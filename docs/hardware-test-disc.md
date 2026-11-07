@@ -1,0 +1,1525 @@
+# PS1 hardware-test disc
+
+The `hardware-tests` disc is the silicon reference for PSoXide. It runs the
+same executable in PSoXide and on a real PlayStation. Real-console data is
+transported through QR payloads, so a TV/capture card is enough and no
+character-by-character transcription is required.
+
+## Versioning
+
+Every payload carries a **suite version** alongside the transport schema
+version. The schema says how bytes are laid out; the suite version says what a
+record id *means*, which a schema version cannot express because an id can be
+redefined without the layout changing.
+
+`psoxide-hwtest report` refuses to diff captures across a MAJOR suite bump, since the
+same id may name two different measurements. Baselines are named by version
+rather than date. The bump rule and the full history of what each version
+changed are in [hardware-test-versions.md](hardware-test-versions.md).
+
+Current: **v2.0**, schema PX8. Not comparable with v0.18 captures, whose timing
+was sampled without interrupt masking. v2.0 is a MAJOR bump from v1.28 because the
+suite is one linear run now (see below); shared records keep their ids and meaning,
+but the order they run in is different, and so is the state each one starts from.
+What was removed and where each thing went: [hardware-test-v2-removed.md](hardware-test-v2-removed.md).
+
+## The linear run (v2.0)
+
+One entry on the menu, **RUN HARDWARE TEST**, runs everything in a fixed order
+and ends in one capture. There is no second tier: nothing is a separate probe
+you have to remember to run, and nothing runs twice. The only screens outside
+the run are the two that need a person or touch the operator's card:
+**CONTROLLER TEST (P1 + P2)** and **MEMORY CARD (AT OWN RISK)**; the menu also
+has **VIEW LAST CAPTURE**.
+
+The run is ten areas, 69 steps, in this order (`src/run.rs`):
+
+| # | Area | Steps |
+|---|---|---|
+| 0 | BOOT SNAPSHOT | `BOOT STATE` (what the BIOS left, read before anything touches it), `KERNEL TIMING` |
+| 1 | CPU AND RAM | cases, `CPU SWEEP`, `CPU AND BUS TIMING` |
+| 2 | IRQ, DMA, TIMERS | cases, timing, `TIMER PRECISION`, `TIMER 1 HBLANK RATE`, `POLLED TIMER TICK LOSS` |
+| 3 | GTE | cases, `GTE SWEEP`, `GTE TIMING`, `GTE COMMAND LATENCY`, `GTE PRECISION` |
+| 4 | GPU, MDEC, DISPLAY | cases, timing and MDEC, `GPU BATCHES`, `CLUT ADDRESS REWRITE` (v2.6, [clut-rewrite-probe.md](clut-rewrite-probe.md)), `MDEC DECODE`, precision, `RASTER HASHES`, `DISPLAY WIDTHS`, `480I INTERLACE`, `GPU DMA EDGE CASES`, `WORKLOAD CALIBRATION`, `TEXTURE UV WINDOWS` (the last four are v2.4, described under "v2.4 measurements") |
+| 5 | SPU | `SPU INIT STATE`, precision, cases, `SPU MAP`, `SPU DMA TIMING`, `UI SAMPLE END AND LOOP` (SB1), `SPU RAM AND VOICES` (SB2), `CAPTURE RINGS` (SB4), `BANK HANDOFF` (PA4) |
+| 6 | CD, XA, CD-DA, STREAM | cases, `CD POLLED TIMING`, `CD DATA VERSUS AUDIO ROUTE` (PA1), `CD READ MECHANISMS` (CL2), `XA MUSIC LOOP`, `XA LATENCY, SWITCH, CLOCK` (v2.6), `STREAM COST`, `CD-DA HANDOFF`, `CD PAUSE SECOND RESPONSE` (v2.7) |
+| 7 | SIO | cases, `SIO TIMING`, then the controller-port and pad-engine measurements described under "SIO measurements" below (select delay, pad and card `/ACK` timing, `CARD SECTOR PROTOCOL` (v2.4), pad and card together, the engine's sweep, pacings, card lease and load, the DualShock motors, hot-plug) |
+| 8 | PERFORMANCE | stack and lever cases, `WARM PROBES`, `EXTENDED PROBES AND SHAPES` (with the v2.5 cached store and load rows), `DMA VERSUS CPU LOADS`, `MDEC DMA VERSUS CPU`, `AUDIT PROBES` |
+| 9 | DRIVE AND BUS STRESS | `CD DMA VERSUS CPU`, `CD MOTOR` (waits up to 20 s), `480I DRAW RULE` (v2.4, last of the safe steps), then `REGISTER A/B (CAN HANG)` |
+
+**A reset between areas.** Each area starts with `reset_area`: the GPU reset
+and the font uploaded again, every SPU voice keyed off with its volumes at
+zero, the CD drive initialised and paused, every DMA channel idle, the
+interrupt mask and our exception vector restored. Each area ends with a handoff
+record (`0x410`-`0x419`) whose flag bits say whether it left the machine clean;
+`0x3F` is clean. The GTE, which has no reset, is seeded where a step needs defined inputs.
+
+**Silent.** Sound is made only inside the SPU, XA and CD-DA steps. The run ends by
+keying every voice off, zeroing every volume, parking the CD drive and reading the SPU's
+capture buffer back, and records that proof (`0x41A`, flags `0x7F` = silent) before
+the QR pages come up. The v1.28 payload-as-audio tone, which was still sounding
+at the end of a v1.28 capture, no longer exists.
+
+**One risky step.** `REGISTER A/B (CAN HANG)` flips undocumented memory-controller
+and cache-control bits around a timed workload, one at a time, with the record id on
+screen. It is last, bounded, and skipped when **L2** is held as the run starts. If the
+console hangs inside it the screen names the record; power-cycle and run again with L2
+held. A hang at bus level cannot be pre-empted, which is the accepted trade.
+
+**Hands off.** The run needs no input after CROSS on the first row, with two optional
+exceptions in the SIO area: the `DUALSHOCK MOTORS` step asks, for each motor level, whether the pad
+vibrated (CROSS yes, CIRCLE no; the question shows for a second with the pad ignored, then every button must be let go, then four seconds to answer), and the `PAD HOT-PLUG WINDOW` shows a
+prompt for six seconds. Answer nothing and they record "no answer" and "nothing happened".
+
+`make hwtest-run` runs it headless, `make hwtest-diff` compares it with the pinned
+emulator baseline, and `make hwtest-compare INPUT=<recording>` decodes a filmed
+run and diffs it against the last silicon captures.
+
+## Testing controllers and analog drift
+
+Choose **CONTROLLER TEST (P1 + P2)** from the root menu. This is a friendly,
+interactive diagnostic; the low-level serial-handshake measurement is part of the
+linear run (SIO measurements below).
+
+The controller test polls both front-panel ports every frame. Each side of the
+screen reports the connected controller mode and keeps a complete button
+history:
+
+- **Yellow** means the button is held now.
+- **Green** means the button has been observed at least once.
+- **Grey** means it has not yet been tested.
+
+An analog controller shows both stick positions and all four raw axis bytes.
+Release both sticks and hold them still: after a short settling period the disc
+samples 90 frames and reports the largest distance from the ideal centre byte
+`128`. A maximum of 8 is green, 9-16 is a yellow warning, and anything above 16
+is a red drift failure. Moving either stick automatically clears the old result
+and starts a fresh measurement when the stick rests again. Digital controllers
+remain fully testable and show `STICKS / DRIFT N/A` rather than inventing analog
+data.
+
+START is part of the button test, so it does not immediately leave this screen.
+Hold **START+SELECT** together for roughly three quarters of a second on either
+controller to return to the main menu.
+
+> **The per-probe sections that follow describe the v1.x flow.** The screens they name
+> (`PA2` to `PA5`, `Capturing timing data`, the console-tests page, the FMV and MDEC
+> screens) no longer exist; their measurements are steps of the linear run, with the
+> same record ids, and [hardware-test-v2-removed.md](hardware-test-v2-removed.md) says
+> which step took which. They are kept because they explain what the records mean.
+
+## Capturing and clearing stale BIOS reverb state (`PA5`)
+
+PA5 is reachable from the main menu (TRIANGLE) and waits five seconds on a variant
+selector (default
+`DEPTH0`). PA4 SPLIT established that the real-console noise begins only when
+the t0a0 map bank is uploaded, after SDK init and the light bank, with all
+voice mixer volumes at zero. PA5 tests whether stale global reverb state is
+reading the newly uploaded map data as its work buffer.
+
+The probe captures SPUCNT/SPUSTAT, wet-output volumes, reverb base, external
+input volumes, EON, a per-stage hash/nonzero count of all 32 reverb registers,
+raw VBlank clocks, and map-bank readback. Crucially, `main()` snapshots the
+untouched BIOS state before any SDK initialization; all 32 raw boot reverb
+configuration words are included in the CRC-protected QR so the hardware state
+can be replayed exactly in PSoXide.
+
+Use Left/Right and Cross, and reboot the console between variants:
+
+| Variant | Reset immediately before t0a0 map upload |
+|---|---|
+| `CONTROL` | No reverb changes; expected hardware noise reproduction |
+| `DEPTH0` | Set only reverb output volume L/R to zero |
+| `DEPTH2` | Set reverb output volume L/R to zero, then wait two VBlanks |
+| `BASE0` | Set only the reverb work-area base to zero |
+| `FULL0` | Zero wet volume, EON, external inputs, reverb routing/master, base, and all 32 config words |
+
+Run DEPTH0 first. Then reboot and run CONTROL and FULL0. BASE0 and DEPTH2 are
+follow-up discriminators. Keep OBS running from the calibration beep through
+the final QR and note whether noise starts during stage 06 (`T0A0 MAP BANK
+ONLY`). Decode the final payload with:
+
+```sh
+psoxide-hwtest audio-report /tmp/pa5-qr.txt
+```
+
+Press TRIANGLE from the completed PA5 screen to return to the menu.
+
+### SCPH hardware result (2026-07-20)
+
+The real-console `DEPTH0` capture isolated the fault. The retail BIOS handed
+the executable a live full reverb preset (`SPUCNT=C085`, `SPUSTAT=0805`,
+`vLOUT=5EBC/5EBC`, work-area base `E128`, `EON=00FFFFFF`, configuration hash
+`F0417A52`). SDK initialization cleared reverb routing/master state but left
+the wet-output depth, work-area base, and configuration registers intact. A
+later map-bank DMA then replaced the data under that still-readable reverb work
+area.
+
+Setting only `vLOUT` to zero reduced the captured map-upload interval from the
+PA4 SPLIT reproduction's `-30.07 dBFS` to `-86.82 dBFS`, a `56.75 dB`
+suppression. The map-bank readback still matched (`25C971C5`) and the full
+reverb register block remained otherwise unchanged. This proves that the noise
+was stale BIOS reverb output, not a voice, CD audio, DMA corruption, or a bad
+map-bank upload.
+
+The historical firmware-boot regression recreated this measured handoff state.
+External firmware boot was removed on 2026-09-15; the current built-in launch
+path does not reproduce that firmware handoff. PSoXide's SPU continues reverb
+reads, APF processing, and wet output while the reverb master-write bit is clear, matching the hardware probe; only feedback writes
+are gated. The SDK now zeros both wet-output depth registers during `spu::init`,
+before game banks can reuse SPU RAM. In the historical regression, the old PA5
+executable reproduced the fault under CONTROL and was digitally silent under DEPTH0 in PSoXide, while a
+newly linked Half-Life build remained digitally silent through its first eight
+seconds under the same hostile handoff profile.
+
+## Isolating the stale-menu-voice handoff (`PA4`)
+
+PA4 is the second probe and waits five seconds on a variant selector (default SAFE2).
+Its schema-v2 QR records the raw VBlank counter immediately before and after
+each blocking transition, while the final stage retains the SPU RAM hashes.
+Use Left/Right and Cross to start sooner. Reboot the console between variants:
+
+| Variant | Transition under test |
+|---|---|
+| `BASELINE` | PA3 order: naturally ended voice 16, then init + 3050 + 3198 |
+| `SAFE0` | Zero voice-16 volume and key it off immediately before the exact transition |
+| `SAFE1` | Same explicit stop, then wait one hardware VBlank |
+| `SAFE2` | Same explicit stop, then wait two hardware VBlanks |
+| `SPLIT` | No pre-stop; observe separately after init, 3050, 3198, and readback |
+
+Run SAFE2 first. If it stays quiet, reboot and capture SAFE0, then SAFE1 only
+if SAFE0 is noisy. BASELINE is the PA3 reproduction and SPLIT identifies the
+specific operation that starts the fault. Keep OBS running from the calibration
+beep through the final QR for each run.
+
+The menu marker starts 15 frames into stage 2 and naturally ends before frame
+45, matching PA3. The selected shutdown and transition execute at frame 45.
+Every blocking operation records actual elapsed VBlanks and realigns the engine
+clock. The QR stores all 24 voices' nonzero-volume mask plus voice 16's complete
+register state, ENDX, SPUCNT/SPUSTAT, bank dimensions, and readback hashes.
+
+Decode each final `PA4/.../C:...` QR with:
+
+```sh
+psoxide-hwtest audio-report /tmp/pa4-qr.txt
+```
+
+Press TRIANGLE from the completed PA4 screen to return to the menu.
+
+## Reproducing the Hazard Course bank transition (`PA3`)
+
+PA3 remains as the second probe, an automatic six-stage reproduction of the
+exact audio-bank lifecycle used when Hazard Course is selected. It uploads the
+287,808-byte full menu bank (chunk 3000), starts a synthetic menu-accept sound
+on voice 16, then executes the same `spu::init()` and replacement sequence as
+the game: the 114,320-byte light profile (chunk 3050) followed by t0a0's
+367,344-byte map bank (chunk 3198). The sample rates, decoded lengths, ADPCM
+block counts, loop ownership, SPU addresses, and one-DMA-per-sample call shape
+match hl-psx; all sound content is synthetic.
+
+Stage 4 is a deliberate positive control: voices 0, 15, and 17 remain active
+while their map bank is overwritten with loud marker data. It must sound bad.
+Stage 5 recreates the same premise, silences and keys off every known map-bank
+owner, then performs the same overwrite. It must become quiet apart from one
+short completion marker. This proves the capture can distinguish a live-bank
+overwrite from a safe handoff.
+
+Every blocking upload records elapsed hardware VBlanks, then asks the engine to
+discard fixed-update debt. Consequently, stage snapshots retain their intended
+wall-clock position even when a real transfer spans several display frames.
+The QR also stores ENDX, current envelope/start address for voices 0/15/16/17,
+and a diagnostic 64-byte stable-mode SPU readback hash.
+
+Record the complete run without changing capture volume. Leave the final QR
+visible for several seconds, decode its `PA3/.../C:...` text, then run:
+
+```sh
+psoxide-hwtest audio-report /tmp/pa3-qr.txt
+```
+
+Press TRIANGLE from the completed PA3 screen to return to the menu.
+
+## Capturing hl-psx voice-bank audio (`PA2`)
+
+PA2 remains as the second automatic voice probe. Record the complete run
+without changing the capture volume. Stage 0 emits a half-second
+calibration marker. PA2 then reconstructs sanitized banks with the exact
+Hazard Course resident/per-map sample counts, rates, block lengths, and upload
+order: 68 core samples plus 26 map samples, roughly 508 KiB of back-to-back SPU
+DMA traffic. PA2 used chunk 3051 rather than the first-map chunk 3050, so PA3
+is the authoritative reproduction of the original recording's startup path.
+No Half-Life audio is stored in either fixture.
+
+Production upload and playback run first; a comparison upload that waits for
+SPUSTAT's delayed transfer-mode mirror and gives the final FIFO words time to
+drain runs second. In both cases voice 15's target contains a short marker,
+then silence, and a proper one-shot end block. The following allocation is a
+loud overrun guard. Hearing a late tone during either `END + GUARD` stage proves
+that the target's end block did not stop the voice.
+
+Leave the final QR visible for several seconds. Decode its `PA2/.../C:...` text
+from any clear OBS frame and run:
+
+```sh
+psoxide-hwtest audio-report /tmp/pa2-qr.txt
+```
+
+The report preserves SPUCNT/SPUSTAT, all voice-15 registers, ENDX, maximum
+mode/drain poll counts, and expected/observed last-64-byte hashes for all six
+stages. SPU DMA readback is intentionally diagnostic rather than a pass/fail
+oracle; compare its hash with ENDX and the external OBS waveform. Press Down
+once from the completed PA2 screen to reach the older PA1 CD-route probe.
+
+## Capturing timing data
+
+1. Build and burn `build/examples/mipsel-sony-psx/release/hardware-tests.bin`
+   with its matching `.cue`.
+2. Let the controller-probe page settle, then press **Start** to jump directly
+   to `TIMING MAP`.
+3. Scan QR page `01/03`, press Right for `02/03`, then once more for `03/03`.
+   Save or copy the complete `PX6/.../C:...` text returned by each scan.
+4. If a value looks unstable, press Cross once to run five fresh samples and
+   scan all three pages from the new run. Do not mix pages from different
+   runs.
+
+## Operator flow
+
+The disc boots side-effect free into its main menu. Nothing measures or changes
+hardware state until the operator chooses an entry:
+
+   | Row | Contains |
+   |---|---|
+   | `RUN HARDWARE TEST` | The linear run. Row 0 is pinned: the headless rig fires CROSS at a fixed tick with the cursor at its boot position. Hold L2 as you press CROSS to skip the one step that can hang a console |
+   | `CONTROLLER TEST (P1 + P2)` | Live two-port button, stick and analog-drift diagnostic |
+   | `MEMORY CARD (AT OWN RISK)` | Card diagnostic behind a consent screen: it has had limited testing on real hardware and reads and writes the operator's card, so corruption cannot be ruled out. CIRCLE accepts the risk before any card traffic happens; writes additionally require the L1+R1+CROSS chord |
+   | `VIEW LAST CAPTURE` | Back to the QR symbols the last run produced |
+
+Up/Down moves, Cross runs, START backs out. During the run a progress screen
+names the area, the step and the in-flight case or record (the record id is also
+drawn as sixteen bit-cells under the bar, so a photo of a frozen screen names it).
+When the run finishes the capture pages appear; Left/Right turn them, and they also
+advance by themselves.
+
+### Recording a capture
+
+Start the recording before power-on and keep it going until the last QR page has been
+on screen. Film the screen, not the TV's menu. Every page must be readable: the whole
+payload is only valid complete, which `tools/hwtest-video-qr.py` checks with the
+whole-binary CRC. The pages carry a run id and the tool groups pages by it, so a
+recording that spans several runs is not combined into a payload that cannot check out.
+
+There is no audio link any more. `AUDIO READOUT` is gone, so there is nothing to record
+besides video.
+
+Decode with one command:
+
+    make hwtest-compare INPUT=~/Movies/run.mov
+
+The run includes waits that are part of the measurement (the CD motor case waits up to
+20 s), and the six-second hot-plug window; the progress bar covers all of it.
+
+## Radius disc and list node sweep (v2.8, records `0xB00`-`0xBF7`, `0xC00`-`0xC47`)
+
+`make hwtest-radius-disc PSOXIDE_SDK=<PSoXide checkout>` builds `build/hwtest-radius/hardware-tests-radius.{bin,cue}`: the suite with the SDK stop panel, `CDTEST.BIN` at 400 sectors and `RADIUS.DAT` after the XA files, about 78 minutes in all (the recipe refuses an image over 359,844 blocks). Run it from MAIN MENU row 2 (`RADIUS + LIST NODE SWEEP ONLY`, about three minutes) or as part of the full run.
+
+Record layouts are in the headers of `src/radius.rs` and `src/ll_sweep.rs`; `psoxide-hwtest diag-report <pages>` decodes both. The radius table's state codes: OK all sectors and data right; RT right after a retry or an error on the way; XX sectors came with wrong data; TO fewer sectors than asked, last event a timeout; ER fewer sectors, last event INT5. The time includes the seek: the first method at a position (the SDK reader) pays the long seek from the previous position, the raw reads then read the same place again.
+
+The list node table reads: size in words, GPU state when the node arrived (BUSY: two large triangles still drawing), whether the closing GP0(1Fh) interrupt came (IRQ or NOIRQ), rectangles drawn of rectangles in the node, whether channel 2 finished (DMA or HUNG), GPU? when the GPU did not answer after recovery. `DATA OR IRQ LOST FROM n WORDS` names the smallest size that lost either.
+
+## v2.10: the v1.x measurements in the linear run
+
+v2.10 is v2.9 plus the v1.26/v1.27 measurements that the linear run did not have, one tree on editor main. [hardware-test-v1-to-v2.10.md](hardware-test-v1-to-v2.10.md) maps every v1.x feature to its v2.10 place; [hardware-test-v2.10-vs-v2.9.md](hardware-test-v2.10-vs-v2.9.md) explains every row that moved against v2.9.
+
+* `make hardware-tests-disc` always builds the console-diag EXE with `CDTEST.BIN` at 400 sectors (the BIOS-free EXE is 577 sectors; 460 leaves 542). Image size is the same 16,660 sectors as the v2.9 test images.
+* `MDEC SETUP DIAGNOSTIC` (GPU area, after `MDEC DECODE`): records `0x230 + 0x10 * v` (sequence v, A to F, ten records of three halfwords each, fourteen when a DMA timed out), `0x290` overview, `0x298 + 5 * t` traces (idle, busy, busy with enable), `0x2A8` control. `psoxide-hwtest report` prints `mdec_diag`, `mdec_reset_trace` and `mdec_control` rows.
+* `GPU BATCHES` carries the E2 texture-window cases `0x146`-`0x14B`; case `0xEA` (index 234, list upload) is in the GPU area.
+* `CD DATA VERSUS AUDIO ROUTE` writes `0x510 + stage` (peaks, state) and `0x520 + 8 * stage + k` (registers, volumes, per-half hash, non-zero count, energy).
+
+To run the headless gate: `make hwtest-diff` (builds the disc, runs `real` once, compares with `docs/hardware-refs/px8-emulator-v2.10.txt` and `hwtest-machine-code-v2.10.txt`). The `mister` target needs a long pad pulse and many more steps than `real`: its flips wait out the lost `GP0(1Fh)` interrupt and the menu misses a 3-poll press, so `--pad-pulses '0x4000@25+90' --steps 60000000000` (about 3.5 minutes) instead of the Makefile's `'0x4000@25+3'` and `12000000000`.
+
+## Console tests (v1.27)
+
+`MAIN MENU > CONSOLE TESTS (V1.27)` holds four cases. Each takes over the
+display for its run, keeps its result up until CROSS, then opens the QR pages
+with its records in the capture (records `2C0`-`2E3`, decoded by
+`psoxide-hwtest report` as `console_*` rows). They are for filming: the answer is
+on the screen, and the QR pages carry the numbers behind it.
+
+**KERNEL TIMING (BIOS).** The SDK runtime replaces the BIOS exception vector,
+so a normal run never executes a line of kernel. This case puts the vector the
+BIOS left back (`main` snapshots it before the engine starts) and measures, in
+system-clock cycles from root counter 2: EnterCriticalSection and
+ExitCriticalSection one call at a time, with an empty call timed the same way
+(`EMPTY CALL`) and subtracted into the `NET` column; then a VBlank round trip.
+The round trip is the gap in a loop that reads the counter back to back: a
+kernel event for VBlank is opened (class F2000003h, spec 2), only VBlank is
+unmasked, and each interrupt shows as one read far later than the one before.
+The runtime's own handler gets the same measurement (`VBLANK SDK`) as a
+reference. The BIOS VBlank part runs last, three seconds after the earlier
+results are shown, and may hang a kernel that does not acknowledge a VBlank
+nobody handles: if the screen stops on `BIOS VBLANK NEXT`, that is the result
+(power-cycle, and the other three cases are unaffected). The emulator's HLE
+kernel answers the same case, so run it headless for the matching emulator
+numbers; compare console and emulator on this case's own output.
+
+**DISPLAY WIDTHS.** Steps through 256, 320, 368, 384, 512 and 640 pixels, five
+seconds each (LEFT/RIGHT steps, START ends). The picture is a dark field with a
+red bar on the extreme left pixels, a green bar on the extreme right, white
+one-pixel lines on the outermost rows, one-pixel stripes beside each edge, grey
+frames 8, 16 and 24 pixels in, and a ruler of ticks every 16 pixels and numbers
+every 64. Read it off the screen: all of both bars visible and no black band
+means the width is whole; a missing bar, or a ruler that starts at 64, is the
+amount cropped; stripes that smear are a wrong dot clock. 256, 320, 512 and
+640 go through `DisplayConfig`. It has no 368 or 384 preset, so those start
+from the 320 `DisplayConfig` and write GP1(08h) with the 368-mode bit and
+GP1(06h) from the 7-clock dot clock themselves; 384 pixels is that mode with a
+wider window, an assumption the case tests (the emulator shows both as 368).
+
+**480I INTERLACE.** A 640x480 interlaced picture through
+`DisplayConfig::R640X480`: red on even lines and blue on odd on the left, white
+line patterns at 1, 2 and 4 pixel pitch on the right. A display showing both
+fields shows both colours (a flicker between them on a CRT); one showing a
+single field shows one. The header reads GPUSTAT live (480-line and interlace
+bits) and counts how often the field bit changed at VBlank (about once a frame
+when interlace works).
+
+**XA MUSIC LOOP.** Plays channel 0 of `HWSONGS.XA` (generated tones, 6 s) on
+loop through `psx_io::cd::xa::Player`. The screen shows the state, the head
+position, the loop count, the restart gap of each loop in milliseconds (the
+time from the player restarting the song to the first poll that finds the head
+back inside it, polling every few milliseconds) and a GETLOCP line: UPDATING
+if the head position keeps changing, FROZEN OR SLOW otherwise, with the longest
+time it sat still. If the song never loops, `NO LOOP SEEN` appears after its
+length plus three seconds. The file comes from `make hardware-tests-disc`,
+which needs `PSOXIDE_SDK` for the encode as `MOVIE.STR` does (the SDK at
+ae6e1ef10 or later; it builds the file with `psx-audio-cook xa-encode`, four
+tone songs as the channels of one 37.8 kHz stereo single-speed file) and puts
+it on the disc after `MOVIE.STR` with `mkisopsx --xa-file`. A program
+chain-loaded from another disc needs `HWSONGS.XA` in its own part of the image,
+found by name.
+
+**XA LATENCY, SWITCH, CLOCK (v2.6).** The step after XA MUSIC LOOP in the linear run. It starts the pad song five times from a paused drive, switches between the pad and the whistle with a Setfilter alone six times and by restarting three times, interrupts a song with a 64-sector data read three times and times three ways back (XA resume, a fresh XA start, CD-DA Play), then plays `HWCLOCK.XA` (190 s, file 2) for 180 s and compares the head with the system clock at 60, 120 and 180 s. Sound is detected in the SPU CD capture buffer, so every number is the time to something audible. The run shows `XA` and the trial in progress on the detail line and the bar fills with the three minutes. `HWCLOCK.XA` comes from `make hardware-tests-disc` the same way as `HWSONGS.XA`. Records `0x320`-`0x32E`; their layout is in `src/xa_measure.rs`.
+
+**CD PAUSE SECOND RESPONSE (v2.7).** The last step of the CD area (`src/cd_pause.rs`, records `0x340`-`0x3B8`). Pause answers twice, an acknowledge (INT3) at once and a completion (INT2) when the drive has stopped; a loader that pauses between chunks waits for INT2. PSX-SPX puts it near 1,096,083 system clocks at double speed, the emulator branch `fix/cd-pause-late-land-2026-10-16` uses an estimate of 120,000 clocks, chosen between bounds, and nothing had timed it on a console for a data read or an idle drive. The step times it from the Pause command byte to the interrupt flag changing, in system clocks (Timer 2 at system clock / 8, widened to 32 bits, so a clock is eight system clocks of resolution before the loop's own pass time, which `0x340` records). The wait for INT2 is bounded at 8,000,000 clocks (a quarter of a second, 7.3 times the PSX-SPX figure and about twice the longest the console has shown, the 123 ms after CD-DA in v1.28) and by a pass count the SELECT skip key shrinks to one; a Pause that does not complete in time is recorded as a timeout, not waited for. The data the drive reads is never fetched: each sector's INT1 is acknowledged and counted, which is all the controller needs.
+
+The matrix is single and double speed by five head states, three trials each: IDLE (drive paused and spinning), SETTLED (Pause after 12 sectors of a read at LBA 564), FIRST (Pause right after the read's first sector), SEEK (a read aimed at LBA 15,000, Pause the moment ReadN is acknowledged, while the head travels) and FAR (the same read, Pause after its first sector; each far trial first brings the head back to LBA 564 so the seek is long). Four WATCH trials on the settled read send GetStat commands after the Pause and log every flag with its time and the status byte: EARLY sends the first GetStat the moment the Pause is acknowledged and then one every 150,000 clocks, SPACED waits 400,000 clocks for the first and sends one every 400,000. They show whether a command between Pause's two responses cancels the second, and what the status byte says while the drive spins down.
+
+Records: `0x340` clocks per pass of the wait loop (min, median, max); `0x341` the INT2 and INT3 limits in units of 1024 clocks and the trials run; `0x342` setup steps the drive refused and cleanup pauses that never settled; `0x350 + 4 * cell + trial` (cell = speed * 5 + state, trial 0 to 2) the clocks from Pause to INT2 split over two fields (`lo`, `hi`, so `hi * 65536 + lo`, both `0xFFFF` for none) and a packed field (outcome in bits 0 and 1: 0 completed, 1 no INT2 in time, 2 drive error, 3 no acknowledge; sectors that arrived after the Pause in bits 2 to 5; the INT2 status byte in bits 8 to 15); `0x350 + 4 * cell + 3` the acknowledge time min, median and max in units of 32 clocks; `0x380 + 16 * watch + event` (watch = speed * 2 + 0 SPACED or 1 EARLY, events 0 to 7) the offset from the Pause in units of 128 clocks, the flag (bits 8 to 10: 1 sector, 2 complete, 3 acknowledge, 5 error, 7 the limit ended the watch) with the status byte, and the GetStats sent so far; `0x388 + 16 * watch` flags seen, GetStats sent and whether INT2 came. `psoxide-hwtest report` prints them as `cd_pause` rows in clocks and milliseconds. The step takes about a minute on a console (far seeks dominate); hold SELECT to skip it.
+
+## CD stream cases (v1.28)
+
+Three more cases on the `CONSOLE TESTS` page, plus `CD STREAM, ALL THREE` that
+runs them in turn. They exist for the SDK's streaming transport
+(`psx-cdstream`, the interrupt-driven reader the streaming design in
+[streaming-design-2026-10-08.md](streaming-design-2026-10-08.md) is built on),
+which the characterisation capture never runs: its CD records read by polling.
+Each installs the transport, measures, removes it and leaves records `2F0`-`2F7`,
+`300`-`30B` and `310`-`315` in the capture (decoded by `hwtest-report.py` as
+`cdstream_cost`, `cdstream_cdda` and `cdstream_motor` rows). Run them after the
+full characterisation: the transport's exception wrapper stays in the vector
+when it is removed, and the 20 s motor wait and the read after Stop are the
+kind of thing that can leave the drive in a state the earlier records should not
+inherit. All three read `CDTEST.BIN` (460 sectors of the `PSOXSTRM` pattern at
+LBA 564) and check what they get against the pattern, so a layout that moved
+shows as failed data.
+
+**CD STREAM COST.** A sustained read at double speed (240 sectors) and at single
+speed (120 sectors), three runs each. Sectors a second; the foreground CPU the
+sector pops take (a fixed spin loop runs through the read and is compared with
+the same loop run with nothing reading, so the difference is time the interrupt
+handler took, in microseconds per sector and as a share of the CPU); the longest
+handler call, from Timer 2; interrupts per sector; the time to the first sector
+of a read that starts with a seek back from the run before; sectors discarded
+and chained; the handler's private stack never touched.
+
+**CD-DA HANDOFF.** How long a lease request takes to stop a read in flight
+(four tries). Then, three times, the proper hand-off: the tone plays, a Pause
+(its acknowledge and its completion are `T_pause`), GetlocP is saved, the
+transport reads 64 sectors (time to the first and to the last), the tone is
+resumed with SetLoc and Play from the saved position (time until the drive
+reports PLAYING, and whether GetlocP two seconds later says it continued from
+there rather than from the start of the track). Then two reads that start while
+the tone is still playing, one with the transport's recovery Pause and one with
+no Pause at all.
+
+Whether CD-DA survives is read off the hardware, not heard. Before the read,
+over a third of a second, three things are sampled: the drive's PLAYING status
+bit, whether GetlocP's position advances, and the SPU's capture buffer for CD
+input (SPU RAM 0 to 3FFh, the CD left channel after the CD volume), whose
+peak-to-peak range is large while the tone reaches the SPU and zero otherwise.
+During the read the capture buffer is sampled once a VBlank, giving the share of
+samples that still carried signal and when the first silent one came. After the
+read the three are sampled again. A third control read, after a proper Pause,
+should show no signal at all. If the before-sample does not show signal in the
+capture buffer (record `308`/`30A` flags, bit 2), the method is blind on that
+console and the other two signals are the evidence. The emulator models the
+capture buffer, so its numbers prove the suite runs and the pipeline decodes;
+it has no laser, so they say nothing about a console.
+
+**CD MOTOR.** A read after a Pause and a wait of 0, 5 and 15 seconds (does the
+motor spin down on its own, and what does the next read cost); a read right
+after a Stop (reported to fail on a console); and a read after a Stop once
+GetStat says the motor stopped. The transport must read again afterwards.
+
+What the suite already measured for the streaming design, so these cases do
+not repeat it: seeks by distance forward and back (`90`-`93`, `C0`-`C7`), polled
+read rate at 1x and 2x (`94`, `95`), command latencies including Pause (`96`-`9A`),
+a read with and without live audio (`9B` against `9C`), the cost of starting the
+tone (`9D`) and GetlocP during playback (`9E`). They use raw commands; the new
+cases add the transport's own cost and the audio hand-off around it.
+
+## Timing records move when the guest binary changes
+
+Adding unrelated code shifts I-cache alignment, which genuinely changes measured
+cycle counts. A rebuild therefore drifts the timing baseline even when no
+measurement logic changed at all.
+
+`make hwtest-verify-code` is what separates the two cases: it digests the
+instructions between each probe's markers, so `drift=0` there while
+`hwtest-diff` reports drift means the measured blocks are byte-identical and only
+their addresses moved. That is a re-baseline, not a regression.
+
+The mechanism, measured on 2026-09-17: a commit of clippy fixes that touched no
+probe moved 104 of the 151 timing minima in the emulator, by up to 40 cycles
+(`multu_mflo_small` 126 -> 151, `nop_block` 211 -> 196, `divu_mflo` 317 ->
+302). Each record takes five samples, and between samples the scan heartbeat
+and a pad poll run. That code shares I-cache lines with the probe (the image is
+far larger than the 4 KiB direct-mapped cache), so every sample starts with a
+few of its own lines evicted and pays a refill for each. How many depends on
+where the linker placed both. The minimum across five samples does not escape
+it because all five are equally cold. This is also the likely reason the two
+full silicon captures disagree on `multu_mflo_small` (126 on v1.7, 140 on
+v1.17) while agreeing on the medium and large bands.
+
+Records `0x01`-`0x0F` therefore measure instruction cost plus a
+layout-dependent refill tax, and they are not comparable across suite builds.
+Their warm twins (next section) are.
+
+## Performance probes (records `0x72`-`0x8D`, and `0xDC`-`0xEC` on request)
+
+`src/perf_probes.rs`. These exist to price CPU-side optimisation techniques on
+silicon and to calibrate the emulator's cycle model against numbers that do not
+depend on link layout.
+
+**The warm harness.** Every probe here runs its timed block twice inside one
+assembly block and reports the second pass, and the block starts on a
+cache-line boundary. Every line it executes is resident by the time it is
+timed, so the result is a property of the instructions alone. In the emulator
+these records have zero jitter where their older twins show 70-90 cycles.
+`psoxide-hwtest report --layout-immune-timing-only` counts timing drift only for
+these ids, which is the useful gate for a refactor that moves code.
+
+| Id | Record | Question |
+|---|---|---|
+| `72`-`78` | warm twins of `01` nops, `02` ALU, `03` cached RAM load, `09` scratchpad load, `0B` RAM store, `0C` scratchpad store, `04` taken branch | what those instructions cost with no refill tax |
+| `79`-`84` | `multu; k nops; mflo` x16 at the three `rs` magnitude bands, for k = 0 and k = m-1, m, m+1 around each band's documented latency m (6, 9, 13) | how many independent instructions fit behind a multiply before the `mflo` interlock stall is gone. Flat up to a knee, then +16 per extra nop; the knee is the real latency |
+| `85`-`89` | `divu; k nops; mflo` x8 for k = 0, 34, 36, 38, 40 | the same for the divider (documented 36) |
+| `8A` | `multu` with a small `rs` against a large `rt` | whether the band is chosen by `rs` alone |
+| `8B` | signed `mult` with `rs` = -5 | whether a small negative `rs` takes the fast band |
+| `8C`, `8D` | 32 alternating calls to two one-line leaves, exactly 4 KiB apart versus on neighbouring lines | the cost of a direct-mapped I-cache conflict per call. The wrapper runs through KSEG1 so it cannot disturb the lines it measures |
+
+Emulator values at v1.21: the knees land exactly on the modelled latencies
+(`7A`/`7B` = 126, `7C` = 142; `86`/`87` = 302, `88` = 318), and the alias pair
+costs 1362 against 1036, about five cycles per conflicting call.
+
+**The register A/B group** answers whether two undocumented-in-practice
+registers buy anything:
+
+* `RAM_SIZE` (`0x1F801060`) bit 7, which psx-spx describes as "delay on
+  simultaneous CODE+DATA fetch from RAM". `DC`/`DD` run 64 RAM loads through
+  their KSEG1 alias, so every instruction fetch is a RAM access coinciding with
+  a RAM data access, with the bit as found and flipped. `DE`/`DF` are the same
+  loads from KSEG0, warm, as the control pair.
+* Cache control (`0xFFFE0130`) bits 13-17, which psx-spx labels only
+  "supposedly" (read priority, no wait state, bus grant, load scheduling, no
+  streaming). Each is flipped alone around 64 cached RAM loads and around a
+  cold sweep of all 256 cache lines. `EA` sets the refill size to two words, a
+  bit the emulator does model, as a cross-check that the flip and the restore
+  both take effect. Bit 12 (interrupt polarity) has no performance reading and
+  is left alone; bus grant runs last.
+
+Each pair goes through byte-identical code: one assembly block reads the
+register, makes an untimed call in the normal state, writes `value ^ mask`,
+times the call, and restores, all reached through KSEG1 with interrupts masked.
+Mask 0 is the control. No other code ever runs in the flipped state.
+
+A wrong guess about one of these bits can hang a console, so the group never
+runs in the standing battery or the headless conformance capture. It runs from
+`TARGETED PROBES > PERF A/B (MAY HANG)`, which takes only the performance
+probes (no CD, GPU, MDEC or SIO batteries, so a power cycle costs about a
+minute) and then shows a full capture. The record id is on screen while each
+record runs, so a hang names its bit. The emulator models none of these bits
+except the refill size: headless, every flipped record equals its control, and
+`make hwtest-capture-perf` only proves the path runs and restores. The numbers
+come from a console.
+
+The memory-control block now ends with the `RAM_SIZE` and cache-control values
+(eleven registers instead of nine), so a capture records what the BIOS left in
+both.
+
+### v1.23: extended ids, GPU batches done properly, and the open shapes
+
+Record ids are sixteen bits in the guest. `00`-`FE` travel as before; ids of
+`100` and up go in a new PX8 block, `TIMING_EXT` (flag bit 6, last in the
+payload: a u16 count, then id/min/median/max as four u16). The in-flight id is
+drawn as sixteen cells during a scan.
+
+`100`-`114`, GPU batches (`src/gpu_probes.rs`). The v1.22 console run showed
+the fill battery's method is broken: it writes to GP0 unpaced, overflowing the
+16-word FIFO, ends on GPUSTAT bit 26, which pulses between primitives, and
+samples mostly transparent texels. These batches are a linked list of one
+packet per primitive handed to DMA, ending in a GP0(1Fh) interrupt request,
+which the GPU takes in order with the drawing; Timer 2 runs from the DMA kick
+to GPUSTAT bit 24. Textures and CLUTs have no zero entry. Flat, Gouraud,
+dithered, textured, raw, translucent and Gouraud-textured triangles; flat, 4bpp
+and 8bpp rects; an 8bpp rect with a CLUT change on each; a texture page change
+on each; a wide UV span; clipped-away triangles; a letterboxed batch; VRAM
+fill and copy; and 64 two-pixel triangles of three kinds for setup cost. The
+emulator has no draw-time model and reads about 20 for all of them. The
+standing `A0`-`AF` records are unchanged and should not be trusted; the v1.22
+sweep's `BA`-`BF`, `3B`, `38`, `CB` and `F6` are retired.
+
+`120`-`136`, the shapes v1.22 left open: the multiply interlock at k = 1 to 4
+and the divide at k = 35; a load followed by 2, 3, 6 and 8 independent
+instructions; a store followed by 1 and 2, bursts of 2, 4 and 8 stores, and a
+GP0 store followed by 3; RTPS followed at once by a read of SXY2, MAC0, MAC1
+or IR1 and then 20 nops, with a control that reads after RTPS has finished
+(22 cycles a turn if the read is free, about 36 if it waits); and the alias
+pair called from a cached wrapper that cannot share a line with either leaf.
+
+What the v1.22 captures found, and what went into the emulator, is in
+[emulator-accuracy-from-silicon.md](emulator-accuracy-from-silicon.md).
+
+### The performance sweep (v1.22)
+
+`TARGETED PROBES > PERF SWEEP (SAFE)` runs the records above plus the ones
+below and nothing else, then shows a full capture (four pages). `PERF A/B (MAY
+HANG)` is the same sweep followed by the register A/B group. Neither runs the
+conformance battery, so conformance cases read as pending in these captures.
+The sweep exists because every record id from `00` to `FE` is now taken and the
+standing battery's full capture was already at five pages.
+
+| Id | Record | What it prices |
+|---|---|---|
+| `1E` | the warm nop block through KSEG1 | an instruction executed uncached, which is also what thrashing degenerates to |
+| `37`, `39`, `C8`-`CA`, `CC`, `CD`, `CF` | byte and KSEG1 stores; loads with no nop between them; byte loads; `lwl`/`lwr` and `swl`/`swr` unaligned pairs; sixteen sequential addresses | the data-access shapes the compiler emits. The emulator charges an unaligned word 18 cycles against 8 aligned, and LLVM emits thousands of them |
+| `1F`, `CE` | a store then three independent instructions (against `76`); a load then four (against `74`) | the four-entry write queue and LSI's load scheduling. Sony's notes and nugget's kernels say the store becomes free and the load hides part of its wait; the emulator has neither and reads both as purely additive |
+| `27`-`2F` | warm latency of RTPS, RTPT, NCLIP, MVMVA, AVSZ3, SQR, OP, GPF, NCDS, issued back to back | the GTE's latency table, which until now had six cold, layout-dependent silicon points. Every GTE record carries 48 trailing nops (subtract them) so the timed pass starts with the GTE idle |
+| `3A` | RTPT followed by the six `mtc2` that load the next triple (against `28`) | psx-spx's GTE pipeline page says inputs are latched within about four cycles and `mtc2` never stalls, so the next vertices can be loaded behind the current command |
+| `ED`-`F2` | RTPT then 21/23/25 nops, RTPS then 13/15/17 nops, before the next command | how much CPU work fits behind a GTE command for free. Knee at the latency |
+| `F3`-`F5` | sixteen `mtc2`, `ctc2`, `mfc2` | the coprocessor register moves every vertex pays for |
+| `F7`, `F8` | one three-component Q12 lerp with `mult` and with GPF | the same work on each side, including the register traffic |
+| `8E`, `8F` | sixteen `multu` with no read between them, then one `mflo` | whether a multiply issued behind a running one waits for it. The emulator says it costs nothing |
+| `F9`-`FD` | GPUSTAT read, GP0 write (a GPU nop), I_STAT read, SPU halfword read and write | what an I/O port costs in an inner loop. The emulator has an SPU read at 27 cycles |
+| `33`, `34` | the DMA controller walking 256 and 1024 empty packets | what an unused ordering-table slot costs per frame |
+| `35`, `36` | 128 nops with GPU DMA idle, and started right after kicking a 512-node list | whether the CPU runs while the list is walked. Equal means it does |
+| `9F`, `FE` | the same pair with 64 RAM loads in place of the nops | psx-spx and Sony both say the CPU runs during DMA only until it needs the bus. The emulator lets it run freely |
+| `BA`-`BF` (with `A0`, `A2`, `AE`, `AF` retaken) | raw-texture and translucent textured triangles, Gouraud-textured triangles, triangles clipped away entirely, VRAM fill and VRAM copy | GPU cases the fill battery left out, each next to its reference |
+| `3B`, `38` | 64 two-pixel triangles, flat-textured and Gouraud-textured | per-triangle setup with nothing to fill. nocash: 100 against 250 cycles |
+| `CB` | `AF`'s 8bpp rects with a different CLUT on every other one | the CLUT cache reload. nocash: 256 cycles each |
+| `F6` | `A2` with the vertical display range collapsed to one line | whether the GPU renders faster when it is not fetching the picture. The screen blanks for the few milliseconds this takes |
+| `3C`, `3D` (A/B run) | `RAM_SIZE` bit 7 around a cold sweep of 4 KiB of code that also loads data | the realistic case for that bit: line refills and data reads contending for RAM |
+| `3E`, `3F` (A/B run) | the SPU bus read-delay nibble as found and shortened, around 64 SPU status reads | whether SPU register traffic can be made cheaper. The emulator models this one: 3489 to 2229 |
+
+Where these claims come from, and what the engine does about each today, is in
+[ps1-performance-research-2026-09-17.md](ps1-performance-research-2026-09-17.md).
+
+`make hwtest-diff-perf` gates the whole A/B capture headless against
+`px8-emulator-perf-v<version>.txt`, counting timing drift only for warm
+records, so it should survive unrelated guest edits.
+
+**Folding a console capture back in.** For each finding, change the emulator in
+the PSoXide-emulator repository and bump `components.lock.json` here; nothing
+under `emu/crates/emulator-core` is editable in this tree.
+
+1. Gap sweep knees: `mult_cycles` and `DIV_CYCLES` in `cpu.rs`. A knee one nop
+   later than modelled means the latency is one cycle longer.
+2. `8A`/`8B`: the `rs`-only, sign-folded magnitude rule in `mult_cycles`.
+3. Warm twins: the RAM, scratchpad and branch costs in
+   `bus/memory_timing.rs`, which were fitted to the layout-dependent records.
+4. `8C` against `8D`: the refill cost per line in `icache_fill_stalls`.
+5. `DD` against `DC`: if the uncached pair differs and the cached pair does
+   not, `RAM_SIZE` bit 7 is real. Model it in the fetch path. Do NOT clear it
+   at boot: psx-spx says that hangs CD loading on PU-8 boards.
+6. Any cache-control pair that differs: model the bit, then measure the games.
+7. GTE latencies and gap knees: the table in `psx-gte-core/src/state.rs`.
+8. `8E`/`8F`: `hilo_busy_until` is overwritten by a second multiply today. If
+   silicon queues them, that is a stall the emulator does not charge.
+9. `36` against `35`, and `33`/`34`: linked-list DMA cost per node and whether
+   it holds the CPU off the bus.
+10. `BA`-`BF` and the fill battery: the GPU draw-time model, which does not
+    exist yet. nocash's measured rendering timings are the prior.
+11. `1F` and `CE`: the write queue and load scheduling, neither of which the
+    emulator has. With a third of every Cortex vblank in RAM stalls, these
+    two move whole-frame numbers more than anything else here.
+12. `E2`-`EC`: LSI documents NOPAD, LDSCH and RDPRI, and the BIOS value has
+    all three in their fast setting, so expect each flip to slow its workload
+    rather than speed it up.
+
+## Performance-lever gates (cases `0xC8`-`0xD2`, records `137`-`13A`, v1.24)
+
+Three levers measured well headless and each rests on something only silicon
+can answer. The cases sit near the end of the conformance battery (indices
+200-210), so RUN ALL TESTS and FULL CHARACTERISATION both run them, and RESUME
+FROM TEST at 200 runs these, the list-busy cases after them and the timing
+scan. Code in `src/lever_probes.rs`. INFO values and passing observations travel only in the
+FULL CHARACTERISATION capture; a conformance capture carries a case's numbers
+only when it fails.
+
+**GTE vs IRQ** (gates psx-rt's handler under any IRQ-heavy present path).
+psx-rt's exception handler returns to EPC. psx-spx documents that an interrupt
+taken on a GTE command lets the command run and leaves EPC pointing at it, so
+returning to EPC runs it twice; its fix is to step EPC over a GTE command. The
+emulator never takes an interrupt in front of a GTE command
+(`should_take_interrupt`), so headless both variants are clean by construction.
+The probe loops `mtc2` x3 to SXY0-2 (sentinels outside RTPS's output range),
+RTPS, 20 nops, and reads SXY0: one RTPS leaves the old SXY1, two leave the old
+SXY2, none leaves SXY0. Timer 2 interrupts at 331, 457, 613 and 797 clocks
+(8192 iterations each) on top of VBlank, under a probe-owned handler that
+acknowledges, counts the interrupts whose EPC held a GTE command, and returns
+to EPC or EPC + 4.
+
+| Case | Status | Expected | Observed |
+|---|---|---|---|
+| `0xC8` return to EPC: exposure | INFO | interrupts taken | interrupts whose EPC held a GTE command |
+| `0xC9` return to EPC: RTPS intact | PASS if none corrupted | interrupts on a GTE command | doubled (bits 0-15), lost or unrecognised (16-31) |
+| `0xCA` skip GTE at EPC: exposure | INFO | interrupts taken | commands stepped over |
+| `0xCB` skip GTE at EPC: RTPS intact | PASS if none corrupted | commands stepped over | as `0xC9` |
+
+On silicon, `0xC9` failing with doubled close to its expected value says the
+hazard is real at that rate; `0xCB` passing with a non-zero expected says the
+fix works. `0xCB` failing with a non-zero high half says the command had not
+run when the handler skipped it, i.e. the fix loses commands.
+
+**Present queue** (gates quake-psx a29ca4d's `present-queue`). The prototype's
+VBlank handler, copied instruction for instruction and chained to psx-rt's the
+same way, runs 120 frames. Each frame's DMA chain sets its draw environment,
+clears its buffer, draws 0 to 19 screen-sized Gouraud triangles (so some frames
+outlast a VBlank and some edges find the GPU busy), a white bar that moves 16
+pixels a frame, a marker, and ends in GP0(1Fh). Three instrumentation steps are
+added to the handler: it counts edges, records GPUSTAT and Timer 1 when it
+decides to flip, and acknowledges the GPU interrupt before the kick so each
+chain's GP0(1Fh) raises GPUSTAT bit 24 afresh. A flip made while bit 24 is
+clear exposes a frame the GPU has not finished: the tear this lever must not
+cause.
+
+| Case | Status | Expected | Observed |
+|---|---|---|---|
+| `0xCC` frames kicked and drawn | PASS if all 120 kicked, no timeout, both markers read back | 120 | kicks (bits 0-15), timeouts (16-23), bad markers (24-31) |
+| `0xCD` bit 28 idle means drawn | PASS if no early flip | flips checked (119) | flips made before the previous chain's GP0(1Fh) |
+| `0xCE` flip lines after VBlank | INFO | largest Timer 1 value seen (lines a frame) | latest flip line (bits 0-15), earliest (16-31) |
+| `0xCF` busy edges skipped | INFO | VBlank edges seen | edges that found the GPU or channel 2 busy |
+
+Timer 1 runs from HBlank with sync mode 1 (reset at VBlank). `0xCE` is a
+measurement: where that reset sits relative to the VBlank IRQ differs between
+console models, and the emulator reads timers without catching them up (see
+"Timers" in [emulator-accuracy-from-silicon.md](emulator-accuracy-from-silicon.md)),
+so its value there is not a beam position. On silicon a spread of a few lines
+between earliest and latest says every flip landed at the same beam position.
+The moving bar is for the camera: a torn flip breaks it horizontally.
+
+**Scratchpad stack** (gates the SDK's `ScratchpadStack`, PSoXide 3e939cd54).
+The editor pins an SDK from before it, so psx-rt's trampoline is vendored
+(`__hwtest_call_on_stack`, without the panic bookkeeping). hello-spstack's
+workload (three call levels, each with an array in its frame, reading a
+256-byte table in the scratchpad) runs 32 rounds on the RAM stack, then 32 on
+a stack in scratchpad bytes 256-1024, each round after a different spin so the
+interrupts land at different points. Throughout both runs: Timer 2 interrupts
+every 1531 clocks plus VBlank (the GTE probe's handler, in skip mode; it uses
+only `$k0`/`$k1`), and between rounds a 2048-node linked list re-kicked on
+channel 2, a 4 KiB SPU upload re-kicked on channel 4 (sound RAM 0x60000), the
+SDK's SectorReader streaming the CDTEST region, and a pad poll. CD data moves
+by PIO, as SectorReader does since a1e95d30: chopping CD DMA on channel 3 can
+latch busy for good on the project console, which would take the timing scan's
+CD records with it, and no DMA channel can reach the scratchpad anyway.
+
+| Case | Status | Expected | Observed |
+|---|---|---|---|
+| `0xD0` checksum vs RAM stack | PASS if equal (and every round equal) | RAM-stack checksum | scratchpad-stack checksum |
+| `0xD1` IRQs taken, all intact | PASS if no flag and at least 64 interrupts on the stack | 64 | interrupts taken with `$sp` in the scratchpad (bits 0-14), deepest stack use in bytes (15-26), flags (27-31: table changed, region bottom word changed, `$sp` not restored, caller's RAM frame changed, an interrupt saw the scratchpad during the RAM run) |
+| `0xD2` background activity | INFO | 64 (rounds) | channel 2 kicks (bits 0-7), channel 4 kicks (8-15), CD sectors (16-23), pad polls (24-31), each saturating |
+
+Records `137`-`13A` time one `level2` call (16 `level3` calls) with Timer 2,
+inside the called function so both stacks run identical timed code: RAM stack,
+scratchpad stack, then both again while channel 2 walks the 2048-node empty
+list. Warm records `74`/`75` already price a bare RAM load against a
+scratchpad one (514 against 126 for 64 on the v1.23 console sweep, about six
+clocks a load). In the v1.24 build the timed call makes 515 stack loads and 899
+stack stores (31 loads and 55 stores per `level3`, counted from the
+disassembly, plus 19 of each in `level2`), so six clocks a load predicts about
+3,100 clocks between `137` and `138`.
+
+Emulator (frozen frontend, PSoXide-editor a03b8fa9): `137` 16,064, `138`
+12,556, `139` 16,065, `13A` 12,517. The emulator does not model RAM loads
+slowing during a linked-list DMA (record `FE`), so `139` equals `137` there;
+silicon is expected to differ.
+
+## Linked-list busy time (cases `0xD3`-`0xE9`, v1.24)
+
+How long GPU DMA channel 2 stays busy (CHCR bit 24) on a linked list whose
+nodes draw. The emulator's default model clears CHCR after a word-count
+formula (`gpu_command_linked_cycles` in bus.rs: words + words/16 + 9 a node +
+nodes/5 + 5) that ignores draw cost; the experimental FIFO model
+(`PSOXIDE_EXPERIMENTAL_DMA_FIFO=1`) keeps it busy until the drawing nearly
+drains. An hl-psx optimisation measures +21% on the default model and nothing
+on the FIFO one, so which is true decides it. Code in `src/list_busy_probes.rs`;
+indices 211-233, so RESUME FROM TEST at 211 runs only these and the timing
+scan. The values are INFO and travel only in the FULL CHARACTERISATION capture;
+`psoxide-hwtest report` prints them as a labelled `list_busy` table.
+
+Four lists, each ending in GP0(1Fh), all drawing into the 320x240 area at
+(0, 0) after a black fill that is fenced with its own GP0(1Fh):
+
+| List | Nodes | Words (with headers) | Default-model CHCR formula |
+|---|---|---|---|
+| empty: 16 empty nodes | 17 | 18 | 181 |
+| cheap: 16 two-pixel Gouraud triangles, one a node | 17 | 114 | 283 |
+| expensive: the same packets, each triangle half the area | 17 | 114 | 283 |
+| packed: the expensive triangles four to a node, 24 words each | 5 | 102 | 160 |
+
+Cheap and expensive differ only in vertex coordinates, so the default model
+gives them the same busy time. Every packet word's top byte is 0x00 or 0x30,
+so if the GPU loses words from a packed node it can only misread them as NOPs,
+cache clears or triangles, all clipped to the draw area.
+
+Each list runs twice and the second run counts. From the kick, one poll loop
+reads Timer 2 at the system clock, widened to 32 bits in software on every poll
+so no list can overflow it, and stamps the first poll that sees each event; a
+stamp is late by up to one poll turn, and 0xFFFFFFFF means never seen (after
+16M clocks the loop gives up, the channel is aborted and GP1(01h) resets the
+GPU). Bits 28 and 26 are stamped where their final high run begins, since both
+pulse while the GPU works. Interrupts are masked for each walk.
+
+| Case (index) | Status | Expected | Observed |
+|---|---|---|---|
+| `0xD3`/`0xD7`/`0xDB`/`0xDF` (211/215/219/223) CHCR clear, empty/cheap/expensive/packed | INFO | words (bits 16-31), nodes (0-15) | clocks from the kick to CHCR bit 24 clear |
+| `0xD4`/`0xD8`/`0xDC`/`0xE0` (212/216/220/224) GP0(1Fh) IRQ | INFO | as above | clocks to GPUSTAT bit 24 |
+| `0xD5`/`0xD9`/`0xDD`/`0xE1` (213/217/221/225) GPUSTAT.28 settled | INFO | as above | clocks to the start of bit 28's final high run |
+| `0xD6`/`0xDA`/`0xDE`/`0xE2` (214/218/222/226) GPUSTAT.26 settled | INFO | as above | the same for bit 26 |
+| `0xE3` (227) packed list draws the same pixels | PASS if the packed list's GP0(1Fh) arrived and twelve sampled pixel pairs hash the same as after the expensive list | hash after expensive | hash after packed |
+| `0xE4`/`0xE6`/`0xE8` (228/230/232) CPU during walk: ALU / RAM load / scratchpad iterations | INFO | 256 | iterations while the expensive list walked (bits 0-15), clocks for 256 iterations idle (16-31), each saturating |
+| `0xE5`/`0xE7`/`0xE9` (229/231/233) the same loops' walk clocks | INFO | iterations | clocks from just after the kick to CHCR clear |
+
+The throughput loop is one assembly block: eight `addiu`, eight RAM `lw` or
+eight scratchpad `lw`, then a read of channel 2's CHCR and one of Timer 2,
+until CHCR bit 24 clears. Run idle, CHCR is XORed with bit 24 so the exit test
+never passes and the same instructions run 256 times. Slowdown during the walk
+is (walk clocks / walk iterations) / (idle clocks / 256).
+
+Emulator, frozen frontend `baseline-2026-09-22`, full characterisation capture
+(clocks):
+
+| | default model | FIFO model |
+|---|---|---|
+| empty: CHCR / 1Fh / bit 28 / bit 26 | 225 / 6 / 6 / 6 | 226 / 226 / 6 / 6 |
+| cheap | 283 / 6 / 4,906 / 4,906 | 4,648 / 4,937 / 4,937 / 4,937 |
+| expensive | 283 / 6 / 314,366 / 314,366 | 293,588 / 313,187 / 313,187 / 313,187 |
+| packed | 159 / 19 / 314,331 / 314,331 | 234,905 / never / 234,905 / 234,905 |
+| `0xE3` packed pixels | PASS | FAIL (the GP0(1Fh) was lost) |
+| ALU loop: walk iterations / walk clocks / idle per 256 | 9 / 217 / 6,392 | 10,719 / 267,967 / 6,392 |
+| RAM loads | 4 / 292 / 18,941 | 3,987 / 294,917 / 18,932 |
+| scratchpad loads | 9 / 217 / 6,392 | 10,719 / 267,967 / 6,392 |
+
+The two models answer differently exactly where the lever cares: default
+gives cheap and expensive the same CHCR time and raises the 1Fh interrupt a
+few clocks after the kick, long before the drawing it follows (bits 28 and 26
+do track the drawing there); FIFO keeps CHCR busy for most of the drawing, and
+drops words from a 24-word node while the GPU draws. Neither slows the CPU
+during the walk (FIFO: 25.0 clocks an ALU iteration against 25.0 idle, 74.0 a
+RAM iteration against 73.9), where the v1.22 console read RAM loads half again
+as slow during an empty-list walk (`FE`).
+
+Reading a console capture: `219` near `215` means the default model is right
+about CHCR; `219` near `220` and far above `215` means the FIFO model is, and
+the +21% does not exist on silicon. `220` is the console's time to draw the
+expensive list. `221` against `220` says whether GPUSTAT bit 28 going idle
+means the drawing has finished, which the present-queue gate (`0xCD`) relies
+on. `227` failing, or `224` reading never, says silicon loses words from a node
+larger than its FIFO while it draws, and `223` then times some other workload.
+
+## FMV stream test (MAIN MENU last row, records `1F0`-`1F5`, v1.25)
+
+The SDK's FMV console test (`sdk/examples/hello-fmv`, run as a library; the
+suite's side is `src/fmv_test.rs`). The disc carries `MOVIE.STR` at LBA 1024:
+75 s of synthetic 320x240 15 fps video at the full double-speed sector budget
+with interleaved XA-ADPCM stereo beeps (440 Hz left, 660 Hz right, one a
+second), built by the SDK's `tools/fmv_test_movie.py` (FFmpeg and psxavenc;
+`make hardware-tests-disc` builds it once into `build/`, `PSXAVENC=` names the
+encoder). Every video sector carries its ordinal, the file's total and a
+checksum, and the player streams all 9,826 of them through the SDK's polled
+PIO path.
+
+An overlay over the video counts frames shown (FR), frames skipped because the
+decoder was still busy (LATE), sectors that never arrived (LOST) and sectors
+that arrived corrupt, repeated or out of order (BAD), with the LBA and the
+time. The summary screen stays up until CROSS or START returns to the menu,
+whose row then shows PASS or FAIL.
+
+**PASS** means every video sector arrived intact (SECT 9826/9826), LOST 0, BAD
+0, DROP 0, CDERR 0 and DECERR 0. LATE and the KCYC line are measurements, not
+pass criteria. LATE is higher here than on the standalone FMV disc (headless,
+same emulator: SHW 741 / LATE 382 against 889 / 234) because the bitstream
+decode costs more per frame inside this program (KCYC VLC 1375 against 1222; it
+moves with code layout, and this suite builds without the SDK's delay-slot
+filler flags); the sectors, and so the verdict, do not depend on it.
+
+The result joins the capture as six timing-block records whose three fields
+are counters, not min/median/max: `1F0` pass, good, total; `1F1` lost, bad,
+dropped; `1F2` drive errors, decode errors, first problem LBA (FFFF none);
+`1F3` shown, late, VBlanks; `1F4` kilocycles per frame for the bitstream, MDEC
+plus upload, and waiting; `1F5` last good LBA, run count, setup failure code.
+`psoxide-hwtest report` prints them as an `fmv` table and re-derives the verdict
+from the counters. A capture taken before the run is re-encoded with them at
+once (and so carries the timing block even if it was a routine one); a capture
+taken after it picks them up from its own timing scan. Run it after FULL
+CHARACTERISATION, so the characterisation still describes a console nothing
+has touched: the player resets the SPU and reprograms the drive.
+
+The movie moves the CD-DA track outward by 11,230 sectors. No probe names an
+LBA past the CDTEST region, but `0x9B` (a read at LBA 424 while track 2 plays)
+now starts from further away, so it is not comparable with v1.24's.
+
+## CD-DA contention (records `0x9B`-`0x9E`)
+
+The disc carries a synthetic CD-DA track (track 2, generated by
+`tools/gen-cdda-tone.py`, 440 Hz left / 660 Hz right) specifically so
+read-while-audio contention can be measured. This is the one CD failure no
+emulator reproduces, and it cannot be probed without a real audio track, which
+is why the track is part of the disc build rather than optional.
+
+`0x9B` against `0x9C` is the whole measurement: the same read path, the same
+sector count, the only difference being whether audio was live. The emulator
+reports 6731 against 6730 HBlank ticks, i.e. **no contention at all**. Distinct
+channel frequencies mean the same recording also proves stereo routing and lets
+a dropout be heard, not just measured.
+
+## GPU fill rate (records `0xA0`-`0xAF`)
+
+The emulator models no GPU draw time whatsoever, so there is no data anywhere to
+build a model from and the console is the only possible instrument. Pixel counts
+are held identical across shading modes, so a difference isolates interpolation,
+blending or dither cost rather than the per-pixel floor. `0xAA` against `0xAB`
+holds total pixels constant while changing primitive count, separating setup
+cost from fill cost. `0xAC` against `0xAD` holds pixels constant while changing
+UV footprint, which is the texture-cache probe.
+
+Current emulator readings show gouraud within 1% of flat and dithered identical
+to undithered, and `0xAC`/`0xAD` identical, all consistent with none of these
+costs being modelled. Every one is a claim console data will settle.
+
+Everything draws into off-screen VRAM at y >= 400, so neither the photographed
+capture nor the QR pages are disturbed. Sizes stay well under one Timer 2 wrap
+(65,535 cycles): at roughly a pixel per cycle a 256x256 fill would sit on the
+boundary and alias a slow result into a fast one.
+
+## MDEC (records `0xB0`-`0xB3`)
+
+Table uploads and reset settle. Two gotchas cost real debugging time and are
+worth recording: **busy is status bit 29, not bit 31** (bit 31 is the data-out
+FIFO flag and stays set while idle, so polling it never returns), and a command
+holds busy until it has consumed *exactly* the number of payload words it
+implies (16 for luma-only quant, 32 for luma+chroma, 32 for scale).
+
+Decode-to-drained is measured for one and two macroblocks (`0xB4`, `0xB5`),
+using minimal but valid blocks: a head halfword carrying quant scale and a
+signed 10-bit DC, then `0xFE00`, whose run-length field of 63 overflows the
+coefficient index and terminates the block.
+
+Draining is part of the measurement, not overhead. It is also where the two
+platforms disagree, so the wait accepts **either** termination: real hardware
+clears busy once the decode finishes and its output is read, whereas PSoXide
+only re-evaluates busy when the last parameter word arrives (output is already
+queued by then), so busy stays set forever and a busy-only wait never returns.
+Draining the expected pixel count terminates in emulation; the busy check
+terminates, sooner, on silicon.
+
+## SIO / pad (records `0xB6`-`0xB9`)
+
+The same pad poll at four setup/inter-byte pacings. The spread is the signal: it
+shows how much of a transfer is fixed cost and how much is pacing the pad
+demands. The SCPH-1200 setup-delay hunt cost a whole session; this makes it a
+standing measurement. `0xFFFF` means the pad did not answer, which is distinct
+from a fast poll.
+
+## SIO measurements (v2.0, records `0x600`-`0x6A6`)
+
+Added so that what the emulator cannot settle becomes a number in the capture. None
+of these passes or fails; every one is laid out the same whether a pad, a card or
+nothing is plugged in (a port with nothing in it is a result). The guest is
+`src/sio_timing.rs` (raw register measurements) and `src/pad_engine.rs` (the
+SDK's interrupt-driven pad engine, `psx_pad::console`, opt-in per game; its design is
+`sdk/docs/PAD-IRQ-ENGINE.md` in the SDK). Times are system-clock cycles (33.8688 MHz)
+from Timer 2 unless a field says HBlanks (Timer 1). The memory card is read, and written only where a record below says so.
+The field names of every record are in `tools/hwtest-report.py` (`V2_RECORDS`) and are
+decoded as rows `v2,<id>_<name>,<field>,<value>`.
+
+Raw port measurements, steps `SIO0 SELECT DELAY`, `SIO0 PAD ACK TIMING`,
+`SIO0 CARD ACK TIMING`:
+
+* `600`-`601`, select to first byte, port 1 then 2: 16 delays from 0 to 24,576 cycles
+  after `/CS` is asserted, four polls each; a poll counts when the first two bytes
+  pulsed `/ACK` and the third reply is `0x5A`. Fields: the shortest delay at which
+  all four polls were answered, the longest delay at which any failed, and a 16-bit
+  mask of the delays that were fully answered (bit n is delay n). This is the
+  question the official SCPH-1200 raised, in cycles instead of status-read spins; the
+  older sweep is `D0`-`DB`.
+* `610`-`618` (port 1) and `620`-`628` (port 2), one record per byte of a nine-byte
+  `0x42` pad poll: cycles from the byte's write to `/ACK` asserting, the pulse width,
+  and the cycles until the byte was received. Median of eight polls. A byte that gets
+  no `/ACK` (an empty port, or the last byte of a short reply) reads `0xFFFF`.
+  `630`-`631` hold what each port answered (replies 0 to 3 and a flag word: bits 0-8
+  which bytes pulsed `/ACK`, bit 9 the third reply was `0x5A`, bit 10 the `STAT` IRQ
+  latch after the release, bit 11 TX idle).
+* `6C0`-`6C3` and `6C8`-`6CB`, the same for the four bytes of a memory-card read
+  command (`81 52 00 00`, abandoned before any data moves); `634`-`635` hold the answers.
+* Empty-port behaviour is those same records on a port with nothing in it:
+  replies `0xFF`, no `/ACK`, the byte still received after its eight clocks.
+
+`PAD AND CARD UNDER LOAD`: `640`-`64F`, port 1 idle, port 1 loaded, port 2 idle, port 2
+loaded, three records each. A pad poll and a card frame read take turns, 24 rounds. Loaded
+means the GPU walking a list of large triangles behind them, with interrupts on. Records:
+pad polls and card reads that worked, with error counts; card frame time in HBlanks
+(min, median, max); pad poll time in cycles. A slot with no card gets rows of
+`0xFFFF`.
+
+Pad engine, steps `ENGINE SETUP SWEEP`, `ENGINE ACK PACING`, `ENGINE TIMED PACING`,
+`ENGINE AND CARD LEASE`, `ENGINE UNDER LOAD`, `PAD HOT-PLUG WINDOW`:
+
+* `660`-`666`: the engine's own select-to-first-byte path (a timer interrupt starts the
+  first byte), swept over 2,000 to 8,000 cycles in steps of 1,000, 100 frames each:
+  clean updates on port 1, faults, and each port's health.
+* `670`-`674` with `Ack` pacing and `678`-`67C` with `Timed` pacing, 600 frames each
+  with the pad asked into analog mode: updates, faults and health per port; interrupts,
+  stalls and spurious interrupts; the CPU a loop keeps (work per frame against the same
+  loop with nothing polling, so the engine's cost, and with port 2 as it is, empty or not,
+  its cost); mode changes seen on port 1 (a wrong identifier or a slipped packet shows
+  here), kicks, and the final mode. This answers whether the engine's one control-register
+  write between bytes corrupts a given pad, the question the 2026-06-22 result left open.
+* `690`-`693`: 600 frames of the engine with a memory-card sector read every ten frames
+  through `lease()`, on the first slot that holds a card: pad faults, frames the engine
+  skipped while the port was out, card checksum errors; reads ok and tried; the wait for
+  the lease (median, longest); card frame time in HBlanks. Reads only, unless L1 and R1 are held
+  while CROSS starts the run, as the card diagnostic asks for its writes: then every frame read is
+  also written back with the bytes just read (the card's contents do not change), and `694` holds
+  the writes ok and tried and the write time in HBlanks.
+* `720`-`749`, the engine under load: seven phases of six records each (loop rounds per
+  frame; faults, stalls and spurious interrupts; handler stack left, events and kicks; the
+  load generator's own interrupt state; `I_MASK` and `I_STAT`; totals since install). Phases:
+  the engine with no ports polled under the whole load (control), both ports alone, then with
+  the GPU list walk, the SPU upload and the CD sector stream one at a time, then CD with the
+  pad interrupts re-opened, then all three with them open. The load runs in the foreground with
+  interrupts enabled and every call is timed: the longest call, how many outlast a pad byte on
+  the wire (1,100 cycles), and how many began with interrupts disabled or with a pad or
+  engine-timer interrupt already pending. The finding in the emulator: the SDK's
+  `SectorReader` sets `I_MASK` to VBlank only while it runs, which switches off the engine's
+  SIO and root-counter-0 interrupts; with that mask the engine stalls and faults on half the
+  frames (phase 4), with the two bits re-opened it does not (phases 5 and 6). The probe is not
+  the cause: it never masks interrupts, and no load call began with them off.
+* `638`-`63B`, hot-plug: a six-second window with a prompt ("UNPLUG+REPLUG ONE (OPTIONAL)" and
+  the seconds left), both ports watched through the engine every frame: transitions, the health
+  before and after, frames the port read absent, and the frames of the first and last change.
+  Unplug and replug a pad in either port while the prompt is up, or do nothing.
+
+### DualShock motors (records `760`-`768`)
+
+Step `DUALSHOCK MOTORS`, at the end of the SIO area before the hot-plug window (`src/rumble.rs`;
+the objective part is written out as packets, the operator part uses the SDK's motor API). For
+each port, every packet a frame after the last: a plain poll for the
+identifier; config-mode entry (`01 43 00 01`) and an `01 45` query to see whether the pad now
+answers `F3`; the motor mapping (`01 4D 00 00 01 FF FF FF FF`, which returns the old mapping);
+config-mode exit (`01 43 00 00 5A...`); then a poll with both motors commanded and one with them
+stopped. A digital pad, or an empty port, must not answer `F3` and must come out unchanged; an
+analog pad in digital mode is expected to accept. Records per port: `760`/`763` identifiers and
+a flag word (bit 0 the entry answered `5A`, 1 config mode confirmed, 2 and 3 the mapping answered
+`5A` and `F3`, 4 the exit answered `F3`, 5 and 6 the motor poll kept the identifier and `5A`,
+7 no pad, 8 the query answered `5A`); `761`/`764` the old mapping bytes; `762`/`765` the motor
+poll's identifier, `5A` and buttons, and the identifier after the stop; `767`/`768` the cost of a
+poll with the motors idle and with both on, in cycles from the first byte written to the last byte
+received (median of eight; v2.2 and earlier recorded the last byte's unanswered window instead).
+
+v2.2 adds, per port: `76D`/`76E` the pad identity (a plain poll's id and `5A`, button bytes and
+stick bytes) and the same on the screen for a second and a half; Enter Config tried up to four
+times a frame apart, with the last attempt's reply bytes 1 to 8 in `769`/`76B` and `76A`/`76C`
+(the second also holds the attempts made and the first attempt's id and `5A`); the `01 45`
+query's reply bytes 3 to 8 in `76F`/`770`, which carry the model, mode and LED bytes when the pad
+is in config mode and `FF` when not.
+
+Operator part, on the first port that accepted the config packets (`766`): the small motor on for
+a second, the large motor at 0, 64, 128, 192 and 255 for a second each, and a series of pulses of
+1, 2, 4, 8 and 15 frames on each motor, asking after each "FELT? X YES O NO" (CROSS yes, CIRCLE
+no; the question shows for a second with the pad ignored, then every button must be let go, then
+four seconds to answer; no answer is its own value). The record packs two bits per stimulus,
+in that order (0 none, 1 yes, 2 no), the number asked, and the port. v2.3 adds `771`-`773` (the raw
+button word of each answer, then a mask of questions whose buttons were never let go) and
+`774`-`776` (the frame each answer arrived on, then a mask of questions that saw a button down in
+the first second). Every motor is stopped with
+several polls of zeros before the step ends. With no pad that takes the config packets the
+record reads `FFFF` and nothing is asked.
+
+## v2.4 measurements
+
+Written for the emulator work (`feat/hwtest-v2.4-2026-10-09`); the film or capture decodes with `python3 tools/hwtest-report.py --v24 <page file>`, which prints each table and checks that every record describes the case it should (a failed check is the harness, not the machine).
+
+**480i draw rule** (`src/field_rule.rs`, `0x800`-`0x852`). GP1(08h) 512 x 480 interlaced, GPUSTAT bit 31 sampled about 3 ms after VBlank (so a field cannot flip under a command) and retried up to six frames until it has the wanted value. One command over a 64 x 16 scratch area that an upload cleared first: GP0 fill, flat rectangle, two flat triangles, a textured quad (opaque texels, raw), a vertical line, a VRAM-to-VRAM copy, and an upload as the control. Each record is `row_mask` (a bit per row that holds something afterwards), `descriptor` and `flags`; the descriptor names the command, E1 bit 10, the field asked for, the mode, whether the scratch area is inside the displayed rectangle or beside it, and the variant, so a record cannot be read as another case. `--v24` prints the 7 x 4 table (command by bit 10 by field). Expected if the emulator's model is right: bit 10 clear gives `0xAAAA` for field 0 and `0x5555` for field 1 on fill, rectangle, triangles, textured quad and line, `0xFFFF` for the copy and the upload, and `0xFFFF` everywhere with bit 10 set and in the other modes. Further cases: the scratch area outside the displayed rectangle (is the rule about the picture or all of VRAM), a polygon whose own texpage word sets bit 10, the draw-area top and the draw offset on an odd row (is the parity the absolute VRAM row), the display start on an odd row, a fill issued at once after VBlank on four frames, the same commands with the display blanked (GP1 03h; is the rule off then), and the clocks (divided by 8) of a 256 x 240 fill and rectangle with the rule on and off.
+
+**GPU DMA edge cases** (`src/dma_edge.rs`, `0x860`-`0x873`). *Stop mid-node:* the list is a 512 x 256 rectangle, an upload node of 48 distinct words, and a second upload node of 8; CHCR START is cleared a fixed number of clocks after the kick; after the GPU has had time to finish, a GP0(1Fh) interrupt request says whether it is idle (it is swallowed while a command is unfinished), the command buffer is reset and the destination rows are read back. `words_of_the_node_landed` of 48 means the whole node reached the GPU after the stop; about 13 means only what was in the FIFO; the second node landing means the walk went on. *Block FIFO:* the same upload carried by a request-mode transfer (64 and 256 words, blocks of 16, and 64 words in blocks of 8) behind the rectangle and, as the control, with the GPU idle; the landed words and the clocks.
+
+**Memory-card protocol** (`src/card_proto.rs`, `0x880`-`0x8BF`, port 1 then port 2). A 140-byte sector read of frame 56 (`81 52 00 00 MSB LSB` and filler; replies `FF`, flag, `5A 5D`, dummy, MSB, `5C 5D`, MSB, LSB, 128 data, checksum, `47`), four times, every byte's `/ACK` rise and width and arrival time; the first ten bytes one record each, the 128 data bytes as min/median/max, the checksum and terminator bytes, the span and a validity word, the replies. With L1 and R1 held at the start, and only when every gate on the four reads passes (all four good, every checksum matching, no error flag, identical data), the same 128 bytes written back to frame 56, one of the unused frames of block 0 (56 to 62; 36 to 55 hold broken-sector replacement data) (138 bytes, status `47`), twice; a failed gate writes nothing and records why. The sector read and written is frame 56, not the header. A slot with no card answers `FF` and never pulses `/ACK`: the first byte's record says so. L1+R1 at the start also arms the older pad-engine card-lease write-back (`694`: about sixty frames of block 0 rewritten with the bytes just read, on the first slot that holds a card). START+R2 at the start (a chord apart from the card writes) shows a QR checkpoint page set after each area; L2 skips the steps that can hang a console.
+
+**Calibration and UV windows** (`src/workload.rs`, `0x8C0`-`0x8C5` and `0x8E0`-`0x92B`). See the module header.
+
+**Pads** (`src/rumble.rs`, `0x940`-`0x962`). The motor step names the pad (CROSS SCPH-1200, CIRCLE SCPH-110, SQUARE another, TRIANGLE none or digital), runs, asks for the swap, names the second pad, and runs the battery again if it was named. Answers use the debounced question (one second with the pad ignored, release, then a press).
+
+## Other v2.0 measurements
+
+* `GTE COMMAND LATENCY` (`150`-`191`, `192`-`195`): for each of 22 GTE commands, three
+  records: the command then an immediate `mfc2` of MAC0, the same of MAC1, and the command
+  back to back with itself; the cycles for eight or sixteen turns (the `work` of the
+  record). If a coprocessor read waits for the command the first two cost the command's
+  latency a turn; otherwise two instructions. `192`-`195` are `swc2` (a store of a
+  coprocessor register) straight after RTPS (MAC1 and SXY2), NCLIP (MAC0) and SQR (MAC1),
+  the interlock the emulator models for SWC2 without a console figure behind it.
+* `DMA VERSUS CPU LOADS` (`140`-`145`): 64 RAM loads with a DMA channel idle and the same
+  loads straight after kicking a transfer big enough to outlast them, for the SPU
+  (256 words), the ordering-table clear (2,048 words) and a block transfer of NOP words to
+  GP0. The GPU list walk is `35`, `36`, `9F`, `FE`.
+* `TIMER 1 HBLANK RATE` (`650`-`652`): Timer 1 on the HBlank clock over 120 frames, once
+  with nobody reading the counter and once with the CPU reading it in a tight loop:
+  counts per window, distinct values seen, the largest step between reads, and how many
+  reads the loop made. Does tight polling change what it counts?
+* The emulator timing audit's measurement list, `TIMING-AUDIT-STEPS.md` (M1 to M11), warm
+  harness unless noted: the block twice, the second pass timed on Timer 2 at the system clock,
+  interrupts masked, five samples (min, median, max):
+  * M1 GTE early reads, copies of `130` (RTPS, the read, 20 nops, sixteen turns): `swc2 $14` to
+    the scratchpad (`192`), `cfc2 $31` (`193`), `lwc2 $0` from the scratchpad (`194`). Interlocked
+    is `130`'s 638; free is about 400. M2: the same `swc2` to cached RAM (`195`).
+  * M3 MMIO read cost, 64 x (lw, nop), timed by a counter other than the one read: Timer 0
+    counter, DMA channel 2 CHCR and DPCR timed by Timer 2 (`1A0`-`1A2`); Timer 2's counter timed
+    by Timer 0 on the system clock (`1A3`).
+  * M4 scratchpad `lb`, `lbu`, `lh`, `lhu`, `sb`, `sh`, 64 each with a nop (`1A8`-`1AD`).
+  * M5 isolated cache: 64 `sw` and 64 `lw` run through KSEG1 with Status.IsC clear against the
+    scratchpad (the control, `1B0`, `1B1`), set (`1B2`, `1B3`), and set with the cache-control
+    TAG bit as well (`1B4`, `1B5`). The Status read-modify-write is in all six; the epilogue is the
+    BIOS's flush (IsC, TAG, a zero word to all 256 lines).
+  * M6 CPU/DMA matrix, loops of 64, idle against channel running: GPU 512-node empty list walk
+    with 64 `sw` back to back (`1E0` idle, `1E1` during), `sw` + 3 nops (`1E2`, `1E3`), `lw` + 3
+    nops (`1E4`, `1E5`), scratchpad `lw` + nop (`1E6`, `1E7`), `lw` + nop (`9F`, `FE`); OTC channel
+    6, 1024 words, `lw` + nop (`142`, `143`); SPU channel 4, 512 halfwords (`140`, `141`); GPU
+    block channel (`144`, `145`). The idle references are `76`, `1F`, `74`, `75`. The CD and MDEC
+    rows need the far end really there, so they are field records, `700`-`709`: loop clocks idle,
+    loop clocks during, and the transfer's own duration in units of 32 clocks, with every wait
+    bounded (about 2 million clocks) and `FFFF` for a timeout. CD (`700`-`707`): SetMode (1x or
+    2x, 2048 or 2340 bytes), SetLoc to the test region, ReadN, wait for INT1 so a sector is
+    buffered, BFRD, DMA 3 to RAM under the loop; `lw` loop then `sw` loop for each of the four
+    combinations. MDEC (`708`, `709`): reset, tables, a decode command for four macroblocks, DMA 1
+    started to drain, DMA 0 kicked to feed under the loop. Step `CD DMA VERSUS CPU` is in the
+    drive area, ahead of `CD MOTOR`.
+  * M7 controlled-cold code: the 4 KiB evictor `1C` uses before every sample, then (a) 64 `sw` to
+    RAM, (b) 64 `sw` to the scratchpad, (c) 32 x (lw GPUSTAT, nop), (d) 32 x (lw RAM, nop), (e) 64
+    nops (`1B8`-`1BC`); one pass, nothing warmed.
+  * M8 warm BIOS ROM (`1C0`-`1C3`), EXP1 (`1C4`-`1C7`) and EXP3 (`1C8`-`1CB`), through KSEG1: 64 x
+    (lw, nop), 64 bare `lw`, then `lhu` and `lbu` with a nop.
+  * M9 GPU texture state, `200`-`223`: a list of 16 textured triangles at 8x8, 16x32 and 32x32,
+    at 4, 8 and 15 bits a texel, each (a) one page and one CLUT, (b) alternating page, (c)
+    alternating CLUT, (d) one page with the UV window moving. Clocks for the list (divide by 16).
+    Anchors `10C` and `10B`. 15 bpp has no CLUT, so (c) repeats (a) there.
+  * M10 multiply/divide unit: `divu`, `multu` (small), a gap of 0, 10, 30 or 36 nops, `mflo`
+    (`1D0`-`1D3`) against `divu` and 36 nops (`1D4`); `multu` large, `mtlo`, `mflo` (`1D5`, small
+    operand `1D8`); `multu`, `mthi`, `mfhi` (small `1D6`, large `1D7`).
+  * M11 polled-counter tick loss, `6B0`-`6B7` (step `POLLED TIMER TICK LOSS`): an assembly loop
+    reads the counter and adds the 16-bit steps it sees until about a second of ticks is
+    reached, with Timer 1 on HBlank free-running as the reference, read at the two ends only.
+    Loops of 6 and 14 instructions, for Timer 2 and Timer 0 on the system clock, Timer 2 at an
+    eighth and Timer 0 on the dot clock. Record: reference HBlanks, ticks seen in thousands,
+    ticks per HBlank times 16; the lost fraction is one minus ticks per HBlank over the nominal
+    rate (2,172 system clocks to a line in the audit's figure). Deviations from the audit's
+    wording: about one second rather than a second and a half, so Timer 1 (65,536 lines is 4.2 s)
+    cannot wrap when a counter loses most of its ticks; Timer 1 is the reference for every case,
+    because Timer 0 on the system clock wraps in 1.9 ms and cannot count a second from its two
+    ends. `650`-`652` do the same for Timer 1 itself, free against polled.
+* The scratchpad-versus-RAM load and store cycles, the I-cache miss cost and the
+  multiply and divide latencies already measured are the records that existed before
+  (`72`-`8D`, `C8`, `C9`, `1C`-`1D`, `42`-`45`); this version does not repeat them.
+
+## Console identity and raster hashes (precision `128`-`159`)
+
+A capture that cannot say which console and BIOS produced it is much harder to
+trust later, and previously that was encoded only in a hand-written filename.
+Two BIOS regions are sampled (build date at `0x100`, version string at
+`0x7FF32`) as a deliberate hedge: these reads return zero on the emulator's
+side-loaded HLE path, which maps no BIOS ROM, so they **cannot be validated
+before a burn**. If one region reads zero on console the other still identifies
+the machine.
+
+Then 22 bit-exact raster hashes. A 32-bit hash covers a whole 96x96 VRAM region,
+making this the cheapest coverage per payload byte in the schema, and it is what
+originally caught the triangle rasterizer being Redux-shaped rather than
+silicon. Timing says how long a primitive took; only a hash says it drew the
+right pixels. `raster_hash_00` currently reads `0x04121005`, matching the
+recorded silicon hash the emulator's own rasterizer test asserts.
+
+## CD-ROM battery (records `0x90`-`0x9A`)
+
+The drive is the one subsystem where the console is the only usable
+instrument: seek time is mechanical and no emulator models head travel.
+
+Every record here is timed on **Timer 1's HBlank clock** (~63.9 us per tick,
+~4.19 s of range), not Timer 2's system clock, which wraps after ~1.9 ms and
+could not express a seek at all. Seek and read acknowledge immediately and
+finish much later, so these wait for the drive's SECOND response (the
+completion IRQ) via `cdrom::try_command_until_complete`. Timing to the ack
+would report a mechanical seek as microseconds.
+
+| ID | Measurement |
+|---:|---|
+| `90`-`93` | SeekL over 1, 16, 128 and 512 sectors from a parked origin |
+| `94`-`95` | 8 sequential sectors, single and double speed |
+| `96`-`98` | GetStat, SetMode and GetLocP response |
+| `99`-`9A` | Pause and Init, to completion |
+
+Each seek re-parks the head first, so a record measures a known distance
+rather than travel from wherever the previous record happened to finish.
+Throughput discards the first sector, which carries the seek and spin-up
+settle, and so reports sustained rate rather than first-byte latency.
+`0xFFFF` means the command did not complete within its poll budget, which is
+distinct from a zero-time result.
+
+The emulator currently reports the same 845 HBlank ticks for a 128-sector and
+a 512-sector seek, so its seek time is distance-independent. Single and double
+speed differ by exactly 2.0x. Both are exactly the kind of claim a console
+capture can confirm or demolish.
+
+## Payload schema `PX8`
+
+PX8 supersedes PX7: every block after the header is optional, behind a flags
+byte, and pages are counted from the payload rather than fixed per schema.
+
+PX7 always carried everything. Timing envelopes and precision values are 71% of
+that payload and they are *characterisation*: there is no expected value to
+check them against, silicon is the reference. A routine run does not need them,
+and as the suite grows towards covering every chip, shipping them on every
+capture is what limits how many cases can be added.
+
+So a **conformance** capture carries the status bitmap and one record per
+FAILING case -- 163 bytes and a single QR at 200 cases, and still one QR at a
+thousand, because a passing case costs three bits and nothing else. A
+**characterisation** capture carries the lot, in PX7's field order, so an
+archived `px7-*` reference still describes the same thing a full PX8 does.
+
+A failure record names its case by `TestSpec::id`, not by array position, so a
+capture archived today still points at the same test after the array grows. The
+ids are checked for uniqueness at compile time.
+
+PX7 itself superseded PX6: four pages instead of three, a median column beside
+each min/max, explicit per-record ids, and 128 record slots. Since v1.21 a PX8
+timing block carries only the records that ran, and the header count says how
+many that is; unfilled slots used to cost seven bytes each on the wire.
+
+The median is not decoration. With five samples reduced to two numbers, a
+min/max gap cannot distinguish one stray interrupt from a genuinely bimodal
+distribution. Records now routinely read `min=126, median=126, max=286`, which
+says plainly that the maximum is a single cold-I-cache outlier and the typical
+cost is the minimum.
+
+Samples are now taken with **interrupts masked** (`IrqGuard`, restored on
+drop). Previously the only defence against a VBlank or CD IRQ landing inside a
+measured window was that one of the five repeats happened to escape it, so the
+min/max gap reported "did an interrupt hit" rather than silicon jitter.
+
+Record ids are written into the payload rather than implied by position, so an
+unused slot is skippable and adding a probe cannot silently shift the meaning
+of every later record. `0xFF` marks an unfilled slot; `0x00` could not, being
+the real empty-harness record.
+
+Note that two work sizes per probe were considered and rejected: every probe
+shares the identical harness prologue and epilogue with record `0x00`, so
+`(t_probe - t_empty) / N` already cancels the harness exactly.
+
+## Payload schema `PX6` (superseded)
+
+The capture is a 1,733-byte versioned binary record encoded as exactly 2,312
+Base64 characters. Its three pages carry 828, 828, and 656 characters. Each
+screen encodes its complete `PX6/<page>/<chunk>/C:<crc>` text in the proven
+Version-20-L QR geometry. A CRC-32 protects each page and a second CRC-32
+protects the reconstructed binary record.
+
+The record preserves all 173 conformance observations and their statuses, all
+90 timing min/max pairs, CPU/GTE/SPU startup-scan summaries, the nine
+memory-control registers, run IDs, section digests, and 128 raw precision
+values. Fixed schema ordering avoids repeating labels and IDs on screen.
+``psoxide-hwtest report`` accepts all three strings mirrored to the debug TTY
+and reconstructs the complete report. It remains backward-compatible with
+two-page PX5 captures.
+
+The third page is intentionally a microscope rather than a duplicate. It
+stores raw SPU DMA readback words for one-block and four-block BCR shapes plus
+Stop/DMA-read mode poll counts and forced-stable comparison hashes, repeated
+GPUSTAT reads after IRQ and DMA-direction writes, isolated Timer 2
+mode/counter/I_STAT snapshots, raw SPU voice-register masks, consecutive OTC
+CHCR reads, an exact NCLIP scene-A settle sweep from 47 through 64 NOPs, and an
+immediate-versus-settled OP comparison. This extra data reveals corruption and
+state-transition shapes that a checksum or one-shot pass/fail result cannot.
+
+The timing minimum is normally the least-interrupted measurement; the min/max
+gap records IRQ or hardware jitter instead of hiding it. BIOS revisions can
+legitimately program different bus values, while the full GTE observations can
+distinguish a true latency window from magnitude-dependent partial accumulation.
+
+Record IDs:
+
+| ID | Measurement | Work field |
+|---:|---|---|
+| `00` | Empty Timer 2 measurement harness | zero |
+| `01` | Literal NOP block | instructions |
+| `02` | Dependent `ADDIU` block | instructions |
+| `03` | Cached `LW` plus explicit load-hazard slot | loads |
+| `04` | Taken branch plus delay slot | branches |
+| `05`–`07` | `MULTU`/`MFLO`, fixed small, medium, and large `rs` magnitudes | pairs |
+| `08` | `DIVU` followed immediately by `MFLO` | pairs |
+| `09`–`0A` | Scratchpad and uncached-RAM `LW` plus hazard slot | loads |
+| `0B`–`0D` | Cached RAM, scratchpad, and uncached-RAM stores | stores |
+| `0E`–`0F` | GPUSTAT and I_STAT reads plus hazard slot | reads |
+| `10`–`1B` | Volatile spin at system, system/8, and dot clocks | iterations |
+| `1C`–`1D` | Cold (flushed) and warm execution of one 4 KiB I-cache footprint | instructions |
+| `20` | Timer 1 HBlank ticks during the long spin | `FFFF` sentinel |
+| `21`–`26` | RTPS, RTPT, NCLIP, MVMVA, NCDT, and NCCT throughput | commands |
+| `30`–`32` | 16-, 64-, and 256-word OTC DMA completion | words |
+| `40` | End-to-end CD-ROM GetStat first-response latency | commands |
+| `41` | GP0 IRQ1 command-to-GPUSTAT settle latency | commands |
+| `42`–`44` | Cold minimal return target entered at cache-line word 0, 1, or 2 | calls |
+| `45` | Warm minimal return target entered at cache-line word 0 | calls |
+| `46` | Untaken branch plus delay slot | branches |
+| `47`–`48` | Cached-RAM byte and halfword loads plus explicit load-hazard slot | loads |
+| `49`–`4A` | Uncached-RAM byte and halfword loads plus explicit load-hazard slot | loads |
+| `4B`–`4D` | BIOS-ROM word, halfword, and byte loads plus explicit load-hazard slot | loads |
+| `4E` | SPU status halfword reads plus explicit load-hazard slot | reads |
+| `4F` | SIO status word reads plus explicit load-hazard slot | reads |
+| `50`–`51` | Cached-RAM byte and halfword stores | stores |
+| `52`–`54` | CD-ROM byte, halfword, and word reads plus explicit load-hazard slot | reads |
+| `55`–`57` | Expansion-1 byte, halfword, and word reads plus explicit load-hazard slot | reads |
+| `58`–`5A` | Expansion-2 byte, halfword, and word reads plus explicit load-hazard slot | reads |
+| `5B`–`5D` | Expansion-3 byte, halfword, and word reads plus explicit load-hazard slot | reads |
+| `5E`–`5F` | SPU status byte and aligned SPU word reads plus explicit load-hazard slot | reads |
+| `60`–`62` | Cache-control byte, halfword, and word reads plus explicit load-hazard slot | reads |
+| `63` | Memory-control word reads plus explicit load-hazard slot | reads |
+| `64` | Interlocked unaligned SPU `LWL`/`LWR` pair plus explicit hazard slot | pairs |
+| `65` | 1 KiB RAM-to-SPU DMA completion (`512` halfwords) | halfwords |
+| `66`–`68` | GPU block DMA of 16, 64, and 256 GP0 NOP words using a 16-word block size | words |
+| `69`–`6A` | GPU block DMA of 256 GP0 NOP words using 64×4 and 256×1 BCR shapes | words |
+| `6B` | GPU linked-list DMA with two headers and 128 GP0 NOP words per node | header + payload words |
+| `6C`–`6D` | CPU-submitted monochrome lines: 16 short 16-pixel spans and 8 long 256-pixel spans | rasterized pixels |
+| `6E`–`6F` | Matching Gouraud-line batches, including Q12 color interpolation | rasterized pixels |
+| `70` | Main-RAM DRAM refresh period recovered from slow uncached reads | samples |
+| `71` | Extra uncached-read wait imposed by a DRAM refresh slot | samples |
+
+The exact instruction blocks use `.set noreorder` and literal repetitions, so
+the workload does not depend on LLVM loop generation. Timer reset, workload,
+and timer read are emitted in one non-inlined assembly block, with inputs live
+before the reset. Harmless marker instructions outside the measured interval
+let the final PS-X machine code be audited byte-for-byte. Five measurements are
+kept per record; no average is used because an interrupt-inflated average is a
+poor estimate of instruction cost.
+
+The four short-cache records complement the 4 KiB aggregate. Their targets
+are 16-byte aligned and enter at linked word offsets 0, 1, and 2, while the
+timing wrappers occupy different direct-map indices. Comparing `42`–`44`
+reveals entry-position/refill-shape cost; comparing `42` with `45` isolates a
+cold refill from the same call/return path when warm. The final-EXE audit
+checks these layouts rather than trusting source alignment alone.
+
+The GPU DMA records send only GP0 NOP commands, so they do not alter VRAM or
+the photographed capture. Records `68`–`6A` deliberately hold the 256-word
+payload constant while changing BCR shape. That separates actual bus/FIFO
+cost from completion models based only on block count; record `6B` also
+exposes linked-list header and node-transition overhead.
+
+The line records start Timer 2 immediately before the first GP0 packet and
+stop only after GPUSTAT command-ready returns. CPU write stalls and the final
+GPU drain are therefore both included. Short/long pairs separate command
+setup from per-pixel cost; monochrome/Gouraud pairs expose interpolation cost.
+They draw into off-screen VRAM and do not cover the photographed capture.
+
+The final two timing records use single uncached-RAM reads as a refresh
+detector. Interrupts are disabled during each scan. Timer 0 timestamps only
+the contended reads, avoiding a counter read on every iteration that would
+itself disturb the cadence. `70` reports the interval between refresh slots;
+`71` reports the largest extra wait above the uncontended read floor. These
+two records occupy the previously unused cells on timing page 15.
+
+PX6 includes the observed values from conformance cases 116–137 in fixed order,
+preserving the exact partial or stale values needed to infer silicon latency.
+
+## SCPH-9902 calibration (PX6 `B2761BE1`)
+
+The final PAL hardware capture established these constraints:
+
+- NCLIP's scene-A MAC0 stayed at `0x00000874` for every read gap from 47
+  through 64 NOPs. Other predecessor sequences produced `0x00002764`,
+  `0xFFFFB964`, and `0x00007674` for the same scene. This is internal
+  state/history-dependent accumulation, not a fixed command-result latency.
+- OP produced MAC1/MAC2/MAC3 = `-768`, `1536`, `0` when issued immediately
+  after its CTC2/MTC2 seed, and `-768`, `1536`, `-768` after 64 NOPs. The
+  arithmetic is correct; the discrepancy belongs to input/control-write
+  commitment.
+- GP1 IRQ acknowledgement and DMA-direction changes become visible in
+  GPUSTAT one read after the write.
+- Timer reached-target/reached-wrap bits survive a mode write and clear on a
+  mode-register read. Both Timer 2 interrupt probes raised I_STAT bit 6.
+- SPUCNT's low-six-bit SPUSTAT mirror took 24-27 status polls to settle.
+  SPUSTAT DMA-request bits did not assert before the DMA channel was armed, so
+  they must not be used as a pre-start readiness condition. The captured SPU
+  readback words are therefore diagnostic only, not RAM-content calibration.
+
+These are behavioral constraints, not permission to reproduce them with
+read-triggered special cases. GPU, GTE, and SPU timing should be scheduled in
+bus/SPU/GTE time so unrelated instruction sequences observe the same effects.
+
+## Reading the payload off a console
+
+There are two independent readout paths carrying the *same* bytes.
+
+**QR.** The proven path. Scan each page, keep the `PX8/<page>/<chunk>/C:<crc>`
+text. Self-validating and visible, but paged and manual. A conformance capture
+is one page; a characterisation capture is six. The page header carries the
+total, so there is no fixed count to remember.
+
+**Audio link.** The disc streams the whole 2,637-byte payload out of the SPU as
+binary FSK and loops it in hardware, forever, with no CPU involvement. Point a
+capture card at the console, record, and decode:
+
+```sh
+psoxide-hwtest audio-decode capture.wav --emit-pages pages.txt
+psoxide-hwtest report pages.txt
+```
+
+One repetition takes about 13.6 seconds, so any recording longer than that
+contains a complete copy, and a repetition spoiled by a glitch costs the next
+11.6 seconds rather than another burn. The decoder re-emits the payload in the
+QR wire format on purpose, so both paths feed the identical report pipeline and
+cannot drift apart.
+
+Four tone rates are available, cycled with SQUARE on the capture page. They all
+replay the SAME uploaded stream at a lower SPU pitch, which stretches each block
+over proportionally more output samples: a slower mode lowers both tones and the
+baud rate together and multiplies energy per bit while costing no extra SPU RAM,
+which matters because the fast stream already fills most of it. The decoder
+sweeps all four and detects which was used, so a fallback needs no flag. A
+calibration section of each pure tone precedes the data, so a failed decode can
+be diagnosed offline instead of by burning again.
+
+Modulation is FSK because it is amplitude-independent: capture chains apply AGC
+and arbitrary volume, which would destroy on/off keying but cannot change which
+tone is present. Each bit is exactly one ADPCM block, 28 samples at 44.1 kHz,
+and the two tones (1575 Hz and 3150 Hz) fit a whole number of cycles into that
+block so blocks concatenate without a phase discontinuity. Both land on exact
+DFT bins of a 28-sample window, making a bit decision a two-bin comparison with
+no filter design.
+
+The emulator path is verified end to end by `make hwtest-audio`, which records
+the SPU output, decodes it, and parses the result. The recovered bytes are
+byte-identical to the QR payload, at both the fast rate and a slower fallback
+rate.
+
+`make hwtest-audio-chain` goes further and degrades that recording the way a
+real capture chain does, requiring the decoder to still recover the identical
+payload. All twelve cases pass: resampling to 48/32/96 kHz, a 20x gain range,
+hard clipping, DC offset, band-limiting, 25% noise, and a stacked worst case.
+
+**Recordings are resampled to 44.1 kHz before decoding, and this is not
+optional.** The link's bit clock IS the console's 44.1 kHz sample rate, so at
+48 kHz a bit spans 30.48 samples and the tones no longer land on exact DFT
+bins. A 48 kHz recording fails completely without that step, and 48 kHz is what
+OBS records by default. That proves the encoding and framing; it does
+not prove analog robustness through a real capture chain, which only a console
+recording can establish.
+
+## Headless validation
+
+None of these need pad input, a GUI, or QR scanning: the tier-1 battery runs at
+boot and mirrors every page to the TTY.
+
+```sh
+make hwtest-capture   # build guest + run headless -> build/hwtest-capture.log
+make hwtest-diff      # audit the linked EXE, then diff the capture vs baseline
+make hwtest-audio     # record SPU output, decode it, parse the recovered payload
+make hwtest-audio-chain  # decode again through simulated capture-card damage
+make hwtest-baseline  # deliberately re-pin the baseline (review the diff first)
+make hwtest-capture-full  # FULL characterisation capture (timing, memctl, precision)
+make hwtest-diff-full     # ...diffed against px8-emulator-full-v<version>.txt
+make hwtest-baseline-full # ...and re-pinned
+make hwtest-capture-perf  # PERF A/B run: the sweep, then the register A/B group
+make hwtest-diff-perf     # ...gated on the warm records
+make hwtest-probe-capture ROW=<n>  # one TARGETED PROBES row, for before/after diffs
+make hwtest-silicon SILICON=<payload.txt>   # compare against a console capture
+```
+
+`hwtest-capture` side-loads the EXE but mounts the CUE with `--disc`. The CD
+battery needs a disc in the drive; against a driveless EXE every CD command
+burns its full poll budget timing out, which alone exhausts the instruction cap
+before the capture encodes. Booting the CUE directly instead produces no guest
+TTY at all.
+
+`hwtest-diff` is the routine gate. Its baseline is a conformance capture, so it
+covers the 200 case verdicts and the expected/observed values of the failing
+ones, and nothing else: since PX8 made the other blocks optional it has not
+seen a timing minimum or a precision value. `hwtest-diff-full` covers those,
+against a FULL baseline. Both the guest EXE and the headless capture are
+byte-reproducible, so a difference is a real behaviour change rather than
+toolchain noise; but see "Timing records move when the guest binary changes"
+before reading a timing drift as a regression.
+
+Two baselines are pinned, and they answer different questions:
+
+| File | What it pins | Fails when |
+|---|---|---|
+| `docs/hardware-refs/px8-emulator-v*.txt` | conformance verdicts and failing values | emulator behaviour moves |
+| `docs/hardware-refs/px8-emulator-full-v*.txt` | every captured value | emulator behaviour moves, or guest code shifts alignment |
+| `docs/hardware-refs/hwtest-machine-code-*.txt` | the instructions between each probe's markers in the linked EXE | a measured block changes shape |
+
+The second matters because a timing record only means what this document
+claims if the instructions inside its measured window are still the ones the
+source asked for. ``psoxide-hwtest verify-machine-code`` extracts each span
+from the linked EXE and digests it. Markers are `ori $zero, $zero, imm` words
+(start `0x34000000 | id << 1`, end `start | 1`), which write no register and
+which no compiler emits, so the verifier discovers probes by scanning the
+image rather than the source: a macro-generated probe or one in another module
+is audited like any other. Rows are keyed by probe id and named in the
+baseline. A probe that appears, vanishes, reuses an id or loses its end marker
+fails the gate. Until v1.20 the markers were `sll`-to-zero words that LLVM
+also emits; eight were shared between probes and the six GTE command probes
+were never audited at all. The re-keyed v1.20 baseline pins the same word
+counts and digests for the original 19 probes, which is the evidence that the
+marker change left every measured window untouched.
+
+**The emulator baseline is not hardware truth.** It detects our own drift. The
+comparison that matters is `hwtest-silicon` against a real console capture,
+and no such payload is currently checked in: the SCPH-9902 capture described
+below survives only as the prose in this file. Commit the raw payload text of
+the next console run.
+
+The headless run reported `126 pass, 21 fail, 26 info` when the conformance
+section had 173 cases (it is `143 pass, 1 fail, 56 info` of 200 at v1.21). The guest's expected values were recalibrated against
+SCPH-9902 across several commits (`Match SCPH-9902 hardware fidelity
+checkpoint`, `Calibrate final PAL hardware fidelity probes`, `Calibrate OTC and
+SPU behavior from SCPH-9902`) while the emulator's GTE was not changed, so
+these 21 failures are measured emulator-vs-silicon gaps rather than a
+regression.
+
+They cluster almost entirely in GTE NCLIP state-dependent accumulation. Across
+the whole big-value settle sweep the emulator returns `0x00000874` where the
+console returned `0x00002764`, and the magnitude and controlled-scene variants
+diverge similarly. Closing that gap is the highest-value GTE fidelity work
+this disc currently points at.
+
+Because expectations are compiled into the guest, revising one costs a rebuild
+and a reburn, and old captures cannot be re-judged when understanding
+improves. That is the argument for moving judgment host-side and letting the
+disc report raw values only.
+
+Completed pages are also mirrored verbatim to the debug TTY with the prefix
+`hardware-tests: px6 `. This lets the headless release gate feed the exact same
+payload to `psoxide-hwtest report` without host-side image recognition.
+
+`mkisopsx` currently warns that it does not supply a licensed PS1 system area.
+Use the same real-console burn/boot method that worked for the previous test
+disc; the generated CUE/BIN pair itself is the artifact validated here.

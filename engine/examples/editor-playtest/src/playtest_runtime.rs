@@ -1,0 +1,2879 @@
+use super::*;
+
+enum PoiSaveLoad {
+    Loaded(SaveBlock),
+    NewGame,
+    Retry,
+}
+
+fn load_poi_save_from_card(port: &mut psx_engine::ControllerPort) -> PoiSaveLoad {
+    let mut card = psx_mc::Card::new(psx_mc::HardwareCard::on_port(port, psx_mc::Slot::One));
+    let mut bytes = [0u8; psx_game_runtime::save::SAVE_BLOCK_BYTES];
+    let len = match card.read(PROJECT_SAVE_NAME, &mut bytes) {
+        Ok(len) => len,
+        Err(psx_mc::Error::NotFound) => return PoiSaveLoad::NewGame,
+        Err(_) => return PoiSaveLoad::Retry,
+    };
+    if len != bytes.len() {
+        // Preserve existing POI/module progress when upgrading the original
+        // 128-byte save. Its exit pose starts empty and is populated at the
+        // next title handoff. Other sizes are unsupported schemas.
+        return SaveBlock::decode_legacy_v1(&bytes[..len], PERSISTENT_FLAG_COUNT)
+            .map(PoiSaveLoad::Loaded)
+            .unwrap_or(PoiSaveLoad::NewGame);
+    }
+    match SaveBlock::decode(&bytes, PERSISTENT_FLAG_COUNT) {
+        Some(save) => PoiSaveLoad::Loaded(save),
+        None => PoiSaveLoad::Retry,
+    }
+}
+
+fn save_poi_state_to_card(port: &mut psx_engine::ControllerPort, save: &SaveBlock) -> bool {
+    let mut card = psx_mc::Card::new(psx_mc::HardwareCard::on_port(port, psx_mc::Slot::One));
+    if card.is_formatted() != Ok(true) {
+        // Formatting is destructive and belongs behind an explicit System UI
+        // confirmation, never inside a POI interaction.
+        return false;
+    }
+    let mut bytes = [0u8; psx_game_runtime::save::SAVE_BLOCK_BYTES];
+    save.encode(&mut bytes);
+    if card
+        .write(PROJECT_SAVE_NAME, PROJECT_SAVE_TITLE, &bytes)
+        .is_err()
+    {
+        return false;
+    }
+    let mut verify = [0u8; psx_game_runtime::save::SAVE_BLOCK_BYTES];
+    matches!(
+        card.read(PROJECT_SAVE_NAME, &mut verify),
+        Ok(len)
+            if len == verify.len()
+                && SaveBlock::decode(&verify, PERSISTENT_FLAG_COUNT) == Some(*save)
+    )
+}
+
+fn boost_module_for_reward(resource: u16) -> Option<BoostModuleId> {
+    let id = BoostModuleId(resource);
+    id.index()
+        .filter(|index| BOOST_MODULES.get(*index).is_some())
+        .map(|_| id)
+}
+
+fn poi_persistent_flags(
+    interactable: &InteractableRecord,
+) -> psx_game_runtime::poi::PoiPersistentFlags {
+    psx_game_runtime::poi::PoiPersistentFlags {
+        read: interactable.read_flag,
+        reward: interactable.reward_flag,
+    }
+}
+
+fn apply_debug_body_fallback(
+    config: &mut CharacterMotorConfig,
+    has_world: bool,
+    has_character: bool,
+) {
+    if has_world && !has_character {
+        config.radius = WORLD_PLAYER_RADIUS;
+        config.height = WORLD_PLAYER_HEIGHT;
+        config.walk_speed = WORLD_FALLBACK_PLAYER_SPEED;
+        config.run_speed = WORLD_FALLBACK_PLAYER_SPEED;
+    }
+}
+
+/// Sim ticks per POI panel/type-on step. The panel and type-on timings were
+/// tuned at the playtest's 30 Hz visual cadence, one presented frame every
+/// second 60 Hz tick, so a step every two ticks keeps that look while making
+/// it independent of how fast frames are actually presented.
+pub(super) const POI_PRESENTATION_TICKS_PER_STEP: u8 = 2;
+
+/// Deterministic damage cadence for shared hazard contents. Water is
+/// non-damaging; slime deals four health twice per second, lava deals ten
+/// health four times per second at the 60 Hz simulation rate.
+pub(super) const fn hazard_damage(contents: i16, tick: u32) -> u16 {
+    match contents {
+        psx_grid::contents::CONTENTS_SLIME if tick % 30 == 0 => 4,
+        psx_grid::contents::CONTENTS_LAVA if tick % 15 == 0 => 10,
+        _ => 0,
+    }
+}
+
+const _: () = {
+    assert!(hazard_damage(psx_grid::contents::CONTENTS_WATER, 30) == 0);
+    assert!(hazard_damage(psx_grid::contents::CONTENTS_SLIME, 29) == 0);
+    assert!(hazard_damage(psx_grid::contents::CONTENTS_SLIME, 30) == 4);
+    assert!(hazard_damage(psx_grid::contents::CONTENTS_LAVA, 14) == 0);
+    assert!(hazard_damage(psx_grid::contents::CONTENTS_LAVA, 15) == 10);
+};
+
+/// Crossfade length for a specific transition, rather than one number for
+/// every change of state. What reads well depends on BOTH ends: an attack
+/// must start crisply but settle slowly, and a gait change can afford a long
+/// fade only because the clips are phase-matched.
+/// The shading view of the room the player is in, over the resident rooms of
+/// the grid world. Takes the pieces rather than the whole playtest, so a
+/// draw call can hold it while it mutably borrows other fields.
+pub(super) fn room_lighting_of(
+    world_rt: &Option<WorldRuntime>,
+    room_index: RoomIndex,
+    ambient: [u8; 3],
+    camera: WorldCamera,
+) -> Option<RuntimeRoomLighting<'_>> {
+    let world = world_rt.as_ref()?;
+    let room_record = ROOMS.get(room_index.to_usize())?;
+    Some(RuntimeRoomLighting {
+        room_index,
+        ambient: Rgb8::from_array(ambient),
+        camera,
+        fog_enabled: room_record.flags & room_flags::FOG_ENABLED != 0,
+        fog_rgb: Rgb8::from_array(room_record.fog_rgb),
+        fog_near: room_record.fog_near,
+        fog_far: room_record.fog_far,
+        lights: room_light_slice(LIGHTS.as_slice(), room_index),
+        probes: Some(world.light_probes()),
+    })
+}
+
+fn player_blend_ticks(from: PlayerAnim, to: PlayerAnim) -> u32 {
+    if to == PlayerAnim::Fall {
+        0
+    } else if to == PlayerAnim::Land {
+        2
+    } else if to == PlayerAnim::HookLaunch {
+        4
+    } else if from == PlayerAnim::HookLaunch {
+        10
+    } else if from == PlayerAnim::WalkWindup && to == PlayerAnim::Walk {
+        // The windup reaches the moving walk entry pose. Blending from its
+        // clamped endpoint would brake the stride again after preparation.
+        0
+    } else if player_anim_is_stop(to) && from.is_gait() {
+        4
+    } else if player_anim_is_attack(to) || to.is_motor_fixed_action() {
+        // Entering a committed action: its first frames carry the read.
+        PLAYER_ANIM_BLEND_ACTION_TICKS
+    } else if player_anim_is_attack(from) || matches!(from, PlayerAnim::Intro) {
+        // Leaving one: a long swing needs somewhere to land.
+        PLAYER_ANIM_BLEND_ACTION_OUT_TICKS
+    } else if from.is_gait() && to.is_gait() {
+        PLAYER_ANIM_BLEND_GAIT_TICKS
+    } else {
+        PLAYER_ANIM_BLEND_LOCOMOTION_TICKS
+    }
+}
+
+fn player_anim_is_stop(anim: PlayerAnim) -> bool {
+    matches!(
+        anim,
+        PlayerAnim::Idle
+            | PlayerAnim::WalkWinddown
+            | PlayerAnim::WalkWinddownAlt
+            | PlayerAnim::RunWinddown
+            | PlayerAnim::RunWinddownAlt
+    )
+}
+
+impl Playtest {
+    /// Depth range for effects in `room`: they sort against the grid
+    /// renderer, see [`CLASSIC_DEPTH_RANGE`].
+    pub(super) fn effect_depth_range(&self, room: RoomIndex) -> DepthRange {
+        if ROOMS.get(room.to_usize()).is_some() {
+            CLASSIC_DEPTH_RANGE
+        } else {
+            WORLD_DEPTH_RANGE
+        }
+    }
+
+    pub(super) fn ensure_poi_save_loaded(&mut self, port: &mut psx_engine::ControllerPort) {
+        if self.poi_save_loaded {
+            return;
+        }
+        match load_poi_save_from_card(port) {
+            PoiSaveLoad::Loaded(saved) => self.poi_save = saved,
+            PoiSaveLoad::NewGame => {}
+            PoiSaveLoad::Retry => return,
+        }
+        self.poi_save_loaded = true;
+        self.restore_claimed_poi_rewards();
+        self.restore_persistent_destructibles();
+    }
+
+    pub(super) fn restore_persistent_destructibles(&mut self) {
+        for (index, record) in DESTRUCTIBLES.iter().enumerate() {
+            if self.poi_save.flag(usize::from(record.persistent_flag)) {
+                let _ = self.destructibles.restore_broken(index);
+            }
+        }
+    }
+
+    pub(super) fn mark_destructible_broken(&mut self, index: usize) {
+        let Some(record) = DESTRUCTIBLES.get(index) else {
+            return;
+        };
+        let flag = usize::from(record.persistent_flag);
+        if !self.poi_save.flag(flag) {
+            self.poi_save.set_flag(flag);
+            self.poi_save_dirty = true;
+        }
+    }
+
+    pub(super) fn restore_claimed_poi_rewards(&mut self) {
+        self.power_up_loadout = PowerUpLoadout::DEFAULT;
+        self.power_up_inventory = BoostInventory::EMPTY;
+        for interactable in &INTERACTABLES {
+            if interactable.kind != InteractableKind::PointOfInterest
+                || !poi_persistent_flags(interactable).reward_claimed(&self.poi_save)
+            {
+                continue;
+            }
+            if let Some(module) = boost_module_for_reward(interactable.reward_resource) {
+                let _ = self.power_up_inventory.add(module);
+            }
+        }
+    }
+
+    /// Capture the pose needed by a future Continue/savestate flow. The
+    /// current tech demo intentionally never restores this in `init_gameplay`:
+    /// its main-menu action is New Game and always uses the authored spawn.
+    pub(super) fn snapshot_resume_position(&mut self) {
+        if !self.poi_save_loaded {
+            return;
+        }
+        let position = self.motor.position();
+        let changed = self.poi_save.set_resume_position(SavedPlayerPosition {
+            x: position.x,
+            y: position.y,
+            z: position.z,
+            yaw: self.motor.yaw().as_q12(),
+        });
+        self.poi_save_dirty |= changed;
+    }
+
+    /// Flush pending POI state at an intentional save boundary. Memory-card
+    /// filesystem writes take many video periods on real hardware, so they
+    /// must never run inside a live interaction or an arbitrary gameplay tick.
+    pub(super) fn flush_poi_save(&mut self, port: &mut psx_engine::ControllerPort) {
+        if !self.poi_save_loaded || !self.poi_save_dirty {
+            return;
+        }
+        self.poi_save_dirty = !save_poi_state_to_card(port, &self.poi_save);
+    }
+
+    pub(super) fn retry_poi_card_load(&mut self, tick: u32, port: &mut psx_engine::ControllerPort) {
+        const RETRY_TICKS: u32 = 300;
+        if self.poi_save_loaded || tick % RETRY_TICKS != 0 {
+            return;
+        }
+        self.ensure_poi_save_loaded(port);
+    }
+
+    pub(super) fn point_of_interest_available(&self, interactable: &InteractableRecord) -> bool {
+        if interactable.kind != InteractableKind::PointOfInterest {
+            return interactable_is_active(interactable);
+        }
+        if !self.poi_save_loaded {
+            return false;
+        }
+        let candidate = psx_game_runtime::poi::PoiCandidate {
+            room: interactable.room.0,
+            x: interactable.x,
+            z: interactable.z,
+            radius: interactable.radius,
+            enabled: interactable_is_active(interactable),
+            repeatable: interactable.flags & psx_level::interactable_flags::REPEATABLE != 0,
+            persistence: poi_persistent_flags(interactable),
+            reward: psx_game_runtime::poi::PoiReward {
+                resource: interactable.reward_resource,
+                quantity: interactable.reward_quantity,
+            },
+        };
+        candidate.is_available(&self.poi_save)
+    }
+
+    pub(super) fn point_of_interest_depleted(&self, interactable: &InteractableRecord) -> bool {
+        if interactable.kind != InteractableKind::PointOfInterest {
+            return false;
+        }
+        let candidate = psx_game_runtime::poi::PoiCandidate {
+            room: interactable.room.0,
+            x: interactable.x,
+            z: interactable.z,
+            radius: interactable.radius,
+            enabled: interactable_is_active(interactable),
+            repeatable: interactable.flags & psx_level::interactable_flags::REPEATABLE != 0,
+            persistence: poi_persistent_flags(interactable),
+            reward: psx_game_runtime::poi::PoiReward {
+                resource: interactable.reward_resource,
+                quantity: interactable.reward_quantity,
+            },
+        };
+        candidate.is_depleted(&self.poi_save)
+    }
+
+    fn grant_point_of_interest_reward(&mut self, index: usize) -> Option<BoostModuleId> {
+        let Some(interactable) = INTERACTABLES.get(index) else {
+            return None;
+        };
+        let persistence = poi_persistent_flags(interactable);
+        if persistence.reward_claimed(&self.poi_save) || interactable.reward_quantity == 0 {
+            return None;
+        }
+        let Some(module) = boost_module_for_reward(interactable.reward_resource) else {
+            return None;
+        };
+        let already_owned = self.power_up_inventory.contains(module)
+            || BoostSlotId::ALL
+                .iter()
+                .any(|slot| self.power_up_loadout.module(*slot) == module);
+        if already_owned || !self.power_up_inventory.add(module) {
+            return None;
+        }
+        if persistence.mark_reward_claimed(&mut self.poi_save) {
+            self.poi_save_dirty = true;
+        }
+        self.queue_gameplay_sfx(LevelGameplaySfxEvent::ItemAcquired);
+        Some(module)
+    }
+
+    pub(super) fn advance_poi_message(&mut self) {
+        if self.poi_closing {
+            return;
+        }
+        if !self.acquired_module.is_none() {
+            if !self.complete_acquired_item_reveal() {
+                self.begin_message_close();
+            }
+            return;
+        }
+        if self.complete_active_message_reveal() {
+            return;
+        }
+        if let Some(message) = self.poi_messages.active() {
+            if message.page_offset() + 1 < message.page_count() {
+                self.finish_poi_message();
+            } else {
+                self.begin_message_close();
+            }
+        }
+    }
+
+    fn begin_message_close(&mut self) {
+        self.poi_closing = true;
+        self.set_poi_presentation_frames(
+            psx_engine::ui::MESSAGE_PANEL_EXPAND_FRAMES,
+            self.poi_page_type_frame,
+        );
+    }
+
+    pub(super) fn dismiss_legacy_message(&mut self) {
+        if !self.poi_closing && !self.complete_legacy_message_reveal() {
+            self.begin_message_close();
+        }
+    }
+
+    fn finish_poi_message(&mut self) {
+        use psx_game_runtime::poi::{MessageAdvance, MessageSource};
+        if !self.acquired_module.is_none() {
+            self.acquired_module = BoostModuleId::NONE;
+            self.set_poi_presentation_frames(0, 0);
+            // Souls-style one-time tutorial: the first pickup explains where
+            // the module goes. Runtime-only copy through the legacy overlay,
+            // so it needs no cooked page and no save flag.
+            if !self.socket_hint_shown {
+                self.socket_hint_shown = true;
+                self.message_overlay = Some(RuntimeMessageOverlay {
+                    title: "",
+                    body: crate::loc::tr(
+                        "ui.hint.sockets",
+                        "START: OPENS INVENTORY\nEQUIP RECOVERED MODULES.",
+                    ),
+                });
+                self.set_poi_page_type_frame(0);
+            }
+            return;
+        }
+        match self.poi_messages.advance() {
+            MessageAdvance::Advanced(_) => {
+                self.set_poi_page_type_frame(0);
+            }
+            MessageAdvance::Closed(MessageSource::PointOfInterest(index)) => {
+                if let Some(interactable) = INTERACTABLES.get(usize::from(index)) {
+                    if poi_persistent_flags(interactable).mark_read(&mut self.poi_save) {
+                        self.poi_save_dirty = true;
+                    }
+                }
+                if let Some(module) = self.grant_point_of_interest_reward(usize::from(index)) {
+                    self.acquired_module = module;
+                    self.set_poi_presentation_frames(0, 0);
+                }
+            }
+            MessageAdvance::Closed(MessageSource::World) | MessageAdvance::Inactive => {}
+        }
+    }
+
+    fn complete_acquired_item_reveal(&mut self) -> bool {
+        let Some(module) = self
+            .acquired_module
+            .index()
+            .and_then(|index| BOOST_MODULES.get(index))
+        else {
+            return false;
+        };
+        let required_panel = psx_engine::ui::MESSAGE_PANEL_EXPAND_FRAMES;
+        let name = self.acquired_module.index().map_or(module.name, |index| {
+            crate::loc::module_name(index, module.name)
+        });
+        let prefix = crate::loc::item_acquired_prefix();
+        let required_type = u16::try_from(prefix.chars().count() + name.chars().count())
+            .unwrap_or(u16::MAX)
+            .saturating_mul(psx_engine::ui::MESSAGE_PANEL_TYPE_TICKS_PER_CHAR);
+        if self.poi_panel_frame >= required_panel && self.poi_page_type_frame >= required_type {
+            return false;
+        }
+        self.set_poi_presentation_frames(required_panel, required_type);
+        true
+    }
+
+    /// The first Cross press during panel motion or type-on completes the
+    /// current presentation instead of skipping unread copy. A later press is
+    /// then free to advance/close through `MessageController`.
+    fn complete_active_message_reveal(&mut self) -> bool {
+        let Some(message) = self.poi_messages.active() else {
+            return false;
+        };
+        let Some(page_text) = crate::loc::page_text(message.page() as usize) else {
+            return false;
+        };
+        let required_panel = if matches!(
+            message.source(),
+            psx_game_runtime::poi::MessageSource::PointOfInterest(_)
+        ) {
+            psx_engine::ui::MESSAGE_PANEL_EXPAND_FRAMES
+        } else {
+            0
+        };
+        let required_type = u16::try_from(page_text.chars().count())
+            .unwrap_or(u16::MAX)
+            .saturating_mul(psx_engine::ui::MESSAGE_PANEL_TYPE_TICKS_PER_CHAR);
+        if self.poi_panel_frame >= required_panel && self.poi_page_type_frame >= required_type {
+            return false;
+        }
+
+        self.set_poi_presentation_frames(required_panel, required_type);
+        true
+    }
+
+    /// A legacy Message/Checkpoint panel follows the same first-press rule as
+    /// paged Archive copy: finish the current type-on before allowing the next
+    /// press to dismiss it.
+    pub(super) fn complete_legacy_message_reveal(&mut self) -> bool {
+        let Some(message) = self.message_overlay else {
+            return false;
+        };
+        let required_type = u16::try_from(message.body.chars().count())
+            .unwrap_or(u16::MAX)
+            .saturating_mul(psx_engine::ui::MESSAGE_PANEL_TYPE_TICKS_PER_CHAR);
+        if self.poi_page_type_frame >= required_type {
+            return false;
+        }
+        self.set_poi_page_type_frame(required_type);
+        true
+    }
+
+    /// Keep live, prepared, and submitted POI presentation counters coherent
+    /// when input changes the content between deferred render stages. Without
+    /// this atomic reset a new page can flash fully typed, or a reward panel
+    /// can draw at its compact endpoint before jumping back to the full panel.
+    pub(super) fn set_poi_presentation_frames(&mut self, panel: u16, page: u16) {
+        self.poi_panel_frame = panel;
+        self.prepared_poi_panel_frame = panel;
+        self.overlay_poi_panel_frame = panel;
+        self.set_poi_page_type_frame(page);
+    }
+
+    pub(super) fn set_poi_page_type_frame(&mut self, page: u16) {
+        self.poi_page_type_frame = page;
+        self.prepared_poi_page_type_frame = page;
+        self.overlay_poi_page_type_frame = page;
+    }
+
+    /// Advance the POI panel and type-on from the fixed simulation, one
+    /// presentation step every `POI_PRESENTATION_TICKS_PER_STEP` sim ticks.
+    ///
+    /// This used to run from `render`, once per prepared frame. The type-on
+    /// gates input (the first press only completes unfinished copy), so a
+    /// slower render left the copy unfinished when a press arrived and the
+    /// same press did something else: on the souls gate, a heavier world pass
+    /// kept a message open and the tape walked into the wrong fight. Driving it
+    /// from the sim makes the press behave the same at every render rate.
+    pub(super) fn tick_poi_presentation(&mut self) {
+        self.poi_presentation_subtick = self.poi_presentation_subtick.saturating_add(1);
+        if self.poi_presentation_subtick < POI_PRESENTATION_TICKS_PER_STEP {
+            return;
+        }
+        self.poi_presentation_subtick = 0;
+        self.advance_poi_presentation_frame();
+    }
+
+    /// Freeze the presentation progress the frame being prepared will draw.
+    pub(super) fn snapshot_poi_presentation_for_render(&mut self) {
+        self.prepared_poi_panel_frame = self.poi_panel_frame;
+        self.prepared_poi_page_type_frame = self.poi_page_type_frame;
+    }
+
+    /// One presentation step of the POI panel and type-on.
+    pub(super) fn advance_poi_presentation_frame(&mut self) {
+        if self.poi_closing {
+            self.poi_panel_frame = self.poi_panel_frame.saturating_sub(1);
+            if self.poi_panel_frame == 0 {
+                self.poi_closing = false;
+                if !self.acquired_module.is_none() || self.poi_messages.active().is_some() {
+                    self.finish_poi_message();
+                } else {
+                    self.message_overlay = None;
+                }
+            }
+            return;
+        }
+        if !self.acquired_module.is_none() {
+            if self.poi_panel_frame < psx_engine::ui::MESSAGE_PANEL_EXPAND_FRAMES {
+                self.poi_panel_frame = self.poi_panel_frame.saturating_add(1);
+            } else {
+                self.poi_page_type_frame = self.poi_page_type_frame.saturating_add(1);
+            }
+            return;
+        }
+        let Some(message) = self.poi_messages.active() else {
+            if self.message_overlay.is_some() {
+                self.poi_page_type_frame = self.poi_page_type_frame.saturating_add(1);
+            }
+            return;
+        };
+        if matches!(
+            message.source(),
+            psx_game_runtime::poi::MessageSource::PointOfInterest(_)
+        ) && self.poi_panel_frame < psx_engine::ui::MESSAGE_PANEL_EXPAND_FRAMES
+        {
+            self.poi_panel_frame = self.poi_panel_frame.saturating_add(1);
+        } else {
+            self.poi_page_type_frame = self.poi_page_type_frame.saturating_add(1);
+        }
+    }
+
+    #[inline(never)]
+    pub(super) fn open_demo_outro_once(&mut self) {
+        const OUTRO_SCENE: u8 = 1;
+        if self.poi_messages.world_message_shown(OUTRO_SCENE)
+            || self.hazard_death_ticks_remaining != 0
+            || self.message_overlay.is_some()
+            || !self.acquired_module.is_none()
+            || self.inventory_overlay_active
+        {
+            return;
+        }
+        // This demo's authored boss model opts into the closing message.
+        // Disabled actors begin Dead and must never complete the demo.
+        let boss_defeated = GAME_ENTITIES.iter().enumerate().any(|(index, record)| {
+            record.flags & psx_level::game_entity_flags::ENABLED != 0
+                && MODEL_INSTANCES
+                    .get(usize::from(record.model_instance))
+                    .and_then(|instance| MODELS.get(instance.model.to_usize()))
+                    .is_some_and(|model| model.name == "Heavy Enemy Model")
+                && self.game_entities.state(index)
+                    == psx_game_runtime::entities::GameEntityState::Dead
+                && self
+                    .game_entities
+                    .clip_for_state(GAME_ENTITIES.as_slice(), index)
+                    .phase_ticks
+                    >= 90
+        });
+        if boss_defeated
+            && self.poi_messages.open_world(
+                OUTRO_SCENE,
+                psx_game_runtime::poi::MessagePageSpan::new(
+                    crate::loc::DEMO_OUTRO_FIRST,
+                    crate::loc::DEMO_OUTRO_COUNT,
+                ),
+            )
+        {
+            self.set_poi_presentation_frames(psx_engine::ui::MESSAGE_PANEL_EXPAND_FRAMES, 0);
+        }
+    }
+
+    pub(super) fn initial_world_message_active(&self) -> bool {
+        let (Some(active), Some(welcome)) = (self.poi_messages.active(), WORLD_MESSAGE.get())
+        else {
+            return false;
+        };
+        active.source() == psx_game_runtime::poi::MessageSource::World
+            && active.page() - active.page_offset() == welcome.page_first
+            && active.page_count() == welcome.page_count
+    }
+
+    pub(super) fn open_world_message_once(&mut self) {
+        let Some(message) = WORLD_MESSAGE.get() else {
+            return;
+        };
+        if self.poi_messages.open_world(
+            0,
+            psx_game_runtime::poi::MessagePageSpan::new(message.page_first, message.page_count),
+        ) {
+            // World copy has no compact prompt to expand from, so its first
+            // presented frame begins typing immediately.
+            self.set_poi_presentation_frames(psx_engine::ui::MESSAGE_PANEL_EXPAND_FRAMES, 0);
+        }
+    }
+
+    /// Fixed-point stat multipliers from the four endpoint sockets at the
+    /// current Horizon/Zenith health positions.
+    pub(super) fn vitality_modifiers(&self) -> VitalityModifiers {
+        // Only the active state's two sockets act. The inactive state's modules
+        // are dormant until it is swapped to, which is what makes the boon
+        // layout a choice rather than four always-on bonuses.
+        self.power_up_loadout.modifiers_for(
+            &self.player_vitality,
+            BOOST_MODULES,
+            Some(self.player_stance.active()),
+        )
+    }
+
+    /// Live authored playback rate for an animation. Only the four attack
+    /// actions use the module Attack Speed lane; locomotion and defensive
+    /// actions retain their authored cadence.
+    pub(super) fn player_action_speed_q8(
+        &self,
+        character: &RuntimeCharacter,
+        anim: PlayerAnim,
+    ) -> u16 {
+        live_action_speed_q8(self.vitality_modifiers(), character, anim)
+    }
+
+    pub(super) fn player_character_for_anim(
+        &self,
+        character: &RuntimeCharacter,
+        _anim: PlayerAnim,
+    ) -> RuntimeCharacter {
+        let mut character = *character;
+        let modifiers = self.vitality_modifiers();
+        for anim in [
+            PlayerAnim::LightAttack,
+            PlayerAnim::LightAttackFollowup,
+            PlayerAnim::LightAttackFinisher,
+            PlayerAnim::HeavyAttack,
+            PlayerAnim::VertLightAttack,
+            PlayerAnim::VertHeavyAttack,
+            PlayerAnim::RangedAttack,
+        ] {
+            let action = anim.action();
+            let authored = character.action_speed(action);
+            character.action_speeds[action.to_index()] = modifiers.attack_speed_q8(authored);
+        }
+        character
+    }
+
+    pub(super) const fn player_attack_channel(anim: PlayerAnim) -> VitalityChannelId {
+        match anim {
+            PlayerAnim::VertLightAttack
+            | PlayerAnim::VertHeavyAttack
+            | PlayerAnim::RangedAttack => VitalityChannelId::Two,
+            _ => VitalityChannelId::One,
+        }
+    }
+
+    /// Apply an untyped incoming hit as aligned with the active stance.
+    pub(super) fn apply_untyped_player_damage(&mut self, damage: u16) -> bool {
+        let damage = self.vitality_modifiers().incoming_damage(damage);
+        // Untyped damage has no colour to compare, so it is treated as aligned
+        // with whatever is active: the player cannot read an axis that was
+        // never authored, and should not be punished for it.
+        let active = self.player_stance.active();
+        self.apply_stance_damage(active, damage)
+    }
+
+    /// The projectile colour sets the multiplier; the active stance receives damage.
+    pub(super) fn apply_typed_player_damage(
+        &mut self,
+        channel: psx_game_runtime::projectiles::ProjectileDamageChannel,
+        damage: u16,
+    ) -> bool {
+        let damage = self.vitality_modifiers().incoming_damage(damage);
+        let channel = match channel {
+            psx_game_runtime::projectiles::ProjectileDamageChannel::Horizon => {
+                VitalityChannelId::One
+            }
+            psx_game_runtime::projectiles::ProjectileDamageChannel::Zenith => {
+                VitalityChannelId::Two
+            }
+        };
+        self.apply_stance_damage(channel, damage)
+    }
+
+    /// Route one incoming hit through the stance.
+    ///
+    /// Only the active pool is damaged. Ranged-equipped prototypes use 100%
+    /// matching / 125% opposite damage; other projects retain authored scaling.
+    /// A depleted pool swaps the stance here.
+    fn apply_stance_damage(&mut self, attack: VitalityChannelId, damage: u16) -> bool {
+        let before = u32::from(self.player_vitality.pool(VitalityChannelId::One).current())
+            + u32::from(self.player_vitality.pool(VitalityChannelId::Two).current());
+        let mut config = self.player_stance_config;
+        if self.player_has_ranged_weapon() {
+            config.aligned_damage_q12 = 4096;
+            config.opposed_damage_q12 = 5120;
+        }
+        let outcome = self
+            .player_stance
+            .apply_damage(&mut self.player_vitality, attack, damage, &config)
+            .defeated;
+        let after = u32::from(self.player_vitality.pool(VitalityChannelId::One).current())
+            + u32::from(self.player_vitality.pool(VitalityChannelId::Two).current());
+        if after < before {
+            self.queue_gameplay_sfx(LevelGameplaySfxEvent::PlayerDamage);
+        }
+        outcome
+    }
+
+    #[inline]
+    pub(super) fn queue_gameplay_sfx(&mut self, event: LevelGameplaySfxEvent) {
+        self.gameplay_sfx_events |= event.bit();
+    }
+
+    /// Arm the shared player death sequence: `delay_ticks` of locked
+    /// Death animation, then [`Self::respawn_after_death`] when the
+    /// countdown in `update_gameplay` reaches zero. One arming point
+    /// for every cause (combat damage, liquid hazards, lethal
+    /// water); callers floor health themselves. PLAYER_DEATHS counts
+    /// here so the death event is recorded even if a run ends before
+    /// the respawn completes.
+    pub(super) fn arm_player_death(
+        &mut self,
+        by_combat: bool,
+        delay_ticks: u8,
+        now: SimTick,
+        video_hz: VideoHz,
+    ) {
+        self.hazard_death_ticks_remaining = delay_ticks.max(1);
+        self.death_by_combat = by_combat;
+        self.switch_player_anim(PlayerAnim::Death, now, video_hz);
+        self.anim_lock_until_tick = now.saturating_add(u32::from(delay_ticks));
+        self.lock_target = None;
+        self.camera_recenter_requested = false;
+        self.soft_lock_target = None;
+        self.active_interactable = None;
+        telemetry::counter(telemetry::counter::PLAYER_DEATHS, 1);
+    }
+
+    /// Clear run progress while keeping front-end settings and loaded assets.
+    // Initial load and the menu share the full reset; keep one copy in RAM.
+    #[inline(never)]
+    pub(super) fn reset_new_game(&mut self) {
+        self.hook_travel = None;
+        self.hook_target = None;
+        self.hook_attached = None;
+        self.fall_from_arch = false;
+        self.hook_charge = psx_game_runtime::hook_points::ArchCharge::EMPTY;
+        self.hook_selected = None;
+        self.hook_visible = 0;
+        self.hook_fov_delta_q8 = 0;
+        self.hook_burst_started = false;
+        self.opening = opening_sequence::OpeningSequence::default();
+        // New Game must not reload a previous run from the card, including
+        // when a card was absent at boot and becomes available later.
+        self.poi_save = SaveBlock::new(PLAYER_MAX_HEALTH, PERSISTENT_FLAG_COUNT);
+        self.poi_save_loaded = true;
+        self.poi_save_load_attempted = true;
+        self.poi_save_dirty = true;
+        self.poi_messages = MessageController::new();
+        self.poi_closing = false;
+        self.set_poi_presentation_frames(0, 0);
+        self.socket_hint_shown = false;
+        self.souls = SoulsWallet::EMPTY;
+        self.damage_numbers = DamageNumbers::default();
+        self.gameplay_epoch_set = false;
+        self.player_contents_memo = None;
+        self.gameplay_sfx_events = 0;
+        self.lock_target = None;
+        self.soft_lock_target = None;
+        self.lock_switch_stick_held = false;
+        self.lock_invalid_ticks = 0;
+        self.soft_lock_suppressed = false;
+        self.evade_run_hold_ticks = 0;
+        self.evade_run_hold_consumed = false;
+        self.evade_latched_move = (Q12::ZERO, Q12::ZERO);
+        self.evade_buffer_vblanks = 0;
+        self.anim_state = PlayerAnim::Idle;
+        self.anim_start_tick = SimTick::ZERO;
+        self.anim_blend_from = None;
+        self.anim_lock_until_tick = SimTick::ZERO;
+        self.loco = LocoPhase::Idle;
+        self.active_interactable = None;
+        self.checkpoint = None;
+        self.message_overlay = None;
+        self.box_props.reset_dynamic_state();
+        // Phase-3 gameplay layer: spawn entity/logic state 1:1 from
+        // the cooked tables (empty tables leave both inert; the same
+        // calls re-run on future checkpoint respawns), then push the
+        // initial door states onto their box props (START_ON doors
+        // begin open without a fire event).
+        self.game_entities
+            .spawn_from_records_with_ids(GAME_ENTITIES.as_slice(), GAME_ENTITY_IDS.as_slice());
+        self.game_entities
+            .enable_combat_flow(self.player_has_ranged_weapon());
+        self.game_entities
+            .set_stance_swap_delay(self.player_stance_config.swap_cooldown_ticks);
+        self.deferred_enemy_attacks.clear();
+        self.combat_projectiles.clear();
+        self.combat_projectile_impacts.clear();
+        self.attack_buffer.clear();
+        self.authored_attack.clear();
+        self.authored_dodge.clear();
+        self.attack_chain.clear();
+        self.logic.init_from_records(LOGIC.as_slice());
+        self.logic_fired_reported = 0;
+        self.player_vitality = DualVitality::equal(PLAYER_MAX_HEALTH);
+        self.player_poise = psx_game_runtime::poise::Poise::EMPTY;
+        self.combat_flow = psx_game_runtime::combat_flow::CombatFlow::FULL;
+        self.camera_recenter_requested = false;
+        // Playtest lives in a zeroed MaybeUninit, and a zeroed stance config
+        // would mean no damage and no recovery at all, so it is set explicitly
+        // on every reset rather than relying on the zero pattern.
+        self.player_stance = CombatStance::new(VitalityChannelId::One);
+        self.ranged_ready = combat_input::RangedReady::EMPTY;
+        self.aim_control = aim_control::AimControl::EMPTY;
+        self.vitality_circles = VitalityCircleState::EMPTY;
+        self.power_up_loadout = PowerUpLoadout::DEFAULT;
+        self.power_up_inventory = BoostInventory::EMPTY;
+        self.selected_power_up_slot = BoostSlotId::HorizonEmpty as u8;
+        self.selected_power_up_item = BoostModuleId::NONE;
+        self.inventory_ui_state = crate::playtest_scene::INVENTORY_UI_SOCKETS;
+        self.inventory_overlay_active = false;
+        self.combat_music = CombatMusicState::default();
+        self.acquired_module = BoostModuleId::NONE;
+        self.hazard_death_ticks_remaining = 0;
+        self.death_by_combat = false;
+        self.weapon_attach_reported = false;
+        self.swing_hit_mask = 0;
+        self.destructibles.reset();
+        self.clear_actor_pose_snapshots();
+    }
+
+    /// Start a fresh combat life without changing checkpoints or collected items.
+    /// In-flight shots and queued inputs belong to the old life, not the spawn.
+    fn reset_life_combat(&mut self) {
+        self.player_vitality.refill();
+        self.player_stance = CombatStance::new(VitalityChannelId::One);
+        self.ranged_ready = combat_input::RangedReady::EMPTY;
+        self.aim_control = aim_control::AimControl::EMPTY;
+        self.player_poise = psx_game_runtime::poise::Poise::EMPTY;
+        self.combat_flow = psx_game_runtime::combat_flow::CombatFlow::FULL;
+        self.combat_projectiles.clear();
+        self.combat_projectile_impacts.clear();
+        self.deferred_enemy_attacks.clear();
+        self.attack_buffer.clear();
+        self.authored_attack.clear();
+        self.authored_dodge.clear();
+        self.attack_chain.clear();
+        self.evade_buffer_vblanks = 0;
+        self.swing_hit_mask = 0;
+        self.camera_recenter_requested = false;
+        self.player_actor_pose = None;
+        self.previous_player_actor_pose = None;
+        self.player_contents_memo = None;
+        self.motor.interrupt_action();
+        self.ranged_ready = combat_input::RangedReady::EMPTY;
+        self.aim_control = aim_control::AimControl::EMPTY;
+        self.loco = LocoPhase::Idle;
+    }
+
+    /// Respawn after ANY completed death sequence (combat or hazard).
+    ///
+    /// Persistence policy (the souls rule: the world resets, the
+    /// checkpoint persists): `self.checkpoint` deliberately survives
+    /// death and decides the respawn pose; enemies, logic records
+    /// (including fired-once triggers), door states, and box props are
+    /// TRANSIENT and re-arm 1:1 from their cooked tables below.
+    pub(super) fn respawn_after_death(&mut self) {
+        self.hook_travel = None;
+        self.hook_target = None;
+        self.hook_attached = None;
+        self.fall_from_arch = false;
+        self.hook_charge = psx_game_runtime::hook_points::ArchCharge::EMPTY;
+        self.hook_selected = None;
+        self.hook_visible = 0;
+        self.hook_fov_delta_q8 = 0;
+        self.hook_burst_started = false;
+        let respawning_at_checkpoint = self.checkpoint.is_some();
+        let (room, position, yaw) = if let Some(checkpoint) = self.checkpoint {
+            (checkpoint.room, checkpoint.position, checkpoint.yaw)
+        } else {
+            let spawn = PLAYER_CONTROLLER
+                .get()
+                .map_or(PLAYER_SPAWN.get(), |controller| controller.spawn);
+            (
+                spawn.room,
+                RoomPoint::new(spawn.x, spawn.y, spawn.z),
+                Angle::from_q12(spawn.yaw as u16),
+            )
+        };
+        if ROOMS.get(room.to_usize()).is_none() {
+            return;
+        }
+        self.room_index = room;
+        let motor_yaw = if !respawning_at_checkpoint && self.character.is_none() {
+            yaw.add(Angle::HALF)
+        } else {
+            yaw
+        };
+        self.motor.snap_to(position, motor_yaw);
+        self.reset_life_combat();
+        self.hazard_death_ticks_remaining = 0;
+        self.anim_state = PlayerAnim::Idle;
+        self.anim_blend_from = None;
+        self.anim_lock_until_tick = SimTick::ZERO;
+        self.lock_target = None;
+        self.soft_lock_target = None;
+        self.active_interactable = None;
+        self.evade_run_hold_ticks = 0;
+        self.evade_run_hold_consumed = false;
+        // New life: the next successful weapon socket resolution counts
+        // as this life's PLAYER_WEAPON_ATTACHMENTS event.
+        self.weapon_attach_reported = false;
+        self.game_entities
+            .spawn_from_records_with_ids(GAME_ENTITIES.as_slice(), GAME_ENTITY_IDS.as_slice());
+        self.game_entities
+            .enable_combat_flow(self.player_has_ranged_weapon());
+        self.game_entities
+            .set_stance_swap_delay(self.player_stance_config.swap_cooldown_ticks);
+        self.logic.init_from_records(LOGIC.as_slice());
+        // The logic runtime restarts its rolling fired total with the
+        // records; restart the reported watermark with it or the
+        // LOGIC_RECORDS_FIRED delta counter under-reports until the new
+        // total passes the pre-death one.
+        self.logic_fired_reported = 0;
+        self.box_props.reset_dynamic_state();
+        self.sync_door_box_props();
+        self.camera.snap_to_player_with_yaw(
+            self.camera_target(None, false),
+            self.camera_config(),
+            if respawning_at_checkpoint && self.character.is_none() {
+                yaw.add(Angle::HALF)
+            } else {
+                yaw
+            },
+        );
+        self.render_camera = world_camera_from_position_focus(
+            self.camera.projection(PROJECTION),
+            self.camera.position(),
+            self.camera.focus(),
+        );
+        #[cfg(not(feature = "cd-stream-bench"))]
+        if self.world_rt.is_none() {
+            self.load_active_room_window();
+        }
+        telemetry::debug_log(if self.death_by_combat {
+            "player combat:respawn"
+        } else {
+            "player hazard:respawn"
+        });
+        self.death_by_combat = false;
+    }
+
+    /// Switch the player animation state, recording the outgoing
+    /// pose so the renderer can crossfade instead of hard-cutting.
+    pub(super) fn switch_player_anim(&mut self, anim: PlayerAnim, now: SimTick, video_hz: VideoHz) {
+        self.authored_attack.clear();
+        self.authored_dodge.clear();
+        self.attack_chain.clear();
+        self.chain_blend_ticks = 0;
+        let old = self.anim_state;
+        self.anim_blend_from = Some((old, now.saturating_sub(self.anim_start_tick), now));
+        // Gait to gait, enter the incoming cycle at the phase the outgoing one
+        // had reached. Cook-time alignment puts foot-down at frame 0 of every
+        // gait clip, so equal phase is the same point in the stride and the
+        // feet stay in step across the change. Backdating the start tick is
+        // how the phase is expressed: the clip reads as having begun earlier.
+        let carried = self.gait_phase_carry(old, anim, now, video_hz);
+        self.anim_state = anim;
+        self.anim_start_tick = SimTick::from_u32(now.as_u32().saturating_sub(carried));
+    }
+
+    /// Ticks to backdate the incoming gait clip by so it starts in phase with
+    /// the outgoing one. Zero for anything that is not gait-to-gait, and for
+    /// any clip whose duration cannot be resolved.
+    fn gait_phase_carry(
+        &self,
+        from: PlayerAnim,
+        to: PlayerAnim,
+        now: SimTick,
+        video_hz: VideoHz,
+    ) -> u32 {
+        if !from.is_gait() || !to.is_gait() || from == to {
+            return 0;
+        }
+        let Some(character) = self.character.as_ref() else {
+            return 0;
+        };
+        let cycle = |anim: PlayerAnim| {
+            self.player_clip_duration_vblanks(
+                character,
+                character.clip_for(anim),
+                video_hz,
+                self.player_action_speed_q8(character, anim),
+                character.action_frame_range(anim.action()),
+            )
+            .filter(|ticks| *ticks > 0)
+        };
+        let (Some(out_cycle), Some(in_cycle)) = (cycle(from), cycle(to)) else {
+            return 0;
+        };
+        let local = now.saturating_sub(self.anim_start_tick) % out_cycle;
+        // local < out_cycle guarantees the exact quotient is < in_cycle,
+        // even when the intermediate product needs both MULTU result words.
+        psx_math::int32::mul_div_u32(local, in_cycle, out_cycle)
+    }
+
+    /// Resolve the active crossfade for this render tick, if any.
+    ///
+    /// Alpha ramps linearly over the window; attacks use the short
+    /// window so combat stays snappy while locomotion soft-blends.
+    ///
+    /// Keep outgoing clips advancing except when a gait stops: continuing
+    /// that stride would show extra steps after the motor is already still.
+    pub(super) fn player_anim_blend(&self, now: SimTick) -> Option<PlayerAnimBlend> {
+        let (anim, local_tick, switch_tick) = self.anim_blend_from?;
+        let duration = if self.chain_blend_ticks != 0 {
+            u32::from(self.chain_blend_ticks)
+        } else {
+            player_blend_ticks(anim, self.anim_state)
+        };
+        let elapsed = now.saturating_sub(switch_tick);
+        if elapsed >= duration {
+            return None;
+        }
+        Some(PlayerAnimBlend {
+            anim,
+            local_tick: if anim.is_gait() && player_anim_is_stop(self.anim_state) {
+                local_tick
+            } else {
+                local_tick.saturating_add(elapsed)
+            },
+            alpha_q12: ((elapsed << 12) / duration.max(1)) as u16,
+        })
+    }
+
+    pub(super) fn start_player_anim_action(
+        &mut self,
+        anim: PlayerAnim,
+        now: SimTick,
+        video_hz: VideoHz,
+    ) -> bool {
+        let Some(character) = self.character else {
+            return false;
+        };
+        if !self.lock_player_anim_action(&character, anim, now, video_hz) {
+            return false;
+        }
+        self.switch_player_anim(anim, now, video_hz);
+        if player_anim_is_attack(anim) {
+            // A fresh swing gets a fresh one-hit-per-enemy mask.
+            self.swing_hit_mask = 0;
+            self.ranged_ready.released = 0;
+            self.destructibles.begin_swing();
+        }
+        true
+    }
+
+    #[cfg_attr(target_arch = "mips", optimize(size))]
+    pub(super) fn player_melee_read(&self) -> u8 {
+        if !matches!(
+            self.anim_state,
+            PlayerAnim::LightAttack
+                | PlayerAnim::LightAttackFollowup
+                | PlayerAnim::LightAttackFinisher
+                | PlayerAnim::HeavyAttack
+        ) {
+            return 0;
+        }
+        let (Some(c), Some(pose)) = (self.character, self.player_actor_pose) else {
+            return 0;
+        };
+        let first = c.combat_capsule_first.to_usize();
+        let frame = pose.pose().phase_q12() >> 12;
+        let mut first_hit = u32::MAX;
+        let mut end_hit = 0;
+        for capsule in COMBAT_CAPSULES
+            .get(first..first + usize::from(c.combat_capsule_count))
+            .unwrap_or(&[])
+        {
+            if capsule.flags & psx_level::combat_capsule_flags::HITBOX != 0
+                && capsule.action == self.anim_state.action().to_index() as u8
+            {
+                first_hit = first_hit.min(u32::from(capsule.active_start_frame));
+                end_hit = end_hit.max(u32::from(capsule.active_end_frame));
+            }
+        }
+        if first_hit == u32::MAX {
+            0
+        } else if frame < first_hit {
+            1
+        } else if frame >= end_hit {
+            3
+        } else {
+            2
+        }
+    }
+
+    /// The final half of a melee windup is readable and interruptible; active
+    /// heavy armour and ordinary movement never count as a firearm opening.
+    pub(super) fn player_shot_opening(&self) -> bool {
+        if !matches!(
+            self.anim_state,
+            PlayerAnim::LightAttack
+                | PlayerAnim::LightAttackFollowup
+                | PlayerAnim::LightAttackFinisher
+                | PlayerAnim::HeavyAttack
+        ) {
+            return false;
+        }
+        let (Some(c), Some(pose)) = (self.character, self.player_actor_pose) else {
+            return false;
+        };
+        let first = c.combat_capsule_first.to_usize();
+        let frame = pose.pose().phase_q12() >> 12;
+        COMBAT_CAPSULES
+            .get(first..first + usize::from(c.combat_capsule_count))
+            .unwrap_or(&[])
+            .iter()
+            .filter(|c| {
+                c.flags & psx_level::combat_capsule_flags::HITBOX != 0
+                    && c.action == self.anim_state.action().to_index() as u8
+            })
+            .map(|c| u32::from(c.active_start_frame))
+            .min()
+            .is_some_and(|start| frame >= start / 2 && frame < start)
+    }
+
+    pub(super) fn react_player_to_hit(
+        &mut self,
+        damage: u16,
+        armored: bool,
+        shot_only: bool,
+        ctx: &Ctx,
+    ) -> bool {
+        if self.hazard_death_ticks_remaining != 0 {
+            return false;
+        }
+        let poise_broken = self.combat_flow.can_interrupt()
+            && !matches!(self.anim_state, PlayerAnim::Stun)
+            && self
+                .player_poise
+                .hit(damage, psx_game_runtime::character::PLAYER_POISE, armored);
+        if poise_broken {
+            self.combat_flow.broke();
+        }
+        if shot_only && !poise_broken {
+            return false;
+        }
+        // Player animation starts and locks use the absolute simulation clock.
+        // Enemy animation phases use gameplay_tick; using that epoch here makes
+        // the reaction appear expired as soon as update_gameplay checks its lock.
+        let now = ctx.sim_tick;
+        let Some(mut reaction) = psx_game_runtime::character::player_damage_reaction(
+            poise_broken,
+            armored,
+            self.anim_state,
+            self.anim_lock_until_tick > now,
+        ) else {
+            return poise_broken;
+        };
+        // Older projects can still use their hit clip when no Stun is bound.
+        if reaction == PlayerAnim::Stun
+            && self
+                .character
+                .is_none_or(|c| c.action_clip(reaction.action()).is_none())
+        {
+            reaction = PlayerAnim::HitReact;
+        }
+        // An unbound ordinary hit should not freeze a character on an idle pose.
+        if !poise_broken
+            && self
+                .character
+                .is_none_or(|c| c.action_clip(reaction.action()).is_none())
+        {
+            return false;
+        }
+        self.motor.interrupt_action();
+        self.ranged_ready = combat_input::RangedReady::EMPTY;
+        self.aim_control = aim_control::AimControl::EMPTY;
+        self.attack_buffer.clear();
+        self.authored_attack.clear();
+        self.authored_dodge.clear();
+        self.attack_chain.clear();
+        self.evade_buffer_vblanks = 0;
+        self.loco = LocoPhase::Idle;
+        let has_reaction = self.start_player_anim_action(reaction, now, ctx.video_hz);
+        let recovery = if has_reaction {
+            // Follow authored speed and range through the final recovery pose.
+            self.anim_lock_until_tick.saturating_sub(now).max(1)
+        } else {
+            18
+        };
+        // Missing hit-react assets still interrupt gameplay safely.
+        if !has_reaction {
+            self.switch_player_anim(reaction, now, ctx.video_hz);
+        }
+        self.anim_lock_until_tick = now.saturating_add(recovery);
+        self.anim_blend_from = None;
+        telemetry::debug_log(if poise_broken {
+            "player poise:break"
+        } else {
+            "player hit:react"
+        });
+        poise_broken
+    }
+
+    pub(super) fn spawn_combat_hit_sparks(
+        &mut self,
+        position: [i32; 3],
+        height: u16,
+        room: RoomIndex,
+        zenith: bool,
+        staggered: bool,
+        defeated: bool,
+    ) {
+        let _ = self.combat_projectile_impacts.spawn_effect(
+            [
+                position[0],
+                position[1].saturating_add(i32::from(height) / 2),
+                position[2],
+            ],
+            room,
+            if defeated {
+                16
+            } else if staggered {
+                10
+            } else {
+                6
+            },
+            psx_game_runtime::combat_feedback::melee_impact_style(zenith, staggered, defeated),
+        );
+    }
+
+    pub(super) fn lock_player_anim_action(
+        &mut self,
+        character: &RuntimeCharacter,
+        anim: PlayerAnim,
+        now: SimTick,
+        video_hz: VideoHz,
+    ) -> bool {
+        if character.action_clip(anim.action()).is_none() {
+            return false;
+        }
+        let clip = character.clip_for(anim);
+        let duration = self
+            .player_clip_duration_vblanks(
+                character,
+                clip,
+                video_hz,
+                self.player_action_speed_q8(character, anim),
+                character.action_frame_range(anim.action()),
+            )
+            .unwrap_or(24)
+            .max(1);
+        self.anim_lock_until_tick = now.saturating_add(duration);
+        true
+    }
+
+    /// Resolve permissions on the same clip phase used by the visible player.
+    pub(super) fn player_combat_sample(
+        &self,
+        ctx: &Ctx,
+    ) -> psx_game_runtime::combat_timing::Sample {
+        use psx_game_runtime::combat_timing::Sample;
+        let Some(character) = self.character.as_ref() else {
+            return Sample::LEGACY;
+        };
+        if !character
+            .combat_windows
+            .iter()
+            .any(|w| w.action == self.anim_state.action().to_index() as u8)
+        {
+            return Sample::LEGACY;
+        }
+        let Some(clip) = self
+            .models
+            .get(character.model.to_usize())
+            .copied()
+            .flatten()
+            .and_then(|model| model.clip(&self.clips, character.clip_for(self.anim_state)))
+        else {
+            return Sample::LEGACY;
+        };
+        let phase = psx_game_runtime::model_rendering::animation_phase_at_tick_q12(
+            clip,
+            ctx.sim_tick.saturating_sub(self.anim_start_tick),
+            ctx.video_hz,
+            false,
+            self.player_action_speed_q8(character, self.anim_state),
+            character.action_frame_range(self.anim_state.action()),
+        );
+        psx_game_runtime::combat_timing::Sample::new(
+            &character.combat_windows,
+            self.anim_state.action().to_index() as u8,
+            phase,
+        )
+    }
+
+    /// Whether enemy melee and projectiles pass through the player this tick.
+    ///
+    /// The dodge's window is `roll_invulnerable_frames` motor ticks from its
+    /// first frame. A stance change bursts the body apart the same way, so it
+    /// grants the same count of ticks from the swap. The swap is pressed
+    /// before `CombatStance::tick` in the same update, so contact resolution
+    /// first sees elapsed = 1: `1..=frames` is `frames` ticks, the dodge's
+    /// count, press tick included.
+    pub(super) fn player_invulnerable(&self, ctx: &Ctx) -> bool {
+        let config = self.motor_config();
+        self.player_combat_sample(ctx)
+            .active(psx_level::CombatWindowKind::Invulnerable)
+            .unwrap_or_else(|| self.motor.is_action_invulnerable(config))
+            || self.player_stance.swap_elapsed_ticks() <= u16::from(config.roll_invulnerable_frames)
+    }
+
+    pub(super) fn motor_config(&self) -> CharacterMotorConfig {
+        let mut config = match &self.character {
+            Some(c) => c.motor_config(),
+            None => CharacterMotorConfig::character(
+                0,
+                scaled_player_speed(FALLBACK_PLAYER_SPEED),
+                scaled_player_speed(FALLBACK_PLAYER_SPEED),
+                FALLBACK_PLAYER_YAW_STEP,
+            ),
+        }
+        .without_stamina_limit();
+        config.roll_decelerates = self.character.is_some();
+        if let Some(room) = ROOMS.get(self.room_index.to_usize()) {
+            config.gravity_per_tick_q8 = room.gravity_per_tick_q8;
+        }
+        // Characterless projects use the cooker's matching debug body.
+        // Authored characters keep their Character-bound radius and height
+        // instead of silently shrinking the player.
+        apply_debug_body_fallback(
+            &mut config,
+            self.world_rt.is_some(),
+            self.character.is_some(),
+        );
+        let modifiers = self.vitality_modifiers();
+        config.walk_speed = modifiers.movement_speed(config.walk_speed);
+        config.run_speed = modifiers.movement_speed(config.run_speed);
+        config
+    }
+
+    pub(super) fn camera_orbit_speed_level(&self) -> u8 {
+        ROOMS
+            .get(self.room_index.to_usize())
+            .map(|room| room.camera.orbit_speed_level)
+            .unwrap_or(LevelCameraRecord::DEFAULT.orbit_speed_level)
+    }
+
+    pub(super) fn collect_collision_blockers_into<
+        S: psx_engine::BoundedSink<CharacterCollisionCylinder>,
+    >(
+        &self,
+        out: &mut S,
+    ) -> usize {
+        let mut count = 0usize;
+        for (index, inst) in MODEL_INSTANCES.iter().enumerate() {
+            if inst.room != self.room_index {
+                continue;
+            }
+            let Some(model) = self.models.get(inst.model.to_usize()).copied().flatten() else {
+                continue;
+            };
+            let height = (model.world_height as i32).max(1);
+            let radius = i32::from(model.collision_radius).max(1);
+            if radius <= 0 {
+                continue;
+            }
+            // An instance bound to a game entity blocks at the
+            // entity's LIVE position (phase 3): the player collides
+            // with the enemy where it stands, not its spawn point.
+            // Dead entities stop blocking (souls corpses are not
+            // walls).
+            let inst_index = index.min(u16::MAX as usize) as u16;
+            let center = match game_entity_for_instance(inst_index) {
+                Some(entity) => {
+                    if self.game_entities.state(entity)
+                        == psx_game_runtime::entities::GameEntityState::Dead
+                    {
+                        continue;
+                    }
+                    let live = self.game_entities.position(entity);
+                    RoomPoint::new(live[0], live[1], live[2])
+                }
+                None => RoomPoint::new(inst.x, inst.y, inst.z),
+            };
+            if !out.try_push(CharacterCollisionCylinder::new(center, radius, height)) {
+                return count;
+            }
+            count += 1;
+        }
+        count
+            + psx_game_runtime::cylinder_props::collect_cylinder_prop_collision_blockers_into(
+                CYLINDER_PROPS.as_slice(),
+                self.room_index,
+                out,
+            )
+    }
+
+    #[cfg(feature = "collision-debug-overlay")]
+    pub(super) fn draw_collision_debug_overlay(&self, gpu: &mut Gpu, camera: WorldCamera) {
+        if let Some(character) = self.character.as_ref() {
+            draw_collision_cylinder_debug(
+                gpu,
+                self.motor.position(),
+                character.radius,
+                character.height,
+                camera,
+                (0x40, 0xd8, 0xff),
+            );
+        }
+
+        if self.world_rt.is_some() {
+            for inst in MODEL_INSTANCES.iter() {
+                if inst.room != self.room_index {
+                    continue;
+                }
+                let Some(model) = self.models.get(inst.model.to_usize()).copied().flatten() else {
+                    continue;
+                };
+                draw_collision_cylinder_debug(
+                    gpu,
+                    RoomPoint::new(inst.x, inst.y, inst.z),
+                    i32::from(model.collision_radius),
+                    i32::from(model.world_height),
+                    camera,
+                    (0xff, 0xd0, 0x40),
+                );
+            }
+        }
+    }
+
+    #[inline(never)]
+    pub(super) fn draw_particle_emitters<'a>(
+        &self,
+        camera: WorldCamera,
+        elapsed_tick: SimTick,
+        ot: &mut OtFrame<'a, OT_DEPTH>,
+        primitive_packets: &mut PrimitivePacketArena<'a>,
+    ) -> usize {
+        let Some(particle_material) = self.particle_material else {
+            return 0;
+        };
+        let mut submitted = 0usize;
+        let depth_range = self.effect_depth_range(self.room_index);
+        let mut projector = None;
+        for emitter in &PARTICLE_EMITTERS {
+            if emitter.room != self.room_index {
+                continue;
+            }
+            let loaded_projector = match projector {
+                Some(projector) => Some(projector),
+                None => {
+                    if !PROP_PARTICLE_GTE_PROJECT_ENABLED {
+                        None
+                    } else {
+                        let loaded = LoadedWorldCameraGte::load(camera);
+                        projector = Some(loaded);
+                        Some(loaded)
+                    }
+                }
+            };
+            submitted += draw_particle_emitter(
+                *emitter,
+                camera,
+                loaded_projector,
+                depth_range,
+                particle_material,
+                elapsed_tick,
+                ot,
+                primitive_packets,
+            );
+        }
+        submitted
+    }
+
+    /// Draw live combat bolts after world submission so their additive quads
+    /// participate in the same depth table as authored particle effects.
+    #[inline(never)]
+    pub(super) fn draw_combat_projectiles<'a>(
+        &self,
+        camera: WorldCamera,
+        ot: &mut OtFrame<'a, OT_DEPTH>,
+        primitive_packets: &mut PrimitivePacketArena<'a>,
+    ) -> usize {
+        let Some(particle_material) = self.particle_material else {
+            return 0;
+        };
+        let mut submitted = 0usize;
+        // A named eye socket follows the same sampled head as the visible mesh.
+        // Models without an authored eye simply omit this presentation effect.
+        for (index, record) in GAME_ENTITIES.iter().enumerate() {
+            let Some(progress) = self.game_entities.stance_eye_pulse_q12(index) else {
+                continue;
+            };
+            let room = record.room;
+            if room != self.room_index {
+                continue;
+            }
+            let room_camera = camera;
+            let Some(snapshot) = self
+                .instance_actor_poses
+                .get(usize::from(record.model_instance))
+                .copied()
+                .flatten()
+            else {
+                continue;
+            };
+            let model = snapshot.model();
+            let first = model.socket_first.to_usize();
+            let Some(socket) = MODEL_SOCKETS
+                .get(first..first + usize::from(model.socket_count))
+                .and_then(|sockets| sockets.iter().find(|socket| socket.name == "stance_eye"))
+            else {
+                continue;
+            };
+            let Some(eye) = snapshot
+                .pose()
+                .joint_world_point(socket.joint, socket.translation)
+            else {
+                continue;
+            };
+            let range = self.effect_depth_range(room);
+            let clearance = -current_actor_surface_options(room).depth_bias + 2;
+            submitted += psx_game_runtime::particles::draw_stance_eye_pulse(
+                eye,
+                progress,
+                stance_rgb(self.game_entities.stance(index)),
+                room_camera,
+                DepthRange::new(range.near() + clearance, range.far() + clearance),
+                particle_material,
+                ot,
+                primitive_packets,
+            );
+        }
+        // Charge flares are sampled from the same retained pose token as the
+        // eventual release, so the animated muzzle and presentation cannot
+        // drift apart even when NPC simulation runs below source clip rate.
+        if self.ranged_ready.firing(
+            self.overlay_sim_tick
+                .as_u32()
+                .wrapping_add(self.gameplay_epoch.as_u32()),
+        ) && self.ranged_ready.released == 0
+        {
+            if let (Some(character), Some(pose)) = (self.character, self.player_actor_pose) {
+                let first = character.combat_capsule_first.to_usize();
+                let capsules = COMBAT_CAPSULES
+                    .get(first..first + usize::from(character.combat_capsule_count))
+                    .unwrap_or(&[]);
+                if let Some(mut charge) = psx_game_runtime::combat::authored_projectile_charge(
+                    capsules,
+                    CharacterAnimationAction::RangedAttack,
+                    Some(*pose.pose()),
+                ) {
+                    charge.visual.core_rgb = [224, 255, 248];
+                    charge.visual.glow_rgb = [64, 208, 168];
+                    let range = self.effect_depth_range(self.room_index);
+                    let clearance = -current_actor_surface_options(self.room_index).depth_bias
+                        + i32::from(charge.radius.max(2));
+                    submitted += draw_projectile_charge(
+                        charge,
+                        camera,
+                        None,
+                        DepthRange::new(range.near() + clearance, range.far() + clearance),
+                        particle_material,
+                        ot,
+                        primitive_packets,
+                    );
+                }
+            }
+        }
+        let mut attack_index = 0usize;
+        while attack_index < self.deferred_enemy_attacks.len() {
+            let Some(attack) = self.deferred_enemy_attacks.get(attack_index) else {
+                break;
+            };
+            attack_index += 1;
+            let Some(entity) = GAME_ENTITIES.get(attack.entity()) else {
+                continue;
+            };
+            if !attack.is_ranged() {
+                continue;
+            }
+            let first = entity.combat_capsule_first.to_usize();
+            let end = first.saturating_add(usize::from(entity.combat_capsule_count));
+            let capsules = COMBAT_CAPSULES.get(first..end).unwrap_or(&[]);
+            let pose = self
+                .instance_actor_poses
+                .get(entity.model_instance as usize)
+                .copied()
+                .flatten()
+                .map(|snapshot| snapshot.pose());
+            let Some(mut charge) = psx_game_runtime::combat::authored_projectile_charge(
+                capsules,
+                attack.action(),
+                pose,
+            ) else {
+                continue;
+            };
+            if attack.room() != self.room_index {
+                continue;
+            }
+            let room_camera = camera;
+            charge.visual = crate::game_logic_runtime::enemy_projectile_visual(charge.visual);
+            let range = self.effect_depth_range(attack.room());
+            let clearance = -current_actor_surface_options(attack.room()).depth_bias
+                + i32::from(charge.radius.max(2));
+            let depth_range = DepthRange::new(range.near() + clearance, range.far() + clearance);
+            submitted += draw_projectile_charge(
+                charge,
+                room_camera,
+                None,
+                depth_range,
+                particle_material,
+                ot,
+                primitive_packets,
+            );
+        }
+        let mut index = 0usize;
+        while index < MAX_COMBAT_PROJECTILES {
+            let Some(projectile) = self.combat_projectiles.get(index) else {
+                index += 1;
+                continue;
+            };
+            if projectile.room != self.room_index {
+                index += 1;
+                continue;
+            }
+            let (room_camera, depth_range) = (camera, self.effect_depth_range(projectile.room));
+            submitted += draw_projectile_bolt(
+                projectile,
+                room_camera,
+                None,
+                depth_range,
+                particle_material,
+                ot,
+                primitive_packets,
+            );
+            index += 1;
+        }
+        let mut impact_index = 0usize;
+        while impact_index < MAX_PROJECTILE_IMPACTS {
+            let Some(impact) = self.combat_projectile_impacts.get(impact_index) else {
+                impact_index += 1;
+                continue;
+            };
+            if impact.room != self.room_index {
+                impact_index += 1;
+                continue;
+            }
+            let (room_camera, depth_range) = (camera, self.effect_depth_range(impact.room));
+            // Use the same half-sector clearance as actor meshes. A hit on a
+            // large floor/wall polygon also needs this allowance for its centre
+            // sort key. Effects still sort in world depth, never the HUD band.
+            let depth_range = if impact.visual.crystal {
+                let clearance = -current_actor_surface_options(impact.room).depth_bias
+                    + i32::from(impact.radius.max(2));
+                DepthRange::new(
+                    depth_range.near() + clearance,
+                    depth_range.far() + clearance,
+                )
+            } else {
+                depth_range
+            };
+            let effect_submitted = draw_projectile_impact(
+                impact,
+                room_camera,
+                None,
+                depth_range,
+                particle_material,
+                ot,
+                primitive_packets,
+            );
+            submitted += effect_submitted;
+            impact_index += 1;
+        }
+        submitted
+    }
+
+    /// Gameplay-anchored animation tick: raw sim ticks minus the epoch
+    /// captured at the first gameplay update. Value-based animation
+    /// phases (ambient models, particles, atmosphere, HUD pulse) use
+    /// this so visuals are a pure function of gameplay time instead of
+    /// inheriting the build- and disc-dependent loading duration.
+    pub(super) fn gameplay_tick(&self, now: SimTick) -> SimTick {
+        SimTick::from_u32(now.as_u32().wrapping_sub(self.gameplay_epoch.as_u32()))
+    }
+
+    pub(super) fn camera_config(&self) -> ThirdPersonCameraConfig {
+        if self.world_rt.is_some() && self.character.is_none() {
+            let mut config = ThirdPersonCameraConfig::character(
+                WORLD_FALLBACK_CAMERA_DISTANCE,
+                WORLD_FALLBACK_CAMERA_HEIGHT,
+                WORLD_FALLBACK_CAMERA_TARGET_HEIGHT,
+            );
+            config.min_floor_clearance = WORLD_FALLBACK_CAMERA_CLEARANCE;
+            config.collision_margin = WORLD_FALLBACK_CAMERA_MARGIN;
+            // The debug body has no visible turn animation to protect. Follow
+            // its cardinal route promptly so a 90-degree doorway turn shows
+            // the next room instead of holding a side wall in frame.
+            config.auto_align_when_moving = true;
+            config.auto_align_step = Angle::from_q12(64);
+            config.collision_solve_interval = CAMERA_COLLISION_SOLVE_INTERVAL;
+            return config;
+        }
+        let camera = ROOMS
+            .get(self.room_index.to_usize())
+            .map(|room| room.camera)
+            .unwrap_or(LevelCameraRecord::DEFAULT);
+        let mut config = ThirdPersonCameraConfig::character(
+            camera.distance,
+            camera.height,
+            camera.target_height,
+        );
+        config.lock_height_boost = camera
+            .height
+            .saturating_mul(i32::from(camera.lock_rise_percent))
+            / 100;
+        config.height = config.height.max(16);
+        config.min_floor_clearance = camera.min_floor_clearance;
+        if self.world_rt.is_some() {
+            // Keep a small authored gap between the point-traced camera and
+            // walls. The renderer clips any remaining near-plane
+            // intersection exactly.
+            config.collision_margin = WORLD_CAMERA_WALL_MARGIN;
+        }
+        config.recenter_preserves_pitch = camera.recenter_preserves_pitch;
+        config.fov_y_degrees = camera.fov_y_degrees;
+        config.blend_profiles = camera.blend_profiles;
+        config.lock_target_framing = camera.lock_target_framing;
+        if camera.lock_target_framing {
+            // Native ordinary orbit limits, converted from degrees to Q12 turns.
+            config.pitch_min_q12 = -455; // -40 degrees
+            config.pitch_max_q12 = 796; // +70 degrees
+        }
+        config.lock_profile =
+            camera
+                .lock_profile
+                .map(|profile| psx_engine::ThirdPersonCameraProfile {
+                    distance: profile.distance,
+                    height: profile.height,
+                    target_height: profile.target_height,
+                    fov_y_degrees: profile.fov_y_degrees,
+                    shoulder_offset: profile.shoulder_offset,
+                });
+        config.max_distance = config
+            .max_distance
+            .max(camera.lock_profile.map_or(0, |p| p.distance));
+        if camera.accelerated_orbit {
+            config.accelerated_orbit_speed = Some(camera.orbit_speed_level);
+            config.manual_cooldown_frames = 120;
+            config.manual_release_frames = 60;
+        }
+        config.position_lag_shift = camera.position_lag_shift;
+        config.position_vertical_lag_shift = Some(camera.position_vertical_lag_shift);
+        config.focus_lag_shift = camera.focus_lag_shift;
+        config.focus_vertical_lag_shift = Some(camera.focus_vertical_lag_shift);
+        config.distance_lag_shift = camera.distance_lag_shift;
+        config.collision_solve_interval = CAMERA_COLLISION_SOLVE_INTERVAL;
+        if self.player_has_ranged_weapon() {
+            // Aim overrides composition, never the persistent target. Reversing
+            // L2 changes the destination of the same live blend.
+            config.blend_profiles = true;
+            config.profile_response_q12 = 1024;
+            config.preserve_profile_pitch = true;
+            if self.ranged_ready.aiming() {
+                // Sky arches need an upward sightline; free and locked profiles stay authored.
+                config.pitch_min_q12 = -796;
+                config.pitch_max_q12 = 796;
+                config.composition_override = Some(psx_engine::ThirdPersonCameraProfile {
+                    distance: camera.distance * 10 / 13,
+                    height: camera.target_height + 16,
+                    target_height: camera.target_height,
+                    shoulder_offset: camera.distance * 3 / 26,
+                    fov_y_degrees: camera.fov_y_degrees,
+                });
+                config.lock_frame_percent = 0;
+                config.lock_target_framing = true;
+                config.auto_align_when_moving = false;
+                config.accelerated_orbit_speed = None;
+            }
+        }
+        config
+    }
+
+    pub(super) fn camera_target(
+        &self,
+        lock_target: Option<RoomPoint>,
+        moving: bool,
+    ) -> ThirdPersonCameraTarget {
+        ThirdPersonCameraTarget {
+            player: self.motor.position(),
+            player_yaw: self.motor.yaw(),
+            moving,
+            lock_target,
+        }
+    }
+
+    pub(super) fn current_room_lighting(
+        &self,
+        camera: WorldCamera,
+    ) -> Option<RuntimeRoomLighting<'_>> {
+        room_lighting_of(
+            &self.world_rt,
+            self.room_index,
+            self.current_ambient_rgb,
+            camera,
+        )
+    }
+
+    pub(super) fn free_orbit_camera(&self) -> WorldCamera {
+        WorldCamera::orbit_yaw(
+            PROJECTION,
+            self.spawn,
+            CAMERA_Y_OFFSET,
+            self.orbit_radius,
+            self.orbit_yaw,
+        )
+    }
+
+    pub(super) fn update_camera_sweep(&mut self, delta_vblanks: u16) {
+        self.orbit_radius = CAMERA_SWEEP_RADIUS.clamp(CAMERA_RADIUS_MIN, CAMERA_RADIUS_MAX);
+        self.orbit_yaw = self.orbit_yaw.add_signed_q12(scale_i16_by_vblanks(
+            CAMERA_SWEEP_YAW_STEP_Q12,
+            delta_vblanks,
+        ));
+        self.player_moved_last_tick = false;
+        self.camera_turning_last_tick = true;
+        telemetry::stage_begin(telemetry::stage::CAMERA);
+        self.render_camera = self.free_orbit_camera();
+        telemetry::stage_end(telemetry::stage::CAMERA);
+    }
+
+    pub(super) fn update_follow_camera(&mut self, ctx: &Ctx) -> WorldCamera {
+        #[cfg(feature = "sim-trace")]
+        self.camera.pin_throttle_phase(
+            ctx.sim_tick.as_u32(),
+            self.camera_config().collision_solve_interval,
+        );
+        let mut camera = self.solve_follow_camera(ctx);
+        let age = self
+            .hook_travel
+            .map(|flight| ctx.sim_tick.as_u32().wrapping_sub(flight.started));
+        self.hook_fov_delta_q8 = psx_game_runtime::hook_points::ease_lens_q8(
+            self.hook_fov_delta_q8,
+            psx_game_runtime::hook_points::lens_target_q8(age),
+        );
+        // Apply after profile solving so all free/locked user settings remain the baseline.
+        camera.projection.focal_length =
+            (camera.projection.focal_length * (256 + self.hook_fov_delta_q8) / 256).max(1);
+        #[cfg(feature = "emulator-telemetry")]
+        if self.player_has_ranged_weapon() && ctx.sim_tick.every(6) {
+            let [x, y] = self.aim_control.angles();
+            let [tx, ty, tz] = self.ranged_target();
+            crate::debug_runtime::debug_log_aim_camera([
+                ctx.sim_tick.as_u32() as i32,
+                i32::from(self.ranged_ready.aiming()),
+                i32::from(self.is_locked()),
+                i32::from(x),
+                i32::from(y),
+                camera.position.x,
+                camera.position.y,
+                camera.position.z,
+                self.camera.distance(),
+                i32::from(self.camera.pitch_q12()),
+                tx,
+                ty,
+                tz,
+                self.lock_target.map_or(-1, |index| index as i32),
+            ]);
+        }
+        #[cfg(feature = "camera-pose-log")]
+        {
+            let player = self.motor.position();
+            let eye = self.camera.position();
+            let focus = self.camera.focus();
+            let (right_x, _) = ctx.pad.sticks.right_centered();
+            crate::debug_runtime::debug_log_camera_pose([
+                ctx.sim_tick.as_u32() as i32,
+                player.x,
+                player.y,
+                player.z,
+                eye.x,
+                eye.y,
+                eye.z,
+                focus.x,
+                focus.y,
+                focus.z,
+                i32::from(self.camera.yaw().as_q12()),
+                i32::from(self.camera.pitch_q12()),
+                self.camera.distance(),
+                i32::from(self.camera.collision_pull_in()),
+                i32::from(right_x),
+                i32::from(self.camera.lift_pitch_q12()),
+                i32::from(self.camera.lift_goals_q12().0),
+                i32::from(self.camera.lift_goals_q12().1),
+                i32::from(self.camera.slide_yaw_q12()),
+                self.world_rt
+                    .as_ref()
+                    .map_or(0, |world_rt| world_rt.camera_traces() as i32),
+                i32::from(self.camera.escape_goal_q12()),
+            ]);
+        }
+        #[cfg(feature = "emulator-telemetry")]
+        if ctx.sim_tick.every(30) {
+            debug_log_camera_profile(
+                ctx.sim_tick.as_u32(),
+                camera.projection.focal_length,
+                self.camera.distance(),
+                self.is_locked(),
+                self.camera.focus().y,
+                self.lock_target
+                    .or(self.soft_lock_target)
+                    .and_then(|index| self.camera_target_anchor(index))
+                    .map(|point| point.y),
+            );
+        }
+        camera
+    }
+
+    fn solve_follow_camera(&mut self, ctx: &Ctx) -> WorldCamera {
+        if self
+            .aim_control
+            .camera_transition(self.ranged_ready.aiming(), self.is_locked())
+        {
+            self.camera.release_lock_preserving_view();
+        }
+        let mut config = self.camera_config();
+        let mut input = if self.is_locked() {
+            ThirdPersonCameraInput {
+                yaw_delta_q12: 0,
+                pitch_delta_q12: 0,
+                // Shoulder inputs remain exclusively owned by combat even
+                // while hard locked.
+                recenter: false,
+            }
+        } else {
+            camera_input(
+                ctx,
+                self.camera_orbit_speed_level(),
+                self.analog_deadzone,
+                config.accelerated_orbit_speed.is_some(),
+            )
+        };
+        input.recenter |= core::mem::take(&mut self.camera_recenter_requested);
+        if self.ranged_ready.aiming() && !self.is_locked() {
+            // Deliberate aiming uses a lower, unaccelerated stick rate.
+            let (x, y) = camera_stick_axes(ctx, self.analog_deadzone);
+            input.yaw_delta_q12 = (-i32::from(x) * 12 / 128) as i16;
+            input.pitch_delta_q12 = (i32::from(y) * 10 / 128) as i16;
+            input.recenter = false;
+        }
+        if let Some(flight) = self.hook_travel {
+            config.accelerated_orbit_speed = None;
+            config.auto_align_when_moving = false;
+            config.preserve_profile_pitch = true;
+            config.position_lag_shift = 0;
+            config.position_vertical_lag_shift = Some(0);
+            config.focus_lag_shift = 0;
+            config.focus_vertical_lag_shift = Some(0);
+            // Align during anticipation, then hold exactly behind the route.
+            // Both axes ignore stick/recenter input until flight is finished.
+            let yaw_error = self
+                .camera
+                .yaw()
+                .shortest_delta_q12(flight.camera_yaw(self.camera.yaw()));
+            input.yaw_delta_q12 = if ctx.sim_tick.as_u32().wrapping_sub(flight.started)
+                < psx_game_runtime::hook_points::LAUNCH_TICKS
+            {
+                yaw_error.clamp(-96, 96)
+            } else {
+                yaw_error
+            };
+            input.pitch_delta_q12 = self.hook_camera_pitch - self.camera.pitch_q12();
+            input.recenter = false;
+        }
+        let lock_target = if self.ranged_ready.aiming() {
+            self.lock_target_indicator_position().map(|_| {
+                let [x, y, z] = self.ranged_target();
+                RoomPoint::new(x, y, z)
+            })
+        } else if config.lock_target_framing {
+            self.lock_target
+                .or(self.soft_lock_target)
+                .and_then(|index| self.camera_target_anchor(index))
+        } else {
+            self.lock_target_position()
+                .or_else(|| self.soft_lock_target_position())
+        };
+        let target = self.camera_target(lock_target, self.anim_state != PlayerAnim::Idle);
+        let mut prop_blockers =
+            psx_engine::FixedScratch::<CharacterCollisionAabb, MAX_STATIC_PROP_AABB_BLOCKERS>::new(
+            );
+        if self.world_rt.is_some()
+            && self
+                .collect_static_prop_aabb_blockers_checked_into(&mut prop_blockers)
+                .is_none()
+        {
+            // Invalid generated prop collision freezes the existing camera
+            // instead of treating the obstructed boom as clear.
+            return world_camera_from_position_focus(
+                self.camera.projection(PROJECTION),
+                self.camera.position(),
+                self.camera.focus(),
+            );
+        }
+        let Some(world_rt) = self.world_rt.as_mut() else {
+            // No world cooked yet (the placeholder manifest): nothing to
+            // collide with, so hold the current view.
+            return world_camera_from_position_focus(
+                self.camera.projection(PROJECTION),
+                self.camera.position(),
+                self.camera.focus(),
+            );
+        };
+        world_rt
+            .update_camera(
+                &mut self.camera,
+                target,
+                input,
+                config,
+                1,
+                prop_blockers.as_slice(),
+                &self.destructibles,
+            )
+            .expect("grid camera trace failed")
+            .camera
+    }
+
+    pub(super) fn lock_target_position(&self) -> Option<RoomPoint> {
+        self.lock_target
+            .and_then(|index| self.target_position(index))
+    }
+
+    /// True while facing is bound to a live combat target.
+    pub(super) fn is_locked(&self) -> bool {
+        self.lock_target.is_some()
+    }
+
+    pub(super) fn soft_lock_target_position(&self) -> Option<RoomPoint> {
+        self.target_position(self.soft_lock_target?)
+    }
+
+    /// Gameplay entity currently driving combat readability. A deliberate
+    /// hard lock wins; otherwise reuse the camera's existing soft lock. This
+    /// is the single target authority for the enemy HUD and stance tell.
+    pub(super) fn combat_target_entity_index(&self) -> Option<usize> {
+        let model_instance = self.lock_target.or(self.soft_lock_target)?;
+        self.target_position(model_instance)?;
+        game_entity_for_instance(u16::try_from(model_instance).ok()?)
+    }
+
+    /// Camera-only anchor: three quarters of the scaled model's standing height.
+    /// Gameplay targeting continues to use the live root position.
+    fn camera_target_anchor(&self, index: usize) -> Option<RoomPoint> {
+        let instance = MODEL_INSTANCES.get(index)?;
+        let root = self.target_position(index)?;
+        let height = MODELS.get(instance.model.to_usize()).map(|model| {
+            i32::from(model.world_height) * i32::from(instance.visual_scale_q8) / 256
+        })?;
+        Some(root.with_y(root.y.saturating_add(height.saturating_mul(3) / 4)))
+    }
+
+    pub(super) fn target_position(&self, index: usize) -> Option<RoomPoint> {
+        let target = MODEL_INSTANCES.get(index)?;
+        if target.room != self.room_index {
+            return None;
+        }
+        let instance = u16::try_from(index).ok()?;
+        // Hard/soft lock is combat targeting, not a generic model picker.
+        // Requiring a live gameplay entity prevents scenery and dead actors
+        // from winning the screen-space acquisition score.
+        game_entity_for_instance(instance)?;
+        let live = self
+            .game_entities
+            .live_position_for_model_instance(GAME_ENTITIES.as_slice(), instance)?;
+        Some(RoomPoint::new(live[0], live[1], live[2]))
+    }
+
+    pub(super) fn refresh_active_interactable(&mut self) {
+        self.active_interactable = self.find_best_interactable();
+    }
+
+    pub(super) fn find_best_interactable(&mut self) -> Option<usize> {
+        let player = self.motor.position();
+        let mut best = None;
+        let mut best_distance = u32::MAX;
+        for (index, interactable) in INTERACTABLES.iter().enumerate() {
+            if !self.point_of_interest_available(interactable)
+                || interactable.room != self.room_index
+            {
+                continue;
+            }
+            let Some(distance) = psx_game_runtime::poi::xz_distance_squared_within_radius(
+                [player.x, player.z],
+                [interactable.x, interactable.z],
+                interactable.radius,
+            ) else {
+                continue;
+            };
+            if let Some(world_rt) = self.world_rt.as_mut() {
+                if !world_rt.typed_world_object_directly_visible(
+                    player,
+                    psx_level::world_object_kind::POINT_OF_INTEREST_BEACON,
+                    index,
+                    &self.destructibles,
+                ) {
+                    continue;
+                }
+            }
+            if distance < best_distance {
+                best = Some(index);
+                best_distance = distance;
+            }
+        }
+        best
+    }
+
+    /// Interact-prompt activation, migrated onto the LOGIC event
+    /// graph (phase 3): the cook pairs every interactable with a
+    /// logic record 1:1, so the prompt fires that record and the
+    /// terminal effect (message overlay / checkpoint) runs through
+    /// `dispatch_logic_effects` -- one dispatch path whether the
+    /// record fired from a prompt, a trigger volume, or a relay
+    /// chain. A record the runtime refuses (removed by a killtarget,
+    /// gated by an unsatisfied master, waiting out its re-arm)
+    /// refuses the interaction. The legacy direct path remains only
+    /// for hand-rolled manifests whose interactables carry no paired
+    /// record.
+    pub(super) fn activate_interactable(
+        &mut self,
+        index: usize,
+        now: u32,
+        port: &mut psx_engine::ControllerPort,
+    ) -> bool {
+        let Some(interactable) = INTERACTABLES.get(index) else {
+            return false;
+        };
+        if !self.point_of_interest_available(interactable) {
+            return false;
+        }
+        if interactable.logic != psx_level::INTERACTABLE_LOGIC_NONE {
+            let fired = self.logic.fire_index(
+                LOGIC.as_slice(),
+                usize::from(interactable.logic),
+                psx_game_runtime::logic::UseCode::Toggle,
+                now,
+            );
+            if fired {
+                self.dispatch_logic_effects(port);
+            }
+            return fired;
+        }
+        match interactable.kind {
+            InteractableKind::Message => {
+                self.open_interactable_message(interactable);
+                true
+            }
+            InteractableKind::Checkpoint => {
+                self.set_checkpoint(
+                    RuntimeCheckpoint {
+                        room: self.room_index,
+                        position: self.motor.position(),
+                        yaw: self.motor.yaw(),
+                        checkpoint_id: interactable.checkpoint_id,
+                    },
+                    port,
+                );
+                self.open_interactable_message(interactable);
+                true
+            }
+            InteractableKind::PointOfInterest => {
+                // A successful pickup is already a complete interaction. Do
+                // not make the player acknowledge an authored recovery page
+                // before showing the useful confirmation. Lore-only POIs and
+                // rewards that could not be granted still use their pages.
+                if let Some(module) = self.grant_point_of_interest_reward(index) {
+                    if poi_persistent_flags(interactable).mark_read(&mut self.poi_save) {
+                        self.poi_save_dirty = true;
+                    }
+                    self.acquired_module = module;
+                    self.set_poi_presentation_frames(
+                        psx_engine::ui::MESSAGE_PANEL_EXPAND_FRAMES,
+                        0,
+                    );
+                    return true;
+                }
+                let Some(message) = INTERACTABLE_MESSAGES.get(interactable.message as usize) else {
+                    return false;
+                };
+                let opened = self.poi_messages.open_poi(
+                    index.min(u16::MAX as usize) as u16,
+                    psx_game_runtime::poi::MessagePageSpan::new(
+                        message.page_first,
+                        message.page_count,
+                    ),
+                );
+                if opened {
+                    self.set_poi_presentation_frames(0, 0);
+                }
+                opened
+            }
+        }
+    }
+
+    /// The single checkpoint assignment point for BOTH activation paths
+    /// (the logic-graph CHECKPOINT dispatch and the legacy direct
+    /// interactable path are mutually exclusive per activation, so an
+    /// activation can never double-count). Only an assignment that
+    /// CHANGES the held value counts: re-activating the same checkpoint
+    /// from the same pose is a no-op for the counter, while the first
+    /// activation of a life (the checkpoint itself persists across
+    /// respawn) and any pose/record change count once.
+    pub(super) fn set_checkpoint(
+        &mut self,
+        checkpoint: RuntimeCheckpoint,
+        port: &mut psx_engine::ControllerPort,
+    ) {
+        if self.checkpoint != Some(checkpoint) {
+            telemetry::counter(telemetry::counter::PLAYER_CHECKPOINT_ACTIVATIONS, 1);
+        }
+        self.checkpoint = Some(checkpoint);
+        // The save names the checkpoint by its stable id (the hash of its
+        // authored id), never by a table index.
+        let stable = psx_level::StableId::of_name(checkpoint.checkpoint_id).raw();
+        if self.poi_save.checkpoint_id != stable {
+            self.poi_save.checkpoint_id = stable;
+            self.poi_save_dirty = true;
+        }
+        // Checkpoints are the genre-visible save boundary. POI interaction
+        // stays smooth; its read/reward state reaches the card here instead.
+        self.flush_poi_save(port);
+    }
+
+    pub(super) fn open_interactable_message(&mut self, interactable: &InteractableRecord) {
+        if self.poi_messages.active().is_some() {
+            return;
+        }
+        let (title, body) = interactable_message_text(interactable);
+        self.message_overlay = Some(RuntimeMessageOverlay { title, body });
+        self.set_poi_page_type_frame(0);
+    }
+
+    pub(super) fn lock_target_indicator_position(&self) -> Option<RoomPoint> {
+        self.lock_target
+            .and_then(|index| self.target_indicator_position(index))
+    }
+
+    pub(super) fn target_indicator_position(&self, index: usize) -> Option<RoomPoint> {
+        let target = MODEL_INSTANCES.get(index)?;
+        let position = self.target_position(index)?;
+        let height = MODELS
+            .get(target.model.to_usize())
+            .map(|model| i32::from(model.world_height) * i32::from(target.visual_scale_q8) / 256)
+            .unwrap_or(1024);
+        Some(RoomPoint::new(
+            position.x,
+            position.y.saturating_add(height >> 1),
+            position.z,
+        ))
+    }
+
+    pub(super) fn lock_target_valid(&self, range: i32) -> bool {
+        self.lock_target
+            .is_some_and(|index| self.target_index_valid(index, range))
+    }
+
+    pub(super) fn target_index_valid(&self, index: usize, range: i32) -> bool {
+        let Some(target) = self.target_position(index) else {
+            return false;
+        };
+        distance_xz_sq(self.motor.position(), target) <= square_i32_saturating(range)
+    }
+
+    pub(super) fn find_best_lock_target(&self, range: i32) -> Option<usize> {
+        self.find_lock_target(range, self.ranged_ready.aiming())
+    }
+
+    pub(super) fn find_lock_target(&self, range: i32, aiming: bool) -> Option<usize> {
+        let player = self.motor.position();
+        let view_yaw = self.camera.yaw().add(Angle::HALF);
+        let range_sq = square_i32_saturating(range);
+        let mut best: Option<(usize, i32)> = None;
+        for (index, _) in MODEL_INSTANCES.iter().enumerate() {
+            // Use the same cooked visibility set that gates instance
+            // rendering. A longer lock range must not make actors behind a
+            // wall targetable merely because they share the active room.
+            if index >= u16::BITS as usize || self.instance_visible_mask & (1u16 << index) == 0 {
+                continue;
+            }
+            let Some(point) = self.target_position(index) else {
+                continue;
+            };
+            let dx = point.x.saturating_sub(player.x);
+            let dz = point.z.saturating_sub(player.z);
+            let dist_sq = square_i32_saturating(dx).saturating_add(square_i32_saturating(dz));
+            if dist_sq == 0 || dist_sq > range_sq {
+                continue;
+            }
+            if aiming {
+                let Some(projected) = self
+                    .target_indicator_position(index)
+                    .and_then(|p| self.render_camera.project_world(p))
+                else {
+                    continue;
+                };
+                let dx =
+                    i32::from(projected.sx) - i32::from(self.render_camera.projection.screen_x);
+                let dy =
+                    i32::from(projected.sy) - i32::from(self.render_camera.projection.screen_y);
+                if dx.abs() > 100 || dy.abs() > 80 {
+                    continue;
+                }
+                let score = -(dx * dx + dy * dy);
+                if best.is_none_or(|(_, previous)| score > previous) {
+                    best = Some((index, score));
+                }
+                continue;
+            }
+            let Some((screen_x_q8, forward)) = horizontal_view_coordinates(player, point, view_yaw)
+            else {
+                continue;
+            };
+            if abs_i32(screen_x_q8) > LOCK_ACQUIRE_HALF_CONE_Q8 {
+                continue;
+            }
+            // Centre bias dominates, then forward depth and distance break
+            // ties. This makes R3 select what the player is looking at rather
+            // than a merely-near actor at the edge of the screen.
+            let score = forward
+                .saturating_mul(16)
+                .saturating_sub(abs_i32(screen_x_q8).saturating_mul(96))
+                .saturating_sub(dist_sq >> 10);
+            match best {
+                Some((_, best_score)) if best_score >= score => {}
+                _ => best = Some((index, score)),
+            }
+        }
+        best.map(|(index, _)| index)
+    }
+
+    pub(super) fn update_soft_lock(&mut self, ctx: &Ctx) {
+        if self.is_locked() {
+            self.soft_lock_target = None;
+            self.soft_lock_suppressed = false;
+            return;
+        }
+        let (right_x, _) = ctx.pad.sticks.right_centered();
+        if abs_i16(right_x) >= CAMERA_SOFT_LOCK_BREAK_STICK {
+            self.soft_lock_target = None;
+            self.soft_lock_suppressed = true;
+            return;
+        }
+        if self.soft_lock_suppressed {
+            if self.find_best_lock_target(SOFT_LOCK_BREAK_RANGE).is_none() {
+                self.soft_lock_suppressed = false;
+            }
+            return;
+        }
+        match self.soft_lock_target {
+            Some(index) if self.target_index_valid(index, SOFT_LOCK_BREAK_RANGE) => {}
+            _ => self.soft_lock_target = self.find_best_lock_target(SOFT_LOCK_RANGE),
+        }
+    }
+
+    pub(super) fn update_lock_target_switch(&mut self, ctx: &Ctx) {
+        let (right_x, _) = ctx.pad.sticks.right_centered();
+        let magnitude = abs_i16(right_x);
+        if magnitude <= LOCK_SWITCH_STICK_RELEASE {
+            self.lock_switch_stick_held = false;
+            return;
+        }
+        if magnitude < LOCK_SWITCH_STICK_THRESHOLD || self.lock_switch_stick_held {
+            return;
+        }
+
+        self.switch_lock_target(if right_x > 0 { 1 } else { -1 });
+        self.lock_switch_stick_held = true;
+    }
+
+    pub(super) fn switch_lock_target(&mut self, direction: i32) {
+        let Some(current_index) = self.lock_target else {
+            return;
+        };
+        let Some(current) = self.target_position(current_index) else {
+            self.lock_target = None;
+            return;
+        };
+        let player = self.motor.position();
+        let view_yaw = self.camera.yaw().add(Angle::HALF);
+        let Some((current_screen_x, _)) = horizontal_view_coordinates(player, current, view_yaw)
+        else {
+            return;
+        };
+        let range_sq = square_i32_saturating(LOCK_RANGE);
+        let mut best: Option<(usize, i32)> = None;
+        for (index, _) in MODEL_INSTANCES.iter().enumerate() {
+            if index == current_index {
+                continue;
+            }
+            if index >= u16::BITS as usize || self.instance_visible_mask & (1u16 << index) == 0 {
+                continue;
+            }
+            let Some(target) = self.target_position(index) else {
+                continue;
+            };
+            let dx = target.x.saturating_sub(player.x);
+            let dz = target.z.saturating_sub(player.z);
+            let dist_sq = square_i32_saturating(dx).saturating_add(square_i32_saturating(dz));
+            if dist_sq == 0 || dist_sq > range_sq {
+                continue;
+            }
+            let Some((candidate_screen_x, forward)) =
+                horizontal_view_coordinates(player, target, view_yaw)
+            else {
+                continue;
+            };
+            let screen_delta = candidate_screen_x.saturating_sub(current_screen_x);
+            if direction > 0 && screen_delta <= 0 || direction < 0 && screen_delta >= 0 {
+                continue;
+            }
+            // Select the next target in screen order, with a small depth and
+            // distance penalty so a near neighbour wins over a far backdrop.
+            let score = abs_i32(screen_delta)
+                .saturating_mul(256)
+                .saturating_add(abs_i32(candidate_screen_x))
+                .saturating_add(dist_sq >> 12)
+                .saturating_sub(forward >> 4);
+            match best {
+                Some((_, best_score)) if best_score <= score => {}
+                _ => best = Some((index, score)),
+            }
+        }
+        if let Some((index, _)) = best {
+            self.lock_target = Some(index);
+            self.lock_invalid_ticks = 0;
+        }
+    }
+}
+
+/// Live authored playback rate for an animation, Q8. Only the four attack
+/// actions use the module Attack Speed lane; locomotion and defensive actions
+/// retain their authored cadence.
+///
+/// Takes already-resolved modifiers so a caller that needs several speeds at
+/// once pays for [`Playtest::vitality_modifiers`] a single time.
+pub(super) fn live_action_speed_q8(
+    modifiers: VitalityModifiers,
+    character: &RuntimeCharacter,
+    anim: PlayerAnim,
+) -> u16 {
+    let authored = character.action_speed(anim.action());
+    if player_anim_is_attack(anim) {
+        modifiers.attack_speed_q8(authored)
+    } else {
+        authored
+    }
+}
+
+#[cfg(test)]
+mod life_reset_tests {
+    use super::*;
+    use psx_game_runtime::projectiles::{CombatTeam, ProjectileSpawn};
+
+    fn test_scene() -> std::boxed::Box<Playtest> {
+        let layout = std::alloc::Layout::new::<Playtest>();
+        let raw = unsafe { std::alloc::alloc_zeroed(layout) as *mut Playtest };
+        assert!(!raw.is_null());
+        unsafe { Playtest::init_zeroed(raw) };
+        unsafe { std::boxed::Box::from_raw(raw) }
+    }
+
+    #[test]
+    fn walk_windup_hands_off_without_blending_a_frozen_endpoint() {
+        let mut scene = test_scene();
+        scene.anim_state = PlayerAnim::Walk;
+        scene.anim_blend_from = Some((PlayerAnim::WalkWindup, 40, SimTick::from_u32(100)));
+        assert!(scene.player_anim_blend(SimTick::from_u32(100)).is_none());
+        assert!(scene.player_anim_blend(SimTick::from_u32(102)).is_none());
+
+        // An interrupted stop still blends when movement resumes.
+        scene.anim_blend_from = Some((PlayerAnim::WalkWinddown, 12, SimTick::from_u32(100)));
+        assert!(scene.player_anim_blend(SimTick::from_u32(100)).is_some());
+    }
+
+    #[test]
+    fn stopping_a_gait_blends_from_the_release_pose_without_more_steps() {
+        let mut scene = test_scene();
+        for gait in [
+            PlayerAnim::Walk,
+            PlayerAnim::Run,
+            PlayerAnim::StrafeLeft,
+            PlayerAnim::WalkBackward,
+        ] {
+            for stop in [
+                PlayerAnim::Idle,
+                PlayerAnim::WalkWinddown,
+                PlayerAnim::WalkWinddownAlt,
+                PlayerAnim::RunWinddown,
+                PlayerAnim::RunWinddownAlt,
+            ] {
+                scene.anim_state = stop;
+                scene.anim_blend_from = Some((gait, 17, SimTick::from_u32(100)));
+                for elapsed in 0..4 {
+                    let blend = scene
+                        .player_anim_blend(SimTick::from_u32(100 + elapsed))
+                        .unwrap();
+                    assert_eq!(blend.local_tick, 17);
+                    assert_eq!(blend.alpha_q12, (elapsed * 1024) as u16);
+                }
+                assert!(scene.player_anim_blend(SimTick::from_u32(104)).is_none());
+            }
+        }
+        scene.anim_state = PlayerAnim::Run;
+        scene.anim_blend_from = Some((PlayerAnim::Walk, 17, SimTick::from_u32(100)));
+        assert_eq!(
+            scene
+                .player_anim_blend(SimTick::from_u32(102))
+                .unwrap()
+                .local_tick,
+            19
+        );
+    }
+
+    #[test]
+    fn only_initial_world_pages_lock_controls_through_the_closing_animation() {
+        use psx_game_runtime::poi::MessagePageSpan;
+        let mut scene = test_scene();
+        let welcome = WORLD_MESSAGE
+            .get()
+            .expect("test project has a welcome message");
+        assert!(!scene.initial_world_message_active());
+        scene.open_world_message_once();
+        for page in 0..welcome.page_count {
+            assert!(scene.initial_world_message_active());
+            assert!(scene.gameplay_menu_blocked());
+            assert!(
+                !scene.cinematic_active(),
+                "welcome keeps the normal HUD and music"
+            );
+            assert_eq!(scene.poi_messages.active().unwrap().page_offset(), page);
+            scene.set_poi_presentation_frames(u16::MAX, u16::MAX);
+            scene.advance_poi_message();
+        }
+        assert!(scene.poi_closing);
+        for _ in 0..psx_engine::ui::MESSAGE_PANEL_EXPAND_FRAMES {
+            assert!(scene.initial_world_message_active());
+            scene.advance_poi_presentation_frame();
+        }
+        assert!(!scene.initial_world_message_active());
+        assert!(!scene.gameplay_menu_blocked());
+        scene.open_world_message_once();
+        assert!(
+            !scene.initial_world_message_active(),
+            "welcome stays dismissed"
+        );
+        assert!(scene.poi_messages.open_world(
+            1,
+            MessagePageSpan::new(crate::loc::DEMO_OUTRO_FIRST, crate::loc::DEMO_OUTRO_COUNT,)
+        ));
+        assert!(
+            !scene.initial_world_message_active(),
+            "outro stays interactive"
+        );
+        while scene.poi_messages.active().is_some() {
+            scene.poi_messages.advance();
+        }
+        assert!(scene.poi_messages.open_poi(
+            0,
+            MessagePageSpan::new(welcome.page_first, welcome.page_count)
+        ));
+        assert!(
+            !scene.initial_world_message_active(),
+            "POI source never locks controls"
+        );
+    }
+
+    #[test]
+    fn legacy_dismiss_finishes_copy_then_contracts_over_presented_frames() {
+        let mut scene = test_scene();
+        scene.message_overlay = Some(RuntimeMessageOverlay {
+            title: "",
+            body: "RECOVERED",
+        });
+        scene.dismiss_legacy_message();
+        assert!(!scene.poi_closing, "first press completes unfinished copy");
+        scene.dismiss_legacy_message();
+        assert!(scene.poi_closing);
+        let duration = psx_engine::ui::MESSAGE_PANEL_EXPAND_FRAMES;
+        for remaining in (1..duration).rev() {
+            scene.dismiss_legacy_message(); // repeated input must not restart/cancel contraction
+            scene.advance_poi_presentation_frame();
+            assert_eq!(scene.poi_panel_frame, remaining);
+            assert!(scene.message_overlay.is_some());
+        }
+        scene.advance_poi_presentation_frame();
+        assert!(!scene.poi_closing);
+        assert!(scene.message_overlay.is_none());
+    }
+
+    #[test]
+    fn message_press_behaves_the_same_at_every_render_rate() {
+        // One message and one Cross press on a fixed sim tick, replayed with a
+        // frame presented every 1, 2, 3, 5 and 9 sim ticks. On the sim clock
+        // the copy has finished typing by the press, so the press must start
+        // the close at every render rate and the panel must be gone on the
+        // same tick. Advancing the type-on per presented frame fails this.
+        fn run(ticks_per_frame: u32) -> (bool, Option<u32>) {
+            const PRESS_TICK: u32 = 44;
+            let mut scene = test_scene();
+            scene.message_overlay = Some(RuntimeMessageOverlay {
+                title: "",
+                body: "Relay synchronized.",
+            });
+            let mut closing_after_press = false;
+            let mut closed_at = None;
+            for tick in 0..120u32 {
+                if tick == PRESS_TICK {
+                    scene.dismiss_legacy_message();
+                    closing_after_press = scene.poi_closing;
+                }
+                scene.tick_poi_presentation();
+                if tick % ticks_per_frame == 0 {
+                    scene.snapshot_poi_presentation_for_render();
+                }
+                if closed_at.is_none() && scene.message_overlay.is_none() {
+                    closed_at = Some(tick);
+                }
+            }
+            (closing_after_press, closed_at)
+        }
+        let reference = run(2);
+        assert!(
+            reference.0,
+            "the press lands after the copy finished typing"
+        );
+        assert!(reference.1.is_some(), "the panel closes");
+        for ticks_per_frame in [1, 3, 5, 9] {
+            assert_eq!(
+                run(ticks_per_frame),
+                reference,
+                "a frame every {ticks_per_frame} sim ticks"
+            );
+        }
+    }
+
+    #[test]
+    fn pickup_dismiss_shows_inventory_hint_only_after_contraction() {
+        let mut scene = test_scene();
+        scene.acquired_module = BoostModuleId(1);
+        scene.set_poi_presentation_frames(u16::MAX, u16::MAX);
+        scene.advance_poi_message();
+        assert!(scene.poi_closing);
+        for _ in 1..psx_engine::ui::MESSAGE_PANEL_EXPAND_FRAMES {
+            scene.advance_poi_presentation_frame();
+            assert!(scene.message_overlay.is_none());
+            assert!(!scene.acquired_module.is_none());
+        }
+        scene.advance_poi_presentation_frame();
+        assert!(scene.acquired_module.is_none());
+        assert!(scene.socket_hint_shown);
+        assert_eq!(
+            scene.message_overlay.unwrap().body,
+            "START: OPENS INVENTORY\nEQUIP RECOVERED MODULES."
+        );
+        assert_eq!(scene.poi_page_type_frame, 0, "hint starts with unread copy");
+    }
+
+    #[test]
+    fn only_the_last_page_dismisses_the_message_panel() {
+        let mut scene = test_scene();
+        scene
+            .poi_messages
+            .open_world(0, psx_game_runtime::poi::MessagePageSpan::new(0, 2));
+        scene.set_poi_presentation_frames(u16::MAX, u16::MAX);
+        scene.advance_poi_message();
+        assert!(!scene.poi_closing);
+        assert_eq!(scene.poi_messages.active().unwrap().page_offset(), 1);
+        scene.set_poi_page_type_frame(u16::MAX);
+        scene.advance_poi_message();
+        assert!(scene.poi_closing);
+        for _ in 0..psx_engine::ui::MESSAGE_PANEL_EXPAND_FRAMES {
+            scene.advance_poi_presentation_frame();
+        }
+        assert!(scene.poi_messages.active().is_none());
+    }
+
+    #[test]
+    fn new_game_discards_progress_and_messages_but_preserves_settings() {
+        let layout = std::alloc::Layout::new::<Playtest>();
+        let raw = unsafe { std::alloc::alloc_zeroed(layout) as *mut Playtest };
+        assert!(!raw.is_null());
+        unsafe { Playtest::init_zeroed(raw) };
+        let mut scene = unsafe { std::boxed::Box::from_raw(raw) };
+        scene.poi_save.set_flag(0);
+        scene.poi_save.set_resume_position(SavedPlayerPosition {
+            x: 1,
+            y: 2,
+            z: 3,
+            yaw: 4,
+        });
+        scene
+            .poi_messages
+            .open_world(0, psx_game_runtime::poi::MessagePageSpan::new(0, 1));
+        scene.socket_hint_shown = true;
+        scene.poi_closing = true;
+        scene.souls.award(200, 100);
+        scene.lock_target = Some(1);
+        scene.soft_lock_target = Some(1);
+        scene.attack_buffer.request(1, 100);
+        scene.evade_buffer_vblanks = 8;
+        scene.gameplay_epoch_set = true;
+        scene.hazard_death_ticks_remaining = 10;
+        scene.checkpoint = Some(RuntimeCheckpoint {
+            room: RoomIndex::ZERO,
+            position: RoomPoint::new(1, 2, 3),
+            yaw: Angle::ZERO,
+            checkpoint_id: "old run",
+        });
+        assert!(scene.power_up_inventory.add(BoostModuleId(1)));
+        scene
+            .game_entities
+            .spawn_from_records_with_ids(GAME_ENTITIES.as_slice(), GAME_ENTITY_IDS.as_slice());
+        let enemy = GAME_ENTITIES
+            .iter()
+            .position(|record| record.flags & psx_level::game_entity_flags::ENABLED != 0);
+        if let Some(index) = enemy {
+            scene.game_entities.apply_hit(
+                GAME_ENTITIES.as_slice(),
+                index,
+                VitalityChannelId::One,
+                u16::MAX,
+                u16::MAX,
+            );
+            assert_eq!(
+                scene.game_entities.state(index),
+                psx_game_runtime::entities::GameEntityState::Dead
+            );
+        }
+        scene.brightness_level = 3;
+        scene.analog_deadzone = 27;
+
+        scene.reset_new_game();
+
+        assert_eq!(
+            scene.poi_save,
+            SaveBlock::new(PLAYER_MAX_HEALTH, PERSISTENT_FLAG_COUNT)
+        );
+        assert!(scene.poi_save_loaded && scene.poi_save_load_attempted);
+        assert!(scene.poi_save_dirty, "next save replaces the old run");
+        assert!(scene.poi_messages.active().is_none());
+        assert!(!scene.poi_messages.world_message_shown(0));
+        assert!(!scene.socket_hint_shown);
+        assert!(!scene.poi_closing);
+        assert_eq!(scene.souls.total(), 0);
+        assert!(scene.lock_target.is_none() && scene.soft_lock_target.is_none());
+        assert_eq!(scene.attack_buffer.take(101), None);
+        assert_eq!(scene.evade_buffer_vblanks, 0);
+        assert!(!scene.gameplay_epoch_set);
+        assert_eq!(scene.hazard_death_ticks_remaining, 0);
+        assert_eq!(
+            scene.player_vitality.pool(VitalityChannelId::One).current(),
+            PLAYER_MAX_HEALTH
+        );
+        assert_eq!(
+            scene.player_vitality.pool(VitalityChannelId::Two).current(),
+            PLAYER_MAX_HEALTH
+        );
+        assert!(scene.power_up_inventory.is_empty());
+        assert!(scene.checkpoint.is_none());
+        assert_eq!(scene.game_entities.count(), GAME_ENTITIES.len());
+        if let Some(index) = enemy {
+            assert_ne!(
+                scene.game_entities.state(index),
+                psx_game_runtime::entities::GameEntityState::Dead
+            );
+            assert!(scene.game_entities.health(index) > 0);
+        }
+        assert_eq!(scene.brightness_level, 3);
+        assert_eq!(scene.analog_deadzone, 27);
+    }
+
+    #[test]
+    fn respawn_discards_old_projectiles_broken_guard_and_queued_actions() {
+        // Use the production validity initializer on heap storage: the scene
+        // contains non-zero Option niches and is too large for the test stack.
+        let layout = std::alloc::Layout::new::<Playtest>();
+        let raw = unsafe { std::alloc::alloc_zeroed(layout) as *mut Playtest };
+        assert!(!raw.is_null());
+        unsafe {
+            Playtest::init_zeroed(raw);
+        }
+        let mut storage = unsafe { std::boxed::Box::from_raw(raw) };
+        let scene = &mut *storage;
+        let config = scene.player_stance_config;
+        let first = scene.player_stance.apply_damage(
+            &mut scene.player_vitality,
+            VitalityChannelId::One,
+            u16::MAX,
+            &config,
+        );
+        assert!(first.forced_swap);
+        assert!(scene.player_stance.is_broken(VitalityChannelId::One));
+        scene.attack_buffer.request(1, 100);
+        scene.evade_buffer_vblanks = 8;
+        scene.swing_hit_mask = 3;
+        scene.camera_recenter_requested = true;
+        scene
+            .combat_projectiles
+            .spawn(ProjectileSpawn {
+                position: [0; 3],
+                velocity: [1, 0, 0],
+                radius: 2,
+                damage: 50,
+                poise_damage: 50,
+                lifetime_ticks: 100,
+                room: RoomIndex::ZERO,
+                team: CombatTeam::Enemy,
+                owner: 0,
+                tint_rgb: [255; 3],
+                damage_channel: psx_game_runtime::projectiles::ProjectileDamageChannel::Horizon,
+                visual: psx_game_runtime::projectiles::ProjectileVisualStyle::EMPTY,
+            })
+            .unwrap();
+        assert_eq!(scene.combat_projectiles.len(), 1);
+        scene.souls.award(50, 100);
+        scene.reset_life_combat();
+        assert_eq!(scene.combat_projectiles.len(), 0);
+        assert_eq!(scene.attack_buffer.take(101), None);
+        assert_eq!(scene.evade_buffer_vblanks, 0);
+        assert_eq!(scene.swing_hit_mask, 0);
+        assert!(!scene.camera_recenter_requested);
+        assert_eq!(scene.player_stance.active(), VitalityChannelId::One);
+        assert!(scene.player_stance.can_swap());
+        assert!(!scene.player_stance.is_broken(VitalityChannelId::One));
+        assert_eq!(
+            scene.player_vitality.pool(VitalityChannelId::One).current(),
+            PLAYER_MAX_HEALTH
+        );
+        assert_eq!(
+            scene.player_vitality.pool(VitalityChannelId::Two).current(),
+            PLAYER_MAX_HEALTH
+        );
+        assert_eq!(
+            scene.souls.total(),
+            50,
+            "progress survives a new combat life"
+        );
+    }
+}

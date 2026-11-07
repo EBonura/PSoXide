@@ -1,0 +1,12 @@
+[package]
+name = "psx-disc-toc"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared PSXDEMO1 collection catalog wire format and executable checksums"
+
+[lints]
+workspace = true
+
+[dependencies]

@@ -1,0 +1,60 @@
+//! PSoXide's game layer -- the runtime between `psx-engine`'s
+//! primitives and a game. Phase 1 (see `docs/game-runtime-plan.md`):
+//! CD streaming and, next, the room residency/VRAM stack carved out
+//! of the `editor-playtest` example so every downstream game stops
+//! re-implementing them.
+//!
+//! Boundary rules (the short version): this crate owns streaming and
+//! gameplay POLICY; `psx-engine` owns drawing/scheduling MECHANISM;
+//! capacities arrive through generated budgets, cooked data arrives
+//! as `&'static` typed records, and state lives in owned arenas.
+
+#![cfg_attr(
+    target_arch = "mips",
+    feature(optimize_attribute, asm_experimental_arch)
+)]
+#![no_std]
+#![deny(unsafe_op_in_unsafe_fn)]
+#![warn(missing_docs)]
+
+pub mod actor_pose;
+pub mod arch_props;
+#[cfg(feature = "cd-stream-bench")]
+pub mod asset_streaming;
+pub mod attack_chain;
+pub mod box_props;
+pub mod card_stream;
+pub mod cd_stream;
+pub mod character;
+pub mod combat;
+pub mod combat_feedback;
+pub mod combat_flow;
+pub mod combat_policy;
+pub mod combat_timing;
+pub mod cube_sky_stream;
+pub mod cylinder_props;
+pub mod destructibles;
+pub mod dormant;
+pub mod entities;
+pub mod grid_stream;
+pub mod image_props;
+pub mod logic;
+pub mod model_rendering;
+pub mod panel_stream;
+pub mod particles;
+pub mod poi;
+pub mod poise;
+pub mod projectiles;
+pub mod ranged_tactics;
+pub mod reuse_heap;
+pub mod room_lighting;
+pub mod save;
+pub mod schedule;
+pub mod sky;
+pub mod streaming;
+pub mod vitality;
+pub mod vitality_circles;
+pub mod vram;
+
+/// Elevated hook acquisition and traversal.
+pub mod hook_points;

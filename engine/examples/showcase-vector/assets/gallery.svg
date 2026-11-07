@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="160" height="112" viewBox="0 0 160 112">
+  <!-- Test sheet for the vector runtime: one group per feature, drawn at native resolution. -->
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2d6bff"/><stop offset="0.5" stop-color="#8f4dff"/>
+      <stop offset="1" stop-color="#ff8a3d"/>
+    </linearGradient>
+    <linearGradient id="diag" gradientUnits="userSpaceOnUse" x1="90" y1="60" x2="150" y2="100">
+      <stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#1a8f5a"/>
+    </linearGradient>
+  </defs>
+  <g id="rects">
+    <rect x="4" y="4" width="30" height="20" fill="#e84a3a"/>
+    <rect x="38" y="4" width="30" height="20" rx="6" ry="6" fill="#3ac8e8"/>
+  </g>
+  <g id="round">
+    <circle cx="90" cy="14" r="10" fill="#f5c542"/>
+    <ellipse cx="120" cy="14" rx="16" ry="9" fill="#7ad65c"/>
+  </g>
+  <g id="gradient">
+    <rect x="4" y="30" width="60" height="26" fill="url(#sky)"/>
+  </g>
+  <g id="ring">
+    <path fill-rule="evenodd" fill="#d8d8d8" d="M92 30 H128 V56 H92 Z M100 36 V50 H120 V36 Z"/>
+  </g>
+  <g id="star">
+    <path fill="#ffd23a" d="M30 62 L35 76 L50 76 L38 85 L43 99 L30 91 L17 99 L22 85 L10 76 L25 76 Z"/>
+  </g>
+  <g id="blob">
+    <path fill="url(#diag)" d="M90 80 C 90 60 130 58 140 74 C 150 92 120 106 100 100 C 92 98 90 90 90 80 Z"/>
+  </g>
+  <g id="stroke">
+    <path d="M56 100 L66 66 L76 100 L86 66" fill="none" stroke="#ff5aa5" stroke-width="3" stroke-linejoin="round"/>
+  </g>
+  <g id="glow">
+    <circle cx="146" cy="38" r="14" fill="#40260a" data-blend="add"/>
+    <circle cx="146" cy="38" r="8" fill="#6a4010" data-blend="add"/>
+  </g>
+</svg>

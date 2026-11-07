@@ -1,0 +1,47 @@
+[package]
+name    = "psx-game-runtime"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "PSoXide game layer: streaming/residency/VRAM policy and (in later phases) the entity/combat/AI runtime, between psx-engine's primitives and a game. See docs/game-runtime-plan.md."
+
+[features]
+# Streamed-world build shape (editor-playtest's default, which forwards
+# it): enables the CD-backed asset streamer, VRAM upload queue and UI image
+# cache.
+cd-stream-bench = []
+# CD throughput probe (`cd_stream::run_benchmark`). Declared here since
+# phase 1.5: the module carried its `cd-stream-benchmark` cfgs from the
+# example verbatim in the phase-1 carve, but the crate never declared
+# the feature, so the probe silently compiled out (and every cfg warned)
+# until the game's own feature forwarded it again.
+cd-stream-benchmark = ["cd-stream-bench"]
+# Immediate-mode actor collision cylinders. Keep this out of shipping builds:
+# the helper is intentionally explicit and sizeable on MIPS, and is only useful
+# while tuning authored collision bounds.
+collision-debug-overlay = []
+# Counters of the far panels for a replay to read (`PANEL_COUNTERS` fills more of itself,
+# the stream tallies what the screen shows against what has a picture): measurement builds
+# only, it costs code and time.
+panel-meter = []
+
+[dependencies]
+# Explicit paths, same rationale as psx-engine: resolvable when
+# consumed from outside the engine workspace.
+psx-asset     = { path = "../../../sdk/crates/psx-asset" }
+psx-cdstream  = { path = "../../../sdk/crates/psx-cdstream" }
+psx-engine    = { path = "../psx-engine" }
+psx-font      = { path = "../../../sdk/crates/psx-font" }
+psx-grid      = { path = "../psx-grid" }
+psx-gpu       = { path = "../../../sdk/crates/psx-gpu" }
+psx-level     = { path = "../psx-level" }
+psx-hw        = { path = "../../../crates/psx-hw" }
+psx-io        = { path = "../../../sdk/crates/psx-io" }
+psx-math      = { path = "../../../sdk/crates/psx-math" }
+psx-residency = { path = "../../../sdk/crates/psx-residency" }
+psx-telemetry = { path = "../../../sdk/crates/psx-telemetry" }
+psx-vram      = { path = "../../../sdk/crates/psx-vram" }
+
+[lints]
+workspace = true

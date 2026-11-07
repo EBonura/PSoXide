@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/psx-bsp",
+    "crates/psx-carousel",
+    "crates/psx-disc-toc",
+    "crates/psx-chainloader",
+    "crates/psx-engine",
+    "crates/psx-game-runtime",
+    "crates/psx-goldsrc",
+    "crates/psx-grid",
+    "crates/psx-level",
+    "crates/psx-render-contract",
+    "crates/psx-vector",
+    "crates/psx-vector-cook",
+]
+
+[workspace.package]
+edition    = "2021"
+license    = "GPL-2.0-or-later"
+repository = "https://github.com/EBonura/PSoXide-editor"
+
+[workspace.lints.rust]
+missing_docs = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unsafe_op_in_unsafe_fn = "deny"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+too_many_arguments = "allow"

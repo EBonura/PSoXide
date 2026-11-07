@@ -1,0 +1,1080 @@
+//! `editor-playtest` -- render a level cooked from the editor.
+//!
+//! Loads a Rust manifest selected by `build.rs`: the ignored
+//! `generated/level_manifest.cooked.rs` when the editor has
+//! cooked a project, otherwise the tracked placeholder
+//! `generated/level_manifest.rs`. The cooked manifest contains:
+//!
+//! * a master [`LevelAssetRecord`] table -- every cooked
+//!   `.psxw` room blob and `.psxt` texture blob is a record;
+//! * per-room [`LevelMaterialRecord`]s mapping each cooked
+//!   local material slot to a texture asset id;
+//! * per-room [`RoomResidencyRecord`]s declaring required
+//!   RAM/VRAM assets;
+//! * a [`PlayerSpawnRecord`] and [`EntityRecord`]s.
+//!
+//! The runtime resolves the active room by walking `ASSETS`,
+//! uploads its texture assets through a tiny no-alloc
+//! [`ResidencyManager`], builds a `TextureMaterial` table from
+//! the room's material slice, and renders. No hardcoded starter
+//! textures -- the asset table is the source of truth.
+//!
+//! Controls:
+//! * Left stick / D-pad -- camera-relative movement.
+//! * Right stick        -- camera yaw; vertical adjusts camera height.
+//! * CIRCLE tap        -- directional roll; lock-on remains active.
+//! * CIRCLE hold       -- run while moving.
+//! * TRIANGLE          -- change stance; R3 toggles lock-on.
+//! * HRZ: R1 / R2      -- light combo / heavy melee.
+//! * ZTH: R2 fires; L2 optionally precision aims when ranged clips are bound.
+//! * Legacy projects without ranged bindings retain Zenith melee.
+
+// `cfg(test)` is false for every guest build, so `not(test)` holds and both
+// attributes apply exactly as they always have -- the MIPS artifact is
+// unchanged by construction, not by measurement. Under `cargo test` on the
+// host the crate picks up `std` and lets libtest supply its own `main`, which
+// is what lets the runtime modules' pure-function tests actually run.
+#![cfg_attr(target_arch = "mips", feature(optimize_attribute))]
+#![cfg_attr(not(test), no_std)]
+#![cfg_attr(not(test), no_main)]
+#![allow(static_mut_refs)]
+
+extern crate alloc;
+extern crate psx_rt;
+
+#[cfg(all(target_arch = "mips", feature = "boot-trace"))]
+fn game_trace(message: &str) {
+    psx_rt::tty::println(message);
+}
+
+#[cfg(not(all(target_arch = "mips", feature = "boot-trace")))]
+fn game_trace(_message: &str) {}
+
+use psx_asset::{Animation, ModelPart, ModelVertex};
+use psx_engine::ui::UiTextureSlot;
+use psx_engine::{
+    button, horizontal_view_coordinates, telemetry, AdaptiveSubdivisionKindMask, Angle, App,
+    CharacterCollisionAabb, CharacterCollisionCylinder, CharacterMotorAnim, CharacterMotorConfig,
+    CharacterMotorInput, CharacterMotorState, Config, Ctx, DepthBand, DepthRange,
+    LoadedWorldCameraGte, OtFrame, PacketFramePair, PrimitivePacketArena, PrimitivePacketScratch,
+    PrimitiveSink, ProjectedVertex, QueuedFrame, RenderSubmission, Rgb8, RoomPoint, Scene,
+    SceneStateRef, SchedulerConfig, SimTick, TexturedModelRenderFace, ThirdPersonCameraConfig,
+    ThirdPersonCameraInput, ThirdPersonCameraState, ThirdPersonCameraTarget, VideoHz, VisualPacing,
+    WorldCamera, WorldProjection, WorldRenderPass, WorldSurfaceOptions, WorldTriCommand,
+    WorldVertex, PRIMITIVE_PACKET_SLOT_WORDS, Q12,
+};
+use psx_font::FontAtlas;
+use psx_game_runtime::vitality::{
+    BoostInventory, BoostModuleId, BoostSlotId, CombatStance, CombatStanceConfig, DualVitality,
+    PowerUpLoadout, VitalityChannelId, VitalityModifiers,
+};
+use psx_game_runtime::vitality_circles::VitalityCircleState;
+use psx_game_runtime::{
+    destructibles::RuntimeDestructibles,
+    poi::MessageController,
+    save::{SaveBlock, SavedPlayerPosition},
+};
+use psx_gpu::{
+    display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode},
+    material::{BlendMode, TextureMaterial},
+    ot::OrderingTable,
+    prim::{
+        QuadFlat, QuadTexturedGouraud, QuadTexturedMaterial, Sprite, TriFlat, TriTextured,
+        TriTexturedGouraud,
+    },
+    Gpu,
+};
+use psx_level::{
+    find_asset_of_kind, room_flags, AssetId, AssetKind, CharacterAnimationAction, InteractableKind,
+    InteractableRecord, LevelBoxPropRecord, LevelCameraRecord, LevelCharacterRecord,
+    LevelGameEntityRecord, LevelGameplaySfxEvent, LevelImagePropRecord, LevelRoomRecord,
+    LevelSkyRecord, LevelUiValueBinding, ModelClipIndex, ParticleEmitterRecord, RoomIndex,
+};
+use psx_vram::{TextureDepth, TexturePage};
+
+mod box_props;
+mod grid_materials;
+mod grid_runtime;
+mod world_common;
+#[cfg(feature = "cd-stream-benchmark")]
+use psx_game_runtime::cd_stream;
+mod aim_control;
+mod character_runtime;
+mod combat_input;
+mod crystal_palette;
+mod damage_numbers;
+mod debug_runtime;
+#[cfg(feature = "emulator-telemetry")]
+use debug_runtime::*;
+mod game_logic_runtime;
+mod hook_runtime;
+mod hook_signposting;
+mod image_props_runtime;
+mod input;
+mod level_data;
+mod loc;
+mod marker_runtime;
+mod model_rendering;
+mod overlay;
+mod particle_runtime;
+mod player_ranged;
+mod playtest_runtime;
+mod playtest_scene;
+mod playtest_update;
+// The stance HUD: the sprite art and its composition are shared with the host viewer and the
+// showcase, which use only part of them, hence the allowance.
+#[allow(dead_code)]
+#[path = "stance_hud_packets.rs"]
+mod hud_packets;
+#[allow(dead_code)]
+#[path = "stance_hud_sprites.rs"]
+mod hud_sprites;
+mod stance_hud;
+mod vitality_circle_runtime;
+use playtest_update::{Gait, LocoPhase};
+#[cfg(feature = "card-trace")]
+mod card_trace;
+mod room_lighting_runtime;
+mod runtime_arenas;
+mod runtime_config;
+mod runtime_schedule;
+mod sky_runtime;
+mod souls;
+mod vram_runtime;
+mod world_objects_runtime;
+
+use box_props::*;
+use world_common::*;
+
+/// The runtime that owns the cooked world: rendering, collision, activation,
+/// sky gating.
+pub(crate) type WorldRuntime = grid_runtime::GridRuntime;
+use character_runtime::*;
+use damage_numbers::*;
+use game_logic_runtime::*;
+use image_props_runtime::*;
+use input::*;
+use marker_runtime::*;
+use model_rendering::*;
+use overlay::*;
+use particle_runtime::*;
+use room_lighting_runtime::*;
+use runtime_arenas::*;
+use runtime_config::*;
+use runtime_schedule::RUNTIME_SCHEDULE;
+use sky_runtime::*;
+use souls::SoulsWallet;
+use vram_runtime::*;
+use world_objects_runtime::*;
+
+// Placeholder manifests reference unused statics; populated
+// manifests reference all of them. Quiet either side here.
+#[allow(dead_code, unused_imports)]
+mod generated {
+    // Host tests never read the local cook: `generated/` holds whatever project
+    // was last built, so a test that depended on it passed or failed with that
+    // choice. They run against a checked-in fixture instead.
+    #[cfg(not(test))]
+    include!(env!("PSXED_PLAYTEST_MANIFEST"));
+    #[cfg(test)]
+    include!("../test-fixtures/level_manifest.rs");
+}
+
+/// True when the manifest carries a cooked grid world; the placeholder
+/// manifest does not, and that build boots to a clear screen.
+pub(crate) const HAS_WORLD: bool = generated::PLAYTEST_HAS_WORLD;
+
+use generated::{
+    ASSETS, BOOST_MODULES, CHARACTERS, COMBAT_CAPSULES, EQUIPMENT, GAMEPLAY_SFX_CUES, MODELS,
+    MODEL_CLIPS, MODEL_CLIP_BOUNDS, MODEL_FRAME_BOUNDS, MODEL_SOCKETS, PERSISTENT_FLAG_COUNT,
+    PLAYTEST_PACKET_CAPACITY, PROJECT_SAVE_NAME, PROJECT_SAVE_TITLE, UI_FONTS, UI_NODES, UI_PAINTS,
+    UI_SFX_CUES, UI_SFX_SAMPLES, WEAPONS, WEAPON_APPEARANCES, WEAPON_HITBOXES,
+};
+#[cfg(feature = "cd-stream-bench")]
+use generated::{
+    GAMEPLAY_PACK_MAX_CHUNK_BYTES, PERSISTENT_ASSET_PAGE_COUNT, PERSISTENT_ASSET_SLOT_COUNT,
+    UI_PACK_IMAGE_CACHE_SLOTS, UI_PACK_MAX_CHUNK_BYTES, UI_PACK_START_LBA, UI_PACK_TOC,
+    UI_SFX_MAX_SAMPLE_BYTES, UI_SFX_PACK_FIRST_CHUNK,
+};
+use generated::{GAME_FLOW, OPTIONS, UI_SCENES};
+use generated::{
+    LEN_BOX_PROPS, LEN_GAME_ENTITIES, LEN_INTERACTABLES, LEN_LOGIC, LEN_MODEL_INSTANCES,
+};
+use level_data::{
+    ARCH_PROPS, ARCH_PROP_COLLISIONS, ARCH_PROP_SURFACES, BOX_PROPS, BOX_PROP_SURFACES,
+    CYLINDER_PROPS, CYLINDER_PROP_SURFACES, DESTRUCTIBLES, ENTITIES, GAME_ENTITIES,
+    GAME_ENTITY_IDS, IMAGE_PROPS, INTERACTABLES, INTERACTABLE_MESSAGES, LIGHTS, LOGIC,
+    MODEL_INSTANCES, PARTICLE_EMITTERS, PLAYER_CONTROLLER, PLAYER_SPAWN, ROOMS,
+    ROOM_REFLECTION_PROBES, VITALITY_CIRCLES, WORLD_AMBIENT_RGB, WORLD_MESSAGE, WORLD_OBJECTS,
+};
+
+/// Two ordering tables, alternated with the packet scratch's frame pair: the
+/// runner starts building a frame while the GPU still walks the previous
+/// one's table (`RenderSubmission::QueuedDoubleBuffered`).
+static mut OT: [OrderingTable<OT_DEPTH>; 2] = [OrderingTable::new(), OrderingTable::new()];
+/// Which end of the shared packet scratch the last built frame used; see
+/// `PacketFramePair`. Indexes `OT` too.
+static mut PACKET_FRAMES: PacketFramePair = PacketFramePair::new();
+fn world_camera_from_position_focus(
+    projection: WorldProjection,
+    position: RoomPoint,
+    focus: RoomPoint,
+) -> WorldCamera {
+    let dx = position.x.saturating_sub(focus.x);
+    let dz = position.z.saturating_sub(focus.z);
+    let radius =
+        isqrt_i32(square_i32_saturating(dx).saturating_add(square_i32_saturating(dz))).max(1);
+    let target_dy = focus.y.saturating_sub(position.y);
+    let pitch_len =
+        isqrt_i32(square_i32_saturating(radius).saturating_add(square_i32_saturating(target_dy)))
+            .max(1);
+    WorldCamera::from_basis(
+        projection,
+        position,
+        Q12::from_ratio(dx, radius),
+        Q12::from_ratio(dz, radius),
+        Q12::from_ratio(target_dy, pitch_len),
+        Q12::from_ratio(radius, pitch_len),
+    )
+}
+
+/// Locomotion crossfade window in sim ticks (60 Hz): long enough to
+/// soften idle/walk/run cuts, short enough that matrix-lerp shrink
+/// stays invisible.
+const PLAYER_ANIM_BLEND_LOCOMOTION_TICKS: u32 = 8;
+/// Attack/action crossfade window in sim ticks: snappier so combat
+/// startup frames are not softened away.
+const PLAYER_ANIM_BLEND_ACTION_TICKS: u32 = 4;
+/// Crossfade window when LEAVING a committed one-shot (attack, intro).
+/// Entering one stays snappy so its startup frames read, but a 2.5-4.5s
+/// swing cut to idle in four ticks is the harshest transition in the game;
+/// it wants a settle roughly as long as a footfall.
+const PLAYER_ANIM_BLEND_ACTION_OUT_TICKS: u32 = 14;
+/// Crossfade window between two stepping gaits (walk <-> run <-> strafe).
+/// Longer than the generic locomotion window because gait clips are
+/// cook-time aligned to foot-down and the incoming clip is entered at the
+/// outgoing clip's phase, so a long fade blends like poses instead of
+/// averaging opposite halves of a stride.
+const PLAYER_ANIM_BLEND_GAIT_TICKS: u32 = 10;
+
+mod duel;
+mod opening_sequence;
+
+struct Playtest {
+    duel: duel::Duel,
+    opening: opening_sequence::OpeningSequence,
+    /// The resident grid world loaded from the cooked manifest. Invalid grid
+    /// data fails initialization instead of falling back to another world
+    /// representation.
+    world_rt: Option<WorldRuntime>,
+    /// Ambient RGB for the room containing the player.
+    current_ambient_rgb: [u8; 3],
+    /// Index in ROOMS the player is currently in. Used to scope
+    /// model-instance + light queries.
+    room_index: RoomIndex,
+    /// Player locomotion state: position, yaw, stamina, and evade actions.
+    motor: CharacterMotorState,
+    /// Resolved Character driving the player -- `None` when no
+    /// `PLAYER_CONTROLLER` was authored. Falls back to the
+    /// pre-character debug controls in that case.
+    character: Option<RuntimeCharacter>,
+    /// Current animation state. Source of truth for which clip
+    /// `draw_player` plays each frame.
+    anim_state: PlayerAnim,
+    /// Tick the current animation started at -- used to phase
+    /// the loop relative to clip switches so transitions don't
+    /// pop into the middle of the new clip.
+    anim_start_tick: SimTick,
+    /// Non-looping gameplay animation lock. While active,
+    /// locomotion input is ignored and the current action clip
+    /// plays from start to finish.
+    anim_lock_until_tick: SimTick,
+    /// Active clip-transition crossfade: outgoing state, its frozen
+    /// clip-local tick, and the switch tick the blend ramps from.
+    /// Cleared on init/respawn; expires by elapsed ticks at render.
+    anim_blend_from: Option<(PlayerAnim, u32, SimTick)>,
+    /// Three-part gait (windup / cruise / winddown) phase; see
+    /// `walk_transition_input` and `walk_transition_state`.
+    loco: LocoPhase,
+    /// Which gait's clips the phase is playing (walk or run).
+    loco_gait: Gait,
+    /// Tick the current locomotion phase began.
+    loco_start_tick: SimTick,
+    /// Winddown variant chosen for the current stop (the gait's winddown from
+    /// the stride start, its mirror from the half stride).
+    loco_stop_anim: PlayerAnim,
+    /// Breakable box-prop state (broken bits, derived data, falls,
+    /// break bursts), owned by `psx_game_runtime::box_props` since the
+    /// phase-2 carve.
+    box_props: RuntimeBoxProps,
+    /// One health/affinity owner shared by typed world objects.
+    destructibles: RuntimeDestructibles<{ psx_level::MAX_DESTRUCTIBLES }>,
+    /// Souls-like game-entity SoA state over the cooked
+    /// `GAME_ENTITIES` records (phase 3; empty for record-free
+    /// projects and then inert).
+    game_entities: RuntimeGameEntities,
+    /// Exact attack clip/phase tokens emitted by the latest NPC tick. The
+    /// post-update pose pass consumes these before player melee, keeping enemy
+    /// body, equipment, and contact on one retained sample.
+    deferred_enemy_attacks: RuntimeDeferredEnemyAttacks,
+    /// Fixed-capacity swept combat projectiles. All-zero is an empty valid
+    /// state, so it remains in scene BSS beside the entity SoA.
+    combat_projectiles: RuntimeCombatProjectiles,
+    ranged_ready: combat_input::RangedReady,
+    hook_selected: Option<usize>,
+    hook_burst_started: bool,
+    hook_fov_delta_q8: i32,
+    hook_camera_pitch: i16,
+    hook_visible: u32,
+    hook_travel: Option<psx_game_runtime::hook_points::HookTravel>,
+    hook_target: Option<usize>,
+    hook_attached: Option<usize>,
+    fall_from_arch: bool,
+    hook_charge: psx_game_runtime::hook_points::ArchCharge,
+    aim_control: aim_control::AimControl,
+    /// Fixed-capacity visual aftermath for stopped combat projectiles.
+    combat_projectile_impacts: RuntimeProjectileImpactEffects,
+    attack_buffer: combat_input::AttackBuffer,
+    authored_attack: psx_game_runtime::combat_timing::Request,
+    authored_dodge: psx_game_runtime::combat_timing::Request,
+    attack_chain: psx_game_runtime::attack_chain::AttackChainState,
+    chain_blend_ticks: u8,
+    /// Floating damage numbers for hits dealt and taken. Purely
+    /// presentational: spawned from the damage sites, expired by their
+    /// own clock, and read only by the overlay pass. All-zero is a
+    /// valid empty pool, so it needs no boot stamp.
+    damage_numbers: DamageNumbers,
+    /// The run's soul total, credited when the player lands a killing blow.
+    /// All-zero is the empty wallet, so it needs no boot stamp.
+    souls: SoulsWallet,
+    /// Logic-entity runtime (delay queue, master gating, fan-out)
+    /// over the cooked `LOGIC` records (phase 3).
+    logic: RuntimeLogic,
+    /// Rolling fired total already reported to telemetry, so the
+    /// LOGIC_RECORDS_FIRED counter emits per-tick deltas.
+    logic_fired_reported: u16,
+    /// Horizon and Zenith health pools. Both must reach zero before the shared
+    /// death sequence arms; legacy untyped damage drains Horizon first and
+    /// spills its excess into Zenith.
+    player_vitality: DualVitality,
+    player_poise: psx_game_runtime::poise::Poise,
+    combat_flow: psx_game_runtime::combat_flow::CombatFlow,
+    /// Which pool is active. Only the active pool takes damage and only the
+    /// inactive one recovers, so swapping is how the player heals.
+    player_stance: CombatStance,
+    /// Authored tuning for the stance: damage multipliers, recovery delays and
+    /// rate, break threshold, and the swap cooldown.
+    player_stance_config: CombatStanceConfig,
+    /// Compact claim/effect state for authored vitality fields.
+    vitality_circles: VitalityCircleState,
+    /// Four runtime-assignable unique modules around the two health endpoints.
+    power_up_loadout: PowerUpLoadout,
+    /// Collected unique modules which are not currently installed in a socket.
+    power_up_inventory: BoostInventory,
+    /// Socket targeted by the inventory detail/assignment flow.
+    selected_power_up_slot: u8,
+    /// Collected item highlighted in the inventory browser.
+    selected_power_up_item: BoostModuleId,
+    /// Packed inventory navigation state: low two bits are the active pane
+    /// (sockets/modules/assignment), high bits retain the module-list cursor.
+    /// Keeping both in one byte matters in the PS1 scene BSS.
+    inventory_ui_state: u8,
+    /// Suppresses the live gameplay vitality HUD while the inventory owns the
+    /// screen; the inventory has its own socket presentation.
+    inventory_overlay_active: bool,
+    /// Remaining death-sequence ticks, shared by every death cause
+    /// (combat damage, liquid hazards, lethal water). Non-zero locks
+    /// player input until the shared checkpoint/spawn respawn completes.
+    hazard_death_ticks_remaining: u8,
+    /// Whether the running death sequence was armed by combat damage
+    /// rather than an environmental hazard (respawn logging only).
+    death_by_combat: bool,
+    /// Whether this life already reported its first successful equipped
+    /// weapon socket-pose resolution (PLAYER_WEAPON_ATTACHMENTS is one
+    /// per life; cleared at gameplay init and on respawn).
+    weapon_attach_reported: bool,
+    /// Entities already hit by the CURRENT player swing (bit i =
+    /// entity i): one swing connects at most once per enemy. Cleared
+    /// when an attack action starts.
+    // psx-numeric-allow-next-line: one-hit-per-swing bitmask over 64 entity records; bit ops only, two-word on R3000
+    swing_hit_mask: u64,
+    /// Last `player_contents` answer keyed by the position and height it was
+    /// sampled at. The tick asks twice (locomotion modifier before the move,
+    /// hazard after it); while the player stands still both answers are the
+    /// same three point-hull descents, ~3.6% of an idle vblank. Zero-initialised
+    /// to `None` with the rest of the scene; cleared on gameplay entry.
+    player_contents_memo: Option<(RoomPoint, i32, psx_grid::contents::LiquidContentsSample)>,
+    /// Player skeleton/presentation state frozen after the latest fixed update.
+    /// Body rendering, equipment sockets, and authored combat capsules all
+    /// consume this same snapshot until the next simulation tick.
+    player_actor_pose: Option<PlayerActorPoseSnapshot>,
+    player_dash_assembly: psx_game_runtime::model_rendering::PlayerDashAssembly,
+    player_scarf: psx_game_runtime::model_rendering::PlayerScarf,
+    /// Previous consecutive player pose. Active sword hitboxes sweep from
+    /// this pose into `player_actor_pose`, preventing fast animation motion
+    /// from tunnelling through an enemy between retained samples.
+    previous_player_actor_pose: Option<PlayerActorPoseSnapshot>,
+    /// Per-cooked-instance pose authority for the latest fixed update. The
+    /// table index is the `MODEL_INSTANCES` index, covering both live game
+    /// entities and static placed actors without render-time resampling.
+    instance_actor_poses: [Option<InstanceActorPoseSnapshot>; MAX_MODEL_INSTANCES],
+    /// Previous retained instance poses, used only for consecutive melee sweeps.
+    previous_instance_actor_poses: [Option<InstanceActorPoseSnapshot>; MAX_MODEL_INSTANCES],
+    /// Visibility result for cooked model instances. Grid worlds leave this at
+    /// all-visible and continue using their room window.
+    instance_visible_mask: u16,
+    /// Circle is shared by tap-evade and hold-sprint. We delay
+    /// either decision for a few simulation ticks: release before
+    /// the threshold becomes evade; holding past it becomes sprint.
+    evade_run_hold_ticks: u8,
+    evade_run_hold_consumed: bool,
+    /// Camera-relative stick vector captured when Circle went down (and
+    /// refreshed while it stays deflected during the hold). The evade fires
+    /// on release, by which time a quick tap has often let the stick go, so
+    /// the direction the player expressed at the press is what the dodge
+    /// takes.
+    evade_latched_move: (Q12, Q12),
+    /// Vblanks left on a buffered evade: a Circle tap that lands during an
+    /// attack, a hit reaction, or the previous dodge waits here and fires
+    /// on the first tick the actor is free again instead of being dropped.
+    evade_buffer_vblanks: u8,
+    orbit_yaw: Angle,
+    orbit_radius: i32,
+    /// Runtime third-person camera rig. Updated at simulation cadence
+    /// so control remains responsive when visuals are paced lower.
+    camera: ThirdPersonCameraState,
+    /// Last visual camera produced by the simulation update.
+    render_camera: WorldCamera,
+    /// Camera snapshot taken by `render` for the deferred overlay pass.
+    /// The flip (and so `render_overlay`) runs after the next fixed
+    /// update has already moved `render_camera`; world-anchored overlay
+    /// elements must use the camera the underlying frame was built with.
+    overlay_camera: WorldCamera,
+    /// Sim-tick snapshot taken by `render` alongside `overlay_camera`.
+    /// Time-animated overlay elements (atmosphere particles, lock-on
+    /// indicator) must use the tick of the frame they decorate: the
+    /// tick current at flip time depends on deadline-miss cadence, so
+    /// sampling it made the overlay's animation phase nondeterministic
+    /// across builds (the 3-pixel corridor LSB instability).
+    overlay_sim_tick: SimTick,
+    /// Overlay state for the frame currently being prepared on the CPU. It is
+    /// promoted to `overlay_*` only when that frame is submitted, after the
+    /// previous queued frame has used its own snapshot.
+    prepared_overlay_camera: WorldCamera,
+    prepared_overlay_sim_tick: SimTick,
+    /// Tick of the first gameplay update after loading completed. The
+    /// engine clock origin is set at app init, BEFORE CD loading, so
+    /// raw `ctx.sim_tick` VALUES carry the build- and disc-dependent
+    /// loading duration. Gameplay logic is immune (it compares ticks
+    /// from the same clock), but value-based animation phase (ambient
+    /// model instances, particles, atmosphere) must subtract this
+    /// epoch so visuals are a pure function of gameplay time.
+    gameplay_epoch: SimTick,
+    gameplay_epoch_set: bool,
+    /// fps-overlay counter state (burn builds): presented frames and
+    /// worst inter-frame gap over a rolling ~1s gameplay-tick window.
+    #[cfg(feature = "fps-overlay")]
+    fps_window_start: u32,
+    #[cfg(feature = "fps-overlay")]
+    fps_window_frames: u8,
+    #[cfg(feature = "fps-overlay")]
+    fps_last_tick: u32,
+    #[cfg(feature = "fps-overlay")]
+    fps_worst_gap: u8,
+    #[cfg(feature = "fps-overlay")]
+    fps_display: u8,
+    #[cfg(feature = "fps-overlay")]
+    fps_display_worst: u8,
+    /// Last movement result; stationary frames can use a broader cached
+    /// visibility candidate set without rebuilding it for camera-only turns.
+    player_moved_last_tick: bool,
+    /// Edge-triggered gameplay audio bits consumed once by GameApp after this
+    /// fixed update. A byte replaces five booleans and is zero-valid.
+    gameplay_sfx_events: u32,
+    /// True when the latest input frame is manually rotating the camera.
+    camera_turning_last_tick: bool,
+    /// Index into `MODEL_INSTANCES` for the current lock-on target.
+    /// Only live gameplay entities participate; scenery model instances
+    /// never enter the combat target set.
+    lock_target: Option<usize>,
+    camera_recenter_requested: bool,
+    lock_switch_stick_held: bool,
+    /// Consecutive ticks where the hard-lock target is outside break range.
+    /// Dead/despawned targets still release immediately.
+    lock_invalid_ticks: u8,
+    /// Automatic camera-only target. Suppressed after strong
+    /// manual camera input until the player leaves target range.
+    soft_lock_target: Option<usize>,
+    soft_lock_suppressed: bool,
+    /// Nearest authored interactable currently in range.
+    active_interactable: Option<usize>,
+    /// Last synchronized in-memory checkpoint. Future death/respawn
+    /// code restores from this; it is intentionally not persisted to
+    /// memory card yet.
+    checkpoint: Option<RuntimeCheckpoint>,
+    /// Simple modal message overlay opened by an interactable.
+    message_overlay: Option<RuntimeMessageOverlay>,
+    /// Combat-music gate fed by the enemy states each fixed tick.
+    combat_music: CombatMusicState,
+    /// The one-time "socket your modules" hint has been shown this launch.
+    /// It opens after the first item pickup's acquired panel closes.
+    socket_hint_shown: bool,
+    /// Paged POI/world-message controller. Unlike legacy checkpoint overlays,
+    /// it never pauses gameplay and only Cross can advance it.
+    poi_messages: MessageController,
+    /// Floor height under each Point of Interest, resolved once by a
+    /// downward trace so the beacon stands on the floor whatever height
+    /// the point was authored at. `i32::MIN` until resolved.
+    poi_floor_y: [i32; LEN_INTERACTABLES],
+    /// Presentation-step progress for the active POI panel and page type-on,
+    /// advanced by the simulation (see `tick_poi_presentation`).
+    /// Prepared/overlay copies keep deferred UI matched to its world frame.
+    poi_panel_frame: u16,
+    /// Keep the current content alive until its reverse transition finishes.
+    poi_closing: bool,
+    poi_page_type_frame: u16,
+    prepared_poi_panel_frame: u16,
+    prepared_poi_page_type_frame: u16,
+    overlay_poi_panel_frame: u16,
+    overlay_poi_page_type_frame: u16,
+    /// The frame the last render built for the present queue: its ordering
+    /// table's head and the arena words reserved for its recorded overlay.
+    /// Null when that render was not offered the queue.
+    queued_head: *const u32,
+    queued_overlay: *mut u32,
+    queued_overlay_words: usize,
+    /// The present queue is held off: last frame's packets ahead of the
+    /// world pass would not fit beside a queued frame, so the paired-arena
+    /// fence would wait for its kick early in the frame. Zero (the
+    /// `init_zeroed` state) offers the queue.
+    present_queue_held_off: bool,
+    /// Frames in the current stay: in the queue, or held off and fitting.
+    present_queue_frames: u16,
+    /// Doublings of the re-entry wait after short stays in the queue.
+    present_queue_backoff: u8,
+    /// Sim ticks since the last POI presentation step.
+    poi_presentation_subtick: u8,
+    /// Unique reward currently replacing the just-closed POI message panel.
+    acquired_module: BoostModuleId,
+    /// Save-persistent point-of-interest read/reward state.
+    poi_save: SaveBlock,
+    /// Card-load gate populated during the authored loading screen.
+    poi_save_loaded: bool,
+    /// Prevent an unavailable card from being rescanned on every loading
+    /// frame. Gameplay retries remain deliberately sparse.
+    poi_save_load_attempted: bool,
+    /// In-memory POI state changed since the last checkpoint/title handoff, or
+    /// the previous boundary write could not be verified.
+    poi_save_dirty: bool,
+    /// Spawn position retained for orbit-mode targeting.
+    spawn: RoomPoint,
+    /// Runtime UI font atlases, compacted from the cooked manifest's used fonts.
+    ui_fonts: [Option<FontAtlas>; MAX_RUNTIME_UI_FONTS],
+    /// Parsed models/materials, built once at init.
+    models: [Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
+    /// Persistent model bytes are resident and the parsed runtime tables are valid.
+    runtime_models_loaded: bool,
+    /// Horizon/Zenith palette copies of the player's and enemies' atlases.
+    /// All-zero (the `init_zeroed` state) is empty.
+    stance_cluts: model_rendering::StanceCluts,
+    /// The front-end/gameplay RAM union currently belongs to gameplay. False
+    /// while menu/loading images own it, and reset on every gameplay exit.
+    gameplay_asset_arena_active: bool,
+    /// Last world-ready condition set reported by `trace_world_ready_conditions`,
+    /// OR'd with a seen bit so the zeroed initial value cannot be mistaken for
+    /// "all conditions false, already reported".
+    #[cfg(feature = "boot-trace")]
+    world_ready_trace_mask: u32,
+    /// Last persistent-asset progress reported, so the trace can show movement.
+    #[cfg(feature = "boot-trace")]
+    world_ready_trace_progress: i32,
+    /// Whether the persistent-asset failure has already been announced. The
+    /// flag is sticky and the loading screen runs forever, so without this the
+    /// report would repeat every tick.
+    #[cfg(feature = "cd-stream-bench")]
+    persistent_failure_reported: bool,
+    /// Predecoded model face records, shared by `models`.
+    model_faces: [TexturedModelRenderFace; MAX_RUNTIME_MODEL_FACES],
+    model_face_count: usize,
+    /// Predecoded model part records, shared by `models`.
+    model_parts: [ModelPart; MAX_RUNTIME_MODEL_PARTS],
+    model_part_count: usize,
+    /// Predecoded model vertex records, shared by `models`.
+    model_vertices: [ModelVertex; MAX_RUNTIME_MODEL_DECODED_VERTICES],
+    model_vertex_count: usize,
+    /// Parsed animations, indexed like `MODEL_CLIPS`.
+    clips: [Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
+    /// VRAM-bound subtract-blended circular floor shadow.
+    shadow_material: Option<TextureMaterial>,
+    /// VRAM-bound tintable machine glyph for authored vitality circles.
+    vitality_circle_material: Option<TextureMaterial>,
+    /// VRAM-bound 16x16 white circular sprite used by particle emitters.
+    particle_material: Option<TextureMaterial>,
+    /// Immediate-mode cylinder overlay for tuning actor blockers.
+    #[cfg(feature = "collision-debug-overlay")]
+    show_collision_debug: bool,
+    /// Cooperative background policy for room-window and VRAM upload work.
+    streaming_jobs: RuntimeStreamingJobs,
+    /// Live scaled-radial threshold selected by the front-end Settings scene.
+    analog_deadzone: i16,
+    /// User-facing 1..=6 presentation brightness level.
+    brightness_level: u8,
+    /// Display-window picture offset (pixels right, scanlines down) selected by
+    /// the front-end Settings scene; zero is the standard centred picture.
+    screen_offset: (i16, i16),
+}
+
+impl Playtest {
+    /// Make the zeroed `SCENE` storage a valid `Playtest`, then stamp the
+    /// boot-time initial state (everything the old `const fn new()`
+    /// initializer stored as non-zero `.data` bytes).
+    ///
+    /// # Safety
+    ///
+    /// `scene` must point to `SCENE`'s link-time-zero storage, before any
+    /// other access to it: phase 1 below writes `None` into every
+    /// `Option` field through raw places because a niched `Option`'s
+    /// all-zero bytes can decode as `Some(<invalid payload>)`, and a
+    /// `&mut Playtest` may only be minted once every field holds a valid
+    /// value. Single-threaded boot path.
+    // Startup-only code: reserve RAM for gameplay allocations without shrinking hot render loops.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
+    unsafe fn init_zeroed(scene: *mut Self) {
+        use core::ptr::addr_of_mut;
+        // Phase 1 -- validity: `None` for EVERY `Option` field, so the
+        // borrow below stays sound no matter which payload niche the
+        // compiler picked for each `None` encoding (empirically, the
+        // room/model/font/material `Option`s niche into a payload
+        // bool/enum byte, making their `None` a NON-zero byte).
+        addr_of_mut!((*scene).world_rt).write(None);
+        addr_of_mut!((*scene).character).write(None);
+        addr_of_mut!((*scene).player_actor_pose).write(None);
+        addr_of_mut!((*scene).player_dash_assembly)
+            .write(psx_game_runtime::model_rendering::PlayerDashAssembly::new());
+        addr_of_mut!((*scene).player_scarf)
+            .write(psx_game_runtime::model_rendering::PlayerScarf::new());
+        addr_of_mut!((*scene).previous_player_actor_pose).write(None);
+        addr_of_mut!((*scene).hook_selected).write(None);
+        addr_of_mut!((*scene).hook_travel).write(None);
+        addr_of_mut!((*scene).hook_target).write(None);
+        addr_of_mut!((*scene).hook_attached).write(None);
+        addr_of_mut!((*scene).fall_from_arch).write(false);
+        addr_of_mut!((*scene).hook_charge).write(psx_game_runtime::hook_points::ArchCharge::EMPTY);
+        addr_of_mut!((*scene).lock_target).write(None);
+        addr_of_mut!((*scene).camera_recenter_requested).write(false);
+        addr_of_mut!((*scene).soft_lock_target).write(None);
+        addr_of_mut!((*scene).active_interactable).write(None);
+        addr_of_mut!((*scene).checkpoint).write(None);
+        addr_of_mut!((*scene).message_overlay).write(None);
+        addr_of_mut!((*scene).socket_hint_shown).write(false);
+        addr_of_mut!((*scene).combat_music).write(CombatMusicState::default());
+        addr_of_mut!((*scene).poi_messages).write(MessageController::new());
+        addr_of_mut!((*scene).shadow_material).write(None);
+        addr_of_mut!((*scene).vitality_circle_material).write(None);
+        addr_of_mut!((*scene).particle_material).write(None);
+        for slot in 0..MAX_RUNTIME_UI_FONTS {
+            addr_of_mut!((*scene).ui_fonts[slot]).write(None);
+        }
+        for slot in 0..MAX_RUNTIME_MODELS {
+            addr_of_mut!((*scene).models[slot]).write(None);
+        }
+        for slot in 0..MAX_RUNTIME_MODEL_CLIPS {
+            addr_of_mut!((*scene).clips[slot]).write(None);
+        }
+        for slot in 0..MAX_MODEL_INSTANCES {
+            addr_of_mut!((*scene).instance_actor_poses[slot]).write(None);
+            addr_of_mut!((*scene).previous_instance_actor_poses[slot]).write(None);
+        }
+        // Phase 2 -- boot state: every field is now a valid value, so
+        // mint the exclusive borrow and stamp the non-zero initial state.
+        (*scene).init_boot_state();
+    }
+
+    /// Stamp the non-zero boot state (what the old `const fn new()`
+    /// stored in `.data`) onto the zeroed-and-made-valid scene: ambient
+    /// light, sentinel-filled pools, camera rig, fallback materials, and
+    /// the streaming-job budget. Per-element loops for the pools -- no
+    /// whole-array temporaries. Every field not stamped here boots as
+    /// all-zero bytes, which IS its old initializer value.
+    fn init_boot_state(&mut self) {
+        self.current_ambient_rgb = [0x80; 3];
+        self.destructibles = RuntimeDestructibles::EMPTY;
+        self.motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
+        self.player_contents_memo = None;
+        self.player_vitality = DualVitality::equal(PLAYER_MAX_HEALTH);
+        self.player_poise = psx_game_runtime::poise::Poise::EMPTY;
+        self.combat_flow = psx_game_runtime::combat_flow::CombatFlow::FULL;
+        // Playtest lives in a zeroed MaybeUninit, and a zeroed stance config
+        // would mean no damage and no recovery at all, so it is set explicitly
+        // on every reset rather than relying on the zero pattern.
+        self.player_stance = CombatStance::new(VitalityChannelId::One);
+        self.vitality_circles = VitalityCircleState::EMPTY;
+        self.player_stance_config = CombatStanceConfig::DEFAULT;
+        self.power_up_loadout = PowerUpLoadout::DEFAULT;
+        self.power_up_inventory = BoostInventory::EMPTY;
+        self.poi_save = SaveBlock::new(PLAYER_MAX_HEALTH, PERSISTENT_FLAG_COUNT);
+        self.poi_save_loaded = false;
+        self.poi_save_load_attempted = false;
+        self.poi_save_dirty = false;
+        self.poi_floor_y = [i32::MIN; LEN_INTERACTABLES];
+        self.poi_panel_frame = 0;
+        self.poi_closing = false;
+        self.poi_page_type_frame = 0;
+        self.prepared_poi_panel_frame = 0;
+        self.prepared_poi_page_type_frame = 0;
+        self.overlay_poi_panel_frame = 0;
+        self.overlay_poi_page_type_frame = 0;
+        self.poi_presentation_subtick = 0;
+        self.selected_power_up_slot = BoostSlotId::HorizonEmpty as u8;
+        self.selected_power_up_item = BoostModuleId::NONE;
+        self.inventory_ui_state = crate::playtest_scene::INVENTORY_UI_SOCKETS;
+        self.inventory_overlay_active = false;
+        self.acquired_module = BoostModuleId::NONE;
+        // Zero bytes already decode as `Idle`; stamped for self-documentation.
+        self.anim_state = PlayerAnim::Idle;
+        self.anim_blend_from = None;
+        self.loco = LocoPhase::Idle;
+        self.box_props.init();
+        self.orbit_yaw = CAMERA_START_YAW;
+        self.orbit_radius = CAMERA_START_RADIUS;
+        self.camera = ThirdPersonCameraState::new(CAMERA_START_YAW);
+        self.render_camera = WorldCamera::from_basis(
+            PROJECTION,
+            WorldVertex::ZERO,
+            Q12::ZERO,
+            Q12::ONE,
+            Q12::ZERO,
+            Q12::ONE,
+        );
+        self.overlay_camera = WorldCamera::from_basis(
+            PROJECTION,
+            WorldVertex::ZERO,
+            Q12::ZERO,
+            Q12::ONE,
+            Q12::ZERO,
+            Q12::ONE,
+        );
+        self.prepared_overlay_camera = self.overlay_camera;
+        for vertex in self.model_vertices.iter_mut() {
+            *vertex = ModelVertex::ZERO;
+        }
+        self.streaming_jobs = RuntimeStreamingJobs::new();
+        self.analog_deadzone = ANALOG_DEADZONE_DEFAULT;
+        self.brightness_level = BRIGHTNESS_DEFAULT;
+        self.instance_visible_mask = u16::MAX;
+    }
+
+    fn step_streaming_jobs(&mut self, ctx: &mut Ctx) {
+        let background_tick = self.streaming_jobs.background_tick(ctx);
+        // Every tick, not just background ticks. The controller steps over
+        // sectors that land while nobody is collecting, and this read is a
+        // loading screen with nothing to stay responsive for.
+        #[cfg(feature = "cd-stream-bench")]
+        if !self.step_persistent_model_assets() {
+            // The persistent model pack owns the CD controller until its
+            // session-lifetime read finishes.
+            return;
+        }
+        // The resident grid world owns geometry, activation and collision.
+        // Its rooms stream in around the player every tick; shared VRAM
+        // uploads and material resolution follow on background ticks.
+        let player = self.motor.position();
+        let eye = self.render_camera.position;
+        let demand_only = self.combat_music.engaged;
+        if let Some(world_rt) = self.world_rt.as_mut() {
+            world_rt.stream(
+                [player.x, player.y, player.z],
+                Some([eye.x, eye.y, eye.z]),
+                demand_only,
+            );
+        }
+        // A world that bakes a sky per chunk shows the player's chunk's, once
+        // the level has loaded: sky reads stay off the drive while the first
+        // rooms stream in.
+        #[cfg(feature = "cd-stream-bench")]
+        if self.initial_world_ready() {
+            let room = self
+                .world_rt
+                .as_ref()
+                .map(|world_rt| world_rt.player_room());
+            step_chunk_sky(room);
+            let hold_near = self
+                .world_rt
+                .as_ref()
+                .map_or(0, |world_rt| world_rt.card_hold_near());
+            #[cfg(feature = "far-cards")]
+            step_cards([eye.x, eye.y, eye.z], hold_near);
+            #[cfg(not(feature = "far-cards"))]
+            let _ = hold_near;
+            crate::vram_runtime::step_panels(
+                [eye.x, eye.y, eye.z],
+                self.render_camera.projection.focal_length,
+            );
+        }
+        if self.world_rt.is_some() && background_tick {
+            let _ = self.streaming_jobs.step_vram_uploads();
+            if let Some(world_rt) = self.world_rt.as_mut() {
+                let _ = world_rt.refresh_materials(true);
+            }
+        }
+    }
+
+    fn initial_world_ready(&mut self) -> bool {
+        #[cfg(not(feature = "cd-stream-bench"))]
+        {
+            self.world_rt
+                .as_ref()
+                .is_none_or(|world_rt| world_rt.rooms_ready() && world_rt.materials_ready())
+        }
+        #[cfg(feature = "cd-stream-bench")]
+        {
+            if !self.runtime_models_loaded {
+                // Traced too: this is the earliest condition and it returns
+                // before the rest are even evaluated, so a stall here is
+                // otherwise silent.
+                // `failed` is sticky and stops the pump, so a single bad
+                // persistent asset hangs the loading screen forever with
+                // nothing reported. Distinguish the two.
+                let arena_failed = persistent_assets_arena().failed();
+                if arena_failed && !self.persistent_failure_reported {
+                    // Unconditional, not behind `boot-trace`: this state never
+                    // resolves, so the run is over and the only question left
+                    // is which asset and why. Reason 0..11 is a cd_stream chunk
+                    // status, 100+ an asset_streaming reason code.
+                    self.persistent_failure_reported = true;
+                    // `psx_rt::tty` only exists on the guest target; the gate
+                    // is cfg-true there, so this stays the same code on MIPS.
+                    #[cfg(target_arch = "mips")]
+                    {
+                        psx_rt::tty::print("PERSISTENT ASSET LOAD FAILED: asset ");
+                        psx_rt::tty::print_hex_u32(persistent_assets_arena().failed_asset() as u32);
+                        psx_rt::tty::print(" reason ");
+                        psx_rt::tty::print_hex_u32(persistent_assets_arena().failed_reason());
+                        psx_rt::tty::println("");
+                    }
+                }
+                #[cfg(feature = "boot-trace")]
+                {
+                    // Distinguish "slow" from "wedged": a load that is merely
+                    // slow keeps moving this.
+                    let progress = persistent_assets_arena().progress_q12();
+                    if progress != self.world_ready_trace_progress {
+                        self.world_ready_trace_progress = progress;
+                        psx_rt::tty::print("persistent progress q12 ");
+                        psx_rt::tty::print_hex_u32(progress as u32);
+                        psx_rt::tty::println("");
+                    }
+                }
+                self.trace_world_ready_conditions(&[
+                    ("runtime_models_loaded", false),
+                    ("persistent_assets_not_failed", !arena_failed),
+                ]);
+                return false;
+            }
+            self.world_rt
+                .as_ref()
+                .is_none_or(|world_rt| world_rt.rooms_ready() && world_rt.materials_ready())
+        }
+    }
+
+    /// Report which world-ready conditions are still false, once per change.
+    ///
+    /// A stalled load is otherwise invisible: `initial_world_ready` collapses
+    /// seven conditions into one bool, none of them is a telemetry counter, and
+    /// the loading screen looks identical whichever one is stuck. Finding that
+    /// out cost a whole session once (see docs/known-issues-2026-07-25.md).
+    ///
+    /// Printing only on change keeps a 30 Hz loading loop from flooding the TTY
+    /// while still showing the order conditions settle in, which is what says
+    /// whether a load is progressing or wedged.
+    #[cfg(feature = "cd-stream-bench")]
+    fn trace_world_ready_conditions(&mut self, conditions: &[(&str, bool)]) {
+        #[cfg(not(feature = "boot-trace"))]
+        {
+            let _ = conditions;
+        }
+        #[cfg(feature = "boot-trace")]
+        {
+            let mut mask = 0u32;
+            let mut i = 0;
+            while i < conditions.len() {
+                if conditions[i].1 {
+                    mask |= 1 << i;
+                }
+                i += 1;
+            }
+            const TRACED: u32 = 1 << 31;
+            if mask | TRACED == self.world_ready_trace_mask {
+                return;
+            }
+            self.world_ready_trace_mask = mask | TRACED;
+            psx_rt::tty::println("world-ready pending:");
+            let mut i = 0;
+            while i < conditions.len() {
+                if !conditions[i].1 {
+                    psx_rt::tty::println(conditions[i].0);
+                }
+                i += 1;
+            }
+        }
+    }
+
+    fn update_evade_run_button(&mut self, ctx: &Ctx, delta_vblanks: u16) -> EvadeRunIntent {
+        if ctx.just_pressed(EVADE_RUN_BUTTON) {
+            self.evade_run_hold_ticks = 0;
+            self.evade_run_hold_consumed = false;
+        }
+
+        if ctx.is_held(EVADE_RUN_BUTTON) {
+            self.evade_run_hold_ticks = self
+                .evade_run_hold_ticks
+                .saturating_add(delta_vblanks.min(u8::MAX as u16) as u8);
+            if self.evade_run_hold_ticks >= EVADE_RUN_HOLD_VBLANKS {
+                self.evade_run_hold_consumed = true;
+            }
+            return EvadeRunIntent {
+                // Movement responds immediately; the hold threshold only
+                // decides whether release means evade or stop sprinting.
+                sprint: true,
+                evade: false,
+            };
+        }
+
+        let evade = ctx.just_released(EVADE_RUN_BUTTON) && !self.evade_run_hold_consumed;
+        self.evade_run_hold_ticks = 0;
+        self.evade_run_hold_consumed = false;
+        EvadeRunIntent {
+            sprint: false,
+            evade,
+        }
+    }
+}
+
+fn interactable_is_active(interactable: &InteractableRecord) -> bool {
+    (interactable.flags & psx_level::interactable_flags::ENABLED) != 0
+}
+
+fn interactable_message_text(interactable: &InteractableRecord) -> (&'static str, &'static str) {
+    INTERACTABLE_MESSAGES
+        .get(interactable.message as usize)
+        .map(|message| (message.title, message.body))
+        .unwrap_or(match interactable.kind {
+            InteractableKind::Message => ("ECHO REMNANT", ""),
+            InteractableKind::Checkpoint => ("SYNC RELAY", "Relay synchronized."),
+            InteractableKind::PointOfInterest => ("", ""),
+        })
+}
+
+fn begin_world_render_pass<'a, 'ot>(
+    ot: &'a mut OtFrame<'ot, OT_DEPTH>,
+    commands: &'a mut [WorldTriCommand],
+) -> WorldRenderPass<'a, 'ot, OT_DEPTH> {
+    // Bucketed: the ordering table is the radix sort, no per-frame comparison
+    // sort (docs/perf-30fps.md, experiment 2).
+    WorldRenderPass::new_bucketed(ot, commands)
+}
+
+fn playtest_visual_pacing(video_mode: VideoMode) -> VisualPacing {
+    match video_mode {
+        VideoMode::Ntsc => VisualPacing::EveryNVBlanks(2),
+        // PAL is 50Hz, so exact 30Hz pacing does not divide cleanly.
+        // Use a deterministic 25Hz fallback instead of a jittery cadence.
+        VideoMode::Pal => VisualPacing::EveryNVBlanks(2),
+    }
+}
+
+/// The `Playtest` scene is ~227 KB; keeping it as a `main` stack local
+/// pushed `$sp` down into `.bss`. Place it in static storage so it no
+/// longer competes with the stack for the same region.
+///
+/// Flat-binary discipline (same as `runtime_arenas`): the storage must be
+/// link-time zero so it lands in `.bss` -- NOLOAD in the PSX-EXE -- instead
+/// of storing ~227 KB of initializer bytes in the flat binary's `.data`
+/// (which the old `Playtest::new()` image did: sentinel-filled pools,
+/// fallback materials, and niched `Option` fields are non-zero bytes).
+///
+/// `MaybeUninit` storage rather than an all-zero `const Playtest` because
+/// no such value exists: several `Option` fields niche their discriminant
+/// into a payload bool/enum byte, so their `None` is a NON-zero byte and
+/// the all-zero pattern would decode as `Some(<invalid payload>)`. NOT
+/// ready for use until [`Playtest::init_zeroed`] stamps validity and the
+/// boot state at the top of `main`, before anything else touches it.
+static mut SCENE: core::mem::MaybeUninit<Playtest> = core::mem::MaybeUninit::zeroed();
+
+/// The game's heap, which reuses what is freed (`psx-rt`'s `alloc` feature is off); `main`
+/// gives it the range the linker left.
+#[cfg(target_arch = "mips")]
+#[global_allocator]
+static HEAP: psx_game_runtime::reuse_heap::ReuseHeap =
+    psx_game_runtime::reuse_heap::ReuseHeap::new();
+
+// psx-rt's `_start` calls this through an unmangled `extern "Rust" { fn main(); }`,
+// so the guest needs the raw symbol. Under `cargo test` libtest owns the `main`
+// entry symbol, so only there is this one left mangled. `not(test)` is true for
+// every guest build, so MIPS keeps the exact same `#[no_mangle] fn main`.
+#[cfg_attr(not(test), no_mangle)]
+fn main() -> ! {
+    // The heap first: nothing may allocate before it has its range.
+    #[cfg(target_arch = "mips")]
+    // SAFETY: first thing the program does; `__heap_start..__heap_end` is the range
+    // `psoxide.ld` leaves between .bss and the stack reserve (empty when they meet), used by
+    // nothing else.
+    unsafe {
+        extern "C" {
+            static __heap_start: u8;
+            static __heap_end: u8;
+        }
+        let start = &raw const __heap_start as usize;
+        HEAP.init(start, &raw const __heap_end as usize);
+    }
+    // Stamp the scene's boot state onto its link-time-zero storage BEFORE
+    // any other use (see `SCENE` and `Playtest::init_zeroed`).
+    // SAFETY: single-threaded boot path; the raw stamping happens before
+    // this one exclusive borrow is minted (`MaybeUninit<T>` is
+    // `#[repr(transparent)]`, so the cast is layout-exact), and nothing
+    // else touches the static.
+    let scene: &mut Playtest = unsafe {
+        let scene = core::ptr::addr_of_mut!(SCENE).cast::<Playtest>();
+        Playtest::init_zeroed(scene);
+        &mut *scene
+    };
+    // The scene now lives in `.bss`, not on the stack; this guard still
+    // checks that the live stack frames (and the rest of static data) leave
+    // headroom between `$sp` and the top of `.bss` instead of silently
+    // corrupting `static` buffers at runtime.
+    #[cfg(target_arch = "mips")]
+    psx_rt::assert_stack_headroom();
+    // Stamp the runtime arenas' initial state onto their link-time-zero
+    // storage before anything can touch them (see `runtime_arenas`).
+    init_runtime_arenas();
+    game_trace("editor-playtest: init ok");
+    let video_mode = VideoMode::Ntsc;
+    let config = Config {
+        clear_color: (5, 7, 12),
+        video_mode,
+        visual_pacing: playtest_visual_pacing(video_mode),
+        scheduler: SchedulerConfig::new()
+            .with_max_fixed_ticks_before_visual(RUNTIME_SCHEDULE.max_fixed_ticks_before_visual)
+            .with_visual_lockstep(cfg!(feature = "lockstep-visuals")),
+        loading_ui_scene: generated::LOADING_UI_SCENE,
+        music_tracks: generated::MUSIC_TRACKS,
+        ..Config::default()
+    };
+    // Drive the cooked game flow (front-end UI scenes + gameplay) rather than
+    // booting straight into gameplay, so an authored menu shows first and
+    // `GAME_FLOW.entry` (set from the project's boot target) decides where
+    // play begins.
+    App::run_with_flow(
+        config,
+        &GAME_FLOW,
+        UI_SCENES,
+        UI_NODES,
+        UI_PAINTS,
+        OPTIONS,
+        UI_SFX_SAMPLES,
+        UI_SFX_CUES,
+        GAMEPLAY_SFX_CUES,
+        scene,
+    );
+}

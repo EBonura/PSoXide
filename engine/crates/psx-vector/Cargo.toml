@@ -1,0 +1,26 @@
+[package]
+name = "psx-vector"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Cooked vector graphics for the PS1: the PSVG wire format and a no_std integer-only runtime that draws named groups as Gouraud triangles."
+
+[lints]
+workspace = true
+
+[dependencies]
+# Explicit paths, as in psx-engine: this crate is consumed from outside its
+# native workspace too.
+psx-gpu = { path = "../../../sdk/crates/psx-gpu" }
+psx-math = { path = "../../../sdk/crates/psx-math" }
+
+[features]
+default = []
+# The PSVG writer, used by the host cooker and by tests. Pulls in `alloc`;
+# the runtime never enables it.
+encode = []
+
+[dev-dependencies]
+# Lets the unit tests build assets with the writer without a feature flag.
+psx-vector = { path = ".", features = ["encode"] }

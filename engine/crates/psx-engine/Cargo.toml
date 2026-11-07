@@ -1,0 +1,65 @@
+[package]
+name    = "psx-engine"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "PSoXide engine layer. Scene/App framework + canonical unit types (Angle, Frames) sitting on top of the SDK. Host-independent; MIPS-target only."
+
+[dependencies]
+# Explicit paths rather than `workspace = true` so this crate
+# resolves cleanly when consumed from outside its native workspace
+# (the editor frontend pulls it in for the 3D-viewport host renderer).
+psx-asset = { path = "../../../sdk/crates/psx-asset" }
+psx-cdstream = { path = "../../../sdk/crates/psx-cdstream" }
+psx-font  = { path = "../../../sdk/crates/psx-font" }
+psx-gpu   = { path = "../../../sdk/crates/psx-gpu" }
+psx-gte   = { path = "../../../sdk/crates/psx-gte" }
+psx-hw    = { path = "../../../crates/psx-hw" }
+psx-io    = { path = "../../../sdk/crates/psx-io" }
+psx-level = { path = "../psx-level" }
+psx-math  = { path = "../../../sdk/crates/psx-math" }
+psx-telemetry = { path = "../../../sdk/crates/psx-telemetry" }
+psx-pad   = { path = "../../../sdk/crates/psx-pad" }
+psx-tick  = { path = "../../../sdk/crates/psx-tick" }
+psx-spu   = { path = "../../../sdk/crates/psx-spu" }
+psx-sfx   = { path = "../../../sdk/crates/psx-sfx" }
+psx-settings = { path = "../../../sdk/crates/psx-settings", default-features = false }
+psx-vram  = { path = "../../../sdk/crates/psx-vram" }
+# Also on the host: `scratchpad` re-exports its Region/ScratchpadStack, whose
+# layout checks are consts every build evaluates (on the host `run` is a plain
+# call).
+psx-rt = { path = "../../../sdk/crates/psx-rt" }
+
+[dev-dependencies]
+trybuild = "1"
+
+[features]
+default = []
+boot-trace = ["psx-rt/boot-trace"]
+emulator-telemetry = []
+# Debug-line output only (no stage/counter events): a lighter path for guest
+# builds that are too close to the RAM limit for full emulator telemetry.
+debug-log = []
+hardware-boot-visual = []
+room-surface-profile = []
+# Player skinned-vertex live-capture instrument (the HWB-008..011
+# explosion-hunt channel). Off by default: the per-vertex observe and
+# per-joint compose recording cost real cycles and must not ride along
+# in shipping or performance-measurement builds.
+vert-debug = []
+# Hand frames of scenes that ask for RenderSubmission::PresentQueue to
+# psx-rt's VBlank-kicked present queue. Without it those scenes present the
+# QueuedDoubleBuffered way, and no SDK code pays for the queue.
+present-queue = ["psx-rt/present-queue"]
+# Read the pads from `psx_pad::console`, the interrupt-driven pad engine, instead
+# of polling them from the frame loop: no spinning on the controller port, an
+# empty port 2 costs nothing, and a memory card borrows the port as a lease.
+# Falls back to the synchronous driver if the engine cannot install. Opt-in
+# per game (sdk/docs/PAD-IRQ-ENGINE.md).
+pad-irq-engine = ["psx-pad/irq-engine"]
+# Earlier name of pad-irq-engine, kept so editor-playtest and older callers still build.
+pad-irq = ["pad-irq-engine"]
+
+[lints]
+workspace = true

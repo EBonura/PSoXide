@@ -1,0 +1,2785 @@
+use std::collections::{HashMap, HashSet};
+use std::env;
+use std::fmt::Write as FmtWrite;
+use std::fs;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+
+mod web_dist;
+
+const ONE_VBLANK_CYCLES: u64 = 564_480;
+const CPU_HZ: f64 = 33_868_800.0;
+
+fn main() {
+    if let Err(error) = run() {
+        eprintln!("{error}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<(), String> {
+    let mut args: Vec<String> = env::args().skip(1).collect();
+    let Some(command) = args.first().cloned() else {
+        return Err(help());
+    };
+    args.remove(0);
+    match command.as_str() {
+        "lint-policy-guard" => lint_policy_guard(),
+        "runtime-numeric-guard" => runtime_numeric_guard(),
+        "bake-spectrum" => bake_spectrum(&args),
+        "cortex-bringup-report" => cortex_bringup_report(&args),
+        "cortex-stream-guard" => cortex_stream_guard(&args),
+        "vblank-chart" => vblank_chart(&args),
+        "gen-tones" => gen_tones(),
+        "gen-fonts" => gen_fonts(),
+        "verify-web-dist" => web_dist::run(&args),
+        "-h" | "--help" | "help" => Err(help()),
+        other => Err(format!(
+            "unknown psoxide-dev command `{other}`\n\n{}",
+            help()
+        )),
+    }
+}
+
+fn help() -> String {
+    "usage: psoxide-dev <command> [args]\n\
+     commands:\n\
+       lint-policy-guard\n\
+       runtime-numeric-guard\n\
+       bake-spectrum <input.wav> -o <output.bin> [--fps N] [--bands N] [--seconds S]\n\
+       cortex-bringup-report [--out REPORT.md] [--fail-on-warn]\n\
+       cortex-stream-guard [--profile profile.csv] [--cdda-log cdda.log]\n\
+       vblank-chart --in <profile.csv> --out <chart.html> [--title TITLE]\n\
+       gen-tones\n\
+       gen-fonts\n\
+       verify-web-dist <dist> [--public-disc]"
+        .to_string()
+}
+
+fn repo_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("tools/psoxide-dev is two levels below repo root")
+        .to_path_buf()
+}
+
+fn resolve_from_cwd(path: &str) -> PathBuf {
+    let path = PathBuf::from(path);
+    if path.is_absolute() {
+        path
+    } else {
+        env::current_dir()
+            .unwrap_or_else(|_| repo_root())
+            .join(path)
+    }
+}
+
+fn relative_to_root(path: &Path) -> String {
+    path.strip_prefix(repo_root())
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+fn lint_policy_guard() -> Result<(), String> {
+    let root = repo_root();
+    // The three real workspace roots. editor/ and emu/ merged into the
+    // root workspace (abeb9fef) -- their crates inherit root's lints.
+    // Root and engine are the editor's own and must match exactly. sdk/ is
+    // imported from PSoXide, which may be stricter: it must carry every
+    // editor lint at the same level or a stricter one, and may add its own.
+    let reference_path = root.join("Cargo.toml");
+    let engine_path = root.join("engine/Cargo.toml");
+    let sdk_path = root.join("sdk/Cargo.toml");
+    let sections = ["workspace.lints.rust", "workspace.lints.clippy"];
+    let mut violations = Vec::new();
+    for section in sections {
+        let reference = extract_toml_section(&reference_path, section)?;
+        let Some(reference) = reference else {
+            violations.push(format!(
+                "{} missing [{section}]",
+                relative_to_root(&reference_path)
+            ));
+            continue;
+        };
+        match extract_toml_section(&engine_path, section)? {
+            None => violations.push(format!(
+                "{} missing [{section}]",
+                relative_to_root(&engine_path)
+            )),
+            Some(engine) if engine != reference => violations.push(format!(
+                "{} [{section}] differs from {}",
+                relative_to_root(&engine_path),
+                relative_to_root(&reference_path)
+            )),
+            Some(_) => {}
+        }
+        match extract_toml_section(&sdk_path, section)? {
+            None => violations.push(format!(
+                "{} missing [{section}]",
+                relative_to_root(&sdk_path)
+            )),
+            Some(sdk) => {
+                for problem in lints_at_least_as_strict(&reference, &sdk) {
+                    violations.push(format!(
+                        "{} [{section}] {problem} (editor: {})",
+                        relative_to_root(&sdk_path),
+                        relative_to_root(&reference_path)
+                    ));
+                }
+            }
+        }
+    }
+    if !violations.is_empty() {
+        eprintln!("lint policy guard failed.");
+        eprintln!(
+            "Keep [workspace.lints.rust] and [workspace.lints.clippy] identical in the root and engine manifests; sdk/ may only add lints or make them stricter.\n"
+        );
+        for violation in violations {
+            eprintln!("{violation}");
+        }
+        return Err("lint policy guard failed".to_string());
+    }
+    println!("lint policy guard: ok (3 manifests)");
+    Ok(())
+}
+
+/// One `[workspace.lints.*]` entry: its level and its priority.
+#[derive(Debug, PartialEq, Eq)]
+struct LintSetting {
+    level: u8,
+    priority: i64,
+}
+
+/// Rank a lint level from `allow` (0) to `forbid` (3).
+fn lint_level_rank(level: &str) -> Option<u8> {
+    match level {
+        "allow" | "expect" => Some(0),
+        "warn" => Some(1),
+        "deny" => Some(2),
+        "forbid" => Some(3),
+        _ => None,
+    }
+}
+
+/// Parse `name = "level"` or `name = { level = "level", priority = n }`.
+fn parse_lint_line(line: &str) -> Option<(String, LintSetting)> {
+    let (name, value) = line.split_once('=')?;
+    let name = name.trim().to_string();
+    let value = value.trim();
+    let quoted = |text: &str| -> Option<String> {
+        let text = text.trim();
+        let inner = text.strip_prefix('"')?;
+        Some(inner[..inner.find('"')?].to_string())
+    };
+    let (level, priority) = if let Some(table) = value.strip_prefix('{') {
+        let table = table.trim_end().strip_suffix('}')?;
+        let mut level = None;
+        let mut priority = 0;
+        for field in table.split(',') {
+            let (key, field_value) = field.split_once('=')?;
+            match key.trim() {
+                "level" => level = Some(quoted(field_value)?),
+                "priority" => priority = field_value.trim().parse().ok()?,
+                _ => return None,
+            }
+        }
+        (level?, priority)
+    } else {
+        (quoted(value)?, 0)
+    };
+    Some((
+        name,
+        LintSetting {
+            level: lint_level_rank(&level)?,
+            priority,
+        },
+    ))
+}
+
+/// Every lint in `editor` must appear in `sdk` at the same level or a
+/// stricter one, with the same priority. Returns one message per lint that
+/// does not, naming it.
+fn lints_at_least_as_strict(editor: &[String], sdk: &[String]) -> Vec<String> {
+    let sdk: HashMap<String, LintSetting> = sdk
+        .iter()
+        .filter_map(|line| parse_lint_line(line))
+        .collect();
+    let mut problems = Vec::new();
+    for line in editor {
+        if line.trim_start().starts_with('#') {
+            continue;
+        }
+        let Some((name, wanted)) = parse_lint_line(line) else {
+            problems.push(format!("cannot read the editor entry `{line}`"));
+            continue;
+        };
+        match sdk.get(&name) {
+            None => problems.push(format!("is missing `{name}`")),
+            Some(found) if found.level < wanted.level => {
+                problems.push(format!("sets `{name}` weaker than the editor"))
+            }
+            Some(found) if found.priority != wanted.priority => {
+                problems.push(format!("sets `{name}` with a different priority"))
+            }
+            Some(_) => {}
+        }
+    }
+    problems
+}
+
+fn extract_toml_section(path: &Path, section: &str) -> Result<Option<Vec<String>>, String> {
+    let text = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let header = format!("[{section}]");
+    let mut lines = text.lines();
+    while let Some(line) = lines.next() {
+        if line.trim() != header {
+            continue;
+        }
+        let mut body = Vec::new();
+        for candidate in lines.by_ref() {
+            if candidate.starts_with('[') {
+                break;
+            }
+            if !candidate.trim().is_empty() {
+                body.push(candidate.trim_end().to_string());
+            }
+        }
+        return Ok(Some(body));
+    }
+    Ok(None)
+}
+
+fn runtime_numeric_guard() -> Result<(), String> {
+    let root = repo_root();
+    let mut runtime_roots = vec![
+        root.join("engine/crates/psx-engine/src"),
+        root.join("engine/crates/psx-game-runtime/src"),
+        root.join("engine/crates/psx-level/src"),
+        root.join("engine/crates/psx-grid/src"),
+        root.join("engine/crates/psx-vector/src"),
+    ];
+    push_child_src_dirs(&mut runtime_roots, &root.join("engine/examples"))?;
+    // Every other engine crate is guest-linked too (psx-bsp's collision and
+    // frustum kernels once linked `__udivdi3` unseen because only the three
+    // roots above were scanned). `collect_rs_files` de-duplicates.
+    // psx-vector-cook is the host cooker for vector art; it never links into a guest.
+    for entry in sorted_dirs(&root.join("engine/crates"))? {
+        if entry.file_name().and_then(|s| s.to_str()) != Some("psx-vector-cook") {
+            runtime_roots.push(entry.join("src"));
+        }
+    }
+    for entry in sorted_dirs(&root.join("sdk/crates"))? {
+        // psx-gte-core is the host GTE model; psx-residency-sim replays a route
+        // against the real residency policy on the host and never links into a
+        // guest. Neither is runtime code.
+        if matches!(
+            entry.file_name().and_then(|s| s.to_str()),
+            Some("psx-gte-core" | "psx-residency-sim")
+        ) {
+            continue;
+        }
+        runtime_roots.push(entry.join("src"));
+    }
+
+    // Whole-file exemptions: files whose PURPOSE is 64-bit math.
+    // psx-rt/builtins.rs implements the __divdi3/__moddi3 compiler
+    // shims (their signatures are i64 by ABI definition); psx-math's
+    // fmt.rs is the u64 decimal formatter. Line markers inside them
+    // would just repeat the file header.
+    let exempt_files = [
+        root.join("sdk/crates/psx-rt/src/builtins.rs"),
+        root.join("sdk/crates/psx-math/src/fmt.rs"),
+    ];
+
+    let mut files = Vec::new();
+    let mut seen = HashSet::new();
+    for runtime_root in runtime_roots {
+        collect_rs_files(&runtime_root, &mut files, &mut seen)?;
+    }
+    // `src/tests.rs` and `src/tests/` are only included from a
+    // `#[cfg(test)] mod tests;` declaration. They are host reference oracles,
+    // not guest runtime code; the item blanker below still handles inline
+    // `#[cfg(test)]` modules.
+    files.retain(|f| {
+        !exempt_files.contains(f)
+            && f.file_name().and_then(|name| name.to_str()) != Some("tests.rs")
+            && !f
+                .strip_prefix(&root)
+                .unwrap_or(f)
+                .components()
+                .any(|part| part.as_os_str() == "tests")
+    });
+    // A file that only a `#[cfg(test)] mod name;` declaration includes is host
+    // test code like `tests.rs`, whatever it is called.
+    let mut test_only = HashSet::new();
+    for path in &files {
+        let src = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        test_only.extend(cfg_test_module_paths(path, &src));
+    }
+    files.retain(|f| {
+        !test_only
+            .iter()
+            .any(|t| f == t || f.starts_with(t.with_extension("")))
+    });
+    files.sort();
+
+    let mut violations = Vec::new();
+    let mut allowed_hits = 0usize;
+    for path in &files {
+        let src = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let code = blank_test_items(&blank_comments_and_literals(&src));
+        let allowed = allowed_lines(&src);
+        scan_forbidden_types(
+            path,
+            &src,
+            &code,
+            &allowed,
+            &mut allowed_hits,
+            &mut violations,
+        );
+        scan_float_literals(
+            path,
+            &src,
+            &code,
+            &allowed,
+            &mut allowed_hits,
+            &mut violations,
+        );
+    }
+
+    if !violations.is_empty() {
+        eprintln!("PS1 runtime numeric guard failed.");
+        eprintln!(
+            "Runtime Rust must avoid f32/f64, float literals, and 64/128-bit integer types unless explicitly allowlisted."
+        );
+        eprintln!("Use fixed-point 16/32-bit integer math, or move host-only code out of runtime source roots.\n");
+        eprintln!(
+            "Use `// psx-numeric-allow-next-line: reason` only for a reviewed exception that cannot move out of runtime code.\n"
+        );
+        for violation in violations {
+            eprintln!("{violation}");
+        }
+        return Err("runtime numeric guard failed".to_string());
+    }
+    println!(
+        "runtime numeric guard: ok ({} files, {} line-level allow hits)",
+        files.len(),
+        allowed_hits
+    );
+    Ok(())
+}
+
+fn push_child_src_dirs(out: &mut Vec<PathBuf>, parent: &Path) -> Result<(), String> {
+    for dir in sorted_dirs(parent)? {
+        out.push(dir.join("src"));
+    }
+    Ok(())
+}
+
+fn sorted_dirs(parent: &Path) -> Result<Vec<PathBuf>, String> {
+    if !parent.exists() {
+        return Ok(Vec::new());
+    }
+    let mut dirs = Vec::new();
+    for entry in fs::read_dir(parent).map_err(|e| format!("{}: {e}", parent.display()))? {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        if path.is_dir() {
+            dirs.push(path);
+        }
+    }
+    dirs.sort();
+    Ok(dirs)
+}
+
+fn collect_rs_files(
+    root: &Path,
+    files: &mut Vec<PathBuf>,
+    seen: &mut HashSet<PathBuf>,
+) -> Result<(), String> {
+    if !root.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(root).map_err(|e| format!("{}: {e}", root.display()))? {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        if path.is_dir() {
+            collect_rs_files(&path, files, seen)?;
+        } else if path.extension().and_then(|s| s.to_str()) == Some("rs")
+            && seen.insert(path.clone())
+        {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// Names of the modules `src` declares as `#[cfg(test)] mod name;`.
+fn cfg_test_module_names(src: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut lines = src.lines().map(str::trim);
+    while let Some(line) = lines.next() {
+        if line != "#[cfg(test)]" {
+            continue;
+        }
+        let Some(decl) = lines.next() else { break };
+        let decl = decl
+            .strip_prefix("pub(crate) ")
+            .or(decl.strip_prefix("pub "))
+            .unwrap_or(decl);
+        if let Some(name) = decl
+            .strip_prefix("mod ")
+            .and_then(|rest| rest.strip_suffix(';'))
+        {
+            names.push(name.trim().to_string());
+        }
+    }
+    names
+}
+
+/// Source files that a `#[cfg(test)] mod name;` declaration in `declaring`
+/// pulls in: `name.rs` beside it (or inside its own directory for a file that
+/// is not a crate or module root).
+fn cfg_test_module_paths(declaring: &Path, src: &str) -> Vec<PathBuf> {
+    let Some(parent) = declaring.parent() else {
+        return Vec::new();
+    };
+    let stem = declaring
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
+    let base = if matches!(stem, "lib" | "main" | "mod") {
+        parent.to_path_buf()
+    } else {
+        parent.join(stem)
+    };
+    cfg_test_module_names(src)
+        .into_iter()
+        .map(|name| base.join(format!("{name}.rs")))
+        .collect()
+}
+
+fn allowed_lines(src: &str) -> HashSet<usize> {
+    let mut allowed = HashSet::new();
+    for (idx, line) in src.lines().enumerate() {
+        let number = idx + 1;
+        if line.contains("psx-numeric-allow-line") {
+            allowed.insert(number);
+        }
+        if line.contains("psx-numeric-allow-next-line") {
+            allowed.insert(number + 1);
+        }
+    }
+    allowed
+}
+
+fn blank_comments_and_literals(src: &str) -> String {
+    let bytes = src.as_bytes();
+    let mut out: Vec<u8> = bytes.to_vec();
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        if bytes[idx] == b'r' {
+            if let Some(end) = raw_string_end(bytes, idx) {
+                blank_range(&mut out, idx, end);
+                idx = end;
+                continue;
+            }
+        }
+        if bytes[idx..].starts_with(b"//") {
+            let end = bytes[idx..]
+                .iter()
+                .position(|&b| b == b'\n')
+                .map(|p| idx + p)
+                .unwrap_or(bytes.len());
+            blank_range(&mut out, idx, end);
+            idx = end;
+            continue;
+        }
+        if bytes[idx..].starts_with(b"/*") {
+            let mut depth = 1usize;
+            let mut end = idx + 2;
+            while end < bytes.len() && depth > 0 {
+                if bytes[end..].starts_with(b"/*") {
+                    depth += 1;
+                    end += 2;
+                } else if bytes[end..].starts_with(b"*/") {
+                    depth -= 1;
+                    end += 2;
+                } else {
+                    end += 1;
+                }
+            }
+            blank_range(&mut out, idx, end);
+            idx = end;
+            continue;
+        }
+        if bytes[idx] == b'"' {
+            let mut end = idx + 1;
+            let mut escaped = false;
+            while end < bytes.len() {
+                let current = bytes[end];
+                if escaped {
+                    escaped = false;
+                } else if current == b'\\' {
+                    escaped = true;
+                } else if current == b'"' {
+                    end += 1;
+                    break;
+                }
+                end += 1;
+            }
+            blank_range(&mut out, idx, end);
+            idx = end;
+            continue;
+        }
+        if bytes[idx] == b'\'' {
+            if let Some(end) = char_literal_end(bytes, idx) {
+                blank_range(&mut out, idx, end);
+                idx = end;
+                continue;
+            }
+        }
+        idx += 1;
+    }
+    String::from_utf8(out).expect("source bytes stay utf8")
+}
+
+fn raw_string_end(src: &[u8], start: usize) -> Option<usize> {
+    if src.get(start) != Some(&b'r') {
+        return None;
+    }
+    let mut idx = start + 1;
+    while src.get(idx) == Some(&b'#') {
+        idx += 1;
+    }
+    if src.get(idx) != Some(&b'"') {
+        return None;
+    }
+    let hashes = idx - start - 1;
+    let mut marker = vec![b'"'];
+    marker.extend(std::iter::repeat_n(b'#', hashes));
+    find_bytes(&src[idx + 1..], &marker).map(|pos| idx + 1 + pos + marker.len())
+}
+
+fn char_literal_end(src: &[u8], start: usize) -> Option<usize> {
+    if start + 1 >= src.len() {
+        return None;
+    }
+    let next = src[start + 1];
+    if next.is_ascii_alphabetic() || next == b'_' {
+        return None;
+    }
+    let mut idx = start + 1;
+    if src[idx] == b'\\' {
+        idx += 2;
+    } else {
+        idx += 1;
+    }
+    (src.get(idx) == Some(&b'\'')).then_some(idx + 1)
+}
+
+fn blank_range(out: &mut [u8], start: usize, end: usize) {
+    let end = end.min(out.len());
+    for byte in &mut out[start..end] {
+        if *byte != b'\n' {
+            *byte = b' ';
+        }
+    }
+}
+
+/// Blank `#[cfg(test)]` items so the guard only judges code that ships to
+/// the console. Host tests legitimately use f64: the reference oracle for
+/// a fixed-point port is the float closed form it was ported from, and
+/// flagging those made the guard mostly false positives.
+///
+/// Only unconditionally test-only forms are blanked: `#[cfg(test)]` and
+/// `#[cfg(all(test, ...))]`. `#[cfg(any(target_arch = "mips", test))]`
+/// also compiles into the guest, so it stays under the guard.
+///
+/// Runs on comment/literal-blanked source, so braces inside strings and
+/// comments cannot break the brace match. Blanks with spaces to keep byte
+/// offsets, and therefore reported line numbers, intact.
+fn blank_test_items(code: &str) -> String {
+    let bytes = code.as_bytes();
+    let mut out = bytes.to_vec();
+    let mut idx = 0usize;
+    while let Some(pos) = code[idx..].find("#[cfg(") {
+        let start = idx + pos;
+        let rest = &code[start + "#[cfg(".len()..];
+        if !(rest.starts_with("test)]") || rest.starts_with("all(test,")) {
+            idx = start + "#[cfg(".len();
+            continue;
+        }
+        // Walk to the end of the attached item: a brace-balanced block, or
+        // a `;` for brace-less items like `#[cfg(test)] use super::*;`.
+        let mut cursor = start;
+        let mut depth = 0usize;
+        // A `;` inside `(..)` or `[..]` belongs to an array type such as
+        // `[i16; 3]` in a signature, not to the end of a brace-less item.
+        let mut nesting = 0usize;
+        let mut end = bytes.len();
+        while cursor < bytes.len() {
+            match bytes[cursor] {
+                b'(' | b'[' => nesting += 1,
+                b')' | b']' => nesting = nesting.saturating_sub(1),
+                b'{' => depth += 1,
+                b'}' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        end = cursor + 1;
+                        break;
+                    }
+                }
+                b';' if depth == 0 && nesting == 0 => {
+                    end = cursor + 1;
+                    break;
+                }
+                _ => {}
+            }
+            cursor += 1;
+        }
+        blank_range(&mut out, start, end);
+        idx = end;
+    }
+    String::from_utf8(out).expect("blanking only substitutes ASCII spaces")
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn line_col(src: &str, offset: usize) -> (usize, usize) {
+    let mut line = 1usize;
+    let mut col = 1usize;
+    for (idx, ch) in src.char_indices() {
+        if idx >= offset {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
+}
+
+fn report_context(src: &str, line: usize) -> String {
+    src.lines()
+        .nth(line.saturating_sub(1))
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+fn scan_forbidden_types(
+    path: &Path,
+    src: &str,
+    code: &str,
+    allowed: &HashSet<usize>,
+    allowed_hits: &mut usize,
+    violations: &mut Vec<String>,
+) {
+    let forbidden = ["f32", "f64", "u64", "i64", "u128", "i128"];
+    for token in forbidden {
+        let mut start = 0usize;
+        while let Some(pos) = code[start..].find(token) {
+            let offset = start + pos;
+            let before = offset
+                .checked_sub(1)
+                .and_then(|i| code.as_bytes().get(i).copied());
+            let after = code.as_bytes().get(offset + token.len()).copied();
+            if before.is_none_or(|b| !is_ident_byte(b)) && after.is_none_or(|b| !is_ident_byte(b)) {
+                let (line, col) = line_col(code, offset);
+                if allowed.contains(&line) {
+                    *allowed_hits += 1;
+                } else {
+                    let kind = if token.starts_with('f') {
+                        "float type"
+                    } else {
+                        "wide integer type"
+                    };
+                    violations.push(format!(
+                        "{}:{line}:{col}: forbidden {kind} `{token}`\n    {}",
+                        relative_to_root(path),
+                        report_context(src, line)
+                    ));
+                }
+            }
+            start = offset + token.len();
+        }
+    }
+}
+
+fn is_ident_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+fn scan_float_literals(
+    path: &Path,
+    src: &str,
+    code: &str,
+    allowed: &HashSet<usize>,
+    allowed_hits: &mut usize,
+    violations: &mut Vec<String>,
+) {
+    let bytes = code.as_bytes();
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        if !bytes[idx].is_ascii_digit()
+            || idx > 0 && (is_ident_byte(bytes[idx - 1]) || bytes[idx - 1] == b'.')
+        {
+            idx += 1;
+            continue;
+        }
+        let start = idx;
+        while idx < bytes.len() && bytes[idx].is_ascii_digit() {
+            idx += 1;
+        }
+        let mut has_float = false;
+        if idx < bytes.len()
+            && bytes[idx] == b'.'
+            && idx + 1 < bytes.len()
+            && bytes[idx + 1].is_ascii_digit()
+        {
+            has_float = true;
+            idx += 1;
+            while idx < bytes.len() && bytes[idx].is_ascii_digit() {
+                idx += 1;
+            }
+        }
+        if idx < bytes.len() && matches!(bytes[idx], b'e' | b'E') {
+            has_float = true;
+            idx += 1;
+            if idx < bytes.len() && matches!(bytes[idx], b'+' | b'-') {
+                idx += 1;
+            }
+            while idx < bytes.len() && bytes[idx].is_ascii_digit() {
+                idx += 1;
+            }
+        }
+        if has_float {
+            if idx < bytes.len() && bytes[idx] == b'_' {
+                idx += 1;
+            }
+            if idx + 2 <= bytes.len() && &bytes[idx..idx + 1] == b"f" {
+                idx += 1;
+                while idx < bytes.len() && bytes[idx].is_ascii_digit() {
+                    idx += 1;
+                }
+            }
+            let literal = &code[start..idx];
+            let (line, col) = line_col(code, start);
+            if allowed.contains(&line) {
+                *allowed_hits += 1;
+            } else {
+                violations.push(format!(
+                    "{}:{line}:{col}: forbidden float literal `{literal}`\n    {}",
+                    relative_to_root(path),
+                    report_context(src, line)
+                ));
+            }
+        }
+        idx = idx.max(start + 1);
+    }
+}
+
+fn bake_spectrum(args: &[String]) -> Result<(), String> {
+    let mut input = None;
+    let mut output = None;
+    let mut fps = 30usize;
+    let mut bands = 16usize;
+    let mut seconds = None;
+    let mut window = 512usize;
+    let mut min_hz = 80.0f64;
+    let mut max_hz = 8000.0f64;
+    let mut i = 0usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-o" | "--output" => {
+                i += 1;
+                output = args.get(i).cloned();
+            }
+            "--fps" => {
+                i += 1;
+                fps = parse_arg(args.get(i), "--fps")?;
+            }
+            "--bands" => {
+                i += 1;
+                bands = parse_arg(args.get(i), "--bands")?;
+            }
+            "--seconds" => {
+                i += 1;
+                seconds = Some(parse_arg(args.get(i), "--seconds")?);
+            }
+            "--window" => {
+                i += 1;
+                window = parse_arg(args.get(i), "--window")?;
+            }
+            "--min-hz" => {
+                i += 1;
+                min_hz = parse_arg(args.get(i), "--min-hz")?;
+            }
+            "--max-hz" => {
+                i += 1;
+                max_hz = parse_arg(args.get(i), "--max-hz")?;
+            }
+            value if !value.starts_with('-') && input.is_none() => input = Some(value.to_string()),
+            other => return Err(format!("unknown bake-spectrum arg `{other}`")),
+        }
+        i += 1;
+    }
+    let input = input.ok_or_else(|| "bake-spectrum requires an input WAV".to_string())?;
+    let output = output.ok_or_else(|| "bake-spectrum requires -o <output>".to_string())?;
+    if fps == 0 || bands == 0 || window <= 8 || !window.is_power_of_two() {
+        return Err(
+            "--fps/--bands must be positive and --window must be a power of two > 8".into(),
+        );
+    }
+    if min_hz <= 0.0 || max_hz <= min_hz {
+        return Err("--min-hz/--max-hz must form a positive range".into());
+    }
+    let input_path = resolve_from_cwd(&input);
+    let output_path = resolve_from_cwd(&output);
+    let wav = read_wav_pcm16(&input_path)?;
+    let seconds = seconds.unwrap_or(wav.frames as f64 / wav.rate as f64);
+    let frame_count = (seconds * fps as f64).floor().max(1.0) as usize;
+    let hop = wav.rate as f64 / fps as f64;
+    let freqs = log_spaced_frequencies(bands, min_hz, max_hz);
+    let hann: Vec<f64> = (0..window)
+        .map(|i| 0.5 - 0.5 * ((2.0 * std::f64::consts::PI * i as f64) / (window - 1) as f64).cos())
+        .collect();
+    let mut powers = Vec::with_capacity(frame_count);
+    for frame in 0..frame_count {
+        let start = (frame as f64 * hop).floor() as usize;
+        let samples = frame_samples(&wav, start, &hann);
+        powers.push(
+            freqs
+                .iter()
+                .map(|&freq| goertzel_power(&samples, wav.rate, freq))
+                .collect::<Vec<_>>(),
+        );
+    }
+    let baked = normalize_and_smooth(&powers);
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    fs::write(&output_path, &baked).map_err(|e| format!("{}: {e}", output_path.display()))?;
+    println!(
+        "[bake-spectrum] {} -> {} ({} frames x {} bands @ {} Hz, {} bytes)",
+        input_path.display(),
+        output_path.display(),
+        frame_count,
+        bands,
+        fps,
+        baked.len()
+    );
+    Ok(())
+}
+
+fn parse_arg<T: std::str::FromStr>(value: Option<&String>, name: &str) -> Result<T, String> {
+    value
+        .ok_or_else(|| format!("{name} requires a value"))?
+        .parse()
+        .map_err(|_| format!("invalid value for {name}"))
+}
+
+fn cortex_stream_guard(args: &[String]) -> Result<(), String> {
+    let mut profile = Some("build/preburn/cortex_ignition_v1/profile.csv".to_string());
+    let mut cdda_log = Some("build/preburn/cortex_ignition_v1/cdda-probe.log".to_string());
+    let mut i = 0usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--profile" => {
+                i += 1;
+                profile = args.get(i).cloned();
+            }
+            "--cdda-log" => {
+                i += 1;
+                cdda_log = args.get(i).cloned();
+            }
+            other => return Err(format!("unknown cortex-stream-guard arg `{other}`")),
+        }
+        i += 1;
+    }
+
+    let profile = resolve_from_cwd(
+        profile
+            .as_deref()
+            .unwrap_or("build/preburn/cortex_ignition_v1/profile.csv"),
+    );
+    let cdda_log = resolve_from_cwd(
+        cdda_log
+            .as_deref()
+            .unwrap_or("build/preburn/cortex_ignition_v1/cdda-probe.log"),
+    );
+
+    let mut failures = Vec::new();
+    let mut signals = Vec::new();
+
+    match read_optional_log(&cdda_log)? {
+        Some(text) if log_status(Some(&text), &["Nonzero:", "Peak:", "Play="]) == "PASS" => {
+            signals.push(format!(
+                "cdda log: {}",
+                summarize_matching_lines(&text, &["Nonzero:", "Peak:", "CD CMDS:"], 4)
+            ));
+        }
+        Some(text) => {
+            failures.push(format!(
+                "failure: CD-DA probe lacks required audio/play signal ({})",
+                summarize_matching_lines(&text, &["Nonzero:", "Peak:", "CD CMDS:"], 4)
+            ));
+        }
+        None => failures.push(format!(
+            "failure: CD-DA probe log missing: {}",
+            cdda_log.display()
+        )),
+    }
+
+    match streaming_profile_summary(&profile) {
+        Ok(summary) => {
+            signals.push(format!(
+                "profile rows={} loads={} bytes={} sectors={} status={} requests={} misses={} failed_loads={} pending_last={} missing_mask_max=0x{:x}",
+                summary.rows,
+                summary.max_cd_room_chunk_loads,
+                summary.max_cd_room_chunk_bytes,
+                summary.max_cd_room_chunk_sectors,
+                summary.max_cd_room_chunk_status,
+                summary.max_room_stream_requests,
+                summary.max_room_stream_misses,
+                summary.max_room_stream_failed_loads,
+                summary.last_room_stream_pending_loads,
+                summary.max_missing_mask
+            ));
+            if !summary.missing_columns.is_empty() {
+                failures.push(format!(
+                    "failure: profile is missing guard column(s): {}",
+                    summary.missing_columns.join(", ")
+                ));
+            }
+            if summary.rows == 0 {
+                failures.push("failure: profile has no guest-frame rows".to_string());
+            }
+            if summary.rows > 0 && summary.missing_columns.is_empty() {
+                if summary.max_cd_room_chunk_loads == 0 {
+                    failures
+                        .push("failure: no CD room chunk loads observed in profile".to_string());
+                }
+                if summary.max_cd_room_chunk_bytes == 0 || summary.max_cd_room_chunk_sectors == 0 {
+                    failures.push(
+                        "failure: room streaming did not report CD bytes/sectors".to_string(),
+                    );
+                }
+                if summary.max_cd_room_chunk_status != 0 {
+                    let status = summary.max_cd_room_chunk_status;
+                    let label = if status == 5 {
+                        "STATUS_CD_ERROR"
+                    } else {
+                        "nonzero status"
+                    };
+                    failures.push(format!(
+                        "failure: CD room chunk status reached {status} ({label})"
+                    ));
+                }
+                if summary.max_room_stream_failed_loads != 0 {
+                    failures.push(format!(
+                        "failure: room stream failed-load counter reached {}",
+                        summary.max_room_stream_failed_loads
+                    ));
+                }
+                if summary.max_room_stream_requests == 0 {
+                    failures.push("failure: no room stream requests observed".to_string());
+                }
+                if summary.max_missing_mask != 0 {
+                    failures.push(format!(
+                        "failure: portal/room missing mask became nonzero: 0x{:x}",
+                        summary.max_missing_mask
+                    ));
+                }
+            }
+        }
+        Err(error) => failures.push(format!("failure: {error}")),
+    }
+
+    for signal in &signals {
+        println!("{signal}");
+    }
+    if failures.is_empty() {
+        println!("streaming guard: PASS");
+        return Ok(());
+    }
+    for failure in &failures {
+        eprintln!("{failure}");
+    }
+    eprintln!("streaming guard: FAIL");
+    Err("cortex stream guard failed".to_string())
+}
+
+#[derive(Default)]
+struct StreamingProfileSummary {
+    rows: usize,
+    missing_columns: Vec<String>,
+    max_cd_room_chunk_loads: u64,
+    max_cd_room_chunk_bytes: u64,
+    max_cd_room_chunk_sectors: u64,
+    max_cd_room_chunk_status: u64,
+    max_room_stream_requests: u64,
+    max_room_stream_misses: u64,
+    max_room_stream_failed_loads: u64,
+    last_room_stream_pending_loads: u64,
+    max_missing_mask: u64,
+}
+
+fn streaming_profile_summary(path: &Path) -> Result<StreamingProfileSummary, String> {
+    let text = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut lines = text.lines().filter(|line| !line.trim().is_empty());
+    let header = lines
+        .next()
+        .ok_or_else(|| format!("profile is empty: {}", path.display()))?;
+    let headers: Vec<&str> = header.split(',').map(str::trim).collect();
+    let required = [
+        "cd_room_chunk_loads",
+        "cd_room_chunk_bytes",
+        "cd_room_chunk_sectors",
+        "cd_room_chunk_status",
+        "room_stream_requests",
+        "room_stream_misses",
+        "room_stream_pending_loads",
+        "room_stream_failed_loads",
+        "missing_mask",
+    ];
+    let mut columns = HashMap::new();
+    let mut missing = Vec::new();
+    for name in required {
+        if let Some(index) = headers.iter().position(|header| *header == name) {
+            columns.insert(name, index);
+        } else {
+            missing.push(name.to_string());
+        }
+    }
+
+    let mut summary = StreamingProfileSummary {
+        missing_columns: missing,
+        ..StreamingProfileSummary::default()
+    };
+    for line in lines {
+        let fields: Vec<&str> = line.split(',').map(str::trim).collect();
+        summary.rows += 1;
+        summary.max_cd_room_chunk_loads = summary.max_cd_room_chunk_loads.max(csv_field_u64(
+            &fields,
+            columns.get("cd_room_chunk_loads").copied(),
+        ));
+        summary.max_cd_room_chunk_bytes = summary.max_cd_room_chunk_bytes.max(csv_field_u64(
+            &fields,
+            columns.get("cd_room_chunk_bytes").copied(),
+        ));
+        summary.max_cd_room_chunk_sectors = summary.max_cd_room_chunk_sectors.max(csv_field_u64(
+            &fields,
+            columns.get("cd_room_chunk_sectors").copied(),
+        ));
+        summary.max_cd_room_chunk_status = summary.max_cd_room_chunk_status.max(csv_field_u64(
+            &fields,
+            columns.get("cd_room_chunk_status").copied(),
+        ));
+        summary.max_room_stream_requests = summary.max_room_stream_requests.max(csv_field_u64(
+            &fields,
+            columns.get("room_stream_requests").copied(),
+        ));
+        summary.max_room_stream_misses = summary.max_room_stream_misses.max(csv_field_u64(
+            &fields,
+            columns.get("room_stream_misses").copied(),
+        ));
+        summary.max_room_stream_failed_loads = summary.max_room_stream_failed_loads.max(
+            csv_field_u64(&fields, columns.get("room_stream_failed_loads").copied()),
+        );
+        summary.last_room_stream_pending_loads =
+            csv_field_u64(&fields, columns.get("room_stream_pending_loads").copied());
+        summary.max_missing_mask = summary
+            .max_missing_mask
+            .max(csv_field_u64(&fields, columns.get("missing_mask").copied()));
+    }
+    Ok(summary)
+}
+
+fn csv_field_u64(fields: &[&str], index: Option<usize>) -> u64 {
+    index
+        .and_then(|index| fields.get(index))
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+fn cortex_bringup_report(args: &[String]) -> Result<(), String> {
+    let mut out = Some("build/preburn/cortex_ignition_v1/BRINGUP_REPORT.md".to_string());
+    let mut preburn_dir = Some("build/preburn/cortex_ignition_v1".to_string());
+    let mut fail_on_warn = false;
+    let mut i = 0usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--out" => {
+                i += 1;
+                out = args.get(i).cloned();
+            }
+            "--preburn-dir" => {
+                i += 1;
+                preburn_dir = args.get(i).cloned();
+            }
+            "--fail-on-warn" => {
+                fail_on_warn = true;
+            }
+            other => return Err(format!("unknown cortex-bringup-report arg `{other}`")),
+        }
+        i += 1;
+    }
+
+    let out_path = resolve_from_cwd(
+        out.as_deref()
+            .unwrap_or("build/preburn/cortex_ignition_v1/BRINGUP_REPORT.md"),
+    );
+    let preburn_dir = resolve_from_cwd(
+        preburn_dir
+            .as_deref()
+            .unwrap_or("build/preburn/cortex_ignition_v1"),
+    );
+
+    let mut report = String::new();
+    writeln!(
+        report,
+        "# Cortex Ignition V1 Bringup Report\n\n\
+         Generated from local logs. This is a data ledger, not a proof of real-hardware success: \
+         emulator rows are only as strong as the signal listed in the table.\n"
+    )
+    .map_err(|e| e.to_string())?;
+    writeln!(
+        report,
+        "## Evidence Matrix\n\n\
+         | Surface | Source | Status | Signal | Follow-up |\n\
+         | --- | --- | --- | --- | --- |"
+    )
+    .map_err(|e| e.to_string())?;
+
+    let disc_reads = read_optional_log(&preburn_dir.join("disc-reads.log"))?;
+    report_row(
+        &mut report,
+        "Disc image structure",
+        &preburn_dir.join("disc-reads.log"),
+        log_status(disc_reads.as_deref(), &["CD001", "PS-X EXE"]),
+        disc_reads
+            .as_deref()
+            .map(|text| summarize_matching_lines(text, &["CD001", "PS-X EXE"], 3))
+            .unwrap_or_else(|| "log missing".to_string()),
+        "Keep this as the first burn gate: bad SYSTEM.CNF/EXE/ISO layout must fail before CD-R.",
+    )?;
+
+    let internal_hle = read_optional_log(&preburn_dir.join("internal-hle.log"))?;
+    report_row(
+        &mut report,
+        "PSoXide internal boot/render",
+        &preburn_dir.join("internal-hle.log"),
+        log_status(
+            internal_hle.as_deref(),
+            &["display_fnv1a_64", "vram_fnv1a_64"],
+        ),
+        internal_hle
+            .as_deref()
+            .map(|text| {
+                summarize_matching_lines(text, &["display_fnv1a_64", "vram_fnv1a_64", "pc="], 4)
+            })
+            .unwrap_or_else(|| "log missing".to_string()),
+        "Pin these hashes when a hardware-visible checkpoint changes unexpectedly.",
+    )?;
+
+    let cdda = read_optional_log(&preburn_dir.join("cdda-probe.log"))?;
+    report_row(
+        &mut report,
+        "CD-DA audio probe",
+        &preburn_dir.join("cdda-probe.log"),
+        log_status(cdda.as_deref(), &["Nonzero:", "Peak:", "Play="]),
+        cdda.as_deref()
+            .map(|text| summarize_matching_lines(text, &["Nonzero:", "Peak:", "CD CMDS:"], 4))
+            .unwrap_or_else(|| "log missing".to_string()),
+        "Keep CD-DA and streamed data ownership regressions visible; they are central to the hardware issue.",
+    )?;
+
+    let streaming_guard = read_optional_log(&preburn_dir.join("streaming-guard.log"))?;
+    report_row(
+        &mut report,
+        "CD-DA + room streaming guard",
+        &preburn_dir.join("streaming-guard.log"),
+        log_status(streaming_guard.as_deref(), &["streaming guard: PASS"]),
+        streaming_guard
+            .as_deref()
+            .map(|text| {
+                summarize_matching_lines(
+                    text,
+                    &["streaming guard:", "profile rows=", "failure:"],
+                    6,
+                )
+            })
+            .unwrap_or_else(|| "log missing".to_string()),
+        "This red gate must cover menu CD-DA and gameplay room streaming before a burn candidate is trusted.",
+    )?;
+
+    writeln!(
+        report,
+        "\n## Hardware Finding Rule\n\n\
+         Every real-CD observation should land in one of three places:\n\n\
+         - a `hardware-boot-visual` checkpoint or text label when the finding is visible on a TV;\n\
+         - a preburn/emulator assertion when the finding is reproducible without hardware;\n\
+         - a tracked emulator, engine, or SDK fix when the finding explains a behavioral gap.\n\n\
+         Record real CD-R observations in local hardware notes and decode color/text stops \
+         with `docs/hardware-visual-checkpoints.md`. \
+         The current visible checkpoint sources are `engine/crates/psx-engine/src/app.rs` and \
+         `engine/crates/psx-engine/src/game_app.rs`. If the next CD stops on a color/text code, \
+         preserve that code here and convert it into a named gate before burning again.\n"
+    )
+    .map_err(|e| e.to_string())?;
+    writeln!(
+        report,
+        "## Focused Probe Routing\n\n\
+         When hardware and emulators disagree, route active red rows to one narrow owner at a time: \
+         CD-ROM IRQ/data timing, \
+         CD-DA/data arbitration, SIO/pad timing, GPU display area, or engine/SDK disc layout.\n"
+    )
+    .map_err(|e| e.to_string())?;
+
+    if let Some(parent) = out_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    fs::write(&out_path, report).map_err(|e| format!("{}: {e}", out_path.display()))?;
+    println!("wrote {}", relative_to_root(&out_path));
+    if fail_on_warn {
+        let text =
+            fs::read_to_string(&out_path).map_err(|e| format!("{}: {e}", out_path.display()))?;
+        if text.contains("| WARN |") || text.contains("| MISSING |") {
+            return Err(format!(
+                "bringup report contains WARN/MISSING rows: {}",
+                relative_to_root(&out_path)
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn read_optional_log(path: &Path) -> Result<Option<String>, String> {
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("{}: {error}", path.display())),
+    }
+}
+
+fn log_status(text: Option<&str>, required: &[&str]) -> &'static str {
+    match text {
+        None => "MISSING",
+        Some(text) if required.iter().all(|needle| text.contains(needle)) => "PASS",
+        Some(_) => "WARN",
+    }
+}
+
+fn report_row(
+    report: &mut String,
+    surface: &str,
+    path: &Path,
+    status: &str,
+    signal: String,
+    follow_up: &str,
+) -> Result<(), String> {
+    writeln!(
+        report,
+        "| {} | `{}` | {} | {} | {} |",
+        markdown_cell(surface),
+        markdown_cell(&relative_to_root(path)),
+        markdown_cell(status),
+        markdown_cell(&signal),
+        markdown_cell(follow_up)
+    )
+    .map_err(|e| e.to_string())
+}
+
+fn markdown_cell(value: &str) -> String {
+    value
+        .replace('|', "\\|")
+        .replace('\n', " ")
+        .trim()
+        .to_string()
+}
+
+fn summarize_matching_lines(text: &str, needles: &[&str], max_lines: usize) -> String {
+    let mut lines = Vec::new();
+    for line in text.lines() {
+        if needles
+            .iter()
+            .any(|needle| !needle.is_empty() && line.contains(needle))
+        {
+            lines.push(truncate_middle(line.trim(), 120));
+            if lines.len() == max_lines {
+                break;
+            }
+        }
+    }
+    if lines.is_empty() {
+        "no matching signal lines".to_string()
+    } else {
+        lines.join("; ")
+    }
+}
+
+fn truncate_middle(text: &str, max_len: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max_len {
+        return text.to_string();
+    }
+    if max_len <= 3 {
+        return ".".repeat(max_len);
+    }
+    let keep = (max_len - 3) / 2;
+    let tail = max_len - 3 - keep;
+    let head: String = chars.iter().take(keep).collect();
+    let tail: String = chars.iter().skip(chars.len() - tail).collect();
+    format!("{head}...{tail}")
+}
+
+struct WavPcm {
+    samples: Vec<i16>,
+    channels: usize,
+    rate: usize,
+    frames: usize,
+}
+
+fn read_wav_pcm16(path: &Path) -> Result<WavPcm, String> {
+    let mut bytes = Vec::new();
+    fs::File::open(path)
+        .map_err(|e| format!("{}: {e}", path.display()))?
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    if bytes.get(0..4) != Some(b"RIFF") || bytes.get(8..12) != Some(b"WAVE") {
+        return Err(format!("{}: expected RIFF/WAVE", path.display()));
+    }
+    let mut offset = 12usize;
+    let mut channels = None;
+    let mut rate = None;
+    let mut bits = None;
+    let mut data = None;
+    while offset + 8 <= bytes.len() {
+        let id = &bytes[offset..offset + 4];
+        let len = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap()) as usize;
+        offset += 8;
+        let end = offset.saturating_add(len).min(bytes.len());
+        match id {
+            b"fmt " if len >= 16 => {
+                let format = u16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap());
+                if format != 1 {
+                    return Err(format!("{}: expected PCM WAV format", path.display()));
+                }
+                channels = Some(u16::from_le_bytes(
+                    bytes[offset + 2..offset + 4].try_into().unwrap(),
+                ) as usize);
+                rate = Some(
+                    u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap()) as usize,
+                );
+                bits = Some(u16::from_le_bytes(
+                    bytes[offset + 14..offset + 16].try_into().unwrap(),
+                ));
+            }
+            b"data" => data = Some(bytes[offset..end].to_vec()),
+            _ => {}
+        }
+        offset = end + (len & 1);
+    }
+    let channels = channels.ok_or_else(|| format!("{}: missing fmt chunk", path.display()))?;
+    let rate = rate.ok_or_else(|| format!("{}: missing sample rate", path.display()))?;
+    if bits != Some(16) {
+        return Err(format!("{}: expected 16-bit PCM WAV", path.display()));
+    }
+    let data = data.ok_or_else(|| format!("{}: missing data chunk", path.display()))?;
+    let mut samples = Vec::with_capacity(data.len() / 2);
+    for chunk in data.chunks_exact(2) {
+        samples.push(i16::from_le_bytes([chunk[0], chunk[1]]));
+    }
+    let frames = samples.len() / channels.max(1);
+    Ok(WavPcm {
+        samples,
+        channels,
+        rate,
+        frames,
+    })
+}
+
+fn log_spaced_frequencies(count: usize, min_hz: f64, max_hz: f64) -> Vec<f64> {
+    if count == 1 {
+        return vec![(min_hz + max_hz) * 0.5];
+    }
+    let ratio = max_hz / min_hz;
+    (0..count)
+        .map(|i| min_hz * ratio.powf(i as f64 / (count - 1) as f64))
+        .collect()
+}
+
+fn frame_samples(wav: &WavPcm, start: usize, window: &[f64]) -> Vec<f64> {
+    let mut out = Vec::with_capacity(window.len());
+    for (i, &weight) in window.iter().enumerate() {
+        let src = start + i;
+        if src >= wav.frames {
+            out.push(0.0);
+            continue;
+        }
+        let base = src * wav.channels;
+        let sample = if wav.channels == 1 {
+            wav.samples[base] as f64
+        } else {
+            (wav.samples[base] as f64 + wav.samples[base + 1] as f64) * 0.5
+        };
+        out.push((sample / 32768.0) * weight);
+    }
+    out
+}
+
+fn goertzel_power(samples: &[f64], rate: usize, freq: f64) -> f64 {
+    let n = samples.len();
+    let k = ((n as f64 * freq) / rate as f64)
+        .round()
+        .clamp(1.0, (n / 2 - 1) as f64);
+    let omega = (2.0 * std::f64::consts::PI * k) / n as f64;
+    let coeff = 2.0 * omega.cos();
+    let mut s_prev = 0.0;
+    let mut s_prev2 = 0.0;
+    for &sample in samples {
+        let s = sample + coeff * s_prev - s_prev2;
+        s_prev2 = s_prev;
+        s_prev = s;
+    }
+    s_prev2 * s_prev2 + s_prev * s_prev - coeff * s_prev * s_prev2
+}
+
+fn percentile_f64(values: &mut [f64], q: f64) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    values.sort_by(|a, b| a.total_cmp(b));
+    let idx = ((values.len() - 1) as f64 * q).round() as usize;
+    values[idx.min(values.len() - 1)]
+}
+
+fn normalize_and_smooth(powers: &[Vec<f64>]) -> Vec<u8> {
+    if powers.is_empty() {
+        return Vec::new();
+    }
+    let frames = powers.len();
+    let bands = powers[0].len();
+    let mut floors = vec![0.0; bands];
+    let mut ceilings = vec![1.0; bands];
+    for band in 0..bands {
+        let mut values: Vec<f64> = (0..frames)
+            .map(|frame| powers[frame][band].ln_1p())
+            .collect();
+        let mut values_hi = values.clone();
+        floors[band] = percentile_f64(&mut values, 0.10);
+        ceilings[band] = (floors[band] + 0.001).max(percentile_f64(&mut values_hi, 0.96));
+    }
+    let mut prev = vec![0.0; bands];
+    let mut out = vec![0; frames * bands];
+    for frame in 0..frames {
+        for band in 0..bands {
+            let value = powers[frame][band].ln_1p();
+            let norm = ((value - floors[band]) / (ceilings[band] - floors[band])).clamp(0.0, 1.0);
+            let target = norm.sqrt();
+            let smoothed = if target > prev[band] {
+                prev[band] * 0.35 + target * 0.65
+            } else {
+                prev[band] * 0.78 + target * 0.22
+            };
+            prev[band] = smoothed;
+            out[frame * bands + band] = (smoothed * 255.0).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+    out
+}
+
+fn vblank_chart(args: &[String]) -> Result<(), String> {
+    let mut input = None;
+    let mut output = None;
+    let mut title = None;
+    let mut budget = ONE_VBLANK_CYCLES;
+    let mut i = 0usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--in" => {
+                i += 1;
+                input = args.get(i).cloned();
+            }
+            "--out" => {
+                i += 1;
+                output = args.get(i).cloned();
+            }
+            "--title" => {
+                i += 1;
+                title = args.get(i).cloned();
+            }
+            "--budget" => {
+                i += 1;
+                budget = parse_arg(args.get(i), "--budget")?;
+            }
+            other => return Err(format!("unknown vblank-chart arg `{other}`")),
+        }
+        i += 1;
+    }
+    let input = resolve_from_cwd(input.as_deref().ok_or("vblank-chart requires --in")?);
+    let output = resolve_from_cwd(output.as_deref().ok_or("vblank-chart requires --out")?);
+    let csv = fs::read_to_string(&input).map_err(|e| format!("{}: {e}", input.display()))?;
+    let mut rows = csv.lines();
+    let header: Vec<String> = rows
+        .next()
+        .ok_or("profile CSV is empty")?
+        .split(',')
+        .map(str::to_string)
+        .collect();
+    let row_values: Vec<Vec<String>> = rows
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.split(',').map(str::to_string).collect())
+        .collect();
+    let frame_cycles_idx =
+        csv_col(&header, "frame_cycles").ok_or("CSV has no frame_cycles column")?;
+    let render_idx = csv_col(&header, "render");
+    let present_idx = csv_col(&header, "present");
+    let miss_idx = csv_col(&header, "visual_deadline_misses");
+    let bands = [
+        ("update", "sim: update", "#1f6feb"),
+        ("frame_clear", "frame clear", "#6e7681"),
+        ("room", "room", "#2f81f7"),
+        ("sky", "sky", "#58a6ff"),
+        ("image_props", "props (image/box)", "#2ea043"),
+        ("model_instances", "models", "#3fb950"),
+        ("player", "player", "#56d364"),
+        ("equipment", "equipment", "#2dd4bf"),
+        ("world_flush", "world flush/sort", "#db61a2"),
+        ("ot_submit", "ot submit", "#e3a008"),
+        ("ot_wait", "gpu draw (ot wait)", "#e3633a"),
+        ("render_other", "render glue", "#768390"),
+        ("present", "present", "#8957e5"),
+        ("frame_other", "idle / loop", "#373e47"),
+    ];
+    let mut bars = Vec::new();
+    let mut render_cyc = Vec::new();
+    let mut sim_cyc = Vec::new();
+    let mut misses = 0u64;
+    for row in &row_values {
+        let fc = csv_num(row, Some(frame_cycles_idx));
+        let render = csv_num(row, render_idx);
+        let present = csv_num(row, present_idx);
+        let mut values = Vec::new();
+        let mut render_leaf_sum = 0u64;
+        for (key, _, _) in bands.iter().take(12) {
+            let value = csv_num(row, csv_col(&header, key));
+            if *key != "update" {
+                render_leaf_sum = render_leaf_sum.saturating_add(value);
+            }
+            values.push(value);
+        }
+        let render_other = render.saturating_sub(render_leaf_sum);
+        let frame_other = fc
+            .saturating_sub(values[0])
+            .saturating_sub(render)
+            .saturating_sub(present);
+        values.push(render_other);
+        values.push(present);
+        values.push(frame_other);
+        let is_render = render > 0;
+        if is_render {
+            render_cyc.push(fc);
+        } else {
+            sim_cyc.push(fc);
+        }
+        let miss = csv_num(row, miss_idx);
+        misses = misses.saturating_add(miss);
+        bars.push((values, fc, is_render, miss));
+    }
+    let title = title.unwrap_or_else(|| {
+        format!(
+            "per-vblank work - {}",
+            input
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("profile")
+        )
+    });
+    let html = render_chart_html(&title, &bands, &bars, budget);
+    if let Some(parent) = output.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    fs::write(&output, html).map_err(|e| format!("{}: {e}", output.display()))?;
+    render_cyc.sort_unstable();
+    sim_cyc.sort_unstable();
+    let render_avg = avg_u64(&render_cyc);
+    let sim_avg = avg_u64(&sim_cyc);
+    let all_avg = avg_u64(
+        &render_cyc
+            .iter()
+            .chain(sim_cyc.iter())
+            .copied()
+            .collect::<Vec<_>>(),
+    );
+    println!("wrote {}  ({} vblanks)", output.display(), bars.len());
+    println!(
+        "  render vblanks : {:>4}  avg {}  p50 {}  over-budget {}/{}",
+        render_cyc.len(),
+        fmt_budget(render_avg, budget),
+        fmt_budget(percentile_u64(&render_cyc, 50), budget),
+        render_cyc.iter().filter(|&&v| v > budget).count(),
+        render_cyc.len()
+    );
+    println!(
+        "  sim-only       : {:>4}  avg {}  p50 {}",
+        sim_cyc.len(),
+        fmt_budget(sim_avg, budget),
+        fmt_budget(percentile_u64(&sim_cyc, 50), budget)
+    );
+    println!(
+        "  overall avg    : {}   <- perfectly-spread target",
+        fmt_budget(all_avg, budget)
+    );
+    println!("  deadline misses: {misses}");
+    Ok(())
+}
+
+fn csv_col(header: &[String], name: &str) -> Option<usize> {
+    header.iter().position(|col| col == name)
+}
+
+fn csv_num(row: &[String], idx: Option<usize>) -> u64 {
+    idx.and_then(|i| row.get(i))
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+fn avg_u64(values: &[u64]) -> u64 {
+    if values.is_empty() {
+        0
+    } else {
+        values.iter().sum::<u64>() / values.len() as u64
+    }
+}
+
+fn percentile_u64(values: &[u64], p: u64) -> u64 {
+    if values.is_empty() {
+        return 0;
+    }
+    let idx = ((values.len() as u64 - 1) * p / 100) as usize;
+    values[idx]
+}
+
+fn fmt_budget(value: u64, budget: u64) -> String {
+    format!(
+        "{value:>10} ({:5.1}% of 1 vblank)",
+        value as f64 / budget as f64 * 100.0
+    )
+}
+
+fn render_chart_html(
+    title: &str,
+    bands: &[(&str, &str, &str)],
+    bars: &[(Vec<u64>, u64, bool, u64)],
+    budget: u64,
+) -> String {
+    let labels = bands
+        .iter()
+        .map(|(_, label, _)| json_string(label))
+        .collect::<Vec<_>>()
+        .join(",");
+    let colors = bands
+        .iter()
+        .map(|(_, _, color)| json_string(color))
+        .collect::<Vec<_>>()
+        .join(",");
+    let max_fc = bars.iter().map(|(_, fc, _, _)| *fc).max().unwrap_or(budget);
+    let cap = (budget * 2).max(max_fc);
+    let bar_json = bars
+        .iter()
+        .map(|(values, fc, render, miss)| {
+            format!(
+                "{{\"s\":[{}],\"fc\":{},\"r\":{},\"m\":{}}}",
+                values
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+                fc,
+                if *render { 1 } else { 0 },
+                miss
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        r#"<!doctype html><meta charset="utf-8"><title>{title}</title>
+<style>body{{margin:0;background:#0d1117;color:#c9d1d9;font:13px -apple-system,Segoe UI,sans-serif}}#hdr,#legend{{padding:12px 16px;border-bottom:1px solid #21262d}}canvas{{display:block;width:100%;height:420px}}.sw{{display:inline-block;width:11px;height:11px;margin:0 4px 0 12px}}</style>
+<div id="hdr"><h1>{title}</h1><div id="stats"></div><div id="legend"></div></div><canvas id="c"></canvas>
+<script>
+const labels=[{labels}],colors=[{colors}],bars=[{bar_json}],budget={budget},cap={cap},hz={CPU_HZ};
+document.getElementById('legend').innerHTML=labels.map((l,i)=>`<span class=sw style="background:${{colors[i]}}"></span>${{l}}`).join('');
+const c=document.getElementById('c'),ctx=c.getContext('2d');function resize(){{c.width=c.clientWidth*devicePixelRatio;c.height=420*devicePixelRatio;ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);draw();}}addEventListener('resize',resize);
+function ms(cyc){{return (cyc/hz*1000).toFixed(2)}}function draw(){{const w=c.clientWidth,h=420,plot=386,bw=w/Math.max(1,bars.length);ctx.clearRect(0,0,w,h);const y=v=>10+plot-(v/cap)*plot;for(let i=0;i<bars.length;i++){{let acc=0,x=i*bw;for(let s=0;s<bars[i].s.length;s++){{let v=bars[i].s[s];if(!v)continue;ctx.fillStyle=colors[s];ctx.fillRect(x+0.5,y(acc+v),Math.max(1,bw-1),Math.max(0,y(acc)-y(acc+v)));acc+=v;}}if(bars[i].m){{ctx.fillStyle='#f85149';ctx.fillRect(x,400,Math.max(1,bw-1),4)}}}}ctx.strokeStyle='#a8b1bb';ctx.setLineDash([4,4]);ctx.beginPath();ctx.moveTo(0,y(budget));ctx.lineTo(w,y(budget));ctx.stroke();}}
+const render=bars.filter(b=>b.r),sim=bars.filter(b=>!b.r);const avg=a=>a.length?Math.round(a.reduce((s,b)=>s+b.fc,0)/a.length):0;document.getElementById('stats').textContent=`vblanks ${{bars.length}} · render ${{render.length}} avg ${{ms(avg(render))}}ms · sim ${{sim.length}} avg ${{ms(avg(sim))}}ms · 1 vblank ${{ms(budget)}}ms`;resize();
+</script>"#,
+        title = html_escape(title),
+        labels = labels,
+        colors = colors,
+        bar_json = bar_json,
+        budget = budget,
+        cap = cap,
+        CPU_HZ = CPU_HZ
+    )
+}
+
+fn json_string(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn html_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+fn gen_tones() -> Result<(), String> {
+    let crate_root = repo_root().join("sdk/crates/psx-spu");
+    let vendor = crate_root.join("vendor");
+    let out = crate_root.join("src/tones.rs");
+    fs::create_dir_all(&vendor).map_err(|e| format!("{}: {e}", vendor.display()))?;
+    let tones = [
+        (
+            "SINE",
+            "Pure sine wave. Smooth, tonal - the default tuning reference.",
+            make_sine_samples(),
+        ),
+        (
+            "SQUARE",
+            "Hard square wave. Buzzier, classic 8-bit timbre.",
+            make_square_samples(),
+        ),
+        (
+            "TRIANGLE",
+            "Triangle wave. Softer than square, richer than sine.",
+            make_triangle_samples(),
+        ),
+        (
+            "SAWTOOTH",
+            "Sawtooth ramp. Bright, full-spectrum - good for chiptune leads.",
+            make_sawtooth_samples(),
+        ),
+    ];
+    let mut rust = String::from(
+        "//! Built-in ADPCM tone samples.\n//!\n//! Each tone is a single 16-byte ADPCM block with self-loop flags\n//! set (0x07 = loop end + repeat + loop start), so the SPU\n//! sustains the waveform until [`crate::Voice::key_off`]. Native\n//! playback frequency at [`crate::Pitch::UNITY`] is ~1575 Hz\n//! (44100 / 28 samples per loop); use [`crate::Pitch::for_frequency`]\n//! to tune to a specific note.\n//!\n//! Generated by `psoxide-dev gen-tones` from hand-rolled waveform\n//! definitions - no external dependency on an ADPCM encoder.\n\n",
+    );
+    rust.push_str("/// Native playback frequency (Hz) when a single-block\n/// tone is played at [`crate::Pitch::UNITY`]. The 28-sample\n/// loop at 44100 Hz gives 44100 / 28 = 1575 Hz.\npub const NATIVE_HZ: u32 = 1575;\n\n");
+    for (name, doc, samples) in tones {
+        // Shift 0: nibbles decode at full scale (max nibble 7 -> 28672 of
+        // 32767). This shipped as shift 8 for a while, which decodes at
+        // 1/256 scale (~peak 112) -- inaudible; VoXide found it as "no
+        // sound in-game" while every port with its own samples was fine.
+        let block = encode_adpcm_block(&samples, 0, 0, 0x07);
+        let path = vendor.join(format!("tone_{}.adpcm", name.to_ascii_lowercase()));
+        fs::write(&path, block).map_err(|e| format!("{}: {e}", path.display()))?;
+        println!("wrote {} - 16 bytes", relative_to_root(&path));
+        rust.push_str(&format!(
+            "/// {doc}\npub const {name}: &[u8; 16] = include_bytes!(\"../vendor/tone_{}.adpcm\");\n\n",
+            name.to_ascii_lowercase()
+        ));
+    }
+    rust.pop();
+    fs::write(&out, rust).map_err(|e| format!("{}: {e}", out.display()))?;
+    println!("wrote {}", relative_to_root(&out));
+    Ok(())
+}
+
+fn make_sine_samples() -> Vec<i8> {
+    (0..28)
+        .map(|i| {
+            (f64::sin(2.0 * std::f64::consts::PI * i as f64 / 28.0) * 7.0)
+                .round()
+                .clamp(-8.0, 7.0) as i8
+        })
+        .collect()
+}
+
+fn make_square_samples() -> Vec<i8> {
+    (0..28).map(|i| if i < 14 { 7 } else { -7 }).collect()
+}
+
+fn make_triangle_samples() -> Vec<i8> {
+    (0..28)
+        .map(|i| {
+            let v = if i < 14 {
+                -7.0 + (14.0 * i as f64 / 13.0).round()
+            } else {
+                7.0 - (14.0 * (i - 14) as f64 / 13.0).round()
+            };
+            v.clamp(-7.0, 7.0) as i8
+        })
+        .collect()
+}
+
+fn make_sawtooth_samples() -> Vec<i8> {
+    (0..28)
+        .map(|i| (-7.0 + (14.0 * i as f64 / 27.0).round()).clamp(-7.0, 7.0) as i8)
+        .collect()
+}
+
+fn encode_adpcm_block(samples: &[i8], shift: u8, filter: u8, flags: u8) -> [u8; 16] {
+    let mut out = [0u8; 16];
+    out[0] = (shift & 0x0f) | ((filter & 0x0f) << 4);
+    out[1] = flags;
+    for (idx, &sample) in samples.iter().take(28).enumerate() {
+        let nibble = sample as u8 & 0x0f;
+        let byte = 2 + idx / 2;
+        if idx % 2 == 0 {
+            out[byte] |= nibble;
+        } else {
+            out[byte] |= nibble << 4;
+        }
+    }
+    out
+}
+
+fn gen_fonts() -> Result<(), String> {
+    let crate_root = repo_root().join("sdk/crates/psx-font");
+    let vendor = crate_root.join("vendor");
+    let out_dir = crate_root.join("src/fonts");
+    fs::create_dir_all(&out_dir).map_err(|e| format!("{}: {e}", out_dir.display()))?;
+    let fonts = font_entries();
+    let mut mod_rs = String::from(
+        "//! Built-in fonts.\n//!\n//! Mostly from dhepper/font8x8 (8x8 monochrome), the canonical\n//! IBM PC VGA 8x16 font (the PC BIOS font, unrelated to the PS1\n//! BIOS), and a curated set of commercially usable TTFs rasterized\n//! into compact PS1 cells.\n//! See `vendor/PROVENANCE.md` for the full chain.\n//!\n//! Generated by `psoxide-dev gen-fonts`. Add new entries there\n//! rather than editing this file by hand.\n\n",
+    );
+    for entry in fonts {
+        let mut entry = entry;
+        let glyphs = match entry.format {
+            FontFormat::CHeader8x8 => parse_c_header_8x8(&vendor.join(entry.source), entry.count)?,
+            FontFormat::IbmBin => {
+                parse_ibm_bin(&vendor.join(entry.source), entry.height, entry.count)?
+            }
+            FontFormat::Ttf => parse_ttf_font(&vendor.join(entry.source), &mut entry)?,
+        };
+        let collisions = colliding_letters(&entry, &glyphs);
+        if !collisions.is_empty() {
+            let report = collisions
+                .iter()
+                .map(|group| group.iter().collect::<String>())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!(
+                "{}: letters rasterize to identical bitmaps at {}x{}: {report}.\n\
+                 A reader cannot tell them apart, so text in this font is wrong rather \n\
+                 than merely ugly. Either raise the cell size until the letterforms \n\
+                 separate, or drop the font: some display faces distinguish letters with \n\
+                 a notch a pixel or two wide and simply have no legible small size.",
+                entry.module, entry.width, entry.height
+            ));
+        }
+        let module = emit_font_module(&entry, &glyphs);
+        let path = out_dir.join(format!("{}.rs", entry.module));
+        fs::write(&path, module).map_err(|e| format!("{}: {e}", path.display()))?;
+        println!("wrote {} - {} glyphs", relative_to_root(&path), entry.count);
+        let last_cp = entry.first_cp + entry.count as u32 - 1;
+        mod_rs.push_str(&format!(
+            "/// Built-in font: `{}` (U+{:04X}..U+{:04X}, {} glyphs).\npub mod {};\n",
+            entry.module, entry.first_cp, last_cp, entry.count, entry.module
+        ));
+    }
+    mod_rs
+        .push_str("\n// Flat re-exports so call sites read as\n// `psx_font::fonts::BASIC` etc.\n");
+    for entry in font_entries() {
+        mod_rs.push_str(&format!("pub use {}::{};\n", entry.module, entry.prefix));
+    }
+    // Fonts that live in the tree without a generator entry, kept by hand
+    // because their source is not a TTF we rasterize. Regenerating `mod.rs`
+    // from the entry list alone silently drops them, and the only symptom is a
+    // build break in whatever imported one.
+    let generated: Vec<String> = font_entries()
+        .iter()
+        .map(|entry| entry.module.to_string())
+        .collect();
+    let mut hand_written: Vec<(String, String)> = Vec::new();
+    for file in fs::read_dir(&out_dir).map_err(|e| format!("{}: {e}", out_dir.display()))? {
+        let path = file.map_err(|e| e.to_string())?.path();
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if stem == "mod" || generated.iter().any(|name| name == stem) {
+            continue;
+        }
+        let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        // Export every font descriptor in a hand-maintained module. Spleen
+        // intentionally carries both its regular and italic variants in one
+        // file; taking only the first descriptor silently dropped the latter
+        // whenever generated `mod.rs` was refreshed.
+        for konst in text.lines().filter_map(|line| {
+            let rest = line.trim().strip_prefix("pub const ")?;
+            let (name, ty) = rest.split_once(": ")?;
+            ty.starts_with("BitmapFont")
+                .then(|| name.trim().to_string())
+        }) {
+            hand_written.push((stem.to_string(), konst));
+        }
+    }
+    hand_written.sort();
+    if !hand_written.is_empty() {
+        mod_rs.push_str("\n// Hand-maintained fonts: no generator entry, kept as-is.\n");
+        let mut previous_module: Option<&str> = None;
+        for (module, konst) in &hand_written {
+            if previous_module != Some(module.as_str()) {
+                mod_rs.push_str(&format!(
+                    "/// Hand-maintained built-in font module.\npub mod {module};\n"
+                ));
+                previous_module = Some(module.as_str());
+            }
+            mod_rs.push_str(&format!("pub use {module}::{konst};\n"));
+        }
+    }
+    fs::write(out_dir.join("mod.rs"), mod_rs).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum FontFormat {
+    CHeader8x8,
+    IbmBin,
+    Ttf,
+}
+
+#[derive(Clone)]
+struct FontEntry {
+    source: &'static str,
+    format: FontFormat,
+    module: &'static str,
+    prefix: &'static str,
+    license: &'static str,
+    first_cp: u32,
+    count: usize,
+    doc: &'static str,
+    width: usize,
+    height: usize,
+    advance: usize,
+    line_height: usize,
+    max_cell_w: usize,
+    max_cell_h: usize,
+    preferred_px: f32,
+    min_px: f32,
+    align_to_baseline: bool,
+    coverage_threshold: u8,
+    advances: Option<Vec<u8>>,
+}
+
+fn font_entries() -> Vec<FontEntry> {
+    let mut entries = vec![
+        font_entry(
+            "font8x8_basic.h",
+            FontFormat::CHeader8x8,
+            "basic",
+            "BASIC",
+            "Public Domain",
+            0x00,
+            128,
+            "ASCII 0x00..0x7F.",
+            8,
+            8,
+        ),
+        font_entry(
+            "font8x8_ext_latin.h",
+            FontFormat::CHeader8x8,
+            "ext_latin",
+            "EXT_LATIN",
+            "Public Domain",
+            0xA0,
+            96,
+            "Latin-1 supplement, U+00A0..U+00FF.",
+            8,
+            8,
+        ),
+        font_entry(
+            "font8x8_box.h",
+            FontFormat::CHeader8x8,
+            "boxdraw",
+            "BOXDRAW",
+            "Public Domain",
+            0x2500,
+            128,
+            "Box-drawing U+2500..U+257F.",
+            8,
+            8,
+        ),
+        font_entry(
+            "IBM_VGA_8x16.bin",
+            FontFormat::IbmBin,
+            "basic_8x16",
+            "BASIC_8X16",
+            "Public Domain",
+            0x00,
+            128,
+            "IBM PC VGA 8x16 console font (PC BIOS lineage, unrelated to the PS1 BIOS).",
+            8,
+            16,
+        ),
+    ];
+    for (source, module, prefix, license, doc) in [
+        (
+            "kenney-fonts/Kenney Blocks.ttf",
+            "kenney_blocks",
+            "KENNEY_BLOCKS",
+            "CC0-1.0",
+            "Kenney Blocks, rasterized from Kenney Fonts.",
+        ),
+        (
+            "kenney-fonts/Kenney Future.ttf",
+            "kenney_future",
+            "KENNEY_FUTURE",
+            "CC0-1.0",
+            "Kenney Future, rasterized from Kenney Fonts.",
+        ),
+        (
+            "kenney-fonts/Kenney Future Narrow.ttf",
+            "kenney_future_narrow",
+            "KENNEY_FUTURE_NARROW",
+            "CC0-1.0",
+            "Kenney Future Narrow, rasterized from Kenney Fonts.",
+        ),
+        (
+            "kenney-fonts/Kenney High.ttf",
+            "kenney_high",
+            "KENNEY_HIGH",
+            "CC0-1.0",
+            "Kenney High, rasterized from Kenney Fonts.",
+        ),
+        (
+            "kenney-fonts/Kenney High Square.ttf",
+            "kenney_high_square",
+            "KENNEY_HIGH_SQUARE",
+            "CC0-1.0",
+            "Kenney High Square, rasterized from Kenney Fonts.",
+        ),
+        (
+            "kenney-fonts/Kenney Mini.ttf",
+            "kenney_mini",
+            "KENNEY_MINI",
+            "CC0-1.0",
+            "Kenney Mini, rasterized from Kenney Fonts.",
+        ),
+        (
+            "kenney-fonts/Kenney Mini Square.ttf",
+            "kenney_mini_square",
+            "KENNEY_MINI_SQUARE",
+            "CC0-1.0",
+            "Kenney Mini Square, rasterized from Kenney Fonts.",
+        ),
+        (
+            "kenney-fonts/Kenney Mini Square Mono.ttf",
+            "kenney_mini_square_mono",
+            "KENNEY_MINI_SQUARE_MONO",
+            "CC0-1.0",
+            "Kenney Mini Square Mono, rasterized from Kenney Fonts.",
+        ),
+        (
+            "kenney-fonts/Kenney Pixel.ttf",
+            "kenney_pixel",
+            "KENNEY_PIXEL",
+            "CC0-1.0",
+            "Kenney Pixel, rasterized from Kenney Fonts.",
+        ),
+        (
+            "kenney-fonts/Kenney Pixel Square.ttf",
+            "kenney_pixel_square",
+            "KENNEY_PIXEL_SQUARE",
+            "CC0-1.0",
+            "Kenney Pixel Square, rasterized from Kenney Fonts.",
+        ),
+        (
+            "kenney-fonts/Kenney Rocket.ttf",
+            "kenney_rocket",
+            "KENNEY_ROCKET",
+            "CC0-1.0",
+            "Kenney Rocket, rasterized from Kenney Fonts.",
+        ),
+        (
+            "kenney-fonts/Kenney Rocket Square.ttf",
+            "kenney_rocket_square",
+            "KENNEY_ROCKET_SQUARE",
+            "CC0-1.0",
+            "Kenney Rocket Square, rasterized from Kenney Fonts.",
+        ),
+        (
+            "google-fonts/pressstart2p/PressStart2P-Regular.ttf",
+            "press_start_2p",
+            "PRESS_START_2P",
+            "SIL OFL 1.1",
+            "Press Start 2P, rasterized from Google Fonts.",
+        ),
+        (
+            "google-fonts/silkscreen/Silkscreen-Regular.ttf",
+            "silkscreen",
+            "SILKSCREEN",
+            "SIL OFL 1.1",
+            "Silkscreen, rasterized from Google Fonts.",
+        ),
+        (
+            "google-fonts/pixelifysans/PixelifySans[wght].ttf",
+            "pixelify_sans",
+            "PIXELIFY_SANS",
+            "SIL OFL 1.1",
+            "Pixelify Sans, rasterized from Google Fonts.",
+        ),
+        (
+            "google-fonts/orbitron/Orbitron[wght].ttf",
+            "orbitron",
+            "ORBITRON",
+            "SIL OFL 1.1",
+            "Orbitron, rasterized from Google Fonts.",
+        ),
+        (
+            "google-fonts/audiowide/Audiowide-Regular.ttf",
+            "audiowide",
+            "AUDIOWIDE",
+            "SIL OFL 1.1",
+            "Audiowide, rasterized from Google Fonts.",
+        ),
+        (
+            "google-fonts/michroma/Michroma-Regular.ttf",
+            "michroma",
+            "MICHROMA",
+            "SIL OFL 1.1",
+            "Michroma, rasterized from Google Fonts.",
+        ),
+        (
+            "google-fonts/electrolize/Electrolize-Regular.ttf",
+            "electrolize",
+            "ELECTROLIZE",
+            "SIL OFL 1.1",
+            "Electrolize, rasterized from Google Fonts.",
+        ),
+        (
+            "google-fonts/oxanium/Oxanium[wght].ttf",
+            "oxanium",
+            "OXANIUM",
+            "SIL OFL 1.1",
+            "Oxanium, rasterized from Google Fonts.",
+        ),
+        (
+            "google-fonts/rajdhani/Rajdhani-Regular.ttf",
+            "rajdhani",
+            "RAJDHANI",
+            "SIL OFL 1.1",
+            "Rajdhani, rasterized from Google Fonts.",
+        ),
+        (
+            "google-fonts/chakrapetch/ChakraPetch-Regular.ttf",
+            "chakra_petch",
+            "CHAKRA_PETCH",
+            "SIL OFL 1.1",
+            "Chakra Petch, rasterized from Google Fonts.",
+        ),
+        (
+            "google-fonts/tektur/Tektur[wdth,wght].ttf",
+            "tektur",
+            "TEKTUR",
+            "SIL OFL 1.1",
+            "Tektur, rasterized from Google Fonts.",
+        ),
+        (
+            "google-fonts/tomorrow/Tomorrow-Regular.ttf",
+            "tomorrow",
+            "TOMORROW",
+            "SIL OFL 1.1",
+            "Tomorrow, rasterized from Google Fonts.",
+        ),
+        (
+            "google-fonts/zendots/ZenDots-Regular.ttf",
+            "zen_dots",
+            "ZEN_DOTS",
+            "SIL OFL 1.1",
+            "Zen Dots, rasterized from Google Fonts.",
+        ),
+        (
+            "google-fonts/turretroad/TurretRoad-Regular.ttf",
+            "turret_road",
+            "TURRET_ROAD",
+            "SIL OFL 1.1",
+            "Turret Road, rasterized from Google Fonts.",
+        ),
+        (
+            "google-fonts/tiny5/Tiny5-Regular.ttf",
+            "tiny5",
+            "TINY5",
+            "SIL OFL 1.1",
+            "Tiny5, rasterized from Google Fonts.",
+        ),
+        (
+            "google-fonts/jersey10/Jersey10-Regular.ttf",
+            "jersey_10",
+            "JERSEY_10",
+            "SIL OFL 1.1",
+            "Jersey 10, rasterized from Google Fonts.",
+        ),
+        (
+            "google-fonts/spacemono/SpaceMono-Regular.ttf",
+            "space_mono",
+            "SPACE_MONO",
+            "SIL OFL 1.1",
+            "Space Mono, rasterized from Google Fonts.",
+        ),
+        (
+            "google-fonts/brunoace/BrunoAce-Regular.ttf",
+            "bruno_ace",
+            "BRUNO_ACE",
+            "SIL OFL 1.1",
+            "Bruno Ace, rasterized from Google Fonts.",
+        ),
+        (
+            "google-fonts/aldrich/Aldrich-Regular.ttf",
+            "aldrich",
+            "ALDRICH",
+            "SIL OFL 1.1",
+            "Aldrich, rasterized from Google Fonts.",
+        ),
+        (
+            "google-fonts/syncopate/Syncopate-Regular.ttf",
+            "syncopate",
+            "SYNCOPATE",
+            "Apache-2.0",
+            "Syncopate, rasterized from Google Fonts.",
+        ),
+        (
+            "google-fonts/sharetechmono/ShareTechMono-Regular.ttf",
+            "share_tech_mono",
+            "SHARE_TECH_MONO",
+            "SIL OFL 1.1",
+            "Share Tech Mono, rasterized from Google Fonts.",
+        ),
+        (
+            "google-fonts/jura/Jura[wght].ttf",
+            "jura",
+            "JURA",
+            "SIL OFL 1.1",
+            "Jura, rasterized from Google Fonts.",
+        ),
+        (
+            "itchio/drippy-space/DrippySpace-Regular.ttf",
+            "drippy_space",
+            "DRIPPY_SPACE",
+            "SIL OFL 1.1",
+            "Drippy Space by Syntaxes of Play, rasterized for futuristic display UI.",
+        ),
+    ] {
+        let mut entry = font_entry(
+            source,
+            FontFormat::Ttf,
+            module,
+            prefix,
+            license,
+            0x20,
+            96,
+            doc,
+            0,
+            0,
+        );
+        if module == "drippy_space" {
+            // The face is made from extremely thin, disconnected strokes.
+            // Generic 50% coverage thresholding erases diagonal joins, while
+            // top-left packing makes punctuation and digits float because it
+            // ignores each glyph's baseline bearings.
+            // Below 20 source pixels the W/M diagonals quantize into an
+            // N-like shape even in FreeType. Treat this as a display face,
+            // never as a compact HUD/menu font.
+            entry.max_cell_w = 20;
+            entry.max_cell_h = 24;
+            entry.preferred_px = 20.0;
+            entry.min_px = 20.0;
+            entry.align_to_baseline = true;
+            entry.coverage_threshold = 80;
+            // Space, punctuation, digits, and uppercase A-Z. Lowercase is
+            // intentionally excluded: this is a title face, and retaining
+            // all 96 printable glyphs at this cell size would overflow the
+            // fixed 16 KiB PS1 upload scratch buffer.
+            entry.count = 0x5B - 0x20;
+        }
+        if let Some((cell_w, cell_h, px)) = LARGE_CELL_TTF_FONTS
+            .iter()
+            .find(|(name, ..)| *name == module)
+            .map(|(_, w, h, px)| (*w, *h, *px))
+        {
+            entry.max_cell_w = cell_w;
+            entry.max_cell_h = cell_h;
+            entry.preferred_px = px;
+            // Never fall back below this: the whole point is that the small
+            // sizes are the broken ones.
+            entry.min_px = px;
+        }
+        entries.push(entry);
+    }
+
+    // Likewise, a title made by magnifying the 16px 1bpp atlas only makes
+    // its stair-steps larger. This compact A-Z atlas preserves the outline at
+    // the title size while remaining small enough for one PS1 font tpage.
+    let mut drippy_space_display = font_entry(
+        "itchio/drippy-space/DrippySpace-Regular.ttf",
+        FontFormat::Ttf,
+        "drippy_space_display",
+        "DRIPPY_SPACE_DISPLAY",
+        "SIL OFL 1.1",
+        0x41,
+        26,
+        "Drippy Space uppercase display face, rasterized natively for large UI titles.",
+        0,
+        0,
+    );
+    drippy_space_display.max_cell_w = 32;
+    drippy_space_display.max_cell_h = 36;
+    drippy_space_display.preferred_px = 28.0;
+    drippy_space_display.min_px = 28.0;
+    drippy_space_display.align_to_baseline = true;
+    drippy_space_display.coverage_threshold = 80;
+    entries.push(drippy_space_display);
+
+    // The regular Zen Dots atlas deliberately fits the complete printable
+    // ASCII range into a compact 16px-high cell. Enlarging that 1bpp raster
+    // for a logo turns every source pixel into a chunky block, so keep a
+    // separate uppercase-only atlas rasterized at its intended display size.
+    // A-Z stays compact enough to fit the PS1 uploader's audited 16 KiB
+    // scratch buffer and one 4bpp texture page.
+    let mut zen_dots_display = font_entry(
+        "google-fonts/zendots/ZenDots-Regular.ttf",
+        FontFormat::Ttf,
+        "zen_dots_display",
+        "ZEN_DOTS_DISPLAY",
+        "SIL OFL 1.1",
+        0x41,
+        26,
+        "Zen Dots uppercase display face, rasterized natively for large UI titles.",
+        0,
+        0,
+    );
+    zen_dots_display.max_cell_w = 32;
+    zen_dots_display.max_cell_h = 32;
+    zen_dots_display.preferred_px = 28.0;
+    zen_dots_display.min_px = 28.0;
+    entries.push(zen_dots_display);
+    entries
+}
+
+/// Faces that cannot render readable words at any size, kept for display use.
+///
+/// Kenney Future draws H, K and X as one glyph separated by a few pixels of
+/// taper on the crossbar. That is still true at 120 pixels, so no cell size
+/// rescues it: a larger cell only makes the bitmaps differ byte-wise while a
+/// reader still sees `PRESS X TO CONTINUE` as `PRESS H TO CONTINUE`. Use them
+/// for a logo or a heading where the word is already known, never for prose.
+const DECORATIVE_FONTS: &[&str] = &["kenney_future", "kenney_future_narrow"];
+
+/// Display faces that need a bigger cell than the default to stay readable.
+///
+/// Most of these TTFs survive a 16-pixel cell. A few tell letters apart with a
+/// notch one or two pixels wide at that size, which the rasterizer's coverage
+/// threshold then removes, leaving K, X and H as the same bitmap and turning
+/// `PRESS X` into `PRESS H`. Giving them room costs VRAM and rules them out
+/// for body text, but a large legible font beats a small wrong one.
+const LARGE_CELL_TTF_FONTS: &[(&str, usize, usize, f32)] = &[
+    // A variable font whose default instance is thin: at 16 pixels its
+    // horizontal bars fall under the coverage threshold and vanish, leaving E
+    // and L, F and I as bare stems.
+    ("jura", 32, 28, 26.0),
+];
+
+fn font_entry(
+    source: &'static str,
+    format: FontFormat,
+    module: &'static str,
+    prefix: &'static str,
+    license: &'static str,
+    first_cp: u32,
+    count: usize,
+    doc: &'static str,
+    width: usize,
+    height: usize,
+) -> FontEntry {
+    FontEntry {
+        source,
+        format,
+        module,
+        prefix,
+        license,
+        first_cp,
+        count,
+        doc,
+        width,
+        height,
+        advance: width,
+        line_height: height,
+        max_cell_w: 32,
+        max_cell_h: 16,
+        preferred_px: 16.0,
+        min_px: 8.0,
+        align_to_baseline: false,
+        coverage_threshold: 128,
+        advances: None,
+    }
+}
+
+fn parse_c_header_8x8(path: &Path, expected: usize) -> Result<Vec<Vec<u8>>, String> {
+    let text = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut glyphs = Vec::new();
+    for segment in text.split('{') {
+        let Some((body, _)) = segment.split_once('}') else {
+            continue;
+        };
+        let values: Vec<u8> = body
+            .split(',')
+            .filter_map(|part| {
+                let part = part.trim();
+                part.strip_prefix("0x")
+                    .or_else(|| part.strip_prefix("0X"))
+                    .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+            })
+            .collect();
+        if values.len() == 8 {
+            glyphs.push(values);
+        }
+    }
+    if glyphs.len() != expected {
+        return Err(format!(
+            "{}: parsed {} glyphs, expected {expected}",
+            path.display(),
+            glyphs.len()
+        ));
+    }
+    Ok(glyphs)
+}
+
+fn parse_ibm_bin(path: &Path, height: usize, expected: usize) -> Result<Vec<Vec<u8>>, String> {
+    let data = fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    if data.len() / height < expected {
+        return Err(format!("{}: not enough glyphs", path.display()));
+    }
+    Ok((0..expected)
+        .map(|idx| data[idx * height..idx * height + height].to_vec())
+        .collect())
+}
+
+fn parse_ttf_font(path: &Path, entry: &mut FontEntry) -> Result<Vec<Vec<u8>>, String> {
+    let data = fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let font = fontdue::Font::from_bytes(data, fontdue::FontSettings::default())
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    let mut chosen_px = None;
+    for px in (entry.min_px as u32..=entry.preferred_px as u32).rev() {
+        let mut cell_w = 0usize;
+        let mut cell_h = 0usize;
+        let mut min_x = 0i32;
+        let mut min_y = 0i32;
+        let mut max_x = 0i32;
+        let mut max_y = 0i32;
+        for cp in entry.first_cp..entry.first_cp + entry.count as u32 {
+            if cp == 0x20 {
+                continue;
+            }
+            let ch = char::from_u32(cp).unwrap_or(' ');
+            let (metrics, _) = font.rasterize(ch, px as f32);
+            if entry.align_to_baseline {
+                min_x = min_x.min(metrics.xmin);
+                min_y = min_y.min(metrics.ymin);
+                max_x = max_x.max(metrics.xmin + metrics.width as i32);
+                max_y = max_y.max(metrics.ymin + metrics.height as i32);
+            } else {
+                cell_w = cell_w.max(metrics.width + 2);
+                cell_h = cell_h.max(metrics.height + 2);
+            }
+        }
+        if entry.align_to_baseline {
+            cell_w = (max_x - min_x).max(0) as usize + 2;
+            cell_h = (max_y - min_y).max(0) as usize + 2;
+        }
+        if cell_w <= entry.max_cell_w && cell_h <= entry.max_cell_h {
+            chosen_px = Some((px as f32, cell_w.max(1), cell_h.max(1)));
+            break;
+        }
+    }
+    let (px, cell_w, cell_h) = chosen_px.ok_or_else(|| {
+        format!(
+            "{}: could not fit glyphs into {}x{} cells",
+            path.display(),
+            entry.max_cell_w,
+            entry.max_cell_h
+        )
+    })?;
+    entry.width = cell_w;
+    entry.height = cell_h;
+    entry.advance = cell_w;
+    entry.line_height = cell_h;
+    let row_bytes = cell_w.div_ceil(8);
+    let (global_min_x, global_max_y) = if entry.align_to_baseline {
+        let mut min_x = 0i32;
+        let mut max_y = 0i32;
+        for cp in entry.first_cp..entry.first_cp + entry.count as u32 {
+            if cp == 0x20 {
+                continue;
+            }
+            let ch = char::from_u32(cp).unwrap_or(' ');
+            let (metrics, _) = font.rasterize(ch, px);
+            min_x = min_x.min(metrics.xmin);
+            max_y = max_y.max(metrics.ymin + metrics.height as i32);
+        }
+        (min_x, max_y)
+    } else {
+        (0, 0)
+    };
+    let mut glyphs = Vec::new();
+    let mut advances = Vec::new();
+    for cp in entry.first_cp..entry.first_cp + entry.count as u32 {
+        let ch = char::from_u32(cp).unwrap_or(' ');
+        let (metrics, bitmap) = font.rasterize(ch, px);
+        let mut rows = vec![0u8; row_bytes * cell_h];
+        let offset_x = if entry.align_to_baseline {
+            (1 + metrics.xmin - global_min_x).max(0) as usize
+        } else {
+            1
+        };
+        let offset_y = if entry.align_to_baseline {
+            (1 + global_max_y - (metrics.ymin + metrics.height as i32)).max(0) as usize
+        } else {
+            1
+        };
+        for y in 0..metrics.height.min(cell_h.saturating_sub(offset_y)) {
+            for x in 0..metrics.width.min(cell_w.saturating_sub(offset_x)) {
+                if bitmap[y * metrics.width + x] >= entry.coverage_threshold {
+                    let dx = offset_x + x;
+                    rows[(offset_y + y) * row_bytes + dx / 8] |= 1 << (dx % 8);
+                }
+            }
+        }
+        advances.push(metrics.advance_width.ceil().clamp(1.0, 255.0) as u8);
+        glyphs.push(rows);
+    }
+    entry.advances = Some(advances);
+    Ok(glyphs)
+}
+
+/// Letters of the Latin alphabet that came out as the same bitmap.
+///
+/// A font is not merely ugly when this happens, it is wrong: `PRESS X` renders
+/// as `PRESS H` and no amount of squinting recovers it. Worth checking at
+/// generation time because the failure is invisible in the glyph table and only
+/// shows up as misspelled words on screen, a long way from here.
+///
+/// Only A-Z: punctuation and box-drawing glyphs legitimately repeat, and a
+/// font of pure block shapes has every reason to.
+fn colliding_letters(entry: &FontEntry, glyphs: &[Vec<u8>]) -> Vec<Vec<char>> {
+    use std::collections::BTreeMap;
+    if DECORATIVE_FONTS.contains(&entry.module) {
+        return Vec::new();
+    }
+    let mut by_bitmap: BTreeMap<&[u8], Vec<char>> = BTreeMap::new();
+    for letter in 'A'..='Z' {
+        let Some(index) = (letter as u32).checked_sub(entry.first_cp) else {
+            continue;
+        };
+        let Some(glyph) = glyphs.get(index as usize) else {
+            continue;
+        };
+        if glyph.iter().all(|byte| *byte == 0) {
+            continue; // a font without letters at all is a different problem
+        }
+        by_bitmap.entry(glyph.as_slice()).or_default().push(letter);
+    }
+    by_bitmap
+        .into_values()
+        .filter(|group| group.len() > 1)
+        .collect()
+}
+
+fn emit_font_module(entry: &FontEntry, glyphs: &[Vec<u8>]) -> String {
+    let row_bytes = entry.width.div_ceil(8);
+    let total_bytes = entry.count * row_bytes * entry.height;
+    let bit_order = match entry.format {
+        FontFormat::IbmBin => "Msb",
+        _ => "Lsb",
+    };
+    let mut out = format!(
+        "// This file is GENERATED by `psoxide-dev gen-fonts` from\n// `vendor/{}`. Do NOT edit by hand - re-run the\n// generator if the upstream font source changes.\n//\n// License: {} (see `vendor/PROVENANCE.md`).\n\nuse crate::{{BitOrder, BitmapFont}};\n\n",
+        entry.source, entry.license
+    );
+    out.push_str(&format!(
+        "/// {}\n///\n/// {}x{} pixels per glyph, 1 bit per pixel, {} = leftmost.\npub const {}_BITMAP: [u8; {}] = [\n",
+        entry.doc,
+        entry.width,
+        entry.height,
+        if bit_order == "Lsb" { "LSB" } else { "MSB" },
+        entry.prefix,
+        total_bytes
+    ));
+    for (idx, rows) in glyphs.iter().enumerate() {
+        let cp = entry.first_cp + idx as u32;
+        out.push_str("    ");
+        out.push_str(
+            &rows
+                .iter()
+                .map(|b| format!("0x{b:02x}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        out.push_str(&format!(", // U+{cp:04X}\n"));
+    }
+    out.push_str("];\n\n");
+    let advances_name = if let Some(advances) = entry.advances.as_ref() {
+        out.push_str(&format!("/// Per-glyph pixel advances for the `{}` bitmap above.\npub const {}_ADVANCES: [u8; {}] = [\n", entry.module, entry.prefix, advances.len()));
+        for chunk in advances.chunks(16) {
+            out.push_str("    ");
+            out.push_str(
+                &chunk
+                    .iter()
+                    .map(u8::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+            out.push_str(",\n");
+        }
+        out.push_str("];\n\n");
+        format!("Some(&{}_ADVANCES)", entry.prefix)
+    } else {
+        "None".to_string()
+    };
+    out.push_str(&format!(
+        "/// [`BitmapFont`] descriptor for the `{}` bitmap above.\n/// Pass into [`crate::FontAtlas::upload`] to install it in VRAM.\npub const {}: BitmapFont = BitmapFont {{\n    glyph_w: {},\n    glyph_h: {},\n    first_char: 0x{:04x},\n    glyph_count: {},\n    bitmap: &{}_BITMAP,\n    glyph_advances: {},\n    advance_x: {},\n    line_height: {},\n    bit_order: BitOrder::{},\n}};\n",
+        entry.module,
+        entry.prefix,
+        entry.width,
+        entry.height,
+        entry.first_cp,
+        entry.count,
+        entry.prefix,
+        advances_name,
+        entry.advance,
+        entry.line_height,
+        bit_order
+    ));
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The numeric guard is only meaningful if it blanks exactly the
+    /// test-only items: too little and it flags host oracles that
+    /// legitimately use f64, too much and guest violations slip through.
+    #[test]
+    fn cfg_test_module_declarations_name_their_files() {
+        let src = "mod real;\n#[cfg(test)]\nmod flood_tests;\n#[cfg(test)]\npub(crate) mod probe;\n#[cfg(test)]\nmod inline { }\n";
+        assert_eq!(cfg_test_module_names(src), ["flood_tests", "probe"]);
+        assert_eq!(
+            cfg_test_module_paths(Path::new("a/src/lib.rs"), src),
+            [
+                Path::new("a/src/flood_tests.rs"),
+                Path::new("a/src/probe.rs")
+            ]
+        );
+        assert_eq!(
+            cfg_test_module_paths(Path::new("a/src/walk.rs"), src)[0],
+            Path::new("a/src/walk/flood_tests.rs")
+        );
+    }
+
+    #[test]
+    fn blank_test_items_blanks_test_only_and_keeps_the_rest() {
+        let src = "\
+fn ships() -> u64 { 1 }
+#[cfg(test)]
+mod tests { fn oracle() -> f64 { 0.5 } }
+#[cfg(all(test, feature = \"x\"))]
+fn gated() -> f64 { 1.0 }
+#[cfg(test)]
+use core::f64::consts::PI;
+#[cfg(any(target_arch = \"mips\", test))]
+fn also_ships() -> u64 { 2 }
+#[cfg(test)]
+#[inline(always)]
+fn array_arg(position: [i16; 3]) -> u8 { let wide: i64 = 1; wide as u8 }
+";
+        let out = blank_test_items(src);
+
+        assert!(out.contains("fn ships() -> u64"));
+        // `any(..., test)` still compiles into the guest, so it stays visible.
+        assert!(out.contains("fn also_ships() -> u64"));
+        // Brace-balanced item, feature-gated variant, and the brace-less
+        // `use` form all disappear.
+        assert!(!out.contains("oracle"));
+        assert!(!out.contains("gated"));
+        assert!(!out.contains("PI"));
+        // A `;` inside an array type in the signature must not end the item.
+        assert!(!out.contains("array_arg"));
+        assert!(!out.contains("wide"));
+        // Offsets must survive, or reported line numbers drift.
+        assert_eq!(out.len(), src.len());
+        assert_eq!(out.lines().count(), src.lines().count());
+    }
+
+    fn lines(text: &str) -> Vec<String> {
+        text.lines().map(str::to_string).collect()
+    }
+
+    const EDITOR_LINTS: &str = "\
+missing_docs = \"warn\"
+rust_2018_idioms = { level = \"warn\", priority = -1 }
+dbg_macro = \"deny\"";
+
+    #[test]
+    fn sdk_lints_equal_to_the_editor_pass() {
+        let editor = lines(EDITOR_LINTS);
+        assert!(lints_at_least_as_strict(&editor, &editor).is_empty());
+    }
+
+    #[test]
+    fn sdk_lints_that_add_or_tighten_pass() {
+        let editor = lines(EDITOR_LINTS);
+        let sdk = lines(
+            "\
+missing_docs = \"deny\"
+rust_2018_idioms = { level = \"warn\", priority = -1 }
+dbg_macro = \"forbid\"
+undocumented_unsafe_blocks = \"warn\"",
+        );
+        assert!(lints_at_least_as_strict(&editor, &sdk).is_empty());
+    }
+
+    #[test]
+    fn sdk_lints_that_drop_or_weaken_one_fail_and_name_it() {
+        let editor = lines(EDITOR_LINTS);
+        let missing = lines(
+            "\
+missing_docs = \"warn\"
+rust_2018_idioms = { level = \"warn\", priority = -1 }",
+        );
+        assert_eq!(
+            lints_at_least_as_strict(&editor, &missing),
+            ["is missing `dbg_macro`"]
+        );
+        let weaker = lines(
+            "\
+missing_docs = \"allow\"
+rust_2018_idioms = { level = \"warn\", priority = -1 }
+dbg_macro = \"deny\"",
+        );
+        assert_eq!(
+            lints_at_least_as_strict(&editor, &weaker),
+            ["sets `missing_docs` weaker than the editor"]
+        );
+        let reprioritised = lines(
+            "\
+missing_docs = \"warn\"
+rust_2018_idioms = { level = \"warn\", priority = 0 }
+dbg_macro = \"deny\"",
+        );
+        assert_eq!(
+            lints_at_least_as_strict(&editor, &reprioritised),
+            ["sets `rust_2018_idioms` with a different priority"]
+        );
+    }
+}

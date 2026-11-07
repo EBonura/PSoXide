@@ -1,0 +1,1181 @@
+//! Small fixed-step cloth ribbon, enabled by a model's `scarf_neck` socket.
+//! Simulation owns sixteen particles; drawing never advances physics.
+
+use super::*;
+use psx_engine::{LoadedAnchoredCameraGte, Vec3I16, ViewVertex, WorldRenderLayer};
+use psx_gpu::material::TexturedPacketMaterial;
+use psx_math::int32::isqrt_i32;
+
+const ROWS: usize = 8;
+const POINTS: usize = ROWS * 2;
+const Q: i32 = 16;
+type Point = [i32; 3];
+// The fixed-update cloth solve has no live renderer/collision scratch data.
+// The guest build proves its complete call tree fits in the scratchpad.
+type ScarfStack = psx_engine::scratchpad::ScratchpadStack<0, { psx_engine::scratchpad::SIZE }>;
+const _: () = psx_engine::scratchpad::assert_disjoint(&[ScarfStack::REGION]);
+
+/// A neck wrap and a tapering cloth tail. All dynamic storage is bounded and
+/// independent of the camera, framebuffer, material palette and render cadence.
+pub struct PlayerScarf {
+    active: bool,
+    model: u16,
+    tick: u32,
+    solve_tick: u32,
+    anchor: WorldVertex,
+    basis: Mat3I16,
+    height: i32,
+    points: [Point; POINTS],
+    previous: [Point; POINTS],
+}
+
+impl PlayerScarf {
+    /// Empty state, also used at scene changes and respawns.
+    pub const fn new() -> Self {
+        Self {
+            active: false,
+            model: 0,
+            tick: 0,
+            solve_tick: 0,
+            anchor: WorldVertex::ZERO,
+            basis: Mat3I16::IDENTITY,
+            height: 1,
+            points: [[0; 3]; POINTS],
+            previous: [[0; 3]; POINTS],
+        }
+    }
+
+    /// Whether the current player model opts into the scarf.
+    pub const fn active(&self) -> bool {
+        self.active
+    }
+
+    /// Sample the attachment and advance exactly once for this simulation tick.
+    /// Teleports, model replacements and clock discontinuities reset the ribbon.
+    pub fn tick(
+        &mut self,
+        tables: ModelTables,
+        pose: &PlayerActorPoseSnapshot,
+        height: i32,
+        floor_y: i32,
+        hz: VideoHz,
+    ) {
+        let model = pose.model();
+        let sockets = tables
+            .model_sockets
+            .get(
+                model.socket_first.to_usize()
+                    ..model
+                        .socket_first
+                        .to_usize()
+                        .saturating_add(model.socket_count as usize),
+            )
+            .unwrap_or(&[]);
+        let Some(socket) = sockets.iter().find(|s| s.name == "scarf_neck") else {
+            self.active = false;
+            return;
+        };
+        let Some(joint) = pose.pose().joint_world_transform(socket.joint) else {
+            self.active = false;
+            return;
+        };
+        let offset = rotate(joint.rotation, socket.translation);
+        let anchor = WorldVertex::new(
+            joint.translation.x.saturating_add(offset[0]),
+            // The socket sits at the upper neck; the wrap belongs below the jaw.
+            joint
+                .translation
+                .y
+                .saturating_add(offset[1])
+                .saturating_sub(height / 20),
+            joint.translation.z.saturating_add(offset[2]),
+        );
+        // SAFETY: this phase only mutates owned particle arrays. Attachment
+        // sampling finished above; no other scratchpad reservation is live.
+        unsafe {
+            ScarfStack::run(|| {
+                self.advance(
+                    pose.pose().tick().as_u32(),
+                    model.index.raw(),
+                    anchor,
+                    // A neck joint's bind basis need not use the model's upright/forward
+                    // axes. Position follows the animated neck; cloth orientation uses
+                    // the actor's presentation basis so the tail starts down the back.
+                    pose.pose().rotation(),
+                    height,
+                    // The visual origin is lifted to the hips by the model
+                    // floor correction. Only the motor supplies the real floor.
+                    floor_y,
+                    hz,
+                );
+            });
+        }
+    }
+
+    #[inline(never)]
+    fn advance(
+        &mut self,
+        tick: u32,
+        model: u16,
+        anchor: WorldVertex,
+        basis: Mat3I16,
+        height: i32,
+        floor_y: i32,
+        hz: VideoHz,
+    ) {
+        let height = height.clamp(128, 4096);
+        if self.active && tick == self.tick && model == self.model {
+            return;
+        }
+        let delta = [
+            self.anchor.x - anchor.x,
+            self.anchor.y - anchor.y,
+            self.anchor.z - anchor.z,
+        ];
+        let reset = !self.active
+            || model != self.model
+            || height != self.height
+            || tick.wrapping_sub(self.tick) > 8
+            || delta.iter().any(|d| d.abs() > height * 2);
+        self.active = true;
+        self.model = model;
+        self.tick = tick;
+        self.anchor = anchor;
+        self.basis = basis;
+        self.height = height;
+        if reset {
+            self.solve_tick = tick;
+            for row in 0..ROWS {
+                for side in 0..2 {
+                    let p = self.rest_point(row, side);
+                    self.points[row * 2 + side] = p;
+                    self.previous[row * 2 + side] = p;
+                }
+            }
+            for i in 2..POINTS {
+                self.collide_body(i, floor_y);
+            }
+            self.previous = self.points;
+            return;
+        }
+        // Rebase both Verlet positions without dragging free particles with
+        // the moving attachment. The displacement becomes physical inertia.
+        let bound = height * Q * 2;
+        for i in 0..POINTS {
+            for (axis, d) in delta.iter().enumerate() {
+                self.points[i][axis] = (self.points[i][axis] + d * Q).clamp(-bound, bound);
+                self.previous[i][axis] = (self.previous[i][axis] + d * Q).clamp(-bound, bound);
+            }
+        }
+        let pins = [self.rest_point(0, 0), self.rest_point(0, 1)];
+        self.points[..2].copy_from_slice(&pins);
+        self.previous[..2].copy_from_slice(&pins);
+        // Cloth solves at a fixed half-video rate (30 Hz NTSC, 25 Hz PAL),
+        // independent of rendered frames. The animated neck still updates on
+        // every gameplay tick, and both histories rebase together above.
+        if tick.wrapping_sub(self.solve_tick) < 2 {
+            for i in 2..POINTS {
+                self.collide_body(i, floor_y);
+            }
+            return;
+        }
+        self.solve_tick = tick;
+        let segment = height * Q / 16;
+        let hz = hz.as_nonzero_u32() as i32 / 2;
+        let gravity = (height * 3600 / (64 * hz * hz)).max(1);
+        let damping = if hz <= 25 { 236 } else { 240 };
+        for i in 2..POINTS {
+            let old = self.points[i];
+            for (axis, o) in old.iter().enumerate() {
+                let velocity =
+                    ((o - self.previous[i][axis]) * damping / 256).clamp(-segment, segment);
+                self.points[i][axis] = (o + velocity).clamp(-bound, bound);
+            }
+            self.points[i][1] -= gravity;
+            self.previous[i] = old;
+        }
+        for _ in 0..2 {
+            self.points[..2].copy_from_slice(&pins);
+            for row in 0..ROWS {
+                self.constrain(row * 2, row * 2 + 1, self.width(row).pow(2), 256);
+                if row > 0 {
+                    for side in 0..2 {
+                        self.constrain(
+                            (row - 1) * 2 + side,
+                            row * 2 + side,
+                            segment * segment,
+                            256,
+                        );
+                    }
+                    let width = (self.width(row - 1) + self.width(row)) / 2;
+                    let diagonal_squared = segment * segment + width * width;
+                    // Alternate diagonals resist shearing without doubling the solve.
+                    self.constrain(
+                        (row - 1) * 2 + (row & 1),
+                        row * 2 + 1 - (row & 1),
+                        diagonal_squared,
+                        192,
+                    );
+                }
+                if row > 1 {
+                    for side in 0..2 {
+                        self.constrain(
+                            (row - 2) * 2 + side,
+                            row * 2 + side,
+                            segment * segment * 4,
+                            48,
+                        );
+                    }
+                }
+            }
+            for i in 2..POINTS {
+                self.collide_body(i, floor_y);
+            }
+        }
+        self.points[..2].copy_from_slice(&pins);
+        self.previous[..2].copy_from_slice(&pins);
+    }
+
+    fn width(&self, row: usize) -> i32 {
+        self.height * Q * (16 - row as i32) / (12 * 16)
+    }
+
+    fn rest_point(&self, row: usize, side: usize) -> Point {
+        let local = [
+            if side == 0 {
+                -self.width(row) / 2
+            } else {
+                self.width(row) / 2
+            },
+            -self.height * Q / 80 - row as i32 * self.height * Q / 16,
+            -self.height * Q / 18 - row as i32 * self.height * Q / 64,
+        ];
+        rotate(self.basis, local)
+    }
+
+    fn constrain(&mut self, a: usize, b: usize, rest_squared: i32, stiffness: i32) {
+        let mut pa = self.points[a];
+        let mut pb = self.points[b];
+        let delta = core::array::from_fn::<_, 3, _>(|k| pb[k] - pa[k]);
+        let squared = delta
+            .iter()
+            .map(|v| v.saturating_mul(*v))
+            .fold(0i32, i32::saturating_add);
+        // Position-based length correction using squared distances. This
+        // converges around the rest length without a square root per link.
+        // Divide before multiplying to keep all arithmetic in signed 32 bits.
+        let ratio = (squared - rest_squared) / (squared.saturating_add(rest_squared) / 256).max(1);
+        let factor = ratio.clamp(-256, 256) * stiffness / 256;
+        let free_a = a >= 2;
+        let free_b = b >= 2;
+        let both_free = free_a && free_b;
+        for k in 0..3 {
+            // Keep these constant divisions: a runtime 256/512 selection
+            // otherwise emits three expensive MIPS DIVs for every constraint.
+            let correction = delta[k] * factor / 256;
+            let correction = if both_free {
+                correction / 2
+            } else {
+                correction
+            };
+            if free_a {
+                pa[k] += correction;
+            }
+            if free_b {
+                pb[k] -= correction;
+            }
+        }
+        self.points[a] = pa;
+        self.points[b] = pb;
+    }
+
+    fn collide_body(&mut self, i: usize, floor_y: i32) {
+        // Upright torso capsule, deliberately cheaper than sixteen world traces.
+        let p = self.points[i];
+        let center_y = p[1].clamp(-self.height * Q / 3, -self.height * Q / 8);
+        let d = [p[0], p[1] - center_y, p[2]];
+        let radius = self.height * Q / 9;
+        let d2 = d
+            .iter()
+            .map(|x| x.saturating_mul(*x))
+            .fold(0i32, i32::saturating_add);
+        if d2 < radius * radius {
+            let len = isqrt_i32(d2).max(1);
+            if d2 == 0 {
+                self.points[i][2] = -radius;
+            } else {
+                let factor = (radius * 256 + len - 1) / len;
+                self.points[i] = [
+                    d[0] * factor / 256,
+                    center_y + d[1] * factor / 256,
+                    d[2] * factor / 256,
+                ];
+            }
+        }
+        self.points[i][1] = self.points[i][1].max((floor_y - self.anchor.y + 8) * Q);
+    }
+
+    /// Draw opaque, double-sided cloth in the supplied persistent stance hue.
+    /// The body can fade independently; no texture upload or body re-pose occurs.
+    pub fn draw<const OT_DEPTH: usize>(
+        &self,
+        camera: WorldCamera,
+        color: (u8, u8, u8),
+        assembly: Option<ModelPhaseAssembly>,
+        options: WorldSurfaceOptions,
+        triangles: &mut PrimitivePacketArena<'_>,
+        world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+    ) -> u16 {
+        self.draw_crystal(camera, color, assembly, options, None, triangles, world)
+    }
+
+    /// Crystal atlas over the same procedural cloth, with an opaque fallback.
+    pub fn draw_crystal<const OT_DEPTH: usize>(
+        &self,
+        camera: WorldCamera,
+        color: (u8, u8, u8),
+        assembly: Option<ModelPhaseAssembly>,
+        options: WorldSurfaceOptions,
+        crystal: Option<TextureMaterial>,
+        triangles: &mut PrimitivePacketArena<'_>,
+        world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+    ) -> u16 {
+        self.draw_crystal_with_dash(
+            camera,
+            color,
+            assembly,
+            DashWireVisual::Solid,
+            options,
+            crystal,
+            triangles,
+            world,
+        )
+    }
+
+    /// Apply the body's dash wire/reassembly clock to the cloth as well.
+    pub fn draw_crystal_with_dash<const OT_DEPTH: usize>(
+        &self,
+        camera: WorldCamera,
+        color: (u8, u8, u8),
+        assembly: Option<ModelPhaseAssembly>,
+        dash: DashWireVisual,
+        options: WorldSurfaceOptions,
+        crystal: Option<TextureMaterial>,
+        triangles: &mut PrimitivePacketArena<'_>,
+        world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+    ) -> u16 {
+        if !self.active {
+            return 0;
+        }
+        let mut vertices = [WorldVertex::ZERO; 32];
+        // Two hand-shaped cloth edges, in 1/1024 of character height.
+        // The upper edge hugs the neck; the wider lower edge folds onto the
+        // collarbones with an off-centre front point. Unequal heights and
+        // depths avoid the rigid, circular tube silhouette of the first wrap.
+        const WRAP: [[Point; 2]; 8] = [
+            [[30, 4, -2], [44, -24, 0]],
+            [[23, 0, 20], [34, -35, 33]],
+            [[2, -5, 27], [-7, -54, 43]],
+            [[-23, 4, 20], [-34, -29, 30]],
+            [[-31, 6, -4], [-43, -18, -6]],
+            [[-24, 4, -31], [-34, -22, -47]],
+            [[0, 2, -39], [0, -26, -58]],
+            [[25, 4, -29], [37, -20, -43]],
+        ];
+        for (i, edge) in WRAP.into_iter().enumerate() {
+            for (side, point) in edge.into_iter().enumerate() {
+                let v = rotate(self.basis, point.map(|axis| axis * self.height / 1024));
+                vertices[i * 2 + side] = WorldVertex::new(
+                    self.anchor.x + v[0],
+                    self.anchor.y + v[1],
+                    self.anchor.z + v[2],
+                );
+            }
+        }
+        for i in 0..POINTS {
+            vertices[16 + i] = WorldVertex::new(
+                self.anchor.x + self.points[i][0] / Q,
+                self.anchor.y + self.points[i][1] / Q,
+                self.anchor.z + self.points[i][2] / Q,
+            );
+        }
+        let assembly = assembly.filter(|effect| !effect.is_assembled());
+        // Textured cloth in its solid state reads neither the GTE projection
+        // below (only the wire and flat-colour paths do) nor a per-triangle
+        // view transform: each strip corner is shared by up to six triangles,
+        // so it is transformed and divided once here and the triangle loop
+        // reuses it. The values are the ones the per-triangle path computed.
+        let cached =
+            crystal.is_some() && assembly.is_none() && matches!(dash, DashWireVisual::Solid);
+        let mut projected = [ProjectedVertex::INVALID; 32];
+        if !cached {
+            let gte = LoadedAnchoredCameraGte::load(camera, self.anchor);
+            for start in (0..32).step_by(3) {
+                let local = core::array::from_fn(|k| {
+                    let p = vertices[(start + k).min(31)];
+                    Vec3I16::new(
+                        (p.x - self.anchor.x) as i16,
+                        (p.y - self.anchor.y) as i16,
+                        (p.z - self.anchor.z) as i16,
+                    )
+                });
+                let out = gte.project_points(local);
+                for k in 0..3 {
+                    if start + k < 32 {
+                        projected[start + k] = out[k];
+                    }
+                }
+            }
+        }
+        // One set of packet words for all of the cloth's triangles.
+        let packet = crystal.map_or_else(
+            || TextureMaterial::new(0, 0).textured_packet_material(),
+            TextureMaterial::textured_packet_material,
+        );
+        let mut views = [ViewVertex::new(0, 0, 0); 32];
+        let mut cpu_projected = [None; 32];
+        if cached {
+            for i in 0..32 {
+                views[i] = camera.view_vertex(vertices[i]);
+                cpu_projected[i] = camera.projection.project_view(views[i]);
+            }
+        }
+        // While the dash rebuilds the cloth, its textured triangles are the
+        // intact mesh, so a corner shared by up to six of them is transformed
+        // and divided once, on first use, rather than once per triangle.
+        let lazy = crystal.is_some() && assembly.is_none() && !cached;
+        let mut seen = 0u32;
+        let options = options
+            .with_cull_mode(CullMode::None)
+            .with_render_layer(WorldRenderLayer::Opaque);
+        let wire_style = world.line_style(&options, DASH_WIRE_COLOR);
+        let mut submitted = 0;
+        let mut batch = [([0u16; 3], (0u8, 0u8, 0u8)); 30];
+        let mut batch_len = 0;
+        for strip in 0..15 {
+            let (a, b, shade) = if strip < 8 {
+                (
+                    strip * 2,
+                    ((strip + 1) % 8) * 2,
+                    [210, 190, 230, 205, 174, 190, 200, 224][strip],
+                )
+            } else {
+                (16 + (strip - 8) * 2, 18 + (strip - 8) * 2, 220)
+            };
+            for (facet, (indices, brightness)) in [
+                ([a, b, a + 1], shade),
+                ([a + 1, b, b + 1], (shade + 20).min(256)),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                if !matches!(dash, DashWireVisual::Solid) {
+                    let p = indices.map(|i| projected[i]);
+                    if p.iter().all(|p| {
+                        *p != ProjectedVertex::INVALID && p.sz > camera.projection.focal_length / 2
+                    }) {
+                        for edge in 0..3 {
+                            let (a, b) = (&p[edge], &p[(edge + 1) % 3]);
+                            match &wire_style {
+                                Some(style) => world.emit_line(triangles, style, a, b),
+                                None => {
+                                    let _ = world.submit_projected_line(
+                                        triangles,
+                                        [*a, *b],
+                                        DASH_WIRE_COLOR,
+                                        options,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    let show = match dash {
+                        DashWireVisual::Restoring { progress_q8 } => {
+                            (strip * 2 + facet) * 255 / 30 < usize::from(progress_q8)
+                        }
+                        _ => false,
+                    };
+                    if !show {
+                        continue;
+                    }
+                }
+                if let Some(material) = crystal {
+                    let target = indices.map(|i| vertices[i]);
+                    let fragment = match assembly {
+                        Some(effect) => effect.cloth_fragment(target, strip * 2 + facet),
+                        None => Some(target),
+                    };
+                    if let Some(fragment) = fragment {
+                        // Both triangles share the same continuous strip UVs.
+                        // Cloth movement supplies motion; the surface does not crawl.
+                        let v0 = if strip < 8 {
+                            8
+                        } else {
+                            8 + (strip as i32 - 8) * 14
+                        };
+                        let v1 = if strip < 8 { 108 } else { v0 + 14 };
+                        let uvs = if facet == 0 {
+                            [(20, v0), (20, v1), (108, v0)]
+                        } else {
+                            [(108, v0), (20, v1), (108, v1)]
+                        };
+                        let layer_options = options.with_material_layer(material);
+                        if lazy {
+                            for i in indices {
+                                if seen & (1 << i) == 0 {
+                                    seen |= 1 << i;
+                                    views[i] = camera.view_vertex(vertices[i]);
+                                    cpu_projected[i] = camera.projection.project_view(views[i]);
+                                }
+                            }
+                        }
+                        if cached || lazy {
+                            let corners = indices.map(|i| cpu_projected[i]);
+                            if let [Some(a), Some(b), Some(c)] = corners {
+                                // No corner is behind the near plane, so the
+                                // clipper would hand these three back as they are.
+                                submitted += world
+                                    .submit_textured_triangle_prepared(
+                                        triangles,
+                                        [a, b, c],
+                                        uvs.map(|(u, v)| {
+                                            (u.clamp(0, 127) as u8, v.clamp(0, 127) as u8)
+                                        }),
+                                        material,
+                                        packet,
+                                        layer_options,
+                                    )
+                                    .submitted_triangles;
+                                continue;
+                            }
+                            submitted += submit_crystal_cloth(
+                                indices.map(|i| views[i]),
+                                uvs,
+                                camera,
+                                material,
+                                layer_options,
+                                triangles,
+                                world,
+                            );
+                            continue;
+                        }
+                        submitted += submit_crystal_cloth_views(
+                            fragment.map(|v| camera.view_vertex(v)),
+                            uvs,
+                            camera,
+                            material,
+                            packet,
+                            layer_options,
+                            triangles,
+                            world,
+                        );
+                    }
+                    continue;
+                }
+                let tint = (
+                    (u32::from(color.0) * brightness / 256) as u8,
+                    (u32::from(color.1) * brightness / 256) as u8,
+                    (u32::from(color.2) * brightness / 256) as u8,
+                );
+                if let Some(effect) = assembly {
+                    if let Some(fragment) =
+                        effect.cloth_fragment(indices.map(|i| vertices[i]), strip * 2 + facet)
+                    {
+                        submitted += submit_clipped_cloth(
+                            fragment.map(|v| camera.view_vertex(v)),
+                            camera,
+                            tint,
+                            options,
+                            triangles,
+                            world,
+                        );
+                    }
+                    continue;
+                }
+                let p = indices.map(|i| projected[i]);
+                if p.iter().all(|p| {
+                    *p != ProjectedVertex::INVALID
+                        && p.sz > camera.projection.focal_length / 2
+                        && p.sz < 65535
+                        && p.sx > -1023
+                        && p.sx < 1023
+                        && p.sy > -1023
+                        && p.sy < 1023
+                }) && projected_triangle_batchable(p)
+                {
+                    batch[batch_len] = (indices.map(|i| i as u16), tint);
+                    batch_len += 1;
+                } else {
+                    // Keep original submission order when clipping interrupts
+                    // the mesh, including triangles at equal ordering depth.
+                    submitted += world.submit_solid_gouraud_faces(
+                        triangles,
+                        &projected,
+                        &batch[..batch_len],
+                        options,
+                    );
+                    batch_len = 0;
+                    submitted += submit_clipped_cloth(
+                        indices.map(|i| camera.view_vertex(vertices[i])),
+                        camera,
+                        tint,
+                        options,
+                        triangles,
+                        world,
+                    );
+                }
+            }
+        }
+        submitted +=
+            world.submit_solid_gouraud_faces(triangles, &projected, &batch[..batch_len], options);
+        submitted
+    }
+}
+
+impl Default for PlayerScarf {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn rotate(basis: Mat3I16, p: Point) -> Point {
+    core::array::from_fn(|r| {
+        (i32::from(basis.m[r][0]) * p[0]
+            + i32::from(basis.m[r][1]) * p[1]
+            + i32::from(basis.m[r][2]) * p[2])
+            >> 12
+    })
+}
+
+fn submit_cloth_triangle<const N: usize>(
+    p: [ProjectedVertex; 3],
+    color: (u8, u8, u8),
+    options: WorldSurfaceOptions,
+    arena: &mut PrimitivePacketArena<'_>,
+    world: &mut WorldRenderPass<'_, '_, N>,
+) -> u16 {
+    if !projected_triangle_batchable(p) {
+        return 0;
+    }
+    world
+        .submit_gouraud_triangle(
+            arena,
+            p.map(|v| ProjectedLit {
+                sx: v.sx,
+                sy: v.sy,
+                sz: v.sz.clamp(0, 65535) as u16,
+                r: color.0,
+                g: color.1,
+                b: color.2,
+            }),
+            options,
+        )
+        .submitted_triangles
+}
+
+// Near crossings preserve the remaining cloth polygon, rather than making
+// a whole segment disappear beside the camera. At most four output corners.
+fn submit_clipped_cloth<const N: usize>(
+    input: [ViewVertex; 3],
+    camera: WorldCamera,
+    color: (u8, u8, u8),
+    options: WorldSurfaceOptions,
+    arena: &mut PrimitivePacketArena<'_>,
+    world: &mut WorldRenderPass<'_, '_, N>,
+) -> u16 {
+    let near = camera.projection.near_z.max(1);
+    let mut polygon = [ViewVertex::new(0, 0, 0); 4];
+    let mut count = 0;
+    for i in 0..3 {
+        let a = input[i];
+        let b = input[(i + 1) % 3];
+        if a.z >= near {
+            polygon[count] = a;
+            count += 1;
+        }
+        if (a.z >= near) != (b.z >= near) {
+            let t = (near - a.z) * 4096 / (b.z - a.z);
+            polygon[count] = ViewVertex::new(
+                a.x + (((b.x - a.x) * t) >> 12),
+                a.y + (((b.y - a.y) * t) >> 12),
+                near,
+            );
+            count += 1;
+        }
+    }
+    let mut submitted = 0;
+    for i in 1..count.saturating_sub(1) {
+        if let [Some(a), Some(b), Some(c)] =
+            [polygon[0], polygon[i], polygon[i + 1]].map(|v| camera.projection.project_view(v))
+        {
+            submitted += submit_cloth_triangle([a, b, c], color, options, arena, world);
+        }
+    }
+    submitted
+}
+
+/// [`submit_crystal_cloth`] for a caller that also holds the material's prepacked
+/// packet words. With every corner in front of the near plane the clipper
+/// returns the three corners unchanged, so the packet goes out directly, as it
+/// does for the cached strip corners; anything crossing the plane is clipped.
+#[allow(clippy::too_many_arguments)]
+fn submit_crystal_cloth_views<const N: usize>(
+    input: [ViewVertex; 3],
+    uvs: [(i32, i32); 3],
+    camera: WorldCamera,
+    material: TextureMaterial,
+    packet: TexturedPacketMaterial,
+    options: WorldSurfaceOptions,
+    arena: &mut PrimitivePacketArena<'_>,
+    world: &mut WorldRenderPass<'_, '_, N>,
+) -> u16 {
+    let near = camera.projection.near_z.max(1);
+    if input.iter().any(|v| v.z < near) {
+        return submit_crystal_cloth(input, uvs, camera, material, options, arena, world);
+    }
+    let [Some(a), Some(b), Some(c)] = input.map(|v| camera.projection.project_view(v)) else {
+        return 0;
+    };
+    world
+        .submit_textured_triangle_prepared(
+            arena,
+            [a, b, c],
+            uvs.map(|(u, v)| (u.clamp(0, 127) as u8, v.clamp(0, 127) as u8)),
+            material,
+            packet,
+            options,
+        )
+        .submitted_triangles
+}
+
+/// Clip position and UV together at the near plane, then submit native FT3s.
+fn submit_crystal_cloth<const N: usize>(
+    input: [ViewVertex; 3],
+    uvs: [(i32, i32); 3],
+    camera: WorldCamera,
+    material: TextureMaterial,
+    options: WorldSurfaceOptions,
+    arena: &mut PrimitivePacketArena<'_>,
+    world: &mut WorldRenderPass<'_, '_, N>,
+) -> u16 {
+    let near = camera.projection.near_z.max(1);
+    let mut polygon = [(ViewVertex::new(0, 0, 0), (0, 0)); 4];
+    let mut count = 0;
+    for i in 0..3 {
+        let j = (i + 1) % 3;
+        let a = input[i];
+        let b = input[j];
+        if a.z >= near {
+            polygon[count] = (a, uvs[i]);
+            count += 1;
+        }
+        if (a.z >= near) != (b.z >= near) {
+            let t = (near - a.z) * 4096 / (b.z - a.z);
+            polygon[count] = (
+                ViewVertex::new(
+                    a.x + (((b.x - a.x) * t) >> 12),
+                    a.y + (((b.y - a.y) * t) >> 12),
+                    near,
+                ),
+                (
+                    uvs[i].0 + (((uvs[j].0 - uvs[i].0) * t) >> 12),
+                    uvs[i].1 + (((uvs[j].1 - uvs[i].1) * t) >> 12),
+                ),
+            );
+            count += 1;
+        }
+    }
+    let mut submitted = 0;
+    for i in 1..count.saturating_sub(1) {
+        let corners = [polygon[0], polygon[i], polygon[i + 1]];
+        if let [Some(a), Some(b), Some(c)] = corners.map(|v| camera.projection.project_view(v.0)) {
+            submitted += world
+                .submit_textured_triangle(
+                    arena,
+                    [a, b, c],
+                    corners.map(|v| (v.1 .0.clamp(0, 127) as u8, v.1 .1.clamp(0, 127) as u8)),
+                    material,
+                    options,
+                )
+                .submitted_triangles;
+        }
+    }
+    submitted
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use psx_engine::{DepthBand, DepthRange, OtFrame, WorldProjection, WorldTriCommand};
+    use psx_gpu::{ot::OrderingTable, prim::TriGouraud};
+    fn step(s: &mut PlayerScarf, t: u32, x: i32, z: i32) {
+        s.advance(
+            t,
+            1,
+            WorldVertex::new(x, 1000, z),
+            Mat3I16::IDENTITY,
+            1024,
+            0,
+            VideoHz::NTSC,
+        );
+    }
+    #[test]
+    fn pins_follow_pose_and_tail_has_inertia_without_unbounded_stretch() {
+        let mut s = PlayerScarf::new();
+        for t in 0..180 {
+            step(&mut s, t, 0, 0);
+        }
+        let before = s.points[14][0];
+        step(&mut s, 180, 40, 0);
+        assert!(
+            s.points[14][0] < before - 20 * Q,
+            "free cloth must lag the moving neck"
+        );
+        for t in 181..500 {
+            step(&mut s, t, 40, 0);
+        }
+        assert_eq!(s.points[0], s.rest_point(0, 0));
+        assert_eq!(s.points[1], s.rest_point(0, 1));
+        for row in 1..ROWS {
+            for side in 0..2 {
+                let a = s.points[row * 2 + side];
+                let b = s.points[(row - 1) * 2 + side];
+                let length = isqrt_i32((0..3).map(|k| (a[k] - b[k]).pow(2)).sum());
+                assert!(
+                    length < 1024 * Q / 10,
+                    "constraint stretched too far: {length}"
+                );
+            }
+        }
+        assert!(s.points.iter().all(|p| p[1] >= -992 * Q));
+    }
+    #[test]
+    fn render_frequency_does_not_advance_physics_and_teleports_reset_velocity() {
+        let mut s = PlayerScarf::new();
+        step(&mut s, 0, 0, 0);
+        step(&mut s, 1, 30, 0);
+        let saved = s.points;
+        let previous = s.previous;
+        step(&mut s, 1, 30, 0);
+        assert_eq!(s.points, saved);
+        assert_eq!(s.previous, previous);
+        step(&mut s, 2, 20000, -20000);
+        assert_eq!(s.points, s.previous);
+        assert_eq!(s.points[0], s.rest_point(0, 0));
+        assert_eq!(s.points[1], s.rest_point(0, 1));
+        step(&mut s, 1000, 20000, -20000);
+        assert_eq!(s.points, s.previous);
+    }
+    #[test]
+    fn turns_and_long_runs_remain_bounded_and_outside_torso() {
+        let mut s = PlayerScarf::new();
+        for t in 0..1200 {
+            let yaw = Angle::from_q12((t * 31) as u16);
+            let basis = Mat3I16 {
+                m: [
+                    [yaw.cos_q12() as i16, 0, yaw.sin_q12() as i16],
+                    [0, 4096, 0],
+                    [-(yaw.sin_q12() as i16), 0, yaw.cos_q12() as i16],
+                ],
+            };
+            s.advance(
+                t,
+                1,
+                WorldVertex::new(t as i32 * 30, 1000, 0),
+                basis,
+                1024,
+                0,
+                VideoHz::NTSC,
+            );
+            for p in &s.points[2..] {
+                assert!(p.iter().all(|v| v.abs() < 1024 * Q * 2));
+                let y = p[1].clamp(-1024 * Q / 3, -1024 * Q / 8);
+                let d2 = p[0] * p[0] + (p[1] - y).pow(2) + p[2] * p[2];
+                assert!(
+                    d2 >= (1024 * Q / 9 - 8).pow(2),
+                    "tick={t} point={p:?} length={}",
+                    isqrt_i32(d2)
+                );
+            }
+        }
+    }
+    #[test]
+    fn pal_and_ntsc_solve_on_fixed_ticks_and_preserve_attachment() {
+        for hz in [VideoHz::PAL, VideoHz::NTSC] {
+            let mut s = PlayerScarf::new();
+            for t in 0..600 {
+                s.advance(
+                    t,
+                    1,
+                    WorldVertex::new(0, 1000, 0),
+                    Mat3I16::IDENTITY,
+                    1024,
+                    0,
+                    hz,
+                );
+                assert_eq!(s.solve_tick, t & !1);
+                assert_eq!(s.points[0], s.rest_point(0, 0));
+                assert_eq!(s.points[1], s.rest_point(0, 1));
+                assert!(s.points[14][1] < s.points[0][1]);
+            }
+        }
+    }
+    #[test]
+    fn near_crossing_clips_to_two_triangles_and_capacity_is_bounded() {
+        let camera = WorldCamera::orbit(
+            WorldProjection::new(160, 120, 256, 32),
+            WorldVertex::ZERO,
+            1800,
+            Angle::from_q12(0),
+            Angle::from_q12(0),
+        );
+        let options = WorldSurfaceOptions::new(DepthBand::whole(), DepthRange::new(0, 8192))
+            .with_cull_mode(CullMode::None);
+        let mut storage = OrderingTable::<64>::new();
+        let mut ot = OtFrame::begin(&mut storage);
+        let mut commands = [WorldTriCommand::EMPTY; 64];
+        let mut slots = psx_engine::PrimitivePacketScratch::<2>::ZERO;
+        let mut arena = PrimitivePacketArena::new(&mut slots);
+        let mut world = WorldRenderPass::new_bucketed(&mut ot, &mut commands);
+        let crossing = [
+            ViewVertex::new(0, 0, 16),
+            ViewVertex::new(-8, -8, 64),
+            ViewVertex::new(8, -8, 64),
+        ];
+        assert_eq!(
+            submit_clipped_cloth(
+                crossing,
+                camera,
+                (255, 113, 58),
+                options,
+                &mut arena,
+                &mut world
+            ),
+            2
+        );
+        assert_eq!(arena.used_slots(), 2);
+        assert_eq!(
+            submit_clipped_cloth(
+                crossing,
+                camera,
+                (255, 113, 58),
+                options,
+                &mut arena,
+                &mut world
+            ),
+            0
+        );
+        assert_eq!(arena.used_slots(), 2);
+        assert_eq!(
+            submit_clipped_cloth(
+                [ViewVertex::new(0, 0, -10); 3],
+                camera,
+                (255, 113, 58),
+                options,
+                &mut arena,
+                &mut world
+            ),
+            0
+        );
+        unsafe {
+            arena.mutate_typed_slots::<TriGouraud>(0, 2, |triangle| {
+                // GP0 command remains an opaque Gouraud triangle after clipping.
+                assert_eq!(triangle.color0_cmd >> 24, 0x30);
+            });
+        }
+    }
+    #[test]
+    fn crystal_near_clip_preserves_uvs_blending_and_packet_capacity() {
+        let camera = WorldCamera::orbit(
+            WorldProjection::new(160, 120, 256, 32),
+            WorldVertex::ZERO,
+            1800,
+            Angle::from_q12(0),
+            Angle::from_q12(0),
+        );
+        let options = WorldSurfaceOptions::new(DepthBand::whole(), DepthRange::new(0, 8192))
+            .with_cull_mode(CullMode::None);
+        let mut storage = OrderingTable::<64>::new();
+        let mut ot = OtFrame::begin(&mut storage);
+        let mut commands = [WorldTriCommand::EMPTY; 64];
+        let mut slots = psx_engine::PrimitivePacketScratch::<2>::ZERO;
+        let mut arena = PrimitivePacketArena::new(&mut slots);
+        let mut world = WorldRenderPass::new_bucketed(&mut ot, &mut commands);
+        let crossing = [
+            ViewVertex::new(0, 0, 16),
+            ViewVertex::new(-8, -8, 64),
+            ViewVertex::new(8, -8, 64),
+        ];
+        let material =
+            TextureMaterial::opaque(42, 0, (128, 128, 128)).with_blend_mode(BlendMode::Average);
+        for expected in [2, 0] {
+            assert_eq!(
+                submit_crystal_cloth(
+                    crossing,
+                    [(0, 0), (127, 0), (0, 127)],
+                    camera,
+                    material,
+                    options,
+                    &mut arena,
+                    &mut world
+                ),
+                expected
+            );
+        }
+        assert_eq!(arena.used_slots(), 2);
+        unsafe {
+            arena.mutate_typed_slots::<TriTextured>(0, 2, |t| {
+                assert_eq!(t.color_cmd >> 24, 0x26);
+                assert_eq!(t.uv0_clut >> 16, 42);
+                for uv in [t.uv0_clut, t.uv1_tpage, t.uv2] {
+                    assert!((uv & 255) <= 127 && ((uv >> 8) & 255) <= 127);
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn settled_tip_points_down_after_stopping() {
+        let mut s = PlayerScarf::new();
+        for t in 0..300 {
+            step(&mut s, t, (t.min(120) * 20) as i32, 0);
+        }
+        let centers: [Point; ROWS] = core::array::from_fn(|r| {
+            core::array::from_fn(|a| (s.points[r * 2][a] + s.points[r * 2 + 1][a]) / 2)
+        });
+        // The model's visual origin can be around hip height (~700 here).
+        // The tip must pass below it instead of landing on that invisible plane.
+        assert!(
+            1000 + centers[ROWS - 1][1] / Q < 650,
+            "tip too high: {centers:?}"
+        );
+        let tip_drop = centers[ROWS - 2][1] - centers[ROWS - 1][1];
+        assert!(tip_drop > 1024 * Q / 24, "tip must hang down: {centers:?}");
+    }
+    #[test]
+    fn palette_hue_persists_without_fading_and_draw_is_read_only() {
+        let mut s = PlayerScarf::new();
+        for t in 0..180 {
+            step(&mut s, t, 0, 0);
+        }
+        let before = s.points;
+        let camera = WorldCamera::orbit(
+            WorldProjection::new(160, 120, 256, 8),
+            WorldVertex::new(0, 700, 0),
+            1800,
+            Angle::from_q12(0),
+            Angle::from_q12(0),
+        );
+        let options = WorldSurfaceOptions::new(DepthBand::whole(), DepthRange::new(0, 8192));
+        for color in [(255, 113, 58), (108, 224, 198)] {
+            let mut storage = OrderingTable::<64>::new();
+            let mut ot = OtFrame::begin(&mut storage);
+            let mut commands = [WorldTriCommand::EMPTY; 64];
+            let mut slots = psx_engine::PrimitivePacketScratch::<64>::ZERO;
+            let mut arena = PrimitivePacketArena::new(&mut slots);
+            let mut world = WorldRenderPass::new_bucketed(&mut ot, &mut commands);
+            assert_eq!(
+                s.draw(camera, color, None, options, &mut arena, &mut world),
+                30
+            );
+            let mut count = 0;
+            let end = arena.used_slots();
+            unsafe {
+                arena.mutate_typed_slots::<TriGouraud>(0, end, |triangle| {
+                    let rgb = triangle.color0_cmd;
+                    if color.0 > color.1 {
+                        assert!((rgb & 255) > ((rgb >> 8) & 255));
+                    } else {
+                        assert!(((rgb >> 8) & 255) > (rgb & 255));
+                    }
+                    count += 1;
+                });
+            }
+            assert_eq!(count, 30);
+            assert_eq!(s.points, before);
+        }
+    }
+    #[test]
+    fn crystal_cloth_direct_path_matches_the_clipper_for_corners_in_front() {
+        let projection = WorldProjection::new(160, 120, 256, 32);
+        let camera = WorldCamera::orbit(
+            projection,
+            WorldVertex::ZERO,
+            1800,
+            Angle::from_q12(0),
+            Angle::from_q12(0),
+        );
+        let mut seed = 0x2545_f491u32;
+        let mut next = |range: i32| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            (seed % (range as u32 * 2 + 1)) as i32 - range
+        };
+        let words = |arena: &mut PrimitivePacketArena<'_>| {
+            let end = arena.used_slots();
+            let mut out = [[0u32; 9]; 4];
+            let mut n = 0;
+            unsafe {
+                arena.mutate_typed_slots::<TriTextured>(0, end, |t| {
+                    out[n] = [
+                        t.tag,
+                        t.tex_window,
+                        t.color_cmd,
+                        t.v0,
+                        t.v1,
+                        t.v2,
+                        t.uv0_clut,
+                        t.uv1_tpage,
+                        t.uv2,
+                    ];
+                    n += 1;
+                });
+            }
+            (n, out)
+        };
+        let materials = [
+            TextureMaterial::opaque(42, 5, (128, 128, 128)),
+            TextureMaterial::opaque(7, 9, (90, 200, 40)).with_blend_mode(BlendMode::Average),
+        ];
+        for cull in [CullMode::None, CullMode::Back, CullMode::Front] {
+            for split in [false, true] {
+                for material in materials {
+                    let packet = material.textured_packet_material();
+                    let options =
+                        WorldSurfaceOptions::new(DepthBand::whole(), DepthRange::new(0, 8192))
+                            .with_cull_mode(cull)
+                            .with_textured_triangle_splitting(split)
+                            .with_material_layer(material);
+                    for _ in 0..400 {
+                        let input = core::array::from_fn(|_| {
+                            ViewVertex::new(next(1600), next(1600), 20 + next(1500).abs())
+                        });
+                        let uvs = core::array::from_fn(|_| (next(160) + 20, next(160) + 20));
+                        let mut got = [(0u16, (0usize, [[0u32; 9]; 4])); 2];
+                        for (k, direct) in [false, true].into_iter().enumerate() {
+                            let mut storage = OrderingTable::<64>::new();
+                            let mut ot = OtFrame::begin(&mut storage);
+                            let mut commands = [WorldTriCommand::EMPTY; 64];
+                            let mut slots = psx_engine::PrimitivePacketScratch::<4>::ZERO;
+                            let mut arena = PrimitivePacketArena::new(&mut slots);
+                            let mut world = WorldRenderPass::new_bucketed(&mut ot, &mut commands);
+                            let submitted = if direct {
+                                submit_crystal_cloth_views(
+                                    input, uvs, camera, material, packet, options, &mut arena,
+                                    &mut world,
+                                )
+                            } else {
+                                submit_crystal_cloth(
+                                    input, uvs, camera, material, options, &mut arena, &mut world,
+                                )
+                            };
+                            got[k] = (submitted, words(&mut arena));
+                        }
+                        assert_eq!(got[0], got[1], "{input:?} {uvs:?} {cull:?} {split}");
+                    }
+                }
+            }
+        }
+    }
+}

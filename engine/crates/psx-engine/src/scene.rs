@@ -1,0 +1,892 @@
+//! Scene trait + per-frame context.
+//!
+//! A `Scene` is whatever your game wants to run. The engine calls
+//! [`Scene::init`] once at boot, then [`Scene::update`] + [`Scene::render`]
+//! in a loop, passing a [`Ctx`] that carries the live-per-frame
+//! things the scene needs: the current pad state (with edge-detection
+//! helpers), the simulation and visual-frame counters, the display cadence,
+//! and the [`DoubleBuffer`] and [`Gpu`] it draws with.
+//!
+//! The split into `update` + `render` is cosmetic -- both get the
+//! same `Ctx`. Keeping them separate reads better and makes it easy
+//! to add determinism/replay hooks later (record `Ctx.pad` during
+//! update, replay without re-rendering, etc).
+
+use psx_font::FontAtlas;
+use psx_gpu::display::DoubleBuffer;
+use psx_gpu::Gpu;
+use psx_io::periph::{ControllerPort, GpuDma};
+use psx_level::{AssetId, LevelOptionDef, LevelUiValueBinding, LevelWorldLayer};
+use psx_pad::{button, poll_on, ActionInput, ActionMap, PadState, Port};
+
+use crate::frames::{SimTick, VideoHz, VisualFrame};
+use crate::ui::UiTextureSlot;
+
+/// How a scene hands its prepared 3D frame to the GPU.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum RenderSubmission {
+    /// [`Scene::render`] performs any ordering-table submission itself.
+    Immediate,
+    /// [`Scene::render`] only builds CPU-side packets; the runner calls
+    /// [`Scene::submit_render`] after the previous frame is presented.
+    /// This overlaps frame N GPU rasterisation with frame N+1 CPU work
+    /// without requiring a second packet arena. The runner drains frame N's
+    /// linked-list walk before `render` starts, because `render` rewrites
+    /// the packets and ordering table N's DMA is still reading.
+    Queued,
+    /// [`Queued`](Self::Queued), except that `render` never writes memory
+    /// the previous frame's list still reads: it alternates two ordering
+    /// tables and shares its packet scratch through
+    /// [`PacketFramePair`](crate::PacketFramePair), whose fence waits for
+    /// the walk only if this frame needs the in-flight frame's slots (and
+    /// before relinking retained packets). The runner therefore starts
+    /// `render` while the walk is still running, so the CPU builds frame
+    /// N+1 during frame N's DMA instead of waiting it out. `render` must
+    /// not touch the GPU or channel 2 except through calls that drain the
+    /// channel first (VRAM uploads do).
+    QueuedDoubleBuffered,
+    /// [`QueuedDoubleBuffered`](Self::QueuedDoubleBuffered), except that the
+    /// runner hands the whole frame to psx-rt's present queue instead of
+    /// kicking it itself: frame N's ordering table, its overlay and the draw
+    /// target and clear that precede it become one DMA chain, which the VBlank
+    /// handler starts (and flips N-1 onto the display) on the first edge
+    /// after N-1 has drawn. The CPU goes straight on to the next frame.
+    ///
+    /// `render` ends its ordering table on [`Ctx::present_queue_hook`] right
+    /// after clearing it and reserves overlay space;
+    /// [`Scene::take_queued_frame`] then returns both, and the runner records
+    /// [`Scene::render_overlay`] into that space with psx-io's command
+    /// recording. Display-control writes are not recorded; psx-vram uploads
+    /// reach the GPU at once, outside the recording.
+    /// When `take_queued_frame` returns `None`, the runner presents the frame
+    /// through the `QueuedDoubleBuffered` path instead, so the scene must
+    /// also support [`Scene::submit_render`].
+    ///
+    /// Needs psx-engine's `present-queue` feature; without it the runner
+    /// presents these scenes as `QueuedDoubleBuffered`.
+    PresentQueue,
+}
+
+impl RenderSubmission {
+    /// True for both queued contracts: `render` builds, `submit_render` kicks.
+    pub const fn is_queued(self) -> bool {
+        matches!(
+            self,
+            Self::Queued | Self::QueuedDoubleBuffered | Self::PresentQueue
+        )
+    }
+}
+
+/// A frame a [`RenderSubmission::PresentQueue`] scene built, returned by
+/// [`Scene::take_queued_frame`]. Everything it points at must stay live and
+/// unmodified until the frame after next starts rendering.
+#[derive(Copy, Clone, Debug)]
+pub struct QueuedFrame {
+    /// The ordering table's submit head (the first node the walk reads).
+    pub head: *const u32,
+    /// Space for the runner to record the overlay into.
+    pub overlay: *mut u32,
+    /// Words available at `overlay`.
+    pub overlay_words: usize,
+}
+
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RuntimeRequests {
+    timing_realign: bool,
+    visual_checkpoint: bool,
+    scene_state: Option<u16>,
+}
+
+/// Per-frame context passed to [`Scene::update`] and
+/// [`Scene::render`]. The engine owns and updates this between
+/// frames; the scene reads from it and draws through it.
+pub struct Ctx {
+    /// Fixed simulation/control tick. Advances once per display
+    /// VBlank, including VBlanks where the app runner intentionally
+    /// keeps the previous framebuffer visible.
+    pub sim_tick: SimTick,
+    /// Monotonic visible-frame counter. Advances once per rendered
+    /// frame, so it can diverge from `sim_tick` when visuals are paced
+    /// below the simulation cadence.
+    pub visual_frame: VisualFrame,
+    /// Display cadence used for time conversion (`60` NTSC, `50` PAL).
+    pub video_hz: VideoHz,
+    /// Port-1 pad state this frame.
+    pub pad: PadState,
+    /// Port-1 pad state last frame -- used by [`Ctx::just_pressed`]
+    /// to distinguish "newly pressed this frame" from "held across
+    /// multiple frames".
+    pub pad_prev: PadState,
+    /// Port-2 pad state from the most recent explicit
+    /// [`Ctx::refresh_second_pad`] call.
+    pub pad2: PadState,
+    /// Previous explicit port-2 sample, for edge detection.
+    pub pad2_prev: PadState,
+    /// Frame buffer the scene draws into. Immediate scenes receive it cleared
+    /// before [`Scene::render`]; queued scenes prepare CPU packets first and
+    /// receive the clear immediately before [`Scene::submit_render`].
+    pub fb: DoubleBuffer,
+    runtime_requests: RuntimeRequests,
+    gpu_dma: Option<GpuDma>,
+    controller_port: Option<ControllerPort>,
+    /// The pad engine owns the port while it runs; a card borrows it here.
+    #[cfg(all(feature = "pad-irq-engine", target_arch = "mips"))]
+    pad_engine: PadEngine,
+    present_queue_hook: Option<*const u32>,
+}
+
+/// The interrupt-driven pad engine, as the context uses it.
+#[cfg(all(feature = "pad-irq-engine", target_arch = "mips"))]
+#[derive(Default)]
+struct PadEngine {
+    /// The engine is installed and owns the port token.
+    running: bool,
+    /// Port 2 is being polled (the first `refresh_second_pad` switches it on).
+    second_port: bool,
+    /// The port, on loan to a card driver until the end of the tick.
+    lease: Option<psx_pad::console::Lease>,
+}
+
+impl Ctx {
+    pub(crate) fn new(
+        sim_tick: SimTick,
+        visual_frame: VisualFrame,
+        video_hz: VideoHz,
+        pad: PadState,
+        pad_prev: PadState,
+        fb: DoubleBuffer,
+    ) -> Self {
+        Self {
+            sim_tick,
+            visual_frame,
+            video_hz,
+            pad,
+            pad_prev,
+            pad2: PadState::NONE,
+            pad2_prev: PadState::NONE,
+            fb,
+            runtime_requests: RuntimeRequests::default(),
+            gpu_dma: None,
+            controller_port: None,
+            #[cfg(all(feature = "pad-irq-engine", target_arch = "mips"))]
+            pad_engine: PadEngine::default(),
+            present_queue_hook: None,
+        }
+    }
+
+    /// Hand the context the GPU DMA token; the app runner does this once.
+    pub(crate) fn set_gpu_dma(&mut self, dma: GpuDma) {
+        self.gpu_dma = Some(dma);
+    }
+
+    /// Hand the context the controller-port token; the app runner does this
+    /// once, after its boot-time pad negotiation.
+    pub(crate) fn set_controller_port(&mut self, port: ControllerPort) {
+        self.controller_port = Some(port);
+    }
+
+    /// The controller-port token, for polling a pad or negotiating its mode
+    /// through `psx_pad::poll_on` and its siblings. Memory-card drivers
+    /// borrow it from here too, so a card and a poll never overlap.
+    ///
+    /// # Panics
+    ///
+    /// Outside the app runner, which takes the token at boot.
+    ///
+    /// With the `pad-irq-engine` feature the pad engine owns the token and
+    /// this lends it: the first call in a tick takes a lease from the engine,
+    /// which polls nothing until the runner ends the tick. Keep to one card
+    /// transaction per tick.
+    #[inline]
+    pub fn controller_port(&mut self) -> &mut ControllerPort {
+        #[cfg(all(feature = "pad-irq-engine", target_arch = "mips"))]
+        if self.pad_engine.running {
+            return &mut **self
+                .pad_engine
+                .lease
+                .get_or_insert_with(psx_pad::console::lease);
+        }
+        self.controller_port
+            .as_mut()
+            .expect("the app runner holds the controller-port token")
+    }
+
+    /// Start reading the pads from the interrupt-driven engine: install it
+    /// with the port token, or give the token back to the synchronous driver
+    /// if the engine cannot take the exception vector. Returns whether it is
+    /// running. The app runner calls this once, after its boot-time pad
+    /// negotiation.
+    #[cfg(all(feature = "pad-irq-engine", target_arch = "mips"))]
+    pub(crate) fn start_pad_engine(&mut self, port: ControllerPort) -> bool {
+        match psx_pad::console::install(port, psx_pad::engine::Config::PORT1_ONLY) {
+            Ok(()) => {
+                self.pad_engine.running = true;
+                true
+            }
+            Err(port) => {
+                self.set_controller_port(port);
+                false
+            }
+        }
+    }
+
+    /// Whether the pads are read from the interrupt-driven engine.
+    #[inline]
+    pub(crate) fn pad_engine_running(&self) -> bool {
+        #[cfg(all(feature = "pad-irq-engine", target_arch = "mips"))]
+        {
+            self.pad_engine.running
+        }
+        #[cfg(not(all(feature = "pad-irq-engine", target_arch = "mips")))]
+        {
+            false
+        }
+    }
+
+    /// Give the port back to the engine if a card driver borrowed it this
+    /// tick. The app runner calls this after each update and render.
+    #[inline]
+    pub(crate) fn release_controller_port(&mut self) {
+        #[cfg(all(feature = "pad-irq-engine", target_arch = "mips"))]
+        {
+            self.pad_engine.lease = None;
+        }
+    }
+
+    /// The GPU DMA token, for [`OtFrame::submit`](crate::OtFrame::submit)
+    /// and the other calls that walk or write through channel 2.
+    ///
+    /// # Panics
+    ///
+    /// Outside the app runner, which takes the token at boot.
+    #[inline]
+    pub fn gpu_dma(&mut self) -> &mut GpuDma {
+        self.gpu_dma
+            .as_mut()
+            .expect("the app runner holds the GPU DMA token")
+    }
+
+    /// The GPU driver, for immediate drawing and the other calls that write
+    /// GP0 or GP1. It borrows the context, so nothing can draw while a
+    /// linked-list walk the same borrow started is still being waited on.
+    ///
+    /// # Panics
+    ///
+    /// Outside the app runner, which takes the token at boot.
+    #[inline]
+    pub fn gpu(&mut self) -> &mut Gpu {
+        Gpu::from_dma_mut(self.gpu_dma())
+    }
+
+    /// The GPU driver and the double buffer together, for calls such as
+    /// `ctx.fb.clear(gpu, ..)` that need both at once.
+    ///
+    /// # Panics
+    ///
+    /// Outside the app runner, which takes the token at boot.
+    #[inline]
+    pub fn gpu_and_buffers(&mut self) -> (&mut Gpu, &mut DoubleBuffer) {
+        let dma = self
+            .gpu_dma
+            .as_mut()
+            .expect("the app runner holds the GPU DMA token");
+        (Gpu::from_dma_mut(dma), &mut self.fb)
+    }
+
+    /// During a [`RenderSubmission::PresentQueue`] render, the node the
+    /// frame's ordering table must end on: pass it to
+    /// [`OtFrame::end_with_chain`](crate::OtFrame::end_with_chain) right after
+    /// clearing the table. The runner points it at the recorded overlay.
+    /// `None` in every other render.
+    #[inline]
+    pub fn present_queue_hook(&self) -> Option<*const u32> {
+        self.present_queue_hook
+    }
+
+    pub(crate) fn set_present_queue_hook(&mut self, hook: Option<*const u32>) {
+        self.present_queue_hook = hook;
+    }
+
+    /// Fixed simulation delta as Q12 seconds.
+    #[inline]
+    pub fn fixed_delta_seconds_q12(&self) -> u32 {
+        self.video_hz.fixed_delta_seconds_q12()
+    }
+
+    /// Elapsed simulation time as Q12 seconds.
+    #[inline]
+    pub fn elapsed_seconds_q12(&self) -> u32 {
+        self.sim_tick.elapsed_seconds_q12(self.video_hz)
+    }
+
+    /// `true` if `button` is pressed right now (held).
+    #[inline]
+    pub fn is_held(&self, button: u16) -> bool {
+        self.pad.buttons.is_held(button)
+    }
+
+    /// The raw active-high mask of buttons held this frame. Feed it to a
+    /// [`psx_pad::PadTracker`] for delay-then-rate auto-repeat or handoff
+    /// suppression, which `Ctx` itself does not track.
+    #[inline]
+    pub fn held_mask(&self) -> u16 {
+        self.pad.buttons.bits()
+    }
+
+    /// `true` if `button` transitioned from released to pressed
+    /// *this frame*. Exactly the edge-detect pattern every game
+    /// reinvents; factored here so menus / fire buttons / etc don't
+    /// have to track `pad_prev` themselves.
+    #[inline]
+    pub fn just_pressed(&self, button: u16) -> bool {
+        self.pad.buttons.is_held(button) && !self.pad_prev.buttons.is_held(button)
+    }
+
+    /// `true` if `button` transitioned from pressed to released
+    /// this frame.
+    #[inline]
+    pub fn just_released(&self, button: u16) -> bool {
+        !self.pad.buttons.is_held(button) && self.pad_prev.buttons.is_held(button)
+    }
+
+    /// Poll controller port 2 once, preserving its previous sample.
+    ///
+    /// Port 2 is deliberately opt-in: a single-player game should not pay for
+    /// a second SIO transaction every simulation tick. Multiplayer games call
+    /// this only in the screens and modes that can use a second controller.
+    #[inline]
+    pub fn refresh_second_pad(&mut self) -> PadState {
+        self.pad2_prev = self.pad2;
+        #[cfg(all(feature = "pad-irq-engine", target_arch = "mips"))]
+        if self.pad_engine.running {
+            // The engine polls port 2 from the next VBlank on; until its
+            // first reading lands the port reads as no pad.
+            self.poll_second_port();
+            self.pad2 = psx_pad::console::pad(Port::Two);
+            return self.pad2;
+        }
+        self.pad2 = poll_on(self.controller_port(), Port::Two);
+        self.pad2
+    }
+
+    /// Ask the pad on `port` for analog mode and lock it there.
+    ///
+    /// On the synchronous driver this is `psx_pad::enable_analog_on`, which
+    /// blocks for a few frames and returns whether the pad took it. On the
+    /// pad engine the request is queued, one command per VBlank, and this
+    /// returns `false`; read the answer from [`Ctx::pad_for`]'s
+    /// `is_analog()` a few frames later. Port 2 is polled from here on.
+    pub fn enable_analog(&mut self, port: Port) -> bool {
+        #[cfg(all(feature = "pad-irq-engine", target_arch = "mips"))]
+        if self.pad_engine.running {
+            if port == Port::Two {
+                self.poll_second_port();
+            }
+            psx_pad::console::request_analog(port);
+            return false;
+        }
+        psx_pad::enable_analog_on(self.controller_port(), port)
+    }
+
+    /// Start the pad engine polling port 2, once.
+    #[cfg(all(feature = "pad-irq-engine", target_arch = "mips"))]
+    fn poll_second_port(&mut self) {
+        if !self.pad_engine.second_port {
+            self.pad_engine.second_port = true;
+            psx_pad::console::configure(psx_pad::engine::Config::DEFAULT);
+        }
+    }
+
+    /// Current pad sample for player index 0 or 1. Other indices are
+    /// disconnected.
+    #[inline]
+    pub const fn pad_for(&self, player: usize) -> PadState {
+        match player {
+            0 => self.pad,
+            1 => self.pad2,
+            _ => PadState::NONE,
+        }
+    }
+
+    /// Previous pad sample for player index 0 or 1. Other indices are
+    /// disconnected.
+    #[inline]
+    pub const fn previous_pad_for(&self, player: usize) -> PadState {
+        match player {
+            0 => self.pad_prev,
+            1 => self.pad2_prev,
+            _ => PadState::NONE,
+        }
+    }
+
+    /// Whether `button` is held by one player now.
+    #[inline]
+    pub const fn is_held_for(&self, player: usize, button: u16) -> bool {
+        self.pad_for(player).buttons.is_held(button)
+    }
+
+    /// Whether `button` was newly pressed by one player this tick.
+    #[inline]
+    pub const fn just_pressed_for(&self, player: usize, button: u16) -> bool {
+        self.pad_for(player).buttons.is_held(button)
+            && !self.previous_pad_for(player).buttons.is_held(button)
+    }
+
+    /// Whether `button` was newly released by one player this tick.
+    #[inline]
+    pub const fn just_released_for(&self, player: usize, button: u16) -> bool {
+        !self.pad_for(player).buttons.is_held(button)
+            && self.previous_pad_for(player).buttons.is_held(button)
+    }
+
+    /// Interpret one player's samples through a logical action map.
+    #[inline]
+    pub fn actions<'a, const ACTIONS: usize>(
+        &'a self,
+        player: usize,
+        map: &'a ActionMap<ACTIONS>,
+    ) -> ActionInput<'a, ACTIONS> {
+        match player {
+            0 => map.input(self.pad, self.pad_prev),
+            1 => map.input(self.pad2, self.pad2_prev),
+            _ => map.input(PadState::NONE, PadState::NONE),
+        }
+    }
+
+    /// Convenience: any D-pad direction currently held.
+    #[inline]
+    pub fn dpad_any_held(&self) -> bool {
+        self.is_held(button::UP)
+            || self.is_held(button::DOWN)
+            || self.is_held(button::LEFT)
+            || self.is_held(button::RIGHT)
+    }
+
+    /// Ask the app runner to discard display-clock debt accumulated by an
+    /// intentional blocking load or scene transition. The request is consumed
+    /// after the current fixed update; simulation tick order is unchanged.
+    #[inline]
+    pub fn request_timing_realign(&mut self) {
+        self.runtime_requests.timing_realign = true;
+    }
+
+    #[inline]
+    pub(crate) fn take_timing_realign_request(&mut self) -> bool {
+        let requested = self.runtime_requests.timing_realign;
+        self.runtime_requests.timing_realign = false;
+        requested
+    }
+
+    /// Ask the app runner to discard clock debt accumulated by a blocking
+    /// loading slice and yield to the next eligible visual frame before
+    /// another fixed update. This is distinct from normal gameplay overload:
+    /// loading has no simulation state to catch up, but its progress UI must
+    /// still be presented between synchronous CD drains.
+    #[inline]
+    pub fn request_visual_checkpoint(&mut self) {
+        self.runtime_requests.visual_checkpoint = true;
+    }
+
+    #[inline]
+    pub(crate) fn take_visual_checkpoint_request(&mut self) -> bool {
+        let requested = self.runtime_requests.visual_checkpoint;
+        self.runtime_requests.visual_checkpoint = false;
+        requested
+    }
+
+    /// Ask the game flow to enter the composed scene state with this cooked
+    /// [`psx_level::LevelSceneState::id`].
+    ///
+    /// This is the one way gameplay can move the flow itself. Everything else
+    /// that changes state is driven from the front-end: a button's authored
+    /// action, or a state's START binding. A win condition has neither -- the
+    /// world decides, mid-tick, that the run is over -- so it needs to say so
+    /// without the flow driver having to know what "won" means for this game.
+    ///
+    /// The request is a plain id rather than a callback so the scene stays
+    /// unaware of the flow's cursor indices, and it is consumed once per
+    /// update: re-requesting the state the flow is already entering is
+    /// harmless, which lets a caller poll a condition instead of latching it.
+    #[inline]
+    pub fn request_scene_state(&mut self, state_id: u16) {
+        self.runtime_requests.scene_state = Some(state_id);
+    }
+
+    #[inline]
+    pub(crate) fn take_scene_state_request(&mut self) -> Option<u16> {
+        self.runtime_requests.scene_state.take()
+    }
+}
+
+/// A copyable view of a flow state, handed to the scene resource-lifecycle
+/// hooks. Carries the cooked state identity by value so the hooks never borrow
+/// the flow tables the driver owns.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct SceneStateRef {
+    /// Cooked `LevelSceneState` id (or a synthesised id for bare
+    /// `Gameplay` / `UiScene` flow states).
+    pub id: u16,
+    /// Whether this state runs the gameplay world.
+    pub world: LevelWorldLayer,
+    /// UI scene overlaid on this state, or the project's "no UI scene" sentinel.
+    pub ui_scene: u16,
+    /// State flags (UI input / pause-world).
+    pub flags: u16,
+}
+
+impl SceneStateRef {
+    /// `true` if this state runs the gameplay world layer.
+    #[inline]
+    pub fn has_gameplay(self) -> bool {
+        matches!(self.world, LevelWorldLayer::Gameplay)
+    }
+}
+
+/// Implement this trait on your game type and hand an instance to
+/// [`App::run`][crate::app::App::run].
+///
+/// All methods take `&mut self` so the scene can keep its own state
+/// inline (no globals needed). All methods take `&mut Ctx` so the
+/// scene can read pad state and draw into the framebuffer.
+pub trait Scene {
+    /// Select the rendering hand-off contract. Existing scenes use immediate
+    /// submission unless they explicitly opt into queued preparation.
+    #[inline]
+    fn render_submission(&self) -> RenderSubmission {
+        RenderSubmission::Immediate
+    }
+
+    /// Called once at boot, before any flow state is entered, for assets
+    /// the front-end UI shares with gameplay -- chiefly the [`ui_font`] atlas
+    /// menus draw their text with. It runs even when the game boots into a
+    /// UI scene (a title/menu), where full gameplay [`init`] is deferred
+    /// until play actually starts, so the menu would otherwise have no font.
+    /// Default is a no-op; a gameplay-only scene can upload everything in
+    /// [`init`] as before.
+    ///
+    /// [`ui_font`]: Scene::ui_font
+    /// [`init`]: Scene::init
+    #[allow(unused_variables)]
+    fn load_shared_assets(&mut self, ctx: &mut Ctx) {}
+
+    /// Stage UI SFX sample `index` from disc and hand its `.psau` bytes to
+    /// `consume`. The boot-time SFX upload calls this for every sample whose
+    /// cooked record carries no linked bytes, so a bank that lives in SPU RAM
+    /// after boot does not also keep a dead copy in main RAM. Returns `false`
+    /// when the sample could not be read; that sample then stays silent.
+    #[allow(unused_variables)]
+    fn with_streamed_ui_sfx_sample(
+        &mut self,
+        index: usize,
+        consume: &mut dyn FnMut(&[u8]),
+    ) -> bool {
+        false
+    }
+
+    /// Initialise a gameplay session, after its resources are acquired.
+    /// A front-end StartGameplay action calls this again for a new game;
+    /// returning from a gameplay overlay does not. Shared boot-only assets
+    /// belong in [`load_shared_assets`](Scene::load_shared_assets).
+    #[allow(unused_variables)]
+    fn init(&mut self, ctx: &mut Ctx) {}
+
+    /// Advance load-only work while a flow transition is holding the loading
+    /// screen after [`init`](Scene::init). Return `true` once the scene is ready
+    /// for its first gameplay render. The default is ready immediately for
+    /// simple scenes with no asynchronous world streaming.
+    #[allow(unused_variables)]
+    fn loading_update(&mut self, ctx: &mut Ctx) -> bool {
+        true
+    }
+
+    /// Advance game state for the current fixed simulation tick.
+    /// Called before [`render`]. Read pad input from `ctx` and use
+    /// `ctx.sim_tick` for deterministic timers and animation phase.
+    ///
+    /// [`render`]: Scene::render
+    fn update(&mut self, ctx: &mut Ctx);
+
+    /// Drain confirmed gameplay SFX edges raised by the latest [`update`].
+    /// Bits are [`psx_level::LevelGameplaySfxEvent::bit`] values. The flow
+    /// wrapper consumes the mask once, after simulation, so held input and
+    /// render retries cannot replay a sound.
+    #[inline]
+    fn take_gameplay_sfx_events(&mut self) -> u32 {
+        0
+    }
+
+    /// Advance resource work for a front-end UI state. The flow driver calls
+    /// this once per UI tick before handling input/rendering. Scenes can use it
+    /// to progressively stream optional menu assets without blocking the
+    /// boot-time [`on_enter_state`](Scene::on_enter_state) path.
+    #[allow(unused_variables)]
+    fn update_ui_resources(&mut self, state: SceneStateRef, ctx: &mut Ctx) {}
+
+    /// Whether every front-end (menu/intro/settings) asset is resident in
+    /// memory. The flow driver holds the menu CD-DA music until this returns
+    /// `true`, so the front-end never reads the CD while a music track is
+    /// playing -- on real hardware the single laser cannot stream a UI image
+    /// from the disc and play a CD-DA track at the same time (the read hangs
+    /// and the music dies; emulators have no laser/seek model so they hide it).
+    /// Scenes progressively stream all front-end UI in
+    /// [`update_ui_resources`](Scene::update_ui_resources) and flip this true
+    /// once the whole group is cached. Default is always ready (a scene with no
+    /// streamed front-end assets).
+    #[inline]
+    fn front_end_assets_ready(&self) -> bool {
+        true
+    }
+
+    /// A world cinematic owns input and hides the gameplay UI.
+    /// Front-end and combat music stay silent until it finishes.
+    #[inline]
+    fn cinematic_active(&self) -> bool {
+        false
+    }
+
+    /// Keep Start from opening a gameplay menu while the scene owns input.
+    /// Unlike a cinematic, a tutorial can retain its HUD and music.
+    #[inline]
+    fn gameplay_menu_blocked(&self) -> bool {
+        self.cinematic_active()
+    }
+
+    /// Whether the scene is in combat right now. While true, the current UI
+    /// scene's combat-trigger Music node (if any) plays, faded in; when it
+    /// turns false the track fades out and stops. Default: never.
+    #[inline]
+    fn combat_music_active(&self) -> bool {
+        false
+    }
+
+    /// Live world-load progress in Q12 (0..=4096) while
+    /// [`loading_update`](Scene::loading_update) streams the next
+    /// state's world. Feeds UI nodes bound to
+    /// `LevelUiValueBinding::LoadingProgress`. Default reports zero
+    /// (the engine pins the bar full once `loading_update` is ready).
+    #[inline]
+    fn loading_progress_q12(&self) -> i32 {
+        0
+    }
+
+    /// One-shot hook before the authored loading scene first draws:
+    /// re-upload any of its streamed images into VRAM (from a RAM
+    /// cache, never the CD -- the disc laser belongs to the world
+    /// stream during loading). Default no-op for scenes whose loading
+    /// art is baked.
+    #[inline]
+    fn prepare_loading_assets(&mut self, _scene: u16) {}
+
+    /// Draw or prepare the current frame after [`update`]. Immediate scenes
+    /// are called after `ctx.fb` has been cleared. Queued scenes must only
+    /// build CPU-side packets here; the runner clears the next back buffer and
+    /// calls [`submit_render`](Scene::submit_render) afterwards.
+    ///
+    /// A scene that kicks its ordering table asynchronously (with
+    /// [`psx_gpu::submit_linked_list_raw_async`], leaving the wait to the
+    /// runner) must not issue any immediate GP0 draw after the kick; put that
+    /// work in [`render_overlay`](Scene::render_overlay) instead, which
+    /// the engine calls once the GPU has drained the table.
+    ///
+    /// [`update`]: Scene::update
+    fn render(&mut self, ctx: &mut Ctx);
+
+    /// Submit packets prepared by [`Scene::render`] when
+    /// [`Scene::render_submission`] returns [`RenderSubmission::Queued`].
+    /// Queued scenes must not issue GPU commands from `render`; this hook runs
+    /// after the prior frame has finished and the next back buffer is ready.
+    #[allow(unused_variables)]
+    fn submit_render(&mut self, ctx: &mut Ctx) {}
+
+    /// Hand over the frame the last [`Scene::render`] built for the present
+    /// queue ([`RenderSubmission::PresentQueue`]). Called right after
+    /// `render`, before the runner records [`Scene::render_overlay`], so
+    /// commit here whatever state the overlay reads. `None` makes the runner
+    /// present the frame through [`Scene::submit_render`] instead.
+    #[allow(unused_variables)]
+    fn take_queued_frame(&mut self, ctx: &mut Ctx) -> Option<QueuedFrame> {
+        None
+    }
+
+    /// Draw the 2D overlay layer (HUD, prompts, debug readouts) on top
+    /// of the frame built by the last [`render`](Scene::render) call.
+    ///
+    /// The app runner invokes this at presentation time: the frame's
+    /// ordering-table DMA has been drained and the GPU is idle, but the
+    /// display has not flipped yet, so immediate GP0 draws here
+    /// composite over the finished 3D scene in the back buffer without
+    /// racing the linked-list walker. Default: no overlay.
+    #[allow(unused_variables)]
+    fn render_overlay(&mut self, ctx: &mut Ctx) {}
+
+    /// Draw a final presentation pass over the fully composed frame.
+    ///
+    /// The game-flow wrapper calls this for both gameplay-backed and UI-only
+    /// states after ordinary overlays have finished. Projects can use it for
+    /// global presentation settings such as a PS1-native brightness curve
+    /// without teaching the generic flow driver about project option ids.
+    #[allow(unused_variables)]
+    fn render_post_process(&mut self, ctx: &mut Ctx) {}
+
+    /// Font the flow driver uses to draw front-end UI scene text (menu
+    /// labels and buttons). The gameplay scene owns the font atlas it
+    /// uploads in [`init`](Scene::init), so it lends it here for the menu
+    /// states to share rather than uploading a second copy. The default
+    /// returns `None`, which skips UI text -- correct for a gameplay-only
+    /// scene with no menus. Override to return your uploaded atlas.
+    #[inline]
+    fn ui_font(&self) -> Option<&FontAtlas> {
+        None
+    }
+
+    /// Font selector lookup for cooked UI nodes. Slot `0` is the first cooked
+    /// UI font; scenes that upload additional atlases override this to expose
+    /// slots `1..`.
+    #[inline]
+    fn ui_font_at(&self, index: u8) -> Option<&FontAtlas> {
+        if index == 0 {
+            self.ui_font()
+        } else {
+            None
+        }
+    }
+
+    /// Texture resolver for front-end UI image nodes. The flow driver owns only
+    /// cooked asset ids; scenes know how their texture assets are packed and
+    /// uploaded, so they translate an [`AssetId`] into GPU texture state here.
+    /// Default skips image nodes, which is correct for projects with text/rect
+    /// menus only.
+    #[inline]
+    fn ui_texture(&self, _asset: AssetId) -> Option<UiTextureSlot> {
+        None
+    }
+
+    /// Resolve a gameplay-owned UI value such as player health or stamina.
+    ///
+    /// Constants, project options, and loading progress remain owned by the
+    /// flow driver. Returning `None` for a gameplay binding draws it as zero;
+    /// scenes with an authored gameplay HUD override this method so that HUD
+    /// is rendered once by the same scene-state UI pass as every other
+    /// authored overlay.
+    #[inline]
+    fn ui_value(&self, _binding: LevelUiValueBinding) -> Option<i32> {
+        None
+    }
+
+    /// Resolve a tagged UI node's live text. Untagged nodes and unknown tags
+    /// keep their authored copy. The caller lends a fixed scratch buffer so
+    /// gameplay can compose numeric labels without allocation; implementations
+    /// may also return static strings directly.
+    #[inline]
+    fn ui_text<'a>(&self, _tag: &str, _scratch: &'a mut [u8]) -> Option<&'a str> {
+        None
+    }
+
+    /// Resolve whether a tagged UI node participates in drawing and focus
+    /// navigation. Untagged and unknown nodes remain visible by default.
+    /// This keeps fixed-capacity PS1 menus able to present genuinely dynamic
+    /// lists without leaving invisible controls in the navigation graph.
+    #[inline]
+    fn ui_node_visible(&self, _tag: &str) -> bool {
+        true
+    }
+
+    /// Resolve whether a visible tagged control participates in focus
+    /// navigation. This is separate from visibility so a modal sub-flow can
+    /// keep its surrounding controls on screen while temporarily constraining
+    /// the cursor to the active group.
+    #[inline]
+    fn ui_node_focusable(&self, _tag: &str) -> bool {
+        true
+    }
+
+    /// Preferred opaque `Game` action for UI focus. The flow driver consults
+    /// this when a scene first seeds focus and after a game-specific action or
+    /// cancel changes an in-place submenu. Returning `None` preserves ordinary
+    /// spatial navigation and selected-tab seeding.
+    #[inline]
+    fn preferred_ui_focus_action(&self) -> Option<u16> {
+        None
+    }
+
+    /// Notify gameplay that focus landed on an opaque `Game` action. Domain UI
+    /// can use this to keep a selected socket or list row synchronized with the
+    /// engine-owned cursor without duplicating navigation state.
+    #[inline]
+    fn game_ui_focus_changed(&mut self, _id: u16) {}
+
+    /// Handle an authored game-specific UI action. The flow driver owns
+    /// navigation actions; opaque `Game` ids are deliberately dispatched to
+    /// the gameplay scene so projects can implement inventory assignment and
+    /// other domain controls without teaching the engine their semantics.
+    #[allow(unused_variables)]
+    fn game_ui_action(&mut self, id: u16, ctx: &mut Ctx) {}
+
+    /// Handle Circle while an authored gameplay overlay owns UI input.
+    /// Returning `true` consumes the press. Gameplay overlays never fall back
+    /// to the front-end return stack: their category changes belong to
+    /// explicit tabs, while Start owns resume.
+    #[allow(unused_variables)]
+    fn game_ui_cancel(&mut self, ctx: &mut Ctx) -> bool {
+        false
+    }
+
+    /// Handle Square while an authored gameplay overlay owns UI input.
+    /// Returning `true` consumes the press.
+    #[allow(unused_variables)]
+    fn game_ui_square(&mut self, ctx: &mut Ctx) -> bool {
+        false
+    }
+
+    /// Called on every completed flow-state entry, including transitions whose
+    /// incoming and outgoing states share one resource set. Resource lifecycle
+    /// hooks intentionally skip those transitions; lightweight UI mode state
+    /// still needs to observe them.
+    #[allow(unused_variables)]
+    fn on_flow_state_entered(&mut self, state: SceneStateRef, ctx: &mut Ctx) {}
+
+    /// Receive the current project-option values. The flow driver calls this
+    /// when a UI entry applies defaults, after front-end option edits, and each
+    /// time it enters the gameplay state, handing the cooked [`LevelOptionDef`]
+    /// table and the parallel live-value slice (`values[i]` is the current value
+    /// of `options[i]`, already clamped to that option's range). A scene reads
+    /// whatever settings it cares about by matching `option.id` and caches or
+    /// applies them. `ctx` is there for options that program the hardware, the
+    /// display window's picture offset for one, through `ctx.gpu()`.
+    ///
+    /// Values are not delivered per frame: front-end menus publish only when an
+    /// option changes, and live in-game adjustment is a separate, later concern.
+    /// Default is a no-op.
+    #[allow(unused_variables)]
+    fn apply_options(&mut self, options: &[LevelOptionDef], values: &[i32], ctx: &mut Ctx) {}
+
+    /// Acquire the VRAM/asset resources a flow state needs, through the
+    /// project's VRAM allocator. The flow driver calls this once, immediately
+    /// before the state becomes active, and only when the incoming state's
+    /// resource *set* differs from the outgoing one (see
+    /// [`state_resource_key`](Scene::state_resource_key)). For a gameplay
+    /// state it runs before [`init`](Scene::init), so uploads land before init
+    /// reads them. Default is a no-op.
+    #[allow(unused_variables)]
+    fn on_enter_state(&mut self, state: SceneStateRef, ctx: &mut Ctx) {}
+
+    /// Release the resources acquired in
+    /// [`on_enter_state`](Scene::on_enter_state), returning their reservations
+    /// to the allocator. The driver calls this once after the state stops
+    /// being active, and only when the destination state's resource set
+    /// differs. Must be idempotent (tolerate already-released resources).
+    /// Default is a no-op.
+    #[allow(unused_variables)]
+    fn on_exit_state(&mut self, state: SceneStateRef, ctx: &mut Ctx) {}
+
+    /// Stable identity of the resource *set* a state owns. The driver skips the
+    /// exit+enter pair when the outgoing and incoming keys match, so a resource
+    /// shared across states -- e.g. a UI font atlas used by both menus and the
+    /// gameplay HUD -- is acquired once and not torn down on intra-set hops.
+    /// Default: every state is its own set (`state.id`), i.e. fully symmetric
+    /// create/destroy on every transition.
+    #[allow(unused_variables)]
+    fn state_resource_key(&self, state: SceneStateRef) -> u32 {
+        state.id as u32
+    }
+}

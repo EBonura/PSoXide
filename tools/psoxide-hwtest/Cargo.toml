@@ -1,0 +1,19 @@
+[package]
+name        = "psoxide-hwtest"
+version     = "0.1.0"
+edition     = "2021"
+license     = "GPL-2.0-or-later"
+description = "Host tools for the hardware-test disc: capture reports, SB4 diffs and the linked-EXE machine-code audit."
+
+[lib]
+name = "psoxide_hwtest"
+path = "src/lib.rs"
+
+[[bin]]
+name = "psoxide-hwtest"
+path = "src/main.rs"
+
+[dependencies]
+
+[dev-dependencies]
+regex = "1"

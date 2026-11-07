@@ -1,0 +1,150 @@
+[package]
+name    = "editor-playtest"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+
+[workspace]
+
+[[bin]]
+name = "editor-playtest"
+path = "src/main.rs"
+
+[profile.release]
+# opt-level 2, not the default 3. The guest is RAM-bound long before it is
+# cycle-bound: opt-level 3 inlines hard enough that Scene::render alone reaches
+# 74 KiB as a single function, and .text lands at 734 KiB, 38% of the console's
+# whole 1952 KiB budget.
+#
+# Measured by replaying the recorded cortex 0.2 tape on both builds, identical
+# route, 3601 ticks and 3337 frames either way:
+#
+#   .text            734.4 KiB -> 665.4 KiB   (-69 KiB)
+#   total route      1,945,684,066 -> 1,945,670,404 cycles (-0.001%)
+#
+# The per-bucket medians disagree in both directions, -0.30% on gameplay
+# frames and +1.38% on heavy ones, which is noise; the route total aggregates
+# 3333 frames and is flat. So this is 69 KiB for no measurable frame cost.
+#
+# opt-level "s" is correct here, and is still not the right trade. The old ban
+# was mis-attributed to the optimisation level; the real fault was LLVM's MIPS
+# delay-slot filler, now disabled in tools/build_guest_staged.sh. But measured
+# on the same 0.2 tape, -Os redistributes the same total work into far spikier
+# frames:
+#
+#                            >8 vblanks   4-8   heavy median
+#   opt2 + flag                      10   357      2,832,423
+#   opt-s + flag                    112   190      3,519,313
+#
+# Total route cycles are within 0.03% of each other, so this is scheduling and
+# instruction-cache behaviour, not more work: -Os gives up the unrolling that
+# keeps this renderer inside a 4 KB I-cache. 112 frames over eight vblanks is a
+# visible hitch; the RAM it buys is better found in the assets.
+#
+# opt-level "z" remains unusable for a different reason: rustc itself SIGSEGVs
+# compiling psx-engine with it.
+opt-level     = 2
+panic         = "abort"
+codegen-units = 1
+lto           = true
+
+[features]
+# Measurement builds only: tag projections with a primitive class through
+# PSoXide's emulator-only class port so `frontend launch --sort-log` splits
+# depth-sort errors by class pair. Retail hardware ignores the writes.
+sort-probe = []
+# Measurement builds only: `stance-hud-open` keeps the stance HUD unfolded and `stance-hud-off` draws
+# none, so its cost is the difference of two runs of one route (`EDITOR_PLAYTEST_FEATURES`).
+stance-hud-open = []
+stance-hud-off = []
+default = [
+    "cd-stream-bench",
+    "ot-2048",
+    # VBlank-kicked presentation: +26% fps with one enemy on screen (19.8 to
+    # 25.0). Frames that would fence early beside a queued frame, such as
+    # with two melee enemies, go double-buffered instead (choose_present_queue).
+    # Stress harness, 2026-10-03.
+    "present-queue",
+]
+cd-stream-bench = ["dep:psx-io", "psx-game-runtime/cd-stream-bench"]
+cd-stream-benchmark = ["cd-stream-bench", "psx-game-runtime/cd-stream-benchmark"]
+# Measurement builds: the far panels' counters, the camera and the draw tallies at fixed addresses.
+panel-meter = ["cd-stream-bench", "psx-game-runtime/panel-meter"]
+boot-trace = ["psx-engine/boot-trace", "psx-rt/boot-trace"]
+# The SDK's debug TTY (off in every other build, so a shipped disc makes no port traffic and no BIOS
+# call): the duel, sample and persistent-load logs the editor's validation runs read from the terminal.
+host-tty = ["psx-rt/host-tty"]
+emulator-telemetry = ["psx-engine/emulator-telemetry"]
+# The far cards of rooms (`flood: (cards: true)`): the older far view, replaced by the
+# panels (`flood: (panels: N)`); a build for a level that has cards needs this.
+# Measurement only: the panels stream and are never drawn.
+panel-nodraw = []
+far-cards = ["cd-stream-bench"]
+# Measurement builds: one debug line per far-card event (card_trace.rs).
+card-trace = ["cd-stream-bench", "emulator-telemetry"]
+# Pad polled by the interrupt-driven engine (see psx-engine `pad-irq`).
+pad-irq = ["psx-engine/pad-irq"]
+# Per-update `camera-pose` debug lines only; fits builds that overflow RAM with
+# the full emulator-telemetry feature (Graybox Reach).
+camera-pose-log = ["psx-engine/debug-log"]
+# One `sim-state` line per fixed tick (player, camera, entities) for the
+# cycle-independent sim-state gate (tools/grid_simgate.sh). Implies the
+# `camera-pose-log` line.
+sim-trace = ["camera-pose-log"]
+hardware-boot-visual = ["psx-engine/hardware-boot-visual"]
+# The HWB explosion-hunt live-capture overlay (4 cycling pages + the
+# engine-side per-vertex capture). NOT a default: it costs real cycles
+# and draw packets, so probe builds request it explicitly via
+# EDITOR_PLAYTEST_FEATURES="... vert-debug-overlay".
+vert-debug-overlay = ["psx-engine/vert-debug"]
+# Hand every gameplay frame to psx-rt's VBlank-kicked present queue
+# (RenderSubmission::PresentQueue) instead of kicking it from the runner.
+present-queue = ["psx-engine/present-queue"]
+# Read the pads from the interrupt-driven pad engine instead of polling them
+# from the frame loop (sdk/docs/PAD-IRQ-ENGINE.md). Build with
+# EDITOR_PLAYTEST_FEATURES="<defaults> pad-irq-engine".
+pad-irq-engine = ["psx-engine/pad-irq-engine"]
+room-surface-profile = ["psx-engine/room-surface-profile"]
+# Diagnostic-only cadence for semantic A/B comparisons. Render exactly once
+# per two fixed simulation ticks even when wall-clock VBlanks have accumulated,
+# so faster and slower builds present the same guest states.
+lockstep-visuals = []
+# Experiment-only reference cadence for measuring the existing 30 Hz NPC
+# schedule against collision/decision work on every 60 Hz simulation tick.
+npc-think-60hz = []
+# Reference build for measuring the cost of the existing single-quad actor
+# shadow implementation.
+actor-shadows-off = []
+# Projected (flattened-geometry) actor shadows instead of the blob decal.
+actor-shadows-projected = []
+# On-screen presented-fps + worst-frame-gap counter for hardware
+# ratification burns. Off by default: shipping builds must not carry it.
+fps-overlay = []
+# Opt-in actor collision-cylinder tuning overlay (L3). The complete input,
+# scene-state and renderer path is absent from normal/shipping playtests.
+collision-debug-overlay = ["psx-game-runtime/collision-debug-overlay"]
+ot-1024 = []
+ot-2048 = []
+
+[dependencies]
+psx-asset  = { path = "../../../sdk/crates/psx-asset" }
+psx-engine = { path = "../../crates/psx-engine" }
+psx-game-runtime = { path = "../../crates/psx-game-runtime" }
+psx-grid   = { path = "../../crates/psx-grid" }
+psx-font   = { path = "../../../sdk/crates/psx-font" }
+psx-gpu    = { path = "../../../sdk/crates/psx-gpu" }
+psx-gte    = { path = "../../../sdk/crates/psx-gte" }
+psx-io     = { path = "../../../sdk/crates/psx-io", optional = true }
+psx-level  = { path = "../../crates/psx-level", features = ["wire"] }
+psx-math   = { path = "../../../sdk/crates/psx-math" }
+psx-pad    = { path = "../../../sdk/crates/psx-pad" }
+psx-residency = { path = "../../../sdk/crates/psx-residency" }
+psx-mc     = { path = "../../../sdk/crates/psx-mc" }
+# hazard-trampolines-256: with every delay-slot filler search on, PGO builds
+# can need more than the default 96 trampoline words (a profile-driven layout
+# filled the array with one jump table's entries).
+# No `alloc` feature: the heap is `reuse_heap.rs`, which reuses what is freed.
+psx-rt     = { path = "../../../sdk/crates/psx-rt", features = ["hazard-trampolines-256"] }
+psx-spu    = { path = "../../../sdk/crates/psx-spu" }
+psx-vram   = { path = "../../../sdk/crates/psx-vram" }
+psxed-format = { path = "../../../crates/psxed-format" }

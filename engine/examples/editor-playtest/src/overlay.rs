@@ -1,0 +1,912 @@
+//! Debug/status overlays for editor-playtest.
+//!
+//! Cooked UI scenes are rendered by the engine's scene-state UI pass. This
+//! module keeps only diagnostic overlays the playtest still draws directly.
+
+use super::*;
+use psx_engine::ui::{
+    draw_expanding_message_panel, draw_interaction_prompt_panel, draw_item_acquired_panel,
+    draw_message_panel,
+};
+pub(crate) use psx_engine::ui::{MessagePageMeta, MessagePanelVariant};
+
+/// Apply the six-step demo-disc brightness control as a native PS1 blend over
+/// the composed frame. This costs two flat triangles and no VRAM. Level one
+/// matches the old level three, level four is the authored image, and the top
+/// two levels lift the image above neutral.
+pub(crate) fn draw_brightness_overlay(gpu: &mut Gpu, level: u8) {
+    let (amount, blend_mode) = match level.clamp(1, BRIGHTNESS_LEVELS) {
+        1 => (24, BlendMode::Subtract),
+        2 => (14, BlendMode::Subtract),
+        3 => (6, BlendMode::Subtract),
+        4 => (0, BlendMode::Opaque),
+        5 => (6, BlendMode::Add),
+        _ => (14, BlendMode::Add),
+    };
+    if amount == 0 {
+        return;
+    }
+    // Level four (the only opaque blend) has amount 0 and returned above, so
+    // both triangles are translucent.
+    let material = TextureMaterial::blended(0, 0, (amount, amount, amount), blend_mode);
+    gpu.set_draw_mode(material);
+    gpu.draw(
+        &TriFlat::new(
+            [(0, 0), (SCREEN_W, 0), (0, SCREEN_H)],
+            amount,
+            amount,
+            amount,
+        )
+        .translucent(),
+    );
+    gpu.set_draw_mode(material);
+    gpu.draw(
+        &TriFlat::new(
+            [(SCREEN_W, 0), (0, SCREEN_H), (SCREEN_W, SCREEN_H)],
+            amount,
+            amount,
+            amount,
+        )
+        .translucent(),
+    );
+}
+
+/// Animated proximity prompt. `prompt` is the action verb; the shared engine
+/// chrome adds the matching Cross icon.
+pub(crate) fn draw_interaction_prompt_animated(
+    gpu: &mut Gpu,
+    font: &FontAtlas,
+    prompt: &str,
+    frame: u16,
+    cross_prompt: Option<UiTextureSlot>,
+) {
+    draw_interaction_prompt_panel(gpu, font, prompt, frame, cross_prompt);
+}
+
+pub(crate) fn draw_interactable_message(
+    gpu: &mut Gpu,
+    font: &FontAtlas,
+    _title: &str,
+    body: &str,
+    typewriter_frame: u16,
+    cross_prompt: Option<UiTextureSlot>,
+) {
+    draw_message_page(
+        gpu,
+        font,
+        body,
+        MessagePanelVariant::PointOfInterest,
+        MessagePageMeta::new(0, 1),
+        0,
+        typewriter_frame,
+        cross_prompt,
+    );
+}
+
+/// Shared POI/world-message bridge used by the playtest state machine.
+pub(crate) fn draw_message_page(
+    gpu: &mut Gpu,
+    font: &FontAtlas,
+    page_text: &str,
+    variant: MessagePanelVariant,
+    page: MessagePageMeta,
+    frame: u16,
+    typewriter_frame: u16,
+    cross_prompt: Option<UiTextureSlot>,
+) {
+    draw_message_panel(
+        gpu,
+        font,
+        page_text,
+        variant,
+        page,
+        frame,
+        typewriter_frame,
+        cross_prompt,
+        crate::loc::dismiss_action(),
+    );
+}
+
+/// POI-only presentation bridge that visibly morphs the active interaction
+/// prompt into the first message page.
+pub(crate) fn draw_expanding_poi_message(
+    gpu: &mut Gpu,
+    font: &FontAtlas,
+    action: &str,
+    page_text: &str,
+    page: MessagePageMeta,
+    frame: u16,
+    transition_frame: u16,
+    typewriter_frame: u16,
+    cross_prompt: Option<UiTextureSlot>,
+) {
+    draw_expanding_message_panel(
+        gpu,
+        font,
+        action,
+        page_text,
+        page,
+        frame,
+        transition_frame,
+        typewriter_frame,
+        cross_prompt,
+        crate::loc::dismiss_action(),
+    );
+}
+
+pub(crate) fn draw_acquired_module(
+    gpu: &mut Gpu,
+    font: &FontAtlas,
+    item_name: &str,
+    frame: u16,
+    transition_frame: u16,
+    typewriter_frame: u16,
+    cross_prompt: Option<UiTextureSlot>,
+) {
+    draw_item_acquired_panel(
+        gpu,
+        font,
+        item_name,
+        frame,
+        transition_frame,
+        typewriter_frame,
+        cross_prompt,
+        crate::loc::item_acquired_prefix(),
+        crate::loc::dismiss_action(),
+    );
+}
+
+/// Hardware-ratification overlay (burn builds only): presented frames
+/// per second and the worst inter-frame gap in vblanks over the last
+/// second, top-right. The emulator does not model GPU draw time, so
+/// silicon framerate is the only true measurement; this makes it
+/// readable from a console photo. 30 fps steady shows "30 W2".
+#[cfg(feature = "fps-overlay")]
+pub(crate) fn draw_fps_overlay(gpu: &mut Gpu, font: &FontAtlas, fps: u8, worst_gap_vblanks: u8) {
+    let mut buf = [0u8; 8];
+    let mut len = 0usize;
+    push_u8_decimal(&mut buf, &mut len, fps);
+    buf[len] = b' ';
+    len += 1;
+    buf[len] = b'W';
+    len += 1;
+    push_u8_decimal(&mut buf, &mut len, worst_gap_vblanks);
+    let Ok(text) = core::str::from_utf8(&buf[..len]) else {
+        return;
+    };
+    let width = font.text_width(text) as i16;
+    let x = SCREEN_W - 8 - width;
+    draw_rect(gpu, x - 3, 6, width + 6, 12, (10, 12, 16));
+    font.draw_text(x, 8, text, (170, 255, 190));
+}
+
+#[cfg(feature = "fps-overlay")]
+fn push_u8_decimal(buf: &mut [u8; 8], len: &mut usize, value: u8) {
+    if value >= 100 {
+        buf[*len] = b'0' + value / 100;
+        *len += 1;
+    }
+    if value >= 10 {
+        buf[*len] = b'0' + (value / 10) % 10;
+        *len += 1;
+    }
+    buf[*len] = b'0' + value % 10;
+    *len += 1;
+}
+
+/// DIAGNOSTIC (vertex-explosion probe, not for release): the controlled
+/// fixed-pose diff (IMG_6161-6165) showed the stretch is HORIZONTAL -- only
+/// the projected X widens on hardware, while depth/Y/projection match the
+/// emulator. So the view-space X is computed wider on hardware. This overlay
+/// shows the view-space X EXTENT (min..max) per skinning stage to find which
+/// step widens it:
+///   AX = primary-joint transform view-space X
+///   BX = secondary-joint transform view-space X (AFTER the GTE matrix reload)
+///   LX = blended (lerp) view-space X
+///   SX = projected screen X range (the symptom), O = verts off hw bounds
+/// Whichever of AX/BX/LX widens on hardware vs the emulator is the culprit.
+/// Reads + RESETS the per-frame accumulator.
+#[cfg(feature = "vert-debug-overlay")]
+pub(crate) fn draw_player_vert_debug(font: &FontAtlas) {
+    use psx_engine::render3d::player_vert_debug as vdbg;
+    let b = vdbg::get();
+
+    // No blended verts observed this frame (model culled / not yet rendered):
+    // the accumulator still holds its i32::MAX/MIN sentinels, which would
+    // photograph as plausible-looking garbage. Say so explicitly instead.
+    if b.total == 0 {
+        font.draw_text(8, 44, "NO VERTS", (255, 90, 90));
+        vdbg::reset();
+        return;
+    }
+
+    // ALL-STAGES capture, auto-cycling pages (~3 s each at 30 Hz render).
+    // The pose is static while photographing, so each page shows the same
+    // worst vertex; one photo per page = the full chain for offline replay
+    // through the console-exact GTE core.
+    let page = unsafe {
+        PAGE_TICKS = PAGE_TICKS.wrapping_add(1);
+        (PAGE_TICKS / 90) % 4
+    };
+    // Header carries the latch score: identical SC on every photographed
+    // page proves all pages show the same latched event.
+    let mut hdr = DbgLine::new();
+    hdr.s(b"P");
+    hdr.i(page as i32 + 1);
+    hdr.s(b"/4 SC ");
+    hdr.i(vdbg::snapshot().score);
+    font.draw_text(216, 44, hdr.text(), (255, 255, 255));
+
+    match page {
+        0 => draw_vdbg_extents(font, &b),
+        1 => draw_vdbg_vertex_page(font),
+        2 => draw_vdbg_matrices_page(font),
+        _ => draw_vdbg_compose_inputs_page(font),
+    }
+
+    vdbg::reset();
+}
+
+#[cfg(feature = "vert-debug-overlay")]
+static mut PAGE_TICKS: u32 = 0;
+
+/// Page 1: the original per-stage view-space X extents (kept so the new
+/// burn stays comparable with the IMG_6161-6172 rounds).
+#[cfg(feature = "vert-debug-overlay")]
+fn draw_vdbg_extents(font: &FontAtlas, b: &psx_engine::render3d::player_vert_debug::Bounds) {
+    // The stretch is HORIZONTAL, so we show the view-space X EXTENT
+    // (min..max) per skinning stage -- the stage whose X widens on hardware
+    // vs the emulator is the bug. AX = primary joint, BX = secondary joint
+    // after the GTE matrix reload, LX = blended (lerp). SX = projected.
+    let mut l1 = DbgLine::new();
+    l1.s(b"AX ");
+    l1.i(b.ax_min);
+    l1.s(b"..");
+    l1.i(b.ax_max);
+    font.draw_text(8, 44, l1.text(), (255, 232, 120));
+
+    let mut l2 = DbgLine::new();
+    l2.s(b"BX ");
+    l2.i(b.bx_min);
+    l2.s(b"..");
+    l2.i(b.bx_max);
+    font.draw_text(8, 56, l2.text(), (255, 200, 120));
+
+    let mut l3 = DbgLine::new();
+    l3.s(b"LX ");
+    l3.i(b.lx_min);
+    l3.s(b"..");
+    l3.i(b.lx_max);
+    font.draw_text(8, 68, l3.text(), (255, 170, 120));
+
+    let mut l4 = DbgLine::new();
+    l4.s(b"SX ");
+    l4.i(b.scr_min_x as i32);
+    l4.s(b"..");
+    l4.i(b.scr_max_x as i32);
+    l4.s(b" O ");
+    l4.i(b.oob as i32);
+    font.draw_text(8, 80, l4.text(), (160, 230, 255));
+
+    // ALL-path projected X (blended + single-bone batch + remainder), from
+    // the model pass accumulator. SX above covers only the blended verts;
+    // PX wider than SX on hardware = the single-bone paths widen too.
+    let mut l5 = DbgLine::new();
+    l5.s(b"PX ");
+    l5.i(b.px_min as i32);
+    l5.s(b"..");
+    l5.i(b.px_max as i32);
+    font.draw_text(8, 92, l5.text(), (120, 255, 220));
+}
+
+/// Page 2: worst vertex identity + every stage OUTPUT in hex. Offline:
+/// va =? MVMVA(rot0, tr0, pos), vb =? MVMVA(rot1, tr1, pos),
+/// vl =? lerp(va, vb, blend), (sx, sy) =? RTPS(vl).
+#[cfg(feature = "vert-debug-overlay")]
+fn draw_vdbg_vertex_page(font: &FontAtlas) {
+    use psx_engine::render3d::player_vert_debug as vdbg;
+    let s = vdbg::snapshot();
+    if !s.valid {
+        font.draw_text(8, 44, "NO SNAP", (255, 90, 90));
+        return;
+    }
+    let mut l = DbgLine::new();
+    l.s(b"V ");
+    l.x16(s.pos.x as u16);
+    l.b(b' ');
+    l.x16(s.pos.y as u16);
+    l.b(b' ');
+    l.x16(s.pos.z as u16);
+    l.s(b" J");
+    l.i(s.j0 as i32);
+    l.b(b'/');
+    l.i(s.j1 as i32);
+    l.s(b" W");
+    l.i(s.blend as i32);
+    font.draw_text(8, 44, l.text(), (255, 255, 160));
+    draw_hex3(font, 56, b"VA", &s.va, (255, 232, 120));
+    draw_hex3(font, 68, b"VB", &s.vb, (255, 200, 120));
+    draw_hex3(font, 80, b"VL", &s.vl, (255, 170, 120));
+    let mut l5 = DbgLine::new();
+    l5.s(b"SXY ");
+    l5.x16(s.sx as u16);
+    l5.b(b' ');
+    l5.x16(s.sy as u16);
+    l5.s(b" FLG ");
+    l5.x32(s.flag);
+    font.draw_text(8, 92, l5.text(), (160, 230, 255));
+}
+
+/// Page 3: the matrices exactly as CTC2'd for the worst vertex (primary on
+/// the left column block, secondary below) + view-space translations.
+#[cfg(feature = "vert-debug-overlay")]
+fn draw_vdbg_matrices_page(font: &FontAtlas) {
+    use psx_engine::render3d::player_vert_debug as vdbg;
+    let s = vdbg::snapshot();
+    if !s.valid {
+        font.draw_text(8, 44, "NO SNAP", (255, 90, 90));
+        return;
+    }
+    draw_mat3(font, 44, b"R0", &s.rot0.m, (255, 232, 120));
+    draw_hex3(font, 80, b"T0", &s.tr0, (255, 232, 120));
+    draw_mat3(font, 92, b"R1", &s.rot1.m, (255, 200, 120));
+    draw_hex3(font, 128, b"T1", &s.tr1, (255, 200, 120));
+}
+
+/// Page 4: the GTE compose INPUTS for the worst vertex's two joints:
+/// shared view*instance matrix, then each joint's model/pose matrix and
+/// pose translation. Offline: rot0 =? compose(VI, M0), rot1 =? compose(VI, M1).
+#[cfg(feature = "vert-debug-overlay")]
+fn draw_vdbg_compose_inputs_page(font: &FontAtlas) {
+    use psx_engine::render3d::player_vert_debug as vdbg;
+    let s = vdbg::snapshot();
+    if !s.valid {
+        font.draw_text(8, 44, "NO SNAP", (255, 90, 90));
+        return;
+    }
+    draw_mat3(font, 44, b"VI", &s.vi.m, (160, 230, 255));
+    if s.m0.valid {
+        draw_mat3(font, 80, b"M0", &s.m0.model.m, (255, 232, 120));
+        let pt0 = [
+            s.m0.ptrans.x as i32,
+            s.m0.ptrans.y as i32,
+            s.m0.ptrans.z as i32,
+        ];
+        draw_hex3(font, 116, b"P0", &pt0, (255, 232, 120));
+    } else {
+        font.draw_text(8, 80, "M0 MISSING", (255, 90, 90));
+    }
+    if s.m1.valid {
+        draw_mat3(font, 128, b"M1", &s.m1.model.m, (255, 200, 120));
+        let pt1 = [
+            s.m1.ptrans.x as i32,
+            s.m1.ptrans.y as i32,
+            s.m1.ptrans.z as i32,
+        ];
+        draw_hex3(font, 164, b"P1", &pt1, (255, 200, 120));
+    } else {
+        font.draw_text(8, 128, "M1 MISSING", (255, 90, 90));
+    }
+}
+
+/// One labelled row of three 32-bit hex values.
+#[cfg(feature = "vert-debug-overlay")]
+fn draw_hex3(font: &FontAtlas, y: i16, label: &[u8], v: &[i32; 3], color: (u8, u8, u8)) {
+    let mut l = DbgLine::new();
+    l.s(label);
+    l.b(b' ');
+    l.x32(v[0] as u32);
+    l.b(b' ');
+    l.x32(v[1] as u32);
+    l.b(b' ');
+    l.x32(v[2] as u32);
+    font.draw_text(8, y, l.text(), color);
+}
+
+/// A 3x3 i16 matrix as three rows of three 16-bit hex values.
+#[cfg(feature = "vert-debug-overlay")]
+fn draw_mat3(font: &FontAtlas, y: i16, label: &[u8], m: &[[i16; 3]; 3], color: (u8, u8, u8)) {
+    for (row, values) in m.iter().enumerate() {
+        let mut l = DbgLine::new();
+        l.s(label);
+        l.i(row as i32);
+        l.b(b' ');
+        l.x16(values[0] as u16);
+        l.b(b' ');
+        l.x16(values[1] as u16);
+        l.b(b' ');
+        l.x16(values[2] as u16);
+        font.draw_text(8, y + (row as i16) * 12, l.text(), color);
+    }
+}
+
+/// Tiny stack-buffer line builder for the diagnostic overlay (no_std, no alloc).
+#[cfg(feature = "vert-debug-overlay")]
+struct DbgLine {
+    buf: [u8; 48],
+    len: usize,
+}
+
+#[cfg(feature = "vert-debug-overlay")]
+impl DbgLine {
+    fn new() -> Self {
+        Self {
+            buf: [0; 48],
+            len: 0,
+        }
+    }
+    fn b(&mut self, c: u8) {
+        if self.len < self.buf.len() {
+            self.buf[self.len] = c;
+            self.len += 1;
+        }
+    }
+    fn s(&mut self, t: &[u8]) {
+        for &c in t {
+            self.b(c);
+        }
+    }
+    fn i(&mut self, v: i32) {
+        if v < 0 {
+            self.b(b'-');
+        }
+        let mut n = v.unsigned_abs();
+        let mut tmp = [0u8; 10];
+        let mut t = 0;
+        loop {
+            tmp[t] = b'0' + (n % 10) as u8;
+            t += 1;
+            n /= 10;
+            if n == 0 {
+                break;
+            }
+        }
+        while t > 0 {
+            t -= 1;
+            self.b(tmp[t]);
+        }
+    }
+    fn x16(&mut self, v: u16) {
+        self.hex(v as u32, 4);
+    }
+    fn x32(&mut self, v: u32) {
+        self.hex(v, 8);
+    }
+    fn hex(&mut self, v: u32, digits: u32) {
+        let mut d = digits;
+        while d > 0 {
+            d -= 1;
+            let nibble = ((v >> (d * 4)) & 0xF) as u8;
+            self.b(if nibble < 10 {
+                b'0' + nibble
+            } else {
+                b'A' + nibble - 10
+            });
+        }
+    }
+    fn text(&self) -> &str {
+        // SAFETY: only ASCII digits/letters/punctuation pushed above.
+        unsafe { core::str::from_utf8_unchecked(&self.buf[..self.len]) }
+    }
+}
+
+#[inline(never)]
+fn draw_rect(gpu: &mut Gpu, x: i16, y: i16, width: i16, height: i16, color: (u8, u8, u8)) {
+    if width <= 0 || height <= 0 {
+        return;
+    }
+    gpu.draw(&QuadFlat::new(
+        [
+            (x, y),
+            (x + width, y),
+            (x, y + height),
+            (x + width, y + height),
+        ],
+        color.0,
+        color.1,
+        color.2,
+    ));
+}
+
+/// A rectangle with its top-left and bottom-right corners chamfered.
+///
+/// The authored stance shells carried `corner_cut: 2` on exactly those two
+/// corners, and that slant is the HUD's signature. When the bars moved into
+/// the overlay so a swap could animate, the cut did not come with them and
+/// both bars went square.
+///
+/// The overlay's primitive is a four-point polygon and a two-corner chamfer is
+/// a hexagon, so this draws three quads split at the cut columns: a sliver
+/// with a sloped top edge, the square middle, and a sliver with a sloped
+/// bottom edge. At the authored cut of two pixels the outer two are slivers,
+/// so the whole shell costs two extra polygons.
+#[inline(never)]
+fn draw_chamfered(gpu: &mut Gpu, x: i16, y: i16, w: i16, h: i16, cut: i16, color: (u8, u8, u8)) {
+    if w <= 0 || h <= 0 {
+        return;
+    }
+    // A cut wider than half the box would cross the slopes over each other.
+    let cut = cut.min(w / 2).min(h / 2).max(0);
+    if cut == 0 {
+        draw_rect(gpu, x, y, w, h, color);
+        return;
+    }
+    let (r, g, b) = color;
+    // Left sliver: top edge rises from (x, y + cut) to (x + cut, y).
+    gpu.draw(&QuadFlat::new(
+        [(x, y + cut), (x + cut, y), (x, y + h), (x + cut, y + h)],
+        r,
+        g,
+        b,
+    ));
+    draw_rect(gpu, x + cut, y, w - cut * 2, h, color);
+    // Right sliver: bottom edge falls from (x + w - cut, y + h) to (x + w, y + h - cut).
+    gpu.draw(&QuadFlat::new(
+        [
+            (x + w - cut, y),
+            (x + w, y),
+            (x + w - cut, y + h),
+            (x + w, y + h - cut),
+        ],
+        r,
+        g,
+        b,
+    ));
+}
+
+/// Draw the targeted enemy's dual vitality with the same visual grammar and
+/// swap motion as the player HUD, but at a much smaller scale and without a
+/// cooldown diamond. Enemy swap timing is intentionally internal; the moving
+/// bars and model-colour sweep communicate the stance change itself.
+pub(crate) fn draw_enemy_vitality_hud(
+    gpu: &mut Gpu,
+    font: &FontAtlas,
+    left_x: i16,
+    top_y: i16,
+    active: VitalityChannelId,
+    active_fill_q12: u16,
+    inactive_fill_q12: u16,
+    swap_motion_progress_q12: u16,
+) {
+    let (active_rgb, _) = vitality_channel_style(active);
+    let (inactive_rgb, _) = vitality_channel_style(active.other());
+    let (incoming, outgoing) =
+        enemy_vitality_swap_geometry(left_x, top_y, swap_motion_progress_q12);
+
+    if swap_motion_progress_q12 < 2048 {
+        draw_vitality_bar(
+            gpu,
+            font,
+            incoming.bounds,
+            incoming.cut,
+            active_fill_q12,
+            active_rgb,
+            "",
+        );
+        draw_vitality_bar(
+            gpu,
+            font,
+            outgoing.bounds,
+            outgoing.cut,
+            inactive_fill_q12,
+            inactive_rgb,
+            "",
+        );
+    } else {
+        draw_vitality_bar(
+            gpu,
+            font,
+            outgoing.bounds,
+            outgoing.cut,
+            inactive_fill_q12,
+            inactive_rgb,
+            "",
+        );
+        draw_vitality_bar(
+            gpu,
+            font,
+            incoming.bounds,
+            incoming.cut,
+            active_fill_q12,
+            active_rgb,
+            "",
+        );
+    }
+}
+
+#[inline(always)]
+fn vitality_channel_style(channel: VitalityChannelId) -> ((u8, u8, u8), &'static str) {
+    if channel == VitalityChannelId::One {
+        ((234, 82, 48), "HRZ")
+    } else {
+        ((76, 202, 181), "ZTH")
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct VitalityBarGeometry {
+    bounds: (i16, i16, i16, i16),
+    cut: i16,
+}
+
+/// Resting enemy bars share one left edge and touch at one horizontal edge. The
+/// active shell is one pixel taller above and below and appreciably wider,
+/// while the whole 76x18 cluster stays smaller than even the player's
+/// inactive 104x11 bar.
+#[inline(always)]
+fn enemy_vitality_resting_geometry(
+    left_x: i16,
+    top_y: i16,
+) -> (VitalityBarGeometry, VitalityBarGeometry) {
+    let active = VitalityBarGeometry {
+        bounds: (left_x, top_y, 76, 10),
+        cut: 5,
+    };
+    let inactive = VitalityBarGeometry {
+        bounds: (left_x, top_y + 10, 56, 8),
+        cut: 4,
+    };
+    (active, inactive)
+}
+
+#[inline(always)]
+fn enemy_vitality_swap_geometry(
+    left_x: i16,
+    top_y: i16,
+    progress_q12: u16,
+) -> (VitalityBarGeometry, VitalityBarGeometry) {
+    let (active, inactive) = enemy_vitality_resting_geometry(left_x, top_y);
+    vitality_swap_geometry_between(inactive, active, progress_q12, -2, 4)
+}
+
+#[inline(always)]
+fn vitality_swap_geometry_between(
+    inactive: VitalityBarGeometry,
+    active: VitalityBarGeometry,
+    progress_q12: u16,
+    incoming_arc_pixels: i16,
+    outgoing_arc_pixels: i16,
+) -> (VitalityBarGeometry, VitalityBarGeometry) {
+    let raw_t = progress_q12.min(4096);
+    let t = smoothstep_q12(raw_t);
+    // 4t(1-t), in Q12: zero at both endpoints and one at the midpoint.
+    let arc_q12 = ((i32::from(raw_t) * i32::from(4096 - raw_t)) >> 10) as u16;
+
+    let incoming = lerp_bar(inactive, active, t, incoming_arc_pixels, arc_q12);
+    let outgoing = lerp_bar(active, inactive, t, outgoing_arc_pixels, arc_q12);
+    (incoming, outgoing)
+}
+
+#[inline(always)]
+fn lerp_bar(
+    from: VitalityBarGeometry,
+    to: VitalityBarGeometry,
+    t_q12: u16,
+    arc_pixels: i16,
+    arc_q12: u16,
+) -> VitalityBarGeometry {
+    let (from_x, from_y, from_w, from_h) = from.bounds;
+    let (to_x, to_y, to_w, to_h) = to.bounds;
+    VitalityBarGeometry {
+        bounds: (
+            lerp_i16(from_x, to_x, t_q12) + lerp_i16(0, arc_pixels, arc_q12),
+            lerp_i16(from_y, to_y, t_q12),
+            lerp_i16(from_w, to_w, t_q12),
+            lerp_i16(from_h, to_h, t_q12),
+        ),
+        cut: lerp_i16(from.cut, to.cut, t_q12),
+    }
+}
+
+#[inline(always)]
+fn smoothstep_q12(value: u16) -> u16 {
+    let t = i32::from(value.min(4096));
+    let t_squared = (t * t) >> 12;
+    ((t_squared * (12288 - 2 * t)) >> 12) as u16
+}
+
+#[inline(always)]
+fn lerp_i16(from: i16, to: i16, t_q12: u16) -> i16 {
+    let delta = i32::from(to) - i32::from(from);
+    let scaled = delta * i32::from(t_q12.min(4096));
+    let rounded = if scaled >= 0 {
+        scaled + 2048
+    } else {
+        scaled - 2048
+    };
+    from + (rounded / 4096) as i16
+}
+
+#[inline(never)]
+fn draw_vitality_bar(
+    gpu: &mut Gpu,
+    font: &FontAtlas,
+    (x, y, w, h): (i16, i16, i16, i16),
+    cut: i16,
+    fill_q12: u16,
+    rgb: (u8, u8, u8),
+    label: &str,
+) {
+    draw_chamfered(gpu, x, y, w, h, cut, (rgb.0 / 2, rgb.1 / 2, rgb.2 / 2));
+    draw_chamfered(
+        gpu,
+        x + 1,
+        y + 1,
+        w - 2,
+        h - 2,
+        cut.saturating_sub(1),
+        (rgb.0 / 11, rgb.1 / 11, rgb.2 / 11),
+    );
+
+    const LABEL_SLOT_W: i16 = 28;
+    const LABEL_INK_H: i16 = 6;
+    const LABEL_TOP_BEARING: i16 = 1;
+    // Enemy bars deliberately omit a redundant HRZ/ZTH legend. Give that
+    // space back to their health fill instead of leaving an unexplained gap.
+    let has_label = !label.is_empty();
+    let fill_x = x + if has_label { LABEL_SLOT_W } else { 5 };
+    let fill_w = (w - if has_label { 34 } else { 10 }).max(0);
+    let fill_h = (h - 10).max(3);
+    let fill_y = y + (h - fill_h) / 2;
+    let filled = ((i32::from(fill_w) * i32::from(fill_q12.min(4096))) >> 12) as i16;
+    draw_rect(
+        gpu,
+        fill_x,
+        fill_y,
+        fill_w,
+        fill_h,
+        (rgb.0 / 12, rgb.1 / 12, rgb.2 / 12),
+    );
+    if filled > 0 {
+        draw_rect(gpu, fill_x, fill_y, filled, fill_h, rgb);
+        let mut step = 1;
+        while step < 8 {
+            let tx = fill_x + (fill_w * step) / 8;
+            if tx < fill_x + filled {
+                draw_rect(
+                    gpu,
+                    tx,
+                    fill_y,
+                    1,
+                    fill_h,
+                    (rgb.0 / 3, rgb.1 / 3, rgb.2 / 3),
+                );
+            }
+            step += 1;
+        }
+    }
+    // These fixed three-letter uppercase labels use rows 1..=6 of the 5x8
+    // atlas. Centre their visible ink rather than the atlas cell, whose blank
+    // first and last rows made the compact inactive shell look bottom-heavy.
+    if has_label {
+        let label_w = font.text_width(label) as i16;
+        let label_x = x + (LABEL_SLOT_W - label_w + 1) / 2;
+        let label_y = y + (h - LABEL_INK_H) / 2 - LABEL_TOP_BEARING;
+        font.draw_text(label_x, label_y, label, (rgb.0, rgb.1, rgb.2));
+    }
+}
+
+#[cfg(test)]
+mod vitality_hud_tests {
+    use super::{enemy_vitality_resting_geometry, enemy_vitality_swap_geometry};
+
+    #[test]
+    fn enemy_bars_are_smaller_left_aligned_and_edge_attached() {
+        let (active, inactive) = enemy_vitality_resting_geometry(160, 34);
+        assert_eq!(active.bounds.3, inactive.bounds.3 + 2);
+        assert_eq!(active.bounds.1 + active.bounds.3, inactive.bounds.1);
+        assert_eq!(active.bounds.0, 160);
+        assert_eq!(inactive.bounds.0, 160);
+    }
+
+    #[test]
+    fn enemy_swap_preserves_both_compact_resting_endpoints() {
+        let (active, inactive) = enemy_vitality_resting_geometry(160, 34);
+        assert_eq!(enemy_vitality_swap_geometry(160, 34, 0), (inactive, active));
+        assert_eq!(
+            enemy_vitality_swap_geometry(160, 34, 4096),
+            (active, inactive)
+        );
+    }
+}
+
+pub(crate) fn draw_opening_skip(gpu: &mut Gpu, font: &FontAtlas, progress: u8) {
+    font.draw_text(192, 216, "HOLD X TO SKIP", (180, 195, 190));
+    draw_rect(gpu, 192, 229, 112, 2, (38, 51, 48));
+    draw_rect(
+        gpu,
+        192,
+        229,
+        i16::from(progress) * 112 / 30,
+        2,
+        (156, 219, 207),
+    );
+}
+
+/// Dim the composed framebuffer rather than clipping dark colours with subtraction.
+/// Exact 1:1 texture coordinates make the read/write pass safe within each pixel;
+/// clear the texture cache before sampling this frame's newly drawn image.
+pub(crate) fn draw_opening_fade(gpu: &mut Gpu, fb: &DoubleBuffer, amount: u8) {
+    use psx_io::gpu::{wait_command_ready, write_command};
+    if amount == 0 {
+        return;
+    }
+    if amount == 255 {
+        gpu.draw(&QuadFlat::new(
+            [(0, 0), (SCREEN_W, 0), (0, SCREEN_H), (SCREEN_W, SCREEN_H)],
+            0,
+            0,
+            0,
+        ));
+        return;
+    }
+    let tint = ((255 - u16::from(amount)) * 128 / 255) as u8;
+    wait_command_ready();
+    write_command(0x0100_0000); // Clear GPU texture cache after world rendering.
+    let base_y = fb.draw_origin().1;
+    let (fb_width, fb_height) = fb.size();
+    let mut y = 0u16;
+    while y < fb_height {
+        let source_y = base_y + y;
+        let v = (source_y & 255) as u8;
+        let h = (fb_height - y).min(128).min(255 - u16::from(v));
+        let row_height = h.max(1);
+        let mut x = 0u16;
+        while x < fb_width {
+            let w = (fb_width - x).min(128);
+            let tpage = (x / 64) | ((source_y / 256) << 4) | (2 << 7);
+            let material = TextureMaterial::opaque(0, tpage, (tint, tint, tint)).with_dither(true);
+            gpu.set_draw_mode(material);
+            if h == 0 {
+                gpu.set_draw_mode(material);
+                gpu.draw(&Sprite::with_material(
+                    x as i16,
+                    y as i16,
+                    w,
+                    1,
+                    (0, v),
+                    material,
+                ));
+            } else {
+                gpu.draw(&QuadTexturedMaterial::with_material(
+                    [
+                        (x as i16, y as i16),
+                        ((x + w) as i16, y as i16),
+                        (x as i16, (y + h) as i16),
+                        ((x + w) as i16, (y + h) as i16),
+                    ],
+                    [
+                        (0, v),
+                        (w as u8, v),
+                        (0, v + h as u8),
+                        (w as u8, v + h as u8),
+                    ],
+                    material,
+                ));
+            }
+            x += w;
+        }
+        y += row_height;
+    }
+}
+
+/// The tether meter, shown under the stance HUD while the player is attached to an arch: how many
+/// ticks of the airborne allowance are left. The stance HUD itself shows health and ammunition.
+pub(crate) fn draw_tether_meter(gpu: &mut Gpu, font: &FontAtlas, ticks_left: u16) {
+    use psx_game_runtime::combat_flow::AIR_TICKS;
+    let rgb = if ticks_left < 120 {
+        (255, 96, 64)
+    } else {
+        (180, 210, 220)
+    };
+    draw_rect(gpu, 8, 42, 48, 6, (25, 30, 34));
+    draw_rect(
+        gpu,
+        9,
+        43,
+        (u32::from(ticks_left.min(AIR_TICKS)) * 46 / u32::from(AIR_TICKS)) as i16,
+        4,
+        rgb,
+    );
+    font.draw_text(8, 50, "TETHER", rgb);
+}

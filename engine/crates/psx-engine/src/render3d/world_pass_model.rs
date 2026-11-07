@@ -1,0 +1,4971 @@
+use super::*;
+use psx_math::int32::InvariantDivisor31;
+
+/// A solid-colour face: three projected-vertex indices and its RGB.
+type SolidFace = ([u16; 3], (u8, u8, u8));
+
+/// The back-culled extent-safe model face walker runs with its stack in the
+/// scratchpad (per drawn face it reloads a dozen spilled loop invariants).
+/// It starts after the blended-vertex chunk, the model pass's only
+/// scratchpad reservation, has been flushed, and it never clips or splits,
+/// so nothing it calls claims scratchpad bytes either.
+type ModelFaceWalkerStack = crate::scratchpad::ScratchpadStack<0, { crate::scratchpad::SIZE }>;
+// Regions live around the walker: none but its own stack.
+const _: () = crate::scratchpad::assert_disjoint(&[ModelFaceWalkerStack::REGION]);
+
+// Gather the independent face words before decoding any index. LLVM's
+// ordinary field loads interleave each load with its dependent index math,
+// inserting an R3000 load-delay NOP three times per face.
+/// # Safety
+/// Every masked face index must address an initialized projected vertex.
+#[inline(always)]
+unsafe fn model_face_addresses_scheduled(
+    face: &TexturedModelRenderFace,
+    projected: *const ProjectedVertex,
+) -> (TexturedModelRenderFace, [*const ProjectedVertex; 3]) {
+    const _: () = assert!(core::mem::size_of::<ProjectedVertex>() == 8);
+    #[cfg(target_arch = "mips")]
+    {
+        let (a, b, c, pa, pb, pc): (
+            u32,
+            u32,
+            u32,
+            *const ProjectedVertex,
+            *const ProjectedVertex,
+            *const ProjectedVertex,
+        );
+        unsafe {
+            core::arch::asm!(
+                ".set push", ".set noat",
+                "lw {a}, 0({face})", "lw {b}, 4({face})", "lw {c}, 8({face})",
+                "andi {pa}, {a}, 16383", "andi {pb}, {b}, 16383", "andi {pc}, {c}, 16383",
+                "sll {pa}, {pa}, 3", "sll {pb}, {pb}, 3", "sll {pc}, {pc}, 3",
+                "addu {pa}, {base}, {pa}", "addu {pb}, {base}, {pb}", "addu {pc}, {base}, {pc}",
+                ".set pop",
+                face = in(reg) face as *const TexturedModelRenderFace, base = in(reg) projected,
+                a = out(reg) a, b = out(reg) b, c = out(reg) c,
+                pa = out(reg) pa, pb = out(reg) pb, pc = out(reg) pc,
+                options(nostack, readonly, preserves_flags),
+            );
+        }
+        (
+            TexturedModelRenderFace {
+                corner_words: [a, b, c],
+            },
+            [pa, pb, pc],
+        )
+    }
+    #[cfg(not(target_arch = "mips"))]
+    {
+        let [a, b, c] = face.vertex_indices();
+        unsafe {
+            (
+                *face,
+                [
+                    projected.add(a as usize),
+                    projected.add(b as usize),
+                    projected.add(c as usize),
+                ],
+            )
+        }
+    }
+}
+
+/// Four prepacked opaque-crystal colors for one model draw.
+///
+/// The bands are built once per model. The hot face walker selects a band
+/// from the NCLIP area the GTE already produced for backface culling, so the
+/// response adds no texture projection, division, or per-face color math.
+/// A band is the draw's own material with a different
+/// [`TextureMaterial::with_tint`], so the texture-window, CLUT and tpage packet
+/// words are identical in all four. Only the GP0 colour/command word is stored
+/// per band; the invariant three come from the packet material the caller
+/// already holds in registers. A banded face is then one indexed load instead
+/// of three, and the table is 20 bytes instead of 68.
+#[derive(Copy, Clone)]
+pub(super) struct CameraCrystalPacketMaterials {
+    plain: TexturedPacketMaterial,
+    band_color_command_words: [u32; 4],
+    roughness: u8,
+}
+
+impl CameraCrystalPacketMaterials {
+    /// Take `&self`, never `self`.
+    ///
+    /// The band table is indexed by a runtime value, so it must live in memory.
+    /// With a by-value receiver the compiler materialised a fresh copy of the
+    /// whole table for EVERY submitted face: 26 stack-to-stack instructions
+    /// with ten uncached RAM loads inlined into the hot batch, and an outright
+    /// `memcpy` call once the walker stood alone. Borrowing reads the caller's
+    /// one copy in place, so a banded face costs an index and one load.
+    #[inline(always)]
+    fn band(&self, area: i32) -> usize {
+        let area = area.unsigned_abs() >> self.roughness.min(3);
+        if area <= 8 {
+            3
+        } else if area <= 32 {
+            2
+        } else if area <= 128 {
+            1
+        } else {
+            0
+        }
+    }
+
+    /// Band this area onto `plain`, which must be the same material the bands
+    /// were built from (only its colour word is replaced).
+    #[inline(always)]
+    fn banded(&self, plain: TexturedPacketMaterial, area: i32) -> TexturedPacketMaterial {
+        TexturedPacketMaterial {
+            color_command_word: self.band_color_command_words[self.band(area)],
+            ..plain
+        }
+    }
+
+    /// Band this area onto the material the table was built from. Used by the
+    /// walkers that do not already carry the plain packet material in a local.
+    #[inline(always)]
+    fn for_area(&self, area: i32) -> TexturedPacketMaterial {
+        self.banded(self.plain, area)
+    }
+
+    /// The same band as [`Self::for_area`], applied to a whole material.
+    ///
+    /// Oversized triangles cannot use a prepacked packet: they are clipped
+    /// and split, and each piece resolves its own packet words. Recovering
+    /// the band tint from the packed GP0 header serves them without carrying
+    /// a second tint array, which would widen the `Option` this struct is
+    /// passed through on every hot batch loop.
+    #[inline]
+    fn material_for_area(&self, material: TextureMaterial, area: i32) -> TextureMaterial {
+        let header = self.for_area(area).color_command_word;
+        material.with_tint((header as u8, (header >> 8) as u8, (header >> 16) as u8))
+    }
+}
+
+fn camera_crystal_packet_materials(
+    material: TextureMaterial,
+    view_instance: Mat3I16,
+    roughness: u8,
+) -> CameraCrystalPacketMaterials {
+    // Model-local X in camera space is a cheap, stable orbit signal. Keep its
+    // influence deliberately bounded: the earlier experiment reached 1.89x
+    // and clipped pale Aletha facets to white, hiding the response entirely.
+    let view_x = i32::from(view_instance.m[2][0]).abs().min(1 << 12);
+    let quantize_shift = 7 + roughness.min(3);
+    let quantized_view_x = (view_x >> quantize_shift) << quantize_shift;
+    let view_bias_q7 = ((quantized_view_x * 16 + (1 << 11)) >> 12) - 8;
+    let base = material.tint();
+    let make = |band_q7: i32| {
+        // Crystal may darken facets but never amplify the already lit base
+        // material. The texture itself carries the pale highlights; keeping
+        // the modulation at or below neutral prevents editor/runtime whites
+        // from diverging through PS1 color saturation.
+        let scale_q7 = (band_q7 + view_bias_q7).clamp(56, 128);
+        let channel = |value: u8| ((i32::from(value) * scale_q7 + 64) >> 7).clamp(0, 255) as u8;
+        material
+            .with_tint((channel(base.0), channel(base.1), channel(base.2)))
+            .textured_packet_material()
+    };
+    let bands = [make(68), make(84), make(104), make(120)];
+    debug_assert!(bands.iter().all(|band| {
+        band.tex_window_word == bands[0].tex_window_word
+            && band.clut_high_word == bands[0].clut_high_word
+            && band.tpage_high_word == bands[0].tpage_high_word
+    }));
+    CameraCrystalPacketMaterials {
+        plain: bands[0],
+        band_color_command_words: [
+            bands[0].color_command_word,
+            bands[1].color_command_word,
+            bands[2].color_command_word,
+            bands[3].color_command_word,
+        ],
+        roughness,
+    }
+}
+
+/// Normal-driven matcap lookup using existing cooked UV storage. No extra pass,
+/// vertex duplication, framebuffer reads, or per-pixel work is required.
+// Keep this in the face walker: outlining adds argument/result spills and
+// call overhead to every visible face on the R3000.
+#[inline(always)]
+fn facet_reflection_face(
+    mut face: TexturedModelRenderFace,
+    joints: &[JointViewTransform],
+    width: u8,
+    height: u8,
+    roughness: u8,
+) -> TexturedModelRenderFace {
+    let words = face.uv_words();
+    let n = [
+        words[0] as u8 as i8 as i32,
+        (words[0] >> 8) as u8 as i8 as i32,
+        words[1] as u8 as i8 as i32,
+    ];
+    let Some(joint) = joints.get((words[1] >> 8) as usize) else {
+        for k in 0..3 {
+            face = face.with_corner_uv_word(k, 0);
+        }
+        return face;
+    };
+    let m = joint.rotation.m;
+    let dot = |row: usize| {
+        i32::from(m[row][0]) * n[0] + i32::from(m[row][1]) * n[1] + i32::from(m[row][2]) * n[2]
+    };
+    // Projection scales X/Y by four to improve GTE precision; undo that
+    // anisotropy before normal lookup. Uniform model scale cancels in L1.
+    let nx = dot(0) / (MODEL_GTE_XY_SCALE * 8);
+    let ny = dot(1) / (MODEL_GTE_XY_SCALE * 8);
+    let nz = dot(2) / 8;
+    let len = (nx.abs() + ny.abs() + nz.abs()).max(1);
+    // len >= abs(n): both dividend and divisor are nonnegative, and the
+    // quotient is already inside the texture. Quantization is a power-of-two
+    // mask, avoiding a second dynamic division for each coordinate on MIPS.
+    let quantum_mask = !((1u32 << roughness.min(3)) - 1);
+    let coord = |n: i32, size: u8| {
+        let max = u32::from(size.max(1)) - 1;
+        let x = (len + n) as u32 * max / (2 * len) as u32;
+        (x & quantum_mask) as u16
+    };
+    let u = i32::from(coord(nx, width));
+    let v = i32::from(coord(ny, height));
+    // Optional authored microfacet gradients. Six 2-bit offsets occupy the
+    // final UV word; bit 15 opts in. Each triangle samples a small patch,
+    // retaining its own normal while allowing light to fade across its face.
+    let gradient = words[2];
+    // Bits 12-14 optionally select one of four horizontal material strips.
+    // Zero retains the full reflection map used by existing character assets.
+    // The strips share one CLUT, so different finishes need no extra draw pass.
+    let band = (gradient >> 12) & 7;
+    for k in 0..3 {
+        let (du, dv) = if gradient & 0x8000 != 0 {
+            let bits = gradient >> (k * 4);
+            (
+                (i32::from(bits & 3) * 2 - 3) * 4,
+                (i32::from((bits >> 2) & 3) * 2 - 3) * 4,
+            )
+        } else {
+            (0, 0)
+        };
+        let mut mapped_u = (u + du).clamp(0, i32::from(width.max(1)) - 1) as u16;
+        if (1..=4).contains(&band) && width >= 4 {
+            mapped_u = ((band - 1) * u16::from(width) + mapped_u) >> 2;
+        }
+        let uv = mapped_u | (((v + dv).clamp(0, i32::from(height.max(1)) - 1) as u16) << 8);
+        face = face.with_corner_uv_word(k, uv);
+    }
+    face
+}
+
+/// Joint rotation currently loaded into the GTE for [`facet_reflection_plain_words`].
+///
+/// Faces are cooked part by part, so consecutive faces nearly always name the
+/// same joint and the five-register matrix load happens once per run instead
+/// of nine matrix loads from RAM per face. The matrix the GTE held before the
+/// first borrow is kept and handed back by [`ReflectionJoint::restore`]: the
+/// walker used to leave RT alone and code after it (projectors built before
+/// the model draw) may rely on that.
+struct ReflectionJoint {
+    joint: usize,
+    loaded: bool,
+    saved: Option<Mat3I16>,
+}
+
+impl ReflectionJoint {
+    const fn new() -> Self {
+        Self {
+            joint: usize::MAX,
+            loaded: false,
+            saved: None,
+        }
+    }
+
+    #[inline(always)]
+    fn restore(self) {
+        if let Some(matrix) = self.saved {
+            psx_gte::scene::load_rotation(&matrix);
+            settle_gte_matrix_write();
+        }
+    }
+}
+
+/// Three buffer NOPs after a matrix load. Every other matrix load in the
+/// engine reaches its first MVMVA at least seven instructions after the last
+/// control write (a translation load follows it); this walker has no
+/// translation load, so the distance is made up here rather than assumed to
+/// be enough on silicon (the CTC2 to MVMVA hazard window is not measured).
+#[inline(always)]
+fn settle_gte_matrix_write() {
+    #[cfg(target_arch = "mips")]
+    // SAFETY: three no-op instructions; no registers, memory or flags are touched.
+    unsafe {
+        core::arch::asm!(
+            ".word 0",
+            ".word 0",
+            ".word 0",
+            options(nostack, nomem, preserves_flags)
+        );
+    }
+}
+
+/// The three UV words of a facet-reflection face, identical to
+/// [`facet_reflection_face`] for every face with a joint in `joints`.
+///
+/// The nine CPU products become one GTE MVMVA with `sf = 0` (the exact row
+/// products) against the joint rotation loaded once per run of faces. With no
+/// gradient or strip bits (cooked final word `0`) the per-corner offsets and
+/// clamps drop out, because the lookup is already inside the map (`len >=
+/// |n|`, so `0 <= u <= width - 1`); with them the corner loop below is the
+/// general routine's, line for line.
+#[inline(always)]
+fn facet_reflection_words(
+    words: [u16; 3],
+    joints: &[JointViewTransform],
+    rotation: &mut ReflectionJoint,
+    width: u8,
+    height: u8,
+    roughness: u8,
+) -> [u16; 3] {
+    let joint = usize::from(words[1] >> 8);
+    if joint != rotation.joint {
+        rotation.joint = joint;
+        rotation.loaded = match joints.get(joint) {
+            Some(transform) => {
+                if rotation.saved.is_none() {
+                    rotation.saved = Some(psx_gte::scene::read_rotation());
+                }
+                psx_gte::scene::load_rotation(&transform.rotation);
+                settle_gte_matrix_write();
+                true
+            }
+            None => false,
+        };
+    }
+    if !rotation.loaded {
+        return [0; 3];
+    }
+    let n = Vec3I16::new(
+        words[0] as u8 as i8 as i16,
+        (words[0] >> 8) as u8 as i8 as i16,
+        words[1] as u8 as i8 as i16,
+    );
+    let d = psx_gte::scene::rotate_vector_unshifted_scheduled(n);
+    // Projection scales X/Y by four to improve GTE precision; undo that
+    // anisotropy before normal lookup. Uniform model scale cancels in L1.
+    let nx = d.x / (MODEL_GTE_XY_SCALE * 8);
+    let ny = d.y / (MODEL_GTE_XY_SCALE * 8);
+    let nz = d.z / 8;
+    let len = (nx.abs() + ny.abs() + nz.abs()).max(1);
+    let quantum_mask = !((1u32 << roughness.min(3)) - 1);
+    let coord = |n: i32, size: u8| {
+        let max = u32::from(size.max(1)) - 1;
+        let x = (len + n) as u32 * max / (2 * len) as u32;
+        (x & quantum_mask) as u16
+    };
+    let u = i32::from(coord(nx, width));
+    let v = i32::from(coord(ny, height));
+    let gradient = words[2];
+    if gradient & 0xf000 == 0 {
+        let word = (u as u16) | ((v as u16) << 8);
+        return [word; 3];
+    }
+    let band = (gradient >> 12) & 7;
+    let (wmax, hmax) = (i32::from(width.max(1)) - 1, i32::from(height.max(1)) - 1);
+    // Gradient offsets are at most 12 texels either way, so a lookup at
+    // least 12 texels inside the map on both axes can skip every clamp.
+    let inside = u >= 12 && v >= 12 && u + 12 <= wmax && v + 12 <= hmax;
+    let strip = (1..=4).contains(&band) && width >= 4;
+    let mut out = [0u16; 3];
+    for (k, word) in out.iter_mut().enumerate() {
+        let (du, dv) = if gradient & 0x8000 != 0 {
+            let bits = gradient >> (k * 4);
+            (
+                (i32::from(bits & 3) * 2 - 3) * 4,
+                (i32::from((bits >> 2) & 3) * 2 - 3) * 4,
+            )
+        } else {
+            (0, 0)
+        };
+        let (cu, cv) = if inside {
+            (u + du, v + dv)
+        } else {
+            ((u + du).clamp(0, wmax), (v + dv).clamp(0, hmax))
+        };
+        let mut mapped_u = cu as u16;
+        if strip {
+            mapped_u = ((band - 1) * u16::from(width) + mapped_u) >> 2;
+        }
+        *word = mapped_u | ((cv as u16) << 8);
+    }
+    out
+}
+
+fn model_face_with_uv_mapping(
+    mut face: TexturedModelRenderFace,
+    projected_vertices: &[ProjectedVertex],
+    mapping: ModelUvMapping,
+    joints: &[JointViewTransform],
+) -> TexturedModelRenderFace {
+    let (texture_width, texture_height, roughness, uv_offset) = match mapping {
+        ModelUvMapping::FacetReflection {
+            texture_width,
+            texture_height,
+            roughness,
+        } => {
+            return facet_reflection_face(face, joints, texture_width, texture_height, roughness);
+        }
+        ModelUvMapping::Authored => return face,
+        ModelUvMapping::AuthoredOffset(offset) => return face.with_uv_offset(offset),
+        ModelUvMapping::CameraCrystal { .. } => return face,
+        ModelUvMapping::ScreenSpaceReflection {
+            texture_width,
+            texture_height,
+            roughness,
+            uv_offset,
+        } => (texture_width, texture_height, roughness, uv_offset),
+    };
+    let width = i32::from(texture_width.max(1));
+    let height = i32::from(texture_height.max(1));
+    let quantum = 1i32 << roughness.min(3);
+    for corner in 0..3 {
+        let Some(projected) = projected_vertices.get(usize::from(face.vertex_indices()[corner]))
+        else {
+            return face;
+        };
+        // The PS1 projection is centred at (0, 0). Mapping that 320x240
+        // viewport into the compact room texture makes the environment stay in
+        // screen space while the model moves beneath it, the classic PS1 fake
+        // reflection used in place of unavailable multitexture shaders.
+        let u = ((i32::from(projected.sx) + 160) * width / 320).rem_euclid(width);
+        let v = ((i32::from(projected.sy) + 120) * height / 240).rem_euclid(height);
+        let u = (u / quantum) * quantum;
+        let v = (v / quantum) * quantum;
+        let uv_word = u.wrapping_add(i32::from(uv_offset.u)).rem_euclid(width) as u16
+            | ((v.wrapping_add(i32::from(uv_offset.v)).rem_euclid(height) as u16) << 8);
+        face = face.with_corner_uv_word(corner, uv_word);
+    }
+    face
+}
+
+#[derive(Copy, Clone)]
+struct PreparedModelDepthSlots {
+    front: usize,
+    back: usize,
+    near: i32,
+    far: i32,
+    /// `1 / span` prepared once per model: the per-face slot is then a
+    /// `multu` instead of a `div` (about 35 interlocked cycles each).
+    span: InvariantDivisor31,
+    band_slots: i32,
+    exact_power_of_two_shift: u8,
+}
+
+impl PreparedModelDepthSlots {
+    #[inline(never)]
+    fn new<const OT_DEPTH: usize>(options: WorldSurfaceOptions) -> Self {
+        let max_slot = OT_DEPTH.saturating_sub(1);
+        let front = options.depth_band.front().min(max_slot);
+        let back = options.depth_band.back().min(max_slot);
+        let near = options.depth_range.near();
+        let far = options.depth_range.far();
+        let span = if far > near { far - near } else { 0 };
+        debug_assert_eq!(
+            options.depth_range.span_divisor(),
+            InvariantDivisor31::new(span.max(1) as u32)
+        );
+        let band_slots = back.saturating_sub(front) as i32;
+        let exact_power_of_two_shift = if back > front && far > near && band_slots > 0 {
+            let quantum = span / band_slots;
+            if span % band_slots == 0 && quantum > 0 && quantum & (quantum - 1) == 0 {
+                (quantum as u32).trailing_zeros() as u8
+            } else {
+                u8::MAX
+            }
+        } else {
+            u8::MAX
+        };
+        // A degenerate band (empty slot range or empty depth range) always
+        // answers `front`. Folding that into `near` here, instead of testing
+        // `back <= front || far <= near` inside `slot`, keeps two comparisons
+        // and the two operands they need out of the per-face body of the hot
+        // model batch walkers, where every live value costs a stack reload:
+        // `depth <= i32::MAX` is unconditionally true, so the first branch
+        // still returns `front` for exactly the same inputs.
+        let degenerate = back <= front || far <= near;
+        Self {
+            front,
+            back,
+            near: if degenerate { i32::MAX } else { near },
+            far: if degenerate { i32::MAX } else { far },
+            span: options.depth_range.span_divisor(),
+            band_slots,
+            exact_power_of_two_shift,
+        }
+    }
+
+    #[inline(always)]
+    fn slot(self, depth: i32) -> usize {
+        if depth <= self.near {
+            return self.front;
+        }
+        if depth >= self.far {
+            return self.back;
+        }
+        let offset = depth - self.near;
+        if self.exact_power_of_two_shift != u8::MAX {
+            return self.front + ((offset as usize) >> self.exact_power_of_two_shift);
+        }
+        // `offset` is positive here and `band_slots` too, so the saturating
+        // product stays below 2^31, the divisor's exact domain.
+        self.front
+            + self
+                .span
+                .divide(offset.saturating_mul(self.band_slots) as u32) as usize
+    }
+}
+
+/// Depth mapping and packet header for emitting many loose lines of one colour
+/// and depth bias through [`WorldRenderPass::emit_line`].
+///
+/// Built once per effect with [`WorldRenderPass::line_style`]: the depth-slot
+/// mapping is prepared here instead of being rebuilt, with a copy of the whole
+/// surface options, for every line.
+#[derive(Copy, Clone)]
+pub struct LineStyle {
+    slots: PreparedModelDepthSlots,
+    color_cmd: u32,
+    bias: i32,
+}
+
+// Outside the inexpensive proof rectangle, recover precisely the old bounds.
+// Walk authored part ranges, not unrelated or unprojected cache entries.
+#[inline(never)]
+fn projected_part_bounds(
+    parts: &[ModelPart],
+    projected: &[ProjectedVertex],
+    count: usize,
+    joint_count: usize,
+) -> (i16, i16, i16, i16) {
+    let (mut min_x, mut max_x, mut min_y, mut max_y) = (i16::MAX, i16::MIN, i16::MAX, i16::MIN);
+    for part in parts {
+        if part.joint_index() as usize >= joint_count {
+            continue;
+        }
+        let first = part.first_vertex() as usize;
+        let end = first
+            .saturating_add(part.vertex_count() as usize)
+            .min(count);
+        for &vertex in projected.iter().take(end).skip(first) {
+            track_projected_model_bounds(vertex, &mut min_x, &mut max_x, &mut min_y, &mut max_y);
+        }
+    }
+    (min_x, max_x, min_y, max_y)
+}
+
+impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
+    /// Submit a textured triangle in camera space.
+    ///
+    /// The triangle is clipped against the projection's near plane
+    /// before projection. This avoids whole-surface popping when a
+    /// floor or wall crosses the camera plane.
+    pub fn submit_textured_view_triangle(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        verts: [TexturedViewVertex; 3],
+        projection: WorldProjection,
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+    ) -> WorldRenderStats {
+        let mut clipped = [TexturedViewVertex::ZERO; 4];
+        let count = clip_textured_triangle_to_near(verts, projection.near_z, &mut clipped);
+        let mut stats = WorldRenderStats::default();
+        if count < 3 {
+            stats.dropped_triangles = 1;
+            return stats;
+        }
+        if count != 3 || !verts.iter().all(|v| v.position.z >= projection.near_z) {
+            stats.clipped_triangles = 1;
+        }
+
+        let first = self.submit_clipped_textured_triangle(
+            triangles,
+            [clipped[0], clipped[1], clipped[2]],
+            projection,
+            material,
+            options,
+        );
+        merge_world_stats(&mut stats, first);
+        if stats.primitive_overflow || stats.command_overflow || count == 3 {
+            return stats;
+        }
+
+        let second = self.submit_clipped_textured_triangle(
+            triangles,
+            [clipped[0], clipped[2], clipped[3]],
+            projection,
+            material,
+            options,
+        );
+        merge_world_stats(&mut stats, second);
+        stats
+    }
+
+    /// Submit a textured quad in camera space as two clipped,
+    /// independently culled and sorted triangles.
+    ///
+    /// Corners arrive in perimeter order `[0, 1, 2, 3]`. Triangles
+    /// share the `0`–`2` diagonal per [`TEXTURED_QUAD_TRIANGLES`].
+    pub fn submit_textured_view_quad(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        verts: [TexturedViewVertex; 4],
+        projection: WorldProjection,
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+    ) -> WorldRenderStats {
+        let [a, b, c] = TEXTURED_QUAD_TRIANGLES[0];
+        let mut stats = self.submit_textured_view_triangle(
+            triangles,
+            [verts[a], verts[b], verts[c]],
+            projection,
+            material,
+            options,
+        );
+        if stats.primitive_overflow || stats.command_overflow {
+            return stats;
+        }
+
+        let [a, b, c] = TEXTURED_QUAD_TRIANGLES[1];
+        let second = self.submit_textured_view_triangle(
+            triangles,
+            [verts[a], verts[b], verts[c]],
+            projection,
+            material,
+            options,
+        );
+        merge_world_stats(&mut stats, second);
+        stats
+    }
+
+    /// Submit a subset of an already projected opaque model, preserving its
+    /// packed face path. Used when assembly reveals faces without posing the
+    /// skeleton a second time. Unsupported surfaces use the regular submitter.
+    pub fn submit_projected_model_faces(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        projected: &[ProjectedVertex],
+        faces: &[TexturedModelRenderFace],
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+    ) -> TexturedModelRenderStats {
+        let safe = faces
+            .iter()
+            .all(|&face| projected_model_face_batchable(projected, face));
+        self.submit_projected_model_faces_checked(
+            triangles, projected, faces, material, options, safe,
+        )
+    }
+
+    /// [`Self::submit_projected_model_faces`] for faces the caller has already
+    /// found [`projected_model_face_batchable`], one by one, while it had
+    /// their corners in hand.
+    pub fn submit_batchable_projected_model_faces(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        projected: &[ProjectedVertex],
+        faces: &[TexturedModelRenderFace],
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+    ) -> TexturedModelRenderStats {
+        self.submit_projected_model_faces_checked(
+            triangles, projected, faces, material, options, true,
+        )
+    }
+
+    fn submit_projected_model_faces_checked(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        projected: &[ProjectedVertex],
+        faces: &[TexturedModelRenderFace],
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+        safe: bool,
+    ) -> TexturedModelRenderStats {
+        let mut stats = TexturedModelRenderStats::default();
+        // A bucketed pass keeps no render layer (slot and submission order are
+        // all it records), so a translucent material only needs the layer that
+        // the other orderings would have had to be told about.
+        if safe
+            && (!material.is_translucent()
+                || matches!(self.ordering, WorldCommandOrdering::Bucketed))
+            && options.cull_mode == CullMode::Back
+            && options.depth_policy == DepthPolicy::Average
+        {
+            self.submit_predecoded_model_faces_packed_average_unclamped_extent_safe_batch::<true>(
+                triangles,
+                projected,
+                faces,
+                material.textured_packet_material(),
+                None,
+                ModelUvOffset::default(),
+                true,
+                options,
+                &mut stats,
+                &mut 0,
+            );
+        } else {
+            for face in faces {
+                let indices = face.vertex_indices().map(usize::from);
+                if indices
+                    .iter()
+                    .any(|&i| i >= projected.len() || projected[i] == ProjectedVertex::INVALID)
+                {
+                    stats.skipped_triangles = stats.skipped_triangles.saturating_add(1);
+                    continue;
+                }
+                let next = self.submit_textured_triangle(
+                    triangles,
+                    indices.map(|i| projected[i]),
+                    face.uvs(),
+                    material.with_clut_bank(face.palette_bank()),
+                    options,
+                );
+                merge_textured_model_stats(&mut stats, next);
+            }
+        }
+        stats
+    }
+
+    /// Transform and submit a textured world-space triangle through
+    /// `camera`.
+    pub fn submit_textured_world_triangle(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        camera: WorldCamera,
+        verts: [WorldVertex; 3],
+        uvs: [(u8, u8); 3],
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+    ) -> WorldRenderStats {
+        self.submit_textured_view_triangle(
+            triangles,
+            [
+                camera.textured_view_vertex(verts[0], uvs[0]),
+                camera.textured_view_vertex(verts[1], uvs[1]),
+                camera.textured_view_vertex(verts[2], uvs[2]),
+            ],
+            camera.projection,
+            material,
+            options,
+        )
+    }
+
+    /// Transform and submit a textured world-space quad through
+    /// `camera`.
+    pub fn submit_textured_world_quad(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        camera: WorldCamera,
+        verts: [WorldVertex; 4],
+        uvs: [(u8, u8); 4],
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+    ) -> WorldRenderStats {
+        self.submit_textured_view_quad(
+            triangles,
+            [
+                camera.textured_view_vertex(verts[0], uvs[0]),
+                camera.textured_view_vertex(verts[1], uvs[1]),
+                camera.textured_view_vertex(verts[2], uvs[2]),
+                camera.textured_view_vertex(verts[3], uvs[3]),
+            ],
+            camera.projection,
+            material,
+            options,
+        )
+    }
+
+    /// Submit an animated textured model using predecoded part, vertex, and face records.
+    ///
+    /// This is the canonical runtime model path. Callers decode cooked `.psxmdl`
+    /// parts, vertices, and faces once during asset load, then pass those compact
+    /// records here every frame.
+    pub fn submit_textured_model_predecoded_geometry_faces(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        model: impl Into<PredecodedModelInfo>,
+        animation: Animation<'_>,
+        frame_q12: u32,
+        camera: WorldCamera,
+        origin: WorldVertex,
+        instance_rotation: Mat3I16,
+        local_to_world: LocalToWorldScale,
+        pose_translation: ModelPoseTranslation,
+        projected_vertices: &mut [ProjectedVertex],
+        joint_view_transforms: &mut [JointViewTransform],
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+        faces: &[TexturedModelRenderFace],
+        geometry: TexturedModelGeometry<'_>,
+    ) -> TexturedModelRenderStats {
+        self.submit_textured_model_geometry_impl(
+            triangles,
+            model.into(),
+            animation,
+            frame_q12,
+            None,
+            camera,
+            origin,
+            instance_rotation,
+            local_to_world,
+            pose_translation,
+            projected_vertices,
+            joint_view_transforms,
+            material,
+            None,
+            options,
+            faces,
+            geometry,
+            true,
+        )
+    }
+
+    /// Submit an animated textured model with a second material pass while
+    /// reusing the sampled joints and projected vertices from the first pass.
+    pub fn submit_textured_model_predecoded_geometry_faces_layered(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        model: impl Into<PredecodedModelInfo>,
+        animation: Animation<'_>,
+        frame_q12: u32,
+        camera: WorldCamera,
+        origin: WorldVertex,
+        instance_rotation: Mat3I16,
+        local_to_world: LocalToWorldScale,
+        pose_translation: ModelPoseTranslation,
+        projected_vertices: &mut [ProjectedVertex],
+        joint_view_transforms: &mut [JointViewTransform],
+        material: TextureMaterial,
+        secondary_material: Option<TexturedModelLayer>,
+        options: WorldSurfaceOptions,
+        faces: &[TexturedModelRenderFace],
+        geometry: TexturedModelGeometry<'_>,
+        blend_from: Option<ModelPoseBlend<'_>>,
+    ) -> TexturedModelRenderStats {
+        self.submit_textured_model_geometry_impl(
+            triangles,
+            model.into(),
+            animation,
+            frame_q12,
+            blend_from,
+            camera,
+            origin,
+            instance_rotation,
+            local_to_world,
+            pose_translation,
+            projected_vertices,
+            joint_view_transforms,
+            material,
+            secondary_material,
+            options,
+            faces,
+            geometry,
+            true,
+        )
+    }
+
+    /// Submit a primary-joint animated model using predecoded part, vertex, and face records.
+    ///
+    /// This is the lower-cost variant for models whose vertices are all
+    /// single-bone skinned; callers still pass the same predecoded part,
+    /// vertex, and face records.
+    pub fn submit_textured_model_primary_joints_predecoded_geometry_faces(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        model: impl Into<PredecodedModelInfo>,
+        animation: Animation<'_>,
+        frame_q12: u32,
+        camera: WorldCamera,
+        origin: WorldVertex,
+        instance_rotation: Mat3I16,
+        local_to_world: LocalToWorldScale,
+        pose_translation: ModelPoseTranslation,
+        projected_vertices: &mut [ProjectedVertex],
+        joint_view_transforms: &mut [JointViewTransform],
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+        faces: &[TexturedModelRenderFace],
+        geometry: TexturedModelGeometry<'_>,
+    ) -> TexturedModelRenderStats {
+        self.submit_textured_model_geometry_impl(
+            triangles,
+            model.into(),
+            animation,
+            frame_q12,
+            None,
+            camera,
+            origin,
+            instance_rotation,
+            local_to_world,
+            pose_translation,
+            projected_vertices,
+            joint_view_transforms,
+            material,
+            None,
+            options,
+            faces,
+            geometry,
+            false,
+        )
+    }
+
+    /// Primary-joint counterpart of
+    /// [`Self::submit_textured_model_predecoded_geometry_faces_layered`].
+    pub fn submit_textured_model_primary_joints_predecoded_geometry_faces_layered(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        model: impl Into<PredecodedModelInfo>,
+        animation: Animation<'_>,
+        frame_q12: u32,
+        camera: WorldCamera,
+        origin: WorldVertex,
+        instance_rotation: Mat3I16,
+        local_to_world: LocalToWorldScale,
+        pose_translation: ModelPoseTranslation,
+        projected_vertices: &mut [ProjectedVertex],
+        joint_view_transforms: &mut [JointViewTransform],
+        material: TextureMaterial,
+        secondary_material: Option<TexturedModelLayer>,
+        options: WorldSurfaceOptions,
+        faces: &[TexturedModelRenderFace],
+        geometry: TexturedModelGeometry<'_>,
+        blend_from: Option<ModelPoseBlend<'_>>,
+    ) -> TexturedModelRenderStats {
+        self.submit_textured_model_geometry_impl(
+            triangles,
+            model.into(),
+            animation,
+            frame_q12,
+            blend_from,
+            camera,
+            origin,
+            instance_rotation,
+            local_to_world,
+            pose_translation,
+            projected_vertices,
+            joint_view_transforms,
+            material,
+            secondary_material,
+            options,
+            faces,
+            geometry,
+            false,
+        )
+    }
+
+    fn submit_textured_model_geometry_impl(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        model: PredecodedModelInfo,
+        animation: Animation<'_>,
+        frame_q12: u32,
+        blend_from: Option<ModelPoseBlend<'_>>,
+        camera: WorldCamera,
+        origin: WorldVertex,
+        instance_rotation: Mat3I16,
+        local_to_world: LocalToWorldScale,
+        pose_translation: ModelPoseTranslation,
+        projected_vertices: &mut [ProjectedVertex],
+        joint_view_transforms: &mut [JointViewTransform],
+        material: TextureMaterial,
+        secondary_material: Option<TexturedModelLayer>,
+        options: WorldSurfaceOptions,
+        faces: &[TexturedModelRenderFace],
+        geometry: TexturedModelGeometry<'_>,
+        blend_vertices: bool,
+    ) -> TexturedModelRenderStats {
+        let mut stats = TexturedModelRenderStats::default();
+        // X/Y-scaled view + H/scale: see MODEL_GTE_XY_SCALE.
+        let camera_view = model_gte_view_matrix(camera);
+        let gte_projection = model_gte_projection(camera.projection);
+        let view_instance = if MODEL_GTE_JOINT_COMPOSE || MODEL_GTE_JOINT_TRANSLATION {
+            mat3_mul_q12(&camera_view, &instance_rotation)
+        } else {
+            Mat3I16::IDENTITY
+        };
+        let view_origin_translation = if MODEL_GTE_JOINT_TRANSLATION {
+            compute_view_origin_translation(camera_view, origin, camera.position)
+        } else {
+            Vec3I32::ZERO
+        };
+        load_world_projection_gte(gte_projection);
+
+        let joint_count = (model.joint_count() as usize).min(joint_view_transforms.len());
+        let pose_sample = animation.looped_pose_sample_q12(frame_q12);
+        crate::telemetry::stage_begin(crate::telemetry::stage::TEXTURED_MODEL_JOINTS);
+        // EXPLOSION PROBE (diagnostic): capture this model's compose inputs;
+        // frozen once a blended (player) vertex is observed this frame.
+        super::player_vert_debug::record_joints_begin(&view_instance);
+        // A saturated or absent crossfade uses the packed GTE fast path; an
+        // active blend samples both clips unpacked (the packed translations
+        // carry per-clip shifts that cannot be lerped directly).
+        let active_blend = blend_from.filter(|blend| blend.alpha_q12 < 1 << 12);
+        let transform_pose = |pose: JointPose| {
+            if MODEL_GTE_JOINT_TRANSLATION {
+                textured_model_part_gte_transform_with_view_gte_translation(
+                    view_instance,
+                    view_origin_translation,
+                    pose,
+                    local_to_world,
+                )
+            } else if MODEL_GTE_JOINT_COMPOSE {
+                textured_model_part_gte_transform_with_view_gte_compose(
+                    camera_view,
+                    view_instance,
+                    camera.position,
+                    pose,
+                    instance_rotation,
+                    local_to_world,
+                    origin,
+                )
+            } else {
+                textured_model_part_gte_transform_with_view(
+                    camera_view,
+                    camera.position,
+                    pose,
+                    instance_rotation,
+                    local_to_world,
+                    origin,
+                )
+            }
+        };
+        let packed_joints = MODEL_GTE_JOINT_TRANSLATION
+            && MODEL_GTE_JOINT_PACKED_TRANSLATION
+            && active_blend.is_none();
+        if let Some(sample) = pose_sample.filter(|_| !packed_joints && joint_count <= 32) {
+            // Loop fission for the I-cache. `pose()` is about 3.3 KiB of
+            // straight-line decode and the joint transform most of another
+            // 2 KiB, and they collide in the 4 KiB direct-mapped I-cache, so
+            // decoding and transforming joint by joint refilled both on every
+            // joint. Decode every pose first, staged in its joint's output
+            // slot (a JointViewTransform holds the same matrix and
+            // translation), then transform them all. Decoding, the crossfade
+            // and the pose translation touch no GTE state, so the GTE sees the
+            // same commands in the same order. `present` needs one bit per
+            // joint; more than 32 joints take the fused loop below.
+            let mut present = 0u32;
+            for (joint, joint_view_transform) in joint_view_transforms
+                .iter_mut()
+                .enumerate()
+                .take(joint_count)
+            {
+                let joint_index = joint as u16;
+                if let Some(pose) = sample.pose(joint_index) {
+                    let pose = match &active_blend {
+                        Some(blend) => blend.blend_toward(pose, joint_index),
+                        None => pose,
+                    };
+                    let pose = apply_model_pose_translation(pose, pose_translation);
+                    *joint_view_transform = JointViewTransform {
+                        rotation: Mat3I16 { m: pose.matrix },
+                        translation: pose.translation,
+                    };
+                    present |= 1 << joint;
+                }
+            }
+            for (joint, joint_view_transform) in joint_view_transforms
+                .iter_mut()
+                .enumerate()
+                .take(joint_count)
+            {
+                super::player_vert_debug::set_joint_slot(joint as u8);
+                *joint_view_transform = if present & (1 << joint) != 0 {
+                    let (rotation, translation) = transform_pose(JointPose {
+                        matrix: joint_view_transform.rotation.m,
+                        translation: joint_view_transform.translation,
+                    });
+                    JointViewTransform {
+                        rotation,
+                        translation,
+                    }
+                } else {
+                    JointViewTransform::default()
+                };
+            }
+        } else if let Some(sample) = pose_sample {
+            for (joint, joint_view_transform) in joint_view_transforms
+                .iter_mut()
+                .enumerate()
+                .take(joint_count)
+            {
+                let joint_index = joint as u16;
+                super::player_vert_debug::set_joint_slot(joint as u8);
+                let joint_transform = if packed_joints {
+                    sample
+                        .gte_pose(joint_index)
+                        .and_then(|pose| {
+                            textured_model_part_gte_transform_with_view_gte_packed_translation(
+                                view_instance,
+                                view_origin_translation,
+                                pose,
+                                pose_translation,
+                                local_to_world,
+                            )
+                        })
+                        .or_else(|| {
+                            sample.pose(joint_index).map(|pose| {
+                                textured_model_part_gte_transform_with_view_gte_translation(
+                                    view_instance,
+                                    view_origin_translation,
+                                    apply_model_pose_translation(pose, pose_translation),
+                                    local_to_world,
+                                )
+                            })
+                        })
+                } else {
+                    sample.pose(joint_index).map(|pose| {
+                        let pose = match &active_blend {
+                            Some(blend) => blend.blend_toward(pose, joint_index),
+                            None => pose,
+                        };
+                        transform_pose(apply_model_pose_translation(pose, pose_translation))
+                    })
+                };
+
+                *joint_view_transform = match joint_transform {
+                    Some((rotation, translation)) => JointViewTransform {
+                        rotation,
+                        translation,
+                    },
+                    None => JointViewTransform::default(),
+                };
+            }
+        } else {
+            for joint_view_transform in joint_view_transforms.iter_mut().take(joint_count) {
+                *joint_view_transform = JointViewTransform::default();
+            }
+        }
+        crate::telemetry::stage_end(crate::telemetry::stage::TEXTURED_MODEL_JOINTS);
+
+        let model_vertex_count = model.vertex_count() as usize;
+        let model_part_count = model.part_count();
+        if !geometry.usable_for(model) {
+            stats.vertex_overflow = true;
+            return stats;
+        }
+        let project_count = model_vertex_count
+            .min(projected_vertices.len())
+            .min(u16::MAX as usize);
+        if project_count < model_vertex_count {
+            stats.vertex_overflow = true;
+        }
+        stats.projected_vertices = project_count as u16;
+        let near_z = camera.projection.near_z;
+        let mut all_projected_vertices_in_front = true;
+        let mut all_projected_vertices_inside_hw_bounds = project_count == model_vertex_count;
+        let mut projected_extent_code = 0u32;
+        // EXPLOSION PROBE (diagnostic): blended-vertex count for THIS model,
+        // so the all-path projected-X bounds below are merged only for the
+        // skinned player model, not every textured prop.
+        #[cfg(feature = "vert-debug")]
+        let mut probe_model_blended = 0u32;
+        crate::telemetry::stage_begin(crate::telemetry::stage::TEXTURED_MODEL_PROJECT);
+        let parts = &geometry.parts[..model_part_count as usize];
+        let vertices = &geometry.vertices[..model_vertex_count];
+        // Carry seam vertices across part boundaries. Their primary-joint
+        // contribution is captured while each part's matrix is live; a full
+        // chunk can then amortize secondary-joint and projection-state loads
+        // across the whole model instead of flushing every small part.
+        #[cfg(all(not(feature = "vert-debug"), not(target_arch = "mips")))]
+        let mut blended_chunk = MaybeUninit::<[u16; BLENDED_VERTEX_CHUNK]>::uninit();
+        #[cfg(all(not(feature = "vert-debug"), not(target_arch = "mips")))]
+        let blended_chunk_ptr = blended_chunk.as_mut_ptr().cast::<u16>();
+        #[cfg(all(not(feature = "vert-debug"), not(target_arch = "mips")))]
+        let mut blended_view_chunk = MaybeUninit::<[ViewVertex; BLENDED_VERTEX_CHUNK]>::uninit();
+        #[cfg(all(not(feature = "vert-debug"), not(target_arch = "mips")))]
+        let blended_view_chunk_ptr = blended_view_chunk.as_mut_ptr().cast::<ViewVertex>();
+        #[cfg(all(not(feature = "vert-debug"), target_arch = "mips"))]
+        let blended_chunk_ptr = unsafe { crate::scratchpad::ptr_at::<u16>(0) };
+        #[cfg(all(not(feature = "vert-debug"), target_arch = "mips"))]
+        let blended_view_chunk_ptr =
+            unsafe { crate::scratchpad::ptr_at::<ViewVertex>(BLENDED_VERTEX_INDEX_BYTES) };
+        #[cfg(not(feature = "vert-debug"))]
+        let mut blended_len = 0usize;
+        #[cfg(not(feature = "vert-debug"))]
+        let mut blended_restore_primary = JointViewTransform::default();
+        let mut part_index = 0u16;
+        while part_index < model_part_count {
+            let part = parts[part_index as usize];
+            let primary_joint = part.joint_index() as usize;
+            if primary_joint >= joint_count {
+                all_projected_vertices_in_front = false;
+                all_projected_vertices_inside_hw_bounds = false;
+                part_index += 1;
+                continue;
+            }
+            let primary = joint_view_transforms[primary_joint];
+            #[cfg(not(feature = "vert-debug"))]
+            {
+                blended_restore_primary = primary;
+            }
+            super::player_vert_debug::set_primary_joint(primary_joint as u8);
+
+            scene::load_rotation(&primary.rotation);
+            scene::load_translation(primary.translation);
+
+            let mut global_index = part.first_vertex() as usize;
+            let part_end = global_index
+                .saturating_add(part.vertex_count() as usize)
+                .min(project_count);
+            // Empty authored ranges cannot establish nonempty bounds. Force
+            // the exact fallback, which retains the old empty-set result.
+            if global_index >= part_end {
+                projected_extent_code = u32::MAX;
+            }
+            while global_index < part_end {
+                if blend_vertices
+                    && model_vertex_uses_cpu_blend(vertices[global_index], joint_count)
+                {
+                    stats.cpu_blended_vertices = stats.cpu_blended_vertices.wrapping_add(1);
+                    #[cfg(feature = "vert-debug")]
+                    {
+                        probe_model_blended += 1;
+                    }
+                    #[cfg(feature = "vert-debug")]
+                    {
+                        let vertex = vertices[global_index];
+                        let projected = project_blended_textured_model_vertex(
+                            vertex,
+                            primary,
+                            joint_view_transforms,
+                            gte_projection,
+                        );
+                        all_projected_vertices_in_front &=
+                            projected_model_vertex_in_front(projected, near_z);
+                        all_projected_vertices_inside_hw_bounds &=
+                            projected_model_vertex_inside_hw_bounds(projected);
+                        projected_extent_code |=
+                            crate::projection::gpu_extent_box_code([projected.sx, projected.sy]);
+                        projected_vertices[global_index] = projected;
+                    }
+                    #[cfg(not(feature = "vert-debug"))]
+                    {
+                        let vertex = vertices[global_index];
+                        let primary_view = scene::transform_vertex_scheduled(vertex.position);
+                        // SAFETY: `blended_len` is reset at the fixed capacity
+                        // below and incremented once after both writes.
+                        unsafe {
+                            blended_chunk_ptr
+                                .add(blended_len)
+                                .write(global_index as u16);
+                            blended_view_chunk_ptr
+                                .add(blended_len)
+                                .write(ViewVertex::new(
+                                    primary_view.x,
+                                    primary_view.y,
+                                    primary_view.z,
+                                ));
+                        }
+                        blended_len += 1;
+                        if blended_len == BLENDED_VERTEX_CHUNK {
+                            // SAFETY: every entry is written before
+                            // `blended_len` advances; this branch is a full
+                            // initialized chunk.
+                            unsafe {
+                                flush_blended_model_vertex_chunk(
+                                    blended_chunk_ptr,
+                                    blended_view_chunk_ptr,
+                                    blended_len,
+                                    vertices,
+                                    primary,
+                                    joint_view_transforms,
+                                    gte_projection,
+                                    near_z,
+                                    projected_vertices,
+                                    &mut all_projected_vertices_in_front,
+                                    &mut all_projected_vertices_inside_hw_bounds,
+                                    &mut projected_extent_code,
+                                );
+                            }
+                            blended_len = 0;
+                        }
+                    }
+                    global_index += 1;
+                    continue;
+                }
+
+                // Extent of the single-joint run starting here; unblended
+                // models take the whole part in one run with no per-vertex
+                // blend checks.
+                let run_end = if blend_vertices {
+                    let mut end = global_index + 1;
+                    while end < part_end && !model_vertex_uses_cpu_blend(vertices[end], joint_count)
+                    {
+                        end += 1;
+                    }
+                    end
+                } else {
+                    part_end
+                };
+
+                // Software-pipelined RTPT over the run's triples: kick
+                // triple N, fold triple N-1's bookkeeping while the GTE
+                // runs, then read N (the next kick would clobber the
+                // SXY/SZ FIFOs, so N must be read before N+1 starts).
+                // Inputs go straight from the vertex slice to the GTE --
+                // no staging copies, no per-vertex blend checks.
+                let mut pending: Option<(usize, [scene::Projected; 3])> = None;
+                while global_index + 3 <= run_end {
+                    let kicked = scene::start_project_triple(
+                        vertices[global_index].position,
+                        vertices[global_index + 1].position,
+                        vertices[global_index + 2].position,
+                    );
+                    if let Some((done_index, triple)) = pending.take() {
+                        commit_projected_triple(
+                            done_index,
+                            triple,
+                            near_z,
+                            projected_vertices,
+                            &mut all_projected_vertices_in_front,
+                            &mut projected_extent_code,
+                        );
+                    }
+                    pending = Some((global_index, kicked.read()));
+                    global_index += 3;
+                }
+                if let Some((done_index, triple)) = pending.take() {
+                    commit_projected_triple(
+                        done_index,
+                        triple,
+                        near_z,
+                        projected_vertices,
+                        &mut all_projected_vertices_in_front,
+                        &mut projected_extent_code,
+                    );
+                }
+                while global_index < run_end {
+                    let projected = project_gte_model_vertex(vertices[global_index]);
+                    all_projected_vertices_in_front &=
+                        projected_model_vertex_in_front(projected, near_z);
+                    projected_extent_code |=
+                        crate::projection::gpu_extent_box_code([projected.sx, projected.sy]);
+                    projected_vertices[global_index] = projected;
+                    global_index += 1;
+                }
+            }
+            part_index += 1;
+        }
+        #[cfg(not(feature = "vert-debug"))]
+        if blended_len > 0 {
+            // SAFETY: only entries written by the blended-vertex branch
+            // contribute to `blended_len`, and every entry has a matching
+            // primary-joint view-space value.
+            unsafe {
+                flush_blended_model_vertex_chunk(
+                    blended_chunk_ptr,
+                    blended_view_chunk_ptr,
+                    blended_len,
+                    vertices,
+                    blended_restore_primary,
+                    joint_view_transforms,
+                    gte_projection,
+                    near_z,
+                    projected_vertices,
+                    &mut all_projected_vertices_in_front,
+                    &mut all_projected_vertices_inside_hw_bounds,
+                    &mut projected_extent_code,
+                );
+            }
+        }
+        crate::telemetry::stage_end(crate::telemetry::stage::TEXTURED_MODEL_PROJECT);
+        // EXPLOSION PROBE (diagnostic): for the skinned player model, surface
+        // the ALL-path projected X bounds (blended + batch + remainder) so the
+        // overlay can split blended-only vs mesh-wide widening.
+        #[cfg(feature = "vert-debug")]
+        if probe_model_blended > 0 {
+            let bounds =
+                projected_part_bounds(parts, projected_vertices, project_count, joint_count);
+            super::player_vert_debug::merge_all_x(bounds.0, bounds.1);
+        }
+
+        let mut faces_considered = 0u32;
+        let packet_material = material.textured_packet_material();
+        let camera_crystal_materials =
+            match options.model_uv_mapping {
+                ModelUvMapping::CameraCrystal { roughness } => Some(
+                    camera_crystal_packet_materials(material, view_instance, roughness),
+                ),
+                _ => None,
+            };
+        let packed_fast_faces =
+            options.split_textured_triangles && options.textured_split_max_edge == 0;
+        let packed_back_in_front_faces = packed_fast_faces
+            && all_projected_vertices_in_front
+            && options.cull_mode == CullMode::Back;
+        let packed_back_average_in_front_faces =
+            packed_back_in_front_faces && options.depth_policy == DepthPolicy::Average;
+        let authored_uv_offset = match options.model_uv_mapping {
+            ModelUvMapping::Authored => Some(ModelUvOffset::ZERO),
+            ModelUvMapping::AuthoredOffset(offset) => Some(offset),
+            ModelUvMapping::CameraCrystal { .. } => Some(ModelUvOffset::ZERO),
+            ModelUvMapping::ScreenSpaceReflection { .. }
+            | ModelUvMapping::FacetReflection { .. } => None,
+        };
+        // Back-culled and double-sided models can share the unclamped batch.
+        // CullMode::None previously fell through to the general per-face path,
+        // even when the projection pass had proved every near-plane and clamp
+        // verdict for the whole model. Global bounds can also prove every face's
+        // extent; otherwise the batch retains its per-face extent fallback.
+        // CULL_BACK keeps the one semantic difference compile-time so the
+        // double-sided loop has no winding test.
+        // Dash reconstruction deliberately disables splitting. If the whole
+        // reflection model is extent-safe, its packets need no splitting in
+        // either mode and can use the same fused reflection walker.
+        let unsplit_reflection = !options.split_textured_triangles
+            && matches!(
+                options.model_uv_mapping,
+                ModelUvMapping::FacetReflection { .. }
+            );
+        let packed_average_unclamped_faces = (packed_fast_faces || unsplit_reflection)
+            && (authored_uv_offset.is_some()
+                || matches!(
+                    options.model_uv_mapping,
+                    ModelUvMapping::FacetReflection { .. }
+                ))
+            && all_projected_vertices_in_front
+            && options.depth_policy == DepthPolicy::Average
+            && all_projected_vertices_inside_hw_bounds
+            && (options.cull_mode == CullMode::Back || options.cull_mode == CullMode::None);
+        let packed_average_unclamped_extent_safe_faces = packed_average_unclamped_faces
+            && project_count != 0
+            && model_part_count != 0
+            && (projected_extent_code == 0 || {
+                let (min_x, max_x, min_y, max_y) =
+                    projected_part_bounds(parts, projected_vertices, project_count, joint_count);
+                projected_model_bounds_hw_extent_safe(min_x, max_x, min_y, max_y)
+            });
+        // Keep unsplit models on the general path when any face could need
+        // hardware-extent rejection. The batch fallback may subdivide it.
+        let packed_average_unclamped_faces = packed_average_unclamped_faces
+            && (packed_fast_faces || packed_average_unclamped_extent_safe_faces);
+        // The bucketed renderer is the shipping/editor-play default. A layered
+        // model used to traverse, validate, cull, and depth every face twice.
+        // When the complete model bounds prove the direct packet path safe,
+        // submit both materials in one traversal while retaining the original
+        // command order (all base packets followed by all overlay packets).
+        let layered_packet_capacity = faces.len().checked_mul(2);
+        let fused_secondary_material = secondary_material.filter(|layer| {
+            packed_average_unclamped_extent_safe_faces
+                && authored_uv_offset.is_some()
+                && layer.uv_mapping.is_authored()
+                && matches!(self.ordering, WorldCommandOrdering::Bucketed)
+                && layered_packet_capacity.is_some_and(|required| {
+                    required <= triangles.remaining()
+                        && required <= self.commands.len().saturating_sub(self.command_len)
+                })
+        });
+        crate::telemetry::stage_begin(crate::telemetry::stage::TEXTURED_MODEL_FACES);
+        if let Some(secondary_layer) = fused_secondary_material {
+            let secondary_material = secondary_layer.material;
+            let projected_vertices = &projected_vertices[..project_count];
+            let secondary_options = options.with_material_layer(secondary_material);
+            if options.cull_mode == CullMode::Back {
+                self.submit_predecoded_model_faces_layered_bucketed_average_unclamped_extent_safe_batch::<true>(
+                    triangles,
+                    projected_vertices,
+                    faces,
+                    packet_material,
+                    camera_crystal_materials,
+                    secondary_material.textured_packet_material(),
+                    secondary_layer.uv_offset,
+                    options,
+                    secondary_options,
+                    &mut stats,
+                    &mut faces_considered,
+                );
+            } else {
+                self.submit_predecoded_model_faces_layered_bucketed_average_unclamped_extent_safe_batch::<false>(
+                    triangles,
+                    projected_vertices,
+                    faces,
+                    packet_material,
+                    camera_crystal_materials,
+                    secondary_material.textured_packet_material(),
+                    secondary_layer.uv_offset,
+                    options,
+                    secondary_options,
+                    &mut stats,
+                    &mut faces_considered,
+                );
+            }
+        } else if packed_average_unclamped_faces {
+            let projected_vertices = &projected_vertices[..project_count];
+            let overflow = if let ModelUvMapping::FacetReflection {
+                texture_width,
+                texture_height,
+                roughness,
+            } = options.model_uv_mapping
+            {
+                self.submit_facet_reflection_batch(
+                    triangles,
+                    projected_vertices,
+                    faces,
+                    joint_view_transforms,
+                    packet_material,
+                    material,
+                    options,
+                    packed_average_unclamped_extent_safe_faces,
+                    texture_width,
+                    texture_height,
+                    roughness,
+                    &mut stats,
+                    &mut faces_considered,
+                )
+            } else if packed_average_unclamped_extent_safe_faces {
+                if options.cull_mode == CullMode::Back {
+                    let stats = &mut stats;
+                    let faces_considered = &mut faces_considered;
+                    // SAFETY: the blended-vertex chunk was flushed above, so
+                    // no scratchpad bytes are live (see ModelFaceWalkerStack);
+                    // the walker installs no exception handler, and
+                    // tools/stack_guard.py proves its call tree fits.
+                    unsafe {
+                        ModelFaceWalkerStack::run(|| {
+                            self.submit_predecoded_model_faces_packed_average_unclamped_extent_safe_batch::<true>(
+                                triangles,
+                                projected_vertices,
+                                faces,
+                                packet_material,
+                                camera_crystal_materials,
+                                authored_uv_offset.unwrap_or_default(),
+                                true,
+                                options,
+                                stats,
+                                faces_considered,
+                            )
+                        })
+                    }
+                } else {
+                    self.submit_predecoded_model_faces_packed_average_unclamped_extent_safe_batch::<false>(
+                        triangles,
+                        projected_vertices,
+                        faces,
+                        packet_material,
+                        camera_crystal_materials,
+                        authored_uv_offset.unwrap_or_default(),
+                        true,
+                        options,
+                        &mut stats,
+                        &mut faces_considered,
+                    )
+                }
+            } else if options.cull_mode == CullMode::Back {
+                self.submit_predecoded_model_faces_packed_average_unclamped_batch::<true>(
+                    triangles,
+                    projected_vertices,
+                    faces,
+                    packet_material,
+                    camera_crystal_materials,
+                    authored_uv_offset.unwrap_or_default(),
+                    true,
+                    material,
+                    options,
+                    &mut stats,
+                    &mut faces_considered,
+                )
+            } else {
+                self.submit_predecoded_model_faces_packed_average_unclamped_batch::<false>(
+                    triangles,
+                    projected_vertices,
+                    faces,
+                    packet_material,
+                    camera_crystal_materials,
+                    authored_uv_offset.unwrap_or_default(),
+                    true,
+                    material,
+                    options,
+                    &mut stats,
+                    &mut faces_considered,
+                )
+            };
+            if overflow {
+                crate::telemetry::stage_end(crate::telemetry::stage::TEXTURED_MODEL_FACES);
+                emit_textured_model_detail_counters(
+                    joint_count,
+                    model.part_count(),
+                    project_count,
+                    faces_considered,
+                    blend_vertices,
+                    all_projected_vertices_in_front,
+                    all_projected_vertices_inside_hw_bounds,
+                    packed_average_unclamped_faces,
+                    packed_back_in_front_faces,
+                    packed_fast_faces,
+                    &stats,
+                );
+                return stats;
+            }
+        } else {
+            // These general walkers deliberately carry no camera-crystal
+            // band, the one gap left in the crystal's route coverage. Three
+            // ways of closing it were measured on 2026-08-29 against the
+            // shipping route: a band per face, a model-wide band resolved
+            // just above this loop, and a model-wide band resolved once
+            // beside the crystal itself. Each cost about 70k cycles a frame
+            // in the model face stage, +57%, on frames that never enter this
+            // branch at all, and each moved untouched stages with it
+            // (`textured_model_joints` -8%), so the cost tracks where the
+            // code lands in this function rather than the band arithmetic.
+            // A model reaches here only by clipping the near plane, leaving
+            // the hardware vertex range, or asking for a depth policy the
+            // batches do not serve; `textured_model_packed_general`,
+            // `..._packed_clamped` and `..._fallback_faces` stayed at zero
+            // across every gameplay frame measured, including the closest
+            // camera the game allows. Do not reopen without a measurement.
+            let mut face_index = 0usize;
+            while face_index < faces.len() {
+                faces_considered = faces_considered.wrapping_add(1);
+                let face = model_face_with_uv_mapping(
+                    faces[face_index],
+                    projected_vertices,
+                    options.model_uv_mapping,
+                    joint_view_transforms,
+                );
+                let palette_bank = face.palette_bank();
+                let face_material = material.with_clut_bank(palette_bank);
+                let face_packet_material = face_material.textured_packet_material();
+                let overflow = if packed_back_average_in_front_faces {
+                    self.submit_predecoded_model_face_packed_back_average_in_front_fast(
+                        triangles,
+                        projected_vertices,
+                        project_count,
+                        face,
+                        face_packet_material,
+                        face_material,
+                        options,
+                        &mut stats,
+                    )
+                } else if packed_back_in_front_faces {
+                    self.submit_predecoded_model_face_packed_back_in_front_fast(
+                        triangles,
+                        projected_vertices,
+                        project_count,
+                        face,
+                        face_packet_material,
+                        face_material,
+                        options,
+                        &mut stats,
+                    )
+                } else if packed_fast_faces {
+                    self.submit_predecoded_model_face_packed_fast(
+                        triangles,
+                        projected_vertices,
+                        project_count,
+                        face,
+                        all_projected_vertices_in_front,
+                        near_z,
+                        face_packet_material,
+                        face_material,
+                        options,
+                        &mut stats,
+                    )
+                } else {
+                    self.submit_predecoded_model_face(
+                        triangles,
+                        projected_vertices,
+                        project_count,
+                        face,
+                        all_projected_vertices_in_front,
+                        near_z,
+                        face_packet_material,
+                        face_material,
+                        options,
+                        &mut stats,
+                    )
+                };
+                if overflow {
+                    crate::telemetry::stage_end(crate::telemetry::stage::TEXTURED_MODEL_FACES);
+                    emit_textured_model_detail_counters(
+                        joint_count,
+                        model.part_count(),
+                        project_count,
+                        faces_considered,
+                        blend_vertices,
+                        all_projected_vertices_in_front,
+                        all_projected_vertices_inside_hw_bounds,
+                        packed_average_unclamped_faces,
+                        packed_back_in_front_faces,
+                        packed_fast_faces,
+                        &stats,
+                    );
+                    return stats;
+                }
+                face_index += 1;
+            }
+        }
+        if fused_secondary_material.is_none() {
+            if let Some(secondary_layer) = secondary_material {
+                let material = secondary_layer.material;
+                let options = options.with_material_layer(material);
+                let packet_material = material.textured_packet_material();
+                let overflow = if !secondary_layer.uv_offset.is_zero()
+                    || !secondary_layer.uv_mapping.is_authored()
+                {
+                    let mut overflow = false;
+                    let mut face_index = 0usize;
+                    while face_index < faces.len() {
+                        faces_considered = faces_considered.wrapping_add(1);
+                        let face = model_face_with_uv_mapping(
+                            faces[face_index],
+                            projected_vertices,
+                            secondary_layer.uv_mapping,
+                            joint_view_transforms,
+                        )
+                        .with_uv_offset(secondary_layer.uv_offset);
+                        overflow = if packed_back_average_in_front_faces {
+                            self.submit_predecoded_model_face_packed_back_average_in_front_fast(
+                                triangles,
+                                projected_vertices,
+                                project_count,
+                                face,
+                                packet_material,
+                                material,
+                                options,
+                                &mut stats,
+                            )
+                        } else if packed_back_in_front_faces {
+                            self.submit_predecoded_model_face_packed_back_in_front_fast(
+                                triangles,
+                                projected_vertices,
+                                project_count,
+                                face,
+                                packet_material,
+                                material,
+                                options,
+                                &mut stats,
+                            )
+                        } else if packed_fast_faces {
+                            self.submit_predecoded_model_face_packed_fast(
+                                triangles,
+                                projected_vertices,
+                                project_count,
+                                face,
+                                all_projected_vertices_in_front,
+                                near_z,
+                                packet_material,
+                                material,
+                                options,
+                                &mut stats,
+                            )
+                        } else {
+                            self.submit_predecoded_model_face(
+                                triangles,
+                                projected_vertices,
+                                project_count,
+                                face,
+                                all_projected_vertices_in_front,
+                                near_z,
+                                packet_material,
+                                material,
+                                options,
+                                &mut stats,
+                            )
+                        };
+                        if overflow {
+                            break;
+                        }
+                        face_index += 1;
+                    }
+                    overflow
+                } else if packed_average_unclamped_faces {
+                    let projected_vertices = &projected_vertices[..project_count];
+                    if packed_average_unclamped_extent_safe_faces {
+                        if options.cull_mode == CullMode::Back {
+                            self.submit_predecoded_model_faces_packed_average_unclamped_extent_safe_batch::<true>(
+                            triangles,
+                            projected_vertices,
+                            faces,
+                            packet_material,
+                            None,
+                            ModelUvOffset::ZERO,
+                            false,
+                            options,
+                            &mut stats,
+                            &mut faces_considered,
+                        )
+                        } else {
+                            self.submit_predecoded_model_faces_packed_average_unclamped_extent_safe_batch::<false>(
+                            triangles,
+                            projected_vertices,
+                            faces,
+                            packet_material,
+                            None,
+                            ModelUvOffset::ZERO,
+                            false,
+                            options,
+                            &mut stats,
+                            &mut faces_considered,
+                        )
+                        }
+                    } else if options.cull_mode == CullMode::Back {
+                        // Reached only by an authored, unoffset layer; a
+                        // crystal layer is never authored and walks per face.
+                        self.submit_predecoded_model_faces_packed_average_unclamped_batch::<true>(
+                            triangles,
+                            projected_vertices,
+                            faces,
+                            packet_material,
+                            None,
+                            ModelUvOffset::ZERO,
+                            false,
+                            material,
+                            options,
+                            &mut stats,
+                            &mut faces_considered,
+                        )
+                    } else {
+                        self.submit_predecoded_model_faces_packed_average_unclamped_batch::<false>(
+                            triangles,
+                            projected_vertices,
+                            faces,
+                            packet_material,
+                            None,
+                            ModelUvOffset::ZERO,
+                            false,
+                            material,
+                            options,
+                            &mut stats,
+                            &mut faces_considered,
+                        )
+                    }
+                } else {
+                    let mut overflow = false;
+                    let mut face_index = 0usize;
+                    while face_index < faces.len() {
+                        faces_considered = faces_considered.wrapping_add(1);
+                        overflow = if packed_back_average_in_front_faces {
+                            self.submit_predecoded_model_face_packed_back_average_in_front_fast(
+                                triangles,
+                                projected_vertices,
+                                project_count,
+                                faces[face_index],
+                                packet_material,
+                                material,
+                                options,
+                                &mut stats,
+                            )
+                        } else if packed_back_in_front_faces {
+                            self.submit_predecoded_model_face_packed_back_in_front_fast(
+                                triangles,
+                                projected_vertices,
+                                project_count,
+                                faces[face_index],
+                                packet_material,
+                                material,
+                                options,
+                                &mut stats,
+                            )
+                        } else if packed_fast_faces {
+                            self.submit_predecoded_model_face_packed_fast(
+                                triangles,
+                                projected_vertices,
+                                project_count,
+                                faces[face_index],
+                                all_projected_vertices_in_front,
+                                near_z,
+                                packet_material,
+                                material,
+                                options,
+                                &mut stats,
+                            )
+                        } else {
+                            self.submit_predecoded_model_face(
+                                triangles,
+                                projected_vertices,
+                                project_count,
+                                faces[face_index],
+                                all_projected_vertices_in_front,
+                                near_z,
+                                packet_material,
+                                material,
+                                options,
+                                &mut stats,
+                            )
+                        };
+                        if overflow {
+                            break;
+                        }
+                        face_index += 1;
+                    }
+                    overflow
+                };
+                if overflow {
+                    crate::telemetry::stage_end(crate::telemetry::stage::TEXTURED_MODEL_FACES);
+                    emit_textured_model_detail_counters(
+                        joint_count,
+                        model.part_count(),
+                        project_count,
+                        faces_considered,
+                        blend_vertices,
+                        all_projected_vertices_in_front,
+                        all_projected_vertices_inside_hw_bounds,
+                        packed_average_unclamped_faces,
+                        packed_back_in_front_faces,
+                        packed_fast_faces,
+                        &stats,
+                    );
+                    return stats;
+                }
+            }
+        }
+        crate::telemetry::stage_end(crate::telemetry::stage::TEXTURED_MODEL_FACES);
+        emit_textured_model_detail_counters(
+            joint_count,
+            model.part_count(),
+            project_count,
+            faces_considered,
+            blend_vertices,
+            all_projected_vertices_in_front,
+            all_projected_vertices_inside_hw_bounds,
+            packed_average_unclamped_faces,
+            packed_back_in_front_faces,
+            packed_fast_faces,
+            &stats,
+        );
+
+        stats
+    }
+
+    // Cold by measurement: with this walker outlined, the shipping route
+    // retires 0.01% of its instructions here or less (the non-extent-safe,
+    // non-authored-UV and layered variants are all dead on the real content).
+    // Outlined so dead-in-practice code stops sitting between the hot batch
+    // walkers in `submit_textured_model_geometry_impl`, where it inflated the
+    // frame, register pressure and I-cache footprint of the loop that does run.
+    #[inline(never)]
+    pub(super) fn submit_predecoded_model_faces_layered_bucketed_average_unclamped_extent_safe_batch<
+        const CULL_BACK: bool,
+    >(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        projected_vertices: &[ProjectedVertex],
+        faces: &[TexturedModelRenderFace],
+        base_material: TexturedPacketMaterial,
+        base_camera_crystal_materials: Option<CameraCrystalPacketMaterials>,
+        secondary_material: TexturedPacketMaterial,
+        secondary_uv_offset: ModelUvOffset,
+        base_options: WorldSurfaceOptions,
+        secondary_options: WorldSurfaceOptions,
+        stats: &mut TexturedModelRenderStats,
+        faces_considered: &mut u32,
+    ) {
+        debug_assert!(matches!(self.ordering, WorldCommandOrdering::Bucketed));
+        debug_assert!(
+            faces.len().saturating_mul(2) <= self.commands.len().saturating_sub(self.command_len)
+        );
+        debug_assert!(faces.len().saturating_mul(2) <= triangles.remaining());
+
+        let base_command_start = self.command_len;
+        let secondary_command_start = base_command_start + faces.len();
+        let compact_commands = self.commands.as_mut_ptr().cast::<BucketedWorldCommand>();
+        let depth_slots = PreparedModelDepthSlots::new::<OT_DEPTH>(base_options);
+        debug_assert_eq!(base_options.depth_band, secondary_options.depth_band);
+        debug_assert_eq!(base_options.depth_range, secondary_options.depth_range);
+        debug_assert_eq!(base_options.depth_bias, secondary_options.depth_bias);
+        let mut culled_triangles = 0u16;
+        let mut submitted_triangles = 0usize;
+
+        let mut face_index = 0usize;
+        while face_index < faces.len() {
+            let face = faces[face_index];
+            let [ia, ib, ic] = face.vertex_indices();
+            let ia = ia as usize;
+            let ib = ib as usize;
+            let ic = ic as usize;
+            let projected = unsafe {
+                // SAFETY: model faces are validated against the model vertex
+                // count during decode, and this path is entered only after the
+                // complete vertex set was projected.
+                [
+                    *projected_vertices.get_unchecked(ia),
+                    *projected_vertices.get_unchecked(ib),
+                    *projected_vertices.get_unchecked(ic),
+                ]
+            };
+
+            let area = if CULL_BACK || base_camera_crystal_materials.is_some() {
+                psx_gte::scene::screen_area_scheduled([
+                    (projected[0].sx, projected[0].sy),
+                    (projected[1].sx, projected[1].sy),
+                    (projected[2].sx, projected[2].sy),
+                ])
+            } else {
+                1
+            };
+            if CULL_BACK && area <= 0 {
+                culled_triangles = culled_triangles.wrapping_add(1);
+                face_index += 1;
+                continue;
+            }
+            let positions = [
+                (projected[0].sx, projected[0].sy),
+                (projected[1].sx, projected[1].sy),
+                (projected[2].sx, projected[2].sy),
+            ];
+            let base_material = base_camera_crystal_materials
+                .as_ref()
+                .map(|materials| materials.for_area(area))
+                .unwrap_or(base_material);
+            let base_triangle = unsafe {
+                triangles.push_unchecked(TriTextured::with_packet_material_packed_uv_words(
+                    positions,
+                    face.uv_words(),
+                    base_material.with_clut_bank(face.palette_bank()),
+                ))
+            };
+            let base_triangle = base_triangle as *mut TriTextured as *mut u32;
+            let secondary_triangle = unsafe {
+                triangles.push_unchecked(TriTextured::with_packet_material_packed_uv_words(
+                    positions,
+                    face.with_uv_offset(secondary_uv_offset).uv_words(),
+                    secondary_material,
+                ))
+            };
+            let secondary_triangle = secondary_triangle as *mut TriTextured as *mut u32;
+
+            let depth = ((projected[0].sz + projected[1].sz + projected[2].sz) / 3)
+                .saturating_add(base_options.depth_bias);
+            let base_slot = depth_slots.slot(depth);
+            unsafe {
+                // SAFETY: the capacity preflight reserves two command slots per
+                // input face. Base and secondary regions are disjoint until the
+                // secondary region is compacted after the traversal.
+                compact_commands
+                    .add(base_command_start + submitted_triangles)
+                    .write(BucketedWorldCommand::new(
+                        base_triangle,
+                        base_slot,
+                        TriTextured::WORDS,
+                    ));
+                compact_commands
+                    .add(secondary_command_start + submitted_triangles)
+                    .write(BucketedWorldCommand::new(
+                        secondary_triangle,
+                        base_slot,
+                        TriTextured::WORDS,
+                    ));
+            }
+            submitted_triangles += 1;
+            face_index += 1;
+        }
+
+        unsafe {
+            // SAFETY: both ranges contain `submitted_triangles` initialized
+            // compact commands. `copy` permits overlap when culled faces leave
+            // a gap between the base and secondary regions.
+            core::ptr::copy(
+                compact_commands.add(secondary_command_start),
+                compact_commands.add(base_command_start + submitted_triangles),
+                submitted_triangles,
+            );
+        }
+        self.command_len = base_command_start + submitted_triangles.saturating_mul(2);
+
+        let processed = faces.len().min(u16::MAX as usize) as u16;
+        let submitted = submitted_triangles.min(u16::MAX as usize) as u16;
+        *faces_considered = faces_considered.wrapping_add(u32::from(processed).wrapping_mul(2));
+        flush_packed_unclamped_model_batch_stats(
+            stats,
+            0,
+            processed.wrapping_mul(2),
+            processed.wrapping_mul(2),
+            culled_triangles.wrapping_mul(2),
+            submitted.wrapping_mul(2),
+            submitted.wrapping_mul(2),
+            0,
+        );
+    }
+
+    /// Map only front-facing facets, then reuse the packet batches. Keeping
+    /// this scratch buffer outside the scratchpad walker bounds stack usage.
+    #[inline(never)]
+    fn submit_facet_reflection_batch(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        projected: &[ProjectedVertex],
+        faces: &[TexturedModelRenderFace],
+        joints: &[JointViewTransform],
+        packet: TexturedPacketMaterial,
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+        extent_safe: bool,
+        width: u8,
+        height: u8,
+        roughness: u8,
+        stats: &mut TexturedModelRenderStats,
+        considered: &mut u32,
+    ) -> bool {
+        if extent_safe
+            && matches!(self.ordering, WorldCommandOrdering::Bucketed)
+            && faces.len() <= triangles.remaining()
+            && faces.len() <= self.commands.len().saturating_sub(self.command_len)
+        {
+            // As for the authored-UV walker, projection has released its
+            // scratchpad region. This path neither clips nor subdivides.
+            // The post-link stack guard proves the complete call tree fits.
+            unsafe {
+                ModelFaceWalkerStack::run(|| {
+                    self.submit_facet_reflection_extent_safe(
+                        triangles, projected, faces, joints, packet, options, width, height,
+                        roughness, stats, considered,
+                    );
+                });
+            }
+            return false;
+        }
+        self.submit_facet_reflection_mapped_batch(
+            triangles,
+            projected,
+            faces,
+            joints,
+            packet,
+            material,
+            options,
+            extent_safe,
+            width,
+            height,
+            roughness,
+            stats,
+            considered,
+        )
+    }
+
+    /// Fuse visibility, reflection coordinates and packet output. The old
+    /// 16-face staging loop loaded/cull-tested each vertex twice and rebuilt
+    /// submission state for every chunk, including chunks of hidden faces.
+    #[inline(never)]
+    fn submit_facet_reflection_extent_safe(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        projected: &[ProjectedVertex],
+        faces: &[TexturedModelRenderFace],
+        joints: &[JointViewTransform],
+        packet: TexturedPacketMaterial,
+        options: WorldSurfaceOptions,
+        width: u8,
+        height: u8,
+        roughness: u8,
+        stats: &mut TexturedModelRenderStats,
+        considered: &mut u32,
+    ) {
+        debug_assert!(faces.len() <= triangles.remaining());
+        debug_assert!(faces.len() <= self.commands.len().saturating_sub(self.command_len));
+        let command_start = self.command_len;
+        let commands = self.commands.as_mut_ptr().cast::<BucketedWorldCommand>();
+        let depth_slots = PreparedModelDepthSlots::new::<OT_DEPTH>(options);
+        let mut culled = 0u16;
+        let mut submitted = 0usize;
+        let mut rotation = ReflectionJoint::new();
+        for source in faces {
+            // SAFETY: the caller validated all indices and projected all
+            // vertices, and preflighted a packet/command for every face.
+            let (face, addresses) =
+                unsafe { model_face_addresses_scheduled(source, projected.as_ptr()) };
+            let p = unsafe { [*addresses[0], *addresses[1], *addresses[2]] };
+            let xy = [(p[0].sx, p[0].sy), (p[1].sx, p[1].sy), (p[2].sx, p[2].sy)];
+            if options.cull_mode == CullMode::Back && psx_gte::scene::screen_area_scheduled(xy) <= 0
+            {
+                culled = culled.wrapping_add(1);
+                continue;
+            }
+            let uv_words = facet_reflection_words(
+                face.uv_words(),
+                joints,
+                &mut rotation,
+                width,
+                height,
+                roughness,
+            );
+            let triangle = unsafe {
+                triangles.push_unchecked(TriTextured::with_packet_material_packed_uv_words(
+                    xy,
+                    uv_words,
+                    packet.with_clut_bank(face.palette_bank()),
+                ))
+            } as *mut TriTextured as *mut u32;
+            let depth = ((p[0].sz + p[1].sz + p[2].sz) / 3).saturating_add(options.depth_bias);
+            unsafe {
+                commands
+                    .add(command_start + submitted)
+                    .write(BucketedWorldCommand::new(
+                        triangle,
+                        depth_slots.slot(depth),
+                        TriTextured::WORDS,
+                    ));
+            }
+            submitted += 1;
+        }
+        rotation.restore();
+        self.command_len = command_start + submitted;
+        let processed = faces.len().min(u16::MAX as usize) as u16;
+        *considered = considered.wrapping_add(u32::from(processed));
+        let submitted = submitted.min(u16::MAX as usize) as u16;
+        flush_packed_unclamped_model_batch_stats(
+            stats, 0, processed, processed, culled, submitted, submitted, 0,
+        );
+    }
+
+    #[inline(never)]
+    fn submit_facet_reflection_mapped_batch(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        projected: &[ProjectedVertex],
+        faces: &[TexturedModelRenderFace],
+        joints: &[JointViewTransform],
+        packet: TexturedPacketMaterial,
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+        extent_safe: bool,
+        width: u8,
+        height: u8,
+        roughness: u8,
+        stats: &mut TexturedModelRenderStats,
+        considered: &mut u32,
+    ) -> bool {
+        let mut mapped = [TexturedModelRenderFace::ZERO; 16];
+        for chunk in faces.chunks(16) {
+            for (dst, face) in mapped.iter_mut().zip(chunk.iter().copied()) {
+                let [a, b, c] = face.vertex_indices().map(|i| projected[usize::from(i)]);
+                let area = (i32::from(b.sx) - i32::from(a.sx))
+                    * (i32::from(c.sy) - i32::from(a.sy))
+                    - (i32::from(b.sy) - i32::from(a.sy)) * (i32::from(c.sx) - i32::from(a.sx));
+                *dst = if options.cull_mode == CullMode::Back && area <= 0 {
+                    face
+                } else {
+                    facet_reflection_face(face, joints, width, height, roughness)
+                };
+            }
+            let faces = &mapped[..chunk.len()];
+            let overflow = if extent_safe {
+                if options.cull_mode == CullMode::Back {
+                    self.submit_predecoded_model_faces_packed_average_unclamped_extent_safe_batch::<true>(
+                        triangles, projected, faces, packet, None, ModelUvOffset::ZERO, true, options, stats, considered)
+                } else {
+                    self.submit_predecoded_model_faces_packed_average_unclamped_extent_safe_batch::<false>(
+                        triangles, projected, faces, packet, None, ModelUvOffset::ZERO, true, options, stats, considered)
+                }
+            } else if options.cull_mode == CullMode::Back {
+                self.submit_predecoded_model_faces_packed_average_unclamped_batch::<true>(
+                    triangles,
+                    projected,
+                    faces,
+                    packet,
+                    None,
+                    ModelUvOffset::ZERO,
+                    true,
+                    material,
+                    options,
+                    stats,
+                    considered,
+                )
+            } else {
+                self.submit_predecoded_model_faces_packed_average_unclamped_batch::<false>(
+                    triangles,
+                    projected,
+                    faces,
+                    packet,
+                    None,
+                    ModelUvOffset::ZERO,
+                    true,
+                    material,
+                    options,
+                    stats,
+                    considered,
+                )
+            };
+            if overflow {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[inline(always)]
+    pub(super) fn submit_predecoded_model_faces_packed_average_unclamped_extent_safe_batch<
+        const CULL_BACK: bool,
+    >(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        projected_vertices: &[ProjectedVertex],
+        faces: &[TexturedModelRenderFace],
+        packet_material: TexturedPacketMaterial,
+        camera_crystal_materials: Option<CameraCrystalPacketMaterials>,
+        uv_offset: ModelUvOffset,
+        palette_banks: bool,
+        options: WorldSurfaceOptions,
+        stats: &mut TexturedModelRenderStats,
+        faces_considered: &mut u32,
+    ) -> bool {
+        if matches!(self.ordering, WorldCommandOrdering::Bucketed)
+            && faces.len() <= triangles.remaining()
+            && faces.len() <= self.commands.len().saturating_sub(self.command_len)
+        {
+            if uv_offset.is_zero() {
+                // The crystal band is a per-model property, so resolve it into
+                // the walker's type. A plain model then carries no band test,
+                // no band-table base and no roughness reload in its per-face
+                // body, and the crystal model keeps both in registers instead
+                // of behind an `Option` the loop must re-test every face.
+                if camera_crystal_materials.is_some() {
+                    self.submit_predecoded_model_faces_bucketed_average_unclamped_extent_safe_authored_batch::<
+                        CULL_BACK,
+                        true,
+                    >(
+                        triangles,
+                        projected_vertices,
+                        faces,
+                        packet_material,
+                        camera_crystal_materials,
+                        palette_banks,
+                        options,
+                        stats,
+                        faces_considered,
+                    );
+                } else {
+                    self.submit_predecoded_model_faces_bucketed_average_unclamped_extent_safe_authored_batch::<
+                        CULL_BACK,
+                        false,
+                    >(
+                        triangles,
+                        projected_vertices,
+                        faces,
+                        packet_material,
+                        camera_crystal_materials,
+                        palette_banks,
+                        options,
+                        stats,
+                        faces_considered,
+                    );
+                }
+            } else {
+                self.submit_predecoded_model_faces_bucketed_average_unclamped_extent_safe_batch::<
+                    CULL_BACK,
+                >(
+                    triangles,
+                    projected_vertices,
+                    faces,
+                    packet_material,
+                    uv_offset,
+                    palette_banks,
+                    options,
+                    stats,
+                    faces_considered,
+                );
+            }
+            return false;
+        }
+
+        let mut culled_triangles = 0u16;
+        let mut submitted_triangles = 0u16;
+        let mut fast_submitted_triangles = 0u16;
+
+        let mut face_index = 0usize;
+        while face_index < faces.len() {
+            let face = faces[face_index];
+            let [ia, ib, ic] = face.vertex_indices();
+            let ia = ia as usize;
+            let ib = ib as usize;
+            let ic = ic as usize;
+            let projected = unsafe {
+                // SAFETY: model faces are validated against the model vertex count
+                // once while decoding. This extent-safe batch is reachable only
+                // when the complete model vertex set was projected.
+                [
+                    *projected_vertices.get_unchecked(ia),
+                    *projected_vertices.get_unchecked(ib),
+                    *projected_vertices.get_unchecked(ic),
+                ]
+            };
+            let area = if CULL_BACK || camera_crystal_materials.is_some() {
+                psx_gte::scene::screen_area_scheduled([
+                    (projected[0].sx, projected[0].sy),
+                    (projected[1].sx, projected[1].sy),
+                    (projected[2].sx, projected[2].sy),
+                ])
+            } else {
+                1
+            };
+            if CULL_BACK && area <= 0 {
+                culled_triangles = culled_triangles.wrapping_add(1);
+                face_index += 1;
+                continue;
+            }
+            let packet_material = camera_crystal_materials
+                .as_ref()
+                .map(|materials| materials.for_area(area))
+                .unwrap_or(packet_material);
+            let packet_material = if palette_banks {
+                packet_material.with_clut_bank(face.palette_bank())
+            } else {
+                packet_material
+            };
+
+            match self.submit_projected_model_triangle_preclamped_packed_average_untracked(
+                triangles,
+                projected,
+                face.with_uv_offset(uv_offset).uv_words(),
+                packet_material,
+                options,
+            ) {
+                ModelTrianglePacketResult::Submitted => {
+                    submitted_triangles = submitted_triangles.wrapping_add(1);
+                    fast_submitted_triangles = fast_submitted_triangles.wrapping_add(1);
+                }
+                ModelTrianglePacketResult::CommandOverflow => {
+                    let processed = (face_index + 1).min(u16::MAX as usize) as u16;
+                    *faces_considered = faces_considered.wrapping_add(u32::from(processed));
+                    flush_packed_unclamped_model_batch_stats(
+                        stats,
+                        0,
+                        processed,
+                        processed,
+                        culled_triangles,
+                        submitted_triangles,
+                        fast_submitted_triangles,
+                        0,
+                    );
+                    stats.command_overflow = true;
+                    return true;
+                }
+                ModelTrianglePacketResult::PrimitiveOverflow => {
+                    let processed = (face_index + 1).min(u16::MAX as usize) as u16;
+                    *faces_considered = faces_considered.wrapping_add(u32::from(processed));
+                    flush_packed_unclamped_model_batch_stats(
+                        stats,
+                        0,
+                        processed,
+                        processed,
+                        culled_triangles,
+                        submitted_triangles,
+                        fast_submitted_triangles,
+                        0,
+                    );
+                    stats.primitive_overflow = true;
+                    return true;
+                }
+            }
+            face_index += 1;
+        }
+
+        let processed = faces.len().min(u16::MAX as usize) as u16;
+        *faces_considered = faces_considered.wrapping_add(u32::from(processed));
+        flush_packed_unclamped_model_batch_stats(
+            stats,
+            0,
+            processed,
+            processed,
+            culled_triangles,
+            submitted_triangles,
+            fast_submitted_triangles,
+            0,
+        );
+        false
+    }
+
+    /// Monomorphic shipping walker for bucketed, average-depth, packed,
+    /// unclamped, extent-safe model faces with authored UVs. The route checks
+    /// happen once before this function; the inner loop keeps no UV-policy or
+    /// packet-capacity branches. On PS1 the face UV/palette unpack occupies
+    /// five mandatory NCLIP wait slots without shortening either GTE hazard.
+    ///
+    /// `#[inline(never)]` was measured on 2026-08-30 and is a large LOSS
+    /// (-6.9% delivered frames, `textured_model_faces` +52.7%): standing alone
+    /// the crystal band lookup stops being a stack copy and becomes a `memcpy`
+    /// CALL of the 68-byte band table per submitted face, with eight caller-save
+    /// spills around it. Keep it inlined. Retried once the band table became a
+    /// borrow (no memcpy): still a small loss, +0.28% frame cycles.
+    #[inline(always)]
+    fn submit_predecoded_model_faces_bucketed_average_unclamped_extent_safe_authored_batch<
+        const CULL_BACK: bool,
+        const CRYSTAL: bool,
+    >(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        projected_vertices: &[ProjectedVertex],
+        faces: &[TexturedModelRenderFace],
+        packet_material: TexturedPacketMaterial,
+        camera_crystal_materials: Option<CameraCrystalPacketMaterials>,
+        palette_banks: bool,
+        options: WorldSurfaceOptions,
+        stats: &mut TexturedModelRenderStats,
+        faces_considered: &mut u32,
+    ) {
+        if let Some(mut batch) = triangles.reserve_batch(faces.len()) {
+            self.submit_predecoded_model_faces_bucketed_average_unclamped_extent_safe_authored_batch_sink::<CULL_BACK, CRYSTAL>(
+                &mut batch, projected_vertices, faces, packet_material, camera_crystal_materials, palette_banks, options, stats, faces_considered);
+            return;
+        }
+        self.submit_predecoded_model_faces_bucketed_average_unclamped_extent_safe_authored_batch_sink::<CULL_BACK, CRYSTAL>(
+            triangles, projected_vertices, faces, packet_material, camera_crystal_materials, palette_banks, options, stats, faces_considered);
+    }
+
+    #[inline(always)]
+    fn submit_predecoded_model_faces_bucketed_average_unclamped_extent_safe_authored_batch_sink<
+        const CULL_BACK: bool,
+        const CRYSTAL: bool,
+    >(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        projected_vertices: &[ProjectedVertex],
+        faces: &[TexturedModelRenderFace],
+        packet_material: TexturedPacketMaterial,
+        camera_crystal_materials: Option<CameraCrystalPacketMaterials>,
+        palette_banks: bool,
+        options: WorldSurfaceOptions,
+        stats: &mut TexturedModelRenderStats,
+        faces_considered: &mut u32,
+    ) {
+        debug_assert!(matches!(self.ordering, WorldCommandOrdering::Bucketed));
+        debug_assert!(faces.len() <= triangles.remaining());
+        debug_assert!(faces.len() <= self.commands.len().saturating_sub(self.command_len));
+
+        let command_start = self.command_len;
+        let compact_commands = self.commands.as_mut_ptr().cast::<BucketedWorldCommand>();
+        let depth_slots = PreparedModelDepthSlots::new::<OT_DEPTH>(options);
+        let mut culled_triangles = 0u16;
+        let mut submitted_triangles = 0usize;
+        for source_face in faces {
+            let (face, addresses) =
+                unsafe { model_face_addresses_scheduled(source_face, projected_vertices.as_ptr()) };
+            let projected = unsafe { [*addresses[0], *addresses[1], *addresses[2]] };
+            let (area, uv_words, palette_bank) = if CULL_BACK || CRYSTAL {
+                psx_gte::scene::screen_area_and_unpack_model_face_scheduled(
+                    [
+                        (projected[0].sx, projected[0].sy),
+                        (projected[1].sx, projected[1].sy),
+                        (projected[2].sx, projected[2].sy),
+                    ],
+                    face.corner_words,
+                )
+            } else {
+                (1, face.uv_words(), face.palette_bank())
+            };
+            if CULL_BACK && area <= 0 {
+                culled_triangles = culled_triangles.wrapping_add(1);
+                continue;
+            }
+            // Band onto the walker's own packet material rather than the
+            // table's copy of it: the three non-colour words then stay in the
+            // registers this loop already holds them in, instead of being
+            // re-read out of the band table on every submitted face.
+            let packet_material = match camera_crystal_materials.as_ref() {
+                Some(materials) if CRYSTAL => materials.banded(packet_material, area),
+                _ => packet_material,
+            };
+            let packet_material = if palette_banks {
+                packet_material.with_clut_bank(palette_bank)
+            } else {
+                packet_material
+            };
+            let triangle = unsafe {
+                // SAFETY: the caller preflighted one slot for every input face,
+                // which is a conservative bound after backface culling.
+                triangles.push_unchecked(TriTextured::with_packet_material_packed_uv_words(
+                    [
+                        (projected[0].sx, projected[0].sy),
+                        (projected[1].sx, projected[1].sy),
+                        (projected[2].sx, projected[2].sy),
+                    ],
+                    uv_words,
+                    packet_material,
+                ))
+            } as *mut TriTextured as *mut u32;
+            let depth = ((projected[0].sz + projected[1].sz + projected[2].sz) / 3)
+                .saturating_add(options.depth_bias);
+            let slot = depth_slots.slot(depth);
+            unsafe {
+                // SAFETY: the command preflight reserves one slot per input
+                // face and the emitted prefix never exceeds the input face count.
+                compact_commands
+                    .add(command_start + submitted_triangles)
+                    .write(BucketedWorldCommand::new(
+                        triangle,
+                        slot,
+                        TriTextured::WORDS,
+                    ));
+            }
+            submitted_triangles += 1;
+        }
+        self.command_len = command_start + submitted_triangles;
+
+        let processed = faces.len().min(u16::MAX as usize) as u16;
+        let submitted = submitted_triangles.min(u16::MAX as usize) as u16;
+        *faces_considered = faces_considered.wrapping_add(u32::from(processed));
+        flush_packed_unclamped_model_batch_stats(
+            stats,
+            0,
+            processed,
+            processed,
+            culled_triangles,
+            submitted,
+            submitted,
+            0,
+        );
+    }
+
+    // Cold by measurement: with this walker outlined, the shipping route
+    // retires 0.01% of its instructions here or less (the non-extent-safe,
+    // non-authored-UV and layered variants are all dead on the real content).
+    // Outlined so dead-in-practice code stops sitting between the hot batch
+    // walkers in `submit_textured_model_geometry_impl`, where it inflated the
+    // frame, register pressure and I-cache footprint of the loop that does run.
+    #[inline(never)]
+    fn submit_predecoded_model_faces_bucketed_average_unclamped_extent_safe_batch<
+        const CULL_BACK: bool,
+    >(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        projected_vertices: &[ProjectedVertex],
+        faces: &[TexturedModelRenderFace],
+        packet_material: TexturedPacketMaterial,
+        uv_offset: ModelUvOffset,
+        palette_banks: bool,
+        options: WorldSurfaceOptions,
+        stats: &mut TexturedModelRenderStats,
+        faces_considered: &mut u32,
+    ) {
+        debug_assert!(matches!(self.ordering, WorldCommandOrdering::Bucketed));
+        debug_assert!(faces.len() <= triangles.remaining());
+        debug_assert!(faces.len() <= self.commands.len().saturating_sub(self.command_len));
+
+        let command_start = self.command_len;
+        let compact_commands = self.commands.as_mut_ptr().cast::<BucketedWorldCommand>();
+        let depth_slots = PreparedModelDepthSlots::new::<OT_DEPTH>(options);
+        let mut culled_triangles = 0u16;
+        let mut submitted_triangles = 0usize;
+        let mut face_index = 0usize;
+        while face_index < faces.len() {
+            let face = faces[face_index];
+            let packet_material = if palette_banks {
+                packet_material.with_clut_bank(face.palette_bank())
+            } else {
+                packet_material
+            };
+            let [ia, ib, ic] = face.vertex_indices();
+            let ia = ia as usize;
+            let ib = ib as usize;
+            let ic = ic as usize;
+            let projected = unsafe {
+                // SAFETY: decoded faces were validated against the completely
+                // projected model vertex slice before entering this batch.
+                [
+                    *projected_vertices.get_unchecked(ia),
+                    *projected_vertices.get_unchecked(ib),
+                    *projected_vertices.get_unchecked(ic),
+                ]
+            };
+            if CULL_BACK
+                && psx_gte::scene::screen_area_scheduled([
+                    (projected[0].sx, projected[0].sy),
+                    (projected[1].sx, projected[1].sy),
+                    (projected[2].sx, projected[2].sy),
+                ]) <= 0
+            {
+                culled_triangles = culled_triangles.wrapping_add(1);
+                face_index += 1;
+                continue;
+            }
+            let triangle = unsafe {
+                // SAFETY: the caller preflighted one slot for every input face,
+                // which is a conservative bound after backface culling.
+                triangles.push_unchecked(TriTextured::with_packet_material_packed_uv_words(
+                    [
+                        (projected[0].sx, projected[0].sy),
+                        (projected[1].sx, projected[1].sy),
+                        (projected[2].sx, projected[2].sy),
+                    ],
+                    face.with_uv_offset(uv_offset).uv_words(),
+                    packet_material,
+                ))
+            } as *mut TriTextured as *mut u32;
+            let depth = ((projected[0].sz + projected[1].sz + projected[2].sz) / 3)
+                .saturating_add(options.depth_bias);
+            let slot = depth_slots.slot(depth);
+            unsafe {
+                // SAFETY: the command preflight reserves one slot per input
+                // face and `submitted_triangles <= face_index`.
+                compact_commands
+                    .add(command_start + submitted_triangles)
+                    .write(BucketedWorldCommand::new(
+                        triangle,
+                        slot,
+                        TriTextured::WORDS,
+                    ));
+            }
+            submitted_triangles += 1;
+            face_index += 1;
+        }
+        self.command_len = command_start + submitted_triangles;
+
+        let processed = faces.len().min(u16::MAX as usize) as u16;
+        let submitted = submitted_triangles.min(u16::MAX as usize) as u16;
+        *faces_considered = faces_considered.wrapping_add(u32::from(processed));
+        flush_packed_unclamped_model_batch_stats(
+            stats,
+            0,
+            processed,
+            processed,
+            culled_triangles,
+            submitted,
+            submitted,
+            0,
+        );
+    }
+
+    // Cold by measurement: with this walker outlined, the shipping route
+    // retires 0.01% of its instructions here or less (the non-extent-safe,
+    // non-authored-UV and layered variants are all dead on the real content).
+    // Outlined so dead-in-practice code stops sitting between the hot batch
+    // walkers in `submit_textured_model_geometry_impl`, where it inflated the
+    // frame, register pressure and I-cache footprint of the loop that does run.
+    #[inline(never)]
+    fn submit_predecoded_model_faces_packed_average_unclamped_batch<const CULL_BACK: bool>(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        projected_vertices: &[ProjectedVertex],
+        faces: &[TexturedModelRenderFace],
+        packet_material: TexturedPacketMaterial,
+        camera_crystal_materials: Option<CameraCrystalPacketMaterials>,
+        uv_offset: ModelUvOffset,
+        palette_banks: bool,
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+        stats: &mut TexturedModelRenderStats,
+        faces_considered: &mut u32,
+    ) -> bool {
+        let mut skipped_triangles = 0u16;
+        let mut packed_face_calls = 0u16;
+        let mut packed_unclamped_face_calls = 0u16;
+        let mut culled_triangles = 0u16;
+        let mut submitted_triangles = 0u16;
+        let mut fast_submitted_triangles = 0u16;
+        let mut hw_extent_fallbacks = 0u16;
+
+        let mut face_index = 0usize;
+        while face_index < faces.len() {
+            *faces_considered = faces_considered.wrapping_add(1);
+            let face = faces[face_index].with_uv_offset(uv_offset);
+            let [ia, ib, ic] = face.vertex_indices();
+            let ia = ia as usize;
+            let ib = ib as usize;
+            let ic = ic as usize;
+            if ia >= projected_vertices.len()
+                || ib >= projected_vertices.len()
+                || ic >= projected_vertices.len()
+            {
+                skipped_triangles = skipped_triangles.wrapping_add(1);
+                face_index += 1;
+                continue;
+            }
+
+            packed_face_calls = packed_face_calls.wrapping_add(1);
+            packed_unclamped_face_calls = packed_unclamped_face_calls.wrapping_add(1);
+            let projected = unsafe {
+                // SAFETY: each index was checked against `projected_vertices.len()`
+                // immediately above. The slice is pretrimmed to `project_count`.
+                [
+                    *projected_vertices.get_unchecked(ia),
+                    *projected_vertices.get_unchecked(ib),
+                    *projected_vertices.get_unchecked(ic),
+                ]
+            };
+
+            // The backface cross product is the crystal's band signal, so a
+            // banded face costs nothing extra here. Only a double-sided
+            // crystal model pays for an area it would not have computed.
+            let area = if CULL_BACK || camera_crystal_materials.is_some() {
+                projected_screen_area(projected)
+            } else {
+                1
+            };
+            if CULL_BACK && area <= 0 {
+                culled_triangles = culled_triangles.wrapping_add(1);
+                face_index += 1;
+                continue;
+            }
+            let packet_material = camera_crystal_materials
+                .as_ref()
+                .map(|materials| materials.for_area(area))
+                .unwrap_or(packet_material);
+            let packet_material = if palette_banks {
+                packet_material.with_clut_bank(face.palette_bank())
+            } else {
+                packet_material
+            };
+
+            if projected_triangle_preclamped_hw_extent_safe(projected) {
+                match self.submit_projected_model_triangle_preclamped_packed_average_untracked(
+                    triangles,
+                    projected,
+                    face.uv_words(),
+                    packet_material,
+                    options,
+                ) {
+                    ModelTrianglePacketResult::Submitted => {
+                        submitted_triangles = submitted_triangles.wrapping_add(1);
+                        fast_submitted_triangles = fast_submitted_triangles.wrapping_add(1);
+                    }
+                    ModelTrianglePacketResult::CommandOverflow => {
+                        flush_packed_unclamped_model_batch_stats(
+                            stats,
+                            skipped_triangles,
+                            packed_face_calls,
+                            packed_unclamped_face_calls,
+                            culled_triangles,
+                            submitted_triangles,
+                            fast_submitted_triangles,
+                            hw_extent_fallbacks,
+                        );
+                        stats.command_overflow = true;
+                        return true;
+                    }
+                    ModelTrianglePacketResult::PrimitiveOverflow => {
+                        flush_packed_unclamped_model_batch_stats(
+                            stats,
+                            skipped_triangles,
+                            packed_face_calls,
+                            packed_unclamped_face_calls,
+                            culled_triangles,
+                            submitted_triangles,
+                            fast_submitted_triangles,
+                            hw_extent_fallbacks,
+                        );
+                        stats.primitive_overflow = true;
+                        return true;
+                    }
+                }
+                face_index += 1;
+                continue;
+            }
+
+            hw_extent_fallbacks = hw_extent_fallbacks.wrapping_add(1);
+            flush_packed_unclamped_model_batch_stats(
+                stats,
+                skipped_triangles,
+                packed_face_calls,
+                packed_unclamped_face_calls,
+                culled_triangles,
+                submitted_triangles,
+                fast_submitted_triangles,
+                hw_extent_fallbacks,
+            );
+            skipped_triangles = 0;
+            packed_face_calls = 0;
+            packed_unclamped_face_calls = 0;
+            culled_triangles = 0;
+            submitted_triangles = 0;
+            fast_submitted_triangles = 0;
+            hw_extent_fallbacks = 0;
+
+            let material = camera_crystal_materials
+                .as_ref()
+                .map(|materials| materials.material_for_area(material, area))
+                .unwrap_or(material);
+            let material = if palette_banks {
+                material.with_clut_bank(face.palette_bank())
+            } else {
+                material
+            };
+            let uvs = face.uvs();
+            let textured = [
+                ProjectedTexturedVertex::new(projected[0], uvs[0].0 as i32, uvs[0].1 as i32),
+                ProjectedTexturedVertex::new(projected[1], uvs[1].0 as i32, uvs[1].1 as i32),
+                ProjectedTexturedVertex::new(projected[2], uvs[2].0 as i32, uvs[2].1 as i32),
+            ];
+            let tri_stats =
+                self.submit_textured_triangle_split(triangles, textured, material, options, 0);
+            merge_textured_model_stats(stats, tri_stats);
+            if stats.primitive_overflow || stats.command_overflow {
+                return true;
+            }
+
+            face_index += 1;
+        }
+
+        flush_packed_unclamped_model_batch_stats(
+            stats,
+            skipped_triangles,
+            packed_face_calls,
+            packed_unclamped_face_calls,
+            culled_triangles,
+            submitted_triangles,
+            fast_submitted_triangles,
+            hw_extent_fallbacks,
+        );
+        false
+    }
+
+    // Cold by measurement: `textured_model_packed_general`, `..._packed_clamped`
+    // and `..._fallback_faces` are ~0 across the shipping route. Outlined so
+    // this dead-in-practice code stops sitting between the hot batch walkers
+    // in `submit_textured_model_geometry_impl`, where it inflated the frame,
+    // register pressure and I-cache footprint of the loop that does run.
+    #[inline(never)]
+    fn submit_predecoded_model_face_packed_back_average_in_front_fast(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        projected_vertices: &[ProjectedVertex],
+        project_count: usize,
+        face: TexturedModelRenderFace,
+        packet_material: TexturedPacketMaterial,
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+        stats: &mut TexturedModelRenderStats,
+    ) -> bool {
+        let [ia, ib, ic] = face.vertex_indices();
+        let ia = ia as usize;
+        let ib = ib as usize;
+        let ic = ic as usize;
+        if ia >= project_count || ib >= project_count || ic >= project_count {
+            stats.skipped_triangles = stats.skipped_triangles.wrapping_add(1);
+            return false;
+        }
+        stats.packed_face_calls = stats.packed_face_calls.wrapping_add(1);
+        stats.packed_clamped_face_calls = stats.packed_clamped_face_calls.wrapping_add(1);
+        let projected = [
+            projected_vertices[ia],
+            projected_vertices[ib],
+            projected_vertices[ic],
+        ];
+
+        if projected_back_facing(projected) {
+            stats.culled_triangles = stats.culled_triangles.wrapping_add(1);
+            return false;
+        }
+
+        let projected = [
+            clamp_projected_vertex(projected[0]),
+            clamp_projected_vertex(projected[1]),
+            clamp_projected_vertex(projected[2]),
+        ];
+        if projected_triangle_preclamped_hw_extent_safe(projected) {
+            let before = stats.submitted_triangles;
+            let overflow = self.submit_projected_model_triangle_preclamped_packed_average_fast(
+                triangles,
+                projected,
+                face.uv_words(),
+                packet_material,
+                options,
+                stats,
+            );
+            stats.fast_submitted_triangles = stats
+                .fast_submitted_triangles
+                .wrapping_add(stats.submitted_triangles.wrapping_sub(before));
+            return overflow;
+        }
+
+        stats.hw_extent_fallbacks = stats.hw_extent_fallbacks.wrapping_add(1);
+        let uvs = face.uvs();
+        let textured = [
+            ProjectedTexturedVertex::new(projected[0], uvs[0].0 as i32, uvs[0].1 as i32),
+            ProjectedTexturedVertex::new(projected[1], uvs[1].0 as i32, uvs[1].1 as i32),
+            ProjectedTexturedVertex::new(projected[2], uvs[2].0 as i32, uvs[2].1 as i32),
+        ];
+        let tri_stats =
+            self.submit_textured_triangle_split(triangles, textured, material, options, 0);
+        merge_textured_model_stats(stats, tri_stats);
+        stats.primitive_overflow || stats.command_overflow
+    }
+
+    // Cold by measurement: `textured_model_packed_general`, `..._packed_clamped`
+    // and `..._fallback_faces` are ~0 across the shipping route. Outlined so
+    // this dead-in-practice code stops sitting between the hot batch walkers
+    // in `submit_textured_model_geometry_impl`, where it inflated the frame,
+    // register pressure and I-cache footprint of the loop that does run.
+    #[inline(never)]
+    fn submit_predecoded_model_face_packed_back_in_front_fast(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        projected_vertices: &[ProjectedVertex],
+        project_count: usize,
+        face: TexturedModelRenderFace,
+        packet_material: TexturedPacketMaterial,
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+        stats: &mut TexturedModelRenderStats,
+    ) -> bool {
+        let [ia, ib, ic] = face.vertex_indices();
+        let ia = ia as usize;
+        let ib = ib as usize;
+        let ic = ic as usize;
+        if ia >= project_count || ib >= project_count || ic >= project_count {
+            stats.skipped_triangles = stats.skipped_triangles.wrapping_add(1);
+            return false;
+        }
+        stats.packed_face_calls = stats.packed_face_calls.wrapping_add(1);
+        stats.packed_clamped_face_calls = stats.packed_clamped_face_calls.wrapping_add(1);
+        let projected = [
+            projected_vertices[ia],
+            projected_vertices[ib],
+            projected_vertices[ic],
+        ];
+
+        if projected_back_facing(projected) {
+            stats.culled_triangles = stats.culled_triangles.wrapping_add(1);
+            return false;
+        }
+
+        let projected = [
+            clamp_projected_vertex(projected[0]),
+            clamp_projected_vertex(projected[1]),
+            clamp_projected_vertex(projected[2]),
+        ];
+        if projected_triangle_preclamped_hw_extent_safe(projected) {
+            let before = stats.submitted_triangles;
+            let overflow = self.submit_projected_model_triangle_preclamped_packed_fast(
+                triangles,
+                projected,
+                face.uv_words(),
+                packet_material,
+                options,
+                stats,
+            );
+            stats.fast_submitted_triangles = stats
+                .fast_submitted_triangles
+                .wrapping_add(stats.submitted_triangles.wrapping_sub(before));
+            return overflow;
+        }
+
+        stats.hw_extent_fallbacks = stats.hw_extent_fallbacks.wrapping_add(1);
+        let uvs = face.uvs();
+        let textured = [
+            ProjectedTexturedVertex::new(projected[0], uvs[0].0 as i32, uvs[0].1 as i32),
+            ProjectedTexturedVertex::new(projected[1], uvs[1].0 as i32, uvs[1].1 as i32),
+            ProjectedTexturedVertex::new(projected[2], uvs[2].0 as i32, uvs[2].1 as i32),
+        ];
+        let tri_stats =
+            self.submit_textured_triangle_split(triangles, textured, material, options, 0);
+        merge_textured_model_stats(stats, tri_stats);
+        stats.primitive_overflow || stats.command_overflow
+    }
+
+    // Cold by measurement: `textured_model_packed_general`, `..._packed_clamped`
+    // and `..._fallback_faces` are ~0 across the shipping route. Outlined so
+    // this dead-in-practice code stops sitting between the hot batch walkers
+    // in `submit_textured_model_geometry_impl`, where it inflated the frame,
+    // register pressure and I-cache footprint of the loop that does run.
+    #[inline(never)]
+    fn submit_predecoded_model_face_packed_fast(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        projected_vertices: &[ProjectedVertex],
+        project_count: usize,
+        face: TexturedModelRenderFace,
+        all_projected_vertices_in_front: bool,
+        near_z: i32,
+        packet_material: TexturedPacketMaterial,
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+        stats: &mut TexturedModelRenderStats,
+    ) -> bool {
+        let [ia, ib, ic] = face.vertex_indices();
+        let ia = ia as usize;
+        let ib = ib as usize;
+        let ic = ic as usize;
+        if ia >= project_count || ib >= project_count || ic >= project_count {
+            stats.skipped_triangles = stats.skipped_triangles.wrapping_add(1);
+            return false;
+        }
+        stats.packed_face_calls = stats.packed_face_calls.wrapping_add(1);
+        stats.packed_general_face_calls = stats.packed_general_face_calls.wrapping_add(1);
+        let projected = [
+            projected_vertices[ia],
+            projected_vertices[ib],
+            projected_vertices[ic],
+        ];
+
+        if !all_projected_vertices_in_front && projected_model_face_crosses_near(projected, near_z)
+        {
+            stats.dropped_triangles = stats.dropped_triangles.wrapping_add(1);
+            stats.near_plane_dropped_faces = stats.near_plane_dropped_faces.wrapping_add(1);
+            return false;
+        }
+
+        if projected_culled(projected, options.cull_mode) {
+            stats.culled_triangles = stats.culled_triangles.wrapping_add(1);
+            return false;
+        }
+
+        let projected = [
+            clamp_projected_vertex(projected[0]),
+            clamp_projected_vertex(projected[1]),
+            clamp_projected_vertex(projected[2]),
+        ];
+        if projected_triangle_preclamped_hw_extent_safe(projected) {
+            let before = stats.submitted_triangles;
+            let overflow = self.submit_projected_model_triangle_preclamped_packed_fast(
+                triangles,
+                projected,
+                face.uv_words(),
+                packet_material,
+                options,
+                stats,
+            );
+            stats.fast_submitted_triangles = stats
+                .fast_submitted_triangles
+                .wrapping_add(stats.submitted_triangles.wrapping_sub(before));
+            return overflow;
+        }
+
+        stats.hw_extent_fallbacks = stats.hw_extent_fallbacks.wrapping_add(1);
+        let uvs = face.uvs();
+        let textured = [
+            ProjectedTexturedVertex::new(projected[0], uvs[0].0 as i32, uvs[0].1 as i32),
+            ProjectedTexturedVertex::new(projected[1], uvs[1].0 as i32, uvs[1].1 as i32),
+            ProjectedTexturedVertex::new(projected[2], uvs[2].0 as i32, uvs[2].1 as i32),
+        ];
+        let tri_stats =
+            self.submit_textured_triangle_split(triangles, textured, material, options, 0);
+        merge_textured_model_stats(stats, tri_stats);
+        stats.primitive_overflow || stats.command_overflow
+    }
+
+    // Cold by measurement: `textured_model_packed_general`, `..._packed_clamped`
+    // and `..._fallback_faces` are ~0 across the shipping route. Outlined so
+    // this dead-in-practice code stops sitting between the hot batch walkers
+    // in `submit_textured_model_geometry_impl`, where it inflated the frame,
+    // register pressure and I-cache footprint of the loop that does run.
+    #[inline(never)]
+    fn submit_predecoded_model_face(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        projected_vertices: &[ProjectedVertex],
+        project_count: usize,
+        face: TexturedModelRenderFace,
+        all_projected_vertices_in_front: bool,
+        near_z: i32,
+        packet_material: TexturedPacketMaterial,
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+        stats: &mut TexturedModelRenderStats,
+    ) -> bool {
+        let [ia, ib, ic] = face.vertex_indices();
+        let ia = ia as usize;
+        let ib = ib as usize;
+        let ic = ic as usize;
+        if ia >= project_count || ib >= project_count || ic >= project_count {
+            stats.skipped_triangles = stats.skipped_triangles.wrapping_add(1);
+            return false;
+        }
+        stats.fallback_face_calls = stats.fallback_face_calls.wrapping_add(1);
+        let projected = [
+            projected_vertices[ia],
+            projected_vertices[ib],
+            projected_vertices[ic],
+        ];
+
+        if !all_projected_vertices_in_front && projected_model_face_crosses_near(projected, near_z)
+        {
+            stats.dropped_triangles = stats.dropped_triangles.wrapping_add(1);
+            stats.near_plane_dropped_faces = stats.near_plane_dropped_faces.wrapping_add(1);
+            return false;
+        }
+
+        if projected_culled(projected, options.cull_mode) {
+            stats.culled_triangles = stats.culled_triangles.wrapping_add(1);
+            return false;
+        }
+
+        let projected = [
+            clamp_projected_vertex(projected[0]),
+            clamp_projected_vertex(projected[1]),
+            clamp_projected_vertex(projected[2]),
+        ];
+
+        if options.split_textured_triangles {
+            if options.textured_split_max_edge == 0
+                && projected_triangle_preclamped_hw_extent_safe(projected)
+            {
+                let before = stats.submitted_triangles;
+                let overflow = self.submit_projected_model_triangle_preclamped_packed_fast(
+                    triangles,
+                    projected,
+                    face.uv_words(),
+                    packet_material,
+                    options,
+                    stats,
+                );
+                stats.fast_submitted_triangles = stats
+                    .fast_submitted_triangles
+                    .wrapping_add(stats.submitted_triangles.wrapping_sub(before));
+                return overflow;
+            }
+            let uvs = face.uvs();
+            let textured = [
+                ProjectedTexturedVertex::new(projected[0], uvs[0].0 as i32, uvs[0].1 as i32),
+                ProjectedTexturedVertex::new(projected[1], uvs[1].0 as i32, uvs[1].1 as i32),
+                ProjectedTexturedVertex::new(projected[2], uvs[2].0 as i32, uvs[2].1 as i32),
+            ];
+            let tri_stats =
+                self.submit_textured_triangle_split(triangles, textured, material, options, 0);
+            merge_textured_model_stats(stats, tri_stats);
+            stats.primitive_overflow || stats.command_overflow
+        } else {
+            self.submit_projected_model_triangle_preclamped_fast(
+                triangles,
+                projected,
+                face.uvs(),
+                material,
+                options,
+                stats,
+            )
+        }
+    }
+
+    /// Prepare [`Self::emit_line`] for lines of `color`, ordered by `options`
+    /// (depth band, range and bias). `None` unless this pass orders its commands
+    /// by slot bucket, the one mode `emit_line` writes; callers then keep to
+    /// [`Self::submit_projected_line`].
+    pub fn line_style(
+        &self,
+        options: &WorldSurfaceOptions,
+        color: (u8, u8, u8),
+    ) -> Option<LineStyle> {
+        if !matches!(self.ordering, WorldCommandOrdering::Bucketed) {
+            return None;
+        }
+        Some(LineStyle {
+            slots: PreparedModelDepthSlots::new::<OT_DEPTH>(*options),
+            color_cmd: psx_gpu::prim::LineMono::new(0, 0, 0, 0, color.0, color.1, color.2)
+                .color_cmd,
+            bias: options.depth_bias,
+        })
+    }
+
+    /// One monochrome line between two projected vertices: the packet and
+    /// ordering command [`Self::submit_projected_line`] writes for the same
+    /// colour and options, without rebuilding the depth mapping or copying the
+    /// options. Does nothing when either arena is full, as that call does.
+    #[inline(always)]
+    pub fn emit_line(
+        &mut self,
+        lines: &mut impl PrimitiveSink<psx_gpu::prim::LineMono>,
+        style: &LineStyle,
+        a: &ProjectedVertex,
+        b: &ProjectedVertex,
+    ) {
+        use psx_gpu::prim::LineMono;
+        if self.command_len >= self.commands.len() {
+            return;
+        }
+        let mut packet = LineMono::new(a.sx, a.sy, b.sx, b.sy, 0, 0, 0);
+        packet.color_cmd = style.color_cmd;
+        let Some(line) = lines.push(packet) else {
+            return;
+        };
+        let slot = style.slots.slot(a.sz.min(b.sz).saturating_add(style.bias));
+        // SAFETY: `line_style` only exists for a bucketed pass, whose
+        // constructor verified the command storage layout and alignment for
+        // `BucketedWorldCommand`, and the index was bounds-checked above.
+        unsafe {
+            self.commands
+                .as_mut_ptr()
+                .cast::<BucketedWorldCommand>()
+                .add(self.command_len)
+                .write(BucketedWorldCommand::new(
+                    line as *mut LineMono as *mut u32,
+                    slot,
+                    LineMono::WORDS,
+                ));
+        }
+        self.command_len += 1;
+    }
+
+    /// Submit fixed wireframe edges with the same packets and nearest-end
+    /// depth as `submit_projected_line`. Invalid endpoints are skipped.
+    /// Returns the number of valid edges attempted, including arena exhaustion,
+    /// matching the runtime's wireframe accounting.
+    pub fn submit_projected_line_edges(
+        &mut self,
+        lines: &mut impl PrimitiveSink<psx_gpu::prim::LineMono>,
+        projected: &[ProjectedVertex],
+        edges: &[[u16; 2]],
+        color: (u8, u8, u8),
+        options: WorldSurfaceOptions,
+    ) -> u16 {
+        let fast = matches!(self.ordering, WorldCommandOrdering::Bucketed)
+            && edges.len() <= lines.remaining()
+            && edges.len() <= self.commands.len().saturating_sub(self.command_len);
+        if !fast {
+            let mut count = 0u16;
+            for &[a, b] in edges {
+                let (Some(&a), Some(&b)) =
+                    (projected.get(usize::from(a)), projected.get(usize::from(b)))
+                else {
+                    continue;
+                };
+                if a == ProjectedVertex::INVALID || b == ProjectedVertex::INVALID {
+                    continue;
+                }
+                self.submit_projected_line(lines, [a, b], color, options);
+                count = count.saturating_add(1);
+            }
+            return count;
+        }
+        // A reserved batch keeps the packet cursor and count in locals for
+        // the whole loop (no per-packet fence test, no counter stores), which
+        // is what lets the loop below hold its operands in registers.
+        if let Some(mut batch) = lines.reserve_batch(edges.len()) {
+            let count = self.emit_line_edges(&mut batch, projected, edges, color, options);
+            return count.min(u16::MAX as usize) as u16;
+        }
+        let count = self.emit_line_edges(lines, projected, edges, color, options);
+        count.min(u16::MAX as usize) as u16
+    }
+
+    /// The bucketed, capacity-proven half of [`Self::submit_projected_line_edges`].
+    ///
+    /// `lines` and the command storage must each have room for one entry per
+    /// edge.
+    #[inline(always)]
+    fn emit_line_edges(
+        &mut self,
+        lines: &mut impl PrimitiveSink<psx_gpu::prim::LineMono>,
+        projected: &[ProjectedVertex],
+        edges: &[[u16; 2]],
+        color: (u8, u8, u8),
+        options: WorldSurfaceOptions,
+    ) -> usize {
+        use psx_gpu::prim::LineMono;
+        let depths = PreparedModelDepthSlots::new::<OT_DEPTH>(options);
+        let color_cmd = LineMono::new(0, 0, 0, 0, color.0, color.1, color.2).color_cmd;
+        let bias = options.depth_bias;
+        let start = self.command_len;
+        let commands = self.commands.as_mut_ptr().cast::<BucketedWorldCommand>();
+        let vertices = projected.as_ptr();
+        let vertex_count = projected.len();
+        let mut count = 0usize;
+        for &[a, b] in edges {
+            let (a, b) = (usize::from(a), usize::from(b));
+            if a >= vertex_count || b >= vertex_count {
+                continue;
+            }
+            // SAFETY: both indices are below `vertex_count`.
+            let (a, b) = unsafe { (&*vertices.add(a), &*vertices.add(b)) };
+            if (a.sz == i32::MIN && a.sx == 0 && a.sy == 0)
+                || (b.sz == i32::MIN && b.sx == 0 && b.sy == 0)
+            {
+                continue;
+            }
+            // SAFETY: one packet/command per input edge was reserved by the
+            // caller. Skipped edges only reduce that bound; the bucketed
+            // constructor guarantees compatible command storage layout and
+            // alignment.
+            unsafe {
+                let mut packet = LineMono::new(a.sx, a.sy, b.sx, b.sy, 0, 0, 0);
+                packet.color_cmd = color_cmd;
+                let line = lines.push_unchecked(packet) as *mut LineMono as *mut u32;
+                let depth = a.sz.min(b.sz).saturating_add(bias);
+                commands.add(start + count).write(BucketedWorldCommand::new(
+                    line,
+                    depths.slot(depth),
+                    LineMono::WORDS,
+                ));
+            }
+            count += 1;
+        }
+        self.command_len = start + count;
+        count
+    }
+
+    /// Submit indexed, solid-color Gouraud triangles with shared depth setup.
+    /// Packet colors, depth clamping and culling match individual submissions.
+    /// Invalid indices/vertices are skipped. Callers own clipping/extent checks,
+    /// as with `submit_gouraud_triangle`. Capacity/sorted-mode fallbacks retain
+    /// the scalar path; the bucketed fast path reserves its complete upper bound.
+    pub fn submit_solid_gouraud_faces(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<psx_gpu::prim::TriGouraud>,
+        projected: &[ProjectedVertex],
+        faces: &[SolidFace],
+        options: WorldSurfaceOptions,
+    ) -> u16 {
+        use psx_gpu::prim::TriGouraud;
+        let fast = matches!(self.ordering, WorldCommandOrdering::Bucketed)
+            && faces.len() <= triangles.remaining()
+            && faces.len() <= self.commands.len().saturating_sub(self.command_len);
+        if !fast {
+            let mut count = 0u16;
+            for &(indices, color) in faces {
+                let [Some(&a), Some(&b), Some(&c)] = indices.map(|i| projected.get(i as usize))
+                else {
+                    continue;
+                };
+                let p = [a, b, c];
+                if p.contains(&ProjectedVertex::INVALID) {
+                    continue;
+                }
+                count = count.saturating_add(
+                    self.submit_gouraud_triangle(
+                        triangles,
+                        p.map(|v| ProjectedLit {
+                            sx: v.sx,
+                            sy: v.sy,
+                            sz: v.sz.clamp(0, 65535) as u16,
+                            r: color.0,
+                            g: color.1,
+                            b: color.2,
+                        }),
+                        options,
+                    )
+                    .submitted_triangles,
+                );
+            }
+            return count;
+        }
+        let depths = PreparedModelDepthSlots::new::<OT_DEPTH>(options);
+        let commands = self.commands.as_mut_ptr().cast::<BucketedWorldCommand>();
+        let start = self.command_len;
+        let mut count = 0usize;
+        for &(indices, color) in faces {
+            let [Some(&a), Some(&b), Some(&c)] = indices.map(|i| projected.get(i as usize)) else {
+                continue;
+            };
+            let p = [a, b, c];
+            if p.contains(&ProjectedVertex::INVALID) || projected_culled(p, options.cull_mode) {
+                continue;
+            }
+            let [z0, z1, z2] = p.map(|v| v.sz.clamp(0, 65535));
+            let depth = options
+                .depth_policy
+                .depth_values(z0, z1, z2)
+                .saturating_add(options.depth_bias);
+            // SAFETY: at most one packet and command per face; the complete
+            // upper bound was reserved above. Bucketed command layout is
+            // guaranteed by the render-pass constructor. Skips reduce usage.
+            unsafe {
+                let packet = triangles
+                    .push_unchecked(TriGouraud::new(p.map(|v| (v.sx, v.sy)), [color; 3]))
+                    as *mut TriGouraud as *mut u32;
+                commands.add(start + count).write(BucketedWorldCommand::new(
+                    packet,
+                    depths.slot(depth),
+                    TriGouraud::WORDS,
+                ));
+            }
+            count += 1;
+        }
+        self.command_len = start + count;
+        count.min(u16::MAX as usize) as u16
+    }
+
+    /// Submit one already projected textured triangle from prepacked packet
+    /// words: no culling, no splitting, depth averaged from its corners,
+    /// `options.render_layer` as given. For effects that draw many loose
+    /// triangles, each with its own colour. `false` once the primitive or
+    /// command arena is full; `stats` records which.
+    #[inline(always)]
+    pub fn submit_projected_packed_triangle(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        verts: [ProjectedVertex; 3],
+        uv_words: [u16; 3],
+        material: TexturedPacketMaterial,
+        options: &WorldSurfaceOptions,
+        stats: &mut TexturedModelRenderStats,
+    ) -> bool {
+        match self.submit_projected_model_triangle_preclamped_packed_average_untracked(
+            triangles, verts, uv_words, material, *options,
+        ) {
+            ModelTrianglePacketResult::Submitted => true,
+            ModelTrianglePacketResult::CommandOverflow => {
+                stats.command_overflow = true;
+                false
+            }
+            ModelTrianglePacketResult::PrimitiveOverflow => {
+                stats.primitive_overflow = true;
+                false
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn submit_projected_model_triangle_preclamped_packed_average_untracked(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        verts: [ProjectedVertex; 3],
+        uv_words: [u16; 3],
+        material: TexturedPacketMaterial,
+        options: WorldSurfaceOptions,
+    ) -> ModelTrianglePacketResult {
+        if self.command_len >= self.commands.len() {
+            return ModelTrianglePacketResult::CommandOverflow;
+        }
+
+        let Some(tri) = triangles.push(TriTextured::with_packet_material_packed_uv_words(
+            [
+                (verts[0].sx, verts[0].sy),
+                (verts[1].sx, verts[1].sy),
+                (verts[2].sx, verts[2].sy),
+            ],
+            uv_words,
+            material,
+        )) else {
+            return ModelTrianglePacketResult::PrimitiveOverflow;
+        };
+
+        let depth = CameraDepth::new(
+            ((verts[0].sz + verts[1].sz + verts[2].sz) / 3).saturating_add(options.depth_bias),
+        );
+        self.push_command(
+            options
+                .depth_band
+                .slot_depth::<OT_DEPTH>(options.depth_range, depth),
+            depth.raw(),
+            options.render_layer,
+            tri as *mut TriTextured as *mut u32,
+            TriTextured::WORDS,
+        );
+        ModelTrianglePacketResult::Submitted
+    }
+
+    #[inline(always)]
+    fn submit_projected_model_triangle_preclamped_packed_average_fast(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        verts: [ProjectedVertex; 3],
+        uv_words: [u16; 3],
+        material: TexturedPacketMaterial,
+        options: WorldSurfaceOptions,
+        stats: &mut TexturedModelRenderStats,
+    ) -> bool {
+        if self.command_len >= self.commands.len() {
+            stats.command_overflow = true;
+            return true;
+        }
+
+        let Some(tri) = triangles.push(TriTextured::with_packet_material_packed_uv_words(
+            [
+                (verts[0].sx, verts[0].sy),
+                (verts[1].sx, verts[1].sy),
+                (verts[2].sx, verts[2].sy),
+            ],
+            uv_words,
+            material,
+        )) else {
+            stats.primitive_overflow = true;
+            return true;
+        };
+
+        let depth = CameraDepth::new(
+            ((verts[0].sz + verts[1].sz + verts[2].sz) / 3).saturating_add(options.depth_bias),
+        );
+        self.push_command(
+            options
+                .depth_band
+                .slot_depth::<OT_DEPTH>(options.depth_range, depth),
+            depth.raw(),
+            options.render_layer,
+            tri as *mut TriTextured as *mut u32,
+            TriTextured::WORDS,
+        );
+        stats.submitted_triangles = stats.submitted_triangles.wrapping_add(1);
+        false
+    }
+
+    #[inline(always)]
+    fn submit_projected_model_triangle_preclamped_packed_fast(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        verts: [ProjectedVertex; 3],
+        uv_words: [u16; 3],
+        material: TexturedPacketMaterial,
+        options: WorldSurfaceOptions,
+        stats: &mut TexturedModelRenderStats,
+    ) -> bool {
+        if self.command_len >= self.commands.len() {
+            stats.command_overflow = true;
+            return true;
+        }
+
+        let Some(tri) = triangles.push(TriTextured::with_packet_material_packed_uv_words(
+            [
+                (verts[0].sx, verts[0].sy),
+                (verts[1].sx, verts[1].sy),
+                (verts[2].sx, verts[2].sy),
+            ],
+            uv_words,
+            material,
+        )) else {
+            stats.primitive_overflow = true;
+            return true;
+        };
+
+        let depth = CameraDepth::new(
+            options
+                .depth_policy
+                .depth_values(verts[0].sz, verts[1].sz, verts[2].sz)
+                .saturating_add(options.depth_bias),
+        );
+        self.push_command(
+            options
+                .depth_band
+                .slot_depth::<OT_DEPTH>(options.depth_range, depth),
+            depth.raw(),
+            options.render_layer,
+            tri as *mut TriTextured as *mut u32,
+            TriTextured::WORDS,
+        );
+        stats.submitted_triangles = stats.submitted_triangles.wrapping_add(1);
+        false
+    }
+
+    fn submit_projected_model_triangle_preclamped_fast(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        verts: [ProjectedVertex; 3],
+        uvs: [(u8, u8); 3],
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+        stats: &mut TexturedModelRenderStats,
+    ) -> bool {
+        let verts = [
+            clamp_projected_vertex(verts[0]),
+            clamp_projected_vertex(verts[1]),
+            clamp_projected_vertex(verts[2]),
+        ];
+        if !projected_triangle_hw_safe(verts) {
+            stats.dropped_triangles = stats.dropped_triangles.wrapping_add(1);
+            stats.hw_unsafe_dropped_faces = stats.hw_unsafe_dropped_faces.wrapping_add(1);
+            return false;
+        }
+        if self.command_len >= self.commands.len() {
+            stats.command_overflow = true;
+            return true;
+        }
+
+        let (uv0, uv1, uv2) = (uvs[0], uvs[1], uvs[2]);
+        let Some(tri) = triangles.push(TriTextured::with_material(
+            [
+                (verts[0].sx, verts[0].sy),
+                (verts[1].sx, verts[1].sy),
+                (verts[2].sx, verts[2].sy),
+            ],
+            [uv0, uv1, uv2],
+            material,
+        )) else {
+            stats.primitive_overflow = true;
+            return true;
+        };
+
+        let depth = CameraDepth::new(options.depth_policy.depth_values(
+            verts[0].sz,
+            verts[1].sz,
+            verts[2].sz,
+        ))
+        .saturating_add(options.depth_bias);
+        self.push_command(
+            options
+                .depth_band
+                .slot_depth::<OT_DEPTH>(options.depth_range, depth),
+            depth.raw(),
+            options.render_layer,
+            tri as *mut TriTextured as *mut u32,
+            TriTextured::WORDS,
+        );
+        stats.submitted_triangles = stats.submitted_triangles.wrapping_add(1);
+        false
+    }
+
+    fn submit_clipped_textured_triangle(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        verts: [TexturedViewVertex; 3],
+        projection: WorldProjection,
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+    ) -> WorldRenderStats {
+        let Some(a) = projection.project_view(verts[0].position) else {
+            return WorldRenderStats {
+                dropped_triangles: 1,
+                ..WorldRenderStats::default()
+            };
+        };
+        let Some(b) = projection.project_view(verts[1].position) else {
+            return WorldRenderStats {
+                dropped_triangles: 1,
+                ..WorldRenderStats::default()
+            };
+        };
+        let Some(c) = projection.project_view(verts[2].position) else {
+            return WorldRenderStats {
+                dropped_triangles: 1,
+                ..WorldRenderStats::default()
+            };
+        };
+        self.submit_textured_triangle(
+            triangles,
+            [a, b, c],
+            [
+                (clamp_u8(verts[0].u), clamp_u8(verts[0].v)),
+                (clamp_u8(verts[1].u), clamp_u8(verts[1].v)),
+                (clamp_u8(verts[2].u), clamp_u8(verts[2].v)),
+            ],
+            material,
+            options,
+        )
+    }
+}
+
+#[cfg(test)]
+mod prepared_model_depth_tests {
+    use super::*;
+
+    fn assert_matches_generic<const OT_DEPTH: usize>(
+        band: DepthBand,
+        range: DepthRange,
+        depths: &[i32],
+    ) {
+        let options = WorldSurfaceOptions::new(band, range);
+        let prepared = PreparedModelDepthSlots::new::<OT_DEPTH>(options);
+        for &depth in depths {
+            assert_eq!(
+                prepared.slot(depth),
+                band.slot_depth::<OT_DEPTH>(range, CameraDepth::new(depth))
+                    .index(),
+                "OT={OT_DEPTH}, band={band:?}, range={range:?}, depth={depth}"
+            );
+        }
+    }
+
+    #[test]
+    fn prepared_depth_slots_match_generic_mapping() {
+        let depths = [
+            i32::MIN,
+            -1,
+            0,
+            40,
+            63,
+            64,
+            65,
+            95,
+            96,
+            8_192,
+            16_383,
+            16_384,
+            16_385,
+            i32::MAX,
+        ];
+        // Shipping playtest mapping: 16,320 depth units over 510 slots,
+        // exactly 32 units per slot (the shift fast path).
+        assert_matches_generic::<512>(DepthBand::new(0, 510), DepthRange::new(64, 16_384), &depths);
+        // Non-power-of-two quantum and non-divisible spans retain the exact
+        // generic multiply/divide mapping.
+        assert_matches_generic::<512>(DepthBand::new(7, 403), DepthRange::new(40, 12_345), &depths);
+        assert_matches_generic::<32>(
+            DepthBand::new(3, usize::MAX),
+            DepthRange::new(-200, 997),
+            &depths,
+        );
+        // Degenerate tables/ranges keep the conservative front slot.
+        assert_matches_generic::<0>(DepthBand::whole(), DepthRange::new(10, 1_000), &depths);
+        assert_matches_generic::<64>(DepthBand::new(20, 10), DepthRange::new(500, 500), &depths);
+    }
+
+    #[test]
+    fn opaque_crystal_changes_with_camera_without_saturating() {
+        let material = TextureMaterial::opaque(0, 0, (116, 132, 152));
+        let front = camera_crystal_packet_materials(material, Mat3I16::IDENTITY, 0);
+        let mut side_view = Mat3I16::IDENTITY;
+        side_view.m[2][0] = 1 << 12;
+        let side = camera_crystal_packet_materials(material, side_view, 0);
+
+        let front_highlight = front.for_area(4).color_command_word;
+        let side_highlight = side.for_area(4).color_command_word;
+        assert_ne!(front_highlight, side_highlight);
+        assert_ne!(front.for_area(4), front.for_area(512));
+
+        let blue = (side_highlight >> 16) & 0xff;
+        assert_eq!(blue, 152, "opaque crystal must not amplify lit base tint");
+    }
+
+    /// The hot bucketed walker bands onto its OWN packet material instead of
+    /// the band table's copy, so that the texture-window, CLUT and tpage words
+    /// stay in registers across the face loop. That is only sound because a
+    /// band differs from the draw's material in the colour word alone. Pin it.
+    #[test]
+    fn banding_the_draws_own_material_matches_the_band_table() {
+        for tint in [(116, 132, 152), (255, 255, 255), (8, 200, 40)] {
+            for roughness in 0..4u8 {
+                let material = TextureMaterial::opaque(0x1234, 0x5678, tint);
+                let mut view = Mat3I16::IDENTITY;
+                view.m[2][0] = 3000;
+                let crystal = camera_crystal_packet_materials(material, view, roughness);
+                let plain = material.textured_packet_material();
+                for area in [-2048, -33, -1, 0, 1, 8, 9, 32, 33, 128, 129, 4096, 1 << 20] {
+                    assert_eq!(
+                        crystal.banded(plain, area),
+                        crystal.for_area(area),
+                        "tint {tint:?} roughness {roughness} area {area}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The camera crystal must survive every submission route a model can take.
+///
+/// It first shipped on the extent-safe batch alone, so Aletha's facets
+/// flashed back to the flat lit tint whenever a pose pushed her projected
+/// bounds past the hardware triangle extent, on and off between adjacent
+/// frames. These drive each route directly and assert the band actually
+/// reaches the emitted packet.
+#[cfg(test)]
+mod camera_crystal_route_tests {
+    use super::*;
+    use psx_gpu::ot::OrderingTable;
+
+    const ZERO_TRI: TriTextured = TriTextured::new([(0, 0); 3], [(0, 0); 3], 0, 0, (0, 0, 0));
+    const MATERIAL: TextureMaterial = TextureMaterial::opaque(0, 0, (116, 132, 152));
+    /// Screen areas landing in each of the four bands, largest first.
+    const AREAS: [i32; 4] = [1600, 100, 20, 4];
+
+    fn crystal() -> CameraCrystalPacketMaterials {
+        camera_crystal_packet_materials(MATERIAL, Mat3I16::IDENTITY, 0)
+    }
+
+    fn options() -> WorldSurfaceOptions {
+        WorldSurfaceOptions::new(DepthBand::whole(), DepthRange::new(0, 4096))
+            .with_cull_mode(CullMode::Back)
+            .with_textured_triangle_splitting(true)
+    }
+
+    /// Four right triangles, one per band, laid out so the whole set breaks
+    /// the hardware extent limit while every single triangle stays inside it.
+    /// That is exactly the dispatch case that lost the crystal.
+    fn fixture() -> ([ProjectedVertex; 12], [TexturedModelRenderFace; 4]) {
+        let mut vertices = [ProjectedVertex::new(0, 0, 512); 12];
+        let mut faces = [TexturedModelRenderFace::new([0, 1, 2], [(0, 0); 3]); 4];
+        for (index, area) in AREAS.iter().enumerate() {
+            // Legs (w, h) give a `w * h` cross product with positive winding.
+            let leg = match *area {
+                1600 => (40, 40),
+                100 => (10, 10),
+                20 => (4, 5),
+                _ => (2, 2),
+            };
+            let x = index as i16 * 100 - 200;
+            let y = index as i16 * 220 - 330;
+            let base = index * 3;
+            vertices[base] = ProjectedVertex::new(x, y, 512);
+            vertices[base + 1] = ProjectedVertex::new(x + leg.0, y, 512);
+            vertices[base + 2] = ProjectedVertex::new(x, y + leg.1, 512);
+            faces[index] = TexturedModelRenderFace::new(
+                [base as u16, base as u16 + 1, base as u16 + 2],
+                [(0, 0), (8, 0), (0, 8)],
+            );
+        }
+        (vertices, faces)
+    }
+
+    fn packet_colors(packets: &[TriTextured]) -> [u32; 4] {
+        let mut colors = [0u32; 4];
+        for (slot, packet) in colors.iter_mut().zip(packets.iter()) {
+            *slot = packet.color_cmd;
+        }
+        colors
+    }
+
+    #[test]
+    fn projected_subset_keeps_palette_banks_and_skips_invalid_faces() {
+        let (vertices, faces) = fixture();
+        let selected = TexturedModelRenderFace::new_with_palette_bank(
+            faces[1].vertex_indices(),
+            faces[1].uvs(),
+            2,
+        );
+        let invalid = TexturedModelRenderFace::new([999, 0, 1], [(0, 0); 3]);
+        let mut output = [ZERO_TRI; 2];
+        for (index, input) in [&[selected][..], &[selected, invalid][..]]
+            .into_iter()
+            .enumerate()
+        {
+            let mut storage = OrderingTable::<8>::new();
+            let mut ot = OtFrame::begin(&mut storage);
+            let mut commands = [WorldTriCommand::EMPTY; 4];
+            let mut packets = [ZERO_TRI; 4];
+            let mut arena = PrimitiveArena::new(&mut packets);
+            let mut world = WorldRenderPass::new_bucketed(&mut ot, &mut commands);
+            let stats = world.submit_projected_model_faces(
+                &mut arena,
+                &vertices,
+                input,
+                MATERIAL,
+                options().with_depth_policy(DepthPolicy::Average),
+            );
+            assert_eq!(stats.submitted_triangles, 1);
+            assert_eq!(usize::from(stats.skipped_triangles), index);
+            assert!(!stats.primitive_overflow && !stats.command_overflow);
+            output[index] = core::mem::replace(&mut packets[0], ZERO_TRI);
+        }
+        assert_eq!(output[0].v0, output[1].v0);
+        assert_eq!(output[0].v1, output[1].v1);
+        assert_eq!(output[0].v2, output[1].v2);
+        assert_eq!(output[0].color_cmd, output[1].color_cmd);
+        assert_eq!(output[0].uv0_clut, output[1].uv0_clut);
+        assert_eq!(output[0].uv0_clut >> 16, 2);
+    }
+
+    fn model_bounds(vertices: &[ProjectedVertex]) -> (i16, i16, i16, i16) {
+        let mut bounds = (i16::MAX, i16::MIN, i16::MAX, i16::MIN);
+        for vertex in vertices {
+            bounds.0 = bounds.0.min(vertex.sx);
+            bounds.1 = bounds.1.max(vertex.sx);
+            bounds.2 = bounds.2.min(vertex.sy);
+            bounds.3 = bounds.3.max(vertex.sy);
+        }
+        bounds
+    }
+
+    fn expected_band_colors() -> [u32; 4] {
+        let crystal = crystal();
+        [
+            crystal.for_area(AREAS[0]).color_command_word,
+            crystal.for_area(AREAS[1]).color_command_word,
+            crystal.for_area(AREAS[2]).color_command_word,
+            crystal.for_area(AREAS[3]).color_command_word,
+        ]
+    }
+
+    fn assert_banded(colors: &[u32], route: &str) {
+        let expected = expected_band_colors();
+        assert_eq!(colors.len(), 4, "{route}: every face must be submitted");
+        assert_eq!(colors, &expected[..], "{route}: wrong crystal bands");
+        for pair in expected.windows(2) {
+            assert_ne!(pair[0], pair[1], "{route}: bands must stay distinguishable");
+        }
+    }
+
+    #[test]
+    fn fixture_is_the_non_extent_safe_dispatch_case() {
+        let (vertices, _) = fixture();
+        let (min_x, max_x, min_y, max_y) = model_bounds(&vertices);
+        assert!(
+            !projected_model_bounds_hw_extent_safe(min_x, max_x, min_y, max_y),
+            "fixture must fall off the extent-safe batch"
+        );
+        for face in fixture().1 {
+            let [ia, ib, ic] = face.vertex_indices();
+            let projected = [
+                vertices[ia as usize],
+                vertices[ib as usize],
+                vertices[ic as usize],
+            ];
+            assert!(
+                projected_triangle_preclamped_hw_extent_safe(projected),
+                "each face must still take the packed submit"
+            );
+        }
+    }
+
+    #[test]
+    fn packed_average_unclamped_batch_bands_every_face() {
+        let (vertices, faces) = fixture();
+        let mut ot_storage = OrderingTable::<8>::new();
+        let mut ot = OtFrame::begin(&mut ot_storage);
+        let mut commands = [WorldTriCommand::EMPTY; 8];
+        let mut triangle_storage = [ZERO_TRI; 8];
+        let submitted = {
+            let mut triangles = PrimitiveArena::new(&mut triangle_storage);
+            let mut pass = WorldRenderPass::new(&mut ot, &mut commands);
+            let mut stats = TexturedModelRenderStats::default();
+            let mut considered = 0u32;
+            let overflow = pass
+                .submit_predecoded_model_faces_packed_average_unclamped_batch::<true>(
+                    &mut triangles,
+                    &vertices,
+                    &faces,
+                    MATERIAL.textured_packet_material(),
+                    Some(crystal()),
+                    ModelUvOffset::ZERO,
+                    true,
+                    MATERIAL,
+                    options(),
+                    &mut stats,
+                    &mut considered,
+                );
+            assert!(!overflow);
+            triangles.len()
+        };
+        let colors = packet_colors(&triangle_storage[..submitted]);
+        assert_eq!(submitted, 4);
+        assert_banded(&colors, "packed_average_unclamped_batch");
+    }
+
+    #[test]
+    fn extent_safe_batch_bands_every_face() {
+        let (vertices, faces) = fixture();
+        let mut ot_storage = OrderingTable::<8>::new();
+        let mut ot = OtFrame::begin(&mut ot_storage);
+        let mut commands = [WorldTriCommand::EMPTY; 8];
+        let mut triangle_storage = [ZERO_TRI; 8];
+        let submitted = {
+            let mut triangles = PrimitiveArena::new(&mut triangle_storage);
+            let mut pass = WorldRenderPass::new(&mut ot, &mut commands);
+            let mut stats = TexturedModelRenderStats::default();
+            let mut considered = 0u32;
+            let overflow = pass
+                .submit_predecoded_model_faces_packed_average_unclamped_extent_safe_batch::<true>(
+                    &mut triangles,
+                    &vertices,
+                    &faces,
+                    MATERIAL.textured_packet_material(),
+                    Some(crystal()),
+                    ModelUvOffset::ZERO,
+                    true,
+                    options(),
+                    &mut stats,
+                    &mut considered,
+                );
+            assert!(!overflow);
+            triangles.len()
+        };
+        let colors = packet_colors(&triangle_storage[..submitted]);
+        assert_eq!(submitted, 4);
+        assert_banded(&colors, "packed_average_unclamped_extent_safe_batch");
+    }
+
+    #[test]
+    fn bucketed_authored_batch_bands_every_face() {
+        let (vertices, faces) = fixture();
+        let mut ot_storage = OrderingTable::<8>::new();
+        let mut ot = OtFrame::begin(&mut ot_storage);
+        let mut commands = [WorldTriCommand::EMPTY; 8];
+        let mut triangle_storage = [ZERO_TRI; 8];
+        let submitted = {
+            let mut triangles = PrimitiveArena::new(&mut triangle_storage);
+            let mut pass = WorldRenderPass::new_bucketed(&mut ot, &mut commands);
+            let mut stats = TexturedModelRenderStats::default();
+            let mut considered = 0u32;
+            let overflow = pass
+                .submit_predecoded_model_faces_packed_average_unclamped_extent_safe_batch::<true>(
+                    &mut triangles,
+                    &vertices,
+                    &faces,
+                    MATERIAL.textured_packet_material(),
+                    Some(crystal()),
+                    ModelUvOffset::ZERO,
+                    true,
+                    options(),
+                    &mut stats,
+                    &mut considered,
+                );
+            assert!(!overflow);
+            triangles.len()
+        };
+        let colors = packet_colors(&triangle_storage[..submitted]);
+        assert_eq!(submitted, 4);
+        assert_banded(&colors, "bucketed_extent_safe_authored_batch");
+    }
+
+    #[test]
+    fn layered_bucketed_batch_bands_the_base_layer() {
+        let (vertices, faces) = fixture();
+        let overlay = TextureMaterial::opaque(0, 0, (64, 64, 64));
+        let mut ot_storage = OrderingTable::<8>::new();
+        let mut ot = OtFrame::begin(&mut ot_storage);
+        let mut commands = [WorldTriCommand::EMPTY; 16];
+        let mut triangle_storage = [ZERO_TRI; 16];
+        let submitted = {
+            let mut triangles = PrimitiveArena::new(&mut triangle_storage);
+            let mut pass = WorldRenderPass::new_bucketed(&mut ot, &mut commands);
+            let mut stats = TexturedModelRenderStats::default();
+            let mut considered = 0u32;
+            pass.submit_predecoded_model_faces_layered_bucketed_average_unclamped_extent_safe_batch::<
+                true,
+            >(
+                &mut triangles,
+                &vertices,
+                &faces,
+                MATERIAL.textured_packet_material(),
+                Some(crystal()),
+                overlay.textured_packet_material(),
+                ModelUvOffset::ZERO,
+                options(),
+                options().with_material_layer(overlay),
+                &mut stats,
+                &mut considered,
+            );
+            triangles.len()
+        };
+        // Base and overlay packets interleave two per face.
+        let mut base = [0u32; 4];
+        for (slot, tri) in base
+            .iter_mut()
+            .zip(triangle_storage[..submitted].iter().step_by(2))
+        {
+            *slot = tri.color_cmd;
+        }
+        assert_eq!(submitted, 8);
+        assert_banded(&base, "layered_bucketed_extent_safe_batch");
+        for overlay_packet in triangle_storage[..submitted].iter().skip(1).step_by(2) {
+            assert_eq!(
+                overlay_packet.color_cmd,
+                overlay.textured_packet_material().color_command_word,
+                "overlay layer keeps its own material"
+            );
+        }
+    }
+
+    #[test]
+    fn no_crystal_leaves_every_route_on_the_plain_material() {
+        let (vertices, faces) = fixture();
+        let mut ot_storage = OrderingTable::<8>::new();
+        let mut ot = OtFrame::begin(&mut ot_storage);
+        let mut commands = [WorldTriCommand::EMPTY; 8];
+        let mut triangle_storage = [ZERO_TRI; 8];
+        let submitted = {
+            let mut triangles = PrimitiveArena::new(&mut triangle_storage);
+            let mut pass = WorldRenderPass::new(&mut ot, &mut commands);
+            let mut stats = TexturedModelRenderStats::default();
+            let mut considered = 0u32;
+            let overflow = pass
+                .submit_predecoded_model_faces_packed_average_unclamped_batch::<true>(
+                    &mut triangles,
+                    &vertices,
+                    &faces,
+                    MATERIAL.textured_packet_material(),
+                    None,
+                    ModelUvOffset::ZERO,
+                    true,
+                    MATERIAL,
+                    options(),
+                    &mut stats,
+                    &mut considered,
+                );
+            assert!(!overflow);
+            triangles.len()
+        };
+        let plain = MATERIAL.textured_packet_material().color_command_word;
+        for tri in &triangle_storage[..submitted] {
+            assert_eq!(tri.color_cmd, plain);
+        }
+    }
+}
+
+#[cfg(test)]
+mod facet_reflection_tests {
+    use super::*;
+    fn face(n: [i8; 3], joint: u8) -> TexturedModelRenderFace {
+        TexturedModelRenderFace::new_with_palette_bank(
+            [4, 5, 6],
+            [(n[0] as u8, n[1] as u8), (n[2] as u8, joint), (0, 0)],
+            2,
+        )
+    }
+    fn joint(m: [[i16; 3]; 3]) -> JointViewTransform {
+        JointViewTransform {
+            rotation: Mat3I16 { m },
+            translation: Vec3I32::ZERO,
+        }
+    }
+    fn reference_face(
+        mut face: TexturedModelRenderFace,
+        joints: &[JointViewTransform],
+        width: u8,
+        height: u8,
+        roughness: u8,
+    ) -> TexturedModelRenderFace {
+        let words = face.uv_words();
+        let n = [
+            words[0] as u8 as i8 as i32,
+            (words[0] >> 8) as u8 as i8 as i32,
+            words[1] as u8 as i8 as i32,
+        ];
+        let Some(joint) = joints.get((words[1] >> 8) as usize) else {
+            for k in 0..3 {
+                face = face.with_corner_uv_word(k, 0);
+            }
+            return face;
+        };
+        let m = joint.rotation.m;
+        let dot = |row: usize| {
+            i32::from(m[row][0]) * n[0] + i32::from(m[row][1]) * n[1] + i32::from(m[row][2]) * n[2]
+        };
+        // Projection scales X/Y by four to improve GTE precision; undo that
+        // anisotropy before normal lookup. Uniform model scale cancels in L1.
+        let nx = dot(0) / (MODEL_GTE_XY_SCALE * 8);
+        let ny = dot(1) / (MODEL_GTE_XY_SCALE * 8);
+        let nz = dot(2) / 8;
+        let len = (nx.abs() + ny.abs() + nz.abs()).max(1);
+        let quantum = 1 << roughness.min(3);
+        let coord = |n: i32, size: u8| {
+            let max = i32::from(size.max(1)) - 1;
+            let x = ((len + n) * max / (2 * len)).clamp(0, max);
+            ((x / quantum) * quantum) as u16
+        };
+        let u = i32::from(coord(nx, width));
+        let v = i32::from(coord(ny, height));
+        // Optional authored microfacet gradients. Six 2-bit offsets occupy the
+        // final UV word; bit 15 opts in. Each triangle samples a small patch,
+        // retaining its own normal while allowing light to fade across its face.
+        let gradient = words[2];
+        for k in 0..3 {
+            let (du, dv) = if gradient & 0x8000 != 0 {
+                let bits = gradient >> (k * 4);
+                (
+                    (i32::from(bits & 3) * 2 - 3) * 4,
+                    (i32::from((bits >> 2) & 3) * 2 - 3) * 4,
+                )
+            } else {
+                (0, 0)
+            };
+            let uv = (u + du).clamp(0, i32::from(width.max(1)) - 1) as u16
+                | (((v + dv).clamp(0, i32::from(height.max(1)) - 1) as u16) << 8);
+            face = face.with_corner_uv_word(k, uv);
+        }
+        face
+    }
+
+    #[test]
+    fn optimized_coordinates_match_original_integer_mapping() {
+        let mut seed = 0x873a2431u32;
+        let mut next = || {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            seed
+        };
+        for _ in 0..20000 {
+            let n = [next() as i8, next() as i8, next() as i8];
+            let m = core::array::from_fn(|_| core::array::from_fn(|_| next() as i16));
+            let j = joint(m);
+            // Existing assets use only the enable bit and six corner offsets.
+            // Leave the newly assigned material-strip bits clear for this
+            // byte-for-byte comparison with the original mapping.
+            let f = face(n, 0).with_corner_uv_word(2, next() as u16 & 0x8fff);
+            let w = next() as u8;
+            let h = next() as u8;
+            let roughness = (next() % 8) as u8;
+            let a = facet_reflection_face(f, &[j], w, h, roughness);
+            let b = reference_face(f, &[j], w, h, roughness);
+            assert_eq!(a.corner_words, b.corner_words);
+        }
+    }
+
+    #[test]
+    fn cached_line_batch_matches_individual_packets_slots_and_capacity_fallback() {
+        use psx_gpu::{ot::OrderingTable, prim::LineMono};
+        extern crate std;
+        use std::vec::Vec;
+        let projected = [
+            ProjectedVertex::new(-70, 20, 200),
+            ProjectedVertex::new(33, -18, 800),
+            ProjectedVertex::new(10, 60, 1200),
+            ProjectedVertex::INVALID,
+        ];
+        let edges = [[0, 1], [1, 2], [2, 0], [0, 0], [3, 1], [9, 0], [1, 0]];
+        for capacity in [0, 2, 12] {
+            for command_capacity in [0, 2, 12] {
+                for bucketed in [false, true] {
+                    for bias in [-999, 0, 700] {
+                        let run = |batch: bool| {
+                            let mut storage = OrderingTable::<8>::new();
+                            let mut ot = OtFrame::begin(&mut storage);
+                            let mut commands = [WorldTriCommand::EMPTY; 12];
+                            let mut packets: [LineMono; 12] =
+                                core::array::from_fn(|_| LineMono::new(0, 0, 0, 0, 0, 0, 0));
+                            let mut slots = Vec::new();
+                            let (count, used);
+                            {
+                                let mut arena = PrimitiveArena::new(&mut packets[..capacity]);
+                                let commands = &mut commands[..command_capacity];
+                                let mut pass = if bucketed {
+                                    WorldRenderPass::new_bucketed(&mut ot, commands)
+                                } else {
+                                    WorldRenderPass::new(&mut ot, commands)
+                                };
+                                let options = WorldSurfaceOptions::new(
+                                    DepthBand::whole(),
+                                    DepthRange::new(16, 2048),
+                                )
+                                .with_depth_bias(bias);
+                                count = if batch {
+                                    pass.submit_projected_line_edges(
+                                        &mut arena,
+                                        &projected,
+                                        &edges,
+                                        (12, 64, 200),
+                                        options,
+                                    )
+                                } else {
+                                    let mut count = 0;
+                                    for &[a, b] in &edges {
+                                        let (Some(&a), Some(&b)) =
+                                            (projected.get(a as usize), projected.get(b as usize))
+                                        else {
+                                            continue;
+                                        };
+                                        if a == ProjectedVertex::INVALID
+                                            || b == ProjectedVertex::INVALID
+                                        {
+                                            continue;
+                                        }
+                                        pass.submit_projected_line(
+                                            &mut arena,
+                                            [a, b],
+                                            (12, 64, 200),
+                                            options,
+                                        );
+                                        count += 1;
+                                    }
+                                    count
+                                };
+                                used = arena.len();
+                                if bucketed {
+                                    for i in 0..pass.command_len {
+                                        slots.push(unsafe {
+                                            (*pass
+                                                .commands
+                                                .as_ptr()
+                                                .cast::<BucketedWorldCommand>()
+                                                .add(i))
+                                            .slot_words
+                                        });
+                                    }
+                                }
+                            }
+                            let words: Vec<_> = packets[..used]
+                                .iter()
+                                .map(|p| [p.color_cmd, p.v0, p.v1])
+                                .collect();
+                            (count, words, slots)
+                        };
+                        assert_eq!(run(true), run(false));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn translucent_projected_faces_take_the_packed_batch_with_identical_packets() {
+        use psx_gpu::{material::BlendMode, ot::OrderingTable, prim::TriTextured};
+        extern crate std;
+        use std::vec::Vec;
+        let mut state = 0x1357_9bdfu32;
+        let mut next = move |range: i32| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            (state % (range as u32 * 2 + 1)) as i32 - range
+        };
+        let mut projected = [ProjectedVertex::INVALID; 40];
+        for vertex in projected.iter_mut() {
+            *vertex = ProjectedVertex::new(
+                (160 + next(120)) as i16,
+                (120 + next(90)) as i16,
+                40 + next(900).abs(),
+            );
+        }
+        let mut faces = [TexturedModelRenderFace::ZERO; 60];
+        for face in faces.iter_mut() {
+            let indices = [0; 3].map(|_| (next(19) + 19) as u16);
+            let uvs = [0; 3].map(|_| ((next(60) + 60) as u8, (next(60) + 60) as u8));
+            *face = TexturedModelRenderFace::new_with_palette_bank(
+                indices,
+                uvs,
+                (next(2) + 2) as u8 & 3,
+            );
+        }
+        let materials = [
+            TextureMaterial::opaque(42, 5, (128, 128, 128)).with_blend_mode(BlendMode::Average),
+            TextureMaterial::opaque(7, 9, (90, 200, 40)).with_blend_mode(BlendMode::Add),
+            TextureMaterial::opaque(7, 9, (90, 200, 40)),
+        ];
+        for material in materials {
+            for bias in [0, 3] {
+                let run = |safe: bool| {
+                    let mut storage = OrderingTable::<64>::new();
+                    let mut ot = OtFrame::begin(&mut storage);
+                    let mut commands = [WorldTriCommand::EMPTY; 80];
+                    let mut packets = [TriTextured::with_material(
+                        [(0, 0); 3],
+                        [(0, 0); 3],
+                        TextureMaterial::new(0, 0),
+                    ); 80];
+                    let base = packets.as_ptr() as usize;
+                    let (stats, used, rows);
+                    {
+                        let mut arena = PrimitiveArena::new(&mut packets);
+                        let mut pass = WorldRenderPass::new_bucketed(&mut ot, &mut commands);
+                        let options =
+                            WorldSurfaceOptions::new(DepthBand::whole(), DepthRange::new(0, 1000))
+                                .with_cull_mode(CullMode::Back)
+                                .with_depth_policy(DepthPolicy::Average)
+                                .with_depth_bias(bias)
+                                .with_textured_triangle_splitting(false)
+                                .with_material_layer(material);
+                        let result = pass.submit_projected_model_faces_checked(
+                            &mut arena, &projected, &faces, material, options, safe,
+                        );
+                        stats = (
+                            result.submitted_triangles,
+                            result.culled_triangles,
+                            result.skipped_triangles,
+                        );
+                        used = arena.len();
+                        let mut r = [(0usize, 0usize); 80];
+                        for (i, row) in r.iter_mut().enumerate().take(pass.command_len()) {
+                            // SAFETY: the first `command_len` compact entries were written.
+                            let command = unsafe {
+                                *pass.commands.as_ptr().cast::<BucketedWorldCommand>().add(i)
+                            };
+                            *row = (command.packet_ptr as usize - base, command.slot_words);
+                        }
+                        rows = r;
+                    }
+                    let words: Vec<[u32; 8]> = packets[..used]
+                        .iter()
+                        .map(|p| {
+                            [
+                                p.tex_window,
+                                p.color_cmd,
+                                p.v0,
+                                p.v1,
+                                p.v2,
+                                p.uv0_clut,
+                                p.uv1_tpage,
+                                p.uv2,
+                            ]
+                        })
+                        .collect();
+                    (stats, used, rows, words)
+                };
+                assert_eq!(run(true), run(false), "{material:?} bias {bias}");
+            }
+        }
+    }
+
+    #[test]
+    fn packet_arena_line_batch_matches_individual_packets_and_slots() {
+        use psx_gpu::ot::OrderingTable;
+        extern crate std;
+        use std::vec::Vec;
+        let projected = [
+            ProjectedVertex::new(-70, 20, 200),
+            ProjectedVertex::new(33, -18, 800),
+            ProjectedVertex::new(10, 60, 1200),
+            ProjectedVertex::INVALID,
+            ProjectedVertex::new(5, 5, i32::MIN),
+        ];
+        let edges = [
+            [0, 1],
+            [1, 2],
+            [2, 0],
+            [0, 0],
+            [3, 1],
+            [9, 0],
+            [1, 0],
+            [4, 1],
+            [2, 4],
+        ];
+        for command_capacity in [3, 12] {
+            for bias in [-999, 0, 700] {
+                let run = |batch: bool| {
+                    let mut storage = OrderingTable::<8>::new();
+                    let mut ot = OtFrame::begin(&mut storage);
+                    let mut commands = [WorldTriCommand::EMPTY; 12];
+                    let mut scratch = crate::PrimitivePacketScratch::<12>::ZERO;
+                    let base = &scratch as *const _ as usize;
+                    let (count, used, packets, slots);
+                    {
+                        let mut arena = crate::PrimitivePacketArena::new(&mut scratch);
+                        let mut pass = WorldRenderPass::new_bucketed(
+                            &mut ot,
+                            &mut commands[..command_capacity],
+                        );
+                        let options =
+                            WorldSurfaceOptions::new(DepthBand::whole(), DepthRange::new(16, 2048))
+                                .with_depth_bias(bias);
+                        count = if batch {
+                            pass.submit_projected_line_edges(
+                                &mut arena,
+                                &projected,
+                                &edges,
+                                (12, 64, 200),
+                                options,
+                            )
+                        } else {
+                            let mut count = 0;
+                            for &[a, b] in &edges {
+                                let (Some(&a), Some(&b)) =
+                                    (projected.get(a as usize), projected.get(b as usize))
+                                else {
+                                    continue;
+                                };
+                                if a == ProjectedVertex::INVALID || b == ProjectedVertex::INVALID {
+                                    continue;
+                                }
+                                pass.submit_projected_line(
+                                    &mut arena,
+                                    [a, b],
+                                    (12, 64, 200),
+                                    options,
+                                );
+                                count += 1;
+                            }
+                            count
+                        };
+                        used = arena.used_slots();
+                        let commands_used = pass.command_len();
+                        let mut rows = [(0usize, 0usize); 12];
+                        for (i, row) in rows.iter_mut().enumerate().take(commands_used) {
+                            // SAFETY: the first `commands_used` compact entries were written.
+                            let command = unsafe {
+                                *pass.commands.as_ptr().cast::<BucketedWorldCommand>().add(i)
+                            };
+                            *row = (command.packet_ptr as usize - base, command.slot_words);
+                        }
+                        slots = rows;
+                        packets = commands_used;
+                    }
+                    let words: Vec<u32> =
+                        scratch.words_mut()[..used * crate::PRIMITIVE_PACKET_SLOT_WORDS].to_vec();
+                    (count, used, packets, slots, words)
+                };
+                assert_eq!(run(true), run(false));
+            }
+        }
+    }
+
+    #[test]
+    fn solid_gouraud_batch_matches_scalar_packets_depths_culling_and_exhaustion() {
+        use psx_gpu::{ot::OrderingTable, prim::TriGouraud};
+        extern crate std;
+        use std::vec::Vec;
+        let projected = [
+            ProjectedVertex::new(-70, 20, 200),
+            ProjectedVertex::new(33, -18, 800),
+            ProjectedVertex::new(10, 60, 1200),
+            ProjectedVertex::new(25, 80, 70000),
+            ProjectedVertex::new(15, 30, -50),
+            ProjectedVertex::INVALID,
+        ];
+        let faces = [
+            ([0, 1, 2], (255, 113, 58)),
+            ([2, 1, 0], (108, 224, 198)),
+            ([0, 0, 0], (20, 30, 40)),
+            ([1, 3, 4], (255, 255, 255)),
+            ([5, 1, 2], (0, 0, 0)),
+            ([99, 0, 1], (0, 0, 0)),
+            ([4, 2, 1], (12, 64, 200)),
+        ];
+        for capacity in [0, 2, 12] {
+            for command_capacity in [0, 2, 12] {
+                for mode in 0..3 {
+                    for cull in [CullMode::None, CullMode::Back, CullMode::Front] {
+                        for policy in [
+                            DepthPolicy::Average,
+                            DepthPolicy::Nearest,
+                            DepthPolicy::Farthest,
+                            DepthPolicy::Fixed(615),
+                        ] {
+                            for bias in [i32::MIN, -999, 0, 700, i32::MAX] {
+                                let run = |batch: bool| {
+                                    let mut storage = OrderingTable::<8>::new();
+                                    let mut ot = OtFrame::begin(&mut storage);
+                                    let mut commands = [WorldTriCommand::EMPTY; 12];
+                                    let mut packets: [TriGouraud; 12] =
+                                        core::array::from_fn(|_| {
+                                            TriGouraud::new([(0, 0); 3], [(0, 0, 0); 3])
+                                        });
+                                    let mut keys = Vec::new();
+                                    let (count, used);
+                                    {
+                                        let mut arena =
+                                            PrimitiveArena::new(&mut packets[..capacity]);
+                                        let commands = &mut commands[..command_capacity];
+                                        let mut pass = match mode {
+                                            0 => WorldRenderPass::new_bucketed(&mut ot, commands),
+                                            1 => WorldRenderPass::new(&mut ot, commands),
+                                            _ => WorldRenderPass::new_deferred_sorted(
+                                                &mut ot, commands,
+                                            ),
+                                        };
+                                        let options = WorldSurfaceOptions::new(
+                                            DepthBand::whole(),
+                                            DepthRange::new(16, 2048),
+                                        )
+                                        .with_depth_bias(bias)
+                                        .with_depth_policy(policy)
+                                        .with_cull_mode(cull);
+                                        count = if batch {
+                                            pass.submit_solid_gouraud_faces(
+                                                &mut arena, &projected, &faces, options,
+                                            )
+                                        } else {
+                                            let mut count = 0;
+                                            for &(indices, color) in &faces {
+                                                let [Some(&a), Some(&b), Some(&c)] =
+                                                    indices.map(|i| projected.get(i as usize))
+                                                else {
+                                                    continue;
+                                                };
+                                                let p = [a, b, c];
+                                                if p.contains(&ProjectedVertex::INVALID) {
+                                                    continue;
+                                                }
+                                                count += pass
+                                                    .submit_gouraud_triangle(
+                                                        &mut arena,
+                                                        p.map(|v| ProjectedLit {
+                                                            sx: v.sx,
+                                                            sy: v.sy,
+                                                            sz: v.sz.clamp(0, 65535) as u16,
+                                                            r: color.0,
+                                                            g: color.1,
+                                                            b: color.2,
+                                                        }),
+                                                        options,
+                                                    )
+                                                    .submitted_triangles;
+                                            }
+                                            count
+                                        };
+                                        used = arena.len();
+                                        for i in 0..pass.command_len {
+                                            keys.push(if mode == 0 {
+                                                (
+                                                    unsafe {
+                                                        (*pass
+                                                            .commands
+                                                            .as_ptr()
+                                                            .cast::<BucketedWorldCommand>()
+                                                            .add(i))
+                                                        .slot_words
+                                                    },
+                                                    0,
+                                                    0,
+                                                    0,
+                                                )
+                                            } else {
+                                                let c = pass.commands[i];
+                                                (
+                                                    usize::from(c.slot),
+                                                    c.depth,
+                                                    c.order,
+                                                    c.render_layer,
+                                                )
+                                            });
+                                        }
+                                    }
+                                    let words: Vec<_> = packets[..used]
+                                        .iter()
+                                        .map(|p| {
+                                            [p.color0_cmd, p.v0, p.color1, p.v1, p.color2, p.v2]
+                                        })
+                                        .collect();
+                                    (count, words, keys)
+                                };
+                                assert_eq!(run(true), run(false));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fused_reflection_packets_and_order_match_staged_path() {
+        use psx_gpu::ot::OrderingTable;
+        extern crate std;
+        use std::vec::Vec;
+        const ZERO: TriTextured = TriTextured::new([(0, 0); 3], [(0, 0); 3], 0, 0, (0, 0, 0));
+        let vertices = [
+            ProjectedVertex::new(-20, -30, 512),
+            ProjectedVertex::new(40, -10, 800),
+            ProjectedVertex::new(10, 60, 1200),
+        ];
+        let faces: [_; 37] = core::array::from_fn(|i| {
+            let indices = match i % 3 {
+                0 => [0, 1, 2],
+                1 => [0, 2, 1],
+                _ => [0, 0, 2],
+            };
+            TexturedModelRenderFace::new_with_palette_bank(
+                indices,
+                [
+                    ((i as u8).wrapping_mul(7), 128),
+                    (127, if i == 5 { 255 } else { 0 }),
+                    (0, 0),
+                ],
+                (i % 4) as u8,
+            )
+            .with_corner_uv_word(2, if i % 2 == 0 { 0x8f30 } else { 0 })
+        });
+        let joints = [joint([[16384, 0, 0], [0, 16384, 0], [0, 0, 4096]])];
+        for cull in [CullMode::Back, CullMode::None] {
+            for roughness in 0..4 {
+                let run = |mode: u8| {
+                    let mut ot_storage = OrderingTable::<8>::new();
+                    let mut ot = OtFrame::begin(&mut ot_storage);
+                    let mut commands = [WorldTriCommand::EMPTY; 48];
+                    let mut packets = [ZERO; 48];
+                    let mut stats = TexturedModelRenderStats::default();
+                    let mut considered = 0;
+                    let mut slots = Vec::new();
+                    let count;
+                    {
+                        let mut triangles = PrimitiveArena::new(&mut packets);
+                        let mut pass = WorldRenderPass::new_bucketed(&mut ot, &mut commands);
+                        let material = TextureMaterial::opaque(0x1234, 0x5678, (116, 132, 152));
+                        let options =
+                            WorldSurfaceOptions::new(DepthBand::whole(), DepthRange::new(0, 4096))
+                                .with_cull_mode(cull)
+                                .with_textured_triangle_splitting(false);
+                        let overflow = if mode == 0 {
+                            pass.submit_facet_reflection_batch(
+                                &mut triangles,
+                                &vertices,
+                                &faces,
+                                &joints,
+                                material.textured_packet_material(),
+                                material,
+                                options,
+                                true,
+                                128,
+                                64,
+                                roughness,
+                                &mut stats,
+                                &mut considered,
+                            )
+                        } else if mode == 1 {
+                            pass.submit_facet_reflection_mapped_batch(
+                                &mut triangles,
+                                &vertices,
+                                &faces,
+                                &joints,
+                                material.textured_packet_material(),
+                                material,
+                                options,
+                                true,
+                                128,
+                                64,
+                                roughness,
+                                &mut stats,
+                                &mut considered,
+                            )
+                        } else {
+                            let mut overflow = false;
+                            for face in faces {
+                                considered += 1;
+                                let mapped =
+                                    facet_reflection_face(face, &joints, 128, 64, roughness);
+                                let material = material.with_clut_bank(face.palette_bank());
+                                overflow |= pass.submit_predecoded_model_face(
+                                    &mut triangles,
+                                    &vertices,
+                                    vertices.len(),
+                                    mapped,
+                                    true,
+                                    8,
+                                    material.textured_packet_material(),
+                                    material,
+                                    options,
+                                    &mut stats,
+                                );
+                            }
+                            overflow
+                        };
+                        assert!(!overflow);
+                        count = triangles.len();
+                        for i in 0..pass.command_len {
+                            // The bucketed pass initialized precisely this prefix.
+                            let command = unsafe {
+                                *pass.commands.as_ptr().cast::<BucketedWorldCommand>().add(i)
+                            };
+                            slots.push(command.slot_words);
+                        }
+                    }
+                    let words: Vec<_> = packets[..count]
+                        .iter()
+                        .map(|p| {
+                            [
+                                p.tag,
+                                p.tex_window,
+                                p.color_cmd,
+                                p.v0,
+                                p.uv0_clut,
+                                p.v1,
+                                p.uv1_tpage,
+                                p.v2,
+                                p.uv2,
+                            ]
+                        })
+                        .collect();
+                    (words, slots, stats, considered)
+                };
+                let fused = run(0);
+                assert_eq!(fused, run(1));
+                // Dash used the general unsplit walker. Check its actual
+                // packets, OT slots, culling and submission against the fused
+                // path; only dispatch counters are expected to differ.
+                let general = run(2);
+                assert_eq!(fused.0, general.0);
+                assert_eq!(fused.1, general.1);
+                assert_eq!(fused.2.submitted_triangles, general.2.submitted_triangles);
+                assert_eq!(fused.2.culled_triangles, general.2.culled_triangles);
+                assert_eq!(fused.2.dropped_triangles, general.2.dropped_triangles);
+                assert_eq!(fused.3, general.3);
+            }
+        }
+    }
+    #[test]
+    fn facet_uv_tracks_normal_rotation_and_preserves_face_identity() {
+        let f = face([0, 0, -127], 0);
+        let a = facet_reflection_face(
+            f,
+            &[joint([[16384, 0, 0], [0, 16384, 0], [0, 0, 4096]])],
+            128,
+            128,
+            0,
+        );
+        assert_eq!(a.uvs(), [(63, 63); 3]);
+        let b = facet_reflection_face(
+            f,
+            &[joint([[0, 0, 16384], [0, 16384, 0], [-4096, 0, 0]])],
+            128,
+            128,
+            0,
+        );
+        assert_eq!(b.uvs(), [(0, 63); 3]);
+        assert_eq!(b.vertex_indices(), [4, 5, 6]);
+        assert_eq!(b.palette_bank(), 2);
+    }
+    #[test]
+    fn authored_gradient_spreads_corners_and_clamps_at_texture_edges() {
+        let f = face([0, 0, -127], 0).with_corner_uv_word(2, 0x8f30);
+        let m = joint([[16384, 0, 0], [0, 16384, 0], [0, 0, 4096]]);
+        let result = facet_reflection_face(f, &[m], 128, 128, 0);
+        assert_eq!(result.uvs(), [(51, 51), (75, 51), (75, 75)]);
+        assert_eq!(result.vertex_indices(), f.vertex_indices());
+        assert_eq!(result.palette_bank(), f.palette_bank());
+        for n in [[127, 0, 0], [-127, 0, 0], [0, 127, 0], [0, -127, 0]] {
+            let f = face(n, 0).with_corner_uv_word(2, 0x8f30);
+            for size in [0, 1, 128, 255] {
+                let result = facet_reflection_face(f, &[m], size, size, 0);
+                assert!(result
+                    .uvs()
+                    .iter()
+                    .all(|&(u, v)| u < size.max(1) && v < size.max(1)));
+            }
+        }
+    }
+    #[test]
+    fn material_strips_keep_rotating_gradients_inside_the_selected_finish() {
+        let m = joint([[16384, 0, 0], [0, 16384, 0], [0, 0, 4096]]);
+        for band in 1..=4u16 {
+            for n in [
+                [0, 0, -127],
+                [127, 0, 0],
+                [-127, 0, 0],
+                [0, 127, 0],
+                [0, -127, 0],
+            ] {
+                let f = face(n, 0).with_corner_uv_word(2, 0x8f30 | (band << 12));
+                let mapped = facet_reflection_face(f, &[m], 128, 128, 0);
+                assert!(mapped
+                    .uvs()
+                    .iter()
+                    .all(|&(u, v)| u16::from(u) >= (band - 1) * 32
+                        && u16::from(u) < band * 32
+                        && v < 128));
+                assert_eq!(mapped.vertex_indices(), f.vertex_indices());
+                assert_eq!(mapped.palette_bank(), f.palette_bank());
+            }
+        }
+        let f = face([0, 0, -127], 0).with_corner_uv_word(2, 0xaf30);
+        assert_eq!(
+            facet_reflection_face(f, &[m], 128, 128, 0).uvs(),
+            [(44, 51), (50, 51), (50, 75)]
+        );
+    }
+    #[test]
+    fn facet_lookup_stays_in_bounds_for_extreme_matrices_and_bad_joint() {
+        for n in [[-128, -128, -128], [127, 127, 127], [0, 0, 0]] {
+            for m in [[[i16::MIN; 3]; 3], [[i16::MAX; 3]; 3], [[0; 3]; 3]] {
+                for size in [0, 1, 128, 255] {
+                    let result = facet_reflection_face(face(n, 0), &[joint(m)], size, size, 3);
+                    assert!(result
+                        .uvs()
+                        .iter()
+                        .all(|&(u, v)| u < size.max(1) && v < size.max(1)));
+                }
+            }
+        }
+        assert_eq!(
+            facet_reflection_face(face([0, 0, -127], 255), &[], 128, 128, 0).uvs(),
+            [(0, 0); 3]
+        );
+    }
+}
+
+#[cfg(test)]
+mod facet_reflection_words_tests {
+    use super::*;
+
+    fn next(seed: &mut u32) -> u32 {
+        *seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        *seed >> 8
+    }
+
+    /// The GTE-backed path must give exactly the words the general
+    /// per-corner routine gives, gradient and strip bits included.
+    #[test]
+    fn words_match_the_general_routine() {
+        let mut seed = 0x1234_5678;
+        let mut joints = [JointViewTransform::ZERO; 5];
+        for joint in joints.iter_mut() {
+            for row in 0..3 {
+                for col in 0..3 {
+                    joint.rotation.m[row][col] = (next(&mut seed) % 8193) as i16 - 4096;
+                }
+            }
+        }
+        let mut rotation = ReflectionJoint::new();
+        for case in 0..8000u32 {
+            let nx = (next(&mut seed) & 0xff) as u8;
+            let ny = (next(&mut seed) & 0xff) as u8;
+            let nz = (next(&mut seed) & 0xff) as u8;
+            // Joints 5 and 6 do not exist: the general routine zeroes the words.
+            let joint = (next(&mut seed) % 7) as u16;
+            let gradient = match case % 3 {
+                0 => 0,
+                1 => (next(&mut seed) & 0xffff) as u16,
+                _ => (next(&mut seed) & 0x0fff) as u16 | 0x8000,
+            };
+            let words = [
+                u16::from(nx) | u16::from(ny) << 8,
+                u16::from(nz) | joint << 8,
+                gradient,
+            ];
+            let (width, height) =
+                [(64u8, 64u8), (128, 64), (32, 96), (1, 1), (4, 8)][(case % 5) as usize];
+            let roughness = ((case / 5) % 4) as u8;
+            let face = TexturedModelRenderFace {
+                corner_words: [
+                    u32::from(words[0]) << 16,
+                    u32::from(words[1]) << 16 | 1,
+                    u32::from(words[2]) << 16 | 2,
+                ],
+            };
+            let general = facet_reflection_face(face, &joints, width, height, roughness).uv_words();
+            let fast =
+                facet_reflection_words(words, &joints, &mut rotation, width, height, roughness);
+            assert_eq!(fast, general, "case {case}");
+        }
+    }
+}
