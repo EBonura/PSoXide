@@ -2383,7 +2383,7 @@ impl GameRig<'_> {
 }
 
 impl Rig for GameRig<'_> {
-    fn link(&mut self, threshold: u32) -> Result<Option<u32>> {
+    fn link(&mut self, threshold: u32) -> Result<Option<ladder::Fit>> {
         println!("psoxide-pgo: ladder link at threshold {threshold}");
         if let Some(command) = &self.options.link {
             let map = self.work.join("ladder.map");
@@ -2396,22 +2396,24 @@ impl Rig for GameRig<'_> {
             if !ok {
                 return Ok(None);
             }
-            let printed = output.lines().find_map(|line| {
+            let printed: Option<u32> = output.lines().find_map(|line| {
                 line.strip_prefix("free ")?
                     .trim()
                     .trim_end_matches(" B")
                     .parse()
                     .ok()
             });
-            return match printed {
-                Some(free) => Ok(Some(free)),
-                None => Ok(Some(
-                    crate::ram::free_ram(&fs::read_to_string(&map).map_err(|error| {
-                        format!("--link printed no `free N` and wrote no map: {error}")
-                    })?)
-                    .ok_or("the link map has no __bss_end")?,
-                )),
+            let code = output
+                .lines()
+                .find_map(|line| Some(line.strip_prefix("code ")?.trim().to_string()));
+            let free = match printed {
+                Some(free) => free,
+                None => crate::ram::free_ram(&fs::read_to_string(&map).map_err(|error| {
+                    format!("--link printed no `free N` and wrote no map: {error}")
+                })?)
+                .ok_or("the link map has no __bss_end")?,
             };
+            return Ok(Some(ladder::Fit { free, code }));
         }
         let variant = self.variant(threshold);
         match apply(
@@ -2427,8 +2429,17 @@ impl Rig for GameRig<'_> {
                     .ok_or("the ladder needs the link map")?;
                 let free = crate::ram::free_ram(&fs::read_to_string(map)?)
                     .ok_or_else(|| format!("{} has no __bss_end", map.display()))?;
+                let code = {
+                    use std::hash::{Hash, Hasher};
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    fs::read(&linked.exe)?.hash(&mut hasher);
+                    format!("{:016x}", hasher.finish())
+                };
                 self.exe = Some(linked.exe);
-                Ok(Some(free))
+                Ok(Some(ladder::Fit {
+                    free,
+                    code: Some(code),
+                }))
             }
             Err(error) => {
                 println!("psoxide-pgo: threshold {threshold} did not build: {error}");

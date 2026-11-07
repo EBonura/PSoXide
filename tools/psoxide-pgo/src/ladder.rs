@@ -74,10 +74,20 @@ impl Config {
 }
 
 /// The two things the search needs from a game.
+/// A link that held.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Fit {
+    pub free: u32,
+    /// A fingerprint of the code. Neighbouring thresholds often link the
+    /// very same code (free RAM moves in plateaus), and benching it twice
+    /// buys nothing, so equal fingerprints count as one candidate.
+    pub code: Option<String>,
+}
+
 pub trait Rig {
-    /// Link at `threshold`: the free RAM it leaves, or `None` when it did not
-    /// link or has no safe stack. The last link made is the one on disk.
-    fn link(&mut self, threshold: u32) -> Result<Option<u32>>;
+    /// Link at `threshold`: what it leaves, or `None` when it did not link
+    /// or has no safe stack. The last link made is the one on disk.
+    fn link(&mut self, threshold: u32) -> Result<Option<Fit>>;
     /// Bench the link for `threshold`: named scores, higher is better.
     fn bench(&mut self, threshold: u32, free: u32) -> Result<Vec<(String, f64)>>;
 }
@@ -88,6 +98,8 @@ pub struct Rung {
     pub threshold: u32,
     /// `None`: did not link or unsafe stack.
     pub free: Option<u32>,
+    /// See [`Fit::code`].
+    pub code: Option<String>,
     pub scores: Vec<(String, f64)>,
     /// Geometric mean of the per-metric ratios to the best candidate.
     pub geomean: Option<f64>,
@@ -114,33 +126,37 @@ pub struct Outcome {
 /// Find the candidates and pick one. Links through `rig`, memoised.
 pub fn search(rig: &mut dyn Rig, config: &Config) -> Result<Outcome> {
     let grid = config.grid()?;
-    let mut linked: BTreeMap<u32, Option<u32>> = BTreeMap::new();
-    let mut fits = |rig: &mut dyn Rig, at: usize| -> Result<bool> {
-        let threshold = grid[at];
-        if let std::collections::btree_map::Entry::Vacant(slot) = linked.entry(threshold) {
-            slot.insert(rig.link(threshold)?);
-        }
-        Ok(linked[&threshold].is_some_and(|free| free >= config.floor))
-    };
+    let mut linked: BTreeMap<u32, Option<Fit>> = BTreeMap::new();
+    let floor = config.floor;
+    let fits =
+        |rig: &mut dyn Rig, linked: &mut BTreeMap<u32, Option<Fit>>, at: usize| -> Result<bool> {
+            let threshold = grid[at];
+            if let std::collections::btree_map::Entry::Vacant(slot) = linked.entry(threshold) {
+                slot.insert(rig.link(threshold)?);
+            }
+            Ok(linked[&threshold]
+                .as_ref()
+                .is_some_and(|fit| fit.free >= floor))
+        };
     // The first grid index that fits.
     let first = if config.scan {
         let mut first = None;
         for at in 0..grid.len() {
-            if first.is_none() && fits(rig, at)? {
+            if first.is_none() && fits(rig, &mut linked, at)? {
                 first = Some(at);
             } else if first.is_some() {
-                fits(rig, at)?;
+                fits(rig, &mut linked, at)?;
             }
         }
         first
-    } else if fits(rig, 0)? {
+    } else if fits(rig, &mut linked, 0)? {
         Some(0)
     } else {
         // Invariant: `low` does not fit, `high` is untested or fits.
         let (mut low, mut high) = (0, grid.len());
         while high - low > 1 {
             let mid = low + (high - low) / 2;
-            if fits(rig, mid)? {
+            if fits(rig, &mut linked, mid)? {
                 high = mid;
             } else {
                 low = mid;
@@ -158,21 +174,31 @@ pub fn search(rig: &mut dyn Rig, config: &Config) -> Result<Outcome> {
         )
         .into());
     };
-    // The K highest fitting grid points from there down, each verified.
-    let mut candidates = Vec::new();
+    // The K highest fitting grid points from there down, each verified, one
+    // per distinct code.
+    let mut candidates: Vec<u32> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
     for (at, &threshold) in grid.iter().enumerate().skip(first) {
         if candidates.len() == config.candidates {
             break;
         }
-        if fits(rig, at)? {
-            candidates.push(threshold);
+        if !fits(rig, &mut linked, at)? {
+            continue;
         }
+        let code = linked[&threshold].as_ref().and_then(|fit| fit.code.clone());
+        if let Some(code) = code {
+            if seen.contains(&code) {
+                continue;
+            }
+            seen.push(code);
+        }
+        candidates.push(threshold);
     }
     let mut warnings = Vec::new();
     let mut scored: BTreeMap<u32, Vec<(String, f64)>> = BTreeMap::new();
     if candidates.len() > 1 {
         for &threshold in &candidates {
-            let free = linked[&threshold].expect("candidates fit");
+            let free = linked[&threshold].as_ref().expect("candidates fit").free;
             let scores = rig.bench(threshold, free)?;
             if scores.is_empty() {
                 return Err(
@@ -185,9 +211,10 @@ pub fn search(rig: &mut dyn Rig, config: &Config) -> Result<Outcome> {
     let mut rungs: Vec<Rung> = grid
         .iter()
         .filter_map(|&threshold| {
-            linked.get(&threshold).map(|&free| Rung {
+            linked.get(&threshold).map(|fit| Rung {
                 threshold,
-                free,
+                free: fit.as_ref().map(|fit| fit.free),
+                code: fit.as_ref().and_then(|fit| fit.code.clone()),
                 scores: scored.get(&threshold).cloned().unwrap_or_default(),
                 geomean: None,
                 worst: None,
@@ -281,12 +308,12 @@ fn pick(rungs: &[Rung], candidates: &[u32], tie_percent: f64) -> u32 {
         .expect("a candidate is within the tie of the top")
 }
 
-fn describe(linked: &BTreeMap<u32, Option<u32>>) -> String {
+fn describe(linked: &BTreeMap<u32, Option<Fit>>) -> String {
     linked
         .iter()
         .rev()
-        .map(|(threshold, free)| match free {
-            Some(free) => format!("{threshold}: {free} B"),
+        .map(|(threshold, fit)| match fit {
+            Some(fit) => format!("{threshold}: {} B", fit.free),
             None => format!("{threshold}: did not link"),
         })
         .collect::<Vec<_>>()
@@ -340,6 +367,16 @@ pub fn table(outcome: &Outcome, config: &Config) -> String {
         }
         if rung.threshold == outcome.chosen {
             text.push_str("  <- chosen");
+        } else if rung.scores.is_empty() && rung.fits(config.floor) {
+            let twin = outcome.rungs.iter().find(|other| {
+                other.threshold > rung.threshold
+                    && other.code.is_some()
+                    && other.code == rung.code
+                    && !other.scores.is_empty()
+            });
+            if let Some(twin) = twin {
+                let _ = write!(text, "  same code as {}", twin.threshold);
+            }
         }
         text.push('\n');
     }
@@ -372,6 +409,7 @@ mod tests {
     struct Fake {
         links: Vec<u32>,
         benches: Vec<u32>,
+        plateaus: bool,
         speeds: BTreeMap<u32, Vec<(&'static str, f64)>>,
     }
 
@@ -380,6 +418,7 @@ mod tests {
             Self {
                 links: Vec::new(),
                 benches: Vec::new(),
+                plateaus: false,
                 speeds: speeds.iter().map(|(t, s)| (*t, s.to_vec())).collect(),
             }
         }
@@ -390,9 +429,13 @@ mod tests {
     }
 
     impl Rig for Fake {
-        fn link(&mut self, threshold: u32) -> Result<Option<u32>> {
+        fn link(&mut self, threshold: u32) -> Result<Option<Fit>> {
             self.links.push(threshold);
-            Ok(Some(free_at(threshold)))
+            Ok(Some(Fit {
+                free: free_at(threshold),
+                // Plateaus of identical code every 100 units, when asked for.
+                code: self.plateaus.then(|| (threshold / 100).to_string()),
+            }))
         }
         fn bench(&mut self, threshold: u32, _free: u32) -> Result<Vec<(String, f64)>> {
             self.benches.push(threshold);
@@ -473,6 +516,22 @@ mod tests {
         assert_eq!(outcome.chosen, 900);
         assert!(outcome.warnings[0].contains("b"), "{:?}", outcome.warnings);
         assert!(table(&outcome, &config(3600)).contains("<- chosen"));
+    }
+
+    #[test]
+    fn rungs_that_link_the_same_code_are_benched_once() {
+        // The code changes every 100 units, so 900 links 950's code, 800 links 850's, and so on.
+        let mut rig = Fake::new(&[
+            (950, &[("a", 10.0)]),
+            (850, &[("a", 10.2)]),
+            (750, &[("a", 9.0)]),
+            (650, &[("a", 9.5)]),
+        ]);
+        rig.plateaus = true;
+        let outcome = search(&mut rig, &config(3600)).unwrap();
+        assert_eq!(outcome.candidates, [950, 850, 750, 650]);
+        assert_eq!(rig.benches, [950, 850, 750, 650]);
+        assert!(table(&outcome, &config(3600)).contains("same code as 950"));
     }
 
     #[test]
