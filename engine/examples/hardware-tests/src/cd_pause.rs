@@ -248,7 +248,7 @@ fn timed_pause(clock: &mut Clock) -> Trial {
         sectors: 0,
         status: 0,
     };
-    let Some(saved) = cdio::dispatch_command(CMD_PAUSE, &[], SPINS) else {
+    let Some(saved) = crate::probe_tokens::cd().dispatch_command(CMD_PAUSE, &[], SPINS) else {
         return trial;
     };
     let t0 = clock.ticks();
@@ -296,7 +296,7 @@ fn timed_pause(clock: &mut Clock) -> Trial {
             _ => {}
         }
     }
-    cdio::restore_irq_output(saved);
+    crate::probe_tokens::cd().restore_irq_output(saved);
     trial
 }
 
@@ -307,7 +307,7 @@ fn watched_pause(
     events: &mut [Event; WATCH_EVENTS],
     early: bool,
 ) -> (u32, u32, bool) {
-    let Some(saved) = cdio::dispatch_command(CMD_PAUSE, &[], SPINS) else {
+    let Some(saved) = crate::probe_tokens::cd().dispatch_command(CMD_PAUSE, &[], SPINS) else {
         return (0, 0, false);
     };
     let t0 = clock.ticks();
@@ -383,7 +383,7 @@ fn watched_pause(
             };
         }
     }
-    cdio::restore_irq_output(saved);
+    crate::probe_tokens::cd().restore_irq_output(saved);
     (seen, sent, int2)
 }
 
@@ -400,7 +400,7 @@ fn mode_for(fast: bool) -> u8 {
 /// The drive paused, at the speed under test.
 #[inline(never)]
 fn settle(fast: bool, fails: &mut u32) {
-    if !cdio::try_pause_until_complete(SPINS) {
+    if !crate::probe_tokens::cd().try_pause_until_complete(SPINS) {
         *fails += 1;
     }
     if cdio::try_set_mode(mode_for(fast), SPINS).is_none() {
@@ -412,8 +412,8 @@ fn settle(fast: bool, fails: &mut u32) {
 #[inline(never)]
 fn start_read(fast: bool, lba: u32, fails: &mut u32) -> bool {
     let ok = cdio::try_set_mode(mode_for(fast), SPINS).is_some()
-        && cdio::try_set_target_lba(lba, SPINS).is_some()
-        && cdio::try_start_reading(SPINS).is_some();
+        && crate::probe_tokens::cd().try_set_target_lba(lba, SPINS).is_some()
+        && crate::probe_tokens::cd().try_start_reading(SPINS).is_some();
     if !ok {
         *fails += 1;
     }
@@ -530,6 +530,7 @@ fn pass_cost() -> (u32, u32, u32) {
 
 /// The whole case.
 #[inline(never)]
+#[allow(clippy::needless_range_loop)]
 pub(crate) fn run(font: &FontAtlas) -> [TimingRecord; CD_PAUSE_COUNT] {
     let mut out = [TimingRecord::pending(); CD_PAUSE_COUNT];
     let mut next = 0usize;
@@ -586,7 +587,7 @@ pub(crate) fn run(font: &FontAtlas) -> [TimingRecord; CD_PAUSE_COUNT] {
                         | (u32::from(result.status) << 8),
                 );
                 // Whatever the trial left, the next one starts from a paused drive.
-                if !cdio::try_pause_until_complete(SPINS) {
+                if !crate::probe_tokens::cd().try_pause_until_complete(SPINS) {
                     cleanup_fails += 1;
                 }
             }
@@ -637,13 +638,13 @@ pub(crate) fn run(font: &FontAtlas) -> [TimingRecord; CD_PAUSE_COUNT] {
             ));
         }
         push(record(id + WATCH_EVENTS as u16, seen, sent, u32::from(int2)));
-        if !cdio::try_pause_until_complete(SPINS) {
+        if !crate::probe_tokens::cd().try_pause_until_complete(SPINS) {
             cleanup_fails += 1;
         }
     }
 
     // Leave the drive paused at single speed, as the area expects.
-    let _ = cdio::try_pause_until_complete(SPINS);
+    let _ = crate::probe_tokens::cd().try_pause_until_complete(SPINS);
     let _ = cdio::try_set_mode(0, SPINS);
 
     push(record(

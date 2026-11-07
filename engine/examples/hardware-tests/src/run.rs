@@ -77,7 +77,7 @@ fn test_area(spec: &TestSpec) -> Area {
         0x00C8..=0x00CB => Area::Gte,
         0x00CC..=0x00CF => Area::Gpu,
         0x00D0..=0x00D2 => Area::Perf,
-        0x00D3..=0x00E9 => Area::Gpu,
+        0x00D3..=0x00EA => Area::Gpu,
         _ => match spec.group {
             "CPU" | "RAM" => Area::CpuRam,
             "IRQ" | "DMA" | "TMR" => Area::IrqDmaTimers,
@@ -290,7 +290,7 @@ pub(crate) fn cd_quiesce() {
     let _ = cd_command_until_complete_timed(psx_hw::cd::CMD_PAUSE, &[]);
     cd_drain_irqs();
     let _ = psx_io::cd::try_set_mode(0, CD_SPINS);
-    let _ = psx_io::cd::try_mute(CD_SPINS);
+    let _ = crate::probe_tokens::cd().try_mute(CD_SPINS);
     cd_drain_irqs();
 }
 
@@ -556,7 +556,7 @@ fn verify_silence(run: &mut Run) {
             peak = peak.max(half.unsigned_abs());
         }
     }
-    let playing = match psx_io::cd::try_status(CD_SPINS) {
+    let playing = match crate::probe_tokens::cd().try_status(CD_SPINS) {
         Some(response) => response
             .bytes()
             .first()
@@ -852,6 +852,7 @@ const STEPS: &[Step] = &[
     step(Area::Gpu, "GPU BATCHES", records_gpu_batches),
     step(Area::Gpu, "CLUT ADDRESS REWRITE", records_clut_rewrite),
     step(Area::Gpu, "MDEC DECODE", step_mdec),
+    step(Area::Gpu, "MDEC SETUP DIAGNOSTIC", step_mdec_diag),
     step(Area::Gpu, "GPU PRECISION", precision_gpu_step),
     step(Area::Gpu, "RASTER HASHES", precision_identity_step),
     step(Area::Gpu, "DISPLAY WIDTHS", step_widths),
@@ -919,6 +920,15 @@ const STEPS: &[Step] = &[
 
 fn step_mdec(run: &mut Run) {
     run.push_all(&mdec_check::run());
+}
+
+fn step_mdec_diag(run: &mut Run) {
+    let diag = mdec_diag::run_battery();
+    for record in mdec_diag::records(&diag) {
+        if record.id != TIMING_RECORD_UNUSED {
+            run.push(record);
+        }
+    }
 }
 
 fn step_widths(run: &mut Run) {

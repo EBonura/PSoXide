@@ -326,6 +326,32 @@ fn build() -> BTreeMap<u32, V2Entry> {
             format!("cd_route_stage_{k}"),
             ["capture_peak_left", "capture_peak_right", "state_word"],
         );
+        let detail: [(&str, [&str; 3]); 6] = [
+            ("cd_route_regs", ["spucnt", "spustat", "cd_status_and_irq"]),
+            (
+                "cd_route_volume",
+                ["cd_volume_left", "cd_volume_right", "sectors_serviced"],
+            ),
+            (
+                "cd_route_left_hash",
+                ["left_hash_low", "left_hash_high", "left_nonzero_samples"],
+            ),
+            (
+                "cd_route_right_hash",
+                ["right_hash_low", "right_hash_high", "right_nonzero_samples"],
+            ),
+            (
+                "cd_route_left_energy",
+                ["left_energy_low", "left_energy_high", "left_samples"],
+            ),
+            (
+                "cd_route_right_energy",
+                ["right_energy_low", "right_energy_high", "right_samples"],
+            ),
+        ];
+        for (d, (name, fields)) in detail.into_iter().enumerate() {
+            b.put(0x520 + 8 * k + d as u32, format!("{name}_{k}"), fields);
+        }
     }
     for slot in 0..2u32 {
         for k in 0..7 {

@@ -13,6 +13,13 @@
 //! packed state word (bits 0-3 command results, bit 4 SPUCNT bit 0, bits 8-15
 //! data sectors serviced). Stage 0 is the control: the drive idle, nothing in
 //! the capture buffer, so its peaks are the silence floor.
+//!
+//! Records `0x520 + 8 * stage + k` (v2.10, from the v1.x CD/SPU audio probe):
+//! the rest of what that probe kept per stage, so nothing it measured is lost:
+//! the SPU and CD registers (k 0 and 1), and for each capture half the FNV
+//! hash, the count of non-zero samples and the summed magnitude (k 2 to 5).
+//! The hash is what tells two runs' buffers apart sample for sample; the
+//! energy separates a quiet leak from silence where the peak alone is small.
 
 use crate::console_tests::record;
 use crate::{spu_dma_read, TimingRecord};
@@ -22,6 +29,15 @@ use psx_spu::{self as spu, CdVolume};
 
 /// rec cd_route_stage: capture_peak_left, capture_peak_right, state_word (five records, 0x510-0x514)
 pub(crate) const CD_ROUTE_RECORD: u16 = 0x510;
+/// First of the per-stage detail records: `0x520 + 8 * stage + k`, k 0 to 5.
+pub(crate) const CD_ROUTE_DETAIL_RECORD: u16 = 0x520;
+/// rec cd_route_regs: spucnt, spustat, cd_status_and_irq (stage detail k 0: SPUCNT, SPUSTAT, CD index-0 status in the high byte and request flag in the low)
+/// rec cd_route_volume: cd_volume_left, cd_volume_right, sectors_serviced (stage detail k 1)
+/// rec cd_route_left_hash: left_hash_low, left_hash_high, left_nonzero_samples (stage detail k 2)
+/// rec cd_route_right_hash: right_hash_low, right_hash_high, right_nonzero_samples (stage detail k 3)
+/// rec cd_route_left_energy: left_energy_low, left_energy_high, left_samples (stage detail k 4)
+/// rec cd_route_right_energy: right_energy_low, right_energy_high, right_samples (stage detail k 5)
+const DETAIL_PER_STAGE: usize = 6;
 
 const STAGE_COUNT: usize = 5;
 /// Frames a stage runs, and the frame its capture buffer is read.
@@ -56,13 +72,13 @@ fn apply_stage(stage: usize) -> u8 {
             spu::enable_cd_audio(false);
             let demute = psx_io::cd::try_unmute(200_000).is_some();
             let mode = psx_io::cd::try_set_mode(psx_hw::cd::MODE_DOUBLE_SPEED, 200_000).is_some();
-            let loc = psx_io::cd::try_set_target_lba(CDTEST_LBA, 200_000).is_some();
-            let read = psx_io::cd::try_start_reading(200_000).is_some();
+            let loc = crate::probe_tokens::cd().try_set_target_lba(CDTEST_LBA, 200_000).is_some();
+            let read = crate::probe_tokens::cd().try_start_reading(200_000).is_some();
             demute as u8 | ((mode as u8) << 1) | ((loc as u8) << 2) | ((read as u8) << 3)
         }
         2 => {
             spu::enable_cd_audio(false);
-            psx_io::cd::try_mute(200_000).is_some() as u8
+            crate::probe_tokens::cd().try_mute(200_000).is_some() as u8
         }
         3 => {
             let demute = psx_io::cd::try_unmute(200_000).is_some();
@@ -71,7 +87,7 @@ fn apply_stage(stage: usize) -> u8 {
         }
         _ => {
             spu::enable_cd_audio(false);
-            let paused = psx_io::cd::try_pause_until_complete(200_000);
+            let paused = crate::probe_tokens::cd().try_pause_until_complete(200_000);
             let demute = psx_io::cd::try_unmute(200_000).is_some();
             paused as u8 | ((demute as u8) << 1)
         }
@@ -112,33 +128,59 @@ fn service_cd_sector(state: &mut State) {
     state.sectors = state.sectors.saturating_add(1);
 }
 
-/// Peak magnitude of a capture half.
-fn peak(words: &[u32]) -> u32 {
-    let mut peak = 0u32;
-    for &word in words {
-        for raw in [(word & 0xFFFF) as u16, (word >> 16) as u16] {
-            peak = peak.max((raw as i16 as i32).unsigned_abs());
-        }
-    }
-    peak
+/// What one capture half holds: FNV hash of the raw halfwords, non-zero
+/// samples, peak magnitude, summed magnitude.
+#[derive(Copy, Clone, Default)]
+struct HalfStats {
+    hash: u32,
+    nonzero: u16,
+    peak: u32,
+    energy: u32,
+    samples: u16,
 }
 
+fn half_stats(words: &[u32]) -> HalfStats {
+    let mut stats = HalfStats {
+        hash: 0x811C_9DC5,
+        ..HalfStats::default()
+    };
+    for &word in words {
+        for raw in [(word & 0xFFFF) as u16, (word >> 16) as u16] {
+            stats.hash = (stats.hash ^ raw as u32).wrapping_mul(0x0100_0193);
+            let magnitude = (raw as i16 as i32).unsigned_abs().min(0xFFFF);
+            if raw != 0 {
+                stats.nonzero = stats.nonzero.saturating_add(1);
+            }
+            stats.peak = stats.peak.max(magnitude);
+            stats.energy = stats.energy.saturating_add(magnitude);
+            stats.samples = stats.samples.saturating_add(1);
+        }
+    }
+    stats
+}
+
+/// Records the five stages write.
+pub(crate) const RECORD_COUNT: usize = STAGE_COUNT * (1 + DETAIL_PER_STAGE);
+
 /// Run the five stages.
-pub(crate) fn run() -> [TimingRecord; STAGE_COUNT] {
-    let mut out = [record(CD_ROUTE_RECORD, 0, 0, 0); STAGE_COUNT];
+pub(crate) fn run() -> [TimingRecord; RECORD_COUNT] {
+    let mut out = [record(CD_ROUTE_RECORD, 0, 0, 0); RECORD_COUNT];
     spu::set_cd_volume(CdVolume::MAX, CdVolume::MAX);
     spu::enable_cd_audio(false);
-    let _ = psx_io::cd::try_pause_until_complete(200_000);
+    let _ = crate::probe_tokens::cd().try_pause_until_complete(200_000);
     let _ = psx_io::cd::try_unmute(200_000);
     let mut state = State {
         command_state: 0,
         sectors: 0,
     };
-    for (stage, slot) in out.iter_mut().enumerate() {
+    for stage in 0..STAGE_COUNT {
         state.command_state = apply_stage(stage);
-        let mut left = 0;
-        let mut right = 0;
+        let mut left = HalfStats::default();
+        let mut right = HalfStats::default();
         let mut cnt = 0;
+        let mut spustat = 0;
+        let mut cd_volume = (0, 0);
+        let mut cd_flags = 0;
         for frame in 0..STAGE_FRAMES {
             if (1..=3).contains(&stage) {
                 service_cd_sector(&mut state);
@@ -149,23 +191,50 @@ pub(crate) fn run() -> [TimingRecord; STAGE_COUNT] {
                 // One contiguous DMA read avoids an artificial boundary
                 // between the adjacent CD-L and CD-R capture rings.
                 spu_dma_read(0, buffer);
-                left = peak(&buffer[..CAPTURE_HALF_WORDS]);
-                right = peak(&buffer[CAPTURE_HALF_WORDS..]);
-                // SAFETY: plain SPU register read.
-                cnt = unsafe { psx_io::read_u16(psx_hw::spu::SPUCNT) };
+                left = half_stats(&buffer[..CAPTURE_HALF_WORDS]);
+                right = half_stats(&buffer[CAPTURE_HALF_WORDS..]);
+                // SAFETY: plain SPU and CD register reads.
+                unsafe {
+                    cnt = psx_io::read_u16(psx_hw::spu::SPUCNT);
+                    spustat = psx_io::read_u16(psx_hw::spu::SPUSTAT);
+                    cd_volume = (
+                        psx_io::read_u16(psx_hw::spu::BASE + 0x1B0),
+                        psx_io::read_u16(psx_hw::spu::BASE + 0x1B2),
+                    );
+                    cd_flags = ((psx_io::read_u8(CD_STATUS) as u32) << 8)
+                        | cd_irq_flag() as u32;
+                }
             }
             interrupts::wait_vblank();
         }
-        *slot = record(
+        out[stage] = record(
             CD_ROUTE_RECORD + stage as u16,
-            left,
-            right,
+            left.peak,
+            right.peak,
             (state.command_state & 0xF) as u32
                 | (((cnt & 1) as u32) << 4)
                 | ((state.sectors.min(255) as u32) << 8),
         );
+        let first = CD_ROUTE_DETAIL_RECORD + 8 * stage as u16;
+        let at = STAGE_COUNT + DETAIL_PER_STAGE * stage;
+        let half = |value: u32| (value & 0xFFFF, value >> 16);
+        let (lh_lo, lh_hi) = half(left.hash);
+        let (rh_lo, rh_hi) = half(right.hash);
+        let (le_lo, le_hi) = half(left.energy);
+        let (re_lo, re_hi) = half(right.energy);
+        out[at] = record(first, cnt as u32, spustat as u32, cd_flags);
+        out[at + 1] = record(
+            first + 1,
+            cd_volume.0 as u32,
+            cd_volume.1 as u32,
+            state.sectors as u32,
+        );
+        out[at + 2] = record(first + 2, lh_lo, lh_hi, left.nonzero as u32);
+        out[at + 3] = record(first + 3, rh_lo, rh_hi, right.nonzero as u32);
+        out[at + 4] = record(first + 4, le_lo, le_hi, left.samples as u32);
+        out[at + 5] = record(first + 5, re_lo, re_hi, right.samples as u32);
     }
-    let _ = psx_io::cd::try_pause_until_complete(200_000);
+    let _ = crate::probe_tokens::cd().try_pause_until_complete(200_000);
     spu::enable_cd_audio(false);
     out
 }

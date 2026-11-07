@@ -198,7 +198,7 @@ fn wait_heard(clock: &mut Watch, want: Want, between: &mut dyn FnMut(&mut Watch)
 /// trial cannot hear the last one.
 #[inline(never)]
 fn quiet() -> bool {
-    let _ = psx_io::cd::try_pause_until_complete(SPINS);
+    let _ = crate::probe_tokens::cd().try_pause_until_complete(SPINS);
     for _ in 0..bounds::scale(SILENCE_POLLS) {
         if heard() == Heard::Silent {
             return true;
@@ -222,7 +222,7 @@ fn player() -> Player {
 /// The absolute LBA the head is over (GetlocP), if the drive answers.
 #[inline(never)]
 fn head_lba() -> Option<u32> {
-    let response = psx_io::cd::try_play_position(SPINS)?;
+    let response = crate::probe_tokens::cd().try_play_position(SPINS)?;
     let position = PlayPosition::parse(&response)?;
     let frames = (u32::from(position.absolute_min) * 60 + u32::from(position.absolute_sec)) * 75
         + u32::from(position.absolute_frame);
@@ -235,7 +235,7 @@ fn raw_resume(number: u8, channel: u8, lba: u32) -> bool {
     psx_io::cd::try_unmute(SPINS).is_some()
         && psx_io::cd::try_set_mode(MODE_XA_ADPCM | MODE_XA_FILTER, SPINS).is_some()
         && psx_io::cd::try_command(CMD_SETFILTER, &[number, channel], SPINS).is_some()
-        && psx_io::cd::try_set_target_lba(lba, SPINS).is_some()
+        && crate::probe_tokens::cd().try_set_target_lba(lba, SPINS).is_some()
         && psx_io::cd::try_command(CMD_READS, &[], SPINS).is_some()
 }
 
@@ -534,7 +534,7 @@ pub(crate) fn run(font: &FontAtlas) -> [TimingRecord; XA_MEASURE_COUNT] {
                 })
                 .is_some()
             {
-                let _ = psx_io::cd::try_pause_until_complete(SPINS);
+                let _ = crate::probe_tokens::cd().try_pause_until_complete(SPINS);
                 let paused = head_lba();
                 let (got, took) = data_read(&mut clock);
                 if got == DATA_SECTORS {
@@ -564,7 +564,7 @@ pub(crate) fn run(font: &FontAtlas) -> [TimingRecord; XA_MEASURE_COUNT] {
                 })
                 .is_some()
             {
-                let _ = psx_io::cd::try_pause_until_complete(SPINS);
+                let _ = crate::probe_tokens::cd().try_pause_until_complete(SPINS);
                 let (got, took) = data_read(&mut clock);
                 if got == DATA_SECTORS {
                     read_time.add(sys_ms(took));
@@ -584,7 +584,7 @@ pub(crate) fn run(font: &FontAtlas) -> [TimingRecord; XA_MEASURE_COUNT] {
             progress.step("CD-DA PLAY AFTER READ");
             quiet();
             if start_tone() && wait_heard(&mut clock, Want::Any, &mut |_| {}).is_some() {
-                let _ = psx_io::cd::try_pause_until_complete(SPINS);
+                let _ = crate::probe_tokens::cd().try_pause_until_complete(SPINS);
                 let (got, took) = data_read(&mut clock);
                 if got == DATA_SECTORS {
                     read_time.add(sys_ms(took));

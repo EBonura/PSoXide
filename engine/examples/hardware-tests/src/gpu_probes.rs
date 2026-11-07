@@ -15,19 +15,20 @@
 //! drawing, so GPUSTAT bit 24 going high means the last primitive has been
 //! drawn. Textures are opaque.
 //!
-//! The window family (`0x140` and up) is the grid-line E2 probe, pending port
-//! to the consolidated suite (no suite version of its own). It prices GP0(E2),
+//! The window family (`0x146`-`0x14B`) is the grid-line E2 probe, ported from the
+//! v1.27 line into v2.10 (the v1.27 tree numbered it `0x140`-`0x145`, which the
+//! v2 CPU/DMA matrix already owns; it never ran on a console under the old ids). It prices GP0(E2),
 //! the texture window the grid renderer uses to repeat a texture inside one
 //! primitive. Every grid
 //! packet carries its own E2 word in front of the polygon, so the questions
 //! are what that word costs by itself, what an active window costs, and what
 //! it costs to change window between neighbouring primitives (the texture
 //! cache may flush). Cases: carrying a reset window against carrying none
-//! (`0x140` against `0x103`), an active 64 texel window against none at the
-//! same span (`0x141` against `0x10D`), and the same window every time against
-//! two alternating (`0x142` against `0x143`). `0x144` alternates a reset with
+//! (`0x146` against `0x103`), an active 64 texel window against none at the
+//! same span (`0x147` against `0x10D`), and the same window every time against
+//! two alternating (`0x148` against `0x149`). `0x14A` alternates a reset with
 //! a window, the stream a level of plain and repeating quads makes, and
-//! `0x145` repeats the texture four times across a primitive.
+//! `0x14B` repeats the texture four times across a primitive.
 //!
 //! Timer 2 runs from the DMA kick to the interrupt flag. The poll loop costs
 //! about a dozen cycles a turn, which is the resolution. Everything draws into
@@ -206,20 +207,20 @@ const CASES: [Case; 27] = [
     case(0x114, 64, 2, Shape::GouraudTexTri).span(2),
     // The texture window (GP0(E2)) as the grid renderer uses it: see the
     // module note for which pairs to read against each other.
-    case(0x140, 16, 32, Shape::TexTri).window(Window::Reset),
-    case(0x141, 16, 32, Shape::TexTri)
+    case(0x146, 16, 32, Shape::TexTri).window(Window::Reset),
+    case(0x147, 16, 32, Shape::TexTri)
         .span(63)
         .window(Window::Same(WINDOW_64)),
-    case(0x142, 16, 32, Shape::TexTri)
+    case(0x148, 16, 32, Shape::TexTri)
         .span(31)
         .window(Window::Same(WINDOW_32_A)),
-    case(0x143, 16, 32, Shape::TexTri)
+    case(0x149, 16, 32, Shape::TexTri)
         .span(31)
         .window(Window::Alternate(WINDOW_32_A, WINDOW_32_B)),
-    case(0x144, 16, 32, Shape::TexTri)
+    case(0x14A, 16, 32, Shape::TexTri)
         .span(63)
         .window(Window::Alternate(WINDOW_NONE, WINDOW_64)),
-    case(0x145, 16, 32, Shape::TexTri)
+    case(0x14B, 16, 32, Shape::TexTri)
         .span(255)
         .window(Window::Same(WINDOW_64)),
     // Last on purpose: it leaves a lit, textured triangle in off-screen VRAM,

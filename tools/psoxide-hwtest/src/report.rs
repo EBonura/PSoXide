@@ -1544,6 +1544,9 @@ pub fn print_report(
     for row in console_rows(&capture.records) {
         say!("{row}");
     }
+    for row in mdec_diag_rows(&capture.records) {
+        say!("{row}");
+    }
     for row in cd_pause_rows(&capture.records) {
         say!("{row}");
     }
@@ -1599,4 +1602,213 @@ pub fn print_report(
         }
     }
     Ok(0)
+}
+
+const MDEC_DIAG_FIRST: u32 = 0x230;
+const MDEC_DIAG_OVERVIEW: u32 = 0x290;
+const MDEC_DIAG_TRACE: u32 = 0x298;
+const MDEC_DIAG_CONTROL: u32 = 0x2A8;
+
+// v2.10 MDEC SETUP DIAGNOSTIC (ported from the v1.26 MDEC DIAGNOSTIC; guest: mdec_diag.rs, `records` documents the layout).
+const MDEC_SEQUENCES: [&str; 6] = [
+    "A control v1.25",
+    "B settle then enable",
+    "C fixed delay",
+    "D cpu tables",
+    "E psn00bsdk order",
+    "F sdk driver",
+];
+const MDEC_STEPS: [&str; 7] = [
+    "none",
+    "reset settle",
+    "quant upload",
+    "scale upload",
+    "idle after tables",
+    "probe dma0 in",
+    "probe dma1 out",
+];
+const MDEC_SNAPSHOTS: [&str; 6] = [
+    "before_reset",
+    "after_reset",
+    "after_enable",
+    "after_command",
+    "after_tables",
+    "after_probe",
+];
+
+const MDEC_TRACES: [&str; 3] = ["from_idle", "from_busy", "from_busy_with_enable"];
+const MDEC_NEVER: i64 = 0xFFFF;
+
+/// MDEC1 status decoded per psx-spx.
+fn mdec_status_text(value: u64) -> String {
+    let flags: Vec<&str> = [
+        (31, "out_empty"),
+        (30, "in_full"),
+        (29, "busy"),
+        (28, "in_req"),
+        (27, "out_req"),
+    ]
+    .iter()
+    .filter(|(bit, _)| value >> bit & 1 != 0)
+    .map(|(_, name)| *name)
+    .collect();
+    let block = value >> 16 & 7;
+    let remaining = value & 0xFFFF;
+    let flags = if flags.is_empty() {
+        "-".to_string()
+    } else {
+        flags.join(" ")
+    };
+    format!("0x{value:08X} [{flags} block={block} words-1={remaining:#06x}]")
+}
+
+fn mdec_stream(by_id: &HashMap<u32, &Record>, first: u32, records: u32) -> Vec<i64> {
+    let mut halves = Vec::new();
+    for k in 0..records {
+        let Some(record) = by_id.get(&(first + k)) else {
+            break;
+        };
+        halves.extend([record.minimum, record.median, record.maximum]);
+    }
+    halves
+}
+
+fn shr(value: u64, count: u64) -> u64 {
+    if count >= 64 {
+        0
+    } else {
+        value >> count
+    }
+}
+
+/// The MDEC SETUP DIAGNOSTIC, unpacked. Empty unless the capture carries it.
+pub fn mdec_diag_rows(records: &[Record]) -> Vec<String> {
+    let by_id = by_id(records);
+    let Some(overview) = by_id.get(&MDEC_DIAG_OVERVIEW) else {
+        return Vec::new();
+    };
+    let mut rows = Vec::new();
+    rows.push(format!(
+        "# mdec_diag runs={} batteries={}",
+        overview.median, overview.maximum
+    ));
+    rows.push("mdec_diag,sequence,field,value".to_string());
+    let clocks = |v: i64| {
+        if v == MDEC_NEVER {
+            "never".to_string()
+        } else {
+            v.to_string()
+        }
+    };
+    for (v, name) in MDEC_SEQUENCES.iter().enumerate() {
+        let h = mdec_stream(&by_id, MDEC_DIAG_FIRST + 0x10 * v as u32, 14);
+        if h.len() < 27 {
+            rows.push(format!("mdec_diag,{name},missing,{} halfwords", h.len()));
+            continue;
+        }
+        let word = |i: usize| (h[i] | h[i + 1] << 16) as u64;
+        let (mask, runs) = ((h[0] & 0xFF) as u64, (h[0] >> 8) as u64);
+        let run_fails = word(9);
+        let fails: Vec<&str> = (0..runs)
+            .map(|r| {
+                MDEC_STEPS[(shr(run_fails, 4 * r) & 0xF).min(MDEC_STEPS.len() as u64 - 1) as usize]
+            })
+            .collect();
+        rows.push(format!(
+            "mdec_diag,{name},worked,{}/{runs} runs_1_to_8={}",
+            mask.count_ones(),
+            format!("{mask:08b}").chars().rev().collect::<String>()
+        ));
+        rows.push(format!(
+            "mdec_diag,{name},per_run_fail,{}",
+            fails.join(" | ")
+        ));
+        rows.push(format!(
+            "mdec_diag,{name},detail_run,{} fail={}",
+            (h[1] >> 8) + 1,
+            MDEC_STEPS[((h[1] & 0xFF) as usize).min(MDEC_STEPS.len() - 1)]
+        ));
+        rows.push(format!("mdec_diag,{name},settle_clocks,{}", clocks(h[2])));
+        rows.push(format!("mdec_diag,{name},request_clocks,{}", clocks(h[3])));
+        rows.push(format!(
+            "mdec_diag,{name},probe_request_clocks,{}",
+            clocks(h[4])
+        ));
+        if v == 5 {
+            rows.push(format!(
+                "mdec_diag,{name},sdk_driver,enable_writes={} cpu_uploads={} reset_settled={}",
+                h[5] & 0xFF,
+                h[5] >> 8 & 0x7F,
+                h[5] >> 15
+            ));
+        }
+        let (taken, rescue) = (h[6] & 0xFF, h[6] >> 8);
+        for (slot, snapshot) in MDEC_SNAPSHOTS.iter().enumerate() {
+            let value = word(11 + 2 * slot);
+            let text = if taken >> slot & 1 != 0 {
+                mdec_status_text(value)
+            } else {
+                "not read".to_string()
+            };
+            rows.push(format!("mdec_diag,{name},status_{snapshot},{text}"));
+        }
+        rows.push(format!(
+            "mdec_diag,{name},probe,words={}/128 flat={} first=0x{:08X}",
+            h[7] & 0x7FFF,
+            h[7] >> 15,
+            word(23)
+        ));
+        if v == 0 {
+            let how = match rescue {
+                0 => "not tried (no timeout)".to_string(),
+                1 => "freed the stuck DMA".to_string(),
+                2 => "did not free it".to_string(),
+                other => other.to_string(),
+            };
+            let status = if rescue != 0 {
+                format!(" status={}", mdec_status_text(word(25)))
+            } else {
+                String::new()
+            };
+            rows.push(format!("mdec_diag,{name},late_enable,{how}{status}"));
+        }
+        if h[8] != 0 && h.len() >= 39 {
+            let w: Vec<u64> = (0..6).map(|i| word(27 + 2 * i)).collect();
+            let (chcr, bcr, madr, dpcr, dicr, kick) = (w[0], w[1], w[2], w[3], w[4], w[5]);
+            let moved = ((madr & 0xFF_FFFF) as i64 - (kick & 0xFF_FFFF) as i64).div_euclid(4);
+            rows.push(format!(
+                "mdec_diag,{name},dma_timeout,chcr=0x{chcr:08X} bcr=0x{bcr:08X} madr=0x{madr:08X} kick_madr=0x{kick:08X} words_moved={moved} blocks_left={} dpcr=0x{dpcr:08X} dicr=0x{dicr:08X}",
+                bcr >> 16
+            ));
+        }
+    }
+    for (t, name) in MDEC_TRACES.iter().enumerate() {
+        let h = mdec_stream(&by_id, MDEC_DIAG_TRACE + 5 * t as u32, 5);
+        if h.len() < 13 {
+            continue;
+        }
+        let samples: Vec<String> = (0..(h[0].min(4) as usize))
+            .map(|i| {
+                format!(
+                    "{}clk:{}",
+                    h[1 + 3 * i],
+                    mdec_status_text((h[2 + 3 * i] | h[3 + 3 * i] << 16) as u64)
+                )
+            })
+            .collect();
+        rows.push(format!("mdec_reset_trace,{name},{}", samples.join(" -> ")));
+    }
+    let h = mdec_stream(&by_id, MDEC_DIAG_CONTROL, 3);
+    if h.len() >= 9 {
+        let (cpu_sum, dma_sum) = ((h[3] | h[4] << 16) as u64, (h[5] | h[6] << 16) as u64);
+        rows.push(format!(
+            "mdec_control,cpu_ok={} dma_ok={} sums_equal={} cpu_words={} dma_words={} cpu_sum=0x{cpu_sum:08X} dma_sum=0x{dma_sum:08X}",
+            h[0] & 1,
+            h[0] >> 1 & 1,
+            h[0] >> 2 & 1,
+            h[1],
+            h[2]
+        ));
+    }
+    rows
 }

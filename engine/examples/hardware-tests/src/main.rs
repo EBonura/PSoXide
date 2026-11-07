@@ -65,14 +65,17 @@ mod field_rule;
 mod gpu_probes;
 mod handoff_probe;
 mod kernel_timing;
+mod list_upload_probe;
 mod ll_sweep;
 mod lever_probes;
 mod list_busy_probes;
 mod mdec_check;
+mod mdec_diag;
 mod pad_engine;
 mod payload;
 mod perf_probes;
 mod photo;
+mod probe_tokens;
 mod radius;
 mod records;
 mod regs;
@@ -224,9 +227,9 @@ unsafe extern "C" {
 //
 // History, one entry per version: docs/hardware-test-versions.md.
 const SUITE_VERSION_MAJOR: u8 = 2;
-const SUITE_VERSION_MINOR: u8 = 8;
+const SUITE_VERSION_MINOR: u8 = 10;
 /// Display form. Keep in step with the two constants above.
-const SUITE_VERSION: &str = "HWTEST v2.9";
+const SUITE_VERSION: &str = "HWTEST v2.10";
 /// `CDTEST.BIN`: the deterministic read region the CD probes use, placed so it
 /// ends at LBA 1024. The console-diag build's stop panel pushes the boot EXE
 /// past the 541 sectors the plain layout allows, so that build gives the
@@ -238,7 +241,7 @@ const SCREEN_H: i16 = 240;
 const FONT_TPAGE: TexturePage = TexturePage::new(320, 0, TextureDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 
-const TEST_COUNT: usize = 234;
+const TEST_COUNT: usize = 235;
 const PAD_POLL_TEST_INDEX: usize = 26;
 
 /// Number of timing variants the SIO records sweep.
@@ -421,7 +424,7 @@ struct ScanReport {
 }
 
 /// Slots in the timing report. `run::tests` asserts the largest run fits.
-const TIMING_RECORD_COUNT: usize = 1500;
+const TIMING_RECORD_COUNT: usize = 1700;
 const MEMORY_CONTROL_REGISTER_COUNT: usize = MEMORY_CONTROL_REGISTERS.len();
 /// Captured with the timing block, in this order (the host names them by
 /// position). The first nine are the bus configuration the BIOS left.
@@ -1930,6 +1933,14 @@ const TESTS: [TestSpec; TEST_COUNT] = [
         name: "CPU during walk: scratchpad walk clocks",
         run: list_busy_probes::test_spad_cycles,
     },
+    // Image transfers inside list nodes of at most 16 words, as the grid
+    // runtime's sky stream sends them (list_upload_probe.rs). Index 234.
+    TestSpec {
+        id: 0x00ea,
+        group: "DMA",
+        name: "list upload: A0h rows in 16-word nodes read back",
+        run: list_upload_probe::test_list_upload,
+    },
 ];
 
 fn mix32(mut hash: u32, value: u32) -> u32 {
@@ -2281,7 +2292,7 @@ fn cd_clock_reset() {
 /// passes `CD_DEADLINE_HBLANKS`. Assumes the caller has already reset the
 /// clock, so the deadline covers the whole operation being timed.
 fn cd_command_until_complete_timed(command: u8, params: &[u8]) -> bool {
-    let Some(saved) = psx_io::cd::dispatch_command(command, params, CD_SPINS) else {
+    let Some(saved) = crate::probe_tokens::cd().dispatch_command(command, params, CD_SPINS) else {
         return false;
     };
     let mut seen_ack = false;
@@ -2316,7 +2327,7 @@ fn cd_command_until_complete_timed(command: u8, params: &[u8]) -> bool {
             }
         }
     };
-    psx_io::cd::restore_irq_output(saved);
+    crate::probe_tokens::cd().restore_irq_output(saved);
     ok
 }
 
@@ -2355,8 +2366,8 @@ fn cd_read_with_audio(playing: bool, sectors: u32) -> u16 {
 
     // Data mode for the read itself.
     if psx_io::cd::try_set_mode(0, CD_SPINS).is_none()
-        || psx_io::cd::try_set_target_lba(CD_TEST_LBA, CD_SPINS).is_none()
-        || psx_io::cd::try_start_reading(CD_SPINS).is_none()
+        || crate::probe_tokens::cd().try_set_target_lba(CD_TEST_LBA, CD_SPINS).is_none()
+        || crate::probe_tokens::cd().try_start_reading(CD_SPINS).is_none()
     {
         cd_clock_reset();
         let _ = cd_command_until_complete_timed(psx_hw::cd::CMD_PAUSE, &[]);
@@ -2376,7 +2387,7 @@ fn cd_read_with_audio(playing: bool, sectors: u32) -> u16 {
     });
     cd_clock_reset();
     let _ = cd_command_until_complete_timed(psx_hw::cd::CMD_PAUSE, &[]);
-    let _ = psx_io::cd::try_mute(CD_SPINS);
+    let _ = crate::probe_tokens::cd().try_mute(CD_SPINS);
     if primed {
         elapsed
     } else {
@@ -2399,7 +2410,7 @@ fn cd_play_start() -> u16 {
         // rather than the command merely having been accepted.
         let mut polls = 0;
         while polls < 64 {
-            if let Some(response) = psx_io::cd::try_play_position(CD_SPINS) {
+            if let Some(response) = crate::probe_tokens::cd().try_play_position(CD_SPINS) {
                 if !response.is_empty() {
                     return true;
                 }
@@ -2410,7 +2421,7 @@ fn cd_play_start() -> u16 {
     });
     cd_clock_reset();
     let _ = cd_command_until_complete_timed(psx_hw::cd::CMD_PAUSE, &[]);
-    let _ = psx_io::cd::try_mute(CD_SPINS);
+    let _ = crate::probe_tokens::cd().try_mute(CD_SPINS);
     elapsed
 }
 
@@ -2426,11 +2437,11 @@ fn cd_getlocp_during_playback() -> u16 {
     cd_clock_reset();
     while timers::counter(timers::Timer::Timer1) < 1_000 {}
     let elapsed = cd_timed(|| {
-        psx_io::cd::try_play_position(CD_SPINS).is_some_and(|response| !response.is_empty())
+        crate::probe_tokens::cd().try_play_position(CD_SPINS).is_some_and(|response| !response.is_empty())
     });
     cd_clock_reset();
     let _ = cd_command_until_complete_timed(psx_hw::cd::CMD_PAUSE, &[]);
-    let _ = psx_io::cd::try_mute(CD_SPINS);
+    let _ = crate::probe_tokens::cd().try_mute(CD_SPINS);
     elapsed
 }
 
@@ -2468,7 +2479,7 @@ fn cd_sector_timed() -> bool {
 /// previous record happened to leave the head.
 fn cd_park(lba: u32) -> bool {
     cd_clock_reset();
-    psx_io::cd::try_set_target_lba(lba, CD_SPINS).is_some()
+    crate::probe_tokens::cd().try_set_target_lba(lba, CD_SPINS).is_some()
         && cd_command_until_complete_timed(psx_hw::cd::CMD_SEEKL, &[])
 }
 
@@ -2479,7 +2490,7 @@ fn cd_seek_backward(distance: u32) -> u16 {
     if !cd_park(origin) {
         return CD_FAILED;
     }
-    if psx_io::cd::try_set_target_lba(CD_TEST_LBA, CD_SPINS).is_none() {
+    if crate::probe_tokens::cd().try_set_target_lba(CD_TEST_LBA, CD_SPINS).is_none() {
         return CD_FAILED;
     }
     cd_timed(|| cd_command_until_complete_timed(psx_hw::cd::CMD_SEEKL, &[]))
@@ -2491,7 +2502,7 @@ fn cd_seek_distance(distance: u32) -> u16 {
         return CD_FAILED;
     }
     let target = CD_TEST_LBA + distance;
-    if psx_io::cd::try_set_target_lba(target, CD_SPINS).is_none() {
+    if crate::probe_tokens::cd().try_set_target_lba(target, CD_SPINS).is_none() {
         return CD_FAILED;
     }
     cd_timed(|| cd_command_until_complete_timed(psx_hw::cd::CMD_SEEKL, &[]))
@@ -2507,8 +2518,8 @@ fn cd_read_throughput(double_speed: bool, sectors: u32) -> u16 {
     };
     if psx_io::cd::try_set_mode(mode, CD_SPINS).is_none()
         || !cd_park(CD_TEST_LBA)
-        || psx_io::cd::try_set_target_lba(CD_TEST_LBA, CD_SPINS).is_none()
-        || psx_io::cd::try_start_reading(CD_SPINS).is_none()
+        || crate::probe_tokens::cd().try_set_target_lba(CD_TEST_LBA, CD_SPINS).is_none()
+        || crate::probe_tokens::cd().try_start_reading(CD_SPINS).is_none()
     {
         cd_clock_reset();
         let _ = cd_command_until_complete_timed(psx_hw::cd::CMD_PAUSE, &[]);
@@ -3640,13 +3651,13 @@ fn prime_rtpt_hazard_state() {
     }
     #[cfg(not(target_arch = "mips"))]
     {
-        mtc2!(0, v0_xy);
-        mtc2!(1, v0_z);
-        mtc2!(2, v1_xy);
-        mtc2!(3, v1_z);
-        mtc2!(4, v2_xy);
-        mtc2!(5, v2_z);
-        unsafe { gte_ops::rtpt() };
+        write_data!(0, v0_xy);
+        write_data!(1, v0_z);
+        write_data!(2, v1_xy);
+        write_data!(3, v1_z);
+        write_data!(4, v2_xy);
+        write_data!(5, v2_z);
+        unsafe { gte_ops::project_triple() };
     }
     gte_nops!(64);
 }
@@ -3683,13 +3694,13 @@ macro_rules! rtpt_input_gap_probe {
             }
             #[cfg(not(target_arch = "mips"))]
             {
-                mtc2!(0, v0_xy);
-                mtc2!(1, v0_z);
-                mtc2!(2, v1_xy);
-                mtc2!(3, v1_z);
-                mtc2!(4, v2_xy);
-                mtc2!(5, v2_z);
-                unsafe { gte_ops::rtpt() };
+                write_data!(0, v0_xy);
+                write_data!(1, v0_z);
+                write_data!(2, v1_xy);
+                write_data!(3, v1_z);
+                write_data!(4, v2_xy);
+                write_data!(5, v2_z);
+                unsafe { gte_ops::project_triple() };
             }
             gte_nops!(64);
             rtpt_result_digest(
@@ -3751,19 +3762,19 @@ macro_rules! rtpt_read_gap_probe {
             }
             #[cfg(not(target_arch = "mips"))]
             {
-                mtc2!(0, v0_xy);
-                mtc2!(1, v0_z);
-                mtc2!(2, v1_xy);
-                mtc2!(3, v1_z);
-                mtc2!(4, v2_xy);
-                mtc2!(5, v2_z);
-                unsafe { gte_ops::rtpt() };
-                v0_xy = mfc2!(12);
-                v0_z = mfc2!(13);
-                v1_xy = mfc2!(14);
-                v1_z = mfc2!(17);
-                v2_xy = mfc2!(18);
-                v2_z = mfc2!(19);
+                write_data!(0, v0_xy);
+                write_data!(1, v0_z);
+                write_data!(2, v1_xy);
+                write_data!(3, v1_z);
+                write_data!(4, v2_xy);
+                write_data!(5, v2_z);
+                unsafe { gte_ops::project_triple() };
+                v0_xy = read_data!(12);
+                v0_z = read_data!(13);
+                v1_xy = read_data!(14);
+                v1_z = read_data!(17);
+                v2_xy = read_data!(18);
+                v2_z = read_data!(19);
             }
             rtpt_result_digest(v0_xy, v0_z, v1_xy, v1_z, v2_xy, v2_z)
         }
@@ -6483,7 +6494,7 @@ fn test_gpu_dma_direction_after_otc() -> TestResult {
     // The helper is bounded now, so a wedged OTC channel reports instead
     // of hanging the battery; bit 2 carries whether it completed.
     // SAFETY: single-threaded test battery, no other live borrow of OT.
-    let cleared = dma::clear_ordering_table(unsafe { &mut OT });
+    let cleared = probe_tokens::clear_ordering_table(unsafe { &mut OT });
     gpu_io::write_display_control(0x0400_0000 | 2);
     let observed = ((gpu_io::status().bits() >> 29) & 0b11) | ((cleared as u32) << 2);
     expect_eq(0b110, observed, "dma dir | otc done")
@@ -6729,7 +6740,7 @@ fn test_scratchpad_roundtrip() -> TestResult {
 }
 
 fn test_cdrom_getstat_response() -> TestResult {
-    match psx_io::cd::try_status(200_000) {
+    match crate::probe_tokens::cd().try_status(200_000) {
         Some(response) if !response.is_empty() => {
             TestResult::info(1, response.bytes()[0] as u32, "getstat")
         }
@@ -7656,7 +7667,7 @@ fn timed_gpu_line_batch(shaded: bool, length: u16, count: u16) -> u16 {
 fn timed_cdrom_getstat() -> u16 {
     timers::set_mode(timers::Timer::Timer2, 0);
     timers::set_counter(timers::Timer::Timer2, 0);
-    let response = psx_io::cd::try_status(200_000);
+    let response = crate::probe_tokens::cd().try_status(200_000);
     let elapsed = timers::counter(timers::Timer::Timer2);
     if response.is_some_and(|value| !value.is_empty()) {
         elapsed

@@ -75,7 +75,7 @@ impl HardwareTests {
             manual_until: 0,
             clock: 0,
             controller_test: ControllerTest::new(),
-            memory_card: MemoryCardDiagnostic::new(),
+            memory_card: crate::probe_tokens::memcard_diagnostic(),
             memcard_armed: false,
         }
     }
@@ -174,7 +174,7 @@ impl Scene for HardwareTests {
                             self.mode = Mode::ControllerTest;
                         }
                         3 => {
-                            self.memory_card = MemoryCardDiagnostic::new();
+                            self.memory_card = crate::probe_tokens::memcard_diagnostic();
                             self.memcard_armed = false;
                             self.mode = Mode::MemoryCard;
                         }

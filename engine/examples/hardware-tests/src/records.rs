@@ -508,7 +508,7 @@ pub(crate) fn push_cd_records(records: &mut [TimingRecord; TIMING_RECORD_COUNT],
         records,
         next,
         sample_timing(0x96, 1, || {
-            cd_timed(|| psx_io::cd::try_status(CD_SPINS).is_some())
+            cd_timed(|| crate::probe_tokens::cd().try_status(CD_SPINS).is_some())
         }),
     );
     push_timing_record(
@@ -522,7 +522,7 @@ pub(crate) fn push_cd_records(records: &mut [TimingRecord; TIMING_RECORD_COUNT],
         records,
         next,
         sample_timing(0x98, 1, || {
-            cd_timed(|| psx_io::cd::try_play_position(CD_SPINS).is_some())
+            cd_timed(|| crate::probe_tokens::cd().try_play_position(CD_SPINS).is_some())
         }),
     );
     push_timing_record(
