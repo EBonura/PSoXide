@@ -189,7 +189,9 @@ pub(crate) fn record(base: Option<&Value>, installed: &Installed<'_>) -> Result<
         fields.remove("replaced");
     }
     overlay(&mut record, facts);
-    Ok((serde_json::to_string_pretty(&record)? + "\n").into_bytes())
+    let mut text = serde_json::to_string_pretty(&record)?;
+    text.push('\n');
+    Ok(text.into_bytes())
 }
 
 /// Merge `over` into `base`: objects merge key by key, anything else in `over` wins.

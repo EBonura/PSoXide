@@ -249,7 +249,8 @@ pub fn command_reset_count() -> u32 {
 /// else writes it.
 static mut DRAW_DONE_LIST: [u32; 1 + psx_hw::gpu::gp0::DRAW_DONE_WORDS] = {
     let mut list = [0u32; 1 + psx_hw::gpu::gp0::DRAW_DONE_WORDS];
-    list[0] = ((psx_hw::gpu::gp0::DRAW_DONE_WORDS as u32) << psx_hw::dma::linked_list::LENGTH_SHIFT)
+    list[0] = ((psx_hw::gpu::gp0::DRAW_DONE_WORDS as u32)
+        << psx_hw::dma::linked_list::LENGTH_SHIFT)
         | psx_hw::dma::linked_list::END;
     let mut i = 0;
     while i < psx_hw::gpu::gp0::DRAW_DONE_WORDS {
@@ -261,6 +262,7 @@ static mut DRAW_DONE_LIST: [u32; 1 + psx_hw::gpu::gp0::DRAW_DONE_WORDS] = {
 
 /// Pointer to the draw-done list (a node chains can end on).
 #[inline]
+#[must_use]
 pub fn draw_done_list() -> *const u32 {
     core::ptr::addr_of!(DRAW_DONE_LIST).cast::<u32>()
 }
@@ -273,8 +275,15 @@ pub fn draw_done_list() -> *const u32 {
 ///
 /// `x` must be a multiple of 16 (GP0(02h) rounds it down) and the block must
 /// lie inside VRAM and stay unused.
+///
+/// # Panics
+///
+/// When `x` is not a multiple of 16, or the block would not fit VRAM.
 pub fn set_draw_done_scratch(x: u16, y: u16) {
-    assert!(x % 16 == 0 && x <= 1008 && y <= 504, "the scratch block must fit VRAM");
+    assert!(
+        x.is_multiple_of(16) && x <= 1008 && y <= 504,
+        "the scratch block must fit VRAM"
+    );
     #[cfg(target_arch = "mips")]
     let _ = crate::dma::wait_done(crate::dma::Channel::Gpu, crate::dma::DEFAULT_SPINS);
     let at = psx_hw::gpu::pack_xy(x, y);
@@ -402,18 +411,34 @@ mod tests {
     #[test]
     fn the_draw_done_kick_never_reaches_the_direct_access_guard() {
         let source = include_str!("gpu.rs");
-        let from = source.find("fn kick_draw_done_list()").expect("the kick exists");
+        let from = source
+            .find("fn kick_draw_done_list()")
+            .expect("the kick exists");
         let body = &source[from..];
         let body = &body[..body.find("\n}\n").expect("the kick ends")];
-        assert!(body.contains("dma::start_unguarded("), "the kick starts the walk unguarded");
-        assert!(!body.contains("dma::start("), "dma::start runs the guard on its address store");
-        assert!(!body.contains("raw::set_address"), "raw::set_address runs the guard");
-        assert!(!body.contains("run_direct_access_guard"), "the kick is already past the guard");
+        assert!(
+            body.contains("dma::start_unguarded("),
+            "the kick starts the walk unguarded"
+        );
+        assert!(
+            !body.contains("dma::start("),
+            "dma::start runs the guard on its address store"
+        );
+        assert!(
+            !body.contains("raw::set_address"),
+            "raw::set_address runs the guard"
+        );
+        assert!(
+            !body.contains("run_direct_access_guard"),
+            "the kick is already past the guard"
+        );
     }
 
     #[test]
     fn the_scratch_block_can_be_moved_and_the_list_stays_well_formed() {
         let words = psx_hw::gpu::gp0::DRAW_DONE_WORDS;
+        // SAFETY: `draw_done_list()` points at the static list of `1 + DRAW_DONE_WORDS` words, and no
+        // channel 2 walk runs on the host.
         let list = || unsafe { core::slice::from_raw_parts(draw_done_list(), 1 + words) };
         assert_eq!(&list()[1..], &psx_hw::gpu::gp0::DRAW_DONE_SEQUENCE);
         set_draw_done_scratch(960, 488);

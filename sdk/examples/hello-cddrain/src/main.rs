@@ -77,7 +77,7 @@ fn expected_byte(index: u32, sectors: u32) -> u8 {
         index
             .wrapping_mul(37)
             .wrapping_add(index >> 3)
-            .wrapping_add(0x5D) as u8
+            .wrapping_add(0x5d) as u8
     }
 }
 
@@ -296,9 +296,16 @@ fn check_partial(report: &mut Report, reader: &mut SectorReader) {
     let tail_ok = (0..25).all(|word| {
         // SAFETY: inside BIG.
         let got = unsafe { big().add(37 * SECTOR_WORDS + word).read_volatile() };
-        got == expected_word((40 + 37) * SECTOR_WORDS as u32 + word as u32, file_sectors())
+        got == expected_word(
+            (40 + 37) * SECTOR_WORDS as u32 + word as u32,
+            file_sectors(),
+        )
     });
-    report.push(if guard_ok { "guard intact" } else { "GUARD OVERWRITTEN" });
+    report.push(if guard_ok {
+        "guard intact"
+    } else {
+        "GUARD OVERWRITTEN"
+    });
     report.finish(state == Some(DrainState::Done) && first_ok && tail_ok && guard_ok);
 }
 
@@ -358,7 +365,11 @@ fn check_watchdog(report: &mut Report, reader: &mut SectorReader) {
     let state = busy_until_settled(&mut rounds);
     drain::cancel();
     let watchdog = matches!(state, DrainState::Failed(DrainFailure::Watchdog));
-    report.push(if watchdog { "ended by the watchdog, " } else { "NOT ended, " });
+    report.push(if watchdog {
+        "ended by the watchdog, "
+    } else {
+        "NOT ended, "
+    });
     let mut again_rounds = 0;
     let again = read(reader, 300, 8, 0, &mut again_rounds);
     let recovered = again == Some(DrainState::Done) && verify(big(), 300, 8);

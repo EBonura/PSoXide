@@ -408,9 +408,18 @@ pub mod gp0 {
         let at = super::pack_xy(DRAW_DONE_SCRATCH.0, DRAW_DONE_SCRATCH.1);
         let size = super::pack_xy(16, 8);
         [
-            REQUEST_IRQ, FILL_RECT, at, size,
-            REQUEST_IRQ, FILL_RECT, at, size,
-            REQUEST_IRQ, FILL_RECT, at, size,
+            REQUEST_IRQ,
+            FILL_RECT,
+            at,
+            size,
+            REQUEST_IRQ,
+            FILL_RECT,
+            at,
+            size,
+            REQUEST_IRQ,
+            FILL_RECT,
+            at,
+            size,
             REQUEST_IRQ,
         ]
     };

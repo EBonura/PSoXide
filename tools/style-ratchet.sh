@@ -33,6 +33,14 @@ clippy::fn_params_excessive_bools clippy::needless_for_each
 clippy::disallowed_types clippy::disallowed_methods missing_docs"
 LINTS="$CLEAN $BACKLOG"
 
+CONTENT="psxed psxed-audio psxed-gltf psxed-obj psxed-project psxed-tex psoxide-dev psoxide-hwtest psoxide-perf"
+CONTENT_EXCLUDE=""
+CONTENT_PACKAGES=""
+for c in $CONTENT; do
+	CONTENT_EXCLUDE="$CONTENT_EXCLUDE --exclude $c"
+	CONTENT_PACKAGES="$CONTENT_PACKAGES -p $c"
+done
+
 WARN=""
 for l in $LINTS; do WARN="$WARN -W $l"; done
 
@@ -55,7 +63,12 @@ trap 'rm -rf "$NOW" "$CONF"' EXIT
 cat clippy.toml tools/style-ratchet-clippy.toml >"$CONF/clippy.toml"
 export CLIPPY_CONF_DIR="$CONF"
 {
-	measure root --workspace --lib --bins --all-features
+	# `content` is what came in from PSoXide-editor (the psxed cookers and project model and
+	# the host tools); `engine` is the engine workspace. Each has its own baseline so the
+	# older scopes keep their meaning and the newer ones can only go down.
+	measure root --workspace $CONTENT_EXCLUDE --lib --bins --all-features
+	measure content $CONTENT_PACKAGES --lib --bins --all-features
+	measure engine --manifest-path engine/Cargo.toml --workspace --lib --bins --all-features
 	measure sdk --manifest-path sdk/Cargo.toml --workspace --lib --bins --all-features
 	measure sdk-guest --manifest-path sdk/Cargo.toml --workspace --lib --target mipsel-sony-psx \
 		-Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem

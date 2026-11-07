@@ -634,12 +634,18 @@ pub fn panel_eyes(
     // Citadel.
     let dilate: i32 = spacing * PANEL_CAMERA_OUT_TENTHS / 10;
     if dilate > 0 {
-        let key = |x: f32, z: f32| ((x / sector as f32).floor() as i32, (z / sector as f32).floor() as i32);
+        let key = |x: f32, z: f32| {
+            (
+                (x / sector as f32).floor() as i32,
+                (z / sector as f32).floor() as i32,
+            )
+        };
         let stood: Vec<(usize, f32, f32, f32)> = groups.values().flatten().copied().collect();
         let mut taken: std::collections::HashSet<(i32, i32)> =
             stood.iter().map(|s| key(s.1, s.3)).collect();
         // Nearest standable sector first, so a point takes the height of the floor it hangs near.
-        let mut candidates: std::collections::HashMap<(i32, i32), (i32, usize, f32)> = Default::default();
+        let mut candidates: std::collections::HashMap<(i32, i32), (i32, usize, f32)> =
+            Default::default();
         for (k, s) in stood.iter().enumerate() {
             let (sx, sz) = key(s.1, s.3);
             for dz in -dilate..=dilate {

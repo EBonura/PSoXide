@@ -62,7 +62,11 @@ pub struct Layout<const N: usize> {
 }
 
 impl<const N: usize> Layout<N> {
-    /// Build the table; `rects[n]` is owner `n`'s region. Fails the build for more than 32 owners.
+    /// Build the table; `rects[n]` is owner `n`'s region.
+    ///
+    /// # Panics
+    ///
+    /// For more than 32 owners; in a `const` that fails the build.
     pub const fn new(rects: [VramRect; N]) -> Self {
         assert!(N <= 32, "a layout holds at most 32 owners");
         let mut corners = [[0u16; 4]; N];

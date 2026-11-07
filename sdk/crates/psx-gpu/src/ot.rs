@@ -1199,7 +1199,9 @@ mod tests {
     fn the_shared_draw_done_node_is_the_sequence_then_the_end() {
         let words = psx_hw::gpu::gp0::DRAW_DONE_WORDS;
         // SAFETY: the node is a tag and its words of immutable static data.
-        let node = unsafe { core::slice::from_raw_parts(crate::chain::DRAW_DONE_NODE.as_ptr(), 1 + words) };
+        let node = unsafe {
+            core::slice::from_raw_parts(crate::chain::DRAW_DONE_NODE.as_ptr(), 1 + words)
+        };
         assert_eq!(node[0] >> 24, words as u32);
         assert_eq!(node[0] & OT_ADDR_MASK, OT_END);
         assert_eq!(&node[1..], &psx_hw::gpu::gp0::DRAW_DONE_SEQUENCE);

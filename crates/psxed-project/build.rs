@@ -16,5 +16,8 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     let chosen = if live.is_file() { live } else { snapshot };
     let chosen = chosen.canonicalize().expect("starter project.ron resolves");
-    println!("cargo:rustc-env=PSXED_STARTER_PROJECT_RON={}", chosen.display());
+    println!(
+        "cargo:rustc-env=PSXED_STARTER_PROJECT_RON={}",
+        chosen.display()
+    );
 }

@@ -44,7 +44,10 @@ use psx_level::{
     GameFlow, LevelGameplaySfxCueRecord, LevelOptionDef, LevelUiNodeRecord, LevelUiPaintRecord,
     LevelUiScene, LevelUiSfxCueRecord, LevelUiSfxSampleRecord,
 };
-#[cfg_attr(all(feature = "pad-irq-engine", target_arch = "mips"), allow(unused_imports))]
+#[cfg_attr(
+    all(feature = "pad-irq-engine", target_arch = "mips"),
+    allow(unused_imports)
+)]
 use psx_pad::enable_analog_on;
 use psx_pad::{require_analog_on, PadReader, Port};
 

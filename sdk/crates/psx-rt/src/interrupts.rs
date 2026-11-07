@@ -682,6 +682,7 @@ static mut __psx_rt_draw_done_fallbacks: u32 = 0;
 
 /// How many frames the VBlank handler released without GPUSTAT bit 24 (see
 /// `__psx_rt_draw_done_fallbacks`). Stays 0 on a PS1.
+#[must_use]
 pub fn draw_done_fallback_count() -> u32 {
     // SAFETY: a volatile aligned read of a counter only the handler writes.
     unsafe { core::ptr::addr_of!(__psx_rt_draw_done_fallbacks).read_volatile() }

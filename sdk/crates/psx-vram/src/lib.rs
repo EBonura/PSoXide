@@ -1834,7 +1834,12 @@ mod tests {
         let mut got = 0;
         while let Some((page, _)) = a.alloc_model_slot(64, TextureDepth::Bit4) {
             let rect = VramRect::new(page.x(), page.y(), 64, TEXTURE_PAGE_TEXELS);
-            assert!(!rect.overlaps(DRAW_DONE_SCRATCH), "page at {} {}", page.x(), page.y());
+            assert!(
+                !rect.overlaps(DRAW_DONE_SCRATCH),
+                "page at {} {}",
+                page.x(),
+                page.y()
+            );
             got += 1;
         }
         assert_eq!(got, VRAM_ALLOC_COLS - 1, "every column but the corner one");

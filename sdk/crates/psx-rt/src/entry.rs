@@ -78,6 +78,7 @@ const CHANNELS: [Channel; 7] = [
 /// This is how the hardware tests learn what each BIOS leaves behind; nothing in the SDK reads it.
 #[cfg(feature = "entry-census")]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Inherited {
     /// cop0 SR.
     pub status: u32,
@@ -142,6 +143,7 @@ static mut INHERITED: Inherited = Inherited {
 
 /// The registers as the program found them (all zero before `_start` has run, or off the console).
 #[cfg(feature = "entry-census")]
+#[must_use]
 pub fn inherited() -> Inherited {
     // SAFETY: a copy of a static written once by `set_entry_state` at boot, before `main`.
     unsafe { *core::ptr::addr_of!(INHERITED) }

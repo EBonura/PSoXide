@@ -58,6 +58,7 @@ pub const ATTEMPTS: u32 = 3;
 
 /// The first answer to a Pause.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PauseAnswer {
     /// INT3: the drive took the command; INT2 follows when it has stopped.
     Acknowledged,
@@ -69,6 +70,7 @@ pub enum PauseAnswer {
 
 /// The wait for the second answer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Completion {
     /// INT2: the drive has stopped.
     Arrived,
@@ -80,6 +82,7 @@ pub enum Completion {
 
 /// Why a Pause could not be proven.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PauseFailure {
     /// The Pause was never acknowledged (no drive, tray open, dead controller).
     NoAnswer,
@@ -122,6 +125,11 @@ pub trait PauseDrive {
 ///
 /// `Ok` means the second response arrived, or the status reported no reading,
 /// seeking or playing bit. The drive is then idle and spun up.
+///
+/// # Errors
+///
+/// The [`PauseFailure`] says how the drive let the Pause down: never answered,
+/// refused on every try, or acknowledged but still reading, seeking or playing.
 pub fn pause_until_stopped(drive: &mut impl PauseDrive) -> Result<(), PauseFailure> {
     let mut refused = false;
     for _ in 0..ATTEMPTS {

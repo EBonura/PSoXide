@@ -166,7 +166,10 @@ impl GameFrames {
             .partition_point(|t| t.0 < cycles)
             .min(self.ticks.len() - 1);
         let tick = self.ticks[at].1;
-        let k = self.saved.partition_point(|&n| n < tick).min(self.saved.len() - 1);
+        let k = self
+            .saved
+            .partition_point(|&n| n < tick)
+            .min(self.saved.len() - 1);
         let n = self.saved[k];
         let bytes = std::fs::read(self.dir.join(format!("frames/tick-{n:06}.ppm"))).ok()?;
         let mut at = 0;
@@ -194,7 +197,13 @@ impl GameFrames {
 
 /// Whether a game pixel is the sky backdrop (olive) and not geometry (blue or grey).
 fn is_backdrop(p: [u8; 3]) -> bool {
-    p[1] >= p[2] && p[0] >= 30 && p[1] >= 38 && p[0] <= 64 && p[1] <= 70 && p[2] <= 64 && p[1] >= p[0]
+    p[1] >= p[2]
+        && p[0] >= 30
+        && p[1] >= 38
+        && p[0] <= 64
+        && p[1] <= 70
+        && p[2] <= 64
+        && p[1] >= p[0]
 }
 
 fn arg(args: &[String], key: &str) -> Option<f32> {
@@ -212,7 +221,9 @@ fn main() {
     let path = Path::new(&args[0]);
     let text = std::fs::read_to_string(path).expect("read the project");
     let project = ProjectDocument::from_ron_str(&text).expect("parse the project");
-    let root = path.parent().map_or_else(|| PathBuf::from("."), PathBuf::from);
+    let root = path
+        .parent()
+        .map_or_else(|| PathBuf::from("."), PathBuf::from);
     let out = PathBuf::from(&args[3]);
     std::fs::create_dir_all(&out).expect("create the output directory");
     let every = arg(&args, "every").unwrap_or(10.0) as usize;
@@ -225,8 +236,16 @@ fn main() {
     let (cooked, albedo) = (inputs.cooked, inputs.albedo);
     let sector = cooked.level.sector_units as f32;
     let real_r = real_sectors * sector;
-    let world = World::new(&cooked, &albedo, Some(panel_textures(&project, &root, &cooked)));
-    println!("level: {} rooms, {} triangles, sector {sector}", world.rooms(), world.triangles());
+    let world = World::new(
+        &cooked,
+        &albedo,
+        Some(panel_textures(&project, &root, &cooked)),
+    );
+    println!(
+        "level: {} rooms, {} triangles, sector {sector}",
+        world.rooms(),
+        world.triangles()
+    );
     // The bake eyes, to say which hole pixels lie in rooms the eye in use leaves out of its
     // panels (the rooms the game draws whole from anywhere within reach of it).
     let mut scaled = project.clone();
@@ -269,7 +288,8 @@ fn main() {
             })
         };
         let real = world.render(&cam, 2, &near).resolve(2);
-        let mut hole_rooms: std::collections::HashMap<u16, usize> = std::collections::HashMap::new();
+        let mut hole_rooms: std::collections::HashMap<u16, usize> =
+            std::collections::HashMap::new();
         let mut image = RgbImage::new(320 * 3, 240);
         let (mut seen, mut holes, mut extra) = (0usize, 0usize, 0usize);
         for y in 0..240usize {
@@ -277,13 +297,18 @@ fn main() {
                 let at = y * 320 + x;
                 let t_cov = truth.coverage[at] >= 0.5;
                 let t_rgb = if t_cov { truth.rgb[at] } else { SKY };
-                image.put_pixel(x as u32, y as u32, Rgb(t_rgb.map(|c| c.clamp(0.0, 255.0) as u8)));
+                image.put_pixel(
+                    x as u32,
+                    y as u32,
+                    Rgb(t_rgb.map(|c| c.clamp(0.0, 255.0) as u8)),
+                );
                 image.put_pixel(320 + x as u32, y as u32, Rgb(frame[at]));
                 // The HUD's corner and the player's column are the game's own.
                 if (y < 64 && x < 150) || (y > 90 && (110..210).contains(&x)) {
                     continue;
                 }
-                let far = !t_cov || (truth.room[at] != u16::MAX && !near(usize::from(truth.room[at])));
+                let far =
+                    !t_cov || (truth.room[at] != u16::MAX && !near(usize::from(truth.room[at])));
                 if !far || real.coverage[at] >= 0.5 {
                     continue;
                 }
@@ -301,11 +326,16 @@ fn main() {
                         .iter()
                         .copied()
                         .min_by(|a, b| {
-                            let d = |e: &[f32; 3]| (0..3).map(|k| (e[k] - pose.eye[k]).powi(2)).sum::<f32>();
+                            let d = |e: &[f32; 3]| {
+                                (0..3).map(|k| (e[k] - pose.eye[k]).powi(2)).sum::<f32>()
+                            };
                             d(a).total_cmp(&d(b))
                         })
                         .unwrap_or(pose.eye);
-                    let class = match (box_distance(room, at_eye) <= 3.44, box_distance(room, pose.eye) <= 12.0) {
+                    let class = match (
+                        box_distance(room, at_eye) <= 3.44,
+                        box_distance(room, pose.eye) <= 12.0,
+                    ) {
                         (true, true) => 0,
                         (true, false) => 1,
                         (false, true) => 2,
@@ -331,7 +361,11 @@ fn main() {
         if pct > 20.0 {
             let mut v: Vec<_> = hole_rooms.iter().collect();
             v.sort_by_key(|e| std::cmp::Reverse(*e.1));
-            let top: Vec<String> = v.iter().take(4).map(|(r, n)| format!("room {r}: {n}")).collect();
+            let top: Vec<String> = v
+                .iter()
+                .take(4)
+                .map(|(r, n)| format!("room {r}: {n}"))
+                .collect();
             println!("  HOLEROOMS f{} {}", pose.frame, top.join(", "));
         }
         println!(

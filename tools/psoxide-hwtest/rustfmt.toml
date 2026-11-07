@@ -1,0 +1,5 @@
+# Formatted with rustfmt defaults, as it was in PSoXide-editor.
+# The suite sources are not reformatted: its exe embeds panic locations, so a reflow would change the
+# exe and its recorded sha without a suite version change.
+unstable_features = true
+ignore = ["../../engine/examples/hardware-tests", "src", "tests"]
