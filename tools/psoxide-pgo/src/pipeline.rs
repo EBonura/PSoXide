@@ -15,6 +15,7 @@ use std::{env, fs};
 use object::read::elf::{ElfFile32, FileHeader, ProgramHeader};
 use object::{Object, ObjectSection};
 
+use crate::ladder::{self, Rig};
 use crate::{layout, Result};
 
 /// The only guest target.
@@ -60,6 +61,9 @@ pub const USAGE: &str = "\
                            [--ram-floor BYTES [--ram-fallback V]...] -- CARGO-ARGS...
        psoxide-pgo choose  [GUEST] --profile PROFILE [--layout LAYOUT] --gate CMD [--variant V]...
                            [--pack CMD] [--frame-budget VBLANKS] [--rank deadline|work] -- CARGO-ARGS...
+       psoxide-pgo ladder  [GUEST] --profile PROFILE [--layout LAYOUT] [--variant BASE] --ram-floor BYTES
+                           [--from N] [--to N] [--step N] [--candidates K] [--tie PERCENT] [--scan]
+                           [--link CMD] [--pack CMD] [--bench CMD] [--out TABLE] [-- CARGO-ARGS...]
        psoxide-pgo measure --frontend PATH --image PATH [--tape PATH] --polls A..B
                            [--launch-arg ARG]... [--name NAME] [--wait-range START..END]...
   GUEST: [--crate DIR] [--work DIR] [--patcher PATH] [--scanner PATH] [--stack-guard PATH]
@@ -70,6 +74,18 @@ pub const USAGE: &str = "\
   BYTES: RAM the image must leave free below the stack reserve; a variant that leaves less
          is rebuilt as each --ram-fallback in turn (hot=500, hot=250, ...) and the first
          that fits ships
+  ladder: finds the highest hot call-site thresholds (grid --from 1000 --to 250 --step 50) whose
+         link leaves --ram-floor free, benches the --candidates highest (default 4) and ships the
+         best, not the first. Cost: a binary search of about log2(grid) links, then per candidate
+         one link, one layout, one pack and one bench, so K = 4 is four times the cost of a
+         plain apply; --candidates 1 takes the highest fit with no bench, for quick local runs.
+         --link CMD: the game's own link at $PSOXIDE_PGO_THRESHOLD, which prints `free N` or
+         leaves its map at $PSOXIDE_PGO_MAP; non-zero exit = did not link or unsafe. Without it
+         the link is `apply --variant BASE+hot=N` on the CARGO-ARGS. --bench CMD runs per
+         candidate (env PSOXIDE_PGO_THRESHOLD, _FREE, _EXE, _IMAGE) and prints `score NAME VALUE`
+         lines, higher is better. Pick = best geometric mean of per-metric ratios; candidates
+         within --tie (0.3) percent tie and the one with the most free RAM wins; a pick more
+         than 1% under the best on any metric is warned. The table goes to --out (ladder.txt).
   A..B: the gameplay window in port-1 polls, loads excluded
   START..END: guest addresses in hex (one build's layout) of a loop to count as waiting";
 
@@ -125,6 +141,9 @@ struct Options {
     frame_budget: Option<u64>,
     ram_floor: Option<u32>,
     ram_fallbacks: Vec<String>,
+    ladder: ladder::Config,
+    bench: Option<String>,
+    link: Option<String>,
     objective: Objective,
     cargo: Vec<String>,
 }
@@ -153,6 +172,11 @@ fn parse_polls(text: &str) -> Result<(u64, u64)> {
         Some((from, to)) if from < to => Ok((from, to)),
         _ => Err(format!("--polls wants FROM..TO with FROM < TO, not {text:?}").into()),
     }
+}
+
+fn flag_number<T: std::str::FromStr>(text: &str, flag: &str) -> Result<T> {
+    text.parse()
+        .map_err(|_| format!("{flag} wants a number, not {text:?}").into())
 }
 
 fn parse(mode: &str, args: &[String]) -> Result<Options> {
@@ -209,6 +233,19 @@ fn parse(mode: &str, args: &[String]) -> Result<Options> {
                         .map_err(|_| format!("--ram-floor wants a byte count, not {text:?}"))?,
                 );
             }
+            "--from" => options.ladder.from = flag_number(&value()?, "--from")?,
+            "--to" => options.ladder.to = flag_number(&value()?, "--to")?,
+            "--step" => options.ladder.step = flag_number(&value()?, "--step")?,
+            "--candidates" => options.ladder.candidates = flag_number(&value()?, "--candidates")?,
+            "--tie" => {
+                let text = value()?;
+                options.ladder.tie_percent = text
+                    .parse()
+                    .map_err(|_| format!("--tie wants a percentage, not {text:?}"))?;
+            }
+            "--scan" => options.ladder.scan = true,
+            "--bench" => options.bench = Some(value()?),
+            "--link" => options.link = Some(value()?),
             "--ram-fallback" => options.ram_fallbacks.push(value()?),
             "--gate" => options.gate = Some(value()?),
             "--frame-budget" => {
@@ -239,7 +276,9 @@ fn parse(mode: &str, args: &[String]) -> Result<Options> {
     if !options.ram_fallbacks.is_empty() && options.ram_floor.is_none() {
         return Err("--ram-fallback needs --ram-floor".into());
     }
-    if mode != "measure" && options.cargo.first().map(String::as_str) != Some("build") {
+    let own_link = mode == "ladder" && options.link.is_some();
+    if mode != "measure" && !own_link && options.cargo.first().map(String::as_str) != Some("build")
+    {
         return Err("give the guest's cargo arguments after --, starting with `build`".into());
     }
     Ok(options)
@@ -287,6 +326,7 @@ pub fn main(mode: &str, args: &[String]) -> Result<()> {
             Ok(())
         }
         "choose" => choose(&guest, &options),
+        "ladder" => ladder_mode(&guest, &options),
         _ => unreachable!("main only dispatches pipeline modes"),
     }
 }
@@ -2299,6 +2339,185 @@ fn choose(guest: &Guest, options: &Options) -> Result<()> {
     println!(
         "The last variant built is {}; build the winner with `apply --variant`.",
         variants.last().expect("at least one variant")
+    );
+    Ok(())
+}
+
+/// Run a shell hook with `env`, echoing and returning its stdout.
+fn hook(command: &str, env: &[(&str, &Path)], extra: &[(&str, String)]) -> Result<(bool, String)> {
+    let mut child = Command::new("sh");
+    child.arg("-c").arg(command).stdout(Stdio::piped());
+    for (name, value) in env {
+        child.env(name, value);
+    }
+    for (name, value) in extra {
+        child.env(name, value);
+    }
+    let mut child = child.spawn()?;
+    let mut output = String::new();
+    for line in BufReader::new(child.stdout.take().expect("stdout is piped")).lines() {
+        let line = line?;
+        println!("  {line}");
+        output.push_str(&line);
+        output.push('\n');
+    }
+    Ok((child.wait()?.success(), output))
+}
+
+/// The ladder's rig: the link and the bench of one game.
+struct GameRig<'a> {
+    guest: &'a Guest,
+    options: &'a Options,
+    work: PathBuf,
+    /// Image of the last internal link, for the bench.
+    exe: Option<PathBuf>,
+}
+
+impl GameRig<'_> {
+    fn variant(&self, threshold: u32) -> String {
+        match self.options.variants.first().map(String::as_str) {
+            None | Some("default") => format!("hot={threshold}"),
+            Some(base) => format!("{base}+hot={threshold}"),
+        }
+    }
+}
+
+impl Rig for GameRig<'_> {
+    fn link(&mut self, threshold: u32) -> Result<Option<u32>> {
+        println!("psoxide-pgo: ladder link at threshold {threshold}");
+        if let Some(command) = &self.options.link {
+            let map = self.work.join("ladder.map");
+            let _ = fs::remove_file(&map);
+            let (ok, output) = hook(
+                command,
+                &[("PSOXIDE_PGO_MAP", &map), ("PSOXIDE_PGO_WORK", &self.work)],
+                &[("PSOXIDE_PGO_THRESHOLD", threshold.to_string())],
+            )?;
+            if !ok {
+                return Ok(None);
+            }
+            let printed = output.lines().find_map(|line| {
+                line.strip_prefix("free ")?
+                    .trim()
+                    .trim_end_matches(" B")
+                    .parse()
+                    .ok()
+            });
+            return match printed {
+                Some(free) => Ok(Some(free)),
+                None => Ok(Some(
+                    crate::ram::free_ram(&fs::read_to_string(&map).map_err(|error| {
+                        format!("--link printed no `free N` and wrote no map: {error}")
+                    })?)
+                    .ok_or("the link map has no __bss_end")?,
+                )),
+            };
+        }
+        let variant = self.variant(threshold);
+        match apply(
+            self.guest,
+            self.options.profile.as_deref(),
+            self.options.layout.as_deref(),
+            &variant,
+        ) {
+            Ok(linked) => {
+                let map = linked
+                    .map
+                    .as_deref()
+                    .ok_or("the ladder needs the link map")?;
+                let free = crate::ram::free_ram(&fs::read_to_string(map)?)
+                    .ok_or_else(|| format!("{} has no __bss_end", map.display()))?;
+                self.exe = Some(linked.exe);
+                Ok(Some(free))
+            }
+            Err(error) => {
+                println!("psoxide-pgo: threshold {threshold} did not build: {error}");
+                Ok(None)
+            }
+        }
+    }
+
+    fn bench(&mut self, threshold: u32, free: u32) -> Result<Vec<(String, f64)>> {
+        let command = self
+            .options
+            .bench
+            .as_ref()
+            .ok_or("the ladder needs --bench CMD")?;
+        println!("psoxide-pgo: ladder bench at threshold {threshold}");
+        let mut env: Vec<(&str, PathBuf)> = vec![("PSOXIDE_PGO_WORK", self.work.clone())];
+        let mut disc = None;
+        if self.options.link.is_none() {
+            // The bench follows its own link, which the search may have moved on from.
+            self.link(threshold)?;
+            let exe = self.exe.clone().ok_or("no executable to bench")?;
+            let path = self.work.join("ladder.bin");
+            let image = match &self.options.pack {
+                Some(pack_command) => pack(pack_command, &exe, &path)?,
+                None => exe.clone(),
+            };
+            disc = Some(path);
+            env.push(("PSOXIDE_PGO_EXE", exe));
+            env.push(("PSOXIDE_PGO_IMAGE", image));
+        }
+        let env: Vec<(&str, &Path)> = env.iter().map(|(n, p)| (*n, p.as_path())).collect();
+        let (ok, output) = hook(
+            command,
+            &env,
+            &[
+                ("PSOXIDE_PGO_THRESHOLD", threshold.to_string()),
+                ("PSOXIDE_PGO_FREE", free.to_string()),
+            ],
+        )?;
+        if let Some(disc) = disc {
+            remove_disc(&disc);
+        }
+        if !ok {
+            return Err(format!("the bench failed at threshold {threshold}").into());
+        }
+        Ok(ladder::parse_scores(&output))
+    }
+}
+
+/// `ladder`: search, bench, pick, write the table, and leave the pick linked.
+fn ladder_mode(guest: &Guest, options: &Options) -> Result<()> {
+    let mut config = options.ladder.clone();
+    config.floor = options.ram_floor.ok_or("ladder needs --ram-floor BYTES")?;
+    if config.candidates > 1 && options.bench.is_none() {
+        return Err("ladder needs --bench CMD (or --candidates 1 to take the highest fit)".into());
+    }
+    let work = match &guest.work {
+        Some(work) => work.clone(),
+        None => env::current_dir()?.join("psoxide-pgo"),
+    };
+    fs::create_dir_all(&work)?;
+    let mut rig = GameRig {
+        guest,
+        options,
+        work: work.clone(),
+        exe: None,
+    };
+    let outcome = ladder::search(&mut rig, &config)?;
+    let table = ladder::table(&outcome, &config);
+    print!("\n{table}");
+    let out = options
+        .out
+        .clone()
+        .unwrap_or_else(|| work.join("ladder.txt"));
+    fs::write(&out, &table)?;
+    fs::write(
+        work.join("shipped-variant.txt"),
+        format!("threshold {}\n{table}", outcome.chosen),
+    )?;
+    // Leave the pick linked, as the last link made may be another rung.
+    let free = rig.link(outcome.chosen)?;
+    if free.is_none() {
+        return Err(format!("the chosen threshold {} no longer links", outcome.chosen).into());
+    }
+    println!("psoxide-pgo: ladder benched {:?}", outcome.candidates);
+    println!(
+        "psoxide-pgo: ladder chose {} (table in {})",
+        outcome.chosen,
+        out.display()
     );
     Ok(())
 }

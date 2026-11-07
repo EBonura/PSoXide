@@ -44,9 +44,11 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::{env, fs};
 
+mod ladder;
 mod layout;
 mod pipeline;
 mod ram;
+mod stale;
 mod work;
 
 use gimli::{AttributeValue, DebuggingInformationEntry, EndianSlice, RunTimeEndian, UnitOffset};
@@ -541,6 +543,30 @@ fn read_histograms(paths: &[PathBuf]) -> Result<Vec<(u64, u64)>> {
 }
 
 fn convert(elf_path: &Path, pc_paths: &[PathBuf], out_path: &Path) -> Result<()> {
+    convert_histogram(elf_path, read_histograms(pc_paths)?, out_path, true)
+}
+
+/// Every instruction word of the executable sections once: the profile of
+/// this build with every line key it can have, for the staleness check.
+fn uniform_histogram(elf_path: &Path) -> Result<Vec<(u64, u64)>> {
+    let data = fs::read(elf_path)?;
+    let object = object::File::parse(&*data)?;
+    let mut words = Vec::new();
+    for section in object.sections() {
+        if section.kind() == object::SectionKind::Text {
+            let start = section.address();
+            words.extend((0..section.size() / 4).map(|word| (start + 4 * word, 1)));
+        }
+    }
+    Ok(words)
+}
+
+fn convert_histogram(
+    elf_path: &Path,
+    histogram: Vec<(u64, u64)>,
+    out_path: &Path,
+    verbose: bool,
+) -> Result<()> {
     let data = fs::read(elf_path)?;
     let object = object::File::parse(&*data)?;
     let (sections, endian) = dwarf_sections(&object)?;
@@ -576,7 +602,6 @@ fn convert(elf_path: &Path, pc_paths: &[PathBuf], out_path: &Path) -> Result<()>
         .filter_map(|symbol| Some((symbol.address(), symbol.size(), symbol.name().ok()?)))
         .collect();
     elf_symbols.sort_unstable();
-    let histogram = read_histograms(pc_paths)?;
     if histogram.is_empty() {
         return Err("the PC sample logs hold no samples".into());
     }
@@ -644,6 +669,9 @@ fn convert(elf_path: &Path, pc_paths: &[PathBuf], out_path: &Path) -> Result<()>
         node.emit(1, &mut out);
     }
     fs::write(out_path, out)?;
+    if !verbose {
+        return Ok(());
+    }
     println!(
         "functions {}  mapped samples {mapped}  unmapped {}  in unrolled copies {duplicated}",
         order.len(),
@@ -875,8 +903,18 @@ fn rebind(in_path: &Path, elf_path: &Path, out_path: &Path) -> Result<()> {
     if bound == 0 && missing + ambiguous > 0 {
         return Err(format!("no profile name matched a symbol in {}", elf_path.display()).into());
     }
-    fs::write(out_path, rebound)?;
-    Ok(())
+    fs::write(out_path, &rebound)?;
+    // How much of the profile still describes this code.
+    let keys_path = out_path.with_extension("keys");
+    let keys = convert_histogram(elf_path, uniform_histogram(elf_path)?, &keys_path, false)
+        .and_then(|()| Ok(fs::read_to_string(&keys_path)?));
+    let _ = fs::remove_file(&keys_path);
+    let mut report = stale::compare(&rebound, &keys?);
+    for (name, _) in &mut report.worst {
+        *name = portable_name(name).into_owned();
+    }
+    println!("{report}");
+    report.gate()
 }
 
 const USAGE: &str = "usage: psoxide-pgo <elf-with-dwarf> <pc.csv>... <out.prof>
@@ -886,9 +924,9 @@ const USAGE: &str = "usage: psoxide-pgo <elf-with-dwarf> <pc.csv>... <out.prof>
        psoxide-pgo place <in.layout> <link.map> <image.exe> <linker-script> <out.order>
        psoxide-pgo ram <link.map> [--floor BYTES]";
 
-const MODES: [&str; 10] = [
+const MODES: [&str; 11] = [
     "portable", "rebind", "layout", "place", "collect", "order", "apply", "choose", "measure",
-    "ram",
+    "ram", "ladder",
 ];
 
 /// A layout profile from one link and per-word logs (`--pc-log-words
@@ -961,7 +999,7 @@ fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
     let result = match words.as_slice() {
-        [mode @ ("collect" | "order" | "apply" | "choose" | "measure"), ..] => {
+        [mode @ ("collect" | "order" | "apply" | "choose" | "measure" | "ladder"), ..] => {
             pipeline::main(mode, &args[1..])
         }
         ["ram", map] => ram_report(Path::new(map), None),

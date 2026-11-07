@@ -772,3 +772,57 @@ The same hl-psx commit built from two checkout paths differed by about 0.4%
 in FPS, because the path changes the code layout. Build every candidate from
 one directory, and treat smaller differences as unproven without a cycle
 breakdown.
+
+## ladder: how far to inline
+
+Profile-guided inlining is steered by one number, the hot call-site threshold,
+and it moves free RAM by kilobytes. Taking the first threshold of a coarse
+ladder that fits the RAM floor (1000, 500, 250...) loses 2-3% to a few hundred
+bytes, and a higher threshold is not always faster. `ladder` replaces that:
+
+```
+psoxide-pgo ladder --profile P [--layout L] --ram-floor BYTES \
+    [--from 1000] [--to 250] [--step 50] [--candidates 4] [--tie 0.3] [--scan] \
+    [--link CMD] [--pack CMD] --bench CMD [--out ladder.txt] -- CARGO-ARGS...
+```
+
+It binary-searches the grid for the highest threshold whose link leaves
+`--ram-floor` free (and, through `apply`'s post-link checks, a safe stack),
+links the `--candidates` highest fitting grid points so each one is verified,
+benches them, and leaves the pick linked. `--scan` links every grid point
+instead (use it when the profile is suspect).
+
+Cost: about log2(grid) links to find the edge, then per candidate one link,
+one pack and one bench (a game whose bench needs a layout collects it inside
+the bench hook, since a layout never survives a rung change). K = 4 is about
+four times the cost of one `apply`. `--candidates 1` takes the highest fit with
+no bench, for quick local iteration.
+
+The bench hook runs with `PSOXIDE_PGO_THRESHOLD`, `_FREE`, `_EXE` and `_IMAGE`
+(the packed disc when `--pack` is given) and prints `score NAME VALUE` lines,
+higher is better, one per window or tape. A game that links through its own
+tool passes `--link CMD` instead of cargo arguments: the command links at
+`$PSOXIDE_PGO_THRESHOLD`, prints `free N` (or leaves its map at
+`$PSOXIDE_PGO_MAP`) and exits non-zero when the link fails or the stack is
+unsafe.
+
+Selection: each candidate's score on a metric is divided by the best
+candidate's, the candidate's rating is the geometric mean of those ratios, and
+the best rating wins. Candidates within `--tie` percent (0.3) of the best tie,
+and the tie goes to the one with the most free RAM. A pick more than 1% under
+the best candidate on any single metric is flagged in the output. The whole
+table (threshold, free RAM, fit, every metric, rating, worst ratio) is written
+to `--out` and `shipped-variant.txt`; paste it in the game's commit message.
+
+## Stale profiles
+
+`rebind` (so every `apply`, `choose` and `ladder`) reports how much of the
+sample profile still describes the code: the share of its samples whose
+(function, line offset, discriminator) exists in the build, the functions
+missing and changed, and the functions that lost the most. It warns below 98%
+and refuses below 90% (`PSOXIDE_PGO_ALLOW_STALE=1` builds anyway). LLVM has no
+way to notice a stale AutoFDO profile (pseudo-probes would, but this rustc has
+no flag for them), so it inlines by the wrong numbers and free RAM jumps by
+tens of KB. hl-psx's committed profiles read, against one build: same commit
+100%, next commit 99.3%, four commits on 95.5%, ten on 91%, a week of HUD work
+88.9%. Thresholds are provisional.
