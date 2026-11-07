@@ -31,25 +31,27 @@
 //! real silicon. Everything lands in one QR.
 
 use psx_asset::Audio;
-use psx_font::FontAtlas;
-use psx_rt::tty;
+use psx_rt::{interrupts, tty};
 use psx_spu::{self as spu, Adsr, SpuAddr, Voice, Volume};
-use qrcodegen_no_heap::{QrCode, QrCodeEcc, Version};
 
-use crate::payload::{append, base64_encode, crc32, draw_qr};
-use crate::{hex2, hex8, spu_dma_read};
+use crate::console_tests::record;
+use crate::{hex2, hex8, spu_dma_read, TimingRecord};
 
 /// The launcher's own cooked browse blip, byte for byte. The select
 /// blip (pickup_coin) stays out: at 7 KiB it alone overflowed the
 /// playtest boot-EXE budget, and the reported bug is the browse blip.
 static BEEP_PSAU: &[u8] = include_bytes!("../../../../assets/audio/freesfx/psau/ui_beep.psau");
 
+/// rec sb1_audit: blocks_or_loop_starts, flags_or_and_last_or_readback_low, first_end_block_or_readback_high (0x430 audit, 0x431 upload readback)
+pub(crate) const SB1_AUDIT: u16 = 0x430;
+/// rec sb1_stage: envelope_at_frame_32, envelope_at_frame_100, endx_bit_per_checkpoint (five records, 0x432-0x436)
+pub(crate) const SB1_STAGE: u16 = 0x432;
 const STAGE_COUNT: usize = 6;
 const FIELD_COUNT: usize = 9;
 /// Frames each stage runs. Stage 0 is the silent audit.
-const STAGE_FRAMES: [u16; STAGE_COUNT] = [60, 300, 300, 300, 300, 300];
+const STAGE_FRAMES: [u16; STAGE_COUNT] = [4, 130, 130, 130, 130, 130];
 /// Frames within a stage at which the envelope/ENDX checkpoints sample.
-const CHECKPOINTS: [u16; 8] = [2, 8, 16, 32, 64, 120, 200, 280];
+const CHECKPOINTS: [u16; 8] = [2, 8, 16, 32, 64, 100, 120, 128];
 
 /// SPU layout: the blip at the first free SPU address, like the SDK.
 const SPU_SAMPLE_BASE: u32 = 0x1010;
@@ -61,14 +63,6 @@ const ENDX_LO: u32 = psx_hw::spu::BASE + 0x19C;
 /// Readback staging for the audit: ui_beep is 2 KiB of psau, so its
 /// ADPCM fits with room to spare.
 static mut READBACK: [u32; 1024] = [0; 1024];
-
-const QR_VERSION: Version = Version::new(15);
-const QR_SIZE: usize = 77;
-const QR_BUFFER_LEN: usize = QR_VERSION.buffer_len();
-const QR_SCALE: i16 = 2;
-const BINARY_LEN: usize = 264;
-const BASE64_LEN: usize = 352;
-const QR_TEXT_MAX: usize = 4 + BASE64_LEN + 3 + 8;
 
 #[derive(Copy, Clone)]
 struct StageRecord {
@@ -121,10 +115,6 @@ impl FlagAudit {
     fn packed_summary(self) -> u32 {
         ((self.blocks as u32) << 16) | ((self.or_flags as u32) << 8) | self.last_flags as u32
     }
-
-    fn packed_detail(self) -> u32 {
-        ((self.first_end as u32) << 16) | ((self.loop_starts as u32) << 8)
-    }
 }
 
 pub(crate) struct SampleProbe {
@@ -137,9 +127,6 @@ pub(crate) struct SampleProbe {
     beep_rate: u32,
     beep_audit: FlagAudit,
     beep_readback_fnv: u32,
-    qr_modules: [u8; (QR_SIZE * QR_SIZE).div_ceil(8)],
-    qr_size: u8,
-    binary_crc: u32,
 }
 
 impl SampleProbe {
@@ -160,9 +147,6 @@ impl SampleProbe {
                 loop_starts: 0,
             },
             beep_readback_fnv: 0,
-            qr_modules: [0; (QR_SIZE * QR_SIZE).div_ceil(8)],
-            qr_size: 0,
-            binary_crc: 0,
         }
     }
 
@@ -172,16 +156,63 @@ impl SampleProbe {
         self.complete = false;
         self.run = self.run.wrapping_add(1);
         self.records = [StageRecord::empty(); STAGE_COUNT];
-        self.qr_size = 0;
         spu::init();
-        spu::set_main_volume(Volume::MAX, Volume::MAX);
+        spu::set_main_volume(Volume::SILENCE, Volume::SILENCE);
         spu::enable_cd_audio(false);
         self.apply_stage();
         tty::println("hardware-tests: sb1 begin ui-sample probe");
     }
 
-    pub(crate) fn restart(&mut self) {
+    /// Run the audit and the five keyed stages, a frame at a time, and
+    /// return the records: `0x430` the flag audit, `0x431` its upload
+    /// readback, `0x432`-`0x436` the stages.
+    pub(crate) fn run(&mut self) -> [TimingRecord; 7] {
         self.start();
+        let mut tick = 0u32;
+        while !self.complete {
+            self.update(tick);
+            interrupts::wait_vblank();
+            tick += 1;
+        }
+        self.records_out()
+    }
+
+    fn records_out(&self) -> [TimingRecord; 7] {
+        let audit = self.beep_audit;
+        let mut out = [
+            record(
+                SB1_AUDIT,
+                audit.blocks as u32,
+                ((audit.or_flags as u32) << 8) | audit.last_flags as u32,
+                audit.first_end as u32,
+            ),
+            record(
+                SB1_AUDIT + 1,
+                audit.loop_starts as u32,
+                self.beep_readback_fnv & 0xFFFF,
+                self.beep_readback_fnv >> 16,
+            ),
+            record(SB1_AUDIT, 0, 0, 0),
+            record(SB1_AUDIT, 0, 0, 0),
+            record(SB1_AUDIT, 0, 0, 0),
+            record(SB1_AUDIT, 0, 0, 0),
+            record(SB1_AUDIT, 0, 0, 0),
+        ];
+        for stage in 1..STAGE_COUNT {
+            let fields = &self.records[stage].fields;
+            // fields[1 + slot] = envelope << 16 | ENDX bit at checkpoint `slot`.
+            let mut endx = 0u32;
+            for slot in 0..CHECKPOINTS.len() {
+                endx |= (fields[1 + slot] & 1) << slot;
+            }
+            out[1 + stage] = record(
+                SB1_STAGE + stage as u16 - 1,
+                fields[1 + 3] >> 16,
+                fields[1 + 5] >> 16,
+                endx,
+            );
+        }
+        out
     }
 
     pub(crate) fn update(&mut self, tick: u32) {
@@ -234,8 +265,6 @@ impl SampleProbe {
             self.apply_stage();
         } else {
             self.complete = true;
-            self.encode_qr();
-            self.print_payload();
         }
     }
 
@@ -298,119 +327,6 @@ impl SampleProbe {
         voice.configure_sample(SpuAddr::new(addr), rate, Volume::linear(1, 14), adsr);
         Voice::start(voice.mask());
     }
-
-    fn encode_qr(&mut self) {
-        let mut binary = [0u8; BINARY_LEN];
-        let len = self.write_binary(&mut binary);
-        let crc = crc32(&binary[..len]);
-        binary[BINARY_LEN - 4..].copy_from_slice(&crc.to_le_bytes());
-        self.binary_crc = crc;
-
-        let mut payload = [0u8; BASE64_LEN];
-        let payload_len = base64_encode(&binary, &mut payload);
-        assert!(payload_len == BASE64_LEN, "SB1 Base64 layout drift");
-        let mut text = [0u8; QR_TEXT_MAX];
-        let mut text_len = 0usize;
-        append(&mut text, &mut text_len, b"SB1/");
-        append(&mut text, &mut text_len, &payload);
-        append(&mut text, &mut text_len, b"/C:");
-        append(
-            &mut text,
-            &mut text_len,
-            hex8(self.binary_crc).digits().as_bytes(),
-        );
-        let encoded = unsafe { core::str::from_utf8_unchecked(&text[..text_len]) };
-        let mut temp = [0u8; QR_BUFFER_LEN];
-        let mut output = [0u8; QR_BUFFER_LEN];
-        let Ok(qr) = QrCode::encode_text(
-            encoded,
-            &mut temp,
-            &mut output,
-            QrCodeEcc::Medium,
-            QR_VERSION,
-            QR_VERSION,
-            None,
-            false,
-        ) else {
-            self.qr_size = 0;
-            return;
-        };
-        self.qr_modules.fill(0);
-        self.qr_size = qr.size() as u8;
-        for y in 0..qr.size() {
-            for x in 0..qr.size() {
-                if qr.get_module(x, y) {
-                    let bit = y as usize * QR_SIZE + x as usize;
-                    self.qr_modules[bit / 8] |= 1 << (bit & 7);
-                }
-            }
-        }
-    }
-
-    /// Everything the decode needs, CRC last. Bytes past the payload up
-    /// to `BINARY_LEN - 4` stay zero.
-    fn write_binary(&self, binary: &mut [u8; BINARY_LEN]) -> usize {
-        let mut at = 0usize;
-        let mut push = |binary: &mut [u8; BINARY_LEN], bytes: &[u8]| {
-            binary[at..at + bytes.len()].copy_from_slice(bytes);
-            at += bytes.len();
-            at
-        };
-        push(binary, b"SB1B");
-        push(binary, &[2, STAGE_COUNT as u8, FIELD_COUNT as u8, self.run]);
-        push(binary, &self.beep_audit.packed_summary().to_le_bytes());
-        push(binary, &self.beep_audit.packed_detail().to_le_bytes());
-        push(binary, &self.beep_rate.to_le_bytes());
-        push(binary, &self.beep_readback_fnv.to_le_bytes());
-        let mut len = 0;
-        for record in self.records {
-            for value in record.fields {
-                len = push(binary, &value.to_le_bytes());
-            }
-        }
-        assert!(len <= BINARY_LEN - 4, "SB1 binary layout drift");
-        len
-    }
-
-    fn print_payload(&self) {
-        let mut binary = [0u8; BINARY_LEN];
-        self.write_binary(&mut binary);
-        binary[BINARY_LEN - 4..].copy_from_slice(&self.binary_crc.to_le_bytes());
-        let mut payload = [0u8; BASE64_LEN];
-        base64_encode(&binary, &mut payload);
-        tty::print("hardware-tests: sb1 SB1/");
-        tty::print(unsafe { core::str::from_utf8_unchecked(&payload) });
-        tty::print("/C:");
-        tty::println(hex8(self.binary_crc).digits());
-    }
-
-    pub(crate) fn draw(&self, font: &FontAtlas) {
-        font.draw_text(8, 8, "UI SAMPLE END/LOOP PROBE SB1", (255, 232, 128));
-        font.draw_text(8, 20, "AUTOMATIC - RECORD COMPLETE RUN", (150, 170, 200));
-        if !self.complete {
-            let stage = self.stage as usize;
-            font.draw_text(8, 42, "STAGE", (140, 160, 190));
-            font.draw_text(64, 42, hex2(self.stage).as_str(), (232, 236, 244));
-            font.draw_text(88, 42, stage_label(self.stage), (96, 200, 255));
-            font.draw_text(8, 58, stage_description(self.stage), (220, 224, 230));
-            font.draw_text(8, 76, "TIME LEFT", (140, 160, 190));
-            let remaining = STAGE_FRAMES[stage].saturating_sub(self.stage_frame);
-            font.draw_text(88, 76, hex8(remaining as u32).digits(), (232, 236, 244));
-            font.draw_text(8, 108, "EACH KEYED STAGE = ONE SHORT BLIP", (112, 136, 170));
-            font.draw_text(8, 124, "A CONSTANT BUZZ = SAMPLE LOOPS ON", (255, 128, 96));
-            font.draw_text(8, 140, "HARDWARE: THE LAUNCHER BUG, CAUGHT", (255, 128, 96));
-            font.draw_text(8, 172, "QR APPEARS AFTER ALL 6 STAGES", (112, 136, 170));
-            return;
-        }
-
-        font.draw_text(8, 36, "COMPLETE - HOLD CAMERA STEADY ON QR", (96, 240, 128));
-        font.draw_text(8, 226, "X RERUN", (150, 170, 200));
-        if self.qr_size as usize != QR_SIZE {
-            font.draw_text(88, 112, "QR ENCODE FAILED", (255, 96, 96));
-            return;
-        }
-        draw_qr(&self.qr_modules, QR_SIZE, QR_SIZE, 50, QR_SCALE);
-    }
 }
 
 fn stage_label(stage: u8) -> &'static str {
@@ -421,18 +337,6 @@ fn stage_label(stage: u8) -> &'static str {
         3 => "BEEP KEYOFF",
         4 => "BEEP PERC",
         5 => "BEEP DTONE",
-        _ => "?",
-    }
-}
-
-fn stage_description(stage: u8) -> &'static str {
-    match stage {
-        0 => "READ TERMINATOR FLAGS + SPU READBACK",
-        1 => "LAUNCHER PATH: KEY ON, NEVER OFF",
-        2 => "RETRIGGER AT 0/10/20/30: FAST BROWSE",
-        3 => "KEY OFF AT 60: MEASURE THE RELEASE",
-        4 => "PERCUSSIVE PRESET: SELF-FADING?",
-        5 => "DEFAULT TONE: FULL PLAY + FAST RELEASE?",
         _ => "?",
     }
 }

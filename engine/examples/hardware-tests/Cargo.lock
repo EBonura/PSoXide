@@ -12,9 +12,9 @@ checksum = "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3"
 name = "hardware-tests"
 version = "0.1.0"
 dependencies = [
- "hello-fmv",
  "hello-memcard",
  "psx-asset",
+ "psx-cdstream",
  "psx-engine",
  "psx-fmv",
  "psx-font",
@@ -22,27 +22,13 @@ dependencies = [
  "psx-gte",
  "psx-hw",
  "psx-io",
+ "psx-mc",
  "psx-pack",
  "psx-pad",
  "psx-rt",
  "psx-spu",
  "psx-vram",
  "qrcodegen-no-heap",
-]
-
-[[package]]
-name = "hello-fmv"
-version = "0.1.0"
-dependencies = [
- "psx-fmv",
- "psx-font",
- "psx-gpu",
- "psx-hw",
- "psx-io",
- "psx-pack",
- "psx-rt",
- "psx-spu",
- "psx-vram",
 ]
 
 [[package]]
@@ -201,6 +187,7 @@ dependencies = [
  "psx-hw",
  "psx-io",
  "psx-math",
+ "psx-rt",
 ]
 
 [[package]]

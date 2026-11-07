@@ -23,24 +23,71 @@
 //! acknowledge a VBlank nobody handles; the screen shows the earlier results
 //! before it starts, so a hang still leaves them to read.
 //!
+//! # Whose kernel it is
+//!
+//! Nothing here assumes a BIOS. Sony versions put a stub at the vector that
+//! jumps to their own handler (0x0C80 on the versions measured), OpenBIOS puts
+//! one that jumps to its handler at 0x27D0, and a program started by another
+//! program may find something else altogether (a `j` into that program's own
+//! code, which has no SYSCALL handler). The case therefore records the four
+//! words it found and decodes them: only a `lui`/`addiu` (or `ori`)/`jr`/`nop`
+//! stub whose target lies in the kernel's first 64 KiB of RAM counts as a
+//! kernel vector. That stub is what is put back for the measurements, whatever
+//! its target, so the first SYSCALL reaches the kernel that booted the program.
+//! Any other vector means there is no kernel to measure, and the BIOS parts are
+//! skipped (records zero, flag bit 3 clear), never attempted. The result flags
+//! say which happened, and carry the stub's target.
+//!
 //! The emulator's kernel is its own HLE one, so the same case run headless
 //! measures that.
 
-use crate::console_tests::{
-    bit, put_number, record, spread, text, Buttons, Screen, KERNEL_COUNT, KERNEL_RECORD,
-};
+use crate::console_tests::{bit, record, spread, KERNEL_COUNT, KERNEL_RECORD};
 use crate::TimingRecord;
 use psx_font::FontAtlas;
 use psx_io::{irq, timers};
 use psx_rt::interrupts;
 
-/// The general exception vector, and the four words the BIOS keeps there.
+/// The general exception vector: four words.
 const VECTOR: *mut u32 = 0x8000_0080 as *mut u32;
-const BIOS_VECTOR: [u32; 4] = [0x3C1A_0000, 0x275A_0C80, 0x0340_0008, 0];
+/// The stub Sony versions keep there, for the "standard" flag only. It decides nothing.
+const SONY_VECTOR: [u32; 4] = [0x3C1A_0000, 0x275A_0C80, 0x0340_0008, 0];
 
-/// What `main` found at the vector before the runtime replaced it.
-static mut SNAPSHOT: [u32; 4] = BIOS_VECTOR;
-static mut SNAPSHOT_STANDARD: bool = false;
+/// What `main` found at the vector before the runtime replaced it, whatever it was.
+static mut SNAPSHOT: [u32; 4] = [0; 4];
+/// The stub's target when the snapshot decodes as a kernel vector.
+static mut SNAPSHOT_TARGET: Option<u32> = None;
+
+/// Where a kernel vector stub jumps, or `None` when the words are not a stub into the
+/// kernel's own RAM.
+///
+/// The stub is `lui $k0, hi; addiu $k0, $k0, lo` (or `ori`), `jr $k0`, `nop`, with the target in
+/// the first 64 KiB of RAM through any of its mirrors. Anything else (a `j` into a program, zeros,
+/// a ROM address) is not something a SYSCALL may be sent through.
+pub(crate) const fn kernel_stub_target(words: [u32; 4]) -> Option<u32> {
+    const LUI_K0: u32 = 0x3C1A_0000;
+    const ADDIU_K0: u32 = 0x275A_0000;
+    const ORI_K0: u32 = 0x375A_0000;
+    const JR_K0: u32 = 0x0340_0008;
+    let high = (words[0] & 0xFFFF) << 16;
+    let low = words[1] & 0xFFFF;
+    let target = if words[0] & 0xFFFF_0000 != LUI_K0 {
+        return None;
+    } else if words[1] & 0xFFFF_0000 == ADDIU_K0 {
+        // The immediate is sign-extended.
+        high.wrapping_add(low as u16 as i16 as i32 as u32)
+    } else if words[1] & 0xFFFF_0000 == ORI_K0 {
+        high | low
+    } else {
+        return None;
+    };
+    if words[2] != JR_K0 || words[3] != 0 {
+        return None;
+    }
+    if target & 0x1FFF_FFFF >= 0x1_0000 || target & 0x1FFF_FFFF < 0x80 {
+        return None;
+    }
+    Some(target)
+}
 
 core::arch::global_asm!(
     ".set noreorder",
@@ -97,7 +144,7 @@ extern "C" {
     fn __hwtest_enable_event(event: u32) -> u32;
 }
 
-/// Record the vector the BIOS left. Call from `main`, before the runtime or
+/// Record the vector the BIOS left, whatever it is. Call from `main`, before the runtime or
 /// the engine can install a handler.
 pub(crate) fn snapshot_vector() {
     // SAFETY: plain reads of kernel RAM and writes of two private statics, on
@@ -107,14 +154,18 @@ pub(crate) fn snapshot_vector() {
         for (i, word) in words.iter_mut().enumerate() {
             *word = core::ptr::read_volatile(VECTOR.add(i));
         }
-        SNAPSHOT_STANDARD = words == BIOS_VECTOR;
-        if SNAPSHOT_STANDARD {
-            SNAPSHOT = words;
-        }
+        SNAPSHOT = words;
+        SNAPSHOT_TARGET = kernel_stub_target(words);
     }
 }
 
-/// Make the BIOS's own vector the live one.
+/// The kernel vector's target, when the snapshot is one.
+fn kernel_target() -> Option<u32> {
+    // SAFETY: a read of a private static written once at start-up.
+    unsafe { SNAPSHOT_TARGET }
+}
+
+/// Make the BIOS's own vector the live one. Only called when [`kernel_target`] is `Some`.
 fn use_bios_vector() {
     // SAFETY: four aligned words of the exception vector, written with
     // interrupts masked at the controller and the cache flushed behind them.
@@ -176,8 +227,13 @@ impl Stat {
 
 #[derive(Copy, Clone, Default)]
 pub(crate) struct Outcome {
-    /// The vector `main` found was the standard BIOS one.
+    /// The vector `main` found was Sony's stub (jump to 0x0C80).
     pub(crate) standard_vector: bool,
+    /// The vector `main` found was a kernel stub of any BIOS (see the module docs), with its
+    /// target; `None` means no SYSCALL was sent through it.
+    pub(crate) kernel_target: Option<u32>,
+    /// The SYSCALL part ran.
+    pub(crate) critical_done: bool,
     pub(crate) harness: Stat,
     pub(crate) enter: Stat,
     pub(crate) exit: Stat,
@@ -197,6 +253,10 @@ pub(crate) struct Outcome {
 /// vector live and no interrupt source unmasked.
 #[inline(never)]
 pub(crate) fn measure_critical_sections(out: &mut Outcome) {
+    if out.kernel_target.is_none() {
+        return;
+    }
+    out.critical_done = true;
     let mask = irq::mask();
     irq::set_mask(0);
     use_bios_vector();
@@ -265,6 +325,9 @@ pub(crate) fn measure_runtime_vblank(out: &mut Outcome) {
 /// acknowledge the interrupt.
 #[inline(never)]
 pub(crate) fn measure_bios_vblank(out: &mut Outcome) {
+    if out.kernel_target.is_none() {
+        return;
+    }
     // SAFETY: BIOS B-table calls through the stubs above, with the BIOS's own
     // kernel RAM intact (the program never touches the first 64 KiB).
     let event = unsafe { __hwtest_open_event(0xF200_0003, 0x0002, 0x2000, 0) };
@@ -306,15 +369,20 @@ pub(crate) fn measure_bios_vblank(out: &mut Outcome) {
 /// 0x2C0 EnterCriticalSection and 0x2C1 ExitCriticalSection per call
 /// (min/median/max, harness included); 0x2C2 the empty call and its two
 /// counter reads; 0x2C3 BIOS VBlank round trip; 0x2C4 BIOS gaps found, events
-/// delivered, flags (bit 0 standard vector, bit 1 event opened, bit 2 BIOS
-/// loop finished, bits 8-15 gaps found under the runtime handler); 0x2C5
-/// runtime VBlank round trip.
+/// delivered, flags (bit 0 Sony's standard vector, bit 1 event opened, bit 2 BIOS
+/// loop finished, bit 3 SYSCALL part ran, bit 4 the vector was a kernel stub,
+/// bits 8-15 gaps found under the runtime handler, bits 16-31 the low half of the
+/// stub's target, 0x0C80 for Sony and 0x27D0 for OpenBIOS); 0x2C5
+/// runtime VBlank round trip. A BIOS part that did not run has all-zero timings.
 pub(crate) fn records(out: &Outcome) -> [TimingRecord; KERNEL_COUNT] {
     let stat = |offset: u16, s: &Stat| record(KERNEL_RECORD + offset, s.min, s.med, s.max);
     let flags = bit(out.standard_vector, 0)
         | bit(out.event.is_some(), 1)
         | bit(out.bios_done, 2)
-        | out.sdk_vblank.count << 8;
+        | bit(out.critical_done, 3)
+        | bit(out.kernel_target.is_some(), 4)
+        | out.sdk_vblank.count << 8
+        | (out.kernel_target.unwrap_or(0) & 0xFFFF) << 16;
     [
         stat(0, &out.enter),
         stat(1, &out.exit),
@@ -330,119 +398,33 @@ pub(crate) fn records(out: &Outcome) -> [TimingRecord; KERNEL_COUNT] {
     ]
 }
 
-/// Set `standard_vector` from what `main` found.
+/// Set the vector fields from what `main` found.
 pub(crate) fn start() -> Outcome {
     Outcome {
         // SAFETY: a read of a private static written once at start-up.
-        standard_vector: unsafe { SNAPSHOT_STANDARD },
+        standard_vector: unsafe { *core::ptr::addr_of!(SNAPSHOT) } == SONY_VECTOR,
+        kernel_target: kernel_target(),
         ..Outcome::default()
     }
 }
 
-const LABEL: (u8, u8, u8) = (150, 170, 200);
-const VALUE: (u8, u8, u8) = (236, 240, 248);
-const NOTE: (u8, u8, u8) = (255, 216, 96);
-const COLUMNS: [i16; 4] = [120, 168, 216, 264];
-
-fn row(font: &FontAtlas, y: i16, label: &str, stat: &Stat, net: Option<u32>) {
-    text(font, 8, y, label, LABEL);
-    if stat.count == 0 {
-        text(font, COLUMNS[0], y, "-", LABEL);
-        return;
-    }
-    for (x, value) in COLUMNS.iter().zip([stat.min, stat.med, stat.max]) {
-        put_number(font, *x, y, value, VALUE);
-    }
-    if let Some(net) = net {
-        put_number(font, 276, y, net, NOTE);
-    }
-}
-
-/// The result screen. `status` is the line at the foot.
+/// Run the whole case. Both BIOS parts are skipped when the vector found at start-up is not a
+/// kernel stub, and when `skip_bios` (the run was started to avoid risky steps): a SYSCALL goes
+/// to a kernel handler, and the VBlank round trip can hang a kernel which does not acknowledge
+/// a VBlank nobody handles.
+/// There is no picture of its own: the run's progress screen names the step.
 #[inline(never)]
-pub(crate) fn draw(font: &FontAtlas, out: &Outcome, status: &str) {
-    text(font, 8, 8, "KERNEL TIMING (CYCLES)", VALUE);
-    text(
-        font,
-        8,
-        20,
-        if out.standard_vector {
-            "VECTOR: BIOS SNAPSHOT"
-        } else {
-            "VECTOR: FALLBACK WORDS"
-        },
-        LABEL,
-    );
-    text(font, COLUMNS[0], 36, "MIN", LABEL);
-    text(font, COLUMNS[1], 36, "MED", LABEL);
-    text(font, COLUMNS[2], 36, "MAX", LABEL);
-    text(font, 276, 36, "NET", LABEL);
-    let net = |s: &Stat| s.med.saturating_sub(out.harness.med);
-    row(font, 50, "EMPTY CALL", &out.harness, None);
-    row(font, 62, "ENTER CS", &out.enter, Some(net(&out.enter)));
-    row(font, 74, "EXIT CS", &out.exit, Some(net(&out.exit)));
-    if out.enter.count != 0 {
-        text(font, 8, 86, "ENTER+EXIT NET", LABEL);
-        put_number(font, 276, 86, net(&out.enter) + net(&out.exit), NOTE);
-    }
-    row(font, 106, "VBLANK SDK", &out.sdk_vblank, None);
-    row(font, 118, "VBLANK BIOS", &out.bios_vblank, None);
-    if out.bios_vblank.count != 0 {
-        text(font, 8, 134, "BIOS GAPS", LABEL);
-        put_number(font, 120, 134, out.bios_vblank.count, VALUE);
-        text(font, 8, 146, "EVENT READY", LABEL);
-        put_number(font, 120, 146, out.events_seen, VALUE);
-        text(
-            font,
-            168,
-            146,
-            if out.event.is_some() {
-                "OPENED"
-            } else {
-                "NOT OPENED"
-            },
-            LABEL,
-        );
-    }
-    text(font, 8, 218, status, NOTE);
-}
-
-/// Frames the earlier results stay up before the BIOS VBlank part starts.
-const WARNING_FRAMES: u32 = 180;
-
-/// Show the screen for `frames` frames (or until the exit button when
-/// `frames` is zero).
-#[inline(never)]
-fn hold(screen: &mut Screen, font: &FontAtlas, out: &Outcome, status: &str, frames: u32) {
-    let mut buttons = Buttons::new();
-    let mut shown = 0u32;
-    while frames == 0 || shown < frames {
-        if buttons.poll().exit() {
-            break;
-        }
-        screen.clear((6, 8, 18));
-        draw(font, out, status);
-        screen.present();
-        shown += 1;
-    }
-}
-
-/// Run the whole case and leave the result on screen until CROSS.
-#[inline(never)]
-pub(crate) fn run(screen: &mut Screen, font: &FontAtlas) -> Outcome {
+pub(crate) fn run_headless(
+    _gpu: &mut psx_gpu::Gpu,
+    _font: &FontAtlas,
+    skip_bios: bool,
+) -> [TimingRecord; KERNEL_COUNT] {
     let mut out = start();
+    if skip_bios {
+        out.kernel_target = None;
+    }
     measure_critical_sections(&mut out);
     measure_runtime_vblank(&mut out);
-    hold(
-        screen,
-        font,
-        &out,
-        "BIOS VBLANK NEXT (MAY HANG)",
-        WARNING_FRAMES,
-    );
     measure_bios_vblank(&mut out);
-    // Interrupt handling put the runtime's clock back to zero; the caller
-    // realigns the engine after the case.
-    hold(screen, font, &out, "CROSS: BACK", 0);
-    out
+    records(&out)
 }

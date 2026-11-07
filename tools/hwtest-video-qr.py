@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Recover PX7/PX8 capture pages and probe payloads from a console recording.
+"""Recover the PX8 capture pages from a console recording.
 
 The QR pages are photographed off a TV, so a still frame is only readable if it
 happens to land between the capture card's scaling and interlacing artifacts.
@@ -8,27 +8,17 @@ keeps any page whose CRC checks out.
 
     python3 tools/hwtest-video-qr.py capture.mov pages.txt
 
-Pages are grouped by RUN. A recording usually contains more than one pass (a
-reboot, or RERUN STARTUP TESTS), and those pass different measurements under the
-same page numbers, so combining a page 1 from one run with a page 3 from another
-produces a payload that fails its binary CRC. Every distinct chunk seen for a
-page is kept, and the combination satisfying the whole-binary CRC is written.
-
-Targeted-probe QRs (PA1-PA5, SB1-SB4) seen in the same recording are written as
-sidecar files next to the output: pages-pa5.txt, pages-sb4.txt, and so on, one
-payload line each, ready for psoxide-hwtest audio-report /
-psoxide-hwtest sb4-report. A probe payload is accepted when its decoded
-binary's trailing CRC32 checks out (the wire text's /C: field is not the chunk
-CRC for probes, so the binary self-check is the validation that matters).
+v2.0 shows one capture per run: a cover page ("FILM FROM HERE, n PAGES" and a
+run id), then the pages in turn, forever. Every page carries the run id, so a
+recording that spans several runs is sorted by run before anything is
+combined; the binary CRC then confirms the set. `tools/hwtest-report.py
+--compare recording.mov` does this and the diff against the silicon baselines
+in one go.
 
 Install zxing-cpp (`pip install zxing-cpp`). OpenCV's detector is the fallback
 and is markedly weaker on a photographed CRT: on one console recording it read
 3 of 5 pages after minutes of preprocessing, while zxing read all 5 in twenty
 seconds from raw frames.
-
-Known limit: SB2's symbol is denser than the rest and has never decoded from a
-640x480 capture; use its TTY mirror or give it a paged transport before relying
-on video for SB2.
 """
 
 from __future__ import annotations
@@ -100,32 +90,15 @@ def renderings(gray: np.ndarray):
 
 
 PAGE_SCHEMAS = ("PX7", "PX8")
-# Every prefix a targeted probe emits. SB3 never existed; CL1 is the CD read
-# mechanism probe, which is labelled CL2 on screen but kept its wire prefix.
-PROBE_PREFIXES = ("PA1", "PA2", "PA3", "PA4", "PA5", "SB1", "SB2", "SB4", "CL1")
-
-
-def probe_payload_valid(chunk: str) -> bool:
-    """A probe payload is valid when its decoded binary's trailing CRC32
-    matches the rest of the binary. The /C: field on the wire is not the
-    chunk CRC for probes, so this is the check that matters."""
-    try:
-        binary = base64.b64decode(chunk + "=" * (-len(chunk) % 4))
-    except binascii.Error:
-        return False
-    if len(binary) < 8:
-        return False
-    claimed = int.from_bytes(binary[-4:], "little")
-    return claimed == (binascii.crc32(binary[:-4]) & 0xFFFF_FFFF)
 
 
 def scan(
     video: pathlib.Path, verbose: bool = True
-) -> tuple[dict[int, set[str]], int | None, str, dict[str, set[str]]]:
+) -> tuple[dict[int | None, dict[int, set[str]]], dict[int | None, int], str]:
+    """Pages by run id, then page number; each run's page total; the schema."""
     capture = cv2.VideoCapture(str(video))
-    seen: dict[int, set[str]] = {}
-    probes: dict[str, set[str]] = {}
-    total_pages: int | None = None
+    runs: dict[int | None, dict[int, set[str]]] = {}
+    totals: dict[int | None, int] = {}
     schema = ""
     frame_no = 0
 
@@ -141,42 +114,33 @@ def scan(
             continue
         for data in read_symbols(gray):
             prefix = data.split("/", 1)[0]
-            if prefix in PROBE_PREFIXES and "/C:" in data:
-                chunk = data.rsplit("/C:", 1)[0].split("/", 1)[1]
-                if probe_payload_valid(chunk):
-                    bucket = probes.setdefault(prefix, set())
-                    if data not in bucket:
-                        bucket.add(data)
-                        if verbose:
-                            print(f"probe {prefix} at frame {frame_no}", flush=True)
-                continue
-            if prefix not in PAGE_SCHEMAS:
+            if prefix not in PAGE_SCHEMAS or "/C:" not in data:
                 continue
             if schema and prefix != schema:
-                if verbose:
-                    print(
-                        f"# skipping {prefix} page at frame {frame_no}: "
-                        f"recording already yielded {schema} pages",
-                        flush=True,
-                    )
                 continue
             body, claimed = data.rsplit("/C:", 1)
-            _, page_field, chunk = body.split("/", 2)
-            number, total = int(page_field[:2], 16), int(page_field[2:], 16)
-            if int(claimed, 16) != (binascii.crc32(chunk.encode()) & 0xFFFF_FFFF):
+            try:
+                _, page_field, chunk = body.split("/", 2)
+                number, total = int(page_field[:2], 16), int(page_field[2:4], 16)
+                run_id = int(page_field[4:], 16) if len(page_field) == 8 else None
+                crc_ok = int(claimed, 16) == (binascii.crc32(chunk.encode()) & 0xFFFF_FFFF)
+            except ValueError:
+                continue
+            if not crc_ok:
                 continue
             schema = prefix
-            total_pages = total
-            bucket = seen.setdefault(number, set())
+            totals[run_id] = total
+            bucket = runs.setdefault(run_id, {}).setdefault(number, set())
             if chunk not in bucket:
                 bucket.add(chunk)
                 if verbose:
-                    print(f"{schema} page {number}/{total} at frame {frame_no}", flush=True)
+                    label = "" if run_id is None else f" run {run_id:04X}"
+                    print(f"{schema} page {number}/{total}{label} at frame {frame_no}", flush=True)
 
     capture.release()
     if verbose:
         print(f"# frames scanned: {frame_no}")
-    return seen, total_pages, schema, probes
+    return runs, totals, schema
 
 
 def combine(seen: dict[int, set[str]], total_pages: int) -> list[str] | None:
@@ -200,56 +164,47 @@ def combine(seen: dict[int, set[str]], total_pages: int) -> list[str] | None:
     return None
 
 
-def write_probe_files(out: pathlib.Path, probes: dict[str, set[str]]) -> None:
-    for prefix, payloads in sorted(probes.items()):
-        sidecar = out.with_name(f"{out.stem}-{prefix.lower()}{out.suffix or '.txt'}")
-        sidecar.write_text("\n".join(sorted(payloads)) + "\n")
-        extra = "" if len(payloads) == 1 else f" ({len(payloads)} distinct payloads)"
-        print(f"# probe {prefix} -> {sidecar}{extra}")
+def pages_from_video(video: pathlib.Path, verbose: bool = False) -> list[str]:
+    """The page lines of the most complete run in a recording; raises
+    ValueError when no run has all its pages with a matching binary CRC."""
+    runs, totals, schema = scan(video, verbose)
+    if not runs:
+        raise ValueError(f"no PX7/PX8 page decoded from any frame of {video}")
+    problems = []
+    # Complete runs first, newest-looking last: a recording usually ends on
+    # the run that was being filmed.
+    for run_id, seen in sorted(runs.items(), key=lambda item: -len(item[1])):
+        total = totals[run_id]
+        missing = [n for n in range(1, total + 1) if n not in seen]
+        label = "run ?" if run_id is None else f"run {run_id:04X}"
+        if missing:
+            problems.append(f"{label}: recovered {sorted(seen)} of {total}; missing {missing}")
+            continue
+        chosen = combine(seen, total)
+        if chosen is None:
+            problems.append(f"{label}: every page decoded but the binary CRC does not check out")
+            continue
+        return [
+            f"{schema}/{n:02X}{total:02X}"
+            + ("" if run_id is None else f"{run_id:04X}")
+            + f"/{chunk}/C:{binascii.crc32(chunk.encode()) & 0xFFFF_FFFF:08X}"
+            for n, chunk in enumerate(chosen, start=1)
+        ]
+    raise ValueError("; ".join(problems))
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("video", help="recording of the console showing the capture pages")
-    parser.add_argument("out", help="write capture page lines here (probe sidecars go next to it)")
+    parser.add_argument("out", help="write the capture page lines here")
     args = parser.parse_args()
-
-    out = pathlib.Path(args.out)
-    seen, total_pages, schema, probes = scan(pathlib.Path(args.video))
-    write_probe_files(out, probes)
-    if not seen or total_pages is None:
-        print("FAIL: no PX7/PX8 page decoded from any frame", file=sys.stderr)
+    try:
+        lines = pages_from_video(pathlib.Path(args.video), verbose=True)
+    except ValueError as exc:
+        print(f"FAIL: {exc}", file=sys.stderr)
         return 1
-
-    missing = [n for n in range(1, total_pages + 1) if n not in seen]
-    if missing:
-        print(
-            f"FAIL: recovered {sorted(seen)} of {total_pages}; missing {missing}.\n"
-            "      Some symbols do not survive the capture chain. Use the audio\n"
-            "      readout (psoxide-hwtest audio-decode) for a complete payload.",
-            file=sys.stderr,
-        )
-        return 1
-
-    chosen = combine(seen, total_pages)
-    if chosen is None:
-        print(
-            "FAIL: every page decoded, but no combination satisfies the payload\n"
-            "      CRC. Either the recording spans several runs with no single\n"
-            "      run showing all pages, or it was made with a disc older than\n"
-            "      HWTEST v1.4, which rebuilt the payload on every page change so\n"
-            "      the pages never described one consistent capture.",
-            file=sys.stderr,
-        )
-        return 1
-
-    lines = [
-        f"{schema}/{n:02X}{total_pages:02X}/{chunk}/C:"
-        f"{binascii.crc32(chunk.encode()) & 0xFFFF_FFFF:08X}"
-        for n, chunk in enumerate(chosen, start=1)
-    ]
-    out.write_text("\n".join(lines) + "\n")
-    print(f"# recovered all {total_pages} {schema} pages -> {out}")
+    pathlib.Path(args.out).write_text("\n".join(lines) + "\n")
+    print(f"# recovered all {len(lines)} pages -> {args.out}")
     return 0
 
 

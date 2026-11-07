@@ -54,6 +54,9 @@ const KICK: u32 =
 pub(crate) const NOT_SEEN: u32 = u32::MAX;
 /// Give up on a list after this many clocks (about half a second).
 const POLL_LIMIT: u32 = 16_000_000;
+/// Loop passes a poll gets besides the clock limit, so that a stopped clock
+/// cannot make it endless: a pass is some forty clocks.
+const POLL_SPINS: u32 = 2_000_000;
 const GPUSTAT_IRQ: u32 = 1 << 24;
 const GPUSTAT_CMD_READY: u32 = 1 << 26;
 const GPUSTAT_DMA_READY: u32 = 1 << 28;
@@ -269,8 +272,15 @@ fn kick_and_stamp(armed: &Armed) -> Stamps {
         bit28: NOT_SEEN,
         bit26: NOT_SEEN,
     };
+    // BCR is rewritten before every kick, as everywhere in this suite: silicon
+    // counts it down as a transfer runs.
+    // SAFETY: a register write to an idle channel.
+    unsafe {
+        dma::raw::set_size(dma::Channel::Gpu, dma::size_words(0));
+    }
     let guard = IrqGuard::mask();
     let mut clock = Clock::start();
+    let mut guard_count = 0u32;
     // SAFETY: silicon probe: the transfer touches only memory this probe
     // owns, which stays live and untouched until the probe waits the
     // channel idle or aborts it.
@@ -301,7 +311,8 @@ fn kick_and_stamp(armed: &Armed) -> Stamps {
         if !busy && s.irq != NOT_SEEN && stat & ready == ready {
             break;
         }
-        if t > POLL_LIMIT {
+        guard_count += 1;
+        if t > POLL_LIMIT || guard_count > crate::bounds::scale(POLL_SPINS) {
             break;
         }
     }
@@ -447,6 +458,10 @@ fn throughput(kind: LoopKind) -> Throughput {
     drop(guard);
 
     let armed = arm(Kind::Expensive);
+    // SAFETY: a register write to an idle channel.
+    unsafe {
+        dma::raw::set_size(dma::Channel::Gpu, dma::size_words(0));
+    }
     let guard = IrqGuard::mask();
     timers::set_mode(timers::Timer::Timer2, 0);
     // SAFETY: silicon probe: the transfer touches only memory this probe
@@ -458,7 +473,13 @@ fn throughput(kind: LoopKind) -> Throughput {
     let (iterations, cycles) = run_loop(kind, 0, WALK_CAP);
     // Let the drawing finish before anything else touches the GPU.
     let mut clock = Clock::start();
-    while gpu_io::status().bits() & GPUSTAT_IRQ == 0 && clock.now() < POLL_LIMIT {}
+    let mut spins = 0u32;
+    while gpu_io::status().bits() & GPUSTAT_IRQ == 0
+        && clock.now() < POLL_LIMIT
+        && spins < crate::bounds::scale(POLL_SPINS)
+    {
+        spins += 1;
+    }
     let irq_seen = gpu_io::status().bits() & GPUSTAT_IRQ != 0;
     drop(guard);
     disarm(&armed, irq_seen);
@@ -589,3 +610,48 @@ macro_rules! loop_cases {
 loop_cases!(test_alu_counts, test_alu_cycles, 0, "alu iters");
 loop_cases!(test_ram_counts, test_ram_cycles, 1, "ram iters");
 loop_cases!(test_spad_counts, test_spad_cycles, 2, "spad iters");
+
+/// A GPU kept busy behind another measurement: channel 2 walks the list of
+/// large triangles again and again until [`GpuLoad::stop`]. The caller
+/// decides what runs alongside; this only keeps the GPU and the DMA channel
+/// working so the other measurement sees the bus a game would.
+pub(crate) struct GpuLoad {
+    armed: Armed,
+    head: u32,
+}
+
+impl GpuLoad {
+    pub(crate) fn start() -> Self {
+        let armed = arm(Kind::Expensive);
+        let head = addr_of_mut!(LIST) as u32;
+        // SAFETY: silicon probe: the transfer touches only memory this probe
+        // owns, which stays live and untouched until `stop` aborts it.
+        unsafe {
+            dma::raw::set_size(dma::Channel::Gpu, dma::size_words(0));
+            dma::raw::set_control(dma::Channel::Gpu, KICK);
+        }
+        Self { armed, head }
+    }
+
+    /// Start another walk if the last one finished.
+    pub(crate) fn keep_busy(&mut self) {
+        if !dma::is_busy(dma::Channel::Gpu) {
+            // SAFETY: as in `start`.
+            unsafe {
+                dma::raw::set_address(dma::Channel::Gpu, self.head);
+                dma::raw::set_size(dma::Channel::Gpu, dma::size_words(0));
+                dma::raw::set_control(dma::Channel::Gpu, KICK);
+            }
+        }
+    }
+
+    /// Stop the walk, let the GPU finish what it is drawing and put its DMA
+    /// direction back.
+    pub(crate) fn stop(&mut self) {
+        disarm(&self.armed, true);
+        let mut polls = 0u32;
+        while gpu_io::status().bits() & GPUSTAT_CMD_READY == 0 && polls < 2_000_000 {
+            polls += 1;
+        }
+    }
+}

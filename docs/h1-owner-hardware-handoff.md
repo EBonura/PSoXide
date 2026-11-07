@@ -301,7 +301,7 @@ The combined disc already includes the PSoXide hardware suite as `HARDWARE
 TESTS`; no second burn is needed.
 
 - [ ] Reboot, select `HARDWARE TESTS`, and wait through the chain-load.
-- [ ] Run `RUN ALL TESTS + CAPTURE`.
+- [ ] Run `RUN HARDWARE TEST` (was `RUN ALL TESTS + CAPTURE` before v2.0).
 - [ ] Photograph or film every QR page according to
       `docs/hardware-test-disc.md`.
 - [ ] Do not run the memory-card diagnostic unless you accept its explicit

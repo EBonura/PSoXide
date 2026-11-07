@@ -321,6 +321,7 @@ const fn pad_kind(mode: PadMode) -> &'static str {
         PadMode::Negcon => "NEGCON",
         PadMode::Config => "CONFIG",
         PadMode::Unknown => "UNKNOWN",
+        PadMode::Negcon => "NEGCON",
     }
 }
 

@@ -4,12 +4,14 @@
 use std::path::{Path, PathBuf};
 
 use psoxide_hwtest::report::{
-    console_rows, fmv_rows, label, list_busy_labels, work, Record, CONSOLE_KERNEL,
-    CONSOLE_KERNEL_FIRST, CONSOLE_WIDTHS, FMV_FIELDS, FMV_FIRST_RECORD, FMV_SETUP_ERRORS,
-    LIST_BUSY_FIRST_CASE, MEMORY_CONTROL_NAMES, PX7_RECORD_UNUSED, PX8_BLOCK_FAILURES,
-    PX8_BLOCK_MEMCTL, PX8_BLOCK_OBSERVED, PX8_BLOCK_PRECISION, PX8_BLOCK_STATUS, PX8_BLOCK_TIMING,
+    cd_pause_rows, console_rows, fmt_g, label, list_busy_labels, record_label, work, Record,
+    CD_PAUSE_META_FIRST, CD_PAUSE_TRIAL_FIRST, CD_PAUSE_WATCH_FIRST, CONSOLE_KERNEL,
+    CONSOLE_KERNEL_FIRST, CONSOLE_WIDTHS, LIST_BUSY_FIRST_CASE, MEMORY_CONTROL_NAMES,
+    PX7_RECORD_UNUSED, PX8_BLOCK_FAILURES, PX8_BLOCK_MEMCTL, PX8_BLOCK_OBSERVED,
+    PX8_BLOCK_PRECISION, PX8_BLOCK_STATUS, PX8_BLOCK_TIMING,
 };
 use psoxide_hwtest::tables::{LABELS, WORK_BY_ID};
+use psoxide_hwtest::v2::v2_records;
 use regex::Regex;
 
 fn guest_dir() -> PathBuf {
@@ -102,51 +104,19 @@ fn perf_probe_table_matches_the_host_tables() {
 }
 
 #[test]
-fn record_slots_hold_the_largest_scope() {
-    let source = guest_source();
-    let slots: u32 = capture_one(r"const TIMING_RECORD_COUNT: usize = (\d+);", &source)
-        .parse()
-        .unwrap();
-    let table: Vec<u32> = ["SAFE", "LEVERS", "EXTENDED", "SHAPES", "RISKY", "CASES"]
-        .iter()
-        .map(|name| {
-            capture_one(&format!(r"const {name}: \[\w+; (\d+)\]"), &source)
-                .parse()
-                .unwrap()
-        })
-        .collect();
-    let dma_pairs = 6;
-    let retired = LABELS
-        .iter()
-        .filter(|(_, name)| name.starts_with("v122_only_"))
-        .count() as u32;
-    // The FMV STREAM TEST's records join any scope once it has run.
-    let fmv = FMV_FIELDS.len() as u32;
-    // The v1.26 MDEC DIAGNOSTIC's records replace an earlier battery's slots
-    // when it runs, so they are not part of the standing battery.
-    let mdec = LABELS
-        .iter()
-        .filter(|(id, _)| (0x200..0x2B0).contains(id))
-        .count() as u32;
-    // The v1.27 console cases' records likewise join a capture only once run.
-    let console = LABELS
-        .iter()
-        .filter(|(id, _)| (0x2C0..0x2F0).contains(id))
-        .count() as u32;
-    // What is left is the standing battery, which has not changed size.
-    let tables: u32 = table.iter().sum();
-    let standing = LABELS.len() as u32 - tables - dma_pairs - retired - fmv - mdec - console;
-    assert_eq!(standing, 151);
-    // The standard scope takes the standing battery, SAFE and LEVERS.
-    assert!(standing + table[0] + table[1] + fmv <= slots);
-    assert!(tables + dma_pairs + fmv <= slots);
-}
-
-#[test]
 fn console_records_match_the_guest() {
     let source = read("console_tests.rs");
     let mut groups = Vec::new();
-    for name in ["KERNEL", "WIDTH", "INTERLACE", "XA"] {
+    for name in [
+        "KERNEL",
+        "WIDTH",
+        "INTERLACE",
+        "XA",
+        "CDCOST",
+        "CDHANDOFF",
+        "CDMOTOR",
+        "XA_MEASURE",
+    ] {
         let first = hex(&capture_one(
             &format!(r"const {name}_RECORD: u16 = (0x[0-9A-Fa-f]+);"),
             &source,
@@ -165,11 +135,6 @@ fn console_records_match_the_guest() {
         (CONSOLE_KERNEL_FIRST, CONSOLE_KERNEL.len() as u32)
     );
     assert_eq!(groups[1].1, CONSOLE_WIDTHS.len() as u32);
-    // The slots the guest reserves are exactly the records it can emit.
-    let slots = capture_one(r"const RECORD_SLOTS: usize = ([^;]+);", &source)
-        .matches("_COUNT")
-        .count();
-    assert_eq!(slots, groups.len());
 }
 
 #[test]
@@ -187,6 +152,11 @@ fn console_rows_unpack_each_case() {
         record(0x2E1, 343, 344, 344),
         record(0x2E2, 0xFFFF, 0xFFFF, 0xFFFF),
         record(0x2E3, 376, 2918, 13),
+        record(0x320, 900, 910, 1250),
+        record(0x322, 15, 20, 31),
+        record(0x32A, 0xFFF6, 0, 12),
+        record(0x32C, 0xFFFF, 3, 0xFFFD),
+        record(0x32E, 40, 5000, 3300),
     ];
     let rows = console_rows(&records);
     let has = |text: &str| assert!(rows.iter().any(|row| row == text), "missing {text:?}");
@@ -194,71 +164,31 @@ fn console_rows_unpack_each_case() {
     has("console_kernel,exit_cs_net,482");
     has("console_kernel,runtime_vblank_gaps,24");
     has("console_width,256,0xD780,608,3168");
-    has("console_width,320,not shown");
+    has("console_width,320,0xFFFF,0,0");
     has("console_xa,getlocp_updating,1");
     has("console_xa,no_loop_seen,0");
     has("console_xa,loop_gap_ms,min=343 med=344 max=344");
     has("console_xa,loop_period_ms,none");
+    has("console_xa_measure,start_to_sound_ms,min=900 med=910 max=1250");
+    has("console_xa_measure,play_call_ms,min=1.5 med=2 max=3.1");
+    has("console_xa_measure,resume_head_moved_ms,min=-10 med=0 max=12");
+    has("console_xa_measure,head_minus_sysclk_ms_at_60s,none");
+    has("console_xa_measure,head_minus_sysclk_ms_at_180s,-3");
+    has("console_xa_measure,start_to_head_ms,missing");
+    has("console_xa_measure,sysclocks_per_hblank_line,2033");
     assert!(console_rows(&[]).is_empty());
 }
 
 #[test]
-fn fmv_records_match_the_guest() {
-    let source = read("fmv_test.rs");
-    let first = hex(&capture_one(
-        r"const FIRST_RECORD: u16 = (0x[0-9A-Fa-f]+);",
-        &source,
-    ));
-    let count: u32 = capture_one(r"const RECORD_COUNT: usize = (\d+);", &source)
-        .parse()
-        .unwrap();
-    assert_eq!(first, FMV_FIRST_RECORD);
-    assert_eq!(count as usize, FMV_FIELDS.len());
-    for id in first..first + count {
-        assert!(label(id).is_some(), "record {id:03X}");
-    }
-    let errors = Regex::new(r"(?s)const SETUP_ERRORS: \[&str; \d+\] = \[(.*?)\];")
-        .unwrap()
-        .captures(&source)
-        .expect("SETUP_ERRORS")[1]
-        .to_string();
-    let names: Vec<String> = Regex::new(r#""([^"]+)""#)
-        .unwrap()
-        .captures_iter(&errors)
-        .map(|c| c[1].to_string())
-        .collect();
-    assert_eq!(names, FMV_SETUP_ERRORS[1..]);
-}
-
-#[test]
-fn fmv_rows_rederive_the_verdict() {
-    let mut fields = [
-        (1, 9826, 9826),
-        (0, 0, 0),
-        (0, 0, 0xFFFF),
-        (889, 234, 4450),
-        (40, 30, 20),
-        (12253, 1, 0),
-    ];
-    let build = |fields: &[(i64, i64, i64)]| -> Vec<Record> {
-        fields
-            .iter()
-            .enumerate()
-            .map(|(index, (low, mid, high))| {
-                record(FMV_FIRST_RECORD + index as u32, *low, *mid, *high)
-            })
-            .collect()
-    };
-    let rows = fmv_rows(&build(&fields));
-    assert_eq!(rows[0], "# fmv=PASS criteria=PASS");
-    assert!(rows.contains(&"fmv,first_error_lba,none".to_string()));
-    assert!(rows.contains(&"fmv,setup_error,none".to_string()));
-    // One lost sector fails the criteria even if the guest said PASS.
-    fields[1] = (1, 0, 0);
-    let rows = fmv_rows(&build(&fields));
-    assert_eq!(rows[0], "# fmv=PASS criteria=FAIL");
-    assert!(rows.contains(&"# fmv verdict disagrees with its own counters".to_string()));
-    assert!(fmv_rows(&[]).is_empty());
+fn g_format_follows_python() {
+    assert_eq!(fmt_g(0.0), "0");
+    assert_eq!(fmt_g(2.0), "2");
+    assert_eq!(fmt_g(0.15), "0.15");
+    assert_eq!(fmt_g(1234567.0), "1.23457e+06");
+    assert_eq!(fmt_g(123456.0), "123456");
+    assert_eq!(fmt_g(0.00001), "1e-05");
+    assert_eq!(fmt_g(-3.0), "-3");
+    assert_eq!(fmt_g(6553.5), "6553.5");
 }
 
 #[test]
@@ -314,4 +244,254 @@ fn every_memory_control_value_has_a_name() {
     .parse()
     .unwrap();
     assert!(count <= MEMORY_CONTROL_NAMES.len());
+}
+
+/// `/// rec name: field, field, field (...)` lines of the guest, as
+/// (name, fields). Fields are compared lowercase: the guest spells some hex
+/// digits in capitals.
+fn guest_record_docs() -> Vec<(String, [String; 3])> {
+    let docs = Regex::new(r"(?m)^\s*///\s+rec\s+(\w+):\s*([^()\n]+?)\s*(?:\(|$)").unwrap();
+    docs.captures_iter(&guest_source())
+        .map(|found| {
+            let fields: Vec<String> = found[2]
+                .split(',')
+                .map(|field| field.trim().to_lowercase())
+                .collect();
+            let fields: [String; 3] = fields
+                .try_into()
+                .unwrap_or_else(|f: Vec<String>| panic!("rec {}: {} fields", &found[1], f.len()));
+            (found[1].to_string(), fields)
+        })
+        .collect()
+}
+
+/// Whether table label `label` belongs to the guest's family `name`: the
+/// guest documents `sb4_hash` once for `sb4_hash_0` to `sb4_hash_4`.
+fn in_family(label: &str, name: &str) -> bool {
+    label == name
+        || label
+            .strip_prefix(name)
+            .is_some_and(|rest| rest.starts_with('_'))
+}
+
+#[test]
+fn every_documented_guest_record_is_in_the_v2_table() {
+    let docs = guest_record_docs();
+    assert!(docs.len() > 90, "guest rec docs not found: {}", docs.len());
+    let mut missing = Vec::new();
+    for (name, fields) in &docs {
+        let known = v2_records().values().any(|entry| {
+            in_family(&entry.label, name)
+                && entry.fields.each_ref().map(|f| f.to_lowercase()) == *fields
+        });
+        if !known {
+            missing.push(format!("{name}: {fields:?}"));
+        }
+    }
+    assert!(missing.is_empty(), "no v2 table entry for: {missing:#?}");
+}
+
+#[test]
+fn every_v2_family_is_mentioned_by_the_guest() {
+    // The guest documents some families in a module comment rather than in a
+    // `/// rec` line (the MDEC probe, the rumble answers), so the check here is
+    // only that the family name, with its numbering dropped, still appears.
+    let source = guest_source();
+    // Names the table gives to records the guest documents under a shorter
+    // name: `handoff` (ten areas) and the `sb1_audit` record that 0x431 reuses
+    // for the upload readback.
+    let renamed = |label: &str| label.starts_with("handoff_area_") || label == "sb1_upload";
+    let mut orphans = Vec::new();
+    for (id, entry) in v2_records().iter().filter(|(_, e)| !renamed(&e.label)) {
+        let mut parts: Vec<&str> = entry.label.split('_').collect();
+        let mentioned = loop {
+            if source.contains(&parts.join("_")) {
+                break true;
+            }
+            if parts.len() <= 2 {
+                break false;
+            }
+            parts.pop();
+        };
+        if !mentioned {
+            orphans.push(format!("{id:03X} {}", entry.label));
+        }
+    }
+    assert!(
+        orphans.is_empty(),
+        "not mentioned by the guest: {orphans:#?}"
+    );
+}
+
+#[test]
+fn v2_table_never_shadows_a_timing_record() {
+    // A v2 entry may rename an older label's id, but it must not claim an id
+    // the standing timing battery measures (those carry a work count).
+    for id in v2_records().keys() {
+        if let Some(work) = work(*id) {
+            assert_eq!(work, 0, "v2 record {id:03X} sits on a timed record");
+        }
+    }
+}
+
+#[test]
+fn every_known_record_fits_the_guest_record_slots() {
+    let slots: usize = capture_one(
+        r"const TIMING_RECORD_COUNT: usize = (\d+);",
+        &read("main.rs"),
+    )
+    .parse()
+    .unwrap();
+    let mut ids: Vec<u32> = LABELS.iter().map(|(id, _)| u32::from(*id)).collect();
+    ids.extend(v2_records().keys());
+    ids.sort_unstable();
+    ids.dedup();
+    assert!(
+        ids.len() <= slots,
+        "{} record ids named, {slots} slots",
+        ids.len()
+    );
+    assert!(ids.iter().all(|id| record_label(*id) != "unlabelled"));
+}
+
+#[test]
+fn cd_pause_ids_match_the_guest() {
+    let source = read("cd_pause.rs");
+    let id = |name: &str| {
+        hex(&capture_one(
+            &format!(r"const {name}: u16 = (0x[0-9A-Fa-f]+);"),
+            &source,
+        ))
+    };
+    assert_eq!(id("CD_PAUSE_RECORD"), CD_PAUSE_META_FIRST);
+    assert_eq!(id("META_LIMITS"), CD_PAUSE_META_FIRST + 1);
+    assert_eq!(id("META_FAILS"), CD_PAUSE_META_FIRST + 2);
+    assert_eq!(id("TRIAL_BASE"), CD_PAUSE_TRIAL_FIRST);
+    assert_eq!(id("WATCH_BASE"), CD_PAUSE_WATCH_FIRST);
+    let count = |name: &str| -> u32 {
+        capture_one(&format!(r"const {name}: usize = (\d+);"), &source)
+            .parse()
+            .unwrap()
+    };
+    let (speeds, states, trials, watches, events) = (
+        count("SPEEDS"),
+        count("STATES"),
+        count("TRIALS"),
+        count("WATCHES"),
+        count("WATCH_EVENTS"),
+    );
+    assert_eq!((speeds, states, trials, watches, events), (2, 5, 3, 4, 8));
+    // The record total is three meta, four per cell and nine per watch.
+    assert!(source.contains("3 + SPEEDS * STATES * (TRIALS + 1) + WATCHES * (WATCH_EVENTS + 1)"));
+    let mut ids = vec![
+        CD_PAUSE_META_FIRST,
+        CD_PAUSE_META_FIRST + 1,
+        CD_PAUSE_META_FIRST + 2,
+    ];
+    // Four records per cell: the trials, then the acknowledge summary.
+    ids.extend((0..speeds * states * (trials + 1)).map(|k| CD_PAUSE_TRIAL_FIRST + k));
+    // Sixteen ids per watch: the events, then the summary at +8.
+    for watch in 0..watches {
+        ids.extend((0..=events).map(|k| CD_PAUSE_WATCH_FIRST + 16 * watch + k));
+    }
+    for id in &ids {
+        assert!(
+            label(*id).is_some_and(|l| l.starts_with("cd_pause_")),
+            "{id:03X}"
+        );
+        assert_eq!(work(*id), Some(0), "{id:03X}");
+    }
+    // The last id the guest can emit is the last the tables name.
+    assert_eq!(ids.iter().max(), Some(&0x3B8));
+    let named = LABELS
+        .iter()
+        .filter(|(id, name)| (0x340..0x3C0).contains(id) && name.starts_with("cd_pause_"))
+        .count();
+    assert_eq!(named, ids.len());
+}
+
+#[test]
+fn cd_pause_state_and_event_names_match_the_guest() {
+    let source = read("cd_pause.rs");
+    let names = capture_one(r"const STATE_NAMES: \[&str; \w+\] = \[([^\]]*)\];", &source);
+    let found: Vec<&str> = names
+        .split(',')
+        .map(|n| n.trim().trim_matches('"'))
+        .collect();
+    assert_eq!(found, ["IDLE", "SETTLED", "FIRST", "SEEK", "FAR"]);
+    // Outcome and flag codes are documented on the guest's Trial and Event.
+    assert!(source.contains("0 completed, 1 no INT2 in time, 2 drive error, 3 no acknowledge"));
+    assert!(source.contains("1 sector, 2 complete, 3 acknowledge, 5 error, 7 gave up"));
+}
+
+/// A trial record as the guest builds it: lo, hi of the clocks, then the
+/// packed outcome, sectors and status.
+fn trial(id: u32, clocks: Option<u32>, outcome: u32, sectors: u32, status: u32) -> Record {
+    let (lo, hi) = match clocks {
+        Some(c) => (i64::from(c & 0xFFFF), i64::from(c >> 16)),
+        None => (0xFFFF, 0xFFFF),
+    };
+    record(id, lo, hi, i64::from(outcome | sectors << 2 | status << 8))
+}
+
+#[test]
+fn cd_pause_rows_unpack_trials_acks_and_watches() {
+    let mut records = vec![
+        record(0x340, 52, 52, 56),
+        record(0x341, 7812, 1953, 34),
+        record(0x342, 2, 1, 0),
+    ];
+    // 1x IDLE (cell 0): three completions, the second one slow.
+    records.push(trial(0x350, Some(26_320), 0, 0, 0x02));
+    records.push(trial(0x351, Some(70_000), 0, 3, 0x42));
+    records.push(trial(0x352, Some(26_264), 0, 0, 0x02));
+    records.push(record(0x353, 602, 604, 610));
+    // 2x FAR (cell 9): never completes, drive error, never acknowledged.
+    records.push(trial(0x374, None, 1, 15, 0x00));
+    records.push(trial(0x375, None, 2, 0, 0x03));
+    records.push(trial(0x376, None, 3, 0, 0x00));
+    records.push(record(0x377, 0xFFFF, 0xFFFF, 0xFFFF));
+    // 2x EARLY watch (watch 3): acknowledge, then INT2 after one GetStat.
+    records.push(record(0x3B0, 150, 3 << 8 | 0x02, 0));
+    records.push(record(0x3B1, 205, 2 << 8 | 0x02, 1));
+    records.push(record(0x3B2, 0, 0, 0));
+    records.push(record(0x3B8, 2, 1, 1));
+    // 1x SPACED watch (watch 0) that gave up at the limit.
+    records.push(record(0x380, 150, 3 << 8 | 0x02, 0));
+    records.push(record(0x381, 62_500, 7 << 8, 5));
+    records.push(record(0x388, 2, 5, 0));
+    let rows = cd_pause_rows(&records);
+    let has = |text: &str| {
+        assert!(
+            rows.iter().any(|row| row == text),
+            "missing {text:?}\n{rows:#?}"
+        )
+    };
+
+    has("cd_pause,loop_pass_clocks,min=52 med=52 max=56");
+    has("cd_pause,int2_limit_clocks_about,7999488");
+    has("cd_pause,int3_limit_clocks_about,1999872");
+    has("cd_pause,trials_run,34");
+    has("cd_pause,setup_failures,2");
+    has("cd_pause,cleanup_failures,1");
+    has("cd_pause_trial,1x,IDLE,0,26320,0.777,completed,0,0x02");
+    has("cd_pause_trial,1x,IDLE,1,70000,2.067,completed,3,0x42");
+    has("cd_pause_trial,2x,FAR,0,never,never,no INT2 within the limit,15,0x00");
+    has("cd_pause_trial,2x,FAR,1,never,never,drive error,0,0x03");
+    has("cd_pause_trial,2x,FAR,2,never,never,no acknowledge,0,0x00");
+    has("cd_pause_ack,1x,IDLE,19264,19328,19520,0.571");
+    has("cd_pause_ack,2x,FAR,none,none,none,none");
+    has("cd_pause_watch,2x,EARLY,0,19200,0.567,acknowledge_int3,0x02,0");
+    has("cd_pause_watch,2x,EARLY,1,26240,0.775,complete_int2,0x02,1");
+    has("cd_pause_watch,1x,SPACED,1,8000000,236.206,gave_up_at_limit,0x00,5");
+    has("cd_pause_watch_summary,2x,EARLY,2,1,yes");
+    has("cd_pause_watch_summary,1x,SPACED,2,5,no");
+    // Unused event slots and cells without records print nothing.
+    assert!(!rows
+        .iter()
+        .any(|row| row.starts_with("cd_pause_watch,2x,EARLY,2,")));
+    assert!(!rows
+        .iter()
+        .any(|row| row.starts_with("cd_pause_trial,1x,SETTLED")));
+    assert!(cd_pause_rows(&[]).is_empty());
 }

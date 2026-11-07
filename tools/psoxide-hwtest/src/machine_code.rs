@@ -34,6 +34,9 @@ const MARKER_BASE: u32 = 0x3400_0000;
 const LAYOUT_BIT: u32 = 0x8000;
 /// A measured block is tens to hundreds of instructions; 1024 words is slack.
 const MAX_SPAN_WORDS: usize = 1024;
+/// Probe ids are small. A data table can hold a word shaped like a marker
+/// (`ori $zero, $zero, imm`); ids this large are such coincidences.
+const MAX_PROBE_ID: u32 = 1023;
 
 /// A malformed marker pairing (the script's `AuditError`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,6 +80,9 @@ pub fn discover(words: &[u32]) -> std::result::Result<(Spans, Layout), AuditErro
             continue;
         }
         let (probe_id, is_end) = (low >> 1, low & 1);
+        if probe_id > MAX_PROBE_ID {
+            continue;
+        }
         if is_end == 0 {
             if let Some((open_id, _)) = open {
                 return Err(AuditError(format!(

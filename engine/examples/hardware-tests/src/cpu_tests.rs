@@ -75,7 +75,7 @@ pub(super) fn run_cpu_scan() -> ScanReport {
     hash = mix32(hash, cpu_unaligned_load_store_battery());
     items = items.wrapping_add(3);
 
-    ScanReport::info(items, hash, 0, "safe mips-i forms")
+    ScanReport::info(items, hash, 0)
 }
 
 pub(super) fn test_cpu_endian() -> TestResult {

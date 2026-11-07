@@ -19,8 +19,8 @@
 //!   MULT operand dependence, and the I-cache 4 KiB alias pair.
 //! * `RISKY` flips one bit of RAM_SIZE or the cache-control port around a
 //!   fixed workload and restores it. A wrong guess about an undocumented bit
-//!   can hang the console, so these run only from TARGETED PROBES > PERF A/B,
-//!   never from the default scan or the headless conformance capture. The
+//!   can hang the console, so these are the last step of the linear run
+//!   (`REGISTER A/B (CAN HANG)`), skipped when L2 is held at the start. The
 //!   record id is on screen while each one runs: a hang names its culprit.
 //!
 //! Marker ids 32 and up belong to this file (see the scheme in main.rs).
@@ -46,6 +46,10 @@ const SPU_SPARE: u32 = 0x1F80_1DBC;
 /// 16 words so the sequential-address probe has somewhere to walk, plus slack
 /// for the unaligned store pair, which writes one byte past a word.
 static mut PERF_WORDS: [u32; 18] = [0; 18];
+/// Sixteen different cached-RAM A/B pairs for the store-to-load timing rows.
+/// The timed code walks forward, so a queued store cannot merge with the next.
+static mut STORE_LOAD_WORDS: [u32; 32] = [0; 32];
+static mut STORE_LOAD_WITNESS: u32 = 0;
 
 /// A probe argument that is only known at run time.
 #[derive(Copy, Clone)]
@@ -57,6 +61,7 @@ enum Arg {
     RamUnaligned,
     /// The same word through KSEG1.
     RamWordKseg1,
+    StoreLoadPairs,
     /// 4 KiB of `lw; nop` pairs covering every I-cache line.
     IcacheLoadBlock,
     /// Leaf at line 0 of a 4 KiB page.
@@ -81,6 +86,7 @@ impl Arg {
             Self::RamWord => (&raw const PERF_WORDS) as u32,
             Self::RamUnaligned => (&raw const PERF_WORDS) as u32 + 1,
             Self::RamWordKseg1 => ((&raw const PERF_WORDS) as u32 & 0x1FFF_FFFF) | 0xA000_0000,
+            Self::StoreLoadPairs => (&raw const STORE_LOAD_WORDS) as u32,
             Self::IcacheLoadBlock => __hwtest_icache_load_block as *const () as u32,
             Self::EntryW0 => __hwtest_icache_entry_w0 as *const () as u32,
             Self::EntryW1 => __hwtest_icache_entry_w1 as *const () as u32,
@@ -108,6 +114,8 @@ struct Probe {
     /// Load a defined GTE state first, so a command's inputs are not whatever
     /// the last test left behind.
     seed_gte: bool,
+    /// Flush the I-cache before each sample, so the block runs cold.
+    cold: bool,
 }
 
 const fn probe(id: u16, work: u16, run: WarmFn, a: Arg, b: Arg) -> Probe {
@@ -119,6 +127,7 @@ const fn probe(id: u16, work: u16, run: WarmFn, a: Arg, b: Arg) -> Probe {
         b,
         uncached: false,
         seed_gte: false,
+        cold: false,
     }
 }
 
@@ -186,9 +195,7 @@ const SAFE: [Probe; 28] = [
 const T_SMALL: Arg = Arg::Imm(0x0000_0400);
 const LERP_A: Arg = Arg::Imm(0x0000_1234);
 
-/// The rest of the performance sweep. Runs from TARGETED PROBES, not with the
-/// standing battery: the full capture is already at its page budget, and this
-/// group is only interesting next to the register A/B records anyway.
+/// The rest of the performance sweep, the `EXTENDED PROBES AND SHAPES` step.
 const EXTENDED: [Probe; 39] = [
     probe(0x1E, 128, warm_nops, NONE, NONE).uncached(),
     // Each store is followed by three independent instructions, which a
@@ -306,6 +313,97 @@ const SHAPES: [Probe; 22] = [
     probe(0x136, 32, cached_call_pairs, Arg::EntryW0, Arg::EntryW1),
 ];
 
+/// v2.5: four controlled shapes at each of three literal gaps. For each gap,
+/// T00/T10/T01/T11 separate an ordinary store and load from any extra cost
+/// of a store immediately preceding a load of a different RAM word. The
+/// linked instructions are bracketed by separate markers 0x220..0x22B.
+const STORE_LOAD: [Probe; 12] = [
+    probe(
+        0x8D0,
+        16,
+        store_load_00_g0,
+        Arg::StoreLoadPairs,
+        Arg::StoreLoadPairs,
+    ),
+    probe(
+        0x8D1,
+        16,
+        store_load_10_g0,
+        Arg::StoreLoadPairs,
+        Arg::StoreLoadPairs,
+    ),
+    probe(
+        0x8D2,
+        16,
+        store_load_01_g0,
+        Arg::StoreLoadPairs,
+        Arg::StoreLoadPairs,
+    ),
+    probe(
+        0x8D3,
+        16,
+        store_load_11_g0,
+        Arg::StoreLoadPairs,
+        Arg::StoreLoadPairs,
+    ),
+    probe(
+        0x8D4,
+        16,
+        store_load_00_g2,
+        Arg::StoreLoadPairs,
+        Arg::StoreLoadPairs,
+    ),
+    probe(
+        0x8D5,
+        16,
+        store_load_10_g2,
+        Arg::StoreLoadPairs,
+        Arg::StoreLoadPairs,
+    ),
+    probe(
+        0x8D6,
+        16,
+        store_load_01_g2,
+        Arg::StoreLoadPairs,
+        Arg::StoreLoadPairs,
+    ),
+    probe(
+        0x8D7,
+        16,
+        store_load_11_g2,
+        Arg::StoreLoadPairs,
+        Arg::StoreLoadPairs,
+    ),
+    probe(
+        0x8D8,
+        16,
+        store_load_00_g6,
+        Arg::StoreLoadPairs,
+        Arg::StoreLoadPairs,
+    ),
+    probe(
+        0x8D9,
+        16,
+        store_load_10_g6,
+        Arg::StoreLoadPairs,
+        Arg::StoreLoadPairs,
+    ),
+    probe(
+        0x8DA,
+        16,
+        store_load_01_g6,
+        Arg::StoreLoadPairs,
+        Arg::StoreLoadPairs,
+    ),
+    probe(
+        0x8DB,
+        16,
+        store_load_11_g6,
+        Arg::StoreLoadPairs,
+        Arg::StoreLoadPairs,
+    ),
+];
+
 /// v1.24: the scratchpad-stack lever (lever_probes.rs). One call of
 /// hello-spstack's `level2` (16 `level3` calls) on the RAM stack and on a
 /// scratchpad stack, idle and while channel 2 walks a 2048-node empty list.
@@ -335,6 +433,210 @@ const LEVERS: [Probe; 4] = [
         NONE,
         NONE,
     ),
+];
+
+/// v2.0: every GTE command's latency as the CPU sees it, three ways. For each
+/// of 22 commands: the command then an immediate `mfc2` of MAC0, the same
+/// with MAC1, and the command back to back with itself. Whether a coprocessor
+/// read waits for the command, and for which registers, is the unknown; the
+/// back-to-back row is the command's issue-to-issue time for comparison.
+/// Ids `0x150`-`0x191`, three a command in the order of `GTE_LATENCY_NAMES`.
+const GTE_LATENCY: [Probe; 66] = [
+    probe(0x150, 16, lat_rtps_mac0, NONE, NONE).gte(),
+    probe(0x151, 16, lat_rtps_mac1, NONE, NONE).gte(),
+    probe(0x152, 16, lat_rtps_b2b, NONE, NONE).gte(),
+    probe(0x153, 16, lat_nclip_mac0, NONE, NONE).gte(),
+    probe(0x154, 16, lat_nclip_mac1, NONE, NONE).gte(),
+    probe(0x155, 16, lat_nclip_b2b, NONE, NONE).gte(),
+    probe(0x156, 16, lat_op_mac0, NONE, NONE).gte(),
+    probe(0x157, 16, lat_op_mac1, NONE, NONE).gte(),
+    probe(0x158, 16, lat_op_b2b, NONE, NONE).gte(),
+    probe(0x159, 16, lat_dpcs_mac0, NONE, NONE).gte(),
+    probe(0x15A, 16, lat_dpcs_mac1, NONE, NONE).gte(),
+    probe(0x15B, 16, lat_dpcs_b2b, NONE, NONE).gte(),
+    probe(0x15C, 16, lat_intpl_mac0, NONE, NONE).gte(),
+    probe(0x15D, 16, lat_intpl_mac1, NONE, NONE).gte(),
+    probe(0x15E, 16, lat_intpl_b2b, NONE, NONE).gte(),
+    probe(0x15F, 16, lat_mvmva_mac0, NONE, NONE).gte(),
+    probe(0x160, 16, lat_mvmva_mac1, NONE, NONE).gte(),
+    probe(0x161, 16, lat_mvmva_b2b, NONE, NONE).gte(),
+    probe(0x162, 8, lat_ncds_mac0, NONE, NONE).gte(),
+    probe(0x163, 8, lat_ncds_mac1, NONE, NONE).gte(),
+    probe(0x164, 8, lat_ncds_b2b, NONE, NONE).gte(),
+    probe(0x165, 8, lat_cdp_mac0, NONE, NONE).gte(),
+    probe(0x166, 8, lat_cdp_mac1, NONE, NONE).gte(),
+    probe(0x167, 8, lat_cdp_b2b, NONE, NONE).gte(),
+    probe(0x168, 8, lat_ncdt_mac0, NONE, NONE).gte(),
+    probe(0x169, 8, lat_ncdt_mac1, NONE, NONE).gte(),
+    probe(0x16A, 8, lat_ncdt_b2b, NONE, NONE).gte(),
+    probe(0x16B, 8, lat_nccs_mac0, NONE, NONE).gte(),
+    probe(0x16C, 8, lat_nccs_mac1, NONE, NONE).gte(),
+    probe(0x16D, 8, lat_nccs_b2b, NONE, NONE).gte(),
+    probe(0x16E, 16, lat_cc_mac0, NONE, NONE).gte(),
+    probe(0x16F, 16, lat_cc_mac1, NONE, NONE).gte(),
+    probe(0x170, 16, lat_cc_b2b, NONE, NONE).gte(),
+    probe(0x171, 8, lat_ncs_mac0, NONE, NONE).gte(),
+    probe(0x172, 8, lat_ncs_mac1, NONE, NONE).gte(),
+    probe(0x173, 8, lat_ncs_b2b, NONE, NONE).gte(),
+    probe(0x174, 8, lat_nct_mac0, NONE, NONE).gte(),
+    probe(0x175, 8, lat_nct_mac1, NONE, NONE).gte(),
+    probe(0x176, 8, lat_nct_b2b, NONE, NONE).gte(),
+    probe(0x177, 16, lat_sqr_mac0, NONE, NONE).gte(),
+    probe(0x178, 16, lat_sqr_mac1, NONE, NONE).gte(),
+    probe(0x179, 16, lat_sqr_b2b, NONE, NONE).gte(),
+    probe(0x17A, 16, lat_dcpl_mac0, NONE, NONE).gte(),
+    probe(0x17B, 16, lat_dcpl_mac1, NONE, NONE).gte(),
+    probe(0x17C, 16, lat_dcpl_b2b, NONE, NONE).gte(),
+    probe(0x17D, 8, lat_dpct_mac0, NONE, NONE).gte(),
+    probe(0x17E, 8, lat_dpct_mac1, NONE, NONE).gte(),
+    probe(0x17F, 8, lat_dpct_b2b, NONE, NONE).gte(),
+    probe(0x180, 16, lat_avsz3_mac0, NONE, NONE).gte(),
+    probe(0x181, 16, lat_avsz3_mac1, NONE, NONE).gte(),
+    probe(0x182, 16, lat_avsz3_b2b, NONE, NONE).gte(),
+    probe(0x183, 16, lat_avsz4_mac0, NONE, NONE).gte(),
+    probe(0x184, 16, lat_avsz4_mac1, NONE, NONE).gte(),
+    probe(0x185, 16, lat_avsz4_b2b, NONE, NONE).gte(),
+    probe(0x186, 8, lat_rtpt_mac0, NONE, NONE).gte(),
+    probe(0x187, 8, lat_rtpt_mac1, NONE, NONE).gte(),
+    probe(0x188, 8, lat_rtpt_b2b, NONE, NONE).gte(),
+    probe(0x189, 16, lat_gpf_mac0, NONE, NONE).gte(),
+    probe(0x18A, 16, lat_gpf_mac1, NONE, NONE).gte(),
+    probe(0x18B, 16, lat_gpf_b2b, NONE, NONE).gte(),
+    probe(0x18C, 16, lat_gpl_mac0, NONE, NONE).gte(),
+    probe(0x18D, 16, lat_gpl_mac1, NONE, NONE).gte(),
+    probe(0x18E, 16, lat_gpl_b2b, NONE, NONE).gte(),
+    probe(0x18F, 8, lat_ncct_mac0, NONE, NONE).gte(),
+    probe(0x190, 8, lat_ncct_mac1, NONE, NONE).gte(),
+    probe(0x191, 8, lat_ncct_b2b, NONE, NONE).gte(),
+];
+
+/// The emulator timing audit's list (`TIMING-AUDIT-STEPS.md`), M1 to M8 and
+/// M10, as warm-harness records: Timer 2 on the system clock unless the
+/// comment says otherwise, interrupts masked, five samples.
+const AUDIT: [Probe; 46] = [
+    // M1: RTPS then swc2 / cfc2 / lwc2 (16 turns, 20 nops), against 0x130.
+    probe(
+        0x192,
+        16,
+        m1_swc2_sxy2_scratchpad,
+        Arg::Imm(SCRATCHPAD),
+        NONE,
+    )
+    .gte(),
+    probe(0x193, 16, m1_cfc2_flag, NONE, NONE).gte(),
+    probe(
+        0x194,
+        16,
+        m1_lwc2_zero_scratchpad,
+        Arg::Imm(SCRATCHPAD),
+        NONE,
+    )
+    .gte(),
+    // M2: the swc2 again, to cached RAM.
+    probe(0x195, 16, m2_swc2_sxy2_ram, Arg::RamWord, NONE).gte(),
+    // M3: MMIO read cost, 64 x (lw, nop), timed by a counter that is not the
+    // one read: Timer 0 counter, DMA2 CHCR and DPCR by Timer 2, Timer 2's
+    // counter by Timer 0.
+    probe(0x1A0, 64, warm_loads, Arg::Imm(0x1F80_1100), NONE),
+    probe(0x1A1, 64, warm_loads, Arg::Imm(0x1F80_10A8), NONE),
+    probe(0x1A2, 64, warm_loads, Arg::Imm(0x1F80_10F0), NONE),
+    probe(
+        0x1A3,
+        64,
+        m3_timer2_read_timed_by_timer0,
+        Arg::Imm(0x1F80_1120),
+        NONE,
+    ),
+    // M4: scratchpad lb, lbu, lh, lhu, sb, sh, 64 each with a nop.
+    probe(
+        0x1A8,
+        64,
+        warm_signed_byte_loads,
+        Arg::Imm(SCRATCHPAD),
+        NONE,
+    ),
+    probe(0x1A9, 64, warm_byte_loads, Arg::Imm(SCRATCHPAD), NONE),
+    probe(
+        0x1AA,
+        64,
+        warm_signed_half_loads,
+        Arg::Imm(SCRATCHPAD),
+        NONE,
+    ),
+    probe(0x1AB, 64, warm_half_loads, Arg::Imm(SCRATCHPAD), NONE),
+    probe(0x1AC, 64, warm_byte_stores_nop, Arg::Imm(SCRATCHPAD), NONE),
+    probe(0x1AD, 64, warm_half_stores_nop, Arg::Imm(SCRATCHPAD), NONE),
+    // M5: IsC clear against the scratchpad (control), IsC set, IsC and TAG
+    // set; 64 sw and 64 lw each, run through KSEG1.
+    probe(0x1B0, 64, isolate_control_sw, Arg::Imm(SCRATCHPAD), NONE).uncached(),
+    probe(0x1B1, 64, isolate_control_lw, Arg::Imm(SCRATCHPAD), NONE).uncached(),
+    probe(0x1B2, 64, isolate_data_sw, Arg::RamWord, NONE).uncached(),
+    probe(0x1B3, 64, isolate_data_lw, Arg::RamWord, NONE).uncached(),
+    probe(0x1B4, 64, isolate_tag_sw, Arg::RamWord, NONE).uncached(),
+    probe(0x1B5, 64, isolate_tag_lw, Arg::RamWord, NONE).uncached(),
+    // M7: the 4 KiB evictor before every sample, then (a) 64 sw to RAM, (b) 64
+    // sw to the scratchpad, (c) 32 x (lw GPUSTAT, nop), (d) 32 x (lw RAM, nop),
+    // (e) 64 nops.
+    probe(0x1B8, 64, m7_sw_ram, Arg::RamWord, Arg::IcacheBlock),
+    probe(
+        0x1B9,
+        64,
+        m7_sw_scratchpad,
+        Arg::Imm(SCRATCHPAD),
+        Arg::IcacheBlock,
+    ),
+    probe(
+        0x1BA,
+        32,
+        m7_gpustat_pairs,
+        Arg::Imm(GPUSTAT),
+        Arg::IcacheBlock,
+    ),
+    probe(0x1BB, 32, m7_ram_pairs, Arg::RamWord, Arg::IcacheBlock),
+    probe(0x1BC, 64, m7_nops, NONE, Arg::IcacheBlock),
+    // M8: warm BIOS ROM, EXP1 and EXP3, through KSEG1: 64 x (lw, nop), 64
+    // bare lw, then half and byte (lhu, lbu with a nop).
+    probe(0x1C0, 64, warm_loads, Arg::Imm(0xBFC0_0000), NONE),
+    probe(
+        0x1C1,
+        64,
+        warm_loads_back_to_back,
+        Arg::Imm(0xBFC0_0000),
+        NONE,
+    ),
+    probe(0x1C2, 64, warm_half_loads, Arg::Imm(0xBFC0_0000), NONE),
+    probe(0x1C3, 64, warm_byte_loads, Arg::Imm(0xBFC0_0000), NONE),
+    probe(0x1C4, 64, warm_loads, Arg::Imm(0xBF00_0000), NONE),
+    probe(
+        0x1C5,
+        64,
+        warm_loads_back_to_back,
+        Arg::Imm(0xBF00_0000),
+        NONE,
+    ),
+    probe(0x1C6, 64, warm_half_loads, Arg::Imm(0xBF00_0000), NONE),
+    probe(0x1C7, 64, warm_byte_loads, Arg::Imm(0xBF00_0000), NONE),
+    probe(0x1C8, 64, warm_loads, Arg::Imm(0xBFA0_0000), NONE),
+    probe(
+        0x1C9,
+        64,
+        warm_loads_back_to_back,
+        Arg::Imm(0xBFA0_0000),
+        NONE,
+    ),
+    probe(0x1CA, 64, warm_half_loads, Arg::Imm(0xBFA0_0000), NONE),
+    probe(0x1CB, 64, warm_byte_loads, Arg::Imm(0xBFA0_0000), NONE),
+    // M10: divu, multu small, mflo after a gap of 0, 10, 30 and 36 nops
+    // against divu and 36 nops; multu large, mtlo, mflo; multu, mthi, mfhi.
+    probe(0x1D0, 8, m10_divu_multu_gap0, RS_SMALL, DIVISOR),
+    probe(0x1D1, 8, m10_divu_multu_gap10, RS_SMALL, DIVISOR),
+    probe(0x1D2, 8, m10_divu_multu_gap30, RS_SMALL, DIVISOR),
+    probe(0x1D3, 8, m10_divu_multu_gap36, RS_SMALL, DIVISOR),
+    probe(0x1D4, 8, m10_divu_36_nops, RS_SMALL, DIVISOR),
+    probe(0x1D5, 16, m10_multu_mtlo_mflo, RS_LARGE, RT),
+    probe(0x1D6, 16, m10_multu_mthi_mfhi, RS_SMALL, RT),
+    probe(0x1D7, 16, m10_multu_mthi_mfhi, RS_LARGE, RT),
+    probe(0x1D8, 16, m10_multu_mtlo_mflo, RS_SMALL, RT),
 ];
 
 #[derive(Copy, Clone)]
@@ -437,6 +739,9 @@ fn push_probes(table: &[Probe], records: &mut Records, next: &mut usize) {
             if entry.seed_gte {
                 seed_gte_state();
             }
+            if entry.cold {
+                flush_icache_without_irq();
+            }
             if entry.uncached {
                 call_uncached(entry.run, a, b)
             } else {
@@ -455,7 +760,393 @@ pub(crate) fn push_safe(records: &mut Records, next: &mut usize) {
 pub(crate) fn push_extended(records: &mut Records, next: &mut usize) {
     push_probes(&EXTENDED, records, next);
     push_probes(&SHAPES, records, next);
+    // Volatile setup and readback are outside every timed interval. A stays
+    // writable, B stays distinct and nonzero; the machine-code audit proves
+    // each load instruction targets B rather than A.
+    let words = (&raw mut STORE_LOAD_WORDS) as *mut u32;
+    for i in 0..16 {
+        unsafe {
+            core::ptr::write_volatile(words.add(i * 2), 0x1357_0000 | i as u32);
+            core::ptr::write_volatile(words.add(i * 2 + 1), 0xA5A5_0000 | i as u32);
+        }
+    }
+    push_probes(&STORE_LOAD, records, next);
+    let mut a_zero = 0;
+    let mut b_unchanged = 0;
+    for i in 0..16 {
+        unsafe {
+            a_zero += (core::ptr::read_volatile(words.add(i * 2)) == 0) as u16;
+            b_unchanged +=
+                (core::ptr::read_volatile(words.add(i * 2 + 1)) == (0xA5A5_0000 | i as u32)) as u16;
+        }
+    }
+    let witness_ok =
+        unsafe { (core::ptr::read_volatile(&raw const STORE_LOAD_WITNESS) == 0xA5A5_000F) as u16 };
+    push_timing_record(
+        records,
+        next,
+        TimingRecord {
+            id: 0x8DC,
+            work: 16,
+            min: a_zero,
+            med: b_unchanged,
+            max: witness_ok,
+        },
+    );
     push_dma(records, next);
+}
+
+/// The GTE command latency table (v2.0), with the GTE seeded before each
+/// sample so the inputs are defined.
+pub(crate) fn push_gte_latency(records: &mut Records, next: &mut usize) {
+    push_probes(&GTE_LATENCY, records, next);
+}
+
+/// The emulator timing audit's list (M1 to M11 bar the polled-timer one).
+pub(crate) fn push_audit(records: &mut Records, next: &mut usize) {
+    push_probes(&AUDIT, records, next);
+}
+
+/// Where the CPU's RAM loads wait on each DMA channel: 64 loads with the
+/// channel idle and the same loads right after kicking a transfer big enough
+/// to outlast them. GPU list walking is `push_dma`'s; these are the other
+/// three: SPU block DMA, OTC clear and GPU block DMA. A channel that never
+/// goes idle is stopped and described (`0x780`-`0x787`) and the next one
+/// runs.
+pub(crate) fn push_dma_channels(records: &mut Records, next: &mut usize) {
+    type Overlap = fn(u32, u32, u32, u32) -> u16;
+    let data = Arg::RamWord.resolve();
+    let run: Overlap = timed_loads_with_dma;
+
+    // SPU: 256 words as 16 blocks of 16, written to SPU RAM at 16 cycles a
+    // halfword, which keeps the channel busy for thousands of cycles.
+    dma_end_reset(DmaGroup::Spu);
+    for (id, kick) in [(0x140u16, 0u32), (0x141, SPU_KICK)] {
+        let record = sample_timing(id, 64, || {
+            with_spu_dma(|base, head| run(base, head, kick, data))
+        });
+        push_timing_record(records, next, record);
+    }
+    push_dma_end(records, next, DmaGroup::Spu);
+    // OTC: 1024 words cleared backwards, one RAM write a word.
+    dma_end_reset(DmaGroup::Otc);
+    for (id, kick) in [(0x142u16, 0u32), (0x143, OTC_KICK)] {
+        let record = sample_timing(id, 64, || {
+            with_otc_dma(|base, head| run(base, head, kick, data))
+        });
+        push_timing_record(records, next, record);
+    }
+    push_dma_end(records, next, DmaGroup::Otc);
+    // GPU block DMA of NOP words: the channel reads RAM and the GPU takes it.
+    dma_end_reset(DmaGroup::GpuBlock);
+    for (id, kick) in [(0x144u16, 0u32), (0x145, GPU_BLOCK_KICK)] {
+        let record = sample_timing(id, 64, || {
+            with_gpu_block_dma(|base, head| run(base, head, kick, data))
+        });
+        push_timing_record(records, next, record);
+    }
+    push_dma_end(records, next, DmaGroup::GpuBlock);
+    push_rekick(records, next);
+}
+
+/// rec dma_rekick_first: bcr_after_first_high_half, bcr_after_first_low_half, flags (0x7A0; bit 0 the first kick, with BCR set, was still busy at the bound; the count after a transfer that finished is what a kick without a rewrite starts from)
+const REKICK_FIRST_RECORD: u16 = 0x7A0;
+/// rec dma_rekick_second: bcr_after_second_high_half, bcr_after_second_low_half, flags (0x7A1; the same SPU channel kicked again without writing BCR; bit 0 still busy at the bound, bit 1 the first kick was still busy, bit 2 CHCR START still set after the stop)
+const REKICK_SECOND_RECORD: u16 = 0x7A1;
+/// rec dma_rekick_progress: blocks_past_source, bound_iterations_used, madr_low_half_at_the_bound (0x7A2; blocks the second kick moved before the bound, from MADR; a count of 0 meaning 65,536 blocks shows as a transfer that does not end)
+const REKICK_PROGRESS_RECORD: u16 = 0x7A2;
+
+/// What a block-mode kick does when BCR was left at the count the last
+/// transfer ended on. One bounded case on the SPU channel (16 blocks of 16
+/// words, kicked, waited out, kicked again without writing BCR). The silicon
+/// hypothesis from v2.1 is that BCR reads 0 once the blocks are done and a
+/// count of 0 runs 65,536 blocks; the wait after the second kick is the same
+/// counted loop as the probes' and the channel is stopped at the bound. Every
+/// other probe in this file writes BCR before each kick.
+fn push_rekick(records: &mut Records, next: &mut usize) {
+    crate::bounds::record_start(REKICK_FIRST_RECORD);
+    let mut seen = [0u32; 8];
+    let _ = with_spu_dma(|base, head| {
+        let channel = dma::Channel::Spu;
+        let bound = crate::bounds::scale(DMA_FINAL_WAIT_ITERATIONS);
+        // SAFETY: silicon probe: the transfers read only memory this probe
+        // owns plus whatever follows it, write SPU RAM from the staging
+        // address, and are stopped at the bound.
+        unsafe {
+            dma::raw::set_address(channel, head);
+            dma::raw::set_control(channel, SPU_KICK);
+            let mut spins = 0u32;
+            while dma::is_busy(channel) && spins < bound {
+                spins += 1;
+            }
+            let first_busy = dma::is_busy(channel);
+            if first_busy {
+                dma::abort(channel);
+            }
+            let after_first = psx_io::read_u32(base + 4);
+            // Again, BCR as the first transfer left it.
+            dma::raw::set_address(channel, head);
+            dma::raw::set_control(channel, SPU_KICK);
+            let mut again = 0u32;
+            while dma::is_busy(channel) && again < bound {
+                again += 1;
+            }
+            let busy = dma::is_busy(channel);
+            let chcr = dma::control(channel);
+            let madr = dma::address(channel);
+            let after_second = psx_io::read_u32(base + 4);
+            if busy {
+                dma::abort(channel);
+            }
+            let stopped = dma::is_busy(channel);
+            seen = [
+                after_first,
+                after_second,
+                (busy as u32) | ((first_busy as u32) << 1) | ((stopped as u32) << 2),
+                (madr & 0x00FF_FFFF).saturating_sub(head & 0x00FF_FFFF) / 64,
+                again,
+                madr & 0xFFFF,
+                chcr >> 16,
+                0,
+            ];
+        }
+        0
+    });
+    push_timing_record(
+        records,
+        next,
+        crate::console_tests::record(
+            REKICK_FIRST_RECORD,
+            seen[0] >> 16,
+            seen[0] & 0xFFFF,
+            (seen[2] >> 1) & 1,
+        ),
+    );
+    push_timing_record(
+        records,
+        next,
+        crate::console_tests::record(
+            REKICK_SECOND_RECORD,
+            seen[1] >> 16,
+            seen[1] & 0xFFFF,
+            seen[2],
+        ),
+    );
+    push_timing_record(
+        records,
+        next,
+        crate::console_tests::record(REKICK_PROGRESS_RECORD, seen[3], seen[4], seen[5]),
+    );
+}
+
+const SPU_KICK: u32 =
+    psx_hw::dma::CHCR_TO_DEVICE | psx_hw::dma::CHCR_SYNC_BLOCK | psx_hw::dma::CHCR_START;
+const GPU_BLOCK_KICK: u32 = SPU_KICK;
+const OTC_KICK: u32 = psx_hw::dma::CHCR_STEP_BACKWARD
+    | psx_hw::dma::CHCR_SYNC_MANUAL
+    | psx_hw::dma::CHCR_START
+    | psx_hw::dma::CHCR_TRIGGER;
+
+static mut DMA_SOURCE: [u32; 256] = [0; 256];
+const OTC_WORDS: usize = 1024;
+static mut DMA_OT: [u32; OTC_WORDS] = [0; OTC_WORDS];
+
+/// The DMA rows whose end state is described: each group's records are
+/// `0x780 + 2 * group` and the next one.
+#[derive(Copy, Clone)]
+enum DmaGroup {
+    Spu = 0,
+    Otc = 1,
+    GpuBlock = 2,
+    GpuList = 3,
+}
+
+/// rec dma_end: timeout_flags, chcr_high_half, device_status (SPU, OTC, GPU block and GPU list groups, 0x780 0x782 0x784 0x786; flags bit 0 busy before a kick, bit 1 busy after the loop, bit 2 the SPU mode never matched, bit 3 something stopped; ffff in the status = none)
+const DMA_END_RECORD: u16 = 0x780;
+/// rec dma_end_registers: madr_low_half, bcr_high_half, bcr_low_half (the same groups, 0x781 0x783 0x785 0x787; read after the timeout, before the channel was stopped)
+const DMA_END_REGISTERS_RECORD: u16 = 0x781;
+/// rec spu_mode_wait: iterations_first, iterations_longest, mode_never_matched (SPUSTAT bits 5-0 against the SPUCNT mode before the SPU DMA kick, 0x788)
+const SPU_MODE_WAIT_RECORD: u16 = 0x788;
+
+#[derive(Copy, Clone)]
+struct DmaEnd {
+    flags: u32,
+    chcr: u32,
+    status: u32,
+    madr: u32,
+    bcr: u32,
+    seen: bool,
+}
+
+const DMA_END_BLANK: DmaEnd = DmaEnd {
+    flags: 0,
+    chcr: 0,
+    status: 0xFFFF,
+    madr: 0,
+    bcr: 0,
+    seen: false,
+};
+static mut DMA_END: [DmaEnd; 4] = [DMA_END_BLANK; 4];
+/// SPUSTAT wait before the SPU DMA kick: iterations the first and the
+/// longest took.
+static mut SPU_MODE_ITERATIONS: [u32; 3] = [0; 3];
+const SPU_MODE_WAIT_ITERATIONS: u32 = 100_000;
+
+fn dma_end_reset(group: DmaGroup) {
+    // SAFETY: single thread; plain statics.
+    unsafe {
+        DMA_END[group as usize] = DMA_END_BLANK;
+        DMA_WAIT_FLAGS = 0;
+        if matches!(group, DmaGroup::Spu) {
+            SPU_MODE_ITERATIONS = [0; 3];
+        }
+    }
+}
+
+/// After a probe call: take the wait flags, and if a wait ran out describe
+/// the channel (CHCR, MADR, BCR and `status`) and stop it by clearing CHCR.
+/// Without a timeout the last call's state is kept.
+fn dma_settle(group: DmaGroup, channel: dma::Channel, status: u32) {
+    // SAFETY: single thread; plain statics, and register reads.
+    unsafe {
+        let flags = DMA_WAIT_FLAGS;
+        DMA_WAIT_FLAGS = 0;
+        let end = &mut DMA_END[group as usize];
+        end.flags |= flags;
+        if flags != 0 || !end.seen {
+            let base = channel.register_base();
+            end.chcr = dma::control(channel);
+            end.madr = dma::address(channel);
+            end.bcr = psx_io::read_u32(base + 4);
+            end.status = status;
+            end.seen = flags == 0 || end.seen;
+        }
+        if flags & 3 != 0 {
+            end.flags |= 8;
+            dma::abort(channel);
+        }
+    }
+}
+
+fn push_dma_end(records: &mut Records, next: &mut usize, group: DmaGroup) {
+    // SAFETY: single thread; plain statics.
+    let end = unsafe { DMA_END[group as usize] };
+    let id = DMA_END_RECORD + 2 * group as u16;
+    push_timing_record(
+        records,
+        next,
+        crate::console_tests::record(id, end.flags, end.chcr >> 16, end.status),
+    );
+    push_timing_record(
+        records,
+        next,
+        crate::console_tests::record(
+            DMA_END_REGISTERS_RECORD + 2 * group as u16,
+            end.madr & 0xFFFF,
+            end.bcr >> 16,
+            end.bcr & 0xFFFF,
+        ),
+    );
+    if matches!(group, DmaGroup::Spu) {
+        // SAFETY: single thread; plain static.
+        let wait = unsafe { SPU_MODE_ITERATIONS };
+        push_timing_record(
+            records,
+            next,
+            crate::console_tests::record(SPU_MODE_WAIT_RECORD, wait[0], wait[1], wait[2]),
+        );
+    }
+}
+
+/// Set the SPU up for a DMA write of 256 words and run `body(base, source)`,
+/// then put SPUCNT back. The channel's address and size are set; the body's
+/// assembly writes MADR and CHCR. SPUSTAT bits 5-0 follow SPUCNT's mode a
+/// moment after it is written (psx-spx), and a kick before they match is the
+/// suspect for a block write that never ends, so the wait is counted and its
+/// length recorded; if it runs out the kick goes ahead and says so.
+fn with_spu_dma(body: impl FnOnce(u32, u32) -> u16) -> u16 {
+    use psx_hw::spu::{SPUCNT, SPUSTAT, TRANSFER_ADDR, TRANSFER_CTRL};
+    // SAFETY: SPU register writes and a DMA from memory this probe owns; the
+    // body's waits are counted and a stuck channel is stopped below.
+    unsafe {
+        let old = psx_io::read_u16(SPUCNT);
+        let stopped = old & !0x0030;
+        let mut waits = [0u32; 2];
+        for (slot, mode) in [stopped, stopped | 0x0020].into_iter().enumerate() {
+            psx_io::write_u16(SPUCNT, mode);
+            if slot == 1 {
+                psx_io::write_u16(TRANSFER_CTRL, 0x0004);
+                psx_io::write_u16(TRANSFER_ADDR, 0x0800);
+            }
+            let limit = crate::bounds::scale(SPU_MODE_WAIT_ITERATIONS);
+            let mut iterations = 0u32;
+            while psx_io::read_u16(SPUSTAT) & 0x003F != mode & 0x003F && iterations < limit {
+                iterations += 1;
+            }
+            waits[slot] = iterations;
+            if iterations >= limit && limit > 1 {
+                DMA_WAIT_FLAGS |= 4;
+            }
+        }
+        // The first sample's wait, the longest of all of them, how many ran out.
+        #[allow(clippy::deref_addrof)]
+        let record = &mut *(&raw mut SPU_MODE_ITERATIONS);
+        if record[0] == 0 {
+            record[0] = waits[1];
+        }
+        record[1] = record[1].max(waits[1]);
+        record[2] += (waits[1] >= SPU_MODE_WAIT_ITERATIONS) as u32;
+        dma::enable_channel(dma::Channel::Spu);
+        DMA_BCR = dma::size_blocks(16, 16);
+        dma::raw::set_size(dma::Channel::Spu, DMA_BCR);
+        let source = (&raw mut DMA_SOURCE) as u32;
+        let elapsed = body(dma::Channel::Spu.register_base(), source);
+        let status = psx_io::read_u16(SPUSTAT) as u32;
+        dma_settle(DmaGroup::Spu, dma::Channel::Spu, status);
+        // Mode 0 on the SPU side too, so a transfer that never ended is not
+        // left armed.
+        psx_io::write_u16(SPUCNT, stopped);
+        psx_io::write_u16(SPUCNT, old);
+        elapsed
+    }
+}
+
+fn with_otc_dma(body: impl FnOnce(u32, u32) -> u16) -> u16 {
+    // SAFETY: a DMA into a table this probe owns; the body's waits are
+    // counted and a stuck channel is stopped below.
+    unsafe {
+        let table = (&raw mut DMA_OT) as *mut u32;
+        dma::enable_channel(dma::Channel::OrderingTableClear);
+        DMA_BCR = dma::size_words(OTC_WORDS as u16);
+        dma::raw::set_size(dma::Channel::OrderingTableClear, DMA_BCR);
+        let end = table.add(OTC_WORDS - 1) as u32;
+        let elapsed = body(dma::Channel::OrderingTableClear.register_base(), end);
+        dma_settle(DmaGroup::Otc, dma::Channel::OrderingTableClear, 0xFFFF);
+        elapsed
+    }
+}
+
+fn with_gpu_block_dma(body: impl FnOnce(u32, u32) -> u16) -> u16 {
+    let old_direction = (gpu_io::status().bits() >> 29) & 3;
+    gpu_io::write_display_control(0x0400_0002); // DMA CPU -> GP0
+    dma::enable_channel(dma::Channel::Gpu);
+    // SAFETY: a DMA of GP0 NOPs from memory this probe owns; the body's waits
+    // are counted and a stuck channel is stopped below.
+    let elapsed = unsafe {
+        DMA_BCR = dma::size_blocks(16, 16);
+        dma::raw::set_size(dma::Channel::Gpu, DMA_BCR);
+        body(
+            dma::Channel::Gpu.register_base(),
+            (&raw mut DMA_SOURCE) as u32,
+        )
+    };
+    let status = gpu_io::status().bits();
+    dma_settle(DmaGroup::GpuBlock, dma::Channel::Gpu, status >> 16);
+    // A transfer that never ended leaves the direction at 0 (off); one that
+    // did gets the old direction back.
+    let timed_out = unsafe { DMA_END[DmaGroup::GpuBlock as usize].flags & 8 != 0 };
+    gpu_io::write_display_control(0x0400_0000 | if timed_out { 0 } else { old_direction });
+    elapsed
 }
 
 pub(crate) fn push_risky(records: &mut Records, next: &mut usize) {
@@ -528,6 +1219,95 @@ macro_rules! warm_probe {
         }
     };
 }
+
+/// Sixteen adjacent A/B pairs. Each timed pass resets the pointer from `$9`;
+/// the first pass warms the I-cache and the second is the recorded one.
+/// Eight tail nops give successive pairs the same fixed separation without
+/// assuming a store has drained on silicon. The omitted operation is a
+/// literal nop, so each shape has equal instruction count at a fixed gap.
+/// The 0/2/6 gap itself is also literal nops.
+macro_rules! store_load_pair_probe {
+    ($name:ident, $marker:literal, $first:literal, $second:literal, $gap:literal) => {
+        #[inline(never)]
+        fn $name(a: u32, b: u32) -> u16 {
+            let elapsed: u32;
+            let last_load: u32;
+            unsafe {
+                core::arch::asm!(
+                    concat!(
+                        ".set noreorder\n",
+                        ".balign 16\n",
+                        ".word 0x34000000 | (", stringify!($marker), " << 1)\n",
+                        "lui $11, 0x1F80\n",
+                        "ori $11, $11, 0x1120\n",
+                        "addiu $13, $zero, 2\n",
+                        "2:\n",
+                        "sw $zero, 4($11)\n",
+                        "sw $zero, 0($11)\n",
+                        "addu $8, $9, $zero\n",
+                        ".rept 16\n",
+                        $first, "\n",
+                        ".rept ", stringify!($gap), "\n",
+                        "nop\n",
+                        ".endr\n",
+                        $second, "\n",
+                        ".rept 8\n",
+                        "nop\n",
+                        ".endr\n",
+                        "addiu $8, $8, 8\n",
+                        ".endr\n",
+                        "lw $12, 0($11)\n",
+                        "addiu $13, $13, -1\n",
+                        "bnez $13, 2b\n",
+                        "nop\n",
+                        ".word 0x34000001 | (", stringify!($marker), " << 1)\n",
+                        ".set reorder"
+                    ),
+                    inout("$8") a => _,
+                    inout("$9") b => _,
+                    inout("$10") 0u32 => last_load,
+                    lateout("$11") _,
+                    lateout("$12") elapsed,
+                    lateout("$13") _,
+                    options(nostack)
+                );
+                core::ptr::write_volatile(&raw mut STORE_LOAD_WITNESS, last_load);
+            }
+            elapsed as u16
+        }
+    };
+}
+
+store_load_pair_probe!(store_load_00_g0, 0x220, "nop", "nop", 0);
+store_load_pair_probe!(store_load_10_g0, 0x221, "sw $zero, 0($8)", "nop", 0);
+store_load_pair_probe!(store_load_01_g0, 0x222, "nop", "lw $10, 4($8)", 0);
+store_load_pair_probe!(
+    store_load_11_g0,
+    0x223,
+    "sw $zero, 0($8)",
+    "lw $10, 4($8)",
+    0
+);
+store_load_pair_probe!(store_load_00_g2, 0x224, "nop", "nop", 2);
+store_load_pair_probe!(store_load_10_g2, 0x225, "sw $zero, 0($8)", "nop", 2);
+store_load_pair_probe!(store_load_01_g2, 0x226, "nop", "lw $10, 4($8)", 2);
+store_load_pair_probe!(
+    store_load_11_g2,
+    0x227,
+    "sw $zero, 0($8)",
+    "lw $10, 4($8)",
+    2
+);
+store_load_pair_probe!(store_load_00_g6, 0x228, "nop", "nop", 6);
+store_load_pair_probe!(store_load_10_g6, 0x229, "sw $zero, 0($8)", "nop", 6);
+store_load_pair_probe!(store_load_01_g6, 0x22A, "nop", "lw $10, 4($8)", 6);
+store_load_pair_probe!(
+    store_load_11_g6,
+    0x22B,
+    "sw $zero, 0($8)",
+    "lw $10, 4($8)",
+    6
+);
 
 /// `$count` x (`$op` $8,$9; `$gap` nops; mflo $10).
 macro_rules! muldiv_gap_probe {
@@ -849,6 +1629,317 @@ rtps_read_probe!(rtps_read_ir1, 112, 0, 0x480A4800);
 // The control: the same read once RTPS (15 clocks) has certainly finished.
 rtps_read_probe!(rtps_read_otz_after_gap, 113, 16, 0x480A3800);
 
+/// `$reps` x (GTE command `$word`; `$read`), then the usual idle tail. The
+/// read is `mfc2 $10` of MAC0 (0x480AC000) or MAC1 (0x480AC800): if it waits
+/// for the command, the block costs the command's latency a turn; if it does
+/// not, it costs two instructions. The back-to-back twin uses `gte_probe!`.
+macro_rules! gte_read_probe {
+    ($name:ident, $id:literal, $reps:literal, $word:literal, $read:literal) => {
+        warm_probe!(
+            $name,
+            $id,
+            concat!(
+                ".rept ",
+                stringify!($reps),
+                "\n",
+                ".word ",
+                stringify!($word),
+                "\n",
+                ".word ",
+                stringify!($read),
+                "\n",
+                ".endr\n",
+                ".rept 48\nnop\n.endr\n"
+            )
+        );
+    };
+}
+
+gte_read_probe!(lat_rtps_mac0, 130, 16, 0x4A080001, 0x480AC000);
+gte_read_probe!(lat_rtps_mac1, 131, 16, 0x4A080001, 0x480AC800);
+gte_probe!(lat_rtps_b2b, 132, 16, 0x4A080001, 0);
+gte_read_probe!(lat_nclip_mac0, 133, 16, 0x4A000006, 0x480AC000);
+gte_read_probe!(lat_nclip_mac1, 134, 16, 0x4A000006, 0x480AC800);
+gte_probe!(lat_nclip_b2b, 135, 16, 0x4A000006, 0);
+gte_read_probe!(lat_op_mac0, 136, 16, 0x4A08000C, 0x480AC000);
+gte_read_probe!(lat_op_mac1, 137, 16, 0x4A08000C, 0x480AC800);
+gte_probe!(lat_op_b2b, 138, 16, 0x4A08000C, 0);
+gte_read_probe!(lat_dpcs_mac0, 139, 16, 0x4A080010, 0x480AC000);
+gte_read_probe!(lat_dpcs_mac1, 140, 16, 0x4A080010, 0x480AC800);
+gte_probe!(lat_dpcs_b2b, 141, 16, 0x4A080010, 0);
+gte_read_probe!(lat_intpl_mac0, 142, 16, 0x4A080011, 0x480AC000);
+gte_read_probe!(lat_intpl_mac1, 143, 16, 0x4A080011, 0x480AC800);
+gte_probe!(lat_intpl_b2b, 144, 16, 0x4A080011, 0);
+gte_read_probe!(lat_mvmva_mac0, 145, 16, 0x4A080012, 0x480AC000);
+gte_read_probe!(lat_mvmva_mac1, 146, 16, 0x4A080012, 0x480AC800);
+gte_probe!(lat_mvmva_b2b, 147, 16, 0x4A080012, 0);
+gte_read_probe!(lat_ncds_mac0, 148, 8, 0x4A080013, 0x480AC000);
+gte_read_probe!(lat_ncds_mac1, 149, 8, 0x4A080013, 0x480AC800);
+gte_probe!(lat_ncds_b2b, 150, 8, 0x4A080013, 0);
+gte_read_probe!(lat_cdp_mac0, 151, 8, 0x4A080014, 0x480AC000);
+gte_read_probe!(lat_cdp_mac1, 152, 8, 0x4A080014, 0x480AC800);
+gte_probe!(lat_cdp_b2b, 153, 8, 0x4A080014, 0);
+gte_read_probe!(lat_ncdt_mac0, 154, 8, 0x4A080016, 0x480AC000);
+gte_read_probe!(lat_ncdt_mac1, 155, 8, 0x4A080016, 0x480AC800);
+gte_probe!(lat_ncdt_b2b, 156, 8, 0x4A080016, 0);
+gte_read_probe!(lat_nccs_mac0, 157, 8, 0x4A08001B, 0x480AC000);
+gte_read_probe!(lat_nccs_mac1, 158, 8, 0x4A08001B, 0x480AC800);
+gte_probe!(lat_nccs_b2b, 159, 8, 0x4A08001B, 0);
+gte_read_probe!(lat_cc_mac0, 160, 16, 0x4A08001C, 0x480AC000);
+gte_read_probe!(lat_cc_mac1, 161, 16, 0x4A08001C, 0x480AC800);
+gte_probe!(lat_cc_b2b, 162, 16, 0x4A08001C, 0);
+gte_read_probe!(lat_ncs_mac0, 163, 8, 0x4A08001E, 0x480AC000);
+gte_read_probe!(lat_ncs_mac1, 164, 8, 0x4A08001E, 0x480AC800);
+gte_probe!(lat_ncs_b2b, 165, 8, 0x4A08001E, 0);
+gte_read_probe!(lat_nct_mac0, 166, 8, 0x4A080020, 0x480AC000);
+gte_read_probe!(lat_nct_mac1, 167, 8, 0x4A080020, 0x480AC800);
+gte_probe!(lat_nct_b2b, 168, 8, 0x4A080020, 0);
+gte_read_probe!(lat_sqr_mac0, 169, 16, 0x4A080028, 0x480AC000);
+gte_read_probe!(lat_sqr_mac1, 170, 16, 0x4A080028, 0x480AC800);
+gte_probe!(lat_sqr_b2b, 171, 16, 0x4A080028, 0);
+gte_read_probe!(lat_dcpl_mac0, 172, 16, 0x4A080029, 0x480AC000);
+gte_read_probe!(lat_dcpl_mac1, 173, 16, 0x4A080029, 0x480AC800);
+gte_probe!(lat_dcpl_b2b, 174, 16, 0x4A080029, 0);
+gte_read_probe!(lat_dpct_mac0, 175, 8, 0x4A08002A, 0x480AC000);
+gte_read_probe!(lat_dpct_mac1, 176, 8, 0x4A08002A, 0x480AC800);
+gte_probe!(lat_dpct_b2b, 177, 8, 0x4A08002A, 0);
+gte_read_probe!(lat_avsz3_mac0, 178, 16, 0x4A08002D, 0x480AC000);
+gte_read_probe!(lat_avsz3_mac1, 179, 16, 0x4A08002D, 0x480AC800);
+gte_probe!(lat_avsz3_b2b, 180, 16, 0x4A08002D, 0);
+gte_read_probe!(lat_avsz4_mac0, 181, 16, 0x4A08002E, 0x480AC000);
+gte_read_probe!(lat_avsz4_mac1, 182, 16, 0x4A08002E, 0x480AC800);
+gte_probe!(lat_avsz4_b2b, 183, 16, 0x4A08002E, 0);
+gte_read_probe!(lat_rtpt_mac0, 184, 8, 0x4A080030, 0x480AC000);
+gte_read_probe!(lat_rtpt_mac1, 185, 8, 0x4A080030, 0x480AC800);
+gte_probe!(lat_rtpt_b2b, 186, 8, 0x4A080030, 0);
+gte_read_probe!(lat_gpf_mac0, 187, 16, 0x4A08003D, 0x480AC000);
+gte_read_probe!(lat_gpf_mac1, 188, 16, 0x4A08003D, 0x480AC800);
+gte_probe!(lat_gpf_b2b, 189, 16, 0x4A08003D, 0);
+gte_read_probe!(lat_gpl_mac0, 190, 16, 0x4A08003E, 0x480AC000);
+gte_read_probe!(lat_gpl_mac1, 191, 16, 0x4A08003E, 0x480AC800);
+gte_probe!(lat_gpl_b2b, 192, 16, 0x4A08003E, 0);
+gte_read_probe!(lat_ncct_mac0, 193, 8, 0x4A08003F, 0x480AC000);
+gte_read_probe!(lat_ncct_mac1, 194, 8, 0x4A08003F, 0x480AC800);
+gte_probe!(lat_ncct_b2b, 195, 8, 0x4A08003F, 0);
+
+// M1 and M2 of the timing audit: copies of the 0x130 shape (RTPS, the read,
+// then 20 nops, sixteen turns). An interlocked read costs 638 clocks a block as
+// 0x130 does, a free one about 400. swc2 $14,0($8): 0xE90E0000; cfc2 $10,$31:
+// 0x484AF800; lwc2 $0,0($8): 0xC9000000.
+rtps_read_probe!(m1_swc2_sxy2_scratchpad, 196, 0, 0xE90E0000);
+rtps_read_probe!(m1_cfc2_flag, 197, 0, 0x484AF800);
+rtps_read_probe!(m1_lwc2_zero_scratchpad, 198, 0, 0xC9000000);
+rtps_read_probe!(m2_swc2_sxy2_ram, 199, 0, 0xE90E0000);
+
+/// `warm_probe!` with the timer chosen by the caller (`$timer` is the low half
+/// of the counter's address: 0x1120 Timer 2, 0x1100 Timer 0, both on the
+/// system clock in mode 0), `$14` and `$15` free to the payload, and an
+/// `$epilogue` after the second pass, outside the timed window.
+macro_rules! warm_probe_ext {
+    ($name:ident, $id:literal, $timer:literal, $payload:expr, $epilogue:expr) => {
+        #[inline(never)]
+        fn $name(a: u32, b: u32) -> u16 {
+            let elapsed: u32;
+            unsafe {
+                core::arch::asm!(
+                    concat!(
+                        ".set noreorder\n",
+                        ".balign 16\n",
+                        ".word 0x34000000 | (", stringify!($id), " << 1)\n",
+                        "lui $11, 0x1F80\n",
+                        "ori $11, $11, ", stringify!($timer), "\n",
+                        "addiu $13, $zero, 2\n",
+                        "2:\n",
+                        "sw $zero, 4($11)\n",
+                        "sw $zero, 0($11)\n",
+                        $payload,
+                        "lw $12, 0($11)\n",
+                        "addiu $13, $13, -1\n",
+                        "bnez $13, 2b\n",
+                        "nop\n",
+                        $epilogue,
+                        ".word 0x34000001 | (", stringify!($id), " << 1)\n",
+                        ".set reorder"
+                    ),
+                    inout("$8") a => _,
+                    inout("$9") b => _,
+                    lateout("$10") _,
+                    lateout("$11") _,
+                    lateout("$12") elapsed,
+                    lateout("$13") _,
+                    lateout("$14") _,
+                    lateout("$15") _,
+                    options(nostack)
+                );
+            }
+            elapsed as u16
+        }
+    };
+}
+
+// M3: Timer 2's own counter read, timed by Timer 0 on the system clock (the
+// other MMIO reads are `warm_loads` on Timer 2).
+warm_probe_ext!(
+    m3_timer2_read_timed_by_timer0,
+    200,
+    0x1100,
+    ".rept 64\nlw $9, 0($8)\nnop\n.endr\n",
+    ""
+);
+
+// M4: scratchpad sub-word accesses, 64 each with a nop after.
+warm_probe!(
+    warm_signed_byte_loads,
+    201,
+    ".rept 64\nlb $9, 0($8)\nnop\n.endr\n"
+);
+warm_probe!(
+    warm_signed_half_loads,
+    202,
+    ".rept 64\nlh $9, 0($8)\nnop\n.endr\n"
+);
+warm_probe!(
+    warm_byte_stores_nop,
+    203,
+    ".rept 64\nsb $zero, 0($8)\nnop\n.endr\n"
+);
+warm_probe!(
+    warm_half_stores_nop,
+    204,
+    ".rept 64\nsh $zero, 0($8)\nnop\n.endr\n"
+);
+
+// M5: 64 sw and 64 lw run through KSEG1 with COP0 Status bit 16 (IsC) clear
+// against the scratchpad (the control), set, and set with the cache-control
+// TAG bit (bit 2) as well. The Status read-modify-write is in all of them, so
+// only the bit differs. The epilogue is the BIOS's own flush (IsC, TAG, a zero
+// word to all 256 lines) so the I-cache comes back with no valid line.
+macro_rules! isolate_probe {
+    ($name:ident, $id:literal, $enter:literal, $access:literal, $leave:literal) => {
+        warm_probe_ext!(
+            $name,
+            $id,
+            0x1120,
+            concat!($enter, ".rept 64\n", $access, "\n.endr\n", $leave),
+            "lui $15, 0xFFFE\nori $15, $15, 0x0130\nlw $14, 0($15)\nnop\nori $9, $14, 4\nsw $9, 0($15)\nmfc0 $10, $12\nnop\nlui $9, 1\nor $9, $9, $10\nmtc0 $9, $12\nnop\nnop\nmove $9, $zero\n.rept 256\nsw $zero, 0($9)\naddiu $9, $9, 16\n.endr\nmtc0 $10, $12\nnop\nnop\nsw $14, 0($15)\n"
+        );
+    };
+}
+isolate_probe!(
+    isolate_control_sw,
+    205,
+    "mfc0 $10, $12\nnop\nmove $9, $10\nmtc0 $9, $12\nnop\nnop\n",
+    "sw $zero, 0($8)",
+    "mtc0 $10, $12\nnop\nnop\n"
+);
+isolate_probe!(
+    isolate_control_lw,
+    206,
+    "mfc0 $10, $12\nnop\nmove $9, $10\nmtc0 $9, $12\nnop\nnop\n",
+    "lw $9, 0($8)\nnop",
+    "mtc0 $10, $12\nnop\nnop\n"
+);
+isolate_probe!(
+    isolate_data_sw,
+    207,
+    "mfc0 $10, $12\nnop\nlui $9, 1\nor $9, $9, $10\nmtc0 $9, $12\nnop\nnop\n",
+    "sw $zero, 0($8)",
+    "mtc0 $10, $12\nnop\nnop\n"
+);
+isolate_probe!(
+    isolate_data_lw,
+    208,
+    "mfc0 $10, $12\nnop\nlui $9, 1\nor $9, $9, $10\nmtc0 $9, $12\nnop\nnop\n",
+    "lw $9, 0($8)\nnop",
+    "mtc0 $10, $12\nnop\nnop\n"
+);
+isolate_probe!(isolate_tag_sw, 209, "lui $15, 0xFFFE\nori $15, $15, 0x0130\nlw $14, 0($15)\nnop\nori $9, $14, 4\nsw $9, 0($15)\nmfc0 $10, $12\nnop\nlui $9, 1\nor $9, $9, $10\nmtc0 $9, $12\nnop\nnop\n", "sw $zero, 0($8)", "mtc0 $10, $12\nnop\nnop\nsw $14, 0($15)\n");
+isolate_probe!(isolate_tag_lw, 210, "lui $15, 0xFFFE\nori $15, $15, 0x0130\nlw $14, 0($15)\nnop\nori $9, $14, 4\nsw $9, 0($15)\nmfc0 $10, $12\nnop\nlui $9, 1\nor $9, $9, $10\nmtc0 $9, $12\nnop\nnop\n", "lw $9, 0($8)\nnop", "mtc0 $10, $12\nnop\nnop\nsw $14, 0($15)\n");
+
+/// One pass, the I-cache evicted first by the 4 KiB block `0x1C` uses (`b` is
+/// its address; it returns through `$10`), so the lines of the code that
+/// follows are refills. M7.
+macro_rules! cold_probe {
+    ($name:ident, $id:literal, $payload:expr) => {
+        #[inline(never)]
+        fn $name(a: u32, b: u32) -> u16 {
+            let elapsed: u32;
+            unsafe {
+                core::arch::asm!(
+                    concat!(
+                        ".set noreorder\n",
+                        ".balign 16\n",
+                        ".word 0x34000000 | (", stringify!($id), " << 1)\n",
+                        "jalr $10, $9\n",
+                        "nop\n",
+                        "lui $11, 0x1F80\n",
+                        "ori $11, $11, 0x1120\n",
+                        "sw $zero, 4($11)\n",
+                        "sw $zero, 0($11)\n",
+                        $payload,
+                        "lw $12, 0($11)\n",
+                        ".word 0x34000001 | (", stringify!($id), " << 1)\n",
+                        ".set reorder"
+                    ),
+                    inout("$8") a => _,
+                    inout("$9") b => _,
+                    lateout("$10") _,
+                    lateout("$11") _,
+                    lateout("$12") elapsed,
+                    options(nostack)
+                );
+            }
+            elapsed as u16
+        }
+    };
+}
+cold_probe!(m7_sw_ram, 211, ".rept 64\nsw $zero, 0($8)\n.endr\n");
+cold_probe!(m7_sw_scratchpad, 212, ".rept 64\nsw $zero, 0($8)\n.endr\n");
+cold_probe!(
+    m7_gpustat_pairs,
+    213,
+    ".rept 32\nlw $9, 0($8)\nnop\n.endr\n"
+);
+cold_probe!(m7_ram_pairs, 214, ".rept 32\nlw $9, 0($8)\nnop\n.endr\n");
+cold_probe!(m7_nops, 215, ".rept 64\nnop\n.endr\n");
+
+// M10: the multiply/divide unit. (a) divu, multu small, a gap, mflo, against
+// divu and 36 nops; (b) multu large, mtlo, mflo; (c) multu, mthi, mfhi.
+// 0x0109001B divu $8,$9; 0x01090019 multu $8,$9; 0x00005012 mflo $10;
+// 0x00005010 mfhi $10; 0x01000013 mtlo $8; 0x01000011 mthi $8.
+macro_rules! divmul_gap_probe {
+    ($name:ident, $id:literal, $gap:literal) => {
+        warm_probe!(
+            $name,
+            $id,
+            concat!(
+                ".rept 8\n.word 0x0109001B\n.word 0x01090019\n.rept ",
+                stringify!($gap),
+                "\nnop\n.endr\n.word 0x00005012\n.endr\n.rept 48\nnop\n.endr\n"
+            )
+        );
+    };
+}
+divmul_gap_probe!(m10_divu_multu_gap0, 216, 0);
+divmul_gap_probe!(m10_divu_multu_gap10, 217, 10);
+divmul_gap_probe!(m10_divu_multu_gap30, 218, 30);
+divmul_gap_probe!(m10_divu_multu_gap36, 219, 36);
+warm_probe!(
+    m10_divu_36_nops,
+    220,
+    ".rept 8\n.word 0x0109001B\n.rept 36\nnop\n.endr\n.endr\n.rept 48\nnop\n.endr\n"
+);
+warm_probe!(
+    m10_multu_mtlo_mflo,
+    221,
+    ".rept 16\n.word 0x01090019\n.word 0x01000013\n.word 0x00005012\n.endr\n.rept 48\nnop\n.endr\n"
+);
+warm_probe!(
+    m10_multu_mthi_mfhi,
+    222,
+    ".rept 16\n.word 0x01090019\n.word 0x01000011\n.word 0x00005010\n.endr\n.rept 48\nnop\n.endr\n"
+);
+
 /// The cached twin of `warm_call_pairs`. It lives in the I-cache entry section
 /// at page offset 0x100, so its lines (16 to 51) can never share a cache index
 /// with the leaves it calls (lines 0, 1 and 2).
@@ -888,10 +1979,14 @@ fn with_gpu_list_dma(body: impl FnOnce() -> u16) -> u16 {
     // owns, which stays live and untouched until the probe waits the
     // channel idle or aborts it.
     unsafe {
-        dma::raw::set_size(dma::Channel::Gpu, dma::size_words(0));
+        DMA_BCR = dma::size_words(0);
+        dma::raw::set_size(dma::Channel::Gpu, DMA_BCR);
     }
     let elapsed = body();
-    gpu_io::write_display_control(0x0400_0000 | old_direction);
+    // A list that never ended leaves the direction off, not as it was.
+    // SAFETY: single thread; plain static.
+    let timed_out = unsafe { DMA_END[DmaGroup::GpuList as usize].flags & 8 != 0 };
+    gpu_io::write_display_control(0x0400_0000 | if timed_out { 0 } else { old_direction });
     elapsed
 }
 
@@ -907,6 +2002,7 @@ fn timed_empty_list(nodes: usize) -> u16 {
         // channel idle or aborts it.
         unsafe {
             dma::raw::set_address(dma::Channel::Gpu, head);
+            dma::raw::set_size(dma::Channel::Gpu, dma::size_words(0));
         }
         psx_io::timers::set_mode(psx_io::timers::Timer::Timer2, 0);
         psx_io::timers::set_counter(psx_io::timers::Timer::Timer2, 0);
@@ -947,51 +2043,110 @@ fn push_dma(records: &mut Records, next: &mut usize) {
     // Then the same with 64 RAM loads in place of the nops: psx-spx says the
     // CPU runs during DMA only until it needs the bus.
     type Overlap = fn(u32, u32, u32, u32) -> u16;
-    let data = Arg::RamWord.resolve();
-    let cases: [(u16, u16, Overlap, u32); 4] = [
-        (0x35, 128, timed_nops_with_dma, 0),
-        (0x36, 128, timed_nops_with_dma, LIST_KICK),
-        (0x9F, 64, timed_loads_with_dma, 0),
-        (0xFE, 64, timed_loads_with_dma, LIST_KICK),
+    let ram = Arg::RamWord.resolve();
+    let scratchpad = SCRATCHPAD;
+    // (id, loop length, loop, CHCR, data address). The idle rows have CHCR 0.
+    // M6's GPU walk rows: 64 sw back to back, 64 sw + 3 nops, 64 lw + 3 nops,
+    // 64 scratchpad lw + nop, against the 0xFE control (64 lw + nop).
+    let cases: [(u16, u16, Overlap, u32, u32); 12] = [
+        (0x35, 128, timed_nops_with_dma, 0, ram),
+        (0x36, 128, timed_nops_with_dma, LIST_KICK, ram),
+        (0x9F, 64, timed_loads_with_dma, 0, ram),
+        (0xFE, 64, timed_loads_with_dma, LIST_KICK, ram),
+        (0x1E0, 64, timed_sw_with_dma, 0, ram),
+        (0x1E1, 64, timed_sw_with_dma, LIST_KICK, ram),
+        (0x1E2, 64, timed_sw_3nops_with_dma, 0, ram),
+        (0x1E3, 64, timed_sw_3nops_with_dma, LIST_KICK, ram),
+        (0x1E4, 64, timed_lw_3nops_with_dma, 0, ram),
+        (0x1E5, 64, timed_lw_3nops_with_dma, LIST_KICK, ram),
+        (0x1E6, 64, timed_loads_with_dma, 0, scratchpad),
+        (0x1E7, 64, timed_loads_with_dma, LIST_KICK, scratchpad),
     ];
-    for (id, work, run, chcr) in cases {
+    dma_end_reset(DmaGroup::GpuList);
+    for (id, work, run, chcr, data) in cases {
         // 512 rather than 1024: if the CPU does wait for the walk, the whole
         // walk lands in a 16-bit counter.
         let head = build_empty_list(512);
         let record = sample_timing(id, work, || {
-            with_gpu_list_dma(|| run(base, head, chcr, data))
+            with_gpu_list_dma(|| {
+                let elapsed = run(base, head, chcr, data);
+                dma_settle(
+                    DmaGroup::GpuList,
+                    dma::Channel::Gpu,
+                    gpu_io::status().bits() >> 16,
+                );
+                elapsed
+            })
         });
         push_timing_record(records, next, record);
     }
+    push_dma_end(records, next, DmaGroup::GpuList);
 }
+
+/// How the last overlap probe's waits ended: bit 0 the channel was still busy
+/// when a pass was about to kick it, bit 1 it was still busy when the block
+/// ended. OR-ed over a record's samples; cleared by the caller.
+static mut DMA_WAIT_FLAGS: u32 = 0;
+
+/// The BCR value the overlap probes write before every kick. Silicon counts a
+/// block-mode BCR down as the blocks go, so the value set once before a probe
+/// reads 0 after the first transfer, and a kick with a count of 0 runs 65,536
+/// blocks (v2.1: the SPU and GPU block channels never went idle). Written
+/// inside the probe, ahead of the timed span, so every kick starts the transfer
+/// it describes.
+static mut DMA_BCR: u32 = 0;
+
+/// Loop iterations a wait on a DMA channel's busy bit gets before the block
+/// kicks anyway (before a pass: an idle channel reads idle at once) or gives
+/// up (after the loop: the longest legitimate transfer here, the SPU's 256
+/// words at about 16 cycles a halfword, is under 10,000 cycles; an iteration
+/// is about 20 cycles, so 20,000 of them is some 400,000 cycles, over ten
+/// milliseconds, forty times longer).
+const DMA_PRE_WAIT_ITERATIONS: u32 = 4_000;
+const DMA_FINAL_WAIT_ITERATIONS: u32 = 20_000;
 
 /// `$payload`, timed on the second pass, each pass starting by writing `chcr`
 /// to the DMA channel at `base` with MADR = `head`. Each pass first waits for
 /// the channel to go idle, and the block ends the same way, so the caller can
 /// restore the GPU's DMA direction. `$24` holds a RAM address for payloads
-/// that load.
+/// that load. Both waits are counted loops: a channel that never goes idle
+/// costs `DMA_PRE_WAIT_ITERATIONS` or `DMA_FINAL_WAIT_ITERATIONS` passes and
+/// sets a bit in `DMA_WAIT_FLAGS`, and the block goes on, so the caller can
+/// stop the channel and say what it found.
 macro_rules! dma_overlap_probe {
     ($name:ident, $start:literal, $end:literal, $payload:literal) => {
         #[inline(never)]
         fn $name(base: u32, head: u32, chcr: u32, data: u32) -> u16 {
             let elapsed: u32;
+            let flags: u32;
+            let pre = crate::bounds::scale(DMA_PRE_WAIT_ITERATIONS);
+            let post = crate::bounds::scale(DMA_FINAL_WAIT_ITERATIONS);
+            let bcr = unsafe { DMA_BCR };
             unsafe {
                 core::arch::asm!(
                     ".set noreorder",
                     ".balign 16",
                     $start,
+                    "move $15, $zero",
                     "lui $11, 0x1F80",
                     "ori $11, $11, 0x1120",
                     "addiu $13, $zero, 2",
                     "2:",
+                    "move $3, $4",
                     "3:",
                     "lw $10, 8($8)",
                     "nop",
                     "srl $10, $10, 24",
                     "andi $10, $10, 1",
-                    "bnez $10, 3b",
+                    "beqz $10, 5f",
                     "nop",
+                    "addiu $3, $3, -1",
+                    "bnez $3, 3b",
+                    "nop",
+                    "ori $15, $15, 1",
+                    "5:",
                     "sw $9, 0($8)",
+                    "sw $2, 4($8)",
                     "sw $zero, 4($11)",
                     "sw $zero, 0($11)",
                     "sw $14, 8($8)",
@@ -1000,25 +2155,37 @@ macro_rules! dma_overlap_probe {
                     "addiu $13, $13, -1",
                     "bnez $13, 2b",
                     "nop",
+                    "move $3, $5",
                     "4:",
                     "lw $10, 8($8)",
                     "nop",
                     "srl $10, $10, 24",
                     "andi $10, $10, 1",
-                    "bnez $10, 4b",
+                    "beqz $10, 6f",
                     "nop",
+                    "addiu $3, $3, -1",
+                    "bnez $3, 4b",
+                    "nop",
+                    "ori $15, $15, 2",
+                    "6:",
                     $end,
                     ".set reorder",
                     in("$8") base,
                     in("$9") head,
                     in("$14") chcr,
                     in("$24") data,
+                    in("$4") pre,
+                    in("$5") post,
+                    in("$2") bcr,
+                    lateout("$3") _,
                     lateout("$10") _,
                     lateout("$11") _,
                     lateout("$12") elapsed,
                     lateout("$13") _,
+                    lateout("$15") flags,
                     options(nostack)
                 );
+                DMA_WAIT_FLAGS |= flags;
             }
             elapsed as u16
         }
@@ -1038,6 +2205,26 @@ dma_overlap_probe!(
     ".word 0x340000B8", // probe 92 start marker
     ".word 0x340000B9", // probe 92 end marker
     ".rept 64\nlw $10, 0($24)\nnop\n.endr"
+);
+
+// M6's other loop shapes.
+dma_overlap_probe!(
+    timed_sw_with_dma,
+    ".word 0x340001BE", // probe 223 start marker
+    ".word 0x340001BF", // probe 223 end marker
+    ".rept 64\nsw $zero, 0($24)\n.endr"
+);
+dma_overlap_probe!(
+    timed_sw_3nops_with_dma,
+    ".word 0x340001C0", // probe 224 start marker
+    ".word 0x340001C1", // probe 224 end marker
+    ".rept 64\nsw $zero, 0($24)\nnop\nnop\nnop\n.endr"
+);
+dma_overlap_probe!(
+    timed_lw_3nops_with_dma,
+    ".word 0x340001C2", // probe 225 start marker
+    ".word 0x340001C3", // probe 225 end marker
+    ".rept 64\nlw $10, 0($24)\nnop\nnop\nnop\n.endr"
 );
 
 /// Time one call to `target` with `mask` XORed into `register`, then put the
