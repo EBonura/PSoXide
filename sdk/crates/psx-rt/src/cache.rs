@@ -88,6 +88,7 @@ trait Bus {
 }
 
 /// Poll until no channel is busy, at most `limit` busy polls. `true` when idle was seen.
+#[inline(never)]
 fn spin_until_idle(bus: &mut impl Bus, limit: u32, spins: &mut u32) -> bool {
     let mut n = 0u32;
     while bus.dma_busy() {
@@ -115,31 +116,30 @@ fn run_when_dma_idle<B: Bus, R>(
         ..QuiesceReport::default()
     };
     let mut tries = 0u32;
-    loop {
+    // Every way out of the loop runs `run` exactly once with interrupts masked, so the closure
+    // (the flush) is instantiated once here, not once per exit.
+    let was = loop {
         let idle = spin_until_idle(bus, limit, &mut report.spins);
         let was = bus.irq_off();
         if !idle {
             // The bound ran out with interrupts on; do not wait twice as long again.
             report.timed_out = true;
-            let r = run(report);
-            bus.irq_restore(was);
-            return (r, report);
+            break was;
         }
         if !bus.dma_busy() {
-            let r = run(report);
-            bus.irq_restore(was);
-            return (r, report);
+            break was;
         }
         if tries >= KICK_RETRIES {
             report.timed_out = !spin_until_idle(bus, limit, &mut report.spins);
-            let r = run(report);
-            bus.irq_restore(was);
-            return (r, report);
+            break was;
         }
         bus.irq_restore(was);
         tries += 1;
         report.retries += 1;
-    }
+    };
+    let r = run(report);
+    bus.irq_restore(was);
+    (r, report)
 }
 
 /// The DMA owner tokens, borrowed for as long as the bus is held quiet.
