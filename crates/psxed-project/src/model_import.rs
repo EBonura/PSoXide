@@ -1174,7 +1174,6 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")
-            .join("..")
             .join("assets")
             .join("models")
             .join("obsidian_wraith")

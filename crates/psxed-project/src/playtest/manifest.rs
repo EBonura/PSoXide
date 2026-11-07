@@ -2031,7 +2031,6 @@ pub fn default_generated_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
-        .join("..")
         .join("engine")
         .join("examples")
         .join("editor-playtest")

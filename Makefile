@@ -1,5 +1,6 @@
 .DEFAULT_GOAL := help
 include tools/sdk-examples.mk
+include tools/engine-examples.mk
 
 .PHONY: help check test miri fmt fmt-check lint example disc hello-tri hello-tri-disc run-tri
 help:
@@ -8,9 +9,14 @@ help:
 check:
 	cargo check --locked --workspace --all-features
 	cargo check --locked --manifest-path sdk/Cargo.toml --workspace --all-features
+	cargo check --locked --manifest-path engine/Cargo.toml --workspace --all-features
+# psxed-project's tests read the editor repository's projects/ and assets/ (they run in
+# PSoXide-editor, which hydrates this crate), so they are left out of the SDK run.
 test:
-	cargo test --locked --workspace
+	cargo test --locked --workspace --exclude psxed-project
 	cargo test --locked --manifest-path sdk/Cargo.toml --workspace
+	cargo test --locked --manifest-path engine/Cargo.toml -p psx-game-runtime -p psx-render-contract -p psx-chainloader -p psx-goldsrc -p psx-bsp
+	cargo test --locked --manifest-path engine/Cargo.toml -p psx-level --features wire
 # Miri over every SDK crate's host tests and psx-hw's, under Stacked Borrows
 # and then Tree Borrows (sdk/docs/MIRI.md). Provenance is permissive because a
 # DMA link is a 24-bit integer on the console; leaks are ignored because tests
@@ -27,18 +33,23 @@ miri:
 fmt:
 	cargo fmt --all
 	cargo fmt --manifest-path sdk/Cargo.toml --all
-	for m in sdk/examples/*/Cargo.toml; do cargo fmt --manifest-path "$$m" || exit 1; done
+	cargo fmt --manifest-path engine/Cargo.toml --all
+	for m in sdk/examples/*/Cargo.toml engine/examples/*/Cargo.toml; do cargo fmt --manifest-path "$$m" || exit 1; done
 fmt-check:
 	cargo fmt --all -- --check
 	cargo fmt --manifest-path sdk/Cargo.toml --all -- --check
-	for m in sdk/examples/*/Cargo.toml; do cargo fmt --manifest-path "$$m" -- --check || exit 1; done
+	cargo fmt --manifest-path engine/Cargo.toml --all -- --check
+	for m in sdk/examples/*/Cargo.toml engine/examples/*/Cargo.toml; do cargo fmt --manifest-path "$$m" -- --check || exit 1; done
 lint:
 	tools/check-register-literals.sh
 	sh tools/guest_symbol_gate_test.sh
 	sh tools/wide_gate.sh
-	cargo run --locked -q -p xtask -- check-mfc0 sdk
+	cargo run --locked -q -p xtask -- check-mfc0 sdk engine
+	cargo run --locked -q -p psoxide-dev -- lint-policy-guard
+	cargo run --locked -q -p psoxide-dev -- runtime-numeric-guard
 	cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 	cargo clippy --locked --manifest-path sdk/Cargo.toml --workspace --all-targets --all-features -- -D warnings
+	cargo clippy --locked --manifest-path engine/Cargo.toml --workspace --all-targets --all-features -- -D warnings
 	# Again for the guest: the cfg(target_arch = "mips") MMIO, DMA and asm paths
 	# only exist there. Libraries only; the tests need std.
 	cargo clippy --locked --manifest-path sdk/Cargo.toml --workspace --target $(TARGET) \

@@ -77,3 +77,7 @@ emu/crates/frontend/dist/
 
 # Local headless/console capture dirs (hwtest inputs, screenshot sweeps).
 /captures/
+
+*.pyc
+__pycache__/
+.psxed-view.ron

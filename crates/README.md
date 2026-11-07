@@ -16,12 +16,19 @@ runtime; they are the lowest common layer the rest of the repo builds on.
 | [`psx-library`](psx-library) | Host-side install of a built disc into the games library: `Game Name (repo)` naming, atomic replace with digest check, safe removal of stale flat-named copies and a provenance record. Used by every game's build tool. |
 | [`psx-trace`](psx-trace) | Instruction trace record format emitted by the emulator core (originally shared with the retired PCSX-Redux parity oracle). |
 | [`psxed-format`](psxed-format) | Neutral cooked-asset formats shared by the SDK, editor cookers and engine. |
+| [`psxed`](psxed) | Content-pipeline CLI: cooks OBJ meshes, textures and audio into the blobs the runtime embeds (`make assets`). |
+| [`psxed-audio`](psxed-audio) | Host-side WAV to SPU ADPCM audio cooker used by the editor and by game cook tools. |
+| [`psxed-gltf`](psxed-gltf) | glTF/GLB/FBX mesh importer that cooks scene meshes into PSXM and model blobs. |
+| [`psxed-obj`](psxed-obj) | OBJ parser and vertex-cluster decimator emitting PSXM blobs. |
+| [`psxed-project`](psxed-project) | The editor project model (scenes, nodes, resources, grid worlds) with the grid edit verbs and the cook that turns a project into the playtest runtime package (`cook-playtest`). Its tests read the editor repository's `projects/` and `assets/`, so they run there. |
+| [`psxed-tex`](psxed-tex) | PNG/JPG to PSXT texture cooker: crop, resample, 4/8-bit CLUT quantisation, VRAM packing. |
 
 These crates are members of the SDK repo-root host workspace alongside its
-host tools. The device-side `sdk/` keeps its own workspace. The engine and
-editor live in [PSoXide-editor](https://github.com/EBonura/PSoXide-editor),
-and the emulator in [PSoXide-emulator](https://github.com/EBonura/PSoXide-emulator);
-both import the shared contracts from an exact SDK revision.
+host tools. The device-side `sdk/` keeps its own workspace. The engine
+(`engine/`, its own workspace) lives here too. The editor UI and the projects
+live in [PSoXide-editor](https://github.com/EBonura/PSoXide-editor), and the emulator in
+[PSoXide-emulator](https://github.com/EBonura/PSoXide-emulator); both import the shared
+contracts from an exact SDK revision.
 
 ## See also
 

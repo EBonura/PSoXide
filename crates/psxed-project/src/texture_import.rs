@@ -577,7 +577,6 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")
-            .join("..")
             .join("assets")
             .join("branding")
             .join("psoxide-app-icon.png")

@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["crates/psx-anim-cook", "crates/psx-anim-tracks", "crates/psx-disasm", "crates/psx-audio-cook", "crates/psx-seq-cook", "crates/psx-hw", "crates/psx-iso", "crates/psx-library", "crates/psx-trace", "crates/psxed-format", "tools/mkisopsx", "tools/psoxide-hazard", "tools/psoxide-link", "tools/psoxide-pgo", "tools/psoxide-size", "tools/xtask"]
-exclude = ["sdk", "build"]
+members = ["crates/psx-anim-cook", "crates/psx-anim-tracks", "crates/psx-disasm", "crates/psx-audio-cook", "crates/psx-seq-cook", "crates/psx-hw", "crates/psx-iso", "crates/psx-library", "crates/psx-trace", "crates/psxed-format", "crates/psxed", "crates/psxed-audio", "crates/psxed-gltf", "crates/psxed-obj", "crates/psxed-project", "crates/psxed-tex", "tools/mkisopsx", "tools/psoxide-dev", "tools/psoxide-hwtest", "tools/psoxide-perf", "tools/psoxide-hazard", "tools/psoxide-link", "tools/psoxide-pgo", "tools/psoxide-size", "tools/xtask"]
+exclude = ["sdk", "engine", "build"]
 
 [workspace.package]
 edition = "2021"
@@ -60,6 +60,14 @@ bitflags = { version = "2.6", default-features = false }
 serde = { version = "1.0", default-features = false, features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
+tempfile = "3.10"
+image = { version = "0.25", default-features = false, features = ["png"] }
+psx-asset = { path = "sdk/crates/psx-asset" }
+psxed-format = { path = "crates/psxed-format" }
+psxed-audio = { path = "crates/psxed-audio" }
+psxed-gltf = { path = "crates/psxed-gltf" }
+psxed-obj = { path = "crates/psxed-obj" }
+psxed-tex = { path = "crates/psxed-tex" }
 
 [profile.release]
 lto = "fat"

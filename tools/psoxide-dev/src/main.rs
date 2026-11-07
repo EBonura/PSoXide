@@ -84,14 +84,12 @@ fn relative_to_root(path: &Path) -> String {
 
 fn lint_policy_guard() -> Result<(), String> {
     let root = repo_root();
-    // The three real workspace roots. editor/ and emu/ merged into the
-    // root workspace (abeb9fef) -- their crates inherit root's lints.
-    // Root and engine are the editor's own and must match exactly. sdk/ is
-    // imported from PSoXide, which may be stricter: it must carry every
-    // editor lint at the same level or a stricter one, and may add its own.
-    let reference_path = root.join("Cargo.toml");
-    let engine_path = root.join("engine/Cargo.toml");
-    let sdk_path = root.join("sdk/Cargo.toml");
+    // The three real workspace roots. engine/ carries the baseline lint table
+    // (the one the engine and editor crates were written against). The root
+    // host workspace and sdk/ may add lints or make them stricter, never relax
+    // or drop one.
+    let reference_path = root.join("engine/Cargo.toml");
+    let others = [root.join("Cargo.toml"), root.join("sdk/Cargo.toml")];
     let sections = ["workspace.lints.rust", "workspace.lints.clippy"];
     let mut violations = Vec::new();
     for section in sections {
@@ -103,30 +101,17 @@ fn lint_policy_guard() -> Result<(), String> {
             ));
             continue;
         };
-        match extract_toml_section(&engine_path, section)? {
-            None => violations.push(format!(
-                "{} missing [{section}]",
-                relative_to_root(&engine_path)
-            )),
-            Some(engine) if engine != reference => violations.push(format!(
-                "{} [{section}] differs from {}",
-                relative_to_root(&engine_path),
-                relative_to_root(&reference_path)
-            )),
-            Some(_) => {}
-        }
-        match extract_toml_section(&sdk_path, section)? {
-            None => violations.push(format!(
-                "{} missing [{section}]",
-                relative_to_root(&sdk_path)
-            )),
-            Some(sdk) => {
-                for problem in lints_at_least_as_strict(&reference, &sdk) {
-                    violations.push(format!(
-                        "{} [{section}] {problem} (editor: {})",
-                        relative_to_root(&sdk_path),
-                        relative_to_root(&reference_path)
-                    ));
+        for path in &others {
+            match extract_toml_section(path, section)? {
+                None => violations.push(format!("{} missing [{section}]", relative_to_root(path))),
+                Some(other) => {
+                    for problem in lints_at_least_as_strict(&reference, &other) {
+                        violations.push(format!(
+                            "{} [{section}] {problem} (baseline: {})",
+                            relative_to_root(path),
+                            relative_to_root(&reference_path)
+                        ));
+                    }
                 }
             }
         }
@@ -134,7 +119,7 @@ fn lint_policy_guard() -> Result<(), String> {
     if !violations.is_empty() {
         eprintln!("lint policy guard failed.");
         eprintln!(
-            "Keep [workspace.lints.rust] and [workspace.lints.clippy] identical in the root and engine manifests; sdk/ may only add lints or make them stricter.\n"
+            "engine/ holds the baseline [workspace.lints.*] table; the root and sdk/ manifests may only add lints or make them stricter.\n"
         );
         for violation in violations {
             eprintln!("{violation}");

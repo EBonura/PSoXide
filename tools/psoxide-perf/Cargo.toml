@@ -19,5 +19,13 @@ regex  = "1"
 sha2   = { workspace = true }
 tempfile = { workspace = true }
 
-[lints]
-workspace = true
+[lints.rust]
+missing_docs = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unsafe_op_in_unsafe_fn = "deny"
+unused_must_use = "deny"
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+too_many_arguments = "allow"

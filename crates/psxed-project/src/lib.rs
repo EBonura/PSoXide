@@ -82,7 +82,7 @@ pub use document_types::*;
 /// if `editor/projects/default/` is absent at runtime. Single source
 /// of truth -- edits to the on-disk file propagate to `starter()` on
 /// the next build.
-const DEFAULT_PROJECT_RON: &str = include_str!("../../../projects/default/project.ron");
+const DEFAULT_PROJECT_RON: &str = include_str!(env!("PSXED_STARTER_PROJECT_RON"));
 /// Where user projects live, resolved for both the dev tree and a shipped
 /// binary.
 ///
