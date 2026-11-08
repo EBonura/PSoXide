@@ -17,6 +17,7 @@ test:
 	cargo test --locked --manifest-path sdk/Cargo.toml --workspace
 	cargo test --locked --manifest-path engine/Cargo.toml -p psx-game-runtime -p psx-render-contract -p psx-chainloader -p psx-goldsrc -p psx-bsp
 	cargo test --locked --manifest-path engine/Cargo.toml -p psx-level --features wire
+	cargo test --locked --manifest-path engine/examples/editor-playtest/Cargo.toml
 # Miri over every SDK crate's host tests and psx-hw's, under Stacked Borrows
 # and then Tree Borrows (sdk/docs/MIRI.md). Provenance is permissive because a
 # DMA link is a 24-bit integer on the console; leaks are ignored because tests

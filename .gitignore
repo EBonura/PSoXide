@@ -81,3 +81,6 @@ emu/crates/frontend/dist/
 *.pyc
 __pycache__/
 .psxed-view.ron
+
+# Scratch logs under engine/ (engine/t-ps.log was committed once by mistake).
+/engine/*.log
