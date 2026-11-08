@@ -1487,7 +1487,15 @@ fn transaction<T: Transport>(bus: &mut T, socket: Port, bytes: [u8; 8]) -> [u8; 
     while i <= count {
         let tx = if i == 0 { 0x01 } else { bytes[i - 1] };
         let is_last = i == count;
-        let rx = ex(bus, socket, Pacing::NoAckWait, tx, is_last, &mut ack, &mut idx);
+        let rx = ex(
+            bus,
+            socket,
+            Pacing::NoAckWait,
+            tx,
+            is_last,
+            &mut ack,
+            &mut idx,
+        );
         if i > 0 {
             out[i - 1] = rx;
         }
