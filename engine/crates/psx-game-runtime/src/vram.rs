@@ -802,6 +802,13 @@ impl<
         // call records their preferred range without reserving unused capacity.
         self.allocator
             .reserve_room_band(layout.room_tpage_base_x, 0);
+        // The draw-done block lives in the CLUT band's corner (see
+        // `VramAllocator::draw_done_scratch`), not under the page at the bottom right of VRAM.
+        #[cfg(target_arch = "mips")]
+        {
+            let block = self.allocator.draw_done_scratch();
+            psx_io::gpu::set_draw_done_scratch(block.x, block.y);
+        }
         // The old x=320..384 lower-page gap existed only to preserve a
         // historical model base. Every consumer now carries its allocated
         // tpage, so the aligned page at x=320 is ordinary usable VRAM.
@@ -2829,7 +2836,7 @@ mod tests {
     }
 
     #[test]
-    fn cortex_shared_enemy_atlas_plan_leaves_eleven_texture_pages_free() {
+    fn cortex_shared_enemy_atlas_plan_leaves_twelve_texture_pages_free() {
         let mut vram = TestVram::new(ARENA_LAYOUT);
         vram.reserve_static_vram_regions(ARENA_LAYOUT);
 
@@ -2864,8 +2871,8 @@ mod tests {
                 free_pages += 1;
             }
         }
-        // Twelve before the SDK reserved the draw-done block (psx_vram::DRAW_DONE_SCRATCH): the
-        // page at the bottom right corner of the model row now covers it and is never handed out.
-        assert_eq!(free_pages, 11, "352 KiB of page capacity remains");
+        // Twelve: the draw-done block sits in the CLUT band, so the page at the bottom right
+        // corner of the model row stays usable (it was skipped when the block was in the corner).
+        assert_eq!(free_pages, 12, "384 KiB of page capacity remains");
     }
 }

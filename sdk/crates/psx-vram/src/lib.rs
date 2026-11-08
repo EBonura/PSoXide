@@ -709,9 +709,12 @@ impl Clut {
 
 /// The 16 x 8 pixel block every frame's draw-done sequence fills with black
 /// (`psx_hw::gpu::gp0::DRAW_DONE_SCRATCH`, the bottom right corner of VRAM).
-/// [`VramAllocator`] never hands out a rectangle that touches it, so a texture
-/// page that would cover it is skipped; code that places data there by hand
-/// loses it to the sequence.
+/// [`VramAllocator`] never hands out a rectangle that touches the block it is
+/// told about, so a texture page that would cover it is skipped; code that
+/// places data there by hand loses it to the sequence. This is the default
+/// place. An allocator with a reserved CLUT band keeps the block in the band
+/// instead ([`VramAllocator::draw_done_scratch`]), where no page could be, and
+/// the caller moves the sequence with `psx_io::gpu::set_draw_done_scratch`.
 pub const DRAW_DONE_SCRATCH: VramRect = VramRect::new(
     psx_hw::gpu::gp0::DRAW_DONE_SCRATCH.0,
     psx_hw::gpu::gp0::DRAW_DONE_SCRATCH.1,
@@ -825,6 +828,17 @@ impl<const ROWS: usize> ClutRowAllocator<ROWS> {
         VramRect::new(0, self.base_y, self.slots_per_row * 16, ROWS as u16)
     }
 
+    /// Take 16-pixel `slot` out of rows `first_row..` for good, for pixels some other owner
+    /// keeps there (the draw-done block).
+    const fn block_slot(&mut self, slot: u16, first_row: usize) {
+        let mut r = first_row;
+        while r < ROWS {
+            // psx-numeric-allow-next-line: 64-slot occupancy bitmask is a u64 by definition
+            self.rows[r] |= 1u64 << slot;
+            r += 1;
+        }
+    }
+
     fn slot_count(entries: u16) -> usize {
         (entries.max(1) as usize).div_ceil(16)
     }
@@ -894,6 +908,9 @@ pub struct VramAllocator<const ROOM_PAGES: usize, const CLUT_ROWS: usize> {
     room_base_x: u16,
     room_base_y: u16,
     clut_band_reserved: bool,
+    /// The 16 x 8 block the draw-done sequence fills; no rectangle the allocator hands out
+    /// touches it.
+    draw_done: VramRect,
 }
 
 impl<const ROOM_PAGES: usize, const CLUT_ROWS: usize> VramAllocator<ROOM_PAGES, CLUT_ROWS> {
@@ -912,6 +929,7 @@ impl<const ROOM_PAGES: usize, const CLUT_ROWS: usize> VramAllocator<ROOM_PAGES, 
             room_base_x: 0,
             room_base_y: 0,
             clut_band_reserved: false,
+            draw_done: DRAW_DONE_SCRATCH,
         }
     }
 
@@ -952,16 +970,41 @@ impl<const ROOM_PAGES: usize, const CLUT_ROWS: usize> VramAllocator<ROOM_PAGES, 
             }
             r += 1;
         }
+        // The draw-done block goes in the band's bottom right corner: no texture page covers
+        // the band, so it costs eight CLUT slots and no page. In the default corner of VRAM
+        // it kept the one page there out of use. A band under eight rows keeps the default.
+        let mut clut = ClutRowAllocator::with_width(band.y, band.w);
+        let mut draw_done = DRAW_DONE_SCRATCH;
+        if CLUT_ROWS >= DRAW_DONE_SCRATCH.h as usize {
+            draw_done = VramRect::new(
+                band.w - DRAW_DONE_SCRATCH.w,
+                band.y + band.h - DRAW_DONE_SCRATCH.h,
+                DRAW_DONE_SCRATCH.w,
+                DRAW_DONE_SCRATCH.h,
+            );
+            clut.block_slot(draw_done.x / 16, CLUT_ROWS - DRAW_DONE_SCRATCH.h as usize);
+        }
         Self {
             grid,
-            clut: ClutRowAllocator::with_width(band.y, band.w),
+            clut,
             room: TextureWindowAtlas::new(),
             room_pages: [None; ROOM_PAGES],
             room_page_handles: [VramHandle::Empty; ROOM_PAGES],
             room_base_x: 0,
             room_base_y: 0,
             clut_band_reserved: true,
+            draw_done,
         }
+    }
+
+    /// The block the draw-done sequence fills with black every frame, which no rectangle this
+    /// allocator hands out touches: [`DRAW_DONE_SCRATCH`] unless the allocator was built with
+    /// [`with_clut_band`](Self::with_clut_band), which keeps it in the band's bottom right
+    /// corner. Whoever owns the GPU must point the sequence at it
+    /// (`psx_io::gpu::set_draw_done_scratch`) before the first frame is submitted.
+    #[must_use]
+    pub const fn draw_done_scratch(&self) -> VramRect {
+        self.draw_done
     }
 
     /// The rectangle every CLUT this allocator hands out lies inside.
@@ -985,7 +1028,7 @@ impl<const ROOM_PAGES: usize, const CLUT_ROWS: usize> VramAllocator<ROOM_PAGES, 
 
     #[allow(dead_code)] // used by later stages for overlap assertions
     fn rect_free(&self, x: u16, y: u16, w: u16, h: u16) -> bool {
-        if DRAW_DONE_SCRATCH.overlaps(VramRect::new(x, y, w, h)) {
+        if self.draw_done.overlaps(VramRect::new(x, y, w, h)) {
             return false;
         }
         let (c0, c1, r0, r1) = Self::span(x, y, w, h);
@@ -1086,7 +1129,7 @@ impl<const ROOM_PAGES: usize, const CLUT_ROWS: usize> VramAllocator<ROOM_PAGES, 
         let mut c = 0usize;
         while c + n <= VRAM_ALLOC_COLS {
             let cols_free = (c..c + n).all(|col| (r0..r1).all(|r| self.grid[r] & (1 << col) == 0))
-                && !DRAW_DONE_SCRATCH.overlaps(VramRect::new(
+                && !self.draw_done.overlaps(VramRect::new(
                     (c as u16) * ALLOC_COL_W,
                     page_y,
                     count * ALLOC_COL_W,
@@ -1827,6 +1870,38 @@ mod tests {
     }
 
     #[test]
+    fn a_clut_band_keeps_the_draw_done_block_and_gives_the_corner_page_back() {
+        const BAND: VramRect = VramRect::new(0, 480, 320, 32);
+        let mut a = VramAllocator::<2, 32>::with_clut_band(BAND);
+        a.reserve_rect(VramRect::new(0, 0, 320, 480));
+        // Bottom right corner of the band, clear of every page the allocator can place.
+        assert_eq!(a.draw_done_scratch(), VramRect::new(304, 504, 16, 8));
+        assert!(inside_band(a.draw_done_scratch(), BAND));
+        let mut got = 0;
+        let mut covers_corner = false;
+        for page_y in [0u16, 256] {
+            while let Some((page, _)) = a.alloc_page_run(1, TextureDepth::Bit4, page_y) {
+                covers_corner |= VramRect::new(page.x(), page.y(), 64, TEXTURE_PAGE_TEXELS)
+                    .overlaps(DRAW_DONE_SCRATCH);
+                got += 1;
+            }
+        }
+        assert!(covers_corner, "the corner page is handed out");
+        assert_eq!(
+            got,
+            2 * (VRAM_ALLOC_COLS - 5),
+            "every free column on both page rows"
+        );
+    }
+
+    fn inside_band(r: VramRect, band: VramRect) -> bool {
+        r.x >= band.x
+            && r.y >= band.y
+            && r.x + r.w <= band.x + band.w
+            && r.y + r.h <= band.y + band.h
+    }
+
+    #[test]
     fn the_draw_done_scratch_block_is_never_allocated() {
         // Fill every page column of the model row with one-page slots: the one
         // at the right edge would cover the corner block, so it is refused.
@@ -1943,9 +2018,13 @@ mod tests {
         }
         assert_eq!(
             n,
-            20 * 32,
-            "the band holds 20 four-bit CLUTs on each of 32 rows"
+            20 * 32 - 8,
+            "the band holds 20 four-bit CLUTs on each of 32 rows, less the draw-done block's eight"
         );
+        let block = a.draw_done_scratch();
+        for clut in cluts[..n].iter().flatten() {
+            assert!(!clut.overlaps(block), "CLUT on the draw-done block");
+        }
         let mut a8 = VramAllocator::<6, 32>::with_clut_band(BAND);
         let mut eight = 0;
         while let Some((clut, _)) = a8.alloc_clut(256) {
