@@ -211,10 +211,18 @@ impl<'a> DataWriter<'a> {
 // Filesystem operations on Card.
 // --------------------------------------------------------------------------
 
+/// The directory size as a loop bound LLVM cannot see through. With the constant, every loop over
+/// the directory unrolled fifteen copies of `read_dir` and its 128-byte checksum.
+#[inline(always)]
+fn block_count() -> usize {
+    core::hint::black_box(DATA_BLOCKS)
+}
+
 impl<B: Block> Card<B> {
     /// Read directory entry `index`, refusing one whose XOR checksum does not
     /// match. Every operation walks these entries, so a flipped link or state
     /// byte must stop it before it frees or reuses another save's blocks.
+    #[inline(never)]
     fn read_dir(&mut self, index: usize) -> Result<[u8; FRAME_SIZE]> {
         let mut f = [0u8; FRAME_SIZE];
         self.dev.read_frame(1 + index as u16, &mut f)?;
@@ -224,6 +232,7 @@ impl<B: Block> Card<B> {
         Ok(f)
     }
 
+    #[inline(never)]
     fn write_dir(&mut self, index: usize, frame: &mut [u8; FRAME_SIZE]) -> Result<()> {
         frame[E_CHK] = checksum(frame);
         self.dev.write_frame(1 + index as u16, frame)
@@ -250,7 +259,7 @@ impl<B: Block> Card<B> {
 
         let mut states = [0u8; DATA_BLOCKS];
         let mut links = [LINK_NONE; DATA_BLOCKS];
-        for i in 0..DATA_BLOCKS {
+        for i in 0..block_count() {
             let entry = self.read_dir(i)?;
             let state = entry[E_STATE];
             if !is_free(state) && !matches!(state, ST_FIRST | ST_MIDDLE | ST_LAST) {
@@ -261,7 +270,7 @@ impl<B: Block> Card<B> {
         }
 
         let mut visited = 0u16;
-        for first in 0..DATA_BLOCKS {
+        for first in 0..block_count() {
             if states[first] != ST_FIRST {
                 continue;
             }
@@ -301,7 +310,7 @@ impl<B: Block> Card<B> {
         // `i` is both a slot index and a bit position in `visited`, so the
         // iterator form would still need the counter.
         #[allow(clippy::needless_range_loop)]
-        for i in 0..DATA_BLOCKS {
+        for i in 0..block_count() {
             if matches!(states[i], ST_MIDDLE | ST_LAST) && visited & (1u16 << i) == 0 {
                 return Err(Error::Corrupt);
             }
@@ -318,7 +327,7 @@ impl<B: Block> Card<B> {
     /// It performs no writes.
     pub fn validate_filesystem(&mut self) -> Result<()> {
         self.validate_structure()?;
-        for first in 0..DATA_BLOCKS {
+        for first in 0..block_count() {
             let entry = self.read_dir(first)?;
             if entry[E_STATE] != ST_FIRST {
                 continue;
@@ -343,7 +352,7 @@ impl<B: Block> Card<B> {
         self.dev.write_frame(0, &hdr)?;
 
         // Frames 1..=15: free directory entries.
-        for i in 0..DATA_BLOCKS {
+        for i in 0..block_count() {
             let mut e = [0u8; FRAME_SIZE];
             e[E_STATE] = ST_FREE;
             e[E_LINK] = 0xff;
@@ -373,7 +382,7 @@ impl<B: Block> Card<B> {
     /// Number of free 8 KiB blocks.
     pub fn free_blocks(&mut self) -> Result<usize> {
         let mut n = 0;
-        for i in 0..DATA_BLOCKS {
+        for i in 0..block_count() {
             if is_free(self.read_dir(i)?[E_STATE]) {
                 n += 1;
             }
@@ -383,7 +392,7 @@ impl<B: Block> Card<B> {
 
     /// Find the first-block directory index of `name`, if present.
     fn find(&mut self, name: &[u8]) -> Result<Option<usize>> {
-        for i in 0..DATA_BLOCKS {
+        for i in 0..block_count() {
             let e = self.read_dir(i)?;
             if e[E_STATE] == ST_FIRST && entry_name_eq(&e, name) {
                 return Ok(Some(i));
@@ -393,6 +402,7 @@ impl<B: Block> Card<B> {
     }
 
     /// Follow the link chain from a first-block entry.
+    #[inline(never)]
     fn chain(&mut self, first: usize) -> Result<Chain> {
         let mut blocks = [0u8; DATA_BLOCKS];
         let mut len = 0;
@@ -425,7 +435,7 @@ impl<B: Block> Card<B> {
     /// List all files. Returns the number written to `out` (capped at its len).
     pub fn list(&mut self, out: &mut [Entry]) -> Result<usize> {
         let mut n = 0;
-        for i in 0..DATA_BLOCKS {
+        for i in 0..block_count() {
             let e = self.read_dir(i)?;
             if e[E_STATE] != ST_FIRST {
                 continue;
@@ -533,7 +543,7 @@ impl<B: Block> Card<B> {
         // copies, and one that does not fit is refused before any write.
         let mut alloc = [0u8; DATA_BLOCKS];
         let mut got = 0;
-        for i in 0..DATA_BLOCKS {
+        for i in 0..block_count() {
             if got == need {
                 break;
             }
@@ -615,7 +625,7 @@ impl<B: Block> Card<B> {
             first_entries: 0,
             all_entries: 0,
         };
-        for i in 0..DATA_BLOCKS {
+        for i in 0..block_count() {
             let e = self.read_dir(i)?;
             if e[E_STATE] != ST_FIRST || !entry_name_eq(&e, name) {
                 continue;
@@ -631,7 +641,7 @@ impl<B: Block> Card<B> {
 
     /// Mark every directory entry in `mask` free, lowest index first.
     fn free_blocks_in(&mut self, mask: u16) -> Result<()> {
-        for i in 0..DATA_BLOCKS {
+        for i in 0..block_count() {
             if mask & (1 << i) != 0 {
                 let mut e = [0u8; FRAME_SIZE];
                 e[E_STATE] = ST_FREE;
