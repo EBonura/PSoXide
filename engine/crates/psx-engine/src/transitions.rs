@@ -52,6 +52,8 @@ fn transition_color(transition: FlowTransition) -> (u8, u8, u8) {
     )
 }
 
+#[optimize(size)]
+#[inline(never)]
 fn draw_fullscreen(gpu: &mut Gpu, color: (u8, u8, u8)) {
     gpu.draw(&QuadFlat::new(
         [(0, 0), (320, 0), (0, 240), (320, 240)],
@@ -61,6 +63,8 @@ fn draw_fullscreen(gpu: &mut Gpu, color: (u8, u8, u8)) {
     ));
 }
 
+#[optimize(size)]
+#[inline(never)]
 fn draw_fullscreen_average(gpu: &mut Gpu, color: (u8, u8, u8)) {
     gpu.set_draw_mode(TextureMaterial::blended(
         0,
@@ -80,6 +84,8 @@ fn draw_fullscreen_average(gpu: &mut Gpu, color: (u8, u8, u8)) {
     );
 }
 
+#[optimize(size)]
+#[inline(never)]
 fn draw_rect(gpu: &mut Gpu, x: i16, y: i16, w: u16, h: u16, color: (u8, u8, u8)) {
     if w == 0 || h == 0 {
         return;

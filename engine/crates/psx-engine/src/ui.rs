@@ -1040,6 +1040,8 @@ fn activation_echo_layer(frame: u16, delay: u16, ring: u16) -> Option<(u8, u8)> 
 /// highlight reads regardless of the control's own colours. The
 /// scene's [`LevelUiFocusStyle`] selects the animation; everything
 /// is integer-only flat quads, no allocation.
+#[optimize(size)]
+#[inline(never)]
 fn draw_focus_ring(
     gpu: &mut Gpu,
     node: UiResolvedNode,
@@ -1081,6 +1083,8 @@ fn draw_focus_ring(
 /// Four-edge outline whose inner boundary sits `margin` pixels outside
 /// the control and whose band extends `thickness` pixels further out.
 /// `margin = 1, thickness = 1` reproduces the classic 1px ring.
+#[optimize(size)]
+#[inline(never)]
 fn draw_ring_edges(
     gpu: &mut Gpu,
     node: UiResolvedNode,
@@ -1137,6 +1141,8 @@ fn lerp_color(a: (u8, u8, u8), b: (u8, u8, u8), t: u8) -> (u8, u8, u8) {
 
 /// Targeting-reticle brackets: an L at each corner that breathes up to
 /// 2px outward while its colour pulses `color_b -> color_a`.
+#[optimize(size)]
+#[inline(never)]
 fn draw_focus_corners(
     gpu: &mut Gpu,
     node: UiResolvedNode,
@@ -1207,6 +1213,8 @@ const TRACER_SEGMENTS: i32 = 6;
 
 /// A faint base ring plus a bright head orbiting the perimeter with a
 /// gradient tail. One lap per `period` frames, clockwise.
+#[optimize(size)]
+#[inline(never)]
 fn draw_focus_tracer(
     gpu: &mut Gpu,
     node: UiResolvedNode,
@@ -1246,6 +1254,8 @@ fn draw_focus_tracer(
 /// parallel convex outline, and the bright comet is split at polygon
 /// vertices so its head and tail traverse the 45-degree edges instead of
 /// orbiting an invisible rectangle.
+#[optimize(size)]
+#[inline(never)]
 fn draw_focus_shape_tracer(
     gpu: &mut Gpu,
     node: UiResolvedNode,
@@ -1277,6 +1287,8 @@ fn draw_focus_shape_tracer(
     }
 }
 
+#[optimize(size)]
+#[inline(never)]
 fn draw_shape_outline(gpu: &mut Gpu, polygon: &UiShapePolygon, (r, g, b): (u8, u8, u8)) {
     if polygon.len < 2 {
         return;
@@ -1325,6 +1337,8 @@ fn shape_edge_point(
     )
 }
 
+#[optimize(size)]
+#[inline(never)]
 fn draw_shape_perimeter_run(
     gpu: &mut Gpu,
     polygon: &UiShapePolygon,
@@ -1371,6 +1385,8 @@ fn draw_shape_perimeter_run(
 /// along the focus ring band (top edge left-to-right, then right edge
 /// down, bottom right-to-left, left edge up), splitting across edges
 /// and the wrap point as needed.
+#[optimize(size)]
+#[inline(never)]
 fn draw_perimeter_run(
     gpu: &mut Gpu,
     node: UiResolvedNode,
@@ -3198,6 +3214,8 @@ const SLIDER_FOCUS_SHAPE: UiShapeConfig = UiShapeConfig {
 /// Active-row fill shared by the settings label and its control. It uses the
 /// same animated red gradient as the main-menu buttons while keeping the
 /// slider itself thin and readable.
+#[optimize(size)]
+#[inline(never)]
 fn draw_linked_focus_background(
     gpu: &mut Gpu,
     resolved: UiResolvedNode,
@@ -3357,6 +3375,8 @@ fn focus_sweep_rect(
     Some((x as i16, y as i16, band_width as i16, band_height as i16))
 }
 
+#[optimize(size)]
+#[inline(never)]
 fn draw_focus_sweep(
     gpu: &mut Gpu,
     resolved: UiResolvedNode,
@@ -3389,6 +3409,8 @@ fn draw_focus_sweep(
     );
 }
 
+#[optimize(size)]
+#[inline(never)]
 fn draw_focus_sweep_half(
     gpu: &mut Gpu,
     vertices: [(i16, i16); 4],
@@ -4023,6 +4045,8 @@ fn text_prefix_chars(text: &str, character_count: usize) -> &str {
     &text[..end]
 }
 
+#[optimize(size)]
+#[inline(never)]
 fn draw_message_panel_body(
     gpu: &mut Gpu,
     font: &FontAtlas,
@@ -4092,6 +4116,8 @@ fn draw_message_panel_body(
 /// Keep the close control visible for the entire readable phase. Cross may
 /// first complete the typewriter or advance a paged message, but it is always
 /// the control that ultimately dismisses the open panel.
+#[optimize(size)]
+#[inline(never)]
 fn draw_message_dismiss_hint(
     gpu: &mut Gpu,
     font: &FontAtlas,
@@ -4168,6 +4194,8 @@ fn interaction_prompt_layout(
     }
 }
 
+#[optimize(size)]
+#[inline(never)]
 fn draw_interaction_prompt_text(
     gpu: &mut Gpu,
     font: &FontAtlas,
@@ -4209,6 +4237,8 @@ fn controller_prompt_prefix_width(has_prompt: bool) -> i16 {
     }
 }
 
+#[optimize(size)]
+#[inline(never)]
 fn draw_controller_prompt_prefix(
     gpu: &mut Gpu,
     font: &FontAtlas,
@@ -4291,6 +4321,8 @@ fn lerp_u16_q8(from: u16, to: u16, progress: u16) -> u16 {
         .clamp(0, i32::from(u16::MAX)) as u16
 }
 
+#[optimize(size)]
+#[inline(never)]
 fn draw_archive_panel_chrome(gpu: &mut Gpu, resolved: UiResolvedNode, frame: u16) {
     let config = UiShapeConfig {
         corners: ui_shape::TOP_LEFT | ui_shape::BOTTOM_RIGHT,
@@ -4373,6 +4405,8 @@ fn wrapped_line_count(
     lines.max(1)
 }
 
+#[optimize(size)]
+#[inline(never)]
 fn draw_message_page_pips(gpu: &mut Gpu, resolved: UiResolvedNode, page: MessagePageMeta) {
     if page.count <= 1 {
         return;

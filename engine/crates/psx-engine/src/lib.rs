@@ -50,6 +50,7 @@
 //! ```
 
 #![no_std]
+#![feature(optimize_attribute)]
 #![cfg_attr(target_arch = "mips", feature(asm_experimental_arch))]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
