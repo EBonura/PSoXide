@@ -909,12 +909,13 @@ fn rebind(in_path: &Path, elf_path: &Path, out_path: &Path) -> Result<()> {
     let keys = convert_histogram(elf_path, uniform_histogram(elf_path)?, &keys_path, false)
         .and_then(|()| Ok(fs::read_to_string(&keys_path)?));
     let _ = fs::remove_file(&keys_path);
-    let mut report = stale::compare(&rebound, &keys?);
+    let collected_here = text.starts_with(pipeline::FEATURES_TAG);
+    let mut report = stale::compare(&rebound, &keys?).enforced_for(collected_here);
     for (name, _) in &mut report.worst {
         *name = portable_name(name).into_owned();
     }
     println!("{report}");
-    report.gate_for(text.starts_with(pipeline::FEATURES_TAG))
+    report.gate_for(collected_here)
 }
 
 const USAGE: &str = "usage: psoxide-pgo <elf-with-dwarf> <pc.csv>... <out.prof>

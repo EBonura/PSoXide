@@ -66,8 +66,21 @@ fn lines(text: &str) -> Vec<(&str, u32, u32, u64)> {
     out
 }
 
+/// What a low bind share does to the build, which decides what the report calls it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Enforcement {
+    /// The build refuses a share under [`REFUSE_BELOW`].
+    Refuses,
+    /// It would refuse, but `PSOXIDE_PGO_ALLOW_STALE` lets it build.
+    Allowed,
+    /// The profile was not written by `collect`: the figure is only reported.
+    Reported,
+}
+
 #[derive(Debug, PartialEq)]
 pub struct Report {
+    /// See [`Enforcement`]; [`compare`] starts at `Refuses`.
+    pub enforcement: Enforcement,
     pub samples: u64,
     pub bound_samples: u64,
     pub functions: usize,
@@ -85,6 +98,20 @@ impl Report {
             return 0.0;
         }
         self.bound_samples as f64 / self.samples as f64
+    }
+
+    /// Set what a share under [`REFUSE_BELOW`] does to this build: refuses for a profile
+    /// `collect` wrote unless `PSOXIDE_PGO_ALLOW_STALE` is set, and is only reported otherwise.
+    #[must_use]
+    pub fn enforced_for(mut self, collected_here: bool) -> Self {
+        self.enforcement = if !collected_here {
+            Enforcement::Reported
+        } else if std::env::var_os("PSOXIDE_PGO_ALLOW_STALE").is_some() {
+            Enforcement::Allowed
+        } else {
+            Enforcement::Refuses
+        };
+        self
     }
 
     /// Err below [`REFUSE_BELOW`] unless `PSOXIDE_PGO_ALLOW_STALE` is set.
@@ -127,7 +154,15 @@ impl fmt::Display for Report {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let share = self.share();
         let level = if share < REFUSE_BELOW {
-            "STALE PROFILE: "
+            match self.enforcement {
+                Enforcement::Refuses => "STALE PROFILE: ",
+                Enforcement::Allowed => {
+                    "stale profile, building anyway (PSOXIDE_PGO_ALLOW_STALE): "
+                }
+                Enforcement::Reported => {
+                    "low bind, not enforced (profile not written by collect): "
+                }
+            }
         } else if share < WARN_BELOW {
             "warning, aging profile: "
         } else {
@@ -168,6 +203,7 @@ pub fn compare(profile: &str, build_keys: &str) -> Report {
         .collect();
     let named: HashSet<&str> = present.iter().map(|(function, _, _)| *function).collect();
     let mut report = Report {
+        enforcement: Enforcement::Refuses,
         samples: 0,
         bound_samples: 0,
         functions: 0,
@@ -243,6 +279,10 @@ a::g:3:1
         assert_eq!(report.worst[0], ("a::f".to_string(), 80));
         assert!(report.to_string().contains("STALE PROFILE"));
         assert!(report.gate().is_err());
+        // The same figure for a profile that is only reported never says "STALE".
+        let reported = compare(profile, BUILD).enforced_for(false);
+        assert!(!reported.to_string().contains("STALE"));
+        assert!(reported.to_string().contains("not enforced"));
     }
 
     #[test]

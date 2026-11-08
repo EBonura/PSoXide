@@ -821,7 +821,8 @@ sample profile still describes the code: the share of its samples whose
 (function, line offset, discriminator) exists in the build, the functions
 missing and changed, and the functions that lost the most. It warns below 98%
 and, for a profile `collect` wrote, refuses below 90% (`PSOXIDE_PGO_ALLOW_STALE=1` builds
-anyway). A profile made another way is only reported: the comparison assumes the profile and
+anyway). The report says `STALE PROFILE` only when the build refuses; with the override it says it
+is building anyway, and for a profile made another way it says `low bind, not enforced`. A profile made another way is only reported: the comparison assumes the profile and
 the twin were built with the same optimisation, and oot-psx, which collects from its
 profile-applied build and rebinds onto an unprofiled twin, reads 76.7% on a fresh profile. LLVM has no
 way to notice a stale AutoFDO profile (pseudo-probes would, but this rustc has
