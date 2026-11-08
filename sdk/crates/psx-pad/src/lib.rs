@@ -1157,6 +1157,24 @@ fn poll_once<T: Transport>(bus: &mut T, socket: Port, rumble: Rumble) -> RawPoll
     })
 }
 
+/// One byte of a poll. Kept out of line: nine inlined copies of the exchange and its result
+/// decoding were most of `poll_state` (2.4 KB in every game).
+#[inline(never)]
+fn pad_exchange<T: Transport>(
+    bus: &mut T,
+    tx: u8,
+    is_last: bool,
+    timing: Timing,
+) -> Result<u8, ExchangeError> {
+    bus.exchange(tx, is_last, timing)
+}
+
+/// [`pad_exchange`] at the standard per-byte timing, `None` on any failure.
+#[inline(always)]
+fn pad_byte<T: Transport>(bus: &mut T, tx: u8, is_last: bool) -> Option<u8> {
+    pad_exchange(bus, tx, is_last, Timing::PAD).ok()
+}
+
 /// A complete selected-port poll, or no usable packet. The current ID
 /// determines the length; a mode toggle never reuses an earlier length.
 fn poll_selected<T: Transport>(bus: &mut T, rumble: Rumble) -> Option<RawPoll> {
@@ -1167,17 +1185,17 @@ fn poll_selected<T: Transport>(bus: &mut T, rumble: Rumble) -> Option<RawPoll> {
         ack_spins: ADDRESS_ACK_SPINS,
         ..Timing::PAD
     };
-    match bus.exchange(0x01, false, address) {
+    match pad_exchange(bus, 0x01, false, address) {
         Ok(_) => {}
         Err(ExchangeError::AckTimeout { reply: 0xff }) => return Some(RawPoll::NONE),
         Err(_) => return None,
     }
-    let id_low = bus.exchange(0x42, false, Timing::PAD).ok()?;
+    let id_low = pad_byte(bus, 0x42, false)?;
     let mode = mode_from_id_low(id_low);
     if matches!(mode, PadMode::Unknown | PadMode::Disconnected) {
         return None;
     }
-    let id_high = bus.exchange(0x00, false, Timing::PAD).ok()?;
+    let id_high = pad_byte(bus, 0x00, false)?;
     if id_high != 0x5a {
         return None;
     }
@@ -1190,14 +1208,14 @@ fn poll_selected<T: Transport>(bus: &mut T, rumble: Rumble) -> Option<RawPoll> {
     } else {
         (0, 0)
     };
-    let buttons_low = bus.exchange(small, false, Timing::PAD).ok()?;
-    let buttons_high = bus.exchange(large, !analog, Timing::PAD).ok()?;
+    let buttons_low = pad_byte(bus, small, false)?;
+    let buttons_high = pad_byte(bus, large, !analog)?;
     let sticks = if analog {
         AnalogSticks {
-            right_x: bus.exchange(0x00, false, Timing::PAD).ok()?,
-            right_y: bus.exchange(0x00, false, Timing::PAD).ok()?,
-            left_x: bus.exchange(0x00, false, Timing::PAD).ok()?,
-            left_y: bus.exchange(0x00, true, Timing::PAD).ok()?,
+            right_x: pad_byte(bus, 0x00, false)?,
+            right_y: pad_byte(bus, 0x00, false)?,
+            left_x: pad_byte(bus, 0x00, false)?,
+            left_y: pad_byte(bus, 0x00, true)?,
         }
     } else {
         AnalogSticks::CENTERED
@@ -1460,28 +1478,19 @@ fn transaction<T: Transport>(bus: &mut T, socket: Port, bytes: [u8; 8]) -> [u8; 
     bus.delay(DEFAULT_SETUP_SPINS);
     let mut ack = 0u16;
     let mut idx = 0u8;
-    let _select = ex(
-        bus,
-        socket,
-        Pacing::NoAckWait,
-        0x01,
-        false,
-        &mut ack,
-        &mut idx,
-    );
+    // The address byte goes through the same loop as the eight command bytes, so the byte exchange
+    // is inlined once rather than twice.
     let mut out = [0u8; 8];
     let mut i = 0;
-    while i < bytes.len() {
-        let is_last = i == bytes.len() - 1;
-        out[i] = ex(
-            bus,
-            socket,
-            Pacing::NoAckWait,
-            bytes[i],
-            is_last,
-            &mut ack,
-            &mut idx,
-        );
+    // `black_box` keeps LLVM from unrolling the nine exchanges into nine inlined copies.
+    let count = core::hint::black_box(bytes.len());
+    while i <= count {
+        let tx = if i == 0 { 0x01 } else { bytes[i - 1] };
+        let is_last = i == count;
+        let rx = ex(bus, socket, Pacing::NoAckWait, tx, is_last, &mut ack, &mut idx);
+        if i > 0 {
+            out[i - 1] = rx;
+        }
         i += 1;
     }
     bus.deselect();
