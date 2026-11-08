@@ -412,7 +412,7 @@ fn variant_flags(variant: &str) -> Result<Option<Vec<String>>> {
 
 /// First line of a profile written by `collect`: the cargo features it was
 /// trained with. LLVM skips `#` lines.
-const FEATURES_TAG: &str = "# psoxide-pgo features: ";
+pub const FEATURES_TAG: &str = "# psoxide-pgo features: ";
 
 /// The cargo features `args` select, normalised so equal sets compare equal.
 fn features_of(args: &[String]) -> String {

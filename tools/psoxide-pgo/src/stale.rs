@@ -100,7 +100,28 @@ impl Report {
         }
         Ok(())
     }
+
+    /// [`gate`](Self::gate) for a profile `collect` wrote (its first line records the features it
+    /// built with); anything else is reported and never refused. `collect` collects and rebinds
+    /// on twins of the same optimisation, which is what the comparison assumes. A game that
+    /// collects from its profile-applied build and rebinds onto an unprofiled twin (oot-psx) reads
+    /// low even on a fresh profile: 76.7% on the code it was collected from.
+    pub fn gate_for(&self, collected_here: bool) -> Result<()> {
+        if collected_here {
+            return self.gate();
+        }
+        if self.share() < WARN_BELOW {
+            println!("{FOREIGN_NOTE}");
+        }
+        Ok(())
+    }
 }
+
+/// Why a low figure is only a warning for a profile `collect` did not write.
+pub const FOREIGN_NOTE: &str = "note: this profile was not written by `collect`, so the figure is \
+    not enforced. It compares against a twin of this build, which reads low (76.7% for oot-psx on \
+    the code it was collected from) when the profile was collected on the profile-applied build \
+    and is rebound onto an unprofiled twin.";
 
 impl fmt::Display for Report {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -222,6 +243,15 @@ a::g:3:1
         assert_eq!(report.worst[0], ("a::f".to_string(), 80));
         assert!(report.to_string().contains("STALE PROFILE"));
         assert!(report.gate().is_err());
+    }
+
+    #[test]
+    fn a_profile_collect_did_not_write_is_reported_not_refused() {
+        let profile = "a::f:10:1\n 5: 80\na::g:5:1\n 1: 10\n";
+        let report = compare(profile, BUILD);
+        assert!(report.share() < REFUSE_BELOW);
+        assert!(report.gate_for(true).is_err());
+        assert!(report.gate_for(false).is_ok());
     }
 
     #[test]

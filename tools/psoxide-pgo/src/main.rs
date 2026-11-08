@@ -914,7 +914,7 @@ fn rebind(in_path: &Path, elf_path: &Path, out_path: &Path) -> Result<()> {
         *name = portable_name(name).into_owned();
     }
     println!("{report}");
-    report.gate()
+    report.gate_for(text.starts_with(pipeline::FEATURES_TAG))
 }
 
 const USAGE: &str = "usage: psoxide-pgo <elf-with-dwarf> <pc.csv>... <out.prof>
