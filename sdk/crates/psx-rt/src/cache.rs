@@ -101,42 +101,55 @@ fn spin_until_idle(bus: &mut impl Bus, limit: u32, spins: &mut u32) -> bool {
     true
 }
 
-/// Run `run` with interrupts masked and every DMA channel idle.
+/// The waiting half of the gate: returns with interrupts masked and, unless a bound ran out
+/// (`report.timed_out`), every DMA channel idle. The value is the interrupt state to hand to
+/// [`Bus::irq_restore`] once the caller is done.
 ///
 /// Waits first with interrupts on (a walk takes up to a frame, and VBlank should keep being
 /// served), then masks and checks again: the VBlank handler may have kicked a queued frame in
 /// between. If it did, back out and wait again, a few times, then wait inside the window.
-fn run_when_dma_idle<B: Bus, R>(
-    bus: &mut B,
-    limit: u32,
-    run: impl FnOnce(QuiesceReport) -> R,
-) -> (R, QuiesceReport) {
+///
+/// This is one function per bus, not inlined into each caller: every flush entry point shares
+/// it, so a program that uses one entry point carries one copy of the poll loops and a program
+/// that uses two does not carry them twice.
+#[inline(never)]
+fn wait_for_quiet<B: Bus>(bus: &mut B, limit: u32) -> (bool, QuiesceReport) {
     let mut report = QuiesceReport {
         busy_at_entry: bus.dma_busy(),
         ..QuiesceReport::default()
     };
     let mut tries = 0u32;
-    // Every way out of the loop runs `run` exactly once with interrupts masked, so the closure
-    // (the flush) is instantiated once here, not once per exit.
-    let was = loop {
+    // Opaque to the optimiser: with a known trip count LLVM unrolls the whole retry loop, five
+    // copies of the waits (about 400 bytes) for a path that runs once.
+    let max_tries = core::hint::black_box(KICK_RETRIES);
+    loop {
         let idle = spin_until_idle(bus, limit, &mut report.spins);
         let was = bus.irq_off();
         if !idle {
             // The bound ran out with interrupts on; do not wait twice as long again.
             report.timed_out = true;
-            break was;
+            return (was, report);
         }
         if !bus.dma_busy() {
-            break was;
+            return (was, report);
         }
-        if tries >= KICK_RETRIES {
+        if tries >= max_tries {
             report.timed_out = !spin_until_idle(bus, limit, &mut report.spins);
-            break was;
+            return (was, report);
         }
         bus.irq_restore(was);
         tries += 1;
         report.retries += 1;
-    };
+    }
+}
+
+/// Run `run` with interrupts masked and every DMA channel idle (see [`wait_for_quiet`]).
+fn run_when_dma_idle<B: Bus, R>(
+    bus: &mut B,
+    limit: u32,
+    run: impl FnOnce(QuiesceReport) -> R,
+) -> (R, QuiesceReport) {
+    let (was, report) = wait_for_quiet(bus, limit);
     let r = run(report);
     bus.irq_restore(was);
     (r, report)
@@ -337,6 +350,9 @@ struct HwBus;
 
 #[cfg(target_arch = "mips")]
 impl Bus for HwBus {
+    // One copy of the seven-channel check (168 bytes) instead of one per poll site: the gate
+    // has four, and the polls are not a hot path.
+    #[inline(never)]
     fn dma_busy(&mut self) -> bool {
         use psx_io::dma::{is_busy, Channel};
         is_busy(Channel::Gpu)
