@@ -26,6 +26,7 @@ pub(crate) const fn unpack(o: u16) -> (usize, usize, usize) {
 }
 
 /// `a / b` as Q16 without a 64-bit intermediate (`b` non-zero).
+#[optimize(size)]
 pub(crate) fn ratio_q16(mut a: u32, mut b: u32) -> u32 {
     while b >= 1 << 16 {
         a >>= 1;
@@ -41,6 +42,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
     // ---- script ticks ----------------------------------------------------
 
     /// One update of player `p`: tempo gate, scripts, then property update.
+    #[optimize(size)]
     pub(crate) fn step_player(&mut self, p: usize) {
         let code = core::mem::take(&mut self.codes[p]);
         self.process_sequence(p, &mut *code);
@@ -48,6 +50,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
         self.player_sound(p);
     }
 
+    #[optimize(size)]
     fn process_sequence(&mut self, p: usize, code: &mut [u8]) {
         if !self.players[p].enabled {
             return;
@@ -82,6 +85,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
     }
 
     /// Returns false when the player stopped scripting for good.
+    #[optimize(size)]
     fn run_sequence_script(&mut self, p: usize, code: &mut [u8]) -> bool {
         loop {
             let mut s = self.players[p].script;
@@ -145,6 +149,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
         }
     }
 
+    #[optimize(size)]
     fn seq_op(&mut self, p: usize, code: &mut [u8], s: &mut Script, cmd: u8) -> bool {
         match cmd {
             0xf1 | 0xd0 => {
@@ -279,6 +284,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
 
     // ---- channels --------------------------------------------------------
 
+    #[optimize(size)]
     pub(crate) fn enable_channel(&mut self, p: usize, c: usize, pc: u16) {
         for l in 0..LAYERS {
             self.free_layer(p, c, l);
@@ -291,6 +297,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
         ch.delay = 0;
     }
 
+    #[optimize(size)]
     pub(crate) fn disable_channel(&mut self, p: usize, c: usize) {
         for l in 0..LAYERS {
             self.free_layer(p, c, l);
@@ -300,6 +307,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
         ch.finished = true;
     }
 
+    #[optimize(size)]
     fn process_channel(&mut self, p: usize, c: usize, code: &mut [u8]) {
         let skip_script = self.players[p].channels[c].stop_script
             || (self.players[p].muted
@@ -318,6 +326,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
         }
     }
 
+    #[optimize(size)]
     fn font_slot_to_index(&self, p: usize, slot: u8) -> Option<u8> {
         let pl = &self.players[p];
         let n = pl.n_fonts as usize;
@@ -328,6 +337,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
         self.font_index(pl.fonts[n - 1 - slot])
     }
 
+    #[optimize(size)]
     fn set_instrument(&mut self, p: usize, c: usize, id: u8) {
         let bank = self.bank;
         let font = self.players[p].channels[c].font;
@@ -363,6 +373,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
         ch.has_instrument = true;
     }
 
+    #[optimize(size)]
     fn run_channel_script(&mut self, p: usize, c: usize, code: &mut [u8]) {
         loop {
             let mut s = self.players[p].channels[c].script;
@@ -464,6 +475,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
 
     /// One channel opcode in `0xB0..0xF2`. Returns true if the script must stop
     /// for this tick.
+    #[optimize(size)]
     fn channel_op(
         &mut self,
         p: usize,
@@ -669,6 +681,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
         false
     }
 
+    #[optimize(size)]
     fn channel_font(&mut self, p: usize, c: usize, slot: u8) {
         if let Some(i) = self.font_slot_to_index(p, slot) {
             self.players[p].channels[c].font = i;
@@ -677,6 +690,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
 
     // ---- layers ----------------------------------------------------------
 
+    #[optimize(size)]
     pub(crate) fn set_layer(&mut self, p: usize, c: usize, l: usize, pc: u16) {
         if self.players[p].channels[c].layers[l].alloc {
             self.note_decay(owner(p, c, l));
@@ -695,6 +709,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
         ly.script.pc = pc;
     }
 
+    #[optimize(size)]
     pub(crate) fn free_layer(&mut self, p: usize, c: usize, l: usize) {
         if self.players[p].channels[c].layers[l].alloc {
             self.layer_disable(owner(p, c, l));
@@ -702,6 +717,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
         }
     }
 
+    #[optimize(size)]
     pub(crate) fn layer_disable(&mut self, o: u16) {
         let (p, c, l) = unpack(o);
         if self.players[p].finished {
@@ -714,6 +730,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
         ly.finished = true;
     }
 
+    #[optimize(size)]
     fn process_layer(&mut self, p: usize, c: usize, l: usize, code: &mut [u8]) {
         let o = owner(p, c, l);
         {
@@ -758,6 +775,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
         self.layer_tail(o, p, c, l);
     }
 
+    #[optimize(size)]
     fn layer_tail(&mut self, o: u16, p: usize, c: usize, l: usize) {
         let ly = self.players[p].channels[c].layers[l];
         if ly.muted && (ly.note != NONE8 || ly.continuous) {
@@ -767,6 +785,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
 
     /// Run layer opcodes up to the next note or delay; `None` if the layer
     /// ended.
+    #[optimize(size)]
     fn layer_commands(&mut self, p: usize, c: usize, l: usize, code: &mut [u8]) -> Option<u8> {
         let o = owner(p, c, l);
         loop {
@@ -902,6 +921,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
     }
 
     /// Step 3: read a note's operands. `None` ends the tick with no note.
+    #[optimize(size)]
     fn layer_note_args(
         &mut self,
         p: usize,
@@ -991,6 +1011,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
 
     /// Step 4: pick the sample and frequency for the note. `Some(same)` where
     /// `same` says the sample is unchanged; `None` ends the tick.
+    #[optimize(size)]
     fn layer_voice(&mut self, p: usize, c: usize, l: usize, key: u8) -> Option<bool> {
         let bank = self.bank?;
         let (track, tempo) = (self.players[p].transpose, self.players[p].tempo);
@@ -1136,6 +1157,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
 }
 
 /// Instrument `id` of the font index `font`.
+#[optimize(size)]
 pub(crate) fn inst_lookup(bank: &Bank<'_>, font: u8, id: u8) -> Option<crate::format::Instrument> {
     if font == NONE8 {
         return None;
@@ -1143,6 +1165,7 @@ pub(crate) fn inst_lookup(bank: &Bank<'_>, font: u8, id: u8) -> Option<crate::fo
     bank.instrument(font, id)
 }
 
+#[optimize(size)]
 fn set_priorities(ch: &mut Channel, v: u8) {
     if v & 15 != 0 {
         ch.note_priority = v & 15;
@@ -1153,11 +1176,13 @@ fn set_priorities(ch: &mut Channel, v: u8) {
 }
 
 /// `vel / 127` as Q15.
+#[optimize(size)]
 pub(crate) fn vol_q15(v: u8) -> u16 {
     (((v.min(127) as u32) << 15) / 127) as u16
 }
 
 /// `(vel / 127)^2` as Q15.
+#[optimize(size)]
 pub(crate) fn vel_sq_q15(v: u8) -> u16 {
     let v = v.min(127) as u32;
     ((v * v) << 15).wrapping_div(127 * 127) as u16

@@ -25,6 +25,7 @@ pub(crate) const ARGS: [u8; 80] = [
 ];
 
 /// Read one byte (reads past the end give `0xFF`, which ends a script).
+#[optimize(size)]
 pub(crate) fn rd8(code: &[u8], s: &mut Script) -> u8 {
     let v = code.get(s.pc as usize).copied().unwrap_or(OP_END);
     s.pc = s.pc.wrapping_add(1);
@@ -32,12 +33,14 @@ pub(crate) fn rd8(code: &[u8], s: &mut Script) -> u8 {
 }
 
 /// Read a big-endian 16-bit operand.
+#[optimize(size)]
 pub(crate) fn rd16(code: &[u8], s: &mut Script) -> u16 {
     let hi = rd8(code, s) as u16;
     (hi << 8) | rd8(code, s) as u16
 }
 
 /// Read a delay: one byte, or two when the top bit of the first is set.
+#[optimize(size)]
 pub(crate) fn rd_delay(code: &[u8], s: &mut Script) -> u16 {
     let a = rd8(code, s) as u16;
     if a & 0x80 != 0 {
@@ -48,6 +51,7 @@ pub(crate) fn rd_delay(code: &[u8], s: &mut Script) -> u16 {
 }
 
 /// The single operand of a control-flow opcode (or `0`).
+#[optimize(size)]
 pub(crate) fn flow_arg(code: &[u8], s: &mut Script, op: u8) -> u16 {
     let t = ARGS[(op - 0xb0) as usize];
     if t & 3 == 1 {
@@ -63,6 +67,7 @@ pub(crate) fn flow_arg(code: &[u8], s: &mut Script, op: u8) -> u16 {
 
 /// Run a control-flow opcode. Returns `0` to carry on, [`SCRIPT_END`], or a
 /// positive delay the caller should wait.
+#[optimize(size)]
 pub(crate) fn flow(code: &[u8], s: &mut Script, op: u8, arg: u16) -> i32 {
     match op {
         0xff => {

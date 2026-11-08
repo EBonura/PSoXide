@@ -24,6 +24,7 @@ const ONE_Q24: i32 = 1 << 24;
 const SPU_FULL: u32 = 0x3fff;
 
 /// `(arg / 32767)^2` as Q24.
+#[optimize(size)]
 fn level_sq_q24(arg: i16) -> i32 {
     let a = arg.max(0) as u32;
     let x = (a << 15) / 32767;
@@ -33,22 +34,26 @@ fn level_sq_q24(arg: i16) -> i32 {
 impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
     // ---- bookkeeping -----------------------------------------------------
 
+    #[optimize(size)]
     pub(crate) fn next_random(&mut self) -> u32 {
         self.rng = self.rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
         self.rng >> 8
     }
 
+    #[optimize(size)]
     pub(crate) fn move_front(&mut self, n: usize) {
         self.pos_min -= 1;
         self.notes[n].pos = self.pos_min;
     }
 
+    #[optimize(size)]
     fn move_back(&mut self, n: usize) {
         self.pos_max += 1;
         self.notes[n].pos = self.pos_max;
     }
 
     /// The note on `list` that is last in line (`back`) or first.
+    #[optimize(size)]
     pub(crate) fn edge(&self, list: NoteList, back: bool) -> Option<usize> {
         let mut best: Option<usize> = None;
         for (i, n) in self.notes.iter().enumerate() {
@@ -71,6 +76,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
 
     /// The lowest-priority note on `list`, later ones winning ties, if its
     /// priority is below `limit`.
+    #[optimize(size)]
     pub(crate) fn lowest_below(&self, list: NoteList, limit: u8) -> Option<usize> {
         let mut idx: [usize; N] = [0; N];
         let mut cnt = 0;
@@ -101,15 +107,18 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
     // ---- layers let go of notes -----------------------------------------
 
     /// The layer lets its note decay at the instrument's rate.
+    #[optimize(size)]
     pub(crate) fn note_decay(&mut self, o: u16) {
         self.decay_or_release(o, false);
     }
 
     /// The layer cuts its note off with a fast release.
+    #[optimize(size)]
     pub(crate) fn note_release(&mut self, o: u16) {
         self.decay_or_release(o, true);
     }
 
+    #[optimize(size)]
     fn decay_or_release(&mut self, o: u16, release: bool) {
         let (p, c, l) = unpack(o);
         self.players[p].channels[c].layers[l].bit3 = false;
@@ -169,6 +178,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
     // ---- allocation ------------------------------------------------------
 
     /// Step 5 of a note command: give the layer a note.
+    #[optimize(size)]
     pub(crate) fn layer_alloc(&mut self, p: usize, c: usize, l: usize, same: bool) {
         let o = owner(p, c, l);
         let ly = self.players[p].channels[c].layers[l];
@@ -199,6 +209,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
         }
     }
 
+    #[optimize(size)]
     fn alloc_note(&mut self, o: u16) -> Option<usize> {
         let (p, c, l) = unpack(o);
         let (policy, note_priority, ly_note) = {
@@ -262,6 +273,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
         }
     }
 
+    #[optimize(size)]
     fn release_and_take(&mut self, n: usize, o: u16) {
         let (p, c, _) = unpack(o);
         let pri = self.players[p].channels[c].note_priority;
@@ -272,6 +284,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
         nt.adsr.want_release = true;
     }
 
+    #[optimize(size)]
     fn init_for_layer(&mut self, n: usize, o: u16) {
         let (p, c, l) = unpack(o);
         let ch = &self.players[p].channels[c];
@@ -322,6 +335,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
         ly.note_vel_q15 = 0;
     }
 
+    #[optimize(size)]
     pub(crate) fn note_disable(&mut self, n: usize, hw: &mut impl Hw) {
         let v = self.voice_of[n];
         let nt = &mut self.notes[n];
@@ -346,6 +360,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
 
     // ---- vibrato and portamento -----------------------------------------
 
+    #[optimize(size)]
     fn vibrato_init(&mut self, n: usize) {
         let Some(o) = (self.notes[n].parent != NO_OWNER).then_some(self.notes[n].parent) else {
             return;
@@ -375,6 +390,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
         v.delay = ch.vib_delay;
     }
 
+    #[optimize(size)]
     fn vibrato_scale(&mut self, n: usize) -> u32 {
         let (cp, cc) = (
             (self.notes[n].vib.chan >> 4) as usize,
@@ -409,6 +425,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
         u32::MAX / t.max(1)
     }
 
+    #[optimize(size)]
     fn porta_scale(&mut self, n: usize) -> u32 {
         let pt = &mut self.notes[n].porta;
         pt.cur = pt.cur.wrapping_add(pt.speed);
@@ -426,6 +443,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
     // ---- envelope --------------------------------------------------------
 
     /// One point of an envelope: `(delay, arg)`.
+    #[optimize(size)]
     fn env_point(&self, player: u8, r: EnvRef, idx: u8) -> (i16, i16) {
         match r {
             EnvRef::Default => DEFAULT_ENVELOPE
@@ -452,6 +470,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
 
     /// Step the envelope one update. Returns its level, Q24, in the squared
     /// amplitude domain.
+    #[optimize(size)]
     fn adsr_update(&mut self, n: usize) -> i32 {
         let mut a = self.notes[n].adsr;
         match a.state {
@@ -529,6 +548,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
     // ---- players' sound --------------------------------------------------
 
     /// Fade and per-channel property update for player `p`, once per update.
+    #[optimize(size)]
     pub(crate) fn player_sound(&mut self, p: usize) {
         let mut disable = false;
         {
@@ -561,6 +581,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
         self.players[p].recalc_volume = false;
     }
 
+    #[optimize(size)]
     fn channel_sound(&mut self, p: usize, c: usize, recalc: bool, apply_bend: bool) {
         let fade = self.players[p].applied_fade_q15 as u32;
         let muted = self.players[p].muted;
@@ -617,6 +638,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
     }
 
     /// Stop a player and let go of everything it holds.
+    #[optimize(size)]
     pub(crate) fn disable_player(&mut self, p: usize) {
         for c in 0..CHANNELS {
             if self.players[p].channels[c].enabled
@@ -636,6 +658,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
 
     /// Walk every note: transfer ownership, step envelopes, and write the
     /// voice registers.
+    #[optimize(size)]
     pub(crate) fn process_notes(&mut self, hw: &mut impl Hw) {
         for n in 0..N {
             let nt = self.notes[n];
@@ -713,6 +736,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
     }
 
     /// Envelope, vibrato, portamento and the register writes for one note.
+    #[optimize(size)]
     fn drive_voice(&mut self, n: usize, hw: &mut impl Hw) {
         let env = self.adsr_update(n) as u32;
         if self.notes[n].porta.mode != 0 {
@@ -798,6 +822,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
 
 /// Move `value` toward `target`: over `timer` updates when a ramp is running,
 /// else jump or start a ramp of `delay` updates.
+#[optimize(size)]
 fn ramp(value: &mut u32, timer: &mut u16, target: u32, delay: u16) {
     if *timer != 0 {
         if *timer == 1 {

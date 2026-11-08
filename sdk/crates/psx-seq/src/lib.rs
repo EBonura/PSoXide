@@ -48,6 +48,10 @@
 
 #![cfg_attr(not(test), no_std)]
 #![warn(missing_docs)]
+// The engine functions are marked `#[optimize(size)]`: at full speed LLVM inlined them into one
+// 28.8 KB `update` for OoT; size-optimised it is 3.6 KB smaller and the average update costs 0.9%
+// fewer cycles (hello-seq, 14 voices).
+#![feature(optimize_attribute)]
 
 mod engine;
 pub mod format;
