@@ -2379,6 +2379,20 @@ fn hook(command: &str, env: &[(&str, &Path)], extra: &[(&str, String)]) -> Resul
     Ok((child.wait()?.success(), output))
 }
 
+/// The `free N` and `code HASH` a link hook reports. The last such line wins: the link's own
+/// tools may print lines of the same shape (cs-psx's overlay build prints `code 0x...` ranges)
+/// before the hook's report.
+fn link_report(output: &str) -> (Option<u32>, Option<String>) {
+    let last = |prefix: &str| {
+        output
+            .lines()
+            .rev()
+            .find_map(|line| Some(line.strip_prefix(prefix)?.trim().to_string()))
+    };
+    let free = last("free ").and_then(|text| text.trim_end_matches(" B").parse().ok());
+    (free, last("code "))
+}
+
 /// The ladder's rig: the link and the bench of one game.
 struct GameRig<'a> {
     guest: &'a Guest,
@@ -2411,16 +2425,7 @@ impl Rig for GameRig<'_> {
             if !ok {
                 return Ok(None);
             }
-            let printed: Option<u32> = output.lines().find_map(|line| {
-                line.strip_prefix("free ")?
-                    .trim()
-                    .trim_end_matches(" B")
-                    .parse()
-                    .ok()
-            });
-            let code = output
-                .lines()
-                .find_map(|line| Some(line.strip_prefix("code ")?.trim().to_string()));
+            let (printed, code) = link_report(&output);
             let free = match printed {
                 Some(free) => free,
                 None => crate::ram::free_ram(&fs::read_to_string(&map).map_err(|error| {
@@ -2566,6 +2571,13 @@ fn ladder_mode(guest: &Guest, options: &Options) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_link_report_is_its_last_free_and_code_lines() {
+        let output = "code 0x80408000..0x8040afc0\nfree 99\nfree 2416\ncode 9f3a\n";
+        assert_eq!(link_report(output), (Some(2416), Some("9f3a".to_string())));
+        assert_eq!(link_report("noise\n"), (None, None));
+    }
 
     #[test]
     fn link_maps_are_named_by_what_selects_the_link() {
