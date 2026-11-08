@@ -14,9 +14,25 @@ COOK="${3:?missing psx-audio-cook}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-"$FRONTEND" launch --path "$CUE" --steps 170000000 \
+# The run ends on the guest's own clock: hello-xa polls the pad once per presented
+# frame (every second VBlank under the 30 fps cap), so poll 360 is about route tick
+# 720, two seconds past the third press (tick 560, poll 280) and long enough for the
+# whistle to be heard. The pulses are on the route clock, so the stop must not depend
+# on how many instructions a VBlank takes. --steps is only a hang guard: if it ends
+# the run, no stop condition fired and the gate fails.
+STOP_POLL="${XA_GATE_STOP_POLL:-360}"
+"$FRONTEND" launch --path "$CUE" --steps "${XA_GATE_STEP_CEILING:-3000000000}" \
+    --stop-at-poll "$STOP_POLL" \
     --pad-pulses '0x4000@220+6,0x4000@440+6,0x4000@560+6' \
-    --dump-audio "$WORK/capture.wav" --cd-command-log "$WORK/cd.csv" >/dev/null
+    --dump-audio "$WORK/capture.wav" --cd-command-log "$WORK/cd.csv" >"$WORK/out.txt" 2>"$WORK/err.txt" || {
+    echo "xa-gate: FAIL: the emulator exited with an error" >&2
+    cat "$WORK/err.txt" >&2
+    exit 1
+}
+grep -q 'stopped-at=' "$WORK/out.txt" || {
+    echo "xa-gate: FAIL: poll $STOP_POLL was never reached within the step ceiling (the guest hung or stopped polling)" >&2
+    exit 1
+}
 
 # Setfilter (0x0D) parameters, file 1: channels 0, 1, 2, 3 in order.
 FILTERS="$(awk -F, '$2 == "0x0D" { printf "%s;", $4 }' "$WORK/cd.csv")"

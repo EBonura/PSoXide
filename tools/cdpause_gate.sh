@@ -14,11 +14,17 @@ STEPS="${3:-3000000000}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-"$FRONTEND" launch --path "$CUE" --steps "$STEPS" >"$WORK/out.txt" 2>"$WORK/err.txt" || {
+"$FRONTEND" launch --path "$CUE" --steps "$STEPS" \
+    --stop-on-tty 'hello-cdpause: ALL PASS' --stop-on-tty 'hello-cdpause: FAIL' >"$WORK/out.txt" 2>"$WORK/err.txt" || {
     echo "cdpause-gate: FAIL: the emulator exited with an error" >&2
     cat "$WORK/err.txt" >&2
     exit 1
 }
+if ! grep -q 'stopped-at=' "$WORK/out.txt"; then
+    cat "$WORK/out.txt" >&2
+    echo "cdpause-gate: FAIL: no verdict within the step ceiling (hang guard)" >&2
+    exit 1
+fi
 if grep -q '^hello-cdpause: ALL PASS' "$WORK/out.txt"; then
     grep -E '^[0-9] ' "$WORK/out.txt"
     echo "cdpause-gate: PASS"

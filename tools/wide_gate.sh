@@ -17,6 +17,8 @@ TARGET=mipsel-sony-psx
 FRONTEND="${1:-}"
 
 # gate_example <example> <verdict-prefix> <steps>
+# The run stops when the guest prints "<verdict-prefix> PASS" or "... FAIL"; <steps> is only a
+# hang guard.
 gate_example() {
     EXAMPLE="$1"
     VERDICT="$2"
@@ -38,9 +40,14 @@ gate_example() {
     EXE="$WORK/build/$TARGET/release/$EXAMPLE.exe"
     mkdir -p "$WORK/config"
     "$FRONTEND" --config-dir "$WORK/config" launch --path "$EXE" \
-        --steps "$STEPS" >"$WORK/$EXAMPLE.out.txt" 2>"$WORK/$EXAMPLE.err.txt" || {
+        --steps "$STEPS" --stop-on-tty "$VERDICT PASS" --stop-on-tty "$VERDICT FAIL" \
+        >"$WORK/$EXAMPLE.out.txt" 2>"$WORK/$EXAMPLE.err.txt" || {
         echo "wide-gate: FAIL: the emulator exited with an error on $EXAMPLE" >&2
         cat "$WORK/$EXAMPLE.err.txt" >&2
+        exit 1
+    }
+    grep -q 'stopped-at=' "$WORK/$EXAMPLE.out.txt" || {
+        echo "wide-gate: FAIL: $EXAMPLE printed no verdict within the step ceiling (hang guard)" >&2
         exit 1
     }
     grep -E "^($VERDICT|  FAIL|widediv)" "$WORK/$EXAMPLE.out.txt" || true

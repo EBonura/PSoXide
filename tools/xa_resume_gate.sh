@@ -18,10 +18,18 @@ STEPS="${XA_RESUME_STEPS:-1200000000}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
+# The run ends when the guest prints its verdict (--stop-on-tty), so it does not depend
+# on how many instructions a VBlank takes; XA_RESUME_STEPS is only a hang guard.
 "$FRONTEND" launch --path "$CUE" --steps "$STEPS" \
+    --stop-on-tty 'hello-xa-resume: ALL PASS' --stop-on-tty 'hello-xa-resume: FAIL' \
     --dump-audio "$WORK/capture.wav" --cd-command-log "$WORK/cd.csv" >"$WORK/out.txt" 2>"$WORK/err.txt" || {
     echo "xa-resume-gate: FAIL: the emulator exited with an error" >&2
     cat "$WORK/err.txt" >&2
+    exit 1
+}
+grep -q 'stopped-at=' "$WORK/out.txt" || {
+    cat "$WORK/out.txt" >&2
+    echo "xa-resume-gate: FAIL: no verdict within the step ceiling (hang guard)" >&2
     exit 1
 }
 if [ -n "${XA_RESUME_KEEP:-}" ]; then
