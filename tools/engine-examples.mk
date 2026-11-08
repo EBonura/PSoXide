@@ -8,7 +8,14 @@ EXAMPLE_OUT := build/examples/$(PSX_TARGET)/release
 PSX_BUILD_FLAGS := --target $(PSX_TARGET) -Zjson-target-spec -Zbuild-std=core -Zbuild-std-features=compiler-builtins-mem
 EDITOR_PLAYTEST_PSX_BUILD_FLAGS := --target $(PSX_TARGET) -Zjson-target-spec -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem
 SDK_EXAMPLE_CARGO_ENV := CARGO_TARGET_DIR="$(EXAMPLE_TARGET_DIR)" RUSTFLAGS="-Cllvm-args=-disable-mips-df-backward-search -Clink-arg=-T../../psoxide.ld -Clink-arg=--oformat=binary"
-ENGINE_EXAMPLE_CARGO_ENV := CARGO_TARGET_DIR="$(EXAMPLE_TARGET_DIR)" RUSTFLAGS="-Cllvm-args=-disable-mips-df-backward-search -Clink-arg=-T../../../sdk/psoxide.ld -Clink-arg=--oformat=binary"
+# Engine examples are their own Cargo workspaces whose SDK crates sit outside the workspace root, so Cargo
+# hashes their absolute path and the same commit built from two directories gave two different executables
+# (hardware-tests: two layouts, same size). psoxide-rustc takes the checkout out of that hash; see
+# tools/psoxide-pgo/README.md ("One guest from any directory").
+REPRO_TARGET := $(CURDIR)/build/repro-rustc
+REPRO_RUSTC := $(REPRO_TARGET)/release/psoxide-rustc
+REPRO_ENV := RUSTC_WRAPPER="$(REPRO_RUSTC)" PSOXIDE_REPRO_ROOT="$(CURDIR)"
+ENGINE_EXAMPLE_CARGO_ENV := $(REPRO_ENV) CARGO_TARGET_DIR="$(EXAMPLE_TARGET_DIR)" RUSTFLAGS="-Cllvm-args=-disable-mips-df-backward-search -Clink-arg=-T../../../sdk/psoxide.ld -Clink-arg=--oformat=binary"
 
 CDDA_DEMO_TRACK ?= assets/audio/cdda/GONCHAROV.track02.cdda
 # Reconstructed from the CD-DA track on demand rather than tracked: the .cdda
@@ -90,6 +97,10 @@ showcase-particles:
 # Cargo features of the guest, e.g. HWTEST_FEATURES=console-diag.
 HWTEST_FEATURES ?=
 
+.PHONY: repro-rustc
+repro-rustc:
+	cargo build -q --release --manifest-path tools/psoxide-pgo/Cargo.toml --target-dir "$(REPRO_TARGET)" --bin psoxide-rustc
+hello-engine showcase-text game-pong game-magikaaaaaarp-pong game-breakout game-invaders showcase-3d showcase-model showcase-lights showcase-fog showcase-particles hardware-tests: repro-rustc
 .PHONY: hardware-tests hardware-tests-disc hwtest-radius-disc hwtest-verify-code hello-engine showcase-text game-pong game-breakout game-invaders showcase-3d showcase-model showcase-lights showcase-fog showcase-particles game-magikaaaaaarp-pong game-magikaaaaaarp-pong-disc magikaaaaaarp-pong-spectrum assets psxed engine-examples
 hardware-tests:
 	cd engine/examples/hardware-tests && $(ENGINE_EXAMPLE_CARGO_ENV) cargo build --release $(EDITOR_PLAYTEST_PSX_BUILD_FLAGS) $(if $(HWTEST_FEATURES),--features "$(HWTEST_FEATURES)")
