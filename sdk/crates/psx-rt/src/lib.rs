@@ -329,9 +329,9 @@ extern "C" fn report_panic(info: *const u8) -> ! {
                 buf[i] = b'0' + (line % 10) as u8;
                 line /= 10;
             }
-            if let Ok(s) = core::str::from_utf8(&buf[i..]) {
-                tty::print(s);
-            }
+            // SAFETY: the bytes are ASCII digits, valid UTF-8. Checking them with `from_utf8` would keep
+            // the whole UTF-8 validator (1 KB) in every game whose panic handler reaches here.
+            tty::print(unsafe { core::str::from_utf8_unchecked(&buf[i..]) });
             tty::print("\n");
         }
         halt()
