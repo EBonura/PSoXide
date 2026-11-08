@@ -838,6 +838,7 @@ fn wait_param_room_bounded(mut spins: u32) -> bool {
 }
 
 /// Pop and discard up to `limit` response bytes.
+#[inline(never)]
 fn drain_response_limited(limit: u32) {
     select_index(0);
     let mut drained = 0;
@@ -849,6 +850,7 @@ fn drain_response_limited(limit: u32) {
 
 /// Acknowledge every controller IRQ and reset the parameter FIFO, then the
 /// CD-ROM bit of I_STAT.
+#[inline(never)]
 fn ack_all_and_reset_parameters() {
     select_index(1);
     write_byte(reg::REQUEST_IRQ, code::ACK_ALL | code::CLEAR_PARAMETER_FIFO);
