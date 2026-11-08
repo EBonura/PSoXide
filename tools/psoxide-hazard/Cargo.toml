@@ -31,3 +31,7 @@ path = "src/bin/window-gate.rs"
 [[bin]]
 name = "cache-gate"
 path = "src/bin/cache-gate.rs"
+
+[[bin]]
+name = "check-mfc0"
+path = "src/bin/check-mfc0.rs"

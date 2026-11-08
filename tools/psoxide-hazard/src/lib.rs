@@ -5,6 +5,8 @@
 //!   moving any code, and rescans.
 //! * [`scan`] (`hazard-scan`) proves an image free of those hazards,
 //!   whatever built it.
+//! * [`mfc0`] (`check-mfc0`) reads Rust sources for coprocessor moves whose consumer can run in
+//!   the next instruction; it needs no build and runs over any source tree.
 //! * [`cache_gate`] (`cache-gate`) proves nothing outside the SDK's flush routines writes the
 //!   cache control register or isolates the cache.
 //! * [`stack_guard`] (`stack-guard`) proves every scratchpad stack call tree
@@ -21,6 +23,7 @@ pub mod cache_gate;
 pub mod detect;
 pub mod linkmap;
 pub mod listing;
+pub mod mfc0;
 pub mod module;
 pub mod overlay_composition;
 pub mod overlay_elf;

@@ -12,7 +12,7 @@
 
 mod fmv_movie;
 mod material_audit;
-mod mfc0;
+use psoxide_hazard::mfc0;
 pub mod pyjson;
 #[cfg(test)]
 mod readme_tables;

@@ -502,7 +502,7 @@ fn enable_cop2_for_diagnostics() {
     // SAFETY: COP0 status read-modify-write to enable COP2; nops cover the
     // CP0 hazard.
     unsafe {
-        core::arch::asm!("mfc0 $8, $12", lateout("$8") sr);
+        core::arch::asm!("mfc0 $8, $12", "nop", lateout("$8") sr);
         sr |= 0x4000_0000;
         core::arch::asm!(
             "mtc0 $8, $12",

@@ -5,8 +5,8 @@ use std::io::Write;
 use std::path::Path;
 
 use crate::detect::{
-    every_word, is_branch, looks_like_code, straight_line_pairs, Detector, Image, IsCode, Unlisted,
-    TABLE_CEILING,
+    every_word, is_branch, is_coprocessor_move, looks_like_code, straight_line_pairs, Detector,
+    Image, IsCode, Unlisted, TABLE_CEILING,
 };
 use crate::linkmap::{io_message, LinkMap};
 use crate::listing::{load_address, Listing, HEADER};
@@ -148,7 +148,13 @@ fn scan_in(
             list.join(" ")
         );
     }
-    let straight = straight_line_pairs(&listing, is_code).len();
+    // A coprocessor move comes from inline assembly, which the compiler does not schedule
+    // around: HL and CS shipped `mfc0` with no nop for weeks and `psoxide-hazard` printed this
+    // as a warning above "0 hazards". It is a hazard, and the one the patcher cannot reroute.
+    let (moves, loads): (Vec<i64>, Vec<i64>) = straight_line_pairs(&listing, is_code)
+        .into_iter()
+        .partition(|&addr| is_coprocessor_move(listing.op(addr)));
+    let straight = loads.len();
     if straight != 0 {
         let _ = writeln!(
             out,
@@ -160,6 +166,16 @@ fn scan_in(
         let _ = writeln!(out, "{warning}");
     }
     let mut hazards = Vec::new();
+    for &addr in &moves {
+        let (e, next) = (
+            listing.get(addr).expect("listed"),
+            listing.get(addr + 4).expect("listed"),
+        );
+        hazards.push(format!(
+            "{addr:08x}: {} {} | next {} {} | reads the register one instruction early",
+            e.op, e.args, next.op, next.args
+        ));
+    }
     for h in found.map_err(ScanError::Unlisted)? {
         let site = format!(
             "{:08x}: {} {} | slot {} {}",

@@ -758,3 +758,56 @@ fn patching_refuses_a_truncated_image() {
     assert!(out.contains("truncated"), "{out}");
     assert_eq!(std::fs::read(&fx.path).unwrap(), cut);
 }
+
+/// `mfc0 rt, $rd` (COP0 register move from the coprocessor).
+fn mfc0(rt: &str, rd: u32) -> u32 {
+    0x4000_0000 | reg(rt) << 16 | rd << 11
+}
+
+#[test]
+fn a_coprocessor_move_read_by_the_next_instruction_is_a_hazard() {
+    // hl-psx's old `enable_cop2`: `asm!("mfc0 $8, $12", lateout("$8") sr)` and then
+    // `sr |= 1 << 30` in the next instruction. The scanner printed a warning and "0 hazards".
+    let fx = Fixture::new();
+    let mut image = Image::new(0x8001_0000);
+    image.put(0, &[mfc0("t0", 12), ori("t0", "t0", 0x4000), BREAK]);
+    image.write(&fx.path);
+    let (hazards, out) = fx.scan_with(&looks_like_code, TABLE_CEILING);
+    assert_eq!(hazards.len(), 1, "{out}");
+    assert!(hazards[0].starts_with(&hex(image.addr(0))), "{hazards:?}");
+    assert!(
+        hazards[0].contains("mfc0") && hazards[0].contains("ori"),
+        "{hazards:?}"
+    );
+    let (status, stdout) = call(scan::main, &[fx.p()]);
+    assert_eq!(status, 1, "{stdout}");
+    assert!(stdout.contains("1 hazards in"), "{stdout}");
+
+    // The nop that fixes it, and a consumer of another register.
+    image.put(0, &[mfc0("t0", 12), NOP, ori("t0", "t0", 0x4000), BREAK]);
+    image.write(&fx.path);
+    assert_eq!(fx.scan_with(&looks_like_code, TABLE_CEILING).0.len(), 0);
+    image.put(0, &[mfc0("t0", 12), ori("t1", "t2", 1), BREAK]);
+    image.write(&fx.path);
+    assert_eq!(fx.scan_with(&looks_like_code, TABLE_CEILING).0.len(), 0);
+}
+
+#[test]
+fn a_plain_load_read_by_the_next_instruction_stays_a_warning() {
+    let fx = Fixture::new();
+    let mut image = Image::new(0x8001_0000);
+    let data = image.addr(Image::DATA);
+    image.put(
+        0,
+        &[
+            lui("at", hi(data)),
+            lw("t0", lo(data), "at"),
+            ori("t1", "t0", 1),
+            BREAK,
+        ],
+    );
+    image.write(&fx.path);
+    let (hazards, out) = fx.scan_with(&looks_like_code, TABLE_CEILING);
+    assert!(hazards.is_empty());
+    assert!(out.contains("1 straight-line load-use pairs"), "{out}");
+}

@@ -127,3 +127,15 @@ A resident guest that exceeds psx-rt's default 96 trampoline words can enable
 These features change only the resident array's capacity. Each packed cold
 image retains its separate 136-byte reservation: an eight-byte header and
 32 instruction words.
+
+## Load-delay checks that see game code
+
+Two checks cover the coprocessor moves (`mfc0`, `mfc2`, `cfc2`), whose result arrives one instruction
+late and which come from `asm!` blocks the compiler does not schedule around:
+
+- `hazard-scan` reports a move whose next instruction reads its destination as a hazard (exit 1), not
+  the warning it used to be. Plain loads of that shape stay a warning: LLVM schedules those apart.
+- `check-mfc0 [DIR...]` reads Rust sources, with no build. It flags a read in the next asm line and an
+  `asm!` block that ENDS with a move (the consumer is then in the next block, HL's `enable_cop2`). A game
+  runs it over its own tree: `cargo run --release -p psoxide-hazard --bin check-mfc0 -- game host`
+  from the hydrated SDK. `cargo run -p xtask -- check-mfc0` is the same code (`make lint`).

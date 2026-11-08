@@ -9,6 +9,7 @@ publish = false
 description = "Repository tasks for the PSoXide SDK and its website: `cargo run -p xtask -- <task>`."
 
 [dependencies]
+psoxide-hazard = { path = "../psoxide-hazard" }
 psoxide-link = { path = "../psoxide-link" }
 regex = "1"
 serde_json = { workspace = true }

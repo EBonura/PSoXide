@@ -1093,5 +1093,12 @@ pub fn straight_line_pairs(listing: &Listing, is_code: IsCode<'_>) -> Vec<i64> {
     pairs
 }
 
+/// True for the coprocessor register moves, the loads LLVM never schedules a slot after: they
+/// come from `asm!` blocks, where the compiler cannot see the delay.
+#[must_use]
+pub fn is_coprocessor_move(op: &str) -> bool {
+    matches!(op, "mfc0" | "mfc2" | "cfc2")
+}
+
 /// The default load address, for callers building images by hand.
 pub const DEFAULT_LOAD_ADDR: i64 = LOAD_ADDR;
