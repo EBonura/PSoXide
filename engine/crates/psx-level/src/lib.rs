@@ -776,6 +776,7 @@ pub const POI_PERSISTENT_FLAG_CAPACITY: usize = 832;
 /// removed or reordered, so a save keeps meaning the same door across
 /// recooks. Two records can land on one slot; the cook refuses a level where
 /// they do, naming both.
+#[must_use]
 pub const fn persistent_flag_slot(id: StableId) -> u16 {
     (id.raw() % POI_PERSISTENT_FLAG_CAPACITY as u32) as u16
 }

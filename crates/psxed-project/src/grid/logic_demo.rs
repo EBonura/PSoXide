@@ -83,6 +83,7 @@ fn find_material(project: &ProjectDocument, names: &[&str]) -> Option<ResourceId
 /// The three rooms: flat floors and ceilings, derived closure walls, with a
 /// doorway (a hidden, non-solid wall segment on each side of the shared
 /// edge) at the rows the doors and the gap use.
+#[must_use]
 pub fn lever_doors_world(
     floor: Option<ResourceId>,
     wall: Option<ResourceId>,
@@ -155,6 +156,10 @@ fn slab_vertices(half_thickness: i16, half_width: i16, height: i16) -> [[i16; 3]
 /// Turn `project` into the lever-and-doors project in place: the base's
 /// level goes, its player stays, the world becomes the three rooms and the
 /// gameplay nodes are placed.
+///
+/// # Errors
+///
+/// Fails when the first room has no floor to spawn the player on.
 pub fn into_lever_doors(project: &mut ProjectDocument) -> Result<(), StarterError> {
     strip_base(project, 0);
     super::graybox_set::add_to(project);
@@ -344,6 +349,10 @@ pub fn into_lever_doors(project: &mut ProjectDocument) -> Result<(), StarterErro
 
 /// Create the lever-and-doors project at `out_dir` from the base project in
 /// `base_dir`, named `name`. Returns the written `project.ron`.
+///
+/// # Errors
+///
+/// Fails when the base project does not load or a file cannot be written.
 pub fn create_project(
     base_dir: &Path,
     out_dir: &Path,
@@ -365,6 +374,7 @@ pub fn create_project(
 }
 
 /// The base project directory under `projects_dir`.
+#[must_use]
 pub fn base_dir(projects_dir: &Path) -> PathBuf {
     projects_dir.join(STARTER_BASE)
 }

@@ -131,6 +131,8 @@ pub struct LogicStats {
 }
 
 /// Where a sliding door is, from [`LogicRuntime::door_slide`].
+// Read by the game, never built outside this module.
+#[allow(clippy::exhaustive_structs)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DoorSlide {
     /// Offset from the closed position, engine units.
@@ -301,6 +303,7 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
     /// The save flag record `index` owns, or `None` when it is not
     /// persistent (or `ids` has no entry for it). `ids` is the cooked
     /// stable-id table parallel to `records`.
+    #[must_use]
     pub fn persistent_slot(
         records: &'static [LevelLogicRecord],
         ids: &[StableId],
@@ -404,6 +407,7 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
     /// engine units, and whether it has fully cleared (the game hides it and
     /// frees its collision then; until then it is solid where it is).
     /// `None` for a door that opens instantly, and for any other record.
+    #[must_use]
     pub fn door_slide(
         &self,
         records: &'static [LevelLogicRecord],
@@ -432,6 +436,7 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
     }
 
     /// True while door `index` refuses to open until unlocked.
+    #[must_use]
     pub fn door_locked(&self, index: usize) -> bool {
         index < self.count() && self.locked[index] != 0
     }
@@ -449,12 +454,14 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
     }
 
     /// True when any refusal mark is pending.
+    #[must_use]
     pub fn any_refused(&self) -> bool {
         self.refused_marks.iter().any(|word| *word != 0)
     }
 
     /// On/off state of a [`logic_kind::SWITCH`] record (a lever that has
     /// been pulled reads on until it is pulled back).
+    #[must_use]
     pub fn switch_on(&self, index: usize) -> bool {
         self.door_open(index)
     }

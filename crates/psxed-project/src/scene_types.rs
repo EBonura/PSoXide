@@ -671,6 +671,7 @@ pub enum InteractableKind {
 }
 
 /// What pressing an [`InteractableKind::Switch`] again does.
+#[allow(clippy::exhaustive_enums)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SwitchBehavior {
     /// Each press flips the lever (target On, then Off, ...), with a short
@@ -787,6 +788,8 @@ pub enum LogicNodeKind {
 /// The motion of a sliding door: its box translates `distance` along
 /// `direction` over `ticks` and is solid wherever it is until it has fully
 /// cleared the doorway.
+// A closed authored set: the inspector lists every field and variant.
+#[allow(clippy::exhaustive_structs)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DoorSlide {
     /// Which way the box travels when the door opens.
@@ -798,6 +801,7 @@ pub struct DoorSlide {
 }
 
 /// Slide direction. North is -Z, east is +X, up is +Y.
+#[allow(clippy::exhaustive_enums)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DoorDirection {
     /// +Y.
@@ -816,6 +820,7 @@ pub enum DoorDirection {
 
 /// One side of a door, by compass direction. A player is on the east side
 /// when their X is greater than the door's, south when their Z is greater.
+#[allow(clippy::exhaustive_enums)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DoorSide {
     /// Greater X than the door.
@@ -829,6 +834,7 @@ pub enum DoorSide {
 }
 
 /// Whether a door can be opened.
+#[allow(clippy::exhaustive_enums)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DoorLock {
     /// Opens whenever it is told to.
