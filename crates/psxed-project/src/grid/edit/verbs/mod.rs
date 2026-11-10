@@ -17,11 +17,13 @@
 //! * [`rules`]: the smart paint rules and the shared writing helpers.
 
 pub mod break_verb;
+pub mod common;
 pub mod extrude;
 pub mod fine;
 pub mod raise;
 pub mod raise_leaves;
 pub mod ramp;
+pub mod room;
 pub mod rules;
 pub mod spiral;
 pub mod stairs;
@@ -105,5 +107,7 @@ impl Snapshot {
 mod extrude_authored_tests;
 #[cfg(test)]
 mod extrude_tests;
+#[cfg(test)]
+mod room_tests;
 #[cfg(test)]
 mod tests;
