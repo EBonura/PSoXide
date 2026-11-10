@@ -111,3 +111,50 @@ fn arched_windows_cook_and_flat_stays_the_default() {
         .window_arch
         .is_none());
 }
+
+#[test]
+fn a_door_and_windows_in_a_tall_building_open_only_the_ground_storey() {
+    use crate::grid::derive::DerivedKind;
+    use crate::grid::leaf_derive::derived_walls_of;
+    let mut w = empty();
+    let mut p = params(rect(6, 6));
+    p.storeys = 3;
+    p.window_arch = Some(super::opening::ArchShape::Round);
+    p.roof_parapet = None;
+    let r = build_building(&mut w, &p).unwrap();
+    assert_eq!(r.doors.len(), 1, "{:?}", r.notes);
+    assert!(r.windows >= 3, "full sector flat windows: {r:?}");
+    assert!(r.notes.is_empty(), "{:?}", r.notes);
+    // Every sector that has a ground opening keeps solid authored walls for
+    // its upper storeys on that edge.
+    let room = &w.rooms[r.room];
+    let mut checked = 0;
+    for (key, s) in room.leaves() {
+        for side in [
+            WallEdge::North,
+            WallEdge::East,
+            WallEdge::South,
+            WallEdge::West,
+        ] {
+            let opened = derived_walls_of(room, key).iter().any(|d| {
+                d.edge == side && d.span == 0 && d.kind == DerivedKind::Closure && d.hidden
+            });
+            if opened && s.span_count() > 1 {
+                let upper = s
+                    .walls(side)
+                    .iter()
+                    .filter(|x| x.heights[0] >= 3072)
+                    .count();
+                assert!(upper >= 1, "storey above stays walled");
+                assert!(s
+                    .walls(side)
+                    .iter()
+                    .filter(|x| x.heights[0] >= 3072)
+                    .all(|x| x.solid));
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked >= 3);
+    crate::grid::cook::tests::cook(&w).expect("cooks");
+}

@@ -14,6 +14,9 @@
 //!
 //! * **No wall thickness.** A wall is a zero thickness derived face; there
 //!   is no inner and outer skin in the data model.
+//! * **With several storeys, openings are a whole sector side and flat.**
+//!   A storey column stays whole sectors, so a head or a narrow opening
+//!   that needs finer cells is only available in a one storey building.
 //! * **Doors and windows on the ground storey only.** An opening is an
 //!   override on the wall segment plus authored pieces, and both address an
 //!   edge, not a span: cutting one on an upper storey would also open the
@@ -376,7 +379,8 @@ pub fn build_building(
     if p.window_every > 0 {
         let phase = (hash(p.seed, OP_WINDOW, [0, 0], 0) % p.window_every as u32) as i32;
         for (c, side) in &edges {
-            if door_cells.contains(c) {
+            // Not on the stairwell: the treads lower the ceiling under them.
+            if door_cells.contains(c) || well.is_some_and(|r| r.contains(*c)) {
                 continue;
             }
             let along_coord = match side {
@@ -387,9 +391,13 @@ pub fn build_building(
                 continue;
             }
             let (s, _) = along(*c, *side);
-            let (from, to, profile) = match p.window_arch {
-                Some(shape) => (s, s + 4, arch_head(shape, 4, p.window_top)),
-                None => (s + 1, s + 3, OpeningProfile::Rectangular),
+            // A storey column stays whole sectors, so with several storeys a
+            // window is the whole sector side and flat; an arched or
+            // narrower one needs finer cells.
+            let (from, to, profile) = match (p.window_arch, p.storeys) {
+                (_, n) if n > 1 => (s, s + 4, OpeningProfile::Rectangular),
+                (Some(shape), _) => (s, s + 4, arch_head(shape, 4, p.window_top)),
+                _ => (s + 1, s + 3, OpeningProfile::Rectangular),
             };
             let op = OpeningParams {
                 profile,

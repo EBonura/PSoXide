@@ -14,7 +14,11 @@
 //!   The lintel never blocks (the opening is taller than the body), the sill
 //!   blocks.
 //!
-//! An authored wall already on the edge is split the same way. Nothing here
+//! An authored wall already on the edge is split the same way. In a column
+//! of several storeys only the ground storey is opened: the faces of the
+//! storeys above on that edge are written back as authored walls (the edge
+//! override is keyed by edge, not span), and a head needing finer cells is
+//! refused because a storey column stays whole sectors. Nothing here
 //! is stored about the opening: it is plain, hand-tweakable grid data.
 //!
 //! **Arched profiles are not built.** A round or pointed head needs a data
@@ -471,7 +475,15 @@ fn cut_one(
     let mut plan: Vec<(LeafKey, Vec<crate::grid::derive::DerivedWall>)> = Vec::new();
     for &key in &keys {
         let room = &world.rooms[p.room];
-        let walls: Vec<_> = derived_walls_of(room, key)
+        // A column of several storeys derives its faces per span through the
+        // sector path; the leaf path sees the ground span only.
+        let tall = key.level == 2 && room.leaf(key).is_some_and(|s| s.span_count() > 1);
+        let all = if tall {
+            crate::grid::derive::edge_walls(room, key.cell(), p.side)
+        } else {
+            derived_walls_of(room, key)
+        };
+        let walls: Vec<_> = all
             .into_iter()
             .filter(|w| w.edge == p.side && w.kind != DerivedKind::Slab)
             .collect();
@@ -568,6 +580,20 @@ fn cut_one(
                 return Err(OpeningRefusal::NotRectangular);
             };
             if dw.hidden && dw.solid == Some(false) {
+                continue;
+            }
+            if dw.span > 0 {
+                // A storey above the ground one: the edge override is keyed
+                // by edge, not by span, so it hides this face too. Write it
+                // back as the same face in an authored record, with the
+                // collision it had, so only the ground storey is opened.
+                new_pieces.push(GridWall {
+                    heights: h,
+                    material: dw.material,
+                    facing: WallFacing::Both,
+                    solid: dw.kind == DerivedKind::Closure,
+                    ..GridWall::span(0, 0, None)
+                });
                 continue;
             }
             if matches!(dw.kind, DerivedKind::Closure | DerivedKind::Drop) {
