@@ -3119,14 +3119,7 @@ mod persistence_cook_tests {
             &mut slots,
             &mut report
         ));
-        assert_eq!(
-            slots
-                .get(&7)
-                .map(String::as_str)
-                .unwrap_or("")
-                .contains("gate a"),
-            true
-        );
+        assert!(slots.get(&7).unwrap().contains("gate a"));
         let mut swapped = logic.clone();
         swapped.swap(0, 1);
         let mut slots2 = HashMap::new();
