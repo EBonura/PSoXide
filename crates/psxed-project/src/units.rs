@@ -217,9 +217,12 @@ fn scale_node(node: &mut SceneNode) {
                     *axis = div_u16_min1(*axis);
                 }
             }
-            LogicNodeKind::Door { .. }
-            | LogicNodeKind::Relay
-            | LogicNodeKind::Multisource { .. } => {}
+            LogicNodeKind::Door { slide, .. } => {
+                if let Some(slide) = slide {
+                    slide.distance = div_u16_min1(slide.distance);
+                }
+            }
+            LogicNodeKind::Relay | LogicNodeKind::Multisource { .. } => {}
         },
         NodeKind::Animator { action_clips, .. } => {
             for clip in action_clips.iter_mut() {

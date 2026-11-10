@@ -1809,10 +1809,14 @@ impl Playtest {
     /// overlay, checkpoints update the in-memory checkpoint (with the
     /// same confirmation overlay the legacy interactable path showed).
     pub(super) fn dispatch_logic_effects(&mut self, port: &mut psx_engine::ControllerPort) {
-        if !self.logic.any_fired() {
+        if !self.logic.any_fired() && !self.logic.any_refused() {
             return;
         }
         for (index, record) in LOGIC.iter().enumerate() {
+            // A locked or wrong-side door was asked to open: show its message.
+            if self.logic.take_refused(index) {
+                self.open_logic_message(index, record);
+            }
             if !self.logic.take_fired(index) {
                 continue;
             }
@@ -1822,10 +1826,15 @@ impl Playtest {
                     // actually changed (same-state uses return before
                     // marking), so every drain here is one activation.
                     telemetry::counter(telemetry::counter::LOGIC_DOOR_ACTIVATIONS, 1);
-                    if record.link != psx_level::LOGIC_LINK_NONE {
-                        let open = self.logic.door_open(index);
+                    let open = self.logic.door_open(index);
+                    // A sliding door's box follows `sync_sliding_doors`, tick
+                    // by tick; only an instant door flips here.
+                    if record.link != psx_level::LOGIC_LINK_NONE
+                        && self.logic.door_slide(LOGIC.as_slice(), index).is_none()
+                    {
                         self.box_props.set_door_open(usize::from(record.link), open);
                     }
+                    self.door_motion_sound(index, open);
                 }
                 psx_level::logic_kind::MESSAGE => {
                     self.open_logic_message(index, record);
@@ -1883,11 +1892,41 @@ impl Playtest {
         for (index, record) in LOGIC.iter().enumerate() {
             if record.kind == psx_level::logic_kind::DOOR
                 && record.link != psx_level::LOGIC_LINK_NONE
+                && self.logic.door_slide(LOGIC.as_slice(), index).is_none()
             {
                 let open = self.logic.door_open(index);
                 self.box_props.set_door_open(usize::from(record.link), open);
             }
         }
+        self.sync_sliding_doors();
+    }
+
+    /// Move the box of every door with motion to where the logic runtime has
+    /// it: drawn and solid at its offset until it has fully cleared, then
+    /// hidden and passable (and solid again the moment it starts closing).
+    pub(super) fn sync_sliding_doors(&mut self) {
+        for (index, record) in LOGIC.iter().enumerate() {
+            if record.kind != psx_level::logic_kind::DOOR
+                || record.link == psx_level::LOGIC_LINK_NONE
+            {
+                continue;
+            }
+            if let Some(slide) = self.logic.door_slide(LOGIC.as_slice(), index) {
+                let link = usize::from(record.link);
+                self.box_props.set_door_slide(link, slide.offset);
+                self.box_props.set_door_open(link, slide.cleared);
+            }
+        }
+    }
+
+    /// SEAM: the sound of door `index` starting to open or close. Left empty
+    /// on purpose: a door cue needs a `LevelGameplaySfxEvent` pair, their
+    /// cook-time bindings to UI-scene audio and authored sounds, none of which
+    /// exist yet. Call sites are already one per commanded state change, so
+    /// filling this in touches nothing else.
+    #[inline(always)]
+    fn door_motion_sound(&mut self, index: usize, opening: bool) {
+        let _ = (index, opening);
     }
 }
 

@@ -317,15 +317,19 @@ pub(super) fn box_prop_aabb_overlaps_xz(
     a_min.x <= b_max.x && a_max.x >= b_min.x && a_min.z <= b_max.z && a_max.z >= b_min.z
 }
 
-/// Shift a box-face quad down (or up) by `dy` room units. Used to draw a
-/// falling box at its current offset without rebuilding its runtime.
-pub(super) fn box_prop_offset_quad_y(quad: [WorldVertex; 4], dy: i32) -> [WorldVertex; 4] {
-    if dy == 0 {
+/// Shift a box-face quad by `offset` room units. Used to draw a falling box
+/// or a sliding door at its current offset without rebuilding its runtime.
+pub(super) fn box_prop_offset_quad(quad: [WorldVertex; 4], offset: [i32; 3]) -> [WorldVertex; 4] {
+    if offset == [0; 3] {
         return quad;
     }
     let mut out = quad;
     for vertex in out.iter_mut() {
-        *vertex = WorldVertex::new(vertex.x, vertex.y.saturating_add(dy), vertex.z);
+        *vertex = WorldVertex::new(
+            vertex.x.saturating_add(offset[0]),
+            vertex.y.saturating_add(offset[1]),
+            vertex.z.saturating_add(offset[2]),
+        );
     }
     out
 }

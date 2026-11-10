@@ -1658,6 +1658,9 @@ pub fn build_package(
                         *wait_ticks,
                         *enabled,
                         &mut names,
+                        &mut interactable_messages,
+                        &mut interactable_message_pages,
+                        &mut interactable_message_pages_it,
                         &mut logic,
                         &mut pending_door_links,
                         report,
@@ -1759,6 +1762,7 @@ pub fn build_package(
     if !resolve_door_links(
         &pending_door_links,
         &box_prop_indices_by_name,
+        &box_props,
         &mut logic,
         &mut report,
     ) {

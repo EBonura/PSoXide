@@ -233,6 +233,10 @@ pub struct BoxProps<
     ///
     /// [`logic_kind::DOOR`]: psx_level::logic_kind::DOOR
     door_open: [u32; BOX_PROP_BROKEN_WORDS],
+    /// Slide offset of a door-linked box from its authored position, room
+    /// units per axis. Drawn and collided at the offset until the door has
+    /// cleared the doorway (then `door_open` hides it).
+    slide: [[i16; 3]; MAX_BOX_PROP_STATE],
     /// Static derived box-prop data used by render, break tests, and collision.
     runtime: [BoxPropRuntime; MAX_BOX_PROP_STATE],
     /// Dynamic fall state per box, parallel to `broken`. A box
@@ -256,6 +260,7 @@ impl<
     pub const EMPTY: Self = Self {
         broken: [0; BOX_PROP_BROKEN_WORDS],
         door_open: [0; BOX_PROP_BROKEN_WORDS],
+        slide: [[0; 3]; MAX_BOX_PROP_STATE],
         runtime: [BoxPropRuntime::EMPTY; MAX_BOX_PROP_STATE],
         fall: [BoxPropFallState::EMPTY; MAX_BOX_PROP_STATE],
         break_events: [BoxPropBreakEvent::EMPTY; MAX_BOX_PROP_BREAK_EVENTS],
@@ -278,6 +283,7 @@ impl<
     pub fn reset_dynamic_state(&mut self) {
         self.broken = [0; BOX_PROP_BROKEN_WORDS];
         self.door_open = [0; BOX_PROP_BROKEN_WORDS];
+        self.slide = [[0; 3]; MAX_BOX_PROP_STATE];
         self.fall = [BoxPropFallState::EMPTY; MAX_BOX_PROP_STATE];
         self.break_events = [BoxPropBreakEvent::EMPTY; MAX_BOX_PROP_BREAK_EVENTS];
     }
@@ -293,6 +299,14 @@ impl<
             self.door_open[word] |= mask;
         } else {
             self.door_open[word] &= !mask;
+        }
+    }
+
+    /// Move a door-linked box to `offset` from its authored position (room
+    /// units). Offsets saturate at the `i16` range.
+    pub fn set_door_slide(&mut self, index: usize, offset: [i32; 3]) {
+        if let Some(slide) = self.slide.get_mut(index) {
+            *slide = offset.map(|axis| axis.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16);
         }
     }
 
@@ -677,18 +691,15 @@ impl<
     fn live_collision_aabb(&self, index: usize) -> Option<(RoomPoint, RoomPoint)> {
         let runtime = self.runtime.get(index)?;
         let fall_y = self.fall.get(index)?.fall_y;
-        Some((
+        let slide = self.slide.get(index)?.map(i32::from);
+        let shift = |point: RoomPoint| {
             RoomPoint::new(
-                runtime.aabb_min.x,
-                runtime.aabb_min.y.saturating_add(fall_y),
-                runtime.aabb_min.z,
-            ),
-            RoomPoint::new(
-                runtime.aabb_max.x,
-                runtime.aabb_max.y.saturating_add(fall_y),
-                runtime.aabb_max.z,
-            ),
-        ))
+                point.x.saturating_add(slide[0]),
+                point.y.saturating_add(fall_y).saturating_add(slide[1]),
+                point.z.saturating_add(slide[2]),
+            )
+        };
+        Some((shift(runtime.aabb_min), shift(runtime.aabb_max)))
     }
 }
 
@@ -770,6 +781,34 @@ mod collision_tests {
         );
         assert_eq!(out[0].min, RoomPoint::new(10, 0, -4));
         assert_eq!(out[0].max, RoomPoint::new(14, 8, 4));
+    }
+
+    #[test]
+    fn a_sliding_door_collides_where_it_is_until_it_has_cleared() {
+        static PROPS: [LevelBoxPropRecord; 1] = [record(0, [10, 0, -4], [14, 8, 4], true)];
+        let mut state = BoxProps::<1, 1, 1>::EMPTY;
+        state.init();
+        state.rebuild(&PROPS);
+        let mut out = [CharacterCollisionAabb::EMPTY; 1];
+        state.set_door_slide(0, [0, 5, 0]);
+        assert_eq!(
+            state.collect_collision_blockers_checked(&PROPS, RoomIndex(0), &mut out),
+            Some(1)
+        );
+        assert_eq!(out[0].min, RoomPoint::new(10, 5, -4));
+        assert_eq!(out[0].max, RoomPoint::new(14, 13, 4));
+        state.set_door_slide(0, [-3, 0, 2]);
+        state.collect_collision_blockers_checked(&PROPS, RoomIndex(0), &mut out);
+        assert_eq!(out[0].min, RoomPoint::new(7, 0, -2));
+        // Fully open hides it and frees the doorway.
+        state.set_door_open(0, true);
+        assert_eq!(
+            state.collect_collision_blockers_checked(&PROPS, RoomIndex(0), &mut out),
+            Some(0)
+        );
+        state.reset_dynamic_state();
+        state.collect_collision_blockers_checked(&PROPS, RoomIndex(0), &mut out);
+        assert_eq!(out[0].min, RoomPoint::new(10, 0, -4), "reset puts it back");
     }
 
     #[test]

@@ -654,6 +654,9 @@ pub enum InteractableKind {
         /// How repeated presses behave.
         #[serde(default)]
         behavior: SwitchBehavior,
+        /// Unlock the target door instead of opening it.
+        #[serde(default)]
+        unlocks: bool,
     },
 }
 
@@ -757,6 +760,77 @@ pub enum LogicNodeKind {
         /// Whether the door starts open.
         #[serde(default)]
         start_open: bool,
+        /// How the box moves when the door opens. `None` is the original
+        /// instant door: hidden and passable at once.
+        #[serde(default)]
+        slide: Option<DoorSlide>,
+        /// Whether the door opens at all, and from which side.
+        #[serde(default)]
+        lock: DoorLock,
+        /// Text shown when the door refuses to open (locked, or the wrong
+        /// side). Empty uses a stock line.
+        #[serde(default)]
+        refusal: String,
+    },
+}
+
+/// The motion of a sliding door: its box translates `distance` along
+/// `direction` over `ticks` and is solid wherever it is until it has fully
+/// cleared the doorway.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DoorSlide {
+    /// Which way the box travels when the door opens.
+    pub direction: DoorDirection,
+    /// How far it travels, editor units (must be > 0).
+    pub distance: u16,
+    /// 60 Hz ticks from closed to fully open (must be > 0).
+    pub ticks: u16,
+}
+
+/// Slide direction. North is -Z, east is +X, up is +Y.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DoorDirection {
+    /// +Y.
+    Up,
+    /// -Y.
+    Down,
+    /// +X.
+    East,
+    /// -X.
+    West,
+    /// +Z.
+    South,
+    /// -Z.
+    North,
+}
+
+/// One side of a door, by compass direction. A player is on the east side
+/// when their X is greater than the door's, south when their Z is greater.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DoorSide {
+    /// Greater X than the door.
+    East,
+    /// Smaller X.
+    West,
+    /// Greater Z.
+    South,
+    /// Smaller Z.
+    North,
+}
+
+/// Whether a door can be opened.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DoorLock {
+    /// Opens whenever it is told to.
+    #[default]
+    Unlocked,
+    /// Refuses until a Switch with `unlocks: true` targets it.
+    Locked,
+    /// Refuses while the player stands on `refuse_from`'s side of the box
+    /// prop, opens from the other side. Closing is never refused.
+    OneWay {
+        /// The side the door will not open from.
+        refuse_from: DoorSide,
     },
 }
 
