@@ -108,6 +108,33 @@ fn cook_check(project: &ProjectDocument, dir: &std::path::Path) {
         budget.meshes,
         psxed_project::grid::mesh::MAX_MESHES_PER_ROOM
     );
+    let spawn = Spawn {
+        room: 0,
+        cell: SPAWN,
+    };
+    if let Some(a) = analyse(world, &[spawn], &psx_engine::WalkLimits::DEFAULT) {
+        println!(
+            "walk counts {:?} (steep, low, step, drop, unreachable)",
+            a.counts()
+        );
+        for (i, r) in world.rooms.iter().enumerate() {
+            let lost = rect(
+                [r.origin[0], r.origin[1]],
+                [
+                    r.origin[0] + r.width as i32 - 1,
+                    r.origin[1] + r.depth as i32 - 1,
+                ],
+            )
+            .cells()
+            .filter(|c| a.rooms[i].cell(*c).is_some_and(|w| w.unreachable))
+            .count();
+            println!(
+                "  room {i} {:>14}: {} standable, {lost} unreachable",
+                r.name,
+                a.rooms[i].standable_count()
+            );
+        }
+    }
     let (package, report) = psxed_project::playtest::build_package(project, dir);
     println!("cook ok: {}", report.is_ok());
     for e in report.error_messages() {
