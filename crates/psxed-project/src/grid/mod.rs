@@ -71,6 +71,7 @@ pub mod leaf_map;
 pub mod light;
 pub mod lighting;
 pub mod limits;
+pub mod logic_demo;
 pub mod mesh;
 mod mesh_arch;
 mod mesh_column;
