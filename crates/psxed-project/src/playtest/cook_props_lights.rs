@@ -1217,6 +1217,10 @@ pub(crate) fn push_particle_emitter(
     true
 }
 
+/// Ticks (60 Hz) a toggle switch refuses a second press, so a mashed button
+/// cannot flip a moving door back and forth every frame.
+const SWITCH_TOGGLE_COOLDOWN_TICKS: i16 = 30;
+
 // Borrow the existing cook tables without allocating an intermediate context.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn push_interactable(
@@ -1263,17 +1267,51 @@ pub(crate) fn push_interactable(
             non_empty_or(body, "Relay synchronized.").to_string(),
             non_empty_or(checkpoint_id, node_name).to_string(),
         ),
+        crate::InteractableKind::Switch { target, .. } => {
+            if target.trim().is_empty() {
+                report.error(format!(
+                    "Switch on '{node_name}' has no target - a lever that fires \
+                     nothing is dead content"
+                ));
+                return false;
+            }
+            (
+                PlaytestInteractableKind::Switch,
+                psx_level::logic_kind::SWITCH,
+                String::new(),
+                String::new(),
+                String::new(),
+            )
+        }
     };
-    let message = messages.len().min(u16::MAX as usize) as u16;
-    let page_first = message_pages.len().min(u16::MAX as usize) as u16;
-    message_pages.push(body.clone());
-    message_pages_it.push(String::new());
-    messages.push(PlaytestInteractableMessage {
-        title,
-        body,
-        page_first,
-        page_count: 1,
-    });
+    // A switch shows no text, so it takes no slot in the message tables.
+    let message = if kind == PlaytestInteractableKind::Switch {
+        psx_level::INTERACTABLE_MESSAGE_NONE
+    } else {
+        let message = messages.len().min(u16::MAX as usize) as u16;
+        let page_first = message_pages.len().min(u16::MAX as usize) as u16;
+        message_pages.push(body.clone());
+        message_pages_it.push(String::new());
+        messages.push(PlaytestInteractableMessage {
+            title,
+            body,
+            page_first,
+            page_count: 1,
+        });
+        message
+    };
+    // A switch's wiring: its target, and whether it retires after one press
+    // (wait -1) or cools down between presses.
+    let (switch_target, switch_wait) = match component.kind {
+        crate::InteractableKind::Switch { target, behavior } => (
+            names.intern(target),
+            match behavior {
+                crate::SwitchBehavior::OneShot => -1,
+                crate::SwitchBehavior::Toggle => SWITCH_TOGGLE_COOLDOWN_TICKS,
+            },
+        ),
+        _ => (psx_level::LOGIC_NAME_NONE, 0),
+    };
     let flags = if component.enabled {
         psx_level::interactable_flags::ENABLED
     } else {
@@ -1314,11 +1352,11 @@ pub(crate) fn push_interactable(
         kind: logic_kind,
         spawnflags: 0,
         targetname: names.intern(node_name),
-        target: psx_level::LOGIC_NAME_NONE,
+        target: switch_target,
         killtarget: psx_level::LOGIC_NAME_NONE,
         master: psx_level::LOGIC_NAME_NONE,
         delay_ticks: 0,
-        wait_ticks: 0,
+        wait_ticks: switch_wait,
         arg0: 0,
         arg1: 0,
         link: psx_level::LOGIC_LINK_NONE,
@@ -1906,6 +1944,35 @@ pub(crate) fn resolve_door_links(
     ok
 }
 
+/// Every switch must fire something that exists: a target naming no cooked
+/// logic record is a cook error, never a lever that silently does nothing.
+pub(crate) fn check_switch_targets(
+    logic: &[PlaytestLogic],
+    names: &NameInterner,
+    report: &mut PlaytestValidationReport,
+) -> bool {
+    let mut ok = true;
+    for (index, record) in logic.iter().enumerate() {
+        if record.kind != psx_level::logic_kind::SWITCH {
+            continue;
+        }
+        let resolves = logic
+            .iter()
+            .enumerate()
+            .any(|(other, candidate)| other != index && candidate.targetname == record.target);
+        if !resolves {
+            let switch = names.name_of(record.targetname).unwrap_or("?");
+            let target = names.name_of(record.target).unwrap_or("?");
+            report.error(format!(
+                "Switch '{switch}' targets '{target}', which is not a placed \
+                 Logic node (Door, Relay, ...) or another interactable"
+            ));
+            ok = false;
+        }
+    }
+    ok
+}
+
 /// Cook one souls-like game entity from a non-player Character
 /// Controller that opted in with `EnemyBehaviorSettings`. `kind` is
 /// the interned Character resource name so every placement of one
@@ -2101,6 +2168,7 @@ pub(crate) fn default_prompt_for_interactable(kind: &crate::InteractableKind) ->
     match kind {
         crate::InteractableKind::Message { .. } => "READ ECHO",
         crate::InteractableKind::Checkpoint { .. } => "SYNCHRONIZE",
+        crate::InteractableKind::Switch { .. } => "USE",
     }
 }
 
@@ -2351,5 +2419,136 @@ mod message_page_tests {
         );
         assert!(objects[1].bounds_min[0] < 50 && objects[1].bounds_max[0] > 50);
         assert!(objects[1].bounds_min[1] < 60 && objects[1].bounds_max[1] > 60);
+    }
+}
+
+#[cfg(test)]
+mod switch_cook_tests {
+    use super::*;
+
+    fn cook_switch(
+        kind: crate::InteractableKind,
+        names: &mut NameInterner,
+        logic: &mut Vec<PlaytestLogic>,
+        report: &mut PlaytestValidationReport,
+    ) -> bool {
+        let mut messages = Vec::new();
+        let mut pages = Vec::new();
+        let mut pages_it = Vec::new();
+        let mut interactables = Vec::new();
+        push_interactable(
+            "lever",
+            0,
+            [0, 0, 0],
+            0,
+            InteractableComponent {
+                kind: &kind,
+                prompt: "PULL",
+                radius: 128,
+                enabled: true,
+            },
+            names,
+            &mut messages,
+            &mut pages,
+            &mut pages_it,
+            &mut interactables,
+            logic,
+            report,
+        ) && messages.is_empty()
+            && interactables[0].message == psx_level::INTERACTABLE_MESSAGE_NONE
+    }
+
+    #[test]
+    fn switch_cooks_to_a_target_firing_record_without_a_message() {
+        let mut names = NameInterner::default();
+        let mut logic = Vec::new();
+        let mut report = PlaytestValidationReport::default();
+        let toggle = crate::InteractableKind::Switch {
+            target: "gate".into(),
+            behavior: crate::SwitchBehavior::Toggle,
+        };
+        assert!(cook_switch(toggle, &mut names, &mut logic, &mut report));
+        let one_shot = crate::InteractableKind::Switch {
+            target: "gate".into(),
+            behavior: crate::SwitchBehavior::OneShot,
+        };
+        assert!(cook_switch(one_shot, &mut names, &mut logic, &mut report));
+        assert_eq!(logic[0].kind, psx_level::logic_kind::SWITCH);
+        assert_eq!(logic[0].target, names.intern("gate"));
+        assert_eq!(logic[0].wait_ticks, SWITCH_TOGGLE_COOLDOWN_TICKS);
+        assert_eq!(logic[1].wait_ticks, -1);
+    }
+
+    #[test]
+    fn switch_without_a_target_is_a_cook_error() {
+        let mut names = NameInterner::default();
+        let mut logic = Vec::new();
+        let mut report = PlaytestValidationReport::default();
+        let kind = crate::InteractableKind::Switch {
+            target: "  ".into(),
+            behavior: crate::SwitchBehavior::Toggle,
+        };
+        assert!(!cook_switch(kind, &mut names, &mut logic, &mut report));
+        assert!(!report.is_ok());
+        assert!(logic.is_empty());
+    }
+
+    #[test]
+    fn switch_target_must_name_a_cooked_record() {
+        let mut names = NameInterner::default();
+        let mut logic = Vec::new();
+        let mut report = PlaytestValidationReport::default();
+        let kind = crate::InteractableKind::Switch {
+            target: "ghost".into(),
+            behavior: crate::SwitchBehavior::Toggle,
+        };
+        assert!(cook_switch(kind, &mut names, &mut logic, &mut report));
+        assert!(!check_switch_targets(&logic, &names, &mut report));
+        assert!(report.errors.iter().any(|e| e.contains("'ghost'")));
+
+        // A placed Logic node of that name satisfies it.
+        let mut report = PlaytestValidationReport::default();
+        let mut pending = Vec::new();
+        assert!(push_logic_node(
+            "ghost",
+            0,
+            [0, 0, 0],
+            &crate::LogicNodeKind::Relay,
+            "lever",
+            "",
+            "",
+            0,
+            0,
+            true,
+            &mut names,
+            &mut logic,
+            &mut pending,
+            &mut report,
+        ));
+        assert!(check_switch_targets(&logic, &names, &mut report));
+    }
+
+    #[test]
+    fn existing_interactables_still_parse_and_the_switch_reads_plainly() {
+        let old: crate::InteractableKind =
+            ron::from_str(r#"Message(title: "T", body: "B")"#).unwrap();
+        assert!(matches!(old, crate::InteractableKind::Message { .. }));
+        let lever: crate::InteractableKind =
+            ron::from_str(r#"Switch(target: "gate_door", behavior: OneShot)"#).unwrap();
+        assert_eq!(
+            lever,
+            crate::InteractableKind::Switch {
+                target: "gate_door".into(),
+                behavior: crate::SwitchBehavior::OneShot,
+            }
+        );
+        let bare: crate::InteractableKind = ron::from_str("Switch(target: \"d\")").unwrap();
+        assert!(matches!(
+            bare,
+            crate::InteractableKind::Switch {
+                behavior: crate::SwitchBehavior::Toggle,
+                ..
+            }
+        ));
     }
 }

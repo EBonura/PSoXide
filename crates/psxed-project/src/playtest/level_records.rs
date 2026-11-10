@@ -280,6 +280,7 @@ impl OwnedLevelRecords {
                     kind: match i.kind {
                         PlaytestInteractableKind::Message => InteractableKind::Message,
                         PlaytestInteractableKind::Checkpoint => InteractableKind::Checkpoint,
+                        PlaytestInteractableKind::Switch => InteractableKind::Switch,
                         PlaytestInteractableKind::PointOfInterest => {
                             InteractableKind::PointOfInterest
                         }

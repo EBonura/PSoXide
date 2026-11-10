@@ -253,6 +253,12 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
         index < self.count() && self.counter[index] != 0
     }
 
+    /// On/off state of a [`logic_kind::SWITCH`] record (a lever that has
+    /// been pulled reads on until it is pulled back).
+    pub fn switch_on(&self, index: usize) -> bool {
+        self.door_open(index)
+    }
+
     /// Drain the fired mark for record `index`: true once per fire.
     /// The owning game polls the records it renders effects for
     /// (message overlays, checkpoint saves).
@@ -471,7 +477,7 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
                 let satisfied = self.counter[index] >= required;
                 if satisfied && !was_satisfied {
                     self.mark_fired(index);
-                    self.dispatch_outputs(records, record, now, depth);
+                    self.dispatch_outputs(records, record, now, depth, UseCode::Toggle);
                 }
                 return;
             }
@@ -487,12 +493,38 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
                 }
                 self.counter[index] = next as i16;
             }
+            logic_kind::SWITCH => {
+                // A lever: flip (or force) its own state, then tell the
+                // target the new state outright. An explicit On/Off keeps
+                // the target in step with the lever even when the target
+                // was also moved by something else.
+                let on = self.counter[index] != 0;
+                let next = match code {
+                    UseCode::On => true,
+                    UseCode::Off => false,
+                    _ => !on,
+                };
+                if next == on {
+                    return;
+                }
+                self.counter[index] = next as i16;
+                self.mark_fired(index);
+                let out = if next { UseCode::On } else { UseCode::Off };
+                self.dispatch_outputs(records, record, now, depth, out);
+                self.apply_wait(index, record, now);
+                return;
+            }
             // MESSAGE / CHECKPOINT / TRIGGER_VOLUME / RELAY: the
             // reaction is the fire mark plus output dispatch.
             _ => {}
         }
         self.mark_fired(index);
-        self.dispatch_outputs(records, record, now, depth);
+        self.dispatch_outputs(records, record, now, depth, UseCode::Toggle);
+        self.apply_wait(index, record, now);
+    }
+
+    /// Fire-once and re-arm bookkeeping after a record reacted.
+    fn apply_wait(&mut self, index: usize, record: &LevelLogicRecord, now: u32) {
         if record.wait_ticks < 0 {
             self.state[index] = LogicState::Removed as u8;
         } else if record.wait_ticks > 0 {
@@ -510,6 +542,7 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
         record: &LevelLogicRecord,
         now: u32,
         depth: u8,
+        code: UseCode,
     ) {
         if record.target == LOGIC_NAME_NONE && record.killtarget == LOGIC_NAME_NONE {
             return;
@@ -519,12 +552,12 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
                 now.saturating_add(u32::from(record.delay_ticks)),
                 record.target,
                 record.killtarget,
-                UseCode::Toggle,
+                code,
             );
             return;
         }
         self.kill_targets(records, record.killtarget);
-        self.fire_targets(records, record.target, UseCode::Toggle, now, depth + 1);
+        self.fire_targets(records, record.target, code, now, depth + 1);
     }
 
     fn mark_fired(&mut self, index: usize) {
@@ -819,6 +852,89 @@ mod tests {
         let stats = logic.stats();
         assert_eq!(stats.queued, 4);
         assert_eq!(stats.queue_drops, 1);
+    }
+
+    // Names: 1 = lever, 2 = door.
+    static LEVER_DOOR: [LevelLogicRecord; 2] = [
+        LevelLogicRecord {
+            targetname: 1,
+            target: 2,
+            wait_ticks: 30,
+            ..blank(logic_kind::SWITCH)
+        },
+        LevelLogicRecord {
+            targetname: 2,
+            ..blank(logic_kind::DOOR)
+        },
+    ];
+
+    #[test]
+    fn toggle_switch_drives_its_target_with_explicit_on_and_off() {
+        let mut logic = TestLogic::EMPTY;
+        logic.init_from_records(&LEVER_DOOR);
+        assert!(logic.fire_index(&LEVER_DOOR, 0, UseCode::Toggle, 1));
+        assert!(logic.switch_on(0) && logic.door_open(1));
+        // Cooldown: a second press inside `wait_ticks` is refused.
+        assert!(!logic.fire_index(&LEVER_DOOR, 0, UseCode::Toggle, 10));
+        logic.tick(&LEVER_DOOR, input_at([0; 3]), 40);
+        assert!(logic.fire_index(&LEVER_DOOR, 0, UseCode::Toggle, 40));
+        assert!(!logic.switch_on(0) && !logic.door_open(1));
+    }
+
+    #[test]
+    fn a_door_moved_by_something_else_still_follows_the_lever() {
+        // Toggle semantics would flip the door the wrong way; the lever
+        // sends On/Off, so the door ends up where the lever says.
+        let mut logic = TestLogic::EMPTY;
+        logic.init_from_records(&LEVER_DOOR);
+        logic.fire_by_name(&LEVER_DOOR, 2, UseCode::On, 1);
+        assert!(logic.door_open(1) && !logic.switch_on(0));
+        assert!(logic.fire_index(&LEVER_DOOR, 0, UseCode::Toggle, 2));
+        assert!(logic.door_open(1), "lever on: door stays open");
+    }
+
+    #[test]
+    fn one_shot_switch_retires_after_its_press() {
+        static ONCE: [LevelLogicRecord; 2] = [
+            LevelLogicRecord {
+                targetname: 1,
+                target: 2,
+                wait_ticks: -1,
+                ..blank(logic_kind::SWITCH)
+            },
+            LevelLogicRecord {
+                targetname: 2,
+                ..blank(logic_kind::DOOR)
+            },
+        ];
+        let mut logic = TestLogic::EMPTY;
+        logic.init_from_records(&ONCE);
+        assert!(logic.fire_index(&ONCE, 0, UseCode::Toggle, 1));
+        assert!(logic.door_open(1) && logic.is_removed(0));
+        assert!(!logic.fire_index(&ONCE, 0, UseCode::Toggle, 2));
+        assert!(logic.door_open(1));
+    }
+
+    #[test]
+    fn switch_output_keeps_its_delay() {
+        static DELAYED: [LevelLogicRecord; 2] = [
+            LevelLogicRecord {
+                targetname: 1,
+                target: 2,
+                delay_ticks: 10,
+                ..blank(logic_kind::SWITCH)
+            },
+            LevelLogicRecord {
+                targetname: 2,
+                ..blank(logic_kind::DOOR)
+            },
+        ];
+        let mut logic = TestLogic::EMPTY;
+        logic.init_from_records(&DELAYED);
+        assert!(logic.fire_index(&DELAYED, 0, UseCode::Toggle, 5));
+        assert!(!logic.door_open(1));
+        logic.tick(&DELAYED, input_at([0; 3]), 15);
+        assert!(logic.door_open(1), "the queued On arrives, not a Toggle");
     }
 
     #[test]

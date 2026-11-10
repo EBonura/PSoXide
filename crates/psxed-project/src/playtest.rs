@@ -1764,6 +1764,9 @@ pub fn build_package(
     ) {
         return (None, report);
     }
+    if !check_switch_targets(&logic, &names, &mut report) {
+        return (None, report);
+    }
 
     // Contract caps (psx-level is the single source, like
     // MAX_ROOM_MATERIALS): the runtime sizes its SoA state from these,

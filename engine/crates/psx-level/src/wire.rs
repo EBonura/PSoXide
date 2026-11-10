@@ -259,6 +259,7 @@ impl Wire for InteractableKind {
             InteractableKind::Message => 0,
             InteractableKind::Checkpoint => 1,
             InteractableKind::PointOfInterest => 2,
+            InteractableKind::Switch => 3,
         });
     }
     fn get(r: &mut Reader) -> Option<Self> {
@@ -266,6 +267,7 @@ impl Wire for InteractableKind {
             0 => Some(InteractableKind::Message),
             1 => Some(InteractableKind::Checkpoint),
             2 => Some(InteractableKind::PointOfInterest),
+            3 => Some(InteractableKind::Switch),
             _ => None,
         }
     }

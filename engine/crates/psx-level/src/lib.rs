@@ -752,6 +752,9 @@ pub enum InteractableKind {
     /// Player-authored point of interest with a visible archive beacon,
     /// paged body text, optional one-time reward, and persistent read state.
     PointOfInterest,
+    /// Lever or button: pressing interact fires the paired
+    /// [`logic_kind::SWITCH`] record's `target`.
+    Switch,
 }
 
 /// Runtime flags for [`InteractableRecord`].
@@ -963,6 +966,13 @@ pub mod logic_kind {
     /// closed (drawn + solid) and open (hidden + passable). Authoring
     /// pending.
     pub const DOOR: u8 = 6;
+    /// Lever or button, cooked from `Interactable::Switch` components.
+    /// Using it flips its own on/off state (`counter`) and fires `target`
+    /// with an explicit On or Off, so the target never depends on how many
+    /// times the switch was pressed. `wait_ticks < 0` makes it one-shot
+    /// (retired after the first press); a positive value is the toggle's
+    /// cooldown between presses.
+    pub const SWITCH: u8 = 7;
 }
 
 /// Runtime flags for [`LevelLogicRecord`].

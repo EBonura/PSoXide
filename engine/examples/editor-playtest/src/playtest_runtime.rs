@@ -2117,6 +2117,9 @@ impl Playtest {
         for (index, interactable) in INTERACTABLES.iter().enumerate() {
             if !self.point_of_interest_available(interactable)
                 || interactable.room != self.room_index
+                // A spent one-shot lever offers no prompt.
+                || (interactable.kind == InteractableKind::Switch
+                    && self.logic.is_removed(usize::from(interactable.logic)))
             {
                 continue;
             }
@@ -2181,6 +2184,9 @@ impl Playtest {
             return fired;
         }
         match interactable.kind {
+            // A lever without its paired record (a hand-rolled manifest)
+            // has nothing to fire.
+            InteractableKind::Switch => false,
             InteractableKind::Message => {
                 self.open_interactable_message(interactable);
                 true

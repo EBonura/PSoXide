@@ -642,6 +642,31 @@ pub enum InteractableKind {
         #[serde(default = "default_interactable_checkpoint_body")]
         body: String,
     },
+    /// Lever or button: pressing interact fires `target` (a placed
+    /// Logic node, usually a Door, named by its node name). The switch
+    /// sends the target an explicit On when it turns on and Off when it
+    /// turns off, so a door always ends up where the lever says.
+    Switch {
+        /// Node name this switch fires ("" is a cook error: a lever that
+        /// fires nothing is dead content).
+        #[serde(default)]
+        target: String,
+        /// How repeated presses behave.
+        #[serde(default)]
+        behavior: SwitchBehavior,
+    },
+}
+
+/// What pressing an [`InteractableKind::Switch`] again does.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SwitchBehavior {
+    /// Each press flips the lever (target On, then Off, ...), with a short
+    /// cooldown between presses.
+    #[default]
+    Toggle,
+    /// The first press turns the target On and the lever retires: it
+    /// shows no prompt afterwards.
+    OneShot,
 }
 
 impl Default for InteractableKind {

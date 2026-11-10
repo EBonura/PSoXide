@@ -962,7 +962,7 @@ fn interactable_message_text(interactable: &InteractableRecord) -> (&'static str
         .unwrap_or(match interactable.kind {
             InteractableKind::Message => ("ECHO REMNANT", ""),
             InteractableKind::Checkpoint => ("SYNC RELAY", "Relay synchronized."),
-            InteractableKind::PointOfInterest => ("", ""),
+            InteractableKind::PointOfInterest | InteractableKind::Switch => ("", ""),
         })
 }
 
