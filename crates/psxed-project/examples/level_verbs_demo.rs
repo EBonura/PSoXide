@@ -85,7 +85,49 @@ fn arg(name: &str) -> Option<PathBuf> {
     None
 }
 
+/// Cook a written project the way Play does and print the verdict and the
+/// numbers the caps are judged on.
+fn cook_check(project: &ProjectDocument, dir: &std::path::Path) {
+    let world = project.active_scene().world.grid().expect("a grid world");
+    let budget = GridBudget::of(world);
+    println!(
+        "rooms {}, faces {}, largest room {} faces (cap {}), leaves {}, meshes {} (cap {} a room)",
+        budget.rooms,
+        budget.faces,
+        budget.largest_room_faces,
+        psxed_project::grid::limits::MAX_ROOM_FACES,
+        budget.leaves,
+        budget.meshes,
+        psxed_project::grid::mesh::MAX_MESHES_PER_ROOM
+    );
+    let (package, report) = psxed_project::playtest::build_package(project, dir);
+    println!("cook ok: {}", report.is_ok());
+    for e in report.error_messages() {
+        println!("  error: {e}");
+    }
+    for w in report
+        .warnings
+        .iter()
+        .filter(|w| !w.contains("slab(s) lean"))
+    {
+        println!("  warning: {w}");
+    }
+    if let Some(p) = package {
+        let g = &p.world_geometry;
+        println!(
+            "cooked: faces {}, triangles {}, busiest room {} surfaces, pool {:?}",
+            g.faces, g.triangles, g.max_room_surfaces, g.pool
+        );
+    }
+}
+
 fn main() {
+    if let Some(dir) = arg("--check") {
+        let project =
+            ProjectDocument::load_from_path(dir.join("project.ron")).expect("the project loads");
+        cook_check(&project, &dir);
+        return;
+    }
     let base = arg("--base").expect("usage: level_verbs_demo --base <project dir> --out <dir>");
     let out = arg("--out").expect("usage: level_verbs_demo --base <project dir> --out <dir>");
     assert!(!out.exists(), "{} exists: pick a new folder", out.display());
@@ -428,19 +470,5 @@ fn main() {
             );
         }
     }
-    let (package, report) = psxed_project::playtest::build_package(&project, &out);
-    println!("cook ok: {}", report.is_ok());
-    for e in report.error_messages() {
-        println!("  error: {e}");
-    }
-    for w in &report.warnings {
-        println!("  warning: {w}");
-    }
-    if let Some(p) = package {
-        let g = &p.world_geometry;
-        println!(
-            "cooked: faces {}, triangles {}, busiest room {} surfaces",
-            g.faces, g.triangles, g.max_room_surfaces
-        );
-    }
+    cook_check(&project, &out);
 }
