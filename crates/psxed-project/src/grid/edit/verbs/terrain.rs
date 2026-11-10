@@ -191,7 +191,7 @@ pub fn relief(p: &TerrainParams, at: [i32; 2]) -> i32 {
     let mut total = 0i64;
     for o in 0..p.octaves {
         let wl = (p.wavelength >> o).max(1);
-        let amp = i64::from(p.amplitude_clicks) * i64::from(SECTOR_UNITS / 4) >> o;
+        let amp = (i64::from(p.amplitude_clicks) * i64::from(SECTOR_UNITS / 4)) >> o;
         let (gx, gz) = (at[0].div_euclid(wl), at[1].div_euclid(wl));
         let tx = i64::from(at[0].rem_euclid(wl)) * 1024 / i64::from(wl);
         let tz = i64::from(at[1].rem_euclid(wl)) * 1024 / i64::from(wl);
