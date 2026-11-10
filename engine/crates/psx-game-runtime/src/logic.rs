@@ -413,8 +413,10 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
         if index >= self.count() || record.kind != logic_kind::DOOR || !door_slides(record) {
             return None;
         }
-        let travelled =
-            i32::from(record.arg0) * i32::from(self.progress[index]) / i32::from(record.arg1);
+        // 32767 * 65535 still fits an i32; saturating keeps a hand-built
+        // record with a larger distance from overflowing.
+        let travelled = i32::from(record.arg0).saturating_mul(i32::from(self.progress[index]))
+            / i32::from(record.arg1);
         let (x, y, z) = match record.spawnflags & door_flags::DIR_MASK {
             door_flags::DIR_POS_X => (travelled, 0, 0),
             door_flags::DIR_NEG_X => (-travelled, 0, 0),
