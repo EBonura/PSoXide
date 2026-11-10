@@ -28,6 +28,7 @@ pub mod raise;
 pub mod raise_leaves;
 pub mod ramp;
 pub mod room;
+pub mod ruin;
 pub mod rules;
 pub mod spiral;
 pub mod stairs;
@@ -122,6 +123,8 @@ mod extrude_tests;
 mod opening_tests;
 #[cfg(test)]
 mod room_tests;
+#[cfg(test)]
+mod ruin_tests;
 #[cfg(test)]
 mod terrain_tests;
 #[cfg(test)]

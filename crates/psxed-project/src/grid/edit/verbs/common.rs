@@ -97,3 +97,28 @@ pub fn aimed<R>(
         .run(world, edit)
         .map(|a| a.value)
 }
+
+fn mix(mut h: u32) -> u32 {
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x7feb_352d);
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x846c_a68b);
+    h ^ (h >> 16)
+}
+
+/// A 32 bit hash of `(seed, op, position, salt)`: every random decision of
+/// the composite verbs is a pure function of these, never a running
+/// sequence, so the result does not depend on the order cells are visited
+/// in. Integers only, the same on every host.
+pub fn hash(seed: u32, op: u32, at: [i32; 2], salt: u32) -> u32 {
+    let mut h = mix(seed ^ 0x9e37_79b9);
+    h = mix(h ^ op.wrapping_mul(0x85eb_ca6b));
+    h = mix(h ^ (at[0] as u32).wrapping_mul(0xc2b2_ae35));
+    h = mix(h ^ (at[1] as u32).wrapping_mul(0x27d4_eb2f));
+    mix(h ^ salt.wrapping_mul(0x1656_67b1))
+}
+
+/// Whether the decision passes at `permille` chances in a thousand.
+pub fn chance(seed: u32, op: u32, at: [i32; 2], permille: u32) -> bool {
+    hash(seed, op, at, 0) % 1000 < permille
+}
