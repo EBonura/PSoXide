@@ -4,19 +4,31 @@
 //! doorways cut in their shared walls:
 //!
 //! ```text
-//!        A (lever, checkpoint)     B                     C
+//!          A (lever)               B                       C
 //!   z=2  +-----------------+-----------------+-----------------+
-//!        |                 |   shortcut door |                 |   one-way: opens from C only
-//!   z=1  | player   lever  |=gate door       |                 |   gate door: opened by the lever
-//!        |                 |                 |                 |
-//!   z=0  +-----------------+-----------------+--  open gap  ---+
+//!        |                 |                 |    open gap     |   B|C, row 2: no door, so C is reachable
+//!   z=1  | player   lever  |= gate door      |= shortcut door  |   A|B, row 1: opened by the lever
+//!        |                 |                 |                 |   B|C, row 1: one-way, opens from C only
+//!   z=0  +-----------------+-----------------+-----------------+
 //! ```
 //!
 //! * `gate_ab` (A to B): a sliding door the lever in A opens. Persistent.
-//! * `gap` (B to C, row 0): an empty doorway, so C can be reached at all.
-//! * `shortcut` (B to C, row 2): a one-way sliding door that refuses from the
+//! * `gap` (B to C, row 2): an empty doorway, so C can be reached at all.
+//! * `shortcut` (B to C, row 1): a one-way sliding door that refuses from the
 //!   B side and opens from the C side, so a player walking back from C opens
 //!   it and one coming from A is told it will not budge. Persistent.
+//!
+//! Headless check (the owner's PGO emulator, no window): cook the project, build
+//! the guest and a disc with `mkisopsx`, then
+//! `psoxide-emulator launch --path lever.cue --embedded-playtest --memcard card.mcd
+//! --pad-pulses 0x0010@1500+75,0x4000@1620+8,0x0010@1800+260 --stop-at-poll 2300
+//! --dump-ram ram.bin`: hold up for 75 ticks, press Cross at the lever, hold up
+//! again. Without the Cross press the player stops against the closed gate at
+//! x = 303 (engine units); with it the gate slides up and the player walks on
+//! through room B. Appending `0x4000@2000+8` (Cross at the shortcut, from its
+//! west side) shows its refusal message instead of opening it; walking round
+//! through the gap (`0x2000@2070+8,0x0020@2110+26,0x0010@2160+25,0x0080@2210+27`)
+//! and pushing at it from the east side (`0x0040@2260+40,0x4000@2320+8`) opens it.
 //!
 //! Built from the starter's base project (the Cortex player, camera, sky and
 //! UI), so [`create_project`] needs the editor repository's
@@ -48,8 +60,6 @@ pub const GATE_DOOR: &str = "gate_ab";
 pub const SHORTCUT_DOOR: &str = "shortcut";
 /// Name of the lever entity.
 pub const LEVER: &str = "gate lever";
-/// Name of the checkpoint entity beside the lever (its save boundary).
-pub const CHECKPOINT: &str = "sync a";
 /// Name of the entity whose Switch targets [`SHORTCUT_DOOR`].
 pub const SHORTCUT_BUTTON: &str = "shortcut button";
 
@@ -94,10 +104,10 @@ pub fn lever_doors_world(
         }
         rooms.push(room);
     }
-    // Doorways: A|B at row 1, B|C at rows 0 (the gap) and 2 (the shortcut).
+    // Doorways: A|B at row 1, B|C at rows 1 (the shortcut) and 2 (the gap).
     let clicks = SEGMENT_CLICKS as i32;
     let width = ROOM_WIDTH as i32;
-    let doorways = [(1, 1), (2, 0), (2, 2)];
+    let doorways = [(1, 1), (2, 1), (2, 2)];
     for (boundary, row) in doorways {
         let key = EdgeKey {
             x: boundary * width * clicks,
@@ -159,11 +169,16 @@ pub fn into_lever_doors(project: &mut ProjectDocument) -> Result<(), StarterErro
         room: 0,
         cell: [0, 1],
     };
-    let at = spawn_point(&world, spawn)
+    let mut at = spawn_point(&world, spawn)
         .ok_or_else(|| StarterError::Io("the lever room has no floor".to_string()))?;
+    // Walking "forward" from here drifts a little south (the camera trails the
+    // player's turn), so start a third of a sector north of the doorway's
+    // middle and arrive at it.
+    at[2] -= 384;
     let sector = world.scale.sector_editor_units();
-    // Facing +X (east), toward the door.
-    place_actors(project, &world, at, 90.0, sector);
+    // Facing +X (east), toward the door: a node yaw of 270 degrees faces east
+    // (90 faces west).
+    place_actors(project, &world, at, 270.0, sector);
 
     let scene = project.active_scene_mut();
     let unit = scene
@@ -176,10 +191,10 @@ pub fn into_lever_doors(project: &mut ProjectDocument) -> Result<(), StarterErro
     };
 
     // One lamp per room.
-    for room in 0..ROOM_NAMES.len() {
+    for (room, room_name) in ROOM_NAMES.iter().enumerate() {
         let lamp = scene.add_node(
             NodeId::ROOT,
-            format!("Light {}", ROOM_NAMES[room]),
+            format!("Light {room_name}"),
             NodeKind::PointLight {
                 color: [255, 214, 160],
                 intensity: 1.4,
@@ -248,7 +263,7 @@ pub fn into_lever_doors(project: &mut ProjectDocument) -> Result<(), StarterErro
     let shortcut_at = [
         (2 * ROOM_WIDTH) as f32 * sector as f32,
         0.0,
-        2.5 * sector as f32,
+        1.5 * sector as f32,
     ];
     slab(scene, &format!("{GATE_DOOR} box"), gate_at);
     door_node(
@@ -291,7 +306,7 @@ pub fn into_lever_doors(project: &mut ProjectDocument) -> Result<(), StarterErro
             },
         );
     };
-    // The lever and a checkpoint in room A, a few steps from the player.
+    // The lever, in room A.
     entity(
         scene,
         LEVER,
@@ -303,19 +318,7 @@ pub fn into_lever_doors(project: &mut ProjectDocument) -> Result<(), StarterErro
             persistent: true,
         },
         "PULL LEVER",
-        420,
-    );
-    entity(
-        scene,
-        CHECKPOINT,
-        at_cell(0, 2.5, 0.5),
-        InteractableKind::Checkpoint {
-            checkpoint_id: CHECKPOINT.to_string(),
-            title: "SYNC RELAY".to_string(),
-            body: "Relay synchronized.".to_string(),
-        },
-        "SYNCHRONIZE",
-        420,
+        640,
     );
     // The shortcut's button stands on the door's plane so one press radius
     // reaches both sides; the door decides which side is let through.
@@ -413,7 +416,6 @@ mod tests {
         let doors = by_kind(logic_kind::DOOR);
         let switches = by_kind(logic_kind::SWITCH);
         assert_eq!((doors.len(), switches.len()), (2, 2));
-        assert_eq!(by_kind(logic_kind::CHECKPOINT).len(), 1);
 
         // Every door slides up one room height over the authored ticks, is
         // linked to its box, takes the box's position for its plane and is
@@ -429,8 +431,8 @@ mod tests {
         assert_eq!((gate.x, gate.z), (320, 120), "the A|B doorway, row 1");
         assert_eq!(
             (shortcut.x, shortcut.z),
-            (640, 200),
-            "the B|C doorway, row 2"
+            (640, 120),
+            "the B|C doorway, row 1"
         );
         assert_eq!(
             gate.spawnflags & !door_flags::DIR_MASK,
