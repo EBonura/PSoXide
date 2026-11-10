@@ -2157,7 +2157,13 @@ impl Playtest {
             ) else {
                 continue;
             };
-            if let Some(world_rt) = self.world_rt.as_mut() {
+            // Only a point of interest has a beacon to see; a lever is a plain
+            // radius and skips the line-of-sight test. (Message and Checkpoint
+            // interactables still go through it, and with no beacon cooked for
+            // them they are unreachable in a grid world: left as it was.)
+            if interactable.kind == InteractableKind::Switch {
+                // fall through to the distance ranking below
+            } else if let Some(world_rt) = self.world_rt.as_mut() {
                 if !world_rt.typed_world_object_directly_visible(
                     player,
                     psx_level::world_object_kind::POINT_OF_INTEREST_BEACON,
