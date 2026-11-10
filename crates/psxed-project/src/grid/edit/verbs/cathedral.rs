@@ -34,7 +34,9 @@ use crate::ResourceId;
 
 use super::super::rects::CellRect;
 use super::arcade::{build_arcade, ArcadeParams, ArcadeRefusal, Layout};
-use super::opening::{cut_opening, DoorPlane, OpeningKind, OpeningParams};
+use super::opening::{
+    arch_head, cut_opening, ArchShape, DoorPlane, OpeningKind, OpeningParams, OpeningProfile,
+};
 use super::room::{lay_room, Footprint, LeafPolicy, RoomParams, RoomRefusal, RoomTarget};
 
 /// A transept crossing the nave.
@@ -77,6 +79,9 @@ pub struct CathedralParams {
     pub transept: Option<Transept>,
     /// A polygonal apse at the east end.
     pub apse: bool,
+    /// Arched heads for the west door and the clerestory windows (flat
+    /// lintels when `None`).
+    pub arch: Option<ArchShape>,
     /// A large door in the west front.
     pub west_door: bool,
     /// Sectors the west door spans.
@@ -113,6 +118,7 @@ impl CathedralParams {
             clerestory: true,
             transept: None,
             apse: true,
+            arch: None,
             west_door: true,
             door_sectors: 2,
             chancel_rise: 512,
@@ -380,12 +386,19 @@ pub fn build_cathedral(
                 (nave.max[1], WallEdge::South),
             ] {
                 let start = x * 4;
+                // An arched window takes the whole sector so its head has
+                // four pieces; a flat one is two clicks wide.
+                let (from, to, profile) = match p.arch {
+                    Some(shape) => (start, start + 4, arch_head(shape, 4, top)),
+                    None => (start + 1, start + 3, OpeningProfile::Rectangular),
+                };
                 let op = OpeningParams {
+                    profile,
                     room,
                     cell: [x, z],
                     side,
-                    from: start + 1,
-                    to: start + 3,
+                    from,
+                    to,
                     kind: OpeningKind::Window { sill },
                     top,
                     material: p.wall_material,
@@ -404,15 +417,29 @@ pub fn build_cathedral(
     if p.west_door {
         let n = p.door_sectors.clamp(1, nw);
         let first_z = nave.min[1] + (nw - n) / 2;
-        for z in first_z..first_z + n {
+        let apex = (p.nave_height - 1024).min(6144);
+        // Flat lintels go one sector at a time; an arch is one arch over the
+        // whole run of sectors.
+        let runs: Vec<(i32, i32, OpeningProfile)> = match p.arch {
+            Some(shape) => vec![(
+                first_z * 4,
+                (first_z + n) * 4,
+                arch_head(shape, n * 4, apex),
+            )],
+            None => (first_z..first_z + n)
+                .map(|z| (z * 4, z * 4 + 4, OpeningProfile::Rectangular))
+                .collect(),
+        };
+        for (from, to, profile) in runs {
             let op = OpeningParams {
+                profile,
                 room,
-                cell: [ox, z],
+                cell: [ox, from.div_euclid(4)],
                 side: WallEdge::West,
-                from: z * 4,
-                to: z * 4 + 4,
+                from,
+                to,
                 kind: OpeningKind::Door,
-                top: (p.nave_height - 1024).min(6144),
+                top: apex,
                 material: p.wall_material,
             };
             match cut_opening(&mut work, &op) {

@@ -110,3 +110,23 @@ fn a_cathedral_cooks() {
     build_cathedral(&mut w, &p).unwrap();
     crate::grid::cook::tests::cook(&w).expect("a cathedral cooks");
 }
+
+#[test]
+fn an_arched_cathedral_has_one_arched_west_door_and_arched_windows() {
+    use super::opening::ArchShape;
+    let mut p = params();
+    p.arch = Some(ArchShape::Pointed);
+    let mut w = empty();
+    let r = build_cathedral(&mut w, &p).unwrap();
+    assert!(r.notes.is_empty(), "{:?}", r.notes);
+    assert_eq!(r.doors.len(), 1, "one arch over the whole run");
+    assert_eq!(r.doors[0].width, 2048);
+    assert_eq!(r.windows, 10);
+    crate::grid::cook::tests::cook(&w).expect("an arched cathedral cooks");
+    // The flat default is unchanged.
+    let mut flat = empty();
+    assert_eq!(
+        build_cathedral(&mut flat, &params()).unwrap().doors.len(),
+        2
+    );
+}

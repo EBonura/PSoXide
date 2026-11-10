@@ -94,3 +94,20 @@ fn refusals_leave_the_document_alone() {
     assert!(build_building(&mut w, &p).is_err());
     assert!(w.rooms.is_empty());
 }
+
+#[test]
+fn arched_windows_cook_and_flat_stays_the_default() {
+    use super::opening::ArchShape;
+    let mut p = params(rect(6, 6));
+    p.storeys = 1;
+    p.stair = false;
+    p.roof_parapet = None;
+    p.window_arch = Some(ArchShape::Round);
+    let mut w = empty();
+    let r = build_building(&mut w, &p).unwrap();
+    assert!(r.windows >= 4 && r.notes.is_empty(), "{r:?}");
+    crate::grid::cook::tests::cook(&w).expect("cooks");
+    assert!(BuildingParams::new(RoomTarget::New("x".into()), rect(3, 3))
+        .window_arch
+        .is_none());
+}

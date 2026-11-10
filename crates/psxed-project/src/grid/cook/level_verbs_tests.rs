@@ -26,7 +26,7 @@ use crate::grid::edit::verbs::arcade::{build_arcade, ArcadeParams};
 use crate::grid::edit::verbs::bridge::{build_bridge, BridgeParams};
 use crate::grid::edit::verbs::building::{build_building, BuildingParams};
 use crate::grid::edit::verbs::corridor::{lay_corridor, CorridorParams, Waypoint};
-use crate::grid::edit::verbs::opening::{cut_opening, OpeningKind, OpeningParams};
+use crate::grid::edit::verbs::opening::{cut_opening, OpeningKind, OpeningParams, OpeningProfile};
 use crate::grid::edit::verbs::room::{lay_room, Footprint, RoomParams, RoomTarget};
 use crate::grid::edit::verbs::terrain::{lay_terrain, Edge, TerrainParams};
 use crate::grid::edit::CellRect;
@@ -91,6 +91,7 @@ fn build() -> Level {
     cut_opening(
         &mut w,
         &OpeningParams {
+            profile: OpeningProfile::Rectangular,
             room: 1,
             cell: [25, 0],
             side: WallEdge::North,
@@ -149,6 +150,7 @@ fn build() -> Level {
     );
     build_bridge(&mut w, &bridge).unwrap();
     let door_a = OpeningParams {
+        profile: OpeningProfile::Rectangular,
         room: 0,
         cell: [7, 4],
         side: WallEdge::East,
@@ -388,4 +390,39 @@ fn the_cathedral_is_walkable_from_its_west_door_to_the_raised_chancel() {
         "every sector is reachable: {:?}",
         a.counts()
     );
+}
+
+#[test]
+fn a_body_walks_in_through_the_arched_west_door_to_the_chancel() {
+    use crate::grid::edit::verbs::cathedral::{build_cathedral, CathedralParams};
+    use crate::grid::edit::verbs::opening::ArchShape;
+    let units = RuntimeUnits::new(GridScale::DEFAULT).unwrap();
+    let rt = |gu: i32| units.rt(gu);
+    for shape in [ArchShape::Pointed, ArchShape::Round] {
+        let mut w = GridWorld {
+            scale: GridScale::DEFAULT,
+            ..GridWorld::default()
+        };
+        let mut p = CathedralParams::new(RoomTarget::New("cathedral".into()), [4, 0]);
+        p.arch = Some(shape);
+        let r = build_cathedral(&mut w, &p).unwrap();
+        assert!(r.notes.is_empty(), "{:?}", r.notes);
+        // A flat forecourt outside the door, in the same room.
+        let mut yard = TerrainParams::new(r.room, cells([0, 3], [3, 6]), 1);
+        yard.base = Some(0);
+        yard.create = true;
+        yard.amplitude_clicks = 0;
+        yard.follow_ceiling = false;
+        lay_terrain(&mut w, &yard).unwrap();
+        cook(&w).expect("cooks");
+        let nat = native(&w);
+        let row = rt(4 * 1024 + 0);
+        let start = RoomPoint::new(rt(1024), 0, row);
+        let (end, _, _) = walk(&nat, start, &[[rt(13 * 1024), row]], 1200, 1);
+        assert!(
+            end.x >= rt(13 * 1024) - 6,
+            "{shape:?}: through the arch: {end:?}"
+        );
+        assert_eq!(end.y, rt(p.chancel_rise));
+    }
 }

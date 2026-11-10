@@ -36,7 +36,9 @@ use crate::ResourceId;
 
 use super::super::rects::CellRect;
 use super::common::{bounds_of, hash};
-use super::opening::{cut_opening, DoorPlane, OpeningKind, OpeningParams};
+use super::opening::{
+    arch_head, cut_opening, ArchShape, DoorPlane, OpeningKind, OpeningParams, OpeningProfile,
+};
 use super::room::{lay_room, Footprint, LeafPolicy, RoomParams, RoomRefusal, RoomTarget};
 use super::spiral::{lay_spiral, ring_cells, SpiralParams};
 use super::stairs::RiserOption;
@@ -65,8 +67,11 @@ pub struct BuildingParams {
     pub window_every: i32,
     /// Window sill above the floor, grid units.
     pub window_sill: i32,
-    /// Window top above the floor, grid units.
+    /// Window top above the floor, grid units (the apex of an arched one).
     pub window_top: i32,
+    /// Arched window heads, a sector wide (flat lintels two clicks wide when
+    /// `None`).
+    pub window_arch: Option<ArchShape>,
     /// An interior spiral stair linking the storeys (needs more than one).
     pub stair: bool,
     /// A flat roof; the value is the parapet height, grid units.
@@ -97,6 +102,7 @@ impl BuildingParams {
             window_every: 2,
             window_sill: 768,
             window_top: 2048,
+            window_arch: None,
             stair: true,
             roof_parapet: Some(768),
             seed: 0,
@@ -347,6 +353,7 @@ pub fn build_building(
         let pick = on_side[(mid + jitter).saturating_sub(1).min(on_side.len() - 1)];
         let (from, to) = along(pick, side);
         let op = OpeningParams {
+            profile: OpeningProfile::Rectangular,
             room,
             cell: pick,
             side,
@@ -380,12 +387,17 @@ pub fn build_building(
                 continue;
             }
             let (s, _) = along(*c, *side);
+            let (from, to, profile) = match p.window_arch {
+                Some(shape) => (s, s + 4, arch_head(shape, 4, p.window_top)),
+                None => (s + 1, s + 3, OpeningProfile::Rectangular),
+            };
             let op = OpeningParams {
+                profile,
                 room,
                 cell: *c,
                 side: *side,
-                from: s + 1,
-                to: s + 3,
+                from,
+                to,
                 kind: OpeningKind::Window {
                     sill: p.window_sill,
                 },

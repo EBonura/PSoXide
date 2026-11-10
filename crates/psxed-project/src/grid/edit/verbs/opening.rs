@@ -32,7 +32,7 @@ use crate::grid::overrides::Axis;
 use crate::grid::sector::WallEdge;
 use crate::grid::surface::{GridWall, WallFacing};
 use crate::grid::tree::{normalize, subdivide_to};
-use crate::grid::units::CLICK_UNITS;
+use crate::grid::units::{snap_to, CLICK_UNITS, FINE_UNITS};
 use crate::grid::world::GridWorld;
 use crate::ResourceId;
 
@@ -51,9 +51,41 @@ pub enum OpeningKind {
     },
 }
 
+/// The curve of an arched head.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArchShape {
+    /// A half ellipse: chords of a circle when the rise is half the width.
+    Round,
+    /// Two arcs, each centred on the spring line, meeting at the apex.
+    Pointed,
+}
+
+/// The head of an opening.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OpeningProfile {
+    /// A flat lintel at `top`.
+    #[default]
+    Rectangular,
+    /// An arch traced by sloped lintel pieces, `segment_clicks` wide each
+    /// (1 or 2). `spring` and `apex` are heights above the floor, snapped to
+    /// the 64 unit lattice; `top` is ignored.
+    Arched {
+        /// Curve.
+        shape: ArchShape,
+        /// Height of the spring line.
+        spring: i32,
+        /// Height of the apex.
+        apex: i32,
+        /// Width of one piece in clicks: 1 (quarter sector) or 2.
+        segment_clicks: i32,
+    },
+}
+
 /// Parameters of an opening.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OpeningParams {
+    /// The head: flat lintel or an arch.
+    pub profile: OpeningProfile,
     /// The room that holds the wall.
     pub room: usize,
     /// The sector the wall is seen from.
@@ -89,6 +121,9 @@ pub enum OpeningRefusal {
     AlreadyOpen,
     /// A wall face on the stretch is not a rectangle.
     NotRectangular,
+    /// The arch numbers do not make an arch (spring at or over the apex, a
+    /// width under two clicks, or a segment width other than 1 or 2).
+    BadArch,
     /// The opening is shorter than the body.
     TooLow {
         /// Least clear height, grid units.
@@ -118,6 +153,7 @@ impl OpeningRefusal {
             Self::NotAWall => "There is no wall there: the floors and ceilings agree".to_string(),
             Self::AlreadyOpen => "That stretch is already open".to_string(),
             Self::NotRectangular => "The wall there is not a rectangle".to_string(),
+            Self::BadArch => "The arch needs spring under apex, a run of 2 or more clicks and pieces 1 or 2 clicks wide".to_string(),
             Self::TooLow { least } => format!("A door must be at least {least} units tall"),
             Self::TopAboveCeiling { max } => {
                 format!("The top is above the ceiling: at most {max} units")
@@ -188,6 +224,41 @@ fn edge_click(cell: [i32; 2], side: WallEdge, c: i32) -> [i32; 2] {
     }
 }
 
+fn isqrt(n: i64) -> i64 {
+    if n <= 0 {
+        return 0;
+    }
+    let mut x = (n as f64).sqrt() as i64;
+    while x * x > n {
+        x -= 1;
+    }
+    while (x + 1) * (x + 1) <= n {
+        x += 1;
+    }
+    x
+}
+
+/// Height of the intrados `u` grid units from the middle of a run `width`
+/// wide, above the spring line `spring` (absolute), snapped to the lattice.
+/// Integer: the square root is exact (the float only seeds it), so the
+/// result is the same on every host.
+pub fn intrados(shape: ArchShape, spring: i32, apex: i32, width: i32, u: i32) -> i32 {
+    let half = i64::from(width / 2).max(1);
+    let rise = i64::from(apex - spring);
+    let u = i64::from(u.abs()).min(half);
+    let y = match shape {
+        ArchShape::Round => isqrt(half * half - u * u) * rise / half,
+        ArchShape::Pointed => {
+            // The right flank is an arc centred on the spring line at `cx`
+            // through the spring point and the apex.
+            let cx = (half * half - rise * rise) / (2 * half);
+            let r = half - cx;
+            isqrt((r * r - (u - cx) * (u - cx)).max(0))
+        }
+    };
+    snap_to(spring + y as i32, FINE_UNITS).min(apex)
+}
+
 /// Split a wall piece `[bottom a, bottom b, top b, top a]` around an opening
 /// from `lo` to `hi` (absolute heights, per end `[a, b]`): the lintel and,
 /// when `lo` is a sill, the sill.
@@ -207,11 +278,29 @@ fn pieces(h: [i32; 4], lo: Option<[i32; 2]>, hi: [i32; 2]) -> Vec<[i32; 4]> {
     out
 }
 
-/// Cut an opening. One logical edit: the caller snapshots the document once.
+/// What was cut, in world heights (room offset included), so the mirror on
+/// the neighbouring room repeats it exactly.
+#[derive(Clone, Copy)]
+struct Cut {
+    plane: DoorPlane,
+    /// Lintel underside (apex for an arch).
+    top: i32,
+    sill: Option<i32>,
+    /// Shape, spring and apex of an arched head.
+    arch: Option<(ArchShape, i32, i32)>,
+}
+
+/// Cut an opening. The run `from..to` may cross several sectors of the same
+/// side; an arch is one arch over the whole run. One logical edit: the caller
+/// snapshots the document once.
 pub fn cut_opening(
     world: &mut GridWorld,
     params: &OpeningParams,
 ) -> Result<OpeningOutcome, OpeningRefusal> {
+    let axis_cell = |c: i32| c.div_euclid(CLICKS_PER_SECTOR);
+    if params.from >= params.to {
+        return Err(OpeningRefusal::BadRange);
+    }
     let mut work = world.clone();
     let mut out = OpeningOutcome {
         segments: 0,
@@ -219,62 +308,115 @@ pub fn cut_opening(
         mirrored: false,
         door: None,
     };
-    let door = cut_one(&mut work, params, None, &mut out)?;
-    out.door = match params.kind {
-        OpeningKind::Door => door.map(|d| d.0),
-        OpeningKind::Window { .. } => None,
-    };
-    // The same stretch of the room across the border, if one is there.
-    if let Some((_, abs_top, abs_sill)) = door {
-        let outward = {
-            let d = params.side.front_direction();
-            [-d[0], -d[1]]
+    let run = (params.from, params.to);
+    let mut first: Option<Cut> = None;
+    for s in axis_cell(params.from)..=axis_cell(params.to - 1) {
+        let cell = match params.side {
+            WallEdge::North | WallEdge::South => [s, params.cell[1]],
+            _ => [params.cell[0], s],
         };
-        let mid = (params.from + params.to - 1) / 2;
-        let probe = edge_click(params.cell, params.side, mid);
-        let step = [probe[0] + outward[0], probe[1] + outward[1]];
-        let neighbour: Vec<usize> = (0..work.rooms.len())
-            .filter(|&j| j != params.room)
-            .filter(|&j| {
-                work.rooms[j].leaf_at(step).is_some_and(|(_, s)| {
-                    s.ground_floor().is_some() && s.ground_ceiling().is_some()
-                })
-            })
-            .collect();
-        if let Some(&j) = neighbour.first() {
-            let cell = [
-                step[0].div_euclid(CLICKS_PER_SECTOR),
-                step[1].div_euclid(CLICKS_PER_SECTOR),
-            ];
-            let mirror = OpeningParams {
-                room: j,
-                cell,
-                side: params.side.opposite().map_or(params.side, |(e, _)| e),
-                ..*params
-            };
-            let before = out.segments;
-            if cut_one(&mut work, &mirror, Some((abs_top, abs_sill)), &mut out).is_ok() {
-                out.mirrored = out.segments > before;
-            }
+        let piece = OpeningParams {
+            cell,
+            from: params.from.max(s * CLICKS_PER_SECTOR),
+            to: params.to.min((s + 1) * CLICKS_PER_SECTOR),
+            ..*params
+        };
+        let abs = first.map(|c| (c.top, c.sill, c.arch));
+        let cut = cut_one(&mut work, &piece, abs, run, &mut out)?;
+        first.get_or_insert(cut);
+        mirror(&mut work, &piece, &cut, run, &mut out);
+    }
+    if let (Some(c), OpeningKind::Door) = (first, params.kind) {
+        let mut plane = c.plane;
+        let width = (params.to - params.from) * CLICK_UNITS;
+        let mid = (params.from + params.to) * CLICK_UNITS / 2;
+        match plane.axis {
+            Axis::X => plane.center[0] = mid,
+            _ => plane.center[2] = mid,
         }
+        plane.width = width;
+        out.door = Some(plane);
     }
     *world = work;
     Ok(out)
 }
 
-/// `(plane, absolute top, absolute sill)` of what was cut.
-type Cut = (DoorPlane, i32, Option<i32>);
+/// The same stretch of the room across the border, if one is there.
+fn mirror(
+    work: &mut GridWorld,
+    p: &OpeningParams,
+    cut: &Cut,
+    run: (i32, i32),
+    out: &mut OpeningOutcome,
+) {
+    let outward = {
+        let d = p.side.front_direction();
+        [-d[0], -d[1]]
+    };
+    let mid = (p.from + p.to - 1) / 2;
+    let probe = edge_click(p.cell, p.side, mid);
+    let step = [probe[0] + outward[0], probe[1] + outward[1]];
+    let Some(j) = (0..work.rooms.len()).filter(|&j| j != p.room).find(|&j| {
+        work.rooms[j]
+            .leaf_at(step)
+            .is_some_and(|(_, s)| s.ground_floor().is_some() && s.ground_ceiling().is_some())
+    }) else {
+        return;
+    };
+    let cell = [
+        step[0].div_euclid(CLICKS_PER_SECTOR),
+        step[1].div_euclid(CLICKS_PER_SECTOR),
+    ];
+    let m = OpeningParams {
+        room: j,
+        cell,
+        side: p.side.opposite().map_or(p.side, |(e, _)| e),
+        ..*p
+    };
+    let before = out.segments;
+    if cut_one(work, &m, Some((cut.top, cut.sill, cut.arch)), run, out).is_ok() {
+        out.mirrored |= out.segments > before;
+    }
+}
+
+/// Absolute height of an arched head at world click `c` of a run.
+fn head_at(arch: (ArchShape, i32, i32), run: (i32, i32), c: i32) -> i32 {
+    let width = (run.1 - run.0) * CLICK_UNITS;
+    let u = (c - run.0) * CLICK_UNITS - width / 2;
+    intrados(arch.0, arch.1, arch.2, width, u)
+}
 
 fn cut_one(
     world: &mut GridWorld,
     p: &OpeningParams,
-    absolute: Option<(i32, Option<i32>)>,
+    absolute: Option<(i32, Option<i32>, Option<(ArchShape, i32, i32)>)>,
+    run: (i32, i32),
     out: &mut OpeningOutcome,
-) -> Result<Option<Cut>, OpeningRefusal> {
+) -> Result<Cut, OpeningRefusal> {
     let side = side_of(p.cell, p.side).ok_or(OpeningRefusal::NotCardinal)?;
     if p.from >= p.to || p.from < side.start || p.to > side.start + CLICKS_PER_SECTOR {
         return Err(OpeningRefusal::BadRange);
     }
+    let arched = match p.profile {
+        OpeningProfile::Rectangular => None,
+        OpeningProfile::Arched {
+            shape,
+            spring,
+            apex,
+            segment_clicks,
+        } => {
+            let ok = (1..=2).contains(&segment_clicks)
+                && spring >= 0
+                && apex > spring
+                && run.1 - run.0 >= 2
+                && (run.1 - run.0) % segment_clicks == 0
+                && (run.0 - side.start).rem_euclid(segment_clicks) == 0;
+            if !ok {
+                return Err(OpeningRefusal::BadArch);
+            }
+            Some((shape, spring, apex, segment_clicks))
+        }
+    };
     let least = body_headroom(world).unwrap_or(CLICK_UNITS * 4);
     let y_offset = world
         .rooms
@@ -293,13 +435,18 @@ fn cut_one(
         if !has {
             return Err(OpeningRefusal::NoHost);
         }
-        // The coarsest size both ends fall on (the sector, half, quarter).
-        let level = (2..=4u8)
-            .find(|&l| {
-                let e = edge_clicks(l);
-                (p.from - side.start) % e == 0 && (p.to - side.start) % e == 0
-            })
-            .unwrap_or(4);
+        // The coarsest size both ends fall on (the sector, half, quarter);
+        // an arch fixes it by its piece width.
+        let level = match arched {
+            Some((.., 1)) => 4,
+            Some((.., _)) => 3,
+            None => (2..=4u8)
+                .find(|&l| {
+                    let e = edge_clicks(l);
+                    (p.from - side.start) % e == 0 && (p.to - side.start) % e == 0
+                })
+                .unwrap_or(4),
+        };
         for c in p.from..p.to {
             subdivide_to(room, edge_click(p.cell, p.side, c), level)
                 .map_err(|_| OpeningRefusal::FineCells)?;
@@ -342,18 +489,32 @@ fn cut_one(
         ceil_min = ceil_min.min(ce[0]).min(ce[1]);
         plan.push((key, walls));
     }
-    let (top_abs, sill_abs) = match absolute {
-        Some((t, s)) => (t - y_offset, s.map(|s| s - y_offset)),
+    // Heights in this room's own frame. `arch_abs` is (shape, spring, apex).
+    let (top_abs, sill_abs, arch_abs) = match absolute {
+        Some((t, s, a)) => (
+            t - y_offset,
+            s.map(|s| s - y_offset),
+            a.map(|(sh, sp, ap)| (sh, sp - y_offset, ap - y_offset)),
+        ),
         None => {
             let sill = match p.kind {
                 OpeningKind::Door => None,
+                OpeningKind::Window { .. } if false => None,
                 OpeningKind::Window { sill } => Some(floor_ref + sill),
             };
-            (floor_ref + p.top, sill)
+            match arched {
+                Some((shape, spring, apex, _)) => (
+                    floor_ref + apex,
+                    sill,
+                    Some((shape, floor_ref + spring, floor_ref + apex)),
+                ),
+                None => (floor_ref + p.top, sill, None),
+            }
         }
     };
     let clear_from = sill_abs.unwrap_or(floor_ref);
-    if matches!(p.kind, OpeningKind::Door) && top_abs - floor_ref < least {
+    let head_low = arch_abs.map_or(top_abs, |a| a.1);
+    if matches!(p.kind, OpeningKind::Door) && head_low - floor_ref < least {
         return Err(OpeningRefusal::TooLow { least });
     }
     if top_abs > ceil_min {
@@ -361,17 +522,36 @@ fn cut_one(
             max: ceil_min - floor_ref,
         });
     }
-    if top_abs <= clear_from {
+    if head_low <= clear_from {
         return Err(OpeningRefusal::SillAboveTop);
     }
+    // Underside of the head over a leaf: flat, or the intrados at the two
+    // ends of the leaf's segment in the edge's walking direction a to b.
+    let hi_of = |key: LeafKey| -> [i32; 2] {
+        let Some(a) = arch_abs else {
+            return [top_abs, top_abs];
+        };
+        let c0 = if matches!(p.side, WallEdge::North | WallEdge::South) {
+            key.x
+        } else {
+            key.z
+        };
+        let c1 = c0 + key.edge_clicks();
+        let (h0, h1) = (head_at(a, run, c0), head_at(a, run, c1));
+        match p.side {
+            WallEdge::North | WallEdge::East => [h0, h1],
+            _ => [h1, h0],
+        }
+    };
     for (key, walls) in plan {
+        let hi = hi_of(key);
         let room = &mut world.rooms[p.room];
         // Authored walls on the edge: split around the opening.
         let sector = room.leaf_mut(key).ok_or(OpeningRefusal::NoHost)?;
         let old: Vec<GridWall> = std::mem::take(sector.walls_mut(p.side));
         let mut new_pieces: Vec<GridWall> = Vec::new();
         for w in old {
-            let split = pieces(w.heights, sill_abs.map(|s| [s, s]), [top_abs, top_abs]);
+            let split = pieces(w.heights, sill_abs.map(|s| [s, s]), hi);
             for h in split {
                 new_pieces.push(GridWall {
                     heights: h,
@@ -388,12 +568,13 @@ fn cut_one(
                 continue;
             }
             if matches!(dw.kind, DerivedKind::Closure | DerivedKind::Drop) {
-                let split = pieces(h, sill_abs.map(|s| [s, s]), [top_abs, top_abs]);
+                let split = pieces(h, sill_abs.map(|s| [s, s]), hi);
                 for hh in split {
-                    // A window's pieces are solid. A door's lintel is not: it
-                    // is above the body, and the walkability flood treats any
-                    // solid wall record on an edge as blocking whatever its
-                    // height, so a solid lintel would read as a closed door.
+                    // A window's pieces are solid. A door's lintel (and the
+                    // whole arched head over it) is not: it is above the
+                    // body, and the walkability flood treats any solid wall
+                    // record on an edge as blocking whatever its height, so
+                    // a solid lintel would read as a closed door.
                     new_pieces.push(GridWall {
                         heights: hh,
                         material: p.material.or(dw.material),
@@ -441,13 +622,31 @@ fn cut_one(
         },
         through: [-d[0], -d[1]],
         width,
-        height: top_abs - clear_from,
+        height: head_low - clear_from,
     };
-    Ok(Some((
+    Ok(Cut {
         plane,
-        top_abs + y_offset,
-        sill_abs.map(|s| s + y_offset),
-    )))
+        top: top_abs + y_offset,
+        sill: sill_abs.map(|s| s + y_offset),
+        arch: arch_abs.map(|(sh, sp, ap)| (sh, sp + y_offset, ap + y_offset)),
+    })
+}
+
+/// An arched head `clicks` wide whose apex is `apex` above the floor, with
+/// the rise of a good proportion for the curve (a pointed arch rises three
+/// quarters of its width, a round one half), pieces one click wide.
+pub fn arch_head(shape: ArchShape, clicks: i32, apex: i32) -> OpeningProfile {
+    let width = clicks * CLICK_UNITS;
+    let rise = match shape {
+        ArchShape::Pointed => width * 3 / 4,
+        ArchShape::Round => width / 2,
+    };
+    OpeningProfile::Arched {
+        shape,
+        spring: snap_to(apex - rise, FINE_UNITS).max(0),
+        apex: snap_to(apex, FINE_UNITS),
+        segment_clicks: 1,
+    }
 }
 
 /// Cut a door and return the plane a door entity needs (data only: no logic
