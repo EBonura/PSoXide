@@ -18,6 +18,7 @@
 
 pub mod break_verb;
 pub mod common;
+pub mod corridor;
 pub mod extrude;
 pub mod fine;
 pub mod raise;
@@ -103,6 +104,8 @@ impl Snapshot {
     }
 }
 
+#[cfg(test)]
+mod corridor_tests;
 #[cfg(test)]
 mod extrude_authored_tests;
 #[cfg(test)]
