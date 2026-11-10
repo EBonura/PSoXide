@@ -19,6 +19,7 @@
 pub mod arcade;
 pub mod break_verb;
 pub mod bridge;
+pub mod cathedral;
 pub mod common;
 pub mod corridor;
 pub mod extrude;
@@ -113,6 +114,8 @@ impl Snapshot {
 mod arcade_tests;
 #[cfg(test)]
 mod bridge_tests;
+#[cfg(test)]
+mod cathedral_tests;
 #[cfg(test)]
 mod corridor_tests;
 #[cfg(test)]

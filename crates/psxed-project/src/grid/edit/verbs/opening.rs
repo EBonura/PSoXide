@@ -386,7 +386,7 @@ fn cut_one(
             if dw.hidden && dw.solid == Some(false) {
                 continue;
             }
-            if dw.kind == DerivedKind::Closure {
+            if matches!(dw.kind, DerivedKind::Closure | DerivedKind::Drop) {
                 let split = pieces(h, sill_abs.map(|s| [s, s]), [top_abs, top_abs]);
                 for hh in split {
                     // Lintel and sill are solid: heights are part of the
@@ -395,6 +395,7 @@ fn cut_one(
                         heights: hh,
                         material: p.material.or(dw.material),
                         facing: WallFacing::Both,
+                        solid: dw.kind == DerivedKind::Closure,
                         ..GridWall::span(0, 0, None)
                     });
                     out.pieces += 1;
