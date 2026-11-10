@@ -30,6 +30,7 @@ pub mod room;
 pub mod rules;
 pub mod spiral;
 pub mod stairs;
+pub mod terrain;
 
 use super::super::sector::GridSector;
 use super::super::world::GridWorld;
@@ -118,5 +119,7 @@ mod extrude_tests;
 mod opening_tests;
 #[cfg(test)]
 mod room_tests;
+#[cfg(test)]
+mod terrain_tests;
 #[cfg(test)]
 mod tests;
