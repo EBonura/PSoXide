@@ -386,10 +386,13 @@ fn head_at(arch: (ArchShape, i32, i32), run: (i32, i32), c: i32) -> i32 {
     intrados(arch.0, arch.1, arch.2, width, u)
 }
 
+/// A cut's world heights: top, sill, and the arch's shape, spring and apex.
+type Absolute = (i32, Option<i32>, Option<(ArchShape, i32, i32)>);
+
 fn cut_one(
     world: &mut GridWorld,
     p: &OpeningParams,
-    absolute: Option<(i32, Option<i32>, Option<(ArchShape, i32, i32)>)>,
+    absolute: Option<Absolute>,
     run: (i32, i32),
     out: &mut OpeningOutcome,
 ) -> Result<Cut, OpeningRefusal> {
@@ -439,7 +442,7 @@ fn cut_one(
         // an arch fixes it by its piece width.
         let level = match arched {
             Some((.., 1)) => 4,
-            Some((.., _)) => 3,
+            Some(_) => 3,
             None => (2..=4u8)
                 .find(|&l| {
                     let e = edge_clicks(l);

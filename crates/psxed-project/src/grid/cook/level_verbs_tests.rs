@@ -416,7 +416,7 @@ fn a_body_walks_in_through_the_arched_west_door_to_the_chancel() {
         lay_terrain(&mut w, &yard).unwrap();
         cook(&w).expect("cooks");
         let nat = native(&w);
-        let row = rt(4 * 1024 + 0);
+        let row = rt(4 * 1024);
         let start = RoomPoint::new(rt(1024), 0, row);
         let (end, _, _) = walk(&nat, start, &[[rt(13 * 1024), row]], 1200, 1);
         assert!(
