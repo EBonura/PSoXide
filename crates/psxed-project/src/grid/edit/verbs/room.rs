@@ -312,7 +312,18 @@ fn write(
         }
         for cell in sectors {
             if !sector_ready(room, cell) {
-                return Err(RoomRefusal::FineCells { cell });
+                // Finer cells stand here: a room overwrites the sector, so
+                // they go (with their authored walls) and one sector leaf
+                // takes their place. This used to refuse; nothing needed it.
+                let doomed: Vec<LeafKey> = room
+                    .leaves()
+                    .map(|(k, _)| k)
+                    .filter(|k| k.touches_sector(cell))
+                    .collect();
+                for k in doomed {
+                    room.remove_leaf(k);
+                }
+                over += 1;
             }
             let [x, z] = room.local(cell).ok_or(RoomRefusal::RoomTooLarge)?;
             let (f, c) = surfaces(p);

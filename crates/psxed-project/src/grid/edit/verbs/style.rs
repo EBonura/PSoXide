@@ -512,6 +512,14 @@ pub fn cloister() -> Style {
     }
 }
 
+/// A cloister bay as a room style: one groin vault over a 16 click square.
+pub fn cloister_room() -> Style {
+    let mut s = cloister();
+    s.name = "cloister room".into();
+    s.rhythm = vec![BayKind::plain("bay", 16)];
+    s
+}
+
 /// A crypt: a low round barrel and thick piers that narrow the passage.
 pub fn crypt() -> Style {
     let mut pier = BayKind::plain("pier", 1);

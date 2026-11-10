@@ -426,3 +426,52 @@ fn a_body_walks_in_through_the_arched_west_door_to_the_chancel() {
         assert_eq!(end.y, rt(p.chancel_rise));
     }
 }
+
+#[test]
+fn a_body_walks_every_styled_corridor_end_to_end() {
+    use crate::grid::edit::verbs::corridor::LegShape;
+    use crate::grid::edit::verbs::style::{self, Roles};
+    use crate::grid::edit::verbs::styled::{lay_styled_corridor, StyledCorridor};
+    let units = RuntimeUnits::new(GridScale::DEFAULT).unwrap();
+    let rt = |gu: i32| units.rt(gu);
+    for (style, width) in [
+        (style::plain(), 1),
+        (style::scifi_rib(), 2),
+        (style::gothic_nave(), 2),
+        (style::cloister(), 2),
+        (style::crypt(), 2),
+    ] {
+        let name = style.name.clone();
+        let mut w = GridWorld {
+            scale: GridScale::DEFAULT,
+            ..GridWorld::default()
+        };
+        // A straight run with a ramp up in the middle and a landing at each
+        // end, so a styled leg climbs and a plain landing follows.
+        let sc = StyledCorridor {
+            target: RoomTarget::New("run".into()),
+            waypoints: vec![
+                Waypoint::at_height([0, 0], 0),
+                Waypoint::at([6, 0]),
+                Waypoint::at_height([14, 0], 512),
+            ],
+            width,
+            base: 0,
+            leg: LegShape::Ramp,
+            style,
+            roles: Roles::default(),
+        };
+        lay_styled_corridor(&mut w, &sc).unwrap_or_else(|e| panic!("{name}: {}", e.describe()));
+        cook(&w).unwrap_or_else(|e| panic!("{name} cooks: {e}"));
+        let nat = native(&w);
+        // Down the middle of the corridor.
+        let z = rt(width * 512);
+        let start = RoomPoint::new(rt(512), 0, z);
+        let (end, [_, hi], _) = walk(&nat, start, &[[rt(14 * 1024 + 512), z]], 1500, 1);
+        assert!(
+            end.x >= rt(14 * 1024) - 6,
+            "{name}: walked the corridor end to end: {end:?}"
+        );
+        assert!(hi >= rt(512) - 4, "{name}: climbed to the landing: {hi}");
+    }
+}

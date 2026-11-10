@@ -118,3 +118,23 @@ fn decompose_is_deterministic_and_disjoint() {
     let total: i32 = a.iter().map(|k| (k.edge_clicks() / 4).max(1).pow(2)).sum();
     assert_eq!(total as usize, cells.len());
 }
+
+#[test]
+fn a_room_over_finer_cells_replaces_them_instead_of_refusing() {
+    use crate::grid::tree::subdivide_to;
+    let mut w = empty();
+    let mut p = RoomParams::new(rect([0, 0], [3, 3]), "base", 3072);
+    p.leaves = LeafPolicy::Sectors;
+    lay_room(&mut w, &p).unwrap();
+    subdivide_to(&mut w.rooms[0], [4, 4], 4).unwrap();
+    assert!(w.rooms[0].leaves().any(|(k, _)| k.level == 4));
+    let mut q = RoomParams::new(rect([1, 1], [2, 2]), "x", 4096);
+    q.target = RoomTarget::Existing(0);
+    q.leaves = LeafPolicy::Sectors;
+    let out = lay_room(&mut w, &q).unwrap();
+    assert_eq!(out.cells, 4);
+    assert!(w.rooms[0]
+        .leaves()
+        .all(|(k, _)| !k.touches_sector([1, 1]) || k.level == 2));
+    assert!(check(&w.rooms[0]).is_empty());
+}

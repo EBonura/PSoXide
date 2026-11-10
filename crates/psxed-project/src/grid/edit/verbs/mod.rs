@@ -20,6 +20,7 @@ pub mod arcade;
 pub mod break_verb;
 pub mod bridge;
 pub mod building;
+pub mod capture;
 pub mod cathedral;
 pub mod common;
 pub mod corridor;
@@ -119,6 +120,8 @@ mod arcade_tests;
 mod bridge_tests;
 #[cfg(test)]
 mod building_tests;
+#[cfg(test)]
+mod capture_tests;
 #[cfg(test)]
 mod cathedral_tests;
 #[cfg(test)]
