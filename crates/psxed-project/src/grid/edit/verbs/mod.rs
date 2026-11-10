@@ -21,6 +21,7 @@ pub mod common;
 pub mod corridor;
 pub mod extrude;
 pub mod fine;
+pub mod opening;
 pub mod raise;
 pub mod raise_leaves;
 pub mod ramp;
@@ -110,6 +111,8 @@ mod corridor_tests;
 mod extrude_authored_tests;
 #[cfg(test)]
 mod extrude_tests;
+#[cfg(test)]
+mod opening_tests;
 #[cfg(test)]
 mod room_tests;
 #[cfg(test)]
