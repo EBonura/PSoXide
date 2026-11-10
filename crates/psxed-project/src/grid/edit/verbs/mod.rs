@@ -34,6 +34,8 @@ pub mod ruin;
 pub mod rules;
 pub mod spiral;
 pub mod stairs;
+pub mod style;
+pub mod styled;
 pub mod terrain;
 
 use super::super::sector::GridSector;
@@ -131,6 +133,8 @@ mod opening_tests;
 mod room_tests;
 #[cfg(test)]
 mod ruin_tests;
+#[cfg(test)]
+mod style_tests;
 #[cfg(test)]
 mod terrain_tests;
 #[cfg(test)]
