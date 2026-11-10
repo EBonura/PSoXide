@@ -130,3 +130,35 @@ fn an_arched_cathedral_has_one_arched_west_door_and_arched_windows() {
         2
     );
 }
+
+#[test]
+fn a_gothic_nave_style_vaults_the_nave_ceiling_and_keeps_the_clerestory() {
+    use super::style;
+    let mut p = params();
+    p.style = Some(style::gothic_nave());
+    let mut w = empty();
+    let r = build_cathedral(&mut w, &p).unwrap();
+    assert_eq!(r.windows, 10, "{:?}", r.notes);
+    let room = &w.rooms[r.room];
+    // Nave rows 2..=5 (16 clicks across); along the nave, bays of 8 clicks
+    // with a rib at the start of each. Mid-nave (z click 16), mid-bay (x
+    // click 4): the crown is the nave height plus the pointed rise.
+    let (_, s) = room.leaf_at([4, 16]).unwrap();
+    let c = s.ground_ceiling().unwrap().heights;
+    assert!(c.iter().any(|&h| h >= 9216 + 1408), "{c:?}");
+    // On the nave's edge line the ceiling is still the nave height.
+    let (_, e) = room.leaf_at([4, 8]).unwrap();
+    let h = e.ground_ceiling().unwrap().heights;
+    assert_eq!((h[0], h[1]), (9216, 9216), "{h:?}");
+    crate::grid::cook::tests::cook(&w).expect("a vaulted nave cooks");
+    // The flat default is unchanged.
+    let mut flat = empty();
+    let fr = build_cathedral(&mut flat, &params()).unwrap();
+    let (_, s) = flat.rooms[fr.room].leaf_at([4, 16]).unwrap();
+    assert!(s
+        .ground_ceiling()
+        .unwrap()
+        .heights
+        .iter()
+        .all(|&h| h == 9216));
+}

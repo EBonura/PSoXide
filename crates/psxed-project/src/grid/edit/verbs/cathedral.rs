@@ -30,6 +30,9 @@ use std::collections::BTreeSet;
 use crate::grid::mesh_arch::ArchProfile;
 use crate::grid::sector::WallEdge;
 use crate::grid::world::GridWorld;
+
+use super::style::{Roles, Style};
+use super::styled::{restyle_run, Frame, StyleRefusal};
 use crate::ResourceId;
 
 use super::super::rects::CellRect;
@@ -82,6 +85,12 @@ pub struct CathedralParams {
     /// Arched heads for the west door and the clerestory windows (flat
     /// lintels when `None`).
     pub arch: Option<ArchShape>,
+    /// A style for the nave ceiling (its cross profile, rhythm and vault are
+    /// added to the nave height; its cycle should equal the bay in clicks).
+    pub style: Option<Style>,
+    /// Materials by role for the styled nave (trim and accent default to the
+    /// wall material).
+    pub roles: Option<Roles>,
     /// A large door in the west front.
     pub west_door: bool,
     /// Sectors the west door spans.
@@ -119,6 +128,8 @@ impl CathedralParams {
             transept: None,
             apse: true,
             arch: None,
+            style: None,
+            roles: None,
             west_door: true,
             door_sectors: 2,
             chancel_rise: 512,
@@ -139,6 +150,8 @@ pub enum CathedralRefusal {
     Room(RoomRefusal),
     /// The arcade was refused.
     Arcade(ArcadeRefusal),
+    /// The nave style was refused.
+    Style(StyleRefusal),
 }
 
 impl CathedralRefusal {
@@ -148,6 +161,7 @@ impl CathedralRefusal {
             Self::BadParameter(what) => format!("{what} is out of range"),
             Self::Room(r) => r.describe(),
             Self::Arcade(a) => a.describe(),
+            Self::Style(s) => s.describe(),
         }
     }
 }
@@ -329,6 +343,37 @@ pub fn build_cathedral(
             )
             .map_err(CathedralRefusal::Room)?;
         }
+    }
+    // 5b. The nave ceiling in the style, over what the steps and chancel
+    //     left: the style's offsets are added to each sector's own heights.
+    if let Some(style) = &p.style {
+        let roles = p.roles.unwrap_or(Roles {
+            floor: p.floor_material,
+            wall: p.wall_material,
+            ceiling: p.ceiling_material,
+            trim: p.wall_material,
+            accent: p.wall_material,
+            ground: p.floor_material,
+        });
+        let frame = Frame {
+            along_axis: 0,
+            along_sign: 1,
+            along_edge: ox * 4,
+            across_axis: 1,
+            across_sign: 1,
+            across_edge: nave.min[1] * 4,
+        };
+        let cells: BTreeSet<[i32; 2]> = nave.cells().collect();
+        restyle_run(
+            &mut work,
+            room,
+            &cells,
+            frame,
+            nave.depth() * 4,
+            style,
+            roles,
+        )
+        .map_err(CathedralRefusal::Style)?;
     }
     // 6. The arcade: one arch per bay on each nave border, none in the
     //    transept.
