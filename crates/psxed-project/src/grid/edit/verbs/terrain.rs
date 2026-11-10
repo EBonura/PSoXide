@@ -261,9 +261,8 @@ pub fn field(
                 let n = [c[0] + dx, c[1] + dz];
                 let has = !p.cells.contains(&n)
                     && room
-                        .local(n)
-                        .and_then(|[x, z]| room.sector(x, z))
-                        .is_some_and(|s| s.ground_floor().is_some());
+                        .leaf_at([n[0] * 4, n[1] * 4])
+                        .is_some_and(|(_, s)| s.ground_floor().is_some());
                 if has {
                     for (ox, oz) in [(0, 0), (1, 0), (1, 1), (0, 1)] {
                         outside.insert([n[0] + ox, n[1] + oz]);
@@ -358,13 +357,22 @@ pub fn lay_terrain(
     world: &mut GridWorld,
     p: &TerrainParams,
 ) -> Result<TerrainReport, TerrainRefusal> {
-    let (mut f, anchored) = field(world, p)?;
+    // Work on a copy; cells held by a bigger leaf are split to sectors first
+    // so their corners can be read and written.
+    let mut work = world.clone();
+    if let Some(room) = work.rooms.get_mut(p.room) {
+        for &c in &p.cells {
+            if !sector_ready(room, c) {
+                return Err(TerrainRefusal::FineCells { cell: c });
+            }
+        }
+    }
+    let (mut f, anchored) = field(&work, p)?;
     let mut report = TerrainReport::default();
     if p.keep_walkable {
         report.clamped = clamp_slopes(&mut f, &anchored, MAX_EDGE_RISE);
     }
     let rect = bounds_of(&p.cells).ok_or(TerrainRefusal::EmptyRegion)?;
-    let mut work = world.clone();
     grow_room_to(&mut work.rooms[p.room], rect).map_err(|e| match e {
         RectRefusal::NoSuchRoom => TerrainRefusal::NoSuchRoom,
         RectRefusal::RoomTooLarge { .. } => TerrainRefusal::RoomTooLarge,

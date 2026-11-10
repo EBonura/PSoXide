@@ -160,6 +160,12 @@ pub fn ruin_region(world: &mut GridWorld, p: &RuinParams) -> Result<RuinReport, 
     if p.intensity == 0 {
         return Ok(report);
     }
+    // Cells held by a bigger leaf are split to sectors so they can break.
+    if let Some(room) = world.rooms.get_mut(p.room) {
+        for &c in &p.cells {
+            let _ = super::common::sector_ready(room, c);
+        }
+    }
     let i = p.intensity;
     if p.crumble {
         let cells: Vec<[i32; 2]> = p.cells.difference(&p.keep).copied().collect();

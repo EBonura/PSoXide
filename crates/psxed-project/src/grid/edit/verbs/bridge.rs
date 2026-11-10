@@ -22,16 +22,20 @@ use psx_engine::WalkLimits;
 use crate::grid::cook::RuntimeUnits;
 use crate::grid::mesh::{ColumnSpec, GridMesh, MeshAsset, MeshKind, MAX_MESHES_PER_ROOM};
 use crate::grid::mesh_span::SpanSpec;
+use crate::grid::room::GridRoom;
 use crate::grid::world::GridWorld;
 
 use super::super::meshes::{add_asset, place_mesh, solve_span, MeshRefusal};
+use super::room::RoomTarget;
 use super::stairs::max_riser;
 
 /// Parameters of a bridge.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BridgeParams {
-    /// The room the instances go in.
-    pub room: usize,
+    /// Where the instances go: a new room of their own (the default, and the
+    /// one that works next to rooms of any leaf size) or an existing room of
+    /// whole sectors.
+    pub target: RoomTarget,
     /// Start of the deck top: `[x, y, z]`, grid units, `y` room relative.
     pub from: [i32; 3],
     /// End of the deck top.
@@ -54,9 +58,15 @@ pub struct BridgeParams {
 
 impl BridgeParams {
     /// A plain deck of `width` and `thickness` between two points.
-    pub fn deck(room: usize, from: [i32; 3], to: [i32; 3], width: i32, thickness: i32) -> Self {
+    pub fn deck(
+        target: RoomTarget,
+        from: [i32; 3],
+        to: [i32; 3],
+        width: i32,
+        thickness: i32,
+    ) -> Self {
         Self {
-            room,
+            target,
             from,
             to,
             width,
@@ -98,6 +108,10 @@ pub enum BridgeRefusal {
     BadRecipe(String),
     /// The room would pass its size cap.
     RoomTooLarge,
+    /// The room has cells of several sizes: a mesh over empty ground in such
+    /// a room has no cell to hang its collision on, so the deck would not
+    /// hold a body. Use a new room (the default) or a room of whole sectors.
+    TreeRoom,
 }
 
 impl BridgeRefusal {
@@ -118,6 +132,9 @@ impl BridgeRefusal {
             Self::TooMany => format!("A room holds at most {MAX_MESHES_PER_ROOM} meshes"),
             Self::BadRecipe(why) => why.clone(),
             Self::RoomTooLarge => "The room would grow past its size limit".to_string(),
+            Self::TreeRoom => {
+                "That room has cells of several sizes: the deck would not collide over empty ground; use a new room".to_string()
+            }
         }
     }
 }
@@ -125,6 +142,8 @@ impl BridgeRefusal {
 /// What a bridge made.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BridgeOutcome {
+    /// The room the instances are in.
+    pub room: usize,
     /// The deck instance.
     pub deck: u16,
     /// The parapet instances (none, or two).
@@ -151,9 +170,6 @@ pub fn build_bridge(
     world: &mut GridWorld,
     p: &BridgeParams,
 ) -> Result<BridgeOutcome, BridgeRefusal> {
-    if p.room >= world.rooms.len() {
-        return Err(BridgeRefusal::NoSuchRoom);
-    }
     let (dx, dz) = (
         i64::from(p.to[0] - p.from[0]),
         i64::from(p.to[2] - p.from[2]),
@@ -179,7 +195,26 @@ pub fn build_bridge(
         }
     }
     let mut work = world.clone();
+    let room_index = match &p.target {
+        RoomTarget::Existing(i) => {
+            let r = work.rooms.get(*i).ok_or(BridgeRefusal::NoSuchRoom)?;
+            if !r.leaves.is_sectors_only() {
+                return Err(BridgeRefusal::TreeRoom);
+            }
+            *i
+        }
+        RoomTarget::New(name) => {
+            if work.rooms.len() >= crate::grid::limits::MAX_ROOMS {
+                return Err(BridgeRefusal::RoomTooLarge);
+            }
+            let mut room = GridRoom::new_derived(name.clone(), 1, 1);
+            room.origin = [p.from[0].div_euclid(1024), p.from[2].div_euclid(1024)];
+            work.rooms.push(room);
+            work.rooms.len() - 1
+        }
+    };
     let mut out = BridgeOutcome {
+        room: room_index,
         length,
         rise,
         ..BridgeOutcome::default()
@@ -207,7 +242,7 @@ pub fn build_bridge(
         .map_err(convert)?;
         let mut mesh = GridMesh::new(0, asset, placement.position);
         mesh.rotation = [placement.yaw, 0, 0];
-        place_mesh(w, p.room, mesh).map_err(convert)
+        place_mesh(w, room_index, mesh).map_err(convert)
     };
     let deck = SpanSpec {
         length,
@@ -250,7 +285,7 @@ pub fn build_bridge(
                 .map_err(convert)?;
             let mesh = GridMesh::new(0, asset, [at[0], p.pier_foot, at[1]]);
             out.piers
-                .push(place_mesh(&mut work, p.room, mesh).map_err(convert)?);
+                .push(place_mesh(&mut work, room_index, mesh).map_err(convert)?);
             d += spacing;
         }
     }

@@ -681,6 +681,8 @@ mod gap_tests;
 #[cfg(test)]
 mod leaf_tests;
 #[cfg(test)]
+mod level_verbs_tests;
+#[cfg(test)]
 mod light_tests;
 #[cfg(test)]
 mod mesh_tests;

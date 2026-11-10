@@ -4,22 +4,29 @@ use crate::grid::edit::CellRect;
 use crate::grid::mesh::{MeshKind, Proxy};
 
 use super::bridge::{build_bridge, BridgeParams, BridgeRefusal};
-use super::room::{lay_room, Footprint, RoomParams};
+use super::room::{lay_room, Footprint, LeafPolicy, RoomParams, RoomTarget};
 use super::room_tests::empty;
 
 fn world() -> crate::grid::world::GridWorld {
     let mut w = empty();
-    let p = RoomParams::new(
+    let mut p = RoomParams::new(
         Footprint::Rect(CellRect::from_corners([0, 0], [11, 3])),
         "gap",
         8192,
     );
+    p.leaves = LeafPolicy::Sectors;
     lay_room(&mut w, &p).unwrap();
     w
 }
 
 fn deck() -> BridgeParams {
-    BridgeParams::deck(0, [2048, 0, 2048], [10240, 0, 2048], 1024, 512)
+    BridgeParams::deck(
+        RoomTarget::Existing(0),
+        [2048, 0, 2048],
+        [10240, 0, 2048],
+        1024,
+        512,
+    )
 }
 
 #[test]
@@ -97,6 +104,29 @@ fn a_climbing_deck_is_held_to_the_walkable_slope() {
     same.to = same.from;
     assert_eq!(build_bridge(&mut w, &same), Err(BridgeRefusal::NoLength));
     let mut gone = deck();
-    gone.room = 9;
+    gone.target = RoomTarget::Existing(9);
     assert_eq!(build_bridge(&mut w, &gone), Err(BridgeRefusal::NoSuchRoom));
+}
+
+#[test]
+fn the_default_is_a_room_of_its_own_and_a_tree_room_is_refused() {
+    let mut w = world();
+    let mut p = deck();
+    p.target = RoomTarget::New("bridge".into());
+    let out = build_bridge(&mut w, &p).unwrap();
+    assert_eq!(out.room, 1);
+    assert_eq!(w.rooms[1].meshes.len(), 1);
+    assert_eq!(w.rooms[1].leaf_count(), 0);
+    // A room with a big leaf refuses.
+    let mut t = empty();
+    let mut r = RoomParams::new(
+        Footprint::Rect(CellRect::from_corners([0, 0], [3, 3])),
+        "big",
+        4096,
+    );
+    r.leaves = LeafPolicy::Maximal;
+    lay_room(&mut t, &r).unwrap();
+    let mut q = deck();
+    q.target = RoomTarget::Existing(0);
+    assert_eq!(build_bridge(&mut t, &q), Err(BridgeRefusal::TreeRoom));
 }
