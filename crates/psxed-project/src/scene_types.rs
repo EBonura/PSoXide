@@ -413,6 +413,12 @@ pub enum NodeKind {
         /// Disabled nodes stay authored but cook flag-disabled.
         #[serde(default = "default_true")]
         enabled: bool,
+        /// Keep this node's state across death and in the save: an open door
+        /// stays open. Doors only here (a Switch carries its own flag);
+        /// anything else is a cook error. Tied to the node's stable id, so
+        /// it survives recooks that do not delete the node.
+        #[serde(default)]
+        persistent: bool,
     },
     /// Shared health and damage state for one breakable object. Image props
     /// point at it through their `destructible` field.
@@ -657,6 +663,10 @@ pub enum InteractableKind {
         /// Unlock the target door instead of opening it.
         #[serde(default)]
         unlocks: bool,
+        /// Keep the lever's state across death and in the save (a pulled
+        /// one-shot lever stays pulled). Tied to the entity's stable id.
+        #[serde(default)]
+        persistent: bool,
     },
 }
 

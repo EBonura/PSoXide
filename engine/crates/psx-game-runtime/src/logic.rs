@@ -20,8 +20,11 @@
 //! `&'static` cooked records, all-zero [`LogicRuntime::EMPTY`].
 
 use psx_level::{
-    door_flags, logic_flags, logic_kind, switch_flags, LevelLogicRecord, LOGIC_NAME_NONE,
+    door_flags, logic_flags, logic_kind, persistent_flag_slot, switch_flags, LevelLogicRecord,
+    StableId, LOGIC_NAME_NONE,
 };
+
+use crate::save::SaveBlock;
 
 /// What a use asks of the record it reaches. Records fired by an output
 /// (relays, delayed chains, interact prompts) always toggle; the explicit
@@ -292,6 +295,97 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
             queue_drops: self.queue_drops,
             depth_drops: self.depth_drops,
             fired: self.fired,
+        }
+    }
+
+    /// The save flag record `index` owns, or `None` when it is not
+    /// persistent (or `ids` has no entry for it). `ids` is the cooked
+    /// stable-id table parallel to `records`.
+    pub fn persistent_slot(
+        records: &'static [LevelLogicRecord],
+        ids: &[StableId],
+        index: usize,
+    ) -> Option<usize> {
+        let record = records.get(index)?;
+        if record.flags & logic_flags::PERSISTENT == 0 {
+            return None;
+        }
+        Some(usize::from(persistent_flag_slot(*ids.get(index)?)))
+    }
+
+    /// Write record `index`'s state into `save` when it is persistent: the
+    /// flag reads "differs from the authored start" (a door that starts open
+    /// and was closed is set), so an untouched record leaves its bit clear.
+    /// Returns whether `save` changed, so the owner can mark it dirty.
+    pub fn store_persistent(
+        &self,
+        records: &'static [LevelLogicRecord],
+        ids: &[StableId],
+        index: usize,
+        save: &mut SaveBlock,
+    ) -> bool {
+        let Some(slot) = Self::persistent_slot(records, ids, index) else {
+            return false;
+        };
+        if index >= self.count() || slot >= usize::from(save.flag_count) {
+            return false;
+        }
+        let start_on = records[index].flags & logic_flags::START_ON != 0;
+        let differs = (self.counter[index] != 0) != start_on;
+        if save.flag(slot) == differs {
+            return false;
+        }
+        if differs {
+            save.set_flag(slot);
+        } else {
+            save.clear_flag(slot);
+        }
+        true
+    }
+
+    /// Apply the persistent state in `save` to a freshly initialised runtime
+    /// (after [`Self::init_from_records`], at boot or on respawn). Records
+    /// whose bit is clear keep their authored start; every transient record
+    /// is untouched, so it resets exactly as before.
+    pub fn restore_persistent(
+        &mut self,
+        records: &'static [LevelLogicRecord],
+        ids: &[StableId],
+        save: &SaveBlock,
+    ) {
+        let count = self.count().min(records.len());
+        let mut index = 0usize;
+        while index < count {
+            if let Some(slot) = Self::persistent_slot(records, ids, index) {
+                if slot < usize::from(save.flag_count) && save.flag(slot) {
+                    self.restore_changed(index, &records[index]);
+                }
+            }
+            index += 1;
+        }
+    }
+
+    /// Put persistent record `index` in its "differs from the authored
+    /// start" state.
+    fn restore_changed(&mut self, index: usize, record: &LevelLogicRecord) {
+        let on = record.flags & logic_flags::START_ON == 0;
+        self.counter[index] = i16::from(on);
+        match record.kind {
+            logic_kind::DOOR => {
+                if door_slides(record) {
+                    self.progress[index] = if on { record.arg1 } else { 0 };
+                }
+                // An open door is not locked; a closed one is back to its
+                // authored lock (unlocking is not saved).
+                if on {
+                    self.locked[index] = 0;
+                }
+            }
+            // A spent one-shot lever stays spent.
+            logic_kind::SWITCH if record.wait_ticks < 0 => {
+                self.state[index] = LogicState::Removed as u8;
+            }
+            _ => {}
         }
     }
 
@@ -1275,6 +1369,137 @@ mod tests {
         logic.tick(&NORTH, input_at([0, 0, 50]), 3);
         logic.fire_by_name(&NORTH, 2, UseCode::On, 4);
         assert!(logic.door_open(0));
+    }
+
+    const PERSIST: u16 = logic_flags::ENABLED | logic_flags::PERSISTENT;
+    const IDS: [StableId; 4] = [StableId(5), StableId(1_000_003), StableId(77), StableId(42)];
+
+    // 0 = lever (persistent, one-shot), 1 = door it opens (persistent,
+    // slides), 2 = a transient door, 3 = a persistent door that starts open.
+    static WORLD: [LevelLogicRecord; 4] = [
+        LevelLogicRecord {
+            targetname: 1,
+            target: 2,
+            wait_ticks: -1,
+            flags: PERSIST,
+            ..blank(logic_kind::SWITCH)
+        },
+        LevelLogicRecord {
+            flags: PERSIST,
+            ..sliding_door(0)
+        },
+        LevelLogicRecord {
+            targetname: 3,
+            ..blank(logic_kind::DOOR)
+        },
+        LevelLogicRecord {
+            targetname: 4,
+            flags: PERSIST | logic_flags::START_ON,
+            ..blank(logic_kind::DOOR)
+        },
+    ];
+
+    #[test]
+    fn a_persistent_door_and_lever_survive_a_death_and_transient_ones_reset() {
+        let mut save = SaveBlock::new(100, 832);
+        let mut logic = TestLogic::EMPTY;
+        logic.init_from_records(&WORLD);
+        // Pull the lever, open the transient door, close the start-open door.
+        assert!(logic.fire_index(&WORLD, 0, UseCode::Toggle, 1));
+        logic.fire_by_name(&WORLD, 3, UseCode::On, 1);
+        logic.fire_by_name(&WORLD, 4, UseCode::Off, 1);
+        for index in 0..4 {
+            logic.store_persistent(&WORLD, &IDS, index, &mut save);
+        }
+        assert!(logic.door_open(1) && logic.door_open(2) && !logic.door_open(3));
+
+        // Death: the world re-arms from the cooked tables, then the save
+        // is applied.
+        logic.init_from_records(&WORLD);
+        assert!(!logic.door_open(1), "re-armed before the restore");
+        logic.restore_persistent(&WORLD, &IDS, &save);
+        assert!(logic.door_open(1), "the persistent door is still open");
+        assert!(logic.door_slide(&WORLD, 1).unwrap().cleared, "and cleared");
+        assert!(logic.is_removed(0), "a spent one-shot lever stays spent");
+        assert!(!logic.fire_index(&WORLD, 0, UseCode::Toggle, 9));
+        assert!(!logic.door_open(2), "the transient door reset");
+        assert!(
+            !logic.door_open(3),
+            "a start-open door that was closed stays closed"
+        );
+    }
+
+    #[test]
+    fn storing_reports_a_change_once_and_clears_when_toggled_back() {
+        let mut save = SaveBlock::new(100, 832);
+        let mut logic = TestLogic::EMPTY;
+        logic.init_from_records(&WORLD);
+        assert!(
+            !logic.store_persistent(&WORLD, &IDS, 1, &mut save),
+            "untouched"
+        );
+        logic.fire_by_name(&WORLD, 2, UseCode::On, 1);
+        assert!(logic.store_persistent(&WORLD, &IDS, 1, &mut save));
+        assert!(
+            !logic.store_persistent(&WORLD, &IDS, 1, &mut save),
+            "no change"
+        );
+        logic.fire_by_name(&WORLD, 2, UseCode::Off, 2);
+        assert!(logic.store_persistent(&WORLD, &IDS, 1, &mut save));
+        assert!((0..832).all(|slot| !save.flag(slot)), "back to clean");
+        // Non-persistent records never touch the save.
+        logic.fire_by_name(&WORLD, 3, UseCode::On, 3);
+        assert!(!logic.store_persistent(&WORLD, &IDS, 2, &mut save));
+    }
+
+    #[test]
+    fn the_flag_follows_the_stable_id_not_the_table_position() {
+        // The same door cooked into a different table position (other
+        // records added before it) keeps its save bit.
+        static BEFORE: [LevelLogicRecord; 1] = [LevelLogicRecord {
+            flags: PERSIST,
+            ..blank(logic_kind::DOOR)
+        }];
+        static AFTER: [LevelLogicRecord; 3] = [
+            blank(logic_kind::RELAY),
+            blank(logic_kind::RELAY),
+            LevelLogicRecord {
+                flags: PERSIST,
+                ..blank(logic_kind::DOOR)
+            },
+        ];
+        let door = StableId(123_457);
+        let mut save = SaveBlock::new(100, 832);
+        let mut logic = TestLogic::EMPTY;
+        logic.init_from_records(&BEFORE);
+        logic.fire_index(&BEFORE, 0, UseCode::Toggle, 1);
+        assert!(logic.store_persistent(&BEFORE, &[door], 0, &mut save));
+        let mut frame = [0u8; crate::save::SAVE_BLOCK_BYTES];
+        save.encode(&mut frame);
+        let loaded = SaveBlock::decode(&frame, 832).unwrap();
+
+        let mut recooked = TestLogic::EMPTY;
+        recooked.init_from_records(&AFTER);
+        recooked.restore_persistent(&AFTER, &[StableId(1), StableId(2), door], &loaded);
+        assert!(recooked.door_open(2) && !recooked.door_open(0));
+        assert_eq!(
+            TestLogic::persistent_slot(&AFTER, &[StableId(1), StableId(2), door], 2),
+            Some(usize::from(psx_level::persistent_flag_slot(door)))
+        );
+    }
+
+    #[test]
+    fn a_save_with_a_smaller_flag_table_is_ignored_not_misread() {
+        let mut save = SaveBlock::new(100, 4);
+        let mut logic = TestLogic::EMPTY;
+        logic.init_from_records(&WORLD);
+        logic.fire_by_name(&WORLD, 2, UseCode::On, 1);
+        // Slot of IDS[1] is 1_000_003 % 832 = 579, beyond a 4-flag table.
+        assert!(!logic.store_persistent(&WORLD, &IDS, 1, &mut save));
+        save.flags = [0xFF; crate::save::SAVE_FLAG_BYTES];
+        logic.init_from_records(&WORLD);
+        logic.restore_persistent(&WORLD, &IDS, &save);
+        assert!(!logic.door_open(1));
     }
 
     #[test]

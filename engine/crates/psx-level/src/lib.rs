@@ -771,6 +771,15 @@ pub const POI_FLAG_NONE: u16 = u16::MAX;
 /// Number of persistent POI state bits available in the one-frame save block.
 pub const POI_PERSISTENT_FLAG_CAPACITY: usize = 832;
 
+/// The save flag a persistent record owns: its stable id modulo the flag
+/// capacity. Unlike a table index it does not move when records are added,
+/// removed or reordered, so a save keeps meaning the same door across
+/// recooks. Two records can land on one slot; the cook refuses a level where
+/// they do, naming both.
+pub const fn persistent_flag_slot(id: StableId) -> u16 {
+    (id.raw() % POI_PERSISTENT_FLAG_CAPACITY as u32) as u16
+}
+
 /// Sentinel for a point-of-interest reward resource.
 pub const POI_REWARD_NONE: u16 = u16::MAX;
 
@@ -981,6 +990,10 @@ pub mod logic_flags {
     pub const ENABLED: u16 = 1 << 0;
     /// Record starts in the "on"/open state (kind-specific).
     pub const START_ON: u16 = 1 << 1;
+    /// The record's state survives death and is saved: it maps to one save
+    /// flag, [`persistent_flag_slot`](crate::persistent_flag_slot) of its
+    /// stable id. Doors and switches only.
+    pub const PERSISTENT: u16 = 1 << 2;
 }
 
 /// [`LevelLogicRecord::spawnflags`] of a [`logic_kind::DOOR`] record. A door
@@ -3957,3 +3970,18 @@ mod tests {
 
 /// Maximum authored elevated hook landings per project.
 pub const MAX_HOOK_POINTS: usize = 32;
+
+#[cfg(test)]
+mod persistent_slot_tests {
+    use super::*;
+
+    #[test]
+    fn the_slot_is_inside_the_save_bitmap_and_depends_only_on_the_id() {
+        for raw in [1u32, 831, 832, 833, 0xe40c_292c, u32::MAX] {
+            let slot = persistent_flag_slot(StableId(raw));
+            assert!(usize::from(slot) < POI_PERSISTENT_FLAG_CAPACITY);
+            assert_eq!(slot, persistent_flag_slot(StableId(raw)));
+        }
+        assert_eq!(persistent_flag_slot(StableId(832 + 7)), 7);
+    }
+}

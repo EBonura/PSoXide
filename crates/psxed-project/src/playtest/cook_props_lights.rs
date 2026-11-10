@@ -1319,6 +1319,7 @@ pub(crate) fn push_interactable(
             target,
             behavior,
             unlocks,
+            ..
         } => (
             names.intern(target),
             match behavior {
@@ -1389,6 +1390,16 @@ pub(crate) fn push_interactable(
         max: [pos[0] + radius, pos[1], pos[2] + radius],
         flags: if component.enabled {
             psx_level::logic_flags::ENABLED
+        } else {
+            0
+        } | if matches!(
+            component.kind,
+            crate::InteractableKind::Switch {
+                persistent: true,
+                ..
+            }
+        ) {
+            psx_level::logic_flags::PERSISTENT
         } else {
             0
         },
@@ -1812,6 +1823,7 @@ pub(crate) fn push_logic_node(
     delay_ticks: u16,
     wait_ticks: i16,
     enabled: bool,
+    persistent: bool,
     names: &mut NameInterner,
     messages: &mut Vec<PlaytestInteractableMessage>,
     message_pages: &mut Vec<String>,
@@ -1846,6 +1858,16 @@ pub(crate) fn push_logic_node(
             0
         },
     };
+    if persistent {
+        if !matches!(kind, crate::LogicNodeKind::Door { .. }) {
+            report.error(format!(
+                "'{node_name}' is marked persistent, but only Doors (and Switch \
+                 interactables) can be saved"
+            ));
+            return false;
+        }
+        record.flags |= psx_level::logic_flags::PERSISTENT;
+    }
     match kind {
         crate::LogicNodeKind::TriggerVolume { size } => {
             if size[0] == 0 || size[1] == 0 || size[2] == 0 {
@@ -2049,12 +2071,61 @@ pub(crate) fn check_switch_targets(
             .iter()
             .enumerate()
             .any(|(other, candidate)| other != index && candidate.targetname == record.target);
+        // A persistent lever aimed at something that is not saved comes back
+        // out of step with it after a death.
+        if record.flags & psx_level::logic_flags::PERSISTENT != 0 {
+            let unsaved = logic.iter().enumerate().any(|(other, candidate)| {
+                other != index
+                    && candidate.targetname == record.target
+                    && candidate.flags & psx_level::logic_flags::PERSISTENT == 0
+            });
+            if unsaved {
+                let switch = names.name_of(record.targetname).unwrap_or("?");
+                let target = names.name_of(record.target).unwrap_or("?");
+                report.warn(format!(
+                    "Persistent switch '{switch}' targets '{target}', which is not \
+                     persistent: after a death the lever and the target disagree"
+                ));
+            }
+        }
         if !resolves {
             let switch = names.name_of(record.targetname).unwrap_or("?");
             let target = names.name_of(record.target).unwrap_or("?");
             report.error(format!(
                 "Switch '{switch}' targets '{target}', which is not a placed \
                  Logic node (Door, Relay, ...) or another interactable"
+            ));
+            ok = false;
+        }
+    }
+    ok
+}
+
+/// Give every persistent logic record its save slot, the same way the
+/// destructibles and points of interest take theirs: a hash of the stable
+/// id into the shared save bitmap. A slot already taken is a cook error that
+/// names both owners; the fix is to recreate one node so it gets a new id.
+pub(crate) fn claim_logic_persistence_slots(
+    logic: &[PlaytestLogic],
+    logic_ids: &[u32],
+    names: &NameInterner,
+    slots: &mut HashMap<u16, String>,
+    report: &mut PlaytestValidationReport,
+) -> bool {
+    let mut ok = true;
+    for (record, id) in logic.iter().zip(logic_ids) {
+        if record.flags & psx_level::logic_flags::PERSISTENT == 0 {
+            continue;
+        }
+        let slot = psx_level::persistent_flag_slot(psx_level::StableId(*id));
+        let owner = format!(
+            "logic '{}' (stable id {id:#010x})",
+            names.name_of(record.targetname).unwrap_or("?")
+        );
+        if let Some(existing) = slots.insert(slot, owner.clone()) {
+            report.error(format!(
+                "{existing} and {owner} map to the same persistent save slot; \
+                 recreate one node to give it a new stable id"
             ));
             ok = false;
         }
@@ -2556,12 +2627,14 @@ mod switch_cook_tests {
             target: "gate".into(),
             behavior: crate::SwitchBehavior::Toggle,
             unlocks: false,
+            persistent: false,
         };
         assert!(cook_switch(toggle, &mut names, &mut logic, &mut report));
         let one_shot = crate::InteractableKind::Switch {
             target: "gate".into(),
             behavior: crate::SwitchBehavior::OneShot,
             unlocks: false,
+            persistent: false,
         };
         assert!(cook_switch(one_shot, &mut names, &mut logic, &mut report));
         assert_eq!(logic[0].kind, psx_level::logic_kind::SWITCH);
@@ -2579,6 +2652,7 @@ mod switch_cook_tests {
             target: "  ".into(),
             behavior: crate::SwitchBehavior::Toggle,
             unlocks: false,
+            persistent: false,
         };
         assert!(!cook_switch(kind, &mut names, &mut logic, &mut report));
         assert!(!report.is_ok());
@@ -2594,6 +2668,7 @@ mod switch_cook_tests {
             target: "ghost".into(),
             behavior: crate::SwitchBehavior::Toggle,
             unlocks: false,
+            persistent: false,
         };
         assert!(cook_switch(kind, &mut names, &mut logic, &mut report));
         assert!(!check_switch_targets(&logic, &names, &mut report));
@@ -2613,6 +2688,7 @@ mod switch_cook_tests {
             0,
             0,
             true,
+            false,
             &mut names,
             &mut Vec::new(),
             &mut Vec::new(),
@@ -2637,6 +2713,7 @@ mod switch_cook_tests {
                 target: "gate_door".into(),
                 behavior: crate::SwitchBehavior::OneShot,
                 unlocks: false,
+                persistent: false,
             }
         );
         let bare: crate::InteractableKind = ron::from_str("Switch(target: \"d\")").unwrap();
@@ -2685,6 +2762,7 @@ mod door_cook_tests {
             0,
             0,
             true,
+            false,
             &mut names,
             &mut messages,
             &mut pages,
@@ -2856,6 +2934,7 @@ mod door_cook_tests {
                 delay_ticks: 0,
                 wait_ticks: 0,
                 enabled: true,
+                persistent: false,
             },
         );
         crate::units::scale_project_to_engine_units(&mut project);
@@ -2871,5 +2950,236 @@ mod door_cook_tests {
         };
         assert_eq!(slide.distance, 160, "editor units / 16, like every length");
         assert_eq!(slide.ticks, 90, "ticks do not scale");
+    }
+}
+
+#[cfg(test)]
+mod persistence_cook_tests {
+    use super::*;
+
+    fn push_node(
+        name: &str,
+        kind: &crate::LogicNodeKind,
+        persistent: bool,
+        names: &mut NameInterner,
+        logic: &mut Vec<PlaytestLogic>,
+        report: &mut PlaytestValidationReport,
+    ) -> bool {
+        push_logic_node(
+            name,
+            0,
+            [0, 0, 0],
+            kind,
+            if matches!(kind, crate::LogicNodeKind::Relay) {
+                "x"
+            } else {
+                ""
+            },
+            "",
+            "",
+            0,
+            0,
+            true,
+            persistent,
+            names,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            logic,
+            &mut Vec::new(),
+            report,
+        )
+    }
+
+    fn door() -> crate::LogicNodeKind {
+        crate::LogicNodeKind::Door {
+            box_prop: "box".into(),
+            start_open: false,
+            slide: None,
+            lock: crate::DoorLock::Unlocked,
+            refusal: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_persistent_door_is_flagged_and_other_kinds_are_refused() {
+        let mut names = NameInterner::default();
+        let mut logic = Vec::new();
+        let mut report = PlaytestValidationReport::default();
+        assert!(push_node(
+            "gate",
+            &door(),
+            true,
+            &mut names,
+            &mut logic,
+            &mut report
+        ));
+        assert_ne!(logic[0].flags & psx_level::logic_flags::PERSISTENT, 0);
+        assert!(push_node(
+            "plain",
+            &door(),
+            false,
+            &mut names,
+            &mut logic,
+            &mut report
+        ));
+        assert_eq!(logic[1].flags & psx_level::logic_flags::PERSISTENT, 0);
+        assert!(report.is_ok());
+
+        let relay = crate::LogicNodeKind::Relay;
+        assert!(!push_node(
+            "relay",
+            &relay,
+            true,
+            &mut names,
+            &mut logic,
+            &mut report
+        ));
+        assert!(report.errors.iter().any(|e| e.contains("'relay'")));
+    }
+
+    #[test]
+    fn a_persistent_switch_cooks_with_the_flag() {
+        let mut names = NameInterner::default();
+        let mut logic = Vec::new();
+        let mut report = PlaytestValidationReport::default();
+        let lever = |persistent| crate::InteractableKind::Switch {
+            target: "gate".into(),
+            behavior: crate::SwitchBehavior::OneShot,
+            unlocks: false,
+            persistent,
+        };
+        for kind in [lever(true), lever(false)] {
+            let (mut messages, mut pages, mut pages_it) = (Vec::new(), Vec::new(), Vec::new());
+            assert!(push_interactable(
+                "lever",
+                0,
+                [0; 3],
+                0,
+                InteractableComponent {
+                    kind: &kind,
+                    prompt: "PULL",
+                    radius: 8,
+                    enabled: true,
+                },
+                &mut names,
+                &mut messages,
+                &mut pages,
+                &mut pages_it,
+                &mut Vec::new(),
+                &mut logic,
+                &mut report,
+            ));
+        }
+        assert_ne!(logic[0].flags & psx_level::logic_flags::PERSISTENT, 0);
+        assert_eq!(logic[1].flags & psx_level::logic_flags::PERSISTENT, 0);
+        assert_ne!(logic[1].flags & psx_level::logic_flags::ENABLED, 0);
+    }
+
+    #[test]
+    fn slots_follow_stable_ids_and_a_clash_names_both_owners() {
+        let mut names = NameInterner::default();
+        let mut logic = Vec::new();
+        let mut report = PlaytestValidationReport::default();
+        for name in ["gate a", "gate b"] {
+            assert!(push_node(
+                name,
+                &door(),
+                true,
+                &mut names,
+                &mut logic,
+                &mut report
+            ));
+        }
+        // Two ids 832 apart share a slot.
+        let ids = [7, 7 + psx_level::POI_PERSISTENT_FLAG_CAPACITY as u32];
+        let mut slots = HashMap::new();
+        assert!(!claim_logic_persistence_slots(
+            &logic,
+            &ids,
+            &names,
+            &mut slots,
+            &mut report
+        ));
+        let message = report.error_messages().join(" ");
+        assert!(
+            message.contains("gate a") && message.contains("gate b"),
+            "{message}"
+        );
+        assert!(message.contains("new stable id"), "{message}");
+
+        // Distinct slots claim cleanly, and moving the records in the table
+        // does not change which slot an id gets.
+        let mut report = PlaytestValidationReport::default();
+        let mut slots = HashMap::new();
+        assert!(claim_logic_persistence_slots(
+            &logic,
+            &[7, 8],
+            &names,
+            &mut slots,
+            &mut report
+        ));
+        assert_eq!(
+            slots
+                .get(&7)
+                .map(String::as_str)
+                .unwrap_or("")
+                .contains("gate a"),
+            true
+        );
+        let mut swapped = logic.clone();
+        swapped.swap(0, 1);
+        let mut slots2 = HashMap::new();
+        assert!(claim_logic_persistence_slots(
+            &swapped,
+            &[8, 7],
+            &names,
+            &mut slots2,
+            &mut report
+        ));
+        assert!(slots2.get(&7).unwrap().contains("gate a"));
+    }
+
+    #[test]
+    fn a_persistent_lever_at_an_unsaved_door_warns() {
+        let mut names = NameInterner::default();
+        let mut logic = Vec::new();
+        let mut report = PlaytestValidationReport::default();
+        assert!(push_node(
+            "gate",
+            &door(),
+            false,
+            &mut names,
+            &mut logic,
+            &mut report
+        ));
+        let kind = crate::InteractableKind::Switch {
+            target: "gate".into(),
+            behavior: crate::SwitchBehavior::Toggle,
+            unlocks: false,
+            persistent: true,
+        };
+        let (mut messages, mut pages, mut pages_it) = (Vec::new(), Vec::new(), Vec::new());
+        assert!(push_interactable(
+            "lever",
+            0,
+            [0; 3],
+            0,
+            InteractableComponent {
+                kind: &kind,
+                prompt: "PULL",
+                radius: 8,
+                enabled: true,
+            },
+            &mut names,
+            &mut messages,
+            &mut pages,
+            &mut pages_it,
+            &mut Vec::new(),
+            &mut logic,
+            &mut report,
+        ));
+        assert!(check_switch_targets(&logic, &names, &mut report));
+        assert!(report.warnings.iter().any(|w| w.contains("not persistent")));
     }
 }

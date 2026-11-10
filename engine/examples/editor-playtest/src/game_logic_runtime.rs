@@ -1835,7 +1835,9 @@ impl Playtest {
                         self.box_props.set_door_open(usize::from(record.link), open);
                     }
                     self.door_motion_sound(index, open);
+                    self.store_persistent_logic(index);
                 }
+                psx_level::logic_kind::SWITCH => self.store_persistent_logic(index),
                 psx_level::logic_kind::MESSAGE => {
                     self.open_logic_message(index, record);
                 }

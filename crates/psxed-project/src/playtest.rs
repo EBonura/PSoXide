@@ -1644,6 +1644,7 @@ pub fn build_package(
                 delay_ticks,
                 wait_ticks,
                 enabled,
+                persistent,
             } => {
                 let ok = report.blaming(PlaytestValidationTarget::Node(node.id), |report| {
                     push_logic_node(
@@ -1657,6 +1658,7 @@ pub fn build_package(
                         *delay_ticks,
                         *wait_ticks,
                         *enabled,
+                        *persistent,
                         &mut names,
                         &mut interactable_messages,
                         &mut interactable_message_pages,
@@ -1747,6 +1749,13 @@ pub fn build_package(
             ));
         }
     }
+    claim_logic_persistence_slots(
+        &logic,
+        &logic_ids,
+        &names,
+        &mut persistence_slots,
+        &mut report,
+    );
     let world_objects = cook_world_objects(
         &image_props,
         &box_props,
