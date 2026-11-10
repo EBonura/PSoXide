@@ -16,6 +16,7 @@
 //! * [`spiral`]: stairs winding round a ring of sectors, a slab per tread.
 //! * [`rules`]: the smart paint rules and the shared writing helpers.
 
+pub mod arcade;
 pub mod break_verb;
 pub mod common;
 pub mod corridor;
@@ -105,6 +106,8 @@ impl Snapshot {
     }
 }
 
+#[cfg(test)]
+mod arcade_tests;
 #[cfg(test)]
 mod corridor_tests;
 #[cfg(test)]
