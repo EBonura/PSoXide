@@ -292,3 +292,14 @@ fn a_domed_chamber_has_its_crown_in_the_middle_and_four_piers() {
     assert_eq!(ceil(3, 5)[0], ceil(12, 5)[1]);
     crate::grid::cook::tests::cook(&w).expect("a dome cooks");
 }
+
+#[test]
+fn the_six_graybox_roles_are_six_different_materials_in_a_new_project() {
+    let mut project = crate::ProjectDocument::new("t");
+    crate::grid::graybox_set::add_to(&mut project);
+    let r = Roles::graybox(&project);
+    let all = [r.floor, r.wall, r.ceiling, r.trim, r.accent, r.ground];
+    assert!(all.iter().all(Option::is_some), "{all:?}");
+    let distinct: BTreeSet<String> = all.iter().map(|m| format!("{m:?}")).collect();
+    assert_eq!(distinct.len(), 6);
+}

@@ -157,12 +157,12 @@ impl Roles {
                 .map(|r| r.id)
         };
         Self {
-            floor: find("Graybox / Warm Stone"),
-            wall: find("Graybox / Light Frieze"),
-            ceiling: find("Graybox / Wood"),
-            trim: find("Graybox / Dark Trim"),
-            accent: find("Graybox / Metal"),
-            ground: find("Graybox / Moss"),
+            floor: find("Graybox / Warm Stone 64"),
+            wall: find("Graybox / Light Frieze 64"),
+            ceiling: find("Graybox / Wood 64"),
+            trim: find("Graybox / Dark Trim 64"),
+            accent: find("Graybox / Metal 64"),
+            ground: find("Graybox / Moss 64"),
         }
     }
 }

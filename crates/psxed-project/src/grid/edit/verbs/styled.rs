@@ -560,6 +560,22 @@ pub fn lay_styled_corridor(
     let mut styled = 0;
     let mut spots: Vec<([i32; 2], i32, i32)> = Vec::new();
     let omin = offsets(p.width).next().unwrap_or(0);
+    // A cell two legs both reach (a corner of a wide corridor) stays plain.
+    let mut reached: BTreeMap<[i32; 2], usize> = BTreeMap::new();
+    for i in 0..p.waypoints.len() - 1 {
+        let (a, b) = (p.waypoints[i].cell, p.waypoints[i + 1].cell);
+        let d = [(b[0] - a[0]).signum(), (b[1] - a[1]).signum()];
+        let len = (b[0] - a[0]).abs() + (b[1] - a[1]).abs();
+        let lat = [-d[1], d[0]];
+        for k in 1..len {
+            for o in offsets(p.width) {
+                let cell = [a[0] + d[0] * k + lat[0] * o, a[1] + d[1] * k + lat[1] * o];
+                if !landing.contains(&cell) {
+                    *reached.entry(cell).or_default() += 1;
+                }
+            }
+        }
+    }
     for i in 0..p.waypoints.len() - 1 {
         let (a, b) = (p.waypoints[i].cell, p.waypoints[i + 1].cell);
         let d = [(b[0] - a[0]).signum(), (b[1] - a[1]).signum()];
@@ -613,7 +629,7 @@ pub fn lay_styled_corridor(
         for k in k0..=k_last {
             for o in offsets(p.width) {
                 let cell = [a[0] + d[0] * k + lat[0] * o, a[1] + d[1] * k + lat[1] * o];
-                if !landing.contains(&cell) {
+                if !landing.contains(&cell) && reached.get(&cell) == Some(&1) {
                     cells.insert(cell);
                 }
             }

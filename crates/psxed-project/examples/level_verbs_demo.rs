@@ -36,6 +36,10 @@ use psxed_project::grid::edit::verbs::opening::{
 };
 use psxed_project::grid::edit::verbs::room::{lay_room, Footprint, RoomParams, RoomTarget};
 use psxed_project::grid::edit::verbs::ruin::{ruin_region, RuinParams};
+use psxed_project::grid::edit::verbs::style::{self, Roles};
+use psxed_project::grid::edit::verbs::styled::{
+    lay_styled_corridor, lay_styled_room, StyledCorridor, StyledRoom,
+};
 use psxed_project::grid::edit::verbs::terrain::{lay_terrain, Edge, TerrainParams};
 use psxed_project::grid::edit::CellRect;
 use psxed_project::grid::starter::{create_project, starter_world};
@@ -73,6 +77,10 @@ fn outside_cell(door: &psxed_project::grid::edit::verbs::opening::DoorPlane) -> 
     let x = door.center[0] + door.through[0] * SECTOR_UNITS / 2;
     let z = door.center[2] + door.through[1] * SECTOR_UNITS / 2;
     [x.div_euclid(SECTOR_UNITS), z.div_euclid(SECTOR_UNITS)]
+}
+
+fn arg_flag(name: &str) -> bool {
+    std::env::args().skip(1).any(|a| a == name)
 }
 
 fn arg(name: &str) -> Option<PathBuf> {
@@ -121,6 +129,197 @@ fn cook_check(project: &ProjectDocument, dir: &std::path::Path) {
     }
 }
 
+/// Put the player on `spawn`, replace the starter lamp by `lamps` and save.
+fn finish(
+    project: &mut ProjectDocument,
+    path: &std::path::Path,
+    world: &GridWorld,
+    spawn: [i32; 2],
+    lamps: &[(&str, i32, i32)],
+) {
+    // The player and a lamp at each piece.
+    let scene = project.active_scene_mut();
+    let to_editor = |gu: i32| world.scale.to_editor(gu) as f32;
+    let player = scene
+        .nodes()
+        .iter()
+        .find(|n| {
+            n.children.iter().any(|c| {
+                scene.node(*c).is_some_and(|k| {
+                    matches!(&k.kind, NodeKind::CharacterController { player: true, .. })
+                })
+            })
+        })
+        .map(|n| n.id)
+        .expect("a player entity");
+    let half = SECTOR_UNITS / 2;
+    if let Some(node) = scene.node_mut(player) {
+        node.transform.translation[0] = to_editor(spawn[0] * SECTOR_UNITS + half);
+        node.transform.translation[2] = to_editor(spawn[1] * SECTOR_UNITS + half);
+        node.transform.rotation_degrees = [0.0, 90.0, 0.0];
+    }
+    let old: Vec<NodeId> = scene
+        .nodes()
+        .iter()
+        .filter(|n| matches!(n.kind, NodeKind::PointLight { .. }))
+        .map(|n| n.id)
+        .collect();
+    for id in old {
+        scene.remove_node(id);
+    }
+    let unit = scene
+        .world_sector_size_for_node(NodeId::ROOT)
+        .unwrap_or(1024)
+        .max(1) as f32;
+    for &(name, x, z) in lamps {
+        let lamp = scene.add_node(
+            NodeId::ROOT,
+            name,
+            NodeKind::PointLight {
+                color: [255, 224, 180],
+                intensity: 1.4,
+                radius: 5.0 * world.scale.sector_editor_units() as f32 / unit,
+            },
+        );
+        if let Some(node) = scene.node_mut(lamp) {
+            node.transform.translation = [to_editor(x), to_editor(1500), to_editor(z)];
+        }
+    }
+    scene.world = SceneWorld::Grid(world.clone());
+    project.save_to_path(path).expect("the project saves");
+    println!("wrote {}", path.display());
+}
+
+/// The styles demo: one corridor per built-in style side by side, a domed
+/// chamber and a cloister walk, all opening onto a flat courtyard.
+fn styles_demo(mut project: ProjectDocument, path: &std::path::Path, roles: Roles) {
+    let mut world: GridWorld = starter_world(roles.floor, roles.wall, roles.ceiling);
+    world.rooms.clear();
+    let mut yard = GridRoom::new_derived("Courtyard", 1, 1);
+    yard.defaults.wall_material = roles.wall;
+    world.rooms.push(yard);
+    let mut t = TerrainParams::new(0, rect([0, 0], [11, 45]).cells().collect(), 1);
+    t.base = Some(0);
+    t.create = true;
+    t.amplitude_clicks = 0;
+    t.follow_ceiling = false;
+    t.material = roles.ground;
+    lay_terrain(&mut world, &t).expect("the courtyard");
+    let mut names: Vec<(usize, String)> = Vec::new();
+    let mut lamps: Vec<(String, i32, i32)> = Vec::new();
+    let door = |world: &mut GridWorld, room: usize, z: i32, top: i32| {
+        cut_opening(
+            world,
+            &OpeningParams {
+                profile: OpeningProfile::Rectangular,
+                room,
+                cell: [12, z],
+                side: WallEdge::West,
+                from: z * 4,
+                to: (z + 2) * 4,
+                kind: OpeningKind::Door,
+                top,
+                material: roles.trim,
+            },
+        )
+        .expect("a door onto the courtyard");
+    };
+    // One corridor per style, 20 sectors long, two wide.
+    for (i, s) in [
+        style::plain(),
+        style::scifi_rib(),
+        style::gothic_nave(),
+        style::cloister(),
+        style::crypt(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let z = 2 + 5 * i as i32;
+        let top = (s.headroom - 256).min(2048);
+        let name = s.name.clone();
+        let out = lay_styled_corridor(
+            &mut world,
+            &StyledCorridor {
+                target: RoomTarget::New(name.clone()),
+                waypoints: vec![Waypoint::at_height([12, z], 0), Waypoint::at([32, z])],
+                width: 2,
+                base: 0,
+                leg: LegShape::Ramp,
+                style: s,
+                roles,
+            },
+        )
+        .expect("a styled corridor");
+        door(&mut world, out.room, z, top);
+        names.push((out.room, name.clone()));
+        lamps.push((format!("{name} light"), 20 * 1024, (z * 1024) + 1024));
+    }
+    // The domed chamber on four piers.
+    let dome = lay_styled_room(
+        &mut world,
+        &StyledRoom {
+            target: RoomTarget::New("Domed chamber".into()),
+            rect: rect([12, 27], [15, 30]),
+            base: 0,
+            style: style::domed_chamber(),
+            roles,
+        },
+    )
+    .expect("the domed chamber");
+    door(&mut world, dome.room, 28, 2048);
+    names.push((dome.room, "Domed chamber".into()));
+    lamps.push(("Dome light".into(), 14 * 1024, 29 * 1024));
+    // A cloister walk: groin vaults round a U.
+    let walk = lay_styled_corridor(
+        &mut world,
+        &StyledCorridor {
+            target: RoomTarget::New("Cloister walk".into()),
+            waypoints: vec![
+                Waypoint::at_height([12, 34], 0),
+                Waypoint::at([28, 34]),
+                Waypoint::at([28, 42]),
+                Waypoint::at([12, 42]),
+            ],
+            width: 2,
+            base: 0,
+            leg: LegShape::Ramp,
+            style: style::cloister(),
+            roles,
+        },
+    )
+    .expect("the cloister walk");
+    door(&mut world, walk.room, 34, 2048);
+    names.push((walk.room, "Cloister walk".into()));
+    lamps.push(("Cloister light".into(), 20 * 1024, 35 * 1024));
+    lamps.push((
+        "Spawn Light".into(),
+        SPAWN[0] * 1024 + 512,
+        SPAWN[1] * 1024 + 512,
+    ));
+    let lamp_refs: Vec<(&str, i32, i32)> =
+        lamps.iter().map(|(n, x, z)| (n.as_str(), *x, *z)).collect();
+    finish(&mut project, path, &world, SPAWN, &lamp_refs);
+    // What each style costs.
+    let faces = psxed_project::grid::faces::room_face_counts(&world);
+    println!("faces per room (cost of each style):");
+    for (room, name) in &names {
+        let r = &world.rooms[*room];
+        println!(
+            "  {name:>14}: {:>5} faces, {:>4} leaves, {:>2} meshes",
+            faces[*room],
+            r.leaf_count(),
+            r.meshes.len()
+        );
+    }
+    println!("  {:>14}: {:>5} faces", "Courtyard", faces[0]);
+    cook_check(
+        &project,
+        path.parent()
+            .map_or(path, |_| path.parent().unwrap_or(path)),
+    );
+}
+
 fn main() {
     if let Some(dir) = arg("--check") {
         let project =
@@ -134,9 +333,23 @@ fn main() {
     let path = create_project(&base, &out, "Level verbs demo").expect("the starter is made");
     let mut project = ProjectDocument::load_from_path(&path).expect("the starter loads");
 
-    let ground = material(&project, "Graybox / Ground 64");
-    let walls = material(&project, "Graybox / Original 64");
-    let roof = material(&project, "Graybox / Cliff 64");
+    // The six distinct Graybox materials by role (stone floor, light walls,
+    // wood ceiling, dark trim, metal accent, moss ground); the near-identical
+    // blue ones only as a fallback.
+    let roles = Roles::graybox(&project);
+    if arg_flag("--styles") {
+        styles_demo(project, &path, roles);
+        return;
+    }
+    let ground = roles
+        .floor
+        .or_else(|| material(&project, "Graybox / Ground 64"));
+    let walls = roles
+        .wall
+        .or_else(|| material(&project, "Graybox / Original 64"));
+    let roof = roles
+        .ceiling
+        .or_else(|| material(&project, "Graybox / Cliff 64"));
     // The starter's own world settings (shading, global light, scale); the
     // rooms are ours.
     let mut world: GridWorld = starter_world(ground, walls, roof);
@@ -333,7 +546,7 @@ fn main() {
     t.amplitude_clicks = 1;
     t.edge = Edge::Cliff;
     t.follow_ceiling = false;
-    t.material = ground;
+    t.material = roles.ground.or(ground);
     let report = lay_terrain(&mut world, &t).expect("the courtyard");
     let mut pads: Vec<[i32; 2]> = doors.clone();
     pads.push(SPAWN);
@@ -355,64 +568,20 @@ fn main() {
     // Now the ruin, with the spawn on a floor.
     let ruin_report = ruin_region(&mut world, &ruin_later).expect("the ruin");
 
-    // The player and a lamp at each piece.
-    let scene = project.active_scene_mut();
-    let to_editor = |gu: i32| world.scale.to_editor(gu) as f32;
-    let player = scene
-        .nodes()
-        .iter()
-        .find(|n| {
-            n.children.iter().any(|c| {
-                scene.node(*c).is_some_and(|k| {
-                    matches!(&k.kind, NodeKind::CharacterController { player: true, .. })
-                })
-            })
-        })
-        .map(|n| n.id)
-        .expect("a player entity");
-    let half = SECTOR_UNITS / 2;
-    if let Some(node) = scene.node_mut(player) {
-        node.transform.translation[0] = to_editor(SPAWN[0] * SECTOR_UNITS + half);
-        node.transform.translation[2] = to_editor(SPAWN[1] * SECTOR_UNITS + half);
-        node.transform.rotation_degrees = [0.0, 90.0, 0.0];
-    }
-    let old: Vec<NodeId> = scene
-        .nodes()
-        .iter()
-        .filter(|n| matches!(n.kind, NodeKind::PointLight { .. }))
-        .map(|n| n.id)
-        .collect();
-    for id in old {
-        scene.remove_node(id);
-    }
-    let unit = scene
-        .world_sector_size_for_node(NodeId::ROOT)
-        .unwrap_or(1024)
-        .max(1) as f32;
-    for (name, x, z) in [
-        ("Spawn Light", SPAWN[0] * 1024 + 512, SPAWN[1] * 1024 + 512),
-        ("Cathedral Light", 14 * 1024, 6 * 1024),
-        ("Ruin Light", 14 * 1024, 20 * 1024),
-        ("Building Light", 34 * 1024, 6 * 1024),
-        ("Tower Light", 50 * 1024, 6 * 1024),
-        ("Hall Light", 46 * 1024, 20 * 1024),
-    ] {
-        let lamp = scene.add_node(
-            NodeId::ROOT,
-            name,
-            NodeKind::PointLight {
-                color: [255, 224, 180],
-                intensity: 1.4,
-                radius: 5.0 * world.scale.sector_editor_units() as f32 / unit,
-            },
-        );
-        if let Some(node) = scene.node_mut(lamp) {
-            node.transform.translation = [to_editor(x), to_editor(1500), to_editor(z)];
-        }
-    }
-    scene.world = SceneWorld::Grid(world.clone());
-    project.save_to_path(&path).expect("the project saves");
-    println!("wrote {}", path.display());
+    finish(
+        &mut project,
+        &path,
+        &world,
+        SPAWN,
+        &[
+            ("Spawn Light", SPAWN[0] * 1024 + 512, SPAWN[1] * 1024 + 512),
+            ("Cathedral Light", 14 * 1024, 6 * 1024),
+            ("Ruin Light", 14 * 1024, 20 * 1024),
+            ("Building Light", 34 * 1024, 6 * 1024),
+            ("Tower Light", 50 * 1024, 6 * 1024),
+            ("Hall Light", 46 * 1024, 20 * 1024),
+        ],
+    );
 
     // Report: budget, reachability and the playtest cook.
     let budget = GridBudget::of(&world);
