@@ -138,7 +138,8 @@ pub(crate) fn collect_runtime_model_clip_requirements(
                 add_model_clip_requirement(project, &mut out, resource.id, None);
             }
             ResourceData::Character(character) => {
-                add_character_clip_requirements(project, &mut out, character);
+                let enemy = character.spawn_role == crate::CharacterSpawnRole::Enemy;
+                add_character_clip_requirements(project, &mut out, character, enemy);
             }
             ResourceData::Weapon(weapon) => {
                 if let Some(model) = weapon.model {
@@ -172,7 +173,8 @@ pub(crate) fn collect_runtime_model_clip_requirements(
                         if let Some(ResourceData::Character(character)) =
                             project.resource(character_id).map(|r| &r.data)
                         {
-                            add_character_clip_requirements(project, &mut out, character);
+                            let enemy = !controller.player;
+                            add_character_clip_requirements(project, &mut out, character, enemy);
                         }
                     }
                 }
@@ -201,15 +203,22 @@ pub(crate) fn collect_runtime_model_clip_requirements(
             NodeKind::SpawnPoint {
                 character: Some(character_id),
                 ..
+            } => {
+                if let Some(ResourceData::Character(character)) =
+                    project.resource(*character_id).map(|r| &r.data)
+                {
+                    add_character_clip_requirements(project, &mut out, character, false);
+                }
             }
-            | NodeKind::CharacterController {
+            NodeKind::CharacterController {
                 character: Some(character_id),
+                player,
                 ..
             } => {
                 if let Some(ResourceData::Character(character)) =
                     project.resource(*character_id).map(|r| &r.data)
                 {
-                    add_character_clip_requirements(project, &mut out, character);
+                    add_character_clip_requirements(project, &mut out, character, !*player);
                 }
             }
             _ => {}
@@ -219,10 +228,51 @@ pub(crate) fn collect_runtime_model_clip_requirements(
     out
 }
 
+/// The actions an enemy's cooked state clips read (see [`game_entity_state_clips`]), and no
+/// others: an enemy never rolls, blocks or aims, so those clips are not resident for it. The
+/// ranged action is the one its projectile emitter names. A hit reaction is only the stagger
+/// when the set has no stun clip, so it is resident only then.
+fn enemy_clip_actions(
+    project: &ProjectDocument,
+    set: &crate::AnimationSetResource,
+    character: &crate::CharacterResource,
+) -> Vec<CharacterAnimationAction> {
+    let ranged = character
+        .combat_capsules
+        .iter()
+        .find_map(|volume| match volume.role {
+            crate::CombatCapsuleRole::ProjectileEmitter { action, .. } => Some(action),
+            _ => None,
+        })
+        .unwrap_or(CharacterAnimationAction::RangedAttack);
+    let mut actions = vec![
+        CharacterAnimationAction::Idle,
+        CharacterAnimationAction::Intro,
+        CharacterAnimationAction::Turn,
+        CharacterAnimationAction::Walk,
+        CharacterAnimationAction::WalkBackward,
+        CharacterAnimationAction::StrafeLeft,
+        CharacterAnimationAction::StrafeRight,
+        CharacterAnimationAction::Run,
+        CharacterAnimationAction::LightAttack,
+        CharacterAnimationAction::HeavyAttack,
+        ranged,
+        CharacterAnimationAction::Stun,
+        CharacterAnimationAction::Death,
+    ];
+    if animation_set_action_clip(project, set, CharacterAnimationAction::Stun).is_none() {
+        actions.push(CharacterAnimationAction::HitReact);
+    }
+    actions
+}
+
+/// Mark the clips `character` can play as resident. `enemy` limits that to the actions an
+/// enemy's state machine reads; a player placement keeps every action of its set.
 pub(crate) fn add_character_clip_requirements(
     project: &ProjectDocument,
     out: &mut HashMap<ResourceId, BTreeSet<u16>>,
     character: &crate::CharacterResource,
+    enemy: bool,
 ) {
     let Some(model) = character.model else {
         return;
@@ -240,7 +290,12 @@ pub(crate) fn add_character_clip_requirements(
         return;
     };
 
-    for action in CharacterAnimationAction::ALL {
+    let actions = if enemy {
+        enemy_clip_actions(project, set, character)
+    } else {
+        CharacterAnimationAction::ALL.to_vec()
+    };
+    for action in actions {
         if let Some(animation_id) = animation_set_action_clip(project, set, action) {
             if let Some(index) = project.resolved_model_animation_index(model, animation_id) {
                 add_model_clip_requirement(project, out, model, Some(index));
@@ -1929,6 +1984,19 @@ pub(crate) fn register_model_for_instance(
         let corrected_anim = psx_asset::Animation::from_bytes(&animation_bytes)
             .expect("host-generated corrected animation must parse");
         let cooked_frame_count = corrected_anim.frame_count();
+        // One line per resident clip: the audit trail of what a model carries in RAM, in the
+        // order the runtime table has it. Cheap to grep next to the resample and track lines.
+        crate::playtest::emit_cook_output(format_args!(
+            "[cook] clip {label}: {} frames at {} Hz, {} B resident, {}",
+            cooked_frame_count,
+            corrected_anim.sample_rate_hz(),
+            animation_bytes.len(),
+            if corrected_anim.is_keyed_tracks() {
+                "keyed tracks"
+            } else {
+                "pose table"
+            },
+        ));
         let baked_bounds =
             bake_model_clip_frame_bounds(&parsed_model, &corrected_anim, frame_bounds_pad);
         let frame_count = match u16::try_from(baked_bounds.len()) {
@@ -4007,6 +4075,83 @@ mod socket_anchor_tests {
         assert_eq!(ticks(Some((10, 17)), 256, Range::FULL), 92);
         assert_eq!(ticks(Some((30, 44)), 0, Range::FULL), 32);
         assert_eq!(ticks(None, 256, Range::FULL), 32);
+    }
+
+    /// An enemy's state machine reads a fixed set of actions. A roll, a block or an aim clip
+    /// bound in the same set is not resident for it, and a hit reaction is resident only while
+    /// no stun clip stands in for the stagger. A player placement keeps every bound clip.
+    #[test]
+    fn an_enemy_keeps_only_the_clips_its_states_can_play() {
+        use super::*;
+        let mut project = ProjectDocument::new("enemy clips");
+        let model_data: ResourceData =
+            ron::from_str(r#"Model((model_path: "model.psxmdl", skeleton: Some((900))))"#).unwrap();
+        let model_id = project.add_resource("model", model_data);
+        let actions = [
+            CharacterAnimationAction::Idle,
+            CharacterAnimationAction::Stun,
+            CharacterAnimationAction::HitReact,
+            CharacterAnimationAction::Roll,
+            CharacterAnimationAction::Death,
+        ];
+        let mut set = crate::AnimationSetResource::defaults();
+        let mut clip_ids = Vec::new();
+        for action in actions {
+            let clip: crate::AnimationClipResource = ron::from_str(&format!(
+                r#"(psxanim_path: "{}.psxanim", skeleton: Some((900)))"#,
+                action.label()
+            ))
+            .unwrap();
+            let id = project.add_resource(action.label(), ResourceData::AnimationClip(clip));
+            set.set_action_clip(action, Some(id));
+            clip_ids.push(id);
+        }
+        let set_id = project.add_resource("set", ResourceData::AnimationSet(set));
+        let mut character = crate::CharacterResource::defaults();
+        character.model = Some(model_id);
+        character.animation_set = Some(set_id);
+        let index_of = |project: &ProjectDocument, action: usize| {
+            project
+                .resolved_model_animation_index(model_id, clip_ids[action])
+                .unwrap()
+        };
+        let resident = |project: &ProjectDocument, enemy: bool| {
+            let mut out = HashMap::new();
+            add_character_clip_requirements(project, &mut out, &character, enemy);
+            out.remove(&model_id).unwrap_or_default()
+        };
+        let player = resident(&project, false);
+        let enemy = resident(&project, true);
+        for (position, action) in actions.iter().enumerate() {
+            assert!(
+                player.contains(&index_of(&project, position)),
+                "a player keeps {action:?}"
+            );
+        }
+        assert!(enemy.contains(&index_of(&project, 0)), "idle");
+        assert!(enemy.contains(&index_of(&project, 1)), "stun");
+        assert!(enemy.contains(&index_of(&project, 4)), "death");
+        assert!(
+            !enemy.contains(&index_of(&project, 2)),
+            "hit react, a stun exists"
+        );
+        assert!(!enemy.contains(&index_of(&project, 3)), "roll");
+
+        // Without a stun clip the hit reaction is the stagger and stays.
+        let mut set = crate::AnimationSetResource::defaults();
+        for (action, id) in actions.iter().zip(&clip_ids) {
+            if *action != CharacterAnimationAction::Stun {
+                set.set_action_clip(*action, Some(*id));
+            }
+        }
+        if let Some(resource) = project.resource_mut(set_id) {
+            resource.data = ResourceData::AnimationSet(set);
+        }
+        let enemy = resident(&project, true);
+        assert!(
+            enemy.contains(&index_of(&project, 2)),
+            "hit react without stun"
+        );
     }
 
     #[test]
