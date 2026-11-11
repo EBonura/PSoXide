@@ -167,12 +167,12 @@ fn gaps_are_reported_not_refused() {
         .into_iter()
         .find(|v| !v.addr.authored)
         .unwrap();
-    let (_, warn) =
+    let (set, warn) =
         set_wall_heights(&mut w, closure.addr, [None, None, Some(1024), Some(1024)]).unwrap();
     assert_eq!(warn, vec![WallWarning::GapAbove(4096 - 1024)]);
-    // A bottom above the floor leaves a gap under it.
-    let (_, warn) =
-        set_wall_heights(&mut w, closure.addr, [Some(512), Some(512), None, None]).unwrap();
+    // A bottom above the floor leaves a gap under it (the wall is now the
+    // record the first edit made: the replaced face is not listed again).
+    let (_, warn) = set_wall_heights(&mut w, set, [Some(512), Some(512), None, None]).unwrap();
     assert!(
         warn.iter().any(|x| matches!(x, WallWarning::GapBelow(512))),
         "{warn:?}"
@@ -250,4 +250,16 @@ fn an_opening_can_be_cut_and_closed_on_any_storey() {
     let open = views.iter().find(|v| v.opening.is_some()).unwrap().addr;
     set_wall_opening(&mut w, open, None).unwrap();
     assert_eq!(faces(&w), before, "closed again");
+}
+
+#[test]
+fn a_wall_replaced_by_a_set_height_is_listed_once() {
+    let mut w = level();
+    let r = riser(&w);
+    let (placed, _) =
+        set_wall_heights(&mut w, r.addr, [None, None, Some(1024), Some(1024)]).unwrap();
+    let views = walls_at(&w, 0, LeafKey::sector([1, 0]), WallEdge::East);
+    let in_span = views.iter().filter(|v| v.addr.span == placed.span).count();
+    assert_eq!(in_span, 1, "one wall per edge and span: {views:?}");
+    assert!(views[0].addr.authored);
 }

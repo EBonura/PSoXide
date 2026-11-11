@@ -71,6 +71,8 @@ pub struct TiltParams {
     pub target: TiltTarget,
     /// The hinge.
     pub hinge: Hinge,
+    /// The storey of the column to lean (0 is the ground span).
+    pub span: usize,
     /// Offset at the far side, grid units (negative leans down).
     pub rise: i32,
     /// Apply even where a floor ends up steeper than a body can stand on.
@@ -228,7 +230,11 @@ pub fn tilt_cells(world: &mut GridWorld, p: &TiltParams) -> Result<TiltOutcome, 
         };
         let mut changed = false;
         if floors {
-            if let Some(f) = sector.ground_floor_mut() {
+            if let Some(f) = sector
+                .spans_mut()
+                .get_mut(p.span)
+                .and_then(|s| s.floor.as_mut())
+            {
                 let was_steep = units
                     .as_ref()
                     .is_some_and(|u| surface_class(u, y_offset, f, &limits) == SlopeClass::Steep);
@@ -252,7 +258,11 @@ pub fn tilt_cells(world: &mut GridWorld, p: &TiltParams) -> Result<TiltOutcome, 
             }
         }
         if ceilings {
-            if let Some(c) = sector.ground_ceiling_mut() {
+            if let Some(c) = sector
+                .spans_mut()
+                .get_mut(p.span)
+                .and_then(|s| s.ceiling.as_mut())
+            {
                 for i in 0..4 {
                     c.heights[i] += applied[i];
                     if let Some(b) = c.heights_b.as_mut() {
@@ -265,7 +275,11 @@ pub fn tilt_cells(world: &mut GridWorld, p: &TiltParams) -> Result<TiltOutcome, 
                 }
             }
         }
-        if let (Some(f), Some(c)) = (sector.ground_floor(), sector.ground_ceiling()) {
+        if let (Some(f), Some(c)) = sector
+            .spans()
+            .get(p.span)
+            .map_or((None, None), |s| (s.floor.as_ref(), s.ceiling.as_ref()))
+        {
             if f.heights.iter().zip(c.heights.iter()).any(|(f, c)| f >= c) {
                 return Err(TiltRefusal::MeetsCeiling(cell));
             }

@@ -785,6 +785,7 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
             target: TiltTarget::Floor,
             hinge: Hinge::Edge(RampDir::North),
             rise: 512,
+            span: 0,
             force: false,
         },
     )

@@ -165,6 +165,7 @@ fn tilt_leans_a_platform_without_flattening_it() {
         target: TiltTarget::Floor,
         hinge: Hinge::Edge(RampDir::West),
         rise: 512,
+        span: 0,
         force: false,
     };
     let out = tilt_cells(&mut w, &p).unwrap();
@@ -191,6 +192,7 @@ fn tilt_refuses_a_too_steep_floor_unless_forced_and_never_through_the_ceiling() 
         target: TiltTarget::Both,
         hinge: Hinge::Corner(BoxCorner::NorthWest),
         rise: 4096,
+        span: 0,
         force: false,
     };
     let before = w.clone();
@@ -213,10 +215,50 @@ fn tilt_refuses_a_too_steep_floor_unless_forced_and_never_through_the_ceiling() 
         target: TiltTarget::Floor,
         hinge: Hinge::Edge(RampDir::North),
         rise: 3072,
+        span: 0,
         force: true,
     };
     assert!(matches!(
         tilt_cells(&mut w, &up),
         Err(TiltRefusal::MeetsCeiling(_))
     ));
+}
+
+#[test]
+fn tilt_leans_the_storey_it_is_told_to_and_leaves_the_ground_alone() {
+    let mut w = empty();
+    let mut p = RoomParams::new(
+        Footprint::Rect(CellRect::from_corners([0, 0], [2, 2])),
+        "tall",
+        5120,
+    );
+    p.leaves = super::verbs::room::LeafPolicy::Sectors;
+    let r = lay_room(&mut w, &p).unwrap().room;
+    let one = CellRect::from_corners([1, 1], [1, 1]);
+    super::spans::insert_slab(&mut w, r, one, 2048, 256, None);
+    let spans = |w: &GridWorld| {
+        let s = w.rooms[r].leaf(LeafKey::sector([1, 1])).unwrap();
+        s.spans()
+            .iter()
+            .map(|sp| sp.floor.as_ref().map(|f| f.heights))
+            .collect::<Vec<_>>()
+    };
+    let before = spans(&w);
+    assert!(before.len() >= 2, "a storey above the ground");
+    tilt_cells(
+        &mut w,
+        &TiltParams {
+            room: r,
+            cells: cells([1, 1], [1, 1]),
+            target: TiltTarget::Floor,
+            hinge: Hinge::Edge(RampDir::North),
+            span: 1,
+            rise: 256,
+            force: false,
+        },
+    )
+    .unwrap();
+    let after = spans(&w);
+    assert_eq!(after[0], before[0], "the ground did not move");
+    assert_ne!(after[1], before[1], "the upper floor leans");
 }

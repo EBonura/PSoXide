@@ -34,6 +34,7 @@ use crate::grid::leaf_derive::derived_walls_of;
 use crate::grid::limits::MAX_WALLS_PER_EDGE;
 use crate::grid::sector::WallEdge;
 use crate::grid::surface::{GridWall, WallFacing};
+use crate::grid::units::FINE_UNITS;
 use crate::grid::world::GridWorld;
 use crate::ResourceId;
 
@@ -201,6 +202,23 @@ pub fn walls_at(world: &GridWorld, room: usize, leaf: LeafKey, side: WallEdge) -
         .any(|(j, o)| j != room && o.leaf_at(probe).is_some());
     let mut out = Vec::new();
     for (i, w) in derived_on(world, room, leaf, side).into_iter().enumerate() {
+        // The face a Set height replaced stays hidden under its record; it is
+        // not a second wall. (A door's hidden face has a lintel above the
+        // opening and a window's has a sill and a lintel, so neither is one
+        // record reaching the floor.)
+        if w.hidden && w.solid == Some(false) {
+            let floor = w.edge_heights().map_or(0, |h| h[0].min(h[1]));
+            let in_span: Vec<_> = sector
+                .walls(side)
+                .iter()
+                .filter(|a| span_of(sector, &a.heights) == w.span)
+                .collect();
+            let replaced = in_span.len() == 1
+                && in_span[0].heights[0].min(in_span[0].heights[1]) <= floor + FINE_UNITS;
+            if replaced {
+                continue;
+            }
+        }
         let o = r.edge_overrides.get(&w.key);
         let heights = w.edge_heights().unwrap_or([0; 4]);
         out.push(WallView {
