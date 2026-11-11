@@ -77,6 +77,11 @@ pub struct BuildingParams {
     pub window_arch: Option<ArchShape>,
     /// An interior spiral stair linking the storeys (needs more than one).
     pub stair: bool,
+    /// The stair's riser. A lap of the smallest ring (3 by 3, four treads)
+    /// must climb more than a body and a slab to be walkable, so the default
+    /// is `Max`: the tallest riser of at most 448 that divides the storey
+    /// height evenly, so every storey comes out exact.
+    pub riser: RiserOption,
     /// A flat roof; the value is the parapet height, grid units.
     pub roof_parapet: Option<i32>,
     /// Moves the doors and the window phase.
@@ -107,6 +112,7 @@ impl BuildingParams {
             window_top: 2048,
             window_arch: None,
             stair: true,
+            riser: RiserOption::Max,
             roof_parapet: Some(768),
             seed: 0,
             floor_material: None,
@@ -162,6 +168,22 @@ pub struct BuildingReport {
     pub windows: usize,
     /// Things left out and why.
     pub notes: Vec<String>,
+}
+
+/// The riser a building's stair uses: `Max` picks the tallest multiple of the
+/// fine step up to 448 that divides the storey height.
+fn stair_riser(option: RiserOption, storey_height: i32) -> RiserOption {
+    if option != RiserOption::Max {
+        return option;
+    }
+    let mut riser = 448;
+    while riser > 64 {
+        if storey_height % riser == 0 {
+            return RiserOption::Typed(riser);
+        }
+        riser -= 64;
+    }
+    RiserOption::Click
 }
 
 fn find_ring(cells: &BTreeSet<[i32; 2]>) -> Option<CellRect> {
@@ -291,7 +313,7 @@ pub fn build_building(
             &ring,
             SpiralParams {
                 storeys: (p.storeys - 1) as usize,
-                riser: RiserOption::Click,
+                riser: stair_riser(p.riser, p.storey_height),
                 material: p.floor_material,
             },
             p.storey_height,
