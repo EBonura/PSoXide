@@ -136,6 +136,24 @@ fn deck_cells(
     Ok(())
 }
 
+/// The deck mesh draws but does not collide: the floor cells under it carry
+/// the body (their closure walls hold it on the deck), so the walk never
+/// depends on the mesh slab. Parapets and piers keep their collision.
+fn soften_decks(world: &mut GridWorld, room: usize) {
+    let decks: Vec<u16> = world
+        .mesh_assets
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| a.name == "bridge deck")
+        .map(|(i, _)| i as u16)
+        .collect();
+    for mesh in &mut world.rooms[room].meshes {
+        if decks.contains(&mesh.asset) {
+            mesh.collide = false;
+        }
+    }
+}
+
 /// Parts of the level, for tests and the report.
 #[derive(Clone, Debug, Default)]
 pub struct Plan {
@@ -281,7 +299,8 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
         // A deck over no cell is not a place a room can lead onto: lay floor
         // cells a quarter click under its top (inside the slab); they also
         // catch a body that steps off an open edge.
-        deck_cells(world, room, cells([x0, 6], [x1 - 1, 6]), -256, [0, 0])?;
+        deck_cells(world, room, cells([x0, 6], [x1 - 1, 6]), -64, [0, 0])?;
+        soften_decks(world, room);
     }
     let landing = room_named(world, "Landing");
     ghost_edge(world, landing, [5, 6], WallEdge::East);
@@ -342,6 +361,11 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
     cath.wall_material = m.stone_wall;
     cath.ceiling_material = m.vault;
     build_cathedral(world, &cath).map_err(|r| format!("cathedral: {}", r.describe()))?;
+    paint_meshes(
+        world,
+        room_named(world, "Cathedral"),
+        &[m.voussoir, m.vault, m.stone_wall, m.pier],
+    );
     // ---- 4. Courtyard and cloister ---------------------------------------
     let mut yard = cells([10, 11], [23, 19]);
     yard.extend(cells([24, 14], [30, 19]));
@@ -398,6 +422,7 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
         },
     )
     .map_err(|r| format!("crypt: {}", r.describe()))?;
+    paint_meshes(world, room_named(world, "Crypt"), &[m.pier, m.trim]);
     let scifi_roles = Roles {
         floor: m.scifi_panel,
         wall: m.scifi_panel,
@@ -441,6 +466,7 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
         },
     )
     .map_err(|r| format!("dome: {}", r.describe()))?;
+    paint_meshes(world, room_named(world, "Domed chamber"), &[m.pier, m.trim]);
     // ---- 6. The tower -----------------------------------------------------
     let mut tower = BuildingParams::new(
         RoomTarget::New("Tower".into()),

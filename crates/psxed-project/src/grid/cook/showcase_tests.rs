@@ -102,6 +102,19 @@ fn walk(
     zsign: i32,
     units: &RuntimeUnits,
 ) -> (Vec<RoomPoint>, [i32; 2]) {
+    let (stops, span, _) = walk_trail(world, from, legs, ticks, zsign, units);
+    (stops, span)
+}
+
+fn walk_trail(
+    world: &Native,
+    from: RoomPoint,
+    legs: &[[i32; 2]],
+    ticks: u32,
+    zsign: i32,
+    units: &RuntimeUnits,
+) -> (Vec<RoomPoint>, [i32; 2], Vec<RoomPoint>) {
+    let mut trail = Vec::new();
     let cfg: CharacterMotorConfig = if std::env::var("SC_REACH").is_ok() {
         super::motor_harness::reach_config()
     } else {
@@ -130,10 +143,11 @@ fn walk(
                 .expect("in range");
             lo = lo.min(motor.position().y);
             hi = hi.max(motor.position().y);
+            trail.push(motor.position());
         }
         stops.push(motor.position());
     }
-    (stops, [lo, hi])
+    (stops, [lo, hi], trail)
 }
 
 /// The route, in hundredths of a sector. Each entry is a stop.
@@ -269,10 +283,25 @@ fn print_wanted_rooms() {
         ("deck middle", 2, 13 * s, 6 * s + s / 2),
     ] {
         window.invalidate();
-        window.wanted(level, Some((room, [x, 0, z])), Some((room, [x, 0, z])), &mut wanted);
+        window.wanted(
+            level,
+            Some((room, [x, 0, z])),
+            Some((room, [x, 0, z])),
+            &mut wanted,
+        );
         let names: Vec<String> = wanted
             .iter()
-            .map(|w| format!("{}{}", w.room, if matches!(w.want, psx_grid::stream::Want::Need) { "" } else { "(lead)" }))
+            .map(|w| {
+                format!(
+                    "{}{}",
+                    w.room,
+                    if matches!(w.want, psx_grid::stream::Want::Need) {
+                        ""
+                    } else {
+                        "(lead)"
+                    }
+                )
+            })
             .collect();
         eprintln!("{label}: {names:?}");
     }
@@ -320,4 +349,59 @@ fn walk_the_written_project() {
         eprintln!("{name:>16}: at {:?} y {}", [p.x, p.z], p.y);
     }
     eprintln!("span {span:?}");
+}
+
+#[test]
+fn the_player_is_always_in_a_needed_room() {
+    use psx_grid::stream::{room_at, StreamWindow, Want};
+    let mut w = made();
+    w.stream = crate::grid::world::StreamRadii {
+        draw_far: 3,
+        active_radius: 3,
+        lead_radius: 1,
+        ..crate::grid::world::StreamRadii::DEFAULT
+    };
+    let cooked = super::tests::cook(&w).expect("cooks");
+    let words: &'static mut [u32] = psx_grid::write::aligned_copy(&cooked.core).leak();
+    // SAFETY: the words live for the program and cover the core's bytes.
+    let core: &'static [u8] =
+        unsafe { core::slice::from_raw_parts(words.as_ptr().cast::<u8>(), cooked.core.len()) };
+    let level = psx_grid::LevelView::parse(core).expect("a level");
+    let units = RuntimeUnits::new(w.scale).unwrap();
+    let nat = native(&w);
+    let start = RoomPoint::new(units.rt(250 * 1024 / 100), 0, units.rt(650 * 1024 / 100));
+    let sign = z_sign(&nat, start);
+    let legs: Vec<[i32; 2]> = ROUTE.iter().map(|(_, p)| *p).collect();
+    let (_, _, trail) = walk_trail(&nat, start, &legs, 1500, sign, &units);
+    let mut window = StreamWindow::new(&level);
+    let mut wanted = Vec::new();
+    let (mut hint, mut bad, mut peak) = (0usize, 0usize, 0usize);
+    for p in trail.iter().step_by(4) {
+        let at = [p.x, p.y, p.z];
+        let room = room_at(&level, hint, at);
+        let Some(room) = room else {
+            bad += 1;
+            if bad < 6 {
+                eprintln!("no room at {at:?}");
+            }
+            continue;
+        };
+        hint = room;
+        window.invalidate();
+        window.wanted(&level, Some((room, at)), Some((room, at)), &mut wanted);
+        peak = peak.max(wanted.len());
+        if !wanted
+            .iter()
+            .any(|x| usize::from(x.room) == room && x.want == Want::Need)
+        {
+            bad += 1;
+            if bad < 6 {
+                eprintln!("room {room} not needed at {at:?}");
+            }
+        }
+    }
+    eprintln!(
+        "bad samples {bad} of {}, most rooms wanted {peak}",
+        trail.len() / 4
+    );
 }
