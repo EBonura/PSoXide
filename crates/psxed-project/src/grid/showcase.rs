@@ -308,7 +308,14 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
         OPEN_WALL,
     )
     .map_err(e("landing"))?;
-    deck_cells(world, landing, cells([6, 6], [21, 7]), 0, [0, 0], m.floor_stone)?;
+    deck_cells(
+        world,
+        landing,
+        cells([6, 6], [21, 7]),
+        0,
+        [0, 0],
+        m.floor_stone,
+    )?;
     let deck_z = 7 * SECTOR_UNITS;
     // The middle piece has no parapet: the lodge door opens onto it.
     for (name, x0, x1, parapet) in [
@@ -412,6 +419,7 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
     let courtyard = room_named(world, "Courtyard");
     ghost_edge(world, courtyard, [15, 12], WallEdge::North);
     ghost_edge(world, courtyard, [27, 14], WallEdge::North);
+    ghost_edge(world, courtyard, [15, 19], WallEdge::South);
     let cloister_roles = Roles {
         floor: m.floor_stone,
         wall: m.block_big,
@@ -467,7 +475,11 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
         },
     )
     .map_err(|r| format!("crypt: {}", r.describe()))?;
-    paint_meshes(world, room_named(world, "Crypt"), &[m.block_mid, m.trim_course]);
+    paint_meshes(
+        world,
+        room_named(world, "Crypt"),
+        &[m.block_mid, m.trim_course],
+    );
     let scifi_roles = Roles {
         floor: m.grating,
         wall: m.iron_plate,
@@ -511,7 +523,11 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
         },
     )
     .map_err(|r| format!("dome: {}", r.describe()))?;
-    paint_meshes(world, room_named(world, "Domed chamber"), &[m.block_mid, m.trim_course]);
+    paint_meshes(
+        world,
+        room_named(world, "Domed chamber"),
+        &[m.block_mid, m.trim_course],
+    );
     // ---- 6. The tower -----------------------------------------------------
     let mut tower = BuildingParams::new(
         RoomTarget::New("Tower".into()),
@@ -579,7 +595,11 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
     let hb = room_named(world, "High bridge");
     world.rooms[hb].defaults.open_wall = OPEN_WALL;
     world.rooms[hb].defaults.wall_material = m.girder;
-    paint_meshes(world, hb, &[m.floor_stone, m.block_big, m.block_dark, m.block_mid]);
+    paint_meshes(
+        world,
+        hb,
+        &[m.floor_stone, m.block_big, m.block_dark, m.block_mid],
+    );
     deck_cells(world, hb, cells([15, 12], [15, 19]), 0, [0, 256], m.grating)?;
     soften_decks(world, hb);
     ghost_edge(world, hb, [15, 19], WallEdge::South);
@@ -954,10 +974,34 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
         )
         .map_err(|r| format!("tank: {r:?}"))?;
         for (room, asset, x, z, y) in [
-            (gate_room, mast, 22 * SECTOR_UNITS + 256, 5 * SECTOR_UNITS + 256, 6144),
-            (gate_room, mast, 26 * SECTOR_UNITS + 768, 5 * SECTOR_UNITS + 256, 6144),
-            (gate_room, tank, 24 * SECTOR_UNITS + 512, 8 * SECTOR_UNITS, 6144),
-            (gate_room, mast, 25 * SECTOR_UNITS, 8 * SECTOR_UNITS + 512, 6144),
+            (
+                gate_room,
+                mast,
+                22 * SECTOR_UNITS + 256,
+                5 * SECTOR_UNITS + 256,
+                6144,
+            ),
+            (
+                gate_room,
+                mast,
+                26 * SECTOR_UNITS + 768,
+                5 * SECTOR_UNITS + 256,
+                6144,
+            ),
+            (
+                gate_room,
+                tank,
+                24 * SECTOR_UNITS + 512,
+                8 * SECTOR_UNITS,
+                6144,
+            ),
+            (
+                gate_room,
+                mast,
+                25 * SECTOR_UNITS,
+                8 * SECTOR_UNITS + 512,
+                6144,
+            ),
         ] {
             let id = super::edit::meshes::place_mesh(
                 world,
@@ -967,7 +1011,11 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
             .map_err(|r| format!("roof mesh: {r:?}"))?;
             let _ = id;
         }
-        paint_meshes(world, gate_room, &[m.girder, m.iron_plate, m.iron_plate, m.iron_plate]);
+        paint_meshes(
+            world,
+            gate_room,
+            &[m.girder, m.iron_plate, m.iron_plate, m.iron_plate],
+        );
     }
     // ---- 10. Banners ----------------------------------------------------------
     for (name, room) in [("Landing", 6..12), ("Landing", 16..22)].map(|(n, r)| (n, r)) {
@@ -1186,8 +1234,14 @@ pub fn into_showcase(
         r.ambient = [122, 120, 110];
         if matches!(
             r.name.as_str(),
-            "Gatehouse" | "Lodge" | "Cathedral" | "Cloister" | "Crypt" | "Machine passage"
-                | "Domed chamber" | "Tower"
+            "Gatehouse"
+                | "Lodge"
+                | "Cathedral"
+                | "Cloister"
+                | "Crypt"
+                | "Machine passage"
+                | "Domed chamber"
+                | "Tower"
         ) {
             r.ambient = [150, 146, 134];
         }

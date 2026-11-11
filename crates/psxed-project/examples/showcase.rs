@@ -31,32 +31,80 @@ use psxed_project::grid::{GridBudget, SECTOR_UNITS};
 use psxed_project::ProjectDocument;
 
 const TEXTURES: &[(&str, &[u8])] = &[
-    ("block_big", include_bytes!("showcase_assets/block_big.psxt")),
-    ("block_mid", include_bytes!("showcase_assets/block_mid.psxt")),
-    ("block_small", include_bytes!("showcase_assets/block_small.psxt")),
-    ("block_dark", include_bytes!("showcase_assets/block_dark.psxt")),
-    ("block_pale", include_bytes!("showcase_assets/block_pale.psxt")),
+    (
+        "block_big",
+        include_bytes!("showcase_assets/block_big.psxt"),
+    ),
+    (
+        "block_mid",
+        include_bytes!("showcase_assets/block_mid.psxt"),
+    ),
+    (
+        "block_small",
+        include_bytes!("showcase_assets/block_small.psxt"),
+    ),
+    (
+        "block_dark",
+        include_bytes!("showcase_assets/block_dark.psxt"),
+    ),
+    (
+        "block_pale",
+        include_bytes!("showcase_assets/block_pale.psxt"),
+    ),
     ("voussoir", include_bytes!("showcase_assets/voussoir.psxt")),
-    ("trim_course", include_bytes!("showcase_assets/trim_course.psxt")),
-    ("dome_stone", include_bytes!("showcase_assets/dome_stone.psxt")),
-    ("floor_stone", include_bytes!("showcase_assets/floor_stone.psxt")),
+    (
+        "trim_course",
+        include_bytes!("showcase_assets/trim_course.psxt"),
+    ),
+    (
+        "dome_stone",
+        include_bytes!("showcase_assets/dome_stone.psxt"),
+    ),
+    (
+        "floor_stone",
+        include_bytes!("showcase_assets/floor_stone.psxt"),
+    ),
     ("sand", include_bytes!("showcase_assets/sand.psxt")),
-    ("sand_stone", include_bytes!("showcase_assets/sand_stone.psxt")),
+    (
+        "sand_stone",
+        include_bytes!("showcase_assets/sand_stone.psxt"),
+    ),
     ("rock", include_bytes!("showcase_assets/rock.psxt")),
     ("rubble", include_bytes!("showcase_assets/rubble.psxt")),
-    ("step_stone", include_bytes!("showcase_assets/step_stone.psxt")),
-    ("iron_plate", include_bytes!("showcase_assets/iron_plate.psxt")),
+    (
+        "step_stone",
+        include_bytes!("showcase_assets/step_stone.psxt"),
+    ),
+    (
+        "iron_plate",
+        include_bytes!("showcase_assets/iron_plate.psxt"),
+    ),
     ("grating", include_bytes!("showcase_assets/grating.psxt")),
     ("girder", include_bytes!("showcase_assets/girder.psxt")),
     ("pipes", include_bytes!("showcase_assets/pipes.psxt")),
-    ("rust_panel", include_bytes!("showcase_assets/rust_panel.psxt")),
+    (
+        "rust_panel",
+        include_bytes!("showcase_assets/rust_panel.psxt"),
+    ),
     ("hatch", include_bytes!("showcase_assets/hatch.psxt")),
-    ("lamp_window", include_bytes!("showcase_assets/lamp_window.psxt")),
+    (
+        "lamp_window",
+        include_bytes!("showcase_assets/lamp_window.psxt"),
+    ),
     ("cable", include_bytes!("showcase_assets/cable.psxt")),
-    ("step_metal", include_bytes!("showcase_assets/step_metal.psxt")),
+    (
+        "step_metal",
+        include_bytes!("showcase_assets/step_metal.psxt"),
+    ),
     ("pipes_v", include_bytes!("showcase_assets/pipes_v.psxt")),
-    ("mega_face", include_bytes!("showcase_assets/mega_face.psxt")),
-    ("mega_face_pale", include_bytes!("showcase_assets/mega_face_pale.psxt")),
+    (
+        "mega_face",
+        include_bytes!("showcase_assets/mega_face.psxt"),
+    ),
+    (
+        "mega_face_pale",
+        include_bytes!("showcase_assets/mega_face_pale.psxt"),
+    ),
 ];
 
 fn arg_flag(name: &str) -> bool {
