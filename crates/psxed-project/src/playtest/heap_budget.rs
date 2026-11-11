@@ -15,6 +15,8 @@ use psx_grid::LevelView;
 /// File the cook writes in the generated directory.
 pub const HEAP_BUDGET_FILENAME: &str = "heap_budget.txt";
 
+/// Bytes the heap keeps beyond the cooked need (the same figure `heap-guard` holds it to).
+pub const MARGIN_BYTES: usize = 4096;
 /// Bytes of one resident room slot on the guest (`RoomSlot` plus its table entry).
 const SLOT_BYTES: usize = 228;
 /// Bytes of heap every level needs whatever its size: the level core's tables, the record decode
@@ -47,6 +49,35 @@ impl HeapBudget {
     pub fn need(&self) -> usize {
         self.renderer + self.resident_table + self.fixed
     }
+}
+
+/// Bytes of RAM the guest's image and heap share: `__heap_end - LOAD_ADDR` in `sdk/psoxide.ld`.
+const GUEST_RAM_BYTES: usize = 0x1F_7F00 - 0x1_0000;
+/// The smallest the guest's image has been without its room pool: code, data and the other bss.
+/// Measured on the linked guest: grid-starter 1,469,360 B, verbs-demo 1,499,886 B, the Citadel
+/// 1,518,816 B. A level that does not fit even with this is refused at the cook, before a
+/// guest build that cannot link; the exact answer for the rest is `heap-guard` after the link.
+const IMAGE_FLOOR_BYTES: usize = 1_460_000;
+
+/// The cook's refusal for a level that cannot fit the guest whatever else is trimmed, `None` when
+/// it may fit (the link-time check decides).
+pub fn refusal(package: &PlaytestPackage) -> Option<String> {
+    let budget = plan(package)?;
+    let wanted = budget.pool + IMAGE_FLOOR_BYTES + budget.need() + MARGIN_BYTES;
+    (wanted > GUEST_RAM_BYTES).then(|| {
+        format!(
+            "grid world: level '{}' cannot fit the guest's {} KiB of RAM: its room pool alone is {} KiB (the rooms the guest holds at once, of {} rooms), the rest of the guest takes at least {} KiB and its heap needs {} KiB, {} KiB over. \
+             Fewer or smaller rooms shrink the pool; a level that cannot hold all its rooms at once should stream by flood (a flood radius in the world settings); the largest room ({} B of renderer scratch) sets the heap.",
+            package.save_title.replace('\n', " "),
+            GUEST_RAM_BYTES / 1024,
+            budget.pool / 1024,
+            budget.rooms,
+            IMAGE_FLOOR_BYTES / 1024,
+            (budget.need() + MARGIN_BYTES) / 1024,
+            (wanted - GUEST_RAM_BYTES).div_ceil(1024),
+            budget.renderer,
+        )
+    })
 }
 
 /// The budget of the cooked grid world, `None` for a package without one.

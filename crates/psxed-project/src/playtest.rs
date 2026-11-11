@@ -343,6 +343,18 @@ pub fn build_package(
     project: &ProjectDocument,
     project_root: &Path,
 ) -> (Option<PlaytestPackage>, PlaytestValidationReport) {
+    let (package, mut report) = build_package_cooked(project, project_root);
+    if let Some(message) = package.as_ref().and_then(heap_budget::refusal) {
+        report.error(message);
+        return (None, report);
+    }
+    (package, report)
+}
+
+fn build_package_cooked(
+    project: &ProjectDocument,
+    project_root: &Path,
+) -> (Option<PlaytestPackage>, PlaytestValidationReport) {
     // Cook at runtime scale: divide every authored length by
     // WORLD_UNIT_DIVISOR on an in-memory clone. Authored files and the
     // editor's preview stay at the historical scale.
