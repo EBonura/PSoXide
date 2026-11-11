@@ -102,7 +102,11 @@ fn walk(
     zsign: i32,
     units: &RuntimeUnits,
 ) -> (Vec<RoomPoint>, [i32; 2]) {
-    let cfg: CharacterMotorConfig = config();
+    let cfg: CharacterMotorConfig = if std::env::var("SC_REACH").is_ok() {
+        super::motor_harness::reach_config()
+    } else {
+        config()
+    };
     let mut motor = CharacterMotorState::new(from, Angle::ZERO);
     let (mut lo, mut hi) = (from.y, from.y);
     let mut stops = Vec::new();
@@ -288,4 +292,32 @@ fn print_pool_by_radius() {
         let cooked = super::tests::cook(&w).expect("cooks");
         eprintln!("draw_far {far}: pool {} pages", cooked.report.pool_pages);
     }
+}
+
+/// Walk the real cooked package of a written project (`SC_PROJECT=<dir>`):
+/// the bytes the guest gets, not the test cook's.
+#[test]
+fn walk_the_written_project() {
+    let Ok(dir) = std::env::var("SC_PROJECT") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let project = crate::ProjectDocument::load_from_path(dir.join("project.ron")).unwrap();
+    let (package, report) = crate::playtest::build_package(&project, &dir);
+    assert!(report.is_ok(), "{:?}", report.error_messages());
+    let g = package.unwrap().world_geometry;
+    let keep: Option<Vec<usize>> = std::env::var("SC_KEEP")
+        .ok()
+        .map(|v| v.split(',').filter_map(|n| n.parse().ok()).collect());
+    let nat = super::motor_harness::native_subset(&g.core, &g.room_chunks, keep.as_deref());
+    let w = made();
+    let units = RuntimeUnits::new(w.scale).unwrap();
+    let start = RoomPoint::new(units.rt(250 * 1024 / 100), 0, units.rt(650 * 1024 / 100));
+    let sign = z_sign(&nat, start);
+    let legs: Vec<[i32; 2]> = ROUTE.iter().map(|(_, p)| *p).collect();
+    let (stops, span) = walk(&nat, start, &legs, 1500, sign, &units);
+    for ((name, _), p) in ROUTE.iter().zip(&stops) {
+        eprintln!("{name:>16}: at {:?} y {}", [p.x, p.z], p.y);
+    }
+    eprintln!("span {span:?}");
 }

@@ -991,9 +991,9 @@ pub fn into_showcase(
             ..super::lighting::GlobalLight::NEW_WORLD
         },
         stream: super::world::StreamRadii {
-            draw_far: 6,
-            active_radius: 6,
-            lead_radius: 2,
+            draw_far: 3,
+            active_radius: 3,
+            lead_radius: 1,
             ..super::world::StreamRadii::DEFAULT
         },
         mesh_assets: Vec::new(),

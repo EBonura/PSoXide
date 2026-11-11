@@ -23,6 +23,31 @@ pub(super) struct Native {
     pub collision: GridCollision<'static>,
 }
 
+/// Open the collision of cooked bytes (a level core and its room chunks).
+pub(super) fn native_from(core: &[u8], chunks: &[Vec<u8>]) -> Native {
+    native_subset(core, chunks, None)
+}
+
+/// [`native_from`] with only the rooms in `keep` resident (the others are
+/// `None`, like rooms the streamer has not loaded).
+pub(super) fn native_subset(core: &[u8], chunks: &[Vec<u8>], keep: Option<&[usize]>) -> Native {
+    let level = LevelView::parse(leak(core)).expect("a level");
+    let rooms: Vec<Option<CollisionView<'static>>> = chunks
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            keep.is_none_or(|k| k.contains(&i))
+                .then(|| CollisionView::parse(leak(c)).expect("a room"))
+        })
+        .collect();
+    let rooms: &'static [Option<CollisionView<'static>>] = rooms.leak();
+    Native {
+        collision: psx_grid::ResidentRooms::from_collisions(level, rooms)
+            .expect("a collision world")
+            .leak_collision(),
+    }
+}
+
 /// Cook `world` and open its collision.
 pub(super) fn native(world: &GridWorld) -> Native {
     let cooked = cook(world).expect("the world cooks");
