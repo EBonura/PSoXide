@@ -1013,9 +1013,9 @@ static HEAP: psx_game_runtime::reuse_heap::ReuseHeap =
 /// on in every build: it only runs when the guest has already died.
 #[cfg(target_arch = "mips")]
 fn fatal_byte(byte: u8) {
-    // SAFETY: a byte store to the debug console port (0x1F802080), which has no other effect.
+    // SAFETY: a byte store to the debug console port, which has no other effect.
     unsafe {
-        core::ptr::write_volatile(0x1f80_2080_usize as *mut u8, byte);
+        core::ptr::write_volatile(psx_hw::memory::expansion2::DEBUG_CONSOLE as *mut u8, byte);
     }
 }
 

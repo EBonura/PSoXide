@@ -798,6 +798,9 @@ fn manifest_lba(manifest: &str, name: &str) -> Option<u32> {
 /// at the cooked sectors, so a disc whose packs came from another cook than its executable (two
 /// cooks share one generated directory) boots and then reads the wrong sectors. A constant the
 /// manifest does not carry is not checked.
+///
+/// # Errors
+/// A message naming the pack and the sector the executable expects when a pack lands elsewhere.
 pub fn verify_playtest_layout(
     manifest: &str,
     extents: &[(String, u32, u32)],
