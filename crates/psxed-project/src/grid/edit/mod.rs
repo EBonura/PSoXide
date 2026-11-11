@@ -45,6 +45,9 @@ pub mod selection;
 pub mod spans;
 pub mod surfaces;
 pub mod verbs;
+pub mod wall_api;
+#[cfg(test)]
+mod wall_api_tests;
 pub mod walls;
 
 pub use clipboard::{GridClipboard, PasteOutcome, Transform};

@@ -136,7 +136,7 @@ mod extrude_tests;
 #[cfg(test)]
 mod opening_tests;
 #[cfg(test)]
-mod room_tests;
+pub(crate) mod room_tests;
 #[cfg(test)]
 mod ruin_tests;
 #[cfg(test)]

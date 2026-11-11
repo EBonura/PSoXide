@@ -17,11 +17,10 @@
 //! * **With several storeys, openings are a whole sector side and flat.**
 //!   A storey column stays whole sectors, so a head or a narrow opening
 //!   that needs finer cells is only available in a one storey building.
-//! * **Doors and windows on the ground storey only.** An opening is an
-//!   override on the wall segment plus authored pieces, and both address an
-//!   edge, not a span: cutting one on an upper storey would also open the
-//!   storey below. Lifting this needs the edge override and the authored
-//!   wall to name a span (`EdgeKey` plus a span index).
+//! * **Doors on the ground storey, windows on every storey.** An opening
+//!   is cut on one storey of the column ([`cut_opening_on_span`]); the
+//!   faces of the other storeys on that edge are written back as records so
+//!   they keep standing.
 //! * **The stair is a spiral** round a ring of sectors, so it needs a ring
 //!   of at least 3 by 3 sectors inside the footprint.
 //!
@@ -40,7 +39,8 @@ use crate::ResourceId;
 use super::super::rects::CellRect;
 use super::common::{bounds_of, hash};
 use super::opening::{
-    arch_head, cut_opening, ArchShape, DoorPlane, OpeningKind, OpeningParams, OpeningProfile,
+    arch_head, cut_opening, cut_opening_on_span, ArchShape, DoorPlane, OpeningKind, OpeningParams,
+    OpeningProfile,
 };
 use super::room::{lay_room, Footprint, LeafPolicy, RoomParams, RoomRefusal, RoomTarget};
 use super::spiral::{lay_spiral, ring_cells, SpiralParams};
@@ -412,9 +412,13 @@ pub fn build_building(
                 top: p.window_top,
                 material: p.wall_material,
             };
-            match cut_opening(&mut work, &op) {
-                Ok(_) => windows += 1,
-                Err(e) => notes.push(format!("window skipped: {}", e.describe())),
+            // Every storey gets its window: the edge override is keyed by
+            // edge and storey now, so each is cut on its own span.
+            for storey in 0..p.storeys {
+                match cut_opening_on_span(&mut work, &op, storey as u8) {
+                    Ok(_) => windows += 1,
+                    Err(e) => notes.push(format!("window skipped: {}", e.describe())),
+                }
             }
         }
     }

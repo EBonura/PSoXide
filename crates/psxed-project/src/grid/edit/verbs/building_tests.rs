@@ -123,7 +123,7 @@ fn a_door_and_windows_in_a_tall_building_open_only_the_ground_storey() {
     p.roof_parapet = None;
     let r = build_building(&mut w, &p).unwrap();
     assert_eq!(r.doors.len(), 1, "{:?}", r.notes);
-    assert!(r.windows >= 3, "full sector flat windows: {r:?}");
+    assert!(r.windows >= 9, "windows on all three storeys: {r:?}");
     assert!(r.notes.is_empty(), "{:?}", r.notes);
     // Every sector that has a ground opening keeps solid authored walls for
     // its upper storeys on that edge.

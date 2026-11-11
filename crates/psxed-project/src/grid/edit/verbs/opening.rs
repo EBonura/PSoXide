@@ -301,6 +301,17 @@ pub fn cut_opening(
     world: &mut GridWorld,
     params: &OpeningParams,
 ) -> Result<OpeningOutcome, OpeningRefusal> {
+    cut_opening_on_span(world, params, 0)
+}
+
+/// [`cut_opening`] on storey `span` of the column (0 is the ground one). The
+/// faces of the other storeys on the same edge keep standing.
+pub fn cut_opening_on_span(
+    world: &mut GridWorld,
+    params: &OpeningParams,
+    span: u8,
+) -> Result<OpeningOutcome, OpeningRefusal> {
+    let span = usize::from(span);
     let axis_cell = |c: i32| c.div_euclid(CLICKS_PER_SECTOR);
     if params.from >= params.to {
         return Err(OpeningRefusal::BadRange);
@@ -326,9 +337,9 @@ pub fn cut_opening(
             ..*params
         };
         let abs = first.map(|c| (c.top, c.sill, c.arch));
-        let cut = cut_one(&mut work, &piece, abs, run, &mut out)?;
+        let cut = cut_one(&mut work, &piece, abs, run, span, &mut out)?;
         first.get_or_insert(cut);
-        mirror(&mut work, &piece, &cut, run, &mut out);
+        mirror(&mut work, &piece, &cut, run, span, &mut out);
     }
     if let (Some(c), OpeningKind::Door) = (first, params.kind) {
         let mut plane = c.plane;
@@ -351,6 +362,7 @@ fn mirror(
     p: &OpeningParams,
     cut: &Cut,
     run: (i32, i32),
+    span: usize,
     out: &mut OpeningOutcome,
 ) {
     let outward = {
@@ -378,7 +390,8 @@ fn mirror(
         ..*p
     };
     let before = out.segments;
-    if cut_one(work, &m, Some((cut.top, cut.sill, cut.arch)), run, out).is_ok() {
+    if cut_one(work, &m, Some((cut.top, cut.sill, cut.arch)), run, 0, out).is_ok() {
+        let _ = span;
         out.mirrored |= out.segments > before;
     }
 }
@@ -398,6 +411,7 @@ fn cut_one(
     p: &OpeningParams,
     absolute: Option<Absolute>,
     run: (i32, i32),
+    span: usize,
     out: &mut OpeningOutcome,
 ) -> Result<Cut, OpeningRefusal> {
     let side = side_of(p.cell, p.side).ok_or(OpeningRefusal::NotCardinal)?;
@@ -488,7 +502,8 @@ fn cut_one(
             .filter(|w| w.edge == p.side && w.kind != DerivedKind::Slab)
             .collect();
         let sector = room.leaf(key).ok_or(OpeningRefusal::NoHost)?;
-        let (Some(f), Some(c)) = (sector.ground_floor(), sector.ground_ceiling()) else {
+        let sp = sector.spans().get(span).ok_or(OpeningRefusal::NoHost)?;
+        let (Some(f), Some(c)) = (sp.floor.as_ref(), sp.ceiling.as_ref()) else {
             return Err(OpeningRefusal::NoHost);
         };
         let fe = crate::grid::edit::walls::surface_edge_heights(f, p.side);
@@ -497,7 +512,21 @@ fn cut_one(
         if walls.is_empty() && !authored {
             return Err(OpeningRefusal::NotAWall);
         }
-        if !walls.is_empty() && walls.iter().all(|w| w.hidden && w.solid == Some(false)) {
+        let mine: Vec<_> = walls
+            .iter()
+            .filter(|w| usize::from(w.span) == span)
+            .collect();
+        // A face another cut hid but pinned back as a record (the other
+        // storeys of an edge) is a standing wall, not an opening: a record
+        // that runs from the floor to the ceiling keeps it closed.
+        let (flo, chi) = (fe[0].max(fe[1]), ce[0].min(ce[1]));
+        let pinned = sector.walls(p.side).iter().any(|w| {
+            let mid = (w.heights[0] + w.heights[1] + w.heights[2] + w.heights[3]) / 4;
+            sector.span_at(mid, 0).unwrap_or(0) == span
+                && w.heights[0].min(w.heights[1]) <= flo
+                && w.heights[2].max(w.heights[3]) >= chi - 64
+        });
+        if !pinned && !mine.is_empty() && mine.iter().all(|w| w.hidden && w.solid == Some(false)) {
             return Err(OpeningRefusal::AlreadyOpen);
         }
         floor_ref = floor_ref.max(fe[0]).max(fe[1]);
@@ -566,6 +595,11 @@ fn cut_one(
         let old: Vec<GridWall> = std::mem::take(sector.walls_mut(p.side));
         let mut new_pieces: Vec<GridWall> = Vec::new();
         for w in old {
+            let mid = (w.heights[0] + w.heights[1] + w.heights[2] + w.heights[3]) / 4;
+            if sector.span_at(mid, 0).unwrap_or(0) != span {
+                new_pieces.push(w);
+                continue;
+            }
             let split = pieces(w.heights, sill_abs.map(|s| [s, s]), hi);
             for h in split {
                 new_pieces.push(GridWall {
@@ -582,7 +616,7 @@ fn cut_one(
             if dw.hidden && dw.solid == Some(false) {
                 continue;
             }
-            if dw.span > 0 {
+            if usize::from(dw.span) != span {
                 // A storey above the ground one: the edge override is keyed
                 // by edge, not by span, so it hides this face too. Write it
                 // back as the same face in an authored record, with the

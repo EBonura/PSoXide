@@ -10,7 +10,7 @@ use super::room::{
     decompose, lay_room, Footprint, LeafPolicy, RoomParams, RoomRefusal, RoomTarget,
 };
 
-pub(super) fn empty() -> GridWorld {
+pub(crate) fn empty() -> GridWorld {
     GridWorld {
         scale: GridScale::DEFAULT,
         ..GridWorld::default()
