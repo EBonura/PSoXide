@@ -8,6 +8,7 @@ use crate::grid::world::GridWorld;
 use super::corridor::{LegShape, Waypoint};
 use super::room::RoomTarget;
 use super::room_tests::empty;
+use super::style_fixtures as fixtures;
 use super::style::{self, BayKind, Curve, Profile, Roles, Spandrel, Style, Vault};
 use super::styled::{
     lay_styled_corridor, lay_styled_room, StyleRefusal, StyledCorridor, StyledRoom,
@@ -27,7 +28,7 @@ fn corridor(style: Style, len: i32, width: i32) -> StyledCorridor {
 
 #[test]
 fn a_profile_is_a_small_table_of_slopes_on_the_lattice() {
-    let f = style::scifi_rib().floor;
+    let f = fixtures::ribbed_walk().floor;
     let samples: Vec<i32> = (0..=8).map(|k| f.sample(8, k)).collect();
     assert_eq!(samples, vec![0, 0, 0, 128, 128, 128, 0, 0, 0], "_/-\\_");
     // A barrel: zero at the sides, the rise at the middle, symmetric.
@@ -104,8 +105,15 @@ fn vaults_have_the_shapes_they_are_named_for() {
 }
 
 #[test]
-fn every_built_in_style_round_trips_through_ron_and_checks() {
-    for s in style::built_in() {
+fn every_fixture_style_round_trips_through_ron_and_checks() {
+    for s in [
+        style::plain(),
+        fixtures::ribbed_walk(),
+        fixtures::pointed_barrel(),
+        fixtures::groin_walk(),
+        fixtures::piered_barrel(),
+        fixtures::dome_room(),
+    ] {
         s.check().unwrap();
         let back = Style::from_ron(&s.to_ron()).unwrap();
         assert_eq!(back, s, "{}", s.name);
@@ -138,10 +146,10 @@ fn vertex_heights(w: &GridWorld, room: usize, ceiling: bool) -> BTreeMap<[i32; 2
 #[test]
 fn styled_runs_tile_without_cracks_and_sit_on_the_lattice() {
     for (style, width, check_ceiling) in [
-        (style::scifi_rib(), 2, false),
-        (style::gothic_nave(), 2, false),
-        (style::cloister(), 2, true),
-        (style::crypt(), 2, false),
+        (fixtures::ribbed_walk(), 2, false),
+        (fixtures::pointed_barrel(), 2, false),
+        (fixtures::groin_walk(), 2, true),
+        (fixtures::piered_barrel(), 2, false),
         (style::plain(), 1, true),
     ] {
         let mut w = empty();
@@ -183,7 +191,7 @@ fn only_as_many_leaves_as_the_profile_needs() {
     // A plain corridor is whole sectors, nothing finer.
     assert!(w.rooms[plain.room].leaves().all(|(k, _)| k.level == 2));
     let mut w = empty();
-    let rib = lay_styled_corridor(&mut w, &corridor(style::scifi_rib(), 10, 2)).unwrap();
+    let rib = lay_styled_corridor(&mut w, &corridor(fixtures::ribbed_walk(), 10, 2)).unwrap();
     let by_level: Vec<usize> = (2..=4)
         .map(|l| {
             w.rooms[rib.room]
@@ -198,7 +206,7 @@ fn only_as_many_leaves_as_the_profile_needs() {
 #[test]
 fn the_rhythm_repeats_and_a_rib_narrows_and_lowers() {
     let mut w = empty();
-    let out = lay_styled_corridor(&mut w, &corridor(style::scifi_rib(), 12, 2)).unwrap();
+    let out = lay_styled_corridor(&mut w, &corridor(fixtures::ribbed_walk(), 12, 2)).unwrap();
     let room = &w.rooms[out.room];
     // The leg is cells x 2..=10 (the landings take x 0..=1 and 11..=12);
     // rhythm cycle 4 clicks: along 0 (wx = 8) is a rib.
@@ -260,9 +268,9 @@ fn refusals_leave_the_document_alone() {
 }
 
 #[test]
-fn a_domed_chamber_has_its_crown_in_the_middle_and_four_piers() {
+fn a_dome_room_has_its_crown_in_the_middle_and_four_piers() {
     let mut w = empty();
-    let s = style::domed_chamber();
+    let s = fixtures::dome_room();
     let out = lay_styled_room(
         &mut w,
         &StyledRoom {
@@ -308,9 +316,9 @@ fn the_six_graybox_roles_are_six_different_materials_in_a_new_project() {
 fn the_walkability_analysis_reads_styled_corridors_with_void_insets() {
     use crate::grid::walk::{analyse, Spawn};
     for (style, width) in [
-        (style::scifi_rib(), 2),
-        (style::crypt(), 2),
-        (style::gothic_nave(), 2),
+        (fixtures::ribbed_walk(), 2),
+        (fixtures::piered_barrel(), 2),
+        (fixtures::pointed_barrel(), 2),
     ] {
         let name = style.name.clone();
         let mut w = empty();
@@ -382,10 +390,10 @@ fn measure_style_cost() {
     use crate::grid::faces::all_faces;
     for (style, width) in [
         (style::plain(), 2),
-        (style::scifi_rib(), 2),
-        (style::gothic_nave(), 2),
-        (style::cloister(), 2),
-        (style::crypt(), 2),
+        (fixtures::ribbed_walk(), 2),
+        (fixtures::pointed_barrel(), 2),
+        (fixtures::groin_walk(), 2),
+        (fixtures::piered_barrel(), 2),
     ] {
         let name = style.name.clone();
         let mut w = empty();

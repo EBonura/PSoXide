@@ -8,7 +8,8 @@ use crate::grid::surface::GridWall;
 use super::capture::{capture_bay, repeat_bay, Along, CaptureRefusal};
 use super::room::{lay_room, Footprint, LeafPolicy, RoomParams, RoomTarget};
 use super::room_tests::empty;
-use super::style::{self, Roles};
+use super::style::Roles;
+use super::style_fixtures as fixtures;
 use super::styled::{lay_styled_room, StyledRoom};
 
 /// A hand-edited bay: a dome room's quarter plus an authored wall piece and a
@@ -22,7 +23,7 @@ fn source() -> crate::grid::world::GridWorld {
             target: RoomTarget::New("sculpt".into()),
             rect,
             base: 512,
-            style: style::cloister_room(),
+            style: fixtures::groin_room(),
             roles: Roles::default(),
         },
     )

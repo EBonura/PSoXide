@@ -357,89 +357,19 @@ fn a_ruined_hall_keeps_the_critical_path() {
 }
 
 #[test]
-fn the_cathedral_is_walkable_from_its_west_door_to_the_raised_chancel() {
-    use crate::grid::edit::verbs::cathedral::{build_cathedral, CathedralParams};
-    let units = RuntimeUnits::new(GridScale::DEFAULT).unwrap();
-    let rt = |gu: i32| units.rt(gu);
-    let mut w = GridWorld {
-        scale: GridScale::DEFAULT,
-        ..GridWorld::default()
-    };
-    let p = CathedralParams::new(RoomTarget::New("cathedral".into()), [0, 0]);
-    let r = build_cathedral(&mut w, &p).unwrap();
-    assert!(r.notes.is_empty(), "{:?}", r.notes);
-    cook(&w).expect("a cathedral cooks");
-    let nat = native(&w);
-    // On the nave axis, just inside the west door, walking east.
-    let row = rt(4 * 1024);
-    let start = RoomPoint::new(rt(512), 0, row);
-    let (end, [_, hi], _) = walk(&nat, start, &[[rt(9 * 1024), row]], 900, 1);
-    assert!(end.x >= rt(9 * 1024) - 6, "to the chancel: {end:?}");
-    assert_eq!(end.y, rt(p.chancel_rise), "{end:?}");
-    assert_eq!(hi, end.y);
-    let spawn = Spawn {
-        room: 0,
-        cell: [0, 4],
-    };
-    let a = analyse(&w, &[spawn], &psx_engine::WalkLimits::DEFAULT).unwrap();
-    assert_eq!(a.counts()[0], 0, "no steep sector");
-    assert_eq!(a.counts()[2], 0, "no step too tall");
-    assert_eq!(
-        a.counts()[4],
-        0,
-        "every sector is reachable: {:?}",
-        a.counts()
-    );
-}
-
-#[test]
-fn a_body_walks_in_through_the_arched_west_door_to_the_chancel() {
-    use crate::grid::edit::verbs::cathedral::{build_cathedral, CathedralParams};
-    use crate::grid::edit::verbs::opening::ArchShape;
-    let units = RuntimeUnits::new(GridScale::DEFAULT).unwrap();
-    let rt = |gu: i32| units.rt(gu);
-    for shape in [ArchShape::Pointed, ArchShape::Round] {
-        let mut w = GridWorld {
-            scale: GridScale::DEFAULT,
-            ..GridWorld::default()
-        };
-        let mut p = CathedralParams::new(RoomTarget::New("cathedral".into()), [4, 0]);
-        p.arch = Some(shape);
-        let r = build_cathedral(&mut w, &p).unwrap();
-        assert!(r.notes.is_empty(), "{:?}", r.notes);
-        // A flat forecourt outside the door, in the same room.
-        let mut yard = TerrainParams::new(r.room, cells([0, 3], [3, 6]), 1);
-        yard.base = Some(0);
-        yard.create = true;
-        yard.amplitude_clicks = 0;
-        yard.follow_ceiling = false;
-        lay_terrain(&mut w, &yard).unwrap();
-        cook(&w).expect("cooks");
-        let nat = native(&w);
-        let row = rt(4 * 1024);
-        let start = RoomPoint::new(rt(1024), 0, row);
-        let (end, _, _) = walk(&nat, start, &[[rt(13 * 1024), row]], 1200, 1);
-        assert!(
-            end.x >= rt(13 * 1024) - 6,
-            "{shape:?}: through the arch: {end:?}"
-        );
-        assert_eq!(end.y, rt(p.chancel_rise));
-    }
-}
-
-#[test]
 fn a_body_walks_every_styled_corridor_end_to_end() {
     use crate::grid::edit::verbs::corridor::LegShape;
     use crate::grid::edit::verbs::style::{self, Roles};
+    use crate::grid::edit::verbs::style_fixtures as fixtures;
     use crate::grid::edit::verbs::styled::{lay_styled_corridor, StyledCorridor};
     let units = RuntimeUnits::new(GridScale::DEFAULT).unwrap();
     let rt = |gu: i32| units.rt(gu);
     for (style, width) in [
         (style::plain(), 1),
-        (style::scifi_rib(), 2),
-        (style::gothic_nave(), 2),
-        (style::cloister(), 2),
-        (style::crypt(), 2),
+        (fixtures::ribbed_walk(), 2),
+        (fixtures::pointed_barrel(), 2),
+        (fixtures::groin_walk(), 2),
+        (fixtures::piered_barrel(), 2),
     ] {
         let name = style.name.clone();
         let mut w = GridWorld {

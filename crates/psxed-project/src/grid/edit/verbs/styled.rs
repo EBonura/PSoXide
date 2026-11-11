@@ -1,4 +1,4 @@
-//! Styled runs: Corridor, Room and the Cathedral nave shaped by a
+//! Styled runs: Corridor and Room shaped by a
 //! [`Style`](super::style::Style) on fine leaves.
 //!
 //! The run is first laid plain (flat floor, flat ceiling, whole sectors) by
@@ -44,7 +44,7 @@ use super::common::body_headroom;
 use super::corridor::{lay_corridor, CorridorParams, CorridorRefusal, LegShape, Waypoint};
 use super::room::{lay_room, Footprint, LeafPolicy, RoomParams, RoomRefusal, RoomTarget};
 use super::stairs::max_riser;
-use super::style::{BayKind, Pier, Role, Roles, Style, Vault};
+use super::style::{BayKind, Pier, Role, Roles, Style};
 
 /// The steepest rise between two neighbouring clicks of a floor profile, grid
 /// units: both components of a cell's gradient stay under the slope the motor
@@ -826,35 +826,4 @@ pub fn lay_styled_room(
         leaves,
         piers,
     })
-}
-
-/// Shape the ceiling of cells already in `room` (for the Cathedral nave): the
-/// style's offsets are added to what the sectors hold.
-pub fn restyle_run(
-    world: &mut GridWorld,
-    room: usize,
-    cells: &BTreeSet<[i32; 2]>,
-    frame: Frame,
-    width_clicks: i32,
-    style: &Style,
-    roles: Roles,
-) -> Result<usize, StyleRefusal> {
-    style.check().map_err(StyleRefusal::BadStyle)?;
-    let run = Run {
-        frame,
-        width: width_clicks,
-        style,
-        roles,
-    };
-    preflight(world, &world.rooms[room], cells, &run)?;
-    for &cell in cells {
-        restyle_sector(&mut world.rooms[room], cell, &run)?;
-    }
-    normalize(&mut world.rooms[room]);
-    Ok(cells.len())
-}
-
-/// Whether a style's vault shapes the ceiling.
-pub fn is_vaulted(style: &Style) -> bool {
-    !matches!(style.vault, Vault::None)
 }

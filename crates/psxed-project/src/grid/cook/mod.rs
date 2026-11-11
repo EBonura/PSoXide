@@ -701,8 +701,6 @@ mod probe_tests;
 #[cfg(test)]
 mod ramp_tests;
 #[cfg(test)]
-mod showcase_tests;
-#[cfg(test)]
 mod skin_tests;
 #[cfg(test)]
 mod span_tests;

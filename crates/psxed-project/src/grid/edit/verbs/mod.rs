@@ -21,7 +21,6 @@ pub mod break_verb;
 pub mod bridge;
 pub mod building;
 pub mod capture;
-pub mod cathedral;
 pub mod common;
 pub mod corridor;
 pub mod doorway_door;
@@ -124,8 +123,6 @@ mod building_tests;
 #[cfg(test)]
 mod capture_tests;
 #[cfg(test)]
-mod cathedral_tests;
-#[cfg(test)]
 mod corridor_tests;
 #[cfg(test)]
 mod doorway_door_tests;
@@ -139,6 +136,8 @@ mod opening_tests;
 pub(crate) mod room_tests;
 #[cfg(test)]
 mod ruin_tests;
+#[cfg(test)]
+pub(crate) mod style_fixtures;
 #[cfg(test)]
 mod style_tests;
 #[cfg(test)]
