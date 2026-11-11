@@ -396,6 +396,17 @@ fn main() -> ExitCode {
     }
 
     let extents = builder.file_extents();
+    // The packs must land where the executable's cooked manifest says (the manifest sits beside the
+    // world-pack order file in the generated directory).
+    if let Some(order) = &args.world_pack_order_file {
+        let manifest = order.with_file_name("level_manifest.cooked.rs");
+        if let Ok(text) = std::fs::read_to_string(&manifest) {
+            if let Err(error) = psx_iso::verify_playtest_layout(&text, &extents) {
+                eprintln!("{}: {error}", manifest.display());
+                return ExitCode::from(1);
+            }
+        }
+    }
     for path in args.files.iter().chain(&args.xa_files) {
         let name = path
             .file_name()

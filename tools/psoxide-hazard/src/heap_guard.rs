@@ -24,6 +24,7 @@ fn hex(field: &str) -> Option<u64> {
 }
 
 /// `(heap_start, heap_end)`: the start from the link map, the end [`HEAP_END`].
+#[must_use]
 pub fn heap_range(map: &str) -> Option<(u64, u64)> {
     let start = map.lines().find_map(|line| {
         let address = hex(line.split_whitespace().next()?)?;
@@ -53,6 +54,9 @@ fn value(budget: &str, key: &str) -> Option<u64> {
 }
 
 /// Check `map` against `budget`; the message on a failure.
+///
+/// # Errors
+/// The message naming the level, the bytes short and what uses the RAM when the heap is short.
 pub fn check(map: &str, budget: &str) -> Result<String, String> {
     let need = value(budget, "need").unwrap_or(0);
     if need == 0 {
