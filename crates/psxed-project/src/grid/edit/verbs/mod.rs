@@ -24,6 +24,7 @@ pub mod capture;
 pub mod cathedral;
 pub mod common;
 pub mod corridor;
+pub mod doorway_door;
 pub mod extrude;
 pub mod fine;
 pub mod opening;
@@ -126,6 +127,8 @@ mod capture_tests;
 mod cathedral_tests;
 #[cfg(test)]
 mod corridor_tests;
+#[cfg(test)]
+mod doorway_door_tests;
 #[cfg(test)]
 mod extrude_authored_tests;
 #[cfg(test)]
