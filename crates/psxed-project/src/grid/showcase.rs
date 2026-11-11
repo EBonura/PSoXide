@@ -995,9 +995,9 @@ pub fn into_showcase(
             ..super::lighting::GlobalLight::NEW_WORLD
         },
         stream: super::world::StreamRadii {
-            draw_far: 3,
+            draw_far: 2,
             active_radius: 3,
-            lead_radius: 1,
+            lead_radius: 2,
             ..super::world::StreamRadii::DEFAULT
         },
         mesh_assets: Vec::new(),
@@ -1011,8 +1011,8 @@ pub fn into_showcase(
         r.fog = super::room::GridFog {
             enabled: true,
             color: [112, 24, 22],
-            start: 2 * SECTOR_UNITS,
-            falloff: 8 * SECTOR_UNITS,
+            start: SECTOR_UNITS,
+            falloff: 4 * SECTOR_UNITS,
         };
         r.ambient = [96, 70, 74];
     }
@@ -1124,7 +1124,7 @@ pub fn into_showcase(
             sky.mountain_roughness_percent = 90;
             sky.match_room_fog = true;
             sky.cloud_layer.enabled = false;
-            culling.draw_distance = culling.draw_distance.max(24 * 1024);
+            culling.draw_distance = 7 * 1024;
         }
     }
     scene.world = SceneWorld::Grid(world);
