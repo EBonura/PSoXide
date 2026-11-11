@@ -17,6 +17,7 @@
 //! * [`rules`]: the smart paint rules and the shared writing helpers.
 
 pub mod arcade;
+pub mod bay_corridor;
 pub mod break_verb;
 pub mod bridge;
 pub mod building;
@@ -116,6 +117,8 @@ impl Snapshot {
 
 #[cfg(test)]
 mod arcade_tests;
+#[cfg(test)]
+mod bay_corridor_tests;
 #[cfg(test)]
 mod bridge_tests;
 #[cfg(test)]

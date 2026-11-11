@@ -1,0 +1,780 @@
+(
+    size: (6, 3),
+    reference: 0,
+    leaves: [
+        ((
+            level: 2,
+            x: 0,
+            z: 0,
+        ), (
+            floor: Some((
+                heights: (1024, 0, 0, 1024),
+                split: NwSe,
+                tri_a: (
+                    material: Some((236)),
+                ),
+                auto_split: true,
+                paint_locked: true,
+            )),
+            ceiling: Some((
+                heights: (2304, 3584, 3584, 2304),
+                split: NwSe,
+                tri_a: (
+                    material: Some((236)),
+                ),
+                auto_split: true,
+            )),
+        )),
+        ((
+            level: 2,
+            x: 4,
+            z: 0,
+        ), (
+            floor: Some((
+                heights: (0, 0, 0, 0),
+                split: NwSe,
+                tri_a: (
+                    material: Some((237)),
+                ),
+                auto_split: true,
+            )),
+            ceiling: Some((
+                heights: (3584, 3584, 3584, 3584),
+                split: NwSe,
+                tri_a: (
+                    material: Some((236)),
+                ),
+                auto_split: true,
+            )),
+        )),
+        ((
+            level: 2,
+            x: 0,
+            z: 4,
+        ), (
+            floor: Some((
+                heights: (1024, 0, 0, 1024),
+                split: NwSe,
+                tri_a: (
+                    material: Some((236)),
+                ),
+                auto_split: true,
+                paint_locked: true,
+            )),
+            ceiling: Some((
+                heights: (2304, 3584, 3584, 2304),
+                split: NwSe,
+                tri_a: (
+                    material: Some((236)),
+                ),
+                auto_split: true,
+            )),
+        )),
+        ((
+            level: 2,
+            x: 4,
+            z: 4,
+        ), (
+            floor: Some((
+                heights: (0, 0, 0, 0),
+                split: NwSe,
+                tri_a: (
+                    material: Some((237)),
+                ),
+                auto_split: true,
+            )),
+            ceiling: Some((
+                heights: (3584, 3584, 3584, 3584),
+                split: NwSe,
+                tri_a: (
+                    material: Some((236)),
+                ),
+                auto_split: true,
+            )),
+        )),
+        ((
+            level: 2,
+            x: 8,
+            z: 0,
+        ), (
+            floor: Some((
+                heights: (0, 0, 0, 0),
+                split: NwSe,
+                tri_a: (
+                    material: Some((237)),
+                ),
+                auto_split: true,
+            )),
+            ceiling: Some((
+                heights: (3584, 3584, 3584, 3584),
+                split: NwSe,
+                tri_a: (
+                    material: Some((236)),
+                ),
+                auto_split: true,
+            )),
+        )),
+        ((
+            level: 2,
+            x: 12,
+            z: 0,
+        ), (
+            floor: Some((
+                heights: (0, 0, 0, 0),
+                split: NwSe,
+                tri_a: (
+                    material: Some((237)),
+                ),
+                auto_split: true,
+            )),
+            ceiling: Some((
+                heights: (3584, 3584, 3584, 3584),
+                split: NwSe,
+                tri_a: (
+                    material: Some((236)),
+                ),
+                auto_split: true,
+            )),
+        )),
+        ((
+            level: 2,
+            x: 8,
+            z: 4,
+        ), (
+            floor: Some((
+                heights: (0, 0, 0, 0),
+                split: NwSe,
+                tri_a: (
+                    material: Some((237)),
+                ),
+                auto_split: true,
+            )),
+            ceiling: Some((
+                heights: (3584, 3584, 3584, 3584),
+                split: NwSe,
+                tri_a: (
+                    material: Some((236)),
+                ),
+                auto_split: true,
+            )),
+        )),
+        ((
+            level: 2,
+            x: 12,
+            z: 4,
+        ), (
+            floor: Some((
+                heights: (0, 0, 0, 0),
+                split: NwSe,
+                tri_a: (
+                    material: Some((237)),
+                ),
+                auto_split: true,
+            )),
+            ceiling: Some((
+                heights: (3584, 3584, 3584, 3584),
+                split: NwSe,
+                tri_a: (
+                    material: Some((236)),
+                ),
+                auto_split: true,
+            )),
+        )),
+        ((
+            level: 2,
+            x: 16,
+            z: 0,
+        ), (
+            floor: Some((
+                heights: (0, 0, 0, 0),
+                split: NwSe,
+                tri_a: (
+                    material: Some((237)),
+                ),
+                auto_split: true,
+            )),
+            ceiling: Some((
+                heights: (3584, 3584, 3584, 3584),
+                split: NwSe,
+                tri_a: (
+                    material: Some((236)),
+                ),
+                auto_split: true,
+            )),
+        )),
+        ((
+            level: 2,
+            x: 20,
+            z: 0,
+        ), (
+            floor: Some((
+                heights: (0, 1024, 1024, 0),
+                split: NwSe,
+                tri_a: (
+                    material: Some((236)),
+                ),
+                auto_split: true,
+                paint_locked: true,
+            )),
+            ceiling: Some((
+                heights: (3584, 2304, 2304, 3584),
+                split: NwSe,
+                tri_a: (
+                    material: Some((236)),
+                ),
+                auto_split: true,
+            )),
+        )),
+        ((
+            level: 2,
+            x: 16,
+            z: 4,
+        ), (
+            floor: Some((
+                heights: (0, 0, 0, 0),
+                split: NwSe,
+                tri_a: (
+                    material: Some((237)),
+                ),
+                auto_split: true,
+            )),
+            ceiling: Some((
+                heights: (3584, 3584, 3584, 3584),
+                split: NwSe,
+                tri_a: (
+                    material: Some((236)),
+                ),
+                auto_split: true,
+            )),
+        )),
+        ((
+            level: 2,
+            x: 20,
+            z: 4,
+        ), (
+            floor: Some((
+                heights: (0, 1024, 1024, 0),
+                split: NwSe,
+                tri_a: (
+                    material: Some((236)),
+                ),
+                auto_split: true,
+                paint_locked: true,
+            )),
+            ceiling: Some((
+                heights: (3584, 2304, 2304, 3584),
+                split: NwSe,
+                tri_a: (
+                    material: Some((236)),
+                ),
+                auto_split: true,
+            )),
+        )),
+        ((
+            level: 3,
+            x: 2,
+            z: 8,
+        ), (
+            floor: Some((
+                heights: (1024, 448, 448, 1024),
+                split: NwSe,
+                tri_a: (
+                    material: Some((240)),
+                ),
+                auto_split: true,
+                paint_locked: true,
+            )),
+            ceiling: Some((
+                heights: (2432, 3072, 3072, 2432),
+                split: NwSe,
+                tri_a: (
+                    material: Some((240)),
+                ),
+                auto_split: true,
+            )),
+            wall_material: Some((241)),
+        )),
+        ((
+            level: 3,
+            x: 0,
+            z: 10,
+        ), (
+            floor: Some((
+                heights: (1024, 512, 512, 1024),
+                split: NwSe,
+                tri_a: (
+                    material: Some((236)),
+                ),
+                auto_split: true,
+                paint_locked: true,
+            )),
+            ceiling: Some((
+                heights: (2304, 2944, 2944, 2304),
+                split: NwSe,
+                tri_a: (
+                    material: Some((236)),
+                ),
+                auto_split: true,
+            )),
+        )),
+        ((
+            level: 3,
+            x: 2,
+            z: 10,
+        ), (
+            floor: Some((
+                heights: (512, 0, 0, 512),
+                split: NwSe,
+                tri_a: (
+                    material: Some((236)),
+                ),
+                auto_split: true,
+                paint_locked: true,
+            )),
+            ceiling: Some((
+                heights: (2944, 3584, 3584, 2944),
+                split: NwSe,
+                tri_a: (
+                    material: Some((236)),
+                ),
+                auto_split: true,
+            )),
+        )),
+        ((
+            level: 3,
+            x: 4,
+            z: 8,
+        ), (
+            floor: Some((
+                heights: (0, 0, 0, 0),
+                split: NwSe,
+                tri_a: (
+                    material: Some((237)),
+                ),
+                auto_split: true,
+            )),
+            ceiling: Some((
+                heights: (3072, 3072, 3072, 3072),
+                split: NwSe,
+                tri_a: (
+                    material: Some((240)),
+                ),
+                auto_split: true,
+            )),
+            wall_material: Some((241)),
+        )),
+        ((
+            level: 3,
+            x: 6,
+            z: 8,
+        ), (
+            floor: Some((
+                heights: (0, 0, 0, 0),
+                split: NwSe,
+                tri_a: (
+                    material: Some((237)),
+                ),
+                auto_split: true,
+            )),
+            ceiling: Some((
+                heights: (3072, 3072, 3072, 3072),
+                split: NwSe,
+                tri_a: (
+                    material: Some((240)),
+                ),
+                auto_split: true,
+            )),
+            wall_material: Some((241)),
+        )),
+        ((
+            level: 3,
+            x: 4,
+            z: 10,
+        ), (
+            floor: Some((
+                heights: (0, 0, 0, 0),
+                split: NwSe,
+                tri_a: (
+                    material: Some((237)),
+                ),
+                auto_split: true,
+            )),
+            ceiling: Some((
+                heights: (3584, 3584, 3584, 3584),
+                split: NwSe,
+                tri_a: (
+                    material: Some((236)),
+                ),
+                auto_split: true,
+            )),
+        )),
+        ((
+            level: 3,
+            x: 6,
+            z: 10,
+        ), (
+            floor: Some((
+                heights: (0, 0, 0, 0),
+                split: NwSe,
+                tri_a: (
+                    material: Some((237)),
+                ),
+                auto_split: true,
+            )),
+            ceiling: Some((
+                heights: (3584, 3584, 3584, 3584),
+                split: NwSe,
+                tri_a: (
+                    material: Some((236)),
+                ),
+                auto_split: true,
+            )),
+        )),
+        ((
+            level: 3,
+            x: 8,
+            z: 8,
+        ), (
+            floor: Some((
+                heights: (0, 0, 0, 0),
+                split: NeSw,
+                tri_a: (
+                    material: Some((237)),
+                ),
+                auto_split: true,
+            )),
+            ceiling: Some((
+                heights: (3072, 2816, 2816, 3072),
+                split: NwSe,
+                tri_a: (
+                    material: Some((240)),
+                ),
+                auto_split: true,
+            )),
+            wall_material: Some((241)),
+        )),
+        ((
+            level: 3,
+            x: 10,
+            z: 8,
+        ), (
+            floor: Some((
+                heights: (0, 0, 0, 0),
+                split: NwSe,
+                tri_a: (
+                    material: Some((237)),
+                ),
+                auto_split: true,
+            )),
+            ceiling: Some((
+                heights: (2816, 2816, 2816, 2816),
+                split: NwSe,
+                tri_a: (
+                    material: Some((240)),
+                ),
+                auto_split: true,
+            )),
+            wall_material: Some((241)),
+        )),
+        ((
+            level: 3,
+            x: 8,
+            z: 10,
+        ), (
+            floor: Some((
+                heights: (0, 0, 0, 0),
+                split: NwSe,
+                tri_a: (
+                    material: Some((237)),
+                ),
+                auto_split: true,
+            )),
+            ceiling: Some((
+                heights: (3584, 3584, 3584, 3584),
+                split: NwSe,
+                tri_a: (
+                    material: Some((236)),
+                ),
+                auto_split: true,
+            )),
+        )),
+        ((
+            level: 3,
+            x: 10,
+            z: 10,
+        ), (
+            floor: Some((
+                heights: (0, 0, 0, 0),
+                split: NwSe,
+                tri_a: (
+                    material: Some((237)),
+                ),
+                auto_split: true,
+            )),
+            ceiling: Some((
+                heights: (3584, 3584, 3584, 3584),
+                split: NwSe,
+                tri_a: (
+                    material: Some((236)),
+                ),
+                auto_split: true,
+            )),
+        )),
+        ((
+            level: 3,
+            x: 12,
+            z: 8,
+        ), (
+            floor: Some((
+                heights: (0, 0, 0, 0),
+                split: NwSe,
+                tri_a: (
+                    material: Some((237)),
+                ),
+                auto_split: true,
+            )),
+            ceiling: Some((
+                heights: (2816, 2816, 2816, 2816),
+                split: NwSe,
+                tri_a: (
+                    material: Some((240)),
+                ),
+                auto_split: true,
+            )),
+            wall_material: Some((241)),
+        )),
+        ((
+            level: 3,
+            x: 14,
+            z: 8,
+        ), (
+            floor: Some((
+                heights: (0, 0, 0, 0),
+                split: NwSe,
+                tri_a: (
+                    material: Some((237)),
+                ),
+                auto_split: true,
+            )),
+            ceiling: Some((
+                heights: (2816, 3072, 3072, 2816),
+                split: NwSe,
+                tri_a: (
+                    material: Some((240)),
+                ),
+                auto_split: true,
+            )),
+            wall_material: Some((241)),
+        )),
+        ((
+            level: 3,
+            x: 12,
+            z: 10,
+        ), (
+            floor: Some((
+                heights: (0, 0, 0, 0),
+                split: NwSe,
+                tri_a: (
+                    material: Some((237)),
+                ),
+                auto_split: true,
+            )),
+            ceiling: Some((
+                heights: (3584, 3584, 3584, 3584),
+                split: NwSe,
+                tri_a: (
+                    material: Some((236)),
+                ),
+                auto_split: true,
+            )),
+        )),
+        ((
+            level: 3,
+            x: 14,
+            z: 10,
+        ), (
+            floor: Some((
+                heights: (0, 0, 0, 0),
+                split: NwSe,
+                tri_a: (
+                    material: Some((237)),
+                ),
+                auto_split: true,
+            )),
+            ceiling: Some((
+                heights: (3584, 3584, 3584, 3584),
+                split: NwSe,
+                tri_a: (
+                    material: Some((236)),
+                ),
+                auto_split: true,
+            )),
+        )),
+        ((
+            level: 3,
+            x: 16,
+            z: 8,
+        ), (
+            floor: Some((
+                heights: (0, 0, 0, 0),
+                split: NwSe,
+                tri_a: (
+                    material: Some((237)),
+                ),
+                auto_split: true,
+            )),
+            ceiling: Some((
+                heights: (3072, 3072, 3072, 3072),
+                split: NwSe,
+                tri_a: (
+                    material: Some((240)),
+                ),
+                auto_split: true,
+            )),
+            wall_material: Some((241)),
+        )),
+        ((
+            level: 3,
+            x: 18,
+            z: 8,
+        ), (
+            floor: Some((
+                heights: (0, 0, 0, 0),
+                split: NwSe,
+                tri_a: (
+                    material: Some((237)),
+                ),
+                auto_split: true,
+            )),
+            ceiling: Some((
+                heights: (3072, 3072, 3072, 3072),
+                split: NwSe,
+                tri_a: (
+                    material: Some((240)),
+                ),
+                auto_split: true,
+            )),
+            wall_material: Some((241)),
+        )),
+        ((
+            level: 3,
+            x: 16,
+            z: 10,
+        ), (
+            floor: Some((
+                heights: (0, 0, 0, 0),
+                split: NwSe,
+                tri_a: (
+                    material: Some((237)),
+                ),
+                auto_split: true,
+            )),
+            ceiling: Some((
+                heights: (3584, 3584, 3584, 3584),
+                split: NwSe,
+                tri_a: (
+                    material: Some((236)),
+                ),
+                auto_split: true,
+            )),
+        )),
+        ((
+            level: 3,
+            x: 18,
+            z: 10,
+        ), (
+            floor: Some((
+                heights: (0, 0, 0, 0),
+                split: NwSe,
+                tri_a: (
+                    material: Some((237)),
+                ),
+                auto_split: true,
+            )),
+            ceiling: Some((
+                heights: (3584, 3584, 3584, 3584),
+                split: NwSe,
+                tri_a: (
+                    material: Some((236)),
+                ),
+                auto_split: true,
+            )),
+        )),
+        ((
+            level: 3,
+            x: 20,
+            z: 8,
+        ), (
+            floor: Some((
+                heights: (448, 1024, 1024, 448),
+                split: NwSe,
+                tri_a: (
+                    material: Some((240)),
+                ),
+                auto_split: true,
+                paint_locked: true,
+            )),
+            ceiling: Some((
+                heights: (3072, 2432, 2432, 3072),
+                split: NwSe,
+                tri_a: (
+                    material: Some((240)),
+                ),
+                auto_split: true,
+            )),
+            wall_material: Some((241)),
+        )),
+        ((
+            level: 3,
+            x: 20,
+            z: 10,
+        ), (
+            floor: Some((
+                heights: (0, 512, 512, 0),
+                split: NwSe,
+                tri_a: (
+                    material: Some((236)),
+                ),
+                auto_split: true,
+                paint_locked: true,
+            )),
+            ceiling: Some((
+                heights: (3584, 2944, 2944, 3584),
+                split: NwSe,
+                tri_a: (
+                    material: Some((236)),
+                ),
+                auto_split: true,
+            )),
+        )),
+        ((
+            level: 3,
+            x: 22,
+            z: 10,
+        ), (
+            floor: Some((
+                heights: (512, 1024, 1024, 512),
+                split: NwSe,
+                tri_a: (
+                    material: Some((236)),
+                ),
+                auto_split: true,
+                paint_locked: true,
+            )),
+            ceiling: Some((
+                heights: (2944, 2304, 2304, 2944),
+                split: NwSe,
+                tri_a: (
+                    material: Some((236)),
+                ),
+                auto_split: true,
+            )),
+        )),
+    ],
+    materials: [
+        ((236), "SF / Black panel"),
+        ((237), "SF / Grey plate"),
+        ((240), "SF / Rib flange lit"),
+        ((241), "SF / Rib web lit"),
+    ],
+)

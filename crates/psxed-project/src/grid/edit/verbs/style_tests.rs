@@ -8,8 +8,8 @@ use crate::grid::world::GridWorld;
 use super::corridor::{LegShape, Waypoint};
 use super::room::RoomTarget;
 use super::room_tests::empty;
-use super::style_fixtures as fixtures;
 use super::style::{self, BayKind, Curve, Profile, Roles, Spandrel, Style, Vault};
+use super::style_fixtures as fixtures;
 use super::styled::{
     lay_styled_corridor, lay_styled_room, StyleRefusal, StyledCorridor, StyledRoom,
 };

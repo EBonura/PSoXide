@@ -405,3 +405,40 @@ fn a_body_walks_every_styled_corridor_end_to_end() {
         assert!(hi >= rt(512) - 4, "{name}: climbed to the landing: {hi}");
     }
 }
+
+#[test]
+fn a_body_walks_the_rib_corridor_through_every_rib() {
+    use crate::grid::edit::verbs::bay_corridor::{lay_bay_corridor, rib_corridor, BayCorridor};
+    use crate::grid::edit::verbs::style::Roles;
+    let units = RuntimeUnits::new(GridScale::DEFAULT).unwrap();
+    let rt = |gu: i32| units.rt(gu);
+    let mut w = GridWorld {
+        scale: GridScale::DEFAULT,
+        ..GridWorld::default()
+    };
+    // Twelve sectors along +X: four bays, a rib in each.
+    let run = BayCorridor {
+        target: RoomTarget::New("rib".into()),
+        waypoints: vec![Waypoint::at([0, 2]), Waypoint::at([11, 2])],
+        width: 6,
+        base: 0,
+        bay: rib_corridor(),
+        roles: Roles::default(),
+    };
+    let out = lay_bay_corridor(&mut w, &run).unwrap_or_else(|e| panic!("{}", e.describe()));
+    assert_eq!(out.bays, 4);
+    cook(&w).expect("cooks");
+    let nat = native(&w);
+    // Down the middle of the six sector width.
+    let z = rt(3 * 1024);
+    let start = RoomPoint::new(rt(512), 0, z);
+    let (end, [lo, hi], _) = walk(&nat, start, &[[rt(11 * 1024 + 512), z]], 2500, 1);
+    assert!(
+        end.x >= rt(11 * 1024) - 6,
+        "walked through the ribs: {end:?}"
+    );
+    assert!(
+        hi - lo <= rt(128),
+        "the floor is level in the middle: {lo} {hi}"
+    );
+}

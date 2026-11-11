@@ -20,8 +20,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::grid::leaf::LeafKey;
 use crate::grid::sector::{GridSector, WallEdge};
+use crate::grid::surface::GridSplit;
 use crate::grid::tree::normalize;
 use crate::grid::world::GridWorld;
+use crate::{ProjectDocument, ResourceData, ResourceId};
+
+use super::style::Roles;
 
 use super::super::rects::{grow_room_to, CellRect};
 
@@ -35,6 +39,150 @@ pub struct BayTemplate {
     pub reference: i32,
     /// Leaves with their corner in clicks from the bay's minimum corner.
     pub leaves: Vec<(LeafKey, GridSector)>,
+    /// The name of every material the leaves use, as the source project
+    /// called it. Empty for a bay whose materials were never named; such a
+    /// bay keeps the ids it was cut with, which only mean something in that
+    /// project.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub materials: Vec<(ResourceId, String)>,
+}
+
+impl BayTemplate {
+    /// Every material id the leaves use, once, in first-use order.
+    fn used_materials(&self) -> Vec<ResourceId> {
+        let mut seen: Vec<ResourceId> = Vec::new();
+        let mut note = |m: Option<ResourceId>| {
+            if let Some(m) = m {
+                if !seen.contains(&m) {
+                    seen.push(m);
+                }
+            }
+        };
+        for (_, sector) in &self.leaves {
+            for surf in sector.surfaces() {
+                note(surf.tri_a.material);
+                note(surf.tri_b.as_ref().and_then(|t| t.material));
+            }
+            note(sector.ground_wall_material());
+            for edge in WallEdge::ALL {
+                for wall in sector.walls(edge) {
+                    note(wall.material);
+                }
+            }
+        }
+        seen
+    }
+
+    /// Record the name each material has in `project`, so the bay can be laid
+    /// in another project by name. Ids the project does not hold stay
+    /// unnamed.
+    pub fn name_materials(&mut self, project: &ProjectDocument) {
+        self.materials = self
+            .used_materials()
+            .into_iter()
+            .filter_map(|id| {
+                let found = project
+                    .resources
+                    .iter()
+                    .find(|r| r.id == id && matches!(r.data, ResourceData::Material(_)))?;
+                Some((id, found.name.clone()))
+            })
+            .collect();
+    }
+
+    /// The bay with its materials bound to `project`: a material whose name
+    /// the project holds becomes that material; any other falls back to the
+    /// project's role (floor surfaces to `roles.floor`, ceilings to
+    /// `roles.ceiling`, walls and the wall material of a leaf to
+    /// `roles.wall`), which may itself be none.
+    pub fn bound_to(&self, project: &ProjectDocument, roles: Roles) -> Self {
+        let by_name = |id: ResourceId| -> Option<ResourceId> {
+            let (_, name) = self.materials.iter().find(|(m, _)| *m == id)?;
+            project
+                .resources
+                .iter()
+                .find(|r| &r.name == name && matches!(r.data, ResourceData::Material(_)))
+                .map(|r| r.id)
+        };
+        let bind = |m: Option<ResourceId>, role: Option<ResourceId>| match m {
+            Some(id) => by_name(id).or(role),
+            None => None,
+        };
+        let mut out = self.clone();
+        for (_, sector) in &mut out.leaves {
+            if let Some(f) = sector.ground_floor_mut() {
+                f.tri_a.material = bind(f.tri_a.material, roles.floor);
+                if let Some(b) = f.tri_b.as_mut() {
+                    b.material = bind(b.material, roles.floor);
+                }
+            }
+            if let Some(c) = sector.ground_ceiling_mut() {
+                c.tri_a.material = bind(c.tri_a.material, roles.ceiling);
+                if let Some(b) = c.tri_b.as_mut() {
+                    b.material = bind(b.material, roles.ceiling);
+                }
+            }
+            let wall = bind(sector.ground_wall_material(), roles.wall);
+            sector.set_ground_wall_material(wall);
+            for edge in WallEdge::ALL {
+                for w in sector.walls_mut(edge) {
+                    w.material = bind(w.material, roles.wall);
+                }
+            }
+        }
+        out.materials.clear();
+        out
+    }
+
+    /// The bay turned `quarter_turns` quarter turns, so a run that goes
+    /// along +Z (as captured) can go along +X (1), -Z (2) or -X (3). A
+    /// rotation keeps handedness: the bay is not mirrored. Refused for a bay
+    /// with authored walls, void triangles, split-level surfaces, a second
+    /// triangle of its own or a mapped texture, which a turn cannot carry
+    /// over exactly.
+    pub fn turned(&self, quarter_turns: u8) -> Result<Self, CaptureRefusal> {
+        let mut out = self.clone();
+        for _ in 0..quarter_turns % 4 {
+            out = out.turned_once()?;
+        }
+        Ok(out)
+    }
+
+    fn turned_once(&self) -> Result<Self, CaptureRefusal> {
+        let width_clicks = self.size[0] * 4;
+        let mut leaves = Vec::with_capacity(self.leaves.len());
+        for (key, sector) in &self.leaves {
+            if sector.wall_count() > 0 {
+                return Err(CaptureRefusal::NotTurnable);
+            }
+            let mut s = sector.clone();
+            for surf in s.surfaces_mut() {
+                if surf.heights_b.is_some()
+                    || surf.tri_b.is_some()
+                    || surf.void != 0
+                    || !surf.tri_a.uv.is_identity()
+                {
+                    return Err(CaptureRefusal::NotTurnable);
+                }
+                let h = surf.heights;
+                surf.heights = [h[1], h[2], h[3], h[0]];
+                surf.split = match surf.split {
+                    GridSplit::NwSe => GridSplit::NeSw,
+                    GridSplit::NeSw => GridSplit::NwSe,
+                };
+            }
+            let edge = key.edge_clicks();
+            let turned = LeafKey::new(key.level, key.z, width_clicks - key.x - edge)
+                .ok_or(CaptureRefusal::NotTurnable)?;
+            leaves.push((turned, s));
+        }
+        Ok(Self {
+            size: [self.size[1], self.size[0]],
+            reference: self.reference,
+            leaves,
+            materials: self.materials.clone(),
+        })
+    }
 }
 
 /// Why a capture or a repeat was refused. The document is untouched.
@@ -52,6 +200,8 @@ pub enum CaptureRefusal {
     RoomTooLarge,
     /// The repeat count is zero.
     NoCopies,
+    /// The bay cannot be turned to run another way.
+    NotTurnable,
 }
 
 impl CaptureRefusal {
@@ -66,6 +216,9 @@ impl CaptureRefusal {
             Self::Storeys => "Columns of several storeys cannot be captured".to_string(),
             Self::RoomTooLarge => "The room would grow past its size limit".to_string(),
             Self::NoCopies => "Repeat at least once".to_string(),
+            Self::NotTurnable => {
+                "This bay has authored walls, void cells or mapped textures, so it cannot be turned: run it the way it was cut".to_string()
+            }
         }
     }
 }
@@ -145,6 +298,7 @@ pub fn capture_bay(
         size: [rect.width(), rect.depth()],
         reference,
         leaves,
+        materials: Vec::new(),
     })
 }
 
