@@ -566,6 +566,20 @@ struct Playtest {
     /// In-memory POI state changed since the last checkpoint/title handoff, or
     /// the previous boundary write could not be verified.
     poi_save_dirty: bool,
+    /// Title-menu Continue probe: 0 not read yet, 1 no usable save, 2 a save
+    /// with a rest point is on the card.
+    continue_probe: u8,
+    /// Continue was chosen: the next gameplay init loads the card and resumes
+    /// at the saved rest point instead of starting a new game.
+    continue_pending: bool,
+    /// A persistent door or lever changed: write the save once things are calm.
+    flush_wanted: bool,
+    /// The save write in progress, a few card transactions per frame.
+    card_job: psx_mc::CardJob<{ psx_mc::queue_frames(psx_game_runtime::save::SAVE_BLOCK_BYTES) }>,
+    /// Card-read attempts spent on a pending Continue (bounded).
+    continue_tries: u16,
+    /// This session resumed from a save: no opening sequence.
+    continuing: bool,
     /// Spawn position retained for orbit-mode targeting.
     spawn: RoomPoint,
     /// Runtime UI font atlases, compacted from the cooked manifest's used fonts.
@@ -717,6 +731,10 @@ impl Playtest {
         self.poi_save_loaded = false;
         self.poi_save_load_attempted = false;
         self.poi_save_dirty = false;
+        self.continue_probe = 0;
+        self.continue_pending = false;
+        self.continue_tries = 0;
+        self.continuing = false;
         self.poi_floor_y = [i32::MIN; LEN_INTERACTABLES];
         self.poi_panel_frame = 0;
         self.poi_closing = false;

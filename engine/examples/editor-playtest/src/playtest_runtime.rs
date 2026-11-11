@@ -204,6 +204,9 @@ impl Playtest {
         // The logic records were armed before the card was read.
         self.restore_persistent_logic();
         self.sync_door_box_props();
+        if self.continue_pending {
+            self.apply_continue();
+        }
     }
 
     /// Record persistent logic record `index`'s state in the save (on every
@@ -217,7 +220,68 @@ impl Playtest {
             &mut self.poi_save,
         ) {
             self.poi_save_dirty = true;
+            self.flush_wanted = true;
         }
+    }
+
+    /// Whether a persistent door is mid-slide.
+    fn persistent_door_moving(&self) -> bool {
+        LOGIC.iter().enumerate().any(|(index, record)| {
+            record.kind == psx_level::logic_kind::DOOR
+                && self
+                    .logic
+                    .door_slide(LOGIC.as_slice(), index)
+                    .is_some_and(|slide| !slide.cleared && slide.offset != [0, 0, 0])
+        })
+    }
+
+    /// Write the save in the background after a persistent door or lever
+    /// changed. The card is driven one transaction a frame (psx-mc's job), so
+    /// nothing stalls; it starts only when no door is sliding and no fight is
+    /// on. Checkpoints and title exits still write at once, blocking, where
+    /// the player is at rest anyway.
+    pub(super) fn pump_poi_flush(&mut self, ctx: &mut Ctx) {
+        use psx_mc::Step;
+        let now = ctx.sim_tick.as_u32();
+        if self.card_job.is_busy() {
+            let mut card = psx_mc::HardwareCard::on_port(ctx.controller_port(), psx_mc::Slot::One);
+            let bytes = {
+                let mut bytes = [0u8; psx_game_runtime::save::SAVE_BLOCK_BYTES];
+                self.poi_save.encode(&mut bytes);
+                bytes
+            };
+            match self.card_job.step(&mut card, now) {
+                Ok(Step::NeedsPlan) => {
+                    let planned = self
+                        .card_job
+                        .plan(|c| c.write(PROJECT_SAVE_NAME, PROJECT_SAVE_TITLE, &bytes));
+                    if planned.is_err() {
+                        self.poi_save_dirty = true;
+                    }
+                }
+                Ok(_) => {}
+                // The card went away or refused: stay dirty, a boundary
+                // write tries again.
+                Err(_) => self.poi_save_dirty = true,
+            }
+            return;
+        }
+        if !self.flush_wanted || !self.poi_save_loaded {
+            return;
+        }
+        if !self.poi_save_dirty {
+            self.flush_wanted = false;
+            return;
+        }
+        if self.persistent_door_moving()
+            || self.combat_music.engaged
+            || self.message_overlay.is_some()
+        {
+            return;
+        }
+        self.flush_wanted = false;
+        self.poi_save_dirty = false;
+        self.card_job.begin();
     }
 
     /// Apply the saved state of every persistent logic record to the
@@ -261,30 +325,108 @@ impl Playtest {
         }
     }
 
-    /// Capture the pose needed by a future Continue/savestate flow. The
-    /// current tech demo intentionally never restores this in `init_gameplay`:
-    /// its main-menu action is New Game and always uses the authored spawn.
-    pub(super) fn snapshot_resume_position(&mut self) {
-        if !self.poi_save_loaded {
+    /// Probe the card once the title is up: does a save with a rest point
+    /// exist? The Continue button is shown only then. A busy or absent card
+    /// is asked again every couple of seconds.
+    pub(super) fn probe_continue(&mut self, tick: u32, port: &mut psx_engine::ControllerPort) {
+        const RETRY_TICKS: u32 = 120;
+        if self.continue_probe != 0 || !(self.continue_tries == 0 || tick % RETRY_TICKS == 0) {
             return;
         }
-        let position = self.motor.position();
-        let changed = self.poi_save.set_resume_position(SavedPlayerPosition {
-            x: position.x,
-            y: position.y,
-            z: position.z,
-            yaw: self.motor.yaw().as_q12(),
+        self.continue_tries = self.continue_tries.saturating_add(1);
+        self.continue_probe = match load_poi_save_from_card(port) {
+            PoiSaveLoad::Loaded(save)
+                if save.checkpoint_id != 0 && save.resume_position.is_some() =>
+            {
+                2
+            }
+            PoiSaveLoad::Loaded(_) | PoiSaveLoad::NewGame => 1,
+            PoiSaveLoad::Retry => 0,
+        };
+    }
+
+    /// Whether the title offers Continue.
+    pub(super) fn continue_available(&self) -> bool {
+        self.continue_probe == 2
+    }
+
+    /// Choose Continue: the next gameplay init reads the card instead of
+    /// starting a new game.
+    pub(super) fn request_continue(&mut self) {
+        self.continue_pending = true;
+        self.continue_tries = 0;
+    }
+
+    /// Card reads spent on a pending Continue before it gives up and starts
+    /// a new game.
+    const CONTINUE_MAX_TRIES: u16 = 600;
+
+    /// True while loading must wait for the card read a Continue needs.
+    pub(super) fn continue_waiting(&self) -> bool {
+        self.continue_pending && !self.poi_save_loaded
+    }
+
+    /// Whether the loading screen should read the card this tick.
+    pub(super) fn continue_wants_read(&mut self) -> bool {
+        if !self.continue_waiting() {
+            return false;
+        }
+        if self.continue_tries >= Self::CONTINUE_MAX_TRIES {
+            // Give up: a new game, and never merge an old card later.
+            self.continue_pending = false;
+            self.poi_save_loaded = true;
+            self.poi_save_dirty = true;
+            return false;
+        }
+        self.continue_tries += 1;
+        true
+    }
+
+    /// Put the player at the saved rest point: the checkpoint is the save's
+    /// pose, and the respawn path does the rest (vitality, enemies, doors
+    /// and levers from the save).
+    fn apply_continue(&mut self) {
+        self.continue_pending = false;
+        let Some(pose) = self.poi_save.resume_position else {
+            return;
+        };
+        let at = RoomPoint::new(pose.x, pose.y, pose.z);
+        let Some(room) = self
+            .world_rt
+            .as_ref()
+            .and_then(|world_rt| world_rt.room_containing([at.x, at.y, at.z]))
+            .and_then(|room| u16::try_from(room).ok())
+        else {
+            return;
+        };
+        let wanted = self.poi_save.checkpoint_id;
+        let checkpoint_id = INTERACTABLES
+            .iter()
+            .find(|i| {
+                i.kind == InteractableKind::Checkpoint
+                    && psx_level::StableId::of_name(i.checkpoint_id).raw() == wanted
+            })
+            .map_or("", |i| i.checkpoint_id);
+        self.checkpoint = Some(RuntimeCheckpoint {
+            room: RoomIndex::new(room),
+            position: at,
+            yaw: Angle::from_q12(pose.yaw),
+            checkpoint_id,
         });
-        self.poi_save_dirty |= changed;
+        self.respawn_after_death();
+        self.continuing = true;
     }
 
     /// Flush pending POI state at an intentional save boundary. Memory-card
     /// filesystem writes take many video periods on real hardware, so they
     /// must never run inside a live interaction or an arbitrary gameplay tick.
     pub(super) fn flush_poi_save(&mut self, port: &mut psx_engine::ControllerPort) {
-        if !self.poi_save_loaded || !self.poi_save_dirty {
+        if !self.poi_save_loaded || !(self.poi_save_dirty || self.card_job.is_busy()) {
             return;
         }
+        // A blocking write supersedes a background one in progress.
+        self.card_job.abort();
+        self.flush_wanted = false;
         self.poi_save_dirty = !save_poi_state_to_card(port, &self.poi_save);
     }
 
@@ -812,6 +954,8 @@ impl Playtest {
         self.poi_save_loaded = true;
         self.poi_save_load_attempted = true;
         self.poi_save_dirty = true;
+        // Overwrite the old card save soon, in the background.
+        self.flush_wanted = true;
         self.poi_messages = MessageController::new();
         self.poi_closing = false;
         self.set_poi_presentation_frames(0, 0);
@@ -987,7 +1131,9 @@ impl Playtest {
         self.camera.snap_to_player_with_yaw(
             self.camera_target(None, false),
             self.camera_config(),
-            if respawning_at_checkpoint && self.character.is_none() {
+            // The camera orbits behind the player: half a turn from the
+            // facing a checkpoint stores (a spawn stores the orbit yaw).
+            if respawning_at_checkpoint {
                 yaw.add(Angle::HALF)
             } else {
                 yaw
@@ -2314,6 +2460,14 @@ impl Playtest {
             self.poi_save.checkpoint_id = stable;
             self.poi_save_dirty = true;
         }
+        // The rest pose is what Continue restores.
+        let position = checkpoint.position;
+        self.poi_save_dirty |= self.poi_save.set_resume_position(SavedPlayerPosition {
+            x: position.x,
+            y: position.y,
+            z: position.z,
+            yaw: checkpoint.yaw.as_q12(),
+        });
         // Checkpoints are the genre-visible save boundary. POI interaction
         // stays smooth; its read/reward state reaches the card here instead.
         self.flush_poi_save(port);

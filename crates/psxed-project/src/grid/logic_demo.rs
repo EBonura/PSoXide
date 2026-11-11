@@ -157,6 +157,53 @@ fn slab_vertices(half_thickness: i16, half_width: i16, height: i16) -> [[i16; 3]
     ]
 }
 
+/// `UiAction::Game` id of the Continue button (editor-playtest's
+/// `CONTINUE_ACTION`) and the tag that hides it until the card holds a save.
+pub const CONTINUE_ACTION: u16 = 401;
+/// Visibility tag of the Continue button.
+pub const CONTINUE_TAG: &str = "menu.continue";
+
+/// Add a Continue button under every New Game (`StartGameplay`) button of the
+/// project's UI scenes: a copy placed one row above, firing the game action
+/// [`CONTINUE_ACTION`], shown only while the card holds a save. A project
+/// authors its own the same way: a Button with action Game(401) and tag
+/// `menu.continue`.
+pub fn add_continue_button(project: &mut ProjectDocument) {
+    let mut title = None;
+    for scene in &mut project.ui_scenes {
+        let found = scene.nodes().iter().find_map(|node| match &node.kind {
+            crate::UiNodeKind::Button { action, .. }
+                if *action == crate::UiAction::StartGameplay =>
+            {
+                Some((node.parent.unwrap_or(scene.root), node.kind.clone()))
+            }
+            _ => None,
+        });
+        let Some((parent, mut kind)) = found else {
+            continue;
+        };
+        if let crate::UiNodeKind::Button {
+            rect,
+            label,
+            tag,
+            action,
+            ..
+        } = &mut kind
+        {
+            rect.y -= rect.height as i16 + 4;
+            *label = "  CONTINUE".to_string();
+            *tag = CONTINUE_TAG.to_string();
+            *action = crate::UiAction::Game(CONTINUE_ACTION);
+        }
+        scene.add_node(parent, "Continue", kind);
+        title.get_or_insert(scene.id);
+    }
+    // Boot into the title so the button is what a player sees first.
+    if let Some(id) = title {
+        project.boot = crate::BootTarget::UiScene(id);
+    }
+}
+
 /// Turn `project` into the lever-and-doors project in place: the base's
 /// level goes, its player stays, the world becomes the three rooms and the
 /// gameplay nodes are placed.
@@ -166,6 +213,7 @@ fn slab_vertices(half_thickness: i16, half_width: i16, height: i16) -> [[i16; 3]
 /// Fails when the first room has no floor to spawn the player on.
 pub fn into_lever_doors(project: &mut ProjectDocument) -> Result<(), StarterError> {
     strip_base(project, 0);
+    add_continue_button(project);
     super::graybox_set::add_to(project);
     let ground = find_material(project, &["Graybox / Ground 64"]);
     let walls = find_material(project, &["Graybox / Original 64"]).or(ground);

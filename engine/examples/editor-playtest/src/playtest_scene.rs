@@ -8,6 +8,10 @@ const INVENTORY_UI_MODULES: u8 = 1;
 const INVENTORY_UI_ASSIGN: u8 = 2;
 const INVENTORY_ITEM_COUNT: u8 = 3;
 const GAMEPLAY_SCENE_STATE_NAME: &str = "Gameplay";
+/// `UiAction::Game` id of the title's Continue button, which is tagged
+/// `menu.continue` so it shows only while the card holds a save. Clear of the
+/// inventory (200..=220), the tab bar (300..=304) and the language toggle (400).
+pub(crate) const CONTINUE_ACTION: u16 = 401;
 const INVENTORY_SCENE_STATE_NAME: &str = "Inventory Overlay";
 /// Sim tick at which the `lockstep-visuals` replay diagnostic opens the
 /// gameplay gate, above any build's load time (a whole map loads by tick ~40,
@@ -720,6 +724,9 @@ impl Scene for Playtest {
         if tag == "souls.gain" {
             return self.souls.showing_recent_gain(self.souls_now());
         }
+        if tag == "menu.continue" {
+            return self.continue_available();
+        }
         let selected = BoostSlotId::from_index(self.selected_power_up_slot);
         match tag {
             "inventory.item.0" => !self.power_up_inventory.item_at(0).is_none(),
@@ -787,7 +794,12 @@ impl Scene for Playtest {
         }
     }
 
-    fn game_ui_action(&mut self, id: u16, _ctx: &mut Ctx) {
+    fn game_ui_action(&mut self, id: u16, ctx: &mut Ctx) {
+        if id == CONTINUE_ACTION {
+            self.request_continue();
+            self.requested_gameplay_state(ctx);
+            return;
+        }
         if id == crate::loc::LANGUAGE_TOGGLE_ACTION {
             crate::loc::cycle_language();
             return;
@@ -951,8 +963,11 @@ impl Scene for Playtest {
             // A gameplay-to-front-end handoff is the other safe save boundary.
             // Gameplay overlays share the gameplay resource key, so opening the
             // pause/inventory menu does not trigger a card write here.
-            self.snapshot_resume_position();
             self.flush_poi_save(ctx.controller_port());
+            // The title asks the card again: a rest or a settled door may
+            // have changed what Continue offers.
+            self.continue_probe = 0;
+            self.continue_tries = 0;
             // Re-anchor the animation epoch on the next gameplay entry
             // (see `gameplay_epoch` in main.rs).
             self.gameplay_epoch_set = false;
@@ -1031,9 +1046,11 @@ impl Scene for Playtest {
         if !self.poi_save_load_attempted {
             self.poi_save_load_attempted = true;
             self.ensure_poi_save_loaded(ctx.controller_port());
+        } else if self.continue_wants_read() {
+            self.ensure_poi_save_loaded(ctx.controller_port());
         }
         self.step_streaming_jobs(ctx);
-        let ready = self.initial_world_ready();
+        let ready = self.initial_world_ready() && !self.continue_waiting();
         // The far panels of the first eye are in VRAM before the level opens.
         #[cfg(feature = "cd-stream-bench")]
         let ready = ready && crate::vram_runtime::panels_loaded();
@@ -1099,7 +1116,10 @@ impl Scene for Playtest {
         let _ = scene;
     }
 
-    fn update_ui_resources(&mut self, state: SceneStateRef, _ctx: &mut Ctx) {
+    fn update_ui_resources(&mut self, state: SceneStateRef, ctx: &mut Ctx) {
+        if !state.has_gameplay() {
+            self.probe_continue(ctx.sim_tick.as_u32(), ctx.controller_port());
+        }
         #[cfg(feature = "cd-stream-bench")]
         if !state.has_gameplay() {
             service_menu_ui_images(state.ui_scene);
