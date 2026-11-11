@@ -235,11 +235,38 @@ impl Playtest {
         })
     }
 
-    /// Write the save in the background after a persistent door or lever
-    /// changed. The card is driven one transaction a frame (psx-mc's job), so
-    /// nothing stalls; it starts only when no door is sliding and no fight is
-    /// on. Checkpoints and title exits still write at once, blocking, where
-    /// the player is at rest anyway.
+    /// Whether the player is at ease enough for a card write: no persistent
+    /// door sliding, no fight, no message up, feet on the ground.
+    fn flush_is_calm(&self) -> bool {
+        !self.persistent_door_moving()
+            && !self.combat_music.engaged
+            && self.message_overlay.is_none()
+            && self.motor.grounded()
+    }
+
+    /// Write the save after a persistent door or lever changed, at the first
+    /// calm moment (see [`Self::flush_is_calm`]). The write is blocking, as
+    /// the checkpoint and title-exit ones are: it costs no memory, and a
+    /// calm moment is where a short hitch is cheapest. The
+    /// `background-card-write` feature drives the card a transaction a frame
+    /// instead, for about 5 KB of heap.
+    #[cfg(not(feature = "background-card-write"))]
+    pub(super) fn pump_poi_flush(&mut self, ctx: &mut Ctx) {
+        if !self.flush_wanted || !self.poi_save_loaded {
+            return;
+        }
+        if !self.poi_save_dirty {
+            self.flush_wanted = false;
+            return;
+        }
+        if self.flush_is_calm() {
+            self.flush_poi_save(ctx.controller_port());
+        }
+    }
+
+    /// The background form of [`Self::pump_poi_flush`]: psx-mc's job writes
+    /// one card transaction a frame, so nothing stalls.
+    #[cfg(feature = "background-card-write")]
     pub(super) fn pump_poi_flush(&mut self, ctx: &mut Ctx) {
         use psx_mc::Step;
         let now = ctx.sim_tick.as_u32();
@@ -273,10 +300,7 @@ impl Playtest {
             self.flush_wanted = false;
             return;
         }
-        if self.persistent_door_moving()
-            || self.combat_music.engaged
-            || self.message_overlay.is_some()
-        {
+        if !self.flush_is_calm() {
             return;
         }
         self.flush_wanted = false;
@@ -414,10 +438,15 @@ impl Playtest {
     /// filesystem writes take many video periods on real hardware, so they
     /// must never run inside a live interaction or an arbitrary gameplay tick.
     pub(super) fn flush_poi_save(&mut self, port: &mut psx_engine::ControllerPort) {
-        if !self.poi_save_loaded || !(self.poi_save_dirty || self.card_job.is_busy()) {
+        #[cfg(feature = "background-card-write")]
+        let busy = self.card_job.is_busy();
+        #[cfg(not(feature = "background-card-write"))]
+        let busy = false;
+        if !self.poi_save_loaded || !(self.poi_save_dirty || busy) {
             return;
         }
         // A blocking write supersedes a background one in progress.
+        #[cfg(feature = "background-card-write")]
         self.card_job.abort();
         self.flush_wanted = false;
         self.poi_save_dirty = !save_poi_state_to_card(port, &self.poi_save);

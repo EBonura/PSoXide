@@ -1258,6 +1258,7 @@ fn build_package_cooked(
                             &mut interactable_message_pages_it,
                             &mut interactables,
                             &mut logic,
+                            &mut pending_door_links,
                             report,
                         )
                     });

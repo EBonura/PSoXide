@@ -575,6 +575,7 @@ struct Playtest {
     /// A persistent door or lever changed: write the save once things are calm.
     flush_wanted: bool,
     /// The save write in progress, a few card transactions per frame.
+    #[cfg(feature = "background-card-write")]
     card_job: psx_mc::CardJob<{ psx_mc::queue_frames(psx_game_runtime::save::SAVE_BLOCK_BYTES) }>,
     /// Card-read attempts spent on a pending Continue (bounded).
     continue_tries: u16,

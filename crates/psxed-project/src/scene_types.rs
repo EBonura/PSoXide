@@ -667,6 +667,15 @@ pub enum InteractableKind {
         /// one-shot lever stays pulled). Tied to the entity's stable id.
         #[serde(default)]
         persistent: bool,
+        /// Name of a Box Prop the lever moves: its handle. It slides by
+        /// `handle_slide` when the lever is on and back home when it is off,
+        /// through the same machinery a sliding door uses, and follows the
+        /// lever's saved state on restore. `None` leaves the lever invisible.
+        #[serde(default)]
+        handle: Option<String>,
+        /// How the handle moves when the lever is on (needed with `handle`).
+        #[serde(default)]
+        handle_slide: Option<DoorSlide>,
     },
 }
 

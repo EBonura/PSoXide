@@ -218,6 +218,7 @@ pub fn into_lever_doors(project: &mut ProjectDocument) -> Result<(), StarterErro
     let ground = find_material(project, &["Graybox / Ground 64"]);
     let walls = find_material(project, &["Graybox / Original 64"]).or(ground);
     let roof = find_material(project, &["Graybox / Cliff 64"]).or(ground);
+    let signal = find_material(project, &["DP City / Bright Green Signal"]);
     let door_material = find_material(project, &["Graybox / Cliff 64", "Graybox / Original 64"]);
     let world = lever_doors_world(ground, walls, roof);
 
@@ -376,19 +377,25 @@ pub fn into_lever_doors(project: &mut ProjectDocument) -> Result<(), StarterErro
         "REST",
         640,
     );
-    // The lever, in room A.
-    entity(
+    // The lever: a plate and a handle on room A's east wall, beside the gate's
+    // doorway. The handle drops when it is pulled.
+    super::lever::place_lever(
         scene,
-        LEVER,
-        at_cell(0, 2.5, 1.5),
-        InteractableKind::Switch {
-            target: GATE_DOOR.to_string(),
+        &super::lever::LeverSpec {
+            name: LEVER,
+            wall_at: [
+                (ROOM_WIDTH) as f32 * sector as f32,
+                0.0,
+                2.1 * sector as f32,
+            ],
+            facing: DoorDirection::West,
+            target: GATE_DOOR,
             behavior: SwitchBehavior::OneShot,
-            unlocks: false,
             persistent: true,
+            radius: 1280,
+            material: door_material,
+            handle_material: signal,
         },
-        "PULL LEVER",
-        640,
     );
     // The shortcut's button stands on the door's plane so one press radius
     // reaches both sides; the door decides which side is let through.
@@ -401,6 +408,8 @@ pub fn into_lever_doors(project: &mut ProjectDocument) -> Result<(), StarterErro
             behavior: SwitchBehavior::Toggle,
             unlocks: false,
             persistent: true,
+            handle: None,
+            handle_slide: None,
         },
         "PUSH DOOR",
         640,
@@ -529,6 +538,14 @@ mod tests {
             .find(|(_, r)| r.target == gate.targetname)
             .expect("a lever fires the gate");
         assert_eq!(gate_lever.wait_ticks, -1);
+        // The gate lever drives its handle box: 160 editor units down over 20
+        // ticks, 10 engine units.
+        assert_ne!(gate_lever.link, LOGIC_LINK_NONE);
+        assert_eq!((gate_lever.arg0, gate_lever.arg1), (10, 20));
+        assert_eq!(
+            gate_lever.spawnflags >> psx_level::switch_flags::HANDLE_SHIFT,
+            door_flags::DIR_DOWN
+        );
         assert!(switches
             .iter()
             .any(|(_, r)| r.target == shortcut.targetname));

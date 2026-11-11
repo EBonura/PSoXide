@@ -1048,6 +1048,9 @@ pub mod door_flags {
 pub mod switch_flags {
     /// Pressing the switch unlocks its target door instead of opening it.
     pub const UNLOCK: u16 = 1 << 0;
+    /// Bits 8..=10: the slide direction of the lever's handle box, a
+    /// [`door_flags`](crate::door_flags) `DIR_*` value shifted by this.
+    pub const HANDLE_SHIFT: u16 = 8;
 }
 
 /// Runtime flags for [`LevelGameEntityRecord`].

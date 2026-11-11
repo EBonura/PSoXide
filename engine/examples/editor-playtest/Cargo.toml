@@ -66,6 +66,9 @@ default = [
     # Stress harness, 2026-10-03.
     "present-queue",
 ]
+# Write the save a card transaction a frame (psx-mc CardJob) instead of one blocking write at a calm
+# moment: no hitch, about 5 KB more heap.
+background-card-write = []
 cd-stream-bench = ["dep:psx-io", "psx-game-runtime/cd-stream-bench"]
 cd-stream-benchmark = ["cd-stream-bench", "psx-game-runtime/cd-stream-benchmark"]
 # Measurement builds: the far panels' counters, the camera and the draw tallies at fixed addresses.
