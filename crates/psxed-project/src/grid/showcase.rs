@@ -247,7 +247,7 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
     let e = |what: &'static str| move |err: String| format!("{what}: {err}");
     let mut plan = Plan {
         spawn: [2, 6],
-        spawn_yaw: 90.0,
+        spawn_yaw: 270.0,
         lever: [21, 6],
         ..Plan::default()
     };
@@ -285,6 +285,27 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
     }
     let landing = room_named(world, "Landing");
     ghost_edge(world, landing, [5, 6], WallEdge::East);
+    // The deck cells open onto their neighbours at every joint, on both
+    // sides, so the streamer links the rooms and the body walks across.
+    for (name, west, east) in [
+        ("Chained bridge west", true, true),
+        ("Chained bridge middle", true, true),
+        ("Chained bridge east", true, true),
+    ] {
+        let room = room_named(world, name);
+        let (x0, x1) = {
+            let r = &world.rooms[room];
+            (r.origin[0], r.origin[0] + r.width as i32 - 1)
+        };
+        if west {
+            ghost_edge(world, room, [x0, 6], WallEdge::West);
+        }
+        if east {
+            ghost_edge(world, room, [x1, 6], WallEdge::East);
+        }
+    }
+    let middle = room_named(world, "Chained bridge middle");
+    ghost_edge(world, middle, [13, 6], WallEdge::South);
     // ---- 2. Gatehouse and lodge -----------------------------------------
     let mut gh = BuildingParams::new(
         RoomTarget::New("Gatehouse".into()),
@@ -488,6 +509,8 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
     let hb = room_named(world, "High bridge");
     paint_meshes(world, hb, &[m.paving, m.stone_wall, m.crypt_stone, m.pier]);
     deck_cells(world, hb, cells([15, 11], [15, 19]), -64, [0, 228])?;
+    ghost_edge(world, hb, [15, 19], WallEdge::South);
+    ghost_edge(world, hb, [15, 11], WallEdge::North);
     // Lodge: the shortcut door onto the start bridge (one way), and a plain
     // doorway on the courtyard side for the high bridge to land at.
     let shortcut = doorway_with_door(
@@ -951,8 +974,8 @@ fn entity_with_interactable(
 
 /// Turn `project` (a base such as `default`, with its player, enemies,
 /// camera, sky and UI) into the showcase project in place.
-pub fn into_showcase(project: &mut ProjectDocument) -> Result<Plan, String> {
-    super::base_project::strip_base(project, 1);
+pub fn into_showcase(project: &mut ProjectDocument, enemies: usize) -> Result<Plan, String> {
+    super::base_project::strip_base(project, enemies.min(1));
     let mats = add_materials(project);
     let mut world = GridWorld {
         scale: super::starter::STARTER_SCALE,
@@ -979,11 +1002,11 @@ pub fn into_showcase(project: &mut ProjectDocument) -> Result<Plan, String> {
     for r in &mut world.rooms {
         r.fog = super::room::GridFog {
             enabled: true,
-            color: [58, 10, 14],
-            start: 3 * SECTOR_UNITS,
-            falloff: 9 * SECTOR_UNITS,
+            color: [112, 24, 22],
+            start: 2 * SECTOR_UNITS,
+            falloff: 8 * SECTOR_UNITS,
         };
-        r.ambient = [78, 56, 60];
+        r.ambient = [96, 70, 74];
     }
     // Actors.
     let (player, enemies) = player_and_enemies(scene);
@@ -995,7 +1018,8 @@ pub fn into_showcase(project: &mut ProjectDocument) -> Result<Plan, String> {
     }
     let cathedral = room_named(&world, "Cathedral");
     let tower = room_named(&world, "Tower");
-    let spots = [(cathedral, [34, 8], 270.0f32), (tower, [15, 25], 0.0)];
+    let spots = [(cathedral, [32, 8], 270.0f32)];
+    let _ = tower;
     for (id, (room, cell, yaw)) in enemies.iter().zip(spots) {
         let p = stand(&world, room, cell, 64);
         if let Some(n) = scene.node_mut(*id) {
@@ -1026,15 +1050,14 @@ pub fn into_showcase(project: &mut ProjectDocument) -> Result<Plan, String> {
         .unwrap_or(1024)
         .max(1) as f32;
     let lamp_radius = |sectors: f32| sectors * world.scale.sector_editor_units() as f32 / unit;
-    let lamps: [(&str, [i32; 2], i32, f32, f32); 12] = [
+    let lamps: [(&str, [i32; 2], i32, f32, f32); 11] = [
         ("Landing brazier", [2, 6], 1280, 5.0, 1.5),
-        ("Bridge lantern", [10, 6], 1280, 4.5, 1.2),
         ("Gate lantern", [20, 6], 1536, 4.0, 1.4),
         ("Gatehouse lamp", [24, 7], 1536, 4.5, 1.4),
         ("Nave brazier", [31, 8], 2048, 6.0, 1.6),
         ("Chancel fire", [34, 8], 1792, 6.0, 1.8),
         ("Cloister lamp", [31, 13], 1280, 5.0, 1.4),
-        ("Garth ember", [27, 17], 768, 5.0, 1.0),
+        ("Lodge lamp", [13, 8], 1024, 3.5, 1.4),
         ("Crypt lamp", [26, 30], -256, 4.5, 1.4),
         ("Machine light", [17, 30], -256, 4.5, 1.3),
         ("Dome fire", [12, 30], 1024, 5.5, 1.8),
@@ -1065,17 +1088,19 @@ pub fn into_showcase(project: &mut ProjectDocument) -> Result<Plan, String> {
         if let NodeKind::World { sky, culling, .. } = &mut root.kind {
             sky.mode = crate::SkyMode::Panorama;
             sky.texture = None;
-            sky.top_color = [10, 2, 6];
-            sky.horizon_color = [96, 18, 22];
-            sky.lower_color = [34, 6, 10];
+            sky.top_color = [40, 6, 10];
+            sky.horizon_color = [118, 26, 24];
+            sky.lower_color = [40, 6, 10];
             sky.sun_enabled = true;
-            sky.sun_color = [255, 76, 52];
-            sky.sun_border_color = [140, 16, 16];
-            sky.sun_size_percent = 16;
-            sky.sun_glow_percent = 70;
+            sky.sun_color = [214, 96, 84];
+            sky.sun_border_color = [150, 34, 30];
+            sky.sun_size_percent = 34;
+            sky.sun_glow_percent = 80;
+            sky.sun_yaw_degrees = 90;
+            sky.sun_pitch_degrees = 14;
             sky.mountain_height_percent = 60;
-            sky.mountain_top_color = [4, 2, 4];
-            sky.mountain_base_color = [26, 6, 10];
+            sky.mountain_top_color = [10, 2, 6];
+            sky.mountain_base_color = [44, 8, 12];
             sky.mountain_gap_percent = 0;
             sky.mountain_roughness_percent = 90;
             sky.match_room_fog = true;
@@ -1096,11 +1121,12 @@ pub fn create_project(
     base_dir: &Path,
     out_dir: &Path,
     name: &str,
+    enemies: usize,
     textures: &[(&str, &[u8])],
 ) -> Result<(PathBuf, Plan), String> {
     let mut project = ProjectDocument::load_from_path(base_dir.join("project.ron"))
         .map_err(|e| format!("base project: {e}"))?;
-    let plan = into_showcase(&mut project)?;
+    let plan = into_showcase(&mut project, enemies)?;
     project.name = name.to_string();
     std::fs::create_dir_all(out_dir.join(TEXTURE_DIR)).map_err(|e| format!("create: {e}"))?;
     for (n, bytes) in textures {

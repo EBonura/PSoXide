@@ -16,6 +16,10 @@
 //! (made by an art script outside the repository) and written to
 //! `<out>/textures/showcase/`.
 //!
+//! `--enemy` keeps the base's one enemy. It costs about 440 KB of the guest's
+//! RAM (model, clips, arenas), which the full level cannot spare yet, so it is
+//! off by default.
+//!
 //! `--check` cooks a written project the way Play does and prints the budget
 //! and the walkability report.
 
@@ -85,6 +89,10 @@ const TEXTURES: &[(&str, &[u8])] = &[
     ("frieze", include_bytes!("showcase_assets/frieze.psxt")),
 ];
 
+fn arg_flag(name: &str) -> bool {
+    std::env::args().skip(1).any(|a| a == name)
+}
+
 fn arg(name: &str) -> Option<PathBuf> {
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -149,7 +157,14 @@ fn main() {
     let base = arg("--base").expect(usage);
     let out = arg("--out").expect(usage);
     assert!(!out.exists(), "{} exists: pick a new folder", out.display());
-    let (path, plan) = create_project(&base, &out, "Showcase", TEXTURES).expect("the showcase");
+    let (path, plan) = create_project(
+        &base,
+        &out,
+        "Showcase",
+        usize::from(arg_flag("--enemy")),
+        TEXTURES,
+    )
+    .expect("the showcase");
     println!("wrote {}", path.display());
     for n in &plan.notes {
         println!("note: {n}");
