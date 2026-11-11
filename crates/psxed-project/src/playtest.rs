@@ -342,10 +342,65 @@ pub fn build_package(
     project: &ProjectDocument,
     project_root: &Path,
 ) -> (Option<PlaytestPackage>, PlaytestValidationReport) {
+    build_package_with_spawn(project, project_root, None)
+}
+
+/// Where Play-from-here puts the player, in editor units, without editing
+/// the project.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpawnOverride {
+    /// Position of the player node, editor units.
+    pub position: [f32; 3],
+    /// Facing, degrees around Y (the node's own convention).
+    pub yaw_degrees: f32,
+}
+
+/// Move the player source of `project` (a player controlled Character
+/// Controller's entity, or a player Spawn Point) to `spawn`. Returns whether
+/// one was found.
+fn apply_spawn_override(project: &mut ProjectDocument, spawn: SpawnOverride) -> bool {
+    let scene = project.active_scene_mut();
+    let target = scene
+        .nodes()
+        .iter()
+        .find(|n| match &n.kind {
+            NodeKind::SpawnPoint { player: true, .. } => true,
+            NodeKind::Entity => n.children.iter().any(|c| {
+                scene.node(*c).is_some_and(|k| {
+                    matches!(&k.kind, NodeKind::CharacterController { player: true, .. })
+                })
+            }),
+            _ => false,
+        })
+        .map(|n| n.id);
+    let Some(id) = target else {
+        return false;
+    };
+    if let Some(node) = scene.node_mut(id) {
+        node.transform.translation = spawn.position;
+        node.transform.rotation_degrees[1] = spawn.yaw_degrees;
+    }
+    true
+}
+
+/// [`build_package`] with the player moved to `spawn` at cook time (Play from
+/// here). The project itself is not edited.
+pub fn build_package_with_spawn(
+    project: &ProjectDocument,
+    project_root: &Path,
+    spawn: Option<SpawnOverride>,
+) -> (Option<PlaytestPackage>, PlaytestValidationReport) {
     // Cook at runtime scale: divide every authored length by
     // WORLD_UNIT_DIVISOR on an in-memory clone. Authored files and the
     // editor's preview stay at the historical scale.
     let mut scaled_project = project.clone();
+    if let Some(spawn) = spawn {
+        if !apply_spawn_override(&mut scaled_project, spawn) {
+            let mut report = PlaytestValidationReport::default();
+            report.error("Play from here needs a player: no player spawn or player controller");
+            return (None, report);
+        }
+    }
     let mut report = PlaytestValidationReport::default();
     // The world cooks from the grid document alone: check it against the
     // shared caps before anything else runs.

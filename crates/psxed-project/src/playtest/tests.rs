@@ -361,3 +361,38 @@ fn an_arch_prop_node_cooks_in_a_grid_world_with_segment_boxes() {
     // One conservative box per profile segment, plus the legs.
     assert!(package.arch_prop_collisions.len() >= 6);
 }
+
+#[test]
+fn play_from_here_moves_the_cooked_spawn_without_editing_the_project() {
+    let project = ProjectDocument::starter();
+    let root = crate::default_project_dir();
+    let (plain, report) = build_package(&project, &root);
+    assert!(report.is_ok(), "{:?}", report.errors);
+    let home = plain.expect("package").spawn.expect("a spawn");
+    let before = project.clone();
+    let spawn = SpawnOverride {
+        position: [1000.0, 2000.0, 3000.0],
+        yaw_degrees: 90.0,
+    };
+    let (moved, report) = build_package_with_spawn(&project, &root, Some(spawn));
+    assert!(report.is_ok(), "{:?}", report.errors);
+    let moved = moved.expect("package").spawn.expect("a spawn");
+    assert_ne!((moved.x, moved.z), (home.x, home.z));
+    assert_ne!(moved.yaw, home.yaw);
+    // The authored project is untouched.
+    assert_eq!(project, before);
+    // A cook without a player is refused with a message.
+    let mut bare = ProjectDocument::starter();
+    let scene = bare.active_scene_mut();
+    let ids: Vec<_> = scene
+        .nodes()
+        .iter()
+        .filter(|n| matches!(n.kind, crate::NodeKind::Entity))
+        .map(|n| n.id)
+        .collect();
+    for id in ids {
+        scene.remove_node(id);
+    }
+    let (none, report) = build_package_with_spawn(&bare, &root, Some(spawn));
+    assert!(none.is_none() && !report.is_ok());
+}
