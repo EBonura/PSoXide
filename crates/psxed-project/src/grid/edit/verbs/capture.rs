@@ -70,7 +70,7 @@ impl CaptureRefusal {
     }
 }
 
-fn shift(sector: &mut GridSector, dy: i32) {
+pub(crate) fn shift(sector: &mut GridSector, dy: i32) {
     for s in sector.surfaces_mut() {
         for h in s.heights.iter_mut() {
             *h += dy;
