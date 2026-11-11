@@ -429,11 +429,10 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
             width: 2,
             base: 0,
             leg: LegShape::Stairs,
-            style: {
-                let mut crypt = style::crypt();
-                crypt.headroom = 2560;
-                crypt
-            },
+            // The crypt style's thick piers pinch the third-person camera into
+            // the player's head in a two sector passage, so the crypt hall takes
+            // the cloister's groin vaults (low, stone) instead.
+            style: style::cloister(),
             roles: crypt_roles,
         },
     )
