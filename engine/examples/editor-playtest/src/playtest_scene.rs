@@ -1127,7 +1127,9 @@ impl Scene for Playtest {
 
     fn update(&mut self, ctx: &mut Ctx) {
         let physical = (ctx.pad, ctx.pad_prev);
-        self.duel_pad(ctx);
+        if crate::generated::ANY_TRAINING_ENTITY {
+            self.duel_pad(ctx);
+        }
         if self.duel.active && self.duel.finished {
             self.game_entities.advance_defeated_animations(1);
             self.refresh_actor_pose_snapshots(ctx);

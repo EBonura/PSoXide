@@ -6,7 +6,7 @@ use super::*;
 use crate::dormant::{dormant_state, DormantStates};
 use psx_level::StableId;
 
-impl<const N: usize, const S: bool> GameEntities<N, S> {
+impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
     /// Initialise slot `index` from `record`. `seed` seeds the entity's
     /// tactical randomness.
     // Shared by every spawn path; keep one copy on PS1.

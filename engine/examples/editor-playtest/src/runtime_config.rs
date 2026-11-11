@@ -450,8 +450,11 @@ pub(super) const MAX_LOGIC_EVENTS: usize = if LEN_LOGIC == 0 { 0 } else { 32 };
 
 /// The crate souls-like entity state instantiated with this example's
 /// entity cap.
-pub(super) type RuntimeGameEntities =
-    psx_game_runtime::entities::GameEntities<MAX_GAME_ENTITIES, true>;
+pub(super) type RuntimeGameEntities = psx_game_runtime::entities::GameEntities<
+    MAX_GAME_ENTITIES,
+    true,
+    { crate::generated::ANY_TACTICAL_ENTITY },
+>;
 
 /// Caller-owned one-tick handoff between entity state advancement and the
 /// retained-pose combat pass. At most every live entity can attack in one

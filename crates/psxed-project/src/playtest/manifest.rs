@@ -526,6 +526,18 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
                 .unwrap_or(0),
         );
     }
+    // Which optional enemy systems the level's enemies use, so the executable can leave out the
+    // code of those it does not: the training duel, the tactical policy.
+    let any_flag = |flag: u16| package.game_entities.iter().any(|e| e.flags & flag != 0);
+    let _ = writeln!(
+        out,
+        "/// Whether any enemy is a training-pen target (the scripted duel).\n\
+         pub const ANY_TRAINING_ENTITY: bool = {};\n\
+         /// Whether any enemy uses the tactical policy.\n\
+         pub const ANY_TACTICAL_ENTITY: bool = {};",
+        any_flag(psx_level::game_entity_flags::TRAINING),
+        any_flag(psx_level::game_entity_flags::TACTICAL),
+    );
     out.push('\n');
 
     out.push_str(

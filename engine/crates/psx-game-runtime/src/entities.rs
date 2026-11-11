@@ -551,7 +551,13 @@ pub struct MeleeArcStats {
 /// world has.
 /// `STANCE_BOUND_ATTACKS` selects stance-locked combat at compile time.
 /// The default retains the distance-only behavior for games without stances.
-pub struct GameEntities<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool = false> {
+/// `TACTICAL_POLICY` is whether any entity can use the tactical policy; `false` removes that
+/// code from the build, and the default keeps it.
+pub struct GameEntities<
+    const MAX_ENTITIES: usize,
+    const STANCE_BOUND_ATTACKS: bool = false,
+    const TACTICAL_POLICY: bool = true,
+> {
     tactics: [tactics::TacticalState; MAX_ENTITIES],
     /// Live entity count = `min(records.len(), MAX_ENTITIES)`.
     count: u16,
@@ -634,8 +640,8 @@ pub struct GameEntities<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: b
     spatial_active_mask: u64,
 }
 
-impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
-    GameEntities<MAX_ENTITIES, STANCE_BOUND_ATTACKS>
+impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL_POLICY: bool>
+    GameEntities<MAX_ENTITIES, STANCE_BOUND_ATTACKS, TACTICAL_POLICY>
 {
     fn can_run(record: &LevelGameEntityRecord) -> bool {
         record.flags & game_entity_flags::CAN_RUN != 0
