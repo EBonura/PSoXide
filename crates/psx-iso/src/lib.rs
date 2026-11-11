@@ -27,8 +27,9 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
-use alloc::vec;
+use alloc::string::String;
 use alloc::vec::Vec;
+use alloc::{format, vec};
 
 pub mod boot;
 pub mod exe;
@@ -778,6 +779,51 @@ pub fn msf_to_lba(m_bcd: u8, s_bcd: u8, f_bcd: u8) -> u32 {
     (abs - 150).max(0) as u32
 }
 
+/// `pub const NAME: u32 = N;` in a cooked manifest's text.
+fn manifest_lba(manifest: &str, name: &str) -> Option<u32> {
+    manifest.lines().find_map(|line| {
+        let rest = line.trim().strip_prefix("pub const ")?.strip_prefix(name)?;
+        rest.strip_prefix(": u32 =")?
+            .trim()
+            .strip_suffix(';')?
+            .trim()
+            .parse()
+            .ok()
+    })
+}
+
+/// Check the layout a playtest disc is about to be written with against the constants the guest
+/// was built with: `manifest` is the text of the cooked `level_manifest.cooked.rs`, `extents` the
+/// builder's [`iso9660::IsoBuilder::file_extents`]. The guest reads the world pack and the UI pack
+/// at the cooked sectors, so a disc whose packs came from another cook than its executable (two
+/// cooks share one generated directory) boots and then reads the wrong sectors. A constant the
+/// manifest does not carry is not checked.
+pub fn verify_playtest_layout(
+    manifest: &str,
+    extents: &[(String, u32, u32)],
+) -> Result<(), String> {
+    for (constant, file) in [
+        ("WORLD_PACK_START_LBA", WORLD_PACK_FILE_NAME),
+        ("UI_PACK_START_LBA", UI_PACK_FILE_NAME),
+    ] {
+        let Some(cooked) = manifest_lba(manifest, constant) else {
+            continue;
+        };
+        let landed = extents
+            .iter()
+            .find(|(name, _, _)| name == file)
+            .map(|&(_, lba, _)| lba);
+        if landed != Some(cooked) {
+            return Err(format!(
+                "{file} lands on sector {landed:?} but the executable was built for {constant} = {cooked}: \
+                 the packs and the executable come from different cooks (a second cook rewrote the \
+                 generated directory in between); cook and build again before packing"
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1207,5 +1253,37 @@ mod tests {
 
     fn le_u32(bytes: &[u8]) -> u32 {
         u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    fn extents(world: u32, ui: u32) -> Vec<(String, u32, u32)> {
+        vec![
+            (String::from(WORLD_PACK_FILE_NAME), world, 8),
+            (String::from(UI_PACK_FILE_NAME), ui, 306),
+        ]
+    }
+
+    #[test]
+    fn a_layout_that_matches_the_manifest_passes() {
+        let manifest = "pub const WORLD_PACK_START_LBA: u32 = 1024;\npub const UI_PACK_START_LBA: u32 = 3533;\n";
+        assert_eq!(
+            verify_playtest_layout(manifest, &extents(1024, 3533)),
+            Ok(())
+        );
+        assert_eq!(verify_playtest_layout("", &extents(1, 2)), Ok(()));
+    }
+
+    #[test]
+    fn a_pack_on_another_sector_fails() {
+        let manifest = "pub const UI_PACK_START_LBA: u32 = 3533;\n";
+        let error = verify_playtest_layout(manifest, &extents(1024, 1032)).unwrap_err();
+        assert!(
+            error.contains("UI.PAK") && error.contains("3533"),
+            "{error}"
+        );
     }
 }
