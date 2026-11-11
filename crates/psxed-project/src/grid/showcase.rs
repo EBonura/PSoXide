@@ -315,6 +315,7 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
     // ---- 3. Cathedral ----------------------------------------------------
     let mut cath = CathedralParams::new(RoomTarget::New("Cathedral".into()), [27, 4]);
     cath.arch = Some(ArchShape::Pointed);
+    cath.bays = 4;
     cath.west_door = false;
     cath.floor_material = m.paving;
     cath.wall_material = m.stone_wall;
@@ -403,7 +404,11 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
             target: RoomTarget::New("Domed chamber".into()),
             rect: rect([10, 28], [13, 31]),
             base: -1024,
-            style: style::domed_chamber(),
+            style: {
+                let mut dome = style::domed_chamber();
+                dome.chord_clicks = 2;
+                dome
+            },
             roles: Roles {
                 floor: m.paving,
                 wall: m.tower_stone,
@@ -947,7 +952,7 @@ fn entity_with_interactable(
 /// Turn `project` (a base such as `default`, with its player, enemies,
 /// camera, sky and UI) into the showcase project in place.
 pub fn into_showcase(project: &mut ProjectDocument) -> Result<Plan, String> {
-    super::base_project::strip_base(project, 2);
+    super::base_project::strip_base(project, 1);
     let mats = add_materials(project);
     let mut world = GridWorld {
         scale: super::starter::STARTER_SCALE,
@@ -958,7 +963,12 @@ pub fn into_showcase(project: &mut ProjectDocument) -> Result<Plan, String> {
             sky: Some([120, 28, 30]),
             ..super::lighting::GlobalLight::NEW_WORLD
         },
-        stream: super::world::StreamRadii::DEFAULT,
+        stream: super::world::StreamRadii {
+            draw_far: 3,
+            active_radius: 3,
+            lead_radius: 1,
+            ..super::world::StreamRadii::DEFAULT
+        },
         mesh_assets: Vec::new(),
         level_names: Default::default(),
         palette_pins: Vec::new(),
@@ -993,7 +1003,7 @@ pub fn into_showcase(project: &mut ProjectDocument) -> Result<Plan, String> {
             n.transform.rotation_degrees = [0.0, yaw, 0.0];
         }
     }
-    plan.enemies = [[34, 0, 8], [15, -1024, 25]];
+    plan.enemies = [[32, 0, 8], [0, 0, 0]];
     // The checkpoint in the dome.
     let dome = room_named(&world, "Domed chamber");
     let cp = stand(&world, dome, [11, 29], 0);
@@ -1022,7 +1032,7 @@ pub fn into_showcase(project: &mut ProjectDocument) -> Result<Plan, String> {
         ("Gate lantern", [20, 6], 1536, 4.0, 1.4),
         ("Gatehouse lamp", [24, 7], 1536, 4.5, 1.4),
         ("Nave brazier", [31, 8], 2048, 6.0, 1.6),
-        ("Chancel fire", [36, 8], 1792, 6.0, 1.8),
+        ("Chancel fire", [34, 8], 1792, 6.0, 1.8),
         ("Cloister lamp", [31, 13], 1280, 5.0, 1.4),
         ("Garth ember", [27, 17], 768, 5.0, 1.0),
         ("Crypt lamp", [26, 30], -256, 4.5, 1.4),
