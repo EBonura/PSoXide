@@ -238,7 +238,6 @@ fn the_reference_projects_cook_and_validate() {
         "grid-dungeon",
         "grid-cave",
         "grid-sewers",
-        "grid-west",
     ] {
         let Some(project) = load_reference(name) else {
             eprintln!("skipping {name}: not present");

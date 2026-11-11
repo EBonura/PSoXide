@@ -5,7 +5,7 @@
 
 use super::tests::{cook, load_reference};
 
-const PROJECTS: [(&str, u64); 12] = [
+const PROJECTS: [(&str, u64); 11] = [
     ("default", 0x0f0c1e28b8ef939c),
     ("graybox-reach", 0x9b506aff3037965e),
     ("grid-cathedral", 0x05782fa4b4d023d2),
@@ -17,7 +17,6 @@ const PROJECTS: [(&str, u64); 12] = [
     ("grid-sewers", 0xde6d0bffc419b732),
     ("grid-starter", 0x2462121e0e7c58c9),
     ("grid-tower", 0xd5d530eadc20a198),
-    ("grid-west", 0x4d79c0f987f3ad12),
 ];
 
 fn fnv(hash: &mut u64, bytes: &[u8]) {

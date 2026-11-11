@@ -39,7 +39,6 @@ const REFERENCE: [&str; 6] = [
     "grid-dungeon",
     "grid-cave",
     "grid-sewers",
-    "grid-west",
 ];
 
 fn main() {

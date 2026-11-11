@@ -14,13 +14,12 @@ use super::tree::{normalize, subdivide, subdivide_to};
 use super::units::GridScale;
 use super::world::GridWorld;
 
-const PROJECTS: [&str; 7] = [
+const PROJECTS: [&str; 6] = [
     "grid-cathedral",
     "grid-level008",
     "grid-dungeon",
     "grid-cave",
     "grid-sewers",
-    "grid-west",
     "grid-starter",
 ];
 

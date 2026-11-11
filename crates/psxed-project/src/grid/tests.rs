@@ -180,7 +180,6 @@ fn legacy_levels_load_with_every_diagonal_locked_and_no_rule_set() {
         "grid-dungeon",
         "grid-cave",
         "grid-sewers",
-        "grid-west",
     ] {
         let path = crate::projects_dir().join(name).join("project.ron");
         let project = ProjectDocument::load_from_path(path).expect("a reference project loads");

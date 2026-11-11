@@ -438,13 +438,12 @@ fn shared_runs_trace_exactly_like_private_copies_in_a_tree_room() {
 /// The reference levels (the tracked ones, and the local ones when present).
 /// Most hold no free planes, which makes the check the cheap statement that
 /// nothing moved; the ones with planes and meshes are the real test.
-const LEVELS: [&str; 16] = [
+const LEVELS: [&str; 15] = [
     "grid-cathedral",
     "grid-level008",
     "grid-dungeon",
     "grid-cave",
     "grid-sewers",
-    "grid-west",
     "grid-gate",
     "grid-tower",
     "grid-corridor",

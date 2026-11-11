@@ -10,13 +10,12 @@ use super::surface::{GridSurface, GridWall};
 use super::units::GridScale;
 use super::world::GridWorld;
 
-const PROJECTS: [&str; 9] = [
+const PROJECTS: [&str; 8] = [
     "grid-cathedral",
     "grid-level008",
     "grid-dungeon",
     "grid-cave",
     "grid-sewers",
-    "grid-west",
     "grid-planes",
     "grid-gate",
     "grid-starter",

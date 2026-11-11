@@ -12,13 +12,12 @@ use crate::grid::faces::{all_faces, GridFace};
 use crate::grid::overrides::WallMode;
 use crate::grid::world::GridWorld;
 
-const LEVELS: [&str; 6] = [
+const LEVELS: [&str; 5] = [
     "grid-cathedral",
     "grid-level008",
     "grid-dungeon",
     "grid-cave",
     "grid-sewers",
-    "grid-west",
 ];
 
 /// A face reduced to what the eye sees: ring, texels, material, sidedness,

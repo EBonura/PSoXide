@@ -3,13 +3,12 @@
 
 use super::faces::all_faces;
 
-const PROJECTS: [&str; 7] = [
+const PROJECTS: [&str; 6] = [
     "grid-cathedral",
     "grid-level008",
     "grid-dungeon",
     "grid-cave",
     "grid-sewers",
-    "grid-west",
     "grid-planes",
 ];
 

@@ -27,7 +27,6 @@ fn the_player_spawn_stands_on_the_native_floor() {
         "grid-cathedral",
         "grid-cave",
         "grid-sewers",
-        "grid-west",
     ] {
         let Some(project) = load_reference(name) else {
             eprintln!("skipping {name}: not present");

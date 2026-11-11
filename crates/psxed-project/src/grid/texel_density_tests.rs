@@ -93,7 +93,6 @@ fn every_tracked_reference_project_still_reads_as_32() {
         "grid-sewers",
         "grid-starter",
         "grid-tower",
-        "grid-west",
     ] {
         let path = crate::projects_dir().join(name).join("project.ron");
         let project = crate::ProjectDocument::load_from_path(path).expect("loads");

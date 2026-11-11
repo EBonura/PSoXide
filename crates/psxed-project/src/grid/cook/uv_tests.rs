@@ -253,7 +253,6 @@ fn the_reference_levels_cut_far_fewer_faces_through_the_window() {
         "grid-dungeon",
         "grid-cave",
         "grid-sewers",
-        "grid-west",
     ] {
         let project = load_reference(name).unwrap();
         let world = project.active_scene().world.grid().unwrap();

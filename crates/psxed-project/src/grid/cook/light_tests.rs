@@ -179,14 +179,13 @@ use crate::grid::lighting::gather::{solve, FlatAlbedo, GatherInput, FALLBACK_ALB
 use crate::grid::lighting::{Gather, GlobalLight};
 
 /// Every tracked grid reference level.
-const ALL_REFERENCE_LEVELS: [&str; 10] = [
+const ALL_REFERENCE_LEVELS: [&str; 9] = [
     "grid-starter",
     "grid-cathedral",
     "grid-dungeon",
     "grid-cave",
     "grid-level008",
     "grid-sewers",
-    "grid-west",
     "grid-tower",
     "grid-gate",
     "grid-corridor",

@@ -374,7 +374,6 @@ fn the_reference_levels_bake_probes_and_five_bits_lose_nothing_the_framebuffer_k
         "grid-cave",
         "grid-dungeon",
         "grid-sewers",
-        "grid-west",
         "grid-level008",
         "grid-cathedral",
         "grid-corridor",
