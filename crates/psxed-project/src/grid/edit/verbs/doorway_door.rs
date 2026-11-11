@@ -164,6 +164,8 @@ pub fn doorway_with_door(
                     behavior: l.behavior,
                     unlocks: false,
                     persistent: p.persistent,
+                    handle: None,
+                    handle_slide: None,
                 },
                 prompt: l.prompt.clone(),
                 radius: l.radius,

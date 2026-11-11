@@ -1903,12 +1903,13 @@ impl Playtest {
         self.sync_sliding_doors();
     }
 
-    /// Move the box of every door with motion to where the logic runtime has
+    /// Move the box of every door with motion (and every lever handle) to where the logic runtime has
     /// it: drawn and solid at its offset until it has fully cleared, then
     /// hidden and passable (and solid again the moment it starts closing).
     pub(super) fn sync_sliding_doors(&mut self) {
         for (index, record) in LOGIC.iter().enumerate() {
-            if record.kind != psx_level::logic_kind::DOOR
+            let is_door = record.kind == psx_level::logic_kind::DOOR;
+            if !(is_door || record.kind == psx_level::logic_kind::SWITCH)
                 || record.link == psx_level::LOGIC_LINK_NONE
             {
                 continue;
@@ -1916,7 +1917,11 @@ impl Playtest {
             if let Some(slide) = self.logic.door_slide(LOGIC.as_slice(), index) {
                 let link = usize::from(record.link);
                 self.box_props.set_door_slide(link, slide.offset);
-                self.box_props.set_door_open(link, slide.cleared);
+                // A door's box is gone once it has cleared the doorway; a
+                // lever's handle stays where it slid to.
+                if is_door {
+                    self.box_props.set_door_open(link, slide.cleared);
+                }
             }
         }
     }

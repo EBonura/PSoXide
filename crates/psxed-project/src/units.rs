@@ -192,7 +192,16 @@ fn scale_node(node: &mut SceneNode) {
                 *height = div_u16_min1(*height);
             }
         },
-        NodeKind::Interactable { radius, .. } => *radius = div_u16_min1(*radius),
+        NodeKind::Interactable { radius, kind, .. } => {
+            *radius = div_u16_min1(*radius);
+            if let crate::InteractableKind::Switch {
+                handle_slide: Some(slide),
+                ..
+            } = kind
+            {
+                slide.distance = div_u16_min1(slide.distance);
+            }
+        }
         // PointLight radius is authored in SECTORS and resolves against
         // the (already scaled) world sector size, so the multiplier
         // itself must not scale.

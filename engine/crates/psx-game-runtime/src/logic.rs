@@ -141,11 +141,22 @@ pub struct DoorSlide {
     pub cleared: bool,
 }
 
-/// True when a door record slides (otherwise it opens instantly).
+/// Slide direction (`door_flags::DIR_*`) of a door, or of a lever's handle
+/// (the same bits, shifted up past the switch flags).
+fn slide_dir(record: &LevelLogicRecord) -> u16 {
+    match record.kind {
+        logic_kind::DOOR => record.spawnflags & door_flags::DIR_MASK,
+        logic_kind::SWITCH => {
+            (record.spawnflags >> switch_flags::HANDLE_SHIFT) & door_flags::DIR_MASK
+        }
+        _ => door_flags::DIR_NONE,
+    }
+}
+
+/// True when a record slides a box: a door with motion (otherwise it opens
+/// instantly) or a lever with a handle.
 fn door_slides(record: &LevelLogicRecord) -> bool {
-    record.spawnflags & door_flags::DIR_MASK != door_flags::DIR_NONE
-        && record.arg0 > 0
-        && record.arg1 > 0
+    slide_dir(record) != door_flags::DIR_NONE && record.arg0 > 0 && record.arg1 > 0
 }
 
 /// True when `player` stands on the side `record` refuses.
@@ -257,10 +268,10 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
             };
             if record.kind == logic_kind::DOOR {
                 self.locked[index] = u8::from(record.spawnflags & door_flags::LOCKED != 0);
-                // A sliding door that starts open starts fully slid.
-                if door_slides(record) && self.counter[index] != 0 {
-                    self.progress[index] = record.arg1;
-                }
+            }
+            // A slider that starts on starts fully slid.
+            if door_slides(record) && self.counter[index] != 0 {
+                self.progress[index] = record.arg1;
             }
         }
     }
@@ -374,17 +385,13 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
     fn restore_changed(&mut self, index: usize, record: &LevelLogicRecord) {
         let on = record.flags & logic_flags::START_ON == 0;
         self.counter[index] = i16::from(on);
+        if door_slides(record) {
+            self.progress[index] = if on { record.arg1 } else { 0 };
+        }
         match record.kind {
-            logic_kind::DOOR => {
-                if door_slides(record) {
-                    self.progress[index] = if on { record.arg1 } else { 0 };
-                }
-                // An open door is not locked; a closed one is back to its
-                // authored lock (unlocking is not saved).
-                if on {
-                    self.locked[index] = 0;
-                }
-            }
+            // An open door is not locked; a closed one is back to its
+            // authored lock (unlocking is not saved).
+            logic_kind::DOOR if on => self.locked[index] = 0,
             // A spent one-shot lever stays spent.
             logic_kind::SWITCH if record.wait_ticks < 0 => {
                 self.state[index] = LogicState::Removed as u8;
@@ -415,14 +422,14 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
         index: usize,
     ) -> Option<DoorSlide> {
         let record = records.get(index)?;
-        if index >= self.count() || record.kind != logic_kind::DOOR || !door_slides(record) {
+        if index >= self.count() || !door_slides(record) {
             return None;
         }
         // 32767 * 65535 still fits an i32; saturating keeps a hand-built
         // record with a larger distance from overflowing.
         let travelled = i32::from(record.arg0).saturating_mul(i32::from(self.progress[index]))
             / i32::from(record.arg1);
-        let (x, y, z) = match record.spawnflags & door_flags::DIR_MASK {
+        let (x, y, z) = match slide_dir(record) {
             door_flags::DIR_POS_X => (travelled, 0, 0),
             door_flags::DIR_NEG_X => (-travelled, 0, 0),
             door_flags::DIR_UP => (0, travelled, 0),
@@ -581,7 +588,7 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
         let mut index = 0usize;
         while index < count {
             let record = &records[index];
-            if record.kind == logic_kind::DOOR && door_slides(record) {
+            if door_slides(record) {
                 let progress = self.progress[index];
                 if self.counter[index] != 0 {
                     self.progress[index] = progress.saturating_add(1).min(record.arg1);
@@ -1497,6 +1504,42 @@ mod tests {
             TestLogic::persistent_slot(&AFTER, &[1, 2, door], 2),
             Some(usize::from(door))
         );
+    }
+
+    /// A lever with a handle slides it down while on and home while off, and a
+    /// restore puts a saved lever's handle back down.
+    #[test]
+    fn a_lever_handle_slides_with_the_lever_and_follows_its_saved_state() {
+        static HANDLE_LEVER: [LevelLogicRecord; 1] = [LevelLogicRecord {
+            targetname: 1,
+            wait_ticks: -1,
+            // Down, in the handle bits.
+            spawnflags: door_flags::DIR_DOWN << switch_flags::HANDLE_SHIFT,
+            arg0: 100,
+            arg1: 10,
+            flags: PERSIST,
+            ..blank(logic_kind::SWITCH)
+        }];
+        let mut logic = TestLogic::EMPTY;
+        logic.init_from_records(&HANDLE_LEVER);
+        let at = |logic: &TestLogic| logic.door_slide(&HANDLE_LEVER, 0).expect("a handle").offset;
+        assert_eq!(at(&logic), [0, 0, 0]);
+        logic.fire_index(&HANDLE_LEVER, 0, UseCode::Toggle, 1);
+        for now in 2..7 {
+            logic.tick(&HANDLE_LEVER, input_at([0, 0, 0]), now);
+        }
+        assert_eq!(at(&logic), [0, -50, 0], "halfway down after five ticks");
+        for now in 7..30 {
+            logic.tick(&HANDLE_LEVER, input_at([0, 0, 0]), now);
+        }
+        assert_eq!(at(&logic), [0, -100, 0]);
+        let mut save = SaveBlock::new(100, 832);
+        assert!(logic.store_persistent(&HANDLE_LEVER, &[9], 0, &mut save));
+        let mut after_death = TestLogic::EMPTY;
+        after_death.init_from_records(&HANDLE_LEVER);
+        assert_eq!(at(&after_death), [0, 0, 0]);
+        after_death.restore_persistent(&HANDLE_LEVER, &[9], &save);
+        assert_eq!(at(&after_death), [0, -100, 0], "the handle stays down");
     }
 
     #[test]

@@ -68,6 +68,7 @@ pub mod leaf_derive;
 pub mod leaf_diag;
 mod leaf_faces;
 pub mod leaf_map;
+pub mod lever;
 pub mod light;
 pub mod lighting;
 pub mod limits;

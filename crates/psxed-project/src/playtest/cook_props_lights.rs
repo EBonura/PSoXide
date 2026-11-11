@@ -1257,6 +1257,7 @@ pub(crate) fn push_interactable(
     message_pages_it: &mut Vec<String>,
     interactables: &mut Vec<PlaytestInteractable>,
     logic: &mut Vec<PlaytestLogic>,
+    pending_door_links: &mut Vec<PendingDoorLink>,
     report: &mut PlaytestValidationReport,
 ) -> bool {
     if component.radius == 0 {
@@ -1334,11 +1335,52 @@ pub(crate) fn push_interactable(
         ),
         _ => (psx_level::LOGIC_NAME_NONE, 0, 0),
     };
+    // A lever's handle: a Box Prop the door slide machinery moves, its
+    // direction in the switch flag bits above the unlock bit, the distance and
+    // ticks in the record's slide args.
+    let mut handle_args = (0u16, 0u16);
+    let mut switch_spawnflags = switch_spawnflags;
+    let mut handle_box: Option<&str> = None;
+    if let crate::InteractableKind::Switch {
+        handle: Some(handle),
+        handle_slide,
+        ..
+    } = component.kind
+    {
+        let Some(slide) = handle_slide
+            .filter(|s| s.distance != 0 && s.ticks != 0 && s.distance <= i16::MAX as u16)
+        else {
+            report.error(format!(
+                "Switch on '{node_name}' has a handle but no valid slide (distance and ticks \
+                 must be > 0, the distance at most {} engine units)",
+                i16::MAX
+            ));
+            return false;
+        };
+        let direction = match slide.direction {
+            crate::DoorDirection::Up => psx_level::door_flags::DIR_UP,
+            crate::DoorDirection::Down => psx_level::door_flags::DIR_DOWN,
+            crate::DoorDirection::East => psx_level::door_flags::DIR_POS_X,
+            crate::DoorDirection::West => psx_level::door_flags::DIR_NEG_X,
+            crate::DoorDirection::South => psx_level::door_flags::DIR_POS_Z,
+            crate::DoorDirection::North => psx_level::door_flags::DIR_NEG_Z,
+        };
+        switch_spawnflags |= direction << psx_level::switch_flags::HANDLE_SHIFT;
+        handle_args = (slide.distance, slide.ticks);
+        handle_box = Some(handle.as_str());
+    }
     let flags = if component.enabled {
         psx_level::interactable_flags::ENABLED
     } else {
         0
     };
+    if let Some(box_prop) = handle_box {
+        pending_door_links.push(PendingDoorLink {
+            logic_index: logic.len(),
+            box_prop: box_prop.to_string(),
+            node_name: node_name.to_string(),
+        });
+    }
     // The paired event-graph record lands at this index; the
     // interactable stores it so the interact prompt can fire the
     // record directly (and the effect dispatch can walk back).
@@ -1379,8 +1421,8 @@ pub(crate) fn push_interactable(
         master: psx_level::LOGIC_NAME_NONE,
         delay_ticks: 0,
         wait_ticks: switch_wait,
-        arg0: 0,
-        arg1: 0,
+        arg0: handle_args.0,
+        arg1: handle_args.1,
         link: psx_level::LOGIC_LINK_NONE,
         message,
         x: pos[0],
@@ -2025,7 +2067,10 @@ pub(crate) fn resolve_door_links(
                     record.link = *index;
                     // The door's plane is its box's bottom-centre: the point
                     // the one-way side test compares the player against.
-                    if let Some(prop) = box_props.get(usize::from(*index)) {
+                    if let Some(prop) = box_props
+                        .get(usize::from(*index))
+                        .filter(|_| record.kind == psx_level::logic_kind::DOOR)
+                    {
                         record.x = prop.x;
                         record.y = prop.y;
                         record.z = prop.z;
@@ -2034,7 +2079,7 @@ pub(crate) fn resolve_door_links(
             }
             Some(indices) => {
                 report.error(format!(
-                    "Door '{}' names Box Prop '{}', but {} placed boxes share \
+                    "'{}' names Box Prop '{}', but {} placed boxes share \
                      that name - rename the box so the link is unambiguous",
                     link.node_name,
                     link.box_prop,
@@ -2044,7 +2089,7 @@ pub(crate) fn resolve_door_links(
             }
             None => {
                 report.error(format!(
-                    "Door '{}' names Box Prop '{}', which is not a placed \
+                    "'{}' names Box Prop '{}', which is not a placed \
                      Box Prop in any cooked room",
                     link.node_name, link.box_prop
                 ));
@@ -2663,6 +2708,7 @@ mod switch_cook_tests {
             &mut pages_it,
             &mut interactables,
             logic,
+            &mut Vec::new(),
             report,
         ) && messages.is_empty()
             && interactables[0].message == psx_level::INTERACTABLE_MESSAGE_NONE
@@ -2678,6 +2724,8 @@ mod switch_cook_tests {
             behavior: crate::SwitchBehavior::Toggle,
             unlocks: false,
             persistent: false,
+            handle: None,
+            handle_slide: None,
         };
         assert!(cook_switch(toggle, &mut names, &mut logic, &mut report));
         let one_shot = crate::InteractableKind::Switch {
@@ -2685,6 +2733,8 @@ mod switch_cook_tests {
             behavior: crate::SwitchBehavior::OneShot,
             unlocks: false,
             persistent: false,
+            handle: None,
+            handle_slide: None,
         };
         assert!(cook_switch(one_shot, &mut names, &mut logic, &mut report));
         assert_eq!(logic[0].kind, psx_level::logic_kind::SWITCH);
@@ -2703,6 +2753,8 @@ mod switch_cook_tests {
             behavior: crate::SwitchBehavior::Toggle,
             unlocks: false,
             persistent: false,
+            handle: None,
+            handle_slide: None,
         };
         assert!(!cook_switch(kind, &mut names, &mut logic, &mut report));
         assert!(!report.is_ok());
@@ -2719,6 +2771,8 @@ mod switch_cook_tests {
             behavior: crate::SwitchBehavior::Toggle,
             unlocks: false,
             persistent: false,
+            handle: None,
+            handle_slide: None,
         };
         assert!(cook_switch(kind, &mut names, &mut logic, &mut report));
         assert!(!check_switch_targets(&logic, &names, &mut report));
@@ -2764,6 +2818,8 @@ mod switch_cook_tests {
                 behavior: crate::SwitchBehavior::OneShot,
                 unlocks: false,
                 persistent: false,
+                handle: None,
+                handle_slide: None,
             }
         );
         let bare: crate::InteractableKind = ron::from_str("Switch(target: \"d\")").unwrap();
@@ -3098,6 +3154,8 @@ mod persistence_cook_tests {
             behavior: crate::SwitchBehavior::OneShot,
             unlocks: false,
             persistent,
+            handle: None,
+            handle_slide: None,
         };
         for kind in [lever(true), lever(false)] {
             let (mut messages, mut pages, mut pages_it) = (Vec::new(), Vec::new(), Vec::new());
@@ -3118,6 +3176,7 @@ mod persistence_cook_tests {
                 &mut pages_it,
                 &mut Vec::new(),
                 &mut logic,
+                &mut Vec::new(),
                 &mut report,
             ));
         }
@@ -3238,6 +3297,8 @@ mod persistence_cook_tests {
             behavior: crate::SwitchBehavior::Toggle,
             unlocks: false,
             persistent: true,
+            handle: None,
+            handle_slide: None,
         };
         let (mut messages, mut pages, mut pages_it) = (Vec::new(), Vec::new(), Vec::new());
         assert!(push_interactable(
@@ -3257,6 +3318,7 @@ mod persistence_cook_tests {
             &mut pages_it,
             &mut Vec::new(),
             &mut logic,
+            &mut Vec::new(),
             &mut report,
         ));
         assert!(check_switch_targets(&logic, &names, &mut report));
