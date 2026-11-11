@@ -128,6 +128,7 @@ fn deck_cells(
     area: BTreeSet<[i32; 2]>,
     base: i32,
     slope: [i32; 2],
+    material: Option<ResourceId>,
 ) -> Result<(), String> {
     let mut t = TerrainParams::new(room, area, 1);
     t.base = Some(base);
@@ -137,13 +138,13 @@ fn deck_cells(
     t.keep_walkable = false;
     t.edge = Edge::Cliff;
     t.slope = slope;
+    t.material = material;
     lay_terrain(world, &t).map_err(|e| format!("deck cells: {}", e.describe()))?;
     Ok(())
 }
 
-/// The deck mesh draws but does not collide: the floor cells under it carry
-/// the body (their closure walls hold it on the deck), so the walk never
-/// depends on the mesh slab. Parapets and piers keep their collision.
+/// Take the deck mesh out: the floor cells are the deck (paving that lights
+/// over many vertices and shows its texture); the piers stay as dressing.
 fn soften_decks(world: &mut GridWorld, room: usize) {
     let decks: Vec<u16> = world
         .mesh_assets
@@ -152,11 +153,9 @@ fn soften_decks(world: &mut GridWorld, room: usize) {
         .filter(|(_, a)| a.name == "bridge deck")
         .map(|(i, _)| i as u16)
         .collect();
-    for mesh in &mut world.rooms[room].meshes {
-        if decks.contains(&mesh.asset) {
-            mesh.collide = false;
-        }
-    }
+    world.rooms[room]
+        .meshes
+        .retain(|mesh| !decks.contains(&mesh.asset));
 }
 
 /// Parts of the level, for tests and the report.
@@ -292,7 +291,7 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
         m.stone_wall,
     )
     .map_err(e("landing"))?;
-    deck_cells(world, landing, cells([6, 6], [21, 7]), -64, [0, 0])?;
+    deck_cells(world, landing, cells([6, 6], [21, 7]), 0, [0, 0], m.paving)?;
     let deck_z = 7 * SECTOR_UNITS;
     // The middle piece has no parapet: the lodge door opens onto it.
     for (name, x0, x1, parapet) in [
@@ -305,7 +304,7 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
             [x0 * SECTOR_UNITS, 0, deck_z],
             [x1 * SECTOR_UNITS, 0, deck_z],
             2 * SECTOR_UNITS,
-            512,
+            128,
         );
         // The deck's sides are the room's closure walls (a parapet mesh
         // would only be decoration the body walks through).
@@ -430,7 +429,11 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
             width: 2,
             base: 0,
             leg: LegShape::Stairs,
-            style: style::crypt(),
+            style: {
+                let mut crypt = style::crypt();
+                crypt.headroom = 2560;
+                crypt
+            },
             roles: crypt_roles,
         },
     )
@@ -548,7 +551,8 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
     world.rooms[hb].defaults.open_wall = OPEN_WALL;
     world.rooms[hb].defaults.wall_material = m.stone_wall;
     paint_meshes(world, hb, &[m.paving, m.stone_wall, m.crypt_stone, m.pier]);
-    deck_cells(world, hb, cells([15, 12], [15, 19]), -64, [0, 256])?;
+    deck_cells(world, hb, cells([15, 12], [15, 19]), 0, [0, 256], m.paving)?;
+    soften_decks(world, hb);
     ghost_edge(world, hb, [15, 19], WallEdge::South);
     ghost_edge(world, hb, [15, 12], WallEdge::North);
     // Lodge: the shortcut door onto the start bridge (one way), and a plain
@@ -1043,9 +1047,9 @@ pub fn into_showcase(
             ..super::lighting::GlobalLight::NEW_WORLD
         },
         stream: super::world::StreamRadii {
-            draw_far: 2,
+            draw_far: 3,
             active_radius: 3,
-            lead_radius: 2,
+            lead_radius: 1,
             ..super::world::StreamRadii::DEFAULT
         },
         mesh_assets: Vec::new(),
@@ -1059,10 +1063,10 @@ pub fn into_showcase(
         r.fog = super::room::GridFog {
             enabled: true,
             color: [214, 48, 44],
-            start: SECTOR_UNITS,
-            falloff: 4 * SECTOR_UNITS,
+            start: 5 * SECTOR_UNITS / 2,
+            falloff: 7 * SECTOR_UNITS / 2,
         };
-        r.ambient = [96, 70, 74];
+        r.ambient = [112, 82, 86];
     }
     // Actors.
     let (player, enemies) = player_and_enemies(scene);
@@ -1162,7 +1166,7 @@ pub fn into_showcase(
             sky.sun_enabled = true;
             sky.sun_color = [214, 96, 84];
             sky.sun_border_color = [150, 34, 30];
-            sky.sun_size_percent = 34;
+            sky.sun_size_percent = 48;
             sky.sun_glow_percent = 80;
             sky.sun_yaw_degrees = 90;
             sky.sun_pitch_degrees = 14;
@@ -1171,7 +1175,7 @@ pub fn into_showcase(
             sky.mountain_base_color = [44, 8, 12];
             sky.mountain_gap_percent = 0;
             sky.mountain_roughness_percent = 90;
-            sky.match_room_fog = true;
+            sky.match_room_fog = false;
             sky.cloud_layer.enabled = false;
             culling.draw_distance = 7 * 1024;
         }
