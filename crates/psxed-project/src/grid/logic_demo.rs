@@ -13,6 +13,8 @@
 //! ```
 //!
 //! * `gate_ab` (A to B): a sliding door the lever in A opens. Persistent.
+//! * `checkpoint` (room A, on the walk to the lever): a rest point, reachable by
+//!   radius and line of sight like the levers.
 //! * `gap` (B to C, row 2): an empty doorway, so C can be reached at all.
 //! * `shortcut` (B to C, row 1): a one-way sliding door that refuses from the
 //!   B side and opens from the C side, so a player walking back from C opens
@@ -60,6 +62,8 @@ pub const GATE_DOOR: &str = "gate_ab";
 pub const SHORTCUT_DOOR: &str = "shortcut";
 /// Name of the lever entity.
 pub const LEVER: &str = "gate lever";
+/// Name (and checkpoint id) of the checkpoint entity in room A.
+pub const CHECKPOINT: &str = "gate checkpoint";
 /// Name of the entity whose Switch targets [`SHORTCUT_DOOR`].
 pub const SHORTCUT_BUTTON: &str = "shortcut button";
 
@@ -311,6 +315,19 @@ pub fn into_lever_doors(project: &mut ProjectDocument) -> Result<(), StarterErro
             },
         );
     };
+    // A checkpoint, in room A on the player's walk to the lever.
+    entity(
+        scene,
+        CHECKPOINT,
+        at_cell(0, 1.4, 1.2),
+        InteractableKind::Checkpoint {
+            checkpoint_id: CHECKPOINT.to_string(),
+            title: "Checkpoint".to_string(),
+            body: "Rested.".to_string(),
+        },
+        "REST",
+        640,
+    );
     // The lever, in room A.
     entity(
         scene,

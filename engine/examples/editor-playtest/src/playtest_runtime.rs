@@ -87,6 +87,11 @@ fn apply_debug_body_fallback(
 /// it independent of how fast frames are actually presented.
 pub(super) const POI_PRESENTATION_TICKS_PER_STEP: u8 = 2;
 
+/// Chest height, runtime units, at which the interact prompt tests line of
+/// sight for a lever, message or checkpoint (half the player hull, as the
+/// melee occlusion probe does).
+const INTERACT_SIGHT_LIFT: i32 = 28;
+
 /// Deterministic damage cadence for shared hazard contents. Water is
 /// non-damaging; slime deals four health twice per second, lava deals ten
 /// health four times per second at the 60 Hz simulation rate.
@@ -2157,19 +2162,33 @@ impl Playtest {
             ) else {
                 continue;
             };
-            // Only a point of interest has a beacon to see; a lever is a plain
-            // radius and skips the line-of-sight test. (Message and Checkpoint
-            // interactables still go through it, and with no beacon cooked for
-            // them they are unreachable in a grid world: left as it was.)
-            if interactable.kind == InteractableKind::Switch {
-                // fall through to the distance ranking below
-            } else if let Some(world_rt) = self.world_rt.as_mut() {
-                if !world_rt.typed_world_object_directly_visible(
-                    player,
-                    psx_level::world_object_kind::POINT_OF_INTEREST_BEACON,
-                    index,
-                    &self.destructibles,
-                ) {
+            // A point of interest has a cooked beacon to see. Every other kind
+            // (lever, message, checkpoint) has no beacon: radius plus a clear
+            // line through the grid collision, chest to chest, so a prompt
+            // never shows through a wall or a closed door.
+            if let Some(world_rt) = self.world_rt.as_mut() {
+                let seen = if interactable.kind == InteractableKind::PointOfInterest {
+                    world_rt.typed_world_object_directly_visible(
+                        player,
+                        psx_level::world_object_kind::POINT_OF_INTEREST_BEACON,
+                        index,
+                        &self.destructibles,
+                    )
+                } else {
+                    world_rt.sight_clear(
+                        [
+                            player.x,
+                            player.y.saturating_add(INTERACT_SIGHT_LIFT),
+                            player.z,
+                        ],
+                        [
+                            interactable.x,
+                            interactable.y.saturating_add(INTERACT_SIGHT_LIFT),
+                            interactable.z,
+                        ],
+                    )
+                };
+                if !seen {
                     continue;
                 }
             }

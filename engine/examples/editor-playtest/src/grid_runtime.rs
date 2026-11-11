@@ -785,6 +785,11 @@ impl GridRuntime {
         visibility
     }
 
+    /// Whether nothing solid lies on the segment `from -> to`.
+    pub(super) fn sight_clear(&self, from: [i32; 3], to: [i32; 3]) -> bool {
+        self.resident.collision().line_of_sight(from, to)
+    }
+
     pub(super) fn typed_world_object_directly_visible(
         &mut self,
         observer: RoomPoint,
@@ -1676,6 +1681,22 @@ mod tests {
         assert_eq!(runtime.room_of(at), Some(0));
         // Loading a room that is already here is refused, not duplicated.
         assert!(!runtime.add_room(0, bytes[0]));
+    }
+
+    #[test]
+    fn a_prompt_sight_line_is_blocked_by_the_floor_and_clear_across_a_portal() {
+        let mut runtime = GridRuntime::from_core(leak(&core()), 1000).expect("the core loads");
+        assert!(runtime.add_room(0, leak(&chunk())));
+        assert!(runtime.add_room(1, leak(&chunk())));
+        let here = [S / 2, 20, S / 2];
+        let next_room = [S + S / 2, 20, S / 2];
+        let below_floor = [S / 2, -30, S / 2];
+        assert!(runtime.sight_clear(here, [S / 4, 30, S / 4]));
+        assert!(
+            runtime.sight_clear(here, next_room),
+            "an open portal passes sight"
+        );
+        assert!(!runtime.sight_clear(here, below_floor), "a floor blocks it");
     }
 
     #[test]
