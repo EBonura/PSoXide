@@ -62,3 +62,22 @@ pub(super) fn push_hook_entities(
         }
     }
 }
+
+/// Whether any enabled mesh instance of `world` carries a hook socket, so the level has a hook
+/// point before the entity walk has cooked one.
+pub(crate) fn has_hook_sockets(world: &GridWorld) -> bool {
+    world.rooms.iter().any(|room| {
+        room.meshes.iter().filter(|m| m.enabled).any(|mesh| {
+            world
+                .mesh_assets
+                .get(usize::from(mesh.asset))
+                .and_then(|asset| asset.build().ok())
+                .is_some_and(|built| {
+                    built
+                        .sockets
+                        .iter()
+                        .any(|socket| matches!(socket, Socket::Hook { .. }))
+                })
+        })
+    })
+}

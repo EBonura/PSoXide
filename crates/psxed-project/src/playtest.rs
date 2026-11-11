@@ -657,6 +657,7 @@ fn build_package_cooked(
     let mut pending_door_links: Vec<PendingDoorLink> = Vec::new();
     // ResourceId → index into `models` for instance dedup.
     let runtime_model_clips = collect_runtime_model_clip_requirements(project, scene);
+    let omitted_actions = cook_entities::omitted_player_actions(scene);
     let mut model_for_resource: HashMap<ResourceId, u16> = HashMap::new();
     let mut model_clip_remaps: HashMap<ResourceId, Vec<Option<u16>>> = HashMap::new();
     let mut weapon_for_resource: HashMap<ResourceId, u16> = HashMap::new();
@@ -2066,6 +2067,7 @@ fn build_package_cooked(
                     &mut combat_capsules,
                     &mut characters,
                     &clip_trim,
+                    &omitted_actions,
                     &mut report,
                 )
                 .map(|character_index| PlaytestPlayerController {
@@ -2170,6 +2172,7 @@ fn build_package_cooked(
         &model_clips,
         &weapon_for_resource,
         &equipment,
+        &omitted_actions,
         &mut report,
     );
 
