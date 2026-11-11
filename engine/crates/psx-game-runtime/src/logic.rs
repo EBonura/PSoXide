@@ -20,8 +20,8 @@
 //! `&'static` cooked records, all-zero [`LogicRuntime::EMPTY`].
 
 use psx_level::{
-    door_flags, logic_flags, logic_kind, persistent_flag_slot, switch_flags, LevelLogicRecord,
-    StableId, LOGIC_NAME_NONE,
+    door_flags, logic_flags, logic_kind, switch_flags, LevelLogicRecord, LOGIC_NAME_NONE,
+    PERSISTENT_SLOT_NONE,
 };
 
 use crate::save::SaveBlock;
@@ -301,19 +301,20 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
     }
 
     /// The save flag record `index` owns, or `None` when it is not
-    /// persistent (or `ids` has no entry for it). `ids` is the cooked
-    /// stable-id table parallel to `records`.
+    /// persistent (or `slots` has no entry for it). `slots` is the cooked
+    /// slot table parallel to `records`.
     #[must_use]
     pub fn persistent_slot(
         records: &'static [LevelLogicRecord],
-        ids: &[StableId],
+        slots: &[u16],
         index: usize,
     ) -> Option<usize> {
         let record = records.get(index)?;
         if record.flags & logic_flags::PERSISTENT == 0 {
             return None;
         }
-        Some(usize::from(persistent_flag_slot(*ids.get(index)?)))
+        let slot = *slots.get(index)?;
+        (slot != PERSISTENT_SLOT_NONE).then_some(usize::from(slot))
     }
 
     /// Write record `index`'s state into `save` when it is persistent: the
@@ -323,11 +324,11 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
     pub fn store_persistent(
         &self,
         records: &'static [LevelLogicRecord],
-        ids: &[StableId],
+        slots: &[u16],
         index: usize,
         save: &mut SaveBlock,
     ) -> bool {
-        let Some(slot) = Self::persistent_slot(records, ids, index) else {
+        let Some(slot) = Self::persistent_slot(records, slots, index) else {
             return false;
         };
         if index >= self.count() || slot >= usize::from(save.flag_count) {
@@ -353,13 +354,13 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
     pub fn restore_persistent(
         &mut self,
         records: &'static [LevelLogicRecord],
-        ids: &[StableId],
+        slots: &[u16],
         save: &SaveBlock,
     ) {
         let count = self.count().min(records.len());
         let mut index = 0usize;
         while index < count {
-            if let Some(slot) = Self::persistent_slot(records, ids, index) {
+            if let Some(slot) = Self::persistent_slot(records, slots, index) {
                 if slot < usize::from(save.flag_count) && save.flag(slot) {
                     self.restore_changed(index, &records[index]);
                 }
@@ -1381,7 +1382,8 @@ mod tests {
     }
 
     const PERSIST: u16 = logic_flags::ENABLED | logic_flags::PERSISTENT;
-    const IDS: [StableId; 4] = [StableId(5), StableId(1_000_003), StableId(77), StableId(42)];
+    /// Cooked save slots, parallel to `WORLD`.
+    const SLOTS: [u16; 4] = [5, 579, 77, 42];
 
     // 0 = lever (persistent, one-shot), 1 = door it opens (persistent,
     // slides), 2 = a transient door, 3 = a persistent door that starts open.
@@ -1418,7 +1420,7 @@ mod tests {
         logic.fire_by_name(&WORLD, 3, UseCode::On, 1);
         logic.fire_by_name(&WORLD, 4, UseCode::Off, 1);
         for index in 0..4 {
-            logic.store_persistent(&WORLD, &IDS, index, &mut save);
+            logic.store_persistent(&WORLD, &SLOTS, index, &mut save);
         }
         assert!(logic.door_open(1) && logic.door_open(2) && !logic.door_open(3));
 
@@ -1426,7 +1428,7 @@ mod tests {
         // is applied.
         logic.init_from_records(&WORLD);
         assert!(!logic.door_open(1), "re-armed before the restore");
-        logic.restore_persistent(&WORLD, &IDS, &save);
+        logic.restore_persistent(&WORLD, &SLOTS, &save);
         assert!(logic.door_open(1), "the persistent door is still open");
         assert!(logic.door_slide(&WORLD, 1).unwrap().cleared, "and cleared");
         assert!(logic.is_removed(0), "a spent one-shot lever stays spent");
@@ -1444,21 +1446,21 @@ mod tests {
         let mut logic = TestLogic::EMPTY;
         logic.init_from_records(&WORLD);
         assert!(
-            !logic.store_persistent(&WORLD, &IDS, 1, &mut save),
+            !logic.store_persistent(&WORLD, &SLOTS, 1, &mut save),
             "untouched"
         );
         logic.fire_by_name(&WORLD, 2, UseCode::On, 1);
-        assert!(logic.store_persistent(&WORLD, &IDS, 1, &mut save));
+        assert!(logic.store_persistent(&WORLD, &SLOTS, 1, &mut save));
         assert!(
-            !logic.store_persistent(&WORLD, &IDS, 1, &mut save),
+            !logic.store_persistent(&WORLD, &SLOTS, 1, &mut save),
             "no change"
         );
         logic.fire_by_name(&WORLD, 2, UseCode::Off, 2);
-        assert!(logic.store_persistent(&WORLD, &IDS, 1, &mut save));
+        assert!(logic.store_persistent(&WORLD, &SLOTS, 1, &mut save));
         assert!((0..832).all(|slot| !save.flag(slot)), "back to clean");
         // Non-persistent records never touch the save.
         logic.fire_by_name(&WORLD, 3, UseCode::On, 3);
-        assert!(!logic.store_persistent(&WORLD, &IDS, 2, &mut save));
+        assert!(!logic.store_persistent(&WORLD, &SLOTS, 2, &mut save));
     }
 
     #[test]
@@ -1477,7 +1479,7 @@ mod tests {
                 ..blank(logic_kind::DOOR)
             },
         ];
-        let door = StableId(123_457);
+        let door: u16 = 300;
         let mut save = SaveBlock::new(100, 832);
         let mut logic = TestLogic::EMPTY;
         logic.init_from_records(&BEFORE);
@@ -1489,11 +1491,11 @@ mod tests {
 
         let mut recooked = TestLogic::EMPTY;
         recooked.init_from_records(&AFTER);
-        recooked.restore_persistent(&AFTER, &[StableId(1), StableId(2), door], &loaded);
+        recooked.restore_persistent(&AFTER, &[1, 2, door], &loaded);
         assert!(recooked.door_open(2) && !recooked.door_open(0));
         assert_eq!(
-            TestLogic::persistent_slot(&AFTER, &[StableId(1), StableId(2), door], 2),
-            Some(usize::from(psx_level::persistent_flag_slot(door)))
+            TestLogic::persistent_slot(&AFTER, &[1, 2, door], 2),
+            Some(usize::from(door))
         );
     }
 
@@ -1503,11 +1505,11 @@ mod tests {
         let mut logic = TestLogic::EMPTY;
         logic.init_from_records(&WORLD);
         logic.fire_by_name(&WORLD, 2, UseCode::On, 1);
-        // Slot of IDS[1] is 1_000_003 % 832 = 579, beyond a 4-flag table.
-        assert!(!logic.store_persistent(&WORLD, &IDS, 1, &mut save));
+        // Slot of SLOTS[1] is 579, beyond a 4-flag table.
+        assert!(!logic.store_persistent(&WORLD, &SLOTS, 1, &mut save));
         save.flags = [0xFF; crate::save::SAVE_FLAG_BYTES];
         logic.init_from_records(&WORLD);
-        logic.restore_persistent(&WORLD, &IDS, &save);
+        logic.restore_persistent(&WORLD, &SLOTS, &save);
         assert!(!logic.door_open(1));
     }
 

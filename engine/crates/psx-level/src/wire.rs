@@ -426,7 +426,7 @@ level_tables! {
     table interactables: InteractableRecord;
     table vitality_circles: LevelVitalityCircleRecord;
     table logic: LevelLogicRecord;
-    table logic_ids: StableId;
+    table logic_slots: u16;
     table game_entities: LevelGameEntityRecord;
     table game_entity_ids: StableId;
     table entities: EntityRecord;
@@ -658,7 +658,7 @@ mod tests {
             interactables: &interactables,
             vitality_circles: &[],
             logic: &[],
-            logic_ids: &[StableId(5)],
+            logic_slots: &[7, 12],
             game_entities: &[],
             game_entity_ids: &[],
             entities: &[],
@@ -686,7 +686,7 @@ mod tests {
         assert_eq!(decoded.interactable_messages, &messages);
         assert_eq!(decoded.interactable_message_pages, &pages);
         assert_eq!(decoded.interactable_message_pages_it, &[""]);
-        assert_eq!(decoded.logic_ids, &[StableId(5)]);
+        assert_eq!(decoded.logic_slots, &[7, 12]);
         assert_eq!(decoded.player_spawn, spawn);
         assert_eq!(decoded.world_ambient_rgb, [32; 3]);
         assert_eq!(decoded.encode(), bytes, "canonical");

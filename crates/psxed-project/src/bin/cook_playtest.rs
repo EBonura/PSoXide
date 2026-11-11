@@ -26,7 +26,7 @@ use psxed_project::{
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let (project, project_root) = match args.first() {
+    let (mut project, project_root) = match args.first() {
         None => (ProjectDocument::starter(), default_project_dir()),
         Some(path) => match std::fs::read_to_string(path) {
             Ok(text) => match ProjectDocument::from_ron_str(&text) {
@@ -75,6 +75,25 @@ fn main() -> ExitCode {
             // Surface package counts in the success line: a quick read on
             // what landed in generated/.
             if let Some(package) = package {
+                println!(
+                    "[cook-playtest] Persistent slots: {} of {} save flags used ({} persistent doors and levers)",
+                    package.persistent_slots_used,
+                    psx_level::POI_PERSISTENT_FLAG_CAPACITY,
+                    package.persistent_slots.len(),
+                );
+                // Keep every record on the slot it got: store the assignment in
+                // the project file, so adding a door never renumbers the others.
+                if let Some(path) = args.first() {
+                    if package.persistent_slots != project.persistent_slots {
+                        project.persistent_slots = package.persistent_slots.clone();
+                        match project.save_to_path(path) {
+                            Ok(()) => println!("[cook-playtest] stored the slot table in {path}"),
+                            Err(e) => {
+                                eprintln!("[cook-playtest] could not store the slot table: {e}")
+                            }
+                        }
+                    }
+                }
                 // The exact cooked resource envelope. The editor already shows
                 // this after Play; printing it here means a CLI cook, a gate
                 // log and a budget review all quote the same numbers instead

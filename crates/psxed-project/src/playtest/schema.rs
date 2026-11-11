@@ -2023,6 +2023,16 @@ pub struct PlaytestPackage {
     pub game_entity_ids: Vec<u32>,
     /// Stable id of each [`Self::logic`] record, parallel to it.
     pub logic_ids: Vec<u32>,
+    /// Save-flag slot of each [`Self::logic`] record, parallel to it
+    /// (`psx_level::PERSISTENT_SLOT_NONE` for a transient one).
+    pub logic_slots: Vec<u16>,
+    /// The slot table this cook assigned (stable id to slot). The caller
+    /// stores it in `ProjectDocument::persistent_slots` when it differs, so
+    /// the next cook keeps every record where it is.
+    pub persistent_slots: Vec<crate::PersistentSlot>,
+    /// Bits of the save's flag bitset taken by every persistent object
+    /// (doors, levers, breakables, points of interest).
+    pub persistent_slots_used: u16,
     /// Single player spawn -- required.
     pub spawn: Option<PlaytestSpawn>,
     /// Cooked Character resources used by player / future

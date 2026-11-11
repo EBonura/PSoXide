@@ -771,11 +771,14 @@ pub const POI_FLAG_NONE: u16 = u16::MAX;
 /// Number of persistent POI state bits available in the one-frame save block.
 pub const POI_PERSISTENT_FLAG_CAPACITY: usize = 832;
 
-/// The save flag a persistent record owns: its stable id modulo the flag
-/// capacity. Unlike a table index it does not move when records are added,
-/// removed or reordered, so a save keeps meaning the same door across
-/// recooks. Two records can land on one slot; the cook refuses a level where
-/// they do, naming both.
+/// Sentinel in the cooked logic slot table: this record is not persistent.
+pub const PERSISTENT_SLOT_NONE: u16 = u16::MAX;
+
+/// The slot a persistent record hashes to: its stable id modulo the flag
+/// capacity. The cook starts a record's slot search here (so a level with no
+/// collisions keeps the slots this hash alone used to give), then assigns
+/// slots explicitly and cooks them in the logic slot table; the runtime reads
+/// that table and never hashes.
 #[must_use]
 pub const fn persistent_flag_slot(id: StableId) -> u16 {
     (id.raw() % POI_PERSISTENT_FLAG_CAPACITY as u32) as u16

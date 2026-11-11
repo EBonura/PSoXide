@@ -1934,6 +1934,18 @@ impl<'a, S: Scene> GameApp<'a, S> {
             }
             LevelUiAction::Game { id } => {
                 self.gameplay.game_ui_action(id, ctx);
+                // A game action may ask for a scene state (Continue asks for
+                // gameplay from the title); route it like Start Gameplay.
+                if let Some(state_id) = ctx.take_scene_state_request() {
+                    if let Some(target) = self.flow_index_for_scene_state(state_id) {
+                        if self.tag_at(target).has_gameplay() {
+                            self.prepare_gameplay_start();
+                        }
+                        let return_to = self.cursor.return_to;
+                        self.request_flow_state(target, return_to, ctx);
+                        return;
+                    }
+                }
                 if let Some(scene) = self.current_tag().ui_scene() {
                     let (first, count) = self.scene_node_range(scene);
                     let _ = self.focus_preferred_game_action(first, count);
@@ -2735,6 +2747,9 @@ mod tests {
         /// When `Some`, `update` asks the flow for this scene state, the way a
         /// world raises its own win/lose condition.
         request_state: Option<u16>,
+        /// When `Some`, a game action asks the flow for this scene state (a
+        /// title's Continue button asking for gameplay).
+        request_on_game_action: Option<u16>,
         combat_active: bool,
         cinematic: bool,
         menu_blocked: bool,
@@ -2774,9 +2789,12 @@ mod tests {
         fn prepare_loading_assets(&mut self, _scene: u16) {
             self.loading_prepares += 1;
         }
-        fn game_ui_action(&mut self, id: u16, _ctx: &mut Ctx) {
+        fn game_ui_action(&mut self, id: u16, ctx: &mut Ctx) {
             self.game_actions += 1;
             self.last_game_action = id;
+            if let Some(state) = self.request_on_game_action {
+                ctx.request_scene_state(state);
+            }
         }
         fn ui_node_visible(&self, tag: &str) -> bool {
             self.hidden_ui_tag != Some(tag)
@@ -3658,6 +3676,35 @@ mod tests {
         idle_tick(&mut app, &mut ctx);
         assert_eq!(app.gameplay.updates, updates_at_entry);
         assert_eq!(app.cursor.current, 1);
+    }
+
+    /// A game action may ask for a scene state (Continue asks for gameplay):
+    /// the flow follows it the way it follows a button's own navigation.
+    #[test]
+    fn a_game_action_can_request_a_scene_state() {
+        let mut scene = CountingScene {
+            shared_resource_key: Some(7),
+            request_on_game_action: Some(43),
+            ..Default::default()
+        };
+        let mut app = GameApp::new(
+            &PAUSE_COMPOSED_FLOW,
+            MENU_SCENES,
+            MENU_NODES,
+            &[],
+            &[],
+            &[],
+            &[],
+            psx_level::UI_SCENE_NONE,
+            &mut scene,
+        );
+        let mut ctx = test_ctx();
+        app.init(&mut ctx);
+        complete_loading(&mut app, &mut ctx);
+        assert_eq!(app.cursor.current, 0);
+        app.perform_action(LevelUiAction::Game { id: 401 }, &mut ctx);
+        assert_eq!(app.cursor.current, 1, "the request moved the flow");
+        assert_eq!(app.gameplay.last_game_action, 401);
     }
 
     /// A request naming a state the flow does not have is inert rather than

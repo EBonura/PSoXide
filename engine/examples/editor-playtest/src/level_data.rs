@@ -156,7 +156,7 @@ level_statics! {
     table INTERACTABLES: interactables: InteractableRecord = LEN_INTERACTABLES;
     table VITALITY_CIRCLES: vitality_circles: LevelVitalityCircleRecord = LEN_VITALITY_CIRCLES;
     table LOGIC: logic: LevelLogicRecord = LEN_LOGIC;
-    table LOGIC_IDS: logic_ids: StableId = LEN_LOGIC_IDS;
+    table LOGIC_SLOTS: logic_slots: u16 = LEN_LOGIC_SLOTS;
     table GAME_ENTITIES: game_entities: LevelGameEntityRecord = LEN_GAME_ENTITIES;
     table GAME_ENTITY_IDS: game_entity_ids: StableId = LEN_GAME_ENTITY_IDS;
     table ENTITIES: entities: EntityRecord = LEN_ENTITIES;
@@ -209,7 +209,7 @@ mod fixture {
                 interactables: &[],
                 vitality_circles: &[],
                 logic: &[],
-                logic_ids: &[],
+                logic_slots: &[],
                 game_entities: GAME_ENTITIES,
                 game_entity_ids: GAME_ENTITY_IDS,
                 entities: &[],

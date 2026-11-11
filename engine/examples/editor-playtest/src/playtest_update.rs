@@ -528,6 +528,14 @@ impl Playtest {
         self.motor.snap_to(self.spawn, spawn_motor_yaw);
         self.room_index = spawn.room;
         self.reset_new_game();
+        self.continuing = false;
+        if self.continue_pending {
+            // Continue reads the card during loading instead of keeping the
+            // blank new-game save `reset_new_game` just made.
+            self.poi_save_loaded = false;
+            self.poi_save_load_attempted = false;
+            self.poi_save_dirty = false;
+        }
         self.sync_door_box_props();
         // Start the camera behind the AUTHORED spawn facing so the
         // SpawnPoint's editor rotation is honoured in Play (movement is
@@ -629,9 +637,10 @@ impl Playtest {
             release_ui_images();
             self.gameplay_epoch = ctx.sim_tick;
             self.gameplay_epoch_set = true;
-            if !GAME_ENTITIES
-                .iter()
-                .any(|r| r.flags & psx_level::game_entity_flags::TRAINING != 0)
+            if !self.continuing
+                && !GAME_ENTITIES
+                    .iter()
+                    .any(|r| r.flags & psx_level::game_entity_flags::TRAINING != 0)
                 && self.start_player_anim_action(PlayerAnim::Intro, ctx.sim_tick, ctx.video_hz)
             {
                 self.ground_opening_player();
@@ -659,6 +668,7 @@ impl Playtest {
             return;
         }
         self.tick_gameplay_layer(ctx);
+        self.pump_poi_flush(ctx);
         {
             use psx_game_runtime::entities::GameEntityState;
             let count = self.game_entities.count().min(GAME_ENTITIES.len());

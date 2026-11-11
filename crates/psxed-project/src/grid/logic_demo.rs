@@ -13,7 +13,7 @@
 //! ```
 //!
 //! * `gate_ab` (A to B): a sliding door the lever in A opens. Persistent.
-//! * `checkpoint` (room A, on the walk to the lever): a rest point, reachable by
+//! * `checkpoint` (room B, just past the gate): a rest point, reachable by
 //!   radius and line of sight like the levers.
 //! * `gap` (B to C, row 2): an empty doorway, so C can be reached at all.
 //! * `shortcut` (B to C, row 1): a one-way sliding door that refuses from the
@@ -157,6 +157,53 @@ fn slab_vertices(half_thickness: i16, half_width: i16, height: i16) -> [[i16; 3]
     ]
 }
 
+/// `UiAction::Game` id of the Continue button (editor-playtest's
+/// `CONTINUE_ACTION`) and the tag that hides it until the card holds a save.
+pub const CONTINUE_ACTION: u16 = 401;
+/// Visibility tag of the Continue button.
+pub const CONTINUE_TAG: &str = "menu.continue";
+
+/// Add a Continue button under every New Game (`StartGameplay`) button of the
+/// project's UI scenes: a copy placed one row above, firing the game action
+/// [`CONTINUE_ACTION`], shown only while the card holds a save. A project
+/// authors its own the same way: a Button with action Game(401) and tag
+/// `menu.continue`.
+pub fn add_continue_button(project: &mut ProjectDocument) {
+    let mut title = None;
+    for scene in &mut project.ui_scenes {
+        let found = scene.nodes().iter().find_map(|node| match &node.kind {
+            crate::UiNodeKind::Button { action, .. }
+                if *action == crate::UiAction::StartGameplay =>
+            {
+                Some((node.parent.unwrap_or(scene.root), node.kind.clone()))
+            }
+            _ => None,
+        });
+        let Some((parent, mut kind)) = found else {
+            continue;
+        };
+        if let crate::UiNodeKind::Button {
+            rect,
+            label,
+            tag,
+            action,
+            ..
+        } = &mut kind
+        {
+            rect.y -= rect.height as i16 + 4;
+            *label = "  CONTINUE".to_string();
+            *tag = CONTINUE_TAG.to_string();
+            *action = crate::UiAction::Game(CONTINUE_ACTION);
+        }
+        scene.add_node(parent, "Continue", kind);
+        title.get_or_insert(scene.id);
+    }
+    // Boot into the title so the button is what a player sees first.
+    if let Some(id) = title {
+        project.boot = crate::BootTarget::UiScene(id);
+    }
+}
+
 /// Turn `project` into the lever-and-doors project in place: the base's
 /// level goes, its player stays, the world becomes the three rooms and the
 /// gameplay nodes are placed.
@@ -166,6 +213,7 @@ fn slab_vertices(half_thickness: i16, half_width: i16, height: i16) -> [[i16; 3]
 /// Fails when the first room has no floor to spawn the player on.
 pub fn into_lever_doors(project: &mut ProjectDocument) -> Result<(), StarterError> {
     strip_base(project, 0);
+    add_continue_button(project);
     super::graybox_set::add_to(project);
     let ground = find_material(project, &["Graybox / Ground 64"]);
     let walls = find_material(project, &["Graybox / Original 64"]).or(ground);
@@ -315,11 +363,11 @@ pub fn into_lever_doors(project: &mut ProjectDocument) -> Result<(), StarterErro
             },
         );
     };
-    // A checkpoint, in room A on the player's walk to the lever.
+    // A checkpoint, in room B just past the gate, on the walk through it.
     entity(
         scene,
         CHECKPOINT,
-        at_cell(0, 1.4, 1.2),
+        at_cell(1, 1.5, 1.4),
         InteractableKind::Checkpoint {
             checkpoint_id: CHECKPOINT.to_string(),
             title: "Checkpoint".to_string(),
@@ -489,18 +537,21 @@ mod tests {
             assert_eq!(lever.message, psx_level::INTERACTABLE_MESSAGE_NONE);
         }
 
-        // Four persistent records, four distinct save slots.
+        // Four persistent records, four distinct save slots, all cooked in the
+        // slot table and handed back for the project to store.
         let slots: std::collections::BTreeSet<u16> = package
             .logic
             .iter()
-            .zip(&package.logic_ids)
+            .zip(&package.logic_slots)
             .filter(|(r, _)| r.flags & logic_flags::PERSISTENT != 0)
-            .map(|(_, id)| psx_level::persistent_flag_slot(psx_level::StableId(*id)))
+            .map(|(_, slot)| *slot)
             .collect();
         assert_eq!(slots.len(), 4);
         assert!(slots
             .iter()
             .all(|slot| usize::from(*slot) < psx_level::POI_PERSISTENT_FLAG_CAPACITY));
+        assert_eq!(package.persistent_slots.len(), 4);
+        assert_eq!(package.persistent_slots_used, 4);
     }
 
     #[test]
