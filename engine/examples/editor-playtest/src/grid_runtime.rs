@@ -35,9 +35,10 @@ use psx_grid::contents::{contents_of_liquid_kind, LiquidContentsSample, CONTENTS
 use psx_grid::render::load_gte_clip_planes;
 use psx_grid::render::{
     classic_far_depth, load_view_rotation, plan_axes, FrustumPlanes, GridFrame, GridPhase,
-    GridRenderer, RoomCamera, SkinCamera, SkinRenderer, ViewProjection, ViewTransform,
-    CLIP_ALL_PLANES,
+    GridRenderer, RoomCamera, ViewProjection, ViewTransform, CLIP_ALL_PLANES,
 };
+#[cfg(feature = "far-skin")]
+use psx_grid::render::{SkinCamera, SkinRenderer};
 use psx_grid::stream::{room_at, StreamWindow, Want};
 use psx_grid::{FormatError, LevelView, ResidentRooms, RoomActivity, RoomView, LEVEL_HAS_LIQUIDS};
 use psx_gte::math::Vec3I32 as GteVec3I32;
@@ -176,7 +177,9 @@ pub(super) struct GridRuntime {
     draw_scratch: Vec<usize>,
     visible_scratch: Vec<usize>,
     /// Per room, whether the frame draws it whole (the skin covers the rest).
+    #[cfg(feature = "far-skin")]
     skin_skip: Vec<bool>,
+    #[cfg(feature = "far-skin")]
     skin: SkinRenderer,
     /// Per room, whether the frame draws it whole (no far card then).
     card_skip: Vec<bool>,
@@ -329,7 +332,9 @@ impl GridRuntime {
             room_hint: 0,
             draw_scratch: Vec::new(),
             visible_scratch: Vec::new(),
+            #[cfg(feature = "far-skin")]
             skin_skip: Vec::new(),
+            #[cfg(feature = "far-skin")]
             skin: SkinRenderer::new(),
             card_skip: Vec::new(),
             last_world_packet_words: 0,
@@ -1205,6 +1210,7 @@ impl GridRuntime {
                         break;
                     }
                 }
+                #[cfg(feature = "far-skin")]
                 if self.level.skin.is_some() && !total.overflowed {
                     scene::load_translation(view.translation);
                     // The skin covers the rooms this frame does not draw whole.

@@ -65,9 +65,22 @@ pub fn refusal(package: &PlaytestPackage) -> Option<String> {
     let budget = plan(package)?;
     let wanted = budget.pool + IMAGE_FLOOR_BYTES + budget.need() + MARGIN_BYTES;
     (wanted > GUEST_RAM_BYTES).then(|| {
+        let mut rooms: Vec<(usize, usize)> = package
+            .world_geometry
+            .room_chunks
+            .iter()
+            .enumerate()
+            .map(|(room, chunk)| (room, chunk.len().div_ceil(2048)))
+            .collect();
+        rooms.sort_by_key(|&(room, pages)| (std::cmp::Reverse(pages), room));
+        let biggest: Vec<String> = rooms
+            .iter()
+            .take(3)
+            .map(|(room, pages)| format!("room {room} ({pages} pages, {} KiB)", pages * 2))
+            .collect();
         format!(
             "grid world: level '{}' cannot fit the guest's {} KiB of RAM: its room pool alone is {} KiB (the rooms the guest holds at once, of {} rooms), the rest of the guest takes at least {} KiB and its heap needs {} KiB, {} KiB over. \
-             Fewer or smaller rooms shrink the pool; a level that cannot hold all its rooms at once should stream by flood (a flood radius in the world settings); the largest room ({} B of renderer scratch) sets the heap.",
+             The biggest rooms are {}. The rest of the guest, measured: code about 970 KiB (the renderers, the engine, the game logic), the runtime arenas about 325 KiB (sized by the level's models, clips, UI images and packet budget), the scene state 31 KiB. Fewer or smaller rooms shrink the pool; a level that cannot hold all its rooms at once should stream by flood (a flood radius in the world settings); the largest room ({} B of renderer scratch) sets the heap.",
             package.save_title.replace('\n', " "),
             GUEST_RAM_BYTES / 1024,
             budget.pool / 1024,
@@ -75,6 +88,7 @@ pub fn refusal(package: &PlaytestPackage) -> Option<String> {
             IMAGE_FLOOR_BYTES / 1024,
             (budget.need() + MARGIN_BYTES) / 1024,
             (wanted - GUEST_RAM_BYTES).div_ceil(1024),
+            biggest.join(", "),
             budget.renderer,
         )
     })
