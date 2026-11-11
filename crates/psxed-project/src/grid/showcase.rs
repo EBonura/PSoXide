@@ -113,6 +113,7 @@ fn platform(
     height: i32,
     material: Option<ResourceId>,
     wall: Option<ResourceId>,
+    wall_height: i32,
 ) -> Result<usize, String> {
     let room = world.rooms.len();
     let mut r = GridRoom::new_derived(name, 1, 1);
@@ -120,7 +121,7 @@ fn platform(
     // An open-air room has no ceiling to take its closure walls up to: this
     // height makes them (low edge walls the body cannot step over, which are
     // the parapets of a bridge deck and the rim of a platform).
-    r.defaults.open_wall = OPEN_WALL;
+    r.defaults.open_wall = wall_height;
     world.rooms.push(r);
     let mut t = TerrainParams::new(room, area, 1);
     t.base = Some(height);
@@ -302,8 +303,9 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
         "Landing",
         cells([0, 4], [5, 9]),
         0,
-        m.sand_stone,
-        m.rock,
+        m.floor_stone,
+        m.block_big,
+        OPEN_WALL,
     )
     .map_err(e("landing"))?;
     deck_cells(world, landing, cells([6, 6], [21, 7]), 0, [0, 0], m.floor_stone)?;
@@ -345,6 +347,7 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
         Footprint::Rect(rect([22, 5], [26, 9])),
     );
     gh.storeys = 1;
+    gh.storey_height = 6144;
     gh.stair = false;
     gh.roof_parapet = None;
     gh.door_sides = vec![];
@@ -371,7 +374,7 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
     cath.arch = Some(ArchShape::Round);
     cath.bays = 4;
     cath.west_door = false;
-    cath.floor_material = m.sand_stone;
+    cath.floor_material = m.floor_stone;
     cath.wall_material = m.block_big;
     cath.ceiling_material = m.block_small;
     build_cathedral(world, &cath).map_err(|r| format!("cathedral: {}", r.describe()))?;
@@ -389,7 +392,8 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
         yard.clone(),
         0,
         m.sand,
-        m.rock,
+        m.block_big,
+        6144,
     )
     .map_err(e("courtyard"))?;
     {
@@ -652,7 +656,7 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
                 from: 24,
                 to: 32,
                 kind: door,
-                top: 2048,
+                top: 3584,
                 material: m.trim_course,
             },
             name: "gate".into(),
@@ -694,7 +698,7 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
         WallEdge::East,
         28,
         36,
-        arch_head(ArchShape::Pointed, 8, 2816),
+        arch_head(ArchShape::Round, 8, 3072),
         door,
         0,
         m.voussoir,
@@ -897,9 +901,12 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
     ruin_region(world, &ruin).map_err(|r| format!("ruin: {}", r.describe()))?;
     // ---- 9b. Far megablock silhouettes on the sand (outside the walls) ------
     for (name, x0, z0, w, d, storeys, wall) in [
-        ("Monolith north", 12, 0, 2, 2, 3, m.block_big),
-        ("Monolith west", -5, 10, 2, 3, 2, m.block_pale),
-        ("Monolith east", 19, -1, 3, 2, 3, m.block_mid),
+        ("Monolith north a", 12, 3, 2, 3, 3, m.block_big),
+        ("Monolith north b", 12, 0, 2, 3, 4, m.block_pale),
+        ("Monolith north c", 17, 3, 3, 3, 2, m.block_mid),
+        ("Monolith north d", 18, 0, 3, 3, 3, m.block_big),
+        ("Monolith south", 7, 8, 3, 3, 3, m.block_pale),
+        ("Monolith west", -3, 5, 3, 4, 3, m.block_mid),
     ] {
         let mut b = BuildingParams::new(
             RoomTarget::New(name.into()),
@@ -915,6 +922,52 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
         b.wall_material = wall;
         b.ceiling_material = m.block_small;
         build_building(world, &b).map_err(|r| format!("{name}: {}", r.describe()))?;
+    }
+    // ---- 9c. Iron on the roofs: masts and a tank (dressing only) -----------
+    {
+        let mast = super::edit::meshes::add_asset(
+            world,
+            super::mesh::MeshAsset::new(
+                "mast",
+                super::mesh::MeshKind::Column(ColumnSpec {
+                    radius: 64,
+                    height: 2560,
+                    sides: 4,
+                    plinth: 64,
+                    capital: 64,
+                }),
+            ),
+        )
+        .map_err(|r| format!("mast: {r:?}"))?;
+        let tank = super::edit::meshes::add_asset(
+            world,
+            super::mesh::MeshAsset::new(
+                "tank",
+                super::mesh::MeshKind::Column(ColumnSpec {
+                    radius: 384,
+                    height: 1280,
+                    sides: 8,
+                    plinth: 64,
+                    capital: 64,
+                }),
+            ),
+        )
+        .map_err(|r| format!("tank: {r:?}"))?;
+        for (room, asset, x, z, y) in [
+            (gate_room, mast, 22 * SECTOR_UNITS + 256, 5 * SECTOR_UNITS + 256, 6144),
+            (gate_room, mast, 26 * SECTOR_UNITS + 768, 5 * SECTOR_UNITS + 256, 6144),
+            (gate_room, tank, 24 * SECTOR_UNITS + 512, 8 * SECTOR_UNITS, 6144),
+            (gate_room, mast, 25 * SECTOR_UNITS, 8 * SECTOR_UNITS + 512, 6144),
+        ] {
+            let id = super::edit::meshes::place_mesh(
+                world,
+                room,
+                super::mesh::GridMesh::new(0, asset, [x, y, z]),
+            )
+            .map_err(|r| format!("roof mesh: {r:?}"))?;
+            let _ = id;
+        }
+        paint_meshes(world, gate_room, &[m.girder, m.iron_plate, m.iron_plate, m.iron_plate]);
     }
     // ---- 10. Banners ----------------------------------------------------------
     for (name, room) in [("Landing", 6..12), ("Landing", 16..22)].map(|(n, r)| (n, r)) {
@@ -1097,7 +1150,7 @@ pub fn into_showcase(
     let mats = add_materials(project);
     let mut world = GridWorld {
         scale: super::starter::STARTER_SCALE,
-        texels_per_sector: super::units::SectorTexels::DEFAULT,
+        texels_per_sector: super::units::SectorTexels::LEGACY,
         rooms: Vec::new(),
         shading: super::light::FacingShade {
             up: 210,
@@ -1131,6 +1184,13 @@ pub fn into_showcase(
             falloff: 5 * SECTOR_UNITS,
         };
         r.ambient = [122, 120, 110];
+        if matches!(
+            r.name.as_str(),
+            "Gatehouse" | "Lodge" | "Cathedral" | "Cloister" | "Crypt" | "Machine passage"
+                | "Domed chamber" | "Tower"
+        ) {
+            r.ambient = [150, 146, 134];
+        }
     }
     // Actors.
     let (player, enemies) = player_and_enemies(scene);
