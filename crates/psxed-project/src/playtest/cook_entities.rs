@@ -235,16 +235,18 @@ pub(crate) fn collect_runtime_model_clip_requirements(
 
 /// Actions a player never plays in this level, because the system that starts them is not in it.
 ///
-/// - No enemy: nothing hits the player, so there is no hit reaction or stun (poise break).
-/// - No enemy and nothing destructible: nothing to shoot at, so no aiming, ranged walk or fire.
+/// - No enemy: nothing hits or staggers the player, so there is no hit reaction or stun (poise
+///   break). The only callers of the player's hit reaction are enemy melee and enemy projectile
+///   impacts; hazards and liquids drain vitality or kill (`arm_player_death`) and never play a
+///   reaction.
 /// - No hook point (a node, or a placed mesh with a hook socket): no perch.
 ///
-/// The runtime treats an unbound action as absent (an unbound hit reaction still interrupts the
-/// player, an unbound aim leaves the player unable to aim), so omitting the clips changes nothing
-/// the level can trigger. Fall, land, death and the locomotion set are never omitted.
+/// Aim, ranged walk and fire are never omitted: aiming is also how the player hooks to an arch,
+/// and a player who aims in an empty room expects it to work. Fall, land, death and the
+/// locomotion set stay as well. The runtime treats an unbound hit reaction as an interrupt with no
+/// clip, so omitting the clips changes nothing the level can trigger.
 pub(crate) fn omitted_player_actions(scene: &crate::Scene) -> Vec<CharacterAnimationAction> {
     let mut enemies = false;
-    let mut destructibles = false;
     let mut hooks = false;
     for node in scene.nodes() {
         match &node.kind {
@@ -253,7 +255,6 @@ pub(crate) fn omitted_player_actions(scene: &crate::Scene) -> Vec<CharacterAnima
                 player: false,
                 ..
             } => enemies = true,
-            NodeKind::Destructible { .. } => destructibles = true,
             NodeKind::HookPoint => hooks = true,
             _ => {}
         }
@@ -268,16 +269,6 @@ pub(crate) fn omitted_player_actions(scene: &crate::Scene) -> Vec<CharacterAnima
             CharacterAnimationAction::HitReactAlt,
             CharacterAnimationAction::Stun,
             CharacterAnimationAction::StunRecovery,
-        ]);
-    }
-    if !enemies && !destructibles {
-        omitted.extend([
-            CharacterAnimationAction::RangedAttack,
-            CharacterAnimationAction::RangedAim,
-            CharacterAnimationAction::RangedWalk,
-            CharacterAnimationAction::RangedBackward,
-            CharacterAnimationAction::RangedLeft,
-            CharacterAnimationAction::RangedRight,
         ]);
     }
     if !hooks {
@@ -4244,8 +4235,9 @@ mod socket_anchor_tests {
         );
     }
 
-    /// The player's reaction, ranged and perch clips are left out of a level that has no enemy,
-    /// nothing to shoot and no hook point, and each comes back with its system.
+    /// The player's reaction and perch clips are left out of a level that has no enemy and no
+    /// hook point, and each comes back with its system. Aim and fire are never left out, so a
+    /// level with hook points and no enemy can still aim and hook.
     #[test]
     fn a_player_keeps_a_clip_only_when_its_system_is_in_the_level() {
         use super::*;
@@ -4256,16 +4248,15 @@ mod socket_anchor_tests {
         );
         let scene = project.active_scene_mut();
         let root = scene.root;
-        let omitted = |scene: &crate::Scene| omitted_player_actions(scene);
         let has = |list: &[CharacterAnimationAction], a| list.contains(&a);
 
-        let bare = omitted(scene);
+        let bare = omitted_player_actions(scene);
         for a in [
             CharacterAnimationAction::HitReact,
+            CharacterAnimationAction::HitReactAlt,
             CharacterAnimationAction::Stun,
-            CharacterAnimationAction::RangedAim,
-            CharacterAnimationAction::RangedAttack,
             CharacterAnimationAction::ArchPerch,
+            CharacterAnimationAction::HookLaunch,
         ] {
             assert!(has(&bare, a), "{a:?} is left out of an empty level");
         }
@@ -4275,13 +4266,27 @@ mod socket_anchor_tests {
             CharacterAnimationAction::Land,
             CharacterAnimationAction::Death,
             CharacterAnimationAction::Roll,
+            CharacterAnimationAction::RangedAim,
+            CharacterAnimationAction::RangedAttack,
+            CharacterAnimationAction::RangedWalk,
+            CharacterAnimationAction::RangedBackward,
+            CharacterAnimationAction::RangedLeft,
+            CharacterAnimationAction::RangedRight,
         ] {
             assert!(!has(&bare, a), "{a:?} always stays");
         }
 
+        // Hook points and no enemy: the player can still aim, fire and perch.
         scene.add_node(root, "Hook", NodeKind::HookPoint);
-        let hooked = omitted(scene);
-        assert!(!has(&hooked, CharacterAnimationAction::ArchPerch));
+        let hooked = omitted_player_actions(scene);
+        for a in [
+            CharacterAnimationAction::ArchPerch,
+            CharacterAnimationAction::HookLaunch,
+            CharacterAnimationAction::RangedAim,
+            CharacterAnimationAction::RangedAttack,
+        ] {
+            assert!(!has(&hooked, a), "{a:?} stays with a hook point");
+        }
         assert!(has(&hooked, CharacterAnimationAction::Stun));
 
         let host = scene.add_node(root, "Enemy", NodeKind::Entity);
@@ -4295,10 +4300,7 @@ mod socket_anchor_tests {
                 player: false,
             },
         );
-        let fought = omitted(scene);
-        assert!(!has(&fought, CharacterAnimationAction::Stun));
-        assert!(!has(&fought, CharacterAnimationAction::HitReact));
-        assert!(!has(&fought, CharacterAnimationAction::RangedAim));
+        let fought = omitted_player_actions(scene);
         assert!(fought.is_empty(), "{fought:?}");
     }
 
