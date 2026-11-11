@@ -115,3 +115,32 @@ fn a_corridor_into_a_hall_keeps_the_hall_and_opens_where_floors_agree() {
     let faces = crate::grid::faces::all_faces(&w);
     assert!(!faces.is_empty());
 }
+
+#[test]
+fn a_wide_leg_covers_the_columns_of_its_landings_whichever_way_it_runs() {
+    // A U: east, south, west. The landings are 2 by 2 squares at each
+    // waypoint; every leg must cover exactly the rows or columns of the
+    // squares it joins, so the footprint is a clean ring with no step.
+    let mut w = empty();
+    let mut p = params(&[
+        ([4, 0], None),
+        ([9, 0], None),
+        ([9, 8], None),
+        ([4, 8], None),
+    ]);
+    p.width = 2;
+    let out = lay_corridor(&mut w, &p).unwrap();
+    let r = &w.rooms[out.room];
+    let has = |c: [i32; 2]| r.local(c).and_then(|[x, z]| r.sector(x, z)).is_some();
+    // North walk rows 0..1, east walk columns 9..10, south walk rows 8..9.
+    for x in 4..=10 {
+        assert!(has([x, 0]) && has([x, 1]), "north walk at {x}");
+        assert!(has([x, 8]) && has([x, 9]), "south walk at {x}");
+    }
+    for z in 0..=9 {
+        assert!(has([9, z]) && has([10, z]), "east walk at {z}");
+    }
+    // Nothing leaks one column west of the east walk.
+    assert!(!has([8, 4]) && !has([11, 4]));
+    assert!(!has([6, 10]) && !has([6, -1]));
+}

@@ -635,7 +635,7 @@ pub fn lay_styled_corridor(
         let (a, b) = (p.waypoints[i].cell, p.waypoints[i + 1].cell);
         let d = [(b[0] - a[0]).signum(), (b[1] - a[1]).signum()];
         let len = (b[0] - a[0]).abs() + (b[1] - a[1]).abs();
-        let lat = [-d[1], d[0]];
+        let lat = [d[1].abs(), d[0].abs()];
         for k in 1..len {
             for o in offsets(p.width) {
                 let cell = [a[0] + d[0] * k + lat[0] * o, a[1] + d[1] * k + lat[1] * o];
@@ -649,7 +649,7 @@ pub fn lay_styled_corridor(
         let (a, b) = (p.waypoints[i].cell, p.waypoints[i + 1].cell);
         let d = [(b[0] - a[0]).signum(), (b[1] - a[1]).signum()];
         let len = (b[0] - a[0]).abs() + (b[1] - a[1]).abs();
-        let lat = [-d[1], d[0]];
+        let lat = [d[1].abs(), d[0].abs()];
         let along_axis = if d[0] != 0 { 0 } else { 1 };
         let across_axis = 1 - along_axis;
         let along_sign = d[usize::from(along_axis)];

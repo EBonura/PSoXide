@@ -305,7 +305,9 @@ pub fn plan(
             cells: if dh != 0 { between as usize } else { 0 },
             rise: dh,
         });
-        let lateral = [-d[1], d[0]];
+        // A wide leg grows towards +X (a leg along Z) or +Z (a leg along X)
+        // whichever way it runs, like the landing squares at its ends.
+        let lateral = [d[1].abs(), d[0].abs()];
         for k in 1..len {
             let (entry, exit) = (
                 heights[i] + lerp(dh, k - 1, between),
