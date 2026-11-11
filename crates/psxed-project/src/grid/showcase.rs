@@ -1028,7 +1028,7 @@ fn entity_with_interactable(
 pub fn into_showcase(
     project: &mut ProjectDocument,
     enemies: usize,
-    spawn: Option<[i32; 2]>,
+    spawn: Option<([i32; 2], f32)>,
 ) -> Result<Plan, String> {
     super::base_project::strip_base(project, enemies.min(1));
     super::logic_demo::add_continue_button(project);
@@ -1066,8 +1066,9 @@ pub fn into_showcase(
     }
     // Actors.
     let (player, enemies) = player_and_enemies(scene);
-    if let Some(cell) = spawn {
+    if let Some((cell, yaw)) = spawn {
         plan.spawn = cell;
+        plan.spawn_yaw = yaw;
     }
     let spawn_room = world
         .rooms
@@ -1189,7 +1190,7 @@ pub fn create_project(
     out_dir: &Path,
     name: &str,
     enemies: usize,
-    spawn: Option<[i32; 2]>,
+    spawn: Option<([i32; 2], f32)>,
     textures: &[(&str, &[u8])],
 ) -> Result<(PathBuf, Plan), String> {
     let mut project = ProjectDocument::load_from_path(base_dir.join("project.ron"))

@@ -157,11 +157,15 @@ fn main() {
     let base = arg("--base").expect(usage);
     let out = arg("--out").expect(usage);
     assert!(!out.exists(), "{} exists: pick a new folder", out.display());
-    // `--spawn x,z` starts the player on another sector (for testing a part).
+    // `--spawn x,z[,yaw]` starts the player on another sector (for testing a
+    // part); the yaw is the node's, 270 faces east, 90 west, 0 south, 180 north.
     let spawn = arg("--spawn").and_then(|v| {
         let v = v.to_string_lossy().into_owned();
-        let (x, z) = v.split_once(',')?;
-        Some([x.parse().ok()?, z.parse().ok()?])
+        let mut it = v.split(',');
+        let x = it.next()?.parse().ok()?;
+        let z = it.next()?.parse().ok()?;
+        let yaw = it.next().and_then(|y| y.parse().ok()).unwrap_or(270.0);
+        Some(([x, z], yaw))
     });
     let (path, plan) = create_project(
         &base,
