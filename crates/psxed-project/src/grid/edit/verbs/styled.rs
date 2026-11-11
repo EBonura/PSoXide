@@ -228,18 +228,16 @@ impl Run<'_> {
         for (i, &(x, z)) in corners.iter().enumerate() {
             let (px, pz) = (x - sector[0] * 4, z - sector[1] * 4);
             let (f, c) = (bilinear(bf, px, pz), bilinear(bc, px, pz));
-            let fo = scale(
-                self.style.floor.sample(self.width, across[i]),
-                kind.floor_scale_pct,
-            ) + kind.floor_offset;
-            let co = scale(
-                self.style.ceiling.sample(self.width, across[i]),
-                kind.ceiling_scale_pct,
-            ) + kind.ceiling_offset
-                + self
-                    .style
-                    .vault
-                    .offset(self.width, len, across[i], along[i] - start);
+            let rel = along[i] - start;
+            let fo = self.smooth(across[i], rel, len, start, |c, _| {
+                scale(self.style.floor.sample(self.width, c), kind.floor_scale_pct)
+            }) + kind.floor_offset;
+            let co = self.smooth(across[i], rel, len, start, |c, a| {
+                scale(
+                    self.style.ceiling.sample(self.width, c),
+                    kind.ceiling_scale_pct,
+                ) + self.style.vault.offset(self.width, len, c, a)
+            }) + kind.ceiling_offset;
             floor[i] = snap_to(f + fo, FINE_UNITS);
             ceil[i] = snap_to(c + co, FINE_UNITS);
         }
@@ -250,6 +248,44 @@ impl Run<'_> {
             ceil_mat: self.role(kind, |k| k.ceiling_role, self.style.ceiling_role),
             wall_mat: self.role(kind, |k| k.wall_role, self.style.wall_role),
         })
+    }
+}
+
+impl Run<'_> {
+    /// `f` at `(across, along)`, sampled every `chord_clicks` clicks and
+    /// interpolated between (the mean of the sample points either side).
+    fn smooth(&self, c: i32, a: i32, len: i32, start: i32, f: impl Fn(i32, i32) -> i32) -> i32 {
+        let chord = self.style.chord_clicks.max(1);
+        if chord <= 1 {
+            return snap_to(f(c, a), FINE_UNITS);
+        }
+        let pair = |p: i32, hi: i32| -> Vec<i32> {
+            if p % chord == 0 {
+                vec![p]
+            } else {
+                let lo = p - p.rem_euclid(chord);
+                vec![lo.max(0), (lo + chord).min(hi)]
+            }
+        };
+        // Along, the sample points are on even absolute clicks (the leaves'
+        // alignment), whatever the bay's own phase.
+        let as_: Vec<i32> = pair(a + start, len + start)
+            .into_iter()
+            .map(|p| (p - start).clamp(0, len))
+            .collect();
+        let cs = pair(c, self.width);
+        let mut sum = 0i64;
+        let mut n = 0i64;
+        for &cc in &cs {
+            for &aa in &as_ {
+                // Sample points sit on a coarser lattice (a multiple of the
+                // chord times the fine step), so the midpoint between two
+                // of them is again on the fine lattice.
+                sum += i64::from(snap_to(f(cc, aa), FINE_UNITS * chord));
+                n += 1;
+            }
+        }
+        snap_to((sum / n) as i32, FINE_UNITS)
     }
 }
 
@@ -278,7 +314,14 @@ fn planar(corners: &dyn Fn(usize) -> i64, e: i64) -> bool {
 
 /// Cut a 4 by 4 grid of fine cells into the fewest leaves that hold it
 /// exactly.
-fn fit(grid: &[[Option<CellData>; 4]; 4], x: usize, z: usize, e: usize, out: &mut Vec<Block>) {
+fn fit(
+    grid: &[[Option<CellData>; 4]; 4],
+    x: usize,
+    z: usize,
+    e: usize,
+    lossy: bool,
+    out: &mut Vec<Block>,
+) {
     let cells: Vec<Option<CellData>> = (z..z + e)
         .flat_map(|j| (x..x + e).map(move |i| (i, j)))
         .map(|(i, j)| grid[j][i])
@@ -307,6 +350,32 @@ fn fit(grid: &[[Option<CellData>; 4]; 4], x: usize, z: usize, e: usize, out: &mu
             let fl = [nw.floor[0], ne.floor[1], se.floor[2], sw.floor[3]];
             let ce = [nw.ceil[0], ne.ceil[1], se.ceil[2], sw.ceil[3]];
             let plane_ok = |h: &[i32; 4], pick: &dyn Fn(&CellData) -> [i32; 4]| {
+                if lossy && e == 2 {
+                    // A style that samples every second click: the block is
+                    // its four corners, bilinear, within half a fine step.
+                    for j in 0..e {
+                        for i in 0..e {
+                            let cell = pick(&grid[z + j][x + i].expect("a cell"));
+                            let spots = [(i, j), (i + 1, j), (i + 1, j + 1), (i, j + 1)];
+                            for (k, (ci, cj)) in spots.into_iter().enumerate() {
+                                let (ci, cj) = (ci as i64, cj as i64);
+                                let want = i64::from(h[0]) * (2 - ci) * (2 - cj)
+                                    + i64::from(h[1]) * ci * (2 - cj)
+                                    + i64::from(h[2]) * ci * cj
+                                    + i64::from(h[3]) * (2 - ci) * cj;
+                                // Edge midpoints must be exact (they are vertices the
+                                // neighbours share, and stay on the lattice); only
+                                // the middle of the block may be off.
+                                let centre = ci == 1 && cj == 1;
+                                let slack = if centre { 4 * 32 } else { 0 };
+                                if (i64::from(cell[k]) * 4 - want).abs() > slack {
+                                    return false;
+                                }
+                            }
+                        }
+                    }
+                    return true;
+                }
                 if !planar(&|i| i64::from(h[i]), e64) {
                     return false;
                 }
@@ -345,7 +414,7 @@ fn fit(grid: &[[Option<CellData>; 4]; 4], x: usize, z: usize, e: usize, out: &mu
     if e > 1 {
         let h = e / 2;
         for (dx, dz) in [(0, 0), (h, 0), (0, h), (h, h)] {
-            fit(grid, x + dx, z + dz, h, out);
+            fit(grid, x + dx, z + dz, h, lossy, out);
         }
     } else if let Some(Some(d)) = cells.first() {
         out.push((4, x as i32, z as i32, Some(*d)));
@@ -383,7 +452,7 @@ pub fn restyle_sector(
         }
     }
     let mut blocks = Vec::new();
-    fit(&grid, 0, 0, 4, &mut blocks);
+    fit(&grid, 0, 0, 4, run.style.chord_clicks > 1, &mut blocks);
     room.remove_leaf(key);
     for (level, bx, bz, data) in blocks {
         let Some(d) = data else { continue };
@@ -479,7 +548,7 @@ fn place_piers(world: &mut GridWorld, room: usize, pier: Pier, spots: &[([i32; 2
         let column = ColumnSpec {
             radius: pier.radius.clamp(64, 1024),
             height: clear.clamp(640, 16384),
-            sides: 8,
+            sides: pier.sides.clamp(3, 12),
             plinth: 64,
             capital: 64,
         };

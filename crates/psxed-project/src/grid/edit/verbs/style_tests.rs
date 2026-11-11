@@ -375,3 +375,45 @@ fn a_solid_lintel_over_a_doorway_does_not_block_the_walk_analysis() {
     let after = analyse(&w, &[spawn], &psx_engine::WalkLimits::DEFAULT).unwrap();
     assert_eq!(after.counts()[4], 0, "the door is open");
 }
+
+#[test]
+#[ignore = "measurement"]
+fn measure_style_cost() {
+    use crate::grid::faces::all_faces;
+    for (style, width) in [
+        (style::plain(), 2),
+        (style::scifi_rib(), 2),
+        (style::gothic_nave(), 2),
+        (style::cloister(), 2),
+        (style::crypt(), 2),
+    ] {
+        let name = style.name.clone();
+        let mut w = empty();
+        let out = lay_styled_corridor(&mut w, &corridor(style, 20, width)).unwrap();
+        let faces = all_faces(&w);
+        let mut kinds: BTreeMap<String, usize> = BTreeMap::new();
+        for f in &faces {
+            *kinds
+                .entry(
+                    format!("{:?}", f.kind)
+                        .split(|c: char| !c.is_alphanumeric())
+                        .next()
+                        .unwrap()
+                        .to_string(),
+                )
+                .or_default() += 1;
+        }
+        let lv: Vec<usize> = (2..=4)
+            .map(|l| {
+                w.rooms[out.room]
+                    .leaves()
+                    .filter(|(k, _)| k.level == l)
+                    .count()
+            })
+            .collect();
+        eprintln!(
+            "{name}: faces {} kinds {kinds:?} leaves by level 2,3,4 {lv:?}",
+            faces.len()
+        );
+    }
+}

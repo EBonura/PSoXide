@@ -172,6 +172,13 @@ impl Roles {
 pub struct Pier {
     /// Shaft radius.
     pub radius: i32,
+    /// Sides of the shaft, 3 to 12 (fewer is cheaper).
+    #[serde(default = "eight")]
+    pub sides: u8,
+}
+
+fn eight() -> u8 {
+    8
 }
 
 /// One stretch of the rhythm.
@@ -354,6 +361,16 @@ pub struct Style {
     pub wall_role: Role,
     /// Four piers at the corners of a vaulted room, if any.
     pub corner_piers: Option<Pier>,
+    /// Cell size the ceiling and floor are sampled at, in clicks: 1 is the
+    /// finest (every click is a vertex); 2 samples every second click and
+    /// interpolates between, which makes a curve of half the chords and
+    /// about a quarter of the leaves.
+    #[serde(default = "one")]
+    pub chord_clicks: i32,
+}
+
+fn one() -> i32 {
+    1
 }
 
 impl Style {
@@ -425,6 +442,7 @@ pub fn plain() -> Style {
         ceiling_role: Role::Ceiling,
         wall_role: Role::Wall,
         corner_piers: None,
+        chord_clicks: 1,
     }
 }
 
@@ -465,6 +483,7 @@ pub fn scifi_rib() -> Style {
         ceiling_role: Role::Ceiling,
         wall_role: Role::Wall,
         corner_piers: None,
+        chord_clicks: 1,
     }
 }
 
@@ -474,7 +493,10 @@ pub fn gothic_nave() -> Style {
     let mut rib = BayKind::plain("rib", 1);
     rib.ceiling_offset = -128;
     rib.ceiling_role = Some(Role::Trim);
-    rib.pier = Some(Pier { radius: 192 });
+    rib.pier = Some(Pier {
+        radius: 192,
+        sides: 6,
+    });
     Style {
         name: "gothic nave".into(),
         floor: Profile::Flat,
@@ -489,6 +511,7 @@ pub fn gothic_nave() -> Style {
         ceiling_role: Role::Ceiling,
         wall_role: Role::Wall,
         corner_piers: None,
+        chord_clicks: 2,
     }
 }
 
@@ -509,6 +532,7 @@ pub fn cloister() -> Style {
         ceiling_role: Role::Ceiling,
         wall_role: Role::Wall,
         corner_piers: None,
+        chord_clicks: 2,
     }
 }
 
@@ -525,7 +549,10 @@ pub fn crypt() -> Style {
     let mut pier = BayKind::plain("pier", 1);
     pier.inset = 1;
     pier.wall_role = Some(Role::Trim);
-    pier.pier = Some(Pier { radius: 320 });
+    pier.pier = Some(Pier {
+        radius: 320,
+        sides: 6,
+    });
     Style {
         name: "crypt".into(),
         floor: Profile::Flat,
@@ -540,6 +567,7 @@ pub fn crypt() -> Style {
         ceiling_role: Role::Ceiling,
         wall_role: Role::Wall,
         corner_piers: None,
+        chord_clicks: 2,
     }
 }
 
@@ -559,7 +587,11 @@ pub fn domed_chamber() -> Style {
         floor_role: Role::Floor,
         ceiling_role: Role::Ceiling,
         wall_role: Role::Wall,
-        corner_piers: Some(Pier { radius: 256 }),
+        corner_piers: Some(Pier {
+            radius: 256,
+            sides: 8,
+        }),
+        chord_clicks: 1,
     }
 }
 
