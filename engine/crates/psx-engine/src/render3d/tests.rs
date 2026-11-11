@@ -1713,3 +1713,57 @@ fn emit_line_matches_submit_projected_line() {
         }
     }
 }
+
+/// A joint far off the camera axis pushes view X past the GTE's i16 IR range.
+/// RTPS then pins every vertex of the joint to the same screen X (the editor's
+/// stretched player), while the exact path keeps them apart.
+#[cfg(not(target_arch = "mips"))]
+#[test]
+fn far_off_axis_joint_projects_exactly_instead_of_saturating_in_the_gte() {
+    let projection = WorldProjection::new(160, 120, 80, 32);
+    let rotation = Mat3I16 {
+        m: [[400, 0, 0], [0, 400, 0], [0, 0, 400]],
+    };
+    let vertex = |x, y| ModelVertex {
+        position: Vec3I16::new(x, y, 0),
+        joint1: 0,
+        blend: 0,
+    };
+
+    let far = JointViewTransform {
+        rotation,
+        translation: Vec3I32::new(52_231, -40_988, 25_508),
+    };
+    assert!(joint_view_exceeds_gte_range(&far));
+    let at_origin = project_exact_model_vertex(vertex(0, 0), &far, projection);
+    let to_the_side = project_exact_model_vertex(vertex(30_000, 0), &far, projection);
+    // 160 + 52231 * 80 / 25508, and 2929 more view units for 30000 model units.
+    assert_eq!(at_origin.sx as i32, 160 + 52_231 * 80 / 25_508);
+    assert_eq!(to_the_side.sx as i32, 160 + (52_231 + 2_929) * 80 / 25_508);
+    assert!(to_the_side.sx > at_origin.sx);
+    assert_eq!(at_origin.sz, 25_508);
+
+    // The GTE collapses both onto the saturated column, which is the bug the
+    // exact path replaces.
+    load_world_projection_gte(projection);
+    scene::load_rotation(&far.rotation);
+    scene::load_translation(far.translation);
+    let gte_a = scene::project_vertex_scheduled(vertex(0, 0).position);
+    let gte_b = scene::project_vertex_scheduled(vertex(30_000, 0).position);
+    assert_eq!(gte_a.sx, gte_b.sx);
+    assert_ne!(gte_a.sx, at_origin.sx);
+
+    // A joint inside the range stays on the GTE and agrees with the exact path.
+    let near = JointViewTransform {
+        rotation,
+        translation: Vec3I32::new(300, -200, 2_000),
+    };
+    assert!(!joint_view_exceeds_gte_range(&near));
+    scene::load_rotation(&near.rotation);
+    scene::load_translation(near.translation);
+    let gte = scene::project_vertex_scheduled(vertex(30_000, 9_000).position);
+    let exact = project_exact_model_vertex(vertex(30_000, 9_000), &near, projection);
+    assert_close_i32(gte.sx as i32, exact.sx as i32, 1);
+    assert_close_i32(gte.sy as i32, exact.sy as i32, 1);
+    assert_eq!(gte.sz as i32, exact.sz);
+}

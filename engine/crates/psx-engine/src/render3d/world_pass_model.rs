@@ -1213,6 +1213,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
 
             scene::load_rotation(&primary.rotation);
             scene::load_translation(primary.translation);
+            #[cfg(not(target_arch = "mips"))]
+            let exact_view = joint_view_exceeds_gte_range(&primary);
 
             let mut global_index = part.first_vertex() as usize;
             let part_end = global_index
@@ -1291,6 +1293,27 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                             blended_len = 0;
                         }
                     }
+                    global_index += 1;
+                    continue;
+                }
+
+                // A joint far enough off the camera axis that RTPS would
+                // saturate IR1/IR2 projects its vertices exactly on the CPU,
+                // as the blended seam vertices already do (host only).
+                #[cfg(not(target_arch = "mips"))]
+                if exact_view {
+                    let projected = project_exact_model_vertex(
+                        vertices[global_index],
+                        &primary,
+                        gte_projection,
+                    );
+                    all_projected_vertices_in_front &=
+                        projected_model_vertex_in_front(projected, near_z);
+                    all_projected_vertices_inside_hw_bounds &=
+                        projected_model_vertex_inside_hw_bounds(projected);
+                    projected_extent_code |=
+                        crate::projection::gpu_extent_box_code([projected.sx, projected.sy]);
+                    projected_vertices[global_index] = projected;
                     global_index += 1;
                     continue;
                 }
