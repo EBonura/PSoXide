@@ -57,6 +57,7 @@ mod budget;
 pub use budget::*;
 mod cook_ui;
 mod grid_world;
+mod heap_budget;
 pub use grid_world::{
     bake_panels_for_tools, cook_for_cards, cook_level_bytes, panel_eyes, panel_textures,
     room_card_eye, CardInputs, CookedLevelBytes, MaterialBinding,

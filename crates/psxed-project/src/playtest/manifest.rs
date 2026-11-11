@@ -147,6 +147,10 @@ pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io
         generated_dir.join(UI_PACK_ORDER_FILENAME),
         render_ui_pack_order(package),
     )?;
+    std::fs::write(
+        generated_dir.join(super::heap_budget::HEAP_BUDGET_FILENAME),
+        super::heap_budget::render(package),
+    )?;
     let xa_started = std::time::Instant::now();
     std::fs::write(
         generated_dir.join(XA_MUSIC_FILENAME),

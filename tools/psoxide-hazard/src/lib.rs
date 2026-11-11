@@ -11,6 +11,7 @@
 //!   cache control register or isolates the cache.
 //! * [`stack_guard`] (`stack-guard`) proves every scratchpad stack call tree
 //!   fits its region.
+//! * [`heap_guard`] (`heap-guard`) proves the guest heap holds what the cooked level needs.
 //!
 //! These replace `tools/hazard_patch.py`, `hazard_scan.py` and
 //! `stack_guard.py`, with the same command lines, reports and patched bytes,
@@ -21,6 +22,7 @@ use std::io::Write;
 
 pub mod cache_gate;
 pub mod detect;
+pub mod heap_guard;
 pub mod linkmap;
 pub mod listing;
 pub mod mfc0;

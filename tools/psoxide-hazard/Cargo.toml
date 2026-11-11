@@ -25,6 +25,10 @@ name = "stack-guard"
 path = "src/bin/stack-guard.rs"
 
 [[bin]]
+name = "heap-guard"
+path = "src/bin/heap-guard.rs"
+
+[[bin]]
 name = "window-gate"
 path = "src/bin/window-gate.rs"
 
