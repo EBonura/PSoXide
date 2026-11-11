@@ -101,7 +101,11 @@ fn check(dir: &std::path::Path, spawn: Option<(usize, [i32; 2])>) {
         }
     }
     if let Some((room, cell)) = spawn {
-        if let Some(a) = analyse(world, &[Spawn { room, cell }], &psx_engine::WalkLimits::DEFAULT) {
+        if let Some(a) = analyse(
+            world,
+            &[Spawn { room, cell }],
+            &psx_engine::WalkLimits::DEFAULT,
+        ) {
             println!(
                 "walk counts {:?} (steep, low, step, drop, unreachable)",
                 a.counts()
@@ -146,17 +150,22 @@ fn main() {
             Some(([x, z], yaw))
         })
         .unwrap_or(([5, 14], 0.0));
-    let textures: Vec<(&str, &[u8])> = TEXTURE_NAMES
-        .iter()
-        .map(|n| (*n, bytes_of(n)))
-        .collect();
+    let textures: Vec<(&str, &[u8])> = TEXTURE_NAMES.iter().map(|n| (*n, bytes_of(n))).collect();
     let atm = if daylight {
         Atmosphere::Daylight
     } else {
         Atmosphere::Twilight
     };
-    let (path, plan) =
-        create_project(&base, &out, "Style test", atm, spawn, arg_flag("--perch"), &textures).expect("the scene");
+    let (path, plan) = create_project(
+        &base,
+        &out,
+        "Style test",
+        atm,
+        spawn,
+        arg_flag("--perch"),
+        &textures,
+    )
+    .expect("the scene");
     println!("wrote {}", path.display());
     for n in &plan.notes {
         println!("note: {n}");

@@ -117,12 +117,57 @@ fn megablock_walls(world: &mut GridWorld, room: usize, q: [Option<ResourceId>; 4
     let c = i32::from(SEGMENT_CLICKS);
     world.rooms[room].band_sets = sets;
     for &[x, z] in &cells {
-        for side in [WallEdge::North, WallEdge::East, WallEdge::South, WallEdge::West] {
+        for side in [
+            WallEdge::North,
+            WallEdge::East,
+            WallEdge::South,
+            WallEdge::West,
+        ] {
             let (n, key, along, positive) = match side {
-                WallEdge::North => ([x, z - 1], EdgeKey { x: x * c, z: z * c, axis: Axis::X, len: SEGMENT_CLICKS }, x, true),
-                WallEdge::South => ([x, z + 1], EdgeKey { x: x * c, z: (z + 1) * c, axis: Axis::X, len: SEGMENT_CLICKS }, x, false),
-                WallEdge::East => ([x + 1, z], EdgeKey { x: (x + 1) * c, z: z * c, axis: Axis::Z, len: SEGMENT_CLICKS }, z, true),
-                _ => ([x - 1, z], EdgeKey { x: x * c, z: z * c, axis: Axis::Z, len: SEGMENT_CLICKS }, z, false),
+                WallEdge::North => (
+                    [x, z - 1],
+                    EdgeKey {
+                        x: x * c,
+                        z: z * c,
+                        axis: Axis::X,
+                        len: SEGMENT_CLICKS,
+                    },
+                    x,
+                    true,
+                ),
+                WallEdge::South => (
+                    [x, z + 1],
+                    EdgeKey {
+                        x: x * c,
+                        z: (z + 1) * c,
+                        axis: Axis::X,
+                        len: SEGMENT_CLICKS,
+                    },
+                    x,
+                    false,
+                ),
+                WallEdge::East => (
+                    [x + 1, z],
+                    EdgeKey {
+                        x: (x + 1) * c,
+                        z: z * c,
+                        axis: Axis::Z,
+                        len: SEGMENT_CLICKS,
+                    },
+                    z,
+                    true,
+                ),
+                _ => (
+                    [x - 1, z],
+                    EdgeKey {
+                        x: x * c,
+                        z: z * c,
+                        axis: Axis::Z,
+                        len: SEGMENT_CLICKS,
+                    },
+                    z,
+                    false,
+                ),
             };
             if cells.contains(&n) {
                 continue;
@@ -323,10 +368,37 @@ fn build(
     mass(world, "South rim", [-1, 28], [12, 29], 0, 12288, calm, calm)?;
     // ---- the ruin: unequal heights, the gateway mass tall --------------------
     let w = m.plain[0];
-    let wing_w = mass(world, "Wing west", [1, 2], [2, 4], floor, 3584, m.accent[0], m.cap)?;
-    let pil_l = mass(world, "Pilaster west", [3, 2], [4, 4], floor, 8192, w, m.cap)?;
+    let wing_w = mass(
+        world,
+        "Wing west",
+        [1, 2],
+        [2, 4],
+        floor,
+        3584,
+        m.accent[0],
+        m.cap,
+    )?;
+    let pil_l = mass(
+        world,
+        "Pilaster west",
+        [3, 2],
+        [4, 4],
+        floor,
+        8192,
+        w,
+        m.cap,
+    )?;
     let gate_block = mass(world, "Gate block", [5, 2], [8, 4], floor, 6656, w, m.cap)?;
-    let pil_r = mass(world, "Pilaster east", [9, 2], [10, 4], floor, 5120, w, m.cap)?;
+    let pil_r = mass(
+        world,
+        "Pilaster east",
+        [9, 2],
+        [10, 4],
+        floor,
+        5120,
+        w,
+        m.cap,
+    )?;
     let wing_e = mass(world, "Wing east", [11, 3], [11, 4], floor, 2560, w, m.cap)?;
     megablock_walls(world, wing_w, m.accent);
     for r in [pil_l, gate_block, pil_r, wing_e] {
@@ -354,10 +426,37 @@ fn build(
         build_building(world, &p).map_err(|r| format!("tower: {}", r.describe()))?;
     }
     // The cube under the dome.
-    let dome_cube = mass(world, "Dome cube", [9, -3], [11, -1], floor, 3584, m.cap, m.cap)?;
+    let dome_cube = mass(
+        world,
+        "Dome cube",
+        [9, -3],
+        [11, -1],
+        floor,
+        3584,
+        m.cap,
+        m.cap,
+    )?;
     // Two distant masses at the canal's far end, in the same stone.
-    let far_w = mass(world, "Far mass west", [2, 24], [5, 26], floor, 7168, w, m.cap)?;
-    let far_e = mass(world, "Far mass east", [7, 26], [10, 27], floor, 4608, w, m.cap)?;
+    let far_w = mass(
+        world,
+        "Far mass west",
+        [2, 24],
+        [5, 26],
+        floor,
+        7168,
+        w,
+        m.cap,
+    )?;
+    let far_e = mass(
+        world,
+        "Far mass east",
+        [7, 26],
+        [10, 27],
+        floor,
+        4608,
+        w,
+        m.cap,
+    )?;
     for r in [far_w, far_e] {
         megablock_walls(world, r, m.plain);
     }
@@ -407,14 +506,15 @@ fn build(
         t.material = m.sand;
         lay_terrain(world, &t).map_err(|r| format!("dunes: {}", r.describe()))?;
     }
-    // The mud pool, a step down in a low part of the floor.
+    // The mud pool: flush with the sand (a step down read as a hole in the
+    // frames), told apart by its texture alone.
     {
         let pool: BTreeSet<[i32; 2]> = cells_of(rect([8, 9], [10, 12]))
             .into_iter()
             .filter(|c| area.contains(c))
             .collect();
         let mut t = TerrainParams::new(canal, pool, 3);
-        t.base = Some(floor - 192);
+        t.base = Some(floor);
         t.create = true;
         t.amplitude_clicks = 0;
         t.follow_ceiling = false;
@@ -512,8 +612,11 @@ fn build(
     }
     // ---- the catwalk at the stair's head -----------------------------------
     {
-        let top = floor + 3584 + 0;
-        let mut p = GridPlane::new([3 * SECTOR_UNITS + 512, top, 5 * SECTOR_UNITS + 512], [7 * SECTOR_UNITS, SECTOR_UNITS]);
+        let top = floor + 3584;
+        let mut p = GridPlane::new(
+            [3 * SECTOR_UNITS + 512, top, 5 * SECTOR_UNITS + 512],
+            [7 * SECTOR_UNITS, SECTOR_UNITS],
+        );
         p.rotation = [0, 90, 0];
         p.material = m.iron_panel;
         p.collision = PlaneCollision::Walkable;
@@ -525,7 +628,10 @@ fn build(
     {
         let foot: BTreeSet<[i32; 2]> = cells_of(rect([1, 5], [11, 6]))
             .into_iter()
-            .filter(|c| area.contains(c) && c[1] != 5 || c[1] == 5 && area.contains(c) && !(5..=8).contains(&c[0]))
+            .filter(|c| {
+                area.contains(c) && c[1] != 5
+                    || c[1] == 5 && area.contains(c) && !(5..=8).contains(&c[0])
+            })
             .collect();
         let mut t = TerrainParams::new(canal, foot.clone(), 11);
         t.amplitude_clicks = 1;
@@ -536,7 +642,10 @@ fn build(
         lay_terrain(world, &t).map_err(|r| format!("rubble slope: {}", r.describe()))?;
         for &c in &foot {
             if let Some([lx, lz]) = world.rooms[canal].local(c) {
-                if let Some(f) = world.rooms[canal].sector_mut(lx, lz).and_then(|s| s.ground_floor_mut()) {
+                if let Some(f) = world.rooms[canal]
+                    .sector_mut(lx, lz)
+                    .and_then(|s| s.ground_floor_mut())
+                {
                     f.tri_a.material = m.rubble;
                     if let Some(b) = f.tri_b.as_mut() {
                         b.material = m.rubble;
@@ -560,7 +669,10 @@ fn build(
         add_plane(world, canal, p).map_err(|e| format!("gantry: {e:?}"))?;
     }
     {
-        let mut p = GridPlane::new([10 * SECTOR_UNITS, floor + 2900, 5 * SECTOR_UNITS + 380], [2304, 700]);
+        let mut p = GridPlane::new(
+            [10 * SECTOR_UNITS, floor + 2900, 5 * SECTOR_UNITS + 380],
+            [2304, 700],
+        );
         p.rotation = [0, 90, 0];
         p.material = m.iron_panel;
         p.collision = PlaneCollision::Walkable;
@@ -587,10 +699,22 @@ fn build(
     .map_err(|e| format!("arch: {e:?}"))?;
     // One over the gateway (the way over the wall), one mid-canal, one off
     // the west flank.
-    place(world, canal, arch, [6 * SECTOR_UNITS + 512, floor + 6656 + 768, 6 * SECTOR_UNITS], [0, 0, 0], m.arch_teal, true)?;
+    place(
+        world,
+        canal,
+        arch,
+        [6 * SECTOR_UNITS + 512, floor + 6656 + 768, 6 * SECTOR_UNITS],
+        [0, 0, 0],
+        m.arch_teal,
+        true,
+    )?;
     // The crown of the arch over the gate, 9344 up: a small walkable plane
     // there so the player can be placed perched (the real route is the hook).
-    let crown = [6 * SECTOR_UNITS + 512, floor + 6656 + 768 + 640 + 1536 + 512, 6 * SECTOR_UNITS];
+    let crown = [
+        6 * SECTOR_UNITS + 512,
+        floor + 6656 + 768 + 640 + 1536 + 512,
+        6 * SECTOR_UNITS,
+    ];
     if perch {
         let mut p = GridPlane::new(crown, [768, 768]);
         p.rotation = [0, 90, 0];
@@ -599,8 +723,24 @@ fn build(
         p.double_sided = true;
         add_plane(world, canal, p).map_err(|e| format!("perch: {e:?}"))?;
     }
-    place(world, canal, arch, [9 * SECTOR_UNITS, floor + 2304, 10 * SECTOR_UNITS], [30, 0, 0], m.arch_teal, true)?;
-    place(world, canal, arch, [2 * SECTOR_UNITS, floor + 4864, 9 * SECTOR_UNITS], [100, 0, 0], m.arch_teal, true)?;
+    place(
+        world,
+        canal,
+        arch,
+        [9 * SECTOR_UNITS, floor + 2304, 10 * SECTOR_UNITS],
+        [30, 0, 0],
+        m.arch_teal,
+        true,
+    )?;
+    place(
+        world,
+        canal,
+        arch,
+        [2 * SECTOR_UNITS, floor + 4864, 9 * SECTOR_UNITS],
+        [100, 0, 0],
+        m.arch_teal,
+        true,
+    )?;
     let rubble = add_asset(
         world,
         MeshAsset::new(
@@ -614,7 +754,15 @@ fn build(
     )
     .map_err(|e| format!("rubble: {e:?}"))?;
     for (x, z) in [(1, 6), (7, 6), (11, 6), (4, 9)] {
-        place(world, canal, rubble, [x * SECTOR_UNITS + 512, floor - 128, z * SECTOR_UNITS], [0, 0, 0], m.rubble, false)?;
+        place(
+            world,
+            canal,
+            rubble,
+            [x * SECTOR_UNITS + 512, floor - 128, z * SECTOR_UNITS],
+            [0, 0, 0],
+            m.rubble,
+            false,
+        )?;
     }
     // The dome on its cube.
     let dome = add_asset(
@@ -622,20 +770,49 @@ fn build(
         MeshAsset::new(
             "dome",
             MeshKind::Imported(lathe(
-                &[(2000, 0), (1960, 400), (1800, 800), (1480, 1160), (1000, 1440), (500, 1640), (0, 1700)],
+                &[
+                    (2000, 0),
+                    (1960, 400),
+                    (1800, 800),
+                    (1480, 1160),
+                    (1000, 1440),
+                    (500, 1640),
+                    (0, 1700),
+                ],
                 8,
             )),
         ),
     )
     .map_err(|e| format!("dome: {e:?}"))?;
-    place(world, dome_cube, dome, [10 * SECTOR_UNITS + 512, floor + 3584, -2 * SECTOR_UNITS + 512], [0, 0, 0], m.cap, false)?;
+    place(
+        world,
+        dome_cube,
+        dome,
+        [
+            10 * SECTOR_UNITS + 512,
+            floor + 3584,
+            -2 * SECTOR_UNITS + 512,
+        ],
+        [0, 0, 0],
+        m.cap,
+        false,
+    )?;
     // A far alien mushroom on the north rim, a thin stem and a cap.
     let mushroom = add_asset(
         world,
         MeshAsset::new(
             "mushroom",
             MeshKind::Imported(lathe(
-                &[(180, 0), (160, 7000), (260, 14000), (240, 15800), (2400, 16100), (2600, 16500), (1800, 17300), (0, 17800)],
+                &[
+                    (180, 0),
+                    (160, 7000),
+                    (260, 14000),
+                    (240, 15800),
+                    (2400, 16100),
+                    (2600, 16500),
+                    (1800, 17300),
+                    (0, 17800),
+                ],
                 8,
             )),
         ),
@@ -646,7 +823,15 @@ fn build(
         .iter()
         .position(|r| r.name == "North rim")
         .ok_or("north rim")?;
-    place(world, north, mushroom, [8 * SECTOR_UNITS, 12288, -7 * SECTOR_UNITS], [0, 0, 0], m.arch_teal, true)?;
+    place(
+        world,
+        north,
+        mushroom,
+        [8 * SECTOR_UNITS, 12288, -7 * SECTOR_UNITS],
+        [0, 0, 0],
+        m.arch_teal,
+        true,
+    )?;
     // ---- light, fog, ambient ------------------------------------------------
     let look = atm.look();
     for r in &mut world.rooms {
@@ -683,12 +868,28 @@ fn build(
             },
         );
         if let Some(n) = scene.node_mut(id) {
-            n.transform.translation = [ed(6 * SECTOR_UNITS + 512), ed(floor + 2600), ed(7 * SECTOR_UNITS)];
+            n.transform.translation = [
+                ed(6 * SECTOR_UNITS + 512),
+                ed(floor + 2600),
+                ed(7 * SECTOR_UNITS),
+            ];
         }
     }
     for (name, x, y, z, rad) in [
-        ("Slot lamp west", 3 * SECTOR_UNITS + 512, floor + 2560, 6 * SECTOR_UNITS, 5.0f32),
-        ("Slot lamp east", 10 * SECTOR_UNITS, floor + 1792, 6 * SECTOR_UNITS, 4.0),
+        (
+            "Slot lamp west",
+            3 * SECTOR_UNITS + 512,
+            floor + 2560,
+            6 * SECTOR_UNITS,
+            5.0f32,
+        ),
+        (
+            "Slot lamp east",
+            10 * SECTOR_UNITS,
+            floor + 1792,
+            6 * SECTOR_UNITS,
+            4.0,
+        ),
     ] {
         let id = scene.add_node(
             NodeId::ROOT,
@@ -708,7 +909,10 @@ fn build(
     plan.spawn = cell;
     plan.spawn_yaw = yaw;
     plan.spawn_room = canal;
-    let player = scene.node(NodeId::ROOT).map(|r| r.children.clone()).unwrap_or_default();
+    let player = scene
+        .node(NodeId::ROOT)
+        .map(|r| r.children.clone())
+        .unwrap_or_default();
     for id in player {
         let is_player = scene.node(id).is_some_and(|n| {
             matches!(n.kind, NodeKind::Entity)
@@ -721,9 +925,13 @@ fn build(
         });
         if is_player {
             // A vista camera: further back and higher, looking up the wall.
-            let kids = scene.node(id).map(|n| n.children.clone()).unwrap_or_default();
+            let kids = scene
+                .node(id)
+                .map(|n| n.children.clone())
+                .unwrap_or_default();
             for c in kids {
-                if let Some(NodeKind::Camera { settings }) = scene.node_mut(c).map(|k| &mut k.kind) {
+                if let Some(NodeKind::Camera { settings }) = scene.node_mut(c).map(|k| &mut k.kind)
+                {
                     settings.distance = 7000;
                     settings.height = 3200;
                     settings.target_height = 2600;
@@ -750,7 +958,8 @@ fn build(
             }
         }
     }
-    plan.notes.push("canal bend left out: one straight canal".into());
+    plan.notes
+        .push("canal bend left out: one straight canal".into());
     Ok(plan)
 }
 
