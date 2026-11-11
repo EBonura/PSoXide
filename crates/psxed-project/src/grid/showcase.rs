@@ -270,15 +270,22 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
         ..Plan::default()
     };
     // ---- 1. Landing and the chained bridge ------------------------------
-    platform(world, "Landing", cells([0, 4], [5, 9]), 0, m.paving).map_err(e("landing"))?;
+    // One room holds the landing, the floor cells under the deck and the deck
+    // meshes: a mesh-only room next to a cell room is not something the
+    // streamer lets a body walk onto (see the notes), and one room has no
+    // joint to cross.
+    let landing =
+        platform(world, "Landing", cells([0, 4], [5, 9]), 0, m.paving).map_err(e("landing"))?;
+    deck_cells(world, landing, cells([6, 6], [21, 6]), -64, [0, 0])?;
     let deck_z = 6 * SECTOR_UNITS + 512;
+    // The middle piece has no parapet: the lodge door opens onto it.
     for (name, x0, x1, parapet) in [
-        ("Chained bridge west", 6, 12, true),
-        ("Chained bridge middle", 12, 16, false),
-        ("Chained bridge east", 16, 22, true),
+        ("bridge west", 6, 12, true),
+        ("bridge middle", 12, 16, false),
+        ("bridge east", 16, 22, true),
     ] {
         let mut b = BridgeParams::deck(
-            RoomTarget::New(name.into()),
+            RoomTarget::Existing(landing),
             [x0 * SECTOR_UNITS, 0, deck_z],
             [x1 * SECTOR_UNITS, 0, deck_z],
             SECTOR_UNITS,
@@ -290,41 +297,17 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
         b.pier_spacing = Some(3 * SECTOR_UNITS);
         b.pier_foot = -4096;
         build_bridge(world, &b).map_err(|r| format!("{name}: {}", r.describe()))?;
-        let room = room_named(world, name);
-        paint_meshes(
-            world,
-            room,
-            &[m.paving, m.stone_wall, m.crypt_stone, m.pier],
-        );
-        // A deck over no cell is not a place a room can lead onto: lay floor
-        // cells a quarter click under its top (inside the slab); they also
-        // catch a body that steps off an open edge.
-        deck_cells(world, room, cells([x0, 6], [x1 - 1, 6]), -64, [0, 0])?;
-        soften_decks(world, room);
     }
-    let landing = room_named(world, "Landing");
-    ghost_edge(world, landing, [5, 6], WallEdge::East);
-    // The deck cells open onto their neighbours at every joint, on both
-    // sides, so the streamer links the rooms and the body walks across.
-    for (name, west, east) in [
-        ("Chained bridge west", true, true),
-        ("Chained bridge middle", true, true),
-        ("Chained bridge east", true, true),
-    ] {
-        let room = room_named(world, name);
-        let (x0, x1) = {
-            let r = &world.rooms[room];
-            (r.origin[0], r.origin[0] + r.width as i32 - 1)
-        };
-        if west {
-            ghost_edge(world, room, [x0, 6], WallEdge::West);
-        }
-        if east {
-            ghost_edge(world, room, [x1, 6], WallEdge::East);
-        }
-    }
-    let middle = room_named(world, "Chained bridge middle");
-    ghost_edge(world, middle, [13, 6], WallEdge::South);
+    paint_meshes(
+        world,
+        landing,
+        &[m.paving, m.stone_wall, m.crypt_stone, m.pier],
+    );
+    soften_decks(world, landing);
+    // The deck's end opens onto the gatehouse door and the middle piece onto
+    // the lodge door.
+    ghost_edge(world, landing, [21, 6], WallEdge::East);
+    ghost_edge(world, landing, [13, 6], WallEdge::South);
     // ---- 2. Gatehouse and lodge -----------------------------------------
     let mut gh = BuildingParams::new(
         RoomTarget::New("Gatehouse".into()),
@@ -837,12 +820,7 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
     ruin.keep = keep;
     ruin_region(world, &ruin).map_err(|r| format!("ruin: {}", r.describe()))?;
     // ---- 10. Banners ----------------------------------------------------------
-    for (name, room) in [
-        ("Chained bridge west", 6..12),
-        ("Chained bridge east", 16..22),
-    ]
-    .map(|(n, r)| (n, r))
-    {
+    for (name, room) in [("Landing", 6..12), ("Landing", 16..22)].map(|(n, r)| (n, r)) {
         let room_idx = room_named(world, name);
         for x in room.step_by(3) {
             for (z, yaw) in [(6 * SECTOR_UNITS + 160, 0), (7 * SECTOR_UNITS - 160, 180)] {
