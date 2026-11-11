@@ -536,7 +536,7 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
         1,
     )
     .map_err(|r| format!("tower upper door: {}", r.describe()))?;
-    let mut high = BridgeParams::deck(
+    let high = BridgeParams::deck(
         RoomTarget::New("High bridge".into()),
         [15 * SECTOR_UNITS + 512, 2048, 20 * SECTOR_UNITS],
         [15 * SECTOR_UNITS + 512, 0, 12 * SECTOR_UNITS],
