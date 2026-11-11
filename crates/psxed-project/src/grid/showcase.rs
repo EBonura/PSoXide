@@ -611,7 +611,38 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
         },
     )
     .map_err(|r| format!("gate: {}", r.describe()))?;
-    let _ = gate;
+    // A wall plate on the lever so the player finds it in the dark.
+    if let Some(lever) = gate.lever {
+        let at = scene
+            .node(lever)
+            .map_or([0.0; 3], |n| n.transform.translation);
+        let (hw, hd, h) = (160i16, 96i16, 768i16);
+        let vertices = [
+            [-hw, 0, -hd],
+            [hw, 0, -hd],
+            [hw, 0, hd],
+            [-hw, 0, hd],
+            [-hw, h, -hd],
+            [hw, h, -hd],
+            [hw, h, hd],
+            [-hw, h, hd],
+        ];
+        let plate = scene.add_node(
+            NodeId::ROOT,
+            "lever plate",
+            NodeKind::BoxProp {
+                materials: [m.iron_gate; crate::BOX_PROP_FACE_COUNT],
+                uvs: crate::default_box_prop_uvs(),
+                vertices,
+                collision_enabled: false,
+                break_flags: 0,
+                erosion: Default::default(),
+            },
+        );
+        if let Some(n) = scene.node_mut(plate) {
+            n.transform.translation = at;
+        }
+    }
     open(
         world,
         gate_room,
@@ -985,6 +1016,7 @@ pub fn into_showcase(
     spawn: Option<[i32; 2]>,
 ) -> Result<Plan, String> {
     super::base_project::strip_base(project, enemies.min(1));
+    super::logic_demo::add_continue_button(project);
     let mats = add_materials(project);
     let mut world = GridWorld {
         scale: super::starter::STARTER_SCALE,
@@ -1011,7 +1043,7 @@ pub fn into_showcase(
     for r in &mut world.rooms {
         r.fog = super::room::GridFog {
             enabled: true,
-            color: [112, 24, 22],
+            color: [214, 48, 44],
             start: SECTOR_UNITS,
             falloff: 4 * SECTOR_UNITS,
         };
@@ -1072,7 +1104,7 @@ pub fn into_showcase(
     let lamp_radius = |sectors: f32| sectors * world.scale.sector_editor_units() as f32 / unit;
     let lamps: [(&str, [i32; 2], i32, f32, f32); 11] = [
         ("Landing brazier", [2, 6], 1280, 5.0, 1.5),
-        ("Gate lantern", [20, 6], 1536, 4.0, 1.4),
+        ("Lever lamp", [21, 6], 640, 3.0, 1.8),
         ("Gatehouse lamp", [24, 7], 1536, 4.5, 1.4),
         ("Nave brazier", [31, 8], 2048, 6.0, 1.6),
         ("Chancel fire", [34, 8], 1792, 6.0, 1.8),
@@ -1108,9 +1140,9 @@ pub fn into_showcase(
         if let NodeKind::World { sky, culling, .. } = &mut root.kind {
             sky.mode = crate::SkyMode::Panorama;
             sky.texture = None;
-            sky.top_color = [40, 6, 10];
-            sky.horizon_color = [118, 26, 24];
-            sky.lower_color = [40, 6, 10];
+            sky.top_color = [90, 12, 20];
+            sky.horizon_color = [214, 48, 44];
+            sky.lower_color = [90, 12, 20];
             sky.sun_enabled = true;
             sky.sun_color = [214, 96, 84];
             sky.sun_border_color = [150, 34, 30];
