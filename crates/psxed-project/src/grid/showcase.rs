@@ -43,46 +43,58 @@ use crate::{InteractableKind, ProjectDocument};
 /// Materials by name; every one may be absent (tests build without any).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Mats {
-    /// Ashlar walls.
-    pub stone_wall: Option<ResourceId>,
-    /// Rubble masonry.
-    pub stone_rough: Option<ResourceId>,
-    /// Worn paving.
-    pub paving: Option<ResourceId>,
-    /// Square flagstones.
-    pub flagstone: Option<ResourceId>,
-    /// Stair treads.
-    pub stair_tread: Option<ResourceId>,
-    /// Fluted pier.
-    pub pier: Option<ResourceId>,
-    /// Arch ring stones.
+    /// `block_big` texture.
+    pub block_big: Option<ResourceId>,
+    /// `block_mid` texture.
+    pub block_mid: Option<ResourceId>,
+    /// `block_small` texture.
+    pub block_small: Option<ResourceId>,
+    /// `block_dark` texture.
+    pub block_dark: Option<ResourceId>,
+    /// `block_pale` texture.
+    pub block_pale: Option<ResourceId>,
+    /// `voussoir` texture.
     pub voussoir: Option<ResourceId>,
-    /// Moulded trim course.
-    pub trim: Option<ResourceId>,
-    /// Crypt stone.
-    pub crypt_stone: Option<ResourceId>,
-    /// Tower ashlar.
-    pub tower_stone: Option<ResourceId>,
-    /// Ribbed vault.
-    pub vault: Option<ResourceId>,
-    /// Crimson banner.
-    pub banner: Option<ResourceId>,
-    /// Iron gate.
-    pub iron_gate: Option<ResourceId>,
-    /// Wooden door.
-    pub wood_door: Option<ResourceId>,
-    /// Lit lancet windows.
-    pub window_glow: Option<ResourceId>,
-    /// Ash ground.
-    pub ash_ground: Option<ResourceId>,
-    /// Rubble.
+    /// `trim_course` texture.
+    pub trim_course: Option<ResourceId>,
+    /// `dome_stone` texture.
+    pub dome_stone: Option<ResourceId>,
+    /// `floor_stone` texture.
+    pub floor_stone: Option<ResourceId>,
+    /// `sand` texture.
+    pub sand: Option<ResourceId>,
+    /// `sand_stone` texture.
+    pub sand_stone: Option<ResourceId>,
+    /// `rock` texture.
+    pub rock: Option<ResourceId>,
+    /// `rubble` texture.
     pub rubble: Option<ResourceId>,
-    /// Sci-fi rib panel.
-    pub scifi_panel: Option<ResourceId>,
-    /// Sci-fi trim.
-    pub scifi_trim: Option<ResourceId>,
-    /// Skull frieze.
-    pub frieze: Option<ResourceId>,
+    /// `step_stone` texture.
+    pub step_stone: Option<ResourceId>,
+    /// `iron_plate` texture.
+    pub iron_plate: Option<ResourceId>,
+    /// `grating` texture.
+    pub grating: Option<ResourceId>,
+    /// `girder` texture.
+    pub girder: Option<ResourceId>,
+    /// `pipes` texture.
+    pub pipes: Option<ResourceId>,
+    /// `rust_panel` texture.
+    pub rust_panel: Option<ResourceId>,
+    /// `hatch` texture.
+    pub hatch: Option<ResourceId>,
+    /// `lamp_window` texture.
+    pub lamp_window: Option<ResourceId>,
+    /// `cable` texture.
+    pub cable: Option<ResourceId>,
+    /// `step_metal` texture.
+    pub step_metal: Option<ResourceId>,
+    /// `pipes_v` texture.
+    pub pipes_v: Option<ResourceId>,
+    /// `mega_face` texture.
+    pub mega_face: Option<ResourceId>,
+    /// `mega_face_pale` texture.
+    pub mega_face_pale: Option<ResourceId>,
 }
 
 fn rect(a: [i32; 2], b: [i32; 2]) -> CellRect {
@@ -266,7 +278,10 @@ fn paint_meshes(world: &mut GridWorld, room: usize, slots: &[Option<ResourceId>]
 /// motor's step up).
 const OPEN_WALL: i32 = 896;
 
-const LIGHT_RED: [u8; 3] = [255, 92, 52];
+const LIGHT_RED: [u8; 3] = [255, 200, 130];
+
+/// Haze colour of the fog and the sky's horizon.
+const HAZE: [u8; 3] = [178, 190, 172];
 
 /// Build the whole level into `world` and `scene`.
 pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan, String> {
@@ -287,11 +302,11 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
         "Landing",
         cells([0, 4], [5, 9]),
         0,
-        m.paving,
-        m.stone_wall,
+        m.sand_stone,
+        m.rock,
     )
     .map_err(e("landing"))?;
-    deck_cells(world, landing, cells([6, 6], [21, 7]), 0, [0, 0], m.paving)?;
+    deck_cells(world, landing, cells([6, 6], [21, 7]), 0, [0, 0], m.floor_stone)?;
     let deck_z = 7 * SECTOR_UNITS;
     // The middle piece has no parapet: the lodge door opens onto it.
     for (name, x0, x1, parapet) in [
@@ -316,7 +331,7 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
     paint_meshes(
         world,
         landing,
-        &[m.paving, m.stone_wall, m.crypt_stone, m.pier],
+        &[m.floor_stone, m.block_big, m.block_dark, m.block_mid],
     );
     soften_decks(world, landing);
     // The deck's end opens onto the gatehouse door and the middle piece onto
@@ -334,9 +349,9 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
     gh.roof_parapet = None;
     gh.door_sides = vec![];
     gh.window_every = 0;
-    gh.floor_material = m.flagstone;
-    gh.wall_material = m.tower_stone;
-    gh.ceiling_material = m.vault;
+    gh.floor_material = m.floor_stone;
+    gh.wall_material = m.block_pale;
+    gh.ceiling_material = m.block_small;
     build_building(world, &gh).map_err(|r| format!("gatehouse: {}", r.describe()))?;
     let mut lodge = BuildingParams::new(
         RoomTarget::New("Lodge".into()),
@@ -347,23 +362,23 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
     lodge.roof_parapet = None;
     lodge.door_sides = vec![];
     lodge.window_every = 0;
-    lodge.floor_material = m.flagstone;
-    lodge.wall_material = m.stone_rough;
-    lodge.ceiling_material = m.vault;
+    lodge.floor_material = m.floor_stone;
+    lodge.wall_material = m.block_dark;
+    lodge.ceiling_material = m.block_small;
     build_building(world, &lodge).map_err(|r| format!("lodge: {}", r.describe()))?;
     // ---- 3. Cathedral ----------------------------------------------------
     let mut cath = CathedralParams::new(RoomTarget::New("Cathedral".into()), [27, 4]);
-    cath.arch = Some(ArchShape::Pointed);
+    cath.arch = Some(ArchShape::Round);
     cath.bays = 4;
     cath.west_door = false;
-    cath.floor_material = m.paving;
-    cath.wall_material = m.stone_wall;
-    cath.ceiling_material = m.vault;
+    cath.floor_material = m.sand_stone;
+    cath.wall_material = m.block_big;
+    cath.ceiling_material = m.block_small;
     build_cathedral(world, &cath).map_err(|r| format!("cathedral: {}", r.describe()))?;
     paint_meshes(
         world,
         room_named(world, "Cathedral"),
-        &[m.voussoir, m.vault, m.stone_wall, m.pier],
+        &[m.voussoir, m.dome_stone, m.block_big, m.block_mid],
     );
     // ---- 4. Courtyard and cloister ---------------------------------------
     let mut yard = cells([10, 12], [23, 19]);
@@ -373,22 +388,33 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
         "Courtyard",
         yard.clone(),
         0,
-        m.ash_ground,
-        m.stone_rough,
+        m.sand,
+        m.rock,
     )
     .map_err(e("courtyard"))?;
+    {
+        // Dunes: relief on the flat yard, blended to flat at the rim so the doors keep their floor.
+        let room = world.rooms.len() - 1;
+        let mut dunes = TerrainParams::new(room, yard.clone(), 7);
+        dunes.amplitude_clicks = 2;
+        dunes.wavelength = 5;
+        dunes.follow_ceiling = false;
+        dunes.edge = Edge::Blend(3);
+        dunes.material = m.sand;
+        lay_terrain(world, &dunes).map_err(|r| format!("dunes: {}", r.describe()))?;
+    }
     // The yard's rim walls are open where doors lead in: the lodge's south
     // door and the cloister's garth door.
     let courtyard = room_named(world, "Courtyard");
     ghost_edge(world, courtyard, [15, 12], WallEdge::North);
     ghost_edge(world, courtyard, [27, 14], WallEdge::North);
     let cloister_roles = Roles {
-        floor: m.flagstone,
-        wall: m.stone_wall,
-        ceiling: m.vault,
-        trim: m.trim,
-        accent: m.pier,
-        ground: m.ash_ground,
+        floor: m.floor_stone,
+        wall: m.block_big,
+        ceiling: m.block_small,
+        trim: m.trim_course,
+        accent: m.block_mid,
+        ground: m.sand,
     };
     lay_styled_corridor(
         world,
@@ -410,12 +436,12 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
     .map_err(|r| format!("cloister: {}", r.describe()))?;
     // ---- 5. Stair, crypt, machine passage, dome ---------------------------
     let crypt_roles = Roles {
-        floor: m.flagstone,
-        wall: m.crypt_stone,
-        ceiling: m.vault,
-        trim: m.pier,
-        accent: m.pier,
-        ground: m.ash_ground,
+        floor: m.floor_stone,
+        wall: m.block_dark,
+        ceiling: m.block_small,
+        trim: m.block_mid,
+        accent: m.block_mid,
+        ground: m.sand,
     };
     lay_styled_corridor(
         world,
@@ -437,14 +463,14 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
         },
     )
     .map_err(|r| format!("crypt: {}", r.describe()))?;
-    paint_meshes(world, room_named(world, "Crypt"), &[m.pier, m.trim]);
+    paint_meshes(world, room_named(world, "Crypt"), &[m.block_mid, m.trim_course]);
     let scifi_roles = Roles {
-        floor: m.scifi_panel,
-        wall: m.scifi_panel,
-        ceiling: m.scifi_panel,
-        trim: m.scifi_trim,
-        accent: m.scifi_trim,
-        ground: m.ash_ground,
+        floor: m.grating,
+        wall: m.iron_plate,
+        ceiling: m.pipes,
+        trim: m.girder,
+        accent: m.cable,
+        ground: m.sand,
     };
     lay_styled_corridor(
         world,
@@ -471,17 +497,17 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
                 dome
             },
             roles: Roles {
-                floor: m.paving,
-                wall: m.tower_stone,
-                ceiling: m.vault,
-                trim: m.trim,
-                accent: m.pier,
-                ground: m.ash_ground,
+                floor: m.floor_stone,
+                wall: m.block_pale,
+                ceiling: m.dome_stone,
+                trim: m.trim_course,
+                accent: m.block_mid,
+                ground: m.sand,
             },
         },
     )
     .map_err(|r| format!("dome: {}", r.describe()))?;
-    paint_meshes(world, room_named(world, "Domed chamber"), &[m.pier, m.trim]);
+    paint_meshes(world, room_named(world, "Domed chamber"), &[m.block_mid, m.trim_course]);
     // ---- 6. The tower -----------------------------------------------------
     let mut tower = BuildingParams::new(
         RoomTarget::New("Tower".into()),
@@ -500,9 +526,9 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
     tower.window_sill = 512;
     tower.window_top = 2048;
     tower.door_height = 1536;
-    tower.floor_material = m.stair_tread;
-    tower.wall_material = m.tower_stone;
-    tower.ceiling_material = m.vault;
+    tower.floor_material = m.step_stone;
+    tower.wall_material = m.block_pale;
+    tower.ceiling_material = m.dome_stone;
     let tr = build_building(world, &tower).map_err(|r| format!("tower: {}", r.describe()))?;
     plan.notes.extend(tr.notes.iter().cloned());
     plan.notes.push(format!(
@@ -533,7 +559,7 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
             to: 64,
             kind: door,
             top: 1536,
-            material: m.trim,
+            material: m.trim_course,
         },
         1,
     )
@@ -548,9 +574,9 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
     build_bridge(world, &high).map_err(|r| format!("high bridge: {}", r.describe()))?;
     let hb = room_named(world, "High bridge");
     world.rooms[hb].defaults.open_wall = OPEN_WALL;
-    world.rooms[hb].defaults.wall_material = m.stone_wall;
-    paint_meshes(world, hb, &[m.paving, m.stone_wall, m.crypt_stone, m.pier]);
-    deck_cells(world, hb, cells([15, 12], [15, 19]), 0, [0, 256], m.paving)?;
+    world.rooms[hb].defaults.wall_material = m.girder;
+    paint_meshes(world, hb, &[m.floor_stone, m.block_big, m.block_dark, m.block_mid]);
+    deck_cells(world, hb, cells([15, 12], [15, 19]), 0, [0, 256], m.grating)?;
     soften_decks(world, hb);
     ghost_edge(world, hb, [15, 19], WallEdge::South);
     ghost_edge(world, hb, [15, 12], WallEdge::North);
@@ -569,10 +595,10 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
                 to: 56,
                 kind: door,
                 top: 2048,
-                material: m.trim,
+                material: m.trim_course,
             },
             name: "shortcut".into(),
-            material: m.wood_door,
+            material: m.hatch,
             direction: DoorDirection::Up,
             ticks: 45,
             lock: DoorLock::OneWay {
@@ -610,7 +636,7 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
         rect_profile,
         door,
         2048,
-        m.trim,
+        m.trim_course,
     )?;
     // Gatehouse: the lever gate to the bridge, and the pointed arch into the
     // nave.
@@ -627,10 +653,10 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
                 to: 32,
                 kind: door,
                 top: 2048,
-                material: m.trim,
+                material: m.trim_course,
             },
             name: "gate".into(),
-            material: m.iron_gate,
+            material: m.hatch,
             direction: DoorDirection::Up,
             ticks: 90,
             lock: DoorLock::Unlocked,
@@ -657,8 +683,8 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
             behavior: SwitchBehavior::OneShot,
             persistent: true,
             radius: 760,
-            material: m.iron_gate,
-            handle_material: m.banner,
+            material: m.hatch,
+            handle_material: m.rust_panel,
         },
     );
     open(
@@ -685,7 +711,7 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
         rect_profile,
         door,
         1792,
-        m.trim,
+        m.trim_course,
     )?;
     open(
         world,
@@ -721,7 +747,7 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
         rect_profile,
         OpeningKind::Window { sill: 768 },
         1792,
-        m.trim,
+        m.trim_course,
     )?;
     open(
         world,
@@ -745,7 +771,7 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
         rect_profile,
         door,
         1536,
-        m.trim,
+        m.trim_course,
     )?;
     // Crypt to machine passage to dome to tower.
     open(
@@ -758,7 +784,7 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
         rect_profile,
         door,
         1536,
-        m.scifi_trim,
+        m.girder,
     )?;
     open(
         world,
@@ -770,7 +796,7 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
         rect_profile,
         door,
         1536,
-        m.scifi_trim,
+        m.girder,
     )?;
     open(
         world,
@@ -782,14 +808,14 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
         rect_profile,
         door,
         1536,
-        m.trim,
+        m.trim_course,
     )?;
     // ---- 8. The gallery: a colonnade, a captured and repeated hand bay and
     //         a tilted floor, off the cathedral's north aisle ---------------
     let mut gal = RoomParams::new(Footprint::Rect(rect([28, 0], [37, 3])), "Gallery", 3072);
-    gal.floor_material = m.flagstone;
-    gal.ceiling_material = m.vault;
-    gal.wall_material = m.tower_stone;
+    gal.floor_material = m.floor_stone;
+    gal.ceiling_material = m.dome_stone;
+    gal.wall_material = m.block_pale;
     gal.leaves = LeafPolicy::Sectors;
     lay_room(world, &gal).map_err(|r| format!("gallery: {}", r.describe()))?;
     let gallery = room_named(world, "Gallery");
@@ -807,7 +833,7 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
         },
     )
     .map_err(|r| format!("colonnade: {}", r.describe()))?;
-    paint_meshes(world, gallery, &[m.pier, m.trim]);
+    paint_meshes(world, gallery, &[m.block_mid, m.trim_course]);
     // A hand-made bay: a plinth and a step, captured and laid four more times.
     {
         let r = &mut world.rooms[gallery];
@@ -869,6 +895,27 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
     let mut ruin = RuinParams::new(cath_room, all, 11, 32);
     ruin.keep = keep;
     ruin_region(world, &ruin).map_err(|r| format!("ruin: {}", r.describe()))?;
+    // ---- 9b. Far megablock silhouettes on the sand (outside the walls) ------
+    for (name, x0, z0, w, d, storeys, wall) in [
+        ("Monolith north", 12, 0, 2, 2, 3, m.block_big),
+        ("Monolith west", -5, 10, 2, 3, 2, m.block_pale),
+        ("Monolith east", 19, -1, 3, 2, 3, m.block_mid),
+    ] {
+        let mut b = BuildingParams::new(
+            RoomTarget::New(name.into()),
+            Footprint::Rect(rect([x0, z0], [x0 + w - 1, z0 + d - 1])),
+        );
+        b.storeys = storeys;
+        b.storey_height = 3072;
+        b.stair = false;
+        b.roof_parapet = None;
+        b.door_sides = vec![];
+        b.window_every = 0;
+        b.floor_material = m.sand;
+        b.wall_material = wall;
+        b.ceiling_material = m.block_small;
+        build_building(world, &b).map_err(|r| format!("{name}: {}", r.describe()))?;
+    }
     // ---- 10. Banners ----------------------------------------------------------
     for (name, room) in [("Landing", 6..12), ("Landing", 16..22)].map(|(n, r)| (n, r)) {
         let room_idx = room_named(world, name);
@@ -876,7 +923,7 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
             for (z, yaw) in [(6 * SECTOR_UNITS + 160, 0), (8 * SECTOR_UNITS - 160, 180)] {
                 let mut p = GridPlane::new([x * SECTOR_UNITS + 512, 1152, z], [448, 1536]);
                 p.rotation = [yaw, 0, 0];
-                p.material = m.banner;
+                p.material = m.cable;
                 p.double_sided = true;
                 world.rooms[room_idx].planes.push(p);
             }
@@ -886,27 +933,33 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
 }
 
 /// The texture set, in the order of [`Mats`].
-pub const TEXTURES: [&str; 20] = [
-    "stone_wall",
-    "stone_rough",
-    "paving",
-    "flagstone",
-    "stair_tread",
-    "pier",
+pub const TEXTURES: [&str; 26] = [
+    "block_big",
+    "block_mid",
+    "block_small",
+    "block_dark",
+    "block_pale",
     "voussoir",
-    "trim",
-    "crypt_stone",
-    "tower_stone",
-    "vault",
-    "banner",
-    "iron_gate",
-    "wood_door",
-    "window_glow",
-    "ash_ground",
+    "trim_course",
+    "dome_stone",
+    "floor_stone",
+    "sand",
+    "sand_stone",
+    "rock",
     "rubble",
-    "scifi_panel",
-    "scifi_trim",
-    "frieze",
+    "step_stone",
+    "iron_plate",
+    "grating",
+    "girder",
+    "pipes",
+    "rust_panel",
+    "hatch",
+    "lamp_window",
+    "cable",
+    "step_metal",
+    "pipes_v",
+    "mega_face",
+    "mega_face_pale",
 ];
 
 /// Folder of the textures inside a project.
@@ -935,26 +988,32 @@ pub fn add_materials(project: &mut ProjectDocument) -> Mats {
         })
         .collect();
     Mats {
-        stone_wall: ids[0],
-        stone_rough: ids[1],
-        paving: ids[2],
-        flagstone: ids[3],
-        stair_tread: ids[4],
-        pier: ids[5],
-        voussoir: ids[6],
-        trim: ids[7],
-        crypt_stone: ids[8],
-        tower_stone: ids[9],
-        vault: ids[10],
-        banner: ids[11],
-        iron_gate: ids[12],
-        wood_door: ids[13],
-        window_glow: ids[14],
-        ash_ground: ids[15],
-        rubble: ids[16],
-        scifi_panel: ids[17],
-        scifi_trim: ids[18],
-        frieze: ids[19],
+        block_big: ids[0],
+        block_mid: ids[1],
+        block_small: ids[2],
+        block_dark: ids[3],
+        block_pale: ids[4],
+        voussoir: ids[5],
+        trim_course: ids[6],
+        dome_stone: ids[7],
+        floor_stone: ids[8],
+        sand: ids[9],
+        sand_stone: ids[10],
+        rock: ids[11],
+        rubble: ids[12],
+        step_stone: ids[13],
+        iron_plate: ids[14],
+        grating: ids[15],
+        girder: ids[16],
+        pipes: ids[17],
+        rust_panel: ids[18],
+        hatch: ids[19],
+        lamp_window: ids[20],
+        cable: ids[21],
+        step_metal: ids[22],
+        pipes_v: ids[23],
+        mega_face: ids[24],
+        mega_face_pale: ids[25],
     }
 }
 
@@ -1040,9 +1099,15 @@ pub fn into_showcase(
         scale: super::starter::STARTER_SCALE,
         texels_per_sector: super::units::SectorTexels::DEFAULT,
         rooms: Vec::new(),
-        shading: super::light::FacingShade::SUBTLE,
+        shading: super::light::FacingShade {
+            up: 210,
+            down: 150,
+            side_x: 256,
+            side_z: 176,
+        },
         global_light: super::lighting::GlobalLight {
-            sky: Some([120, 28, 30]),
+            sky: Some([112, 116, 108]),
+            bounces: 0,
             ..super::lighting::GlobalLight::NEW_WORLD
         },
         stream: super::world::StreamRadii {
@@ -1057,15 +1122,15 @@ pub fn into_showcase(
     };
     let scene = project.active_scene_mut();
     let mut plan = build(&mut world, scene, &mats)?;
-    // Red fog and a low red ambient in every room.
+    // Pale grey-green haze, closing softly with distance, and a high warm ambient.
     for r in &mut world.rooms {
         r.fog = super::room::GridFog {
             enabled: true,
-            color: [214, 48, 44],
-            start: 5 * SECTOR_UNITS / 2,
-            falloff: 7 * SECTOR_UNITS / 2,
+            color: HAZE,
+            start: 7 * SECTOR_UNITS / 2,
+            falloff: 5 * SECTOR_UNITS,
         };
-        r.ambient = [112, 82, 86];
+        r.ambient = [122, 120, 110];
     }
     // Actors.
     let (player, enemies) = player_and_enemies(scene);
@@ -1140,7 +1205,7 @@ pub fn into_showcase(
             name,
             NodeKind::PointLight {
                 color: LIGHT_RED,
-                intensity,
+                intensity: intensity * 0.22,
                 radius: lamp_radius(radius),
             },
         );
@@ -1154,29 +1219,23 @@ pub fn into_showcase(
         }
         plan.lights.push((name.to_string(), cell[0], y, cell[1]));
     }
-    // The sky: a low red blood moon over black jagged silhouettes.
+    // The sky: flat pale grey-green haze over a low, hazy dune horizon.
     if let Some(root) = scene.node_mut(NodeId::ROOT) {
         if let NodeKind::World { sky, culling, .. } = &mut root.kind {
             sky.mode = crate::SkyMode::Panorama;
             sky.texture = None;
-            sky.top_color = [90, 12, 20];
-            sky.horizon_color = [214, 48, 44];
-            sky.lower_color = [90, 12, 20];
-            sky.sun_enabled = true;
-            sky.sun_color = [214, 96, 84];
-            sky.sun_border_color = [150, 34, 30];
-            sky.sun_size_percent = 48;
-            sky.sun_glow_percent = 80;
-            sky.sun_yaw_degrees = 90;
-            sky.sun_pitch_degrees = 14;
-            sky.mountain_height_percent = 60;
-            sky.mountain_top_color = [10, 2, 6];
-            sky.mountain_base_color = [44, 8, 12];
+            sky.top_color = [150, 164, 152];
+            sky.horizon_color = HAZE;
+            sky.lower_color = HAZE;
+            sky.sun_enabled = false;
+            sky.mountain_height_percent = 14;
+            sky.mountain_top_color = [184, 184, 160];
+            sky.mountain_base_color = [178, 184, 164];
             sky.mountain_gap_percent = 0;
-            sky.mountain_roughness_percent = 90;
+            sky.mountain_roughness_percent = 40;
             sky.match_room_fog = false;
             sky.cloud_layer.enabled = false;
-            culling.draw_distance = 7 * 1024;
+            culling.draw_distance = 9 * 1024;
         }
     }
     scene.world = SceneWorld::Grid(world);
