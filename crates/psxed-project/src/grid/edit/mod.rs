@@ -35,6 +35,8 @@ pub mod heights;
 pub mod lens;
 pub mod meshes;
 pub mod move_cells;
+#[cfg(test)]
+mod move_tilt_tests;
 pub mod natural;
 pub mod outline;
 pub mod planes;
@@ -50,8 +52,6 @@ pub mod verbs;
 pub mod wall_api;
 #[cfg(test)]
 mod wall_api_tests;
-#[cfg(test)]
-mod move_tilt_tests;
 pub mod walls;
 
 pub use clipboard::{GridClipboard, PasteOutcome, Transform};
