@@ -57,6 +57,7 @@ mod budget;
 pub use budget::*;
 mod cook_ui;
 mod grid_world;
+mod heap_budget;
 pub use grid_world::{
     bake_panels_for_tools, cook_for_cards, cook_level_bytes, panel_eyes, panel_textures,
     room_card_eye, CardInputs, CookedLevelBytes, MaterialBinding,
@@ -386,6 +387,19 @@ fn apply_spawn_override(project: &mut ProjectDocument, spawn: SpawnOverride) -> 
 /// [`build_package`] with the player moved to `spawn` at cook time (Play from
 /// here). The project itself is not edited.
 pub fn build_package_with_spawn(
+    project: &ProjectDocument,
+    project_root: &Path,
+    spawn: Option<SpawnOverride>,
+) -> (Option<PlaytestPackage>, PlaytestValidationReport) {
+    let (package, mut report) = build_package_cooked(project, project_root, spawn);
+    if let Some(message) = package.as_ref().and_then(heap_budget::refusal) {
+        report.error(message);
+        return (None, report);
+    }
+    (package, report)
+}
+
+fn build_package_cooked(
     project: &ProjectDocument,
     project_root: &Path,
     spawn: Option<SpawnOverride>,

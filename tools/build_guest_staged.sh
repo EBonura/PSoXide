@@ -141,6 +141,17 @@ patch_and_prove() {
         echo "[guest-build] a scratchpad stack call tree is unproven in $EXE_RELATIVE; refusing to stage it" >&2
         exit 1
     }
+    # The level's heap need (written by the cook next to the manifest) against the heap the link
+    # left: a level that cannot fit stops here with the numbers, not at runtime as a failed
+    # allocation. A hazard directory built before heap-guard existed simply has none to run.
+    if [ -x "$hazard_dir/heap-guard" ]; then
+        "$hazard_dir/heap-guard" "$2" "$ROOT/$GUEST_DIR/generated" >"$3/heap-guard.txt" 2>&1 || {
+            cat "$3/heap-guard.txt" >&2
+            echo "[guest-build] the heap of $EXE_RELATIVE cannot hold this level; refusing to stage it" >&2
+            exit 1
+        }
+        cat "$3/heap-guard.txt"
+    fi
 }
 
 if [ "${PSOXIDE_GUEST_STAGE:-1}" = "0" ]; then

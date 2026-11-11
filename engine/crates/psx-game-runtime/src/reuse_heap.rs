@@ -42,6 +42,9 @@ struct State {
     /// Per class, the first freed block (each holds the address of the next in its first
     /// word), or 0.
     free: [usize; CLASSES],
+    /// The size of the latest request the heap could not serve (0 if none has failed): what a
+    /// fatal-fault report names as the allocation that ran the heap out.
+    failed: usize,
 }
 
 /// A bump allocator with a free list per size class.
@@ -61,6 +64,7 @@ impl ReuseHeap {
                 next: 0,
                 end: 0,
                 free: [0; CLASSES],
+                failed: 0,
             }),
         }
     }
@@ -101,8 +105,24 @@ impl ReuseHeap {
                 state.next = end;
                 start as *mut u8
             }
-            _ => core::ptr::null_mut(),
+            _ => {
+                state.failed = size;
+                core::ptr::null_mut()
+            }
         }
+    }
+
+    /// Bytes the bump pointer has left (freed blocks on the lists are not counted).
+    pub fn bump_free(&self) -> usize {
+        // SAFETY: single-threaded, see the `Sync` impl; a plain read.
+        let state = unsafe { &*self.state.get() };
+        state.end.saturating_sub(state.next)
+    }
+
+    /// The size of the latest request the heap could not serve, 0 if none has failed.
+    pub fn failed_request(&self) -> usize {
+        // SAFETY: as for `bump_free`.
+        unsafe { (*self.state.get()).failed }
     }
 }
 
