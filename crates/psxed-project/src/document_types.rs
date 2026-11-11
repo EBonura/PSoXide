@@ -354,9 +354,26 @@ pub struct ProjectDocument {
     /// actions override this value. `None` preserves legacy instant handoffs.
     #[serde(default)]
     pub screen_transition: crate::UiTransition,
+    /// Save slots the cook assigned to persistent doors and levers: the
+    /// stable id of the record and its bit in the save's flag bitset. The
+    /// cook reads this table, keeps every entry whose record still exists and
+    /// gives new records the lowest-collision free slot, then hands the new
+    /// table back in the package (`PlaytestPackage::persistent_slots`) for
+    /// the caller to store here, so adding a door never renumbers the others.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub persistent_slots: Vec<PersistentSlot>,
     /// Project resources.
     pub resources: Vec<Resource>,
     next_resource_id: u64,
+}
+
+/// One saved assignment of a persistent record to a save-flag slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistentSlot {
+    /// Stable id of the record (`psx_level::StableId` raw value).
+    pub id: u32,
+    /// Bit index in the save's persistent flag bitset.
+    pub slot: u16,
 }
 
 /// Where a cooked project starts running.
@@ -405,6 +422,7 @@ impl ProjectDocument {
             options: Vec::new(),
             boot: BootTarget::default(),
             screen_transition: crate::UiTransition::default(),
+            persistent_slots: Vec::new(),
             resources: Vec::new(),
             next_resource_id: 1,
         }

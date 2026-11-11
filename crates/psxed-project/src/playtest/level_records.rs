@@ -35,7 +35,7 @@ pub struct OwnedLevelRecords {
     interactables: Vec<InteractableRecord>,
     vitality_circles: Vec<LevelVitalityCircleRecord>,
     logic: Vec<LevelLogicRecord>,
-    logic_ids: Vec<StableId>,
+    logic_slots: Vec<u16>,
     game_entities: Vec<LevelGameEntityRecord>,
     game_entity_ids: Vec<StableId>,
     entities: Vec<EntityRecord>,
@@ -341,7 +341,7 @@ impl OwnedLevelRecords {
                     flags: l.flags,
                 })
                 .collect(),
-            logic_ids: package.logic_ids.iter().map(|id| StableId(*id)).collect(),
+            logic_slots: package.logic_slots.clone(),
             game_entities: package
                 .game_entities
                 .iter()
@@ -632,7 +632,7 @@ impl OwnedLevelRecords {
             interactables: &self.interactables,
             vitality_circles: &self.vitality_circles,
             logic: &self.logic,
-            logic_ids: &self.logic_ids,
+            logic_slots: &self.logic_slots,
             game_entities: &self.game_entities,
             game_entity_ids: &self.game_entity_ids,
             entities: &self.entities,

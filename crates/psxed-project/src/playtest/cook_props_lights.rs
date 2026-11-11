@@ -2101,36 +2101,86 @@ pub(crate) fn check_switch_targets(
     ok
 }
 
-/// Give every persistent logic record its save slot, the same way the
-/// destructibles and points of interest take theirs: a hash of the stable
-/// id into the shared save bitmap. A slot already taken is a cook error that
-/// names both owners; the fix is to recreate one node so it gets a new id.
-pub(crate) fn claim_logic_persistence_slots(
+/// Give every persistent logic record its save slot, collision free.
+///
+/// `previous` is the project's stored table: a record keeps the slot it had
+/// as long as it still exists and nothing else (a destructible or point of
+/// interest, which hash into the same bitset) took it. A record without one
+/// starts at the slot its stable id hashes to (so a project with no
+/// collisions gets the slots the hash alone used to give, and saves written
+/// then stay valid) and walks forward to the next free bit. More persistent
+/// records than the save holds is a cook error. Returns the slot of every
+/// logic record (`PERSISTENT_SLOT_NONE` for a transient one) and the table
+/// to store back in the project.
+pub(crate) fn assign_logic_persistence_slots(
     logic: &[PlaytestLogic],
     logic_ids: &[u32],
+    previous: &[crate::PersistentSlot],
     names: &NameInterner,
-    slots: &mut HashMap<u16, String>,
+    taken: &mut HashMap<u16, String>,
     report: &mut PlaytestValidationReport,
-) -> bool {
-    let mut ok = true;
-    for (record, id) in logic.iter().zip(logic_ids) {
-        if record.flags & psx_level::logic_flags::PERSISTENT == 0 {
+) -> (Vec<u16>, Vec<crate::PersistentSlot>) {
+    let capacity = psx_level::POI_PERSISTENT_FLAG_CAPACITY;
+    let mut slots = vec![psx_level::PERSISTENT_SLOT_NONE; logic.len()];
+    let persistent = |index: usize| logic[index].flags & psx_level::logic_flags::PERSISTENT != 0;
+    let owner_of = |index: usize| {
+        format!(
+            "logic '{}' (stable id {:#010x})",
+            names.name_of(logic[index].targetname).unwrap_or("?"),
+            logic_ids.get(index).copied().unwrap_or(0)
+        )
+    };
+    // Pass 1: records that keep their stored slot.
+    for index in (0..logic.len()).filter(|i| persistent(*i)) {
+        let Some(id) = logic_ids.get(index) else {
             continue;
-        }
-        let slot = psx_level::persistent_flag_slot(psx_level::StableId(*id));
-        let owner = format!(
-            "logic '{}' (stable id {id:#010x})",
-            names.name_of(record.targetname).unwrap_or("?")
-        );
-        if let Some(existing) = slots.insert(slot, owner.clone()) {
-            report.error(format!(
-                "{existing} and {owner} map to the same persistent save slot; \
-                 recreate one node to give it a new stable id"
-            ));
-            ok = false;
+        };
+        let Some(kept) = previous.iter().find(|entry| entry.id == *id) else {
+            continue;
+        };
+        if usize::from(kept.slot) < capacity && !taken.contains_key(&kept.slot) {
+            taken.insert(kept.slot, owner_of(index));
+            slots[index] = kept.slot;
         }
     }
-    ok
+    // Pass 2: the rest, from their hash slot to the next free bit.
+    let unplaced: Vec<usize> = (0..logic.len())
+        .filter(|i| persistent(*i) && slots[*i] == psx_level::PERSISTENT_SLOT_NONE)
+        .collect();
+    for index in unplaced {
+        let Some(id) = logic_ids.get(index) else {
+            continue;
+        };
+        let start = usize::from(psx_level::persistent_flag_slot(psx_level::StableId(*id)));
+        let free = (0..capacity)
+            .map(|step| ((start + step) % capacity) as u16)
+            .find(|slot| !taken.contains_key(slot));
+        match free {
+            Some(slot) => {
+                taken.insert(slot, owner_of(index));
+                slots[index] = slot;
+            }
+            None => {
+                report.error(format!(
+                    "{} needs a persistent save slot but all {capacity} are taken (doors, levers, \
+                     breakables and points of interest share them); a world this size needs a \
+                     larger save block",
+                    owner_of(index)
+                ));
+                break;
+            }
+        }
+    }
+    let table = logic_ids
+        .iter()
+        .zip(&slots)
+        .filter(|(_, slot)| **slot != psx_level::PERSISTENT_SLOT_NONE)
+        .map(|(id, slot)| crate::PersistentSlot {
+            id: *id,
+            slot: *slot,
+        })
+        .collect();
+    (slots, table)
 }
 
 /// Cook one souls-like game entity from a non-player Character
@@ -3076,8 +3126,7 @@ mod persistence_cook_tests {
         assert_ne!(logic[1].flags & psx_level::logic_flags::ENABLED, 0);
     }
 
-    #[test]
-    fn slots_follow_stable_ids_and_a_clash_names_both_owners() {
+    fn two_doors() -> (NameInterner, Vec<PlaytestLogic>) {
         let mut names = NameInterner::default();
         let mut logic = Vec::new();
         let mut report = PlaytestValidationReport::default();
@@ -3091,46 +3140,84 @@ mod persistence_cook_tests {
                 &mut report
             ));
         }
-        // Two ids 832 apart share a slot.
+        (names, logic)
+    }
+
+    #[test]
+    fn colliding_hashes_get_distinct_slots_instead_of_an_error() {
+        let (names, logic) = two_doors();
+        // Two ids 832 apart hash to one slot: the second walks to the next.
         let ids = [7, 7 + psx_level::POI_PERSISTENT_FLAG_CAPACITY as u32];
-        let mut slots = HashMap::new();
-        assert!(!claim_logic_persistence_slots(
+        let mut report = PlaytestValidationReport::default();
+        let (slots, table) = assign_logic_persistence_slots(
             &logic,
             &ids,
+            &[],
             &names,
-            &mut slots,
-            &mut report
-        ));
-        let message = report.error_messages().join(" ");
-        assert!(
-            message.contains("gate a") && message.contains("gate b"),
-            "{message}"
+            &mut HashMap::new(),
+            &mut report,
         );
-        assert!(message.contains("new stable id"), "{message}");
+        assert!(report.is_ok(), "{:?}", report.error_messages());
+        assert_eq!(slots, [7, 8]);
+        assert_eq!(table.len(), 2);
+    }
 
-        // Distinct slots claim cleanly, and moving the records in the table
-        // does not change which slot an id gets.
+    #[test]
+    fn a_stored_slot_survives_new_records_and_a_reordered_table() {
+        let (names, logic) = two_doors();
         let mut report = PlaytestValidationReport::default();
-        let mut slots = HashMap::new();
-        assert!(claim_logic_persistence_slots(
+        // The project stored gate a (id 7) at slot 100, off its hash slot.
+        let stored = [crate::PersistentSlot { id: 7, slot: 100 }];
+        let (slots, table) = assign_logic_persistence_slots(
             &logic,
             &[7, 8],
+            &stored,
             &names,
-            &mut slots,
-            &mut report
-        ));
-        assert!(slots.get(&7).unwrap().contains("gate a"));
+            &mut HashMap::new(),
+            &mut report,
+        );
+        assert_eq!(slots, [100, 8], "stored slot kept, the new door hashes");
+        // Recook with the records swapped and the table fed back.
         let mut swapped = logic.clone();
         swapped.swap(0, 1);
-        let mut slots2 = HashMap::new();
-        assert!(claim_logic_persistence_slots(
+        let (slots2, _) = assign_logic_persistence_slots(
             &swapped,
             &[8, 7],
+            &table,
             &names,
-            &mut slots2,
-            &mut report
-        ));
-        assert!(slots2.get(&7).unwrap().contains("gate a"));
+            &mut HashMap::new(),
+            &mut report,
+        );
+        assert_eq!(slots2, [8, 100]);
+        assert!(report.is_ok());
+    }
+
+    #[test]
+    fn a_slot_owned_by_another_kind_is_skipped_and_a_full_save_is_an_error() {
+        let (names, logic) = two_doors();
+        let mut report = PlaytestValidationReport::default();
+        let mut taken = HashMap::new();
+        taken.insert(7u16, "destructible 'wall'".to_string());
+        let (slots, _) = assign_logic_persistence_slots(
+            &logic,
+            &[7, 8],
+            &[crate::PersistentSlot { id: 7, slot: 7 }],
+            &names,
+            &mut taken,
+            &mut report,
+        );
+        assert_eq!(slots, [8, 9], "the stored slot was taken, so both moved on");
+        // Every slot taken: a clear error naming the record.
+        let mut full: HashMap<u16, String> = (0..psx_level::POI_PERSISTENT_FLAG_CAPACITY as u16)
+            .map(|slot| (slot, "other".to_string()))
+            .collect();
+        let mut report = PlaytestValidationReport::default();
+        assign_logic_persistence_slots(&logic, &[7, 8], &[], &names, &mut full, &mut report);
+        let message = report.error_messages().join(" ");
+        assert!(
+            message.contains("gate a") && message.contains("all 832"),
+            "{message}"
+        );
     }
 
     #[test]

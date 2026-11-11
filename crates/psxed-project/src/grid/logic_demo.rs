@@ -537,18 +537,21 @@ mod tests {
             assert_eq!(lever.message, psx_level::INTERACTABLE_MESSAGE_NONE);
         }
 
-        // Four persistent records, four distinct save slots.
+        // Four persistent records, four distinct save slots, all cooked in the
+        // slot table and handed back for the project to store.
         let slots: std::collections::BTreeSet<u16> = package
             .logic
             .iter()
-            .zip(&package.logic_ids)
+            .zip(&package.logic_slots)
             .filter(|(r, _)| r.flags & logic_flags::PERSISTENT != 0)
-            .map(|(_, id)| psx_level::persistent_flag_slot(psx_level::StableId(*id)))
+            .map(|(_, slot)| *slot)
             .collect();
         assert_eq!(slots.len(), 4);
         assert!(slots
             .iter()
             .all(|slot| usize::from(*slot) < psx_level::POI_PERSISTENT_FLAG_CAPACITY));
+        assert_eq!(package.persistent_slots.len(), 4);
+        assert_eq!(package.persistent_slots_used, 4);
     }
 
     #[test]

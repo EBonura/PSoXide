@@ -215,7 +215,7 @@ impl Playtest {
     pub(super) fn store_persistent_logic(&mut self, index: usize) {
         if self.logic.store_persistent(
             LOGIC.as_slice(),
-            LOGIC_IDS.as_slice(),
+            LOGIC_SLOTS.as_slice(),
             index,
             &mut self.poi_save,
         ) {
@@ -288,7 +288,7 @@ impl Playtest {
     /// just-armed runtime: boot after a card load, and every respawn.
     pub(super) fn restore_persistent_logic(&mut self) {
         self.logic
-            .restore_persistent(LOGIC.as_slice(), LOGIC_IDS.as_slice(), &self.poi_save);
+            .restore_persistent(LOGIC.as_slice(), LOGIC_SLOTS.as_slice(), &self.poi_save);
     }
 
     pub(super) fn restore_persistent_destructibles(&mut self) {

@@ -1818,13 +1818,15 @@ fn build_package_cooked(
             ));
         }
     }
-    claim_logic_persistence_slots(
+    let (logic_slots, persistent_slots) = assign_logic_persistence_slots(
         &logic,
         &logic_ids,
+        &project.persistent_slots,
         &names,
         &mut persistence_slots,
         &mut report,
     );
+    let persistent_slots_used = persistence_slots.len() as u16;
     let world_objects = cook_world_objects(
         &image_props,
         &box_props,
@@ -2319,6 +2321,9 @@ fn build_package_cooked(
         game_entities,
         game_entity_ids,
         logic_ids,
+        logic_slots,
+        persistent_slots,
+        persistent_slots_used,
         spawn,
         characters,
         player_controller,
