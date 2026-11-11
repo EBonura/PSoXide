@@ -174,18 +174,57 @@ fn sector_of(room: &GridRoom, cell: [i32; 2]) -> Option<&GridSector> {
     room.sector(x, z)
 }
 
-/// Whether a solid wall of either sector, or a derived one, stands on the
-/// physical edge between `cell`'s `edge` side.
-fn edge_blocked(room: &GridRoom, cell: [i32; 2], edge: WallEdge) -> bool {
-    let solid = |sector: Option<&GridSector>, e: WallEdge| {
-        sector.is_some_and(|s| s.walls(e).iter().any(|w| w.solid))
+/// Whether a solid wall record stops a body walking over `floor` through
+/// `edge`: it does not when it stands wholly above the body's head (a lintel
+/// over a doorway), or wholly under the floor.
+fn record_stops(
+    units: &RuntimeUnits,
+    limits: &WalkLimits,
+    y_offset: i32,
+    floor: Option<&GridSurface>,
+    edge: WallEdge,
+    wall: &super::surface::GridWall,
+) -> bool {
+    if !wall.solid {
+        return false;
+    }
+    let Some(floor) = floor else {
+        return true;
     };
-    if solid(sector_of(room, cell), edge) {
+    let rt = |h: i32| units.rt(y_offset.saturating_add(h));
+    let profile = edge_profile(floor, edge);
+    let floor_hi = rt(profile[0].max(profile[1]));
+    let floor_lo = rt(profile[0].min(profile[1]));
+    let bottom = rt(wall.heights[0].min(wall.heights[1]));
+    let top = rt(wall.heights[2].max(wall.heights[3]));
+    let clears_head = bottom >= floor_hi + limits.body_height;
+    let under_floor = top <= floor_lo;
+    !(clears_head || under_floor)
+}
+
+/// Whether a solid wall of either sector, or a derived one, stands on the
+/// physical edge between `cell`'s `edge` side and stops a body.
+fn edge_blocked(
+    units: &RuntimeUnits,
+    limits: &WalkLimits,
+    room: &GridRoom,
+    cell: [i32; 2],
+    edge: WallEdge,
+) -> bool {
+    let stops = |sector: Option<&GridSector>, e: WallEdge| {
+        sector.is_some_and(|s| {
+            let floor = s.ground_floor();
+            s.walls(e)
+                .iter()
+                .any(|w| record_stops(units, limits, room.y_offset, floor, e, w))
+        })
+    };
+    if stops(sector_of(room, cell), edge) {
         return true;
     }
     if let Some((opposite, offset)) = edge.opposite() {
         let other = [cell[0] + offset[0], cell[1] + offset[1]];
-        if solid(sector_of(room, other), opposite) {
+        if stops(sector_of(room, other), opposite) {
             return true;
         }
     }
@@ -343,7 +382,7 @@ fn flag_edges_of(
             let other = [cell[0] + offset[0], cell[1] + offset[1]];
             let neighbour = sector_of(room, other).filter(|s| s.ground_floor().is_some());
             let Some(neighbour) = neighbour else {
-                if !edge_blocked(room, cell, edge) {
+                if !edge_blocked(units, limits, room, cell, edge) {
                     out.push(EdgeFlag {
                         room: ri,
                         cell,
@@ -370,7 +409,7 @@ fn flag_edges_of(
             let a = a.map(|h| units.rt(room.y_offset.saturating_add(h)));
             let b = b.map(|h| units.rt(room.y_offset.saturating_add(h)));
             let delta = (a[0] - b[0]).abs().max((a[1] - b[1]).abs());
-            if delta > limits.step_up && !edge_blocked(room, cell, edge) {
+            if delta > limits.step_up && !edge_blocked(units, limits, room, cell, edge) {
                 out.push(EdgeFlag {
                     room: ri,
                     cell,
@@ -483,7 +522,7 @@ fn reach(
                 _ => [-1, 0],
             };
             let other = [cell[0] + off[0], cell[1] + off[1]];
-            if edge_blocked(room, cell, edge) {
+            if edge_blocked(units, limits, room, cell, edge) {
                 continue;
             }
             let here = edge_profile(floor, edge);

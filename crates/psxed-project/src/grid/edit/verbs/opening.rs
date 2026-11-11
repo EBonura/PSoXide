@@ -570,7 +570,7 @@ fn cut_one(
             for h in split {
                 new_pieces.push(GridWall {
                     heights: h,
-                    solid: w.solid && matches!(p.kind, OpeningKind::Window { .. }),
+                    solid: w.solid,
                     ..w.clone()
                 });
             }
@@ -599,17 +599,14 @@ fn cut_one(
             if matches!(dw.kind, DerivedKind::Closure | DerivedKind::Drop) {
                 let split = pieces(h, sill_abs.map(|s| [s, s]), hi);
                 for hh in split {
-                    // A window's pieces are solid. A door's lintel (and the
-                    // whole arched head over it) is not: it is above the
-                    // body, and the walkability flood treats any solid wall
-                    // record on an edge as blocking whatever its height, so
-                    // a solid lintel would read as a closed door.
+                    // Every piece is solid, lintels too: the walkability
+                    // analysis and the motor both judge a wall record by its
+                    // heights, so a head above the body does not block it.
                     new_pieces.push(GridWall {
                         heights: hh,
                         material: p.material.or(dw.material),
                         facing: WallFacing::Both,
-                        solid: dw.kind == DerivedKind::Closure
-                            && matches!(p.kind, OpeningKind::Window { .. }),
+                        solid: dw.kind == DerivedKind::Closure,
                         ..GridWall::span(0, 0, None)
                     });
                     out.pieces += 1;

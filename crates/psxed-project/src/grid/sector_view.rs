@@ -123,15 +123,20 @@ pub fn corner_heights(room: &GridRoom, cell: [i32; 2], ceiling: bool) -> Option<
     let s = CLICKS_PER_SECTOR;
     // The click just inside each corner, and the leaf there.
     let corners = [(0, 0), (s - 1, 0), (s - 1, s - 1), (0, s - 1)];
-    let mut heights = [0; 4];
     let any = room
         .leaves
         .in_sector(cell)
         .into_iter()
         .find_map(|(_, l)| pick(l))?;
+    // A corner click inside a void (the inset of a rib, a chamfer) has no
+    // leaf: it takes the mean of the corners that do, so the sector still
+    // has a floor and a ceiling to be judged on.
+    let mut found: [Option<i32>; 4] = [None; 4];
     for (i, (ix, iz)) in corners.into_iter().enumerate() {
         let click = [base[0] + ix, base[1] + iz];
-        let (key, leaf) = room.leaf_at(click)?;
+        let Some((key, leaf)) = room.leaf_at(click) else {
+            continue;
+        };
         let surface = pick(leaf).unwrap_or_else(|| any.clone());
         let n = key.edge_clicks();
         // Where this corner of the sector lies in the leaf, in clicks.
@@ -139,9 +144,14 @@ pub fn corner_heights(room: &GridRoom, cell: [i32; 2], ceiling: bool) -> Option<
             base[0] + if i == 1 || i == 2 { s } else { 0 } - key.x,
             base[1] + if i == 2 || i == 3 { s } else { 0 } - key.z,
         );
-        heights[i] = height_in_leaf(&surface, dx, dz, n);
+        found[i] = Some(height_in_leaf(&surface, dx, dz, n));
     }
-    Some(heights)
+    let known: Vec<i32> = found.iter().flatten().copied().collect();
+    if known.is_empty() {
+        return None;
+    }
+    let mean = known.iter().sum::<i32>() / known.len() as i32;
+    Some(found.map(|h| h.unwrap_or(mean)))
 }
 
 /// A sector made from the fine leaves in it: the ground span's surfaces at

@@ -303,3 +303,75 @@ fn the_six_graybox_roles_are_six_different_materials_in_a_new_project() {
     let distinct: BTreeSet<String> = all.iter().map(|m| format!("{m:?}")).collect();
     assert_eq!(distinct.len(), 6);
 }
+
+#[test]
+fn the_walkability_analysis_reads_styled_corridors_with_void_insets() {
+    use crate::grid::walk::{analyse, Spawn};
+    for (style, width) in [
+        (style::scifi_rib(), 2),
+        (style::crypt(), 2),
+        (style::gothic_nave(), 2),
+    ] {
+        let name = style.name.clone();
+        let mut w = empty();
+        let out = lay_styled_corridor(&mut w, &corridor(style, 10, width)).unwrap();
+        let a = analyse(
+            &w,
+            &[Spawn {
+                room: out.room,
+                cell: [0, 0],
+            }],
+            &psx_engine::WalkLimits::DEFAULT,
+        )
+        .unwrap();
+        // 12 by 2 sectors: every one stands and every one is reached.
+        assert_eq!(a.rooms[out.room].standable_count(), 24, "{name}");
+        assert_eq!(a.counts()[4], 0, "{name}: unreachable");
+    }
+}
+
+#[test]
+fn a_solid_lintel_over_a_doorway_does_not_block_the_walk_analysis() {
+    use super::opening::{cut_opening, OpeningKind, OpeningParams, OpeningProfile};
+    use super::room::{lay_room, Footprint, LeafPolicy, RoomParams};
+    use crate::grid::edit::CellRect as R;
+    use crate::grid::sector::WallEdge;
+    use crate::grid::walk::{analyse, Spawn};
+    let mut w = empty();
+    for (x0, n) in [(0, "a"), (4, "b")] {
+        let mut p = RoomParams::new(
+            Footprint::Rect(R::from_corners([x0, 0], [x0 + 3, 2])),
+            n,
+            3072,
+        );
+        p.leaves = LeafPolicy::Sectors;
+        lay_room(&mut w, &p).unwrap();
+    }
+    let door = OpeningParams {
+        profile: OpeningProfile::Rectangular,
+        room: 0,
+        cell: [3, 1],
+        side: WallEdge::East,
+        from: 4,
+        to: 8,
+        kind: OpeningKind::Door,
+        top: 2048,
+        material: None,
+    };
+    let spawn = Spawn {
+        room: 0,
+        cell: [0, 1],
+    };
+    let before = analyse(&w, &[spawn], &psx_engine::WalkLimits::DEFAULT).unwrap();
+    assert_eq!(before.counts()[4], 12, "room b is walled off");
+    cut_opening(&mut w, &door).unwrap();
+    // The lintel is a solid wall record, above the body.
+    let lintels = w.rooms[0]
+        .leaves()
+        .flat_map(|(_, s)| s.walls(WallEdge::East).to_vec())
+        .filter(|x| x.solid)
+        .count();
+    assert!(lintels > 0);
+    let after = analyse(&w, &[spawn], &psx_engine::WalkLimits::DEFAULT).unwrap();
+    assert_eq!(after.counts()[4], 0, "the door is open");
+}
