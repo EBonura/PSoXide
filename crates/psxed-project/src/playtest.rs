@@ -1644,6 +1644,7 @@ pub fn build_package(
                 delay_ticks,
                 wait_ticks,
                 enabled,
+                persistent,
             } => {
                 let ok = report.blaming(PlaytestValidationTarget::Node(node.id), |report| {
                     push_logic_node(
@@ -1657,7 +1658,11 @@ pub fn build_package(
                         *delay_ticks,
                         *wait_ticks,
                         *enabled,
+                        *persistent,
                         &mut names,
+                        &mut interactable_messages,
+                        &mut interactable_message_pages,
+                        &mut interactable_message_pages_it,
                         &mut logic,
                         &mut pending_door_links,
                         report,
@@ -1744,6 +1749,13 @@ pub fn build_package(
             ));
         }
     }
+    claim_logic_persistence_slots(
+        &logic,
+        &logic_ids,
+        &names,
+        &mut persistence_slots,
+        &mut report,
+    );
     let world_objects = cook_world_objects(
         &image_props,
         &box_props,
@@ -1759,9 +1771,13 @@ pub fn build_package(
     if !resolve_door_links(
         &pending_door_links,
         &box_prop_indices_by_name,
+        &box_props,
         &mut logic,
         &mut report,
     ) {
+        return (None, report);
+    }
+    if !check_switch_targets(&logic, &names, &mut report) {
         return (None, report);
     }
 

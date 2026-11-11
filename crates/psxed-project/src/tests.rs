@@ -1577,6 +1577,9 @@ fn legacy_door_motion_fields_are_ignored() {
         LogicNodeKind::Door {
             box_prop: "Legacy Box".to_string(),
             start_open: true,
+            slide: None,
+            lock: crate::DoorLock::Unlocked,
+            refusal: String::new(),
         }
     );
 }

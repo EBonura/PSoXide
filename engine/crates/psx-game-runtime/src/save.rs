@@ -135,6 +135,14 @@ impl SaveBlock {
         self.flags[index / 8] |= 1 << (index % 8);
     }
 
+    /// Clear persistent flag `index`; out-of-range is ignored.
+    pub fn clear_flag(&mut self, index: usize) {
+        if index >= SAVE_FLAG_CAPACITY {
+            return;
+        }
+        self.flags[index / 8] &= !(1 << (index % 8));
+    }
+
     /// Encode into one card frame, checksummed.
     pub fn encode(&self, out: &mut [u8; SAVE_BLOCK_BYTES]) {
         out.fill(0);
@@ -344,6 +352,16 @@ mod tests {
         block.encode(&mut frame);
         let back = SaveBlock::decode(&frame, SAVE_FLAG_CAPACITY as u16).unwrap();
         assert!(back.flag(SAVE_FLAG_CAPACITY - 1));
+    }
+
+    #[test]
+    fn a_flag_can_be_cleared_again() {
+        let mut block = SaveBlock::new(1, SAVE_FLAG_CAPACITY as u16);
+        block.set_flag(9);
+        block.set_flag(10);
+        block.clear_flag(9);
+        block.clear_flag(SAVE_FLAG_CAPACITY); // out of range: ignored
+        assert!(!block.flag(9) && block.flag(10));
     }
 
     #[test]

@@ -31,6 +31,13 @@ impl NameInterner {
         id
     }
 
+    /// The name interned as `id`, for error text.
+    pub(crate) fn name_of(&self, id: u16) -> Option<&str> {
+        self.ids
+            .iter()
+            .find_map(|(name, &candidate)| (candidate == id).then_some(name.as_str()))
+    }
+
     /// Number of distinct interned names.
     pub(crate) fn len(&self) -> usize {
         self.ids.len()
@@ -1453,6 +1460,8 @@ pub enum PlaytestInteractableKind {
     Checkpoint,
     /// Persistent, beacon-backed point of interest.
     PointOfInterest,
+    /// Lever or button that fires its paired logic record's target.
+    Switch,
 }
 
 /// Text payload used by an interactable.

@@ -196,6 +196,30 @@ impl Playtest {
         self.poi_save_loaded = true;
         self.restore_claimed_poi_rewards();
         self.restore_persistent_destructibles();
+        // The logic records were armed before the card was read.
+        self.restore_persistent_logic();
+        self.sync_door_box_props();
+    }
+
+    /// Record persistent logic record `index`'s state in the save (on every
+    /// change, in memory; the card write waits for the next save boundary
+    /// like every other flag). Doors and switches only; others do nothing.
+    pub(super) fn store_persistent_logic(&mut self, index: usize) {
+        if self.logic.store_persistent(
+            LOGIC.as_slice(),
+            LOGIC_IDS.as_slice(),
+            index,
+            &mut self.poi_save,
+        ) {
+            self.poi_save_dirty = true;
+        }
+    }
+
+    /// Apply the saved state of every persistent logic record to the
+    /// just-armed runtime: boot after a card load, and every respawn.
+    pub(super) fn restore_persistent_logic(&mut self) {
+        self.logic
+            .restore_persistent(LOGIC.as_slice(), LOGIC_IDS.as_slice(), &self.poi_save);
     }
 
     pub(super) fn restore_persistent_destructibles(&mut self) {
@@ -945,6 +969,9 @@ impl Playtest {
         self.game_entities
             .set_stance_swap_delay(self.player_stance_config.swap_cooldown_ticks);
         self.logic.init_from_records(LOGIC.as_slice());
+        // Persistent doors and levers keep what the player did to them
+        // across the death; everything else just re-armed above.
+        self.restore_persistent_logic();
         // The logic runtime restarts its rolling fired total with the
         // records; restart the reported watermark with it or the
         // LOGIC_RECORDS_FIRED delta counter under-reports until the new
@@ -2117,6 +2144,9 @@ impl Playtest {
         for (index, interactable) in INTERACTABLES.iter().enumerate() {
             if !self.point_of_interest_available(interactable)
                 || interactable.room != self.room_index
+                // A spent one-shot lever offers no prompt.
+                || (interactable.kind == InteractableKind::Switch
+                    && self.logic.is_removed(usize::from(interactable.logic)))
             {
                 continue;
             }
@@ -2127,7 +2157,13 @@ impl Playtest {
             ) else {
                 continue;
             };
-            if let Some(world_rt) = self.world_rt.as_mut() {
+            // Only a point of interest has a beacon to see; a lever is a plain
+            // radius and skips the line-of-sight test. (Message and Checkpoint
+            // interactables still go through it, and with no beacon cooked for
+            // them they are unreachable in a grid world: left as it was.)
+            if interactable.kind == InteractableKind::Switch {
+                // fall through to the distance ranking below
+            } else if let Some(world_rt) = self.world_rt.as_mut() {
                 if !world_rt.typed_world_object_directly_visible(
                     player,
                     psx_level::world_object_kind::POINT_OF_INTEREST_BEACON,
@@ -2181,6 +2217,9 @@ impl Playtest {
             return fired;
         }
         match interactable.kind {
+            // A lever without its paired record (a hand-rolled manifest)
+            // has nothing to fire.
+            InteractableKind::Switch => false,
             InteractableKind::Message => {
                 self.open_interactable_message(interactable);
                 true

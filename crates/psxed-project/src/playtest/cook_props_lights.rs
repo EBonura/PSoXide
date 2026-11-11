@@ -1217,6 +1217,32 @@ pub(crate) fn push_particle_emitter(
     true
 }
 
+/// Append one single-page message to the interactable message tables and
+/// return its index.
+fn push_single_page_message(
+    messages: &mut Vec<PlaytestInteractableMessage>,
+    message_pages: &mut Vec<String>,
+    message_pages_it: &mut Vec<String>,
+    title: String,
+    body: String,
+) -> u16 {
+    let message = messages.len().min(u16::MAX as usize) as u16;
+    let page_first = message_pages.len().min(u16::MAX as usize) as u16;
+    message_pages.push(body.clone());
+    message_pages_it.push(String::new());
+    messages.push(PlaytestInteractableMessage {
+        title,
+        body,
+        page_first,
+        page_count: 1,
+    });
+    message
+}
+
+/// Ticks (60 Hz) a toggle switch refuses a second press, so a mashed button
+/// cannot flip a moving door back and forth every frame.
+const SWITCH_TOGGLE_COOLDOWN_TICKS: i16 = 30;
+
 // Borrow the existing cook tables without allocating an intermediate context.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn push_interactable(
@@ -1263,17 +1289,51 @@ pub(crate) fn push_interactable(
             non_empty_or(body, "Relay synchronized.").to_string(),
             non_empty_or(checkpoint_id, node_name).to_string(),
         ),
+        crate::InteractableKind::Switch { target, .. } => {
+            if target.trim().is_empty() {
+                report.error(format!(
+                    "Switch on '{node_name}' has no target - a lever that fires \
+                     nothing is dead content"
+                ));
+                return false;
+            }
+            (
+                PlaytestInteractableKind::Switch,
+                psx_level::logic_kind::SWITCH,
+                String::new(),
+                String::new(),
+                String::new(),
+            )
+        }
     };
-    let message = messages.len().min(u16::MAX as usize) as u16;
-    let page_first = message_pages.len().min(u16::MAX as usize) as u16;
-    message_pages.push(body.clone());
-    message_pages_it.push(String::new());
-    messages.push(PlaytestInteractableMessage {
-        title,
-        body,
-        page_first,
-        page_count: 1,
-    });
+    // A switch shows no text, so it takes no slot in the message tables.
+    let message = if kind == PlaytestInteractableKind::Switch {
+        psx_level::INTERACTABLE_MESSAGE_NONE
+    } else {
+        push_single_page_message(messages, message_pages, message_pages_it, title, body)
+    };
+    // A switch's wiring: its target, and whether it retires after one press
+    // (wait -1) or cools down between presses.
+    let (switch_target, switch_wait, switch_spawnflags) = match component.kind {
+        crate::InteractableKind::Switch {
+            target,
+            behavior,
+            unlocks,
+            ..
+        } => (
+            names.intern(target),
+            match behavior {
+                crate::SwitchBehavior::OneShot => -1,
+                crate::SwitchBehavior::Toggle => SWITCH_TOGGLE_COOLDOWN_TICKS,
+            },
+            if *unlocks {
+                psx_level::switch_flags::UNLOCK
+            } else {
+                0
+            },
+        ),
+        _ => (psx_level::LOGIC_NAME_NONE, 0, 0),
+    };
     let flags = if component.enabled {
         psx_level::interactable_flags::ENABLED
     } else {
@@ -1312,13 +1372,13 @@ pub(crate) fn push_interactable(
     logic.push(PlaytestLogic {
         room: room_index,
         kind: logic_kind,
-        spawnflags: 0,
+        spawnflags: switch_spawnflags,
         targetname: names.intern(node_name),
-        target: psx_level::LOGIC_NAME_NONE,
+        target: switch_target,
         killtarget: psx_level::LOGIC_NAME_NONE,
         master: psx_level::LOGIC_NAME_NONE,
         delay_ticks: 0,
-        wait_ticks: 0,
+        wait_ticks: switch_wait,
         arg0: 0,
         arg1: 0,
         link: psx_level::LOGIC_LINK_NONE,
@@ -1330,6 +1390,16 @@ pub(crate) fn push_interactable(
         max: [pos[0] + radius, pos[1], pos[2] + radius],
         flags: if component.enabled {
             psx_level::logic_flags::ENABLED
+        } else {
+            0
+        } | if matches!(
+            component.kind,
+            crate::InteractableKind::Switch {
+                persistent: true,
+                ..
+            }
+        ) {
+            psx_level::logic_flags::PERSISTENT
         } else {
             0
         },
@@ -1753,7 +1823,11 @@ pub(crate) fn push_logic_node(
     delay_ticks: u16,
     wait_ticks: i16,
     enabled: bool,
+    persistent: bool,
     names: &mut NameInterner,
+    messages: &mut Vec<PlaytestInteractableMessage>,
+    message_pages: &mut Vec<String>,
+    message_pages_it: &mut Vec<String>,
     logic: &mut Vec<PlaytestLogic>,
     pending_door_links: &mut Vec<PendingDoorLink>,
     report: &mut PlaytestValidationReport,
@@ -1784,6 +1858,16 @@ pub(crate) fn push_logic_node(
             0
         },
     };
+    if persistent {
+        if !matches!(kind, crate::LogicNodeKind::Door { .. }) {
+            report.error(format!(
+                "'{node_name}' is marked persistent, but only Doors (and Switch \
+                 interactables) can be saved"
+            ));
+            return false;
+        }
+        record.flags |= psx_level::logic_flags::PERSISTENT;
+    }
     match kind {
         crate::LogicNodeKind::TriggerVolume { size } => {
             if size[0] == 0 || size[1] == 0 || size[2] == 0 {
@@ -1839,7 +1923,9 @@ pub(crate) fn push_logic_node(
         crate::LogicNodeKind::Door {
             box_prop,
             start_open,
-            ..
+            slide,
+            lock,
+            refusal,
         } => {
             if box_prop.trim().is_empty() {
                 report.error(format!(
@@ -1849,6 +1935,61 @@ pub(crate) fn push_logic_node(
                 return false;
             }
             record.kind = psx_level::logic_kind::DOOR;
+            if let Some(slide) = slide {
+                // Distances are already in engine units (the cook scales the
+                // project first); the runtime keeps offsets as i16.
+                if slide.distance == 0 || slide.ticks == 0 || slide.distance > i16::MAX as u16 {
+                    report.error(format!(
+                        "Door '{node_name}' has a slide of distance {} over {} ticks \
+                         (both must be > 0, and the distance at most {} engine units)",
+                        slide.distance,
+                        slide.ticks,
+                        i16::MAX
+                    ));
+                    return false;
+                }
+                record.spawnflags |= match slide.direction {
+                    crate::DoorDirection::Up => psx_level::door_flags::DIR_UP,
+                    crate::DoorDirection::Down => psx_level::door_flags::DIR_DOWN,
+                    crate::DoorDirection::East => psx_level::door_flags::DIR_POS_X,
+                    crate::DoorDirection::West => psx_level::door_flags::DIR_NEG_X,
+                    crate::DoorDirection::South => psx_level::door_flags::DIR_POS_Z,
+                    crate::DoorDirection::North => psx_level::door_flags::DIR_NEG_Z,
+                };
+                record.arg0 = slide.distance;
+                record.arg1 = slide.ticks;
+            }
+            let default_refusal = match lock {
+                crate::DoorLock::Unlocked => None,
+                crate::DoorLock::Locked => {
+                    record.spawnflags |= psx_level::door_flags::LOCKED;
+                    Some("LOCKED.")
+                }
+                crate::DoorLock::OneWay { refuse_from } => {
+                    record.spawnflags |= (match refuse_from {
+                        crate::DoorSide::East => psx_level::door_flags::REFUSE_EAST,
+                        crate::DoorSide::West => psx_level::door_flags::REFUSE_WEST,
+                        crate::DoorSide::South => psx_level::door_flags::REFUSE_SOUTH,
+                        crate::DoorSide::North => psx_level::door_flags::REFUSE_NORTH,
+                    }) << psx_level::door_flags::REFUSE_SHIFT;
+                    Some("IT WILL NOT OPEN FROM THIS SIDE.")
+                }
+            };
+            match default_refusal {
+                Some(stock) => {
+                    record.message = push_single_page_message(
+                        messages,
+                        message_pages,
+                        message_pages_it,
+                        "DOOR".to_string(),
+                        non_empty_or(refusal, stock).to_string(),
+                    );
+                }
+                None if !refusal.trim().is_empty() => report.warn(format!(
+                    "Door '{node_name}' is not locked, so its refusal text is never shown"
+                )),
+                None => {}
+            }
             if *start_open {
                 record.flags |= psx_level::logic_flags::START_ON;
             }
@@ -1869,6 +2010,7 @@ pub(crate) fn push_logic_node(
 pub(crate) fn resolve_door_links(
     pending: &[PendingDoorLink],
     box_prop_indices_by_name: &HashMap<String, Vec<u16>>,
+    box_props: &[PlaytestBoxProp],
     logic: &mut [PlaytestLogic],
     report: &mut PlaytestValidationReport,
 ) -> bool {
@@ -1881,6 +2023,13 @@ pub(crate) fn resolve_door_links(
             Some([index]) => {
                 if let Some(record) = logic.get_mut(link.logic_index) {
                     record.link = *index;
+                    // The door's plane is its box's bottom-centre: the point
+                    // the one-way side test compares the player against.
+                    if let Some(prop) = box_props.get(usize::from(*index)) {
+                        record.x = prop.x;
+                        record.y = prop.y;
+                        record.z = prop.z;
+                    }
                 }
             }
             Some(indices) => {
@@ -1901,6 +2050,84 @@ pub(crate) fn resolve_door_links(
                 ));
                 ok = false;
             }
+        }
+    }
+    ok
+}
+
+/// Every switch must fire something that exists: a target naming no cooked
+/// logic record is a cook error, never a lever that silently does nothing.
+pub(crate) fn check_switch_targets(
+    logic: &[PlaytestLogic],
+    names: &NameInterner,
+    report: &mut PlaytestValidationReport,
+) -> bool {
+    let mut ok = true;
+    for (index, record) in logic.iter().enumerate() {
+        if record.kind != psx_level::logic_kind::SWITCH {
+            continue;
+        }
+        let resolves = logic
+            .iter()
+            .enumerate()
+            .any(|(other, candidate)| other != index && candidate.targetname == record.target);
+        // A persistent lever aimed at something that is not saved comes back
+        // out of step with it after a death.
+        if record.flags & psx_level::logic_flags::PERSISTENT != 0 {
+            let unsaved = logic.iter().enumerate().any(|(other, candidate)| {
+                other != index
+                    && candidate.targetname == record.target
+                    && candidate.flags & psx_level::logic_flags::PERSISTENT == 0
+            });
+            if unsaved {
+                let switch = names.name_of(record.targetname).unwrap_or("?");
+                let target = names.name_of(record.target).unwrap_or("?");
+                report.warn(format!(
+                    "Persistent switch '{switch}' targets '{target}', which is not \
+                     persistent: after a death the lever and the target disagree"
+                ));
+            }
+        }
+        if !resolves {
+            let switch = names.name_of(record.targetname).unwrap_or("?");
+            let target = names.name_of(record.target).unwrap_or("?");
+            report.error(format!(
+                "Switch '{switch}' targets '{target}', which is not a placed \
+                 Logic node (Door, Relay, ...) or another interactable"
+            ));
+            ok = false;
+        }
+    }
+    ok
+}
+
+/// Give every persistent logic record its save slot, the same way the
+/// destructibles and points of interest take theirs: a hash of the stable
+/// id into the shared save bitmap. A slot already taken is a cook error that
+/// names both owners; the fix is to recreate one node so it gets a new id.
+pub(crate) fn claim_logic_persistence_slots(
+    logic: &[PlaytestLogic],
+    logic_ids: &[u32],
+    names: &NameInterner,
+    slots: &mut HashMap<u16, String>,
+    report: &mut PlaytestValidationReport,
+) -> bool {
+    let mut ok = true;
+    for (record, id) in logic.iter().zip(logic_ids) {
+        if record.flags & psx_level::logic_flags::PERSISTENT == 0 {
+            continue;
+        }
+        let slot = psx_level::persistent_flag_slot(psx_level::StableId(*id));
+        let owner = format!(
+            "logic '{}' (stable id {id:#010x})",
+            names.name_of(record.targetname).unwrap_or("?")
+        );
+        if let Some(existing) = slots.insert(slot, owner.clone()) {
+            report.error(format!(
+                "{existing} and {owner} map to the same persistent save slot; \
+                 recreate one node to give it a new stable id"
+            ));
+            ok = false;
         }
     }
     ok
@@ -2101,6 +2328,7 @@ pub(crate) fn default_prompt_for_interactable(kind: &crate::InteractableKind) ->
     match kind {
         crate::InteractableKind::Message { .. } => "READ ECHO",
         crate::InteractableKind::Checkpoint { .. } => "SYNCHRONIZE",
+        crate::InteractableKind::Switch { .. } => "USE",
     }
 }
 
@@ -2351,5 +2579,600 @@ mod message_page_tests {
         );
         assert!(objects[1].bounds_min[0] < 50 && objects[1].bounds_max[0] > 50);
         assert!(objects[1].bounds_min[1] < 60 && objects[1].bounds_max[1] > 60);
+    }
+}
+
+#[cfg(test)]
+mod switch_cook_tests {
+    use super::*;
+
+    fn cook_switch(
+        kind: crate::InteractableKind,
+        names: &mut NameInterner,
+        logic: &mut Vec<PlaytestLogic>,
+        report: &mut PlaytestValidationReport,
+    ) -> bool {
+        let mut messages = Vec::new();
+        let mut pages = Vec::new();
+        let mut pages_it = Vec::new();
+        let mut interactables = Vec::new();
+        push_interactable(
+            "lever",
+            0,
+            [0, 0, 0],
+            0,
+            InteractableComponent {
+                kind: &kind,
+                prompt: "PULL",
+                radius: 128,
+                enabled: true,
+            },
+            names,
+            &mut messages,
+            &mut pages,
+            &mut pages_it,
+            &mut interactables,
+            logic,
+            report,
+        ) && messages.is_empty()
+            && interactables[0].message == psx_level::INTERACTABLE_MESSAGE_NONE
+    }
+
+    #[test]
+    fn switch_cooks_to_a_target_firing_record_without_a_message() {
+        let mut names = NameInterner::default();
+        let mut logic = Vec::new();
+        let mut report = PlaytestValidationReport::default();
+        let toggle = crate::InteractableKind::Switch {
+            target: "gate".into(),
+            behavior: crate::SwitchBehavior::Toggle,
+            unlocks: false,
+            persistent: false,
+        };
+        assert!(cook_switch(toggle, &mut names, &mut logic, &mut report));
+        let one_shot = crate::InteractableKind::Switch {
+            target: "gate".into(),
+            behavior: crate::SwitchBehavior::OneShot,
+            unlocks: false,
+            persistent: false,
+        };
+        assert!(cook_switch(one_shot, &mut names, &mut logic, &mut report));
+        assert_eq!(logic[0].kind, psx_level::logic_kind::SWITCH);
+        assert_eq!(logic[0].target, names.intern("gate"));
+        assert_eq!(logic[0].wait_ticks, SWITCH_TOGGLE_COOLDOWN_TICKS);
+        assert_eq!(logic[1].wait_ticks, -1);
+    }
+
+    #[test]
+    fn switch_without_a_target_is_a_cook_error() {
+        let mut names = NameInterner::default();
+        let mut logic = Vec::new();
+        let mut report = PlaytestValidationReport::default();
+        let kind = crate::InteractableKind::Switch {
+            target: "  ".into(),
+            behavior: crate::SwitchBehavior::Toggle,
+            unlocks: false,
+            persistent: false,
+        };
+        assert!(!cook_switch(kind, &mut names, &mut logic, &mut report));
+        assert!(!report.is_ok());
+        assert!(logic.is_empty());
+    }
+
+    #[test]
+    fn switch_target_must_name_a_cooked_record() {
+        let mut names = NameInterner::default();
+        let mut logic = Vec::new();
+        let mut report = PlaytestValidationReport::default();
+        let kind = crate::InteractableKind::Switch {
+            target: "ghost".into(),
+            behavior: crate::SwitchBehavior::Toggle,
+            unlocks: false,
+            persistent: false,
+        };
+        assert!(cook_switch(kind, &mut names, &mut logic, &mut report));
+        assert!(!check_switch_targets(&logic, &names, &mut report));
+        assert!(report.errors.iter().any(|e| e.contains("'ghost'")));
+
+        // A placed Logic node of that name satisfies it.
+        let mut report = PlaytestValidationReport::default();
+        let mut pending = Vec::new();
+        assert!(push_logic_node(
+            "ghost",
+            0,
+            [0, 0, 0],
+            &crate::LogicNodeKind::Relay,
+            "lever",
+            "",
+            "",
+            0,
+            0,
+            true,
+            false,
+            &mut names,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut logic,
+            &mut pending,
+            &mut report,
+        ));
+        assert!(check_switch_targets(&logic, &names, &mut report));
+    }
+
+    #[test]
+    fn existing_interactables_still_parse_and_the_switch_reads_plainly() {
+        let old: crate::InteractableKind =
+            ron::from_str(r#"Message(title: "T", body: "B")"#).unwrap();
+        assert!(matches!(old, crate::InteractableKind::Message { .. }));
+        let lever: crate::InteractableKind =
+            ron::from_str(r#"Switch(target: "gate_door", behavior: OneShot)"#).unwrap();
+        assert_eq!(
+            lever,
+            crate::InteractableKind::Switch {
+                target: "gate_door".into(),
+                behavior: crate::SwitchBehavior::OneShot,
+                unlocks: false,
+                persistent: false,
+            }
+        );
+        let bare: crate::InteractableKind = ron::from_str("Switch(target: \"d\")").unwrap();
+        assert!(matches!(
+            bare,
+            crate::InteractableKind::Switch {
+                behavior: crate::SwitchBehavior::Toggle,
+                ..
+            }
+        ));
+    }
+}
+
+#[cfg(test)]
+mod door_cook_tests {
+    use super::*;
+
+    struct Cooked {
+        record: Option<PlaytestLogic>,
+        messages: Vec<PlaytestInteractableMessage>,
+        report: PlaytestValidationReport,
+        ok: bool,
+    }
+
+    fn cook_door(slide: Option<crate::DoorSlide>, lock: crate::DoorLock, refusal: &str) -> Cooked {
+        let kind = crate::LogicNodeKind::Door {
+            box_prop: "gate box".into(),
+            start_open: false,
+            slide,
+            lock,
+            refusal: refusal.into(),
+        };
+        let mut names = NameInterner::default();
+        let (mut messages, mut pages, mut pages_it) = (Vec::new(), Vec::new(), Vec::new());
+        let mut logic = Vec::new();
+        let mut pending = Vec::new();
+        let mut report = PlaytestValidationReport::default();
+        let ok = push_logic_node(
+            "gate",
+            0,
+            [0, 0, 0],
+            &kind,
+            "",
+            "",
+            "",
+            0,
+            0,
+            true,
+            false,
+            &mut names,
+            &mut messages,
+            &mut pages,
+            &mut pages_it,
+            &mut logic,
+            &mut pending,
+            &mut report,
+        );
+        Cooked {
+            record: logic.pop(),
+            messages,
+            report,
+            ok,
+        }
+    }
+
+    #[test]
+    fn a_door_with_no_new_fields_cooks_exactly_as_before() {
+        let cooked = cook_door(None, crate::DoorLock::Unlocked, "");
+        assert!(cooked.ok);
+        let record = cooked.record.unwrap();
+        assert_eq!(record.kind, psx_level::logic_kind::DOOR);
+        assert_eq!((record.spawnflags, record.arg0, record.arg1), (0, 0, 0));
+        assert_eq!(record.message, psx_level::INTERACTABLE_MESSAGE_NONE);
+        assert!(cooked.messages.is_empty());
+    }
+
+    #[test]
+    fn a_slide_cooks_to_direction_distance_and_ticks() {
+        let slide = crate::DoorSlide {
+            direction: crate::DoorDirection::North,
+            distance: 160,
+            ticks: 90,
+        };
+        let cooked = cook_door(Some(slide), crate::DoorLock::Unlocked, "");
+        assert!(cooked.ok);
+        let record = cooked.record.unwrap();
+        assert_eq!(record.spawnflags, psx_level::door_flags::DIR_NEG_Z);
+        assert_eq!((record.arg0, record.arg1), (160, 90));
+    }
+
+    #[test]
+    fn a_slide_of_nothing_or_too_far_is_a_cook_error() {
+        for (distance, ticks) in [(0, 30), (80, 0), (u16::MAX, 30)] {
+            let slide = crate::DoorSlide {
+                direction: crate::DoorDirection::Up,
+                distance,
+                ticks,
+            };
+            let cooked = cook_door(Some(slide), crate::DoorLock::Unlocked, "");
+            assert!(!cooked.ok && !cooked.report.is_ok(), "{distance} {ticks}");
+        }
+    }
+
+    #[test]
+    fn locks_cook_to_flags_and_a_refusal_message() {
+        let locked = cook_door(None, crate::DoorLock::Locked, "");
+        assert!(locked.ok);
+        let record = locked.record.unwrap();
+        assert_eq!(record.spawnflags, psx_level::door_flags::LOCKED);
+        assert_eq!(locked.messages.len(), 1);
+        assert_eq!(record.message, 0);
+        assert_eq!(locked.messages[0].body, "LOCKED.");
+
+        let one_way = cook_door(
+            None,
+            crate::DoorLock::OneWay {
+                refuse_from: crate::DoorSide::West,
+            },
+            "Barred from this side.",
+        );
+        assert_eq!(
+            one_way.record.unwrap().spawnflags,
+            psx_level::door_flags::REFUSE_WEST << psx_level::door_flags::REFUSE_SHIFT
+        );
+        assert_eq!(one_way.messages[0].body, "Barred from this side.");
+    }
+
+    #[test]
+    fn refusal_text_on_an_unlocked_door_warns() {
+        let cooked = cook_door(None, crate::DoorLock::Unlocked, "never shown");
+        assert!(cooked.ok && cooked.report.is_ok());
+        assert!(!cooked.report.warnings.is_empty());
+        assert!(cooked.messages.is_empty());
+    }
+
+    #[test]
+    fn a_door_takes_its_plane_from_the_linked_box() {
+        let mut cooked = cook_door(None, crate::DoorLock::Unlocked, "");
+        let pending = [PendingDoorLink {
+            logic_index: 0,
+            box_prop: "gate box".into(),
+            node_name: "gate".into(),
+        }];
+        let mut by_name = HashMap::new();
+        by_name.insert("gate box".to_string(), vec![0u16]);
+        let mut prop = test_box_prop();
+        prop.x = 640;
+        prop.y = 0;
+        prop.z = 1920;
+        let mut logic = vec![cooked.record.unwrap()];
+        assert!(resolve_door_links(
+            &pending,
+            &by_name,
+            &[prop],
+            &mut logic,
+            &mut cooked.report,
+        ));
+        assert_eq!((logic[0].x, logic[0].z, logic[0].link), (640, 1920, 0));
+    }
+
+    fn test_box_prop() -> PlaytestBoxProp {
+        PlaytestBoxProp {
+            room: 0,
+            texture_asset_indices: [None; psx_level::BOX_PROP_FACE_COUNT],
+            blend_modes: [0; psx_level::BOX_PROP_FACE_COUNT],
+            uvs: [[(0, 0); 4]; psx_level::BOX_PROP_FACE_COUNT],
+            x: 0,
+            y: 0,
+            z: 0,
+            ground_y: 0,
+            pitch: 0,
+            yaw: 0,
+            roll: 0,
+            vertices: [[0; 3]; psx_level::BOX_PROP_VERTEX_COUNT],
+            collision_min: [0; 3],
+            collision_max: [0; 3],
+            surface_first: 0,
+            surface_count: 0,
+            tint_rgb: [[0x80; 3]; psx_level::BOX_PROP_FACE_COUNT],
+            baked_vertex_rgb: [[(0x80, 0x80, 0x80); 4]; psx_level::BOX_PROP_FACE_COUNT],
+            flags: 0,
+        }
+    }
+
+    #[test]
+    fn the_authored_door_reads_plainly_and_scales_with_the_cook() {
+        let kind: crate::LogicNodeKind = ron::from_str(
+            r#"Door(box_prop: "gate", slide: Some((direction: Up, distance: 2560, ticks: 90)),
+                    lock: OneWay(refuse_from: West), refusal: "No.")"#,
+        )
+        .unwrap();
+        let crate::LogicNodeKind::Door {
+            slide: Some(slide),
+            lock,
+            ..
+        } = &kind
+        else {
+            panic!("a door with a slide");
+        };
+        assert_eq!(slide.distance, 2560);
+        assert_eq!(
+            *lock,
+            crate::DoorLock::OneWay {
+                refuse_from: crate::DoorSide::West
+            }
+        );
+
+        let mut project = crate::ProjectDocument::new("units");
+        let scene = project.active_scene_mut();
+        let node = scene.add_node(
+            scene.root,
+            "gate",
+            crate::NodeKind::Logic {
+                kind,
+                target: String::new(),
+                killtarget: String::new(),
+                master: String::new(),
+                delay_ticks: 0,
+                wait_ticks: 0,
+                enabled: true,
+                persistent: false,
+            },
+        );
+        crate::units::scale_project_to_engine_units(&mut project);
+        let scaled = project.active_scene().node(node).unwrap();
+        let crate::NodeKind::Logic {
+            kind: crate::LogicNodeKind::Door {
+                slide: Some(slide), ..
+            },
+            ..
+        } = &scaled.kind
+        else {
+            panic!("still a door");
+        };
+        assert_eq!(slide.distance, 160, "editor units / 16, like every length");
+        assert_eq!(slide.ticks, 90, "ticks do not scale");
+    }
+}
+
+#[cfg(test)]
+mod persistence_cook_tests {
+    use super::*;
+
+    fn push_node(
+        name: &str,
+        kind: &crate::LogicNodeKind,
+        persistent: bool,
+        names: &mut NameInterner,
+        logic: &mut Vec<PlaytestLogic>,
+        report: &mut PlaytestValidationReport,
+    ) -> bool {
+        push_logic_node(
+            name,
+            0,
+            [0, 0, 0],
+            kind,
+            if matches!(kind, crate::LogicNodeKind::Relay) {
+                "x"
+            } else {
+                ""
+            },
+            "",
+            "",
+            0,
+            0,
+            true,
+            persistent,
+            names,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            logic,
+            &mut Vec::new(),
+            report,
+        )
+    }
+
+    fn door() -> crate::LogicNodeKind {
+        crate::LogicNodeKind::Door {
+            box_prop: "box".into(),
+            start_open: false,
+            slide: None,
+            lock: crate::DoorLock::Unlocked,
+            refusal: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_persistent_door_is_flagged_and_other_kinds_are_refused() {
+        let mut names = NameInterner::default();
+        let mut logic = Vec::new();
+        let mut report = PlaytestValidationReport::default();
+        assert!(push_node(
+            "gate",
+            &door(),
+            true,
+            &mut names,
+            &mut logic,
+            &mut report
+        ));
+        assert_ne!(logic[0].flags & psx_level::logic_flags::PERSISTENT, 0);
+        assert!(push_node(
+            "plain",
+            &door(),
+            false,
+            &mut names,
+            &mut logic,
+            &mut report
+        ));
+        assert_eq!(logic[1].flags & psx_level::logic_flags::PERSISTENT, 0);
+        assert!(report.is_ok());
+
+        let relay = crate::LogicNodeKind::Relay;
+        assert!(!push_node(
+            "relay",
+            &relay,
+            true,
+            &mut names,
+            &mut logic,
+            &mut report
+        ));
+        assert!(report.errors.iter().any(|e| e.contains("'relay'")));
+    }
+
+    #[test]
+    fn a_persistent_switch_cooks_with_the_flag() {
+        let mut names = NameInterner::default();
+        let mut logic = Vec::new();
+        let mut report = PlaytestValidationReport::default();
+        let lever = |persistent| crate::InteractableKind::Switch {
+            target: "gate".into(),
+            behavior: crate::SwitchBehavior::OneShot,
+            unlocks: false,
+            persistent,
+        };
+        for kind in [lever(true), lever(false)] {
+            let (mut messages, mut pages, mut pages_it) = (Vec::new(), Vec::new(), Vec::new());
+            assert!(push_interactable(
+                "lever",
+                0,
+                [0; 3],
+                0,
+                InteractableComponent {
+                    kind: &kind,
+                    prompt: "PULL",
+                    radius: 8,
+                    enabled: true,
+                },
+                &mut names,
+                &mut messages,
+                &mut pages,
+                &mut pages_it,
+                &mut Vec::new(),
+                &mut logic,
+                &mut report,
+            ));
+        }
+        assert_ne!(logic[0].flags & psx_level::logic_flags::PERSISTENT, 0);
+        assert_eq!(logic[1].flags & psx_level::logic_flags::PERSISTENT, 0);
+        assert_ne!(logic[1].flags & psx_level::logic_flags::ENABLED, 0);
+    }
+
+    #[test]
+    fn slots_follow_stable_ids_and_a_clash_names_both_owners() {
+        let mut names = NameInterner::default();
+        let mut logic = Vec::new();
+        let mut report = PlaytestValidationReport::default();
+        for name in ["gate a", "gate b"] {
+            assert!(push_node(
+                name,
+                &door(),
+                true,
+                &mut names,
+                &mut logic,
+                &mut report
+            ));
+        }
+        // Two ids 832 apart share a slot.
+        let ids = [7, 7 + psx_level::POI_PERSISTENT_FLAG_CAPACITY as u32];
+        let mut slots = HashMap::new();
+        assert!(!claim_logic_persistence_slots(
+            &logic,
+            &ids,
+            &names,
+            &mut slots,
+            &mut report
+        ));
+        let message = report.error_messages().join(" ");
+        assert!(
+            message.contains("gate a") && message.contains("gate b"),
+            "{message}"
+        );
+        assert!(message.contains("new stable id"), "{message}");
+
+        // Distinct slots claim cleanly, and moving the records in the table
+        // does not change which slot an id gets.
+        let mut report = PlaytestValidationReport::default();
+        let mut slots = HashMap::new();
+        assert!(claim_logic_persistence_slots(
+            &logic,
+            &[7, 8],
+            &names,
+            &mut slots,
+            &mut report
+        ));
+        assert!(slots.get(&7).unwrap().contains("gate a"));
+        let mut swapped = logic.clone();
+        swapped.swap(0, 1);
+        let mut slots2 = HashMap::new();
+        assert!(claim_logic_persistence_slots(
+            &swapped,
+            &[8, 7],
+            &names,
+            &mut slots2,
+            &mut report
+        ));
+        assert!(slots2.get(&7).unwrap().contains("gate a"));
+    }
+
+    #[test]
+    fn a_persistent_lever_at_an_unsaved_door_warns() {
+        let mut names = NameInterner::default();
+        let mut logic = Vec::new();
+        let mut report = PlaytestValidationReport::default();
+        assert!(push_node(
+            "gate",
+            &door(),
+            false,
+            &mut names,
+            &mut logic,
+            &mut report
+        ));
+        let kind = crate::InteractableKind::Switch {
+            target: "gate".into(),
+            behavior: crate::SwitchBehavior::Toggle,
+            unlocks: false,
+            persistent: true,
+        };
+        let (mut messages, mut pages, mut pages_it) = (Vec::new(), Vec::new(), Vec::new());
+        assert!(push_interactable(
+            "lever",
+            0,
+            [0; 3],
+            0,
+            InteractableComponent {
+                kind: &kind,
+                prompt: "PULL",
+                radius: 8,
+                enabled: true,
+            },
+            &mut names,
+            &mut messages,
+            &mut pages,
+            &mut pages_it,
+            &mut Vec::new(),
+            &mut logic,
+            &mut report,
+        ));
+        assert!(check_switch_targets(&logic, &names, &mut report));
+        assert!(report.warnings.iter().any(|w| w.contains("not persistent")));
     }
 }

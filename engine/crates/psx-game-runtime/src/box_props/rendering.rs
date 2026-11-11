@@ -217,12 +217,18 @@ pub fn draw_box_props<
         let Some(box_runtime) = state.runtime.get(index) else {
             continue;
         };
-        // A box mid-fall is drawn shifted down by its current fall offset.
-        let fall_y = state.fall[index].fall_y;
+        // A box mid-fall is drawn shifted down by its current fall offset,
+        // and a sliding door by how far it has travelled.
+        let slide = state.slide[index];
+        let offset = [
+            i32::from(slide[0]),
+            state.fall[index].fall_y.saturating_add(i32::from(slide[1])),
+            i32::from(slide[2]),
+        ];
         let cull_center = WorldVertex::new(
-            box_runtime.cull_center.x,
-            box_runtime.cull_center.y.saturating_add(fall_y),
-            box_runtime.cull_center.z,
+            box_runtime.cull_center.x.saturating_add(offset[0]),
+            box_runtime.cull_center.y.saturating_add(offset[1]),
+            box_runtime.cull_center.z.saturating_add(offset[2]),
         );
         if !sphere_visible_to_camera(camera, options, cull_center, box_runtime.cull_radius, 96) {
             continue;
@@ -239,7 +245,7 @@ pub fn draw_box_props<
             draw_box_prop_faces(
                 prop,
                 &box_runtime.faces,
-                fall_y,
+                offset,
                 loaded_projector,
                 camera,
                 options,
@@ -253,7 +259,7 @@ pub fn draw_box_props<
             draw_generated_box_prop_surfaces(
                 prop,
                 generated_surfaces,
-                fall_y,
+                offset,
                 loaded_projector,
                 camera,
                 options,
@@ -270,7 +276,7 @@ pub fn draw_box_props<
 fn draw_generated_box_prop_surfaces<T, const OT_DEPTH: usize>(
     prop: &LevelBoxPropRecord,
     generated_surfaces: &[LevelBoxPropSurfaceRecord],
-    fall_y: i32,
+    offset: [i32; 3],
     projector: LoadedWorldCameraGte,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
@@ -303,7 +309,7 @@ fn draw_generated_box_prop_surfaces<T, const OT_DEPTH: usize>(
         if !box_prop_face_front_facing(camera, face_runtime) {
             continue;
         }
-        let face_vertices = box_prop_offset_quad_y(face_runtime.vertices, fall_y);
+        let face_vertices = box_prop_offset_quad(face_runtime.vertices, offset);
         let Some(texture_asset) = prop.texture_assets[face] else {
             continue;
         };
@@ -757,7 +763,7 @@ fn box_prop_apply_fog_weight(
 fn draw_box_prop_faces<T, const OT_DEPTH: usize>(
     prop: &LevelBoxPropRecord,
     faces: &[BoxPropFaceRuntime; psx_level::BOX_PROP_FACE_COUNT],
-    fall_y: i32,
+    offset: [i32; 3],
     projector: LoadedWorldCameraGte,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
@@ -781,7 +787,7 @@ fn draw_box_prop_faces<T, const OT_DEPTH: usize>(
         }
         // A uniform Y shift while the box falls; facing is unchanged so the
         // front-facing test above still uses the resting normal/center.
-        let face_vertices = box_prop_offset_quad_y(face_runtime.vertices, fall_y);
+        let face_vertices = box_prop_offset_quad(face_runtime.vertices, offset);
         let Some(texture_asset) = prop.texture_assets[face] else {
             continue;
         };

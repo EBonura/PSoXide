@@ -752,6 +752,9 @@ pub enum InteractableKind {
     /// Player-authored point of interest with a visible archive beacon,
     /// paged body text, optional one-time reward, and persistent read state.
     PointOfInterest,
+    /// Lever or button: pressing interact fires the paired
+    /// [`logic_kind::SWITCH`] record's `target`.
+    Switch,
 }
 
 /// Runtime flags for [`InteractableRecord`].
@@ -767,6 +770,16 @@ pub const POI_FLAG_NONE: u16 = u16::MAX;
 
 /// Number of persistent POI state bits available in the one-frame save block.
 pub const POI_PERSISTENT_FLAG_CAPACITY: usize = 832;
+
+/// The save flag a persistent record owns: its stable id modulo the flag
+/// capacity. Unlike a table index it does not move when records are added,
+/// removed or reordered, so a save keeps meaning the same door across
+/// recooks. Two records can land on one slot; the cook refuses a level where
+/// they do, naming both.
+#[must_use]
+pub const fn persistent_flag_slot(id: StableId) -> u16 {
+    (id.raw() % POI_PERSISTENT_FLAG_CAPACITY as u32) as u16
+}
 
 /// Sentinel for a point-of-interest reward resource.
 pub const POI_REWARD_NONE: u16 = u16::MAX;
@@ -963,6 +976,13 @@ pub mod logic_kind {
     /// closed (drawn + solid) and open (hidden + passable). Authoring
     /// pending.
     pub const DOOR: u8 = 6;
+    /// Lever or button, cooked from `Interactable::Switch` components.
+    /// Using it flips its own on/off state (`counter`) and fires `target`
+    /// with an explicit On or Off, so the target never depends on how many
+    /// times the switch was pressed. `wait_ticks < 0` makes it one-shot
+    /// (retired after the first press); a positive value is the toggle's
+    /// cooldown between presses.
+    pub const SWITCH: u8 = 7;
 }
 
 /// Runtime flags for [`LevelLogicRecord`].
@@ -971,6 +991,60 @@ pub mod logic_flags {
     pub const ENABLED: u16 = 1 << 0;
     /// Record starts in the "on"/open state (kind-specific).
     pub const START_ON: u16 = 1 << 1;
+    /// The record's state survives death and is saved: it maps to one save
+    /// flag, [`persistent_flag_slot`](crate::persistent_flag_slot) of its
+    /// stable id. Doors and switches only.
+    pub const PERSISTENT: u16 = 1 << 2;
+}
+
+/// [`LevelLogicRecord::spawnflags`] of a [`logic_kind::DOOR`] record. A door
+/// whose direction is [`door_flags::DIR_NONE`], or whose `arg0` (distance)
+/// or `arg1` (ticks) is zero, opens instantly: hidden and passable at once.
+/// Otherwise its box prop slides `arg0` engine units along the direction
+/// over `arg1` ticks and is solid at its current position until it has
+/// fully cleared. The record's `x`/`y`/`z` is the linked box prop's
+/// bottom-centre, the point the one-way side test is made against, and
+/// `message` is the text shown when the door refuses to open.
+pub mod door_flags {
+    /// No slide: the door opens instantly.
+    pub const DIR_NONE: u16 = 0;
+    /// Slide toward +X.
+    pub const DIR_POS_X: u16 = 1;
+    /// Slide toward -X.
+    pub const DIR_NEG_X: u16 = 2;
+    /// Slide up (+Y).
+    pub const DIR_UP: u16 = 3;
+    /// Slide down (-Y).
+    pub const DIR_DOWN: u16 = 4;
+    /// Slide toward +Z.
+    pub const DIR_POS_Z: u16 = 5;
+    /// Slide toward -Z.
+    pub const DIR_NEG_Z: u16 = 6;
+    /// Bits 0..=2: the slide direction.
+    pub const DIR_MASK: u16 = 0b111;
+    /// The door refuses to open until something sends it an unlock.
+    pub const LOCKED: u16 = 1 << 3;
+    /// Bits 4..=6: the side of the door a player is refused from (one-way
+    /// door), `REFUSE_*` shifted by [`REFUSE_SHIFT`].
+    pub const REFUSE_MASK: u16 = 0b111 << REFUSE_SHIFT;
+    /// Shift of the refused-side field.
+    pub const REFUSE_SHIFT: u16 = 4;
+    /// Nobody is refused by side.
+    pub const REFUSE_NONE: u16 = 0;
+    /// A player east of the door (x greater than the door's) is refused.
+    pub const REFUSE_EAST: u16 = 1;
+    /// A player west of the door (x less) is refused.
+    pub const REFUSE_WEST: u16 = 2;
+    /// A player south of the door (z greater) is refused.
+    pub const REFUSE_SOUTH: u16 = 3;
+    /// A player north of the door (z less) is refused.
+    pub const REFUSE_NORTH: u16 = 4;
+}
+
+/// [`LevelLogicRecord::spawnflags`] of a [`logic_kind::SWITCH`] record.
+pub mod switch_flags {
+    /// Pressing the switch unlocks its target door instead of opening it.
+    pub const UNLOCK: u16 = 1 << 0;
 }
 
 /// Runtime flags for [`LevelGameEntityRecord`].
@@ -3897,3 +3971,18 @@ mod tests {
 
 /// Maximum authored elevated hook landings per project.
 pub const MAX_HOOK_POINTS: usize = 32;
+
+#[cfg(test)]
+mod persistent_slot_tests {
+    use super::*;
+
+    #[test]
+    fn the_slot_is_inside_the_save_bitmap_and_depends_only_on_the_id() {
+        for raw in [1u32, 831, 832, 833, 0xe40c_292c, u32::MAX] {
+            let slot = persistent_flag_slot(StableId(raw));
+            assert!(usize::from(slot) < POI_PERSISTENT_FLAG_CAPACITY);
+            assert_eq!(slot, persistent_flag_slot(StableId(raw)));
+        }
+        assert_eq!(persistent_flag_slot(StableId(832 + 7)), 7);
+    }
+}

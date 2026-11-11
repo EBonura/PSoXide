@@ -387,6 +387,7 @@ impl Playtest {
             now,
         );
         self.dispatch_logic_effects(ctx.controller_port());
+        self.sync_sliding_doors();
         telemetry::counter(
             telemetry::counter::GAME_ENTITIES_THOUGHT,
             u32::from(entity_stats.thought),

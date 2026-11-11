@@ -413,6 +413,12 @@ pub enum NodeKind {
         /// Disabled nodes stay authored but cook flag-disabled.
         #[serde(default = "default_true")]
         enabled: bool,
+        /// Keep this node's state across death and in the save: an open door
+        /// stays open. Doors only here (a Switch carries its own flag);
+        /// anything else is a cook error. Tied to the node's stable id, so
+        /// it survives recooks that do not delete the node.
+        #[serde(default)]
+        persistent: bool,
     },
     /// Shared health and damage state for one breakable object. Image props
     /// point at it through their `destructible` field.
@@ -642,6 +648,39 @@ pub enum InteractableKind {
         #[serde(default = "default_interactable_checkpoint_body")]
         body: String,
     },
+    /// Lever or button: pressing interact fires `target` (a placed
+    /// Logic node, usually a Door, named by its node name). The switch
+    /// sends the target an explicit On when it turns on and Off when it
+    /// turns off, so a door always ends up where the lever says.
+    Switch {
+        /// Node name this switch fires ("" is a cook error: a lever that
+        /// fires nothing is dead content).
+        #[serde(default)]
+        target: String,
+        /// How repeated presses behave.
+        #[serde(default)]
+        behavior: SwitchBehavior,
+        /// Unlock the target door instead of opening it.
+        #[serde(default)]
+        unlocks: bool,
+        /// Keep the lever's state across death and in the save (a pulled
+        /// one-shot lever stays pulled). Tied to the entity's stable id.
+        #[serde(default)]
+        persistent: bool,
+    },
+}
+
+/// What pressing an [`InteractableKind::Switch`] again does.
+#[allow(clippy::exhaustive_enums)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SwitchBehavior {
+    /// Each press flips the lever (target On, then Off, ...), with a short
+    /// cooldown between presses.
+    #[default]
+    Toggle,
+    /// The first press turns the target On and the lever retires: it
+    /// shows no prompt afterwards.
+    OneShot,
 }
 
 impl Default for InteractableKind {
@@ -732,6 +771,82 @@ pub enum LogicNodeKind {
         /// Whether the door starts open.
         #[serde(default)]
         start_open: bool,
+        /// How the box moves when the door opens. `None` is the original
+        /// instant door: hidden and passable at once.
+        #[serde(default)]
+        slide: Option<DoorSlide>,
+        /// Whether the door opens at all, and from which side.
+        #[serde(default)]
+        lock: DoorLock,
+        /// Text shown when the door refuses to open (locked, or the wrong
+        /// side). Empty uses a stock line.
+        #[serde(default)]
+        refusal: String,
+    },
+}
+
+/// The motion of a sliding door: its box translates `distance` along
+/// `direction` over `ticks` and is solid wherever it is until it has fully
+/// cleared the doorway.
+// A closed authored set: the inspector lists every field and variant.
+#[allow(clippy::exhaustive_structs)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DoorSlide {
+    /// Which way the box travels when the door opens.
+    pub direction: DoorDirection,
+    /// How far it travels, editor units (must be > 0).
+    pub distance: u16,
+    /// 60 Hz ticks from closed to fully open (must be > 0).
+    pub ticks: u16,
+}
+
+/// Slide direction. North is -Z, east is +X, up is +Y.
+#[allow(clippy::exhaustive_enums)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DoorDirection {
+    /// +Y.
+    Up,
+    /// -Y.
+    Down,
+    /// +X.
+    East,
+    /// -X.
+    West,
+    /// +Z.
+    South,
+    /// -Z.
+    North,
+}
+
+/// One side of a door, by compass direction. A player is on the east side
+/// when their X is greater than the door's, south when their Z is greater.
+#[allow(clippy::exhaustive_enums)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DoorSide {
+    /// Greater X than the door.
+    East,
+    /// Smaller X.
+    West,
+    /// Greater Z.
+    South,
+    /// Smaller Z.
+    North,
+}
+
+/// Whether a door can be opened.
+#[allow(clippy::exhaustive_enums)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DoorLock {
+    /// Opens whenever it is told to.
+    #[default]
+    Unlocked,
+    /// Refuses until a Switch with `unlocks: true` targets it.
+    Locked,
+    /// Refuses while the player stands on `refuse_from`'s side of the box
+    /// prop, opens from the other side. Closing is never refused.
+    OneWay {
+        /// The side the door will not open from.
+        refuse_from: DoorSide,
     },
 }
 
