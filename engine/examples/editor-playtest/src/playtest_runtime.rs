@@ -391,14 +391,6 @@ impl Playtest {
             return;
         };
         let at = RoomPoint::new(pose.x, pose.y, pose.z);
-        let Some(room) = self
-            .world_rt
-            .as_ref()
-            .and_then(|world_rt| world_rt.room_containing([at.x, at.y, at.z]))
-            .and_then(|room| u16::try_from(room).ok())
-        else {
-            return;
-        };
         let wanted = self.poi_save.checkpoint_id;
         let checkpoint_id = INTERACTABLES
             .iter()
@@ -408,7 +400,8 @@ impl Playtest {
             })
             .map_or("", |i| i.checkpoint_id);
         self.checkpoint = Some(RuntimeCheckpoint {
-            room: RoomIndex::new(room),
+            // Grid worlds cook as one playtest room whatever their rooms are.
+            room: self.room_index,
             position: at,
             yaw: Angle::from_q12(pose.yaw),
             checkpoint_id,
@@ -1058,6 +1051,39 @@ impl Playtest {
         self.loco = LocoPhase::Idle;
     }
 
+    /// Put the world back to its authored state except what the save keeps:
+    /// enemies respawn, transient logic (triggers, doors, one-shots) re-arms,
+    /// persistent doors and levers keep what the player did to them, box
+    /// props reset. A death and a rest at a checkpoint both do this.
+    fn rearm_world(&mut self) {
+        self.game_entities
+            .spawn_from_records_with_ids(GAME_ENTITIES.as_slice(), GAME_ENTITY_IDS.as_slice());
+        self.game_entities
+            .enable_combat_flow(self.player_has_ranged_weapon());
+        self.game_entities
+            .set_stance_swap_delay(self.player_stance_config.swap_cooldown_ticks);
+        self.logic.init_from_records(LOGIC.as_slice());
+        self.restore_persistent_logic();
+        // The logic runtime restarts its rolling fired total with the
+        // records; restart the reported watermark with it or the
+        // LOGIC_RECORDS_FIRED delta counter under-reports until the new
+        // total passes the pre-reset one.
+        self.logic_fired_reported = 0;
+        self.box_props.reset_dynamic_state();
+        self.sync_door_box_props();
+    }
+
+    /// Rest at a checkpoint like a bonfire: both vitality pools refill, the
+    /// world re-arms (see [`Self::rearm_world`]) and the save, which now holds
+    /// the new rest point, is written. The respawn point itself was set by
+    /// [`Self::set_checkpoint`].
+    fn rest_at_checkpoint(&mut self, port: &mut psx_engine::ControllerPort) {
+        self.reset_life_combat();
+        self.deferred_enemy_attacks.clear();
+        self.rearm_world();
+        self.flush_poi_save(port);
+    }
+
     /// Respawn after ANY completed death sequence (combat or hazard).
     ///
     /// Persistence policy (the souls rule: the world resets, the
@@ -1111,23 +1137,7 @@ impl Playtest {
         // New life: the next successful weapon socket resolution counts
         // as this life's PLAYER_WEAPON_ATTACHMENTS event.
         self.weapon_attach_reported = false;
-        self.game_entities
-            .spawn_from_records_with_ids(GAME_ENTITIES.as_slice(), GAME_ENTITY_IDS.as_slice());
-        self.game_entities
-            .enable_combat_flow(self.player_has_ranged_weapon());
-        self.game_entities
-            .set_stance_swap_delay(self.player_stance_config.swap_cooldown_ticks);
-        self.logic.init_from_records(LOGIC.as_slice());
-        // Persistent doors and levers keep what the player did to them
-        // across the death; everything else just re-armed above.
-        self.restore_persistent_logic();
-        // The logic runtime restarts its rolling fired total with the
-        // records; restart the reported watermark with it or the
-        // LOGIC_RECORDS_FIRED delta counter under-reports until the new
-        // total passes the pre-death one.
-        self.logic_fired_reported = 0;
-        self.box_props.reset_dynamic_state();
-        self.sync_door_box_props();
+        self.rearm_world();
         self.camera.snap_to_player_with_yaw(
             self.camera_target(None, false),
             self.camera_config(),
@@ -2378,6 +2388,9 @@ impl Playtest {
             );
             if fired {
                 self.dispatch_logic_effects(port);
+                if interactable.kind == InteractableKind::Checkpoint {
+                    self.rest_at_checkpoint(port);
+                }
             }
             return fired;
         }
@@ -2399,6 +2412,7 @@ impl Playtest {
                     },
                     port,
                 );
+                self.rest_at_checkpoint(port);
                 self.open_interactable_message(interactable);
                 true
             }

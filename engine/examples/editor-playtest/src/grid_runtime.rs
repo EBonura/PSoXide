@@ -586,12 +586,6 @@ impl GridRuntime {
         Some(located.room)
     }
 
-    /// The room whose footprint holds `point`, from the core alone (no room
-    /// has to be resident yet).
-    pub(super) fn room_containing(&self, point: [i32; 3]) -> Option<usize> {
-        room_at(&self.level, 0, point)
-    }
-
     /// Refresh the activation search around `observer`. Returns whether the
     /// observer is inside the world at all.
     fn activate(&mut self, observer: RoomPoint) -> bool {
