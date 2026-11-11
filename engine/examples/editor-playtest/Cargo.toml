@@ -80,6 +80,9 @@ emulator-telemetry = ["psx-engine/emulator-telemetry"]
 # Measurement only: the panels stream and are never drawn.
 panel-nodraw = []
 far-cards = ["cd-stream-bench"]
+# The heightfield far skin (`flood: (skin: true)`), parked: no shipped project bakes one, and its
+# renderer and scratch cost heap. A build for a level that has a skin needs this.
+far-skin = []
 # Measurement builds: one debug line per far-card event (card_trace.rs).
 card-trace = ["cd-stream-bench", "emulator-telemetry"]
 # Pad polled by the interrupt-driven engine (see psx-engine `pad-irq`).
