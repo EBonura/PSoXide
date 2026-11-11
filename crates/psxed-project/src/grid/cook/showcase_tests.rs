@@ -405,3 +405,25 @@ fn the_player_is_always_in_a_needed_room() {
         trail.len() / 4
     );
 }
+
+#[test]
+fn the_bridge_has_walls_on_both_sides_and_the_platform_a_rim() {
+    let w = made();
+    let units = RuntimeUnits::new(w.scale).unwrap();
+    let nat = native(&w);
+    let from = RoomPoint::new(units.rt(800 * 1024 / 100), 0, units.rt(700 * 1024 / 100));
+    let sign = z_sign(&nat, from);
+    // Push against each side of the deck: the body stays on it.
+    for goal_z in [300, 1100] {
+        let (stops, _) = walk(&nat, from, &[[800, goal_z]], 400, sign, &units);
+        let z = stops[0].z;
+        assert!(
+            z >= units.rt(6 * 1024) && z <= units.rt(8 * 1024),
+            "stays on the deck: z {z} for goal {goal_z}"
+        );
+    }
+    // And off the landing's west rim.
+    let from = RoomPoint::new(units.rt(250 * 1024 / 100), 0, units.rt(650 * 1024 / 100));
+    let (stops, _) = walk(&nat, from, &[[-300, 650]], 400, sign, &units);
+    assert!(stops[0].x >= 0, "the landing has a rim: {:?}", stops[0]);
+}

@@ -100,10 +100,15 @@ fn platform(
     area: BTreeSet<[i32; 2]>,
     height: i32,
     material: Option<ResourceId>,
+    wall: Option<ResourceId>,
 ) -> Result<usize, String> {
     let room = world.rooms.len();
     let mut r = GridRoom::new_derived(name, 1, 1);
-    r.defaults.wall_material = material;
+    r.defaults.wall_material = wall;
+    // An open-air room has no ceiling to take its closure walls up to: this
+    // height makes them (low edge walls the body cannot step over, which are
+    // the parapets of a bridge deck and the rim of a platform).
+    r.defaults.open_wall = OPEN_WALL;
     world.rooms.push(r);
     let mut t = TerrainParams::new(room, area, 1);
     t.base = Some(height);
@@ -258,6 +263,10 @@ fn paint_meshes(world: &mut GridWorld, room: usize, slots: &[Option<ResourceId>]
     }
 }
 
+/// Height of the closure walls of open-air rooms, grid units (more than the
+/// motor's step up).
+const OPEN_WALL: i32 = 896;
+
 const LIGHT_RED: [u8; 3] = [255, 92, 52];
 
 /// Build the whole level into `world` and `scene`.
@@ -274,8 +283,15 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
     // meshes: a mesh-only room next to a cell room is not something the
     // streamer lets a body walk onto (see the notes), and one room has no
     // joint to cross.
-    let landing =
-        platform(world, "Landing", cells([0, 4], [5, 9]), 0, m.paving).map_err(e("landing"))?;
+    let landing = platform(
+        world,
+        "Landing",
+        cells([0, 4], [5, 9]),
+        0,
+        m.paving,
+        m.stone_wall,
+    )
+    .map_err(e("landing"))?;
     deck_cells(world, landing, cells([6, 6], [21, 7]), -64, [0, 0])?;
     let deck_z = 7 * SECTOR_UNITS;
     // The middle piece has no parapet: the lodge door opens onto it.
@@ -291,9 +307,9 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
             2 * SECTOR_UNITS,
             512,
         );
-        if parapet {
-            b.parapet = Some(768);
-        }
+        // The deck's sides are the room's closure walls (a parapet mesh
+        // would only be decoration the body walks through).
+        let _ = parapet;
         b.pier_spacing = Some(3 * SECTOR_UNITS);
         b.pier_foot = -4096;
         build_bridge(world, &b).map_err(|r| format!("{name}: {}", r.describe()))?;
@@ -353,7 +369,20 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
     // ---- 4. Courtyard and cloister ---------------------------------------
     let mut yard = cells([10, 12], [23, 19]);
     yard.extend(cells([24, 14], [30, 19]));
-    platform(world, "Courtyard", yard.clone(), 0, m.ash_ground).map_err(e("courtyard"))?;
+    platform(
+        world,
+        "Courtyard",
+        yard.clone(),
+        0,
+        m.ash_ground,
+        m.stone_rough,
+    )
+    .map_err(e("courtyard"))?;
+    // The yard's rim walls are open where doors lead in: the lodge's south
+    // door and the cloister's garth door.
+    let courtyard = room_named(world, "Courtyard");
+    ghost_edge(world, courtyard, [15, 12], WallEdge::North);
+    ghost_edge(world, courtyard, [27, 14], WallEdge::North);
     let cloister_roles = Roles {
         floor: m.flagstone,
         wall: m.stone_wall,
@@ -514,9 +543,10 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
         SECTOR_UNITS,
         512,
     );
-    high.parapet = Some(768);
     build_bridge(world, &high).map_err(|r| format!("high bridge: {}", r.describe()))?;
     let hb = room_named(world, "High bridge");
+    world.rooms[hb].defaults.open_wall = OPEN_WALL;
+    world.rooms[hb].defaults.wall_material = m.stone_wall;
     paint_meshes(world, hb, &[m.paving, m.stone_wall, m.crypt_stone, m.pier]);
     deck_cells(world, hb, cells([15, 12], [15, 19]), -64, [0, 256])?;
     ghost_edge(world, hb, [15, 19], WallEdge::South);
@@ -581,7 +611,7 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
     )?;
     // Gatehouse: the lever gate to the bridge, and the pointed arch into the
     // nave.
-    let gate = doorway_with_door(
+    let _gate = doorway_with_door(
         world,
         scene,
         &DoorwayDoor {
@@ -603,47 +633,31 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
             lock: DoorLock::Unlocked,
             refusal: String::new(),
             persistent: true,
-            lever: Some(Lever {
-                cell: [21, 6],
-                prompt: "PULL LEVER".into(),
-                radius: 700,
-                behavior: SwitchBehavior::OneShot,
-            }),
+            lever: None,
         },
     )
     .map_err(|r| format!("gate: {}", r.describe()))?;
-    // A wall plate on the lever so the player finds it in the dark.
-    if let Some(lever) = gate.lever {
-        let at = scene
-            .node(lever)
-            .map_or([0.0; 3], |n| n.transform.translation);
-        let (hw, hd, h) = (160i16, 96i16, 768i16);
-        let vertices = [
-            [-hw, 0, -hd],
-            [hw, 0, -hd],
-            [hw, 0, hd],
-            [-hw, 0, hd],
-            [-hw, h, -hd],
-            [hw, h, -hd],
-            [hw, h, hd],
-            [-hw, h, hd],
-        ];
-        let plate = scene.add_node(
-            NodeId::ROOT,
-            "lever plate",
-            NodeKind::BoxProp {
-                materials: [m.iron_gate; crate::BOX_PROP_FACE_COUNT],
-                uvs: crate::default_box_prop_uvs(),
-                vertices,
-                collision_enabled: false,
-                break_flags: 0,
-                erosion: Default::default(),
-            },
-        );
-        if let Some(n) = scene.node_mut(plate) {
-            n.transform.translation = at;
-        }
-    }
+    // The lever: a plate and a handle on the deck's north wall beside the
+    // gate, a switch that drops the handle and opens the gate.
+    let to_editor = |gu: i32| world.scale.to_editor(gu) as f32;
+    super::lever::place_lever(
+        scene,
+        &super::lever::LeverSpec {
+            name: "gate lever",
+            wall_at: [
+                to_editor(21 * SECTOR_UNITS + 512),
+                0.0,
+                to_editor(6 * SECTOR_UNITS),
+            ],
+            facing: DoorDirection::South,
+            target: "gate",
+            behavior: SwitchBehavior::OneShot,
+            persistent: true,
+            radius: 760,
+            material: m.iron_gate,
+            handle_material: m.banner,
+        },
+    );
     open(
         world,
         gate_room,
