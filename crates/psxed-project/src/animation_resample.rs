@@ -87,6 +87,29 @@ fn sample_at(
     Some(blend(&a, &b, fraction, scale as i32))
 }
 
+/// Largest change of a clip's duration, in percent, a resample may make.
+///
+/// A fixed-rate clip lasts `(frames - 1) / rate` and rates are whole hertz, so
+/// the output lands within half an output frame of the source. On a long clip
+/// that is a rounding error; on a short one it is not: an 8 frame clip at 15 Hz
+/// (466 ms) came out as 2 frames at 1 Hz (1000 ms). Anything that plays a clip by
+/// its length (a locomotion cycle, an attack's active window, a patrol's pace)
+/// moves with it, so a rate that stretches or shrinks a clip past this is not a
+/// candidate at all. The widest change in the shipped clips is 5.9%, so 6% leaves
+/// their cook as it was.
+pub const MAX_DURATION_CHANGE_PERCENT: u32 = 6;
+
+/// Whether a resample to `out_frames` at `target_hz` keeps the clip's duration within
+/// [`MAX_DURATION_CHANGE_PERCENT`].
+fn keeps_duration(source_frames: u16, source_hz: u16, out_frames: u16, target_hz: u16) -> bool {
+    let source_intervals = u64::from(source_frames.saturating_sub(1));
+    let out_intervals = u64::from(out_frames.saturating_sub(1));
+    // Durations are intervals / rate; compare them cross-multiplied, exactly.
+    let source = source_intervals * u64::from(target_hz);
+    let out = out_intervals * u64::from(source_hz);
+    source.abs_diff(out) * 100 <= source * u64::from(MAX_DURATION_CHANGE_PERCENT)
+}
+
 /// Output frame count for a target rate, keeping both endpoints.
 fn frames_at_rate(source_frames: u16, source_hz: u16, target_hz: u16) -> u16 {
     let intervals = source_frames.saturating_sub(1) as u32;
@@ -152,7 +175,9 @@ pub fn chosen_rate_hz(animation: &Animation<'_>, budget_degrees: u8) -> u16 {
     // Walk down from just under the authored rate and keep the cheapest that
     // holds. Rates are small, so this is a handful of passes.
     for candidate in 1..source_hz {
-        if frames_at_rate(animation.frame_count(), source_hz, candidate) >= animation.frame_count()
+        let out_frames = frames_at_rate(animation.frame_count(), source_hz, candidate);
+        if out_frames >= animation.frame_count()
+            || !keeps_duration(animation.frame_count(), source_hz, out_frames, candidate)
         {
             continue;
         }
@@ -178,7 +203,9 @@ pub fn resample_animation_bytes(animation: &Animation<'_>, target_hz: u16) -> Op
     }
     let joints = animation.joint_count();
     let out_frames = frames_at_rate(source_frames, source_hz, target_hz);
-    if out_frames >= source_frames {
+    if out_frames >= source_frames
+        || !keeps_duration(source_frames, source_hz, out_frames, target_hz)
+    {
         return None;
     }
     let scale = (out_frames - 1) as i64;
@@ -451,6 +478,28 @@ mod tests {
         let bytes = linear_clip(60, 4, 12, 0);
         let animation = Animation::from_bytes(&bytes).expect("clip");
         assert_eq!(chosen_rate_hz(&animation, 2), 1);
+    }
+
+    #[test]
+    fn a_short_clip_is_never_stretched_to_reach_a_rate() {
+        // gen_run_fwd_winddown_mirror: 8 frames at 15 Hz (466 ms) was cooked at 1 Hz
+        // as 2 frames (1000 ms, +114.6%). Nothing moves between the kept frames
+        // here, so only the duration rule can refuse it.
+        let bytes = linear_clip(8, 4, 15, 0);
+        let animation = Animation::from_bytes(&bytes).expect("clip");
+        assert_eq!(chosen_rate_hz(&animation, 2), 15);
+        assert!(resample_animation_bytes(&animation, 1).is_none());
+        // The refusal is the duration rule, not the rate: a longer clip of the same
+        // kind still resamples to a rate whose length stays inside the tolerance.
+        let long = linear_clip(60, 4, 15, 0);
+        let long = Animation::from_bytes(&long).expect("clip");
+        let rate = chosen_rate_hz(&long, 2);
+        assert!(rate < 15);
+        let out = resample_animation_bytes(&long, rate).expect("resampled");
+        let out = Animation::from_bytes(&out).expect("resampled clip");
+        let source_ms = 1000 * (long.frame_count() - 1) as u32 / 15;
+        let out_ms = 1000 * (out.frame_count() - 1) as u32 / u32::from(rate);
+        assert!(out_ms.abs_diff(source_ms) * 100 <= source_ms * MAX_DURATION_CHANGE_PERCENT);
     }
 
     #[test]
