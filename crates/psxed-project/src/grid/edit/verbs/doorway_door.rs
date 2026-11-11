@@ -134,7 +134,7 @@ pub fn doorway_with_door(
                     distance,
                     ticks: p.ticks,
                 }),
-                lock: p.lock.clone(),
+                lock: p.lock,
                 refusal: p.refusal.clone(),
             },
             target: String::new(),
@@ -147,7 +147,7 @@ pub fn doorway_with_door(
         },
     );
     let lever = p.lever.as_ref().map(|l| {
-        let id = scene.add_node(NodeId::ROOT, &format!("{} lever", p.name), NodeKind::Entity);
+        let id = scene.add_node(NodeId::ROOT, format!("{} lever", p.name), NodeKind::Entity);
         if let Some(n) = scene.node_mut(id) {
             n.transform.translation = [
                 ed(l.cell[0] * 1024 + 512) as f32,

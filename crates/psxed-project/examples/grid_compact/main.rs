@@ -33,7 +33,7 @@ mod tree;
 
 use load::Loaded;
 
-const REFERENCE: [&str; 6] = [
+const REFERENCE: [&str; 5] = [
     "grid-cathedral",
     "grid-level008",
     "grid-dungeon",
