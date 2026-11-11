@@ -1009,6 +1009,56 @@ static mut SCENE: core::mem::MaybeUninit<Playtest> = core::mem::MaybeUninit::zer
 static HEAP: psx_game_runtime::reuse_heap::ReuseHeap =
     psx_game_runtime::reuse_heap::ReuseHeap::new();
 
+/// One byte to the debug console (Expansion 2). A retail console ignores the store, so this is
+/// on in every build: it only runs when the guest has already died.
+#[cfg(target_arch = "mips")]
+fn fatal_byte(byte: u8) {
+    // SAFETY: a byte store to the debug console port (0x1F802080), which has no other effect.
+    unsafe {
+        core::ptr::write_volatile(0x1f80_2080_usize as *mut u8, byte);
+    }
+}
+
+/// `label` then `value` as eight hex digits.
+#[cfg(target_arch = "mips")]
+fn fatal_field(label: &[u8], value: u32) {
+    for &byte in label {
+        fatal_byte(byte);
+    }
+    for shift in (0..8).rev() {
+        fatal_byte(b"0123456789abcdef"[((value >> (shift * 4)) & 0xf) as usize]);
+    }
+}
+
+/// Runs from the exception handler when the guest takes a fault it cannot resume from, which
+/// includes every failed allocation and panic (`panic=immediate-abort` compiles both to BREAK):
+/// one line on the debug console, so a headless run ends with `--stop-on-tty FATAL` and a
+/// console log names the cause. `epc` is the site (look it up in the link map); `alloc` is the
+/// size of the latest request the heap could not serve (0 if none) and `heap_free` what the heap
+/// had left.
+#[cfg(target_arch = "mips")]
+extern "C" fn fatal_report(cause: u32, epc: u32, badvaddr: u32) {
+    for &byte in b"FATAL kind=" {
+        fatal_byte(byte);
+    }
+    let kind: &[u8] = match (cause >> 2) & 0x1f {
+        9 => b"break",
+        6 => b"ibe",
+        4 => b"adel",
+        5 => b"ades",
+        _ => b"other",
+    };
+    for &byte in kind {
+        fatal_byte(byte);
+    }
+    fatal_field(b" cause=", cause);
+    fatal_field(b" epc=", epc);
+    fatal_field(b" bad=", badvaddr);
+    fatal_field(b" alloc=", HEAP.failed_request() as u32);
+    fatal_field(b" heap_free=", HEAP.bump_free() as u32);
+    fatal_byte(b'\n');
+}
+
 // psx-rt's `_start` calls this through an unmangled `extern "Rust" { fn main(); }`,
 // so the guest needs the raw symbol. Under `cargo test` libtest owns the `main`
 // entry symbol, so only there is this one left mangled. `not(test)` is true for
@@ -1028,6 +1078,8 @@ fn main() -> ! {
         let start = &raw const __heap_start as usize;
         HEAP.init(start, &raw const __heap_end as usize);
     }
+    #[cfg(target_arch = "mips")]
+    psx_rt::interrupts::set_fatal_hook(fatal_report);
     // Stamp the scene's boot state onto its link-time-zero storage BEFORE
     // any other use (see `SCENE` and `Playtest::init_zeroed`).
     // SAFETY: single-threaded boot path; the raw stamping happens before

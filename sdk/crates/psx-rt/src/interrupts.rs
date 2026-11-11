@@ -427,7 +427,7 @@ __psx_rt_exception_handler:
     j     __psx_diag_fault_tramp
     nop
     .else
-    b     3b
+    j     {fatal}
     nop
     .endif
 
@@ -477,6 +477,7 @@ __psx_rt_exception_handler:
     strict = const STRICT_FAULTS as u32,
     present = const PRESENT_QUEUE as u32,
     diag = const CONSOLE_DIAG as u32,
+    fatal = sym psx_rt_fatal_fault,
     isc_hi = const crate::cache::ISOLATE_CACHE_BIT >> 16,
     // Every register the handler touches is in the I/O window, so one `lui`
     // of the window's high half reaches them all and the offsets are the low
@@ -652,6 +653,43 @@ static mut __psx_rt_fault_epc: u32 = 0;
 /// register.
 #[no_mangle]
 static mut __psx_rt_fault_badvaddr: u32 = 0;
+
+/// Address of the program's fatal-fault hook, 0 for none. See [`set_fatal_hook`].
+#[no_mangle]
+static mut __psx_rt_fatal_hook: u32 = 0;
+
+/// Register `hook` to run, with `(Cause, EPC, BadVAddr)`, when the exception handler halts on a
+/// fault it cannot resume from (BREAK, which is what `panic=immediate-abort` and a failed
+/// allocation compile to, an instruction bus error, a misaligned fetch). The hook runs inside the
+/// handler with interrupts off, on the interrupted stack; it should print a line and return, and
+/// the handler then spins as it always did. Without a hook the halt is silent.
+pub fn set_fatal_hook(hook: extern "C" fn(u32, u32, u32)) {
+    // SAFETY: one aligned word store, read only by the handler's halt path.
+    unsafe { core::ptr::write_volatile(&raw mut __psx_rt_fatal_hook, hook as usize as u32) };
+}
+
+/// The handler's halt: run the registered hook, then spin.
+#[cfg(target_arch = "mips")]
+#[no_mangle]
+#[inline(never)]
+extern "C" fn psx_rt_fatal_fault() -> ! {
+    // SAFETY: the statics are written only by the handler before it jumps here, and the hook word
+    // only by `set_fatal_hook` with a function of this signature.
+    unsafe {
+        let hook = core::ptr::read_volatile(&raw const __psx_rt_fatal_hook);
+        if hook != 0 {
+            let hook: extern "C" fn(u32, u32, u32) = core::mem::transmute(hook as usize);
+            hook(
+                core::ptr::read_volatile(&raw const __psx_rt_fault_cause),
+                core::ptr::read_volatile(&raw const __psx_rt_fault_epc),
+                core::ptr::read_volatile(&raw const __psx_rt_fault_badvaddr),
+            );
+        }
+    }
+    loop {
+        core::hint::spin_loop();
+    }
+}
 
 /// One queued GP1 word the VBlank handler writes to the GPU at the first
 /// blank edge on which GPUSTAT bit 24 is set, then clears. Zero = empty.
