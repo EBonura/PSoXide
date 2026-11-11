@@ -157,11 +157,18 @@ fn main() {
     let base = arg("--base").expect(usage);
     let out = arg("--out").expect(usage);
     assert!(!out.exists(), "{} exists: pick a new folder", out.display());
+    // `--spawn x,z` starts the player on another sector (for testing a part).
+    let spawn = arg("--spawn").and_then(|v| {
+        let v = v.to_string_lossy().into_owned();
+        let (x, z) = v.split_once(',')?;
+        Some([x.parse().ok()?, z.parse().ok()?])
+    });
     let (path, plan) = create_project(
         &base,
         &out,
         "Showcase",
         usize::from(arg_flag("--enemy")),
+        spawn,
         TEXTURES,
     )
     .expect("the showcase");

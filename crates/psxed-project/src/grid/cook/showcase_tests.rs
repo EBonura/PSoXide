@@ -224,3 +224,68 @@ fn a_body_walks_the_route_to_the_tower() {
     let end = stops.last().unwrap();
     assert!(end.y.abs() <= 3, "ends on the lodge floor: {end:?}");
 }
+
+#[test]
+fn print_portals() {
+    let w = made();
+    let units = RuntimeUnits::new(w.scale).unwrap();
+    let sw = crate::grid::sector_view::sector_world(&w).map(|(x, _)| x);
+    let pw = sw.as_ref().unwrap_or(&w);
+    let portals = super::portals::derive(pw, &units).unwrap();
+    for (i, ps) in portals.iter().enumerate() {
+        let dests: Vec<u16> = ps.iter().map(|p| p.dest).collect();
+        eprintln!("room {i} {:>22} -> {dests:?}", w.rooms[i].name);
+    }
+}
+
+#[test]
+fn print_wanted_rooms() {
+    use psx_grid::stream::StreamWindow;
+    let mut w = made();
+    w.stream = crate::grid::world::StreamRadii {
+        draw_far: 3,
+        active_radius: 3,
+        lead_radius: 1,
+        ..crate::grid::world::StreamRadii::DEFAULT
+    };
+    let cooked = super::tests::cook(&w).expect("cooks");
+    let words: &'static mut [u32] = psx_grid::write::aligned_copy(&cooked.core).leak();
+    // SAFETY: the words live for the program and cover the core's bytes.
+    let core: &'static [u8] =
+        unsafe { core::slice::from_raw_parts(words.as_ptr().cast::<u8>(), cooked.core.len()) };
+    let level = &psx_grid::LevelView::parse(core).expect("a level");
+    let units = RuntimeUnits::new(w.scale).unwrap();
+    let mut window = StreamWindow::new(level);
+    let mut wanted = Vec::new();
+    let s = units.rt(1024);
+    for (label, room, x, z) in [
+        ("landing centre", 0usize, 2 * s + s / 2, 6 * s + s / 2),
+        ("landing east edge", 0, 6 * s - 8, 6 * s + s / 2),
+        ("deck west", 1, 8 * s, 6 * s + s / 2),
+        ("deck middle", 2, 13 * s, 6 * s + s / 2),
+    ] {
+        window.invalidate();
+        window.wanted(level, Some((room, [x, 0, z])), Some((room, [x, 0, z])), &mut wanted);
+        let names: Vec<String> = wanted
+            .iter()
+            .map(|w| format!("{}{}", w.room, if matches!(w.want, psx_grid::stream::Want::Need) { "" } else { "(lead)" }))
+            .collect();
+        eprintln!("{label}: {names:?}");
+    }
+}
+
+#[test]
+fn print_pool_by_radius() {
+    let w0 = made();
+    for far in [3u8, 4, 5, 6, 8] {
+        let mut w = w0.clone();
+        w.stream = crate::grid::world::StreamRadii {
+            draw_far: far,
+            active_radius: far,
+            lead_radius: 1,
+            ..crate::grid::world::StreamRadii::DEFAULT
+        };
+        let cooked = super::tests::cook(&w).expect("cooks");
+        eprintln!("draw_far {far}: pool {} pages", cooked.report.pool_pages);
+    }
+}

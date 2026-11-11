@@ -974,7 +974,11 @@ fn entity_with_interactable(
 
 /// Turn `project` (a base such as `default`, with its player, enemies,
 /// camera, sky and UI) into the showcase project in place.
-pub fn into_showcase(project: &mut ProjectDocument, enemies: usize) -> Result<Plan, String> {
+pub fn into_showcase(
+    project: &mut ProjectDocument,
+    enemies: usize,
+    spawn: Option<[i32; 2]>,
+) -> Result<Plan, String> {
     super::base_project::strip_base(project, enemies.min(1));
     let mats = add_materials(project);
     let mut world = GridWorld {
@@ -987,9 +991,9 @@ pub fn into_showcase(project: &mut ProjectDocument, enemies: usize) -> Result<Pl
             ..super::lighting::GlobalLight::NEW_WORLD
         },
         stream: super::world::StreamRadii {
-            draw_far: 3,
-            active_radius: 3,
-            lead_radius: 1,
+            draw_far: 6,
+            active_radius: 6,
+            lead_radius: 2,
             ..super::world::StreamRadii::DEFAULT
         },
         mesh_assets: Vec::new(),
@@ -1010,8 +1014,19 @@ pub fn into_showcase(project: &mut ProjectDocument, enemies: usize) -> Result<Pl
     }
     // Actors.
     let (player, enemies) = player_and_enemies(scene);
-    let landing = room_named(&world, "Landing");
-    let at = stand(&world, landing, plan.spawn, 64);
+    if let Some(cell) = spawn {
+        plan.spawn = cell;
+    }
+    let spawn_room = world
+        .rooms
+        .iter()
+        .position(|r| {
+            r.local(plan.spawn)
+                .and_then(|[x, z]| r.sector(x, z))
+                .is_some()
+        })
+        .unwrap_or(0);
+    let at = stand(&world, spawn_room, plan.spawn, 64);
     if let Some(id) = player.and_then(|p| scene.node_mut(p)) {
         id.transform.translation = at;
         id.transform.rotation_degrees = [0.0, plan.spawn_yaw, 0.0];
@@ -1122,11 +1137,12 @@ pub fn create_project(
     out_dir: &Path,
     name: &str,
     enemies: usize,
+    spawn: Option<[i32; 2]>,
     textures: &[(&str, &[u8])],
 ) -> Result<(PathBuf, Plan), String> {
     let mut project = ProjectDocument::load_from_path(base_dir.join("project.ron"))
         .map_err(|e| format!("base project: {e}"))?;
-    let plan = into_showcase(&mut project, enemies)?;
+    let plan = into_showcase(&mut project, enemies, spawn)?;
     project.name = name.to_string();
     std::fs::create_dir_all(out_dir.join(TEXTURE_DIR)).map_err(|e| format!("create: {e}"))?;
     for (n, bytes) in textures {
