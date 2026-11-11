@@ -3226,6 +3226,58 @@ fn cpu_project_gte_view(view: ViewVertex, projection: WorldProjection) -> Option
     Some(ProjectedVertex::new(clamp_i16(sx), clamp_i16(sy), view.z))
 }
 
+/// True when a single-joint vertex of this joint could leave the GTE's i16
+/// IR1/IR2 range after the rotate and translate, so RTPS would saturate its
+/// view X or Y and pin the vertex to the screen edge.
+///
+/// The model view matrix carries [`MODEL_GTE_XY_SCALE`], so a model more than
+/// about 8,000 units off the camera axis overflows: the editor's far views
+/// reach that, the shipped third-person camera never does. Vertices are
+/// bounded by the full i16 model range, so the check needs only the joint,
+/// not each vertex. Host only: the console path is unchanged.
+#[cfg(not(target_arch = "mips"))]
+fn joint_view_exceeds_gte_range(joint: &JointViewTransform) -> bool {
+    let translation = [joint.translation.x, joint.translation.y];
+    let mut row = 0usize;
+    while row < 2 {
+        let r = joint.rotation.m[row];
+        // |sum r_j * v_j| >> 12 is at most (sum |r_j|) * 32768 >> 12.
+        let reach = ((r[0] as i32).abs() + (r[1] as i32).abs() + (r[2] as i32).abs()) * 8;
+        if translation[row].saturating_abs().saturating_add(reach) > i16::MAX as i32 {
+            return true;
+        }
+        row += 1;
+    }
+    false
+}
+
+/// Exact CPU counterpart of the GTE RTPS for one single-joint vertex: the
+/// same `translation + (rotation * v >> 12)` in i32 with no IR saturation,
+/// then the shared exact projection. Host only, for joints that
+/// [`joint_view_exceeds_gte_range`] flags.
+#[cfg(not(target_arch = "mips"))]
+fn project_exact_model_vertex(
+    vertex: ModelVertex,
+    joint: &JointViewTransform,
+    projection: WorldProjection,
+) -> ProjectedVertex {
+    let v = [
+        vertex.position.x as i32,
+        vertex.position.y as i32,
+        vertex.position.z as i32,
+    ];
+    let row = |r: [i16; 3], t: i32| -> i32 {
+        t + ((r[0] as i32 * v[0] + r[1] as i32 * v[1] + r[2] as i32 * v[2]) >> 12)
+    };
+    let view = ViewVertex::new(
+        row(joint.rotation.m[0], joint.translation.x),
+        row(joint.rotation.m[1], joint.translation.y),
+        row(joint.rotation.m[2], joint.translation.z),
+    );
+    cpu_project_gte_view(view, projection)
+        .unwrap_or_else(|| ProjectedVertex::new(0, 0, projection.near_z - 1))
+}
+
 /// Project an already-view-space vertex through the GTE. Loading the identity
 /// rotation with zero translation makes RTPS perform only the perspective
 /// divide and screen mapping -- in hardware -- replacing the two CPU divides
