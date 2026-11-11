@@ -86,6 +86,7 @@ pub mod plane_faces;
 pub mod room;
 pub mod sector;
 pub mod sector_view;
+pub mod showcase;
 pub mod slope;
 pub mod starter;
 pub mod storeys;
