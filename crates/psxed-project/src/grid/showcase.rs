@@ -276,8 +276,8 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
     // joint to cross.
     let landing =
         platform(world, "Landing", cells([0, 4], [5, 9]), 0, m.paving).map_err(e("landing"))?;
-    deck_cells(world, landing, cells([6, 6], [21, 6]), -64, [0, 0])?;
-    let deck_z = 6 * SECTOR_UNITS + 512;
+    deck_cells(world, landing, cells([6, 6], [21, 7]), -64, [0, 0])?;
+    let deck_z = 7 * SECTOR_UNITS;
     // The middle piece has no parapet: the lodge door opens onto it.
     for (name, x0, x1, parapet) in [
         ("bridge west", 6, 12, true),
@@ -288,7 +288,7 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
             RoomTarget::Existing(landing),
             [x0 * SECTOR_UNITS, 0, deck_z],
             [x1 * SECTOR_UNITS, 0, deck_z],
-            SECTOR_UNITS,
+            2 * SECTOR_UNITS,
             512,
         );
         if parapet {
@@ -307,7 +307,8 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
     // The deck's end opens onto the gatehouse door and the middle piece onto
     // the lodge door.
     ghost_edge(world, landing, [21, 6], WallEdge::East);
-    ghost_edge(world, landing, [13, 6], WallEdge::South);
+    ghost_edge(world, landing, [21, 7], WallEdge::East);
+    ghost_edge(world, landing, [13, 7], WallEdge::South);
     // ---- 2. Gatehouse and lodge -----------------------------------------
     let mut gh = BuildingParams::new(
         RoomTarget::New("Gatehouse".into()),
@@ -324,7 +325,7 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
     build_building(world, &gh).map_err(|r| format!("gatehouse: {}", r.describe()))?;
     let mut lodge = BuildingParams::new(
         RoomTarget::New("Lodge".into()),
-        Footprint::Rect(rect([12, 7], [15, 10])),
+        Footprint::Rect(rect([12, 8], [15, 11])),
     );
     lodge.storeys = 1;
     lodge.stair = false;
@@ -350,7 +351,7 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
         &[m.voussoir, m.vault, m.stone_wall, m.pier],
     );
     // ---- 4. Courtyard and cloister ---------------------------------------
-    let mut yard = cells([10, 11], [23, 19]);
+    let mut yard = cells([10, 12], [23, 19]);
     yard.extend(cells([24, 14], [30, 19]));
     platform(world, "Courtyard", yard.clone(), 0, m.ash_ground).map_err(e("courtyard"))?;
     let cloister_roles = Roles {
@@ -509,7 +510,7 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
     let mut high = BridgeParams::deck(
         RoomTarget::New("High bridge".into()),
         [15 * SECTOR_UNITS + 512, 2048, 20 * SECTOR_UNITS],
-        [15 * SECTOR_UNITS + 512, 0, 11 * SECTOR_UNITS],
+        [15 * SECTOR_UNITS + 512, 0, 12 * SECTOR_UNITS],
         SECTOR_UNITS,
         512,
     );
@@ -517,9 +518,9 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
     build_bridge(world, &high).map_err(|r| format!("high bridge: {}", r.describe()))?;
     let hb = room_named(world, "High bridge");
     paint_meshes(world, hb, &[m.paving, m.stone_wall, m.crypt_stone, m.pier]);
-    deck_cells(world, hb, cells([15, 11], [15, 19]), -64, [0, 228])?;
+    deck_cells(world, hb, cells([15, 12], [15, 19]), -64, [0, 256])?;
     ghost_edge(world, hb, [15, 19], WallEdge::South);
-    ghost_edge(world, hb, [15, 11], WallEdge::North);
+    ghost_edge(world, hb, [15, 12], WallEdge::North);
     // Lodge: the shortcut door onto the start bridge (one way), and a plain
     // doorway on the courtyard side for the high bridge to land at.
     let shortcut = doorway_with_door(
@@ -529,7 +530,7 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
             opening: OpeningParams {
                 profile: rect_profile,
                 room: lodge_room,
-                cell: [13, 7],
+                cell: [13, 8],
                 side: WallEdge::North,
                 from: 52,
                 to: 56,
@@ -547,7 +548,7 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
             refusal: "It does not open from this side.".into(),
             persistent: true,
             lever: Some(Lever {
-                cell: [13, 7],
+                cell: [13, 8],
                 prompt: "PUSH DOOR".into(),
                 radius: 1100,
                 behavior: SwitchBehavior::Toggle,
@@ -569,7 +570,7 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
     open(
         world,
         lodge_room,
-        [15, 10],
+        [15, 11],
         WallEdge::South,
         60,
         64,
@@ -590,7 +591,7 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
                 cell: [22, 6],
                 side: WallEdge::West,
                 from: 24,
-                to: 28,
+                to: 32,
                 kind: door,
                 top: 2048,
                 material: m.trim,
@@ -855,7 +856,7 @@ pub fn build(world: &mut GridWorld, scene: &mut Scene, m: &Mats) -> Result<Plan,
     for (name, room) in [("Landing", 6..12), ("Landing", 16..22)].map(|(n, r)| (n, r)) {
         let room_idx = room_named(world, name);
         for x in room.step_by(3) {
-            for (z, yaw) in [(6 * SECTOR_UNITS + 160, 0), (7 * SECTOR_UNITS - 160, 180)] {
+            for (z, yaw) in [(6 * SECTOR_UNITS + 160, 0), (8 * SECTOR_UNITS - 160, 180)] {
                 let mut p = GridPlane::new([x * SECTOR_UNITS + 512, 1152, z], [448, 1536]);
                 p.rotation = [yaw, 0, 0];
                 p.material = m.banner;

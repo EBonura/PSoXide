@@ -152,10 +152,10 @@ fn walk_trail(
 
 /// The route, in hundredths of a sector. Each entry is a stop.
 const ROUTE: &[(&str, [i32; 2])] = &[
-    ("start", [250, 650]),
-    ("bridge", [1000, 650]),
-    ("lever", [2150, 650]),
-    ("gate", [2300, 650]),
+    ("start", [250, 700]),
+    ("bridge", [1000, 700]),
+    ("lever", [2150, 700]),
+    ("gate", [2300, 700]),
     ("gatehouse", [2500, 750]),
     ("nave door", [2750, 780]),
     ("nave", [3200, 800]),
@@ -192,9 +192,9 @@ const ROUTE: &[(&str, [i32; 2])] = &[
     ("top east", [1550, 2350]),
     ("top door", [1550, 2060]),
     ("high bridge", [1550, 1500]),
-    ("lodge door", [1550, 1120]),
-    ("lodge", [1350, 900]),
-    ("lodge north", [1350, 760]),
+    ("lodge door", [1550, 1220]),
+    ("lodge", [1350, 1000]),
+    ("lodge north", [1350, 860]),
 ];
 
 #[test]
@@ -341,7 +341,7 @@ fn walk_the_written_project() {
     let nat = super::motor_harness::native_subset(&g.core, &g.room_chunks, keep.as_deref());
     let w = made();
     let units = RuntimeUnits::new(w.scale).unwrap();
-    let start = RoomPoint::new(units.rt(250 * 1024 / 100), 0, units.rt(650 * 1024 / 100));
+    let start = RoomPoint::new(units.rt(250 * 1024 / 100), 0, units.rt(700 * 1024 / 100));
     let sign = z_sign(&nat, start);
     let legs: Vec<[i32; 2]> = ROUTE.iter().map(|(_, p)| *p).collect();
     let (stops, span) = walk(&nat, start, &legs, 1500, sign, &units);
@@ -369,7 +369,7 @@ fn the_player_is_always_in_a_needed_room() {
     let level = psx_grid::LevelView::parse(core).expect("a level");
     let units = RuntimeUnits::new(w.scale).unwrap();
     let nat = native(&w);
-    let start = RoomPoint::new(units.rt(250 * 1024 / 100), 0, units.rt(650 * 1024 / 100));
+    let start = RoomPoint::new(units.rt(250 * 1024 / 100), 0, units.rt(700 * 1024 / 100));
     let sign = z_sign(&nat, start);
     let legs: Vec<[i32; 2]> = ROUTE.iter().map(|(_, p)| *p).collect();
     let (_, _, trail) = walk_trail(&nat, start, &legs, 1500, sign, &units);
