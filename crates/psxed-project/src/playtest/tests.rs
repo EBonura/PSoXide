@@ -396,3 +396,125 @@ fn play_from_here_moves_the_cooked_spawn_without_editing_the_project() {
     let (none, report) = build_package_with_spawn(&bare, &root, Some(spawn));
     assert!(none.is_none() && !report.is_ok());
 }
+
+/// What an enemy's cooked states play must not depend on which other clips are resident: every
+/// state resolves to the clip its animation set binds to the action (with the cook's fallbacks),
+/// and no clip of an enemy is resident that none of its states can reach. Needs the editor
+/// repository's `projects/` (`PSOXIDE_PROJECTS_DIR`), like every project test.
+#[test]
+fn an_enemys_states_play_their_authored_clips_and_nothing_else_is_resident() {
+    use crate::CharacterAnimationAction as Action;
+    let root = crate::projects_dir().join("graybox-reach");
+    let mut project = ProjectDocument::load_from_path(root.join("project.ron")).unwrap();
+    crate::grid::starter::attach_starter_world(&mut project);
+    let (package, report) = build_package(&project, &root);
+    let package = package.unwrap_or_else(|| panic!("graybox reach cooks: {:?}", report.errors));
+    let entity = package.game_entities[0];
+    let instance = &package.model_instances[usize::from(entity.model_instance)];
+    let model = &package.models[usize::from(instance.model)];
+    let clips =
+        &package.model_clips[usize::from(model.clip_first)..][..usize::from(model.clip_count)];
+    let played = |clip: u16| clips[usize::from(clip)].name.clone();
+
+    let character = project
+        .resources
+        .iter()
+        .find_map(|r| match &r.data {
+            crate::ResourceData::Character(c) if c.model == Some(model.source_resource) => Some(c),
+            _ => None,
+        })
+        .expect("the enemy's character");
+    let set = character
+        .animation_set
+        .and_then(|id| match &project.resource(id)?.data {
+            crate::ResourceData::AnimationSet(set) => Some(set),
+            _ => None,
+        })
+        .expect("its animation set");
+    let bound = |action: Action| -> Option<String> {
+        let id = super::cook_entities::animation_set_action_clip(&project, set, action)?;
+        Some(project.resource(id)?.name.clone())
+    };
+    let idle = bound(Action::Idle).expect("an idle clip");
+    let walk = bound(Action::Walk).unwrap_or_else(|| idle.clone());
+    let attack = bound(Action::LightAttack).unwrap_or_else(|| idle.clone());
+    let ranged_action = character
+        .combat_capsules
+        .iter()
+        .find_map(|volume| match volume.role {
+            crate::CombatCapsuleRole::ProjectileEmitter { action, .. } => Some(action),
+            _ => None,
+        })
+        .unwrap_or(Action::RangedAttack);
+    let expected = [
+        ("idle", entity.idle_clip, idle.clone()),
+        (
+            "alert",
+            entity.alert_clip,
+            bound(Action::Intro).unwrap_or_else(|| idle.clone()),
+        ),
+        (
+            "turn",
+            entity.turn_clip,
+            bound(Action::Turn).unwrap_or_else(|| idle.clone()),
+        ),
+        ("walk", entity.walk_clip, walk.clone()),
+        (
+            "walk backward",
+            entity.walk_backward_clip,
+            bound(Action::WalkBackward).unwrap_or_else(|| walk.clone()),
+        ),
+        (
+            "strafe left",
+            entity.strafe_left_clip,
+            bound(Action::StrafeLeft).unwrap_or_else(|| walk.clone()),
+        ),
+        (
+            "strafe right",
+            entity.strafe_right_clip,
+            bound(Action::StrafeRight).unwrap_or_else(|| walk.clone()),
+        ),
+        (
+            "run",
+            entity.run_clip,
+            bound(Action::Run).unwrap_or_else(|| walk.clone()),
+        ),
+        ("attack", entity.attack_clip, attack.clone()),
+        (
+            "heavy attack",
+            entity.heavy_attack_clip,
+            bound(Action::HeavyAttack).unwrap_or_else(|| attack.clone()),
+        ),
+        (
+            "ranged attack",
+            entity.ranged_attack_clip,
+            bound(ranged_action).unwrap_or_else(|| attack.clone()),
+        ),
+        (
+            "stagger",
+            entity.stagger_clip,
+            bound(Action::Stun)
+                .or_else(|| bound(Action::HitReact))
+                .unwrap_or_else(|| attack.clone()),
+        ),
+        (
+            "death",
+            entity.death_clip,
+            bound(Action::Death).unwrap_or(idle),
+        ),
+    ];
+    let mut reachable = std::collections::BTreeSet::new();
+    for (state, clip, name) in expected {
+        assert_eq!(played(clip), name, "{state} plays its authored clip");
+        reachable.insert(name);
+    }
+    // The model's own default clip stays resident as well; nothing else may.
+    reachable.insert(played(model.default_clip));
+    for clip in clips {
+        assert!(
+            reachable.contains(&clip.name),
+            "{} is resident but no state of the enemy plays it",
+            clip.name
+        );
+    }
+}

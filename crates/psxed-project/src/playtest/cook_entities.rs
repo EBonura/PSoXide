@@ -131,6 +131,7 @@ pub(crate) fn collect_runtime_model_clip_requirements(
     scene: &crate::Scene,
 ) -> HashMap<ResourceId, BTreeSet<u16>> {
     let mut out = HashMap::new();
+    let omitted = omitted_player_actions(scene);
 
     for resource in &project.resources {
         match &resource.data {
@@ -138,7 +139,8 @@ pub(crate) fn collect_runtime_model_clip_requirements(
                 add_model_clip_requirement(project, &mut out, resource.id, None);
             }
             ResourceData::Character(character) => {
-                add_character_clip_requirements(project, &mut out, character);
+                let enemy = character.spawn_role == crate::CharacterSpawnRole::Enemy;
+                add_character_clip_requirements(project, &mut out, character, enemy, &omitted);
             }
             ResourceData::Weapon(weapon) => {
                 if let Some(model) = weapon.model {
@@ -172,7 +174,10 @@ pub(crate) fn collect_runtime_model_clip_requirements(
                         if let Some(ResourceData::Character(character)) =
                             project.resource(character_id).map(|r| &r.data)
                         {
-                            add_character_clip_requirements(project, &mut out, character);
+                            let enemy = !controller.player;
+                            add_character_clip_requirements(
+                                project, &mut out, character, enemy, &omitted,
+                            );
                         }
                     }
                 }
@@ -201,15 +206,24 @@ pub(crate) fn collect_runtime_model_clip_requirements(
             NodeKind::SpawnPoint {
                 character: Some(character_id),
                 ..
+            } => {
+                if let Some(ResourceData::Character(character)) =
+                    project.resource(*character_id).map(|r| &r.data)
+                {
+                    add_character_clip_requirements(project, &mut out, character, false, &omitted);
+                }
             }
-            | NodeKind::CharacterController {
+            NodeKind::CharacterController {
                 character: Some(character_id),
+                player,
                 ..
             } => {
                 if let Some(ResourceData::Character(character)) =
                     project.resource(*character_id).map(|r| &r.data)
                 {
-                    add_character_clip_requirements(project, &mut out, character);
+                    add_character_clip_requirements(
+                        project, &mut out, character, !*player, &omitted,
+                    );
                 }
             }
             _ => {}
@@ -219,10 +233,99 @@ pub(crate) fn collect_runtime_model_clip_requirements(
     out
 }
 
+/// Actions a player never plays in this level, because the system that starts them is not in it.
+///
+/// - No enemy: nothing hits or staggers the player, so there is no hit reaction or stun (poise
+///   break). The only callers of the player's hit reaction are enemy melee and enemy projectile
+///   impacts; hazards and liquids drain vitality or kill (`arm_player_death`) and never play a
+///   reaction.
+/// - No hook point (a node, or a placed mesh with a hook socket): no perch.
+///
+/// Aim, ranged walk and fire are never omitted: aiming is also how the player hooks to an arch,
+/// and a player who aims in an empty room expects it to work. Fall, land, death and the
+/// locomotion set stay as well. The runtime treats an unbound hit reaction as an interrupt with no
+/// clip, so omitting the clips changes nothing the level can trigger.
+pub(crate) fn omitted_player_actions(scene: &crate::Scene) -> Vec<CharacterAnimationAction> {
+    let mut enemies = false;
+    let mut hooks = false;
+    for node in scene.nodes() {
+        match &node.kind {
+            NodeKind::CharacterController {
+                character: Some(_),
+                player: false,
+                ..
+            } => enemies = true,
+            NodeKind::HookPoint => hooks = true,
+            _ => {}
+        }
+    }
+    if let Some(world) = scene.world.grid() {
+        hooks |= crate::playtest::mesh_sockets::has_hook_sockets(world);
+    }
+    let mut omitted = Vec::new();
+    if !enemies {
+        omitted.extend([
+            CharacterAnimationAction::HitReact,
+            CharacterAnimationAction::HitReactAlt,
+            CharacterAnimationAction::Stun,
+            CharacterAnimationAction::StunRecovery,
+        ]);
+    }
+    if !hooks {
+        omitted.extend([
+            CharacterAnimationAction::HookLaunch,
+            CharacterAnimationAction::ArchPerch,
+        ]);
+    }
+    omitted
+}
+
+/// The actions an enemy's cooked state clips read (see [`game_entity_state_clips`]), and no
+/// others: an enemy never rolls, blocks or aims, so those clips are not resident for it. The
+/// ranged action is the one its projectile emitter names. A hit reaction is only the stagger
+/// when the set has no stun clip, so it is resident only then.
+fn enemy_clip_actions(
+    project: &ProjectDocument,
+    set: &crate::AnimationSetResource,
+    character: &crate::CharacterResource,
+) -> Vec<CharacterAnimationAction> {
+    let ranged = character
+        .combat_capsules
+        .iter()
+        .find_map(|volume| match volume.role {
+            crate::CombatCapsuleRole::ProjectileEmitter { action, .. } => Some(action),
+            _ => None,
+        })
+        .unwrap_or(CharacterAnimationAction::RangedAttack);
+    let mut actions = vec![
+        CharacterAnimationAction::Idle,
+        CharacterAnimationAction::Intro,
+        CharacterAnimationAction::Turn,
+        CharacterAnimationAction::Walk,
+        CharacterAnimationAction::WalkBackward,
+        CharacterAnimationAction::StrafeLeft,
+        CharacterAnimationAction::StrafeRight,
+        CharacterAnimationAction::Run,
+        CharacterAnimationAction::LightAttack,
+        CharacterAnimationAction::HeavyAttack,
+        ranged,
+        CharacterAnimationAction::Stun,
+        CharacterAnimationAction::Death,
+    ];
+    if animation_set_action_clip(project, set, CharacterAnimationAction::Stun).is_none() {
+        actions.push(CharacterAnimationAction::HitReact);
+    }
+    actions
+}
+
+/// Mark the clips `character` can play as resident. `enemy` limits that to the actions an
+/// enemy's state machine reads; a player placement keeps every action of its set.
 pub(crate) fn add_character_clip_requirements(
     project: &ProjectDocument,
     out: &mut HashMap<ResourceId, BTreeSet<u16>>,
     character: &crate::CharacterResource,
+    enemy: bool,
+    omitted: &[CharacterAnimationAction],
 ) {
     let Some(model) = character.model else {
         return;
@@ -240,7 +343,15 @@ pub(crate) fn add_character_clip_requirements(
         return;
     };
 
-    for action in CharacterAnimationAction::ALL {
+    let actions = if enemy {
+        enemy_clip_actions(project, set, character)
+    } else {
+        CharacterAnimationAction::ALL
+            .into_iter()
+            .filter(|action| !omitted.contains(action))
+            .collect()
+    };
+    for action in actions {
         if let Some(animation_id) = animation_set_action_clip(project, set, action) {
             if let Some(index) = project.resolved_model_animation_index(model, animation_id) {
                 add_model_clip_requirement(project, out, model, Some(index));
@@ -850,6 +961,7 @@ pub(crate) fn cook_player_character(
     combat_capsules: &mut Vec<PlaytestCombatCapsule>,
     characters: &mut Vec<PlaytestCharacter>,
     clip_trim: &crate::clip_window::ClipTrim,
+    omitted: &[CharacterAnimationAction],
     report: &mut PlaytestValidationReport,
 ) -> Option<u16> {
     let mut default_character = crate::CharacterResource::defaults();
@@ -998,6 +1110,17 @@ pub(crate) fn cook_player_character(
             };
         }
 
+        if omitted.contains(&action) {
+            // Left out of the level (see `omitted_player_actions`): unbound, like an action
+            // the set never had.
+            return Some((
+                CHARACTER_CLIP_NONE,
+                character_action_flags_for(action, None),
+                character_action_speed_for(None),
+                character_action_frame_range_for(None),
+                character_action_push_for(None),
+            ));
+        }
         if let Some((_, set_name, set)) = animation_set {
             if let Some(animation_id) = animation_set_action_clip(project, set, action) {
                 let options = set
@@ -1168,6 +1291,11 @@ pub(crate) fn cook_player_character(
         [psx_level::CharacterCombatWindow::NONE; psx_level::MAX_CHARACTER_COMBAT_WINDOWS];
     if let Some((set_id, _, set)) = animation_set {
         for (index, window) in set.combat_windows.iter().enumerate() {
+            // A window on an action left out of the level has no clip to sit in; its slot
+            // stays unused (action 255, which no lookup matches).
+            if omitted.contains(&window.action) {
+                continue;
+            }
             let action = window.action.to_index();
             let fallback = matches!(
                 window.action,
@@ -1244,7 +1372,11 @@ pub(crate) fn cook_player_character(
                 end,
             };
         }
-        for window in &set.combat_windows {
+        for window in set
+            .combat_windows
+            .iter()
+            .filter(|w| !omitted.contains(&w.action))
+        {
             use crate::CombatWindowKind as K;
             let allowed = match window.kind {
                 K::AttackBuffer => Some(K::Attack),
@@ -1929,6 +2061,19 @@ pub(crate) fn register_model_for_instance(
         let corrected_anim = psx_asset::Animation::from_bytes(&animation_bytes)
             .expect("host-generated corrected animation must parse");
         let cooked_frame_count = corrected_anim.frame_count();
+        // One line per resident clip: the audit trail of what a model carries in RAM, in the
+        // order the runtime table has it. Cheap to grep next to the resample and track lines.
+        crate::playtest::emit_cook_output(format_args!(
+            "[cook] clip {label}: {} frames at {} Hz, {} B resident, {}",
+            cooked_frame_count,
+            corrected_anim.sample_rate_hz(),
+            animation_bytes.len(),
+            if corrected_anim.is_keyed_tracks() {
+                "keyed tracks"
+            } else {
+                "pose table"
+            },
+        ));
         let baked_bounds =
             bake_model_clip_frame_bounds(&parsed_model, &corrected_anim, frame_bounds_pad);
         let frame_count = match u16::try_from(baked_bounds.len()) {
@@ -3445,6 +3590,7 @@ pub(crate) fn cook_weapon_appearances(
     model_clips: &[PlaytestModelClip],
     weapon_for_resource: &HashMap<ResourceId, u16>,
     equipment: &[PlaytestEquipment],
+    omitted: &[CharacterAnimationAction],
     report: &mut PlaytestValidationReport,
 ) -> Vec<PlaytestWeaponAppearance> {
     let mut out = Vec::new();
@@ -3465,6 +3611,9 @@ pub(crate) fn cook_weapon_appearances(
             continue;
         };
         for track in &set.weapon_appearance_tracks {
+            if omitted.contains(&track.action) {
+                continue;
+            }
             // Appearance tracks belong to the reusable character asset, while
             // the package contains only equipment instantiated in this scene.
             // An unequipped authored weapon is therefore dormant, not a cook
@@ -4007,6 +4156,152 @@ mod socket_anchor_tests {
         assert_eq!(ticks(Some((10, 17)), 256, Range::FULL), 92);
         assert_eq!(ticks(Some((30, 44)), 0, Range::FULL), 32);
         assert_eq!(ticks(None, 256, Range::FULL), 32);
+    }
+
+    /// An enemy's state machine reads a fixed set of actions. A roll, a block or an aim clip
+    /// bound in the same set is not resident for it, and a hit reaction is resident only while
+    /// no stun clip stands in for the stagger. A player placement keeps every bound clip.
+    #[test]
+    fn an_enemy_keeps_only_the_clips_its_states_can_play() {
+        use super::*;
+        let mut project = ProjectDocument::new("enemy clips");
+        let model_data: ResourceData =
+            ron::from_str(r#"Model((model_path: "model.psxmdl", skeleton: Some((900))))"#).unwrap();
+        let model_id = project.add_resource("model", model_data);
+        let actions = [
+            CharacterAnimationAction::Idle,
+            CharacterAnimationAction::Stun,
+            CharacterAnimationAction::HitReact,
+            CharacterAnimationAction::Roll,
+            CharacterAnimationAction::Death,
+        ];
+        let mut set = crate::AnimationSetResource::defaults();
+        let mut clip_ids = Vec::new();
+        for action in actions {
+            let clip: crate::AnimationClipResource = ron::from_str(&format!(
+                r#"(psxanim_path: "{}.psxanim", skeleton: Some((900)))"#,
+                action.label()
+            ))
+            .unwrap();
+            let id = project.add_resource(action.label(), ResourceData::AnimationClip(clip));
+            set.set_action_clip(action, Some(id));
+            clip_ids.push(id);
+        }
+        let set_id = project.add_resource("set", ResourceData::AnimationSet(set));
+        let mut character = crate::CharacterResource::defaults();
+        character.model = Some(model_id);
+        character.animation_set = Some(set_id);
+        let index_of = |project: &ProjectDocument, action: usize| {
+            project
+                .resolved_model_animation_index(model_id, clip_ids[action])
+                .unwrap()
+        };
+        let resident = |project: &ProjectDocument, enemy: bool| {
+            let mut out = HashMap::new();
+            add_character_clip_requirements(project, &mut out, &character, enemy, &[]);
+            out.remove(&model_id).unwrap_or_default()
+        };
+        let player = resident(&project, false);
+        let enemy = resident(&project, true);
+        for (position, action) in actions.iter().enumerate() {
+            assert!(
+                player.contains(&index_of(&project, position)),
+                "a player keeps {action:?}"
+            );
+        }
+        assert!(enemy.contains(&index_of(&project, 0)), "idle");
+        assert!(enemy.contains(&index_of(&project, 1)), "stun");
+        assert!(enemy.contains(&index_of(&project, 4)), "death");
+        assert!(
+            !enemy.contains(&index_of(&project, 2)),
+            "hit react, a stun exists"
+        );
+        assert!(!enemy.contains(&index_of(&project, 3)), "roll");
+
+        // Without a stun clip the hit reaction is the stagger and stays.
+        let mut set = crate::AnimationSetResource::defaults();
+        for (action, id) in actions.iter().zip(&clip_ids) {
+            if *action != CharacterAnimationAction::Stun {
+                set.set_action_clip(*action, Some(*id));
+            }
+        }
+        if let Some(resource) = project.resource_mut(set_id) {
+            resource.data = ResourceData::AnimationSet(set);
+        }
+        let enemy = resident(&project, true);
+        assert!(
+            enemy.contains(&index_of(&project, 2)),
+            "hit react without stun"
+        );
+    }
+
+    /// The player's reaction and perch clips are left out of a level that has no enemy and no
+    /// hook point, and each comes back with its system. Aim and fire are never left out, so a
+    /// level with hook points and no enemy can still aim and hook.
+    #[test]
+    fn a_player_keeps_a_clip_only_when_its_system_is_in_the_level() {
+        use super::*;
+        let mut project = ProjectDocument::new("omissions");
+        let character = project.add_resource(
+            "player",
+            ResourceData::Character(crate::CharacterResource::defaults()),
+        );
+        let scene = project.active_scene_mut();
+        let root = scene.root;
+        let has = |list: &[CharacterAnimationAction], a| list.contains(&a);
+
+        let bare = omitted_player_actions(scene);
+        for a in [
+            CharacterAnimationAction::HitReact,
+            CharacterAnimationAction::HitReactAlt,
+            CharacterAnimationAction::Stun,
+            CharacterAnimationAction::ArchPerch,
+            CharacterAnimationAction::HookLaunch,
+        ] {
+            assert!(has(&bare, a), "{a:?} is left out of an empty level");
+        }
+        for a in [
+            CharacterAnimationAction::Idle,
+            CharacterAnimationAction::Fall,
+            CharacterAnimationAction::Land,
+            CharacterAnimationAction::Death,
+            CharacterAnimationAction::Roll,
+            CharacterAnimationAction::RangedAim,
+            CharacterAnimationAction::RangedAttack,
+            CharacterAnimationAction::RangedWalk,
+            CharacterAnimationAction::RangedBackward,
+            CharacterAnimationAction::RangedLeft,
+            CharacterAnimationAction::RangedRight,
+        ] {
+            assert!(!has(&bare, a), "{a:?} always stays");
+        }
+
+        // Hook points and no enemy: the player can still aim, fire and perch.
+        scene.add_node(root, "Hook", NodeKind::HookPoint);
+        let hooked = omitted_player_actions(scene);
+        for a in [
+            CharacterAnimationAction::ArchPerch,
+            CharacterAnimationAction::HookLaunch,
+            CharacterAnimationAction::RangedAim,
+            CharacterAnimationAction::RangedAttack,
+        ] {
+            assert!(!has(&hooked, a), "{a:?} stays with a hook point");
+        }
+        assert!(has(&hooked, CharacterAnimationAction::Stun));
+
+        let host = scene.add_node(root, "Enemy", NodeKind::Entity);
+        scene.add_node(
+            host,
+            "Controller",
+            NodeKind::CharacterController {
+                character: Some(character),
+                loadout: None,
+                settings: None,
+                player: false,
+            },
+        );
+        let fought = omitted_player_actions(scene);
+        assert!(fought.is_empty(), "{fought:?}");
     }
 
     #[test]

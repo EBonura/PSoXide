@@ -24,6 +24,12 @@
 #   PSOXIDE_GUEST_STAGE_ROOT=<dir> override the canonical root
 #   PSOXIDE_GUEST_CARGO_HOME=<dir> override the isolated Cargo home
 #   PSOXIDE_RUSTC=<path>           psoxide-rustc binary (default: built from the hydrated SDK)
+#   PSOXIDE_GUEST_OPT=speed|size   speed (default, unchanged): the guest crate builds at the
+#                                  profile's opt-level 2. size: only the editor-playtest crate
+#                                  builds at opt-level s (the engine and SDK crates keep their
+#                                  level). About 130 KB less .text on a one-enemy level for
+#                                  +0.2% route cycles, but a different frame-time distribution,
+#                                  so it is the owner's call and never the default.
 #
 # Every argument is forwarded verbatim to `cargo build --release`; the
 # Makefile passes the target/build-std flags and the feature selection, and
@@ -33,6 +39,11 @@
 set -eu
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+case "${PSOXIDE_GUEST_OPT:-speed}" in
+    speed) ;;
+    size) set -- "$@" --config 'profile.release.package.editor-playtest.opt-level="s"' ;;
+    *) echo "[guest-build] PSOXIDE_GUEST_OPT must be speed or size, not '$PSOXIDE_GUEST_OPT'" >&2; exit 1 ;;
+esac
 GUEST_DIR="engine/examples/editor-playtest"
 EXE_RELATIVE="build/examples/mipsel-sony-psx/release/editor-playtest.exe"
 # The linker script is reached relative to the guest crate directory, so the

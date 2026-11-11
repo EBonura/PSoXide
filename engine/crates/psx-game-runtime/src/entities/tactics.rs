@@ -143,9 +143,9 @@ impl TacticalState {
     };
 }
 
-impl<const N: usize, const S: bool> GameEntities<N, S> {
+impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
     pub(super) fn is_tactical(record: &LevelGameEntityRecord) -> bool {
-        record.flags & game_entity_flags::TACTICAL != 0
+        T && record.flags & game_entity_flags::TACTICAL != 0
     }
 
     /// Relocate the one authored training actor for an obstacle fixture. This

@@ -1,6 +1,6 @@
 //! Optional Cortex prototype; legacy records retain their original rules.
 use super::*;
-impl<const N: usize, const S: bool> GameEntities<N, S> {
+impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
     /// Visible animation phase supplied by the game: 0 neutral, 1 tell, 2 swing, 3 recovery.
     pub fn set_player_attack_read(&mut self, phase: u8) {
         self.player_attack_read = phase;
