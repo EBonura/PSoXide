@@ -91,12 +91,17 @@ impl BayTemplate {
     }
 
     /// The bay with its materials bound to `project`: a material whose name
-    /// the project holds becomes that material; any other falls back to the
+    /// the project holds becomes that material (a bay that carries no names
+    /// keeps its ids); any other falls back to the
     /// project's role (floor surfaces to `roles.floor`, ceilings to
     /// `roles.ceiling`, walls and the wall material of a leaf to
     /// `roles.wall`), which may itself be none.
     pub fn bound_to(&self, project: &ProjectDocument, roles: Roles) -> Self {
         let by_name = |id: ResourceId| -> Option<ResourceId> {
+            // A bay cut before names were recorded keeps the ids it has.
+            if self.materials.is_empty() {
+                return Some(id);
+            }
             let (_, name) = self.materials.iter().find(|(m, _)| *m == id)?;
             project
                 .resources

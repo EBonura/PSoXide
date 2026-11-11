@@ -296,3 +296,18 @@ fn naming_a_captured_bays_materials_records_what_the_project_calls_them() {
     let names: Vec<&str> = bay.materials.iter().map(|(_, n)| n.as_str()).collect();
     assert_eq!(names, ["Stone", "Brick"]);
 }
+
+#[test]
+fn a_bay_cut_before_names_were_recorded_keeps_its_material_ids() {
+    let mut bay = rib_corridor();
+    bay.materials.clear();
+    let (p, ids) = project_with(&["Floor", "Wall", "Ceiling"]);
+    let roles = Roles {
+        floor: Some(ids[0]),
+        wall: Some(ids[1]),
+        ceiling: Some(ids[2]),
+        ..Roles::default()
+    };
+    let bound = bay.bound_to(&p, roles);
+    assert_eq!(bound.leaves, bay.leaves, "no names, no rebinding");
+}
