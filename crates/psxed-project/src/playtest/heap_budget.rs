@@ -46,6 +46,7 @@ pub struct HeapBudget {
 
 impl HeapBudget {
     /// Bytes of heap the level needs.
+    #[must_use]
     pub fn need(&self) -> usize {
         self.renderer + self.resident_table + self.fixed
     }
@@ -61,6 +62,7 @@ const IMAGE_FLOOR_BYTES: usize = 1_460_000;
 
 /// The cook's refusal for a level that cannot fit the guest whatever else is trimmed, `None` when
 /// it may fit (the link-time check decides).
+#[must_use]
 pub fn refusal(package: &PlaytestPackage) -> Option<String> {
     let budget = plan(package)?;
     let wanted = budget.pool + IMAGE_FLOOR_BYTES + budget.need() + MARGIN_BYTES;
@@ -95,6 +97,7 @@ pub fn refusal(package: &PlaytestPackage) -> Option<String> {
 }
 
 /// The budget of the cooked grid world, `None` for a package without one.
+#[must_use]
 pub fn plan(package: &PlaytestPackage) -> Option<HeapBudget> {
     let world = &package.world_geometry;
     let level = LevelView::parse(&world.core).ok()?;
@@ -113,6 +116,7 @@ pub fn plan(package: &PlaytestPackage) -> Option<HeapBudget> {
 
 /// The text of `heap_budget.txt` for `package`: `key=value` lines, `need=0` when there is no grid
 /// world, so a stale file from an earlier cook never gates this one.
+#[must_use]
 pub fn render(package: &PlaytestPackage) -> String {
     match plan(package) {
         Some(b) => format!(
