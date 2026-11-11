@@ -1205,6 +1205,7 @@ pub fn into_showcase(
             down: 150,
             side_x: 256,
             side_z: 176,
+            sun: super::light::SunTint::OFF,
         },
         global_light: super::lighting::GlobalLight {
             sky: Some([112, 116, 108]),

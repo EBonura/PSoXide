@@ -60,6 +60,64 @@ pub struct FacingShade {
     pub side_x: u16,
     /// Faces looking along the Z axis (north or south).
     pub side_z: u16,
+    /// A colour for the sun side and the shade side. Off by default.
+    #[serde(default, skip_serializing_if = "SunTint::is_off")]
+    pub sun: SunTint,
+}
+
+/// One sun direction and the colour it gives the faces by the way they face
+/// it: a face looking at the sun takes the `lit` colour, one looking away the
+/// `shade` colour, and a face in between a blend of the two (by the cosine of
+/// its normal to the sun, mapped onto 0..1). Colours are Q8 multipliers per
+/// channel (256 leaves a channel as it is, above 256 brightens it), applied
+/// to the lit vertex colour on top of the brightness factors. It runs where
+/// the facing shade runs (the editor preview and the cook), bakes into the
+/// vertex colours, and costs the guest nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SunTint {
+    /// Where the sun is, as a direction from the world to the sun (any
+    /// length; `[0, 0, 0]` turns the tint off). +X is east, +Y up, -Z north.
+    pub dir: [i16; 3],
+    /// Multiplier of a face looking at the sun.
+    pub lit: [u16; 3],
+    /// Multiplier of a face looking away from it.
+    pub shade: [u16; 3],
+}
+
+impl SunTint {
+    /// No tint.
+    pub const OFF: Self = Self {
+        dir: [0, 0, 0],
+        lit: [256; 3],
+        shade: [256; 3],
+    };
+
+    /// Whether this leaves every colour alone.
+    pub fn is_off(&self) -> bool {
+        self.dir == [0, 0, 0] || (self.lit == [256; 3] && self.shade == [256; 3])
+    }
+
+    /// The Q8 multipliers (as 0..) for a face looking along the unit `normal`.
+    pub fn multiplier(&self, normal: [f64; 3]) -> [f64; 3] {
+        if self.is_off() {
+            return [1.0; 3];
+        }
+        let d = self.dir.map(f64::from);
+        let length = dot(d, d).sqrt();
+        let facing = dot(normal, d.map(|v| v / length)).clamp(-1.0, 1.0);
+        let t = 0.5 + 0.5 * facing;
+        core::array::from_fn(|i| {
+            let shade = f64::from(self.shade[i]);
+            let lit = f64::from(self.lit[i]);
+            (shade + (lit - shade) * t) / 256.0
+        })
+    }
+}
+
+impl Default for SunTint {
+    fn default() -> Self {
+        Self::OFF
+    }
 }
 
 impl FacingShade {
@@ -70,6 +128,7 @@ impl FacingShade {
         down: 256,
         side_x: 256,
         side_z: 256,
+        sun: SunTint::OFF,
     };
 
     /// Subtle but visible: floors as lit, ceilings and walls a little
@@ -80,6 +139,7 @@ impl FacingShade {
         down: 200,
         side_x: 212,
         side_z: 168,
+        sun: SunTint::OFF,
     };
 
     /// A stronger version for dim levels that need more contrast.
@@ -88,11 +148,16 @@ impl FacingShade {
         down: 168,
         side_x: 180,
         side_z: 124,
+        sun: SunTint::OFF,
     };
 
     /// Whether this leaves every colour alone.
     pub fn is_off(&self) -> bool {
-        *self == Self::OFF
+        self.up == 256
+            && self.down == 256
+            && self.side_x == 256
+            && self.side_z == 256
+            && self.sun.is_off()
     }
 
     /// The factor (0..=1) for a face looking along the unit `normal`.
@@ -117,7 +182,12 @@ impl FacingShade {
             return colour;
         }
         let k = self.factor(normal);
-        colour.map(|c| (f64::from(c) * k).round().clamp(0.0, 255.0) as u8)
+        let tint = self.sun.multiplier(normal);
+        core::array::from_fn(|i| {
+            (f64::from(colour[i]) * k * tint[i])
+                .round()
+                .clamp(0.0, 255.0) as u8
+        })
     }
 }
 
@@ -570,5 +640,31 @@ mod tests {
             .collect();
         assert!(lit.iter().any(|c| c[0] > 32));
         assert!(shadowed.iter().all(|c| *c == [32; 3]));
+    }
+
+    #[test]
+    fn sun_tint_warms_the_sun_side_and_cools_the_shade_side() {
+        let shade = FacingShade {
+            sun: SunTint {
+                dir: [256, 128, 0],
+                lit: [290, 256, 210],
+                shade: [200, 190, 240],
+            },
+            ..FacingShade::OFF
+        };
+        assert!(!shade.is_off());
+        let east = shade.apply([100; 3], [1.0, 0.0, 0.0]);
+        let west = shade.apply([100; 3], [-1.0, 0.0, 0.0]);
+        let up = shade.apply([100; 3], [0.0, 1.0, 0.0]);
+        // The sun side is warm (red over blue), the shade side violet (blue over red).
+        assert!(east[0] > east[2], "{east:?}");
+        assert!(west[2] > west[0], "{west:?}");
+        // A face at right angles to the sun sits between the two.
+        assert!(up[0] > west[0] && up[0] < east[0], "{up:?}");
+        // Deterministic and off by default: no tint leaves a colour alone.
+        assert_eq!(shade.apply([100; 3], [1.0, 0.0, 0.0]), east);
+        assert_eq!(FacingShade::OFF.apply([100; 3], [1.0, 0.0, 0.0]), [100; 3]);
+        assert!(SunTint::OFF.is_off());
+        assert!(FacingShade::OFF.is_off());
     }
 }

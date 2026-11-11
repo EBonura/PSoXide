@@ -91,6 +91,7 @@ pub mod showcase;
 pub mod slope;
 pub mod starter;
 pub mod storeys;
+pub mod style_test;
 pub mod surface;
 pub mod tree;
 pub mod units;
