@@ -23,13 +23,57 @@ use crystal::draw_crystal_discharge;
 /// Particle decals use the U=0 half of the shared shadow/particle 4bpp page;
 /// the placement and generated-texture sizing are the crate vram module's
 /// contract.
-use crate::vram::{PARTICLE_TEXEL_U, PARTICLE_TEXTURE_SIZE};
+use crate::model_rendering::model_render_uv_max;
+use crate::vram::{VramSlot, PARTICLE_TEXEL_U, PARTICLE_TEXTURE_SIZE};
 use crate::{
     combat::AuthoredProjectileCharge,
     projectiles::{ProjectileEffectKind, ProjectileImpactEffect, ProjectileSnapshot},
 };
 const PARTICLE_TEXEL_V: u8 = 0;
 const PARTICLE_UV_MAX: u8 = PARTICLE_TEXEL_U + PARTICLE_TEXTURE_SIZE as u8 - 1;
+
+/// What one authored emitter's particles sample: a texture material and the
+/// texel rectangle of its sprite. The built-in disc sits at a U offset on the
+/// shared effect page; a cooked sprite texture fills its own texture window
+/// from (0, 0).
+#[derive(Clone, Copy, Debug)]
+pub struct ParticleSprite {
+    /// Base material; each particle applies its own tint and blend mode.
+    pub material: TextureMaterial,
+    /// First texel (u, v).
+    pub uv_min: (u8, u8),
+    /// Last texel (u, v), inclusive.
+    pub uv_max: (u8, u8),
+}
+
+impl ParticleSprite {
+    /// The runtime's generated disc on the shared effect page.
+    pub const fn builtin(material: TextureMaterial) -> Self {
+        Self {
+            material,
+            uv_min: (PARTICLE_TEXEL_U, PARTICLE_TEXEL_V),
+            uv_max: (PARTICLE_UV_MAX, PARTICLE_UV_MAX),
+        }
+    }
+
+    /// A cooked sprite texture resident in `slot`.
+    pub fn from_slot(slot: VramSlot) -> Self {
+        Self {
+            material: TextureMaterial::blended(
+                slot.clut_word,
+                slot.tpage_word,
+                (0x80, 0x80, 0x80),
+                BlendMode::Average,
+            )
+            .with_texture_window(slot.texture_window),
+            uv_min: (0, 0),
+            uv_max: (
+                model_render_uv_max(slot.texture_width),
+                model_render_uv_max(slot.texture_height),
+            ),
+        }
+    }
+}
 
 const ATMOSPHERE_PARTICLE_MAX: u32 = 96;
 const ATMOSPHERE_SCREEN_MARGIN: i32 = 24;
@@ -171,7 +215,7 @@ pub fn draw_particle_emitter<'a, const OT_DEPTH: usize>(
     camera: WorldCamera,
     projector: Option<LoadedWorldCameraGte>,
     depth_range: DepthRange,
-    particle_material: TextureMaterial,
+    sprite: ParticleSprite,
     elapsed_tick: SimTick,
     ot: &mut OtFrame<'a, OT_DEPTH>,
     primitive_packets: &mut PrimitivePacketArena<'a>,
@@ -211,7 +255,7 @@ pub fn draw_particle_emitter<'a, const OT_DEPTH: usize>(
             camera,
             projector,
             depth_range,
-            particle_material,
+            sprite,
             seed,
             age as i32,
             lifetime as i32,
@@ -753,7 +797,7 @@ fn draw_particle_sample<'a, const OT_DEPTH: usize>(
     camera: WorldCamera,
     projector: Option<LoadedWorldCameraGte>,
     depth_range: DepthRange,
-    particle_material: TextureMaterial,
+    sprite: ParticleSprite,
     seed: u32,
     age: i32,
     lifetime: i32,
@@ -821,7 +865,9 @@ fn draw_particle_sample<'a, const OT_DEPTH: usize>(
     draw_particle_quad(
         center,
         half,
-        particle_material.with_tint(tint).with_blend_mode(blend),
+        sprite.material.with_tint(tint).with_blend_mode(blend),
+        sprite.uv_min,
+        sprite.uv_max,
         slot,
         ot,
         primitive_packets,
@@ -832,6 +878,8 @@ fn draw_particle_quad<'a, const OT_DEPTH: usize>(
     center: ProjectedVertex,
     half: i16,
     material: TextureMaterial,
+    (u0, v0): (u8, u8),
+    (u1, v1): (u8, u8),
     slot: psx_engine::DepthSlot,
     ot: &mut OtFrame<'a, OT_DEPTH>,
     primitive_packets: &mut PrimitivePacketArena<'a>,
@@ -845,12 +893,7 @@ fn draw_particle_quad<'a, const OT_DEPTH: usize>(
     }
     let quad = QuadTexturedMaterial::with_material(
         [(left, top), (right, top), (left, bottom), (right, bottom)],
-        [
-            (PARTICLE_TEXEL_U, PARTICLE_TEXEL_V),
-            (PARTICLE_UV_MAX, PARTICLE_TEXEL_V),
-            (PARTICLE_TEXEL_U, PARTICLE_UV_MAX),
-            (PARTICLE_UV_MAX, PARTICLE_UV_MAX),
-        ],
+        [(u0, v0), (u1, v0), (u0, v1), (u1, v1)],
         material,
     );
     let Some(packet) = primitive_packets.push_packet(quad) else {

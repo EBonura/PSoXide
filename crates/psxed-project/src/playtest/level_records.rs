@@ -254,6 +254,7 @@ impl OwnedLevelRecords {
                     random_velocity_q4: e.random_velocity_q4,
                     acceleration_q4: e.acceleration_q4,
                     spawn_radius: e.spawn_radius,
+                    texture_asset: optional_asset(e.texture_asset_index),
                     flags: e.flags,
                 })
                 .collect(),

@@ -1745,10 +1745,14 @@ fn build_package_cooked(
             }
             NodeKind::ParticleEmitter { settings } => {
                 if !push_particle_emitter(
+                    project,
+                    project_root,
                     node.name.as_str(),
                     room_index,
                     raw_pos,
                     settings,
+                    &mut texture_asset_for_path,
+                    &mut assets,
                     &mut particle_emitters,
                     &mut report,
                 ) {

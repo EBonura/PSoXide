@@ -3128,6 +3128,9 @@ pub struct ParticleEmitterRecord {
     pub acceleration_q4: [i16; 3],
     /// Random spawn offset radius, in engine units.
     pub spawn_radius: u16,
+    /// 4bpp sprite texture drawn on every particle, or `None` for the
+    /// runtime's built-in disc. Palette entry 0 is transparent.
+    pub texture_asset: Option<AssetId>,
     /// Runtime flags.
     pub flags: u16,
 }

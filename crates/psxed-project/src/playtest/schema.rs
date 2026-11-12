@@ -1447,6 +1447,9 @@ pub struct PlaytestParticleEmitter {
     pub acceleration_q4: [i16; 3],
     /// Random spawn offset radius, in engine units.
     pub spawn_radius: u16,
+    /// Index into [`PlaytestPackage::assets`] of the sprite texture, or
+    /// `None` for the runtime's built-in disc.
+    pub texture_asset_index: Option<usize>,
     /// Runtime flags. Bit 0 = enabled.
     pub flags: u16,
 }

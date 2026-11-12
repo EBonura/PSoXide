@@ -1172,11 +1172,16 @@ pub(crate) fn push_point_light(
     true
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn push_particle_emitter(
+    project: &ProjectDocument,
+    project_root: &Path,
     node_name: &str,
     room_index: u16,
     pos: [i32; 3],
     settings: &ParticleEmitterSettings,
+    texture_asset_for_path: &mut HashMap<String, usize>,
+    assets: &mut Vec<PlaytestAsset>,
     particle_emitters: &mut Vec<PlaytestParticleEmitter>,
     report: &mut PlaytestValidationReport,
 ) -> bool {
@@ -1212,9 +1217,75 @@ pub(crate) fn push_particle_emitter(
         random_velocity_q4: settings.random_velocity_q4,
         acceleration_q4: settings.acceleration_q4,
         spawn_radius: settings.spawn_radius,
+        texture_asset_index: settings.texture.and_then(|texture| {
+            resolve_particle_texture_asset(
+                project,
+                project_root,
+                node_name,
+                texture,
+                texture_asset_for_path,
+                assets,
+                report,
+            )
+        }),
         flags: particle_emitter_flags::ENABLED,
     });
     true
+}
+
+/// Resolve a Particle Emitter's sprite (a Material's image; projects fold
+/// old Texture resources into Materials on load) into a cooked texture
+/// asset, shared with every other user of the same image. A sprite the
+/// runtime cannot sample falls back to the built-in disc with a warning.
+fn resolve_particle_texture_asset(
+    project: &ProjectDocument,
+    project_root: &Path,
+    node_name: &str,
+    sprite: ResourceId,
+    texture_asset_for_path: &mut HashMap<String, usize>,
+    assets: &mut Vec<PlaytestAsset>,
+    report: &mut PlaytestValidationReport,
+) -> Option<usize> {
+    let label = format!("Particle Emitter '{node_name}'");
+    let Some(resource) = project.resource(sprite) else {
+        report.warn(format!(
+            "{label} references missing resource #{} - using the built-in sprite",
+            sprite.raw()
+        ));
+        return None;
+    };
+    let (texture_key, bytes) = match material_texture_bytes(project, resource, project_root) {
+        Ok(Some(source)) => source,
+        Ok(None) => {
+            report.warn(format!(
+                "{label}: '{}' has no image - using the built-in sprite",
+                resource.name
+            ));
+            return None;
+        }
+        Err(msg) => {
+            report.warn(format!("{label}: {msg} - using the built-in sprite"));
+            return None;
+        }
+    };
+    if let Some(&existing) = texture_asset_for_path.get(&texture_key) {
+        return Some(existing);
+    }
+    if let Err(msg) = expect_room_material_depth(&resource.name, &bytes) {
+        report.warn(format!("{label}: {msg} - using the built-in sprite"));
+        return None;
+    }
+    let texture_index = texture_asset_for_path.len();
+    let asset_index = assets.len();
+    assets.push(PlaytestAsset {
+        kind: PlaytestAssetKind::Texture,
+        bytes,
+        filename: format!("texture_{texture_index:03}.psxt"),
+        source_label: resource.name.clone(),
+        streamed_class: StreamedClass::None,
+    });
+    texture_asset_for_path.insert(texture_key, asset_index);
+    Some(asset_index)
 }
 
 /// Append one single-page message to the interactable message tables and

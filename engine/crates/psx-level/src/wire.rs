@@ -28,7 +28,7 @@ use crate::*;
 pub const MAGIC: [u8; 4] = *b"PXLR";
 /// Version of the layout below. Bump it whenever a record or the table list
 /// changes.
-pub const VERSION: u16 = 2;
+pub const VERSION: u16 = 3;
 
 /// A cursor over the chunk's bytes. The bytes live for the whole run, so a
 /// string decoded from them can be `&'static`.
@@ -326,7 +326,7 @@ wire_struct! {
     ParticleEmitterRecord {
         room, x, y, z, max_particles, spawn_rate_q8, lifetime_frames, start_size, end_size,
         start_color, end_color, blend_mode, base_velocity_q4, random_velocity_q4, acceleration_q4,
-        spawn_radius, flags
+        spawn_radius, texture_asset, flags
     }
     LevelMaterialUvMotion { enabled, speed_u_q8, speed_v_q8, phase_u, phase_v }
     LevelModelSecondaryLayer { texture_asset, blend_mode, tint_rgb, motion, flags }

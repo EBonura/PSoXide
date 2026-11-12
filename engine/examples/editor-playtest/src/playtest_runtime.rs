@@ -1706,12 +1706,21 @@ impl Playtest {
                     }
                 }
             };
+            // A cooked sprite still uploading skips this frame rather than
+            // flashing the built-in disc.
+            let sprite = match emitter.texture_asset {
+                Some(texture) => match prop_texture_slot(texture) {
+                    Some(slot) => psx_game_runtime::particles::ParticleSprite::from_slot(slot),
+                    None => continue,
+                },
+                None => psx_game_runtime::particles::ParticleSprite::builtin(particle_material),
+            };
             submitted += draw_particle_emitter(
                 *emitter,
                 camera,
                 loaded_projector,
                 depth_range,
-                particle_material,
+                sprite,
                 elapsed_tick,
                 ot,
                 primitive_packets,

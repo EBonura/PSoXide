@@ -363,6 +363,62 @@ fn an_arch_prop_node_cooks_in_a_grid_world_with_segment_boxes() {
 }
 
 #[test]
+fn a_particle_emitters_sprite_cooks_as_a_shared_texture_asset() {
+    use crate::{
+        GeneratedMaterialTexture, MaterialResource, MaterialTextureMode, NodeKind,
+        ParticleEmitterSettings, ResourceData,
+    };
+    let mut project = ProjectDocument::starter();
+    let smoke = project.add_resource(
+        "Smoke puff",
+        ResourceData::Material(MaterialResource {
+            texture_mode: MaterialTextureMode::Generated,
+            generated: GeneratedMaterialTexture {
+                size: 32,
+                base_color: [200, 200, 200],
+                noise_enabled: false,
+                ..GeneratedMaterialTexture::default()
+            },
+            ..MaterialResource::opaque(None)
+        }),
+    );
+    let scene = project.active_scene_mut();
+    for (name, texture) in [
+        ("Smoke A", Some(smoke)),
+        ("Smoke B", Some(smoke)),
+        ("Sparks", None),
+    ] {
+        let id = scene.add_node(
+            scene.root,
+            name,
+            NodeKind::ParticleEmitter {
+                settings: ParticleEmitterSettings {
+                    texture,
+                    ..ParticleEmitterSettings::default()
+                },
+            },
+        );
+        scene.node_mut(id).unwrap().transform.translation = [1280.0, 0.0, 1280.0];
+    }
+    let (package, report) = build_package(&project, &crate::default_project_dir());
+    assert!(report.is_ok(), "{:?}", report.errors);
+    let package = package.unwrap();
+    let sprites: Vec<Option<usize>> = package
+        .particle_emitters
+        .iter()
+        .map(|e| e.texture_asset_index)
+        .collect();
+    assert_eq!(sprites.len(), 3, "{:?}", report.warnings);
+    let shared = sprites[0].expect("the smoke emitter has its sprite");
+    assert_eq!(sprites[1], Some(shared), "one image cooks once");
+    assert_eq!(sprites[2], None, "no sprite keeps the built-in disc");
+    let asset = &package.assets[shared];
+    assert!(matches!(asset.kind, PlaytestAssetKind::Texture));
+    let texture = psx_asset::Texture::from_bytes(&asset.bytes).expect("a PSXT");
+    assert_eq!((texture.width(), texture.height()), (32, 32));
+}
+
+#[test]
 fn play_from_here_moves_the_cooked_spawn_without_editing_the_project() {
     let project = ProjectDocument::starter();
     let root = crate::default_project_dir();
