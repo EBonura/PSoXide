@@ -132,12 +132,7 @@ pub fn lever_doors_world(
         scale: STARTER_SCALE,
         texels_per_sector: super::units::SectorTexels::DEFAULT,
         rooms,
-        shading: super::light::FacingShade::SUBTLE,
-        global_light: super::lighting::GlobalLight::NEW_WORLD,
-        stream: super::world::StreamRadii::DEFAULT,
-        mesh_assets: Vec::new(),
-        level_names: Default::default(),
-        palette_pins: Vec::new(),
+        ..GridWorld::standard()
     }
 }
 
@@ -220,7 +215,7 @@ pub fn into_lever_doors(project: &mut ProjectDocument) -> Result<(), StarterErro
     let roof = find_material(project, &["Graybox / Cliff 64"]).or(ground);
     let signal = find_material(project, &["DP City / Bright Green Signal"]);
     let door_material = find_material(project, &["Graybox / Cliff 64", "Graybox / Original 64"]);
-    let world = lever_doors_world(ground, walls, roof);
+    let world = super::starter::with_far_panels(project, lever_doors_world(ground, walls, roof));
 
     // The player starts in room A, west end of the middle row.
     let spawn = SpawnRequest {

@@ -52,6 +52,66 @@ pub struct GridWorld {
     pub palette_pins: Vec<crate::ResourceId>,
 }
 
+/// The world-level settings every newly created world starts with, so new
+/// projects cannot drift apart: streamed by portal flood, shaded by facing and
+/// lit by the global gather.
+///
+/// This is only what a world made today gets. It is not what a missing field
+/// loads as: a world stored without these settings still loads with them off
+/// (the serde defaults are unchanged), so worlds on disk render and cook exactly
+/// as they always did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WorldProfile {
+    /// How much darker faces are by the way they face.
+    pub shading: FacingShade,
+    /// Ambient occlusion, sky light and bounced light.
+    pub global_light: GlobalLight,
+    /// Draw, activation and prefetch radii, and the flood settings.
+    pub stream: StreamRadii,
+}
+
+impl WorldProfile {
+    /// The standard profile: the arch study's facing shade and global light,
+    /// and the Citadel's flood streaming (`projects/zz-far-s10`).
+    ///
+    /// Flood is on because every world streams by it (a world that does not
+    /// must hold all its rooms resident). Far panels are off here: they need a
+    /// cube sky, and the sky is a project resource that a world document cannot
+    /// promise. The project-level creation paths add them with
+    /// [`Self::PANELS`] when the project's sky is a cube sky
+    /// (`grid::starter::with_far_panels`).
+    /// Panel lattice spacing in sectors for a world whose project has a cube
+    /// sky: the Citadel's (`projects/zz-far-s10`).
+    pub const PANELS: u8 = 10;
+
+    /// The standard profile.
+    pub const STANDARD: Self = Self {
+        shading: FacingShade::STRONG,
+        global_light: GlobalLight {
+            enabled: true,
+            occlusion: 52,
+            reach: 4,
+            bounces: 2,
+            bounce_gain: 150,
+            rays: 64,
+            sky: None,
+        },
+        stream: StreamRadii {
+            draw_far: 12,
+            active_radius: 8,
+            lead_radius: 4,
+            ring: true,
+            flood: FloodSettings {
+                on: true,
+                near_radius: 12,
+                res_radius: 13,
+                panels: 0,
+                ..FloodSettings::DEFAULT
+            },
+        },
+    };
+}
+
 /// Radii in sectors, walked over the portal graph, that decide which rooms
 /// are drawn, hold active entities and (once rooms stream) are resident.
 /// They are the per-level knobs of `docs/grid/streaming-design.md` 3.4.
@@ -254,9 +314,26 @@ fn merge(bounds: Option<EditorBounds>, add: EditorBounds) -> EditorBounds {
 }
 
 impl GridWorld {
-    /// An empty world at the default scale.
+    /// An empty world at the default scale, with every world-level setting
+    /// off: what a world stored without them loads as. Use [`Self::standard`]
+    /// for a world that is being created.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// An empty world carrying the standard profile ([`WorldProfile::STANDARD`]).
+    /// Every path that creates a world starts from this.
+    pub fn standard() -> Self {
+        Self::default().with_profile(&WorldProfile::STANDARD)
+    }
+
+    /// This world with `profile`'s settings in place of its own.
+    #[must_use]
+    pub fn with_profile(mut self, profile: &WorldProfile) -> Self {
+        self.shading = profile.shading;
+        self.global_light = profile.global_light;
+        self.stream = profile.stream;
+        self
     }
 
     /// Whether the rooms are chunks of one surface (a world cut into even

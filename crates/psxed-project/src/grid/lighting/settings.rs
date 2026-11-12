@@ -45,7 +45,7 @@ pub struct GlobalLight {
 }
 
 impl GlobalLight {
-    /// The values a new world starts from.
+    /// The values of a world stored without the setting (the gather off).
     pub const DEFAULT: Self = Self {
         enabled: false,
         occlusion: 60,
@@ -56,7 +56,7 @@ impl GlobalLight {
         sky: None,
     };
 
-    /// What a new world gets: the gather on with the default values.
+    /// The gather on with the default values.
     pub const NEW_WORLD: Self = Self {
         enabled: true,
         ..Self::DEFAULT

@@ -132,8 +132,7 @@ impl FacingShade {
     };
 
     /// Subtle but visible: floors as lit, ceilings and walls a little
-    /// darker, the two wall directions apart from each other. What a new
-    /// world gets.
+    /// darker, the two wall directions apart from each other.
     pub const SUBTLE: Self = Self {
         up: 256,
         down: 200,
