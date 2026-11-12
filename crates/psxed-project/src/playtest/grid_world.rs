@@ -252,6 +252,7 @@ pub(super) fn cook(
     assets: &mut Vec<PlaytestAsset>,
     texture_asset_for_path: &mut HashMap<String, usize>,
     report: &mut PlaytestValidationReport,
+    pool_ceiling_kib: usize,
 ) -> Option<PlaytestGridWorld> {
     let lights = scene_lights(project.active_scene());
     let mut binder = Binder {
@@ -262,7 +263,7 @@ pub(super) fn cook(
         used: Vec::new(),
         warnings: Vec::new(),
     };
-    let cooked = cook::cook_level(
+    let cooked = cook::cook_level_within(
         CookInput {
             world,
             binder: &mut binder,
@@ -272,6 +273,7 @@ pub(super) fn cook(
             texture_repeat: cook::texture_repeat_default(),
         },
         None,
+        pool_ceiling_kib,
     );
     let used = std::mem::take(&mut binder.used);
     for warning in std::mem::take(&mut binder.warnings) {

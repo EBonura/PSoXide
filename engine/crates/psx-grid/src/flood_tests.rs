@@ -452,3 +452,89 @@ fn a_flooded_level_keeps_its_wanted_set_until_a_search_finishes() {
     window.invalidate();
     assert_ne!(window.refresh(&level, Some((5, at)), Some((5, at))), gone);
 }
+
+/// Two corridors of `each` rooms, `pages` pages a room, side by side with no
+/// portal between them: room `i` of the first is `i`, of the second
+/// `each + i`.
+fn two_islands(each: usize, pages: u16, flood: FloodBlock) -> Vec<u32> {
+    let mut rooms = Vec::new();
+    let mut portals = Vec::new();
+    for island in 0..2usize {
+        for i in 0..each {
+            let first = portals.len() as u16;
+            let wall = |at: i16, dest: usize| Portal {
+                dest: dest as u16,
+                flags: PORTAL_ALWAYS_OPEN,
+                v: [
+                    [at, 0, 0],
+                    [at, 0, S as i16],
+                    [at, 100, S as i16],
+                    [at, 100, 0],
+                ],
+                normal: [0; 3],
+                reserved: 0,
+            };
+            let base = island * each;
+            if i > 0 {
+                portals.push(wall(0, base + i - 1));
+            }
+            if i + 1 < each {
+                portals.push(wall(2 * S as i16, base + i + 1));
+            }
+            rooms.push(RoomRecord {
+                // The second island is a long way off along Z.
+                origin: [i as i32 * 2 * S, 0, island as i32 * 50 * S],
+                width: 2,
+                depth: 1,
+                pack_sectors: pages,
+                portal_first: first,
+                portal_count: portals.len() as u16 - first,
+                min_y: 0,
+                max_y: 100,
+                ..RoomRecord::default()
+            });
+        }
+    }
+    let core = LevelCore {
+        sector_units: S as u16,
+        draw_far: 0,
+        active_radius: 1,
+        rooms,
+        portals,
+        flood: Some(flood),
+        ..LevelCore::default()
+    };
+    aligned_copy(&core.to_bytes())
+}
+
+#[test]
+fn rooms_with_no_portal_to_the_player_are_never_wanted_and_never_sized_into_the_pool() {
+    // Two corridors of 4 rooms, 3 pages each, a radius that takes in a whole
+    // corridor and a budget that would take both.
+    let words = two_islands(4, 3, block(100, 40, 40, 12));
+    let level = view(&words);
+    let mut window = StreamWindow::new(&level);
+    assert!(window.floods());
+    let mut wanted = Vec::new();
+    for player in [1usize, 6] {
+        let at = [
+            level.rooms[player].origin[0] + S,
+            50,
+            level.rooms[player].origin[2] + S / 2,
+        ];
+        window.invalidate();
+        window.wanted(&level, Some((player, at)), Some((player, at)), &mut wanted);
+        let island = if player < 4 { 0..4 } else { 4..8 };
+        assert!(!wanted.is_empty());
+        assert!(
+            wanted.iter().all(|w| island.contains(&usize::from(w.room))),
+            "player in room {player} wants {:?}",
+            wanted.iter().map(|w| w.room).collect::<Vec<_>>()
+        );
+    }
+    // The pool is one island and one more room, not the sum of both.
+    let plan = plan_pool(&level, &[3usize; 8]);
+    assert_eq!(plan.peak_pages, 4 * 3);
+    assert_eq!(plan.pool_pages, 4 * 3 + 3);
+    assert!(plan.pool_pages < 8 * 3);
+}

@@ -391,7 +391,34 @@ pub fn build_package_with_spawn(
     project_root: &Path,
     spawn: Option<SpawnOverride>,
 ) -> (Option<PlaytestPackage>, PlaytestValidationReport) {
-    let (package, mut report) = build_package_cooked(project, project_root, spawn);
+    let (package, report) = build_package_cooked(
+        project,
+        project_root,
+        spawn,
+        crate::grid::cook::GUEST_POOL_CEILING_KIB,
+    );
+    // The cook decides what stays resident from a ceiling it is handed. The first pass assumes the
+    // default; when the guest cannot actually hold the pool that produced, cook again with the room
+    // the guest has (a level that streams by flood then streams; one that cannot is refused).
+    let Some(headroom_kib) = package.as_ref().and_then(heap_budget::pool_headroom_kib) else {
+        return finish_budget(package, report);
+    };
+    if package
+        .as_ref()
+        .and_then(heap_budget::refusal)
+        .is_none_or(|_| headroom_kib == 0)
+    {
+        return finish_budget(package, report);
+    }
+    let (package, report) = build_package_cooked(project, project_root, spawn, headroom_kib);
+    finish_budget(package, report)
+}
+
+/// Apply the guest-fit refusal to a cooked package.
+fn finish_budget(
+    package: Option<PlaytestPackage>,
+    mut report: PlaytestValidationReport,
+) -> (Option<PlaytestPackage>, PlaytestValidationReport) {
     if let Some(message) = package.as_ref().and_then(heap_budget::refusal) {
         report.error(message);
         return (None, report);
@@ -403,6 +430,7 @@ fn build_package_cooked(
     project: &ProjectDocument,
     project_root: &Path,
     spawn: Option<SpawnOverride>,
+    pool_ceiling_kib: usize,
 ) -> (Option<PlaytestPackage>, PlaytestValidationReport) {
     // Cook at runtime scale: divide every authored length by
     // WORLD_UNIT_DIVISOR on an in-memory clone. Authored files and the
@@ -568,6 +596,7 @@ fn build_package_cooked(
         &mut assets,
         &mut texture_asset_for_path,
         &mut report,
+        pool_ceiling_kib,
     ) {
         Some(world) => world,
         None => return (None, report),

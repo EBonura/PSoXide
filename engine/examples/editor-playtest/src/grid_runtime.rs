@@ -517,6 +517,18 @@ impl GridRuntime {
             telemetry::counter::ROOM_STREAM_RESIDENT_SLOTS,
             self.resident.len() as u32,
         );
+        // Which rooms those are, as a bitset of room indices (rooms 0..63): the telemetry log's
+        // proof that a level of separate pieces keeps only the player's piece in memory.
+        let (mut mask_lo, mut mask_hi) = (0u32, 0u32);
+        for slot in self.resident.iter() {
+            match slot.room {
+                room @ 0..=31 => mask_lo |= 1 << room,
+                room @ 32..=63 => mask_hi |= 1 << (room - 32),
+                _ => {}
+            }
+        }
+        telemetry::counter(telemetry::counter::ROOM_STREAM_RESIDENT_MASK_LO, mask_lo);
+        telemetry::counter(telemetry::counter::ROOM_STREAM_RESIDENT_MASK_HI, mask_hi);
         if evicted || installed {
             self.materials_epoch = None;
         }
