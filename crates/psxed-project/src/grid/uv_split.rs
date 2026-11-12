@@ -18,6 +18,10 @@
 //! Two pieces that share a cut compute their shared corners from the same
 //! two end points in the same order, so they agree to the unit.
 
+/// The renderer's UV shift of a scrolled quad on one axis (`psx-grid`), for the
+/// editor preview to move a face exactly as the runtime does.
+pub use psx_grid::render::scroll_shift;
+
 use super::faces::GridFace;
 use super::units::GridScale;
 use super::uv::TILE_TEXELS;
