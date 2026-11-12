@@ -13,10 +13,16 @@ use crate::grid::world::{FloodSettings, StreamRadii};
 /// `count` one-sector rooms side by side, 25 to a row, floored and roofed so
 /// neighbours get portals.
 fn strip(count: usize) -> GridWorld {
+    spaced(count, 1)
+}
+
+/// [`strip`] with `gap` sectors between the origins of neighbours: 1 touches,
+/// 2 leaves a sector between rooms, so they get no portal.
+fn spaced(count: usize, gap: usize) -> GridWorld {
     let rooms = (0..count)
         .map(|i| {
             let mut room = GridRoom::new(format!("r{i}"), 1, 1);
-            room.origin = [(i % 25) as i32, (i / 25) as i32];
+            room.origin = [((i % 25) * gap) as i32, ((i / 25) * gap) as i32];
             let sector = room.sector_or_insert(0, 0).unwrap();
             sector.set_ground_floor(Some(GridSurface::flat(0, None)));
             sector.set_ground_ceiling(Some(GridSurface::flat(1024, None)));
@@ -133,4 +139,92 @@ fn the_default_flood_settings_are_not_written_to_a_document() {
     let old: StreamRadii =
         ron::from_str("(draw_far: 12, active_radius: 12, lead_radius: 4, ring: true)").unwrap();
     assert_eq!(old.flood, FloodSettings::DEFAULT);
+}
+
+/// [`cook`] for a guest whose pool may take `ceiling_kib`.
+fn cook_within(world: &GridWorld, ceiling_kib: usize) -> Result<CookedLevel, String> {
+    cook_level_within(
+        CookInput {
+            world,
+            binder: &mut super::tests::TestBinder,
+            lights: &[],
+            first_pack_sector: 100,
+            lod_far_cells: 0,
+            texture_repeat: true,
+        },
+        None,
+        ceiling_kib,
+    )
+}
+
+/// `count` one-sector rooms a sector apart: no two touch, so no portals.
+fn islands(count: usize) -> GridWorld {
+    spaced(count, 2)
+}
+
+#[test]
+fn a_connected_level_just_over_the_ceiling_streams() {
+    // 40 connected one page rooms against a 30 page (60 KiB) pool: not held
+    // whole, a page budget of the ceiling less the largest room.
+    let cooked = cook_within(&flooded(strip(40), 4, 8), 60).unwrap();
+    let (words, len) = view(&cooked);
+    let level = LevelView::parse(words_as_bytes(&words, len)).unwrap();
+    let flood = level.budget_flood().expect("the flood block");
+    assert_eq!(flood.pool_cap_pages, 29);
+    // And just under it is held whole.
+    let cooked = cook_within(&flooded(strip(40), 4, 8), 80).unwrap();
+    let (words, len) = view(&cooked);
+    let level = LevelView::parse(words_as_bytes(&words, len)).unwrap();
+    assert_eq!(level.budget_flood().unwrap().pool_cap_pages, 0);
+}
+
+#[test]
+fn a_level_whose_largest_room_leaves_no_page_budget_is_refused() {
+    // The pool needs the resident set and the largest room. A ceiling of one
+    // page holds one room and nothing to stream it past: a page budget of 0
+    // would read as "held whole" to the guest, so the cook refuses instead.
+    let error = cook_within(&flooded(strip(40), 4, 8), 2).unwrap_err();
+    assert!(error.contains("largest room"), "{error}");
+}
+
+#[test]
+fn separate_islands_stream_even_when_they_would_fit_whole() {
+    // 12 one page rooms, none touching: 24 KiB, under a 40 KiB pool, but the
+    // player is only ever in one of them.
+    let world = flooded(islands(12), 4, 8);
+    let cooked = cook_within(&world, 40).unwrap();
+    assert!(cooked.level.portals.is_empty());
+    let (words, len) = view(&cooked);
+    let level = LevelView::parse(words_as_bytes(&words, len)).unwrap();
+    let flood = level.budget_flood().expect("the flood block");
+    assert_ne!(flood.pool_cap_pages, 0, "islands are not held whole");
+    assert!(cooked
+        .report
+        .warnings
+        .iter()
+        .any(|w| w.contains("12 islands")));
+    // The pool is the worst island plus the largest room, not the sum.
+    let chunks: Vec<usize> = cooked
+        .chunks
+        .iter()
+        .map(|c| c.len().div_ceil(2048))
+        .collect();
+    let plan = psx_grid::stream::plan_pool(&level, &chunks);
+    assert_eq!(plan.peak_rooms, 1, "one island, one room, at a time");
+    assert_eq!(plan.pool_pages, chunks[0] + plan.max_room_pages);
+    assert!(plan.pool_pages < chunks.iter().sum::<usize>());
+}
+
+#[test]
+fn islands_are_counted_through_portals_only() {
+    let one = cook_within(&flooded(strip(6), 4, 8), 4096).unwrap();
+    let pages: Vec<usize> = one.chunks.iter().map(|c| c.len().div_ceil(2048)).collect();
+    assert_eq!(flood_plan::island_pages(&one.level, &pages).len(), 1);
+    let apart = cook_within(&flooded(islands(6), 4, 8), 4096).unwrap();
+    let pages: Vec<usize> = apart
+        .chunks
+        .iter()
+        .map(|c| c.len().div_ceil(2048))
+        .collect();
+    assert_eq!(flood_plan::island_pages(&apart.level, &pages).len(), 6);
 }

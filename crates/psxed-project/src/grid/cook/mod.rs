@@ -46,11 +46,15 @@ pub const MAX_ROOM_PAGES: usize = 255;
 /// Total chunk pages above which the cook warns that a level with an
 /// unbounded draw distance, which keeps every room resident, may not fit.
 pub const ALL_RESIDENT_ADVISORY_PAGES: usize = 512;
-/// KiB of room pool the editor playtest guest can link: the hex lane
-/// measured 546 to 552 KiB as the point where it stops linking. A level that
-/// streams by flood ([`crate::grid::world::FloodSettings`]) is refused when
-/// its busiest position needs more, and a level whose rooms total less is
-/// held whole.
+/// KiB of room pool the cook assumes when its caller does not know the guest
+/// it is cooking for: the hex lane measured 546 to 552 KiB as the point where
+/// a small editor playtest guest stops linking. It is a default, not a
+/// measurement of any one level: the editor Play path computes the room it
+/// really has (`playtest::heap_budget::pool_headroom_kib`) and cooks with
+/// [`cook_level_within`]. A level that streams by flood
+/// ([`crate::grid::world::FloodSettings`]) is refused when its busiest
+/// position needs more than the ceiling, and a level in one piece whose rooms
+/// total less is held whole.
 pub const GUEST_POOL_CEILING_KIB: usize = 550;
 
 /// Everything the cook needs besides the document.
@@ -258,8 +262,20 @@ fn pages(bytes: usize) -> usize {
 /// points (runtime units) is blocked, for the light bake; pass `None` for no
 /// shadows.
 pub fn cook_level(
+    input: CookInput<'_>,
+    occluded: Option<&dyn Fn([f64; 3], [f64; 3]) -> bool>,
+) -> Result<CookedLevel, String> {
+    cook_level_within(input, occluded, GUEST_POOL_CEILING_KIB)
+}
+
+/// [`cook_level`] for a guest whose room pool may take at most
+/// `pool_ceiling_kib` KiB: a flooded level is held whole only when it fits
+/// that and is in one piece, and is refused when its busiest position needs
+/// more.
+pub fn cook_level_within(
     mut input: CookInput<'_>,
     occluded: Option<&dyn Fn([f64; 3], [f64; 3]) -> bool>,
+    pool_ceiling_kib: usize,
 ) -> Result<CookedLevel, String> {
     let world = input.world;
     let issues = limits::validate(world);
@@ -340,6 +356,7 @@ pub fn cook_level(
             origins,
             cols,
             portal_world,
+            pool_ceiling_kib,
         )
     })?
 }
@@ -389,6 +406,7 @@ fn cook_rooms(
     origins: Vec<[i32; 3]>,
     mut cols: Vec<collision::Tables>,
     portal_world: &GridWorld,
+    pool_ceiling_kib: usize,
 ) -> Result<CookedLevel, String> {
     let mut materials = render::MaterialSet::default();
     let mut tables: Vec<RoomChunk> = Vec::new();
@@ -643,7 +661,7 @@ fn cook_rooms(
     };
     level.measure_chunks(&tables, chunks.iter().map(|c| pages(c.len())));
     if radii.flood.on {
-        let plan = flood_plan::plan(&level, &chunks, &radii.flood)?;
+        let plan = flood_plan::plan(&level, &chunks, &radii.flood, pool_ceiling_kib)?;
         // The core's own radii stay meaningful for the observers outside any
         // room: the draw distance is the flood's, the lead the rest of it.
         level.draw_far = radii.flood.near_radius;

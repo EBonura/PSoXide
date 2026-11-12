@@ -4,16 +4,18 @@
 //! with the same flood code the guest runs: the pool its busiest position
 //! needs must fit the memory the guest can link, and the quads in the view
 //! cone at the draw radius must fit the level's quad budget. A level that
-//! fits the pool whole gets a block that says so (`pool_cap_pages` 0) and the
-//! guest never floods it.
+//! fits the pool whole, and is in one piece, gets a block that says so
+//! (`pool_cap_pages` 0) and the guest never floods it. A level of several
+//! pieces with no portal between them (component rooms placed apart) is
+//! always flooded: the flood walks portals only, so the pieces the player is
+//! not in are never resident and the pool is sized by the worst piece, not by
+//! the sum of them.
 
 use psx_grid::write::{FloodBlock, LevelCore};
 use psx_grid::{FloodHeader, FLOOD_WEIGHT_ONE};
 
 use crate::grid::census::{draw_load, sample_cameras, Graph, LevelBlobs};
 use crate::grid::world::FloodSettings;
-
-use super::GUEST_POOL_CEILING_KIB;
 
 /// Seed of the camera samples the quad gate measures from.
 const SAMPLE_SEED: u64 = 12345;
@@ -33,12 +35,48 @@ pub(super) struct FloodPlan {
     pub notes: Vec<String>,
 }
 
+/// Pages of each island of the portal graph: the rooms reachable from one
+/// another through portals. A room with no portal is an island of its own.
+/// `pages` is the pages of each room chunk, in room order.
+pub(super) fn island_pages(level: &LevelCore, pages: &[usize]) -> Vec<usize> {
+    let mut parent: Vec<usize> = (0..level.rooms.len()).collect();
+    fn find(parent: &mut [usize], mut room: usize) -> usize {
+        while parent[room] != room {
+            parent[room] = parent[parent[room]];
+            room = parent[room];
+        }
+        room
+    }
+    for (room, record) in level.rooms.iter().enumerate() {
+        let first = usize::from(record.portal_first);
+        for portal in &level.portals[first..first + usize::from(record.portal_count)] {
+            let (a, b) = (
+                find(&mut parent, room),
+                find(&mut parent, usize::from(portal.dest)),
+            );
+            parent[a] = b;
+        }
+    }
+    let mut sums = vec![0usize; level.rooms.len()];
+    for (room, &p) in pages.iter().enumerate() {
+        let root = find(&mut parent, room);
+        sums[root] += p;
+    }
+    let mut islands: Vec<usize> = (0..level.rooms.len())
+        .filter(|&room| find(&mut parent, room) == room)
+        .map(|room| sums[room])
+        .collect();
+    islands.sort_unstable_by(|a, b| b.cmp(a));
+    islands
+}
+
 /// The flood block of `level` and its gates. `chunks` are the cooked room
-/// chunks, in room order.
+/// chunks, in room order; `ceiling_kib` is the most room pool the guest has.
 pub(super) fn plan(
     level: &LevelCore,
     chunks: &[Vec<u8>],
     settings: &FloodSettings,
+    ceiling_kib: usize,
 ) -> Result<FloodPlan, String> {
     if settings.res_radius < settings.near_radius {
         return Err(format!(
@@ -49,7 +87,8 @@ pub(super) fn plan(
     let pages: Vec<usize> = chunks.iter().map(|c| c.len().div_ceil(2048)).collect();
     let total: usize = pages.iter().sum();
     let largest = pages.iter().copied().max().unwrap_or(0);
-    let ceiling_pages = GUEST_POOL_CEILING_KIB / PAGE_KIB;
+    let ceiling_pages = ceiling_kib / PAGE_KIB;
+    let islands = island_pages(level, &pages);
     let mut block = FloodBlock {
         header: FloodHeader {
             pool_cap_pages: 0,
@@ -62,15 +101,29 @@ pub(super) fn plan(
         portal_weight: vec![FLOOD_WEIGHT_ONE; level.portals.len()],
     };
     let mut notes = Vec::new();
-    if total <= ceiling_pages {
+    if total <= ceiling_pages && islands.len() <= 1 {
         notes.push(format!(
-            "flood streaming: the rooms total {total} pages ({} KiB), which the {GUEST_POOL_CEILING_KIB} KiB pool holds whole; every room stays resident and the flood never runs",
+            "flood streaming: the rooms total {total} pages ({} KiB), which the {ceiling_kib} KiB pool holds whole; every room stays resident and the flood never runs",
             total * PAGE_KIB
         ));
         return Ok(FloodPlan { block, notes });
     }
+    if islands.len() > 1 {
+        notes.push(format!(
+            "flood streaming: {} islands with no portal between them ({} pages in the largest, {total} in all); only the island the player is in, and its flood, is ever resident",
+            islands.len(),
+            islands[0]
+        ));
+    }
     // The resident set may not take the page being installed's room.
     let budget = ceiling_pages.saturating_sub(largest).min(total);
+    if budget == 0 {
+        // A budget of 0 reads as "held whole" to the guest.
+        return Err(format!(
+            "flood streaming: the largest room takes {largest} pages ({} KiB) and the {ceiling_kib} KiB pool the guest has room for cannot hold it and a resident set beside it; cut the room smaller",
+            largest * PAGE_KIB
+        ));
+    }
     block.header.pool_cap_pages = u16::try_from(budget)
         .map_err(|_| format!("flood streaming: a budget of {budget} pages is above 65535"))?;
 
@@ -80,9 +133,9 @@ pub(super) fn plan(
     let blobs = LevelBlobs::new(&core, chunks);
     let view = blobs.view();
     let pool = psx_grid::stream::plan_pool(&view, &blobs.pages());
-    if pool.pool_pages * PAGE_KIB > GUEST_POOL_CEILING_KIB {
+    if pool.pool_pages * PAGE_KIB > ceiling_kib {
         return Err(format!(
-            "flood streaming: the busiest position keeps {} cells, {} pages ({} KiB) resident and the pool is {} KiB with the largest room, above the {GUEST_POOL_CEILING_KIB} KiB the guest links; lower the resident radius ({}) or cut the rooms smaller",
+            "flood streaming: the busiest position keeps {} cells, {} pages ({} KiB) resident and the pool is {} KiB with the largest room, above the {ceiling_kib} KiB the guest has room for; lower the resident radius ({}) or cut the rooms smaller",
             pool.peak_rooms,
             pool.peak_pages,
             pool.peak_pages * PAGE_KIB,
