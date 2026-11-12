@@ -68,21 +68,6 @@ fn any_world_material(project: &ProjectDocument) -> Option<ResourceId> {
     })
 }
 
-/// `world` with far panels on when `project`'s sky is a cube sky, which the
-/// panels need (they take the sky atlas's VRAM). The rest of the standard
-/// profile is already in the world; a project without a cube sky keeps panels
-/// off rather than cook a level that draws them over the wrong sky.
-pub(super) fn with_far_panels(project: &ProjectDocument, mut world: GridWorld) -> GridWorld {
-    let scene = project.active_scene();
-    let cube = scene
-        .world_sky_for_node(scene.root)
-        .is_some_and(|sky| sky.mode == crate::SkyMode::Cube);
-    if cube {
-        world.stream.flood.panels = super::world::WorldProfile::PANELS;
-    }
-    world
-}
-
 /// The starter room: a derived room of floor and ceiling. Its outline walls
 /// are the closure walls the room derives itself, in the wall material.
 pub fn starter_world(
@@ -119,8 +104,8 @@ pub fn attach_starter_world(project: &mut ProjectDocument) {
         find_material(project, &["Graybox / Ground 64"]).or_else(|| any_world_material(project));
     let walls = find_material(project, &["Graybox / Original 64"]).or(ground);
     let roof = find_material(project, &["Graybox / Cliff 64"]).or(ground);
-    let world = with_far_panels(project, starter_world(ground, walls, roof));
-    project.active_scene_mut().world = SceneWorld::Grid(world);
+    let scene = project.active_scene_mut();
+    scene.world = SceneWorld::Grid(starter_world(ground, walls, roof));
 }
 
 /// Turn `project` into a starter project in place: its level goes, its player
@@ -135,7 +120,7 @@ pub fn into_starter(project: &mut ProjectDocument) -> Result<(), StarterError> {
         find_material(project, &["Graybox / Ground 64"]).or_else(|| any_world_material(project));
     let walls = find_material(project, &["Graybox / Original 64"]).or(ground);
     let roof = find_material(project, &["Graybox / Cliff 64"]).or(ground);
-    let world = with_far_panels(project, starter_world(ground, walls, roof));
+    let world = starter_world(ground, walls, roof);
 
     let centre = SpawnRequest {
         room: 0,

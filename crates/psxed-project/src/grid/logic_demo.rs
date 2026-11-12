@@ -215,7 +215,7 @@ pub fn into_lever_doors(project: &mut ProjectDocument) -> Result<(), StarterErro
     let roof = find_material(project, &["Graybox / Cliff 64"]).or(ground);
     let signal = find_material(project, &["DP City / Bright Green Signal"]);
     let door_material = find_material(project, &["Graybox / Cliff 64", "Graybox / Original 64"]);
-    let world = super::starter::with_far_panels(project, lever_doors_world(ground, walls, roof));
+    let world = lever_doors_world(ground, walls, roof);
 
     // The player starts in room A, west end of the middle row.
     let spawn = SpawnRequest {

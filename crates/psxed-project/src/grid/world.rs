@@ -75,15 +75,13 @@ impl WorldProfile {
     /// and the Citadel's flood streaming (`projects/zz-far-s10`).
     ///
     /// Flood is on because every world streams by it (a world that does not
-    /// must hold all its rooms resident). Far panels are off here: they need a
-    /// cube sky, and the sky is a project resource that a world document cannot
-    /// promise. The project-level creation paths add them with
-    /// [`Self::PANELS`] when the project's sky is a cube sky
-    /// (`grid::starter::with_far_panels`).
-    /// Panel lattice spacing in sectors for a world whose project has a cube
-    /// sky: the Citadel's (`projects/zz-far-s10`).
-    pub const PANELS: u8 = 10;
-
+    /// must hold all its rooms resident). Far panels are off: they need a cube
+    /// sky (a project resource, which a world document cannot promise), they
+    /// bake a lattice of eyes at every cook and change the layout of the level
+    /// pack, and a new world's small room lies wholly inside `near_radius`, so
+    /// there is nothing beyond it to draw. A level that outgrows the near
+    /// radius sets `flood.panels` (the Citadel uses 10) in a project with a
+    /// cube sky.
     /// The standard profile.
     pub const STANDARD: Self = Self {
         shading: FacingShade::STRONG,

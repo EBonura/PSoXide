@@ -12,12 +12,10 @@ use crate::ProjectDocument;
 
 fn assert_standard(world: &GridWorld, path: &str) {
     let p = &WorldProfile::STANDARD;
-    // Far panels are the one field a project path sets from its sky.
-    let mut expected = p.stream;
-    expected.flood.panels = world.stream.flood.panels;
     assert_eq!(world.shading, p.shading, "{path}: shading");
     assert_eq!(world.global_light, p.global_light, "{path}: global light");
-    assert_eq!(world.stream, expected, "{path}: stream");
+    assert_eq!(world.stream, p.stream, "{path}: stream");
+    assert_eq!(world.stream.flood.panels, 0, "{path}: far panels are off");
     assert!(world.stream.flood.on, "{path}: flood streaming is on");
     assert!(world.global_light.enabled, "{path}: global light is on");
     assert!(!world.shading.is_off(), "{path}: facing shade is on");
@@ -147,27 +145,4 @@ fn a_new_project_with_the_profile_cooks() {
     let (package, report) = crate::playtest::build_package(&project, &base);
     assert!(report.is_ok(), "starter cook: {:?}", report.errors);
     assert!(package.is_some());
-}
-
-#[test]
-fn panels_follow_the_projects_sky() {
-    use crate::SkyMode;
-    let mut project = ProjectDocument::starter();
-    let panels = |p: &ProjectDocument| p.active_scene().world.grid().unwrap().stream.flood.panels;
-    let sky_mode = |p: &mut ProjectDocument, mode: SkyMode| {
-        let scene = p.active_scene_mut();
-        let root = scene.root;
-        if let Some(node) = scene.node_mut(root) {
-            if let crate::NodeKind::World { sky, .. } = &mut node.kind {
-                sky.mode = mode;
-            }
-        }
-    };
-    sky_mode(&mut project, SkyMode::Cube);
-    attach_starter_world(&mut project);
-    assert_eq!(panels(&project), WorldProfile::PANELS);
-    sky_mode(&mut project, SkyMode::Panorama);
-    attach_starter_world(&mut project);
-    assert_eq!(panels(&project), 0, "no cube sky, no panels");
-    assert_standard(project.active_scene().world.grid().unwrap(), "no cube sky");
 }
