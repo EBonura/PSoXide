@@ -86,6 +86,8 @@ fn resolve_material(material: &psx_grid::Material, textures_ready: bool) -> Opti
         } else {
             slot.texture_window.word()
         },
+        // `animate_materials` sets it each frame for a scrolling material.
+        scroll: 0,
     })
 }
 
@@ -152,4 +154,38 @@ pub(super) fn bind_pending(
         all_ready &= ready;
     }
     all_ready
+}
+
+/// Set the UV scroll of every resident, bound material that has a motion in
+/// the level's `grid_uv_motions` table, for the gameplay `tick`. Deterministic
+/// from the tick like the model path (`LevelMaterialUvMotion::offset_at_tick`);
+/// a level with no scrolling material returns at the first line.
+pub(super) fn animate_materials(
+    level: &LevelView<'static>,
+    resident: &mut ResidentRooms<'static>,
+    tick: u32,
+    video_hz: u16,
+) {
+    let motions = crate::level_data::GRID_UV_MOTIONS.as_slice();
+    if motions.is_empty() {
+        return;
+    }
+    for slot in resident.iter_mut().filter(|slot| slot.materials_ready) {
+        let Some(render) = slot.render else {
+            continue;
+        };
+        for (binding, &id) in slot.materials.iter_mut().zip(render.material_use) {
+            let index = level
+                .materials
+                .get(usize::from(id))
+                .map_or(0, |m| m.uv_motion);
+            let Some(motion) = index
+                .checked_sub(1)
+                .and_then(|at| motions.get(usize::from(at)))
+            else {
+                continue;
+            };
+            binding.set_scroll(motion.offset_at_tick(tick, video_hz));
+        }
+    }
 }

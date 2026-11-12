@@ -102,6 +102,7 @@ pub const LEN_ARCH_PROPS: usize = 0;
 pub const LEN_ARCH_PROP_SURFACES: usize = 0;
 pub const LEN_ARCH_PROP_COLLISIONS: usize = 0;
 pub const LEN_MODEL_INSTANCES: usize = 0;
+pub const LEN_GRID_UV_MOTIONS: usize = 0;
 pub const UI_PACK_START_LBA: u32 = 1024;
 pub static UI_PACK_TOC: &[LevelWorldPackEntryRecord] = &[];
 

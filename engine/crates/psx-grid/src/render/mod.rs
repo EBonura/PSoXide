@@ -105,6 +105,11 @@ pub struct GridMaterial {
     /// material's texture, or 0 when the texture has no window placement.
     /// Quads flagged [`QUAD2_REPEAT`] draw through it with raw UVs.
     pub window_word: u32,
+    /// This frame's UV scroll of an animated material, `u | v << 8` texels
+    /// already reduced to the texture's tile (each byte below its tile
+    /// size). Zero for a still material, which is nearly all of them. Only
+    /// `REPEAT` quads move; see [`Self::addressing`].
+    pub scroll: u16,
 }
 
 impl GridMaterial {
@@ -114,15 +119,91 @@ impl GridMaterial {
     /// window. A `REPEAT` quad keeps its UVs raw and selects the material's
     /// window, whose offset puts them back on the texture; `None` when the
     /// material has no window to repeat through.
+    ///
+    /// A scrolling material (`scroll != 0`) adds its offset to a `REPEAT`
+    /// quad's raw UVs. The texture window wraps them, so the picture flows
+    /// with no change to the geometry. A plain quad has no window to wrap
+    /// through and never moves; the cook marks every quad of a scrolling
+    /// material `REPEAT`. The still path pays one compare, on the `REPEAT`
+    /// branch only.
     #[inline(always)]
     pub(crate) fn addressing(&self, quad: &Quad, window_reset: u32) -> Option<(u32, u32)> {
         if quad.flags2 & QUAD2_REPEAT == 0 {
             Some((u32::from(self.uv_origin), window_reset))
         } else if self.window_word != 0 {
-            Some((0, self.window_word))
+            if self.scroll == 0 {
+                Some((0, self.window_word))
+            } else {
+                Some((self.scroll_origin(quad), self.window_word))
+            }
         } else {
             None
         }
+    }
+
+    /// Set the scroll from a texel offset (any `u8` per axis, as the level's
+    /// UV motion resolves it): reduced to this material's tile, so a wrapped
+    /// offset and its remainder draw the same. A material with no window
+    /// (`window_word == 0`) has no tile to wrap in and stays still.
+    pub fn set_scroll(&mut self, offset: [u8; 2]) {
+        if self.window_word == 0 {
+            self.scroll = 0;
+            return;
+        }
+        let tile = [self.window_word & 31, (self.window_word >> 5) & 31];
+        let reduce = |c: u8, mask: u32| (u32::from(c) & !(mask << 3) & 255) as u16;
+        self.scroll = reduce(offset[0], tile[0]) | (reduce(offset[1], tile[1]) << 8);
+    }
+
+    /// The UV offset that scrolls `quad` by this frame's `scroll`, as a value
+    /// to add to a packed `u | v << 8` corner (wrapping, so a negative axis
+    /// shift borrows nothing: both axes land inside `0..=255`).
+    ///
+    /// Packet UVs are bytes the GPU interpolates without wrapping, so a
+    /// corner may not wrap past 255 or below 0 on its own. The offset is
+    /// instead placed per axis: the quad's lowest UV moves to
+    /// `(lowest + scroll) mod tile`, the same picture the window shows for
+    /// `lowest + scroll`, and the rest follow. That lands the whole range in
+    /// `0..=255` as long as the quad spans at most `256 - tile` texels on the
+    /// axis, which the cook guarantees for a scrolling material (three
+    /// 64 texel tiles at most). A quad that does not fit on an axis stays
+    /// still on that axis rather than tearing.
+    #[inline(never)]
+    fn scroll_origin(&self, quad: &Quad) -> u32 {
+        let count = if quad.flags & QUAD_TRI != 0 { 3 } else { 4 };
+        let tile = [
+            256 - ((self.window_word & 31) << 3) as i32,
+            256 - (((self.window_word >> 5) & 31) << 3) as i32,
+        ];
+        let mut shift = [0i32; 2];
+        for axis in 0..2 {
+            let (mut lo, mut hi) = (255i32, 0i32);
+            for uv in &quad.uv[..count] {
+                let c = i32::from((uv >> (8 * axis)) as u8);
+                lo = lo.min(c);
+                hi = hi.max(c);
+            }
+            let scroll = i32::from((self.scroll >> (8 * axis)) as u8);
+            shift[axis] = scroll_shift(lo, hi, scroll, tile[axis]);
+        }
+        (shift[0] + (shift[1] << 8)) as u32
+    }
+}
+
+/// The UV shift of one axis of a scrolled `REPEAT` quad whose corners span
+/// `lo..=hi` texels, for a scroll of `scroll` texels in a texture window of
+/// `tile` texels (a power of two): the quad's lowest UV lands on
+/// `(lo + scroll) mod tile`, which draws what `lo + scroll` would through the
+/// window, and the whole span stays in `0..=255`. `0` (no scroll on this
+/// axis) when the span is too wide for the shift to fit a byte. The editor
+/// preview calls this too, so it moves exactly as the renderer does.
+#[inline(always)]
+pub fn scroll_shift(lo: i32, hi: i32, scroll: i32, tile: i32) -> i32 {
+    let d = ((lo + scroll) & (tile - 1)) - lo;
+    if hi + d > 255 {
+        0
+    } else {
+        d
     }
 }
 

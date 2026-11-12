@@ -3,7 +3,7 @@
 //! when a project is absent.
 
 use psx_grid::write::{aligned_copy, words_as_bytes};
-use psx_grid::{LevelView, RoomView};
+use psx_grid::{LevelView, RoomView, QUAD2_REPEAT};
 
 use super::*;
 use crate::grid::room::GridRoom;
@@ -30,6 +30,63 @@ impl MaterialBinder for TestBinder {
             texels: [64, 64],
         })
     }
+}
+
+/// Material 7 scrolls (motion 1); every other one is still.
+struct ScrollBinder;
+
+impl MaterialBinder for ScrollBinder {
+    fn bind(&mut self, material: Option<ResourceId>) -> Result<BoundMaterial, String> {
+        let mut bound = TestBinder.bind(material)?;
+        if material.is_some_and(|m| m.raw() == 7) {
+            bound.uv_motion = 1;
+        }
+        Ok(bound)
+    }
+}
+
+#[test]
+fn a_scrolling_material_carries_its_motion_and_cooks_every_quad_as_repeat() {
+    let world = box_room();
+    let cooked = cook_level(
+        CookInput {
+            world: &world,
+            binder: &mut ScrollBinder,
+            lights: &[],
+            first_pack_sector: 100,
+            lod_far_cells: lod::LOD_FAR_CELLS,
+            texture_repeat: true,
+        },
+        None,
+    )
+    .unwrap();
+    let (core, chunks) = read(&cooked);
+    let level = LevelView::parse(words_as_bytes(&core, cooked.core.len())).unwrap();
+    let room = RoomView::parse(words_as_bytes(&chunks[0], cooked.chunks[0].len())).unwrap();
+    room.validate_full(level.materials.len()).unwrap();
+    let mut scrolled = 0;
+    for quad in room.render.quads {
+        let used = room.render.material_use[usize::from(quad.material)];
+        let material = &level.materials[usize::from(used)];
+        if material.texture_asset == 7 {
+            assert_eq!(material.uv_motion, 1);
+            assert_ne!(quad.flags2 & QUAD2_REPEAT, 0, "a scrolling quad repeats");
+            for axis in 0..2 {
+                let uvs: Vec<u8> = quad.uv.iter().map(|uv| (uv >> (8 * axis)) as u8).collect();
+                let span = uvs.iter().max().unwrap() - uvs.iter().min().unwrap();
+                assert!(span <= 192, "room for the shift: {span}");
+            }
+            scrolled += 1;
+        } else {
+            assert_eq!(material.uv_motion, 0);
+            assert_eq!(
+                quad.flags2 & QUAD2_REPEAT,
+                0,
+                "a still single-tile quad is plain"
+            );
+        }
+    }
+    assert_eq!(scrolled, 6, "the six floors");
 }
 
 pub(crate) fn cook(world: &GridWorld) -> Result<CookedLevel, String> {

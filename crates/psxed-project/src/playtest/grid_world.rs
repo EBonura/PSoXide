@@ -81,6 +81,29 @@ struct Binder<'a> {
     /// Asset indices the level's materials use, in first-use order.
     used: Vec<usize>,
     warnings: Vec<String>,
+    /// UV-scroll recipes of the level's materials, deduplicated. A cooked
+    /// material's `uv_motion` is its position here plus one.
+    motions: Vec<crate::MaterialUvMotion>,
+}
+
+impl Binder<'_> {
+    /// The 1-based table index of a material's UV scroll, adding it when new.
+    fn motion_index(&mut self, authored: crate::MaterialUvMotion) -> Result<u8, String> {
+        // Mode UvScroll selects the recipe; its own `enabled` is the model
+        // path's switch.
+        let motion = crate::MaterialUvMotion {
+            enabled: true,
+            ..authored
+        };
+        let at = match self.motions.iter().position(|m| *m == motion) {
+            Some(at) => at,
+            None => {
+                self.motions.push(motion);
+                self.motions.len() - 1
+            }
+        };
+        u8::try_from(at + 1).map_err(|_| "more than 255 distinct material UV scrolls".to_string())
+    }
 }
 
 impl MaterialBinder for Binder<'_> {
@@ -132,6 +155,7 @@ impl MaterialBinder for Binder<'_> {
         let mut tint = [128; 3];
         let mut blend = PsxBlendMode::Opaque;
         let mut sided = MaterialFaceSidedness::Front;
+        let mut uv_motion = 0u8;
         let mut textured = false;
         let mut key = "@flat-white".to_string();
         let mut bytes = flat_white_psxt();
@@ -146,7 +170,9 @@ impl MaterialBinder for Binder<'_> {
             tint = data.tint;
             blend = data.blend_mode;
             sided = data.sidedness();
-            if data.animation.mode != MaterialAnimationMode::Static {
+            if data.animation.mode == MaterialAnimationMode::UvScroll {
+                uv_motion = self.motion_index(data.animation.uv_scroll)?;
+            } else if data.animation.mode != MaterialAnimationMode::Static {
                 self.warnings.push(format!(
                     "material {:?} is animated; the grid renderer draws it still",
                     resource.name
@@ -222,7 +248,7 @@ impl MaterialBinder for Binder<'_> {
                 PsxBlendMode::Subtract => 3,
                 PsxBlendMode::AddQuarter => 4,
             },
-            uv_motion: 0,
+            uv_motion,
             tint,
             textured,
             texels: [width, height],
@@ -262,6 +288,7 @@ pub(super) fn cook(
         by_path: texture_asset_for_path,
         used: Vec::new(),
         warnings: Vec::new(),
+        motions: Vec::new(),
     };
     let cooked = cook::cook_level_within(
         CookInput {
@@ -276,6 +303,7 @@ pub(super) fn cook(
         pool_ceiling_kib,
     );
     let used = std::mem::take(&mut binder.used);
+    let uv_motions = std::mem::take(&mut binder.motions);
     for warning in std::mem::take(&mut binder.warnings) {
         report.warn(format!("grid world: {warning}"));
     }
@@ -406,6 +434,7 @@ pub(super) fn cook(
         record_lens: Vec::new(),
         pool,
         texture_asset_indices: used,
+        uv_motions,
         faces: cooked.report.rooms.iter().map(surfaces).sum(),
         triangles: cooked
             .report
@@ -1046,6 +1075,7 @@ pub fn cook_for_cards(
         by_path: &mut by_path,
         used: Vec::new(),
         warnings: Vec::new(),
+        motions: Vec::new(),
     };
     let cooked = cook::cook_level(
         CookInput {
@@ -1357,6 +1387,7 @@ pub fn cook_level_bytes(
         by_path: &mut by_path,
         used: Vec::new(),
         warnings: Vec::new(),
+        motions: Vec::new(),
     };
     let mut stand_in = StandInBinder;
     let binder: &mut dyn MaterialBinder = match binding {
@@ -1510,6 +1541,54 @@ mod tests {
         assert!(grid.rooms.starts_with(b"PGRM"));
         assert_eq!(grid.rooms.len() % SECTOR_BYTES, 0);
         assert!(grid.faces > 0 && grid.max_room_surfaces <= grid.faces);
+    }
+
+    #[test]
+    fn a_uv_scroll_material_reaches_the_grid_materials_and_the_level_records() {
+        let (dir, mut project) = starter_project("scroll");
+        let motion = crate::MaterialUvMotion {
+            enabled: false,
+            speed_u_q8: 5 * 256,
+            speed_v_q8: -256,
+            phase_u: 3,
+            phase_v: 0,
+        };
+        for resource in &mut project.resources {
+            if let ResourceData::Material(material) = &mut resource.data {
+                material.animation.mode = MaterialAnimationMode::UvScroll;
+                material.animation.uv_scroll = motion;
+            }
+        }
+        let (package, report) = super::super::build_package(&project, &dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(report.is_ok(), "{:?}", report.error_messages());
+        assert!(
+            !report.warnings.iter().any(|w| w.contains("draws it still")),
+            "UV scroll is animated by the grid renderer"
+        );
+        let package = package.expect("a package");
+        // One recipe shared by every material, `enabled` forced on by the mode.
+        assert_eq!(
+            package.world_geometry.uv_motions,
+            [crate::MaterialUvMotion {
+                enabled: true,
+                ..motion
+            }]
+        );
+        let core = psx_grid::write::aligned_copy(&package.world_geometry.core);
+        let bytes = psx_grid::write::words_as_bytes(&core, package.world_geometry.core.len());
+        let level = psx_grid::LevelView::parse(bytes).expect("the core parses");
+        let textured: Vec<_> = level
+            .materials
+            .iter()
+            .filter(|m| m.tex_shape != 0)
+            .collect();
+        assert!(!textured.is_empty());
+        assert!(textured.iter().all(|m| m.uv_motion == 1));
+        let records = super::super::tests::decode_level_records(&package);
+        assert_eq!(records.grid_uv_motions.len(), 1);
+        assert_eq!(records.grid_uv_motions[0].speed_u_q8, 5 * 256);
+        assert!(records.grid_uv_motions[0].enabled);
     }
 
     #[test]

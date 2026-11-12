@@ -49,7 +49,7 @@ use psx_residency::{CategoryConfig, Class, Wanted};
 use crate::generated::{
     GRID_ROOM_COUNT, GRID_ROOM_ENTRIES, GRID_ROOM_POOL_PAGES, WORLD_PACK_START_LBA,
 };
-use crate::grid_materials::{bind_pending, Pending};
+use crate::grid_materials::{animate_materials, bind_pending, Pending};
 use crate::level_data::WORLD_OBJECTS;
 use crate::world_common::{
     view_camera, world_view_rotation, CountingTraceProvider, VisibilityBounds,
@@ -1111,7 +1111,8 @@ impl GridRuntime {
         &mut self,
         camera: WorldCamera,
         _visibility_origin: Option<RoomPoint>,
-        _material_tick: u32,
+        material_tick: u32,
+        video_hz: u16,
         _destructibles: &RuntimeDestructibles<{ psx_level::MAX_DESTRUCTIBLES }>,
         primitive_packets: &mut PrimitivePacketArena<'_>,
         ot: &mut OtFrame<'_, DEPTH>,
@@ -1152,6 +1153,7 @@ impl GridRuntime {
         ];
         let sector = self.level.sector_units() as i32;
 
+        animate_materials(&self.level, &mut self.resident, material_tick, video_hz);
         primitive_packets.try_fence_completed();
         if !self.fits_before_fence(primitive_packets) {
             primitive_packets.fence();
