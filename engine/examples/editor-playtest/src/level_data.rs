@@ -18,8 +18,8 @@ use psx_level::{
     LevelArchPropCollisionRecord, LevelArchPropRecord, LevelArchPropSurfaceRecord,
     LevelBoxPropRecord, LevelBoxPropSurfaceRecord, LevelCylinderPropRecord,
     LevelCylinderPropSurfaceRecord, LevelDestructibleRecord, LevelGameEntityRecord,
-    LevelImagePropRecord, LevelLogicRecord, LevelMaterialUvMotion, LevelModelInstanceRecord, LevelRoomRecord,
-    LevelVitalityCircleRecord, LevelWorldObjectRecord, ParticleEmitterRecord,
+    LevelImagePropRecord, LevelLogicRecord, LevelMaterialUvMotion, LevelModelInstanceRecord,
+    LevelRoomRecord, LevelVitalityCircleRecord, LevelWorldObjectRecord, ParticleEmitterRecord,
     PlayerControllerRecord, PlayerSpawnRecord, PointLightRecord, StableId,
 };
 

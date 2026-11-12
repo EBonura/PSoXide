@@ -1568,12 +1568,19 @@ mod tests {
         // One recipe shared by every material, `enabled` forced on by the mode.
         assert_eq!(
             package.world_geometry.uv_motions,
-            [crate::MaterialUvMotion { enabled: true, ..motion }]
+            [crate::MaterialUvMotion {
+                enabled: true,
+                ..motion
+            }]
         );
         let core = psx_grid::write::aligned_copy(&package.world_geometry.core);
         let bytes = psx_grid::write::words_as_bytes(&core, package.world_geometry.core.len());
         let level = psx_grid::LevelView::parse(bytes).expect("the core parses");
-        let textured: Vec<_> = level.materials.iter().filter(|m| m.tex_shape != 0).collect();
+        let textured: Vec<_> = level
+            .materials
+            .iter()
+            .filter(|m| m.tex_shape != 0)
+            .collect();
         assert!(!textured.is_empty());
         assert!(textured.iter().all(|m| m.uv_motion == 1));
         let records = super::super::tests::decode_level_records(&package);

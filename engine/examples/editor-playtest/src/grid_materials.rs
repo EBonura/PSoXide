@@ -175,7 +175,10 @@ pub(super) fn animate_materials(
             continue;
         };
         for (binding, &id) in slot.materials.iter_mut().zip(render.material_use) {
-            let index = level.materials.get(usize::from(id)).map_or(0, |m| m.uv_motion);
+            let index = level
+                .materials
+                .get(usize::from(id))
+                .map_or(0, |m| m.uv_motion);
             let Some(motion) = index
                 .checked_sub(1)
                 .and_then(|at| motions.get(usize::from(at)))

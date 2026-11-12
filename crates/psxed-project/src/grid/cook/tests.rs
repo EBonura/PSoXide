@@ -79,7 +79,11 @@ fn a_scrolling_material_carries_its_motion_and_cooks_every_quad_as_repeat() {
             scrolled += 1;
         } else {
             assert_eq!(material.uv_motion, 0);
-            assert_eq!(quad.flags2 & QUAD2_REPEAT, 0, "a still single-tile quad is plain");
+            assert_eq!(
+                quad.flags2 & QUAD2_REPEAT,
+                0,
+                "a still single-tile quad is plain"
+            );
         }
     }
     assert_eq!(scrolled, 6, "the six floors");

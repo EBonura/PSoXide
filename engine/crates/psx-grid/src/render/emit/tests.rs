@@ -440,7 +440,10 @@ fn a_scrolling_repeat_quad_moves_with_the_offset_and_wraps_with_the_tile() {
 fn a_repeat_quad_too_wide_to_shift_stays_still_instead_of_tearing() {
     // 255 texels wide: no shift fits a byte, so the axis holds still.
     let (repeat, _) = scrolled(255, [10, 0], [-120, 40, 40]);
-    assert_eq!(corner_uvs(&repeat), [(255, 0), (0, 0), (255, 255), (0, 255)]);
+    assert_eq!(
+        corner_uvs(&repeat),
+        [(255, 0), (0, 0), (255, 255), (0, 255)]
+    );
 }
 
 #[test]
