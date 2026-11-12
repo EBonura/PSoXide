@@ -272,6 +272,11 @@ pub const TIGHT_SPARE_BYTES: usize = 24 * 1024;
 /// stays the exact answer.
 #[must_use]
 pub fn refusal(package: &PlaytestPackage) -> Option<String> {
+    // `PSOXIDE_HEAP_ESTIMATE=link` leaves the verdict to the link-time guard (the exact answer),
+    // for a level the estimate refuses and the link would accept (and to measure the model).
+    if std::env::var("PSOXIDE_HEAP_ESTIMATE").is_ok_and(|v| v == "link") {
+        return None;
+    }
     let Err(message) = estimate(package)? else {
         return None;
     };
