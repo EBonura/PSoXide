@@ -28,7 +28,7 @@ use crate::*;
 pub const MAGIC: [u8; 4] = *b"PXLR";
 /// Version of the layout below. Bump it whenever a record or the table list
 /// changes.
-pub const VERSION: u16 = 4;
+pub const VERSION: u16 = 5;
 
 /// A cursor over the chunk's bytes. The bytes live for the whole run, so a
 /// string decoded from them can be `&'static`.
@@ -442,6 +442,7 @@ level_tables! {
     table arch_prop_surfaces: LevelArchPropSurfaceRecord;
     table arch_prop_collisions: LevelArchPropCollisionRecord;
     table model_instances: LevelModelInstanceRecord;
+    table grid_uv_motions: LevelMaterialUvMotion;
     one player_spawn: PlayerSpawnRecord;
     one player_controller: Option<PlayerControllerRecord>;
     one world_message: Option<InteractableMessageRecord>;
@@ -699,6 +700,7 @@ mod tests {
             arch_prop_surfaces: &[],
             arch_prop_collisions: &[],
             model_instances: &[],
+            grid_uv_motions: &[],
             player_spawn: spawn,
             player_controller: None,
             world_message: None,

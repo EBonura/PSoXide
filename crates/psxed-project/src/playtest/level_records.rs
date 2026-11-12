@@ -51,6 +51,7 @@ pub struct OwnedLevelRecords {
     arch_prop_surfaces: Vec<LevelArchPropSurfaceRecord>,
     arch_prop_collisions: Vec<LevelArchPropCollisionRecord>,
     model_instances: Vec<LevelModelInstanceRecord>,
+    grid_uv_motions: Vec<LevelMaterialUvMotion>,
     player_spawn: PlayerSpawnRecord,
     player_controller: Option<PlayerControllerRecord>,
     world_message: Option<InteractableMessageRecord>,
@@ -616,6 +617,12 @@ impl OwnedLevelRecords {
                     flags: inst.flags,
                 })
                 .collect(),
+            grid_uv_motions: package
+                .world_geometry
+                .uv_motions
+                .iter()
+                .map(uv_motion)
+                .collect(),
             player_spawn: spawn_record(spawn),
             player_controller: package.player_controller.map(|pc| PlayerControllerRecord {
                 spawn: spawn_record(pc.spawn),
@@ -656,6 +663,7 @@ impl OwnedLevelRecords {
             arch_prop_surfaces: &self.arch_prop_surfaces,
             arch_prop_collisions: &self.arch_prop_collisions,
             model_instances: &self.model_instances,
+            grid_uv_motions: &self.grid_uv_motions,
             player_spawn: self.player_spawn,
             player_controller: self.player_controller,
             world_message: self.world_message,

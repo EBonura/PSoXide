@@ -37,7 +37,9 @@ pub struct BoundMaterial {
     pub flags: u16,
     /// 0 opaque, 1 average, 2 add, 3 subtract, 4 add-quarter.
     pub blend: u8,
-    /// UV-motion table index, 0 none.
+    /// UV-motion table index (1 based into the level's `grid_uv_motions`),
+    /// 0 none. A scrolling material cooks every primitive as `REPEAT`, at
+    /// most three tiles per axis, so the renderer can move it.
     pub uv_motion: u8,
     /// Modulation colour, `[128; 3]` neutral.
     pub tint: [u8; 3],
@@ -63,6 +65,12 @@ impl BoundMaterial {
     /// Whether a primitive of this material may carry the `REPEAT` flag.
     pub fn can_repeat(&self) -> bool {
         self.tex_shape() != 0
+    }
+
+    /// Whether the renderer scrolls this material: it has a motion and a
+    /// texture the window can repeat.
+    pub fn scrolls(&self) -> bool {
+        self.uv_motion != 0 && self.can_repeat()
     }
 }
 
@@ -197,8 +205,7 @@ struct Rebased {
 /// then clamped so the last tile an axis touches never reaches the first
 /// texel of the next one. With `repeat` an axis may touch up to four tiles
 /// (`REPEAT` primitive, raw UVs); otherwise one, as before.
-fn rebase_texels(texels: &[[f64; 2]], repeat: bool) -> Rebased {
-    let limit = uv_split::tiles_per_primitive(repeat);
+fn rebase_texels(texels: &[[f64; 2]], limit: i64, force_repeat: bool) -> Rebased {
     let mut uvs = texels.to_vec();
     let mut overflow = false;
     let mut tiles = [1i64; 2];
@@ -222,7 +229,7 @@ fn rebase_texels(texels: &[[f64; 2]], repeat: bool) -> Rebased {
             .map(|uv| [uv[0].round() as u8, uv[1].round() as u8])
             .collect(),
         overflow,
-        repeat: tiles.iter().any(|&t| t > 1),
+        repeat: force_repeat || tiles.iter().any(|&t| t > 1),
     }
 }
 
@@ -331,7 +338,9 @@ impl RoomBuild {
                 extra_flags,
             );
         }
-        let pieces = uv_split::split(face, cx.world.scale, cx.repeat && bound.can_repeat());
+        let repeat = cx.repeat && bound.can_repeat();
+        let tiles = uv_split::tiles_for(repeat, bound.scrolls());
+        let pieces = uv_split::split_tiles(face, cx.world.scale, tiles);
         self.tables.stats.uv_split_quads += pieces.len() - 1;
         // The face counts once, however many primitives it became.
         let faces_before = self.tables.stats.faces;
@@ -447,7 +456,9 @@ impl RoomBuild {
         // UVs per kept corner.
         let mut texels: Vec<[f64; 2]> = keep.iter().map(|&i| face.texels[i]).collect();
         let rebased = if bound.textured {
-            rebase_texels(&texels, cx.repeat && bound.can_repeat())
+            let repeat = cx.repeat && bound.can_repeat();
+            let scrolls = repeat && bound.scrolls();
+            rebase_texels(&texels, uv_split::tiles_for(repeat, scrolls), scrolls)
         } else {
             Rebased {
                 uv: vec![[0, 0]; texels.len()],

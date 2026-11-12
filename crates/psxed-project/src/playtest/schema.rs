@@ -312,6 +312,9 @@ pub struct PlaytestGridWorld {
     pub pool: psx_grid::stream::PoolPlan,
     /// Texture assets the level's materials use.
     pub texture_asset_indices: Vec<usize>,
+    /// UV-scroll recipes of the level's materials, in the order `Material::uv_motion`
+    /// indexes them (1 based). Written as the records' `grid_uv_motions` table.
+    pub uv_motions: Vec<crate::MaterialUvMotion>,
     /// Cooked surfaces (quads and triangles) over all rooms.
     pub faces: usize,
     /// Triangles the cooked surfaces amount to (a quad is two).

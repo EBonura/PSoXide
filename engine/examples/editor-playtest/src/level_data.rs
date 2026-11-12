@@ -18,7 +18,7 @@ use psx_level::{
     LevelArchPropCollisionRecord, LevelArchPropRecord, LevelArchPropSurfaceRecord,
     LevelBoxPropRecord, LevelBoxPropSurfaceRecord, LevelCylinderPropRecord,
     LevelCylinderPropSurfaceRecord, LevelDestructibleRecord, LevelGameEntityRecord,
-    LevelImagePropRecord, LevelLogicRecord, LevelModelInstanceRecord, LevelRoomRecord,
+    LevelImagePropRecord, LevelLogicRecord, LevelMaterialUvMotion, LevelModelInstanceRecord, LevelRoomRecord,
     LevelVitalityCircleRecord, LevelWorldObjectRecord, ParticleEmitterRecord,
     PlayerControllerRecord, PlayerSpawnRecord, PointLightRecord, StableId,
 };
@@ -172,6 +172,7 @@ level_statics! {
     table ARCH_PROP_SURFACES: arch_prop_surfaces: LevelArchPropSurfaceRecord = LEN_ARCH_PROP_SURFACES;
     table ARCH_PROP_COLLISIONS: arch_prop_collisions: LevelArchPropCollisionRecord = LEN_ARCH_PROP_COLLISIONS;
     table MODEL_INSTANCES: model_instances: LevelModelInstanceRecord = LEN_MODEL_INSTANCES;
+    table GRID_UV_MOTIONS: grid_uv_motions: LevelMaterialUvMotion = LEN_GRID_UV_MOTIONS;
     value PLAYER_SPAWN: player_spawn: PlayerSpawnRecord = PlayerSpawnRecord {
         room: psx_level::RoomIndex(0),
         x: 0,
@@ -227,6 +228,7 @@ mod fixture {
                 arch_prop_surfaces: &[],
                 arch_prop_collisions: &[],
                 model_instances: &[],
+                grid_uv_motions: &[],
                 player_spawn: PLAYER_SPAWN,
                 player_controller: None,
                 world_message: WORLD_MESSAGE,

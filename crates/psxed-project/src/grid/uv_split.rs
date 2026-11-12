@@ -27,6 +27,12 @@ use super::uv::TILE_TEXELS;
 /// clamped to 255).
 pub const MAX_TILES_PER_PRIMITIVE: i64 = 4;
 
+/// Most tiles one primitive of a UV-scrolling material holds per axis. The
+/// renderer shifts the UVs by up to a tile less one texel and the packet
+/// bytes end at 255, so the primitive must span at most `256 - 64` texels:
+/// three tiles (see `GridMaterial::scroll_origin` in `psx-grid`).
+pub const SCROLL_TILES_PER_PRIMITIVE: i64 = 3;
+
 /// Most pieces one face is cut into; a face asking for more is left whole
 /// (and counted as an overflow by the cook).
 pub const MAX_PIECES: i64 = 1024;
@@ -63,6 +69,15 @@ pub fn fits(texels: &[[f64; 2]], tiles: i64) -> bool {
 /// repeat through the texture window.
 pub fn wants_split(face: &GridFace, repeat: bool) -> bool {
     !fits(&face.texels, tiles_per_primitive(repeat))
+}
+
+/// Tiles per axis a primitive holds when the material may also scroll.
+pub const fn tiles_for(repeat: bool, scrolling: bool) -> i64 {
+    if repeat && scrolling {
+        SCROLL_TILES_PER_PRIMITIVE
+    } else {
+        tiles_per_primitive(repeat)
+    }
 }
 
 /// Tiles per axis a primitive holds.
@@ -146,10 +161,15 @@ fn clip(poly: &[Vert], axis: usize, bound: f64, keep_above: bool) -> Vec<Vert> {
 /// piece count is the fewest the limit allows. Returns the face itself when
 /// it needs no cut or would need more than [`MAX_PIECES`].
 pub fn split(face: &GridFace, scale: GridScale, repeat: bool) -> Vec<GridFace> {
-    if !wants_split(face, repeat) {
+    split_tiles(face, scale, tiles_per_primitive(repeat))
+}
+
+/// [`split`] with the per-axis tile limit given: `tiles_for(repeat, scrolling)`.
+pub fn split_tiles(face: &GridFace, scale: GridScale, tiles: i64) -> Vec<GridFace> {
+    if fits(&face.texels, tiles) {
         return vec![face.clone()];
     }
-    let step = tiles_per_primitive(repeat);
+    let step = tiles;
     let range = |axis: usize| {
         let (min, max) = bounds(&face.texels, axis);
         let first = (min / TILE_TEXELS).floor() as i64;
@@ -291,6 +311,26 @@ mod tests {
                 assert_eq!(split(&faces[0], UNIT, repeat).len(), 1);
             }
         }
+    }
+
+    #[test]
+    fn a_scrolling_material_cuts_into_pieces_of_at_most_three_tiles() {
+        assert_eq!(tiles_for(true, true), 3);
+        assert_eq!(tiles_for(true, false), MAX_TILES_PER_PRIMITIVE);
+        assert_eq!(tiles_for(false, true), 1);
+        let face = fit_face(8, 2);
+        let pieces = split_tiles(&face, UNIT, tiles_for(true, true));
+        // 8 by 2 tiles in pieces of 3 by 3 (clamped): 3 by 1.
+        assert_eq!(pieces.len(), 3);
+        for piece in &pieces {
+            for axis in 0..2 {
+                let (lo, hi) = span(piece, axis);
+                // Three tiles, 192 texels, so a shift of up to 63 stays in a byte.
+                assert!(hi - lo <= 192.0 + 1e-9, "{piece:?}");
+            }
+        }
+        let total: f64 = pieces.iter().map(area).sum();
+        assert!((total - 1024.0 * 1024.0).abs() < 1.0, "{total}");
     }
 
     #[test]

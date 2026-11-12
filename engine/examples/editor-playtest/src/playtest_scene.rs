@@ -285,6 +285,7 @@ impl Playtest {
         camera: WorldCamera,
         room_record: Option<&LevelRoomRecord>,
         sim_tick: SimTick,
+        video_hz: u16,
         primitive_packets: &mut PrimitivePacketArena<'_>,
         ot: &mut OtFrame<'_, OT_DEPTH>,
     ) {
@@ -304,6 +305,7 @@ impl Playtest {
                 camera,
                 cinematic_visibility,
                 material_tick,
+                video_hz,
                 &self.destructibles,
                 primitive_packets,
                 ot,
@@ -1257,6 +1259,7 @@ impl Scene for Playtest {
                 camera,
                 room_record,
                 ctx.sim_tick,
+                ctx.video_hz.as_u16(),
                 &mut primitive_packets,
                 &mut ot,
             );
@@ -1628,6 +1631,7 @@ impl Scene for Playtest {
                 camera,
                 room_record,
                 ctx.sim_tick,
+                ctx.video_hz.as_u16(),
                 &mut primitive_packets,
                 &mut ot,
             );

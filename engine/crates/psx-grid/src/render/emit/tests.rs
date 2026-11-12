@@ -22,6 +22,7 @@ fn material() -> GridMaterial {
         command_bits: 0,
         resident: true,
         window_word: WINDOW,
+        scroll: 0,
     }
 }
 
@@ -121,6 +122,16 @@ fn draw_screens_with(
     eye: [i32; 3],
     switches: u32,
 ) -> (GridFrame, Vec<u32>, Vec<(u32, u16)>) {
+    draw_chunk(chunk, eye, switches, material())
+}
+
+/// [`draw_screens_with`] through the given material binding.
+fn draw_chunk(
+    chunk: Vec<u8>,
+    eye: [i32; 3],
+    switches: u32,
+    material: GridMaterial,
+) -> (GridFrame, Vec<u32>, Vec<(u32, u16)>) {
     let words = aligned_copy(&chunk);
     let bytes = words_as_bytes(&words, words.len() * 4);
     let room = RoomView::parse(bytes).expect("room parses");
@@ -149,7 +160,7 @@ fn draw_screens_with(
     };
     let mut renderer = GridRenderer::for_rooms(core::iter::once(&room));
     let mut out = vec![0u32; 4096];
-    let frame = renderer.draw_room(&room, &camera, &[material()], &mut out, false);
+    let frame = renderer.draw_room(&room, &camera, &[material], &mut out, false);
     out.truncate(frame.packet_words);
     let screens = renderer.screen.iter().map(|s| (s.sxy, s.sz)).collect();
     (frame, out, screens)
@@ -353,4 +364,93 @@ fn a_switched_plane_is_drawn_only_while_its_slot_says_so() {
         "an inverted plane shows while the slot is off"
     );
     assert_eq!(packets(off, 1 << 5), 0);
+}
+
+/// The packet of the repeating quad when the material scrolls by `offset`
+/// (raw, as the level's UV motion gives it), and the plain quad's packet.
+fn scrolled(far: u8, offset: [u8; 2], eye: [i32; 3]) -> (Vec<u32>, Vec<u32>) {
+    let mut bound = material();
+    bound.set_scroll(offset);
+    let (frame, stream, _) = draw_chunk(chunk(far), eye, 0, bound);
+    assert_eq!(frame.packets, 2, "{frame:?}");
+    let packets = packets(&stream);
+    let repeat = packets.iter().find(|p| p[1] == WINDOW).expect("repeat");
+    let plain = packets
+        .iter()
+        .find(|p| p[1] == TextureWindow::NONE.word())
+        .expect("plain");
+    (repeat.to_vec(), plain.to_vec())
+}
+
+/// Corner UVs of a quad packet as `(u, v)`, in the packet's 1, 0, 2, 3 order.
+fn corner_uvs(p: &[u32]) -> [(u8, u8); 4] {
+    [4, 7, 10, 13].map(|at| (p[at] as u8, (p[at] >> 8) as u8))
+}
+
+#[test]
+fn set_scroll_reduces_the_offset_to_the_materials_tile() {
+    let mut m = material();
+    m.set_scroll([200, 70]);
+    assert_eq!(m.scroll, (200 % 64) | ((70 % 64) << 8));
+    m.set_scroll([64, 128]);
+    assert_eq!(m.scroll, 0);
+    m.window_word = 0;
+    m.set_scroll([5, 5]);
+    assert_eq!(m.scroll, 0, "a material with no window stays still");
+    // A 128 by 32 window: masks 0b10000 (x) and 0b11100 (y).
+    m.window_word = 0xE200_0000 | 0b10000 | (0b11100 << 5);
+    m.set_scroll([255, 255]);
+    assert_eq!(m.scroll, 127 | (31 << 8));
+}
+
+#[test]
+fn a_scrolling_repeat_quad_moves_with_the_offset_and_wraps_with_the_tile() {
+    // Three tiles of a 64 texel texture: the widest a scrolling material is
+    // cooked to, so every offset fits.
+    let far = 191;
+    let eye = [-120, 40, 40];
+    let (still, still_plain) = scrolled(far, [0, 0], eye);
+    assert_eq!(corner_uvs(&still), [(far, 0), (0, 0), (far, far), (0, far)]);
+    let mut lows = Vec::new();
+    for offset in 0..=255u8 {
+        let (repeat, plain) = scrolled(far, [offset, 0], eye);
+        let uv = corner_uvs(&repeat);
+        // Corner 0 holds the lowest u: it sits at the offset modulo the tile.
+        assert_eq!(uv[1].0, offset % 64, "offset {offset}");
+        // The span is kept, whole, inside the byte.
+        assert_eq!(uv[0].0 - uv[1].0, far, "offset {offset}");
+        // The other axis does not move.
+        assert_eq!(uv[1].1, 0);
+        assert_eq!(uv[3].1, far);
+        // A plain quad never scrolls.
+        assert_eq!(plain, still_plain);
+        lows.push(uv[1].0);
+    }
+    // One full tile later the picture is where it began.
+    assert_eq!(lows[64], lows[0]);
+    assert_eq!(lows[10], 10);
+    // Both axes at once.
+    let (both, _) = scrolled(far, [3, 7], eye);
+    let uv = corner_uvs(&both);
+    assert_eq!((uv[1].0, uv[1].1), (3, 7));
+    assert_eq!(uv[2], (3 + far, 7 + far));
+}
+
+#[test]
+fn a_repeat_quad_too_wide_to_shift_stays_still_instead_of_tearing() {
+    // 255 texels wide: no shift fits a byte, so the axis holds still.
+    let (repeat, _) = scrolled(255, [10, 0], [-120, 40, 40]);
+    assert_eq!(corner_uvs(&repeat), [(255, 0), (0, 0), (255, 255), (0, 255)]);
+}
+
+#[test]
+fn a_scrolling_quad_on_the_near_plane_path_still_draws() {
+    let mut bound = material();
+    bound.set_scroll([13, 21]);
+    let (still, ..) = draw_chunk(chunk(191), [70, 40, 40], 0, material());
+    let (moving, stream, _) = draw_chunk(chunk(191), [70, 40, 40], 0, bound);
+    assert!(moving.robust_quads >= 1, "{moving:?}");
+    assert_eq!(moving.packets, still.packets);
+    let packets = packets(&stream);
+    assert!(packets.iter().any(|p| p[1] == WINDOW));
 }
