@@ -91,15 +91,8 @@ pub fn starter_world(
         scale: STARTER_SCALE,
         texels_per_sector: super::units::SectorTexels::DEFAULT,
         rooms: vec![room],
-        // A new world shades faces by the way they face, so a step or a
-        // platform reads even under one lamp.
-        shading: super::light::FacingShade::SUBTLE,
-        // ...and gathers its light (ambient occlusion, sky and bounce).
-        global_light: super::lighting::GlobalLight::NEW_WORLD,
-        stream: super::world::StreamRadii::DEFAULT,
-        mesh_assets: Vec::new(),
-        level_names: Default::default(),
-        palette_pins: Vec::new(),
+        // The standard profile: flood streaming, facing shade, global light.
+        ..GridWorld::standard()
     }
 }
 

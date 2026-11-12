@@ -132,12 +132,7 @@ pub fn lever_doors_world(
         scale: STARTER_SCALE,
         texels_per_sector: super::units::SectorTexels::DEFAULT,
         rooms,
-        shading: super::light::FacingShade::SUBTLE,
-        global_light: super::lighting::GlobalLight::NEW_WORLD,
-        stream: super::world::StreamRadii::DEFAULT,
-        mesh_assets: Vec::new(),
-        level_names: Default::default(),
-        palette_pins: Vec::new(),
+        ..GridWorld::standard()
     }
 }
 

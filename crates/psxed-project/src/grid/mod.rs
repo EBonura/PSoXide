@@ -120,6 +120,8 @@ mod leaf_face_tests;
 #[cfg(test)]
 mod leaf_tests;
 #[cfg(test)]
+mod profile_tests;
+#[cfg(test)]
 mod seam_tests;
 #[cfg(test)]
 mod span_face_tests;
@@ -157,4 +159,4 @@ pub use slope::SlopeClass;
 pub use surface::{GridSplit, GridSurface, GridTri, GridWall, WallFacing};
 pub use units::{GridScale, SectorTexels, CLICK_UNITS, FINE_UNITS, SECTOR_UNITS};
 pub use visual::{LogicVisibility, VisualSlots};
-pub use world::{GridWorld, SceneWorld, StreamRadii};
+pub use world::{GridWorld, SceneWorld, StreamRadii, WorldProfile};

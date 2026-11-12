@@ -588,7 +588,10 @@ fn a_grid_world_rides_world_pack_with_the_core_first_and_one_chunk_per_room() {
     let package = cooked_starter("layout");
     let world = &package.world_geometry;
     let chunks = world_pack_chunks(&package);
-    assert_eq!(chunks.len(), 2 + world.room_chunks.len());
+    // The core, the records, the rooms and, in a ring world over a cube sky
+    // (the standard profile's), a baked sky per room after them.
+    let skies = world.chunk_skies.iter().filter(|s| !s.is_empty()).count();
+    assert_eq!(chunks.len(), 2 + world.room_chunks.len() + skies);
     // The level's own records are chunk 1, ahead of the rooms.
     assert_eq!((chunks[1].0, chunks[1].1), (1, world.records.as_slice()));
     assert!(world.records.starts_with(b"PXLR"));
@@ -650,7 +653,13 @@ fn the_world_chunks_land_in_stream_chunks_in_pack_order() {
     }
     let order = std::fs::read_to_string(dir.join(WORLD_PACK_ORDER_FILENAME)).unwrap();
     let ids: Vec<&str> = order.lines().filter(|l| !l.starts_with('#')).collect();
-    let expected: Vec<String> = (0..package.world_geometry.room_chunks.len() + 2)
+    let skies = package
+        .world_geometry
+        .chunk_skies
+        .iter()
+        .filter(|s| !s.is_empty())
+        .count();
+    let expected: Vec<String> = (0..package.world_geometry.room_chunks.len() + 2 + skies)
         .map(|id| id.to_string())
         .collect();
     assert_eq!(ids, expected);
