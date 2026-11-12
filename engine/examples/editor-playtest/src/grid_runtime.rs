@@ -391,6 +391,32 @@ impl GridRuntime {
         telemetry::stage_begin(telemetry::stage::CD_ROOM_CHUNK_LOAD);
         self.stream_inner(player, camera, demand_only);
         telemetry::stage_end(telemetry::stage::CD_ROOM_CHUNK_LOAD);
+        self.report_residency();
+    }
+
+    /// Publish which rooms are resident, every tick (the streamer's own counters are written only
+    /// on a step, which a settled level skips): the count, the set as a bitset of room indices
+    /// (rooms 0..63) and the room the player is in. This is the telemetry log's proof that a
+    /// level of separate pieces keeps only the player's piece in memory.
+    fn report_residency(&self) {
+        let (mut mask_lo, mut mask_hi) = (0u32, 0u32);
+        for slot in self.resident.iter() {
+            match slot.room {
+                room @ 0..=31 => mask_lo |= 1 << room,
+                room @ 32..=63 => mask_hi |= 1 << (room - 32),
+                _ => {}
+            }
+        }
+        telemetry::counter(
+            telemetry::counter::ROOM_STREAM_RESIDENT_SLOTS,
+            self.resident.len() as u32,
+        );
+        telemetry::counter(telemetry::counter::ROOM_STREAM_RESIDENT_MASK_LO, mask_lo);
+        telemetry::counter(telemetry::counter::ROOM_STREAM_RESIDENT_MASK_HI, mask_hi);
+        telemetry::counter(
+            telemetry::counter::ROOM_PLAYER_ROOM_INDEX,
+            self.stream_hint as u32,
+        );
     }
 
     /// Plan distance inside which a room is drawn whole for certain, so the stream keeps its
@@ -517,18 +543,6 @@ impl GridRuntime {
             telemetry::counter::ROOM_STREAM_RESIDENT_SLOTS,
             self.resident.len() as u32,
         );
-        // Which rooms those are, as a bitset of room indices (rooms 0..63): the telemetry log's
-        // proof that a level of separate pieces keeps only the player's piece in memory.
-        let (mut mask_lo, mut mask_hi) = (0u32, 0u32);
-        for slot in self.resident.iter() {
-            match slot.room {
-                room @ 0..=31 => mask_lo |= 1 << room,
-                room @ 32..=63 => mask_hi |= 1 << (room - 32),
-                _ => {}
-            }
-        }
-        telemetry::counter(telemetry::counter::ROOM_STREAM_RESIDENT_MASK_LO, mask_lo);
-        telemetry::counter(telemetry::counter::ROOM_STREAM_RESIDENT_MASK_HI, mask_hi);
         if evicted || installed {
             self.materials_epoch = None;
         }
