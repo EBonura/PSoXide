@@ -610,6 +610,9 @@ pub fn plan_pool(level: &LevelView<'_>, room_pages: &[usize]) -> PoolPlan {
     let mut wanted = Vec::new();
     let mut peak = (0usize, 0usize);
     let mut most_rooms = 0usize;
+    // Per island (see [`island_of`]): the most pages a position in it wants.
+    let island = island_of(level);
+    let mut island_peak = vec![0usize; level.rooms.len()];
     let mut try_at = |window: &mut StreamWindow, room: usize, at: [i32; 3]| {
         window.invalidate();
         window.wanted(level, Some((room, at)), Some((room, at)), &mut wanted);
@@ -620,6 +623,8 @@ pub fn plan_pool(level: &LevelView<'_>, room_pages: &[usize]) -> PoolPlan {
         if pages > peak.0 {
             peak = (pages, wanted.len());
         }
+        let slot = &mut island_peak[island[room]];
+        *slot = (*slot).max(pages);
         most_rooms = most_rooms.max(wanted.len());
     };
     for room in 0..level.rooms.len() {
@@ -668,13 +673,66 @@ pub fn plan_pool(level: &LevelView<'_>, room_pages: &[usize]) -> PoolPlan {
     // A ring or flood level's wanted set already holds the rooms it will need
     // next (the lead), so it needs room for one more chunk landing, not half
     // its peak again.
-    plan.pool_pages = if window.ring || window.flood.is_some() {
+    plan.pool_pages = if window.flood.is_some() {
+        // A flood walks portals only, so the rooms wanted at a position are all in the
+        // observer's island and the pool is sized by the worst island, not by the level.
+        // An island of one room never has a chunk landing beside its resident set (it is
+        // the whole set), so it needs exactly its room; a larger island needs its peak
+        // plus room for one more of its own chunks landing. Moving to another island
+        // (a warp, a respawn) wants a disjoint set: the old island's rooms are beyond the
+        // keep radius, the first tier the residency engine evicts, so the pool need not
+        // hold both.
+        let mut total = vec![0usize; level.rooms.len()];
+        let mut count = vec![0usize; level.rooms.len()];
+        let mut largest = vec![0usize; level.rooms.len()];
+        for (room, &pages) in room_pages.iter().enumerate().take(level.rooms.len()) {
+            let i = island[room];
+            total[i] += pages;
+            count[i] += 1;
+            largest[i] = largest[i].max(pages);
+        }
+        (0..level.rooms.len())
+            .filter(|&i| count[i] > 0)
+            .map(|i| {
+                if count[i] == 1 {
+                    total[i]
+                } else {
+                    (island_peak[i] + largest[i]).min(total[i])
+                }
+            })
+            .max()
+            .unwrap_or(0)
+    } else if window.ring {
         peak.0 + max_room_pages
     } else {
         peak.0 + peak.0 / 2 + max_room_pages
     }
     .min(total_pages);
     plan
+}
+
+/// The island each room belongs to: rooms joined through portals share one, and a room with
+/// no portal is an island of its own. The value is a room index of the island (its root).
+pub fn island_of(level: &LevelView<'_>) -> Vec<usize> {
+    fn find(parent: &mut [usize], mut room: usize) -> usize {
+        while parent[room] != room {
+            parent[room] = parent[parent[room]];
+            room = parent[room];
+        }
+        room
+    }
+    let count = level.rooms.len();
+    let mut parent: Vec<usize> = (0..count).collect();
+    for room in 0..count {
+        for portal in level.room_portals(room) {
+            let dest = usize::from(portal.dest);
+            if dest < count {
+                let (a, b) = (find(&mut parent, room), find(&mut parent, dest));
+                parent[a] = b;
+            }
+        }
+    }
+    (0..count).map(|room| find(&mut parent, room)).collect()
 }
 
 /// The room that contains `point`, from the level core alone (no chunk needs

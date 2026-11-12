@@ -203,7 +203,7 @@ fn separate_islands_stream_even_when_they_would_fit_whole() {
         .warnings
         .iter()
         .any(|w| w.contains("12 islands")));
-    // The pool is the worst island plus the largest room, not the sum.
+    // The pool is the worst island, not the sum: a one-room island has nothing landing beside it.
     let chunks: Vec<usize> = cooked
         .chunks
         .iter()
@@ -211,7 +211,7 @@ fn separate_islands_stream_even_when_they_would_fit_whole() {
         .collect();
     let plan = psx_grid::stream::plan_pool(&level, &chunks);
     assert_eq!(plan.peak_rooms, 1, "one island, one room, at a time");
-    assert_eq!(plan.pool_pages, chunks[0] + plan.max_room_pages);
+    assert_eq!(plan.pool_pages, plan.max_room_pages);
     assert!(plan.pool_pages < chunks.iter().sum::<usize>());
 }
 

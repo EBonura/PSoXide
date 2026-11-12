@@ -423,6 +423,9 @@ fn finish_budget(
         report.error(message);
         return (None, report);
     }
+    if let Some(note) = package.as_ref().and_then(heap_budget::tight_note) {
+        report.warn(note);
+    }
     (package, report)
 }
 

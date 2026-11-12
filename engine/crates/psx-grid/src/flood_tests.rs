@@ -532,9 +532,30 @@ fn rooms_with_no_portal_to_the_player_are_never_wanted_and_never_sized_into_the_
             wanted.iter().map(|w| w.room).collect::<Vec<_>>()
         );
     }
-    // The pool is one island and one more room, not the sum of both.
+    // The pool is one island (it holds the whole island, so no landing room beside it), not the
+    // sum of both.
     let plan = plan_pool(&level, &[3usize; 8]);
     assert_eq!(plan.peak_pages, 4 * 3);
-    assert_eq!(plan.pool_pages, 4 * 3 + 3);
+    assert_eq!(plan.pool_pages, 4 * 3);
     assert!(plan.pool_pages < 8 * 3);
+}
+
+#[test]
+fn islands_of_one_room_are_sized_by_the_worst_room_and_bigger_islands_keep_a_landing_room() {
+    // Two islands of one room each, 3 pages: nothing ever lands beside a resident set, and a
+    // move to the other island evicts the first (it is far off, so beyond every keep radius).
+    let words = two_islands(1, 3, block(100, 40, 40, 0));
+    let level = view(&words);
+    let plan = plan_pool(&level, &[3usize; 2]);
+    assert_eq!(plan.pool_pages, 3);
+    // Islands of three rooms keep the peak plus a landing room of their own.
+    let words = two_islands(3, 3, block(100, 40, 40, 8));
+    let level = view(&words);
+    let plan = plan_pool(&level, &[3usize; 6]);
+    assert!(plan.pool_pages >= plan.peak_pages);
+    assert!(plan.pool_pages <= 3 * 3);
+    let mut roots = crate::stream::island_of(&level);
+    roots.sort_unstable();
+    roots.dedup();
+    assert_eq!(roots.len(), 2);
 }

@@ -53,37 +53,77 @@ fn value(budget: &str, key: &str) -> Option<u64> {
     })
 }
 
+/// Address the guest's image starts at (`LOAD_ADDR` in `sdk/psoxide.ld`): the heap starts at this
+/// plus the linked image (code, data, bss and the room pool).
+pub const IMAGE_BASE: u64 = 0x8001_0000;
+
+/// Where the heap ends, as an image size: the bytes of RAM the image and the heap share.
+pub const RAM_BYTES: u64 = HEAP_END - IMAGE_BASE;
+
 /// Check `map` against `budget`; the message on a failure.
 ///
 /// # Errors
 /// The message naming the level, the bytes short and what uses the RAM when the heap is short.
 pub fn check(map: &str, budget: &str) -> Result<String, String> {
+    if value(budget, "need").unwrap_or(0) == 0 {
+        return Ok("heap guard: no cooked grid level, nothing to check".into());
+    }
+    let (start, _) =
+        heap_range(map).ok_or("heap guard: the link map has no __heap_start/__heap_end")?;
+    verdict(budget, start, Some(map), "")
+}
+
+/// The guard's verdict for a heap that starts at `heap_start` (the end is [`HEAP_END`]): the one
+/// computation the link-time guard and the cook's own check share, so a level the cook passes is
+/// a level the guard passes whenever `heap_start` is the link's. `map` adds what uses the RAM to
+/// the refusal when the link is at hand; `source` is appended to the refusal's first words (the
+/// cook says its figure is an estimate).
+///
+/// # Errors
+/// The message naming the level, the bytes short and what uses the RAM when the heap is short.
+pub fn verdict(
+    budget: &str,
+    heap_start: u64,
+    map: Option<&str>,
+    source: &str,
+) -> Result<String, String> {
     let need = value(budget, "need").unwrap_or(0);
     if need == 0 {
         return Ok("heap guard: no cooked grid level, nothing to check".into());
     }
-    let (start, end) =
-        heap_range(map).ok_or("heap guard: the link map has no __heap_start/__heap_end")?;
+    let (start, end) = (heap_start, HEAP_END);
     let heap = end.saturating_sub(start);
     let required = need + MARGIN_BYTES;
     let level = budget
         .lines()
         .find_map(|line| line.strip_prefix("level="))
         .unwrap_or("?");
+    // The cook writes its estimate of the linked image (pool included); with the link at hand the
+    // difference is printed, so a drifting model is seen on the next build.
+    let drift = match (map, value(budget, "image_estimate")) {
+        (Some(_), Some(estimate)) => format!(
+            "; the cook estimated an image of {estimate} B, the link has {} B ({:+} B)",
+            start.saturating_sub(IMAGE_BASE),
+            start.saturating_sub(IMAGE_BASE) as i64 - estimate as i64
+        ),
+        _ => String::new(),
+    };
     if heap >= required {
         return Ok(format!(
-            "heap guard: level '{level}' needs {need} B (+{MARGIN_BYTES} margin), the heap is {heap} B: {} B to spare",
+            "heap guard{source}: level '{level}' needs {need} B (+{MARGIN_BYTES} margin), the heap is {heap} B: {} B to spare{drift}",
             heap - required
         ));
     }
     let pool = value(budget, "pool").unwrap_or(0);
-    let arenas = symbol_size(map, "RUNTIME_ARENAS").unwrap_or(0);
-    let scene = symbol_size(map, "SCENE").unwrap_or(0);
-    let image = start.saturating_sub(0x8001_0000);
+    let arenas = map
+        .and_then(|m| symbol_size(m, "RUNTIME_ARENAS"))
+        .unwrap_or(0);
+    let scene = map.and_then(|m| symbol_size(m, "SCENE")).unwrap_or(0);
+    let image = start.saturating_sub(IMAGE_BASE);
     Err(format!(
-        "heap guard: level '{level}' will run out of heap: it needs {need} B (renderer scratch {}, resident table {}, fixed {}) plus a {MARGIN_BYTES} B margin, \
+        "heap guard{source}: level '{level}' will run out of heap: it needs {need} B (renderer scratch {}, resident table {}, fixed {}) plus a {MARGIN_BYTES} B margin, \
          and the link leaves {heap} B, short by {} B. The RAM goes to: room pool {pool} B ({} rooms), runtime arenas {arenas} B, \
-         scene {scene} B; the whole linked image (code, data and bss) is {} B. \
+         scene {scene} B; the whole linked image (code, data and bss) is {} B{drift}. \
          Fewer or smaller rooms shrink the pool, a level that cannot hold all its rooms at once should stream by flood, and the largest room sets the renderer scratch.",
         value(budget, "renderer").unwrap_or(0),
         value(budget, "resident_table").unwrap_or(0),

@@ -836,6 +836,7 @@ version = "0.1.0"
 dependencies = [
  "flate2",
  "image",
+ "psoxide-hazard",
  "psx-anim-tracks",
  "psx-asset",
  "psx-audio-cook",

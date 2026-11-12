@@ -861,4 +861,59 @@ mod tests {
         assert_eq!(summary.issued, 0);
         assert_eq!(summary.missing, 1);
     }
+
+    /// One frame loop for rooms of different sizes: step, finish every read (the payload names
+    /// its room), step again, install. Returns the rooms resident after.
+    fn run_sized<const E: usize>(
+        s: &mut GridStreamer<E, Script>,
+        t: &mut Script,
+        rooms: &[RoomRecord],
+        wanted: &[Wanted],
+    ) -> Vec<u16> {
+        for _ in 0..32 {
+            s.step(t, rooms, wanted, &|_| u32::MAX, &mut |_| {});
+            for n in t.pending() {
+                let lba = t.reqs[n].lba;
+                let room = rooms
+                    .iter()
+                    .position(|r| BASE + r.pack_sector == lba)
+                    .unwrap() as u32;
+                t.finish(n, room);
+            }
+            s.step(t, rooms, wanted, &|_| u32::MAX, &mut |_| {});
+            while s.install_next(&mut |_, _| true).is_some() {}
+        }
+        let mut resident: Vec<u16> = (0..rooms.len() as u16)
+            .filter(|&r| s.is_resident(r))
+            .collect();
+        resident.sort_unstable();
+        resident
+    }
+
+    #[test]
+    fn a_pool_the_size_of_the_biggest_island_holds_a_move_between_islands_of_different_sizes() {
+        // Island A is one room of 5 pages, island B two rooms of 3 and 4 pages (7 in all), so the
+        // cook sizes the pool at 7 pages (the worst island, nothing beside it). Moving between the
+        // islands wants disjoint sets; the rooms left behind are beyond the keep radius and are
+        // evicted, whatever order the rooms were laid out in the pool, in both directions and
+        // with the second island asked for at lead class as well as demand.
+        let mut rooms = rooms(3, 1);
+        let sizes = [5u16, 3, 4];
+        let mut sector = 0;
+        for (room, &pages) in rooms.iter_mut().zip(&sizes) {
+            room.pack_sector = sector;
+            room.pack_sectors = pages;
+            sector += u32::from(pages);
+        }
+        let mut t = Script::default();
+        let mut s = streamer::<3>(7);
+        let a = [want(0, Class::Demand, 0)];
+        let b = [want(1, Class::Demand, 0), want(2, Class::Lead, 100)];
+        for _ in 0..3 {
+            assert_eq!(run_sized(&mut s, &mut t, &rooms, &a), vec![0]);
+            assert_eq!(run_sized(&mut s, &mut t, &rooms, &b), vec![1, 2]);
+            assert!(s.pages_in_use() <= 7);
+        }
+        assert_eq!(s.counters().failed_installs, 0);
+    }
 }

@@ -22,6 +22,8 @@ psx-iso      = { path = "../psx-iso" }
 psx-hw       = { path = "../psx-hw" }
 psx-audio-cook = { path = "../psx-audio-cook" }
 psx-level    = { path = "../../engine/crates/psx-level", features = ["wire"] }
+# The link-time heap guard's own arithmetic, so the cook's check cannot drift from it.
+psoxide-hazard = { path = "../../tools/psoxide-hazard" }
 flate2 = "1.1"
 image.workspace = true
 ron = "0.8"
