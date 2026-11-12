@@ -179,6 +179,8 @@ pub struct Context<'a> {
     /// window (up to four tiles per axis). Off, every primitive holds one
     /// tile, which is how format version 2 levels were cooked.
     pub repeat: bool,
+    /// The slots of the level's logic-switched planes and meshes.
+    pub slots: crate::grid::visual::VisualSlots,
 }
 
 /// Packed UVs of a primitive and how it addresses its texture.
@@ -653,7 +655,16 @@ pub fn build(
         }
         let count = u8::try_from(count)
             .map_err(|_| format!("room {room_index} plane {index}: {count} quads, at most 255"))?;
-        let reference = plane_ref(cx, room, index, origin, first as u16, count, build.range)?;
+        let plane = &room.planes[index];
+        if plane.shown_by.is_some() && plane.collision != crate::grid::plane::PlaneCollision::Decor
+        {
+            return Err(format!(
+                "room {room_index} plane {index} is switched by logic but has collision; \
+                 a switched plane only changes what is drawn, so make it Decor"
+            ));
+        }
+        let mut reference = plane_ref(cx, room, index, origin, first as u16, count, build.range)?;
+        reference.flags = cx.slots.flags(plane.shown_by.as_ref());
         build.tables.plane_refs.push(reference);
     }
     // Static meshes follow the planes: an instance is one more run of quads
@@ -689,10 +700,16 @@ pub fn build(
             .map_err(|_| format!("room {room_index} mesh {id}: {count} quads, at most 255"))?;
         let span = placed_mesh(cx.world, room_index, index)
             .map_or(([0; 2], [0; 2]), |p| p.mesh.cell_span(&p.built));
-        build
-            .tables
-            .plane_refs
-            .push(run_ref(room, span, first as u16, count, build.range));
+        let instance = &room.meshes[index];
+        if instance.shown_by.is_some() && instance.collide {
+            return Err(format!(
+                "room {room_index} mesh {id} is switched by logic but collides; \
+                 a switched mesh only changes what is drawn, so turn its collision off"
+            ));
+        }
+        let mut reference = run_ref(room, span, first as u16, count, build.range);
+        reference.flags = cx.slots.flags(instance.shown_by.as_ref());
+        build.tables.plane_refs.push(reference);
     }
     build.tables.material_use = (0..=255u8)
         .filter(|m| build.used[usize::from(*m)])

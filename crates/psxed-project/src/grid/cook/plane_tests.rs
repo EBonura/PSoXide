@@ -282,3 +282,60 @@ fn the_camera_passes_through_see_through_planes_by_default_and_the_flag_override
     assert!(!flagged(wall(Some(rid(9)), Some(false))));
     assert!(flagged(wall(Some(rid(8)), Some(true))));
 }
+
+fn beam() -> GridPlane {
+    // A fullbright, additive-style decor plane a logic node shows.
+    let mut plane = GridPlane::new([1536, 512, 1536], [1024, 1024]);
+    plane.fullbright = true;
+    plane.double_sided = true;
+    plane.material = Some(rid(8));
+    plane
+}
+
+#[test]
+fn a_plane_shown_by_logic_cooks_its_slot_into_the_run_and_others_stay_unswitched() {
+    use crate::grid::LogicVisibility;
+    use psx_grid::visual_switch;
+    let mut world = ditch_world();
+    let mut lit = beam();
+    lit.shown_by = Some(LogicVisibility::while_on("gate"));
+    let mut dark = beam();
+    dark.center = [2560, 512, 1536];
+    dark.shown_by = Some(LogicVisibility {
+        source: "gate".into(),
+        invert: true,
+    });
+    let mut other = beam();
+    other.center = [3584, 512, 1536];
+    other.shown_by = Some(LogicVisibility::while_on("alarm"));
+    world.rooms[0].planes.extend([lit, dark, other, beam()]);
+    let cooked = cook(&world).unwrap();
+    let level = LevelView::parse(leak(&cooked.core)).unwrap();
+    let room = RoomView::parse(leak(&cooked.chunks[0])).unwrap();
+    room.validate_full(level.materials.len()).unwrap();
+    let flags: Vec<u8> = room.render.plane_refs.iter().map(|r| r.flags).collect();
+    assert_eq!(
+        flags,
+        vec![
+            visual_switch::encode(0, false),
+            visual_switch::encode(0, true),
+            visual_switch::encode(1, false),
+            0
+        ],
+        "one slot per node name, in the order the planes are met"
+    );
+}
+
+#[test]
+fn a_plane_that_is_switched_and_solid_is_refused() {
+    use crate::grid::LogicVisibility;
+    let mut world = ditch_world();
+    let mut wall = beam();
+    wall.collision = PlaneCollision::Solid;
+    wall.shown_by = Some(LogicVisibility::while_on("gate"));
+    world.rooms[0].planes.push(wall);
+    let error = cook(&world)
+        .err()
+        .expect("a solid switched plane does not cook");
+    assert!(error.contains("switched by logic"), "{error}");
+}

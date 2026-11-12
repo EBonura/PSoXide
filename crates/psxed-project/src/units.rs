@@ -221,7 +221,7 @@ fn scale_node(node: &mut SceneNode) {
             settings.spawn_radius = div_u16(settings.spawn_radius);
         }
         NodeKind::Logic { kind, .. } => match kind {
-            LogicNodeKind::TriggerVolume { size } => {
+            LogicNodeKind::TriggerVolume { size } | LogicNodeKind::Hazard { size, .. } => {
                 for axis in size.iter_mut() {
                     *axis = div_u16_min1(*axis);
                 }
@@ -231,7 +231,9 @@ fn scale_node(node: &mut SceneNode) {
                     slide.distance = div_u16_min1(slide.distance);
                 }
             }
-            LogicNodeKind::Relay | LogicNodeKind::Multisource { .. } => {}
+            LogicNodeKind::Relay
+            | LogicNodeKind::Multisource { .. }
+            | LogicNodeKind::Timer { .. } => {}
         },
         NodeKind::Animator { action_clips, .. } => {
             for clip in action_clips.iter_mut() {

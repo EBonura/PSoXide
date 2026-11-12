@@ -1183,6 +1183,7 @@ pub(crate) fn push_particle_emitter(
     texture_asset_for_path: &mut HashMap<String, usize>,
     assets: &mut Vec<PlaytestAsset>,
     particle_emitters: &mut Vec<PlaytestParticleEmitter>,
+    visual_slots: &mut crate::grid::VisualSlots,
     report: &mut PlaytestValidationReport,
 ) -> bool {
     if !settings.enabled {
@@ -1228,6 +1229,7 @@ pub(crate) fn push_particle_emitter(
                 report,
             )
         }),
+        visual: visual_slots.flags(settings.shown_by.as_ref()),
         flags: particle_emitter_flags::ENABLED,
     });
     true
@@ -1473,6 +1475,7 @@ pub(crate) fn push_interactable(
         reward_flag: psx_level::POI_FLAG_NONE,
         reward_resource: psx_level::POI_REWARD_NONE,
         reward_quantity: 0,
+        reward_abilities: 0,
         flags,
     });
     // The paired event-graph record: same authored source, interned
@@ -1494,6 +1497,7 @@ pub(crate) fn push_interactable(
         wait_ticks: switch_wait,
         arg0: handle_args.0,
         arg1: handle_args.1,
+        arg2: 0,
         link: psx_level::LOGIC_LINK_NONE,
         message,
         x: pos[0],
@@ -1573,9 +1577,22 @@ pub(crate) fn push_point_of_interest(
         return false;
     };
 
-    let (reward_resource, reward_quantity) = match component.reward {
-        None => (psx_level::POI_REWARD_NONE, 0),
+    let (reward_resource, reward_quantity, reward_abilities) = match component.reward {
+        None => (psx_level::POI_REWARD_NONE, 0, 0),
+        Some(reward) if !reward.has_item() => {
+            // A fragment: abilities and no item.
+            let abilities = reward.abilities.bits();
+            if abilities == 0 {
+                report.error(format!(
+                    "Point of Interest on '{node_name}' has a reward with no item name \
+                     and no abilities, so it gives nothing"
+                ));
+                return false;
+            }
+            (psx_level::POI_REWARD_NONE, 0, abilities)
+        }
         Some(reward) => {
+            let abilities = reward.abilities.bits();
             if reward.quantity != 1 {
                 report.error(format!(
                     "Point of Interest on '{node_name}' grants a unique module, so reward quantity must be 1"
@@ -1679,7 +1696,7 @@ pub(crate) fn push_point_of_interest(
                 effect_summary,
                 percentages,
             });
-            (index, 1)
+            (index, 1, abilities)
         }
     };
 
@@ -1716,13 +1733,14 @@ pub(crate) fn push_point_of_interest(
         logic: psx_level::INTERACTABLE_LOGIC_NONE,
         checkpoint_id: component.persistence_id.to_string(),
         read_flag,
-        reward_flag: if reward_resource == psx_level::POI_REWARD_NONE {
+        reward_flag: if reward_resource == psx_level::POI_REWARD_NONE && reward_abilities == 0 {
             psx_level::POI_FLAG_NONE
         } else {
             reward_flag
         },
         reward_resource,
         reward_quantity,
+        reward_abilities,
         flags,
     });
     true
@@ -1958,6 +1976,7 @@ pub(crate) fn push_logic_node(
         wait_ticks,
         arg0: 0,
         arg1: 0,
+        arg2: 0,
         link: psx_level::LOGIC_LINK_NONE,
         message: psx_level::INTERACTABLE_MESSAGE_NONE,
         x: pos[0],
@@ -2112,6 +2131,71 @@ pub(crate) fn push_logic_node(
                 node_name: node_name.to_string(),
             });
         }
+        crate::LogicNodeKind::Timer {
+            on_ticks,
+            off_ticks,
+            phase_ticks,
+            running,
+        } => {
+            if *on_ticks == 0 || *off_ticks == 0 {
+                report.error(format!(
+                    "Timer '{node_name}' is on for {on_ticks} ticks and off for {off_ticks} \
+                     (both must be > 0, or it never changes)"
+                ));
+                return false;
+            }
+            if record.target == psx_level::LOGIC_NAME_NONE
+                && record.killtarget == psx_level::LOGIC_NAME_NONE
+            {
+                report.warn(format!(
+                    "Timer '{node_name}' has no target; only planes, meshes or emitters \
+                     shown by it will follow it"
+                ));
+            }
+            record.kind = psx_level::logic_kind::TIMER;
+            record.arg0 = *on_ticks;
+            record.arg1 = *off_ticks;
+            record.arg2 = *phase_ticks;
+            if *running {
+                record.flags |= psx_level::logic_flags::START_ON;
+            }
+        }
+        crate::LogicNodeKind::Hazard {
+            size,
+            damage,
+            interval_ticks,
+            start_on,
+        } => {
+            if size[0] == 0 || size[1] == 0 || size[2] == 0 {
+                report.error(format!(
+                    "Hazard '{node_name}' has a zero-size extent \
+                     (must be > 0 on every axis)"
+                ));
+                return false;
+            }
+            if *damage == 0 || *interval_ticks == 0 {
+                report.error(format!(
+                    "Hazard '{node_name}' deals {damage} damage every {interval_ticks} ticks \
+                     (both must be > 0)"
+                ));
+                return false;
+            }
+            record.kind = psx_level::logic_kind::HAZARD;
+            record.arg0 = *damage;
+            record.arg1 = *interval_ticks;
+            if *start_on {
+                record.flags |= psx_level::logic_flags::START_ON;
+            }
+            // Floor-anchored center, like a trigger volume.
+            let half_x = i32::from(size[0]) / 2;
+            let half_z = i32::from(size[2]) / 2;
+            record.min = [pos[0] - half_x, pos[1], pos[2] - half_z];
+            record.max = [
+                pos[0] + half_x,
+                pos[1] + i32::from(size[1]),
+                pos[2] + half_z,
+            ];
+        }
     }
     logic.push(record);
     true
@@ -2169,6 +2253,42 @@ pub(crate) fn resolve_door_links(
         }
     }
     ok
+}
+
+/// Resolve each visual-switch slot's node name to the logic record it
+/// follows. A name that matches no logic record is a cook error: a plane
+/// shown by a node that is not there would be hidden for good. Two records
+/// sharing the name follow the first, like a target fires every record of
+/// its name but a visual can only follow one state.
+pub(crate) fn resolve_visual_links(
+    slots: &crate::grid::VisualSlots,
+    logic: &[PlaytestLogic],
+    names: &mut NameInterner,
+    report: &mut PlaytestValidationReport,
+) -> Option<Vec<u16>> {
+    if let Some(message) = slots.overflow() {
+        report.error(message);
+        return None;
+    }
+    let mut links = Vec::with_capacity(slots.names().len());
+    let mut ok = true;
+    for name in slots.names() {
+        let id = names.intern(name);
+        let found = logic.iter().position(|record| {
+            record.targetname == id && record.kind != psx_level::logic_kind::NONE
+        });
+        match found {
+            Some(index) => links.push(index as u16),
+            None => {
+                report.error(format!(
+                    "a plane, mesh or particle emitter is shown by '{name}', which is not a \
+                     placed Logic node (Timer, Door, Hazard, ...) or Switch interactable"
+                ));
+                ok = false;
+            }
+        }
+    }
+    ok.then_some(links)
 }
 
 /// Every switch must fire something that exists: a target naming no cooked
@@ -2727,6 +2847,7 @@ mod message_page_tests {
             reward_flag: 1,
             reward_resource: psx_level::POI_REWARD_NONE,
             reward_quantity: 0,
+            reward_abilities: 0,
             flags: psx_level::interactable_flags::ENABLED,
         };
         let mut report = PlaytestValidationReport::default();
@@ -3394,5 +3515,282 @@ mod persistence_cook_tests {
         ));
         assert!(check_switch_targets(&logic, &names, &mut report));
         assert!(report.warnings.iter().any(|w| w.contains("not persistent")));
+    }
+}
+
+#[cfg(test)]
+mod gates_cook_tests {
+    use super::*;
+    use crate::{LogicNodeKind, PlayerAbilities, PointOfInterestReward};
+
+    fn cook_logic(
+        name: &str,
+        kind: &LogicNodeKind,
+        target: &str,
+        names: &mut NameInterner,
+        logic: &mut Vec<PlaytestLogic>,
+        report: &mut PlaytestValidationReport,
+    ) -> bool {
+        push_logic_node(
+            name,
+            0,
+            [100, 8, 200],
+            kind,
+            target,
+            "",
+            "",
+            0,
+            0,
+            true,
+            false,
+            names,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            logic,
+            &mut Vec::new(),
+            report,
+        )
+    }
+
+    fn timer(on: u16, off: u16, phase: u16, running: bool) -> LogicNodeKind {
+        LogicNodeKind::Timer {
+            on_ticks: on,
+            off_ticks: off,
+            phase_ticks: phase,
+            running,
+        }
+    }
+
+    #[test]
+    fn a_timer_cooks_its_cycle_and_whether_it_runs_from_load() {
+        let (mut names, mut logic) = (NameInterner::default(), Vec::new());
+        let mut report = PlaytestValidationReport::default();
+        assert!(cook_logic(
+            "beam",
+            &timer(60, 90, 15, true),
+            "hz",
+            &mut names,
+            &mut logic,
+            &mut report
+        ));
+        assert!(cook_logic(
+            "idle",
+            &timer(5, 6, 0, false),
+            "hz",
+            &mut names,
+            &mut logic,
+            &mut report
+        ));
+        assert!(report.is_ok(), "{:?}", report.error_messages());
+        let beam = &logic[0];
+        assert_eq!(beam.kind, psx_level::logic_kind::TIMER);
+        assert_eq!((beam.arg0, beam.arg1, beam.arg2), (60, 90, 15));
+        assert_ne!(beam.flags & psx_level::logic_flags::START_ON, 0);
+        assert_ne!(beam.target, psx_level::LOGIC_NAME_NONE);
+        assert_eq!(logic[1].flags & psx_level::logic_flags::START_ON, 0);
+    }
+
+    #[test]
+    fn a_timer_that_never_changes_is_a_cook_error() {
+        for (on, off) in [(0, 30), (30, 0)] {
+            let (mut names, mut logic) = (NameInterner::default(), Vec::new());
+            let mut report = PlaytestValidationReport::default();
+            assert!(!cook_logic(
+                "beam",
+                &timer(on, off, 0, true),
+                "hz",
+                &mut names,
+                &mut logic,
+                &mut report
+            ));
+            assert!(!report.is_ok());
+            assert!(logic.is_empty());
+        }
+    }
+
+    fn hazard(size: [u16; 3], damage: u16, interval: u16, on: bool) -> LogicNodeKind {
+        LogicNodeKind::Hazard {
+            size,
+            damage,
+            interval_ticks: interval,
+            start_on: on,
+        }
+    }
+
+    #[test]
+    fn a_hazard_cooks_a_floor_anchored_volume_with_its_damage_and_cadence() {
+        let (mut names, mut logic) = (NameInterner::default(), Vec::new());
+        let mut report = PlaytestValidationReport::default();
+        assert!(cook_logic(
+            "zap",
+            &hazard([200, 120, 80], 25, 30, true),
+            "",
+            &mut names,
+            &mut logic,
+            &mut report
+        ));
+        assert!(cook_logic(
+            "cold",
+            &hazard([200, 120, 80], 25, 30, false),
+            "",
+            &mut names,
+            &mut logic,
+            &mut report
+        ));
+        assert!(report.is_ok(), "{:?}", report.error_messages());
+        let zap = &logic[0];
+        assert_eq!(zap.kind, psx_level::logic_kind::HAZARD);
+        assert_eq!((zap.arg0, zap.arg1), (25, 30));
+        assert_eq!(zap.min, [0, 8, 160]);
+        assert_eq!(zap.max, [200, 128, 240]);
+        assert_ne!(zap.flags & psx_level::logic_flags::START_ON, 0);
+        assert_eq!(logic[1].flags & psx_level::logic_flags::START_ON, 0);
+    }
+
+    #[test]
+    fn a_hazard_with_no_extent_damage_or_interval_is_a_cook_error() {
+        for bad in [
+            hazard([0, 100, 100], 10, 10, true),
+            hazard([100, 100, 100], 0, 10, true),
+            hazard([100, 100, 100], 10, 0, true),
+        ] {
+            let (mut names, mut logic) = (NameInterner::default(), Vec::new());
+            let mut report = PlaytestValidationReport::default();
+            assert!(!cook_logic(
+                "zap",
+                &bad,
+                "",
+                &mut names,
+                &mut logic,
+                &mut report
+            ));
+            assert!(!report.is_ok());
+        }
+    }
+
+    fn poi_with(
+        reward: PointOfInterestReward,
+    ) -> (Vec<PlaytestInteractable>, bool, PlaytestValidationReport) {
+        let project = ProjectDocument::new("abilities");
+        let pages = vec!["A FRAGMENT.".to_string()];
+        let mut interactables = Vec::new();
+        let mut report = PlaytestValidationReport::default();
+        let ok = push_point_of_interest(
+            &project,
+            "fragment",
+            0,
+            [0, 0, 0],
+            0,
+            crate::playtest::PointOfInterestComponent {
+                pages: &pages,
+                pages_it: &[],
+                prompt: "READ",
+                radius: 100,
+                marker_height: 100,
+                repeatable: false,
+                persistence_id: "frag",
+                reward: Some(&reward),
+                enabled: true,
+            },
+            1,
+            2,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut interactables,
+            &mut Vec::new(),
+            &mut report,
+        );
+        (interactables, ok, report)
+    }
+
+    #[test]
+    fn a_fragment_grants_abilities_with_no_item_and_keeps_its_reward_flag() {
+        let both = PlayerAbilities {
+            sprint: true,
+            dash: true,
+        };
+        let (record, ok, report) = poi_with(PointOfInterestReward::abilities_only(both));
+        assert!(ok, "{:?}", report.error_messages());
+        let poi = &record[0];
+        assert_eq!(
+            poi.reward_abilities,
+            psx_level::ability::SPRINT | psx_level::ability::DASH
+        );
+        assert_eq!(poi.reward_resource, psx_level::POI_REWARD_NONE);
+        assert_eq!(poi.reward_quantity, 0);
+        assert_eq!(poi.reward_flag, 2, "the claim is tracked like an item's");
+        let sprint = PlayerAbilities {
+            sprint: true,
+            dash: false,
+        };
+        let (record, ..) = poi_with(PointOfInterestReward::abilities_only(sprint));
+        assert_eq!(record[0].reward_abilities, psx_level::ability::SPRINT);
+    }
+
+    #[test]
+    fn a_reward_that_gives_nothing_is_a_cook_error() {
+        let (_, ok, report) = poi_with(PointOfInterestReward::abilities_only(
+            PlayerAbilities::none(),
+        ));
+        assert!(!ok);
+        assert!(!report.is_ok());
+    }
+
+    #[test]
+    fn a_module_reward_can_also_unlock_an_ability() {
+        let mut reward = PointOfInterestReward::default();
+        reward.abilities = PlayerAbilities {
+            sprint: false,
+            dash: true,
+        };
+        let (record, ok, report) = poi_with(reward);
+        assert!(ok, "{:?}", report.error_messages());
+        assert_eq!(record[0].reward_abilities, psx_level::ability::DASH);
+        assert_ne!(record[0].reward_resource, psx_level::POI_REWARD_NONE);
+        assert_eq!(record[0].reward_quantity, 1);
+    }
+
+    #[test]
+    fn visual_slots_resolve_to_the_logic_records_they_follow() {
+        use crate::grid::{LogicVisibility, VisualSlots};
+        let (mut names, mut logic) = (NameInterner::default(), Vec::new());
+        let mut report = PlaytestValidationReport::default();
+        assert!(cook_logic(
+            "hz",
+            &hazard([10, 10, 10], 1, 1, true),
+            "",
+            &mut names,
+            &mut logic,
+            &mut report
+        ));
+        assert!(cook_logic(
+            "beam",
+            &timer(1, 1, 0, true),
+            "hz",
+            &mut names,
+            &mut logic,
+            &mut report
+        ));
+        let mut slots = VisualSlots::default();
+        slots.flags(Some(&LogicVisibility::while_on("beam")));
+        slots.flags(Some(&LogicVisibility::while_on("hz")));
+        let links = resolve_visual_links(&slots, &logic, &mut names, &mut report);
+        assert_eq!(
+            links,
+            Some(vec![1, 0]),
+            "slot 0 follows the timer, slot 1 the hazard"
+        );
+        slots.flags(Some(&LogicVisibility::while_on("ghost")));
+        let mut report = PlaytestValidationReport::default();
+        assert_eq!(
+            resolve_visual_links(&slots, &logic, &mut names, &mut report),
+            None
+        );
+        assert!(
+            !report.is_ok(),
+            "a node that is not there is an error, not a hidden beam"
+        );
     }
 }

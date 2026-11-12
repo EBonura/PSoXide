@@ -146,6 +146,11 @@ pub struct GridPlane {
     /// collision class either way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub camera_pass: Option<bool>,
+    /// Drawn only while a logic node is on (or off): a laser beam a Timer
+    /// switches, a lamp a Door lights. Visual only, so a switched plane must
+    /// not collide.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shown_by: Option<super::visual::LogicVisibility>,
 }
 
 impl GridPlane {
@@ -163,6 +168,7 @@ impl GridPlane {
             fullbright: false,
             enabled: true,
             camera_pass: None,
+            shown_by: None,
         }
     }
 

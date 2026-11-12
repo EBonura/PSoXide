@@ -301,6 +301,10 @@ pub struct GridMesh {
     /// nothing and spawn no sockets.
     #[serde(default = "yes", skip_serializing_if = "is_true")]
     pub enabled: bool,
+    /// Drawn only while a logic node is on (or off). Visual only, so a
+    /// switched instance must not collide.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shown_by: Option<super::visual::LogicVisibility>,
 }
 
 impl GridMesh {
@@ -316,6 +320,7 @@ impl GridMesh {
             fullbright: false,
             collide: true,
             enabled: true,
+            shown_by: None,
         }
     }
 

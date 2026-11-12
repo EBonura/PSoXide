@@ -36,6 +36,7 @@ pub struct OwnedLevelRecords {
     vitality_circles: Vec<LevelVitalityCircleRecord>,
     logic: Vec<LevelLogicRecord>,
     logic_slots: Vec<u16>,
+    visual_links: Vec<u16>,
     game_entities: Vec<LevelGameEntityRecord>,
     game_entity_ids: Vec<StableId>,
     entities: Vec<EntityRecord>,
@@ -53,6 +54,7 @@ pub struct OwnedLevelRecords {
     player_spawn: PlayerSpawnRecord,
     player_controller: Option<PlayerControllerRecord>,
     world_message: Option<InteractableMessageRecord>,
+    world_start_abilities: u16,
 }
 
 /// A string that lives for the rest of the process. The cook builds a handful
@@ -255,6 +257,7 @@ impl OwnedLevelRecords {
                     acceleration_q4: e.acceleration_q4,
                     spawn_radius: e.spawn_radius,
                     texture_asset: optional_asset(e.texture_asset_index),
+                    visual: e.visual,
                     flags: e.flags,
                 })
                 .collect(),
@@ -300,6 +303,7 @@ impl OwnedLevelRecords {
                     reward_flag: i.reward_flag,
                     reward_resource: i.reward_resource,
                     reward_quantity: i.reward_quantity,
+                    reward_abilities: i.reward_abilities,
                     flags: i.flags,
                 })
                 .collect(),
@@ -332,6 +336,7 @@ impl OwnedLevelRecords {
                     wait_ticks: l.wait_ticks,
                     arg0: l.arg0,
                     arg1: l.arg1,
+                    arg2: l.arg2,
                     link: l.link,
                     message: l.message,
                     x: l.x,
@@ -343,6 +348,7 @@ impl OwnedLevelRecords {
                 })
                 .collect(),
             logic_slots: package.logic_slots.clone(),
+            visual_links: package.visual_links.clone(),
             game_entities: package
                 .game_entities
                 .iter()
@@ -617,6 +623,7 @@ impl OwnedLevelRecords {
                 flags: 0,
             }),
             world_message: package.world_message.as_ref().map(message_record),
+            world_start_abilities: package.world_start_abilities,
         }
     }
 
@@ -634,6 +641,7 @@ impl OwnedLevelRecords {
             vitality_circles: &self.vitality_circles,
             logic: &self.logic,
             logic_slots: &self.logic_slots,
+            visual_links: &self.visual_links,
             game_entities: &self.game_entities,
             game_entity_ids: &self.game_entity_ids,
             entities: &self.entities,
@@ -652,6 +660,7 @@ impl OwnedLevelRecords {
             player_controller: self.player_controller,
             world_message: self.world_message,
             world_ambient_rgb: [32; 3],
+            world_start_abilities: self.world_start_abilities,
         }
     }
 

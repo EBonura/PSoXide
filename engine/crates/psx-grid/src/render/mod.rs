@@ -235,6 +235,10 @@ pub struct RoomCamera<'a> {
     pub focal_length: i32,
     /// Runtime units per sector edge.
     pub sector: i32,
+    /// State of the level's visual switches, bit `i` set while slot `i` is
+    /// on ([`crate::visual_switch`]). A switched plane or mesh whose slot
+    /// says hidden is skipped. Zero with nothing switched.
+    pub switches: u32,
 }
 
 /// Per-frame working storage, sized for the largest room and reused.
@@ -380,7 +384,14 @@ impl GridRenderer {
         // SAFETY: see `PhaseStack`.
         unsafe {
             PhaseStack::run(|| {
-                self.select_quads(room, eye.frustum, eye.sector, eye.camera, &mut frame)
+                self.select_quads(
+                    room,
+                    eye.frustum,
+                    eye.sector,
+                    eye.camera,
+                    eye.switches,
+                    &mut frame,
+                )
             })
         };
         mark(GridPhase::Quads, false);

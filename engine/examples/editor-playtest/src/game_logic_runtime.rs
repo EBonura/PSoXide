@@ -1866,6 +1866,37 @@ impl Playtest {
         }
     }
 
+    /// Hurt the player with what the hazard volumes dealt this tick, and arm
+    /// the death sequence when it was lethal. The volume already left an
+    /// invulnerable player alone, so this only ever sees real hits.
+    pub(super) fn apply_logic_hazard_damage(&mut self, ctx: &Ctx) {
+        let damage = self.logic.take_hazard_damage();
+        if damage == 0 {
+            return;
+        }
+        telemetry::debug_log("player hazard:logic");
+        if self.apply_untyped_player_damage(damage) {
+            self.arm_player_death(false, HAZARD_DEATH_TICKS, ctx.sim_tick, ctx.video_hz);
+        }
+    }
+
+    /// The state of the level's visual switches, bit `i` set while slot `i`
+    /// is on: the logic record each slot names, read as on or off. Planes,
+    /// meshes and emitters cooked against a slot follow it.
+    pub(super) fn visual_switch_mask(&self) -> u32 {
+        let mut mask = 0u32;
+        for (slot, link) in VISUAL_LINKS
+            .iter()
+            .enumerate()
+            .take(psx_grid::visual_switch::SLOTS)
+        {
+            if self.logic.is_on(LOGIC.as_slice(), usize::from(*link)) {
+                mask |= 1 << slot;
+            }
+        }
+        mask
+    }
+
     /// Message overlay for a fired MESSAGE/CHECKPOINT record, through
     /// the same text table + fallbacks the legacy interactable path
     /// used (the cook shares the message index between both records).

@@ -430,7 +430,11 @@ fn cook_rooms(
             binder: &mut *input.binder,
             materials: &mut materials,
             repeat: input.texture_repeat,
+            slots: crate::grid::visual::VisualSlots::from_world(world),
         };
+        if let Some(message) = cx.slots.overflow() {
+            return Err(message);
+        }
         let ambient = room.ambient;
         let mut ren = render::build(&mut cx, index, origin, ambient)?;
         let mut lod = lod::build(

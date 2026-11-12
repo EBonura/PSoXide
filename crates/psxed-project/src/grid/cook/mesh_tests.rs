@@ -511,3 +511,25 @@ fn a_slab_thickness_follows_the_height_scale() {
     let blocked = walk(&native, RoomPoint::new(300, 0, 320), 4096, 0, 200).position();
     assert!(blocked.x < 400, "{blocked:?}");
 }
+
+#[test]
+fn a_mesh_shown_by_logic_cooks_its_slot_and_must_not_collide() {
+    use crate::grid::LogicVisibility;
+    use psx_grid::visual_switch;
+    let mut world = arch_hall();
+    world.rooms[0].meshes[0].collide = false;
+    world.rooms[0].meshes[0].shown_by = Some(LogicVisibility::while_on("gate"));
+    let cooked = cook(&world).unwrap();
+    let room = RoomView::parse(leak(&cooked.chunks[0])).unwrap();
+    assert_eq!(room.render.plane_refs.len(), 1);
+    assert_eq!(
+        room.render.plane_refs[0].flags,
+        visual_switch::encode(0, false)
+    );
+    // With collision on, the instance would still block while hidden.
+    world.rooms[0].meshes[0].collide = true;
+    let error = cook(&world)
+        .err()
+        .expect("a colliding switched mesh does not cook");
+    assert!(error.contains("switched by logic"), "{error}");
+}

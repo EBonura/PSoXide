@@ -112,6 +112,15 @@ fn draw_from(far: u8, eye: [i32; 3]) -> (GridFrame, Vec<u32>) {
 
 /// [`draw_from`] that also returns the corner cache (`sxy`, `sz`).
 fn draw_screens(chunk: Vec<u8>, eye: [i32; 3]) -> (GridFrame, Vec<u32>, Vec<(u32, u16)>) {
+    draw_screens_with(chunk, eye, 0)
+}
+
+/// [`draw_screens`] with the level's visual switches at `switches`.
+fn draw_screens_with(
+    chunk: Vec<u8>,
+    eye: [i32; 3],
+    switches: u32,
+) -> (GridFrame, Vec<u32>, Vec<(u32, u16)>) {
     let words = aligned_copy(&chunk);
     let bytes = words_as_bytes(&words, words.len() * 4);
     let room = RoomView::parse(bytes).expect("room parses");
@@ -136,6 +145,7 @@ fn draw_screens(chunk: Vec<u8>, eye: [i32; 3]) -> (GridFrame, Vec<u32>, Vec<(u32
         screen: [320, 240],
         focal_length: 160,
         sector: 80,
+        switches,
     };
     let mut renderer = GridRenderer::for_rooms(core::iter::once(&room));
     let mut out = vec![0u32; 4096];
@@ -279,4 +289,68 @@ fn a_cell_wholly_above_or_below_the_view_is_not_queued() {
         again, stream,
         "the recorded range does not change the packets"
     );
+}
+
+/// [`chunk`] with its two quads moved out of the cell into one free plane
+/// whose run carries `flags`.
+fn plane_chunk(flags: u8) -> Vec<u8> {
+    let words = aligned_copy(&chunk(255));
+    let bytes = words_as_bytes(&words, words.len() * 4);
+    let room = RoomView::parse(bytes).expect("room parses");
+    RoomChunk {
+        width: 1,
+        depth: 1,
+        min_y: 0,
+        max_y: 80,
+        sectors: room.col.sectors.to_vec(),
+        vertices: room.render.vertices.to_vec(),
+        quads: room.render.quads.to_vec(),
+        cells: vec![RCell {
+            first: 0,
+            count: 0,
+            flags: 0,
+            min_y: 0,
+            max_y: 0,
+        }],
+        plane_refs: vec![PlaneRef {
+            quad: 0,
+            count: 2,
+            flags,
+            x0: 0,
+            z0: 0,
+            x1: 0,
+            z1: 0,
+            min_y: 0,
+            max_y: 80,
+        }],
+        material_use: vec![0],
+        ..RoomChunk::default()
+    }
+    .to_bytes()
+}
+
+#[test]
+fn a_switched_plane_is_drawn_only_while_its_slot_says_so() {
+    let eye = [-120, 40, 40];
+    let packets = |flags: u8, switches: u32| {
+        draw_screens_with(plane_chunk(flags), eye, switches)
+            .0
+            .packets
+    };
+    assert_eq!(packets(0, 0), 2, "an unswitched plane always draws");
+    let on = visual_switch::encode(5, false);
+    assert_eq!(packets(on, 0), 0, "slot 5 is off, so the plane is hidden");
+    assert_eq!(
+        packets(on, 1 << 4),
+        0,
+        "another slot being on changes nothing"
+    );
+    assert_eq!(packets(on, 1 << 5), 2, "slot 5 on shows it");
+    let off = visual_switch::encode(5, true);
+    assert_eq!(
+        packets(off, 0),
+        2,
+        "an inverted plane shows while the slot is off"
+    );
+    assert_eq!(packets(off, 1 << 5), 0);
 }

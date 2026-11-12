@@ -165,6 +165,10 @@ pub(super) struct GridRuntime {
     /// Set once the first need set was resident.
     streamed_once: bool,
     renderer: GridRenderer,
+    /// State of the level's visual switches this frame, bit `i` set while
+    /// slot `i` is on (`psx_grid::visual_switch`). Planes and meshes a logic
+    /// record switches off are skipped.
+    visual_switches: u32,
     /// Every resident room's materials were bound when the set last changed.
     materials_epoch: Option<u32>,
     /// Scratch of [`bind_pending`].
@@ -321,6 +325,7 @@ impl GridRuntime {
             idle_ticks: 0,
             wanted_res: Vec::new(),
             settled: None,
+            visual_switches: 0,
             stream_hint: 0,
             need_missing: u32::MAX,
             late_short_windows: 0,
@@ -1071,6 +1076,11 @@ impl GridRuntime {
         self.draw_scratch = candidates;
     }
 
+    /// Set the visual switches the next draw reads.
+    pub(super) fn set_visual_switches(&mut self, switches: u32) {
+        self.visual_switches = switches;
+    }
+
     pub(super) fn draw<const DEPTH: usize>(
         &mut self,
         camera: WorldCamera,
@@ -1185,6 +1195,7 @@ impl GridRuntime {
                         screen,
                         focal_length: self.projection.focal_length,
                         sector,
+                        switches: self.visual_switches,
                     };
                     let frame = self.renderer.draw_room_with_marks(
                         &room,

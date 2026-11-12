@@ -85,6 +85,7 @@ pub const LEN_INTERACTABLES: usize = 0;
 pub const LEN_VITALITY_CIRCLES: usize = 0;
 pub const LEN_LOGIC: usize = 0;
 pub const LEN_LOGIC_SLOTS: usize = 0;
+pub const LEN_VISUAL_LINKS: usize = 0;
 pub const LEN_GAME_ENTITIES: usize = 0;
 pub const LEN_GAME_ENTITY_IDS: usize = 0;
 pub const LEN_ENTITIES: usize = 0;

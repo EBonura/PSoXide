@@ -290,7 +290,9 @@ impl Playtest {
     ) {
         let material_tick = self.gameplay_tick(sim_tick).as_u32();
         let mut visible_sky_aperture = false;
+        let visual_switches = self.visual_switch_mask();
         if let Some(world_rt) = self.world_rt.as_mut() {
+            world_rt.set_visual_switches(visual_switches);
             telemetry::stage_begin(telemetry::stage::ROOM);
             sort_probe_class(SORT_CLASS_WORLD);
             let cinematic_visibility = (self.opening.active() && !self.opening.gameplay_camera())

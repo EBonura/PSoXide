@@ -2825,6 +2825,10 @@ pub struct ParticleEmitterSettings {
     /// Whether the emitter should run in playtest/runtime.
     #[serde(default = "default_particle_emitter_enabled")]
     pub enabled: bool,
+    /// Emits only while a logic node is on (or off): sparks at a laser
+    /// emitter that follow its Timer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shown_by: Option<crate::grid::LogicVisibility>,
     /// Optional 16x16 greyscale/white mask texture used for the sprite.
     #[serde(default)]
     pub texture: Option<ResourceId>,
@@ -2872,6 +2876,7 @@ impl ParticleEmitterSettings {
     pub const fn defaults() -> Self {
         Self {
             enabled: default_particle_emitter_enabled(),
+            shown_by: None,
             texture: None,
             max_particles: default_particle_emitter_max_particles(),
             spawn_rate_q8: default_particle_emitter_spawn_rate_q8(),

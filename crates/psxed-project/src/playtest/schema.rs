@@ -1450,6 +1450,9 @@ pub struct PlaytestParticleEmitter {
     /// Index into [`PlaytestPackage::assets`] of the sprite texture, or
     /// `None` for the runtime's built-in disc.
     pub texture_asset_index: Option<usize>,
+    /// Logic-driven visibility byte (`psx_grid::visual_switch`); zero is
+    /// always emitting.
+    pub visual: u8,
     /// Runtime flags. Bit 0 = enabled.
     pub flags: u16,
 }
@@ -1517,6 +1520,8 @@ pub struct PlaytestInteractable {
     pub reward_resource: u16,
     /// Number of module copies granted by this POI.
     pub reward_quantity: u8,
+    /// `psx_level::ability` bits this POI unlocks, or zero.
+    pub reward_abilities: u16,
     /// Runtime flags from [`psx_level::interactable_flags`].
     pub flags: u16,
 }
@@ -1576,6 +1581,8 @@ pub struct PlaytestLogic {
     pub arg0: u16,
     /// Second kind-specific argument.
     pub arg1: u16,
+    /// Third kind-specific argument.
+    pub arg2: u16,
     /// Kind-defined entity link, or `psx_level::LOGIC_LINK_NONE`.
     pub link: u16,
     /// Index into [`PlaytestPackage::interactable_messages`], or
@@ -2005,6 +2012,11 @@ pub struct PlaytestPackage {
     pub interactable_message_pages_it: Vec<String>,
     /// Optional per-scene message shown once when gameplay first becomes active.
     pub world_message: Option<PlaytestInteractableMessage>,
+    /// `psx_level::ability` bits the player starts the level with.
+    pub world_start_abilities: u16,
+    /// Logic record index each visual-switch slot follows (slot = position),
+    /// `psx_grid::visual_switch`.
+    pub visual_links: Vec<u16>,
     /// Number of persistent flag bits assigned by this cook.
     pub persistent_flag_count: u16,
     /// Unique collectible modules referenced by point-of-interest rewards.

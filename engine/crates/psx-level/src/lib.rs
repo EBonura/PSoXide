@@ -787,6 +787,23 @@ pub const fn persistent_flag_slot(id: StableId) -> u16 {
 /// Sentinel for a point-of-interest reward resource.
 pub const POI_REWARD_NONE: u16 = u16::MAX;
 
+/// Player abilities a level can lock and a pickup can unlock, one bit each in
+/// a `u16`. The set is the cook/runtime contract: [`LevelRecords`](crate::wire)
+/// carry the abilities a level starts with, a point of interest reward carries
+/// the ones it grants, and the save block keeps the ones earned. A bit not
+/// listed here is reserved and never set by the cook.
+pub mod ability {
+    /// Hold Circle to sprint.
+    pub const SPRINT: u16 = 1 << 0;
+    /// Tap Circle to dash (the dodge roll).
+    pub const DASH: u16 = 1 << 1;
+    /// Every ability this build knows. A level that authors nothing starts
+    /// with all of them, so projects made before abilities behave as before.
+    pub const ALL: u16 = SPRINT | DASH;
+    /// No ability.
+    pub const NONE: u16 = 0;
+}
+
 /// Fixed player-stat lanes stored by [`BoostModuleRecord`]. The table layout
 /// is part of the cook/runtime contract, so editor-authored percentage effects
 /// stay allocation-free on the console.
@@ -897,6 +914,9 @@ pub struct InteractableRecord {
     pub reward_resource: u16,
     /// Reward quantity. Zero means no reward.
     pub reward_quantity: u8,
+    /// [`ability`] bits the reward unlocks for good, or zero. Claimed with
+    /// the same one-time [`Self::reward_flag`] as a module reward.
+    pub reward_abilities: u16,
     /// Runtime flags from [`interactable_flags`].
     pub flags: u16,
 }
@@ -986,6 +1006,20 @@ pub mod logic_kind {
     /// (retired after the first press); a positive value is the toggle's
     /// cooldown between presses.
     pub const SWITCH: u8 = 7;
+    /// Free-running timer: after `arg2` phase ticks it is on for `arg0`
+    /// ticks, off for `arg1`, and repeats. Every change sends an explicit On
+    /// or Off to `target`, so a door, gate or hazard it drives never depends
+    /// on how many times it flipped. [`logic_flags::START_ON`] runs it from
+    /// level load; otherwise it waits for a use (On starts it from the
+    /// beginning of its phase, Off stops it and sends Off, Toggle flips
+    /// between the two). A death or checkpoint rest re-arms it.
+    pub const TIMER: u8 = 8;
+    /// Damaging volume: while it is on and the player stands inside
+    /// `min`..`max`, the player takes `arg0` damage at once and again every
+    /// `arg1` ticks (0 means every tick), unless the player is invulnerable.
+    /// On/Off (from a timer, switch or relay) switch it; Toggle flips it.
+    /// [`logic_flags::START_ON`] starts it on.
+    pub const HAZARD: u8 = 9;
 }
 
 /// Runtime flags for [`LevelLogicRecord`].
@@ -1106,6 +1140,8 @@ pub struct LevelLogicRecord {
     pub arg0: u16,
     /// Second kind-specific argument.
     pub arg1: u16,
+    /// Third kind-specific argument ([`logic_kind::TIMER`]: phase ticks).
+    pub arg2: u16,
     /// Kind-defined entity link ([`logic_kind::DOOR`] stores a
     /// `BOX_PROPS` index here), or [`LOGIC_LINK_NONE`].
     pub link: u16,
@@ -3131,6 +3167,10 @@ pub struct ParticleEmitterRecord {
     /// 4bpp sprite texture drawn on every particle, or `None` for the
     /// runtime's built-in disc. Palette entry 0 is transparent.
     pub texture_asset: Option<AssetId>,
+    /// Logic-driven visibility, `psx_grid::visual_switch` bits: zero is
+    /// always emitting, otherwise the emitter runs only while its slot's
+    /// logic record is on (or off, inverted).
+    pub visual: u8,
     /// Runtime flags.
     pub flags: u16,
 }

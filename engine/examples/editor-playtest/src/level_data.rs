@@ -157,6 +157,7 @@ level_statics! {
     table VITALITY_CIRCLES: vitality_circles: LevelVitalityCircleRecord = LEN_VITALITY_CIRCLES;
     table LOGIC: logic: LevelLogicRecord = LEN_LOGIC;
     table LOGIC_SLOTS: logic_slots: u16 = LEN_LOGIC_SLOTS;
+    table VISUAL_LINKS: visual_links: u16 = LEN_VISUAL_LINKS;
     table GAME_ENTITIES: game_entities: LevelGameEntityRecord = LEN_GAME_ENTITIES;
     table GAME_ENTITY_IDS: game_entity_ids: StableId = LEN_GAME_ENTITY_IDS;
     table ENTITIES: entities: EntityRecord = LEN_ENTITIES;
@@ -182,6 +183,7 @@ level_statics! {
     value PLAYER_CONTROLLER: player_controller: Option<PlayerControllerRecord> = None;
     value WORLD_MESSAGE: world_message: Option<InteractableMessageRecord> = None;
     value WORLD_AMBIENT_RGB: world_ambient_rgb: [u8; 3] = [0; 3];
+    value WORLD_START_ABILITIES: world_start_abilities: u16 = psx_level::ability::ALL;
 }
 
 /// The host tests read a fixture level instead of a disc: the first read of
@@ -210,6 +212,7 @@ mod fixture {
                 vitality_circles: &[],
                 logic: &[],
                 logic_slots: &[],
+                visual_links: &[],
                 game_entities: GAME_ENTITIES,
                 game_entity_ids: GAME_ENTITY_IDS,
                 entities: &[],
@@ -228,6 +231,8 @@ mod fixture {
                 player_controller: None,
                 world_message: WORLD_MESSAGE,
                 world_ambient_rgb: [0; 3],
+                // Nothing unlocked: the gating tests earn what they need.
+                world_start_abilities: psx_level::ability::NONE,
             });
         });
     }

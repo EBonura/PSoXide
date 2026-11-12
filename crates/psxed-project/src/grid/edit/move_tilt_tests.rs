@@ -60,6 +60,7 @@ fn move_carries_cells_nodes_and_meshes_and_refuses_a_collision() {
         fullbright: false,
         collide: true,
         enabled: true,
+        shown_by: None,
     });
     let p = MoveParams {
         room: r,

@@ -647,6 +647,9 @@ fn build_package_cooked(
     // the box-prop name table after the walk (a door may name a box
     // that cooks later in scene order).
     let mut names = NameInterner::default();
+    // The slots of the logic-switched planes, meshes and emitters. The grid
+    // cook builds the same plane and mesh slots from the same world.
+    let mut visual_slots = crate::grid::VisualSlots::from_world(grid_doc);
     let mut logic: Vec<PlaytestLogic> = Vec::new();
     let mut game_entities: Vec<PlaytestGameEntity> = Vec::new();
     // Stable ids parallel to `game_entities` and `logic`: hashes of the
@@ -762,6 +765,12 @@ fn build_package_cooked(
             })
         }
         _ => None,
+    };
+    let world_start_abilities = match scene.node(scene.root).map(|node| &node.kind) {
+        Some(NodeKind::World {
+            start_abilities, ..
+        }) => start_abilities.bits(),
+        _ => psx_level::ability::ALL,
     };
 
     let mut previous_node: Option<crate::NodeId> = None;
@@ -1754,6 +1763,7 @@ fn build_package_cooked(
                     &mut texture_asset_for_path,
                     &mut assets,
                     &mut particle_emitters,
+                    &mut visual_slots,
                     &mut report,
                 ) {
                     return (None, report);
@@ -1857,6 +1867,10 @@ fn build_package_cooked(
     if !check_switch_targets(&logic, &names, &mut report) {
         return (None, report);
     }
+    let Some(visual_links) = resolve_visual_links(&visual_slots, &logic, &mut names, &mut report)
+    else {
+        return (None, report);
+    };
 
     // Contract caps (psx-level is the single source, like
     // MAX_ROOM_MATERIALS): the runtime sizes its SoA state from these,
@@ -2321,6 +2335,8 @@ fn build_package_cooked(
         interactable_message_pages,
         interactable_message_pages_it,
         world_message,
+        world_start_abilities,
+        visual_links,
         persistent_flag_count,
         boost_modules,
         interactables,

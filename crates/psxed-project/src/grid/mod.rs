@@ -97,6 +97,7 @@ pub mod units;
 pub mod uv;
 pub mod uv_region;
 pub mod uv_split;
+pub mod visual;
 pub mod walk;
 pub mod world;
 
@@ -155,4 +156,5 @@ pub use sector::{GridSector, GridSpan, WallEdge};
 pub use slope::SlopeClass;
 pub use surface::{GridSplit, GridSurface, GridTri, GridWall, WallFacing};
 pub use units::{GridScale, SectorTexels, CLICK_UNITS, FINE_UNITS, SECTOR_UNITS};
+pub use visual::{LogicVisibility, VisualSlots};
 pub use world::{GridWorld, SceneWorld, StreamRadii};

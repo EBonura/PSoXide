@@ -16,6 +16,13 @@
 //! process globally so a timed chain never freezes when the player
 //! looks away (hl parity: visibility gates monster thinking, not logic).
 //!
+//! Timers and hazards: a [`logic_kind::TIMER`] runs free of the player and
+//! sends its targets an explicit On or Off at every change of its cycle; a
+//! [`logic_kind::HAZARD`] is a volume that, while on, reports damage for the
+//! player standing in it ([`LogicRuntime::take_hazard_damage`]) unless the
+//! player is invulnerable. Both re-arm with the records, so a death or a
+//! checkpoint rest restarts every cycle from the same beginning.
+//!
 //! Crate rules hold: no statics, no unsafe, `const N` capacities,
 //! `&'static` cooked records, all-zero [`LogicRuntime::EMPTY`].
 
@@ -177,6 +184,9 @@ fn refuses_side(record: &LevelLogicRecord, player: [i32; 3]) -> bool {
 pub struct LogicTickInput {
     /// Player position, engine units.
     pub player: [i32; 3],
+    /// The player cannot be hurt this tick (a dash's frames, a death in
+    /// progress): hazards neither hit nor spend their re-hit interval.
+    pub player_invulnerable: bool,
 }
 
 /// Owned logic runtime over the cooked record table. Record `i`
@@ -195,15 +205,18 @@ pub struct LogicRuntime<
     overflow: u16,
     /// Per-record [`LogicState`] as raw u8.
     state: [u8; MAX_LOGIC],
-    /// Re-arm deadline while [`LogicState::Waiting`].
+    /// Re-arm deadline while [`LogicState::Waiting`]. A timer keeps the tick
+    /// its cycle began at here; a hazard the tick it may next hit.
     rearm_at: [u32; MAX_LOGIC],
     /// Kind-specific counter: multisource satisfied-input count,
-    /// door open flag.
+    /// door open flag, hazard on flag, and a timer's last sent state (-1
+    /// before it has sent any, then 0 off or 1 on).
     counter: [i16; MAX_LOGIC],
     /// Slide progress of a door with motion: 0 = closed, the door's
-    /// `arg1` ticks = fully open.
+    /// `arg1` ticks = fully open. A timer uses it as "cycle start recorded".
     progress: [u16; MAX_LOGIC],
-    /// 1 while a door refuses to open until unlocked.
+    /// 1 while a door refuses to open until unlocked. A timer uses it as
+    /// "running".
     locked: [u8; MAX_LOGIC],
     /// Fired marks the owning game drains for terminal effects (one
     /// bit per record).
@@ -213,6 +226,8 @@ pub struct LogicRuntime<
     refused_marks: [u32; LOGIC_FIRED_WORDS],
     /// Player position at the last tick, for the one-way side test.
     player: [i32; 3],
+    /// Damage hazards dealt since [`Self::take_hazard_damage`] last ran.
+    hazard_damage: u16,
     /// The delay queue.
     events: [LogicEvent; MAX_EVENTS],
     /// Rolling stats.
@@ -240,6 +255,7 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
         fired_marks: [0; LOGIC_FIRED_WORDS],
         refused_marks: [0; LOGIC_FIRED_WORDS],
         player: [0; 3],
+        hazard_damage: 0,
         events: [LogicEvent::INACTIVE; MAX_EVENTS],
         queue_drops: 0,
         depth_drops: 0,
@@ -268,6 +284,11 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
             };
             if record.kind == logic_kind::DOOR {
                 self.locked[index] = u8::from(record.spawnflags & door_flags::LOCKED != 0);
+            }
+            if record.kind == logic_kind::TIMER {
+                // Nothing sent yet; running from load when it starts on.
+                self.counter[index] = -1;
+                self.locked[index] = u8::from(record.flags & logic_flags::START_ON != 0);
             }
             // A slider that starts on starts fully slid.
             if door_slides(record) && self.counter[index] != 0 {
@@ -467,6 +488,49 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
         self.refused_marks.iter().any(|word| *word != 0)
     }
 
+    /// Whether record `index` is "on", the one state a visual switch follows
+    /// (a plane, mesh or emitter shown while a logic record is on): a timer
+    /// between its on and off ticks, a hazard that would hurt now, a door
+    /// that is open, a lever thrown, a multisource that is satisfied. A
+    /// record the level retired, or one that has no on state, is off.
+    #[must_use]
+    pub fn is_on(&self, records: &'static [LevelLogicRecord], index: usize) -> bool {
+        if index >= self.count().min(records.len()) {
+            return false;
+        }
+        let record = &records[index];
+        let removed = LogicState::from_raw(self.state[index]) == LogicState::Removed;
+        match record.kind {
+            logic_kind::TIMER => !removed && self.counter[index] > 0,
+            logic_kind::HAZARD => {
+                !removed
+                    && self.counter[index] != 0
+                    && self.master_satisfied(records, record.master)
+            }
+            logic_kind::MULTISOURCE => {
+                let required = i16::try_from(record.arg0.max(1)).unwrap_or(i16::MAX);
+                self.counter[index] >= required
+            }
+            logic_kind::DOOR | logic_kind::SWITCH => self.counter[index] != 0,
+            _ => false,
+        }
+    }
+
+    /// Damage the hazards dealt to the player since the last call, then
+    /// reset it. The owner applies it to the player's health and arms death
+    /// when that kills.
+    #[must_use]
+    pub fn take_hazard_damage(&mut self) -> u16 {
+        core::mem::take(&mut self.hazard_damage)
+    }
+
+    /// Whether the timer at `index` is running (not stopped by an Off, and
+    /// started).
+    #[must_use]
+    pub fn timer_running(&self, index: usize) -> bool {
+        index < self.count() && self.locked[index] != 0
+    }
+
     /// On/off state of a [`logic_kind::SWITCH`] record (a lever that has
     /// been pulled reads on until it is pulled back).
     #[must_use]
@@ -569,6 +633,22 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
                 }
                 LogicState::Ready => {}
             }
+            // Timers and hazards do not wait on the player's view of the
+            // level: a cycle that froze when the player looked away would
+            // come back out of step with the beam they are watching.
+            match record.kind {
+                logic_kind::TIMER => {
+                    self.timer_step(records, index, now, 0);
+                    index += 1;
+                    continue;
+                }
+                logic_kind::HAZARD => {
+                    self.hazard_step(records, index, input, now);
+                    index += 1;
+                    continue;
+                }
+                _ => {}
+            }
             // The owner's spatial mask gates the touch scan for scan cost.
             let activation_allows = index < 64 && self.spatial_active_mask & (1u64 << index) != 0;
             if record.kind == logic_kind::TRIGGER_VOLUME
@@ -580,6 +660,66 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
             }
             index += 1;
         }
+    }
+
+    /// One tick of the timer at `index`: record where its cycle began, work
+    /// out whether it is in its on or off stretch, and when that differs from
+    /// what it last sent, send its targets an explicit On or Off.
+    fn timer_step(
+        &mut self,
+        records: &'static [LevelLogicRecord],
+        index: usize,
+        now: u32,
+        depth: u8,
+    ) {
+        if self.locked[index] == 0 {
+            return;
+        }
+        let record = &records[index];
+        if self.progress[index] == 0 {
+            // First tick of a run: the cycle begins now.
+            self.progress[index] = 1;
+            self.rearm_at[index] = now;
+        }
+        let on_ticks = u32::from(record.arg0);
+        let period = on_ticks + u32::from(record.arg1);
+        if period == 0 {
+            return;
+        }
+        let elapsed = now.saturating_sub(self.rearm_at[index]);
+        let phase = (elapsed % period + u32::from(record.arg2) % period) % period;
+        let on = phase < on_ticks;
+        if self.counter[index] == i16::from(on) {
+            return;
+        }
+        self.counter[index] = i16::from(on);
+        self.mark_fired(index);
+        let code = if on { UseCode::On } else { UseCode::Off };
+        self.dispatch_outputs(records, record, now, depth, code);
+    }
+
+    /// One tick of the hazard at `index`: when it is on and the player is
+    /// inside and can be hurt, deal its damage and wait out its re-hit
+    /// interval before the next hit.
+    fn hazard_step(
+        &mut self,
+        records: &'static [LevelLogicRecord],
+        index: usize,
+        input: LogicTickInput,
+        now: u32,
+    ) {
+        let record = &records[index];
+        if self.counter[index] == 0
+            || input.player_invulnerable
+            || now < self.rearm_at[index]
+            || !point_in_aabb(input.player, record.min, record.max)
+            || !self.master_satisfied(records, record.master)
+        {
+            return;
+        }
+        self.hazard_damage = self.hazard_damage.saturating_add(record.arg0);
+        self.rearm_at[index] = now.saturating_add(u32::from(record.arg1.max(1)));
+        self.mark_fired(index);
     }
 
     /// Move every sliding door one tick toward its commanded state.
@@ -750,6 +890,43 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
                 }
                 return;
             }
+            logic_kind::TIMER => {
+                // On starts the cycle from its beginning, Off stops it and
+                // sends its targets Off, Toggle flips between the two.
+                let running = self.locked[index] != 0;
+                let next = match code {
+                    UseCode::On => true,
+                    UseCode::Off => false,
+                    _ => !running,
+                };
+                if next == running {
+                    return;
+                }
+                if next {
+                    self.locked[index] = 1;
+                    self.progress[index] = 0;
+                    self.counter[index] = -1;
+                    self.timer_step(records, index, now, depth);
+                } else {
+                    self.locked[index] = 0;
+                    if self.counter[index] != 0 {
+                        self.counter[index] = 0;
+                        self.mark_fired(index);
+                        self.dispatch_outputs(records, record, now, depth, UseCode::Off);
+                    }
+                }
+                return;
+            }
+            logic_kind::HAZARD => {
+                let on = self.counter[index] != 0;
+                let next = match code {
+                    UseCode::On => true,
+                    UseCode::Off => false,
+                    _ => !on,
+                };
+                self.counter[index] = i16::from(next);
+                return;
+            }
             logic_kind::DOOR => {
                 if code == UseCode::Unlock {
                     self.locked[index] = 0;
@@ -897,7 +1074,10 @@ fn point_in_aabb(point: [i32; 3], min: [i32; 3], max: [i32; 3]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    extern crate alloc;
     use super::*;
+    use alloc::string::String;
+    use alloc::vec::Vec;
     use psx_level::RoomIndex;
 
     type TestLogic = LogicRuntime<8, 1, 4>;
@@ -915,6 +1095,7 @@ mod tests {
             wait_ticks: 0,
             arg0: 0,
             arg1: 0,
+            arg2: 0,
             link: psx_level::LOGIC_LINK_NONE,
             message: psx_level::INTERACTABLE_MESSAGE_NONE,
             x: 0,
@@ -927,7 +1108,10 @@ mod tests {
     }
 
     fn input_at(pos: [i32; 3]) -> LogicTickInput {
-        LogicTickInput { player: pos }
+        LogicTickInput {
+            player: pos,
+            player_invulnerable: false,
+        }
     }
 
     #[test]
@@ -1726,5 +1910,345 @@ mod tests {
         logic.set_spatial_active_mask(u64::MAX);
         assert!(logic.is_removed(0), "flag-disabled record retires");
         assert!(logic.door_open(1), "START_ON door begins open");
+    }
+
+    // ---- Timers and hazards ----
+
+    /// Names: 1 = timer, 2 = door, 3 = gate, 4 = hazard.
+    const fn timer(on: u16, off: u16, phase: u16, running: bool) -> LevelLogicRecord {
+        LevelLogicRecord {
+            targetname: 1,
+            target: 2,
+            arg0: on,
+            arg1: off,
+            arg2: phase,
+            flags: logic_flags::ENABLED | if running { logic_flags::START_ON } else { 0 },
+            ..blank(logic_kind::TIMER)
+        }
+    }
+
+    /// The door's open state at every tick of `from..to`, as a string of
+    /// `#` (open) and `.` (closed).
+    fn door_trace(
+        logic: &mut TestLogic,
+        records: &'static [LevelLogicRecord],
+        from: u32,
+        to: u32,
+    ) -> String {
+        let mut out = String::new();
+        for now in from..to {
+            logic.tick(records, input_at([0, 0, 0]), now);
+            out.push(if logic.door_open(1) { '#' } else { '.' });
+        }
+        out
+    }
+
+    #[test]
+    fn a_running_timer_opens_and_closes_its_door_on_the_period() {
+        static RECORDS: [LevelLogicRecord; 2] = [
+            timer(3, 2, 0, true),
+            LevelLogicRecord {
+                targetname: 2,
+                ..blank(logic_kind::DOOR)
+            },
+        ];
+        let mut logic = TestLogic::EMPTY;
+        logic.init_from_records(&RECORDS);
+        // The cycle begins at the first tick, whatever the clock says.
+        assert_eq!(door_trace(&mut logic, &RECORDS, 100, 112), "###..###..##");
+    }
+
+    #[test]
+    fn a_timers_phase_shifts_where_in_the_cycle_it_starts() {
+        // 3 on, 2 off, phase 3: it starts at the beginning of the off stretch.
+        static OFF_FIRST: [LevelLogicRecord; 2] = [
+            timer(3, 2, 3, true),
+            LevelLogicRecord {
+                targetname: 2,
+                ..blank(logic_kind::DOOR)
+            },
+        ];
+        let mut logic = TestLogic::EMPTY;
+        logic.init_from_records(&OFF_FIRST);
+        assert_eq!(door_trace(&mut logic, &OFF_FIRST, 0, 10), "..###..###");
+        // Phase 1 is one tick into the on stretch; a phase past the period wraps.
+        static LATE: [LevelLogicRecord; 2] = [
+            timer(3, 2, 6, true),
+            LevelLogicRecord {
+                targetname: 2,
+                ..blank(logic_kind::DOOR)
+            },
+        ];
+        logic.init_from_records(&LATE);
+        // Phase 6 mod 5 is phase 1: two ticks of on left, then two off.
+        assert_eq!(door_trace(&mut logic, &LATE, 0, 6), "##..##");
+    }
+
+    #[test]
+    fn a_timer_that_starts_off_waits_for_a_use_then_stops_with_an_off() {
+        static RECORDS: [LevelLogicRecord; 2] = [
+            timer(3, 2, 0, false),
+            LevelLogicRecord {
+                targetname: 2,
+                ..blank(logic_kind::DOOR)
+            },
+        ];
+        let mut logic = TestLogic::EMPTY;
+        logic.init_from_records(&RECORDS);
+        assert_eq!(
+            door_trace(&mut logic, &RECORDS, 0, 5),
+            ".....",
+            "not running"
+        );
+        assert!(!logic.timer_running(0));
+        // A use starts it from the beginning of its cycle, on that tick.
+        logic.fire_by_name(&RECORDS, 1, UseCode::On, 5);
+        assert!(logic.timer_running(0));
+        assert!(logic.door_open(1), "the first On goes out at once");
+        assert_eq!(door_trace(&mut logic, &RECORDS, 6, 12), "##..##");
+        // Off stops it and closes what it drove.
+        logic.fire_by_name(&RECORDS, 1, UseCode::Off, 12);
+        assert!(!logic.timer_running(0));
+        assert!(!logic.door_open(1));
+        assert_eq!(door_trace(&mut logic, &RECORDS, 13, 20), ".......");
+        // A toggle starts it again, from the beginning.
+        logic.fire_by_name(&RECORDS, 1, UseCode::Toggle, 20);
+        assert!(logic.door_open(1));
+    }
+
+    #[test]
+    fn a_death_rearms_a_timer_to_the_same_beginning() {
+        static RECORDS: [LevelLogicRecord; 2] = [
+            timer(3, 2, 0, true),
+            LevelLogicRecord {
+                targetname: 2,
+                ..blank(logic_kind::DOOR)
+            },
+        ];
+        let mut logic = TestLogic::EMPTY;
+        logic.init_from_records(&RECORDS);
+        let first = door_trace(&mut logic, &RECORDS, 100, 104);
+        assert_eq!(first, "###.");
+        // The player dies mid-cycle and the world re-arms at tick 500.
+        logic.init_from_records(&RECORDS);
+        assert!(
+            !logic.door_open(1),
+            "the door is back to its authored state"
+        );
+        assert_eq!(door_trace(&mut logic, &RECORDS, 501, 505), first);
+    }
+
+    #[test]
+    fn a_timer_sends_explicit_on_and_off_so_a_multisource_never_drifts() {
+        // A required-1 gate driven by the timer: satisfied exactly while the
+        // timer is on, however many cycles have gone by.
+        static RECORDS: [LevelLogicRecord; 2] = [
+            LevelLogicRecord {
+                target: 3,
+                ..timer(2, 2, 0, true)
+            },
+            LevelLogicRecord {
+                targetname: 3,
+                arg0: 1,
+                ..blank(logic_kind::MULTISOURCE)
+            },
+        ];
+        let mut logic = TestLogic::EMPTY;
+        logic.init_from_records(&RECORDS);
+        let mut seen = String::new();
+        for now in 0..12 {
+            logic.tick(&RECORDS, input_at([0, 0, 0]), now);
+            seen.push(if logic.is_on(&RECORDS, 1) { '#' } else { '.' });
+        }
+        assert_eq!(seen, "##..##..##..");
+    }
+
+    #[test]
+    fn a_timer_delay_shifts_its_outputs_without_changing_its_own_cycle() {
+        static RECORDS: [LevelLogicRecord; 2] = [
+            LevelLogicRecord {
+                delay_ticks: 2,
+                ..timer(3, 3, 0, true)
+            },
+            LevelLogicRecord {
+                targetname: 2,
+                ..blank(logic_kind::DOOR)
+            },
+        ];
+        let mut logic = TestLogic::EMPTY;
+        logic.init_from_records(&RECORDS);
+        assert_eq!(door_trace(&mut logic, &RECORDS, 0, 12), "..###...###.");
+        // The timer itself ran on its own cycle, on for ticks 0..3.
+    }
+
+    /// Names: 4 = hazard, 5 = master gate.
+    const fn hazard(damage: u16, interval: u16, on: bool) -> LevelLogicRecord {
+        LevelLogicRecord {
+            targetname: 4,
+            arg0: damage,
+            arg1: interval,
+            min: [-50, 0, -50],
+            max: [50, 100, 50],
+            flags: logic_flags::ENABLED | if on { logic_flags::START_ON } else { 0 },
+            ..blank(logic_kind::HAZARD)
+        }
+    }
+
+    fn damage_over(
+        logic: &mut TestLogic,
+        records: &'static [LevelLogicRecord],
+        player: [i32; 3],
+        invulnerable: bool,
+        ticks: core::ops::Range<u32>,
+    ) -> Vec<u16> {
+        let mut out = Vec::new();
+        for now in ticks {
+            logic.tick(
+                records,
+                LogicTickInput {
+                    player,
+                    player_invulnerable: invulnerable,
+                },
+                now,
+            );
+            out.push(logic.take_hazard_damage());
+        }
+        out
+    }
+
+    #[test]
+    fn a_hazard_hits_on_contact_then_once_per_interval_while_the_player_stays() {
+        static RECORDS: [LevelLogicRecord; 1] = [hazard(7, 4, true)];
+        let mut logic = TestLogic::EMPTY;
+        logic.init_from_records(&RECORDS);
+        let inside = [0, 10, 0];
+        assert_eq!(
+            damage_over(&mut logic, &RECORDS, inside, false, 10..22),
+            [7, 0, 0, 0, 7, 0, 0, 0, 7, 0, 0, 0]
+        );
+        // Outside the volume nothing happens, and the damage is taken once.
+        assert_eq!(
+            damage_over(&mut logic, &RECORDS, [500, 10, 0], false, 22..26),
+            [0; 4]
+        );
+        assert_eq!(logic.take_hazard_damage(), 0);
+    }
+
+    #[test]
+    fn a_hazard_only_hurts_while_it_is_on() {
+        static RECORDS: [LevelLogicRecord; 1] = [hazard(5, 1, false)];
+        let mut logic = TestLogic::EMPTY;
+        logic.init_from_records(&RECORDS);
+        let inside = [0, 10, 0];
+        assert_eq!(
+            damage_over(&mut logic, &RECORDS, inside, false, 0..3),
+            [0; 3]
+        );
+        assert!(!logic.is_on(&RECORDS, 0));
+        logic.fire_by_name(&RECORDS, 4, UseCode::On, 3);
+        assert!(logic.is_on(&RECORDS, 0));
+        assert_eq!(
+            damage_over(&mut logic, &RECORDS, inside, false, 3..6),
+            [5; 3]
+        );
+        logic.fire_by_name(&RECORDS, 4, UseCode::Off, 6);
+        assert_eq!(
+            damage_over(&mut logic, &RECORDS, inside, false, 6..9),
+            [0; 3]
+        );
+        // Toggle flips it, and a second On does not stack.
+        logic.fire_by_name(&RECORDS, 4, UseCode::Toggle, 9);
+        logic.fire_by_name(&RECORDS, 4, UseCode::On, 9);
+        assert_eq!(
+            damage_over(&mut logic, &RECORDS, inside, false, 9..11),
+            [5; 2]
+        );
+    }
+
+    #[test]
+    fn invulnerable_frames_pass_through_a_hazard_and_do_not_spend_its_interval() {
+        static RECORDS: [LevelLogicRecord; 1] = [hazard(9, 30, true)];
+        let mut logic = TestLogic::EMPTY;
+        logic.init_from_records(&RECORDS);
+        let inside = [0, 10, 0];
+        // A dash lasting 6 ticks through the beam: nothing lands.
+        assert_eq!(
+            damage_over(&mut logic, &RECORDS, inside, true, 0..6),
+            [0; 6]
+        );
+        // The first vulnerable tick inside is hit at once, not 30 ticks late.
+        assert_eq!(
+            damage_over(&mut logic, &RECORDS, inside, false, 6..8),
+            [9, 0]
+        );
+    }
+
+    #[test]
+    fn a_timer_switches_a_hazard_with_on_and_off_directly() {
+        // Beam on for 4 ticks, off for 4, damaging every tick it is on.
+        static RECORDS: [LevelLogicRecord; 2] = [
+            LevelLogicRecord {
+                target: 4,
+                ..timer(4, 4, 0, true)
+            },
+            hazard(3, 1, false),
+        ];
+        let mut logic = TestLogic::EMPTY;
+        logic.init_from_records(&RECORDS);
+        assert_eq!(
+            damage_over(&mut logic, &RECORDS, [0, 10, 0], false, 0..12),
+            [3, 3, 3, 3, 0, 0, 0, 0, 3, 3, 3, 3]
+        );
+        // Standing clear of the volume through every phase costs nothing.
+        logic.init_from_records(&RECORDS);
+        assert_eq!(
+            damage_over(&mut logic, &RECORDS, [500, 10, 0], false, 0..12),
+            [0; 12]
+        );
+    }
+
+    #[test]
+    fn a_master_multisource_gates_a_hazard() {
+        // The timer feeds a gate; the hazard hurts only while the gate is
+        // satisfied, though the hazard itself is always on.
+        static RECORDS: [LevelLogicRecord; 3] = [
+            LevelLogicRecord {
+                target: 5,
+                ..timer(2, 2, 0, true)
+            },
+            LevelLogicRecord {
+                targetname: 5,
+                arg0: 1,
+                ..blank(logic_kind::MULTISOURCE)
+            },
+            LevelLogicRecord {
+                master: 5,
+                ..hazard(2, 1, true)
+            },
+        ];
+        let mut logic = TestLogic::EMPTY;
+        logic.init_from_records(&RECORDS);
+        assert_eq!(
+            damage_over(&mut logic, &RECORDS, [0, 10, 0], false, 0..8),
+            [2, 2, 0, 0, 2, 2, 0, 0]
+        );
+        assert!(!logic.is_on(&RECORDS, 2), "gated off now");
+    }
+
+    #[test]
+    fn a_hazard_can_kill_through_stacked_hits_and_rearms_with_the_world() {
+        static RECORDS: [LevelLogicRecord; 1] = [hazard(40, 10, true)];
+        let mut logic = TestLogic::EMPTY;
+        logic.init_from_records(&RECORDS);
+        let hits: u16 = damage_over(&mut logic, &RECORDS, [0, 10, 0], false, 0..30)
+            .iter()
+            .sum();
+        assert_eq!(hits, 120, "three hits in thirty ticks");
+        // Re-arm: the interval clock is fresh, so contact hits at once.
+        logic.init_from_records(&RECORDS);
+        assert_eq!(
+            damage_over(&mut logic, &RECORDS, [0, 10, 0], false, 31..32),
+            [40]
+        );
     }
 }

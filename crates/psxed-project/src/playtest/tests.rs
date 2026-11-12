@@ -284,6 +284,48 @@ pub(super) fn decode_level_records(
 }
 
 #[test]
+fn gates_records_ride_the_level_chunk() {
+    let mut package = PlaytestPackage::default();
+    package.logic.push(PlaytestLogic {
+        room: 0,
+        kind: psx_level::logic_kind::TIMER,
+        spawnflags: 0,
+        targetname: 1,
+        target: 2,
+        killtarget: 0,
+        master: 0,
+        delay_ticks: 0,
+        wait_ticks: 0,
+        arg0: 60,
+        arg1: 60,
+        arg2: 30,
+        link: psx_level::LOGIC_LINK_NONE,
+        message: psx_level::INTERACTABLE_MESSAGE_NONE,
+        x: 0,
+        y: 0,
+        z: 0,
+        min: [0; 3],
+        max: [0; 3],
+        flags: psx_level::logic_flags::ENABLED | psx_level::logic_flags::START_ON,
+    });
+    package.visual_links = vec![0];
+    package.world_start_abilities = psx_level::ability::DASH;
+    let decoded = decode_level_records(&package);
+    assert_eq!(decoded.logic.len(), 1);
+    assert_eq!(decoded.logic[0].kind, psx_level::logic_kind::TIMER);
+    assert_eq!(
+        (
+            decoded.logic[0].arg0,
+            decoded.logic[0].arg1,
+            decoded.logic[0].arg2
+        ),
+        (60, 60, 30)
+    );
+    assert_eq!(decoded.visual_links, &[0]);
+    assert_eq!(decoded.world_start_abilities, psx_level::ability::DASH);
+}
+
+#[test]
 fn hook_points_round_trip_and_cook_with_world_scale() {
     let mut project = ProjectDocument::starter();
     let scene = project.active_scene_mut();

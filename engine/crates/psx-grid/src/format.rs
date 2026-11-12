@@ -1072,6 +1072,44 @@ pub struct LodBlock {
     pub max_y: i16,
 }
 
+/// Logic-driven visibility of a run of quads or of any other drawn record
+/// (a free plane, a placed mesh, a particle emitter), carried in one byte.
+///
+/// Bit 0 marks the run as switched. Bits 1 to 5 are the switch slot, an index
+/// into the level's visual-switch table; the game keeps one bit per slot,
+/// set while the logic record the slot names is on. Bit 6 inverts it: shown
+/// while the record is off. A byte of zero is "always drawn", so every level
+/// cooked before the switch existed reads as it did.
+pub mod visual_switch {
+    /// The run is switched by a slot.
+    pub const SWITCHED: u8 = 1;
+    /// Shift of the slot number.
+    pub const SLOT_SHIFT: u8 = 1;
+    /// Slots in a level: the width of the state mask.
+    pub const SLOTS: usize = 32;
+    /// Bits 1 to 5: the slot.
+    pub const SLOT_MASK: u8 = 0x1F << SLOT_SHIFT;
+    /// Shown while the slot's record is off instead of on.
+    pub const INVERT: u8 = 1 << 6;
+
+    /// The byte for a switched run on `slot`, shown while the record is on
+    /// (or off, with `invert`).
+    pub const fn encode(slot: usize, invert: bool) -> u8 {
+        SWITCHED | ((slot as u8) << SLOT_SHIFT) | if invert { INVERT } else { 0 }
+    }
+
+    /// Whether a run with these `flags` is drawn while the slots in `on` are
+    /// on (bit `i` of `on` is slot `i`).
+    pub const fn shown(flags: u8, on: u32) -> bool {
+        if flags & SWITCHED == 0 {
+            return true;
+        }
+        let slot = (flags & SLOT_MASK) >> SLOT_SHIFT;
+        let state = (on >> slot) & 1 != 0;
+        state != (flags & INVERT != 0)
+    }
+}
+
 /// A free plane's render reference, 12 bytes: the run of quads it draws and
 /// a box around them for the per-frame frustum test.
 ///
@@ -1084,6 +1122,7 @@ pub struct PlaneRef {
     pub quad: u16,
     /// Quads in the run.
     pub count: u8,
+    /// [`visual_switch`] bits: zero draws the run always.
     pub flags: u8,
     pub x0: u8,
     pub z0: u8,

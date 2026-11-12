@@ -478,6 +478,7 @@ impl Playtest {
             reward: psx_game_runtime::poi::PoiReward {
                 resource: interactable.reward_resource,
                 quantity: interactable.reward_quantity,
+                abilities: interactable.reward_abilities,
             },
         };
         candidate.is_available(&self.poi_save)
@@ -498,6 +499,7 @@ impl Playtest {
             reward: psx_game_runtime::poi::PoiReward {
                 resource: interactable.reward_resource,
                 quantity: interactable.reward_quantity,
+                abilities: interactable.reward_abilities,
             },
         };
         candidate.is_depleted(&self.poi_save)
@@ -508,24 +510,69 @@ impl Playtest {
             return None;
         };
         let persistence = poi_persistent_flags(interactable);
-        if persistence.reward_claimed(&self.poi_save) || interactable.reward_quantity == 0 {
+        if persistence.reward_claimed(&self.poi_save) {
             return None;
         }
-        let Some(module) = boost_module_for_reward(interactable.reward_resource) else {
+        // Abilities are granted first and never fail: they cost no inventory
+        // room, so a full pack cannot keep a fragment's gift from the player.
+        let abilities = interactable.reward_abilities;
+        let newly_unlocked = abilities & !self.abilities().bits();
+        let mut module = None;
+        if interactable.reward_quantity != 0 {
+            if let Some(candidate) = boost_module_for_reward(interactable.reward_resource) {
+                let already_owned = self.power_up_inventory.contains(candidate)
+                    || BoostSlotId::ALL
+                        .iter()
+                        .any(|slot| self.power_up_loadout.module(*slot) == candidate);
+                if already_owned || !self.power_up_inventory.add(candidate) {
+                    return None;
+                }
+                module = Some(candidate);
+            }
+        }
+        if module.is_none() && abilities == 0 {
             return None;
-        };
-        let already_owned = self.power_up_inventory.contains(module)
-            || BoostSlotId::ALL
-                .iter()
-                .any(|slot| self.power_up_loadout.module(*slot) == module);
-        if already_owned || !self.power_up_inventory.add(module) {
-            return None;
+        }
+        if self.poi_save.grant_abilities(abilities) {
+            self.poi_save_dirty = true;
         }
         if persistence.mark_reward_claimed(&mut self.poi_save) {
             self.poi_save_dirty = true;
         }
         self.queue_gameplay_sfx(LevelGameplaySfxEvent::ItemAcquired);
-        Some(module)
+        if newly_unlocked != 0 {
+            self.announce_unlocked_abilities(newly_unlocked);
+        }
+        module
+    }
+
+    /// Tell the player what they can now do, through the legacy message
+    /// overlay (runtime copy, like the socket hint, so it needs no cooked
+    /// page). The module panel, if the same pickup also gave one, comes up
+    /// after this is dismissed.
+    fn announce_unlocked_abilities(&mut self, unlocked: u16) {
+        use psx_level::ability;
+        let (title, body) = if unlocked & ability::SPRINT != 0 && unlocked & ability::DASH != 0 {
+            (
+                crate::loc::tr("ui.ability.both.title", "SPRINT AND DASH"),
+                crate::loc::tr(
+                    "ui.ability.both.body",
+                    "HOLD CIRCLE TO SPRINT.\nTAP CIRCLE TO DASH.",
+                ),
+            )
+        } else if unlocked & ability::SPRINT != 0 {
+            (
+                crate::loc::tr("ui.ability.sprint.title", "SPRINT"),
+                crate::loc::tr("ui.ability.sprint.body", "HOLD CIRCLE TO SPRINT."),
+            )
+        } else {
+            (
+                crate::loc::tr("ui.ability.dash.title", "DASH"),
+                crate::loc::tr("ui.ability.dash.body", "TAP CIRCLE TO DASH."),
+            )
+        };
+        self.message_overlay = Some(RuntimeMessageOverlay { title, body });
+        self.set_poi_page_type_frame(0);
     }
 
     pub(super) fn advance_poi_message(&mut self) {
@@ -1583,7 +1630,19 @@ impl Playtest {
         let modifiers = self.vitality_modifiers();
         config.walk_speed = modifiers.movement_speed(config.walk_speed);
         config.run_speed = modifiers.movement_speed(config.run_speed);
+        // Sprinting is something the player has to have been given: the one
+        // gate every sprint decision of the motor passes through.
+        config.run_enabled &= self.abilities().sprint();
         config
+    }
+
+    /// What the player can do now: the abilities the level starts them with
+    /// and the ones they have since earned (the save keeps those).
+    pub(super) fn abilities(&self) -> psx_game_runtime::abilities::PlayerAbilities {
+        psx_game_runtime::abilities::PlayerAbilities::effective(
+            WORLD_START_ABILITIES.get(),
+            self.poi_save.abilities,
+        )
     }
 
     pub(super) fn camera_orbit_speed_level(&self) -> u8 {
@@ -1690,8 +1749,11 @@ impl Playtest {
         let mut submitted = 0usize;
         let depth_range = self.effect_depth_range(self.room_index);
         let mut projector = None;
+        let switches = self.visual_switch_mask();
         for emitter in &PARTICLE_EMITTERS {
-            if emitter.room != self.room_index {
+            if emitter.room != self.room_index
+                || !psx_grid::visual_switch::shown(emitter.visual, switches)
+            {
                 continue;
             }
             let loaded_projector = match projector {
@@ -2761,6 +2823,77 @@ mod life_reset_tests {
         assert!(!raw.is_null());
         unsafe { Playtest::init_zeroed(raw) };
         unsafe { std::boxed::Box::from_raw(raw) }
+    }
+
+    #[test]
+    fn sprint_needs_the_ability_and_the_motor_obeys() {
+        use psx_level::ability;
+        let mut scene = test_scene();
+        // The fixture level starts the player with nothing.
+        assert!(!scene.abilities().sprint() && !scene.abilities().dash());
+        assert!(
+            !scene.motor_config().run_enabled,
+            "holding Circle cannot sprint yet"
+        );
+        // A fragment grants sprint, for good, through the save.
+        assert!(scene.poi_save.grant_abilities(ability::SPRINT));
+        assert!(scene.abilities().sprint() && !scene.abilities().dash());
+        assert!(scene.motor_config().run_enabled);
+        // Starting a new game forgets what was earned.
+        scene.poi_save = SaveBlock::new(PLAYER_MAX_HEALTH, PERSISTENT_FLAG_COUNT);
+        assert!(!scene.motor_config().run_enabled);
+    }
+
+    #[test]
+    fn a_tap_on_circle_dashes_only_once_dash_is_unlocked() {
+        use psx_level::ability;
+        let mut scene = test_scene();
+        // Press, then release a few ticks later.
+        let tap = |scene: &mut Playtest| {
+            let held = scene.evade_run_intent(true, true, false, 1);
+            assert!(
+                held.sprint && !held.evade,
+                "holding asks to sprint, never to dash"
+            );
+            scene.evade_run_intent(false, false, true, 1)
+        };
+        assert!(!tap(&mut scene).evade, "locked: the tap does nothing");
+        assert_eq!(scene.evade_buffer_vblanks, 0, "and nothing is buffered");
+        // Sprint alone does not unlock the dash.
+        scene.poi_save.grant_abilities(ability::SPRINT);
+        assert!(!tap(&mut scene).evade);
+        scene.poi_save.grant_abilities(ability::DASH);
+        assert!(tap(&mut scene).evade, "unlocked: the same tap dashes");
+    }
+
+    #[test]
+    fn a_long_hold_is_a_sprint_not_a_dash_whether_or_not_it_is_unlocked() {
+        use psx_level::ability;
+        let mut scene = test_scene();
+        scene.poi_save.grant_abilities(ability::DASH);
+        scene.evade_run_intent(true, true, false, 1);
+        for _ in 0..EVADE_RUN_HOLD_VBLANKS {
+            scene.evade_run_intent(false, true, false, 1);
+        }
+        assert!(!scene.evade_run_intent(false, false, true, 1).evade);
+    }
+
+    #[test]
+    fn an_ability_reward_is_granted_once_with_no_item_and_survives_the_card() {
+        use psx_level::ability;
+        let mut scene = test_scene();
+        assert!(!scene.abilities().sprint());
+        // The reward is a record's bits; claim them the way a pickup does.
+        let persistence = psx_game_runtime::poi::PoiPersistentFlags { read: 0, reward: 0 };
+        assert!(!persistence.reward_claimed(&scene.poi_save));
+        assert!(scene.poi_save.grant_abilities(ability::SPRINT));
+        assert!(persistence.mark_reward_claimed(&mut scene.poi_save));
+        scene.announce_unlocked_abilities(ability::SPRINT);
+        assert_eq!(scene.message_overlay.unwrap().title, "SPRINT");
+        let mut frame = [0u8; psx_game_runtime::save::SAVE_BLOCK_BYTES];
+        scene.poi_save.encode(&mut frame);
+        let back = SaveBlock::decode(&frame, scene.poi_save.flag_count).unwrap();
+        assert!(back.abilities & ability::SPRINT != 0);
     }
 
     #[test]

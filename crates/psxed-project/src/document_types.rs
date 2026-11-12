@@ -1331,6 +1331,7 @@ impl ProjectDocument {
                         culling,
                         physics,
                         world_message,
+                        start_abilities: _,
                     } => {
                         *sector_size = snap_world_sector_size(*sector_size);
                         sky.horizon_percent = sky.horizon_percent.clamp(5, 95);

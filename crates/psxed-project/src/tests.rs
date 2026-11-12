@@ -1688,6 +1688,7 @@ fn point_of_interest_world_message_and_boost_module_roundtrip() {
             repeatable: false,
             persistence_id: "archive-beacon-01".to_string(),
             reward: Some(PointOfInterestReward {
+                grants_item: true,
                 module: None,
                 quantity: 1,
                 item_name: "Kinetic Relay".to_string(),
@@ -1698,6 +1699,7 @@ fn point_of_interest_world_message_and_boost_module_roundtrip() {
                     stat: BoostStatKind::HorizonAttack,
                     percent: 15,
                 }],
+                abilities: PlayerAbilities::none(),
             }),
             enabled: true,
         },
@@ -1706,6 +1708,68 @@ fn point_of_interest_world_message_and_boost_module_roundtrip() {
     let ron = project.to_ron_string().expect("serializes");
     let restored = ProjectDocument::from_ron_str(&ron).expect("deserializes");
     assert_eq!(restored, project);
+}
+
+#[test]
+fn a_world_stored_without_abilities_starts_the_player_with_all_of_them() {
+    let world: NodeKind = ron::from_str("World()").expect("defaults load");
+    let NodeKind::World {
+        start_abilities, ..
+    } = &world
+    else {
+        panic!("a world")
+    };
+    assert_eq!(*start_abilities, PlayerAbilities::all());
+    assert_eq!(
+        start_abilities.bits(),
+        psx_level::ability::SPRINT | psx_level::ability::DASH
+    );
+    // All is the default, so it is not written back out.
+    let text = ron::to_string(&world).expect("serializes");
+    assert!(!text.contains("start_abilities"), "{text}");
+}
+
+#[test]
+fn a_world_that_starts_with_no_abilities_keeps_that_through_a_save() {
+    for abilities in [
+        PlayerAbilities::none(),
+        PlayerAbilities {
+            sprint: true,
+            dash: false,
+        },
+        PlayerAbilities {
+            sprint: false,
+            dash: true,
+        },
+    ] {
+        let mut world = NodeKind::default_world();
+        let NodeKind::World {
+            start_abilities, ..
+        } = &mut world
+        else {
+            unreachable!()
+        };
+        *start_abilities = abilities;
+        let text = ron::to_string(&world).expect("serializes");
+        let back: NodeKind = ron::from_str(&text).expect("loads");
+        assert_eq!(back, world, "{text}");
+    }
+}
+
+#[test]
+fn an_ability_reward_survives_a_save_and_a_reward_without_one_loads_as_none() {
+    let reward = PointOfInterestReward::abilities_only(PlayerAbilities {
+        sprint: true,
+        dash: false,
+    });
+    let text = ron::to_string(&reward).expect("serializes");
+    let back: PointOfInterestReward = ron::from_str(&text).expect("loads");
+    assert_eq!(back, reward);
+    assert!(!back.has_item());
+    assert_eq!(back.abilities.bits(), psx_level::ability::SPRINT);
+    // A reward saved before abilities existed gives none.
+    let old: PointOfInterestReward = ron::from_str("(item_name: \"Relay\")").expect("loads");
+    assert!(old.abilities.is_none() && old.has_item());
 }
 
 #[test]

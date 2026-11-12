@@ -50,7 +50,9 @@ pub(super) enum ArchiveBeaconKind {
 
 impl ArchiveBeaconKind {
     fn of(interactable: &InteractableRecord) -> Self {
-        if interactable.reward_resource == psx_level::POI_REWARD_NONE {
+        if interactable.reward_resource == psx_level::POI_REWARD_NONE
+            && interactable.reward_abilities == 0
+        {
             Self::Message
         } else {
             Self::Item

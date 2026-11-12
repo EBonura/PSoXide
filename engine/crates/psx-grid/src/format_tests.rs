@@ -402,3 +402,19 @@ fn a_room_without_spans_has_no_span_block() {
     assert!(view.col.span_index.is_empty());
     assert!(view.col.extra_spans(0).is_empty());
 }
+
+#[test]
+fn an_unswitched_run_is_always_drawn_and_a_switched_one_follows_its_slot() {
+    use crate::visual_switch::{encode, shown, SLOTS};
+    for on in [0u32, u32::MAX, 0x5555_5555] {
+        assert!(shown(0, on), "flags 0 draw whatever the switches say");
+    }
+    for slot in 0..SLOTS {
+        let flags = encode(slot, false);
+        assert!(shown(flags, 1 << slot));
+        assert!(!shown(flags, !(1u32 << slot)), "only its own slot counts");
+        let inverted = encode(slot, true);
+        assert!(!shown(inverted, 1 << slot));
+        assert!(shown(inverted, !(1u32 << slot)));
+    }
+}

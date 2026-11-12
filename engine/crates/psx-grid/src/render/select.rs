@@ -257,6 +257,7 @@ impl GridRenderer {
         frustum: &FrustumPlanes,
         size: i32,
         camera: [i32; 3],
+        switches: u32,
         frame: &mut GridFrame,
     ) {
         let [cx, cy, cz] = camera;
@@ -347,6 +348,10 @@ impl GridRenderer {
         // and its run of quads goes through the same facing test.
         let clamp16 = |v: i32| v.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
         for plane in room.render.plane_refs {
+            // A plane or mesh a logic record switches off is not drawn.
+            if !visual_switch::shown(plane.flags, switches) {
+                continue;
+            }
             let lo = GteVec3I16 {
                 x: clamp16(i32::from(plane.x0) * size),
                 y: plane.min_y,

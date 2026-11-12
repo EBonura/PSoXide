@@ -205,7 +205,8 @@ use level_data::{
     CYLINDER_PROPS, CYLINDER_PROP_SURFACES, DESTRUCTIBLES, ENTITIES, GAME_ENTITIES,
     GAME_ENTITY_IDS, IMAGE_PROPS, INTERACTABLES, INTERACTABLE_MESSAGES, LIGHTS, LOGIC, LOGIC_SLOTS,
     MODEL_INSTANCES, PARTICLE_EMITTERS, PLAYER_CONTROLLER, PLAYER_SPAWN, ROOMS,
-    ROOM_REFLECTION_PROBES, VITALITY_CIRCLES, WORLD_AMBIENT_RGB, WORLD_MESSAGE, WORLD_OBJECTS,
+    ROOM_REFLECTION_PROBES, VISUAL_LINKS, VITALITY_CIRCLES, WORLD_AMBIENT_RGB, WORLD_MESSAGE,
+    WORLD_OBJECTS, WORLD_START_ABILITIES,
 };
 
 /// Two ordering tables, alternated with the packet scratch's frame pair: the
@@ -940,12 +941,31 @@ impl Playtest {
     }
 
     fn update_evade_run_button(&mut self, ctx: &Ctx, delta_vblanks: u16) -> EvadeRunIntent {
-        if ctx.just_pressed(EVADE_RUN_BUTTON) {
+        self.evade_run_intent(
+            ctx.just_pressed(EVADE_RUN_BUTTON),
+            ctx.is_held(EVADE_RUN_BUTTON),
+            ctx.just_released(EVADE_RUN_BUTTON),
+            delta_vblanks,
+        )
+    }
+
+    /// What Circle asks for this tick, from its edges: hold sprints, a tap
+    /// dashes. A dash the player has not unlocked is a tap that does nothing:
+    /// it never reaches the dodge, the authored dodge window or the buffer.
+    /// (Sprint is gated where the motor is configured, see `motor_config`.)
+    fn evade_run_intent(
+        &mut self,
+        pressed: bool,
+        held: bool,
+        released: bool,
+        delta_vblanks: u16,
+    ) -> EvadeRunIntent {
+        if pressed {
             self.evade_run_hold_ticks = 0;
             self.evade_run_hold_consumed = false;
         }
 
-        if ctx.is_held(EVADE_RUN_BUTTON) {
+        if held {
             self.evade_run_hold_ticks = self
                 .evade_run_hold_ticks
                 .saturating_add(delta_vblanks.min(u8::MAX as u16) as u8);
@@ -960,7 +980,7 @@ impl Playtest {
             };
         }
 
-        let evade = ctx.just_released(EVADE_RUN_BUTTON) && !self.evade_run_hold_consumed;
+        let evade = released && !self.evade_run_hold_consumed && self.abilities().dash();
         self.evade_run_hold_ticks = 0;
         self.evade_run_hold_consumed = false;
         EvadeRunIntent {

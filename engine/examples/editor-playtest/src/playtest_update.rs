@@ -381,11 +381,18 @@ impl Playtest {
                 );
             }
         }
+        // A dash's invulnerable frames pass through a hazard, and so does a
+        // body already dying: neither is hit or spends the hazard's interval.
+        let hazard_exempt = self.player_invulnerable(ctx) || self.hazard_death_ticks_remaining != 0;
         self.logic.tick(
             LOGIC.as_slice(),
-            psx_game_runtime::logic::LogicTickInput { player: player_pos },
+            psx_game_runtime::logic::LogicTickInput {
+                player: player_pos,
+                player_invulnerable: hazard_exempt,
+            },
             now,
         );
+        self.apply_logic_hazard_damage(ctx);
         self.dispatch_logic_effects(ctx.controller_port());
         self.sync_sliding_doors();
         telemetry::counter(

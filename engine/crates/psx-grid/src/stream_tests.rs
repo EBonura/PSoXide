@@ -165,6 +165,7 @@ fn draw(
             screen: [320, 240],
             focal_length: 160,
             sector: S,
+            switches: 0,
         };
         let mut out = vec![0u32; 4096];
         let frame = renderer.draw_room(&view, &camera, &slot.materials, &mut out, false);

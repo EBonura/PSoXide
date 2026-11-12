@@ -51,6 +51,15 @@ pub enum NodeKind {
         /// Optional message shown once per game launch when this scene starts.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         world_message: Option<WorldMessage>,
+        /// What the player can do from the first frame of this world. The
+        /// rest is earned from pickups. A world stored without the setting
+        /// starts the player with everything, as every world did before
+        /// abilities.
+        #[serde(
+            default = "PlayerAbilities::all",
+            skip_serializing_if = "PlayerAbilities::is_all"
+        )]
+        start_abilities: PlayerAbilities,
     },
     /// Static or dynamic mesh / model instance.
     ///
@@ -459,6 +468,7 @@ impl NodeKind {
             culling: WorldCullingSettings::default(),
             physics: WorldPhysicsSettings::default(),
             world_message: None,
+            start_abilities: PlayerAbilities::all(),
         }
     }
 
@@ -556,9 +566,69 @@ impl Default for WorldMessage {
     }
 }
 
+/// The player abilities a world can lock and a pickup can unlock. One flag
+/// per ability; the cook packs them into the runtime's `psx_level::ability`
+/// bits. A new ability is a new flag here and a new bit there.
+#[allow(clippy::exhaustive_structs)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayerAbilities {
+    /// Hold Circle to sprint.
+    #[serde(default)]
+    pub sprint: bool,
+    /// Tap Circle to dash.
+    #[serde(default)]
+    pub dash: bool,
+}
+
+impl PlayerAbilities {
+    /// Every ability.
+    pub const fn all() -> Self {
+        Self {
+            sprint: true,
+            dash: true,
+        }
+    }
+
+    /// No ability.
+    pub const fn none() -> Self {
+        Self {
+            sprint: false,
+            dash: false,
+        }
+    }
+
+    /// Whether every ability is on (the default of a world's start set).
+    pub fn is_all(&self) -> bool {
+        *self == Self::all()
+    }
+
+    /// Whether no ability is on.
+    pub fn is_none(&self) -> bool {
+        *self == Self::none()
+    }
+
+    /// The runtime bits (`psx_level::ability`).
+    pub fn bits(&self) -> u16 {
+        let mut bits = psx_level::ability::NONE;
+        if self.sprint {
+            bits |= psx_level::ability::SPRINT;
+        }
+        if self.dash {
+            bits |= psx_level::ability::DASH;
+        }
+        bits
+    }
+}
+
 /// Optional one-time reward attached to a point of interest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PointOfInterestReward {
+    /// Whether the pickup gives an item (the module fields below). Off, it
+    /// grants only [`Self::abilities`], and the module fields are ignored
+    /// (but kept, so switching the item back on loses nothing). Rewards
+    /// saved before abilities existed always gave an item.
+    #[serde(default = "default_true", skip_serializing_if = "is_true_ref")]
+    pub grants_item: bool,
     /// Legacy Boost Module resource reference. Existing projects continue to
     /// load; new rewards define their unique item inline below.
     #[serde(default)]
@@ -582,11 +652,39 @@ pub struct PointOfInterestReward {
     /// and are added together by the cooker.
     #[serde(default)]
     pub modifiers: Vec<crate::BoostStatModifier>,
+    /// Abilities this pickup unlocks for good. A reward with no item name
+    /// and no legacy module grants only these (an arch fragment); with an
+    /// item it grants both.
+    #[serde(default, skip_serializing_if = "PlayerAbilities::is_none")]
+    pub abilities: PlayerAbilities,
+}
+
+impl PointOfInterestReward {
+    /// A reward that unlocks `abilities` and gives no item.
+    pub fn abilities_only(abilities: PlayerAbilities) -> Self {
+        Self {
+            grants_item: false,
+            module: None,
+            quantity: 1,
+            item_name: String::new(),
+            description: String::new(),
+            item_name_it: String::new(),
+            description_it: String::new(),
+            modifiers: Vec::new(),
+            abilities,
+        }
+    }
+
+    /// Whether the reward gives an item, as opposed to abilities alone.
+    pub fn has_item(&self) -> bool {
+        self.grants_item
+    }
 }
 
 impl Default for PointOfInterestReward {
     fn default() -> Self {
         Self {
+            grants_item: true,
             module: None,
             quantity: 1,
             item_name: "NEW MODULE".to_string(),
@@ -594,6 +692,7 @@ impl Default for PointOfInterestReward {
             item_name_it: String::new(),
             description_it: String::new(),
             modifiers: vec![crate::BoostStatModifier::default()],
+            abilities: PlayerAbilities::none(),
         }
     }
 }
@@ -792,6 +891,56 @@ pub enum LogicNodeKind {
         #[serde(default)]
         refusal: String,
     },
+    /// Free-running timer: on for `on_ticks`, off for `off_ticks`, repeat.
+    /// Every change sends `target` an explicit On or Off, so a door, gate or
+    /// hazard it drives never drifts. Planes, meshes and emitters can be
+    /// shown while it is on. A death or checkpoint rest restarts the cycle.
+    Timer {
+        /// 60 Hz ticks on per cycle (must be > 0).
+        #[serde(default = "default_timer_ticks")]
+        on_ticks: u16,
+        /// 60 Hz ticks off per cycle (must be > 0).
+        #[serde(default = "default_timer_ticks")]
+        off_ticks: u16,
+        /// Ticks into the cycle it starts at, so two timers can be set a
+        /// beat apart. Wraps past the cycle length.
+        #[serde(default)]
+        phase_ticks: u16,
+        /// Running from level load. Off, it waits for something to use it:
+        /// On starts it, Off stops it and sends Off, a trigger toggles it.
+        #[serde(default = "default_true")]
+        running: bool,
+    },
+    /// A damaging volume. While it is on and the player stands in it, the
+    /// player takes `damage` at once and again every `interval_ticks`, unless
+    /// invulnerable (a dash passes through). On and Off from a Timer, Switch
+    /// or Relay switch it; a master Multisource gates it.
+    Hazard {
+        /// Full volume extent, engine units (XZ centered, Y up from the floor).
+        #[serde(default = "default_logic_trigger_size")]
+        size: [u16; 3],
+        /// Health taken per hit (must be > 0).
+        #[serde(default = "default_hazard_damage")]
+        damage: u16,
+        /// Ticks between hits while the player stays inside (must be > 0).
+        #[serde(default = "default_hazard_interval")]
+        interval_ticks: u16,
+        /// Whether it is on at level load.
+        #[serde(default = "default_true")]
+        start_on: bool,
+    },
+}
+
+pub(crate) const fn default_timer_ticks() -> u16 {
+    60
+}
+
+pub(crate) const fn default_hazard_damage() -> u16 {
+    25
+}
+
+pub(crate) const fn default_hazard_interval() -> u16 {
+    30
 }
 
 /// The motion of a sliding door: its box translates `distance` along
@@ -903,6 +1052,10 @@ impl Default for ColliderShape {
             half_extents: [256, 256, 256],
         }
     }
+}
+
+fn is_true_ref(value: &bool) -> bool {
+    *value
 }
 
 pub(crate) const fn default_true() -> bool {

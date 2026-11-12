@@ -77,6 +77,9 @@ pub struct PoiReward {
     pub resource: u16,
     /// Number of copies to grant.
     pub quantity: u8,
+    /// `psx_level::ability` bits granted for good, or zero. A reward may be
+    /// an item, abilities, or both.
+    pub abilities: u16,
 }
 
 impl PoiReward {
@@ -84,11 +87,12 @@ impl PoiReward {
     pub const NONE: Self = Self {
         resource: POI_REWARD_NONE,
         quantity: 0,
+        abilities: 0,
     };
 
     /// Whether this describes a non-empty reward.
     pub const fn is_some(self) -> bool {
-        self.resource != POI_REWARD_NONE && self.quantity != 0
+        (self.resource != POI_REWARD_NONE && self.quantity != 0) || self.abilities != 0
     }
 }
 
@@ -453,12 +457,33 @@ mod tests {
         let reward = PoiReward {
             resource: 72,
             quantity: 2,
+            abilities: 0,
         };
         assert!(FLAGS.reward_pending(&save, reward));
         assert!(!FLAGS.reward_pending(&save, PoiReward::NONE));
         assert!(!PoiPersistentFlags::NONE.reward_pending(&save, reward));
         assert!(FLAGS.mark_reward_claimed(&mut save));
         assert!(!FLAGS.reward_pending(&save, reward));
+    }
+
+    #[test]
+    fn an_ability_reward_counts_as_a_reward_without_an_item() {
+        let mut save = SaveBlock::new(100, 4);
+        let reward = PoiReward {
+            resource: POI_REWARD_NONE,
+            quantity: 0,
+            abilities: psx_level::ability::SPRINT,
+        };
+        assert!(reward.is_some());
+        assert!(FLAGS.reward_pending(&save, reward));
+        // Reading the message does not spend it: the POI stays available
+        // until the ability is claimed.
+        let mut one_shot = candidate(0, false, FLAGS);
+        one_shot.reward = reward;
+        assert!(FLAGS.mark_read(&mut save));
+        assert!(one_shot.is_available(&save));
+        assert!(FLAGS.mark_reward_claimed(&mut save));
+        assert!(one_shot.is_depleted(&save));
     }
 
     #[test]
@@ -496,6 +521,7 @@ mod tests {
         one_shot.reward = PoiReward {
             resource: 7,
             quantity: 1,
+            abilities: 0,
         };
 
         assert!(FLAGS.mark_read(&mut save));

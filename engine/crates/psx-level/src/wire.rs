@@ -28,7 +28,7 @@ use crate::*;
 pub const MAGIC: [u8; 4] = *b"PXLR";
 /// Version of the layout below. Bump it whenever a record or the table list
 /// changes.
-pub const VERSION: u16 = 3;
+pub const VERSION: u16 = 4;
 
 /// A cursor over the chunk's bytes. The bytes live for the whole run, so a
 /// string decoded from them can be `&'static`.
@@ -326,7 +326,7 @@ wire_struct! {
     ParticleEmitterRecord {
         room, x, y, z, max_particles, spawn_rate_q8, lifetime_frames, start_size, end_size,
         start_color, end_color, blend_mode, base_velocity_q4, random_velocity_q4, acceleration_q4,
-        spawn_radius, texture_asset, flags
+        spawn_radius, texture_asset, visual, flags
     }
     LevelMaterialUvMotion { enabled, speed_u_q8, speed_v_q8, phase_u, phase_v }
     LevelModelSecondaryLayer { texture_asset, blend_mode, tint_rgb, motion, flags }
@@ -337,7 +337,7 @@ wire_struct! {
     }
     InteractableRecord {
         room, kind, x, y, z, yaw, radius, marker_height, prompt, message, logic, checkpoint_id,
-        read_flag, reward_flag, reward_resource, reward_quantity, flags
+        read_flag, reward_flag, reward_resource, reward_quantity, reward_abilities, flags
     }
     InteractableMessageRecord { title, body, page_first, page_count }
     LevelVitalityCircleRecord {
@@ -348,7 +348,7 @@ wire_struct! {
     PlayerControllerRecord { spawn, character, flags }
     LevelLogicRecord {
         room, kind, spawnflags, targetname, target, killtarget, master, delay_ticks, wait_ticks,
-        arg0, arg1, link, message, x, y, z, min, max, flags
+        arg0, arg1, arg2, link, message, x, y, z, min, max, flags
     }
     CharacterActionFrameRange { start, end }
     LevelGameEntityRecord {
@@ -427,6 +427,7 @@ level_tables! {
     table vitality_circles: LevelVitalityCircleRecord;
     table logic: LevelLogicRecord;
     table logic_slots: u16;
+    table visual_links: u16;
     table game_entities: LevelGameEntityRecord;
     table game_entity_ids: StableId;
     table entities: EntityRecord;
@@ -445,6 +446,7 @@ level_tables! {
     one player_controller: Option<PlayerControllerRecord>;
     one world_message: Option<InteractableMessageRecord>;
     one world_ambient_rgb: [u8; 3];
+    one world_start_abilities: u16;
 }
 
 /// Runtime pool caps a level's records are checked against by the cook. The
@@ -637,6 +639,7 @@ mod tests {
             reward_flag: 9,
             reward_resource: 10,
             reward_quantity: 11,
+            reward_abilities: ability::SPRINT | ability::DASH,
             flags: 1,
         }];
         let spawn = PlayerSpawnRecord {
@@ -646,6 +649,28 @@ mod tests {
             z: 200,
             yaw: 0,
             flags: 1,
+        };
+        let timer = LevelLogicRecord {
+            room: RoomIndex(0),
+            kind: logic_kind::TIMER,
+            spawnflags: 0,
+            targetname: 1,
+            target: 2,
+            killtarget: 0,
+            master: 0,
+            delay_ticks: 0,
+            wait_ticks: 0,
+            arg0: 60,
+            arg1: 90,
+            arg2: 15,
+            link: LOGIC_LINK_NONE,
+            message: INTERACTABLE_MESSAGE_NONE,
+            x: 0,
+            y: 0,
+            z: 0,
+            min: [0; 3],
+            max: [0; 3],
+            flags: logic_flags::ENABLED | logic_flags::START_ON,
         };
         let records = LevelRecords {
             rooms: &rooms,
@@ -657,8 +682,9 @@ mod tests {
             interactable_message_pages_it: &[""],
             interactables: &interactables,
             vitality_circles: &[],
-            logic: &[],
+            logic: &[timer],
             logic_slots: &[7, 12],
+            visual_links: &[0, 3],
             game_entities: &[],
             game_entity_ids: &[],
             entities: &[],
@@ -677,6 +703,7 @@ mod tests {
             player_controller: None,
             world_message: None,
             world_ambient_rgb: [32; 3],
+            world_start_abilities: ability::SPRINT,
         };
         let bytes = records.encode();
         assert_eq!(&bytes[..4], b"PXLR");
@@ -687,6 +714,9 @@ mod tests {
         assert_eq!(decoded.interactable_message_pages, &pages);
         assert_eq!(decoded.interactable_message_pages_it, &[""]);
         assert_eq!(decoded.logic_slots, &[7, 12]);
+        assert_eq!(decoded.logic, &[timer]);
+        assert_eq!(decoded.visual_links, &[0, 3]);
+        assert_eq!(decoded.world_start_abilities, ability::SPRINT);
         assert_eq!(decoded.player_spawn, spawn);
         assert_eq!(decoded.world_ambient_rgb, [32; 3]);
         assert_eq!(decoded.encode(), bytes, "canonical");

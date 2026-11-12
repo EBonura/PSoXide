@@ -24,7 +24,8 @@
 //! | 24     | 4    | saved y                                  |
 //! | 28     | 4    | saved z                                  |
 //! | 32     | 104  | persistent flag bitset (832 flags)       |
-//! | 136    | 112  | reserved for future savestate fields     |
+//! | 136    | 2    | abilities earned from pickups (bits)     |
+//! | 138    | 110  | reserved for future savestate fields     |
 //! | 248    | 8    | FNV-1a-64 over bytes 0..248              |
 //!
 //! Nothing in a save is an array index. The checkpoint is a stable id
@@ -56,6 +57,10 @@ pub const SAVE_BLOCK_BYTES: usize = 256;
 
 const CHECKSUM_OFFSET: usize = SAVE_BLOCK_BYTES - 8;
 const FLAGS_OFFSET: usize = 32;
+/// Where the earned abilities sit: the first bytes of the reserve after the
+/// flags. A save written before abilities has zero there, which reads as
+/// "none earned", so the version did not need to change.
+const ABILITIES_OFFSET: usize = FLAGS_OFFSET + SAVE_FLAG_BYTES;
 /// Layout of version 2, which still loads (see the module docs).
 const V2_ROOM_NONE: u16 = u16::MAX;
 const LEGACY_V1_BYTES: usize = 128;
@@ -95,6 +100,9 @@ pub struct SaveBlock {
     pub resume_position: Option<SavedPlayerPosition>,
     /// Persistent world flags, one bit per cook-interned index.
     pub flags: [u8; SAVE_FLAG_BYTES],
+    /// `psx_level::ability` bits the player earned from pickups. What the
+    /// player can do is these plus the level's starting set.
+    pub abilities: u16,
 }
 
 impl SaveBlock {
@@ -107,7 +115,15 @@ impl SaveBlock {
             flag_count,
             resume_position: None,
             flags: [0; SAVE_FLAG_BYTES],
+            abilities: 0,
         }
+    }
+
+    /// Earn `bits`, returning whether the save changed.
+    pub fn grant_abilities(&mut self, bits: u16) -> bool {
+        let before = self.abilities;
+        self.abilities |= bits;
+        self.abilities != before
     }
 
     /// Replace the stored exit pose, returning whether the save changed.
@@ -159,8 +175,9 @@ impl SaveBlock {
             out[24..28].copy_from_slice(&position.y.to_le_bytes());
             out[28..32].copy_from_slice(&position.z.to_le_bytes());
         }
-        // The future-state reserve remains zero.
         out[FLAGS_OFFSET..FLAGS_OFFSET + SAVE_FLAG_BYTES].copy_from_slice(&self.flags);
+        // The rest of the future-state reserve remains zero.
+        out[ABILITIES_OFFSET..ABILITIES_OFFSET + 2].copy_from_slice(&self.abilities.to_le_bytes());
         let checksum = fnv1a_64(&out[..CHECKSUM_OFFSET]);
         out[CHECKSUM_OFFSET..].copy_from_slice(&checksum.to_le_bytes());
     }
@@ -214,6 +231,7 @@ impl SaveBlock {
                 flag_count,
                 resume_position,
                 flags,
+                abilities: 0,
             });
         }
         let resume_position = (word(18) == 1).then(|| SavedPlayerPosition {
@@ -229,6 +247,7 @@ impl SaveBlock {
             flag_count,
             resume_position,
             flags,
+            abilities: word(ABILITIES_OFFSET),
         })
     }
 
@@ -273,6 +292,7 @@ impl SaveBlock {
             flag_count,
             resume_position: None,
             flags,
+            abilities: 0,
         })
     }
 }
@@ -302,6 +322,33 @@ mod tests {
         let mut frame = [0u8; SAVE_BLOCK_BYTES];
         block.encode(&mut frame);
         assert_eq!(SaveBlock::decode(&frame, 7), Some(block));
+    }
+
+    #[test]
+    fn earned_abilities_survive_a_save_and_an_old_save_has_none() {
+        let mut block = sample();
+        assert_eq!(block.abilities, 0);
+        assert!(block.grant_abilities(psx_level::ability::SPRINT));
+        assert!(
+            !block.grant_abilities(psx_level::ability::SPRINT),
+            "no change the second time"
+        );
+        assert!(block.grant_abilities(psx_level::ability::DASH));
+        let mut frame = [0u8; SAVE_BLOCK_BYTES];
+        block.encode(&mut frame);
+        let back = SaveBlock::decode(&frame, 7).unwrap();
+        assert_eq!(
+            back.abilities,
+            psx_level::ability::SPRINT | psx_level::ability::DASH
+        );
+        // A frame written before abilities has the reserve zeroed: none earned.
+        let mut old = sample();
+        old.abilities = 0;
+        old.encode(&mut frame);
+        assert!(frame[ABILITIES_OFFSET..ABILITIES_OFFSET + 2]
+            .iter()
+            .all(|b| *b == 0));
+        assert_eq!(SaveBlock::decode(&frame, 7).unwrap().abilities, 0);
     }
 
     #[test]
