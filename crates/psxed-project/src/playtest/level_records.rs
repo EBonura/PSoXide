@@ -726,7 +726,15 @@ mod tests {
         let root = crate::default_project_dir();
         let project =
             ProjectDocument::load_from_path(root.join("project.ron")).expect("the default loads");
-        let (package, report) = super::super::build_package(&project, &root);
+        // The records round trip whether or not the guest has the RAM for this level: the cook's
+        // heap check (which refuses the default project on the current guest, 64 KB over its
+        // image region) is not what this test is about.
+        let (package, report) = super::super::build_package_cooked(
+            &project,
+            &root,
+            None,
+            crate::grid::cook::GUEST_POOL_CEILING_KIB,
+        );
         assert!(report.is_ok(), "{:?}", report.error_messages());
         let package = package.expect("a package");
         let records = super::super::tests::decode_level_records(&package);
