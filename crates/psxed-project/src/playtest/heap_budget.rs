@@ -73,11 +73,12 @@ const GUEST_RAM_BYTES: usize = psoxide_hazard::heap_guard::RAM_BYTES as usize;
 /// whole system, and one more record only adds the table's arrays ([`TABLE_IMAGE`]).
 ///
 /// Measured 2026-11-12 on the toolkit with the Laser tunnel's checkpoint and fragments
-/// (`cd-stream-bench`, plain build): the linked image was 1,950,608 B, of which the pool 299,008 B,
-/// the persistent arena 297,816 B (142 pages, 125 slots) and the tables below 69,296 B; the rest,
-/// with every table empty, is this constant. `psoxide-hazard`'s `heap-guard` prints the model's
+/// (`cd-stream-bench`, plain build): the linked image was 1,801,104 B, of which the pool 149,504 B,
+/// the persistent arena 297,816 B (142 pages, 125 slots), the tables below 71,910 B and the chunk
+/// sky 50,848 B ([`CHUNK_SKY_CODE_BYTES`] and its data); the rest, with every table empty and no
+/// sky, is this constant. `psoxide-hazard`'s `heap-guard` prints the model's
 /// error against the link on every build.
-const IMAGE_FIXED_BYTES: usize = 1_284_488;
+const IMAGE_FIXED_BYTES: usize = 1_231_026;
 /// Bytes the model may be short by: what `.data` and the small level-sized statics of another level
 /// may add beyond the tables below, plus the layout noise of a different link (about 1 KiB between
 /// builds of the same level). The cook assumes this many more bytes than it modelled: it refuses a
@@ -109,20 +110,40 @@ const TABLE_IMAGE: &[(&str, usize, usize)] = &[
     ("model_instances", 30_900, 920),
     ("grid_uv_motions", 600, 20),
 ];
+/// What a world that bakes chunk skies adds besides the sky data itself (the background rows and
+/// runs and the initial mask, which sit in the image too): the streaming window the sky's reads
+/// land in (33,540 B) and the code that steps it. Measured by emptying the toolkit's three sky
+/// tables: 50,848 B in all, 11,834 B of it the toolkit's data.
+const CHUNK_SKY_CODE_BYTES: usize = 39_100;
+/// What a model instance adds on top of its own table when enemies exist as well: the two systems
+/// share less code than their separate costs suggest (the toolkit with one enemy, both enemy
+/// policies and one model instance linked 31 KB above the sum of the four measured alone).
+const ACTOR_MODEL_SURCHARGE_BYTES: usize = 31_200;
 /// What an enemy using the tactical policy (`ANY_TACTICAL_ENTITY`) adds to the image.
 const TACTICAL_CODE_BYTES: usize = 26_400;
 /// What a training-pen enemy (`ANY_TRAINING_ENTITY`) adds to the image.
 const TRAINING_CODE_BYTES: usize = 11_400;
 
-/// Bytes of the image the level's record tables and enemy systems add ([`TABLE_IMAGE`]).
+/// Bytes of the image the level's record tables, enemy systems and chunk sky add
+/// ([`TABLE_IMAGE`]).
 #[must_use]
 pub fn table_bytes(package: &PlaytestPackage) -> usize {
     let any = |flag: u16| package.game_entities.iter().any(|e| e.flags & flag != 0);
-    table_bytes_of(
-        &package.world_geometry.record_lens,
-        any(psx_level::game_entity_flags::TACTICAL),
-        any(psx_level::game_entity_flags::TRAINING),
-    )
+    let sky = &package.world_geometry.sky_tables;
+    let sky_bytes = if sky.background_rows.is_empty() {
+        0
+    } else {
+        CHUNK_SKY_CODE_BYTES
+            + sky.background_rows.len() * 2
+            + sky.background_runs.len()
+            + sky.initial_mask.len() * 4
+    };
+    sky_bytes
+        + table_bytes_of(
+            &package.world_geometry.record_lens,
+            any(psx_level::game_entity_flags::TACTICAL),
+            any(psx_level::game_entity_flags::TRAINING),
+        )
 }
 
 /// [`table_bytes`] from the record counts (by `psx_level::wire::TABLE_NAMES` order) and the two
@@ -140,6 +161,17 @@ pub fn table_bytes_of(lens: &[usize], tactical: bool, training: bool) -> usize {
         if count > 0 {
             bytes += code + per_record * count;
         }
+    }
+    let count = |name: &str| {
+        psx_level::wire::TABLE_NAMES
+            .iter()
+            .position(|table| *table == name)
+            .and_then(|i| lens.get(i))
+            .copied()
+            .unwrap_or(0)
+    };
+    if count("game_entities") > 0 && count("model_instances") > 0 {
+        bytes += ACTOR_MODEL_SURCHARGE_BYTES;
     }
     if tactical {
         bytes += TACTICAL_CODE_BYTES;
@@ -445,9 +477,9 @@ mod tests {
             "within a page of the RAM"
         );
         // The toolkit measured 2026-11-12 (rib-room-h with the tunnel's checkpoint and fragments):
-        // 142 persistent pages, 125 slots, a pool of 299,008 B, 232 lights, 3 interactables, 7
-        // logic records, 2 world objects: linked at 1,950,608 B. The model must not fall below it,
-        // and must not be far above it.
+        // 142 persistent pages, 125 slots, a pool of 149,504 B, 232 lights, 3 interactables, 7
+        // logic records, 2 world objects, a chunk sky of 1537 rows, 7992 runs and 192 mask words:
+        // linked at 1,801,104 B. The model must not fall below it, and must not be far above it.
         let mut lens = vec![0usize; psx_level::wire::TABLE_NAMES.len()];
         let set = |lens: &mut Vec<usize>, name: &str, n: usize| {
             lens[psx_level::wire::TABLE_NAMES
@@ -472,13 +504,17 @@ mod tests {
             + 142 * 2048
             + 125 * PERSISTENT_SLOT_BYTES
             + table_bytes_of(&lens, false, false)
-            + 299_008;
+            + CHUNK_SKY_CODE_BYTES
+            + 1537 * 2
+            + 7992
+            + 192 * 4
+            + 149_504;
         assert!(
-            model >= 1_950_608,
+            model >= 1_801_104,
             "the model never falls below the link: {model}"
         );
         assert!(
-            model <= 1_950_608 + 8 * 1024,
+            model <= 1_801_104 + 8 * 1024,
             "and stays close to it: {model}"
         );
         // Without the interactables the link was 25,152 B smaller (measured the same way).
@@ -487,7 +523,11 @@ mod tests {
             + 142 * 2048
             + 125 * PERSISTENT_SLOT_BYTES
             + table_bytes_of(&lens, false, false)
-            + 299_008;
+            + CHUNK_SKY_CODE_BYTES
+            + 1537 * 2
+            + 7992
+            + 192 * 4
+            + 149_504;
         assert!(model - without >= 25_152);
     }
 

@@ -161,7 +161,7 @@ pub(super) fn plan(
         ));
     }
     notes.push(format!(
-        "flood streaming: draw {} sectors, resident {}: pool {} pages ({} KiB: busiest set {} cells, {} pages, plus the largest room); view cone quads at the draw radius mean {:.0}, p90 {:.0}, worst {} (room {})",
+        "flood streaming: draw {} sectors, resident {}: pool {} pages ({} KiB: busiest set {} cells, {} pages, plus the largest room when its island has more than one); view cone quads at the draw radius mean {:.0}, p90 {:.0}, worst {} (room {})",
         settings.near_radius,
         settings.res_radius,
         pool.pool_pages,
