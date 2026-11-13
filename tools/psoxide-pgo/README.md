@@ -852,6 +852,25 @@ The SDK's own `make repro-check` runs the gate on `editor-playtest` and `hello-e
   `accurate+nopgso+hot=1500` trained on gameplay polls: +1.9% fps, 1.2% fewer
   work instructions and 15% fewer I-cache stalls. Count `jal` to memcpy in the
   disassembly of the two builds before blaming the profile.
+- **A profile collected again builds bigger than the one it replaces.** One
+  profile-guided game at SDK 3b7ef1256 (`hot=500+profi`): the profile committed for an older SDK left 88,460 B
+  free and one collected again on the tree left 68,796 B, with the same work on
+  every window (within 0.25%), so 19.7 KB bought nothing. The collections were
+  alike: same tape and polls, the sampler's 61 instructions, 1.4% more samples,
+  the twelve hottest functions within 1% to 3.5% of each other. The extra bytes
+  were about a hundred call sites in `main`, chains into code that has no sample
+  in either profile (sound and crafting calls), which LLVM's remarks show inlined
+  at its locally-hot threshold (525) in one build and kept cold (45) in the other.
+  It needs `profi` (without it both profiles make the same decisions there) and
+  the sample loader's replay of the profile's inlining (with `noreplay` both
+  profiles leave 59 KB free). Jittering `main`'s counts by 5% or scaling them
+  by 0.85 or 1.2 did not move it, and swapping `main`'s record between the two profiles made
+  both worse (62 to 66 KB), so no one record is to blame. A hot count that does
+  not depend on the profile's own distribution flattens it:
+  `hot=500+profi+llvm=-profile-summary-hot-count=80` left the new profile 87,916 B
+  and the old one 95,724 B at the same work. Gate such a variant like any other,
+  and give `choose` the RAM the build being replaced leaves (`--ram-floor`), so a
+  collection that inlines more is refused instead of committed.
 - **`ticks` and `cycles` are the same for every variant.** The game is locked
   to the display; `vblanks` says how many frames missed, and `choose` ranks
   by those, then by the heavy frames' work, then by `work_cycles`.
