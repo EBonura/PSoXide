@@ -58,15 +58,6 @@ impl Builder {
 const ACK: [&str; 3] = ["ack_rise_cycles", "ack_width_cycles", "byte_done_cycles"];
 const ANSWER: [&str; 3] = ["replies_0_and_1", "replies_2_and_3", "ack_mask_and_flags"];
 const TICK_CASES: [&str; 4] = ["t2_sysclk", "t0_sysclk", "t2_sysclk_div8", "t0_dotclock"];
-const LOAD_PHASES: [&str; 7] = [
-    "no_ports_all_load",
-    "both_ports_alone",
-    "gpu",
-    "spu",
-    "cd_reader_mask",
-    "cd_pad_irqs_open",
-    "all_load_pad_irqs_open",
-];
 const DMA_MATRIX_STATES: [&str; 10] = [
     "cd_1x_2048_lw",
     "cd_1x_2048_sw",
@@ -377,8 +368,7 @@ fn build() -> BTreeMap<u32, V2Entry> {
             ],
         );
     }
-    // SIO0 measurements (src/sio_timing.rs), the pad engine (src/pad_engine.rs)
-    // and the Timer 1 rate (src/timer1_rate.rs).
+    // SIO0 measurements (src/sio_timing.rs) and the Timer 1 rate (src/timer1_rate.rs).
     for port in 0..2u32 {
         let p = port + 1;
         b.put(
@@ -412,20 +402,6 @@ fn build() -> BTreeMap<u32, V2Entry> {
             ],
         );
         b.put(0x634 + port, format!("sio_card_answer_p{p}"), ANSWER);
-        b.put(
-            0x638 + port,
-            format!("engine_hotplug_p{p}"),
-            [
-                "transitions",
-                "initial_health_and_final_health",
-                "frames_absent",
-            ],
-        );
-        b.put(
-            0x63A + port,
-            format!("engine_hotplug_frames_p{p}"),
-            ["first_event_frame", "last_event_frame", "frames_watched"],
-        );
         for load in 0..2u32 {
             let base = 0x640 + 4 * (2 * port + load);
             let tag = format!("p{p}_{}", ["idle", "loaded"][load as usize]);
@@ -519,118 +495,6 @@ fn build() -> BTreeMap<u32, V2Entry> {
         "timer1_polled_reads",
         ["reads_low", "reads_high", "steps_larger_than_one"],
     );
-    for k in 0..7u32 {
-        b.put(
-            0x660 + k,
-            format!("engine_setup_{}", 2000 + 1000 * k),
-            [
-                "clean_updates_port1",
-                "faults_port1",
-                "health_port1_and_port2",
-            ],
-        );
-    }
-    for (pacing, base) in [("ack", 0x670u32), ("timed", 0x678)] {
-        b.put(
-            base,
-            format!("engine_port_{pacing}_p1"),
-            ["updates", "faults", "health_and_last_fault"],
-        );
-        b.put(
-            base + 1,
-            format!("engine_port_{pacing}_p2"),
-            ["updates", "faults", "health_and_last_fault"],
-        );
-        b.put(
-            base + 2,
-            format!("engine_stats_{pacing}"),
-            ["events", "stalls", "spurious"],
-        );
-        b.put(
-            base + 3,
-            format!("engine_work_{pacing}"),
-            ["work_avg", "work_min", "work_idle_avg"],
-        );
-        b.put(
-            base + 4,
-            format!("engine_pad_{pacing}"),
-            ["mode_changes", "kicks", "final_mode_and_buttons_seen"],
-        );
-    }
-    b.put(
-        0x690,
-        "engine_card_pad",
-        ["pad_faults", "leased_skips", "card_checksum_errors"],
-    );
-    b.put(
-        0x691,
-        "engine_card_ops",
-        ["card_ok", "card_tried", "slot_with_card"],
-    );
-    b.put(
-        0x692,
-        "engine_card_wait",
-        [
-            "lease_wait_med_cycles",
-            "lease_wait_max_cycles",
-            "pad_updates",
-        ],
-    );
-    b.put(
-        0x694,
-        "engine_card_writes",
-        ["writes_ok", "writes_tried", "write_frame_hblanks_med"],
-    );
-    b.put(
-        0x693,
-        "engine_card_frame",
-        [
-            "card_frame_hblanks_min",
-            "card_frame_hblanks_med",
-            "card_frame_hblanks_max",
-        ],
-    );
-    for (phase, tag) in LOAD_PHASES.iter().enumerate() {
-        let base = 0x720 + 6 * phase as u32;
-        b.put(
-            base,
-            format!("engine_load_work_{tag}"),
-            ["rounds_avg", "rounds_min", "rounds_max"],
-        );
-        b.put(
-            base + 1,
-            format!("engine_load_health_{tag}"),
-            ["pad_faults", "stalls", "spurious"],
-        );
-        b.put(
-            base + 2,
-            format!("engine_load_stack_{tag}"),
-            ["handler_stack_unused_bytes", "events", "kicks"],
-        );
-        b.put(
-            base + 3,
-            format!("engine_load_irq_{tag}"),
-            [
-                "longest_load_call_cycles",
-                "load_calls_over_a_byte",
-                "entered_ie_clear_and_pending",
-            ],
-        );
-        b.put(
-            base + 4,
-            format!("engine_load_mask_{tag}"),
-            ["i_mask_after_load_start", "i_mask_at_end", "i_stat_at_end"],
-        );
-        b.put(
-            base + 5,
-            format!("engine_load_totals_{tag}"),
-            [
-                "port1_faults_since_install",
-                "stalls_since_install",
-                "port1_updates_since_install",
-            ],
-        );
-    }
     for port in 0..2u32 {
         let p = port + 1;
         let base = 0x760 + 3 * port;

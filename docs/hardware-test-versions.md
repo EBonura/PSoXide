@@ -33,6 +33,10 @@ shipped without either, which is why no machine-code baseline exists for them.
 
 ## History
 
+### v2.12 (2026-11-13, schema PX8)
+
+MINOR. Records only retired, none redefined: the interrupt-driven pad engine is deleted from the SDK (the synchronous driver is the one driver for every game), so the steps that exercised it are gone. Removed steps: `ENGINE SETUP SWEEP`, `ENGINE ACK PACING`, `ENGINE TIMED PACING`, `ENGINE AND CARD LEASE`, `ENGINE UNDER LOAD` and `PAD HOT-PLUG WINDOW` (the hot-plug window watched the ports through the engine), module `src/pad_engine.rs`. Retired record ids, not reused: `0x638`-`0x63B`, `0x660`-`0x666`, `0x670`-`0x674`, `0x678`-`0x67C`, `0x690`-`0x694`, `0x720`-`0x749`. The decoder no longer names them. Every other record measures what it did in v2.11, so shared records stay comparable; the v2.11 emulator and machine-code baselines are orphaned until regenerated, as for any bump. The skip key (SELECT) is now always read from the port directly.
+
 ### v2.11 (2026-11-13, schema PX8)
 
 MINOR. Records only added. Step `SIO0 LATCH AND ARM` (SIO area, after `SIO0 CARD ACK TIMING`; `src/sio_timing.rs`, records `0x6E0`-`0x6E3`) asks the two questions the shared pad driver's latch path rests on: whether `STAT` bit 9 sets with `CTRL` bit 12 clear, and whether one `CTRL` write (arm plus ACK) after an acknowledged byte disturbs the rest of the packet. Neither passes or fails; a port with nothing in it reads zero tries. The v2.10 emulator and machine-code baselines are orphaned until regenerated.

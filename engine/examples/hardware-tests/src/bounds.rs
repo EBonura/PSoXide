@@ -11,14 +11,12 @@
 //! in that step give up after one pass (`scale` returns 1 while the key is
 //! down). The key is sampled at the start of each record (`record_start`) and
 //! at each step; it clears when the next step begins. It is read from the
-//! pad port directly when nothing else owns it, or from the pad engine's
-//! snapshot while the engine is installed.
+//! pad port directly.
 
 use crate::sio_timing::transaction;
 use crate::ui;
 
 static mut SKIPPING: bool = false;
-static mut ENGINE_ACTIVE: bool = false;
 
 /// Pad polls are 5 bytes behind a 8,000-cycle select delay: a little over half
 /// a millisecond, once a record.
@@ -29,13 +27,6 @@ pub(crate) fn begin_step() {
     heartbeat();
     // SAFETY: single thread; plain statics.
     unsafe { SKIPPING = false };
-}
-
-/// The pad engine is installed (or not): the port cannot be polled directly
-/// meanwhile, so the snapshot is read instead.
-pub(crate) fn set_engine_active(active: bool) {
-    // SAFETY: single thread; plain statics.
-    unsafe { ENGINE_ACTIVE = active };
 }
 
 /// Whether SELECT was down at the last look.
@@ -59,18 +50,13 @@ pub(crate) fn poll() {
     if unsafe { SKIPPING } {
         return;
     }
-    // SAFETY: as above.
-    let down = if unsafe { ENGINE_ACTIVE } {
-        psx_pad::console::pad(psx_pad::Port::One).buttons.bits() & 1 != 0
-    } else {
-        let seen = transaction(
-            false,
-            POLL_SETUP_CYCLES,
-            &[0x01, 0x42, 0x00, 0x00, 0x00],
-            true,
-        );
-        seen.bytes[2].reply == 0x5A && seen.bytes[3].reply & 1 == 0
-    };
+    let seen = transaction(
+        false,
+        POLL_SETUP_CYCLES,
+        &[0x01, 0x42, 0x00, 0x00, 0x00],
+        true,
+    );
+    let down = seen.bytes[2].reply == 0x5A && seen.bytes[3].reply & 1 == 0;
     if down {
         // SAFETY: single thread; plain static.
         unsafe { SKIPPING = true };

@@ -137,11 +137,9 @@ pub(crate) struct Run {
     pub(crate) pad: PadState,
     /// Skip the steps that can hang a console (hold L2 when starting).
     pub(crate) skip_risky: bool,
-    /// Write memory-card frames back (the same bytes just read): the pad
-    /// engine's lease step rewrites about sixty frames of block 0 with the
-    /// bytes it read, and the card protocol step writes one unused frame. Only
-    /// when L1 and R1 were held at the start, as the card diagnostic asks for
-    /// its writes.
+    /// Write a memory-card frame back (the same bytes just read): the card
+    /// protocol step writes one unused frame. Only when L1 and R1 were held at
+    /// the start, as the card diagnostic asks for its writes.
     pub(crate) write_cards: bool,
     /// Show a QR checkpoint page set after each area: only when START and R2
     /// were held at the start, a chord apart from the card writes.
@@ -691,9 +689,6 @@ records_step!(records_sio_setup, sio_timing::setup_sweep);
 records_step!(records_sio_pad, sio_timing::pad_timing);
 records_step!(records_sio_card, sio_timing::card_timing);
 records_step!(records_sio_latch, sio_timing::latch_and_arm);
-records_step!(records_engine_setup, pad_engine::setup_sweep);
-records_step!(records_engine_ack, pad_engine::pacing_ack);
-records_step!(records_engine_timed, pad_engine::pacing_timed);
 
 fn run_tests(run: &mut Run, area: Area) {
     let total = TESTS.iter().filter(|spec| test_area(spec) == area).count();
@@ -727,40 +722,11 @@ fn step_sio_mix(run: &mut Run) {
     ui::repaint(run.font());
 }
 
-/// Card sector reads (and, with L1 and R1 held at the start, write-backs of the
-/// same bytes) through the engine's lease.
-fn step_engine_card(run: &mut Run) {
-    pad_engine::card_lease(&mut run.timing.records, &mut run.next, run.write_cards);
-}
-
-/// The engine with a GPU walk, SPU DMA and a CD read going; the load paints
-/// over the picture, so it is drawn again afterwards.
-fn step_engine_load(run: &mut Run) {
-    pad_engine::under_load(&mut run.timing.records, &mut run.next);
-    ui::repaint(run.font());
-}
-
 /// The DualShock motor packets, the poll-cost comparison and the operator's
 /// yes or no for each motor level.
 fn step_rumble(run: &mut Run) {
     let font = run.font.take().expect("font uploaded by reset_area");
     rumble::run(&font, &mut run.timing.records, &mut run.next);
-    run.font = Some(font);
-}
-
-/// The optional hot-plug window. Says what it wants on the detail line and
-/// counts the seconds down.
-fn step_sio_hotplug(run: &mut Run) {
-    let font = run.font.take().expect("font uploaded by reset_area");
-    pad_engine::hotplug(
-        |seconds| {
-            let mut line = ui::Line::new();
-            line.s("UNPLUG+REPLUG ONE (OPTIONAL) ").u(seconds).s("S");
-            ui::detail(&font, "PAD", line.as_str());
-        },
-        &mut run.timing.records,
-        &mut run.next,
-    );
     run.font = Some(font);
 }
 
@@ -892,13 +858,7 @@ const STEPS: &[Step] = &[
     step(Area::Sio, "SIO0 LATCH AND ARM", records_sio_latch),
     step(Area::Sio, "CARD SECTOR PROTOCOL", step_card_proto),
     step(Area::Sio, "PAD AND CARD UNDER LOAD", step_sio_mix),
-    step(Area::Sio, "ENGINE SETUP SWEEP", records_engine_setup),
-    step(Area::Sio, "ENGINE ACK PACING", records_engine_ack),
-    step(Area::Sio, "ENGINE TIMED PACING", records_engine_timed),
-    step(Area::Sio, "ENGINE AND CARD LEASE", step_engine_card),
-    step(Area::Sio, "ENGINE UNDER LOAD", step_engine_load),
     step(Area::Sio, "DUALSHOCK MOTORS", step_rumble),
-    step(Area::Sio, "PAD HOT-PLUG WINDOW", step_sio_hotplug),
     // 8
     step(Area::Perf, "STACK AND LEVER CASES", tests_perf),
     step(Area::Perf, "WARM PROBES", records_perf_safe),

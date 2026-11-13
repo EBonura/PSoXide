@@ -1,4 +1,4 @@
-# PS1 hardware-test disc
+pad and card together, the DualShock motors) |# PS1 hardware-test disc
 
 The `hardware-tests` disc is the silicon reference for PSoXide. It runs the
 same executable in PSoXide and on a real PlayStation. Real-console data is
@@ -43,7 +43,7 @@ The run is ten areas, 70 steps, in this order (`src/run.rs`):
 | 4 | GPU, MDEC, DISPLAY | cases, timing and MDEC, `GPU BATCHES`, `CLUT ADDRESS REWRITE` (v2.6, [clut-rewrite-probe.md](clut-rewrite-probe.md)), `MDEC DECODE`, precision, `RASTER HASHES`, `DISPLAY WIDTHS`, `480I INTERLACE`, `GPU DMA EDGE CASES`, `WORKLOAD CALIBRATION`, `TEXTURE UV WINDOWS` (the last four are v2.4, described under "v2.4 measurements") |
 | 5 | SPU | `SPU INIT STATE`, precision, cases, `SPU MAP`, `SPU DMA TIMING`, `UI SAMPLE END AND LOOP` (SB1), `SPU RAM AND VOICES` (SB2), `CAPTURE RINGS` (SB4), `BANK HANDOFF` (PA4) |
 | 6 | CD, XA, CD-DA, STREAM | cases, `CD POLLED TIMING`, `CD DATA VERSUS AUDIO ROUTE` (PA1), `CD READ MECHANISMS` (CL2), `XA MUSIC LOOP`, `XA LATENCY, SWITCH, CLOCK` (v2.6), `STREAM COST`, `CD-DA HANDOFF`, `CD PAUSE SECOND RESPONSE` (v2.7) |
-| 7 | SIO | cases, `SIO TIMING`, then the controller-port and pad-engine measurements described under "SIO measurements" below (select delay, pad and card `/ACK` timing, `CARD SECTOR PROTOCOL` (v2.4), pad and card together, the engine's sweep, pacings, card lease and load, the DualShock motors, hot-plug) |
+| 7 | SIO | cases, `SIO TIMING`, then the controller-port measurements described under "SIO measurements" below (select delay, pad and card `/ACK` timing, `CARD SECTOR PROTOCOL` (v2.4), pad and card together, the engine's sweep, pacings, card lease and load, the DualShock motors, hot-plug) |
 | 8 | PERFORMANCE | stack and lever cases, `WARM PROBES`, `EXTENDED PROBES AND SHAPES` (with the v2.5 cached store and load rows), `DMA VERSUS CPU LOADS`, `MDEC DMA VERSUS CPU`, `AUDIT PROBES` |
 | 9 | DRIVE AND BUS STRESS | `CD DMA VERSUS CPU`, `CD MOTOR` (waits up to 20 s), `480I DRAW RULE` (v2.4, last of the safe steps), then `REGISTER A/B (CAN HANG)` |
 
@@ -66,10 +66,9 @@ screen. It is last, bounded, and skipped when **L2** is held as the run starts. 
 console hangs inside it the screen names the record; power-cycle and run again with L2
 held. A hang at bus level cannot be pre-empted, which is the accepted trade.
 
-**Hands off.** The run needs no input after CROSS on the first row, with two optional
-exceptions in the SIO area: the `DUALSHOCK MOTORS` step asks, for each motor level, whether the pad
-vibrated (CROSS yes, CIRCLE no; the question shows for a second with the pad ignored, then every button must be let go, then four seconds to answer), and the `PAD HOT-PLUG WINDOW` shows a
-prompt for six seconds. Answer nothing and they record "no answer" and "nothing happened".
+**Hands off.** The run needs no input after CROSS on the first row, with one optional
+exception in the SIO area: the `DUALSHOCK MOTORS` step asks, for each motor level, whether the pad
+vibrated (CROSS yes, CIRCLE no; the question shows for a second with the pad ignored, then every button must be let go, then four seconds to answer). Answer nothing and it records "no answer".
 
 `make hwtest-run` runs it headless, `make hwtest-diff` compares it with the pinned
 emulator baseline, and `make hwtest-compare INPUT=<recording>` decodes a filmed
@@ -316,7 +315,7 @@ Decode with one command:
     make hwtest-compare INPUT=~/Movies/run.mov
 
 The run includes waits that are part of the measurement (the CD motor case waits up to
-20 s), and the six-second hot-plug window; the progress bar covers all of it.
+20 s); the progress bar covers all of it.
 
 ## Radius disc and list node sweep (v2.8, records `0xB00`-`0xBF7`, `0xC00`-`0xC47`)
 
@@ -946,9 +945,7 @@ from a fast poll.
 Added so that what the emulator cannot settle becomes a number in the capture. None
 of these passes or fails; every one is laid out the same whether a pad, a card or
 nothing is plugged in (a port with nothing in it is a result). The guest is
-`src/sio_timing.rs` (raw register measurements) and `src/pad_engine.rs` (the
-SDK's interrupt-driven pad engine, `psx_pad::console`, opt-in per game; its design is
-`sdk/docs/PAD-IRQ-ENGINE.md` in the SDK). Times are system-clock cycles (33.8688 MHz)
+`src/sio_timing.rs` (raw register measurements). Times are system-clock cycles (33.8688 MHz)
 from Timer 2 unless a field says HBlanks (Timer 1). The memory card is read, and written only where a record below says so.
 The field names of every record are in `tools/hwtest-report.py` (`V2_RECORDS`) and are
 decoded as rows `v2,<id>_<name>,<field>,<value>`.
@@ -984,47 +981,9 @@ pad polls and card reads that worked, with error counts; card frame time in HBla
 (min, median, max); pad poll time in cycles. A slot with no card gets rows of
 `0xFFFF`.
 
-Pad engine, steps `ENGINE SETUP SWEEP`, `ENGINE ACK PACING`, `ENGINE TIMED PACING`,
-`ENGINE AND CARD LEASE`, `ENGINE UNDER LOAD`, `PAD HOT-PLUG WINDOW`:
-
-* `660`-`666`: the engine's own select-to-first-byte path (a timer interrupt starts the
-  first byte), swept over 2,000 to 8,000 cycles in steps of 1,000, 100 frames each:
-  clean updates on port 1, faults, and each port's health.
-* `670`-`674` with `Ack` pacing and `678`-`67C` with `Timed` pacing, 600 frames each
-  with the pad asked into analog mode: updates, faults and health per port; interrupts,
-  stalls and spurious interrupts; the CPU a loop keeps (work per frame against the same
-  loop with nothing polling, so the engine's cost, and with port 2 as it is, empty or not,
-  its cost); mode changes seen on port 1 (a wrong identifier or a slipped packet shows
-  here), kicks, and the final mode. This answers whether the engine's one control-register
-  write between bytes corrupts a given pad, the question the 2026-06-22 result left open.
-* `690`-`693`: 600 frames of the engine with a memory-card sector read every ten frames
-  through `lease()`, on the first slot that holds a card: pad faults, frames the engine
-  skipped while the port was out, card checksum errors; reads ok and tried; the wait for
-  the lease (median, longest); card frame time in HBlanks. Reads only, unless L1 and R1 are held
-  while CROSS starts the run, as the card diagnostic asks for its writes: then every frame read is
-  also written back with the bytes just read (the card's contents do not change), and `694` holds
-  the writes ok and tried and the write time in HBlanks.
-* `720`-`749`, the engine under load: seven phases of six records each (loop rounds per
-  frame; faults, stalls and spurious interrupts; handler stack left, events and kicks; the
-  load generator's own interrupt state; `I_MASK` and `I_STAT`; totals since install). Phases:
-  the engine with no ports polled under the whole load (control), both ports alone, then with
-  the GPU list walk, the SPU upload and the CD sector stream one at a time, then CD with the
-  pad interrupts re-opened, then all three with them open. The load runs in the foreground with
-  interrupts enabled and every call is timed: the longest call, how many outlast a pad byte on
-  the wire (1,100 cycles), and how many began with interrupts disabled or with a pad or
-  engine-timer interrupt already pending. The finding in the emulator: the SDK's
-  `SectorReader` sets `I_MASK` to VBlank only while it runs, which switches off the engine's
-  SIO and root-counter-0 interrupts; with that mask the engine stalls and faults on half the
-  frames (phase 4), with the two bits re-opened it does not (phases 5 and 6). The probe is not
-  the cause: it never masks interrupts, and no load call began with them off.
-* `638`-`63B`, hot-plug: a six-second window with a prompt ("UNPLUG+REPLUG ONE (OPTIONAL)" and
-  the seconds left), both ports watched through the engine every frame: transitions, the health
-  before and after, frames the port read absent, and the frames of the first and last change.
-  Unplug and replug a pad in either port while the prompt is up, or do nothing.
-
 ### DualShock motors (records `760`-`768`)
 
-Step `DUALSHOCK MOTORS`, at the end of the SIO area before the hot-plug window (`src/rumble.rs`;
+Step `DUALSHOCK MOTORS`, at the end of the SIO area (`src/rumble.rs`;
 the objective part is written out as packets, the operator part uses the SDK's motor API). For
 each port, every packet a frame after the last: a plain poll for the
 identifier; config-mode entry (`01 43 00 01`) and an `01 45` query to see whether the pad now
@@ -1066,7 +1025,7 @@ Written for the emulator work (`feat/hwtest-v2.4-2026-10-09`); the film or captu
 
 **GPU DMA edge cases** (`src/dma_edge.rs`, `0x860`-`0x873`). *Stop mid-node:* the list is a 512 x 256 rectangle, an upload node of 48 distinct words, and a second upload node of 8; CHCR START is cleared a fixed number of clocks after the kick; after the GPU has had time to finish, a GP0(1Fh) interrupt request says whether it is idle (it is swallowed while a command is unfinished), the command buffer is reset and the destination rows are read back. `words_of_the_node_landed` of 48 means the whole node reached the GPU after the stop; about 13 means only what was in the FIFO; the second node landing means the walk went on. *Block FIFO:* the same upload carried by a request-mode transfer (64 and 256 words, blocks of 16, and 64 words in blocks of 8) behind the rectangle and, as the control, with the GPU idle; the landed words and the clocks.
 
-**Memory-card protocol** (`src/card_proto.rs`, `0x880`-`0x8BF`, port 1 then port 2). A 140-byte sector read of frame 56 (`81 52 00 00 MSB LSB` and filler; replies `FF`, flag, `5A 5D`, dummy, MSB, `5C 5D`, MSB, LSB, 128 data, checksum, `47`), four times, every byte's `/ACK` rise and width and arrival time; the first ten bytes one record each, the 128 data bytes as min/median/max, the checksum and terminator bytes, the span and a validity word, the replies. With L1 and R1 held at the start, and only when every gate on the four reads passes (all four good, every checksum matching, no error flag, identical data), the same 128 bytes written back to frame 56, one of the unused frames of block 0 (56 to 62; 36 to 55 hold broken-sector replacement data) (138 bytes, status `47`), twice; a failed gate writes nothing and records why. The sector read and written is frame 56, not the header. A slot with no card answers `FF` and never pulses `/ACK`: the first byte's record says so. L1+R1 at the start also arms the older pad-engine card-lease write-back (`694`: about sixty frames of block 0 rewritten with the bytes just read, on the first slot that holds a card). START+R2 at the start (a chord apart from the card writes) shows a QR checkpoint page set after each area; L2 skips the steps that can hang a console.
+**Memory-card protocol** (`src/card_proto.rs`, `0x880`-`0x8BF`, port 1 then port 2). A 140-byte sector read of frame 56 (`81 52 00 00 MSB LSB` and filler; replies `FF`, flag, `5A 5D`, dummy, MSB, `5C 5D`, MSB, LSB, 128 data, checksum, `47`), four times, every byte's `/ACK` rise and width and arrival time; the first ten bytes one record each, the 128 data bytes as min/median/max, the checksum and terminator bytes, the span and a validity word, the replies. With L1 and R1 held at the start, and only when every gate on the four reads passes (all four good, every checksum matching, no error flag, identical data), the same 128 bytes written back to frame 56, one of the unused frames of block 0 (56 to 62; 36 to 55 hold broken-sector replacement data) (138 bytes, status `47`), twice; a failed gate writes nothing and records why. The sector read and written is frame 56, not the header. A slot with no card answers `FF` and never pulses `/ACK`: the first byte's record says so. START+R2 at the start (a chord apart from the card writes) shows a QR checkpoint page set after each area; L2 skips the steps that can hang a console.
 
 **Calibration and UV windows** (`src/workload.rs`, `0x8C0`-`0x8C5` and `0x8E0`-`0x92B`). See the module header.
 

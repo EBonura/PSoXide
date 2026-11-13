@@ -56,7 +56,6 @@ carries a work value for them but still decodes older captures.
 
 ## What the SIO area gained
 
-v2.0 added the controller-port measurements the emulator could not settle and
-the pad engine questions: see the SIO sections of
+v2.0 added the controller-port measurements the emulator could not settle: see the SIO sections of
 [hardware-test-disc.md](hardware-test-disc.md). They are measurement steps,
 not gates; none of them fails the run.
