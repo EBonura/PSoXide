@@ -185,18 +185,18 @@ pub trait Transport {
         true
     }
 
-    /// [`wait_status_set`](Self::wait_status_set), returning the status word
-    /// that had a bit of `mask` set, so the caller can tell which one. `None`
-    /// on timeout.
-    fn wait_status_any(&mut self, mask: u32, spins: u32) -> Option<u32> {
+    /// [`wait_status_set`](Self::wait_status_set), returning
+    /// the bits of `mask` that were set, so the caller can tell which one; 0 on
+    /// timeout.
+    fn wait_status_any(&mut self, mask: u32, spins: u32) -> u32 {
         let mut remaining = spins;
         loop {
-            let status = self.status();
-            if status & mask != 0 {
-                return Some(status);
+            let seen = self.status() & mask;
+            if seen != 0 {
+                return seen;
             }
             if remaining == 0 {
-                return None;
+                return 0;
             }
             remaining -= 1;
             core::hint::spin_loop();
@@ -311,9 +311,9 @@ pub trait Transport {
         let reply = self.receive();
         if !is_last {
             if ack_seen == 0 {
-                match self.wait_status_any(ACK_SIGNALS, timing.ack_spins) {
-                    Some(status) => ack_seen = status & ACK_SIGNALS,
-                    None => return Err(ExchangeError::AckTimeout { reply }),
+                ack_seen = self.wait_status_any(ACK_SIGNALS, timing.ack_spins);
+                if ack_seen == 0 {
+                    return Err(ExchangeError::AckTimeout { reply });
                 }
             }
             if !self.wait_status_clear(sio0::stat::DSR_LEVEL, timing.ack_spins) {
