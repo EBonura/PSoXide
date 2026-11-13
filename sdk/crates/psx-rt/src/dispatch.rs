@@ -18,8 +18,8 @@
 //! # What a handler may do
 //!
 //! It runs with CPU interrupts off, on the dispatcher stack ([`STACK_BYTES`],
-//! of which the saved context uses the top 112), after every register the C ABI
-//! lets a callee change was saved. It must not block, panic, use the GTE (the
+//! of which the saved context uses the top 112), after every register a compiled
+//! function may leave changed was saved (the C ABI's caller-saved set and `$28`). It must not block, panic, use the GTE (the
 //! interrupted code's GTE registers are not saved) or touch `$26` and `$27`. It
 //! acknowledges its own source in `I_STAT` (the dispatcher acknowledges
 //! nothing; VBlank was acknowledged by psx-rt before any hook runs). It must
@@ -342,7 +342,9 @@ core::arch::global_asm!(
     # I_STAT bit order, restores and jumps to $26. $26 and $27 are the kernel's
     # and no handler touches them: $27 holds the interrupted stack pointer.
     # Frame (112 bytes): 0..15 the callee's argument area, 16 $16, 20 $17,
-    # 24 $18, 32.. $1..$15, 92 $24, 96 $25, 100 $31, 104 hi, 108 lo.
+    # 24 $18, 28 $28, 32.. $1..$15, 92 $24, 96 $25, 100 $31, 104 hi, 108 lo.
+    # $28 (the global pointer) is saved because the compiler uses it as a general register: a handler may
+    # leave it changed (nothing in its prologue saves it) and the interrupted code may hold a live value in it.
     .globl __psx_rt_dispatch_tramp
 __psx_rt_dispatch_tramp:
     move  $27, $29
@@ -373,6 +375,7 @@ __psx_rt_dispatch_tramp:
     sw    $16, 16($29)
     sw    $17, 20($29)
     sw    $18, 24($29)
+    sw    $28, 28($29)
     lui   $2, %hi({irq})
     lw    $17, %lo({irq})($2)
     lw    $2, %lo({irq}+4)($2)
@@ -434,6 +437,7 @@ __psx_rt_dispatch_tramp:
     lw    $16, 16($29)
     lw    $17, 20($29)
     lw    $18, 24($29)
+    lw    $28, 28($29)
     jr    $26
     move  $29, $27
 

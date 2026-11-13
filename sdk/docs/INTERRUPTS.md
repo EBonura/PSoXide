@@ -24,7 +24,7 @@ acknowledged and counted, as before.
 It runs with CPU interrupts off, on one private stack shared by every handler
 (`dispatch::STACK_BYTES`, 512 bytes, the saved context in the top 112;
 `dispatch::paint_stack()` once at start and `dispatch::stack_unused_bytes()` give a watermark),
-after the interrupted code's caller-saved registers were saved once. It must not block, panic,
+after the interrupted code's caller-saved registers and `$28` were saved once. It must not block, panic,
 use the GTE (the interrupted code's GTE registers are not saved), touch `$26`/`$27`, or
 acknowledge VBlank. It must finish well inside a frame: no other interrupt is taken until it
 returns. Handlers never nest, so one stack serves all of them.
@@ -32,7 +32,7 @@ returns. Handlers never nest, so one stack serves all of them.
 ## How it is built
 
 The dispatcher is one short assembly routine (`__psx_rt_dispatch_tramp`). It saves `$1`-`$15`,
-`$24`, `$25`, `$31`, HI, LO and the three callee-saved registers it uses, on its own stack;
+`$24`, `$25`, `$28`, `$31`, HI, LO and the three callee-saved registers it uses, on its own stack;
 reads the pending word the exception handler stored and the registered mask; calls the VBlank
 hooks (a zero-ended array) if bit 0 is due, then one handler per due source in `I_STAT` bit order
 (a table indexed by bit); restores and returns to the handler's continuation (the VBlank path's
@@ -53,6 +53,29 @@ returns.
 
 A fault inside a handler is fatal whatever `strict-faults` says: the fault's exception overwrites
 EPC and `$26`/`$27`, which the interrupted code's return needs.
+
+## What is saved, and why `$28`
+
+A handler is a compiled Rust function, so it may write any register the compiler lets a function write
+without saving it. That set was read off the compiler's output, not off the o32 table: a scan of a
+linked game image (1,600 functions) for every register a function writes and does not store to its frame.
+`$1`-`$15`, `$24`, `$25` and `$31` are written freely; `$16`-`$23` and `$30` never without a save in the
+function (the callee-saved set, saved by the handler's own code); `$26` and `$27` only by psx-rt's own
+assembly; **and `$28`, the global pointer, by 107 of them with no save at all**: this toolchain allocates
+it as a general register. The dispatcher therefore saves every register the compiler may leave changed:
+`$1`-`$15`, `$24`, `$25`, `$28`, `$31`, HI and LO; `$16`-`$18` it uses itself and saves; `$19`-`$23` and `$30`
+reach a handler's own prologue unchanged. `$26`/`$27` belong to the exception path. Interrupted code that held a
+live value in `$28` (the hot loops of a game do) would otherwise resume with a handler's leftover. The
+two wrappers the dispatcher replaced saved `$28` for this reason; the dispatcher's first version did not, which
+`hello-gteirq` now checks (`make hello-gteirq-gate`): the foreground holds a known value in `$28` while a
+VBlank hook and a root counter handler both overwrite it.
+
+Where an exception enters compiled code, and what is saved there: the dispatcher (above); psx-rt's exception
+handler itself, which is assembly using `$26` and `$27` only (VBlank work, the present kick, the fault paths
+and the stray count enter no compiled code); the masked update routine `__psx_rt_dispatch_update`
+(assembly, entered as a function, `$2`, `$3`, `$5`, `$8`, `$9` only); the `console-diag` stop panel, which
+saves every register including `$28` before it calls its Rust watchdog and fault routines; the legacy
+`claim_interrupt_sources` and `declare_stack_safe_handler`, which only store words and enter no code.
 
 ## Cost
 
@@ -78,7 +101,8 @@ each build with its CD handler moved through the cache in 512-byte steps:
 
 (*) Before: main with `install_vblank_counter` out of line as well.
 
-With nothing registered the handler does five instructions more per VBlank (load the VBlank
+The save and restore of `$28` cost two instructions and about 8 cycles per dispatched interrupt (the routine is 8 bytes
+larger). With nothing registered the handler does five instructions more per VBlank (load the VBlank
 vector, branch, and the two slots after them) and one more per other interrupt. The dispatcher's
 code, stack and table are linked only into a program that registers something (the handler jumps
 through `__psx_rt_irq.vector`, which the first registration sets). Sizes are in the CHANGELOG

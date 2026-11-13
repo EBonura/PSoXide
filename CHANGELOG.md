@@ -17,6 +17,15 @@ every program works on every Sony BIOS and on OpenBIOS).
   cycles inside it, measured on the emulator: VoXide +24,142 once before the first frame (it uploads its own font
   atlas) and +1,296 a frame, Celeste about +8,200 a frame (its own wait loop against psx-rt's is the likely part; not
   split further).
+- `psx_rt::dispatch` saves and restores `$28`. This toolchain allocates the global pointer as a general register
+  (107 of the 1,600 functions of one linked game write it with no save), so a handler could return with the
+  interrupted code's `$28` changed; the two wrappers the dispatcher replaced saved it and the dispatcher did not. A
+  game whose hot loops keep a live value in `$28` and whose music pump ran as a VBlank hook broke at the first note.
+  The routine is 8 bytes larger (344 to 352) and a dispatch costs two instructions and about 8 cycles more
+  (285.3 to 293.2 cycles for the routine itself, hello-gteirq on the emulator). The frame and the stack do not grow
+  (the slot was free). `hello-gteirq` has a `$28` check, run by `make hello-gteirq-gate`: the foreground holds a
+  known value in `$28` while a VBlank hook and a root counter handler overwrite it (fails on the dispatcher without
+  the save, 9,625 changed passes; passes with it). `docs/INTERRUPTS.md` lists what is saved and why.
 - `psx_rt::dispatch`: one interrupt dispatcher, a short assembly routine. psx-rt's exception handler is the only
   handler in the vector; code that needs an interrupt registers with `on_vblank(handler)` (4 slots, run after psx-rt's
   VBlank work) or `attach(source, handler)` / `detach(source)`, and the handler runs on one shared 512-byte private

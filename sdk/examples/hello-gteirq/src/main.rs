@@ -24,6 +24,12 @@
 //! equal `dispatch::plan`, the pure reference. The two hooks then stay
 //! registered through the VBlank phase and must each run once per VBlank, in order.
 //!
+//! The foreground also holds a known value in `$28` (the global pointer, which the compiler
+//! uses as a general register, so a handler may leave it changed and the interrupted code
+//! may hold a live value in it) across a loop, while a VBlank hook and the root counter 2
+//! handler each overwrite `$28`. The dispatcher saves and restores it; the check fails if
+//! the foreground ever sees it changed.
+//!
 //! The verdict goes to the TTY (`GTEIRQ PASS ...` or `GTEIRQ FAIL ...`) and
 //! on screen. `gte_skips` counts the interrupts the handler stepped over a
 //! GTE command for: about one in forty VBlanks on silicon, where the loop is
@@ -72,11 +78,72 @@ const PERIOD_ITERATIONS: u32 = 320;
 
 static mut TIMER_IRQS: u32 = 0;
 
+/// What the foreground keeps in `$28` while the handlers run.
+const GP_SENTINEL: u32 = 0x600d_cafe;
+/// What the `$28` handlers leave in it.
+const GP_CLOBBER: u32 = 0xbad0_0028;
+static mut GP_HOOK_RUNS: u32 = 0;
+static mut GP_TIMER_RUNS: u32 = 0;
+
+/// Overwrite `$28` the way compiled code may, with no save: the dispatcher has to put it back.
+#[inline(always)]
+fn clobber_gp() {
+    // SAFETY: the point of the call; nothing after it in the handler reads `$28`.
+    unsafe { core::arch::asm!("li $28, {v}", v = const GP_CLOBBER, options(nomem, nostack)) };
+}
+
+/// A VBlank hook that leaves `$28` changed.
+#[inline(never)]
+fn gp_hook() {
+    // SAFETY: runs with interrupts off; the foreground only reads it.
+    unsafe { *(&raw mut GP_HOOK_RUNS) += 1 };
+    clobber_gp();
+}
+
+/// The foreground side: hold `GP_SENTINEL` in `$28` for `iterations` loop passes and count the
+/// passes that found it changed (each is put back, so one interrupt counts once). The whole
+/// loop is one asm block, so no compiled code of ours has a live value in `$28` meanwhile; it
+/// is saved before and restored after.
+#[inline(never)]
+fn gp_loop(iterations: u32) -> u32 {
+    let mut changed = 0u32;
+    let _saved: u32;
+    // SAFETY: restores `$28` before it ends; touches no memory.
+    unsafe {
+        core::arch::asm!(
+            ".set noreorder",
+            "move {saved}, $28",
+            "move $28, {sentinel}",
+            "1:",
+            "beq $28, {sentinel}, 2f",
+            "nop",
+            "addiu {changed}, {changed}, 1",
+            "move $28, {sentinel}",
+            "2:",
+            "addiu {left}, {left}, -1",
+            "bnez {left}, 1b",
+            "nop",
+            "move $28, {saved}",
+            ".set reorder",
+            saved = out(reg) _saved,
+            sentinel = in(reg) GP_SENTINEL,
+            changed = inout(reg) changed,
+            left = inout(reg) iterations => _,
+            options(nomem, nostack)
+        );
+    }
+    changed
+}
+
 /// The dispatcher's handler for root counter 2.
 fn on_timer() {
     irq::acknowledge(1 << source::TIMER2);
     // SAFETY: runs with interrupts off; the foreground only reads it.
-    unsafe { *(&raw mut TIMER_IRQS) += 1 };
+    unsafe {
+        *(&raw mut TIMER_IRQS) += 1;
+        *(&raw mut GP_TIMER_RUNS) += 1;
+    }
+    clobber_gp();
 }
 
 /// Who ran during an order check, one code per call.
@@ -173,6 +240,8 @@ fn order_mismatches() -> u32 {
 
 /// Iterations between checks of the VBlank count.
 const CHUNK: u32 = 4096;
+/// Loop passes of one `$28` check (five instructions each).
+const GP_ITERATIONS: u32 = 20_000;
 /// Interrupts to run under: about five seconds on NTSC.
 const VBLANKS: u32 = 300;
 
@@ -287,6 +356,9 @@ fn main() {
         HOOK_ORDER_ERRORS = 0;
     }
     hooks_ok &= mask_after_detach == 1;
+    // The `$28` hook joins after the order check, which counts only hooks A and B.
+    hooks_ok &= dispatch::on_vblank(gp_hook).is_ok();
+    let mut gp_changed = 0u32;
 
     let skips_before = interrupts::gte_skip_count();
     let start = interrupts::vblank_count();
@@ -295,11 +367,14 @@ fn main() {
     while interrupts::vblank_count().wrapping_sub(start) < VBLANKS {
         gte_loop(CHUNK, &mut counts);
         iterations = iterations.wrapping_add(CHUNK);
+        gp_changed += gp_loop(GP_ITERATIONS);
     }
     let vblanks = interrupts::vblank_count().wrapping_sub(start);
     // SAFETY: plain reads of counters the hooks wrote.
     let (hook_a_runs, hook_b_runs, hook_order_errors) =
         unsafe { (HOOK_A, HOOK_B, HOOK_ORDER_ERRORS) };
+    // SAFETY: as above.
+    let gp_hook_runs = unsafe { core::ptr::read_volatile(&raw const GP_HOOK_RUNS) };
 
     // Phase 2: root counter 2 through the dispatcher.
     let mut timer_counts = Counts::default();
@@ -316,6 +391,7 @@ fn main() {
         timers::set_mode(Timer::Timer2, RESET_AT_TARGET | IRQ_ON_TARGET | IRQ_REPEAT);
         gte_loop(PERIOD_ITERATIONS, &mut timer_counts);
         timer_iterations += PERIOD_ITERATIONS;
+        gp_changed += gp_loop(GP_ITERATIONS);
         timers::set_mode(Timer::Timer2, 0);
     }
     irq::set_mask(irq::mask() & !(1 << source::TIMER2));
@@ -366,6 +442,12 @@ fn main() {
         ),
         (timer_irqs > 500, "the dispatcher served too few timer IRQs"),
         (timer_skips >= 10, "too few timer IRQs landed on an RTPS"),
+        (gp_changed == 0, "an interrupt handler left $28 changed"),
+        (
+            gp_hook_runs.abs_diff(vblanks) <= 1
+                && unsafe { core::ptr::read_volatile(&raw const GP_TIMER_RUNS) } > 500,
+            "the $28 handlers did not run",
+        ),
     ];
     let failures = checks.iter().filter(|check| !check.0).count() as u32;
     for (_, what) in checks.iter().filter(|check| !check.0) {
@@ -385,6 +467,7 @@ fn main() {
         line("timer_skips", timer_skips),
         line("timer_doubled", timer_counts.doubled),
         line("timer_missing", timer_counts.missing),
+        line("gp_changed", gp_changed),
     ];
     let (banner, tint) = if failures == 0 {
         ("GTEIRQ PASS", GREEN)

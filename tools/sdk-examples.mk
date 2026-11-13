@@ -42,7 +42,7 @@ PGO_ARGS ?=
 PGO_VARIANTS ?= --variant off --variant default --variant hot=500 --variant hot=500+profi
 GATE ?=
 
-.PHONY: example disc hello-tri hello-tri-disc run-tri examples pgo-collect pgo-choose hello-xa-disc hello-xa-gate hello-xa-resume-disc hello-xa-resume-gate hello-cdstream-disc hello-cdstream-gate hello-cddrain-disc hello-cddrain-gate hello-cdpause-disc hello-cdpause-gate hello-wide-gate
+.PHONY: example disc hello-tri hello-tri-disc run-tri examples pgo-collect pgo-choose hello-xa-disc hello-xa-gate hello-xa-resume-disc hello-xa-resume-gate hello-cdstream-disc hello-cdstream-gate hello-cddrain-disc hello-cddrain-gate hello-gteirq-disc hello-gteirq-gate hello-cdpause-disc hello-cdpause-gate hello-wide-gate
 examples:
 	@set -e; for example in hello-tri hello-input hello-ot hello-gte hello-tex hello-memcard hello-spstack hello-gteirq hello-present hello-present-queue hello-asmprobe; do $(MAKE) -f tools/sdk-examples.mk disc EXAMPLE=$$example; done
 
@@ -97,6 +97,13 @@ hello-xa-resume-gate: hello-xa-resume-disc
 	@test -n "$(FRONTEND)" || (echo "Set FRONTEND to the PSoXide-emulator executable"; exit 1)
 	cargo build -q --release --locked -p psx-audio-cook
 	sh tools/xa_resume_gate.sh "$(FRONTEND)" "$(BUILD)/$(TARGET)/release/hello-xa-resume.cue" $(or $(CARGO_TARGET_DIR),target)/release/psx-audio-cook
+# hello-gteirq: a GTE command under dispatched interrupts, the dispatcher's order, and `$28` across a hook and a handler.
+hello-gteirq-disc:
+	$(MAKE) disc EXAMPLE=hello-gteirq
+# Runs hello-gteirq headless and checks its verdict: make hello-gteirq-gate FRONTEND=/path/to/frontend
+hello-gteirq-gate: hello-gteirq-disc
+	@test -n "$(FRONTEND)" || (echo "Set FRONTEND to the PSoXide-emulator executable"; exit 1)
+	sh tools/gteirq_gate.sh "$(FRONTEND)" "$(BUILD)/$(TARGET)/release/hello-gteirq.cue"
 # hello-cdstream streams CDTEST.BIN, the deterministic file mkisopsx writes with
 # --cdtest-sectors, through psx-cdstream and checks every byte. 960 sectors is
 # nearly all the boot area has room for after the executable.
