@@ -5,6 +5,16 @@
 No program depends on a BIOS any more, not a call into one and not the state one leaves behind (Manny's rule:
 every program works on every Sony BIOS and on OpenBIOS).
 
+- The synchronous pad poll (`psx_pad::poll_on`) accepts an `/ACK` as the live level or as the latched interrupt bit, so
+  it works on PCSX-ReARMed, which latches `STAT` bit 9 and never shows bit 7. A port that shows the level takes the same
+  register accesses as before and no `CTRL` write mid-packet. When only the latch answers, `psx_io::controller_port::Transport::exchange`
+  waits for the level to release, then writes `CTRL` once with the ACK interrupt armed and the latch cleared. An empty
+  socket on such a port reads `Disconnected` in one poll, not `Unknown` after four. `Transport::exchange` now takes the
+  `Port`, and `Transport` gains `control()` and `ack_irq_armed()`: anyone implementing `Transport` outside the SDK must add
+  `control()` (a read of `CTRL`). Reported by Thomas Bertani, with a patch.
+- Hardware tests v2.11: step `SIO0 LATCH AND ARM` and records `0x6E0` to `0x6E3` (does `STAT` bit 9 set with `CTRL` bit 12
+  clear, and does one `CTRL` write after an acknowledged byte disturb the rest of the packet). The v2.10 baselines in
+  `docs/hardware-refs` do not match v2.11 until they are regenerated.
 - `VramAllocator::with_clut_band` keeps the draw-done block in the band's bottom right corner (`draw_done_scratch()`, it takes eight CLUT slots) instead of the corner of VRAM, so the texture page there is allocatable again (Cortex's twelfth free page); `psx_game_runtime::vram::VramRuntime` points the sequence at it with `set_draw_done_scratch`. Allocators without a band, and every game that does not use `VramAllocator`, keep (1008, 504).
 - GP0(1Fh) is no longer sent alone (FPGA PSX cores lose it): `psx_hw::gpu::gp0::DRAW_DONE_SEQUENCE` is one 13-word
   node, GP0(1Fh) and a 16 x 8 fill of a block at the corner of VRAM (`DRAW_DONE_SCRATCH`, 1008,504, never handed out
