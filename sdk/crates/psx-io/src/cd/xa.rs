@@ -107,6 +107,25 @@ impl File {
         Song {
             file: self,
             channel,
+            span: self.span_sector_count(),
+        }
+    }
+
+    /// Channel `channel` of this file as a song that ends `span_sector_count`
+    /// sectors from the top of the file, for a file whose encoder padded it
+    /// to its longest song: the player loops or stops there, not at the end
+    /// of the file. Clamped to [`span_sector_count`](Self::span_sector_count).
+    #[must_use]
+    pub const fn song_with_span(self, channel: u8, span_sector_count: u32) -> Song {
+        let file_span = self.span_sector_count();
+        Song {
+            file: self,
+            channel,
+            span: if span_sector_count < file_span {
+                span_sector_count
+            } else {
+                file_span
+            },
         }
     }
 
@@ -121,6 +140,8 @@ impl File {
 pub struct Song {
     file: File,
     channel: u8,
+    /// Sectors from the top of the file to where this song's audio ends.
+    span: u32,
 }
 
 /// The step of starting a song that the drive refused.
@@ -381,7 +402,7 @@ impl Engine {
         let Some(song) = self.song else {
             return;
         };
-        let end = self.start_lba + song.file.span_sector_count();
+        let end = self.start_lba + song.span;
         if let Some(head) = drive.head_lba() {
             if (self.target_lba..end).contains(&head) {
                 self.state = State::Streaming;
@@ -438,7 +459,7 @@ impl Engine {
         if self.suspended || self.suspend_pending {
             return Event::Playing;
         }
-        let end = self.start_lba + song.file.span_sector_count();
+        let end = self.start_lba + song.span;
         if let Some(head) = drive.head_lba() {
             if self.state == State::Seeking && (self.target_lba..end).contains(&head) {
                 self.state = State::Streaming;
@@ -1197,6 +1218,36 @@ mod tests {
         let seen = player.with_cd_suspended(|cd| (cd, 7)).unwrap();
         assert_eq!(seen, 7);
         assert!(!player.is_suspended());
+    }
+
+    #[test]
+    fn a_song_with_its_own_span_loops_at_its_own_end() {
+        let mut drive = Fake::default();
+        let mut engine = Engine::new();
+        // 100 sectors of file span, this song's audio ends at 40.
+        let short =
+            File::new(1000, 100 + END_GUARD_SECTORS, 3, DriveSpeed::Single).song_with_span(2, 40);
+        engine.start(&mut drive, short, true).unwrap();
+        drive.heads = vec![Some(1010), Some(1039), Some(1040)];
+        assert_eq!(engine.poll(&mut drive), Event::Playing);
+        assert_eq!(engine.poll(&mut drive), Event::Playing);
+        assert_eq!(engine.poll(&mut drive), Event::Looped);
+        // The same song through `song` runs to the file's end instead.
+        let whole = File::new(1000, 100 + END_GUARD_SECTORS, 3, DriveSpeed::Single).song(2);
+        engine.start(&mut drive, whole, true).unwrap();
+        drive.heads = vec![Some(1010), Some(1040), Some(1099), Some(1100)];
+        for _ in 0..3 {
+            assert_eq!(engine.poll(&mut drive), Event::Playing);
+        }
+        assert_eq!(engine.poll(&mut drive), Event::Looped);
+    }
+
+    #[test]
+    fn a_span_is_clamped_to_the_file() {
+        let file = File::new(0, 100 + END_GUARD_SECTORS, 1, DriveSpeed::Single);
+        assert_eq!(file.song_with_span(0, 5000), file.song(0));
+        assert_eq!(file.song_with_span(0, 100), file.song(0));
+        assert_ne!(file.song_with_span(0, 99), file.song(0));
     }
 
     #[test]
