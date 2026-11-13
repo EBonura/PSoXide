@@ -893,6 +893,7 @@ pub fn enable_cd_audio(enabled: bool) {
 /// work area in 8-byte units, so a preset is only valid with a
 /// [`ReverbArea`] of at least `work_bytes`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ReverbPreset {
     /// The coefficient registers, in register order.
     pub registers: [u16; 32],
@@ -902,6 +903,7 @@ pub struct ReverbPreset {
 
 impl ReverbPreset {
     /// A preset from its registers and work-area size.
+    #[must_use]
     pub const fn new(registers: [u16; 32], work_bytes: u32) -> Self {
         Self {
             registers,
@@ -938,6 +940,7 @@ impl ReverbArea {
     /// # Panics
     /// If `base` or `bytes` is not a multiple of 8, or the area does not fit
     /// in sound RAM.
+    #[must_use]
     pub const fn new(base: u32, bytes: u32) -> Self {
         assert!(
             base.is_multiple_of(8) && bytes.is_multiple_of(8),
@@ -954,17 +957,20 @@ impl ReverbArea {
     ///
     /// # Panics
     /// As [`ReverbArea::new`].
+    #[must_use]
     pub const fn top_of_ram(bytes: u32) -> Self {
         assert!(bytes <= SPU_RAM_BYTES, "reverb area must fit in sound RAM");
         Self::new(SPU_RAM_BYTES - bytes, bytes)
     }
 
     /// First byte address of the area.
+    #[must_use]
     pub const fn base(self) -> u32 {
         self.base
     }
 
     /// Byte address just past the area.
+    #[must_use]
     pub const fn end(self) -> u32 {
         self.base + self.bytes
     }
@@ -972,6 +978,7 @@ impl ReverbArea {
 
 /// Which sources feed the reverb.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ReverbInput {
     /// One bit per voice (bits 0..=23) sent through the reverb.
     pub voices: u32,
@@ -980,6 +987,12 @@ pub struct ReverbInput {
 }
 
 impl ReverbInput {
+    /// The voices in `voices` (bits 0..=23) and, if `cd_audio`, the CD audio input.
+    #[must_use]
+    pub const fn new(voices: u32, cd_audio: bool) -> Self {
+        Self { voices, cd_audio }
+    }
+
     /// Every voice, no CD audio.
     pub const ALL_VOICES: Self = Self {
         voices: 0x00ff_ffff,
