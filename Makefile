@@ -42,6 +42,7 @@ fmt-check:
 	cargo fmt --manifest-path engine/Cargo.toml --all -- --check
 	for m in sdk/examples/*/Cargo.toml engine/examples/*/Cargo.toml; do cargo fmt --manifest-path "$$m" -- --check || exit 1; done
 lint:
+	$(MAKE) fmt-check
 	tools/check-register-literals.sh
 	sh tools/guest_symbol_gate_test.sh
 	sh tools/wide_gate.sh

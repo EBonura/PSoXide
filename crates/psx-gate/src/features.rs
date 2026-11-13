@@ -51,11 +51,14 @@ pub fn refusals(krate: &str, enabled: &[String], profile: &Profile, own: &Own) -
         .map(|feature| {
             format!(
                 "psx-gate: {krate}: feature `{feature}` is not in sdk/profile.toml and the program \
-                 being built has no exception for it; STANDARD.md rule 2 (no cargo feature selects \
+                 being built has no exception for it; sdk/docs/GATE.md rule 2 (no cargo feature selects \
                  a different implementation of an SDK job). Use the SDK's one implementation, or if \
                  it is a development tap add it under [diag]. A program that holds an exception \
-                 builds with `psoxide-pgo apply`, or names its psx-gate.toml in {FILE_VAR}. Who \
-                 enables it: `cargo tree -e features -i {krate}`."
+                 says so to the build: `psoxide-pgo apply` does, a program of this repository built \
+                 by plain cargo sets {PROGRAM_VAR}=<its name> (sdk/profile.toml lists its \
+                 exceptions), any other program sets {FILE_VAR} to its psx-gate.toml (see \
+                 sdk/docs/GATE.md, G1). Who enables the feature: `cargo tree -e features -i \
+                 {krate}`."
             )
         })
         .collect()

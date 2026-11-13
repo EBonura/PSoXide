@@ -38,7 +38,7 @@ echo "  oracle $ORACLE"
 GUEST_FLAGS="-Zunstable-options -Cpanic=immediate-abort -Cllvm-args=-disable-mips-df-backward-search ${GUEST_RUSTFLAGS_EXTRA:-} -Clink-arg=-T../../../sdk/psoxide.ld -Clink-arg=--oformat=binary"
 (
     cd "$ROOT/engine/examples/toolchain-probe"
-    RUSTFLAGS="$GUEST_FLAGS" CARGO_TARGET_DIR="$TARGET_DIR/guest" \
+    PSX_GATE_PROGRAM=toolchain-probe RUSTFLAGS="$GUEST_FLAGS" CARGO_TARGET_DIR="$TARGET_DIR/guest" \
         cargo build --release --target mipsel-sony-psx \
         -Zjson-target-spec -Zbuild-std=core,alloc \
         -Zbuild-std-features=compiler-builtins-mem >/dev/null 2>&1

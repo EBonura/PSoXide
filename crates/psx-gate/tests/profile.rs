@@ -170,3 +170,61 @@ fn deprecated_symbols_are_still_defined_in_the_sdk() {
         );
     }
 }
+
+/// A program of this repository that holds a feature exception is built by `psoxide-pgo apply`
+/// (which tells the build scripts who it is) or by plain cargo with `PSX_GATE_PROGRAM=<name>`; a
+/// recipe or script that builds it by plain cargo without naming it is refused by the first SDK
+/// crate's build script, and nobody finds out until the recipe runs. This reads every make file,
+/// script and workflow that builds guests, so a new recipe cannot forget it.
+#[test]
+fn recipes_that_build_a_program_with_feature_exceptions_by_plain_cargo_name_it() {
+    let profile = profile();
+    let programs: BTreeSet<&str> = profile
+        .exceptions
+        .iter()
+        .filter(|e| e.kind == "feature")
+        .map(|e| e.program.as_str())
+        .collect();
+    let mut files = vec![root().join("Makefile")];
+    for (dir, ext) in [
+        ("tools", "mk"),
+        ("tools", "sh"),
+        (".github/workflows", "yml"),
+    ] {
+        for entry in fs::read_dir(root().join(dir)).expect("dir").flatten() {
+            if entry.path().extension().is_some_and(|e| e == ext) {
+                files.push(entry.path());
+            }
+        }
+    }
+    let mut problems = Vec::new();
+    for file in files {
+        let text = fs::read_to_string(&file).unwrap_or_default();
+        for program in &programs {
+            let names_it = format!("PSX_GATE_PROGRAM={program}");
+            let dir = format!("examples/{program}");
+            let builds = |line: &str| line.contains("cargo build") && !line.contains("psoxide-pgo");
+            for line in text.lines().filter(|l| l.contains(&dir) && builds(l)) {
+                if !line.contains(&names_it) {
+                    problems.push(format!(
+                        "{}: builds {program} without {names_it}: {}",
+                        file.display(),
+                        line.trim()
+                    ));
+                }
+            }
+            // A script that enters the program's directory (or keeps it in a variable) and builds
+            // on another line.
+            let enters = |line: &str| {
+                line.contains(&dir) && (line.contains("cd ") || line.contains("GUEST_DIR="))
+            };
+            if text.lines().any(enters) && text.lines().any(builds) && !text.contains(&names_it) {
+                problems.push(format!(
+                    "{}: mentions {dir} and runs cargo build, but never sets {names_it}",
+                    file.display()
+                ));
+            }
+        }
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}

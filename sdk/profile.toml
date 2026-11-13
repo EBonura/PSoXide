@@ -1,4 +1,4 @@
-# The architecture gate's allow-list for the SDK (sdk/docs/GATE.md, STANDARD.md rules 2 and 3).
+# The architecture gate's allow-list for the SDK (the rules and the design are in sdk/docs/GATE.md).
 #
 # A guest build that enables a feature below nowhere, writes a hardware register address,
 # installs an exception-vector handler, runs COP0 assembly, calls a deprecated entry point or

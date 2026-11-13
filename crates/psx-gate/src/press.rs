@@ -59,8 +59,8 @@ pub fn check(
                 Kind::Diag if allow_diag => Ok(Verdict::Diag(found.program().to_string())),
                 Kind::Diag => Err(format!(
                     "psx-gate: {label}: built with a diagnostic feature of an SDK crate \
-                     (psx-rt/host-tty and the other [diag] entries of sdk/profile.toml); STANDARD.md \
-                     rule 2. A diagnostic image does not go on a disc: rebuild without it, or pass \
+                     (psx-rt/host-tty and the other [diag] entries of sdk/profile.toml); \
+                     sdk/docs/GATE.md rule 2. A diagnostic image does not go on a disc: rebuild without it, or pass \
                      --diag for a development disc"
                 )),
                 _ => Ok(Verdict::Receipt(found.program().to_string())),
@@ -71,7 +71,7 @@ pub fn check(
             None => Err(format!(
                 "psx-gate: {label}: no gate receipt, so this executable did not come through \
                  `psoxide-pgo apply` (the one build step that runs the architecture gate); \
-                 STANDARD.md rules 2 and 3. Build it with `psoxide-pgo apply`"
+                 sdk/docs/GATE.md rules 2 and 3. Build it with `psoxide-pgo apply`"
             )),
         },
         Err(ReceiptError::Mismatch) => Err(format!(

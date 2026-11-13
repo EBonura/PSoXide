@@ -6,7 +6,7 @@
 //! deprecated symbols, and the exceptions of the programs inside the SDK repository) and the
 //! program's own `psx-gate.toml` at its repository root. It refuses:
 //!
-//! * a feature of an SDK crate that `[shipping]` and `[diag]` do not list (STANDARD.md rule 2);
+//! * a feature of an SDK crate that `[shipping]` and `[diag]` do not list (sdk/docs/GATE.md rule 2);
 //! * a hardware register address, an exception-vector write or COP0 assembly in the program's
 //!   own sources, and a private copy of an SDK crate in its graph (rule 3);
 //! * a call of a deprecated SDK entry point.
@@ -61,23 +61,23 @@ const REGISTER: &str = r"(?i)0x1f80|0xbf80|0x9f80|1f80_|1f80[0-9a-f]{4}h";
 const VECTOR: &str = r"(?i)0x[0-9a-f_]*(8000|a000)_?0080|declare_stack_safe_handler";
 const COP0: &str = r"\b(mfc0|mtc0|rfe|cfc0|ctc0)\b";
 
-/// The STANDARD.md rule and the remedy for a kind.
+/// The sdk/docs/GATE.md rule and the remedy for a kind.
 fn advice(kind: &str) -> &'static str {
     match kind {
         "feature" => {
-            "STANDARD.md rule 2 (no cargo feature selects a different implementation); \
+            "sdk/docs/GATE.md rule 2 (no cargo feature selects a different implementation); \
              use the SDK's one implementation, or a [diag] tap that no shipping build enables"
         }
         "register-literal" => {
-            "STANDARD.md rule 3 (a game does not touch a register); use the psx_hw / psx_io \
+            "sdk/docs/GATE.md rule 3 (a game does not touch a register); use the psx_hw / psx_io \
              accessor for it, or add the job to the SDK"
         }
         "vector-write" => {
-            "STANDARD.md rule 3 (a game does not wrap the exception vector); register with \
+            "sdk/docs/GATE.md rule 3 (a game does not wrap the exception vector); register with \
              psx_rt::interrupts (the dispatcher) instead"
         }
         "cop0-asm" => {
-            "STANDARD.md rule 3 (a game does not run COP0 code); use psx_rt::interrupts and \
+            "sdk/docs/GATE.md rule 3 (a game does not run COP0 code); use psx_rt::interrupts and \
              psx_rt's critical sections"
         }
         "deprecated-use" => {
@@ -85,7 +85,7 @@ fn advice(kind: &str) -> &'static str {
              API for the job"
         }
         "private-copy" => {
-            "STANDARD.md rules 1 and 3 (one implementation, no game-side copy); depend on the \
+            "sdk/docs/GATE.md rules 1 and 3 (one implementation, no game-side copy); depend on the \
              SDK's crate of that name and delete the copy"
         }
         _ => "",
@@ -859,7 +859,7 @@ mod tests {
             "{v}"
         );
         assert!(
-            v.contains("STANDARD.md rule 3") && v.contains("psx_hw"),
+            v.contains("sdk/docs/GATE.md rule 3") && v.contains("psx_hw"),
             "{v}"
         );
     }

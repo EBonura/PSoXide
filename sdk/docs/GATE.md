@@ -1,11 +1,25 @@
 # The architecture gate
 
 A program that breaks the SDK's architecture does not build, and an image that did not pass the
-gate does not become a disc. The rules are STANDARD.md rules 2 and 3. What is allowed is
+gate does not become a disc. The rules are the three below. What is allowed is
 `sdk/profile.toml` (the feature tables, the probe programs, the deprecated symbols, and the
 exceptions of the programs that live in this repository). What is still tolerated in any other
 program is listed by that program, in a `psx-gate.toml` at the root of its own repository; the
 SDK does not name its users.
+
+## The rules
+
+The messages cite these. They are the SDK's standard for a program that links it:
+
+1. **One implementation of each job.** The SDK has one implementation of every job (GPU, pad, CD,
+   audio, timing, ...). A program does not carry its own copy of an SDK crate.
+2. **No feature selects a different implementation.** A cargo feature of an SDK crate may switch
+   on a development tap (`[diag]`, which makes a build a diagnostic one that cannot become a disc)
+   or a host-only tool (`[host]`), or a capability every build may have (`[shipping]`). It does not
+   choose another implementation of an SDK job.
+3. **A program reaches the hardware through the SDK.** It does not write a register address,
+   install an exception-vector handler or run COP0 code itself, and it does not call a legacy
+   entry point the SDK has replaced.
 
 ## What is refused
 
@@ -23,8 +37,8 @@ A refusal prints what was found, where (`file:line`, or `crate/feature`, or the 
 rule and what to use instead:
 
 ```
-psx-gate: acme/rover: game/src/irq.rs:36: (0x8000_0080 as *mut u32).write_volatile(...) (vector-write); STANDARD.md rule 3 (a game does not wrap the exception vector); register with psx_rt::interrupts (the dispatcher) instead
-psx-gate: psx-gpu: feature `asm-kernels` is not in sdk/profile.toml and the program being built has no exception for it; STANDARD.md rule 2 (...). Who enables it: `cargo tree -e features -i psx-gpu`.
+psx-gate: acme/rover: game/src/irq.rs:36: (0x8000_0080 as *mut u32).write_volatile(...) (vector-write); sdk/docs/GATE.md rule 3 (a game does not wrap the exception vector); register with psx_rt::interrupts (the dispatcher) instead
+psx-gate: psx-gpu: feature `asm-kernels` is not in sdk/profile.toml and the program being built has no exception for it; sdk/docs/GATE.md rule 2 (...). Who enables it: `cargo tree -e features -i psx-gpu`.
 ```
 
 ## Three places, one file
@@ -53,6 +67,11 @@ the environment:
   (`relative` is to the directory that holds `.cargo`.)
 * `PSX_GATE_PROGRAM`, the name of a program inside this repository, whose `feature` entries in
   `sdk/profile.toml` count. `psoxide-pgo` sets it for those programs.
+
+A recipe or script of this repository that builds a program with feature exceptions by plain
+cargo (not through `psoxide-pgo`) sets `PSX_GATE_PROGRAM=<its name>` on the cargo command; a test
+(`crates/psx-gate/tests/profile.rs`) reads the make files, scripts and workflows and fails when
+one does not.
 
 With neither set only the tables count: a program that holds a feature exception and is built by
 plain cargo without naming its file is refused, loudly, until it does. There is no silent way

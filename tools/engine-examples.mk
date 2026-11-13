@@ -103,7 +103,7 @@ repro-rustc:
 hello-engine showcase-text game-pong game-magikaaaaaarp-pong game-breakout game-invaders showcase-3d showcase-model showcase-lights showcase-fog showcase-particles hardware-tests: repro-rustc
 .PHONY: hardware-tests hardware-tests-disc hwtest-radius-disc hwtest-verify-code hello-engine showcase-text game-pong game-breakout game-invaders showcase-3d showcase-model showcase-lights showcase-fog showcase-particles game-magikaaaaaarp-pong game-magikaaaaaarp-pong-disc magikaaaaaarp-pong-spectrum assets psxed engine-examples
 hardware-tests:
-	cd engine/examples/hardware-tests && $(ENGINE_EXAMPLE_CARGO_ENV) cargo build --release $(EDITOR_PLAYTEST_PSX_BUILD_FLAGS) $(if $(HWTEST_FEATURES),--features "$(HWTEST_FEATURES)")
+	cd engine/examples/hardware-tests && PSX_GATE_PROGRAM=hardware-tests $(ENGINE_EXAMPLE_CARGO_ENV) cargo build --release $(EDITOR_PLAYTEST_PSX_BUILD_FLAGS) $(if $(HWTEST_FEATURES),--features "$(HWTEST_FEATURES)")
 	cargo run -q --release --locked -p psoxide-hazard --bin hazard-scan -- $(EXAMPLE_OUT)/hardware-tests.exe
 
 # --- hardware-test pipeline ----------------------------------------------
