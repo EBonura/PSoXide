@@ -17,12 +17,12 @@
 //! been proved on a console. Nothing else about the drive changes.
 //!
 //! It is small on purpose, because the programs it is for are tight on RAM: no
-//! command state machine, no queue, no token. The handler, its exception wrapper
-//! and its private stack come to about 1.5 KB. The full transport in the crate
+//! command state machine, no queue, no token. The handler and its registration
+//! come to well under 1 KB. The full transport in the crate
 //! root ([`install`](crate::install), [`submit`](crate::submit)) owns the whole
 //! drive, commands included, and is the one to use when every read can go
-//! through it. Do not use both in one program at the same time: each puts a
-//! wrapper in the exception vector and both would answer a CD interrupt.
+//! through it. Do not use both in one program at the same time: each registers
+//! for the CD source and the second would replace the first.
 //!
 //! # What the program has to hold to
 //!
@@ -32,9 +32,7 @@
 //! - The destination is not read or written by anything else until then.
 //! - After `Done` or `Failed` the program ends the read with the polled
 //!   reader's `stop` and calls [`cancel`] (or [`start`] again).
-//! - `install_vblank_counter` takes psx-rt's handler back and drops the
-//!   wrapper; [`start`] puts it in again when it notices, so a program that
-//!   calls it for every scene needs nothing else.
+//! - [`start`] installs psx-rt's handler if it is not in the vector.
 
 use core::cell::UnsafeCell;
 use psx_hw::cd::{index_status, irq as flag};
@@ -48,12 +46,11 @@ use crate::request::{Request, SECTOR_WORDS};
 const CD_BIT: u32 = 1 << source::CDROM;
 /// Status reads to wait for the data FIFO to fill after a sector interrupt.
 const FIFO_POLLS: u32 = 256;
-/// Bytes of private stack the handler runs on. The handler is a flat loop with
-/// a small frame: the deepest call measured used 112 bytes (Half-Life, five
-/// weapon switches in the emulator, stack painted by [`start`]).
-pub const DRAIN_STACK_BYTES: usize = 384;
-/// Fill byte of the handler stack, to measure how much of it was used.
-const STACK_FILL: u8 = 0xa5;
+/// Bytes of the private stack the handler runs on: the dispatcher's, shared with
+/// every other handler. The handler is a flat loop with a small frame: the
+/// deepest call measured used 112 bytes (Half-Life, five weapon switches in the
+/// emulator), and the dispatcher's saved context takes 112 more.
+pub const DRAIN_STACK_BYTES: usize = psx_rt::dispatch::STACK_BYTES;
 
 /// Where a drain stands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -128,170 +125,11 @@ static DRAIN: Global = Global(UnsafeCell::new(Drain {
     timeout: 0,
 }));
 
-#[repr(C, align(16))]
-struct Stack([u8; DRAIN_STACK_BYTES]);
-
-/// The handler's private stack, painted when [`start`] first puts the wrapper in
-/// the vector so a tool can see how much of it a run used ([`stack_unused_bytes`]).
-#[no_mangle]
-static mut PSX_CDDRAIN_STACK: Stack = Stack([0; DRAIN_STACK_BYTES]);
-/// Where the wrapper saves the interrupted context.
-#[no_mangle]
-static mut PSX_CDDRAIN_CONTEXT: [u32; 34] = [0; 34];
-/// The handler the wrapper hands every exception on to: whatever the vector led
-/// to when [`start`] first put the wrapper in (psx-rt's, or another wrapper
-/// that leads there). Zero until then.
-#[no_mangle]
-static mut PSX_CDDRAIN_NEXT_HANDLER: u32 = 0;
-/// `psx_rt::interrupts::vector_epoch` when the wrapper was put in the vector.
-static mut PSX_CDDRAIN_EPOCH: u32 = 0;
-
-// -------------------------------------------------------------- the wrapper
-
-core::arch::global_asm!(
-    r#"
-    .set noreorder
-    .set noat
-    .section .text.psx_cddrain_irq
-    .globl psx_cddrain_exception_wrapper
-psx_cddrain_exception_wrapper:
-    # Not an interrupt: straight through.
-    mfc0  $26, $13
-    nop
-    andi  $26, $26, 0x007c
-    bnez  $26, 9f
-    nop
-    # An interrupt, but is the CD source one of the pending, enabled ones?
-    lui   $26, {io_hi}
-    lw    $27, {i_stat}($26)
-    lw    $26, {i_mask}($26)
-    nop
-    and   $27, $27, $26
-    andi  $27, $27, {cd_bit}
-    beqz  $27, 9f
-    nop
-    # Save the interrupted context (everything but $k0/$k1) in our own block.
-    lui   $26, %hi({context})
-    addiu $26, $26, %lo({context})
-    sw    $1, 0($26)
-    sw    $2, 4($26)
-    sw    $3, 8($26)
-    sw    $4, 12($26)
-    sw    $5, 16($26)
-    sw    $6, 20($26)
-    sw    $7, 24($26)
-    sw    $8, 28($26)
-    sw    $9, 32($26)
-    sw    $10, 36($26)
-    sw    $11, 40($26)
-    sw    $12, 44($26)
-    sw    $13, 48($26)
-    sw    $14, 52($26)
-    sw    $15, 56($26)
-    sw    $16, 60($26)
-    sw    $17, 64($26)
-    sw    $18, 68($26)
-    sw    $19, 72($26)
-    sw    $20, 76($26)
-    sw    $21, 80($26)
-    sw    $22, 84($26)
-    sw    $23, 88($26)
-    sw    $24, 92($26)
-    sw    $25, 96($26)
-    sw    $28, 100($26)
-    sw    $29, 104($26)
-    sw    $30, 108($26)
-    sw    $31, 112($26)
-    mfhi  $27
-    sw    $27, 116($26)
-    mflo  $27
-    sw    $27, 120($26)
-    # Our own stack; the interrupted one is never written.
-    lui   $29, %hi({stack}+{stack_bytes})
-    addiu $29, $29, %lo({stack}+{stack_bytes})
-    addiu $29, $29, -16
-    jal   {handler}
-    nop
-    lui   $26, %hi({context})
-    addiu $26, $26, %lo({context})
-    lw    $27, 116($26)
-    nop
-    mthi  $27
-    lw    $27, 120($26)
-    nop
-    mtlo  $27
-    lw    $1, 0($26)
-    lw    $2, 4($26)
-    lw    $3, 8($26)
-    lw    $4, 12($26)
-    lw    $5, 16($26)
-    lw    $6, 20($26)
-    lw    $7, 24($26)
-    lw    $8, 28($26)
-    lw    $9, 32($26)
-    lw    $10, 36($26)
-    lw    $11, 40($26)
-    lw    $12, 44($26)
-    lw    $13, 48($26)
-    lw    $14, 52($26)
-    lw    $15, 56($26)
-    lw    $16, 60($26)
-    lw    $17, 64($26)
-    lw    $18, 68($26)
-    lw    $19, 72($26)
-    lw    $20, 76($26)
-    lw    $21, 80($26)
-    lw    $22, 84($26)
-    lw    $23, 88($26)
-    lw    $24, 92($26)
-    lw    $25, 96($26)
-    lw    $28, 100($26)
-    lw    $29, 104($26)
-    lw    $30, 108($26)
-    lw    $31, 112($26)
-    nop
-9:
-    # The handler that was in the vector before this one: psx-rt's (VBlank,
-    # display flip, faults, strays, and the return), or another wrapper that
-    # leads there.
-    lui   $26, %hi({next})
-    lw    $26, %lo({next})($26)
-    nop
-    jr    $26
-    nop
-    .set at
-    .set reorder
-    "#,
-    io_hi = const psx_hw::memory::io::BASE >> 16,
-    i_stat = const psx_hw::irq::I_STAT & 0xFFFF,
-    i_mask = const psx_hw::irq::I_MASK & 0xFFFF,
-    cd_bit = const CD_BIT,
-    stack = sym PSX_CDDRAIN_STACK,
-    stack_bytes = const DRAIN_STACK_BYTES,
-    context = sym PSX_CDDRAIN_CONTEXT,
-    next = sym PSX_CDDRAIN_NEXT_HANDLER,
-    handler = sym psx_cddrain_interrupt,
-);
-
-// The wrapper reaches both registers with one `lui` of the I/O window and a
-// signed 16-bit offset.
-const _: () = {
-    let window = psx_hw::memory::io::BASE >> 16;
-    assert!(psx_hw::irq::I_STAT >> 16 == window && psx_hw::irq::I_MASK >> 16 == window);
-    assert!(psx_hw::irq::I_STAT & 0xffff < 0x8000 && psx_hw::irq::I_MASK & 0xffff < 0x8000);
-};
-
-extern "C" {
-    fn psx_cddrain_exception_wrapper();
-    #[link_name = "__psx_rt_exception_handler"]
-    fn psx_rt_exception_handler();
-}
-
 // ------------------------------------------------------------------ handler
 
-/// Called by the wrapper, on the private stack, with CPU interrupts off.
-#[no_mangle]
-extern "C" fn psx_cddrain_interrupt() {
+/// The dispatcher's handler for the CD source (`psx_rt::dispatch`): runs on its
+/// stack with CPU interrupts off.
+fn on_cd_interrupt() {
     // SAFETY: exception entry masks CPU interrupts, and every foreground access
     // closes the CD source before it takes its reference, so this is the only
     // live reference to the drain.
@@ -404,31 +242,33 @@ fn token() -> Cd {
 
 // ------------------------------------------------------------- the source
 
-/// Let the CD interrupt source reach the CPU. psx-rt's handler would
-/// acknowledge a CD interrupt that reached it pending, so the source is claimed
-/// while it is open and this wrapper services it.
-fn open_source() {
-    psx_rt::interrupts::claim_interrupt_sources(CD_BIT);
-    irq::set_mask(irq::mask() | CD_BIT);
-}
-
-/// Stop the CD source reaching the CPU and drop the claim, so code that opens it
-/// itself (the polled reader) has its strays acknowledged by psx-rt as before.
+/// Stop the CD source reaching the CPU and unregister the handler, so code that
+/// opens it itself (the polled reader) has its strays acknowledged by psx-rt as
+/// before.
 fn close_source() {
     irq::set_mask(irq::mask() & !CD_BIT);
-    psx_rt::interrupts::release_interrupt_sources(CD_BIT);
+    psx_rt::dispatch::detach(psx_rt::dispatch::Source::Cdrom);
 }
 
-/// Run `f` on the drain with the CD source closed, then reopen the source if the
-/// drain is still running.
+/// Run `f` on the drain with the CD source masked, then let it through again if
+/// the drain is still running, with the handler registered while it is; once
+/// the drain stops, the handler is unregistered. The registration changes only
+/// when the drain starts or stops, not around every call (a `poll` loop would
+/// pay for two registrations a round).
 fn with_drain<R>(f: impl FnOnce(&mut Drain) -> R) -> R {
-    close_source();
-    // SAFETY: the source is closed, so the handler (the only other user) cannot
-    // run until it is reopened below, and the CPU has one thread of control.
+    irq::set_mask(irq::mask() & !CD_BIT);
+    // SAFETY: the source is masked, so the handler (the only other user) cannot
+    // run until it is let through below, and the CPU has one thread of control.
     let drain = unsafe { &mut *DRAIN.0.get() };
     let result = f(drain);
+    let registered = psx_rt::dispatch::registered_sources() & CD_BIT != 0;
     if drain.state == RUNNING {
-        open_source();
+        if !registered {
+            psx_rt::dispatch::attach(psx_rt::dispatch::Source::Cdrom, on_cd_interrupt);
+        }
+        irq::set_mask(irq::mask() | CD_BIT);
+    } else if registered {
+        psx_rt::dispatch::detach(psx_rt::dispatch::Source::Cdrom);
     }
     result
 }
@@ -464,7 +304,9 @@ pub unsafe fn start(
     if destination.is_null() || destination.align_offset(4) != 0 || sectors == 0 {
         return false;
     }
-    install_vector();
+    if !psx_rt::interrupts::is_stack_safe_handler_installed() {
+        psx_rt::interrupts::install_vblank_counter();
+    }
     // SAFETY: the caller vouches for `destination` and `sectors`.
     let request = unsafe { Request::new_raw(0, sectors, destination) }.with_byte_len(byte_len);
     close_source();
@@ -529,71 +371,10 @@ fn decode(error: u32) -> DrainFailure {
     }
 }
 
-fn paint_stack() {
-    // SAFETY: the handler cannot run (the source is closed, or the drain is not
-    // running) and nothing else uses this stack; plain volatile stores over a
-    // static this module owns.
-    unsafe {
-        let stack = (&raw mut PSX_CDDRAIN_STACK).cast::<u8>();
-        for i in 0..DRAIN_STACK_BYTES {
-            stack.add(i).write_volatile(STACK_FILL);
-        }
-    }
-}
-
-/// Bytes of the handler's stack never touched since [`start`] painted it (when it
-/// put the wrapper in the vector).
+/// Bytes of the dispatcher's stack never touched since
+/// `psx_rt::dispatch::paint_stack`, which a measuring program calls once before
+/// [`start`].
 #[must_use]
 pub fn stack_unused_bytes() -> usize {
-    let mut unused = 0;
-    // SAFETY: plain volatile reads of a static this module owns.
-    unsafe {
-        let stack = (&raw const PSX_CDDRAIN_STACK).cast::<u8>();
-        while unused < DRAIN_STACK_BYTES && stack.add(unused).read_volatile() == STACK_FILL {
-            unused += 1;
-        }
-    }
-    unused
-}
-
-fn install_vector() {
-    const EXCEPTION_VECTOR: *mut u32 = 0x8000_0080 as *mut u32;
-    const J_OPCODE: u32 = 0x0800_0000;
-    const J_MASK: u32 = 0xfc00_0000;
-    let wrapper = psx_cddrain_exception_wrapper as *const () as usize as u32;
-    // SAFETY: the general exception vector is two words of kernel RAM. The
-    // handler it leads to now is kept in a static the wrapper reads, before the
-    // vector is rewritten; it is psx-rt's unless something chained in front of
-    // psx-rt is there, and anything that is not a `j`
-    // is replaced by psx-rt's. A wrapper installed since psx-rt last reset the
-    // vector is not put in front again: it is already in the chain, and writing
-    // the vector would drop whatever was installed since. The wrapper switches
-    // stacks before it stores anything and hands over with `$sp` as it found it.
-    // The instruction cache is flushed so the CPU fetches the new words, and the
-    // wrapper is declared stack-safe so scratchpad stacks stay allowed.
-    unsafe {
-        let epoch = psx_rt::interrupts::vector_epoch();
-        if core::ptr::read_volatile(&raw const PSX_CDDRAIN_NEXT_HANDLER) != 0
-            && core::ptr::read_volatile(&raw const PSX_CDDRAIN_EPOCH) == epoch
-        {
-            return;
-        }
-        if !psx_rt::interrupts::is_stack_safe_handler_installed() {
-            psx_rt::interrupts::install_vblank_counter();
-        }
-        paint_stack();
-        let epoch = psx_rt::interrupts::vector_epoch();
-        core::ptr::write_volatile(&raw mut PSX_CDDRAIN_EPOCH, epoch);
-        let current = core::ptr::read_volatile(EXCEPTION_VECTOR);
-        let next = if current & J_MASK == J_OPCODE {
-            ((current & !J_MASK) << 2) | 0x8000_0000
-        } else {
-            psx_rt_exception_handler as *const () as usize as u32
-        };
-        core::ptr::write_volatile(&raw mut PSX_CDDRAIN_NEXT_HANDLER, next);
-        core::ptr::write_volatile(EXCEPTION_VECTOR, J_OPCODE | ((wrapper >> 2) & 0x03ff_ffff));
-        core::ptr::write_volatile(EXCEPTION_VECTOR.add(1), 0);
-        psx_rt::cache::flush_instruction_cache();
-        psx_rt::interrupts::declare_stack_safe_handler(psx_cddrain_exception_wrapper);
-    }
+    psx_rt::dispatch::stack_unused_bytes()
 }

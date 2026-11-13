@@ -84,18 +84,17 @@
 //!
 //! The full one is the transport below, for a program that can route its reads
 //! through it: call [`ensure_installed`] with [`IrqMaskPolicy::OnlyWhileBusy`]
-//! before a read (it also puts the wrapper back after `install_vblank_counter`
-//! reset the exception vector), submit the request, and look at it once a frame.
+//! before a read, submit the request, and look at it once a frame.
 //! Between requests the CD interrupt source is closed and the polled reader works
 //! as before; before a polled command, [`stop_and_wait`] ends a request still in
-//! flight. Use one or the other in a program, not both at once: each puts a
-//! wrapper in the exception vector and both would answer a CD interrupt.
+//! flight. Use one or the other in a program, not both at once: each registers
+//! for the CD source with psx-rt's dispatcher and the second would replace the first.
 //!
 //! # How it is built
 //!
 //! [`Engine`] is the whole state machine, generic over [`CdHw`], the
-//! controller as it sees it. On the console [`install`] puts an exception
-//! wrapper in front of psx-rt's handler that calls the one global engine
+//! controller as it sees it. On the console the CD source's handler, registered
+//! with psx-rt's dispatcher (`psx_rt::dispatch`), calls the one global engine
 //! once per CD interrupt, and the free functions (`submit`, `state`, ...)
 //! reach it with the CD source closed. On the host the tests drive the same
 //! engine against a scripted drive, so every phase, cancel point, error path,
@@ -108,7 +107,6 @@
 //! `install`, so the compiler keeps the two from sharing the drive.
 //! `uninstall` hands the token back.
 #![no_std]
-#![cfg_attr(target_arch = "mips", feature(asm_experimental_arch))]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 

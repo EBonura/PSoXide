@@ -401,6 +401,8 @@ fn lookup(reader: &mut SectorReader, sector: &mut [u32; SECTOR_WORDS]) -> Option
 
 #[no_mangle]
 fn main() {
+    // So step 6 can report how much of the dispatcher stack the handler used.
+    psx_rt::dispatch::paint_stack();
     let Some(peripherals) = psx_rt::Peripherals::take() else {
         return;
     };

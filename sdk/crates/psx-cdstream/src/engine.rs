@@ -584,7 +584,7 @@ impl<H: CdHw> Engine<H> {
 
     /// Where `ticket` is. Also runs the no-progress check ([`service`](Self::service)).
     ///
-    /// The CD source is reopened only after the lookup. The console wrapper
+    /// The CD source is reopened only after the lookup. The console handler
     /// closes the source before it hands the engine to foreground code, so the
     /// handler cannot run meanwhile; reopening it first lets a pending
     /// interrupt run the handler between the checks below, and a request that
@@ -631,7 +631,7 @@ impl<H: CdHw> Engine<H> {
     // ------------------------------------------------------------- interrupt
 
     /// Handle one CD interrupt. Called by the interrupt handler (the crate's
-    /// exception wrapper on the console, the test harness on the host).
+    /// dispatcher handler on the console, the test harness on the host).
     pub fn on_interrupt(&mut self) {
         let started = self.hw.clock();
         self.stats.irq_count = self.stats.irq_count.wrapping_add(1);
@@ -761,6 +761,7 @@ impl<H: CdHw> Engine<H> {
         }
     }
 
+    #[inline(never)]
     fn pause_complete(&mut self) {
         if self.recovering && self.active.is_some_and(|a| !a.cancelled) {
             // The recovery Pause is done: start the seek it was clearing the
@@ -797,6 +798,7 @@ impl<H: CdHw> Engine<H> {
         self.change(next);
     }
 
+    #[inline(never)]
     fn pause(&mut self) {
         self.command(CMD_PAUSE, &[], Phase::Stopping);
     }
@@ -842,6 +844,7 @@ impl<H: CdHw> Engine<H> {
     /// The drive has stopped (or is in an unknown state after a failure) and
     /// no request holds it: grant a waiting lease, start the next request, or
     /// stay idle.
+    #[inline(never)]
     fn settle(&mut self) {
         if self.owner != Owner::Data || !self.is_ready_to_start() {
             return;
@@ -990,7 +993,7 @@ impl<H: CdHw> Engine<H> {
         }
     }
 
-    /// Close the CPU-side CD source. The console wrapper calls this before it
+    /// Close the CPU-side CD source. The console handler calls this before it
     /// touches the engine from the foreground, so the handler cannot run
     /// meanwhile; every foreground method ends by opening it again if
     /// [`source_wanted`](Self::source_wanted).
@@ -1000,13 +1003,20 @@ impl<H: CdHw> Engine<H> {
     }
 
     /// Record that the source was closed behind the engine's back (by the
-    /// console wrapper, through `I_MASK` directly), so the next
+    /// console handler, through `I_MASK` directly), so the next
     /// [`sync_source`](Self::sync_source) reopens it.
     pub fn note_source_closed(&mut self) {
         self.source_open = false;
     }
 
+    /// Whether the engine has the source open (its last
+    /// [`CdHw::set_source_enabled`] was `true`).
+    pub fn is_source_open(&self) -> bool {
+        self.source_open
+    }
+
     /// Open or close the source to match [`source_wanted`](Self::source_wanted).
+    #[inline(never)]
     pub fn sync_source(&mut self) {
         let wanted = self.source_wanted();
         if wanted != self.source_open {

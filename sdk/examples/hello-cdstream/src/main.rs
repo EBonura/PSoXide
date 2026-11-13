@@ -535,11 +535,13 @@ fn check_cpu(report: &mut Report) {
     report.push(" cycles, ");
     report.num(psx_cdstream::handler_stack_unused_bytes() as u32);
     report.push(" stack bytes unused");
-    // The handler's private stack is 768 bytes and the deepest call measured 248 (Half-Life,
-    // emulator); a console run that leaves less than 256 unused has found a deeper path.
+    // The dispatcher's stack is 512 bytes, 112 of them the saved context. The deepest path
+    // through this build's handler is 168 bytes (a static walk of the image), so at least 232
+    // stay unused; the deepest handler measured anywhere used 248 (Half-Life, emulator). A
+    // console run that leaves less than 96 unused has found a much deeper path.
     let ok = matches!(finished, Some(done) if done.outcome == Outcome::Done)
         && verify(big(), 0, sectors)
-        && psx_cdstream::handler_stack_unused_bytes() >= 256;
+        && psx_cdstream::handler_stack_unused_bytes() >= 96;
     report.finish(ok);
 }
 
@@ -715,6 +717,8 @@ fn lookup(reader: &mut SectorReader, sector: &mut [u32; SECTOR_WORDS]) -> Option
 
 #[no_mangle]
 fn main() {
+    // So the run can report how much of the dispatcher's stack the handler used.
+    psx_rt::dispatch::paint_stack();
     let Some(peripherals) = psx_rt::Peripherals::take() else {
         return;
     };

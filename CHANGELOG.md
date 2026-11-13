@@ -5,6 +5,21 @@
 No program depends on a BIOS any more, not a call into one and not the state one leaves behind (Manny's rule:
 every program works on every Sony BIOS and on OpenBIOS).
 
+- `psx_rt::dispatch`: one interrupt dispatcher, a short assembly routine. psx-rt's exception handler is the only
+  handler in the vector; code that needs an interrupt registers with `on_vblank(handler)` (4 slots, run after psx-rt's
+  VBlank work) or `attach(source, handler)` / `detach(source)`, and the handler runs on one shared 512-byte private
+  stack after a single save of the caller-saved registers (`docs/INTERRUPTS.md`). psx-cdstream (the transport and
+  `drain`) is on it: its two exception wrappers, their stacks and contexts are gone, and the CD handler is registered
+  only while the stream has the source open (a foreground call only masks it for its own length).
+  `install_vblank_counter` is out of line. Free RAM against the previous SDK (link maps, PGO off): hello-tri, which
+  registers nothing, -160 bytes; VoXide, which registers nothing and installs from three places, +204;
+  hello-cdstream +1,400; hello-cddrain +704. Cycles per interrupt on the emulator (table in
+  `docs/INTERRUPTS.md`): a VBlank with nothing registered +11.1 (113.6 to 124.7, five instructions); a VBlank in a
+  program with a CD handler about 43 to 51 fewer; a CD interrupt 242 fewer in hello-cddrain, and in hello-cdstream,
+  over eight placements of its handler in the instruction cache, 21,832 to 22,012 against 21,851 to 22,180 before.
+  `hello-gteirq` checks the dispatcher's order against its Rust reference and runs its RTPS loop under root
+  counter 2 interrupts served by it.
+
 - The synchronous pad poll (`psx_pad::poll_on`) accepts an `/ACK` as the live level or as the latched interrupt bit, so
   it works on PCSX-ReARMed, which latches `STAT` bit 9 and never shows bit 7. A port that shows the level takes the same
   register accesses as before and no `CTRL` write mid-packet. When only the latch answers, `psx_io::controller_port::Transport::exchange`
