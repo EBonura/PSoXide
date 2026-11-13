@@ -393,9 +393,6 @@ struct Playtest {
     hazard_push_left: u16,
     hazard_push_axis_z: bool,
     hazard_push_toward_max: bool,
-    /// Ticks after a hazard shove during which hazards leave the player alone,
-    /// so one touch cannot chain into a kill.
-    hazard_grace_ticks: u8,
     /// Whether the running death sequence was armed by combat damage
     /// rather than an environmental hazard (respawn logging only).
     death_by_combat: bool,

@@ -23,7 +23,8 @@
 //! player is invulnerable. A hazard with a knockback (`arg2`, engine units)
 //! also reports a push out of its volume ([`LogicRuntime::take_hazard_push`]):
 //! a touch hurts a little and shoves the player out the nearer thin face,
-//! whether the player walked into a live volume or it switched on around them. Both re-arm with the records, so a death or a
+//! whether the player walked into a live volume or it switched on around them,
+//! and keeps shoving (without damage) until the hit interval allows the next. Both re-arm with the records, so a death or a
 //! checkpoint rest restarts every cycle from the same beginning.
 //!
 //! Crate rules hold: no statics, no unsafe, `const N` capacities,
@@ -740,10 +741,17 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
         let record = &records[index];
         if self.counter[index] == 0
             || input.player_invulnerable
-            || now < self.rearm_at[index]
             || !point_in_aabb(input.player, record.min, record.max)
             || !self.master_satisfied(records, record.master)
         {
+            return;
+        }
+        if now < self.rearm_at[index] {
+            // Between hits a volume with a knockback stays solid: the player
+            // is still shoved out, only the damage waits for its interval.
+            if record.arg2 != 0 {
+                self.hazard_push = Some(exit_push(record, input.player));
+            }
             return;
         }
         self.hazard_damage = self.hazard_damage.saturating_add(record.arg0);
@@ -2463,8 +2471,11 @@ mod tests {
         let (damage, push) = tick_at(&mut logic, &RECORDS, inside, false, 4);
         assert_eq!(damage, 25, "exactly the authored damage");
         assert!(push.is_some_and(|p| !p.toward_max && p.distance == 21));
-        // The interval keeps it from hitting again straight away.
-        assert_eq!(tick_at(&mut logic, &RECORDS, inside, false, 5), (0, None));
+        // The interval keeps it from damaging again straight away, but a
+        // volume with a knockback still shoves anyone who stays inside.
+        let (damage, push) = tick_at(&mut logic, &RECORDS, inside, false, 5);
+        assert_eq!(damage, 0);
+        assert!(push.is_some());
     }
 
     #[test]

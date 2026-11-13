@@ -1872,19 +1872,20 @@ impl Playtest {
     pub(super) fn apply_logic_hazard_damage(&mut self, ctx: &Ctx) {
         let damage = self.logic.take_hazard_damage();
         let push = self.logic.take_hazard_push();
-        if damage == 0 {
-            return;
-        }
-        telemetry::debug_log("player hazard:logic");
-        if self.apply_hazard_player_damage(damage) {
-            self.hazard_push_left = 0;
-            self.arm_player_death(false, HAZARD_DEATH_TICKS, ctx.sim_tick, ctx.video_hz);
-            return;
+        if damage != 0 {
+            telemetry::debug_log("player hazard:logic");
+            if self.apply_hazard_player_damage(damage) {
+                self.hazard_push_left = 0;
+                self.arm_player_death(false, HAZARD_DEATH_TICKS, ctx.sim_tick, ctx.video_hz);
+                return;
+            }
         }
         let Some(push) = push else {
             return;
         };
-        self.react_player_to_hit(damage, false, false, ctx);
+        if damage != 0 {
+            self.react_player_to_hit(damage, false, false, ctx);
+        }
         let mut toward_max = push.toward_max;
         if push.tie {
             // Dead centre: carry on the way she faces.
@@ -1901,7 +1902,6 @@ impl Playtest {
         self.hazard_push_left = push.distance;
         self.hazard_push_axis_z = push.axis_z;
         self.hazard_push_toward_max = toward_max;
-        self.hazard_grace_ticks = HAZARD_GRACE_TICKS;
     }
 
     /// One tick of the shove a hazard touch gave the player: a few engine

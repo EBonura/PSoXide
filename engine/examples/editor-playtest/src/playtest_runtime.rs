@@ -1125,7 +1125,6 @@ impl Playtest {
         self.acquired_module = BoostModuleId::NONE;
         self.hazard_death_ticks_remaining = 0;
         self.hazard_push_left = 0;
-        self.hazard_grace_ticks = 0;
         self.death_by_combat = false;
         self.weapon_attach_reported = false;
         self.swing_hit_mask = 0;
