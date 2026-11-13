@@ -995,9 +995,8 @@ impl ReverbInput {
 /// SPUCNT bits [`stop_reverb`] clears and [`Spu::start_reverb`] sets.
 const REVERB_CONTROL_BITS: u16 = spucnt_bits::REVERB_MASTER | spucnt_bits::CD_AUDIO_REVERB;
 
-/// Bytes cleared per upload; the word-aligned buffer keeps the upload on DMA.
-#[cfg(not(test))]
-const REVERB_CLEAR_CHUNK: usize = 256;
+/// Words sent per piece when clearing a work area (256 bytes).
+const REVERB_CLEAR_WORDS: usize = 64;
 
 impl Spu {
     /// Start the reverb: stop it, zero the work area, load the preset, route
@@ -1071,24 +1070,19 @@ pub fn set_reverb_depth(depth: i16) {
     write_reg16(REVERB_VOL_RIGHT, depth as u16);
 }
 
-// Zero `area` in 256-byte uploads.
-#[cfg(not(test))]
+// Zero `area` in one DMA session: the SPU's transfer address advances by
+// itself, so each 256-byte piece only re-arms the channel.
 fn clear_reverb_area(dma: &mut SpuDma, area: ReverbArea) {
-    #[repr(C, align(4))]
-    struct ZeroChunk([u8; REVERB_CLEAR_CHUNK]);
-    static ZERO: ZeroChunk = ZeroChunk([0; REVERB_CLEAR_CHUNK]);
-    let mut at = area.base;
-    while at < area.end() {
-        let bytes = (area.end() - at).min(REVERB_CLEAR_CHUNK as u32) as usize;
-        upload_adpcm_with(dma, SpuAddr::new(at), &ZERO.0[..bytes]);
-        at += bytes as u32;
+    // One block of zeros, word-aligned for DMA.
+    static ZERO: [u32; REVERB_CLEAR_WORDS] = [0; REVERB_CLEAR_WORDS];
+    let spucnt = begin_dma_write(SpuAddr::new(area.base));
+    let mut left = area.bytes / 4;
+    while left > 0 {
+        let words = left.min(REVERB_CLEAR_WORDS as u32);
+        send_dma_words(dma, &ZERO[..words as usize], dma_block_size(words));
+        left -= words;
     }
-}
-
-// The host has no DMA: the test log records the clear as one event.
-#[cfg(test)]
-fn clear_reverb_area(_dma: &mut SpuDma, area: ReverbArea) {
-    mock::clear(area.base, area.bytes);
+    end_dma_write(spucnt);
 }
 
 // ======================================================================
@@ -1143,10 +1137,26 @@ fn upload_adpcm_dma(dma: &mut SpuDma, dest: SpuAddr, bytes: &[u8]) -> bool {
         return false;
     }
     let words = (bytes.len() / 4) as u32;
-    // Largest block size (in words) that divides the count; the SPU transfer
-    // FIFO is 16 words, so cap there. ADPCM is whole 16-byte (4-word) blocks,
-    // so 4 always divides.
-    let block_size = if words.is_multiple_of(16) {
+    let block_size = dma_block_size(words);
+    if words / block_size > 0xffff {
+        return false; // larger than one block-sync transfer can describe
+    }
+
+    let spucnt = begin_dma_write(dest);
+    // SAFETY: `bytes` is word-aligned and a whole number of words (checked
+    // above), so it is exactly `words` initialised `u32`s.
+    let source =
+        unsafe { core::slice::from_raw_parts(bytes.as_ptr().cast::<u32>(), words as usize) };
+    send_dma_words(dma, source, block_size);
+    end_dma_write(spucnt);
+    true
+}
+
+/// Largest block size (in words) that divides `words`; the SPU transfer FIFO
+/// is 16 words, so cap there. ADPCM is whole 16-byte (4-word) blocks, so 4
+/// always divides.
+fn dma_block_size(words: u32) -> u32 {
+    if words.is_multiple_of(16) {
         16
     } else if words.is_multiple_of(8) {
         8
@@ -1156,12 +1166,17 @@ fn upload_adpcm_dma(dma: &mut SpuDma, dest: SpuAddr, bytes: &[u8]) -> bool {
         2
     } else {
         1
-    };
-    let block_count = words / block_size;
-    if block_count > 0xffff {
-        return false; // larger than one block-sync transfer can describe
     }
+}
 
+// A DMA transfer session is the three steps below: `begin_dma_write`, any
+// number of `send_dma_words` (the SPU's transfer address advances by itself
+// from one to the next), `end_dma_write`. Every DMA write into sound RAM goes
+// through them, whole uploads and the reverb clear alike.
+
+/// Start a DMA write session at `dest`. Returns the SPUCNT value (transfer
+/// mode Stop) that [`end_dma_write`] restores.
+fn begin_dma_write(dest: SpuAddr) -> u16 {
     // Stop any in-flight transfer, and WAIT for the SPU to really be
     // stopped before touching anything else. Going through Stop is what
     // makes the wait below meaningful: SPUSTAT only tells us the mode
@@ -1179,20 +1194,28 @@ fn upload_adpcm_dma(dma: &mut SpuDma, dest: SpuAddr, bytes: &[u8]) -> bool {
     // a 32-byte table arrived not at all.
     write_reg16(SPUCNT, spucnt | spucnt_bits::TRANSFER_DMA_WRITE);
     wait_spu_status(spucnt | spucnt_bits::TRANSFER_DMA_WRITE);
+    spucnt
+}
 
-    // Channel 4: main RAM -> SPU, block-sync, forward, start; block until done.
-    // SAFETY: `bytes` is word-aligned and a whole number of words (checked
-    // above), so it is exactly `words` initialised `u32`s.
-    let source =
-        unsafe { core::slice::from_raw_parts(bytes.as_ptr().cast::<u32>(), words as usize) };
+/// Send `source` to the open session: channel 4, main RAM -> SPU, block-sync,
+/// forward, start; blocks until the channel is done. `block_size` (words) must
+/// divide `source.len()` and be at most 16.
+#[cfg(not(test))]
+fn send_dma_words(dma: &mut SpuDma, source: &[u32], block_size: u32) {
     let _ = dma.write_blocks(source, block_size as u16);
-    // The channel is done handing bytes over; the SPU is still writing
-    // them into sound RAM.
-    wait_transfer_idle();
+}
 
-    // Return to Stop transfer-mode.
+#[cfg(test)]
+fn send_dma_words(_dma: &mut SpuDma, source: &[u32], block_size: u32) {
+    mock::dma(source.len() as u32, block_size);
+}
+
+/// Finish a session: the channel is done handing bytes over but the SPU is
+/// still writing them into sound RAM, so wait for it, then return to Stop
+/// transfer mode (`spucnt` from [`begin_dma_write`]).
+fn end_dma_write(spucnt: u16) {
+    wait_transfer_idle();
     write_reg16(SPUCNT, spucnt);
-    true
 }
 
 /// PIO upload (manual FIFO writes) -- small or non-word-aligned uploads. Sets
@@ -1251,8 +1274,8 @@ mod mock {
     pub enum Event {
         /// A 16-bit register write.
         Write(u32, u16),
-        /// A work-area clear of `(base, bytes)`.
-        Clear(u32, u32),
+        /// A DMA channel 4 transfer of `(words, block size in words)`.
+        Dma(u32, u32),
     }
 
     struct Spu {
@@ -1286,8 +1309,8 @@ mod mock {
         })
     }
 
-    pub fn clear(base: u32, bytes: u32) {
-        SPU.with_borrow_mut(|s| s.log.push(Event::Clear(base, bytes)));
+    pub fn dma(words: u32, block_size: u32) {
+        SPU.with_borrow_mut(|s| s.log.push(Event::Dma(words, block_size)));
     }
 
     /// Reset the registers to `spucnt` and empty the log.
@@ -1441,7 +1464,7 @@ mod tests {
         log.iter()
             .filter_map(|e| match *e {
                 mock::Event::Write(a, v) => Some((a, v)),
-                mock::Event::Clear(..) => None,
+                mock::Event::Dma(..) => None,
             })
             .collect()
     }
@@ -1450,7 +1473,7 @@ mod tests {
     /// stop writes both games share, then Half-Life's order of depth last.
     #[test]
     fn hall_with_cd_writes_the_expected_sequence() {
-        use mock::Event::{Clear, Write};
+        use mock::Event::{Dma, Write};
         mock::reset(0xc000);
         let area = ReverbArea::top_of_ram(ReverbPreset::HALL.work_bytes);
         test_spu().start_reverb(
@@ -1465,9 +1488,17 @@ mod tests {
             Write(0x1f80_1d98, 0),
             Write(0x1f80_1d9a, 0),
             Write(0x1f80_1daa, 0xc000),
-            Clear(0x7_5220, 0xade0),
-            Write(0x1f80_1da2, 0xea44),
+            // One DMA session: stop, normal transfer type, address once,
+            // DMA-write mode once.
+            Write(0x1f80_1daa, 0xc000),
+            Write(0x1f80_1dac, 0x0004),
+            Write(0x1f80_1da6, 0xea44),
+            Write(0x1f80_1daa, 0xc020),
         ];
+        // 11,128 words: 173 pieces of 64 (block 16) and a last one of 56 (block 8).
+        want.extend((0..173).map(|_| Dma(64, 16)));
+        want.push(Dma(56, 8));
+        want.extend([Write(0x1f80_1daa, 0xc000), Write(0x1f80_1da2, 0xea44)]);
         for (i, &v) in ReverbPreset::HALL.registers.iter().enumerate() {
             want.push(Write(0x1f80_1dc0 + 2 * i as u32, v));
         }
@@ -1575,6 +1606,29 @@ mod tests {
             &ReverbPreset::HALL,
             ReverbInput::ALL_VOICES,
             0,
+        );
+    }
+
+    /// The ordinary upload and the reverb clear are the same session: one
+    /// stop, one address, one mode switch, then the transfers.
+    #[test]
+    fn an_upload_is_one_dma_session() {
+        use mock::Event::{Dma, Write};
+        mock::reset(0xc000);
+        let data = [0u32; 8];
+        // SAFETY: viewing eight words as thirty-two bytes.
+        let bytes = unsafe { core::slice::from_raw_parts(data.as_ptr().cast::<u8>(), 32) };
+        test_spu().upload_adpcm(SpuAddr::new(0x1010), bytes);
+        assert_eq!(
+            mock::take_log(),
+            std::vec![
+                Write(0x1f80_1daa, 0xc000),
+                Write(0x1f80_1dac, 0x0004),
+                Write(0x1f80_1da6, 0x0202),
+                Write(0x1f80_1daa, 0xc020),
+                Dma(8, 8),
+                Write(0x1f80_1daa, 0xc000),
+            ]
         );
     }
 }
