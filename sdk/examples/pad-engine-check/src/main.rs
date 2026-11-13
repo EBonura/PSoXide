@@ -42,7 +42,7 @@ fn dec(mut v: u32) {
     }
     while n > 0 {
         n -= 1;
-        psx_rt::bios::write_char(digits[n]);
+        tty::print(core::str::from_utf8(&digits[n..=n]).unwrap_or("?"));
     }
 }
 
