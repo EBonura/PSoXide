@@ -81,6 +81,20 @@ every program works on every Sony BIOS and on OpenBIOS).
   `usize` formatter or `report_panic` for it), and its text loop is built for size. In a program that only calls the
   splash: 17,840 -> 16,704 bytes (text, data, bss) at opt-level 3, 16,064 -> 15,728 at "s"; with formatted panics
   18,524 -> 16,620 and 19,980 -> 18,572. The 25 frames sampled every 6th VBlank are byte-identical.
+- `psx_io::cd`, `psx_io::cd::xa`: smaller CD command paths and a smaller XA player, measured on Hollow Knight's link
+  (its own copy of the player, `xa_player.rs`, is deleted for this). The polled command paths inlined a 16-byte
+  response drain and the response read at every call (five drains in one function); each is now one function
+  (`drain_response_limited(16)` and an out-of-line `read_response_fifo`), the same register reads and writes in the
+  same order and count per command. The acknowledge and the flag read stay inlined on purpose: out of line they sat in
+  the polling loop of `SectorReader` and aliased it in the instruction cache (Hollow Knight: 31 percent more refills in
+  its first loads, doors up to 0.7 s longer). `Player::poll` is one function, the loop restart and the stop are one
+  copy each, the song's end is kept as an LBA, GetlocP is decoded from the three bytes it needs, and a suspension is a
+  flag plus the next poll's Pause and head reading instead of code in the poll, so a program that never suspends does
+  not pay for it. Link maps, Hollow Knight shipping disc: free RAM 22,340 before; 22,812 with its own player on this
+  SDK; 22,460 with the SDK player. The 352 bytes the SDK player has over Hollow Knight's copy of the same job buy
+  results that name the failed drive command (`Error`) in place of a bool, `suspend`, `resume` and
+  `with_cd_suspended`, per-song speed (`DriveSpeed`, single and double) and the head sample behind `SongClock`; they
+  are not a regression to chase.
 - `psx-splash`: the one boot splash. `psx_splash::show(gpu, buffers, line, brightness, buttons)` plays the Bonnie
   Studios mark and one line of text with a sweeping sheen (150 frames, a fresh Cross, Circle or Start press skips it
   after 8) and returns; the line is the only thing a game chooses (`"Built with PSoXide"`, for example). The mark is

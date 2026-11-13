@@ -30,7 +30,6 @@
 //! audible gap whose length is the drive's seek time; authoring the loop
 //! point into a quiet passage hides it.
 
-use super::PlayPosition;
 use crate::disc_base::shift_lba;
 use crate::periph::Cd;
 use psx_hw::cd::xa::{END_GUARD_SECTORS, SECTORS_PER_SECOND};
@@ -258,10 +257,16 @@ impl Drive for Cd {
     fn pause(&mut self) -> bool {
         self.try_pause_until_complete(PAUSE_SPINS)
     }
+    #[inline(never)]
     fn head_lba(&mut self) -> Option<u32> {
-        let position = PlayPosition::parse(&self.try_play_position(COMMAND_SPINS)?)?;
-        let frames = (position.absolute_min as u32 * 60 + position.absolute_sec as u32) * 75
-            + position.absolute_frame as u32;
+        let response = self.try_play_position(COMMAND_SPINS)?;
+        // GetlocP answers eight bytes; the absolute minute, second and frame are bytes 5 to 7,
+        // in BCD (`bcd_to_bin` for the byte `v` is `v - 6 * (v >> 4)`).
+        let &[_, _, _, _, _, min, sec, frame, ..] = response.bytes() else {
+            return None;
+        };
+        let bcd = |v: u8| u32::from(v) - 6 * u32::from(v >> 4);
+        let frames = (bcd(min) * 60 + bcd(sec)) * 75 + bcd(frame);
         // The drive counts from the start of the lead-in, two seconds before LBA 0.
         frames.checked_sub(150)
     }
@@ -287,12 +292,12 @@ struct Engine {
     suspend_pending: bool,
     /// Absolute LBA of the top of the song file.
     start_lba: u32,
+    /// Absolute LBA where the song's audio ends (the top plus its span).
+    end_lba: u32,
     /// Where the last read was aimed: the top of the file for a start or a
     /// loop, the saved position for a resume.
     target_lba: u32,
     head_lba: u32,
-    /// Where a suspended song continues, fixed when the pause is accepted.
-    resume_lba: u32,
     /// Counts reads started (start, loop, resume): a new epoch means the
     /// head readings before it say nothing about the ones after.
     epoch: u32,
@@ -311,9 +316,9 @@ impl Engine {
             suspended: false,
             suspend_pending: false,
             start_lba: 0,
+            end_lba: 0,
             target_lba: 0,
             head_lba: 0,
-            resume_lba: 0,
             epoch: 0,
             head_serial: 0,
         }
@@ -348,12 +353,19 @@ impl Engine {
     /// Seek to the top of the file and start streaming.
     fn begin_read(&mut self, drive: &mut impl Drive, song: Song) -> Result<(), Error> {
         let top = shift_lba(song.file.lba);
-        self.begin_read_at(drive, top, top)
+        self.begin_read_at(drive, top, top, top + song.span)
     }
 
     /// Seek to `at` (an absolute LBA inside the song file whose top is `top`)
     /// and start streaming.
-    fn begin_read_at(&mut self, drive: &mut impl Drive, top: u32, at: u32) -> Result<(), Error> {
+    #[inline(never)]
+    fn begin_read_at(
+        &mut self,
+        drive: &mut impl Drive,
+        top: u32,
+        at: u32,
+        end: u32,
+    ) -> Result<(), Error> {
         if !drive.set_target(at) {
             return Err(Error::Seek);
         }
@@ -361,6 +373,7 @@ impl Engine {
             return Err(Error::Read);
         }
         self.start_lba = top;
+        self.end_lba = end;
         self.target_lba = at;
         self.head_lba = at;
         self.pause_pending = false;
@@ -371,6 +384,7 @@ impl Engine {
 
     /// Pause a running drive. The drive refuses a pause during the seek that
     /// starts a read, so a refused pause is retried by [`Self::poll`].
+    #[inline(never)]
     fn stop(&mut self, drive: &mut impl Drive) {
         self.suspended = false;
         self.suspend_pending = false;
@@ -381,41 +395,19 @@ impl Engine {
         self.song = None;
     }
 
+    /// Suspend the song: the next poll pauses the drive, and a Pause the drive refuses (it does
+    /// during the seek that starts a read) is retried by the polls after it. The poll that gets
+    /// the Pause accepted also asks the drive where the head is, and [`Self::resume`] continues
+    /// from that position, or from the last one a poll saw, or from the seek target when no poll
+    /// ever saw the head.
     fn suspend(&mut self, drive: &mut impl Drive) -> bool {
         if self.state == State::Idle || self.suspended {
             return true;
         }
-        self.suspended = drive.pause();
-        self.suspend_pending = !self.suspended;
-        if self.suspended {
-            self.note_resume_position(drive);
-        }
+        self.suspend_pending = true;
+        self.pause_pending = true;
+        self.poll(drive);
         self.suspended
-    }
-
-    /// Fix where a resume continues, now that the pause is accepted and the
-    /// head holds still. A poll may be a long time old (a game that polls
-    /// only near the end of a song never refreshed it), so ask the drive
-    /// once more; if it does not answer, fall back to the last position the
-    /// poll saw, or to the seek target when no poll ever saw the head.
-    fn note_resume_position(&mut self, drive: &mut impl Drive) {
-        let Some(song) = self.song else {
-            return;
-        };
-        let end = self.start_lba + song.span;
-        if let Some(head) = drive.head_lba() {
-            if (self.target_lba..end).contains(&head) {
-                self.state = State::Streaming;
-                self.head_lba = head;
-                self.resume_lba = head;
-                return;
-            }
-        }
-        self.resume_lba = if self.state == State::Streaming {
-            self.head_lba
-        } else {
-            self.target_lba
-        };
     }
 
     /// Continue a suspended song. Anything may have happened to the drive
@@ -436,40 +428,57 @@ impl Engine {
                 if !drive.set_filter(file.number, song.channel) {
                     return Err(Error::SetFilter);
                 }
-                self.begin_read_at(drive, self.start_lba, self.resume_lba)?;
+                let at = if self.state == State::Streaming {
+                    self.head_lba
+                } else {
+                    self.target_lba
+                };
+                self.begin_read_at(drive, self.start_lba, at, self.end_lba)?;
             }
             self.suspended = false;
         }
         // A refused Pause left the original read active. Cancel its retry
         // without starting another read or changing the pending seek.
-        self.suspend_pending = false;
+        if self.suspend_pending {
+            self.suspend_pending = false;
+            self.pause_pending = false;
+        }
         Ok(())
     }
 
+    #[inline(never)]
     fn poll(&mut self, drive: &mut impl Drive) -> Event {
-        let Some(song) = self.song else {
-            if self.pause_pending {
-                self.pause_pending = !drive.pause();
+        // A Pause that was refused is tried again: a stop's, or a suspension's, which is
+        // settled by the head reading below (the one poll that does read the head of a
+        // suspended song).
+        let mut settled = false;
+        if self.pause_pending {
+            self.pause_pending = !drive.pause();
+            if !self.pause_pending && self.suspend_pending {
+                self.suspend_pending = false;
+                self.suspended = true;
+                settled = true;
             }
-            return Event::Idle;
-        };
-        if self.suspend_pending {
-            self.suspend(drive);
         }
-        if self.suspended || self.suspend_pending {
+        if self.state == State::Idle {
+            return Event::Idle;
+        }
+        if self.suspend_pending || (self.suspended && !settled) {
             return Event::Playing;
         }
-        let end = self.start_lba + song.span;
+        let end = self.end_lba;
         if let Some(head) = drive.head_lba() {
-            if self.state == State::Seeking && (self.target_lba..end).contains(&head) {
+            let inside = head < end;
+            if self.state == State::Seeking && inside && head >= self.target_lba {
                 self.state = State::Streaming;
             }
             if self.state == State::Streaming {
-                self.head_lba = head;
-                self.head_serial = self.head_serial.wrapping_add(1);
-            }
-            if self.state == State::Streaming && head >= end {
-                return self.reach_end(drive, song);
+                if inside {
+                    self.head_lba = head;
+                    self.head_serial = self.head_serial.wrapping_add(1);
+                } else if !self.suspended {
+                    return self.reach_end(drive);
+                }
             }
         }
         Event::Playing
@@ -484,7 +493,12 @@ impl Engine {
             return 0;
         };
         let sectors = self.head_lba.saturating_sub(self.start_lba);
-        sectors * 1000 / song.file.speed.sectors_per_second()
+        // `sectors * 1000 / sectors_per_second` (75 or 150) as a division by a constant.
+        let thirds = match song.file.speed {
+            DriveSpeed::Single => 40,
+            DriveSpeed::Double => 20,
+        };
+        sectors * thirds / 3
     }
 
     fn head_sample(&self) -> Option<HeadSample> {
@@ -499,8 +513,14 @@ impl Engine {
         })
     }
 
-    fn reach_end(&mut self, drive: &mut impl Drive, song: Song) -> Event {
-        if self.looping && self.begin_read(drive, song).is_ok() {
+    #[inline(never)]
+    fn reach_end(&mut self, drive: &mut impl Drive) -> Event {
+        // A loop starts the same song again: from the top of its file, to the same end.
+        if self.looping
+            && self
+                .begin_read_at(drive, self.start_lba, self.start_lba, self.end_lba)
+                .is_ok()
+        {
             return Event::Looped;
         }
         self.stop(drive);
