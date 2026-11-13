@@ -116,19 +116,10 @@ engine/Cargo.toml
 engine/crates
 $GUEST_DIR"
 
-# Post-link proof shared by both build paths: reroute load-delay hazards and
-# prove the scratchpad stacks. $1 = executable, $2 = link map, $3 = directory
-# for the reports. An unpatched image runs differently from a patched one
-# (the souls gate's second layout diverged at its first sword swing), so the
-# in-tree escape hatch has to get the same treatment as the canonical stage.
-patch_and_prove() {
-    # LLVM's delay-slot filler leaves loads in branch delay slots whose
-    # consumer runs inside the R3000 load delay. Rather than disabling the
-    # filler (tens of kilobytes of nops), reroute those branches through the
-    # guest's HAZARD_TRAMPOLINES array post-link and prove the image clean
-    # (the SDK's hazard-patch). PSOXIDE_HAZARD_DIR names a directory that
-    # already holds hazard-patch and stack-guard; otherwise they build here,
-    # from tools/psoxide-hazard in the locked SDK.
+# The directory that holds the SDK's post-link tools and the gate. PSOXIDE_HAZARD_DIR names a
+# directory that already has them; otherwise they build here from tools/psoxide-hazard in the
+# locked SDK. Sets hazard_dir.
+find_hazard_tools() {
     if [ -n "${PSOXIDE_HAZARD_DIR:-}" ]; then
         hazard_dir="$PSOXIDE_HAZARD_DIR"
     else
@@ -139,6 +130,43 @@ patch_and_prove() {
             exit 1
         }
     fi
+}
+
+# The architecture gate (sdk/docs/GATE.md) over this program, with the cargo arguments the
+# build will use: refuses before anything compiles, as `psoxide-pgo apply` does.
+gate_check() {
+    find_hazard_tools
+    "$hazard_dir/psx-gate" --sdk "$ROOT" --crate "$ROOT/$GUEST_DIR" -- build --release "$@" || {
+        echo "[guest-build] the architecture gate refused editor-playtest; nothing was built" >&2
+        exit 1
+    }
+}
+
+# Write the gate receipt into the finished executable ($1; the rest are the cargo arguments), the
+# same receipt `psoxide-pgo apply` writes: shipping, or diag when a diagnostic feature is on.
+gate_receipt() {
+    exe="$1"
+    shift
+    find_hazard_tools
+    "$hazard_dir/psx-gate" --sdk "$ROOT" --crate "$ROOT/$GUEST_DIR" --receipt "$exe" \
+        -- build --release "$@" || {
+        echo "[guest-build] could not write the gate receipt into $exe" >&2
+        exit 1
+    }
+}
+
+# Post-link proof shared by both build paths: reroute load-delay hazards and
+# prove the scratchpad stacks. $1 = executable, $2 = link map, $3 = directory
+# for the reports. An unpatched image runs differently from a patched one
+# (the souls gate's second layout diverged at its first sword swing), so the
+# in-tree escape hatch has to get the same treatment as the canonical stage.
+patch_and_prove() {
+    # LLVM's delay-slot filler leaves loads in branch delay slots whose
+    # consumer runs inside the R3000 load delay. Rather than disabling the
+    # filler (tens of kilobytes of nops), reroute those branches through the
+    # guest's HAZARD_TRAMPOLINES array post-link and prove the image clean
+    # (the SDK's hazard-patch).
+    find_hazard_tools
     "$hazard_dir/hazard-patch" --map "$2" "$1" >"$3/hazard-patch.txt" 2>&1 || {
         cat "$3/hazard-patch.txt" >&2
         echo "[guest-build] load-delay hazards remain in $EXE_RELATIVE; refusing to stage it" >&2
@@ -153,6 +181,8 @@ patch_and_prove() {
         exit 1
     }
 }
+
+gate_check "$@"
 
 if [ "${PSOXIDE_GUEST_STAGE:-1}" = "0" ]; then
     echo "[guest-build] PSOXIDE_GUEST_STAGE=0: building in-tree (artifact is checkout-specific)"
@@ -177,6 +207,7 @@ if [ "${PSOXIDE_GUEST_STAGE:-1}" = "0" ]; then
     fi
     cd "$ROOT"
     patch_and_prove "$ROOT/$EXE_RELATIVE" "$in_tree_map" "$ROOT/build/examples"
+    gate_receipt "$ROOT/$EXE_RELATIVE" "$@"
     echo "[guest-build] $(shasum -a 256 "$EXE_RELATIVE")"
     exit 0
 fi
@@ -273,6 +304,7 @@ if [ -n "${PSOXIDE_GUEST_LINK_ELF:-}" ]; then
     exit 0
 fi
 patch_and_prove "$staged_exe" "$GUEST_MAP" "$STAGE"
+gate_receipt "$staged_exe" "$@"
 mkdir -p "$ROOT/$(dirname "$EXE_RELATIVE")"
 cp "$staged_exe" "$ROOT/$EXE_RELATIVE"
 echo "[guest-build] canonical stage $STAGE"

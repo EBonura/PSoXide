@@ -522,7 +522,6 @@ dependencies = [
  "psoxide-hazard",
  "psx-gate",
  "psx-hw",
- "psx-iso",
  "rustc-demangle",
  "serde_json",
 ]

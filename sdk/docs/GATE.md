@@ -108,6 +108,13 @@ executable's file stem. A determined bypass is to rename the file to a listed st
 and any change made after the gate ran, not sabotage by someone who has the SDK. Disc builders
 that call `psx_iso` directly are not covered.
 
+The receipt is written in one place, `psx_gate::press::stamp`. `psoxide-pgo apply` calls it at the end
+of its build; `tools/build_guest_staged.sh` (the editor's playtest program, which does not go
+through `apply`) runs `psx-gate` before it compiles anything and `psx-gate --receipt EXE` after
+the hazard patch, which runs the same check and stamps the same receipt (diag when a `[diag]`
+feature is on). A program built by plain cargo through some other script has no receipt until it
+does the same.
+
 What a caller of `psx_iso` must do to be covered: read the executable, call
 `psx_gate::press::check(&exe, label, allow_diag, &sdk_profile, own.as_ref())` before it hands the
 bytes to `IsoBuilder`, and stop on `Err` (print the message, exit non-zero). `label` is the

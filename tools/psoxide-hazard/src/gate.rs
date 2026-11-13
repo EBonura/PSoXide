@@ -506,14 +506,17 @@ pub fn check(
 }
 
 /// `psx-gate [--sdk DIR] [--metadata FILE | --crate DIR] [--package NAME] [--program-file FILE]
-/// [-- CARGO-ARGS]`:
-/// run the gate and print the refusals. Exit 1 when there are any.
+/// [--receipt EXE] [-- CARGO-ARGS]`:
+/// run the gate and print the refusals. Exit 1 when there are any. With `--receipt EXE` a pass
+/// also writes the gate receipt into the linked, patched PSX-EXE (what `psoxide-pgo apply` does
+/// at the end of its build; a staged guest build, which does not go through `apply`, calls it).
 pub fn main(args: &[String]) -> i32 {
     let mut sdk = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let (mut metadata, mut crate_dir, mut package) = (None, PathBuf::from("."), None);
     let mut cargo: Vec<String> = Vec::new();
     let mut propose = false;
     let mut program_file: Option<PathBuf> = None;
+    let mut receipt: Option<PathBuf> = None;
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -523,6 +526,7 @@ pub fn main(args: &[String]) -> i32 {
             "--package" => package = it.next().cloned(),
             "--propose" => propose = true,
             "--program-file" => program_file = it.next().map(PathBuf::from),
+            "--receipt" => receipt = it.next().map(PathBuf::from),
             "--" => {
                 cargo.extend(it.by_ref().cloned());
             }
@@ -558,6 +562,12 @@ pub fn main(args: &[String]) -> i32 {
                 eprintln!("{line}");
             }
             if outcome.violations.is_empty() {
+                if let Some(exe) = &receipt {
+                    if let Err(e) = write_receipt(exe, &outcome) {
+                        eprintln!("psx-gate: {e}");
+                        return 2;
+                    }
+                }
                 println!(
                     "psx-gate: {} passes ({}; exceptions held: {})",
                     outcome.program,
@@ -583,6 +593,14 @@ pub fn main(args: &[String]) -> i32 {
             2
         }
     }
+}
+
+/// Write the receipt of `outcome` (a program that passed) into the PSX-EXE at `exe`.
+fn write_receipt(exe: &Path, outcome: &Outcome) -> Result<(), String> {
+    let mut bytes = fs::read(exe).map_err(|e| format!("cannot read {}: {e}", exe.display()))?;
+    psx_gate::press::stamp(&mut bytes, &outcome.program, outcome.diag)
+        .map_err(|_| format!("{} is not a PSX-EXE the receipt fits", exe.display()))?;
+    fs::write(exe, bytes).map_err(|e| format!("cannot write {}: {e}", exe.display()))
 }
 
 /// Resolve the program with cargo (or read `metadata`) and check it. The program's own file is

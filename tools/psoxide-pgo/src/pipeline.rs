@@ -575,12 +575,7 @@ impl Guest {
             return Ok(());
         };
         let mut bytes = fs::read(exe)?;
-        let kind = if *diag {
-            psx_iso::receipt::Kind::Diag
-        } else {
-            psx_iso::receipt::Kind::Shipping
-        };
-        if psx_iso::receipt::write(&mut bytes, program, kind).is_ok() {
+        if psx_gate::press::stamp(&mut bytes, program, *diag).is_ok() {
             fs::write(exe, bytes)?;
         }
         Ok(())

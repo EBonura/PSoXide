@@ -14,7 +14,6 @@ gimli  = { version = "0.34", default-features = false, features = ["read", "std"
 object = { version = "0.40", default-features = false, features = ["read_core", "elf", "std"] }
 rustc-demangle = "0.1"
 psoxide-hazard = { path = "../psoxide-hazard" }
-psx-iso = { path = "../../crates/psx-iso" }
 psx-gate = { path = "../../crates/psx-gate" }
 serde_json = { workspace = true }
 
