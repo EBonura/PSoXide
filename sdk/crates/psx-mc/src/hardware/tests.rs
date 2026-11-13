@@ -230,6 +230,10 @@ impl Transport for CardBus {
     fn set_mode(&mut self, _value: u16) {}
     fn set_baud(&mut self, _value: u16) {}
 
+    fn control(&mut self) -> u16 {
+        self.control_reg
+    }
+
     fn set_control(&mut self, value: u16) {
         self.now += 1;
         if value & sio0::ctrl::ACK != 0 {
