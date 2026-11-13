@@ -364,7 +364,7 @@ fn expected_word(word: u32, sectors: u32) -> u32 {
 /// Do the `sectors` sectors at `buffer`, which hold file sectors
 /// `file_sector..`, carry the pattern? `stride` checks one word in that many.
 #[inline(never)]
-fn verify(buffer: *const u32, file_sector: u32, sectors: u32, stride: u32) -> bool {
+pub(crate) fn verify(buffer: *const u32, file_sector: u32, sectors: u32, stride: u32) -> bool {
     let total = FILE_SECTORS;
     let first_word = file_sector * SECTOR_WORDS as u32;
     let mut word = 0;

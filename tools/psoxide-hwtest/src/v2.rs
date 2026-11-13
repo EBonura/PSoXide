@@ -597,6 +597,16 @@ fn build() -> BTreeMap<u32, V2Entry> {
             ["polls", "id_and_magic", "poll_cycles_median"],
         );
     }
+    for (case, tag) in ["mixed_waits", "mixed_early", "single_waits", "single_early"]
+        .iter()
+        .enumerate()
+    {
+        b.put(
+            0x6F8 + case as u32,
+            format!("cd_stop_{tag}"),
+            ["sectors", "errors_and_retries", "time_16_hblanks"],
+        );
+    }
     b.put(
         0x7A0,
         "dma_rekick_first",

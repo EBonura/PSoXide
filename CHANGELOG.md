@@ -77,6 +77,14 @@ every program works on every Sony BIOS and on OpenBIOS).
   `Port`, and `Transport` gains `control()` and `ack_irq_armed()`: anyone implementing `Transport` outside the SDK must add
   `control()` (a read of `CTRL`). Reported by Thomas Bertani, with a patch.
 - The interrupt-driven pad engine is deleted: `psx_pad::engine` and `psx_pad::console` with the `irq-engine` feature, psx-engine's `pad-irq-engine` and `pad-irq` features and the branches behind them, editor-playtest's features for them, `sdk/docs/PAD-IRQ-ENGINE.md` and the `pad-engine-check` example. The synchronous driver is the one driver for every game (`sdk/docs/PAD.md`). A game that enabled `pad-irq-engine` drops it from its features.
+- `SectorReader::stop` waits 16,384 spins (about 296,000 clocks, 8.9 ms) for Pause's second response after every read, and the
+  wait always runs out: on the console the response comes 1.2 to 3.9 million clocks after the acknowledge (hardware-tests v2.7),
+  and the emulator models it. The wait came in with the reader, ported with the poll limits of a loader that had run on a console (the commit lists the limits, it records no finding for this wait),
+  and the doc written with `stop_proved` already said `stop` returns at the acknowledge. `psx_io::cd::reader::STOP_AT_ACKNOWLEDGE`
+  (off) makes it do that; a load of 100 reads of 1 to 8 sectors, one after another, takes 240,867 HBlanks as shipped and 232,076 with it on the emulator (15.3 s and 14.7 s, the same bytes). Off until a console passes hardware-tests v2.14 (below); then the constant and the wait are deleted.
+- Hardware tests v2.14 (machine-code baseline pinned, drift 0 against v2.13): step `CD STOP AT ACKNOWLEDGE` and records `0x6F8` to `0x6FB`, four pass-or-fail cases (forty reads each,
+  every sector checked) for `stop` with and without its wait for the second response. What a pass and a fail mean is in
+  `docs/hardware-test-versions.md`.
 - The hardware-tests machine-code baseline for v2.13 is pinned (`docs/hardware-refs/hwtest-machine-code-v2.13.txt`, made with the
   command `make hwtest-verify-code` prints, from the v2.10 file: 218 probes, drift 0, so no measured block changed shape across
   v2.11 to v2.13), and `make hwtest-verify-code` passes again. A host test now fails `make test` when `SUITE_VERSION` has no

@@ -68,6 +68,14 @@ const ACK_POLL: u32 = 16_384;
 const PARAM_POLL: u32 = 16_384;
 const DATA_POLL: u32 = 4_000_000;
 const CLEANUP_POLL: u32 = 16_384;
+
+/// Whether [`SectorReader::stop`] returns at the Pause's acknowledge instead of spending
+/// 16,384 spins on a second response that comes later than that. Off until a
+/// console has run hardware-tests v2.14 (`CD STOP AT ACKNOWLEDGE`, records `0x6F8` to
+/// `0x6FB`) and every case read its sectors correctly with no errors and no retries: the
+/// next command (Setloc) then reaches a drive that is still completing the Pause. After a
+/// pass this constant and the wait go; after a fail the early return goes.
+pub const STOP_AT_ACKNOWLEDGE: bool = false;
 /// Response bytes drained at most. The FIFO holds 16, but on heavy streaming
 /// the controller (or an emulator) can wedge it "not empty", and an unbounded
 /// drain would hang the loader.
@@ -687,18 +695,33 @@ impl SectorReader {
     /// put the interrupt mask [`prepare`](Self::prepare) replaced back.
     /// Safe to call after failures; it tolerates a drive with no active read.
     ///
-    /// **This returns after the Pause is acknowledged, not when the drive has
-    /// stopped.** On the console the second response comes 1.2 to 3.9 million
-    /// system clocks later (see [`pause`](super::pause)); waiting here would
-    /// charge every chunk of a table scan that long. That is safe for the next
-    /// command of a read sequence (any command cancels the pending second
-    /// response, and a data sector still in flight is drained by the waits),
-    /// and wrong for a caller that then asks the drive for its state: a GetStat
-    /// right after still says "reading". Use [`stop_proved`](Self::stop_proved)
+    /// **This does not wait for the drive to stop.** It sends the Pause, takes the
+    /// acknowledge, and then (today) spends 16,384 spins, about 296,000
+    /// system clocks (8.9 ms), looking for the second response. That wait always runs out:
+    /// out of a read the second response comes 1.2 to 3.9 million clocks after the
+    /// acknowledge on the console (see [`pause`](super::pause)), and the emulator
+    /// models the same, so every call pays the 8.9 ms for nothing.
+    /// With [`STOP_AT_ACKNOWLEDGE`] set the call returns at the acknowledge instead,
+    /// and the next command of a read sequence goes out while the drive is still
+    /// completing the Pause: on the console a GetStat there cancels the second
+    /// response (4 of 4), and no other command has been tried, which is what
+    /// hardware-tests v2.14 (`CD STOP AT ACKNOWLEDGE`) asks.
+    /// Either way it is wrong for a caller that then asks the drive for its state: a
+    /// GetStat right after still says "reading". Use [`stop_proved`](Self::stop_proved)
     /// when the drive has to be quiet before anything else happens.
     pub fn stop(&mut self) {
+        self.stop_waiting(!STOP_AT_ACKNOWLEDGE);
+    }
+
+    /// [`stop`](Self::stop) with the choice of whether to look for the second
+    /// response made by the caller, so hardware-tests can run both sequences on one
+    /// build. Not for programs: they call `stop`.
+    #[doc(hidden)]
+    pub fn stop_waiting(&mut self, look_for_second_response: bool) {
         if self.send_command(CMD_PAUSE, &[], IRQ_ACK, CLEANUP_POLL) {
-            let _ = self.wait_irq(IRQ_COMPLETE, CLEANUP_POLL);
+            if look_for_second_response {
+                let _ = self.wait_irq(IRQ_COMPLETE, CLEANUP_POLL);
+            }
             self.cd.drain_response_limited(DRAIN_LIMIT);
             self.cd.acknowledge_irq(IRQ_COMPLETE);
         }

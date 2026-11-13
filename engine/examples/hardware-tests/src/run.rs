@@ -690,6 +690,7 @@ records_step!(records_sio_pad, sio_timing::pad_timing);
 records_step!(records_sio_card, sio_timing::card_timing);
 records_step!(records_sio_latch, sio_timing::latch_and_arm);
 records_step!(records_sio_early, sio_timing::select_early);
+records_step!(records_cd_stop, cd_stop::run);
 
 fn run_tests(run: &mut Run, area: Area) {
     let total = TESTS.iter().filter(|spec| test_area(spec) == area).count();
@@ -850,6 +851,7 @@ const STEPS: &[Step] = &[
     step(Area::Cd, "STREAM COST", step_stream_cost),
     step(Area::Cd, "CD-DA HANDOFF", step_stream_handoff),
     step(Area::Cd, "CD PAUSE SECOND RESPONSE", step_cd_pause),
+    step(Area::Cd, "CD STOP AT ACKNOWLEDGE", records_cd_stop),
     // 7
     step(Area::Sio, "SIO CASES", tests_sio),
     step(Area::Sio, "SIO TIMING", records_sio),
