@@ -4,7 +4,7 @@ include tools/engine-examples.mk
 
 .PHONY: help check test miri fmt fmt-check lint example disc hello-tri hello-tri-disc run-tri
 help:
-	@echo "make check | test | miri | lint | hello-tri-disc"
+	@echo "make check | test | miri | lint | repro-check | hello-tri-disc"
 	@echo "make disc EXAMPLE=hello-input; make run-tri FRONTEND=/path/to/frontend"
 check:
 	cargo check --locked --workspace --all-features

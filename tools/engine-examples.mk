@@ -269,3 +269,19 @@ assets: psxed
 $(foreach example,$(ENGINE_DATA_DISC_EXAMPLES),$(eval $(call build_engine_data_disc,$(example))))
 
 engine-examples: $(ENGINE_EXAMPLE_DISCS)
+
+# Reproducibility check: build the same checkout from two directories and require byte-identical
+# executables (tools/psoxide-pgo "One guest from any directory"). Two full guest builds per artifact, so
+# it is not part of `make lint`; it is a step of every fleet repin's gate list. The gate clones the tree
+# into its own temp directories, so run it on a clean build of the commit being checked.
+.PHONY: repro-check repro-check-editor-playtest repro-check-hello-engine
+REPRO_GATE = cargo run -q --release --locked -p psoxide-pgo --bin repro-gate --
+repro-check: repro-check-editor-playtest repro-check-hello-engine
+repro-check-editor-playtest:
+	$(REPRO_GATE) --source "$(CURDIR)" \
+		--build 'sh tools/build_guest_staged.sh $(EDITOR_PLAYTEST_PSX_BUILD_FLAGS)' \
+		--artifact '{checkout}/$(EXAMPLE_OUT)/editor-playtest.exe'
+repro-check-hello-engine:
+	$(REPRO_GATE) --source "$(CURDIR)" \
+		--build 'make hello-engine' \
+		--artifact '{checkout}/$(EXAMPLE_OUT)/hello-engine.exe'
