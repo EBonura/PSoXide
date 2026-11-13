@@ -5,6 +5,12 @@
 No program depends on a BIOS any more, not a call into one and not the state one leaves behind (Manny's rule:
 every program works on every Sony BIOS and on OpenBIOS).
 
+
+- `psx-splash` links less: `draw_line` walks the line by character with no re-slicing and no division by zero, so the
+  splash holds no panic path of its own (a build that keeps formatted panics no longer links `slice_error_fail`, the
+  `usize` formatter or `report_panic` for it), and its text loop is built for size. In a program that only calls the
+  splash: 17,840 -> 16,704 bytes (text, data, bss) at opt-level 3, 16,064 -> 15,728 at "s"; with formatted panics
+  18,524 -> 16,620 and 19,980 -> 18,572. The 25 frames sampled every 6th VBlank are byte-identical.
 - `psx-splash`: the one boot splash. `psx_splash::show(gpu, buffers, line, brightness, buttons)` plays the Bonnie
   Studios mark and one line of text with a sweeping sheen (150 frames, a fresh Cross, Circle or Start press skips it
   after 8) and returns; the line is the only thing a game chooses (`"Built with PSoXide"`, for example). The mark is

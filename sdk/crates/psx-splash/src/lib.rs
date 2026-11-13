@@ -105,7 +105,8 @@ pub fn show(
     let font = FontAtlas::upload(&BASIC, FONT_TPAGE, FONT_CLUT);
     let mark = TextureMaterial::opaque(MARK_CLUT.uv_word(), MARK_TPAGE.uv_word(0), (0, 0, 0));
     let x0 = 160 - (font.text_width(line) / 2) as i16;
-    let span = line.chars().count() as i32 + SHEEN;
+    // At least 1, so the `%` below carries no divide-by-zero panic.
+    let span = (line.chars().count() as i32 + SHEEN).max(1);
 
     // One frame per VBlank whatever the presentation cap is: 150 frames are 2.5 seconds.
     let cap = psx_rt::interrupts::min_flip_vblanks();
@@ -136,7 +137,7 @@ pub fn show(
             [(0, 0), (128, 0), (0, 128), (128, 128)],
             mark.with_tint((grey, grey, grey)),
         ));
-        draw_line(&font, x0, line, (frame / 2).rem_euclid(span), level);
+        draw_line(&font, x0, line, (frame / 2) % span, level);
         if let Some(overlay) = brightness.faded_overlay(Resolution::R320X240, grey) {
             gpu.draw(&overlay);
         }
@@ -169,6 +170,7 @@ fn upload_mark() {
 
 /// The line: a black outline, then each letter as a gradient whose brightness rises toward
 /// the sheen's head, all scaled by the fade `level` (0 to 0x80).
+#[cfg_attr(target_arch = "mips", optimize(size))]
 fn draw_line(font: &FontAtlas, mut x: i16, line: &str, head: i32, level: i32) {
     let mix = |colour: (u8, u8, u8), near: i32| -> (u8, u8, u8) {
         let channel = |value: u8| {
@@ -178,7 +180,9 @@ fn draw_line(font: &FontAtlas, mut x: i16, line: &str, head: i32, level: i32) {
         (channel(colour.0), channel(colour.1), channel(colour.2))
     };
     for (index, ch) in line.char_indices() {
-        let glyph = &line[index..index + ch.len_utf8()];
+        // The one character as a `&str`, copied out so nothing re-slices `line`.
+        let mut one = [0u8; 4];
+        let glyph: &str = ch.encode_utf8(&mut one);
         for (dx, dy) in [(-1, -1), (1, -1), (-1, 1), (1, 1)] {
             font.draw_text(x + dx, LINE_Y + dy, glyph, (0, 0, 0));
         }
@@ -190,7 +194,7 @@ fn draw_line(font: &FontAtlas, mut x: i16, line: &str, head: i32, level: i32) {
             mix((0x68, 0x80, 0x80), near),
             mix((0x38, 0x58, 0x80), near),
         );
-        x += font.text_width(glyph) as i16;
+        x += i16::from(font.glyph_advance(ch));
     }
 }
 
