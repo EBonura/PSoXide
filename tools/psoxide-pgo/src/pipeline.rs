@@ -109,6 +109,12 @@ struct Guest {
     /// directory every such path is under, which the build is pinned to
     /// (see [`Guest::pin_root`]).
     repro_root: Option<PathBuf>,
+    /// What the architecture gate (`psx-gate`) found, set once before any build: the program
+    /// name and whether a diagnostic feature is on, for the receipt written into the image.
+    gate: Option<(String, bool)>,
+    /// What the SDK crates' build scripts need to know of the program (`PSX_GATE_FILE`,
+    /// `PSX_GATE_PROGRAM`), set on every cargo build the driver runs.
+    gate_env: Vec<(&'static str, std::ffi::OsString)>,
 }
 
 /// One link: the executable cargo reports and the link map the driver asked
@@ -325,9 +331,17 @@ pub fn main(mode: &str, args: &[String]) -> Result<()> {
             .take()
             .unwrap_or_else(|| tools.join("../sdk/psoxide.ld")),
         repro_root: None,
+        gate: None,
+        gate_env: Vec::new(),
     };
     let guest = Guest {
         repro_root: guest.pin_root()?,
+        ..guest
+    };
+    let (gate, gate_env) = guest.run_gate()?;
+    let guest = Guest {
+        gate: Some(gate),
+        gate_env,
         ..guest
     };
     for name in ["RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS"] {
@@ -521,6 +535,57 @@ fn escaping_root(metadata: &serde_json::Value) -> Option<PathBuf> {
 }
 
 impl Guest {
+    /// The architecture gate over this program (sdk/profile.toml, `psx-gate`): refuse before
+    /// compiling anything. The SDK is the one this tool was built from.
+    #[allow(clippy::type_complexity)]
+    fn run_gate(&self) -> Result<((String, bool), Vec<(&'static str, std::ffi::OsString)>)> {
+        let sdk = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let outcome =
+            psoxide_hazard::gate::run(&sdk, None, &self.crate_dir, None, &self.cargo, None)?;
+        if !outcome.violations.is_empty() {
+            for line in &outcome.violations {
+                eprintln!("{line}");
+            }
+            return Err(format!(
+                "the architecture gate refused {} ({} problem(s); sdk/profile.toml, sdk/docs/GATE.md)",
+                outcome.program,
+                outcome.violations.len()
+            )
+            .into());
+        }
+        // The SDK crates' build scripts learn the program from the environment: its own file, or
+        // for a program inside the SDK repository its name in sdk/profile.toml.
+        let mut env_vars: Vec<(&'static str, std::ffi::OsString)> = Vec::new();
+        if let Some(file) = &outcome.program_file {
+            let file = file.canonicalize().unwrap_or_else(|_| file.clone());
+            env_vars.push((psx_gate::features::FILE_VAR, file.into_os_string()));
+        }
+        if outcome.sdk_local {
+            env_vars.push((
+                psx_gate::features::PROGRAM_VAR,
+                outcome.package.clone().into(),
+            ));
+        }
+        Ok(((outcome.program, outcome.diag), env_vars))
+    }
+
+    /// Write the gate receipt into a linked, patched PSX-EXE (an ELF or other file is left).
+    fn write_receipt(&self, exe: &Path) -> Result<()> {
+        let Some((program, diag)) = &self.gate else {
+            return Ok(());
+        };
+        let mut bytes = fs::read(exe)?;
+        let kind = if *diag {
+            psx_iso::receipt::Kind::Diag
+        } else {
+            psx_iso::receipt::Kind::Shipping
+        };
+        if psx_iso::receipt::write(&mut bytes, program, kind).is_ok() {
+            fs::write(exe, bytes)?;
+        }
+        Ok(())
+    }
+
     /// Build with `flags` appended to the guest's own rustflags and return
     /// the executable cargo reports, with the link map when the link wrote
     /// one. `order` goes to the guest's build.rs in [`LINK_ORDER_ENV`]; it
@@ -529,6 +594,13 @@ impl Guest {
         let mut flags = flags.to_vec();
         let mut command = Command::new("cargo");
         command.current_dir(&self.crate_dir).args(&self.cargo);
+        for name in [
+            psx_gate::features::FILE_VAR,
+            psx_gate::features::PROGRAM_VAR,
+        ] {
+            command.env_remove(name);
+        }
+        command.envs(self.gate_env.iter().map(|(name, value)| (*name, value)));
         if let Some(root) = &self.repro_root {
             let this = env::current_exe()?;
             if let Some(inner) = env::var_os("RUSTC_WRAPPER").filter(|inner| !inner.is_empty()) {
@@ -808,7 +880,8 @@ impl Guest {
         check(None, psoxide_hazard::cache_gate::main, true, "cache gate")?;
         // A game that uses psx_rt::scratchpad_window gets its guard rooms and level-1 roots proved
         // from the final image; a game without stubs passes silently.
-        check(None, psoxide_hazard::window_gate::main, true, "window gate")
+        check(None, psoxide_hazard::window_gate::main, true, "window gate")?;
+        self.write_receipt(exe)
     }
 }
 
@@ -2725,6 +2798,8 @@ mod tests {
             stack_guard: None,
             linker_script: PathBuf::new(),
             repro_root: None,
+            gate: None,
+            gate_env: Vec::new(),
         };
         let spaced = guest(&["build", "--target-dir", target.to_str().unwrap()]);
         let joined = guest(&["build", &format!("--target-dir={}", target.display())]);

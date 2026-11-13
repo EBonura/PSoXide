@@ -1,0 +1,297 @@
+# The architecture gate's allow-list for the SDK (sdk/docs/GATE.md, STANDARD.md rules 2 and 3).
+#
+# A guest build that enables a feature below nowhere, writes a hardware register address,
+# installs an exception-vector handler, runs COP0 assembly, calls a deprecated entry point or
+# carries a private copy of an SDK crate stops, unless an exception names exactly that. The
+# exceptions of a program that lives in this repository are the [[exception]] entries at the end
+# of this file; the exceptions of any other program are in that program's own `psx-gate.toml`,
+# which this file never names. Both are ratchets: nothing is added, an entry that no longer
+# matches the tree fails the build too (delete it), and a count only goes down. Every entry's
+# `remove` is a short tag: a workstream (W3), `unscheduled` or `decision`.
+
+# Features any guest build may enable.
+[shipping]
+psx-rt   = ["runtime", "hazard-trampolines-192", "hazard-trampolines-256"]
+psx-mc   = ["hw"]
+psx-settings = ["card"]
+
+# Development taps. A build with one of these on is a diagnostic build: it runs, it cannot
+# become a disc without --diag (the receipt psoxide-pgo apply writes says so).
+[diag]
+psx-rt   = ["host-tty", "boot-trace", "entry-census", "scratchpad-stack-check", "strict-faults", "console-diag"]
+psx-io   = ["console-diag"]
+psx-telemetry = ["emit"]
+psx-cdstream  = ["trace"]
+psx-engine    = ["boot-trace", "emulator-telemetry", "debug-log", "hardware-boot-visual", "room-surface-profile", "vert-debug"]
+psx-game-runtime = ["cd-stream-benchmark", "collision-debug-overlay", "panel-meter"]
+psx-goldsrc   = ["emulator-telemetry", "performance-telemetry", "warp-probe"]
+
+# Host-only models and encoders; the build scripts do not check host builds, and a guest build
+# that enables one is refused.
+[host]
+psx-grid     = ["std"]
+psx-vector   = ["encode"]
+psx-gte-core = ["serde"]
+psxed-audio  = ["pack"]
+
+# Programs of this repository that measure the hardware and so must not depend on the accessors
+# they measure: exempt from the register-literal, vector-write and COP0 rules (their features,
+# private copies and deprecated calls are still checked).
+[probe]
+programs = ["hardware-tests"]
+
+# Legacy entry points that a program may still call only while its exceptions list the call.
+[deprecated]
+symbols = ["poll_port1", "PadReader", "poll_on"]
+
+[[exception]]
+program = "editor-playtest"
+kind = "feature"
+item = "psx-engine/present-queue"
+remove = "W7"
+
+[[exception]]
+program = "editor-playtest"
+kind = "feature"
+item = "psx-game-runtime/cd-stream-bench"
+remove = "W6"
+
+[[exception]]
+program = "editor-playtest"
+kind = "feature"
+item = "psx-io/present-queue"
+remove = "W7"
+
+[[exception]]
+program = "editor-playtest"
+kind = "feature"
+item = "psx-level/wire"
+remove = "W10"
+
+[[exception]]
+program = "editor-playtest"
+kind = "feature"
+item = "psx-rt/present-queue"
+remove = "W7"
+
+[[exception]]
+program = "editor-playtest"
+kind = "register-literal"
+item = "engine/examples/editor-playtest/src/playtest_scene.rs"
+count = 1
+remove = "unscheduled"
+
+[[exception]]
+program = "hardware-tests"
+kind = "feature"
+item = "psx-mc/compress"
+remove = "unscheduled"
+
+[[exception]]
+program = "hardware-tests"
+kind = "feature"
+item = "psx-rt/alloc"
+remove = "unscheduled"
+
+[[exception]]
+program = "hello-asmprobe"
+kind = "feature"
+item = "psx-gpu/asm-kernels"
+remove = "unscheduled"
+
+[[exception]]
+program = "hello-asmprobe"
+kind = "feature"
+item = "psx-math/asm-kernels"
+remove = "unscheduled"
+
+[[exception]]
+program = "hello-memcard"
+kind = "feature"
+item = "psx-mc/compress"
+remove = "unscheduled"
+
+[[exception]]
+program = "hello-present-queue"
+kind = "feature"
+item = "psx-io/present-queue"
+remove = "W7"
+
+[[exception]]
+program = "hello-present-queue"
+kind = "feature"
+item = "psx-rt/present-queue"
+remove = "W7"
+
+[[exception]]
+program = "hello-spstack"
+kind = "feature"
+item = "psx-rt/scratchpad-window"
+remove = "unscheduled"
+
+[[exception]]
+program = "hello-spstack"
+kind = "vector-write"
+item = "sdk/examples/hello-spstack/src/main.rs"
+count = 2
+remove = "W3"
+
+[[exception]]
+program = "showcase-vector"
+kind = "feature"
+item = "psx-rt/alloc"
+remove = "unscheduled"
+
+[[exception]]
+program = "toolchain-probe"
+kind = "feature"
+item = "psx-rt/alloc"
+remove = "unscheduled"
+
+[[exception]]
+program = "showcase-text"
+kind = "no-receipt"
+item = "-"
+remove = "W9"
+
+[[exception]]
+program = "game-pong"
+kind = "no-receipt"
+item = "-"
+remove = "W9"
+
+[[exception]]
+program = "game-breakout"
+kind = "no-receipt"
+item = "-"
+remove = "W9"
+
+[[exception]]
+program = "game-invaders"
+kind = "no-receipt"
+item = "-"
+remove = "W9"
+
+[[exception]]
+program = "showcase-3d"
+kind = "no-receipt"
+item = "-"
+remove = "W9"
+
+[[exception]]
+program = "showcase-model"
+kind = "no-receipt"
+item = "-"
+remove = "W9"
+
+[[exception]]
+program = "showcase-lights"
+kind = "no-receipt"
+item = "-"
+remove = "W9"
+
+[[exception]]
+program = "showcase-fog"
+kind = "no-receipt"
+item = "-"
+remove = "W9"
+
+[[exception]]
+program = "showcase-particles"
+kind = "no-receipt"
+item = "-"
+remove = "W9"
+
+[[exception]]
+program = "hello-engine"
+kind = "no-receipt"
+item = "-"
+remove = "W9"
+
+[[exception]]
+program = "game-magikaaaaaarp-pong"
+kind = "no-receipt"
+item = "-"
+remove = "W9"
+
+[[exception]]
+program = "hardware-tests"
+kind = "no-receipt"
+item = "-"
+remove = "W9"
+
+[[exception]]
+program = "hello-overlay"
+kind = "no-receipt"
+item = "-"
+remove = "W9"
+
+[[exception]]
+program = "hello-audio"
+kind = "deprecated-use"
+item = "sdk/examples/hello-audio/src/main.rs"
+count = 2
+remove = "W2"
+
+[[exception]]
+program = "hello-cdda"
+kind = "deprecated-use"
+item = "sdk/examples/hello-cdda/src/main.rs"
+count = 2
+remove = "W2"
+
+[[exception]]
+program = "hello-input"
+kind = "deprecated-use"
+item = "sdk/examples/hello-input/src/main.rs"
+count = 3
+remove = "W2"
+
+[[exception]]
+program = "hello-memcard"
+kind = "deprecated-use"
+item = "sdk/examples/hello-memcard/src/main.rs"
+count = 2
+remove = "W2"
+
+[[exception]]
+program = "hello-xa"
+kind = "deprecated-use"
+item = "sdk/examples/hello-xa/src/main.rs"
+count = 2
+remove = "W2"
+
+[[exception]]
+program = "pollbench"
+kind = "deprecated-use"
+item = "sdk/examples/pollbench/src/main.rs"
+count = 2
+remove = "W2"
+
+[[exception]]
+program = "hardware-tests"
+kind = "deprecated-use"
+item = "engine/examples/hardware-tests/src/controller_test.rs"
+count = 2
+remove = "W2"
+
+[[exception]]
+program = "hardware-tests"
+kind = "deprecated-use"
+item = "engine/examples/hardware-tests/src/lever_probes.rs"
+count = 1
+remove = "W2"
+
+[[exception]]
+program = "hardware-tests"
+kind = "deprecated-use"
+item = "engine/examples/hardware-tests/src/main.rs"
+count = 4
+remove = "W2"
+
+[[exception]]
+program = "hardware-tests"
+kind = "deprecated-use"
+item = "sdk/examples/hello-memcard/src/main.rs"
+count = 2
+remove = "W2"

@@ -10,6 +10,8 @@ description = "Post-link guest checks for PS1 executables: the R3000 load-delay 
 [dependencies]
 psx-disasm = { path = "../../crates/psx-disasm" }
 regex = "1"
+serde_json = { workspace = true }
+psx-gate = { path = "../../crates/psx-gate" }
 psx-residency = { path = "../../sdk/crates/psx-residency" }
 
 [[bin]]
@@ -35,3 +37,7 @@ path = "src/bin/cache-gate.rs"
 [[bin]]
 name = "check-mfc0"
 path = "src/bin/check-mfc0.rs"
+
+[[bin]]
+name = "psx-gate"
+path = "src/bin/psx-gate.rs"

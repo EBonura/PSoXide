@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/psx-anim-cook", "crates/psx-anim-tracks", "crates/psx-disasm", "crates/psx-audio-cook", "crates/psx-seq-cook", "crates/psx-hw", "crates/psx-iso", "crates/psx-library", "crates/psx-trace", "crates/psxed-format", "crates/psxed", "crates/psxed-audio", "crates/psxed-gltf", "crates/psxed-obj", "crates/psxed-project", "crates/psxed-tex", "tools/mkisopsx", "tools/psoxide-dev", "tools/psoxide-hwtest", "tools/psoxide-perf", "tools/psoxide-hazard", "tools/psoxide-link", "tools/psoxide-pgo", "tools/psoxide-size", "tools/xtask"]
+members = ["crates/psx-anim-cook", "crates/psx-anim-tracks", "crates/psx-disasm", "crates/psx-audio-cook", "crates/psx-seq-cook", "crates/psx-hw", "crates/psx-iso", "crates/psx-gate", "crates/psx-library", "crates/psx-trace", "crates/psxed-format", "crates/psxed", "crates/psxed-audio", "crates/psxed-gltf", "crates/psxed-obj", "crates/psxed-project", "crates/psxed-tex", "tools/mkisopsx", "tools/psoxide-dev", "tools/psoxide-hwtest", "tools/psoxide-perf", "tools/psoxide-hazard", "tools/psoxide-link", "tools/psoxide-pgo", "tools/psoxide-size", "tools/xtask"]
 exclude = ["sdk", "engine", "build"]
 
 [workspace.package]

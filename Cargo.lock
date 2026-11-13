@@ -411,6 +411,7 @@ name = "mkisopsx"
 version = "0.1.0"
 dependencies = [
  "lz4_flex",
+ "psx-gate",
  "psx-iso",
 ]
 
@@ -482,8 +483,10 @@ name = "psoxide-hazard"
 version = "0.1.0"
 dependencies = [
  "psx-disasm",
+ "psx-gate",
  "psx-residency",
  "regex",
+ "serde_json",
 ]
 
 [[package]]
@@ -517,7 +520,9 @@ dependencies = [
  "gimli",
  "object",
  "psoxide-hazard",
+ "psx-gate",
  "psx-hw",
+ "psx-iso",
  "rustc-demangle",
  "serde_json",
 ]
@@ -614,6 +619,13 @@ dependencies = [
  "psx-io",
  "psx-math",
  "psx-vram",
+]
+
+[[package]]
+name = "psx-gate"
+version = "0.1.0"
+dependencies = [
+ "psx-iso",
 ]
 
 [[package]]

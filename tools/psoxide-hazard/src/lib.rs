@@ -21,6 +21,7 @@ use std::io::Write;
 
 pub mod cache_gate;
 pub mod detect;
+pub mod gate;
 pub mod linkmap;
 pub mod listing;
 pub mod mfc0;

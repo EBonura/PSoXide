@@ -33,6 +33,7 @@ use alloc::vec::Vec;
 pub mod boot;
 pub mod exe;
 pub mod iso9660;
+pub mod receipt;
 pub use boot::{load_boot_exe_from_disc, BootError, BootExe};
 pub use exe::{pad_to_payload, Exe, ExeError, EXE_HEADER_BYTES};
 pub use iso9660::{

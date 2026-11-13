@@ -139,3 +139,14 @@ late and which come from `asm!` blocks the compiler does not schedule around:
   `asm!` block that ENDS with a move (the consumer is then in the next block, HL's `enable_cop2`). A game
   runs it over its own tree: `cargo run --release -p psoxide-hazard --bin check-mfc0 -- game host`
   from the hydrated SDK. `cargo run -p xtask -- check-mfc0` is the same code (`make lint`).
+
+## The architecture gate
+
+- `psx-gate [--sdk DIR] [--crate DIR] [--metadata FILE] [--program-file FILE] [--propose] [-- CARGO-ARGS]`
+  checks one program against `sdk/profile.toml` and its own `psx-gate.toml` (features of SDK crates,
+  register literals, exception-vector writes, COP0 assembly, deprecated calls, private copies of SDK
+  crates; today's exceptions are a ratchet). The
+  program is resolved with `cargo metadata` under the program's own cargo flags. `psoxide-pgo`
+  runs the same code in-process before it compiles and writes the receipt that `mkisopsx` checks.
+  `--propose` prints the exception entries that would list the current violations (to see what a
+  change adds, never to silence the gate). See `sdk/docs/GATE.md`.

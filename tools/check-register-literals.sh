@@ -6,11 +6,12 @@
 # Moved in from PSoXide-editor and not yet converted: the hardware-test suite reads the registers
 # by raw address on purpose (independent of psx_hw), its reference captures and docs quote them, and
 # psx-engine, psx-goldsrc and psx-chainloader still carry a few literals (follow-up: use psx_hw).
+# psx-gate (tools/psoxide-hazard/src/gate.rs) and its doc spell the patterns they look for.
 # The generated website data and vendored font files are not ours to edit.
 set -eu
 cd "$(dirname "$0")/.."
 if hits=$(git grep -nIiE '0x1f80|0xbf80|1f80_|1f80[0-9a-f]{4}h' -- . \
-	':!crates/psx-hw' ':!engine/examples/hardware-tests' ':!docs/hardware-refs' ':!engine/crates/psx-engine' ':!engine/crates/psx-goldsrc' ':!engine/crates/psx-chainloader' ':!docs/engine-harmonisation-plan-2026-08-22.md' ':!docs/shared-engine-standardisation-2026-08-22.md' ':!engine/examples/editor-playtest/src/playtest_scene.rs' ':!docs/hardware-test-*' ':!tools/psoxide-hwtest' ':!website/data' ':!sdk/crates/psx-font/vendor' ':!tools/check-register-literals.sh'); then
+	':!crates/psx-hw' ':!engine/examples/hardware-tests' ':!docs/hardware-refs' ':!engine/crates/psx-engine' ':!engine/crates/psx-goldsrc' ':!engine/crates/psx-chainloader' ':!docs/engine-harmonisation-plan-2026-08-22.md' ':!docs/shared-engine-standardisation-2026-08-22.md' ':!engine/examples/editor-playtest/src/playtest_scene.rs' ':!docs/hardware-test-*' ':!tools/psoxide-hwtest' ':!website/data' ':!sdk/crates/psx-font/vendor' ':!tools/check-register-literals.sh' ':!tools/psoxide-hazard/src/gate.rs' ':!sdk/docs/GATE.md'); then
 	echo "register address literals outside crates/psx-hw (use psx_hw):" >&2
 	echo "$hits" >&2
 	exit 1

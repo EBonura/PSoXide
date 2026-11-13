@@ -51,7 +51,7 @@ example:
 	$(PGO) apply --crate "sdk/examples/$(EXAMPLE)" --profile "$(PGO_PROFILE)" \
 		--variant "$$(test -f "$(PGO_PROFILE)" && echo "$(PGO_VARIANT)" || echo off)" -- $(EXAMPLE_CARGO)
 disc: example
-	cargo run --locked --release -p mkisopsx -- --exe "$(BUILD)/$(TARGET)/release/$(EXAMPLE).exe" --out "$(BUILD)/$(TARGET)/release/$(EXAMPLE).bin" --volume PSOXIDESDK
+	cargo run --locked --release -p mkisopsx -- --diag --exe "$(BUILD)/$(TARGET)/release/$(EXAMPLE).exe" --out "$(BUILD)/$(TARGET)/release/$(EXAMPLE).bin" --volume PSOXIDESDK
 # make pgo-collect EXAMPLE=x TAPE=route.pxtape FRONTEND=frontend [PGO_ARGS="--polls 100..1400"]
 pgo-collect:
 	@test -n "$(FRONTEND)" -a -n "$(TAPE)" || (echo "Set FRONTEND and TAPE"; exit 1)
@@ -72,7 +72,7 @@ hello-xa-disc:
 		"$(XA_DIR)/song0_pad.wav" "$(XA_DIR)/song1_high.wav" "$(XA_DIR)/song2_blips.wav" "$(XA_DIR)/song3_whistle.wav" \
 		--manifest "$(XA_DIR)/songs.json"
 	$(MAKE) example EXAMPLE=hello-xa
-	cargo run --locked --release -p mkisopsx -- --exe "$(BUILD)/$(TARGET)/release/hello-xa.exe" \
+	cargo run --locked --release -p mkisopsx -- --diag --exe "$(BUILD)/$(TARGET)/release/hello-xa.exe" \
 		--out "$(BUILD)/$(TARGET)/release/hello-xa.bin" --volume PSOXIDESDK --xa-file "$(XA_DIR)/SONGS.XA"
 # Plays hello-xa headless and checks the audio capture: make hello-xa-gate FRONTEND=/path/to/frontend
 hello-xa-gate: hello-xa-disc
@@ -90,7 +90,7 @@ hello-xa-resume-disc:
 		"$(XA_RESUME_DIR)/song0_pad.wav" "$(XA_RESUME_DIR)/song1_high.wav" "$(XA_RESUME_DIR)/song2_blips.wav" "$(XA_RESUME_DIR)/song3_whistle.wav" \
 		--manifest "$(XA_RESUME_DIR)/songs.json"
 	$(MAKE) example EXAMPLE=hello-xa-resume
-	cargo run --locked --release -p mkisopsx -- --exe "$(BUILD)/$(TARGET)/release/hello-xa-resume.exe" \
+	cargo run --locked --release -p mkisopsx -- --diag --exe "$(BUILD)/$(TARGET)/release/hello-xa-resume.exe" \
 		--out "$(BUILD)/$(TARGET)/release/hello-xa-resume.bin" --volume PSOXIDESDK --xa-file "$(XA_RESUME_DIR)/SONGS.XA"
 # Runs hello-xa-resume headless and checks it: make hello-xa-resume-gate FRONTEND=/path/to/frontend
 hello-xa-resume-gate: hello-xa-resume-disc
@@ -103,7 +103,7 @@ hello-xa-resume-gate: hello-xa-resume-disc
 CDSTREAM_SECTORS ?= 960
 hello-cdstream-disc:
 	$(MAKE) example EXAMPLE=hello-cdstream
-	cargo run --locked --release -p mkisopsx -- --exe "$(BUILD)/$(TARGET)/release/hello-cdstream.exe" \
+	cargo run --locked --release -p mkisopsx -- --diag --exe "$(BUILD)/$(TARGET)/release/hello-cdstream.exe" \
 		--out "$(BUILD)/$(TARGET)/release/hello-cdstream.bin" --volume PSOXIDESDK --cdtest-sectors $(CDSTREAM_SECTORS)
 # Runs hello-cdstream headless and checks its verdict: make hello-cdstream-gate FRONTEND=/path/to/frontend
 hello-cdstream-gate: hello-cdstream-disc
@@ -113,7 +113,7 @@ hello-cdstream-gate: hello-cdstream-disc
 # from the CD interrupt, and checks every byte.
 hello-cddrain-disc:
 	$(MAKE) example EXAMPLE=hello-cddrain
-	cargo run --locked --release -p mkisopsx -- --exe "$(BUILD)/$(TARGET)/release/hello-cddrain.exe" \
+	cargo run --locked --release -p mkisopsx -- --diag --exe "$(BUILD)/$(TARGET)/release/hello-cddrain.exe" \
 		--out "$(BUILD)/$(TARGET)/release/hello-cddrain.bin" --volume PSOXIDESDK --cdtest-sectors $(CDSTREAM_SECTORS)
 # Runs hello-cddrain headless and checks its verdict: make hello-cddrain-gate FRONTEND=/path/to/frontend
 hello-cddrain-gate: hello-cddrain-disc
@@ -123,12 +123,12 @@ hello-cddrain-gate: hello-cddrain-disc
 # refused during a seek) against psx_io::cd::reader::SectorReader::stop_proved on the emulator's model of it.
 hello-cdpause-disc:
 	$(MAKE) example EXAMPLE=hello-cdpause
-	cargo run --locked --release -p mkisopsx -- --exe "$(BUILD)/$(TARGET)/release/hello-cdpause.exe" \
+	cargo run --locked --release -p mkisopsx -- --diag --exe "$(BUILD)/$(TARGET)/release/hello-cdpause.exe" \
 		--out "$(BUILD)/$(TARGET)/release/hello-cdpause.bin" --volume PSOXIDESDK --cdtest-sectors 960
 # hello-flipcap checks the presentation cap (no flip within 2 VBlanks of the last, an explicit opt-out for 60 fps).
 hello-flipcap-disc:
 	$(MAKE) example EXAMPLE=hello-flipcap
-	cargo run --locked --release -p mkisopsx -- --exe "$(BUILD)/$(TARGET)/release/hello-flipcap.exe" --out "$(BUILD)/$(TARGET)/release/hello-flipcap.bin" --volume PSOXIDESDK
+	cargo run --locked --release -p mkisopsx -- --diag --exe "$(BUILD)/$(TARGET)/release/hello-flipcap.exe" --out "$(BUILD)/$(TARGET)/release/hello-flipcap.bin" --volume PSOXIDESDK
 hello-flipcap-gate: hello-flipcap-disc
 	@test -n "$(FRONTEND)" || (echo "Set FRONTEND to the PSoXide-emulator executable"; exit 1)
 	sh tools/flipcap_gate.sh "$(FRONTEND)" "$(BUILD)/$(TARGET)/release/hello-flipcap.cue"

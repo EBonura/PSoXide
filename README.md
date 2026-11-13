@@ -81,6 +81,11 @@ Examples that use CD audio or WORLD.PAK need their own pack inputs; the generic
 
 - `tools/check-register-literals.sh` (`make lint`): fails when a hardware-window
   address literal appears anywhere outside `crates/psx-hw`.
+- `sdk/profile.toml` and the architecture gate (`sdk/docs/GATE.md`): a program that enables an
+  unlisted feature of an SDK crate, writes a register address, installs an exception-vector
+  handler, runs COP0 assembly or carries a private copy of an SDK crate does not build
+  (`psx-gate`, run by `psoxide-pgo apply`) and does not become a disc (`mkisopsx` checks the
+  receipt `apply` wrote). Today's exceptions are listed in the profile by name and can only shrink.
 
 The root host workspace and `sdk/` device workspace intentionally remain
 separate. Existing `sdk/crates/*` and `sdk/psoxide.ld` paths are retained.

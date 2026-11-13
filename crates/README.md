@@ -12,6 +12,7 @@ runtime; they are the lowest common layer the rest of the repo builds on.
 | [`psx-seq-cook`](psx-seq-cook) | Host-side cook for `psx-seq` music: imports N64 libultra sequence and soundfont data from a ROM the player owns, converts samples to SPU-ADPCM, writes the song and bank containers, and renders a cooked song to WAV. |
 | [`psx-disasm`](psx-disasm) | R3000 (MIPS I) decoder that prints GNU objdump's `mips:3000` syntax, so the post-link hazard checks (`tools/psoxide-hazard`) read an image without objdump. |
 | [`psx-hw`](psx-hw) | PlayStation 1 hardware model: register addresses, bitfield layouts, and command packet formats. Shared by emulator and SDK. |
+| [`psx-gate`](psx-gate) | The architecture gate's shared parts: the `sdk/profile.toml` reader, the feature check every SDK crate's build script runs, and the receipt check the disc builders run (sdk/docs/GATE.md). |
 | [`psx-iso`](psx-iso) | BIN/CUE and ISO9660 parsing for PS1 disc images. Shared by emulator, SDK, and disc-builder. |
 | [`psx-library`](psx-library) | Host-side install of a built disc into the games library: `Game Name (repo)` naming, atomic replace with digest check, safe removal of stale flat-named copies and a provenance record. Used by every game's build tool. |
 | [`psx-trace`](psx-trace) | Instruction trace record format emitted by the emulator core (originally shared with the retired PCSX-Redux parity oracle). |
