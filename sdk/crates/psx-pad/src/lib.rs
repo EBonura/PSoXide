@@ -13,12 +13,18 @@
 //!
 //! ```text
 //! let mut port = peripherals.controller_port;
-//! let mut reader = psx_pad::PadReader::port1();
-//! let pad = reader.poll_on(&mut port);
-//! if pad.buttons.is_held(psx_pad::button::START) {
+//! let mut pads = psx_pad::Controllers::new();
+//! let one = *pads.poll(&mut port, psx_pad::Port::One);
+//! if one.buttons.is_held(psx_pad::button::START) {
 //!     // …
 //! }
 //! ```
+//!
+//! [`Controllers`] is the one way a game reads its pads: one call per port, the
+//! same analog handshake on first contact, the motors mapped by the first `set_rumble`, an empty port probed once in 60
+//! polls, the last clean state kept across a garbled packet. The older entry points
+//! below it ([`poll_on`], [`PadReader`], [`require_analog_on`], ...) are what it is built
+//! from.
 //!
 //! The protocol spec, reproduced from nocash PSX-SPX:
 //!
@@ -58,7 +64,9 @@ use psx_io::periph::ControllerPort;
 
 pub use psx_io::controller_port::Port;
 
+mod controllers;
 pub mod tracker;
+pub use controllers::Controllers;
 pub use tracker::PadTracker;
 
 // Under test the driver talks to a controller model, not the registers.
@@ -416,7 +424,11 @@ impl Default for AnalogSticks {
 }
 
 /// Result of one controller poll.
+///
+/// Word-aligned so a copy is word loads and stores, not the unaligned pairs a halfword-aligned
+/// 16-byte struct costs on a MIPS-I (it is copied out of every poll and into every slot).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(align(4))]
 pub struct PadState {
     /// Active-high button state.
     pub buttons: ButtonState,
@@ -769,14 +781,14 @@ const ADDRESS_ACK_SPINS: u32 = 1024;
 /// stays borrowed for the length of the poll.
 #[doc(alias = "PadRead")]
 pub fn poll_on<T: Transport>(port: &mut T, socket: Port) -> PadState {
-    poll_state(port, socket, false, Rumble::OFF)
+    poll_state(port, socket, false, Rumble::OFF, None)
 }
 
 /// [`poll_on`] with the motors asked for `rumble`. A pad that is not a
 /// DualShock reporting analog mode is sent zeros; the request takes effect on
 /// one that has been through [`enable_rumble_on`].
 pub fn poll_rumble_on<T: Transport>(port: &mut T, socket: Port, rumble: Rumble) -> PadState {
-    poll_state(port, socket, false, rumble)
+    poll_state(port, socket, false, rumble, None)
 }
 
 /// Poll port 1 once.
@@ -929,7 +941,7 @@ impl PadReader {
         // A pad that was there a moment ago has its absence confirmed before
         // the reader believes it; a socket that was already empty is told so
         // at once.
-        let polled = poll_state(port, self.socket, self.last.is_connected(), self.rumble);
+        let polled = poll_state(port, self.socket, self.last.is_connected(), self.rumble, None);
         self.accept(polled)
     }
 
@@ -998,17 +1010,21 @@ impl PadReader {
 /// for a caller that saw a pad on this socket last time: one such reply could
 /// be a glitch on a pad that is still there, so it takes four before it says
 /// the pad is gone.
+///
+/// `opened` is a select left open on `socket` by [`Transport::open`]: the
+/// first try starts from it, a retry selects again.
 fn poll_state<T: Transport>(
     bus: &mut T,
     socket: Port,
     confirm_absent: bool,
     rumble: Rumble,
+    mut opened: Option<u16>,
 ) -> PadState {
     let mut last = PadState::NONE;
     let mut all_absent = true;
     let mut tries = 0;
     while tries < 4 {
-        let s = poll_once(bus, socket, rumble).to_state();
+        let s = poll_once(bus, socket, rumble, opened.take()).to_state();
         if matches!(
             s.mode,
             PadMode::Digital | PadMode::Analog | PadMode::Config | PadMode::Negcon
@@ -1131,11 +1147,16 @@ fn ex<T: Transport>(
 /// controller is ready for the next one. A port that shows the live level needs
 /// no IRQ enable and no CTRL rewrite; one that only latches (PCSX-ReARMed) gets
 /// one CTRL write per acknowledged byte.
-fn poll_once<T: Transport>(bus: &mut T, socket: Port, rumble: Rumble) -> RawPoll {
+fn poll_once<T: Transport>(
+    bus: &mut T,
+    socket: Port,
+    rumble: Rumble,
+    opened: Option<u16>,
+) -> RawPoll {
     // A previous aborted transaction may have left ACK asserted: `begin` waits
     // for it to release, so an old pulse never counts as the new address
     // byte's ACK.
-    let result = if bus.begin(socket, Timing::PAD) {
+    let result = if pad_begin(bus, socket, opened) {
         poll_selected(bus, socket, rumble)
     } else {
         None
@@ -1149,6 +1170,18 @@ fn poll_once<T: Transport>(bus: &mut T, socket: Port, rumble: Rumble) -> RawPoll
         mode: PadMode::Unknown,
         ..RawPoll::NONE
     })
+}
+
+/// `bus.delay(spins)`, once for every caller in the driver rather than a copy of the loop in each.
+#[inline(always)]
+fn pad_delay<T: Transport>(bus: &mut T, spins: u32) {
+    bus.delay(spins);
+}
+
+/// [`Transport::begin_pad`], one copy for every caller in the driver.
+#[inline(never)]
+fn pad_begin<T: Transport>(bus: &mut T, socket: Port, opened: Option<u16>) -> bool {
+    bus.begin_pad(socket, opened)
 }
 
 /// One byte of a poll. Kept out of line: nine inlined copies of the exchange and its result
@@ -1225,14 +1258,27 @@ fn poll_selected<T: Transport>(bus: &mut T, socket: Port, rumble: Rumble) -> Opt
     } else {
         (0, 0)
     };
-    let buttons_low = pad_byte(bus, socket, small, false)?;
-    let buttons_high = pad_byte(bus, socket, large, !analog)?;
+    // Two button bytes, then four stick bytes for an analog pad; one loop, so the
+    // byte exchange and its failure exit are emitted once.
+    let count = if analog { 6 } else { 2 };
+    let mut data = [0u8; 6];
+    let mut i = 0;
+    while i < count {
+        let tx = match i {
+            0 => small,
+            1 => large,
+            _ => 0,
+        };
+        data[i] = pad_byte(bus, socket, tx, i + 1 == count)?;
+        i += 1;
+    }
+    let [buttons_low, buttons_high, right_x, right_y, left_x, left_y] = data;
     let sticks = if analog {
         AnalogSticks {
-            right_x: pad_byte(bus, socket, 0x00, false)?,
-            right_y: pad_byte(bus, socket, 0x00, false)?,
-            left_x: pad_byte(bus, socket, 0x00, false)?,
-            left_y: pad_byte(bus, socket, 0x00, true)?,
+            right_x,
+            right_y,
+            left_x,
+            left_y,
         }
     } else {
         AnalogSticks::CENTERED
@@ -1388,7 +1434,7 @@ fn request_rumble<T: Transport>(bus: &mut T, socket: Port, gap: u32) -> (PadStat
         [0x43, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
     );
     bus.delay(gap);
-    let mut state = poll_state(bus, socket, true, Rumble::OFF);
+    let mut state = poll_state(bus, socket, true, Rumble::OFF, None);
     let mut retries = 0;
     while state.mode == PadMode::Config && retries < CONFIG_EXIT_RETRIES {
         transaction(
@@ -1397,7 +1443,7 @@ fn request_rumble<T: Transport>(bus: &mut T, socket: Port, gap: u32) -> (PadStat
             [0x43, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
         );
         bus.delay(gap);
-        state = poll_state(bus, socket, true, Rumble::OFF);
+        state = poll_state(bus, socket, true, Rumble::OFF, None);
         retries += 1;
     }
     (state, mapped)
@@ -1434,7 +1480,7 @@ fn request_analog<T: Transport>(bus: &mut T, socket: Port, gap: u32) -> PadState
         [0x43, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
     );
     bus.delay(gap);
-    let mut state = poll_state(bus, socket, true, Rumble::OFF);
+    let mut state = poll_state(bus, socket, true, Rumble::OFF, None);
     let mut retries = 0;
     while state.mode == PadMode::Config && retries < CONFIG_EXIT_RETRIES {
         // The exit did not take: leave the pad in a playable mode rather
@@ -1445,7 +1491,7 @@ fn request_analog<T: Transport>(bus: &mut T, socket: Port, gap: u32) -> PadState
             [0x43, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
         );
         bus.delay(gap);
-        state = poll_state(bus, socket, true, Rumble::OFF);
+        state = poll_state(bus, socket, true, Rumble::OFF, None);
         retries += 1;
     }
     state

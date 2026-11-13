@@ -6,11 +6,10 @@
 //! ```text
 //!   Gpu::new + draw_area + draw_offset
 //!   DoubleBuffer::new
-//!   require_analog_on (port 1)
 //!   scene.init(&mut ctx)
 //!   loop:
 //!     ctx.pad_prev ← ctx.pad           (one-frame input history)
-//!     ctx.pad      ← PadReader::poll_on() (port 1)
+//!     ctx.pad      ← Controllers::poll (port 1; analog handshake on first contact)
 //!     ask FrameScheduler for the next task:
 //!       fixed update  -> poll pad + scene.update(&mut ctx)
 //!       visual render -> clear + scene.render(&mut ctx) + present
@@ -43,8 +42,7 @@ use psx_level::{
     GameFlow, LevelGameplaySfxCueRecord, LevelOptionDef, LevelUiNodeRecord, LevelUiPaintRecord,
     LevelUiScene, LevelUiSfxCueRecord, LevelUiSfxSampleRecord,
 };
-use psx_pad::enable_analog_on;
-use psx_pad::{require_analog_on, PadReader, Port};
+use psx_pad::{PadState, Port};
 
 use crate::game_app::{GameApp, GAMEPLAY_ONLY};
 use crate::present_queue::{PresentQueue, ENABLED as PRESENT_QUEUE_ENABLED};
@@ -537,33 +535,30 @@ impl App {
         boot_visual_checkpoint_raw(&mut gpu, &mut fb, (160, 0, 0), "01 FRAMEBUFFER READY", 1);
         boot_trace("psx-engine: framebuffer ok");
 
-        // Ask a DualShock-compatible controller to enter and lock analog
-        // mode. An original digital controller answers "digital only" and
-        // the same button-input path serves it; a pad that is not plugged in
-        // yet is negotiated again when it connects (see `run_scheduled`).
-        let mut controller_port = peripherals.controller_port;
-        let _ = require_analog_on(&mut controller_port, Port::One);
-
-        // Seed pad + pad_prev from a real poll so a button already held at
-        // boot does NOT register as `just_pressed` on the first frame. This
-        // matters when booting into a UI scene with captured input (editor
-        // embedded Play): the CROSS/START that may be down as Play starts must
-        // not instantly activate a menu button and skip into gameplay. With
-        // both seeded to the current state, an input must actually transition
-        // (release then press) to count as a press.
-        let mut pad_reader = PadReader::port1();
-        let initial_pad = pad_reader.poll_on(&mut controller_port);
         let mut ctx = Ctx::new(
             SimTick::ZERO,
             VisualFrame::ZERO,
             config.video_hz(),
-            initial_pad,
-            initial_pad,
+            PadState::NONE,
+            PadState::NONE,
             fb,
         );
         ctx.set_gpu_dma(gpu.release());
         // The synchronous driver keeps the port.
-        ctx.set_controller_port(controller_port);
+        ctx.set_controller_port(peripherals.controller_port);
+        // The first poll puts a DualShock-compatible controller in analog mode
+        // and locks it there (an original digital pad answers "digital only"
+        // and the same button-input path serves it; a pad plugged in later
+        // gets the same at its first answer). It seeds pad and pad_prev, so a
+        // button already held at boot does NOT register as `just_pressed` on
+        // the first frame. This matters when booting into a UI scene with
+        // captured input (editor embedded Play): the CROSS/START that may be
+        // down as Play starts must not instantly activate a menu button and
+        // skip into gameplay. With both seeded to the current state, an input
+        // must actually transition (release then press) to count as a press.
+        let initial_pad = ctx.poll_pad(Port::One);
+        ctx.pad = initial_pad;
+        ctx.pad_prev = initial_pad;
         boot_visual_checkpoint(&mut ctx, (200, 96, 0), "02 CTX READY");
 
         // The wrapper is the Scene the scheduled loop drives: its
@@ -596,7 +591,7 @@ impl App {
 
         let visual_interval = config.visual_pacing.interval_vblanks();
         boot_trace("psx-engine: loop");
-        Self::run_scheduled(config, &mut app, clock, ctx, pad_reader, visual_interval);
+        Self::run_scheduled(config, &mut app, clock, ctx, visual_interval);
     }
 
     fn run_scheduled<S: Scene>(
@@ -604,7 +599,6 @@ impl App {
         scene: &mut S,
         mut clock: EngineClock,
         mut ctx: Ctx,
-        mut pad_reader: PadReader,
         visual_interval: u16,
     ) -> ! {
         let mut scheduler = FrameScheduler::new(config.scheduler, visual_interval);
@@ -612,7 +606,6 @@ impl App {
         let mut traced_update = false;
         let mut traced_render = false;
         let mut traced_present = false;
-        let mut pad_was_connected = ctx.pad.is_connected();
         // A built visual frame whose flip has not happened yet. The scene's
         // ordering-table DMA may still be walking; fixed updates run in the
         // gap so the GPU draw overlaps CPU work. Holds the frame's missed
@@ -701,17 +694,7 @@ impl App {
                         boot_trace("psx-engine: pad poll begin");
                         boot_visual_checkpoint(&mut ctx, (220, 100, 0), "22 PAD POLL BEGIN");
                     }
-                    ctx.pad = pad_reader.poll_on(ctx.controller_port());
-                    if ctx.pad.is_connected() && !pad_was_connected {
-                            // A newly attached DualShock starts in digital mode.
-                            // Negotiate again on the connection edge so hot-plug
-                            // behaves the same as a controller present at boot.
-                            // The shorter-spaced request: this runs in the frame
-                            // loop, where `require_analog_on` would stall.
-                            let _ = enable_analog_on(ctx.controller_port(), Port::One);
-                            ctx.pad = pad_reader.poll_on(ctx.controller_port());
-                    }
-                    pad_was_connected = ctx.pad.is_connected();
+                    ctx.pad = ctx.poll_pad(Port::One);
                     if !traced_update {
                         boot_trace("psx-engine: pad poll ok");
                         boot_visual_checkpoint(&mut ctx, (220, 220, 0), "23 PAD POLL OK");

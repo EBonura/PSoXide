@@ -19,6 +19,28 @@ every program works on every Sony BIOS and on OpenBIOS).
   over eight placements of its handler in the instruction cache, 21,832 to 22,012 against 21,851 to 22,180 before.
   `hello-gteirq` checks the dispatcher's order against its Rust reference and runs its RTPS loop under root
   counter 2 interrupts served by it.
+- `psx_pad::Controllers`: one way for every game to read its pads, and `psx-engine`'s `App` and `Ctx::refresh_second_pad`
+  read through it. `poll(&mut port, Port::One)` reads one port (a two-player game makes a second call for port 2, so a
+  game that never asks for it pays nothing); the first time a port answers it runs one handshake (analog requested and
+  locked, a video frame between packets), a port that did not answer is probed once in 60 polls instead of every call,
+  and a garbled packet returns the last clean state. `set_rumble(&mut port, port, rumble)` maps the motors the first
+  time it is called for a pad and then rides every poll; `analog(port)` says whether a pad is analog, digital or absent.
+  `App` no longer calls `require_analog_on` at boot or `enable_analog_on` on a hot-plug: the first poll of a pad does
+  both, with the one-frame spacing of `require_analog_on` (a pad plugged in mid-game now holds the loop about four
+  frames, as at boot). `PadState` is word-aligned.
+- The pad's setup time can pass while the game works (`sdk/docs/PAD.md`, "The select is left open"):
+  `psx_io::controller_port::Transport` gains `clock()` (root counter 0, the system clock psx-rt leaves running),
+  `open(port)` and `begin_pad(port, opened)`. A `Controllers` poll ends by asserting `/CS` on the port it expects
+  next, and the next poll clocks its bytes as soon as `PAD_SETUP_CYCLES` (7,168 cycles, what the 1,024 status reads
+  took on a console) have passed since then, measured on the clock, so a poll that comes at once still waits all of
+  it. A select that a card transfer or anything else released is made again with the old delay. Anyone implementing
+  `Transport` outside the SDK adds `clock()`. Behind `SELECT_EARLY` in `psx-pad`, off until a console passes
+  hardware-tests v2.13: until then every poll selects and waits as before.
+  With it on, on the PSoXide emulator: one poll of an analog pad 23,054 cycles at `efdd3083c`, 16,129 with
+  `Controllers` (port 2 empty and asked for every loop: 43,218 and about 16,600). NitroXide's attract bench 38.91
+  flips a second before the pad engine was deleted, 38.73 on SDK main, 39.08 with this; its image has 100 bytes less
+  text than on SDK main. VoXide, which still reads through `poll_port1`, has 548 bytes less text than at `efdd3083c`
+  and puts the same bytes on the wire.
 
 - The synchronous pad poll (`psx_pad::poll_on`) accepts an `/ACK` as the live level or as the latched interrupt bit, so
   it works on PCSX-ReARMed, which latches `STAT` bit 9 and never shows bit 7. A port that shows the level takes the same

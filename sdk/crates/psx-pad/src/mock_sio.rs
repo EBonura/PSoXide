@@ -462,4 +462,12 @@ impl psx_io::controller_port::Transport for MockBus {
     fn control(&mut self) -> u16 {
         with(|m| m.ctrl)
     }
+    fn clock(&mut self) -> u16 {
+        // Root counter 0 moves 64 model ticks a reading, so the setup wait is
+        // about a hundred readings rather than seven thousand.
+        with(|m| {
+            m.now += 64;
+            m.now as u16
+        })
+    }
 }

@@ -17,7 +17,7 @@ use psx_gpu::display::DoubleBuffer;
 use psx_gpu::Gpu;
 use psx_io::periph::{ControllerPort, GpuDma};
 use psx_level::{AssetId, LevelOptionDef, LevelUiValueBinding, LevelWorldLayer};
-use psx_pad::{button, poll_on, ActionInput, ActionMap, PadState, Port};
+use psx_pad::{button, ActionInput, ActionMap, Controllers, PadState, Port};
 
 use crate::frames::{SimTick, VideoHz, VisualFrame};
 use crate::ui::UiTextureSlot;
@@ -129,6 +129,8 @@ pub struct Ctx {
     runtime_requests: RuntimeRequests,
     gpu_dma: Option<GpuDma>,
     controller_port: Option<ControllerPort>,
+    /// The one pad reader, for both ports.
+    pads: Controllers,
     present_queue_hook: Option<*const u32>,
 }
 
@@ -153,6 +155,7 @@ impl Ctx {
             runtime_requests: RuntimeRequests::default(),
             gpu_dma: None,
             controller_port: None,
+            pads: Controllers::new(),
             present_queue_hook: None,
         }
     }
@@ -180,6 +183,16 @@ impl Ctx {
         self.controller_port
             .as_mut()
             .expect("the app runner holds the controller-port token")
+    }
+
+    /// Poll `port` through [`Controllers`], the one pad reader: the app runner does it
+    /// for port 1 every fixed update, [`Ctx::refresh_second_pad`] for port 2.
+    pub(crate) fn poll_pad(&mut self, port: Port) -> PadState {
+        let bus = self
+            .controller_port
+            .as_mut()
+            .expect("the app runner holds the controller-port token");
+        *self.pads.poll(bus, port)
     }
 
     /// The GPU DMA token, for [`OtFrame::submit`](crate::OtFrame::submit)
@@ -283,10 +296,13 @@ impl Ctx {
     /// Port 2 is deliberately opt-in: a single-player game should not pay for
     /// a second SIO transaction every simulation tick. Multiplayer games call
     /// this only in the screens and modes that can use a second controller.
+    /// It reads through the same [`Controllers`] as port 1: an empty port is
+    /// probed once in 60 calls, and a pad that answers for the first time is
+    /// put in analog mode, which blocks for a few frames.
     #[inline]
     pub fn refresh_second_pad(&mut self) -> PadState {
         self.pad2_prev = self.pad2;
-        self.pad2 = poll_on(self.controller_port(), Port::Two);
+        self.pad2 = self.poll_pad(Port::Two);
         self.pad2
     }
 

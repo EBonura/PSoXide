@@ -74,6 +74,17 @@ impl Timing {
     };
 }
 
+/// The shortest time a pad is given between `/CS` asserting and the first
+/// byte, in system-clock cycles (33.8688 MHz): what the pad driver's 1,024
+/// setup spins took on a console (6.93 cycles a spin, run of 11-03, so about
+/// 7,100), rounded up. The original SCPH-1200 needs between 384 and 768 spins;
+/// the 11-03 console answered at every delay from 64 to 24,576 cycles.
+///
+/// The pad driver measures it on root counter 0 ([`Transport::clock`]), so the
+/// wait can start before the transaction does: [`Transport::open`] asserts
+/// `/CS` and [`Transport::begin_pad`] waits only for what is left.
+pub const PAD_SETUP_CYCLES: u16 = 7_168;
+
 /// The two forms a device's `/ACK` takes in `STAT`: the live level, and the
 /// latched interrupt bit.
 const ACK_SIGNALS: u32 = sio0::stat::DSR_LEVEL | sio0::stat::IRQ;
@@ -119,6 +130,53 @@ pub trait Transport {
     fn set_control(&mut self, value: u16);
     /// Read the control register back.
     fn control(&mut self) -> u16;
+    /// System-clock cycles, modulo 2^16: root counter 0, which `psx-rt` sets
+    /// to count the system clock at entry and nothing in the SDK reconfigures.
+    /// A difference of two readings never exceeds the time that really passed
+    /// (a wrap only makes it smaller), so a wait on it is never too short.
+    fn clock(&mut self) -> u16;
+
+    /// Assert `/CS` on `port` for a pad transaction that [`begin_pad`]
+    /// starts later, and return the [`clock`] it was asserted at. The pad's
+    /// setup time then passes while the program does something else.
+    ///
+    /// [`begin_pad`]: Self::begin_pad
+    /// [`clock`]: Self::clock
+    #[inline(never)]
+    fn open(&mut self, port: Port) -> u16 {
+        self.select(port);
+        self.clock()
+    }
+
+    /// Start a pad transaction on `port`: [`begin`](Self::begin) with the
+    /// pad's timing, or, on a select [`open`](Self::open) left, the rest of
+    /// [`PAD_SETUP_CYCLES`] and then the same drain and `/ACK` release.
+    ///
+    /// `opened` is what `open` returned for this port. It is used only if
+    /// `CTRL` still reads back as that select, so a memory-card transfer or
+    /// anything else that released or moved the select in between costs a
+    /// fresh select and the whole setup delay, as does `None`. `false` means
+    /// the line never released; call [`finish`](Self::finish) either way.
+    fn begin_pad(&mut self, port: Port, opened: Option<u16>) -> bool {
+        match opened {
+            Some(at) if self.control() == sio0::selected_ctrl(port.is_two(), false) => {
+                // Bounded as well, so a counter someone stopped cannot hang
+                // the poll: twice the pad's setup spins of clock readings is
+                // still at least the setup time without the clock.
+                let mut spins = 2 * Timing::PAD.setup_spins;
+                while self.clock().wrapping_sub(at) < PAD_SETUP_CYCLES && spins != 0 {
+                    spins -= 1;
+                    core::hint::spin_loop();
+                }
+            }
+            _ => {
+                self.select(port);
+                self.delay(Timing::PAD.setup_spins);
+            }
+        }
+        self.drain_receive();
+        self.wait_status_clear(sio0::stat::DSR_LEVEL, Timing::PAD.ack_spins)
+    }
 
     /// Configure the port for 250 kHz, 8N1 and assert `/CS` on `port`.
     ///
@@ -412,6 +470,11 @@ impl Transport for ControllerPort {
         // has no side effects.
         unsafe { read_u16(sio0::CTRL) }
     }
+
+    #[inline(always)]
+    fn clock(&mut self) -> u16 {
+        crate::timers::counter(crate::timers::Timer::Timer0)
+    }
 }
 
 #[cfg(test)]
@@ -430,6 +493,10 @@ mod tests {
         received: Vec<u8>,
         sent: Vec<u8>,
         control: Vec<u16>,
+        /// Root counter 0, and how far it moves on each read.
+        time: u16,
+        tick: u16,
+        clocks: usize,
     }
 
     impl Script {
@@ -466,6 +533,12 @@ mod tests {
         }
         fn control(&mut self) -> u16 {
             self.control.last().copied().unwrap_or(0)
+        }
+        fn clock(&mut self) -> u16 {
+            self.clocks += 1;
+            let now = self.time;
+            self.time = self.time.wrapping_add(self.tick.max(1));
+            now
         }
     }
 
@@ -712,5 +785,78 @@ mod tests {
             Timing::PAD
         );
         const { assert!(Timing::CARD.ack_spins > Timing::PAD.ack_spins) };
+    }
+
+    #[test]
+    fn a_select_opened_earlier_is_kept_and_only_the_rest_of_the_setup_is_waited() {
+        let mut bus = Script {
+            tick: 1_000,
+            ..Script::default()
+        };
+        let opened = bus.open(Port::Two);
+        let writes = bus.control.len();
+        // The program worked for 5,000 cycles in between.
+        bus.time = bus.time.wrapping_add(4_000);
+        let reads = bus.clocks;
+        assert!(bus.begin_pad(Port::Two, Some(opened)));
+        assert_eq!(bus.control.len(), writes, "no second select");
+        // 5,000 had passed; 7,168 needs three more readings of 1,000.
+        assert_eq!(bus.clocks - reads, 4);
+        assert!(bus.time.wrapping_sub(opened) >= PAD_SETUP_CYCLES);
+    }
+
+    #[test]
+    fn a_long_gap_costs_no_wait_and_a_wrap_never_shortens_it() {
+        // Opened just before the counter wraps, polled after it: the modular
+        // difference is the real one.
+        let mut bus = Script {
+            time: 0xFF00,
+            tick: 16,
+            ..Script::default()
+        };
+        let opened = bus.open(Port::One);
+        bus.time = opened.wrapping_add(30_000);
+        let reads = bus.clocks;
+        assert!(bus.begin_pad(Port::One, Some(opened)));
+        assert_eq!(bus.clocks - reads, 1, "one reading, no wait");
+
+        // A gap of a whole wrap plus a little reads as the little: the wait is
+        // longer than needed, never shorter.
+        let mut bus = Script {
+            tick: 64,
+            ..Script::default()
+        };
+        let opened = bus.open(Port::One);
+        bus.time = opened.wrapping_add(100);
+        assert!(bus.begin_pad(Port::One, Some(opened)));
+        assert!(bus.time.wrapping_sub(opened) >= PAD_SETUP_CYCLES);
+    }
+
+    #[test]
+    fn a_select_released_or_moved_in_between_is_selected_again_with_the_whole_wait() {
+        for (moved_to, port) in [(0u16, Port::One), (sio0::selected_ctrl(true, false), Port::One)] {
+            let mut bus = Script {
+                tick: 64,
+                ..Script::default()
+            };
+            let opened = bus.open(port);
+            // A card transfer ended with a deselect, or another port was taken.
+            bus.set_control(moved_to);
+            bus.time = opened.wrapping_add(50_000);
+            assert!(bus.begin_pad(port, Some(opened)));
+            let fresh = *bus.control.last().unwrap();
+            assert_eq!(fresh, sio0::selected_ctrl(false, false));
+            assert!(bus.reads >= 1_024, "the whole setup delay again");
+        }
+        // No earlier select at all: the same.
+        let mut bus = Script {
+            tick: 64,
+            ..Script::default()
+        };
+        assert!(bus.begin_pad(Port::One, None));
+        assert_eq!(bus.control, [sio0::ctrl::ACK, sio0::selected_ctrl(false, false)]);
+        // The sequence before select-early: the spin delay, no clock.
+        assert!(bus.reads >= 1_024);
+        assert_eq!(bus.clocks, 0);
     }
 }

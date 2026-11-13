@@ -78,7 +78,7 @@ sdk-guest clippy::must_use_candidate 1047
 sdk-guest clippy::unwrap_used 5
 sdk-guest clippy::exhaustive_enums 67
 sdk-guest clippy::exhaustive_structs 144
-sdk-guest clippy::missing_errors_doc 76
+sdk-guest clippy::missing_errors_doc 75
 sdk-guest clippy::missing_panics_doc 33
 sdk-guest clippy::wildcard_imports 9
 sdk-guest clippy::string_add 0
