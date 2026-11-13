@@ -190,6 +190,14 @@ every program works on every Sony BIOS and on OpenBIOS).
   over eight placements of its handler in the instruction cache, 21,832 to 22,012 against 21,851 to 22,180 before.
   `hello-gteirq` checks the dispatcher's order against its Rust reference and runs its RTPS loop under root
   counter 2 interrupts served by it.
+- The select left open is on for every game that reads through `Controllers`: a console passed hardware-tests v2.13
+  (`SIO0 SELECT EARLY`, records `0x6F0` to `0x6F4`). On 2026-11-14, console SCPH-9002, two runs with two DualShocks (an SCPH-1200 and an
+  SCPH-110), the five cases read `0x88`, `0x888`, `0x888`, `0x888`, `0x8088` on both runs (every poll clean, the select kept on the three
+  cases that expect it, a card frame read in the last). Median cycles of a poll, run 1 / run 2: the sequence before 22,654 / 23,201; the
+  select one frame early 15,819 / 15,961; half a second early 15,678 / 15,845; no gap 22,597 / 23,142 (within 60 cycles of the sequence
+  before, so the root counter that times the setup runs at the clock rate); with a card frame read between 22,680 / 22,964. The
+  early select saves 6,800 to 7,400 cycles a poll on the console. `SELECT_EARLY` and the sequence it kept are gone. The poll costs
+  measured with it off, in the handshake retry entry above, are the cost before this change.
 - `psx_pad::Controllers`: one way for every game to read its pads, and `psx-engine`'s `App` and `Ctx::refresh_second_pad`
   read through it. `poll(&mut port, Port::One)` reads one port (a two-player game makes a second call for port 2, so a
   game that never asks for it pays nothing); the first time a port answers it runs one handshake (analog requested and
@@ -205,9 +213,8 @@ every program works on every Sony BIOS and on OpenBIOS).
   next, and the next poll clocks its bytes as soon as `PAD_SETUP_CYCLES` (7,168 cycles, what the 1,024 status reads
   took on a console) have passed since then, measured on the clock, so a poll that comes at once still waits all of
   it. A select that a card transfer or anything else released is made again with the old delay. Anyone implementing
-  `Transport` outside the SDK adds `clock()`. Behind `SELECT_EARLY` in `psx-pad`, off until a console passes
-  hardware-tests v2.13: until then every poll selects and waits as before.
-  With it on, on the PSoXide emulator: one poll of an analog pad 23,054 cycles at `efdd3083c`, 16,129 with
+  `Transport` outside the SDK adds `clock()`.
+  On the PSoXide emulator: one poll of an analog pad 23,054 cycles at `efdd3083c`, 16,129 with
   `Controllers` (port 2 empty and asked for every loop: 43,218 and about 16,600). NitroXide's attract bench 38.91
   flips a second before the pad engine was deleted, 38.73 on SDK main, 39.08 with this; its image has 100 bytes less
   text than on SDK main. VoXide, which still reads through `poll_port1`, has 548 bytes less text than at `efdd3083c`

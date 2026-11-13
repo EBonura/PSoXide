@@ -60,7 +60,10 @@ The minimum is guaranteed by construction, not by the game's frame being long:
 
 An interrupt between the two halves does nothing to the port: no handler in the
 SDK touches SIO0. Hardware-tests step `SIO0 SELECT EARLY` (records
-`0x6F0`-`0x6F4`) is the console's verdict on all of this.
+`0x6F0`-`0x6F4`) is the console's verdict on all of this, and a console passed
+it (2026-11-14, SCPH-9002, two runs with two DualShocks: every poll clean, the
+select kept where the case expects it, 6,800 to 7,400 cycles a poll cheaper than
+the sequence before).
 
 An empty socket answers `0xFF` and never pulses `/ACK`; `Controllers` polls a port that has not answered every
 time for its first 128 such answers (after boot, and after a pad leaves), so that a pad slow to come up is read from

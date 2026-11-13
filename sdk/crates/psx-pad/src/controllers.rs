@@ -68,12 +68,6 @@ const EAGER_PROBES: u8 = 128;
 /// because the handshake spaces its packets so.
 pub const RETRIES: u8 = 3;
 
-/// Whether a poll leaves the next one's select open. Off until a console has run
-/// hardware-tests v2.13 (`SIO0 SELECT EARLY`, records `0x6F0`-`0x6F4`) and passed: until then
-/// every poll selects and waits as before, and the open select is exercised only by that step.
-/// After the verdict this constant goes, with the losing sequence.
-const SELECT_EARLY: bool = false;
-
 /// The configuration packets: enter configuration mode, request analog mode and lock it,
 /// map the motors, leave. The analog handshake sends 0, 1, 3; the rumble one 0, 2, 3.
 /// Built in registers, not read from a table in memory.
@@ -320,26 +314,19 @@ impl<const ANALOG: bool> Controllers<ANALOG> {
             slot.skip -= 1;
             return;
         }
-        // The open select and the port polled before this one are the early select's
-        // bookkeeping: a poll with it off does none.
-        let opened = if SELECT_EARLY {
-            match self.open.take() {
-                Some((open, at)) if open == port => Some(at),
-                _ => None,
-            }
-        } else {
-            None
+        // The select the last poll left open, if it is this port's.
+        let opened = match self.open.take() {
+            Some((open, at)) if open == port => Some(at),
+            _ => None,
         };
         slot.step::<T, ANALOG>(bus, port, opened, &mut self.last[i]);
-        if SELECT_EARLY {
-            // Open the port polled before this one if a pad is in it, else this one.
-            let mut next = core::mem::replace(&mut self.previous, port);
-            if !self.slots[usize::from(next.is_two())].present {
-                next = port;
-            }
-            if self.slots[usize::from(next.is_two())].present {
-                self.open = Some((next, bus.open(next)));
-            }
+        // Open the port polled before this one if a pad is in it, else this one.
+        let mut next = core::mem::replace(&mut self.previous, port);
+        if !self.slots[usize::from(next.is_two())].present {
+            next = port;
+        }
+        if self.slots[usize::from(next.is_two())].present {
+            self.open = Some((next, bus.open(next)));
         }
     }
 
@@ -597,13 +584,8 @@ mod tests {
         let before = bus.selects[0];
         let one = *pads.poll(&mut bus, Port::One);
         assert_eq!(one.mode, PadMode::Disconnected);
-        // Four tries; with the select left open, the first is on it.
-        let fresh = if SELECT_EARLY { 3 } else { 4 };
-        assert_eq!(
-            bus.selects[0] - before,
-            fresh,
-            "four tries confirm the absence"
-        );
+        // Four tries: the first on the select the last poll left open, three fresh.
+        assert_eq!(bus.selects[0] - before, 3, "four tries confirm the absence");
         for _ in 0..EAGER_PROBES {
             let before = bus.selects[0];
             pads.poll(&mut bus, Port::One);
@@ -849,9 +831,6 @@ mod tests {
 
     #[test]
     fn a_poll_leaves_its_own_select_open_and_the_next_one_starts_from_it() {
-        if !SELECT_EARLY {
-            return;
-        }
         let mut bus = TwoPorts::new(dualshock(button::CROSS), empty());
         let mut pads = Controllers::new();
         pads.poll(&mut bus, Port::One);
@@ -870,9 +849,6 @@ mod tests {
 
     #[test]
     fn the_setup_time_is_waited_from_the_open_select_however_soon_the_next_poll_comes() {
-        if !SELECT_EARLY {
-            return;
-        }
         let mut bus = TwoPorts::new(dualshock(0), empty());
         let mut pads = Controllers::new();
         pads.poll(&mut bus, Port::One);
@@ -888,9 +864,6 @@ mod tests {
 
     #[test]
     fn a_select_released_in_between_is_made_again() {
-        if !SELECT_EARLY {
-            return;
-        }
         let mut bus = TwoPorts::new(dualshock(button::SQUARE), empty());
         let mut pads = Controllers::new();
         pads.poll(&mut bus, Port::One);
@@ -904,9 +877,6 @@ mod tests {
 
     #[test]
     fn a_two_player_loop_opens_the_other_port() {
-        if !SELECT_EARLY {
-            return;
-        }
         let mut bus = TwoPorts::new(dualshock(button::CROSS), dualshock(button::CIRCLE));
         let mut pads = Controllers::new();
         both(&mut pads, &mut bus);
@@ -925,9 +895,6 @@ mod tests {
 
     #[test]
     fn no_select_is_left_open_on_an_empty_port_and_its_skipped_polls_keep_the_open_one() {
-        if !SELECT_EARLY {
-            return;
-        }
         let mut bus = TwoPorts::new(empty(), empty());
         let mut pads = Controllers::new();
         pads.poll(&mut bus, Port::One);
@@ -937,6 +904,10 @@ mod tests {
         let mut pads = Controllers::new();
         both(&mut pads, &mut bus);
         both(&mut pads, &mut bus);
+        // Port 2 is polled every time for its first answers like an empty socket, then skipped.
+        for _ in 0..=EAGER_PROBES {
+            both(&mut pads, &mut bus);
+        }
         for _ in 0..10 {
             // Port 2 is skipped: port 1 keeps its select from one loop to the next.
             let n = selects(&mut bus, |bus| {
