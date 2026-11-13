@@ -49,6 +49,10 @@ pgo-collect:
 		--launch-arg --embedded-playtest \
 		--out "$(PGO_PROFILE)" -- $(GAME_CARGO)
 
+# Record the source of a committed profile that has none (once; see "Edits move the profile").
+pgo-stamp:
+	$(PGO) stamp --crate game --profile "$(PGO_PROFILE)" -- $(GAME_CARGO)
+
 # Build every variant and gate it.
 pgo-choose:
 	$(PGO) choose --crate game --profile "$(PGO_PROFILE)" \
@@ -144,6 +148,7 @@ psoxide-pgo collect [GUEST] --frontend PATH [--tape PATH [--polls A..B]]...
                     [--launch-arg ARG]... [--pack CMD] --out PROFILE -- CARGO-ARGS...
 psoxide-pgo order   [GUEST] --frontend PATH (--tape PATH --polls A..B)... [--launch-arg ARG]...
                     [--pack CMD] [--profile PROFILE] [--variant V] --out LAYOUT -- CARGO-ARGS...
+psoxide-pgo stamp   [GUEST] --profile PROFILE -- CARGO-ARGS...
 psoxide-pgo apply   [GUEST] [--profile PROFILE] [--layout LAYOUT] [--variant V] -- CARGO-ARGS...
 psoxide-pgo choose  [GUEST] --profile PROFILE [--layout LAYOUT] --gate CMD [--variant V]...
                     [--pack CMD] [--frame-budget VBLANKS] [--rank deadline|work] -- CARGO-ARGS...
@@ -191,7 +196,8 @@ where no ordering file can move them. Paths may contain spaces; `--pack` and `--
    (`--pc-sample-window-log`), maps ticks to polls through a `--route-log` of
    the same replay, keeps the windows wholly inside the poll range, and stops
    the replay at `TO`. Up to one window at each end is lost to the rounding.
-4. Sums the histograms, converts them, writes the portable profile to `--out`,
+4. Sums the histograms, converts them, writes the portable profile to `--out`
+   with the record of the source it describes (see "Edits move the profile"),
    and deletes the PC and route logs, the collect image and the disc.
 
 After `collect` the exe at cargo's path is the ELF twin, which does not boot;
@@ -622,8 +628,9 @@ warns when the build's features differ. Keep one committed profile per
 shipped feature set (`pgo/mygame.prof`, `pgo/mygame-monsters.prof`).
 
 A profile goes stale as code changes: renamed or removed functions show up as
-`missing` in `rebind`'s count, and LLVM ignores lines that moved. Regenerate
-after large changes, and whenever the game repins onto a different SDK.
+`missing` in `rebind`'s count. Edits inside a function are carried across by
+the profile's source record (below); regenerate after large changes, and
+whenever the game repins onto a different SDK.
 
 ### Line shifts do not move the profile
 
@@ -643,6 +650,81 @@ code inlined at a call site with no line (`inlined at no line` in the
 unmapped summary). Those blocks have no weights on any build, before or after
 an edit, so adding or removing lines elsewhere changes neither the profile nor
 the code. Only an edit inside a function changes that function's own keys.
+
+### Edits move the profile
+
+The offset of a line is measured from its function's declaration, so an edit
+inside a function moves every key below it, and an edit inside a function that
+is inlined elsewhere moves the keys under every caller. LLVM cannot tell. A game
+deleted eight lines of `main` above its hot loop with the committed profile
+unchanged: every key below the deletion matched other code, free RAM fell from
+88,460 B to 43,596 B and text grew by 43 KB. A comment as long as the deleted
+code held the profile for a while; the next edit would have broken it again.
+
+`collect` therefore writes the source the profile describes, as comments LLVM
+skips, below the feature line:
+
+```text
+# psoxide-pgo source: <the commit the tree was at>
+# psoxide-pgo file: <git blob id> <path in the repository>
+# psoxide-pgo func: <declaration line> <last line> <file number> <portable name>
+```
+
+A file is the blob git holds for it (the working copy is hashed with
+`git hash-object -w`, so a tree that was never committed can still be read
+back), and a function is where its code sat in the profiled build, from the
+DWARF. Only functions in files git tracks are recorded; the SDK and the
+standard library are not the game's to diff, and their keys stay as they were.
+
+`apply` (so `choose` and `ladder`) first hashes the recorded files. When every
+one is as it was, nothing more happens: the profile and the build are the same
+as before this record existed. For any file that changed, each function in it
+is carried to the build in front of it:
+
+1. The function's old lines (`git cat-file blob`) and its new lines (the working
+   file, from the declaration line and last line the twin ELF's DWARF gives it
+   in this build, wherever the function moved to, in any file) are aligned as a
+   longest common subsequence of lines, indentation ignored.
+2. Between two aligned lines, a run that was rewritten pairs by position, so a
+   changed line keeps its samples. A line with no partner was deleted: its
+   samples are dropped, not folded into a neighbour, since the code they counted
+   no longer exists and a neighbour's count would describe other code. A function
+   that only moved down its file needs no change at all, because keys are
+   relative to the declaration.
+3. Every key of the function takes its new offset, and so does every inlined
+   call site in it (the call line moves with the caller's edit), and the body of
+   every inlined callee takes the callee's own map, under every caller.
+
+It prints how many functions moved lines and how many samples sat on lines
+that are gone. A function the profile names that this build does not have (a
+rename, a move into another crate) cannot be carried; its entries keep their old
+keys, which nothing looks up, and are listed. If such a function holds more than
+1% of the samples, the build stops, because its counts reach no code: collect
+again (`PSOXIDE_PGO_ALLOW_STALE=1` builds anyway).
+
+The build also stops, with what to run, when:
+
+- the profile has no record (a profile made before this existed, or by another
+  tool). If the profile describes the tree you are in, record it:
+  `make pgo-stamp` (`psoxide-pgo stamp --crate game --profile PROFILE -- CARGO-ARGS`).
+  That adopts the profile as it is: it fixes nothing that already drifted, and
+  `apply`'s bind report says how stale it is. Otherwise collect again.
+  `PSOXIDE_PGO_ALLOW_UNSTAMPED=1` applies it unchecked, as before.
+- the clone lacks a blob the profile names (a shallow clone): fetch the history,
+  or collect again.
+- one function is too large to align (more than 16 million line pairs).
+
+Commit the stamped profile with the source it was collected from, or any later
+commit whose files are what the profile names. A profile collected on edits that
+are never committed carries blobs that only this checkout has.
+
+Measured on one profile-guided game (`hot=500+profi`, SDK 3b7ef1256): the comment that
+padded `main` deleted, the stamped profile carried across, free RAM 88,460 B and
+text 689,164 B as before the edit (43,596 B and 732,512 B without the carry),
+the executable the same size with identical code; what differs is 37 words of
+`.rodata`, each the line number of a panic location in `main.rs` below the
+deleted lines, lower by exactly 8, and the 32-byte receipt hash over them. Both
+bench tapes measure the same work cycles.
 
 ## One guest from any directory (`psoxide-rustc`, `repro-gate`)
 

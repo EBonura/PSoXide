@@ -57,6 +57,7 @@ pub const USAGE: &str = "\
                            [--launch-arg ARG]... [--pack CMD] --out PROFILE -- CARGO-ARGS...
        psoxide-pgo order   [GUEST] --frontend PATH (--tape PATH --polls A..B)... [--launch-arg ARG]...
                            [--pack CMD] [--profile PROFILE] [--variant V] --out LAYOUT -- CARGO-ARGS...
+       psoxide-pgo stamp   [GUEST] --profile PROFILE -- CARGO-ARGS...
        psoxide-pgo apply   [GUEST] [--profile PROFILE] [--layout LAYOUT] [--variant V]
                            [--ram-floor BYTES [--ram-fallback V]...] -- CARGO-ARGS...
        psoxide-pgo choose  [GUEST] --profile PROFILE [--layout LAYOUT] --gate CMD [--variant V]...
@@ -309,7 +310,7 @@ fn parse(mode: &str, args: &[String]) -> Result<Options> {
     Ok(options)
 }
 
-/// Run `collect`, `order`, `apply`, `choose` or `measure`.
+/// Run `collect`, `order`, `apply`, `choose`, `ladder`, `stamp` or `measure`.
 pub fn main(mode: &str, args: &[String]) -> Result<()> {
     let mut options = parse(mode, args)?;
     if mode == "measure" {
@@ -365,6 +366,11 @@ pub fn main(mode: &str, args: &[String]) -> Result<()> {
         }
         "choose" => choose(&guest, &options),
         "ladder" => ladder_mode(&guest, &options),
+        "stamp" => {
+            let profile = options.profile.as_ref().ok_or("stamp needs --profile")?;
+            let elf = guest.build_twin()?.exe;
+            crate::stamp(profile, &elf, &guest.crate_dir)
+        }
         _ => unreachable!("main only dispatches pipeline modes"),
     }
 }
@@ -1734,7 +1740,9 @@ fn collect(guest: &Guest, options: &Options) -> Result<()> {
             out,
             format!("{FEATURES_TAG}{}\n{profile}", features_of(&guest.cargo)),
         )?;
-        Ok(())
+        // And the source the line offsets are measured against, so that a later edit of
+        // those lines carries the profile along (remap.rs).
+        crate::stamp(out, &elf, &guest.crate_dir)
     });
     // The logs are only an intermediate; the profile carries what matters.
     for log in &logs {
@@ -1771,7 +1779,7 @@ fn compile_flags(guest: &Guest, profile: Option<&Path>, variant: &str) -> Result
     }
     let elf = guest.build_twin()?.exe;
     let rebound = elf.with_extension("rebound.prof");
-    crate::rebind(profile, &elf, &rebound)?;
+    crate::rebind(profile, &elf, &rebound, &guest.crate_dir)?;
     let mut flags: Vec<String> = COLLECT_FLAGS.iter().map(ToString::to_string).collect();
     flags.push(format!("-Zprofile-sample-use={}", rebound.display()));
     flags.extend(extra);

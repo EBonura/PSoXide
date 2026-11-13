@@ -48,6 +48,7 @@ mod ladder;
 mod layout;
 mod pipeline;
 mod ram;
+mod remap;
 mod stale;
 mod work;
 
@@ -96,6 +97,8 @@ fn duplication_factor(raw: u64) -> u64 {
 struct Func {
     name: Option<String>,
     line: u64,
+    /// The declaration file as the line table spells it.
+    file: Option<String>,
 }
 
 /// An inlined call: where it sits, what it calls, and what it inlines in turn.
@@ -188,6 +191,24 @@ impl<'a> Symbols<'a> {
         Some(text.to_string_lossy().into_owned())
     }
 
+    /// A file of the unit's line table as a path (directory and name joined).
+    fn file_path(&self, unit: usize, index: u64) -> Option<String> {
+        let unit = &self.units[unit];
+        let header = unit.line_program.as_ref()?.header();
+        let entry = header.file(index)?;
+        let text = |value| {
+            self.dwarf
+                .attr_string(unit, value)
+                .ok()
+                .map(|text| text.to_string_lossy().into_owned())
+        };
+        let name = text(entry.path_name())?;
+        match entry.directory(header).and_then(text) {
+            Some(dir) if !name.starts_with('/') && !dir.is_empty() => Some(format!("{dir}/{name}")),
+            _ => Some(name),
+        }
+    }
+
     fn section_offset(&self, unit: usize, offset: UnitOffset) -> usize {
         offset
             .to_debug_info_offset(&self.units[unit].header)
@@ -201,7 +222,7 @@ impl<'a> Symbols<'a> {
         if let Some(func) = self.funcs.get(&key) {
             return Ok(func.clone());
         }
-        let (mut name, mut line) = (None, None);
+        let (mut name, mut line, mut file) = (None, None, None);
         let mut at = Some((unit, offset));
         for _ in 0..8 {
             let Some((u, o)) = at else { break };
@@ -218,6 +239,13 @@ impl<'a> Symbols<'a> {
                 line = die
                     .attr_value(gimli::DW_AT_decl_line)
                     .and_then(|v| v.udata_value());
+                file = die
+                    .attr_value(gimli::DW_AT_decl_file)
+                    .and_then(|v| match v {
+                        AttributeValue::FileIndex(index) => Some(index),
+                        other => other.udata_value(),
+                    })
+                    .and_then(|index| self.file_path(u, index));
             }
             at = None;
             for attr in [gimli::DW_AT_abstract_origin, gimli::DW_AT_specification] {
@@ -245,6 +273,7 @@ impl<'a> Symbols<'a> {
         let func = Func {
             name,
             line: line.unwrap_or(0),
+            file,
         };
         self.funcs.insert(key, func.clone());
         Ok(func)
@@ -548,7 +577,9 @@ fn read_histograms(paths: &[PathBuf]) -> Result<Vec<(u64, u64)>> {
 }
 
 fn convert(elf_path: &Path, pc_paths: &[PathBuf], out_path: &Path) -> Result<()> {
-    convert_histogram(elf_path, read_histograms(pc_paths)?, out_path, true)
+    let (profile, _) = convert_histogram(elf_path, read_histograms(pc_paths)?, true)?;
+    fs::write(out_path, profile)?;
+    Ok(())
 }
 
 /// Every instruction word of the executable sections once: the profile of
@@ -566,12 +597,13 @@ fn uniform_histogram(elf_path: &Path) -> Result<Vec<(u64, u64)>> {
     Ok(words)
 }
 
+/// The profile text for a histogram of the ELF's addresses, and where each
+/// function it touched sits in the source (see [`remap::Facts`]).
 fn convert_histogram(
     elf_path: &Path,
     histogram: Vec<(u64, u64)>,
-    out_path: &Path,
     verbose: bool,
-) -> Result<()> {
+) -> Result<(String, remap::Facts)> {
     let data = fs::read(elf_path)?;
     let object = object::File::parse(&*data)?;
     let (sections, endian) = dwarf_sections(&object)?;
@@ -601,6 +633,7 @@ fn convert_histogram(
     let mut profile: HashMap<String, Node> = HashMap::new();
     let (mut mapped, mut duplicated) = (0u64, 0u64);
     let mut unmapped = Unmapped::default();
+    let mut facts = remap::Facts::new();
     let mut elf_symbols: Vec<(u64, u64, &str)> = object
         .symbols()
         .filter(|symbol| symbol.size() > 0)
@@ -644,6 +677,7 @@ fn convert_histogram(
             let Some(callee) = hit.func.name.as_ref() else {
                 break;
             };
+            facts.reach(current, hit.call_line);
             let offset = (hit.call_line.wrapping_sub(current.line) & 0xffff) as u32;
             node = node
                 .calls
@@ -652,6 +686,7 @@ fn convert_histogram(
             current = &hit.func;
             children = &hit.children;
         }
+        facts.reach(current, line);
         let offset = (line.wrapping_sub(current.line) & 0xffff) as u32;
         // An unrolled copy runs once per `duplication` iterations of the
         // source loop, so its count stands for that many (AutoFDO scales the
@@ -673,19 +708,17 @@ fn convert_histogram(
         let _ = writeln!(out, "{name}:{}:{}", node.total(), node.head);
         node.emit(1, &mut out);
     }
-    fs::write(out_path, out)?;
-    if !verbose {
-        return Ok(());
+    if verbose {
+        println!(
+            "functions {}  mapped samples {mapped}  unmapped {}  in unrolled copies {duplicated}",
+            order.len(),
+            unmapped.total()
+        );
+        if unmapped.total() > 0 {
+            println!("unmapped: {unmapped}");
+        }
     }
-    println!(
-        "functions {}  mapped samples {mapped}  unmapped {}  in unrolled copies {duplicated}",
-        order.len(),
-        unmapped.total()
-    );
-    if unmapped.total() > 0 {
-        println!("unmapped: {unmapped}");
-    }
-    Ok(())
+    Ok((out, facts))
 }
 
 /// The crate name of the v0 crate root (`C [s<base-62>_] <len> [_] <name>`)
@@ -826,9 +859,42 @@ fn portable(in_path: &Path, out_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Facts about a build's functions under their portable names, which is what a
+/// committed profile uses.
+fn portable_facts(facts: &remap::Facts) -> remap::Facts {
+    let mut out = remap::Facts::new();
+    for (name, fact) in &facts.0 {
+        out.0
+            .entry(portable_name(name).into_owned())
+            .or_insert_with(|| fact.clone());
+    }
+    out
+}
+
+/// Whether an environment switch is on (set and not empty or `0`).
+fn switch(name: &str) -> bool {
+    env::var_os(name).is_some_and(|value| !value.is_empty() && value != "0")
+}
+
+/// Record the source `profile` describes: the repository files and function lines of the
+/// tree `elf_path` was built from, which the profile's keys are measured against. The
+/// profile's own lines are not touched. `collect` does it for the profile it writes;
+/// `stamp` does it for an older one that matches the tree it is run in.
+fn stamp(profile: &Path, elf_path: &Path, crate_dir: &Path) -> Result<()> {
+    let (_, facts) = convert_histogram(elf_path, uniform_histogram(elf_path)?, false)?;
+    let repo = remap::Repo::open(&[crate_dir])
+        .ok_or_else(|| format!("{} is not in a git repository", crate_dir.display()))?;
+    let text = fs::read_to_string(profile)?;
+    let stamped = remap::stamp_text(&text, &portable_facts(&facts), &repo, &repo.head())?;
+    fs::write(profile, stamped)?;
+    println!("psoxide-pgo: recorded the source of {}", profile.display());
+    Ok(())
+}
+
 /// Map a profile's names, portable or from another checkout, onto the
 /// symbols of `elf_path`, which must carry DWARF for its inlined functions.
-fn rebind(in_path: &Path, elf_path: &Path, out_path: &Path) -> Result<()> {
+/// `crate_dir` is where the guest builds, whose repository holds the profile's source.
+fn rebind(in_path: &Path, elf_path: &Path, out_path: &Path, crate_dir: &Path) -> Result<()> {
     let data = fs::read(elf_path)?;
     let object = object::File::parse(&*data)?;
     let (sections, endian) = dwarf_sections(&object)?;
@@ -879,8 +945,49 @@ fn rebind(in_path: &Path, elf_path: &Path, out_path: &Path) -> Result<()> {
         }
     }
 
-    let (mut kept, mut bound, mut missing, mut ambiguous) = (0, 0, 0, 0);
+    // What this build's own code covers: its key set (to say how much of the profile
+    // still binds) and where each function sits in the source (to carry the profile
+    // across edits).
+    let (keys, facts) = convert_histogram(elf_path, uniform_histogram(elf_path)?, false)?;
     let text = fs::read_to_string(in_path)?;
+    let collected_here = text.starts_with(pipeline::FEATURES_TAG);
+    let profile_dir = in_path.parent().unwrap_or(Path::new("."));
+    let carried = match remap::Repo::open(&[crate_dir, profile_dir]) {
+        Some(repo) => remap::carry(&text, &portable_facts(&facts), &repo),
+        None => Err(format!(
+            "{} is not in a git repository",
+            crate_dir.display()
+        )),
+    };
+    let text = match carried {
+        Ok((carried, report)) => {
+            if carried != text {
+                println!("{report}");
+                if let Some(refusal) = report.refusal() {
+                    if !switch("PSOXIDE_PGO_ALLOW_STALE") {
+                        return Err(
+                            format!("{refusal} (PSOXIDE_PGO_ALLOW_STALE=1 builds anyway)").into(),
+                        );
+                    }
+                    println!("psoxide-pgo: {refusal}; building anyway (PSOXIDE_PGO_ALLOW_STALE)");
+                }
+            }
+            carried
+        }
+        Err(error) if switch("PSOXIDE_PGO_ALLOW_UNSTAMPED") => {
+            println!("psoxide-pgo: {error}; building anyway (PSOXIDE_PGO_ALLOW_UNSTAMPED)");
+            text
+        }
+        Err(error) => {
+            return Err(format!(
+                "{}: {error} (PSOXIDE_PGO_ALLOW_UNSTAMPED=1 applies the profile as it is)",
+                in_path.display()
+            )
+            .into())
+        }
+    };
+
+    let (mut kept, mut bound, mut missing, mut ambiguous) = (0, 0, 0, 0);
     let rebound = rename_profile(&text, |name| {
         // A Rust name either demangles or is already portable, and every
         // Rust item path has a `::`; C names such as `main` have neither.
@@ -910,12 +1017,7 @@ fn rebind(in_path: &Path, elf_path: &Path, out_path: &Path) -> Result<()> {
     }
     fs::write(out_path, &rebound)?;
     // How much of the profile still describes this code.
-    let keys_path = out_path.with_extension("keys");
-    let keys = convert_histogram(elf_path, uniform_histogram(elf_path)?, &keys_path, false)
-        .and_then(|()| Ok(fs::read_to_string(&keys_path)?));
-    let _ = fs::remove_file(&keys_path);
-    let collected_here = text.starts_with(pipeline::FEATURES_TAG);
-    let mut report = stale::compare(&rebound, &keys?).enforced_for(collected_here);
+    let mut report = stale::compare(&rebound, &keys).enforced_for(collected_here);
     for (name, _) in &mut report.worst {
         *name = portable_name(name).into_owned();
     }
@@ -925,14 +1027,14 @@ fn rebind(in_path: &Path, elf_path: &Path, out_path: &Path) -> Result<()> {
 
 const USAGE: &str = "usage: psoxide-pgo <elf-with-dwarf> <pc.csv>... <out.prof>
        psoxide-pgo portable <in.prof> <out.prof>
-       psoxide-pgo rebind <in.prof> <target-elf-with-dwarf> <out.prof>
+       psoxide-pgo rebind <in.prof> <target-elf-with-dwarf> <out.prof>   (run in the guest's directory)
        psoxide-pgo layout <link.map> <image.exe> <words.csv>... <out.layout>
        psoxide-pgo place <in.layout> <link.map> <image.exe> <linker-script> <out.order>
        psoxide-pgo ram <link.map> [--floor BYTES]";
 
-const MODES: [&str; 11] = [
+const MODES: [&str; 12] = [
     "portable", "rebind", "layout", "place", "collect", "order", "apply", "choose", "measure",
-    "ram", "ladder",
+    "ram", "ladder", "stamp",
 ];
 
 /// A layout profile from one link and per-word logs (`--pc-log-words
@@ -1008,7 +1110,7 @@ fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
     let result = match words.as_slice() {
-        [mode @ ("collect" | "order" | "apply" | "choose" | "measure" | "ladder"), ..] => {
+        [mode @ ("collect" | "order" | "apply" | "choose" | "measure" | "ladder" | "stamp"), ..] => {
             pipeline::main(mode, &args[1..])
         }
         ["ram", map] => ram_report(Path::new(map), None),
@@ -1017,9 +1119,9 @@ fn main() -> ExitCode {
             Err(_) => Err(format!("--floor wants a byte count, not {floor:?}").into()),
         },
         ["portable", input, output] => portable(Path::new(input), Path::new(output)),
-        ["rebind", input, elf, output] => {
-            rebind(Path::new(input), Path::new(elf), Path::new(output))
-        }
+        ["rebind", input, elf, output] => env::current_dir()
+            .map_err(Into::into)
+            .and_then(|dir| rebind(Path::new(input), Path::new(elf), Path::new(output), &dir)),
         ["layout", map, exe, logs @ .., output] if !logs.is_empty() => {
             layout_profile(Path::new(map), Path::new(exe), logs, Path::new(output))
         }
@@ -1190,6 +1292,7 @@ mod tests {
         let func = Func {
             name: Some("callee".into()),
             line: 10,
+            file: None,
         };
         let at = |call_line, ranges, children| Inlined {
             ranges,
