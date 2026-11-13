@@ -50,9 +50,14 @@ if [ -z "$repro_rustc" ] && [ -f "$ROOT/tools/psoxide-pgo/src/bin/psoxide-rustc.
     }
     repro_rustc="${CARGO_TARGET_DIR:-$ROOT/target}/release/psoxide-rustc"
 fi
+# The staged guest is its own workspace (engine/examples/editor-playtest) and its path dependencies sit above
+# it, so Cargo hashes their absolute paths. Without the wrapper the executable differs by stage root and
+# checkout (110,061 bytes between two stage roots on SDK 8bbdbcc), so there is no unpinned staged build: a
+# missing wrapper stops it instead of producing an executable nobody can reproduce.
 if [ ! -x "$repro_rustc" ]; then
-    echo "[guest-build] WARNING: the pinned SDK has no psoxide-rustc: the guest depends on the stage root" >&2
-    repro_rustc=""
+    echo "[guest-build] no psoxide-rustc (PSOXIDE_RUSTC='${PSOXIDE_RUSTC:-}', source tools/psoxide-pgo/src/bin/psoxide-rustc.rs under $ROOT)." >&2
+    echo "[guest-build] refusing an unpinned build: its layout would depend on the stage root and checkout path." >&2
+    exit 1
 fi
 
 # Delay-slot filling. LLVM's MipsDelaySlotFiller can move a load into a
@@ -246,9 +251,9 @@ cd "$STAGE/$GUEST_DIR"
 CARGO_HOME="$GUEST_CARGO_HOME" \
 CARGO_TARGET_DIR="$STAGE/build/examples" \
 RUSTFLAGS="$RUSTFLAGS_VALUE" \
-RUSTC_WRAPPER="${repro_rustc:-${RUSTC_WRAPPER:-}}" \
+RUSTC_WRAPPER="$repro_rustc" \
 PSOXIDE_REPRO_ROOT="$STAGE" \
-PSOXIDE_REPRO_INNER="$([ -n "$repro_rustc" ] && printf %s "${RUSTC_WRAPPER:-}")" \
+PSOXIDE_REPRO_INNER="${RUSTC_WRAPPER:-}" \
     cargo build --release "$@"
 
 staged_exe="$STAGE/$EXE_RELATIVE"
