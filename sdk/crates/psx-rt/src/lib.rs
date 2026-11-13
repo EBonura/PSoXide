@@ -43,6 +43,7 @@ mod mem;
 
 pub mod cache;
 pub mod critical_section;
+pub mod dispatch;
 #[cfg(all(feature = "console-diag", target_arch = "mips"))]
 pub mod diag;
 pub mod entry;

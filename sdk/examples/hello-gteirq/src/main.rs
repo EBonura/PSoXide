@@ -12,6 +12,18 @@
 //! halves lie outside the range RTPS saturates to, so no projection can
 //! pass for one. The loop runs for `VBLANKS` VBlank interrupts.
 //!
+//! A second phase runs the same loop under root counter 2 interrupts that psx-rt's
+//! dispatcher serves (`psx_rt::dispatch::attach`, the path every driver's
+//! interrupts now take), at 160 consecutive periods so the interrupt
+//! lands on every phase of the loop, including the RTPS itself. NCLIP is not
+//! probed: it is idempotent, so a repeat cannot be seen in its result.
+//!
+//! Before either phase the dispatcher's order is checked: two VBlank hooks and a
+//! handler on every source record who ran, the same assembly an interrupt uses
+//! runs for a set of pending masks (`dispatch_for_test`), and the record must
+//! equal `dispatch::plan`, the pure reference. The two hooks then stay
+//! registered through the VBlank phase and must each run once per VBlank, in order.
+//!
 //! The verdict goes to the TTY (`GTEIRQ PASS ...` or `GTEIRQ FAIL ...`) and
 //! on screen. `gte_skips` counts the interrupts the handler stepped over a
 //! GTE command for: about one in forty VBlanks on silicon, where the loop is
@@ -29,9 +41,16 @@ use psx_font::fonts::BASIC;
 use psx_font::FontAtlas;
 use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
 use psx_gpu::Gpu;
-use psx_rt::{interrupts, tty};
+use psx_hw::irq::source;
+use psx_io::irq;
+use psx_io::timers::{self, Timer};
+use psx_rt::{dispatch, interrupts, tty};
 use psx_vram::{Clut, TextureDepth, TexturePage};
 
+/// Root counter 2 mode bits: reset at target, interrupt at target, repeat.
+const RESET_AT_TARGET: u16 = 1 << 3;
+const IRQ_ON_TARGET: u16 = 1 << 4;
+const IRQ_REPEAT: u16 = 1 << 6;
 const FONT_TPAGE: TexturePage = TexturePage::new(320, 0, TextureDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 const WHITE: (u8, u8, u8) = (220, 220, 230);
@@ -43,6 +62,113 @@ const RED: (u8, u8, u8) = (230, 80, 80);
 const SXY_A: u32 = 0x5a5a_1111;
 const SXY_B: u32 = 0x5a5a_2222;
 const SXY_C: u32 = 0x5a5a_3333;
+/// Phase 2: periods of root counter 2 in system clocks, `PERIOD_FIRST` up, one
+/// more each step, so the interrupt walks every instruction of the loop (it
+/// is 50 to 80 clocks long).
+const PERIOD_FIRST: u16 = 2000;
+const PERIOD_STEPS: u16 = 160;
+/// Iterations at each period.
+const PERIOD_ITERATIONS: u32 = 320;
+
+static mut TIMER_IRQS: u32 = 0;
+
+/// The dispatcher's handler for root counter 2.
+fn on_timer() {
+    irq::acknowledge(1 << source::TIMER2);
+    // SAFETY: runs with interrupts off; the foreground only reads it.
+    unsafe { *(&raw mut TIMER_IRQS) += 1 };
+}
+
+/// Who ran during an order check, one code per call.
+static mut LOG: [u8; 16] = [0; 16];
+static mut LOG_LEN: usize = 0;
+/// Hook runs counted in the VBlank phase and hook B runs that followed hook A's.
+static mut HOOK_A: u32 = 0;
+static mut HOOK_B: u32 = 0;
+static mut HOOK_ORDER_ERRORS: u32 = 0;
+static mut LOGGING: bool = false;
+
+fn record(code: u8) {
+    // SAFETY: handlers run with interrupts off and the foreground reads only
+    // while they cannot.
+    unsafe {
+        if *(&raw const LOGGING) && *(&raw const LOG_LEN) < 16 {
+            LOG[*(&raw const LOG_LEN)] = code;
+            *(&raw mut LOG_LEN) += 1;
+        }
+    }
+}
+
+fn hook_a() {
+    record(0x80);
+    // SAFETY: as above.
+    unsafe { *(&raw mut HOOK_A) += 1 };
+}
+
+fn hook_b() {
+    record(0x81);
+    // SAFETY: as above.
+    unsafe {
+        if *(&raw const HOOK_A) == *(&raw const HOOK_B) + 1 {
+            *(&raw mut HOOK_B) += 1;
+        } else {
+            *(&raw mut HOOK_ORDER_ERRORS) += 1;
+        }
+    }
+}
+
+/// A handler that records its source's `I_STAT` bit.
+fn rec<const BIT: u8>() {
+    record(BIT);
+}
+
+const ORDER_SOURCES: [(dispatch::Source, dispatch::Handler); 4] = [
+    (dispatch::Source::Cdrom, rec::<2>),
+    (dispatch::Source::Dma, rec::<3>),
+    (dispatch::Source::Timer1, rec::<5>),
+    (dispatch::Source::Timer2, rec::<6>),
+];
+
+/// Pending masks the order check runs: everything, single sources, VBlank
+/// alone and with others, sources nothing is registered for (bits 4, 7 and 9),
+/// bit 1 (no source), and nothing.
+const ORDER_MASKS: [u32; 10] = [0x26d, 0x004, 0x001, 0x201, 0x090, 0x040, 0x002, 0, 0x2ad, 0x028];
+
+/// Run `ORDER_MASKS` through the assembly and the reference; the number that
+/// disagreed.
+fn order_mismatches() -> u32 {
+    let mut known = [(0u32, 0u8); 6];
+    known[0] = (dispatch::address_of(hook_a), 0x80);
+    known[1] = (dispatch::address_of(hook_b), 0x81);
+    let mut n = 2;
+    for (source, handler) in ORDER_SOURCES {
+        known[n] = (dispatch::address_of(handler), source.bit() as u8);
+        n += 1;
+    }
+    let mut bad = 0;
+    for mask in ORDER_MASKS {
+        let mut expected = [0u8; 16];
+        let mut expected_len = 0;
+        dispatch::plan(mask, |address| {
+            let code = known.iter().find(|k| k.0 == address).map_or(0xff, |k| k.1);
+            expected[expected_len] = code;
+            expected_len += 1;
+        });
+        // SAFETY: interrupts are off for the whole check and every handler logs only.
+        let ran = irq::without_interrupts(|| unsafe {
+            LOG_LEN = 0;
+            LOGGING = true;
+            dispatch::dispatch_for_test(mask);
+            LOGGING = false;
+            (LOG, LOG_LEN)
+        });
+        if ran.0[..ran.1] != expected[..expected_len] {
+            bad += 1;
+        }
+    }
+    bad
+}
+
 /// Iterations between checks of the VBlank count.
 const CHUNK: u32 = 4096;
 /// Interrupts to run under: about five seconds on NTSC.
@@ -142,6 +268,24 @@ fn main() {
     // Also sets SR.CU2, which the GTE needs.
     interrupts::install_vblank_counter();
 
+    // The order check, then the two hooks that stay for the VBlank phase.
+    let mut hooks_ok = dispatch::on_vblank(hook_a).is_ok() && dispatch::on_vblank(hook_b).is_ok();
+    for (source, handler) in ORDER_SOURCES {
+        dispatch::attach(source, handler);
+    }
+    let order_bad = order_mismatches();
+    for (source, _) in ORDER_SOURCES {
+        dispatch::detach(source);
+    }
+    let mask_after_detach = dispatch::registered_sources();
+    // SAFETY: foreground, interrupts on, the VBlank hooks run only at VBlank.
+    unsafe {
+        HOOK_A = 0;
+        HOOK_B = 0;
+        HOOK_ORDER_ERRORS = 0;
+    }
+    hooks_ok &= mask_after_detach == 1;
+
     let skips_before = interrupts::gte_skip_count();
     let start = interrupts::vblank_count();
     let mut counts = Counts::default();
@@ -151,6 +295,32 @@ fn main() {
         iterations = iterations.wrapping_add(CHUNK);
     }
     let vblanks = interrupts::vblank_count().wrapping_sub(start);
+    // SAFETY: plain reads of counters the hooks wrote.
+    let (hook_a_runs, hook_b_runs, hook_order_errors) =
+        unsafe { (HOOK_A, HOOK_B, HOOK_ORDER_ERRORS) };
+
+    // Phase 2: root counter 2 through the dispatcher.
+    let mut timer_counts = Counts::default();
+    let mut timer_iterations = 0u32;
+    dispatch::attach(dispatch::Source::Timer2, on_timer);
+    let skips_mid = interrupts::gte_skip_count();
+    let irqs_before = unsafe { core::ptr::read_volatile(&raw const TIMER_IRQS) };
+    for step in 0..PERIOD_STEPS {
+        timers::set_mode(Timer::Timer2, 0);
+        timers::set_target(Timer::Timer2, PERIOD_FIRST + step);
+        timers::set_counter(Timer::Timer2, 0);
+        irq::acknowledge(1 << source::TIMER2);
+        irq::set_mask(irq::mask() | (1 << source::TIMER2));
+        timers::set_mode(Timer::Timer2, RESET_AT_TARGET | IRQ_ON_TARGET | IRQ_REPEAT);
+        gte_loop(PERIOD_ITERATIONS, &mut timer_counts);
+        timer_iterations += PERIOD_ITERATIONS;
+        timers::set_mode(Timer::Timer2, 0);
+    }
+    irq::set_mask(irq::mask() & !(1 << source::TIMER2));
+    let timer_irqs =
+        unsafe { core::ptr::read_volatile(&raw const TIMER_IRQS) }.wrapping_sub(irqs_before);
+    let timer_skips = interrupts::gte_skip_count().wrapping_sub(skips_mid);
+    dispatch::detach(dispatch::Source::Timer2);
     let skips = interrupts::gte_skip_count().wrapping_sub(skips_before);
 
     let checks = [
@@ -159,6 +329,17 @@ fn main() {
         (counts.other == 0, "SXY0 held no marker"),
         (counts.ok == iterations, "not every iteration counted"),
         (interrupts::fault_count() == 0, "exceptions other than IRQs"),
+        (hooks_ok, "the dispatcher refused a hook or kept a detached source"),
+        (order_bad == 0, "the dispatcher's order differs from its reference"),
+        (hook_a_runs.abs_diff(vblanks) <= 1, "hook A did not run once per VBlank"),
+        (hook_b_runs == hook_a_runs || hook_b_runs + 1 == hook_a_runs, "hook B did not follow hook A"),
+        (hook_order_errors == 0, "a hook ran out of order"),
+        (timer_counts.doubled == 0, "an RTPS ran twice under timer IRQs"),
+        (timer_counts.missing == 0, "an RTPS was lost under timer IRQs"),
+        (timer_counts.other == 0, "SXY0 held no marker under timer IRQs"),
+        (timer_counts.ok == timer_iterations, "not every timer iteration counted"),
+        (timer_irqs > 500, "the dispatcher served too few timer IRQs"),
+        (timer_skips >= 10, "too few timer IRQs landed on an RTPS"),
     ];
     let failures = checks.iter().filter(|check| !check.0).count() as u32;
     for (_, what) in checks.iter().filter(|check| !check.0) {
@@ -172,6 +353,12 @@ fn main() {
         line("gte_skips", skips),
         line("doubled", counts.doubled),
         line("missing", counts.missing),
+        line("order_bad", order_bad),
+        line("hook_a", hook_a_runs),
+        line("timer_irqs", timer_irqs),
+        line("timer_skips", timer_skips),
+        line("timer_doubled", timer_counts.doubled),
+        line("timer_missing", timer_counts.missing),
     ];
     let (banner, tint) = if failures == 0 {
         ("GTEIRQ PASS", GREEN)

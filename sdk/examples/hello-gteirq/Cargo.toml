@@ -17,6 +17,8 @@ codegen-units = 1
 lto = true
 
 [dependencies]
+psx-hw   = { path = "../../../crates/psx-hw" }
+psx-io   = { path = "../../crates/psx-io" }
 psx-gpu  = { path = "../../crates/psx-gpu" }
 psx-rt   = { path = "../../crates/psx-rt", features = ["host-tty"] }
 psx-font = { path = "../../crates/psx-font" }

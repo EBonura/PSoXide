@@ -11,6 +11,29 @@ use psx_hw::{cop0, dma, gpu, gte, memory};
 #[cfg(target_arch = "mips")]
 use psx_io::irq;
 
+/// What the exception handler and the dispatcher share, in one place so the handler reaches
+/// it with one `lui`. Zero `registered` (a program that registers nothing) means the handler
+/// never leaves for the dispatcher.
+#[repr(C, align(16))]
+pub(crate) struct IrqCell {
+    /// The sources the dispatcher is to serve: `I_STAT & I_MASK` as the handler read it on entry
+    /// for a source interrupt, VBlank alone (1) for the VBlank hooks. The handler writes it only
+    /// on its way to the dispatcher.
+    pub(crate) pending: u32,
+    /// The `I_STAT` bits something is registered with the dispatcher for (bit 0: VBlank hooks).
+    pub(crate) registered: u32,
+    /// Where the handler jumps for a registered bit. Set by the first registration, so the
+    /// dispatcher's code, stack and table are linked only into a program that registers.
+    pub(crate) vector: u32,
+    /// The dispatcher's address once a VBlank hook is registered, else 0. The VBlank path tests
+    /// this one word, so a program with no hook pays a load and a branch per VBlank.
+    pub(crate) vblank_vector: u32,
+}
+
+#[no_mangle]
+pub(crate) static mut __psx_rt_irq: IrqCell =
+    IrqCell { pending: 0, registered: 0, vector: 0, vblank_vector: 0 };
+
 #[cfg(target_arch = "mips")]
 core::arch::global_asm!(
     r#"
@@ -69,8 +92,10 @@ __psx_rt_exception_handler:
     lw    $26, {i_mask}($26)
     nop
     and   $27, $27, $26
-    andi  $27, $27, {vblank_mask}
-    beqz  $27, 9f
+    # $27 keeps the pending, enabled sources for the no-VBlank path below, so
+    # nothing reads the two registers twice.
+    andi  $26, $27, {vblank_mask}
+    beqz  $26, 9f
     nop
 
     lui   $26, %hi(__psx_rt_vblank_count)
@@ -317,6 +342,26 @@ __psx_rt_exception_handler:
 .Lpsx_diag_ret:
     .endif
 
+    # Registered VBlank hooks: one context save for all of them, in the
+    # dispatcher. With none this is a load and a branch: the word is the
+    # dispatcher's address once a hook is registered, else 0. The delay slot
+    # stays empty: a load into $27 there would be followed by the `mfc0 $27`
+    # at `1:`, two delayed writes to one register back to back. The
+    # dispatcher serves VBlank alone from here; a source that is pending too
+    # takes the exception again at once and goes the other way.
+    lui   $26, %hi(__psx_rt_irq)
+    lw    $27, %lo(__psx_rt_irq+12)($26)
+    nop
+    beqz  $27, 1f
+    nop
+    addiu $27, $zero, 1
+    sw    $27, %lo(__psx_rt_irq)($26)
+    lw    $27, %lo(__psx_rt_irq+12)($26)
+    lui   $26, %hi(.Lpsx_disp_vb)
+    jr    $27
+    addiu $26, $26, %lo(.Lpsx_disp_vb)
+.Lpsx_disp_vb:
+
 1:
     mfc0  $27, $13
     nop
@@ -403,6 +448,7 @@ __psx_rt_exception_handler:
     # hazard-scan warns about any it finds. `interrupt_resume_pc`
     # below is the same decision in Rust, unit-tested on host.
 2:
+.Lpsx_rt_iret:
     mfc0  $26, $14
     nop
     lw    $27, 0($26)
@@ -440,16 +486,31 @@ __psx_rt_exception_handler:
     # itself must stay in I_STAT until it does. `stray_interrupt_sources`
     # below is the same decision in Rust, unit-tested on host.
 9:
-    mfc0  $27, $13
+    mfc0  $26, $13
     nop
-    andi  $27, $27, 0x007c
-    bnez  $27, 1b
+    andi  $26, $26, 0x007c
+    bnez  $26, 1b
     nop
-    lui   $26, {io_hi}
-    lw    $27, {i_stat}($26)
-    lw    $26, {i_mask}($26)
+    # $27 is still I_STAT & I_MASK from the entry.
+    # A source registered with the dispatcher: one context save, in `dispatch`,
+    # then the common return. Anything else pending goes on being a stray (or
+    # re-enters at once).
+    # The dispatcher returns straight to the GTE-aware return (`2:`): the
+    # cause was checked above. The `lui` in the delay slot is harmless on the
+    # way to `60:`, which sets $26 first.
+    lui   $26, %hi(__psx_rt_irq)
+    lw    $26, %lo(__psx_rt_irq+4)($26)
     nop
-    and   $27, $27, $26
+    and   $26, $26, $27
+    beqz  $26, 60f
+    lui   $26, %hi(__psx_rt_irq)
+    sw    $27, %lo(__psx_rt_irq)($26)
+    lw    $26, %lo(__psx_rt_irq+8)($26)
+    lui   $27, %hi(.Lpsx_rt_iret)
+    addiu $27, $27, %lo(.Lpsx_rt_iret)
+    jr    $26
+    move  $26, $27
+60:
     # A source a wrapper in front of this handler has claimed is not a stray
     # even though it is pending here: it arrived while another wrapper's handler
     # ran, or while the claimant's own handler held interrupts off, and the
@@ -849,6 +910,9 @@ extern "C" {
 /// game needs must be serviced by the game's own handler ahead of this one
 /// (which then chains here), not left to this handler.
 #[cfg(target_arch = "mips")]
+// Out of line: boot and level-load code, and a game that calls it from several
+// places (VoXide: three) carried a copy at each.
+#[inline(never)]
 pub fn install_vblank_counter() {
     const EXCEPTION_VECTOR: *mut u32 = 0x8000_0080 as *mut u32;
     const J_OPCODE: u32 = 0x0800_0000;
@@ -882,8 +946,13 @@ pub fn install_vblank_counter() {
         psx_io::gpu::set_flip_pacer(Some(pace_direct_flip));
         irq::acknowledge(1 << psx_hw::irq::source::VBLANK);
         // This handler services VBlank only. After a BIOS disc boot, do not
-        // preserve CD-ROM/DMA/etc. bits the BIOS may have left enabled.
-        irq::set_mask(1 << psx_hw::irq::source::VBLANK);
+        // preserve CD-ROM/DMA/etc. bits the BIOS may have left enabled; keep
+        // only a source that is open and has a dispatcher handler (its owner
+        // opened it, and the registration outlives this reinstall).
+        irq::set_mask(
+            1 << psx_hw::irq::source::VBLANK
+                | (irq::mask() & crate::dispatch::registered_sources()),
+        );
         enable_cpu_interrupts();
         core::ptr::write_volatile(&raw mut INSTALLED, true);
     }
