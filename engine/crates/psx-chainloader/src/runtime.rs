@@ -369,11 +369,32 @@ fn verdict(s: &str, rgb: u32) {
     paint::text(8, VERDICT_Y, 2, s, rgb);
 }
 
-/// Put the hardware in the SDK's entry state before a game
-/// boots: interrupts masked, DMA channels off, SPU silent, GPU reset. The launcher has
-/// been driving the GPU and vblank IRQs, and a game's `_start` does not
-/// expect to inherit that.
-unsafe fn quiesce() {
+/// Put the machine in the SDK's entry state and reset the GPU, before another
+/// program runs: the one place that job lives, used by [`run`] and by a
+/// program that calls another one from a running game (Hollow Knight's intro).
+///
+/// What it writes, all of it, in order:
+///
+/// * [`psx_rt::entry::set_entry_state`]: cop0 SR (CU2 only, interrupts off); the
+///   memory controller's access timings; every GTE data and control register
+///   zeroed; `I_MASK` zero and every `I_STAT` bit acknowledged; every DMA channel
+///   given a bounded chance to finish and then aborted, `DPCR` and `DICR` to their
+///   entry values; root counters 0 to 2 to mode 0; SIO0 reset and deselected; the
+///   SPU: every voice keyed off, reverb, pitch modulation and noise off, reverb
+///   volumes and CD input volume zero, reverb work base parked at the top of
+///   sound RAM, main volume at maximum, SPU enabled and unmuted with transfer
+///   mode stopped and CD input off; the instruction cache flushed and the cache
+///   control register set. See `psx_rt::entry` for the exact values.
+/// * `GP1(00h)`: the GPU reset (display off, command FIFO cleared, defaults).
+///
+/// It does not touch the exception vector, sound RAM, VRAM or main RAM. A caller
+/// that will keep running afterwards must save and restore whatever of the above
+/// it depends on.
+///
+/// # Safety
+/// The caller owns the whole machine: no DMA transfer, interrupt handler or
+/// driver may depend on the state this overwrites while it runs.
+pub unsafe fn quiesce() {
     // The SDK's entry state (`psx_rt::entry`): the same one `_start` sets for a program a BIOS
     // booted, so a chain-loaded game starts exactly as a game booted from any BIOS does. It
     // keys off the SPU (the launcher hands over with its launch swoosh still sounding, and
