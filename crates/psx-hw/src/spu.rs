@@ -58,6 +58,8 @@ pub mod voice {
 pub const MAIN_VOL_LEFT: u32 = 0x1f80_1d80;
 /// Main volume, right.
 pub const MAIN_VOL_RIGHT: u32 = 0x1f80_1d82;
+/// First of the 32 reverb coefficient registers (dAPF1 .. vRIN), 2 bytes apart.
+pub const REVERB_COEFFICIENTS: u32 = 0x1f80_1dc0;
 /// Reverb output volume, left.
 pub const REVERB_VOL_LEFT: u32 = 0x1f80_1d84;
 /// Reverb output volume, right.
@@ -122,6 +124,8 @@ pub mod control {
     pub const TRANSFER_DMA_WRITE: u16 = 2 << 4;
     /// Bit 0: mix the CD audio input.
     pub const CD_AUDIO_ENABLE: u16 = 1 << 0;
+    /// Bit 2: send the CD audio input through the reverb.
+    pub const CD_AUDIO_REVERB: u16 = 1 << 2;
     /// Bits 5..=0: the part of the register the SPU applies after a delay;
     /// [`super::status::MODE_MASK`] reads the applied value back.
     pub const MODE_MASK: u16 = 0x3f;
