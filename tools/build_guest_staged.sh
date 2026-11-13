@@ -101,10 +101,14 @@ if [ -n "${PSOXIDE_GUEST_LINK_ELF:-}" ]; then
 fi
 
 # Everything the guest link closure reads. Directories are mirrored with
-# --delete so a removed source file cannot survive in the stage.
+# --delete so a removed source file cannot survive in the stage. A file the guest build reads
+# that is missing here fails the staged build; crates/psx-gate/tests/staged_closure.rs checks the
+# list against the files the closure sources pull in (#[path], include!, include_str!).
 CLOSURE="rust-toolchain.toml
 crates/psx-hw
 crates/psxed-format
+crates/psx-gate/src
+sdk/profile.toml
 sdk/psoxide.ld
 sdk/Cargo.toml
 sdk/crates
