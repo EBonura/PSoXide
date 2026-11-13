@@ -363,6 +363,14 @@ impl SpuDma {
             return false;
         };
         enable_channel(Channel::Spu);
+        self.write_counted(words, block_words, block_count)
+    }
+
+    /// [`write_blocks`](Self::write_blocks) with the block count worked out and the
+    /// channel enabled by the caller (`enable_channel(Channel::Spu)`): `words` is
+    /// exactly `block_count` blocks of `block_words` words, neither zero. For a caller
+    /// that sends many pieces and divides and enables once.
+    pub fn write_counted(&mut self, words: &[u32], block_words: u16, block_count: u16) -> bool {
         // SAFETY: the transfer reads `block_words * block_count` words from
         // `words`, which is exactly the slice (a whole number of non-empty
         // blocks, checked above), borrowed until this function returns. The

@@ -1008,8 +1008,10 @@ impl ReverbInput {
 /// SPUCNT bits [`stop_reverb`] clears and [`Spu::start_reverb`] sets.
 const REVERB_CONTROL_BITS: u16 = spucnt_bits::REVERB_MASTER | spucnt_bits::CD_AUDIO_REVERB;
 
-/// Words sent per piece when clearing a work area (256 bytes).
-const REVERB_CLEAR_WORDS: usize = 64;
+/// Words sent per piece when clearing a work area: 128 bytes, two of the 16-word blocks the FIFO takes.
+/// On the emulator (three presets, two areas) this clears in 171 and 251 HBlanks; a 16-word piece takes
+/// 177 and 258, because each piece pays the channel's start and wait, and costs only 64 bytes less stack.
+const REVERB_CLEAR_WORDS: usize = 32;
 
 impl Spu {
     /// Start the reverb: stop it, zero the work area, load the preset, route
@@ -1020,8 +1022,9 @@ impl Spu {
     /// signed 16-bit level, `0x3FFF` the loudest in range, negative values
     /// invert phase. Change it later with [`set_reverb_depth`].
     ///
-    /// The work area is cleared by DMA in 256-byte chunks, so this is a
-    /// load-time call, not a per-frame one.
+    /// The work area is cleared by DMA in 128-byte pieces sent from a block of
+    /// zeros on the caller's stack (128 bytes for the length of the call, none
+    /// in the image), so this is a load-time call, not a per-frame one.
     ///
     /// # Panics
     /// If `area` is smaller than `preset.work_bytes`.
@@ -1040,8 +1043,11 @@ impl Spu {
         stop_reverb();
         clear_reverb_area(&mut self.0, area);
         write_reg16(REVERB_WORK_BASE, (area.base / 8) as u16);
-        for (i, &value) in preset.registers.iter().enumerate() {
-            write_reg16(REVERB_COEFFICIENTS + 2 * i as u32, value);
+        // A loop, kept a loop: the opaque count stops the compiler unrolling 32 stores.
+        let mut register = REVERB_COEFFICIENTS;
+        for &value in preset.registers.iter().take(core::hint::black_box(32)) {
+            write_reg16(register, value);
+            register += 2;
         }
         write_reg16(voice_mask::REVERB_ENABLE_LO, input.voices as u16);
         write_reg16(
@@ -1083,19 +1089,16 @@ pub fn set_reverb_depth(depth: i16) {
     write_reg16(REVERB_VOL_RIGHT, depth as u16);
 }
 
-// Zero `area` in one DMA session: the SPU's transfer address advances by
-// itself, so each 256-byte piece only re-arms the channel.
+// Zero `area` in one DMA session. The zeros are a block on the stack, not a
+// static: it lives only for the call, so the reverb costs a game no RAM of its own.
 fn clear_reverb_area(dma: &mut SpuDma, area: ReverbArea) {
-    // One block of zeros, word-aligned for DMA.
-    static ZERO: [u32; REVERB_CLEAR_WORDS] = [0; REVERB_CLEAR_WORDS];
-    let spucnt = begin_dma_write(SpuAddr::new(area.base));
-    let mut left = area.bytes / 4;
-    while left > 0 {
-        let words = left.min(REVERB_CLEAR_WORDS as u32);
-        send_dma_words(dma, &ZERO[..words as usize], dma_block_size(words));
-        left -= words;
-    }
-    end_dma_write(spucnt);
+    let zeros = [0u32; REVERB_CLEAR_WORDS];
+    dma_write(
+        dma,
+        SpuAddr::new(area.base),
+        core::hint::black_box(&zeros),
+        area.bytes / 4,
+    );
 }
 
 // ======================================================================
@@ -1155,13 +1158,11 @@ fn upload_adpcm_dma(dma: &mut SpuDma, dest: SpuAddr, bytes: &[u8]) -> bool {
         return false; // larger than one block-sync transfer can describe
     }
 
-    let spucnt = begin_dma_write(dest);
     // SAFETY: `bytes` is word-aligned and a whole number of words (checked
     // above), so it is exactly `words` initialised `u32`s.
     let source =
         unsafe { core::slice::from_raw_parts(bytes.as_ptr().cast::<u32>(), words as usize) };
-    send_dma_words(dma, source, block_size);
-    end_dma_write(spucnt);
+    dma_write(dma, dest, source, words);
     true
 }
 
@@ -1184,8 +1185,37 @@ fn dma_block_size(words: u32) -> u32 {
 
 // A DMA transfer session is the three steps below: `begin_dma_write`, any
 // number of `send_dma_words` (the SPU's transfer address advances by itself
-// from one to the next), `end_dma_write`. Every DMA write into sound RAM goes
-// through them, whole uploads and the reverb clear alike.
+// from one to the next), `end_dma_write`. `dma_write` is the one place that
+// runs them, for whole uploads and the reverb clear alike, so the code exists
+// once in the image.
+
+/// Write `total_words` words to sound RAM at `dest` in one session, sending
+/// `source` over and over (once, for an upload; many times, for a fill) and a
+/// shorter piece last when `source` does not divide `total_words`.
+/// `total_words` must be a multiple of 2 and `source` must not be empty.
+#[inline(never)]
+fn dma_write(dma: &mut SpuDma, dest: SpuAddr, source: &[u32], total_words: u32) {
+    let spucnt = begin_dma_write(dest);
+    enable_dma_channel();
+    // A piece is `source`, or what is left of it at the end. The block size and count
+    // are worked out when the piece's length changes, not for every piece: the division
+    // is the slowest thing in a send, and a fill sends hundreds of pieces.
+    let piece = source.len() as u32;
+    let mut left = total_words;
+    let mut words = 0;
+    let (mut block, mut count) = (0, 0);
+    while left > 0 {
+        let now = left.min(piece);
+        if now != words {
+            words = now;
+            block = dma_block_size(words);
+            count = words / block;
+        }
+        send_dma_words(dma, &source[..words as usize], block, count);
+        left -= words;
+    }
+    end_dma_write(spucnt);
+}
 
 /// Start a DMA write session at `dest`. Returns the SPUCNT value (transfer
 /// mode Stop) that [`end_dma_write`] restores.
@@ -1210,16 +1240,25 @@ fn begin_dma_write(dest: SpuAddr) -> u16 {
     spucnt
 }
 
+/// The SPU's DMA channel on, once for the session, not for every piece.
+#[cfg(not(test))]
+fn enable_dma_channel() {
+    psx_io::dma::enable_channel(psx_io::dma::Channel::Spu);
+}
+
+#[cfg(test)]
+fn enable_dma_channel() {}
+
 /// Send `source` to the open session: channel 4, main RAM -> SPU, block-sync,
 /// forward, start; blocks until the channel is done. `block_size` (words) must
 /// divide `source.len()` and be at most 16.
 #[cfg(not(test))]
-fn send_dma_words(dma: &mut SpuDma, source: &[u32], block_size: u32) {
-    let _ = dma.write_blocks(source, block_size as u16);
+fn send_dma_words(dma: &mut SpuDma, source: &[u32], block_size: u32, blocks: u32) {
+    let _ = dma.write_counted(source, block_size as u16, blocks as u16);
 }
 
 #[cfg(test)]
-fn send_dma_words(_dma: &mut SpuDma, source: &[u32], block_size: u32) {
+fn send_dma_words(_dma: &mut SpuDma, source: &[u32], block_size: u32, _blocks: u32) {
     mock::dma(source.len() as u32, block_size);
 }
 
@@ -1508,9 +1547,9 @@ mod tests {
             Write(TRANSFER_ADDR, 0xea44),
             Write(SPUCNT, 0xc020),
         ];
-        // 11,128 words: 173 pieces of 64 (block 16) and a last one of 56 (block 8).
-        want.extend((0..173).map(|_| Dma(64, 16)));
-        want.push(Dma(56, 8));
+        // 11,128 words: 347 pieces of 32 (block 16) and a last one of 24 (block 8).
+        want.extend((0..347).map(|_| Dma(32, 16)));
+        want.push(Dma(24, 8));
         want.extend([Write(SPUCNT, 0xc000), Write(REVERB_WORK_BASE, 0xea44)]);
         for (i, &v) in ReverbPreset::HALL.registers.iter().enumerate() {
             want.push(Write(REVERB_COEFFICIENTS + 2 * i as u32, v));

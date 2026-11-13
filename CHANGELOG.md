@@ -6,6 +6,17 @@ No program depends on a BIOS any more, not a call into one and not the state one
 every program works on every Sony BIOS and on OpenBIOS).
 
 
+
+- `psx-spu`'s reverb path costs a program less RAM and no time: the zero block `start_reverb` cleared the work area from was a 256-byte
+  static (the 256 B it cost every game that calls it); it is now a block of 128 bytes on the caller's stack for the length of the
+  call (`start_reverb`'s frame grows from 40 to 200 bytes; pieces of 16 words, 64 bytes, take 177 and 258 HBlanks against today's 174
+  and 255, so they are not used); the DMA write session (begin, send, end) is one routine for uploads, the silence block and the
+  reverb clear instead of being inlined into each; the 32 coefficient writes are a loop, not 32 unrolled stores; and a fill enables the
+  channel and works out its block size and count once, not for every piece (`psx_io::dma::SpuDma::write_counted`, which
+  `write_blocks` now calls after enabling the channel). In a program that calls `start_reverb`, `stop_reverb` and `set_reverb_depth`
+  (opt-level 3): text 9,384 -> 8,560, data 840 -> 616, bss 12 -> 12, total 10,236 -> 9,188. `start_reverb` takes 174, 255, 174, 254,
+  174, 255 HBlanks before and 171, 251, 172, 251, 171, 250 after (three presets, two areas), and every SPU register read back after
+  `start_reverb`, `set_reverb_depth` and `stop_reverb` is identical.
 - `psx-splash` links less: `draw_line` walks the line by character with no re-slicing and no division by zero, so the
   splash holds no panic path of its own (a build that keeps formatted panics no longer links `slice_error_fail`, the
   `usize` formatter or `report_panic` for it), and its text loop is built for size. In a program that only calls the
