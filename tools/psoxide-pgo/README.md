@@ -301,6 +301,7 @@ Variants, joined with `+` to combine (`accurate+hot=1000`):
 | `noreplay` | `-Cllvm-args=-disable-sample-loader-inlining`: do not replay the profiled build's inlining; inlinee samples merge into their own functions |
 | `nopgso`   | `-Cllvm-args=-pgso=false`: do not optimise profile-cold code for size |
 | `profi`    | `-Cllvm-args=-sample-profile-use-profi`: infer block counts where samples are missing |
+| `hotcount=N` | `-Cllvm-args=-profile-summary-hot-count=N`: a fixed count above which the profile calls code hot, in place of the one derived from the profile's own samples (see "Troubleshooting") |
 | `llvm=-F`  | `-Cllvm-args=-F`, any other LLVM option (`llvm=-sample-profile-inline-size`) |
 
 A variant that fails to build shows as a failed row in `choose` instead of
@@ -357,7 +358,8 @@ Builds each `--variant` in turn, packs it if `--pack` is given, and runs
 prints (no spaces in the value) becomes a column.
 
 With no `--variant`, the candidates are `off`, `default`, `hot=500`,
-`hot=500+profi`, `accurate+nopgso+hot=1000` and `accurate+nopgso+hot=1500`:
+`hot=500+profi`, `hot=500+profi+hotcount=80`, `accurate+nopgso+hot=1000` and
+`accurate+nopgso+hot=1500`:
 the winners so far were `hot=500+profi` on VoXide 895cb60 (see the table
 under `measure`), `hot=1000` on hl-psx and cs-psx, and `accurate` with
 `-pgso=false` and `hot=1500` on Cortex (see "Troubleshooting"). With
@@ -867,7 +869,7 @@ The SDK's own `make repro-check` runs the gate on `editor-playtest` and `hello-e
   by 0.85 or 1.2 did not move it, and swapping `main`'s record between the two profiles made
   both worse (62 to 66 KB), so no one record is to blame. A hot count that does
   not depend on the profile's own distribution flattens it:
-  `hot=500+profi+llvm=-profile-summary-hot-count=80` left the new profile 87,916 B
+  `hot=500+profi+hotcount=80` left the new profile 87,916 B
   and the old one 95,724 B at the same work. Gate such a variant like any other,
   and give `choose` the RAM the build being replaced leaves (`--ram-floor`), so a
   collection that inlines more is refused instead of committed.

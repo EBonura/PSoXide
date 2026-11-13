@@ -428,6 +428,11 @@ fn variant_flags(variant: &str) -> Result<Option<Vec<String>>> {
                         .parse()
                         .map_err(|_| format!("hot= wants a number, not {threshold:?}"))?;
                     flags.push(llvm(&format!("-hot-callsite-threshold={threshold}")));
+                } else if let Some(count) = part.strip_prefix("hotcount=") {
+                    let count: u32 = count
+                        .parse()
+                        .map_err(|_| format!("hotcount= wants a number, not {count:?}"))?;
+                    flags.push(llvm(&format!("-profile-summary-hot-count={count}")));
                 } else if let Some(flag) = part.strip_prefix("llvm=").filter(|f| f.starts_with('-'))
                 {
                     flags.push(llvm(flag));
@@ -2466,6 +2471,7 @@ fn choose(guest: &Guest, options: &Options) -> Result<()> {
             "default",
             "hot=500",
             "hot=500+profi",
+            "hot=500+profi+hotcount=80",
             "accurate+nopgso+hot=1000",
             "accurate+nopgso+hot=1500",
         ]
@@ -2906,6 +2912,15 @@ mod tests {
                 "-Cllvm-args=-sample-profile-inline-size".to_string(),
             ])
         );
+        assert_eq!(
+            variant_flags("hot=500+profi+hotcount=80").unwrap(),
+            Some(vec![
+                "-Cllvm-args=-hot-callsite-threshold=500".to_string(),
+                "-Cllvm-args=-sample-profile-use-profi".to_string(),
+                "-Cllvm-args=-profile-summary-hot-count=80".to_string(),
+            ])
+        );
+        assert!(variant_flags("hotcount=many").is_err());
         assert!(variant_flags("hot=lots").is_err());
         assert!(variant_flags("llvm=pgso").is_err());
         assert!(variant_flags("fast").is_err());
