@@ -810,6 +810,7 @@ fn finish_failed_polled_command(irq_enable: u8) {
     select_index(0);
 }
 
+#[inline(never)]
 fn read_response_fifo() -> Response {
     select_index(0);
 
@@ -823,7 +824,8 @@ fn read_response_fifo() -> Response {
 }
 
 fn drain_response_fifo() {
-    let _ = read_response_fifo();
+    // The response FIFO holds at most 16 bytes: one shared copy of the loop, not one at each call.
+    drain_response_limited(16);
 }
 
 fn wait_param_room_bounded(mut spins: u32) -> bool {
