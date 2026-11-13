@@ -5,6 +5,18 @@
 No program depends on a BIOS any more, not a call into one and not the state one leaves behind (Manny's rule:
 every program works on every Sony BIOS and on OpenBIOS).
 
+- `psx-splash`: the one boot splash. `psx_splash::show(gpu, buffers, line, brightness, buttons)` plays the Bonnie
+  Studios mark and one line of text with a sweeping sheen (150 frames, a fresh Cross, Circle or Start press skips it
+  after 8) and returns; the line is the only thing a game chooses (`"Built with PSoXide"`, for example). The mark is
+  stored once, run-length coded (4,692 bytes of the 8,192 a plain copy takes), and nothing is linked into a program
+  that does not call it. It reads the pad only through the closure it is given, lifts the presentation cap for its own
+  150 frames and puts it back. VoXide and the Celeste collection each swapped their own copy for the call (throwaway
+  branches, not landed): every frame of the splash is pixel-identical on the emulator (31 and 35 checkpoints) and
+  VoXide's own strict splash golden passes unchanged. Link maps: VoXide text +1,184, rodata -3,597, free RAM +2,416;
+  Celeste text +2,212, rodata -3,395, free RAM +1,184. The splash is VBlank-locked, so its length is unchanged; CPU
+  cycles inside it, measured on the emulator: VoXide +24,142 once before the first frame (it uploads its own font
+  atlas) and +1,296 a frame, Celeste about +8,200 a frame (its own wait loop against psx-rt's is the likely part; not
+  split further).
 - `psx_rt::dispatch`: one interrupt dispatcher, a short assembly routine. psx-rt's exception handler is the only
   handler in the vector; code that needs an interrupt registers with `on_vblank(handler)` (4 slots, run after psx-rt's
   VBlank work) or `attach(source, handler)` / `detach(source)`, and the handler runs on one shared 512-byte private

@@ -57,6 +57,11 @@
       "purpose": "An animated LOADING indicator for blocking loads: a label with stepping dots or a dot spinner and a breathing ink, drawn as plain GP0 rectangles from any `BitmapFont` (no VRAM, no atlas, no heap). Polled from a load loop, redraws only when the picture changes. Host-tested ([adoption guide](https://github.com/EBonura/PSoXide/tree/main/sdk/docs/LOADING-INDICATOR.md))."
     },
     {
+      "name": "psx-splash",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/crates/psx-splash",
+      "purpose": "The boot splash every PSoXide game opens with: the Bonnie Studios mark and one line of text (`Built with PSoXide`, say) with a sweeping sheen, faded in, held and faded out over 150 frames, skipped by a fresh Cross, Circle or Start press. One call, `psx_splash::show`, with the pad read through the caller's own closure; a program that does not call it links none of it. Host-tested."
+    },
+    {
       "name": "psx-gte",
       "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/crates/psx-gte",
       "purpose": "GTE (COP2) wrappers. MIPS emits inline-asm coprocessor ops; host routes through `psx-gte-core`."

@@ -233,6 +233,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "psx-splash"
+version = "0.1.0"
+dependencies = [
+ "psx-display",
+ "psx-font",
+ "psx-gpu",
+ "psx-pad",
+ "psx-rt",
+ "psx-vram",
+]
+
+[[package]]
 name = "psx-spu"
 version = "0.1.0"
 dependencies = [

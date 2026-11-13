@@ -24,6 +24,7 @@ members = [
     "crates/psx-pack",
     "crates/psx-osk",
     "crates/psx-loading",
+    "crates/psx-splash",
     "crates/psx-fmv",
     "crates/psx-tick",
     "crates/psx-cdstream",
@@ -110,6 +111,7 @@ psx-pack = { path = "crates/psx-pack" }
 psx-fmv  = { path = "crates/psx-fmv" }
 psx-osk = { path = "crates/psx-osk" }
 psx-loading = { path = "crates/psx-loading" }
+psx-splash = { path = "crates/psx-splash" }
 psx-cdstream = { path = "crates/psx-cdstream" }
 psx-residency = { path = "crates/psx-residency" }
 psx-residency-sim = { path = "crates/psx-residency-sim" }
