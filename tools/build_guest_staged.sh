@@ -41,6 +41,8 @@ EXE_RELATIVE="build/examples/mipsel-sony-psx/release/editor-playtest.exe"
 # dependency outside the workspace root, rustc seeds every symbol disambiguator from it, and the stage root is a
 # parameter (PSOXIDE_GUEST_STAGE_ROOT), so two stage roots gave different guests. psoxide-rustc (SDK
 # tools/psoxide-pgo) replaces that one value with a hash of the crate name, features and stage-relative path.
+# Read before the build below sets RUSTC_WRAPPER for the command: this sh applies prefix assignments in order.
+inner_wrapper="${RUSTC_WRAPPER:-}"
 repro_rustc="${PSOXIDE_RUSTC:-}"
 if [ -z "$repro_rustc" ] && [ -f "$ROOT/tools/psoxide-pgo/src/bin/psoxide-rustc.rs" ]; then
     (cd "$ROOT" && cargo build -q --release --locked -p psoxide-pgo --bin psoxide-rustc \
@@ -253,7 +255,7 @@ CARGO_TARGET_DIR="$STAGE/build/examples" \
 RUSTFLAGS="$RUSTFLAGS_VALUE" \
 RUSTC_WRAPPER="$repro_rustc" \
 PSOXIDE_REPRO_ROOT="$STAGE" \
-PSOXIDE_REPRO_INNER="${RUSTC_WRAPPER:-}" \
+PSOXIDE_REPRO_INNER="$inner_wrapper" \
     cargo build --release "$@"
 
 staged_exe="$STAGE/$EXE_RELATIVE"
