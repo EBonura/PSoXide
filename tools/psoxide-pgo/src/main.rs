@@ -51,6 +51,11 @@ mod ram;
 mod stale;
 mod work;
 
+// `psoxide-pgo` is also its own `RUSTC_WRAPPER` (see `pipeline::AS_RUSTC_VAR`): the same code as the
+// standalone `psoxide-rustc` binary, so `apply` pins a build without a second binary to build.
+#[path = "bin/psoxide-rustc.rs"]
+mod rustc_wrap;
+
 use gimli::{AttributeValue, DebuggingInformationEntry, EndianSlice, RunTimeEndian, UnitOffset};
 use object::{Object, ObjectSection, ObjectSymbol};
 
@@ -997,6 +1002,9 @@ fn ram_report(map: &Path, floor: Option<u32>) -> Result<()> {
 }
 
 fn main() -> ExitCode {
+    if env::var_os(pipeline::AS_RUSTC_VAR).is_some_and(|value| !value.is_empty()) {
+        return rustc_wrap::main();
+    }
     let args: Vec<String> = env::args().skip(1).collect();
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
     let result = match words.as_slice() {

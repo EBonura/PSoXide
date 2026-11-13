@@ -698,6 +698,29 @@ The build sees `PSOXIDE_REPRO_CHECKOUT`, `PSOXIDE_REPRO_OUT` and
 `PSOXIDE_GUEST_STAGE_ROOT`. Run it before landing a build-script change and
 after every SDK repin.
 
+**`apply` pins by itself.** `psoxide-pgo apply|collect|order|choose` read `cargo metadata` for the guest.
+When a path dependency lies outside the workspace root they run cargo with `psoxide-pgo` itself as the
+`RUSTC_WRAPPER` (it behaves as `psoxide-rustc` when `PSOXIDE_PGO_AS_RUSTC` is set; `PSOXIDE_REPRO_ROOT`
+is the common directory of the workspace and those dependencies, a `RUSTC_WRAPPER` already set, such as
+sccache, becomes `PSOXIDE_REPRO_INNER`). A guest whose workspace root holds every path dependency (the
+`.psoxide` tree inside a repo-root workspace: voxide, hl-psx, hk-psx, quake-psx, nitroxide, cs-psx,
+wipeout-psx) is left exactly as it was, so its executable does not change. A caller that already runs
+under `psoxide-rustc` is left alone. `tools/build_guest_staged.sh` has no unpinned mode: without
+`psoxide-rustc` it stops.
+
+**Per-game check.** Every game gets a `repro-check` target that runs the gate on its own disc build.
+Not part of lint (two full builds); it is a step of the fleet repin's gate list. For a game Makefile that
+builds with `make compile` and hydrates `.psoxide` in the checkout (the clones carry it):
+
+```make
+repro-check:
+	cargo run -q --release --locked --manifest-path "$(PSOXIDE)/tools/psoxide-pgo/Cargo.toml" \
+		--bin repro-gate -- --source "$(CURDIR)" --build 'make compile' \
+		--artifact '{checkout}/game/target/mipsel-sony-psx/release/<game>.exe'
+```
+
+The SDK's own `make repro-check` runs the gate on `editor-playtest` and `hello-engine`.
+
 ## Profile quality notes
 
 - **Head samples** (a function's entry count) come from the samples at its

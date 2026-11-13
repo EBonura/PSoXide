@@ -105,6 +105,10 @@ struct Guest {
     /// The guest's linker script, for the sections it places ahead of the
     /// catch-all `*(.text .text.*)`, which no ordering file can move.
     linker_script: PathBuf,
+    /// Set when a path dependency lies outside the workspace root: the
+    /// directory every such path is under, which the build is pinned to
+    /// (see [`Guest::pin_root`]).
+    repro_root: Option<PathBuf>,
 }
 
 /// One link: the executable cargo reports and the link map the driver asked
@@ -320,6 +324,11 @@ pub fn main(mode: &str, args: &[String]) -> Result<()> {
             .linker_script
             .take()
             .unwrap_or_else(|| tools.join("../sdk/psoxide.ld")),
+        repro_root: None,
+    };
+    let guest = Guest {
+        repro_root: guest.pin_root()?,
+        ..guest
     };
     for name in ["RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS"] {
         if env::var_os(name).is_some_and(|value| !value.is_empty()) {
@@ -478,6 +487,39 @@ fn run(command: &mut Command, what: &str) -> Result<()> {
     Ok(())
 }
 
+/// Set on the `cargo` that `psoxide-pgo` runs when it makes itself the
+/// `RUSTC_WRAPPER`: `main` then behaves as `psoxide-rustc`.
+pub const AS_RUSTC_VAR: &str = "PSOXIDE_PGO_AS_RUSTC";
+
+/// The deepest directory that holds the workspace and every local package,
+/// when some local package lies outside the workspace root; `None` when the
+/// workspace root holds them all. Reads `cargo metadata --format-version 1`.
+fn escaping_root(metadata: &serde_json::Value) -> Option<PathBuf> {
+    let workspace = Path::new(metadata["workspace_root"].as_str()?);
+    let mut root = workspace.to_path_buf();
+    let mut escapes = false;
+    for package in metadata["packages"].as_array()? {
+        if !package["source"].is_null() {
+            continue;
+        }
+        let Some(dir) = package["manifest_path"]
+            .as_str()
+            .and_then(|path| Path::new(path).parent())
+        else {
+            continue;
+        };
+        if !dir.starts_with(workspace) {
+            escapes = true;
+            while !dir.starts_with(&root) {
+                if !root.pop() {
+                    break;
+                }
+            }
+        }
+    }
+    escapes.then_some(root)
+}
+
 impl Guest {
     /// Build with `flags` appended to the guest's own rustflags and return
     /// the executable cargo reports, with the link map when the link wrote
@@ -487,6 +529,16 @@ impl Guest {
         let mut flags = flags.to_vec();
         let mut command = Command::new("cargo");
         command.current_dir(&self.crate_dir).args(&self.cargo);
+        if let Some(root) = &self.repro_root {
+            let this = env::current_exe()?;
+            if let Some(inner) = env::var_os("RUSTC_WRAPPER").filter(|inner| !inner.is_empty()) {
+                command.env(crate::rustc_wrap::INNER_VAR, inner);
+            }
+            command
+                .env("RUSTC_WRAPPER", this)
+                .env(crate::rustc_wrap::ROOT_VAR, root)
+                .env(AS_RUSTC_VAR, "1");
+        }
         match order {
             Some(order) => command.env(LINK_ORDER_ENV, order),
             None => command.env_remove(LINK_ORDER_ENV),
@@ -573,6 +625,48 @@ impl Guest {
         let dir = self.target_dir()?.join(TARGET).join("psoxide-pgo-maps");
         fs::create_dir_all(&dir)?;
         Ok(dir.join(format!("{:016x}.map", fnv1a(key.as_bytes()))))
+    }
+
+    /// The directory to pin the build to, when it needs pinning.
+    ///
+    /// Cargo hashes a path dependency outside the workspace root by its
+    /// absolute path, which makes the executable depend on where the
+    /// checkout is (`psoxide-rustc`). A guest whose workspace root holds
+    /// every path dependency (the SDK imported under the game repository's
+    /// root) is already independent of the checkout and is left exactly as
+    /// it is, so adopting this changes no such game's executable. Nothing is
+    /// done when the caller already runs under `psoxide-rustc`.
+    fn pin_root(&self) -> Result<Option<PathBuf>> {
+        let wrapper = env::var_os("RUSTC_WRAPPER").unwrap_or_default();
+        let pinned_already = Path::new(&wrapper).file_name().is_some_and(|name| {
+            name == "psoxide-rustc"
+                || env::current_exe().is_ok_and(|exe| exe.file_name() == Some(name))
+        });
+        if pinned_already || env::var_os(crate::rustc_wrap::ROOT_VAR).is_some_and(|v| !v.is_empty())
+        {
+            return Ok(None);
+        }
+        let mut pass = Vec::new();
+        let mut args = self.cargo.iter();
+        while let Some(arg) = args.next() {
+            if arg == "--config" || arg == "--manifest-path" {
+                pass.push(arg.clone());
+                pass.extend(args.next().cloned());
+            } else if arg.starts_with("--config=") || arg.starts_with("--manifest-path=") {
+                pass.push(arg.clone());
+            }
+        }
+        let output = Command::new("cargo")
+            .current_dir(&self.crate_dir)
+            .args(["metadata", "--format-version", "1"])
+            .args(&pass)
+            .stderr(Stdio::inherit())
+            .output()?;
+        if !output.status.success() {
+            return Err(format!("cargo metadata failed ({})", output.status).into());
+        }
+        let metadata: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        Ok(escaping_root(&metadata))
     }
 
     /// The guest's cargo target directory: its own `--target-dir`, or what
@@ -2572,6 +2666,46 @@ fn ladder_mode(guest: &Guest, options: &Options) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn metadata(workspace: &str, packages: &[(&str, bool)]) -> serde_json::Value {
+        let packages: Vec<_> = packages
+            .iter()
+            .map(|(manifest, registry)| {
+                serde_json::json!({
+                    "manifest_path": manifest,
+                    "source": if *registry { serde_json::json!("registry+x") } else { serde_json::Value::Null },
+                })
+            })
+            .collect();
+        serde_json::json!({ "workspace_root": workspace, "packages": packages })
+    }
+
+    #[test]
+    fn a_workspace_that_holds_its_path_dependencies_is_not_pinned() {
+        let data = metadata(
+            "/co",
+            &[
+                ("/co/game/Cargo.toml", false),
+                ("/co/.psoxide/sdk/crates/psx-rt/Cargo.toml", false),
+                ("/home/u/.cargo/registry/src/x/bitflags/Cargo.toml", true),
+            ],
+        );
+        assert_eq!(escaping_root(&data), None);
+    }
+
+    #[test]
+    fn a_path_dependency_outside_the_workspace_pins_to_their_common_root() {
+        let data = metadata(
+            "/co/game",
+            &[
+                ("/co/game/Cargo.toml", false),
+                ("/co/.psoxide/sdk/crates/psx-rt/Cargo.toml", false),
+                ("/co/.psoxide/crates/psx-hw/Cargo.toml", false),
+                ("/home/u/.cargo/registry/src/x/bitflags/Cargo.toml", true),
+            ],
+        );
+        assert_eq!(escaping_root(&data), Some(PathBuf::from("/co")));
+    }
+
     #[test]
     fn a_link_report_is_its_last_free_and_code_lines() {
         let output = "code 0x80408000..0x8040afc0\nfree 99\nfree 2416\ncode 9f3a\n";
@@ -2590,6 +2724,7 @@ mod tests {
             scanner: None,
             stack_guard: None,
             linker_script: PathBuf::new(),
+            repro_root: None,
         };
         let spaced = guest(&["build", "--target-dir", target.to_str().unwrap()]);
         let joined = guest(&["build", &format!("--target-dir={}", target.display())]);
