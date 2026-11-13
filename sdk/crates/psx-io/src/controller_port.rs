@@ -20,7 +20,7 @@
 //! ```
 
 use crate::periph::ControllerPort;
-use crate::{read_u32, read_u8, write_u16, write_u8};
+use crate::{read_u16, read_u32, read_u8, write_u16, write_u8};
 use psx_hw::sio::sio0;
 
 /// Which socket a transaction addresses.
@@ -117,6 +117,8 @@ pub trait Transport {
     fn set_baud(&mut self, value: u16);
     /// Write the control register.
     fn set_control(&mut self, value: u16);
+    /// Read the control register back.
+    fn control(&mut self) -> u16;
 
     /// Configure the port for 250 kHz, 8N1 and assert `/CS` on `port`.
     ///
@@ -137,6 +139,13 @@ pub trait Transport {
         // assert the select line.
         self.set_control(sio0::ctrl::ACK);
         self.set_control(sio0::selected_ctrl(port.is_two(), arm_ack_irq));
+    }
+
+    /// Whether the `/ACK` interrupt is armed in `CTRL`. A pad poll arms it only
+    /// when it has seen a port acknowledge a byte with the latch alone, so this
+    /// tells a caller, after the fact, that the port is of that kind.
+    fn ack_irq_armed(&mut self) -> bool {
+        self.control() & sio0::ctrl::ACK_IRQ_EN != 0
     }
 
     /// Release `/CS`, which resets the attached device's state machine.
@@ -396,6 +405,13 @@ impl Transport for ControllerPort {
         // socket and resets the port, nothing else.
         unsafe { write_u16(sio0::CTRL, value) }
     }
+
+    #[inline(always)]
+    fn control(&mut self) -> u16 {
+        // SAFETY: CTRL is the port's aligned 16-bit control register; reading it
+        // has no side effects.
+        unsafe { read_u16(sio0::CTRL) }
+    }
 }
 
 #[cfg(test)]
@@ -447,6 +463,9 @@ mod tests {
         fn set_baud(&mut self, _value: u16) {}
         fn set_control(&mut self, value: u16) {
             self.control.push(value);
+        }
+        fn control(&mut self) -> u16 {
+            self.control.last().copied().unwrap_or(0)
         }
     }
 
@@ -590,6 +609,20 @@ mod tests {
         bus.received.push(0x41);
         assert_eq!(bus.exchange(Port::One, 0x42, false, TIMING), Ok(0x41));
         assert!(bus.control.is_empty());
+    }
+
+    #[test]
+    fn the_ack_interrupt_reads_as_armed_only_after_the_latch_exchange_arms_it() {
+        const IRQ: u32 = sio0::stat::IRQ;
+        let mut level = Script::with_status(&[TX, RX, DSR, 0]);
+        level.received.push(0x41);
+        assert_eq!(level.exchange(Port::One, 0x42, false, TIMING), Ok(0x41));
+        assert!(!level.ack_irq_armed());
+
+        let mut latch = Script::with_status(&[TX, RX, IRQ, IRQ, 0]);
+        latch.received.push(0x41);
+        assert_eq!(latch.exchange(Port::One, 0x42, false, TIMING), Ok(0x41));
+        assert!(latch.ack_irq_armed());
     }
 
     #[test]

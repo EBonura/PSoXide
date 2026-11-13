@@ -1179,6 +1179,25 @@ fn pad_byte<T: Transport>(bus: &mut T, socket: Port, tx: u8, is_last: bool) -> O
     pad_exchange(bus, socket, tx, is_last, Timing::PAD).ok()
 }
 
+/// The command byte got no usable answer. On a port that shows the live `/ACK`
+/// level that is a failed poll, retried by the caller, as a glitching pad needs.
+/// A port that only latches (PCSX-ReARMed) latches the address byte even with
+/// nothing in the socket, so the address byte cannot tell a pad from an empty
+/// socket there; the command byte can, since an empty socket answers `0xFF` and
+/// never acknowledges it. The exchange arms the ACK interrupt only after a byte
+/// was acknowledged by the latch alone, so the armed bit says which kind of port
+/// this is, and an empty socket on it is reported absent in this one poll.
+/// Cold: a real pad never gets here.
+#[cold]
+#[inline(never)]
+fn command_byte_failed<T: Transport>(bus: &mut T, error: ExchangeError) -> Option<RawPoll> {
+    if matches!(error, ExchangeError::AckTimeout { reply: 0xff }) && bus.ack_irq_armed() {
+        Some(RawPoll::NONE)
+    } else {
+        None
+    }
+}
+
 /// A complete selected-port poll, or no usable packet. The current ID
 /// determines the length; a mode toggle never reuses an earlier length.
 fn poll_selected<T: Transport>(bus: &mut T, socket: Port, rumble: Rumble) -> Option<RawPoll> {
@@ -1194,7 +1213,10 @@ fn poll_selected<T: Transport>(bus: &mut T, socket: Port, rumble: Rumble) -> Opt
         Err(ExchangeError::AckTimeout { reply: 0xff }) => return Some(RawPoll::NONE),
         Err(_) => return None,
     }
-    let id_low = pad_byte(bus, socket, 0x42, false)?;
+    let id_low = match pad_exchange(bus, socket, 0x42, false, Timing::PAD) {
+        Ok(reply) => reply,
+        Err(error) => return command_byte_failed(bus, error),
+    };
     let mode = mode_from_id_low(id_low);
     if matches!(mode, PadMode::Unknown | PadMode::Disconnected) {
         return None;

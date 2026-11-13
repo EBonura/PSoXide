@@ -745,3 +745,41 @@ fn no_pad_in_the_socket_costs_the_same_with_every_ack_signal() {
     }
     std::eprintln!("no-pad poll: {base} model ticks");
 }
+
+#[test]
+fn a_latch_only_port_with_an_empty_socket_reads_disconnected_in_one_transaction() {
+    // ReARMed latches the address byte whether or not anything is plugged in.
+    let ticks = |model: Model| {
+        let pad = poll_with(model);
+        assert_eq!(pad.mode, PadMode::Disconnected);
+        mock::with(|m| (m.attempts, m.now))
+    };
+    let (_, plain) = ticks(Model {
+        id: 0xff,
+        ..Model::default()
+    });
+    let (attempts, latched) = ticks(Model {
+        id: 0xff,
+        latch_only: true,
+        latch_free_bytes: 2,
+        empty_latches: true,
+        ..Model::default()
+    });
+    assert_eq!(attempts, 1);
+    // One extra short wait for the command byte: the same budget as the
+    // address byte, so about twice the ordinary empty-socket poll at most.
+    assert!(latched <= plain * 2, "{latched} against {plain}");
+    std::eprintln!("empty socket: {plain} ticks plain, {latched} latch-only");
+}
+
+#[test]
+fn a_glitching_pad_on_a_live_level_port_is_still_retried() {
+    // The address byte is acknowledged by the live level, so a command byte
+    // answered 0xFF without an ACK is a glitch, not an empty socket.
+    let pad = poll_with(Model {
+        sequence: vec![(0x73, Fault::Ack, 1), (0x73, Fault::None, 0)],
+        ..latch_model(0x73)
+    });
+    assert_complete(pad, 0x73);
+    mock::with(|m| assert_eq!(m.attempts, 2));
+}

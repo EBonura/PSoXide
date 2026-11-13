@@ -95,6 +95,11 @@ pub struct Model {
     /// Packet bytes, counted from the first, whose ACK latches without the
     /// interrupt being armed (ReARMed: 2, then it needs CTRL bit 12).
     pub latch_free_bytes: usize,
+    /// An empty socket (id 0xFF) still latches the address byte, as ReARMed does:
+    /// the reply is 0xFF, nothing follows.
+    pub empty_latches: bool,
+    /// The last value written to CTRL.
+    pub ctrl: u16,
     pub armed: bool,
     pub latched: bool,
     pub latch_done_for: u64,
@@ -157,6 +162,8 @@ impl Default for Model {
             latch_only: false,
             latch_too: false,
             latch_free_bytes: 0,
+            empty_latches: false,
+            ctrl: 0,
             armed: false,
             latched: false,
             latch_done_for: 0,
@@ -206,6 +213,7 @@ pub unsafe fn write_u16(addr: u32, value: u16) {
     with(|m| {
         m.now += 1;
         let selected = value & psx_hw::sio::sio0::ctrl::DTR != 0;
+        m.ctrl = value;
         if value & psx_hw::sio::sio0::ctrl::RESET != 0 {
             // The UART keeps a late reply across deselection; only RESET
             // cancels it.
@@ -340,7 +348,9 @@ pub unsafe fn write_u8(addr: u32, value: u8) {
             let ready = m.now + if late { 33_820 } else { m.rx_delay };
             m.pending.push((rx, ready));
         }
-        let acked = m.id != 0xff && index < m.final_step && !faulted(m, Fault::Ack, index);
+        let acked = (m.id != 0xff || (m.empty_latches && index == 0))
+            && index < m.final_step
+            && !faulted(m, Fault::Ack, index);
         (m.ack_at, m.ack_end) = if acked {
             {
                 let delay = match m.slow_ack {
@@ -448,5 +458,8 @@ impl psx_io::controller_port::Transport for MockBus {
     fn set_control(&mut self, value: u16) {
         // SAFETY: as above.
         unsafe { write_u16(CTRL, value) }
+    }
+    fn control(&mut self) -> u16 {
+        with(|m| m.ctrl)
     }
 }
