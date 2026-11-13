@@ -387,6 +387,15 @@ struct Playtest {
     /// (combat damage, liquid hazards, lethal water). Non-zero locks
     /// player input until the shared checkpoint/spawn respawn completes.
     hazard_death_ticks_remaining: u8,
+    /// Engine units still to shove the player along a hazard's thin axis after
+    /// a touch (see `LogicRuntime::take_hazard_push`), the axis (`true` Z) and
+    /// the direction (`true` toward larger coordinates).
+    hazard_push_left: u16,
+    hazard_push_axis_z: bool,
+    hazard_push_toward_max: bool,
+    /// Ticks after a hazard shove during which hazards leave the player alone,
+    /// so one touch cannot chain into a kill.
+    hazard_grace_ticks: u8,
     /// Whether the running death sequence was armed by combat damage
     /// rather than an environmental hazard (respawn logging only).
     death_by_combat: bool,

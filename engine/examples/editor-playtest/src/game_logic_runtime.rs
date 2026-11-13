@@ -1871,12 +1871,98 @@ impl Playtest {
     /// invulnerable player alone, so this only ever sees real hits.
     pub(super) fn apply_logic_hazard_damage(&mut self, ctx: &Ctx) {
         let damage = self.logic.take_hazard_damage();
+        let push = self.logic.take_hazard_push();
         if damage == 0 {
             return;
         }
         telemetry::debug_log("player hazard:logic");
-        if self.apply_untyped_player_damage(damage) {
+        if self.apply_hazard_player_damage(damage) {
+            self.hazard_push_left = 0;
             self.arm_player_death(false, HAZARD_DEATH_TICKS, ctx.sim_tick, ctx.video_hz);
+            return;
+        }
+        let Some(push) = push else {
+            return;
+        };
+        self.react_player_to_hit(damage, false, false, ctx);
+        let mut toward_max = push.toward_max;
+        if push.tie {
+            // Dead centre: carry on the way she faces.
+            let yaw = self.motor.yaw();
+            let facing = if push.axis_z {
+                yaw.cos_q12()
+            } else {
+                yaw.sin_q12()
+            };
+            if facing != 0 {
+                toward_max = facing > 0;
+            }
+        }
+        self.hazard_push_left = push.distance;
+        self.hazard_push_axis_z = push.axis_z;
+        self.hazard_push_toward_max = toward_max;
+        self.hazard_grace_ticks = HAZARD_GRACE_TICKS;
+    }
+
+    /// One tick of the shove a hazard touch gave the player: a few engine
+    /// units along the hazard's thin axis through the same collision the
+    /// motor uses, so a wall stops it and nothing is pushed out of the world.
+    pub(super) fn advance_hazard_push(
+        &mut self,
+        blockers: &[CharacterCollisionCylinder],
+        aabb_blockers: &[CharacterCollisionAabb],
+    ) {
+        if self.hazard_push_left == 0 {
+            return;
+        }
+        if self.hazard_death_ticks_remaining != 0 {
+            self.hazard_push_left = 0;
+            return;
+        }
+        let step = i32::from(self.hazard_push_left).min(HAZARD_PUSH_STEP);
+        let signed = if self.hazard_push_toward_max {
+            step
+        } else {
+            -step
+        };
+        let (dx, dz) = if self.hazard_push_axis_z {
+            (0, signed)
+        } else {
+            (signed, 0)
+        };
+        let config = self.motor_config();
+        let start = self.motor.position();
+        let Some(world_rt) = self.world_rt.as_mut() else {
+            self.hazard_push_left = 0;
+            return;
+        };
+        let moved = world_rt
+            .commit_body_step(
+                start,
+                dx,
+                dz,
+                config.radius,
+                config.height,
+                &self.destructibles,
+                blockers,
+                aabb_blockers,
+            )
+            .ok()
+            .map(|step| step.position)
+            .filter(|end| {
+                // Progress along the push axis, not a slide along a wall.
+                if self.hazard_push_axis_z {
+                    (end.z - start.z).signum() == dz.signum()
+                } else {
+                    (end.x - start.x).signum() == dx.signum()
+                }
+            });
+        match moved {
+            Some(end) => {
+                self.motor.relocate(end);
+                self.hazard_push_left -= step as u16;
+            }
+            None => self.hazard_push_left = 0,
         }
     }
 

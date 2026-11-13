@@ -383,7 +383,10 @@ impl Playtest {
         }
         // A dash's invulnerable frames pass through a hazard, and so does a
         // body already dying: neither is hit or spends the hazard's interval.
-        let hazard_exempt = self.player_invulnerable(ctx) || self.hazard_death_ticks_remaining != 0;
+        let hazard_exempt = self.player_invulnerable(ctx)
+            || self.hazard_death_ticks_remaining != 0
+            || self.hazard_grace_ticks != 0;
+        self.hazard_grace_ticks = self.hazard_grace_ticks.saturating_sub(1);
         self.logic.tick(
             LOGIC.as_slice(),
             psx_game_runtime::logic::LogicTickInput {
@@ -1064,6 +1067,7 @@ impl Playtest {
         };
         telemetry::stage_end(telemetry::stage::SIM_SOLVE);
         self.player_moved_last_tick = motor_frame.moved;
+        self.advance_hazard_push(blockers.as_slice(), aabb_blockers.as_slice());
 
         let hazard_countdown_was_active = self.hazard_death_ticks_remaining > 0;
         if !hazard_countdown_was_active {

@@ -221,9 +221,20 @@ fn scale_node(node: &mut SceneNode) {
             settings.spawn_radius = div_u16(settings.spawn_radius);
         }
         NodeKind::Logic { kind, .. } => match kind {
-            LogicNodeKind::TriggerVolume { size } | LogicNodeKind::Hazard { size, .. } => {
+            LogicNodeKind::TriggerVolume { size } => {
                 for axis in size.iter_mut() {
                     *axis = div_u16_min1(*axis);
+                }
+            }
+            LogicNodeKind::Hazard {
+                size, knockback, ..
+            } => {
+                for axis in size.iter_mut() {
+                    *axis = div_u16_min1(*axis);
+                }
+                // Zero stays "no push".
+                if *knockback > 0 {
+                    *knockback = div_u16_min1(*knockback);
                 }
             }
             LogicNodeKind::Door { slide, .. } => {

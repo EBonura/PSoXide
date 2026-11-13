@@ -20,7 +20,10 @@
 //! sends its targets an explicit On or Off at every change of its cycle; a
 //! [`logic_kind::HAZARD`] is a volume that, while on, reports damage for the
 //! player standing in it ([`LogicRuntime::take_hazard_damage`]) unless the
-//! player is invulnerable. Both re-arm with the records, so a death or a
+//! player is invulnerable. A hazard with a knockback (`arg2`, engine units)
+//! also reports a push out of its volume ([`LogicRuntime::take_hazard_push`]):
+//! a touch hurts a little and shoves the player out the nearer thin face,
+//! whether the player walked into a live volume or it switched on around them. Both re-arm with the records, so a death or a
 //! checkpoint rest restarts every cycle from the same beginning.
 //!
 //! Crate rules hold: no statics, no unsafe, `const N` capacities,
@@ -189,6 +192,22 @@ pub struct LogicTickInput {
     pub player_invulnerable: bool,
 }
 
+/// The shove a hazard hit asks the owner to give the player: out of the
+/// volume through its nearer thin-axis face, then `distance` engine units
+/// along that axis (the way to the face plus the hazard's knockback).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HazardPush {
+    /// The axis the push runs along: `false` X, `true` Z.
+    pub axis_z: bool,
+    /// Push toward the larger coordinate on that axis.
+    pub toward_max: bool,
+    /// The player stood exactly midway: the owner may pick the face by
+    /// facing or velocity and flip `toward_max`.
+    pub tie: bool,
+    /// Engine units to move, at least enough to leave the volume.
+    pub distance: u16,
+}
+
 /// Owned logic runtime over the cooked record table. Record `i`
 /// mirrors `records[i]`; records past `MAX_LOGIC` count as overflow.
 /// `LOGIC_FIRED_WORDS` is the fired-bitset word count the game
@@ -228,6 +247,8 @@ pub struct LogicRuntime<
     player: [i32; 3],
     /// Damage hazards dealt since [`Self::take_hazard_damage`] last ran.
     hazard_damage: u16,
+    /// The push the last hazard hit asked for, until taken.
+    hazard_push: Option<HazardPush>,
     /// The delay queue.
     events: [LogicEvent; MAX_EVENTS],
     /// Rolling stats.
@@ -256,6 +277,7 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
         refused_marks: [0; LOGIC_FIRED_WORDS],
         player: [0; 3],
         hazard_damage: 0,
+        hazard_push: None,
         events: [LogicEvent::INACTIVE; MAX_EVENTS],
         queue_drops: 0,
         depth_drops: 0,
@@ -524,6 +546,13 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
         core::mem::take(&mut self.hazard_damage)
     }
 
+    /// The push the last hit of a hazard with a knockback asked for, then
+    /// clear it. Taken with the damage of the same tick.
+    #[must_use]
+    pub fn take_hazard_push(&mut self) -> Option<HazardPush> {
+        self.hazard_push.take()
+    }
+
     /// Whether the timer at `index` is running (not stopped by an Off, and
     /// started).
     #[must_use]
@@ -720,6 +749,9 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
         self.hazard_damage = self.hazard_damage.saturating_add(record.arg0);
         self.rearm_at[index] = now.saturating_add(u32::from(record.arg1.max(1)));
         self.mark_fired(index);
+        if record.arg2 != 0 {
+            self.hazard_push = Some(exit_push(record, input.player));
+        }
     }
 
     /// Move every sliding door one tick toward its commanded state.
@@ -1057,6 +1089,30 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
             index += 1;
         }
         true
+    }
+}
+
+/// The shove out of a hazard's volume: through the nearer face of its thin
+/// horizontal axis (a gate is thin in the direction it is walked through),
+/// then `arg2` units past it.
+fn exit_push(record: &LevelLogicRecord, player: [i32; 3]) -> HazardPush {
+    let width_x = record.max[0].saturating_sub(record.min[0]);
+    let width_z = record.max[2].saturating_sub(record.min[2]);
+    let axis_z = width_z <= width_x;
+    let axis = if axis_z { 2 } else { 0 };
+    let to_min = player[axis].saturating_sub(record.min[axis]).max(0);
+    let to_max = record.max[axis].saturating_sub(player[axis]).max(0);
+    let toward_max = to_max < to_min;
+    let to_face = to_min.min(to_max);
+    let distance = to_face
+        .saturating_add(i32::from(record.arg2))
+        .saturating_add(1)
+        .clamp(1, i32::from(u16::MAX)) as u16;
+    HazardPush {
+        axis_z,
+        toward_max,
+        tie: to_min == to_max,
+        distance,
     }
 }
 
@@ -2249,6 +2305,203 @@ mod tests {
         assert_eq!(
             damage_over(&mut logic, &RECORDS, [0, 10, 0], false, 31..32),
             [40]
+        );
+    }
+
+    // ---- A timer's visual and its hazard never part ----
+
+    /// Three gates like the laser tunnel's: timers (names 11..13, 90 on and
+    /// 90 off, phases 0, 90, 15) each switching their own hazard (names
+    /// 21..23, a thin 40 deep volume).
+    const fn gate_timer(name: u16, phase: u16) -> LevelLogicRecord {
+        LevelLogicRecord {
+            targetname: name,
+            target: name + 10,
+            ..timer(90, 90, phase, true)
+        }
+    }
+
+    const fn gate_hazard(name: u16, z: i32, on: bool) -> LevelLogicRecord {
+        LevelLogicRecord {
+            targetname: name,
+            min: [-500, 0, z - 20],
+            max: [500, 300, z + 20],
+            ..hazard(5, 1, on)
+        }
+    }
+
+    static GATES: [LevelLogicRecord; 6] = [
+        gate_timer(11, 0),
+        gate_hazard(21, 1000, true),
+        gate_timer(12, 90),
+        gate_hazard(22, 2000, false),
+        gate_timer(13, 15),
+        gate_hazard(23, 3000, true),
+    ];
+
+    /// What the owner draws and what the hazard does come from the same
+    /// state: a gate's visual (the timer's `is_on`) and its hazard (`is_on`,
+    /// and the damage it deals to someone standing in it) agree on every tick
+    /// of many cycles, through a re-arm and a switch-off of the timer.
+    #[test]
+    fn a_timers_visual_and_its_hazard_agree_on_every_tick_across_cycles_and_a_rearm() {
+        let mut logic = TestLogic::EMPTY;
+        logic.init_from_records(&GATES);
+        let z = [1000, 2000, 3000];
+        let mut hurt_ticks = 0u32;
+        for now in 0..2000u32 {
+            // A re-arm (death, checkpoint rest) restarts every cycle.
+            if now == 777 || now == 1500 {
+                logic.init_from_records(&GATES);
+            }
+            for (gate, z) in z.iter().enumerate() {
+                let player = [0, 10, *z];
+                logic.tick(
+                    &GATES,
+                    LogicTickInput {
+                        player,
+                        player_invulnerable: false,
+                    },
+                    now,
+                );
+                let visual = logic.is_on(&GATES, gate * 2);
+                let hazard = logic.is_on(&GATES, gate * 2 + 1);
+                assert_eq!(visual, hazard, "gate {gate} diverged at tick {now}");
+                // Only this gate's hazard can reach the player at its z.
+                let damage = logic.take_hazard_damage();
+                if hazard {
+                    assert_eq!(damage, 5, "gate {gate} on at {now} must hurt");
+                    hurt_ticks += 1;
+                } else {
+                    assert_eq!(damage, 0, "gate {gate} off at {now} must not hurt");
+                }
+            }
+        }
+        assert!(hurt_ticks > 1000, "the gates were on for many ticks");
+    }
+
+    // ---- Hazard knockback ----
+
+    const fn pushing_hazard(damage: u16, knockback: u16, on: bool) -> LevelLogicRecord {
+        LevelLogicRecord {
+            arg2: knockback,
+            // A gate: 100 wide, 40 thin in z.
+            min: [-50, 0, -20],
+            max: [50, 100, 20],
+            ..hazard(damage, 30, on)
+        }
+    }
+
+    fn tick_at(
+        logic: &mut TestLogic,
+        records: &'static [LevelLogicRecord],
+        player: [i32; 3],
+        invulnerable: bool,
+        now: u32,
+    ) -> (u16, Option<HazardPush>) {
+        logic.tick(
+            records,
+            LogicTickInput {
+                player,
+                player_invulnerable: invulnerable,
+            },
+            now,
+        );
+        (logic.take_hazard_damage(), logic.take_hazard_push())
+    }
+
+    #[test]
+    fn a_hazard_with_a_knockback_pushes_a_toucher_out_the_nearer_face_and_hurts_a_little() {
+        static RECORDS: [LevelLogicRecord; 1] = [pushing_hazard(20, 12, true)];
+        let mut logic = TestLogic::EMPTY;
+        logic.init_from_records(&RECORDS);
+        // Walked in from the -z side, 5 units past the face at z -20.
+        let (damage, push) = tick_at(&mut logic, &RECORDS, [0, 10, -15], false, 0);
+        assert_eq!(damage, 20);
+        assert_eq!(
+            push,
+            Some(HazardPush {
+                axis_z: true,
+                toward_max: false,
+                tie: false,
+                // 5 to the face, 12 past it, 1 to be clear of the inclusive box.
+                distance: 18,
+            })
+        );
+        // From the +z side it goes the other way.
+        let mut logic = TestLogic::EMPTY;
+        logic.init_from_records(&RECORDS);
+        let (_, push) = tick_at(&mut logic, &RECORDS, [0, 10, 14], false, 0);
+        assert_eq!(push.map(|p| (p.toward_max, p.distance)), Some((true, 19)));
+        // Dead centre is a tie the owner breaks.
+        let mut logic = TestLogic::EMPTY;
+        logic.init_from_records(&RECORDS);
+        let (_, push) = tick_at(&mut logic, &RECORDS, [0, 10, 0], false, 0);
+        assert!(push.is_some_and(|p| p.tie));
+    }
+
+    #[test]
+    fn a_hazard_switching_on_around_the_player_pushes_and_hurts_exactly_once() {
+        // A timer switches it on at tick 4; the player stands inside from the start.
+        static RECORDS: [LevelLogicRecord; 2] = [
+            LevelLogicRecord {
+                target: 4,
+                ..timer(4, 4, 4, true)
+            },
+            pushing_hazard(25, 10, false),
+        ];
+        let mut logic = TestLogic::EMPTY;
+        logic.init_from_records(&RECORDS);
+        let inside = [0, 10, -10];
+        for now in 0..4 {
+            assert_eq!(
+                tick_at(&mut logic, &RECORDS, inside, false, now),
+                (0, None),
+                "off: nothing at {now}"
+            );
+        }
+        let (damage, push) = tick_at(&mut logic, &RECORDS, inside, false, 4);
+        assert_eq!(damage, 25, "exactly the authored damage");
+        assert!(push.is_some_and(|p| !p.toward_max && p.distance == 21));
+        // The interval keeps it from hitting again straight away.
+        assert_eq!(tick_at(&mut logic, &RECORDS, inside, false, 5), (0, None));
+    }
+
+    #[test]
+    fn a_hazard_turning_on_with_the_player_outside_does_nothing() {
+        static RECORDS: [LevelLogicRecord; 2] = [
+            LevelLogicRecord {
+                target: 4,
+                ..timer(4, 4, 0, true)
+            },
+            pushing_hazard(25, 10, false),
+        ];
+        let mut logic = TestLogic::EMPTY;
+        logic.init_from_records(&RECORDS);
+        for now in 0..16 {
+            assert_eq!(
+                tick_at(&mut logic, &RECORDS, [0, 10, -200], false, now),
+                (0, None)
+            );
+            assert!(logic.is_on(&RECORDS, 1) == (now % 8 < 4));
+        }
+    }
+
+    #[test]
+    fn an_invulnerable_player_is_not_pushed_and_a_hazard_without_a_knockback_never_pushes() {
+        static RECORDS: [LevelLogicRecord; 1] = [pushing_hazard(20, 12, true)];
+        let mut logic = TestLogic::EMPTY;
+        logic.init_from_records(&RECORDS);
+        assert_eq!(
+            tick_at(&mut logic, &RECORDS, [0, 10, -15], true, 0),
+            (0, None)
+        );
+        static PLAIN: [LevelLogicRecord; 1] = [pushing_hazard(20, 0, true)];
+        let mut logic = TestLogic::EMPTY;
+        logic.init_from_records(&PLAIN);
+        assert_eq!(
+            tick_at(&mut logic, &PLAIN, [0, 10, -15], false, 0),
+            (20, None)
         );
     }
 }

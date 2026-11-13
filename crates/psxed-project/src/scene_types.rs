@@ -913,7 +913,8 @@ pub enum LogicNodeKind {
     },
     /// A damaging volume. While it is on and the player stands in it, the
     /// player takes `damage` at once and again every `interval_ticks`, unless
-    /// invulnerable (a dash passes through). On and Off from a Timer, Switch
+    /// invulnerable (a dash passes through); with a `knockback` each hit also
+    /// shoves the player out of the volume. On and Off from a Timer, Switch
     /// or Relay switch it; a master Multisource gates it.
     Hazard {
         /// Full volume extent, engine units (XZ centered, Y up from the floor).
@@ -928,6 +929,13 @@ pub enum LogicNodeKind {
         /// Whether it is on at level load.
         #[serde(default = "default_true")]
         start_on: bool,
+        /// How far past the nearer thin face a touch pushes the player, engine
+        /// units. Zero (the default, so older projects keep their behaviour)
+        /// means no push: contact only deals `damage`. With a push, walking into
+        /// the live volume and the volume switching on around the player both
+        /// shove them out and deal `damage` once, a small hurt rather than a kill.
+        #[serde(default)]
+        knockback: u16,
     },
 }
 

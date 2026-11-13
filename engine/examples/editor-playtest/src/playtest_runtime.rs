@@ -930,6 +930,38 @@ impl Playtest {
         self.apply_stance_damage(active, damage)
     }
 
+    /// Damage from a hazard volume: a hit bigger than the active pool does not stop
+    /// at the pool. The forced stance swap would otherwise absorb the whole hit
+    /// and hand the player its invulnerable frames, so a lethal wall that
+    /// deals more than the pool holds only spent the pool and let the player
+    /// walk through the rest of the volume. What the active pool could not take
+    /// carries into the other one, and the hit is lethal when both run out.
+    pub(super) fn apply_hazard_player_damage(&mut self, damage: u16) -> bool {
+        let damage = self.vitality_modifiers().incoming_damage(damage);
+        let active = self.player_stance.active();
+        let room = u32::from(self.player_vitality.pool(active).current());
+        if self.apply_stance_damage(active, damage) {
+            return true;
+        }
+        if self.player_vitality.pool(active).current() != 0 {
+            return false;
+        }
+        // The pool ran dry. Convert what it could not take back into hit
+        // units (the stance scales an aligned hit before the pool sees it).
+        let scale = if self.player_has_ranged_weapon() {
+            4096
+        } else {
+            u32::from(self.player_stance_config.aligned_damage_q12).max(1)
+        };
+        let scaled = u32::from(damage) * scale / 4096;
+        let Some(rest) = scaled.checked_sub(room).filter(|rest| *rest > 0) else {
+            return false;
+        };
+        let rest = (rest * 4096).div_ceil(scale).min(u32::from(u16::MAX)) as u16;
+        let other = self.player_stance.active();
+        self.apply_stance_damage(other, rest)
+    }
+
     /// The projectile colour sets the multiplier; the active stance receives damage.
     pub(super) fn apply_typed_player_damage(
         &mut self,
@@ -1092,6 +1124,8 @@ impl Playtest {
         self.combat_music = CombatMusicState::default();
         self.acquired_module = BoostModuleId::NONE;
         self.hazard_death_ticks_remaining = 0;
+        self.hazard_push_left = 0;
+        self.hazard_grace_ticks = 0;
         self.death_by_combat = false;
         self.weapon_attach_reported = false;
         self.swing_hit_mask = 0;
@@ -3204,6 +3238,37 @@ mod life_reset_tests {
         }
         assert_eq!(scene.brightness_level, 3);
         assert_eq!(scene.analog_deadzone, 27);
+    }
+
+    #[test]
+    fn a_hazard_hit_bigger_than_the_active_pool_is_lethal_and_an_ordinary_one_is_not() {
+        let layout = std::alloc::Layout::new::<Playtest>();
+        let raw = unsafe { std::alloc::alloc_zeroed(layout) as *mut Playtest };
+        assert!(!raw.is_null());
+        unsafe {
+            Playtest::init_zeroed(raw);
+        }
+        let mut storage = unsafe { std::boxed::Box::from_raw(raw) };
+        let scene = &mut *storage;
+        scene.player_vitality = DualVitality::equal(PLAYER_MAX_HEALTH);
+        // An ordinary untyped hit spends the pool and swaps the stance: the
+        // player lives, and gets the swap's invulnerable frames.
+        assert!(!scene.apply_untyped_player_damage(1000));
+        assert!(!scene.player_vitality.is_defeated());
+        scene.player_vitality = DualVitality::equal(PLAYER_MAX_HEALTH);
+        scene.player_stance = CombatStance::new(VitalityChannelId::One);
+        // A hazard's hit carries over into the other pool and kills outright.
+        assert!(scene.apply_hazard_player_damage(1000));
+        assert!(scene.player_vitality.is_defeated());
+        // A small hit leaves the pool alone and does not spill.
+        scene.player_vitality = DualVitality::equal(PLAYER_MAX_HEALTH);
+        scene.player_stance = CombatStance::new(VitalityChannelId::One);
+        assert!(!scene.apply_hazard_player_damage(10));
+        assert!(!scene.player_vitality.is_defeated());
+        assert_eq!(
+            scene.player_vitality.pool(VitalityChannelId::Two).current(),
+            PLAYER_MAX_HEALTH
+        );
     }
 
     #[test]

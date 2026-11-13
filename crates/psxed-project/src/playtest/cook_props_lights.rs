@@ -2165,6 +2165,7 @@ pub(crate) fn push_logic_node(
             damage,
             interval_ticks,
             start_on,
+            knockback,
         } => {
             if size[0] == 0 || size[1] == 0 || size[2] == 0 {
                 report.error(format!(
@@ -2183,6 +2184,7 @@ pub(crate) fn push_logic_node(
             record.kind = psx_level::logic_kind::HAZARD;
             record.arg0 = *damage;
             record.arg1 = *interval_ticks;
+            record.arg2 = *knockback;
             if *start_on {
                 record.flags |= psx_level::logic_flags::START_ON;
             }
@@ -3615,6 +3617,7 @@ mod gates_cook_tests {
             damage,
             interval_ticks: interval,
             start_on: on,
+            knockback: 0,
         }
     }
 
@@ -3646,6 +3649,26 @@ mod gates_cook_tests {
         assert_eq!(zap.max, [200, 128, 240]);
         assert_ne!(zap.flags & psx_level::logic_flags::START_ON, 0);
         assert_eq!(logic[1].flags & psx_level::logic_flags::START_ON, 0);
+        assert_eq!((zap.arg2, logic[1].arg2), (0, 0), "no knockback by default");
+    }
+
+    #[test]
+    fn a_hazard_knockback_cooks_into_arg2() {
+        let (mut names, mut logic) = (NameInterner::default(), Vec::new());
+        let mut report = PlaytestValidationReport::default();
+        let mut push = hazard([200, 120, 80], 20, 30, true);
+        if let LogicNodeKind::Hazard { knockback, .. } = &mut push {
+            *knockback = 160;
+        }
+        assert!(cook_logic(
+            "gate",
+            &push,
+            "",
+            &mut names,
+            &mut logic,
+            &mut report
+        ));
+        assert_eq!((logic[0].arg0, logic[0].arg1, logic[0].arg2), (20, 30, 160));
     }
 
     #[test]

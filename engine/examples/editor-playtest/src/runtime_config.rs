@@ -152,6 +152,11 @@ pub(super) const ACTIVE_HEAVY_ATTACK_BUTTON: u16 = button::R2;
 pub(super) const PLAYER_MAX_HEALTH: u16 = 100;
 /// Delay between fatal hazard contact and checkpoint/spawn reset.
 pub(super) const HAZARD_DEATH_TICKS: u8 = 30;
+/// Invulnerable window after a hazard shoves the player out of its volume.
+pub(super) const HAZARD_GRACE_TICKS: u8 = 45;
+/// Engine units a hazard shove moves the player per tick (a walking step is
+/// about three), so the way out of a thin volume takes a few ticks.
+pub(super) const HAZARD_PUSH_STEP: i32 = 10;
 
 #[cfg(feature = "ot-2048")]
 pub(super) const OT_DEPTH: usize = 2048;
