@@ -564,7 +564,7 @@ fn install_vector() {
     // SAFETY: the general exception vector is two words of kernel RAM. The
     // handler it leads to now is kept in a static the wrapper reads, before the
     // vector is rewritten; it is psx-rt's unless something chained in front of
-    // psx-rt (the pad engine's wrapper) is there, and anything that is not a `j`
+    // psx-rt is there, and anything that is not a `j`
     // is replaced by psx-rt's. A wrapper installed since psx-rt last reset the
     // vector is not put in front again: it is already in the chain, and writing
     // the vector would drop whatever was installed since. The wrapper switches

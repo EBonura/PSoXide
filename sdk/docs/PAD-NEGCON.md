@@ -1,6 +1,6 @@
 # neGcon input
 
-`PadReader::poll_on`, `poll_on` and the IRQ engine publish `PadMode::Negcon`
+`PadReader::poll_on` and `poll_on` publish `PadMode::Negcon`
 with `PadState.negcon: Option<NegconState>` only after a complete response.
 The state contains active-high digital `buttons`, raw `twist`, `i`, `ii` and
 `left_shoulder`. No calibration or pressure-to-button mapping is imposed.
@@ -24,7 +24,7 @@ if let Some(input) = pad.negcon {
 stays centered. Existing digital/DualShock fields retain their meaning.
 `RawPoll::negcon()` checks ID, magic and exact response length, but diagnostic
 raw polling does not replace the production transport's timeout validation.
-The IRQ engine and blocking reader retain the last clean sample on a failed
+The blocking reader retains the last clean sample on a failed
 packet. A clean different device or disconnection removes neGcon input.
 
 Adopting this revision requires adding `negcon: None` to explicit `PadState`

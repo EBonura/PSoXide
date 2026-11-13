@@ -82,8 +82,6 @@ panel-nodraw = []
 far-cards = ["cd-stream-bench"]
 # Measurement builds: one debug line per far-card event (card_trace.rs).
 card-trace = ["cd-stream-bench", "emulator-telemetry"]
-# Pad polled by the interrupt-driven engine (see psx-engine `pad-irq`).
-pad-irq = ["psx-engine/pad-irq"]
 # Per-update `camera-pose` debug lines only; fits builds that overflow RAM with
 # the full emulator-telemetry feature (Graybox Reach).
 camera-pose-log = ["psx-engine/debug-log"]
@@ -100,10 +98,6 @@ vert-debug-overlay = ["psx-engine/vert-debug"]
 # Hand every gameplay frame to psx-rt's VBlank-kicked present queue
 # (RenderSubmission::PresentQueue) instead of kicking it from the runner.
 present-queue = ["psx-engine/present-queue"]
-# Read the pads from the interrupt-driven pad engine instead of polling them
-# from the frame loop (sdk/docs/PAD-IRQ-ENGINE.md). Build with
-# EDITOR_PLAYTEST_FEATURES="<defaults> pad-irq-engine".
-pad-irq-engine = ["psx-engine/pad-irq-engine"]
 room-surface-profile = ["psx-engine/room-surface-profile"]
 # Diagnostic-only cadence for semantic A/B comparisons. Render exactly once
 # per two fixed simulation ticks even when wall-clock VBlanks have accumulated,

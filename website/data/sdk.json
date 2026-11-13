@@ -74,7 +74,7 @@
     {
       "name": "psx-pad",
       "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/crates/psx-pad",
-      "purpose": "SIO0 controller polling: digital + DualShock analog, `PadTracker` edges/repeat, diagnostic pacing. Feature `irq-engine`: the interrupt-driven engine that polls both ports from VBlank and IRQ7 without waiting ([PAD-IRQ-ENGINE](https://github.com/EBonura/PSoXide/tree/main/sdk/docs/PAD-IRQ-ENGINE.md))."
+      "purpose": "SIO0 controller polling: digital + DualShock analog, `PadTracker` edges/repeat, diagnostic pacing. One synchronous driver for every game ([PAD](https://github.com/EBonura/PSoXide/tree/main/sdk/docs/PAD.md))."
     },
     {
       "name": "psx-tick",
@@ -177,11 +177,6 @@
       "name": "pollbench",
       "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/pollbench",
       "shows": "Cycles one synchronous controller poll costs: port 1, an empty port 2, both."
-    },
-    {
-      "name": "pad-engine-check",
-      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/pad-engine-check",
-      "shows": "The interrupt-driven pad engine against the synchronous driver: CPU left to the game, snapshot, lease."
     },
     {
       "name": "hello-gte",

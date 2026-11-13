@@ -54,10 +54,8 @@ static mut POLLING_KEEP: u32 = 0;
 /// Ask the polled drivers that cut `I_MASK` down to VBlank for the length of a
 /// stream (the CD [`SectorReader`](crate::cd::reader::SectorReader)) to leave
 /// `bits` enabled. For a source whose handler is installed and works alone
-/// through interrupts, such as the pad engine's IRQ7 and root counter 0: cut
-/// from the mask, its transaction never advances for as long as the stream
-/// runs, and the engine abandons and faults one transaction per VBlank. Call
-/// it from foreground code.
+/// through interrupts: cut from the mask, it receives nothing for as long as
+/// the stream runs. Call it from foreground code.
 pub fn keep_enabled_while_polling(bits: u32) {
     // SAFETY: a foreground-only read-modify-write of a word no handler touches.
     unsafe {

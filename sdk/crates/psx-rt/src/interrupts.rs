@@ -707,8 +707,7 @@ static mut __psx_rt_claimed_irq: u32 = 0;
 ///
 /// psx-rt's handler acknowledges an enabled source that is pending when no
 /// VBlank is, because nothing it knows owns it. A wrapper chained in front
-/// (psx-cdstream's for the CD controller, the pad engine's for the controller
-/// port and root counter 0) does own its sources, but an interrupt can arrive
+/// (psx-cdstream's for the CD controller) does own its sources, but an interrupt can arrive
 /// while another wrapper's handler runs, or while its own runs with interrupts
 /// off, and so reach psx-rt's handler pending, where the acknowledge loses it:
 /// a CD sector, a pad byte. A claimed source is left pending, and the exception
@@ -896,7 +895,7 @@ pub fn install_vblank_counter() {}
 
 /// How many times [`install_vblank_counter`] has put psx-rt's handler in the
 /// vector. That drops every wrapper chained in front of it, so a wrapper
-/// (psx-cdstream's, the pad engine's) that remembers installing itself is
+/// (psx-cdstream's) that remembers installing itself is
 /// still in the chain only while this reads what it read then.
 #[cfg(target_arch = "mips")]
 static mut VECTOR_EPOCH: u32 = 0;

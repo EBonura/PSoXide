@@ -12,6 +12,9 @@ every program works on every Sony BIOS and on OpenBIOS).
   socket on such a port reads `Disconnected` in one poll, not `Unknown` after four. `Transport::exchange` now takes the
   `Port`, and `Transport` gains `control()` and `ack_irq_armed()`: anyone implementing `Transport` outside the SDK must add
   `control()` (a read of `CTRL`). Reported by Thomas Bertani, with a patch.
+- The interrupt-driven pad engine is deleted: `psx_pad::engine` and `psx_pad::console` with the `irq-engine` feature, psx-engine's `pad-irq-engine` and `pad-irq` features and the branches behind them, editor-playtest's features for them, `sdk/docs/PAD-IRQ-ENGINE.md` and the `pad-engine-check` example. The synchronous driver is the one driver for every game (`sdk/docs/PAD.md`). A game that enabled `pad-irq-engine` drops it from its features.
+- Hardware tests v2.12: the interrupt-driven pad engine is gone, and its steps with it (`ENGINE SETUP SWEEP`, `ENGINE ACK PACING`,
+  `ENGINE TIMED PACING`, `ENGINE AND CARD LEASE`, `ENGINE UNDER LOAD`, `PAD HOT-PLUG WINDOW`); their record ids are retired.
 - Hardware tests v2.11: step `SIO0 LATCH AND ARM` and records `0x6E0` to `0x6E3` (does `STAT` bit 9 set with `CTRL` bit 12
   clear, and does one `CTRL` write after an acknowledged byte disturb the rest of the packet). The v2.10 baselines in
   `docs/hardware-refs` do not match v2.11 until they are regenerated.

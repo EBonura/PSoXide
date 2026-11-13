@@ -7,7 +7,7 @@
 //! # Interrupt path
 //!
 //! The wrapper sits in the general exception vector in front of psx-rt's
-//! handler, or in front of another wrapper that leads there (the pad engine's),
+//! handler, or in front of another wrapper that leads there,
 //! whichever was in the vector when [`install`] ran. For an interrupt with the CD source pending it saves the
 //! interrupted CPU context, switches to a private 768-byte stack, calls the
 //! engine for one sector or one response, restores the context, and jumps to
@@ -43,7 +43,7 @@ const FIFO_POLLS: u32 = 256;
 ///
 /// The deepest call measured used 248 bytes (a Half-Life run of five weapon
 /// switches in the emulator, every sector popped by the handler, with the stack
-/// painted by [`install`]); the pad engine's comparable handler gets the same 768.
+/// painted by [`install`]).
 /// RAM matters to the games that fit tight, and 2 KiB of it sat unused.
 pub const HANDLER_STACK_BYTES: usize = 768;
 /// Fill byte of the handler stack, to measure how much of it was used.
@@ -251,8 +251,8 @@ static mut PSX_CD_IRQ_STACK: Stack = Stack([0; HANDLER_STACK_BYTES]);
 #[no_mangle]
 static mut PSX_CD_IRQ_CONTEXT: [u32; 34] = [0; 34];
 /// The handler the wrapper hands every exception on to: whatever the vector
-/// led to when [`install`] first ran (psx-rt's, or another wrapper such as the
-/// pad engine's), so the wrappers can be installed in either order. Zero until
+/// led to when [`install`] first ran (psx-rt's, or another wrapper), so the
+/// wrappers can be installed in either order. Zero until
 /// then.
 #[no_mangle]
 static mut PSX_CD_NEXT_HANDLER: u32 = 0;
@@ -554,7 +554,7 @@ fn install_vector() {
     // SAFETY: the general exception vector is two words of kernel RAM. The
     // handler it leads to now is kept in a static the wrapper reads, before the
     // vector is rewritten; it is psx-rt's unless something chained in front of
-    // psx-rt (the pad engine's wrapper) is there, and anything that is not a
+    // psx-rt is there, and anything that is not a
     // `j` is replaced by psx-rt's as before. A wrapper that has been installed
     // since psx-rt last reset the vector is not put in front again: it is already in the chain, and
     // writing the vector would drop whatever was installed since. The wrapper

@@ -10,8 +10,7 @@
 //!   scene.init(&mut ctx)
 //!   loop:
 //!     ctx.pad_prev ← ctx.pad           (one-frame input history)
-//!     ctx.pad      ← PadReader::poll_on() (port 1), or with the
-//!                    `pad-irq-engine` feature the pad engine's snapshot
+//!     ctx.pad      ← PadReader::poll_on() (port 1)
 //!     ask FrameScheduler for the next task:
 //!       fixed update  -> poll pad + scene.update(&mut ctx)
 //!       visual render -> clear + scene.render(&mut ctx) + present
@@ -44,7 +43,6 @@ use psx_level::{
     GameFlow, LevelGameplaySfxCueRecord, LevelOptionDef, LevelUiNodeRecord, LevelUiPaintRecord,
     LevelUiScene, LevelUiSfxCueRecord, LevelUiSfxSampleRecord,
 };
-#[cfg_attr(all(feature = "pad-irq-engine", target_arch = "mips"), allow(unused_imports))]
 use psx_pad::enable_analog_on;
 use psx_pad::{require_analog_on, PadReader, Port};
 
@@ -564,16 +562,7 @@ impl App {
             fb,
         );
         ctx.set_gpu_dma(gpu.release());
-        // The interrupt-driven engine takes the port when the game asks for
-        // it (feature `pad-irq-engine`); otherwise, or if it cannot install,
-        // the synchronous driver keeps it.
-        #[cfg(all(feature = "pad-irq-engine", target_arch = "mips"))]
-        if !ctx.start_pad_engine(controller_port) {
-            boot_trace("psx-engine: pad engine refused, polling synchronously");
-        } else {
-            boot_trace("psx-engine: pad engine running");
-        }
-        #[cfg(not(all(feature = "pad-irq-engine", target_arch = "mips")))]
+        // The synchronous driver keeps the port.
         ctx.set_controller_port(controller_port);
         boot_visual_checkpoint(&mut ctx, (200, 96, 0), "02 CTX READY");
 
@@ -601,8 +590,6 @@ impl App {
         boot_trace("psx-engine: scene init");
         boot_visual_checkpoint(&mut ctx, (180, 180, 0), "03 APP INIT BEGIN");
         app.init(&mut ctx);
-        // A card read in `init` borrowed the port from the pad engine.
-        ctx.release_controller_port();
         boot_visual_checkpoint(&mut ctx, (0, 120, 0), "13 APP INIT OK");
         boot_trace("psx-engine: scene init ok");
         clock.reset_origin();
@@ -610,26 +597,6 @@ impl App {
         let visual_interval = config.visual_pacing.interval_vblanks();
         boot_trace("psx-engine: loop");
         Self::run_scheduled(config, &mut app, clock, ctx, pad_reader, visual_interval);
-    }
-
-    /// Port 1's latest clean state from the interrupt-driven pad engine.
-    #[inline]
-    fn engine_pad() -> psx_pad::PadState {
-        #[cfg(all(feature = "pad-irq-engine", target_arch = "mips"))]
-        {
-            psx_pad::console::pad(Port::One)
-        }
-        #[cfg(not(all(feature = "pad-irq-engine", target_arch = "mips")))]
-        {
-            psx_pad::PadState::NONE
-        }
-    }
-
-    /// Ask the engine to put a newly attached pad in analog mode.
-    #[inline]
-    fn engine_request_analog() {
-        #[cfg(all(feature = "pad-irq-engine", target_arch = "mips"))]
-        psx_pad::console::request_analog(Port::One);
     }
 
     fn run_scheduled<S: Scene>(
@@ -734,16 +701,8 @@ impl App {
                         boot_trace("psx-engine: pad poll begin");
                         boot_visual_checkpoint(&mut ctx, (220, 100, 0), "22 PAD POLL BEGIN");
                     }
-                    if ctx.pad_engine_running() {
-                        // The engine has already read the pad; its snapshot
-                        // is the last clean state, as `PadReader` returns.
-                        ctx.pad = Self::engine_pad();
-                        if ctx.pad.is_connected() && !pad_was_connected {
-                            Self::engine_request_analog();
-                        }
-                    } else {
-                        ctx.pad = pad_reader.poll_on(ctx.controller_port());
-                        if ctx.pad.is_connected() && !pad_was_connected {
+                    ctx.pad = pad_reader.poll_on(ctx.controller_port());
+                    if ctx.pad.is_connected() && !pad_was_connected {
                             // A newly attached DualShock starts in digital mode.
                             // Negotiate again on the connection edge so hot-plug
                             // behaves the same as a controller present at boot.
@@ -751,7 +710,6 @@ impl App {
                             // loop, where `require_analog_on` would stall.
                             let _ = enable_analog_on(ctx.controller_port(), Port::One);
                             ctx.pad = pad_reader.poll_on(ctx.controller_port());
-                        }
                     }
                     pad_was_connected = ctx.pad.is_connected();
                     if !traced_update {
@@ -761,7 +719,6 @@ impl App {
 
                     telemetry::stage_begin(telemetry::stage::UPDATE);
                     scene.update(&mut ctx);
-                    ctx.release_controller_port();
                     telemetry::stage_end(telemetry::stage::UPDATE);
                     if !traced_update {
                         boot_visual_checkpoint(&mut ctx, (0, 140, 180), "29 UPDATE OK");
@@ -874,7 +831,6 @@ impl App {
                         ctx.set_present_queue_hook(Some(present_queue.hook()));
                     }
                     scene.render(&mut ctx);
-                    ctx.release_controller_port();
                     ctx.set_present_queue_hook(None);
                     if !traced_render {
                         boot_visual_checkpoint_hold(
