@@ -885,7 +885,7 @@ pub fn enable_cd_audio(enabled: bool) {
 /// One reverb configuration: the 32 coefficient registers and the size of the
 /// work area they address.
 ///
-/// `registers` follow the hardware order, written to `0x1F801DC0 + 2 * i`:
+/// `registers` follow the hardware order, written to `REVERB_COEFFICIENTS + 2 * i` (psx-hw):
 /// dAPF1, dAPF2, vIIR, vCOMB1..4, vWALL, vAPF1, vAPF2, mLSAME, mRSAME,
 /// mLCOMB1, mRCOMB1, mLCOMB2, mRCOMB2, dLSAME, dRSAME, mLDIFF, mRDIFF,
 /// mLCOMB3, mRCOMB3, mLCOMB4, mRCOMB4, dLDIFF, dRDIFF, mLAPF1, mRAPF1,
@@ -1483,31 +1483,31 @@ mod tests {
             2000,
         );
         let mut want = std::vec![
-            Write(0x1f80_1d84, 0),
-            Write(0x1f80_1d86, 0),
-            Write(0x1f80_1d98, 0),
-            Write(0x1f80_1d9a, 0),
-            Write(0x1f80_1daa, 0xc000),
+            Write(REVERB_VOL_LEFT, 0),
+            Write(REVERB_VOL_RIGHT, 0),
+            Write(voice_mask::REVERB_ENABLE_LO, 0),
+            Write(voice_mask::REVERB_ENABLE_HI, 0),
+            Write(SPUCNT, 0xc000),
             // One DMA session: stop, normal transfer type, address once,
             // DMA-write mode once.
-            Write(0x1f80_1daa, 0xc000),
-            Write(0x1f80_1dac, 0x0004),
-            Write(0x1f80_1da6, 0xea44),
-            Write(0x1f80_1daa, 0xc020),
+            Write(SPUCNT, 0xc000),
+            Write(TRANSFER_CTRL, 0x0004),
+            Write(TRANSFER_ADDR, 0xea44),
+            Write(SPUCNT, 0xc020),
         ];
         // 11,128 words: 173 pieces of 64 (block 16) and a last one of 56 (block 8).
         want.extend((0..173).map(|_| Dma(64, 16)));
         want.push(Dma(56, 8));
-        want.extend([Write(0x1f80_1daa, 0xc000), Write(0x1f80_1da2, 0xea44)]);
+        want.extend([Write(SPUCNT, 0xc000), Write(REVERB_WORK_BASE, 0xea44)]);
         for (i, &v) in ReverbPreset::HALL.registers.iter().enumerate() {
-            want.push(Write(0x1f80_1dc0 + 2 * i as u32, v));
+            want.push(Write(REVERB_COEFFICIENTS + 2 * i as u32, v));
         }
         want.extend([
-            Write(0x1f80_1d98, 0xffff),
-            Write(0x1f80_1d9a, 0x00ff),
-            Write(0x1f80_1daa, 0xc084),
-            Write(0x1f80_1d84, 2000),
-            Write(0x1f80_1d86, 2000),
+            Write(voice_mask::REVERB_ENABLE_LO, 0xffff),
+            Write(voice_mask::REVERB_ENABLE_HI, 0x00ff),
+            Write(SPUCNT, 0xc084),
+            Write(REVERB_VOL_LEFT, 2000),
+            Write(REVERB_VOL_RIGHT, 2000),
         ]);
         assert_eq!(mock::take_log(), want);
     }
@@ -1521,8 +1521,8 @@ mod tests {
         let area = ReverbArea::new(0x7_c000, 0x4000);
         test_spu().start_reverb(area, &preset, ReverbInput::ALL_VOICES, 11_264);
         let log = writes(&mock::take_log());
-        assert!(log.contains(&(0x1f80_1da2, 0xf800)));
-        assert!(log.contains(&(0x1f80_1dc0 + 20, 0x1234)));
+        assert!(log.contains(&(REVERB_WORK_BASE, 0xf800)));
+        assert!(log.contains(&(REVERB_COEFFICIENTS + 20, 0x1234)));
         // CD audio input (bit 0) is left as it was, bit 2 stays clear.
         assert_eq!(mock::reg(SPUCNT), 0xc081);
         assert_eq!(mock::reg(REVERB_VOL_LEFT), 11_264);
@@ -1530,15 +1530,15 @@ mod tests {
         // The depth is the last thing written.
         assert_eq!(
             log[log.len() - 2..],
-            [(0x1f80_1d84, 11_264), (0x1f80_1d86, 11_264)]
+            [(REVERB_VOL_LEFT, 11_264), (REVERB_VOL_RIGHT, 11_264)]
         );
     }
 
     #[test]
     fn stop_silences_unroutes_and_clears_the_master_bits() {
         mock::reset(0xc084);
-        mock::write(0x1f80_1d98, 0xffff);
-        mock::write(0x1f80_1d9a, 0x00ff);
+        mock::write(voice_mask::REVERB_ENABLE_LO, 0xffff);
+        mock::write(voice_mask::REVERB_ENABLE_HI, 0x00ff);
         mock::write(REVERB_VOL_LEFT, 2000);
         mock::write(REVERB_VOL_RIGHT, 2000);
         let _ = mock::take_log();
@@ -1546,11 +1546,11 @@ mod tests {
         assert_eq!(
             mock::take_log(),
             std::vec![
-                mock::Event::Write(0x1f80_1d84, 0),
-                mock::Event::Write(0x1f80_1d86, 0),
-                mock::Event::Write(0x1f80_1d98, 0),
-                mock::Event::Write(0x1f80_1d9a, 0),
-                mock::Event::Write(0x1f80_1daa, 0xc000),
+                mock::Event::Write(REVERB_VOL_LEFT, 0),
+                mock::Event::Write(REVERB_VOL_RIGHT, 0),
+                mock::Event::Write(voice_mask::REVERB_ENABLE_LO, 0),
+                mock::Event::Write(voice_mask::REVERB_ENABLE_HI, 0),
+                mock::Event::Write(SPUCNT, 0xc000),
             ]
         );
     }
@@ -1574,8 +1574,8 @@ mod tests {
         };
         let preset = ReverbPreset::new([0; 32], 0x1000);
         test_spu().start_reverb(ReverbArea::top_of_ram(0x1000), &preset, input, 0);
-        assert_eq!(mock::reg(0x1f80_1d98), 0x8001);
-        assert_eq!(mock::reg(0x1f80_1d9a), 0x0012);
+        assert_eq!(mock::reg(voice_mask::REVERB_ENABLE_LO), 0x8001);
+        assert_eq!(mock::reg(voice_mask::REVERB_ENABLE_HI), 0x0012);
     }
 
     #[test]
@@ -1622,12 +1622,12 @@ mod tests {
         assert_eq!(
             mock::take_log(),
             std::vec![
-                Write(0x1f80_1daa, 0xc000),
-                Write(0x1f80_1dac, 0x0004),
-                Write(0x1f80_1da6, 0x0202),
-                Write(0x1f80_1daa, 0xc020),
+                Write(SPUCNT, 0xc000),
+                Write(TRANSFER_CTRL, 0x0004),
+                Write(TRANSFER_ADDR, 0x0202),
+                Write(SPUCNT, 0xc020),
                 Dma(8, 8),
-                Write(0x1f80_1daa, 0xc000),
+                Write(SPUCNT, 0xc000),
             ]
         );
     }
