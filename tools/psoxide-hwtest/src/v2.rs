@@ -587,6 +587,16 @@ fn build() -> BTreeMap<u32, V2Entry> {
             ],
         );
     }
+    for (case, tag) in ["spins", "open_1_frame", "open_30_frames", "open_0", "open_card"]
+        .iter()
+        .enumerate()
+    {
+        b.put(
+            0x6F0 + case as u32,
+            format!("sio_select_early_{tag}"),
+            ["polls", "id_and_magic", "poll_cycles_median"],
+        );
+    }
     b.put(
         0x7A0,
         "dma_rekick_first",

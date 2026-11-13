@@ -689,6 +689,7 @@ records_step!(records_sio_setup, sio_timing::setup_sweep);
 records_step!(records_sio_pad, sio_timing::pad_timing);
 records_step!(records_sio_card, sio_timing::card_timing);
 records_step!(records_sio_latch, sio_timing::latch_and_arm);
+records_step!(records_sio_early, sio_timing::select_early);
 
 fn run_tests(run: &mut Run, area: Area) {
     let total = TESTS.iter().filter(|spec| test_area(spec) == area).count();
@@ -856,6 +857,7 @@ const STEPS: &[Step] = &[
     step(Area::Sio, "SIO0 PAD ACK TIMING", records_sio_pad),
     step(Area::Sio, "SIO0 CARD ACK TIMING", records_sio_card),
     step(Area::Sio, "SIO0 LATCH AND ARM", records_sio_latch),
+    step(Area::Sio, "SIO0 SELECT EARLY", records_sio_early),
     step(Area::Sio, "CARD SECTOR PROTOCOL", step_card_proto),
     step(Area::Sio, "PAD AND CARD UNDER LOAD", step_sio_mix),
     step(Area::Sio, "DUALSHOCK MOTORS", step_rumble),
