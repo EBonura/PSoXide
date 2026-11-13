@@ -31,8 +31,12 @@ pub(crate) struct IrqCell {
 }
 
 #[no_mangle]
-pub(crate) static mut __psx_rt_irq: IrqCell =
-    IrqCell { pending: 0, registered: 0, vector: 0, vblank_vector: 0 };
+pub(crate) static mut __psx_rt_irq: IrqCell = IrqCell {
+    pending: 0,
+    registered: 0,
+    vector: 0,
+    vblank_vector: 0,
+};
 
 #[cfg(target_arch = "mips")]
 core::arch::global_asm!(

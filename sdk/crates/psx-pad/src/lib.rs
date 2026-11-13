@@ -941,7 +941,13 @@ impl PadReader {
         // A pad that was there a moment ago has its absence confirmed before
         // the reader believes it; a socket that was already empty is told so
         // at once.
-        let polled = poll_state(port, self.socket, self.last.is_connected(), self.rumble, None);
+        let polled = poll_state(
+            port,
+            self.socket,
+            self.last.is_connected(),
+            self.rumble,
+            None,
+        );
         self.accept(polled)
     }
 

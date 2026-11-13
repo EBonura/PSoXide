@@ -464,7 +464,11 @@ mod tests {
         assert_eq!(one.mode, PadMode::Disconnected);
         // Four tries; with the select left open, the first is on it.
         let fresh = if SELECT_EARLY { 3 } else { 4 };
-        assert_eq!(bus.selects[0] - before, fresh, "four tries confirm the absence");
+        assert_eq!(
+            bus.selects[0] - before,
+            fresh,
+            "four tries confirm the absence"
+        );
         let before = bus.selects[0];
         pads.poll(&mut bus, Port::One);
         assert_eq!(bus.selects[0], before, "then the port is skipped");

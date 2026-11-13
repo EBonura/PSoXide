@@ -810,7 +810,7 @@ mod tests {
         // Opened just before the counter wraps, polled after it: the modular
         // difference is the real one.
         let mut bus = Script {
-            time: 0xFF00,
+            time: 0xff00,
             tick: 16,
             ..Script::default()
         };
@@ -834,7 +834,10 @@ mod tests {
 
     #[test]
     fn a_select_released_or_moved_in_between_is_selected_again_with_the_whole_wait() {
-        for (moved_to, port) in [(0u16, Port::One), (sio0::selected_ctrl(true, false), Port::One)] {
+        for (moved_to, port) in [
+            (0u16, Port::One),
+            (sio0::selected_ctrl(true, false), Port::One),
+        ] {
             let mut bus = Script {
                 tick: 64,
                 ..Script::default()
@@ -854,7 +857,10 @@ mod tests {
             ..Script::default()
         };
         assert!(bus.begin_pad(Port::One, None));
-        assert_eq!(bus.control, [sio0::ctrl::ACK, sio0::selected_ctrl(false, false)]);
+        assert_eq!(
+            bus.control,
+            [sio0::ctrl::ACK, sio0::selected_ctrl(false, false)]
+        );
         // The sequence before select-early: the spin delay, no clock.
         assert!(bus.reads >= 1_024);
         assert_eq!(bus.clocks, 0);

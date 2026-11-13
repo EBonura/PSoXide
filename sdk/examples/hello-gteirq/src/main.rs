@@ -132,7 +132,9 @@ const ORDER_SOURCES: [(dispatch::Source, dispatch::Handler); 4] = [
 /// Pending masks the order check runs: everything, single sources, VBlank
 /// alone and with others, sources nothing is registered for (bits 4, 7 and 9),
 /// bit 1 (no source), and nothing.
-const ORDER_MASKS: [u32; 10] = [0x26d, 0x004, 0x001, 0x201, 0x090, 0x040, 0x002, 0, 0x2ad, 0x028];
+const ORDER_MASKS: [u32; 10] = [
+    0x26d, 0x004, 0x001, 0x201, 0x090, 0x040, 0x002, 0, 0x2ad, 0x028,
+];
 
 /// Run `ORDER_MASKS` through the assembly and the reference; the number that
 /// disagreed.
@@ -329,15 +331,39 @@ fn main() {
         (counts.other == 0, "SXY0 held no marker"),
         (counts.ok == iterations, "not every iteration counted"),
         (interrupts::fault_count() == 0, "exceptions other than IRQs"),
-        (hooks_ok, "the dispatcher refused a hook or kept a detached source"),
-        (order_bad == 0, "the dispatcher's order differs from its reference"),
-        (hook_a_runs.abs_diff(vblanks) <= 1, "hook A did not run once per VBlank"),
-        (hook_b_runs == hook_a_runs || hook_b_runs + 1 == hook_a_runs, "hook B did not follow hook A"),
+        (
+            hooks_ok,
+            "the dispatcher refused a hook or kept a detached source",
+        ),
+        (
+            order_bad == 0,
+            "the dispatcher's order differs from its reference",
+        ),
+        (
+            hook_a_runs.abs_diff(vblanks) <= 1,
+            "hook A did not run once per VBlank",
+        ),
+        (
+            hook_b_runs == hook_a_runs || hook_b_runs + 1 == hook_a_runs,
+            "hook B did not follow hook A",
+        ),
         (hook_order_errors == 0, "a hook ran out of order"),
-        (timer_counts.doubled == 0, "an RTPS ran twice under timer IRQs"),
-        (timer_counts.missing == 0, "an RTPS was lost under timer IRQs"),
-        (timer_counts.other == 0, "SXY0 held no marker under timer IRQs"),
-        (timer_counts.ok == timer_iterations, "not every timer iteration counted"),
+        (
+            timer_counts.doubled == 0,
+            "an RTPS ran twice under timer IRQs",
+        ),
+        (
+            timer_counts.missing == 0,
+            "an RTPS was lost under timer IRQs",
+        ),
+        (
+            timer_counts.other == 0,
+            "SXY0 held no marker under timer IRQs",
+        ),
+        (
+            timer_counts.ok == timer_iterations,
+            "not every timer iteration counted",
+        ),
         (timer_irqs > 500, "the dispatcher served too few timer IRQs"),
         (timer_skips >= 10, "too few timer IRQs landed on an RTPS"),
     ];

@@ -106,7 +106,10 @@ const SLOTS_OFFSET: usize = (VBLANK_SLOTS + 1) * 4;
 
 impl Table {
     const fn new() -> Self {
-        Table { hooks: [0; VBLANK_SLOTS + 1], slots: [0; SLOTS] }
+        Table {
+            hooks: [0; VBLANK_SLOTS + 1],
+            slots: [0; SLOTS],
+        }
     }
 
     /// The handlers one dispatch calls, in order, for `pending` `I_STAT & I_MASK`
@@ -127,7 +130,9 @@ impl Table {
 
     /// The first free hook slot, if any.
     fn free_hook(&self) -> Option<usize> {
-        self.hooks[..VBLANK_SLOTS].iter().position(|&hook| hook == 0)
+        self.hooks[..VBLANK_SLOTS]
+            .iter()
+            .position(|&hook| hook == 0)
     }
 }
 
@@ -180,7 +185,10 @@ fn update_registered(set: u32, clear: u32) {
     // SAFETY: host tests only; a volatile aligned read-modify-write of a word.
     unsafe {
         let registered = &raw mut __psx_rt_irq.registered;
-        core::ptr::write_volatile(registered, core::ptr::read_volatile(registered) & !clear | set);
+        core::ptr::write_volatile(
+            registered,
+            core::ptr::read_volatile(registered) & !clear | set,
+        );
     }
 }
 
@@ -199,7 +207,10 @@ pub fn on_vblank(handler: Handler) -> Result<(), Full> {
     unsafe {
         let table = TABLE.0.get();
         let slot = (*table).free_hook().ok_or(Full)?;
-        core::ptr::write_volatile((&raw mut (*table).hooks).cast::<u32>().add(slot), handler as usize as u32);
+        core::ptr::write_volatile(
+            (&raw mut (*table).hooks).cast::<u32>().add(slot),
+            handler as usize as u32,
+        );
     }
     link();
     update_registered(1, 0);
@@ -225,7 +236,9 @@ pub fn attach(source: Source, handler: Handler) {
     // while the bit below is set; one CPU.
     unsafe {
         core::ptr::write_volatile(
-            (&raw mut (*TABLE.0.get()).slots).cast::<u32>().add(bit as usize - 2),
+            (&raw mut (*TABLE.0.get()).slots)
+                .cast::<u32>()
+                .add(bit as usize - 2),
             handler as usize as u32,
         );
     }
@@ -525,7 +538,10 @@ mod tests {
         table.slots[0] = 7; // CD-ROM
         table.slots[3] = 8; // root counter 1, but not registered
         let registered = 1 << Source::Cdrom.bit();
-        assert_eq!(order(&table, (1 << 2) | (1 << 5) | (1 << 7), registered), vec![7]);
+        assert_eq!(
+            order(&table, (1 << 2) | (1 << 5) | (1 << 7), registered),
+            vec![7]
+        );
     }
 
     #[test]
