@@ -27,6 +27,16 @@ pub enum Verdict {
     Listed(String),
 }
 
+/// Write the receipt of a program that passed the gate into `exe` (a PSX-EXE): a shipping
+/// receipt, or a diag one when a `[diag]` feature of an SDK crate is on. The one place a
+/// receipt is written; `psoxide-pgo apply` and `psx-gate --receipt` both call it.
+///
+/// # Errors
+/// [`ReceiptError::NotAnExe`] when `exe` is not a PSX-EXE or `program` is too long.
+pub fn stamp(exe: &mut [u8], program: &str, diag: bool) -> Result<(), ReceiptError> {
+    receipt::write(exe, program, if diag { Kind::Diag } else { Kind::Shipping })
+}
+
 /// Judge `exe` (a PSX-EXE) called `label` against the SDK's profile and the program's own file
 /// (`None` when the recipe passes none).
 ///
@@ -102,6 +112,26 @@ mod tests {
             );
         }
         Profile::parse(&text, Path::new("p")).unwrap()
+    }
+
+    #[test]
+    fn stamp_writes_the_receipt_the_press_checks() {
+        let mut shipping = exe();
+        stamp(&mut shipping, "game", false).unwrap();
+        assert_eq!(
+            check(&shipping, "game", false, &profile(&[]), None),
+            Ok(Verdict::Receipt("game".into()))
+        );
+        let mut diag = exe();
+        stamp(&mut diag, "game", true).unwrap();
+        assert!(check(&diag, "game", false, &profile(&[]), None)
+            .unwrap_err()
+            .contains("diagnostic"));
+        assert_eq!(
+            check(&diag, "game", true, &profile(&[]), None),
+            Ok(Verdict::Diag("game".into()))
+        );
+        assert!(stamp(&mut vec![0u8; 4096], "game", false).is_err());
     }
 
     #[test]
