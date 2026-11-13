@@ -61,7 +61,8 @@ pub const USAGE: &str = "\
        psoxide-pgo apply   [GUEST] [--profile PROFILE] [--layout LAYOUT] [--variant V]
                            [--ram-floor BYTES [--ram-fallback V]...] -- CARGO-ARGS...
        psoxide-pgo choose  [GUEST] --profile PROFILE [--layout LAYOUT] --gate CMD [--variant V]...
-                           [--pack CMD] [--frame-budget VBLANKS] [--rank deadline|work] -- CARGO-ARGS...
+                           [--pack CMD] [--frame-budget VBLANKS] [--rank deadline|work]
+                           [--ram-floor BYTES] -- CARGO-ARGS...
        psoxide-pgo ladder  [GUEST] --profile PROFILE [--layout LAYOUT] [--variant BASE] --ram-floor BYTES
                            [--from N] [--to N] [--step N] [--candidates K] [--tie PERCENT] [--scan]
                            [--baseline FILE [--baseline-tolerance PERCENT]]
@@ -2038,6 +2039,8 @@ fn gate_values(output: &str) -> Vec<(String, String)> {
 struct GateRow {
     variant: String,
     passed: bool,
+    /// Built, but leaves less RAM free than `--ram-floor`: not gated, not ranked.
+    refused: bool,
     values: Vec<(String, String)>,
 }
 
@@ -2063,7 +2066,12 @@ fn format_table(rows: &[GateRow]) -> String {
             .collect();
         let mut row = vec![
             result.variant.clone(),
-            if result.passed { "pass" } else { "FAIL" }.to_string(),
+            match (result.refused, result.passed) {
+                (true, _) => "refused",
+                (false, true) => "pass",
+                (false, false) => "FAIL",
+            }
+            .to_string(),
         ];
         row.extend(
             columns
@@ -2381,16 +2389,24 @@ fn format_ranking(ranking: &Ranking, rows: &[GateRow]) -> String {
         );
     }
     let list = |out: &mut String, ranked: &[(String, Vec<(String, String)>)]| {
+        let free_of = |variant: &str| {
+            rows.iter()
+                .find(|row| row.variant == variant)
+                .and_then(|row| number(row, "free_ram"))
+        };
         let width = ranked
             .iter()
             .map(|(variant, _)| variant.len())
             .max()
             .unwrap_or(0);
         for (place, (variant, columns)) in ranked.iter().enumerate() {
-            let columns: Vec<String> = columns
+            let mut columns: Vec<String> = columns
                 .iter()
                 .map(|(key, value)| format!("{key} {value}"))
                 .collect();
+            if let Some(free) = free_of(variant) {
+                columns.push(format!("free {free} B"));
+            }
             let _ = writeln!(
                 out,
                 "  {}. {variant:<width$}  {}",
@@ -2441,6 +2457,9 @@ fn format_ranking(ranking: &Ranking, rows: &[GateRow]) -> String {
 
 fn choose(guest: &Guest, options: &Options) -> Result<()> {
     let gate = options.gate.as_ref().ok_or("choose needs --gate CMD")?;
+    if !options.ram_fallbacks.is_empty() {
+        return Err("choose ranks the variants it is given; --ram-fallback is for apply".into());
+    }
     let variants: Vec<String> = if options.variants.is_empty() {
         let mut variants = [
             "off",
@@ -2479,18 +2498,38 @@ fn choose(guest: &Guest, options: &Options) -> Result<()> {
             options.layout.as_deref(),
             variant,
         );
-        let exe = match built {
-            Ok(linked) => linked.exe,
+        let linked = match built {
+            Ok(linked) => linked,
             Err(error) => {
                 eprintln!("psoxide-pgo: variant {variant} did not build: {error}");
                 rows.push(GateRow {
                     variant: variant.clone(),
                     passed: false,
+                    refused: false,
                     values: vec![("build".to_string(), "failed".to_string())],
                 });
                 continue;
             }
         };
+        let exe = linked.exe;
+        let free = match linked.map.as_deref() {
+            Some(map) => crate::ram::free_ram(&fs::read_to_string(map)?),
+            None => None,
+        };
+        let free_column = free.map(|free| ("free_ram".to_string(), free.to_string()));
+        if let Some(floor) = options.ram_floor {
+            let free = free.ok_or("--ram-floor needs the link map, and the link wrote none")?;
+            if free < floor {
+                println!("psoxide-pgo: {variant} leaves {free} B free, under the {floor} B floor: refused");
+                rows.push(GateRow {
+                    variant: variant.clone(),
+                    passed: false,
+                    refused: true,
+                    values: free_column.into_iter().collect(),
+                });
+                continue;
+            }
+        }
         let disc = guest.work_dir(&exe)?.join("choose.bin");
         let image = match &options.pack {
             Some(command) => Some(pack(command, &exe, &disc)?),
@@ -2518,13 +2557,33 @@ fn choose(guest: &Guest, options: &Options) -> Result<()> {
         rows.push(GateRow {
             variant: variant.clone(),
             passed,
-            values: gate_values(&output),
+            refused: false,
+            values: free_column
+                .into_iter()
+                .chain(gate_values(&output))
+                .collect(),
         });
     }
     let ranking = rank(&mut rows, options.frame_budget, options.objective);
     print!("\n{}", format_table(&rows));
     if let Some(ranking) = ranking {
         print!("{}", format_ranking(&ranking, &rows));
+    }
+    if let Some(floor) = options.ram_floor {
+        let refused: Vec<String> = rows
+            .iter()
+            .filter(|row| row.refused)
+            .map(|row| {
+                let free = number(row, "free_ram").unwrap_or_default();
+                format!("{} ({free} B free)", row.variant)
+            })
+            .collect();
+        if !refused.is_empty() {
+            println!(
+                "Refused, under the {floor} B RAM floor, and not ranked: {}.",
+                refused.join(", ")
+            );
+        }
     }
     println!(
         "The last variant built is {}; build the winner with `apply --variant`.",
@@ -2993,11 +3052,13 @@ mod tests {
             GateRow {
                 variant: "off".to_string(),
                 passed: true,
+                refused: false,
                 values: vec![("cycles".to_string(), "100".to_string())],
             },
             GateRow {
                 variant: "default".to_string(),
                 passed: false,
+                refused: false,
                 values: vec![],
             },
         ];
@@ -3011,6 +3072,7 @@ mod tests {
         GateRow {
             variant: variant.to_string(),
             passed,
+            refused: false,
             values: values
                 .iter()
                 .map(|(key, value)| (key.to_string(), value.to_string()))
@@ -3067,6 +3129,47 @@ mod tests {
         let mut plain = vec![row("off", true, &[("cycles", "1")])];
         assert!(rank(&mut plain, None, Objective::Deadline).is_none());
         assert_eq!(plain[0].values.len(), 1);
+    }
+
+    #[test]
+    fn choose_lists_free_ram_and_refuses_a_variant_under_the_floor() {
+        let mut rows = vec![
+            row(
+                "off",
+                true,
+                &[("free_ram", "88460"), ("a.work_cycles", "100")],
+            ),
+            row(
+                "hot=500+profi",
+                true,
+                &[("free_ram", "120000"), ("a.work_cycles", "90")],
+            ),
+            GateRow {
+                variant: "default".to_string(),
+                passed: false,
+                refused: true,
+                values: vec![("free_ram".to_string(), "68796".to_string())],
+            },
+        ];
+        let ranking = rank(&mut rows, None, Objective::Work).unwrap();
+        // The refused row is last and unranked, whatever it would have scored.
+        let order: Vec<&str> = rows.iter().map(|row| row.variant.as_str()).collect();
+        assert_eq!(order, vec!["hot=500+profi", "off", "default"]);
+        let table = format_table(&rows);
+        assert!(
+            table.lines().any(
+                |line| line.starts_with("default") && line.contains("refused  - ")
+                    || line.starts_with("default") && line.contains("refused")
+            ),
+            "{table}"
+        );
+        assert!(table.contains("free_ram"), "{table}");
+        let text = format_ranking(&ranking, &rows);
+        assert!(
+            text.contains("1. hot=500+profi  work -10.00%  free 120000 B"),
+            "{text}"
+        );
+        assert!(!text.contains("default"), "{text}");
     }
 
     #[test]
@@ -3258,6 +3361,7 @@ mod tests {
         let row_of = |variant: &str, values: [(String, String); 4]| GateRow {
             variant: variant.to_string(),
             passed: true,
+            refused: false,
             values: values.to_vec(),
         };
         let mut rows = vec![

@@ -151,7 +151,8 @@ psoxide-pgo order   [GUEST] --frontend PATH (--tape PATH --polls A..B)... [--lau
 psoxide-pgo stamp   [GUEST] --profile PROFILE -- CARGO-ARGS...
 psoxide-pgo apply   [GUEST] [--profile PROFILE] [--layout LAYOUT] [--variant V] -- CARGO-ARGS...
 psoxide-pgo choose  [GUEST] --profile PROFILE [--layout LAYOUT] --gate CMD [--variant V]...
-                    [--pack CMD] [--frame-budget VBLANKS] [--rank deadline|work] -- CARGO-ARGS...
+                    [--pack CMD] [--frame-budget VBLANKS] [--rank deadline|work]
+                    [--ram-floor BYTES] -- CARGO-ARGS...
 psoxide-pgo measure --frontend PATH --image PATH [--tape PATH] --polls A..B
                     [--launch-arg ARG]... [--name NAME] [--wait-range START..END]...
 GUEST: [--crate DIR] [--work DIR] [--patcher PATH] [--scanner PATH] [--stack-guard PATH]
@@ -391,6 +392,18 @@ before, and `choose` prints both rankings under the table either way.
 Failed rows and rows missing a ranked column go last, unranked. A gate
 without `vblanks` is ranked by `work`, and one with neither stays in build
 order.
+
+**RAM.** Every row shows `free_ram`, the bytes between `__bss_end` and the end
+of psoxide.ld's RAM region in that variant's link map (the figure `apply
+--ram-floor` and `ram` use), and each line of the rankings ends with it. The
+ranking itself does not use it: a variant that wins by a few frames and gives
+up kilobytes still ranks first. A game that must keep RAM free says how much
+with `--ram-floor BYTES`: a variant that links under it is listed as `refused`
+with its `free_ram`, is not run through the gate, is not ranked and so never
+the winner, and a line under the rankings names it. Set the floor to the free
+RAM (`ram MAP`) of the build being replaced, linked with the cargo arguments `choose`
+uses, to ask for a variant that is no worse in RAM.
+(`--ram-fallback` belongs to `apply`; `choose` stops if given it.)
 
 NitroXide 13f7c0e shows why (its `pgo-choose`: the six variants, the train
 tape over polls 396..1200, discs with the four CD-DA songs; the frame budget
