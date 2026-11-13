@@ -89,6 +89,8 @@ fn v2_table_expands_the_loops() {
     assert_eq!(table[&0x4A9].label, "handoff_stage_safe2_1");
     assert_eq!(table[&0x620].label, "sio_pad_ack_p2_b0");
     assert_eq!(table[&0x6C8].label, "sio_card_ack_p2_b0");
+    assert_eq!(table[&0x6E0].label, "sio_latch_unarmed_p1");
+    assert_eq!(table[&0x6E3].label, "sio_arm_mid_packet_p2");
     assert_eq!(table[&0x6B3].label, "tick_loss_t0_sysclk_14_instr");
     assert_eq!(table[&0x797].label, "dma_matrix_state_cd_2x_2340_sw");
     assert_eq!(table[&0x862].label, "list_abort_1");

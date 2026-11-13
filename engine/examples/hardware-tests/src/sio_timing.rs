@@ -429,6 +429,111 @@ pub(crate) fn card_timing(records: &mut Records, next: &mut usize) {
     }
 }
 
+// -------------------------------------------------- latch and arming records
+
+/// rec sio_latch_unarmed: irq_after_byte_mask, ack_mask, flags (a pad poll with the ACK interrupt armed never, port 1 and 2, 0x6E0-0x6E1). Bit n of the first two is byte n: STAT bit 9 seen after the byte's `/ACK` released, and `/ACK` seen. The flags are 1 for a device that answered with `0x5A`, 2 for a digital pad (five bytes), 4 for an analog pad. Does the latch set with CTRL bit 12 clear? A mask of zero says no, which the shared pad driver relies on.
+const LATCH_UNARMED_RECORD: u16 = 0x6E0;
+/// rec sio_arm_mid_packet: polls_clean_and_tried, first_deviation, irq_after_byte_mask (four polls that write CTRL, arm plus ACK, after every acknowledged byte, each compared with an unarmed poll of the same pad; port 1 and 2, 0x6E2-0x6E3). `polls_clean_and_tried` is the clean count in the low byte and the polls tried in the high byte; a poll is clean when its ID, its `0x5A` and its `/ACK` mask match the unarmed one; `first_deviation` is the poll in the high byte and the byte index in the low byte of the first mismatch, 0xFFFF when there is none. Does one CTRL write mid-packet disturb the rest of it? The shared pad driver does this only when a port reports the latch alone, but a console answer decides whether it may ever do it on silicon.
+const ARM_MID_PACKET_RECORD: u16 = 0x6E2;
+
+/// One pad poll with the select delay of the other passes. With `arm` the
+/// interrupt is armed and the latch cleared by one `CTRL` write after every
+/// byte that pulsed `/ACK`, exactly what `Transport::exchange` does on a port
+/// that only latches. Returns the replies, the bytes that pulsed `/ACK`, and
+/// the bytes after which STAT bit 9 was set.
+fn latch_poll(port2: bool, arm: bool) -> ([u8; 9], u16, u16) {
+    let mut port = token();
+    let _irq = IrqGuard::mask();
+    let mut replies = [0xFFu8; 9];
+    let (mut acks, mut irqs) = (0u16, 0u16);
+    port.set_mode(sio0::MODE_8N1);
+    port.set_baud(sio0::BAUD_250KHZ);
+    port.set_control(sio0::ctrl::ACK);
+    restart();
+    port.set_control(sio0::selected_ctrl(port2, false));
+    while count() < SAFE_SETUP {}
+    port.drain_receive();
+    let _ = port.wait_status_clear(sio0::stat::DSR_LEVEL, 4_096);
+    for (index, tx) in PAD_POLL.iter().enumerate() {
+        let byte = exchange(&mut port, *tx);
+        replies[index] = byte.reply;
+        // Read the latch before the write that clears it.
+        if port.status() & sio0::stat::IRQ != 0 {
+            irqs |= 1 << index;
+        }
+        if byte.acked() {
+            acks |= 1 << index;
+            if arm {
+                port.set_control(sio0::selected_ctrl(port2, true) | sio0::ctrl::ACK);
+            }
+        }
+        if index == 0 && !byte.acked() {
+            break;
+        }
+    }
+    port.deselect();
+    port.reset();
+    pause(4_000);
+    (replies, acks, irqs)
+}
+
+/// The two questions the shared pad driver's latch path rests on.
+pub(crate) fn latch_and_arm(records: &mut Records, next: &mut usize) {
+    for port2 in [false, true] {
+        crate::bounds::record_start(LATCH_UNARMED_RECORD + port2 as u16);
+        let (reference, ref_acks, ref_irqs) = latch_poll(port2, false);
+        let there = reference[2] == 0x5A;
+        let kind = match reference[1] {
+            0x41 => 2,
+            0x73 | 0x53 => 4,
+            _ => 0,
+        };
+        push(
+            records,
+            next,
+            record(
+                LATCH_UNARMED_RECORD + port2 as u16,
+                ref_irqs as u32,
+                ref_acks as u32,
+                there as u32 | kind,
+            ),
+        );
+        crate::bounds::record_start(ARM_MID_PACKET_RECORD + port2 as u16);
+        let mut clean = 0u32;
+        let mut deviation = 0xFFFFu32;
+        let mut irq_union = 0u32;
+        let tries = if there { 4 } else { 0 };
+        for poll in 0..tries {
+            let (replies, acks, irqs) = latch_poll(port2, true);
+            irq_union |= irqs as u32;
+            let mut bad = None;
+            if replies[1] != reference[1] {
+                bad = Some(1);
+            } else if replies[2] != reference[2] {
+                bad = Some(2);
+            } else if acks != ref_acks {
+                bad = Some((acks ^ ref_acks).trailing_zeros());
+            }
+            match bad {
+                None => clean += 1,
+                Some(byte) if deviation == 0xFFFF => deviation = (poll << 8) | byte,
+                Some(_) => {}
+            }
+        }
+        push(
+            records,
+            next,
+            record(
+                ARM_MID_PACKET_RECORD + port2 as u16,
+                clean | (tries << 8),
+                deviation,
+                irq_union,
+            ),
+        );
+    }
+}
+
+
 // ------------------------------------------------------- pad and card mix
 
 const MIX_ROUNDS: usize = 24;

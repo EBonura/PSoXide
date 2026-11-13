@@ -33,6 +33,10 @@ shipped without either, which is why no machine-code baseline exists for them.
 
 ## History
 
+### v2.11 (2026-11-13, schema PX8)
+
+MINOR. Records only added. Step `SIO0 LATCH AND ARM` (SIO area, after `SIO0 CARD ACK TIMING`; `src/sio_timing.rs`, records `0x6E0`-`0x6E3`) asks the two questions the shared pad driver's latch path rests on: whether `STAT` bit 9 sets with `CTRL` bit 12 clear, and whether one `CTRL` write (arm plus ACK) after an acknowledged byte disturbs the rest of the packet. Neither passes or fails; a port with nothing in it reads zero tries. The v2.10 emulator and machine-code baselines are orphaned until regenerated.
+
 ### v2.10 (2026-11-07, schema PX8)
 
 MINOR. The suite that is burned and put on the SuperStation card (v2.9, the BIOS-free linear run) and the v1.27 tree that sat on editor main are one tree again, on editor main, and every v1.26/v1.27 measurement either runs in it or is named as covered. [hardware-test-v1-to-v2.10.md](hardware-test-v1-to-v2.10.md) is the mapping, feature by feature. Added to v2.9:

@@ -690,6 +690,7 @@ records_step!(records_tick_loss, tick_loss::run);
 records_step!(records_sio_setup, sio_timing::setup_sweep);
 records_step!(records_sio_pad, sio_timing::pad_timing);
 records_step!(records_sio_card, sio_timing::card_timing);
+records_step!(records_sio_latch, sio_timing::latch_and_arm);
 records_step!(records_engine_setup, pad_engine::setup_sweep);
 records_step!(records_engine_ack, pad_engine::pacing_ack);
 records_step!(records_engine_timed, pad_engine::pacing_timed);
@@ -888,6 +889,7 @@ const STEPS: &[Step] = &[
     step(Area::Sio, "SIO0 SELECT DELAY", records_sio_setup),
     step(Area::Sio, "SIO0 PAD ACK TIMING", records_sio_pad),
     step(Area::Sio, "SIO0 CARD ACK TIMING", records_sio_card),
+    step(Area::Sio, "SIO0 LATCH AND ARM", records_sio_latch),
     step(Area::Sio, "CARD SECTOR PROTOCOL", step_card_proto),
     step(Area::Sio, "PAD AND CARD UNDER LOAD", step_sio_mix),
     step(Area::Sio, "ENGINE SETUP SWEEP", records_engine_setup),

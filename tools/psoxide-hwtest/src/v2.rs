@@ -397,6 +397,20 @@ fn build() -> BTreeMap<u32, V2Entry> {
             b.put(0x6C0 + 8 * port + k, format!("sio_card_ack_p{p}_b{k}"), ACK);
         }
         b.put(0x630 + port, format!("sio_pad_answer_p{p}"), ANSWER);
+        b.put(
+            0x6E0 + port,
+            format!("sio_latch_unarmed_p{p}"),
+            ["irq_after_byte_mask", "ack_mask", "flags"],
+        );
+        b.put(
+            0x6E2 + port,
+            format!("sio_arm_mid_packet_p{p}"),
+            [
+                "polls_clean_and_tried",
+                "first_deviation",
+                "irq_after_byte_mask",
+            ],
+        );
         b.put(0x634 + port, format!("sio_card_answer_p{p}"), ANSWER);
         b.put(
             0x638 + port,

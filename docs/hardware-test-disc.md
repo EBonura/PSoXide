@@ -32,7 +32,7 @@ the run are the two that need a person or touch the operator's card:
 **CONTROLLER TEST (P1 + P2)** and **MEMORY CARD (AT OWN RISK)**; the menu also
 has **VIEW LAST CAPTURE**.
 
-The run is ten areas, 69 steps, in this order (`src/run.rs`):
+The run is ten areas, 70 steps, in this order (`src/run.rs`):
 
 | # | Area | Steps |
 |---|---|---|
@@ -972,6 +972,8 @@ Raw port measurements, steps `SIO0 SELECT DELAY`, `SIO0 PAD ACK TIMING`,
   latch after the release, bit 11 TX idle).
 * `6C0`-`6C3` and `6C8`-`6CB`, the same for the four bytes of a memory-card read
   command (`81 52 00 00`, abandoned before any data moves); `634`-`635` hold the answers.
+* `6E0`-`6E1` (v2.11, step `SIO0 LATCH AND ARM`), port 1 then 2: one pad poll with the ACK interrupt never armed. Fields: a 9-bit mask of the bytes after which `STAT` bit 9 was set, a mask of the bytes that pulsed `/ACK`, and flags (1 the third reply was `0x5A`, 2 a digital pad, 4 an analog pad). Question: does the latch set with `CTRL` bit 12 clear? The shared pad driver (`psx-io` `Transport::exchange`) takes a set latch as an acknowledgement, so a console that sets it unarmed would make the driver write `CTRL` mid-packet.
+* `6E2`-`6E3`: four pad polls that write `CTRL` (ACK interrupt armed, latch cleared) after every acknowledged byte, each compared with the unarmed poll above. Fields: clean polls in the low byte and polls tried in the high byte (a poll is clean when its ID, its `0x5A` and its `/ACK` mask match), the poll and byte index of the first mismatch (`0xFFFF` none), and the union of the bytes after which `STAT` bit 9 was set. Question: does one `CTRL` write mid-packet disturb the rest of it? This is what the driver does on a port that only latches, so the console answer decides whether it may ever do it on silicon. An empty port or a pad that does not answer reads zero tries.
 * Empty-port behaviour is those same records on a port with nothing in it:
   replies `0xFF`, no `/ACK`, the byte still received after its eight clocks.
 
