@@ -1134,15 +1134,18 @@ fn ex<T: Transport>(
 }
 
 /// The production poll: retain the measured post-select setup delay, then
-/// wait for each non-final byte's live ACK assertion and release. RX-ready
-/// only establishes that the current byte arrived, not that the controller
-/// is ready for the next one. No IRQ enable or CTRL rewrite is needed.
+/// wait for each non-final byte's ACK, as the live level or as the latched
+/// interrupt bit (`Transport::exchange`), and for the level to release.
+/// RX-ready only establishes that the current byte arrived, not that the
+/// controller is ready for the next one. A port that shows the live level needs
+/// no IRQ enable and no CTRL rewrite; one that only latches (PCSX-ReARMed) gets
+/// one CTRL write per acknowledged byte.
 fn poll_once<T: Transport>(bus: &mut T, socket: Port, rumble: Rumble) -> RawPoll {
     // A previous aborted transaction may have left ACK asserted: `begin` waits
     // for it to release, so an old pulse never counts as the new address
     // byte's ACK.
     let result = if bus.begin(socket, Timing::PAD) {
-        poll_selected(bus, rumble)
+        poll_selected(bus, socket, rumble)
     } else {
         None
     };
@@ -1162,22 +1165,23 @@ fn poll_once<T: Transport>(bus: &mut T, socket: Port, rumble: Rumble) -> RawPoll
 #[inline(never)]
 fn pad_exchange<T: Transport>(
     bus: &mut T,
+    socket: Port,
     tx: u8,
     is_last: bool,
     timing: Timing,
 ) -> Result<u8, ExchangeError> {
-    bus.exchange(tx, is_last, timing)
+    bus.exchange(socket, tx, is_last, timing)
 }
 
 /// [`pad_exchange`] at the standard per-byte timing, `None` on any failure.
 #[inline(always)]
-fn pad_byte<T: Transport>(bus: &mut T, tx: u8, is_last: bool) -> Option<u8> {
-    pad_exchange(bus, tx, is_last, Timing::PAD).ok()
+fn pad_byte<T: Transport>(bus: &mut T, socket: Port, tx: u8, is_last: bool) -> Option<u8> {
+    pad_exchange(bus, socket, tx, is_last, Timing::PAD).ok()
 }
 
 /// A complete selected-port poll, or no usable packet. The current ID
 /// determines the length; a mode toggle never reuses an earlier length.
-fn poll_selected<T: Transport>(bus: &mut T, rumble: Rumble) -> Option<RawPoll> {
+fn poll_selected<T: Transport>(bus: &mut T, socket: Port, rumble: Rumble) -> Option<RawPoll> {
     // The address byte is the one that tells a pad from an empty socket, so it
     // gets the BIOS's own limit for a device to answer, not the longer budget
     // for a slow byte part way through a packet.
@@ -1185,17 +1189,17 @@ fn poll_selected<T: Transport>(bus: &mut T, rumble: Rumble) -> Option<RawPoll> {
         ack_spins: ADDRESS_ACK_SPINS,
         ..Timing::PAD
     };
-    match pad_exchange(bus, 0x01, false, address) {
+    match pad_exchange(bus, socket, 0x01, false, address) {
         Ok(_) => {}
         Err(ExchangeError::AckTimeout { reply: 0xff }) => return Some(RawPoll::NONE),
         Err(_) => return None,
     }
-    let id_low = pad_byte(bus, 0x42, false)?;
+    let id_low = pad_byte(bus, socket, 0x42, false)?;
     let mode = mode_from_id_low(id_low);
     if matches!(mode, PadMode::Unknown | PadMode::Disconnected) {
         return None;
     }
-    let id_high = pad_byte(bus, 0x00, false)?;
+    let id_high = pad_byte(bus, socket, 0x00, false)?;
     if id_high != 0x5a {
         return None;
     }
@@ -1208,14 +1212,14 @@ fn poll_selected<T: Transport>(bus: &mut T, rumble: Rumble) -> Option<RawPoll> {
     } else {
         (0, 0)
     };
-    let buttons_low = pad_byte(bus, small, false)?;
-    let buttons_high = pad_byte(bus, large, !analog)?;
+    let buttons_low = pad_byte(bus, socket, small, false)?;
+    let buttons_high = pad_byte(bus, socket, large, !analog)?;
     let sticks = if analog {
         AnalogSticks {
-            right_x: pad_byte(bus, 0x00, false)?,
-            right_y: pad_byte(bus, 0x00, false)?,
-            left_x: pad_byte(bus, 0x00, false)?,
-            left_y: pad_byte(bus, 0x00, true)?,
+            right_x: pad_byte(bus, socket, 0x00, false)?,
+            right_y: pad_byte(bus, socket, 0x00, false)?,
+            left_x: pad_byte(bus, socket, 0x00, false)?,
+            left_y: pad_byte(bus, socket, 0x00, true)?,
         }
     } else {
         AnalogSticks::CENTERED

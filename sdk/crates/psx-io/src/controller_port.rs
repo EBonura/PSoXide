@@ -74,6 +74,10 @@ impl Timing {
     };
 }
 
+/// The two forms a device's `/ACK` takes in `STAT`: the live level, and the
+/// latched interrupt bit.
+const ACK_SIGNALS: u32 = sio0::stat::DSR_LEVEL | sio0::stat::IRQ;
+
 /// Why one byte exchange failed.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ExchangeError {
@@ -181,6 +185,24 @@ pub trait Transport {
         true
     }
 
+    /// [`wait_status_set`](Self::wait_status_set), returning the status word
+    /// that had a bit of `mask` set, so the caller can tell which one. `None`
+    /// on timeout.
+    fn wait_status_any(&mut self, mask: u32, spins: u32) -> Option<u32> {
+        let mut remaining = spins;
+        loop {
+            let status = self.status();
+            if status & mask != 0 {
+                return Some(status);
+            }
+            if remaining == 0 {
+                return None;
+            }
+            remaining -= 1;
+            core::hint::spin_loop();
+        }
+    }
+
     /// Spin until every bit of `mask` is clear in the status register, at most
     /// `spins` reads after the first. `false` on timeout.
     fn wait_status_clear(&mut self, mask: u32, spins: u32) -> bool {
@@ -237,26 +259,46 @@ pub trait Transport {
         }
     }
 
-    /// Clock one byte and wait for the device's `/ACK`.
+    /// Clock one byte and wait for the device's `/ACK`, in whichever form the
+    /// port reports it.
     ///
-    /// Waits for TX ready, writes `byte`, and watches the live `/ACK` level
-    /// while the reply shifts in, so a pulse that ends before the reply
-    /// arrives is not missed. Unless `is_last` (the final byte of a packet is
-    /// never acknowledged), it then waits for `/ACK` to assert if it has not
-    /// yet, and to release, before the next byte may go. RX-ready alone only
-    /// says the byte arrived, not that the device is ready for another.
+    /// Waits for TX ready, writes `byte`, and watches `STAT` while the reply
+    /// shifts in, so a pulse that ends before the reply arrives is not missed.
+    /// An acknowledgement is either the live `/ACK` level ([`DSR_LEVEL`]) or
+    /// the latched interrupt bit ([`IRQ`]): silicon and the PSoXide emulator
+    /// show the level (the latch needs the interrupt armed), while PCSX-ReARMed
+    /// latches the bit and never shows a level. Unless `is_last` (the final
+    /// byte of a packet is never acknowledged), it then waits for either to
+    /// appear if neither has yet, waits for the level to release, and, when the
+    /// latch is what answered, clears it so it cannot count for the next byte.
+    /// RX-ready alone only says the byte arrived, not that the device is ready
+    /// for another.
     ///
-    /// No control-register write happens mid-transaction.
-    fn exchange(&mut self, byte: u8, is_last: bool, timing: Timing) -> Result<u8, ExchangeError> {
+    /// A port that shows the level takes the same register accesses as before
+    /// and no control-register write happens mid-transaction. Only when the
+    /// latch is seen does the exchange write `CTRL` once, with the interrupt
+    /// armed and the latch cleared, `/CS` still asserted on `port`: ReARMed
+    /// latches the first two bytes of a pad packet unarmed and the rest only
+    /// when armed.
+    ///
+    /// [`DSR_LEVEL`]: sio0::stat::DSR_LEVEL
+    /// [`IRQ`]: sio0::stat::IRQ
+    fn exchange(
+        &mut self,
+        port: Port,
+        byte: u8,
+        is_last: bool,
+        timing: Timing,
+    ) -> Result<u8, ExchangeError> {
         if !self.wait_status_set(sio0::stat::TX_READY, timing.byte_spins) {
             return Err(ExchangeError::TxTimeout);
         }
         self.transmit(byte);
-        let mut ack_seen = false;
+        let mut ack_seen = 0;
         let mut remaining = timing.byte_spins;
         loop {
             let status = self.status();
-            ack_seen |= status & sio0::stat::DSR_LEVEL != 0;
+            ack_seen |= status & ACK_SIGNALS;
             if status & sio0::stat::RX_NOT_EMPTY != 0 {
                 break;
             }
@@ -268,11 +310,17 @@ pub trait Transport {
         }
         let reply = self.receive();
         if !is_last {
-            if !ack_seen && !self.wait_status_set(sio0::stat::DSR_LEVEL, timing.ack_spins) {
-                return Err(ExchangeError::AckTimeout { reply });
+            if ack_seen == 0 {
+                match self.wait_status_any(ACK_SIGNALS, timing.ack_spins) {
+                    Some(status) => ack_seen = status & ACK_SIGNALS,
+                    None => return Err(ExchangeError::AckTimeout { reply }),
+                }
             }
             if !self.wait_status_clear(sio0::stat::DSR_LEVEL, timing.ack_spins) {
                 return Err(ExchangeError::AckStuck { reply });
+            }
+            if ack_seen & sio0::stat::IRQ != 0 {
+                self.set_control(sio0::selected_ctrl(port.is_two(), true) | sio0::ctrl::ACK);
             }
         }
         Ok(reply)
@@ -474,7 +522,7 @@ mod tests {
         // TX ready; RX arrives at once without an ack; ack asserts, releases.
         let mut bus = Script::with_status(&[TX, RX, DSR, 0]);
         bus.received.push(0x41);
-        assert_eq!(bus.exchange(0x42, false, TIMING), Ok(0x41));
+        assert_eq!(bus.exchange(Port::One, 0x42, false, TIMING), Ok(0x41));
         assert_eq!(bus.sent, [0x42]);
         // No control write happened inside the exchange.
         assert!(bus.control.is_empty());
@@ -486,16 +534,73 @@ mod tests {
         // RX arrives after: only the release wait remains.
         let mut bus = Script::with_status(&[TX, DSR, RX, 0]);
         bus.received.push(0x5a);
-        assert_eq!(bus.exchange(0x00, false, TIMING), Ok(0x5a));
+        assert_eq!(bus.exchange(Port::One, 0x00, false, TIMING), Ok(0x5a));
     }
 
     #[test]
     fn the_last_byte_of_a_packet_is_never_waited_on() {
         let mut bus = Script::with_status(&[TX, RX]);
         bus.received.push(0x80);
-        assert_eq!(bus.exchange(0x00, true, TIMING), Ok(0x80));
+        assert_eq!(bus.exchange(Port::One, 0x00, true, TIMING), Ok(0x80));
         // Two status reads: TX ready and RX ready, nothing after.
         assert_eq!(bus.reads, 2);
+    }
+
+    #[test]
+    fn a_latched_ack_with_no_live_level_acknowledges_the_byte_and_is_cleared() {
+        // The reply arrives, the latch shows, the level never does. One CTRL
+        // write arms the interrupt and clears the latch, /CS held on port 2.
+        const IRQ: u32 = sio0::stat::IRQ;
+        let mut bus = Script::with_status(&[TX, RX, IRQ, IRQ, 0]);
+        bus.received.push(0x41);
+        assert_eq!(bus.exchange(Port::Two, 0x42, false, TIMING), Ok(0x41));
+        assert_eq!(
+            bus.control,
+            [sio0::selected_ctrl(true, true) | sio0::ctrl::ACK]
+        );
+    }
+
+    #[test]
+    fn a_latch_seen_while_the_reply_shifts_in_is_not_waited_for_again() {
+        const IRQ: u32 = sio0::stat::IRQ;
+        let mut bus = Script::with_status(&[TX, IRQ, RX | IRQ, 0]);
+        bus.received.push(0x5a);
+        assert_eq!(bus.exchange(Port::One, 0x00, false, TIMING), Ok(0x5a));
+        assert_eq!(bus.control.len(), 1);
+    }
+
+    #[test]
+    fn a_level_and_a_latch_together_wait_for_the_level_to_release_before_clearing() {
+        const IRQ: u32 = sio0::stat::IRQ;
+        let mut bus = Script::with_status(&[TX, RX, DSR | IRQ, DSR | IRQ, IRQ, IRQ]);
+        bus.received.push(0x73);
+        assert_eq!(bus.exchange(Port::One, 0x42, false, TIMING), Ok(0x73));
+        // TX, RX, then STAT read until DSR dropped: the write came after.
+        assert_eq!(bus.reads, 5);
+        assert_eq!(
+            bus.control,
+            [sio0::selected_ctrl(false, true) | sio0::ctrl::ACK]
+        );
+    }
+
+    #[test]
+    fn a_level_only_ack_writes_nothing_mid_packet() {
+        // The wire pattern silicon was tuned with: no CTRL write.
+        let mut bus = Script::with_status(&[TX, RX, DSR, DSR, 0]);
+        bus.received.push(0x41);
+        assert_eq!(bus.exchange(Port::One, 0x42, false, TIMING), Ok(0x41));
+        assert!(bus.control.is_empty());
+    }
+
+    #[test]
+    fn no_ack_signal_at_all_times_out_with_the_reply_kept() {
+        let mut bus = Script::with_status(&[TX, RX, 0]);
+        bus.received.push(0xff);
+        assert_eq!(
+            bus.exchange(Port::One, 0x01, false, TIMING),
+            Err(ExchangeError::AckTimeout { reply: 0xff })
+        );
+        assert!(bus.control.is_empty());
     }
 
     #[test]
@@ -513,7 +618,7 @@ mod tests {
         let mut live = Script::with_status(&[TX, RX, 0]);
         live.received.push(0x5a);
         assert_eq!(
-            live.exchange(0x00, false, TIMING),
+            live.exchange(Port::One, 0x00, false, TIMING),
             Err(ExchangeError::AckTimeout { reply: 0x5a })
         );
     }
@@ -538,28 +643,28 @@ mod tests {
     fn each_failure_is_reported_with_its_stage() {
         let mut bus = Script::with_status(&[0]);
         assert_eq!(
-            bus.exchange(0x01, false, TIMING),
+            bus.exchange(Port::One, 0x01, false, TIMING),
             Err(ExchangeError::TxTimeout)
         );
         assert!(bus.sent.is_empty());
 
         let mut bus = Script::with_status(&[TX, 0]);
         assert_eq!(
-            bus.exchange(0x01, false, TIMING),
+            bus.exchange(Port::One, 0x01, false, TIMING),
             Err(ExchangeError::RxTimeout)
         );
 
         let mut bus = Script::with_status(&[TX, RX, 0]);
         bus.received.push(0xff);
         assert_eq!(
-            bus.exchange(0x01, false, TIMING),
+            bus.exchange(Port::One, 0x01, false, TIMING),
             Err(ExchangeError::AckTimeout { reply: 0xff })
         );
 
         let mut bus = Script::with_status(&[TX, RX | DSR, DSR]);
         bus.received.push(0x41);
         assert_eq!(
-            bus.exchange(0x01, false, TIMING),
+            bus.exchange(Port::One, 0x01, false, TIMING),
             Err(ExchangeError::AckStuck { reply: 0x41 })
         );
     }

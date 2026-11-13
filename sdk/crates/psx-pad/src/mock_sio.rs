@@ -87,6 +87,18 @@ pub struct Model {
     pub ack_delay: u64,
     // psx-numeric-allow-next-line: host-only controller model, compiled under cfg(test)
     pub ack_width: u64,
+    /// The port shows no live DSR level and reports each ACK only as the
+    /// latched interrupt bit (PCSX-ReARMed).
+    pub latch_only: bool,
+    /// The port shows the live level and also latches (when armed).
+    pub latch_too: bool,
+    /// Packet bytes, counted from the first, whose ACK latches without the
+    /// interrupt being armed (ReARMed: 2, then it needs CTRL bit 12).
+    pub latch_free_bytes: usize,
+    pub armed: bool,
+    pub latched: bool,
+    pub latch_done_for: u64,
+    pub ack_index: usize,
     pub fault: Fault,
     pub fault_byte: usize,
     /// Apply the fault to the first select only.
@@ -142,6 +154,13 @@ impl Default for Model {
             pending_small: 0,
             ignore_exits: 0,
             slow_ack: None,
+            latch_only: false,
+            latch_too: false,
+            latch_free_bytes: 0,
+            armed: false,
+            latched: false,
+            latch_done_for: 0,
+            ack_index: 0,
             rx_delay: 3,
             ack_delay: 12,
             ack_width: 5,
@@ -200,9 +219,23 @@ pub unsafe fn write_u16(addr: u32, value: u16) {
         if selected && !m.selected {
             select(m);
         }
+        m.armed = selected && value & psx_hw::sio::sio0::ctrl::ACK_IRQ_EN != 0;
+        if value & psx_hw::sio::sio0::ctrl::ACK != 0 && (m.latch_only || m.latch_too) {
+            let level_high =
+                !m.latch_only && m.ack_at != 0 && m.now >= m.ack_at && m.now < m.ack_end;
+            if !level_high {
+                m.latched = false;
+                m.latch_done_for = m.ack_at;
+                if m.latch_only {
+                    m.ack_at = 0;
+                    m.ack_end = 0;
+                }
+            }
+        }
         if !selected {
             m.ack_at = 0;
             m.ack_end = 0;
+            m.latched = false;
         }
         m.selected = selected;
     });
@@ -210,6 +243,8 @@ pub unsafe fn write_u16(addr: u32, value: u16) {
 
 fn select(m: &mut Model) {
     m.attempts += 1;
+    m.latched = false;
+    m.latch_done_for = 0;
     m.step = 0;
     m.ack_at = 0;
     m.ack_end = 0;
@@ -233,7 +268,19 @@ pub unsafe fn read_u32(addr: u32) -> u32 {
         if m.pending.iter().any(|&(_, ready)| m.now >= ready) {
             stat |= 2;
         }
-        if m.ack_at != 0 && m.now >= m.ack_at && m.now < m.ack_end {
+        let latching = m.latch_only || m.latch_too;
+        if latching
+            && m.ack_at != 0
+            && m.now >= m.ack_at
+            && m.latch_done_for != m.ack_at
+            && (m.armed || m.ack_index < m.latch_free_bytes)
+        {
+            m.latched = true;
+        }
+        if m.latched {
+            stat |= psx_hw::sio::sio0::stat::IRQ;
+        }
+        if !m.latch_only && m.ack_at != 0 && m.now >= m.ack_at && m.now < m.ack_end {
             stat |= 1 << 7;
         }
         stat
@@ -305,6 +352,7 @@ pub unsafe fn write_u8(addr: u32, value: u8) {
         } else {
             (0, 0)
         };
+        m.ack_index = index;
         if faulted(m, Fault::AckHeld, index) && index < m.final_step {
             m.ack_end = m.now + 100_000;
         }
