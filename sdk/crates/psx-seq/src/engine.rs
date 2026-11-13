@@ -50,6 +50,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
         self.player_sound(p);
     }
 
+    #[inline(never)]
     #[optimize(size)]
     fn process_sequence(&mut self, p: usize, code: &mut [u8]) {
         if !self.players[p].enabled {
@@ -320,7 +321,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
             }
         }
         for l in 0..LAYERS {
-            if self.players[p].channels[c].layers[l].alloc {
+            if self.players[p].channels[c].layers[l].alloc && !self.layer_waits(p, c, l) {
                 self.process_layer(p, c, l, code);
             }
         }
@@ -352,14 +353,14 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
             ch.inst_or_wave = 1;
             ch.inst = InstSel::NONE;
         } else {
-            match bank.and_then(|b| inst_lookup(&b, font, id)) {
-                Some(i) => {
-                    ch.env = if i.env == NONE16 {
+            match bank.and_then(|b| inst_head(&b, font, id)) {
+                Some((decay, env)) => {
+                    ch.env = if env == NONE16 {
                         EnvRef::Default
                     } else {
-                        EnvRef::Bank(i.env)
+                        EnvRef::Bank(env)
                     };
-                    ch.decay_idx = i.decay;
+                    ch.decay_idx = decay;
                     ch.inst = InstSel { font, id };
                     ch.inst_or_wave = id + 2;
                 }
@@ -373,6 +374,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
         ch.has_instrument = true;
     }
 
+    #[inline(never)]
     #[optimize(size)]
     fn run_channel_script(&mut self, p: usize, c: usize, code: &mut [u8]) {
         loop {
@@ -730,27 +732,37 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
         ly.finished = true;
     }
 
+    /// The part of a layer's tick that most ticks are all of: a disabled layer, or one counting down its
+    /// delay. Done at the call site so those ticks do not pay for a call and the frame of `process_layer`;
+    /// `true` when the tick is over.
+    #[inline(always)]
+    fn layer_waits(&mut self, p: usize, c: usize, l: usize) -> bool {
+        let ly = &mut self.players[p].channels[c].layers[l];
+        if !ly.enabled {
+            return true;
+        }
+        if ly.delay > 1 {
+            ly.delay -= 1;
+            if !ly.muted && ly.delay as i16 <= ly.gate_delay {
+                self.note_decay(owner(p, c, l));
+                self.players[p].channels[c].layers[l].muted = true;
+            }
+            return true;
+        }
+        false
+    }
+
+    #[inline(never)]
     #[optimize(size)]
     fn process_layer(&mut self, p: usize, c: usize, l: usize, code: &mut [u8]) {
         let o = owner(p, c, l);
-        {
-            let ly = &mut self.players[p].channels[c].layers[l];
-            if !ly.enabled {
-                return;
-            }
-            if ly.delay > 1 {
-                ly.delay -= 1;
-                if !ly.muted && ly.delay as i16 <= ly.gate_delay {
-                    self.note_decay(o);
-                    self.players[p].channels[c].layers[l].muted = true;
-                }
-                return;
-            }
-        }
         // step 1: end the previous note
         {
-            let ly = self.players[p].channels[c].layers[l];
-            if !ly.continuous || (ly.note != NONE8 && self.notes[ly.note as usize].wanted == o) {
+            let (continuous, note) = {
+                let ly = &self.players[p].channels[c].layers[l];
+                (ly.continuous, ly.note)
+            };
+            if !continuous || (note != NONE8 && self.notes[note as usize].wanted == o) {
                 self.note_decay(o);
             }
             let ly = &mut self.players[p].channels[c].layers[l];
@@ -777,7 +789,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
 
     #[optimize(size)]
     fn layer_tail(&mut self, o: u16, p: usize, c: usize, l: usize) {
-        let ly = self.players[p].channels[c].layers[l];
+        let ly = &self.players[p].channels[c].layers[l];
         if ly.muted && (ly.note != NONE8 || ly.continuous) {
             self.note_decay(o);
         }
@@ -785,20 +797,19 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
 
     /// Run layer opcodes up to the next note or delay; `None` if the layer
     /// ended.
+    #[inline(never)]
     #[optimize(size)]
     fn layer_commands(&mut self, p: usize, c: usize, l: usize, code: &mut [u8]) -> Option<u8> {
         let o = owner(p, c, l);
         loop {
-            let mut s = self.players[p].channels[c].layers[l].script;
-            let cmd = rd8(code, &mut s);
+            let cmd = rd8(code, &mut self.players[p].channels[c].layers[l].script);
             if cmd <= 0xc0 {
-                self.players[p].channels[c].layers[l].script = s;
                 return Some(cmd);
             }
             if cmd >= FLOW_FIRST {
-                let arg = flow_arg(code, &mut s, cmd);
-                let d = flow(code, &mut s, cmd, arg);
-                self.players[p].channels[c].layers[l].script = s;
+                let s = &mut self.players[p].channels[c].layers[l].script;
+                let arg = flow_arg(code, s, cmd);
+                let d = flow(code, s, cmd, arg);
                 if d != 0 {
                     if d == SCRIPT_END {
                         self.layer_disable(o);
@@ -819,18 +830,18 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
             let mut legato = false;
             let ly = &mut self.players[p].channels[c].layers[l];
             match cmd {
-                0xc1 => ly.vel_sq_q15 = vel_sq_q15(rd8(code, &mut s)),
-                0xca => ly.pan = rd8(code, &mut s),
-                0xc9 => ly.gate_time = rd8(code, &mut s),
-                0xc2 => ly.transpose = rd8(code, &mut s) as i8,
+                0xc1 => ly.vel_sq_q15 = vel_sq_q15(rd8(code, &mut ly.script)),
+                0xca => ly.pan = rd8(code, &mut ly.script),
+                0xc9 => ly.gate_time = rd8(code, &mut ly.script),
+                0xc2 => ly.transpose = rd8(code, &mut ly.script) as i8,
                 0xc4 | 0xc5 => {
                     ly.continuous = cmd == 0xc4;
                     ly.bit1 = false;
                     legato = true;
                 }
-                0xc3 => ly.short_delay = rd_delay(code, &mut s),
+                0xc3 => ly.short_delay = rd_delay(code, &mut ly.script),
                 0xc6 => {
-                    let id = rd8(code, &mut s);
+                    let id = rd8(code, &mut ly.script);
                     if id >= 0x7e {
                         ly.inst_or_wave = if id == 0x7e {
                             1
@@ -846,14 +857,14 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
                             ly.decay_idx = 0;
                         }
                     } else {
-                        match bank.and_then(|b| inst_lookup(&b, font, id)) {
-                            Some(i) => {
-                                ly.env = if i.env == NONE16 {
+                        match bank.and_then(|b| inst_head(&b, font, id)) {
+                            Some((decay, env)) => {
+                                ly.env = if env == NONE16 {
                                     EnvRef::Default
                                 } else {
-                                    EnvRef::Bank(i.env)
+                                    EnvRef::Bank(env)
                                 };
-                                ly.decay_idx = i.decay;
+                                ly.decay_idx = decay;
                                 ly.inst = InstSel { font, id };
                                 ly.inst_or_wave = id + 2;
                             }
@@ -865,31 +876,31 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
                     }
                 }
                 0xc7 => {
-                    ly.porta.mode = rd8(code, &mut s);
-                    let t = rd8(code, &mut s)
+                    ly.porta.mode = rd8(code, &mut ly.script);
+                    let t = rd8(code, &mut ly.script)
                         .wrapping_add(ctrans as u8)
                         .wrapping_add(ly.transpose as u8)
                         .wrapping_add(track as u8);
                     ly.porta_target = if t >= 0x80 { 0 } else { t };
                     ly.porta_time = if ly.porta.mode & 0x80 != 0 {
-                        rd8(code, &mut s) as u16
+                        rd8(code, &mut ly.script) as u16
                     } else {
-                        rd_delay(code, &mut s)
+                        rd_delay(code, &mut ly.script)
                     };
                 }
                 0xc8 => ly.porta.mode = 0,
                 0xcb | 0xcf => {
                     if cmd == 0xcb {
-                        ly.env = EnvRef::Song(rd16(code, &mut s));
+                        ly.env = EnvRef::Song(rd16(code, &mut ly.script));
                     }
-                    ly.decay_idx = rd8(code, &mut s);
+                    ly.decay_idx = rd8(code, &mut ly.script);
                 }
                 0xcc => ly.ignore_drum_pan = true,
                 0xcd => {
-                    rd8(code, &mut s);
+                    rd8(code, &mut ly.script);
                 }
                 0xce => {
-                    let v = rd8(code, &mut s);
+                    let v = rd8(code, &mut ly.script);
                     ly.bend_q16 = BEND_TWO_SEMITONES_Q16[v.wrapping_add(0x80) as usize];
                 }
                 0xd0..=0xdf => {
@@ -913,7 +924,6 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
                 }
                 _ => {}
             }
-            self.players[p].channels[c].layers[l].script = s;
             if legato {
                 self.note_decay(o);
             }
@@ -1011,6 +1021,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
 
     /// Step 4: pick the sample and frequency for the note. `Some(same)` where
     /// `same` says the sample is unchanged; `None` ends the tick.
+    #[inline(never)]
     #[optimize(size)]
     fn layer_voice(&mut self, p: usize, c: usize, l: usize, key: u8) -> Option<bool> {
         let bank = self.bank?;
@@ -1025,7 +1036,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
                 ch.inst,
             )
         };
-        let mut ly = self.players[p].channels[c].layers[l];
+        let ly = &mut self.players[p].channels[c].layers[l];
         let mut inst_or_wave = ly.inst_or_wave;
         let mut same = true;
         if inst_or_wave == 0xff {
@@ -1042,7 +1053,6 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
                     .wrapping_add(ly.transpose as u8);
                 let Some(d) = bank.drum(ch_font, semitone) else {
                     ly.muted = true;
-                    self.players[p].channels[c].layers[l] = ly;
                     return None;
                 };
                 ly.env = if d.env == NONE16 {
@@ -1063,7 +1073,6 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
             1 => {
                 ly.muted = true;
                 self.unsupported += 1;
-                self.players[p].channels[c].layers[l] = ly;
                 return None;
             }
             _ => {
@@ -1073,7 +1082,6 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
                     .wrapping_add(ly.transpose as u8);
                 if semitone >= 0x80 {
                     ly.muted = true;
-                    self.players[p].channels[c].layers[l] = ly;
                     return None;
                 }
                 let inst = if ly.inst_or_wave == 0xff {
@@ -1089,7 +1097,6 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
                     // synthetic wave or missing instrument: nothing to play
                     ly.tuned = TunedRef::NONE;
                     ly.muted = true;
-                    self.players[p].channels[c].layers[l] = ly;
                     return None;
                 };
                 if ly.porta.mode != 0 {
@@ -1151,12 +1158,21 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
             ly.gate_delay = 0;
             ly.delay = ticks as u16 + 1;
         }
-        self.players[p].channels[c].layers[l] = ly;
         Some(same)
     }
 }
 
+/// The release rate index and envelope start of instrument `id` of the font index `font` (see `Bank::instrument_head`).
+#[optimize(size)]
+pub(crate) fn inst_head(bank: &Bank<'_>, font: u8, id: u8) -> Option<(u8, u16)> {
+    if font == NONE8 {
+        return None;
+    }
+    bank.instrument_head(font, id)
+}
+
 /// Instrument `id` of the font index `font`.
+#[inline(always)]
 #[optimize(size)]
 pub(crate) fn inst_lookup(bank: &Bank<'_>, font: u8, id: u8) -> Option<crate::format::Instrument> {
     if font == NONE8 {

@@ -51,6 +51,14 @@
 // The engine functions are marked `#[optimize(size)]`: at full speed LLVM inlined them into one
 // 28.8 KB `update` for OoT; size-optimised it is 3.6 KB smaller and the average update costs 0.9%
 // fewer cycles (hello-seq, 14 voices).
+//
+// The deepest call chain is the script interpreter (`update` > `process_sequence` > `process_layer` >
+// `layer_alloc` > `alloc_note` > `init_for_layer`), and a game may run `update` from an interrupt on a
+// small stack (psx-rt's dispatcher gives a handler 400 bytes: a game's music pump). Inlined into `update` the
+// whole chain was one 328-byte frame plus a 136-byte `init_for_layer`; the stages the chain passes through are
+// `#[inline(never)]` so each has a frame of its own, and the by-value copies of `Layer`, `Note`, `Adsr`
+// and `Instrument` that sat in those frames are borrows or single fields. Keep new per-stage code out
+// of the frames on that chain, and check a change with `stack-guard --root <the caller> --budget 400`.
 #![feature(optimize_attribute)]
 
 mod engine;

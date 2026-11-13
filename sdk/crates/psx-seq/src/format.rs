@@ -334,14 +334,7 @@ impl<'a> Bank<'a> {
 
     /// Instrument `inst` of font index `font`.
     pub fn instrument(&self, font: u8, inst: u8) -> Option<Instrument> {
-        let desc = self.font_field(font, 0)?;
-        if inst >= *self.bytes.get(desc + 1)? {
-            return None;
-        }
-        let at = le32(self.bytes, desc + 4)? as usize + 32 * inst as usize;
-        if *self.bytes.get(at + 3)? == 0 {
-            return None;
-        }
+        let at = self.instrument_at(font, inst)?;
         let tuned = |o: usize| -> Option<Tuned> {
             Some(Tuned {
                 sample: le16(self.bytes, at + o)?,
@@ -357,6 +350,29 @@ impl<'a> Bank<'a> {
             normal: tuned(16)?,
             high: tuned(24)?,
         })
+    }
+
+    /// The release rate index and envelope start of instrument `inst` of font index `font`: what the
+    /// instrument-select opcodes need, without building the whole [`Instrument`] (the interpreter's call chain is the
+    /// deepest stack the engine uses, and an `Option<Instrument>` is a 32-byte frame slot in every caller).
+    pub(crate) fn instrument_head(&self, font: u8, inst: u8) -> Option<(u8, u16)> {
+        let at = self.instrument_at(font, inst)?;
+        // the whole 32-byte record has to be there, as for `instrument`
+        self.bytes.get(at + 31)?;
+        Some((*self.bytes.get(at + 2)?, le16(self.bytes, at + 4)?))
+    }
+
+    /// Byte offset of instrument `inst`'s record.
+    fn instrument_at(&self, font: u8, inst: u8) -> Option<usize> {
+        let desc = self.font_field(font, 0)?;
+        if inst >= *self.bytes.get(desc + 1)? {
+            return None;
+        }
+        let at = le32(self.bytes, desc + 4)? as usize + 32 * inst as usize;
+        if *self.bytes.get(at + 3)? == 0 {
+            return None;
+        }
+        Some(at)
     }
 
     /// Drum `key` of font index `font`.
