@@ -77,6 +77,10 @@ every program works on every Sony BIOS and on OpenBIOS).
   `Port`, and `Transport` gains `control()` and `ack_irq_armed()`: anyone implementing `Transport` outside the SDK must add
   `control()` (a read of `CTRL`). Reported by Thomas Bertani, with a patch.
 - The interrupt-driven pad engine is deleted: `psx_pad::engine` and `psx_pad::console` with the `irq-engine` feature, psx-engine's `pad-irq-engine` and `pad-irq` features and the branches behind them, editor-playtest's features for them, `sdk/docs/PAD-IRQ-ENGINE.md` and the `pad-engine-check` example. The synchronous driver is the one driver for every game (`sdk/docs/PAD.md`). A game that enabled `pad-irq-engine` drops it from its features.
+- The hardware-tests machine-code baseline for v2.13 is pinned (`docs/hardware-refs/hwtest-machine-code-v2.13.txt`, made with the
+  command `make hwtest-verify-code` prints, from the v2.10 file: 218 probes, drift 0, so no measured block changed shape across
+  v2.11 to v2.13), and `make hwtest-verify-code` passes again. A host test now fails `make test` when `SUITE_VERSION` has no
+  baseline file, so a bump cannot leave one out again (v2.11, v2.12 and v2.13 had).
 - Hardware tests v2.13: step `SIO0 SELECT EARLY` and records `0x6F0` to `0x6F4`, five pass-or-fail cases on port 1 for the
   pad poll on a select left open (the sequence before, one video frame, half a second, no gap, a card frame read in the
   gap). What a pass and a fail of each mean is in `docs/hardware-test-versions.md`.
