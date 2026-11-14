@@ -120,6 +120,10 @@ pub mod expansion2 {
         pub const CYCLES: u32 = BASE + 8;
         /// Write only: debug-log bytes; a newline commits one line.
         pub const LOG: u32 = BASE + 12;
+        /// Write only: a primitive-class word for a depth-sort probe, read by
+        /// emulator builds that have one and ignored by the rest. Measurement
+        /// builds only, like every port here.
+        pub const SORT_CLASS: u32 = BASE + 0x28;
     }
 }
 

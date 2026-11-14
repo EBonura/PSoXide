@@ -27,6 +27,7 @@ dependencies = [
  "psx-residency",
  "psx-rt",
  "psx-spu",
+ "psx-telemetry",
  "psx-vram",
  "psxed-format",
 ]

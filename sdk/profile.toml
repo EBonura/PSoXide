@@ -64,13 +64,6 @@ item = "psx-level/wire"
 remove = "W10"
 
 [[exception]]
-program = "editor-playtest"
-kind = "register-literal"
-item = "engine/examples/editor-playtest/src/playtest_scene.rs"
-count = 1
-remove = "unscheduled"
-
-[[exception]]
 program = "hardware-tests"
 kind = "feature"
 item = "psx-mc/compress"

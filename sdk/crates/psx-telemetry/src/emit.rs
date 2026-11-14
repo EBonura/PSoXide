@@ -10,7 +10,13 @@
 //!
 //! Ports (decoded by `emulator-core`, addresses in `psx_hw::memory::expansion2::telemetry`):
 //! the event word (`kind << 24 | id`), the value latch (written before the
-//! event that consumes it) and the debug-log byte stream.
+//! event that consumes it), the debug-log byte stream and the depth-sort
+//! probe's class word ([`sort_class`]).
+//!
+//! These are measurement-build features. A store into this window can fault on
+//! a console, so nothing here may reach a disc: every writer except
+//! [`console`] compiles only with `emit`, and the architecture gate treats a
+//! build that enables `emit` as a diagnostic one.
 //!
 //! [`console`] is deliberately NOT feature-gated (mips-gated only): it is the
 //! Play debug terminal used from normal builds. Use sparingly.
@@ -37,6 +43,8 @@ const EVENT_ADDR: *mut u32 = uncached(telemetry::EVENT);
 const VALUE_ADDR: *mut u32 = uncached(telemetry::VALUE);
 #[cfg(all(target_arch = "mips", feature = "emit"))]
 const LOG_ADDR: *mut u32 = uncached(telemetry::LOG);
+#[cfg(all(target_arch = "mips", feature = "emit"))]
+const SORT_CLASS_ADDR: *mut u32 = uncached(telemetry::SORT_CLASS);
 
 /// Emulator cycle counter, wrapping at 32 bits. Returns zero on host builds
 /// and when the `emit` feature is disabled, without touching telemetry MMIO.
@@ -96,8 +104,31 @@ pub fn task_end(task_id: u16) {
 /// Write a line to the emulator debug log, telemetry builds only.
 #[inline(always)]
 pub fn debug_log(message: &str) {
-    debug_bytes(message.as_bytes());
+    debug_write(message);
     debug_byte(b'\n');
+}
+
+/// Append `message` to the emulator debug log without ending the line, so a
+/// line can be built from several pieces; the emulator commits it at the
+/// next newline. Telemetry builds only.
+#[inline(always)]
+pub fn debug_write(message: &str) {
+    debug_bytes(message.as_bytes());
+}
+
+/// Tag the primitives that follow with a class word for the emulator's
+/// depth-sort probe (an emulator build without the probe ignores it).
+/// Telemetry builds only.
+#[inline(always)]
+pub fn sort_class(class: u32) {
+    #[cfg(all(target_arch = "mips", feature = "emit"))]
+    // SAFETY: SORT_CLASS_ADDR is a word-aligned port in the uncached Expansion 2
+    // window, not Rust-owned memory; the write only latches a class word.
+    unsafe {
+        core::ptr::write_volatile(SORT_CLASS_ADDR, class);
+    }
+    #[cfg(not(all(target_arch = "mips", feature = "emit")))]
+    let _ = class;
 }
 
 /// Write a line to the emulator's guest debug-log port UNCONDITIONALLY
@@ -218,6 +249,8 @@ mod tests {
         task_begin(crate::task::FIXED_UPDATE);
         task_end(crate::task::FIXED_UPDATE);
         debug_log("x");
+        debug_write("x");
+        sort_class(3);
         console("x");
     }
 }
