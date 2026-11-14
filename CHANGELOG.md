@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- `psx_pad::Controllers` (both `new()` and `digital()`) reads a pad that is slow to come up from its first answer. A port that
+  answers "nobody there" was left alone for 59 polls and probed once in 60, so a pad that needed more than a moment was ignored
+  for two seconds. PCSX-ReARMed's DualShock, in either mode, acknowledges the address byte and answers `0xFF` to the command
+  byte (what an empty socket does on that port) for its first 33 video frames (31 to 33 whatever the polls a frame): a game on `Controllers::digital()` first saw a held
+  button at its 124th frame there, a plain digital pad at its 20th, and the earlier poll at its 33rd. The port is now polled
+  every time for its first 128 such answers (and for 128 after a pad leaves), then as before. A plain pad that answers the first
+  poll never reaches this code; an empty port 2 pays 128 failed polls once (about 20,000 cycles each in the emulator). The
+  PSoXide emulator's DualShock answers from the first poll and cannot show the bug. Hardware-tests v2.16 adds the console's
+  answer (`PAD DIGITAL FIRST POLL`, records `0x6FC`-`0x6FE`; the suite number v2.16 is now this step's, so the unlanded present-path branch, which uses v2.16 and v2.17, renumbers when it is rebased).
 - The boot splash costs a program less. The mark is stored LZ coded in 16-bit words (2,746 bytes against 4,692; 512-word
   window, a flag byte per eight tokens) and expanded sixteen rows at a time through a 1 KiB buffer, with the same 4,096 words
   out (a host test pins the FNV-1a of them); `FontAtlas::upload` is out of line, so every caller shares one copy; the

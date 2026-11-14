@@ -101,7 +101,7 @@ fn spin_over_the_ack() {
     psx_io::irq::acknowledge(1 << source::TIMER1);
 }
 
-fn token() -> ControllerPort {
+pub(crate) fn token() -> ControllerPort {
     // SAFETY: a token is a logic guard, not a memory-safety one, and nothing else drives SIO0 while a
     // step of the run is in progress.
     unsafe { ControllerPort::steal() }
@@ -232,7 +232,7 @@ impl Transport for Probe {
 }
 
 /// One configuration packet on port 1, as the driver sends it, then the driver's gap.
-fn send(port: &mut ControllerPort, packet: [u8; 8]) {
+pub(crate) fn send(port: &mut ControllerPort, packet: [u8; 8]) {
     let mut ok = port.begin_pad(Port::One, None);
     let mut i = 0;
     while ok && i <= packet.len() {
@@ -245,7 +245,7 @@ fn send(port: &mut ControllerPort, packet: [u8; 8]) {
 }
 
 /// The ID a poll of port 1 answers, `0xFF` when nothing does.
-fn poll_id(port: &mut ControllerPort) -> u8 {
+pub(crate) fn poll_id(port: &mut ControllerPort) -> u8 {
     let mut id = 0xFF;
     if port.begin_pad(Port::One, None) {
         let mut ok = true;
@@ -276,7 +276,7 @@ fn poll_id(port: &mut ControllerPort) -> u8 {
 }
 
 /// Put the pad in digital mode and unlocked, and say whether a poll then answers ID `0x41`.
-fn make_digital() -> bool {
+pub(crate) fn make_digital() -> bool {
     let mut port = token();
     send(&mut port, [0x43, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00]);
     send(&mut port, [0x44, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);

@@ -604,6 +604,20 @@ fn build() -> BTreeMap<u32, V2Entry> {
             ["rounds", "bytes_seen", "packets"],
         );
     }
+    for (case, tag) in [
+        "digital_driver_digital_pad",
+        "digital_driver_analog_pad",
+        "full_driver_digital_pad",
+    ]
+    .iter()
+    .enumerate()
+    {
+        b.put(
+            0x6FC + case as u32,
+            format!("pad_first_poll_{tag}"),
+            ["first_poll_worst", "id_and_mode", "rounds"],
+        );
+    }
     for (case, tag) in ["mixed_waits", "mixed_early", "single_waits", "single_early"]
         .iter()
         .enumerate()
