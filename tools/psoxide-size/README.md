@@ -7,6 +7,8 @@ psoxide-size audit MAP [--exe EXE] [--top N] [--json] [--list CLASS] [--budget C
 psoxide-size diff BEFORE.map AFTER.map
 psoxide-size panic-flags [--toml]
 psoxide-size faults MAP RAM.bin
+psoxide-size ram MAP [--items] [--floor BYTES|FILE]
+psoxide-size block EXE MAGIC:VERSION:LEN:NAME...
 ```
 
 `audit` reads the lld link map a guest build writes (and the PS-X EXE when given, for strings,
@@ -41,3 +43,22 @@ rustflags for the chosen policy (`--toml` for a cargo `--config` array body).
 `tools/sdk-examples.mk` builds every example this way, and `tools/abort_gate.sh FRONTEND` proves the
 path: `hello-fault` panics on purpose and must be recorded as a break in `main`, `hello-present` must run
 clean and be smaller than its message build.
+
+## Free RAM and the budget gate
+
+`ram` is the number a game's RAM budget gate reads and the table that says where the rest went.
+The first line is `heap region N B`: `STACK_INIT - STACK_RESERVE - __heap_start`, with the
+`STACK_RESERVE` the map itself names, so a game that links a smaller reserve is measured against
+its own (`audit --json` carries the same `heap_free` and `stack_reserve`). Below it: stack reserve,
+the image split into `.text`, `.data` (with the read-only data) and `.bss`, and per output section
+the bytes by crate, by module (the first two path segments of the symbol; the link is fat-LTO, so
+the symbol path, not the object file, says where code came from) and the 30 largest symbols.
+`.overlay.*` sections are listed apart, since they are stored on the disc and do not occupy the
+image. `--items` prints every placed input section as `kind size crate name`, largest first, for
+diffing two links. `--floor` takes a byte count or a file whose first number on its first
+non-comment line is the floor, prints the margin and exits 1 when the link is under it.
+
+`block` finds the one statically initialised state block a gate reads from emulator RAM: four
+magic bytes, a version word, the block's own length and zero padding. Each `MAGIC:VERSION:LEN:NAME`
+prints `0xADDRESS NAME`; it exits 1 when a block is missing, ambiguous or the file is not a PS-X EXE
+with its whole declared payload.

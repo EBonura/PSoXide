@@ -4,7 +4,8 @@
 //! psoxide-size audit  MAP [--exe EXE] [--top N] [--json] [--budget CLASS=BYTES]...
 //! psoxide-size diff   BEFORE.map AFTER.map
 //! psoxide-size faults MAP RAM.bin
-//! psoxide-size faults MAP RAM.bin
+//! psoxide-size ram    MAP [--items] [--floor BYTES|FILE]
+//! psoxide-size block  EXE MAGIC:VERSION:LEN:NAME...
 //! ```
 //!
 //! `audit` reads the lld link map every guest build writes (and, when given,
@@ -15,8 +16,8 @@
 //! class exceeds the budget, so a CI step can hold a size line.
 
 use psoxide_size::classify::{classify, generic_base, Class, Item, Kind};
-use psoxide_size::fault;
 use psoxide_size::map::{self, parse, Image, LinkMap};
+use psoxide_size::{block, fault, ram};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::process::ExitCode;
@@ -128,8 +129,9 @@ fn report(map: &LinkMap, image: Option<&Image>, top: usize, json: bool) -> (Stri
         }
         let _ = writeln!(
             s,
-            "{{\"heap_free\":{},\"text\":{},\"rodata\":{},\"data\":{},\"bss\":{},\"overlay\":{},\"panic_machinery\":{},\"padding\":{},\"classes\":{{{}}}}}",
+            "{{\"heap_free\":{},\"stack_reserve\":{},\"text\":{},\"rodata\":{},\"data\":{},\"bss\":{},\"overlay\":{},\"panic_machinery\":{},\"padding\":{},\"classes\":{{{}}}}}",
             map.heap_free().map(|v| v.to_string()).unwrap_or("null".into()),
+            map.stack_reserve().map(|v| v.to_string()).unwrap_or("null".into()),
             sum_kind(0),
             sum_kind(1),
             sum_kind(2),
@@ -356,7 +358,7 @@ fn load(path: &str) -> Result<LinkMap, String> {
 
 fn run() -> Result<ExitCode, String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let usage = "usage: psoxide-size audit MAP [--exe EXE] [--top N] [--json] [--list CLASS] [--budget CLASS=BYTES]...\n       psoxide-size diff BEFORE.map AFTER.map\n       psoxide-size panic-flags [--toml]   (the shared panic policy; PSOXIDE_PANIC_MESSAGES=1 restores messages)\n       psoxide-size faults MAP RAM.bin   (exit 1 when psx-rt recorded a CPU exception)";
+    let usage = "usage: psoxide-size audit MAP [--exe EXE] [--top N] [--json] [--list CLASS] [--budget CLASS=BYTES]...\n       psoxide-size diff BEFORE.map AFTER.map\n       psoxide-size panic-flags [--toml]   (the shared panic policy; PSOXIDE_PANIC_MESSAGES=1 restores messages)\n       psoxide-size faults MAP RAM.bin   (exit 1 when psx-rt recorded a CPU exception)\n       psoxide-size ram MAP [--items] [--floor BYTES|FILE]   (free RAM and where the rest went; exit 1 under the floor)\n       psoxide-size block EXE MAGIC:VERSION:LEN:NAME...   (address of each versioned state block in a PS-X EXE)";
     match args.first().map(String::as_str) {
         Some("audit") => {
             let mut map_path = None;
@@ -435,6 +437,67 @@ fn run() -> Result<ExitCode, String> {
                 println!("{}", quoted.join(","));
             } else {
                 println!("{}", flags.join(" "));
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Some("ram") => {
+            let (mut map_path, mut items, mut floor) = (None, false, None);
+            let mut it = args[1..].iter();
+            while let Some(a) = it.next() {
+                match a.as_str() {
+                    "--items" => items = true,
+                    "--floor" => floor = Some(it.next().ok_or(usage)?.clone()),
+                    other if map_path.is_none() => map_path = Some(other.to_string()),
+                    _ => return Err(usage.into()),
+                }
+            }
+            let parsed = ram::read(&load(&map_path.ok_or(usage)?)?);
+            let free = parsed
+                .free
+                .ok_or("the map has no __heap_start (not a psoxide.ld link)")?;
+            if items {
+                print!("{}", ram::items(&parsed));
+            } else {
+                print!("{}", ram::report(&parsed));
+            }
+            let Some(floor) = floor else {
+                return Ok(ExitCode::SUCCESS);
+            };
+            let floor = match floor.parse::<u32>() {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    let text =
+                        std::fs::read_to_string(&floor).map_err(|e| format!("{floor}: {e}"))?;
+                    ram::parse_floor(&text).ok_or(format!("{floor} holds no floor in bytes"))?
+                }
+            };
+            if free >= floor {
+                println!(
+                    "RAM budget: {free} B free, floor {floor} B ({} B of allowance)",
+                    free - floor
+                );
+                return Ok(ExitCode::SUCCESS);
+            }
+            eprintln!(
+                "RAM budget: {free} B free is {} B under the {floor} B floor",
+                floor - free
+            );
+            Ok(ExitCode::from(1))
+        }
+        Some("block") if args.len() >= 3 => {
+            let exe = std::fs::read(&args[1]).map_err(|e| format!("{}: {e}", args[1]))?;
+            let specs: Vec<block::Spec> = args[2..]
+                .iter()
+                .map(|text| block::Spec::parse(text))
+                .collect::<Result<_, _>>()?;
+            for spec in &specs {
+                match block::locate(&exe, spec) {
+                    Ok(address) => println!("{address:#010x} {}", spec.name),
+                    Err(error) => {
+                        eprintln!("psoxide-size block: {error}");
+                        return Ok(ExitCode::from(1));
+                    }
+                }
             }
             Ok(ExitCode::SUCCESS)
         }

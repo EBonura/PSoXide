@@ -87,6 +87,11 @@ impl LinkMap {
         Some(acc as u32)
     }
 
+    /// `STACK_RESERVE`, the bytes the link keeps for the stack below `STACK_INIT`.
+    pub fn stack_reserve(&self) -> Option<u32> {
+        self.eval("STACK_RESERVE", 0)
+    }
+
     /// Bytes between the heap start and the stack reserve, the figure every
     /// builder reports as `heap_free`.
     pub fn heap_free(&self) -> Option<u32> {
