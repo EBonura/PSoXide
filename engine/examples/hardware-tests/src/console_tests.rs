@@ -37,6 +37,9 @@ pub(crate) const CDMOTOR_COUNT: usize = 6;
 /// XA MEASURE (v2.6): `0x320` to `0x32E`.
 pub(crate) const XA_MEASURE_RECORD: u16 = 0x320;
 pub(crate) const XA_MEASURE_COUNT: usize = 15;
+/// The clock case's raw records (v2.20), `0x330` to `0x338`.
+pub(crate) const XA_RAW_RECORD: u16 = 0x330;
+pub(crate) const XA_RAW_COUNT: usize = 9;
 /// One timing record whose three fields carry values of the case's own.
 pub(crate) fn record(id: u16, a: u32, b: u32, c: u32) -> TimingRecord {
     let clamp = |value: u32| {

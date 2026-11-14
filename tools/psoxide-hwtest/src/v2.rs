@@ -664,6 +664,22 @@ fn build() -> BTreeMap<u32, V2Entry> {
             ["sectors", "errors_and_retries", "time_16_hblanks"],
         );
     }
+    // v2.20: the XA clock case's raw records, fields that cannot clamp.
+    for (k, mark) in ["60", "120", "180"].iter().enumerate() {
+        b.put(
+            0x330 + k as u32,
+            format!("xa_clock_raw_head_{mark}s"),
+            ["head_ms_low", "head_ms_high", "polls"],
+        );
+        b.put(
+            0x333 + k as u32,
+            format!("xa_clock_raw_clock_{mark}s"),
+            ["clock_ms_low", "clock_ms_high", "head0_ms"],
+        );
+    }
+    b.put(0x336, "xa_clock_raw_poll_cost_x10_ms", ["min", "median", "max"]);
+    b.put(0x337, "xa_clock_raw_poll_counts", ["polls", "over_100ms", "over_1s"]);
+    b.put(0x338, "xa_clock_raw_elapsed", ["elapsed_ms_low", "elapsed_ms_high", "passes_4096"]);
     // v2.20: the NCLIP variants, twelve raw MAC0 readings in each of four variants.
     for (variant, name) in ["built", "filled", "extra_nop", "zeroed"].iter().enumerate() {
         for (k, what) in [
