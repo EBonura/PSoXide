@@ -4,7 +4,7 @@
 //! console at `0x1F802080` raises a data bus error on a retail console (seen 2026-11-14 on an SCPH-9002), and the
 //! emulator does not model that, so no emulator run can show it. A program that runs on a console must make no
 //! access there. This reads every instruction word of the image, tracks the constants built by `lui`, `ori`,
-//! `addiu` and `addu`, and reports every load or store whose address lands in `0x1F802080..=0x1F802FFF` (through
+//! `addiu` and `addu`, and reports every load or store whose address lands in `0x1F802080..=0x1F803FFF` (through
 //! KUSEG, KSEG0 or KSEG1), and every data word that holds such an address.
 //!
 //! It is conservative, not exact: it follows registers along the instruction stream without following branches,
