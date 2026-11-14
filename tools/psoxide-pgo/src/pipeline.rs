@@ -1925,15 +1925,28 @@ fn place(guest: &Guest, linked: &Linked, layout: &Path, compile: &str) -> Result
         &fs::read_to_string(&guest.linker_script)
             .map_err(|error| format!("{}: {error}", guest.linker_script.display()))?,
     );
-    let placement = layout::place(&sections, &image, &bound, &fixed);
-    println!(
-        "psoxide-pgo: placed {} functions ({} cold bytes moved into gaps); predicted \
-         I-cache conflict refills {:.0} -> {:.0}",
-        placement.placed.len(),
-        placement.gap,
-        placement.before,
-        placement.after
-    );
+    let placement = match &profile.placement {
+        Some(recorded) => {
+            let placement = layout::recorded_order(recorded, &sections, &image, &fixed)?;
+            println!(
+                "psoxide-pgo: the layout's recorded placement lists {} sections",
+                placement.order.len()
+            );
+            placement
+        }
+        None => {
+            let placement = layout::place(&sections, &image, &bound, &fixed);
+            println!(
+                "psoxide-pgo: placed {} functions ({} cold bytes moved into gaps); predicted \
+                 I-cache conflict refills {:.0} -> {:.0}",
+                placement.placed.len(),
+                placement.gap,
+                placement.before,
+                placement.after
+            );
+            placement
+        }
+    };
     let text = layout::order_file(&sections, &placement);
     let path = guest
         .work_dir(&linked.exe)?

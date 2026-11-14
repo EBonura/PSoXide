@@ -238,7 +238,7 @@ impl Image {
     }
 
     /// A section's words, or `None` when it lies outside the image.
-    fn words(&self, section: &Section) -> Option<Vec<u32>> {
+    pub(crate) fn words(&self, section: &Section) -> Option<Vec<u32>> {
         (0..section.size / 4)
             .map(|index| self.word(section.start + 4 * index))
             .collect()
@@ -397,7 +397,31 @@ pub struct Layout {
     pub features: String,
     pub variant: String,
     pub functions: Vec<Profiled>,
+    /// The order `search` found, when it ran; [`recorded_order`] links it
+    /// instead of [`place`].
+    pub placement: Option<Recorded>,
 }
+
+/// A placement `search` recorded in a layout profile: where the ordered
+/// sections start and every listed section, in order.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Recorded {
+    pub start: u32,
+    pub entries: Vec<RecordedEntry>,
+}
+
+/// One listed section of a [`Recorded`] placement.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecordedEntry {
+    pub hash: u64,
+    pub words: u32,
+    /// The address the search placed it at.
+    pub address: u32,
+    pub key: String,
+}
+
+const START_TAG: &str = "s";
+const ENTRY_TAG: &str = "o";
 
 /// What a replay's counts held beyond the functions.
 #[derive(Debug, Default)]
@@ -542,6 +566,9 @@ impl Layout {
                 let _ = writeln!(out, "c {} {} {}", call.count, sites.join(","), call.callee);
             }
         }
+        if let Some(placement) = &self.placement {
+            out.push_str(&placement.to_text());
+        }
         out
     }
 
@@ -565,6 +592,36 @@ impl Layout {
                 continue;
             }
             let (tag, rest) = line.split_once(' ').ok_or_else(bad)?;
+            if tag == START_TAG {
+                let start = u32::from_str_radix(rest, 16).map_err(|_| bad())?;
+                layout.placement.get_or_insert_with(Recorded::default).start = start;
+                continue;
+            }
+            if tag == ENTRY_TAG {
+                let mut fields = rest.splitn(4, ' ');
+                let (Some(hash), Some(words), Some(address), Some(key)) =
+                    (fields.next(), fields.next(), fields.next(), fields.next())
+                else {
+                    return Err(bad().into());
+                };
+                let entry = RecordedEntry {
+                    hash: u64::from_str_radix(hash, 16).map_err(|_| bad())?,
+                    words: words.parse().map_err(|_| bad())?,
+                    address: u32::from_str_radix(address, 16).map_err(|_| bad())?,
+                    key: key.to_string(),
+                };
+                layout
+                    .placement
+                    .get_or_insert_with(Recorded::default)
+                    .entries
+                    .push(entry);
+                continue;
+            }
+            if layout.placement.is_some() {
+                // The placement comes last: a function after it would take
+                // its `w` and `c` lines from the wrong place.
+                return Err(bad().into());
+            }
             if tag == "f" {
                 let mut fields = rest.splitn(3, ' ');
                 let (Some(hash), Some(words), Some(key)) =
@@ -824,7 +881,7 @@ pub fn bind(layout: &Layout, sections: &[Section], image: &Image) -> Bound {
 }
 
 /// `*` and `?` glob match, as the linker script's patterns use them.
-fn glob(pattern: &[u8], text: &[u8]) -> bool {
+pub(crate) fn glob(pattern: &[u8], text: &[u8]) -> bool {
     let (mut p, mut t) = (0, 0);
     let mut star: Option<(usize, usize)> = None;
     while t < text.len() {
@@ -1192,6 +1249,105 @@ pub fn place(sections: &[Section], image: &Image, bound: &Bound, fixed: &[String
         before: model.cost(&current),
         after: model.cost(&addresses),
     }
+}
+
+impl Recorded {
+    /// The `s` line and one `o` line per entry (hash, words, address, key).
+    pub fn to_text(&self) -> String {
+        let mut out = String::new();
+        let _ = writeln!(out, "{START_TAG} {:08x}", self.start);
+        for entry in &self.entries {
+            let _ = writeln!(
+                out,
+                "{ENTRY_TAG} {:016x} {} {:08x} {}",
+                entry.hash, entry.words, entry.address, entry.key
+            );
+        }
+        out
+    }
+}
+
+/// Where the catch-all's sections start: after the linker script's fixed
+/// rules, or at the first section when there are none.
+pub fn ordered_start(sections: &[Section], fixed: &[String]) -> u32 {
+    sections
+        .iter()
+        .filter(|section| {
+            fixed
+                .iter()
+                .any(|pattern| glob(pattern.as_bytes(), section.name.as_bytes()))
+        })
+        .map(Section::end)
+        .max()
+        .or_else(|| sections.iter().map(|section| section.start).min())
+        .unwrap_or(0)
+}
+
+/// The placement `search` recorded, bound onto a link: the listed sections in
+/// their order, each with the address the search gave it. Every entry must be
+/// in the link with the same code, and the ordered sections must start where
+/// they started for the search, or the addresses (which are the point) would
+/// not be the ones it scored; the error says to search again.
+pub fn recorded_order(
+    recorded: &Recorded,
+    sections: &[Section],
+    image: &Image,
+    fixed: &[String],
+) -> Result<Placement> {
+    let keys = keys(sections);
+    let index: HashMap<&str, usize> = keys
+        .iter()
+        .enumerate()
+        .filter_map(|(at, key)| Some((key.as_deref()?, at)))
+        .collect();
+    let mut differ = Vec::new();
+    let mut order = Vec::with_capacity(recorded.entries.len());
+    let mut placed = Vec::with_capacity(recorded.entries.len());
+    for entry in &recorded.entries {
+        let same = index.get(entry.key.as_str()).copied().filter(|&k| {
+            sections[k].size / 4 == entry.words
+                && image
+                    .words(&sections[k])
+                    .is_some_and(|words| code_hash(&words) == entry.hash)
+        });
+        match same {
+            Some(k) => {
+                order.push(k);
+                placed.push((k, entry.address));
+            }
+            None => differ.push(entry.key.as_str()),
+        }
+    }
+    if !differ.is_empty() {
+        return Err(format!(
+            "the layout's recorded placement lists {} section(s) this link does not have with \
+             the same code ({}); run `search` again on this code",
+            differ.len(),
+            differ
+                .iter()
+                .take(5)
+                .copied()
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+        .into());
+    }
+    let start = ordered_start(sections, fixed);
+    if start != recorded.start {
+        return Err(format!(
+            "the layout's recorded placement starts at {:#010x} and this link's ordered code at \
+             {start:#010x}: the code ahead of it changed size; run `search` again",
+            recorded.start
+        )
+        .into());
+    }
+    Ok(Placement {
+        order,
+        placed,
+        gap: 0,
+        before: 0.0,
+        after: 0.0,
+    })
 }
 
 /// The ordering file for a placement: one symbol per line.
@@ -1649,5 +1805,64 @@ mod tests {
         );
         assert!(glob(b".text.*hot_leaf*", b".text._RNv4game8hot_leaf3run"));
         assert!(!glob(b".text.*hot_leaf*", b".text._RNv4game4cold"));
+    }
+
+    #[test]
+    fn a_recorded_placement_round_trips_and_binds_only_to_the_same_code() {
+        let (sections, image, counts) = game();
+        let mut layout = collect(&sections, &image, &counts).layout;
+        let words = |k: usize| image.words(&sections[k]).unwrap();
+        // List b, then a; main and c follow in link order.
+        let entry = |k: usize, address| RecordedEntry {
+            hash: code_hash(&words(k)),
+            words: sections[k].size / 4,
+            address,
+            key: keys(&sections)[k].clone().unwrap(),
+        };
+        let at = |name: &str| {
+            keys(&sections)
+                .iter()
+                .position(|key| key.as_deref() == Some(name))
+                .unwrap()
+        };
+        let (a, b) = (at("a"), at("b"));
+        let start = ordered_start(&sections, &[]);
+        layout.placement = Some(Recorded {
+            start,
+            entries: vec![entry(b, start), entry(a, start + 0x40)],
+        });
+        let text = layout.to_text();
+        assert!(text.ends_with(&format!(
+            "s {start:08x}\no {:016x} 16 {:08x} b\no {:016x} 16 {:08x} a\n",
+            code_hash(&words(b)),
+            start,
+            code_hash(&words(a)),
+            start + 0x40
+        )));
+        let parsed = Layout::parse(&text).unwrap();
+        assert_eq!(parsed, layout);
+        let recorded = parsed.placement.unwrap();
+        let placement = recorded_order(&recorded, &sections, &image, &[]).unwrap();
+        assert_eq!(placement.order, vec![b, a]);
+        assert_eq!(order_file(&sections, &placement), "b\na\n");
+
+        // A layout without the block writes and reads exactly as before.
+        let mut plain = layout.clone();
+        plain.placement = None;
+        assert!(!plain.to_text().contains("\ns "));
+        assert_eq!(Layout::parse(&plain.to_text()).unwrap(), plain);
+
+        // Changed code, or code ahead of the ordered sections that moved, is refused.
+        let (_, mut changed, _) = game();
+        changed.body[0x50 + 0x10..0x50 + 0x14].copy_from_slice(&ADDU.to_le_bytes());
+        changed.body[0x90 + 0x10..0x90 + 0x14].copy_from_slice(&ADDU.to_le_bytes());
+        assert!(recorded_order(&recorded, &sections, &changed, &[]).is_err());
+        let moved = Recorded {
+            start: start + 4,
+            ..recorded.clone()
+        };
+        assert!(recorded_order(&moved, &sections, &image, &[]).is_err());
+        // A function line after the placement is refused, not misattributed.
+        assert!(Layout::parse(&format!("{text}f 0000000000000000 1 late\n")).is_err());
     }
 }

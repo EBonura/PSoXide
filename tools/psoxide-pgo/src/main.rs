@@ -49,6 +49,7 @@ mod layout;
 mod pipeline;
 mod ram;
 mod remap;
+mod search;
 mod stale;
 mod work;
 
@@ -1032,9 +1033,9 @@ const USAGE: &str = "usage: psoxide-pgo <elf-with-dwarf> <pc.csv>... <out.prof>
        psoxide-pgo place <in.layout> <link.map> <image.exe> <linker-script> <out.order>
        psoxide-pgo ram <link.map> [--floor BYTES]";
 
-const MODES: [&str; 12] = [
+const MODES: [&str; 14] = [
     "portable", "rebind", "layout", "place", "collect", "order", "apply", "choose", "measure",
-    "ram", "ladder", "stamp",
+    "ram", "ladder", "stamp", "search", "icache",
 ];
 
 /// A layout profile from one link and per-word logs (`--pc-log-words
@@ -1075,14 +1076,27 @@ fn place_order(
     println!("{}", bound.coverage);
     bound.coverage.gate()?;
     let fixed = layout::fixed_patterns(&fs::read_to_string(script)?);
-    let placement = layout::place(&sections, &image, &bound, &fixed);
-    println!(
-        "placed {}  gap {} B  predicted refills {:.0} -> {:.0}",
-        placement.placed.len(),
-        placement.gap,
-        placement.before,
-        placement.after
-    );
+    let placement = match &profile.placement {
+        Some(recorded) => {
+            let placement = layout::recorded_order(recorded, &sections, &image, &fixed)?;
+            println!(
+                "recorded placement: {} sections listed as `search` placed them",
+                placement.order.len()
+            );
+            placement
+        }
+        None => {
+            let placement = layout::place(&sections, &image, &bound, &fixed);
+            println!(
+                "placed {}  gap {} B  predicted refills {:.0} -> {:.0}",
+                placement.placed.len(),
+                placement.gap,
+                placement.before,
+                placement.after
+            );
+            placement
+        }
+    };
     fs::write(out, layout::order_file(&sections, &placement))?;
     Ok(())
 }
@@ -1113,6 +1127,7 @@ fn main() -> ExitCode {
         [mode @ ("collect" | "order" | "apply" | "choose" | "measure" | "ladder" | "stamp"), ..] => {
             pipeline::main(mode, &args[1..])
         }
+        [mode @ ("search" | "icache"), ..] => search::main(mode, &args[1..]),
         ["ram", map] => ram_report(Path::new(map), None),
         ["ram", map, "--floor", floor] => match floor.parse() {
             Ok(floor) => ram_report(Path::new(map), Some(floor)),
@@ -1137,7 +1152,7 @@ fn main() -> ExitCode {
             convert(Path::new(elf), &pcs, Path::new(output))
         }
         _ => {
-            eprintln!("{USAGE}\n{}", pipeline::USAGE);
+            eprintln!("{USAGE}\n{}\n{}", pipeline::USAGE, search::USAGE);
             return ExitCode::from(2);
         }
     };
