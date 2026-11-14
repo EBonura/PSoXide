@@ -10,7 +10,7 @@ command recording are part of every build.
 | --- | --- | --- |
 | A DMA chain (an ordering table, recorded HUD, any linked list) | `Presenter::submit(&mut buffers, head, Part::Final)` | The presenter links the draw area, offset and clear of `buffers`' draw side in front, puts the chain in the slot and kicks it at once if the frame before is on screen and DMA channel 2 is idle; otherwise the handler kicks it at the first edge that allows it. The frame is shown at the first edge after its closing GP0(1Fh) has run, no sooner than the cap. |
 | Several chains (two views, an overlay built later) | `submit(.., Part::More)` for each but the last, then `Part::Final` | Every part is kicked under the same condition; the last carries the display word. A `More` part holds no GP0(1Fh). |
-| Drawing through the GP0 port | draw, then `Presenter::present_drawn(&mut buffers)` | Acknowledges GPUSTAT bit 24, sends the draw-done sequence, queues the flip and returns. The next direct access waits in the guard until the flip has landed and then points the draw area at the other buffer. |
+| Drawing through the GP0 port | `Presenter::begin_frame(&buffers)`, draw, then `Presenter::present_drawn(&mut buffers)` | `begin_frame` waits until the frame before is on screen and points the draw area at the buffer to draw; `present_drawn` acknowledges GPUSTAT bit 24, sends the draw-done sequence, queues the flip and returns. |
 | A loading screen, the last frame before a long blocking read | `Presenter::present_blocking(&mut buffers)` | `present_drawn`, then waits until the frame is on screen. |
 | A buffer filled outside the frame path (a movie frame) | `present::show(origin)` | As `present_drawn` with an explicit origin and no buffer swap. |
 | Display enable at a gate | `present::set_display_enabled(on)` | Applied at the next edge with bit 24 up, never held by the cap. |
@@ -51,8 +51,12 @@ frame that waited past its edge; it runs again on the FPGA core's model with bit
 
 ## Cost
 
-The handler's work per edge with nothing queued is two loads and two branches, as before. Every
-port write tests one byte (the recording or the guard), and every GPU DMA start does the same.
+The handler's work per edge with nothing queued is three loads and three branches (one more than
+before, the kick's slot test). A program that hands over chains or records pays one byte test on
+every port write (the recording or the guard), as the present queue cost before; a program that
+only draws through the port does not: the flags are plain statics only those paths ever set, so the
+optimiser removes the test from its port writes. In the engine that is decided by
+`Scene::PRESENT_QUEUE`, so an engine game that never uses the queue links none of the chain path.
 
 ## Deprecated
 
@@ -67,13 +71,14 @@ and remain only so an old manifest resolves. A direct flip (`DoubleBuffer::swap`
 ## Moving a program onto it
 
 - A frame flipped with `queue_display_control_at_vblank` after `arm_draw_done` and
-  `signal_draw_done`: `presenter.present_drawn(&mut buffers)`. The wait for the flip to land before
-  the next clear, the timeout and the take-and-write recovery go: the guard waits, bounded, and the
+  `signal_draw_done`: `presenter.begin_frame(&buffers)` before the frame's first draw and
+  `presenter.present_drawn(&mut buffers)` after its last. The wait for the flip to land before the
+  next clear, the timeout and the take-and-write recovery go: `begin_frame` waits, bounded, and the
   presenter recovers a stalled walk itself.
 - A chain published with `publish_raw(head, display_of_the_frame_before)`: `submit(.., Part::Final)`,
   without the preamble (draw area, offset, clear), the display-word arithmetic and the explicit
   draw-done handling at the end of a run; the last frame is shown without a successor.
-- `wait_vblank(); swap()`: `present_drawn` (or `present_blocking` where the frame must be on screen
-  before the program goes on).
+- `wait_vblank(); swap()`: `begin_frame` before drawing and `present_drawn` after (or
+  `present_blocking` where the frame must be on screen before the program goes on).
 - A split-screen frame that holds its flip by hand: two parts and `set_cap`.
 - `set_min_flip_vblanks(n)`: `present::set_cap(PresentCap::every_vblanks(n))`.

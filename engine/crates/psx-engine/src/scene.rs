@@ -62,6 +62,9 @@ pub enum RenderSubmission {
     /// When `take_queued_frame` returns `None`, the runner presents the frame
     /// through the `QueuedDoubleBuffered` path instead, so the scene must
     /// also support [`Scene::submit_render`].
+    ///
+    /// A scene that returns it sets [`Scene::PRESENT_QUEUE`]; without it the
+    /// runner presents the frame the `QueuedDoubleBuffered` way.
     PresentQueue,
 }
 
@@ -499,6 +502,14 @@ impl BootSplash {
 /// inline (no globals needed). All methods take `&mut Ctx` so the
 /// scene can read pad state and draw into the framebuffer.
 pub trait Scene {
+    /// Whether this scene ever returns [`RenderSubmission::PresentQueue`]. A scene
+    /// that does sets it to `true`; the runner then links the chain path (the
+    /// presenter's submit, the overlay recording and the test every port write
+    /// makes for them). With the default, a `PresentQueue` frame is presented the
+    /// `QueuedDoubleBuffered` way and none of that is linked: a game that only
+    /// draws through the port pays nothing for the chain path.
+    const PRESENT_QUEUE: bool = false;
+
     /// Select the rendering hand-off contract. Existing scenes use immediate
     /// submission unless they explicitly opt into queued preparation.
     #[inline]

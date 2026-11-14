@@ -748,7 +748,12 @@ impl App {
                     missed_visual_intervals,
                     fixed_update_clamped: _,
                 } => {
-                    let submission = scene.render_submission();
+                    let mut submission = scene.render_submission();
+                    if !S::PRESENT_QUEUE && submission == RenderSubmission::PresentQueue {
+                        // The scene did not declare it (`Scene::PRESENT_QUEUE`), so the
+                        // chain path is not linked.
+                        submission = RenderSubmission::QueuedDoubleBuffered;
+                    }
                     if submission == RenderSubmission::PresentQueue {
                         // The frame before the last submitted one used this
                         // frame's ordering table, packets and nodes.

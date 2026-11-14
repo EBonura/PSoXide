@@ -2346,6 +2346,8 @@ fn resolve_ui_value(
 }
 
 impl<'a, S: Scene> Scene for GameApp<'a, S> {
+    const PRESENT_QUEUE: bool = S::PRESENT_QUEUE;
+
     fn render_submission(&self) -> RenderSubmission {
         if !self.loading_pending() && self.current_tag().has_gameplay() {
             self.gameplay.render_submission()

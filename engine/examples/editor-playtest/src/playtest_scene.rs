@@ -426,6 +426,8 @@ impl Playtest {
 }
 
 impl Scene for Playtest {
+    const PRESENT_QUEUE: bool = true;
+
     fn render_submission(&self) -> RenderSubmission {
         // Present-queue frames: +26% fps with one enemy on screen (19.8 to
         // 25.0). Frames that would fence early beside a queued frame, such as
