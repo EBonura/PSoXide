@@ -3,6 +3,7 @@ use std::env;
 use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::io::Read;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 mod web_dist;
@@ -27,6 +28,7 @@ fn run() -> Result<(), String> {
         "lint-policy-guard" => lint_policy_guard(),
         "runtime-numeric-guard" => runtime_numeric_guard(),
         "no64-scan" => no64_scan(&args),
+        "style-fmt" => style_fmt(&args),
         "bake-spectrum" => bake_spectrum(&args),
         "cortex-bringup-report" => cortex_bringup_report(&args),
         "cortex-stream-guard" => cortex_stream_guard(&args),
@@ -48,6 +50,7 @@ fn help() -> String {
        lint-policy-guard\n\
        runtime-numeric-guard\n\
        no64-scan [--floats] [--exempt FILE]... DIR...\n\
+       style-fmt [--check]\n\
        bake-spectrum <input.wav> -o <output.bin> [--fps N] [--bands N] [--seconds S]\n\
        cortex-bringup-report [--out REPORT.md] [--fail-on-warn]\n\
        cortex-stream-guard [--profile profile.csv] [--cdda-log cdda.log]\n\
@@ -459,6 +462,46 @@ fn collect_game_rs_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), Strin
             && path.file_name().and_then(|n| n.to_str()) != Some("tests.rs")
         {
             out.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// `style-fmt [--check]`: format (or with `--check`, verify) every tracked Rust
+/// file of the git repository in the current directory, using the repository's
+/// own `rustfmt.toml` and the toolchain its `rust-toolchain.toml` pins (the
+/// style guide's options are unstable). Exit status is rustfmt's.
+fn style_fmt(args: &[String]) -> Result<(), String> {
+    let check = match args {
+        [] => false,
+        [flag] if flag == "--check" => true,
+        _ => return Err("usage: psoxide-dev style-fmt [--check]".to_string()),
+    };
+    let listing = std::process::Command::new("git")
+        .args(["ls-files", "-z", "*.rs"])
+        .output()
+        .map_err(|e| format!("git ls-files: {e}"))?;
+    if !listing.status.success() {
+        return Err("git ls-files failed (run from the repository root)".to_string());
+    }
+    let files: Vec<&[u8]> = listing
+        .stdout
+        .split(|&byte| byte == 0)
+        .filter(|name| !name.is_empty())
+        .collect();
+    // Batches keep the command line under the OS limit on a large repository.
+    for batch in files.chunks(256) {
+        let mut rustfmt = std::process::Command::new("rustfmt");
+        rustfmt.args(["--edition", "2021"]);
+        if check {
+            rustfmt.arg("--check");
+        }
+        for name in batch {
+            rustfmt.arg(std::ffi::OsStr::from_bytes(name));
+        }
+        let status = rustfmt.status().map_err(|e| format!("rustfmt: {e}"))?;
+        if !status.success() {
+            return Err("style-fmt: rustfmt reported differences or errors".to_string());
         }
     }
     Ok(())
