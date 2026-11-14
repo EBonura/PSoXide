@@ -371,6 +371,12 @@ pub fn wait_arena_free() {
 /// GPU access after a chain was handed over, so a direct access never collides
 /// with a walk. Bounded like
 /// [`wait_slot_empty`]; a walk it gives up on is stopped by hand.
+#[no_mangle]
+#[doc(hidden)]
+pub fn __psx_rt_direct_access_guard() {
+    wait_idle();
+}
+
 #[doc(alias = "DrawSync")]
 #[inline(never)]
 pub fn wait_idle() {

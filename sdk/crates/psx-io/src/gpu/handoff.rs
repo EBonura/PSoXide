@@ -497,10 +497,23 @@ fn run_armed_guard() {
         *addr_of_mut!(GUARD_ARMED) = false;
         set_slow(*addr_of!(ACTIVE));
     }
+    // On the console the guard is one known function, called directly, so a call tree that
+    // reaches this path has no call through a register to bound.
+    #[cfg(target_arch = "mips")]
+    // SAFETY: `psx-rt` defines the symbol; every program links it.
+    unsafe {
+        __psx_rt_direct_access_guard()
+    }
+    #[cfg(not(target_arch = "mips"))]
     // SAFETY: as above.
     if let Some(guard) = unsafe { read_volatile(addr_of!(GUARD)) } {
         guard();
     }
+}
+
+#[cfg(target_arch = "mips")]
+extern "Rust" {
+    fn __psx_rt_direct_access_guard();
 }
 
 #[cfg(test)]
