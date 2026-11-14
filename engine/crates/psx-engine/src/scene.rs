@@ -46,11 +46,12 @@ pub enum RenderSubmission {
     /// channel first (VRAM uploads do).
     QueuedDoubleBuffered,
     /// [`QueuedDoubleBuffered`](Self::QueuedDoubleBuffered), except that the
-    /// runner hands the whole frame to psx-rt's present queue instead of
-    /// kicking it itself: frame N's ordering table, its overlay and the draw
-    /// target and clear that precede it become one DMA chain, which the VBlank
-    /// handler starts (and flips N-1 onto the display) on the first edge
-    /// after N-1 has drawn. The CPU goes straight on to the next frame.
+    /// runner hands the whole frame to `psx_rt::present::Presenter::submit`
+    /// instead of kicking it itself: frame N's ordering table, its overlay and
+    /// the draw target and clear that precede it become one DMA chain, which
+    /// starts at once if N-1 is on screen and the channel is idle, or else at
+    /// the first edge that allows it; N is shown at the first edge after it
+    /// has drawn. The CPU goes straight on to the next frame.
     ///
     /// `render` ends its ordering table on [`Ctx::present_queue_hook`] right
     /// after clearing it and reserves overlay space;
@@ -61,9 +62,6 @@ pub enum RenderSubmission {
     /// When `take_queued_frame` returns `None`, the runner presents the frame
     /// through the `QueuedDoubleBuffered` path instead, so the scene must
     /// also support [`Scene::submit_render`].
-    ///
-    /// Needs psx-engine's `present-queue` feature; without it the runner
-    /// presents these scenes as `QueuedDoubleBuffered`.
     PresentQueue,
 }
 

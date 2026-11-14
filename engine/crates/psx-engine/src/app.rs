@@ -43,9 +43,10 @@ use psx_level::{
     LevelUiScene, LevelUiSfxCueRecord, LevelUiSfxSampleRecord,
 };
 use psx_pad::{Controllers, PadState, Port};
+use psx_rt::present::{self, Presenter};
 
 use crate::game_app::{GameApp, GAMEPLAY_ONLY};
-use crate::present_queue::{PresentQueue, ENABLED as PRESENT_QUEUE_ENABLED};
+use crate::present_queue;
 use crate::scene::{Ctx, RenderSubmission, Scene};
 use crate::scheduler::{FrameScheduler, SchedulerAction, SchedulerConfig};
 use crate::telemetry;
@@ -545,6 +546,11 @@ impl App {
         };
         boot_trace("psx-engine: gpu ok");
         boot_trace("psx-engine: clock ok");
+        // Every frame goes to the screen through this one presenter: chain frames
+        // (`RenderSubmission::PresentQueue`) and frames the GPU drew through the
+        // port (the other submissions), each shown at the first edge after it is
+        // drawn and no sooner than the cap.
+        let presenter = Presenter::new(Some(config.clear_color));
         boot_visual_checkpoint_raw(&mut gpu, &mut fb, (160, 0, 0), "01 FRAMEBUFFER READY", 1);
         boot_trace("psx-engine: framebuffer ok");
 
@@ -604,13 +610,14 @@ impl App {
 
         let visual_interval = config.visual_pacing.interval_vblanks();
         boot_trace("psx-engine: loop");
-        Self::run_scheduled(config, &mut app, clock, ctx, visual_interval);
+        Self::run_scheduled(config, &mut app, clock, presenter, ctx, visual_interval);
     }
 
     fn run_scheduled<S: Scene>(
         config: Config,
         scene: &mut S,
         mut clock: EngineClock,
+        mut presenter: Presenter,
         mut ctx: Ctx,
         visual_interval: u16,
     ) -> ! {
@@ -624,36 +631,31 @@ impl App {
         // gap so the GPU draw overlaps CPU work. Holds the frame's missed
         // visual intervals for the deadline counters emitted at the flip.
         let mut pending_present: Option<u16> = None;
-        // Set while a queued scene's display flip sits in the VBlank
-        // handler's GP1 slot, carrying that frame's missed visual intervals
-        // for the deadline counters. Until the edge arrives the newly selected
-        // draw buffer is still the one on screen, so the frame clear and the
-        // ordering-table kick that follow the flip are held back -- and the
-        // fixed updates that were already due get to run in the gap that used
-        // to be a spin. See `finish_deferred_flip`.
+        // Set while a queued scene's display flip waits for its edge, carrying
+        // that frame's missed visual intervals for the deadline counters. Until
+        // the edge arrives the newly selected draw buffer is still the one on
+        // screen, so the frame clear and the ordering-table kick that follow
+        // the flip are held back -- and the fixed updates that were already due
+        // get to run in the gap that used to be a spin. See
+        // `finish_deferred_flip`.
         let mut deferred_flip: Option<u16> = None;
-        // Frames handed to psx-rt's present queue (RenderSubmission::PresentQueue).
-        let mut present_queue = PresentQueue::new();
 
         loop {
-            // Resolve a queued flip as soon as the handler has taken the word,
-            // or when the scheduler has nothing but a render or a wait left to
+            // Resolve a queued flip as soon as the handler has applied it, or
+            // when the scheduler has nothing but a render or a wait left to
             // offer -- at which point blocking on the edge is all there is to
             // do. A due fixed update always goes first: covering the edge with
             // simulation the runner owed anyway is the entire point.
             if let Some(previous_misses) = deferred_flip {
-                if !clock.display_flip_pending()
+                if !present::is_flip_pending()
                     || !matches!(
                         scheduler.next_action(clock.elapsed_sim_ticks()),
                         SchedulerAction::RunFixedUpdate { .. }
                     )
                 {
                     telemetry::stage_begin(telemetry::stage::PRESENT);
-                    let landed = clock.wait_display_flip();
+                    present::wait_flip();
                     telemetry::stage_end(telemetry::stage::PRESENT);
-                    if !landed {
-                        telemetry::counter(telemetry::counter::VISUAL_DEADLINE_MISSES, 1);
-                    }
                     // Counted here, not where the word was queued: the frame
                     // reaches the screen at the edge, so `ctx.visual_frame`
                     // advances at the same point in the cadence it did when
@@ -673,7 +675,7 @@ impl App {
                         if !traced_present {
                             boot_trace("psx-engine: present begin");
                         }
-                        Self::present_pending(scene, &mut clock, &mut ctx, &mut pending_present);
+                        Self::present_pending(scene, &mut presenter, &mut ctx, &mut pending_present);
                         if !traced_present {
                             boot_visual_checkpoint_hold(&mut ctx, (0, 220, 0), "49 PRESENT OK", 60);
                             boot_trace("psx-engine: present ok");
@@ -746,31 +748,13 @@ impl App {
                     missed_visual_intervals,
                     fixed_update_clamped: _,
                 } => {
-                    let mut submission = scene.render_submission();
-                    if !PRESENT_QUEUE_ENABLED && submission == RenderSubmission::PresentQueue {
-                        submission = RenderSubmission::QueuedDoubleBuffered;
-                    }
+                    let submission = scene.render_submission();
                     if submission == RenderSubmission::PresentQueue {
-                        if !present_queue.active {
-                            // The queue starts on an idle GPU: present what
-                            // the other paths left in flight first. A queued
-                            // flip is resolved before any visual frame runs.
-                            debug_assert!(deferred_flip.is_none());
-                            Self::present_pending(
-                                scene,
-                                &mut clock,
-                                &mut ctx,
-                                &mut pending_present,
-                            );
-                            present_queue.start();
-                        }
-                        // The frame before the last published one used this
+                        // The frame before the last submitted one used this
                         // frame's ordering table, packets and nodes.
                         telemetry::stage_begin(telemetry::stage::OT_WAIT);
-                        present_queue.wait_arena_free();
+                        present::wait_arena_free();
                         telemetry::stage_end(telemetry::stage::OT_WAIT);
-                    } else if present_queue.active {
-                        present_queue.stop(&mut clock, &mut ctx);
                     }
                     // A queued scene keeps one completed visual in flight.
                     // A single-buffered one drains only the linked-list DMA
@@ -786,17 +770,15 @@ impl App {
                             chain::wait(ctx.gpu_dma());
                             telemetry::stage_end(telemetry::stage::OT_WAIT);
                         })
-                    } else if matches!(
-                        submission,
-                        RenderSubmission::QueuedDoubleBuffered | RenderSubmission::PresentQueue
-                    ) {
+                    } else if submission == RenderSubmission::QueuedDoubleBuffered {
                         pending_present.take()
                     } else {
-                        // Immediate scenes retain the original overload path:
-                        // present before clearing/reusing the back buffer. A
+                        // Immediate scenes, and a present-queue scene after a
+                        // frame of another kind: present what is still in
+                        // flight before clearing or reusing the back buffer. A
                         // late frame still flips on a blank edge: it stays on
                         // screen one VBlank longer instead of tearing.
-                        Self::present_pending(scene, &mut clock, &mut ctx, &mut pending_present);
+                        Self::present_pending(scene, &mut presenter, &mut ctx, &mut pending_present);
                         None
                     };
                     if !traced_render {
@@ -824,7 +806,7 @@ impl App {
                         boot_visual_checkpoint(&mut ctx, (100, 40, 180), "33 SCENE RENDER BEGIN");
                     }
                     if submission == RenderSubmission::PresentQueue {
-                        ctx.set_present_queue_hook(Some(present_queue.hook()));
+                        ctx.set_present_queue_hook(Some(present_queue::hook()));
                     }
                     scene.render(&mut ctx);
                     ctx.set_present_queue_hook(None);
@@ -838,12 +820,10 @@ impl App {
                     }
                     telemetry::stage_end(telemetry::stage::RENDER);
 
+                    // A present-queue frame that could not be submitted goes
+                    // the double-buffered way below.
                     let published = submission == RenderSubmission::PresentQueue
-                        && present_queue.publish(config, scene, &mut ctx);
-                    if submission == RenderSubmission::PresentQueue && !published {
-                        // Present this frame the double-buffered way.
-                        present_queue.stop(&mut clock, &mut ctx);
-                    }
+                        && present_queue::submit(&mut presenter, scene, &mut ctx);
 
                     if submission.is_queued() && !published {
                         if let Some(previous_misses) = queued_previous {
@@ -855,28 +835,22 @@ impl App {
                             scene.render_overlay(&mut ctx);
                             telemetry::stage_end(telemetry::stage::RENDER);
 
-                            // Hand the display-start word to the VBlank
-                            // handler instead of spinning out the rest of the
-                            // display period waiting for the edge ourselves.
-                            // The handler applies it in the blanking interval
-                            // exactly as the synchronous swap did, so this is
-                            // no more prone to shearing; what changes is that
-                            // the CPU keeps the pending fixed updates it was
-                            // about to run and does them inside the wait. The
-                            // clear and the ordering-table kick come after the
-                            // edge, in `finish_deferred_flip`.
+                            // Hand the frame to the presenter instead of
+                            // spinning out the rest of the display period
+                            // waiting for the edge ourselves. The handler flips
+                            // in the blanking interval, so this is no more
+                            // prone to shearing; what changes is that the CPU
+                            // keeps the pending fixed updates it was about to
+                            // run and does them inside the wait. The clear and
+                            // the ordering-table kick come after the edge, in
+                            // `finish_deferred_flip`.
                             //
-                            // The queue closes the frame with GP0(1Fh) and
+                            // The presenter closes the frame with GP0(1Fh) and
                             // the handler flips only once the GPU reaches it,
                             // so the overlay above must be the frame's last
-                            // drawing. The previous flip has landed (it is
-                            // resolved before any visual frame runs), which
-                            // the acknowledge inside the queue requires.
+                            // drawing.
                             telemetry::stage_begin(telemetry::stage::PRESENT);
-                            {
-                                let (gpu, fb) = ctx.gpu_and_buffers();
-                                clock.queue_display_flip(gpu, fb.begin_deferred_swap());
-                            }
+                            presenter.present_drawn(&mut ctx.fb);
                             telemetry::stage_end(telemetry::stage::PRESENT);
                             deferred_flip = Some(previous_misses);
                         } else {
@@ -899,8 +873,8 @@ impl App {
                     // remaining raster time.
                     scheduler.complete_visual_frame();
                     if published {
-                        // Counted at publish: the queue shows the frame on the
-                        // first edge after the one before it has drawn.
+                        // Counted at submit: the presenter shows the frame on
+                        // the first edge allowed after it has drawn.
                         emit_visual_frame_counters(missed_visual_intervals);
                         ctx.visual_frame = ctx.visual_frame.advance();
                     } else {
@@ -911,19 +885,16 @@ impl App {
         }
     }
 
-    /// Take ownership of the buffer a queued flip just freed: point the GPU's
-    /// draw area/offset at it, clear it, and kick the ordering table that was
-    /// built for it.
+    /// Take ownership of the buffer a queued flip just freed: clear it and kick
+    /// the ordering table that was built for it. The clear is the first direct
+    /// access after the flip was handed over, so the presenter's guard has
+    /// pointed the draw area and offset at the buffer first.
     ///
     /// Every step here writes to the buffer the display was showing until the
-    /// flip landed, so none of it may run while
-    /// [`EngineClock::display_flip_pending`] is true -- that is the whole
-    /// reason the work is split out of the present.
+    /// flip landed, so none of it may run while `present::is_flip_pending()`;
+    /// the guard would wait for it, and the runner resolves the flip first so
+    /// the wait is spent on fixed updates instead.
     fn finish_deferred_flip<S: Scene>(config: Config, scene: &mut S, ctx: &mut Ctx) {
-        {
-            let (gpu, fb) = ctx.gpu_and_buffers();
-            fb.apply_draw_target(gpu);
-        }
         telemetry::stage_begin(telemetry::stage::FRAME_CLEAR);
         {
             let (gpu, fb) = ctx.gpu_and_buffers();
@@ -934,19 +905,18 @@ impl App {
     }
 
     /// Drain the in-flight ordering-table DMA, draw the scene's 2D
-    /// overlay layer over the finished frame, and flip the display.
+    /// overlay layer over the finished frame, and hand it to the presenter.
     ///
-    /// The flip always goes through psx-rt's VBlank handler, which applies
-    /// it at a blank edge once the frame's closing GP0(1Fh) has run, and
-    /// this blocks until it has landed: the next frame clears the buffer
-    /// that was on screen. That holds on the overload path too. A late
-    /// frame used to flip immediately, mid-scanout, which tears for a field
-    /// on a console (NitroXide at 60 fps: 6 double flips in 805 gameplay
-    /// VBlanks); it now shows one VBlank later instead. No-op when no built
-    /// frame is awaiting its flip.
+    /// The flip goes through psx-rt's VBlank handler, which applies it at a
+    /// blank edge once the frame's closing GP0(1Fh) has run; the next frame's
+    /// first direct access (its clear) waits in the presenter's guard until it
+    /// has landed, so it never clears the buffer on screen. A late frame used
+    /// to flip immediately, mid-scanout, which tears for a field on a console
+    /// (6 double flips in 805 gameplay VBlanks of a 60 fps game); it shows one
+    /// VBlank later instead. No-op when no built frame is awaiting its flip.
     fn present_pending<S: Scene>(
         scene: &mut S,
-        clock: &mut EngineClock,
+        presenter: &mut Presenter,
         ctx: &mut Ctx,
         pending: &mut Option<u16>,
     ) {
@@ -968,19 +938,8 @@ impl App {
         telemetry::stage_end(telemetry::stage::RENDER);
 
         telemetry::stage_begin(telemetry::stage::PRESENT);
-        {
-            let (gpu, fb) = ctx.gpu_and_buffers();
-            clock.queue_display_flip(gpu, fb.begin_deferred_swap());
-        }
-        let landed = clock.wait_display_flip();
-        {
-            let (gpu, fb) = ctx.gpu_and_buffers();
-            fb.apply_draw_target(gpu);
-        }
+        presenter.present_drawn(&mut ctx.fb);
         telemetry::stage_end(telemetry::stage::PRESENT);
-        if !landed {
-            telemetry::counter(telemetry::counter::VISUAL_DEADLINE_MISSES, 1);
-        }
 
         emit_visual_frame_counters(missed_visual_intervals);
         ctx.visual_frame = ctx.visual_frame.advance();

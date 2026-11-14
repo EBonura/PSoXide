@@ -1110,9 +1110,9 @@ impl<'a> PrimitivePacketArena<'a> {
     pub fn try_fence_completed(&mut self) -> bool {
         self.try_fence_completed_with(
             || {
-                #[cfg(all(target_arch = "mips", feature = "present-queue"))]
+                #[cfg(target_arch = "mips")]
                 return psx_rt::present::is_slot_full();
-                #[cfg(not(all(target_arch = "mips", feature = "present-queue")))]
+                #[cfg(not(target_arch = "mips"))]
                 false
             },
             || {
@@ -1442,7 +1442,6 @@ fn packet_cursor(
 #[cfg(target_arch = "mips")]
 #[inline(always)]
 fn wait_for_in_flight_list() {
-    #[cfg(feature = "present-queue")]
     psx_rt::present::wait_slot_empty();
     // SAFETY: the wait reads channel 2's status until the walk the frame's
     // owner kicked has finished, and starts nothing. The fence runs from a
