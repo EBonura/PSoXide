@@ -164,6 +164,20 @@ and the motor mapping not compiled in (a const parameter of the type,
 `Controllers<false>`); a poll is then exactly what the older `poll_on` sent:
 five bytes to a digital pad, nine to a pad that is already analog.
 
+## The stick as a d-pad, and edges
+
+`PadTracker` turns a polled button mask into press and release edges, auto-repeat (`repeats(mask,
+delay, rate)`) and a handoff guard (`prime`). `StickDpad` folds the centred left stick into d-pad
+bits so a menu can answer the stick through the same tracker: `pad.update(buttons | stick.update(x,
+y))`. A menu that wants one press per push reads `just_pressed`; one that wants a cursor that runs
+reads `repeats`. The test is a parameter, because games feel differently on purpose:
+`StickDpad::per_axis(enter, exit)` judges each axis (a diagonal sets two bits) and
+`StickDpad::radial(enter, exit)` judges the distance from centre and keeps one direction until the
+stick is back inside `exit` (the radii are `Deadzone` radii, so "past" is strictly outside). A push
+registers beyond `enter` and releases inside `exit`; `exit == enter` is a plain threshold. The host
+tests hold the fold to the three rules it replaces at every reading: per axis beyond 48 counts, per
+axis at 48 or more (`per_axis(47, 47)`), and radial 64 in, 32 out with a latched direction.
+
 ## Memory cards
 
 A card transaction needs the whole port, and a poll needs it too. The

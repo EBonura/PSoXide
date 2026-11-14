@@ -65,8 +65,10 @@ use psx_io::periph::ControllerPort;
 pub use psx_io::controller_port::Port;
 
 mod controllers;
+pub mod stick;
 pub mod tracker;
 pub use controllers::Controllers;
+pub use stick::{StickDpad, StickShape};
 pub use tracker::PadTracker;
 
 // Under test the driver talks to a controller model, not the registers.
