@@ -35,6 +35,10 @@ name = "cache-gate"
 path = "src/bin/cache-gate.rs"
 
 [[bin]]
+name = "inline-gate"
+path = "src/bin/inline-gate.rs"
+
+[[bin]]
 name = "check-mfc0"
 path = "src/bin/check-mfc0.rs"
 

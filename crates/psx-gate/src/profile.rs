@@ -65,6 +65,10 @@ pub struct Profile {
     pub probe: Vec<String>,
     /// Legacy SDK entry points a program may still call only while it lists them.
     pub deprecated: Vec<String>,
+    /// Free functions of the per-frame path that must be inlined into their callers: none of them
+    /// may be a function in a linked image (`crate::module::function`, checked on the link map by
+    /// `psoxide-hazard`'s `inline-gate`).
+    pub inline: Vec<String>,
     /// Exceptions: of the programs inside the SDK repository (`sdk/profile.toml`) or of one
     /// program (its `psx-gate.toml`).
     pub exceptions: Vec<Exception>,
@@ -191,7 +195,7 @@ impl Profile {
             if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
                 flush(&mut profile, current.take()).map_err(at)?;
                 section = name.trim().to_string();
-                let known = ["shipping", "diag", "host", "probe", "deprecated"];
+                let known = ["shipping", "diag", "host", "probe", "deprecated", "inline"];
                 if program_file || !known.contains(&section.as_str()) {
                     return Err(at(format!("unknown table [{section}]")));
                 }
@@ -212,11 +216,11 @@ impl Profile {
                 }
             } else {
                 let table = match section.as_str() {
-                    "probe" | "deprecated" => {
-                        let (wanted, list) = if section == "probe" {
-                            ("programs", &mut profile.probe)
-                        } else {
-                            ("symbols", &mut profile.deprecated)
+                    "probe" | "deprecated" | "inline" => {
+                        let (wanted, list) = match section.as_str() {
+                            "probe" => ("programs", &mut profile.probe),
+                            "inline" => ("symbols", &mut profile.inline),
+                            _ => ("symbols", &mut profile.deprecated),
                         };
                         if key != wanted {
                             return Err(at(format!("[{section}] holds `{wanted}`, not `{key}`")));
@@ -352,6 +356,8 @@ psx-grid = ["std"]
 programs = ["probe-a", "probe-b"]
 [deprecated]
 symbols = ["old_call"]
+[inline]
+symbols = ["psx_gpu::chain::start_walk"]
 
 [[exception]]
 program = "game"
@@ -382,6 +388,7 @@ remove = "W2"
         );
         assert_eq!(p.probe, ["probe-a", "probe-b"]);
         assert_eq!(p.deprecated, ["old_call"]);
+        assert_eq!(p.inline, ["psx_gpu::chain::start_walk"]);
     }
 
     #[test]

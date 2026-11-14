@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- The architecture gate refuses an image that holds a frame-path function as a function: `[inline]` in `sdk/profile.toml`
+  lists them (`psx_gpu::chain::start_walk` first) and `inline-gate` (`tools/psoxide-hazard`, run by `psoxide-pgo` with the
+  hazard patch, the stack guard and the cache gate) reads the link map after the link. The compiler's inline choice depends on
+  the size of the program, so the examples never showed the call, return and instruction-cache cost one game paid on every
+  chain submit (thirteen late frames in a test journey against six; `sdk/docs/GATE.md`, "Inlined frame-path functions"). Tests:
+  a map with the symbol is refused and one without it passes; the profile test fails on an entry that names nothing.
 - `psx_gpu::chain::start_walk`, the kick behind every chain submit (`submit_async_raw`, `Frame::submit`, `OtFrame::submit_with`,
   `Gpu::submit_static`, the compatibility entry points), is `inline(always)`. It was left to the compiler, which inlined it in
   small programs and, in a larger one, compiled it as a function: a call and return, a second copy of its instructions in

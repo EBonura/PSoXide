@@ -885,6 +885,9 @@ impl Guest {
         // Nothing but psx-rt's flush routines may change the cache control register or isolate
         // the cache (sdk/docs/CACHE-CONTROL.md); not overridable.
         check(None, psoxide_hazard::cache_gate::main, true, "cache gate")?;
+        // The frame-path functions sdk/profile.toml lists under [inline] must not be functions in the
+        // image (sdk/docs/GATE.md); the SDK is the one this tool was built from.
+        check(None, psoxide_hazard::inline_gate::main, true, "inline gate")?;
         // A game that uses psx_rt::scratchpad_window gets its guard rooms and level-1 roots proved
         // from the final image; a game without stubs passes silently.
         check(None, psoxide_hazard::window_gate::main, true, "window gate")?;

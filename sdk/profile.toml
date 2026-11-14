@@ -44,6 +44,13 @@ programs = ["hardware-tests"]
 [deprecated]
 symbols = ["poll_port1", "psx_pad::poll_port2", "PadReader", "poll_on", "poll_rumble_on", "enable_analog_on", "enable_analog_port1", "enable_analog_port2", "require_analog_on", "require_analog_port1", "enable_rumble_on", "enable_analog", "min_flip_vblanks", "publish_raw", "set_min_flip_vblanks", "is_display_control_queued", "take_queued_display_control", "queue_display_control_at_vblank"]
 
+# Free functions of the per-frame path that must be inlined into their callers. A linked image that
+# holds one as a function is refused after the link (sdk/docs/GATE.md, "Inlined frame-path
+# functions"): the compiler inlines them into a small program and may not into a larger one, so the
+# examples cannot show the cost. `start_walk` is the kick behind every chain submit.
+[inline]
+symbols = ["psx_gpu::chain::start_walk"]
+
 [[exception]]
 program = "editor-playtest"
 kind = "feature"

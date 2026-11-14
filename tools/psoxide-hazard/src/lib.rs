@@ -9,6 +9,8 @@
 //!   the next instruction; it needs no build and runs over any source tree.
 //! * [`cache_gate`] (`cache-gate`) proves nothing outside the SDK's flush routines writes the
 //!   cache control register or isolates the cache.
+//! * [`inline_gate`] (`inline-gate`) proves the frame-path functions `sdk/profile.toml` lists under `[inline]`
+//!   are inlined into their callers, not linked as functions.
 //! * [`stack_guard`] (`stack-guard`) proves every scratchpad stack call tree
 //!   fits its region.
 //!
@@ -22,6 +24,7 @@ use std::io::Write;
 pub mod cache_gate;
 pub mod detect;
 pub mod gate;
+pub mod inline_gate;
 pub mod linkmap;
 pub mod listing;
 pub mod mfc0;

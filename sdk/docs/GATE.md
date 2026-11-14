@@ -166,9 +166,38 @@ other repositories, and a probe that keeps a line-kind entry fails ("delete the 
 program lists its remaining calls per file with a count (`deprecated-use`); a new call is refused
 and the count only goes down. The match is by name.
 
+## Inlined frame-path functions
+
+`[inline]` in `sdk/profile.toml` lists the free functions of the per-frame path (`crate::module::function`)
+that must be inlined into their callers. The compiler inlines a function without `inline(always)` into a
+small program and may not into a larger one, so an example cannot show what a game pays: in one game
+`psx_gpu::chain::start_walk` (the kick behind every chain submit, about twenty instructions) was compiled
+as a function and cost it a call, a return, a second copy of the kick in the instruction cache and its
+loads and stores on every submit, thirteen late frames in a test journey against six before, while every
+example and every gate passed. This is the gate that sees it.
+
+`inline-gate` (`tools/psoxide-hazard`, `psoxide_hazard::inline_gate`) reads the link map after the link
+and fails when a listed function is in the image as a function (a `.text.<symbol>` input section or a
+symbol with a size). `psoxide-pgo apply`, `collect`, `order`, `choose` and `ladder` run it with the
+hazard patch, the scanner, the stack guard and the cache gate, against the `sdk/profile.toml` of the SDK
+the tool was built from, so a game pinned to the SDK is covered by its own build; by hand:
+`inline-gate game.exe --map game.map [--profile profile.toml]`. A function that is not in the image
+passes: a program that never calls it does not link it. The map names a function by its mangled symbol,
+so the gate looks for the run of length-prefixed names the mangling writes for the listed path
+(`psx_gpu::chain::start_walk` is `7psx_gpu5chain10start_walk`), which finds it under either mangling
+scheme, generic instances included; methods (`Type::method`) cannot be listed, because their path is not
+one run in the symbol.
+
+The fix for a refusal is to make the function inline into its callers (`#[inline(always)]`, the way
+`start_walk` is, with the reason in its doc comment), not to delete the entry. Add an entry only for a
+function of the per-frame path that a measurement showed costing a game when it was a function; the list
+is not a style rule. A test (`crates/psx-gate/tests/profile.rs`) fails when an entry no longer names a
+function of its crate, and `inline_gate`'s tests refuse a map that has the symbol and pass one that does
+not.
+
 ## Tests
 
 `cargo test -p psx-gate -p psoxide-hazard -p psx-iso`: each check has a failing and a passing
-fixture (`tools/psoxide-hazard/src/gate.rs`, `crates/psx-gate`, `crates/psx-iso/src/receipt.rs`),
+fixture (`tools/psoxide-hazard/src/gate.rs`, `tools/psoxide-hazard/src/inline_gate.rs`, `crates/psx-gate`, `crates/psx-iso/src/receipt.rs`),
 and `crates/psx-gate/tests/profile.rs` fails when a crate with features has no gate script or the
 profile lists a feature that does not exist.

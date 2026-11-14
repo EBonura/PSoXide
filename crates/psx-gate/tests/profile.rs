@@ -200,6 +200,55 @@ fn deprecated_symbols_are_still_defined_in_the_sdk() {
 /// recipe or script that builds it by plain cargo without naming it is refused by the first SDK
 /// crate's build script, and nobody finds out until the recipe runs. This reads every make file,
 /// script and workflow that builds guests, so a new recipe cannot forget it.
+/// Every `[inline]` entry is `crate::module::function` and still names a function of that crate, so a
+/// renamed or deleted function does not leave an entry that checks nothing.
+#[test]
+fn inlined_frame_path_functions_are_still_defined_in_the_sdk() {
+    let profile = profile();
+    assert!(
+        !profile.inline.is_empty(),
+        "[inline] lists start_walk as its first entry"
+    );
+    let mut problems = Vec::new();
+    for path in &profile.inline {
+        let parts: Vec<&str> = path.split("::").collect();
+        if parts.len() < 3 {
+            problems.push(format!("{path}: write it as crate::module::function"));
+            continue;
+        }
+        let dir_name = parts[0].replace('_', "-");
+        let found = crate_dirs()
+            .into_iter()
+            .filter(|dir| {
+                dir.file_name()
+                    .is_some_and(|name| name.to_string_lossy() == dir_name)
+            })
+            .any(|dir| {
+                let mut files = Vec::new();
+                rust_files(&dir.join("src"), &mut files);
+                let needle = format!("fn {}(", parts[parts.len() - 1]);
+                files
+                    .iter()
+                    .any(|file| fs::read_to_string(file).is_ok_and(|text| text.contains(&needle)))
+            });
+        if !found {
+            problems.push(format!("{path}: no such function in {dir_name}"));
+        }
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            rust_files(&path, out);
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            out.push(path);
+        }
+    }
+}
+
 #[test]
 fn recipes_that_build_a_program_with_feature_exceptions_by_plain_cargo_name_it() {
     let profile = profile();
