@@ -14,6 +14,7 @@ pub mod ladder_logic;
 pub mod model_variant;
 pub mod ordering;
 pub mod pickup_logic;
+pub mod present;
 pub mod pushable;
 pub mod pvs_faces;
 pub mod render;
