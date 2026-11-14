@@ -171,7 +171,7 @@ pub fn show(
 /// 0x0000 is transparent.
 fn upload_mark() {
     let mut y = MARK_TPAGE.y();
-    logo::expand(|band| {
+    logo::expand(&mut |band| {
         upload_16bpp(VramRect::new(MARK_TPAGE.x(), y, 32, 16), band);
         y += 16;
     });
@@ -230,7 +230,7 @@ mod tests {
     #[test]
     fn the_mark_expands_to_its_8_bands_and_its_words() {
         let mut words = std::vec::Vec::new();
-        logo::expand(|band| words.extend_from_slice(band));
+        logo::expand(&mut |band| words.extend_from_slice(band));
         assert_eq!(words.len(), logo::WORDS);
         assert_eq!(fnv1a(words.into_iter()), logo::FNV1A);
     }

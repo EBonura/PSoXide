@@ -29,8 +29,14 @@ pub(crate) static PALETTE: [u16; 16] = [
 
 /// Expand [`CODED`], calling `band` with each 512 words (32 words by 16 rows of the picture) as
 /// they complete, eight times.
+///
+/// Not generic and never inlined, so the decode loop is compiled once, here, for size: a generic
+/// copy is built in the caller's crate under the caller's optimisation settings, and and it was
+/// inlined into `show` there (2,656 bytes more in one game than in the others). The band callback
+/// is a trait object; it is called eight times.
+#[inline(never)]
 #[cfg_attr(target_arch = "mips", optimize(size))]
-pub(crate) fn expand(mut band: impl FnMut(&[u16; 512])) {
+pub(crate) fn expand(band: &mut dyn FnMut(&[u16; 512])) {
     let mut ring = [0u16; 512];
     let mut next = 0usize;
     let mut at = 0usize;
