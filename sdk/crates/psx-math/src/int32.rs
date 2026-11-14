@@ -457,6 +457,7 @@ pub fn mul_shr_trunc_i32(a: i32, b: i32, shift: u32) -> i32 {
     debug_assert!(shift < 32);
     // psx-numeric-allow-next-line: R3000 MULT natively produces this 64-bit product; no wide division or helper call
     let product = i64::from(a) * i64::from(b);
+    // psx-numeric-allow-next-line: truncation bias of the MULT product allowed above; no wide division or helper call
     let bias = if product < 0 { (1i64 << shift) - 1 } else { 0 };
     ((product + bias) >> shift) as i32
 }

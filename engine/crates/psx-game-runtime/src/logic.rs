@@ -347,6 +347,7 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
                 LogicState::Ready => {}
             }
             // The owner's spatial mask gates the touch scan for scan cost.
+            // psx-numeric-allow-next-line: bit select on the 64-record activation mask; bit ops only
             let activation_allows = index < 64 && self.spatial_active_mask & (1u64 << index) != 0;
             if record.kind == logic_kind::TRIGGER_VOLUME
                 && activation_allows

@@ -1578,6 +1578,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
                 self.step_recoil(record, index, mover, delta_ticks);
             }
             let behavior_awake = !matches!(state, GameEntityState::Idle | GameEntityState::Patrol);
+            // psx-numeric-allow-next-line: bit select on the 64-record mask; bit ops only
             let spatially_active = index < 64 && self.spatial_active_mask & (1u64 << index) != 0;
             // PVS is a rendering broad phase, not a perception verdict.
             // Nearby actors must still test sight/hearing around corners.

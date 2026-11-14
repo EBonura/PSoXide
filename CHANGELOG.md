@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `runtime-numeric-guard` is as strict as the scanner games run: a wide type written as a literal suffix (`1u64`, `0_i128`) is a violation too. Seventeen sites in SDK and engine guest code were missed; each is a bit select or mask on a 64-bit value that a neighbouring line already carries a reviewed exception for (or const-evaluated code), and now has its own `psx-numeric-allow-next-line` marker with the reason. No code changed.
 - `psx_telemetry::emit::console` is a measurement-build write like the rest of `emit` (it is `debug_log`). It was compiled into every mips build and stored to the debug-log port (`0x1F802F0C`, inside Expansion 2 beyond the entry state's 128 bytes), which faults on a console. A default build that calls it is byte-identical to one that does not and `psoxide-hwtest scan-expansion2` finds no store; a build with `emit` has them. No SDK or engine code called it; psx-goldsrc keeps its own unconditional copy (`psx_goldsrc::telemetry::console`).
 - Host tools and small shared pieces that games carried copies of, with nothing changed for a game that does not call them (a guest that does not call a new function links byte for byte the same):
   `psoxide-dev no64-scan [--floats] [--exempt FILE]... DIR...` runs the runtime numeric scanner on a program's own directories

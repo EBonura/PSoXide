@@ -326,7 +326,6 @@ fn runtime_numeric_guard() -> Result<(), String> {
             &src,
             &code,
             &allowed,
-            LiteralSuffixes::Ignored,
             &mut allowed_hits,
             &mut violations,
         );
@@ -414,7 +413,6 @@ fn no64_scan(args: &[String]) -> Result<(), String> {
             &src,
             &code,
             &allowed,
-            LiteralSuffixes::Judged,
             &mut allowed_hits,
             &mut violations,
         );
@@ -811,21 +809,11 @@ fn report_context(src: &str, line: usize) -> String {
         .to_string()
 }
 
-/// Whether a wide type used as a literal suffix (`1u64`, `0_i64`) is a hit.
-/// `no64-scan` judges them; `runtime-numeric-guard` does not yet, because
-/// about a dozen SDK sites such as `1u64 << slots` would turn it red.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum LiteralSuffixes {
-    Ignored,
-    Judged,
-}
-
 fn scan_forbidden_types(
     path: &Path,
     src: &str,
     code: &str,
     allowed: &HashSet<usize>,
-    suffixes: LiteralSuffixes,
     allowed_hits: &mut usize,
     violations: &mut Vec<String>,
 ) {
@@ -840,14 +828,13 @@ fn scan_forbidden_types(
             let after = code.as_bytes().get(offset + token.len()).copied();
             // `0u64` and `1_i64`: the type is a literal suffix, so what precedes it is a
             // run of identifier bytes that starts with a digit.
-            let suffix_of_literal =
-                suffixes == LiteralSuffixes::Judged && before.is_some_and(is_ident_byte) && {
-                    let mut start = offset;
-                    while start > 0 && is_ident_byte(code.as_bytes()[start - 1]) {
-                        start -= 1;
-                    }
-                    code.as_bytes()[start].is_ascii_digit()
-                };
+            let suffix_of_literal = before.is_some_and(is_ident_byte) && {
+                let mut start = offset;
+                while start > 0 && is_ident_byte(code.as_bytes()[start - 1]) {
+                    start -= 1;
+                }
+                code.as_bytes()[start].is_ascii_digit()
+            };
             if (before.is_none_or(|b| !is_ident_byte(b)) || suffix_of_literal)
                 && after.is_none_or(|b| !is_ident_byte(b))
             {
@@ -2946,7 +2933,7 @@ dbg_macro = \"deny\"",
 mod no64_tests {
     use super::*;
 
-    fn hits(src: &str, suffixes: LiteralSuffixes) -> usize {
+    fn hits(src: &str) -> usize {
         let code = blank_test_items(&blank_comments_and_literals(src));
         let mut allowed_hits = 0;
         let mut violations = Vec::new();
@@ -2955,7 +2942,6 @@ mod no64_tests {
             src,
             &code,
             &allowed_lines(src),
-            suffixes,
             &mut allowed_hits,
             &mut violations,
         );
@@ -2965,19 +2951,18 @@ mod no64_tests {
     #[test]
     fn types_are_judged_and_comments_strings_and_test_items_are_not() {
         let src = "let a: u64 = 0; // i64\nlet b = \"f32\";\n#[cfg(test)] mod t { fn f() -> f64 { 0 } }\n";
-        assert_eq!(hits(src, LiteralSuffixes::Judged), 1);
+        assert_eq!(hits(src), 1);
     }
 
     #[test]
-    fn literal_suffix_is_a_hit_only_when_judged() {
+    fn literal_suffix_is_a_hit() {
         let src = "let a = 1u64; let b = 0_i128;\n";
-        assert_eq!(hits(src, LiteralSuffixes::Judged), 2);
-        assert_eq!(hits(src, LiteralSuffixes::Ignored), 0);
+        assert_eq!(hits(src), 2);
     }
 
     #[test]
     fn allow_marker_silences_the_next_line() {
         let src = "// psx-numeric-allow-next-line: reviewed\nlet a: u64 = 0;\nlet b: u64 = 0;\n";
-        assert_eq!(hits(src, LiteralSuffixes::Judged), 1);
+        assert_eq!(hits(src), 1);
     }
 }

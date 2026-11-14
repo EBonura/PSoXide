@@ -93,6 +93,7 @@ const fn basis(m: usize) -> i16 {
 /// floor(sqrt(n)), by bisection.
 // psx-numeric-allow-next-line: const-evaluated; only the finished i16 table exists at run time
 const fn isqrt(n: u64) -> u64 {
+    // psx-numeric-allow-next-line: const-evaluated; only the finished i16 table exists at run time
     let (mut lo, mut hi) = (0u64, n + 1);
     while hi - lo > 1 {
         let mid = (lo + hi) / 2;

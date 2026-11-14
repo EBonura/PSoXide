@@ -855,6 +855,7 @@ impl<const ROWS: usize> ClutRowAllocator<ROWS> {
             // psx-numeric-allow-next-line: 64-slot occupancy bitmask is a u64 by definition
             u64::MAX
         } else {
+            // psx-numeric-allow-next-line: 64-slot occupancy bitmask is a u64 by definition
             (1u64 << slots) - 1
         };
         for (r, row) in self.rows.iter_mut().enumerate() {
@@ -884,6 +885,7 @@ impl<const ROWS: usize> ClutRowAllocator<ROWS> {
             // psx-numeric-allow-next-line: 64-slot occupancy bitmask is a u64 by definition
             u64::MAX
         } else {
+            // psx-numeric-allow-next-line: 64-slot occupancy bitmask is a u64 by definition
             (1u64 << slots) - 1
         } << s;
         self.rows[r] &= !mask;

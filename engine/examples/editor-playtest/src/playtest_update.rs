@@ -192,6 +192,7 @@ impl Playtest {
                     continue;
                 };
                 if instance < 64 {
+                    // psx-numeric-allow-next-line: one bit per model or actor; the width IS the mask capacity; bit ops only
                     actor_instances |= 1u64 << instance;
                 }
                 *bounds = VisibilityBounds::cylinder(
@@ -228,6 +229,7 @@ impl Playtest {
                     && player_pos[2] >= record.min[2]
                     && player_pos[2] <= record.max[2]
                 {
+                    // psx-numeric-allow-next-line: one bit per model or actor; the width IS the mask capacity; bit ops only
                     logic_mask |= 1u64 << index;
                 }
             }
@@ -244,6 +246,7 @@ impl Playtest {
             // body/equipment/shadow rendering is suppressed above.
             let mut suppressed = 0u32;
             for (index, dead) in entity_dead.iter().enumerate().take(64) {
+                // psx-numeric-allow-next-line: one bit per model or actor; the width IS the mask capacity; bit ops only
                 if !dead && entity_mask & (1u64 << index) == 0 {
                     suppressed += 1;
                 }

@@ -107,6 +107,7 @@ pub fn draw_model_instance_shadows<const MAX_RUNTIME_MODELS: usize, const OT_DEP
     let mut drawn = 0usize;
     for (index, inst) in tables.model_instances.iter().enumerate() {
         if index >= 64
+            // psx-numeric-allow-next-line: bit select on the instance mask; the width IS the instance capacity
             || visible_instance_mask & (1u64 << index) == 0
             || inst.room != current_room
             || drawn >= knobs.max_model_instances

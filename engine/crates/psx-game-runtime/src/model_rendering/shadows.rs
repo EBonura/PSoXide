@@ -350,6 +350,7 @@ pub fn draw_model_instance_projected_shadows<
             break;
         }
         let index = pose.instance_index();
+        // psx-numeric-allow-next-line: bit select on the instance mask; the width IS the instance capacity
         if index >= 64 || visible_instance_mask & (1u64 << index) == 0 {
             continue;
         }
