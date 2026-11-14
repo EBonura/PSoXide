@@ -139,6 +139,13 @@ A pad that answers an ID the driver does not know every poll keeps the last
 clean state (nothing, if it never had one): `Controllers` does not trust it as
 Quake's `UNKNOWN_MODE_TRUST_POLLS` did.
 
+### A game that never uses sticks
+
+`Controllers::digital()` makes the same `poll` with the handshake, its retries
+and the motor mapping not compiled in (a const parameter of the type,
+`Controllers<false>`); a poll is then exactly what the older `poll_on` sent:
+five bytes to a digital pad, nine to a pad that is already analog.
+
 ## Memory cards
 
 A card transaction needs the whole port, and a poll needs it too. The

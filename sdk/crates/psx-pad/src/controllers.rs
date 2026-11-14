@@ -30,6 +30,10 @@
 //!   the first time for a port (and after a re-plug) it maps the motors, a few frames, and
 //!   the request then rides every poll. A game that never calls it never links the mapping.
 //!
+//! * A game that never uses sticks makes its pads with [`Controllers::digital`]: the same
+//!   `poll`, the handshake, its retries and the motor mapping not compiled in, every
+//!   poll the five bytes a digital pad answers (nine from a pad that is already analog).
+//!
 //! ```text
 //! let mut pads = psx_pad::Controllers::new();           // a static, or a field
 //! let one = *pads.poll(&mut peripherals.controller_port, Port::One);
@@ -106,7 +110,7 @@ impl Slot {
     /// One poll of `socket`, starting from the select `opened` left open if there is one;
     /// `last` is its latest clean state and is updated. Inlined into [`Controllers::step`].
     #[inline(always)]
-    fn step<T: Transport>(
+    fn step<T: Transport, const ANALOG: bool>(
         &mut self,
         bus: &mut T,
         socket: Port,
@@ -119,7 +123,7 @@ impl Slot {
         // SCPH-110 failure, retried a bounded number of times).
         let state = loop {
             let state = poll_state(bus, socket, confirm, self.rumble, opened.take());
-            if state.mode == PadMode::Analog && self.present {
+            if !ANALOG || (state.mode == PadMode::Analog && self.present) {
                 break state;
             }
             if !self.settle(bus, socket, state.mode) {
@@ -219,7 +223,7 @@ fn config<T: Transport>(bus: &mut T, socket: Port, sequence: Sequence, first: us
 /// The controller ports, polled the one way every game polls them. See the module
 /// documentation.
 #[derive(Copy, Clone)]
-pub struct Controllers {
+pub struct Controllers<const ANALOG: bool = true> {
     slots: [Slot; 2],
     /// The latest clean state of each port.
     last: [PadState; 2],
@@ -229,14 +233,7 @@ pub struct Controllers {
     previous: Port,
 }
 
-impl Controllers {
-    const NEW: Self = Self {
-        slots: [Slot::NEW; 2],
-        last: [PadState::NONE; 2],
-        open: None,
-        previous: Port::One,
-    };
-
+impl Controllers<true> {
     /// Two ports that have seen nothing yet.
     #[must_use]
     pub const fn new() -> Self {
@@ -255,6 +252,25 @@ impl Controllers {
             config(bus, port, Sequence::Rumble, 0);
         }
     }
+}
+
+impl Controllers<false> {
+    /// Two ports that have seen nothing yet, for a game that never uses sticks: polls read
+    /// whatever mode the pad is in, and the handshake, its retries and the motor mapping are
+    /// not compiled in.
+    #[must_use]
+    pub const fn digital() -> Self {
+        Self::NEW
+    }
+}
+
+impl<const ANALOG: bool> Controllers<ANALOG> {
+    const NEW: Self = Self {
+        slots: [Slot::NEW; 2],
+        last: [PadState::NONE; 2],
+        open: None,
+        previous: Port::One,
+    };
 
     /// Poll `port` once and return its latest clean state. `bus` is the `ControllerPort`
     /// token (or any [`Transport`]).
@@ -284,7 +300,7 @@ impl Controllers {
         } else {
             None
         };
-        slot.step::<T>(bus, port, opened, &mut self.last[i]);
+        slot.step::<T, ANALOG>(bus, port, opened, &mut self.last[i]);
         if SELECT_EARLY {
             // Open the port polled before this one if a pad is in it, else this one.
             let mut next = core::mem::replace(&mut self.previous, port);
@@ -311,7 +327,7 @@ impl Controllers {
     }
 }
 
-impl Default for Controllers {
+impl Default for Controllers<true> {
     fn default() -> Self {
         Self::new()
     }
@@ -693,6 +709,34 @@ mod tests {
         }
         assert_eq!(command_count(&mut bus, 0, 0x43), 2, "enter and exit, once");
         assert_eq!(command_count(&mut bus, 0, 0x44), 1, "no retry");
+    }
+
+    #[test]
+    fn a_digital_only_game_never_sends_a_configuration_packet_and_polls_as_the_legacy_poll_does() {
+        let mut bus = TwoPorts::new(dualshock(button::SQUARE), empty());
+        let mut pads = Controllers::digital();
+        for _ in 0..5 {
+            let one = *pads.poll(&mut bus, Port::One);
+            assert!(!one.is_analog() && one.buttons.bits() == button::SQUARE);
+        }
+        assert_eq!(command_count(&mut bus, 0, 0x43), 0);
+        assert_eq!(command_count(&mut bus, 0, 0x44), 0);
+        let (mut sends, mut log) = (0, std::vec::Vec::new());
+        bus.model(0, |m| (sends, log) = (m.sends, m.cmd_log.clone()));
+        assert_eq!(sends, 5 * 5, "five bytes a poll");
+
+        // The deprecated poll of the same pad: the same bytes in the same order.
+        let mut legacy = TwoPorts::new(dualshock(button::SQUARE), empty());
+        for _ in 0..5 {
+            assert_eq!(
+                crate::poll_on(&mut legacy, Port::One).buttons.bits(),
+                button::SQUARE
+            );
+        }
+        legacy.model(0, |m| {
+            assert_eq!(m.sends, sends);
+            assert_eq!(m.cmd_log, log);
+        });
     }
 
     /// Selects made on each port by the polls in `f`, and how many of them were

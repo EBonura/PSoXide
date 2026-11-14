@@ -7,6 +7,16 @@ every program works on every Sony BIOS and on OpenBIOS).
 
 
 
+- `Controllers::digital()` for a game that never uses sticks: `Controllers<false>`, the type's const parameter (`Controllers`
+  is `Controllers<true>`, so every call site that exists is unchanged). The same `poll`, with the handshake, its retries and the
+  motor mapping not compiled in, so a poll is what `poll_on` sends: five bytes to a digital pad, nine to a pad that is already
+  analog. A program that uses `Controllers::new()` links byte-identical code (NitroXide's image is identical before and after).
+  Measured on the one game that could use it, a PICO-8 port with a 100,000-cycle frame loop: text of the pad code 5,636 bytes
+  with `poll_on`, 6,152 with `Controllers::digital()` in a bench program; a bench poll of a digital pad 15,853 cycles with
+  `poll_on` and 16,060 with `digital()` (an analog pad 22,925 and 23,165), where the profile of the whole bench loop is 124,155
+  and 124,131 cycles an iteration; in the game's own journeys (first three rooms, cart reset) the CPU time of a tick is +0.46%
+  and +0.16% higher, about 270 cycles a poll (64 more instructions in the poll and a different code layout). That is not equal,
+  so the game is not moved and the SDK's deprecated `poll_port1` stays until it is.
 - `psx-hw` names four SPU registers a console sound diagnostic read by address: a voice's current volume,
   `spu::voice::current_vol_left(n)` and `current_vol_right(n)` (4 bytes a voice, from the current-volume bank), and the main
   volume as it stands now, `spu::MAIN_VOL_LEFT_CURRENT` and `MAIN_VOL_RIGHT_CURRENT`.
