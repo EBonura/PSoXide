@@ -146,6 +146,8 @@ pub(crate) struct Run {
     pub(crate) checkpoints: bool,
     /// Run only the steps marked for the focused sweep (menu row 2).
     pub(crate) focus: bool,
+    /// Run only the steps that need an operator (menu row 8): the linear run leaves them out.
+    pub(crate) manual: bool,
     /// Areas the run entered, for the clean check of a focused run.
     visited: [bool; AREA_COUNT],
     /// An id for the checkpoint files of this run.
@@ -179,6 +181,7 @@ impl Run {
             write_cards: false,
             checkpoints: false,
             focus: false,
+            manual: false,
             visited: [false; AREA_COUNT],
             checkpoint_id: 0,
             handoffs: [Handoff {
@@ -607,6 +610,8 @@ struct Step {
     risky: bool,
     /// Order in the focused sweep run (the menu's second row), 0 for not in it.
     focus: u8,
+    /// Needs a person at the console: left out of the linear run, run by its own menu row.
+    manual: bool,
     run: fn(&mut Run),
 }
 
@@ -616,6 +621,7 @@ const fn step(area: Area, name: &'static str, run: fn(&mut Run)) -> Step {
         name,
         risky: false,
         focus: 0,
+        manual: false,
         run,
     }
 }
@@ -626,6 +632,7 @@ const fn risky(area: Area, name: &'static str, run: fn(&mut Run)) -> Step {
         name,
         risky: true,
         focus: 0,
+        manual: false,
         run,
     }
 }
@@ -637,6 +644,19 @@ const fn focused(area: Area, name: &'static str, order: u8, run: fn(&mut Run)) -
         name,
         risky: false,
         focus: order,
+        manual: false,
+        run,
+    }
+}
+
+/// A step that needs a person at the console. The linear run never runs it; its own menu row does.
+const fn manual(area: Area, name: &'static str, run: fn(&mut Run)) -> Step {
+    Step {
+        area,
+        name,
+        risky: false,
+        focus: 0,
+        manual: true,
         run,
     }
 }
@@ -727,11 +747,19 @@ fn step_sio_mix(run: &mut Run) {
     ui::repaint(run.font());
 }
 
-/// The DualShock motor packets, the poll-cost comparison and the operator's
-/// yes or no for each motor level.
+/// The DualShock motor packets and the poll-cost comparison. The operator's yes or no for each motor
+/// level is not asked here (`step_rumble_questions`).
 fn step_rumble(run: &mut Run) {
     let font = run.font.take().expect("font uploaded by reset_area");
     rumble::run(&font, &mut run.timing.records, &mut run.next);
+    run.font = Some(font);
+}
+
+/// The same step with the operator's questions: which pad, the eight motor questions, the swap. Its own
+/// menu row; the linear run does not ask anyone anything.
+fn step_rumble_questions(run: &mut Run) {
+    let font = run.font.take().expect("font uploaded by reset_area");
+    rumble::run_questions(&font, &mut run.timing.records, &mut run.next);
     run.font = Some(font);
 }
 
@@ -872,6 +900,7 @@ const STEPS: &[Step] = &[
     step(Area::Sio, "CARD SECTOR PROTOCOL", step_card_proto),
     step(Area::Sio, "PAD AND CARD UNDER LOAD", step_sio_mix),
     step(Area::Sio, "DUALSHOCK MOTORS", step_rumble),
+    manual(Area::Sio, "DUALSHOCK MOTOR QUESTIONS", step_rumble_questions),
     // 8
     step(Area::Perf, "STACK AND LEVER CASES", tests_perf),
     step(Area::Perf, "WARM PROBES", records_perf_safe),
@@ -1081,7 +1110,14 @@ pub(crate) fn execute(
     // the marked ones, by their order number.
     let mut order = [0usize; STEPS.len()];
     let mut count = 0;
-    if run.focus {
+    if run.manual {
+        for (index, step) in STEPS.iter().enumerate() {
+            if step.manual {
+                order[count] = index;
+                count += 1;
+            }
+        }
+    } else if run.focus {
         for rank in 1..=u8::MAX {
             for (index, step) in STEPS.iter().enumerate() {
                 if step.focus == rank {
@@ -1091,10 +1127,12 @@ pub(crate) fn execute(
             }
         }
     } else {
-        for (index, slot) in order.iter_mut().enumerate() {
-            *slot = index;
+        for (index, step) in STEPS.iter().enumerate() {
+            if !step.manual {
+                order[count] = index;
+                count += 1;
+            }
         }
-        count = STEPS.len();
     }
     run.visited = [false; AREA_COUNT];
     let mut current: Option<Area> = None;

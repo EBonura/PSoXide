@@ -66,9 +66,9 @@ screen. It is last, bounded, and skipped when **L2** is held as the run starts. 
 console hangs inside it the screen names the record; power-cycle and run again with L2
 held. A hang at bus level cannot be pre-empted, which is the accepted trade.
 
-**Hands off.** The run needs no input after CROSS on the first row, with one optional
-exception in the SIO area: the `DUALSHOCK MOTORS` step asks, for each motor level, whether the pad
-vibrated (CROSS yes, CIRCLE no; the question shows for a second with the pad ignored, then every button must be let go, then four seconds to answer). Answer nothing and it records "no answer".
+**Hands off.** The run needs no input after CROSS on the first row. From v2.20 nothing in it asks
+a question: the motor-feel questions (which pad, whether each motor level vibrated, the swap) moved to their own menu row,
+`DUALSHOCK MOTOR QUESTIONS`, which runs only that step and ends in its own capture (CROSS yes, CIRCLE no; the question shows for a second with the pad ignored, then every button must be let go, then four seconds to answer; no answer records "no answer"). The linear run writes the same records as an unanswered question did (see the v2.20 notes in `docs/hardware-test-versions.md`).
 
 A filmed run is decoded with the two commands under "Recording a capture" below.
 
@@ -289,6 +289,7 @@ hardware state until the operator chooses an entry:
    | `RUN HARDWARE TEST` | The linear run. Row 0 is pinned: the headless rig fires CROSS at a fixed tick with the cursor at its boot position. Hold L2 as you press CROSS to skip the one step that can hang a console |
    | `CONTROLLER TEST (P1 + P2)` | Live two-port button, stick and analog-drift diagnostic |
    | `MEMORY CARD (AT OWN RISK)` | Card diagnostic behind a consent screen: it has had limited testing on real hardware and reads and writes the operator's card, so corruption cannot be ruled out. CIRCLE accepts the risk before any card traffic happens; writes additionally require the L1+R1+CROSS chord |
+   | `DUALSHOCK MOTOR QUESTIONS` | v2.20. The motor step with its questions: which pad is in port 1 (CROSS SCPH-1200, CIRCLE SCPH-110, SQUARE another, TRIANGLE none or digital), whether each motor level vibrated, whether to swap pads. Not part of the linear run; ends in its own capture. |
    | `VIEW LAST CAPTURE` | Back to the QR symbols the last run produced |
 
 Up/Down moves, Cross runs, START backs out. During the run a progress screen
@@ -1037,7 +1038,7 @@ Written for the emulator work (`feat/hwtest-v2.4-2026-10-09`); the film or captu
 
 **Calibration and UV windows** (`src/workload.rs`, `0x8C0`-`0x8C5` and `0x8E0`-`0x92B`). See the module header.
 
-**Pads** (`src/rumble.rs`, `0x940`-`0x962`). The motor step names the pad (CROSS SCPH-1200, CIRCLE SCPH-110, SQUARE another, TRIANGLE none or digital), runs, asks for the swap, names the second pad, and runs the battery again if it was named. Answers use the debounced question (one second with the pad ignored, release, then a press).
+**Pads** (`src/rumble.rs`, `0x940`-`0x962`). From v2.20 the step with these questions is the menu row `DUALSHOCK MOTOR QUESTIONS`; the linear run's `DUALSHOCK MOTORS` writes the records as unanswered. The motor step names the pad (CROSS SCPH-1200, CIRCLE SCPH-110, SQUARE another, TRIANGLE none or digital), runs, asks for the swap, names the second pad, and runs the battery again if it was named. Answers use the debounced question (one second with the pad ignored, release, then a press).
 
 ## Other v2.0 measurements
 

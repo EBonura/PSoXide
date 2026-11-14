@@ -19,6 +19,10 @@
 //! without harm: its identifier stays `41` (or `FF`) and never reads `F3`.
 //! An analog pad in digital mode is expected to accept it.
 //!
+//! The linear run asks nobody anything: it runs the objective part and writes the
+//! operator records as an unanswered question writes them. The operator part has
+//! its own menu row (`DUALSHOCK MOTOR QUESTIONS`, `run_questions`).
+//!
 //! The objective part records every reply identifier and the old mapping, the
 //! cost of a poll with the motors idle and with both running, and that the
 //! motors stop. The operator part runs the small motor, the large motor at 0,
@@ -568,9 +572,11 @@ fn push_answer_records(records: &mut Records, next: &mut usize, taken: &[Answer;
 }
 
 /// One pass over the pad in port 1 (and port 2): identity, config, the cost
-/// of a poll, and when a config-capable pad is there the operator's questions.
-/// Returns the port the operator part ran on.
-fn pass(font: &FontAtlas, records: &mut Records, next: &mut usize) -> Option<bool> {
+/// of a poll, and, when `ask` is set and a config-capable pad is there, the
+/// operator's questions. Without them the question records are written empty
+/// (`0x766` all ones and none asked, the answers `0xFFFF`). Returns the port
+/// the pad that took the config packets is in.
+fn pass(font: &FontAtlas, records: &mut Records, next: &mut usize, ask: bool) -> Option<bool> {
     let mut tested = None;
     for port2 in [false, true] {
         if objective(font, port2, records, next) && tested.is_none() {
@@ -579,10 +585,10 @@ fn pass(font: &FontAtlas, records: &mut Records, next: &mut usize) -> Option<boo
         poll_cost(port2, records, next);
     }
     match tested {
-        Some(port2) => {
+        Some(port2) if ask => {
             operator(font, port2, records, next);
         }
-        None => {
+        _ => {
             push_timing_record(
                 records,
                 next,
@@ -598,35 +604,56 @@ fn choice_record(id: u16, answer: &Answer) -> TimingRecord {
     record(id, answer.value, answer.buttons, answer.frame)
 }
 
-/// The whole step: the pad in the port is named by the operator and run
-/// through the battery; then the operator may swap it for another, name that
-/// one, and the battery runs again into the second set of records (`0x940`
-/// and up). No answer to the second question means no second pass.
+/// The linear run's step: the pad in the port is run through the battery
+/// (identity, config, mapping, poll cost) and nobody is asked anything. The
+/// two pad-choice records, the operator record and the answer records are
+/// written as an unanswered question writes them, so every id is there.
 pub(crate) fn run(font: &FontAtlas, records: &mut Records, next: &mut usize) {
+    run_with(font, records, next, false);
+}
+
+/// The operator's version, its own menu row: the pad in the port is named by
+/// the operator and run through the battery with the motor questions; then
+/// the operator may swap it for another, name that one, and the battery runs
+/// again into the second set of records (`0x940` and up). No answer to the
+/// second question means no second pass.
+pub(crate) fn run_questions(font: &FontAtlas, records: &mut Records, next: &mut usize) {
+    run_with(font, records, next, true);
+}
+
+fn run_with(font: &FontAtlas, records: &mut Records, next: &mut usize, ask: bool) {
     crate::bounds::record_start(PAD_CHOICE_RECORD);
     set_pass(false);
-    let first = choose(
-        font,
-        "WHICH",
-        "X 1200 O 110 SQ OTH TR NONE",
-        MODEL_ANSWER_FRAMES,
-    );
+    let first = if ask {
+        choose(
+            font,
+            "WHICH",
+            "X 1200 O 110 SQ OTH TR NONE",
+            MODEL_ANSWER_FRAMES,
+        )
+    } else {
+        Answer::NONE
+    };
     push_timing_record(records, next, choice_record(PAD_CHOICE_RECORD, &first));
-    let tested_first = pass(font, records, next);
+    let tested_first = pass(font, records, next, ask);
 
     crate::bounds::record_start(PAD_CHOICE_RECORD + 1);
-    let second = choose(
-        font,
-        "SWAP",
-        "X 1200 O 110 SQ OTH TR NONE",
-        SWAP_ANSWER_FRAMES,
-    );
+    let second = if ask {
+        choose(
+            font,
+            "SWAP",
+            "X 1200 O 110 SQ OTH TR NONE",
+            SWAP_ANSWER_FRAMES,
+        )
+    } else {
+        Answer::NONE
+    };
     push_timing_record(records, next, choice_record(PAD_CHOICE_RECORD + 1, &second));
     let mut tested_second = None;
     let second_ran = second.value != 0;
     if second_ran {
         set_pass(true);
-        tested_second = pass(font, records, next);
+        tested_second = pass(font, records, next, ask);
         set_pass(false);
     }
     let port_code = |tested: Option<bool>| match tested {
