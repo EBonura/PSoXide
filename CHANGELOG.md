@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Hardware tests v2.20 (not yet run on a console; gated on the emulator): the linear run asks nobody anything (the DualShock motor
+  questions are the menu row `DUALSHOCK MOTOR QUESTIONS`, and the linear run writes their records as unanswered, every id kept);
+  step `GTE NCLIP VARIANTS` (`0x980`-`0x9AF`, INFO) runs the sequences of conformance cases 22 and 116 to 120, which fail on the
+  console since 2026-11-14, as built, after filling every GTE register, with one more nop and after zeroing them, keeping the raw MAC0; the XA clock
+  step adds `0x330`-`0x338`, raw head and clock readings, the time of each `Player::poll` and its counts, fields that cannot
+  clamp; companions `0x653`-`0x654` and `0x874`-`0x87B` carry the fields that clamp at `0xFFFF`. No existing record id changes.
+  The machine-code baseline for v2.20 is pinned (drift 0 against v2.19) and `docs/hardware-refs/px8-emulator-v2.20.txt` is the
+  emulator baseline. Details in `docs/hardware-test-versions.md`.
 - The first console run of the pad and present work, 2026-11-14 (SCPH-9002; hardware-tests v2.18; two runs, an SCPH-1200 and an
   SCPH-110, both DualShocks; the QR pages are `docs/hardware-refs/px8-silicon-2026-11-14-v2.18-run1-scph1200.txt` and
   `...-run2-scph110.txt`, now read by `psoxide-hwtest compare`). Passed, identical on both runs: the early select (`0x6F0`-`0x6F4`), the
