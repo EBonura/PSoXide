@@ -994,12 +994,11 @@ pub fn search(
             // Re-weight the picks by where the stalls are now.
             let address = link.realize(&listed);
             pick.iter_mut().for_each(|weight| *weight = 0.0);
-            for w in 0..traces.windows.len() {
+            for (w, (window, &base)) in traces.windows.iter().zip(&baseline).enumerate() {
                 let (_, charged) = traces.attribute(w, &address, link.sections.len());
                 for (k, &cycles) in charged.iter().enumerate() {
                     if let Some(&i) = index_of.get(&k) {
-                        pick[i] +=
-                            traces.windows[w].weight * cycles as f64 / baseline[w].max(1) as f64;
+                        pick[i] += window.weight * cycles as f64 / base.max(1) as f64;
                     }
                 }
             }
@@ -1053,13 +1052,16 @@ pub fn search(
     }
 }
 
+/// Lays a plan out: the listed sections and every section's address.
+type Place<'a> = dyn Fn(&Plan) -> (Vec<usize>, Vec<u32>) + Sync + 'a;
+
 type Scored = (f64, Vec<u64>, Vec<usize>, Vec<u32>);
 
 fn evaluate(
     traces: &Traces,
     delta: &Delta<'_>,
     candidates: &[Plan],
-    place: &(dyn Fn(&Plan) -> (Vec<usize>, Vec<u32>) + Sync),
+    place: &Place<'_>,
     baseline: &[u64],
     threads: usize,
 ) -> Vec<Scored> {
@@ -1491,7 +1493,7 @@ mod tests {
     fn encode(events: &[Event]) -> Vec<u8> {
         let mut out = TRACE_MAGIC.to_vec();
         let mut end: i64 = 0;
-        let mut varint = |out: &mut Vec<u8>, mut value: u64| loop {
+        let varint = |out: &mut Vec<u8>, mut value: u64| loop {
             let byte = (value & 0x7f) as u8;
             value >>= 7;
             if value == 0 {

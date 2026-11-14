@@ -155,6 +155,11 @@ psoxide-pgo choose  [GUEST] --profile PROFILE [--layout LAYOUT] --gate CMD [--va
                     [--ram-floor BYTES] -- CARGO-ARGS...
 psoxide-pgo measure --frontend PATH --image PATH [--tape PATH] --polls A..B
                     [--launch-arg ARG]... [--name NAME] [--wait-range START..END]...
+psoxide-pgo search  IN.layout LINK.map IMAGE.exe LINKER-SCRIPT OUT.layout
+                    (--trace NAME MAP EXE TRACE)... [--weight NAME=W]... [--seed N]
+                    [--rounds N] [--batch N] [--threads N] [--start greedy|link|recorded]
+psoxide-pgo icache  LINK.map IMAGE.exe LINKER-SCRIPT (--trace NAME MAP EXE TRACE)...
+                    [--order FILE]... [--at MAP EXE]... [--layout FILE]... [--functions]
 GUEST: [--crate DIR] [--work DIR] [--patcher PATH] [--scanner PATH] [--stack-guard PATH]
        [--linker-script PATH]
 ```
@@ -280,6 +285,100 @@ E1M1 and E1M2, and its chain-route order reused on the monster-route feature
 build +1.2%. The chain-route profile binds 94.4% of its instructions onto
 that build (13 functions changed), so `apply` refuses it; the E1M1 one binds
 fully, and only the gate can reject it (`choose` ranks it below its variant).
+
+### search
+
+`order`'s placement scores a layout with a model of who calls whom. It
+cannot see the order in which code runs, and a direct-mapped cache misses on
+exactly that: a line refills when another line of its set was fetched since
+it last ran. Two placements the model scores alike can differ by several
+percent of a frame, and a game was left drawing weight mixes and keeping the
+luckiest. `search` scores placements by the cache itself instead: it replays
+the order of every fetch through a model of the R3000's I-cache at any set
+of function addresses and moves functions until the refill stalls stop
+falling. Its result is recorded in the layout profile, and the build only
+reads it: no trace and no emulator are involved after the search.
+
+What it reads:
+
+- **Fetch traces**, one per gameplay window: the emulator's
+  `frontend launch --fetch-trace-log PATH --fetch-trace-start-route-tick N`
+  (or `psoxide-gate run --fetch-trace PATH FROM..TO` for a journey). Each
+  records every retired instruction as sequential runs. Trace the disc the
+  layout profile was collected for, or any later link of the same code (the
+  trace binds by portable name and code hash, so an ordered build serves).
+- **The layout profile** the search starts from and writes back (its
+  greedy placement, `--start greedy`, is the starting point), and **the link
+  being placed**: the map and patched image of the build's first, unordered
+  link, which is the one `place` sees.
+
+The model is the emulator's: 256 sets of 16 bytes, a valid bit per word,
+4-word fills that stream (a word every two clocks, the core running each as
+it lands, a wait when execution jumps out of a line before its fill is
+done). It leaves out write-buffer and DRAM-refresh waits ahead of a fill, so
+it predicts about 0.85 to 0.91 of the stalls the emulator measures, at a
+stable ratio. On Half-Life's 30 weight-mix draws it ranked the c4a3 and
+c0a0 benchmarks in the order their measured frame rates put them (Spearman
+0.99 and 0.96).
+
+The search keeps every traced function at a target offset in the cache and
+fills the gap in front of it with code no window ran, largest first. Each
+round it draws a batch of moves (a new offset, a few lines or words either
+way, or two functions trading offsets; functions that stall more are drawn
+more often), scores each by replaying only the cache sets the move touches,
+and keeps the best if it lowers the objective: the sum over windows of
+`weight * stalls / stalls at the start`. Candidates are drawn in order from
+the seed and ties go to the first, so the same traces, layout and seed write
+the same file on any thread count.
+
+```make
+# Once per code change that moves the hot code; commit the layout it writes.
+pgo-search:
+	$(PGO) search pgo/mygame.layout "$(FIRST_MAP)" "$(FIRST_EXE)" "$(PSOXIDE)/sdk/psoxide.ld" \
+		pgo/mygame.layout \
+		--trace c4a3 "$(TRACED_MAP)" "$(TRACED_EXE)" traces/c4a3.trace \
+		--trace c0a0 "$(TRACED_MAP)" "$(TRACED_EXE)" traces/c0a0.trace \
+		--rounds 600 --seed 1
+```
+
+`--batch` (default 24) is the number of moves scored per round and
+`--threads` how many run at once (all cores by default; the result does not
+depend on it). The search prints its objective every 50 rounds and each
+window's stalls before and after. `--start recorded` continues from the
+placement a layout already records, which is how to iterate: search, build,
+trace the new disc, search again from it. `icache` scores the link as
+linked, an ordering file (`--order`), another link of the same code
+(`--at MAP EXE`) or a layout's placement (`--layout`) against the same
+traces, and `--functions` lists the instructions each function ran in each
+window, which says when two runs did different work.
+
+What it cost on Half-Life (hl-psx, 700 to 780 million instructions per
+window, three windows): each trace 105 to 125 MB and about a minute and a
+half (an anchoring replay and the traced one); the search 600 rounds of 24 in
+17 minutes on 10 threads, `-27%` predicted stalls on c4a3; the confirming
+build and four benchmarks about 6 minutes. About half an hour end to end. The
+traces are working files: delete them once the layout is committed.
+
+What to commit: the layout file. `search` writes the profile's own lines
+unchanged, two comment lines saying how the placement was found, and the
+placement: an `s` line (where the ordered sections start) and one `o` line per
+listed section (code hash, size in words, the address the search scored,
+portable name), in link order. `place` and `apply` link that list exactly and
+print `recorded placement: N sections listed`. They refuse it, naming the
+sections, when any of them is missing or its code changed, or when the code
+ahead of the ordered sections changed size: the addresses are the point, so
+search again. A layout without these lines places exactly as before.
+
+**Limits.** The gap filler is code no traced window ran, and there may not
+be much of it. Half-Life traces 514 KB of functions against 242 KB of cold
+code, and its greedy start already spends 223 KB of that on gaps; past the
+pool's end a function lands wherever the code before it ends, and a move
+early in the list shifts everything after it, which the search then scores
+by full replays (slower). The ordering file cannot insert padding, so a game
+with little cold code gets less freedom, not a bigger image. The trace is
+also only as fixed as the workload: a journey whose legs end on video frames
+plays different gameplay on builds of different speed. Use poll-bound tapes
+and `sync = "poll"` steps for the windows you trace and gate on.
 
 ### apply
 
