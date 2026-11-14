@@ -7,6 +7,9 @@ every program works on every Sony BIOS and on OpenBIOS).
 
 
 
+- `psx-hw` names four SPU registers a console sound diagnostic read by address: a voice's current volume,
+  `spu::voice::current_vol_left(n)` and `current_vol_right(n)` (4 bytes a voice, from the current-volume bank), and the main
+  volume as it stands now, `spu::MAIN_VOL_LEFT_CURRENT` and `MAIN_VOL_RIGHT_CURRENT`.
 - `psx_pad::Controllers` protects a DualShock's analog handshake against an interrupt, for every game, and a pad left digital is
   asked again (`sdk/docs/PAD.md`, "A pad left digital"). Three games carried console-found protection against a pad left digital
   for the whole session (the handshake before interrupts were enabled; a request repeated while the pad read digital, bounded in

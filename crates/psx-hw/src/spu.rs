@@ -52,6 +52,27 @@ pub mod voice {
     pub const fn base(n: u32) -> u32 {
         super::BASE + n * STRIDE
     }
+
+    /// Base of the current-volume bank (read only), apart from the register blocks above: two
+    /// 16-bit registers per voice, 4 bytes each from here.
+    pub const CURRENT_VOL_BASE: u32 = 0x1f80_1e00;
+    /// Distance between two voices' current-volume registers.
+    pub const CURRENT_VOL_STRIDE: u32 = 0x4;
+
+    /// Address of voice `n`'s current left volume (read only; the volume the envelope and the
+    /// sweep have reached, `n` in `0..COUNT`).
+    #[inline(always)]
+    #[must_use]
+    pub const fn current_vol_left(n: u32) -> u32 {
+        CURRENT_VOL_BASE + n * CURRENT_VOL_STRIDE
+    }
+
+    /// Address of voice `n`'s current right volume (read only), 2 bytes above the left.
+    #[inline(always)]
+    #[must_use]
+    pub const fn current_vol_right(n: u32) -> u32 {
+        current_vol_left(n) + 2
+    }
 }
 
 /// Main volume, left.
@@ -60,6 +81,11 @@ pub const MAIN_VOL_LEFT: u32 = 0x1f80_1d80;
 pub const MAIN_VOL_RIGHT: u32 = 0x1f80_1d82;
 /// First of the 32 reverb coefficient registers (dAPF1 .. vRIN), 2 bytes apart.
 pub const REVERB_COEFFICIENTS: u32 = 0x1f80_1dc0;
+/// Main volume as it stands now, left (read only; the sweep's current value, where
+/// [`MAIN_VOL_LEFT`] holds the one written).
+pub const MAIN_VOL_LEFT_CURRENT: u32 = 0x1f80_1db8;
+/// Main volume as it stands now, right (read only).
+pub const MAIN_VOL_RIGHT_CURRENT: u32 = 0x1f80_1dba;
 /// Reverb output volume, left.
 pub const REVERB_VOL_LEFT: u32 = 0x1f80_1d84;
 /// Reverb output volume, right.
@@ -151,6 +177,16 @@ mod tests {
         assert_eq!(voice::base(1), 0x1f80_1c10);
         // psx-spx: voice 23 is the last block, ending right before 1F801D80h.
         assert_eq!(voice::base(voice::COUNT - 1) + voice::STRIDE, MAIN_VOL_LEFT);
+    }
+
+    #[test]
+    fn current_volumes_follow_psx_spx() {
+        assert_eq!(voice::current_vol_left(0), 0x1f80_1e00);
+        assert_eq!(voice::current_vol_right(0), 0x1f80_1e02);
+        assert_eq!(voice::current_vol_left(23), 0x1f80_1e5c);
+        assert_eq!(voice::current_vol_right(23), 0x1f80_1e5e);
+        assert_eq!(MAIN_VOL_LEFT_CURRENT, 0x1f80_1db8);
+        assert_eq!(MAIN_VOL_RIGHT_CURRENT, 0x1f80_1dba);
     }
 
     #[test]
