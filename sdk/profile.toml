@@ -42,7 +42,7 @@ programs = ["hardware-tests"]
 
 # Legacy entry points that a program may still call only while its exceptions list the call.
 [deprecated]
-symbols = ["poll_port1", "PadReader", "poll_on"]
+symbols = ["poll_port1", "poll_port2", "PadReader", "poll_on", "poll_rumble_on", "enable_analog_on", "enable_analog_port1", "enable_analog_port2", "require_analog_on", "require_analog_port1", "enable_rumble_on", "enable_analog"]
 
 [[exception]]
 program = "editor-playtest"
@@ -229,13 +229,6 @@ count = 2
 remove = "W2"
 
 [[exception]]
-program = "hello-input"
-kind = "deprecated-use"
-item = "sdk/examples/hello-input/src/main.rs"
-count = 3
-remove = "W2"
-
-[[exception]]
 program = "hello-memcard"
 kind = "deprecated-use"
 item = "sdk/examples/hello-memcard/src/main.rs"
@@ -246,13 +239,6 @@ remove = "W2"
 program = "hello-xa"
 kind = "deprecated-use"
 item = "sdk/examples/hello-xa/src/main.rs"
-count = 2
-remove = "W2"
-
-[[exception]]
-program = "pollbench"
-kind = "deprecated-use"
-item = "sdk/examples/pollbench/src/main.rs"
 count = 2
 remove = "W2"
 

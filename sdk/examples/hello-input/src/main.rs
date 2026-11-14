@@ -16,8 +16,8 @@
 //! - CROSS / CIRCLE / TRIANGLE / SQUARE draw a small coloured
 //!   triangle in the centre whose orientation rotates with the
 //!   face-button pressed.
-//! - The program asks for analog mode at boot and locks it
-//!   (`require_analog_on`, see `sdk/docs/PAD-ANALOG.md`), so the
+//! - `Controllers` asks for analog mode the first time a pad answers and
+//!   locks it (see `sdk/docs/PAD-ANALOG.md`), so the
 //!   DualShock Analog button (F9 on the frontend keyboard, or gamepad
 //!   Mode/Guide when the OS exposes it) no longer switches it back.
 //!   A pad plugged in later is asked again. In analog mode the
@@ -34,7 +34,7 @@ use psx_font::FontAtlas;
 use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
 use psx_gpu::prim::TriFlat;
 use psx_gpu::Gpu;
-use psx_pad::{button, require_analog_on, ButtonState, PadMode, PadReader, PadState, Port};
+use psx_pad::{button, ButtonState, Controllers, PadMode, PadState, Port};
 use psx_vram::{Clut, TextureDepth, TexturePage};
 
 /// Font atlas VRAM slot.
@@ -71,24 +71,15 @@ fn main() {
     let mut g: u8 = 0;
     let mut b: u8 = 32;
 
-    // A program started by a launcher inherits whatever mode the last one
-    // left, so it asks for analog and the lock itself. The reader keeps the
-    // last clean state through a poll the driver had to reject.
+    // `Controllers` runs the analog handshake on a pad's first answer (a program started
+    // by a launcher inherits whatever mode the last one left), asks again of a pad that
+    // stays digital or is parked in configuration mode, and keeps the last clean state
+    // through a poll it had to reject.
     let mut port = peripherals.controller_port;
-    let _ = require_analog_on(&mut port, Port::One);
-    let mut reader = PadReader::port1();
-    let mut was_connected = true;
+    let mut pads = Controllers::new();
 
     loop {
-        let state = reader.poll_on(&mut port);
-        // A pad plugged in later starts in digital mode, and one parked in
-        // configuration mode (ID 0xF3) never reaches analog by itself: ask
-        // again for both, not every frame for a digital-only pad (the
-        // request blocks for a few frames).
-        if (state.is_connected() && !was_connected) || state.mode == PadMode::Config {
-            let _ = require_analog_on(&mut port, Port::One);
-        }
-        was_connected = state.is_connected();
+        let state = *pads.poll(&mut port, Port::One);
         let pad = state.buttons;
 
         // Direction buttons nudge the background color.

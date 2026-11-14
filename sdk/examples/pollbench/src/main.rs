@@ -11,11 +11,11 @@
 //! the cost of an absent socket is the figure this exists to watch.
 #![no_std]
 #![no_main]
-#![allow(deprecated)]
 
 extern crate psx_rt;
 
 use psx_io::timers::{self, Timer};
+use psx_pad::{Controllers, Port};
 use psx_rt::tty;
 
 /// Number of polls per phase.
@@ -54,23 +54,28 @@ fn report(label: &str, total_ticks: u32) {
 #[no_mangle]
 fn main() {
     timers::set_mode(Timer::Timer2, T2_SYSCLK_DIV8);
+    let Some(mut peripherals) = psx_rt::Peripherals::take() else {
+        return;
+    };
+    let port = &mut peripherals.controller_port;
+    let mut pads = Controllers::new();
     report(
         "port1",
         ticks(|| {
-            let _ = psx_pad::poll_port1();
+            let _ = pads.poll(port, Port::One);
         }),
     );
     report(
         "port2",
         ticks(|| {
-            let _ = psx_pad::poll_port2();
+            let _ = pads.poll(port, Port::Two);
         }),
     );
     report(
         "both",
         ticks(|| {
-            let _ = psx_pad::poll_port1();
-            let _ = psx_pad::poll_port2();
+            let _ = pads.poll(port, Port::One);
+            let _ = pads.poll(port, Port::Two);
         }),
     );
     tty::println("pollbench: done");
