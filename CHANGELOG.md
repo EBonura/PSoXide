@@ -40,6 +40,14 @@ every program works on every Sony BIOS and on OpenBIOS).
   enabled the feature removes it from its `Cargo.toml` and the `psx-math/asm-kernels` entry from its `psx-gate.toml`;
   its frames do not change. The portable definition stays as `clip_lanes8_plane_reference`, what the host and the probe run.
 
+- `psx-gpu`: the `asm-kernels` feature and its tagged-stream link kernel are gone; `OrderingTable::link_tagged_packet_stream_unchecked`
+  is the one inline-asm loop in `ot.rs` that every program already ran (no program enabled the feature, only `hello-asmprobe`).
+  The kernel was bit-identical but won only on long streams: 23 cycles a packet against the loop's 28.5, and 28 cycles more
+  setup, so per call (loop to kernel) 1 packet 76 to 104, 3 packets 133 to 148, 8 packets 274 to 263, 30 packets 898 to 762, 100 packets
+  2,887 to 2,354, break-even about 6 packets, and 608 bytes of text against 104. `hello-asmprobe` now compares the console's loop with the portable
+  definition over every stream length to 40, longer ones, thirteen slot distributions and the largest table (65,535 entries, with
+  a guard word after it), and fails when the loop is changed in three different places.
+
 
 - `Controllers::digital()` for a game that never uses sticks: `Controllers<false>`, the type's const parameter (`Controllers`
   is `Controllers<true>`, so every call site that exists is unchanged). The same `poll`, with the handshake, its retries and the

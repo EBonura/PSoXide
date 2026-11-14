@@ -84,11 +84,13 @@ pub fn tty_label_clip(mix: &str, which: &str) {
     tty::print(" cyc/10call=");
 }
 
-pub fn tty_label(name: &str, mode: u32) {
+pub fn tty_label(name: &str, mode: u32, packets: u32) {
     tty::print("BENCH link ");
     tty::print(name);
     tty::print(" mode=");
     tty::print_hex_u32(mode);
+    tty::print(" pk=");
+    tty::print_hex_u32(packets);
     tty::print(" cyc/100pkt=");
 }
 

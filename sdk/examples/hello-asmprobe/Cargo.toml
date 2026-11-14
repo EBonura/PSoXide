@@ -17,7 +17,7 @@ codegen-units = 1
 lto = true
 
 [dependencies]
-psx-gpu  = { path = "../../crates/psx-gpu", features = ["asm-kernels"] }
+psx-gpu  = { path = "../../crates/psx-gpu" }
 psx-rt   = { path = "../../crates/psx-rt", features = ["host-tty"] }
 psx-io   = { path = "../../crates/psx-io" }
 psx-math = { path = "../../crates/psx-math" }
