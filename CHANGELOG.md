@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `psx_telemetry::emit::console` is a measurement-build write like the rest of `emit` (it is `debug_log`). It was compiled into every mips build and stored to the debug-log port (`0x1F802F0C`, inside Expansion 2 beyond the entry state's 128 bytes), which faults on a console. A default build that calls it is byte-identical to one that does not and `psoxide-hwtest scan-expansion2` finds no store; a build with `emit` has them. No SDK or engine code called it; psx-goldsrc keeps its own unconditional copy (`psx_goldsrc::telemetry::console`).
 - Host tools and small shared pieces that games carried copies of, with nothing changed for a game that does not call them (a guest that does not call a new function links byte for byte the same):
   `psoxide-dev no64-scan [--floats] [--exempt FILE]... DIR...` runs the runtime numeric scanner on a program's own directories
   (the scanner five games copied; it judges a wide type written as a literal suffix, `1u64`, which `runtime-numeric-guard`
