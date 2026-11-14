@@ -37,6 +37,10 @@ type Records = [TimingRecord; TIMING_RECORD_COUNT];
 pub(crate) const LIST_ABORT_RECORD: u16 = 0x860;
 /// rec list_abort_progress: madr_words_at_stop, madr_words_after_wait, chcr_after_stop_low_half (the DMA address as words past the list head when the stop was written and after the GPU had time to finish; 0x861 and every second after to 0x867; the delay is in the flags of the record before)
 pub(crate) const LIST_ABORT_PROGRESS_RECORD: u16 = 0x861;
+/// rec list_abort_wide: words_at_stop_low, words_at_stop_high, words_after_wait_low (the same words as the record before each `list_abort_progress` in two halves, so nothing clamps; 0x874 and every second after to 0x87A, one pair a run in the order of 0x860)
+pub(crate) const LIST_ABORT_WIDE_RECORD: u16 = 0x874;
+/// rec list_abort_wide_rest: words_after_wait_high, chcr_after_stop_high_half, unused (0x875 and every second after to 0x87B)
+const LIST_ABORT_WIDE_REST_RECORD: u16 = 0x875;
 /// rec block_fifo: words_landed, words_sent, flags (request-mode DMA behind a large rectangle; 0x868 and every second after to 0x872; flags bit 0 the landed words are a contiguous prefix, bit 1 the channel was still busy at the bound, bit 2 the GPU was idle afterwards, bit 3 the rectangle was sent first, bits 4 to 7 the block size in words divided by 4)
 pub(crate) const BLOCK_FIFO_RECORD: u16 = 0x868;
 /// rec block_fifo_time: clocks_low_half, clocks_high_half, gpustat_high_half_after (kick to channel idle, or to the bound; 0x869 and every second after to 0x873)
@@ -220,6 +224,19 @@ fn abort_run(id: u16, delay: Option<u32>, records: &mut Records, next: &mut usiz
             words_past(madr_final),
             chcr_stop & 0xFFFF,
         ),
+    );    // The companion records (v2.20): the same words in two 16-bit halves each, so a run that went past 65,535 words
+    // loses nothing (the record above clamps), and the half of CHCR the record above leaves out.
+    let (stop, after) = (words_past(madr_stop), words_past(madr_final));
+    let wide = LIST_ABORT_WIDE_RECORD + 2 * ((id - LIST_ABORT_RECORD) / 2);
+    push_timing_record(
+        records,
+        next,
+        record(wide, stop & 0xFFFF, stop >> 16, after & 0xFFFF),
+    );
+    push_timing_record(
+        records,
+        next,
+        record(LIST_ABORT_WIDE_REST_RECORD + (wide - LIST_ABORT_WIDE_RECORD), after >> 16, chcr_stop >> 16, 0),
     );
 }
 

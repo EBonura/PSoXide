@@ -103,6 +103,8 @@ fn v2_table_expands_the_loops() {
     assert_eq!(table[&0x973].label, "present_path_timing");
     assert_eq!(table[&0x974].label, "present_cd_reads_quiet");
     assert_eq!(table[&0x976].label, "present_cache_flush");
+    assert_eq!(table[&0x653].label, "timer1_polled_wide");
+    assert_eq!(table[&0x87B].label, "list_abort_wide_rest_3");
     assert_eq!(table[&0x330].label, "xa_clock_raw_head_60s");
     assert_eq!(table[&0x338].label, "xa_clock_raw_elapsed");
     assert_eq!(table[&0x980].label, "gte_nclip_built_pos");

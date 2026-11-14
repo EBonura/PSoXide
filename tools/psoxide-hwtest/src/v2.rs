@@ -664,6 +664,21 @@ fn build() -> BTreeMap<u32, V2Entry> {
             ["sectors", "errors_and_retries", "time_16_hblanks"],
         );
     }
+    // v2.20: companions of the records that clamp at 0xFFFF.
+    b.put(0x653, "timer1_polled_wide", ["hblanks_low", "hblanks_high", "distinct_low"]);
+    b.put(0x654, "timer1_polled_wide_rest", ["distinct_high", "largest_step", "unused"]);
+    for k in 0..4 {
+        b.put(
+            0x874 + 2 * k,
+            format!("list_abort_wide_{k}"),
+            ["words_at_stop_low", "words_at_stop_high", "words_after_wait_low"],
+        );
+        b.put(
+            0x875 + 2 * k,
+            format!("list_abort_wide_rest_{k}"),
+            ["words_after_wait_high", "chcr_after_stop_high_half", "unused"],
+        );
+    }
     // v2.20: the XA clock case's raw records, fields that cannot clamp.
     for (k, mark) in ["60", "120", "180"].iter().enumerate() {
         b.put(
