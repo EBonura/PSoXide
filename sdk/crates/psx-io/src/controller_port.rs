@@ -238,6 +238,25 @@ pub trait Transport {
         }
     }
 
+    /// Mask CPU interrupts and say whether they were on, for [`restore_interrupts`] to put
+    /// back. A pad's `/ACK` is a pulse of about 90 cycles that the exchange finds by reading
+    /// `STAT`, so an interrupt handler that runs over it hides it and the packet is abandoned
+    /// part way; a configuration packet has no retry and nobody reads its answer, so the
+    /// driver masks around those. A [`ControllerPort`] masks the CPU's interrupts and an
+    /// interrupt that came meanwhile is taken after; a model has none and masks nothing.
+    ///
+    /// Calls bracket, like a critical section: restore what a call returned, innermost first.
+    ///
+    /// [`restore_interrupts`]: Self::restore_interrupts
+    fn mask_interrupts(&mut self) -> bool {
+        false
+    }
+
+    /// Put CPU interrupts back as [`mask_interrupts`](Self::mask_interrupts) found them.
+    fn restore_interrupts(&mut self, were_enabled: bool) {
+        let _ = were_enabled;
+    }
+
     /// Spin until any bit of `mask` is set in the status register, at most
     /// `spins` reads after the first. `false` on timeout.
     fn wait_status_set(&mut self, mask: u32, spins: u32) -> bool {
@@ -474,6 +493,19 @@ impl Transport for ControllerPort {
     #[inline(always)]
     fn clock(&mut self) -> u16 {
         crate::timers::counter(crate::timers::Timer::Timer0)
+    }
+
+    #[inline(always)]
+    fn mask_interrupts(&mut self) -> bool {
+        // SAFETY: the pair brackets, as the trait documents; the driver restores what this
+        // returned before it returns.
+        unsafe { crate::irq::disable_cpu_interrupts() }
+    }
+
+    #[inline(always)]
+    fn restore_interrupts(&mut self, were_enabled: bool) {
+        // SAFETY: `were_enabled` is what the matching `mask_interrupts` returned.
+        unsafe { crate::irq::restore_cpu_interrupts(were_enabled) }
     }
 }
 

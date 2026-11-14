@@ -93,6 +93,8 @@ fn v2_table_expands_the_loops() {
     assert_eq!(table[&0x6E3].label, "sio_arm_mid_packet_p2");
     assert_eq!(table[&0x6F0].label, "sio_select_early_spins");
     assert_eq!(table[&0x6F4].label, "sio_select_early_open_card");
+    assert_eq!(table[&0x6F5].label, "pad_handshake_irq_unmasked");
+    assert_eq!(table[&0x6F7].label, "pad_handshake_irq_first_poll");
     assert_eq!(table[&0x6F8].label, "cd_stop_mixed_waits");
     assert_eq!(table[&0x6FB].label, "cd_stop_single_early");
     assert_eq!(table[&0x6B3].label, "tick_loss_t0_sysclk_14_instr");

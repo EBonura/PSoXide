@@ -84,7 +84,60 @@ Of the 16,129, 15,471 are the nine bytes on the wire (each byte's
 `Controllers` sends the three configuration packets one video frame apart, as
 Sony's libpad does, the first time a pad answers on a port: at boot, and when a
 pad is plugged in later (about four frames). A game that wants analog mode again
-later calls `Ctx::enable_analog`.
+later calls `Ctx::enable_analog`. A pad parked in configuration mode (the SCPH-110
+failure) gets the exit again.
+
+### A pad left digital
+
+The handshake reads none of the answers and a packet that fails part way is not
+sent again, so a packet abandoned part way can leave a DualShock digital for the
+rest of the session. The history, from the repositories:
+
+* VoXide `c28433f` (2026-07-06): on a console the stick read nothing while the
+  buttons worked. The boot code enabled VBlank interrupts and then ran the
+  `0x43`/`0x44` exchange, which then ran with VBlank interrupts on; the fix ran
+  it first and a main-loop request every 15 frames while the pad read digital
+  covered a pad that was not ready. The driver was the synchronous one of that
+  day, with no `/ACK` wait and no interrupt engine (the engine arrived on
+  2026-10-08).
+* Quake's boot code and its `AnalogRetry` (every 15 polls, eight times, any
+  state but analog, `Unknown` included: "restricting this retry to those two
+  modes left Quake permanently digital on real hardware") come from before
+  2026-08-25, the squashed first public commit, so before the `/ACK`-paced
+  poll (`c9d5dd4f5`, 2026-09-27). It kept all of it through its repin to the
+  paced driver (`8fd7835`), so no console has run Quake without it.
+* The demo-disc launcher's request every 60 ticks (`6e60ee3`, 2026-10-03) is a
+  notice policy for a disc that requires analog (an SCPH-110 Analog button
+  toggling it), not a finding about interrupts.
+* The SCPH-110 parked in configuration mode by back-to-back packets
+  (`deddb1649`, 2026-08-16) is "not yet re-measured on silicon".
+
+None of the failures belongs to the deleted interrupt-driven engine: they
+predate it, and the mechanism applies to today's driver as it did to theirs. A
+pad's `/ACK` is a pulse of about 90 cycles that the exchange finds by reading
+`STAT`; an interrupt handler running over it hides it (`Transport::exchange_card`
+says the same of a card), the wait times out and the packet is dropped.
+What no console has shown is how often that happens to the ACK-paced driver;
+hardware-tests v2.15, step `PAD CONFIG UNDER IRQ` (`0x6F5`-`0x6F7`), forces the
+worst case and measures the plain handshake, for the one console session.
+
+`Controllers` therefore does two things, neither of which a normal frame pays for:
+
+* Each configuration packet goes out with CPU interrupts masked
+  (`Transport::mask_interrupts`), from its first byte to its last, about
+  15,000 cycles; a pending interrupt is taken after. The select and the setup
+  wait before the bytes are outside: an interrupt there only lengthens the gap.
+* A pad that answered a packet in full (only a DualShock acknowledges all
+  nine bytes; a digital pad stops after the fourth) and still reports digital,
+  an unknown ID or configuration mode after the handshake gets the handshake
+  (or the exit) again, three times in all for the plug-in, each a few video
+  frames after the last because the handshake spaces its packets. A digital
+  pad pays nothing beyond the first handshake it has always paid. A DualShock
+  that refuses analog pays the three, about eleven video frames, once.
+
+A pad that answers an ID the driver does not know every poll keeps the last
+clean state (nothing, if it never had one): `Controllers` does not trust it as
+Quake's `UNKNOWN_MODE_TRUST_POLLS` did.
 
 ## Memory cards
 

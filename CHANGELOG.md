@@ -7,6 +7,32 @@ every program works on every Sony BIOS and on OpenBIOS).
 
 
 
+- `psx_pad::Controllers` protects a DualShock's analog handshake against an interrupt, for every game, and a pad left digital is
+  asked again (`sdk/docs/PAD.md`, "A pad left digital"). Three games carried console-found protection against a pad left digital
+  for the whole session (the handshake before interrupts were enabled; a request repeated while the pad read digital, bounded in
+  Quake and not in VoXide or the launcher) and lost it on moving to `Controllers`, whose handshake runs at a game's first poll,
+  with interrupts on in most games, reads none of its answers and repeats no packet. The history is in the repositories: those
+  failures were seen on the earlier synchronous drivers (VoXide 2026-07-06, Quake before 2026-08-25), not on the interrupt-driven
+  pad engine, which came later, and not on a console with today's `/ACK`-paced driver, which none has run. The mechanism that
+  applies to today's driver as well is that a pad's `/ACK` is a pulse of about 90 cycles found by reading `STAT`, and an interrupt
+  handler running over it hides it and the packet is dropped. `Transport` gains `mask_interrupts()` and `restore_interrupts()`
+  (a `ControllerPort` masks and restores the CPU's interrupts, a model does nothing), and `Controllers` sends every configuration
+  packet between them, from its first byte to its last (about 15,000 cycles; a pending interrupt is taken after). A pad that
+  answered a packet in full (only a DualShock acknowledges all nine bytes) and still reports digital, an unknown ID or
+  configuration mode after the handshake gets the handshake, or the exit for configuration mode, again, three times in all for the
+  plug-in, which now bounds the exit retry too (it was three a poll for as long as the pad stayed parked). A digital pad pays
+  nothing more than it paid. Host test: a DualShock whose set-analog packet loses its `/ACK` stays digital for 500 polls on the
+  code before this change (the `0x44` sent once) and ends analog on the first poll after it; a pad that refuses analog is asked
+  three more times and no more; a digital pad is never asked again. A normal frame pays nothing: the poll's own code gains no work
+  (a test of `mode == Analog` before the retry logic, which moved out of line) and the early select's bookkeeping, which a poll
+  with `SELECT_EARLY` off never needed, is compiled out. On the emulator, bench program, one poll of an analog pad between 100,000
+  cycles of other work: 23,221 cycles before, 23,187 after (both ports, port 2 empty: 23,677 and 23,653); text 6,896 bytes before
+  and 7,000 after, rodata 72 and 108. In NitroXide (origin main 35938ff): text +28, rodata +52, 80 bytes in all, the two
+  `CP0` mask sequences, the retry and the constants that are loaded from memory since the mask is a barrier for the packets
+  built in registers. Hardware tests v2.15, step `PAD CONFIG UNDER IRQ` (records `0x6F5`-`0x6F7`): the handshake with a timer
+  interrupt forced over the `/ACK` of the set-analog packet, unmasked and as shipped, and the plain first-poll handshake with
+  VBlank on, fifteen rounds each, for the one console session; `make hardware-tests` on the emulator: 150 pass and the two known
+  fails (139, 201), `0x6F5` loses the packet 15 rounds of 15 and recovers on the second, `0x6F6` and `0x6F7` never do.
 - `psx-spu`'s reverb path costs a program less RAM and no time: the zero block `start_reverb` cleared the work area from was a 256-byte
   static (the 256 B it cost every game that calls it); it is now a block of 128 bytes on the caller's stack for the length of the
   call (`start_reverb`'s frame grows from 40 to 200 bytes; pieces of 16 words, 64 bytes, take 177 and 258 HBlanks against today's 174

@@ -597,6 +597,13 @@ fn build() -> BTreeMap<u32, V2Entry> {
             ["polls", "id_and_magic", "poll_cycles_median"],
         );
     }
+    for (case, tag) in ["unmasked", "masked", "first_poll"].iter().enumerate() {
+        b.put(
+            0x6F5 + case as u32,
+            format!("pad_handshake_irq_{tag}"),
+            ["rounds", "bytes_seen", "packets"],
+        );
+    }
     for (case, tag) in ["mixed_waits", "mixed_early", "single_waits", "single_early"]
         .iter()
         .enumerate()

@@ -108,6 +108,11 @@ pub struct Model {
     pub fault_byte: usize,
     /// Apply the fault to the first select only.
     pub fault_once: bool,
+    /// Apply the fault to the transaction opened by this select only, counted from 1
+    /// (0: every select): one packet hit by an interrupt that hid its `/ACK`.
+    pub fault_attempt: usize,
+    /// A DualShock that ignores the analog request (0x44) and so never leaves digital.
+    pub refuse_analog: bool,
     /// Per-select `(id, fault, byte)` overrides, indexed by attempt.
     pub sequence: Vec<(u8, Fault, usize)>,
     // Observations.
@@ -174,6 +179,8 @@ impl Default for Model {
             fault: Fault::None,
             fault_byte: 3,
             fault_once: false,
+            fault_attempt: 0,
+            refuse_analog: false,
             sequence: Vec::new(),
             early: 0,
             sends: 0,
@@ -200,7 +207,10 @@ pub fn reset(model: Model) {
 }
 
 fn faulted(m: &Model, kind: Fault, index: usize) -> bool {
-    m.fault == kind && m.fault_byte == index && (!m.fault_once || m.attempts == 1)
+    m.fault == kind
+        && m.fault_byte == index
+        && (!m.fault_once || m.attempts == 1)
+        && (m.fault_attempt == 0 || m.fault_attempt == m.attempts)
 }
 
 /// 16-bit register write. MODE and BAUD are accepted and ignored; on CTRL,
@@ -425,7 +435,7 @@ fn apply_command(m: &mut Model, index: usize, value: u8) {
                 m.id = if m.analog_requested { 0x73 } else { 0x41 };
             }
         }
-        (0x44, 3) => m.analog_requested = value == 1,
+        (0x44, 3) => m.analog_requested = value == 1 && !m.refuse_analog,
         (0x44, 4) => m.locked = value == 3,
         _ => {}
     }
