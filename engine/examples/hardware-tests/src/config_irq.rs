@@ -13,6 +13,13 @@
 //! packet and asks again (at most three times) a pad that answered the handshake like a DualShock and still
 //! reads digital. This step is the console's answer.
 //!
+//! Console result (2026-11-14, SCPH-9002, two runs, one with an SCPH-1200 and one with an SCPH-110, both
+//! DualShocks): `0x6F7` and `0x6F6` passed on both (15 rounds analog, one set-analog packet a round, nine bytes,
+//! ID `0x73` straight after). `0x6F5`, nothing masked, lost the packet: three bytes written, ID `0x41`
+//! straight after, a second packet, the round ending analog only because `Controllers` asked again
+//! (`bytes_seen` `0x41F3`, `packets` `0x1321` on run 1 and `0x1331` on run 2). An interrupt over the `/ACK` hides
+//! it on the console, so the masking in `Controllers` is needed.
+//!
 //! Each case is [`ROUNDS`] rounds. A round puts the pad in digital mode (enter configuration, set digital
 //! and unlocked, exit, then a poll that must read ID `0x41`), makes a fresh `Controllers` and polls port 1
 //! once, which runs the handshake, with the case's interrupt. The handshake is `Controllers`' own code on
@@ -53,8 +60,8 @@
 //!   after it (bits 0-3 is 1). Masked, the interrupt cannot cost the pad its request.
 //! * `0x6F5`: the console either loses the packet or it does not. Lost (3 bytes written, ID `0x41` straight
 //!   after, a second packet, ended analog): the mechanism is real, and the second packet is what rescues the
-//!   unmasked case. Not lost (9 bytes, analog at once): an interrupt over the pulse does not hide it on this
-//!   console and the masking is only insurance; say so before burning more of the SDK on it.
+//!   unmasked case. Not lost (9 bytes, analog at once): an interrupt over the pulse does not hide it on that
+//!   console and the masking would be only insurance. The console lost it (see the result above).
 //!
 //! Fail: `0x6F6` or `0x6F7` with any round ending digital or needing a second packet.
 

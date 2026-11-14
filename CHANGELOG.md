@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- The first console run of the pad and present work, 2026-11-14 (SCPH-9002; hardware-tests v2.18; two runs, an SCPH-1200 and an
+  SCPH-110, both DualShocks; the QR pages are `docs/hardware-refs/px8-silicon-2026-11-14-v2.18-run1-scph1200.txt` and
+  `...-run2-scph110.txt`, now read by `psoxide-hwtest compare`). Passed, identical on both runs: the early select (`0x6F0`-`0x6F4`), the
+  stop returning at the acknowledge (`0x6F8`-`0x6FB`), the analog handshake with its interrupt masking (`0x6F5`-`0x6F7`), a DualShock read
+  from its first poll (`0x6FC`-`0x6FE`) and the present path (`0x970`-`0x976`). The numbers are in the entries below and in
+  `docs/hardware-test-versions.md`. Two corrections to what the SDK said before: the masking of interrupts around a configuration
+  packet is required (an unmasked interrupt over the `/ACK` loses the packet on a console), not insurance; and an SCPH-1200 and an
+  SCPH-110 both answer as DualShocks (ID `0x73`) once the handshake has run. Open, cause not determined: conformance cases 22 and
+  116 to 120 passed on every earlier console run and fail on both of these (they stay failing cases); the XA clock step reads the
+  clamp floor on every console run and is not a measurement; nine fields clamp at `0xFFFF`. Details in `docs/hardware-test-versions.md`.
 - `psx_pad::Controllers` (both `new()` and `digital()`) reads a pad that is slow to come up from its first answer. A port that
   answers "nobody there" was left alone for 59 polls and probed once in 60, so a pad that needed more than a moment was ignored
   for two seconds. PCSX-ReARMed's DualShock, in either mode, acknowledges the address byte and answers `0xFF` to the command
@@ -106,7 +116,7 @@ every program works on every Sony BIOS and on OpenBIOS).
   Quake and not in VoXide or the launcher) and lost it on moving to `Controllers`, whose handshake runs at a game's first poll,
   with interrupts on in most games, reads none of its answers and repeats no packet. The history is in the repositories: those
   failures were seen on the earlier synchronous drivers (VoXide 2026-07-06, Quake before 2026-08-25), not on the interrupt-driven
-  pad engine, which came later, and not on a console with today's `/ACK`-paced driver, which none has run. The mechanism that
+  pad engine, which came later, and not on a console with today's `/ACK`-paced driver, which no console had run until 2026-11-14 (the first entry above). The mechanism that
   applies to today's driver as well is that a pad's `/ACK` is a pulse of about 90 cycles found by reading `STAT`, and an interrupt
   handler running over it hides it and the packet is dropped. `Transport` gains `mask_interrupts()` and `restore_interrupts()`
   (a `ControllerPort` masks and restores the CPU's interrupts, a model does nothing), and `Controllers` sends every configuration
@@ -118,7 +128,7 @@ every program works on every Sony BIOS and on OpenBIOS).
   code before this change (the `0x44` sent once) and ends analog on the first poll after it; a pad that refuses analog is asked
   three more times and no more; a digital pad is never asked again. A normal frame pays nothing: the poll's own code gains no work
   (a test of `mode == Analog` before the retry logic, which moved out of line) and the early select's bookkeeping, which a poll
-  with `SELECT_EARLY` off never needed, is compiled out. On the emulator, bench program, one poll of an analog pad between 100,000
+  with the early select off, as it was then, never needed, is compiled out. On the emulator, bench program, one poll of an analog pad between 100,000
   cycles of other work: 23,221 cycles before, 23,187 after (both ports, port 2 empty: 23,677 and 23,653); text 6,896 bytes before
   and 7,000 after, rodata 72 and 108. In NitroXide (origin main 35938ff): text +28, rodata +52, 80 bytes in all, the two
   `CP0` mask sequences, the retry and the constants that are loaded from memory since the mask is a barrier for the packets

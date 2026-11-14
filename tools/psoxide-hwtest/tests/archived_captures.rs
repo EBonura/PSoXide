@@ -10,7 +10,7 @@ fn refs() -> PathBuf {
 }
 
 /// file -> (schema, suite minor, timing records, whole-binary CRC)
-const ARCHIVED: [(&str, &str, u8, usize, u32); 21] = [
+const ARCHIVED: [(&str, &str, u8, usize, u32); 23] = [
     ("px7-emulator-v1.5.txt", "PX7", 5, 151, 0x5245A296),
     ("px7-emulator-v1.6.txt", "PX7", 6, 151, 0x056F8EC8),
     ("px7-emulator-v1.7.txt", "PX7", 6, 151, 0x39FFC9DD),
@@ -79,6 +79,20 @@ const ARCHIVED: [(&str, &str, u8, usize, u32); 21] = [
         23,
         137,
         0x8C571D68,
+    ),
+    (
+        "px8-silicon-2026-11-14-v2.18-run1-scph1200.txt",
+        "PX8",
+        18,
+        1290,
+        0x62D56F61,
+    ),
+    (
+        "px8-silicon-2026-11-14-v2.18-run2-scph110.txt",
+        "PX8",
+        18,
+        1313,
+        0x1765A7A4,
     ),
 ];
 

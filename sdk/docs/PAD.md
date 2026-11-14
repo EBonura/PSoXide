@@ -69,7 +69,11 @@ An empty socket answers `0xFF` and never pulses `/ACK`; `Controllers` polls a po
 time for its first 128 such answers (after boot, and after a pad leaves), so that a pad slow to come up is read from
 its first answer (PCSX-ReARMed's DualShock answers like an empty socket for its first 33 video frames), and then probes it
 once in 60 polls, so it costs a game almost nothing. The 128 failed polls of an empty socket cost about 20,000
-cycles each in the emulator's model, once.
+cycles each in the emulator's model, once. A console DualShock answers from its first
+poll (hardware-tests v2.16, step `PAD DIGITAL FIRST POLL`, `0x6FC`-`0x6FE`, 2026-11-14,
+SCPH-9002, two runs with two DualShocks: first read at poll 0, ID `0x41` in digital
+mode and `0x73` in analog, both rounds read from the first poll), so the window is
+harmless there; it is for PCSX-ReARMed.
 
 ## What it costs
 
@@ -124,9 +128,16 @@ predate it, and the mechanism applies to today's driver as it did to theirs. A
 pad's `/ACK` is a pulse of about 90 cycles that the exchange finds by reading
 `STAT`; an interrupt handler running over it hides it (`Transport::exchange_card`
 says the same of a card), the wait times out and the packet is dropped.
-What no console has shown is how often that happens to the ACK-paced driver;
-hardware-tests v2.15, step `PAD CONFIG UNDER IRQ` (`0x6F5`-`0x6F7`), forces the
-worst case and measures the plain handshake, for the one console session.
+A console shows it happens to the ACK-paced driver (2026-11-14, SCPH-9002, two runs
+with two DualShocks, an SCPH-1200 and an SCPH-110; both answer ID `0x73` once the
+handshake has run): hardware-tests v2.15, step `PAD CONFIG UNDER IRQ`
+(`0x6F5`-`0x6F7`), forced an interrupt over the `/ACK` of the set-analog packet. With
+nothing masked the packet was lost (three bytes written, ID `0x41` straight after, a
+second packet needed, `bytes_seen` `0x41F3`, `packets` `0x1321` and `0x1331`); with
+`Controllers` as shipped, which masks, and with the plain first-poll handshake all 15
+rounds ended analog on one packet of nine bytes with ID `0x73` straight after
+(`bytes_seen` `0x73F3`, `packets` `0xF911` and `0xF910`). The masking is needed, not
+insurance. How often a VBlank lands over the pulse in a game is still not measured.
 
 `Controllers` therefore does two things, neither of which a normal frame pays for:
 
