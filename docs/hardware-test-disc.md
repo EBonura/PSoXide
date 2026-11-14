@@ -70,9 +70,7 @@ held. A hang at bus level cannot be pre-empted, which is the accepted trade.
 exception in the SIO area: the `DUALSHOCK MOTORS` step asks, for each motor level, whether the pad
 vibrated (CROSS yes, CIRCLE no; the question shows for a second with the pad ignored, then every button must be let go, then four seconds to answer). Answer nothing and it records "no answer".
 
-`make hwtest-run` runs it headless, `make hwtest-diff` compares it with the pinned
-emulator baseline, and `make hwtest-compare INPUT=<recording>` decodes a filmed
-run and diffs it against the last silicon captures.
+A filmed run is decoded with the two commands under "Recording a capture" below.
 
 ## Testing controllers and analog drift
 
@@ -310,9 +308,13 @@ recording that spans several runs is not combined into a payload that cannot che
 There is no audio link any more. `AUDIO READOUT` is gone, so there is nothing to record
 besides video.
 
-Decode with one command:
+Decode with two commands, from the SDK checkout. The first reads every frame of the recording and keeps the
+pages whose CRC checks (it needs `pip install zxing-cpp`); the second prints the decoded records:
 
-    make hwtest-compare INPUT=~/Movies/run.mov
+    python3 tools/hwtest-video-qr.py ~/Movies/run.mov pages.txt
+    cargo run -q --release --manifest-path tools/psoxide-hwtest/Cargo.toml -- report pages.txt
+
+(There is no `make` target for this: `make hwtest-compare` was named here but no Makefile in the history defines it.)
 
 The run includes waits that are part of the measurement (the CD motor case waits up to
 20 s); the progress bar covers all of it.
