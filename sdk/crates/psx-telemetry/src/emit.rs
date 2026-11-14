@@ -16,7 +16,9 @@
 //! These are measurement-build features. A store into this window can fault on
 //! a console, so nothing here may reach a disc: every writer except
 //! [`console`] compiles only with `emit`, and the architecture gate treats a
-//! build that enables `emit` as a diagnostic one.
+//! build that enables `emit` as a diagnostic one: `sdk/profile.toml` lists it under `[diag]`, so
+//! a measurement disc is built with `mkisopsx --diag`, and a shipping build contains no store to
+//! these ports.
 //!
 //! [`console`] is deliberately NOT feature-gated (mips-gated only): it is the
 //! Play debug terminal used from normal builds. Use sparingly.

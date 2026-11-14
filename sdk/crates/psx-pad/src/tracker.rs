@@ -96,6 +96,21 @@ impl PadTracker {
         false
     }
 
+    /// The buttons held on the frame before the last [`update`](Self::update),
+    /// as polled (suppression does not hide them here).
+    pub const fn previous(&self) -> u16 {
+        self.prev
+    }
+
+    /// Make the previous state equal to the current one, for a resume point
+    /// (a menu closing, a scene starting): buttons held now stay held, but none
+    /// counts as just pressed, and none of them reads as just released later
+    /// than a real release. Unlike [`prime`](Self::prime) nothing is hidden
+    /// from [`is_held`](Self::is_held), and held buttons keep their repeat count.
+    pub fn settle(&mut self) {
+        self.prev = self.held;
+    }
+
     /// Suppress every button held right now until it is released and pressed
     /// again. Call at a context handoff (launcher starts a game, pause menu
     /// closes) so a button held across the transition does not fire in the
@@ -174,6 +189,51 @@ mod tests {
         assert!(t.just_pressed(A));
         assert!(t.is_held(A));
         assert!(!t.is_held(B));
+    }
+
+    #[test]
+    fn previous_is_the_last_frames_polled_mask() {
+        let mut t = PadTracker::new();
+        assert_eq!(t.previous(), 0);
+        t.update(A);
+        assert_eq!(t.previous(), 0);
+        t.update(A | B);
+        assert_eq!(t.previous(), A);
+        t.prime();
+        t.update(A | B);
+        assert_eq!(t.previous(), A | B); // not hidden by prime
+    }
+
+    #[test]
+    fn settle_keeps_held_but_ends_the_press() {
+        let mut t = PadTracker::new();
+        t.update(A);
+        assert!(t.just_pressed(A));
+        t.settle();
+        assert!(t.is_held(A));
+        assert!(!t.just_pressed(A));
+        assert_eq!(t.previous(), A);
+        // A button pressed after the settle is still a fresh press.
+        t.update(A | B);
+        assert!(t.just_pressed(B) && !t.just_pressed(A));
+        // Releasing a settled button is a normal release.
+        t.settle();
+        t.update(B);
+        assert!(t.just_released(A));
+    }
+
+    #[test]
+    fn settle_does_not_hide_buttons_like_prime() {
+        let mut t = PadTracker::new();
+        t.update(A);
+        t.settle();
+        t.update(A);
+        assert!(t.is_held(A));
+        let mut p = PadTracker::new();
+        p.update(A);
+        p.prime();
+        p.update(A);
+        assert!(!p.is_held(A));
     }
 
     #[test]

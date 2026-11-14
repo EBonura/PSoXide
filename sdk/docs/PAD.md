@@ -170,7 +170,7 @@ five bytes to a digital pad, nine to a pad that is already analog.
 delay, rate)`) and a handoff guard (`prime`). `StickDpad` folds the centred left stick into d-pad
 bits so a menu can answer the stick through the same tracker: `pad.update(buttons | stick.update(x,
 y))`. A menu that wants one press per push reads `just_pressed`; one that wants a cursor that runs
-reads `repeats`. The test is a parameter, because games feel differently on purpose:
+reads `repeats`. `previous()` gives the last frame's mask, and `settle()` makes the previous state the current one at a resume point so held buttons stay held but are not fresh presses (`prime` also hides them from `is_held`). The test is a parameter, because games feel differently on purpose:
 `StickDpad::per_axis(enter, exit)` judges each axis (a diagonal sets two bits) and
 `StickDpad::radial(enter, exit)` judges the distance from centre and keeps one direction until the
 stick is back inside `exit` (the radii are `Deadzone` radii, so "past" is strictly outside). A push

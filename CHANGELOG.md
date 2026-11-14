@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Host tools and small shared pieces that games carried copies of, with nothing changed for a game that does not call them (a guest that does not call a new function links byte for byte the same):
+  `psoxide-dev no64-scan [--floats] [--exempt FILE]... DIR...` runs the runtime numeric scanner on a program's own directories
+  (the scanner five games copied; it judges a wide type written as a literal suffix, `1u64`, which `runtime-numeric-guard`
+  does not yet); `psoxide-size ram MAP [--items] [--floor BYTES|FILE]` reports the free RAM a link leaves and where the rest
+  went, and `psoxide-size block EXE MAGIC:VERSION:LEN:NAME...` finds a versioned state block in an executable (the
+  `ram_report` and `gate-symbols` tools games carried); `psoxide-dev style-fmt [--check]` formats a program's tracked Rust.
+  `psx_telemetry::emit` gains `debug_write` (a log write that does not end the line) and `sort_class` (the depth-sort probe's
+  class word, port `+0x28`), under the same `emit` feature as every other writer, so a game's own writes to those ports can go;
+  editor-playtest uses `sort_class` and loses a register-literal exception. `psx_pad::StickDpad` folds the left stick into
+  d-pad bits, per axis or radial, with the entry and exit thresholds as parameters, for `PadTracker`, which gains `previous()` (last frame's mask) and `settle()` (previous state := current at a resume point, held buttons stay held and are not hidden, unlike `prime`).
 - The architecture gate refuses an image that holds a frame-path function as a function: `[inline]` in `sdk/profile.toml`
   lists them (`psx_gpu::chain::start_walk` first) and `inline-gate` (`tools/psoxide-hazard`, run by `psoxide-pgo` with the
   hazard patch, the stack guard and the cache gate) reads the link map after the link. The compiler's inline choice depends on
