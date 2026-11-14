@@ -754,6 +754,13 @@ pub(crate) fn pad_and_card(records: &mut Records, next: &mut usize) {
 // ---------------------------------------------------------- select early
 
 /// rec sio_select_early: polls, id_and_magic, poll_cycles_median (port 1, eight polls a case, 0x6F0-0x6F4). `polls` packs four counts of four bits: clean polls (bits 0-3), polls tried (4-7), polls whose earlier select was still in `CTRL` when the bytes began (8-11), card frames read in the gap (12-15). A poll is clean when every byte exchanged and the third reply was `0x5A`. `id_and_magic` is the last poll's ID in the high byte and its third reply in the low one; `poll_cycles_median` is the system-clock cycles from the start of the transaction to the last byte received, the select delay included only where the case waits it.
+///
+/// Every case sends its bytes with CPU interrupts masked (`Transport::mask_interrupts`, the pair `Controllers`
+/// brackets a configuration packet with); the select and the wait before the bytes stay outside it, so VBlanks
+/// still run while a select is held. Without the mask, once the present path's VBlank handler is linked, the
+/// third poll of `0x6F2` can lose the /ACK of its fifth byte to a VBlank (the eight polls start at different
+/// phases against the VBlank): the phase of an interrupt, not the select, so the case could not answer its own
+/// question. No record field is free for a count of exchanges that saw a VBlank, so none is recorded.
 /// 0x6F0 the pad poll as the SDK did it before v2.13: select, 1,024 status reads, the bytes. 0x6F1 the select left open by the poll before and the bytes clocked one video frame later, as `psx_pad::Controllers` ships. 0x6F2 the same with half a second in between. 0x6F3 the bytes at once after the select, so the setup time is measured on root counter 0 alone. 0x6F4 a memory-card frame read on slot 1 between the open select and the bytes.
 const SELECT_EARLY_RECORD: u16 = 0x6F0;
 const EARLY_POLLS: usize = 8;
@@ -809,6 +816,10 @@ fn early_poll(lead: Lead) -> (bool, bool, bool, u8, u8, u16) {
     let mut replies = [0xFFu8; 9];
     let mut length = 9;
     let mut i = 0;
+    // The exchange runs with CPU interrupts off, as `Controllers` sends a configuration packet: a VBlank
+    // over a pad's /ACK pulse hides it, which would fail a poll for a reason that is not the select. The
+    // select, the wait before the bytes and the whole of `begin_pad` stay outside, with interrupts on.
+    let were_enabled = port.mask_interrupts();
     while ok && i < length {
         let tx = match i {
             0 => 0x01,
@@ -825,6 +836,7 @@ fn early_poll(lead: Lead) -> (bool, bool, bool, u8, u8, u16) {
         i += 1;
     }
     let cycles = count();
+    port.restore_interrupts(were_enabled);
     port.finish(ok);
     (ok && replies[2] == 0x5A, kept, card_ok, replies[1], replies[2], cycles)
 }

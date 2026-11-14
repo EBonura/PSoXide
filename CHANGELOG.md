@@ -10,7 +10,7 @@
   every time for its first 128 such answers (and for 128 after a pad leaves), then as before. A plain pad that answers the first
   poll never reaches this code; an empty port 2 pays 128 failed polls once (about 20,000 cycles each in the emulator). The
   PSoXide emulator's DualShock answers from the first poll and cannot show the bug. Hardware-tests v2.16 adds the console's
-  answer (`PAD DIGITAL FIRST POLL`, records `0x6FC`-`0x6FE`; the suite number v2.16 is now this step's, so the unlanded present-path branch, which uses v2.16 and v2.17, renumbers when it is rebased).
+  answer (`PAD DIGITAL FIRST POLL`, records `0x6FC`-`0x6FE`). The same suite version makes `SIO0 SELECT EARLY` send its bytes with CPU interrupts masked, as `Controllers` does for a configuration packet, so a VBlank over a pad's `/ACK` cannot fail a poll of that step (medians of `0x6F0`-`0x6F4` move by 11 to 35 cycles).
 - The boot splash costs a program less. The mark is stored LZ coded in 16-bit words (2,746 bytes against 4,692; 512-word
   window, a flag byte per eight tokens) and expanded sixteen rows at a time through a 1 KiB buffer, with the same 4,096 words
   out (a host test pins the FNV-1a of them); `FontAtlas::upload` is out of line, so every caller shares one copy; the

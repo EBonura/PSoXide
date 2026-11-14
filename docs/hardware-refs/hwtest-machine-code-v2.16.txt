@@ -1,4 +1,4 @@
-# exe=build/examples/mipsel-sony-psx/release/hardware-tests.exe words=293434 probes=218 layout_tags=6
+# exe=build/examples/mipsel-sony-psx/release/hardware-tests.exe words=287390 probes=218 layout_tags=6
 id,name,words,digest
 01,timed_empty,6,0x21bbd739
 04,timed_load_hazards_at,134,0xe88f9939
