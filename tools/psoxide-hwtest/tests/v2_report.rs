@@ -101,6 +101,8 @@ fn v2_table_expands_the_loops() {
     assert_eq!(table[&0x6FE].label, "pad_first_poll_full_driver_digital_pad");
     assert_eq!(table[&0x970].label, "present_path_frames");
     assert_eq!(table[&0x973].label, "present_path_timing");
+    assert_eq!(table[&0x974].label, "present_cd_reads_quiet");
+    assert_eq!(table[&0x976].label, "present_cache_flush");
     assert_eq!(table[&0x6B3].label, "tick_loss_t0_sysclk_14_instr");
     assert_eq!(table[&0x797].label, "dma_matrix_state_cd_2x_2340_sw");
     assert_eq!(table[&0x862].label, "list_abort_1");

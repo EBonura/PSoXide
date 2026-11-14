@@ -42,7 +42,7 @@ PGO_ARGS ?=
 PGO_VARIANTS ?= --variant off --variant default --variant hot=500 --variant hot=500+profi
 GATE ?=
 
-.PHONY: example disc hello-tri hello-tri-disc run-tri examples pgo-collect pgo-choose hello-xa-disc hello-xa-gate hello-xa-resume-disc hello-xa-resume-gate hello-cdstream-disc hello-cdstream-gate hello-cddrain-disc hello-cddrain-gate hello-gteirq-disc hello-gteirq-gate hello-cdpause-disc hello-cdpause-gate hello-present-queue-disc hello-present-queue-gate hello-wide-gate
+.PHONY: example disc hello-tri hello-tri-disc run-tri examples pgo-collect pgo-choose hello-xa-disc hello-xa-gate hello-xa-resume-disc hello-xa-resume-gate hello-cdstream-disc hello-cdstream-gate hello-cddrain-disc hello-cddrain-gate hello-gteirq-disc hello-gteirq-gate hello-cdpause-disc hello-cdpause-gate hello-present-queue-disc hello-present-queue-gate hello-present-cd-disc hello-present-cd-gate hello-wide-gate
 examples:
 	@set -e; for example in hello-tri hello-input hello-ot hello-gte hello-tex hello-memcard hello-spstack hello-gteirq hello-present hello-present-queue hello-asmprobe; do $(MAKE) -f tools/sdk-examples.mk disc EXAMPLE=$$example; done
 
@@ -147,6 +147,15 @@ hello-present-queue-disc:
 hello-present-queue-gate: hello-present-queue-disc
 	@test -n "$(FRONTEND)" || (echo "Set FRONTEND to the PSoXide-emulator executable"; exit 1)
 	sh tools/present_gate.sh "$(FRONTEND)" "$(BUILD)/$(TARGET)/release/hello-present-queue.cue"
+# hello-present-cd presents chain and drawn frames while the drive delivers sectors (polled and
+# interrupt-driven) and across instruction-cache flushes, against the same reads with presenting off.
+hello-present-cd-disc:
+	$(MAKE) example EXAMPLE=hello-present-cd
+	cargo run --locked --release -p mkisopsx -- --diag --exe "$(BUILD)/$(TARGET)/release/hello-present-cd.exe" \
+		--out "$(BUILD)/$(TARGET)/release/hello-present-cd.bin" --volume PSOXIDESDK --cdtest-sectors 960
+hello-present-cd-gate: hello-present-cd-disc
+	@test -n "$(FRONTEND)" || (echo "Set FRONTEND to the PSoXide-emulator executable"; exit 1)
+	sh tools/present_cd_gate.sh "$(FRONTEND)" "$(BUILD)/$(TARGET)/release/hello-present-cd.cue"
 hello-cdpause-gate: hello-cdpause-disc
 	@test -n "$(FRONTEND)" || (echo "Set FRONTEND to the PSoXide-emulator executable"; exit 1)
 	sh tools/cdpause_gate.sh "$(FRONTEND)" "$(BUILD)/$(TARGET)/release/hello-cdpause.cue"

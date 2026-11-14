@@ -75,6 +75,7 @@ Build and run them via the top-level `Makefile` (see the
 | `hello-diag` | The console stop-panel (`psx-rt` feature `console-diag`) shown on purpose: a stall, a fault, a panic, a failed CD read, an oversized GPU list node or a jump to nowhere (`wild`), chosen by `HELLO_DIAG_MODE`. See [CONSOLE-STOP-PANEL](docs/CONSOLE-STOP-PANEL.md). |
 | `hello-fault` | Panics on purpose (an out-of-range index) so `tools/abort_gate.sh` can prove a `panic=immediate-abort` guest records the `break` in `__psx_rt_fault_*` and that `psoxide-size faults` names `main`; the shared panic policy lives in `tools/psoxide-size`. |
 | `hello-present-queue` | The one present path (`psx_rt::present`, [PRESENT](docs/PRESENT.md)) at 60, 30 and 20 fps and under a varying load, frames of one chain and of two, each frame's kick and flip checked edge by edge from a VBlank hook (`make hello-present-queue-gate`). |
+| `hello-present-cd` | The one present path while the drive delivers sectors (polled reads and a `psx-cdstream` stream) and across instruction-cache flushes, against the same reads with presenting off (`make hello-present-cd-gate`). |
 | `hello-fmv` | FMV console test: streams a 2x STR with XA audio, decodes it with `psx-fmv`, and shows sector counts (LOST/BAD) over the video. |
 | `hello-memcard` | Non-destructive memory-card diagnostic: reads and hashes all 1024 frames, then (L1+R1+Cross) writes and verifies one test save. |
 | `hello-memprobe` | Checks psx-rt's `memcpy`/`memset`/`memcmp` against reference loops for every size and alignment; prints `MEMPROBE PASS` or `FAIL`. |

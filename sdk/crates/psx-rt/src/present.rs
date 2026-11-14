@@ -76,6 +76,17 @@
 //!   kicked by the next edge whose condition holds, and every wait here kicks
 //!   from the thread on each pass, so masked interrupts do not strand it.
 //!
+//! Other interrupts. Besides these words the kick reads channel 2's CHCR and
+//! read-modify-writes DPCR, and the thread's kick saves and restores SR. A CD
+//! interrupt (psx-cdstream's handler, run by the dispatcher) and the end of a
+//! channel 3 transfer touch none of them: channel 3 has its own CHCR, nothing
+//! but `psx_io::dma::enable_channel` (interrupts masked) and the boot code
+//! writes DPCR, DICR is written only at boot, and SR is written only by masked
+//! sections that put it back as they found it. Every handler runs with
+//! interrupts off, so none runs inside a kick. `kick_shares_nothing_with_cd` (tests)
+//! checks the first three against the sources; `hello-present-cd` runs the
+//! present path under polled and interrupt-driven reads and across cache flushes.
+//!
 //! `model` (tests) runs this module's thread-side code against a transport that
 //! injects a VBlank, a walk's end or a draw's end before any of its shared-word
 //! accesses, over every boundary, and checks these five statements.

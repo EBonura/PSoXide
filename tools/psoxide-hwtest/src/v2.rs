@@ -638,6 +638,21 @@ fn build() -> BTreeMap<u32, V2Entry> {
         "present_path_timing",
         ["late_frames", "worst_submit_to_flip", "draw_done_fallbacks"],
     );
+    b.put(
+        0x974,
+        "present_cd_reads_quiet",
+        ["sectors", "errors_and_retries", "unused"],
+    );
+    b.put(
+        0x975,
+        "present_cd_reads_shown",
+        ["sectors", "errors_and_retries", "tears_recoveries_lost"],
+    );
+    b.put(
+        0x976,
+        "present_cache_flush",
+        ["frames_flipped", "parts_kicked", "tears_recoveries_faults"],
+    );
     for (case, tag) in ["mixed_waits", "mixed_early", "single_waits", "single_early"]
         .iter()
         .enumerate()

@@ -607,3 +607,31 @@ fn cancel_flip_takes_the_word_whole() {
     assert_eq!(m.take_flip(), display_word(0));
     assert_eq!(m.flip, 0);
 }
+
+#[test]
+fn kick_shares_nothing_with_cd() {
+    // The kick reads channel 2's CHCR and read-modify-writes DPCR. The CD side
+    // (psx-cdstream's handler and engine, psx-io's reader) must not write DPCR,
+    // DICR or SR, and psx-io's one DPCR write must be masked.
+    let cd_sources = [
+        include_str!("../../psx-cdstream/src/console.rs"),
+        include_str!("../../psx-cdstream/src/engine.rs"),
+        include_str!("../../psx-cdstream/src/hw.rs"),
+        include_str!("../../psx-cdstream/src/drain.rs"),
+        include_str!("../../psx-io/src/cd/reader.rs"),
+    ];
+    for source in cd_sources {
+        for word in ["DPCR", "DICR", "mtc0"] {
+            assert!(!source.contains(word), "CD code names {word}");
+        }
+    }
+    let dma = include_str!("../../psx-io/src/dma.rs");
+    assert_eq!(
+        dma.matches("write_u32(reg::DPCR").count(),
+        1,
+        "one DPCR write in psx-io"
+    );
+    let from = dma.find("pub fn enable_channel").expect("enable_channel");
+    let body = &dma[from..from + dma[from..].find("\n}\n").expect("body ends")];
+    assert!(body.contains("without_interrupts") && body.contains("write_u32(reg::DPCR"));
+}

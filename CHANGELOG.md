@@ -56,6 +56,8 @@ every program works on every Sony BIOS and on OpenBIOS).
   Deprecated, listed in `sdk/profile.toml`: `interrupts::queue_display_control_at_vblank`,
   `is_display_control_queued`, `take_queued_display_control`, `set_min_flip_vblanks`, `min_flip_vblanks`,
   `present::publish_raw` (and `present::start`). hardware-tests v2.17: step `PRESENT ONE PATH`.
+  `make hello-present-cd-gate` presents chain and drawn frames under polled and interrupt-driven CD reads and
+  across instruction-cache flushes; hardware-tests v2.18: step `PRESENT UNDER CD AND FLUSH`.
 
 - `psx-math`: `clip_lanes::clip_lanes8_plane` runs its hand-scheduled kernel on every console build, and the `asm-kernels`
   feature of `psx-math` is gone. The feature chose between two implementations of one job per game. The kernel is

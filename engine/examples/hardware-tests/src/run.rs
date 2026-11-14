@@ -694,6 +694,7 @@ records_step!(records_cd_stop, cd_stop::run);
 records_step!(records_sio_config_irq, config_irq::run);
 records_step!(records_sio_digital_first, digital_first::run);
 records_step!(records_present_path, present_path::run);
+records_step!(records_present_cd, present_path::run_cd);
 
 fn run_tests(run: &mut Run, area: Area) {
     let total = TESTS.iter().filter(|spec| test_area(spec) == area).count();
@@ -856,6 +857,7 @@ const STEPS: &[Step] = &[
     step(Area::Cd, "CD-DA HANDOFF", step_stream_handoff),
     step(Area::Cd, "CD PAUSE SECOND RESPONSE", step_cd_pause),
     step(Area::Cd, "CD STOP AT ACKNOWLEDGE", records_cd_stop),
+    step(Area::Cd, "PRESENT UNDER CD AND FLUSH", records_present_cd),
     // 7
     step(Area::Sio, "SIO CASES", tests_sio),
     step(Area::Sio, "SIO TIMING", records_sio),

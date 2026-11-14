@@ -44,7 +44,7 @@ const READS: u32 = 40;
 const FILE_LBA: u32 = crate::CDTEST_LBA;
 const FILE_SECTORS: u32 = crate::CDTEST_SECTORS;
 
-static mut READER: SectorReader = SectorReader::with_cd(unsafe { psx_io::periph::Cd::steal() });
+pub(crate) static mut READER: SectorReader = SectorReader::with_cd(unsafe { psx_io::periph::Cd::steal() });
 static mut SECTOR: [u32; SECTOR_WORDS] = [0; SECTOR_WORDS];
 
 /// One read of `count` sectors from file sector `first`, then `stop`. `true` when every sector arrived and
