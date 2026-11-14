@@ -267,19 +267,13 @@ __psx_rt_exception_handler:
     nop
 
     # The kick. A part that waits (for the flip above, or for channel 2) is
-    # counted as a skipped edge. With the slot empty this costs one load.
+    # counted as a skipped edge, out of line (`7:` below the stray path). With
+    # the slot empty this costs one load and falls through.
 8:
     PSX_RT_PRESENT_KICK $26, $27, __psx_rt_present_kick_count, 7f
-    b     2f
-    nop
-7:
-    lui   $26, %hi(__psx_rt_present_skip_count)
-    lw    $27, %lo(__psx_rt_present_skip_count)($26)
-    nop
-    addiu $27, $27, 1
-    sw    $27, %lo(__psx_rt_present_skip_count)($26)
 
 2:
+.Lpsx_vblank_ack:
     lui   $26, {io_hi}
     addiu $27, $zero, {ack_vblank}
     sw    $27, {i_stat}($26)
@@ -500,6 +494,15 @@ __psx_rt_exception_handler:
     addiu $27, $27, 1
     b     1b
     sw    $27, %lo(__psx_rt_stray_irq_count)($26)
+    # A published part waited at this edge: count it, then the VBlank path
+    # goes on as if it had kicked.
+7:
+    lui   $26, %hi(__psx_rt_present_skip_count)
+    lw    $27, %lo(__psx_rt_present_skip_count)($26)
+    nop
+    addiu $27, $27, 1
+    b     .Lpsx_vblank_ack
+    sw    $27, %lo(__psx_rt_present_skip_count)($26)
 
     # The thread's kick (`crate::present`): the handler's, with $8 and $9, as a
     # leaf routine that masks CPU interrupts around it (IEc cleared as
