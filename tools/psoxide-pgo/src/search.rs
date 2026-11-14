@@ -289,6 +289,8 @@ pub struct Window {
     pub unbound: u64,
     pub uncached: u64,
     pub ticks: u64,
+    /// Instructions per section of the link.
+    pub executed: HashMap<u32, u64>,
 }
 
 /// Fetch traces bound to one link and reduced to segments.
@@ -422,6 +424,7 @@ impl Traces {
             unbound: 0,
             uncached: 0,
             ticks: 0,
+            executed: HashMap::new(),
         };
         let mut executed: HashMap<u32, u64> = HashMap::new();
         let mut reducer = Reducer {
@@ -497,9 +500,10 @@ impl Traces {
         })?;
         reducer.end_segment();
         window.ids = std::mem::take(&mut reducer.ids);
-        for (unit, count) in executed {
+        for (&unit, &count) in &executed {
             *self.executed.entry(unit).or_default() += count;
         }
+        window.executed = executed;
         self.windows.push(window);
         Ok(())
     }
@@ -612,17 +616,21 @@ impl Traces {
 
     /// The stall cycles of one window in the sets marked in `sets` alone.
     /// A direct-mapped set sees only its own lines, so this is exactly that
-    /// part of [`Self::replay`]; `live` marks the chunks with a line in one
-    /// of those sets at `bases`, and the others are skipped whole.
-    fn replay_sets(&self, window: usize, bases: &[u32], sets: &[bool; SETS], live: &[bool]) -> u64 {
+    /// part of [`Self::replay`] when `positions` (in order) are every place in
+    /// the window where a chunk with a line in those sets runs.
+    fn replay_sets(
+        &self,
+        window: usize,
+        bases: &[u32],
+        sets: &[bool; SETS],
+        positions: impl Iterator<Item = usize>,
+    ) -> u64 {
+        let ids = &self.windows[window].ids;
         let mut tag = [u32::MAX; SETS];
         let mut valid = [0u8; SETS];
         let mut stalls = 0u64;
-        for &id in &self.windows[window].ids {
-            let segment = self.segments[id as usize];
-            if !live[segment.chunk as usize] {
-                continue;
-            }
+        for at in positions {
+            let segment = self.segments[ids[at] as usize];
             let base = bases[segment.chunk as usize];
             let first = segment.first as usize;
             for &(from, to) in &self.intervals[first..first + segment.len as usize] {
@@ -783,15 +791,29 @@ pub struct Found {
 struct Delta<'a> {
     traces: &'a Traces,
     extent: Vec<(u32, u32)>,
+    /// Per window and chunk, the positions of its segments in the window.
+    occurs: Vec<Vec<Vec<u32>>>,
     bases: Vec<u32>,
     stalls: Vec<u64>,
 }
 
 impl<'a> Delta<'a> {
     fn new(traces: &'a Traces, address: &[u32], stalls: Vec<u64>) -> Self {
+        let occurs = traces
+            .windows
+            .iter()
+            .map(|window| {
+                let mut occurs = vec![Vec::new(); traces.chunks.len()];
+                for (at, &id) in window.ids.iter().enumerate() {
+                    occurs[traces.segments[id as usize].chunk as usize].push(at as u32);
+                }
+                occurs
+            })
+            .collect();
         Self {
             traces,
             extent: traces.extents(),
+            occurs,
             bases: traces.bases(address),
             stalls,
         }
@@ -845,11 +867,35 @@ impl<'a> Delta<'a> {
             .collect();
         (0..self.traces.windows.len())
             .map(|w| {
-                let before = self.traces.replay_sets(w, &self.bases, &sets, &live_old);
-                let after = self.traces.replay_sets(w, &bases, &sets, &live_new);
+                let before =
+                    self.traces
+                        .replay_sets(w, &self.bases, &sets, self.positions(w, &live_old));
+                let after = self
+                    .traces
+                    .replay_sets(w, &bases, &sets, self.positions(w, &live_new));
                 self.stalls[w] + after - before
             })
             .collect()
+    }
+
+    /// Every position in window `w` where a `live` chunk runs, in order.
+    fn positions(&self, w: usize, live: &[bool]) -> impl Iterator<Item = usize> {
+        let length = self.traces.windows[w].ids.len();
+        let mut marks = vec![0u64; length.div_ceil(64)];
+        for (c, _) in live.iter().enumerate().filter(|(_, &live)| live) {
+            for &at in &self.occurs[w][c] {
+                marks[at as usize >> 6] |= 1 << (at & 63);
+            }
+        }
+        marks.into_iter().enumerate().flat_map(|(word, mut bits)| {
+            std::iter::from_fn(move || {
+                (bits != 0).then(|| {
+                    let bit = bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    word * 64 + bit
+                })
+            })
+        })
     }
 
     fn accept(&mut self, address: &[u32], stalls: Vec<u64>) {
@@ -1105,7 +1151,7 @@ pub const USAGE: &str = "\
                           (--trace NAME MAP EXE TRACE)... [--weight NAME=W]... [--seed N]
                           [--rounds N] [--batch N] [--threads N] [--start greedy|link]
        psoxide-pgo icache <link.map> <image.exe> <linker-script> (--trace NAME MAP EXE TRACE)...
-                          [--order FILE]... [--at MAP EXE]... [--layout FILE]...";
+                          [--order FILE]... [--at MAP EXE]... [--layout FILE]... [--functions]";
 
 /// One `--trace`: a window's name, the build it was recorded on and the log.
 struct TraceArg {
@@ -1124,6 +1170,7 @@ struct Args {
     layouts: Vec<String>,
     settings: Settings,
     start: String,
+    functions: bool,
 }
 
 fn parse(args: &[String]) -> Result<Args> {
@@ -1142,6 +1189,7 @@ fn parse(args: &[String]) -> Result<Args> {
             progress: true,
         },
         start: "greedy".to_string(),
+        functions: false,
     };
     let mut at = 0;
     let take = |at: &mut usize, count: usize, flag: &str| -> Result<Vec<String>> {
@@ -1190,6 +1238,7 @@ fn parse(args: &[String]) -> Result<Args> {
                 parsed.settings.threads = number(&take(&mut at, 1, flag)?[0], flag)?.max(1);
             }
             "--start" => parsed.start = take(&mut at, 1, flag)?.remove(0),
+            "--functions" => parsed.functions = true,
             _ if flag.starts_with("--") => return Err(format!("unknown option {flag}").into()),
             _ => parsed.positional.push(args[at].clone()),
         }
@@ -1266,6 +1315,30 @@ fn icache(args: &Args) -> Result<()> {
     let patterns = layout::fixed_patterns(&std::fs::read_to_string(script)?);
     let link = load_link(map, exe, &patterns)?;
     let traces = load_traces(args, &link, &patterns)?;
+    if args.functions {
+        // Instructions per function and window, tab-separated, hottest first.
+        let mut rows: Vec<(u64, usize)> = (0..link.sections.len())
+            .map(|k| (traces.executed.get(&(k as u32)).copied().unwrap_or(0), k))
+            .filter(|&(count, _)| count > 0)
+            .collect();
+        rows.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        for (_, k) in rows {
+            let counts: Vec<String> = traces
+                .windows
+                .iter()
+                .map(|window| {
+                    window
+                        .executed
+                        .get(&(k as u32))
+                        .copied()
+                        .unwrap_or(0)
+                        .to_string()
+                })
+                .collect();
+            let name = link.keys[k].as_deref().unwrap_or(&link.sections[k].name);
+            println!("function\t{}\t{name}", counts.join("\t"));
+        }
+    }
     let linked: Vec<u32> = link.sections.iter().map(|section| section.start).collect();
     println!("as linked: {}", stalls_line(&traces, &linked));
     for order in &args.orders {
@@ -1337,18 +1410,25 @@ fn run_search(args: &Args) -> Result<()> {
     let pool = Pool::new(&link, &traces);
     let start = plan_of(&link, &traces, &address);
     println!(
-        "start ({}): {}; {} traced functions to place, {} cold ones to fill gaps with",
+        "start ({}): {}; {} traced functions to place ({} B), {} cold ones to fill gaps with \
+         ({} B), {} B of them used",
         args.start,
         stalls_line(&traces, &address),
         start.hot.len(),
-        pool.0.len()
+        start
+            .hot
+            .iter()
+            .map(|&k| link.sections[k].size)
+            .sum::<u32>(),
+        pool.0.len(),
+        pool.0.iter().map(|&k| link.sections[k].size).sum::<u32>(),
+        start.listing(&link, &pool).1
     );
     let began = std::time::Instant::now();
     let found = search(&link, &traces, &pool, start, &args.settings);
     let settings = &args.settings;
     let summary = format!(
-        "seed {} rounds {} batch {}: {} window replays, {} moves kept, objective {:.4} -> {:.4} \
-         in {:.0} s",
+        "seed {} rounds {} batch {}: {} window replays, {} moves kept, objective {:.4} -> {:.4}",
         settings.seed,
         settings.rounds,
         settings.batch,
@@ -1356,9 +1436,12 @@ fn run_search(args: &Args) -> Result<()> {
         found.accepted,
         found.start,
         found.end,
+    );
+    // The time goes to the terminal only: the file must be the same on every run.
+    println!(
+        "search: {summary} in {:.0} s",
         began.elapsed().as_secs_f64()
     );
-    println!("search: {summary}");
     for (w, window) in traces.windows.iter().enumerate() {
         println!(
             "  {}: {} -> {} stall cycles",
