@@ -8,8 +8,10 @@
 //!
 //! With `host-tty` each byte is one store to the Expansion 2 debug console
 //! ([`psx_hw::memory::expansion2::DEBUG_CONSOLE`]). That is where PCSX-Redux,
-//! OpenBIOS's `putchar` and our emulator print to the host terminal, and a
-//! retail console ignores the store. It never calls into the BIOS and reads no
+//! OpenBIOS's `putchar` and our emulator print to the host terminal. A retail console does not ignore the
+//! store: it raises a data bus error (seen 2026-11-14 on an SCPH-9002 with Expansion 2 at the 128 bytes the
+//! entry state gives it, the debug console being at offset 0x80). A build that runs on a console must
+//! not enable the feature, and `console-diag` does not. It never calls into the BIOS and reads no
 //! kernel state, so a diagnostic build behaves the same under every BIOS.
 
 /// Write a string to TTY.

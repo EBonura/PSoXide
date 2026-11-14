@@ -101,7 +101,9 @@ pub mod expansion2 {
     pub const POST: u32 = 0x1f80_2041;
     /// Debug console character-out: a byte stored here is printed on the host
     /// by PCSX-Redux, OpenBIOS's own `putchar` and PSoXide's emulator. A
-    /// retail console has nothing mapped here, so the store is ignored.
+    /// retail console raises a data bus error on a store here when Expansion 2 is configured at 128 bytes
+    /// (the entry state does; seen 2026-11-14 on an SCPH-9002), so no program that runs on a console may
+    /// store to it.
     pub const DEBUG_CONSOLE: u32 = 0x1f80_2080;
 
     /// PSoXide's emulator-only telemetry port: four word registers in the

@@ -216,6 +216,11 @@ every program works on every Sony BIOS and on OpenBIOS).
   GPUSTAT bit 24 is down but DMA 2 is idle and bits 26 and 28 were up on the previous edge as well
   (`psx_rt::interrupts::draw_done_fallback_count` counts it; 0 on a PS1): a lost request costs one VBlank instead
   of a timeout. Silicon ignores the repeats once bit 24 is set.
+- `console-diag` no longer turns `host-tty` on. A test hardware-tests disc built with it stopped on the fault panel at boot on a
+  console, a data bus error on the first byte stored to the debug console: Expansion 2 is 128 bytes in the entry state and the debug
+  console is at offset 0x80. The emulator does not model the error, so every emulator run had passed. The stop panel draws on screen and
+  needs no tty. `tty.rs` and `psx_hw::memory::expansion2::DEBUG_CONSOLE` said a retail console ignores the store; they now say what it does.
+  The earlier entry (below) names `console-diag` as turning it on; it no longer does.
 - `psx_rt::tty` is off unless the `host-tty` feature is on (`console-diag` turns it on): `print`, `println` and
   `print_hex_u32` compile to nothing without it, and with it each byte is one store to the Expansion 2 debug
   console (`psx_hw::memory::expansion2::DEBUG_CONSOLE`), where PCSX-Redux, OpenBIOS and our emulator print it.
