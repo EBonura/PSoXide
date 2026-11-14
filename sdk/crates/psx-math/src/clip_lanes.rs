@@ -7,9 +7,9 @@
 //! Every plane they use is linear in two of those lanes, and every crossing is
 //! interpolated the same way, so the whole pass is one function of the plane's
 //! four numbers. [`clip_lanes8_plane_reference`] states it with the generic
-//! [`attributed_clip`](crate::attributed_clip) kernel; with the `asm-kernels`
-//! feature on the console, [`clip_lanes8_plane`] runs a hand-scheduled kernel
-//! that produces the same bytes.
+//! [`attributed_clip`](crate::attributed_clip) kernel; on the console
+//! [`clip_lanes8_plane`] runs a hand-scheduled kernel that produces the same bytes (the
+//! `hello-asmprobe` example checks it on 120,000 inputs).
 //!
 //! # Definition
 //!
@@ -38,7 +38,8 @@ pub type Lanes8 = [i32; 8];
 #[repr(C)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct LanePlane {
-    /// Byte offset of the lane multiplied by `primary`: 0 for x, 4 for y.
+    /// Byte offset of the lane multiplied by `primary`: 0 for x, 4 for y. Nothing else is
+    /// accepted (the kernel copies a vertex with that assumption).
     pub primary_offset: u32,
     /// Multiplier of the lane at `primary_offset`.
     pub primary: i32,
@@ -137,9 +138,9 @@ pub unsafe fn clip_lanes8_plane_reference(
     .unwrap_or(capacity)
 }
 
-/// [`clip_lanes8_plane_reference`], or the hand-scheduled kernel on the
-/// console when the `asm-kernels` feature is on. Same safety contract; the
-/// two produce identical bytes (`hello-asmprobe` checks it).
+/// The one clip: the hand-scheduled kernel on the console, the portable definition
+/// ([`clip_lanes8_plane_reference`]) on the host. Same safety contract; the two produce
+/// identical bytes (`hello-asmprobe` checks it).
 ///
 /// # Safety
 ///
@@ -151,12 +152,12 @@ pub unsafe fn clip_lanes8_plane(
     dst: *mut Lanes8,
     plane: &LanePlane,
 ) -> usize {
-    #[cfg(all(target_arch = "mips", feature = "asm-kernels"))]
+    #[cfg(target_arch = "mips")]
     {
         // SAFETY: forwarded contract.
         unsafe { crate::asm_kernels::psx_math_clip_lanes8_plane(src, count, dst, plane) }
     }
-    #[cfg(not(all(target_arch = "mips", feature = "asm-kernels")))]
+    #[cfg(not(target_arch = "mips"))]
     {
         // SAFETY: forwarded contract.
         unsafe { clip_lanes8_plane_reference(src, count, dst, plane) }

@@ -149,5 +149,5 @@ words in hex, because decimal formatting of 64 bits would link `__udivdi3`.
 - `wide_div`: exact `Wide` / `WideU` division, 128-bit product and ratio compare.
 - `fmt`: integer-to-decimal ASCII without `core::fmt`.
 - `color`, `clip_lanes`, `attributed_clip`: color helpers and clipping kernels.
-- Feature `asm-kernels`: hand-scheduled R3000 versions of `clip_lanes8_plane`,
-  bit-identical to the portable definition.
+- `clip_lanes8_plane` runs a hand-scheduled R3000 kernel on the console, bit-identical to the
+  portable definition (`clip_lanes8_plane_reference`, what the host runs).

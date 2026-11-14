@@ -76,9 +76,11 @@ pub fn print_dec(label: &str, v: u32) {
     tty::println("");
 }
 
-pub fn tty_label_clip(name: &str) {
+pub fn tty_label_clip(mix: &str, which: &str) {
     tty::print("BENCH clip ");
-    tty::print(name);
+    tty::print(mix);
+    tty::print(" ");
+    tty::print(which);
     tty::print(" cyc/10call=");
 }
 

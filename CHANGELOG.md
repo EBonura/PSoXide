@@ -26,6 +26,20 @@ No program depends on a BIOS any more, not a call into one and not the state one
 every program works on every Sony BIOS and on OpenBIOS).
 
 
+- `psx-math`: `clip_lanes::clip_lanes8_plane` runs its hand-scheduled kernel on every console build, and the `asm-kernels`
+  feature of `psx-math` is gone. The feature chose between two implementations of one job per game. The kernel is
+  bit-identical to the portable definition: `hello-asmprobe` runs both on 120,000 deterministic inputs (triangles to
+  8-gons, destination capacity 0 to 8, planes through vertices, repeated vertices, every lane at the `i32` limits and next to
+  the multiples of 4096) and the FNV hash over every output byte is the same for both, and the harness fails when the
+  kernel is changed in three different places. Cycles per call on the emulator, portable definition then kernel:
+  triangle inside 742 to 493, triangle outside 535 to 320, triangle with one vertex out 1,791 to 961, with two out
+  1,726 to 907, quad with one out 1,913 to 1,066, quad with alternate vertices out 2,967 to 1,537, seven vertices with one
+  out 2,279 to 1,377 (the kernel is 33% to 48% fewer cycles on every mix). The kernel is 992 bytes of text and 24 bytes of
+  stack; the portable definition compiled stand-alone is 1,628 bytes and 120. Nothing outside `psx-goldsrc` calls the
+  function, and a program that does not call it links none of it (the kernel has its own section). A program that
+  enabled the feature removes it from its `Cargo.toml` and the `psx-math/asm-kernels` entry from its `psx-gate.toml`;
+  its frames do not change. The portable definition stays as `clip_lanes8_plane_reference`, what the host and the probe run.
+
 
 - `Controllers::digital()` for a game that never uses sticks: `Controllers<false>`, the type's const parameter (`Controllers`
   is `Controllers<true>`, so every call site that exists is unchanged). The same `poll`, with the handshake, its retries and the

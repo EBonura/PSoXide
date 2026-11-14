@@ -100,12 +100,6 @@ item = "psx-gpu/asm-kernels"
 remove = "unscheduled"
 
 [[exception]]
-program = "hello-asmprobe"
-kind = "feature"
-item = "psx-math/asm-kernels"
-remove = "unscheduled"
-
-[[exception]]
 program = "hello-memcard"
 kind = "feature"
 item = "psx-mc/compress"

@@ -79,7 +79,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
-#[cfg(all(target_arch = "mips", feature = "asm-kernels"))]
+#[cfg(target_arch = "mips")]
 mod asm_kernels;
 pub mod attributed_clip;
 pub mod clip_lanes;
