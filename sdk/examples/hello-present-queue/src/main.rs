@@ -406,6 +406,7 @@ fn main() {
 
     // The result screen: drawn through the port, presented with `present_drawn`.
     loop {
+        presenter.begin_frame(&fb);
         fb.clear(&mut gpu, (10, 12, 20));
         font.draw_text(8, 6, "ONE PRESENT PATH", WHITE);
         font.draw_text(8, 30, banner, tint);

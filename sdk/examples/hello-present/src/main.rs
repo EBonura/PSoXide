@@ -12,7 +12,7 @@
 //!
 //! 1. Drawn: `FRAMES` frames, each cleared and drawn through the port and an
 //!    ordering table kicked asynchronously (`FrameStorage::draw_async`), then
-//!    `present_drawn`. The next frame's clear runs the guard, after which the
+//!    `present_drawn`. The next frame's `begin_frame` waits for the flip, after which the
 //!    flip has landed and bit 24 is still up: a flip seen without it happened
 //!    before the frame's GP0(1Fh) ran.
 //! 2. Mixed: every fourth frame is a chain handed to `Presenter::submit`
@@ -136,6 +136,7 @@ fn main() {
         // The clear is the frame's first direct access: the guard waits for
         // the last frame's flip, which needs that frame's GP0(1Fh) to have run.
         let gpu = Gpu::from_dma_mut(&mut dma);
+        presenter.begin_frame(&fb);
         fb.clear(gpu, (8, 8, 24));
         if f > 0 && !is_draw_done() {
             early += 1;
@@ -201,6 +202,7 @@ fn main() {
 
     let font = FontAtlas::upload(&BASIC, FONT_TPAGE, FONT_CLUT);
     loop {
+        presenter.begin_frame(&fb);
         fb.clear(gpu, (10, 12, 20));
         font.draw_text(8, 6, "FRAMES DRAWN THROUGH THE PORT", WHITE);
         font.draw_text(8, 30, banner, tint);

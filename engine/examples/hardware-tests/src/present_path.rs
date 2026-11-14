@@ -214,7 +214,8 @@ pub(crate) fn run(records: &mut Records, next: &mut usize) {
         // SAFETY: the hook reads this entry only once kicks pass it.
         unsafe { write_volatile(addr_of_mut!(FIRST_PART[f]), parts) };
         if f % 5 == 4 {
-            // Drawn through the port: the clear runs the guard, which waits for the last flip.
+            // Drawn through the port: `begin_frame` waits for the last flip.
+            presenter.begin_frame(&buffers);
             probe_gpu!(gpu);
             gpu.draw(&FillRect::new((0, y), (320, 240), (24, 8, 8)));
             gpu.draw(&FillRect::new((MARKER_X, y), (16, 16), marker_colour(frame)));
@@ -366,6 +367,7 @@ fn drawn(presenter: &mut Presenter, buffers: &mut DoubleBuffer, frame: &mut u32,
     }
     // SAFETY: the hook reads this entry only once kicks pass it.
     unsafe { write_volatile(addr_of_mut!(FIRST_PART[*frame as usize]), parts) };
+    presenter.begin_frame(buffers);
     let (_, y) = buffers.draw_origin();
     probe_gpu!(gpu);
     gpu.draw(&FillRect::new((0, y), (320, 240), (8, 24, 8)));

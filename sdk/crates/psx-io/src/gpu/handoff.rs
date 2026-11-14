@@ -27,13 +27,11 @@ use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
 pub const RECORDING_NODE_WORDS: u32 = 16;
 
 /// The one command recording. The buffer pointers are meaningful only while
-/// `open` is set; closing clears `open` and `active` before anything else,
+/// `open` is set; closing clears `open` and `ACTIVE` before anything else,
 /// so no path reaches a buffer whose recording has ended.
 struct Recording {
     /// Between a start and the close of that recording.
     open: bool,
-    /// Open and not paused: what [`is_recording`] reports.
-    active: bool,
     /// Counts starts, so a guard or pause knows whether the open recording
     /// is still the one it was made for.
     generation: u32,
@@ -52,7 +50,6 @@ struct Recording {
 #[cfg_attr(target_arch = "mips", link_section = ".data")]
 static mut RECORDING: Recording = Recording {
     open: false,
-    active: false,
     generation: 0,
     overflowed: false,
     head: core::ptr::null_mut(),
@@ -71,28 +68,29 @@ static mut GUARD_ARMED: bool = false;
 #[cfg_attr(target_arch = "mips", link_section = ".data")]
 static mut GUARD: Option<fn()> = None;
 
+#[cfg_attr(target_arch = "mips", link_section = ".data")]
+static mut ACTIVE: bool = false;
+#[cfg_attr(target_arch = "mips", link_section = ".data")]
+static mut PAUSED: bool = false;
+
+// The flags are read and written with plain accesses, not volatile ones: only
+// the foreground touches them (no handler does), and plain accesses let the
+// optimiser see that a program which never opens a recording nor arms the guard
+// only ever stores `false` into `SLOW`, and drop every test of it. Such a
+// program's port writes are then the plain stores they were before.
+
 #[inline(always)]
 pub(super) fn is_slow() -> bool {
-    // SAFETY: a volatile read of a `bool` static; the program is single
-    // threaded and the VBlank handler never touches it.
-    unsafe { read_volatile(addr_of!(SLOW)) }
+    // SAFETY: a plain read of a `bool` static; the program is single
+    // threaded and no interrupt handler touches it.
+    unsafe { *addr_of!(SLOW) }
 }
 
-fn refresh_slow() {
-    // SAFETY: volatile reads and a write of `bool` statics owned by this
-    // module; the program is single threaded and no interrupt handler
-    // touches them.
-    unsafe {
-        let slow =
-            read_volatile(addr_of!(RECORDING.active)) || read_volatile(addr_of!(GUARD_ARMED));
-        write_volatile(addr_of_mut!(SLOW), slow);
-    }
-}
-
-fn set_recording_active(active: bool) {
-    // SAFETY: a volatile write of a `bool` static owned by this module.
-    unsafe { write_volatile(addr_of_mut!(RECORDING.active), active) };
-    refresh_slow();
+/// Set `SLOW` from the recording and the guard. Called only where one of
+/// them changes (opening or closing a recording, arming or running the guard).
+fn set_slow(slow: bool) {
+    // SAFETY: a plain write of a `bool` static owned by this module.
+    unsafe { *addr_of_mut!(SLOW) = slow };
 }
 
 /// The slow half of [`super::write_command`]: record the word, or run the
@@ -188,8 +186,8 @@ pub struct RecordingOverflow;
 #[inline(always)]
 #[must_use]
 pub fn is_recording() -> bool {
-    // SAFETY: a volatile read of a `bool` static owned by this module.
-    unsafe { read_volatile(addr_of!(RECORDING.active)) }
+    // SAFETY: plain reads of `bool` statics owned by this module.
+    unsafe { *addr_of!(ACTIVE) && !*addr_of!(PAUSED) }
 }
 
 /// Open the recording on `buffer` and return its generation.
@@ -214,7 +212,12 @@ unsafe fn open(buffer: *mut u32, words: usize) -> u32 {
         recording.end = buffer.add(words);
         recording.generation
     };
-    set_recording_active(true);
+    // SAFETY: plain writes of `bool` statics owned by this module.
+    unsafe {
+        *addr_of_mut!(ACTIVE) = true;
+        *addr_of_mut!(PAUSED) = false;
+    }
+    set_slow(true);
     generation
 }
 
@@ -236,7 +239,12 @@ fn close(generation: Option<u32>) -> Result<Option<CommandRecording>, RecordingO
     if !open || generation.is_some_and(|generation| !is_open(generation)) {
         return Ok(None);
     }
-    set_recording_active(false);
+    // SAFETY: plain accesses to statics owned by this module.
+    unsafe {
+        *addr_of_mut!(ACTIVE) = false;
+        *addr_of_mut!(PAUSED) = false;
+        set_slow(*addr_of!(GUARD_ARMED));
+    }
     // SAFETY: exclusive access to this module's static. The recording is
     // open (checked above), so `node` and `head` point into the buffer its
     // start's contract keeps live until it is closed, which is now; `next`
@@ -341,7 +349,8 @@ pub fn pause_recording() -> RecordingPause {
     if !is_recording() {
         return RecordingPause { resume: None };
     }
-    set_recording_active(false);
+    // SAFETY: a plain write of a `bool` static owned by this module.
+    unsafe { *addr_of_mut!(PAUSED) = true };
     // SAFETY: a volatile read of this module's static.
     let generation = unsafe { read_volatile(addr_of!(RECORDING.generation)) };
     RecordingPause {
@@ -356,7 +365,8 @@ impl Drop for RecordingPause {
         // buffer may already be gone.
         if let Some(generation) = self.resume {
             if is_open(generation) {
-                set_recording_active(true);
+                // SAFETY: a plain write of a `bool` static owned by this module.
+                unsafe { *addr_of_mut!(PAUSED) = false };
             }
         }
     }
@@ -461,17 +471,17 @@ pub fn set_direct_access_guard(guard: fn()) {
 /// Arm the guard: the GPU may be busy with work the CPU handed off, so the
 /// next direct access must wait for it first.
 pub fn arm_direct_access_guard() {
-    // SAFETY: a volatile write of a `bool` static owned by this module.
-    unsafe { write_volatile(addr_of_mut!(GUARD_ARMED), true) };
-    refresh_slow();
+    // SAFETY: a plain write of a `bool` static owned by this module.
+    unsafe { *addr_of_mut!(GUARD_ARMED) = true };
+    set_slow(true);
 }
 
 /// Run and disarm the guard if it is armed. Direct-access paths outside the
 /// port writes (GPU DMA setup) call it first.
 #[inline]
 pub fn run_direct_access_guard() {
-    // SAFETY: volatile accesses to this module's statics.
-    let armed = unsafe { read_volatile(addr_of!(GUARD_ARMED)) };
+    // SAFETY: a plain read of a `bool` static owned by this module.
+    let armed = unsafe { *addr_of!(GUARD_ARMED) };
     if armed {
         run_armed_guard();
     }
@@ -482,9 +492,11 @@ pub fn run_direct_access_guard() {
 #[cold]
 #[inline(never)]
 fn run_armed_guard() {
-    // SAFETY: volatile accesses to this module's statics.
-    unsafe { write_volatile(addr_of_mut!(GUARD_ARMED), false) };
-    refresh_slow();
+    // SAFETY: plain accesses to statics owned by this module.
+    unsafe {
+        *addr_of_mut!(GUARD_ARMED) = false;
+        set_slow(*addr_of!(ACTIVE));
+    }
     // SAFETY: as above.
     if let Some(guard) = unsafe { read_volatile(addr_of!(GUARD)) } {
         guard();

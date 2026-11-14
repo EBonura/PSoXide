@@ -77,6 +77,7 @@ fn measure(run: impl FnOnce() -> u32) -> Phase {
 fn queued(gpu: &mut Gpu, fb: &mut DoubleBuffer, presenter: &mut Presenter) -> u32 {
     let before = present::stats().recovery_count;
     for _ in 0..FLIPS {
+        presenter.begin_frame(fb);
         fb.clear(gpu, (8, 8, 24));
         presenter.present_drawn(fb);
     }

@@ -7,8 +7,11 @@
 //! closing GP0(1Fh) has run (GPUSTAT bit 24), and no sooner than the cap
 //! allows ([`set_cap`], 30 fps unless a program says otherwise). The CPU never
 //! spins on an edge: it waits only when it is a whole frame ahead, before a
-//! direct GPU access while a frame is still in flight (the guard), and before
-//! reusing memory a walk may still read ([`wait_arena_free`]).
+//! direct GPU access while a frame is still in flight (the guard after a chain
+//! frame, [`Presenter::begin_frame`] after a drawn one), and before reusing
+//! memory a walk may still read ([`wait_arena_free`]). Only a program that hands
+//! over chains or records tests a flag on its port writes; one that only draws
+//! through the port writes it as plain stores.
 //!
 //! # How a chain frame goes out
 //!
@@ -71,7 +74,8 @@
 //! - **The buffer on screen is never drawn into.** A part is kicked only with
 //!   the flip word 0, so the frame before it is already on screen and the part
 //!   draws into the other buffer. The thread's own drawing waits for the same
-//!   condition: the guard runs [`wait_idle`] before the first direct access.
+//!   condition: `begin_frame` (after a drawn frame) or the guard (after a chain
+//!   frame) runs [`wait_idle`] before the first direct access.
 //! - **The channel is never left with nobody to start it.** A waiting part is
 //!   kicked by the next edge whose condition holds, and every wait here kicks
 //!   from the thread on each pass, so masked interrupts do not strand it.
@@ -118,11 +122,6 @@ const PREAMBLE_WORDS: usize = 7;
 /// frame N + 2 is submitted, after its slot wait, by which time frame N's walk
 /// has ended (see [`wait_arena_free`]).
 static mut PREAMBLES: [[u32; PREAMBLE_WORDS]; 2] = [[0; PREAMBLE_WORDS]; 2];
-
-/// The draw area and offset of the side the next frame draws into, set when a
-/// frame is handed over and written by the guard ([`wait_idle`]) before the
-/// next direct access, after the frame's own commands; zero once written.
-static mut NEXT_TARGET: [u32; 3] = [0; 3];
 
 /// Thread-only counters (no handler touches them).
 static mut RECOVERY_COUNT: u32 = 0;
@@ -369,23 +368,13 @@ pub fn wait_arena_free() {
 
 /// Wait until nothing is in flight: the slot empty, the last flip landed and
 /// no walk running. The direct-access guard runs this before the first direct
-/// GPU access after a frame was handed over, so a direct draw never lands in
-/// the buffer still on screen and never collides with a walk. Bounded like
+/// GPU access after a chain was handed over, so a direct access never collides
+/// with a walk. Bounded like
 /// [`wait_slot_empty`]; a walk it gives up on is stopped by hand.
 #[doc(alias = "DrawSync")]
 #[inline(never)]
 pub fn wait_idle() {
     wait_idle_on(&mut Hardware);
-    // The frame handed over last moved the draw side: point the GPU at it,
-    // after that frame's commands (the port's FIFO order), before the access
-    // that ran the guard.
-    // SAFETY: a thread-only static, read and cleared through a raw pointer.
-    let target = unsafe { addr_of_mut!(NEXT_TARGET).replace([0; 3]) };
-    if target[0] != 0 {
-        for word in target {
-            psx_io::gpu::write_command_unguarded(word);
-        }
-    }
     compiler_barrier();
 }
 
@@ -502,9 +491,7 @@ impl Presenter {
         let display = match part {
             Part::Final => {
                 self.frame_open = false;
-                let display = buffers.begin_deferred_swap();
-                set_next_target(buffers);
-                display
+                buffers.begin_deferred_swap()
             }
             Part::More => 0,
         };
@@ -543,19 +530,36 @@ impl Presenter {
         }
     }
 
+    /// Start a frame drawn through the GP0 port (or kicked by the program
+    /// itself): wait until the frame handed over last is on screen and nothing
+    /// walks, then point the draw area and offset at `buffers`' draw side. Call
+    /// it before the frame's first direct GPU access; drawing earlier would land
+    /// in the buffer still on screen. Returns at once when nothing is pending.
+    ///
+    /// The wait is here, at a call the program makes once a frame, and not in
+    /// the port writes: a program that never hands over a chain or records
+    /// pays nothing on its draws.
+    pub fn begin_frame(&mut self, buffers: &DoubleBuffer) {
+        psx_io::gpu::run_direct_access_guard();
+        let port = &mut Hardware;
+        if port.flip() != 0 || port.head() != 0 || port.is_channel_busy() {
+            wait_idle_on(port);
+        }
+        compiler_barrier();
+        for word in buffers.draw_target_words() {
+            psx_io::gpu::write_command_unguarded(word);
+        }
+    }
+
     /// Present a frame drawn through the GP0 port into `buffers`' draw side,
-    /// and return at once: acknowledge bit 24, send the draw-done sequence,
-    /// queue the flip, move `buffers` to the other side, arm the guard. The
-    /// first direct access afterwards (the next frame's clear) waits in the
-    /// guard until the flip has landed, so it never draws into the buffer on
-    /// screen, and the guard then points the draw area and offset at the
-    /// other side. A frame after a [`submit`](Self::submit) gets the same.
+    /// started with [`begin_frame`](Self::begin_frame), and return at once:
+    /// acknowledge bit 24, send the draw-done sequence, queue the flip, move
+    /// `buffers` to the other side. The next frame's `begin_frame` waits until
+    /// the flip has landed.
     pub fn present_drawn(&mut self, buffers: &mut DoubleBuffer) {
         // The previous flip must have landed before the acknowledge, or it
-        // would wait on this frame's GP0(1Fh) instead of its own. The guard
-        // has normally run at this frame's first direct access; a frame that
-        // made none runs it here. `show` and `set_display_enabled` leave a
-        // flip without arming the guard, so look once more.
+        // would wait on this frame's GP0(1Fh) instead of its own: normally
+        // `begin_frame` saw to it; a frame that skipped it waits here.
         psx_io::gpu::run_direct_access_guard();
         let port = &mut Hardware;
         if port.flip() != 0 || port.head() != 0 {
@@ -563,8 +567,6 @@ impl Presenter {
         }
         let display = buffers.begin_deferred_swap();
         present_drawn_on(port, display);
-        set_next_target(buffers);
-        psx_io::gpu::arm_direct_access_guard();
     }
 
     /// [`present_drawn`](Self::present_drawn) and wait until the frame is on
@@ -619,8 +621,8 @@ fn submit_on<P: Port>(port: &mut P, head: u32, display: u32) {
     port.kick();
 }
 
-/// The thread side of `present_drawn`, from the acknowledge on. The guard has
-/// run, so the slot is empty and the flip word 0, and only the thread could
+/// The thread side of `present_drawn`, from the acknowledge on. The caller has
+/// waited, so the slot is empty and the flip word 0, and only the thread could
 /// change either.
 fn present_drawn_on<P: Port>(port: &mut P, display: u32) {
     port.acknowledge_draw_done();
@@ -724,12 +726,6 @@ fn wait_idle_on<P: Port>(port: &mut P) {
             break;
         }
     }
-}
-
-/// Have the guard point the GPU at `buffers`' draw side.
-fn set_next_target(buffers: &DoubleBuffer) {
-    // SAFETY: a thread-only static, written through a raw pointer.
-    unsafe { addr_of_mut!(NEXT_TARGET).write(buffers.draw_target_words()) };
 }
 
 /// Add `vblanks` to a thread-only counter.

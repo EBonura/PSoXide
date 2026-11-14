@@ -197,6 +197,7 @@ impl Show {
 
     /// Draw a frame through the port and hand it over.
     fn drawn(&mut self, gpu: &mut Gpu) {
+        self.presenter.begin_frame(&self.buffers);
         let (_, y) = self.buffers.draw_origin();
         gpu.draw(&FillRect::new((0, y), (320, 240), (40, 8, 8)));
         gpu.draw(&FillRect::new(

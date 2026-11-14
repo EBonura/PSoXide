@@ -662,7 +662,7 @@ impl App {
                     // the swap was synchronous.
                     emit_visual_frame_counters(previous_misses);
                     ctx.visual_frame = ctx.visual_frame.advance();
-                    Self::finish_deferred_flip(config, scene, &mut ctx);
+                    Self::finish_deferred_flip(config, &mut presenter, scene, &mut ctx);
                     deferred_flip = None;
                 }
             }
@@ -791,6 +791,9 @@ impl App {
                         if !traced_render {
                             boot_visual_checkpoint(&mut ctx, (80, 0, 120), "31 CLEAR BEGIN");
                         }
+                        // The frame before is on screen, so the clear and the scene's
+                        // drawing go to the other buffer.
+                        presenter.begin_frame(&ctx.fb);
                         {
                             let (gpu, fb) = ctx.gpu_and_buffers();
                             fb.clear(gpu, config.clear_color);
@@ -857,7 +860,7 @@ impl App {
                             // No frame was in flight, so nothing flipped and
                             // the draw side did not move: prepare this one's
                             // buffer straight away.
-                            Self::finish_deferred_flip(config, scene, &mut ctx);
+                            Self::finish_deferred_flip(config, &mut presenter, scene, &mut ctx);
                         }
                     }
                     if !traced_render {
@@ -886,16 +889,21 @@ impl App {
     }
 
     /// Take ownership of the buffer a queued flip just freed: clear it and kick
-    /// the ordering table that was built for it. The clear is the first direct
-    /// access after the flip was handed over, so the presenter's guard has
-    /// pointed the draw area and offset at the buffer first.
+    /// the ordering table that was built for it. `Presenter::begin_frame`
+    /// first waits for the flip and points the draw area and offset at it.
     ///
     /// Every step here writes to the buffer the display was showing until the
     /// flip landed, so none of it may run while `present::is_flip_pending()`;
     /// the guard would wait for it, and the runner resolves the flip first so
     /// the wait is spent on fixed updates instead.
-    fn finish_deferred_flip<S: Scene>(config: Config, scene: &mut S, ctx: &mut Ctx) {
+    fn finish_deferred_flip<S: Scene>(
+        config: Config,
+        presenter: &mut Presenter,
+        scene: &mut S,
+        ctx: &mut Ctx,
+    ) {
         telemetry::stage_begin(telemetry::stage::FRAME_CLEAR);
+        presenter.begin_frame(&ctx.fb);
         {
             let (gpu, fb) = ctx.gpu_and_buffers();
             fb.clear(gpu, config.clear_color);
