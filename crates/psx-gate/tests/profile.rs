@@ -157,10 +157,21 @@ fn probes_are_programs_of_this_repository_and_get_no_line_entries() {
 #[test]
 fn deprecated_symbols_are_still_defined_in_the_sdk() {
     let profile = profile();
+    // Every source file of every crate: an entry point may live in a module (`psx_rt::interrupts`).
+    fn read_sources(dir: &std::path::Path, sources: &mut String) {
+        for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                read_sources(&path, sources);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                *sources += &fs::read_to_string(&path).unwrap_or_default();
+            }
+        }
+    }
     let mut sources = String::new();
     for parent in ["sdk/crates", "engine/crates", "crates"] {
         for dir in fs::read_dir(root().join(parent)).expect("dir").flatten() {
-            sources += &fs::read_to_string(dir.path().join("src/lib.rs")).unwrap_or_default();
+            read_sources(&dir.path().join("src"), &mut sources);
         }
     }
     for symbol in &profile.deprecated {

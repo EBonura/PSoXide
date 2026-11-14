@@ -6,13 +6,12 @@
 //! Every phase presents as fast as the CPU lets it, so each would flip every
 //! VBlank without the cap:
 //!
-//! 1. Queued: tiny frames, each flip queued with
-//!    `queue_display_control_at_vblank` (the path hl-psx, cs-psx and the other
-//!    decoupled-present games use). The handler holds each flip until the cap
-//!    allows it.
+//! 1. Queued: tiny frames drawn through the port and handed over with
+//!    `Presenter::present_drawn` (the one present path). The handler holds
+//!    each flip until the cap allows it.
 //! 2. Direct: `DoubleBuffer::swap` in a loop with no VBlank wait of its own.
 //!    The swap waits for its slot.
-//! 3. Opt-out: `set_min_flip_vblanks(PresentCap::UNCAPPED.min_vblanks())` and the same queued
+//! 3. Opt-out: `present::set_cap(PresentCap::UNCAPPED)` and the same queued
 //!    loop flips on every VBlank again.
 //!
 //! The flip-interval histogram (`interrupts::flip_histogram`) is read after
@@ -30,8 +29,9 @@ use psx_font::fonts::BASIC;
 use psx_font::FontAtlas;
 use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
 use psx_gpu::Gpu;
+use psx_rt::present::{self, PresentCap, Presenter};
 use psx_rt::{interrupts, tty, Peripherals};
-use psx_tick::{FlipHistogram, PresentCap};
+use psx_tick::FlipHistogram;
 use psx_vram::{Clut, TextureDepth, TexturePage};
 
 const FONT_TPAGE: TexturePage = TexturePage::new(320, 0, TextureDepth::Bit4);
@@ -42,8 +42,6 @@ const RED: (u8, u8, u8) = (230, 80, 80);
 
 /// Flips each phase makes.
 const FLIPS: u32 = 90;
-/// VBlanks a queued flip is given before it counts as a timeout.
-const WAIT_LIMIT: u32 = 8;
 
 /// What one phase measured.
 #[derive(Clone, Copy)]
@@ -74,28 +72,16 @@ fn measure(run: impl FnOnce() -> u32) -> Phase {
     }
 }
 
-/// Queue `FLIPS` flips of an empty frame, as fast as the queue releases them.
-fn queued(gpu: &mut Gpu, fb: &mut DoubleBuffer) -> u32 {
-    let mut timeouts = 0;
+/// Present `FLIPS` empty frames, as fast as the queue releases them; counts the
+/// present stalls (a flip that never landed).
+fn queued(gpu: &mut Gpu, fb: &mut DoubleBuffer, presenter: &mut Presenter) -> u32 {
+    let before = present::stats().recovery_count;
     for _ in 0..FLIPS {
-        fb.apply_draw_target(gpu);
         fb.clear(gpu, (8, 8, 24));
-        gpu.arm_draw_done();
-        gpu.signal_draw_done();
-        interrupts::queue_display_control_at_vblank(fb.begin_deferred_swap());
-        let start = interrupts::vblank_count();
-        while interrupts::is_display_control_queued() {
-            if interrupts::vblank_count().wrapping_sub(start) > WAIT_LIMIT {
-                timeouts += 1;
-                let word = interrupts::take_queued_display_control();
-                if word != 0 {
-                    psx_io::gpu::write_display_control(word);
-                }
-                break;
-            }
-        }
+        presenter.present_drawn(fb);
     }
-    timeouts
+    present::wait_idle();
+    present::stats().recovery_count.wrapping_sub(before)
 }
 
 /// `FLIPS` direct flips with nothing between them but a clear.
@@ -137,13 +123,14 @@ fn main() {
     );
     let mut fb = DoubleBuffer::new(Resolution::R320X240);
     fb.apply_draw_target(&mut gpu);
-    let default_cap = PresentCap::every_vblanks(interrupts::min_flip_vblanks());
+    let default_cap = present::cap();
+    let mut presenter = Presenter::new(None);
 
-    let capped_queue = measure(|| queued(&mut gpu, &mut fb));
+    let capped_queue = measure(|| queued(&mut gpu, &mut fb, &mut presenter));
     let capped_direct = measure(|| direct(&mut gpu, &mut fb));
-    interrupts::set_min_flip_vblanks(PresentCap::UNCAPPED.min_vblanks());
-    let uncapped = measure(|| queued(&mut gpu, &mut fb));
-    interrupts::set_min_flip_vblanks(PresentCap::HZ30.min_vblanks());
+    present::set_cap(PresentCap::UNCAPPED);
+    let uncapped = measure(|| queued(&mut gpu, &mut fb, &mut presenter));
+    present::set_cap(PresentCap::HZ30);
     gpu.wait_idle();
 
     // Two VBlanks per flip, with a little slack at both ends of the phase.
@@ -159,7 +146,7 @@ fn main() {
             "queued: a flip came under 2 VBlanks",
         ),
         (paced(&capped_queue), "queued: not one flip per 2 VBlanks"),
-        (capped_queue.timeouts == 0, "queued: flips timed out"),
+        (capped_queue.timeouts == 0, "queued: present stalled"),
         (capped_direct.flips == FLIPS, "direct: flips counted"),
         (
             capped_direct.fast == 0,

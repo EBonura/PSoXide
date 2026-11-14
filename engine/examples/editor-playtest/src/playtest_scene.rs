@@ -427,7 +427,11 @@ impl Playtest {
 
 impl Scene for Playtest {
     fn render_submission(&self) -> RenderSubmission {
-        if cfg!(feature = "present-queue") && !self.present_queue_held_off {
+        // Present-queue frames: +26% fps with one enemy on screen (19.8 to
+        // 25.0). Frames that would fence early beside a queued frame, such as
+        // with two melee enemies, go double-buffered instead
+        // (choose_present_queue). Stress harness, 2026-10-03.
+        if !self.present_queue_held_off {
             RenderSubmission::PresentQueue
         } else {
             RenderSubmission::QueuedDoubleBuffered

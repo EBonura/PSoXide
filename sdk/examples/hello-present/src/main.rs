@@ -1,26 +1,23 @@
-//! `hello-present` -- psx-rt's queued display flip waits for the frame's
-//! closing GP0(1Fh), not for GPUSTAT bit 28.
+//! `hello-present` -- frames drawn through the GP0 port, presented with
+//! `psx_rt::present::Presenter::present_drawn`, mixed with chain frames.
 //!
-//! On silicon bit 28 rises when the DMA has pushed a list's last packet,
-//! about one large primitive before the drawing ends (hardware-tests v1.24
-//! cases 219-226), so a flip gated on it can show a frame one primitive
-//! short. psx-rt's VBlank handler now applies a queued display start only
-//! once GPUSTAT bit 24 is set, which GP0(1Fh) raises when the GPU reaches
-//! it. This example checks that contract end to end:
+//! psx-rt's VBlank handler applies a queued display start only once GPUSTAT
+//! bit 24 is set, which GP0(1Fh) raises when the GPU reaches it. On silicon
+//! bit 28 rises when the DMA has pushed a list's last packet, about one large
+//! primitive before the drawing ends (hardware-tests v1.24 cases 219-226), so a
+//! flip gated on it could show a frame one primitive short. `present_drawn`
+//! acknowledges the flag, sends GP0(1Fh) behind the frame's drawing, queues the
+//! flip and returns; the next frame's first direct access waits in the guard
+//! until the flip has landed. This example checks that contract end to end:
 //!
-//! 1. Held: a frame kicked without GP0(1Fh) keeps its flip queued, even
-//!    after `wait_idle` has seen the GPU idle (the old bit-28 test would
-//!    have flipped at the next edge).
-//! 2. Released: `signal_draw_done` then lets the flip land within a few
-//!    VBlanks.
-//! 3. Pipelined: `FRAMES` frames of varying cost, each an ordering table
-//!    closed with `end_with_draw_done`, armed with `arm_draw_done` and
-//!    kicked asynchronously, flip through the queue with no timeout, and
-//!    every flip is seen with its frame's GP0(1Fh) executed.
-//!
-//! The asynchronous kicks go through `FrameStorage::draw_async`: the table
-//! and packets are `'static` and owned by the returned `InFlight` until
-//! its `wait`, so no frame is rebuilt under a walk.
+//! 1. Drawn: `FRAMES` frames, each cleared and drawn through the port and an
+//!    ordering table kicked asynchronously (`FrameStorage::draw_async`), then
+//!    `present_drawn`. The next frame's clear runs the guard, after which the
+//!    flip has landed and bit 24 is still up: a flip seen without it happened
+//!    before the frame's GP0(1Fh) ran.
+//! 2. Mixed: every fourth frame is a chain handed to `Presenter::submit`
+//!    instead, so a drawn frame follows a chain frame and the other way round.
+//! 3. Every frame is flipped once, none sooner than the cap (30 fps).
 //!
 //! The verdict goes to the TTY (`PRESENT PASS ...` or `PRESENT FAIL ...`)
 //! and on screen.
@@ -35,8 +32,10 @@ use psx_font::fonts::BASIC;
 use psx_font::FontAtlas;
 use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
 use psx_gpu::frame::{FrameStorage, OtFrame};
+use psx_gpu::ot::OrderingTable;
 use psx_gpu::prim::TriGouraud;
 use psx_gpu::{is_draw_done, Gpu};
+use psx_rt::present::{self, Part, Presenter};
 use psx_rt::{interrupts, tty, Peripherals};
 use psx_vram::{Clut, TextureDepth, TexturePage};
 
@@ -46,46 +45,20 @@ const WHITE: (u8, u8, u8) = (220, 220, 230);
 const GREEN: (u8, u8, u8) = (80, 220, 100);
 const RED: (u8, u8, u8) = (230, 80, 80);
 
-/// Pipelined frames to present.
+/// Frames to present.
 const FRAMES: u32 = 120;
-/// VBlanks a queued flip is given before it counts as a timeout.
-const WAIT_LIMIT: u32 = 8;
 /// Most triangles in one frame; frame `f` draws `f % (TRIS + 1)`.
 const TRIS: usize = 12;
 
 const EMPTY: TriGouraud = TriGouraud::new([(0, 0); 3], [(0, 0, 0); 3]);
 static mut FRAME: FrameStorage<8, [TriGouraud; TRIS]> = FrameStorage::new([EMPTY; TRIS]);
+// A chain frame is walked after `submit` returns, so its table and packets
+// come in two.
+static mut TABLES: [OrderingTable<8>; 2] = [OrderingTable::new(), OrderingTable::new()];
+static mut PACKETS: [[TriGouraud; TRIS]; 2] = [[EMPTY; TRIS], [EMPTY; TRIS]];
 
-/// Wait until the queued flip is applied or `limit` VBlanks pass.
-/// Returns whether it was applied.
-fn wait_flip(limit: u32) -> bool {
-    let start = interrupts::vblank_count();
-    while interrupts::is_display_control_queued() {
-        if interrupts::vblank_count().wrapping_sub(start) > limit {
-            return false;
-        }
-    }
-    true
-}
-
-/// Wait `n` VBlanks.
-fn wait_vblanks(n: u32) {
-    for _ in 0..n {
-        interrupts::wait_vblank();
-    }
-}
-
-/// Build frame `f`: `f % (TRIS + 1)` half-screen Gouraud triangles,
-/// closed with GP0(1Fh) when `close` is set.
-fn build_frame<'f>(
-    frame: &mut OtFrame<'f, 8>,
-    packets: &'f mut [TriGouraud; TRIS],
-    f: u32,
-    close: bool,
-) {
-    if close {
-        frame.end_with_draw_done();
-    }
+/// Build frame `f`: `f % (TRIS + 1)` half-screen Gouraud triangles.
+fn build_frame<'f>(frame: &mut OtFrame<'f, 8>, packets: &'f mut [TriGouraud; TRIS], f: u32) {
     let count = (f as usize) % (TRIS + 1);
     for (t, packet) in packets.iter_mut().take(count).enumerate() {
         let shade = ((t as u32 * 20 + f * 3) & 0x7f) as u8 + 0x20;
@@ -130,70 +103,75 @@ fn main() {
     fb.apply_draw_target(Gpu::from_dma_mut(&mut dma));
     // SAFETY: the only reference ever made to FRAME.
     let mut storage = unsafe { &mut *addr_of_mut!(FRAME) };
+    let mut presenter = Presenter::new(Some((8, 8, 24)));
 
-    // 1. Held: no GP0(1Fh), so the flip must stay queued even once the GPU
-    // is idle.
-    let gpu = Gpu::from_dma_mut(&mut dma);
-    fb.clear(gpu, (8, 8, 24));
-    gpu.arm_draw_done();
-    let (in_flight, ()) = storage.draw_async(dma, |frame, packets| {
-        build_frame(frame, packets, TRIS as u32, false)
-    });
-    interrupts::queue_display_control_at_vblank(fb.begin_deferred_swap());
-    (storage, dma) = in_flight.wait();
-    Gpu::from_dma_mut(&mut dma).wait_idle();
-    wait_vblanks(4);
-    let held = interrupts::is_display_control_queued() && !is_draw_done();
-
-    // 2. Released: GP0(1Fh) through the port lets it land.
-    Gpu::from_dma_mut(&mut dma).signal_draw_done();
-    let released = wait_flip(4);
-    if !released {
-        let word = interrupts::take_queued_display_control();
-        if word != 0 {
-            psx_io::gpu::write_display_control(word);
-        }
-    }
-
-    // 3. Pipelined frames through the queue.
-    let mut timeouts = 0u32;
-    let mut early = 0u32;
+    let flips_before: u32 = interrupts::flip_histogram().iter().sum();
+    let fast_before: u32 = interrupts::flip_histogram()[..2].iter().sum();
+    let stats_before = present::stats();
     let start = interrupts::vblank_count();
+    let mut early = 0u32;
+    let mut chains = 0u32;
     for f in 0..FRAMES {
+        if f % 4 == 3 {
+            present::wait_arena_free();
+            let side = (f & 1) as usize;
+            // SAFETY: `wait_arena_free` guarantees no walk reads this side, and
+            // these are the only references made to it this frame.
+            let (table, packets) = unsafe {
+                (
+                    &mut (*addr_of_mut!(TABLES))[side],
+                    &mut (*addr_of_mut!(PACKETS))[side],
+                )
+            };
+            let mut frame = table.frame();
+            frame.end_with_draw_done();
+            build_frame(&mut frame, packets, f);
+            // SAFETY: the table and packets are static and not rebuilt before
+            // `wait_arena_free` frees this side two frames from now; the table
+            // ends on GP0(1Fh).
+            unsafe { presenter.submit(&mut fb, table.submit_head(), Part::Final) };
+            chains += 1;
+            continue;
+        }
+        // The clear is the frame's first direct access: the guard waits for
+        // the last frame's flip, which needs that frame's GP0(1Fh) to have run.
         let gpu = Gpu::from_dma_mut(&mut dma);
-        fb.apply_draw_target(gpu);
         fb.clear(gpu, (8, 8, 24));
-        gpu.arm_draw_done();
-        let (in_flight, ()) =
-            storage.draw_async(dma, |frame, packets| build_frame(frame, packets, f, true));
-        interrupts::queue_display_control_at_vblank(fb.begin_deferred_swap());
-        let flipped = wait_flip(WAIT_LIMIT);
-        // A flip needs the frame drawn, so its walk is over and this wait
-        // returns at once; after a timeout it ends the walk first.
-        (storage, dma) = in_flight.wait();
-        if !flipped {
-            timeouts += 1;
-            Gpu::from_dma_mut(&mut dma).wait_idle();
-            let word = interrupts::take_queued_display_control();
-            if word != 0 {
-                psx_io::gpu::write_display_control(word);
-            }
-        } else if !is_draw_done() {
-            // The flag cannot clear before the next arm, so a flip seen
-            // without it happened before the frame's GP0(1Fh) ran.
+        if f > 0 && !is_draw_done() {
             early += 1;
         }
+        let (in_flight, ()) =
+            storage.draw_async(dma, |frame, packets| build_frame(frame, packets, f));
+        (storage, dma) = in_flight.wait();
+        presenter.present_drawn(&mut fb);
     }
+    present::wait_idle();
     let vblanks = interrupts::vblank_count().wrapping_sub(start);
+    let flips = interrupts::flip_histogram()
+        .iter()
+        .sum::<u32>()
+        .wrapping_sub(flips_before);
+    let fast = interrupts::flip_histogram()[..2]
+        .iter()
+        .sum::<u32>()
+        .wrapping_sub(fast_before);
+    let stats = present::stats();
+    let recoveries = stats
+        .recovery_count
+        .wrapping_sub(stats_before.recovery_count);
+    let kicks = stats.kick_count.wrapping_sub(stats_before.kick_count);
     let gpu = Gpu::from_dma_mut(&mut dma);
-    gpu.wait_idle();
 
     let checks = [
-        (held, "flip without GP0(1Fh) was applied"),
-        (released, "GP0(1Fh) did not release the flip"),
-        (timeouts == 0, "queued flips timed out"),
+        (flips == FRAMES, "frames not each flipped once"),
+        (kicks == chains, "chain frames not each kicked once"),
         (early == 0, "flip before the frame's GP0(1Fh)"),
-        (vblanks >= FRAMES, "fewer VBlanks than frames"),
+        (fast == 0, "a flip came under 2 VBlanks after the last"),
+        (recoveries == 0, "present stalled"),
+        (
+            vblanks >= 2 * (FRAMES - 1),
+            "fewer VBlanks than the cap allows",
+        ),
         (interrupts::fault_count() == 0, "exceptions other than IRQs"),
     ];
     let failures = checks.iter().filter(|check| !check.0).count() as u32;
@@ -204,8 +182,9 @@ fn main() {
     let lines = [
         line("failures", failures),
         line("frames", FRAMES),
+        line("flips", flips),
+        line("chains", chains),
         line("vblanks", vblanks),
-        line("timeouts", timeouts),
         line("early", early),
     ];
     let (banner, tint) = if failures == 0 {
@@ -222,21 +201,17 @@ fn main() {
 
     let font = FontAtlas::upload(&BASIC, FONT_TPAGE, FONT_CLUT);
     loop {
-        fb.apply_draw_target(gpu);
         fb.clear(gpu, (10, 12, 20));
-        font.draw_text(8, 6, "QUEUED FLIP WAITS FOR GP0(1FH)", WHITE);
+        font.draw_text(8, 6, "FRAMES DRAWN THROUGH THE PORT", WHITE);
         font.draw_text(8, 30, banner, tint);
         for (row, (text, len)) in lines.iter().enumerate() {
             font.draw_text(8, 54 + 12 * row as i16, as_str(&text[..*len]), WHITE);
         }
-        let mut y = 126;
+        let mut y = 138;
         for (_, what) in checks.iter().filter(|check| !check.0) {
             font.draw_text(8, y, what, RED);
             y += 12;
         }
-        gpu.arm_draw_done();
-        gpu.signal_draw_done();
-        interrupts::queue_display_control_at_vblank(fb.begin_deferred_swap());
-        wait_flip(WAIT_LIMIT);
+        presenter.present_blocking(&mut fb);
     }
 }

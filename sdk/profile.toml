@@ -42,13 +42,7 @@ programs = ["hardware-tests"]
 
 # Legacy entry points that a program may still call only while its exceptions list the call.
 [deprecated]
-symbols = ["poll_port1", "psx_pad::poll_port2", "PadReader", "poll_on", "poll_rumble_on", "enable_analog_on", "enable_analog_port1", "enable_analog_port2", "require_analog_on", "require_analog_port1", "enable_rumble_on", "enable_analog"]
-
-[[exception]]
-program = "editor-playtest"
-kind = "feature"
-item = "psx-engine/present-queue"
-remove = "W7"
+symbols = ["poll_port1", "psx_pad::poll_port2", "PadReader", "poll_on", "poll_rumble_on", "enable_analog_on", "enable_analog_port1", "enable_analog_port2", "require_analog_on", "require_analog_port1", "enable_rumble_on", "enable_analog", "min_flip_vblanks", "publish_raw", "set_min_flip_vblanks", "is_display_control_queued", "take_queued_display_control", "queue_display_control_at_vblank"]
 
 [[exception]]
 program = "editor-playtest"
@@ -59,20 +53,8 @@ remove = "W6"
 [[exception]]
 program = "editor-playtest"
 kind = "feature"
-item = "psx-io/present-queue"
-remove = "W7"
-
-[[exception]]
-program = "editor-playtest"
-kind = "feature"
 item = "psx-level/wire"
 remove = "W10"
-
-[[exception]]
-program = "editor-playtest"
-kind = "feature"
-item = "psx-rt/present-queue"
-remove = "W7"
 
 [[exception]]
 program = "editor-playtest"
@@ -98,18 +80,6 @@ program = "hello-memcard"
 kind = "feature"
 item = "psx-mc/compress"
 remove = "unscheduled"
-
-[[exception]]
-program = "hello-present-queue"
-kind = "feature"
-item = "psx-io/present-queue"
-remove = "W7"
-
-[[exception]]
-program = "hello-present-queue"
-kind = "feature"
-item = "psx-rt/present-queue"
-remove = "W7"
 
 [[exception]]
 program = "hello-spstack"

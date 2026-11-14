@@ -105,7 +105,7 @@ fn set_status_register(sr: u32) {
 /// psx-rt applies a queued display word at the next VBlank. The probes' own
 /// handlers do not, so apply any word still waiting before taking the vector.
 fn apply_pending_display_word() {
-    let word = psx_rt::interrupts::take_queued_display_control();
+    let word = psx_rt::present::cancel_flip();
     if word != 0 {
         gpu_io::write_display_control(word);
     }

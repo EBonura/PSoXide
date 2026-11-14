@@ -42,7 +42,7 @@ PGO_ARGS ?=
 PGO_VARIANTS ?= --variant off --variant default --variant hot=500 --variant hot=500+profi
 GATE ?=
 
-.PHONY: example disc hello-tri hello-tri-disc run-tri examples pgo-collect pgo-choose hello-xa-disc hello-xa-gate hello-xa-resume-disc hello-xa-resume-gate hello-cdstream-disc hello-cdstream-gate hello-cddrain-disc hello-cddrain-gate hello-gteirq-disc hello-gteirq-gate hello-cdpause-disc hello-cdpause-gate hello-wide-gate
+.PHONY: example disc hello-tri hello-tri-disc run-tri examples pgo-collect pgo-choose hello-xa-disc hello-xa-gate hello-xa-resume-disc hello-xa-resume-gate hello-cdstream-disc hello-cdstream-gate hello-cddrain-disc hello-cddrain-gate hello-gteirq-disc hello-gteirq-gate hello-cdpause-disc hello-cdpause-gate hello-present-queue-disc hello-present-queue-gate hello-wide-gate
 examples:
 	@set -e; for example in hello-tri hello-input hello-ot hello-gte hello-tex hello-memcard hello-spstack hello-gteirq hello-present hello-present-queue hello-asmprobe; do $(MAKE) -f tools/sdk-examples.mk disc EXAMPLE=$$example; done
 
@@ -139,6 +139,14 @@ hello-flipcap-disc:
 hello-flipcap-gate: hello-flipcap-disc
 	@test -n "$(FRONTEND)" || (echo "Set FRONTEND to the PSoXide-emulator executable"; exit 1)
 	sh tools/flipcap_gate.sh "$(FRONTEND)" "$(BUILD)/$(TARGET)/release/hello-flipcap.cue"
+# hello-present-queue presents 240 frames through the one present path at 60, 30 and 20 fps and under a
+# varying load, and checks each frame's kick and flip edge by edge.
+hello-present-queue-disc:
+	$(MAKE) example EXAMPLE=hello-present-queue
+	cargo run --locked --release -p mkisopsx -- --diag --exe "$(BUILD)/$(TARGET)/release/hello-present-queue.exe" --out "$(BUILD)/$(TARGET)/release/hello-present-queue.bin" --volume PSOXIDESDK
+hello-present-queue-gate: hello-present-queue-disc
+	@test -n "$(FRONTEND)" || (echo "Set FRONTEND to the PSoXide-emulator executable"; exit 1)
+	sh tools/present_gate.sh "$(FRONTEND)" "$(BUILD)/$(TARGET)/release/hello-present-queue.cue"
 hello-cdpause-gate: hello-cdpause-disc
 	@test -n "$(FRONTEND)" || (echo "Set FRONTEND to the PSoXide-emulator executable"; exit 1)
 	sh tools/cdpause_gate.sh "$(FRONTEND)" "$(BUILD)/$(TARGET)/release/hello-cdpause.cue"
