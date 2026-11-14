@@ -993,7 +993,7 @@ pub fn search(
         if round % 16 == 0 {
             // Re-weight the picks by where the stalls are now.
             let address = link.realize(&listed);
-            pick.iter_mut().for_each(|weight| *weight = 0.0);
+            pick.fill(0.0);
             for (w, (window, &base)) in traces.windows.iter().zip(&baseline).enumerate() {
                 let (_, charged) = traces.attribute(w, &address, link.sections.len());
                 for (k, &cycles) in charged.iter().enumerate() {
@@ -1005,7 +1005,9 @@ pub fn search(
             // Every function keeps some chance: a quiet one may be the one
             // in the way.
             let floor = pick.iter().sum::<f64>() / pick.len().max(1) as f64 * 0.05;
-            pick.iter_mut().for_each(|weight| *weight += floor);
+            for weight in &mut pick {
+                *weight += floor;
+            }
         }
         let candidates: Vec<Plan> = (0..settings.batch)
             .map(|_| mutate(&plan, &mut rng, &pick))
