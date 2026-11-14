@@ -3,6 +3,10 @@
 //! Public scene code sees only two runtime counters through
 //! [`crate::scene::Ctx`]: `sim_tick` and `visual_frame`. This module
 //! keeps the platform VBlank counter private to the app runner.
+#![allow(
+    deprecated,
+    reason = "the queued flip moves onto psx_rt::present with the runner"
+)]
 
 use psx_gpu::Gpu;
 

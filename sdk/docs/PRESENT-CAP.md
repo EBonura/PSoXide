@@ -11,19 +11,24 @@ A game that deliberately targets the full display rate opts out by name, once
 at boot:
 
 ```rust
-psx_rt::interrupts::set_min_flip_vblanks(psx_tick::PresentCap::UNCAPPED.min_vblanks());
+psx_rt::present::set_cap(psx_rt::present::PresentCap::UNCAPPED);
 ```
 
-`psx_tick::PresentCap` names the settings (`HZ30`, the default, and
-`UNCAPPED`); `psx_tick::FlipGate` is the same rule as plain logic for host
-tests.
+`PresentCap` (`psx_tick::PresentCap`, re-exported by `psx_rt::present`) names the settings (`HZ30`,
+the default, and `UNCAPPED`); `psx_tick::FlipGate` is the same rule as plain logic for host tests. The
+cap may change at any time (a menu at 60, gameplay at 30); it applies from the next flip on.
+`interrupts::set_min_flip_vblanks` is the deprecated name of the same call.
 
 ## Where it is enforced
+
+Every flip of the one present path (`psx_rt::present`, [PRESENT.md](PRESENT.md)) is applied by the VBlank
+handler, which holds a GP1(05h) word until the hold is zero; display enable is never held. The rows below
+are the entry points, the deprecated ones included.
 
 | Flip path | How |
 | --- | --- |
 | `queue_display_control_at_vblank` (hl-psx, cs-psx, hk-psx, wipeout-psx) | The VBlank handler applies a queued GP1(05h) word only when the hold is zero. Other queued words (display enable) are never held |
-| `present-queue` (`publish_raw`, quake-psx, the engine's present queue) | The handler kicks a published chain, and flips with it, only when the hold is zero |
+| `Presenter::submit`, `Presenter::present_drawn`, `present::show` (the one present path) | The handler applies the frame's flip only when the hold is zero; the next frame starts once that flip has landed |
 | `DoubleBuffer::swap` / `Gpu::set_display_start` (direct flips) | A bounded wait in front of the flip until the handler has counted the cap's VBlanks off. Skipped with interrupts masked or before `install_vblank_counter` |
 
 The handler arms a hold of `cap` edges at every applied flip and counts one off

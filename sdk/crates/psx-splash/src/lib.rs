@@ -115,8 +115,8 @@ pub fn show(
     let span = (line.chars().count() as i32 + SHEEN).max(1);
 
     // One frame per VBlank whatever the presentation cap is: 150 frames are 2.5 seconds.
-    let cap = psx_rt::interrupts::min_flip_vblanks();
-    psx_rt::interrupts::set_min_flip_vblanks(1);
+    let cap = psx_rt::present::cap();
+    psx_rt::present::set_cap(psx_rt::present::PresentCap::UNCAPPED);
     let skips = |b: ButtonState| b.is_held(SKIP);
     let mut previous = buttons();
     let mut frame = 0;
@@ -163,7 +163,7 @@ pub fn show(
         buffers.swap(gpu);
         frame += 1;
     }
-    psx_rt::interrupts::set_min_flip_vblanks(cap);
+    psx_rt::present::set_cap(cap);
 }
 
 /// Expand the mark into VRAM sixteen rows at a time (1,024 bytes of stack, once), and put its

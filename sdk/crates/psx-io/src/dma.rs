@@ -190,14 +190,13 @@ pub mod raw {
     /// The value arms the next transfer on `ch`: the caller takes on
     /// [`super::start`]'s contract for whatever transfer later starts with it.
     ///
-    /// With the `present-queue` feature, a store to the GPU channel first
+    /// A store to the GPU channel first
     /// runs an armed direct-access guard (`gpu::arm_direct_access_guard`),
     /// so it never re-arms the channel under a queued walk. Every GPU DMA
     /// start, [`super::start`] included, goes through here.
     #[doc(alias = "MADR")]
     #[inline(always)]
     pub unsafe fn set_address(ch: Channel, addr: u32) {
-        #[cfg(feature = "present-queue")]
         if matches!(ch, Channel::Gpu) {
             crate::gpu::run_direct_access_guard();
         }
@@ -264,7 +263,7 @@ pub fn is_busy(ch: Channel) -> bool {
 /// Enable a channel without disturbing the others.
 ///
 /// The read-modify-write of the global enable register runs with CPU
-/// interrupts masked: with the `present-queue` feature the VBlank handler
+/// interrupts masked: the VBlank handler (the present queue's kick)
 /// sets the GPU channel's bit in the same register, and a handler that ran
 /// between this read and write would have its bit overwritten.
 pub fn enable_channel(ch: Channel) {

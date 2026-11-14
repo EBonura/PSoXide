@@ -242,7 +242,12 @@ pub(crate) fn set_draw_mode(material: TextureMaterial) {
 }
 
 /// One ready-wait, then the packet's payload words, in order.
-#[inline(always)]
+///
+/// One copy per packet type, called from every draw site: the port write's
+/// recording and guard test (`psx_io::gpu::write_commands`) then exists once
+/// per packet type instead of once per site, and a site is a call, as it was
+/// for the ready-wait before.
+#[inline(never)]
 pub(crate) fn draw<P: GpuPacket>(packet: &P) {
     let words = core::ptr::from_ref(packet).cast::<u32>();
     wait_command_ready();
@@ -253,13 +258,21 @@ pub(crate) fn draw<P: GpuPacket>(packet: &P) {
     write_commands(payload);
 }
 
+/// GP0(E3h), GP0(E4h) and GP0(E5h): the draw area and offset for a buffer at
+/// VRAM line `top`.
+pub(crate) const fn draw_target(top: u16, width: u16, height: u16) -> [u32; 3] {
+    [
+        gp0::draw_area_top_left(0, top as u32),
+        gp0::draw_area_bottom_right((width - 1) as u32, (top + height - 1) as u32),
+        gp0::draw_offset(0, top as i32),
+    ]
+}
+
 /// Draw area and offset for a buffer at VRAM line `top`, written without a
 /// ready-wait, as `FrameBuffer` always has: state commands between frames.
 pub(crate) fn write_draw_target(top: u16, width: u16, height: u16) {
-    write_command(gp0::draw_area_top_left(0, top as u32));
-    write_command(gp0::draw_area_bottom_right(
-        (width - 1) as u32,
-        (top + height - 1) as u32,
-    ));
-    write_command(gp0::draw_offset(0, top as i32));
+    let [top_left, bottom_right, offset] = draw_target(top, width, height);
+    write_command(top_left);
+    write_command(bottom_right);
+    write_command(offset);
 }

@@ -69,8 +69,8 @@ use psx_io::gpu::wait_command_ready;
 #[inline]
 pub(crate) fn wait_idle_impl() {
     // A frame handed to psx-rt's present queue is still "sent to the GPU":
-    // the armed guard waits until it has been kicked and drawn. Without the
-    // `present-queue` feature this is nothing.
+    // the armed guard waits until it has been kicked, drawn and shown. With
+    // nothing handed over it is one load.
     psx_io::gpu::run_direct_access_guard();
     chain::wait_walk();
     psx_io::gpu::wait_dma_ready();
@@ -80,8 +80,8 @@ pub(crate) fn wait_idle_impl() {
 /// True once the GPU has executed the GP0(1Fh) that closes the work kicked
 /// after the last [`Gpu::arm_draw_done`], so everything before it is drawn.
 ///
-/// This is the completion test psx-rt's queued display flip
-/// (`psx_rt::interrupts::queue_display_control_at_vblank`) applies at each VBlank edge.
+/// This is the completion test psx-rt's display flip (`psx_rt::present`)
+/// applies at each VBlank edge.
 /// GP0(1Fh) raises GPUSTAT bit 24 only when the GPU reaches it in its
 /// command stream, after the drawing before it; the flag stays set until
 /// GP1(02h). The v1.24 present-queue probe flipped on this flag with 120 of

@@ -585,7 +585,7 @@ impl Player {
         self.clock.switch(self.clock.phase);
         self.st.pump();
         if let Some(b) = self.queued {
-            if !interrupts::is_display_control_queued() {
+            if !psx_rt::present::is_flip_pending() {
                 self.front = b;
                 self.queued = None;
                 self.shown += 1;
@@ -655,15 +655,10 @@ impl Player {
                 let gp0_free = !self.cols.uploading && psx_vram::dma_copy_to_vram_done();
                 if gp0_free && (behind || edge.wrapping_sub(due) as i32 >= 0) {
                     // The VBlank handler flips only once GPUSTAT bit 24 says
-                    // the GPU got past this frame's uploads: GP0(1Fh) after
-                    // them, acknowledged afresh now that no flip is queued.
-                    let gpu = Gpu::from_dma_mut(&mut self.dma);
-                    gpu.arm_draw_done();
-                    gpu.signal_draw_done();
-                    let (x, y) = self.origins[b];
-                    interrupts::queue_display_control_at_vblank(gp1::display_start(
-                        x as u32, y as u32,
-                    ));
+                    // the GPU got past this frame's uploads: `show` sends
+                    // GP0(1Fh) after them, acknowledged afresh now that no flip
+                    // is queued.
+                    psx_rt::present::show(self.origins[b]);
                     let late = edge.wrapping_sub(due) as i32;
                     if late > 0 {
                         self.late += 1;
@@ -792,7 +787,7 @@ pub fn play(
     // Every display buffer black, the first one shown, in 24-bit mode if the
     // movie is.
     let x2 = halfwords_x2(config.depth);
-    let _ = interrupts::take_queued_display_control();
+    let _ = psx_rt::present::cancel_flip();
     clear_buffers(&mut dma, config);
     let (x0, y0) = config.buffers[0];
     psx_io::gpu::write_display_control(gp1::display_start(x0 as u32, y0 as u32));
@@ -942,7 +937,7 @@ pub fn play(
         p.clock.switch(phase);
     }
     // A flip still queued would land after we hand the display back.
-    let _ = interrupts::take_queued_display_control();
+    let _ = psx_rt::present::cancel_flip();
     mdec().abort_decode();
     psx_io::dma::abort(psx_io::dma::Channel::Gpu);
     if p.cols.uploading {

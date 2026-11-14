@@ -198,8 +198,10 @@ name = "psx-rt"
 version = "0.1.0"
 dependencies = [
  "critical-section",
+ "psx-gpu",
  "psx-hw",
  "psx-io",
+ "psx-tick",
 ]
 
 [[package]]

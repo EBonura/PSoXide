@@ -1,8 +1,7 @@
 //! Command recording and the direct-access guard: what lets a frame's GPU
 //! work be handed to a queue (`psx_rt::present`) instead of the ports.
 //!
-//! Built only with the `present-queue` feature. Without it the port writes
-//! in [`super`] compile to a single store, as before.
+//! Part of every build: the one present path (`psx_rt::present`) depends on both.
 //!
 //! - **Recording.** While the [`ActiveRecording`] that
 //!   [`start_recording_raw`] returns is alive, [`super::write_command`]
@@ -19,7 +18,7 @@
 //!   queued walk can collide with the access.
 //!
 //! Both states share one flag, so a plain port write costs one extra load
-//! and branch while the feature is on.
+//! and branch.
 
 use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
 
@@ -150,12 +149,14 @@ pub struct CommandRecording {
 impl CommandRecording {
     /// First node, the address a chain links to or a DMA walk starts at.
     #[inline]
+    #[must_use]
     pub fn head(&self) -> *const u32 {
         self.head
     }
 
     /// Words used in the buffer, node headers included.
     #[inline]
+    #[must_use]
     pub fn len_words(&self) -> usize {
         self.words
     }
@@ -180,10 +181,12 @@ impl CommandRecording {
 /// The recording ran out of buffer, so it was discarded: a command cut short
 /// would make the GPU take the words after it as its parameters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RecordingOverflow;
 
 /// True while a recording is open and not paused by [`pause_recording`].
 #[inline(always)]
+#[must_use]
 pub fn is_recording() -> bool {
     // SAFETY: a volatile read of a `bool` static owned by this module.
     unsafe { read_volatile(addr_of!(RECORDING.active)) }
@@ -274,6 +277,11 @@ pub struct ActiveRecording {
 
 impl ActiveRecording {
     /// Stop recording. `Ok(None)` when nothing was written.
+    ///
+    /// # Errors
+    ///
+    /// [`RecordingOverflow`] when the buffer ran out: the recording was
+    /// discarded.
     pub fn end(self) -> Result<Option<CommandRecording>, RecordingOverflow> {
         let generation = self.generation;
         core::mem::forget(self);

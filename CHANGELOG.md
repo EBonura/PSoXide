@@ -34,6 +34,25 @@
 No program depends on a BIOS any more, not a call into one and not the state one leaves behind (Manny's rule:
 every program works on every Sony BIOS and on OpenBIOS).
 
+- One present path for every program (`psx_rt::present`, `sdk/docs/PRESENT.md`), with no cargo feature: the
+  VBlank handler, the command recording and the direct-access guard are part of every build, and the
+  `present-queue` features of psx-io and psx-rt no longer do anything (they stay so an old manifest
+  resolves). A frame is a DMA chain (`Presenter::submit`, in one part or several: `Part::More` then `Part::Final`)
+  or drawing through the GP0 port (`Presenter::present_drawn`, `present_blocking`); `present::show` and
+  `present::set_display_enabled` cover a movie frame and a display gate, and `present::set_cap` is the cap's home.
+  The handler flips a finished frame at the first edge the cap allows without waiting for its successor (the old
+  queue showed frame N only when frame N + 1 was kicked), and a part is kicked as soon as the frame before it is
+  on screen and DMA channel 2 is idle, by the handler at an edge or by the thread at submit and in every wait,
+  with one kick implementation in assembly assembled twice (the thread's copy masks interrupts itself); the flip
+  stays the handler's alone. One draw-done fallback instead of two. The presenter links the draw area, offset and
+  clear in front of a chain frame, and the guard points the GPU at the next side after a frame is handed over.
+  Host tests run the thread-side code against a model of the handler and the GPU with an event injected at every
+  shared-word access (`present_model.rs`). psx-gpu's packet draw is one out-of-line copy per packet type and
+  the ready-wait reads GPUSTAT first and tests the recording only when the GPU is busy, so a program that draws
+  through the port links less text than before and pays one byte test per packet for the recording.
+  Deprecated: `interrupts::queue_display_control_at_vblank`,
+  `is_display_control_queued`, `take_queued_display_control`, `set_min_flip_vblanks`, `min_flip_vblanks`,
+  `present::publish_raw` (and `present::start`).
 
 - `psx-math`: `clip_lanes::clip_lanes8_plane` runs its hand-scheduled kernel on every console build, and the `asm-kernels`
   feature of `psx-math` is gone. The feature chose between two implementations of one job per game. The kernel is

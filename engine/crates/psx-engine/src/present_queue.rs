@@ -6,6 +6,10 @@
 //! inert stand-in.
 //!
 //! [`RenderSubmission::PresentQueue`]: crate::scene::RenderSubmission::PresentQueue
+#![allow(
+    deprecated,
+    reason = "the present queue moves onto psx_rt::present::Presenter with the runner"
+)]
 
 #[cfg(feature = "present-queue")]
 use psx_gpu as gpu;

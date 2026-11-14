@@ -44,11 +44,11 @@ sdk clippy::enum_glob_use 0
 sdk clippy::rc_buffer 0
 sdk clippy::rc_mutex 0
 sdk clippy::get_first 0
-sdk clippy::must_use_candidate 1042
+sdk clippy::must_use_candidate 1036
 sdk clippy::unwrap_used 5
 sdk clippy::exhaustive_enums 65
-sdk clippy::exhaustive_structs 142
-sdk clippy::missing_errors_doc 75
+sdk clippy::exhaustive_structs 140
+sdk clippy::missing_errors_doc 74
 sdk clippy::missing_panics_doc 33
 sdk clippy::wildcard_imports 9
 sdk clippy::string_add 0

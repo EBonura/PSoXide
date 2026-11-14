@@ -279,16 +279,23 @@ impl DoubleBuffer {
     /// Select the next draw buffer without touching the GPU, and return the
     /// GP1(05h) word that shows the finished one.
     ///
-    /// The non-blocking first half of a pipelined swap: queue the word for a
-    /// VBlank edge whose handler applies it once the frame's closing
-    /// GP0(1Fh) has run (`psx_rt::interrupts::queue_display_control_at_vblank`,
-    /// see [`crate::is_draw_done`]), wait until it has been applied, then
-    /// call [`apply_draw_target`](Self::apply_draw_target) before drawing.
-    /// Safe to call while the previous frame still rasterises.
+    /// `psx_rt::present::Presenter` calls it when a frame is handed over and
+    /// hands the word to the VBlank handler, which applies it once the
+    /// frame's closing GP0(1Fh) has run (see [`crate::is_draw_done`]). Safe to
+    /// call while the previous frame still rasterises.
     pub fn begin_deferred_swap(&mut self) -> u32 {
         let (x, y) = self.draw_origin();
         self.drawing_second = !self.drawing_second;
         gp1::display_start(x as u32, y as u32)
+    }
+
+    /// The GP0(E3h), GP0(E4h) and GP0(E5h) words that make the buffer being
+    /// drawn the draw area and offset, for a command list (`psx_rt::present`
+    /// links them in front of a frame).
+    #[must_use]
+    pub const fn draw_target_words(&self) -> [u32; 3] {
+        let (_, top) = self.draw_origin();
+        crate::gpu::draw_target(top, self.size.0, self.size.1)
     }
 
     /// Program the draw area and draw offset for the buffer being drawn.

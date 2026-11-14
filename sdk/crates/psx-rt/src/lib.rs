@@ -49,7 +49,6 @@ pub mod dispatch;
 pub mod entry;
 pub mod interrupts;
 mod peripherals;
-#[cfg(feature = "present-queue")]
 pub mod present;
 pub mod scratchpad;
 #[cfg(feature = "scratchpad-window")]
