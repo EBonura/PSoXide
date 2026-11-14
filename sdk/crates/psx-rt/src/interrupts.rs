@@ -1379,6 +1379,13 @@ pub fn try_wait_vblank(spins: u32) -> bool {
 #[doc(alias = "VSync")]
 pub fn wait_vblank() {}
 
+/// Host no-op: there is no VBlank off-target, so the wait is over at once.
+#[cfg(not(target_arch = "mips"))]
+#[must_use]
+pub fn try_wait_vblank(_spins: u32) -> bool {
+    true
+}
+
 /// True when the general exception vector jumps to psx-rt's handler, the
 /// one that never touches `$sp` (so interrupts are safe on any stack).
 #[cfg(target_arch = "mips")]

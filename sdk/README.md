@@ -63,6 +63,7 @@ Build and run them via the top-level `Makefile` (see the
 | `sfxbench` | Cycles the `psx-sfx` bookkeeping costs: placement gains, the mixer's level update, an idle tick and a stealing `play`. |
 | `hello-seq` | Plays a song cooked by `psx-seq-cook` from the player's own cartridge through `psx-seq` and reports what the sequencer costs. |
 | `pollbench` | Cycles one synchronous controller poll costs: port 1, an empty port 2, both. |
+| `hello-splash` | The boot splash at every brightness step, then with another line; the frame-identity and size harness for `psx-splash`. |
 | `hello-gte` | GTE-accelerated transforms. |
 | `hello-audio` | SPU voice playback. |
 | `hello-cdda` | CD-DA audio tracks. |

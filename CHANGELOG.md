@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- The boot splash costs a program less. The mark is stored LZ coded in 16-bit words (2,746 bytes against 4,692; 512-word
+  window, a flag byte per eight tokens) and expanded sixteen rows at a time through a 1 KiB buffer, with the same 4,096 words
+  out (a host test pins the FNV-1a of them); `FontAtlas::upload` is out of line, so every caller shares one copy; the
+  palette is read in place instead of copied and patched on the stack; and the line advances by the font's advance width
+  instead of calling `glyph_advance` for every letter. `hello-splash` (the splash at every brightness step, then another
+  line, one call site): text 14,252 -> 15,472, rodata 5,814 -> 3,902 bytes (1,912 fewer in all after the decoder's growth,
+  and a program that already links the splash's font or upload code gains more: NitroXide, Celeste and VoXide free 2,512,
+  1,776 and 1,568 bytes of RAM); the 2,494 route ticks of the whole run and the 2,091 of a run with three skip presses are
+  pixel-identical, and the setup before the first frame takes 252,770 cycles against 365,165. The splash now waits with `psx_rt::interrupts::try_wait_vblank`, which does
+  not install the VBlank counter (`install_vblank_counter` reaches the I-cache flush): the caller installs it, a program
+  that has not asserts in a debug build and gives up after the wait's bound in a release build. `tools/splash_gate.sh`
+  (run by `make lint`) walks the tree of every `psx_splash::show` with `stack-guard --forbid __psx_rt_flush_i_cache`, so a
+  program that runs its title code from an overlay can prove its call tree clean. psx-rt gets a host `try_wait_vblank`.
+
 No program depends on a BIOS any more, not a call into one and not the state one leaves behind (Manny's rule:
 every program works on every Sony BIOS and on OpenBIOS).
 

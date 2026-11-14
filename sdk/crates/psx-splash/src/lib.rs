@@ -16,13 +16,17 @@
 //!   way of reading a pad of its own.
 //! * **Brightness.** The player's BRIGHTNESS step is applied over every frame, faded with
 //!   the picture so the fade ends black.
-//! * **Pay for use.** The mark (4,692 bytes, run-length coded), its decoder and the text
+//! * **Pay for use.** The mark (2,746 bytes, LZ coded), its decoder and the text
 //!   code are linked only into a program that calls [`show`]. No heap, no cargo feature.
 //!
 //! # What it needs
 //!
 //! A 320x240 [`DoubleBuffer`] and the [`Gpu`], both already set up by the caller; the pad
 //! and the VBlank counter (`psx_rt::interrupts::install_vblank_counter`) are the caller's too.
+//! The splash waits on the counter without installing it: a program that has not installed it
+//! asserts in a debug build, and in a release build the wait gives up after its bound (about a
+//! second) and the splash ends there instead of hanging. `psx-engine`'s `App` installs it
+//! before the splash.
 //! [`show`] leaves the display on the buffer it last drew, 2/128 of full brightness, which
 //! is black to the eye, and does not clear it.
 //!
@@ -81,6 +85,8 @@ const SKIP: u16 = button::CROSS | button::CIRCLE | button::START;
 /// Baseline of the line, and half the sheen's width in letters.
 const LINE_Y: i16 = 150;
 const SHEEN: i32 = 18;
+/// Reads of the VBlank count a frame's wait gives up after (psx-rt's own bound).
+const VBLANK_SPINS: u32 = 4_000_000;
 
 /// Play the splash with `line` under the mark, and return when it has run or been skipped.
 ///
@@ -142,30 +148,37 @@ pub fn show(
             gpu.draw(&overlay);
         }
         gpu.wait_idle();
-        psx_rt::interrupts::wait_vblank();
+        // The installed-only wait: it never reaches `install_vblank_counter` and with it the
+        // I-cache flush, so a program that runs the splash from an overlay can prove its call tree
+        // clean. A program that has not installed the counter asserts in a debug build; in a
+        // release build the bounded wait runs out once and the splash ends.
+        if !psx_rt::interrupts::try_wait_vblank(VBLANK_SPINS) {
+            debug_assert!(
+                false,
+                "psx_splash::show: the VBlank count never advanced; call \
+                 psx_rt::interrupts::install_vblank_counter first"
+            );
+            break;
+        }
         buffers.swap(gpu);
         frame += 1;
     }
     psx_rt::interrupts::set_min_flip_vblanks(cap);
 }
 
-/// Expand the mark into VRAM eight rows at a time (512 bytes of stack, once), and put its
+/// Expand the mark into VRAM sixteen rows at a time (1,024 bytes of stack, once), and put its
 /// palette beside it. Entry 0 of the palette is opaque near-black: the backdrop is black and
 /// 0x0000 is transparent.
 fn upload_mark() {
-    const ROWS: u16 = 8;
-    let mut words = logo::expand(&logo::CODED);
-    let (x, y) = (MARK_TPAGE.x(), MARK_TPAGE.y());
-    for band in 0..(logo::WORDS / 32) as u16 / ROWS {
-        let mut pixels = [0u16; 32 * ROWS as usize];
-        for slot in &mut pixels {
-            *slot = words.next().unwrap_or(0);
-        }
-        upload_16bpp(VramRect::new(x, y + band * ROWS, 32, ROWS), &pixels);
-    }
-    let mut palette = logo::PALETTE;
-    palette[0] = 0x0421;
-    upload_16bpp(VramRect::new(MARK_CLUT.x(), MARK_CLUT.y(), 16, 1), &palette);
+    let mut y = MARK_TPAGE.y();
+    logo::expand(|band| {
+        upload_16bpp(VramRect::new(MARK_TPAGE.x(), y, 32, 16), band);
+        y += 16;
+    });
+    upload_16bpp(
+        VramRect::new(MARK_CLUT.x(), MARK_CLUT.y(), 16, 1),
+        &logo::PALETTE,
+    );
 }
 
 /// The line: a black outline, then each letter as a gradient whose brightness rises toward
@@ -194,7 +207,8 @@ fn draw_line(font: &FontAtlas, mut x: i16, line: &str, head: i32, level: i32) {
             mix((0x68, 0x80, 0x80), near),
             mix((0x38, 0x58, 0x80), near),
         );
-        x += i16::from(font.glyph_advance(ch));
+        // `BASIC` is fixed width and has no advance table, so every glyph advances the same.
+        x += i16::from(font.font().advance_x);
     }
 }
 
@@ -214,29 +228,11 @@ mod tests {
     }
 
     #[test]
-    fn the_mark_expands_to_its_4096_words() {
-        assert_eq!(logo::expand(&logo::CODED).count(), logo::WORDS);
-        assert_eq!(fnv1a(logo::expand(&logo::CODED)), logo::FNV1A);
-    }
-
-    #[test]
-    fn runs_and_literals_expand_in_order() {
-        // 3 x 0x0000, literal 0x1234 0x5678, 4 x 0xBEEF.
-        let coded = [
-            0x80, 0x00, 0x00, 0x01, 0x34, 0x12, 0x78, 0x56, 0x81, 0xef, 0xbe,
-        ];
-        let words: std::vec::Vec<u16> = logo::expand(&coded).collect();
-        assert_eq!(
-            words,
-            [0, 0, 0, 0x1234, 0x5678, 0xbeef, 0xbeef, 0xbeef, 0xbeef]
-        );
-    }
-
-    #[test]
-    fn a_truncated_stream_stops_without_panicking() {
-        assert_eq!(logo::expand(&[0x81, 0xef]).count(), 0);
-        assert_eq!(logo::expand(&[0x01, 0x34, 0x12]).count(), 1);
-        assert_eq!(logo::expand(&[]).count(), 0);
+    fn the_mark_expands_to_its_8_bands_and_its_words() {
+        let mut words = std::vec::Vec::new();
+        logo::expand(|band| words.extend_from_slice(band));
+        assert_eq!(words.len(), logo::WORDS);
+        assert_eq!(fnv1a(words.into_iter()), logo::FNV1A);
     }
 
     #[test]

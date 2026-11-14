@@ -806,6 +806,9 @@ impl FontAtlas {
     /// Atlas layout picks `glyphs_per_row` so the texture's pixel
     /// width stays within `MAX_ATLAS_W_TEXELS`. For 8-wide fonts
     /// that's 32 glyphs per row; 16-wide fonts get 16 per row.
+    ///
+    /// Out of line, so every caller shares one copy.
+    #[inline(never)]
     pub fn upload(font: &'static BitmapFont, tpage: TexturePage, clut: Clut) -> Self {
         assert!(
             matches!(tpage.depth(), TextureDepth::Bit4),

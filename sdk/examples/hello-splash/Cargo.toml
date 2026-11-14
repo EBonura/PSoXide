@@ -1,0 +1,23 @@
+[package]
+name    = "hello-splash"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+
+[workspace]
+
+[[bin]]
+name = "hello-splash"
+path = "src/main.rs"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+
+[dependencies]
+psx-display = { path = "../../crates/psx-display" }
+psx-gpu     = { path = "../../crates/psx-gpu" }
+psx-pad     = { path = "../../crates/psx-pad" }
+psx-rt      = { path = "../../crates/psx-rt" }
+psx-splash  = { path = "../../crates/psx-splash" }
