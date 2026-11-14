@@ -164,8 +164,21 @@ fn deprecated_symbols_are_still_defined_in_the_sdk() {
         }
     }
     for symbol in &profile.deprecated {
+        // `crate::name` must be defined in that crate (`psx_pad` is the directory `psx-pad`).
+        let (haystack, name) = match symbol.split_once("::") {
+            Some((krate, name)) => {
+                let dir = krate.replace('_', "-");
+                let mut own = String::new();
+                for parent in ["sdk/crates", "engine/crates", "crates"] {
+                    own += &fs::read_to_string(root().join(parent).join(&dir).join("src/lib.rs"))
+                        .unwrap_or_default();
+                }
+                (own, name)
+            }
+            None => (sources.clone(), symbol.as_str()),
+        };
         assert!(
-            sources.contains(&format!("fn {symbol}")) || sources.contains(&format!("struct {symbol}")),
+            haystack.contains(&format!("fn {name}")) || haystack.contains(&format!("struct {name}")),
             "deprecated symbol {symbol} is not defined in any SDK crate: delete it from [deprecated]"
         );
     }

@@ -93,6 +93,64 @@ fn advice(kind: &str) -> &'static str {
 }
 
 /// Code of `text` with comments blanked, one entry per line (block comments span lines).
+/// Lines (0-based) of `lines` that use a deprecated item written `krate::name` in the profile.
+///
+/// A line is a use when it names the path (`krate::name`), when it imports the item
+/// (`use krate::{..., name, ...}`), or, in a file that imports it or `krate::*`, when it calls the bare
+/// name as a free function: a definition (`fn name`) and a method call (`.name(`) are the program's own
+/// items and pass. An alias (`name as other`) is not followed.
+fn qualified_hits(lines: &[String], items: &[(String, String)]) -> BTreeSet<usize> {
+    let mut hits = BTreeSet::new();
+    for (krate, name) in items {
+        let path = Regex::new(&format!(
+            r"\b{}::{}\b",
+            regex::escape(krate),
+            regex::escape(name)
+        ))
+        .expect("escaped");
+        let bare = Regex::new(&format!(r"(^|[^.\w:]){}\b", regex::escape(name))).expect("escaped");
+        let word = Regex::new(&format!(r"\b{}\b", regex::escape(name))).expect("escaped");
+        let defined = Regex::new(&format!(r"\bfn\s+{}\b", regex::escape(name))).expect("escaped");
+        let aliased = Regex::new(&format!(r"\b{}\s+as\b", regex::escape(name))).expect("escaped");
+        let starts = Regex::new(&format!(
+            r"^\s*(pub(\([^)]*\))?\s+)?use\s+{}::",
+            regex::escape(krate)
+        ))
+        .expect("escaped");
+        let mut imported = false;
+        let mut in_use = false;
+        let mut use_lines = Vec::new();
+        for (n, line) in lines.iter().enumerate() {
+            if starts.is_match(line) {
+                in_use = true;
+            }
+            if in_use {
+                if word.is_match(line) && !aliased.is_match(line) {
+                    imported = true;
+                    hits.insert(n);
+                }
+                if line.contains('*') {
+                    imported = true;
+                }
+                use_lines.push(n);
+                if line.contains(';') {
+                    in_use = false;
+                }
+            } else if path.is_match(line) {
+                hits.insert(n);
+            }
+        }
+        if imported {
+            for (n, line) in lines.iter().enumerate() {
+                if !use_lines.contains(&n) && bare.is_match(line) && !defined.is_match(line) {
+                    hits.insert(n);
+                }
+            }
+        }
+    }
+    hits
+}
+
 fn code_lines(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut in_block = 0usize;
@@ -334,12 +392,17 @@ pub fn check(
         Regex::new(VECTOR).expect("valid"),
         Regex::new(COP0).expect("valid"),
     );
-    let deprecated = (!profile.deprecated.is_empty()).then(|| {
-        let names: Vec<String> = profile
-            .deprecated
-            .iter()
-            .map(|s| regex::escape(s))
-            .collect();
+    // A bare name matches wherever it appears; `krate::name` matches only the item of that crate
+    // (see `qualified_hits`).
+    let (qualified, bare): (Vec<&String>, Vec<&String>) =
+        profile.deprecated.iter().partition(|s| s.contains("::"));
+    let qualified: Vec<(String, String)> = qualified
+        .into_iter()
+        .filter_map(|s| s.split_once("::"))
+        .map(|(krate, name)| (krate.to_string(), name.to_string()))
+        .collect();
+    let deprecated = (!bare.is_empty()).then(|| {
+        let names: Vec<String> = bare.iter().map(|s| regex::escape(s)).collect();
         Regex::new(&format!(r"\b({})\b", names.join("|"))).expect("escaped names")
     });
     // A probe program measures the hardware: it is exempt from the three line rules.
@@ -410,7 +473,9 @@ pub fn check(
                 continue;
             };
             let item = relative(&file, workspace_root);
-            for (n, code) in code_lines(&text).iter().enumerate() {
+            let lines = code_lines(&text);
+            let qualified_lines = qualified_hits(&lines, &qualified);
+            for (n, code) in lines.iter().enumerate() {
                 for (kind, pattern) in &line_rules {
                     if pattern.is_match(code) {
                         hits.push(Hit {
@@ -420,6 +485,17 @@ pub fn check(
                             text: code.trim().chars().take(100).collect(),
                         });
                     }
+                }
+                // A line the bare-name rule already counted is not counted twice.
+                if qualified_lines.contains(&n)
+                    && !deprecated.as_ref().is_some_and(|p| p.is_match(code))
+                {
+                    hits.push(Hit {
+                        kind: "deprecated-use",
+                        item: item.clone(),
+                        line: Some(n as u32 + 1),
+                        text: code.trim().chars().take(100).collect(),
+                    });
                 }
             }
         }
@@ -1026,5 +1102,36 @@ mod tests {
         assert!(run_check(&f, &with, &listed).violations.is_empty());
         // No list of symbols: nothing to find.
         assert!(run_check(&f, &profile(""), NOTHING).violations.is_empty());
+    }
+
+    #[test]
+    fn a_qualified_deprecated_symbol_matches_the_sdk_item_and_not_a_programs_own_method() {
+        let with = profile("[deprecated]\nsymbols = [\"psx_pad::poll_two\"]\n");
+        let own = "struct S;\nimpl S {\n    fn poll_two(&self) -> u8 { 0 }\n    fn f(&self) { let _ = self.poll_two(); }\n}\nfn g(s: &S) { s.poll_two(); }\n";
+        let f = fixture("qual-own", own, &["runtime"], &[]);
+        assert!(
+            run_check(&f, &with, NOTHING).violations.is_empty(),
+            "a program's own method passes"
+        );
+        let path = "fn f() { let _ = psx_pad::poll_two(); }\n";
+        let f = fixture("qual-path", path, &["runtime"], &[]);
+        let out = run_check(&f, &with, NOTHING);
+        assert_eq!(out.violations.len(), 1, "{:?}", out.violations);
+        assert!(out.violations[0].contains("deprecated-use"));
+        let imported = "use psx_pad::{poll_two, Port};\nfn f() { let _ = poll_two(); }\n";
+        let f = fixture("qual-use", imported, &["runtime"], &[]);
+        let out = run_check(&f, &with, NOTHING);
+        assert!(
+            out.violations.iter().any(|v| v.contains("deprecated-use")),
+            "{:?}",
+            out.violations
+        );
+        let glob = "use psx_pad::*;\nfn f() { let _ = poll_two(); }\n";
+        let f = fixture("qual-glob", glob, &["runtime"], &[]);
+        assert!(!run_check(&f, &with, NOTHING).violations.is_empty());
+        // Its own method next to an import of something else from the crate still passes.
+        let both = "use psx_pad::Port;\nstruct S;\nimpl S { fn poll_two(&self) {} }\nfn f(s: &S) { s.poll_two(); }\n";
+        let f = fixture("qual-other", both, &["runtime"], &[]);
+        assert!(run_check(&f, &with, NOTHING).violations.is_empty());
     }
 }

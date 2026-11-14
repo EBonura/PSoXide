@@ -29,7 +29,7 @@ The messages cite these. They are the SDK's standard for a program that links it
 | `register-literal` | A hardware-window address literal (`0x1F80`, `0xBF80`, `0x9F80`, `1F80_`, `1F80xxxxh`) in code a program owns (comments excluded). | 3 |
 | `vector-write` | `0x8000_0080` / `0xA000_0080` or `declare_stack_safe_handler` in a program's own code. | 3 |
 | `cop0-asm` | `mfc0`, `mtc0`, `rfe`, `cfc0`, `ctc0` in a program's own code. | 3 |
-| `deprecated-use` | A call of a legacy SDK entry point (`[deprecated]` in `sdk/profile.toml`) in code a program owns. Matched by name (`\bsymbol\b`), so a function of another crate with the same name is a hit too; list it. | 1 |
+| `deprecated-use` | A call of a legacy SDK entry point (`[deprecated]` in `sdk/profile.toml`) in code a program owns. Matched by name (`\bsymbol\b`), so a function of another crate with the same name is a hit too; list it. A symbol written `crate::name` in the table matches only the item of that crate: the path `crate::name`, an import of it (`use crate::{..., name}`) and, in a file that imports it or `crate::*`, a bare call; a function the program defines itself and a method call of that name pass. | 1 |
 | `private-copy` | A package named `psx-*`, `psxed*` or `psoxide*` in the program's graph whose manifest is not under the SDK. | 1, 3 |
 | `no-receipt` | A disc builder is given an executable that did not come through `psoxide-pgo apply`. | 2, 3 |
 

@@ -42,7 +42,7 @@ programs = ["hardware-tests"]
 
 # Legacy entry points that a program may still call only while its exceptions list the call.
 [deprecated]
-symbols = ["poll_port1", "poll_port2", "PadReader", "poll_on", "poll_rumble_on", "enable_analog_on", "enable_analog_port1", "enable_analog_port2", "require_analog_on", "require_analog_port1", "enable_rumble_on", "enable_analog"]
+symbols = ["poll_port1", "psx_pad::poll_port2", "PadReader", "poll_on", "poll_rumble_on", "enable_analog_on", "enable_analog_port1", "enable_analog_port2", "require_analog_on", "require_analog_port1", "enable_rumble_on", "enable_analog"]
 
 [[exception]]
 program = "editor-playtest"
