@@ -62,8 +62,11 @@ An interrupt between the two halves does nothing to the port: no handler in the
 SDK touches SIO0. Hardware-tests step `SIO0 SELECT EARLY` (records
 `0x6F0`-`0x6F4`) is the console's verdict on all of this.
 
-An empty socket answers `0xFF` and never pulses `/ACK`; `Controllers` probes it
-once in 60 polls, so it costs a game almost nothing.
+An empty socket answers `0xFF` and never pulses `/ACK`; `Controllers` polls a port that has not answered every
+time for its first 128 such answers (after boot, and after a pad leaves), so that a pad slow to come up is read from
+its first answer (PCSX-ReARMed's DualShock answers like an empty socket for its first 33 video frames), and then probes it
+once in 60 polls, so it costs a game almost nothing. The 128 failed polls of an empty socket cost about 20,000
+cycles each in the emulator's model, once.
 
 ## What it costs
 

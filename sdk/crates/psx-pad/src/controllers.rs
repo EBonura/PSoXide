@@ -20,8 +20,9 @@
 //!   the handshake like a DualShock but still reports digital is asked again, [`RETRIES`]
 //!   times at most, each a handshake of its own (a few video frames) after the last. A
 //!   digital pad, which answers no configuration packet in full, is never asked again.
-//! * A port that did not answer is not polled again for 59 polls, then probed once: an
-//!   empty port 2 costs one probe a second, not one every frame. A pad that was there has
+//! * A port that did not answer is polled every time for its first [`EAGER_PROBES`] such answers
+//!   (a pad that is slow to come up is read from its first answer), then not polled again for 59
+//!   polls and probed once: an empty port 2 costs one probe a second, not one every frame. A pad that was there has
 //!   its absence confirmed by four tries before it is believed. No select is left open on
 //!   an empty port, so a pad plugged in always sees a fresh one.
 //! * A packet that fails part way returns the last clean state, so a held button is never
@@ -49,6 +50,17 @@ use psx_io::controller_port::{Timing, Transport};
 
 /// Polls an absent port is left alone between probes: one probe in 60.
 const ABSENT_SKIP: u8 = 59;
+
+/// Answers of "nobody there" a port gives, from boot or from the moment a pad left it, before it
+/// is probed only once in 60 polls: until then it is polled every time, so a pad that is slow
+/// to come up is read from its first answer. PCSX-ReARMed's DualShock acknowledges the address
+/// byte and answers 0xFF to the command byte, which is what an empty socket does on that port,
+/// until about 33 video frames have gone by (31 to 33 whether a game polls once, twice or four
+/// times a frame: the silence is time, not polls); a probe every 60 polls made it ignore the pad
+/// for 120 polls. The window covers a game that polls twice a frame with a margin of two. An
+/// empty port pays this many failed polls once (about 20,000 cycles each in the emulator's model
+/// of an empty socket).
+const EAGER_PROBES: u8 = 128;
 
 /// Packets sent again to a pad that answered the handshake like a DualShock and is not analog
 /// after it, at most for a plug-in: the whole handshake to one that reports digital, the exit
@@ -87,6 +99,9 @@ enum Sequence {
 struct Slot {
     /// Polls left before an absent port is probed again.
     skip: u8,
+    /// "Nobody there" answers since boot or since a pad was last present, up to
+    /// [`EAGER_PROBES`].
+    unanswered: u8,
     /// A pad answered the last probe; the handshake has run on it.
     present: bool,
     /// The motors were mapped on the pad now in the port.
@@ -101,6 +116,7 @@ struct Slot {
 impl Slot {
     const NEW: Self = Self {
         skip: 0,
+        unanswered: 0,
         present: false,
         mapped: false,
         rumble: Rumble::OFF,
@@ -141,9 +157,17 @@ impl Slot {
             // A garbled packet: the last clean state stands.
             PadMode::Unknown => {}
             PadMode::Disconnected => {
+                if self.present {
+                    self.unanswered = 0;
+                }
                 self.present = false;
                 self.mapped = false;
-                self.skip = ABSENT_SKIP;
+                self.skip = if self.unanswered < EAGER_PROBES {
+                    self.unanswered += 1;
+                    0
+                } else {
+                    ABSENT_SKIP
+                };
                 *last = state;
             }
             _ => {
@@ -472,24 +496,42 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_port_is_probed_once_in_sixty_polls() {
+    fn an_empty_port_is_polled_every_time_at_first_and_then_probed_once_in_sixty_polls() {
         let mut bus = TwoPorts::new(dualshock(0), empty());
         let mut pads = Controllers::new();
-        for _ in 0..60 {
+        for n in 1..=usize::from(EAGER_PROBES) + 1 {
             let [_, two] = both(&mut pads, &mut bus);
             assert_eq!(two.mode, PadMode::Disconnected);
+            assert_eq!(bus.selects[1], n, "every early poll probes");
         }
-        assert_eq!(bus.selects[1], 1, "one probe in the first 60 polls");
+        let probed = bus.selects[1];
+        for _ in 0..59 {
+            both(&mut pads, &mut bus);
+        }
+        assert_eq!(bus.selects[1], probed, "then 59 polls leave the port alone");
         both(&mut pads, &mut bus);
-        assert_eq!(bus.selects[1], 2, "the 61st poll probes again");
+        assert_eq!(bus.selects[1], probed + 1, "and the 60th probes again");
         assert_eq!(pads.analog(Port::Two), AnalogRequirement::Absent);
     }
 
     #[test]
-    fn a_pad_plugged_in_later_gets_the_handshake_at_the_next_probe() {
+    fn a_pad_plugged_in_later_gets_the_handshake_at_the_next_poll() {
         let mut bus = TwoPorts::new(dualshock(0), empty());
         let mut pads = Controllers::new();
         both(&mut pads, &mut bus);
+        bus.model(1, |m| *m = dualshock(button::START));
+        let [_, two] = both(&mut pads, &mut bus);
+        assert!(two.is_analog() && two.buttons.bits() == button::START);
+        assert_eq!(command_count(&mut bus, 1, 0x44), 1);
+    }
+
+    #[test]
+    fn a_pad_plugged_in_after_the_early_probes_waits_for_the_next_probe() {
+        let mut bus = TwoPorts::new(dualshock(0), empty());
+        let mut pads = Controllers::new();
+        for _ in 0..=EAGER_PROBES {
+            both(&mut pads, &mut bus);
+        }
         bus.model(1, |m| *m = dualshock(button::START));
         for _ in 0..59 {
             assert_eq!(both(&mut pads, &mut bus)[1].mode, PadMode::Disconnected);
@@ -497,6 +539,79 @@ mod tests {
         let [_, two] = both(&mut pads, &mut bus);
         assert!(two.is_analog() && two.buttons.bits() == button::START);
         assert_eq!(command_count(&mut bus, 1, 0x44), 1);
+    }
+
+    /// PCSX-ReARMed's DualShock, as the wire log of the first polls records it: the address byte
+    /// is acknowledged, the command byte is answered 0xFF and not acknowledged (an empty socket
+    /// on that port looks the same) until 33 video frames have gone by, then the pad answers as a
+    /// digital pad. The test sets the ID by the poll the game asks for, whether or not the
+    /// driver puts it on the wire, as the pad's readiness depends on time and not on polls.
+    fn slow_to_answer(buttons: u16) -> Model {
+        Model {
+            id: 0xff,
+            dualshock: true,
+            buttons,
+            latch_only: true,
+            latch_free_bytes: 2,
+            empty_latches: true,
+            ..Model::default()
+        }
+    }
+
+    #[test]
+    fn a_pad_slow_to_answer_is_read_from_its_first_answer_at_one_and_two_polls_a_frame() {
+        for per_frame in [1, 2] {
+            for digital in [true, false] {
+                let ready = 33 * per_frame;
+                let mut bus = TwoPorts::new(slow_to_answer(button::CROSS), empty());
+                let mut digital_pads = Controllers::digital();
+                let mut pads = Controllers::new();
+                let mut first = None;
+                for n in 0..400 {
+                    bus.model(0, |m| m.id = if n < ready { 0xff } else { 0x41 });
+                    let state = if digital {
+                        *digital_pads.poll(&mut bus, Port::One)
+                    } else {
+                        *pads.poll(&mut bus, Port::One)
+                    };
+                    if state.buttons.bits() == button::CROSS {
+                        first = Some(n);
+                        break;
+                    }
+                }
+                assert_eq!(
+                    first,
+                    Some(ready),
+                    "{per_frame} polls a frame, digital {digital}: read at the first answer"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_pad_that_goes_away_is_confirmed_absent_and_then_polled_early_and_skipped_late() {
+        let mut bus = TwoPorts::new(dualshock(button::CROSS), empty());
+        let mut pads = Controllers::new();
+        pads.poll(&mut bus, Port::One);
+        bus.model(0, |m| m.id = 0xff);
+        let before = bus.selects[0];
+        let one = *pads.poll(&mut bus, Port::One);
+        assert_eq!(one.mode, PadMode::Disconnected);
+        // Four tries; with the select left open, the first is on it.
+        let fresh = if SELECT_EARLY { 3 } else { 4 };
+        assert_eq!(
+            bus.selects[0] - before,
+            fresh,
+            "four tries confirm the absence"
+        );
+        for _ in 0..EAGER_PROBES {
+            let before = bus.selects[0];
+            pads.poll(&mut bus, Port::One);
+            assert_eq!(bus.selects[0], before + 1, "then every poll probes once");
+        }
+        let before = bus.selects[0];
+        pads.poll(&mut bus, Port::One);
+        assert_eq!(bus.selects[0], before, "then the port is skipped");
     }
 
     #[test]
@@ -536,27 +651,6 @@ mod tests {
             let last = *m.motor_tx.last().unwrap();
             assert_eq!((last.0, last.1, last.2), (0x73, 1, 0x80));
         });
-    }
-
-    #[test]
-    fn a_pad_that_goes_away_is_confirmed_absent_and_then_skipped() {
-        let mut bus = TwoPorts::new(dualshock(button::CROSS), empty());
-        let mut pads = Controllers::new();
-        pads.poll(&mut bus, Port::One);
-        bus.model(0, |m| m.id = 0xff);
-        let before = bus.selects[0];
-        let one = *pads.poll(&mut bus, Port::One);
-        assert_eq!(one.mode, PadMode::Disconnected);
-        // Four tries; with the select left open, the first is on it.
-        let fresh = if SELECT_EARLY { 3 } else { 4 };
-        assert_eq!(
-            bus.selects[0] - before,
-            fresh,
-            "four tries confirm the absence"
-        );
-        let before = bus.selects[0];
-        pads.poll(&mut bus, Port::One);
-        assert_eq!(bus.selects[0], before, "then the port is skipped");
     }
 
     #[test]
