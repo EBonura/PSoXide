@@ -98,6 +98,7 @@ impl PadTracker {
 
     /// The buttons held on the frame before the last [`update`](Self::update),
     /// as polled (suppression does not hide them here).
+    #[must_use]
     pub const fn previous(&self) -> u16 {
         self.prev
     }

@@ -21,10 +21,15 @@ const TOP: usize = 30;
 
 /// Which output section an input section was placed in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
 pub enum Kind {
+    /// `.text`.
     Text,
+    /// `.data`, which holds the read-only data too.
     Data,
+    /// `.bss`.
     Bss,
+    /// An `.overlay.*` section, stored on the disc.
     Overlay,
 }
 
@@ -62,8 +67,11 @@ impl Kind {
 
 /// One input section placed in the image.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Item {
+    /// The output section it was placed in.
     pub kind: Kind,
+    /// Its size in bytes.
     pub size: u32,
     /// Crate the object file belongs to (`game_name`, `psx_gpu`, ...).
     pub krate: String,
@@ -73,13 +81,19 @@ pub struct Item {
 
 /// The sections of a link map as [`Item`]s, plus the figures the headline needs.
 #[derive(Debug, Default)]
+#[non_exhaustive]
 pub struct Ram {
+    /// Every placed input section of a known output section.
     pub items: Vec<Item>,
-    /// Size of each output section, padding included.
+    /// Size of the `.text` output section, padding included.
     pub text_total: u32,
+    /// Size of the `.data` output section.
     pub data_total: u32,
+    /// Size of the `.bss` output section.
     pub bss_total: u32,
+    /// Bytes between `__heap_start` and the stack reserve.
     pub free: Option<u32>,
+    /// `STACK_RESERVE` from the map.
     pub stack_reserve: Option<u32>,
 }
 
@@ -109,6 +123,7 @@ fn item_name(sec: &Section) -> String {
 
 /// Read a map: placed input sections by output section, the section totals,
 /// the stack reserve and the free RAM.
+#[must_use]
 pub fn read(map: &LinkMap) -> Ram {
     let mut ram = Ram::default();
     for out in &map.outputs {
@@ -192,6 +207,7 @@ fn table(out: &mut String, title: &str, rows: BTreeMap<String, u32>, limit: usiz
 }
 
 /// The full report. The first line is the number a budget gate reads.
+#[must_use]
 pub fn report(ram: &Ram) -> String {
     let mut out = String::new();
     let free = ram.free.unwrap_or(0);
@@ -247,6 +263,7 @@ pub fn report(ram: &Ram) -> String {
 /// Every placed input section, one per line: `kind size crate name`, largest
 /// first, tab separated. For diffing two links or finding a symbol the report
 /// folded away.
+#[must_use]
 pub fn items(ram: &Ram) -> String {
     let mut rows: Vec<&Item> = ram.items.iter().collect();
     rows.sort_by(|a, b| b.size.cmp(&a.size).then(a.name.cmp(&b.name)));
@@ -265,6 +282,7 @@ pub fn items(ram: &Ram) -> String {
 }
 
 /// A budget file: the first number on the first non-comment line is the floor.
+#[must_use]
 pub fn parse_floor(text: &str) -> Option<u32> {
     text.lines()
         .map(str::trim)

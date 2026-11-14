@@ -28,6 +28,7 @@ const DPAD: u16 = button::LEFT | button::RIGHT | button::UP | button::DOWN;
 
 /// How [`StickDpad`] judges a reading.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum StickShape {
     /// Each axis against its own threshold: a diagonal push sets two bits.
     PerAxis,
@@ -54,11 +55,13 @@ pub struct StickDpad {
 
 impl StickDpad {
     /// A per-axis fold: each axis registers past `enter` and releases inside `exit`.
+    #[must_use]
     pub const fn per_axis(enter: i16, exit: i16) -> Self {
         Self::new(StickShape::PerAxis, enter, exit)
     }
 
     /// A radial fold: one direction, entered past radius `enter`, released inside `exit`.
+    #[must_use]
     pub const fn radial(enter: i16, exit: i16) -> Self {
         Self::new(StickShape::Radial, enter, exit)
     }

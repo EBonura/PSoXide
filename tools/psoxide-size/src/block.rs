@@ -11,15 +11,23 @@ const HEADER_LEN: usize = 0x800;
 /// What identifies a block: magic, version word, total length, and the name the
 /// address is reported under.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Spec {
+    /// The four magic bytes at the start of the block.
     pub magic: [u8; 4],
+    /// The version word that follows the magic.
     pub version: u32,
+    /// The block's total length in bytes, also stored in its third word.
     pub len: usize,
+    /// The name the address is reported under.
     pub name: String,
 }
 
 impl Spec {
     /// Parse `MAGIC:VERSION:LEN:NAME`, for example `GATE:1:256:GAME_GATE_STATE`.
+    ///
+    /// # Errors
+    /// The text is not four fields, the magic is not four bytes, or a number does not parse.
     pub fn parse(text: &str) -> Result<Spec, String> {
         let bad = || format!("block spec `{text}` is not MAGIC:VERSION:LEN:NAME");
         let mut parts = text.splitn(4, ':');
@@ -52,6 +60,9 @@ fn word(bytes: &[u8], offset: usize) -> Result<u32, String> {
 }
 
 /// The address of the one initialised block `spec` describes in `exe`.
+///
+/// # Errors
+/// `exe` is not a PS-X EXE with its whole payload, or the block is missing or ambiguous.
 pub fn locate(exe: &[u8], spec: &Spec) -> Result<u32, String> {
     if exe.get(..8) != Some(b"PS-X EXE") {
         return Err("input is not a PS-X EXE".into());

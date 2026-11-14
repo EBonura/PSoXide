@@ -88,6 +88,7 @@ impl LinkMap {
     }
 
     /// `STACK_RESERVE`, the bytes the link keeps for the stack below `STACK_INIT`.
+    #[must_use]
     pub fn stack_reserve(&self) -> Option<u32> {
         self.eval("STACK_RESERVE", 0)
     }
