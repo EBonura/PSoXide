@@ -122,7 +122,13 @@ impl Slot {
         // and the poll after an exit sent to a pad parked in configuration mode (the
         // SCPH-110 failure, retried a bounded number of times).
         let state = loop {
-            let state = poll_state(bus, socket, confirm, self.rumble, opened.take());
+            let state = poll_state(
+                bus,
+                socket,
+                confirm,
+                if ANALOG { self.rumble } else { Rumble::OFF },
+                opened.take(),
+            );
             if !ANALOG || (state.mode == PadMode::Analog && self.present) {
                 break state;
             }

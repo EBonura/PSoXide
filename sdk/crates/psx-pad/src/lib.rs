@@ -631,6 +631,7 @@ pub enum Pacing {
 /// per-byte `/ACK` observations so a diagnostic can show whether the controller
 /// acknowledges each byte, and which pacing produced a clean handshake.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(align(4))]
 pub struct RawPoll {
     /// ID low byte: 0x41 digital, 0x73 analog, 0xF3 config, 0xFF none.
     pub id_low: u8,
