@@ -83,9 +83,10 @@ Of the 16,129, 15,471 are the nine bytes on the wire (each byte's
 
 `Controllers` sends the three configuration packets one video frame apart, as
 Sony's libpad does, the first time a pad answers on a port: at boot, and when a
-pad is plugged in later (about four frames). A game that wants analog mode again
-later calls `Ctx::enable_analog`. A pad parked in configuration mode (the SCPH-110
-failure) gets the exit again.
+pad is plugged in later (about four frames). A pad that stays digital after the
+handshake is asked again by `Controllers` itself (see below), and so is one parked in
+configuration mode (the SCPH-110 failure), which gets the exit again.
+`Ctx::enable_analog` is deprecated.
 
 ### A pad left digital
 

@@ -309,7 +309,13 @@ impl Ctx {
     /// Ask the pad on `port` for analog mode and lock it there.
     ///
     /// This is `psx_pad::enable_analog_on`, which blocks for a few frames and
-    /// returns whether the pad took it.
+    /// returns whether the pad took it. Its three configuration packets are not
+    /// protected from interrupts, which `psx_pad::Controllers` does; polling
+    /// through the context does the handshake, and asks again of a pad that
+    /// stays digital, with no call from the program.
+    #[deprecated(
+        note = "`Ctx::poll_pad` runs the analog handshake with interrupts masked on a pad's first answer"
+    )]
     pub fn enable_analog(&mut self, port: Port) -> bool {
         psx_pad::enable_analog_on(self.controller_port(), port)
     }
