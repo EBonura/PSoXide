@@ -7,10 +7,12 @@
 use psx_hw::gpu::{GpuStat, GP0, GP1, GPUREAD, GPUSTAT};
 
 mod handoff;
+#[cfg(not(target_arch = "mips"))]
+pub use handoff::set_direct_access_guard;
 pub use handoff::{
     arm_direct_access_guard, is_recording, pause_recording, run_direct_access_guard,
-    set_direct_access_guard, start_recording_raw, ActiveRecording, CommandRecording,
-    RecordingOverflow, RecordingPause, RECORDING_NODE_WORDS,
+    start_recording_raw, ActiveRecording, CommandRecording, RecordingOverflow, RecordingPause,
+    RECORDING_NODE_WORDS,
 };
 
 /// Push a drawing or VRAM command word, or one of its parameters, to the

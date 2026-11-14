@@ -14,13 +14,15 @@
 //!   touches the buffer of a recording that is no longer open.
 //! - **Direct-access guard.** Once armed ([`arm_direct_access_guard`]), the
 //!   first direct command or display-control write, or GPU DMA address
-//!   store, runs the registered guard function first, which waits until no
-//!   queued walk can collide with the access.
+//!   store, runs the guard first, which waits until no queued walk can
+//!   collide with the access. On the console the guard is psx-rt's
+//!   `__psx_rt_direct_access_guard`, called by name (so a stack proof sees no
+//!   call through a register); the host runs a registered function.
 //!
 //! Both states share one flag, so a plain port write costs one extra load
 //! and branch.
 
-use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
+use core::ptr::{addr_of, addr_of_mut, read_volatile};
 
 /// Payload words per recorded linked-list node. Silicon (hardware-tests
 /// v1.24) loses words from DMA nodes longer than 16 while drawing.
@@ -65,7 +67,8 @@ static mut RECORDING: Recording = Recording {
 static mut SLOW: bool = false;
 #[cfg_attr(target_arch = "mips", link_section = ".data")]
 static mut GUARD_ARMED: bool = false;
-#[cfg_attr(target_arch = "mips", link_section = ".data")]
+// The host runs the registered function; the console calls psx-rt's guard by name and has no pointer.
+#[cfg(not(target_arch = "mips"))]
 static mut GUARD: Option<fn()> = None;
 
 #[cfg_attr(target_arch = "mips", link_section = ".data")]
@@ -458,14 +461,17 @@ fn record_words(words: &[u32]) {
     }
 }
 
-/// Register the function that makes direct GPU access safe while a queued
-/// frame may be walking (`psx_rt::present` registers its `wait_idle`). It
+/// Host only: register the function that makes direct GPU access safe while a queued
+/// frame may be walking (`psx_rt::present` registers its `wait_idle`). On the console
+/// there is no registration: `run_armed_guard` calls psx-rt's `__psx_rt_direct_access_guard`
+/// by name, so one mechanism runs there and no call goes through a register. It
 /// runs once, on the first direct command or display-control write or GPU
 /// DMA address store after [`arm_direct_access_guard`], and is then
 /// disarmed.
+#[cfg(not(target_arch = "mips"))]
 pub fn set_direct_access_guard(guard: fn()) {
     // SAFETY: a volatile write of this module's static.
-    unsafe { write_volatile(addr_of_mut!(GUARD), Some(guard)) };
+    unsafe { core::ptr::write_volatile(addr_of_mut!(GUARD), Some(guard)) };
 }
 
 /// Arm the guard: the GPU may be busy with work the CPU handed off, so the
@@ -500,7 +506,9 @@ fn run_armed_guard() {
     // On the console the guard is one known function, called directly, so a call tree that
     // reaches this path has no call through a register to bound.
     #[cfg(target_arch = "mips")]
-    // SAFETY: `psx-rt` defines the symbol; every program links it.
+    // SAFETY: `psx-rt` defines the symbol (psx-rt/src/present.rs). A console program that links
+    // psx-io links psx-rt; one that did not would fail to link, with an undefined-symbol error
+    // naming `__psx_rt_direct_access_guard`, which is the failure wanted (see sdk/docs/PRESENT.md).
     unsafe {
         __psx_rt_direct_access_guard()
     }

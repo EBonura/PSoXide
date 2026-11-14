@@ -47,6 +47,7 @@ lint:
 	sh tools/guest_symbol_gate_test.sh
 	sh tools/wide_gate.sh
 	sh tools/splash_gate.sh
+	sh tools/guard_stack_gate.sh
 	cargo run --locked -q -p xtask -- check-mfc0 sdk engine
 	cargo run --locked -q -p psoxide-dev -- lint-policy-guard
 	cargo run --locked -q -p psoxide-dev -- runtime-numeric-guard

@@ -82,3 +82,23 @@ and remain only so an old manifest resolves. A direct flip (`DoubleBuffer::swap`
   `present_blocking` where the frame must be on screen before the program goes on).
 - A split-screen frame that holds its flip by hand: two parts and `set_cap`.
 - `set_min_flip_vblanks(n)`: `present::set_cap(PresentCap::every_vblanks(n))`.
+
+## The direct-access guard on the console
+
+Once a chain has been handed over, the first direct GPU access (a port write, a GPU DMA address
+store) waits until the walk is done. On the console that wait is `psx_rt::present::
+__psx_rt_direct_access_guard`, which `psx_io::gpu` calls **by name**, not through a registered
+pointer: a call tree that reaches a direct write then holds no call through a register, which the
+stack proofs of overlay and scratchpad-stack code (`stack-guard`) require. The host build keeps a
+registered function (`set_direct_access_guard`, host only).
+
+What this relies on: **a console program that links `psx-io` also links `psx-rt`**, which holds the
+symbol and the whole present path (it is compiled unconditionally). A program that did not would fail
+to link with an undefined symbol named `__psx_rt_direct_access_guard`, which is the right failure.
+A program that never arms the guard (no `Presenter`) does not link the guard's call chain at all: the
+slow branch of each port write is dropped, and its image is byte for byte what it was.
+
+`tools/guard_stack_gate.sh` (part of `make lint`) keeps it true: it builds `hello-present`, which arms
+the guard and writes directly, and runs `stack-guard` on the call tree rooted at a direct write
+(`psx_io::gpu::handoff::write_command_slow`), failing if the tree calls through a register or does
+not reach the guard's wait. A later change that put a pointer back fails there, in the SDK.

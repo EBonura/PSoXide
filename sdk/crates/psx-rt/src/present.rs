@@ -454,6 +454,7 @@ impl Presenter {
     /// cleared to before its first part draws (`None`: not cleared).
     #[must_use]
     pub fn new(clear: Option<(u8, u8, u8)>) -> Presenter {
+        #[cfg(not(target_arch = "mips"))]
         psx_io::gpu::set_direct_access_guard(wait_idle);
         #[cfg(target_arch = "mips")]
         {
