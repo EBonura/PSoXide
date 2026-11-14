@@ -27,6 +27,7 @@ use crate::console_tests::record;
 use crate::{gpu_read_word_at, push_timing_record, TimingRecord, TIMING_RECORD_COUNT};
 use psx_gpu::display::{DoubleBuffer, Resolution};
 use psx_gpu::prim::FillRect;
+use psx_io::cd::reader::SectorReader;
 use psx_io::timers::{self, Timer};
 use psx_rt::present::{self, Part, PresentCap, PresentStats, Presenter};
 use psx_rt::{dispatch, interrupts, tty};
@@ -51,6 +52,7 @@ static mut ARENAS: [[u32; ARENA_WORDS]; 2] = [[0; ARENA_WORDS]; 2];
 // The hook's state. It only reads and writes these while `RUNNING` is set; the
 // thread writes `FIRST_PART` before each frame's first submit and reads the rest
 // once `RUNNING` is clear.
+static mut READER: SectorReader = SectorReader::with_cd(unsafe { psx_io::periph::Cd::steal() });
 static mut RUNNING: bool = false;
 static mut KICK_BASE: u32 = 0;
 static mut FLIP_BASE: u32 = 0;
@@ -379,8 +381,8 @@ fn drawn(presenter: &mut Presenter, buffers: &mut DoubleBuffer, frame: &mut u32,
 /// sectors of a read and a drawn frame after it. Sectors read correctly, failed reads tried again,
 /// reads that failed twice.
 fn cd_reads(mut show: Option<(&mut Presenter, &mut DoubleBuffer, &mut u32, &mut u32)>) -> (u32, u32, u32) {
-    // SAFETY: single thread; the suite owns the drive for the step (as `cd_stop`).
-    let reader = unsafe { &mut *addr_of_mut!(crate::cd_stop::READER) };
+    // SAFETY: single thread; the suite owns the drive for the step.
+    let reader = unsafe { &mut *addr_of_mut!(READER) };
     let (mut sectors, mut retries, mut errors) = (0u32, 0u32, 0u32);
     for read in 0..CD_READS {
         let count = 1 + read % 8;

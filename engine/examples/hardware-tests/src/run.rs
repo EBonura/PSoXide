@@ -690,7 +690,6 @@ records_step!(records_sio_pad, sio_timing::pad_timing);
 records_step!(records_sio_card, sio_timing::card_timing);
 records_step!(records_sio_latch, sio_timing::latch_and_arm);
 records_step!(records_sio_early, sio_timing::select_early);
-records_step!(records_cd_stop, cd_stop::run);
 records_step!(records_sio_config_irq, config_irq::run);
 records_step!(records_sio_digital_first, digital_first::run);
 records_step!(records_present_path, present_path::run);
@@ -856,7 +855,9 @@ const STEPS: &[Step] = &[
     step(Area::Cd, "STREAM COST", step_stream_cost),
     step(Area::Cd, "CD-DA HANDOFF", step_stream_handoff),
     step(Area::Cd, "CD PAUSE SECOND RESPONSE", step_cd_pause),
-    step(Area::Cd, "CD STOP AT ACKNOWLEDGE", records_cd_stop),
+    // Retired in v2.19 with its verdict: step CD STOP AT ACKNOWLEDGE, records 0x6F8 to 0x6FB (cd_stop_mixed_waits,
+    // cd_stop_mixed_early, cd_stop_single_waits, cd_stop_single_early). The ids are not reused and the decoder
+    // keeps the names so captures of v2.14 to v2.18 read.
     step(Area::Cd, "PRESENT UNDER CD AND FLUSH", records_present_cd),
     // 7
     step(Area::Sio, "SIO CASES", tests_sio),

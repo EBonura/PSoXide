@@ -653,6 +653,7 @@ fn build() -> BTreeMap<u32, V2Entry> {
         "present_cache_flush",
         ["frames_flipped", "parts_kicked", "tears_recoveries_faults"],
     );
+    // Retired in v2.19 (the step is gone); the names stay so captures of v2.14 to v2.18 decode.
     for (case, tag) in ["mixed_waits", "mixed_early", "single_waits", "single_early"]
         .iter()
         .enumerate()
