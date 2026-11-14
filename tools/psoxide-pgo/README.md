@@ -442,8 +442,10 @@ compile:
 		-- $(GAME_CARGO)
 ```
 
-`apply` reads `__bss_end` from each link's map (free = 0x801F8000, the end
-of psoxide.ld's RAM region, minus `__bss_end`), ships the first variant that
+`apply` reads `__bss_end` from each link's map (free = `STACK_INIT - STACK_RESERVE`, as
+the map assigns them and the lowest address the stack may reach, minus
+`__bss_end`; 0x801F7F00 in psoxide.ld, 256 bytes under the end of its RAM
+region), ships the first variant that
 keeps the floor, prints which, and writes it to `shipped-variant.txt` in the
 work directory. When none does, the build stops. Record the shipped variant
 with the build: a later profile can land on another rung.
@@ -494,8 +496,8 @@ Failed rows and rows missing a ranked column go last, unranked. A gate
 without `vblanks` is ranked by `work`, and one with neither stays in build
 order.
 
-**RAM.** Every row shows `free_ram`, the bytes between `__bss_end` and the end
-of psoxide.ld's RAM region in that variant's link map (the figure `apply
+**RAM.** Every row shows `free_ram`, the bytes between `__bss_end` and
+`STACK_INIT - STACK_RESERVE` in that variant's link map (the figure `apply
 --ram-floor` and `ram` use), and each line of the rankings ends with it. The
 ranking itself does not use it: a variant that wins by a few frames and gives
 up kilobytes still ranks first. A game that must keep RAM free says how much
