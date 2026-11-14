@@ -366,17 +366,20 @@ pub fn wait_arena_free() {
     compiler_barrier();
 }
 
-/// Wait until nothing is in flight: the slot empty, the last flip landed and
-/// no walk running. The direct-access guard runs this before the first direct
-/// GPU access after a chain was handed over, so a direct access never collides
-/// with a walk. Bounded like
-/// [`wait_slot_empty`]; a walk it gives up on is stopped by hand.
-#[no_mangle]
+/// The direct-access guard, by name: `psx_io` calls it on the console where it
+/// would otherwise call a registered pointer (a call through a register cannot
+/// be bounded by the stack proofs). Runs [`wait_idle`].
+#[cfg_attr(target_arch = "mips", no_mangle)]
 #[doc(hidden)]
 pub fn __psx_rt_direct_access_guard() {
     wait_idle();
 }
 
+/// Wait until nothing is in flight: the slot empty, the last flip landed and
+/// no walk running. The direct-access guard runs this before the first direct
+/// GPU access after a chain was handed over, so a direct access never collides
+/// with a walk. Bounded like
+/// [`wait_slot_empty`]; a walk it gives up on is stopped by hand.
 #[doc(alias = "DrawSync")]
 #[inline(never)]
 pub fn wait_idle() {
