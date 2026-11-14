@@ -195,9 +195,27 @@ is not a style rule. A test (`crates/psx-gate/tests/profile.rs`) fails when an e
 function of its crate, and `inline_gate`'s tests refuse a map that has the symbol and pass one that does
 not.
 
+## Wide integers and floats in a game's source
+
+The PS1 has no 64-bit ALU and no FPU, so a guest source tree names neither. The SDK's own
+`make lint` runs `psoxide-dev runtime-numeric-guard` over its crates; a game runs the same scanner
+over its own directories with the same exception markers:
+
+```
+cargo run --release -p psoxide-dev -- no64-scan [--floats] [--exempt FILE]... DIR...
+```
+
+Every `.rs` file under each `DIR` is judged, skipping `target` directories, files named `tests.rs`
+and `#[cfg(test)]` items. `f32`, `f64`, `u64`, `i64`, `u128` and `i128` are refused, as a literal
+suffix too (`1u64`); `--floats` also refuses float literals. A reviewed exception carries
+`// psx-numeric-allow-next-line: reason` on the line above (or `psx-numeric-allow-line` on the
+same line), and `--exempt` skips a whole file whose purpose is wide arithmetic. Exit status 0 is
+clean, 1 is a violation, 2 is a usage or read error. Wide arithmetic that a guest really needs is
+`psx_math::Wide`; the link-map symbol gate proves no 64-bit divide or soft-float routine is linked.
+
 ## Tests
 
-`cargo test -p psx-gate -p psoxide-hazard -p psx-iso`: each check has a failing and a passing
+`cargo test -p psx-gate -p psoxide-hazard -p psx-iso -p psoxide-dev`: each check has a failing and a passing
 fixture (`tools/psoxide-hazard/src/gate.rs`, `tools/psoxide-hazard/src/inline_gate.rs`, `crates/psx-gate`, `crates/psx-iso/src/receipt.rs`),
 and `crates/psx-gate/tests/profile.rs` fails when a crate with features has no gate script or the
 profile lists a feature that does not exist.
