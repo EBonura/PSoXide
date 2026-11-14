@@ -31,7 +31,7 @@ pub(crate) static PALETTE: [u16; 16] = [
 /// they complete, eight times.
 ///
 /// Not generic and never inlined, so the decode loop is compiled once, here, for size: a generic
-/// copy is built in the caller's crate under the caller's optimisation settings, and and it was
+/// copy is built in the caller's crate under the caller's optimisation settings, and it was
 /// inlined into `show` there (2,656 bytes more in one game than in the others). The band callback
 /// is a trait object; it is called eight times.
 #[inline(never)]
