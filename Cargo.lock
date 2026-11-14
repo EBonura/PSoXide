@@ -592,6 +592,7 @@ version = "0.1.0"
 dependencies = [
  "psx-asset",
  "psx-cdstream",
+ "psx-display",
  "psx-font",
  "psx-gpu",
  "psx-gte",
@@ -603,6 +604,7 @@ dependencies = [
  "psx-rt",
  "psx-settings",
  "psx-sfx",
+ "psx-splash",
  "psx-spu",
  "psx-telemetry",
  "psx-tick",
@@ -758,6 +760,18 @@ dependencies = [
  "psx-asset",
  "psx-math",
  "psx-spu",
+]
+
+[[package]]
+name = "psx-splash"
+version = "0.1.0"
+dependencies = [
+ "psx-display",
+ "psx-font",
+ "psx-gpu",
+ "psx-pad",
+ "psx-rt",
+ "psx-vram",
 ]
 
 [[package]]

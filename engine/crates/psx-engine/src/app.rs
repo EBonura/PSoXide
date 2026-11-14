@@ -42,7 +42,7 @@ use psx_level::{
     GameFlow, LevelGameplaySfxCueRecord, LevelOptionDef, LevelUiNodeRecord, LevelUiPaintRecord,
     LevelUiScene, LevelUiSfxCueRecord, LevelUiSfxSampleRecord,
 };
-use psx_pad::{PadState, Port};
+use psx_pad::{Controllers, PadState, Port};
 
 use crate::game_app::{GameApp, GAMEPLAY_ONLY};
 use crate::present_queue::{PresentQueue, ENABLED as PRESENT_QUEUE_ENABLED};
@@ -516,22 +516,35 @@ impl App {
         // The runner owns the GPU for the whole run; scenes borrow it
         // through `Ctx::gpu`.
         let peripherals = psx_rt::Peripherals::take().expect("peripherals are taken once");
-        let mut gpu = Gpu::new(
-            peripherals.gpu_dma,
-            DisplayConfig::new(config.video_mode, config.resolution),
-        );
+        let mut port = peripherals.controller_port;
+        // The boot splash, if the scene asks for it, plays on a GPU and buffers of its own: the
+        // loop sets them up a second time, so the scene starts from the state a program that
+        // never showed one starts from.
+        let mut splash = scene.boot_splash(&mut port);
+        let mut dma = peripherals.gpu_dma;
+        let (mut gpu, mut clock, mut fb) = loop {
+            let mut gpu = Gpu::new(dma, DisplayConfig::new(config.video_mode, config.resolution));
+            let clock = EngineClock::new();
+            let mut fb = DoubleBuffer::new(config.resolution);
+            gpu.set_draw_area(
+                (0, 0),
+                (
+                    config.screen_w.saturating_sub(1),
+                    config.screen_h.saturating_sub(1),
+                ),
+            );
+            gpu.set_draw_offset((0, 0));
+            let Some(boot) = splash.take() else {
+                break (gpu, clock, fb);
+            };
+            let mut pads = Controllers::new();
+            psx_splash::show(&mut gpu, &mut fb, boot.line, boot.brightness, || {
+                pads.poll(&mut port, Port::One).buttons
+            });
+            dma = gpu.release();
+        };
         boot_trace("psx-engine: gpu ok");
-        let mut clock = EngineClock::new();
         boot_trace("psx-engine: clock ok");
-        let mut fb = DoubleBuffer::new(config.resolution);
-        gpu.set_draw_area(
-            (0, 0),
-            (
-                config.screen_w.saturating_sub(1),
-                config.screen_h.saturating_sub(1),
-            ),
-        );
-        gpu.set_draw_offset((0, 0));
         boot_visual_checkpoint_raw(&mut gpu, &mut fb, (160, 0, 0), "01 FRAMEBUFFER READY", 1);
         boot_trace("psx-engine: framebuffer ok");
 
@@ -545,7 +558,7 @@ impl App {
         );
         ctx.set_gpu_dma(gpu.release());
         // The synchronous driver keeps the port.
-        ctx.set_controller_port(peripherals.controller_port);
+        ctx.set_controller_port(port);
         // The first poll puts a DualShock-compatible controller in analog mode
         // and locks it there (an original digital pad answers "digital only"
         // and the same button-input path serves it; a pad plugged in later

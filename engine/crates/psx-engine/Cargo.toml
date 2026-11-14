@@ -12,6 +12,7 @@ description = "PSoXide engine layer. Scene/App framework + canonical unit types 
 # (the editor frontend pulls it in for the 3D-viewport host renderer).
 psx-asset = { path = "../../../sdk/crates/psx-asset" }
 psx-cdstream = { path = "../../../sdk/crates/psx-cdstream" }
+psx-display = { path = "../../../sdk/crates/psx-display" }
 psx-font  = { path = "../../../sdk/crates/psx-font" }
 psx-gpu   = { path = "../../../sdk/crates/psx-gpu" }
 psx-gte   = { path = "../../../sdk/crates/psx-gte" }
@@ -25,6 +26,7 @@ psx-tick  = { path = "../../../sdk/crates/psx-tick" }
 psx-spu   = { path = "../../../sdk/crates/psx-spu" }
 psx-sfx   = { path = "../../../sdk/crates/psx-sfx" }
 psx-settings = { path = "../../../sdk/crates/psx-settings", default-features = false }
+psx-splash = { path = "../../../sdk/crates/psx-splash" }
 psx-vram  = { path = "../../../sdk/crates/psx-vram" }
 # Also on the host: `scratchpad` re-exports its Region/ScratchpadStack, whose
 # layout checks are consts every build evaluates (on the host `run` is a plain

@@ -15,6 +15,12 @@
   that has not asserts in a debug build and gives up after the wait's bound in a release build. `tools/splash_gate.sh`
   (run by `make lint`) walks the tree of every `psx_splash::show` with `stack-guard --forbid __psx_rt_flush_i_cache`, so a
   program that runs its title code from an overlay can prove its call tree clean. psx-rt gets a host `try_wait_vblank`.
+- `psx-engine`: `Scene::boot_splash` is the one place a game asks for the boot splash. It gets the controller port (a game
+  that keeps the player's brightness on the card reads it there) and returns `Some(BootSplash { line, brightness })`;
+  `App::run` plays `psx_splash::show` before the scene is initialised, on a GPU and buffers it then sets up afresh, so
+  nothing of the splash reaches the scene. The default is `None`: a scene that does not ask links none of the splash, and
+  `hello-engine` is byte-identical with and without this change. A game no longer steals the peripherals to show the
+  splash before the engine starts.
 
 No program depends on a BIOS any more, not a call into one and not the state one leaves behind (Manny's rule:
 every program works on every Sony BIOS and on OpenBIOS).

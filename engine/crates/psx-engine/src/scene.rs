@@ -459,6 +459,35 @@ impl SceneStateRef {
     }
 }
 
+/// The boot splash a scene asks the engine for: the one line under the Bonnie Studios mark
+/// (see `psx_splash`) and the player's brightness step.
+#[derive(Copy, Clone, Debug)]
+#[non_exhaustive]
+pub struct BootSplash {
+    /// The line, for example `"Built with PSoXide"`.
+    pub line: &'static str,
+    /// The player's brightness setting, applied over the splash like any other frame.
+    pub brightness: psx_display::Brightness,
+}
+
+impl BootSplash {
+    /// The splash with `line` at the default brightness.
+    #[must_use]
+    pub const fn new(line: &'static str) -> Self {
+        Self {
+            line,
+            brightness: psx_display::Brightness::DEFAULT,
+        }
+    }
+
+    /// This splash at the player's `brightness`.
+    #[must_use]
+    pub const fn with_brightness(mut self, brightness: psx_display::Brightness) -> Self {
+        self.brightness = brightness;
+        self
+    }
+}
+
 /// Implement this trait on your game type and hand an instance to
 /// [`App::run`][crate::app::App::run].
 ///
@@ -471,6 +500,17 @@ pub trait Scene {
     #[inline]
     fn render_submission(&self) -> RenderSubmission {
         RenderSubmission::Immediate
+    }
+
+    /// Ask for the boot splash. The engine calls this first of all, before the scene is
+    /// initialised, with the controller port (a scene that keeps the player's brightness on the
+    /// memory card reads it here), and plays `psx_splash::show` when it returns `Some`: on a
+    /// fresh GPU, so nothing of it carries into the scene. The default is no splash, and a scene
+    /// that does not ask links none of the splash.
+    #[allow(unused_variables)]
+    #[inline]
+    fn boot_splash(&mut self, port: &mut ControllerPort) -> Option<BootSplash> {
+        None
     }
 
     /// Called once at boot, before any flow state is entered, for assets
