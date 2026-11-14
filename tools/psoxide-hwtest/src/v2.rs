@@ -618,6 +618,26 @@ fn build() -> BTreeMap<u32, V2Entry> {
             ["first_poll_worst", "id_and_mode", "rounds"],
         );
     }
+    b.put(
+        0x970,
+        "present_path_frames",
+        ["frames_flipped", "parts_kicked", "tears_recoveries_bad_markers"],
+    );
+    b.put(
+        0x971,
+        "present_path_flip_lines",
+        ["earliest_line", "latest_line", "lines_per_frame"],
+    );
+    b.put(
+        0x972,
+        "present_path_kicks",
+        ["thread_kicks", "handler_kicks", "waiting_edges"],
+    );
+    b.put(
+        0x973,
+        "present_path_timing",
+        ["late_frames", "worst_submit_to_flip", "draw_done_fallbacks"],
+    );
     for (case, tag) in ["mixed_waits", "mixed_early", "single_waits", "single_early"]
         .iter()
         .enumerate()

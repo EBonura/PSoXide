@@ -693,6 +693,7 @@ records_step!(records_sio_early, sio_timing::select_early);
 records_step!(records_cd_stop, cd_stop::run);
 records_step!(records_sio_config_irq, config_irq::run);
 records_step!(records_sio_digital_first, digital_first::run);
+records_step!(records_present_path, present_path::run);
 
 fn run_tests(run: &mut Run, area: Area) {
     let total = TESTS.iter().filter(|spec| test_area(spec) == area).count();
@@ -830,6 +831,7 @@ const STEPS: &[Step] = &[
     step(Area::Gpu, "480I INTERLACE", step_interlace),
     step(Area::Gpu, "WORKLOAD CALIBRATION", step_calibration),
     step(Area::Gpu, "TEXTURE UV WINDOWS", step_uv_windows),
+    step(Area::Gpu, "PRESENT ONE PATH", records_present_path),
     // After the two above: a wedged list or FIFO here cannot cost them.
     step(Area::Gpu, "GPU DMA EDGE CASES", step_dma_edge),
     focused(Area::Gpu, "GPU LIST NODE SIZES", 2, step_ll_sweep),
