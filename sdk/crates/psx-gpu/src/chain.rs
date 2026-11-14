@@ -177,9 +177,20 @@ pub fn wait(_dma: &mut GpuDma) {
 
 /// [`submit_async_raw`]'s body, for callers that hold the token elsewhere.
 ///
+/// Inlined into every caller: the kick is about twenty instructions (the bounded wait for the
+/// channel, the DMA direction word, the channel enable, the three channel stores), and a frame
+/// that submits a chain pays a call, a return and the instruction-cache lines of a second copy
+/// of it if it is not. It was left to the compiler, which inlined it into a small program and
+/// not into a larger one (its body gained the direct-access guard tests of `psx-io` when the
+/// present path became part of every build). The wedged-walk abort inside it is already
+/// `inline(always)` for the callers that run on a scratchpad stack, so the rare path is the
+/// same code it was. A program that never submits a chain does not link it: only a call site
+/// emits the body.
+///
 /// # Safety
 ///
 /// As [`submit_async_raw`].
+#[inline(always)]
 pub(crate) unsafe fn start_walk(head: *const u32) {
     // A finished walk does not mean the GPU has drawn what it read. Do not
     // wait for idle here: channel 2's request handshake queues the next list

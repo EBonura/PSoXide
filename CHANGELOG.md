@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- `psx_gpu::chain::start_walk`, the kick behind every chain submit (`submit_async_raw`, `Frame::submit`, `OtFrame::submit_with`,
+  `Gpu::submit_static`, the compatibility entry points), is `inline(always)`. It was left to the compiler, which inlined it in
+  small programs and, in a larger one, compiled it as a function: a call and return, a second copy of its instructions in
+  the instruction cache and its loads and stores around them on every submit. The body did not get dearer (an out-of-line copy
+  executes 19.0 instructions on SDK `46f40d507373` and 19.5 on `6d1cb39fb425`, the difference being the direct-access guard
+  tests every GPU DMA start carries since the present path became part of every build), so the examples (`hello-splash`,
+  `hello-ot` with one and with two submit sites, `hello-cddrain`) link the same code with and without the attribute and
+  nothing in them changes; a program that never submits a chain still does not link the chain path.
 - Hardware tests v2.20 (not yet run on a console; gated on the emulator): the linear run asks nobody anything (the DualShock motor
   questions are the menu row `DUALSHOCK MOTOR QUESTIONS`, and the linear run writes their records as unanswered, every id kept);
   step `GTE NCLIP VARIANTS` (`0x980`-`0x9AF`, INFO) runs the sequences of conformance cases 22 and 116 to 120, which fail on the
