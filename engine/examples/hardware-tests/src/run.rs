@@ -689,6 +689,7 @@ macro_rules! records_step {
 records_step!(records_cpu, records::push_cpu_records);
 records_step!(records_irq, records::push_irq_dma_timer_records);
 records_step!(records_gte, records::push_gte_records);
+records_step!(records_gte_nclip, gte_nclip::run);
 records_step!(records_gpu, records::push_gpu_records);
 records_step!(records_spu, records::push_spu_records);
 records_step!(records_cd, records::push_cd_records);
@@ -846,6 +847,7 @@ const STEPS: &[Step] = &[
     step(Area::Gte, "GTE TIMING", records_gte),
     step(Area::Gte, "GTE COMMAND LATENCY", records_gte_latency),
     step(Area::Gte, "GTE PRECISION", precision_remaining_step),
+    step(Area::Gte, "GTE NCLIP VARIANTS", records_gte_nclip),
     // 4
     step(Area::Gpu, "GPU CASES", tests_gpu),
     step(Area::Gpu, "GPU TIMING AND MDEC", records_gpu),

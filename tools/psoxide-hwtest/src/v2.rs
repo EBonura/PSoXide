@@ -664,6 +664,21 @@ fn build() -> BTreeMap<u32, V2Entry> {
             ["sectors", "errors_and_retries", "time_16_hblanks"],
         );
     }
+    // v2.20: the NCLIP variants, twelve raw MAC0 readings in each of four variants.
+    for (variant, name) in ["built", "filled", "extra_nop", "zeroed"].iter().enumerate() {
+        for (k, what) in [
+            "pos", "neg", "ref1", "probe1", "ref2", "probe2", "ref3", "probe3", "ref4", "probe4", "ref6", "probe6",
+        ]
+        .iter()
+        .enumerate()
+        {
+            b.put(
+                0x980 + 12 * variant as u32 + k as u32,
+                format!("gte_nclip_{name}_{what}"),
+                ["mac0_low", "mac0_high", "flag_bits"],
+            );
+        }
+    }
     b.put(
         0x7A0,
         "dma_rekick_first",

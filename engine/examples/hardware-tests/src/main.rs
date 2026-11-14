@@ -66,6 +66,7 @@ mod dma_matrix;
 mod field_rule;
 mod gpu_done;
 mod gpu_probes;
+mod gte_nclip;
 mod handoff_probe;
 mod kernel_timing;
 mod list_upload_probe;
