@@ -9,6 +9,7 @@ pub mod audio_decode;
 pub mod audio_report;
 pub mod compare;
 pub mod diag28;
+pub mod expansion2_scan;
 pub mod machine_code;
 pub mod radius_fill;
 pub mod report;

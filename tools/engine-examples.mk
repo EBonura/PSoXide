@@ -130,6 +130,13 @@ hwtest-verify-code: hardware-tests
 # the one CD failure no emulator reproduces. The tone is synthesised
 # (tools/gen-cdda-tone.py) so the image stays redistributable and
 # bit-reproducible.
+
+# The burn artifact must make no access to Expansion 2 beyond the 128 bytes the entry state configures: a retail
+# console raises a data bus error on a store to the debug console (offset 0x80 of Expansion 2; seen 2026-11-14 on an SCPH-9002).
+# `psoxide-hwtest scan-expansion2` reads the linked EXE and fails the build when it can. A twin for emulator runs
+# that read the terminal sets HWTEST_ALLOW_DEBUG_PORT=1 with HWTEST_FEATURES="console-diag psx-rt/host-tty" and is never burned.
+HWTEST_PORT_CHECK = $(if $(HWTEST_ALLOW_DEBUG_PORT),@echo "hardware-tests: Expansion 2 check skipped (HWTEST_ALLOW_DEBUG_PORT): not a burn artifact",$(PSOXIDE_HWTEST) scan-expansion2 $(EXAMPLE_OUT)/hardware-tests.exe)
+
 HWTEST_CDDA := $(EXAMPLE_OUT)/hardware-tests-cdda.pcm
 
 $(HWTEST_CDDA):
@@ -174,6 +181,7 @@ $(HWTEST_XA_CLOCK):
 # radius disc and as every v2.9 burn.
 hardware-tests-disc: HWTEST_FEATURES = console-diag
 hardware-tests-disc: hardware-tests $(HWTEST_CDDA) $(HWTEST_XA) $(HWTEST_XA_CLOCK)
+	$(HWTEST_PORT_CHECK)
 	cd tools/mkisopsx && cargo run --release -- \
 		--exe ../../$(EXAMPLE_OUT)/hardware-tests.exe \
 		--out ../../$(EXAMPLE_OUT)/hardware-tests.bin \
@@ -204,6 +212,7 @@ $(HWTEST_RADIUS_FILL):
 
 hwtest-radius-disc: HWTEST_FEATURES = console-diag
 hwtest-radius-disc: hardware-tests $(HWTEST_CDDA) $(HWTEST_XA) $(HWTEST_XA_CLOCK) $(HWTEST_RADIUS_FILL)
+	$(HWTEST_PORT_CHECK)
 	cd tools/mkisopsx && cargo run --release -- \
 		--exe ../../$(EXAMPLE_OUT)/hardware-tests.exe \
 		--out ../../$(HWTEST_RADIUS_DIR)/hardware-tests-radius.bin \

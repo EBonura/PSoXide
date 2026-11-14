@@ -4,7 +4,7 @@ use std::io::Write;
 
 use psoxide_hwtest::report::{parse_capture, payloads_from_paths, print_report, ReportOptions};
 use psoxide_hwtest::util::{Error, Result};
-use psoxide_hwtest::{audio_chain, audio_decode, audio_report, compare, diag28, machine_code, radius_fill, sb4, v24};
+use psoxide_hwtest::{audio_chain, audio_decode, audio_report, compare, diag28, expansion2_scan, machine_code, radius_fill, sb4, v24};
 
 const HELP: &str = "usage: psoxide-hwtest <command> [args]\n\
 commands:\n\
@@ -24,6 +24,8 @@ commands:\n\
       decode and diff SB4 capture-ring payloads\n\
   verify-machine-code EXE [--baseline FILE] [--fail-on-change]\n\
       audit the measured instruction blocks of the linked hardware-tests EXE\n\
+  scan-expansion2 EXE\n\
+      fail when the linked EXE reaches Expansion 2 beyond its first 128 bytes\n\
   diag-report PAYLOAD_OR_FILE ...\n\
       print the v2.8 CD radius and GPU list node size tables (exit 1 on a fault)\n\
   radius-fill OUT SECTORS\n\
@@ -114,6 +116,7 @@ fn run() -> i32 {
         "emulator-baseline" => (compare::emulator_baseline_command(rest, &mut out), 2),
         "v24-report" => (v24::run(rest, &mut out), 2),
         "sb4-report" => (sb4::run(rest, &mut out), 1),
+        "scan-expansion2" => (expansion2_scan::run(rest, &mut out, &mut err), 1),
         "verify-machine-code" => (machine_code::run(rest, &mut out, &mut err), 1),
         "diag-report" => (diag28::run(rest, &mut out), 2),
         "radius-fill" => (radius_fill::run(rest, &mut out), 1),
