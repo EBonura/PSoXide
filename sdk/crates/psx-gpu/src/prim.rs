@@ -528,6 +528,23 @@ impl DrawArea {
         }
     }
 
+    /// [`new`](Self::new) for corners already known to be inside VRAM: no masks, so runtime
+    /// corners cost what the literal words do ([`gp0::draw_area_top_left_in_range`]).
+    #[must_use]
+    pub const fn new_in_range(top_left: (u32, u32), bottom_right: (u32, u32)) -> Self {
+        Self {
+            tag: 0,
+            top_left: gp0::draw_area_top_left_in_range(top_left.0, top_left.1),
+            bottom_right: gp0::draw_area_bottom_right_in_range(bottom_right.0, bottom_right.1),
+        }
+    }
+
+    /// [`set`](Self::set) for corners already known to be inside VRAM.
+    pub const fn set_in_range(&mut self, top_left: (u32, u32), bottom_right: (u32, u32)) {
+        self.top_left = gp0::draw_area_top_left_in_range(top_left.0, top_left.1);
+        self.bottom_right = gp0::draw_area_bottom_right_in_range(bottom_right.0, bottom_right.1);
+    }
+
     /// Re-aim the packet; the OT linkage is left as it is.
     pub const fn set(&mut self, top_left: (u32, u32), bottom_right: (u32, u32)) {
         self.top_left = gp0::draw_area_top_left(top_left.0, top_left.1);

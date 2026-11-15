@@ -297,6 +297,29 @@ pub mod gp0 {
             | ((draw_to_display as u32) << 10)
     }
 
+    /// [`draw_mode`] for fields already in range (`texpage_x` below 16, `texpage_y` 0 or 1,
+    /// `semi_tp` and `tex_depth` below 4): no masks, the cost of the literal word. Out-of-range
+    /// input corrupts neighbouring fields (checked in debug builds only).
+    #[inline(always)]
+    #[must_use]
+    pub const fn draw_mode_in_range(
+        texpage_x: u32,
+        texpage_y: u32,
+        semi_tp: u32,
+        tex_depth: u32,
+        dither: bool,
+        draw_to_display: bool,
+    ) -> u32 {
+        debug_assert!(texpage_x < 16 && texpage_y < 2 && semi_tp < 4 && tex_depth < 4);
+        0xe100_0000
+            | texpage_x
+            | (texpage_y << 4)
+            | (semi_tp << 5)
+            | (tex_depth << 7)
+            | ((dither as u32) << 9)
+            | ((draw_to_display as u32) << 10)
+    }
+
     /// GP0(E2h) -- Texture window (wrap inside a rect).
     #[inline(always)]
     pub const fn tex_window(mask_x: u32, mask_y: u32, off_x: u32, off_y: u32) -> u32 {
@@ -313,10 +336,30 @@ pub mod gp0 {
         0xe300_0000 | (x & 0x3ff) | ((y & 0x1ff) << 10)
     }
 
+    /// [`draw_area_top_left`] for a corner already known to be inside VRAM (`x` below 1024, `y`
+    /// below 512): no masks, so a runtime corner costs the two shifts and ors of the literal
+    /// word and nothing more. Out-of-range input corrupts the command byte (checked in debug
+    /// builds only).
+    #[inline(always)]
+    #[must_use]
+    pub const fn draw_area_top_left_in_range(x: u32, y: u32) -> u32 {
+        debug_assert!(x < 0x400 && y < 0x200);
+        0xe300_0000 | x | (y << 10)
+    }
+
     /// GP0(E4h) -- Draw area bottom-right corner.
     #[inline(always)]
     pub const fn draw_area_bottom_right(x: u32, y: u32) -> u32 {
         0xe400_0000 | (x & 0x3ff) | ((y & 0x1ff) << 10)
+    }
+
+    /// [`draw_area_bottom_right`] for a corner already known to be inside VRAM: see
+    /// [`draw_area_top_left_in_range`].
+    #[inline(always)]
+    #[must_use]
+    pub const fn draw_area_bottom_right_in_range(x: u32, y: u32) -> u32 {
+        debug_assert!(x < 0x400 && y < 0x200);
+        0xe400_0000 | x | (y << 10)
     }
 
     /// GP0(E5h) -- Draw offset (added to every vertex before raster).
@@ -511,6 +554,38 @@ pub mod packet {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn in_range_builders_equal_the_masking_ones_for_every_in_range_input() {
+        for y in 0..0x200 {
+            for x in 0..0x400 {
+                assert_eq!(
+                    gp0::draw_area_top_left_in_range(x, y),
+                    gp0::draw_area_top_left(x, y)
+                );
+                assert_eq!(
+                    gp0::draw_area_bottom_right_in_range(x, y),
+                    gp0::draw_area_bottom_right(x, y)
+                );
+            }
+        }
+        for tx in 0..16 {
+            for ty in 0..2 {
+                for semi in 0..4 {
+                    for depth in 0..4 {
+                        for dither in [false, true] {
+                            for dtd in [false, true] {
+                                assert_eq!(
+                                    gp0::draw_mode_in_range(tx, ty, semi, depth, dither, dtd),
+                                    gp0::draw_mode(tx, ty, semi, depth, dither, dtd)
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn register_addresses_live_in_io_window() {
