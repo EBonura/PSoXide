@@ -87,6 +87,50 @@ pub fn u64_dec(buf: &mut [u8], mut v: u64) -> &str {
     ascii(&buf[..n])
 }
 
+/// Maximum bytes `clock_dec` can produce (`u32::MAX / 60` minutes, `:`, two digits).
+pub const CLOCK_DEC_MAX: usize = U32_DEC_MAX + 3;
+/// Maximum bytes `tenths_dec` can produce (ten digits, `.`, one digit).
+pub const TENTHS_DEC_MAX: usize = U32_DEC_MAX + 2;
+
+/// Format `v` as at least `width` decimal digits, zero-padded on the left.
+/// A value with more digits than `width` is written whole.
+///
+/// `buf` must be at least `max(width, U32_DEC_MAX)` bytes. A fixed-width
+/// counter such as `007` is `u32_dec_padded(buf, 7, 3)`.
+pub fn u32_dec_padded(buf: &mut [u8], v: u32, width: usize) -> &str {
+    let digits = u32_dec(&mut buf[..], v).len();
+    if digits >= width {
+        return ascii(&buf[..digits]);
+    }
+    let pad = width - digits;
+    buf.copy_within(..digits, pad);
+    buf[..pad].fill(b'0');
+    ascii(&buf[..width])
+}
+
+/// Format a count of seconds as a clock, `M:SS`: minutes in as many digits as
+/// they take, seconds always two.
+///
+/// `buf` must be at least [`CLOCK_DEC_MAX`] bytes.
+pub fn clock_dec(buf: &mut [u8], secs: u32) -> &str {
+    let minutes = u32_dec(&mut buf[..], secs / 60).len();
+    let secs = secs % 60;
+    buf[minutes] = b':';
+    buf[minutes + 1] = b'0' + (secs / 10) as u8;
+    buf[minutes + 2] = b'0' + (secs % 10) as u8;
+    ascii(&buf[..minutes + 3])
+}
+
+/// Format `tenths` (a value in tenths of a unit) as `W.T`: `1234` is `123.4`.
+///
+/// `buf` must be at least [`TENTHS_DEC_MAX`] bytes.
+pub fn tenths_dec(buf: &mut [u8], tenths: u32) -> &str {
+    let whole = u32_dec(&mut buf[..], tenths / 10).len();
+    buf[whole] = b'.';
+    buf[whole + 1] = b'0' + (tenths % 10) as u8;
+    ascii(&buf[..whole + 2])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,5 +233,112 @@ mod tests {
         let mut b = [0u8; U64_DEC_MAX];
         assert_eq!(u64_dec(&mut b, u64::MAX), "18446744073709551615");
         assert_eq!(u64_dec(&mut b, 10_000), "10000");
+    }
+
+    // The games' copies, kept as the oracle each formatter must equal.
+
+    // VoXide main.rs `decimal3` (clamped to 999, three digits).
+    fn voxide_decimal3(v: u16) -> [u8; 3] {
+        let n = if v > 999 { 999 } else { v };
+        [
+            b'0' + ((n / 100) as u8),
+            b'0' + (((n / 10) % 10) as u8),
+            b'0' + ((n % 10) as u8),
+        ]
+    }
+
+    // VoXide inv.rs `number` and `tenths`.
+    fn voxide_number(v: u16, buf: &mut [u8; 5]) -> &str {
+        let mut i = 5;
+        let mut v = v;
+        loop {
+            i -= 1;
+            buf[i] = b'0' + (v % 10) as u8;
+            v /= 10;
+            if v == 0 {
+                break;
+            }
+        }
+        core::str::from_utf8(&buf[i..]).unwrap()
+    }
+    fn voxide_tenths(v: i32, buf: &mut [u8; 8]) -> usize {
+        let mut n = [0u8; 5];
+        let whole = voxide_number((v / 10) as u16, &mut n);
+        let w = whole.len();
+        buf[..w].copy_from_slice(whole.as_bytes());
+        buf[w] = b'.';
+        buf[w + 1] = b'0' + (v % 10) as u8;
+        w + 2
+    }
+
+    // NitroXide main.rs and pause_menu.rs clock: minutes are one digit because the
+    // callers clamp to 599 seconds.
+    fn nitro_clock(secs: u32) -> [u8; 4] {
+        [
+            b'0' + (secs / 60) as u8,
+            b':',
+            b'0' + ((secs % 60) / 10) as u8,
+            b'0' + ((secs % 60) % 10) as u8,
+        ]
+    }
+
+    // NitroXide victory.rs clock: `u32_dec` minutes, then the two seconds digits.
+    fn nitro_victory_clock(v: u32) -> ([u8; 14], usize) {
+        let mut out = [0u8; 14];
+        let mut dec = [0u8; U32_DEC_MAX];
+        let mut n = 0;
+        for &c in u32_dec(&mut dec, v / 60).as_bytes() {
+            out[n] = c;
+            n += 1;
+        }
+        out[n] = b':';
+        out[n + 1] = b'0' + (v % 60 / 10) as u8;
+        out[n + 2] = b'0' + (v % 10) as u8;
+        (out, n + 3)
+    }
+
+    #[test]
+    fn padded_equals_voxide_decimal3_over_its_range() {
+        let mut b = [0u8; U32_DEC_MAX];
+        for v in 0..=u16::MAX {
+            assert_eq!(
+                u32_dec_padded(&mut b, u32::from(v.min(999)), 3).as_bytes(),
+                voxide_decimal3(v)
+            );
+        }
+    }
+
+    #[test]
+    fn padded_widths_and_overflowing_values() {
+        let mut b = [0u8; 16];
+        assert_eq!(u32_dec_padded(&mut b, 0, 1), "0");
+        assert_eq!(u32_dec_padded(&mut b, 0, 4), "0000");
+        assert_eq!(u32_dec_padded(&mut b, 42, 2), "42");
+        assert_eq!(u32_dec_padded(&mut b, 1234, 2), "1234");
+        assert_eq!(u32_dec_padded(&mut b, u32::MAX, 12), "004294967295");
+    }
+
+    #[test]
+    fn tenths_equals_voxide_tenths_over_its_range() {
+        let mut b = [0u8; TENTHS_DEC_MAX];
+        for v in 0..=65_535 * 10 + 9 {
+            let mut old = [0u8; 8];
+            let len = voxide_tenths(v, &mut old);
+            assert_eq!(tenths_dec(&mut b, v as u32).as_bytes(), &old[..len], "{v}");
+        }
+        assert_eq!(tenths_dec(&mut b, u32::MAX), "429496729.5");
+    }
+
+    #[test]
+    fn clock_equals_the_nitroxide_clocks() {
+        let mut b = [0u8; CLOCK_DEC_MAX];
+        for secs in 0..=599 {
+            assert_eq!(clock_dec(&mut b, secs).as_bytes(), nitro_clock(secs));
+        }
+        for secs in (0..200_000).chain([u32::MAX - 1, u32::MAX]) {
+            let (old, len) = nitro_victory_clock(secs);
+            assert_eq!(clock_dec(&mut b, secs).as_bytes(), &old[..len], "{secs}");
+        }
+        assert_eq!(clock_dec(&mut b, 61), "1:01");
     }
 }

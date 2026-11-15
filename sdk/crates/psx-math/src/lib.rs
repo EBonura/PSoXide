@@ -85,6 +85,7 @@ mod asm_kernels;
 pub mod attributed_clip;
 pub mod clip_lanes;
 pub mod color;
+pub mod ease;
 pub mod fmt;
 pub mod int32;
 pub mod sincos;
