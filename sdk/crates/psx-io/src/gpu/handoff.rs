@@ -16,8 +16,10 @@
 //!   first direct command or display-control write, or GPU DMA address
 //!   store, runs the guard first, which waits until no queued walk can
 //!   collide with the access. On the console the guard is psx-rt's
-//!   `__psx_rt_direct_access_guard`, called by name (so a stack proof sees no
-//!   call through a register); the host runs a registered function.
+//!   `wait_idle`, reached by a direct call the linker script resolves (so a
+//!   stack proof sees no call through a register, and a program that never
+//!   arms the guard does not link the wait); the host runs a registered
+//!   function.
 //!
 //! Both states share one flag, so a plain port write costs one extra load
 //! and branch.
@@ -67,7 +69,8 @@ static mut RECORDING: Recording = Recording {
 static mut SLOW: bool = false;
 #[cfg_attr(target_arch = "mips", link_section = ".data")]
 static mut GUARD_ARMED: bool = false;
-// The host runs the registered function; the console calls psx-rt's guard by name and has no pointer.
+// The host runs the registered function; the console calls the guard by a linker-resolved name and
+// has no pointer.
 #[cfg(not(target_arch = "mips"))]
 static mut GUARD: Option<fn()> = None;
 
@@ -463,11 +466,11 @@ fn record_words(words: &[u32]) {
 
 /// Host only: register the function that makes direct GPU access safe while a queued
 /// frame may be walking (`psx_rt::present` registers its `wait_idle`). On the console
-/// there is no registration: `run_armed_guard` calls psx-rt's `__psx_rt_direct_access_guard`
-/// by name, so one mechanism runs there and no call goes through a register. It
-/// runs once, on the first direct command or display-control write or GPU
-/// DMA address store after [`arm_direct_access_guard`], and is then
-/// disarmed.
+/// there is no registration: `run_armed_guard` calls `__psx_direct_access_guard`, which
+/// the linker script binds to psx-rt's `wait_idle`, so one mechanism runs there and no
+/// call goes through a register. It runs once, on the first direct command or
+/// display-control write or GPU DMA address store after [`arm_direct_access_guard`], and
+/// is then disarmed.
 #[cfg(not(target_arch = "mips"))]
 pub fn set_direct_access_guard(guard: fn()) {
     // SAFETY: a volatile write of this module's static.
@@ -476,7 +479,25 @@ pub fn set_direct_access_guard(guard: fn()) {
 
 /// Arm the guard: the GPU may be busy with work the CPU handed off, so the
 /// next direct access must wait for it first.
+///
+/// On the console, arming also keeps psx-rt's `wait_idle` in the image: the linker script
+/// binds the guard's call target to it only when something references it, and this is the
+/// reference. Only code that hands a chain over (`psx_rt::present`) arms the guard; a
+/// program that never calls this links no wait at all.
+#[inline]
 pub fn arm_direct_access_guard() {
+    // A relocation of type R_MIPS_NONE: it emits nothing, and makes the linker's section
+    // collection treat `wait_idle` as used wherever this function is. It comes first so the
+    // flag stores below stay free for the scheduler to place, as they were without it.
+    #[cfg(target_arch = "mips")]
+    // SAFETY: the assembly emits no instruction, touches no memory and no register.
+    unsafe {
+        core::arch::asm!(
+            ".reloc ., R_MIPS_NONE, {}",
+            sym __psx_rt_wait_idle,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
     // SAFETY: a plain write of a `bool` static owned by this module.
     unsafe { *addr_of_mut!(GUARD_ARMED) = true };
     set_slow(true);
@@ -506,11 +527,12 @@ fn run_armed_guard() {
     // On the console the guard is one known function, called directly, so a call tree that
     // reaches this path has no call through a register to bound.
     #[cfg(target_arch = "mips")]
-    // SAFETY: `psx-rt` defines the symbol (psx-rt/src/present.rs). A console program that links
-    // psx-io links psx-rt; one that did not would fail to link, with an undefined-symbol error
-    // naming `__psx_rt_direct_access_guard`, which is the failure wanted (see sdk/docs/PRESENT.md).
+    // SAFETY: the linker script (sdk/psoxide.ld) defines the symbol as psx-rt's `wait_idle`
+    // whenever that function is in the image, and `arm_direct_access_guard` puts it there. This
+    // function runs only after an arm, so the symbol is never the unresolved 0 the script gives a
+    // program that has no `wait_idle` (see sdk/docs/PRESENT.md).
     unsafe {
-        __psx_rt_direct_access_guard()
+        __psx_direct_access_guard()
     }
     #[cfg(not(target_arch = "mips"))]
     // SAFETY: as above.
@@ -521,7 +543,10 @@ fn run_armed_guard() {
 
 #[cfg(target_arch = "mips")]
 extern "Rust" {
-    fn __psx_rt_direct_access_guard();
+    /// Defined by the linker script, as `__psx_rt_wait_idle` when psx-rt's `wait_idle` is linked.
+    fn __psx_direct_access_guard();
+    /// psx-rt's `wait_idle`.
+    fn __psx_rt_wait_idle();
 }
 
 #[cfg(test)]

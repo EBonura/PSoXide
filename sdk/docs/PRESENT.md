@@ -86,17 +86,36 @@ and remain only so an old manifest resolves. A direct flip (`DoubleBuffer::swap`
 ## The direct-access guard on the console
 
 Once a chain has been handed over, the first direct GPU access (a port write, a GPU DMA address
-store) waits until the walk is done. On the console that wait is `psx_rt::present::
-__psx_rt_direct_access_guard`, which `psx_io::gpu` calls **by name**, not through a registered
-pointer: a call tree that reaches a direct write then holds no call through a register, which the
-stack proofs of overlay and scratchpad-stack code (`stack-guard`) require. The host build keeps a
-registered function (`set_direct_access_guard`, host only).
+store) waits until the walk is done. On the console that wait is `psx_rt::present::wait_idle`
+(symbol `__psx_rt_wait_idle`), which `psx_io::gpu` calls by a **direct call**, not through a
+registered pointer: a call tree that reaches a direct write then holds no call through a register,
+which the stack proofs of overlay and scratchpad-stack code (`stack-guard`) require. The host build
+keeps a registered function (`set_direct_access_guard`, host only).
 
-What this relies on: **a console program that links `psx-io` also links `psx-rt`**, which holds the
-symbol and the whole present path (it is compiled unconditionally). A program that did not would fail
-to link with an undefined symbol named `__psx_rt_direct_access_guard`, which is the right failure.
-A program that never arms the guard (no `Presenter`) does not link the guard's call chain at all: the
-slow branch of each port write is dropped, and its image is byte for byte what it was.
+A program that never hands a chain over must not pay for that wait (`wait_idle`, the walk stop it
+calls, the draw-done signal and its list are over a kilobyte). Two things make that true whatever the
+program's LTO setting:
+
+- `psx_io::gpu::handoff::run_armed_guard` calls the symbol `__psx_direct_access_guard`, which
+  `sdk/psoxide.ld` defines: the address of `wait_idle` when `wait_idle` is in the image, else 0. The
+  script finds out from the `.text.__psx_rt_wait_idle` window it places `wait_idle` in (empty when
+  the function was dropped).
+- `psx_io::gpu::arm_direct_access_guard` carries an `R_MIPS_NONE` relocation against
+  `__psx_rt_wait_idle`: no bytes, and the linker's section collection treats the function as used
+  wherever an arm is. Every arm (`Presenter::submit`, `publish_raw`) is therefore in a program that
+  has the wait, and `run_armed_guard`, which runs only after an arm, never calls the 0.
+
+Why not the cheaper-looking forms: a weak definition or a `PROVIDE` default does not help, because a
+call that names the wait keeps it linked (section collection follows every relocation to a defined
+symbol), and compile-time folding of the armed flag needs fat LTO (with thin LTO the flag is read
+inline in other crates and cannot be proved constant). The window is the one thing the link can see
+that depends on what the program links.
+
+What this relies on: **a console program that links `psx-io` also links `psx-rt`**, which holds
+`__psx_rt_wait_idle` and the whole present path (it is compiled unconditionally). A program that did
+not would fail to link when it arms the guard, with an undefined symbol named
+`__psx_rt_wait_idle`, which is the right failure. Calling `arm_direct_access_guard` from a program
+that has no `psx-rt` present path is not supported.
 
 `tools/guard_stack_gate.sh` (part of `make lint`) keeps it true: it builds `hello-present`, which arms
 the guard and writes directly, and runs `stack-guard` on the call tree rooted at a direct write

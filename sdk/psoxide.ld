@@ -96,9 +96,27 @@ SECTIONS {
         *(.text.*point_contents_from*)
         *(.text.*plane_contact*)
         *(.text.*model_collision_hull*)
+        /* The direct-access guard's body (psx-rt's `wait_idle`, section
+           `.text.__psx_rt_wait_idle`) goes in a window of its own, so the script can tell
+           whether it is in the image. Nothing but code that arms the guard keeps it there
+           (`psx_io::gpu::arm_direct_access_guard` carries an R_MIPS_NONE reference to it,
+           which section collection honours), and `wait_idle` callers that need it call it
+           directly. See sdk/docs/PRESENT.md. */
+        . = ALIGN(4);
+        __psx_guard_window_start = .;
+        *(.text.__psx_rt_wait_idle)
+        __psx_guard_window_end = .;
         *(.text .text.*);
         __text_end = .;
     } > IMAGE
+
+    /* The call target of psx-io's armed guard: `wait_idle`'s address when it is in the image,
+       else 0. `run_armed_guard` runs only after an arm, and an arm puts `wait_idle` in the
+       image, so a program that never arms never calls the 0. A program's call tree stays free
+       of calls through a register, which a pointer to `wait_idle` could not give it (the
+       stack proofs), and a program that never arms the guard links no wait (a pointer
+       registered at start-up would keep one linked). */
+    __psx_direct_access_guard = __psx_guard_window_end > __psx_guard_window_start ? __psx_guard_window_start : 0;
 
     /* Initialised data + read-only data. PS1 has no MMU so .rodata
        isn't actually read-only at runtime; keep it with .data so

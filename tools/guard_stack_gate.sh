@@ -3,9 +3,10 @@
 #
 # Once the present path has armed the direct-access guard, the first direct port write runs it
 # (psx_io::gpu::handoff::write_command_slow > run_armed_guard). On the console that guard is psx-rt's
-# `__psx_rt_direct_access_guard`, called by name; a registered function pointer would make the tree
-# unprovable ("calls through a register") for overlay and scratchpad-stack code, and a game, not the
-# SDK, would find out. This builds sdk/examples/hello-present (it arms the guard and then writes
+# `wait_idle` (symbol `__psx_rt_wait_idle`), called directly at the address the linker script binds
+# to `__psx_direct_access_guard`; a registered function pointer would make the tree unprovable
+# ("calls through a register") for overlay and scratchpad-stack code, and a game, not the SDK,
+# would find out. This builds sdk/examples/hello-present (it arms the guard and then writes
 # directly) and walks the tree rooted at write_command_slow with stack-guard: it must be bounded,
 # and it must reach the guard's wait (so the root really exercises it).
 #
@@ -30,9 +31,9 @@ if ! "$GUARD" "$WORK/build/$TARGET/release/hello-present.exe" "$MAP" \
     echo "guard-stack-gate: FAIL: the tree of a direct write is not bounded (a call through a register?)" >&2
     exit 1
 fi
-if ! grep -q 'psx_rt::present::wait_idle' "$WORK/guard.txt"; then
+if ! grep -q '__psx_rt_wait_idle' "$WORK/guard.txt"; then
     cat "$WORK/guard.txt" >&2
     echo "guard-stack-gate: FAIL: the tree found does not reach the guard's wait (the root matched nothing useful)" >&2
     exit 1
 fi
-echo "guard-stack-gate: PASS (the tree of a direct write is bounded and reaches the guard by name)"
+echo "guard-stack-gate: PASS (the tree of a direct write is bounded and reaches the guard)"
