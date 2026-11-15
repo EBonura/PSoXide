@@ -541,7 +541,8 @@ pub fn carry(text: &str, new: &Facts, tree: &dyn Tree) -> Result<(String, Report
         return Err(
             "the profile does not say what source it was collected from. If it describes this \
              tree, record that with `psoxide-pgo stamp --crate GAME --profile PROFILE -- \
-             CARGO-ARGS` (the same arguments as the game's build); otherwise collect it again"
+             CARGO-ARGS` (the same arguments as the game's build), or, for a driver that builds \
+             its own twin, `psoxide-pgo stamp PROFILE --elf TWIN.elf`; otherwise collect it again"
                 .into(),
         );
     };
@@ -930,6 +931,33 @@ fn step() {
         let tree = Fake::with(&[("g.rs", OLD)]);
         let error = carry(PROFILE, &Facts::new(), &tree).expect_err("unstamped");
         assert!(error.contains("psoxide-pgo stamp"), "{error}");
+        // A driver that links by itself is pointed at the twin form.
+        assert!(error.contains("stamp PROFILE --elf TWIN.elf"), "{error}");
+    }
+
+    #[test]
+    fn a_stamped_profile_binds_to_its_own_tree_and_a_stale_stamp_carries_the_edit() {
+        // What a driver does: stamp when the profile is collected, carry at build, no override.
+        let tree = Fake::with(&[("g.rs", OLD)]);
+        let at_collection = facts(&[(F, fact("g.rs", 5, 10))]);
+        let text = stamped(&tree, &at_collection);
+        // The tree as collected: nothing changes.
+        let (same, report) = carry(&text, &at_collection, &tree).expect("stamped");
+        assert_eq!((same.as_str(), report.files), (text.as_str(), 0));
+        // A later build of an edited tree: the stamp names the old blob, so the stamp is
+        // stale, and the keys below the edit move with the code.
+        let edited = OLD.replace("    done();", "    again();\n    done();");
+        let later = tree.edit(&[("g.rs", &edited)]);
+        let (carried, report) =
+            carry(&text, &facts(&[(F, fact("g.rs", 5, 11))]), &later).expect("stale stamp");
+        assert_eq!(report.files, 1);
+        assert!(report.refusal().is_none());
+        assert_ne!(carried, text);
+        // A stamp of the later tree, as collected there, is not stale against it.
+        let restamped = stamped(&later, &facts(&[(F, fact("g.rs", 5, 11))]));
+        let (again, report) =
+            carry(&restamped, &facts(&[(F, fact("g.rs", 5, 11))]), &later).expect("restamped");
+        assert_eq!((again, report.files), (restamped, 0));
     }
 
     #[test]

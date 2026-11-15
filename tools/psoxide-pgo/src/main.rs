@@ -893,6 +893,19 @@ fn stamp(profile: &Path, elf_path: &Path, crate_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// `stamp PROFILE --elf TWIN.elf [--crate DIR]`: [`stamp`] for a driver that builds the twin
+/// itself. `TWIN.elf` is the ELF it built with `-Cdebuginfo=1 -Zdebug-info-for-profiling
+/// -Cstrip=none` from the tree the profile was collected on; `--crate` is any directory of the
+/// git repository that holds that tree (default: the current directory).
+fn stamp_elf(profile: &Path, elf: &Path, flags: &[String]) -> Result<()> {
+    let crate_dir = match flags {
+        [] => env::current_dir()?,
+        [flag, dir] if flag == "--crate" => PathBuf::from(dir),
+        other => return Err(format!("stamp --elf: unknown arguments {other:?}").into()),
+    };
+    stamp(profile, elf, &crate_dir)
+}
+
 /// Every linker symbol of `object` and every linkage name its DWARF records (inlined
 /// functions have no symbol of their own), keyed for [`bind`].
 fn build_symbols(object: &object::File, dwarf: &Dwarf, units: &[Unit]) -> Result<bind::Available> {
@@ -1063,6 +1076,7 @@ const USAGE: &str = "usage: psoxide-pgo <elf-with-dwarf> <pc.csv>... <out.prof>
        psoxide-pgo portable <in.prof> <out.prof>
        psoxide-pgo rebind <in.prof> <target-elf-with-dwarf> <out.prof> [--min-bound PERCENT] [--allow-unbound]
                                                                        (run in the guest's directory)
+       psoxide-pgo stamp <profile> --elf <twin-elf-with-dwarf> [--crate DIR]
        psoxide-pgo bind <profile> <target-elf-with-dwarf> [--exact] [--min-bound PERCENT] [--allow-unbound]
        psoxide-pgo layout <link.map> <image.exe> <words.csv>... <out.layout>
        psoxide-pgo place <in.layout> <link.map> <image.exe> <linker-script> <out.order>
@@ -1160,6 +1174,10 @@ fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
     let result = match words.as_slice() {
+        ["stamp", profile, "--elf", elf, flags @ ..] => {
+            let flags: Vec<String> = flags.iter().map(ToString::to_string).collect();
+            stamp_elf(Path::new(profile), Path::new(elf), &flags)
+        }
         [mode @ ("collect" | "order" | "apply" | "choose" | "measure" | "ladder" | "stamp"), ..] => {
             pipeline::main(mode, &args[1..])
         }
@@ -1535,5 +1553,17 @@ mod tests {
         ] {
             assert_eq!(portable_name(key), key);
         }
+    }
+
+    #[test]
+    fn stamp_elf_takes_only_an_optional_crate_directory() {
+        let error = stamp_elf(
+            Path::new("p.prof"),
+            Path::new("t.elf"),
+            &["--profile".to_string(), "x".to_string()],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("unknown arguments"), "{error}");
     }
 }

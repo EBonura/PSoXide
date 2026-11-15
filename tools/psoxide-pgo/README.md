@@ -775,6 +775,27 @@ So the damage is confined to a profile that reaches LLVM spelled as the build th
   -Zdebug-info-for-profiling -Cstrip=none` (the profiled build's own ELF serves: the flags
   do not change the symbols).
 
+A driver that links by itself, and so cannot use `collect` or `stamp --crate ... -- build`
+(this tool's own twin build lacks the driver's environment), stamps and rebinds with no override:
+
+1. When it collects the profile: `psoxide-pgo stamp PROFILE --elf TWIN.elf [--crate DIR]`.
+   `TWIN.elf` is the ELF it built with `-Cdebuginfo=1 -Zdebug-info-for-profiling -Cstrip=none`
+   from the tree it collected on, and `DIR` is any directory of the git repository holding
+   that tree (default: the current directory). It records, as comments LLVM skips, the commit
+   the tree was at, the git blob id of every tracked source file that holds a function of the
+   profile, and for each such function its declaration line and last line in that build.
+2. At each build: `psoxide-pgo rebind PROFILE TWIN.elf OUT` in the game's directory, with the
+   twin of the tree being built. `rebind` hashes the recorded files. Where every one is as
+   recorded it rewrites names only. Where a file was edited since (a stale stamp) it carries
+   the profile's line keys across the edit, using the twin's DWARF for where each function
+   went, and prints how many functions moved and how many samples sat on lines that are gone.
+   It stops, naming the functions, when one holding more than 1% of the samples is not in the
+   build, or when a blob the stamp names is not in the clone. A profile with no stamp stops it
+   too, with the command to run; `PSOXIDE_PGO_ALLOW_UNSTAMPED=1` applies an unstamped profile
+   unchecked and is not for a shipping driver. Stamp again (step 1) whenever the profile is
+   collected again; a stamp that was never collected from the tree it describes records that
+   tree's lines and fixes nothing that had already drifted.
+
 The key is `rustc_demangle`'s hash-free alternate output (`{:#}`) with ` @crate` appended for
 a generic instance, as `portable_name` writes it. It was chosen over deleting the hash from
 the string, which does not give equal strings (hashes have different lengths, and v0
