@@ -78,7 +78,7 @@ pub(crate) fn decompress_leaf_row(
     decompress_visibility(visibility, offset, &mut output[..row_bytes]).then_some(visible_leaves)
 }
 
-pub(crate) use crate::visibility::decode_strict as decompress_visibility;
+pub(crate) use psx_pack::visibility::decode_strict as decompress_visibility;
 
 /// One required PXBSP payload kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
