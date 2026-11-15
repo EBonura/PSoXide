@@ -1520,7 +1520,7 @@ mod tests {
         let mangled: [(&str, &str); 2] = [
             ("_ZN4core3fmt5write17h0123456789abcdefE", "core::fmt::write"),
             (
-                "_ZN57_$LT$core..fmt..Error$u20$as$u20$core..fmt..Debug$GT$3fmt17h0123456789abcdefE",
+                "_ZN53_$LT$core..fmt..Error$u20$as$u20$core..fmt..Debug$GT$3fmt17h0123456789abcdefE",
                 "<core::fmt::Error as core::fmt::Debug>::fmt",
             ),
         ];
