@@ -674,8 +674,8 @@ impl Mask64 {
         Mask64::first(hi).and_not(Mask64::first(lo))
     }
 
-    /// Every bit moved up by `n` (taken modulo 64, like [`WideU::shl_by`]); bits shifted past
-    /// bit 63 are dropped. The same instructions as `u64::wrapping_shl`.
+    /// Every bit moved up by `n` (taken modulo 64, like [`WideU::shl_by`]: a count of 64 or more
+    /// wraps, it does not give the empty set); bits shifted past bit 63 are dropped. The same instructions as `u64::wrapping_shl`.
     #[inline(always)]
     #[must_use]
     pub const fn shl_by(self, n: u32) -> Mask64 {
@@ -689,8 +689,8 @@ impl Mask64 {
         }
     }
 
-    /// Every bit moved down by `n` (taken modulo 64, like [`WideU::shr_by`]); bits shifted
-    /// below bit 0 are dropped. The same instructions as `u64::wrapping_shr`.
+    /// Every bit moved down by `n` (taken modulo 64, like [`WideU::shr_by`]: a count of 64 or more
+    /// wraps, it does not give the empty set); bits shifted below bit 0 are dropped. The same instructions as `u64::wrapping_shr`.
     #[inline(always)]
     #[must_use]
     pub const fn shr_by(self, n: u32) -> Mask64 {
@@ -702,6 +702,38 @@ impl Mask64 {
         } else {
             Mask64([self.0[1] >> k, 0])
         }
+    }
+
+    /// The number of zero bits below the lowest set bit; 64 for the empty set, like
+    /// `u64::trailing_zeros`.
+    #[inline(always)]
+    #[must_use]
+    pub const fn trailing_zeros(self) -> u32 {
+        // The word that holds the lowest set bit; both zero gives 32 + 32.
+        let low_empty = self.0[0] == 0;
+        let word = if low_empty { self.0[1] } else { self.0[0] };
+        ((low_empty as u32) << 5) + word.trailing_zeros()
+    }
+
+    /// The number of zero bits above the highest set bit; 64 for the empty set, like
+    /// `u64::leading_zeros`.
+    #[inline(always)]
+    #[must_use]
+    pub const fn leading_zeros(self) -> u32 {
+        // The word that holds the highest set bit; both zero gives 32 + 32.
+        let (word, base) = if self.0[1] != 0 {
+            (self.0[1], 0)
+        } else {
+            (self.0[0], 32)
+        };
+        base + word.leading_zeros()
+    }
+
+    /// The number of set bits.
+    #[inline(always)]
+    #[must_use]
+    pub const fn count_ones(self) -> u32 {
+        self.0[0].count_ones() + self.0[1].count_ones()
     }
 
     /// Is no bit set?
@@ -1267,6 +1299,33 @@ mod tests {
                 assert_eq!(v(m(w).shl_by(n)), w << (n % 64), "{w:#x} shl {n}");
                 assert_eq!(v(m(w).shr_by(n)), w >> (n % 64), "{w:#x} shr {n}");
             }
+        }
+    }
+
+    #[test]
+    fn mask64_bit_queries_match_u64() {
+        let m = |v: u64| Mask64::from_words(v as u32, (v >> 32) as u32);
+        let mut rng = Rng(0x0bad_cafe_f00d_1234);
+        let mut words = vec![
+            0u64,
+            1,
+            u64::MAX,
+            1 << 63,
+            1 << 32,
+            1 << 31,
+            0xffff_ffff,
+            0xffff_ffff_0000_0000,
+        ];
+        for b in 0..64 {
+            words.push(1 << b);
+            words.push(u64::MAX << b);
+            words.push(u64::MAX >> b);
+        }
+        words.extend((0..500).map(|_| rng.next() >> (rng.next() % 64)));
+        for w in words {
+            assert_eq!(m(w).trailing_zeros(), w.trailing_zeros(), "{w:#x}");
+            assert_eq!(m(w).leading_zeros(), w.leading_zeros(), "{w:#x}");
+            assert_eq!(m(w).count_ones(), w.count_ones(), "{w:#x}");
         }
     }
 
