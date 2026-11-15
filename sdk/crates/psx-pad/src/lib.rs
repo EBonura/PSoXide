@@ -67,7 +67,7 @@ pub use psx_io::controller_port::Port;
 mod controllers;
 pub mod stick;
 pub mod tracker;
-pub use controllers::Controllers;
+pub use controllers::{Controllers, PollCounters};
 pub use stick::{stick_bits, stick_bits_of, RadialStick};
 pub use tracker::{PadEdges, PadFrame, PadTracker};
 
@@ -1028,12 +1028,24 @@ impl PadReader {
 /// for a caller that saw a pad on this socket last time: one such reply could
 /// be a glitch on a pad that is still there, so it takes four before it says
 /// the pad is gone.
+#[inline(always)]
 fn poll_state<T: Transport>(
     bus: &mut T,
     socket: Port,
     confirm_absent: bool,
     rumble: Rumble,
 ) -> PadState {
+    poll_state_first(bus, socket, confirm_absent, rumble).0
+}
+
+/// [`poll_state`], and whether the first try was already clean (the counters of
+/// `Controllers` count the polls that needed a retry).
+fn poll_state_first<T: Transport>(
+    bus: &mut T,
+    socket: Port,
+    confirm_absent: bool,
+    rumble: Rumble,
+) -> (PadState, bool) {
     let mut last = PadState::NONE;
     let mut all_absent = true;
     let mut tries = 0;
@@ -1043,10 +1055,10 @@ fn poll_state<T: Transport>(
             s.mode,
             PadMode::Digital | PadMode::Analog | PadMode::Config | PadMode::Negcon
         ) {
-            return s;
+            return (s, tries == 0);
         }
         if s.mode == PadMode::Disconnected && !confirm_absent {
-            return s;
+            return (s, false);
         }
         all_absent &= s.mode == PadMode::Disconnected;
         last = s;
@@ -1061,7 +1073,7 @@ fn poll_state<T: Transport>(
     if !all_absent {
         last.mode = PadMode::Unknown;
     }
-    last
+    (last, false)
 }
 
 fn poll_once_raw<T: Transport>(bus: &mut T, socket: Port, pacing: Pacing) -> RawPoll {

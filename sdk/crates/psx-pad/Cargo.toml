@@ -6,6 +6,11 @@ license.workspace = true
 repository.workspace = true
 description  = "SIO0 controller polling: digital and DualShock analog pads, plus diagnostic pacing knobs."
 
+[features]
+# Per-port counters in `Controllers` (polls, failed, first-try failed, handshakes) for test
+# instruments. Off in every game: it adds code and state to the poll.
+counters = []
+
 [dependencies]
 psx-hw = { workspace = true }
 psx-io = { path = "../psx-io" }

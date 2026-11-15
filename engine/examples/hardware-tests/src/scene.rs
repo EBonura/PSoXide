@@ -574,6 +574,7 @@ fn main() -> ! {
     let irq_baseline = psx_io::irq::mask();
     // SAFETY: plain read of the DMA control word.
     let dpcr_baseline = unsafe { psx_io::read_u32(psx_hw::dma::DPCR) };
+    pad_ab::execute();
     let row = pad_menu::execute(true, false, irq_baseline, dpcr_baseline);
     // What a game gets from the launcher: SIO0, timers, interrupt mask and DMA quiesced.
     timers::set_mode(timers::Timer::Timer1, 0);

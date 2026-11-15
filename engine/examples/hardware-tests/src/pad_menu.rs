@@ -33,7 +33,7 @@ use psx_rt::{interrupts, tty};
 
 /// Frames of no input (no button, stick at rest) before the survey starts by itself: 70 seconds,
 /// long enough for the whole lab and a few seconds to read its last line.
-const IDLE_ENTRY_FRAMES: u32 = 70 * 60;
+const IDLE_ENTRY_FRAMES: u32 = 600 * 60;
 /// Frames of one lab phase: 8 seconds.
 const PHASE_FRAMES: u32 = 8 * 60;
 /// Root counter 1 mode: count HBlanks (63.6 us), for the time `/CS` was held low.
@@ -406,7 +406,7 @@ fn draw(font: &FontAtlas, v: &View) {
     let n = &v.note;
     txt(font, 4, 2, "PS1 HARDWARE TESTS", INK);
     txt(font, 320 - 4 - crate::SUITE_VERSION.len() as i16 * 8, 2, crate::SUITE_VERSION, DIM);
-    txt(font, 4, 11, "SDK 6E25F2AE, PAD+IO CODE = 9BB3045B", DIM);
+    txt(font, 4, 11, "SDK 6E25F2AE + PAD FIX (LANE PAD-AB)", DIM);
     for (i, label) in ROWS.iter().enumerate() {
         let (col, row) = (i as i16 / 6, i as i16 % 6);
         let (x, y) = (4 + col * 160, 21 + row * 9);
@@ -417,7 +417,7 @@ fn draw(font: &FontAtlas, v: &View) {
         }
         txt(font, x + 10, y, label, c);
     }
-    txt(font, 4, 76, "SHARED SDK PATH, AS THE LAUNCHER POLLS", GOLD);
+    txt(font, 4, 76, "FIXED SDK PATH (WATCHED), STICK NAV", GOLD);
     let mut l = L::new();
     l.s("P1 ").s(CLASS[usize::from(n.class).min(5)]);
     l.s("  ID ").hex(u32::from(n.id), 2);
@@ -498,7 +498,7 @@ fn draw(font: &FontAtlas, v: &View) {
             l.s(rec::LAB_NAMES[p]);
         }
         None => {
-            l.s("LAB DONE, SHIPPED PATH");
+            l.s("A/B DONE, FIXED SDK PATH");
         }
     }
     txt(font, 4, 193, l.as_str(), INK);
@@ -523,7 +523,7 @@ fn draw(font: &FontAtlas, v: &View) {
             }
         }
         None => {
-            l.s("PHASE 1 = THE LAUNCHER PATH, PRE-ENGINE");
+            l.s("THE PAD A/B RAN BEFORE THIS MENU");
         }
     }
     txt(font, 4, 220, l.as_str(), DIM);
@@ -610,10 +610,11 @@ pub(crate) fn execute(first: bool, have_capture: bool, baseline_irq: u32, baseli
     m.tracker.settle();
     let start_vb = interrupts::vblank_count();
     let mut last_vb = start_vb;
-    let mut phase = 0usize;
+    // v2.23: the A/B ran before the menu; the v2.22 lab is not repeated, the menu is for use.
+    let mut phase = LAB_MAX;
     let mut phase_vb = start_vb;
     let mut idle = 0u32;
-    let mut lab_done = false;
+    let mut lab_done = true;
     let mut band = 0usize;
     loop {
         frame();

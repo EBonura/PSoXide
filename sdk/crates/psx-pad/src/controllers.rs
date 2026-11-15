@@ -41,8 +41,8 @@
 //! [`PAD_SETUP_CYCLES`]: psx_io::controller_port::PAD_SETUP_CYCLES
 
 use crate::{
-    pad_begin, pad_delay, pad_exchange, poll_state, AnalogRequirement, PadMode, PadState, Port,
-    Rumble, MOTOR_MAP_PACKET, REQUIRE_ANALOG_GAP_SPINS,
+    pad_begin, pad_delay, pad_exchange, poll_state_first, AnalogRequirement, PadMode, PadState,
+    Port, Rumble, MOTOR_MAP_PACKET, REQUIRE_ANALOG_GAP_SPINS,
 };
 use psx_io::controller_port::{Timing, Transport};
 
@@ -127,6 +127,8 @@ struct Slot {
     recheck: u8,
     /// Consecutive unusable polls, up to [`STALE_POLLS`].
     failed: u8,
+    #[cfg(feature = "counters")]
+    counts: PollCounters,
 }
 
 impl Slot {
@@ -140,6 +142,13 @@ impl Slot {
         capable: false,
         recheck: 0,
         failed: 0,
+        #[cfg(feature = "counters")]
+        counts: PollCounters {
+            polls: 0,
+            failed: 0,
+            first_try_failed: 0,
+            handshakes: 0,
+        },
     };
 
     /// One poll of `socket`; `last` is its latest clean state and is updated. Inlined into [`Controllers::step`].
@@ -154,13 +163,19 @@ impl Slot {
         // One call site of the poll: the poll itself, the poll after the handshake,
         // and the poll after an exit sent to a pad parked in configuration mode (the
         // SCPH-110 failure, retried a bounded number of times).
+        let mut first_clean = true;
+        let mut tried = false;
         let state = loop {
-            let state = poll_state(
+            let (state, clean) = poll_state_first(
                 bus,
                 socket,
                 confirm,
                 if ANALOG { self.rumble } else { Rumble::OFF },
             );
+            if !tried {
+                tried = true;
+                first_clean = clean;
+            }
             if !ANALOG || (state.mode == PadMode::Analog && self.present) {
                 break state;
             }
@@ -169,6 +184,18 @@ impl Slot {
             }
             confirm = true;
         };
+        #[cfg(feature = "counters")]
+        {
+            let c = &mut self.counts;
+            c.polls = c.polls.saturating_add(1);
+            if !first_clean {
+                c.first_try_failed = c.first_try_failed.saturating_add(1);
+            }
+            if matches!(state.mode, PadMode::Unknown | PadMode::Disconnected) {
+                c.failed = c.failed.saturating_add(1);
+            }
+        }
+        let _ = first_clean;
         match state.mode {
             // A garbled packet: the last clean state stands, for a few polls. A link that
             // stays dead is reported as such and the handshake runs again when it recovers.
@@ -246,6 +273,10 @@ impl Slot {
             self.recheck = self.recheck.saturating_sub(1);
             return false;
         };
+        #[cfg(feature = "counters")]
+        {
+            self.counts.handshakes = self.counts.handshakes.saturating_add(1);
+        }
         let capable = config(bus, socket, Sequence::Analog, first);
         if fresh {
             self.capable = capable;
@@ -294,6 +325,20 @@ fn config<T: Transport>(bus: &mut T, socket: Port, sequence: Sequence, first: us
         n += 1;
     }
     ok
+}
+
+/// What one port's driver counted since it was made (feature `counters`, for test instruments:
+/// nothing here touches the wire, and a game build leaves the feature off).
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct PollCounters {
+    /// Calls of `poll` that went to the wire.
+    pub polls: u16,
+    /// Polls whose result was a pad that did not answer or a garbled packet, every retry spent.
+    pub failed: u16,
+    /// Polls whose first try was not clean (the retry may have been).
+    pub first_try_failed: u16,
+    /// Configuration sequences started: the first handshake, its retries and the rechecks.
+    pub handshakes: u16,
 }
 
 /// The controller ports, polled the one way every game polls them. See the module
@@ -360,6 +405,13 @@ impl<const ANALOG: bool> Controllers<ANALOG> {
             return;
         }
         slot.step::<T, ANALOG>(bus, port, &mut self.last[i]);
+    }
+
+    /// What `port`'s driver counted (feature `counters`).
+    #[cfg(feature = "counters")]
+    #[must_use]
+    pub fn counters(&self, port: Port) -> PollCounters {
+        self.slots[usize::from(port.is_two())].counts
     }
 
     /// The latest clean state of `port`, without polling.
@@ -969,6 +1021,26 @@ mod tests {
         let before = bus.selects;
         f(bus);
         [bus.selects[0] - before[0], bus.selects[1] - before[1]]
+    }
+
+    #[cfg(feature = "counters")]
+    #[test]
+    fn the_counters_count_polls_handshakes_and_failures_without_touching_the_wire() {
+        let mut bus = TwoPorts::new(dualshock(button::CROSS), empty());
+        let mut pads = Controllers::new();
+        for _ in 0..5 {
+            pads.poll(&mut bus, Port::One);
+        }
+        let c = pads.counters(Port::One);
+        assert_eq!((c.polls, c.failed, c.handshakes), (5, 0, 1));
+        assert_eq!(c.first_try_failed, 0);
+        // A pad whose /ACK after the fourth byte never comes in time: every poll fails.
+        for _ in 0..3 {
+            bus.model(0, |m| m.slow_ack = Some((3, 1_000_000)));
+            pads.poll(&mut bus, Port::One);
+        }
+        let c = pads.counters(Port::One);
+        assert_eq!((c.polls, c.failed, c.first_try_failed), (8, 3, 3));
     }
 
     #[test]

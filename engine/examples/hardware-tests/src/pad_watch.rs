@@ -18,6 +18,10 @@ use psx_io::periph::ControllerPort;
 use psx_io::timers::{self, Timer};
 use psx_pad::PadMode;
 
+/// Cycles after the deselect the held-select phase opens the next select: tuned in the emulator
+/// so the `/CS`-high time is the 562 the v2.22 menu measured through this transport.
+const HOLD_WAIT: u16 = 431;
+
 /// Reply bytes a pad of this ID sends in all, address byte included: three, and two for every
 /// halfword the low nibble of the ID counts.
 pub(crate) fn reply_len(id: u8) -> usize {
@@ -138,6 +142,12 @@ pub(crate) struct Watch {
     pub counters: Counters,
     /// Host-side switch: `/CS` is released between polls.
     pub release_between: bool,
+    /// A select left open after the last poll (see `hold_polls`), taken by the next poll.
+    held: Option<u16>,
+    /// Leave the next poll's select open after a successful poll (the A/B phase that watches the
+    /// held select; the SDK no longer does it): done in `finish`, `HOLD_WAIT` cycles after the deselect.
+    pub(crate) hold_polls: bool,
+    socket: Port,
 }
 
 impl Watch {
@@ -180,6 +190,9 @@ impl Watch {
                 exits_f3: 0,
             },
             release_between: false,
+            held: None,
+            hold_polls: false,
+            socket: Port::One,
         }
     }
 
@@ -318,7 +331,23 @@ impl Transport for Watch {
         }
         self.port.clock()
     }
+    fn begin_pad(&mut self, port: Port, _opened: Option<u16>) -> bool {
+        self.socket = port;
+        match self.held.take() {
+            Some(at) if self.control() == sio0::selected_ctrl(port.is_two(), false) => {
+                while self.clock().wrapping_sub(at) < psx_io::controller_port::PAD_SETUP_CYCLES {}
+            }
+            _ => {
+                self.select(port);
+                let at = self.clock();
+                while self.clock().wrapping_sub(at) < psx_io::controller_port::PAD_SETUP_CYCLES {}
+            }
+        }
+        self.drain_receive();
+        self.wait_status_clear(sio0::stat::DSR_LEVEL, psx_io::controller_port::Timing::PAD.ack_spins)
+    }
     fn finish(&mut self, succeeded: bool) {
+        let was_poll = self.command == 0x42;
         let sent = self.position as u8;
         let acked = self.rise.iter().filter(|&&r| r != 0xFFFF).count() as u8;
         let poll_like = self.command == 0x42 || (self.command == 0 && self.position == 1);
@@ -382,6 +411,11 @@ impl Transport for Watch {
         self.irq_after_clear = false;
         self.txn_selects = 0;
         self.port.finish(succeeded);
+        if self.hold_polls && succeeded && was_poll {
+            let at = self.port.clock();
+            while self.port.clock().wrapping_sub(at) < HOLD_WAIT {}
+            self.held = Some(self.open(self.socket));
+        }
     }
     fn mask_interrupts(&mut self) -> bool {
         self.port.mask_interrupts()
