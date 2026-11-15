@@ -195,6 +195,17 @@ const RSQRT_KNOTS: [u32; 193] = {
     out
 };
 
+/// `floor(4096 * sqrt(64 / m))` for the sums `m` in `64..=255`: the reciprocal square roots the GTE
+/// classic normalizer reads, from the same knots as [`isqrt_u64`] (`knot = floor(2^34 / sqrt(m))`,
+/// so the Q12 value is `knot >> 19`; the first knot is one short of 2^31 and the `+ 1` makes it
+/// exactly 4096). Replaces a 192-entry (384 B) table in psx-gte; equal for every `m`, tested.
+/// `m` out of range panics on the knot index.
+#[inline(always)]
+#[must_use]
+pub const fn rsqrt_q12_from_64(m: u32) -> i16 {
+    ((RSQRT_KNOTS[(m - 64) as usize] + 1) >> 19) as i16
+}
+
 /// One `multu`: the full 64-bit product of two words.
 #[inline(always)]
 // psx-numeric-allow-next-line: MULTU returns the full HI:LO product
