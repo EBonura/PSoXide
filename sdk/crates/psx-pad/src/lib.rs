@@ -154,6 +154,11 @@ impl ButtonState {
 pub const STICK_CENTER: u8 = 0x80;
 
 /// Controller operating mode inferred from the poll ID byte.
+///
+/// The variant order is part of the code size: `Digital`, `Analog`, `Config` and `Negcon` (the
+/// modes that answered with a valid packet) are adjacent, and `Analog` and `Config` (the modes
+/// that carry sticks) lead them, so [`PadMode::has_sticks`], `has_axes` and the "answered"
+/// test are each one range compare instead of a bit test.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum PadMode {
     /// No controller answered the poll.
@@ -162,10 +167,10 @@ pub enum PadMode {
     Digital,
     /// DualShock analog shape: ID `0x73`, buttons plus stick bytes.
     Analog,
-    /// neGcon-compatible racing controller: ID `0x23`, twist and three pressures.
-    Negcon,
     /// DualShock config/escape shape: ID `0xF3`.
     Config,
+    /// neGcon-compatible racing controller: ID `0x23`, twist and three pressures.
+    Negcon,
     /// A controller answered with an ID this SDK does not classify yet.
     Unknown,
 }

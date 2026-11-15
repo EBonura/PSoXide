@@ -75,7 +75,12 @@ pub const fn stick_bits<const THRESHOLD: i16>(x: i16, y: i16) -> u16 {
 #[must_use]
 #[inline(always)]
 pub const fn stick_bits_of<const THRESHOLD: i16>(pad: &PadState) -> u16 {
-    let (x, y) = pad.menu_stick();
+    // The early return, rather than folding `(0, 0)`, lets the compiler turn the compares into
+    // unsigned compares on the stick bytes themselves (measured: -44 bytes at one call site).
+    if !pad.mode.has_sticks() {
+        return 0;
+    }
+    let (x, y) = pad.sticks.left_centered();
     stick_bits::<THRESHOLD>(x, y)
 }
 
@@ -151,6 +156,34 @@ fn dominant(x: i16, y: i16) -> u16 {
 mod tests {
     use super::*;
     use crate::{PadEdges, PadMode, PadTracker};
+
+    #[test]
+    fn stick_bits_of_equals_the_fold_of_menu_stick_in_every_mode_at_every_reading() {
+        for mode in [
+            PadMode::Disconnected,
+            PadMode::Digital,
+            PadMode::Analog,
+            PadMode::Config,
+            PadMode::Negcon,
+            PadMode::Unknown,
+        ] {
+            for left_x in 0..=255u8 {
+                for left_y in (0..=255u8).step_by(3) {
+                    let mut pad = PadState::NONE;
+                    pad.mode = mode;
+                    pad.sticks.left_x = left_x;
+                    pad.sticks.left_y = left_y;
+                    let (x, y) = pad.menu_stick();
+                    assert_eq!(stick_bits_of::<44>(&pad), stick_bits::<44>(x, y));
+                    assert_eq!(stick_bits_of::<0>(&pad), stick_bits::<0>(x, y));
+                    assert_eq!(
+                        pad.mode.has_sticks(),
+                        matches!(mode, PadMode::Analog | PadMode::Config)
+                    );
+                }
+            }
+        }
+    }
 
     // The rules the games kept by hand, written out as they were (one count at
     // a time) so the fold is held to them exactly.
