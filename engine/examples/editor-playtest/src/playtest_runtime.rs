@@ -2846,6 +2846,9 @@ pub(super) fn live_action_speed_q8(
 }
 
 #[cfg(test)]
+mod combat_baseline_tests;
+
+#[cfg(test)]
 mod life_reset_tests {
     use super::*;
     use psx_game_runtime::projectiles::{CombatTeam, ProjectileSpawn};

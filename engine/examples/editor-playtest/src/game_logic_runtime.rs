@@ -1718,7 +1718,7 @@ impl Playtest {
         None
     }
 
-    fn report_player_melee_stats(&mut self, stats: MeleeArcStats) {
+    pub(super) fn report_player_melee_stats(&mut self, stats: MeleeArcStats) {
         if stats.hits > 0 {
             let heavy = matches!(
                 self.anim_state,
