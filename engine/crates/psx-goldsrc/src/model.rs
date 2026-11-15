@@ -5,11 +5,13 @@ pub use psx_asset::hmd8::*;
 
 /// Reject a model before its vertices can exceed the game-owned scratch arena (`vertex_cap`, the
 /// game's generated projection-scratch budget).
+#[must_use]
 pub fn load(data: &'static [u8], vertex_cap: usize) -> Model {
     Model::from_bytes_with_vertex_cap(data, vertex_cap)
 }
 
 /// Rendering and studio collision sample the same retained animation pose.
+#[must_use]
 #[inline(never)]
 #[optimize(size)]
 pub fn pose<'a>(
@@ -24,6 +26,7 @@ pub fn pose<'a>(
 }
 
 /// Transpose transform about `origin`, then scale, keeping the integer operation order.
+#[must_use]
 #[inline(never)]
 #[optimize(size)]
 pub fn inverse_affine(

@@ -9,6 +9,7 @@ use psx_pad::{AnalogRequirement, Controllers, PadState, Port};
 static mut PADS: Controllers = Controllers::new();
 
 /// Poll `port` once and return its latest clean state.
+#[must_use]
 #[inline(never)]
 pub fn poll(port: Port) -> PadState {
     // SAFETY: the game is single-threaded and polls the pad only through this function; a
@@ -21,6 +22,7 @@ pub fn poll(port: Port) -> PadState {
 }
 
 /// What `port` held at the last poll: analog and locked, a digital pad, or nothing.
+#[must_use]
 pub fn analog(port: Port) -> AnalogRequirement {
     // SAFETY: as in `poll`.
     unsafe { (*core::ptr::addr_of!(PADS)).analog(port) }
