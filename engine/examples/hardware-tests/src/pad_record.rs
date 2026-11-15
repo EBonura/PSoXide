@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-//! The controller survey's record format, `PXCB` schema 1: one controller, one binary.
+//! The controller survey's record format, `PXCB` schema 2 (1 plus the power-on section and a fourth soak kind): one controller, one binary.
 //!
 //! This file is `core` only and is compiled twice: into the hardware-test disc, which encodes
 //! records with it, and into `psoxide-hwtest` (by path), whose tests encode with the same code
@@ -14,7 +14,7 @@
 //!    5  suite major        6  suite minor
 //!    7  record number (1-based, counts controllers seen since boot)
 //!    8  boot id            9  port (0 = port 1, 1 = port 2)
-//!   10  kind (0 pad answered, 1 nothing answered)
+//!   10  kind (0 pad answered, 1 nothing answered, 2 power-on record: the menu's first polls)
 //!   11  flags (bit 0: the record outgrew its buffer and later data was dropped)
 //!   12  SDK revision, 8 ASCII bytes
 //!   20  timer (0: root counter 0, the system clock)   21  reserved
@@ -32,7 +32,9 @@
 /// Record magic.
 pub const MAGIC: &[u8; 4] = b"PXCB";
 /// Schema version of this layout.
-pub const SCHEMA: u8 = 1;
+pub const SCHEMA: u8 = 2;
+/// Oldest schema a reader still takes (v2.21 records: no power-on section, soak kinds 0 to 2).
+pub const SCHEMA_MIN: u8 = 1;
 /// Header length in bytes.
 pub const HEADER_LEN: usize = 32;
 /// Transaction log section.
@@ -43,6 +45,8 @@ pub const TAG_WINDOW: u8 = 2;
 pub const TAG_SOAK: u8 = 3;
 /// Hand-over section.
 pub const TAG_HANDOVER: u8 = 4;
+/// Power-on section: the menu's pad lab and its first polls.
+pub const TAG_POWERON: u8 = 5;
 /// Most bytes one logged transaction holds.
 pub const TXN_MAX: usize = 24;
 /// Longest ID run list a window, soak or hand-over carries.
@@ -566,10 +570,11 @@ pub struct Failure {
 }
 
 /// Soak kinds.
-pub const SOAK_NAMES: [&str; 3] = [
+pub const SOAK_NAMES: [&str; 4] = [
     "SOAK 1 LAUNCHER LOOP ALONE",
     "SOAK 2 LOOP + CD XA + SPU + FLIPS",
     "SOAK 3 LOOP + RAW POLL, SAME FRAME",
+    "SOAK 0 PAD AS THE MENU LEFT IT",
 ];
 
 /// A few hundred consecutive `Controllers` polls.
@@ -894,3 +899,335 @@ pub fn put_handover(w: &mut Writer, h: &Handover) {
 pub const CHARS_PER_PAGE: usize = 36 * 23;
 /// Page schema prefix of a controller record.
 pub const PAGE_SCHEMA: &str = "PXC";
+
+
+// ------------------------------------------------------------------------- power-on record
+
+/// Polls the power-on record keeps (the first `Controllers::poll` calls after power).
+pub const POWER_POLLS: u16 = 600;
+/// Run-length entries the power-on record keeps.
+pub const POWER_RUNS: usize = 150;
+/// Lab phases the record has a result line for.
+pub const LAB_MAX: usize = 8;
+
+/// Poll outcome classes of a [`PollNote`].
+pub const NOTE_CLASS_NAMES: [&str; 6] =
+    ["OK", "SHORT", "GARBLED", "NO PAD", "NO EXCHANGE", "ADDR NOT ACKED"];
+/// Why the stick fold gave what it gave, indexed by [`PollNote::why`].
+pub const FOLD_WHY: [&str; 6] = [
+    "STICK PUSHED",
+    "INSIDE DEAD ZONE",
+    "MODE HAS NO STICKS",
+    "NO PAD CONNECTED",
+    "HELD UNTIL EXIT RADIUS",
+    "FOLD NOT RUN",
+];
+
+/// Lab phase names (what the menu's pad lab does in each 8-second phase).
+pub const LAB_NAMES: [&str; LAB_MAX] = [
+    "1 SHIPPED CONTROLLERS, HELD SELECT",
+    "2 SELECT RELEASED BETWEEN POLLS",
+    "3 HELD SELECT, POLL EVERY 2ND FRAME",
+    "4 HELD SELECT, POLL EVERY 4TH FRAME",
+    "5 NEW CONTROLLERS (NEW HANDSHAKE)",
+    "6 4D MOTOR MAP (LONG), THEN SHIPPED",
+    "7 45/46/47/4C QUERIES, THEN SHIPPED",
+    "8 ENTER+LOCK ANALOG+EXIT, SHIPPED",
+];
+
+/// One `Controllers::poll` call as the watching transport saw it: the first try, the try the SDK
+/// went on with, what it reported, and what its stick fold made of it.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub struct PollNote {
+    /// Lab phase the poll ran in (0 to 7), 0xFF outside the lab.
+    pub lab: u8,
+    /// Outcome class of the first try (see [`NOTE_CLASS_NAMES`]).
+    pub first_class: u8,
+    /// Wire ID of the first try (0xFF when none came): at poll 0 the ID the pad powered up with.
+    pub first_id: u8,
+    /// Byte the first try died at (0 is the address byte), 0xFF when it completed.
+    pub first_died: u8,
+    /// Outcome class of the last try, the one the SDK's report comes from.
+    pub class: u8,
+    /// Wire ID of the last try (0xFF when none came).
+    pub id: u8,
+    /// Reply bytes the last try read.
+    pub n: u8,
+    /// Bytes of the last try whose `/ACK` was seen.
+    pub acked: u8,
+    /// Byte the last try died at, 0xFF when it completed.
+    pub died: u8,
+    /// Poll transactions (command 0x42 or abandoned before it) this call made.
+    pub tries: u8,
+    /// Bit 0: the first try started on a fresh select, not the one held since the last poll.
+    /// Bits 1 to 7: selects the call made itself (every try after the first is one).
+    pub fresh: u8,
+    /// Configuration packets this call sent.
+    pub cfg: u8,
+    /// Exit packets among them.
+    pub exits: u8,
+    /// Reply bytes of the last try.
+    pub rx: [u8; 9],
+    /// Mode code the SDK reported.
+    pub mode: u8,
+    /// Bit 0 connected, bit 1 `analog()` said Analog (locked), bit 2 the mode reports sticks.
+    pub flags: u8,
+    /// Buttons the SDK reported, active high.
+    pub buttons: u16,
+    /// Sticks the SDK reported: right X, right Y, left X, left Y.
+    pub sticks: [u8; 4],
+    /// D-pad bits the shared stick fold produced: bit 0 up, 1 down, 2 left, 3 right.
+    pub fold: u8,
+    /// Why (see [`FOLD_WHY`]).
+    pub why: u8,
+}
+
+/// A run of identical polls, with the shortest and longest time the select was held low before
+/// them (in hblank counts of 63.6 us each).
+#[derive(Clone, Copy, Default)]
+pub struct NoteRun {
+    /// Polls in the run.
+    pub count: u16,
+    /// What they read.
+    pub note: PollNote,
+    /// Shortest hold, hblank counts.
+    pub hold_min: u16,
+    /// Longest hold.
+    pub hold_max: u16,
+}
+
+/// Running counts since boot, for the readout and the record.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub struct Counters {
+    /// Polls that ended complete.
+    pub ok: u32,
+    /// Polls that did not (the last try failed).
+    pub bad: u32,
+    /// Poll transactions whose address byte got no `/ACK`.
+    pub nak: u32,
+    /// Poll transactions beyond the first of a call (fresh-select retries).
+    pub retry: u32,
+    /// Handshakes started (enter-configuration packets sent).
+    pub handshakes: u32,
+    /// Configuration packets sent.
+    pub cfg: u32,
+    /// Exit packets sent.
+    pub exits: u32,
+    /// Exits whose next poll read ID 0xF3 (the pad still in configuration mode).
+    pub exits_f3: u32,
+}
+
+/// What one lab phase saw.
+#[derive(Clone, Copy, Default)]
+pub struct LabResult {
+    /// Phase, 0 to 7.
+    pub phase: u8,
+    /// Video frames the phase ran.
+    pub frames: u16,
+    /// Polls made.
+    pub polls: u16,
+    /// Polls that ended complete.
+    pub ok: u16,
+    /// Polls that did not.
+    pub bad: u16,
+    /// Polls whose first try failed.
+    pub first_bad: u16,
+    /// OR of the buttons the SDK reported.
+    pub btn_or: u16,
+    /// Wire ID of the last poll.
+    pub last_id: u8,
+    /// Mode code the SDK reported last.
+    pub last_mode: u8,
+    /// Flags of the last poll as in [`PollNote::flags`].
+    pub last_flags: u8,
+    /// Raw transactions of the phase's own commands that completed.
+    pub raw_ok: u8,
+    /// Raw transactions the phase sent.
+    pub raw_total: u8,
+    /// Reply to command 0x45 (status) if the phase asked: six bytes after the 0x5A, and whether
+    /// it was read in full.
+    pub status45: [u8; 6],
+    /// 1 when `status45` holds a reply.
+    pub status45_set: u8,
+    /// Polls whose fold gave a d-pad bit.
+    pub fold_hits: u16,
+}
+
+/// The power-on record: the menu's first polls and its lab.
+#[derive(Clone, Copy)]
+pub struct PowerOn {
+    /// Polls noted.
+    pub polls: u16,
+    /// Run-length entries.
+    pub runs: [NoteRun; POWER_RUNS],
+    /// Valid entries.
+    pub run_n: u16,
+    /// Polls whose run did not fit.
+    pub dropped: u16,
+    /// Counters when the record was closed.
+    pub counters: Counters,
+    /// Lab results, in phase order.
+    pub lab: [LabResult; LAB_MAX],
+    /// Valid entries.
+    pub lab_n: u8,
+    /// Video frames since the first poll.
+    pub frames: u32,
+}
+
+impl PowerOn {
+    /// An empty record.
+    pub const EMPTY: PowerOn = PowerOn {
+        polls: 0,
+        runs: [NoteRun {
+            count: 0,
+            note: PollNote {
+                lab: 0,
+                first_class: 0,
+                first_id: 0,
+                first_died: 0,
+                class: 0,
+                id: 0,
+                n: 0,
+                acked: 0,
+                died: 0,
+                tries: 0,
+                fresh: 0,
+                cfg: 0,
+                exits: 0,
+                rx: [0; 9],
+                mode: 0,
+                flags: 0,
+                buttons: 0,
+                sticks: [0; 4],
+                fold: 0,
+                why: 0,
+            },
+            hold_min: 0,
+            hold_max: 0,
+        }; POWER_RUNS],
+        run_n: 0,
+        dropped: 0,
+        counters: Counters {
+            ok: 0,
+            bad: 0,
+            nak: 0,
+            retry: 0,
+            handshakes: 0,
+            cfg: 0,
+            exits: 0,
+            exits_f3: 0,
+        },
+        lab: [LabResult {
+            phase: 0,
+            frames: 0,
+            polls: 0,
+            ok: 0,
+            bad: 0,
+            first_bad: 0,
+            btn_or: 0,
+            last_id: 0,
+            last_mode: 0,
+            last_flags: 0,
+            raw_ok: 0,
+            raw_total: 0,
+            status45: [0; 6],
+            status45_set: 0,
+            fold_hits: 0,
+        }; LAB_MAX],
+        lab_n: 0,
+        frames: 0,
+    };
+
+    /// Note one poll (the first [`POWER_POLLS`] only), run-length coded: a poll that reads like the
+    /// one before extends its run; a full table drops the poll and counts it.
+    pub fn note(&mut self, note: PollNote, hold: u16) {
+        if self.polls >= POWER_POLLS {
+            return;
+        }
+        self.polls += 1;
+        let last = self.run_n as usize;
+        if last > 0 && self.runs[last - 1].note == note {
+            let r = &mut self.runs[last - 1];
+            r.count = r.count.saturating_add(1);
+            r.hold_min = r.hold_min.min(hold);
+            r.hold_max = r.hold_max.max(hold);
+        } else if last < POWER_RUNS {
+            self.runs[last] = NoteRun { count: 1, note, hold_min: hold, hold_max: hold };
+            self.run_n += 1;
+        } else {
+            self.dropped = self.dropped.saturating_add(1);
+        }
+    }
+
+    /// Close lab phase `r`.
+    pub fn lab_result(&mut self, r: LabResult) {
+        if (self.lab_n as usize) < LAB_MAX {
+            self.lab[self.lab_n as usize] = r;
+            self.lab_n += 1;
+        }
+    }
+}
+
+fn put_note(w: &mut Writer, n: &PollNote) {
+    w.u8(n.lab);
+    w.u8(n.first_class);
+    w.u8(n.first_id);
+    w.u8(n.first_died);
+    w.u8(n.class);
+    w.u8(n.id);
+    w.u8(n.n);
+    w.u8(n.acked);
+    w.u8(n.died);
+    w.u8(n.tries);
+    w.u8(n.fresh);
+    w.u8(n.cfg);
+    w.u8(n.exits);
+    w.put(&n.rx);
+    w.u8(n.mode);
+    w.u8(n.flags);
+    w.u16(n.buttons);
+    w.put(&n.sticks);
+    w.u8(n.fold);
+    w.u8(n.why);
+}
+
+/// Bytes of one [`PollNote`] in a record.
+pub const NOTE_LEN: usize = 13 + 9 + 2 + 2 + 4 + 2;
+
+/// Power-on section: polls u16, run count u16, dropped u16, frames u32, counters (8 u32), lab count
+/// u8 then per result phase u8, frames, polls, ok, bad, first_bad, btn_or (u16 each), last id,
+/// last mode, last flags, raw ok, raw total u8, status45 (6 bytes), status45 set u8, fold hits
+/// u16; then per run count u16, hold min u16, hold max u16, note ([`NOTE_LEN`] bytes: lab, first
+/// class, first id, first died, class, id, n, acked, died, tries, fresh, cfg, exits, 9 rx, mode, flags,
+/// buttons u16, 4 sticks, fold, why).
+pub fn put_poweron(w: &mut Writer, p: &PowerOn) {
+    w.u16(p.polls);
+    w.u16(p.run_n);
+    w.u16(p.dropped);
+    w.u32(p.frames);
+    let c = &p.counters;
+    for v in [c.ok, c.bad, c.nak, c.retry, c.handshakes, c.cfg, c.exits, c.exits_f3] {
+        w.u32(v);
+    }
+    w.u8(p.lab_n);
+    for l in &p.lab[..p.lab_n as usize] {
+        w.u8(l.phase);
+        for v in [l.frames, l.polls, l.ok, l.bad, l.first_bad, l.btn_or] {
+            w.u16(v);
+        }
+        w.u8(l.last_id);
+        w.u8(l.last_mode);
+        w.u8(l.last_flags);
+        w.u8(l.raw_ok);
+        w.u8(l.raw_total);
+        w.put(&l.status45);
+        w.u8(l.status45_set);
+        w.u16(l.fold_hits);
+    }
+    for r in &p.runs[..p.run_n as usize] {
+        w.u16(r.count);
+        w.u16(r.hold_min);
+        w.u16(r.hold_max);
+        put_note(w, &r.note);
+    }
+}

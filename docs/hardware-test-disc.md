@@ -322,7 +322,7 @@ The run includes waits that are part of the measurement (the CD motor case waits
 
 ## Radius disc and list node sweep (v2.8, records `0xB00`-`0xBF7`, `0xC00`-`0xC47`)
 
-`make hwtest-radius-disc PSOXIDE_SDK=<PSoXide checkout>` builds `build/hwtest-radius/hardware-tests-radius.{bin,cue}`: the suite with the SDK stop panel, `CDTEST.BIN` at 360 sectors (400 before v2.21) and `RADIUS.DAT` after the XA files, about 78 minutes in all (the recipe refuses an image over 359,844 blocks). Run it from MAIN MENU row 2 (`RADIUS + LIST NODE SWEEP ONLY`, about three minutes) or as part of the full run.
+`make hwtest-radius-disc PSOXIDE_SDK=<PSoXide checkout>` builds `build/hwtest-radius/hardware-tests-radius.{bin,cue}`: the suite with the SDK stop panel, `CDTEST.BIN` at 340 sectors (360 in v2.21, 400 before) and `RADIUS.DAT` after the XA files, about 78 minutes in all (the recipe refuses an image over 359,844 blocks). Run it from MAIN MENU row 2 (`RADIUS + LIST NODE SWEEP ONLY`, about three minutes) or as part of the full run.
 
 Record layouts are in the headers of `src/radius.rs` and `src/ll_sweep.rs`; `psoxide-hwtest diag-report <pages>` decodes both. The radius table's state codes: OK all sectors and data right; RT right after a retry or an error on the way; XX sectors came with wrong data; TO fewer sectors than asked, last event a timeout; ER fewer sectors, last event INT5. The time includes the seek: the first method at a position (the SDK reader) pays the long seek from the previous position, the raw reads then read the same place again.
 
@@ -332,7 +332,7 @@ The list node table reads: size in words, GPU state when the node arrived (BUSY:
 
 v2.10 is v2.9 plus the v1.26/v1.27 measurements that the linear run did not have, one tree on editor main. [hardware-test-v1-to-v2.10.md](hardware-test-v1-to-v2.10.md) maps every v1.x feature to its v2.10 place; [hardware-test-v2.10-vs-v2.9.md](hardware-test-v2.10-vs-v2.9.md) explains every row that moved against v2.9.
 
-* `make hardware-tests-disc` always builds the console-diag EXE with `CDTEST.BIN` at 360 sectors (400 until v2.20; the v2.21 EXE is 635 sectors, 400 leaves 602). Image size is the same 16,660 sectors as the v2.9 test images.
+* `make hardware-tests-disc` always builds the console-diag EXE with `CDTEST.BIN` at 340 sectors (400 until v2.20, 360 in v2.21; the v2.22 EXE is 650 sectors, 340 leaves 662). Image size is the same 16,660 sectors as the v2.9 test images.
 * `MDEC SETUP DIAGNOSTIC` (GPU area, after `MDEC DECODE`): records `0x230 + 0x10 * v` (sequence v, A to F, ten records of three halfwords each, fourteen when a DMA timed out), `0x290` overview, `0x298 + 5 * t` traces (idle, busy, busy with enable), `0x2A8` control. `psoxide-hwtest report` prints `mdec_diag`, `mdec_reset_trace` and `mdec_control` rows.
 * `GPU BATCHES` carries the E2 texture-window cases `0x146`-`0x14B`; case `0xEA` (index 234, list upload) is in the GPU area.
 * `CD DATA VERSUS AUDIO ROUTE` writes `0x510 + stage` (peaks, state) and `0x520 + 8 * stage + k` (registers, volumes, per-half hash, non-zero count, energy).
