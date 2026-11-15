@@ -7,6 +7,8 @@
 
 #![allow(dead_code)] // shipping builds use Sample/actions; replay builds use the parser
 
+use psx_asset::le;
+
 pub const MAGIC: &[u8; 8] = b"HLINPUT1";
 pub const TICK_HZ: u16 = 20;
 
@@ -170,14 +172,12 @@ fn checked_slice(data: &[u8], offset: usize, len: usize) -> Result<&[u8], Error>
 
 #[inline(always)]
 fn read_u16(data: &[u8], offset: usize) -> Result<u16, Error> {
-    let bytes = checked_slice(data, offset, 2)?;
-    Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
+    Ok(le::read_u16(checked_slice(data, offset, 2)?, 0))
 }
 
 #[inline(always)]
 fn read_u32(data: &[u8], offset: usize) -> Result<u32, Error> {
-    let bytes = checked_slice(data, offset, 4)?;
-    Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    Ok(le::read_u32(checked_slice(data, offset, 4)?, 0))
 }
 
 /// Validate one fixed-width NUL-padded map name and return its byte length.

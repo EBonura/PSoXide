@@ -2,6 +2,8 @@
 
 use core::mem::{align_of, size_of};
 
+use psx_asset::le::{read_u16, read_u32};
+
 use crate::format::{
     blend_from_code, GroupRecord, Run, Vertex, HEADER_LEN, MAGIC, RUN_QUADS, RUN_TRIANGLES, VERSION,
 };
@@ -71,14 +73,6 @@ pub struct VectorAsset<'a> {
     pub(crate) runs: &'a [Run],
     names: &'a [u8],
     canvas_q4: [u16; 2],
-}
-
-fn read_u16(bytes: &[u8], at: usize) -> u16 {
-    u16::from_le_bytes([bytes[at], bytes[at + 1]])
-}
-
-fn read_u32(bytes: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
 }
 
 /// View `count` records of `T` at byte offset `off`.
