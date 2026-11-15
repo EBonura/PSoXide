@@ -76,7 +76,10 @@
 //!   positions, accumulated velocities, etc.
 
 #![no_std]
-#![cfg_attr(target_arch = "mips", feature(asm_experimental_arch))]
+#![cfg_attr(
+    target_arch = "mips",
+    feature(asm_experimental_arch, optimize_attribute)
+)]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
