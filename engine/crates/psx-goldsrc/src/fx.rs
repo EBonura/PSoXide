@@ -22,6 +22,7 @@ use core::ptr::addr_of;
 
 use psx_engine::{PrimitivePacketArena, PrimitiveSink};
 use psx_gpu::material::{BlendMode, TextureMaterial};
+use psx_hw::gpu::packet;
 
 use crate::driver;
 
@@ -224,7 +225,7 @@ pub fn tri_flat_blended<T: Tail>(
         material.draw_mode_word(),
         material.texture_window_word(),
         // GP0(22h): flat, triangle, untextured, semi-transparent.
-        0x2200_0000 | gp0_color(r, g, b),
+        packet::FLAT_TRIANGLE | packet::SEMI_TRANSPARENT | gp0_color(r, g, b),
         gp0_vertex(verts[0].0, verts[0].1),
         gp0_vertex(verts[1].0, verts[1].1),
         gp0_vertex(verts[2].0, verts[2].1),
@@ -242,7 +243,7 @@ pub fn tri_flat<T: Tail>(verts: [(i16, i16); 3], r: u8, g: u8, b: u8) {
     }
     let captured = chain_push::<T>(&[
         // GP0(20h): flat, triangle, untextured, opaque.
-        0x2000_0000 | gp0_color(r, g, b),
+        packet::FLAT_TRIANGLE | gp0_color(r, g, b),
         gp0_vertex(verts[0].0, verts[0].1),
         gp0_vertex(verts[1].0, verts[1].1),
         gp0_vertex(verts[2].0, verts[2].1),
@@ -260,7 +261,7 @@ pub fn quad_flat<T: Tail>(verts: [(i16, i16); 4], r: u8, g: u8, b: u8) {
     }
     let captured = chain_push::<T>(&[
         // GP0(28h): flat, quad, untextured, opaque.
-        0x2800_0000 | gp0_color(r, g, b),
+        packet::FLAT_QUAD | gp0_color(r, g, b),
         gp0_vertex(verts[0].0, verts[0].1),
         gp0_vertex(verts[1].0, verts[1].1),
         gp0_vertex(verts[2].0, verts[2].1),

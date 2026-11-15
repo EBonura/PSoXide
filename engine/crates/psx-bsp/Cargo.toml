@@ -16,6 +16,7 @@ psx-pack = { path = "../../../sdk/crates/psx-pack" }
 # against the engine workspace root.
 psx-engine = { path = "../psx-engine" }
 psx-gpu = { path = "../../../sdk/crates/psx-gpu" }
+psx-hw = { path = "../../../crates/psx-hw" }
 psx-gte = { path = "../../../sdk/crates/psx-gte" }
 psx-math = { path = "../../../sdk/crates/psx-math" }
 

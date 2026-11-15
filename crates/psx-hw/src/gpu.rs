@@ -204,6 +204,15 @@ pub mod gp1 {
         0x0500_0000 | (x & 0x3ff) | ((y & 0x1ff) << 10)
     }
 
+    /// [`display_start`] for a corner already inside VRAM (`x` below 1024, `y` below 512): no
+    /// masks. Out-of-range input corrupts the command byte (checked in debug builds only).
+    #[inline(always)]
+    #[must_use]
+    pub const fn display_start_in_range(x: u32, y: u32) -> u32 {
+        debug_assert!(x < 0x400 && y < 0x200);
+        0x0500_0000 | x | (y << 10)
+    }
+
     /// GP1(06h) -- Horizontal display range (GPU clock counts from
     /// start-of-line). Standard NTSC window: `0x260..0xC60`.
     #[inline(always)]
@@ -216,6 +225,15 @@ pub mod gp1 {
     #[inline(always)]
     pub const fn v_display_range(y1: u32, y2: u32) -> u32 {
         0x0700_0000 | (y1 & 0x3ff) | ((y2 & 0x3ff) << 10)
+    }
+
+    /// [`v_display_range`] for scanlines below 1024: no masks. Out-of-range input corrupts the
+    /// command byte (checked in debug builds only).
+    #[inline(always)]
+    #[must_use]
+    pub const fn v_display_range_in_range(y1: u32, y2: u32) -> u32 {
+        debug_assert!(y1 < 0x400 && y2 < 0x400);
+        0x0700_0000 | y1 | (y2 << 10)
     }
 
     /// GP1(08h) -- Display mode (resolution, video standard, depth).
@@ -320,6 +338,16 @@ pub mod gp0 {
             | ((draw_to_display as u32) << 10)
     }
 
+    /// GP0(E1h) from a texpage halfword that is already laid out as the command's low bits
+    /// (every GP0(E1h) field, bits 0..=13): `0xE100_0000 | texpage`, no masks and no field
+    /// arithmetic. Bits above 13 would corrupt the command byte (checked in debug builds only).
+    #[inline(always)]
+    #[must_use]
+    pub const fn draw_mode_from_texpage(texpage: u32) -> u32 {
+        debug_assert!(texpage < 0x4000);
+        0xe100_0000 | texpage
+    }
+
     /// GP0(E2h) -- Texture window (wrap inside a rect).
     #[inline(always)]
     pub const fn tex_window(mask_x: u32, mask_y: u32, off_x: u32, off_y: u32) -> u32 {
@@ -367,6 +395,16 @@ pub mod gp0 {
     #[inline(always)]
     pub const fn draw_offset(x: i32, y: i32) -> u32 {
         0xe500_0000 | ((x as u32) & 0x7ff) | (((y as u32) & 0x7ff) << 11)
+    }
+
+    /// [`draw_offset`] for offsets that are not negative and below 2048: no masks, the cost of
+    /// the literal word (`0xE500_0000 | x | y << 11`). Out-of-range input corrupts the command
+    /// byte or the other component (checked in debug builds only).
+    #[inline(always)]
+    #[must_use]
+    pub const fn draw_offset_in_range(x: u32, y: u32) -> u32 {
+        debug_assert!(x < 0x800 && y < 0x800);
+        0xe500_0000 | x | (y << 11)
     }
 
     /// GP0(E6h) -- Mask-bit setting (stencil-style control).
@@ -585,6 +623,54 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_new_in_range_builders_equal_the_masking_ones() {
+        for t in 0..0x4000 {
+            assert_eq!(gp0::draw_mode_from_texpage(t), 0xe100_0000 | t);
+        }
+        for y in 0..0x800 {
+            for x in 0..0x800 {
+                assert_eq!(
+                    gp0::draw_offset_in_range(x, y),
+                    gp0::draw_offset(x as i32, y as i32)
+                );
+            }
+        }
+        for y in 0..0x200 {
+            for x in 0..0x400 {
+                assert_eq!(gp1::display_start_in_range(x, y), gp1::display_start(x, y));
+            }
+        }
+        for y2 in 0..0x400 {
+            for y1 in 0..0x400 {
+                assert_eq!(
+                    gp1::v_display_range_in_range(y1, y2),
+                    gp1::v_display_range(y1, y2)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn primitive_headers_compose_to_the_literal_words_games_wrote_by_hand() {
+        use packet::*;
+        assert_eq!(FLAT_TRIANGLE | SEMI_TRANSPARENT, 0x2200_0000);
+        assert_eq!(FLAT_QUAD | SEMI_TRANSPARENT, 0x2a00_0000);
+        assert_eq!(SHADED_TRIANGLE | SEMI_TRANSPARENT, 0x3200_0000);
+        assert_eq!(SHADED_QUAD, 0x3800_0000);
+        assert_eq!(SHADED_QUAD | SEMI_TRANSPARENT, 0x3a00_0000);
+        assert_eq!(SHADED_TEXTURED_TRIANGLE, 0x3400_0000);
+        assert_eq!(SHADED_TEXTURED_TRIANGLE | SEMI_TRANSPARENT, 0x3600_0000);
+        assert_eq!(FLAT_TEXTURED_QUAD, 0x2c00_0000);
+        assert_eq!(FLAT_TEXTURED_TRIANGLE | SEMI_TRANSPARENT, 0x2600_0000);
+        assert_eq!(FLAT_RECT | SEMI_TRANSPARENT, 0x6200_0000);
+        assert_eq!(TEXTURED_RECT | SEMI_TRANSPARENT, 0x6600_0000);
+        assert_eq!(SHADED_LINE | SEMI_TRANSPARENT, 0x5200_0000);
+        assert_eq!(gp0::FILL_RECT, 0x0200_0000);
+        assert_eq!(gp0::CLEAR_CACHE, 0x0100_0000);
+        assert_eq!(QUAD, 0x0800_0000);
     }
 
     #[test]
