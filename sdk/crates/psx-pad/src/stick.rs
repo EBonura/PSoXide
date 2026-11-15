@@ -32,6 +32,7 @@ const DPAD: u16 = button::LEFT | button::RIGHT | button::UP | button::DOWN;
 /// left and up, as `AnalogSticks::left_centered` gives them) holds down: an axis
 /// registers when it is strictly beyond `THRESHOLD` counts, so a diagonal sets two
 /// bits. A pad that reports no stick passes `(0, 0)`. `THRESHOLD` is at least 0.
+#[must_use]
 #[inline(always)]
 pub const fn stick_bits<const THRESHOLD: i16>(x: i16, y: i16) -> u16 {
     let mut bits = 0;
