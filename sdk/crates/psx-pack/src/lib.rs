@@ -213,6 +213,12 @@ impl Fnv32 {
     /// Fold `bytes` into the hash, one byte at a time.
     #[inline(never)]
     pub fn update(&mut self, bytes: &[u8]) {
+        #[cfg(target_arch = "mips")]
+        // SAFETY: reads `bytes` and reads and writes `self.0`, both through the asm below.
+        unsafe {
+            fold_bytes(&mut self.0, bytes.as_ptr(), bytes.len());
+        }
+        #[cfg(not(target_arch = "mips"))]
         for &byte in bytes {
             self.push(byte);
         }
@@ -228,21 +234,12 @@ impl Fnv32 {
         let (head, rest) = bytes.split_at(head);
         self.update(head);
         let words = rest.len() / 4;
-        let mut hash = self.0;
-        let mut p = rest.as_ptr().cast::<u32>();
-        // SAFETY: one past the last whole word of `rest`.
-        let end = unsafe { p.add(words) };
-        while p != end {
-            // SAFETY: `p` is word-aligned (the head was consumed) and inside `rest`.
-            let word = u32::from_le(unsafe { p.read() });
-            hash = mul_prime(hash ^ (word & 0xff));
-            hash = mul_prime(hash ^ ((word >> 8) & 0xff));
-            hash = mul_prime(hash ^ ((word >> 16) & 0xff));
-            hash = mul_prime(hash ^ (word >> 24));
-            // SAFETY: stays within one past the last whole word.
-            p = unsafe { p.add(1) };
+        if words != 0 {
+            let start = rest.as_ptr().cast::<u32>();
+            // SAFETY: one past the last whole word of `rest`; `start` is word-aligned (the head
+            // was consumed) and every word up to `end` is inside `rest`.
+            self.0 = unsafe { fold_words(self.0, start, start.add(words)) };
         }
-        self.0 = hash;
         self.update(&rest[words * 4..]);
     }
 
@@ -287,6 +284,145 @@ fn mul_prime(mut x: u32) -> u32 {
 #[inline(always)]
 fn mul_prime(x: u32) -> u32 {
     x.wrapping_mul(0x0100_0193)
+}
+
+/// FNV-1a over the `n` bytes at `p`, from and into `*state`, one byte per round.
+///
+/// A round is `(hash ^ byte) * 0x0100_0193`, and the prime is `403 + 2^24`: the product is
+/// `x * 403` on the multiplier plus `x << 24`. The R3000A's `mult` finishes in 6 cycles when its
+/// first operand is below 0x800 (13 on a full-width one, which is what LLVM emits for the whole
+/// prime), so the constant 403 goes first, and the next byte's load runs while it works (the
+/// next byte is only fetched when there is one). The loop is assembly because LLVM rewrites any
+/// such form back into the slow multiply. The asm names no HI/LO clobber (Rust has no such
+/// register), so each loop is one block with no compiler multiply inside it, and at least two
+/// instructions separate an `mflo` from the next `mult` (the R3000 rule).
+///
+/// # Safety
+/// `p` must be readable for `n` bytes and `state` valid for reads and writes.
+#[cfg(target_arch = "mips")]
+#[inline(always)]
+unsafe fn fold_bytes(state: *mut u32, mut p: *const u8, n: usize) {
+    // SAFETY: reads the `n` bytes at `p` and the word at `state`, writes that word; the caller
+    // vouches for both.
+    unsafe {
+        core::arch::asm!(
+            ".set push",
+            ".set noreorder",
+            ".set noat",
+            "beqz {n}, 9f",
+            "lw {h}, 0({s})",
+            "addu {n}, {p}, {n}",
+            "addiu {c}, $zero, 403",
+            "lbu {b}, 0({p})",
+            "addiu {p}, {p}, 1",
+            "2:",
+            "xor {t}, {h}, {b}",
+            "mult {c}, {t}",
+            "beq {p}, {n}, 3f",
+            "sll {t}, {t}, 24",
+            "lbu {b}, 0({p})",
+            "mflo {h}",
+            "addiu {p}, {p}, 1",
+            "b 2b",
+            "addu {h}, {h}, {t}",
+            "3:",
+            "mflo {h}",
+            "addu {h}, {h}, {t}",
+            "sw {h}, 0({s})",
+            "9:",
+            ".set pop",
+            s = in(reg) state,
+            p = inout(reg) p,
+            n = inout(reg) n => _,
+            c = out(reg) _,
+            b = out(reg) _,
+            t = out(reg) _,
+            h = out(reg) _,
+            options(nostack),
+        );
+    }
+}
+
+/// FNV-1a over the whole words `p..end` (not empty, `p` aligned) from `hash`, four rounds per
+/// word as in [`fold_bytes`]: the next byte of the word is extracted while the multiplier runs,
+/// and the next word is fetched in the last round's wait (not after the last word).
+///
+/// # Safety
+/// `p..end` must be a readable, non-empty range of aligned words.
+#[cfg(target_arch = "mips")]
+#[inline(always)]
+unsafe fn fold_words(mut hash: u32, mut p: *const u32, end: *const u32) -> u32 {
+    // SAFETY: reads the words `p..end`, which the caller vouches for; registers and those words
+    // only.
+    unsafe {
+        core::arch::asm!(
+            ".set push",
+            ".set noreorder",
+            ".set noat",
+            "lw {w}, 0({p})",
+            "2:",
+            "addiu {p}, {p}, 4",
+            "andi {b}, {w}, 255",
+            "xor {t}, {h}, {b}",
+            "mult {c}, {t}",
+            "sll {u}, {t}, 24",
+            "srl {b}, {w}, 8",
+            "andi {b}, {b}, 255",
+            "mflo {h}",
+            "addu {h}, {h}, {u}",
+            "xor {t}, {h}, {b}",
+            "mult {c}, {t}",
+            "sll {u}, {t}, 24",
+            "srl {b}, {w}, 16",
+            "andi {b}, {b}, 255",
+            "mflo {h}",
+            "addu {h}, {h}, {u}",
+            "xor {t}, {h}, {b}",
+            "mult {c}, {t}",
+            "sll {u}, {t}, 24",
+            "srl {b}, {w}, 24",
+            "mflo {h}",
+            "addu {h}, {h}, {u}",
+            "xor {t}, {h}, {b}",
+            "mult {c}, {t}",
+            "beq {p}, {end}, 3f",
+            "sll {u}, {t}, 24",
+            "lw {w}, 0({p})",
+            "3:",
+            "mflo {h}",
+            "bne {p}, {end}, 2b",
+            "addu {h}, {h}, {u}",
+            ".set pop",
+            h = inout(reg) hash,
+            p = inout(reg) p,
+            end = in(reg) end,
+            c = in(reg) 403u32,
+            w = out(reg) _,
+            b = out(reg) _,
+            t = out(reg) _,
+            u = out(reg) _,
+            options(readonly, nostack),
+        );
+    }
+    hash
+}
+
+/// Host form of [`fold_words`].
+///
+/// # Safety
+/// `p..end` must be a readable, non-empty range of aligned words.
+#[cfg(not(target_arch = "mips"))]
+unsafe fn fold_words(mut hash: u32, mut p: *const u32, end: *const u32) -> u32 {
+    while p != end {
+        // SAFETY: `p` is an aligned word inside the range the caller vouches for.
+        let word = u32::from_le(unsafe { p.read() });
+        for shift in [0, 8, 16, 24] {
+            hash = mul_prime(hash ^ ((word >> shift) & 0xff));
+        }
+        // SAFETY: at most one past the end.
+        p = unsafe { p.add(1) };
+    }
+    hash
 }
 
 impl Default for Fnv32 {
@@ -481,6 +617,84 @@ mod tests {
                 parts.update_bulk(&bytes[cut..]);
                 assert_eq!(parts.finish(), want, "resumed {offset}+{len}");
             }
+        }
+    }
+
+    /// Plain FNV-1a, the definition every form must equal.
+    fn reference(mut hash: u32, bytes: &[u8]) -> u32 {
+        for &byte in bytes {
+            hash = (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193);
+        }
+        hash
+    }
+
+    /// Every length 0..=67 at every alignment 0..=3 of a word-aligned buffer, fed whole, bytewise,
+    /// and cut at every two-way and three-way split, through `update` and `update_bulk`.
+    #[test]
+    fn fnv32_equals_the_definition_for_every_length_alignment_and_split() {
+        let mut backing = [0u32; 32];
+        let mut x = 0x9e37_79b9u32;
+        for w in backing.iter_mut() {
+            x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *w = x;
+        }
+        // SAFETY: a u32 array viewed as its 128 bytes.
+        let all = unsafe { core::slice::from_raw_parts(backing.as_ptr().cast::<u8>(), 128) };
+        for offset in 0..4 {
+            for len in 0..=67 {
+                let bytes = &all[offset..offset + len];
+                let want = reference(0x811c_9dc5, bytes);
+                assert_eq!(fnv1a32(bytes), want, "one-shot {offset}+{len}");
+                let mut whole = Fnv32::new();
+                whole.update_bulk(bytes);
+                assert_eq!(whole.finish(), want, "bulk {offset}+{len}");
+                let mut small = Fnv32::new();
+                small.update(bytes);
+                assert_eq!(small.finish(), want, "update {offset}+{len}");
+                for a in 0..=len {
+                    let mut two = Fnv32::new();
+                    two.update_bulk(&bytes[..a]);
+                    two.update_bulk(&bytes[a..]);
+                    assert_eq!(two.finish(), want, "bulk 2-way {offset}+{len} at {a}");
+                    let mut mixed = Fnv32::new();
+                    mixed.update(&bytes[..a]);
+                    mixed.update_bulk(&bytes[a..]);
+                    assert_eq!(
+                        mixed.finish(),
+                        want,
+                        "update then bulk {offset}+{len} at {a}"
+                    );
+                    for b in a..=len {
+                        let mut three = Fnv32::new();
+                        three.update_bulk(&bytes[..a]);
+                        three.update_bulk(&bytes[a..b]);
+                        three.update_bulk(&bytes[b..]);
+                        assert_eq!(three.finish(), want, "bulk 3-way {offset}+{len} at {a},{b}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fnv32_fixed_vectors() {
+        // Published FNV-1a 32 test vectors, fed whole and bytewise.
+        for (text, want) in [
+            (&b""[..], 0x811c_9dc5u32),
+            (b"a", 0xe40c_292c),
+            (b"b", 0xe70c_2de5),
+            (b"foobar", 0xbf9c_f968),
+            (b"hello", 0x4f9f_2cab),
+        ] {
+            assert_eq!(fnv1a32(text), want);
+            let mut bulk = Fnv32::new();
+            bulk.update_bulk(text);
+            assert_eq!(bulk.finish(), want);
+            let mut bytewise = Fnv32::new();
+            for &b in text {
+                bytewise.push(b);
+            }
+            assert_eq!(bytewise.finish(), want);
         }
     }
 
