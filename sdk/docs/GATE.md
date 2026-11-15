@@ -26,7 +26,7 @@ The messages cite these. They are the SDK's standard for a program that links it
 | Kind | Meaning | Rule |
 |---|---|---|
 | `feature` | A program's graph enables a feature of an SDK or engine crate that `profile.toml` lists nowhere (or only under `[host]`). | 2 |
-| `register-literal` | A hardware-window address literal (`0x1F80`, `0xBF80`, `0x9F80`, `1F80_`, `1F80xxxxh`) in code a program owns (comments excluded). | 3 |
+| `register-literal` | A hardware-window address literal (`0x1F80`, `0xBF80`, `0x9F80`, `1F80_`, `1F80xxxxh`) in code a program owns (comments excluded; the initializer of a `static`/`const` array of `u8`/`i8`/`u16`/`i16` is data and is not scanned, since those elements cannot hold an address). | 3 |
 | `vector-write` | `0x8000_0080` / `0xA000_0080` or `declare_stack_safe_handler` in a program's own code. | 3 |
 | `cop0-asm` | `mfc0`, `mtc0`, `rfe`, `cfc0`, `ctc0` in a program's own code. | 3 |
 | `deprecated-use` | A call of a legacy SDK entry point (`[deprecated]` in `sdk/profile.toml`) in code a program owns. Matched by name (`\bsymbol\b`), so a function of another crate with the same name is a hit too; list it. A symbol written `crate::name` in the table matches only the item of that crate: the path `crate::name`, an import of it (`use crate::{..., name}`) and, in a file that imports it or `crate::*`, a bare call; a function the program defines itself and a method call of that name pass. | 1 |
