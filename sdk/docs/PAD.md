@@ -166,17 +166,32 @@ five bytes to a digital pad, nine to a pad that is already analog.
 
 ## The stick as a d-pad, and edges
 
-`PadTracker` turns a polled button mask into press and release edges, auto-repeat (`repeats(mask,
-delay, rate)`) and a handoff guard (`prime`). `StickDpad` folds the centred left stick into d-pad
-bits so a menu can answer the stick through the same tracker: `pad.update(buttons | stick.update(x,
-y))`. A menu that wants one press per push reads `just_pressed`; one that wants a cursor that runs
-reads `repeats`. `previous()` gives the last frame's mask, and `settle()` makes the previous state the current one at a resume point so held buttons stay held but are not fresh presses (`prime` also hides them from `is_held`). The test is a parameter, because games feel differently on purpose:
-`StickDpad::per_axis(enter, exit)` judges each axis (a diagonal sets two bits) and
-`StickDpad::radial(enter, exit)` judges the distance from centre and keeps one direction until the
-stick is back inside `exit` (the radii are `Deadzone` radii, so "past" is strictly outside). A push
-registers beyond `enter` and releases inside `exit`; `exit == enter` is a plain threshold. The host
-tests hold the fold to the three rules it replaces at every reading: per axis beyond 48 counts, per
-axis at 48 or more (`per_axis(47, 47)`), and radial 64 in, 32 out with a latched direction.
+Three pieces, each the size of what a game would write by hand, so a game that adopts one pays
+nothing for the others:
+
+* `PadEdges` is the edge half of a tracker: one word of state (last frame's buttons).
+  `edges.update(buttons)` returns a `PadFrame` with `held`, `previous`, `pressed`, `released`,
+  `is_held`, `just_pressed`, `just_released` and `group_pressed(mask)` (some button of the mask held
+  now and none held before, which differs from `just_pressed` when the mask has several buttons and
+  one is already down). It compiles to the loads, `and`s and stores of
+  `pressed = held & !previous; previous = held`. A caller that keeps its own previous state builds
+  a frame with `PadFrame::new(held, previous)`; `settle(buttons)` sets the previous state at a
+  resume point. It has no hold counters, no repeat and no handoff guard.
+* `PadTracker` adds those: per-button hold counters (a 16-iteration update), `repeats(mask, delay,
+  rate)`, `prime` (hide what is held across a handoff) and `settle`. Use it for a menu that
+  auto-repeats; it is not the cheap way to read edges, and it is left exactly as games link it.
+* `stick_bits::<THRESHOLD>(x, y)` folds the centred left stick into d-pad bits: an axis registers
+  strictly beyond `THRESHOLD` counts, a diagonal sets two bits, no memory. It is a pure function
+  with the threshold as a const parameter, so a game pays for its own threshold only. OR it into
+  the buttons before `update`: `edges.update(buttons | stick_bits::<48>(x, y))`. A menu that wants
+  one press per push reads `just_pressed`; one that wants a running cursor uses `PadTracker::repeats`.
+  `RadialStick::<ENTER, EXIT>` is the stateful form for hysteresis: the distance from centre
+  (`Deadzone` radii, strictly outside), one direction at a time, kept until the stick is back inside
+  `EXIT`.
+
+The host tests hold `stick_bits` to the two threshold rules games wrote by hand at every reading
+(`stick_bits::<48>` is "strictly beyond 48", `stick_bits::<47>` is "48 or more") and `RadialStick`
+to the radial 64-in, 32-out rule with a latched direction.
 
 ## Memory cards
 
