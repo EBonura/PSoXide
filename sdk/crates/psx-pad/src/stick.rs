@@ -35,15 +35,19 @@ const DPAD: u16 = button::LEFT | button::RIGHT | button::UP | button::DOWN;
 #[inline(always)]
 pub const fn stick_bits<const THRESHOLD: i16>(x: i16, y: i16) -> u16 {
     let mut bits = 0;
-    if x < -THRESHOLD {
-        bits |= button::LEFT;
-    } else if x > THRESHOLD {
-        bits |= button::RIGHT;
-    }
+    // Four independent tests, in the order a hand-written fold would have them, so the
+    // compiler need not prove the two sides of an axis exclusive.
     if y < -THRESHOLD {
         bits |= button::UP;
-    } else if y > THRESHOLD {
+    }
+    if y > THRESHOLD {
         bits |= button::DOWN;
+    }
+    if x < -THRESHOLD {
+        bits |= button::LEFT;
+    }
+    if x > THRESHOLD {
+        bits |= button::RIGHT;
     }
     bits
 }
