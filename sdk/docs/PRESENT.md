@@ -117,6 +117,39 @@ not would fail to link when it arms the guard, with an undefined symbol named
 `__psx_rt_wait_idle`, which is the right failure. Calling `arm_direct_access_guard` from a program
 that has no `psx-rt` present path is not supported.
 
+### A program with its own linker script
+
+- A script that is `sdk/psoxide.ld` with text replaced (a derived copy that adds placement lines before
+  the `*(.text .text.*);` catch-all) and a second `-T` script of overlay sections (`INSERT BEFORE .text`
+  or its own memory regions) need no change: the window and the definition are in the copy, and the
+  overlay sections never match `.text.__psx_rt_wait_idle`.
+- A script that **replaces** `psoxide.ld` (a chain-loader blob, a layer linked with C) has no
+  `__psx_direct_access_guard`. A program of it that cannot arm the guard (fat LTO drops
+  `run_armed_guard`, so it is not linked) links as before. One that can arm fails at link time with
+  `undefined symbol: __psx_direct_access_guard`; it must add, before its `.text` catch-all and inside
+  `.text`:
+
+  ```
+  . = ALIGN(4);
+  __psx_guard_window_start = .;
+  *(.text.__psx_rt_wait_idle)
+  __psx_guard_window_end = .;
+  ```
+
+  and, after the `.text` output section:
+
+  ```
+  __psx_direct_access_guard = __psx_guard_window_end > __psx_guard_window_start ? __psx_guard_window_start : 0;
+  ```
+
+  Copying the second without the first leaves the symbol 0 in a program that arms. A link cannot
+  assert against that: a script expression that names `__psx_rt_wait_idle` makes the linker keep it,
+  which is what the window exists to avoid, and a link has no way to ask whether a program contains an
+  arm. The stack proof (`stack-guard`) fails on the resulting `jal 0`, and a console build that gets there
+  jumps to address 0 on the first direct write after a chain, so build such a program once with
+  `guard_stack_gate.sh`'s recipe (or any direct write after a `Presenter::submit`) before shipping.
+- The overlay packer ignores `R_MIPS_NONE` relocations, which the arm leaves in resident (or cold) code.
+
 `tools/guard_stack_gate.sh` (part of `make lint`) keeps it true: it builds `hello-present`, which arms
 the guard and writes directly, and runs `stack-guard` on the call tree rooted at a direct write
 (`psx_io::gpu::handoff::write_command_slow`), failing if the tree calls through a register or does

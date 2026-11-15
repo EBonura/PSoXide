@@ -1412,6 +1412,17 @@ pub fn check_order(
 
 #[cfg(test)]
 mod tests {
+    /// The guard's window in `psoxide.ld` is a fixed placement the search must know about, or it
+    /// would reorder `wait_idle` out of it.
+    #[test]
+    fn the_sdk_script_fixes_the_direct_access_guard_window() {
+        let fixed = fixed_patterns(include_str!("../../../sdk/psoxide.ld"));
+        assert!(
+            fixed.iter().any(|p| p == ".text.__psx_rt_wait_idle"),
+            "{fixed:?}"
+        );
+    }
+
     use super::*;
 
     const OBJ: &str = "/g/deps/game-0123.game.o";
