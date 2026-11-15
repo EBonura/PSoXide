@@ -13,7 +13,7 @@
 //!
 //! - [`sincos`] -- Q0.12 angle type + 256-entry Q1.12 sine LUT +
 //!   interpolated `sin_q12` / `cos_q12` lookups, and the matching
-//!   table-interpolated `atan2_q12` (under one unit of error).
+//!   two arctangents: the coarse inlinable `atan2_q12` (47 units worst) and the accurate `atan2_q12_fine` (under one unit).
 //! - [`int32`] -- saturating 32-bit scalar helpers: `abs_i32` /
 //!   `abs_i16`, `clamp_i16`, `square_i32_saturating`, `isqrt_i32`,
 //!   `mul_q12_i32`, plus the 64-bit-free wide forms `mul_div_i32`,
@@ -98,6 +98,6 @@ pub mod wide_div;
 // Re-export the most common symbols at the crate root so users
 // can `use psx_math::{sin_q12, cos_q12}` without reaching through
 // the submodule -- these are the hot-loop primitives.
-pub use sincos::{atan2_q12, cos_q12, sin_q12, SIN_TABLE};
+pub use sincos::{atan2_q12, atan2_q12_fine, cos_q12, sin_q12, SIN_TABLE};
 pub use wide::{Mask64, Wide, WideU};
 pub use wide_div::Rounding;

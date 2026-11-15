@@ -24,7 +24,7 @@
 )]
 
 use crate::semantic_input::{Sample, ACTION_DUCK, ACTION_JUMP, ACTION_USE};
-use psx_math::atan2_q12;
+use psx_math::atan2_q12_fine;
 
 pub const MAGIC: &[u8; 8] = b"HLWPTS1\0";
 pub const FLAG_USE: u16 = 1 << 0;
@@ -195,7 +195,7 @@ impl Follower {
         let h2 = dx * dx + dz * dz;
         let r = (wp.radius as i32).max(16);
 
-        let desired = atan2_q12(dx, dz);
+        let desired = atan2_q12_fine(dx, dz);
         let err = ((desired as i32 - yaw as i32 + 2048) & 4095) - 2048;
         let turn = err.clamp(-127, 127) as i8;
         // Walk when roughly facing the goal; hold position when we are above
@@ -288,11 +288,11 @@ mod tests {
 
     #[test]
     fn atan2_matches_yaw_convention_on_axes() {
-        assert_eq!(atan2_q12(0, 100), 0); // +z = yaw 0
-        assert_eq!(atan2_q12(100, 0), 1024); // +x = yaw 1024
-        assert_eq!(atan2_q12(0, -100), 2048);
-        assert_eq!(atan2_q12(-100, 0), 3072);
-        assert_eq!(atan2_q12(100, 100), 512);
+        assert_eq!(atan2_q12_fine(0, 100), 0); // +z = yaw 0
+        assert_eq!(atan2_q12_fine(100, 0), 1024); // +x = yaw 1024
+        assert_eq!(atan2_q12_fine(0, -100), 2048);
+        assert_eq!(atan2_q12_fine(-100, 0), 3072);
+        assert_eq!(atan2_q12_fine(100, 100), 512);
     }
 
     #[test]
