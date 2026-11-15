@@ -135,7 +135,7 @@ hwtest-verify-code: hardware-tests
 # console raises a data bus error on a store to the debug console (offset 0x80 of Expansion 2; seen 2026-11-14 on an SCPH-9002).
 # `psoxide-hwtest scan-expansion2` reads the linked EXE and fails the build when it can. A twin for emulator runs
 # that read the terminal sets HWTEST_ALLOW_DEBUG_PORT=1 with HWTEST_FEATURES="console-diag psx-rt/host-tty" and is never burned.
-HWTEST_PORT_CHECK = $(if $(HWTEST_ALLOW_DEBUG_PORT),@echo "hardware-tests: Expansion 2 check skipped (HWTEST_ALLOW_DEBUG_PORT): not a burn artifact",$(PSOXIDE_HWTEST) scan-expansion2 $(EXAMPLE_OUT)/hardware-tests.exe)
+HWTEST_PORT_CHECK = $(if $(HWTEST_ALLOW_DEBUG_PORT),@echo "hardware-tests: Expansion 2 check skipped (HWTEST_ALLOW_DEBUG_PORT): not a burn artifact",$(PSOXIDE_HWTEST) scan-expansion2 --strict $(EXAMPLE_OUT)/hardware-tests.exe)
 
 HWTEST_CDDA := $(EXAMPLE_OUT)/hardware-tests-cdda.pcm
 

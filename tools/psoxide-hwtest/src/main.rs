@@ -24,8 +24,10 @@ commands:\n\
       decode and diff SB4 capture-ring payloads\n\
   verify-machine-code EXE [--baseline FILE] [--fail-on-change]\n\
       audit the measured instruction blocks of the linked hardware-tests EXE\n\
-  scan-expansion2 EXE\n\
-      fail when the linked EXE reaches Expansion 2 beyond its first 128 bytes\n\
+  scan-expansion2 [--strict] [--map LINK.MAP] EXE\n\
+      fail when the linked EXE reaches Expansion 2 beyond its first 128 bytes;\n\
+      a data word that only looks like such an address passes with a note unless\n\
+      code can reach it (--strict fails on every one, --map classifies by section)\n\
   diag-report PAYLOAD_OR_FILE ...\n\
       print the v2.8 CD radius and GPU list node size tables (exit 1 on a fault)\n\
   radius-fill OUT SECTORS\n\
