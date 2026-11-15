@@ -99,7 +99,7 @@ impl Vec3I32 {
     /// Q12 dot product: the sum of `mul_q12_i32` of each lane pair, the sum
     /// saturating. `self` may carry a large Q12 offset; `rhs` should be a
     /// unit-scale vector so the products stay in range.
-    #[inline]
+    #[inline(never)]
     #[must_use]
     pub fn dot_q12(self, rhs: Self) -> i32 {
         psx_math::int32::mul_q12_i32(self.x, rhs.x)
@@ -109,7 +109,7 @@ impl Vec3I32 {
 
     /// Every lane times the Q12 `factor`, through `mul_q12_i32` (so a
     /// product past `i32` saturates).
-    #[inline]
+    #[inline(never)]
     #[must_use]
     pub fn scale_q12(self, factor: i32) -> Self {
         Self {
