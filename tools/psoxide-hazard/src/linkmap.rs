@@ -35,18 +35,42 @@ pub fn io_message(error: &std::io::Error, path: &Path) -> String {
     }
 }
 
+/// The boot overlay a map declares (psyq-boot.ld's `.boot` output section:
+/// `__boot_start`, `__boot_load_end` and the section's stored address):
+/// code and data a program needs only at boot. They are stored after `.data` at `lma` and run at `start`,
+/// where the program's entry stub moves them before `_start`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Boot {
+    /// Where the overlay runs.
+    pub start: i64,
+    /// One past its last byte at `start`.
+    pub load_end: i64,
+    /// Where its bytes sit in the stored image.
+    pub lma: i64,
+}
+
 /// Function bounds and the trampoline array from ld.lld's `-Map` output
-/// for the link that made an image (psoxide.ld's layout). Symbols sit 16
-/// columns in, input sections 8.
+/// for the link that made an image. The shape is psoxide.ld's (its
+/// `__text_start`/`__text_end` marks), psoxide.ld plus a boot overlay, or a
+/// headerless blob whose map has no such marks and whose code is its `.text`
+/// input sections ([`LinkMap::is_raw`]). Symbols sit 16 columns in, input
+/// sections 8.
 #[derive(Debug)]
 pub struct LinkMap {
     path: String,
-    /// `(__text_start, __text_end)`.
+    /// `(__text_start, __text_end)`; a blob's first and last `.text` input
+    /// section edge.
     pub text: (i64, i64),
-    /// Where the data ends and `.bss` begins: `__data_end`, or `__bss_start`
-    /// for a map without it. The header's payload size is this rounded up to
-    /// whole sectors.
+    /// Where the stored image ends and `.bss` begins: the end of the boot
+    /// overlay's stored bytes (psyq.ld's `__load_end`, which ld.lld's map
+    /// evaluates before the overlay exists), `__data_end`, or `__bss_start`
+    /// for a map without them. The header's payload size is this rounded up to whole
+    /// sectors.
     data_end: Option<i64>,
+    raw: bool,
+    boot: Option<Boot>,
+    boot_text: Vec<(i64, i64)>,
     /// `HAZARD_TRAMPOLINES` as `(start, end)`.
     pub trampolines: Option<(i64, i64)>,
     /// Symbols inside .text by address, in map order: `(size, name)`.
@@ -168,6 +192,7 @@ impl LinkMap {
         let mut sections = Vec::new();
         let mut rodata = Vec::new();
         let mut text_marks: HashMap<&str, i64> = HashMap::new();
+        let mut assigned: HashMap<&str, i64> = HashMap::new();
         let mut trampolines = None;
         let mut functions: HashMap<String, (i64, i64)> = HashMap::new();
         let mut tables = Vec::new();
@@ -177,7 +202,22 @@ impl LinkMap {
             };
             let depth = rest.len() - rest.trim_start_matches(' ').len();
             let name = strip(rest);
-            if matches!(
+            if let Some(key) = ["__boot_start", "__boot_load_end"]
+                .into_iter()
+                .find(|key| name.strip_prefix(key) == Some(" = ."))
+            {
+                assigned.insert(key, address);
+            } else if depth == 0 && name == ".boot" {
+                // The output section row's second column is where its bytes are stored;
+                // `__boot_lma` itself reads 0 in ld.lld's map (a --defsym'd value).
+                let stored = line
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|c| i64::from_str_radix(c, 16).ok());
+                if let Some(stored) = stored {
+                    assigned.insert("__boot_lma", stored);
+                }
+            } else if matches!(
                 name,
                 "__text_start = ." | "__text_end = ." | "__data_end = ." | "__bss_start = ."
             ) {
@@ -208,12 +248,53 @@ impl LinkMap {
                 symbols.push((address, size, name.to_string()));
             }
         }
-        let (Some(&lo), Some(&hi)) = (text_marks.get("__text_start"), text_marks.get("__text_end"))
-        else {
-            return Err(MapError(format!(
-                "{path}: no __text_start/__text_end, not an ld.lld map of psoxide.ld"
-            )));
+        let (raw, lo, hi) = match (text_marks.get("__text_start"), text_marks.get("__text_end")) {
+            (Some(&lo), Some(&hi)) => (false, lo, hi),
+            _ => {
+                // No psoxide.ld marks: a headerless blob, whose code is the
+                // span of its `.text` input sections.
+                let lo = sections.iter().map(|s| s.0).min();
+                let hi = sections.iter().map(|s| s.0 + s.1).max();
+                let (Some(lo), Some(hi)) = (lo, hi) else {
+                    return Err(MapError(format!(
+                        "{path}: no __text_start/__text_end and no .text input sections, \
+                         not an ld.lld map of psoxide.ld or of a raw blob"
+                    )));
+                };
+                if let Some(&(at, _)) = rodata.iter().find(|r| lo <= r.0 && r.0 < hi) {
+                    return Err(MapError(format!(
+                        "{path}: a .rodata input section at {at:08x} lies between the .text input \
+                         sections {lo:08x}..{hi:08x}; a raw blob's code must be one run"
+                    )));
+                }
+                (true, lo, hi)
+            }
         };
+        let boot = match (
+            assigned.get("__boot_start"),
+            assigned.get("__boot_load_end"),
+            assigned.get("__boot_lma"),
+        ) {
+            (Some(&start), Some(&load_end), Some(&lma)) if start < load_end => Some(Boot {
+                start,
+                load_end,
+                lma,
+            }),
+            _ => None,
+        };
+        // Only the boot overlay's code is code: its rodata and data share
+        // the output section.
+        let boot_text: Vec<(i64, i64)> = boot
+            .map(|b| {
+                sections
+                    .iter()
+                    .filter(|s| b.start <= s.0 && s.0 + s.1 <= b.load_end)
+                    .map(|s| (s.0, s.0 + s.1))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let extra_code: Vec<(i64, i64)> = extra_code.iter().chain(&boot_text).copied().collect();
+        let extra_code = extra_code.as_slice();
         let mut names: HashMap<i64, Vec<(i64, String)>> = HashMap::new();
         let mut name_order = Vec::new();
         for (address, size, name) in symbols {
@@ -262,10 +343,16 @@ impl LinkMap {
         let mut starts: Vec<i64> = names.keys().copied().collect();
         starts.sort_unstable();
         rodata.sort_unstable();
+        // With a boot overlay the image starts at its mover, not at `_start`.
+        let entry_name = if boot.is_some() {
+            "__boot_entry"
+        } else {
+            "_start"
+        };
         let entry = name_order
             .iter()
             .copied()
-            .find(|a| names[a].iter().any(|(_, n)| n == "_start"));
+            .find(|a| names[a].iter().any(|(_, n)| n == entry_name));
         // LLVM writes a function's jump tables to `.rodata.<its section>`.
         let tables = tables
             .into_iter()
@@ -274,10 +361,13 @@ impl LinkMap {
         Ok(Self {
             path: path.to_string(),
             text: (lo, hi),
-            data_end: text_marks
-                .get("__data_end")
-                .or_else(|| text_marks.get("__bss_start"))
-                .copied(),
+            data_end: boot
+                .map(|b| b.lma + (b.load_end - b.start))
+                .or_else(|| text_marks.get("__data_end").copied())
+                .or_else(|| text_marks.get("__bss_start").copied()),
+            raw,
+            boot,
+            boot_text,
             trampolines,
             names,
             bounds,
@@ -287,6 +377,27 @@ impl LinkMap {
             entry,
             tables,
         })
+    }
+
+    /// The boot overlay the map declares, if any.
+    #[must_use]
+    pub fn boot(&self) -> Option<Boot> {
+        self.boot
+    }
+
+    /// The `[lo, hi)` code sections of the boot overlay at their run
+    /// addresses (empty without one).
+    #[must_use]
+    pub fn boot_text(&self) -> &[(i64, i64)] {
+        &self.boot_text
+    }
+
+    /// True for the map of a headerless blob (see [`LinkMap`]): the image
+    /// has no header for the map's payload size and entry to be checked
+    /// against.
+    #[must_use]
+    pub fn is_raw(&self) -> bool {
+        self.raw
     }
 
     /// Symbol addresses inside .text, sorted.
@@ -321,7 +432,7 @@ impl LinkMap {
                 None
             }
         };
-        if data.starts_with(b"PS-X EXE") {
+        if data.starts_with(b"PS-X EXE") && !self.raw {
             let field =
                 |at: usize| i64::from(u32::from_le_bytes(data[at..at + 4].try_into().unwrap()));
             let (pc, payload) = (field(0x10), field(0x1c));

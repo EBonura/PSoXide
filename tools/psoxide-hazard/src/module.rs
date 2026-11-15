@@ -16,6 +16,14 @@
 //! address throughout, and the module's bytes are copied back to where they
 //! sit when a patch is written. `--code` ranges inside a module's link range
 //! name the module's code (and its trampoline array) in link addresses.
+//!
+//! A *boot overlay* is the one module the link map declares (`__boot_start`,
+//! `__boot_load_end` and the `.boot` section's stored address, see `LinkMap::boot`): code the program
+//! needs only at boot, stored after `.data` and moved by its entry stub over
+//! the start of the heap before `_start` runs. Its link range lies in RAM
+//! above the resident payload instead of in the mirrors, and it has no
+//! trampoline array of its own: its hazards are rerouted through the
+//! resident one.
 
 use std::io::Write;
 
@@ -36,6 +44,9 @@ pub struct Module {
     pub link: (i64, i64),
     /// The load address at which the bytes of `link.0` sit.
     pub at: i64,
+    /// A boot overlay: declared by the map, linked in RAM above the resident
+    /// payload and sharing the resident trampoline array.
+    pub boot: bool,
 }
 
 impl Module {
@@ -96,7 +107,11 @@ fn parse(value: &str) -> Result<Module, String> {
              {LINK_WINDOW_LO:#x}..{LINK_WINDOW_HI:#x}, where no load has bytes of its own"
         ));
     }
-    let module = Module { link: (lo, hi), at };
+    let module = Module {
+        link: (lo, hi),
+        at,
+        boot: false,
+    };
     if module.placed().is_none() {
         return Err(format!("bad --module {value}: the placement end overflows"));
     }
@@ -169,7 +184,10 @@ impl Overlay {
             None
         } else if file.len() >= HEADER as usize && file.starts_with(b"PS-X EXE") {
             let payload = u32::from_le_bytes(file[0x1c..0x20].try_into().unwrap());
-            Some(base + i64::from(payload))
+            // The header's payload covers a boot overlay's stored bytes too:
+            // the resident bytes end where the overlay begins.
+            let stored = modules.iter().filter(|m| m.boot).map(|m| m.at);
+            Some(stored.fold(base + i64::from(payload), i64::min))
         } else {
             let _ = writeln!(
                 out,
@@ -178,11 +196,22 @@ impl Overlay {
             return Err(2);
         };
         for module in &modules {
-            if !(LINK_WINDOW_LO <= module.link.0
+            // A boot overlay runs in RAM above the resident payload, up to the
+            // top of the window; any other module runs in the mirrors.
+            let floor = match (module.boot, resident_end) {
+                (true, Some(end)) => end,
+                _ => LINK_WINDOW_LO,
+            };
+            if !(floor <= module.link.0
                 && module.link.0 < module.link.1
                 && module.link.1 <= LINK_WINDOW_HI)
             {
-                let _ = writeln!(out, "bad --module: link range is not in the RAM mirrors");
+                let what = if module.boot {
+                    "above the resident payload and in RAM"
+                } else {
+                    "in the RAM mirrors"
+                };
+                let _ = writeln!(out, "bad --module: link range is not {what}");
                 return Err(2);
             }
             let Some((lo, hi)) = module.placed() else {
@@ -209,7 +238,7 @@ impl Overlay {
                     return Err(2);
                 }
             }
-            if overlap(module.link, (base, load_end)) {
+            if !module.boot && overlap(module.link, (base, load_end)) {
                 let _ = writeln!(
                     out,
                     "bad {name}: its link range lies inside the load {base:#x}..{load_end:#x}"
@@ -232,11 +261,12 @@ impl Overlay {
         Ok(Self { modules })
     }
 
-    /// The module containing a link address, or `None` for resident code.
+    /// The module containing a link address, or `None` for resident code. A
+    /// boot overlay has no array of its own, so its addresses are resident.
     pub fn domain(&self, address: i64) -> Option<usize> {
         self.modules
             .iter()
-            .position(|m| m.links(address, address + 4))
+            .position(|m| !m.boot && m.links(address, address + 4))
     }
 
     /// True when the complete trampoline array lies in the given domain.
@@ -250,7 +280,7 @@ impl Overlay {
             None => !self
                 .modules
                 .iter()
-                .any(|module| overlap(module.link, (lo, hi))),
+                .any(|module| !module.boot && overlap(module.link, (lo, hi))),
         }
     }
 
@@ -286,6 +316,14 @@ impl Overlay {
     /// file's `length`, each module back where it sits.
     pub fn collapse(&self, image: &[u8], length: usize, base: i64) -> Vec<u8> {
         let mut file = image[..length].to_vec();
+        // A boot overlay's link range overlaps the file's tail (its stored
+        // bytes and the zero padding after them); the tail is not the
+        // overlay's, so clear it before the overlays go back where they sit.
+        for module in self.modules.iter().filter(|m| m.boot) {
+            let to = Self::offset(module.link.0, base).min(length);
+            let end = Self::offset(module.link.1, base).min(length);
+            file[to..end].fill(0);
+        }
         for module in &self.modules {
             let from = Self::offset(module.at, base);
             let to = Self::offset(module.link.0, base);
@@ -311,7 +349,8 @@ mod tests {
             found,
             [Module {
                 link: (0x8040_8000, 0x8040_d480),
-                at: 0x801c_0000
+                at: 0x801c_0000,
+                boot: false
             }]
         );
         assert_eq!(found[0].len(), 0x5480);
@@ -356,6 +395,7 @@ mod tests {
         let module = Module {
             link: (0x8041_0000, 0x8041_0010),
             at: base + 0x20,
+            boot: false,
         };
         let overlay = Overlay::new(
             vec![module],
