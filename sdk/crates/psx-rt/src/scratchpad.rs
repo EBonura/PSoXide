@@ -87,7 +87,8 @@ struct AlignedScratchpad([u8; SIZE]);
 #[cfg(target_arch = "mips")]
 core::arch::global_asm!(
     ".globl __psoxide_scratchpad",
-    ".set __psoxide_scratchpad, 0x1f800000",
+    ".set __psoxide_scratchpad, {base}",
+    base = const psx_hw::memory::scratchpad::BASE,
 );
 
 #[cfg(target_arch = "mips")]
