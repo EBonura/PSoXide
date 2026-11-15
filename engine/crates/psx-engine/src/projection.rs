@@ -7,6 +7,25 @@
 //! renderer one source contract without adding a call or dynamic dispatch.
 
 pub use psx_gte::scene::{project_triangle_scheduled, project_vertex_scheduled};
+use psx_gte::math::{Mat3I16, Vec3I32};
+
+/// Q20.12 world camera and Q0.12 turn angles.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Camera {
+    /// Position in Q12 world units.
+    pub origin: Vec3I32,
+    /// Pitch, yaw and roll as Q0.12 turn angles.
+    pub angles: [i16; 3],
+}
+
+/// Camera transform retained for composing model-local transforms.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ViewTransform {
+    /// View rotation including the axis remap and the view scale.
+    pub rotation: Mat3I16,
+    /// View-space translation of the world origin.
+    pub translation: Vec3I32,
+}
 
 /// Inclusive screen-space clip bounds.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

@@ -7,23 +7,7 @@
 use psx_gte::math::{Mat3I16, Vec3I16 as GteVec3I16, Vec3I32 as GteVec3I32};
 use psx_gte::scene;
 
-/// Q20.12 world camera and Q0.12 turn angles.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct Camera {
-    /// Position in Q12 world units.
-    pub origin: GteVec3I32,
-    /// Pitch, yaw and roll as Q0.12 turn angles.
-    pub angles: [i16; 3],
-}
-
-/// Camera transform retained for composing model-local transforms.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct ViewTransform {
-    /// View rotation including the axis remap and the view scale.
-    pub rotation: Mat3I16,
-    /// View-space translation of the world origin.
-    pub translation: GteVec3I32,
-}
+pub use psx_engine::projection::{Camera, ViewTransform};
 
 /// Uniform scale baked into the view rotation: 3.0 in Q12.
 ///

@@ -49,6 +49,7 @@
 use psx_gpu::material::TextureWindow;
 use psx_gte::math::{Mat3I16, Vec3I16, Vec3I32};
 use psx_gte::scene;
+use psx_math::attributed_clip::lerp_q16_i32_exact;
 
 /// Depth fade (Tomb Raider-style darkness): packet colours scale toward black
 /// between `DEPTH_FADE_START` and the far end. `u32::MAX` disables it. The
@@ -119,6 +120,32 @@ pub struct AffineVertex {
     pub screen: [i16; 2],
     /// Projected GTE depth (SZ), written by submission.
     pub depth: u32,
+}
+
+/// The vertex a fraction `fraction_q16` (Q16, 0 = `a`, 65536 = `b`) of the way from `a` to `b`: position,
+/// UV and RGB interpolated per channel and clamped to their ranges, the high colour byte of `a`, the
+/// projection fields zero. The one interpolator every clipper of an affine surface uses.
+#[inline]
+pub fn lerp_vertex(a: &AffineVertex, b: &AffineVertex, fraction_q16: u32) -> AffineVertex {
+    let lerp_i = |x: i32, y: i32| -> i32 { lerp_q16_i32_exact(x, y, fraction_q16) };
+    let lerp_u8 = |x: u8, y: u8| -> u8 { lerp_i(x as i32, y as i32).clamp(0, 255) as u8 };
+    let ca = a.color;
+    let cb = b.color;
+    let color = (lerp_u8(ca as u8, cb as u8) as u32)
+        | ((lerp_u8((ca >> 8) as u8, (cb >> 8) as u8) as u32) << 8)
+        | ((lerp_u8((ca >> 16) as u8, (cb >> 16) as u8) as u32) << 16)
+        | (ca & 0xff00_0000);
+    AffineVertex {
+        position: [
+            lerp_i(a.position[0] as i32, b.position[0] as i32).clamp(-32768, 32767) as i16,
+            lerp_i(a.position[1] as i32, b.position[1] as i32).clamp(-32768, 32767) as i16,
+            lerp_i(a.position[2] as i32, b.position[2] as i32).clamp(-32768, 32767) as i16,
+        ],
+        uv: [lerp_u8(a.uv[0], b.uv[0]), lerp_u8(a.uv[1], b.uv[1])],
+        color,
+        screen: [0, 0],
+        depth: 0,
+    }
 }
 
 /// Cooked world-surface vertex: position, UV, and either two light-style
@@ -1677,6 +1704,29 @@ mod tests {
     extern crate std;
     use super::*;
     use std::vec::Vec;
+
+    #[test]
+    fn lerp_vertex_hits_both_ends_and_clamps_channels() {
+        let a = AffineVertex {
+            position: [-100, 0, 32767],
+            uv: [0, 255],
+            color: 0xAA00_FF10,
+            ..AffineVertex::default()
+        };
+        let b = AffineVertex {
+            position: [100, 50, -32768],
+            uv: [255, 0],
+            color: 0x0000_00FF,
+            screen: [7, 7],
+            depth: 9,
+        };
+        assert_eq!(lerp_vertex(&a, &b, 0).position, a.position);
+        assert_eq!(lerp_vertex(&a, &b, 65536).position, b.position);
+        let mid = lerp_vertex(&a, &b, 32768);
+        assert_eq!(mid.position[0], 0);
+        assert_eq!(mid.color >> 24, 0xAA, "the high colour byte is the first vertex's");
+        assert_eq!((mid.screen, mid.depth), ([0, 0], 0));
+    }
 
     #[test]
     fn baked_materialization_matches_frozen_scalar() {

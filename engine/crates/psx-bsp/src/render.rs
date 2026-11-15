@@ -11,13 +11,13 @@ use psx_engine::scratchpad::{assert_disjoint, Region, ScratchpadStack};
 use psx_engine::{
     compose_model_view_transform, materialize_baked_surface_vertices, materialize_surface_vertices,
     submit_surface_batch_near, submit_surface_batch_near_with_rule, submit_surface_batch_screened,
-    submit_surface_batch_screened_with_rule, AffineSurface, AffineVertex, ErrorBounded, NearView,
+    submit_surface_batch_screened_with_rule, AffineSurface, AffineVertex, lerp_vertex, ErrorBounded, NearView,
     SplitRule, SurfaceProfile, SurfaceSourceVertex, SurfaceSubmit,
 };
 use psx_gte::math::{Mat3I16, Vec3I16 as GteVec3I16, Vec3I32 as GteVec3I32};
 use psx_gte::scene;
 use psx_math::attributed_clip::{
-    clip_to_plane_unchecked, crossing_fraction_q16_i32, lerp_q16_i32_exact, AttributedClipPlane,
+    clip_to_plane_unchecked, crossing_fraction_q16_i32, AttributedClipPlane,
     ClipTraversal,
 };
 use psx_math::int32::{isqrt_i32, mul_q12_i32};
@@ -244,19 +244,7 @@ const SEMI_TRANSPARENT_COMMAND_BIT: u32 = 0x0200_0000;
 /// shared edges cross subdivision bands together.
 const PXBSP_RENDER_PROFILE: SurfaceProfile = SurfaceProfile::THIRD_PERSON;
 
-/// Q20.12 world camera and Q0.12 turn angles.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct Camera {
-    pub origin: Vec3I32,
-    pub angles: [i16; 3],
-}
-
-/// Camera transform retained for composing model-local transforms.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct ViewTransform {
-    pub rotation: Mat3I16,
-    pub translation: GteVec3I32,
-}
+pub use psx_engine::projection::{Camera, ViewTransform};
 
 /// VRAM binding resolved by the PSoXide runtime for one PXBSP material slot.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
@@ -1272,28 +1260,6 @@ fn clip_polygon_plane(
             &PxbspClipPlane(plane),
             ClipTraversal::PreviousToCurrent,
         )
-    }
-}
-
-fn lerp_vertex(a: &AffineVertex, b: &AffineVertex, fraction_q16: u32) -> AffineVertex {
-    let lerp_i = |x: i32, y: i32| -> i32 { lerp_q16_i32_exact(x, y, fraction_q16) };
-    let lerp_u8 = |x: u8, y: u8| -> u8 { lerp_i(x as i32, y as i32).clamp(0, 255) as u8 };
-    let ca = a.color;
-    let cb = b.color;
-    let color = (lerp_u8(ca as u8, cb as u8) as u32)
-        | ((lerp_u8((ca >> 8) as u8, (cb >> 8) as u8) as u32) << 8)
-        | ((lerp_u8((ca >> 16) as u8, (cb >> 16) as u8) as u32) << 16)
-        | (ca & 0xff00_0000);
-    AffineVertex {
-        position: [
-            lerp_i(a.position[0] as i32, b.position[0] as i32).clamp(-32768, 32767) as i16,
-            lerp_i(a.position[1] as i32, b.position[1] as i32).clamp(-32768, 32767) as i16,
-            lerp_i(a.position[2] as i32, b.position[2] as i32).clamp(-32768, 32767) as i16,
-        ],
-        uv: [lerp_u8(a.uv[0], b.uv[0]), lerp_u8(a.uv[1], b.uv[1])],
-        color,
-        screen: [0, 0],
-        depth: 0,
     }
 }
 

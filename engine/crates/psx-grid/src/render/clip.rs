@@ -1,8 +1,8 @@
 //! Polygon clipping against one frustum plane.
 
-use psx_engine::AffineVertex;
+use psx_engine::{lerp_vertex, AffineVertex};
 use psx_math::attributed_clip::{
-    clip_to_plane_unchecked, crossing_fraction_q16_i32, lerp_q16_i32_exact, AttributedClipPlane,
+    clip_to_plane_unchecked, crossing_fraction_q16_i32, AttributedClipPlane,
     ClipTraversal,
 };
 
@@ -67,24 +67,3 @@ pub fn clip_polygon_plane(
     }
 }
 
-fn lerp_vertex(a: &AffineVertex, b: &AffineVertex, fraction_q16: u32) -> AffineVertex {
-    let lerp_i = |x: i32, y: i32| -> i32 { lerp_q16_i32_exact(x, y, fraction_q16) };
-    let lerp_u8 = |x: u8, y: u8| -> u8 { lerp_i(x as i32, y as i32).clamp(0, 255) as u8 };
-    let ca = a.color;
-    let cb = b.color;
-    let color = (lerp_u8(ca as u8, cb as u8) as u32)
-        | ((lerp_u8((ca >> 8) as u8, (cb >> 8) as u8) as u32) << 8)
-        | ((lerp_u8((ca >> 16) as u8, (cb >> 16) as u8) as u32) << 16)
-        | (ca & 0xff00_0000);
-    AffineVertex {
-        position: [
-            lerp_i(a.position[0] as i32, b.position[0] as i32).clamp(-32768, 32767) as i16,
-            lerp_i(a.position[1] as i32, b.position[1] as i32).clamp(-32768, 32767) as i16,
-            lerp_i(a.position[2] as i32, b.position[2] as i32).clamp(-32768, 32767) as i16,
-        ],
-        uv: [lerp_u8(a.uv[0], b.uv[0]), lerp_u8(a.uv[1], b.uv[1])],
-        color,
-        screen: [0, 0],
-        depth: 0,
-    }
-}
