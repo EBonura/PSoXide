@@ -18,8 +18,8 @@
 //! loop {
 //!     let state = poll_port1();
 //!     let (x, y) = state.sticks.left_centered();
-//!     pad.update(state.buttons.bits() | stick_bits::<48>(x, y));
-//!     if pad.just_pressed(button::DOWN) { cursor_down(); }
+//!     let frame = pad.update(state.buttons.bits() | stick_bits::<48>(x, y));
+//!     if frame.just_pressed(button::DOWN) { cursor_down(); }
 //! }
 //! ```
 
@@ -244,8 +244,7 @@ mod tests {
         let mut pad = PadEdges::new();
         let mut presses = 0;
         for _ in 0..300 {
-            pad.update(fold.update(127, 0));
-            presses += usize::from(pad.just_pressed(button::RIGHT));
+            presses += usize::from(pad.update(fold.update(127, 0)).just_pressed(button::RIGHT));
         }
         assert_eq!(presses, 1);
     }
