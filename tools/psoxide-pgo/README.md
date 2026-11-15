@@ -1094,6 +1094,7 @@ The SDK's own `make repro-check` runs the gate on `editor-playtest` and `hello-e
 psoxide-pgo <elf-with-dwarf> <pc.csv>... <out.prof>        convert (sums several logs)
 psoxide-pgo portable <in.prof> <out.prof>                  strip disambiguators
 psoxide-pgo rebind <in.prof> <target-elf-with-dwarf> <out.prof>  [--min-bound PERCENT] [--allow-unbound]
+psoxide-pgo hottest <in.prof> <out.prof> --coverage PERMILLE [--cold NAME]...   keep the hottest functions
 psoxide-pgo bind <profile> <target-elf-with-dwarf> [--exact] [--min-bound PERCENT] [--allow-unbound]
 psoxide-pgo layout <link.map> <image.exe> <words.csv>... <out.layout>   layout profile from per-word logs
 psoxide-pgo place <in.layout> <link.map> <image.exe> <linker-script> <out.order>
@@ -1198,6 +1199,14 @@ The pick's scores are written to `scores.txt` in the work directory in the same 
 ### Dropping what no longer binds: `rebind --prune`
 
 `psoxide-pgo rebind IN ELF OUT --prune` (run in the guest's directory, on the unprofiled twin) writes `OUT` under portable names without the profile lines that cannot bind onto the build: lines of a function the build does not have (or inlined callees it does not have) and lines whose (offset, discriminator) it does not have. Lines that bind keep their counts exactly; a block that lost lines gets its total rewritten to the sum of what is left, and a block with nothing left goes. A profile that binds in full comes back byte for byte. Use it when a repin replaced code the profile had samples on (a new pad poll, a moved driver): the dead lines are what holds the bind share under the 90% gate, and LLVM ignores them anyway, so pruning is the honest alternative to `PSOXIDE_PGO_ALLOW_STALE`. The profile is carried across edits first, so run `stamp` on the result to record the tree it now describes.
+
+### Keeping the hottest functions: `hottest` and `rebind --coverage`
+
+`psoxide-pgo hottest IN OUT --coverage PERMILLE [--cold NAME]...` writes `IN` with only the functions that hold `PERMILLE` of its samples, in their original order, names untouched. Functions are taken by descending samples (ties in file order); a function whose name contains a `--cold` fragment is never taken and does not count towards the share (the CD driver and stream readers top the histogram while the CPU waits for the drive, and do not run in a frame). `--cold` repeats. Lines under a kept function (inlined callees included) travel with it, and the `#` record `stamp` wrote stays, so the result still rebinds. It prints how many functions it kept and the share of the counted samples they hold.
+
+Why: a build with `-profile-sample-accurate` treats every function the profile does not name as cold and optimises it for size, and a profile naming everything the replays touched makes LLVM inline hot callees into dozens of callers. Half-Life measured +47 KB of `.text` and `play()` from 56 KB to 128 KB with the whole profile, against 750 permille of the frame samples with the CD and stream functions cold (its `PGO_HOT_COVERAGE_PERMILLE` and `PGO_COLD_FUNCTIONS`). A game that drives its own `collect` calls this after `stamp` instead of keeping a private copy of the job.
+
+`rebind IN ELF OUT --coverage PERMILLE [--cold NAME]...` does the same cut on the profile before it binds (after `--rename`), so the bind share it reports is the share of the profile that is applied, and `--prune` still works on what is left. Without `--coverage`, `--cold` is an error. The output equals Half-Life's former `profile_prune::prune` on the same input (unit test `matches_half_lifes_own_prune_on_a_profile_of_its_shape` keeps a copy of that function as the oracle).
 
 ### Following a moved function: `rebind --rename OLD=NEW`
 

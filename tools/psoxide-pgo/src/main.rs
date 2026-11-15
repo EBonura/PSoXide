@@ -45,6 +45,7 @@ use std::process::ExitCode;
 use std::{env, fs};
 
 mod bind;
+mod coverage;
 mod ladder;
 mod layout;
 mod pipeline;
@@ -933,6 +934,7 @@ fn build_symbols(object: &object::File, dwarf: &Dwarf, units: &[Unit]) -> Result
 /// NEW (portable names, as `bind` prints them), for an item that moved between modules or crates.
 fn rebind_with_flags(input: &Path, elf: &Path, output: &Path, flags: &[String]) -> Result<()> {
     let (renames, flags) = take_renames(flags)?;
+    let (coverage, flags) = coverage::take_flags(&flags)?;
     let (gate, rest) = bind::Gate::from_args(&flags)?;
     let (prune, rest): (bool, Vec<&str>) = (
         rest.contains(&"--prune"),
@@ -948,8 +950,33 @@ fn rebind_with_flags(input: &Path, elf: &Path, output: &Path, flags: &[String]) 
         &env::current_dir()?,
         gate,
         &renames,
-        prune,
+        &Trim { prune, coverage },
     )
+}
+
+/// What `rebind` removes from the profile it writes.
+#[derive(Default)]
+struct Trim {
+    /// `--prune`: the lines that cannot bind onto the build.
+    prune: bool,
+    /// `--coverage`: every function but the hottest ones.
+    coverage: Option<coverage::Selection>,
+}
+
+/// `hottest IN OUT --coverage PERMILLE [--cold NAME]...`: write `IN` with only the functions that
+/// hold `PERMILLE` of its samples (see `coverage.rs`), names untouched.
+fn hottest(input: &Path, output: &Path, flags: &[String]) -> Result<()> {
+    let (selection, rest) = coverage::take_flags(flags)?;
+    let Some(selection) = selection else {
+        return Err("hottest: --coverage PERMILLE is required".into());
+    };
+    if !rest.is_empty() {
+        return Err(format!("hottest: unknown arguments {rest:?}").into());
+    }
+    let (text, kept) = coverage::keep_hottest(&fs::read_to_string(input)?, &selection);
+    println!("{}", coverage::report(&kept));
+    fs::write(output, text)?;
+    Ok(())
 }
 
 /// `--rename` pairs: portable name the profile has, portable name the build has.
@@ -1028,7 +1055,7 @@ fn rebind(
     crate_dir: &Path,
     gate: bind::Gate,
     renames: &[(String, String)],
-    prune: bool,
+    trim: &Trim,
 ) -> Result<()> {
     let data = fs::read(elf_path)?;
     let object = object::File::parse(&*data)?;
@@ -1049,6 +1076,16 @@ fn rebind(
     // across edits).
     let (keys, facts) = convert_histogram(elf_path, uniform_histogram(elf_path)?, false)?;
     let text = apply_renames(&fs::read_to_string(in_path)?, renames)?;
+    // `--coverage`: name only the hottest functions, so the bind share below is the share of the
+    // profile that is applied.
+    let text = match &trim.coverage {
+        Some(selection) => {
+            let (kept, report) = coverage::keep_hottest(&text, selection);
+            println!("{}", coverage::report(&report));
+            kept
+        }
+        None => text,
+    };
     // Before anything else: a profile whose functions are not in this build is not
     // applied, and LLVM would not say so.
     let bind = bind::measure(&text, &available, bind::Matching::Normalised);
@@ -1118,7 +1155,7 @@ fn rebind(
     }
     // `--prune`: write the profile without the lines that cannot bind onto this build, under
     // the portable names a committed profile uses.
-    let rebound = if prune {
+    let rebound = if trim.prune {
         let (kept, pruned) = stale::prune(&rebound, &keys);
         println!(
             "pruned {} line(s) holding {} sample(s) and {} function block(s) that do not bind",
@@ -1144,17 +1181,18 @@ fn rebind(
 
 const USAGE: &str = "usage: psoxide-pgo <elf-with-dwarf> <pc.csv>... <out.prof>
        psoxide-pgo portable <in.prof> <out.prof>
-       psoxide-pgo rebind <in.prof> <target-elf-with-dwarf> <out.prof> [--min-bound PERCENT] [--allow-unbound] [--rename OLD=NEW]... [--prune]
+       psoxide-pgo rebind <in.prof> <target-elf-with-dwarf> <out.prof> [--min-bound PERCENT] [--allow-unbound] [--rename OLD=NEW]... [--prune] [--coverage PERMILLE [--cold NAME]...]
                                                                        (run in the guest's directory)
+       psoxide-pgo hottest <in.prof> <out.prof> --coverage PERMILLE [--cold NAME]...
        psoxide-pgo stamp <profile> --elf <twin-elf-with-dwarf> [--crate DIR]
        psoxide-pgo bind <profile> <target-elf-with-dwarf> [--exact] [--min-bound PERCENT] [--allow-unbound]
        psoxide-pgo layout <link.map> <image.exe> <words.csv>... <out.layout>
        psoxide-pgo place <in.layout> <link.map> <image.exe> <linker-script> <out.order>
        psoxide-pgo ram <link.map> [--floor BYTES]";
 
-const MODES: [&str; 15] = [
-    "portable", "rebind", "bind", "layout", "place", "collect", "order", "apply", "choose",
-    "measure", "ram", "ladder", "stamp", "search", "icache",
+const MODES: [&str; 16] = [
+    "portable", "hottest", "rebind", "bind", "layout", "place", "collect", "order", "apply",
+    "choose", "measure", "ram", "ladder", "stamp", "search", "icache",
 ];
 
 /// A layout profile from one link and per-word logs (`--pc-log-words
@@ -1258,6 +1296,10 @@ fn main() -> ExitCode {
             Err(_) => Err(format!("--floor wants a byte count, not {floor:?}").into()),
         },
         ["portable", input, output] => portable(Path::new(input), Path::new(output)),
+        ["hottest", input, output, flags @ ..] => {
+            let flags: Vec<String> = flags.iter().map(ToString::to_string).collect();
+            hottest(Path::new(input), Path::new(output), &flags)
+        }
         ["rebind", input, elf, output, ..] => rebind_with_flags(
             Path::new(input),
             Path::new(elf),
