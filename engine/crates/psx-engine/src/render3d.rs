@@ -2391,9 +2391,11 @@ fn compute_view_origin_translation(
 }
 
 fn quantize_pose_translation_for_gte(translation: Vec3I32) -> (Vec3I16, u8) {
-    let mut max_abs = abs_i32_saturating(translation.x)
-        .max(abs_i32_saturating(translation.y))
-        .max(abs_i32_saturating(translation.z));
+    let mut max_abs = translation
+        .x
+        .saturating_abs()
+        .max(translation.y.saturating_abs())
+        .max(translation.z.saturating_abs());
     let mut shift = 0u8;
     while max_abs > i16::MAX as i32 && shift < 15 {
         max_abs = (max_abs + 1) >> 1;
@@ -2441,16 +2443,6 @@ fn exact_shift_i32(value: i32, shift: u8) -> Option<i32> {
         Some(value >> shift)
     } else {
         None
-    }
-}
-
-fn abs_i32_saturating(value: i32) -> i32 {
-    if value == i32::MIN {
-        i32::MAX
-    } else if value < 0 {
-        -value
-    } else {
-        value
     }
 }
 
@@ -3917,16 +3909,6 @@ fn emit_bool_counter(counter_id: u16, value: bool) {
     }
 }
 
-fn clamp_i16(value: i32) -> i16 {
-    if value < i16::MIN as i32 {
-        i16::MIN
-    } else if value > i16::MAX as i32 {
-        i16::MAX
-    } else {
-        value as i16
-    }
-}
-
 fn clamp_i16_range(value: i16, min: i16, max: i16) -> i16 {
     if value < min {
         min
@@ -3957,7 +3939,7 @@ fn clamp_u16_i32(value: i32) -> u16 {
     }
 }
 
-use psx_math::int32::isqrt_i32;
+use psx_math::int32::{clamp_i16, isqrt_i32};
 
 #[cfg(test)]
 fn sort_for_ot_insert(commands: &mut [GouraudTriCommand]) {

@@ -42,6 +42,8 @@ use psx_level::{
     LevelUiGradientDirection, LevelUiImageEffect, LevelUiNodeKind, LevelUiNodeRecord,
     LevelUiPaintRecord, LevelUiValueBinding, NavRect, UI_OPTION_NONE, UI_PAINT_NONE,
 };
+use psx_math::color::lerp_rgb;
+use psx_math::int32::mul_q12_i32;
 use psx_math::{cos_q12, sin_q12};
 
 /// Canvas width used as the fallback parent rectangle for a node
@@ -211,17 +213,17 @@ impl UiAffine {
             m10,
             m11,
             tx: center_x_q12
-                .saturating_sub(mul_q12(m00, half_w_q12))
-                .saturating_sub(mul_q12(m01, half_h_q12)),
+                .saturating_sub(mul_q12_i32(m00, half_w_q12))
+                .saturating_sub(mul_q12_i32(m01, half_h_q12)),
             ty: center_y_q12
-                .saturating_sub(mul_q12(m10, half_w_q12))
-                .saturating_sub(mul_q12(m11, half_h_q12)),
+                .saturating_sub(mul_q12_i32(m10, half_w_q12))
+                .saturating_sub(mul_q12_i32(m11, half_h_q12)),
         }
     }
 
     fn compose(self, child: Self) -> Self {
         if self.is_translation() {
-            // `mul_q12(4096, v) == v` and `mul_q12(0, v) == 0` exactly, so
+            // `mul_q12_i32(4096, v) == v` and `mul_q12_i32(0, v) == 0` exactly, so
             // with an identity linear part on the left the child's linear
             // part passes straight through and the translations add.
             return Self {
@@ -234,15 +236,15 @@ impl UiAffine {
             };
         }
         Self {
-            m00: mul_q12(self.m00, child.m00).saturating_add(mul_q12(self.m01, child.m10)),
-            m01: mul_q12(self.m00, child.m01).saturating_add(mul_q12(self.m01, child.m11)),
-            m10: mul_q12(self.m10, child.m00).saturating_add(mul_q12(self.m11, child.m10)),
-            m11: mul_q12(self.m10, child.m01).saturating_add(mul_q12(self.m11, child.m11)),
-            tx: mul_q12(self.m00, child.tx)
-                .saturating_add(mul_q12(self.m01, child.ty))
+            m00: mul_q12_i32(self.m00, child.m00).saturating_add(mul_q12_i32(self.m01, child.m10)),
+            m01: mul_q12_i32(self.m00, child.m01).saturating_add(mul_q12_i32(self.m01, child.m11)),
+            m10: mul_q12_i32(self.m10, child.m00).saturating_add(mul_q12_i32(self.m11, child.m10)),
+            m11: mul_q12_i32(self.m10, child.m01).saturating_add(mul_q12_i32(self.m11, child.m11)),
+            tx: mul_q12_i32(self.m00, child.tx)
+                .saturating_add(mul_q12_i32(self.m01, child.ty))
                 .saturating_add(self.tx),
-            ty: mul_q12(self.m10, child.tx)
-                .saturating_add(mul_q12(self.m11, child.ty))
+            ty: mul_q12_i32(self.m10, child.tx)
+                .saturating_add(mul_q12_i32(self.m11, child.ty))
                 .saturating_add(self.ty),
         }
     }
@@ -334,11 +336,6 @@ impl UiResolvedNode {
         }
         self
     }
-}
-
-fn mul_q12(a: i32, b_q12: i32) -> i32 {
-    // psx-numeric-allow-next-line: Q12 multiply widens through i64; R3000 mult yields the 64-bit product natively
-    ((i64::from(a) * i64::from(b_q12)) >> 12).clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
 }
 
 fn mul_scale_q8_to_i16(value_q12: i32, scale_q8: u16) -> i16 {
@@ -1062,7 +1059,7 @@ fn draw_focus_ring(
         }
         LevelUiFocusEffect::Pulse => {
             let wave = focus_wave(frame, style.period);
-            let color = lerp_color(style.color_a, style.color_b, wave);
+            let color = lerp_rgb(style.color_b, style.color_a, u16::from(wave), 255);
             draw_ring_edges(gpu, node, width, height, thickness, margin, color);
         }
         LevelUiFocusEffect::Corners => {
@@ -1132,13 +1129,6 @@ fn focus_wave(frame: u16, period: u16) -> u8 {
     triangle_wave_u8(((pos * 512) / u32::from(period)) as u16)
 }
 
-/// Integer colour mix: `t = 255` selects `a`, `t = 0` selects `b`.
-fn lerp_color(a: (u8, u8, u8), b: (u8, u8, u8), t: u8) -> (u8, u8, u8) {
-    let t = i32::from(t);
-    let mix = |x: u8, y: u8| ((i32::from(x) * t + i32::from(y) * (255 - t)) / 255) as u8;
-    (mix(a.0, b.0), mix(a.1, b.1), mix(a.2, b.2))
-}
-
 /// Targeting-reticle brackets: an L at each corner that breathes up to
 /// 2px outward while its colour pulses `color_b -> color_a`.
 #[optimize(size)]
@@ -1154,7 +1144,7 @@ fn draw_focus_corners(
     frame: u16,
 ) {
     let wave = focus_wave(frame, style.period);
-    let (r, g, b) = lerp_color(style.color_a, style.color_b, wave);
+    let (r, g, b) = lerp_rgb(style.color_b, style.color_a, u16::from(wave), 255);
     let push = i16::from(wave / 96); // 0..=2px breathing
     let d = margin + push;
     let e = d + thickness - 1;
@@ -1241,7 +1231,7 @@ fn draw_focus_tracer(
     let seg = (perimeter / 28).max(2);
     for k in 0..TRACER_SEGMENTS {
         let brightness = (255 - k * 255 / TRACER_SEGMENTS) as u8;
-        let color = lerp_color(style.color_a, style.color_b, brightness);
+        let color = lerp_rgb(style.color_b, style.color_a, u16::from(brightness), 255);
         let start = (head - (k + 1) * seg).rem_euclid(perimeter);
         draw_perimeter_run(
             gpu, node, width, height, thickness, margin, perimeter, outer_w, outer_h, start, seg,
@@ -1280,7 +1270,7 @@ fn draw_focus_shape_tracer(
         let segment_len = (perimeter / 28).max(2);
         for tail in 0..TRACER_SEGMENTS {
             let brightness = (255 - tail * 255 / TRACER_SEGMENTS) as u8;
-            let color = lerp_color(style.color_a, style.color_b, brightness);
+            let color = lerp_rgb(style.color_b, style.color_a, u16::from(brightness), 255);
             let start = (head - (tail + 1) * segment_len).rem_euclid(perimeter);
             draw_shape_perimeter_run(gpu, &polygon, perimeter, start, segment_len, color);
         }
@@ -1647,30 +1637,30 @@ mod tests {
             m10,
             m11,
             tx: center_x_q12
-                .saturating_sub(super::mul_q12(m00, half_w_q12))
-                .saturating_sub(super::mul_q12(m01, half_h_q12)),
+                .saturating_sub(super::mul_q12_i32(m00, half_w_q12))
+                .saturating_sub(super::mul_q12_i32(m01, half_h_q12)),
             ty: center_y_q12
-                .saturating_sub(super::mul_q12(m10, half_w_q12))
-                .saturating_sub(super::mul_q12(m11, half_h_q12)),
+                .saturating_sub(super::mul_q12_i32(m10, half_w_q12))
+                .saturating_sub(super::mul_q12_i32(m11, half_h_q12)),
         }
     }
 
     /// `UiAffine::compose` before the translation fast path was added.
     fn reference_compose(parent: UiAffine, child: UiAffine) -> UiAffine {
         UiAffine {
-            m00: super::mul_q12(parent.m00, child.m00)
-                .saturating_add(super::mul_q12(parent.m01, child.m10)),
-            m01: super::mul_q12(parent.m00, child.m01)
-                .saturating_add(super::mul_q12(parent.m01, child.m11)),
-            m10: super::mul_q12(parent.m10, child.m00)
-                .saturating_add(super::mul_q12(parent.m11, child.m10)),
-            m11: super::mul_q12(parent.m10, child.m01)
-                .saturating_add(super::mul_q12(parent.m11, child.m11)),
-            tx: super::mul_q12(parent.m00, child.tx)
-                .saturating_add(super::mul_q12(parent.m01, child.ty))
+            m00: super::mul_q12_i32(parent.m00, child.m00)
+                .saturating_add(super::mul_q12_i32(parent.m01, child.m10)),
+            m01: super::mul_q12_i32(parent.m00, child.m01)
+                .saturating_add(super::mul_q12_i32(parent.m01, child.m11)),
+            m10: super::mul_q12_i32(parent.m10, child.m00)
+                .saturating_add(super::mul_q12_i32(parent.m11, child.m10)),
+            m11: super::mul_q12_i32(parent.m10, child.m01)
+                .saturating_add(super::mul_q12_i32(parent.m11, child.m11)),
+            tx: super::mul_q12_i32(parent.m00, child.tx)
+                .saturating_add(super::mul_q12_i32(parent.m01, child.ty))
                 .saturating_add(parent.tx),
-            ty: super::mul_q12(parent.m10, child.tx)
-                .saturating_add(super::mul_q12(parent.m11, child.ty))
+            ty: super::mul_q12_i32(parent.m10, child.tx)
+                .saturating_add(super::mul_q12_i32(parent.m11, child.ty))
                 .saturating_add(parent.ty),
         }
     }
@@ -3692,7 +3682,7 @@ fn shape_paint_color(paint: UiPaint, local: (i32, i32), width: u16, height: u16)
                 LevelUiGradientDirection::Vertical => (local.1, i32::from(height)),
             };
             let t = ((position.clamp(0, extent.max(1)) * 255) / extent.max(1)) as u8;
-            lerp_color(to, from, t)
+            lerp_rgb(from, to, u16::from(t), 255)
         }
     }
 }
@@ -4501,8 +4491,8 @@ fn focus_chrome_sweep_paint(paint: UiPaint, frame: u16, period: u16) -> UiPaint 
     };
     let phase = focus_wave(frame, period);
     UiPaint::Gradient {
-        from: lerp_color(dark, bright, phase),
-        to: lerp_color(bright, dark, phase),
+        from: lerp_rgb(bright, dark, u16::from(phase), 255),
+        to: lerp_rgb(dark, bright, u16::from(phase), 255),
         direction: LevelUiGradientDirection::Horizontal,
     }
 }
