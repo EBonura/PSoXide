@@ -900,9 +900,7 @@ fn fraction_u8(index: usize, total: usize) -> u8 {
     ((index.saturating_mul(255)) / total.max(1)).min(255) as u8
 }
 
-fn clamp_i16(value: i32) -> i16 {
-    value.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
-}
+use psx_math::int32::clamp_i16;
 
 #[cfg(test)]
 mod tests {

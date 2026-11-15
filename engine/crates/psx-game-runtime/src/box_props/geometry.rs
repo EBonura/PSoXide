@@ -1,5 +1,6 @@
 use super::*;
 use crate::image_props::{average4_i32, rotate_x_q12, rotate_y_q12, rotate_z_q12};
+use psx_math::color::lerp_rgb;
 
 fn box_prop_face_point_q8(face: [WorldVertex; 4], u_q8: u16, v_q8: u16) -> WorldVertex {
     let left = lerp_world_vertex_q8(face[0], face[3], v_q8);
@@ -22,9 +23,9 @@ pub(super) fn box_prop_face_color_at(
     v_q8: u16,
 ) -> (u8, u8, u8) {
     let colors = prop.baked_vertex_rgb[face];
-    let top = lerp_rgb_q8(colors[0], colors[1], u_q8);
-    let bottom = lerp_rgb_q8(colors[3], colors[2], u_q8);
-    lerp_rgb_q8(top, bottom, v_q8)
+    let top = lerp_rgb(colors[0], colors[1], u_q8, 256);
+    let bottom = lerp_rgb(colors[3], colors[2], u_q8, 256);
+    lerp_rgb(top, bottom, v_q8, 256)
 }
 
 fn lerp_world_vertex_q8(a: WorldVertex, b: WorldVertex, t_q8: u16) -> WorldVertex {
@@ -32,14 +33,6 @@ fn lerp_world_vertex_q8(a: WorldVertex, b: WorldVertex, t_q8: u16) -> WorldVerte
         lerp_i32_q8(a.x, b.x, t_q8),
         lerp_i32_q8(a.y, b.y, t_q8),
         lerp_i32_q8(a.z, b.z, t_q8),
-    )
-}
-
-fn lerp_rgb_q8(a: (u8, u8, u8), b: (u8, u8, u8), t_q8: u16) -> (u8, u8, u8) {
-    (
-        lerp_i32_q8(a.0 as i32, b.0 as i32, t_q8) as u8,
-        lerp_i32_q8(a.1 as i32, b.1 as i32, t_q8) as u8,
-        lerp_i32_q8(a.2 as i32, b.2 as i32, t_q8) as u8,
     )
 }
 
@@ -328,4 +321,28 @@ pub(super) fn box_prop_offset_quad_y(quad: [WorldVertex; 4], dy: i32) -> [WorldV
         *vertex = WorldVertex::new(vertex.x, vertex.y.saturating_add(dy), vertex.z);
     }
     out
+}
+
+#[cfg(test)]
+mod rgb_tests {
+    use super::*;
+
+    /// The private `lerp_rgb_q8` this file used to carry, verbatim, as the oracle.
+    fn old_lerp_i32_q8(a: i32, b: i32, t_q8: u16) -> i32 {
+        let t = t_q8.min(256) as i32;
+        a.saturating_add(b.saturating_sub(a).saturating_mul(t) / 256)
+    }
+
+    #[test]
+    fn color_lerp_through_psx_math_is_bit_identical_to_the_private_one() {
+        for a in 0..=255u8 {
+            for b in 0..=255u8 {
+                for t in (0..=300u16).chain([1000, u16::MAX]) {
+                    let want = old_lerp_i32_q8(i32::from(a), i32::from(b), t) as u8;
+                    let got = lerp_rgb((a, 0, 0), (b, 0, 0), t, 256).0;
+                    assert_eq!(got, want, "a {a} b {b} t {t}");
+                }
+            }
+        }
+    }
 }

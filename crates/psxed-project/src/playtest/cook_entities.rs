@@ -2286,11 +2286,11 @@ pub(crate) fn compact_animation_bytes(animation: &psx_asset::Animation<'_>) -> V
         while joint < joint_count {
             if let Some(pose) = animation.pose(frame, joint) {
                 translations_max_abs =
-                    translations_max_abs.max(abs_i32_saturating(pose.translation.x));
+                    translations_max_abs.max(pose.translation.x.saturating_abs());
                 translations_max_abs =
-                    translations_max_abs.max(abs_i32_saturating(pose.translation.y));
+                    translations_max_abs.max(pose.translation.y.saturating_abs());
                 translations_max_abs =
-                    translations_max_abs.max(abs_i32_saturating(pose.translation.z));
+                    translations_max_abs.max(pose.translation.z.saturating_abs());
                 let original = pose_flat_matrix(&pose);
                 for value in original {
                     rotation_max_abs = rotation_max_abs.max(value.saturating_abs());
@@ -2441,16 +2441,6 @@ pub(crate) fn round_shift_i32(value: i32, shift: u8) -> i32 {
         ((value + half) >> shift) as i32
     } else {
         -(((-value + half) >> shift) as i32)
-    }
-}
-
-pub(crate) fn abs_i32_saturating(value: i32) -> i32 {
-    if value == i32::MIN {
-        i32::MAX
-    } else if value < 0 {
-        -value
-    } else {
-        value
     }
 }
 

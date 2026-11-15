@@ -876,6 +876,7 @@ dependencies = [
  "psx-hw",
  "psx-iso",
  "psx-level",
+ "psx-math",
  "psx-render-contract",
  "psxed-audio",
  "psxed-format",
