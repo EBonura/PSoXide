@@ -193,7 +193,7 @@ impl<P: CollisionTraceProvider + ?Sized> CollisionTraceProvider
     fn trace_into(&mut self, query: CollisionTraceQuery, output: &mut CollisionTrace) -> bool {
         // SAFETY: no scratchpad bytes are live around a trace (see
         // TraceStack), tracing installs no exception handler, and
-        // tools/stack_guard.py proves the call tree fits.
+        // stack-guard proves the call tree fits.
         unsafe { TraceStack::run(|| self.trace_into_on_current_stack(query, output)) }
     }
 }

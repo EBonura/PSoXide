@@ -611,7 +611,7 @@ fn fly_batch<const CAP: usize, S: PrimitiveSink<TriTextured>, const OT_DEPTH: us
     out.run_end = out.faces.len();
     let flight = i32::from(effect.flight_ticks());
     let gte = LoadedAnchoredCameraGte::load(corners.camera, corners.anchor);
-    // SAFETY: see `ShardStack`; tools/stack_guard.py proves the tree fits.
+    // SAFETY: see `ShardStack`; stack-guard proves the tree fits.
     unsafe { ShardStack::run(|| fly_on_stack(flight, gte, corners, batch, out)) }
 }
 

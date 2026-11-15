@@ -991,7 +991,7 @@ impl<
     /// opaque at the palette's own near-black greys instead of blending:
     /// measured against an `actor-shadows-off` build on the benchmark tape it
     /// moved the floor by at most 30 of 255, against 123 once the palette
-    /// carried STP. `tools/gen_shadow_decal.py` authors the blob.
+    /// carried STP. The blob is authored offline.
     pub fn upload_shadow_texture(&mut self, shadow_circle_blob: &[u8]) -> Option<TextureMaterial> {
         let texture = Texture::from_bytes(shadow_circle_blob).ok()?;
         if texture.width() != 64 || texture.height() != 64 || texture.clut_entries() != 16 {

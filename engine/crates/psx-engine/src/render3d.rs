@@ -3258,7 +3258,7 @@ fn project_gte_view_vertex_identity_loaded(
     };
     // Scheduled RTPS wrapper: same op, shared load-delay slots. The
     // compact macro wrapper measured substantially slower on the
-    // 161-blended-vertex player path (see docs/perf-30fps.md).
+    // 161-blended-vertex player path (30 fps perf study).
     let p = scene::project_vertex_scheduled(Vec3I16::new(x, y, z));
     if (p.sz as i32) >= projection.near_z {
         ProjectedVertex::new(p.sx, p.sy, p.sz as i32)

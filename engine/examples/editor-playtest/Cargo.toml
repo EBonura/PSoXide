@@ -82,7 +82,7 @@ card-trace = ["cd-stream-bench", "emulator-telemetry"]
 # the full emulator-telemetry feature (Graybox Reach).
 camera-pose-log = ["psx-engine/debug-log"]
 # One `sim-state` line per fixed tick (player, camera, entities) for the
-# cycle-independent sim-state gate (tools/grid_simgate.sh). Implies the
+# cycle-independent sim-state gate. Implies the
 # `camera-pose-log` line.
 sim-trace = ["camera-pose-log"]
 hardware-boot-visual = ["psx-engine/hardware-boot-visual"]

@@ -14,7 +14,7 @@
 /// Named byte ranges, compile-time overlap checks for the ranges live
 /// together, and running a scratchpad-free phase with its stack here
 /// (psx-rt's runtime helpers; see `psx_rt::scratchpad`). Every guest that
-/// runs a [`ScratchpadStack`] must pass `tools/stack_guard.py` on its linked
+/// runs a [`ScratchpadStack`] must pass `stack-guard` on its linked
 /// image; the editor guest build runs it after the hazard patch.
 pub use psx_rt::scratchpad::{assert_disjoint, Region, ScratchpadStack};
 

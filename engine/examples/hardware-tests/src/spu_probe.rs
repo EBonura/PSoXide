@@ -25,7 +25,7 @@
 //! One cycle per 28 samples means unity pitch sounds at 44100/28 = 1575 Hz
 //! exactly, and any pitch at `1575 * pitch/0x1000`. Each segment is 1.5 s
 //! of tone then 0.5 s of silence, so a recording cuts apart on the gaps
-//! alone and `tools/analyse-tone-ladder.py` can measure every one.
+//! alone and a capture analysis can measure every one.
 //!
 //! That is the point of running both: the QR carries what the REGISTERS
 //! said, an OBS capture carries what the SPEAKER got. A segment whose

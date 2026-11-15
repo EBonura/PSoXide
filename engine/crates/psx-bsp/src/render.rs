@@ -182,7 +182,7 @@ const SUBDIVISION_SCRATCH_VERTICES: usize = psx_engine::AFFINE_SPLIT_SCRATCH_VER
 /// The writer's frame (spilled loop state it reloads per packet) is the next
 /// most re-read, so `flush_pxbsp_batch` runs it on the bytes above the batch.
 /// The batch gives up fourteen more slots for that, and the writer's split
-/// scratch takes six more; `tools/stack_guard.py` proves the writer's linked
+/// scratch takes six more; `stack-guard` proves the writer's linked
 /// call tree fits what is left. A face wider than the batch cannot be
 /// drawn, so the cooker splits every face down to [`PXBSP_MAX_FACE_VERTICES`]
 /// and the face pass skips (never breaks on) anything wider. Cortex's cook is
@@ -1657,7 +1657,7 @@ impl Renderer {
         } else {
             // SAFETY: no scratchpad bytes are live here (see
             // PxbspSelectionStack), selection installs no exception handler,
-            // and tools/stack_guard.py proves its call tree fits.
+            // and stack-guard proves its call tree fits.
             let ok = self.mark_visible_pxbsp_faces_with(map, visibility_origin, hooks)
                 && unsafe {
                     PxbspSelectionStack::run(|| {
@@ -3361,7 +3361,7 @@ unsafe fn flush_pxbsp_batch(
     }
     // SAFETY: the planes and the batch are the only scratchpad bytes live
     // around the flush (see PxbspWriterStack), the writer installs no
-    // exception handler, and tools/stack_guard.py proves its call tree fits.
+    // exception handler, and stack-guard proves its call tree fits.
     let (submitted, deferred) = unsafe {
         PxbspWriterStack::run(|| {
             submit_surface_batch_screened(
@@ -3400,7 +3400,7 @@ unsafe fn flush_pxbsp_batch_ruled<S: SplitRule>(
     }
     // SAFETY: the planes and the batch are the only scratchpad bytes live
     // around the flush (see PxbspWriterStack), the writer installs no
-    // exception handler, and tools/stack_guard.py proves its call tree fits.
+    // exception handler, and stack-guard proves its call tree fits.
     let (submitted, deferred) = unsafe {
         PxbspWriterStack::run(|| {
             submit_surface_batch_screened_with_rule(

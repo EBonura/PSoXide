@@ -1530,7 +1530,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     // SAFETY: the blended-vertex chunk was flushed above, so
                     // no scratchpad bytes are live (see ModelFaceWalkerStack);
                     // the walker installs no exception handler, and
-                    // tools/stack_guard.py proves its call tree fits.
+                    // stack-guard proves its call tree fits.
                     unsafe {
                         ModelFaceWalkerStack::run(|| {
                             self.submit_predecoded_model_faces_packed_average_unclamped_extent_safe_batch::<true>(

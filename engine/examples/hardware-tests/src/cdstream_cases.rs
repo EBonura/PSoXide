@@ -24,7 +24,7 @@
 //!
 //! Each case leaves timing-block records (`0x2F0`, `0x300`, `0x310`) in the
 //! capture; the layouts are in each function's doc and in
-//! tools/hwtest-report.py. They install and remove the transport themselves,
+//! psoxide-hwtest (report.rs). They install and remove the transport themselves,
 //! so a case is safe to run after the others; run them after the full
 //! characterisation, which they would otherwise disturb (the transport's
 //! exception wrapper stays in the vector after it is removed).

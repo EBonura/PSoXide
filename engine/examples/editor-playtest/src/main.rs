@@ -971,7 +971,7 @@ fn begin_world_render_pass<'a, 'ot>(
     commands: &'a mut [WorldTriCommand],
 ) -> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     // Bucketed: the ordering table is the radix sort, no per-frame comparison
-    // sort (docs/perf-30fps.md, experiment 2).
+    // sort (30 fps perf study, experiment 2).
     WorldRenderPass::new_bucketed(ot, commands)
 }
 

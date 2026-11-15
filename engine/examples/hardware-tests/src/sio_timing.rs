@@ -14,7 +14,7 @@
 //! The memory card is only ever read, never written.
 //!
 //! The record layout, three fields each, is documented on the constants
-//! below and mirrored in `tools/hwtest-report.py`.
+//! below and mirrored in `psoxide-hwtest` (report.rs).
 
 use crate::console_tests::{record, spread};
 use crate::list_busy_probes::GpuLoad;

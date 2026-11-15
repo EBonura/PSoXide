@@ -2,7 +2,7 @@
 //!
 //! Accepts raw `.xbsp` files or `PSOXWPAK` bundles (quake-psx `WORLD.PAK`)
 //! and prints a validated lump table per map. This is the P0 gate driver in
-//! docs/quake-bsp-migration-plan.md: every map must index, size-check and
+//! the Quake BSP migration plan: every map must index, size-check and
 //! record-walk cleanly.
 //!
 //! ```sh

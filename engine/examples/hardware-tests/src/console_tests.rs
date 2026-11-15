@@ -4,7 +4,7 @@
 //! cases. They run as steps of the linear run (`run.rs`), draw their own
 //! progress, never wait for a person, and leave timing-block records in the
 //! `0x2C0`-`0x315` range. The record layout is in each module and in
-//! tools/hwtest-report.py.
+//! psoxide-hwtest (report.rs).
 
 use crate::report::hex2;
 use crate::TimingRecord;

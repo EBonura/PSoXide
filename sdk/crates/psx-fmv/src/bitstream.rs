@@ -758,7 +758,7 @@ mod tests {
 
     /// Every frame of a real movie, when `PSX_FMV_TEST_STR` names one: a
     /// 2048-byte-sector `.str` (psxavenc `-t strv`) or one with 2336-byte
-    /// XA sectors (`-t str`, what `tools/fmv_test_movie.py` writes).
+    /// XA sectors (`-t str`).
     #[test]
     fn rewrite_matches_reference_on_a_movie() {
         let Some(path) = std::env::var_os("PSX_FMV_TEST_STR") else {

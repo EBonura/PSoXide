@@ -1433,7 +1433,7 @@ fn packet_cursor(
 
 /// The paired-arena fence: block until the channel-2 linked-list walk (the
 /// in-flight frame's ordering table) has consumed its packets. A direct call,
-/// not a function pointer, so `tools/stack_guard.py` can bound the
+/// not a function pointer, so `stack-guard` can bound the
 /// scratchpad-stack model paths that reach it through a packet push.
 ///
 /// Under the present queue the in-flight frame may not have started walking

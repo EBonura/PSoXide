@@ -4,7 +4,7 @@
 //! Checked, allocation-free readers for the XBSP cooked map format.
 //!
 //! Shared by the guest runtime, the editor cook and quake-psx so the wire
-//! format has one Rust definition (docs/quake-bsp-migration-plan.md, P0).
+//! format has one Rust definition (the Quake BSP migration, P0).
 //! Record sizes and lump order are the cooked format's; the readers and
 //! validators are this crate's own. The PXBSP extensions (material lump,
 //! PSoXide entity records, streaming index) grow here.
