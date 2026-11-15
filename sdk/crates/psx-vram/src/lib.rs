@@ -67,6 +67,7 @@ use psx_hw::gpu::{gp0, gp1, pack_xy};
 use psx_io::dma::{self, Channel};
 use psx_io::gpu::{pause_recording, wait_command_ready, write_command, write_display_control};
 use psx_io::periph::GpuDma;
+use psx_math::Mask64;
 
 /// VRAM framebuffer width in pixels.
 pub const VRAM_WIDTH: u16 = 1024;
@@ -780,17 +781,20 @@ pub trait VramRegionSource {
 /// CLUT-row sub-allocator over a reserved band of `ROWS` VRAM rows.
 ///
 /// Each row holds up to [`CLUT_SLOTS_PER_ROW`] 16-pixel slots tracked as a
-/// `u64` bitmap, so a 4bpp (16-entry) CLUT takes 1 slot and an 8bpp
+/// [`Mask64`] bitmap, so a 4bpp (16-entry) CLUT takes 1 slot and an 8bpp
 /// (256-entry) CLUT takes 16 contiguous slots. [`ClutRowAllocator::new`] spans
 /// the whole 1024-pixel row; [`ClutRowAllocator::with_width`] narrows the band
 /// to its first `width` pixels, which is what lets a layout keep the band
 /// clear of every texture page (see [`VramAllocator::with_clut_band`]).
+///
+/// The struct stays 8-byte aligned, as it was with `u64` rows: at 4-byte alignment the
+/// editor-playtest build copies the allocator into place with 224 more bytes of code.
 #[derive(Copy, Clone, Debug)]
+#[repr(align(8))]
 pub struct ClutRowAllocator<const ROWS: usize> {
     base_y: u16,
     slots_per_row: u16,
-    // psx-numeric-allow-next-line: 64-slot occupancy bitmask is a u64 by definition
-    rows: [u64; ROWS],
+    rows: [Mask64; ROWS],
 }
 
 impl<const ROWS: usize> ClutRowAllocator<ROWS> {
@@ -799,7 +803,7 @@ impl<const ROWS: usize> ClutRowAllocator<ROWS> {
         Self {
             base_y,
             slots_per_row: CLUT_SLOTS_PER_ROW,
-            rows: [0; ROWS],
+            rows: [Mask64::EMPTY; ROWS],
         }
     }
 
@@ -819,7 +823,7 @@ impl<const ROWS: usize> ClutRowAllocator<ROWS> {
         Self {
             base_y,
             slots_per_row: width / 16,
-            rows: [0; ROWS],
+            rows: [Mask64::EMPTY; ROWS],
         }
     }
 
@@ -831,10 +835,10 @@ impl<const ROWS: usize> ClutRowAllocator<ROWS> {
     /// Take 16-pixel `slot` out of rows `first_row..` for good, for pixels some other owner
     /// keeps there (the draw-done block).
     const fn block_slot(&mut self, slot: u16, first_row: usize) {
+        let bit = Mask64::bit(slot as usize);
         let mut r = first_row;
         while r < ROWS {
-            // psx-numeric-allow-next-line: 64-slot occupancy bitmask is a u64 by definition
-            self.rows[r] |= 1u64 << slot;
+            self.rows[r] = self.rows[r].or(bit);
             r += 1;
         }
     }
@@ -850,20 +854,13 @@ impl<const ROWS: usize> ClutRowAllocator<ROWS> {
         if slots == 0 || slots > cap.min(64) {
             return None;
         }
-        // psx-numeric-allow-next-line: 64-slot occupancy bitmask is a u64 by definition
-        let want: u64 = if slots == 64 {
-            // psx-numeric-allow-next-line: 64-slot occupancy bitmask is a u64 by definition
-            u64::MAX
-        } else {
-            // psx-numeric-allow-next-line: 64-slot occupancy bitmask is a u64 by definition
-            (1u64 << slots) - 1
-        };
+        let want = Mask64::first(slots);
         for (r, row) in self.rows.iter_mut().enumerate() {
             let mut s = 0usize;
             while s + slots <= cap.min(64) {
-                let mask = want << s;
-                if *row & mask == 0 {
-                    *row |= mask;
+                let mask = want.shl_by(s as u32);
+                if row.and(mask).is_empty() {
+                    *row = row.or(mask);
                     return Some(Clut::new((s as u16) * 16, self.base_y + r as u16));
                 }
                 s += 1;
@@ -880,15 +877,8 @@ impl<const ROWS: usize> ClutRowAllocator<ROWS> {
         if r >= ROWS || s + slots > self.slots_per_row as usize {
             return;
         }
-        // psx-numeric-allow-next-line: 64-slot occupancy bitmask is a u64 by definition
-        let mask: u64 = if slots == 64 {
-            // psx-numeric-allow-next-line: 64-slot occupancy bitmask is a u64 by definition
-            u64::MAX
-        } else {
-            // psx-numeric-allow-next-line: 64-slot occupancy bitmask is a u64 by definition
-            (1u64 << slots) - 1
-        } << s;
-        self.rows[r] &= !mask;
+        let mask = Mask64::first(slots).shl_by(s as u32);
+        self.rows[r] = self.rows[r].and_not(mask);
     }
 }
 
