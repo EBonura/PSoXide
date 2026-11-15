@@ -40,5 +40,5 @@ pub mod rng;
 pub mod shake;
 
 pub use particles::{Particle, ParticlePool};
-pub use rng::LcgRng;
+pub use rng::{Lcg, LcgRng, NrLcg};
 pub use shake::ShakeState;

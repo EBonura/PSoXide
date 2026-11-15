@@ -7,18 +7,27 @@
 //! good-enough statistical properties for game use and produces
 //! the same output on every PS1 / host / emulator.
 
-/// 32-bit integer LCG. Step once per `next()` / `signed()` call.
-#[derive(Copy, Clone, Debug)]
+/// 32-bit integer LCG with multiplier `MUL` and increment `ADD`. Step once per `next()` /
+/// `signed()` call. [`LcgRng`] (glibc's constants) is the generator the SDK's effects use;
+/// [`NrLcg`] (Numerical Recipes' constants) is the one several games carried privately, and
+/// keeps their streams bit for bit.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(transparent)]
-pub struct LcgRng(u32);
+pub struct Lcg<const MUL: u32, const ADD: u32>(u32);
 
-impl LcgRng {
+/// The `glibc` generator: multiplier 1,103,515,245, increment 12,345.
+pub type LcgRng = Lcg<1_103_515_245, 12_345>;
+
+/// The Numerical Recipes generator: multiplier 1,664,525, increment 1,013,904,223.
+pub type NrLcg = Lcg<1_664_525, 1_013_904_223>;
+
+impl<const MUL: u32, const ADD: u32> Lcg<MUL, ADD> {
     /// Build with an explicit seed. Same seed → same sequence.
     pub const fn new(seed: u32) -> Self {
         Self(seed)
     }
 
-    /// One LCG step. Multiplier + increment are `glibc`'s constants.
+    /// One LCG step with this generator's multiplier and increment.
     /// Returns the fresh internal state.
     ///
     /// # Take the high bits, not the low ones
@@ -35,7 +44,7 @@ impl LcgRng {
     #[inline]
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> u32 {
-        self.0 = self.0.wrapping_mul(1_103_515_245).wrapping_add(12345);
+        self.0 = self.0.wrapping_mul(MUL).wrapping_add(ADD);
         self.0
     }
 
@@ -92,6 +101,20 @@ const fn spread(raw: u8, range: i16) -> i16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_two_generators_equal_the_formulas_the_games_wrote() {
+        // Quake's AmbientRandom (Numerical Recipes) and the glibc form, over 100,000 steps.
+        let (mut nr, mut glibc) = (NrLcg::new(0x1357_9bdf), LcgRng::new(0x1357_9bdf));
+        let (mut a, mut b) = (0x1357_9bdfu32, 0x1357_9bdfu32);
+        for _ in 0..100_000 {
+            a = a.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            b = b.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            assert_eq!(nr.next(), a);
+            assert_eq!(glibc.next(), b);
+        }
+        assert_eq!((nr.state(), glibc.state()), (a, b));
+    }
 
     #[test]
     fn same_seed_same_sequence() {
