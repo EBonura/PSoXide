@@ -28,12 +28,10 @@
 //! `psxavenc -t strv -v v2 -s 320x240 -r 15 -x 2 in.mp4 out.str`.
 
 #![no_std]
-#![cfg_attr(target_arch = "mips", feature(asm_experimental_arch))]
 
 #[doc(alias = "BS")]
 pub mod bitstream;
 pub mod idct;
-pub mod iso;
 pub mod mdec;
 #[cfg(target_arch = "mips")]
 pub mod player;

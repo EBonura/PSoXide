@@ -150,8 +150,8 @@ use psx_io::cd::xa::{DriveSpeed, Event, File, Player};
 psx_spu::enable_cd_audio(true);
 psx_spu::set_cd_volume(CdVolume::MAX, CdVolume::MAX);
 
-// Find MUSIC.XA by name (psx_fmv::iso has a root directory lookup) and
-// describe it with the numbers from the manifest.
+// Find MUSIC.XA by name (`psx_io::iso::find`, with the sector read of the reader the
+// program already has) and describe it with the numbers from the manifest.
 let music = File::from_directory_entry(lba, size_bytes, 1, DriveSpeed::Single);
 let mut player = Player::new(peripherals.cd);
 

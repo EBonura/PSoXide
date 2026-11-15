@@ -31,12 +31,12 @@ extern crate psx_rt;
 
 use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
 use psx_cdstream::{Config, Outcome, Priority, Request, RequestState, Ticket};
-use psx_fmv::iso;
 use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
 use psx_gpu::ot::OrderingTable;
 use psx_gpu::prim::{FillRect, TriGouraud};
 use psx_gpu::Gpu;
 use psx_io::cd::reader::SectorReader;
+use psx_io::iso;
 use psx_io::periph::Cd;
 use psx_rt::present::{self, Part, Presenter};
 use psx_rt::{dispatch, interrupts, tty};
@@ -385,17 +385,16 @@ fn print(label: &str, value: u32) {
 fn lookup(reader: &mut SectorReader) -> Option<(u32, u32)> {
     // SAFETY: single thread, one borrow at a time.
     let sector = unsafe { &mut *addr_of_mut!(SECTOR) };
-    let mut read = |lba: u32| -> Option<&[u8]> {
-        if !reader.start_read(lba) {
-            return None;
-        }
-        let ok = reader.read_sector(sector);
-        reader.stop();
-        // SAFETY: a `[u32; N]` viewed as its own bytes.
-        ok.then(|| unsafe { core::slice::from_raw_parts(sector.as_ptr().cast::<u8>(), 2048) })
-    };
-    let (root, _) = iso::root_directory(read(iso::PVD_LBA)?)?;
-    iso::find_in_directory(read(root)?, FILE_NAME)
+    iso::find(
+        sector,
+        |lba, into| {
+            let ok = reader.start_read(lba) && reader.read_sector(into);
+            reader.stop();
+            ok
+        },
+        None,
+        &[FILE_NAME],
+    )
 }
 
 #[no_mangle]

@@ -33,12 +33,12 @@ use core::ptr::addr_of_mut;
 use psx_cdstream::{
     Completion, Config, FailureKind, LeaseState, Outcome, Priority, Request, RequestState, Ticket,
 };
-use psx_fmv::iso;
 use psx_font::fonts::BASIC;
 use psx_font::FontAtlas;
 use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
 use psx_gpu::Gpu;
 use psx_io::cd::reader::SectorReader;
+use psx_io::iso;
 use psx_io::periph::Cd;
 use psx_rt::interrupts::{vblank_count, wait_vblank};
 use psx_vram::{Clut, TextureDepth, TexturePage};
@@ -696,23 +696,17 @@ fn start(cd: Cd) -> Result<(), &'static str> {
     psx_cdstream::install(cd, config).map_err(|_| "already installed")
 }
 
-fn read_sector<'s>(
-    reader: &mut SectorReader,
-    sector: &'s mut [u32; SECTOR_WORDS],
-    lba: u32,
-) -> Option<&'s [u8]> {
-    if !reader.start_read(lba) {
-        return None;
-    }
-    let ok = reader.read_sector(sector);
-    reader.stop();
-    // SAFETY: a `[u32; N]` viewed as its own bytes; alignment only shrinks.
-    ok.then(|| unsafe { core::slice::from_raw_parts(sector.as_ptr().cast::<u8>(), 2048) })
-}
-
 fn lookup(reader: &mut SectorReader, sector: &mut [u32; SECTOR_WORDS]) -> Option<(u32, u32)> {
-    let (root, _) = iso::root_directory(read_sector(reader, sector, iso::PVD_LBA)?)?;
-    iso::find_in_directory(read_sector(reader, sector, root)?, FILE_NAME)
+    iso::find(
+        sector,
+        |lba, into| {
+            let ok = reader.start_read(lba) && reader.read_sector(into);
+            reader.stop();
+            ok
+        },
+        None,
+        &[FILE_NAME],
+    )
 }
 
 #[no_mangle]

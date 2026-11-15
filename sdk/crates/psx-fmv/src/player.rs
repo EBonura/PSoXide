@@ -328,26 +328,6 @@ fn mdec() -> &'static mut Mdec {
     unsafe { (*addr_of_mut!(MDEC)).as_mut().expect("mdec installed") }
 }
 
-/// Read one sector synchronously into the player's sector buffer.
-fn read_one(lba: u32) -> Option<&'static [u8]> {
-    let r = reader();
-    // SAFETY: single-threaded use of the reader and its sector buffer.
-    unsafe {
-        if !r.start_read(lba) {
-            return None;
-        }
-        let ok = r.read_sector(&mut *addr_of_mut!(SECTOR));
-        r.stop();
-        if !ok {
-            return None;
-        }
-        Some(core::slice::from_raw_parts(
-            addr_of_mut!(SECTOR) as *const u8,
-            SECTOR_WORDS * 4,
-        ))
-    }
-}
-
 /// Find a file in the disc's root directory by name: `(lba, bytes)`.
 /// Takes the drive over (data mode, double speed) and leaves it stopped.
 pub fn find_root_file(name: &str) -> Option<(u32, u32)> {
@@ -355,11 +335,22 @@ pub fn find_root_file(name: &str) -> Option<(u32, u32)> {
     // docs say; the player takes them over for as long as it runs.
     let devices = unsafe { Peripherals::steal() };
     install_devices(devices.cd, devices.mdec_dma);
-    if !reader().prepare() {
+    let r = reader();
+    if !r.prepare() {
         return None;
     }
-    let (root, _) = crate::iso::root_directory(read_one(crate::iso::PVD_LBA)?)?;
-    crate::iso::find_in_directory(read_one(root)?, name)
+    // SAFETY: single-threaded use of the reader and its sector buffer.
+    let sector = unsafe { &mut *addr_of_mut!(SECTOR) };
+    psx_io::iso::find(
+        sector,
+        |lba, into| {
+            let ok = r.start_read(lba) && r.read_sector(into);
+            r.stop();
+            ok
+        },
+        None,
+        &[name],
+    )
 }
 
 /// The drive side: sectors into frame slots.

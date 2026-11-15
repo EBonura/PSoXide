@@ -14,7 +14,7 @@ the editor and emulator share one simulation.
 | Crate | Purpose |
 |-------|---------|
 | [`psx-rt`](crates/psx-rt) | Bare-metal runtime: `_start`, BIOS calls, panic, heap, VBlank IRQ counter, corrected i64 builtins, scratchpad regions and scratchpad stacks. |
-| [`psx-io`](crates/psx-io) | Volatile MMIO primitives for target code, plus the CD-ROM command surface. |
+| [`psx-io`](crates/psx-io) | Volatile MMIO primitives for target code, plus the CD-ROM command surface and the lookup of a file on the disc by name (`psx_io::iso`). |
 | [`psx-gpu`](crates/psx-gpu) | High-level GPU API: init, primitives, framebuffers, display-window shifting. |
 | [`psx-vram`](crates/psx-vram) | Typed VRAM layout primitives: color, rect, tpage, CLUT, upload helpers. |
 | [`psx-spu`](crates/psx-spu) | High-level SPU API: typed voices, volume, pitch, ADSR, ADPCM upload, key-on/off, loop chaining, noise. |
@@ -41,7 +41,7 @@ the editor and emulator share one simulation.
 | [`psx-residency`](crates/psx-residency) | Residency policy for streamed data: contiguous page pools with generation handles, priority classes, pinning, distance-then-LRU eviction, retry backoff, and a fixed-slot policy. It decides what to load and what to evict and never touches the drive; reads go out through a trait. Host-tested, no heap. |
 | [`psx-residency-sim`](crates/psx-residency-sim) | Host-only route simulator for `psx-residency`: replays a route through a region graph against the real policy and a drive model built from the silicon seek and read measurements, and reports deadline slack and misses. |
 | [`psx-telemetry`](crates/psx-telemetry) | Shared guest/host telemetry id tables for the emulator profiling hooks. |
-| [`psx-fmv`](crates/psx-fmv) | FMV playback building blocks: STR sector demux, BS v2 bitstream to MDEC run-length decode, MDEC upload/decode via DMA0/DMA1 (guest only), ISO9660 root-file lookup. |
+| [`psx-fmv`](crates/psx-fmv) | FMV playback building blocks: STR sector demux, BS v2 bitstream to MDEC run-length decode, MDEC upload/decode via DMA0/DMA1 (guest only). |
 
 There is no umbrella crate: games depend on the subsystem crates they use.
 A standalone game should use the pinned bootstrap workflow described in the

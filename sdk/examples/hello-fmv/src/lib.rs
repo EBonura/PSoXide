@@ -36,16 +36,17 @@
 #![no_std]
 
 use core::ptr::addr_of_mut;
+use psx_fmv::bitstream;
 use psx_fmv::mdec::Mdec;
 use psx_fmv::rle::RleBuffer;
 use psx_fmv::stream::FrameAssembler;
-use psx_fmv::{bitstream, iso};
 use psx_font::fonts::basic::BASIC;
 use psx_font::fonts::basic_8x16::BASIC_8X16_BITMAP;
 use psx_font::{BitOrder, BitmapFont, FontAtlas};
 use psx_gpu::display::{DisplayConfig, Resolution, VideoMode};
 use psx_gpu::prim::FillRect;
 use psx_gpu::Gpu;
+use psx_io::iso;
 use psx_io::periph::{Cd, MdecDma};
 use psx_pack::cd::{SectorReader, SECTOR_WORDS};
 use psx_rt::{interrupts, tty, Peripherals};
@@ -296,29 +297,19 @@ impl Stream {
     }
 }
 
-/// Read one sector synchronously (directory lookups before streaming).
-fn read_one(lba: u32) -> Option<&'static [u8]> {
-    // SAFETY: single-threaded use of the reader and its sector buffer.
-    unsafe {
-        let r = reader();
-        if !r.start_read(lba) {
-            return None;
-        }
-        let ok = r.read_sector(&mut *addr_of_mut!(SECTOR));
-        r.stop();
-        if !ok {
-            return None;
-        }
-        Some(core::slice::from_raw_parts(
-            addr_of_mut!(SECTOR) as *const u8,
-            SECTOR_WORDS * 4,
-        ))
-    }
-}
-
 fn find_movie() -> Option<(u32, u32)> {
-    let (root, _) = iso::root_directory(read_one(iso::PVD_LBA)?)?;
-    iso::find_in_directory(read_one(root)?, MOVIE)
+    // SAFETY: single-threaded use of the reader and its sector buffer.
+    let (reader, sector) = unsafe { (reader(), &mut *addr_of_mut!(SECTOR)) };
+    iso::find(
+        sector,
+        |lba, into| {
+            let ok = reader.start_read(lba) && reader.read_sector(into);
+            reader.stop();
+            ok
+        },
+        None,
+        &[MOVIE],
+    )
 }
 
 /// Small fixed text buffer for overlay lines.
