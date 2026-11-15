@@ -32,6 +32,23 @@ const DPAD: u16 = button::LEFT | button::RIGHT | button::UP | button::DOWN;
 /// left and up, as `AnalogSticks::left_centered` gives them) holds down: an axis
 /// registers when it is strictly beyond `THRESHOLD` counts, so a diagonal sets two
 /// bits. A pad that reports no stick passes `(0, 0)`. `THRESHOLD` is at least 0.
+///
+/// Code size depends on how the call site uses the mask, and no single body is smallest at every
+/// shape (mipsel, release, measured against the hand-written fold each game replaced; a minus is
+/// smaller):
+///
+/// * `buttons | stick_bits::<T>(x, y)` inlined at several sites (a platformer's menu, four sites):
+///   -220 bytes. The else-if bodies merge the two axes in registers and OR once; an accumulating
+///   fold (`buttons |= ..` inside the branches) duplicates the tail of every path.
+/// * The same call feeding one edge tracker beside the plain buttons (a first-person game's menu,
+///   one site): +12 bytes. The hand-written independent tests OR straight into the button word;
+///   the mask form materialises a zero, moves the partial masks between registers and ORs once.
+/// * A mask tested bit by bit (`mask & LEFT != 0`, a racing game's four direction booleans):
+///   +72 bytes against comparing the centred value directly, because the booleans no longer fold
+///   into the byte compares.
+///
+/// Branch-free bodies and a body that takes and returns the button word measured larger or equal
+/// in the cases above, not smaller, so the else-if form stays.
 #[must_use]
 #[inline(always)]
 pub const fn stick_bits<const THRESHOLD: i16>(x: i16, y: i16) -> u16 {
