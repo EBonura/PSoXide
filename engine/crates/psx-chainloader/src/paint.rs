@@ -10,8 +10,7 @@
 
 use psx_font::fonts::basic::BASIC_BITMAP;
 
-/// GP0/GP1 ports.
-const GP1: u32 = 0x1F80_1814;
+use psx_hw::gpu::{gp0, gp1, packet, GP1};
 
 /// One GP0 packet: wait for GPUSTAT bit 26 (ready for a new command)
 /// once, then write every word of the packet back to back.
@@ -38,7 +37,7 @@ fn gp0_packet(words: &[u32]) {
 /// Configure drawing after a GP1(00h) reset: drawing area covering the
 /// whole displayed framebuffer, zero offset, display area at 0,0.
 pub fn setup(right: u32, bottom: u32) {
-    unsafe { psx_io::write_u32(GP1, 0x0300_0001) }; // display off while painting
+    unsafe { psx_io::write_u32(GP1, gp1::display_enable(false)) }; // display off while painting
 
     // Program the display the way the launcher's gpu::init does, rather
     // than inheriting whatever GP1(00h) reset leaves behind. Without
@@ -47,20 +46,22 @@ pub fn setup(right: u32, bottom: u32) {
     // the TV. GP1(08h) 320x240 NTSC, GP1(06h) X 0x260..0x260+320*8,
     // GP1(07h) Y 0x10..0x10+240 -- the standard centred NTSC picture.
     unsafe {
-        psx_io::write_u32(GP1, 0x0800_0001); // display mode: 320x240, NTSC
-        psx_io::write_u32(GP1, 0x0600_0000 | 0x260 | ((0x260 + 320 * 8) << 12));
-        psx_io::write_u32(GP1, 0x0700_0000 | 0x10 | ((0x10 + 240) << 10));
-        psx_io::write_u32(GP1, 0x0500_0000); // display area starts at VRAM 0,0
+        psx_io::write_u32(GP1, gp1::display_mode(1, 0, false, false, false)); // display mode: 320x240, NTSC
+        psx_io::write_u32(GP1, gp1::h_display_range(0x260, 0x260 + 320 * 8));
+        psx_io::write_u32(GP1, gp1::v_display_range(0x10, 0x10 + 240));
+        psx_io::write_u32(GP1, gp1::display_start(0, 0)); // display area starts at VRAM 0,0
     }
-    gp0_packet(&[0xE100_0000]); // texpage/draw-mode defaults
-    gp0_packet(&[0xE300_0000]);
-    gp0_packet(&[0xE400_0000 | (bottom << 10) | right]);
-    gp0_packet(&[0xE500_0000]);
+    gp0_packet(&[gp0::draw_mode(0, 0, 0, 0, false, false)]); // texpage/draw-mode defaults
+    gp0_packet(&[gp0::draw_area_top_left(0, 0)]);
+    // Unmasked on purpose: `right` and `bottom` are the caller's, and the masks of
+    // `draw_area_bottom_right` would add instructions to the blob.
+    gp0_packet(&[gp0::draw_area_bottom_right(0, 0) | (bottom << 10) | right]);
+    gp0_packet(&[gp0::draw_offset(0, 0)]);
 }
 
 /// Enable the configured display.
 pub fn show() {
-    unsafe { psx_io::write_u32(GP1, 0x0300_0000) }; // display on
+    unsafe { psx_io::write_u32(GP1, gp1::display_enable(true)) }; // display on
 }
 
 /// Select one of the two vertically stacked 320x240 loading buffers.
@@ -69,13 +70,13 @@ pub fn show() {
 pub fn set_draw_buffer(y: i16) {
     let top = y as u32 & 0x1ff;
     let bottom = (y as u32 + 239) & 0x1ff;
-    gp0_packet(&[0xE300_0000 | (top << 10)]);
-    gp0_packet(&[0xE400_0000 | (bottom << 10) | 319]);
-    gp0_packet(&[0xE500_0000 | ((y as u32 & 0x7ff) << 11)]);
+    gp0_packet(&[gp0::draw_area_top_left(0, top)]);
+    gp0_packet(&[gp0::draw_area_bottom_right(319, bottom)]);
+    gp0_packet(&[gp0::draw_offset(0, y as i32)]);
 }
 
 fn display_buffer(y: i16) {
-    unsafe { psx_io::write_u32(GP1, 0x0500_0000 | ((y as u32 & 0x1ff) << 10)) };
+    unsafe { psx_io::write_u32(GP1, gp1::display_start(0, y as u32)) };
 }
 
 /// Show a completed loading buffer exactly at a fresh VBlank edge. I_STAT is
@@ -150,7 +151,7 @@ pub fn show_checklist() {
 /// Solid rectangle at exact pixel coordinates. `rgb` is `0xBBGGRR`.
 pub fn rect(x: i16, y: i16, w: i16, h: i16, rgb: u32) {
     gp0_packet(&[
-        0x6000_0000 | rgb,
+        packet::FLAT_RECT | rgb,
         ((y as u32) << 16) | (x as u32 & 0xFFFF),
         ((h as u32) << 16) | (w as u32 & 0xFFFF),
     ]);
@@ -163,7 +164,7 @@ fn packed_rgb((r, g, b): (u8, u8, u8)) -> u32 {
 /// One Gouraud triangle for the procedural globe.
 pub fn tri_gouraud(verts: [(i16, i16); 3], colors: [(u8, u8, u8); 3]) {
     gp0_packet(&[
-        0x3000_0000 | packed_rgb(colors[0]),
+        packet::SHADED_TRIANGLE | packed_rgb(colors[0]),
         ((verts[0].1 as u32) << 16) | (verts[0].0 as u32 & 0xffff),
         packed_rgb(colors[1]),
         ((verts[1].1 as u32) << 16) | (verts[1].0 as u32 & 0xffff),
