@@ -1790,6 +1790,7 @@ fn compile_flags(guest: &Guest, profile: Option<&Path>, variant: &str) -> Result
         &rebound,
         &guest.crate_dir,
         crate::bind::Gate::default(),
+        &[],
     )?;
     let mut flags: Vec<String> = COLLECT_FLAGS.iter().map(ToString::to_string).collect();
     flags.push(format!("-Zprofile-sample-use={}", rebound.display()));

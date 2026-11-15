@@ -928,13 +928,53 @@ fn build_symbols(object: &object::File, dwarf: &Dwarf, units: &[Unit]) -> Result
     Ok(available)
 }
 
-/// `rebind IN ELF OUT [--min-bound PERCENT] [--allow-unbound]` in the guest's directory.
+/// `rebind IN ELF OUT [--min-bound PERCENT] [--allow-unbound] [--rename OLD=NEW]...` in the guest's
+/// directory. `--rename` follows a function the profile names OLD to where the build has it as
+/// NEW (portable names, as `bind` prints them), for an item that moved between modules or crates.
 fn rebind_with_flags(input: &Path, elf: &Path, output: &Path, flags: &[String]) -> Result<()> {
-    let (gate, rest) = bind::Gate::from_args(flags)?;
+    let (renames, flags) = take_renames(flags)?;
+    let (gate, rest) = bind::Gate::from_args(&flags)?;
     if !rest.is_empty() {
         return Err(format!("rebind: unknown arguments {rest:?}").into());
     }
-    rebind(input, elf, output, &env::current_dir()?, gate)
+    rebind(input, elf, output, &env::current_dir()?, gate, &renames)
+}
+
+/// `--rename` pairs: portable name the profile has, portable name the build has.
+type Renames = Vec<(String, String)>;
+
+/// The `--rename OLD=NEW` pairs of `flags`, and the flags left.
+fn take_renames(flags: &[String]) -> Result<(Renames, Vec<String>)> {
+    let (mut renames, mut rest) = (Vec::new(), Vec::new());
+    let mut flags = flags.iter();
+    while let Some(flag) = flags.next() {
+        if flag != "--rename" {
+            rest.push(flag.clone());
+            continue;
+        }
+        let pair = flags.next().and_then(|pair| pair.split_once('='));
+        match pair {
+            Some((old, new)) if !old.is_empty() && !new.is_empty() => {
+                renames.push((old.to_string(), new.to_string()));
+            }
+            _ => return Err("--rename wants OLD=NEW".into()),
+        }
+    }
+    Ok((renames, rest))
+}
+
+/// `profile` with every function named as a `renames` key (by portable name) named as its value.
+fn apply_renames(profile: &str, renames: &[(String, String)]) -> Result<String> {
+    if renames.is_empty() {
+        return Ok(profile.to_string());
+    }
+    rename_profile(profile, |name| {
+        let key = portable_name(name);
+        Ok(match renames.iter().find(|(old, _)| old == key.as_ref()) {
+            Some((_, new)) => new.clone(),
+            None => name.to_string(),
+        })
+    })
 }
 
 /// `bind PROFILE ELF [--exact] [--min-bound PERCENT] [--allow-unbound]`: print how much of
@@ -975,6 +1015,7 @@ fn rebind(
     out_path: &Path,
     crate_dir: &Path,
     gate: bind::Gate,
+    renames: &[(String, String)],
 ) -> Result<()> {
     let data = fs::read(elf_path)?;
     let object = object::File::parse(&*data)?;
@@ -994,7 +1035,7 @@ fn rebind(
     // still binds) and where each function sits in the source (to carry the profile
     // across edits).
     let (keys, facts) = convert_histogram(elf_path, uniform_histogram(elf_path)?, false)?;
-    let text = fs::read_to_string(in_path)?;
+    let text = apply_renames(&fs::read_to_string(in_path)?, renames)?;
     // Before anything else: a profile whose functions are not in this build is not
     // applied, and LLVM would not say so.
     let bind = bind::measure(&text, &available, bind::Matching::Normalised);
@@ -1074,7 +1115,7 @@ fn rebind(
 
 const USAGE: &str = "usage: psoxide-pgo <elf-with-dwarf> <pc.csv>... <out.prof>
        psoxide-pgo portable <in.prof> <out.prof>
-       psoxide-pgo rebind <in.prof> <target-elf-with-dwarf> <out.prof> [--min-bound PERCENT] [--allow-unbound]
+       psoxide-pgo rebind <in.prof> <target-elf-with-dwarf> <out.prof> [--min-bound PERCENT] [--allow-unbound] [--rename OLD=NEW]...
                                                                        (run in the guest's directory)
        psoxide-pgo stamp <profile> --elf <twin-elf-with-dwarf> [--crate DIR]
        psoxide-pgo bind <profile> <target-elf-with-dwarf> [--exact] [--min-bound PERCENT] [--allow-unbound]
@@ -1282,6 +1323,35 @@ mod tests {
             portable_name("_RNCNvCsb9SZb48y33G_6hl_psx25classic_native_patch_masks0_0B3_"),
             "hl_psx::classic_native_patch_mask::{closure#2} @hl_psx"
         );
+    }
+
+    #[test]
+    fn a_rename_follows_a_function_that_moved_between_modules() {
+        let profile = "psx_asset::read_u32:10:1\n 1: 10\nhl::play:5:0\n 2: psx_asset::read_u32:4\n  1: 4\n 3: 1\n";
+        let renames = [(
+            "psx_asset::read_u32".to_string(),
+            "psx_asset::le::read_u32".to_string(),
+        )];
+        let moved = apply_renames(profile, &renames).expect("rename");
+        assert_eq!(
+            moved,
+            "psx_asset::le::read_u32:10:1\n 1: 10\nhl::play:5:0\n 2: psx_asset::le::read_u32:4\n  1: 4\n 3: 1\n"
+        );
+        assert_eq!(apply_renames(profile, &[]).expect("none"), profile);
+        let flags: Vec<String> = [
+            "--allow-unbound",
+            "--rename",
+            "a::b=c::b",
+            "--min-bound",
+            "90",
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+        let (pairs, rest) = take_renames(&flags).expect("flags");
+        assert_eq!(pairs, [("a::b".to_string(), "c::b".to_string())]);
+        assert_eq!(rest, ["--allow-unbound", "--min-bound", "90"]);
+        assert!(take_renames(&["--rename".to_string(), "nope".to_string()]).is_err());
     }
 
     #[test]

@@ -1194,3 +1194,7 @@ eligible, the table shows each score's delta against the baseline, and the
 ladder fails, printing the table, when no candidate qualifies.
 
 The pick's scores are written to `scores.txt` in the work directory in the same format, ready to commit as the next run's baseline.
+
+### Following a moved function: `rebind --rename OLD=NEW`
+
+`psoxide-pgo rebind IN ELF OUT --rename psx_asset::read_u32=psx_asset::le::read_u32` renames every function the profile names `OLD` (portable name, as `bind` prints it, as a header or as an inlined callee) to `NEW` before it binds. Without it a function that moved between modules or crates is `missing`, its samples are dropped, and any inline decision that depended on them goes with them. The flag repeats; two profile names that rename onto one are an error.

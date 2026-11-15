@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `psoxide-pgo rebind` takes `--rename OLD=NEW` (repeatable, portable names as `bind` prints them): a profile function that moved to another module or crate binds to its new path. A profile names a callee by path, and a sample-profile inline hint is lost when the path changed (psx_asset's readers moving into `psx_asset::le` stopped inlining in one game until the profile was renamed).
 - Shared pieces for games to delete their own copies, all additions (no existing game's executable changes): `psx_hw::memory::to_kseg0`; `psx_pack::Fnv32` (resumable FNV-1a 32, equal to `fnv1a32` in pieces); `psx_asset::le` (the little-endian readers `lib.rs` kept private); `Vec3I32::{saturating_add, saturating_sub, dot_q12, scale_q12}` in psx-gte-core; `psx_math::ease` (Q8 and Q12 curves and `lerp_q8`) and `fmt::{u32_dec_padded, clock_dec, tenths_dec}`; `psx_gpu::prim::{TriFlatBlended, QuadFlatBlended, TriGouraudBlended, DrawArea, ClutLoad16}` and `RectFlat::translucent`. Each has a host test proving equality with the games' hand-written versions over their input ranges.
 - `psoxide.ld` reads `STACK_RESERVE_OVERRIDE` when a link defines it (a script placed before it, or `--defsym`); with nothing set the reserve is the same 0x8000. `psoxide-size` evaluates the form from the link map.
 - `psx-chainloader`'s `paint` builds its GP1 and GP0 words from `psx_hw::gpu` (the crate's compiled object is identical).
