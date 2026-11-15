@@ -163,6 +163,56 @@ pub fn fnv1a32(bytes: &[u8]) -> u32 {
     hash
 }
 
+/// Resumable FNV-1a over bytes: the same function as [`fnv1a32`], for data
+/// that arrives in pieces (a save record written field by field, a stream
+/// read sector by sector). Feeding the pieces in order gives exactly the
+/// one-shot hash of their concatenation.
+///
+/// ```
+/// use psx_pack::{fnv1a32, Fnv32};
+/// let mut hash = Fnv32::new();
+/// hash.update(b"PSOX");
+/// hash.update(b"WPAK");
+/// assert_eq!(hash.finish(), fnv1a32(b"PSOXWPAK"));
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Fnv32(u32);
+
+impl Fnv32 {
+    /// FNV-1a 32-bit offset basis.
+    const OFFSET: u32 = 0x811c_9dc5;
+    /// FNV-1a 32-bit prime.
+    const PRIME: u32 = 0x0100_0193;
+
+    /// A hash that has seen no bytes; `finish` returns the offset basis.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self(Self::OFFSET)
+    }
+
+    /// Fold `bytes` into the hash.
+    pub const fn update(&mut self, bytes: &[u8]) {
+        let mut i = 0;
+        while i < bytes.len() {
+            self.0 = (self.0 ^ bytes[i] as u32).wrapping_mul(Self::PRIME);
+            i += 1;
+        }
+    }
+
+    /// The hash of everything fed so far. The hash stays usable: more bytes
+    /// may follow.
+    #[must_use]
+    pub const fn finish(&self) -> u32 {
+        self.0
+    }
+}
+
+impl Default for Fnv32 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Undo the `HLZC` compression frame in place.
 ///
 /// On entry `buf[..loaded]` holds a chunk payload as read from disc. A chunk
@@ -278,6 +328,38 @@ fn lz4_block_decode_in_place(buf: &mut [u8], src_start: usize, raw_len: usize) -
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn fnv32_pieces_equal_one_shot_for_every_split() {
+        let data: Vec<u8> = (0..300u32).map(|i| (i * 37 + 11) as u8).collect();
+        let whole = fnv1a32(&data);
+        for cut in 0..=data.len() {
+            let mut h = Fnv32::new();
+            h.update(&data[..cut]);
+            h.update(&data[cut..]);
+            assert_eq!(h.finish(), whole, "split at {cut}");
+        }
+        let mut bytewise = Fnv32::default();
+        for b in &data {
+            bytewise.update(core::slice::from_ref(b));
+        }
+        assert_eq!(bytewise.finish(), whole);
+    }
+
+    #[test]
+    fn fnv32_known_values_and_const() {
+        assert_eq!(Fnv32::new().finish(), 0x811c_9dc5);
+        assert_eq!(fnv1a32(b""), 0x811c_9dc5);
+        // Published FNV-1a 32 test vectors.
+        assert_eq!(fnv1a32(b"a"), 0xe40c_292c);
+        assert_eq!(fnv1a32(b"foobar"), 0xbf9c_f968);
+        const H: u32 = {
+            let mut h = Fnv32::new();
+            h.update(b"foobar");
+            h.finish()
+        };
+        assert_eq!(H, 0xbf9c_f968);
+    }
     use super::*;
     extern crate std;
     use std::vec;
