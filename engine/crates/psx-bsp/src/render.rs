@@ -9,10 +9,6 @@ use alloc::vec::Vec;
 
 use psx_engine::scratchpad::{assert_disjoint, Region, ScratchpadStack};
 use psx_engine::{
-    attributed_clip::{
-        clip_to_plane_unchecked, crossing_fraction_q16_i32, lerp_q16_i32_exact,
-        AttributedClipPlane, ClipTraversal,
-    },
     compose_model_view_transform, materialize_baked_surface_vertices, materialize_surface_vertices,
     submit_surface_batch_near, submit_surface_batch_near_with_rule, submit_surface_batch_screened,
     submit_surface_batch_screened_with_rule, AffineSurface, AffineVertex, ErrorBounded, NearView,
@@ -20,6 +16,10 @@ use psx_engine::{
 };
 use psx_gte::math::{Mat3I16, Vec3I16 as GteVec3I16, Vec3I32 as GteVec3I32};
 use psx_gte::scene;
+use psx_math::attributed_clip::{
+    clip_to_plane_unchecked, crossing_fraction_q16_i32, lerp_q16_i32_exact, AttributedClipPlane,
+    ClipTraversal,
+};
 use psx_math::int32::{isqrt_i32, mul_q12_i32};
 use psx_math::sin_q12;
 

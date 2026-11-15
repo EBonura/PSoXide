@@ -19,10 +19,6 @@ pub mod pxbsp;
 pub mod pxbsp_resident;
 pub mod render;
 pub mod resident;
-/// The sky projection moved to `psx-engine` with the grid renderer; the path
-/// stays so consumers of `psx_bsp::sky` keep building.
-pub use psx_engine::sky;
-pub mod visibility;
 pub mod world_hooks;
 
 use core::fmt;

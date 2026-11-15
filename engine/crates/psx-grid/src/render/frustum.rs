@@ -380,8 +380,8 @@ mod tests {
     use super::*;
     use crate::render::clip::ClipPlane;
     use crate::render::projection::{load_view_rotation, ViewProjection};
-    use psx_engine::attributed_clip::AttributedClipPlane;
     use psx_engine::AffineVertex;
+    use psx_math::attributed_clip::AttributedClipPlane;
 
     fn planes_for(origin: [i32; 3], yaw: u16, pitch: u16) -> FrustumPlanes {
         psx_gte::host::reset();
