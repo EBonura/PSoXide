@@ -35,20 +35,20 @@ const DPAD: u16 = button::LEFT | button::RIGHT | button::UP | button::DOWN;
 #[must_use]
 #[inline(always)]
 pub const fn stick_bits<const THRESHOLD: i16>(x: i16, y: i16) -> u16 {
+    const { assert!(THRESHOLD >= 0) };
+    // `else if` per axis: with a threshold of at least 0 the two sides of an axis exclude each
+    // other, and written that way the compiler emits one compare chain per axis (measured: four
+    // independent tests came out 220 bytes larger over the three call sites of a game).
     let mut bits = 0;
-    // Four independent tests, in the order a hand-written fold would have them, so the
-    // compiler need not prove the two sides of an axis exclusive.
-    if y < -THRESHOLD {
-        bits |= button::UP;
-    }
-    if y > THRESHOLD {
-        bits |= button::DOWN;
-    }
     if x < -THRESHOLD {
         bits |= button::LEFT;
-    }
-    if x > THRESHOLD {
+    } else if x > THRESHOLD {
         bits |= button::RIGHT;
+    }
+    if y < -THRESHOLD {
+        bits |= button::UP;
+    } else if y > THRESHOLD {
+        bits |= button::DOWN;
     }
     bits
 }
@@ -186,6 +186,71 @@ mod tests {
                 assert_eq!(stick_bits::<48>(x, y), rule_beyond_48(x, y), "{x},{y}");
             }
         }
+    }
+
+    /// The rule every game wrote by hand, per axis and strictly beyond `t` counts, as a plain
+    /// comparison on the centred value.
+    fn rule_beyond(t: i16, x: i16, y: i16) -> u16 {
+        let mut bits = 0;
+        if y < -t {
+            bits |= button::UP;
+        }
+        if y > t {
+            bits |= button::DOWN;
+        }
+        if x < -t {
+            bits |= button::LEFT;
+        }
+        if x > t {
+            bits |= button::RIGHT;
+        }
+        bits
+    }
+
+    /// The same rule on the raw stick bytes (centre 128), as a game that never centres writes it:
+    /// an axis is held when the byte is at most `127 - t` or at least `129 + t`.
+    fn rule_on_bytes(t: i16, bx: u8, by: u8) -> u16 {
+        let (bx, by) = (i16::from(bx), i16::from(by));
+        let mut bits = 0;
+        if bx <= 127 - t {
+            bits |= button::LEFT;
+        } else if bx >= 129 + t {
+            bits |= button::RIGHT;
+        }
+        if by <= 127 - t {
+            bits |= button::UP;
+        } else if by >= 129 + t {
+            bits |= button::DOWN;
+        }
+        bits
+    }
+
+    fn every_byte_pair_at<const T: i16>() {
+        for bx in 0..=255u8 {
+            for by in 0..=255u8 {
+                let (x, y) = (i16::from(bx) - 128, i16::from(by) - 128);
+                let got = stick_bits::<T>(x, y);
+                assert_eq!(got, rule_beyond(T, x, y), "T={T} x={x} y={y}");
+                assert_eq!(got, rule_on_bytes(T, bx, by), "T={T} bytes {bx},{by}");
+            }
+        }
+    }
+
+    macro_rules! every_threshold {
+        ($($t:literal)*) => { $( every_byte_pair_at::<$t>(); )* };
+    }
+
+    /// All 65,536 stick byte pairs at every threshold from 0 to 127.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn every_byte_pair_at_every_threshold_matches_the_hand_written_rules() {
+        every_threshold!(
+            0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31
+            32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60
+            61 62 63 64 65 66 67 68 69 70 71 72 73 74 75 76 77 78 79 80 81 82 83 84 85 86 87 88 89
+            90 91 92 93 94 95 96 97 98 99 100 101 102 103 104 105 106 107 108 109 110 111 112 113
+            114 115 116 117 118 119 120 121 122 123 124 125 126 127
+        );
     }
 
     #[test]
