@@ -2,37 +2,14 @@
 //! used for modal overlays where uploading a second generic font atlas would
 //! trample gameplay textures resident in VRAM.
 //!
-//! The drawing functions take the port's [`GpuText`], the three GPU commands the text needs,
-//! so each port keeps its own capture or direct path for them; the sink is a zero-sized type
-//! and every call is resolved at compile time.
+//! The drawing functions draw through the shared capture layer ([`crate::fx`]): captured into the
+//! frame's overlay chain while capture is armed, straight to the GPU otherwise. They take the port's
+//! [`Tail`] as a type parameter, resolved at compile time.
 
+use crate::fx::{self, Tail};
 use psx_font::fonts::BASIC_8X16;
 use psx_gpu::material::TextureMaterial;
 use psx_vram::{upload_16bpp, upload_bytes, Clut, TextureDepth, TexturePage, VramRect};
-
-/// The three GPU commands the text drawing needs. A port implements them on a zero-sized type
-/// that routes to its own command path.
-pub trait GpuText {
-    /// A flat, opaque quad.
-    fn quad_flat(&self, verts: [(i16, i16); 4], r: u8, g: u8, b: u8);
-    /// A textured quad.
-    fn quad_textured_material(
-        &self,
-        verts: [(i16, i16); 4],
-        uvs: [(u8, u8); 4],
-        material: TextureMaterial,
-    );
-    /// A textured rectangle of `w` by `h` at `(x, y)`.
-    fn sprite_textured_material(
-        &self,
-        x: i16,
-        y: i16,
-        w: u16,
-        h: u16,
-        uv: (u8, u8),
-        material: TextureMaterial,
-    );
-}
 
 /// The native 8x16 size, which keeps thin strokes intact.
 pub const SMALL_Q8: u16 = 256; // keep thin strokes intact at the native 8x16 size
@@ -176,8 +153,7 @@ pub fn upload_gameplay_atlas() {
 /// per bitmap run). The normal 1:1 title size uses the same native textured
 /// rectangle command as the menu font. Narrower emergency scales use quads
 /// only for authored lines which exceed the safe display width.
-pub fn draw_text_gameplay_scaled<S: GpuText>(
-    sink: &S,
+pub fn draw_text_gameplay_scaled<T: Tail>(
     x: i16,
     y: i16,
     text: &str,
@@ -194,7 +170,7 @@ pub fn draw_text_gameplay_scaled<S: GpuText>(
                 let u0 = GAME_ATLAS_U as usize + (index % GAME_COLS) * GAME_CELL_W;
                 let v0 = (index / GAME_COLS) * GAME_CELL_H;
                 if scale_q8 == 256 {
-                    sink.sprite_textured_material(
+                    fx::sprite_textured_material::<T>(
                         cx,
                         y,
                         GAME_CELL_W as u16,
@@ -211,7 +187,7 @@ pub fn draw_text_gameplay_scaled<S: GpuText>(
                 let y1 = y0 + scale_i16(glyph_h() as i16, scale_q8).max(1);
                 let u1 = (u0 + GAME_CELL_W).min(u8::MAX as usize);
                 let v1 = (v0 + GAME_CELL_H).min(u8::MAX as usize);
-                sink.quad_textured_material(
+                fx::quad_textured_material::<T>(
                     [(x0, y0), (x1, y0), (x0, y1), (x1, y1)],
                     [
                         (u0 as u8, v0 as u8),
@@ -261,14 +237,7 @@ pub fn text_width_scaled(text: &str, scale_q8: u16) -> i16 {
 
 /// Draw `text` at `(x, y)` as flat quads, one per run of lit pixels, at `scale_q8`.
 #[optimize(size)]
-pub fn draw_text_scaled<S: GpuText>(
-    sink: &S,
-    x: i16,
-    y: i16,
-    text: &str,
-    scale_q8: u16,
-    color: (u8, u8, u8),
-) {
+pub fn draw_text_scaled<T: Tail>(x: i16, y: i16, text: &str, scale_q8: u16, color: (u8, u8, u8)) {
     let gw = glyph_w();
     let gh = glyph_h();
     let row_bytes = row_bytes();
@@ -309,7 +278,7 @@ pub fn draw_text_scaled<S: GpuText>(
                     if y1 <= y0 {
                         y1 = y0 + 1;
                     }
-                    sink.quad_flat(
+                    fx::quad_flat::<T>(
                         [(x0, y0), (x1, y0), (x0, y1), (x1, y1)],
                         color.0,
                         color.1,
@@ -324,15 +293,8 @@ pub fn draw_text_scaled<S: GpuText>(
 }
 
 /// Draw `text` centred on the 320-pixel display.
-pub fn draw_centered_scaled<S: GpuText>(
-    sink: &S,
-    y: i16,
-    text: &str,
-    scale_q8: u16,
-    color: (u8, u8, u8),
-) {
-    draw_text_scaled(
-        sink,
+pub fn draw_centered_scaled<T: Tail>(y: i16, text: &str, scale_q8: u16, color: (u8, u8, u8)) {
+    draw_text_scaled::<T>(
         160 - text_width_scaled(text, scale_q8) / 2,
         y,
         text,
@@ -345,22 +307,25 @@ pub fn draw_centered_scaled<S: GpuText>(
 /// trait can draw through the in-game atlas exactly as they do through a
 /// `FontAtlas`. The scale is fixed per instance because a widget positions rows
 /// by `line_height` and must not have that change under it mid-list.
-pub struct Sink<G> {
-    gpu: G,
+pub struct Sink<T> {
     scale_q8: u16,
+    tail: core::marker::PhantomData<T>,
 }
 
-impl<G: GpuText> Sink<G> {
-    /// A sink drawing through `gpu` at `scale_q8`.
+impl<T: Tail> Sink<T> {
+    /// A sink drawing at `scale_q8`.
     #[must_use]
-    pub const fn new(gpu: G, scale_q8: u16) -> Self {
-        Self { gpu, scale_q8 }
+    pub const fn new(scale_q8: u16) -> Self {
+        Self {
+            scale_q8,
+            tail: core::marker::PhantomData,
+        }
     }
 }
 
-impl<G: GpuText> psx_font::TextSink for Sink<G> {
+impl<T: Tail> psx_font::TextSink for Sink<T> {
     fn draw(&self, x: i16, y: i16, text: &str, tint: (u8, u8, u8)) {
-        draw_text_scaled(&self.gpu, x, y, text, self.scale_q8, tint);
+        draw_text_scaled::<T>(x, y, text, self.scale_q8, tint);
     }
 
     fn width(&self, text: &str) -> i16 {
