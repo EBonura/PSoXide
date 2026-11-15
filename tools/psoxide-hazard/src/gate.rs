@@ -198,6 +198,58 @@ fn code_lines(text: &str) -> Vec<String> {
     out
 }
 
+/// A `static`/`const` whose type is an array (or slice) of an 8- or 16-bit integer, up to its `=`.
+/// Such an element cannot hold a hardware address (the window needs 29 bits), so a `0x1F80` inside
+/// the initializer is a data halfword, not a register.
+const DATA_TABLE: &str = r"^\s*(pub(\([^)]*\))?\s+)?(static|const)\s+(mut\s+)?\w+\s*:\s*&?\s*('\w+\s+)?(\[\s*)+(u8|i8|u16|i16)\b[^=]*=";
+
+/// `lines` with the initializers of 8- and 16-bit integer table items blanked, for the
+/// register-literal rule only (the other rules still read the original lines). The initializer
+/// runs from the `=` to the `;` at bracket depth 0; an item with no such end blanks nothing.
+fn mask_data_tables(lines: &[String]) -> Vec<String> {
+    let decl = Regex::new(DATA_TABLE).expect("valid");
+    let mut out: Vec<String> = lines.to_vec();
+    let mut n = 0;
+    while n < lines.len() {
+        let Some(found) = decl.find(&lines[n]) else {
+            n += 1;
+            continue;
+        };
+        let mut depth = 0i32;
+        let mut end = None;
+        'scan: for (m, line) in lines.iter().enumerate().skip(n) {
+            let from = if m == n { found.end() } else { 0 };
+            for (i, c) in line.char_indices().filter(|(i, _)| *i >= from) {
+                match c {
+                    '[' | '(' | '{' => depth += 1,
+                    ']' | ')' | '}' => depth -= 1,
+                    ';' if depth <= 0 => {
+                        end = Some((m, i));
+                        break 'scan;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let Some((last, stop)) = end else {
+            n += 1;
+            continue;
+        };
+        for m in n..=last {
+            let from = if m == n { found.end() } else { 0 };
+            let to = if m == last { stop } else { lines[m].len() };
+            out[m] = format!(
+                "{}{}{}",
+                &lines[m][..from],
+                " ".repeat(to - from),
+                &lines[m][to..]
+            );
+        }
+        n = last + 1;
+    }
+    out
+}
+
 fn rust_files(dir: &Path, files: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
@@ -474,10 +526,16 @@ pub fn check(
             };
             let item = relative(&file, workspace_root);
             let lines = code_lines(&text);
+            let tables = mask_data_tables(&lines);
             let qualified_lines = qualified_hits(&lines, &qualified);
             for (n, code) in lines.iter().enumerate() {
                 for (kind, pattern) in &line_rules {
-                    if pattern.is_match(code) {
+                    let seen = if *kind == "register-literal" {
+                        &tables[n]
+                    } else {
+                        code
+                    };
+                    if pattern.is_match(seen) {
                         hits.push(Hit {
                             kind,
                             item: item.clone(),
@@ -927,6 +985,67 @@ mod tests {
         format!(
             "[[exception]]\nprogram = \"game\"\nkind = \"{kind}\"\nitem = \"{item}\"\n{count}remove = \"W9\"\n"
         )
+    }
+
+    fn masked_register_hits(src: &str) -> usize {
+        let lines = code_lines(src);
+        mask_data_tables(&lines)
+            .iter()
+            .filter(|l| register_hit(l))
+            .count()
+    }
+
+    #[test]
+    fn a_halfword_in_a_16_bit_table_is_data_not_a_register() {
+        let table = "pub static PIX: [u16; 4] = [\n    0x0000, 0x1F80,\n    0xBF80, 0x9f80,\n];\nconst B: &[u8] = &[0x1f80 as u8];\n";
+        assert_eq!(masked_register_hits(table), 0);
+        // the data is in the table; the same literal beside it is still a register
+        let beside = format!("{table}fn f() {{ let p = 0x1f80_1814 as *mut u32; }}\n");
+        assert_eq!(masked_register_hits(&beside), 1);
+    }
+
+    #[test]
+    fn a_register_in_a_32_bit_table_or_outside_a_table_is_still_refused() {
+        // a u32 element holds a whole address
+        assert_eq!(
+            masked_register_hits("static REGS: [u32; 1] = [0x1F80_1814];\n"),
+            1
+        );
+        // a scalar halfword is not a table
+        assert_eq!(masked_register_hits("const HI: u16 = 0x1F80;\n"), 1);
+        // the array length is code, not data
+        assert_eq!(
+            masked_register_hits("static T: [u16; 0x1F80] = [0; 4];\n"),
+            1
+        );
+        // the mask ends at the item's `;`: code after the table is scanned
+        assert_eq!(
+            masked_register_hits("static T: [u16; 2] = [1, 2]; fn f() { g(0x1F80_1810) }\n"),
+            1
+        );
+        // an unterminated initializer blanks nothing
+        assert_eq!(masked_register_hits("static T: [u16; 2] = [0x1F80,\n"), 1);
+    }
+
+    #[test]
+    fn a_16_bit_table_passes_the_gate_and_a_register_beside_it_does_not() {
+        let table = "pub static PIX: [u16; 2] = [0x1F80, 0x0001];\n";
+        let f = fixture("tab", table, &["runtime"], &[]);
+        let out = run_check(&f, &profile(""), NOTHING);
+        assert!(out.violations.is_empty(), "{:?}", out.violations);
+        let f = fixture(
+            "tab2",
+            &format!("{table}fn f() {{ let p = 0x1f80_1814 as *mut u32; }}\n"),
+            &["runtime"],
+            &[],
+        );
+        let out = run_check(&f, &profile(""), NOTHING);
+        assert_eq!(out.violations.len(), 1, "{:?}", out.violations);
+        assert!(
+            out.violations[0].contains("src/lib.rs:2"),
+            "{:?}",
+            out.violations
+        );
     }
 
     #[test]
