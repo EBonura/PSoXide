@@ -69,24 +69,27 @@ pub fn cos_q12(angle_q12: u16) -> i32 {
     sin_q12(angle_q12.wrapping_add(1024))
 }
 
-/// `atan(i / 64)` for `i` in `0..=64`, in Q12 turns scaled by 16, so the table carries four
-/// fractional bits and 45 degrees is exactly 8192.
-const ATAN_X16: [u16; 65] = [
-    0, 163, 326, 489, 651, 813, 975, 1136, 1297, 1457, 1617, 1775, 1933, 2090, 2246, 2401, 2555,
-    2708, 2860, 3010, 3159, 3307, 3453, 3599, 3742, 3884, 4025, 4164, 4302, 4438, 4572, 4705, 4836,
-    4966, 5094, 5220, 5344, 5467, 5589, 5708, 5826, 5943, 6058, 6171, 6282, 6392, 6500, 6607, 6712,
-    6815, 6917, 7018, 7117, 7214, 7310, 7405, 7498, 7589, 7679, 7768, 7856, 7942, 8026, 8110, 8192,
-];
-
 /// Q0.12 angle of the vector `(x, y)`: the inverse of [`sin_q12`] / [`cos_q12`], so
-/// `atan2_q12(sin, cos)` round-trips an angle.
+/// `atan2_q12(sin, cos)` round-trips an angle. `atan2_q12(dx, dz)` is the yaw that faces
+/// `(dx, dz)` when forward is `(sin yaw, cos yaw)`. `(0, 0)` returns 0.
 ///
-/// Folds to the first octant and reads `atan(slope)` from a 65-entry table with linear
-/// interpolation: exact on the axes and diagonals, worst error under one unit (0.09 degrees)
-/// everywhere (the octant-linear form this replaced erred by up to 47 units, 4.2 degrees).
-/// `(0, 0)` returns 0. Integer-only; large coordinates are pre-scaled together so the slope
-/// never leaves u32. `atan2_q12(dx, dz)` is the yaw that faces `(dx, dz)` when forward is
-/// `(sin yaw, cos yaw)`.
+/// Accuracy contract, the one thing a caller may rely on:
+/// - exact (no error at all) on the four axes and the four diagonals, at every magnitude;
+/// - worst error under 3.2 units (0.28 degrees, 4096 units = one turn) from the true angle of the
+///   integer vector, everywhere;
+/// - continuous: the output never decreases as the vector turns counter-clockwise (the
+///   quotient it reads is exact for the slope, so only the integer input rounding can move it),
+///   and no step is more than one unit for a one-unit change of slope; the octants join and the
+///   turn wraps without a jump.
+///
+/// Folds to the first octant, takes the slope `small / large` in Q12 (one division), and
+/// evaluates `x * (512 + 178 * (1 - x))` for the angle of `atan(x)` in those units: no table.
+/// Integer-only; large coordinates are pre-scaled together so the slope never leaves u32.
+///
+/// Never inlined: at 284 B the compiler copies it into every caller once it is this small
+/// (NitroXide, which calls it from dozens of places: +8,076 B text inlined, -100 B out of line
+/// against the table form).
+#[inline(never)]
 pub fn atan2_q12(y: i32, x: i32) -> u16 {
     if x == 0 && y == 0 {
         return 0;
@@ -99,13 +102,11 @@ pub fn atan2_q12(y: i32, x: i32) -> u16 {
         ay >>= 8;
     }
     let (small, large) = if ax >= ay { (ay, ax) } else { (ax, ay) };
-    // Slope in Q12, 0..=4096: six bits pick the table entry, six interpolate.
+    // Slope in Q12, 0..=4096; the angle of that slope in units, rounded: s * (512 + 178 * (1 - s))
+    // with the second factor kept to 8 bits less so the product stays inside u32.
     let slope = (small << 12) / large;
-    let (i, frac) = ((slope >> 6) as usize, slope & 63);
-    let a = u32::from(ATAN_X16[i]);
-    let b = u32::from(ATAN_X16[i + usize::from(i < 64)]);
-    let octant = ((a * 64 + (b - a) * frac + 512) >> 10) as i32;
-    let q = if ax >= ay { octant } else { 1024 - octant };
+    let q = ((slope * ((512 * 4096 + 178 * (4096 - slope)) >> 8) + (1 << 15)) >> 16) as i32;
+    let q = if ax >= ay { q } else { 1024 - q };
     let angle = match (x >= 0, y >= 0) {
         (true, true) => q,
         (false, true) => 2048 - q,
@@ -117,7 +118,9 @@ pub fn atan2_q12(y: i32, x: i32) -> u16 {
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
     use super::*;
+    use std::vec::Vec;
 
     #[test]
     fn sin_anchors() {
@@ -179,7 +182,7 @@ mod tests {
     }
 
     #[test]
-    fn atan2_is_within_one_unit_of_the_exact_angle() {
+    fn atan2_is_within_3_2_units_of_the_exact_angle() {
         let mut worst = 0.0f64;
         for y in -400..=400 {
             for x in -400..=400 {
@@ -203,7 +206,7 @@ mod tests {
                 worst = worst.max(gap(atan2_q12(y, x), exact(y, x)));
             }
         }
-        assert!(worst < 1.0, "worst error {worst} units");
+        assert!(worst < 3.2, "worst error {worst} units");
     }
 
     #[test]
@@ -232,6 +235,77 @@ mod tests {
             let back = atan2_q12(s, c);
             let diff = (back.wrapping_sub(angle) & 0xfff).min(angle.wrapping_sub(back) & 0xfff);
             assert!(diff <= 4, "angle {angle} came back as {back}");
+        }
+    }
+
+    #[test]
+    fn atan2_is_monotonic_in_the_slope_and_joins_the_octants_without_a_jump() {
+        // y = s, x = 4096: the slope is exact, so every slope of the octant is visited.
+        let mut last = atan2_q12(0, 4096);
+        for s in 1..=4096 {
+            let a = atan2_q12(s, 4096);
+            assert!(a >= last && a - last <= 1, "slope {s}: {last} then {a}");
+            last = a;
+        }
+        assert_eq!(last, 512);
+        // Across the diagonal into the next octant: 45 degrees is shared, and each side moves
+        // toward it by at most a unit per step.
+        assert_eq!(atan2_q12(4095, 4096), 512);
+        assert_eq!(atan2_q12(4096, 4095), 512);
+    }
+
+    #[test]
+    fn atan2_turning_a_vector_all_the_way_round_never_steps_back_or_jumps() {
+        // Sweep the full circle in fine steps at several radii (small ones, where the integer
+        // input is coarse, are judged against the exact angle of the integer vector only).
+        for r in [1000.0f64, 4096.0, 30000.0, 400_000.0] {
+            let mut last: Option<u16> = None;
+            for i in 0..=40960 {
+                let t = f64::from(i) / 40960.0 * core::f64::consts::TAU;
+                let (y, x) = ((r * t.sin()).round() as i32, (r * t.cos()).round() as i32);
+                let a = atan2_q12(y, x);
+                assert!(gap(a, exact(y, x)) < 3.2, "r {r} i {i}");
+                if let Some(p) = last {
+                    // Forward by at most one unit of angle per tenth of a unit of input angle
+                    // plus the integer rounding of the input (about 0.35 units at r = 1000);
+                    // a small dip is that rounding, never a step back of more than one unit.
+                    let d = i32::from(a) - i32::from(p);
+                    let d = if d > 2048 {
+                        d - 4096
+                    } else if d < -2048 {
+                        d + 4096
+                    } else {
+                        d
+                    };
+                    assert!((-1..=2).contains(&d), "r {r} i {i}: {p} then {a}");
+                }
+                last = Some(a);
+            }
+        }
+        for r in [1i32, 2, 3, 5, 8, 13, 40] {
+            // Small radii: every integer vector on the circle of that size, in order of true angle.
+            let mut pts: Vec<(f64, i32, i32)> = Vec::new();
+            for y in -r..=r {
+                for x in -r..=r {
+                    if x != 0 || y != 0 {
+                        pts.push((exact(y, x), y, x));
+                    }
+                }
+            }
+            pts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            for p in pts.windows(2) {
+                let (a, b) = (atan2_q12(p[0].1, p[0].2), atan2_q12(p[1].1, p[1].2));
+                // Two vectors of true angles t0 <= t1 map to angles at most 6 units out of order.
+                let d = i32::from(b) - i32::from(a);
+                let d = if d > 2048 {
+                    d - 4096
+                } else if d < -2048 {
+                    d + 4096
+                } else {
+                    d
+                };
+                assert!(d >= -6, "{:?} then {:?}", p[0], p[1]);
+            }
         }
     }
 

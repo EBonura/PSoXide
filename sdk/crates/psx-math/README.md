@@ -143,7 +143,7 @@ words in hex, because decimal formatting of 64 bits would link `__udivdi3`.
 ## The rest of the crate
 
 - `sincos`: Q0.12 angle type, 256-entry Q1.12 sine table, interpolated
-  `sin_q12` / `cos_q12`, and the octant-linear `atan2_q12`.
+  `sin_q12` / `cos_q12`, and the polynomial `atan2_q12` (exact on axes and diagonals, 3.2 units worst).
 - `int32`: saturating 32-bit helpers and the helper-free wide forms
   (`mul_div_i32`, `mul_shr_i32`, `mul_div_u32`, `isqrt_u64`, `div_u64_by_u32`).
 - `wide_div`: exact `Wide` / `WideU` division, 128-bit product and ratio compare.
