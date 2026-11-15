@@ -75,7 +75,7 @@ impl Vec3I32 {
     }
 
     /// Component-wise sum, each lane saturating at the `i32` limits.
-    #[inline(always)]
+    #[inline]
     #[must_use]
     pub const fn saturating_add(self, rhs: Self) -> Self {
         Self {
@@ -86,7 +86,7 @@ impl Vec3I32 {
     }
 
     /// Component-wise difference, each lane saturating at the `i32` limits.
-    #[inline(always)]
+    #[inline]
     #[must_use]
     pub const fn saturating_sub(self, rhs: Self) -> Self {
         Self {

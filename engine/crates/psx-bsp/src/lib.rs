@@ -422,20 +422,9 @@ pub struct Vec2I16 {
     pub y: i16,
 }
 
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub struct Vec3I16 {
-    pub x: i16,
-    pub y: i16,
-    pub z: i16,
-}
-
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub struct Vec3I32 {
-    pub x: i32,
-    pub y: i32,
-    pub z: i32,
-}
+/// The GTE vectors are the SDK's own: one `Vec3I16` and one `Vec3I32`, with their saturating
+/// and Q12 operations, for the renderer and every game that reads a cooked world.
+pub use psx_gte::math::{Vec3I16, Vec3I32};
 
 pub trait CookedRecord: Copy {
     const SIZE: usize;
@@ -1604,6 +1593,22 @@ extern crate std;
 mod tests {
     use super::*;
     use std::vec::Vec;
+
+    #[test]
+    fn the_bsp_vectors_are_the_gte_vectors_with_the_shared_operations() {
+        let a: psx_gte::math::Vec3I32 = Vec3I32 {
+            x: i32::MAX,
+            y: -5,
+            z: 7,
+        };
+        assert_eq!(
+            a.saturating_add(Vec3I32::new(1, -5, 7)),
+            Vec3I32::new(i32::MAX, -10, 14)
+        );
+        let n: psx_gte::math::Vec3I16 = Vec3I16 { x: 1, y: 2, z: 3 };
+        assert_eq!(n, Vec3I16::new(1, 2, 3));
+        assert_eq!(core::mem::size_of::<Vec3I32>(), 12);
+    }
 
     /// A record whose size is not a power of two, like the cooked planes.
     #[derive(Copy, Clone, Debug, Eq, PartialEq)]
