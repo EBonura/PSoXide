@@ -155,6 +155,7 @@ pub fn find_chunk(bytes: &[u8], header: &PackHeader, chunk_id: u32) -> Option<Pa
 }
 
 /// FNV-1a over `bytes`; the checksum `psx-iso` stores per entry.
+#[inline]
 #[must_use]
 pub fn fnv1a32(bytes: &[u8]) -> u32 {
     let mut hash = Fnv32::new();
@@ -170,9 +171,10 @@ pub fn fnv1a32(bytes: &[u8]) -> u32 {
 /// The guest build multiplies by the prime with shifts and adds: the R3000A's
 /// `mult` takes 13 cycles on a full-width operand and LLVM turns any
 /// shift-and-add form back into one, so the sequence is written out in
-/// assembly. [`update`](Self::update) is the small form (about 20 cycles a
-/// byte); [`update_bulk`](Self::update_bulk) reads aligned words and is the
-/// one for large buffers (about 13 cycles a byte).
+/// assembly. [`update`](Self::update) is the small form (about 19 cycles a
+/// byte, one shared body for `fnv1a32`, `push` loops and the ends of `update_bulk`);
+/// [`update_bulk`](Self::update_bulk) reads aligned words and is the one for large buffers
+/// (about 13.7 cycles a byte).
 ///
 /// ```
 /// use psx_pack::{fnv1a32, Fnv32};
@@ -216,38 +218,32 @@ impl Fnv32 {
         }
     }
 
-    /// [`update`](Self::update) for a large buffer: the aligned middle of
-    /// `bytes` is fetched a word at a time (one bus access for four bytes).
-    /// Same hash, larger code; a caller that hashes a few bytes uses `update`.
+    /// [`update`](Self::update) for a large buffer: the bytes up to a word boundary and the last
+    /// few go through `update`, the whole words between are fetched one load each (the R3000 has
+    /// no data cache, so four byte loads are four bus accesses). Same hash; use it where bytes
+    /// are many.
     #[inline(never)]
     pub fn update_bulk(&mut self, bytes: &[u8]) {
+        let head = ((bytes.as_ptr() as usize).wrapping_neg() & 3).min(bytes.len());
+        let (head, rest) = bytes.split_at(head);
+        self.update(head);
+        let words = rest.len() / 4;
         let mut hash = self.0;
-        let mut p = bytes.as_ptr();
-        // SAFETY: one past the end of the slice.
-        let end = unsafe { p.add(bytes.len()) };
-        while p != end && (p as usize) & 3 != 0 {
-            // SAFETY: `p` is inside the slice.
-            hash = mul_prime(hash ^ u32::from(unsafe { p.read() }));
-            // SAFETY: at most one past the end of the slice.
-            p = unsafe { p.add(1) };
-        }
-        while (end as usize) - (p as usize) >= 4 {
-            // SAFETY: `p` is word-aligned and four bytes lie before `end`.
-            let word = u32::from_le(unsafe { p.cast::<u32>().read() });
+        let mut p = rest.as_ptr().cast::<u32>();
+        // SAFETY: one past the last whole word of `rest`.
+        let end = unsafe { p.add(words) };
+        while p != end {
+            // SAFETY: `p` is word-aligned (the head was consumed) and inside `rest`.
+            let word = u32::from_le(unsafe { p.read() });
             hash = mul_prime(hash ^ (word & 0xff));
             hash = mul_prime(hash ^ ((word >> 8) & 0xff));
             hash = mul_prime(hash ^ ((word >> 16) & 0xff));
             hash = mul_prime(hash ^ (word >> 24));
-            // SAFETY: four bytes were available, so this is at most `end`.
-            p = unsafe { p.add(4) };
-        }
-        while p != end {
-            // SAFETY: `p` is inside the slice.
-            hash = mul_prime(hash ^ u32::from(unsafe { p.read() }));
-            // SAFETY: at most one past the end of the slice.
+            // SAFETY: stays within one past the last whole word.
             p = unsafe { p.add(1) };
         }
         self.0 = hash;
+        self.update(&rest[words * 4..]);
     }
 
     /// The hash of everything fed so far. The hash stays usable: more bytes
