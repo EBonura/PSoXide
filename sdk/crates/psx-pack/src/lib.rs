@@ -302,7 +302,7 @@ fn mul_prime(x: u32) -> u32 {
 /// `p` must be readable for `n` bytes and `state` valid for reads and writes.
 #[cfg(target_arch = "mips")]
 #[inline(always)]
-unsafe fn fold_bytes(state: *mut u32, mut p: *const u8, n: usize) {
+unsafe fn fold_bytes(state: *mut u32, p: *const u8, n: usize) {
     // SAFETY: reads the `n` bytes at `p` and the word at `state`, writes that word; the caller
     // vouches for both.
     unsafe {
@@ -333,7 +333,7 @@ unsafe fn fold_bytes(state: *mut u32, mut p: *const u8, n: usize) {
             "9:",
             ".set pop",
             s = in(reg) state,
-            p = inout(reg) p,
+            p = inout(reg) p => _,
             n = inout(reg) n => _,
             c = out(reg) _,
             b = out(reg) _,
@@ -352,7 +352,7 @@ unsafe fn fold_bytes(state: *mut u32, mut p: *const u8, n: usize) {
 /// `p..end` must be a readable, non-empty range of aligned words.
 #[cfg(target_arch = "mips")]
 #[inline(always)]
-unsafe fn fold_words(mut hash: u32, mut p: *const u32, end: *const u32) -> u32 {
+unsafe fn fold_words(mut hash: u32, p: *const u32, end: *const u32) -> u32 {
     // SAFETY: reads the words `p..end`, which the caller vouches for; registers and those words
     // only.
     unsafe {
@@ -395,7 +395,7 @@ unsafe fn fold_words(mut hash: u32, mut p: *const u32, end: *const u32) -> u32 {
             "addu {h}, {h}, {u}",
             ".set pop",
             h = inout(reg) hash,
-            p = inout(reg) p,
+            p = inout(reg) p => _,
             end = in(reg) end,
             c = in(reg) 403u32,
             w = out(reg) _,
