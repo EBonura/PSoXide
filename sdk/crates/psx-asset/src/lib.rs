@@ -43,6 +43,7 @@
 
 pub mod hma1;
 pub mod hmd8;
+pub mod le;
 pub mod tracks;
 
 use psx_gte::math::{Vec3I16, Vec3I32};
@@ -3531,25 +3532,7 @@ fn validate_model_faces(faces: &[u8], vertex_count: u16) -> Result<(), ParseErro
     Ok(())
 }
 
-#[inline]
-fn read_u16(bytes: &[u8], offset: usize) -> u16 {
-    u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
-}
-
-#[inline]
-fn read_u32(bytes: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes([
-        bytes[offset],
-        bytes[offset + 1],
-        bytes[offset + 2],
-        bytes[offset + 3],
-    ])
-}
-
-#[inline]
-fn read_i16(bytes: &[u8], offset: usize) -> i16 {
-    i16::from_le_bytes([bytes[offset], bytes[offset + 1]])
-}
+use le::{read_i16, read_u16, read_u32};
 
 /// Little-endian `i16` at `offset`, without a bounds check.
 ///
