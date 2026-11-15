@@ -30,3 +30,4 @@ pub mod telemetry;
 pub mod texture_animation;
 pub mod viewmodel;
 pub mod visibility_logic;
+pub mod vram;
