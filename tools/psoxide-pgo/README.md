@@ -809,6 +809,18 @@ profile bind (names normalised): 98.6% of samples bound; no symbol for 1.4% of s
 psoxide-pgo: UNBOUND PROFILE: only 25.7% of the profile's samples sit in functions this build has a symbol for (under 90%), so LLVM would apply almost none of it and say nothing. Collect it again on this build, or pass --allow-unbound (PSOXIDE_PGO_ALLOW_UNBOUND=1) to continue
 ```
 
+A function that is legitimately gone after a pin (renamed, deleted, or inlined everywhere) is
+normal and needs no action: the first two real profiles above had 7 of 368 functions with no
+symbol, 1.4% of their samples, and bound 98.6%, well above the line. The list tells you whether
+the unbound functions were hot; collect again only when the gate fails or a function holding a
+large share is on it.
+
+Which flows keep a raw profile away from the compiler: `collect` writes the portable profile, and
+`apply`, `choose`, `ladder` and `order` build through `rebind`, which hands LLVM a file spelled for
+the local build. `search` works on layout profiles, which bind by portable name and never reach
+LLVM. A game that drives its own build and calls the plain converter must call `rebind` itself
+(above); using `collect` plus `apply` (or `ladder` without `--link`) needs nothing more.
+
 The ten largest unbound functions are listed, under their portable keys. `--allow-unbound`
 or `PSOXIDE_PGO_ALLOW_UNBOUND=1` continues (and says so), `--min-bound PERCENT` moves the line
 (`rebind` and `bind` take both). The threshold comes from the measurements above: 98% or more

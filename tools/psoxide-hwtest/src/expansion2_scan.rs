@@ -335,49 +335,25 @@ fn join(into: &mut Known, other: &Known) -> bool {
     changed
 }
 
-/// What is known on entry to each word: a forward data-flow over the control-flow graph the image's own branches
-/// and jumps make, met by intersection. `None` marks a word no path reaches.
-///
-/// The entry of the image, the target of every `jal`, and every word whose address appears as a data word (a jump
-/// table or function pointer) start with nothing known: a caller's registers mean nothing in the callee, and a
-/// callee-saved register holds its caller's value, not a constant this function formed.
-fn entry_states(words: &[u32], load: u32) -> Vec<Option<Known>> {
-    let mut entry: Vec<Option<Known>> = vec![None; words.len()];
-    let mut work: Vec<usize> = Vec::new();
-    let seed = |entry: &mut Vec<Option<Known>>, at: usize, work: &mut Vec<usize>| {
-        if entry[at].is_none() {
+/// Make `at` an entry: nothing known there, whatever else reaches it.
+fn seed(entry: &mut [Option<Known>], at: usize, work: &mut Vec<usize>) {
+    let changed = match entry[at].as_mut() {
+        None => {
             entry[at] = Some(nothing_known());
-            work.push(at);
-        } else if let Some(state) = entry[at].as_mut() {
-            if join(state, &nothing_known()) {
-                work.push(at);
-            }
+            true
         }
+        Some(state) => join(state, &nothing_known()),
     };
-    if !words.is_empty() {
-        seed(&mut entry, 0, &mut work);
+    if changed {
+        work.push(at);
     }
-    for &word in words {
-        let target = match word >> 26 {
-            0x03 => Some((word & 0x03FF_FFFF) << 2 | (load & 0xF000_0000)),
-            _ => physical(word).map(|_| word),
-        };
-        if let Some(address) = target.filter(|a| a % 4 == 0 && *a >= load) {
-            if let Some(at) = usize::try_from((address - load) / 4).ok().filter(|&t| t < words.len()) {
-                // A `jal` target is an entry; so is a code address held as data. (Any word that happens to
-                // look like one costs only what was known there.)
-                let is_call = word >> 26 == 0x03;
-                let is_pointer = !is_call && address == word;
-                if is_call || is_pointer {
-                    seed(&mut entry, at, &mut work);
-                }
-            }
-        }
-    }
+}
+
+/// Run the data-flow from the words in `work` until no entry state changes.
+fn propagate(words: &[u32], load: u32, entry: &mut [Option<Known>], work: &mut Vec<usize>) {
     let mut effects = Effects { on: false, hits: Vec::new(), formed: BTreeSet::new() };
-    // A queue of words whose entry state changed.
     let mut queued = vec![false; words.len()];
-    for &at in &work {
+    for &at in work.iter() {
         queued[at] = true;
     }
     while let Some(index) = work.pop() {
@@ -388,29 +364,25 @@ fn entry_states(words: &[u32], load: u32) -> Vec<Option<Known>> {
         // The word before a transfer is the transfer; its delay slot is this word.
         let before = index.checked_sub(1).map(|i| flow(words[i], i, words.len(), load));
         let mut successors: Vec<(usize, Known)> = Vec::new();
-        let in_slot = matches!(
-            before,
-            Some(Flow::Branch(_) | Flow::Jump(_) | Flow::Return | Flow::Call)
-        );
-        if in_slot {
-            let slot_of = before.expect("checked above");
-            match slot_of {
-                Flow::Branch(target) => {
-                    successors.push((target, state));
+        match before {
+            Some(Flow::Branch(target)) => {
+                successors.push((target, state));
+                successors.push((index + 1, state));
+            }
+            Some(Flow::Jump(Some(target))) => successors.push((target, state)),
+            Some(Flow::Call) => {
+                let mut after = state;
+                for r in CALLER_SAVED {
+                    after[r] = None;
+                }
+                successors.push((index + 1, after));
+            }
+            Some(Flow::Jump(None) | Flow::Return) => {}
+            _ => {
+                if !matches!(flow(words[index], index, words.len(), load), Flow::Stop) {
                     successors.push((index + 1, state));
                 }
-                Flow::Jump(Some(target)) => successors.push((target, state)),
-                Flow::Call => {
-                    let mut after = state;
-                    for r in CALLER_SAVED {
-                        after[r] = None;
-                    }
-                    successors.push((index + 1, after));
-                }
-                Flow::Jump(None) | Flow::Return | Flow::Next | Flow::Stop => {}
             }
-        } else if !matches!(flow(words[index], index, words.len(), load), Flow::Stop) {
-            successors.push((index + 1, state));
         }
         for (at, state) in successors {
             if at >= words.len() {
@@ -429,14 +401,84 @@ fn entry_states(words: &[u32], load: u32) -> Vec<Option<Known>> {
             }
         }
     }
-    entry
+}
+
+/// What is known on entry to each word: a forward data-flow over the control-flow graph the image's own branches
+/// and jumps make, met by intersection. Every word ends with a state: none is left unscanned.
+///
+/// Entries, where nothing is known (a caller's registers mean nothing in the callee, and a callee-saved register
+/// holds its caller's value, not a constant this function formed):
+/// 1. the start of the image, the target of every `jal`, and every word whose address appears as a data word;
+/// 2. every code address the code forms (`lui` + `addiu`/`ori` of a function's address, for `jalr`, a callback, an
+///    interrupt handler), found by running the data-flow, reading the addresses it forms, and seeding them, until
+///    nothing new is seeded;
+/// 3. then the first word of every run of words still no path reaches (a function nothing in the image refers to,
+///    or data), and the data-flow again, until every word is reached. A constant is never carried into such a run,
+///    but one formed inside it is tracked, as the linear scan did.
+fn entry_states(words: &[u32], load: u32) -> Vec<Option<Known>> {
+    let mut entry: Vec<Option<Known>> = vec![None; words.len()];
+    if words.is_empty() {
+        return entry;
+    }
+    let mut work: Vec<usize> = Vec::new();
+    let index_of = |address: u32| {
+        (address >= load && address % 4 == 0)
+            .then(|| usize::try_from((address - load) / 4).ok())
+            .flatten()
+            .filter(|&t| t < words.len())
+    };
+    seed(&mut entry, 0, &mut work);
+    for &word in words {
+        let target = match word >> 26 {
+            0x03 => Some((word & 0x03FF_FFFF) << 2 | (load & 0xF000_0000)),
+            _ => physical(word).map(|_| word),
+        };
+        if let Some(at) = target.and_then(index_of) {
+            seed(&mut entry, at, &mut work);
+        }
+    }
+    let base = physical(load).unwrap_or(load);
+    loop {
+        propagate(words, load, &mut entry, &mut work);
+        // Code addresses the code forms, read off the states reached so far.
+        let mut fx = Effects { on: true, hits: Vec::new(), formed: BTreeSet::new() };
+        for (index, &word) in words.iter().enumerate() {
+            let pc = load.wrapping_add(4 * index as u32);
+            let mut known = entry[index].unwrap_or_else(nothing_known);
+            step(word, pc, &mut known, &mut fx);
+        }
+        let before = work.len();
+        for &p in &fx.formed {
+            if let Some(at) = p.checked_sub(base).filter(|d| d % 4 == 0).map(|d| (d / 4) as usize) {
+                if at < words.len() && entry[at].is_none() {
+                    seed(&mut entry, at, &mut work);
+                }
+            }
+        }
+        if work.len() > before {
+            continue;
+        }
+        // Nothing more is formed: the first word of each run of unreached words is an entry.
+        let mut previous_reached = true;
+        for at in 0..words.len() {
+            let reached = entry[at].is_some();
+            if !reached && previous_reached {
+                seed(&mut entry, at, &mut work);
+            }
+            previous_reached = reached;
+        }
+        if work.is_empty() {
+            return entry;
+        }
+    }
 }
 
 /// [`scan_words`] and the addresses the code forms.
 ///
 /// A register's constant is used only where it holds on every path that reaches the use: it dies at function entry
 /// (a `jal` target), at a call for the caller-saved registers, wherever two paths meet with different values, and
-/// wherever the register is written with anything but a known constant. A word no path reaches knows nothing.
+/// wherever the register is written with anything but a known constant. A word nothing refers to starts with nothing
+/// known, and one formed inside it is tracked (see `entry_states`).
 #[must_use]
 pub fn scan(words: &[u32], load: u32) -> Scan {
     let entry = entry_states(words, load);
@@ -733,14 +775,44 @@ mod tests {
         assert_eq!(scan_words(&one, 0x8001_0000).len(), 1);
     }
 
-    #[test]
-    fn a_word_no_path_reaches_knows_nothing() {
-        // The word after `jr`'s delay slot is only reachable through a pointer; the constant before the `jr`
-        // is not carried into it.
-        let words = [lui(2, 0xBF80), JR_RA, NOP, sb(4, 2, 0x2080)];
-        assert!(scan_words(&words, 0x8001_0000).is_empty());
+    fn jalr(rs: u32) -> u32 {
+        rs << 21 | 0x0000_F809
     }
 
+    #[test]
+    fn a_word_no_path_reaches_is_still_scanned_with_its_own_constants() {
+        // The constant formed before a `jr` is not carried into the unreached word after it ...
+        let words = [lui(2, 0xBF80), JR_RA, NOP, sb(4, 2, 0x2080)];
+        assert!(scan_words(&words, 0x8001_0000).is_empty());
+        // ... but a function nothing refers to (dead, or reached some way the image does not show) is an
+        // entry, and a constant it forms itself is tracked: the store is found.
+        let dead = [JR_RA, NOP, lui(2, 0xBF80), sb(4, 2, 0x2080), JR_RA, NOP];
+        assert_eq!(scan_words(&dead, 0x8001_0000).len(), 1);
+    }
+
+    #[test]
+    fn a_function_reached_only_through_a_pointer_the_code_forms_is_scanned() {
+        // main: t0 = address of the callback (lui+addiu), jalr t0; the callback (index 8) stores to the debug
+        // console through a constant it forms.
+        let words = [
+            lui(8, 0x8001),
+            addiu(8, 8, 0x0020),
+            jalr(8),
+            NOP,
+            JR_RA,
+            NOP,
+            NOP,
+            NOP,
+            // index 8
+            lui(2, 0xBF80),
+            sb(4, 2, 0x2080),
+            JR_RA,
+            NOP,
+        ];
+        let hits = scan_words(&words, 0x8001_0000);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].pc, 0x8001_0024);
+    }
     #[test]
     fn paths_that_disagree_on_a_register_lose_it_and_paths_that_agree_keep_it() {
         // lui v0,0xbf80; beq a0,zero,+2; nop; lui v0,0x1000; sb a1,0x2f00(v0)
