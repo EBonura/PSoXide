@@ -57,13 +57,16 @@ pub fn root_directory(sector: &[u8; BYTES]) -> Option<Extent> {
 /// The entry named `name` in the directory sector `sector`. `None` when the sector holds no such
 /// entry; a directory of several sectors ([`sectors`]) is searched by asking each in turn.
 ///
-/// `name` is a file or directory name as ISO 9660 writes it: upper case, letters, digits, `_` and
-/// `.`, no `;`. The name on the disc may carry a `;version` after it; a name that only starts with
-/// `name` is a different name. The scan ends at the first record that is empty (the zero padding
+/// `name` (a `&str` or any bytes) is a file or directory name as ISO 9660 writes it: upper case,
+/// letters, digits, `_` and `.`, no `;`. The name on the disc may carry a `;version` after it; a
+/// name that only starts with `name` is a different name. The scan ends at the first record that is empty (the zero padding
 /// after the last record of a sector).
 #[must_use]
-pub fn find_in_directory(sector: &[u8; BYTES], name: &str) -> Option<Extent> {
-    let name = hidden(name.as_bytes());
+pub fn find_in_directory(
+    sector: &[u8; BYTES],
+    name: &(impl AsRef<[u8]> + ?Sized),
+) -> Option<Extent> {
+    let name = hidden(name.as_ref());
     let len = name.len();
     if len.wrapping_sub(1) >= usize::from(u8::MAX) {
         // No name, or one longer than any record holds; and the sums below cannot wrap.
@@ -431,6 +434,13 @@ mod tests {
         assert_eq!(find_in_directory(&im.0[20], "SYSTEM.CNF"), Some((30, 60)));
         assert_eq!(find_in_directory(&im.0[20], "DEEP.DAT"), None);
         assert_eq!(find_in_directory(&im.0[22], "DEEP.DAT"), Some((70, 9)));
+        // The name may be bytes: a program that splits a path by hand never makes a `str`.
+        assert_eq!(
+            find_in_directory(&im.0[20], &b"SYSTEM.CNF"[..]),
+            Some((30, 60))
+        );
+        assert_eq!(find_in_directory(&im.0[20], &b"SYSTEM.CN"[..]), None);
+        assert_eq!(find_in_directory(&im.0[20], &b"\xff\x00"[..]), None);
         assert_eq!(sectors(0), 0);
         assert_eq!(sectors(1), 1);
         assert_eq!(sectors(2048), 1);
