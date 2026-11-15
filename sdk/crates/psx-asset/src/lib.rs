@@ -3532,64 +3532,10 @@ fn validate_model_faces(faces: &[u8], vertex_count: u16) -> Result<(), ParseErro
     Ok(())
 }
 
-use le::{read_i16, read_u16, read_u32};
-
-/// Little-endian `i16` at `offset`, without a bounds check.
-///
-/// # Safety
-/// `offset + 2` must be `<= bytes.len()`.
-#[inline]
-unsafe fn read_i16_unchecked(bytes: &[u8], offset: usize) -> i16 {
-    // SAFETY: `offset` and `offset + 1` are both `< offset + 2 <= len`, as
-    // the caller guarantees.
-    let lo = unsafe { *bytes.get_unchecked(offset) };
-    // SAFETY: as above.
-    let hi = unsafe { *bytes.get_unchecked(offset + 1) };
-    i16::from_le_bytes([lo, hi])
-}
-
-/// Little-endian `i16` at `offset` via one halfword load.
-///
-/// # Safety
-/// `offset + 2` must be `<= bytes.len()` and `bytes.as_ptr().add(offset)`
-/// must be 2-byte aligned.
-#[inline]
-unsafe fn read_i16_aligned_unchecked(bytes: &[u8], offset: usize) -> i16 {
-    // SAFETY: `offset < offset + 2 <= len` per the caller, so the pointer
-    // stays inside the slice.
-    debug_assert_eq!((unsafe { bytes.as_ptr().add(offset) } as usize) & 1, 0);
-    // SAFETY: the caller guarantees two readable bytes at `offset` and 2-byte
-    // alignment, which is everything an `i16` read needs.
-    i16::from_le(unsafe { bytes.as_ptr().add(offset).cast::<i16>().read() })
-}
-
-#[inline]
-fn read_i32(bytes: &[u8], offset: usize) -> i32 {
-    i32::from_le_bytes([
-        bytes[offset],
-        bytes[offset + 1],
-        bytes[offset + 2],
-        bytes[offset + 3],
-    ])
-}
-
-/// Little-endian `i32` at `offset`, read byte-wise without a bounds check.
-///
-/// # Safety
-/// `offset + 4` must be `<= bytes.len()`.
-#[inline]
-unsafe fn read_i32_unchecked(bytes: &[u8], offset: usize) -> i32 {
-    i32::from_le_bytes([
-        // SAFETY: each index below is `< offset + 4 <= len` per the caller.
-        unsafe { *bytes.get_unchecked(offset) },
-        // SAFETY: as above.
-        unsafe { *bytes.get_unchecked(offset + 1) },
-        // SAFETY: as above.
-        unsafe { *bytes.get_unchecked(offset + 2) },
-        // SAFETY: as above.
-        unsafe { *bytes.get_unchecked(offset + 3) },
-    ])
-}
+use le::{
+    read_i16, read_i16_aligned_unchecked, read_i16_unchecked, read_i32, read_i32_unchecked,
+    read_u16, read_u32,
+};
 
 #[inline]
 fn read_i32x4(bytes: &[u8], offset: usize) -> [i32; 4] {
