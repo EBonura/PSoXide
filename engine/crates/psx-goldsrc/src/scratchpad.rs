@@ -77,6 +77,7 @@ static mut PROJECTION_STACK_MODE: u8 = if cfg!(feature = "main-ram-projection-st
 unsafe fn base() -> *mut u8 {
     #[cfg(not(feature = "main-ram-render-scratch"))]
     {
+        // SAFETY: the contract in this function's `# Safety` section (or the arena it names) covers this access.
         unsafe { psx_engine::scratchpad::base_ptr() }
     }
 
@@ -106,16 +107,21 @@ pub unsafe fn call_on_projection_stack<const GUARD_END: usize>(
     // The A/B control retains the same non-inlined entry function but lets it
     // use the ordinary CPU stack. It needs no second main-RAM arena and makes
     // the scratchpad candidate earn back its trampoline and guard overhead.
+    // SAFETY: the contract in this function's `# Safety` section (or the arena it names) covers this access.
     let mode = unsafe { core::ptr::addr_of!(PROJECTION_STACK_MODE).read_volatile() };
     if mode == 2 {
+        // SAFETY: the contract in this function's `# Safety` section (or the arena it names) covers this access.
         unsafe { entry(context) };
         return true;
     }
 
+    // SAFETY: the contract in this function's `# Safety` section (or the arena it names) covers this access.
     let arena = unsafe { base() };
+    // SAFETY: the contract in this function's `# Safety` section (or the arena it names) covers this access.
     let guard = unsafe { arena.add(PROJECTION_GUARD_OFFSET).cast::<u32>() };
     let mut i = 0usize;
     while i < guard_words {
+        // SAFETY: the contract in this function's `# Safety` section (or the arena it names) covers this access.
         unsafe { guard.add(i).write(PROJECTION_GUARD ^ i as u32) };
         i += 1;
     }
@@ -131,12 +137,14 @@ pub unsafe fn call_on_projection_stack<const GUARD_END: usize>(
     }
 
     #[cfg(not(target_arch = "mips"))]
+    // SAFETY: the contract in this function's `# Safety` section (or the arena it names) covers this access.
     unsafe {
         entry(context);
     }
 
     i = 0;
     while i < guard_words {
+        // SAFETY: the contract in this function's `# Safety` section (or the arena it names) covers this access.
         if unsafe { guard.add(i).read() } != PROJECTION_GUARD ^ i as u32 {
             return false;
         }
@@ -170,6 +178,7 @@ pub unsafe fn call_on_stack(
         );
     }
     #[cfg(not(target_arch = "mips"))]
+    // SAFETY: the contract in this function's `# Safety` section (or the arena it names) covers this access.
     unsafe {
         let _ = (stack_top, save);
         entry(context);
@@ -182,10 +191,12 @@ pub unsafe fn call_on_stack(
 /// The caller must reserve a suitably aligned, non-overlapping range large
 /// enough for every element it will address through the returned pointer.
 #[inline(always)]
+#[must_use]
 pub unsafe fn ptr_at<T>(byte_offset: usize) -> *mut T {
     debug_assert!(byte_offset <= SIZE.saturating_sub(core::mem::size_of::<T>()));
-    debug_assert!(byte_offset % core::mem::align_of::<T>() == 0);
+    debug_assert!(byte_offset.is_multiple_of(core::mem::align_of::<T>()));
 
+    // SAFETY: the contract in this function's `# Safety` section (or the arena it names) covers this access.
     unsafe { base().add(byte_offset).cast::<T>() }
 }
 
@@ -194,9 +205,11 @@ pub unsafe fn ptr_at<T>(byte_offset: usize) -> *mut T {
 /// # Safety
 /// Call only when no scratchpad-backed working set is live.
 pub unsafe fn clear() {
+    // SAFETY: the contract in this function's `# Safety` section (or the arena it names) covers this access.
     let words = unsafe { ptr_at::<u32>(0) };
     let mut i = 0usize;
     while i < SIZE / core::mem::size_of::<u32>() {
+        // SAFETY: the contract in this function's `# Safety` section (or the arena it names) covers this access.
         unsafe { words.add(i).write(0) };
         i += 1;
     }

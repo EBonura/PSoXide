@@ -34,6 +34,7 @@ pub trait GpuText {
     );
 }
 
+/// The native 8x16 size, which keeps thin strokes intact.
 pub const SMALL_Q8: u16 = 256; // keep thin strokes intact at the native 8x16 size
 
 // The native HUD packer reserves u=160..255, v=0..127 in the last 4-bit
@@ -228,6 +229,7 @@ pub fn draw_text_gameplay_scaled<S: GpuText>(
 
 /// Width of the tracked gameplay-title face. Keep this separate from
 /// `text_width_scaled`: menus deliberately retain the font's native metrics.
+#[must_use]
 pub fn text_width_gameplay_scaled(text: &str, scale_q8: u16) -> i16 {
     let mut width = 0i16;
     let mut first = true;
@@ -241,10 +243,14 @@ pub fn text_width_gameplay_scaled(text: &str, scale_q8: u16) -> i16 {
     width
 }
 
+/// The height of one text line at `scale_q8`.
+#[must_use]
 pub fn line_height_scaled(scale_q8: u16) -> i16 {
     scale_i16(glyph_h() as i16 + 2, scale_q8).max(1)
 }
 
+/// The width of `text` at `scale_q8` in the menus' native metrics.
+#[must_use]
 pub fn text_width_scaled(text: &str, scale_q8: u16) -> i16 {
     let mut width = 0i16;
     for ch in text.chars() {
@@ -253,6 +259,7 @@ pub fn text_width_scaled(text: &str, scale_q8: u16) -> i16 {
     width
 }
 
+/// Draw `text` at `(x, y)` as flat quads, one per run of lit pixels, at `scale_q8`.
 #[optimize(size)]
 pub fn draw_text_scaled<S: GpuText>(
     sink: &S,
@@ -316,6 +323,7 @@ pub fn draw_text_scaled<S: GpuText>(
     }
 }
 
+/// Draw `text` centred on the 320-pixel display.
 pub fn draw_centered_scaled<S: GpuText>(
     sink: &S,
     y: i16,
@@ -344,6 +352,7 @@ pub struct Sink<G> {
 
 impl<G: GpuText> Sink<G> {
     /// A sink drawing through `gpu` at `scale_q8`.
+    #[must_use]
     pub const fn new(gpu: G, scale_q8: u16) -> Self {
         Self { gpu, scale_q8 }
     }
