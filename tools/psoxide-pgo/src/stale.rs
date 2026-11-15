@@ -238,6 +238,204 @@ pub fn compare(profile: &str, build_keys: &str) -> Report {
     report
 }
 
+/// What [`prune`] took out of a profile.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Pruned {
+    /// Body lines removed.
+    pub lines: usize,
+    /// Samples on those lines.
+    pub samples: u64,
+    /// Function blocks (top level or inlined) removed, because the function is not in the
+    /// build or because none of its lines bind.
+    pub functions: usize,
+}
+
+/// One function's block of a profile: its header, then its lines and inlined callees in order.
+struct Block<'a> {
+    header: &'a str,
+    name: &'a str,
+    items: Vec<Item<'a>>,
+}
+
+enum Item<'a> {
+    Line {
+        text: &'a str,
+        offset: u32,
+        discriminator: u32,
+        count: u64,
+    },
+    Call(Block<'a>),
+}
+
+/// The function name in a top-level header (`name:total:head`).
+fn header_name(line: &str) -> &str {
+    line.rsplitn(3, ':').nth(2).unwrap_or(line)
+}
+
+/// Read the lines of `block`, which sits at `depth`, from `lines[*at..]`.
+fn read_block<'a>(block: &mut Block<'a>, lines: &[&'a str], at: &mut usize, depth: usize) {
+    while let Some(&line) = lines.get(*at) {
+        let indent = line.len() - line.trim_start_matches(' ').len();
+        if indent <= depth {
+            return;
+        }
+        *at += 1;
+        let Some((location, rest)) = line.trim_start().split_once(": ") else {
+            continue;
+        };
+        if let Ok(count) = rest.parse::<u64>() {
+            let (offset, discriminator) = location.split_once('.').unwrap_or((location, "0"));
+            if let (Ok(offset), Ok(discriminator)) = (offset.parse(), discriminator.parse()) {
+                block.items.push(Item::Line {
+                    text: line,
+                    offset,
+                    discriminator,
+                    count,
+                });
+            }
+        } else if let Some((callee, _)) = rest.rsplit_once(':') {
+            let mut call = Block {
+                header: line,
+                name: callee,
+                items: Vec::new(),
+            };
+            read_block(&mut call, lines, at, depth + 1);
+            block.items.push(Item::Call(call));
+        }
+    }
+}
+
+/// Every line and the samples under `block`, for the count of what a removed block held.
+fn tally(block: &Block, pruned: &mut Pruned) {
+    for item in &block.items {
+        match item {
+            Item::Line { count, .. } => {
+                pruned.lines += 1;
+                pruned.samples += count;
+            }
+            Item::Call(call) => tally(call, pruned),
+        }
+    }
+}
+
+/// `block` as text with the lines and callees that do not bind removed; the text, its samples.
+/// `None` when nothing is left of a block that had lines. A block that lost nothing is written
+/// as it was read, so a fully bound profile comes back byte for byte.
+fn render(
+    block: &Block,
+    depth: usize,
+    present: &HashSet<Key>,
+    named: &HashSet<&str>,
+    pruned: &mut Pruned,
+) -> Option<(String, u64, bool)> {
+    let (mut body, mut total, mut changed) = (String::new(), 0u64, false);
+    for item in &block.items {
+        match item {
+            Item::Line {
+                text,
+                offset,
+                discriminator,
+                count,
+            } => {
+                if present.contains(&(block.name, *offset, *discriminator)) {
+                    body.push_str(text);
+                    body.push('\n');
+                    total += count;
+                } else {
+                    pruned.lines += 1;
+                    pruned.samples += count;
+                    changed = true;
+                }
+            }
+            Item::Call(call) => {
+                if !named.contains(call.name) {
+                    tally(call, pruned);
+                    pruned.functions += 1;
+                    changed = true;
+                    continue;
+                }
+                match render(call, depth + 1, present, named, pruned) {
+                    Some((text, samples, call_changed)) => {
+                        body.push_str(&text);
+                        total += samples;
+                        changed |= call_changed;
+                    }
+                    None => changed = true,
+                }
+            }
+        }
+    }
+    if body.is_empty() && !block.items.is_empty() {
+        pruned.functions += 1;
+        return None;
+    }
+    let header = if changed {
+        if depth == 0 {
+            let head = block.header.rsplit(':').next().unwrap_or("0");
+            format!("{}:{total}:{head}\n", block.name)
+        } else {
+            let location = block
+                .header
+                .trim_start()
+                .split_once(": ")
+                .map_or("", |l| l.0);
+            format!("{}{location}: {}:{total}\n", " ".repeat(depth), block.name)
+        }
+    } else {
+        format!("{}\n", block.header)
+    };
+    let mut text = header;
+    text.push_str(&body);
+    Some((text, total, changed))
+}
+
+/// `profile` without the lines that cannot bind onto the build whose key profile is
+/// `build_keys` (the lines [`compare`] counts as lost): lines of a function the build does not
+/// have, and lines whose (offset, discriminator) it does not have. Lines that bind are kept
+/// exactly, counts included; a function block left with no lines goes, and a block that lost
+/// something gets its total rewritten to the sum of what is left. Comment lines are kept in
+/// place. A profile that binds in full comes back unchanged. Names are compared as spelled, so
+/// give a profile and keys in the same naming (a rebound profile).
+pub fn prune(profile: &str, build_keys: &str) -> (String, Pruned) {
+    let present: HashSet<Key> = lines(build_keys)
+        .into_iter()
+        .map(|(function, offset, disc, _)| (function, offset, disc))
+        .collect();
+    let named: HashSet<&str> = present.iter().map(|(function, _, _)| *function).collect();
+    let all: Vec<&str> = profile.lines().collect();
+    let (mut out, mut pruned, mut at) =
+        (String::with_capacity(profile.len()), Pruned::default(), 0);
+    while let Some(&line) = all.get(at) {
+        at += 1;
+        let indent = line.len() - line.trim_start_matches(' ').len();
+        if line.starts_with('#') || indent != 0 {
+            if line.starts_with('#') {
+                out.push_str(line);
+                out.push('\n');
+            }
+            continue;
+        }
+        let mut block = Block {
+            header: line,
+            name: header_name(line),
+            items: Vec::new(),
+        };
+        read_block(&mut block, &all, &mut at, 0);
+        if !named.contains(block.name) {
+            tally(&block, &mut pruned);
+            pruned.functions += 1;
+            continue;
+        }
+        if let Some((text, _, _)) = render(&block, 0, &present, &named, &mut pruned) {
+            out.push_str(&text);
+        }
+    }
+    if !profile.ends_with('\n') && out.ends_with('\n') {
+        out.pop();
+    }
+    (out, pruned)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,5 +496,50 @@ a::g:3:1
     fn discriminators_are_part_of_the_key() {
         let report = compare("a::g:5:1\n 3.2: 5\n 3.3: 5\n", BUILD);
         assert_eq!(report.share(), 0.5);
+    }
+
+    #[test]
+    fn pruning_a_profile_that_binds_in_full_changes_nothing() {
+        let profile =
+            "# note\na::f:10:1\n 1: 7\n 3: 3\n 2: a::g:5\n  1: 2\n  3.2: 3\na::g:5:1\n 1: 5\n";
+        let (pruned, report) = prune(profile, BUILD);
+        assert_eq!(pruned, profile);
+        assert_eq!(report, Pruned::default());
+        assert_eq!(compare(profile, BUILD).share(), 1.0);
+    }
+
+    #[test]
+    fn pruning_drops_a_missing_function_and_lines_that_cannot_bind() {
+        // f's line 5 does not exist; h is not in the build; g, inlined into f, loses its line 9.
+        let profile =
+            "# note\na::f:94:1\n 1: 1\n 5: 80\n 2: a::g:9\n  1: 4\n  9: 5\na::h:9:1\n 2: 9\n";
+        let (pruned, report) = prune(profile, BUILD);
+        // Line counts that bind are untouched; the totals of the blocks that lost lines are
+        // the sum of what is left.
+        assert_eq!(pruned, "# note\na::f:5:1\n 1: 1\n 2: a::g:4\n  1: 4\n");
+        assert_eq!(
+            report,
+            Pruned {
+                lines: 3,
+                samples: 94,
+                functions: 1
+            }
+        );
+        assert_eq!(compare(&pruned, BUILD).share(), 1.0);
+    }
+
+    #[test]
+    fn pruning_drops_an_inlined_callee_the_build_does_not_have_and_a_block_left_empty() {
+        let profile = "a::f:12:1\n 1: 2\n 2: a::gone:6\n  1: 6\n 3: a::g:4\n  9: 4\n";
+        let (pruned, report) = prune(profile, BUILD);
+        assert_eq!(pruned, "a::f:2:1\n 1: 2\n");
+        assert_eq!(
+            report,
+            Pruned {
+                lines: 2,
+                samples: 10,
+                functions: 2
+            }
+        );
     }
 }

@@ -1195,6 +1195,10 @@ ladder fails, printing the table, when no candidate qualifies.
 
 The pick's scores are written to `scores.txt` in the work directory in the same format, ready to commit as the next run's baseline.
 
+### Dropping what no longer binds: `rebind --prune`
+
+`psoxide-pgo rebind IN ELF OUT --prune` (run in the guest's directory, on the unprofiled twin) writes `OUT` under portable names without the profile lines that cannot bind onto the build: lines of a function the build does not have (or inlined callees it does not have) and lines whose (offset, discriminator) it does not have. Lines that bind keep their counts exactly; a block that lost lines gets its total rewritten to the sum of what is left, and a block with nothing left goes. A profile that binds in full comes back byte for byte. Use it when a repin replaced code the profile had samples on (a new pad poll, a moved driver): the dead lines are what holds the bind share under the 90% gate, and LLVM ignores them anyway, so pruning is the honest alternative to `PSOXIDE_PGO_ALLOW_STALE`. The profile is carried across edits first, so run `stamp` on the result to record the tree it now describes.
+
 ### Following a moved function: `rebind --rename OLD=NEW`
 
 `psoxide-pgo rebind IN ELF OUT --rename psx_asset::read_u32=psx_asset::le::read_u32` renames every function the profile names `OLD` (portable name, as `bind` prints it, as a header or as an inlined callee) to `NEW` before it binds. Without it a function that moved between modules or crates is `missing`, its samples are dropped, and any inline decision that depended on them goes with them. The flag repeats; two profile names that rename onto one are an error.

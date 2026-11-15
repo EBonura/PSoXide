@@ -934,10 +934,22 @@ fn build_symbols(object: &object::File, dwarf: &Dwarf, units: &[Unit]) -> Result
 fn rebind_with_flags(input: &Path, elf: &Path, output: &Path, flags: &[String]) -> Result<()> {
     let (renames, flags) = take_renames(flags)?;
     let (gate, rest) = bind::Gate::from_args(&flags)?;
+    let (prune, rest): (bool, Vec<&str>) = (
+        rest.contains(&"--prune"),
+        rest.into_iter().filter(|flag| *flag != "--prune").collect(),
+    );
     if !rest.is_empty() {
         return Err(format!("rebind: unknown arguments {rest:?}").into());
     }
-    rebind(input, elf, output, &env::current_dir()?, gate, &renames)
+    rebind(
+        input,
+        elf,
+        output,
+        &env::current_dir()?,
+        gate,
+        &renames,
+        prune,
+    )
 }
 
 /// `--rename` pairs: portable name the profile has, portable name the build has.
@@ -1016,6 +1028,7 @@ fn rebind(
     crate_dir: &Path,
     gate: bind::Gate,
     renames: &[(String, String)],
+    prune: bool,
 ) -> Result<()> {
     let data = fs::read(elf_path)?;
     let object = object::File::parse(&*data)?;
@@ -1103,7 +1116,23 @@ fn rebind(
     if bound == 0 && missing + ambiguous > 0 {
         return Err(format!("no profile name matched a symbol in {}", elf_path.display()).into());
     }
-    fs::write(out_path, &rebound)?;
+    // `--prune`: write the profile without the lines that cannot bind onto this build, under
+    // the portable names a committed profile uses.
+    let rebound = if prune {
+        let (kept, pruned) = stale::prune(&rebound, &keys);
+        println!(
+            "pruned {} line(s) holding {} sample(s) and {} function block(s) that do not bind",
+            pruned.lines, pruned.samples, pruned.functions
+        );
+        fs::write(
+            out_path,
+            rename_profile(&kept, |name| Ok(portable_name(name).into_owned()))?,
+        )?;
+        kept
+    } else {
+        fs::write(out_path, &rebound)?;
+        rebound
+    };
     // How much of the profile still describes this code.
     let mut report = stale::compare(&rebound, &keys).enforced_for(collected_here);
     for (name, _) in &mut report.worst {
@@ -1115,7 +1144,7 @@ fn rebind(
 
 const USAGE: &str = "usage: psoxide-pgo <elf-with-dwarf> <pc.csv>... <out.prof>
        psoxide-pgo portable <in.prof> <out.prof>
-       psoxide-pgo rebind <in.prof> <target-elf-with-dwarf> <out.prof> [--min-bound PERCENT] [--allow-unbound] [--rename OLD=NEW]...
+       psoxide-pgo rebind <in.prof> <target-elf-with-dwarf> <out.prof> [--min-bound PERCENT] [--allow-unbound] [--rename OLD=NEW]... [--prune]
                                                                        (run in the guest's directory)
        psoxide-pgo stamp <profile> --elf <twin-elf-with-dwarf> [--crate DIR]
        psoxide-pgo bind <profile> <target-elf-with-dwarf> [--exact] [--min-bound PERCENT] [--allow-unbound]
