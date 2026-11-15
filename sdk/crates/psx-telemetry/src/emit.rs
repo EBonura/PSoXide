@@ -45,6 +45,10 @@ const VALUE_ADDR: *mut u32 = uncached(telemetry::VALUE);
 const LOG_ADDR: *mut u32 = uncached(telemetry::LOG);
 #[cfg(all(target_arch = "mips", feature = "emit"))]
 const SORT_CLASS_ADDR: *mut u32 = uncached(telemetry::SORT_CLASS);
+#[cfg(all(target_arch = "mips", feature = "emit"))]
+const WARP_Z_ADDR: *mut u32 = uncached(telemetry::WARP_Z);
+#[cfg(all(target_arch = "mips", feature = "emit"))]
+const WARP_XY_ADDR: *mut u32 = uncached(telemetry::WARP_XY);
 
 /// Emulator cycle counter, wrapping at 32 bits. Returns zero on host builds
 /// and when the `emit` feature is disabled, without touching telemetry MMIO.
@@ -129,6 +133,21 @@ pub fn sort_class(class: u32) {
     }
     #[cfg(not(all(target_arch = "mips", feature = "emit")))]
     let _ = class;
+}
+
+/// Announce a CPU-projected vertex to the emulator's texture-warp probe: screen position and
+/// view depth `z` in GTE SZ units. Telemetry builds only.
+#[inline(always)]
+pub fn warp_probe(x: i32, y: i32, z: i32) {
+    #[cfg(all(target_arch = "mips", feature = "emit"))]
+    // SAFETY: both are word-aligned ports in the uncached Expansion 2 window, not Rust-owned
+    // memory; the writes only latch a probe record.
+    unsafe {
+        core::ptr::write_volatile(WARP_Z_ADDR, z.max(0) as u32);
+        core::ptr::write_volatile(WARP_XY_ADDR, ((y as u32) << 16) | (x as u32 & 0xffff));
+    }
+    #[cfg(not(all(target_arch = "mips", feature = "emit")))]
+    let _ = (x, y, z);
 }
 
 /// Write a line to the emulator's guest debug-log port, so it reaches PSoXide's

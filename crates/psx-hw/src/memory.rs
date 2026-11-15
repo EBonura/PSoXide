@@ -124,6 +124,12 @@ pub mod expansion2 {
         /// emulator builds that have one and ignored by the rest. Measurement
         /// builds only, like every port here.
         pub const SORT_CLASS: u32 = BASE + 0x28;
+        /// Write only: view depth (GTE SZ units) of a CPU-projected vertex, for the texture-warp
+        /// probe. Written before [`WARP_XY`], which commits the vertex. Measurement builds only.
+        pub const WARP_Z: u32 = BASE + 0x20;
+        /// Write only: the vertex's screen position (`y << 16 | x & 0xffff`); commits the vertex
+        /// whose depth was written to [`WARP_Z`].
+        pub const WARP_XY: u32 = BASE + 0x24;
     }
 }
 

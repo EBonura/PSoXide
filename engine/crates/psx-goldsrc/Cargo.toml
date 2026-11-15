@@ -22,13 +22,13 @@ psx-engine = { path = "../psx-engine" }
 # `telemetry` writes PSoXide's guest event ports only when a port enables one of
 # these through its own feature of the same name; otherwise every hook compiles
 # to nothing.
-emulator-telemetry = []
-performance-telemetry = []
+emulator-telemetry = ["psx-telemetry/emit"]
+performance-telemetry = ["psx-telemetry/emit"]
 # Measurement builds only: announce every CPU-projected vertex (screen word +
 # view depth) to PSoXide's texture-warp probe through its emulator-only port,
 # so `frontend launch --warp-log` can score soft-projected geometry too.
 # Retail hardware ignores the writes; shipping builds compile them out.
-warp-probe = []
+warp-probe = ["psx-telemetry/emit"]
 
 [dev-dependencies]
 # The frozen-oracle tests (tests/*_oracle.rs) rewrite legacy source with regexes
