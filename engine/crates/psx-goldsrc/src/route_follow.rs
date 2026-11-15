@@ -24,6 +24,7 @@
 )]
 
 use crate::semantic_input::{Sample, ACTION_DUCK, ACTION_JUMP, ACTION_USE};
+use psx_math::atan2_q12;
 
 pub const MAGIC: &[u8; 8] = b"HLWPTS1\0";
 pub const FLAG_USE: u16 = 1 << 0;
@@ -120,46 +121,6 @@ impl Route {
             radius: rd_u16(self.data, o + 14),
         }
     }
-}
-
-/// Integer atan2 in the runtime's yaw convention: forward = (sin yaw, ., cos
-/// yaw) in world x/z, so `atan2_q12(dx, dz)` is the yaw that faces (dx, dz).
-/// 33-entry quarter table, linear interpolation, exact to ~1 angle unit.
-const ATAN_TAB: [u16; 33] = [
-    0, 20, 41, 61, 81, 101, 121, 140, 160, 179, 197, 216, 234, 252, 269, 286, 303, 319, 335, 350,
-    365, 380, 394, 408, 422, 435, 447, 460, 472, 484, 495, 506, 512,
-];
-
-fn atan_q12(num: i32, den: i32) -> i32 {
-    // num <= den, both positive: angle 0..512
-    if den == 0 {
-        return 512;
-    }
-    let r = ((num << 12) / den).clamp(0, 4096);
-    let idx = (r >> 7) as usize;
-    let frac = r & 127;
-    let a = ATAN_TAB[idx] as i32;
-    let b = ATAN_TAB[(idx + 1).min(32)] as i32;
-    a + ((b - a) * frac >> 7)
-}
-
-pub fn atan2_q12(x: i32, z: i32) -> u16 {
-    if x == 0 && z == 0 {
-        return 0;
-    }
-    let (ax, az) = (x.abs(), z.abs());
-    let base = if az >= ax {
-        atan_q12(ax, az)
-    } else {
-        1024 - atan_q12(az, ax)
-    };
-    let a = match (x >= 0, z >= 0) {
-        (true, true) => base,
-        (true, false) => 2048 - base,
-        (false, false) => 2048 + base,
-        (false, true) => 4096 - base,
-    };
-    (a & 0xFFF) as u16
 }
 
 pub struct Follower {

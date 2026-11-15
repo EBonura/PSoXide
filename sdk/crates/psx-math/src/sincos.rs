@@ -69,37 +69,50 @@ pub fn cos_q12(angle_q12: u16) -> i32 {
     sin_q12(angle_q12.wrapping_add(1024))
 }
 
-/// Q0.12 angle of the vector `(x, y)`: the inverse of [`sin_q12`] /
-/// [`cos_q12`], so `atan2_q12(sin, cos)` round-trips an angle.
+/// `atan(i / 64)` for `i` in `0..=64`, in Q12 turns scaled by 16, so the table carries four
+/// fractional bits and 45 degrees is exactly 8192.
+const ATAN_X16: [u16; 65] = [
+    0, 163, 326, 489, 651, 813, 975, 1136, 1297, 1457, 1617, 1775, 1933, 2090, 2246, 2401, 2555,
+    2708, 2860, 3010, 3159, 3307, 3453, 3599, 3742, 3884, 4025, 4164, 4302, 4438, 4572, 4705, 4836,
+    4966, 5094, 5220, 5344, 5467, 5589, 5708, 5826, 5943, 6058, 6171, 6282, 6392, 6500, 6607, 6712,
+    6815, 6917, 7018, 7117, 7214, 7310, 7405, 7498, 7589, 7679, 7768, 7856, 7942, 8026, 8110, 8192,
+];
+
+/// Q0.12 angle of the vector `(x, y)`: the inverse of [`sin_q12`] / [`cos_q12`], so
+/// `atan2_q12(sin, cos)` round-trips an angle.
 ///
-/// Octant-linear approximation (exact on the axes and diagonals, worst
-/// error about 4° mid-octant): right for facing/steering/aiming logic,
-/// not for precision geometry. `(0, 0)` returns 0. Integer-only; large
-/// coordinates are pre-scaled so the math never leaves u32.
+/// Folds to the first octant and reads `atan(slope)` from a 65-entry table with linear
+/// interpolation: exact on the axes and diagonals, worst error under one unit (0.09 degrees)
+/// everywhere (the octant-linear form this replaced erred by up to 47 units, 4.2 degrees).
+/// `(0, 0)` returns 0. Integer-only; large coordinates are pre-scaled together so the slope
+/// never leaves u32. `atan2_q12(dx, dz)` is the yaw that faces `(dx, dz)` when forward is
+/// `(sin yaw, cos yaw)`.
 pub fn atan2_q12(y: i32, x: i32) -> u16 {
     if x == 0 && y == 0 {
         return 0;
     }
     let (mut ax, mut ay) = (x.unsigned_abs(), y.unsigned_abs());
-    // Keep `small * 512` inside u32: scale both magnitudes below 2^23
-    // together, which preserves their ratio (the only thing used below).
-    while ax >= (1 << 23) || ay >= (1 << 23) {
+    // `small << 12` has to fit a u32. Scaling both magnitudes together keeps the ratio, which
+    // is all that is used below.
+    while ax >= (1 << 19) || ay >= (1 << 19) {
         ax >>= 8;
         ay >>= 8;
     }
-    // First-octant fold: angle 0..1024 (= 90°), 45° exactly at ax == ay.
-    let q = if ax >= ay {
-        (ay * 512 / ax) as i32
-    } else {
-        1024 - (ax * 512 / ay) as i32
-    };
-    let a = match (x >= 0, y >= 0) {
+    let (small, large) = if ax >= ay { (ay, ax) } else { (ax, ay) };
+    // Slope in Q12, 0..=4096: six bits pick the table entry, six interpolate.
+    let slope = (small << 12) / large;
+    let (i, frac) = ((slope >> 6) as usize, slope & 63);
+    let a = u32::from(ATAN_X16[i]);
+    let b = u32::from(ATAN_X16[i + usize::from(i < 64)]);
+    let octant = ((a * 64 + (b - a) * frac + 512) >> 10) as i32;
+    let q = if ax >= ay { octant } else { 1024 - octant };
+    let angle = match (x >= 0, y >= 0) {
         (true, true) => q,
         (false, true) => 2048 - q,
         (false, false) => 2048 + q,
         (true, false) => 4096 - q,
     };
-    (a & 0xfff) as u16
+    (angle & 0xfff) as u16
 }
 
 #[cfg(test)]
@@ -150,14 +163,75 @@ mod tests {
         assert_eq!(atan2_q12(-100, 100), 3584);
     }
 
+    /// The exact angle in Q12 turns, as a float, for the accuracy oracle (host tests only).
+    fn exact(y: i32, x: i32) -> f64 {
+        let a = f64::from(y).atan2(f64::from(x)) / core::f64::consts::TAU * 4096.0;
+        if a < 0.0 {
+            a + 4096.0
+        } else {
+            a
+        }
+    }
+
+    fn gap(a: u16, b: f64) -> f64 {
+        let d = (f64::from(a) - b).abs() % 4096.0;
+        d.min(4096.0 - d)
+    }
+
     #[test]
-    fn atan2_roundtrips_sincos_within_octant_error() {
-        // Octant-linear: allow ~4° (= 46 Q0.12 units) of error.
+    fn atan2_is_within_one_unit_of_the_exact_angle() {
+        let mut worst = 0.0f64;
+        for y in -400..=400 {
+            for x in -400..=400 {
+                if x != 0 || y != 0 {
+                    worst = worst.max(gap(atan2_q12(y, x), exact(y, x)));
+                }
+            }
+        }
+        // Magnitudes across the whole i32 range, including both prescale paths.
+        let mut s = 12345u32;
+        for _ in 0..1_000_000 {
+            s ^= s << 13;
+            s ^= s >> 17;
+            s ^= s << 5;
+            let y = (s as i32) >> (s % 24);
+            s ^= s << 13;
+            s ^= s >> 17;
+            s ^= s << 5;
+            let x = (s as i32) >> (s % 24);
+            if x != 0 || y != 0 {
+                worst = worst.max(gap(atan2_q12(y, x), exact(y, x)));
+            }
+        }
+        assert!(worst < 1.0, "worst error {worst} units");
+    }
+
+    #[test]
+    fn atan2_is_exact_on_the_axes_and_diagonals_at_every_magnitude() {
+        for m in [1, 2, 3, 17, 255, 4096, 1 << 18, 1 << 19, 1 << 24, i32::MAX] {
+            for (y, x, want) in [
+                (0, m, 0),
+                (m, m, 512),
+                (m, 0, 1024),
+                (m, -m, 1536),
+                (0, -m, 2048),
+                (-m, -m, 2560),
+                (-m, 0, 3072),
+                (-m, m, 3584),
+            ] {
+                assert_eq!(atan2_q12(y, x), want, "y {y} x {x}");
+            }
+        }
+    }
+
+    #[test]
+    fn atan2_roundtrips_sincos_within_the_table_error() {
+        // The sine table itself is 8-bit interpolated; allow a few units.
         for &angle in &[0u16, 100, 512, 900, 1024, 2000, 2048, 3000, 3072, 4000] {
             let (s, c) = (sin_q12(angle), cos_q12(angle));
             let back = atan2_q12(s, c);
             let diff = (back.wrapping_sub(angle) & 0xfff).min(angle.wrapping_sub(back) & 0xfff);
-            assert!(diff <= 46, "angle {angle} came back as {back}");
+            assert!(diff <= 4, "angle {angle} came back as {back}");
         }
     }
 
