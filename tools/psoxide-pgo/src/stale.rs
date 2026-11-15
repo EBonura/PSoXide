@@ -305,19 +305,6 @@ fn read_block<'a>(block: &mut Block<'a>, lines: &[&'a str], at: &mut usize, dept
     }
 }
 
-/// Every line and the samples under `block`, for the count of what a removed block held.
-fn tally(block: &Block, pruned: &mut Pruned) {
-    for item in &block.items {
-        match item {
-            Item::Line { count, .. } => {
-                pruned.lines += 1;
-                pruned.samples += count;
-            }
-            Item::Call(call) => tally(call, pruned),
-        }
-    }
-}
-
 /// `block` as text with the lines and callees that do not bind removed; the text, its samples.
 /// `None` when nothing is left of a block that had lines. A block that lost nothing is written
 /// as it was read, so a fully bound profile comes back byte for byte.
@@ -325,7 +312,6 @@ fn render(
     block: &Block,
     depth: usize,
     present: &HashSet<Key>,
-    named: &HashSet<&str>,
     pruned: &mut Pruned,
 ) -> Option<(String, u64, bool)> {
     let (mut body, mut total, mut changed) = (String::new(), 0u64, false);
@@ -347,22 +333,14 @@ fn render(
                     changed = true;
                 }
             }
-            Item::Call(call) => {
-                if !named.contains(call.name) {
-                    tally(call, pruned);
-                    pruned.functions += 1;
-                    changed = true;
-                    continue;
+            Item::Call(call) => match render(call, depth + 1, present, pruned) {
+                Some((text, samples, call_changed)) => {
+                    body.push_str(&text);
+                    total += samples;
+                    changed |= call_changed;
                 }
-                match render(call, depth + 1, present, named, pruned) {
-                    Some((text, samples, call_changed)) => {
-                        body.push_str(&text);
-                        total += samples;
-                        changed |= call_changed;
-                    }
-                    None => changed = true,
-                }
-            }
+                None => changed = true,
+            },
         }
     }
     if body.is_empty() && !block.items.is_empty() {
@@ -401,7 +379,6 @@ pub fn prune(profile: &str, build_keys: &str) -> (String, Pruned) {
         .into_iter()
         .map(|(function, offset, disc, _)| (function, offset, disc))
         .collect();
-    let named: HashSet<&str> = present.iter().map(|(function, _, _)| *function).collect();
     let all: Vec<&str> = profile.lines().collect();
     let (mut out, mut pruned, mut at) =
         (String::with_capacity(profile.len()), Pruned::default(), 0);
@@ -421,12 +398,7 @@ pub fn prune(profile: &str, build_keys: &str) -> (String, Pruned) {
             items: Vec::new(),
         };
         read_block(&mut block, &all, &mut at, 0);
-        if !named.contains(block.name) {
-            tally(&block, &mut pruned);
-            pruned.functions += 1;
-            continue;
-        }
-        if let Some((text, _, _)) = render(&block, 0, &present, &named, &mut pruned) {
+        if let Some((text, _, _)) = render(&block, 0, &present, &mut pruned) {
             out.push_str(&text);
         }
     }
@@ -506,6 +478,15 @@ a::g:3:1
         assert_eq!(pruned, profile);
         assert_eq!(report, Pruned::default());
         assert_eq!(compare(profile, BUILD).share(), 1.0);
+    }
+
+    #[test]
+    fn a_callee_with_no_lines_of_its_own_stays_when_what_it_inlines_binds() {
+        // `w` is a wrapper: all its samples sit in `x`, which it inlines.
+        let profile = "a::f:3:1\n 1: 1\n 2: a::w:2\n  3: a::x:2\n   1: 2\n";
+        let (pruned, report) = prune(profile, profile);
+        assert_eq!(pruned, profile);
+        assert_eq!(report, Pruned::default());
     }
 
     #[test]
