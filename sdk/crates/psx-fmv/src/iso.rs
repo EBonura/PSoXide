@@ -52,6 +52,11 @@ pub fn find_in_directory(sector: &[u8], name: &str) -> Option<(u32, u32)> {
 }
 
 /// Whether a record's name, up to its `;` version suffix, is `name` apart from ASCII case.
+///
+/// Always inlined: its one caller is the lookup loop, and left to the optimiser it stayed a 100 byte
+/// function of its own in a game that calls the lookup with a name it cannot see (the loop, this and
+/// `extent` cost 348 bytes there against 316 for the lookup before this module).
+#[inline(always)]
 fn names_file(raw: &[u8], name: &[u8]) -> bool {
     let Some((head, tail)) = raw.split_at_checked(name.len()) else {
         return false;
@@ -68,6 +73,8 @@ fn same_letter(a: u8, b: u8) -> bool {
 }
 
 /// `(lba, size_bytes)` of a directory record (also the root record inside the volume descriptor).
+/// Always inlined: as a function of its own it was 28 bytes and a call at each of its two sites.
+#[inline(always)]
 fn extent(rec: &[u8]) -> (u32, u32) {
     (le32(&rec[2..6]), le32(&rec[10..14]))
 }
