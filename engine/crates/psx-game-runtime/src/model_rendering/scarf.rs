@@ -13,14 +13,14 @@ const POINTS: usize = ROWS * 2;
 const TAIL_PITCH: i32 = 12;
 /// Tail strip width at the first row is `height / TAIL_WIDTH`; the last row
 /// keeps `(TAIL_TAPER - 7) / TAIL_TAPER` of it, so the strip stays a scarf.
-const TAIL_WIDTH: i32 = 30;
+const TAIL_WIDTH: i32 = 22;
 const TAIL_TAPER: i32 = 40;
 /// The tail hangs from the character's right shoulder (model -x), in 1/1024
 /// of the height, not from the middle of the back.
-const TAIL_SIDE: i32 = -60;
+const TAIL_SIDE: i32 = -50;
 /// Rest depth behind the neck anchor per row, in 1/1024 of the height. The
 /// first rows leave the wrap and the rest settle on the torso capsule.
-const TAIL_BACK: [i32; ROWS] = [30, 52, 76, 96, 100, 100, 100, 100];
+const TAIL_BACK: [i32; ROWS] = [30, 52, 76, 98, 102, 102, 102, 102];
 const Q: i32 = 16;
 type Point = [i32; 3];
 // The fixed-update cloth solve has no live renderer/collision scratch data.
@@ -387,14 +387,14 @@ impl PlayerScarf {
         // collarbones with an off-centre front point. Unequal heights and
         // depths avoid the rigid, circular tube silhouette of the first wrap.
         const WRAP: [[Point; 2]; 8] = [
-            [[30, 4, -2], [40, -16, 0]],
-            [[23, 0, 20], [31, -22, 28]],
-            [[2, -5, 27], [-4, -30, 36]],
-            [[-23, 4, 20], [-31, -20, 27]],
-            [[-31, 6, -4], [-39, -14, -5]],
-            [[-24, 4, -31], [-31, -16, -38]],
-            [[0, 2, -39], [0, -18, -46]],
-            [[25, 4, -29], [33, -14, -35]],
+            [[30, 4, -2], [40, -20, 0]],
+            [[23, 0, 20], [32, -28, 28]],
+            [[2, -5, 27], [-4, -40, 38]],
+            [[-23, 4, 20], [-32, -26, 28]],
+            [[-31, 6, -4], [-40, -18, -5]],
+            [[-24, 4, -31], [-32, -20, -38]],
+            [[0, 2, -39], [0, -22, -46]],
+            [[25, 4, -29], [33, -18, -35]],
         ];
         for (i, edge) in WRAP.into_iter().enumerate() {
             for (side, point) in edge.into_iter().enumerate() {
