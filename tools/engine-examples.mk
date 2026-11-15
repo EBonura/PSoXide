@@ -186,7 +186,7 @@ hardware-tests-disc: hardware-tests $(HWTEST_CDDA) $(HWTEST_XA) $(HWTEST_XA_CLOC
 		--exe ../../$(EXAMPLE_OUT)/hardware-tests.exe \
 		--out ../../$(EXAMPLE_OUT)/hardware-tests.bin \
 		--volume PSOXIDE \
-		--cdtest-sectors 360 \
+		--cdtest-sectors 340 \
 		--xa-file ../../$(HWTEST_XA) \
 		--xa-file ../../$(HWTEST_XA_CLOCK) \
 		--cdda-track ../../$(HWTEST_CDDA)
@@ -217,7 +217,7 @@ hwtest-radius-disc: hardware-tests $(HWTEST_CDDA) $(HWTEST_XA) $(HWTEST_XA_CLOCK
 		--exe ../../$(EXAMPLE_OUT)/hardware-tests.exe \
 		--out ../../$(HWTEST_RADIUS_DIR)/hardware-tests-radius.bin \
 		--volume PSOXIDE \
-		--cdtest-sectors 360 \
+		--cdtest-sectors 340 \
 		--xa-file ../../$(HWTEST_XA) \
 		--xa-file ../../$(HWTEST_XA_CLOCK) \
 		--xa-file ../../$(HWTEST_RADIUS_FILL) \

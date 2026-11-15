@@ -48,19 +48,18 @@ use psx_io::cd::xa::Player;
 use psx_io::gpu as gpu_io;
 use psx_io::irq;
 use psx_io::periph::ControllerPort;
+use crate::pad_watch::{mode_code, mode_name, reply_len, Watch};
 use psx_pad::{AnalogRequirement, Controllers, PadMode, PadState};
 use psx_rt::{interrupts, tty};
 use qrcodegen_no_heap::{QrCode, QrCodeEcc, Version};
 
-/// Menu frames with no input before the mode starts by itself (20 seconds at 60 Hz).
-pub(crate) const IDLE_ENTRY_FRAMES: u32 = 20 * 60;
 
 /// SDK revision the pad path of this build comes from.
-const SDK_REV: [u8; 8] = *b"9bb3045b";
+const SDK_REV: [u8; 8] = *b"6e25f2ae";
 /// System clock, the rate of root counter 0.
 const TIMER_HZ: u32 = 33_868_800;
 /// Ticks to wait for an `/ACK` after a byte before calling it missing.
-const ACK_TIMEOUT: u16 = 40_000;
+pub(crate) const ACK_TIMEOUT: u16 = 40_000;
 /// Frames of the survey's wait for a pad before it records "nothing answered".
 const NO_PAD_FRAMES: u32 = 12 * 60;
 /// Frames a QR page stays up.
@@ -79,42 +78,42 @@ const GAME_POLLS: usize = 120;
 /// Pad presence: polls in a row that must agree before a change is believed.
 const PRESENCE_HOLD: u8 = 6;
 
-const INK: (u8, u8, u8) = (232, 236, 244);
-const DIM: (u8, u8, u8) = (150, 170, 200);
-const GOLD: (u8, u8, u8) = (255, 232, 128);
-const GOOD: (u8, u8, u8) = (96, 240, 128);
+pub(crate) const INK: (u8, u8, u8) = (232, 236, 244);
+pub(crate) const DIM: (u8, u8, u8) = (150, 170, 200);
+pub(crate) const GOLD: (u8, u8, u8) = (255, 232, 128);
+pub(crate) const GOOD: (u8, u8, u8) = (96, 240, 128);
 
 /// One spacing of the survey: the delay after the select before the first byte, the delay after
 /// each `/ACK` before the next byte, and the delay after the transaction before the next
 /// command, all in system-clock ticks.
 #[derive(Clone, Copy)]
-struct Profile {
-    setup: u16,
-    gap: u16,
-    between: u32,
+pub(crate) struct Profile {
+    pub(crate) setup: u16,
+    pub(crate) gap: u16,
+    pub(crate) between: u32,
 }
 
 /// MIN, SHORT, MEDIUM (the SDK's own setup time), LONG (one video frame between commands).
-const PROFILES: [Profile; 4] = [
+pub(crate) const PROFILES: [Profile; 4] = [
     Profile { setup: 0, gap: 0, between: 0 },
     Profile { setup: 2_048, gap: 0, between: 4_096 },
     Profile { setup: 7_168, gap: 400, between: 33_000 },
     Profile { setup: 24_576, gap: 3_000, between: 560_000 },
 ];
 /// The spacing of the raw polls that ride beside the SDK's: the SDK's setup time, no gaps.
-const POLL_PROFILE: Profile = Profile { setup: 7_168, gap: 0, between: 0 };
+pub(crate) const POLL_PROFILE: Profile = Profile { setup: 7_168, gap: 0, between: 0 };
 
-const POLL_TX: [u8; 21] = [
+pub(crate) const POLL_TX: [u8; 21] = [
     0x01, 0x42, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ];
 
-fn cfg(cmd: u8, a: u8, b: u8) -> [u8; 9] {
+pub(crate) const fn cfg(cmd: u8, a: u8, b: u8) -> [u8; 9] {
     [0x01, cmd, 0x00, a, b, 0x00, 0x00, 0x00, 0x00]
 }
 
 /// Spin `cycles` system-clock ticks.
-fn wait_ticks(bus: &mut ControllerPort, cycles: u32) {
+pub(crate) fn wait_ticks(bus: &mut ControllerPort, cycles: u32) {
     let mut left = cycles;
     while left > 0 {
         let chunk = left.min(30_000) as u16;
@@ -124,18 +123,12 @@ fn wait_ticks(bus: &mut ControllerPort, cycles: u32) {
     }
 }
 
-/// Reply bytes a pad of this ID sends in all, address byte included: three, and two for every
-/// halfword the low nibble of the ID counts.
-fn reply_len(id: u8) -> usize {
-    3 + 2 * usize::from(id & 0x0F).max(1)
-}
-
 /// One transaction on the registers: select `port`, wait `profile.setup`, write each byte of `tx`
 /// and wait for its `/ACK` by watching `STAT`, measured on root counter 0. The pad's own ID
 /// byte, the second reply, sets how many bytes the exchange has. Nothing here is the SDK's
 /// exchange: the waits, the limits and what is recorded are this function's.
 #[inline(never)]
-fn transact(
+pub(crate) fn transact(
     bus: &mut ControllerPort,
     port: Port,
     tx: &[u8],
@@ -243,172 +236,13 @@ fn transact(
 }
 
 /// Whether a transaction read as a complete reply from a pad: the magic 0x5A and every byte.
-fn txn_ok(t: &Txn) -> bool {
+pub(crate) fn txn_ok(t: &Txn) -> bool {
     t.got >= 3 && t.got == t.sent && t.flags & 0x07 == 0 && t.rx[2] == 0x5A
 }
 
 /// Active-high buttons from the two wire bytes (3 and 4 of the reply).
-fn wire_buttons(rx: &[u8; TXN_MAX]) -> u16 {
+pub(crate) fn wire_buttons(rx: &[u8; TXN_MAX]) -> u16 {
     !(u16::from(rx[3]) | (u16::from(rx[4]) << 8))
-}
-
-fn mode_code(mode: PadMode) -> u8 {
-    match mode {
-        PadMode::Disconnected => 0,
-        PadMode::Digital => 1,
-        PadMode::Analog => 2,
-        PadMode::Negcon => 3,
-        PadMode::Config => 4,
-        PadMode::Unknown => 5,
-    }
-}
-
-/// The real port under `Controllers`, watching it: it keeps the reply bytes of the last poll
-/// transaction (command 0x42), the `/ACK` timing of each byte, and counts poll and
-/// configuration transactions. It reads the system clock only when `STAT` shows an `/ACK`
-/// signal or the line released, never inside the SDK's wait loops, so it adds no time to them.
-struct Watch {
-    port: ControllerPort,
-    position: usize,
-    command: u8,
-    rx: [u8; 9],
-    n: u8,
-    rise: [u16; 9],
-    width: [u8; 9],
-    up_at: u16,
-    wrote_at: u16,
-    clear_pending: bool,
-    irq_after_clear: bool,
-    snap: [u8; 9],
-    snap_n: u8,
-    snap_ok: bool,
-    snap_wire: rec::Wire,
-    snap_irq: bool,
-    polls: u32,
-    configs: u32,
-}
-
-impl Watch {
-    fn new() -> Self {
-        Self {
-            // SAFETY: a token is a logic guard; nothing else drives SIO0 while the survey runs.
-            port: unsafe { ControllerPort::steal() },
-            position: 0,
-            command: 0,
-            rx: [0; 9],
-            n: 0,
-            rise: [0xFFFF; 9],
-            width: [0; 9],
-            up_at: 0,
-            wrote_at: 0,
-            clear_pending: false,
-            irq_after_clear: false,
-            snap: [0; 9],
-            snap_n: 0,
-            snap_ok: false,
-            snap_wire: rec::Wire::NONE,
-            snap_irq: false,
-            polls: 0,
-            configs: 0,
-        }
-    }
-
-    /// Index of the byte last written.
-    fn current(&self) -> Option<usize> {
-        self.position.checked_sub(1).filter(|&i| i < 9)
-    }
-}
-
-impl Transport for Watch {
-    fn status(&mut self) -> u32 {
-        let status = self.port.status();
-        if self.clear_pending {
-            self.clear_pending = false;
-            if status & sio0::stat::IRQ != 0 {
-                self.irq_after_clear = true;
-            }
-        }
-        if let Some(i) = self.current() {
-            if status & (sio0::stat::DSR_LEVEL | sio0::stat::IRQ) != 0 && self.rise[i] == 0xFFFF {
-                let now = self.port.clock();
-                self.rise[i] = now.wrapping_sub(self.wrote_at);
-                if status & sio0::stat::DSR_LEVEL != 0 {
-                    self.up_at = now;
-                    self.width[i] = 0;
-                } else {
-                    self.width[i] = 0xFF;
-                }
-            } else if status & sio0::stat::DSR_LEVEL == 0
-                && self.rise[i] != 0xFFFF
-                && self.width[i] == 0
-            {
-                self.width[i] = self.port.clock().wrapping_sub(self.up_at).clamp(1, 254) as u8;
-            }
-        }
-        status
-    }
-    fn receive(&mut self) -> u8 {
-        let byte = self.port.receive();
-        if let Some(at) = self.position.checked_sub(1) {
-            if at < 9 {
-                self.rx[at] = byte;
-                self.n = (at + 1) as u8;
-            }
-        }
-        byte
-    }
-    fn transmit(&mut self, byte: u8) {
-        if self.position == 1 {
-            self.command = byte;
-        }
-        self.position += 1;
-        self.wrote_at = self.port.clock();
-        self.port.transmit(byte);
-    }
-    fn set_mode(&mut self, value: u16) {
-        self.port.set_mode(value);
-    }
-    fn set_baud(&mut self, value: u16) {
-        self.port.set_baud(value);
-    }
-    fn set_control(&mut self, value: u16) {
-        if value & sio0::ctrl::ACK != 0 {
-            self.clear_pending = true;
-        }
-        self.port.set_control(value);
-    }
-    fn control(&mut self) -> u16 {
-        self.port.control()
-    }
-    fn clock(&mut self) -> u16 {
-        self.port.clock()
-    }
-    fn finish(&mut self, succeeded: bool) {
-        if self.command == 0x42 {
-            self.snap = self.rx;
-            self.snap_n = self.n;
-            self.snap_ok = succeeded;
-            self.snap_wire = rec::Wire { rise: self.rise, width: self.width };
-            self.snap_irq = self.irq_after_clear;
-            self.polls += 1;
-        } else if self.position > 0 {
-            self.configs += 1;
-        }
-        self.position = 0;
-        self.command = 0;
-        self.n = 0;
-        self.rx = [0; 9];
-        self.rise = [0xFFFF; 9];
-        self.width = [0; 9];
-        self.irq_after_clear = false;
-        self.port.finish(succeeded);
-    }
-    fn mask_interrupts(&mut self) -> bool {
-        self.port.mask_interrupts()
-    }
-    fn restore_interrupts(&mut self, were_enabled: bool) {
-        self.port.restore_interrupts(were_enabled);
-    }
 }
 
 /// What one `Controllers::poll` did, from the SDK's report and the wire.
@@ -479,7 +313,7 @@ struct Screen {
 
 /// Run `draw` once into each of the two 240-line buffers, whichever is on show.
 #[inline(never)]
-fn both(draw: &mut dyn FnMut()) {
+pub(crate) fn both(draw: &mut dyn FnMut()) {
     probe_gpu!(gpu);
     gpu_io::wait_command_ready();
     for base in [0i16, 240] {
@@ -494,7 +328,7 @@ fn both(draw: &mut dyn FnMut()) {
 }
 
 #[inline(never)]
-fn rect(x: i16, y: i16, w: u16, h: u16, c: (u8, u8, u8)) {
+pub(crate) fn rect(x: i16, y: i16, w: u16, h: u16, c: (u8, u8, u8)) {
     probe_gpu!(gpu);
     gpu.draw(&QuadFlat::rect((x, y), (w, h), c));
 }
@@ -568,7 +402,7 @@ impl Screen {
     }
 }
 
-fn hex_bytes(l: &mut L, bytes: &[u8]) {
+pub(crate) fn hex_bytes(l: &mut L, bytes: &[u8]) {
     for (i, b) in bytes.iter().enumerate() {
         if i > 0 {
             l.s(" ");
@@ -578,7 +412,7 @@ fn hex_bytes(l: &mut L, bytes: &[u8]) {
 }
 
 /// Wait one video frame.
-fn frame() {
+pub(crate) fn frame() {
     // The stop panel's watchdog counts GP1 writes and CD commands, which a survey that only
     // polls pads makes none of for minutes.
     crate::bounds::heartbeat();
@@ -822,17 +656,6 @@ fn run_windows(
     w.end_section(sec);
 }
 
-fn mode_name(mode: u8) -> &'static str {
-    match mode {
-        0 => "NONE",
-        1 => "DIGITAL",
-        2 => "ANALOG",
-        3 => "NEGCON",
-        4 => "CONFIG",
-        _ => "UNKNOWN",
-    }
-}
-
 // --------------------------------------------------------------------------- soaks
 
 /// Cycles into the frame the soak's poll starts: 0 for the first hundred polls, as a loop that
@@ -886,6 +709,11 @@ impl Load {
     }
 }
 
+/// Soak `kind` on `port`. Kinds 0 to 2 start a fresh driver, as the launcher makes it, and leave
+/// its first poll (the handshake) out of the counts. Kind 3 is the section that comes before the
+/// raw sweep: it continues `carried`, the driver the menu left (a pad fresh from power, in the
+/// state the menu's lab left it), or, when there is none, a fresh driver whose first poll is
+/// counted as poll 0, so the record holds what `Controllers` does with a pad nobody has touched.
 #[inline(never)]
 fn run_soak(
     scr: &mut Screen,
@@ -893,14 +721,17 @@ fn run_soak(
     port: Port,
     kind: u8,
     w: &mut Writer,
+    carried: Option<Controllers>,
 ) {
     scr.begin(rec::SOAK_NAMES[kind as usize]);
     let mut soak = Soak::EMPTY;
     soak.kind = kind;
-    // A fresh driver, as the launcher makes it, whose first poll runs the handshake.
-    let mut pads = Controllers::new();
     let mut watch = Watch::new();
-    let _ = sdk_poll(&mut pads, &mut watch, port);
+    let continuing = carried.is_some();
+    let mut pads = carried.unwrap_or_else(Controllers::new);
+    if kind != 3 {
+        let _ = sdk_poll(&mut pads, &mut watch, port);
+    }
     let configs_before = watch.configs;
     let mut load = if kind == 1 { Some(Load::start()) } else { None };
     let vb_start = interrupts::vblank_count();
@@ -915,6 +746,9 @@ fn run_soak(
         if i > 0 && (kind == 1 || i % 6 == 0) {
             let mut a = L::new();
             a.s("POLL ").u(i as u32).s("/").u(SDK_POLLS as u32).s("  TIME LEFT ").u((SDK_POLLS - i) as u32 / 60 + 1).s(" S");
+            if kind == 3 {
+                a.s(if continuing { " MENU DRIVER" } else { " FRESH DRIVER" });
+            }
             let mut e = L::new();
             e.s("OK ").u(u32::from(soak.classes[0])).s(" SHORT ").u(u32::from(soak.classes[1])).s(" STALE ").u(u32::from(soak.stale));
             e.s(" CFG ").u(watch.configs - configs_before).s(" VB ").u(u32::from(soak.irq_failed));
@@ -954,7 +788,12 @@ fn say_soak(scr: &mut Screen, soak: &Soak, kind: u8) {
     }
     let last = soak.runs[soak.run_n.saturating_sub(1) as usize].view;
     let mut l = L::new();
-    l.s("S").u(u32::from(kind) + 1).s(" ").u(u32::from(soak.polls)).s(" POLLS: OK ").u(u32::from(soak.classes[0]));
+    if kind == 3 {
+        l.s("S0 ");
+    } else {
+        l.s("S").u(u32::from(kind) + 1).s(" ");
+    }
+    l.s("").u(u32::from(soak.polls)).s(" POLLS: OK ").u(u32::from(soak.classes[0]));
     if soak.classes[1] != 0 {
         l.s(" SHORT ").u(u32::from(soak.classes[1])).s(" DIED AT ").u(modal as u32);
     }
@@ -1069,12 +908,14 @@ impl Stored {
     }
 }
 
-static mut STORED: [Stored; RECORDS] = [Stored::EMPTY; RECORDS];
+/// Stored records: entry 0 is the power-on record, entries 1 to `RECORDS` the survey's records in
+/// turn.
+static mut STORED: [Stored; RECORDS + 1] = [Stored::EMPTY; RECORDS + 1];
 
-/// Slot 0 of the borrowed staging room is where a record is built; slots 1 to `RECORDS` hold the
-/// finished ones.
+/// Slot 0 of the borrowed staging room is where a record is built; slot `1 + k` holds stored
+/// record `k`.
 fn slot_bytes(i: usize) -> &'static mut [u8] {
-    const _: () = assert!(RECORD_MAX * (RECORDS + 1) <= crate::handoff_probe::STAGING_BYTES);
+    const _: () = assert!(RECORD_MAX * (RECORDS + 2) <= crate::handoff_probe::STAGING_BYTES);
     // SAFETY: the slots are disjoint ranges of a buffer nothing else touches while the survey runs.
     unsafe {
         core::slice::from_raw_parts_mut(crate::handoff_probe::staging_ptr().add(i * RECORD_MAX), RECORD_MAX)
@@ -1182,6 +1023,48 @@ struct Survey {
     records: u8,
     baseline_irq: u32,
     baseline_dpcr: u32,
+    /// The driver the menu left, for the first record on port 1.
+    carried: Option<Controllers>,
+}
+
+/// How the mode was entered.
+pub(crate) enum Entry {
+    /// The survey, continuing the menu's driver.
+    Survey(Controllers),
+    /// Only the power-on record's QR pages.
+    PowerOnPages,
+}
+
+/// The power-on record (kind 2), built from what the menu collected, into stored entry 0.
+fn build_power_record(sv: &Survey) {
+    let power = crate::pad_menu::power_on();
+    if power.polls == 0 {
+        return;
+    }
+    let mut w = Writer::new(slot_bytes(0));
+    let mut hdr = Header {
+        suite_major: crate::SUITE_VERSION_MAJOR,
+        suite_minor: crate::SUITE_VERSION_MINOR,
+        record_no: 0,
+        boot_id: sv.boot_id,
+        port: 0,
+        kind: 2,
+        flags: 0,
+        sdk_rev: SDK_REV,
+        timer_hz: TIMER_HZ,
+        ack_timeout: ACK_TIMEOUT,
+    };
+    rec::put_header(&mut w, &hdr);
+    let sec = w.begin_section(rec::TAG_POWERON);
+    rec::put_poweron(&mut w, power);
+    w.end_section(sec);
+    if w.overflow {
+        hdr.flags |= 1;
+    }
+    rec::patch_flags(&mut w, hdr.flags);
+    // SAFETY: single thread; the page cycle reads the slots only between records.
+    let slot = unsafe { &mut (*core::ptr::addr_of_mut!(STORED))[0] };
+    store_record(slot, slot_bytes(1), &w, &hdr);
 }
 
 /// The whole record for the pad in `port` (or for nothing answering).
@@ -1192,7 +1075,6 @@ fn run_record(sv: &mut Survey, port: Port) {
     sv.scr.record_no = sv.records;
     sv.scr.log_n = 0;
     sv.scr.port = u8::from(port.is_two());
-    // SAFETY: single thread; the buffer is only used inside this function.
     let buf = slot_bytes(0);
     let mut w = Writer::new(buf);
     let mut hdr = Header {
@@ -1208,6 +1090,13 @@ fn run_record(sv: &mut Survey, port: Port) {
         ack_timeout: ACK_TIMEOUT,
     };
     rec::put_header(&mut w, &hdr);
+    // Section D: 300 polls on the pad as the menu left it, before anything of the survey's own
+    // touches it. Only when something answers; an empty port gets the kind-1 record as before.
+    let carried = if port == Port::One { sv.carried.take() } else { None };
+    let anything = present(&mut bus, port);
+    if anything {
+        run_soak(&mut sv.scr, &mut bus, port, 3, &mut w, carried);
+    }
     let res = run_survey(&mut sv.scr, &mut bus, port, &mut w);
     if !res.any_ack {
         hdr.kind = 1;
@@ -1218,9 +1107,9 @@ fn run_record(sv: &mut Survey, port: Port) {
         // The launcher's first poll, before anything draws, runs the handshake.
         let _ = sdk_poll(&mut pads, &mut watch, port);
         run_windows(&mut sv.scr, &mut bus, port, &mut pads, &mut watch, &mut w);
-        run_soak(&mut sv.scr, &mut bus, port, 0, &mut w);
-        run_soak(&mut sv.scr, &mut bus, port, 1, &mut w);
-        run_soak(&mut sv.scr, &mut bus, port, 2, &mut w);
+        run_soak(&mut sv.scr, &mut bus, port, 0, &mut w, None);
+        run_soak(&mut sv.scr, &mut bus, port, 1, &mut w, None);
+        run_soak(&mut sv.scr, &mut bus, port, 2, &mut w, None);
         run_handover(&mut sv.scr, port, 0, sv.baseline_irq, sv.baseline_dpcr, &mut w);
         run_handover(&mut sv.scr, port, 1, sv.baseline_irq, sv.baseline_dpcr, &mut w);
     }
@@ -1228,14 +1117,14 @@ fn run_record(sv: &mut Survey, port: Port) {
         hdr.flags |= 1;
     }
     rec::patch_flags(&mut w, hdr.flags);
-    let slot_index = usize::from(sv.records.wrapping_sub(1)) % RECORDS;
+    let index = 1 + usize::from(sv.records.wrapping_sub(1)) % RECORDS;
     // SAFETY: single thread; the page cycle reads the slots only between records.
-    let slot = unsafe { &mut (*core::ptr::addr_of_mut!(STORED))[slot_index] };
-    store_record(slot, slot_bytes(1 + slot_index), &w, &hdr);
+    let slot = unsafe { &mut (*core::ptr::addr_of_mut!(STORED))[index] };
+    store_record(slot, slot_bytes(1 + index), &w, &hdr);
 }
 
-/// Poll `port` raw for presence: a complete poll reply.
-fn present(bus: &mut ControllerPort, port: Port) -> bool {
+/// Poll `port` raw for presence: an address byte that was acknowledged.
+pub(crate) fn present(bus: &mut ControllerPort, port: Port) -> bool {
     // Anything that acknowledges the address byte counts, so a pad whose polls do not complete is
     // still surveyed.
     let t = transact(bus, port, &POLL_TX, POLL_PROFILE, 1, 0, 0);
@@ -1243,7 +1132,7 @@ fn present(bus: &mut ControllerPort, port: Port) -> bool {
 }
 
 /// The mode: runs until the console is reset.
-pub(crate) fn execute(baseline_irq: u32, baseline_dpcr: u32) -> ! {
+pub(crate) fn execute(entry: Entry, baseline_irq: u32, baseline_dpcr: u32) -> ! {
     interrupts::install_vblank_counter();
     irq::set_mask(baseline_irq);
     let _ = Gpu::new(
@@ -1251,14 +1140,20 @@ pub(crate) fn execute(baseline_irq: u32, baseline_dpcr: u32) -> ! {
         DisplayConfig::new(VideoMode::Ntsc, Resolution::R320X240),
     );
     let boot_id = (interrupts::vblank_count() as u8) ^ 0xA5;
+    let (carried, survey) = match entry {
+        Entry::Survey(pads) => (Some(pads), true),
+        Entry::PowerOnPages => (None, false),
+    };
     let mut sv = Survey {
         scr: Screen::new(),
         boot_id,
         records: 0,
         baseline_irq,
         baseline_dpcr,
+        carried,
     };
-    tty::println("pad-survey: begins");
+    tty::println(if survey { "pad-survey: begins" } else { "pad-survey: power-on record pages" });
+    build_power_record(&sv);
     // SAFETY: a token is a logic guard; nothing else drives SIO0 while the survey runs.
     let mut bus = unsafe { ControllerPort::steal() };
     let ports = [Port::One, Port::Two];
@@ -1275,6 +1170,9 @@ pub(crate) fn execute(baseline_irq: u32, baseline_dpcr: u32) -> ! {
         waited += 1;
         let mut starts = [false; 2];
         for p in 0..2 {
+            if !survey {
+                break;
+            }
             let now = present(&mut bus, ports[p]);
             // A change is believed after PRESENCE_HOLD polls in a row that agree.
             if now != seen[p] {
@@ -1292,7 +1190,7 @@ pub(crate) fn execute(baseline_irq: u32, baseline_dpcr: u32) -> ! {
                 streak[p] = 0;
             }
         }
-        if !starts[0] && !starts[1] && waited >= NO_PAD_FRAMES && sv.records == 0 {
+        if survey && !starts[0] && !starts[1] && waited >= NO_PAD_FRAMES && sv.records == 0 {
             // Nothing answered for the wait: record that on port 1, then port 2.
             for p in 0..2 {
                 if !empty_logged[p] && !seen[p] {
@@ -1313,7 +1211,7 @@ pub(crate) fn execute(baseline_irq: u32, baseline_dpcr: u32) -> ! {
             seen[p] = true;
             streak[p] = 0;
             // Show the new record first.
-            view_record = usize::from(sv.records.wrapping_sub(1)) % RECORDS;
+            view_record = 1 + usize::from(sv.records.wrapping_sub(1)) % RECORDS;
             view_page = 0;
             page_frames = PAGE_FRAMES;
             shown = None;
@@ -1321,8 +1219,7 @@ pub(crate) fn execute(baseline_irq: u32, baseline_dpcr: u32) -> ! {
         // The page cycle, or the wait screen before there is a record.
         // SAFETY: single thread; read between records.
         let stored = unsafe { &*core::ptr::addr_of!(STORED) };
-        let have = usize::from(sv.records).min(RECORDS);
-        if have == 0 {
+        if stored.iter().all(|s| s.len == 0) {
             if waited % 30 == 1 {
                 let left = NO_PAD_FRAMES.saturating_sub(waited) / 60;
                 sv.scr.record_no = 0;
@@ -1343,6 +1240,11 @@ pub(crate) fn execute(baseline_irq: u32, baseline_dpcr: u32) -> ! {
         page_frames += 1;
         if page_frames >= PAGE_FRAMES {
             page_frames = 0;
+            if stored[view_record].len == 0 {
+                view_record = (view_record + 1) % (RECORDS + 1);
+                view_page = 0;
+                continue;
+            }
             let s = &stored[view_record];
             if shown != Some((view_record, view_page)) {
                 draw_page(&sv.scr, s, slot_bytes(1 + view_record), view_page);
@@ -1353,7 +1255,7 @@ pub(crate) fn execute(baseline_irq: u32, baseline_dpcr: u32) -> ! {
                 view_page = 0;
                 let mut next = view_record;
                 loop {
-                    next = (next + 1) % RECORDS;
+                    next = (next + 1) % (RECORDS + 1);
                     if stored[next].len != 0 || next == view_record {
                         break;
                     }
@@ -1366,32 +1268,32 @@ pub(crate) fn execute(baseline_irq: u32, baseline_dpcr: u32) -> ! {
 
 /// A line of text under construction. The builders are out of line on purpose: this module
 /// builds a few hundred lines and inlining each append would cost the boot EXE tens of kilobytes.
-struct L(Line);
+pub(crate) struct L(Line);
 
 impl L {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         L(Line::new())
     }
 
     #[inline(never)]
-    fn s(&mut self, t: &str) -> &mut Self {
+    pub(crate) fn s(&mut self, t: &str) -> &mut Self {
         self.0.s(t);
         self
     }
 
     #[inline(never)]
-    fn u(&mut self, v: u32) -> &mut Self {
+    pub(crate) fn u(&mut self, v: u32) -> &mut Self {
         self.0.u(v);
         self
     }
 
     #[inline(never)]
-    fn hex(&mut self, v: u32, digits: u32) -> &mut Self {
+    pub(crate) fn hex(&mut self, v: u32, digits: u32) -> &mut Self {
         self.0.hex(v, digits);
         self
     }
 
-    fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         self.0.as_str()
     }
 }
@@ -1448,14 +1350,21 @@ fn live_sdk(
 const SHORT_NAMES: [&str; 8] = ["REST", "X", "DPAD", "LSTK", "RSTK", "L3R3", "ANLG", "OTHER"];
 
 /// Which 240-line buffer the display shows: 0 or 240.
-static mut FRONT: i16 = 0;
+pub(crate) static mut FRONT: i16 = 0;
 
 /// Draw a screen into the buffer that is not on show, then have the display switch to it at the
 /// next VBlank, as the present path does (a queued GP1 display-start word the VBlank handler
 /// applies). Nothing is ever seen half drawn. Both buffers hold the static parts of the screen
 /// (`Screen::begin`, the log), so only the live area is redrawn here.
 #[inline(never)]
-fn present_scene(draw: &mut dyn FnMut()) {
+pub(crate) fn present_scene(draw: &mut dyn FnMut()) {
+    // The buffer to draw into is the one the display is leaving, so the flip queued by the
+    // last call must have been applied first: drawing before then shows a half-drawn screen.
+    // Bounded: a flip that never comes must not hang the screen.
+    let mut spins = 0u32;
+    while psx_rt::present::is_flip_pending() && spins < 2_000_000 {
+        spins += 1;
+    }
     // SAFETY: single thread; plain static.
     let back = 240 - unsafe { FRONT };
     {

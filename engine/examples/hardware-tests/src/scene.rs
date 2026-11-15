@@ -15,7 +15,10 @@ use psx_engine::{Ctx, Scene};
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum Mode {
+    /// The pad menu (`pad_menu.rs`) runs inside `update` and hands back a row.
     Menu,
+    /// A few seconds on the engine's own pad reading before the chosen row starts.
+    EngineCheck,
     ControllerTest,
     MemoryCard,
     /// GPU DONE SIGNAL ONLY: its result pages.
@@ -24,31 +27,16 @@ enum Mode {
     Capture,
 }
 
-const MENU: [&str; 10] = [
-    // Row 0 is pinned: `make hwtest-run` selects it by firing CROSS at a fixed
-    // tick with the cursor still at its boot position.
-    "RUN HARDWARE TEST",
-    "GPU DONE SIGNAL ONLY",
-    "GPU DONE FIX CANDIDATES",
-    "GPU DONE FILLS + SHIPPED NODE",
-    "RADIUS + LIST NODE SWEEP ONLY",
-    "CONTROLLER TEST (P1 + P2)",
-    "CONTROLLER SURVEY (RAW + SDK)",
-    "MEMORY CARD (AT OWN RISK)",
-    "DUALSHOCK MOTOR QUESTIONS",
-    "VIEW LAST CAPTURE",
-];
-const MENU_TOP: i16 = 36;
-const MENU_ROW_PITCH: i16 = 13;
 /// Frames each capture page (and the cover) stays up before the next one.
 const PAGE_FRAMES: u32 = 150;
+/// Frames the engine check stays up before the chosen row starts.
+const ENGINE_CHECK_FRAMES: u32 = 150;
 /// Frames auto-advance stays off after a manual page turn.
 const MANUAL_HOLD: u32 = 1500;
 
 pub(crate) struct HardwareTests {
     font: Option<FontAtlas>,
     mode: Mode,
-    menu_cursor: usize,
     /// The GPU DONE SIGNAL page on show.
     done_page: usize,
     run: Run,
@@ -62,8 +50,16 @@ pub(crate) struct HardwareTests {
     view_frames: u32,
     manual_until: u32,
     clock: u32,
-    /// Menu frames since the last input; the survey starts at `pad_survey::IDLE_ENTRY_FRAMES`.
-    idle: u32,
+    /// The row the pad menu chose, started once the engine check has been shown.
+    pending_row: Option<u8>,
+    /// Frames of the engine check left.
+    check_frames: u32,
+    /// What a raw poll of port 1 read in the engine check, beside what `ctx.pad` reports.
+    check_raw: [u8; 9],
+    check_raw_n: u8,
+    /// Interrupt mask and DMA control word the suite started with.
+    irq_baseline: u32,
+    dpcr_baseline: u32,
     controller_test: ControllerTest,
     memory_card: MemoryCardDiagnostic,
     /// The memory-card test touches the operator's real card and has had
@@ -73,11 +69,16 @@ pub(crate) struct HardwareTests {
 }
 
 impl HardwareTests {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(pending_row: Option<u8>, irq_baseline: u32, dpcr_baseline: u32) -> Self {
         Self {
             font: None,
-            mode: Mode::Menu,
-            menu_cursor: 0,
+            mode: if pending_row.is_some() { Mode::EngineCheck } else { Mode::Menu },
+            pending_row,
+            check_frames: ENGINE_CHECK_FRAMES,
+            check_raw: [0; 9],
+            check_raw_n: 0,
+            irq_baseline,
+            dpcr_baseline,
             done_page: 0,
             run: Run::new(),
             capture: PhotoCapture::new(),
@@ -87,7 +88,6 @@ impl HardwareTests {
             view_frames: 0,
             manual_until: 0,
             clock: 0,
-            idle: 0,
             controller_test: ControllerTest::new(),
             memory_card: crate::probe_tokens::memcard_diagnostic(),
             memcard_armed: false,
@@ -96,6 +96,107 @@ impl HardwareTests {
 
     fn open_menu(&mut self) {
         self.mode = Mode::Menu;
+    }
+
+    /// The pad menu, in the frame loop: it takes the screen and the pad, returns the row chosen,
+    /// and the engine's own picture is put back before anything of the engine draws.
+    fn run_pad_menu(&mut self, ctx: &mut Ctx) {
+        let row = pad_menu::execute(false, self.have_capture, psx_io::irq::mask(), self.dpcr_baseline);
+        self.font = Some(ui::upload_font());
+        let (gpu, fb) = ctx.gpu_and_buffers();
+        fb.apply_draw_target(gpu);
+        ctx.request_timing_realign();
+        self.pending_row = Some(row);
+        self.check_frames = ENGINE_CHECK_FRAMES;
+        self.mode = Mode::EngineCheck;
+    }
+
+    /// Start the row the menu chose.
+    fn start_row(&mut self, ctx: &mut Ctx, row: u8) {
+        match row {
+            0 => self.start_run(ctx, false, false),
+            1 => self.start_gpu_done(ctx, 0),
+            2 => self.start_gpu_done(ctx, 1),
+            3 => self.start_gpu_done(ctx, 2),
+            4 => self.start_run(ctx, true, false),
+            5 => {
+                self.controller_test.start();
+                self.mode = Mode::ControllerTest;
+            }
+            7 => {
+                self.memory_card = crate::probe_tokens::memcard_diagnostic();
+                self.memcard_armed = false;
+                self.mode = Mode::MemoryCard;
+            }
+            8 => self.start_run(ctx, false, true),
+            _ => {
+                if self.have_capture {
+                    self.open_capture();
+                    self.capture.render_page(0);
+                }
+            }
+        }
+    }
+
+    /// The engine check: what the engine's own pad poll (`ctx.pad`) reports, next to a raw poll of
+    /// the same port every third frame.
+    fn update_engine_check(&mut self, ctx: &mut Ctx) {
+        self.check_frames = self.check_frames.saturating_sub(1);
+        if self.check_frames % 3 == 0 {
+            let t = pad_survey::transact(
+                ctx.controller_port(),
+                psx_io::controller_port::Port::One,
+                &pad_survey::POLL_TX,
+                pad_survey::POLL_PROFILE,
+                1,
+                0,
+                0,
+            );
+            if t.got >= 3 {
+                self.check_raw = [0; 9];
+                for i in 0..9 {
+                    self.check_raw[i] = t.rx[i];
+                }
+                self.check_raw_n = t.got.min(9);
+            }
+        }
+        if self.check_frames == 0 {
+            if let Some(row) = self.pending_row.take() {
+                self.start_row(ctx, row);
+            } else {
+                self.open_menu();
+            }
+        }
+    }
+
+    fn draw_engine_check(&self, font: &FontAtlas, ctx: &Ctx) {
+        font.draw_text(8, 8, "ENGINE PAD CHECK", (255, 232, 128));
+        font.draw_text(8, 22, "THE ENGINE'S OWN POLL (CTX.PAD):", (232, 236, 244));
+        let mut l = ui::Line::new();
+        l.s("MODE ").s(pad_watch::mode_name(pad_watch::mode_code(ctx.pad.mode)));
+        l.s(" BTN ").hex(u32::from(ctx.pad.buttons.bits()), 4);
+        font.draw_text(8, 34, l.as_str(), (232, 236, 244));
+        let mut l = ui::Line::new();
+        l.s("STICK RX ").hex(u32::from(ctx.pad.sticks.right_x), 2);
+        l.s(" RY ").hex(u32::from(ctx.pad.sticks.right_y), 2);
+        l.s(" LX ").hex(u32::from(ctx.pad.sticks.left_x), 2);
+        l.s(" LY ").hex(u32::from(ctx.pad.sticks.left_y), 2);
+        font.draw_text(8, 46, l.as_str(), (232, 236, 244));
+        font.draw_text(8, 64, "A RAW POLL OF THE SAME FRAMES:", (232, 236, 244));
+        let mut l = ui::Line::new();
+        l.s("RX ");
+        for i in 0..usize::from(self.check_raw_n) {
+            if i > 0 {
+                l.s(" ");
+            }
+            l.hex(u32::from(self.check_raw[i]), 2);
+        }
+        font.draw_text(8, 76, l.as_str(), (232, 236, 244));
+        font.draw_text(8, 100, "THE ROW YOU CHOSE STARTS IN A MOMENT.", (150, 170, 200));
+        font.draw_text(8, 112, "THIS IS THE ENGINE PATH, NOT THE MENU'S.", (150, 170, 200));
+        let mut l = ui::Line::new();
+        l.s("LEFT ").u(self.check_frames / 60 + 1).s(" S");
+        font.draw_text(8, 130, l.as_str(), (255, 232, 128));
     }
 
     fn open_capture(&mut self) {
@@ -143,16 +244,6 @@ impl HardwareTests {
         }
     }
 
-    /// The controller survey: takes the machine and never returns.
-    fn start_pad_survey(&mut self, ctx: &mut Ctx) -> ! {
-        let _ = ctx;
-        tty::println("hardware-tests: controller survey begins");
-        let irq_baseline = psx_io::irq::mask();
-        // SAFETY: plain read of the DMA control word.
-        let dpcr_baseline = unsafe { psx_io::read_u32(psx_hw::dma::DPCR) };
-        pad_survey::execute(irq_baseline, dpcr_baseline)
-    }
-
     /// GPU DONE SIGNAL ONLY: run the one step, then show its pages.
     fn start_gpu_done(&mut self, ctx: &mut Ctx, set: u8) {
         tty::println("hardware-tests: gpu-done run begins");
@@ -191,49 +282,8 @@ impl Scene for HardwareTests {
                 // deliberate hold gesture owns navigation.
             }
             Mode::MemoryCard => self.update_memory_card(ctx),
-            Mode::Menu => {
-                let rows = MENU.len();
-                if ctx.pad.buttons.bits() != 0 {
-                    self.idle = 0;
-                } else {
-                    self.idle += 1;
-                    if self.idle >= pad_survey::IDLE_ENTRY_FRAMES {
-                        self.start_pad_survey(ctx);
-                    }
-                }
-                if ctx.just_pressed(button::UP) {
-                    self.menu_cursor = (self.menu_cursor + rows - 1) % rows;
-                }
-                if ctx.just_pressed(button::DOWN) {
-                    self.menu_cursor = (self.menu_cursor + 1) % rows;
-                }
-                if ctx.just_pressed(button::CROSS) {
-                    match self.menu_cursor {
-                        0 => self.start_run(ctx, false, false),
-                        1 => self.start_gpu_done(ctx, 0),
-                        2 => self.start_gpu_done(ctx, 1),
-                        3 => self.start_gpu_done(ctx, 2),
-                        4 => self.start_run(ctx, true, false),
-                        5 => {
-                            self.controller_test.start();
-                            self.mode = Mode::ControllerTest;
-                        }
-                        6 => self.start_pad_survey(ctx),
-                        7 => {
-                            self.memory_card = crate::probe_tokens::memcard_diagnostic();
-                            self.memcard_armed = false;
-                            self.mode = Mode::MemoryCard;
-                        }
-                        8 => self.start_run(ctx, false, true),
-                        _ => {
-                            if self.have_capture {
-                                self.open_capture();
-                                self.capture.render_page(0);
-                            }
-                        }
-                    }
-                }
-            }
+            Mode::Menu => self.run_pad_menu(ctx),
+            Mode::EngineCheck => self.update_engine_check(ctx),
             Mode::GpuDone => {
                 if ctx.just_pressed(button::START) || ctx.just_pressed(button::TRIANGLE) {
                     self.open_menu();
@@ -255,10 +305,8 @@ impl Scene for HardwareTests {
             return;
         };
         match self.mode {
-            Mode::Menu => {
-                draw_test_pattern(ctx.sim_tick.as_u32());
-                self.draw_menu(font);
-            }
+            Mode::Menu => {}
+            Mode::EngineCheck => self.draw_engine_check(font, ctx),
             Mode::GpuDone => gpu_done::draw_page(font, self.done_page),
             Mode::Capture => {
                 if self.view == 0 {
@@ -349,47 +397,6 @@ impl HardwareTests {
         if turned && self.view > table_pages() {
             self.capture.render_page(self.view - 1 - table_pages());
         }
-    }
-
-    fn draw_menu(&self, font: &FontAtlas) {
-        font.draw_text(8, 6, "PS1 HARDWARE TESTS", (232, 236, 244));
-        font.draw_text(
-            320 - 8 - SUITE_VERSION.len() as i16 * 8,
-            6,
-            SUITE_VERSION,
-            (112, 136, 170),
-        );
-        font.draw_text(8, 20, "MAIN MENU", (255, 232, 128));
-        let mut y = MENU_TOP;
-        for (row, label) in MENU.iter().enumerate() {
-            let selected = row == self.menu_cursor;
-            if selected {
-                font.draw_text(10, y, ">", (255, 232, 128));
-            }
-            let colour = if selected {
-                (255, 232, 128)
-            } else {
-                (176, 190, 210)
-            };
-            font.draw_text(22, y, label, colour);
-            if row == 9 && !self.have_capture {
-                font.draw_text(22, y + 9, "NONE YET - RUN FIRST", (112, 136, 170));
-            }
-            y += MENU_ROW_PITCH;
-        }
-        let left = pad_survey::IDLE_ENTRY_FRAMES.saturating_sub(self.idle) / 60;
-        let mut line = ui::Line::new();
-        line.s("NO BUTTON IN ").u(left).s(" S: CONTROLLER SURVEY");
-        font.draw_text(8, 176, line.as_str(), (255, 232, 128));
-        font.draw_text(
-            8,
-            196,
-            "THE RUN TAKES THE WHOLE DISC TO ITSELF.",
-            (140, 160, 190),
-        );
-        font.draw_text(8, 207, "HOLD L2 WHEN STARTING TO SKIP THE", (140, 160, 190));
-        font.draw_text(8, 217, "STEPS THAT CAN HANG A CONSOLE.", (140, 160, 190));
-        font.draw_text(8, 228, "UP/DOWN SELECT   CROSS RUN", (140, 160, 190));
     }
 
     /// Page 0: what to film, and whether the run came back clean.
@@ -562,7 +569,19 @@ fn main() -> ! {
     psx_rt::diag::set_stall_limit(20_000);
     // Before App::run: the engine's clock replaces the BIOS exception vector.
     kernel_timing::snapshot_vector();
-    let mut suite = HardwareTests::new();
+    // The menu comes before the engine, like the launcher: its own `Controllers`, the first
+    // traffic on the pad after power-on, watched. The engine starts only when a row needs it.
+    let irq_baseline = psx_io::irq::mask();
+    // SAFETY: plain read of the DMA control word.
+    let dpcr_baseline = unsafe { psx_io::read_u32(psx_hw::dma::DPCR) };
+    let row = pad_menu::execute(true, false, irq_baseline, dpcr_baseline);
+    // What a game gets from the launcher: SIO0, timers, interrupt mask and DMA quiesced.
+    timers::set_mode(timers::Timer::Timer1, 0);
+    psx_rt::entry::set_entry_state();
+    // SAFETY: restoring the DMA control word the suite started with.
+    unsafe { psx_io::write_u32(psx_hw::dma::DPCR, dpcr_baseline) };
+    psx_io::irq::set_mask(irq_baseline);
+    let mut suite = HardwareTests::new(Some(row), irq_baseline, dpcr_baseline);
     let config = Config {
         screen_w: SCREEN_W as u16,
         screen_h: SCREEN_H as u16,

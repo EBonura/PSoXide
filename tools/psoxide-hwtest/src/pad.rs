@@ -15,8 +15,9 @@ use crate::util::{base64_decode, crc32, Error, Reader, Result};
 pub mod record;
 
 use record::{
-    Axis, Failure, Handover, Header, IdRun, ModeRun, PollRun, PollView, Soak, Txn, Window, Wire,
-    HANDOVER_POLLS_MAX, ID_RUNS, MODE_RUNS, SOAK_FAILS, SOAK_POLLS_MAX, SOAK_RUNS, TXN_MAX,
+    Axis, Counters, Failure, Handover, Header, IdRun, LabResult, ModeRun, NoteRun, PollNote,
+    PollRun, PollView, PowerOn, Soak, Txn, Window, Wire, HANDOVER_POLLS_MAX, ID_RUNS, LAB_MAX,
+    MODE_RUNS, POWER_RUNS, SOAK_FAILS, SOAK_POLLS_MAX, SOAK_RUNS, TXN_MAX,
 };
 
 /// One decoded controller record.
@@ -31,6 +32,8 @@ pub struct PadRecord {
     pub soaks: Vec<Soak>,
     /// Hand-overs.
     pub handovers: Vec<Handover>,
+    /// The power-on section, in a kind-2 record.
+    pub power: Option<Box<PowerOn>>,
 }
 
 /// Page lines to binaries, one per run id: every page's CRC and the binary's CRC are checked.
@@ -208,6 +211,78 @@ fn read_soak(r: &mut Reader) -> Result<Soak> {
     Ok(s)
 }
 
+fn read_note(r: &mut Reader) -> Result<PollNote> {
+    let mut n = PollNote::default();
+    n.lab = r.u8()?;
+    n.first_class = r.u8()?;
+    n.first_id = r.u8()?;
+    n.first_died = r.u8()?;
+    n.class = r.u8()?;
+    n.id = r.u8()?;
+    n.n = r.u8()?;
+    n.acked = r.u8()?;
+    n.died = r.u8()?;
+    n.tries = r.u8()?;
+    n.fresh = r.u8()?;
+    n.cfg = r.u8()?;
+    n.exits = r.u8()?;
+    n.rx.copy_from_slice(r.bytes(9)?);
+    n.mode = r.u8()?;
+    n.flags = r.u8()?;
+    n.buttons = r.u16()?;
+    n.sticks.copy_from_slice(r.bytes(4)?);
+    n.fold = r.u8()?;
+    n.why = r.u8()?;
+    Ok(n)
+}
+
+fn read_poweron(r: &mut Reader) -> Result<Box<PowerOn>> {
+    let mut p = Box::new(PowerOn::EMPTY);
+    p.polls = r.u16()?;
+    p.run_n = r.u16()?;
+    p.dropped = r.u16()?;
+    p.frames = r.u32()?;
+    ensure!(usize::from(p.run_n) <= POWER_RUNS, "{} power-on runs", p.run_n);
+    p.counters = Counters {
+        ok: r.u32()?,
+        bad: r.u32()?,
+        nak: r.u32()?,
+        retry: r.u32()?,
+        handshakes: r.u32()?,
+        cfg: r.u32()?,
+        exits: r.u32()?,
+        exits_f3: r.u32()?,
+    };
+    p.lab_n = r.u8()?;
+    ensure!(usize::from(p.lab_n) <= LAB_MAX, "{} lab results", p.lab_n);
+    for i in 0..usize::from(p.lab_n) {
+        let mut l = LabResult::default();
+        l.phase = r.u8()?;
+        l.frames = r.u16()?;
+        l.polls = r.u16()?;
+        l.ok = r.u16()?;
+        l.bad = r.u16()?;
+        l.first_bad = r.u16()?;
+        l.btn_or = r.u16()?;
+        l.last_id = r.u8()?;
+        l.last_mode = r.u8()?;
+        l.last_flags = r.u8()?;
+        l.raw_ok = r.u8()?;
+        l.raw_total = r.u8()?;
+        l.status45.copy_from_slice(r.bytes(6)?);
+        l.status45_set = r.u8()?;
+        l.fold_hits = r.u16()?;
+        p.lab[i] = l;
+    }
+    for i in 0..usize::from(p.run_n) {
+        let count = r.u16()?;
+        let hold_min = r.u16()?;
+        let hold_max = r.u16()?;
+        p.runs[i] = NoteRun { count, note: read_note(r)?, hold_min, hold_max };
+    }
+    Ok(p)
+}
+
 fn read_handover(r: &mut Reader) -> Result<Handover> {
     let mut h = Handover::EMPTY;
     h.variant = r.u8()?;
@@ -242,7 +317,12 @@ pub fn parse_record(binary: &[u8]) -> Result<PadRecord> {
     let mut r = Reader::new(body, 0);
     ensure!(r.bytes(4)? == record::MAGIC, "not a PXCB record");
     let schema = r.u8()?;
-    ensure!(schema == record::SCHEMA, "schema {schema}, this reader knows {}", record::SCHEMA);
+    ensure!(
+        (record::SCHEMA_MIN..=record::SCHEMA).contains(&schema),
+        "schema {schema}, this reader knows {} to {}",
+        record::SCHEMA_MIN,
+        record::SCHEMA
+    );
     let header = Header {
         suite_major: r.u8()?,
         suite_minor: r.u8()?,
@@ -270,6 +350,7 @@ pub fn parse_record(binary: &[u8]) -> Result<PadRecord> {
         windows: Vec::new(),
         soaks: Vec::new(),
         handovers: Vec::new(),
+        power: None,
     };
     while r.offset < body.len() {
         let tag = r.u8()?;
@@ -289,6 +370,7 @@ pub fn parse_record(binary: &[u8]) -> Result<PadRecord> {
             }
             record::TAG_SOAK => rec.soaks.push(read_soak(&mut s)?),
             record::TAG_HANDOVER => rec.handovers.push(read_handover(&mut s)?),
+            record::TAG_POWERON => rec.power = Some(read_poweron(&mut s)?),
             other => return Err(Error(format!("unknown section tag {other}"))),
         }
     }
@@ -308,6 +390,15 @@ pub fn txn_ok(t: &Txn) -> bool {
     t.got >= 3 && t.got == t.sent && t.flags & 7 == 0 && t.rx[2] == 0x5A
 }
 
+/// The number a soak is called by: kind 3 is the one that runs first, soak 0.
+fn soak_label(kind: u8) -> u8 {
+    if kind == 3 {
+        0
+    } else {
+        kind + 1
+    }
+}
+
 /// A line of the per-controller summary: a key the comparison matches on, and the text.
 pub type Line = (String, String);
 
@@ -321,7 +412,11 @@ pub fn summarise(rec: &PadRecord) -> Vec<Line> {
             "controller {} on port {}, {}, suite v{}.{}, SDK {}, timer 0 = system clock {} Hz, ACK timeout {} ticks{}",
             h.record_no,
             h.port + 1,
-            if h.kind == 0 { "a pad answered" } else { "NOTHING ANSWERED" },
+            match h.kind {
+                0 => "a pad answered",
+                2 => "POWER-ON RECORD (the menu's first polls)",
+                _ => "NOTHING ANSWERED",
+            },
             h.suite_major,
             h.suite_minor,
             rev(h),
@@ -330,6 +425,9 @@ pub fn summarise(rec: &PadRecord) -> Vec<Line> {
             if h.flags & 1 != 0 { ", RECORD TRUNCATED" } else { "" }
         ),
     ));
+    if let Some(p) = &rec.power {
+        power_lines(p, &mut out);
+    }
     // Raw survey.
     for p in 0..4u8 {
         let ts: Vec<&Txn> = rec.txns.iter().filter(|t| t.prof == p).collect();
@@ -447,7 +545,7 @@ pub fn summarise(rec: &PadRecord) -> Vec<Line> {
         let last = s.runs[usize::from(s.run_n.saturating_sub(1))].view;
         let mut line = format!(
             "soak {} polls {}: ok {}",
-            s.kind + 1,
+            soak_label(s.kind),
             s.polls,
             s.classes[0]
         );
@@ -479,7 +577,7 @@ pub fn summarise(rec: &PadRecord) -> Vec<Line> {
             .filter(|&b| s.rise_max[b] != 0)
             .map(|b| format!("b{b}:{}-{}/{}-{}", s.rise_min[b], s.rise_max[b], s.width_min[b], s.width_max[b]))
             .collect();
-        out.push((format!("soak.{}.ack", s.kind), format!("soak {} ACK rise-ticks/width per byte: {}; acked histogram {:?}; latch-only {}", s.kind + 1, rise.join(" "), s.acked_hist, s.latch_polls)));
+        out.push((format!("soak.{}.ack", s.kind), format!("soak {} ACK rise-ticks/width per byte: {}; acked histogram {:?}; latch-only {}", soak_label(s.kind), rise.join(" "), s.acked_hist, s.latch_polls)));
         for f in &s.fails {
             let _ = f;
         }
@@ -488,7 +586,7 @@ pub fn summarise(rec: &PadRecord) -> Vec<Line> {
                 format!("soak.{}.fail.{}", s.kind, f.poll),
                 format!(
                     "soak {} failure at poll {}: wire {} class {} acked {} early {} irq-after-clear {}, reported {} buttons {:04X}",
-                    s.kind + 1,
+                    soak_label(s.kind),
                     f.poll,
                     hex(&f.view.rx[..usize::from(f.view.n.min(9))]),
                     f.view.class,
@@ -527,6 +625,108 @@ pub fn summarise(rec: &PadRecord) -> Vec<Line> {
     out
 }
 
+/// Microseconds a hold of `ticks` HBlank counts is (63.56 us each; the counter's step is the
+/// resolution).
+fn hold_us(ticks: u16) -> u32 {
+    u32::from(ticks) * 6356 / 100
+}
+
+fn note_text(n: &PollNote) -> String {
+    format!(
+        "{} ID {:02X} acked {} died {} first-try {} ID {:02X} died {} tries {} {} cfg {} exits {} wire {} reports {}{} buttons {:04X} sticks {} fold {} ({})",
+        record::NOTE_CLASS_NAMES.get(usize::from(n.class)).copied().unwrap_or("?"),
+        n.id,
+        n.acked,
+        if n.died == 0xFF { "-".to_string() } else { n.died.to_string() },
+        record::NOTE_CLASS_NAMES.get(usize::from(n.first_class)).copied().unwrap_or("?"),
+        n.first_id,
+        if n.first_died == 0xFF { "-".to_string() } else { n.first_died.to_string() },
+        n.tries,
+        if n.fresh & 1 != 0 { "fresh-select" } else { "held-select" },
+        n.cfg,
+        n.exits,
+        hex(&n.rx[..usize::from(n.n.min(9))]),
+        mode_name(n.mode),
+        if n.flags & 2 != 0 { " analog-locked" } else { "" },
+        n.buttons,
+        hex(&n.sticks),
+        if n.fold == 0 { "none".to_string() } else { format!("{:04b}", n.fold) },
+        record::FOLD_WHY.get(usize::from(n.why)).copied().unwrap_or("?"),
+    )
+}
+
+/// The power-on record's verdict lines: first poll, counters, one line per lab phase.
+fn power_lines(p: &PowerOn, out: &mut Vec<Line>) {
+    let c = &p.counters;
+    out.push((
+        "power.counters".into(),
+        format!(
+            "power-on record: {} polls in {} runs (+{} dropped), {} frames at close; since boot: ok {} bad {} address NAKs {} retries {} handshakes {} config packets {} exits {} exits left in F3 {}",
+            p.polls, p.run_n, p.dropped, p.frames, c.ok, c.bad, c.nak, c.retry, c.handshakes, c.cfg, c.exits, c.exits_f3
+        ),
+    ));
+    if let Some(first) = p.runs.first().filter(|_| p.run_n > 0) {
+        out.push(("power.poll0".into(), format!("poll 0 (the handshake from power): {}", note_text(&first.note))));
+    }
+    // From which poll on the SDK said analog and locked, and the first poll that completed.
+    let mut at = 0u32;
+    let mut analog_at = None;
+    let mut ok_at = None;
+    for r in &p.runs[..usize::from(p.run_n)] {
+        if ok_at.is_none() && r.note.class == 0 {
+            ok_at = Some(at);
+        }
+        if analog_at.is_none() && r.note.flags & 2 != 0 {
+            analog_at = Some(at);
+        }
+        at += u32::from(r.count);
+    }
+    let fmt = |v: Option<u32>| v.map_or("NEVER".to_string(), |v| v.to_string());
+    out.push((
+        "power.first".into(),
+        format!("first complete poll: {}; first poll reported analog and locked: {}", fmt(ok_at), fmt(analog_at)),
+    ));
+    let mut seen = 0u16;
+    let mut sticks = false;
+    for r in &p.runs[..usize::from(p.run_n)] {
+        seen |= r.note.buttons;
+        sticks |= r.note.fold != 0;
+    }
+    out.push((
+        "power.buttons".into(),
+        format!("buttons seen in the first {} polls: {seen:04X}; the stick fold gave a d-pad bit: {}", p.polls, if sticks { "yes" } else { "never" }),
+    ));
+    for l in &p.lab[..usize::from(p.lab_n)] {
+        let name = record::LAB_NAMES.get(usize::from(l.phase)).copied().unwrap_or("?");
+        let mut line = format!(
+            "lab {name}: {} frames, polls {} ok {} bad {} first-try bad {}, buttons seen {:04X}{}, last ID {:02X} {}{}, fold hits {}",
+            l.frames,
+            l.polls,
+            l.ok,
+            l.bad,
+            l.first_bad,
+            l.btn_or,
+            if l.btn_or == 0 { " (NONE: nothing pressed, or the pad does not answer)" } else { "" },
+            l.last_id,
+            mode_name(l.last_mode),
+            if l.last_flags & 2 != 0 { " analog-locked" } else { "" },
+            l.fold_hits
+        );
+        if l.raw_total != 0 {
+            let _ = write!(line, "; own commands {}/{} complete", l.raw_ok, l.raw_total);
+        }
+        if l.status45_set != 0 {
+            let _ = write!(
+                line,
+                "; STATUS 45 reply {} ({})",
+                hex(&l.status45),
+                if l.status45 == [0x01, 0x02, 0x01, 0x02, 0x01, 0x00] { "as a good DualShock answers" } else { "NOT the usual 01 02 01 02 01 00" }
+            );
+        }
+        out.push((format!("lab.{}", l.phase), line));
+    }
+}
+
 fn mode_name(mode: u8) -> &'static str {
     ["none", "digital", "analog", "negcon", "config", "unknown"].get(usize::from(mode)).copied().unwrap_or("?")
 }
@@ -536,6 +736,22 @@ pub fn print_record(rec: &PadRecord, out: &mut dyn Write) -> Result<()> {
     writeln!(out, "== CONTROLLER {} (port {}) ==", rec.header.record_no, rec.header.port + 1)?;
     for (_, line) in summarise(rec) {
         writeln!(out, "{line}")?;
+    }
+    if let Some(p) = &rec.power {
+        writeln!(out, "-- power-on polls, run-length coded (polls / lab phase / hold of /CS before the poll in us) --")?;
+        let mut at = 0u32;
+        for r in &p.runs[..usize::from(p.run_n)] {
+            writeln!(
+                out,
+                "polls {at}-{} lab {} hold {}-{} us: {}",
+                at + u32::from(r.count) - 1,
+                if r.note.lab == 0xFF { "after".to_string() } else { (r.note.lab + 1).to_string() },
+                hold_us(r.hold_min),
+                hold_us(r.hold_max),
+                note_text(&r.note)
+            )?;
+            at += u32::from(r.count);
+        }
     }
     writeln!(out, "-- raw transaction log (tx / rx / ack rise ticks / ack width ticks) --")?;
     for t in &rec.txns {
@@ -852,6 +1068,159 @@ mod tests {
         assert!(w.overflow);
         w.u8(3);
         assert_eq!(w.len(), 12);
+    }
+
+    fn power_note(lab: u8, class: u8, buttons: u16, analog: bool) -> PollNote {
+        let mut n = PollNote::default();
+        n.lab = lab;
+        n.first_class = class;
+        n.first_id = if class == 5 { 0xFF } else { 0x41 };
+        n.first_died = if class == 0 { 0xFF } else { 3 };
+        n.class = class;
+        n.id = 0x73;
+        n.n = 9;
+        n.acked = if class == 0 { 8 } else { 3 };
+        n.died = n.first_died;
+        n.tries = 1;
+        n.rx = [0xFF, 0x73, 0x5A, 0xFF, 0xFF, 0x80, 0x80, 0x80, 0x80];
+        n.mode = 2;
+        n.flags = if analog { 7 } else { 5 };
+        n.buttons = buttons;
+        n.sticks = [0x80; 4];
+        n.why = 1;
+        n
+    }
+
+    fn sample_power_record() -> Vec<u8> {
+        let mut p = PowerOn::EMPTY;
+        // The handshake poll, then polls that complete, one that did not, then a pushed stick.
+        let mut first = power_note(0, 0, 0, false);
+        first.cfg = 3;
+        first.exits = 1;
+        first.fresh = 1 | (2 << 1);
+        p.note(first, 2);
+        for i in 0..40 {
+            p.note(power_note(0, 0, 0, true), 260 + i % 3);
+        }
+        p.note(power_note(0, 5, 0, true), 262);
+        for _ in 0..10 {
+            let mut n = power_note(1, 0, 0x0800, true);
+            n.fold = 2;
+            n.why = 0;
+            p.note(n, 0);
+        }
+        p.counters = Counters { ok: 50, bad: 1, nak: 1, retry: 1, handshakes: 1, cfg: 3, exits: 1, exits_f3: 0 };
+        p.frames = 70;
+        let mut lab = LabResult::default();
+        lab.phase = 4;
+        lab.frames = 480;
+        lab.polls = 480;
+        lab.ok = 470;
+        lab.bad = 10;
+        lab.first_bad = 10;
+        lab.btn_or = 0x0800;
+        lab.last_id = 0x73;
+        lab.last_mode = 2;
+        lab.last_flags = 7;
+        lab.raw_ok = 3;
+        lab.raw_total = 3;
+        lab.status45 = [0x01, 0x02, 0x01, 0x02, 0x01, 0x00];
+        lab.status45_set = 1;
+        p.lab_result(lab);
+        let mut buf = vec![0u8; 11 * 1024];
+        let mut w = Writer::new(&mut buf);
+        put_header(
+            &mut w,
+            &Header {
+                suite_major: 2,
+                suite_minor: 22,
+                record_no: 0,
+                boot_id: 0xA5,
+                port: 0,
+                kind: 2,
+                flags: 0,
+                sdk_rev: *b"6e25f2ae",
+                timer_hz: 33_868_800,
+                ack_timeout: 40_000,
+            },
+        );
+        let sec = w.begin_section(TAG_POWERON);
+        put_poweron(&mut w, &p);
+        w.end_section(sec);
+        assert!(!w.overflow);
+        let mut bytes = w.bytes().to_vec();
+        let crc = crc32(&bytes);
+        bytes.extend_from_slice(&crc.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn the_power_on_record_survives_pages_and_decodes_with_its_lab_lines() {
+        let binary = sample_power_record();
+        let got = assemble_pages(&pages(&binary, 0xA500)).unwrap();
+        assert_eq!(got.len(), 1);
+        let rec = parse_record(&got[0].1).unwrap();
+        assert_eq!(rec.header.kind, 2);
+        let p = rec.power.as_ref().expect("power section");
+        assert_eq!(p.polls, 52);
+        // Four runs: the handshake poll (it differs by its config packets), 40 complete polls,
+        // the failed one, the ten with a fold.
+        assert_eq!(p.run_n, 4);
+        assert_eq!(p.runs[1].count, 40);
+        assert_eq!(p.runs[1].hold_min, 260);
+        assert_eq!(p.runs[1].hold_max, 262);
+        assert_eq!(p.runs[0].note.cfg, 3);
+        assert_eq!(p.runs[2].note.class, 5);
+        assert_eq!(p.runs[3].note.fold, 2);
+        assert_eq!(p.counters.exits, 1);
+        assert_eq!(p.lab_n, 1);
+        assert_eq!(p.lab[0].status45, [1, 2, 1, 2, 1, 0]);
+        let mut out = Vec::new();
+        print_record(&rec, &mut out).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("POWER-ON RECORD"), "{out}");
+        assert!(out.contains("poll 0 (the handshake from power)"), "{out}");
+        assert!(out.contains("ADDR NOT ACKED"), "{out}");
+        assert!(out.contains("as a good DualShock answers"), "{out}");
+        assert!(out.contains("first poll reported analog and locked: 1"), "{out}");
+        assert!(out.contains("polls 1-40 lab 1"), "{out}");
+        assert!(out.contains("fold 0010"), "{out}");
+    }
+
+    #[test]
+    fn the_power_on_notes_are_run_length_coded_and_stop_at_600() {
+        let mut p = PowerOn::EMPTY;
+        for _ in 0..700 {
+            p.note(power_note(0, 0, 0, true), 262);
+        }
+        assert_eq!(p.polls, POWER_POLLS);
+        assert_eq!(p.run_n, 1);
+        assert_eq!(p.runs[0].count, 600);
+        // A table of 150 runs is full: the next different poll is dropped and counted.
+        let mut q = PowerOn::EMPTY;
+        for i in 0..200u16 {
+            q.note(power_note(0, 0, i, true), 1);
+        }
+        assert_eq!(usize::from(q.run_n), POWER_RUNS);
+        assert_eq!(q.dropped, 50);
+        // Worst case still fits a record.
+        let mut buf = vec![0u8; 11 * 1024];
+        let mut w = Writer::new(&mut buf);
+        put_poweron(&mut w, &q);
+        assert!(!w.overflow, "{} bytes", w.len());
+    }
+
+    #[test]
+    fn a_v2_21_record_with_schema_1_still_decodes_and_soak_kind_3_is_soak_0() {
+        let mut binary = sample_record(0, 1, false);
+        binary[4] = 1;
+        let n = binary.len();
+        let crc = crc32(&binary[..n - 4]);
+        binary[n - 4..].copy_from_slice(&crc.to_le_bytes());
+        assert!(parse_record(&binary).is_ok());
+        assert_eq!(soak_label(3), 0);
+        assert_eq!(soak_label(0), 1);
+        assert_eq!(NOTE_LEN, 32);
     }
 
     #[test]
