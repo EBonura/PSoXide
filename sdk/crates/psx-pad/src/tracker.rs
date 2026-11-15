@@ -17,6 +17,80 @@
 //! }
 //! ```
 
+/// Frame-to-frame edges over an active-high 16-bit button mask: what is held,
+/// what was held the frame before, and so what was just pressed or released.
+/// Two words of state and no loops. It is the whole job of a menu or a game
+/// that reads edges and never auto-repeats; [`PadTracker`] adds the per-button
+/// hold counters, repeat and the handoff guard on top of it.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct PadEdges {
+    held: u16,
+    prev: u16,
+}
+
+impl PadEdges {
+    /// Nothing held, nothing held before.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { held: 0, prev: 0 }
+    }
+
+    /// Feed the current frame's polled buttons. Call exactly once per polled frame.
+    #[inline]
+    pub fn update(&mut self, buttons: u16) {
+        self.prev = self.held;
+        self.held = buttons;
+    }
+
+    /// The buttons held this frame.
+    #[must_use]
+    pub const fn held(&self) -> u16 {
+        self.held
+    }
+
+    /// The buttons held on the frame before the last [`update`](Self::update).
+    #[must_use]
+    pub const fn previous(&self) -> u16 {
+        self.prev
+    }
+
+    /// The buttons that went from released to held this frame.
+    #[must_use]
+    pub const fn pressed(&self) -> u16 {
+        self.held & !self.prev
+    }
+
+    /// The buttons that went from held to released this frame.
+    #[must_use]
+    pub const fn released(&self) -> u16 {
+        self.prev & !self.held
+    }
+
+    /// Any button in `mask` is held.
+    #[must_use]
+    pub const fn is_held(&self, mask: u16) -> bool {
+        self.held & mask != 0
+    }
+
+    /// Any button in `mask` went from released to held this frame.
+    #[must_use]
+    pub const fn just_pressed(&self, mask: u16) -> bool {
+        self.pressed() & mask != 0
+    }
+
+    /// Any button in `mask` went from held to released this frame.
+    #[must_use]
+    pub const fn just_released(&self, mask: u16) -> bool {
+        self.released() & mask != 0
+    }
+
+    /// Make the previous state equal to the current one, so what is held now is
+    /// not a fresh press (see [`PadTracker::settle`]).
+    pub fn settle(&mut self) {
+        self.prev = self.held;
+    }
+}
+
 /// Frame-to-frame tracker over an active-high 16-bit button mask
 /// (the [`PadState::buttons`](crate::PadState) representation).
 #[derive(Copy, Clone)]
@@ -133,6 +207,37 @@ mod tests {
 
     const A: u16 = 1 << 0;
     const B: u16 = 1 << 1;
+
+    #[test]
+    fn pad_edges_match_the_tracker_on_every_frame_pair() {
+        // The edge-only type is the tracker's edge half: same answers for every
+        // pair of consecutive masks.
+        for prev in [0u16, A, B, A | B, 0x8001, 0xffff] {
+            for now in [0u16, A, B, A | B, 0x8001, 0xffff] {
+                let (mut e, mut t) = (PadEdges::new(), PadTracker::new());
+                e.update(prev);
+                t.update(prev);
+                e.update(now);
+                t.update(now);
+                for mask in [A, B, A | B, 0xffff] {
+                    assert_eq!(e.just_pressed(mask), t.just_pressed(mask));
+                    assert_eq!(e.just_released(mask), t.just_released(mask));
+                    assert_eq!(e.is_held(mask), t.is_held(mask));
+                }
+                assert_eq!(e.previous(), t.previous());
+                assert_eq!(e.pressed(), now & !prev);
+                assert_eq!(e.released(), prev & !now);
+            }
+        }
+    }
+
+    #[test]
+    fn pad_edges_settle_ends_the_press_and_keeps_the_hold() {
+        let mut e = PadEdges::new();
+        e.update(A);
+        e.settle();
+        assert!(e.is_held(A) && !e.just_pressed(A));
+    }
 
     #[test]
     fn edges() {

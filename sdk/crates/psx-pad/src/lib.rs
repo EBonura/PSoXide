@@ -68,8 +68,8 @@ mod controllers;
 pub mod stick;
 pub mod tracker;
 pub use controllers::Controllers;
-pub use stick::{StickDpad, StickShape};
-pub use tracker::PadTracker;
+pub use stick::{stick_bits, RadialStick};
+pub use tracker::{PadEdges, PadTracker};
 
 // Under test the driver talks to a controller model, not the registers.
 #[cfg(test)]
