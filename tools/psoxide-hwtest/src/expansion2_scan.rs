@@ -7,9 +7,9 @@
 //! `addiu` and `addu`, and reports every load or store whose address lands in `0x1F802080..=0x1F803FFF` (through
 //! KUSEG, KSEG0 or KSEG1), and every data word that holds such an address.
 //!
-//! It is conservative, not exact: it follows registers along the instruction stream without following branches,
-//! and drops the caller-saved registers at a call. A report is a reason to look; an empty report means no access
-//! of those shapes.
+//! It is conservative, not exact: it tracks registers over the control-flow graph of the image's own branches and
+//! jumps and keeps a constant only where every path agrees on it (see [`scan`]). A report is a reason to look; an
+//! empty report means no access of those shapes.
 //!
 //! A data word that holds such an address is a different kind of finding, because it is only dangerous if some
 //! code reads it as a pointer. Embedded asset bytes (a cooked texture, a sound bank) contain such words by
@@ -167,18 +167,152 @@ fn sext(imm: u32) -> u32 {
     imm as u16 as i16 as i32 as u32
 }
 
+/// The registers a call may overwrite: everything but `$zero`, the callee-saved registers, `$k0`/`$k1`, `$gp`,
+/// `$sp` and `$fp`.
+const CALLER_SAVED: [usize; 18] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 24, 25, 31];
+
+/// What each register is known to hold at a point of the program.
+type Known = [Option<u32>; 32];
+
+/// What nothing is known, except that `$zero` is zero.
+fn nothing_known() -> Known {
+    let mut known = [None; 32];
+    known[0] = Some(0);
+    known
+}
+
+/// What the instruction stream formed, collected only on the reporting pass.
+struct Effects {
+    on: bool,
+    hits: Vec<Hit>,
+    formed: BTreeSet<u32>,
+}
+
+impl Effects {
+    fn form(&mut self, value: u32) {
+        if self.on {
+            if let Some(p) = physical(value) {
+                self.formed.insert(p);
+            }
+        }
+    }
+
+    /// A load or store at `base + offset`, when the base is known.
+    fn access(&mut self, base: Option<u32>, word: u32, pc: u32, kind: &'static str) {
+        if let Some(address) = base.map(|b| b.wrapping_add(sext(word & 0xFFFF))) {
+            self.form(address);
+            if let Some(p) = physical(address).filter(|&p| self.on && in_window(p)) {
+                self.hits.push(Hit { pc, address: p, kind, value: word });
+            }
+        }
+    }
+}
+
 /// Record `value` as the content of `reg` (never `$zero`), and the address it names as one the code forms.
-fn write(
-    reg: usize,
-    value: Option<u32>,
-    known: &mut [Option<u32>; 32],
-    formed: &mut BTreeSet<u32>,
-) {
+fn write(reg: usize, value: Option<u32>, known: &mut Known, fx: &mut Effects) {
     if reg != 0 {
         known[reg] = value;
-        if let Some(p) = value.and_then(physical) {
-            formed.insert(p);
+        if let Some(value) = value {
+            fx.form(value);
         }
+    }
+}
+
+/// What executing `word` at `pc` does to `known`. A call's clobbering of the caller-saved registers is not here:
+/// it happens after the call's delay slot (see [`Flow`]).
+fn step(word: u32, pc: u32, known: &mut Known, fx: &mut Effects) {
+    let op = word >> 26;
+    let rs = ((word >> 21) & 31) as usize;
+    let rt = ((word >> 16) & 31) as usize;
+    let rd = ((word >> 11) & 31) as usize;
+    let imm = word & 0xFFFF;
+    match op {
+        0x0F => write(rt, Some(imm << 16), known, fx),
+        0x0D => {
+            let v = known[rs].map(|b| b | imm);
+            write(rt, v, known, fx);
+        }
+        0x08 | 0x09 => {
+            let v = known[rs].map(|b| b.wrapping_add(sext(imm)));
+            write(rt, v, known, fx);
+        }
+        0x0C | 0x0E | 0x0A | 0x0B => write(rt, None, known, fx),
+        // loads: check the address, the destination is unknown
+        0x20..=0x26 => {
+            fx.access(known[rs], word, pc, "load");
+            write(rt, None, known, fx);
+        }
+        // lwc2 reads memory and writes a coprocessor register
+        0x32 => fx.access(known[rs], word, pc, "load"),
+        // stores (and swc2)
+        0x28..=0x2E | 0x3A => fx.access(known[rs], word, pc, "store"),
+        0x00 => match word & 63 {
+            // addu / add / or: a copy or a sum of known values
+            0x21 | 0x20 => {
+                let v = known[rs].zip(known[rt]).map(|(a, b)| a.wrapping_add(b));
+                write(rd, v, known, fx);
+            }
+            0x25 => {
+                let v = known[rs].zip(known[rt]).map(|(a, b)| a | b);
+                write(rd, v, known, fx);
+            }
+            // jr, mult/div, mthi/mtlo, syscall, break: no general register written
+            0x08 | 0x18..=0x1B | 0x11 | 0x13 | 0x0C | 0x0D => {}
+            // jalr writes its link register (the callee's clobbering follows the delay slot)
+            0x09 => write(rd, None, known, fx),
+            _ => write(rd, None, known, fx),
+        },
+        // jal links
+        0x03 => write(31, None, known, fx),
+        // COP moves into a register: mfc0, mfc2, cfc2
+        0x10 | 0x12 if rs == 0 || rs == 2 => write(rt, None, known, fx),
+        _ => {}
+    }
+}
+
+/// How control leaves an instruction (the transfer takes effect after its delay slot).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Flow {
+    /// Falls through to the next word.
+    Next,
+    /// A conditional branch to `target` (a word index), or on.
+    Branch(usize),
+    /// An unconditional jump to `target` (a word index, or `None` when it leaves the image).
+    Jump(Option<usize>),
+    /// `jr`: leaves to an address in a register, never falls through.
+    Return,
+    /// A call (`jal`, `jalr`, `bltzal`): the callee clobbers the caller-saved registers and control comes back.
+    Call,
+    /// `break`, `syscall`: nothing follows on this path.
+    Stop,
+}
+
+fn flow(word: u32, index: usize, words: usize, load: u32) -> Flow {
+    let op = word >> 26;
+    let rs = (word >> 21) & 31;
+    let rt = (word >> 16) & 31;
+    let branch = |index: usize| {
+        let target = index as i64 + 1 + i64::from(sext(word & 0xFFFF) as i32);
+        usize::try_from(target).ok().filter(|&t| t < words)
+    };
+    match op {
+        0x02 => {
+            let address = (word & 0x03FF_FFFF) << 2 | (load.wrapping_add(4 * index as u32) & 0xF000_0000);
+            let at = address.wrapping_sub(load) / 4;
+            Flow::Jump(usize::try_from(at).ok().filter(|&t| address >= load && t < words))
+        }
+        0x03 => Flow::Call,
+        0x04..=0x07 => branch(index).map_or(Flow::Next, Flow::Branch),
+        0x01 if rt & 0x1E == 0x10 => Flow::Call,
+        0x01 => branch(index).map_or(Flow::Next, Flow::Branch),
+        0x10..=0x13 if rs == 8 => branch(index).map_or(Flow::Next, Flow::Branch),
+        0x00 => match word & 63 {
+            0x08 => Flow::Return,
+            0x09 => Flow::Call,
+            0x0C | 0x0D => Flow::Stop,
+            _ => Flow::Next,
+        },
+        _ => Flow::Next,
     }
 }
 
@@ -189,112 +323,133 @@ pub fn scan_words(words: &[u32], load: u32) -> Vec<Hit> {
     scan(words, load).hits
 }
 
-/// [`scan_words`] and the addresses the code forms.
-#[must_use]
-pub fn scan(words: &[u32], load: u32) -> Scan {
-    let mut hits = Vec::new();
-    let mut formed = BTreeSet::new();
-    let mut known: [Option<u32>; 32] = [None; 32];
-    known[0] = Some(0);
-    for (index, &word) in words.iter().enumerate() {
-        let pc = load.wrapping_add(4 * index as u32);
-        if let Some(p) = physical(word) {
-            if in_window(p) {
-                hits.push(Hit { pc, address: p, kind: "data word", value: word });
-            }
-        }
-        let op = word >> 26;
-        let rs = ((word >> 21) & 31) as usize;
-        let rt = ((word >> 16) & 31) as usize;
-        let rd = ((word >> 11) & 31) as usize;
-        let imm = word & 0xFFFF;
-        match op {
-            0x0F => write(rt, Some(imm << 16), &mut known, &mut formed),
-            0x0D => {
-                let v = known[rs].map(|b| b | imm);
-                write(rt, v, &mut known, &mut formed);
-            }
-            0x08 | 0x09 => {
-                let v = known[rs].map(|b| b.wrapping_add(sext(imm)));
-                write(rt, v, &mut known, &mut formed);
-            }
-            0x0C | 0x0E | 0x0A | 0x0B => write(rt, None, &mut known, &mut formed),
-            // loads: check the address, the destination is unknown
-            0x20..=0x26 | 0x32 => {
-                if op != 0x32 {
-                    if let Some(base) = known[rs] {
-                        let a = base.wrapping_add(sext(imm));
-                        if let Some(p) = physical(a) {
-                            formed.insert(p);
-                            if in_window(p) {
-                                hits.push(Hit { pc, address: p, kind: "load", value: word });
-                            }
-                        }
-                    }
-                    write(rt, None, &mut known, &mut formed);
-                } else if let Some(base) = known[rs] {
-                    let a = base.wrapping_add(sext(imm));
-                    if let Some(p) = physical(a) {
-                        formed.insert(p);
-                        if in_window(p) {
-                            hits.push(Hit { pc, address: p, kind: "load", value: word });
-                        }
-                    }
-                }
-            }
-            // stores (and swc2)
-            0x28..=0x2E | 0x3A => {
-                if let Some(base) = known[rs] {
-                    let a = base.wrapping_add(sext(imm));
-                    if let Some(p) = physical(a) {
-                        formed.insert(p);
-                        if in_window(p) {
-                            hits.push(Hit { pc, address: p, kind: "store", value: word });
-                        }
-                    }
-                }
-            }
-            0x00 => {
-                let funct = word & 63;
-                match funct {
-                    // addu / add / or with a zero register: a copy or a sum of known values
-                    0x21 | 0x20 => {
-                        let v = match (known[rs], known[rt]) {
-                            (Some(a), Some(b)) => Some(a.wrapping_add(b)),
-                            _ => None,
-                        };
-                        write(rd, v, &mut known, &mut formed);
-                    }
-                    0x25 => {
-                        let v = match (known[rs], known[rt]) {
-                            (Some(a), Some(b)) => Some(a | b),
-                            _ => None,
-                        };
-                        write(rd, v, &mut known, &mut formed);
-                    }
-                    // jr and the others that write no register
-                    0x08 | 0x18..=0x1B | 0x11 | 0x13 | 0x0C | 0x0D => {}
-                    // jalr: a call
-                    0x09 => {
-                        for r in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 24, 25, 31] {
-                            known[r] = None;
-                        }
-                    }
-                    _ => write(rd, None, &mut known, &mut formed),
-                }
-            }
-            // jal: a call
-            0x03 => {
-                for r in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 24, 25, 31] {
-                    known[r] = None;
-                }
-            }
-            // COP moves into a register: mfc0, mfc2, cfc2
-            0x10 | 0x12 if rs == 0 || rs == 2 => write(rt, None, &mut known, &mut formed),
-            _ => {}
+/// Join two register files at a merge point: a register keeps its constant only if every path agrees on it.
+fn join(into: &mut Known, other: &Known) -> bool {
+    let mut changed = false;
+    for (mine, theirs) in into.iter_mut().zip(other) {
+        if mine.is_some() && *mine != *theirs {
+            *mine = None;
+            changed = true;
         }
     }
-    Scan { hits, formed }
+    changed
+}
+
+/// What is known on entry to each word: a forward data-flow over the control-flow graph the image's own branches
+/// and jumps make, met by intersection. `None` marks a word no path reaches.
+///
+/// The entry of the image, the target of every `jal`, and every word whose address appears as a data word (a jump
+/// table or function pointer) start with nothing known: a caller's registers mean nothing in the callee, and a
+/// callee-saved register holds its caller's value, not a constant this function formed.
+fn entry_states(words: &[u32], load: u32) -> Vec<Option<Known>> {
+    let mut entry: Vec<Option<Known>> = vec![None; words.len()];
+    let mut work: Vec<usize> = Vec::new();
+    let seed = |entry: &mut Vec<Option<Known>>, at: usize, work: &mut Vec<usize>| {
+        if entry[at].is_none() {
+            entry[at] = Some(nothing_known());
+            work.push(at);
+        } else if let Some(state) = entry[at].as_mut() {
+            if join(state, &nothing_known()) {
+                work.push(at);
+            }
+        }
+    };
+    if !words.is_empty() {
+        seed(&mut entry, 0, &mut work);
+    }
+    for &word in words {
+        let target = match word >> 26 {
+            0x03 => Some((word & 0x03FF_FFFF) << 2 | (load & 0xF000_0000)),
+            _ => physical(word).map(|_| word),
+        };
+        if let Some(address) = target.filter(|a| a % 4 == 0 && *a >= load) {
+            if let Some(at) = usize::try_from((address - load) / 4).ok().filter(|&t| t < words.len()) {
+                // A `jal` target is an entry; so is a code address held as data. (Any word that happens to
+                // look like one costs only what was known there.)
+                let is_call = word >> 26 == 0x03;
+                let is_pointer = !is_call && address == word;
+                if is_call || is_pointer {
+                    seed(&mut entry, at, &mut work);
+                }
+            }
+        }
+    }
+    let mut effects = Effects { on: false, hits: Vec::new(), formed: BTreeSet::new() };
+    // A queue of words whose entry state changed.
+    let mut queued = vec![false; words.len()];
+    for &at in &work {
+        queued[at] = true;
+    }
+    while let Some(index) = work.pop() {
+        queued[index] = false;
+        let Some(mut state) = entry[index] else { continue };
+        let pc = load.wrapping_add(4 * index as u32);
+        step(words[index], pc, &mut state, &mut effects);
+        // The word before a transfer is the transfer; its delay slot is this word.
+        let before = index.checked_sub(1).map(|i| flow(words[i], i, words.len(), load));
+        let mut successors: Vec<(usize, Known)> = Vec::new();
+        let in_slot = matches!(
+            before,
+            Some(Flow::Branch(_) | Flow::Jump(_) | Flow::Return | Flow::Call)
+        );
+        if in_slot {
+            let slot_of = before.expect("checked above");
+            match slot_of {
+                Flow::Branch(target) => {
+                    successors.push((target, state));
+                    successors.push((index + 1, state));
+                }
+                Flow::Jump(Some(target)) => successors.push((target, state)),
+                Flow::Call => {
+                    let mut after = state;
+                    for r in CALLER_SAVED {
+                        after[r] = None;
+                    }
+                    successors.push((index + 1, after));
+                }
+                Flow::Jump(None) | Flow::Return | Flow::Next | Flow::Stop => {}
+            }
+        } else if !matches!(flow(words[index], index, words.len(), load), Flow::Stop) {
+            successors.push((index + 1, state));
+        }
+        for (at, state) in successors {
+            if at >= words.len() {
+                continue;
+            }
+            let changed = match entry[at].as_mut() {
+                None => {
+                    entry[at] = Some(state);
+                    true
+                }
+                Some(existing) => join(existing, &state),
+            };
+            if changed && !queued[at] {
+                queued[at] = true;
+                work.push(at);
+            }
+        }
+    }
+    entry
+}
+
+/// [`scan_words`] and the addresses the code forms.
+///
+/// A register's constant is used only where it holds on every path that reaches the use: it dies at function entry
+/// (a `jal` target), at a call for the caller-saved registers, wherever two paths meet with different values, and
+/// wherever the register is written with anything but a known constant. A word no path reaches knows nothing.
+#[must_use]
+pub fn scan(words: &[u32], load: u32) -> Scan {
+    let entry = entry_states(words, load);
+    let mut fx = Effects { on: true, hits: Vec::new(), formed: BTreeSet::new() };
+    for (index, &word) in words.iter().enumerate() {
+        let pc = load.wrapping_add(4 * index as u32);
+        if let Some(p) = physical(word).filter(|&p| in_window(p)) {
+            fx.hits.push(Hit { pc, address: p, kind: "data word", value: word });
+        }
+        let mut known = entry[index].unwrap_or_else(nothing_known);
+        step(word, pc, &mut known, &mut fx);
+    }
+    Scan { hits: fx.hits, formed: fx.formed }
 }
 
 /// The report: one line per finding, then one line for each named constant.
@@ -533,5 +688,90 @@ mod tests {
         let found = scan(&words, load);
         assert!(found.hits.iter().any(|h| h.kind == "store"));
         assert_eq!(classify(found.hits.last().unwrap(), &found, None), Reach::Unreached);
+    }
+
+    fn beq(rs: u32, rt: u32, offset: i32) -> u32 {
+        0x1000_0000 | rs << 21 | rt << 16 | (offset as u32 & 0xFFFF)
+    }
+    fn bne(rs: u32, rt: u32, offset: i32) -> u32 {
+        0x1400_0000 | rs << 21 | rt << 16 | (offset as u32 & 0xFFFF)
+    }
+    fn jal(index: u32) -> u32 {
+        0x0C00_0000 | (((0x8001_0000 & 0x0FFF_FFFF) >> 2) + index)
+    }
+    const JR_RA: u32 = 0x03E0_0008;
+    const NOP: u32 = 0;
+    const OR_S0_A0: u32 = 0x0080_8025; // or s0,a0,zero
+
+    #[test]
+    fn a_constant_left_in_an_argument_register_does_not_reach_the_next_function() {
+        // A function leaves a0 = 0x1F801824 (an I/O address it passed on) and returns. The next function
+        // takes its argument in a0, keeps it in the callee-saved s0 and reads 7008 bytes past it.
+        let words = [
+            lui(4, 0x1F80),
+            addiu(4, 4, 0x1824),
+            JR_RA,
+            NOP,
+            // index 4: the callee, entered by the jal below
+            OR_S0_A0,
+            lw(2, 16, 7008),
+            JR_RA,
+            NOP,
+            // index 8: a caller
+            jal(4),
+            NOP,
+            JR_RA,
+            NOP,
+        ];
+        assert!(scan_words(&words, 0x8001_0000).is_empty());
+        // The same bytes with the callee reached by falling into it (no `jr` before it, no call to it) still has
+        // the constant: that is one function, and the access is real.
+        let mut one = words;
+        one[2] = NOP;
+        one[3] = NOP;
+        one[8] = NOP;
+        assert_eq!(scan_words(&one, 0x8001_0000).len(), 1);
+    }
+
+    #[test]
+    fn a_word_no_path_reaches_knows_nothing() {
+        // The word after `jr`'s delay slot is only reachable through a pointer; the constant before the `jr`
+        // is not carried into it.
+        let words = [lui(2, 0xBF80), JR_RA, NOP, sb(4, 2, 0x2080)];
+        assert!(scan_words(&words, 0x8001_0000).is_empty());
+    }
+
+    #[test]
+    fn paths_that_disagree_on_a_register_lose_it_and_paths_that_agree_keep_it() {
+        // lui v0,0xbf80; beq a0,zero,+2; nop; lui v0,0x1000; sb a1,0x2f00(v0)
+        let disagree = [lui(2, 0xBF80), beq(4, 0, 2), NOP, lui(2, 0x1000), sb(5, 2, 0x2F00)];
+        assert!(scan_words(&disagree, 0x8001_0000).is_empty());
+        // The same with both paths holding the constant: the join keeps it.
+        let agree = [lui(2, 0xBF80), beq(4, 0, 2), NOP, lui(2, 0xBF80), sb(5, 2, 0x2F00)];
+        assert_eq!(scan_words(&agree, 0x8001_0000).len(), 1);
+        // A constant built before a branch is still there after it.
+        let across = [lui(2, 0xBF80), bne(4, 0, 2), NOP, NOP, sb(5, 2, 0x2F00)];
+        assert_eq!(scan_words(&across, 0x8001_0000).len(), 1);
+    }
+
+    #[test]
+    fn a_loop_keeps_a_constant_formed_before_it() {
+        // lui v0,0xbf80; L: sb a1,0x2080(v0); addiu a0,a0,-1; bne a0,zero,L; nop
+        let words = [lui(2, 0xBF80), sb(5, 2, 0x2080), addiu(4, 4, 0xFFFF), bne(4, 0, -3), NOP];
+        assert_eq!(scan_words(&words, 0x8001_0000).len(), 1);
+        // A value that changes round the loop is not a constant at its head, so it is not tracked.
+        let words = [lui(2, 0xBF80), sb(5, 2, 0x2080), addiu(2, 2, 4), bne(4, 0, -3), NOP];
+        assert!(scan_words(&words, 0x8001_0000).is_empty());
+    }
+
+    #[test]
+    fn a_call_drops_caller_saved_registers_after_its_delay_slot_only() {
+        // s0 survives a call; v0 does not, and neither does a constant built in the delay slot.
+        let kept = [lui(16, 0xBF80), jal(5), NOP, NOP, sb(5, 16, 0x2080), JR_RA, NOP];
+        assert_eq!(scan_words(&kept, 0x8001_0000).len(), 1);
+        let dropped = [lui(2, 0xBF80), jal(5), NOP, NOP, sb(5, 2, 0x2080), JR_RA, NOP];
+        assert!(scan_words(&dropped, 0x8001_0000).is_empty());
+        let slot = [jal(5), lui(2, 0xBF80), NOP, NOP, sb(5, 2, 0x2080), JR_RA, NOP];
+        assert!(scan_words(&slot, 0x8001_0000).is_empty());
     }
 }
