@@ -25,8 +25,17 @@ STACK_INIT  = RAM_BASE + 0x001FFF00;
    program that no longer leaves room for the stack overruns the region at
    LINK time (a clean rust-lld "section will not fit in region" error)
    instead of silently colliding $sp with .bss at runtime. 32 KiB is a
-   generous floor for the call stack; the heap is unused while alloc is off. */
-STACK_RESERVE = 0x8000;     /* 32 KiB reserved for the runtime stack */
+   generous floor for the call stack; the heap is unused while alloc is off.
+
+   A program whose stack goes deeper sets STACK_RESERVE_OVERRIDE (bytes) at
+   link time instead of patching this file. Either way works and the default
+   is unchanged when nothing sets it:
+     * `-Clink-arg=-T<file>` placed BEFORE this script, where <file> holds
+       `STACK_RESERVE_OVERRIDE = 0x...;`. The link map then carries the line,
+       so psoxide-size reports the heap against the reserve actually linked.
+     * `-Clink-arg=--defsym=STACK_RESERVE_OVERRIDE=0x...`, which the link
+       honours too but the map does not record. */
+STACK_RESERVE = DEFINED(STACK_RESERVE_OVERRIDE) ? STACK_RESERVE_OVERRIDE : 0x8000; /* default 32 KiB */
 
 /* Bytes in front of the image that the kernel reads and does not load. */
 EXE_HEAD_BYTES = 0x800;
