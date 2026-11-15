@@ -22,10 +22,6 @@ psx-font = { path = "../../../sdk/crates/psx-font" }
 psx-vram = { path = "../../../sdk/crates/psx-vram" }
 
 [features]
-# Back the scratchpad with an identically sized and aligned main-RAM block (host builds and the
-# A/B baseline), and let `call_on_projection_stack` use the ordinary CPU stack.
-main-ram-render-scratch = []
-main-ram-projection-stack = []
 # `telemetry` writes PSoXide's guest event ports only when a port enables one of
 # these through its own feature of the same name; otherwise every hook compiles
 # to nothing.

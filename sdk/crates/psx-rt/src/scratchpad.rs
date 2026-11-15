@@ -77,6 +77,81 @@ pub const BASE: usize = psx_hw::memory::scratchpad::BASE as usize;
 /// Scratchpad capacity in bytes.
 pub const SIZE: usize = psx_hw::memory::scratchpad::SIZE;
 
+/// One cache-line-aligned scratchpad-sized block: the object the absolute symbol below names on the
+/// console, and the host tests' stand-in.
+#[repr(C, align(16))]
+struct AlignedScratchpad([u8; SIZE]);
+
+// Give LLVM an absolute object instead of manufacturing an integer-derived pointer at every call
+// site. The symbol occupies no EXE or main-RAM space. This is the one definition in a guest image.
+#[cfg(target_arch = "mips")]
+core::arch::global_asm!(
+    ".globl __psoxide_scratchpad",
+    ".set __psoxide_scratchpad, 0x1f800000",
+);
+
+#[cfg(target_arch = "mips")]
+unsafe extern "C" {
+    static mut __psoxide_scratchpad: AlignedScratchpad;
+}
+
+// Native tests exercise the same pointer API and layouts without fabricating a PS1 address. This
+// storage never ships in a MIPS executable.
+#[cfg(not(target_arch = "mips"))]
+static mut HOST_SCRATCHPAD: AlignedScratchpad = AlignedScratchpad([0; SIZE]);
+
+/// Base address of the CPU scratchpad (the host tests' stand-in block off the console).
+///
+/// This module is the one authority for the scratchpad's address, alignment and size; the engine and
+/// the goldsrc ports re-export it. Games own their byte layouts and lifetimes ([`Region`],
+/// [`assert_disjoint`]): there is no allocator, because render phases deliberately reuse the same
+/// bytes after earlier consumers have finished.
+///
+/// # Safety
+///
+/// The caller must coordinate all live ranges in the arena.
+#[inline(always)]
+pub unsafe fn base_ptr() -> *mut u8 {
+    #[cfg(target_arch = "mips")]
+    {
+        core::ptr::addr_of_mut!(__psoxide_scratchpad).cast::<u8>()
+    }
+    #[cfg(not(target_arch = "mips"))]
+    {
+        core::ptr::addr_of_mut!(HOST_SCRATCHPAD).cast::<u8>()
+    }
+}
+
+/// A typed pointer at `byte_offset` within the scratchpad.
+///
+/// # Safety
+///
+/// The caller must reserve a suitably aligned, non-overlapping range large enough for every value
+/// addressed through the returned pointer. No reference into that range may outlive the operation
+/// which owns the reservation.
+#[inline(always)]
+#[must_use]
+pub unsafe fn ptr_at<T>(byte_offset: usize) -> *mut T {
+    debug_assert!(byte_offset <= SIZE.saturating_sub(core::mem::size_of::<T>()));
+    debug_assert!(byte_offset.is_multiple_of(core::mem::align_of::<T>()));
+    unsafe { base_ptr().add(byte_offset).cast::<T>() }
+}
+
+/// Establish deterministic contents before the first scratchpad consumer.
+///
+/// # Safety
+///
+/// Call only while no scratchpad-backed working set is live.
+#[inline]
+pub unsafe fn clear() {
+    let words = unsafe { ptr_at::<u32>(0) };
+    let mut index = 0usize;
+    while index < SIZE / core::mem::size_of::<u32>() {
+        unsafe { words.add(index).write(0) };
+        index += 1;
+    }
+}
+
 /// Bytes of a stack region a call tree cannot use: the 16-byte o32
 /// argument home area above the first frame, and the canary word at the
 /// bottom of the region (reserved whether or not the check is enabled, so
