@@ -271,9 +271,12 @@ impl AuthoredLoops {
     }
 }
 
+/// The pack reader, kept out of line: six call sites in two cold initialisers share one copy
+/// (inlined, each site carries its own bounds test and unaligned load). The body is the SDK's
+/// one reader.
 #[inline(never)]
 fn rd_u32(d: &[u8], o: usize) -> u32 {
-    u32::from_le_bytes([d[o], d[o + 1], d[o + 2], d[o + 3]])
+    psx_asset::le::read_u32(d, o)
 }
 
 #[inline]
