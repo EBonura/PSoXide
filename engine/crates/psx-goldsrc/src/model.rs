@@ -1,5 +1,5 @@
 //! HMD8 model helpers the GoldSrc ports share: the vertex-capped loader and the out-of-line,
-//! size-optimised animation pose and inverse transform (one copy of each for every call site).
+//! size-optimised inverse transform (one copy for every call site).
 
 pub use psx_asset::hmd8::*;
 
@@ -8,21 +8,6 @@ pub use psx_asset::hmd8::*;
 #[must_use]
 pub fn load(data: &'static [u8], vertex_cap: usize) -> Model {
     Model::from_bytes_with_vertex_cap(data, vertex_cap)
-}
-
-/// Rendering and studio collision sample the same retained animation pose.
-#[must_use]
-#[inline(never)]
-#[optimize(size)]
-pub fn pose<'a>(
-    model: &'a Model,
-    frame: usize,
-    frame2: usize,
-    frac16: u32,
-    mouth: u8,
-    scratch: &'a mut [psx_asset::hma1::Affine],
-) -> Pose<'a> {
-    model.pose(frame, frame2, frac16, mouth, scratch)
 }
 
 /// Transpose transform about `origin`, then scale, keeping the integer operation order.

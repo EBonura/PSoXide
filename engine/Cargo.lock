@@ -247,6 +247,7 @@ version = "0.1.0"
 dependencies = [
  "psx-asset",
  "psx-engine",
+ "psx-font",
  "psx-gpu",
  "psx-gte",
  "psx-io",
@@ -258,6 +259,7 @@ dependencies = [
  "psx-spu",
  "psx-telemetry",
  "psx-tick",
+ "psx-vram",
  "regex",
  "serde_json",
  "sha2",
