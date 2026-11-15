@@ -185,13 +185,20 @@ pub fn fnv1a32(bytes: &[u8]) -> u32 {
 pub struct Fnv32(u32);
 
 impl Fnv32 {
-    /// FNV-1a 32-bit offset basis.
-    const OFFSET: u32 = 0x811c_9dc5;
+    /// FNV-1a 32-bit offset basis: the state of a hash that has seen no bytes.
+    pub const OFFSET_BASIS: u32 = 0x811c_9dc5;
 
     /// A hash that has seen no bytes; `finish` returns the offset basis.
     #[must_use]
     pub const fn new() -> Self {
-        Self(Self::OFFSET)
+        Self(Self::OFFSET_BASIS)
+    }
+
+    /// A hash resumed from the `state` an earlier [`finish`](Self::finish) returned, for a
+    /// caller that keeps the running value in its own struct between pieces.
+    #[must_use]
+    pub const fn from_state(state: u32) -> Self {
+        Self(state)
     }
 
     /// Fold one byte into the hash (for a caller that maps each byte first,
@@ -501,6 +508,19 @@ mod tests {
         for x in [0, 1, 0xff, 0x8000_0000, 0xffff_ffff, 0x0100_0193] {
             assert_eq!(shifts(x), x.wrapping_mul(0x0100_0193));
         }
+    }
+
+    #[test]
+    fn fnv32_resumes_from_a_kept_state() {
+        let data: Vec<u8> = (0..200u32).map(|i| (i * 91 + 3) as u8).collect();
+        for cut in 0..=data.len() {
+            let mut first = Fnv32::new();
+            first.update_bulk(&data[..cut]);
+            let mut second = Fnv32::from_state(first.finish());
+            second.update_bulk(&data[cut..]);
+            assert_eq!(second.finish(), fnv1a32(&data));
+        }
+        assert_eq!(Fnv32::from_state(Fnv32::OFFSET_BASIS), Fnv32::new());
     }
 
     #[test]
