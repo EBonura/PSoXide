@@ -27,6 +27,15 @@ impl<const MUL: u32, const ADD: u32> Lcg<MUL, ADD> {
         Self(seed)
     }
 
+    /// The next state after `state`: one step of this generator on a bare `u32`, for code that keeps
+    /// the state in its own field or save record (`x = NrLcg::step(x)`). The same two
+    /// instructions the games wrote by hand.
+    #[inline(always)]
+    #[must_use]
+    pub const fn step(state: u32) -> u32 {
+        state.wrapping_mul(MUL).wrapping_add(ADD)
+    }
+
     /// One LCG step with this generator's multiplier and increment.
     /// Returns the fresh internal state.
     ///
@@ -44,7 +53,7 @@ impl<const MUL: u32, const ADD: u32> Lcg<MUL, ADD> {
     #[inline]
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> u32 {
-        self.0 = self.0.wrapping_mul(MUL).wrapping_add(ADD);
+        self.0 = Self::step(self.0);
         self.0
     }
 
@@ -114,6 +123,12 @@ mod tests {
             assert_eq!(glibc.next(), b);
         }
         assert_eq!((nr.state(), glibc.state()), (a, b));
+        let (mut x, mut y) = (0x1357_9bdfu32, 0x1357_9bdfu32);
+        for _ in 0..100_000 {
+            x = NrLcg::step(x);
+            y = LcgRng::step(y);
+        }
+        assert_eq!((x, y), (a, b));
     }
 
     #[test]
