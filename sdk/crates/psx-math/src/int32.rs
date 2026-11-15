@@ -69,7 +69,7 @@ pub fn square_i32_saturating(value: i32) -> i32 {
 /// Digit-by-digit (binary restoring) method: shifts and adds only,
 /// no multiplies or divides, so it is cheap on the R3000.
 #[inline]
-pub fn isqrt_i32(value: i32) -> i32 {
+pub const fn isqrt_i32(value: i32) -> i32 {
     if value <= 0 {
         return 0;
     }
@@ -78,7 +78,7 @@ pub fn isqrt_i32(value: i32) -> i32 {
 
 /// Exact floor square root across the complete unsigned 32-bit domain.
 #[inline]
-pub fn isqrt_u32(mut value: u32) -> u32 {
+pub const fn isqrt_u32(mut value: u32) -> u32 {
     let mut root = 0u32;
     let mut bit = 1u32 << 30;
     while bit > value {
@@ -545,6 +545,70 @@ impl InvariantDivisor31 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bisection root the table builders, VoXide's Newton root and the goldsrc wrappers
+    /// stood for; the oracle for the one root.
+    const fn bisection(n: u32) -> u32 {
+        let (mut lo, mut hi) = (0u64, 1u64 << 16);
+        while hi - lo > 1 {
+            let mid = (lo + hi) / 2;
+            if mid * mid <= n as u64 {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        lo as u32
+    }
+
+    /// VoXide's `blast::isqrt` (Newton, `x + 1` overflows at `u32::MAX`).
+    fn newton(n: u32) -> u32 {
+        if n < 2 {
+            return n;
+        }
+        let mut x = n;
+        let mut y = (x + 1) >> 1;
+        while y < x {
+            x = y;
+            y = (x + n / x) >> 1;
+        }
+        x
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "exhaustive sweep; make test runs it natively")]
+    fn isqrt_u32_is_the_floor_root_over_the_whole_domain() {
+        // Every value near each perfect square (where a floor root can be off by one), the low
+        // 2^20 outright, and a stride over the rest.
+        for r in 0..=65_535u32 {
+            let sq = r * r;
+            for n in [sq.saturating_sub(1), sq, sq.saturating_add(1)] {
+                assert_eq!(isqrt_u32(n), bisection(n), "{n}");
+            }
+        }
+        assert_eq!(isqrt_u32(u32::MAX), 65_535);
+        for n in 0..(1u32 << 20) {
+            assert_eq!(isqrt_u32(n), bisection(n), "{n}");
+        }
+        let mut n = 0u32;
+        while let Some(next) = n.checked_add(40_503) {
+            assert_eq!(isqrt_u32(next), bisection(next), "{next}");
+            n = next;
+        }
+        const AT_COMPILE_TIME: u32 = isqrt_u32(1 << 30);
+        assert_eq!(AT_COMPILE_TIME, 1 << 15);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "exhaustive sweep; make test runs it natively")]
+    fn isqrt_u32_equals_voxides_newton_everywhere_it_is_defined() {
+        for n in (0..=u32::MAX - 1).step_by(9_973) {
+            assert_eq!(isqrt_u32(n), newton(n), "{n}");
+        }
+        for n in 0..(1u32 << 20) {
+            assert_eq!(isqrt_u32(n), newton(n), "{n}");
+        }
+    }
 
     #[test]
     #[cfg_attr(

@@ -32,6 +32,7 @@ version = "0.1.0"
 dependencies = [
  "psx-gte-core",
  "psx-hw",
+ "psx-math",
 ]
 
 [[package]]

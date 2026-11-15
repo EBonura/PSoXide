@@ -90,26 +90,10 @@ const fn basis(m: usize) -> i16 {
     }
 }
 
-/// floor(sqrt(n)), by bisection.
-// psx-numeric-allow-next-line: const-evaluated; only the finished i16 table exists at run time
-const fn isqrt(n: u64) -> u64 {
-    // psx-numeric-allow-next-line: const-evaluated; only the finished i16 table exists at run time
-    let (mut lo, mut hi) = (0u64, n + 1);
-    while hi - lo > 1 {
-        let mid = (lo + hi) / 2;
-        if mid * mid <= n {
-            lo = mid;
-        } else {
-            hi = mid;
-        }
-    }
-    lo
-}
-
 /// The 64 coefficients, frequency-major: `MATRIX[8 * k + n]`.
 pub const MATRIX: [i16; 64] = {
     // 32768 / sqrt(2) = sqrt(2^29).
-    let dc = isqrt(1 << 29) as i16;
+    let dc = psx_math::int32::isqrt_u64(1 << 29) as i16;
     let mut m = [0i16; 64];
     let mut n = 0;
     while n < 8 {

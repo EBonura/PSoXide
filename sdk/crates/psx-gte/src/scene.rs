@@ -58,20 +58,6 @@ pub struct ClassicNormalizedVector {
     pub squared: i32,
 }
 
-/// floor(sqrt(n)) by bisection, for building tables at compile time.
-const fn isqrt_u32(n: u32) -> u32 {
-    let (mut lo, mut hi) = (0u32, 1u32 << 16);
-    while hi - lo > 1 {
-        let mid = (lo + hi) / 2;
-        if mid * mid <= n {
-            lo = mid;
-        } else {
-            hi = mid;
-        }
-    }
-    lo
-}
-
 /// Q12 reciprocal square roots of the sums 64..=255, scaled so the sum 64
 /// maps to 1.0: entry `m - 64` is floor(4096 * sqrt(64 / m)). That equals
 /// floor(32768 / sqrt(m)) = floor(sqrt(2^30 / m)), and since flooring the
@@ -81,7 +67,7 @@ const RSQRT_Q12_FROM_64: [i16; 192] = {
     let mut table = [0i16; 192];
     let mut i = 0;
     while i < 192 {
-        table[i] = isqrt_u32((1u32 << 30) / (64 + i as u32)) as i16;
+        table[i] = psx_math::int32::isqrt_u32((1u32 << 30) / (64 + i as u32)) as i16;
         i += 1;
     }
     table

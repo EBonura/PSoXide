@@ -37,6 +37,7 @@ dependencies = [
  "psx-gpu",
  "psx-hw",
  "psx-io",
+ "psx-math",
  "psx-pack",
  "psx-rt",
  "psx-spu",

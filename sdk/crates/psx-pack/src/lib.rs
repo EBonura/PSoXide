@@ -427,9 +427,9 @@ mod tests {
 
     /// The game-side loops this type replaced, kept as oracles.
     fn game_fold(bytes: &[u8]) -> u32 {
-        bytes
-            .iter()
-            .fold(0x811c_9dc5u32, |h, b| (h ^ u32::from(*b)).wrapping_mul(0x0100_0193))
+        bytes.iter().fold(0x811c_9dc5u32, |h, b| {
+            (h ^ u32::from(*b)).wrapping_mul(0x0100_0193)
+        })
     }
 
     /// Hollow Knight's room_decode and ClipCheck form: the prime as shifts and adds.
@@ -484,8 +484,14 @@ mod tests {
     #[test]
     fn the_prime_as_shifts_and_adds_is_the_multiply() {
         let shifts = |x: u32| {
-            let t = x.wrapping_shl(1).wrapping_add(x).wrapping_shl(2).wrapping_add(x);
-            t.wrapping_shl(5).wrapping_sub(t).wrapping_add(x.wrapping_shl(24))
+            let t = x
+                .wrapping_shl(1)
+                .wrapping_add(x)
+                .wrapping_shl(2)
+                .wrapping_add(x);
+            t.wrapping_shl(5)
+                .wrapping_sub(t)
+                .wrapping_add(x.wrapping_shl(24))
         };
         let mut x = 1u32;
         for _ in 0..2_000_000 {

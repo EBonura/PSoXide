@@ -21,16 +21,7 @@ use crate::{JointPose, ParseError};
 
 /// `round(sqrt(n))` for the table builder.
 const fn isqrt_round(n: u32) -> u32 {
-    let mut lo = 0u32;
-    let mut hi = 4200u32;
-    while lo < hi {
-        let mid = (lo + hi).div_ceil(2);
-        if mid * mid <= n {
-            lo = mid;
-        } else {
-            hi = mid - 1;
-        }
-    }
+    let lo = psx_math::int32::isqrt_u32(n);
     if n - lo * lo > lo {
         lo + 1
     } else {
