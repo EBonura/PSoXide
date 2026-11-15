@@ -31,6 +31,31 @@ pub const fn to_physical(virt: u32) -> u32 {
     virt & 0x1fff_ffff
 }
 
+/// Base of KSEG0, the cached mirror of the physical map.
+pub const KSEG0_BASE: u32 = 0x8000_0000;
+
+/// The cached (KSEG0) address of any KUSEG, KSEG0 or KSEG1 address: the one
+/// canonical form a RAM pointer is compared or handed to DMA in, whichever
+/// mirror it was formed through.
+///
+/// For an address inside main RAM this is the same value as
+/// `(addr & 0x001f_ffff) | 0x8000_0000`, the mask the games carried as
+/// `canonical_ram`; it differs only for addresses outside RAM (the
+/// scratchpad, for one, keeps its own physical address).
+///
+/// ```
+/// use psx_hw::memory::to_kseg0;
+/// assert_eq!(to_kseg0(0x0001_2340), 0x8001_2340); // KUSEG
+/// assert_eq!(to_kseg0(0x8001_2340), 0x8001_2340); // already KSEG0
+/// assert_eq!(to_kseg0(0xA001_2340), 0x8001_2340); // KSEG1
+/// assert_eq!(to_kseg0(0x1f80_0000), 0x9f80_0000); // scratchpad
+/// ```
+#[inline]
+#[must_use]
+pub const fn to_kseg0(addr: u32) -> u32 {
+    KSEG0_BASE | to_physical(addr)
+}
+
 /// Base of KSEG1, the uncached mirror of the physical map.
 pub const KSEG1_BASE: u32 = 0xa000_0000;
 
@@ -264,6 +289,30 @@ mod tests {
     #[test]
     fn ram_mirrors_fill_expected_window() {
         assert_eq!(ram::SIZE as u32 * 4, ram::MIRROR_END);
+    }
+
+    /// The games' `canonical_ram` mask, kept here as the oracle.
+    fn canonical_ram(addr: u32) -> u32 {
+        (addr & 0x001f_ffff) | 0x8000_0000
+    }
+
+    #[test]
+    fn to_kseg0_matches_the_games_ram_mask_over_ram_in_every_mirror() {
+        for base in [0x0000_0000u32, 0x8000_0000, 0xa000_0000] {
+            for off in (0..ram::SIZE as u32).step_by(4093) {
+                assert_eq!(to_kseg0(base + off), canonical_ram(base + off));
+            }
+            let last = base + ram::SIZE as u32 - 1;
+            assert_eq!(to_kseg0(last), canonical_ram(last));
+        }
+    }
+
+    #[test]
+    fn to_kseg0_is_idempotent_and_const() {
+        const A: u32 = to_kseg0(0xa001_0000);
+        assert_eq!(A, 0x8001_0000);
+        assert_eq!(to_kseg0(A), A);
+        assert_eq!(to_physical(to_kseg0(0xbf80_2f00)), 0x1f80_2f00);
     }
 
     #[test]
