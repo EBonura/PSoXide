@@ -2331,9 +2331,8 @@ impl<'a> Texture<'a> {
     /// Parse a cooked `.psxt` blob. Returns a `Texture` view that
     /// borrows into `bytes`. Cheap -- header decode + two slice
     /// computations.
-    // Load-time parser: one copy, never inlined into its callers (smaller, the compiler would
-    // otherwise copy the body into every call site once the readers it uses are small).
-    #[inline(never)]
+    // No `#[inline(never)]` (the other parsers have it): a program that reads one texture from one
+    // place, as NitroXide does, is 236 B smaller with the parser inlined into its one caller.
     pub fn from_bytes(bytes: &'a [u8]) -> Result<Self, ParseError> {
         use psxed_format::texture::{Depth, TextureHeader, MAGIC, VERSION};
 
