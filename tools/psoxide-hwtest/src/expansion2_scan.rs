@@ -422,7 +422,7 @@ fn entry_states(words: &[u32], load: u32) -> Vec<Option<Known>> {
     }
     let mut work: Vec<usize> = Vec::new();
     let index_of = |address: u32| {
-        (address >= load && address % 4 == 0)
+        (address >= load && address.is_multiple_of(4))
             .then(|| usize::try_from((address - load) / 4).ok())
             .flatten()
             .filter(|&t| t < words.len())
@@ -449,7 +449,7 @@ fn entry_states(words: &[u32], load: u32) -> Vec<Option<Known>> {
         }
         let before = work.len();
         for &p in &fx.formed {
-            if let Some(at) = p.checked_sub(base).filter(|d| d % 4 == 0).map(|d| (d / 4) as usize) {
+            if let Some(at) = p.checked_sub(base).filter(|d| d.is_multiple_of(4)).map(|d| (d / 4) as usize) {
                 if at < words.len() && entry[at].is_none() {
                     seed(&mut entry, at, &mut work);
                 }
