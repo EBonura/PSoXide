@@ -39,10 +39,10 @@ trybuild = "1"
 [features]
 default = []
 boot-trace = ["psx-rt/boot-trace"]
-emulator-telemetry = []
+emulator-telemetry = ["psx-telemetry/emit"]
 # Debug-line output only (no stage/counter events): a lighter path for guest
 # builds that are too close to the RAM limit for full emulator telemetry.
-debug-log = []
+debug-log = ["psx-telemetry/debug-log"]
 hardware-boot-visual = []
 room-surface-profile = []
 # Player skinned-vertex live-capture instrument (the HWB-008..011

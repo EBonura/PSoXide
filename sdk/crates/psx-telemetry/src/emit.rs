@@ -21,7 +21,7 @@
 //! these ports.
 //!
 
-#[cfg(all(target_arch = "mips", feature = "emit"))]
+#[cfg(all(target_arch = "mips", any(feature = "emit", feature = "debug-log")))]
 use psx_hw::memory::{expansion2::telemetry, to_kseg1};
 
 const EVENT_KIND_FRAME_BEGIN: u8 = 1;
@@ -32,7 +32,7 @@ const EVENT_KIND_TASK_BEGIN: u8 = 5;
 const EVENT_KIND_TASK_END: u8 = 6;
 
 /// The uncached view of one of the emulator's telemetry ports.
-#[cfg(all(target_arch = "mips", feature = "emit"))]
+#[cfg(all(target_arch = "mips", any(feature = "emit", feature = "debug-log")))]
 const fn uncached(physical: u32) -> *mut u32 {
     to_kseg1(physical) as *mut u32
 }
@@ -41,7 +41,7 @@ const fn uncached(physical: u32) -> *mut u32 {
 const EVENT_ADDR: *mut u32 = uncached(telemetry::EVENT);
 #[cfg(all(target_arch = "mips", feature = "emit"))]
 const VALUE_ADDR: *mut u32 = uncached(telemetry::VALUE);
-#[cfg(all(target_arch = "mips", feature = "emit"))]
+#[cfg(all(target_arch = "mips", any(feature = "emit", feature = "debug-log")))]
 const LOG_ADDR: *mut u32 = uncached(telemetry::LOG);
 #[cfg(all(target_arch = "mips", feature = "emit"))]
 const SORT_CLASS_ADDR: *mut u32 = uncached(telemetry::SORT_CLASS);
@@ -160,11 +160,19 @@ pub fn console(message: &str) {
     debug_log(message);
 }
 
+/// Append raw bytes to the emulator debug log without ending the line. Telemetry builds only.
 #[inline(always)]
-fn debug_bytes(bytes: &[u8]) {
+pub fn debug_bytes(bytes: &[u8]) {
     for &byte in bytes {
         debug_byte(byte);
     }
+}
+
+/// Write one line of ASCII bytes to the emulator debug log. Telemetry builds only.
+#[inline(always)]
+pub fn debug_line(bytes: &[u8]) {
+    debug_bytes(bytes);
+    debug_byte(b'\n');
 }
 
 #[cfg(any(all(target_arch = "mips", feature = "emit"), test))]
@@ -187,7 +195,7 @@ fn emit_value(value: u32) {
 #[inline(always)]
 fn emit_value(_value: u32) {}
 
-#[cfg(all(target_arch = "mips", feature = "emit"))]
+#[cfg(all(target_arch = "mips", any(feature = "emit", feature = "debug-log")))]
 #[inline(always)]
 fn debug_byte(byte: u8) {
     // SAFETY: LOG_ADDR is the word-aligned debug-log port in the uncached
@@ -197,7 +205,7 @@ fn debug_byte(byte: u8) {
     }
 }
 
-#[cfg(not(all(target_arch = "mips", feature = "emit")))]
+#[cfg(not(all(target_arch = "mips", any(feature = "emit", feature = "debug-log"))))]
 #[inline(always)]
 fn debug_byte(_byte: u8) {}
 
