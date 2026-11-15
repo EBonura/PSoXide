@@ -665,6 +665,45 @@ impl Mask64 {
         }
     }
 
+    /// The set of bits `lo..hi` (`hi` exclusive); empty when `lo >= hi`, and `hi` past 64 is 64.
+    ///
+    /// What `((1u64 << (hi - lo)) - 1) << lo` was used for.
+    #[inline(always)]
+    #[must_use]
+    pub const fn range(lo: usize, hi: usize) -> Mask64 {
+        Mask64::first(hi).and_not(Mask64::first(lo))
+    }
+
+    /// Every bit moved up by `n` (taken modulo 64, like [`WideU::shl_by`]); bits shifted past
+    /// bit 63 are dropped. The same instructions as `u64::wrapping_shl`.
+    #[inline(always)]
+    #[must_use]
+    pub const fn shl_by(self, n: u32) -> Mask64 {
+        let k = n & 31;
+        // lo >> (32 - k), written so that k == 0 gives zero and not an overlong shift.
+        let carry = (self.0[0] >> 1) >> (31 - k);
+        if n & 32 == 0 {
+            Mask64([self.0[0] << k, (self.0[1] << k) | carry])
+        } else {
+            Mask64([0, self.0[0] << k])
+        }
+    }
+
+    /// Every bit moved down by `n` (taken modulo 64, like [`WideU::shr_by`]); bits shifted
+    /// below bit 0 are dropped. The same instructions as `u64::wrapping_shr`.
+    #[inline(always)]
+    #[must_use]
+    pub const fn shr_by(self, n: u32) -> Mask64 {
+        let k = n & 31;
+        // hi << (32 - k), zero for k == 0.
+        let carry = (self.0[1] << 1) << (31 - k);
+        if n & 32 == 0 {
+            Mask64([(self.0[0] >> k) | carry, self.0[1] >> k])
+        } else {
+            Mask64([self.0[1] >> k, 0])
+        }
+    }
+
     /// Is no bit set?
     #[inline(always)]
     pub const fn is_empty(self) -> bool {
@@ -1200,6 +1239,58 @@ mod tests {
             assert_eq!(m(a).is_empty(), a & (u64::MAX as u128) == 0);
         }
         assert!(Mask64::EMPTY.is_empty());
+    }
+
+    #[test]
+    fn mask64_shifts_match_u64_for_every_count() {
+        let m = |v: u64| Mask64::from_words(v as u32, (v >> 32) as u32);
+        let v = |m: Mask64| (m.low() as u64) | ((m.high() as u64) << 32);
+        let mut rng = Rng(0x1234_5678_9abc_def1);
+        let mut words = vec![
+            0,
+            1,
+            u64::MAX,
+            1 << 63,
+            1 << 32,
+            1 << 31,
+            0xffff_ffff,
+            0xffff_ffff_0000_0000,
+        ];
+        words.extend((0..200).map(|_| rng.next()));
+        for &w in &words {
+            for n in 0..64u32 {
+                assert_eq!(v(m(w).shl_by(n)), w << n, "{w:#x} shl {n}");
+                assert_eq!(v(m(w).shr_by(n)), w >> n, "{w:#x} shr {n}");
+            }
+            // The count is taken modulo 64, like WideU.
+            for n in 64..130u32 {
+                assert_eq!(v(m(w).shl_by(n)), w << (n % 64), "{w:#x} shl {n}");
+                assert_eq!(v(m(w).shr_by(n)), w >> (n % 64), "{w:#x} shr {n}");
+            }
+        }
+    }
+
+    #[test]
+    fn mask64_range_matches_u128_for_every_pair() {
+        let v = |m: Mask64| (m.low() as u128) | ((m.high() as u128) << 32);
+        for lo in 0..=80usize {
+            for hi in 0..=80usize {
+                let want: u128 = (0..64usize)
+                    .filter(|b| (lo..hi).contains(b))
+                    .map(|b| 1u128 << b)
+                    .sum();
+                assert_eq!(v(Mask64::range(lo, hi)), want, "range({lo}, {hi})");
+            }
+        }
+        // The same set as `first(count)` moved up, for a range that fits.
+        for lo in 0..64usize {
+            for count in 0..=(64 - lo) {
+                assert_eq!(
+                    Mask64::range(lo, lo + count),
+                    Mask64::first(count).shl_by(lo as u32)
+                );
+            }
+        }
     }
 
     /// FNV-1a 64 over `bytes`, the reference the host cookers use.

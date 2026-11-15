@@ -24,7 +24,7 @@
 //!   compare and shift, and explicit extraction to 32 bits. Nothing that
 //!   needs a compiler helper exists, and the 64-bit FNV-1a step
 //!   ([`WideU::fnv1a_step`]). Also [`Mask64`], a 64-flag bit set in two
-//!   words.
+//!   words, with variable shifts and a bit range.
 //! - [`wide_div`] -- exact division of a [`Wide`] / [`WideU`] by a word or a
 //!   wide value, with [`Rounding`] and clamping chosen by the caller, a
 //!   128-bit product and ratio compare, all in 32-bit instructions.
