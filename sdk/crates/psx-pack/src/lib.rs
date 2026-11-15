@@ -168,13 +168,14 @@ pub fn fnv1a32(bytes: &[u8]) -> u32 {
 /// read sector by sector). Feeding the pieces in order gives exactly the
 /// one-shot hash of their concatenation.
 ///
-/// The guest build multiplies by the prime with shifts and adds: the R3000A's
-/// `mult` takes 13 cycles on a full-width operand and LLVM turns any
-/// shift-and-add form back into one, so the sequence is written out in
-/// assembly. [`update`](Self::update) is the small form (about 19 cycles a
-/// byte, one shared body for `fnv1a32`, `push` loops and the ends of `update_bulk`);
-/// [`update_bulk`](Self::update_bulk) reads aligned words and is the one for large buffers
-/// (about 13.7 cycles a byte).
+/// The guest build runs `x * 0x0100_0193` as `x * 403` on the multiplier (6 cycles with the
+/// small constant as its first operand) plus `x << 24`, with the next byte's load, its
+/// extraction and the loop bookkeeping inside the multiplier's wait, all in assembly because
+/// LLVM turns any other form back into the 13-cycle full-width multiply (see `fold_bytes`).
+/// [`update`](Self::update) is the small form (80 bytes, about 13.3 cycles a byte, shared by
+/// `fnv1a32` and the ends of `update_bulk`); [`update_bulk`](Self::update_bulk) reads aligned
+/// words and is the one for large buffers (about 11.2 cycles a byte). [`push`](Self::push)
+/// keeps the multiply as shifts and adds, inline, for a caller that maps each byte first.
 ///
 /// ```
 /// use psx_pack::{fnv1a32, Fnv32};
