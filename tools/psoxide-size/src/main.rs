@@ -471,7 +471,7 @@ fn run() -> Result<ExitCode, String> {
                     ram::parse_floor(&text).ok_or(format!("{floor} holds no floor in bytes"))?
                 }
             };
-            if free >= floor {
+            if ram::fits(free, floor) {
                 println!(
                     "RAM budget: {free} B free, floor {floor} B ({} B of allowance)",
                     free - floor

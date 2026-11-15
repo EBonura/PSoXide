@@ -44,6 +44,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::{env, fs};
 
+mod bind;
 mod ladder;
 mod layout;
 mod pipeline;
@@ -892,10 +893,76 @@ fn stamp(profile: &Path, elf_path: &Path, crate_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Every linker symbol of `object` and every linkage name its DWARF records (inlined
+/// functions have no symbol of their own), keyed for [`bind`].
+fn build_symbols(object: &object::File, dwarf: &Dwarf, units: &[Unit]) -> Result<bind::Available> {
+    let mut available = bind::Available::default();
+    for symbol in object.symbols() {
+        if let Ok(name) = symbol.name() {
+            available.add(name);
+        }
+    }
+    for unit in units {
+        let mut entries = unit.entries();
+        while let Some(entry) = entries.next_dfs()? {
+            for attr in [gimli::DW_AT_linkage_name, gimli::DW_AT_MIPS_linkage_name] {
+                if let Some(value) = entry.attr_value(attr) {
+                    available.add(&dwarf.attr_string(unit, value)?.to_string_lossy());
+                }
+            }
+        }
+    }
+    Ok(available)
+}
+
+/// `rebind IN ELF OUT [--min-bound PERCENT] [--allow-unbound]` in the guest's directory.
+fn rebind_with_flags(input: &Path, elf: &Path, output: &Path, flags: &[String]) -> Result<()> {
+    let (gate, rest) = bind::Gate::from_args(flags)?;
+    if !rest.is_empty() {
+        return Err(format!("rebind: unknown arguments {rest:?}").into());
+    }
+    rebind(input, elf, output, &env::current_dir()?, gate)
+}
+
+/// `bind PROFILE ELF [--exact] [--min-bound PERCENT] [--allow-unbound]`: print how much of
+/// `profile` finds a symbol in `elf_path` and fail below the threshold. `--exact` compares
+/// names as spelled, which is what LLVM does with a profile it is given as it is.
+fn bind_check(profile: &Path, elf_path: &Path, args: &[String]) -> Result<()> {
+    let (gate, rest) = bind::Gate::from_args(args)?;
+    let matching = match rest.as_slice() {
+        [] => bind::Matching::Normalised,
+        ["--exact"] => bind::Matching::Exact,
+        other => return Err(format!("bind: unknown arguments {other:?}").into()),
+    };
+    let data = fs::read(elf_path)?;
+    let object = object::File::parse(&*data)?;
+    let (sections, endian) = dwarf_sections(&object)?;
+    let dwarf = sections.borrow(|section| EndianSlice::new(section, endian));
+    let units = dwarf_units(&dwarf)?;
+    let available = build_symbols(&object, &dwarf, &units)?;
+    let collisions = available.collisions();
+    if !collisions.is_empty() {
+        println!(
+            "{} portable keys are shared by two symbols of the build and bind to neither, e.g. {}",
+            collisions.len(),
+            collisions[0]
+        );
+    }
+    let report = bind::measure(&fs::read_to_string(profile)?, &available, matching);
+    println!("{report}");
+    gate.check(&report)
+}
+
 /// Map a profile's names, portable or from another checkout, onto the
 /// symbols of `elf_path`, which must carry DWARF for its inlined functions.
 /// `crate_dir` is where the guest builds, whose repository holds the profile's source.
-fn rebind(in_path: &Path, elf_path: &Path, out_path: &Path, crate_dir: &Path) -> Result<()> {
+fn rebind(
+    in_path: &Path,
+    elf_path: &Path,
+    out_path: &Path,
+    crate_dir: &Path,
+    gate: bind::Gate,
+) -> Result<()> {
     let data = fs::read(elf_path)?;
     let object = object::File::parse(&*data)?;
     let (sections, endian) = dwarf_sections(&object)?;
@@ -909,48 +976,17 @@ fn rebind(in_path: &Path, elf_path: &Path, out_path: &Path, crate_dir: &Path) ->
         .into());
     }
 
-    // Portable name -> this build's symbol, or None when two symbols share
-    // one portable name and the profile cannot say which it meant.
-    let mut targets: HashMap<String, Option<String>> = HashMap::new();
-    let mut add = |symbol: String| {
-        let key = portable_name(&symbol).into_owned();
-        if key == symbol {
-            return;
-        }
-        match targets.get(&key) {
-            None => {
-                targets.insert(key, Some(symbol));
-            }
-            Some(Some(existing)) if *existing != symbol => {
-                targets.insert(key, None);
-            }
-            Some(_) => {}
-        }
-    };
-    for symbol in object.symbols() {
-        if let Ok(name) = symbol.name() {
-            add(name.to_string());
-        }
-    }
-    for unit in &units {
-        let mut entries = unit.entries();
-        while let Some(entry) = entries.next_dfs()? {
-            for attr in [gimli::DW_AT_linkage_name, gimli::DW_AT_MIPS_linkage_name] {
-                if let Some(value) = entry.attr_value(attr) {
-                    add(dwarf
-                        .attr_string(unit, value)?
-                        .to_string_lossy()
-                        .into_owned());
-                }
-            }
-        }
-    }
-
+    let available = build_symbols(&object, &dwarf, &units)?;
     // What this build's own code covers: its key set (to say how much of the profile
     // still binds) and where each function sits in the source (to carry the profile
     // across edits).
     let (keys, facts) = convert_histogram(elf_path, uniform_histogram(elf_path)?, false)?;
     let text = fs::read_to_string(in_path)?;
+    // Before anything else: a profile whose functions are not in this build is not
+    // applied, and LLVM would not say so.
+    let bind = bind::measure(&text, &available, bind::Matching::Normalised);
+    println!("{bind}");
+    gate.check(&bind)?;
     let collected_here = text.starts_with(pipeline::FEATURES_TAG);
     let profile_dir = in_path.parent().unwrap_or(Path::new("."));
     let carried = match remap::Repo::open(&[crate_dir, profile_dir]) {
@@ -990,23 +1026,20 @@ fn rebind(in_path: &Path, elf_path: &Path, out_path: &Path, crate_dir: &Path) ->
 
     let (mut kept, mut bound, mut missing, mut ambiguous) = (0, 0, 0, 0);
     let rebound = rename_profile(&text, |name| {
-        // A Rust name either demangles or is already portable, and every
-        // Rust item path has a `::`; C names such as `main` have neither.
-        let key = portable_name(name);
-        if key == name && !name.contains("::") {
-            kept += 1;
-            return Ok(name.to_string());
-        }
-        Ok(match targets.get(key.as_ref()) {
-            Some(Some(symbol)) => {
-                bound += 1;
-                symbol.clone()
+        Ok(match available.resolve(name) {
+            bind::Lookup::Kept => {
+                kept += 1;
+                name.to_string()
             }
-            Some(None) => {
+            bind::Lookup::Bound(symbol) => {
+                bound += 1;
+                symbol
+            }
+            bind::Lookup::Ambiguous => {
                 ambiguous += 1;
                 name.to_string()
             }
-            None => {
+            bind::Lookup::Missing => {
                 missing += 1;
                 name.to_string()
             }
@@ -1028,14 +1061,16 @@ fn rebind(in_path: &Path, elf_path: &Path, out_path: &Path, crate_dir: &Path) ->
 
 const USAGE: &str = "usage: psoxide-pgo <elf-with-dwarf> <pc.csv>... <out.prof>
        psoxide-pgo portable <in.prof> <out.prof>
-       psoxide-pgo rebind <in.prof> <target-elf-with-dwarf> <out.prof>   (run in the guest's directory)
+       psoxide-pgo rebind <in.prof> <target-elf-with-dwarf> <out.prof> [--min-bound PERCENT] [--allow-unbound]
+                                                                       (run in the guest's directory)
+       psoxide-pgo bind <profile> <target-elf-with-dwarf> [--exact] [--min-bound PERCENT] [--allow-unbound]
        psoxide-pgo layout <link.map> <image.exe> <words.csv>... <out.layout>
        psoxide-pgo place <in.layout> <link.map> <image.exe> <linker-script> <out.order>
        psoxide-pgo ram <link.map> [--floor BYTES]";
 
-const MODES: [&str; 14] = [
-    "portable", "rebind", "layout", "place", "collect", "order", "apply", "choose", "measure",
-    "ram", "ladder", "stamp", "search", "icache",
+const MODES: [&str; 15] = [
+    "portable", "rebind", "bind", "layout", "place", "collect", "order", "apply", "choose",
+    "measure", "ram", "ladder", "stamp", "search", "icache",
 ];
 
 /// A layout profile from one link and per-word logs (`--pc-log-words
@@ -1105,10 +1140,11 @@ fn place_order(
 /// PGO builds can step its inlining down (as `apply --ram-fallback` does).
 fn ram_report(map: &Path, floor: Option<u32>) -> Result<()> {
     let text = fs::read_to_string(map)?;
-    let free = ram::free_ram(&text).ok_or_else(|| format!("{} has no __bss_end", map.display()))?;
+    let free =
+        ram::free_ram(&text).ok_or_else(|| format!("{} has no __heap_start", map.display()))?;
     println!("free {free} B");
     match floor {
-        Some(floor) if free < floor => Err(format!(
+        Some(floor) if !ram::fits(free, floor) => Err(format!(
             "{} leaves {free} B of RAM free, under the {floor} B floor",
             map.display()
         )
@@ -1134,9 +1170,13 @@ fn main() -> ExitCode {
             Err(_) => Err(format!("--floor wants a byte count, not {floor:?}").into()),
         },
         ["portable", input, output] => portable(Path::new(input), Path::new(output)),
-        ["rebind", input, elf, output] => env::current_dir()
-            .map_err(Into::into)
-            .and_then(|dir| rebind(Path::new(input), Path::new(elf), Path::new(output), &dir)),
+        ["rebind", input, elf, output, ..] => rebind_with_flags(
+            Path::new(input),
+            Path::new(elf),
+            Path::new(output),
+            &args[4..],
+        ),
+        ["bind", input, elf, ..] => bind_check(Path::new(input), Path::new(elf), &args[3..]),
         ["layout", map, exe, logs @ .., output] if !logs.is_empty() => {
             layout_profile(Path::new(map), Path::new(exe), logs, Path::new(output))
         }
@@ -1342,5 +1382,132 @@ mod tests {
         top.emit(1, &mut out);
         assert_eq!(top.total(), 17);
         assert_eq!(out, " 2: 10\n 5.1: callee:7\n  1: 7\n");
+    }
+
+    /// Every spelling of one function in builds whose crates hash differently must give one
+    /// key, and that key must be the one a committed profile holds. The spellings are
+    /// symbols of the SDK's own crates and of `core`, as three real builds named them (the
+    /// hashes differ in digits and in length), with the forms rustc v0 has: plain and
+    /// nested paths, inherent and trait impls (impl disambiguators, back-references),
+    /// closures, generic instances with the instantiating crate given as a back-reference
+    /// or spelled out, and const generics.
+    #[test]
+    fn one_function_has_one_key_whatever_the_crate_hashes() {
+        let forms: [(&[&str], &str); 8] = [
+            (
+                &[
+                    "_RNvNtCsakW6tY9fQm5_11psx_goldsrc12chunk_stream14report_sectors",
+                    "_RNvNtCsc8FXrSERXDU_11psx_goldsrc12chunk_stream14report_sectors",
+                    "_RNvNtCs1_11psx_goldsrc12chunk_stream14report_sectors",
+                ],
+                "psx_goldsrc::chunk_stream::report_sectors",
+            ),
+            (
+                &[
+                    "_RNvMNtCsakW6tY9fQm5_11psx_goldsrc12affine_edgesNtB2_10EdgePolicy11begin_frame",
+                    "_RNvMNtCslVZixn0QU4y_11psx_goldsrc12affine_edgesNtB2_10EdgePolicy11begin_frame",
+                ],
+                "<psx_goldsrc::affine_edges::EdgePolicy>::begin_frame",
+            ),
+            (
+                &[
+                    "_RNvXNtCsakW6tY9fQm5_11psx_goldsrc12chunk_streamNtNtNtCscgyhKdNuKvv_6psx_io2cd6reader12SectorReaderNtB2_11ChunkReader10start_read",
+                    "_RNvXNtCsc8FXrSERXDU_11psx_goldsrc12chunk_streamNtNtNtCs3_6psx_io2cd6reader12SectorReaderNtB2_11ChunkReader10start_read",
+                ],
+                "<psx_io::cd::reader::SectorReader as psx_goldsrc::chunk_stream::ChunkReader>::start_read",
+            ),
+            (
+                &[
+                    "_RNvXs0_NtCs6HN5p3ZHQ13_6psx_rt5cacheNtB5_5HwBusNtB5_3Bus11irq_restore",
+                    "_RNvXs0_NtCs4_6psx_rt5cacheNtB5_5HwBusNtB5_3Bus11irq_restore",
+                ],
+                "<psx_rt::cache::HwBus as psx_rt::cache::Bus>::irq_restore",
+            ),
+            (
+                &[
+                    "_RNCNvNtCsakW6tY9fQm5_11psx_goldsrc6render10guard_clip0B5_",
+                    "_RNCNvNtCsc8FXrSERXDU_11psx_goldsrc6render10guard_clip0B5_",
+                ],
+                "psx_goldsrc::render::guard_clip::{closure#0} @psx_goldsrc",
+            ),
+            (
+                &[
+                    "_RINvNtCsbh2AbiOuVML_7psx_gpu3gpu4drawNtNtB4_4prim8FillRectEB4_",
+                    "_RINvNtCs1_7psx_gpu3gpu4drawNtNtB4_4prim8FillRectEB4_",
+                ],
+                "psx_gpu::gpu::draw::<psx_gpu::prim::FillRect> @psx_gpu",
+            ),
+            (
+                &[
+                    "_RINvCsaFmROvEVfWL_7psx_pad10poll_stateNtNtCscgyhKdNuKvv_6psx_io6periph14ControllerPortECs2RILYqUnlV4_10psx_engine",
+                    "_RINvCs2_7psx_pad10poll_stateNtNtCs7_6psx_io6periph14ControllerPortECs7_10psx_engine",
+                ],
+                "psx_pad::poll_state::<psx_io::periph::ControllerPort> @psx_engine",
+            ),
+            (
+                &[
+                    "_RINvMs_NtCs5hzxbyFmMX7_7psx_gpu5frameINtB5_7OtFrameKj1_E3addNtNtB7_4prim8RectFlatECs2RILYqUnlV4_10psx_engine",
+                    "_RINvMs_NtCs9_7psx_gpu5frameINtB5_7OtFrameKj1_E3addNtNtB7_4prim8RectFlatECs1_10psx_engine",
+                ],
+                "<psx_gpu::frame::OtFrame<1>>::add::<psx_gpu::prim::RectFlat> @psx_engine",
+            ),
+        ];
+        for (spellings, key) in forms {
+            for spelling in spellings {
+                assert_eq!(portable_name(spelling), key, "{spelling}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_generic_instance_in_another_crate_is_another_key() {
+        let in_pad =
+            "_RINvCs2_7psx_pad10poll_stateNtNtCs7_6psx_io6periph14ControllerPortECs3_7psx_pad";
+        let in_engine =
+            "_RINvCs2_7psx_pad10poll_stateNtNtCs7_6psx_io6periph14ControllerPortECs3_10psx_engine";
+        assert_eq!(
+            portable_name(in_pad),
+            "psx_pad::poll_state::<psx_io::periph::ControllerPort> @psx_pad"
+        );
+        assert_eq!(
+            portable_name(in_engine),
+            "psx_pad::poll_state::<psx_io::periph::ControllerPort> @psx_engine"
+        );
+    }
+
+    #[test]
+    fn legacy_names_lose_their_hash_and_statics_keep_their_suffix() {
+        let legacy = "_ZN4core3fmt5Write9write_fmt17h0123456789abcdefE";
+        let other = "_ZN4core3fmt5Write9write_fmt17hfedcba9876543210E";
+        assert_eq!(portable_name(legacy), "core::fmt::Write::write_fmt");
+        assert_eq!(portable_name(legacy), portable_name(other));
+        // A linker suffix after the symbol (ThinLTO promotion) is not part of the name.
+        assert_eq!(
+            portable_name("_RNvNtCs1_6psx_rt3tty5print.llvm.12345"),
+            portable_name("_RNvNtCs2_6psx_rt3tty5print")
+        );
+    }
+
+    #[test]
+    fn same_named_items_of_one_scope_share_a_key_and_are_never_merged() {
+        // `s_` is the item's own disambiguator (two `do_panic` in one scope); the portable
+        // path drops it, so both map to one key and the tool binds neither.
+        let first = "_RNvNvNtNtCs1_4core5slice5index16slice_index_fail8do_panic";
+        let second = "_RNvNvNtNtCs1_4core5slice5index16slice_index_fails_8do_panic";
+        assert_eq!(portable_name(first), portable_name(second));
+        let mut available = bind::Available::default();
+        available.add(first);
+        available.add(second);
+        assert_eq!(
+            available.collisions(),
+            ["core::slice::index::slice_index_fail::do_panic"]
+        );
+        assert_eq!(available.resolve(first), bind::Lookup::Ambiguous);
+        // Writing a portable profile that would merge two records is an error.
+        let profile = format!("{first}:5:1\n 1: 5\n{second}:7:1\n 1: 7\n");
+        let error = rename_profile(&profile, |name| Ok(portable_name(name).into_owned()))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("both become"), "{error}");
     }
 }

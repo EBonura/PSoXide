@@ -281,6 +281,23 @@ pub fn items(ram: &Ram) -> String {
     out
 }
 
+/// Free RAM of a link map's text: the figure `psoxide-size ram` prints and every
+/// gate compares with a floor. It is measured to `STACK_INIT - STACK_RESERVE`, the
+/// address the link itself asserts against. `None` when the map has no
+/// `__heap_start` (it is not a psoxide.ld link).
+#[must_use]
+pub fn free_ram(map_text: &str) -> Option<u32> {
+    crate::map::parse(map_text).heap_free()
+}
+
+/// Whether `free` bytes meet `floor`. One comparison for `psoxide-size ram --floor`
+/// and for `psoxide-pgo ladder`'s decision whether a link fits, so the two cannot
+/// disagree at the boundary: exactly at the floor fits, one byte under does not.
+#[must_use]
+pub fn fits(free: u32, floor: u32) -> bool {
+    free >= floor
+}
+
 /// A budget file: the first number on the first non-comment line is the floor.
 #[must_use]
 pub fn parse_floor(text: &str) -> Option<u32> {
@@ -347,6 +364,22 @@ mod tests {
         let ram = read(&parse(MAP));
         assert_eq!(ram.stack_reserve, Some(0xd000));
         assert_eq!(ram.free, Some(0x801f_ff00 - 0xd000 - 0x8001_0600));
+    }
+
+    #[test]
+    fn free_ram_reads_a_map_text_and_fits_is_inclusive() {
+        let map = "\
+     VMA      LMA     Size Align Out     In      Symbol
+       0        0        0     1 STACK_INIT = 0x801FFF00
+       0        0        0     1 STACK_RESERVE = 0x8000
+801f6a84 801f6a84        0     1 __heap_start = .
+";
+        // Up to the stack's reach, not to the end of the RAM region 256 B higher.
+        assert_eq!(free_ram(map), Some(0x801f_7f00 - 0x801f_6a84));
+        assert_eq!(free_ram("801f6a84 801f6a84 0 1 __bss_end = .\n"), None);
+        assert!(fits(100, 100));
+        assert!(!fits(99, 100));
+        assert!(fits(0, 0));
     }
 
     #[test]

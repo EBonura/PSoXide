@@ -27,8 +27,12 @@ pub struct Config {
     pub to: u32,
     /// Grid spacing. Small enough that one step costs well under a percent.
     pub step: u32,
-    /// Free RAM every candidate must leave, in bytes.
+    /// Free RAM every candidate must leave, in bytes, as the caller states it.
     pub floor: u32,
+    /// Extra bytes a candidate must leave on top of `floor` (`--margin`), for a game that
+    /// wants headroom under its floor. The default is 0: a link that leaves exactly the
+    /// floor fits.
+    pub margin: u32,
     /// How many of the highest fitting thresholds to bench. 1 skips the bench.
     pub candidates: usize,
     /// Candidates within this percentage of the best score tie.
@@ -48,6 +52,7 @@ impl Default for Config {
             to: 250,
             step: 50,
             floor: 0,
+            margin: 0,
             candidates: 4,
             tie_percent: 0.3,
             scan: false,
@@ -58,6 +63,11 @@ impl Default for Config {
 }
 
 impl Config {
+    /// What a link must leave free to fit: the floor plus the margin.
+    pub fn required(&self) -> u32 {
+        self.floor.saturating_add(self.margin)
+    }
+
     /// The grid, highest first.
     pub fn grid(&self) -> Result<Vec<u32>> {
         if self.step == 0 || self.from < self.to {
@@ -116,8 +126,11 @@ pub struct Rung {
 }
 
 impl Rung {
-    pub fn fits(&self, floor: u32) -> bool {
-        self.free.is_some_and(|free| free >= floor)
+    /// Whether the link left at least `required` free (see [`Config::required`]), by the
+    /// same comparison `psoxide-size ram --floor` makes.
+    pub fn fits(&self, required: u32) -> bool {
+        self.free
+            .is_some_and(|free| psoxide_size::ram::fits(free, required))
     }
 }
 
@@ -135,7 +148,7 @@ pub struct Outcome {
 pub fn search(rig: &mut dyn Rig, config: &Config) -> Result<Outcome> {
     let grid = config.grid()?;
     let mut linked: BTreeMap<u32, Option<Fit>> = BTreeMap::new();
-    let floor = config.floor;
+    let required = config.required();
     let fits =
         |rig: &mut dyn Rig, linked: &mut BTreeMap<u32, Option<Fit>>, at: usize| -> Result<bool> {
             let threshold = grid[at];
@@ -144,7 +157,7 @@ pub fn search(rig: &mut dyn Rig, config: &Config) -> Result<Outcome> {
             }
             Ok(linked[&threshold]
                 .as_ref()
-                .is_some_and(|fit| fit.free >= floor))
+                .is_some_and(|fit| psoxide_size::ram::fits(fit.free, required)))
         };
     // The first grid index that fits.
     let first = if config.scan {
@@ -177,7 +190,7 @@ pub fn search(rig: &mut dyn Rig, config: &Config) -> Result<Outcome> {
             "no threshold from {} down to {} links with {} B of RAM free ({})",
             config.from,
             config.to,
-            config.floor,
+            config.required(),
             describe(&linked)
         )
         .into());
@@ -394,9 +407,15 @@ pub fn table(outcome: &Outcome, config: &Config) -> String {
             }
             names
         });
-    let mut text = format!(
-        "floor {} B, step {}, candidates {}\n",
-        config.floor, config.step, config.candidates
+    let mut text = if config.margin == 0 {
+        format!("floor {} B, ", config.floor)
+    } else {
+        format!("floor {} B + margin {} B, ", config.floor, config.margin)
+    };
+    let _ = writeln!(
+        text,
+        "step {}, candidates {}",
+        config.step, config.candidates
     );
     let _ = write!(text, "threshold  free_B  fits");
     for name in &names {
@@ -407,7 +426,7 @@ pub fn table(outcome: &Outcome, config: &Config) -> String {
         let free = rung.free.map_or("-".to_string(), |free| free.to_string());
         let fits = if rung.free.is_none() {
             "no link"
-        } else if rung.fits(config.floor) {
+        } else if rung.fits(config.required()) {
             "yes"
         } else {
             "under floor"
@@ -434,7 +453,7 @@ pub fn table(outcome: &Outcome, config: &Config) -> String {
         }
         if rung.threshold == outcome.chosen {
             text.push_str("  <- chosen");
-        } else if rung.scores.is_empty() && rung.fits(config.floor) {
+        } else if rung.scores.is_empty() && rung.fits(config.required()) {
             let twin = outcome.rungs.iter().find(|other| {
                 other.threshold > rung.threshold
                     && other.code.is_some()
@@ -664,6 +683,88 @@ mod tests {
         let mut rig = Fake::new(&[]);
         let error = search(&mut rig, &config(6000)).unwrap_err().to_string();
         assert!(error.contains("no threshold"), "{error}");
+    }
+
+    /// A rig whose free RAM at each threshold is given outright, to land on the boundary.
+    struct Fixed(BTreeMap<u32, u32>);
+
+    impl Rig for Fixed {
+        fn link(&mut self, threshold: u32) -> Result<Option<Fit>> {
+            Ok(Some(Fit {
+                free: self.0[&threshold],
+                code: None,
+            }))
+        }
+        fn bench(&mut self, _threshold: u32, _free: u32) -> Result<Vec<(String, f64)>> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn pick(free: &[(u32, u32)], config: &Config) -> Result<u32> {
+        let config = Config {
+            from: 400,
+            to: 300,
+            candidates: 1,
+            ..config.clone()
+        };
+        let mut rig = Fixed(free.iter().copied().collect());
+        search(&mut rig, &config).map(|outcome| outcome.chosen)
+    }
+
+    #[test]
+    fn a_link_exactly_at_the_floor_fits() {
+        // 400 and 350 leave 3,999 B under a 4,000 B floor; 300 leaves exactly 4,000 B.
+        let free = [(400, 3_999), (350, 3_999), (300, 4_000)];
+        assert_eq!(pick(&free, &config(4_000)).unwrap(), 300);
+    }
+
+    #[test]
+    fn a_link_one_byte_under_the_floor_does_not_fit() {
+        let free = [(400, 3_999), (350, 3_999), (300, 3_999)];
+        let error = pick(&free, &config(4_000)).unwrap_err().to_string();
+        assert!(error.contains("no threshold"), "{error}");
+        assert!(error.contains("4000 B"), "{error}");
+    }
+
+    #[test]
+    fn the_margin_defaults_to_zero_and_adds_to_the_floor() {
+        // 350 leaves exactly the floor: it is the pick with no margin, and with a margin
+        // of one byte it is one byte short, so only 300 fits.
+        let free = [(400, 3_999), (350, 4_000), (300, 4_001)];
+        assert_eq!(Config::default().margin, 0);
+        assert_eq!(pick(&free, &config(4_000)).unwrap(), 350);
+        let with = Config {
+            margin: 1,
+            ..config(4_000)
+        };
+        assert_eq!(with.required(), 4_001);
+        assert_eq!(pick(&free, &with).unwrap(), 300);
+        // A margin never wraps the requirement around.
+        let huge = Config {
+            margin: u32::MAX,
+            ..config(4_000)
+        };
+        assert_eq!(huge.required(), u32::MAX);
+    }
+
+    #[test]
+    fn the_table_names_the_margin_only_when_there_is_one() {
+        let speeds: &[(u32, &[(&str, f64)])] = &[(950, &[("a", 1.0)])];
+        let plain = config(3600);
+        let outcome = search(
+            &mut Fake::new(speeds),
+            &Config {
+                candidates: 1,
+                ..plain.clone()
+            },
+        )
+        .unwrap();
+        assert!(table(&outcome, &plain).starts_with("floor 3600 B, step"));
+        let margined = Config {
+            margin: 100,
+            ..plain
+        };
+        assert!(table(&outcome, &margined).starts_with("floor 3600 B + margin 100 B, step"));
     }
 
     #[test]

@@ -58,6 +58,18 @@ image. `--items` prints every placed input section as `kind size crate name`, la
 diffing two links. `--floor` takes a byte count or a file whose first number on its first
 non-comment line is the floor, prints the margin and exits 1 when the link is under it.
 
+`psoxide-size ram` is the measure of free RAM, and the only one: the floor a game commits is
+compared with this number, exactly at the floor fits and one byte under does not
+(`psoxide_size::ram::fits`). The figure stops at `STACK_INIT - STACK_RESERVE`, the lowest address
+the stack may reach and the one the link asserts against. A RAM report a game wrote itself has
+over-reported by 256 B, because the linker script's `RAM` region ends 256 B above that address, so
+a build it called fine could be under the floor. A game's budget gate and its link hook for
+`psoxide-pgo ladder` must call `psoxide-size ram MAP --floor BYTES` (or `psoxide-pgo ram MAP
+--floor BYTES`, which runs the same function and prints `free N B`), or link against the library
+function `psoxide_size::ram::free_ram`, and print nothing computed by itself. `psoxide-pgo
+ladder` measures the map a `--link` hook leaves with that function and ignores a different `free
+N` the hook printed (it says so).
+
 `block` finds the one statically initialised state block a gate reads from emulator RAM: four
 magic bytes, a version word, the block's own length and zero padding. Each `MAGIC:VERSION:LEN:NAME`
 prints `0xADDRESS NAME`; it exits 1 when a block is missing, ambiguous or the file is not a PS-X EXE

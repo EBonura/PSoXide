@@ -149,6 +149,7 @@ psoxide-pgo collect [GUEST] --frontend PATH [--tape PATH [--polls A..B]]...
 psoxide-pgo order   [GUEST] --frontend PATH (--tape PATH --polls A..B)... [--launch-arg ARG]...
                     [--pack CMD] [--profile PROFILE] [--variant V] --out LAYOUT -- CARGO-ARGS...
 psoxide-pgo stamp   [GUEST] --profile PROFILE -- CARGO-ARGS...
+psoxide-pgo bind    PROFILE TWIN.elf [--exact] [--min-bound PERCENT] [--allow-unbound]
 psoxide-pgo apply   [GUEST] [--profile PROFILE] [--layout LAYOUT] [--variant V] -- CARGO-ARGS...
 psoxide-pgo choose  [GUEST] --profile PROFILE [--layout LAYOUT] --gate CMD [--variant V]...
                     [--pack CMD] [--frame-budget VBLANKS] [--rank deadline|work]
@@ -748,6 +749,74 @@ A profile goes stale as code changes: renamed or removed functions show up as
 the profile's source record (below); regenerate after large changes, and
 whenever the game repins onto a different SDK.
 
+### Names are the key, and it is not the symbol
+
+A profile's function names are looked up by exact symbol, and a Rust v0 symbol spells out
+the disambiguator of every crate on its path. Cargo derives that from `-C metadata`, a hash of
+the package id, its features, its profile and the metadata of every dependency, so a change
+to one crate's dependency edges or features re-hashes that crate and every crate above it, the
+game included. Measured on three profiles of one game committed at three SDK revisions
+(`psoxide-pgo bind PROFILE TWIN.elf --exact`, against one later build): 25.7%, 28.1% and 99.1%
+of the samples sat in functions whose spelling the build still had. Normalised (below) the same
+three bind 98.6%, 98.6% and 99.1%, and `rebind` writes the same file it wrote before.
+
+So the damage is confined to a profile that reaches LLVM spelled as the build that produced it:
+
+- `collect` writes portable names, and `apply`, `choose` and `ladder` rebind them onto the
+  local build, so a game that drives this tool needs no new collection when its SDK pin moves.
+- The plain converter (`psoxide-pgo ELF pc.csv OUT`, run by a game's own build driver) writes
+  the build's raw symbols. A game that gives that file straight to `-Zprofile-sample-use`
+  gets an empty profile after any pin that re-hashes its crates, and LLVM says nothing: the
+  measured case was 59 KB free instead of 3 KB and 12% more instructions per frame. Such a
+  driver commits `psoxide-pgo portable RAW PORTABLE` (or the raw file; both read the same),
+  and before each build links, runs
+  `psoxide-pgo rebind PORTABLE TWIN.elf OUT` in the game's directory and passes `OUT` to
+  `-Zprofile-sample-use`. `TWIN.elf` is any build of the same code with `-Cdebuginfo=1
+  -Zdebug-info-for-profiling -Cstrip=none` (the profiled build's own ELF serves: the flags
+  do not change the symbols).
+
+The key is `rustc_demangle`'s hash-free alternate output (`{:#}`) with ` @crate` appended for
+a generic instance, as `portable_name` writes it. It was chosen over deleting the hash from
+the string, which does not give equal strings (hashes have different lengths, and v0
+back-references are byte offsets that shift with them), and over a parser of our own for the
+v0 grammar, which would need no new key for any form seen so far and would change every
+committed portable profile and `func:` record. The printer expands back-references, so one
+function has one key in any build; closures print as `{closure#N}`, shims as `{shim:..}`,
+impls by their self type, const generics by value, and the instantiating crate (which v0
+keeps once per instantiating crate, and the printer drops) is recovered from the symbol and
+appended. Legacy `_ZN...17h<hash>E` names lose their hash in the same printer. Names already
+in this form pass through unchanged, which is how an old raw profile and a new portable one
+are both read.
+
+Two different symbols can share a key: two items of one name in one scope (the `s_` after a
+path segment is an item counter the printer drops, as in `core`'s two `do_panic`), or a
+generic instance that moved to another instantiating crate. They are never merged. Writing a
+portable profile that would hold two records under one key fails and names both. Binding to
+a build in which two symbols share a key binds neither: both count as unbound, as
+`ambiguous`, and `bind` prints the keys. A generic instance that moves to a different
+instantiating crate between two SDK revisions is a different key and shows up unbound.
+
+#### The unbound gate
+
+`rebind` (so every `apply`, `choose` and `ladder`) and `bind` print how much of the profile
+has a symbol in the build, measured per function record weighted by its samples, before
+anything else, and fail below 90%:
+
+```text
+profile bind (names normalised): 98.6% of samples bound; no symbol for 1.4% of samples (538639 of 39077392) and 7 of 368 functions (0 ambiguous)
+  unbound  0.94%  psx_rt::present::wait_idle
+  ...
+psoxide-pgo: UNBOUND PROFILE: only 25.7% of the profile's samples sit in functions this build has a symbol for (under 90%), so LLVM would apply almost none of it and say nothing. Collect it again on this build, or pass --allow-unbound (PSOXIDE_PGO_ALLOW_UNBOUND=1) to continue
+```
+
+The ten largest unbound functions are listed, under their portable keys. `--allow-unbound`
+or `PSOXIDE_PGO_ALLOW_UNBOUND=1` continues (and says so), `--min-bound PERCENT` moves the line
+(`rebind` and `bind` take both). The threshold comes from the measurements above: 98% or more
+when the names are normalised, under 30% when a re-hashed profile is given as it is. Unlike the
+line-key figure below it applies to a profile whichever tool wrote it. `bind --exact` compares
+names as spelled, which is what LLVM does with a raw file: run it on a profile and a build to
+see whether a driver that skips `rebind` is applying anything.
+
 ### Line shifts do not move the profile
 
 LLVM keys a profile line by `line - the function's declaration line`, so
@@ -991,7 +1060,8 @@ The SDK's own `make repro-check` runs the gate on `editor-playtest` and `hello-e
 ```text
 psoxide-pgo <elf-with-dwarf> <pc.csv>... <out.prof>        convert (sums several logs)
 psoxide-pgo portable <in.prof> <out.prof>                  strip disambiguators
-psoxide-pgo rebind <in.prof> <target-elf-with-dwarf> <out.prof>
+psoxide-pgo rebind <in.prof> <target-elf-with-dwarf> <out.prof>  [--min-bound PERCENT] [--allow-unbound]
+psoxide-pgo bind <profile> <target-elf-with-dwarf> [--exact] [--min-bound PERCENT] [--allow-unbound]
 psoxide-pgo layout <link.map> <image.exe> <words.csv>... <out.layout>   layout profile from per-word logs
 psoxide-pgo place <in.layout> <link.map> <image.exe> <linker-script> <out.order>
 psoxide-pgo ram <link.map> [--floor BYTES]                  free RAM; fails under the floor
@@ -1022,7 +1092,7 @@ bytes, and a higher threshold is not always faster. `ladder` replaces that:
 
 ```
 psoxide-pgo ladder --profile P [--layout L] --ram-floor BYTES \
-    [--from 1000] [--to 250] [--step 50] [--candidates 4] [--tie 0.3] [--scan] \
+    [--from 1000] [--to 250] [--step 50] [--candidates 4] [--tie 0.3] [--scan] [--margin 0] \
     [--link CMD] [--pack CMD] --bench CMD [--out ladder.txt] -- CARGO-ARGS...
 ```
 
@@ -1038,12 +1108,25 @@ the bench hook, since a layout never survives a rung change). K = 4 is about
 four times the cost of one `apply`. `--candidates 1` takes the highest fit with
 no bench, for quick local iteration.
 
+`--margin BYTES` (default 0) asks every candidate for that much more free RAM than the floor: a
+link fits when its free RAM is at least `floor + margin`. Exactly at the requirement fits and one
+byte under does not.
+
+Free RAM is `psoxide-size ram`'s figure and nothing else: `psoxide_size::ram::free_ram` for the
+number, `psoxide_size::ram::fits` for the comparison, called by `ram`, `apply --ram-floor`,
+`choose --ram-floor` and the ladder alike. It stops at `STACK_INIT - STACK_RESERVE`. A game's
+own RAM report has over-reported by 256 B (the link's `RAM` region ends that far above the
+stack's reach), so a game must not print its own `free N`: its `--link` hook should print what
+`psoxide-pgo ram MAP` or `psoxide-size ram MAP` prints, or print nothing and leave the map. The
+ladder measures the map the hook leaves at `$PSOXIDE_PGO_MAP` and warns when the hook's printed
+`free N` disagrees; it uses the printed figure only when the hook left no map.
+
 The bench hook runs with `PSOXIDE_PGO_THRESHOLD`, `_FREE`, `_EXE` and `_IMAGE`
 (the packed disc when `--pack` is given) and prints `score NAME VALUE` lines,
 higher is better, one per window or tape. A game that links through its own
 tool passes `--link CMD` instead of cargo arguments: the command links at
-`$PSOXIDE_PGO_THRESHOLD`, prints `free N` (or leaves its map at
-`$PSOXIDE_PGO_MAP`) and exits non-zero when the link fails or the stack is
+`$PSOXIDE_PGO_THRESHOLD`, leaves its map at `$PSOXIDE_PGO_MAP` (or prints `free N` as
+`psoxide-pgo ram` does) and exits non-zero when the link fails or the stack is
 unsafe.
 
 Selection: each candidate's score on a metric is divided by the best
@@ -1062,7 +1145,7 @@ sample profile still describes the code: the share of its samples whose
 missing and changed, and the functions that lost the most. It warns below 98%
 and, for a profile `collect` wrote, refuses below 90% (`PSOXIDE_PGO_ALLOW_STALE=1` builds
 anyway). The report says `STALE PROFILE` only when the build refuses; with the override it says it
-is building anyway, and for a profile made another way it says `low bind, not enforced`. A profile made another way is only reported: the comparison assumes the profile and
+is building anyway, and for a profile made another way it says `low bind, not enforced`. (The name-level gate under "The unbound gate" applies to every profile.) A profile made another way is only reported: the comparison assumes the profile and
 the twin were built with the same optimisation, and oot-psx, which collects from its
 profile-applied build and rebinds onto an unprofiled twin, reads 76.7% on a fresh profile. LLVM has no
 way to notice a stale AutoFDO profile (pseudo-probes would, but this rustc has

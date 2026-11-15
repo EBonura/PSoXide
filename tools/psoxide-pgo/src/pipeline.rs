@@ -64,7 +64,7 @@ pub const USAGE: &str = "\
                            [--pack CMD] [--frame-budget VBLANKS] [--rank deadline|work]
                            [--ram-floor BYTES] -- CARGO-ARGS...
        psoxide-pgo ladder  [GUEST] --profile PROFILE [--layout LAYOUT] [--variant BASE] --ram-floor BYTES
-                           [--from N] [--to N] [--step N] [--candidates K] [--tie PERCENT] [--scan]
+                           [--from N] [--to N] [--step N] [--candidates K] [--tie PERCENT] [--scan] [--margin BYTES]
                            [--baseline FILE [--baseline-tolerance PERCENT]]
                            [--link CMD] [--pack CMD] [--bench CMD] [--out TABLE] [-- CARGO-ARGS...]
        psoxide-pgo measure --frontend PATH --image PATH [--tape PATH] --polls A..B
@@ -259,6 +259,7 @@ fn parse(mode: &str, args: &[String]) -> Result<Options> {
                     .map_err(|_| format!("--tie wants a percentage, not {text:?}"))?;
             }
             "--scan" => options.ladder.scan = true,
+            "--margin" => options.ladder.margin = flag_number(&value()?, "--margin")?,
             "--baseline" => {
                 let path = value()?;
                 options.ladder.baseline = ladder::parse_scores(
@@ -1783,7 +1784,13 @@ fn compile_flags(guest: &Guest, profile: Option<&Path>, variant: &str) -> Result
     }
     let elf = guest.build_twin()?.exe;
     let rebound = elf.with_extension("rebound.prof");
-    crate::rebind(profile, &elf, &rebound, &guest.crate_dir)?;
+    crate::rebind(
+        profile,
+        &elf,
+        &rebound,
+        &guest.crate_dir,
+        crate::bind::Gate::default(),
+    )?;
     let mut flags: Vec<String> = COLLECT_FLAGS.iter().map(ToString::to_string).collect();
     flags.push(format!("-Zprofile-sample-use={}", rebound.display()));
     flags.extend(extra);
@@ -1858,9 +1865,9 @@ fn apply_within_floor(guest: &Guest, options: &Options, variant: &str) -> Result
             .as_deref()
             .ok_or("--ram-floor needs the link map, and the link wrote none")?;
         let free = crate::ram::free_ram(&fs::read_to_string(map)?)
-            .ok_or_else(|| format!("{} has no __bss_end", map.display()))?;
+            .ok_or_else(|| format!("{} has no __heap_start", map.display()))?;
         tried.push(format!("{candidate}: {free} B"));
-        if free >= floor {
+        if crate::ram::fits(free, floor) {
             let record = format!(
                 "variant {candidate}\nfree {free}\nfloor {floor}\ntried {}\n",
                 tried.join(", ")
@@ -2536,7 +2543,7 @@ fn choose(guest: &Guest, options: &Options) -> Result<()> {
         let free_column = free.map(|free| ("free_ram".to_string(), free.to_string()));
         if let Some(floor) = options.ram_floor {
             let free = free.ok_or("--ram-floor needs the link map, and the link wrote none")?;
-            if free < floor {
+            if !crate::ram::fits(free, floor) {
                 println!("psoxide-pgo: {variant} leaves {free} B free, under the {floor} B floor: refused");
                 rows.push(GateRow {
                     variant: variant.clone(),
@@ -2644,6 +2651,36 @@ fn link_report(output: &str) -> (Option<u32>, Option<String>) {
     (free, last("code "))
 }
 
+/// The free RAM of a `--link` hook's link. The map it left is measured with the shared
+/// function (`psoxide-size ram`'s); a `free N` the hook printed is only a fallback when it
+/// left no map, because a game's own copy of the report has over-reported by 256 B (it
+/// measured to the end of the RAM region, not to the stack's reach). When both exist and
+/// differ the figures are named and the map's is used.
+fn rung_free(printed: Option<u32>, map: &Path) -> Result<u32> {
+    let measured = match fs::read_to_string(map) {
+        Ok(text) => Some(crate::ram::free_ram(&text).ok_or_else(|| {
+            format!(
+                "{} has no __heap_start, so it is no psoxide.ld link",
+                map.display()
+            )
+        })?),
+        Err(_) => None,
+    };
+    match (measured, printed) {
+        (Some(measured), Some(printed)) if measured != printed => {
+            println!(
+                "psoxide-pgo: warning: the link hook printed free {printed} B but its map measures \
+                 {measured} B (`psoxide-size ram` is the measure; a hook should print what \
+                 `psoxide-pgo ram MAP` or `psoxide-size ram MAP` prints). Using {measured} B."
+            );
+            Ok(measured)
+        }
+        (Some(measured), _) => Ok(measured),
+        (None, Some(printed)) => Ok(printed),
+        (None, None) => Err("--link printed no `free N` and wrote no map".into()),
+    }
+}
+
 /// The ladder's rig: the link and the bench of one game.
 struct GameRig<'a> {
     guest: &'a Guest,
@@ -2677,13 +2714,7 @@ impl Rig for GameRig<'_> {
                 return Ok(None);
             }
             let (printed, code) = link_report(&output);
-            let free = match printed {
-                Some(free) => free,
-                None => crate::ram::free_ram(&fs::read_to_string(&map).map_err(|error| {
-                    format!("--link printed no `free N` and wrote no map: {error}")
-                })?)
-                .ok_or("the link map has no __bss_end")?,
-            };
+            let free = rung_free(printed, &map)?;
             return Ok(Some(ladder::Fit { free, code }));
         }
         let variant = self.variant(threshold);
@@ -2699,7 +2730,7 @@ impl Rig for GameRig<'_> {
                     .as_deref()
                     .ok_or("the ladder needs the link map")?;
                 let free = crate::ram::free_ram(&fs::read_to_string(map)?)
-                    .ok_or_else(|| format!("{} has no __bss_end", map.display()))?;
+                    .ok_or_else(|| format!("{} has no __heap_start", map.display()))?;
                 let code = {
                     use std::hash::{Hash, Hasher};
                     let mut hasher = std::collections::hash_map::DefaultHasher::new();
