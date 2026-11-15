@@ -133,6 +133,9 @@ pub struct Mesh<'a> {
 impl<'a> Mesh<'a> {
     /// Parse a cooked `.psxm` blob. Returns a `Mesh` view that
     /// borrows into `bytes`.
+    // Load-time parser: one copy, never inlined into its callers (smaller, the compiler would
+    // otherwise copy the body into every call site once the readers it uses are small).
+    #[inline(never)]
     pub fn from_bytes(bytes: &'a [u8]) -> Result<Self, ParseError> {
         // AssetHeader.
         if bytes.len() < psxed_format::AssetHeader::SIZE {
@@ -352,6 +355,9 @@ pub struct Model<'a> {
 
 impl<'a> Model<'a> {
     /// Parse a cooked `.psxmdl` blob.
+    // Load-time parser: one copy, never inlined into its callers (smaller, the compiler would
+    // otherwise copy the body into every call site once the readers it uses are small).
+    #[inline(never)]
     pub fn from_bytes(bytes: &'a [u8]) -> Result<Self, ParseError> {
         use psxed_format::model::{
             JointRecord, MaterialRecord, ModelHeader, PartRecord, FACE_RECORD_SIZE, LEGACY_VERSION,
@@ -849,6 +855,9 @@ const TRACKS_MARK: usize = 0;
 
 impl<'a> Animation<'a> {
     /// Parse a cooked `.psxanim` blob.
+    // Load-time parser: one copy, never inlined into its callers (smaller, the compiler would
+    // otherwise copy the body into every call site once the readers it uses are small).
+    #[inline(never)]
     pub fn from_bytes(bytes: &'a [u8]) -> Result<Self, ParseError> {
         use psxed_format::animation::{
             AnimationHeader, MAGIC, POSE_RECORD_SIZE, POSE_RECORD_SIZE_V1, POSE_RECORD_SIZE_V3,
@@ -1594,6 +1603,9 @@ pub struct Audio<'a> {
 
 impl<'a> Audio<'a> {
     /// Parse a cooked `.psau` blob.
+    // Load-time parser: one copy, never inlined into its callers (smaller, the compiler would
+    // otherwise copy the body into every call site once the readers it uses are small).
+    #[inline(never)]
     pub fn from_bytes(bytes: &'a [u8]) -> Result<Self, ParseError> {
         use psxed_format::audio::{self, AudioHeader};
 
@@ -2319,6 +2331,9 @@ impl<'a> Texture<'a> {
     /// Parse a cooked `.psxt` blob. Returns a `Texture` view that
     /// borrows into `bytes`. Cheap -- header decode + two slice
     /// computations.
+    // Load-time parser: one copy, never inlined into its callers (smaller, the compiler would
+    // otherwise copy the body into every call site once the readers it uses are small).
+    #[inline(never)]
     pub fn from_bytes(bytes: &'a [u8]) -> Result<Self, ParseError> {
         use psxed_format::texture::{Depth, TextureHeader, MAGIC, VERSION};
 
@@ -2518,6 +2533,9 @@ const WORLD_V4_HORIZONTAL_OVERRIDE_RECORD_SIZE: usize = 24;
 
 impl<'a> World<'a> {
     /// Parse a cooked `.psxw` blob.
+    // Load-time parser: one copy, never inlined into its callers (smaller, the compiler would
+    // otherwise copy the body into every call site once the readers it uses are small).
+    #[inline(never)]
     pub fn from_bytes(bytes: &'a [u8]) -> Result<Self, ParseError> {
         use psxed_format::world::{
             WorldHeader, MAGIC, VERSION, VERSION_V1, VERSION_V2, VERSION_V3, VERSION_V4,
