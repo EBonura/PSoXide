@@ -75,6 +75,8 @@ mod lever_probes;
 mod list_busy_probes;
 mod mdec_check;
 mod mdec_diag;
+mod pad_record;
+mod pad_survey;
 mod payload;
 mod perf_probes;
 mod photo;
@@ -231,14 +233,14 @@ unsafe extern "C" {
 //
 // History, one entry per version: docs/hardware-test-versions.md.
 const SUITE_VERSION_MAJOR: u8 = 2;
-const SUITE_VERSION_MINOR: u8 = 20;
+const SUITE_VERSION_MINOR: u8 = 21;
 /// Display form. Keep in step with the two constants above.
-const SUITE_VERSION: &str = "HWTEST v2.20";
+const SUITE_VERSION: &str = "HWTEST v2.21";
 /// `CDTEST.BIN`: the deterministic read region the CD probes use, placed so it
 /// ends at LBA 1024. The console-diag build's stop panel pushes the boot EXE
 /// past the 541 sectors the plain layout allows, so that build gives the
 /// region 60 sectors back (the Makefile passes the same count to mkisopsx).
-pub(crate) const CDTEST_SECTORS: u32 = if cfg!(feature = "console-diag") { 400 } else { 460 };
+pub(crate) const CDTEST_SECTORS: u32 = if cfg!(feature = "console-diag") { 360 } else { 460 };
 pub(crate) const CDTEST_LBA: u32 = 1024 - CDTEST_SECTORS;
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;

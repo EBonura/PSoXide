@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+<<<<<<< HEAD
 - Shared pieces for games to delete their own copies, all additions (no existing game's executable changes): `psx_hw::memory::to_kseg0`; `psx_pack::Fnv32` (resumable FNV-1a 32, equal to `fnv1a32` in pieces); `psx_asset::le` (the little-endian readers `lib.rs` kept private); `Vec3I32::{saturating_add, saturating_sub, dot_q12, scale_q12}` in psx-gte-core; `psx_math::ease` (Q8 and Q12 curves and `lerp_q8`) and `fmt::{u32_dec_padded, clock_dec, tenths_dec}`; `psx_gpu::prim::{TriFlatBlended, QuadFlatBlended, TriGouraudBlended, DrawArea, ClutLoad16}` and `RectFlat::translucent`. Each has a host test proving equality with the games' hand-written versions over their input ranges.
 - `psoxide.ld` reads `STACK_RESERVE_OVERRIDE` when a link defines it (a script placed before it, or `--defsym`); with nothing set the reserve is the same 0x8000. `psoxide-size` evaluates the form from the link map.
 - `psx-chainloader`'s `paint` builds its GP1 and GP0 words from `psx_hw::gpu` (the crate's compiled object is identical).
@@ -29,6 +30,9 @@
   class word, port `+0x28`), under the same `emit` feature as every other writer, so a game's own writes to those ports can go;
   editor-playtest uses `sort_class` and loses a register-literal exception. `psx_pad::StickDpad` folds the left stick into
   d-pad bits, per axis or radial, with the entry and exit thresholds as parameters, for `PadTracker`, which gains `previous()` (last frame's mask) and `settle()` (previous state := current at a resume point, held buttons stay held and are not hidden, unlike `prime`).
+=======
+- Hardware tests v2.21 (not yet run on a console): the mode `CONTROLLER SURVEY (RAW + SDK)` (main menu row 6, started by itself after 20 s with no button): per controller, a raw SIO0 survey with measured `/ACK` timing at four spacings, eight timed input windows reading the pad raw and through `psx_pad::Controllers` in the same frames, three soaks of `Controllers` polls as the launcher loops them, and the launcher-to-game hand-over; hot swap starts a new numbered record; results as `PXC` QR pages read by `psoxide-hwtest pad-report` and `pad-compare`. `CDTEST.BIN` is 360 sectors on the console-diag disc (was 400) to make room. Details in `docs/hardware-test-versions.md`.
+>>>>>>> 3d469e9b4 (hardware-tests v2.21: the controller survey)
 - The architecture gate refuses an image that holds a frame-path function as a function: `[inline]` in `sdk/profile.toml`
   lists them (`psx_gpu::chain::start_walk` first) and `inline-gate` (`tools/psoxide-hazard`, run by `psoxide-pgo` with the
   hazard patch, the stack guard and the cache gate) reads the link map after the link. The compiler's inline choice depends on
