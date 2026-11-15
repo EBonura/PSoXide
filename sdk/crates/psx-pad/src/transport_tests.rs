@@ -134,7 +134,9 @@ fn an_empty_socket_is_told_at_once_and_cheaply() {
     // four attempts of the long one (about 12,000 reads).
     mock::with(|m| {
         assert_eq!((m.attempts, m.sends), (1, 1));
-        assert!(m.now < 3_000, "{} register accesses", m.now);
+        // The setup time is waited on the clock, 64 model ticks a reading.
+        let limit = 3_000 + u64::from(psx_io::controller_port::PAD_SETUP_CYCLES);
+        assert!(m.now < limit, "{} model ticks", m.now);
     });
     // A reader that never saw a pad is told the same, once.
     start(Model {
@@ -782,4 +784,14 @@ fn a_glitching_pad_on_a_live_level_port_is_still_retried() {
     });
     assert_complete(pad, 0x73);
     mock::with(|m| assert_eq!(m.attempts, 2));
+}
+
+#[test]
+fn a_retry_waits_the_cs_high_time_before_it_selects_again() {
+    poll_with(fault_model(0x73, Fault::Acquire, 0, true));
+    mock::with(|m| {
+        assert_eq!(m.attempts, 2);
+        let shortest = m.cs_high.iter().copied().min().unwrap();
+        assert!(shortest >= u64::from(psx_io::controller_port::PAD_CS_HIGH_CYCLES));
+    });
 }

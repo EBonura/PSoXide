@@ -5,13 +5,12 @@
 //!
 //! * `poll(bus, port)` reads one port. A game reads port 1 with one call per loop; a
 //!   two-player game makes a second call for port 2. A port nobody asks for costs nothing.
-//! * A poll leaves the next one's select open: it asserts `/CS` on the port it expects to be
-//!   asked for next (the port polled before this one, so a two-player loop alternates, and
-//!   a one-player loop reopens its own), and the next poll starts clocking bytes as soon as
-//!   the pad's setup time ([`PAD_SETUP_CYCLES`]) has passed since then. The game's frame runs
-//!   in that time instead of a busy wait. The wait is measured on the system clock, so a poll
-//!   that follows the last one at once still waits the whole of it, and a select that a
-//!   memory-card transfer or a configuration packet released is made again.
+//! * A poll selects its port when it starts, waits the pad's setup time ([`PAD_SETUP_CYCLES`], on the
+//!   system clock) and releases `/CS` when it ends, so the pad has `/CS` high from one poll to the
+//!   next, as the SDK did before the held select. On the console an SCPH-110 did not answer
+//!   polls whose select followed the last deselect by a few hundred cycles; with `/CS` high for the
+//!   rest of the frame it did, so there is no option to leave the select open. A retry, and the
+//!   handshake after a poll, wait [`PAD_CS_HIGH_CYCLES`] with `/CS` high first.
 //! * The first time a port answers, the same handshake runs on it: analog mode requested
 //!   and locked, a video frame between packets, as Sony's libpad does. It blocks for a few
 //!   frames, once per plug-in. Each packet goes out with CPU interrupts masked: a pad's
@@ -23,8 +22,7 @@
 //! * A port that did not answer is polled every time for its first [`EAGER_PROBES`] such answers
 //!   (a pad that is slow to come up is read from its first answer), then not polled again for 59
 //!   polls and probed once: an empty port 2 costs one probe a second, not one every frame. A pad that was there has
-//!   its absence confirmed by four tries before it is believed. No select is left open on
-//!   an empty port, so a pad plugged in always sees a fresh one.
+//!   its absence confirmed by four tries before it is believed.
 //! * A packet that fails part way returns the last clean state, so a held button is never
 //!   read as released for a frame.
 //! * [`Controllers::set_rumble`] is the only call a game that rumbles makes beyond `poll`:
@@ -68,6 +66,24 @@ const EAGER_PROBES: u8 = 128;
 /// because the handshake spaces its packets so.
 pub const RETRIES: u8 = 3;
 
+/// Polls between the asks that go on for a pad that answered the handshake like a DualShock and
+/// still is not analog after its [`RETRIES`] are spent: the pad of an SCPH-110 left in
+/// configuration mode, one that lost a packet to an interrupt late, or one a previous program
+/// left digital. A program that wants analog (the disc launcher, which held its menu on a
+/// notice and asked every 60 frames before this was shared) must not be left digital for the
+/// rest of the session because three asks happened to fail. Each ask costs the handshake's few
+/// frames, so it is slow, and it is made only for a pad that proved it takes configuration
+/// packets: a digital-only pad is never asked.
+pub const RECHECK_POLLS: u8 = 60;
+
+/// Consecutive polls that came back unusable (`PadMode::Unknown`) after which the port stops
+/// presenting its last clean state as the current one: the state becomes `Unknown` and the
+/// next clean poll runs the handshake again. Until then a garbled poll keeps the last clean
+/// state, which stops one bad frame from reading as every button released; past this many it
+/// is a dead link, and a menu that kept reading the last state would show a pad that answers
+/// nothing as analog and idle.
+pub const STALE_POLLS: u8 = 8;
+
 /// The configuration packets: enter configuration mode, request analog mode and lock it,
 /// map the motors, leave. The analog handshake sends 0, 1, 3; the rumble one 0, 2, 3.
 /// Built in registers, not read from a table in memory.
@@ -105,6 +121,12 @@ struct Slot {
     /// Retries left for the pad in the port, [`RETRIES`] if it answered the handshake like a
     /// DualShock.
     again: u8,
+    /// The pad answered the handshake's packets in full, so it takes configuration commands.
+    capable: bool,
+    /// Polls until a pad that is still not analog is asked again, after [`RETRIES`] are spent.
+    recheck: u8,
+    /// Consecutive unusable polls, up to [`STALE_POLLS`].
+    failed: u8,
 }
 
 impl Slot {
@@ -115,16 +137,17 @@ impl Slot {
         mapped: false,
         rumble: Rumble::OFF,
         again: 0,
+        capable: false,
+        recheck: 0,
+        failed: 0,
     };
 
-    /// One poll of `socket`, starting from the select `opened` left open if there is one;
-    /// `last` is its latest clean state and is updated. Inlined into [`Controllers::step`].
+    /// One poll of `socket`; `last` is its latest clean state and is updated. Inlined into [`Controllers::step`].
     #[inline(always)]
     fn step<T: Transport, const ANALOG: bool>(
         &mut self,
         bus: &mut T,
         socket: Port,
-        mut opened: Option<u16>,
         last: &mut PadState,
     ) {
         let mut confirm = self.present;
@@ -137,7 +160,6 @@ impl Slot {
                 socket,
                 confirm,
                 if ANALOG { self.rumble } else { Rumble::OFF },
-                opened.take(),
             );
             if !ANALOG || (state.mode == PadMode::Analog && self.present) {
                 break state;
@@ -148,14 +170,26 @@ impl Slot {
             confirm = true;
         };
         match state.mode {
-            // A garbled packet: the last clean state stands.
-            PadMode::Unknown => {}
+            // A garbled packet: the last clean state stands, for a few polls. A link that
+            // stays dead is reported as such and the handshake runs again when it recovers.
+            PadMode::Unknown => {
+                self.failed = self.failed.saturating_add(1);
+                if self.failed >= STALE_POLLS {
+                    self.failed = STALE_POLLS;
+                    self.present = false;
+                    self.mapped = false;
+                    *last = state;
+                }
+            }
             PadMode::Disconnected => {
                 if self.present {
                     self.unanswered = 0;
                 }
                 self.present = false;
                 self.mapped = false;
+                self.capable = false;
+                self.recheck = 0;
+                self.failed = 0;
                 self.skip = if self.unanswered < EAGER_PROBES {
                     self.unanswered += 1;
                     0
@@ -166,6 +200,7 @@ impl Slot {
             }
             _ => {
                 self.present = true;
+                self.failed = 0;
                 *last = state;
             }
         }
@@ -195,11 +230,26 @@ impl Slot {
             } else {
                 0
             }
+        } else if self.capable
+            && self.recheck == 0
+            && matches!(mode, PadMode::Config | PadMode::Digital)
+        {
+            // The retries are spent and the pad still is not analog: ask once more, then
+            // again every RECHECK_POLLS polls for as long as it stays so.
+            self.recheck = RECHECK_POLLS;
+            if mode == PadMode::Config {
+                2
+            } else {
+                0
+            }
         } else {
+            self.recheck = self.recheck.saturating_sub(1);
             return false;
         };
         let capable = config(bus, socket, Sequence::Analog, first);
         if fresh {
+            self.capable = capable;
+            self.recheck = RECHECK_POLLS;
             self.again = if capable { RETRIES } else { 0 };
         }
         true
@@ -220,6 +270,8 @@ fn config<T: Transport>(bus: &mut T, socket: Port, sequence: Sequence, first: us
     let end = core::hint::black_box(3);
     let mut n = first;
     let mut ok = false;
+    // The first packet follows a poll's deselect at once.
+    bus.cs_high_gap();
     while n < end {
         let index = match n {
             0 => 0,
@@ -228,7 +280,7 @@ fn config<T: Transport>(bus: &mut T, socket: Port, sequence: Sequence, first: us
             _ => 3,
         };
         let packet = packet(index);
-        ok = pad_begin(bus, socket, None);
+        ok = pad_begin(bus, socket);
         let enabled = bus.mask_interrupts();
         let mut i = 0;
         while ok && i <= packet.len() {
@@ -251,10 +303,6 @@ pub struct Controllers<const ANALOG: bool = true> {
     slots: [Slot; 2],
     /// The latest clean state of each port.
     last: [PadState; 2],
-    /// The select the last poll left open: its port and when it was asserted.
-    open: Option<(Port, u16)>,
-    /// The port polled before the last one.
-    previous: Port,
 }
 
 impl Controllers<true> {
@@ -292,8 +340,6 @@ impl<const ANALOG: bool> Controllers<ANALOG> {
     const NEW: Self = Self {
         slots: [Slot::NEW; 2],
         last: [PadState::NONE; 2],
-        open: None,
-        previous: Port::One,
     };
 
     /// Poll `port` once and return its latest clean state. `bus` is the `ControllerPort`
@@ -309,25 +355,11 @@ impl<const ANALOG: bool> Controllers<ANALOG> {
         let i = usize::from(port.is_two());
         let slot = &mut self.slots[i];
         if slot.skip != 0 {
-            // An empty port between probes: nothing goes on the wire and an open select
-            // stays open.
+            // An empty port between probes: nothing goes on the wire.
             slot.skip -= 1;
             return;
         }
-        // The select the last poll left open, if it is this port's.
-        let opened = match self.open.take() {
-            Some((open, at)) if open == port => Some(at),
-            _ => None,
-        };
-        slot.step::<T, ANALOG>(bus, port, opened, &mut self.last[i]);
-        // Open the port polled before this one if a pad is in it, else this one.
-        let mut next = core::mem::replace(&mut self.previous, port);
-        if !self.slots[usize::from(next.is_two())].present {
-            next = port;
-        }
-        if self.slots[usize::from(next.is_two())].present {
-            self.open = Some((next, bus.open(next)));
-        }
+        slot.step::<T, ANALOG>(bus, port, &mut self.last[i]);
     }
 
     /// The latest clean state of `port`, without polling.
@@ -584,8 +616,8 @@ mod tests {
         let before = bus.selects[0];
         let one = *pads.poll(&mut bus, Port::One);
         assert_eq!(one.mode, PadMode::Disconnected);
-        // Four tries: the first on the select the last poll left open, three fresh.
-        assert_eq!(bus.selects[0] - before, 3, "four tries confirm the absence");
+        // Four tries, each its own select.
+        assert_eq!(bus.selects[0] - before, 4, "four tries confirm the absence");
         for _ in 0..EAGER_PROBES {
             let before = bus.selects[0];
             pads.poll(&mut bus, Port::One);
@@ -762,16 +794,127 @@ mod tests {
             empty(),
         );
         let mut pads = Controllers::new();
-        for _ in 0..300 {
+        let polls = 300;
+        for _ in 0..polls {
             let one = *pads.poll(&mut bus, Port::One);
             assert!(!one.is_analog() && one.buttons.bits() == button::LEFT);
         }
-        assert_eq!(
-            command_count(&mut bus, 0, 0x44),
-            1 + usize::from(RETRIES),
-            "the handshake and its retries, no more"
+        // The handshake and its retries, then one more ask every RECHECK_POLLS polls: slow
+        // enough that a pad which will never do it costs a few frames a second at most.
+        let asks = command_count(&mut bus, 0, 0x44);
+        let rechecks = usize::from(polls / u16::from(RECHECK_POLLS));
+        assert!(
+            asks > 1 + usize::from(RETRIES) && asks <= 1 + usize::from(RETRIES) + rechecks,
+            "{asks} asks"
         );
         assert_eq!(pads.analog(Port::One), AnalogRequirement::DigitalOnly);
+    }
+
+    #[test]
+    fn a_dualshock_that_comes_round_late_is_found_analog_by_the_recheck() {
+        let mut bus = TwoPorts::new(
+            Model {
+                refuse_analog: true,
+                ..dualshock(button::CROSS)
+            },
+            empty(),
+        );
+        let mut pads = Controllers::new();
+        for _ in 0..100 {
+            assert!(!pads.poll(&mut bus, Port::One).is_analog());
+        }
+        bus.model(0, |m| m.refuse_analog = false);
+        let mut polls = 0;
+        while !pads.poll(&mut bus, Port::One).is_analog() {
+            polls += 1;
+            assert!(polls <= 2 * u16::from(RECHECK_POLLS), "never found analog");
+        }
+        assert_eq!(pads.analog(Port::One), AnalogRequirement::Analog);
+        bus.model(0, |m| assert!(m.locked && m.id == 0x73));
+    }
+
+    /// A pad that ignores the first `exits` exit-config packets stays in configuration mode
+    /// (ID 0xF3: buttons and sticks on the wire, not analog), the way an SCPH-110 did when its
+    /// commands came too close. Returns the state after `polls` polls.
+    fn parked(exits: u32, polls: usize) -> (PadState, usize) {
+        let mut bus = TwoPorts::new(
+            Model {
+                ignore_exits: exits,
+                axes: [0x80, 0x80, 0xff, 0x80],
+                ..dualshock(button::CROSS)
+            },
+            empty(),
+        );
+        let mut pads = Controllers::new();
+        let mut state = PadState::NONE;
+        for _ in 0..polls {
+            state = *pads.poll(&mut bus, Port::One);
+        }
+        (state, command_count(&mut bus, 0, 0x43))
+    }
+
+    #[test]
+    fn a_pad_that_ignores_the_exit_more_often_than_the_retries_is_found_analog_by_the_recheck() {
+        // The handshake's exit and its RETRIES repeats are all ignored: the pad is parked.
+        let (state, _) = parked(1 + u32::from(RETRIES), 20);
+        assert_eq!(
+            state.mode,
+            PadMode::Config,
+            "parked after the retries are spent"
+        );
+        assert_eq!(state.buttons.bits(), button::CROSS, "buttons still read");
+        assert!(
+            !state.is_analog(),
+            "a game that tests is_analog ignores the sticks"
+        );
+        // Left alone long enough, the recheck sends the exit again and the pad leaves it.
+        let (state, _) = parked(1 + u32::from(RETRIES), 200);
+        assert!(state.is_analog() && state.buttons.bits() == button::CROSS);
+    }
+
+    #[test]
+    fn a_digital_only_pad_is_never_rechecked() {
+        let mut bus = TwoPorts::new(
+            Model {
+                id: 0x41,
+                buttons: button::UP,
+                dualshock: false,
+                ..Model::default()
+            },
+            empty(),
+        );
+        let mut pads = Controllers::new();
+        for _ in 0..300 {
+            pads.poll(&mut bus, Port::One);
+        }
+        assert_eq!(command_count(&mut bus, 0, 0x43), 2, "enter and exit, once");
+    }
+
+    #[test]
+    fn a_link_that_stays_dead_is_not_presented_as_the_last_clean_state() {
+        let mut bus = TwoPorts::new(dualshock(button::CROSS), empty());
+        let mut pads = Controllers::new();
+        assert!(pads.poll(&mut bus, Port::One).is_analog());
+        // A pad whose /ACK after the fourth byte comes far later than any wait: every poll
+        // times out part way, as a dead link does.
+        for _ in 1..STALE_POLLS {
+            bus.model(0, |m| m.slow_ack = Some((3, 1_000_000)));
+            let one = *pads.poll(&mut bus, Port::One);
+            assert!(
+                one.is_analog() && one.buttons.bits() == button::CROSS,
+                "kept for a while"
+            );
+        }
+        bus.model(0, |m| m.slow_ack = Some((3, 1_000_000)));
+        let one = *pads.poll(&mut bus, Port::One);
+        assert_eq!(one.mode, PadMode::Unknown, "then reported as what it is");
+        assert_eq!(pads.analog(Port::One), AnalogRequirement::Absent);
+        assert_eq!(one.buttons.bits(), 0, "and no button is held over");
+        // The link comes back: the handshake runs again and the pad reads analog.
+        bus.model(0, |m| m.slow_ack = None);
+        let handshakes = command_count(&mut bus, 0, 0x44);
+        assert!(pads.poll(&mut bus, Port::One).is_analog());
+        assert_eq!(command_count(&mut bus, 0, 0x44), handshakes + 1);
     }
 
     #[test]
@@ -821,8 +964,7 @@ mod tests {
         });
     }
 
-    /// Selects made on each port by the polls in `f`, and how many of them were
-    /// left open for the next poll.
+    /// Selects made on each port by the polls in `f`.
     fn selects(bus: &mut TwoPorts, f: impl FnOnce(&mut TwoPorts)) -> [usize; 2] {
         let before = bus.selects;
         f(bus);
@@ -830,90 +972,88 @@ mod tests {
     }
 
     #[test]
-    fn a_poll_leaves_its_own_select_open_and_the_next_one_starts_from_it() {
-        let mut bus = TwoPorts::new(dualshock(button::CROSS), empty());
-        let mut pads = Controllers::new();
-        pads.poll(&mut bus, Port::One);
-        assert_eq!(pads.open.map(|(port, _)| port), Some(Port::One));
-        for _ in 0..5 {
-            // One select a poll: the one it leaves open. The bytes go out on the
-            // select the poll before left.
-            let n = selects(&mut bus, |bus| {
-                assert_eq!(pads.poll(bus, Port::One).buttons.bits(), button::CROSS);
-            });
-            assert_eq!(n, [1, 0]);
-            bus.model(0, |m| assert_eq!(m.early, 0));
-        }
-        assert_eq!(bus.selects[1], 0, "port 2 is never selected");
-    }
-
-    #[test]
-    fn the_setup_time_is_waited_from_the_open_select_however_soon_the_next_poll_comes() {
-        let mut bus = TwoPorts::new(dualshock(0), empty());
-        let mut pads = Controllers::new();
-        pads.poll(&mut bus, Port::One);
-        // The next poll at once: it takes the whole setup time on the clock, where
-        // its bytes alone take a few hundred model ticks.
-        let mut before = 0;
-        bus.model(0, |m| before = m.now);
-        pads.poll(&mut bus, Port::One);
-        let mut after = 0;
-        bus.model(0, |m| after = m.now);
-        assert!(after - before >= u64::from(psx_io::controller_port::PAD_SETUP_CYCLES));
-    }
-
-    #[test]
-    fn a_select_released_in_between_is_made_again() {
-        let mut bus = TwoPorts::new(dualshock(button::SQUARE), empty());
-        let mut pads = Controllers::new();
-        pads.poll(&mut bus, Port::One);
-        // A memory-card transfer on the same port ends with a deselect.
-        bus.set_control(0);
-        let n = selects(&mut bus, |bus| {
-            assert_eq!(pads.poll(bus, Port::One).buttons.bits(), button::SQUARE);
-        });
-        assert_eq!(n, [2, 0], "a fresh select for the bytes, then the open one");
-    }
-
-    #[test]
-    fn a_two_player_loop_opens_the_other_port() {
+    fn a_poll_selects_its_own_port_at_its_start_and_ends_deselected() {
         let mut bus = TwoPorts::new(dualshock(button::CROSS), dualshock(button::CIRCLE));
         let mut pads = Controllers::new();
-        both(&mut pads, &mut bus);
         both(&mut pads, &mut bus);
         for _ in 0..4 {
             let n = selects(&mut bus, |bus| {
                 assert_eq!(pads.poll(bus, Port::One).buttons.bits(), button::CROSS);
             });
-            assert_eq!(n, [0, 1], "port 1 found its select open and opened port 2");
+            assert_eq!(n, [1, 0], "one select, on port 1");
+            bus.model(0, |m| assert!(!m.is_selected(), "released at the end"));
             let n = selects(&mut bus, |bus| {
                 assert_eq!(pads.poll(bus, Port::Two).buttons.bits(), button::CIRCLE);
             });
-            assert_eq!(n, [1, 0], "port 2 found its select open and opened port 1");
+            assert_eq!(n, [0, 1], "one select, on port 2");
         }
     }
 
+    /// A transport that leaves out the wait `/CS` must stay high, the bare timing of the code.
+    struct NoGaps(TwoPorts);
+
+    impl Transport for NoGaps {
+        fn status(&mut self) -> u32 {
+            self.0.status()
+        }
+        fn receive(&mut self) -> u8 {
+            self.0.receive()
+        }
+        fn transmit(&mut self, byte: u8) {
+            self.0.transmit(byte);
+        }
+        fn set_mode(&mut self, value: u16) {
+            self.0.set_mode(value);
+        }
+        fn set_baud(&mut self, value: u16) {
+            self.0.set_baud(value);
+        }
+        fn set_control(&mut self, value: u16) {
+            self.0.set_control(value);
+        }
+        fn control(&mut self) -> u16 {
+            self.0.control()
+        }
+        fn clock(&mut self) -> u16 {
+            self.0.clock()
+        }
+        fn select_with(&mut self, port: Port, arm_ack_irq: bool) {
+            self.0.select_with(port, arm_ack_irq);
+        }
+        fn cs_high_gap(&mut self) {}
+    }
+
+    /// A frame of game code between two polls, in model ticks.
+    const FRAME: u64 = 560_000;
+
     #[test]
-    fn no_select_is_left_open_on_an_empty_port_and_its_skipped_polls_keep_the_open_one() {
-        let mut bus = TwoPorts::new(empty(), empty());
+    fn the_pad_gets_cs_high_between_any_two_transactions_and_its_setup_time() {
+        let mut bus = TwoPorts::new(dualshock(button::CROSS), empty());
         let mut pads = Controllers::new();
         pads.poll(&mut bus, Port::One);
-        assert!(pads.open.is_none());
+        for _ in 0..4 {
+            bus.model(0, |m| m.now += FRAME);
+            pads.poll(&mut bus, Port::One);
+        }
+        bus.model(0, |m| {
+            let setup = u64::from(psx_io::controller_port::PAD_SETUP_CYCLES);
+            assert!(m.min_setup_gap >= setup, "{}", m.min_setup_gap);
+            // The handshake's first packet and every retry follow a deselect at once, too.
+            let high = u64::from(psx_io::controller_port::PAD_CS_HIGH_CYCLES);
+            let shortest = m.cs_high.iter().copied().min().unwrap();
+            assert!(shortest >= high, "{shortest}");
+        });
+    }
 
-        let mut bus = TwoPorts::new(dualshock(0), empty());
+    #[test]
+    fn without_the_wait_the_handshake_follows_the_poll_within_a_few_ticks() {
+        let mut bus = NoGaps(TwoPorts::new(dualshock(button::CROSS), empty()));
         let mut pads = Controllers::new();
-        both(&mut pads, &mut bus);
-        both(&mut pads, &mut bus);
-        // Port 2 is polled every time for its first answers like an empty socket, then skipped.
-        for _ in 0..=EAGER_PROBES {
-            both(&mut pads, &mut bus);
-        }
-        for _ in 0..10 {
-            // Port 2 is skipped: port 1 keeps its select from one loop to the next.
-            let n = selects(&mut bus, |bus| {
-                both(&mut pads, bus);
-            });
-            assert_eq!(n, [1, 0]);
-        }
+        pads.poll(&mut bus, Port::One);
+        bus.0.model(0, |m| {
+            let high = u64::from(psx_io::controller_port::PAD_CS_HIGH_CYCLES);
+            let shortest = m.cs_high.iter().copied().min().unwrap();
+            assert!(shortest < high, "{shortest}");
+        });
     }
 }

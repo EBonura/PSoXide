@@ -80,10 +80,24 @@ impl Timing {
 /// 7,100), rounded up. The original SCPH-1200 needs between 384 and 768 spins;
 /// the 11-03 console answered at every delay from 64 to 24,576 cycles.
 ///
-/// The pad driver measures it on root counter 0 ([`Transport::clock`]), so the
-/// wait can start before the transaction does: [`Transport::open`] asserts
-/// `/CS` and [`Transport::begin_pad`] waits only for what is left.
+/// The pad driver measures it on root counter 0 ([`Transport::clock`]) after each select, so no
+/// change to the code can shorten it. It stays at the v0.55 value: the console's three pads
+/// also completed 28 of 28 raw transactions with 2,048 (Hardware Tests v2.21, SHORT), so a
+/// shorter setup is a later optimisation and needs its own console A/B.
+///
+/// [`Transport::open`] asserts `/CS` early for an instrument that wants to start the wait before
+/// the transaction; the pad driver does not use it.
 pub const PAD_SETUP_CYCLES: u16 = 7_168;
+
+/// The shortest time `/CS` must stay high between one pad transaction and the next, in
+/// system-clock cycles (about 1.8 ms; the clock is 16 bits wide, so one wait stays under 65,536).
+/// Console data: a select made a few hundred cycles after the last deselect failed at the address
+/// byte (6 percent of first tries with the watching transport, whose gap was about 560 cycles),
+/// and one made a video frame later never did (Hardware Tests v2.22, pad lab phase 2; the
+/// v0.55 SDK, which released `/CS` after every poll). psx-spx names no minimum.
+/// [`Transport::cs_high_gap`] enforces it where a select follows a deselect at once: a retry, and
+/// the handshake after a poll.
+pub const PAD_CS_HIGH_CYCLES: u16 = 60_000;
 
 /// The two forms a device's `/ACK` takes in `STAT`: the live level, and the
 /// latched interrupt bit.
@@ -136,6 +150,20 @@ pub trait Transport {
     /// (a wrap only makes it smaller), so a wait on it is never too short.
     fn clock(&mut self) -> u16;
 
+    /// Wait until [`PAD_CS_HIGH_CYCLES`] have passed on the system clock, counted from this call.
+    /// Called right after a deselect that a select follows at once (a retry, the handshake after a
+    /// poll): a poll that starts a frame after the last needs nothing. Bounded, so a stopped counter
+    /// cannot hang a poll.
+    #[inline(never)]
+    fn cs_high_gap(&mut self) {
+        let at = self.clock();
+        let mut spins = u32::from(PAD_CS_HIGH_CYCLES);
+        while self.clock().wrapping_sub(at) < PAD_CS_HIGH_CYCLES && spins != 0 {
+            spins -= 1;
+            core::hint::spin_loop();
+        }
+    }
+
     /// Assert `/CS` on `port` for a pad transaction that [`begin_pad`]
     /// starts later, and return the [`clock`] it was asserted at. The pad's
     /// setup time then passes while the program does something else.
@@ -171,7 +199,13 @@ pub trait Transport {
             }
             _ => {
                 self.select(port);
-                self.delay(Timing::PAD.setup_spins);
+                // Measured time, not a spin count: no change to the loop can shorten it.
+                let at = self.clock();
+                let mut spins = 2 * Timing::PAD.setup_spins;
+                while self.clock().wrapping_sub(at) < PAD_SETUP_CYCLES && spins != 0 {
+                    spins -= 1;
+                    core::hint::spin_loop();
+                }
             }
         }
         self.drain_receive();
@@ -878,10 +912,14 @@ mod tests {
             // A card transfer ended with a deselect, or another port was taken.
             bus.set_control(moved_to);
             bus.time = opened.wrapping_add(50_000);
+            let start = bus.time;
             assert!(bus.begin_pad(port, Some(opened)));
             let fresh = *bus.control.last().unwrap();
             assert_eq!(fresh, sio0::selected_ctrl(false, false));
-            assert!(bus.reads >= 1_024, "the whole setup delay again");
+            assert!(
+                bus.time.wrapping_sub(start) >= PAD_SETUP_CYCLES,
+                "the whole setup time again"
+            );
         }
         // No earlier select at all: the same.
         let mut bus = Script {
@@ -893,8 +931,7 @@ mod tests {
             bus.control,
             [sio0::ctrl::ACK, sio0::selected_ctrl(false, false)]
         );
-        // The sequence before select-early: the spin delay, no clock.
-        assert!(bus.reads >= 1_024);
-        assert_eq!(bus.clocks, 0);
+        // Measured on the clock, not counted in status reads.
+        assert!(bus.time >= PAD_SETUP_CYCLES);
     }
 }

@@ -23,7 +23,7 @@
 //! }
 //! ```
 
-use crate::{button, Deadzone};
+use crate::{button, Deadzone, PadState};
 
 /// The four d-pad bits a fold produces.
 const DPAD: u16 = button::LEFT | button::RIGHT | button::UP | button::DOWN;
@@ -70,6 +70,15 @@ pub const fn stick_bits<const THRESHOLD: i16>(x: i16, y: i16) -> u16 {
     bits
 }
 
+/// [`stick_bits`] of a pad state: the d-pad bits its left stick holds down, none unless the pad
+/// reports sticks ([`PadState::menu_stick`]).
+#[must_use]
+#[inline(always)]
+pub const fn stick_bits_of<const THRESHOLD: i16>(pad: &PadState) -> u16 {
+    let (x, y) = pad.menu_stick();
+    stick_bits::<THRESHOLD>(x, y)
+}
+
 /// Radial stick-to-d-pad fold with hysteresis. One per pad.
 ///
 /// A push registers when the stick is strictly beyond radius `ENTER` ([`Deadzone`]
@@ -89,6 +98,13 @@ impl<const ENTER: i16, const EXIT: i16> RadialStick<ENTER, EXIT> {
     pub const fn new() -> Self {
         let () = Self::VALID;
         Self { held: 0 }
+    }
+
+    /// [`update`](Self::update) from a pad state: a pad that reports no sticks holds nothing
+    /// ([`PadState::menu_stick`]).
+    pub fn update_pad(&mut self, pad: &PadState) -> u16 {
+        let (x, y) = pad.menu_stick();
+        self.update(x, y)
     }
 
     /// The d-pad bit the stick holds down for this reading (zero or one of
@@ -134,7 +150,7 @@ fn dominant(x: i16, y: i16) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{PadEdges, PadTracker};
+    use crate::{PadEdges, PadMode, PadTracker};
 
     // The rules the games kept by hand, written out as they were (one count at
     // a time) so the fold is held to them exactly.
@@ -193,6 +209,25 @@ mod tests {
                 self.latch = 0;
                 0
             }
+        }
+    }
+
+    #[test]
+    fn sticks_count_in_analog_and_config_modes_and_in_no_other() {
+        for (mode, counts) in [
+            (PadMode::Analog, true),
+            (PadMode::Config, true),
+            (PadMode::Digital, false),
+            (PadMode::Unknown, false),
+            (PadMode::Disconnected, false),
+        ] {
+            let mut pad = PadState::NONE;
+            pad.mode = mode;
+            pad.sticks.left_x = 0xff;
+            let held = stick_bits_of::<48>(&pad);
+            assert_eq!(held != 0, counts, "{mode:?}");
+            let mut radial = RadialStick::<64, 32>::new();
+            assert_eq!(radial.update_pad(&pad) != 0, counts, "{mode:?}");
         }
     }
 

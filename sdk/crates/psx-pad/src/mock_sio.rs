@@ -122,6 +122,21 @@ pub struct Model {
     pub mid_ctrl: usize,
     pub resets: usize,
     pub tx_errors: usize,
+    // Timing observations, in model ticks (a clock reading moves 64).
+    // psx-numeric-allow-next-line: host-only controller model, compiled under cfg(test)
+    pub min_ack_gap: u64,
+    // psx-numeric-allow-next-line: host-only controller model, compiled under cfg(test)
+    pub min_setup_gap: u64,
+    // psx-numeric-allow-next-line: host-only controller model, compiled under cfg(test)
+    pub min_last_gap: u64,
+    // psx-numeric-allow-next-line: host-only controller model, compiled under cfg(test)
+    pub cs_high: Vec<u64>,
+    // psx-numeric-allow-next-line: host-only controller model, compiled under cfg(test)
+    pub selected_at: u64,
+    // psx-numeric-allow-next-line: host-only controller model, compiled under cfg(test)
+    pub deselected_at: Option<u64>,
+    // psx-numeric-allow-next-line: host-only controller model, compiled under cfg(test)
+    pub last_ready: u64,
 }
 
 impl Model {
@@ -188,6 +203,13 @@ impl Default for Model {
             mid_ctrl: 0,
             resets: 0,
             tx_errors: 0,
+            min_ack_gap: u64::MAX,
+            min_setup_gap: u64::MAX,
+            min_last_gap: u64::MAX,
+            cs_high: Vec::new(),
+            selected_at: 0,
+            deselected_at: None,
+            last_ready: 0,
         }
     }
 }
@@ -235,7 +257,19 @@ pub unsafe fn write_u16(addr: u32, value: u16) {
             m.mid_ctrl += 1;
         }
         if selected && !m.selected {
+            if let Some(at) = m.deselected_at.take() {
+                let high = m.now - at;
+                m.cs_high.push(high);
+            }
+            m.selected_at = m.now;
             select(m);
+        }
+        if !selected && m.selected {
+            if m.step > 0 {
+                let gap = m.now.saturating_sub(m.last_ready);
+                m.min_last_gap = m.min_last_gap.min(gap);
+            }
+            m.deselected_at = Some(m.now);
         }
         m.armed = selected && value & psx_hw::sio::sio0::ctrl::ACK_IRQ_EN != 0;
         if value & psx_hw::sio::sio0::ctrl::ACK != 0 && (m.latch_only || m.latch_too) {
@@ -329,6 +363,13 @@ pub unsafe fn write_u8(addr: u32, value: u8) {
         m.now += 1;
         assert!(m.selected, "DATA sent while deselected");
         let index = m.step;
+        if index == 0 {
+            let gap = m.now - m.selected_at;
+            m.min_setup_gap = m.min_setup_gap.min(gap);
+        } else if m.ack_end != 0 {
+            let gap = m.now.saturating_sub(m.ack_end);
+            m.min_ack_gap = m.min_ack_gap.min(gap);
+        }
         let early = index != 0 && m.now < m.ack_end;
         if early {
             m.early += 1;
@@ -357,6 +398,7 @@ pub unsafe fn write_u8(addr: u32, value: u8) {
             let late = faulted(m, Fault::LateRx, index);
             let ready = m.now + if late { 33_820 } else { m.rx_delay };
             m.pending.push((rx, ready));
+            m.last_ready = ready;
         }
         let acked = (m.id != 0xff || (m.empty_latches && index == 0))
             && index < m.final_step
