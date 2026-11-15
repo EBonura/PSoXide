@@ -12,6 +12,7 @@ workspace = true
 [dependencies]
 # Explicit paths, as in psx-engine: this crate is consumed from outside its
 # native workspace too.
+psx-asset = { path = "../../../sdk/crates/psx-asset" }
 psx-gpu = { path = "../../../sdk/crates/psx-gpu" }
 psx-math = { path = "../../../sdk/crates/psx-math" }
 

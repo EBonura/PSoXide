@@ -24,6 +24,7 @@
 )]
 
 use crate::semantic_input::{Sample, ACTION_DUCK, ACTION_JUMP, ACTION_USE};
+use psx_asset::le::{read_i32, read_u16, read_u32};
 use psx_math::atan2_q12_fine;
 
 pub const MAGIC: &[u8; 8] = b"HLWPTS1\0";
@@ -58,31 +59,19 @@ pub struct Route {
 #[derive(Debug)]
 pub struct Error;
 
-fn rd_u16(d: &[u8], o: usize) -> u16 {
-    u16::from_le_bytes([d[o], d[o + 1]])
-}
-
-fn rd_u32(d: &[u8], o: usize) -> u32 {
-    u32::from_le_bytes([d[o], d[o + 1], d[o + 2], d[o + 3]])
-}
-
-fn rd_i32(d: &[u8], o: usize) -> i32 {
-    rd_u32(d, o) as i32
-}
-
 impl Route {
     pub fn parse(data: &'static [u8]) -> Result<Self, Error> {
         if data.len() < 12 || &data[..8] != MAGIC {
             return Err(Error);
         }
-        let n_segments = rd_u16(data, 8) as usize;
+        let n_segments = read_u16(data, 8) as usize;
         // Validate the segment chain covers the buffer exactly.
         let mut off = 12usize;
         for _ in 0..n_segments {
             if off + SEG_HEADER > data.len() {
                 return Err(Error);
             }
-            let n_wp = rd_u32(data, off + 16) as usize;
+            let n_wp = read_u32(data, off + 16) as usize;
             off += SEG_HEADER + n_wp * WP_SIZE;
             if off > data.len() {
                 return Err(Error);
@@ -100,7 +89,7 @@ impl Route {
         for _ in 0..self.n_segments {
             let name = &self.data[off..off + 16];
             let end = name.iter().position(|&b| b == 0).unwrap_or(16);
-            let n_wp = rd_u32(self.data, off + 16) as usize;
+            let n_wp = read_u32(self.data, off + 16) as usize;
             if &name[..end] == map_name.as_bytes() {
                 return Some((off + SEG_HEADER, n_wp));
             }
@@ -113,12 +102,12 @@ impl Route {
         let o = wp_off + i * WP_SIZE;
         Waypoint {
             pos: [
-                rd_i32(self.data, o),
-                rd_i32(self.data, o + 4),
-                rd_i32(self.data, o + 8),
+                read_i32(self.data, o),
+                read_i32(self.data, o + 4),
+                read_i32(self.data, o + 8),
             ],
-            flags: rd_u16(self.data, o + 12),
-            radius: rd_u16(self.data, o + 14),
+            flags: read_u16(self.data, o + 12),
+            radius: read_u16(self.data, o + 14),
         }
     }
 }
