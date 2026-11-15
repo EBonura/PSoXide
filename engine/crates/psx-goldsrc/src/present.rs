@@ -38,6 +38,10 @@ pub const TITLE_VBLANK_SPINS: u32 = 4_000_000;
 /// through a function pointer, which the stack proof of the cold title cannot bound.
 /// `interrupts::wait_vblank` is not used either: it can install the VBlank counter lazily and
 /// reach the cache flush. A VBlank that never arrives fails closed. Drawing must be finished first.
+///
+/// # Panics
+///
+/// When no VBlank arrives within [`TITLE_VBLANK_SPINS`] reads of the counter.
 #[inline(never)]
 pub fn title_flip(fb: &mut DoubleBuffer, gpu: &mut Gpu) {
     assert!(
