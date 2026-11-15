@@ -10,6 +10,7 @@ psx-sfx = { path = "../../../sdk/crates/psx-sfx" }
 psx-spu = { path = "../../../sdk/crates/psx-spu" }
 psx-pack = { path = "../../../sdk/crates/psx-pack" }
 psx-gpu = { path = "../../../sdk/crates/psx-gpu" }
+psx-hw = { path = "../../../crates/psx-hw" }
 psx-io = { path = "../../../sdk/crates/psx-io" }
 psx-pad = { path = "../../../sdk/crates/psx-pad" }
 psx-rt = { path = "../../../sdk/crates/psx-rt" }

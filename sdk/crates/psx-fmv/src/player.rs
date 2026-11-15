@@ -187,7 +187,7 @@ const MODE_DATA: u8 = 0x80;
 /// when the last frame never completed.
 const FOREIGN_SECTORS: u32 = 32;
 /// GP1(08h), display mode, and its 24-bit colour bit.
-const GP1_DISPLAY_MODE: u32 = 0x0800_0000;
+const GP1_DISPLAY_MODE: u32 = gp1::display_mode(0, 0, false, false, false);
 const DISPLAY_24BIT: u32 = 1 << 4;
 
 /// The current GP1(08h) parameter, rebuilt from GPUSTAT bits 16..22.

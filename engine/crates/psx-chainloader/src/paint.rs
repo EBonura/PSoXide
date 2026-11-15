@@ -53,9 +53,9 @@ pub fn setup(right: u32, bottom: u32) {
     }
     gp0_packet(&[gp0::draw_mode(0, 0, 0, 0, false, false)]); // texpage/draw-mode defaults
     gp0_packet(&[gp0::draw_area_top_left(0, 0)]);
-    // Unmasked on purpose: `right` and `bottom` are the caller's, and the masks of
-    // `draw_area_bottom_right` would add instructions to the blob.
-    gp0_packet(&[gp0::draw_area_bottom_right(0, 0) | (bottom << 10) | right]);
+    // `right` and `bottom` are the caller's and in VRAM: the unmasked form adds no instructions to
+    // the blob.
+    gp0_packet(&[gp0::draw_area_bottom_right_in_range(right, bottom)]);
     gp0_packet(&[gp0::draw_offset(0, 0)]);
 }
 

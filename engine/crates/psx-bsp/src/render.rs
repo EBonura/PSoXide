@@ -16,6 +16,7 @@ use psx_engine::{
 };
 use psx_gte::math::{Mat3I16, Vec3I16 as GteVec3I16, Vec3I32 as GteVec3I32};
 use psx_gte::scene;
+use psx_hw::gpu::packet;
 use psx_math::attributed_clip::{
     clip_to_plane_unchecked, crossing_fraction_q16_i32, lerp_q16_i32_exact, AttributedClipPlane,
     ClipTraversal,
@@ -236,8 +237,8 @@ const WORST_PAGE_LOCAL_PACKET_WORDS_PER_TRIANGLE: usize =
 const WORST_WINDOWED_PACKET_WORDS_PER_TRIANGLE: usize =
     psx_engine::AFFINE_PACKETS_PER_TRIANGLE * 15;
 const PXBSP_MATERIAL_TICKS_PER_SECOND: u16 = 60;
-const TEXTURED_GOURAUD_COMMAND: u32 = 0x3400_0000;
-const SEMI_TRANSPARENT_COMMAND_BIT: u32 = 0x0200_0000;
+const TEXTURED_GOURAUD_COMMAND: u32 = packet::SHADED_TEXTURED_TRIANGLE;
+const SEMI_TRANSPARENT_COMMAND_BIT: u32 = packet::SEMI_TRANSPARENT;
 /// The third-person camera exposes large, oblique floor polygons much farther
 /// from the near plane than a first-person view does. Keep one profile
 /// authority for every world, special-surface and model submission so their
