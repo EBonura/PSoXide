@@ -24,7 +24,7 @@ enum Mode {
     Capture,
 }
 
-const MENU: [&str; 9] = [
+const MENU: [&str; 10] = [
     // Row 0 is pinned: `make hwtest-run` selects it by firing CROSS at a fixed
     // tick with the cursor still at its boot position.
     "RUN HARDWARE TEST",
@@ -33,12 +33,13 @@ const MENU: [&str; 9] = [
     "GPU DONE FILLS + SHIPPED NODE",
     "RADIUS + LIST NODE SWEEP ONLY",
     "CONTROLLER TEST (P1 + P2)",
+    "CONTROLLER SURVEY (RAW + SDK)",
     "MEMORY CARD (AT OWN RISK)",
     "DUALSHOCK MOTOR QUESTIONS",
     "VIEW LAST CAPTURE",
 ];
-const MENU_TOP: i16 = 64;
-const MENU_ROW_PITCH: i16 = 14;
+const MENU_TOP: i16 = 36;
+const MENU_ROW_PITCH: i16 = 13;
 /// Frames each capture page (and the cover) stays up before the next one.
 const PAGE_FRAMES: u32 = 150;
 /// Frames auto-advance stays off after a manual page turn.
@@ -61,6 +62,8 @@ pub(crate) struct HardwareTests {
     view_frames: u32,
     manual_until: u32,
     clock: u32,
+    /// Menu frames since the last input; the survey starts at `pad_survey::IDLE_ENTRY_FRAMES`.
+    idle: u32,
     controller_test: ControllerTest,
     memory_card: MemoryCardDiagnostic,
     /// The memory-card test touches the operator's real card and has had
@@ -84,6 +87,7 @@ impl HardwareTests {
             view_frames: 0,
             manual_until: 0,
             clock: 0,
+            idle: 0,
             controller_test: ControllerTest::new(),
             memory_card: crate::probe_tokens::memcard_diagnostic(),
             memcard_armed: false,
@@ -139,6 +143,16 @@ impl HardwareTests {
         }
     }
 
+    /// The controller survey: takes the machine and never returns.
+    fn start_pad_survey(&mut self, ctx: &mut Ctx) -> ! {
+        let _ = ctx;
+        tty::println("hardware-tests: controller survey begins");
+        let irq_baseline = psx_io::irq::mask();
+        // SAFETY: plain read of the DMA control word.
+        let dpcr_baseline = unsafe { psx_io::read_u32(psx_hw::dma::DPCR) };
+        pad_survey::execute(irq_baseline, dpcr_baseline)
+    }
+
     /// GPU DONE SIGNAL ONLY: run the one step, then show its pages.
     fn start_gpu_done(&mut self, ctx: &mut Ctx, set: u8) {
         tty::println("hardware-tests: gpu-done run begins");
@@ -179,6 +193,14 @@ impl Scene for HardwareTests {
             Mode::MemoryCard => self.update_memory_card(ctx),
             Mode::Menu => {
                 let rows = MENU.len();
+                if ctx.pad.buttons.bits() != 0 {
+                    self.idle = 0;
+                } else {
+                    self.idle += 1;
+                    if self.idle >= pad_survey::IDLE_ENTRY_FRAMES {
+                        self.start_pad_survey(ctx);
+                    }
+                }
                 if ctx.just_pressed(button::UP) {
                     self.menu_cursor = (self.menu_cursor + rows - 1) % rows;
                 }
@@ -196,12 +218,13 @@ impl Scene for HardwareTests {
                             self.controller_test.start();
                             self.mode = Mode::ControllerTest;
                         }
-                        6 => {
+                        6 => self.start_pad_survey(ctx),
+                        7 => {
                             self.memory_card = crate::probe_tokens::memcard_diagnostic();
                             self.memcard_armed = false;
                             self.mode = Mode::MemoryCard;
                         }
-                        7 => self.start_run(ctx, false, true),
+                        8 => self.start_run(ctx, false, true),
                         _ => {
                             if self.have_capture {
                                 self.open_capture();
@@ -349,11 +372,15 @@ impl HardwareTests {
                 (176, 190, 210)
             };
             font.draw_text(22, y, label, colour);
-            if row == 7 && !self.have_capture {
+            if row == 9 && !self.have_capture {
                 font.draw_text(22, y + 9, "NONE YET - RUN FIRST", (112, 136, 170));
             }
             y += MENU_ROW_PITCH;
         }
+        let left = pad_survey::IDLE_ENTRY_FRAMES.saturating_sub(self.idle) / 60;
+        let mut line = ui::Line::new();
+        line.s("NO BUTTON IN ").u(left).s(" S: CONTROLLER SURVEY");
+        font.draw_text(8, 176, line.as_str(), (255, 232, 128));
         font.draw_text(
             8,
             196,

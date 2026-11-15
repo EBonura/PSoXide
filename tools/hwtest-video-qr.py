@@ -87,7 +87,7 @@ def renderings(gray: np.ndarray):
         yield cv2.threshold(big, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
 
 
-PAGE_SCHEMAS = ("PX7", "PX8")
+PAGE_SCHEMAS = ("PX7", "PX8", "PXC")
 
 
 def scan(
@@ -164,11 +164,16 @@ def combine(seen: dict[int, set[str]], total_pages: int) -> list[str] | None:
 
 def pages_from_video(video: pathlib.Path, verbose: bool = False) -> list[str]:
     """The page lines of the most complete run in a recording; raises
-    ValueError when no run has all its pages with a matching binary CRC."""
+    ValueError when no run has all its pages with a matching binary CRC.
+
+    A controller survey (schema PXC) holds one record per controller in one
+    recording, each its own run id, so for it every complete run is returned
+    in run-id order and `psoxide-hwtest pad-report` reports each."""
     runs, totals, schema = scan(video, verbose)
     if not runs:
         raise ValueError(f"no PX7/PX8 page decoded from any frame of {video}")
     problems = []
+    collected: list[tuple[int, list[str]]] = []
     # Complete runs first, newest-looking last: a recording usually ends on
     # the run that was being filmed.
     for run_id, seen in sorted(runs.items(), key=lambda item: -len(item[1])):
@@ -182,12 +187,18 @@ def pages_from_video(video: pathlib.Path, verbose: bool = False) -> list[str]:
         if chosen is None:
             problems.append(f"{label}: every page decoded but the binary CRC does not check out")
             continue
-        return [
+        lines = [
             f"{schema}/{n:02X}{total:02X}"
             + ("" if run_id is None else f"{run_id:04X}")
             + f"/{chunk}/C:{binascii.crc32(chunk.encode()) & 0xFFFF_FFFF:08X}"
             for n, chunk in enumerate(chosen, start=1)
         ]
+        if schema != "PXC":
+            return lines
+        # A controller survey: one record per controller, all of them wanted.
+        collected.append((run_id or 0, lines))
+    if collected:
+        return [line for _, lines in sorted(collected) for line in lines]
     raise ValueError("; ".join(problems))
 
 

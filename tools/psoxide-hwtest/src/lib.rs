@@ -11,6 +11,7 @@ pub mod compare;
 pub mod diag28;
 pub mod expansion2_scan;
 pub mod machine_code;
+pub mod pad;
 pub mod radius_fill;
 pub mod report;
 pub mod sb4;

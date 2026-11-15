@@ -22,6 +22,16 @@ struct SampleStaging([u32; 16_400]);
 
 static mut SAMPLE_STAGING: SampleStaging = SampleStaging([0; 16_400]);
 
+/// The staging buffer as bytes, for the controller survey, which never runs beside this probe and
+/// borrows the room instead of linking buffers of its own into the boot EXE.
+pub(crate) fn staging_ptr() -> *mut u8 {
+    // SAFETY: a raw pointer to the start of the buffer; the caller makes disjoint slices of it.
+    unsafe { SAMPLE_STAGING.0.as_mut_ptr() as *mut u8 }
+}
+
+/// Bytes the staging buffer holds.
+pub(crate) const STAGING_BYTES: usize = 16_400 * 4;
+
 /// rec handoff_stage: voices_with_volume_low, blocking_event_vblanks_or_readback_match, endx_low_or_readback_hash_low (two variants x seven stages, 0x4A0-0x4AD)
 pub(crate) const HANDOFF_RECORD: u16 = 0x4A0;
 const STAGE_COUNT: usize = 7;
