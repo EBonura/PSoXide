@@ -12,6 +12,37 @@
 
 pub mod emit;
 
+/// Result receipts: the statics and the stores a headless journey reads back out of a game's RAM
+/// (a match snapshot, a settings block, a music state). They exist only in a build with this
+/// crate's `receipts` feature, a `[diag]` feature of `sdk/profile.toml`: the gate disc has them
+/// and a shipping disc links none, and an image that carries one cannot become a disc without
+/// `--diag`. Wrap every receipt item and every store that fills one in this macro; with the
+/// feature off the macro expands to nothing, so the wrapped code is neither compiled nor linked.
+///
+/// ```ignore
+/// psx_telemetry::receipts! {
+///     #[used]
+///     #[no_mangle]
+///     pub static mut GAME_STATE: [u32; 4] = [u32::from_le_bytes(*b"GAME"), 1, 16, 0];
+/// }
+/// ```
+#[cfg(feature = "receipts")]
+#[macro_export]
+macro_rules! receipts {
+    ($($item:tt)*) => { $($item)* };
+}
+
+/// See the `receipts` feature: with it off the wrapped code vanishes.
+#[cfg(not(feature = "receipts"))]
+#[macro_export]
+macro_rules! receipts {
+    ($($item:tt)*) => {};
+}
+
+/// Whether this build has the result receipts, for a branch that cannot be wrapped in
+/// [`receipts!`]; a constant, so the dead side is removed.
+pub const RECEIPTS: bool = cfg!(feature = "receipts");
+
 /// Declares one id module plus a `*_desc(id)` lookup returning each id's own
 /// rustdoc as a runtime string. Host tooling (the frame profiler's tooltips)
 /// reads descriptions through the lookup, so the docs here are the single
@@ -916,5 +947,25 @@ mod tests {
             max
         };
         assert_eq!(MAX as usize + 1, 91);
+    }
+}
+
+#[cfg(test)]
+mod receipts_tests {
+    // A receipt block declared through the macro exists, and is writable, only with the feature.
+    crate::receipts! {
+        pub static mut TEST_RECEIPT: [u32; 2] = [u32::from_le_bytes(*b"TEST"), 0];
+        pub fn stamp(value: u32) {
+            // SAFETY: the test is single-threaded and owns the static.
+            unsafe { TEST_RECEIPT[1] = value };
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "receipts")]
+    fn a_wrapped_item_exists_with_the_feature() {
+        stamp(7);
+        // SAFETY: single-threaded test.
+        assert_eq!(unsafe { TEST_RECEIPT[1] }, 7);
     }
 }
