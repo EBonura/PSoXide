@@ -6,8 +6,8 @@
 //! direct-mapped instruction cache. Keeping the schedule here gives every
 //! renderer one source contract without adding a call or dynamic dispatch.
 
-pub use psx_gte::scene::{project_triangle_scheduled, project_vertex_scheduled};
 use psx_gte::math::{Mat3I16, Vec3I32};
+pub use psx_gte::scene::{project_triangle_scheduled, project_vertex_scheduled};
 
 /// Q20.12 world camera and Q0.12 turn angles.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

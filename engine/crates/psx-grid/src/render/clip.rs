@@ -2,8 +2,7 @@
 
 use psx_engine::{lerp_vertex, AffineVertex};
 use psx_math::attributed_clip::{
-    clip_to_plane_unchecked, crossing_fraction_q16_i32, AttributedClipPlane,
-    ClipTraversal,
+    clip_to_plane_unchecked, crossing_fraction_q16_i32, AttributedClipPlane, ClipTraversal,
 };
 
 use super::frustum::FrustumPlanes;
@@ -66,4 +65,3 @@ pub fn clip_polygon_plane(
         )
     }
 }
-

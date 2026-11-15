@@ -1724,7 +1724,11 @@ mod tests {
         assert_eq!(lerp_vertex(&a, &b, 65536).position, b.position);
         let mid = lerp_vertex(&a, &b, 32768);
         assert_eq!(mid.position[0], 0);
-        assert_eq!(mid.color >> 24, 0xAA, "the high colour byte is the first vertex's");
+        assert_eq!(
+            mid.color >> 24,
+            0xAA,
+            "the high colour byte is the first vertex's"
+        );
         assert_eq!((mid.screen, mid.depth), ([0, 0], 0));
     }
 
