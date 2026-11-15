@@ -502,9 +502,7 @@ fn signed_noise(seed: u32, index: u32) -> i32 {
     unsigned_noise(seed, index) - 128
 }
 
-fn clamp_i16(value: i32) -> i16 {
-    value.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
-}
+use psx_math::int32::clamp_i16;
 
 #[cfg(test)]
 mod tests {
