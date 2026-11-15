@@ -1510,4 +1510,30 @@ mod tests {
             .to_string();
         assert!(error.contains("both become"), "{error}");
     }
+
+    /// The (printed name, key) pairs the emulator repository's `stall-tools` joins functions
+    /// by (`KEY_VECTORS` in its `functions.rs`, copied verbatim; that tool has no demangler and
+    /// cannot depend on this repository). Here each key must also be what this tool gives the
+    /// mangled spelling of the same name, and a name that is already a key must pass through.
+    #[test]
+    fn the_stall_tools_keys_are_the_portable_names_of_the_mangled_spellings() {
+        let mangled: [(&str, &str); 2] = [
+            ("_ZN4core3fmt5write17h0123456789abcdefE", "core::fmt::write"),
+            (
+                "_ZN57_$LT$core..fmt..Error$u20$as$u20$core..fmt..Debug$GT$3fmt17h0123456789abcdefE",
+                "<core::fmt::Error as core::fmt::Debug>::fmt",
+            ),
+        ];
+        for (symbol, key) in mangled {
+            assert_eq!(portable_name(symbol), key, "{symbol}");
+        }
+        for key in [
+            "core::fmt::write",
+            "<[u8]>::len",
+            "psx_gpu::gpu::draw::<psx_gpu::prim::FillRect>",
+            "<T>::beta::<closure#0, U>",
+        ] {
+            assert_eq!(portable_name(key), key);
+        }
+    }
 }
