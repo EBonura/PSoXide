@@ -56,6 +56,29 @@ pub const fn to_kseg0(addr: u32) -> u32 {
     KSEG0_BASE | to_physical(addr)
 }
 
+/// [`to_kseg0`] of a pointer: the one canonical form a RAM pointer is compared or handed to DMA
+/// in. On the guest it is `to_kseg0` on the address; on a host build, where a pointer is not a
+/// 32-bit PS1 address, it is the pointer unchanged.
+#[inline(always)]
+#[must_use]
+pub fn to_kseg0_ptr<T>(p: *const T) -> *const T {
+    #[cfg(target_arch = "mips")]
+    {
+        to_kseg0(p as usize as u32) as usize as *const T
+    }
+    #[cfg(not(target_arch = "mips"))]
+    {
+        p
+    }
+}
+
+/// [`to_kseg0_ptr`] for a mutable pointer.
+#[inline(always)]
+#[must_use]
+pub fn to_kseg0_mut<T>(p: *mut T) -> *mut T {
+    to_kseg0_ptr(p.cast_const()).cast_mut()
+}
+
 /// Base of KSEG1, the uncached mirror of the physical map.
 pub const KSEG1_BASE: u32 = 0xa000_0000;
 
@@ -273,6 +296,31 @@ pub mod cache_control {
 
 #[cfg(test)]
 mod tests {
+    /// The game-side `canonical_ram` mask, kept as the oracle.
+    fn game_canonical_ram(addr: u32) -> u32 {
+        (addr & 0x001f_ffff) | 0x8000_0000
+    }
+
+    #[test]
+    fn to_kseg0_equals_the_game_mask_on_every_ram_word_in_all_three_segments() {
+        for base in [0x0000_0000u32, 0x8000_0000, 0xa000_0000] {
+            let mut off = 0u32;
+            while off < 0x0020_0000 {
+                let a = base + off;
+                assert_eq!(to_kseg0(a), game_canonical_ram(a), "{a:#x}");
+                off += 4;
+            }
+        }
+    }
+
+    #[test]
+    fn to_kseg0_ptr_is_the_pointer_on_a_host() {
+        let x = 5u32;
+        let p = &raw const x;
+        assert_eq!(to_kseg0_ptr(p), p);
+        assert_eq!(to_kseg0_mut(p.cast_mut()), p.cast_mut());
+    }
+
     use super::*;
 
     #[test]
