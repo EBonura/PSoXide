@@ -135,6 +135,7 @@ pub unsafe fn base_ptr() -> *mut u8 {
 pub unsafe fn ptr_at<T>(byte_offset: usize) -> *mut T {
     debug_assert!(byte_offset <= SIZE.saturating_sub(core::mem::size_of::<T>()));
     debug_assert!(byte_offset.is_multiple_of(core::mem::align_of::<T>()));
+    // SAFETY: the caller reserved the range (see above); `base_ptr` is the scratchpad.
     unsafe { base_ptr().add(byte_offset).cast::<T>() }
 }
 
@@ -145,9 +146,11 @@ pub unsafe fn ptr_at<T>(byte_offset: usize) -> *mut T {
 /// Call only while no scratchpad-backed working set is live.
 #[inline]
 pub unsafe fn clear() {
+    // SAFETY: offset 0 of a `u32` is in range and aligned.
     let words = unsafe { ptr_at::<u32>(0) };
     let mut index = 0usize;
     while index < SIZE / core::mem::size_of::<u32>() {
+        // SAFETY: `index` is below the word count of the scratchpad; the caller guarantees no live set.
         unsafe { words.add(index).write(0) };
         index += 1;
     }
