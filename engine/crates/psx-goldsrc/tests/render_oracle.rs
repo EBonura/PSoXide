@@ -125,8 +125,9 @@ fn frozen_renderer_matches_the_shared_owner_for_both_games() {
         scratch.write(
             "Cargo.toml",
             &format!(
-                "[package]\nname=\"render-oracle\"\nversion=\"0.0.0\"\nedition=\"2021\"\n[workspace]\n[dependencies]\npsx-engine={{path=\"{}\"}}\n",
-                root.join("engine/crates/psx-engine").display()
+                "[package]\nname=\"render-oracle\"\nversion=\"0.0.0\"\nedition=\"2021\"\n[workspace]\n[dependencies]\npsx-engine={{path=\"{}\"}}\npsx-telemetry={{path=\"{}\"}}\n",
+                root.join("engine/crates/psx-engine").display(),
+                root.join("sdk/crates/psx-telemetry").display()
             ),
         );
         for lane in [
