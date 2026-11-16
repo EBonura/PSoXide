@@ -660,8 +660,8 @@ fn the_borrowed_directory_forms_equal_the_card_forms() {
             continue;
         }
         read.unwrap();
-        for i in 0..DATA_BLOCKS {
-            assert_eq!(dir[i], c.read_dir_with(i, DirOptions::BIOS).unwrap());
+        for (i, entry) in dir.iter().enumerate() {
+            assert_eq!(*entry, c.read_dir_with(i, DirOptions::BIOS).unwrap());
         }
         for opts in [
             DirOptions::BIOS,
