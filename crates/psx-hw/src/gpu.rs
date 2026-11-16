@@ -259,6 +259,21 @@ pub mod gp1 {
             | ((interlace as u32) << 5)
     }
 
+    /// [`display_mode`] with bit 6 set, the horizontal 368 mode ("hres 2"): the mode word a
+    /// 368-wide picture sends. `hres_1` is carried as in [`display_mode`] (the width is 368
+    /// whatever it says); every other bit is `display_mode`'s, which is unchanged.
+    #[inline(always)]
+    #[must_use]
+    pub const fn display_mode_hres2(
+        hres_1: u32,
+        vres: u32,
+        pal: bool,
+        depth_24: bool,
+        interlace: bool,
+    ) -> u32 {
+        display_mode(hres_1, vres, pal, depth_24, interlace) | 0x40
+    }
+
     /// GP1(10h) -- Get-GPU-info latch. The returned value can be read
     /// via `GPUREAD` (at `GP0`) on the next read.
     /// - `0x02`: texture-window setting
@@ -592,6 +607,27 @@ pub mod packet {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_mode_hres2_sets_bit_6_and_leaves_the_rest_alone() {
+        for hres in 0..4 {
+            for vres in 0..2 {
+                for flags in 0..8u32 {
+                    let (pal, d24, il) = (flags & 1 != 0, flags & 2 != 0, flags & 4 != 0);
+                    let plain = gp1::display_mode(hres, vres, pal, d24, il);
+                    assert_eq!(
+                        gp1::display_mode_hres2(hres, vres, pal, d24, il),
+                        plain | 0x40
+                    );
+                }
+            }
+        }
+        // The restored games' raw line: 0x0800_0000 | 0x40 | mode.
+        assert_eq!(
+            gp1::display_mode_hres2(0, 0, false, false, false),
+            0x0800_0040
+        );
+    }
 
     #[test]
     fn in_range_builders_equal_the_masking_ones_for_every_in_range_input() {
