@@ -554,6 +554,7 @@ impl Presenter {
     /// The wait is here, at a call the program makes once a frame, and not in
     /// the port writes: a program that never hands over a chain or records
     /// pays nothing on its draws.
+    #[inline(never)]
     pub fn begin_frame(&mut self, buffers: &DoubleBuffer) {
         psx_io::gpu::run_direct_access_guard();
         let port = &mut Hardware;
