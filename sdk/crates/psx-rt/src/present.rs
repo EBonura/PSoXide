@@ -459,7 +459,9 @@ impl Presenter {
         #[cfg(target_arch = "mips")]
         {
             psx_io::gpu::wait_command_ready();
-            psx_io::gpu::signal_draw_done();
+            // Nothing is armed or recorded at boot: past the guard, as every frame's is, so a
+            // program on the presenter does not link `signal_draw_done`'s own wrapper too.
+            psx_io::gpu::signal_draw_done_unguarded();
         }
         Presenter {
             frame_open: false,
