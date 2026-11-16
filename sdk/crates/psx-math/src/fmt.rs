@@ -114,6 +114,61 @@ pub fn i32_dec(buf: &mut [u8], v: i32) -> &str {
     ascii(&buf[len - digits..])
 }
 
+/// A signed decimal in a fixed buffer: the owned form of [`i32_dec`], for a caller that keeps the
+/// text in a value (a HUD number held until it is drawn) and wants the formatter to stay one
+/// out-of-line body.
+#[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
+pub struct I32Dec {
+    buf: [u8; I32_DEC_MAX],
+    start: usize,
+}
+
+impl I32Dec {
+    /// The digits, with a leading `-` for a negative value.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        ascii(&self.buf[self.start..])
+    }
+}
+
+/// `v` as signed decimal in an owned [`I32Dec`].
+///
+/// Built for size and kept out of line on the console, like [`u32_dec`]: a call site is the
+/// call and the return slot, which is what a game's own `fn(i32) -> Buf` costs there. Through
+/// [`i32_dec`] the wrapper is inlined into each caller, which measured +68 B in a caller with
+/// three sites. Digits are `v.unsigned_abs()` (so `i32::MIN` is right) with 32-bit arithmetic only.
+///
+/// ```
+/// use psx_math::fmt::i32_dec_owned;
+/// assert_eq!(i32_dec_owned(-1234).as_str(), "-1234");
+/// assert_eq!(i32_dec_owned(0).as_str(), "0");
+/// assert_eq!(i32_dec_owned(i32::MIN).as_str(), "-2147483648");
+/// ```
+#[cfg_attr(target_arch = "mips", optimize(size), inline(never))]
+#[must_use]
+pub fn i32_dec_owned(v: i32) -> I32Dec {
+    let mut buf = [b' '; I32_DEC_MAX];
+    let mut i = buf.len();
+    let neg = v < 0;
+    let mut n = v.unsigned_abs();
+    if n == 0 {
+        i -= 1;
+        buf[i] = b'0';
+    } else {
+        while n != 0 {
+            i -= 1;
+            buf[i] = b'0' + (n % 10) as u8;
+            n /= 10;
+        }
+    }
+    if neg {
+        i -= 1;
+        buf[i] = b'-';
+    }
+    I32Dec { buf, start: i }
+}
+
 /// Format `v` as decimal ASCII into `buf`, returning the digits as `&str`.
 ///
 /// `buf` must be at least [`U64_DEC_MAX`] bytes for the general case.
@@ -195,6 +250,23 @@ pub fn tenths_dec(buf: &mut [u8], tenths: u32) -> &str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn i32_dec_owned_equals_i32_dec() {
+        let mut values = [0i32; 0].to_vec();
+        for d in 0..=10u32 {
+            let p = 10i64.pow(d);
+            for v in [p - 1, p, p + 1] {
+                values.push(v.clamp(i32::MIN as i64, i32::MAX as i64) as i32);
+                values.push((-v).clamp(i32::MIN as i64, i32::MAX as i64) as i32);
+            }
+        }
+        values.extend([0, 1, -1, i32::MAX, i32::MIN, i32::MIN + 1]);
+        for v in values {
+            let mut buf = [0u8; I32_DEC_MAX];
+            assert_eq!(i32_dec_owned(v).as_str(), i32_dec(&mut buf, v), "{v}");
+        }
+    }
+
     use super::*;
 
     #[test]

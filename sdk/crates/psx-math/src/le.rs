@@ -235,6 +235,43 @@ pub fn read_u32_inline(bytes: &[u8], offset: usize) -> u32 {
     u32::from_le(unsafe { bytes.as_ptr().add(offset).cast::<u32>().read_unaligned() })
 }
 
+/// [`get_u16`] in the shape a hand-written Option reader has: the slice-range `get`, the array
+/// conversion, `from_le_bytes`, always inlined. Same value as `get_u16`. Use it where `get_u16`
+/// costs bytes: in `#[optimize(size)]` header parsers the byte-indexed body of `get_u16` is
+/// priced too dear to inline, and this one-load form is not (measured on the three Option readers
+/// Ocarina had: `get_*` was 40 B larger over the three sites, this form never larger than the
+/// private reader it replaces).
+#[inline(always)]
+#[must_use]
+pub fn get_u16_inline(bytes: &[u8], offset: usize) -> Option<u16> {
+    Some(u16::from_le_bytes(
+        bytes.get(offset..offset.checked_add(2)?)?.try_into().ok()?,
+    ))
+}
+
+/// [`get_u32`] in the shape of [`get_u16_inline`].
+#[inline(always)]
+#[must_use]
+pub fn get_u32_inline(bytes: &[u8], offset: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(
+        bytes.get(offset..offset.checked_add(4)?)?.try_into().ok()?,
+    ))
+}
+
+/// [`get_i16`] in the shape of [`get_u16_inline`].
+#[inline(always)]
+#[must_use]
+pub fn get_i16_inline(bytes: &[u8], offset: usize) -> Option<i16> {
+    get_u16_inline(bytes, offset).map(|v| v as i16)
+}
+
+/// [`get_i32`] in the shape of [`get_u16_inline`].
+#[inline(always)]
+#[must_use]
+pub fn get_i32_inline(bytes: &[u8], offset: usize) -> Option<i32> {
+    get_u32_inline(bytes, offset).map(|v| v as i32)
+}
+
 /// [`read_u16_unchecked`] from a base pointer: the form a parser that walks a blob by pointer
 /// uses (`hmd8`, `hma1`, `tracks`). The offset is added once and the next byte is a constant
 /// step from it, which is a different (smaller) shape for LLVM to price than
@@ -292,6 +329,25 @@ mod tests {
     /// The byte-indexed readers every game wrote, as oracles.
     fn game_u32(d: &[u8], o: usize) -> u32 {
         u32::from_le_bytes([d[o], d[o + 1], d[o + 2], d[o + 3]])
+    }
+
+    #[test]
+    fn the_inline_option_readers_equal_the_get_forms_at_every_offset() {
+        let data: [u8; 9] = core::array::from_fn(|i| (i as u32 * 91 + 13) as u8);
+        for len in 0..=data.len() {
+            let d = &data[..len];
+            for o in (0..=len + 2).chain([usize::MAX - 3, usize::MAX - 1, usize::MAX]) {
+                assert_eq!(get_u16_inline(d, o), get_u16(d, o));
+                assert_eq!(get_u32_inline(d, o), get_u32(d, o));
+                assert_eq!(get_i16_inline(d, o), get_i16(d, o));
+                assert_eq!(get_i32_inline(d, o), get_i32(d, o));
+            }
+        }
+        assert_eq!(
+            get_u32_inline(&[0x78, 0x56, 0x34, 0x12], 0),
+            Some(0x1234_5678)
+        );
+        assert_eq!(get_i16_inline(&[0xfe, 0xff], 0), Some(-2));
     }
 
     #[test]
