@@ -161,6 +161,24 @@ pub struct StreamStats {
     pub rejected: u32,
 }
 
+/// `results_written` of an engine without results: the latest request read every sector.
+const ENDED_DONE: u32 = 1;
+/// `results_written` of an engine without results: the latest request failed or was cancelled.
+const ENDED_FAILED: u32 = 2;
+
+/// Where the transfer of a [`LeanEngine`] is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Status {
+    /// Nothing has been started.
+    Idle,
+    /// A transfer is running, or the drive is still stopping after one.
+    Busy,
+    /// The latest request read every sector and the drive has stopped.
+    Done,
+    /// The latest request failed or was cancelled, and the drive has stopped.
+    Failed,
+}
+
 #[derive(Clone, Copy)]
 struct Active {
     ticket: Ticket,
@@ -233,6 +251,7 @@ pub struct Engine<
     const SLOTS: usize = { QUEUE_DEPTH + 1 },
     const RESULTS: usize = RECENT_RESULTS,
     const LEASE: bool = true,
+    const STATS: bool = true,
 > {
     hw: H,
     config: Config,
@@ -255,6 +274,8 @@ pub struct Engine<
     /// goes back in the queue even when it is full.
     queue: [Option<Queued>; SLOTS],
     results: [Option<Completion>; RESULTS],
+    /// Results recorded so far; for an engine that keeps none (`RESULTS` 0) how the latest
+    /// request ended instead: [`ENDED_DONE`] or [`ENDED_FAILED`], 0 before any.
     results_written: u32,
     next_ticket: u32,
     next_seq: u32,
@@ -281,19 +302,39 @@ pub struct Engine<
 /// watchdog, the CD source open only while busy.
 pub type SingleEngine<H> = Engine<H, 0, 1, false>;
 
+/// [`SingleEngine`] for a program that also reads no counters and holds no tickets: the
+/// smallest engine. It is [`Engine`] with `SLOTS` 0, `RESULTS` 0, `LEASE` off and `STATS` off,
+/// so the compiler removes by construction what such a program cannot use (no cargo feature
+/// selects it), on top of what [`SingleEngine`] already drops:
+///
+/// - no counters: nothing counts interrupts, sectors or requests, nothing is published to
+///   `PSX_CD_STATS`, and `Config::time_handler` has no effect ([`Engine::stats`] returns zeros
+///   but the phase and the error code);
+/// - no results: [`Engine::state`] returns [`RequestState::Unknown`] for everything that has
+///   finished; the answer is [`Engine::status`], which says how the latest request ended once
+///   the drive has stopped, as a one-transfer-at-a-time caller wants it.
+///
+/// Its console front is the [`lean`](crate::lean) module.
+pub type LeanEngine<H> = Engine<H, 0, 0, false, false>;
+
 /// The Setloc parameters (BCD minute, second, frame) of program-relative sector `lba`, shifted by
 /// the loader's disc base. The same as `psx_io::cd::lba_to_bcd_msf` of the shifted sector, with
 /// the divisions left to the CPU's divider: this runs once per transfer, and the compiler's
 /// multiply-and-shift expansion of five constant divisions is four times the code.
 #[inline(never)]
 fn location(lba: u32) -> [u8; 3] {
-    let ten = core::hint::black_box(10);
-    let bcd = |value: u32| (((value / ten) << 4) | (value % ten)) as u8;
-    let absolute = psx_io::disc_base::shift_lba(lba).saturating_add(150);
+    // The divisor values are hidden from the optimiser, so two hardware divides stand in for the
+    // multiply-and-shift expansions of the constant divisions, and each is known not to be zero,
+    // so there is no check for it. The tens of a value below 100 are `(value * 103) >> 10`, so
+    // `value + 6 * tens` is its BCD.
     let frames = core::hint::black_box(75);
+    let minute_length = core::hint::black_box(60);
+    // SAFETY: the values are the constants above.
+    unsafe { core::hint::assert_unchecked(frames != 0 && minute_length != 0) };
+    let bcd = |value: u32| (value + 6 * ((value * 103) >> 10)) as u8;
+    let absolute = psx_io::disc_base::shift_lba(lba).saturating_add(150);
     let seconds = absolute / frames;
     let frame = absolute - seconds * frames;
-    let minute_length = core::hint::black_box(60);
     let minutes = seconds / minute_length;
     let second = seconds - minutes * minute_length;
     [bcd(minutes.min(99)), bcd(second), bcd(frame)]
@@ -324,8 +365,17 @@ impl<H: CdHw> SingleEngine<H> {
     }
 }
 
-impl<H: CdHw, const SLOTS: usize, const RESULTS: usize, const LEASE: bool>
-    Engine<H, SLOTS, RESULTS, LEASE>
+impl<H: CdHw> LeanEngine<H> {
+    /// The lean engine in the [`Owner::Boot`] state: one request at a time, no counters, no
+    /// tickets, nothing else. See [`LeanEngine`].
+    #[must_use]
+    pub const fn lean(hw: H, config: Config) -> Self {
+        Self::with_hw(hw, config)
+    }
+}
+
+impl<H: CdHw, const SLOTS: usize, const RESULTS: usize, const LEASE: bool, const STATS: bool>
+    Engine<H, SLOTS, RESULTS, LEASE, STATS>
 {
     /// Requests that can wait behind the active one: the slots, less the spare a resumed
     /// request needs when the queue is full.
@@ -338,8 +388,8 @@ impl<H: CdHw, const SLOTS: usize, const RESULTS: usize, const LEASE: bool>
             "a queue has no slot beyond its spare: use 0 or at least 2"
         );
         assert!(
-            RESULTS >= 1,
-            "an engine remembers at least the latest result"
+            RESULTS >= 1 || SLOTS == 0,
+            "an engine with a queue remembers at least the latest result"
         );
     };
 
@@ -437,6 +487,25 @@ impl<H: CdHw, const SLOTS: usize, const RESULTS: usize, const LEASE: bool>
             error: self.error,
             ..self.stats
         }
+    }
+
+    /// Where the transfer is, for a caller that has one request at a time and wants no ticket:
+    /// [`Status::Busy`] while a transfer runs and until the drive has stopped after it, then how
+    /// the latest request ended. Also runs the no-progress check
+    /// ([`service`](Self::service)). A [`LeanEngine`] keeps no other record of results.
+    pub fn status(&mut self) -> Status {
+        self.service();
+        let status = if !self.is_idle() {
+            Status::Busy
+        } else {
+            match self.results_written {
+                0 => Status::Idle,
+                ENDED_DONE => Status::Done,
+                _ => Status::Failed,
+            }
+        };
+        self.sync_source();
+        status
     }
 
     /// Start the longest-handler measurement over
@@ -638,7 +707,9 @@ impl<H: CdHw, const SLOTS: usize, const RESULTS: usize, const LEASE: bool>
             return self.submit_unqueued(request);
         }
         if self.queued_count() >= Self::DEPTH {
-            self.stats.rejected = self.stats.rejected.wrapping_add(1);
+            if STATS {
+                self.stats.rejected = self.stats.rejected.wrapping_add(1);
+            }
             return Err(SubmitError::QueueFull);
         }
         let ticket = self.new_ticket();
@@ -664,7 +735,9 @@ impl<H: CdHw, const SLOTS: usize, const RESULTS: usize, const LEASE: bool>
     /// still stopping after the last one, or the transport is not attached.
     fn submit_unqueued(&mut self, request: Request) -> Result<Ticket, SubmitError> {
         if self.owner != Owner::Data || !self.is_ready_to_start() {
-            self.stats.rejected = self.stats.rejected.wrapping_add(1);
+            if STATS {
+                self.stats.rejected = self.stats.rejected.wrapping_add(1);
+            }
             return Err(SubmitError::QueueFull);
         }
         let ticket = self.new_ticket();
@@ -777,16 +850,20 @@ impl<H: CdHw, const SLOTS: usize, const RESULTS: usize, const LEASE: bool>
     /// Handle one CD interrupt. Called by the interrupt handler (the crate's
     /// dispatcher handler on the console, the test harness on the host).
     pub fn on_interrupt(&mut self) {
-        let started = self.hw.clock();
-        self.stats.irq_count = self.stats.irq_count.wrapping_add(1);
+        let started = if STATS { self.hw.clock() } else { 0 };
+        if STATS {
+            self.stats.irq_count = self.stats.irq_count.wrapping_add(1);
+        }
         if self.owner == Owner::Data {
             let code = self.hw.interrupt_code();
             self.trace(1, code);
             self.dispatch(code);
             self.sync_source();
         }
-        let ticks = u32::from(self.hw.clock().wrapping_sub(started));
-        self.stats.max_irq_ticks = self.stats.max_irq_ticks.max(ticks);
+        if STATS {
+            let ticks = u32::from(self.hw.clock().wrapping_sub(started));
+            self.stats.max_irq_ticks = self.stats.max_irq_ticks.max(ticks);
+        }
     }
 
     fn dispatch(&mut self, code: u8) {
@@ -866,8 +943,10 @@ impl<H: CdHw, const SLOTS: usize, const RESULTS: usize, const LEASE: bool>
             if let Some(a) = self.active.as_mut() {
                 a.received += 1;
             }
-            self.stats.sectors = self.stats.sectors.wrapping_add(1);
-        } else {
+            if STATS {
+                self.stats.sectors = self.stats.sectors.wrapping_add(1);
+            }
+        } else if STATS {
             self.stats.discarded_sectors = self.stats.discarded_sectors.wrapping_add(1);
         }
         self.stamp = self.hw.vblank_count();
@@ -895,7 +974,9 @@ impl<H: CdHw, const SLOTS: usize, const RESULTS: usize, const LEASE: bool>
         match self.take_chain(active.request.end_lba()) {
             Some(next) => {
                 self.start_chained(next);
-                self.stats.chained = self.stats.chained.wrapping_add(1);
+                if STATS {
+                    self.stats.chained = self.stats.chained.wrapping_add(1);
+                }
             }
             None => self.pause(),
         }
@@ -950,7 +1031,9 @@ impl<H: CdHw, const SLOTS: usize, const RESULTS: usize, const LEASE: bool>
     fn fail(&mut self, failure: Failure) {
         self.trace(4, (failure.0 >> 24) as u8);
         self.trace(5, (failure.0 >> 8) as u8);
-        self.error = failure.0;
+        if STATS {
+            self.error = failure.0;
+        }
         self.recovering = false;
         self.change(Phase::Failed);
         self.hw.silence_output();
@@ -972,7 +1055,9 @@ impl<H: CdHw, const SLOTS: usize, const RESULTS: usize, const LEASE: bool>
         // begins inside the request's destination (`Request::new_raw`).
         let rest = unsafe { active.request.remaining_after(active.received) };
         if let Some(request) = rest {
-            self.stats.resumed = self.stats.resumed.wrapping_add(1);
+            if STATS {
+                self.stats.resumed = self.stats.resumed.wrapping_add(1);
+            }
             self.enqueue(Queued {
                 ticket: active.ticket,
                 request,
@@ -1018,7 +1103,9 @@ impl<H: CdHw, const SLOTS: usize, const RESULTS: usize, const LEASE: bool>
     fn begin(&mut self, queued: Queued) {
         let recover = self.phase == Phase::Failed || self.recover_next;
         self.recover_next = false;
-        self.error = 0;
+        if STATS {
+            self.error = 0;
+        }
         self.active = Some(Active {
             ticket: queued.ticket,
             request: queued.request,
@@ -1105,14 +1192,26 @@ impl<H: CdHw, const SLOTS: usize, const RESULTS: usize, const LEASE: bool>
     }
 
     fn finish(&mut self, active: Active, outcome: Outcome) {
-        match outcome {
-            Outcome::Done => self.stats.requests_done = self.stats.requests_done.wrapping_add(1),
-            Outcome::Cancelled => {
-                self.stats.requests_cancelled = self.stats.requests_cancelled.wrapping_add(1)
+        if STATS {
+            match outcome {
+                Outcome::Done => {
+                    self.stats.requests_done = self.stats.requests_done.wrapping_add(1);
+                }
+                Outcome::Cancelled => {
+                    self.stats.requests_cancelled = self.stats.requests_cancelled.wrapping_add(1);
+                }
+                Outcome::Failed(_) => {
+                    self.stats.requests_failed = self.stats.requests_failed.wrapping_add(1);
+                }
             }
-            Outcome::Failed(_) => {
-                self.stats.requests_failed = self.stats.requests_failed.wrapping_add(1)
-            }
+        }
+        if RESULTS == 0 {
+            self.results_written = if outcome == Outcome::Done {
+                ENDED_DONE
+            } else {
+                ENDED_FAILED
+            };
+            return;
         }
         self.record(Completion {
             ticket: active.ticket,
@@ -1122,6 +1221,9 @@ impl<H: CdHw, const SLOTS: usize, const RESULTS: usize, const LEASE: bool>
     }
 
     fn record(&mut self, completion: Completion) {
+        if RESULTS == 0 {
+            return;
+        }
         let slot = self.results_written as usize % RESULTS;
         self.results[slot] = Some(completion);
         self.results_written = self.results_written.wrapping_add(1);

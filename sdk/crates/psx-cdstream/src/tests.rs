@@ -1649,3 +1649,88 @@ fn a_single_engine_fails_a_drive_error_and_the_next_start_recovers() {
             >= 2
     );
 }
+
+// ------------------------------------------------------------ lean transfer
+
+fn lean() -> LeanEngine<FakeDrive> {
+    let mut engine = LeanEngine::lean(FakeDrive::new(), Config::DEFAULT);
+    engine.attach();
+    engine
+}
+
+fn run_lean(engine: &mut LeanEngine<FakeDrive>) {
+    let mut delivered = 0;
+    while engine.hw_mut().raise() {
+        engine.on_interrupt();
+        delivered += 1;
+        assert!(delivered < 100_000, "interrupt storm");
+    }
+}
+
+#[test]
+fn a_lean_engine_is_busy_until_the_drive_has_stopped_then_done() {
+    let mut engine = lean();
+    assert_eq!(engine.status(), Status::Idle);
+    let buf = Buf::new(3);
+    engine
+        .submit(request(100, 3, &buf).with_byte_len(2 * 2048 + 100))
+        .expect("accepted");
+    assert_eq!(engine.status(), Status::Busy);
+    // Done when the last sector has landed, but the drive is still pausing: busy.
+    loop {
+        assert!(engine.hw_mut().raise());
+        engine.on_interrupt();
+        if engine.hw().popped.len() == 3 {
+            break;
+        }
+    }
+    assert_eq!(engine.status(), Status::Busy);
+    run_lean(&mut engine);
+    assert_eq!(engine.status(), Status::Done);
+    assert!(engine.is_idle());
+    buf.assert_sectors(100, 2);
+    assert_eq!(buf.word(2 * 512 + 25), CANARY);
+    // It keeps no counters and no tickets.
+    assert_eq!(engine.stats().irq_count, 0);
+    assert_eq!(engine.stats().sectors, 0);
+    assert_eq!(engine.submissions(), 1);
+}
+
+#[test]
+fn a_lean_engine_reports_a_cancel_and_a_drive_error_as_failed_and_recovers() {
+    let mut engine = lean();
+    let buf = Buf::new(50);
+    engine.submit(request(0, 50, &buf)).expect("accepted");
+    for _ in 0..8 {
+        assert!(engine.hw_mut().raise());
+        engine.on_interrupt();
+    }
+    let other = Buf::new(1);
+    assert_eq!(
+        engine.submit(request(9, 1, &other)),
+        Err(SubmitError::QueueFull)
+    );
+    engine.cancel_all();
+    run_lean(&mut engine);
+    assert_eq!(engine.status(), Status::Failed);
+    engine.hw_mut().error_at.push(23);
+    engine.submit(request(20, 4, &buf)).expect("accepted");
+    run_lean(&mut engine);
+    assert_eq!(engine.status(), Status::Failed);
+    engine.hw_mut().error_at.clear();
+    engine.submit(request(40, 2, &buf)).expect("accepted");
+    run_lean(&mut engine);
+    assert_eq!(engine.status(), Status::Done);
+    buf.assert_sectors(40, 2);
+}
+
+#[test]
+fn a_lean_engine_fails_a_stalled_transfer_by_the_watchdog() {
+    let mut engine = lean();
+    let buf = Buf::new(4);
+    engine.submit(request(5, 4, &buf)).expect("accepted");
+    assert_eq!(engine.status(), Status::Busy);
+    engine.hw_mut().vblank += Config::DEFAULT.timeout_vblanks + 1;
+    assert_eq!(engine.status(), Status::Failed);
+    assert!(engine.is_idle());
+}

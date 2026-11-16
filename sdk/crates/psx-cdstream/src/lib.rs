@@ -92,6 +92,11 @@
 //! ([`single::stop_and_wait`]), gives the controller back ([`single::uninstall`]) and installs
 //! again afterwards: with one request at a time there is no lease to arbitrate.
 //!
+//! A program that also reads no counters and holds no tickets (it starts a read, asks once a frame
+//! whether it is done, and cancels or waits for the drive before polled reads) uses [`LeanEngine`]
+//! through the [`lean`] module: the same state machine without `PSX_CD_STATS`, the handler timing
+//! and the ticket records, and with [`lean::status`] in place of `state`.
+//!
 //! The handler (either engine) runs on psx-rt's dispatcher stack, [`HANDLER_STACK_BYTES`] bytes of
 //! which the saved context takes 112: 400 for the handler, whose deepest path in the
 //! single-transfer engine is measured by `stack-guard` in `hello-cdchunk` (see the crate's

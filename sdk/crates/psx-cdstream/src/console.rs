@@ -23,7 +23,9 @@
 //! if the engine still has the source open. The registration changes only when
 //! the engine opens or closes the source, not around every call.
 
-use crate::engine::{Config, Engine, LeaseState, Owner, Phase, SingleEngine, StreamStats};
+use crate::engine::{
+    Config, Engine, LeanEngine, LeaseState, Owner, Phase, SingleEngine, StreamStats,
+};
 use crate::hw::CdHw;
 use crate::request::{Request, RequestState, SubmitError, Ticket};
 use core::cell::UnsafeCell;
@@ -49,14 +51,14 @@ pub const HANDLER_STACK_BYTES: usize = psx_rt::dispatch::STACK_BYTES;
 
 // -------------------------------------------------------------------- drive
 
-/// The CD-ROM controller, through the SDK's register steps. `SINGLE` picks which of the two
-/// transports its interrupt handler belongs to: the full [`Engine`] or the
-/// [`SingleEngine`] of the [`single`] module.
-pub struct Mmio<const SINGLE: bool = false> {
+/// The CD-ROM controller, through the SDK's register steps. `SINGLE` and `LEAN` pick which of
+/// the three transports its interrupt handler belongs to: the full [`Engine`], the
+/// [`SingleEngine`] of the [`single`] module, or the [`LeanEngine`] of the [`lean`] module.
+pub struct Mmio<const SINGLE: bool = false, const LEAN: bool = false> {
     time_handler: bool,
 }
 
-impl<const SINGLE: bool> Mmio<SINGLE> {
+impl<const SINGLE: bool, const LEAN: bool> Mmio<SINGLE, LEAN> {
     const fn new() -> Self {
         Mmio {
             time_handler: false,
@@ -82,7 +84,7 @@ fn token() -> Cd {
     unsafe { Cd::steal() }
 }
 
-impl<const SINGLE: bool> CdHw for Mmio<SINGLE> {
+impl<const SINGLE: bool, const LEAN: bool> CdHw for Mmio<SINGLE, LEAN> {
     const TRACE: bool = cfg!(feature = "trace");
 
     fn issue(&mut self, command: u8, params: &[u8]) -> bool {
@@ -181,7 +183,9 @@ impl<const SINGLE: bool> CdHw for Mmio<SINGLE> {
         // of an exception taken again for ever. The registration comes before the
         // mask bit and goes after it, so the source is never open without it.
         if enabled {
-            let handler = if SINGLE {
+            let handler = if LEAN {
+                on_lean_interrupt
+            } else if SINGLE {
                 on_single_interrupt
             } else {
                 on_cd_interrupt
@@ -233,9 +237,15 @@ unsafe impl<T> Sync for Global<T> {}
 /// The full transport's engine type, and the single-transfer one's.
 type Full = Engine<Mmio>;
 type Single = SingleEngine<Mmio<true>>;
+type Lean = LeanEngine<Mmio<true, true>>;
 
 static ENGINE: Global<Full> = Global(UnsafeCell::new(Engine::new(Mmio::new(), Config::DEFAULT)));
 static SINGLE: Global<Single> = Global(UnsafeCell::new(SingleEngine::single(
+    Mmio::new(),
+    Config::DEFAULT,
+)));
+
+static LEAN: Global<Lean> = Global(UnsafeCell::new(LeanEngine::lean(
     Mmio::new(),
     Config::DEFAULT,
 )));
@@ -244,6 +254,10 @@ static SINGLE: Global<Single> = Global(UnsafeCell::new(SingleEngine::single(
 /// the few operations on it. The two engines have the same operations; a program links the
 /// glue of the one it uses.
 trait Transport: Sized + 'static {
+    /// Whether the engine counts and publishes `PSX_CD_STATS`.
+    const STATS: bool;
+    /// Whether the engine can lease the drive to audio code.
+    const LEASE: bool;
     fn global() -> &'static Global<Self>;
     fn interrupt(&mut self);
     fn sync_source(&mut self);
@@ -257,8 +271,10 @@ trait Transport: Sized + 'static {
 }
 
 macro_rules! transport {
-    ($engine:ty, $global:ident) => {
+    ($engine:ty, $global:ident, $stats:expr, $lease:expr) => {
         impl Transport for $engine {
+            const STATS: bool = $stats;
+            const LEASE: bool = $lease;
             fn global() -> &'static Global<Self> {
                 &$global
             }
@@ -281,7 +297,9 @@ macro_rules! transport {
             }
             #[inline(always)]
             fn begin(&mut self, config: Config) {
-                self.hw_mut().time_handler = config.time_handler;
+                if $stats {
+                    self.hw_mut().time_handler = config.time_handler;
+                }
                 self.configure(config);
                 self.attach();
             }
@@ -305,8 +323,11 @@ macro_rules! transport {
     };
 }
 
-transport!(Full, ENGINE);
-transport!(Single, SINGLE);
+// The last two: whether the engine counts and publishes statistics, and whether it leases the
+// drive to audio code.
+transport!(Full, ENGINE, true, true);
+transport!(Single, SINGLE, true, false);
+transport!(Lean, LEAN, false, false);
 
 /// The controller token while the transport holds it.
 struct TokenSlot(UnsafeCell<Option<Cd>>);
@@ -396,7 +417,9 @@ fn leave<T: Transport>(engine: &mut T) {
     if engine.source_open() {
         irq::set_mask(irq::mask() | CD_BIT);
     }
-    publish(engine);
+    if T::STATS {
+        publish(engine);
+    }
 }
 
 /// Run `f` on the engine with the CD source closed, then publish the
@@ -432,6 +455,11 @@ fn on_single_interrupt() {
     handle::<Single>();
 }
 
+/// The same for the lean engine.
+fn on_lean_interrupt() {
+    handle::<Lean>();
+}
+
 #[inline(always)]
 fn handle<T: Transport>() {
     // SAFETY: the dispatcher runs with CPU interrupts off, and every foreground
@@ -439,7 +467,9 @@ fn handle<T: Transport>() {
     // only live reference to the engine.
     let engine = unsafe { &mut *T::global().0.get() };
     engine.interrupt();
-    publish(engine);
+    if T::STATS {
+        publish(engine);
+    }
 }
 
 // ------------------------------------------------------------------- set-up
@@ -482,7 +512,7 @@ fn install_in<T: Transport>(cd: Cd, config: Config) -> Result<(), Cd> {
     if !psx_rt::interrupts::is_stack_safe_handler_installed() {
         psx_rt::interrupts::install_vblank_counter();
     }
-    if config.time_handler {
+    if T::STATS && config.time_handler {
         // System clock / 8, free running, no interrupt: wraps after about
         // 15.5 ms.
         timers::set_mode(Timer::Timer2, psx_hw::timers::mode::clock_source(2));
@@ -517,7 +547,7 @@ fn uninstall_in<T: Transport>() -> Option<Cd> {
 /// does not disturb it: the registration is with the dispatcher, not the vector.
 /// Returns `false` when it could not: an audio lease holds the controller. Polled commands may run whenever no request
 /// is queued or active and [`is_idle`] reads true: with
-/// [`IrqMaskPolicy::OnlyWhileBusy`] the CD interrupt source is closed then.
+/// [`crate::IrqMaskPolicy::OnlyWhileBusy`] the CD interrupt source is closed then.
 #[must_use]
 pub fn ensure_installed(config: Config) -> bool {
     ensure_in::<Full>(config)
@@ -529,7 +559,7 @@ fn ensure_in<T: Transport>(config: Config) -> bool {
         // The handler stays registered whatever calls `install_vblank_counter`.
         return true;
     }
-    if with::<T, _>(|engine| engine.owner()) == Owner::Audio {
+    if T::LEASE && with::<T, _>(|engine| engine.owner()) == Owner::Audio {
         return false;
     }
     // SAFETY: a token is a logic guard (see `psx_io::periph`). The caller keeps
@@ -856,5 +886,95 @@ pub mod single {
     /// Start the longest-handler measurement over.
     pub fn reset_max_irq_ticks() {
         with_engine(|engine| engine.reset_max_irq_ticks());
+    }
+}
+
+// ------------------------------------------------------------ lean transfer
+
+/// The smallest transport, for a program that reads one request at a time and wants neither
+/// counters nor tickets ([`LeanEngine`]): a Counter-Strike-style streamer that starts a read,
+/// asks once a frame whether it is done, and cancels or waits for the drive before polled reads.
+/// Everything [`single`] does not need is gone as well: no `PSX_CD_STATS`, no handler timing,
+/// no ticket records. A program uses this module, [`single`] or the crate root, not two of
+/// them: each registers for the CD source with psx-rt's dispatcher and holds its own engine.
+///
+/// [`install`] and [`ensure_installed`] work as at the root. [`submit`] starts the request or
+/// refuses it with [`SubmitError::QueueFull`] while a transfer is running or the drive is still
+/// stopping; [`status`] says how it is going, and is `Busy` until the drive has stopped, so
+/// the polled reader may follow the first `Done` or `Failed`. [`stop_and_wait`] cancels and waits.
+pub mod lean {
+    use super::{install_in, stop_in, uninstall_in, with, Lean, Transport};
+    use crate::engine::{Config, Status};
+    use crate::request::{Request, SubmitError};
+    use psx_io::periph::Cd;
+
+    #[inline(always)]
+    fn with_engine<R>(f: impl FnOnce(&mut Lean) -> R) -> R {
+        with::<Lean, R>(f)
+    }
+
+    /// Take over the controller; see [`install`](fn@crate::install).
+    ///
+    /// # Errors
+    ///
+    /// The token comes back when the transport is already installed.
+    pub fn install(cd: Cd, config: Config) -> Result<(), Cd> {
+        install_in::<Lean>(cd, config)
+    }
+
+    /// Give the controller back to polled code; see [`uninstall`](fn@crate::uninstall).
+    #[must_use]
+    pub fn uninstall() -> Option<Cd> {
+        uninstall_in::<Lean>()
+    }
+
+    /// Install if not installed, taking the token itself; see
+    /// [`ensure_installed`](fn@crate::ensure_installed).
+    #[must_use]
+    pub fn ensure_installed(config: Config) -> bool {
+        super::ensure_in::<Lean>(config)
+    }
+
+    /// Cancel the read and wait for the drive to stop; see
+    /// [`stop_and_wait`](fn@crate::stop_and_wait).
+    #[must_use]
+    pub fn stop_and_wait(max_vblanks: u32) -> bool {
+        stop_in::<Lean>(max_vblanks)
+    }
+
+    /// Start a read now. `request` is read as for [`single::submit`](super::single::submit):
+    /// [`Request::with_byte_len`] bounds the last sector, priorities and resumes have no effect.
+    ///
+    /// # Errors
+    ///
+    /// [`SubmitError::QueueFull`] while a transfer is running or the drive is still stopping,
+    /// and before [`install`]; the other variants as for any request.
+    pub fn submit(request: Request) -> Result<(), SubmitError> {
+        with_engine(|engine| engine.submit(request).map(drop))
+    }
+
+    /// Cancel the running read, if any; it stops at the next sector and the drive pauses.
+    pub fn cancel() {
+        with_engine(<Lean as Transport>::cancel_all);
+    }
+
+    /// Where the transfer is; see [`Engine::status`](crate::Engine::status). Also fails a
+    /// transfer that has made no progress for [`Config::timeout_vblanks`], so call it once per
+    /// frame while a read is in flight.
+    #[must_use]
+    pub fn status() -> Status {
+        with_engine(|engine| engine.status())
+    }
+
+    /// Whether the drive is stopped and no read holds it.
+    #[must_use]
+    pub fn is_idle() -> bool {
+        with_engine(|engine| engine.is_idle())
+    }
+
+    /// Requests accepted so far; see [`submissions`](fn@crate::submissions).
+    #[must_use]
+    pub fn submissions() -> u32 {
+        with_engine(|engine| engine.submissions())
     }
 }
