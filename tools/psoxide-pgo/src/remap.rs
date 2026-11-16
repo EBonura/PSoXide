@@ -39,8 +39,12 @@ const REFUSE_GONE_ABOVE: f64 = 0.01;
 /// may carry lines the build has no code on (a closing brace its DWARF never names), and
 /// they need their partners.
 const TAIL: u32 = 16;
-/// The most table cells one function's line alignment may use.
+/// The most table cells one function's line alignment may use with the full table (exact
+/// traceback, the form every edit under this size has always used).
 const MAX_CELLS: usize = 16_000_000;
+/// Above `MAX_CELLS` the alignment runs in linear memory (Hirschberg), which takes time in
+/// proportion to the cells: this many at most (a few seconds), so a runaway edit still stops.
+const MAX_CELLS_LINEAR: usize = 2_000_000_000;
 
 /// Where a function sits in the source of one build.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -730,8 +734,21 @@ fn align(old: &[String], new: &[String]) -> Result<Vec<Option<usize>>, String> {
         .count();
     let (a, b) = (&old[prefix..n - suffix], &new[prefix..m - suffix]);
     let (rows, cols) = (a.len(), b.len());
-    if (rows + 1) * (cols + 1) > MAX_CELLS {
+    let cells = (rows + 1).saturating_mul(cols + 1);
+    if cells > MAX_CELLS_LINEAR {
         return Err(format!("{rows} lines against {cols} are too many to align"));
+    }
+    if cells > MAX_CELLS {
+        // A large edit inside one function (a block of hundreds of lines deleted from a
+        // function of thousands): the same longest common subsequence, found without the
+        // table. Which of several equally long subsequences it picks may differ from the
+        // table's traceback; edits under the old cap never come here.
+        let mut matched = Vec::new();
+        hirschberg(a, b, 0, 0, &mut matched);
+        let mut pairs: Vec<(usize, usize)> = (0..prefix).map(|i| (i, i)).collect();
+        pairs.extend(matched.into_iter().map(|(i, j)| (prefix + i, prefix + j)));
+        pairs.extend((0..suffix).map(|k| (n - suffix + k, m - suffix + k)));
+        return Ok(pairs_to_map(&pairs, n, m));
     }
     let width = cols + 1;
     let mut table = vec![0u32; (rows + 1) * width];
@@ -759,6 +776,12 @@ fn align(old: &[String], new: &[String]) -> Result<Vec<Option<usize>>, String> {
     }
     pairs.extend((0..suffix).map(|k| (n - suffix + k, m - suffix + k)));
 
+    Ok(pairs_to_map(&pairs, n, m))
+}
+
+/// The line map of an alignment given as its equal-line pairs (increasing in both): paired
+/// lines map to each other, and between two pairs the rewritten run pairs by position.
+fn pairs_to_map(pairs: &[(usize, usize)], n: usize, m: usize) -> Vec<Option<usize>> {
     let mut map = vec![None; n];
     let mut edge = (0usize, 0usize);
     for &(i, j) in pairs.iter().chain(std::iter::once(&(n, m))) {
@@ -771,7 +794,54 @@ fn align(old: &[String], new: &[String]) -> Result<Vec<Option<usize>>, String> {
         }
         edge = (i + 1, j + 1);
     }
-    Ok(map)
+    map
+}
+
+/// The pairs `(i, j)` of one longest common subsequence of `a` and `b` (their indices offset
+/// by `ai` and `bj`), in linear memory: split `a` in half, find where the best subsequence
+/// crosses it by one forward and one backward pass of the length table's last row, recurse
+/// on the two halves.
+fn hirschberg(a: &[String], b: &[String], ai: usize, bj: usize, out: &mut Vec<(usize, usize)>) {
+    if a.is_empty() || b.is_empty() {
+        return;
+    }
+    if a.len() == 1 {
+        if let Some(j) = b.iter().position(|line| *line == a[0]) {
+            out.push((ai, bj + j));
+        }
+        return;
+    }
+    let mid = a.len() / 2;
+    let b_forward: Vec<&String> = b.iter().collect();
+    let b_backward: Vec<&String> = b.iter().rev().collect();
+    let a_forward: Vec<&String> = a[..mid].iter().collect();
+    let a_backward: Vec<&String> = a[mid..].iter().rev().collect();
+    let forward = last_row(&a_forward, &b_forward);
+    let backward = last_row(&a_backward, &b_backward);
+    let split = (0..=b.len())
+        .max_by_key(|&j| (forward[j] + backward[b.len() - j], std::cmp::Reverse(j)))
+        .unwrap_or(0);
+    hirschberg(&a[..mid], &b[..split], ai, bj, out);
+    hirschberg(&a[mid..], &b[split..], ai + mid, bj + split, out);
+}
+
+/// The last row of the longest-common-subsequence table of `a` against `b`: entry `j` is
+/// the length for the first `j` lines of `b`.
+fn last_row(a: &[&String], b: &[&String]) -> Vec<u32> {
+    let mut row = vec![0u32; b.len() + 1];
+    for line in a {
+        let mut diag = 0;
+        for (j, other) in b.iter().enumerate() {
+            let above = row[j + 1];
+            row[j + 1] = if line == other {
+                diag + 1
+            } else {
+                above.max(row[j])
+            };
+            diag = above;
+        }
+    }
+    row
 }
 
 #[cfg(test)]
@@ -885,6 +955,69 @@ fn step() {
             .filter(|l| !l.starts_with('#'))
             .map(str::to_string)
             .collect()
+    }
+
+    /// A long function with a block deleted from its middle: more cells than the table cap, so
+    /// it takes the linear-memory path, and every kept line still finds its partner.
+    #[test]
+    fn a_large_deletion_inside_one_long_function_aligns_in_one_step() {
+        let old: Vec<String> = (0..5200)
+            .map(|i| format!("step_{}(x{});", i, i % 7))
+            .collect();
+        let (cut_from, cut_to) = (1100, 2900);
+        let new: Vec<String> = old[..cut_from]
+            .iter()
+            .chain(&old[cut_to..])
+            .cloned()
+            .collect();
+        assert!(
+            (old.len() - 1) * (new.len() - 1) > MAX_CELLS,
+            "the case must exceed the table cap"
+        );
+        // The edit sits inside the lines the prefix and suffix do not strip.
+        let map = align(&old, &new).expect("a large edit aligns");
+        for (i, to) in map[..cut_from].iter().enumerate() {
+            assert_eq!(*to, Some(i), "line {i} before the cut");
+        }
+        for (k, to) in map[cut_to..].iter().enumerate() {
+            let i = cut_to + k;
+            assert_eq!(*to, Some(i - (cut_to - cut_from)), "line {i} after the cut");
+        }
+        assert!(
+            map[cut_from..cut_to].iter().all(Option::is_none),
+            "deleted lines have no partner"
+        );
+    }
+
+    /// The linear-memory form finds a longest common subsequence as long as the table's.
+    #[test]
+    fn the_linear_form_matches_the_table_on_random_edits() {
+        let mut x = 12345u32;
+        let mut next = || {
+            x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            x >> 16
+        };
+        for _ in 0..40 {
+            let old: Vec<String> = (0..60).map(|_| format!("l{}", next() % 12)).collect();
+            let new: Vec<String> = (0..50).map(|_| format!("l{}", next() % 12)).collect();
+            let mut pairs = Vec::new();
+            hirschberg(&old, &new, 0, 0, &mut pairs);
+            assert!(pairs.windows(2).all(|w| w[0].0 < w[1].0 && w[0].1 < w[1].1));
+            assert!(pairs.iter().all(|&(i, j)| old[i] == new[j]));
+            // Length from the table.
+            let (rows, cols) = (old.len(), new.len());
+            let mut t = vec![vec![0usize; cols + 1]; rows + 1];
+            for i in (0..rows).rev() {
+                for j in (0..cols).rev() {
+                    t[i][j] = if old[i] == new[j] {
+                        t[i + 1][j + 1] + 1
+                    } else {
+                        t[i + 1][j].max(t[i][j + 1])
+                    };
+                }
+            }
+            assert_eq!(pairs.len(), t[0][0]);
+        }
     }
 
     #[test]
