@@ -224,17 +224,27 @@ __psx_rt_exception_handler:
 
     b     8f
     nop
-    # GPUSTAT bit 24 is down for a queued GP1 word. DMA 2 idle and GPUSTAT
-    # bits 26 and 28 up on two edges in a row means a VBlank passed with the GPU
-    # idle and nothing arriving, so the frame is drawn and its GP0(1Fh) was lost
-    # (an FPGA PSX core can miss it): apply the word and count it. Such a flip
-    # costs one VBlank more than one that sees bit 24.
+    # GPUSTAT bit 24 is down for a queued GP1 word. A target that never raises it
+    # (an FPGA PSX core that loses GP0(1Fh), PCSX-ReARMed) is told apart from a
+    # GPU still drawing by the test OpenBIOS's GPU_sync and PSn00bSDK's DrawSync
+    # use: DMA 2 not busy and GPUSTAT bit 26 (ready for DMA block) up. Bit 28
+    # idles early on silicon and is not enough alone; bit 26 can pulse up between
+    # the primitives of a chain, so the pair must hold on {confirm_reads} reads in a row (a
+    # few tens of microseconds, far longer than any gap between primitives) and
+    # on any read that fails the wait ends here and the word stays queued. Held
+    # on the first edge that sees it, not the second: the frame is drawn, so the
+    # flip applies now and is counted. The loop counter lives in
+    # `__psx_rt_flip_quiet`.
 41:
+    lui   $26, %hi(__psx_rt_flip_quiet)
+    addiu $27, $zero, {confirm_reads}
+    sw    $27, %lo(__psx_rt_flip_quiet)($26)
+45:
     lui   $26, {io_hi}
-    lw    $26, {gp1}($26)
-    lui   $27, 0x1400
-    and   $26, $26, $27
-    bne   $26, $27, 8f
+    lw    $27, {gp1}($26)
+    lui   $26, 0x1400
+    and   $27, $27, $26
+    bne   $27, $26, 8f
     nop
     lui   $26, {io_hi}
     lw    $27, {gpu_chcr}($26)
@@ -243,16 +253,11 @@ __psx_rt_exception_handler:
     andi  $27, $27, 1
     bnez  $27, 8f
     nop
-    lui   $26, %hi(__psx_rt_vblank_count)
-    lw    $27, %lo(__psx_rt_vblank_count)($26)
     lui   $26, %hi(__psx_rt_flip_quiet)
-    lw    $26, %lo(__psx_rt_flip_quiet)($26)
+    lw    $27, %lo(__psx_rt_flip_quiet)($26)
     nop
-    addiu $26, $26, 1
-    beq   $26, $27, 43f
-    nop
-    lui   $26, %hi(__psx_rt_flip_quiet)
-    b     8f
+    addiu $27, $27, -1
+    bnez  $27, 45b
     sw    $27, %lo(__psx_rt_flip_quiet)($26)
 43:
     lui   $26, %hi(__psx_rt_draw_done_fallbacks)
@@ -545,6 +550,7 @@ __psx_rt_present_kick:
     dma_dir_lo = const gpu::gp1::dma_direction(gpu::DmaDirection::CpuToGp0 as u32) & 0xFFFF,
     gpu_madr = const (dma::CHANNEL_BASE + dma::CHANNEL_STRIDE * dma::channel::GPU + dma::MADR) & 0xFFFF,
     gpu_bcr = const (dma::CHANNEL_BASE + dma::CHANNEL_STRIDE * dma::channel::GPU + dma::BCR) & 0xFFFF,
+    confirm_reads = const 64,
     gpu_chcr = const (dma::CHANNEL_BASE + dma::CHANNEL_STRIDE * dma::channel::GPU + dma::CHCR) & 0xFFFF,
     chcr_start_shift = const dma::CHCR_START.trailing_zeros(),
     chcr_hi = const dma::CHCR_LINKED_LIST_TO_DEVICE >> 16,
@@ -719,15 +725,14 @@ static mut __psx_rt_fault_badvaddr: u32 = 0;
 #[no_mangle]
 pub(crate) static mut __psx_rt_pending_gp1: u32 = 0;
 
-/// VBlank counts at which the draw-done fallback last saw the GPU idle and
-/// ready with a queued flip waiting (`u32::MAX` = never): two edges in a row
-/// make the fallback fire. In `.data` like the other counters.
+/// The draw-done fallback's confirmation loop counter (the reads left before it
+/// fires). Handler scratch; In `.data` like the other counters.
 #[cfg_attr(target_arch = "mips", link_section = ".data")]
 #[no_mangle]
-static mut __psx_rt_flip_quiet: u32 = u32::MAX;
+static mut __psx_rt_flip_quiet: u32 = 0;
 
 /// Times the VBlank handler acted on a frame without seeing GPUSTAT bit 24:
-/// DMA 2 idle and GPUSTAT bits 26 and 28 up on two edges in a row, with a
+/// DMA 2 idle and GPUSTAT bits 26 and 28 up on a run of reads at one edge, with a
 /// queued flip waiting. A GPU that raises bit 24 for every
 /// closing GP0(1Fh) (a PS1) leaves it at 0; an FPGA PSX core that loses some of
 /// them counts them here.

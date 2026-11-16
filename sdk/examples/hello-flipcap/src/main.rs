@@ -76,9 +76,10 @@ fn measure(run: impl FnOnce() -> u32) -> Phase {
 /// present stalls (a flip that never landed).
 fn queued(gpu: &mut Gpu, fb: &mut DoubleBuffer, presenter: &mut Presenter) -> u32 {
     let before = present::stats().recovery_count;
-    for _ in 0..FLIPS {
+    for n in 0..FLIPS {
         presenter.begin_frame(fb);
-        fb.clear(gpu, (8, 8, 24));
+        // A different picture every frame, so a frame-hash replay can count the flips.
+        fb.clear(gpu, (8, 8, 24 + (n % 8) as u8 * 12));
         presenter.present_drawn(fb);
     }
     present::wait_idle();

@@ -35,8 +35,9 @@ word is zero and channel 2 is idle, it acknowledges bit 24, starts the walk, mov
 display word to the flip word and empties the slot. The kick is one assembler macro assembled twice:
 into the handler, and into `__psx_rt_present_kick`, which the thread calls with CPU interrupts
 masked (at submit and in every wait). The flip is the handler's alone, so it always lands in the
-blanking interval. When bit 24 never rises (an FPGA core that loses GP0(1Fh)) the handler flips once
-channel 2 and the GPU have been idle for two edges in a row and counts it
+blanking interval. When bit 24 never rises (an FPGA core that loses GP0(1Fh)) the handler flips at
+the first edge where channel 2 is idle and GPUSTAT bits 26 and 28 stay up over a run of 64 reads,
+and counts it
 (`interrupts::draw_done_fallback_count`).
 
 Which word each side writes, and why a VBlank between any two thread instructions cannot lose a
