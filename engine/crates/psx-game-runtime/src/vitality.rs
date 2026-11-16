@@ -1264,17 +1264,56 @@ impl CombatStance {
 
     /// Attempt a voluntary swap.
     pub fn request_swap(&mut self, config: &CombatStanceConfig) -> Option<StanceSwap> {
-        if !self.can_swap() {
+        if !self.try_swap(config.swap_cooldown_ticks) {
             return None;
         }
-        self.swap_to(self.inactive(), config);
         Some(StanceSwap::Voluntary)
     }
 
-    fn swap_to(&mut self, channel: VitalityChannelId, config: &CombatStanceConfig) {
+    /// Attempt a voluntary swap that arms `cooldown_ticks` of cooldown.
+    ///
+    /// The same rule as [`Self::request_swap`] for a caller that holds the
+    /// cooldown rather than a whole config (the enemies share the player's
+    /// cooked cooldown this way).
+    pub fn try_swap(&mut self, cooldown_ticks: u16) -> bool {
+        if !self.can_swap() {
+            return false;
+        }
+        self.swap_to(self.inactive(), cooldown_ticks);
+        true
+    }
+
+    fn swap_to(&mut self, channel: VitalityChannelId, cooldown_ticks: u16) {
         self.active = channel;
-        self.swap_cooldown = config.swap_cooldown_ticks;
+        self.swap_cooldown = cooldown_ticks;
         self.swap_elapsed = 0;
+    }
+
+    /// Count `delta` ticks off the swap cooldown.
+    pub fn cool_down(&mut self, delta: u16) {
+        self.swap_cooldown = self.swap_cooldown.saturating_sub(delta);
+    }
+
+    /// Advance the swap presentation clock by `delta` ticks.
+    pub fn advance_swap(&mut self, delta: u16) {
+        self.swap_elapsed = self.swap_elapsed.saturating_add(delta);
+    }
+
+    /// End any swap presentation, keeping the side and the cooldown.
+    pub fn settle(&mut self) {
+        self.swap_elapsed = u16::MAX;
+    }
+
+    /// Test hook: force the active side without a swap.
+    #[cfg(test)]
+    pub(crate) fn set_active(&mut self, channel: VitalityChannelId) {
+        self.active = channel;
+    }
+
+    /// Test hook: force the remaining swap cooldown.
+    #[cfg(test)]
+    pub(crate) fn set_swap_cooldown(&mut self, ticks: u16) {
+        self.swap_cooldown = ticks;
     }
 
     /// Route one incoming attack. Only the active pool is damaged; the
@@ -1314,7 +1353,7 @@ impl CombatStance {
             // state at all. It still costs the longer recovery delay.
             self.regen_delay[active] = config.broken_regen_delay_ticks;
             if !result.defeated {
-                self.swap_to(self.inactive(), config);
+                self.swap_to(self.inactive(), config.swap_cooldown_ticks);
                 result.forced_swap = true;
             }
         }
@@ -1332,8 +1371,8 @@ impl CombatStance {
         config: &CombatStanceConfig,
         regen_bonus_q12: u16,
     ) {
-        self.swap_cooldown = self.swap_cooldown.saturating_sub(1);
-        self.swap_elapsed = self.swap_elapsed.saturating_add(1);
+        self.cool_down(1);
+        self.advance_swap(1);
 
         let inactive = self.inactive();
         let index = inactive.index();
