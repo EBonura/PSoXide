@@ -70,8 +70,7 @@ game that draws textured rectangles after a blended primitive can see it.
   Timings): 256, 512 and 640-pixel modes get their full picture, and a
   picture offset moves by whole pixels of the current width. 320-pixel
   modes are unchanged. alttp-psx (256 pixels) is the one game this moves.
-- **`wait_idle`** also waits for a frame handed to `psx_rt::present` when
-  the `present-queue` feature is on.
+- **`wait_idle`** also waits for a frame handed to `psx_rt::present`.
 - **Recovered hangs are counted**: `psx_gpu::recovery_stats()`.
 - **Removed outright** (no user in any game's main): the
   `ot-window-insert-coalescing` feature and `coalesce_scoped_texture_windows`,

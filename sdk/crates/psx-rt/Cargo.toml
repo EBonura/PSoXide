@@ -65,9 +65,6 @@ scratchpad-window = []
 # For development and test builds; one `b` in the fault path, nothing on
 # the interrupt path.
 strict-faults = []
-# No effect: the present queue (`present`) is part of every build. Kept so a manifest that still
-# names it resolves; it goes with the old present entry points.
-present-queue = []
 # Register psx-rt's interrupt-masking critical section as the
 # `critical-section` crate's implementation (for dependencies that use that
 # crate). A program links at most one implementation, so this is opt-in.

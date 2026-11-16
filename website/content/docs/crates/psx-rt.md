@@ -10,7 +10,7 @@ Use `psx-rt` in every bare-metal program to supply the entry point, panic handli
 
 ## How the crate is organized
 
-`Peripherals` is the token set for the GPU and SPU DMA channels, the CD-ROM controller and the controller port; `Peripherals::take()` returns it once and `None` after that. `bios` and `tty` expose target-side kernel calls and debug text. `interrupts` owns interrupt and VBlank helpers, including queued display flips, and `present` holds the VBlank-kicked present queue behind the `present-queue` feature. `cache` handles instruction-cache maintenance; `scratchpad` provides regions and scoped scratchpad stacks. `heap` is available with `alloc`. Internal `mem` and `builtins` modules implement the memory routines and corrected software 64-bit arithmetic used on the target.
+`Peripherals` is the token set for the GPU and SPU DMA channels, the CD-ROM controller and the controller port; `Peripherals::take()` returns it once and `None` after that. `bios` and `tty` expose target-side kernel calls and debug text. `interrupts` owns interrupt and VBlank helpers, including queued display flips, and `present` holds the VBlank-kicked present queue, part of every build. `cache` handles instruction-cache maintenance; `scratchpad` provides regions and scoped scratchpad stacks. `heap` is available with `alloc`. Internal `mem` and `builtins` modules implement the memory routines and corrected software 64-bit arithmetic used on the target.
 
 ## Integration notes
 
