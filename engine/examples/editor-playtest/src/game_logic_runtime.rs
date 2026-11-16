@@ -21,7 +21,7 @@
 use super::*;
 use psx_game_runtime::combat::{self, MeleeArc, WorldCombatCapsule};
 use psx_game_runtime::destructibles::{DamageChannel, DamageOutcome};
-use psx_game_runtime::entities::{GameEntityState, MeleeArcStats};
+use psx_game_runtime::entities::{DeferredGameEntityAttack, GameEntityState, MeleeArcStats};
 use psx_game_runtime::model_rendering as mr;
 use psx_game_runtime::projectiles::{
     CombatTeam, ProjectileImpactKind, ProjectileImpacts, ProjectileSpawn, ProjectileTarget,
@@ -433,6 +433,45 @@ pub(super) fn game_entity_for_instance(instance: u16) -> Option<usize> {
         .position(|record| record.model_instance == instance)
 }
 
+/// Who fired a volley. Energy and the release latches still live in two
+/// tables, the player's [`Combatant`] and the entity table.
+#[derive(Clone, Copy)]
+pub(super) enum Shooter {
+    /// The player character.
+    Player,
+    /// An entity's ranged attack token.
+    Entity(DeferredGameEntityAttack),
+}
+
+/// One shooter's authored projectile emitters for this tick. Today's
+/// per-shooter differences are fields here, not branches in the release.
+#[derive(Clone, Copy)]
+pub(super) struct Volley {
+    pub(super) shooter: Shooter,
+    pub(super) capsules: &'static [psx_level::CombatCapsuleRecord],
+    pub(super) action: psx_level::CharacterAnimationAction,
+    pub(super) pose: Option<psx_game_runtime::actor_pose::ActorPoseSnapshot>,
+    /// Frame of the event clock the release windows are read at.
+    pub(super) frame: u16,
+    /// Emitters already consumed this attack.
+    pub(super) released: u16,
+    /// Aim point every bolt flies toward.
+    pub(super) target: [i32; 3],
+    pub(super) room: RoomIndex,
+    pub(super) team: CombatTeam,
+    pub(super) owner: u16,
+    /// One channel for every bolt; `None` keeps each emitter's own.
+    pub(super) channel: Option<psx_game_runtime::projectiles::ProjectileDamageChannel>,
+    /// The shooter's outgoing-damage boons.
+    pub(super) modifiers: VitalityModifiers,
+    /// Bolt look derived from the emitter's authored style.
+    pub(super) visual: fn(ProjectileVisualStyle) -> ProjectileVisualStyle,
+    /// A muzzle this point cannot see is consumed without firing.
+    pub(super) sight_from: Option<RoomPoint>,
+    /// Keep the sub-unit velocity remainder of the aim.
+    pub(super) precise: bool,
+}
+
 /// The player as a defender for one tick, frozen before any attack resolves.
 #[derive(Clone, Copy)]
 struct PlayerDefence {
@@ -597,13 +636,7 @@ impl Playtest {
                 // An authored ranged attack never falls through to the legacy
                 // body-radius melee arc, including frames outside its release
                 // window and pool-full retries.
-                self.release_enemy_projectiles(
-                    ctx,
-                    attack,
-                    attacker_capsules,
-                    attacker_pose,
-                    player,
-                );
+                self.release_enemy_projectiles(ctx, attack, attacker_capsules, attacker_pose);
                 continue;
             }
             if player.invulnerable {
@@ -998,83 +1031,181 @@ impl Playtest {
     fn release_enemy_projectiles(
         &mut self,
         ctx: &Ctx,
-        attack: psx_game_runtime::entities::DeferredGameEntityAttack,
-        attacker_capsules: &[psx_level::CombatCapsuleRecord],
+        attack: DeferredGameEntityAttack,
+        attacker_capsules: &'static [psx_level::CombatCapsuleRecord],
         attacker_pose: Option<psx_game_runtime::actor_pose::ActorPoseSnapshot>,
-        player: &PlayerDefence,
     ) {
-        let mut released = self
-            .game_entities
-            .deferred_projectile_release_mask(attack)
-            .unwrap_or(u16::MAX);
-        while let Some((emitter, release)) = combat::authored_projectile_release_pending(
-            attacker_capsules,
-            attack.action(),
-            attacker_pose,
+        let entity = attack.entity();
+        let Some(target) = self.game_entities.ranged_target(entity) else {
+            return;
+        };
+        self.release_projectiles(
+            ctx,
+            Volley {
+                shooter: Shooter::Entity(attack),
+                capsules: attacker_capsules,
+                action: attack.action(),
+                pose: attacker_pose,
+                frame: attacker_pose.map_or(0, |pose| {
+                    (pose.phase_q12() >> 12).min(u32::from(u16::MAX)) as u16
+                }),
+                released: self
+                    .game_entities
+                    .deferred_projectile_release_mask(attack)
+                    .unwrap_or(u16::MAX),
+                target,
+                room: attack.room(),
+                team: CombatTeam::Enemy,
+                owner: entity.min(u16::MAX as usize) as u16,
+                channel: None,
+                modifiers: VitalityModifiers::IDENTITY,
+                visual: enemy_projectile_visual,
+                sight_from: None,
+                precise: true,
+            },
+        );
+    }
+
+    /// Fire every authored emitter of `volley` whose release window the
+    /// frame has reached, until the shooter runs out of energy or the pool is
+    /// full. The one release path for every shooter: what differs between
+    /// them today is data on the [`Volley`].
+    pub(super) fn release_projectiles(&mut self, ctx: &Ctx, volley: Volley) {
+        let mut released = volley.released;
+        while let Some((emitter, release)) = combat::authored_projectile_release_pending_at_frame(
+            volley.capsules,
+            volley.action,
+            volley.pose,
             released,
+            volley.frame,
         ) {
-            if !self.game_entities.can_fire_energy(attack.entity()) {
+            if let (Some(origin), Some(world_rt)) = (volley.sight_from, self.world_rt.as_mut()) {
+                let muzzle = RoomPoint::new(
+                    release.position[0],
+                    release.position[1],
+                    release.position[2],
+                );
+                if !world_rt.melee_segment_clear(origin, muzzle, &[], &self.destructibles) {
+                    self.commit_shot(volley.shooter, emitter);
+                    released |= 1u16 << emitter;
+                    telemetry::debug_log("player projectile:muzzle-blocked");
+                    continue;
+                }
+            }
+            if !self.shooter_can_shoot(volley.shooter) {
                 break;
             }
-            let velocity = self.game_entities.ranged_velocity(
-                attack.entity(),
-                release.position,
-                release.speed,
+            let damage_channel = volley.channel.unwrap_or(release.damage_channel);
+            let damage = volley.modifiers.outgoing_damage(
+                match damage_channel {
+                    psx_game_runtime::projectiles::ProjectileDamageChannel::Horizon => {
+                        VitalityChannelId::One
+                    }
+                    psx_game_runtime::projectiles::ProjectileDamageChannel::Zenith => {
+                        VitalityChannelId::Two
+                    }
+                },
+                release.damage,
             );
             let spawn = ProjectileSpawn {
                 position: release.position,
-                velocity,
+                velocity: psx_game_runtime::projectiles::velocity_toward(
+                    release.position,
+                    volley.target,
+                    release.speed,
+                ),
                 radius: release.radius,
-                damage: release.damage,
+                damage,
+                // The receiving actor evaluates the visible interrupt window.
                 poise_damage: release.poise_damage,
                 lifetime_ticks: release.lifetime_ticks,
-                room: attack.room(),
-                team: CombatTeam::Enemy,
-                owner: attack.entity().min(u16::MAX as usize) as u16,
+                room: volley.room,
+                team: volley.team,
+                owner: volley.owner,
                 tint_rgb: release.tint_rgb,
-                damage_channel: release.damage_channel,
-                visual: enemy_projectile_visual(release.visual),
+                damage_channel,
+                visual: (volley.visual)(release.visual),
             };
-            let Some(target) = self.game_entities.ranged_target(attack.entity()) else {
-                break;
+            let spawned = if volley.precise {
+                self.combat_projectiles
+                    .spawn_toward(spawn, volley.target, release.speed)
+            } else {
+                self.combat_projectiles.spawn(spawn)
             };
-            if self
-                .combat_projectiles
-                .spawn_toward(spawn, target, release.speed)
-                .is_err()
-            {
+            if spawned.is_err() {
                 // Retry on a later retained pose; never consume a shot
                 // that the bounded pool could not hold.
                 break;
             }
+            self.shooter_spend_shot(volley.shooter);
+            self.duel_log_shot(ctx, volley.shooter);
             let _ = self.combat_projectile_impacts.spawn_muzzle(&spawn);
-            self.game_entities.spend_shot_energy(attack.entity());
-            if self.duel.active {
-                duel::log_values(
-                    "duel:shot",
-                    &[
-                        ctx.sim_tick.as_u32() - self.duel.started_tick(),
-                        1,
-                        u32::from(self.game_entities.energy(attack.entity())),
-                    ],
-                );
-            }
-            telemetry::debug_log("enemy projectile:release");
-            #[cfg(feature = "emulator-telemetry")]
-            self.debug_log_enemy_shot(&spawn, player);
-            #[cfg(not(feature = "emulator-telemetry"))]
-            let _ = player;
-            self.queue_gameplay_sfx(LevelGameplaySfxEvent::ProjectileLaunch);
-            let _ = self
-                .game_entities
-                .commit_deferred_projectile(attack, emitter);
+            self.commit_shot(volley.shooter, emitter);
             released |= 1u16 << emitter;
+            self.queue_gameplay_sfx(LevelGameplaySfxEvent::ProjectileLaunch);
+            match volley.shooter {
+                Shooter::Player => telemetry::debug_log("player projectile:release"),
+                Shooter::Entity(_) => {
+                    telemetry::debug_log("enemy projectile:release");
+                    #[cfg(feature = "emulator-telemetry")]
+                    self.debug_log_enemy_shot(ctx, &spawn);
+                }
+            }
         }
+    }
+
+    fn shooter_can_shoot(&self, shooter: Shooter) -> bool {
+        match shooter {
+            Shooter::Player => self.player.flow.can_shoot(),
+            Shooter::Entity(attack) => self.game_entities.can_fire_energy(attack.entity()),
+        }
+    }
+
+    fn shooter_spend_shot(&mut self, shooter: Shooter) {
+        match shooter {
+            Shooter::Player => {
+                let _ = self.player.flow.spend_shot();
+            }
+            Shooter::Entity(attack) => self.game_entities.spend_shot_energy(attack.entity()),
+        }
+    }
+
+    /// Consume `emitter` so it cannot fire again this attack.
+    fn commit_shot(&mut self, shooter: Shooter, emitter: u8) {
+        match shooter {
+            Shooter::Player => self.ranged_ready.released |= 1u16 << emitter,
+            Shooter::Entity(attack) => {
+                let _ = self
+                    .game_entities
+                    .commit_deferred_projectile(attack, emitter);
+            }
+        }
+    }
+
+    /// Duel trace: a shot left the muzzle, with the shooter's energy after
+    /// paying for it. Shooter 0 is the player, 1 the enemy.
+    fn duel_log_shot(&self, ctx: &Ctx, shooter: Shooter) {
+        if !self.duel.active {
+            return;
+        }
+        let (side, energy) = match shooter {
+            Shooter::Player => (0, self.player.flow.energy),
+            Shooter::Entity(attack) => (1, self.game_entities.energy(attack.entity())),
+        };
+        duel::log_values(
+            "duel:shot",
+            &[
+                ctx.sim_tick.as_u32() - self.duel.started_tick(),
+                side,
+                u32::from(energy),
+            ],
+        );
     }
 
     /// Emulator telemetry: an enemy shot with the player's hurtbox.
     #[cfg(feature = "emulator-telemetry")]
-    fn debug_log_enemy_shot(&self, spawn: &ProjectileSpawn, player: &PlayerDefence) {
+    fn debug_log_enemy_shot(&self, ctx: &Ctx, spawn: &ProjectileSpawn) {
+        let player = self.player_defence(ctx);
         let hurt = player
             .capsules
             .iter()

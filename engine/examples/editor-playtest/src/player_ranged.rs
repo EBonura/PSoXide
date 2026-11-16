@@ -1,10 +1,19 @@
 //! Player ranged weapons share the enemy projectile pool, swept world traces,
 //! authored release frames and stance-aware damage. Lock-on never readies a gun.
 use super::*;
-use psx_game_runtime::{
-    combat,
-    projectiles::{self, CombatTeam, ProjectileSpawn},
-};
+use psx_game_runtime::projectiles::{self, CombatTeam, ProjectileVisualStyle};
+
+/// Jade crystal charge and bolt, Aletha's cannon.
+pub(super) fn player_projectile_visual(mut visual: ProjectileVisualStyle) -> ProjectileVisualStyle {
+    visual.crystal = true;
+    visual.core_rgb = [224, 255, 248];
+    visual.glow_rgb = [96, 240, 192];
+    visual.glow_scale_q8 = 512;
+    visual.length_ticks = 3;
+    visual.trail_segments = 4;
+    visual.impact_rgb = [144, 248, 208];
+    visual
+}
 
 impl Playtest {
     pub(super) fn player_has_ranged_weapon(&self) -> bool {
@@ -135,74 +144,26 @@ impl Playtest {
             self.player_action_speed_q8(&c, PlayerAnim::RangedAttack),
             c.action_frame_range(CharacterAnimationAction::RangedAttack),
         );
-        while let Some((emitter, release)) = combat::authored_projectile_release_pending_at_frame(
-            records,
-            CharacterAnimationAction::RangedAttack,
-            Some(*pose.pose()),
-            self.ranged_ready.released,
-            (phase >> 12).min(u32::from(u16::MAX)) as u16,
-        ) {
-            if let Some(world_rt) = self.world_rt.as_mut() {
-                let p = self.motor.position();
-                let origin = RoomPoint::new(p.x, p.y + c.height * 3 / 4, p.z);
-                let muzzle = RoomPoint::new(
-                    release.position[0],
-                    release.position[1],
-                    release.position[2],
-                );
-                if !world_rt.melee_segment_clear(origin, muzzle, &[], &self.destructibles) {
-                    self.ranged_ready.released |= 1u16 << emitter;
-                    telemetry::debug_log("player projectile:muzzle-blocked");
-                    continue;
-                }
-            }
-            let mut visual = release.visual;
-            visual.crystal = true;
-            visual.core_rgb = [224, 255, 248];
-            visual.glow_rgb = [96, 240, 192];
-            visual.glow_scale_q8 = 512;
-            visual.length_ticks = 3;
-            visual.trail_segments = 4;
-            visual.impact_rgb = [144, 248, 208];
-            if !self.player.flow.can_shoot() {
-                break;
-            }
-            let damage = self
-                .vitality_modifiers()
-                .outgoing_damage(VitalityChannelId::Two, release.damage);
-            let spawn = ProjectileSpawn {
-                position: release.position,
-                velocity: projectiles::velocity_toward(release.position, target, release.speed),
-                radius: release.radius,
-                damage,
-                // The receiving actor evaluates the visible interrupt window.
-                poise_damage: release.poise_damage,
-                lifetime_ticks: release.lifetime_ticks,
+        let p = self.motor.position();
+        self.release_projectiles(
+            ctx,
+            Volley {
+                shooter: Shooter::Player,
+                capsules: records,
+                action: CharacterAnimationAction::RangedAttack,
+                pose: Some(*pose.pose()),
+                frame: (phase >> 12).min(u32::from(u16::MAX)) as u16,
+                released: self.ranged_ready.released,
+                target,
                 room: self.room_index,
                 team: CombatTeam::Player,
                 owner: projectiles::NO_PROJECTILE_OWNER,
-                tint_rgb: release.tint_rgb,
-                damage_channel: projectiles::ProjectileDamageChannel::Zenith,
-                visual,
-            };
-            if self.combat_projectiles.spawn(spawn).is_err() {
-                break;
-            }
-            self.player.flow.spend_shot();
-            if self.duel.active {
-                duel::log_values(
-                    "duel:shot",
-                    &[
-                        ctx.sim_tick.as_u32() - self.duel.started_tick(),
-                        0,
-                        u32::from(self.player.flow.energy),
-                    ],
-                );
-            }
-            let _ = self.combat_projectile_impacts.spawn_muzzle(&spawn);
-            self.ranged_ready.released |= 1u16 << emitter;
-            self.queue_gameplay_sfx(LevelGameplaySfxEvent::ProjectileLaunch);
-            telemetry::debug_log("player projectile:release");
-        }
+                channel: Some(projectiles::ProjectileDamageChannel::Zenith),
+                modifiers: self.vitality_modifiers(),
+                visual: player_projectile_visual,
+                sight_from: Some(RoomPoint::new(p.x, p.y + c.height * 3 / 4, p.z)),
+                precise: false,
+            },
+        );
     }
 }
