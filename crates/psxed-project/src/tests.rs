@@ -285,14 +285,16 @@ fn an_old_project_folds_enemy_health_and_poise_into_combat_stats() {
     );
     assert_eq!(stats.opposite_damage_q12, 5120);
     assert_eq!(character(enemy).enemy_behavior.unwrap().legacy_poise, None);
-    // An enemy with no block ran on the old enemy defaults.
-    let stats = character(bare_enemy).combat.unwrap();
+    // An enemy with no block ran on the old enemy defaults, and needs no
+    // record to keep them.
+    assert_eq!(character(bare_enemy).combat, None);
+    let stats = character(bare_enemy).combat_stats();
     assert_eq!(
         (stats.max_health, stats.max_health_secondary, stats.poise),
         (100, 100, 100)
     );
     // The player ran on the old constants: 100 per pool, poise 60.
-    assert_eq!(character(player).combat, Some(CombatStats::PLAYER));
+    assert_eq!(character(player).combat_stats(), CombatStats::PLAYER);
     assert_eq!(CombatStats::PLAYER.poise, 60);
     let NodeKind::CharacterController {
         settings: Some(settings),

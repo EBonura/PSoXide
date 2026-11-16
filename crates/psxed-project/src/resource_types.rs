@@ -2052,9 +2052,10 @@ pub struct CharacterResource {
     #[serde(default = "default_character_backstep_invulnerable_frames")]
     pub backstep_invulnerable_frames: u8,
     /// Health, poise, stance multipliers and energy: the one combat record
-    /// every character carries, player or enemy. `None` only in a project
-    /// written before the record existed; loading fills it in (see
-    /// [`CombatStats::legacy`]) and [`Self::combat_stats`] reads it.
+    /// every character carries, player or enemy. `None` means the role's
+    /// starting numbers ([`CombatStats::legacy`]); a project written before
+    /// the record existed gets its old enemy health and poise folded in here
+    /// on load. Read it through [`Self::combat_stats`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub combat: Option<CombatStats>,
     /// Authored stance tuning; see CombatStanceConfig.
@@ -2202,9 +2203,17 @@ impl CharacterResource {
         })
     }
 
-    /// Fill in [`Self::combat`] from the pre-record fields, and clear them.
+    /// Fill in [`Self::combat`] from the pre-record fields when a project
+    /// wrote any, and clear them. Without them `None` already reads as the
+    /// role's starting numbers, so it stays `None`.
     pub(crate) fn migrate_combat_stats(&mut self) {
-        self.combat = Some(self.combat_stats());
+        if self.combat.is_none()
+            && self
+                .enemy_behavior
+                .is_some_and(|enemy| enemy.has_legacy_combat())
+        {
+            self.combat = Some(self.combat_stats());
+        }
         if let Some(enemy) = &mut self.enemy_behavior {
             enemy.clear_legacy_combat();
         }
@@ -2514,6 +2523,13 @@ fn legacy_u16<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Optio
 }
 
 impl EnemyBehaviorSettings {
+    /// Whether a project wrote the pre-[`CombatStats`] health or poise here.
+    pub(crate) fn has_legacy_combat(&self) -> bool {
+        self.legacy_poise.is_some()
+            || self.legacy_max_health.is_some()
+            || self.legacy_max_health_secondary.is_some()
+    }
+
     /// Forget the pre-[`CombatStats`] health and poise once they are folded.
     pub(crate) fn clear_legacy_combat(&mut self) {
         self.legacy_poise = None;
@@ -2847,9 +2863,10 @@ pub struct CharacterControllerSettings {
     #[serde(default)]
     pub enemy: Option<EnemyBehaviorSettings>,
     /// Health, poise, stance multipliers and energy: the one combat record
-    /// every character carries, player or enemy. `None` only in a project
-    /// written before the record existed; loading fills it in (see
-    /// [`CombatStats::legacy`]) and [`Self::combat_stats`] reads it.
+    /// every character carries, player or enemy. `None` means the role's
+    /// starting numbers ([`CombatStats::legacy`]); a project written before
+    /// the record existed gets its old enemy health and poise folded in here
+    /// on load. Read it through [`Self::combat_stats`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub combat: Option<CombatStats>,
     /// Authored stance tuning; see CombatStanceConfig.
@@ -2913,9 +2930,13 @@ impl CharacterControllerSettings {
             .unwrap_or_else(|| CombatStats::legacy(self.enemy.as_ref()))
     }
 
-    /// Fill in [`Self::combat`] from the pre-record fields, and clear them.
+    /// Fill in [`Self::combat`] from the pre-record fields when a project
+    /// wrote any, and clear them. Without them `None` already reads as the
+    /// role's starting numbers, so it stays `None`.
     pub(crate) fn migrate_combat_stats(&mut self) {
-        self.combat = Some(self.combat_stats());
+        if self.combat.is_none() && self.enemy.is_some_and(|enemy| enemy.has_legacy_combat()) {
+            self.combat = Some(self.combat_stats());
+        }
         if let Some(enemy) = &mut self.enemy {
             enemy.clear_legacy_combat();
         }
