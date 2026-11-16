@@ -816,7 +816,7 @@ impl Playtest {
                             impact.damage,
                             impact.poise_damage,
                         );
-                        self.combat_flow.shot_hit(opening && outcome.staggered);
+                        self.player.flow.shot_hit(opening && outcome.staggered);
                         if opening && outcome.staggered {
                             telemetry::debug_log("flow:enemy-shot-interrupt");
                             if self.duel.active {
@@ -859,13 +859,13 @@ impl Playtest {
                 telemetry::debug_log("enemy projectile:player-hit");
                 hits = hits.saturating_add(1);
                 let exposed = self.player_shot_opening();
-                projectile_opening_hit |= exposed && self.combat_flow.can_interrupt();
-                poise_total = poise_total.saturating_add(self.combat_flow.shot_poise(
+                projectile_opening_hit |= exposed && self.player.flow.can_interrupt();
+                poise_total = poise_total.saturating_add(self.player.flow.shot_poise(
                     impact.poise_damage,
                     psx_game_runtime::character::PLAYER_POISE,
                     exposed,
                 ));
-                if exposed && self.combat_flow.can_interrupt() {
+                if exposed && self.player.flow.can_interrupt() {
                     telemetry::debug_log("flow:player-shot-interrupt");
                 }
                 match impact.damage_channel {
@@ -979,7 +979,7 @@ impl Playtest {
                 player_position,
                 player_height.max(0) as u16,
                 self.room_index,
-                self.player_stance.active() == VitalityChannelId::Two,
+                self.player.stance.active() == VitalityChannelId::Two,
                 staggered,
                 self.hazard_death_ticks_remaining != 0,
             );
@@ -1725,7 +1725,7 @@ impl Playtest {
                 PlayerAnim::HeavyAttack | PlayerAnim::VertHeavyAttack
             );
             for _ in 0..stats.hits {
-                self.combat_flow.melee_hit(heavy);
+                self.player.flow.melee_hit(heavy);
             }
             telemetry::counter(telemetry::counter::PLAYER_MELEE_HITS, u32::from(stats.hits));
             let event = if matches!(

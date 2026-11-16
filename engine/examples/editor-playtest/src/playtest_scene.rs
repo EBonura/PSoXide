@@ -495,8 +495,8 @@ impl Scene for Playtest {
         ) {
             return Some(value);
         }
-        let horizon = self.player_vitality.pool(VitalityChannelId::One);
-        let zenith = self.player_vitality.pool(VitalityChannelId::Two);
+        let horizon = self.player.vitality.pool(VitalityChannelId::One);
+        let zenith = self.player.vitality.pool(VitalityChannelId::Two);
         let health_q12 = |current: u16, maximum: u16| {
             if maximum == 0 {
                 PLAYER_HEALTH_MAX_Q12
@@ -517,27 +517,28 @@ impl Scene for Playtest {
             // pool is live rather than a fixed colour, so the HUD keeps saying
             // "this is the one taking damage" across a swap.
             LevelUiValueBinding::PlayerStanceActiveHealth => {
-                let pool = self.player_vitality.pool(self.player_stance.active());
+                let pool = self.player.vitality.pool(self.player.stance.active());
                 Some(health_q12(pool.current(), pool.maximum()))
             }
             LevelUiValueBinding::PlayerStanceActiveHealthMax => Some(PLAYER_HEALTH_MAX_Q12),
             LevelUiValueBinding::PlayerStanceInactiveHealth => {
-                let pool = self.player_vitality.pool(self.player_stance.inactive());
+                let pool = self.player.vitality.pool(self.player.stance.inactive());
                 Some(health_q12(pool.current(), pool.maximum()))
             }
             LevelUiValueBinding::PlayerStanceInactiveHealthMax => Some(PLAYER_HEALTH_MAX_Q12),
             LevelUiValueBinding::PlayerStanceSwapProgress => Some(i32::from(
-                self.player_stance
+                self.player
+                    .stance
                     .swap_progress_q12(&self.player_stance_config),
             )),
             LevelUiValueBinding::PlayerStanceActiveIsZenith => Some(i32::from(
-                self.player_stance.active() == VitalityChannelId::Two,
+                self.player.stance.active() == VitalityChannelId::Two,
             )),
             LevelUiValueBinding::PlayerStanceActiveBroken => Some(i32::from(
-                self.player_stance.is_broken(self.player_stance.active()),
+                self.player.stance.is_broken(self.player.stance.active()),
             )),
             LevelUiValueBinding::PlayerStanceInactiveBroken => Some(i32::from(
-                self.player_stance.is_broken(self.player_stance.inactive()),
+                self.player.stance.is_broken(self.player.stance.inactive()),
             )),
             LevelUiValueBinding::PlayerHealthEmptyInfluence => {
                 Some(i32::from(horizon.polarity().empty_q12))
@@ -592,7 +593,7 @@ impl Scene for Playtest {
         // Horizon would misleadingly report +0% immediately after assignment.
         let modifiers = self
             .power_up_loadout
-            .modifiers(&self.player_vitality, BOOST_MODULES);
+            .modifiers(&self.player.vitality, BOOST_MODULES);
         let module_bonus = |stat| {
             detail
                 .and_then(|module| module.percentages.get(stat))
@@ -1161,8 +1162,7 @@ impl Scene for Playtest {
             ctx.pad_prev = physical.1;
             return;
         }
-        self.player_poise.tick(1);
-        self.combat_flow.tick(
+        self.player.tick(
             1,
             matches!(self.anim_state, PlayerAnim::Stun | PlayerAnim::HitReact),
         );
@@ -1377,11 +1377,11 @@ impl Scene for Playtest {
                 let player_lighting = player_lighting.filter(|_| !camera_in_player);
                 let stance_crystal_material = self
                     .stance_cluts
-                    .crystal_material(character, self.player_stance.active());
+                    .crystal_material(character, self.player.stance.active());
                 let player_draw =
                     player_lighting.map_or(PlayerModelDrawStats::default(), |lighting| {
                         let phase_assembly = player_phase_assembly(
-                            self.player_stance,
+                            self.player.stance,
                             &self.player_stance_config,
                             player,
                             player_phase_height(character),
@@ -1389,7 +1389,7 @@ impl Scene for Playtest {
                         .map(|effect| effect.with_crystal_material(stance_crystal_material));
                         let stance_clut = self
                             .stance_cluts
-                            .player_override_clut(character, self.player_stance.active());
+                            .player_override_clut(character, self.player.stance.active());
                         draw_player(
                             self.room_index,
                             character,
@@ -1405,7 +1405,7 @@ impl Scene for Playtest {
                             phase_assembly,
                             &mut self.player_dash_assembly,
                             stance_clut,
-                            Some(player_stance_lit_tint(self.player_stance.active())),
+                            Some(player_stance_lit_tint(self.player.stance.active())),
                             &mut primitive_packets,
                             &mut world,
                         )
@@ -1415,9 +1415,9 @@ impl Scene for Playtest {
                 if !camera_in_player && player_lighting.is_some() {
                     self.player_scarf.draw_crystal_with_dash(
                         camera,
-                        stance_rgb(self.player_stance.active()),
+                        stance_rgb(self.player.stance.active()),
                         player_phase_assembly(
-                            self.player_stance,
+                            self.player.stance,
                             &self.player_stance_config,
                             player,
                             player_phase_height(character),
@@ -1737,7 +1737,7 @@ impl Scene for Playtest {
         if self.hook_selected.is_none()
             && self.player_has_ranged_weapon()
             && self.ranged_ready.aiming()
-            && self.player_stance.active() == VitalityChannelId::Two
+            && self.player.stance.active() == VitalityChannelId::Two
         {
             let center = if self.is_locked() {
                 let [x, y, z] = self.ranged_target();
@@ -1750,7 +1750,7 @@ impl Scene for Playtest {
                 ))
             };
             if let Some(center) = center {
-                draw_target_reticle(gpu, center, overlay_tick, self.player_stance.active());
+                draw_target_reticle(gpu, center, overlay_tick, self.player.stance.active());
             }
         } else if let Some(target) = self.lock_target_indicator_position() {
             draw_lock_target_indicator(
@@ -1758,7 +1758,7 @@ impl Scene for Playtest {
                 target,
                 camera,
                 overlay_tick,
-                self.player_stance.active(),
+                self.player.stance.active(),
             );
         }
 
@@ -1835,7 +1835,7 @@ impl Scene for Playtest {
         if !self.inventory_overlay_active {
             if let Some(font) = self.ui_fonts[0].as_ref() {
                 if self.player_has_ranged_weapon() {
-                    if let Some(air_left) = self.hook_attached.map(|_| self.combat_flow.air_left) {
+                    if let Some(air_left) = self.hook_attached.map(|_| self.player.flow.air_left) {
                         draw_tether_meter(gpu, font, air_left);
                     }
                 }

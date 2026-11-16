@@ -283,10 +283,10 @@ impl Playtest {
                     player_height,
                     player_invulnerable,
                     player_combat: Some((
-                        self.player_stance.active(),
+                        self.player.stance.active(),
                         [
-                            self.player_vitality.pool(VitalityChannelId::One).current(),
-                            self.player_vitality.pool(VitalityChannelId::Two).current(),
+                            self.player.vitality.pool(VitalityChannelId::One).current(),
+                            self.player.vitality.pool(VitalityChannelId::Two).current(),
                         ],
                     )),
                     player_noise_radius: player_noise_radius(
@@ -711,12 +711,12 @@ impl Playtest {
             self.room_index,
             circle_position.x,
             circle_position.z,
-            self.player_stance.active(),
-            &mut self.player_vitality,
+            self.player.stance.active(),
+            &mut self.player.vitality,
         );
         if ctx.just_pressed(button::TRIANGLE) && !circle_locks_stance {
             let config = self.player_stance_config;
-            if self.player_stance.request_swap(&config).is_some() {
+            if self.player.request_swap(config.swap_cooldown_ticks) {
                 self.attack_buffer.clear();
                 self.authored_attack.clear();
                 self.authored_dodge.clear();
@@ -731,10 +731,9 @@ impl Playtest {
         // Regeneration comes from the active state's modules and heals the
         // inactive pool, so the bonus is read before the tick that spends it.
         let regeneration = self.vitality_modifiers().regeneration_q12;
-        let swap_cooldown_before_tick = self.player_stance.swap_cooldown();
-        self.player_stance
-            .tick(&mut self.player_vitality, &config, regeneration);
-        if swap_cooldown_before_tick > 0 && self.player_stance.swap_cooldown() == 0 {
+        let swap_cooldown_before_tick = self.player.stance.swap_cooldown();
+        self.player.tick_stance(&config, regeneration);
+        if swap_cooldown_before_tick > 0 && self.player.stance.swap_cooldown() == 0 {
             self.queue_gameplay_sfx(LevelGameplaySfxEvent::StanceSwapReady);
         }
 
@@ -746,7 +745,7 @@ impl Playtest {
                 // even before this tick has readied the weapon.
                 let aiming = ctx.is_held(button::L2)
                     && self.player_has_ranged_weapon()
-                    && self.player_stance.active() == VitalityChannelId::Two;
+                    && self.player.stance.active() == VitalityChannelId::Two;
                 self.lock_target = self.find_lock_target(LOCK_RANGE, aiming);
                 self.camera_recenter_requested = self.lock_target.is_none() && !aiming;
             }
@@ -817,10 +816,11 @@ impl Playtest {
             || (action_locked
                 && !matches!(self.anim_state, PlayerAnim::RangedAttack | PlayerAnim::Land))
             || self
-                .player_stance
+                .player
+                .stance
                 .swap_in_progress(&self.player_stance_config);
         self.ranged_ready.tick(
-            ranged && self.player_stance.active() == VitalityChannelId::Two,
+            ranged && self.player.stance.active() == VitalityChannelId::Two,
             ctx.is_held(button::L2),
             interrupted,
         );
@@ -1105,7 +1105,7 @@ impl Playtest {
                 i32::from(ctx.is_held(button::L2)),
                 i32::from(ctx.is_held(button::R2)),
                 i32::from(ctx.is_held(button::R1)),
-                i32::from(self.player_stance.active() == VitalityChannelId::Two),
+                i32::from(self.player.stance.active() == VitalityChannelId::Two),
                 i32::from(self.ranged_ready.aiming()),
                 self.anim_state.action().to_index() as i32,
                 p.x,
@@ -1236,7 +1236,7 @@ impl Playtest {
                 self.lock_invalid_ticks = 0;
                 if ranged
                     && ctx.is_held(button::L2)
-                    && self.player_stance.active() == VitalityChannelId::Two
+                    && self.player.stance.active() == VitalityChannelId::Two
                 {
                     // Require stick neutral before a later target-switch flick;
                     // releasing L2 with the stick held must not switch enemies.
@@ -1588,7 +1588,7 @@ impl Playtest {
             self.attack_chain.clear();
             return false;
         }
-        if self.player_has_ranged_weapon() && self.player_stance.active() == VitalityChannelId::Two
+        if self.player_has_ranged_weapon() && self.player.stance.active() == VitalityChannelId::Two
         {
             self.attack_chain.clear();
             if ctx.just_pressed(ACTIVE_HEAVY_ATTACK_BUTTON)
@@ -1606,7 +1606,7 @@ impl Playtest {
             }
             if !action_locked
                 && self.motor.action().is_idle()
-                && self.combat_flow.can_shoot()
+                && self.player.flow.can_shoot()
                 && !self.ranged_ready.firing(now.as_u32())
             {
                 if self.attack_buffer.take(now.as_u32()) == Some(5) {
@@ -1630,7 +1630,7 @@ impl Playtest {
             }
             return false;
         }
-        let stance_offset = if self.player_stance.active() == VitalityChannelId::Two {
+        let stance_offset = if self.player.stance.active() == VitalityChannelId::Two {
             2
         } else {
             0

@@ -236,7 +236,7 @@ impl Playtest {
     pub(crate) fn stance_hud_input(&mut self) -> HudInput {
         const VITALITY_Q12_ONE: u32 = 4096;
         let share = |channel| {
-            let pool = self.player_vitality.pool(channel);
+            let pool = self.player.vitality.pool(channel);
             if pool.maximum() == 0 {
                 0
             } else {
@@ -262,9 +262,9 @@ impl Playtest {
             hud().nearest = nearest;
         }
         HudInput {
-            active: self.player_stance.active(),
+            active: self.player.stance.active(),
             share_q12: [share(VitalityChannelId::One), share(VitalityChannelId::Two)],
-            energy: self.combat_flow.energy,
+            energy: self.player.flow.energy,
             nearest_hostile_sq: hud().nearest,
             targeting: self.lock_target.is_some() || self.ranged_ready.aiming(),
             attached: self.hook_attached.is_some(),

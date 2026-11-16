@@ -65,11 +65,12 @@ use psx_engine::{
 };
 use psx_font::FontAtlas;
 use psx_game_runtime::vitality::{
-    BoostInventory, BoostModuleId, BoostSlotId, CombatStance, CombatStanceConfig, DualVitality,
+    BoostInventory, BoostModuleId, BoostSlotId, CombatStance, CombatStanceConfig,
     PowerUpLoadout, VitalityChannelId, VitalityModifiers,
 };
 use psx_game_runtime::vitality_circles::VitalityCircleState;
 use psx_game_runtime::{
+    combatant::Combatant,
     destructibles::RuntimeDestructibles,
     poi::MessageController,
     save::{SaveBlock, SavedPlayerPosition},
@@ -354,15 +355,12 @@ struct Playtest {
     /// Rolling fired total already reported to telemetry, so the
     /// LOGIC_RECORDS_FIRED counter emits per-tick deltas.
     logic_fired_reported: u16,
-    /// Horizon and Zenith health pools. Both must reach zero before the shared
-    /// death sequence arms; legacy untyped damage drains Horizon first and
-    /// spills its excess into Zenith.
-    player_vitality: DualVitality,
-    player_poise: psx_game_runtime::poise::Poise,
-    combat_flow: psx_game_runtime::combat_flow::CombatFlow,
-    /// Which pool is active. Only the active pool takes damage and only the
-    /// inactive one recovers, so swapping is how the player heals.
-    player_stance: CombatStance,
+    /// The player's health, poise, energy and stance: the same `Combatant`
+    /// each enemy holds. Both Horizon and Zenith pools must reach zero
+    /// before the shared death sequence arms. Only the active pool takes
+    /// damage and only the inactive one recovers, so swapping is how the
+    /// player heals.
+    player: Combatant,
     /// Authored tuning for the stance: damage multipliers, recovery delays and
     /// rate, break threshold, and the swap cooldown.
     player_stance_config: CombatStanceConfig,
@@ -724,14 +722,11 @@ impl Playtest {
         self.destructibles = RuntimeDestructibles::EMPTY;
         self.motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
         self.player_contents_memo = None;
-        self.player_vitality = DualVitality::equal(PLAYER_MAX_HEALTH);
-        self.player_poise = psx_game_runtime::poise::Poise::EMPTY;
-        self.combat_flow = psx_game_runtime::combat_flow::CombatFlow::FULL;
+        self.player.reset([PLAYER_MAX_HEALTH; 2]);
+        self.vitality_circles = VitalityCircleState::EMPTY;
         // Playtest lives in a zeroed MaybeUninit, and a zeroed stance config
         // would mean no damage and no recovery at all, so it is set explicitly
         // on every reset rather than relying on the zero pattern.
-        self.player_stance = CombatStance::new(VitalityChannelId::One);
-        self.vitality_circles = VitalityCircleState::EMPTY;
         self.player_stance_config = CombatStanceConfig::DEFAULT;
         self.power_up_loadout = PowerUpLoadout::DEFAULT;
         self.power_up_inventory = BoostInventory::EMPTY;

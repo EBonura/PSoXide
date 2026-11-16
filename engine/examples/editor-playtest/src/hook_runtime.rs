@@ -250,7 +250,7 @@ impl Playtest {
     }
 
     pub(super) fn begin_hook(&mut self, now: SimTick) -> bool {
-        if self.combat_flow.air_left == 0 {
+        if self.player.flow.air_left == 0 {
             return false;
         }
         let Some(index) = self.hook_selected else {
@@ -395,7 +395,7 @@ impl Playtest {
                 return true;
             }
         }
-        if self.combat_flow.air_tick(
+        if self.player.flow.air_tick(
             self.hook_attached.is_some(),
             self.hook_travel.is_none() && self.motor.grounded(),
             self.ranged_ready.firing(ctx.sim_tick.as_u32()),

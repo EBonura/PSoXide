@@ -108,7 +108,7 @@ impl Playtest {
 
     pub(super) fn release_player_projectile(&mut self, ctx: &Ctx) {
         if !self.ranged_ready.firing(ctx.sim_tick.as_u32())
-            || self.player_stance.active() != VitalityChannelId::Two
+            || self.player.stance.active() != VitalityChannelId::Two
         {
             return;
         }
@@ -164,7 +164,7 @@ impl Playtest {
             visual.length_ticks = 3;
             visual.trail_segments = 4;
             visual.impact_rgb = [144, 248, 208];
-            if !self.combat_flow.can_shoot() {
+            if !self.player.flow.can_shoot() {
                 break;
             }
             let damage = self
@@ -188,14 +188,14 @@ impl Playtest {
             if self.combat_projectiles.spawn(spawn).is_err() {
                 break;
             }
-            self.combat_flow.spend_shot();
+            self.player.flow.spend_shot();
             if self.duel.active {
                 duel::log_values(
                     "duel:shot",
                     &[
                         ctx.sim_tick.as_u32() - self.duel.started_tick(),
                         0,
-                        u32::from(self.combat_flow.energy),
+                        u32::from(self.player.flow.energy),
                     ],
                 );
             }
