@@ -14,8 +14,8 @@
 //!
 //! ```text
 //! let mut port = peripherals.controller_port;
-//! let mut pads = psx_pad::PadReader::port1();
-//! let state = pads.poll(&mut port);
+//! let mut pads = psx_pad::Controllers::new();
+//! let state = *pads.poll(&mut port, psx_io::controller_port::Port::One);
 //! let mut card = psx_mc::Card::new(psx_mc::HardwareCard::on_port(&mut port, Slot::One));
 //! ```
 

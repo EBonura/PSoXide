@@ -21,6 +21,9 @@ cook cook examples/showcase-vector/assets/gallery.svg -o examples/showcase-vecto
 cook cook examples/showcase-vector/assets/hud/stance_hud.svg -o examples/showcase-vector/assets/hud/stance_hud.psvg \
   --budget total=80 --quiet
 
+# -disable-mips-df-backward-search is the old cure for the delay-slot load hazard. This script links
+# without the post-link hazard patcher that the policy flags (tools/sdk-examples.mk
+# PSX_DELAY_SLOT_FLAGS) need, so it keeps the flag that leaves no hazard to patch.
 (
   cd "$here"
   CARGO_TARGET_DIR="$root/build/examples" \
