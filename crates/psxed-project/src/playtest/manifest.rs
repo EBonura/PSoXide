@@ -1193,7 +1193,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
 /// A `psx_level::CombatStats` as Rust source for the generated manifest.
 fn combat_stats_literal(stats: &psx_level::CombatStats) -> String {
     format!(
-        "psx_level::CombatStats {{ max_health: {}, poise: {}, armour: {}, opposite_damage_q12: {}, opposite_poise_q12: {}, energy_max: {}, shot_cost: {}, light_gain: {}, heavy_gain: {}, parry_ticks: {}, parry_refund: {}, crit_window_ticks: {}, crit_damage_q12: {}, crit_poise_q12: {}, knockdown_ticks: {} }}",
+        "psx_level::CombatStats {{ max_health: {}, poise: {}, armour: {}, opposite_damage_q12: {}, opposite_poise_q12: {}, energy_max: {}, shot_cost: {}, light_gain: {}, heavy_gain: {}, parry_ticks: {}, parry_refund: {}, crit_window_ticks: {}, crit_damage_q12: {}, crit_poise_q12: {}, knockdown_ticks: {}, parry_swap_percent: {} }}",
         stats.max_health,
         stats.poise,
         stats.armour,
@@ -1209,6 +1209,7 @@ fn combat_stats_literal(stats: &psx_level::CombatStats) -> String {
         stats.crit_damage_q12,
         stats.crit_poise_q12,
         stats.knockdown_ticks,
+        stats.parry_swap_percent,
     )
 }
 

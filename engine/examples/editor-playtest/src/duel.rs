@@ -11,6 +11,10 @@ use psx_game_runtime::{combat_policy, entities::GameEntityState};
 /// same order.
 const SAMPLE_COLUMNS: usize = 21;
 
+/// `duel:decision` intent: the bot swapped on purpose to parry.
+pub(super) const DUEL_INTENT_PARRY: u8 = 7;
+/// `duel:decision` intent: the bot spent its parry's crit.
+pub(super) const DUEL_INTENT_CRIT: u8 = 8;
 /// `duel:event` kind: the actor parried a hit.
 pub(super) const DUEL_EVENT_PARRY: u32 = 1;
 /// `duel:event` kind: the actor's attack was a crit.
@@ -244,11 +248,48 @@ impl Playtest {
                     .player
                     .stance
                     .swap_in_progress(&self.player_stance_config);
-            let swapping = visible && wanted != active && free && self.player.stance.can_swap();
+            // A parry armed a crit: spend it with the weapon the parry
+            // swapped to, the same choice every tactical enemy makes. It
+            // comes before the stance choice, which would otherwise swap
+            // straight back (a parry clears the swap cooldown). A strike may
+            // start during the swap's own animation (the rules allow it).
+            let crit = combat_policy::crit_followup(
+                self.player.crit != 0,
+                active,
+                distance < self.character.map_or(40, |c| c.radius) + i32::from(record.radius) + 24,
+                self.player_has_ranged_weapon() && self.player.flow.can_shoot(&self.player_stats),
+            )
+            .filter(|_| {
+                visible
+                    && self.motor.action().is_idle()
+                    && self.anim_lock_until_tick <= ctx.sim_tick
+            });
+            let swapping = crit.is_none()
+                && visible
+                && wanted != active
+                && free
+                && self.player.stance.can_swap();
             if swapping {
                 buttons |= button::TRIANGLE;
                 self.duel.intent = 5;
             }
+            // Parry on purpose: swap so a hit seen coming lands inside the
+            // parry window. The same choice every tactical enemy makes.
+            let parrying = crit.is_none() && !swapping && visible && free && {
+                let ticks_to_hit = self.duel_ticks_to_hit(i, p, height);
+                let can_swap = self.player.stance.can_swap() && self.player_kits().can_swap();
+                let parry_ticks = self.player_stats.parry_ticks;
+                let percent = self.player_stats.parry_swap_percent;
+                let duel = &mut self.duel;
+                combat_policy::parry_swap(ticks_to_hit, parry_ticks, can_swap, percent, || {
+                    duel.roll()
+                })
+            };
+            if parrying {
+                buttons |= button::TRIANGLE;
+                self.duel.intent = DUEL_INTENT_PARRY;
+            }
+            let swapping = swapping || parrying;
             {
                 // Movement follows the intended weapon phase through a legal stance swap.
                 let ranged = wanted == VitalityChannelId::Two;
@@ -293,7 +334,15 @@ impl Playtest {
                 let roll = self.duel.roll();
                 // Observe committed animation states on a 12-tick decision cadence,
                 // never future player inputs or the enemy's random stream.
-                if visible
+                if let Some(action) = crit {
+                    buttons |= if action == CombatAction::Shoot {
+                        button::R2
+                    } else {
+                        button::R1
+                    };
+                    self.duel.intent = DUEL_INTENT_CRIT;
+                    direction = 0;
+                } else if visible
                     && !swapping
                     && wanted == active
                     && !self.duel.sprint
@@ -455,6 +504,35 @@ impl Playtest {
         ctx.pad_prev.buttons = psx_pad::ButtonState::from_bits(self.duel.previous);
         ctx.pad = pad;
         self.duel.previous = buttons;
+    }
+
+    /// Ticks until the enemy's hit the bot can see lands on the player: its
+    /// melee swing from the windup clock (now, once the swing is out), or
+    /// the nearest incoming bolt. None when nothing is coming.
+    fn duel_ticks_to_hit(&self, i: usize, p: RoomPoint, height: i32) -> Option<u16> {
+        let record = &GAME_ENTITIES[i];
+        let melee = self.game_entities.attack_kind(i) != 2;
+        let swing = match self.game_entities.state(i) {
+            GameEntityState::Windup if melee => {
+                Some(u16::from(record.windup_ticks).saturating_sub(self.game_entities.state_age(i)))
+            }
+            GameEntityState::Attack if melee => Some(0),
+            _ => None,
+        };
+        let bolt = self
+            .combat_projectiles
+            .incoming_threat(
+                psx_game_runtime::projectiles::CombatTeam::Player,
+                self.room_index,
+                [p.x, p.y, p.z],
+                self.character.map_or(12, |c| c.radius),
+                height,
+            )
+            .map(|threat| threat.ticks_to_contact);
+        match (swing, bolt) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     #[inline(never)]

@@ -3096,6 +3096,10 @@ pub(crate) struct GameEntityStateClips {
     /// The combat kits the Character binds ([`CombatKits`]), the same
     /// derivation the player runtime makes from her clips.
     pub kits: CombatKits,
+    /// The strikes it binds clips of its own for, as
+    /// [`psx_level::game_entity_flags::LIGHT_ATTACK`] and
+    /// [`psx_level::game_entity_flags::HEAVY_ATTACK`] bits.
+    pub strikes: u16,
 }
 
 impl GameEntityStateClips {
@@ -3131,6 +3135,8 @@ impl GameEntityStateClips {
             // Bindings unknown without the Character's own model: nothing is
             // restricted (a projectile still needs its cooked range band).
             kits: CombatKits::from_bits(CombatKits::MELEE | CombatKits::RANGED),
+            strikes: psx_level::game_entity_flags::LIGHT_ATTACK
+                | psx_level::game_entity_flags::HEAVY_ATTACK,
         }
     }
 }
@@ -3213,6 +3219,15 @@ pub(crate) fn game_entity_state_clips(
             .and_then(|found| optional(CharacterAnimationAction::from_level(found)))
     };
     let kits = CombatKits::from_bindings(&bindings);
+    let mut strikes = 0;
+    if bindings.bound(psx_level::CharacterAnimationAction::LightAttack)
+        || bindings.bound(psx_level::CharacterAnimationAction::ComboAttack)
+    {
+        strikes |= psx_level::game_entity_flags::LIGHT_ATTACK;
+    }
+    if bindings.bound(psx_level::CharacterAnimationAction::HeavyAttack) {
+        strikes |= psx_level::game_entity_flags::HEAVY_ATTACK;
+    }
     // Warn from what the author bound (the same view as the editor and
     // verb_coverage); `bindings` above is narrower, the clips this
     // entity's runtime states cook, which leaves out ones enemies never
@@ -3286,6 +3301,7 @@ pub(crate) fn game_entity_state_clips(
             .map(|playback| playback.clip)
             .unwrap_or(idle),
         kits,
+        strikes,
     })
 }
 

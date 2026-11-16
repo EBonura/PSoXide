@@ -100,7 +100,9 @@ fn hybrid_fighter() -> (
         std::boxed::Box::leak(std::boxed::Box::new([LevelGameEntityRecord {
             flags: psx_level::game_entity_flags::ENABLED
                 | psx_level::game_entity_flags::RANGED_ATTACK
-                | psx_level::game_entity_flags::MELEE_ATTACK,
+                | psx_level::game_entity_flags::MELEE_ATTACK
+                | psx_level::game_entity_flags::LIGHT_ATTACK
+                | psx_level::game_entity_flags::HEAVY_ATTACK,
             ..GAME_ENTITIES[0]
         }]));
     let mut entities = std::boxed::Box::new(RuntimeGameEntities::EMPTY);

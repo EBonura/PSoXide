@@ -273,6 +273,28 @@ pub fn resolve(bindings: &impl VerbBindings, action: Action) -> Option<Action> {
         .find(|&step| bindings.bound(step))
 }
 
+/// The attack a fighter performs when its controller asks for `wanted` (a
+/// strike or the shot): none without the kit (the blade for a strike, the
+/// cannon for the shot), else `wanted` itself when bound, else the first
+/// bound stand-in of its [`fallback_chain`] (a heavy with no clip is the
+/// light strike, with the light's hitboxes and timing), else none. The one
+/// gate every fighter's strikes and shots pass, player and enemy alike.
+pub fn attack_for(
+    kits: CombatKits,
+    bindings: &impl VerbBindings,
+    wanted: Action,
+) -> Option<Action> {
+    let permitted = if matches!(wanted, Action::RangedAttack | Action::CritShot) {
+        kits.can_shoot()
+    } else {
+        kits.can_melee()
+    };
+    if !permitted {
+        return None;
+    }
+    resolve(bindings, wanted)
+}
+
 /// How one verb is covered by a character's bindings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VerbCoverage {

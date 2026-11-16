@@ -1,5 +1,6 @@
 extern crate std;
 use super::*;
+use crate::combat_intent::CombatIntent;
 use crate::entities::tests::test_record;
 
 const fn enemy() -> LevelGameEntityRecord {
@@ -12,7 +13,9 @@ const fn enemy() -> LevelGameEntityRecord {
             | game_entity_flags::CAN_RUN
             | game_entity_flags::TACTICAL
             | game_entity_flags::RANGED_ATTACK
-            | game_entity_flags::MELEE_ATTACK,
+            | game_entity_flags::MELEE_ATTACK
+            | game_entity_flags::LIGHT_ATTACK
+            | game_entity_flags::HEAVY_ATTACK,
     );
     r.radius = 14;
     r.height = 77;
@@ -925,4 +928,140 @@ fn projectile_evade_does_not_cancel_committed_actions() {
         assert_ne!(e.tactics[0].goal, EnemyGoal::Evade);
         assert_eq!(e.state(0), state);
     }
+}
+
+/// The test enemy with `flags` in place of its own.
+fn enemy_with_flags(flags: u16) -> &'static [LevelGameEntityRecord; 1] {
+    std::boxed::Box::leak(std::boxed::Box::new([LevelGameEntityRecord {
+        flags,
+        ..enemy()
+    }]))
+}
+
+/// What entity 0 commits to when its controller asks for `attack`.
+fn committed(records: &'static [LevelGameEntityRecord; 1], attack: CombatAction) -> Option<u8> {
+    let mut e: GameEntities<2, true> = GameEntities::EMPTY;
+    e.spawn_from_records(records);
+    e.state[0] = GameEntityState::Aggro as u8;
+    let mut stats = GameEntityTickStats::default();
+    let intent = CombatIntent {
+        pressed: crate::combat_intent::CombatActions::of(attack),
+        aim: Some([0, 0, 100]),
+        ..CombatIntent::IDLE
+    };
+    e.apply_intent(&records[0], 0, intent, &mut Arena::default(), 2, &mut stats);
+    (e.state(0) == GameEntityState::Windup).then(|| e.selected_attack_kind(0))
+}
+
+#[test]
+fn enemy_attacks_pass_the_same_kit_gate_as_the_player() {
+    use game_entity_flags::{
+        ENABLED, HEAVY_ATTACK, LIGHT_ATTACK, MELEE_ATTACK, RANGED_ATTACK, TACTICAL,
+    };
+    let base = ENABLED | TACTICAL;
+    let both_strikes = enemy_with_flags(base | MELEE_ATTACK | LIGHT_ATTACK | HEAVY_ATTACK);
+    assert_eq!(committed(both_strikes, CombatAction::LightAttack), Some(0));
+    assert_eq!(committed(both_strikes, CombatAction::HeavyAttack), Some(1));
+    // A heavy with no heavy clip is the light strike.
+    let light_only = enemy_with_flags(base | MELEE_ATTACK | LIGHT_ATTACK);
+    assert_eq!(committed(light_only, CombatAction::HeavyAttack), Some(0));
+    // No blade, no strike at all; no cannon, no shot.
+    let gunner = enemy_with_flags(base | RANGED_ATTACK);
+    assert_eq!(committed(gunner, CombatAction::LightAttack), None);
+    assert_eq!(committed(gunner, CombatAction::HeavyAttack), None);
+    assert_eq!(committed(gunner, CombatAction::Shoot), Some(2));
+    assert_eq!(committed(both_strikes, CombatAction::Shoot), None);
+    // The player's gate gives the same answers for the same bindings.
+    let kits = psx_level::game_entity_combat_kits(light_only[0].flags);
+    assert_eq!(
+        psx_level::combat_verbs::attack_for(
+            kits,
+            &psx_level::GameEntityBindings(light_only[0].flags),
+            psx_level::CharacterAnimationAction::HeavyAttack,
+        ),
+        Some(psx_level::CharacterAnimationAction::LightAttack)
+    );
+}
+
+#[test]
+fn an_enemy_swaps_on_purpose_to_parry_a_swing_it_sees() {
+    let records = enemy_with_flags(enemy().flags);
+    let mut e: GameEntities<2, true> = GameEntities::EMPTY;
+    e.spawn_from_records(&records[..]);
+    e.set_stance_swap_delay(300);
+    e.state[0] = GameEntityState::Aggro as u8;
+    e.state_ticks[0] = 42;
+    let stance = e.stance(0);
+    let mut swing = input([0, 0, 40]);
+    swing.target.attack_read = 2;
+    // Never on purpose at zero percent.
+    let mut never = LevelGameEntityRecord { ..records[0] };
+    never.combat.parry_swap_percent = 0;
+    let never: &'static [LevelGameEntityRecord] =
+        std::boxed::Box::leak(std::boxed::Box::new([never]));
+    let mut quiet: GameEntities<2, true> = GameEntities::EMPTY;
+    quiet.spawn_from_records(never);
+    quiet.state[0] = GameEntityState::Aggro as u8;
+    quiet.state_ticks[0] = 42;
+    quiet.tick_delta(never, swing, &mut Arena::default(), 2);
+    assert_eq!(quiet.stance(0), stance);
+    // Always at a hundred: the swing it sees lands in its parry window.
+    let mut always = LevelGameEntityRecord { ..records[0] };
+    always.combat.parry_swap_percent = 100;
+    let always: &'static [LevelGameEntityRecord] =
+        std::boxed::Box::leak(std::boxed::Box::new([always]));
+    e.tick_delta(always, swing, &mut Arena::default(), 2);
+    assert_ne!(e.stance(0), stance);
+    assert_eq!(e.tactical_snapshot(0).stance_reason, STANCE_REASON_PARRY);
+    assert!(e.combatants[0].parrying(always[0].combat.parry_ticks));
+}
+
+/// Put entity 0 in `stance`, its swap long finished and its cooldown clear
+/// (as a parry leaves it).
+fn settle_in(e: &mut GameEntities<2, true>, stance: VitalityChannelId) {
+    if e.stance(0) != stance {
+        e.combatants[0].stance.set_swap_cooldown(0);
+        e.mutate_stance(0);
+    }
+    e.advance_stance_swap(0, 100);
+    e.combatants[0].stance.set_swap_cooldown(0);
+}
+
+#[test]
+fn a_parry_crit_is_spent_with_the_swapped_to_weapon() {
+    let records = enemy_with_flags(
+        enemy().flags | game_entity_flags::LIGHT_ATTACK | game_entity_flags::HEAVY_ATTACK,
+    );
+    // Blade stance, crit armed, target in reach: the crit strike.
+    let mut e: GameEntities<2, true> = GameEntities::EMPTY;
+    e.spawn_from_records(&records[..]);
+    e.state[0] = GameEntityState::Aggro as u8;
+    e.state_ticks[0] = 42;
+    settle_in(&mut e, VitalityChannelId::One);
+    e.attack_cooldown[0] = 600;
+    e.combatants[0].crit = records[0].combat.crit_window_ticks;
+    assert_eq!(e.attack_owner(), None);
+    e.tick_delta(&records[..], input([0, 0, 30]), &mut Arena::default(), 2);
+    assert_eq!(e.state(0), GameEntityState::Windup);
+    assert_eq!(e.selected_attack_kind(0), GAME_ENTITY_ATTACK_LIGHT);
+    assert_eq!(e.attack_owner(), Some(0));
+    // Zenith stance, crit armed, energy to spare: the crit shot, even at range.
+    let mut g: GameEntities<2, true> = GameEntities::EMPTY;
+    g.spawn_from_records(&records[..]);
+    g.state[0] = GameEntityState::Aggro as u8;
+    g.state_ticks[0] = 42;
+    settle_in(&mut g, VitalityChannelId::Two);
+    g.attack_cooldown[0] = 600;
+    g.combatants[0].crit = records[0].combat.crit_window_ticks;
+    g.tick_delta(&records[..], input([0, 0, 200]), &mut Arena::default(), 2);
+    assert_eq!(g.state(0), GameEntityState::Windup);
+    assert_eq!(g.selected_attack_kind(0), GAME_ENTITY_ATTACK_RANGED);
+    // No crit: the same enemy on cooldown does not attack.
+    let mut h: GameEntities<2, true> = GameEntities::EMPTY;
+    h.spawn_from_records(&records[..]);
+    h.state[0] = GameEntityState::Aggro as u8;
+    h.state_ticks[0] = 42;
+    h.attack_cooldown[0] = 600;
+    h.tick_delta(&records[..], input([0, 0, 30]), &mut Arena::default(), 2);
+    assert_ne!(h.state(0), GameEntityState::Windup);
 }

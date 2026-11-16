@@ -2727,6 +2727,11 @@ pub struct CombatStats {
     /// (a break staggers). PLACEHOLDER, the duel harness tunes it.
     #[serde(default = "default_combat_knockdown_ticks")]
     pub knockdown_ticks: u16,
+    /// For an AI controller of this character: percent chance it swaps on
+    /// purpose to parry a hit it sees about to land in its parry window.
+    /// Zero never parries on purpose. PLACEHOLDER, the duel harness tunes it.
+    #[serde(default = "default_combat_parry_swap_percent")]
+    pub parry_swap_percent: u8,
 }
 
 impl CombatStats {
@@ -2755,6 +2760,7 @@ impl CombatStats {
             crit_damage_q12: stats.crit_damage_q12,
             crit_poise_q12: stats.crit_poise_q12,
             knockdown_ticks: stats.knockdown_ticks,
+            parry_swap_percent: stats.parry_swap_percent,
         }
     }
 
@@ -2784,6 +2790,7 @@ impl CombatStats {
             crit_damage_q12: self.crit_damage_q12,
             crit_poise_q12: self.crit_poise_q12,
             knockdown_ticks: self.knockdown_ticks,
+            parry_swap_percent: self.parry_swap_percent,
         }
     }
 
@@ -2863,6 +2870,8 @@ struct CombatStatsFile {
     crit_poise_q12: u16,
     #[serde(default = "default_combat_knockdown_ticks")]
     knockdown_ticks: u16,
+    #[serde(default = "default_combat_parry_swap_percent")]
+    parry_swap_percent: u8,
 }
 
 impl From<CombatStatsFile> for CombatStats {
@@ -2891,6 +2900,7 @@ impl From<CombatStatsFile> for CombatStats {
             crit_damage_q12: file.crit_damage_q12,
             crit_poise_q12: file.crit_poise_q12,
             knockdown_ticks: file.knockdown_ticks,
+            parry_swap_percent: file.parry_swap_percent,
         }
     }
 }
@@ -2953,6 +2963,10 @@ pub(crate) const fn default_combat_crit_poise_q12() -> u16 {
 
 pub(crate) const fn default_combat_knockdown_ticks() -> u16 {
     CombatStats::PLAYER.knockdown_ticks
+}
+
+pub(crate) const fn default_combat_parry_swap_percent() -> u8 {
+    CombatStats::PLAYER.parry_swap_percent
 }
 
 /// Tunable movement/collision settings authored on a

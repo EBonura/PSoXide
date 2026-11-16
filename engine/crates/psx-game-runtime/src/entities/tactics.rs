@@ -786,6 +786,31 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
                 | EnemyGoal::Retreat
                 | EnemyGoal::BreakAway
         ) && self.tactics[i].phase >= 24);
+        // Parry on purpose: swap so a hit seen coming lands inside the parry
+        // window. The same choice as the duel's player bot; how often is the
+        // character's data.
+        if S && visible && !self.stance_swap_in_progress(i) {
+            let swing = (input.target.attack_read == 2).then_some(0);
+            let bolt = self.projectile_threats[i].map(|threat| threat.ticks_to_contact);
+            let ticks_to_hit = match (swing, bolt) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+            let can_swap = self.swap_permitted(r, i);
+            if crate::combat_policy::parry_swap(
+                ticks_to_hit,
+                r.combat.parry_ticks,
+                can_swap,
+                r.combat.parry_swap_percent,
+                || self.draw(i, 100),
+            ) {
+                intent.pressed = intent.pressed.with(CombatAction::Swap);
+                self.tactics[i].stance_reason = STANCE_REASON_PARRY;
+                self.finish_goal(i, EnemyGoalResult::Cancelled);
+                self.plan_face(i, &mut intent, target, delta);
+                return TacticalPlan::run(intent);
+            }
+        }
         // Free locomotion can evade in either stance, including with an empty
         // Energy reserve. Windup/attack/recovery never enter this policy.
         if !self.stance_swap_in_progress(i)
@@ -808,6 +833,34 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
                     stats,
                 )
                 .unwrap_or(TacticalPlan::run(intent));
+        }
+        // A parry armed a crit: spend it with the weapon the parry swapped
+        // to, the same choice as the duel's player bot. Before the stance
+        // choice, which would otherwise swap straight back (a parry clears
+        // the swap cooldown).
+        if visible && !self.stance_swap_in_progress(i) {
+            let in_reach = melee_height_reachable
+                && self.target_within(i, input, Self::melee_attack_reach(r, input) + 16);
+            let can_shoot = Self::has_ranged_attack(r) && self.can_fire_energy(r, i);
+            let facing = self
+                .tactical_turn(i, target, delta)
+                .is_none_or(|(_, error)| error <= 341);
+            if let Some(action) = crate::combat_policy::crit_followup(
+                self.combatants[i].crit != 0,
+                self.stance(i),
+                in_reach,
+                can_shoot,
+            ) {
+                if facing && self.claim_attack_owner(i) {
+                    self.plan_face(i, &mut intent, target, delta);
+                    intent.pressed = intent.pressed.with(action);
+                    if action == CombatAction::Shoot {
+                        intent.aim = Some(Self::aim_point(input));
+                    }
+                    self.finish_goal(i, EnemyGoalResult::Arrived);
+                    return TacticalPlan::run(intent);
+                }
+            }
         }
         if S && can_replan {
             let (stance, reason) = crate::combat_policy::stance_choice(
@@ -1235,13 +1288,12 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
                 self.yaw[i] = yaw;
             }
         }
-        if let Some(attack) = intent.attack() {
-            self.attack_mode[i] = match attack {
-                CombatAction::HeavyAttack => GAME_ENTITY_ATTACK_HEAVY,
-                CombatAction::Shoot => GAME_ENTITY_ATTACK_RANGED,
-                _ => GAME_ENTITY_ATTACK_LIGHT,
-            };
-            if attack == CombatAction::Shoot {
+        if let Some(kind) = intent
+            .attack()
+            .and_then(|attack| Self::permitted_attack(r, attack))
+        {
+            self.attack_mode[i] = kind;
+            if kind == GAME_ENTITY_ATTACK_RANGED {
                 if let Some(point) = intent.aim {
                     self.capture_ranged_point(i, point);
                 }
@@ -1285,6 +1337,29 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
             }
         }
         self.yaw[i] = facing;
+    }
+
+    /// The attack family (light, heavy, ranged) entity record `r` performs
+    /// for a requested strike or shot, through the one gate every fighter's
+    /// attacks pass ([`combat_verbs::attack_for`]): none without the kit, a
+    /// heavy with no heavy clip is the light strike.
+    fn permitted_attack(r: &LevelGameEntityRecord, attack: CombatAction) -> Option<u8> {
+        use psx_level::CharacterAnimationAction as Action;
+        let wanted = match attack {
+            CombatAction::HeavyAttack => Action::HeavyAttack,
+            CombatAction::Shoot => Action::RangedAttack,
+            _ => Action::LightAttack,
+        };
+        let found = psx_level::combat_verbs::attack_for(
+            Self::stance_moves(r),
+            &psx_level::GameEntityBindings(r.flags),
+            wanted,
+        )?;
+        Some(match found {
+            Action::HeavyAttack => GAME_ENTITY_ATTACK_HEAVY,
+            Action::RangedAttack => GAME_ENTITY_ATTACK_RANGED,
+            _ => GAME_ENTITY_ATTACK_LIGHT,
+        })
     }
 
     /// The controller's follow-up once its intent has run: bookkeeping that
@@ -1362,6 +1437,10 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         }
     }
 }
+
+/// [`EnemyTacticalSnapshot::stance_reason`] of a swap made on purpose to
+/// parry.
+pub const STANCE_REASON_PARRY: u8 = 11;
 
 /// What the tactical controller does once its intent has run.
 #[derive(Clone, Copy)]

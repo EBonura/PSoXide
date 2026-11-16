@@ -325,6 +325,7 @@ fn a_combat_record_written_before_parry_loads_with_the_placeholder_numbers() {
     assert_eq!(old.crit_window_ticks, 60);
     assert_eq!((old.crit_damage_q12, old.crit_poise_q12), (8192, 8192));
     assert_eq!(old.knockdown_ticks, 60);
+    assert_eq!(old.parry_swap_percent, 50);
     // A character with no record keeps the role's starting numbers: the
     // player's parry is a third of her 25-tick swap, an enemy's of its 10.
     assert_eq!(CombatStats::PLAYER.parry_ticks, 8);
@@ -336,6 +337,7 @@ fn a_combat_record_written_before_parry_loads_with_the_placeholder_numbers() {
     let tuned = CombatStats {
         parry_ticks: 5,
         knockdown_ticks: 0,
+        parry_swap_percent: 0,
         ..old
     };
     assert_eq!(CombatStats::from_cooked(tuned.cooked()), tuned);

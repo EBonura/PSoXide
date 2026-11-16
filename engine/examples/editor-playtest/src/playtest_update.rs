@@ -1759,15 +1759,16 @@ fn nearest_stop_uses_mirror(position: u32, cycle: u32) -> bool {
     position.abs_diff(cycle / 2) < position.min(cycle.saturating_sub(position))
 }
 
-/// The strike a press for `wanted` performs: none without the melee kit,
-/// else `wanted` or the first bound strike of its fallback chain, as long as
-/// the player has a state for it.
+/// The strike a press for `wanted` performs, through the one gate every
+/// fighter's attacks pass ([`combat_verbs::attack_for`]): none without the
+/// melee kit, else `wanted` or the first bound strike of its fallback chain,
+/// as long as the player has a state for it.
 pub(super) fn player_strike(
     character: Option<&RuntimeCharacter>,
     wanted: CharacterAnimationAction,
 ) -> Option<PlayerAnim> {
-    let character = character.filter(|character| character.combat_kits().can_melee())?;
-    match combat_verbs::resolve(character, wanted)? {
+    let character = character?;
+    match combat_verbs::attack_for(character.combat_kits(), character, wanted)? {
         CharacterAnimationAction::LightAttack => Some(PlayerAnim::LightAttack),
         CharacterAnimationAction::HeavyAttack => Some(PlayerAnim::HeavyAttack),
         CharacterAnimationAction::VertLightAttack => Some(PlayerAnim::VertLightAttack),

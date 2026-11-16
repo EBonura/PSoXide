@@ -38,7 +38,7 @@
 mod flow;
 mod spawn;
 mod tactics;
-pub use tactics::{EnemyGoal, EnemyGoalResult, EnemyTacticalSnapshot};
+pub use tactics::{EnemyGoal, EnemyGoalResult, EnemyTacticalSnapshot, STANCE_REASON_PARRY};
 
 use crate::combat::{arc_hits_circle, MeleeArc};
 use crate::combatant::{
@@ -2084,6 +2084,21 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             self.attack_wait_ticks[index] = 0;
             self.set_intent(index, GameEntityIntent::Approach);
             stats.attack_grants = stats.attack_grants.saturating_add(1);
+        }
+    }
+
+    /// Take the shared attack slot for `index` unless another entity holds
+    /// it, without the director's wait: a riposte is a reflex. True when
+    /// `index` holds the slot.
+    fn claim_attack_owner(&mut self, index: usize) -> bool {
+        match self.attack_owner() {
+            Some(owner) => owner == index,
+            None => {
+                self.attack_owner_plus_one = (index + 1) as u16;
+                self.attack_owner_chase_ticks = 0;
+                self.attack_wait_ticks[index] = 0;
+                true
+            }
         }
     }
 

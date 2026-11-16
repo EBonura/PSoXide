@@ -2527,7 +2527,7 @@ pub(crate) fn push_game_entity(
         flags |= psx_level::game_entity_flags::RANGED_ATTACK;
     }
     if state_clips.kits.can_melee() {
-        flags |= psx_level::game_entity_flags::MELEE_ATTACK;
+        flags |= psx_level::game_entity_flags::MELEE_ATTACK | state_clips.strikes;
     }
     if state_clips.kits.can_dodge() {
         flags |= psx_level::game_entity_flags::MOBILITY;

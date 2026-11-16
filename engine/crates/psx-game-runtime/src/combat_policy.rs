@@ -1,4 +1,5 @@
 //! Shared tactical choices. Controllers execute intents through their own legal actions.
+use crate::combat_intent::CombatAction;
 use crate::vitality::VitalityChannelId;
 
 /// Why the policy prefers a stance. Stable values are used by duel reports.
@@ -69,6 +70,48 @@ pub fn attack_choice(ranged: bool, close: bool, last: u8, repeats: u8, roll: u16
     }
 }
 
+/// Whether to swap on purpose to parry: a hit is seen `ticks_to_hit` ticks
+/// away, inside the fighter's parry window of `parry_ticks`, the fighter may
+/// swap now, and its roll falls under `percent` (its
+/// [`CombatStats::parry_swap_percent`](psx_level::CombatStats::parry_swap_percent)).
+/// `roll` (0..100) is drawn only when everything else holds, so a fighter
+/// that never sees a parryable hit keeps its random sequence. The same
+/// choice for the duel's player bot and every tactical enemy; what each
+/// can see of the incoming hit is the controller's own perception.
+pub fn parry_swap(
+    ticks_to_hit: Option<u16>,
+    parry_ticks: u16,
+    can_swap: bool,
+    percent: u8,
+    roll: impl FnOnce() -> u16,
+) -> bool {
+    can_swap
+        && percent != 0
+        && parry_ticks != 0
+        && ticks_to_hit.is_some_and(|ticks| ticks <= parry_ticks)
+        && roll() % 100 < u16::from(percent)
+}
+
+/// What a fighter does with the crit its parry armed: attack with the
+/// weapon the parry swapped to. In the blade stance that is the light
+/// strike (the crit strike) once the target is in reach; in the Zenith
+/// stance the shot (the crit shot) when the fighter can afford it. None
+/// with no crit armed, or when the weapon cannot reach yet.
+pub fn crit_followup(
+    crit_armed: bool,
+    stance: VitalityChannelId,
+    in_melee_reach: bool,
+    can_shoot: bool,
+) -> Option<CombatAction> {
+    if !crit_armed {
+        return None;
+    }
+    match stance {
+        VitalityChannelId::One => in_melee_reach.then_some(CombatAction::LightAttack),
+        VitalityChannelId::Two => can_shoot.then_some(CombatAction::Shoot),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,6 +142,41 @@ mod tests {
         use VitalityChannelId::*;
         assert_eq!(stance_choice(true, false, Some(One)).0, One);
         assert_eq!(stance_choice(false, false, Some(Two)).0, Two);
+    }
+    #[test]
+    fn a_parry_swap_needs_a_hit_inside_the_window_and_a_roll() {
+        let yes = || 10;
+        let no = || 90;
+        assert!(parry_swap(Some(3), 8, true, 50, yes));
+        assert!(parry_swap(Some(8), 8, true, 50, yes));
+        assert!(!parry_swap(Some(9), 8, true, 50, yes));
+        assert!(!parry_swap(None, 8, true, 50, yes));
+        assert!(!parry_swap(Some(3), 8, false, 50, yes));
+        assert!(!parry_swap(Some(3), 8, true, 0, yes));
+        assert!(!parry_swap(Some(3), 0, true, 50, yes));
+        assert!(!parry_swap(Some(3), 8, true, 50, no));
+        // No draw unless everything else holds.
+        let mut drawn = false;
+        assert!(!parry_swap(Some(20), 8, true, 50, || {
+            drawn = true;
+            0
+        }));
+        assert!(!drawn);
+    }
+    #[test]
+    fn a_crit_is_spent_with_the_swapped_to_weapon() {
+        use VitalityChannelId::*;
+        assert_eq!(
+            crit_followup(true, One, true, true),
+            Some(CombatAction::LightAttack)
+        );
+        assert_eq!(crit_followup(true, One, false, true), None);
+        assert_eq!(
+            crit_followup(true, Two, false, true),
+            Some(CombatAction::Shoot)
+        );
+        assert_eq!(crit_followup(true, Two, true, false), None);
+        assert_eq!(crit_followup(false, One, true, true), None);
     }
     #[test]
     fn attacks_mix_without_an_endless_heavy_repeat() {

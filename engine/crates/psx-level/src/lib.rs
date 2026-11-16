@@ -1105,6 +1105,31 @@ pub mod game_entity_flags {
     /// The Character has the mobility kit
     /// ([`CombatKits::can_dodge`](crate::combat_verbs::CombatKits::can_dodge)).
     pub const MOBILITY: u16 = 1 << 6;
+    /// The Character binds a light strike clip of its own (or the legacy
+    /// combo slot it falls back to).
+    pub const LIGHT_ATTACK: u16 = 1 << 7;
+    /// The Character binds a heavy strike clip of its own. Without it a
+    /// heavy request is the light strike ([`combat_verbs::attack_for`]).
+    pub const HEAVY_ATTACK: u16 = 1 << 8;
+}
+
+/// The strike and shot bindings a cooked game entity record carries in its
+/// [`game_entity_flags`], as [`combat_verbs::VerbBindings`]: what
+/// [`combat_verbs::attack_for`] needs to gate an entity's attacks the way
+/// it gates the player's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GameEntityBindings(pub u16);
+
+impl combat_verbs::VerbBindings for GameEntityBindings {
+    fn bound(&self, action: CharacterAnimationAction) -> bool {
+        let bit = match action {
+            CharacterAnimationAction::LightAttack => game_entity_flags::LIGHT_ATTACK,
+            CharacterAnimationAction::HeavyAttack => game_entity_flags::HEAVY_ATTACK,
+            CharacterAnimationAction::RangedAttack => game_entity_flags::RANGED_ATTACK,
+            _ => 0,
+        };
+        self.0 & bit != 0
+    }
 }
 
 /// The combat kits a cooked game entity record carries in its
@@ -1238,6 +1263,10 @@ pub struct CombatStats {
     /// character's [`CharacterAnimationAction::Knockdown`] role, which falls
     /// back to its stagger clip until one is authored.
     pub knockdown_ticks: u16,
+    /// For an AI controller of this character: percent chance it swaps on
+    /// purpose when it sees a hit about to land inside its parry window.
+    /// Zero never parries on purpose. The pad ignores it.
+    pub parry_swap_percent: u8,
 }
 
 impl CombatStats {
@@ -1275,6 +1304,8 @@ impl CombatStats {
         crit_poise_q12: 8192,
         // PLACEHOLDER, harness tunes: one second down.
         knockdown_ticks: 60,
+        // PLACEHOLDER, harness tunes: half the hits an AI sees coming.
+        parry_swap_percent: 50,
     };
 
     /// An enemy's numbers when nothing was authored: 200 health (the two
