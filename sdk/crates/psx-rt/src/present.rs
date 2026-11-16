@@ -434,7 +434,10 @@ pub fn show_drawn(origin: (u16, u16)) {
     psx_io::gpu::run_direct_access_guard();
     let port = &mut Hardware;
     wait_flip_on(port);
-    present_drawn_on(port, gp1::display_start(u32::from(origin.0), u32::from(origin.1)));
+    present_drawn_on(
+        port,
+        gp1::display_start(u32::from(origin.0), u32::from(origin.1)),
+    );
 }
 
 /// Turn the video output on or off (GP1(03h)) at the next edge on which bit 24
