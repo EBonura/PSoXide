@@ -324,10 +324,7 @@ pub fn signal_draw_done_unguarded() {
 #[inline(never)]
 fn kick_draw_done_list() {
     use crate::dma::{self, Channel};
-    if !dma::wait_done(Channel::Gpu, dma::DEFAULT_SPINS) {
-        dma::abort(Channel::Gpu);
-        write_display_control_unguarded(psx_hw::gpu::gp1::RESET_CMD_BUFFER);
-    }
+    settle_gpu_channel();
     // Games re-route DMA for VRAM readback and do not always restore it.
     write_display_control_unguarded(psx_hw::gpu::gp1::dma_direction(
         psx_hw::gpu::DmaDirection::CpuToGp0 as u32,
@@ -347,11 +344,19 @@ fn kick_draw_done_list() {
             },
         );
     }
+    settle_gpu_channel();
+    dma::compiler_barrier();
+}
+
+/// Wait out the GPU channel's walk, bounded; a walk that does not end is aborted and the GPU's
+/// command buffer reset. One body for the two waits of [`kick_draw_done_list`].
+#[inline(never)]
+fn settle_gpu_channel() {
+    use crate::dma::{self, Channel};
     if !dma::wait_done(Channel::Gpu, dma::DEFAULT_SPINS) {
         dma::abort(Channel::Gpu);
         write_display_control_unguarded(psx_hw::gpu::gp1::RESET_CMD_BUFFER);
     }
-    dma::compiler_barrier();
 }
 
 /// Spin until the GPU can start a DMA block transfer.
