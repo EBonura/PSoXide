@@ -98,7 +98,7 @@ impl Playlist {
         if self.pos >= self.count {
             Slot::Off
         } else {
-            Slot::Song(self.order[self.pos as usize])
+            Slot::Song(self.order[self.pos as usize & (MAX_SONGS - 1)])
         }
     }
 
@@ -118,17 +118,9 @@ impl Playlist {
 
     /// The shoulder button forward: the next song, then the off slot if there is one, then a
     /// fresh shuffle from its first song.
-    #[inline(never)]
+    #[inline]
     pub fn skip_forward(&mut self) -> Slot {
-        if self.count == 0 {
-            return Slot::Off;
-        }
-        if self.pos + 1 < self.slots() {
-            self.pos += 1;
-        } else {
-            self.reshuffle();
-        }
-        self.slot()
+        self.advance(self.slots())
     }
 
     /// The shoulder button back: the previous slot of this shuffle, wrapping to the last slot
@@ -148,12 +140,19 @@ impl Playlist {
 
     /// The song ended by itself: on to the next song, reshuffling (without opening on the song
     /// just heard) when this shuffle is spent. Never lands on the off slot.
-    #[inline(never)]
+    #[inline]
     pub fn song_finished(&mut self) -> Slot {
+        self.advance(self.count)
+    }
+
+    /// One step forward through `limit` positions (`count` or `slots()`), one body for both
+    /// callers, a fresh shuffle after the last.
+    #[inline(never)]
+    fn advance(&mut self, limit: u8) -> Slot {
         if self.count == 0 {
             return Slot::Off;
         }
-        if self.pos + 1 < self.count {
+        if self.pos + 1 < limit {
             self.pos += 1;
         } else {
             self.reshuffle();
@@ -162,7 +161,7 @@ impl Playlist {
     }
 
     fn reshuffle(&mut self) {
-        let last = self.order[self.count as usize - 1];
+        let last = self.order[(self.count as usize - 1) & (MAX_SONGS - 1)];
         self.shuffle(Some(last));
         self.pos = 0;
     }
@@ -180,7 +179,7 @@ impl Playlist {
         for i in (1..n).rev() {
             self.rng = Xorshift32::step(self.rng);
             let j = ((self.rng >> 8) % (i as u32 + 1)) as usize;
-            self.order.swap(i, j);
+            self.order.swap(i & (MAX_SONGS - 1), j & (MAX_SONGS - 1));
         }
         if n > 1 && Some(self.order[0]) == avoid_first {
             self.order.swap(0, 1);
