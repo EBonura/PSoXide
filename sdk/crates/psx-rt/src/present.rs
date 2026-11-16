@@ -555,8 +555,9 @@ impl Presenter {
     pub fn begin_frame(&mut self, buffers: &DoubleBuffer) {
         psx_io::gpu::run_direct_access_guard();
         let port = &mut Hardware;
-        if port.flip() != 0 || port.head() != 0 || port.is_channel_busy() {
-            wait_idle_on(port);
+        // The guard above emptied the slot if a part was ever submitted (submit arms it).
+        if port.flip() != 0 || port.is_channel_busy() {
+            wait_drawn_idle_on(port);
         }
         compiler_barrier();
         for word in buffers.draw_target_words() {
@@ -575,8 +576,9 @@ impl Presenter {
         // `begin_frame` saw to it; a frame that skipped it waits here.
         psx_io::gpu::run_direct_access_guard();
         let port = &mut Hardware;
-        if port.flip() != 0 || port.head() != 0 {
-            wait_idle_on(port);
+        // The guard above emptied the slot if a part was ever submitted (submit arms it).
+        if port.flip() != 0 {
+            wait_drawn_idle_on(port);
         }
         observe_signal();
         let display = buffers.begin_deferred_swap();
@@ -732,6 +734,14 @@ fn wait_arena_free_on<P: Port>(port: &mut P) -> u32 {
 #[inline(never)]
 fn wait_idle_on<P: Port>(port: &mut P) {
     wait_slot_empty_on(port);
+    wait_drawn_idle_on(port);
+}
+
+/// Wait until no flip is pending and channel 2 is idle; a wait that does not end stops the walk by
+/// hand. The wait of a program that presents with `present_drawn` and never submits parts: it has
+/// no slot wait, so it links neither the slot loop nor the thread kick.
+#[inline(never)]
+fn wait_drawn_idle_on<P: Port>(port: &mut P) {
     let start = port.vblanks();
     let mut spins = 0u32;
     while port.flip() != 0 || port.is_channel_busy() {
@@ -741,6 +751,17 @@ fn wait_idle_on<P: Port>(port: &mut P) {
             break;
         }
     }
+}
+
+/// Wait until the last drawn frame's flip has landed and channel 2 is idle: the wait for a program
+/// that presents with [`Presenter::present_drawn`] and never calls [`Presenter::submit`] or
+/// `publish_raw`. Its slot is always empty, so this has no slot wait and no chain-aware path, and
+/// the program links neither the thread kick nor the slot half of [`wait_idle`]. A program that
+/// submits parts must use [`wait_idle`]. Bounded like it.
+#[inline(never)]
+pub fn wait_drawn_idle() {
+    wait_drawn_idle_on(&mut Hardware);
+    compiler_barrier();
 }
 
 /// Signal mode keeps a leaky count of misses: a miss adds `TRUST_MISS_WEIGHT`, a clean frame takes
