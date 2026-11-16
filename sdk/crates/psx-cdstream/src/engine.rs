@@ -449,6 +449,7 @@ impl<H: CdHw, const SLOTS: usize, const RESULTS: usize, const LEASE: bool>
     /// 2^32: the transfers that may have moved the drive's head. A head parked next to a
     /// sector (see [`Request::park`]) is still there while this equals its value at the
     /// park's submission.
+    #[must_use]
     pub fn submissions(&self) -> u32 {
         self.next_ticket.wrapping_sub(1)
     }

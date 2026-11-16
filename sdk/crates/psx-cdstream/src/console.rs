@@ -717,6 +717,7 @@ pub fn handler_stack_unused_bytes() -> usize {
 /// is the only one running: with one request at a time (a [`single`] transport) that is always
 /// so. [`state`](fn@state) gives the definitive answer, and the only one that knows how the
 /// request ended.
+#[must_use]
 pub fn sectors_landed() -> u32 {
     // SAFETY: a plain load of a word that the interrupt handler and foreground calls store;
     // a stale value only means the answer is one sector old.
@@ -727,6 +728,7 @@ pub fn sectors_landed() -> u32 {
 /// the number of transfers that may have moved the drive's head. A head parked next to a
 /// sector is still there while this has not changed since the park was submitted. See
 /// [`Engine::submissions`].
+#[must_use]
 pub fn submissions() -> u32 {
     with_engine(|engine| engine.submissions())
 }
@@ -764,6 +766,7 @@ pub mod single {
     }
 
     /// Give the controller back to polled code; see [`uninstall`](fn@crate::uninstall).
+    #[must_use]
     pub fn uninstall() -> Option<Cd> {
         uninstall_in::<Single>()
     }
@@ -798,6 +801,7 @@ pub mod single {
     }
 
     /// Cancel the read; it stops at the next sector. Returns whether `ticket` was running.
+    #[must_use]
     pub fn cancel(ticket: Ticket) -> bool {
         with_engine(|engine| engine.cancel(ticket))
     }
@@ -808,6 +812,7 @@ pub mod single {
     }
 
     /// Where a read is. The latest finished request is remembered, no older one.
+    #[must_use]
     pub fn state(ticket: Ticket) -> RequestState {
         with_engine(|engine| engine.state(ticket))
     }
@@ -818,26 +823,31 @@ pub mod single {
     }
 
     /// Whether the drive is stopped and no read holds it.
+    #[must_use]
     pub fn is_idle() -> bool {
         with_engine(|engine| engine.is_idle())
     }
 
     /// Who may program the controller.
+    #[must_use]
     pub fn owner() -> Owner {
         with_engine(|engine| engine.owner())
     }
 
     /// The controller phase.
+    #[must_use]
     pub fn phase() -> Phase {
         with_engine(|engine| engine.phase())
     }
 
     /// A copy of the counters.
+    #[must_use]
     pub fn stats() -> StreamStats {
         with_engine(|engine| engine.stats())
     }
 
     /// Requests accepted so far; see [`submissions`](fn@crate::submissions).
+    #[must_use]
     pub fn submissions() -> u32 {
         with_engine(|engine| engine.submissions())
     }
