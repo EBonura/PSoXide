@@ -39,6 +39,7 @@ pub const MAX_SONGS: usize = 8;
 
 /// What the music is doing at a playlist position.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[allow(clippy::exhaustive_enums)] // closed: a song or silence, matched by callers
 pub enum Slot {
     /// Song `n`, numbered as the caller's table is.
     Song(u8),
@@ -49,6 +50,7 @@ pub enum Slot {
 
 /// Whether a silent slot follows the last song.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[allow(clippy::exhaustive_enums)] // closed: with the off slot or without it
 pub enum OffSlot {
     /// The order wraps from the last song to the first.
     Without,
@@ -186,6 +188,7 @@ impl Playlist {
 }
 
 #[cfg(test)]
+#[allow(clippy::needless_range_loop)] // the oracles are the games' own loops, verbatim
 mod tests {
     use super::*;
 
