@@ -12,6 +12,7 @@ workspace = true
 [dependencies]
 psx-vector = { path = "../psx-vector", features = ["encode"] }
 psx-gpu = { path = "../../../sdk/crates/psx-gpu" }
+psx-hw = { path = "../../../crates/psx-hw" }
 
 [[bin]]
 name = "psx-svg-cook"

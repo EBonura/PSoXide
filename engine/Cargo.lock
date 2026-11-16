@@ -437,6 +437,7 @@ name = "psx-vector-cook"
 version = "0.1.0"
 dependencies = [
  "psx-gpu",
+ "psx-hw",
  "psx-vector",
 ]
 
