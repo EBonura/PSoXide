@@ -37,6 +37,15 @@
 //! outlined to inlined at every call site, 2 to 11 sites each, and `mark_leaf_faces`
 //! grew from 680 to 3,248 B); the same adoption with the byte form gave 2,752 B back.
 //! Keep this shape unless the same comparison on a ship link says otherwise.
+//!
+//! The checked readers (`read_*` and `read_*_inline`) are the other way round, on purpose: a
+//! length test and one `read_unaligned`. Their callers are load-time parsers, often in
+//! `#[optimize(size)]` functions, where the inliner prices the callee by its IR: the byte form
+//! (four loads, shifts and ors) is too dear to inline there, so each of Ocarina's header
+//! parsers (`Skm::new`, `Prm::new`, `Col::parse`, `TitleCam::new`) took a call per field and
+//! grew by about 1,400 B; with the one-load form they are the size they were before the shape
+//! change. A hot accessor that must not be inlined everywhere reads through the unchecked byte
+//! form after its own test.
 
 /// Little-endian `u16` at `offset`.
 ///
@@ -52,7 +61,7 @@
 pub fn read_u16(bytes: &[u8], offset: usize) -> u16 {
     assert!(bytes.len() >= 2 && offset <= bytes.len() - 2);
     // SAFETY: the two bytes at `offset` are inside `bytes`, checked above.
-    unsafe { read_u16_unchecked(bytes, offset) }
+    u16::from_le(unsafe { bytes.as_ptr().add(offset).cast::<u16>().read_unaligned() })
 }
 
 /// Little-endian `u32` at `offset`.
@@ -69,7 +78,7 @@ pub fn read_u16(bytes: &[u8], offset: usize) -> u16 {
 pub fn read_u32(bytes: &[u8], offset: usize) -> u32 {
     assert!(bytes.len() >= 4 && offset <= bytes.len() - 4);
     // SAFETY: the four bytes at `offset` are inside `bytes`, checked above.
-    unsafe { read_u32_unchecked(bytes, offset) }
+    u32::from_le(unsafe { bytes.as_ptr().add(offset).cast::<u32>().read_unaligned() })
 }
 
 /// Little-endian `u16` at `offset`, or `None` if `offset + 2` is past `bytes.len()`.
@@ -210,7 +219,7 @@ pub unsafe fn read_i32_unchecked(bytes: &[u8], offset: usize) -> i32 {
 pub fn read_u16_inline(bytes: &[u8], offset: usize) -> u16 {
     assert!(bytes.len() >= 2 && offset <= bytes.len() - 2);
     // SAFETY: the two bytes at `offset` are inside `bytes`, checked above.
-    unsafe { read_u16_unchecked(bytes, offset) }
+    u16::from_le(unsafe { bytes.as_ptr().add(offset).cast::<u16>().read_unaligned() })
 }
 
 /// [`read_u32`] always inlined; see [`read_u16_inline`].
@@ -223,7 +232,7 @@ pub fn read_u16_inline(bytes: &[u8], offset: usize) -> u16 {
 pub fn read_u32_inline(bytes: &[u8], offset: usize) -> u32 {
     assert!(bytes.len() >= 4 && offset <= bytes.len() - 4);
     // SAFETY: the four bytes at `offset` are inside `bytes`, checked above.
-    unsafe { read_u32_unchecked(bytes, offset) }
+    u32::from_le(unsafe { bytes.as_ptr().add(offset).cast::<u32>().read_unaligned() })
 }
 
 /// [`read_u16_unchecked`] from a base pointer: the form a parser that walks a blob by pointer
