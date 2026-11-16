@@ -6,11 +6,7 @@
 //! fixed backing arenas for primitive packets without depending on an
 //! allocator.
 
-use psx_gpu::{
-    ot::OrderingTable,
-    prim::{QuadTexturedGouraud, TriTexturedGouraud},
-};
-use psx_io::periph::GpuDma;
+use psx_gpu::prim::{QuadTexturedGouraud, TriTexturedGouraud};
 use psx_math::int32::InvariantDivisor31;
 
 /// GPU primitive packet that can be inserted into an ordering table; the
@@ -262,152 +258,59 @@ impl DepthBand {
     }
 }
 
-/// One frame's view of an ordering table: the engine's depth helpers over
-/// [`psx_gpu::frame::OtFrame`].
+/// The one frame type: the engine adds no second one, only the depth-typed insertion methods of
+/// [`OtFrameDepth`] on [`psx_gpu::frame::OtFrame`].
 ///
-/// [`begin`](Self::begin) clears the table and borrows it for `'a`. Every
-/// packet added through the typed methods is borrowed for `'a` too, so it
-/// stays alive and unmoved until [`submit`](Self::submit) has waited out
-/// the walk. Raw packets go in through the `unsafe` `add_raw*` methods,
-/// whose callers vouch for the packet's lifetime.
-#[must_use = "call submit() to send the ordering table to the GPU"]
-pub struct OtFrame<'a, const DEPTH: usize> {
-    frame: psx_gpu::frame::OtFrame<'a, DEPTH>,
-}
+/// [`begin`](OtFrame::begin) clears the table and borrows it for `'a`. Every packet added through
+/// the typed methods is borrowed for `'a` too, so it stays alive and unmoved until
+/// [`submit`](OtFrame::submit) has waited out the walk. Raw packets go in through the `unsafe`
+/// `add_raw*` methods, whose callers vouch for the packet's lifetime.
+pub use psx_gpu::frame::OtFrame;
 
-impl<'a, const DEPTH: usize> OtFrame<'a, DEPTH> {
-    /// Clear `ot` and begin a new frame.
-    ///
-    /// `DEPTH` must be greater than zero; the underlying SDK
-    /// ordering table has the same requirement.
-    pub fn begin(ot: &'a mut OrderingTable<DEPTH>) -> Self {
-        debug_assert!(DEPTH > 0);
-        Self { frame: ot.frame() }
-    }
-
-    /// Continue inserting into an already-started ordering table.
-    ///
-    /// This is for a frame built in more than one pass (a scene pass,
-    /// then an overlay pass) over the same table.
-    ///
-    /// # Safety
-    ///
-    /// See [`OrderingTable::resume_frame`]: every packet `ot` already links
-    /// must stay live and unmodified until this frame's walk has finished,
-    /// and `ot` must not be walking.
-    pub unsafe fn resume(ot: &'a mut OrderingTable<DEPTH>) -> Self {
-        debug_assert!(DEPTH > 0);
-        // SAFETY: forwarded contract.
-        Self {
-            frame: unsafe { ot.resume_frame() },
-        }
-    }
-
-    /// Insert a raw primitive packet pointer at a raw OT slot.
-    ///
-    /// # Safety
-    /// `packet_ptr` must point at the first word of a live GPU packet
-    /// that remains writable until the ordering-table DMA has consumed
-    /// it. `words` is the number of data words following the tag word.
-    pub unsafe fn add_raw(&mut self, slot: usize, packet_ptr: *mut u32, words: u8) {
-        // SAFETY: forwarded contract.
-        unsafe { self.frame.add_raw(slot, packet_ptr, words) };
-    }
-
+/// The engine's depth-typed way into an [`OtFrame`]: insert a packet at a [`DepthSlot`], or at the
+/// slot a depth maps to in a [`DepthRange`]. Import the trait to call the methods.
+pub trait OtFrameDepth<'a, const DEPTH: usize> {
     /// Insert a raw primitive packet pointer at a typed OT slot.
     ///
     /// # Safety
-    /// Same requirements as [`add_raw`](Self::add_raw).
-    pub unsafe fn add_raw_slot(&mut self, slot: DepthSlot, packet_ptr: *mut u32, words: u8) {
+    /// Same requirements as [`OtFrame::add_raw`].
+    unsafe fn add_raw_slot(&mut self, slot: DepthSlot, packet_ptr: *mut u32, words: u8);
+
+    /// Link one committed run of a [`PrimitivePacketArena`] whose packets already carry their
+    /// own tags, in a single insertion. An empty stream links nothing.
+    ///
+    /// # Safety
+    /// Same requirements as [`OtFrame::add_tagged_packet_stream_unchecked`]; `stream` is one
+    /// committed range of that arena.
+    unsafe fn add_committed_tagged_packet_stream_unchecked(
+        &mut self,
+        stream: PrimitivePacketStream,
+    );
+
+    /// Insert a packet at a typed OT slot.
+    fn add_packet_slot<T: GpuPacket>(&mut self, slot: DepthSlot, prim: &'a mut T);
+
+    /// Insert a packet at the slot `depth` maps to in `range`.
+    fn add_packet_depth<T: GpuPacket>(&mut self, range: DepthRange, depth: i32, prim: &'a mut T);
+
+    /// Insert a packet at the slot a [`CameraDepth`] maps to in `range`.
+    fn add_packet_camera_depth<T: GpuPacket>(
+        &mut self,
+        range: DepthRange,
+        depth: CameraDepth,
+        prim: &'a mut T,
+    );
+}
+
+impl<'a, const DEPTH: usize> OtFrameDepth<'a, DEPTH> for OtFrame<'a, DEPTH> {
+    #[inline(always)]
+    unsafe fn add_raw_slot(&mut self, slot: DepthSlot, packet_ptr: *mut u32, words: u8) {
         // SAFETY: forwarded contract.
         unsafe { self.add_raw(slot.index(), packet_ptr, words) };
     }
 
-    /// Insert a raw primitive packet pointer at an already-clamped raw OT slot.
-    ///
-    /// # Safety
-    /// Same requirements as [`add_raw`](Self::add_raw). In addition, `slot`
-    /// must be less than `DEPTH` and `words` at most
-    /// [`psx_gpu::MAX_NODE_WORDS`].
     #[inline(always)]
-    pub unsafe fn add_raw_unchecked(&mut self, slot: usize, packet_ptr: *mut u32, words: u8) {
-        // SAFETY: forwarded contract.
-        unsafe { self.frame.add_raw_unchecked(slot, packet_ptr, words) };
-    }
-
-    /// Insert a raw primitive whose packet length is already in GPU-tag form
-    /// at an already-clamped raw OT slot.
-    ///
-    /// # Safety
-    /// Same requirements as [`add_raw_unchecked`](Self::add_raw_unchecked).
-    /// The low 24 bits of `tag_high` must be zero.
-    #[inline(always)]
-    pub unsafe fn add_raw_tag_unchecked(
-        &mut self,
-        slot: usize,
-        packet_ptr: *mut u32,
-        tag_high: u32,
-    ) {
-        // SAFETY: forwarded contract.
-        unsafe {
-            self.frame
-                .add_raw_tag_high_unchecked(slot, packet_ptr, tag_high)
-        };
-    }
-
-    /// Insert compact raw packet commands in reverse array order.
-    ///
-    /// See [`OrderingTable::insert_packed_commands_reverse_unchecked`] for the
-    /// two-word command layout.
-    ///
-    /// # Safety
-    ///
-    /// `commands` must point at `command_count * 2` readable words laid out
-    /// as that method documents, every encoded slot must be less than
-    /// `DEPTH`, and every packet must meet [`add_raw`](Self::add_raw)'s
-    /// contract: none of this is checked here.
-    #[inline(always)]
-    pub unsafe fn add_packed_commands_reverse_unchecked(
-        &mut self,
-        commands: *const usize,
-        command_count: usize,
-    ) {
-        // SAFETY: forwarded contract.
-        unsafe {
-            self.frame
-                .add_packed_commands_reverse_unchecked(commands, command_count)
-        };
-    }
-
-    /// Insert a contiguous stream of classic packets whose temporary tag
-    /// carries its target ordering-table slot.
-    ///
-    /// # Safety
-    ///
-    /// `first..end` must be a writable sequence of complete tagged packets,
-    /// and every non-sentinel slot encoded in that sequence must be less than
-    /// `DEPTH`. The packet storage must remain live and unmodified until the
-    /// submitted ordering-table DMA has completed.
-    #[inline(always)]
-    pub unsafe fn add_tagged_packet_stream_unchecked(&mut self, first: *mut u32, end: *mut u32) {
-        // SAFETY: forwarded contract.
-        unsafe { self.frame.add_tagged_packet_stream_unchecked(first, end) };
-    }
-
-    /// Insert a tagged stream committed from the shared primitive packet
-    /// arena.
-    ///
-    /// Unlike [`add_tagged_packet_stream_unchecked`](Self::add_tagged_packet_stream_unchecked),
-    /// this form carries the exact committed range and cannot accidentally
-    /// link unused reservation capacity into the ordering table.
-    ///
-    /// # Safety
-    ///
-    /// The arena storage represented by `stream` must remain live and
-    /// unmodified until the ordering-table DMA has completed. Every
-    /// non-sentinel slot encoded in the stream must be less than `DEPTH`.
-    #[inline(always)]
-    pub unsafe fn add_committed_tagged_packet_stream_unchecked(
+    unsafe fn add_committed_tagged_packet_stream_unchecked(
         &mut self,
         stream: PrimitivePacketStream,
     ) {
@@ -415,73 +318,25 @@ impl<'a, const DEPTH: usize> OtFrame<'a, DEPTH> {
             return;
         }
         // SAFETY: forwarded contract; `stream` is one committed range.
-        unsafe {
-            self.frame
-                .add_tagged_packet_stream_unchecked(stream.first, stream.end)
-        };
+        unsafe { self.add_tagged_packet_stream_unchecked(stream.first, stream.end) };
     }
 
-    /// Insert a known SDK GPU packet at a raw OT slot.
     #[inline(always)]
-    pub fn add_packet<T: GpuPacket>(&mut self, slot: usize, prim: &'a mut T) {
-        self.frame.add(slot, prim);
+    fn add_packet_slot<T: GpuPacket>(&mut self, slot: DepthSlot, prim: &'a mut T) {
+        self.add(slot.index(), prim);
     }
 
-    /// Insert a known SDK GPU packet at a typed OT slot.
-    #[inline(always)]
-    pub fn add_packet_slot<T: GpuPacket>(&mut self, slot: DepthSlot, prim: &'a mut T) {
-        self.add_packet(slot.index(), prim);
-    }
-
-    /// Map camera-space `depth` through `range` and insert a known
-    /// SDK GPU packet into the resulting OT slot.
-    pub fn add_packet_depth<T: GpuPacket>(
-        &mut self,
-        range: DepthRange,
-        depth: i32,
-        prim: &'a mut T,
-    ) {
+    fn add_packet_depth<T: GpuPacket>(&mut self, range: DepthRange, depth: i32, prim: &'a mut T) {
         self.add_packet_camera_depth(range, CameraDepth::new(depth), prim);
     }
 
-    /// Map typed camera-space `depth` through `range` and insert a
-    /// known SDK GPU packet into the resulting OT slot.
-    pub fn add_packet_camera_depth<T: GpuPacket>(
+    fn add_packet_camera_depth<T: GpuPacket>(
         &mut self,
         range: DepthRange,
         depth: CameraDepth,
         prim: &'a mut T,
     ) {
         self.add_packet_slot(range.slot_depth::<DEPTH>(depth), prim);
-    }
-
-    /// Continue the walk past slot 0 into `head` instead of ending it there:
-    /// for a present-queue frame, [`Ctx::present_queue_hook`](crate::Ctx::present_queue_hook).
-    /// Call it right after [`begin`](Self::begin), before anything is
-    /// inserted at slot 0.
-    ///
-    /// # Safety
-    /// `head` must be a linked-list node that ends the list itself, live and
-    /// unmodified while the table is walked.
-    pub unsafe fn end_with_chain(&mut self, head: *const u32) {
-        // SAFETY: forwarded contract.
-        unsafe { self.frame.end_with_chain(head) }
-    }
-
-    /// The first node the table's walk reads.
-    pub fn submit_head(&self) -> *const u32 {
-        self.frame.submit_head()
-    }
-
-    /// Submit this frame's ordering table and wait for the walk.
-    pub fn submit(self, dma: &mut GpuDma) {
-        self.frame.submit(dma);
-    }
-
-    /// Submit this frame's ordering table, run `overlap` while the GPU
-    /// walks it, then wait for the walk.
-    pub fn submit_with<R>(self, dma: &mut GpuDma, overlap: impl FnOnce() -> R) -> R {
-        self.frame.submit_with(dma, overlap)
     }
 }
 

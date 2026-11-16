@@ -10,6 +10,7 @@
 //! drawing is the row-span grid renderer.
 
 use core::fmt;
+use psx_engine::OtFrameDepth;
 
 use alloc::boxed::Box;
 use alloc::vec;

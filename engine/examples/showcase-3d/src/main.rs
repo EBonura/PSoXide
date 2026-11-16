@@ -332,7 +332,7 @@ impl Showcase3D {
         )) else {
             return;
         };
-        ot.add_packet(BG_SLOT, bg);
+        ot.add(BG_SLOT, bg);
 
         // Behind world geometry -- starfield with a slow whole-scene
         // roll for parallax.
@@ -363,7 +363,7 @@ impl Showcase3D {
             )) else {
                 break;
             };
-            ot.add_packet(STAR_SLOT, rect);
+            ot.add(STAR_SLOT, rect);
         }
 
         // Pre-project both meshes' vertices once, then walk triangle
@@ -549,7 +549,7 @@ fn render_particles<'a, const N: usize, const OT_N: usize>(
         )) else {
             break;
         };
-        ot.add_packet(slot, rect);
+        ot.add(slot, rect);
         written += 1;
     }
     written

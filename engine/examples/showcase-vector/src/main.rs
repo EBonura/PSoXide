@@ -620,7 +620,7 @@ impl Demo {
                     }
                     // SAFETY: a `static`, unmodified until the walk ends.
                     hud.link(&state, |ptr, tag| unsafe {
-                        ot.add_raw_tag_unchecked(8, ptr, tag)
+                        ot.add_raw_tag_high_unchecked(8, ptr, tag)
                     });
                 }
                 return "walk_hud";
@@ -664,7 +664,7 @@ impl Demo {
                 }
                 // SAFETY: a `static`, unmodified until the walk ends.
                 hud.link(&state, |ptr, tag| unsafe {
-                    ot.add_raw_tag_unchecked(8, ptr, tag)
+                    ot.add_raw_tag_high_unchecked(8, ptr, tag)
                 });
             }
             return "walk_hud";
@@ -707,7 +707,7 @@ impl Demo {
             let t0 = ticks();
             // SAFETY: a `static`, unmodified until the walk ends.
             hud.link(&state, |ptr, tag| unsafe {
-                ot.add_raw_tag_unchecked(8, ptr, tag)
+                ot.add_raw_tag_high_unchecked(8, ptr, tag)
             });
             let spent = ticks().wrapping_sub(t0);
             if swap != 0 {
