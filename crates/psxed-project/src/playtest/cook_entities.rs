@@ -3213,7 +3213,15 @@ pub(crate) fn game_entity_state_clips(
             .and_then(|found| optional(CharacterAnimationAction::from_level(found)))
     };
     let kits = CombatKits::from_bindings(&bindings);
-    warn_combat_verb_gaps(report, character_name, &bindings);
+    // Warn from what the author bound (the same view as the editor and
+    // verb_coverage); `bindings` above is narrower, the clips this
+    // entity's runtime states cook, which leaves out ones enemies never
+    // play (a hit reaction).
+    warn_combat_verb_gaps(
+        report,
+        character_name,
+        &crate::verbs::CharacterVerbBindings::new(project, character),
+    );
     let walk = play(CharacterAnimationAction::Walk)
         .map(|playback| playback.clip)
         .unwrap_or(idle);
