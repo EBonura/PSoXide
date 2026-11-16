@@ -510,7 +510,7 @@ impl<H: CdHw> Engine<H> {
         if request.destination as usize & 3 != 0 {
             return Err(SubmitError::MisalignedDestination);
         }
-        if request.sectors == 0 && !request.park {
+        if request.sectors == 0 && !request.is_park() {
             return Err(SubmitError::Empty);
         }
         if self.queued_count() >= QUEUE_DEPTH {
@@ -675,7 +675,7 @@ impl<H: CdHw> Engine<H> {
                 self.command(CMD_SEEKL, &[], Phase::StartingSeek)
             }
             (Phase::StartingSeek, flag::ACKNOWLEDGE) => self.change(Phase::Seeking),
-            (Phase::Seeking, flag::COMPLETE) if self.active.is_some_and(|a| a.request.park) => {
+            (Phase::Seeking, flag::COMPLETE) if self.active.is_some_and(|a| a.request.is_park()) => {
                 // A park: the head is where it was sent.
                 self.change(Phase::Done);
                 self.hw.silence_output();

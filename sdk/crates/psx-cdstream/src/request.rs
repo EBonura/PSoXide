@@ -40,9 +40,11 @@ pub struct Request {
     pub(crate) byte_len: u32,
     pub(crate) priority: Priority,
     pub(crate) resumes: u8,
-    /// A park: seek to `lba` and stop, reading nothing.
-    pub(crate) park: bool,
 }
+
+/// The `byte_len` of a park: no read has a bound this large, so the field says it without a
+/// flag of its own.
+const PARK_BYTE_LEN: u32 = u32::MAX;
 
 impl Request {
     /// Read `sectors` sectors starting at `lba` (program-relative, shifted by
@@ -65,7 +67,6 @@ impl Request {
             byte_len: 0,
             priority: Priority::NORMAL,
             resumes: 0,
-            park: false,
         }
     }
 
@@ -73,6 +74,7 @@ impl Request {
     /// head waits at the sector the next read will start at, so that read pays no long seek.
     /// It ends [`Outcome::Done`] with 0 sectors when the seek completes, and takes no
     /// destination. Queued and prioritised like a read.
+    #[must_use]
     pub const fn park(lba: u32) -> Self {
         Request {
             lba,
@@ -80,11 +82,15 @@ impl Request {
             // Never written: a park stores nothing. A non-null aligned address keeps the
             // submit checks one rule.
             destination: core::ptr::NonNull::<u32>::dangling().as_ptr(),
-            byte_len: 0,
+            byte_len: PARK_BYTE_LEN,
             priority: Priority::NORMAL,
             resumes: 0,
-            park: true,
         }
+    }
+
+    /// Whether this is a park.
+    pub(crate) const fn is_park(&self) -> bool {
+        self.byte_len == PARK_BYTE_LEN
     }
 
     /// Serve this request at `priority`.
@@ -179,7 +185,6 @@ impl Request {
             byte_len,
             priority: self.priority,
             resumes: self.resumes,
-            park: false,
         })
     }
 
