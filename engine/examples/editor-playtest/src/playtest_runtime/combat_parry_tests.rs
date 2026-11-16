@@ -8,6 +8,7 @@
 
 use super::combat_baseline_tests::{bolt, character, ctx, scene, TEST_I_FRAMES};
 use super::*;
+use psx_game_runtime::combat_intent::{CombatAction, CombatActions, CombatIntent};
 use psx_game_runtime::entities::{CombatTarget, GameEntityState, GameEntityTickInput, NoClipMover};
 use psx_game_runtime::projectiles::{CombatTeam, ProjectileDamageChannel, NO_PROJECTILE_OWNER};
 use psx_level::{game_entity_flags, LevelGameEntityRecord, StableId};
@@ -337,7 +338,10 @@ fn swing(hits: u16) -> psx_game_runtime::entities::MeleeArcStats {
 fn a_crit_doubles_the_next_attack_and_is_used_up_by_it_on_both_sides() {
     let mut scene = player_crit_armed();
     let stats = scene.player_stats;
+    // Armed, but nothing started yet: nothing doubles.
+    assert_eq!(scene.player.crit_scaled(&stats, 10, 7), (10, 7));
     // The player's next swing: doubled, then used up by the swing.
+    scene.player.start_attack();
     assert_eq!(scene.player.crit_scaled(&stats, 10, 7), (20, 14));
     scene.spend_player_melee_crit(swing(1), &ctx(101));
     assert_eq!(scene.player.crit, 0);
@@ -345,6 +349,22 @@ fn a_crit_doubles_the_next_attack_and_is_used_up_by_it_on_both_sides() {
     // The enemy's next attack, the same rule over its own stats.
     let mut scene = enemy_crit_armed();
     let records = GAME_ENTITIES.as_slice();
+    assert_eq!(scene.game_entities.crit_scaled(records, 0, 10, 7), (10, 7));
+    // Its next attack starts (a shot: the fixture has no strike clips).
+    let mut stats = psx_game_runtime::entities::GameEntityTickStats::default();
+    scene.game_entities.apply_intent(
+        hybrid(),
+        0,
+        CombatIntent {
+            pressed: CombatActions::of(CombatAction::Shoot),
+            aim: Some([0, 0, 100]),
+            ..CombatIntent::IDLE
+        },
+        &mut NoClipMover,
+        2,
+        &mut stats,
+    );
+    assert!(scene.game_entities.attack_is_crit(0));
     assert_eq!(scene.game_entities.crit_scaled(records, 0, 10, 7), (20, 14));
     assert!(scene.game_entities.spend_crit(0));
     assert!(!scene.game_entities.crit_armed(0));
@@ -363,13 +383,21 @@ fn an_unused_crit_expires_after_its_window_on_both_sides() {
     let mut scene = player_crit_armed();
     let window = scene.player_stats.crit_window_ticks;
     for _ in 1..window {
-        scene.player.tick(1, false);
+        scene.player.tick(1, false, false);
     }
     assert_ne!(scene.player.crit, 0);
-    scene.player.tick(1, false);
+    scene.player.tick(1, false, false);
     assert_eq!(scene.player.crit, 0);
+    // The enemy parried inside its swap: its window waits for the swap
+    // animation to end, then runs for the same ticks as the player's.
     let mut scene = enemy_crit_armed();
     let window = enemy_record().combat.crit_window_ticks;
+    let mut swap_ticks = 0;
+    while scene.game_entities.stance_swap_in_progress(0) {
+        tick_enemy(&mut scene, 1);
+        swap_ticks += 1;
+    }
+    assert!(swap_ticks > 0);
     tick_enemy(&mut scene, window - 1);
     assert!(scene.game_entities.crit_armed(0));
     tick_enemy(&mut scene, 1);
@@ -400,10 +428,10 @@ fn a_poise_break_knocks_the_player_down_and_she_gets_up() {
     assert_eq!(scene.player.health(), health - 5);
     assert_eq!(scene.anim_state, PlayerAnim::Knockdown);
     for _ in 1..down {
-        scene.player.tick(1, true);
+        scene.player.tick(1, true, false);
     }
     assert!(scene.player.knocked_down());
-    scene.player.tick(1, true);
+    scene.player.tick(1, true, false);
     assert!(!scene.player.knocked_down(), "up after her knockdown ticks");
 }
 

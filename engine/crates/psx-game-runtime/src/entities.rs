@@ -1146,9 +1146,16 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         }
     }
 
-    /// Whether entity `index`'s next attack is a crit.
+    /// Whether a parry has armed a crit for entity `index`: an attack it
+    /// starts now is the crit strike or crit shot.
     pub fn crit_armed(&self, index: usize) -> bool {
         self.combatants.get(index).is_some_and(|c| c.crit != 0)
+    }
+
+    /// Whether entity `index`'s attack under way is a crit (it started
+    /// while a crit was armed, [`Combatant::start_attack`]).
+    pub fn attack_is_crit(&self, index: usize) -> bool {
+        self.combatants.get(index).is_some_and(|c| c.crit_attack)
     }
 
     /// Use up entity `index`'s armed crit; true when one was armed.
@@ -1744,12 +1751,14 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             self.tactics[index].home_cooldown = self.tactics[index]
                 .home_cooldown
                 .saturating_sub(delta_ticks);
+            let swapping = self.stance_swap_in_progress(index);
             self.combatants[index].tick(
                 delta_ticks,
                 matches!(
                     state,
                     GameEntityState::Staggered | GameEntityState::KnockedDown
                 ),
+                swapping,
             );
             self.exchanges[index].tick(delta_ticks);
             self.step_recoil(record, index, mover, delta_ticks);
@@ -2149,7 +2158,12 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         match state {
             GameEntityState::Patrol => stats.patrol_enters += 1,
             GameEntityState::Aggro => stats.aggro_enters += 1,
-            GameEntityState::Windup => stats.windup_enters += 1,
+            GameEntityState::Windup => {
+                stats.windup_enters += 1;
+                // Every attack starts here: it is the crit strike or shot
+                // when a crit is armed now.
+                self.combatants[index].start_attack();
+            }
             GameEntityState::Attack => {
                 stats.attack_enters += 1;
                 if self.selected_attack_is_ranged(index) {

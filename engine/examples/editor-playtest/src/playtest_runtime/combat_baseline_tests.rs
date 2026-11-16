@@ -559,7 +559,7 @@ fn nothing_regenerates_health_during_play() {
     scene.player.stance.request_swap(&config);
     for _ in 0..600 {
         scene.player.advance_stance(1);
-        scene.player.tick(1, false);
+        scene.player.tick(1, false, false);
     }
     assert_eq!(health(&scene), 180);
 }

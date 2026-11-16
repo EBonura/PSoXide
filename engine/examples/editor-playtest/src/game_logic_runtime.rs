@@ -1317,11 +1317,11 @@ impl Playtest {
         }
     }
 
-    /// Whether the shooter's next attack is a crit.
+    /// Whether the shooter's volley under way is a crit.
     fn shooter_crit_armed(&self, shooter: Shooter) -> bool {
         match shooter {
-            Shooter::Player => self.player.crit != 0,
-            Shooter::Entity(attack) => self.game_entities.crit_armed(attack.entity()),
+            Shooter::Player => self.player.crit_attack,
+            Shooter::Entity(attack) => self.game_entities.attack_is_crit(attack.entity()),
         }
     }
 
@@ -1641,7 +1641,7 @@ impl Playtest {
             spec.reach.clamp(0, i32::from(u16::MAX)) as u16,
             vitality_channel,
         );
-        let crit = self.player.crit != 0;
+        let crit = self.player.crit_attack;
         let (outgoing_damage, poise_damage) = self.player.crit_scaled(
             &self.player_stats,
             self.vitality_modifiers()
@@ -1969,7 +1969,7 @@ impl Playtest {
         prop_blockers: &[CharacterCollisionAabb],
     ) -> Option<MeleeArcStats> {
         let now = self.gameplay_tick(ctx.sim_tick);
-        let crit = self.player.crit != 0;
+        let crit = self.player.crit_attack;
         let first = character.combat_capsule_first.to_usize();
         let end = first.saturating_add(usize::from(character.combat_capsule_count));
         let records = COMBAT_CAPSULES.get(first..end)?;

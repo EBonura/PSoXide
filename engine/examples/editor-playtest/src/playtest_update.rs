@@ -1641,6 +1641,8 @@ impl Playtest {
                     ) {
                         let duration = self.anim_lock_until_tick.saturating_sub(now);
                         self.ranged_ready.begin_shot(now.as_u32(), duration);
+                        // The shot starts: the crit shot when a crit is armed.
+                        self.player.start_attack();
                         self.anim_lock_until_tick = now;
                         telemetry::debug_log("player ranged:start");
                         return false;
@@ -1705,6 +1707,8 @@ impl Playtest {
                 telemetry::debug_log("player window:attack");
             }
             if bound && self.start_player_anim_action(anim, now, ctx.video_hz) {
+                // The strike starts: the crit strike when a crit is armed.
+                self.player.start_attack();
                 // The attack owns the motor input until it ends, so the
                 // lock-on turn in the motor never runs during the swing. A
                 // dodge or sprint leaves the body on its old heading (the

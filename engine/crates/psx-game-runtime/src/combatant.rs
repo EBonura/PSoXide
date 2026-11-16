@@ -288,8 +288,15 @@ pub struct Combatant {
     pub stance: CombatStance,
     /// Ticks left down after a poise break; zero when standing.
     pub knockdown: u16,
-    /// Ticks left in which the next attack crits; zero when none is armed.
+    /// Ticks left in which an attack started crits; zero when none is
+    /// armed. It counts down only while the fighter is free to act (not
+    /// during its swap animation), so every fighter gets the same usable
+    /// window whatever its swap length.
     pub crit: u16,
+    /// The attack under way started while a crit was armed: it is the crit
+    /// strike or crit shot until it lands or releases
+    /// ([`Self::start_attack`], [`Self::spend_crit`]).
+    pub crit_attack: bool,
 }
 
 impl Combatant {
@@ -302,6 +309,7 @@ impl Combatant {
         stance: CombatStance::new(VitalityChannelId::One),
         knockdown: 0,
         crit: 0,
+        crit_attack: false,
     };
 
     /// A fresh life for `stats`: health full, posture clear, energy full,
@@ -321,6 +329,7 @@ impl Combatant {
         self.stance.settle();
         self.knockdown = 0;
         self.crit = 0;
+        self.crit_attack = false;
     }
 
     /// Whether a hit on `channel` comes from the stance opposite this
@@ -367,12 +376,21 @@ impl Combatant {
 
     /// Advance posture recovery, the energy timers, the knockdown and the
     /// crit window by `delta` ticks. Break grace only drains once
-    /// `recovering` (a hit reaction) is over.
-    pub fn tick(&mut self, delta: u16, recovering: bool) {
+    /// `recovering` (a hit reaction) is over; the crit window holds while
+    /// `swapping` (the fighter's swap animation is still playing).
+    pub fn tick(&mut self, delta: u16, recovering: bool, swapping: bool) {
         self.poise.tick(delta);
         self.flow.tick(delta, recovering);
         self.knockdown = self.knockdown.saturating_sub(delta);
-        self.crit = self.crit.saturating_sub(delta);
+        if !swapping {
+            self.crit = self.crit.saturating_sub(delta);
+        }
+    }
+
+    /// An attack (a strike or a volley) starts: it carries a crit when one
+    /// is armed now, through to its hit or release, however long that takes.
+    pub fn start_attack(&mut self) {
+        self.crit_attack = self.crit != 0;
     }
 
     /// Whether the fighter is down after a poise break: it cannot act or
@@ -388,11 +406,11 @@ impl Combatant {
     }
 
     /// Damage and poise of an attack this fighter deals, through its crit:
-    /// multiplied by `stats`' crit multipliers while a crit is armed,
-    /// unchanged otherwise. [`Self::spend_crit`] once the attack lands or
-    /// is released.
+    /// multiplied by `stats`' crit multipliers when the attack started with
+    /// a crit armed ([`Self::start_attack`]), unchanged otherwise.
+    /// [`Self::spend_crit`] once the attack lands or is released.
     pub fn crit_scaled(&self, stats: &CombatStats, damage: u16, poise: u16) -> (u16, u16) {
-        if self.crit == 0 {
+        if !self.crit_attack {
             return (damage, poise);
         }
         (
@@ -401,10 +419,14 @@ impl Combatant {
         )
     }
 
-    /// Use up an armed crit; true when one was armed.
+    /// Use up the crit the attack under way carries; true when it carried
+    /// one. The parry's window closes with it: one crit per parry.
     pub fn spend_crit(&mut self) -> bool {
-        let armed = self.crit != 0;
-        self.crit = 0;
+        let armed = self.crit_attack;
+        if armed {
+            self.crit = 0;
+            self.crit_attack = false;
+        }
         armed
     }
 
@@ -560,9 +582,9 @@ mod tests {
         let mut c = fighter();
         assert!(c.poise_hit(60, 60, false, false));
         assert!(!c.poise_hit(60, 60, false, false), "inside grace");
-        c.tick(BREAK_GRACE_TICKS, false);
+        c.tick(BREAK_GRACE_TICKS, false, false);
         assert!(c.poise_hit(60, 60, false, false));
-        c.tick(BREAK_GRACE_TICKS, false);
+        c.tick(BREAK_GRACE_TICKS, false, false);
         assert!(!c.poise_hit(60, 60, false, true), "blocked");
     }
 
@@ -593,7 +615,7 @@ mod tests {
         for _ in 0..200 {
             assert!(!c.invulnerable(10, ActionProtection::NONE));
             c.advance_stance(1);
-            c.tick(1, false);
+            c.tick(1, false, false);
         }
         assert!(!Defender::OPEN.invulnerable());
     }
@@ -803,18 +825,44 @@ mod tests {
     }
 
     #[test]
-    fn a_crit_scales_the_next_attack_until_spent_or_expired() {
+    fn a_crit_scales_an_attack_started_inside_the_window_until_spent() {
         let mut c = fighter();
         assert_eq!(c.crit_scaled(&STATS, 10, 3), (10, 3));
         c.crit = STATS.crit_window_ticks;
+        // Armed but no attack started yet: nothing scales.
+        assert_eq!(c.crit_scaled(&STATS, 10, 3), (10, 3));
+        c.start_attack();
+        assert_eq!(c.crit_scaled(&STATS, 10, 3), (20, 6));
+        // The attack keeps its crit after the window runs out.
+        for _ in 0..STATS.crit_window_ticks {
+            c.tick(1, false, false);
+        }
+        assert_eq!(c.crit, 0);
         assert_eq!(c.crit_scaled(&STATS, 10, 3), (20, 6));
         assert!(c.spend_crit());
         assert!(!c.spend_crit());
+        assert_eq!(c.crit_scaled(&STATS, 10, 3), (10, 3));
+        // An attack started after the window ran out does not crit.
         c.crit = 2;
-        c.tick(1, false);
+        c.tick(1, false, false);
         assert_ne!(c.crit, 0);
-        c.tick(1, false);
+        c.tick(1, false, false);
         assert_eq!(c.crit, 0);
+        c.start_attack();
+        assert!(!c.crit_attack);
+    }
+
+    #[test]
+    fn the_crit_window_waits_for_the_swap_animation() {
+        let mut c = fighter();
+        c.crit = STATS.crit_window_ticks;
+        // A 72-tick swap and a 12-tick swap leave the same usable window.
+        for _ in 0..72 {
+            c.tick(1, false, true);
+        }
+        assert_eq!(c.crit, STATS.crit_window_ticks);
+        c.tick(1, false, false);
+        assert_eq!(c.crit, STATS.crit_window_ticks - 1);
     }
 
     #[test]
@@ -823,13 +871,13 @@ mod tests {
         let out = c.receive_hit(hit(strike(VitalityChannelId::One, 0, 60)));
         assert!(out.poise_broken && out.knocked_down);
         assert_eq!(c.knockdown, STATS.knockdown_ticks);
-        c.tick(BREAK_GRACE_TICKS, false);
-        c.tick(BREAK_GRACE_TICKS, false);
+        c.tick(BREAK_GRACE_TICKS, false, false);
+        c.tick(BREAK_GRACE_TICKS, false, false);
         c.knockdown = 5;
         let out = c.receive_hit(hit(strike(VitalityChannelId::One, 7, 1000)));
         assert_eq!(out.damage_applied, 7);
         assert!(!out.poise_broken, "down: no second break");
-        c.tick(5, false);
+        c.tick(5, false, false);
         assert!(!c.knocked_down());
         let mut off = fighter();
         let out = off.receive_hit(HitIn {
@@ -859,7 +907,8 @@ mod tests {
 
     #[test]
     fn a_fighter_stays_small() {
-        // Every entity slot holds one: 32 B before parry, crit and knockdown.
-        assert_eq!(core::mem::size_of::<Combatant>(), 36);
+        // Every entity slot holds one: 32 B before parry, crit and knockdown,
+        // 36 before the crit latch.
+        assert_eq!(core::mem::size_of::<Combatant>(), 38);
     }
 }

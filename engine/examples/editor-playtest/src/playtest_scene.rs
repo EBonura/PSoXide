@@ -1142,6 +1142,10 @@ impl Scene for Playtest {
             ctx.pad_prev = physical.1;
             return;
         }
+        let swapping = self
+            .player
+            .stance
+            .swap_in_progress(&self.player_stance_config);
         self.player.tick(
             1,
             matches!(
@@ -1151,6 +1155,7 @@ impl Scene for Playtest {
                     | PlayerAnim::HitReact
                     | PlayerAnim::Knockdown
             ),
+            swapping,
         );
         self.update_gameplay(ctx);
         self.tick_poi_presentation();
