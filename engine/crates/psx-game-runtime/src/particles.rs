@@ -670,11 +670,13 @@ fn draw_parry_star<'a, const OT_DEPTH: usize>(
     let eased = 4096 - remaining * remaining / 4096;
     let ring = (reach * (1024 + eased * 3 / 4) / 4096).max(2);
     let slot = depth_range.slot::<OT_DEPTH>(center.sz);
+    // The GPU computes `texel * tint / 128`, so half the colour is the colour
+    // itself on the white particle texel; more saturates toward white.
     let accent = particle_material
         .with_tint(rgb_tuple(scale_rgb(
             impact.visual.impact_rgb,
             brightness,
-            4096,
+            8192,
         )))
         .with_blend_mode(BlendMode::Add);
     let core = particle_material
@@ -690,20 +692,10 @@ fn draw_parry_star<'a, const OT_DEPTH: usize>(
         ..center
     };
     let mut submitted = 0;
-    // The hot core: a glow in the stance colour with a white heart, only
-    // while the burst is young.
+    // The hot core, only while the burst is young.
     let core_ticks = (lifetime / 2).max(1);
     if age < core_ticks {
-        let left = core_ticks - age;
-        let half = ((reach / 2).max(3) * left / core_ticks).max(2);
-        submitted += draw_particle_diamond(
-            center,
-            clamp_i16(half + half / 2),
-            accent,
-            slot,
-            ot,
-            primitive_packets,
-        );
+        let half = ((reach / 3).max(3) * (core_ticks - age) / core_ticks).max(2);
         submitted +=
             draw_particle_diamond(center, clamp_i16(half), core, slot, ot, primitive_packets);
     }
