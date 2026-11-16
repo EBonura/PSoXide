@@ -82,7 +82,7 @@ fn gp0_words(words: &[u32]) {
 /// display area allowed, then a semi-transparent flat quad, GP0(2Ah)).
 #[inline(never)]
 pub fn quad_half_black(x0: i16, y0: i16, x1: i16, y1: i16) {
-    let pack = |x: i16, y: i16| (y as u16 as u32) << 16 | x as u16 as u32;
+    let pack = psx_hw::gpu::pack_vertex;
     gp0_words(&[
         0xE100_0400,
         0x2A00_0000,

@@ -205,7 +205,7 @@ impl FrustumPlanes {
     fn distance_at(&self, index: usize, position: [i16; 3]) -> i32 {
         #[cfg(target_arch = "mips")]
         {
-            let xy = (position[0] as u16 as u32) | ((position[1] as u16 as u32) << 16);
+            let xy = psx_hw::gpu::pack_vertex(position[0], position[1]);
             let z = position[2] as i32 as u32;
             // One MVMVA yields three plane dots but a box corner is chosen
             // for one plane, so only that MAC is read back.

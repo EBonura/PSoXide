@@ -1300,7 +1300,7 @@ impl Model {
             // SAFETY: same contract as this function's.
             let v = unsafe { self.vertex_unchecked(index) };
             GteVertexWords {
-                xy: ((v.y as u16 as u32) << 16) | v.x as u16 as u32,
+                xy: psx_hw::gpu::pack_vertex(v.x, v.y),
                 z: v.z as i32 as u32,
             }
         }

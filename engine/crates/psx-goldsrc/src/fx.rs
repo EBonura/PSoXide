@@ -179,33 +179,10 @@ pub fn chain_push<T: Tail>(words: &[u32]) -> bool {
 // GP0 word builders. These mirror `psx_hw::gpu`'s `pack_*` / `polygon_opcode` exactly: the whole
 // point is that a captured primitive is bit-identical to the immediate one.
 
-/// A GP0 vertex word.
-#[inline(always)]
-#[must_use]
-pub fn gp0_vertex(x: i16, y: i16) -> u32 {
-    ((x as u16) as u32) | (((y as u16) as u32) << 16)
-}
-
-/// A GP0 size or position word from unsigned halves.
-#[inline(always)]
-#[must_use]
-pub fn gp0_xy(x: u16, y: u16) -> u32 {
-    x as u32 | ((y as u32) << 16)
-}
-
-/// A GP0 colour word (low 24 bits).
-#[inline(always)]
-#[must_use]
-pub fn gp0_color(r: u8, g: u8, b: u8) -> u32 {
-    (r as u32) | ((g as u32) << 8) | ((b as u32) << 16)
-}
-
-/// A GP0 texture-coordinate word with its CLUT or page half.
-#[inline(always)]
-#[must_use]
-pub fn gp0_texcoord(u: u8, v: u8, extra: u16) -> u32 {
-    (u as u32) | ((v as u32) << 8) | ((extra as u32) << 16)
-}
+pub use psx_hw::gpu::{
+    pack_color as gp0_color, pack_texcoord as gp0_texcoord, pack_vertex as gp0_vertex,
+    pack_xy as gp0_xy,
+};
 
 /// A flat triangle through a translucent blend mode, captured when armed. An opaque mode is the
 /// plain immediate triangle.

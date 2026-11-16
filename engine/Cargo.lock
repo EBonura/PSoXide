@@ -285,6 +285,7 @@ dependencies = [
  "psx-engine",
  "psx-gpu",
  "psx-gte",
+ "psx-hw",
  "psx-math",
  "psx-pack",
 ]
@@ -426,6 +427,7 @@ version = "0.1.0"
 dependencies = [
  "psx-asset",
  "psx-gpu",
+ "psx-hw",
  "psx-math",
  "psx-vector",
 ]

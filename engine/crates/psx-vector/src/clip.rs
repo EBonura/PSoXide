@@ -27,7 +27,7 @@ impl ClipVertex {
 
     #[inline(always)]
     pub fn pos_word(self) -> u32 {
-        (self.x as u16 as u32) | ((self.y as u16 as u32) << 16)
+        psx_hw::gpu::pack_vertex(self.x as i16, self.y as i16)
     }
 
     #[inline(always)]

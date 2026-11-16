@@ -675,8 +675,8 @@ pub fn rect(sink: &mut dyn Sink, x: i16, y: i16, w: i16, h: i16, colour: Rgb) {
     }
     sink.packet(&[
         0x6000_0000 | colour.word(),
-        (y as u16 as u32) << 16 | x as u16 as u32,
-        (h as u16 as u32) << 16 | w as u16 as u32,
+        psx_hw::gpu::pack_vertex(x, y),
+        psx_hw::gpu::pack_vertex(w, h),
     ]);
 }
 
@@ -688,8 +688,8 @@ fn rect_blended(sink: &mut dyn Sink, x: i16, y: i16, w: i16, h: i16, colour: Rgb
     }
     sink.packet(&[
         0x6200_0000 | colour.word(),
-        (y as u16 as u32) << 16 | x as u16 as u32,
-        (h as u16 as u32) << 16 | w as u16 as u32,
+        psx_hw::gpu::pack_vertex(x, y),
+        psx_hw::gpu::pack_vertex(w, h),
     ]);
 }
 

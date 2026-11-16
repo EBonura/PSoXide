@@ -145,6 +145,7 @@ name = "psx-loading"
 version = "0.1.0"
 dependencies = [
  "psx-font",
+ "psx-hw",
  "psx-io",
 ]
 
