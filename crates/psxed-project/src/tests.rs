@@ -4124,6 +4124,7 @@ fn verb_roles_keep_their_slots_and_match_the_runtime() {
     assert_eq!(CharacterAnimationAction::Knockdown.to_index(), 45);
     assert_eq!(CharacterAnimationAction::CritStrike.to_index(), 46);
     assert_eq!(CharacterAnimationAction::CritShot.to_index(), 47);
+    assert_eq!(CharacterAnimationAction::Parried.to_index(), 48);
     for action in CharacterAnimationAction::ALL {
         assert_eq!(
             format!("{action:?}"),
@@ -4252,6 +4253,9 @@ fn the_cook_warns_once_per_missing_verb_of_a_kit_a_character_has() {
         "Character 'Aletha' Mobility kit has no Dash Left clip -- plays Roll instead"
     ));
     assert!(has("Character 'Aletha' kits: no ranged"));
+    assert!(has(
+        "Character 'Aletha' Core kit has no Parried clip -- plays Stun + Recovery instead"
+    ));
     assert!(!warnings
         .iter()
         .any(|w| w.starts_with("Character 'Aletha' Ranged kit")
@@ -4271,6 +4275,12 @@ fn the_cook_warns_once_per_missing_verb_of_a_kit_a_character_has() {
     assert_eq!(unique.len(), kit_lines.len());
     // The enemies carry their kits in the cooked flags.
     let package = package.unwrap();
+    // No project authors Parried yet: every enemy's parried clip is its chain,
+    // the stagger clip.
+    assert!(package
+        .game_entities
+        .iter()
+        .all(|entity| entity.parried_clip == entity.stagger_clip));
     assert!(package.game_entities.iter().any(|entity| {
         let kits = psx_level::game_entity_combat_kits(entity.flags);
         kits.can_swap() && !kits.can_dodge()

@@ -313,7 +313,11 @@ impl Playtest {
         // one ordinary standing/aim frame flashes before gravity resumes.
         if !matches!(
             self.anim_state,
-            PlayerAnim::Death | PlayerAnim::HitReact | PlayerAnim::Stun | PlayerAnim::Knockdown
+            PlayerAnim::Death
+                | PlayerAnim::HitReact
+                | PlayerAnim::Stun
+                | PlayerAnim::Parried
+                | PlayerAnim::Knockdown
         ) && self.character.is_some_and(|c| {
             c.action_clip(CharacterAnimationAction::Fall)
                 .to_option()
@@ -385,7 +389,10 @@ impl Playtest {
             if self.hazard_death_ticks_remaining != 0
                 || matches!(
                     self.anim_state,
-                    PlayerAnim::Stun | PlayerAnim::Knockdown | PlayerAnim::Death
+                    PlayerAnim::Stun
+                        | PlayerAnim::Parried
+                        | PlayerAnim::Knockdown
+                        | PlayerAnim::Death
                 )
             {
                 self.detach_arch(ctx.sim_tick);

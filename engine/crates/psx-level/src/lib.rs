@@ -1366,6 +1366,10 @@ pub struct LevelGameEntityRecord {
     /// [`CharacterAnimationAction::Knockdown`] role, falling back to
     /// `stagger_clip` at cook time.
     pub knockdown_clip: u16,
+    /// Model-local clip played while staggered by a parry's riposte;
+    /// resolved through the Parried verb's chain (Stun, HitReact) at cook
+    /// time, so it is the stagger clip until a Parried clip is authored.
+    pub parried_clip: u16,
     /// One-shot clip on death; holds its final frame as the corpse
     /// pose.
     pub death_clip: u16,
@@ -3296,7 +3300,7 @@ pub struct ParticleEmitterRecord {
 pub const CHARACTER_CLIP_NONE: OptionalModelClipIndex = OptionalModelClipIndex::NONE;
 
 /// Fixed action slots used by [`LevelCharacterRecord::action_clips`].
-pub const CHARACTER_ANIMATION_ACTION_COUNT: usize = 48;
+pub const CHARACTER_ANIMATION_ACTION_COUNT: usize = 49;
 
 /// Runtime animation action slot.
 ///
@@ -3410,6 +3414,11 @@ pub enum CharacterAnimationAction {
     CritStrike = 46,
     /// The Zenith point-blank riposte a parry arms: the crit shot.
     CritShot = 47,
+    /// The attacker's reaction when its attack is parried (a deflect or
+    /// recoil), played over the stagger the parry deals in place of the
+    /// generic stagger clip. Falls back to [`Self::Stun`], then
+    /// [`Self::HitReact`].
+    Parried = 48,
 }
 
 impl CharacterAnimationAction {
@@ -3463,6 +3472,7 @@ impl CharacterAnimationAction {
         Self::Knockdown,
         Self::CritStrike,
         Self::CritShot,
+        Self::Parried,
     ];
 
     /// Convert to the cooked action slot index.

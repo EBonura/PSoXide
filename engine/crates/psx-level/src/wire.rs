@@ -28,7 +28,7 @@ use crate::*;
 pub const MAGIC: [u8; 4] = *b"PXLR";
 /// Version of the layout below. Bump it whenever a record or the table list
 /// changes.
-pub const VERSION: u16 = 10;
+pub const VERSION: u16 = 11;
 
 /// A cursor over the chunk's bytes. The bytes live for the whole run, so a
 /// string decoded from them can be `&'static`.
@@ -357,7 +357,7 @@ wire_struct! {
         attack_speed_q8, attack_frame_range, heavy_attack_clip, heavy_attack_speed_q8,
         heavy_attack_frame_range, ranged_attack_clip, ranged_attack_speed_q8,
         ranged_attack_frame_range, stagger_clip, stagger_speed_q8, stagger_frame_range,
-        stagger_ticks, knockdown_clip, death_clip, combat_capsule_first, combat_capsule_count,
+        stagger_ticks, knockdown_clip, parried_clip, death_clip, combat_capsule_first, combat_capsule_count,
         ranged_attack_action, x, y, z, yaw, radius, height, walk_speed, run_speed, patrol_x,
         patrol_y, patrol_z, patrol_wait_ticks, aggro_radius, reaction_ticks, preferred_distance,
         spacing_tolerance, spacing_speed_percent, decision_interval_ticks, circle_chance,

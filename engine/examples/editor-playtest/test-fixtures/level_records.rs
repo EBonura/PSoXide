@@ -74,6 +74,7 @@ pub static GAME_ENTITIES: &[LevelGameEntityRecord] = &[LevelGameEntityRecord {
     stagger_frame_range: CharacterActionFrameRange::FULL,
     stagger_ticks: 85,
     knockdown_clip: 0,
+    parried_clip: 0,
     death_clip: 0,
     combat_capsule_first: CombatCapsuleIndex(0),
     combat_capsule_count: 0,

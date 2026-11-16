@@ -92,7 +92,7 @@ const fn extra(action: Action, kit: CombatKit) -> CombatVerb {
 }
 
 /// Number of verbs in [`COMBAT_VERBS`].
-pub const COMBAT_VERB_COUNT: usize = 29;
+pub const COMBAT_VERB_COUNT: usize = 30;
 
 /// The verb list, grouped by kit in [`CombatKit::ALL`] order.
 ///
@@ -109,6 +109,7 @@ pub const COMBAT_VERBS: [CombatVerb; COMBAT_VERB_COUNT] = [
     verb(Action::Turn, CombatKit::Core),
     verb(Action::HitReact, CombatKit::Core),
     verb(Action::Stun, CombatKit::Core),
+    verb(Action::Parried, CombatKit::Core),
     verb(Action::Knockdown, CombatKit::Core),
     verb(Action::GetUp, CombatKit::Core),
     verb(Action::Death, CombatKit::Core),
@@ -146,7 +147,7 @@ pub fn combat_verb(action: Action) -> Option<CombatVerb> {
 ///
 /// The chains, one line each:
 /// - Run, WalkBackward, StrafeLeft, StrafeRight: Walk.
-/// - Stun: HitReact. Knockdown: Stun, then HitReact.
+/// - Stun: HitReact. Parried and Knockdown: Stun, then HitReact.
 /// - GetUp, StanceSwap: none (the knockdown or swap just ends, no clip).
 /// - LightAttack: the legacy ComboAttack slot (and it the light). HeavyAttack
 ///   and CritStrike: LightAttack, then ComboAttack.
@@ -167,6 +168,7 @@ pub const fn fallback_chain(action: Action) -> &'static [Action] {
             &[Action::Walk]
         }
         Action::Stun => &[Action::HitReact],
+        Action::Parried => &[Action::Stun, Action::HitReact],
         Action::Knockdown => &[Action::Stun, Action::HitReact],
         Action::LightAttack => &[Action::ComboAttack],
         Action::HeavyAttack | Action::CritStrike => &[Action::LightAttack, Action::ComboAttack],
@@ -488,7 +490,7 @@ mod tests {
     fn every_fallback_chain_resolves_in_order() {
         use Action as A;
         // Each case: (verb, bound set, expected stand-in).
-        let cases: [(A, &'static [A], Option<A>); 24] = [
+        let cases: [(A, &'static [A], Option<A>); 26] = [
             (A::Run, &[A::Walk], Some(A::Walk)),
             (A::WalkBackward, &[A::Walk], Some(A::Walk)),
             (A::StrafeLeft, &[A::Walk], Some(A::Walk)),
@@ -497,6 +499,8 @@ mod tests {
             (A::Knockdown, &[A::Stun, A::HitReact], Some(A::Stun)),
             (A::Knockdown, &[A::HitReact], Some(A::HitReact)),
             (A::Knockdown, &[], None),
+            (A::Parried, &[A::Stun, A::HitReact], Some(A::Stun)),
+            (A::Parried, &[A::HitReact], Some(A::HitReact)),
             (A::GetUp, &[A::Stun, A::Idle], None),
             (A::StanceSwap, &[A::Idle, A::Walk], None),
             (A::LightAttack, &[A::ComboAttack], Some(A::ComboAttack)),

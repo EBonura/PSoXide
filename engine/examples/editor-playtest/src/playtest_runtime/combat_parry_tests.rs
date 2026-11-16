@@ -165,6 +165,56 @@ fn a_parried_attacker_is_staggered_not_knocked_down_on_both_sides() {
 }
 
 #[test]
+fn a_parried_attacker_plays_parried_on_both_sides() {
+    use psx_level::{CharacterAnimationAction, OptionalModelClipIndex};
+    // The enemy: its riposte stagger plays its cooked Parried clip; any other
+    // stagger still plays the stagger clip. Same state, same timing.
+    let records: &'static [LevelGameEntityRecord] =
+        std::boxed::Box::leak(std::boxed::Box::new([LevelGameEntityRecord {
+            parried_clip: 9,
+            ..*hybrid()
+        }]));
+    let mut scene = duel();
+    assert!(scene.game_entities.spawn_slot(0, StableId(1), &records[0]));
+    let outcome = scene.game_entities.riposte(records, 0, CombatantId::PLAYER);
+    assert!(outcome.staggered);
+    assert_eq!(scene.game_entities.state(0), GameEntityState::Staggered);
+    assert!(scene.game_entities.parried_stagger(0));
+    assert_eq!(scene.game_entities.clip_for_state(records, 0).clip, 9);
+    let mut plain = duel();
+    assert!(plain.game_entities.spawn_slot(0, StableId(1), &records[0]));
+    let broken = plain.game_entities.receive_hit(
+        records,
+        0,
+        Strike {
+            attacker: CombatantId::PLAYER,
+            kind: HitKind::Melee,
+            channel: VitalityChannelId::One,
+            damage: 0,
+            poise: u16::MAX,
+        },
+    );
+    assert!(broken.staggered || broken.knocked_down);
+    assert!(!plain.game_entities.parried_stagger(0));
+    assert_ne!(plain.game_entities.clip_for_state(records, 0).clip, 9);
+
+    // The player: with a Parried clip she plays it over the stagger's lock;
+    // without one she plays its chain (the stagger reaction) as before.
+    let mut scene = duel();
+    let mut aletha = character(true);
+    aletha.action_clips[CharacterAnimationAction::Parried.to_index()] =
+        OptionalModelClipIndex::from_raw(7);
+    scene.character = Some(aletha);
+    assert!(scene.riposte_player(CombatantId::entity(0), &ctx(100)));
+    assert_eq!(scene.anim_state, PlayerAnim::Parried);
+    assert_eq!(aletha.clip_for(PlayerAnim::Parried).to_usize(), 7);
+    assert!(scene.anim_lock_until_tick > ctx(100).sim_tick);
+    let mut scene = duel();
+    assert!(scene.riposte_player(CombatantId::entity(0), &ctx(100)));
+    assert_ne!(scene.anim_state, PlayerAnim::Parried);
+}
+
+#[test]
 fn the_world_is_never_parried_on_either_side() {
     let mut scene = duel();
     player_swaps(&mut scene);

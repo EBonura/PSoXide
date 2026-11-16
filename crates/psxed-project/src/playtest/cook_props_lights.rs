@@ -2560,6 +2560,7 @@ pub(crate) fn push_game_entity(
         stagger_frame_range: state_clips.stagger_frame_range,
         stagger_ticks,
         knockdown_clip: state_clips.knockdown,
+        parried_clip: state_clips.parried,
         death_clip: state_clips.death,
         combat_capsule_first,
         combat_capsule_count,

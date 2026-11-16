@@ -156,6 +156,10 @@ const GAME_ENTITY_ATTACK_NEXT_HEAVY: u8 = 1 << 7;
 /// connected.
 const GAME_ENTITY_ATTACK_CONNECTED: u8 = 1;
 
+/// The current stagger is a parry's riposte: the entity plays its Parried
+/// clip over it. Cleared by every state change.
+const GAME_ENTITY_PARRIED_STAGGER: u8 = 1 << 1;
+
 /// Ticks the one-shot eye pulse lasts after a stance change.
 const GAME_ENTITY_STANCE_PULSE_TICKS: u16 = 30;
 
@@ -904,6 +908,13 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         self.state_ticks.get(index).copied().unwrap_or(0)
     }
 
+    /// Whether entity `index`'s current stagger is a parry's riposte, over
+    /// which it plays its Parried clip.
+    pub fn parried_stagger(&self, index: usize) -> bool {
+        self.state(index) == GameEntityState::Staggered
+            && self.combat_flags[index] & GAME_ENTITY_PARRIED_STAGGER != 0
+    }
+
     /// Behavior state of entity `index`; out-of-range indices read as `Dead`.
     pub fn state(&self, index: usize) -> GameEntityState {
         if index >= self.count() {
@@ -1356,6 +1367,14 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
                     .saturating_add(attack_active_ticks)
                     .saturating_add(ticks),
             ),
+            // A parried attacker plays its Parried clip over the same
+            // stagger; until one is authored that is the stagger clip.
+            GameEntityState::Staggered
+                if self.combat_flags[index] & GAME_ENTITY_PARRIED_STAGGER != 0
+                    && record.parried_clip != record.stagger_clip =>
+            {
+                one_shot(record.parried_clip, ticks)
+            }
             GameEntityState::Staggered => GameEntityClip {
                 speed_q8: if record.stagger_speed_q8 == 0 {
                     768
@@ -1476,6 +1495,9 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
                 },
                 &mut GameEntityTickStats::default(),
             );
+            if strike.kind == HitKind::Parry && !out.knocked_down {
+                self.combat_flags[index] |= GAME_ENTITY_PARRIED_STAGGER;
+            }
         }
         GameEntityHitOutcome {
             connected: true,
@@ -2013,6 +2035,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         }
         self.state[index] = state as u8;
         self.state_ticks[index] = 0;
+        self.combat_flags[index] &= !GAME_ENTITY_PARRIED_STAGGER;
         if matches!(
             state,
             GameEntityState::Staggered | GameEntityState::KnockedDown | GameEntityState::Dead
@@ -2813,6 +2836,7 @@ mod tests {
             stagger_frame_range: CharacterActionFrameRange::FULL,
             stagger_ticks: 0,
             knockdown_clip: 4,
+            parried_clip: 4,
             death_clip: 5,
             combat_capsule_first: psx_level::CombatCapsuleIndex(0),
             combat_capsule_count: 0,

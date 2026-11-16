@@ -1123,7 +1123,11 @@ impl Playtest {
             && self.motor.grounded()
             && !matches!(
                 self.anim_state,
-                PlayerAnim::Death | PlayerAnim::HitReact | PlayerAnim::Stun | PlayerAnim::Knockdown
+                PlayerAnim::Death
+                    | PlayerAnim::HitReact
+                    | PlayerAnim::Stun
+                    | PlayerAnim::Parried
+                    | PlayerAnim::Knockdown
             )
             && self.character.is_some_and(|c| {
                 c.action_clip(CharacterAnimationAction::Land)

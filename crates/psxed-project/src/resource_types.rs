@@ -295,6 +295,9 @@ pub enum CharacterAnimationAction {
     CritStrike,
     /// The Zenith point-blank riposte a parry arms. Falls back to the shot.
     CritShot,
+    /// The attacker's reaction when its attack is parried, over the parry's
+    /// stagger. Falls back to Stun, then HitReact.
+    Parried,
 }
 
 impl CharacterAnimationAction {
@@ -355,6 +358,7 @@ impl CharacterAnimationAction {
         Self::Knockdown,
         Self::CritStrike,
         Self::CritShot,
+        Self::Parried,
     ];
 
     /// Actions exposed by current editor authoring. `StunRecovery` remains in
@@ -407,6 +411,7 @@ impl CharacterAnimationAction {
         Self::Knockdown,
         Self::CritStrike,
         Self::CritShot,
+        Self::Parried,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -461,6 +466,7 @@ impl CharacterAnimationAction {
             Self::Knockdown => "Knockdown",
             Self::CritStrike => "Crit Strike",
             Self::CritShot => "Crit Shot",
+            Self::Parried => "Parried",
         }
     }
 
@@ -514,6 +520,7 @@ impl CharacterAnimationAction {
             Self::Knockdown => 45,
             Self::CritStrike => 46,
             Self::CritShot => 47,
+            Self::Parried => 48,
         }
     }
 
@@ -550,7 +557,8 @@ impl CharacterAnimationAction {
             | Self::GetUp
             | Self::StanceSwap
             | Self::CritStrike
-            | Self::CritShot => None,
+            | Self::CritShot
+            | Self::Parried => None,
             Self::WalkWindup | Self::WalkWinddown | Self::WalkWinddownAlt => {
                 Some(AnimationRole::Walk)
             }
@@ -605,6 +613,9 @@ impl CharacterAnimationAction {
         }
         if name.contains("stance_swap") {
             return Some(Self::StanceSwap);
+        }
+        if name.contains("parried") || name.contains("deflect") {
+            return Some(Self::Parried);
         }
         if name.contains("crit") {
             return Some(if name.contains("shot") {

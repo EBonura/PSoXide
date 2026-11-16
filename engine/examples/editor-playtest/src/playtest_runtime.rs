@@ -1001,7 +1001,7 @@ impl Playtest {
             stats: self.player_stats,
             poise: PoiseRule {
                 armored,
-                blocked: matches!(self.anim_state, PlayerAnim::Stun),
+                blocked: matches!(self.anim_state, PlayerAnim::Stun | PlayerAnim::Parried),
             },
         }
     }
@@ -1448,7 +1448,7 @@ impl Playtest {
             poise: damage,
         };
         let out = self.player.receive_hit(self.player_hit(strike, armored));
-        self.react_player(out, armored, shot_only, ctx)
+        self.react_player(out, armored, shot_only, false, ctx)
     }
 
     /// Stagger the player with the riposte of a parry by `by`: the same
@@ -1463,7 +1463,7 @@ impl Playtest {
         }
         let strike = Strike::parry(by, self.player.stance.active());
         let out = self.player.receive_hit(self.player_hit(strike, false));
-        self.react_player(out, false, false, ctx)
+        self.react_player(out, false, false, true, ctx)
     }
 
     /// A fighter's `strike` reached the player inside her parry window: her
@@ -1544,8 +1544,17 @@ impl Playtest {
 
     /// Start the reaction a landed hit calls for: a knockdown on a break that
     /// knocked her down, the stagger (Stun) on any other break, a hit
-    /// reaction otherwise. Nothing interrupts a knockdown.
-    fn react_player(&mut self, out: HitOut, armored: bool, shot_only: bool, ctx: &Ctx) -> bool {
+    /// reaction otherwise. Nothing interrupts a knockdown. A stagger from a
+    /// parry's riposte (`parried`) keeps the stagger's lock and plays the
+    /// Parried clip over it.
+    fn react_player(
+        &mut self,
+        out: HitOut,
+        armored: bool,
+        shot_only: bool,
+        parried: bool,
+        ctx: &Ctx,
+    ) -> bool {
         let poise_broken = out.poise_broken;
         if out.knocked_down {
             self.knock_player_down(ctx);
@@ -1595,6 +1604,17 @@ impl Playtest {
             self.switch_player_anim(reaction, now, ctx.video_hz);
         }
         self.anim_lock_until_tick = now.saturating_add(recovery);
+        // Same lock, same rules: only the clip differs. Unbound, Parried's
+        // chain (Stun, then HitReact) is exactly the reaction already playing,
+        // at its own authored speed and range.
+        if parried
+            && poise_broken
+            && self
+                .character
+                .is_some_and(|c| c.supports_action(CharacterAnimationAction::Parried))
+        {
+            self.switch_player_anim(PlayerAnim::Parried, now, ctx.video_hz);
+        }
         self.anim_blend_from = None;
         telemetry::debug_log(if poise_broken {
             "player poise:break"

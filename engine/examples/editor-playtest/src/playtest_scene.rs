@@ -1146,7 +1146,10 @@ impl Scene for Playtest {
             1,
             matches!(
                 self.anim_state,
-                PlayerAnim::Stun | PlayerAnim::HitReact | PlayerAnim::Knockdown
+                PlayerAnim::Stun
+                    | PlayerAnim::Parried
+                    | PlayerAnim::HitReact
+                    | PlayerAnim::Knockdown
             ),
         );
         self.update_gameplay(ctx);

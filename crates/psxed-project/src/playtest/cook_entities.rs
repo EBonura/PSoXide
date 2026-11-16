@@ -3091,6 +3091,7 @@ pub(crate) struct GameEntityStateClips {
     pub stagger_speed_q8: u16,
     pub stagger_frame_range: psx_level::CharacterActionFrameRange,
     pub knockdown: u16,
+    pub parried: u16,
     pub death: u16,
     /// The combat kits the Character binds ([`CombatKits`]), the same
     /// derivation the player runtime makes from her clips.
@@ -3125,6 +3126,7 @@ impl GameEntityStateClips {
             stagger_speed_q8: 0,
             stagger_frame_range: psx_level::CharacterActionFrameRange::FULL,
             knockdown: clip,
+            parried: clip,
             death: clip,
             // Bindings unknown without the Character's own model: nothing is
             // restricted (a projectile still needs its cooked range band).
@@ -3264,6 +3266,10 @@ pub(crate) fn game_entity_state_clips(
             0
         },
         stagger_frame_range: stagger.frame_range,
+        // Over a parry's stagger: Parried, else its chain (Stun, HitReact).
+        parried: play(CharacterAnimationAction::Parried)
+            .map(|playback| playback.clip)
+            .unwrap_or(stagger.clip),
         // Held while down: Knockdown, else its chain (Stun, HitReact).
         knockdown: play(CharacterAnimationAction::Knockdown)
             .map(|playback| playback.clip)

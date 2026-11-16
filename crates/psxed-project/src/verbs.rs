@@ -53,15 +53,25 @@ impl<'a> CharacterVerbBindings<'a> {
     }
 }
 
+/// Whether `set` gives `action` a clip of its own, resolved as the cook
+/// resolves it (an explicit binding, a legacy role slot, or a role-matched
+/// clip in the set's extra clips).
+pub fn animation_set_binds(
+    project: &ProjectDocument,
+    set: &AnimationSetResource,
+    action: CharacterAnimationAction,
+) -> bool {
+    crate::playtest::animation_set_action_clip(project, set, action).is_some()
+}
+
 impl VerbBindings for CharacterVerbBindings<'_> {
     fn bound(&self, action: psx_level::CharacterAnimationAction) -> bool {
         self.set.is_some_and(|set| {
-            crate::playtest::animation_set_action_clip(
+            animation_set_binds(
                 self.project,
                 set,
                 CharacterAnimationAction::from_level(action),
             )
-            .is_some()
         })
     }
 

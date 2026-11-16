@@ -49,6 +49,9 @@ pub enum PlayerAnim {
     HitReact,
     /// A poise break plays the complete stagger and recovery one-shot.
     Stun,
+    /// The stagger a parry's riposte deals: the same lock as [`Self::Stun`],
+    /// over the Parried clip (the stagger clip until one is authored).
+    Parried,
     /// A poise break knocked the fighter down: the knockdown clip, held
     /// until it gets up.
     Knockdown,
@@ -98,6 +101,7 @@ impl PlayerAnim {
             Self::Death => CharacterAnimationAction::Death,
             Self::HitReact => CharacterAnimationAction::HitReact,
             Self::Stun => CharacterAnimationAction::Stun,
+            Self::Parried => CharacterAnimationAction::Parried,
             Self::Knockdown => CharacterAnimationAction::Knockdown,
             Self::WalkWindup => CharacterAnimationAction::WalkWindup,
             Self::WalkWinddown => CharacterAnimationAction::WalkWinddown,
@@ -144,7 +148,7 @@ pub const fn player_damage_reaction(
     action_locked: bool,
 ) -> Option<PlayerAnim> {
     if matches!(current, PlayerAnim::Death)
-        || (action_locked && matches!(current, PlayerAnim::Stun))
+        || (action_locked && matches!(current, PlayerAnim::Stun | PlayerAnim::Parried))
     {
         None
     } else if poise_broken {

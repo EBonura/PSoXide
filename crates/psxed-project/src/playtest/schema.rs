@@ -1665,6 +1665,8 @@ pub struct PlaytestGameEntity {
     /// One-shot held while knocked down: the Knockdown role, else the
     /// stagger clip.
     pub knockdown_clip: u16,
+    /// Clip over a parry's stagger (Parried, else its chain).
+    pub parried_clip: u16,
     /// Death one-shot clip.
     pub death_clip: u16,
     /// First rig-attached volume in [`PlaytestPackage::combat_capsules`].
