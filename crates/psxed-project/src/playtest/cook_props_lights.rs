@@ -2490,13 +2490,14 @@ pub(crate) fn push_game_entity(
         ));
         return false;
     }
-    if enemy.max_health == 0 {
+    let combat = settings.combat_stats();
+    if combat.max_health == 0 {
         report.error(format!(
             "Enemy on '{node_name}' has Horizon health 0 (must be > 0)"
         ));
         return false;
     }
-    if enemy.max_health_secondary == 0 {
+    if combat.max_health_secondary == 0 {
         report.error(format!(
             "Enemy on '{node_name}' has Zenith health 0 (must be > 0)"
         ));
@@ -2594,10 +2595,8 @@ pub(crate) fn push_game_entity(
         recovery_ticks: enemy.recovery_ticks,
         attack_min_range,
         attack_max_range,
-        poise: enemy.poise,
         touch_damage: enemy.touch_damage,
-        max_health: enemy.max_health,
-        max_health_secondary: enemy.max_health_secondary,
+        combat: combat.cooked(),
         soul_value: enemy.soul_value,
         flags,
     });

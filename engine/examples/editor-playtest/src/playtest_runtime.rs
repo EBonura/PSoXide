@@ -985,25 +985,22 @@ impl Playtest {
         hit.defeated
     }
 
-    /// The player's routing and posture rules around `strike`.
+    /// The player's stats, routing and posture state around `strike`.
     ///
-    /// Ranged-equipped prototypes use 100% matching / 125% opposite damage;
-    /// other projects retain authored scaling. Posture always runs break
-    /// grace against [`PLAYER_POISE`](psx_game_runtime::character::PLAYER_POISE),
-    /// and a Stun cannot be broken.
+    /// Damage and poise follow the one stance rule over
+    /// [`Self::player_stats`], the same rule every enemy runs; only the
+    /// active pool takes the damage until the two pools become one bar. A
+    /// Stun cannot be broken.
     fn player_hit(&self, strike: Strike, carry: bool, armored: bool) -> HitIn {
-        let mut config = self.player_stance_config;
-        if self.player_has_ranged_weapon() {
-            config.aligned_damage_q12 = 4096;
-            config.opposed_damage_q12 = 5120;
-        }
         HitIn {
             strike,
-            route: HitRoute::Stance { config, carry },
+            stats: self.player_stats,
+            route: HitRoute::Stance {
+                config: self.player_stance_config,
+                carry,
+            },
             poise: PoiseRule {
-                capacity: psx_game_runtime::character::PLAYER_POISE,
                 armored,
-                grace: true,
                 blocked: matches!(self.anim_state, PlayerAnim::Stun),
             },
         }
@@ -1055,7 +1052,7 @@ impl Playtest {
         self.opening = opening_sequence::OpeningSequence::default();
         // New Game must not reload a previous run from the card, including
         // when a card was absent at boot and becomes available later.
-        self.poi_save = SaveBlock::new(PLAYER_MAX_HEALTH, PERSISTENT_FLAG_COUNT);
+        self.poi_save = SaveBlock::new(self.player_stats.max_health, PERSISTENT_FLAG_COUNT);
         self.poi_save_loaded = true;
         self.poi_save_load_attempted = true;
         self.poi_save_dirty = true;
@@ -1096,8 +1093,6 @@ impl Playtest {
         self.game_entities
             .spawn_from_records_with_ids(GAME_ENTITIES.as_slice(), GAME_ENTITY_IDS.as_slice());
         self.game_entities
-            .enable_combat_flow(self.player_has_ranged_weapon());
-        self.game_entities
             .set_stance_swap_delay(self.player_stance_config.swap_cooldown_ticks);
         self.deferred_enemy_attacks.clear();
         self.combat_projectiles.clear();
@@ -1110,7 +1105,7 @@ impl Playtest {
         self.logic_fired_reported = 0;
         // Playtest lives in a zeroed MaybeUninit, so the combatant is set
         // explicitly on every reset rather than relying on the zero pattern.
-        self.player.reset([PLAYER_MAX_HEALTH; 2]);
+        self.player.reset(&self.player_stats);
         self.camera_recenter_requested = false;
         self.ranged_ready = combat_input::RangedReady::EMPTY;
         self.aim_control = aim_control::AimControl::EMPTY;
@@ -1135,7 +1130,7 @@ impl Playtest {
     /// Start a fresh combat life without changing checkpoints or collected items.
     /// In-flight shots and queued inputs belong to the old life, not the spawn.
     fn reset_life_combat(&mut self) {
-        self.player.reset([PLAYER_MAX_HEALTH; 2]);
+        self.player.reset(&self.player_stats);
         self.ranged_ready = combat_input::RangedReady::EMPTY;
         self.aim_control = aim_control::AimControl::EMPTY;
         self.combat_projectiles.clear();
@@ -1164,8 +1159,6 @@ impl Playtest {
     fn rearm_world(&mut self) {
         self.game_entities
             .spawn_from_records_with_ids(GAME_ENTITIES.as_slice(), GAME_ENTITY_IDS.as_slice());
-        self.game_entities
-            .enable_combat_flow(self.player_has_ranged_weapon());
         self.game_entities
             .set_stance_swap_delay(self.player_stance_config.swap_cooldown_ticks);
         self.logic.init_from_records(LOGIC.as_slice());
@@ -2854,6 +2847,7 @@ mod combat_baseline_tests;
 #[cfg(test)]
 mod life_reset_tests {
     use super::*;
+    const PLAYER_MAX_HEALTH: u16 = CombatStats::PLAYER.max_health;
     use psx_game_runtime::projectiles::{CombatTeam, ProjectileSpawn};
     use psx_game_runtime::vitality::DualVitality;
 
@@ -3290,12 +3284,10 @@ mod life_reset_tests {
         let mut storage = unsafe { std::boxed::Box::from_raw(raw) };
         let scene = &mut *storage;
         let config = scene.player_stance_config;
-        let first = scene.player.stance.apply_damage(
-            &mut scene.player.vitality,
-            VitalityChannelId::One,
-            u16::MAX,
-            &config,
-        );
+        let first = scene
+            .player
+            .stance
+            .apply_damage(&mut scene.player.vitality, u16::MAX, &config);
         assert!(first.forced_swap);
         assert!(scene.player.stance.is_broken(VitalityChannelId::One));
         scene.attack_buffer.request(1, 100);

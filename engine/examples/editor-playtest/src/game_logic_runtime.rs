@@ -20,6 +20,7 @@
 
 use super::*;
 use psx_game_runtime::combat::{self, MeleeArc, WorldCombatCapsule};
+use psx_game_runtime::combatant::stance_scaled;
 use psx_game_runtime::destructibles::{DamageChannel, DamageOutcome};
 use psx_game_runtime::entities::{DeferredGameEntityAttack, GameEntityState, MeleeArcStats};
 use psx_game_runtime::model_rendering as mr;
@@ -485,6 +486,16 @@ struct PlayerDefence {
     pose: Option<psx_game_runtime::actor_pose::ActorPoseSnapshot>,
 }
 
+/// The vitality channel (stance) a projectile's damage channel belongs to.
+fn projectile_vitality_channel(
+    channel: psx_game_runtime::projectiles::ProjectileDamageChannel,
+) -> VitalityChannelId {
+    match channel {
+        psx_game_runtime::projectiles::ProjectileDamageChannel::Horizon => VitalityChannelId::One,
+        psx_game_runtime::projectiles::ProjectileDamageChannel::Zenith => VitalityChannelId::Two,
+    }
+}
+
 /// What the player took this tick. Damage and posture land together after
 /// the projectile tick, as one reaction.
 #[derive(Clone, Copy, Default)]
@@ -699,6 +710,7 @@ impl Playtest {
             };
             if connected {
                 self.game_entities.gain_melee_energy(
+                    entity,
                     attack.entity(),
                     self.game_entities.attack_kind(attack.entity()) == 1,
                 );
@@ -834,11 +846,21 @@ impl Playtest {
                 taken.hits = taken.hits.saturating_add(1);
                 let exposed = self.player_shot_opening();
                 taken.shot_opening |= exposed && self.player.flow.can_interrupt();
-                taken.poise = taken.poise.saturating_add(self.player.flow.shot_poise(
+                // The tick's posture lands summed and unscaled, so each bolt
+                // takes the stance rule here, by its own channel.
+                let poise = self.player.flow.shot_poise(
                     impact.poise_damage,
-                    psx_game_runtime::character::PLAYER_POISE,
+                    self.player_stats.poise,
                     exposed,
-                ));
+                );
+                let (_, poise) = stance_scaled(
+                    &self.player_stats,
+                    self.player
+                        .opposes(projectile_vitality_channel(impact.damage_channel)),
+                    0,
+                    poise,
+                );
+                taken.poise = taken.poise.saturating_add(poise);
                 if exposed && self.player.flow.can_interrupt() {
                     telemetry::debug_log("flow:player-shot-interrupt");
                 }
@@ -874,9 +896,12 @@ impl Playtest {
                 VitalityChannelId::Two
             }
         };
-        let applied = self
-            .game_entities
-            .scaled_stance_damage(index, channel, impact.damage);
+        let applied = self.game_entities.scaled_stance_damage(
+            GAME_ENTITIES.as_slice(),
+            index,
+            channel,
+            impact.damage,
+        );
         let opening = self
             .game_entities
             .shot_opening(GAME_ENTITIES.as_slice(), index);
@@ -1156,17 +1181,24 @@ impl Playtest {
 
     fn shooter_can_shoot(&self, shooter: Shooter) -> bool {
         match shooter {
-            Shooter::Player => self.player.flow.can_shoot(),
-            Shooter::Entity(attack) => self.game_entities.can_fire_energy(attack.entity()),
+            Shooter::Player => self.player.flow.can_shoot(&self.player_stats),
+            Shooter::Entity(attack) => GAME_ENTITIES
+                .get(attack.entity())
+                .is_some_and(|record| self.game_entities.can_fire_energy(record, attack.entity())),
         }
     }
 
     fn shooter_spend_shot(&mut self, shooter: Shooter) {
         match shooter {
             Shooter::Player => {
-                let _ = self.player.flow.spend_shot();
+                let _ = self.player.flow.spend_shot(&self.player_stats);
             }
-            Shooter::Entity(attack) => self.game_entities.spend_shot_energy(attack.entity()),
+            Shooter::Entity(attack) => {
+                if let Some(record) = GAME_ENTITIES.get(attack.entity()) {
+                    self.game_entities
+                        .spend_shot_energy(record, attack.entity());
+                }
+            }
         }
     }
 
@@ -1557,8 +1589,12 @@ impl Playtest {
                     GAME_ENTITIES[entity].height,
                 ),
                 GAME_ENTITIES[entity].room,
-                self.game_entities
-                    .scaled_stance_damage(entity, attack, damage),
+                self.game_entities.scaled_stance_damage(
+                    GAME_ENTITIES.as_slice(),
+                    entity,
+                    attack,
+                    damage,
+                ),
                 channel,
                 now,
             );
@@ -1871,10 +1907,13 @@ impl Playtest {
                     continue;
                 }
                 self.swing_hit_mask |= mask;
-                let applied_damage =
-                    self.game_entities
-                        .scaled_stance_damage(entity, vitality_channel, hit.damage);
-                let outcome = self.game_entities.apply_stance_hit(
+                let applied_damage = self.game_entities.scaled_stance_damage(
+                    GAME_ENTITIES.as_slice(),
+                    entity,
+                    vitality_channel,
+                    hit.damage,
+                );
+                let outcome = self.game_entities.apply_hit(
                     GAME_ENTITIES.as_slice(),
                     entity,
                     vitality_channel,
@@ -1970,7 +2009,7 @@ impl Playtest {
                 PlayerAnim::HeavyAttack | PlayerAnim::VertHeavyAttack
             );
             for _ in 0..stats.hits {
-                self.player.flow.melee_hit(heavy);
+                self.player.flow.melee_hit(heavy, &self.player_stats);
             }
             telemetry::counter(telemetry::counter::PLAYER_MELEE_HITS, u32::from(stats.hits));
             let event = if matches!(

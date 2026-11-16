@@ -14,9 +14,7 @@
 //! (ranged weapon, body size), on a record built in the test.
 
 use super::*;
-use psx_game_runtime::combat_flow::{
-    CombatFlow, AIR_TICKS, BREAK_GRACE_TICKS, ENERGY_MAX, HEAVY_GAIN, MELEE_GAIN, SHOT_COST,
-};
+use psx_game_runtime::combat_flow::{CombatFlow, AIR_TICKS, BREAK_GRACE_TICKS};
 use psx_game_runtime::entities::MeleeArcStats;
 use psx_game_runtime::projectiles::{
     CombatTeam, ProjectileDamageChannel, ProjectileSpawn, ProjectileVisualStyle,
@@ -27,6 +25,15 @@ use psx_level::{
     OptionalModelClipIndex, CHARACTER_ANIMATION_ACTION_COUNT, MAX_CHARACTER_ACTION_CHAINS,
     MAX_CHARACTER_COMBAT_WINDOWS,
 };
+
+/// The player character's combat numbers when nothing else is cooked
+/// (`CombatStats::PLAYER`). Their names are the constants they replaced.
+const PLAYER_MAX_HEALTH: u16 = CombatStats::PLAYER.max_health;
+const PLAYER_POISE: u16 = CombatStats::PLAYER.poise;
+const ENERGY_MAX: u16 = CombatStats::PLAYER.energy_max;
+const SHOT_COST: u16 = CombatStats::PLAYER.shot_cost;
+const MELEE_GAIN: u16 = CombatStats::PLAYER.light_gain;
+const HEAVY_GAIN: u16 = CombatStats::PLAYER.heavy_gain;
 
 /// Roll / backstep invulnerable frames of the test character.
 const TEST_I_FRAMES: u8 = 12;
@@ -93,8 +100,7 @@ fn character(ranged: bool) -> RuntimeCharacter {
         roll_active_frames: 20,
         roll_recovery_frames: 10,
         roll_invulnerable_frames: TEST_I_FRAMES,
-        stance_aligned_damage_q12: 2048,
-        stance_opposed_damage_q12: 6144,
+        combat: CombatStats::PLAYER,
         stance_regen_delay_ticks: 90,
         stance_broken_regen_delay_ticks: 300,
         stance_regen_per_tick_q12: 1024,
@@ -155,10 +161,10 @@ fn a_fresh_player_starts_with_two_full_pools_in_the_horizon_stance() {
 }
 
 #[test]
-fn an_untyped_hit_counts_as_aligned_and_takes_half_from_the_active_pool_only() {
+fn an_untyped_hit_counts_as_matching_and_lands_as_authored_on_the_active_pool_only() {
     let mut scene = scene();
     assert!(!scene.apply_untyped_player_damage(20));
-    assert_eq!(pool(&scene, VitalityChannelId::One), 90);
+    assert_eq!(pool(&scene, VitalityChannelId::One), 80);
     assert_eq!(pool(&scene, VitalityChannelId::Two), PLAYER_MAX_HEALTH);
 }
 
@@ -168,26 +174,26 @@ fn an_untyped_hit_follows_the_active_stance_into_the_zenith_pool() {
     let config = scene.player_stance_config;
     assert!(scene.player.stance.request_swap(&config).is_some());
     assert!(!scene.apply_untyped_player_damage(20));
-    assert_eq!(pool(&scene, VitalityChannelId::Two), 90);
+    assert_eq!(pool(&scene, VitalityChannelId::Two), 80);
     assert_eq!(pool(&scene, VitalityChannelId::One), PLAYER_MAX_HEALTH);
 }
 
 #[test]
-fn a_typed_hit_matching_the_active_channel_takes_half() {
+fn a_typed_hit_matching_the_active_channel_lands_as_authored() {
     let mut scene = scene();
     assert!(!scene.apply_typed_player_damage(ProjectileDamageChannel::Horizon, 20));
-    assert_eq!(pool(&scene, VitalityChannelId::One), 90);
+    assert_eq!(pool(&scene, VitalityChannelId::One), 80);
     assert_eq!(pool(&scene, VitalityChannelId::Two), PLAYER_MAX_HEALTH);
 }
 
 #[test]
-fn a_typed_hit_on_the_other_channel_takes_one_and_a_half_from_the_active_pool() {
-    // Today the opposite-channel penalty lands in the ACTIVE pool; the other
-    // pool is never touched. The target design is "opposite hits do extra
-    // poise damage" on one bar, so this is the number that will move.
+fn a_typed_hit_on_the_other_channel_takes_a_quarter_extra_from_the_active_pool() {
+    // The one stance rule: an opposite-stance hit takes the defender's
+    // opposite multiplier (1.25x to start). The penalty still lands in the
+    // ACTIVE pool until the two pools become one bar.
     let mut scene = scene();
     assert!(!scene.apply_typed_player_damage(ProjectileDamageChannel::Zenith, 20));
-    assert_eq!(pool(&scene, VitalityChannelId::One), 70);
+    assert_eq!(pool(&scene, VitalityChannelId::One), 75);
     assert_eq!(pool(&scene, VitalityChannelId::Two), PLAYER_MAX_HEALTH);
 }
 
@@ -205,9 +211,8 @@ fn a_damaging_hit_queues_the_damage_cue_and_a_zero_hit_does_not() {
 
 #[test]
 fn a_ranged_weapon_character_takes_full_matching_and_a_quarter_extra_opposed_damage() {
-    // `player_has_ranged_weapon` swaps the stance multipliers to 1.0x and
-    // 1.25x. A global rule switch keyed off inventory: the enemy rules do the
-    // same through `enable_combat_flow`.
+    // The rule no longer depends on the inventory; the melee-only test below
+    // gives the same numbers.
     let mut scene = scene();
     scene.character = Some(character(true));
     assert!(scene.player_has_ranged_weapon());
@@ -219,12 +224,14 @@ fn a_ranged_weapon_character_takes_full_matching_and_a_quarter_extra_opposed_dam
 }
 
 #[test]
-fn a_melee_only_character_keeps_the_authored_stance_scaling() {
+fn a_melee_only_character_runs_the_same_rule() {
     let mut scene = scene();
     scene.character = Some(character(false));
     assert!(!scene.player_has_ranged_weapon());
     assert!(!scene.apply_untyped_player_damage(20));
-    assert_eq!(pool(&scene, VitalityChannelId::One), 90);
+    assert_eq!(pool(&scene, VitalityChannelId::One), 80);
+    assert!(!scene.apply_typed_player_damage(ProjectileDamageChannel::Zenith, 20));
+    assert_eq!(pool(&scene, VitalityChannelId::One), 55);
 }
 
 #[test]
@@ -249,21 +256,19 @@ fn only_emptying_both_pools_is_lethal() {
 
 #[test]
 fn a_hazard_hit_the_active_pool_exactly_absorbs_does_not_spill() {
-    // 200 at 0.5x is exactly the 100 the pool holds: pool empty, forced swap,
+    // 100 is exactly the 100 the pool holds: pool empty, forced swap,
     // nothing left over, not lethal.
     let mut scene = scene();
-    assert!(!scene.apply_hazard_player_damage(200));
+    assert!(!scene.apply_hazard_player_damage(100));
     assert_eq!(pool(&scene, VitalityChannelId::One), 0);
     assert_eq!(pool(&scene, VitalityChannelId::Two), PLAYER_MAX_HEALTH);
 }
 
 #[test]
 fn a_hazard_hit_past_the_pool_carries_the_rest_into_the_other_pool() {
-    // 210 at 0.5x is 105: the pool takes 100, and the 5 left over is turned
-    // back into hit units (10), re-scaled by the new active stance (aligned
-    // 0.5x) and lands as 5 on the other pool.
+    // 105: the pool takes 100, and the 5 left over lands on the other pool.
     let mut scene = scene();
-    assert!(!scene.apply_hazard_player_damage(210));
+    assert!(!scene.apply_hazard_player_damage(105));
     assert_eq!(pool(&scene, VitalityChannelId::One), 0);
     assert_eq!(pool(&scene, VitalityChannelId::Two), 95);
     assert_eq!(scene.player.stance.active(), VitalityChannelId::Two);
@@ -273,7 +278,7 @@ fn a_hazard_hit_past_the_pool_carries_the_rest_into_the_other_pool() {
 fn a_hazard_hit_inside_the_pool_behaves_like_any_other_hit() {
     let mut scene = scene();
     assert!(!scene.apply_hazard_player_damage(10));
-    assert_eq!(pool(&scene, VitalityChannelId::One), 95);
+    assert_eq!(pool(&scene, VitalityChannelId::One), 90);
     assert_eq!(scene.player.stance.active(), VitalityChannelId::One);
 }
 
@@ -287,23 +292,24 @@ fn liquid_hazards_tick_on_their_own_rhythm() {
 }
 
 #[test]
-fn a_slime_hazard_costs_the_active_pool_two_health_per_hit() {
-    // 4 raw hazard damage through the untyped route at 0.5x.
+fn a_slime_hazard_costs_the_active_pool_four_health_per_hit() {
+    // 4 raw hazard damage through the untyped route, as authored.
     let mut scene = scene();
     let tick = 30;
     let damage = hazard_damage(psx_grid::contents::CONTENTS_SLIME, tick);
     assert!(!scene.apply_untyped_player_damage(damage));
-    assert_eq!(pool(&scene, VitalityChannelId::One), 98);
+    assert_eq!(pool(&scene, VitalityChannelId::One), 96);
 }
 
 #[test]
 fn an_enemy_bolt_routes_by_its_channel_through_the_resolver() {
     // End to end through `resolve_combat`: a Horizon bolt on a Horizon
-    // stance is aligned (0.5x), a Zenith bolt on the same stance is opposed
-    // (1.5x). The bolt starts inside the body capsule, so one tick connects.
+    // stance matches (as authored), a Zenith bolt on the same stance is the
+    // opposite stance (1.25x). The bolt starts inside the body capsule, so
+    // one tick connects.
     for (channel, expected) in [
-        (ProjectileDamageChannel::Horizon, 90),
-        (ProjectileDamageChannel::Zenith, 70),
+        (ProjectileDamageChannel::Horizon, 80),
+        (ProjectileDamageChannel::Zenith, 75),
     ] {
         let mut scene = scene();
         scene.character = Some(character(false));
@@ -373,7 +379,7 @@ fn a_player_inside_the_swap_window_is_not_a_projectile_target() {
 
 #[test]
 fn the_player_poise_capacity_is_sixty() {
-    assert_eq!(psx_game_runtime::character::PLAYER_POISE, 60);
+    assert_eq!(PLAYER_POISE, 60);
 }
 
 #[test]
@@ -552,7 +558,7 @@ fn the_swap_cooldown_is_the_one_the_enemies_receive() {
 #[test]
 fn the_inactive_pool_recovers_after_its_delay_and_the_active_one_never_does() {
     let mut scene = scene();
-    scene.apply_untyped_player_damage(40); // 20 off Horizon
+    scene.apply_untyped_player_damage(20); // 20 off Horizon
     let config = scene.player_stance_config;
     scene.player.stance.request_swap(&config);
     // Horizon is now inactive. Nothing heals until regen_delay (90) passes.
@@ -708,12 +714,12 @@ fn energy_constants_are_the_prototype_economy() {
 fn a_shot_costs_twenty_and_five_shots_empty_the_bar() {
     let mut scene = scene();
     for left in (0..5u16).rev() {
-        assert!(scene.player.flow.can_shoot());
-        assert!(scene.player.flow.spend_shot());
+        assert!(scene.player.flow.can_shoot(&CombatStats::PLAYER));
+        assert!(scene.player.flow.spend_shot(&CombatStats::PLAYER));
         assert_eq!(scene.player.flow.energy, left * SHOT_COST);
     }
-    assert!(!scene.player.flow.can_shoot());
-    assert!(!scene.player.flow.spend_shot());
+    assert!(!scene.player.flow.can_shoot(&CombatStats::PLAYER));
+    assert!(!scene.player.flow.spend_shot(&CombatStats::PLAYER));
     assert_eq!(scene.player.flow.energy, 0);
 }
 
@@ -797,11 +803,11 @@ fn an_arch_refills_twenty_energy_a_second_and_stops_while_firing() {
     flow.energy = 0;
     // 20 per second at 60 ticks: one point every third tick.
     for _ in 0..60 {
-        flow.air_tick(true, false, false);
+        flow.air_tick(true, false, false, &CombatStats::PLAYER);
     }
     assert_eq!(flow.energy, 20);
     for _ in 0..60 {
-        flow.air_tick(true, false, true);
+        flow.air_tick(true, false, true, &CombatStats::PLAYER);
     }
     assert_eq!(flow.energy, 20, "firing pauses the recharge");
     assert_eq!(
@@ -816,16 +822,16 @@ fn the_arch_allowance_runs_out_after_its_ticks_and_needs_ground_time_to_rearm() 
     let mut flow = CombatFlow::FULL;
     let mut expired = false;
     for _ in 0..AIR_TICKS {
-        expired = flow.air_tick(true, false, false);
+        expired = flow.air_tick(true, false, false, &CombatStats::PLAYER);
     }
     assert!(expired);
     assert_eq!(flow.air_left, 0);
     // Touching ground briefly does not refresh it.
     for _ in 0..119 {
-        flow.air_tick(false, true, false);
+        flow.air_tick(false, true, false, &CombatStats::PLAYER);
     }
     assert_eq!(flow.air_left, 0);
-    flow.air_tick(false, true, false);
+    flow.air_tick(false, true, false, &CombatStats::PLAYER);
     assert_eq!(flow.air_left, AIR_TICKS);
 }
 
@@ -843,10 +849,39 @@ fn a_shot_is_free_to_aim_but_the_energy_gate_follows_the_stance_for_the_player()
     // The player's gate is energy plus the Zenith stance; the energy leaf is
     // the same `CombatFlow` the enemies carry.
     let flow = CombatFlow::FULL;
-    assert!(flow.can_shoot());
+    assert!(flow.can_shoot(&CombatStats::PLAYER));
     let mut empty = flow;
     empty.energy = SHOT_COST - 1;
-    assert!(!empty.can_shoot());
+    assert!(!empty.can_shoot(&CombatStats::PLAYER));
+}
+
+#[test]
+fn the_energy_economy_and_health_are_the_characters_data() {
+    // Step 4: the numbers come off the character's CombatStats, not
+    // constants, so a character can carry its own.
+    let mut scene = scene();
+    scene.player_stats = CombatStats {
+        max_health: 70,
+        max_health_secondary: 30,
+        energy_max: 60,
+        shot_cost: 30,
+        light_gain: 5,
+        ..CombatStats::PLAYER
+    };
+    scene.reset_life_combat();
+    assert_eq!(pool(&scene, VitalityChannelId::One), 70);
+    assert_eq!(pool(&scene, VitalityChannelId::Two), 30);
+    assert_eq!(scene.player.flow.energy, 60);
+    assert!(scene.player.flow.spend_shot(&scene.player_stats));
+    assert!(scene.player.flow.spend_shot(&scene.player_stats));
+    assert!(!scene.player.flow.can_shoot(&scene.player_stats));
+    scene.anim_state = PlayerAnim::LightAttack;
+    scene.report_player_melee_stats(MeleeArcStats {
+        hits: 1,
+        staggers: 0,
+        deaths: 0,
+    });
+    assert_eq!(scene.player.flow.energy, 5);
 }
 
 // ---------------------------------------------------------------------------

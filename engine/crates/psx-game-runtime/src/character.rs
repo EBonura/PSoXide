@@ -11,9 +11,6 @@ use psx_level::{
     CHARACTER_ANIMATION_ACTION_COUNT,
 };
 
-/// Player poise pool: a 50-poise claw hit reacts; a 75-poise heavy breaks it.
-pub const PLAYER_POISE: u16 = 60;
-
 /// Animation state machine for the player: idle with no movement,
 /// walking for normal movement, running while Circle is held.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -655,12 +652,12 @@ mod tests {
     #[test]
     fn player_poise_separates_light_heavy_and_accumulated_hits() {
         let mut poise = crate::poise::Poise::EMPTY;
-        assert!(!poise.hit(50, PLAYER_POISE, false));
-        assert!(poise.hit(50, PLAYER_POISE, false));
+        assert!(!poise.hit(50, psx_level::CombatStats::PLAYER.poise, false));
+        assert!(poise.hit(50, psx_level::CombatStats::PLAYER.poise, false));
         let mut poise = crate::poise::Poise::EMPTY;
-        assert!(poise.hit(75, PLAYER_POISE, false));
+        assert!(poise.hit(75, psx_level::CombatStats::PLAYER.poise, false));
         let mut poise = crate::poise::Poise::EMPTY;
-        assert!(!poise.hit(75, PLAYER_POISE, true));
+        assert!(!poise.hit(75, psx_level::CombatStats::PLAYER.poise, true));
     }
 
     #[test]

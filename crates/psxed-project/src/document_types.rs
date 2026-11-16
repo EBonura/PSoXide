@@ -1138,6 +1138,29 @@ impl ProjectDocument {
         ron::ser::to_string_pretty(self, config).map_err(ProjectIoError::Serialize)
     }
 
+    /// Give every character and character controller its combat record,
+    /// built from the fields a project wrote before the record existed (see
+    /// [`CombatStats::legacy`]), so an old project cooks to the numbers it
+    /// always ran with and saves in the new form.
+    fn migrate_combat_stats(&mut self) {
+        for resource in &mut self.resources {
+            if let ResourceData::Character(character) = &mut resource.data {
+                character.migrate_combat_stats();
+            }
+        }
+        for scene in &mut self.scenes {
+            for node in &mut scene.nodes {
+                if let NodeKind::CharacterController {
+                    settings: Some(settings),
+                    ..
+                } = &mut node.kind
+                {
+                    settings.migrate_combat_stats();
+                }
+            }
+        }
+    }
+
     /// Deserialize a project from RON.
     pub fn from_ron_str(source: &str) -> Result<Self, ProjectIoError> {
         let mut project: Self = match ron::from_str(source) {
@@ -1269,6 +1292,7 @@ impl ProjectDocument {
 
     /// Normalize legacy or hand-authored project data after load.
     pub fn normalize_loaded(&mut self) {
+        self.migrate_combat_stats();
         self.migrate_legacy_texture_resources();
         self.migrate_legacy_material_skies();
         for resource in &mut self.resources {

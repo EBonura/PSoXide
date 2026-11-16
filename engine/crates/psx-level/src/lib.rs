@@ -1164,6 +1164,80 @@ pub struct LevelLogicRecord {
     pub flags: u16,
 }
 
+/// Where a character's poise armour comes from. Bits of
+/// [`CombatStats::armour`]; armour doubles the poise capacity for a hit.
+pub mod combat_armour {
+    /// Armoured while a heavy attack's hit frames are active.
+    pub const HEAVY_ATTACK: u8 = 1 << 0;
+    /// An authored `Armored` combat window, when the character's clip has
+    /// one, decides instead of [`HEAVY_ATTACK`]. Only characters with
+    /// combat windows (the player today) can carry one.
+    pub const AUTHORED_WINDOW: u8 = 1 << 1;
+}
+
+/// The combat numbers of one character, the same record for the player and
+/// for enemies. Every fighter runs the same rules over these; characters
+/// differ only here. Q12 multipliers use 4096 for 1.0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CombatStats {
+    /// First vitality pool at spawn (Horizon).
+    pub max_health: u16,
+    /// Second vitality pool at spawn (Zenith). Zero is a legal
+    /// single-pool fighter.
+    pub max_health_secondary: u16,
+    /// Poise capacity: posture damage past it breaks.
+    pub poise: u16,
+    /// Armour sources, bits of [`combat_armour`].
+    pub armour: u8,
+    /// Damage multiplier for a hit whose stance is the opposite of the
+    /// defender's active one, Q12.
+    pub opposite_damage_q12: u16,
+    /// Poise multiplier for a hit whose stance is the opposite of the
+    /// defender's active one, Q12.
+    pub opposite_poise_q12: u16,
+    /// Energy ceiling; a fresh life starts full.
+    pub energy_max: u16,
+    /// Energy one Zenith shot spends.
+    pub shot_cost: u16,
+    /// Energy a connected light blade hit gains.
+    pub light_gain: u16,
+    /// Energy a connected heavy blade hit gains.
+    pub heavy_gain: u16,
+}
+
+impl CombatStats {
+    /// Opposite-stance damage multiplier every character starts from:
+    /// 1.25x, the flow rule the enemies and the ranged player ran before
+    /// the numbers became data.
+    pub const OPPOSITE_DAMAGE_Q12: u16 = 5120;
+    /// Opposite-stance poise multiplier every character starts from.
+    /// PLACEHOLDER: no such multiplier existed before, so it starts equal to
+    /// [`Self::OPPOSITE_DAMAGE_Q12`] until the duel harness tunes it.
+    pub const OPPOSITE_POISE_Q12: u16 = 5120;
+
+    /// The player character's numbers before they became data: 100 per
+    /// pool, poise 60, the shared energy economy.
+    pub const PLAYER: Self = Self {
+        max_health: 100,
+        max_health_secondary: 100,
+        poise: 60,
+        armour: combat_armour::HEAVY_ATTACK | combat_armour::AUTHORED_WINDOW,
+        opposite_damage_q12: Self::OPPOSITE_DAMAGE_Q12,
+        opposite_poise_q12: Self::OPPOSITE_POISE_Q12,
+        energy_max: 100,
+        shot_cost: 20,
+        light_gain: 12,
+        heavy_gain: 20,
+    };
+
+    /// An enemy's numbers when nothing was authored: 100 per pool and
+    /// poise 100, otherwise as [`Self::PLAYER`].
+    pub const ENEMY: Self = Self {
+        poise: 100,
+        ..Self::PLAYER
+    };
+}
+
 /// One placed souls-like game entity (enemy). Cooked today from an
 /// Entity node whose non-player Character Controller opts in with
 /// `EnemyBehaviorSettings`; `kind` is the interned Character resource
@@ -1308,18 +1382,11 @@ pub struct LevelGameEntityRecord {
     pub attack_min_range: u16,
     /// Furthest XZ distance at which a ranged attack may begin. Zero for melee.
     pub attack_max_range: u16,
-    /// Poise pool; poise damage past it staggers the entity.
-    pub poise: u16,
     /// Damage dealt by a connecting touch/melee attack.
     pub touch_damage: u16,
-    /// First vitality channel's pool at spawn (Horizon in Cortex Ignition).
-    pub max_health: u16,
-    /// Second vitality channel's pool at spawn (Zenith in Cortex Ignition).
-    ///
-    /// Enemies carry the same two-channel vitality the player does. Zero is
-    /// a legal single-channel actor: the runtime treats an empty second pool
-    /// as already spent, so the entity dies on the first pool alone.
-    pub max_health_secondary: u16,
+    /// Health, poise, stance multipliers and energy: the same record the
+    /// player character carries.
+    pub combat: CombatStats,
     /// Souls the player is credited for landing the killing blow.
     ///
     /// Authored per enemy so the reward curve is tuned in the editor next to
@@ -3536,10 +3603,9 @@ pub struct LevelCharacterRecord {
     pub roll_recovery_frames: u8,
     /// Roll invulnerability display frames from action start.
     pub roll_invulnerable_frames: u8,
-    /// Authored stance tuning: see CombatStanceConfig.
-    pub stance_aligned_damage_q12: u16,
-    /// Authored stance tuning: see CombatStanceConfig.
-    pub stance_opposed_damage_q12: u16,
+    /// Health, poise, stance multipliers and energy: the same record every
+    /// enemy carries.
+    pub combat: CombatStats,
     /// Authored stance tuning: see CombatStanceConfig.
     pub stance_regen_delay_ticks: u16,
     /// Authored stance tuning: see CombatStanceConfig.

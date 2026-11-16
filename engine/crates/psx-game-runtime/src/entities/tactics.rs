@@ -375,8 +375,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         delta: u16,
     ) {
         if self.state(i) != GameEntityState::Aggro
-            && !(self.flow_enabled
-                && (self.selected_attack_is_ranged(i) || self.state(i) == GameEntityState::Windup)
+            && !((self.selected_attack_is_ranged(i) || self.state(i) == GameEntityState::Windup)
                 && matches!(
                     self.state(i),
                     GameEntityState::Windup | GameEntityState::Attack | GameEntityState::Recover
@@ -421,32 +420,28 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         let roll = self.draw(i, 100);
         // Adapt the observed near retreat / middle circle / far approach bands
         // to the authored Cortex combat radius. Re-sample AFTER the recovery window.
-        let (goal, separation, base, spread) = if self.player_within(i, input, p) {
+        let (goal, separation) = if self.player_within(i, input, p) {
             if roll < 70 {
-                (EnemyGoal::Retreat, p + p / 2, 180, 91)
+                (EnemyGoal::Retreat, p + p / 2)
             } else if roll < 90 {
-                (self.circle_side(i), p + p / 2, 210, 91)
+                (self.circle_side(i), p + p / 2)
             } else {
-                (EnemyGoal::Hold, p, 36, 25)
+                (EnemyGoal::Hold, p)
             }
         } else if self.player_within(i, input, p * 3) {
             if roll < u16::from(r.circle_chance) {
-                (self.circle_side(i), p + p / 2, 210, 91)
+                (self.circle_side(i), p + p / 2)
             } else if roll < 85 {
-                (EnemyGoal::Approach, p, 180, 91)
+                (EnemyGoal::Approach, p)
             } else {
-                (EnemyGoal::Hold, p, 36, 25)
+                (EnemyGoal::Hold, p)
             }
         } else {
-            (EnemyGoal::Approach, p, 240, 61)
+            (EnemyGoal::Approach, p)
         };
-        let duration = if self.flow_enabled {
-            // A readable half-to-one-second reset, not a multi-second refusal
-            // to consider another attack while the player recovers for free.
-            36 + self.draw(i, 37)
-        } else {
-            base + self.draw(i, spread)
-        };
+        // A readable half-to-one-second reset, not a multi-second refusal
+        // to consider another attack while the player recovers for free.
+        let duration = 36 + self.draw(i, 37);
         self.begin_goal(i, goal, duration, separation);
         // The director must let the spacing goal finish before granting another swing.
         if goal == EnemyGoal::Hold {
@@ -532,7 +527,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
             && distance >= t.start_distance
             && t.sample_ticks >= 180;
         if no_travel || no_progress {
-            if self.flow_enabled && t.goal == EnemyGoal::BreakAway {
+            if t.goal == EnemyGoal::BreakAway {
                 self.combatants[i].flow.contest_space();
                 self.finish_goal(i, EnemyGoalResult::Blocked);
                 self.release_attack_owner(i, 0);
@@ -718,8 +713,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
             return;
         }
         if goal != EnemyGoal::None && previous > 0 && self.tactics[i].remaining == 0 {
-            if self.flow_enabled
-                && goal == EnemyGoal::BreakAway
+            if goal == EnemyGoal::BreakAway
                 && visible
                 && self.player_within(i, input, Self::melee_attack_reach(r, input) * 3)
             {
@@ -764,19 +758,16 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
                 | EnemyGoal::TakeCover
                 | EnemyGoal::Peek
                 | EnemyGoal::Evade
-        ) || (self.flow_enabled
-            && matches!(
-                goal,
-                EnemyGoal::CircleLeft
-                    | EnemyGoal::CircleRight
-                    | EnemyGoal::Retreat
-                    | EnemyGoal::BreakAway
-            )
-            && self.tactics[i].phase >= 24);
+        ) || (matches!(
+            goal,
+            EnemyGoal::CircleLeft
+                | EnemyGoal::CircleRight
+                | EnemyGoal::Retreat
+                | EnemyGoal::BreakAway
+        ) && self.tactics[i].phase >= 24);
         // Free locomotion can evade in either stance, including with an empty
         // Energy reserve. Windup/attack/recovery never enter this policy.
-        if self.flow_enabled
-            && !self.stance_swap_in_progress(i)
+        if !self.stance_swap_in_progress(i)
             && self.exchanges[i].try_evade(
                 self.position(i),
                 i32::from(r.radius),
@@ -801,40 +792,38 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
                 melee,
                 self.stance(i),
                 self.combatants[i].health(),
-                [r.max_health, r.max_health_secondary],
+                [r.combat.max_health, r.combat.max_health_secondary],
                 press_after_cannon,
                 if visible { input.player_combat } else { None },
             );
-            let mut stance_reason = reason as u8;
-            let mut desired = stance;
-            if self.flow_enabled {
-                desired = if self.combatants[i]
+            let mut desired = if self.combatants[i].flow.preferred_stance(
+                stance.index() as u8,
+                separated,
+                &r.combat,
+            ) == 0
+            {
+                VitalityChannelId::One
+            } else {
+                VitalityChannelId::Two
+            };
+            let mut stance_reason =
+                self.combatants[i]
                     .flow
-                    .preferred_stance(stance.index() as u8, separated)
-                    == 0
-                {
-                    VitalityChannelId::One
-                } else {
-                    VitalityChannelId::Two
-                };
-                stance_reason = self.combatants[i]
-                    .flow
-                    .stance_reason(stance_reason, separated);
-                let (near, _) = crate::combat_flow::ranged_band(
-                    i32::from(r.preferred_distance),
-                    Self::melee_attack_reach(r, input) + 16,
-                    i32::from(r.attack_max_range),
-                );
-                if desired == VitalityChannelId::Two
-                    && self.stance(i) == VitalityChannelId::One
-                    && Self::distance(self.position(i), home) >= i32::from(r.aggro_radius)
-                    && self.player_within(i, input, near)
-                {
-                    // Stay ready to defend at the boundary. Swapping out and back
-                    // cannot create an escape route that does not exist.
-                    desired = VitalityChannelId::One;
-                    stance_reason = 10;
-                }
+                    .stance_reason(reason as u8, separated, &r.combat);
+            let (near, _) = crate::combat_flow::ranged_band(
+                i32::from(r.preferred_distance),
+                Self::melee_attack_reach(r, input) + 16,
+                i32::from(r.attack_max_range),
+            );
+            if desired == VitalityChannelId::Two
+                && self.stance(i) == VitalityChannelId::One
+                && Self::distance(self.position(i), home) >= i32::from(r.aggro_radius)
+                && self.player_within(i, input, near)
+            {
+                // Stay ready to defend at the boundary. Swapping out and back
+                // cannot create an escape route that does not exist.
+                desired = VitalityChannelId::One;
+                stance_reason = 10;
             }
             // An overhead target cannot replenish a ground actor's Energy.
             // Keep the cannon selected while empty and wait for a reachable target.
@@ -846,10 +835,8 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
                 self.mutate_stance(i);
                 if self.stance(i) == desired {
                     self.tactics[i].stance_reason = stance_reason;
-                    if self.flow_enabled {
-                        self.finish_goal(i, EnemyGoalResult::Cancelled);
-                        goal = EnemyGoal::None;
-                    }
+                    self.finish_goal(i, EnemyGoalResult::Cancelled);
+                    goal = EnemyGoal::None;
                 }
             }
             if self.stance_swap_in_progress(i) {
@@ -863,7 +850,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
             melee
         };
         let reach = if melee {
-            Self::melee_attack_reach(r, input) + if self.flow_enabled { 16 } else { 0 }
+            Self::melee_attack_reach(r, input) + 16
         } else {
             Self::attack_reach(r, input)
         };
@@ -873,36 +860,33 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
             Self::melee_attack_reach(r, input) + 16,
             i32::from(r.attack_max_range),
         );
-        if self.flow_enabled {
-            self.tactics[i].combat_role = 0;
-            if melee {
-                self.exchanges[i].reset();
-                if self.step_melee_defense(r, i, input, mover, delta, stats) {
-                    return;
-                }
-                goal = self.tactics[i].goal;
-            } else if self.can_fire_energy(i)
-                && !self.player_within(i, input, Self::melee_attack_reach(r, input) * 2)
-                && self.step_ranged_exchange(r, i, input, mover, delta, fire_far, stats)
-            {
+        self.tactics[i].combat_role = 0;
+        if melee {
+            self.exchanges[i].reset();
+            if self.step_melee_defense(r, i, input, mover, delta, stats) {
                 return;
             }
-            if matches!(
-                goal,
-                EnemyGoal::TakeCover | EnemyGoal::Peek | EnemyGoal::Evade
-            ) {
-                self.finish_goal(i, EnemyGoalResult::Cancelled);
-                goal = EnemyGoal::None;
-            }
+            goal = self.tactics[i].goal;
+        } else if self.can_fire_energy(r, i)
+            && !self.player_within(i, input, Self::melee_attack_reach(r, input) * 2)
+            && self.step_ranged_exchange(r, i, input, mover, delta, fire_far, stats)
+        {
+            return;
         }
-        if self.flow_enabled && melee && goal == EnemyGoal::BreakAway {
+        if matches!(
+            goal,
+            EnemyGoal::TakeCover | EnemyGoal::Peek | EnemyGoal::Evade
+        ) {
             self.finish_goal(i, EnemyGoalResult::Cancelled);
             goal = EnemyGoal::None;
         }
-        if self.flow_enabled
-            && !melee
+        if melee && goal == EnemyGoal::BreakAway {
+            self.finish_goal(i, EnemyGoalResult::Cancelled);
+            goal = EnemyGoal::None;
+        }
+        if !melee
             && visible
-            && self.can_fire_energy(i)
+            && self.can_fire_energy(r, i)
             && self.player_within(i, input, fire_near)
             && matches!(
                 goal,
@@ -921,11 +905,11 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         // A stance-locked gunner must keep a real firing band. Otherwise a
         // melee approach repeatedly crosses the projectile minimum and backs
         // out again while the stance cooldown is still closed.
-        if melee && self.flow_enabled && goal == EnemyGoal::Approach {
+        if melee && goal == EnemyGoal::Approach {
             self.tactics[i].separation = reach as u16;
         }
         if !melee && goal == EnemyGoal::Approach {
-            self.tactics[i].separation = (if self.flow_enabled { fire_far } else { p * 2 })
+            self.tactics[i].separation = fire_far
                 .min(reach)
                 .max(i32::from(r.attack_min_range) + i32::from(r.spacing_tolerance))
                 as u16;
@@ -933,20 +917,11 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         if goal == EnemyGoal::None {
             // A short assessment before approaching makes initial acquisition and
             // post-goal replans readable; circling side is drawn once per objective.
-            let separation = if !melee || (Self::has_ranged_attack(r) && self.draw(i, 100) < 30) {
-                (p * 2).min(i32::from(r.attack_max_range))
-            } else {
-                Self::melee_attack_reach(r, input)
-            };
-            let separation = if self.flow_enabled {
-                if melee {
-                    reach
-                } else {
-                    fire_far
-                }
-            } else {
-                separation
-            };
+            // The draw no longer picks anything, but it still advances the
+            // entity's random sequence exactly as before, so every later
+            // decision keeps its old roll.
+            let _ = melee && Self::has_ranged_attack(r) && self.draw(i, 100) < 30;
+            let separation = if melee { reach } else { fire_far };
             self.begin_goal(i, EnemyGoal::Approach, 300, separation);
             goal = EnemyGoal::Approach;
         }
@@ -963,7 +938,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
             && (!melee || melee_height_reachable)
             && self.attack_owner() == Some(i)
             && self.tactical_attack_ready(r, i)
-            && (melee || self.can_fire_energy(i))
+            && (melee || self.can_fire_energy(r, i))
             && self.player_within(
                 i,
                 input,
@@ -972,16 +947,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
                 ),
             )
             && error <= 341
-            && (melee
-                || !self.player_within(
-                    i,
-                    input,
-                    if self.flow_enabled {
-                        fire_near
-                    } else {
-                        i32::from(r.attack_min_range)
-                    },
-                ))
+            && (melee || !self.player_within(i, input, fire_near))
         {
             self.choose_attack(r, i, input, !melee);
             if !melee {
@@ -1032,7 +998,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
                 }
                 self.set_intent(i, GameEntityIntent::Approach);
                 if visible && self.player_within(i, input, separation) {
-                    if self.flow_enabled && self.attack_cooldown[i] == 0 {
+                    if self.attack_cooldown[i] == 0 {
                         // Keep the settled goal while turning/acquiring the attack
                         // token instead of restarting it on every policy tick.
                         self.set_intent(i, GameEntityIntent::Hold);

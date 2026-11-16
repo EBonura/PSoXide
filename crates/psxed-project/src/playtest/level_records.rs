@@ -412,10 +412,8 @@ impl OwnedLevelRecords {
                     recovery_ticks: e.recovery_ticks,
                     attack_min_range: e.attack_min_range,
                     attack_max_range: e.attack_max_range,
-                    poise: e.poise,
                     touch_damage: e.touch_damage,
-                    max_health: e.max_health,
-                    max_health_secondary: e.max_health_secondary,
+                    combat: e.combat,
                     soul_value: e.soul_value,
                     flags: e.flags,
                 })
@@ -783,7 +781,7 @@ mod tests {
         assert_eq!(records.game_entities.len(), package.game_entities.len());
         assert!(!records.game_entities.is_empty());
         for (record, entity) in records.game_entities.iter().zip(&package.game_entities) {
-            assert_eq!(record.max_health, entity.max_health);
+            assert_eq!(record.combat, entity.combat);
             assert_eq!(
                 (record.patrol_x, record.patrol_y, record.patrol_z),
                 (entity.patrol[0], entity.patrol[1], entity.patrol[2])

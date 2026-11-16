@@ -1141,7 +1141,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             .join(", ");
         let _ = writeln!(
             out,
-            "    LevelCharacterRecord {{ model: ModelIndex({}), action_clips: [{}], action_flags: [{}], action_speeds: [{}], action_frame_ranges: [{}], action_pushes: [{}], action_chains: [{}], combat_windows: [{}], combat_capsule_first: CombatCapsuleIndex({}), combat_capsule_count: {}, visual_offset: [{}, {}, {}], visual_yaw: {}, visual_scale_q8: {}, weight_q8: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, turn_speed_degrees_per_second: {}, stamina_max_q12: {}, sprint_min_q12: {}, sprint_drain_q12: {}, stamina_recover_q12: {}, roll_cost_q12: {}, roll_speed: {}, roll_active_frames: {}, roll_recovery_frames: {}, roll_invulnerable_frames: {}, backstep_cost_q12: {}, backstep_speed: {}, backstep_active_frames: {}, backstep_recovery_frames: {}, backstep_invulnerable_frames: {}, stance_aligned_damage_q12: {}, stance_opposed_damage_q12: {}, stance_regen_delay_ticks: {}, stance_broken_regen_delay_ticks: {}, stance_regen_per_tick_q12: {}, stance_break_threshold_q12: {}, stance_swap_cooldown_ticks: {}, stance_swap_duration_ticks: {}, camera_distance: {}, camera_height: {}, camera_target_height: {}, material_override: {}, flags: 0 }},",
+            "    LevelCharacterRecord {{ model: ModelIndex({}), action_clips: [{}], action_flags: [{}], action_speeds: [{}], action_frame_ranges: [{}], action_pushes: [{}], action_chains: [{}], combat_windows: [{}], combat_capsule_first: CombatCapsuleIndex({}), combat_capsule_count: {}, visual_offset: [{}, {}, {}], visual_yaw: {}, visual_scale_q8: {}, weight_q8: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, turn_speed_degrees_per_second: {}, stamina_max_q12: {}, sprint_min_q12: {}, sprint_drain_q12: {}, stamina_recover_q12: {}, roll_cost_q12: {}, roll_speed: {}, roll_active_frames: {}, roll_recovery_frames: {}, roll_invulnerable_frames: {}, backstep_cost_q12: {}, backstep_speed: {}, backstep_active_frames: {}, backstep_recovery_frames: {}, backstep_invulnerable_frames: {}, combat: {}, stance_regen_delay_ticks: {}, stance_broken_regen_delay_ticks: {}, stance_regen_per_tick_q12: {}, stance_break_threshold_q12: {}, stance_swap_cooldown_ticks: {}, stance_swap_duration_ticks: {}, camera_distance: {}, camera_height: {}, camera_target_height: {}, material_override: {}, flags: 0 }},",
             character.model,
             action_clips,
             action_flags,
@@ -1177,8 +1177,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             character.backstep_active_frames,
             character.backstep_recovery_frames,
             character.backstep_invulnerable_frames,
-            character.stance_aligned_damage_q12,
-            character.stance_opposed_damage_q12,
+            combat_stats_literal(&character.combat),
             character.stance_regen_delay_ticks,
             character.stance_broken_regen_delay_ticks,
             character.stance_regen_per_tick_q12,
@@ -1194,6 +1193,23 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     out.push_str("];\n\n");
 
     out
+}
+
+/// A `psx_level::CombatStats` as Rust source for the generated manifest.
+fn combat_stats_literal(stats: &psx_level::CombatStats) -> String {
+    format!(
+        "psx_level::CombatStats {{ max_health: {}, max_health_secondary: {}, poise: {}, armour: {}, opposite_damage_q12: {}, opposite_poise_q12: {}, energy_max: {}, shot_cost: {}, light_gain: {}, heavy_gain: {} }}",
+        stats.max_health,
+        stats.max_health_secondary,
+        stats.poise,
+        stats.armour,
+        stats.opposite_damage_q12,
+        stats.opposite_poise_q12,
+        stats.energy_max,
+        stats.shot_cost,
+        stats.light_gain,
+        stats.heavy_gain,
+    )
 }
 
 fn render_world_pack_order(package: &PlaytestPackage) -> String {

@@ -399,6 +399,7 @@ impl Playtest {
             self.hook_attached.is_some(),
             self.hook_travel.is_none() && self.motor.grounded(),
             self.ranged_ready.firing(ctx.sim_tick.as_u32()),
+            &self.player_stats,
         ) {
             self.detach_arch(ctx.sim_tick);
             telemetry::debug_log("arch:timeout");

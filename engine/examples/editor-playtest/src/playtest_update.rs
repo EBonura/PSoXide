@@ -259,8 +259,6 @@ impl Playtest {
             // update, pairing it with the same retained pose contact uses.
             let player_invulnerable = self.player_invulnerable(ctx);
             self.game_entities
-                .enable_combat_flow(self.player_has_ranged_weapon());
-            self.game_entities
                 .set_player_attack_read(self.player_melee_read());
             self.game_entities
                 .observe_projectiles(GAME_ENTITIES.as_slice(), &self.combat_projectiles);
@@ -483,6 +481,7 @@ impl Playtest {
         // PLAYER_SPAWN for placeholder manifests. The spawn room
         // may be a manual portal room rather than room zero.
         self.player_stance_config = CombatStanceConfig::DEFAULT;
+        self.player_stats = CombatStats::PLAYER;
         let (spawn, character) = match PLAYER_CONTROLLER.get() {
             Some(pc) => {
                 let record = CHARACTERS.get(pc.character.to_usize());
@@ -491,9 +490,8 @@ impl Playtest {
                 // rebuild. The reset above installed the defaults; this
                 // replaces them once the cooked values are in hand.
                 if let Some(record) = record {
+                    self.player_stats = record.combat;
                     self.player_stance_config = CombatStanceConfig {
-                        aligned_damage_q12: record.stance_aligned_damage_q12,
-                        opposed_damage_q12: record.stance_opposed_damage_q12,
                         regen_delay_ticks: record.stance_regen_delay_ticks,
                         broken_regen_delay_ticks: record.stance_broken_regen_delay_ticks,
                         regen_per_tick_q12: record.stance_regen_per_tick_q12,
@@ -1606,7 +1604,7 @@ impl Playtest {
             }
             if !action_locked
                 && self.motor.action().is_idle()
-                && self.player.flow.can_shoot()
+                && self.player.flow.can_shoot(&self.player_stats)
                 && !self.ranged_ready.firing(now.as_u32())
             {
                 if self.attack_buffer.take(now.as_u32()) == Some(5) {

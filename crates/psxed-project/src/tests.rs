@@ -214,6 +214,123 @@ fn enemy_behavior_deserializes_without_combat_director_tuning_fields() {
 }
 
 #[test]
+fn an_old_project_folds_enemy_health_and_poise_into_combat_stats() {
+    // A project written before CombatStats: health and poise on the enemy
+    // block, nothing for the player, and the old stance multipliers.
+    let mut project = ProjectDocument::new("legacy-combat");
+    let enemy = CharacterResource {
+        spawn_role: CharacterSpawnRole::Enemy,
+        enemy_behavior: Some(EnemyBehaviorSettings {
+            touch_damage: 11,
+            ..EnemyBehaviorSettings::defaults()
+        }),
+        ..CharacterResource::defaults()
+    };
+    let enemy = project.add_resource("Enemy", ResourceData::Character(enemy));
+    let bare_enemy = CharacterResource {
+        spawn_role: CharacterSpawnRole::Enemy,
+        ..CharacterResource::defaults()
+    };
+    let bare_enemy = project.add_resource("Bare enemy", ResourceData::Character(bare_enemy));
+    let player = project.add_resource(
+        "Player",
+        ResourceData::Character(CharacterResource::defaults()),
+    );
+    let scene = project.active_scene_mut();
+    let root = scene.root;
+    let node = scene.add_node(
+        root,
+        "Placed enemy",
+        NodeKind::CharacterController {
+            loadout: None,
+            character: Some(enemy),
+            settings: Some(CharacterControllerSettings {
+                enemy: Some(EnemyBehaviorSettings {
+                    touch_damage: 12,
+                    ..EnemyBehaviorSettings::defaults()
+                }),
+                ..CharacterControllerSettings::defaults()
+            }),
+            player: false,
+        },
+    );
+    // Write it the way the old writer did: health and poise on the enemy
+    // blocks, the two stance multipliers on every character.
+    let text = project
+        .to_ron_string()
+        .unwrap()
+        .replace(
+            "touch_damage: 11,",
+            "poise: 25, touch_damage: 11, max_health: 300, max_health_secondary: 200,",
+        )
+        .replace("touch_damage: 12,", "poise: 40, touch_damage: 12,")
+        .replace(
+            "stance_regen_delay_ticks:",
+            "stance_aligned_damage_q12: 2048, stance_opposed_damage_q12: 6144, \
+             stance_regen_delay_ticks:",
+        );
+    assert!(text.contains("max_health: 300"));
+    assert!(text.contains("poise: 40"));
+    assert!(text.contains("stance_opposed_damage_q12"));
+    let loaded = ProjectDocument::from_ron_str(&text).unwrap();
+
+    let character = |id| match &loaded.resource(id).unwrap().data {
+        ResourceData::Character(character) => character.clone(),
+        _ => unreachable!(),
+    };
+    let stats = character(enemy).combat.expect("folded on load");
+    assert_eq!(
+        (stats.max_health, stats.max_health_secondary, stats.poise),
+        (300, 200, 25)
+    );
+    assert_eq!(stats.opposite_damage_q12, 5120);
+    assert_eq!(character(enemy).enemy_behavior.unwrap().legacy_poise, None);
+    // An enemy with no block ran on the old enemy defaults.
+    let stats = character(bare_enemy).combat.unwrap();
+    assert_eq!(
+        (stats.max_health, stats.max_health_secondary, stats.poise),
+        (100, 100, 100)
+    );
+    // The player ran on the old constants: 100 per pool, poise 60.
+    assert_eq!(character(player).combat, Some(CombatStats::PLAYER));
+    assert_eq!(CombatStats::PLAYER.poise, 60);
+    let NodeKind::CharacterController {
+        settings: Some(settings),
+        ..
+    } = &loaded.active_scene().node(node).unwrap().kind
+    else {
+        unreachable!()
+    };
+    assert_eq!(settings.combat.unwrap().poise, 40);
+    assert_eq!(settings.combat.unwrap().max_health, 100);
+
+    // Saved again, the record is written and the old fields are gone, and
+    // it reads back the same.
+    let saved = loaded.to_ron_string().unwrap();
+    assert!(saved.contains("combat: Some("));
+    assert!(!saved.contains("stance_opposed_damage_q12"));
+    let again = ProjectDocument::from_ron_str(&saved).unwrap();
+    assert_eq!(again.to_ron_string().unwrap(), saved);
+}
+
+#[test]
+fn player_and_enemy_stats_cook_through_one_path() {
+    let stats = CombatStats {
+        max_health: 70,
+        poise: 33,
+        armour_authored_window: false,
+        opposite_poise_q12: 6000,
+        shot_cost: 25,
+        ..CombatStats::ENEMY
+    };
+    let cooked = stats.cooked();
+    assert_eq!(CombatStats::from_cooked(cooked), stats);
+    assert_eq!(cooked.armour, psx_level::combat_armour::HEAVY_ATTACK);
+    assert_eq!(CombatStats::PLAYER.cooked(), psx_level::CombatStats::PLAYER);
+    assert_eq!(CombatStats::ENEMY.cooked(), psx_level::CombatStats::ENEMY);
+}
+
+#[test]
 fn camera_node_kind_serializes_roundtrip() {
     let kind = NodeKind::Camera {
         settings: WorldCameraSettings {

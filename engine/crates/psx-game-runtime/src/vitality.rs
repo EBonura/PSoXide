@@ -1114,13 +1114,11 @@ mod tests {
 /// Authored numbers governing the active/inactive vitality stance.
 ///
 /// Every value is exposed rather than baked so the feel can be tuned without a
-/// rebuild. Q12 fields are multipliers where 4096 is unity.
+/// rebuild. Q12 fields are multipliers where 4096 is unity. How much a hit
+/// hurts is not here: that is the one stance rule over the defender's
+/// `psx_level::CombatStats`, applied before the stance sees the damage.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct CombatStanceConfig {
-    /// Damage taken when the incoming attack matches the active channel.
-    pub aligned_damage_q12: u16,
-    /// Damage taken when it does not.
-    pub opposed_damage_q12: u16,
     /// Ticks after taking damage before the inactive pool starts recovering.
     pub regen_delay_ticks: u16,
     /// Ticks before a pool that reached zero starts recovering. Longer than
@@ -1138,10 +1136,8 @@ pub struct CombatStanceConfig {
 }
 
 impl CombatStanceConfig {
-    /// Starting point for authoring: 50% aligned, 150% opposed.
+    /// Starting point for authoring.
     pub const DEFAULT: Self = Self {
-        aligned_damage_q12: VITALITY_Q12_ONE / 2,
-        opposed_damage_q12: VITALITY_Q12_ONE + VITALITY_Q12_ONE / 2,
         regen_delay_ticks: 90,
         broken_regen_delay_ticks: 300,
         regen_per_tick_q12: VITALITY_Q12_ONE / 4,
@@ -1169,7 +1165,7 @@ pub enum StanceSwap {
 /// Result of one damage event routed through the stance.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct StanceDamageOutcome {
-    /// Damage actually removed, after alignment scaling.
+    /// Damage actually removed.
     pub damage_applied: u16,
     /// The active pool reached zero on this event.
     pub broke: bool,
@@ -1316,23 +1312,15 @@ impl CombatStance {
         self.swap_cooldown = ticks;
     }
 
-    /// Route one incoming attack. Only the active pool is damaged; the
-    /// multiplier is chosen by whether the attack's channel matches it.
+    /// Route one incoming hit, already scaled by the stance rule. Only the
+    /// active pool is damaged.
     pub fn apply_damage(
         &mut self,
         vitality: &mut DualVitality,
-        attack: VitalityChannelId,
         damage: u16,
         config: &CombatStanceConfig,
     ) -> StanceDamageOutcome {
-        let scale = if attack == self.active {
-            config.aligned_damage_q12
-        } else {
-            config.opposed_damage_q12
-        };
-        let scaled = ((u32::from(damage) * u32::from(scale)) / u32::from(VITALITY_Q12_ONE))
-            .min(u32::from(u16::MAX)) as u16;
-        let outcome = vitality.apply_damage(self.active, scaled);
+        let outcome = vitality.apply_damage(self.active, damage);
 
         let active = self.active.index();
         if outcome.damage_applied > 0 {
@@ -1421,7 +1409,6 @@ mod stance_tests {
             break_threshold_q12: VITALITY_Q12_ONE / 2,
             swap_cooldown_ticks: 3,
             swap_duration_ticks: 4,
-            ..CombatStanceConfig::DEFAULT
         }
     }
 
@@ -1429,7 +1416,7 @@ mod stance_tests {
     fn only_the_active_pool_takes_damage() {
         let mut vitality = DualVitality::equal(100);
         let mut stance = CombatStance::new(VitalityChannelId::One);
-        stance.apply_damage(&mut vitality, VitalityChannelId::One, 20, &config());
+        stance.apply_damage(&mut vitality, 20, &config());
         assert_eq!(
             vitality.pool(VitalityChannelId::Two).current(),
             100,
@@ -1438,24 +1425,16 @@ mod stance_tests {
     }
 
     #[test]
-    fn alignment_halves_and_mismatch_multiplies() {
+    fn the_active_pool_takes_the_damage_as_given() {
+        // The stance no longer scales: the one stance rule over the
+        // defender's CombatStats has already done that.
         let config = config();
-        let mut aligned = DualVitality::equal(200);
+        let mut vitality = DualVitality::equal(200);
         let mut stance = CombatStance::new(VitalityChannelId::One);
-        // Attack on the active channel: 50%.
-        let hit = stance.apply_damage(&mut aligned, VitalityChannelId::One, 40, &config);
-        assert_eq!(hit.damage_applied, 20);
-
-        let mut opposed = DualVitality::equal(200);
-        let mut stance = CombatStance::new(VitalityChannelId::One);
-        // Attack on the other channel while One is active: 150%.
-        let hit = stance.apply_damage(&mut opposed, VitalityChannelId::Two, 40, &config);
-        assert_eq!(hit.damage_applied, 60);
-        assert_eq!(
-            opposed.pool(VitalityChannelId::One).current(),
-            140,
-            "the opposed hit still lands on the active pool, only harder"
-        );
+        let hit = stance.apply_damage(&mut vitality, 40, &config);
+        assert_eq!(hit.damage_applied, 40);
+        assert_eq!(vitality.pool(VitalityChannelId::One).current(), 160);
+        assert_eq!(vitality.pool(VitalityChannelId::Two).current(), 200);
     }
 
     #[test]
@@ -1469,7 +1448,7 @@ mod stance_tests {
         assert!(!stance.can_swap(), "a voluntary swap is on cooldown");
 
         let active = stance.active();
-        let hit = stance.apply_damage(&mut vitality, active, 1000, &config);
+        let hit = stance.apply_damage(&mut vitality, 1000, &config);
         assert!(hit.broke);
         assert!(hit.forced_swap, "a broken pool cannot stay active");
         assert!(!hit.defeated, "the other pool is still whole");
@@ -1486,7 +1465,7 @@ mod stance_tests {
         let config = config();
         let mut vitality = DualVitality::equal(10);
         let mut stance = CombatStance::new(VitalityChannelId::One);
-        stance.apply_damage(&mut vitality, VitalityChannelId::One, 1000, &config);
+        stance.apply_damage(&mut vitality, 1000, &config);
         assert!(stance.is_broken(VitalityChannelId::One));
 
         // The longer delay runs before a single point comes back.
@@ -1514,7 +1493,7 @@ mod stance_tests {
         let mut vitality = DualVitality::equal(100);
         let mut stance = CombatStance::new(VitalityChannelId::One);
         // Damage the inactive pool by swapping, taking a hit, swapping back.
-        stance.apply_damage(&mut vitality, VitalityChannelId::One, 40, &config);
+        stance.apply_damage(&mut vitality, 40, &config);
         let hurt = vitality.pool(VitalityChannelId::One).current();
         stance.request_swap(&config);
 
@@ -1595,9 +1574,9 @@ mod stance_tests {
         let config = config();
         let mut vitality = DualVitality::equal(10);
         let mut stance = CombatStance::new(VitalityChannelId::One);
-        let first = stance.apply_damage(&mut vitality, VitalityChannelId::One, 1000, &config);
+        let first = stance.apply_damage(&mut vitality, 1000, &config);
         assert!(!first.defeated, "one broken pool is not death");
-        let second = stance.apply_damage(&mut vitality, stance.active(), 1000, &config);
+        let second = stance.apply_damage(&mut vitality, 1000, &config);
         assert!(second.defeated);
         assert!(
             !second.forced_swap,

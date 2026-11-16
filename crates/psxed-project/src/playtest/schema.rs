@@ -1725,14 +1725,11 @@ pub struct PlaytestGameEntity {
     pub attack_min_range: u16,
     /// Furthest ranged-attack distance. Zero for melee entities.
     pub attack_max_range: u16,
-    /// Poise pool.
-    pub poise: u16,
     /// Touch/melee damage.
     pub touch_damage: u16,
-    /// First vitality channel's pool at spawn (Horizon).
-    pub max_health: u16,
-    /// Second vitality channel's pool at spawn (Zenith).
-    pub max_health_secondary: u16,
+    /// Health, poise, stance multipliers and energy, cooked by
+    /// [`crate::CombatStats::cooked`] exactly as the player's are.
+    pub combat: psx_level::CombatStats,
     /// Souls credited to the player for the killing blow. Zero grants none.
     pub soul_value: u16,
     /// Runtime flags from `psx_level::game_entity_flags`.
@@ -1845,8 +1842,9 @@ pub struct PlaytestCharacter {
     pub backstep_recovery_frames: u8,
     /// Legacy quickstep invulnerability frames.
     pub backstep_invulnerable_frames: u8,
-    pub stance_aligned_damage_q12: u16,
-    pub stance_opposed_damage_q12: u16,
+    /// Health, poise, stance multipliers and energy, cooked by
+    /// [`crate::CombatStats::cooked`] exactly as every enemy's are.
+    pub combat: psx_level::CombatStats,
     pub stance_regen_delay_ticks: u16,
     pub stance_broken_regen_delay_ticks: u16,
     pub stance_regen_per_tick_q12: u16,

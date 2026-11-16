@@ -2051,12 +2051,12 @@ pub struct CharacterResource {
     /// Legacy quickstep invulnerability frames.
     #[serde(default = "default_character_backstep_invulnerable_frames")]
     pub backstep_invulnerable_frames: u8,
-    /// Authored stance tuning; see CombatStanceConfig.
-    #[serde(default = "default_stance_aligned_damage_q12")]
-    pub stance_aligned_damage_q12: u16,
-    /// Authored stance tuning; see CombatStanceConfig.
-    #[serde(default = "default_stance_opposed_damage_q12")]
-    pub stance_opposed_damage_q12: u16,
+    /// Health, poise, stance multipliers and energy: the one combat record
+    /// every character carries, player or enemy. `None` only in a project
+    /// written before the record existed; loading fills it in (see
+    /// [`CombatStats::legacy`]) and [`Self::combat_stats`] reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub combat: Option<CombatStats>,
     /// Authored stance tuning; see CombatStanceConfig.
     #[serde(default = "default_stance_regen_delay_ticks")]
     pub stance_regen_delay_ticks: u16,
@@ -2187,6 +2187,29 @@ impl Default for CharacterEquipmentBinding {
 }
 
 impl CharacterResource {
+    /// The combat record this character runs with: its own, or for a
+    /// character written before the record existed, the numbers it ran
+    /// with then ([`CombatStats::legacy`]): its enemy block when it has one,
+    /// the old enemy defaults for an enemy without one, else the player's.
+    pub fn combat_stats(&self) -> CombatStats {
+        self.combat.unwrap_or_else(|| {
+            let fallback = EnemyBehaviorSettings::defaults();
+            let enemy = self
+                .enemy_behavior
+                .as_ref()
+                .or((self.spawn_role == CharacterSpawnRole::Enemy).then_some(&fallback));
+            CombatStats::legacy(enemy)
+        })
+    }
+
+    /// Fill in [`Self::combat`] from the pre-record fields, and clear them.
+    pub(crate) fn migrate_combat_stats(&mut self) {
+        self.combat = Some(self.combat_stats());
+        if let Some(enemy) = &mut self.enemy_behavior {
+            enemy.clear_legacy_combat();
+        }
+    }
+
     /// What a placement carries, given the loadout it selected.
     ///
     /// Every consumer resolves equipment through here, so the fallback rule
@@ -2232,8 +2255,7 @@ impl CharacterResource {
             backstep_active_frames: default_character_backstep_active_frames(),
             backstep_recovery_frames: default_character_backstep_recovery_frames(),
             backstep_invulnerable_frames: default_character_backstep_invulnerable_frames(),
-            stance_aligned_damage_q12: default_stance_aligned_damage_q12(),
-            stance_opposed_damage_q12: default_stance_opposed_damage_q12(),
+            combat: None,
             stance_regen_delay_ticks: default_stance_regen_delay_ticks(),
             stance_broken_regen_delay_ticks: default_stance_broken_regen_delay_ticks(),
             stance_regen_per_tick_q12: default_stance_regen_per_tick_q12(),
@@ -2326,14 +2348,6 @@ pub(crate) const fn default_character_roll_cost_q12() -> i32 {
 
 pub(crate) const fn default_character_roll_speed() -> i32 {
     96
-}
-
-pub(crate) const fn default_stance_aligned_damage_q12() -> u16 {
-    2048
-}
-
-pub(crate) const fn default_stance_opposed_damage_q12() -> u16 {
-    6144
 }
 
 pub(crate) const fn default_stance_regen_delay_ticks() -> u16 {
@@ -2456,20 +2470,37 @@ pub struct EnemyBehaviorSettings {
     /// 60 Hz ticks of post-attack recovery (the punish window).
     #[serde(default = "default_enemy_recovery_ticks")]
     pub recovery_ticks: u8,
-    /// Poise pool; poise damage past it staggers the enemy.
-    #[serde(default = "default_enemy_poise")]
-    pub poise: u16,
     /// Damage dealt by a connecting touch/melee attack.
     #[serde(default = "default_enemy_touch_damage")]
     pub touch_damage: u16,
-    /// First vitality channel's pool at spawn (Horizon).
-    #[serde(default = "default_enemy_max_health")]
-    pub max_health: u16,
-    /// Second vitality channel's pool at spawn (Zenith). Enemies carry the
-    /// same two-channel vitality the player does. Serde-defaulted so projects
-    /// authored before the second channel load unchanged.
-    #[serde(default = "default_enemy_max_health_secondary")]
-    pub max_health_secondary: u16,
+    /// Read-only migration input: the poise a project wrote here before
+    /// health and poise moved into [`CombatStats`]. Loading folds it into
+    /// the owner's `combat` and clears it; it is never written.
+    #[serde(
+        default,
+        rename = "poise",
+        skip_serializing,
+        deserialize_with = "legacy_u16"
+    )]
+    pub legacy_poise: Option<u16>,
+    /// Read-only migration input, as [`Self::legacy_poise`], for the
+    /// Horizon pool.
+    #[serde(
+        default,
+        rename = "max_health",
+        skip_serializing,
+        deserialize_with = "legacy_u16"
+    )]
+    pub legacy_max_health: Option<u16>,
+    /// Read-only migration input, as [`Self::legacy_poise`], for the
+    /// Zenith pool.
+    #[serde(
+        default,
+        rename = "max_health_secondary",
+        skip_serializing,
+        deserialize_with = "legacy_u16"
+    )]
+    pub legacy_max_health_secondary: Option<u16>,
     /// Souls credited to the player for killing this enemy. Serde-defaulted
     /// so projects authored before the currency existed load unchanged, and
     /// grant the default rather than nothing.
@@ -2477,7 +2508,19 @@ pub struct EnemyBehaviorSettings {
     pub soul_value: u16,
 }
 
+/// Reads a bare number (as the old writer put it) into `Some`.
+fn legacy_u16<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<u16>, D::Error> {
+    u16::deserialize(deserializer).map(Some)
+}
+
 impl EnemyBehaviorSettings {
+    /// Forget the pre-[`CombatStats`] health and poise once they are folded.
+    pub(crate) fn clear_legacy_combat(&mut self) {
+        self.legacy_poise = None;
+        self.legacy_max_health = None;
+        self.legacy_max_health_secondary = None;
+    }
+
     /// Authoring defaults for a freshly enabled enemy.
     pub const fn defaults() -> Self {
         Self {
@@ -2497,10 +2540,10 @@ impl EnemyBehaviorSettings {
             group_attack_delay_ticks: default_enemy_group_attack_delay_ticks(),
             windup_ticks: default_enemy_windup_ticks(),
             recovery_ticks: default_enemy_recovery_ticks(),
-            poise: default_enemy_poise(),
             touch_damage: default_enemy_touch_damage(),
-            max_health: default_enemy_max_health(),
-            max_health_secondary: default_enemy_max_health_secondary(),
+            legacy_poise: None,
+            legacy_max_health: None,
+            legacy_max_health_secondary: None,
             soul_value: default_enemy_soul_value(),
         }
     }
@@ -2564,22 +2607,8 @@ pub(crate) const fn default_enemy_recovery_ticks() -> u8 {
     24
 }
 
-pub(crate) const fn default_enemy_poise() -> u16 {
-    100
-}
-
 pub(crate) const fn default_enemy_touch_damage() -> u16 {
     10
-}
-
-pub(crate) const fn default_enemy_max_health() -> u16 {
-    100
-}
-
-/// Equal to the Horizon default, so a freshly enabled enemy has two balanced
-/// pools exactly as `DualVitality::equal` gives the player.
-pub(crate) const fn default_enemy_max_health_secondary() -> u16 {
-    100
 }
 
 /// Souls a stock enemy is worth. Matched to the Horizon health default so the
@@ -2588,6 +2617,168 @@ pub(crate) const fn default_enemy_max_health_secondary() -> u16 {
 /// inspector, and zero is legal for one that should grant nothing.
 pub(crate) const fn default_enemy_soul_value() -> u16 {
     50
+}
+
+/// The combat numbers of one character, player or enemy: the authored form
+/// of [`psx_level::CombatStats`], cooked through [`Self::cooked`] for every
+/// character alike. Every field is serde-defaulted to the player
+/// character's starting numbers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CombatStats {
+    /// First vitality pool at spawn (Horizon).
+    #[serde(default = "default_combat_max_health")]
+    pub max_health: u16,
+    /// Second vitality pool at spawn (Zenith).
+    #[serde(default = "default_combat_max_health_secondary")]
+    pub max_health_secondary: u16,
+    /// Poise capacity: posture damage past it breaks (staggers).
+    #[serde(default = "default_combat_poise")]
+    pub poise: u16,
+    /// Armoured while a heavy attack's hit frames are active.
+    #[serde(default = "default_combat_armour_heavy_attack")]
+    pub armour_heavy_attack: bool,
+    /// An authored `Armored` combat window decides armour when the
+    /// character's clip has one.
+    #[serde(default = "default_combat_armour_authored_window")]
+    pub armour_authored_window: bool,
+    /// Damage multiplier for a hit from the stance opposite the active one,
+    /// Q12 (4096 = 1.0).
+    #[serde(default = "default_combat_opposite_damage_q12")]
+    pub opposite_damage_q12: u16,
+    /// Poise multiplier for a hit from the stance opposite the active one,
+    /// Q12. A placeholder value until the duel harness tunes it.
+    #[serde(default = "default_combat_opposite_poise_q12")]
+    pub opposite_poise_q12: u16,
+    /// Energy ceiling.
+    #[serde(default = "default_combat_energy_max")]
+    pub energy_max: u16,
+    /// Energy one Zenith shot spends.
+    #[serde(default = "default_combat_shot_cost")]
+    pub shot_cost: u16,
+    /// Energy a connected light blade hit gains.
+    #[serde(default = "default_combat_light_gain")]
+    pub light_gain: u16,
+    /// Energy a connected heavy blade hit gains.
+    #[serde(default = "default_combat_heavy_gain")]
+    pub heavy_gain: u16,
+}
+
+impl CombatStats {
+    /// The player character's starting numbers.
+    pub const PLAYER: Self = Self::from_cooked(psx_level::CombatStats::PLAYER);
+    /// An enemy's numbers when nothing was authored.
+    pub const ENEMY: Self = Self::from_cooked(psx_level::CombatStats::ENEMY);
+
+    /// The authored form of a cooked record.
+    pub const fn from_cooked(stats: psx_level::CombatStats) -> Self {
+        use psx_level::combat_armour;
+        Self {
+            max_health: stats.max_health,
+            max_health_secondary: stats.max_health_secondary,
+            poise: stats.poise,
+            armour_heavy_attack: stats.armour & combat_armour::HEAVY_ATTACK != 0,
+            armour_authored_window: stats.armour & combat_armour::AUTHORED_WINDOW != 0,
+            opposite_damage_q12: stats.opposite_damage_q12,
+            opposite_poise_q12: stats.opposite_poise_q12,
+            energy_max: stats.energy_max,
+            shot_cost: stats.shot_cost,
+            light_gain: stats.light_gain,
+            heavy_gain: stats.heavy_gain,
+        }
+    }
+
+    /// The runtime record: the same cook for the player and every enemy.
+    pub const fn cooked(self) -> psx_level::CombatStats {
+        use psx_level::combat_armour;
+        let mut armour = 0;
+        if self.armour_heavy_attack {
+            armour |= combat_armour::HEAVY_ATTACK;
+        }
+        if self.armour_authored_window {
+            armour |= combat_armour::AUTHORED_WINDOW;
+        }
+        psx_level::CombatStats {
+            max_health: self.max_health,
+            max_health_secondary: self.max_health_secondary,
+            poise: self.poise,
+            armour,
+            opposite_damage_q12: self.opposite_damage_q12,
+            opposite_poise_q12: self.opposite_poise_q12,
+            energy_max: self.energy_max,
+            shot_cost: self.shot_cost,
+            light_gain: self.light_gain,
+            heavy_gain: self.heavy_gain,
+        }
+    }
+
+    /// The numbers a character written before this record existed ran
+    /// with: an enemy's health and poise from its behaviour block (or the
+    /// old enemy defaults, 100 per pool and poise 100), a player's from the
+    /// old constants (100 per pool, poise 60). Everything else starts at
+    /// the shared defaults.
+    pub fn legacy(enemy: Option<&EnemyBehaviorSettings>) -> Self {
+        match enemy {
+            Some(enemy) => Self {
+                max_health: enemy.legacy_max_health.unwrap_or(Self::ENEMY.max_health),
+                max_health_secondary: enemy
+                    .legacy_max_health_secondary
+                    .unwrap_or(Self::ENEMY.max_health_secondary),
+                poise: enemy.legacy_poise.unwrap_or(Self::ENEMY.poise),
+                ..Self::ENEMY
+            },
+            None => Self::PLAYER,
+        }
+    }
+}
+
+impl Default for CombatStats {
+    fn default() -> Self {
+        Self::PLAYER
+    }
+}
+
+pub(crate) const fn default_combat_max_health() -> u16 {
+    CombatStats::PLAYER.max_health
+}
+
+pub(crate) const fn default_combat_max_health_secondary() -> u16 {
+    CombatStats::PLAYER.max_health_secondary
+}
+
+pub(crate) const fn default_combat_poise() -> u16 {
+    CombatStats::PLAYER.poise
+}
+
+pub(crate) const fn default_combat_armour_heavy_attack() -> bool {
+    CombatStats::PLAYER.armour_heavy_attack
+}
+
+pub(crate) const fn default_combat_armour_authored_window() -> bool {
+    CombatStats::PLAYER.armour_authored_window
+}
+
+pub(crate) const fn default_combat_opposite_damage_q12() -> u16 {
+    CombatStats::PLAYER.opposite_damage_q12
+}
+
+pub(crate) const fn default_combat_opposite_poise_q12() -> u16 {
+    CombatStats::PLAYER.opposite_poise_q12
+}
+
+pub(crate) const fn default_combat_energy_max() -> u16 {
+    CombatStats::PLAYER.energy_max
+}
+
+pub(crate) const fn default_combat_shot_cost() -> u16 {
+    CombatStats::PLAYER.shot_cost
+}
+
+pub(crate) const fn default_combat_light_gain() -> u16 {
+    CombatStats::PLAYER.light_gain
+}
+
+pub(crate) const fn default_combat_heavy_gain() -> u16 {
+    CombatStats::PLAYER.heavy_gain
 }
 
 /// Tunable movement/collision settings authored on a
@@ -2655,12 +2846,12 @@ pub struct CharacterControllerSettings {
     /// See [`EnemyBehaviorSettings`].
     #[serde(default)]
     pub enemy: Option<EnemyBehaviorSettings>,
-    /// Authored stance tuning; see CombatStanceConfig.
-    #[serde(default = "default_stance_aligned_damage_q12")]
-    pub stance_aligned_damage_q12: u16,
-    /// Authored stance tuning; see CombatStanceConfig.
-    #[serde(default = "default_stance_opposed_damage_q12")]
-    pub stance_opposed_damage_q12: u16,
+    /// Health, poise, stance multipliers and energy: the one combat record
+    /// every character carries, player or enemy. `None` only in a project
+    /// written before the record existed; loading fills it in (see
+    /// [`CombatStats::legacy`]) and [`Self::combat_stats`] reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub combat: Option<CombatStats>,
     /// Authored stance tuning; see CombatStanceConfig.
     #[serde(default = "default_stance_regen_delay_ticks")]
     pub stance_regen_delay_ticks: u16,
@@ -2704,14 +2895,29 @@ impl CharacterControllerSettings {
             backstep_recovery_frames: default_character_backstep_recovery_frames(),
             backstep_invulnerable_frames: default_character_backstep_invulnerable_frames(),
             enemy: None,
-            stance_aligned_damage_q12: default_stance_aligned_damage_q12(),
-            stance_opposed_damage_q12: default_stance_opposed_damage_q12(),
+            combat: None,
             stance_regen_delay_ticks: default_stance_regen_delay_ticks(),
             stance_broken_regen_delay_ticks: default_stance_broken_regen_delay_ticks(),
             stance_regen_per_tick_q12: default_stance_regen_per_tick_q12(),
             stance_break_threshold_q12: default_stance_break_threshold_q12(),
             stance_swap_cooldown_ticks: default_stance_swap_cooldown_ticks(),
             stance_swap_duration_ticks: default_stance_swap_duration_ticks(),
+        }
+    }
+
+    /// The combat record this controller runs with: its own, or for a
+    /// controller written before the record existed, the numbers it ran
+    /// with then ([`CombatStats::legacy`]).
+    pub fn combat_stats(&self) -> CombatStats {
+        self.combat
+            .unwrap_or_else(|| CombatStats::legacy(self.enemy.as_ref()))
+    }
+
+    /// Fill in [`Self::combat`] from the pre-record fields, and clear them.
+    pub(crate) fn migrate_combat_stats(&mut self) {
+        self.combat = Some(self.combat_stats());
+        if let Some(enemy) = &mut self.enemy {
+            enemy.clear_legacy_combat();
         }
     }
 
@@ -2738,8 +2944,7 @@ impl CharacterControllerSettings {
             backstep_invulnerable_frames: character.backstep_invulnerable_frames,
             enemy: (character.spawn_role == CharacterSpawnRole::Enemy)
                 .then_some(character.enemy_behavior.unwrap_or_default()),
-            stance_aligned_damage_q12: character.stance_aligned_damage_q12,
-            stance_opposed_damage_q12: character.stance_opposed_damage_q12,
+            combat: Some(character.combat_stats()),
             stance_regen_delay_ticks: character.stance_regen_delay_ticks,
             stance_broken_regen_delay_ticks: character.stance_broken_regen_delay_ticks,
             stance_regen_per_tick_q12: character.stance_regen_per_tick_q12,

@@ -17,7 +17,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         self.y[index] = record.y;
         self.z[index] = record.z;
         self.yaw[index] = record.yaw;
-        self.combatants[index].respawn([record.max_health, record.max_health_secondary]);
+        self.combatants[index].respawn(&record.combat);
         self.exchanges[index] = crate::ranged_tactics::RangedExchange::EMPTY;
         self.projectile_threats[index] = None;
         self.recoil[index] = [0; 3];

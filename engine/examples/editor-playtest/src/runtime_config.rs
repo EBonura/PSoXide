@@ -145,11 +145,6 @@ pub(super) const INTERACT_BUTTON: u16 = button::CROSS;
 /// attack.
 pub(super) const ACTIVE_LIGHT_ATTACK_BUTTON: u16 = button::R1;
 pub(super) const ACTIVE_HEAVY_ATTACK_BUTTON: u16 = button::R2;
-/// Player health pool at gameplay init (the phase-3 combat slice's
-/// sane cooked default -- the Character record carries no health
-/// field yet; authoring it is a future editor slice). Death/respawn
-/// handling is phase 4 (checkpoint loops): health floors at 0.
-pub(super) const PLAYER_MAX_HEALTH: u16 = 100;
 /// Delay between fatal hazard contact and checkpoint/spawn reset.
 pub(super) const HAZARD_DEATH_TICKS: u8 = 30;
 /// Engine units a hazard shove moves the player per tick (a walking step is

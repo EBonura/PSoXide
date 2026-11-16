@@ -1,19 +1,16 @@
 //! Prototype resource and interruption rules shared by player and NPCs.
+//!
+//! The energy economy (ceiling, shot cost, blade gains) is per character
+//! data, [`CombatStats`]; the rules below take it as a parameter.
 /// All rates use the 60 Hz simulation clock, independent of rendering.
-/// Energy ceiling, shared by player and NPCs.
-pub const ENERGY_MAX: u16 = 100;
-/// Energy charged per emitted projectile.
-pub const SHOT_COST: u16 = 20;
+use psx_level::CombatStats;
+
 /// AI rebuilds a useful three-shot reserve before leaving recovery melee.
 pub const AI_RESUME_ENERGY: u16 = 60;
 /// Preserve a contact opportunity through recovery and the stance cooldown.
 pub const FOLLOWUP_TICKS: u16 = 480;
 /// Hold a melee response long enough to complete an attack after a failed escape.
 pub const CONTEST_SPACE_TICKS: u16 = 240;
-/// Energy gained by a connected light melee hit.
-pub const MELEE_GAIN: u16 = 12;
-/// Energy gained by a connected heavy melee hit.
-pub const HEAVY_GAIN: u16 = 20;
 /// Energy refilled per second while attached to an arch and not firing.
 pub const FLOAT_GAIN_PER_SECOND: u16 = 20;
 /// Attached ticks allowed per airborne excursion.
@@ -50,7 +47,7 @@ pub fn ranged_band(preferred: i32, melee_reach: i32, weapon_max: i32) -> (i32, i
 /// Per-actor energy, poise-break grace and stance-preference state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CombatFlow {
-    /// Current energy, 0..=`ENERGY_MAX`.
+    /// Current energy, 0..=[`CombatStats::energy_max`].
     pub energy: u16,
     /// Ticks left in which further poise breaks are refused.
     pub break_grace: u16,
@@ -66,19 +63,26 @@ pub struct CombatFlow {
     float_fraction: u16,
 }
 impl CombatFlow {
-    /// Full energy and air allowance, ranged phase open.
-    pub const FULL: Self = Self {
-        energy: ENERGY_MAX,
-        break_grace: 0,
-        air_left: AIR_TICKS,
-        followup: 0,
-        followup_ticks: 0,
-        recharging: false,
-        ranged_phase: true,
-        contest_ticks: 0,
-        ground_ticks: 0,
-        float_fraction: 0,
-    };
+    /// Full energy for the starting stats ([`CombatStats::PLAYER`]) and the
+    /// air allowance, ranged phase open.
+    pub const FULL: Self = Self::full(&CombatStats::PLAYER);
+
+    /// A fresh life for `stats`: energy at its ceiling, full air allowance,
+    /// ranged phase open.
+    pub const fn full(stats: &CombatStats) -> Self {
+        Self {
+            energy: stats.energy_max,
+            break_grace: 0,
+            air_left: AIR_TICKS,
+            followup: 0,
+            followup_ticks: 0,
+            recharging: false,
+            ranged_phase: true,
+            contest_ticks: 0,
+            ground_ticks: 0,
+            float_fraction: 0,
+        }
+    }
     /// Advance the timers by `delta` ticks; grace only drains once `recovering` is false.
     pub fn tick(&mut self, delta: u16, recovering: bool) {
         self.contest_ticks = self.contest_ticks.saturating_sub(delta);
@@ -92,16 +96,16 @@ impl CombatFlow {
         }
     }
     /// True when energy covers at least one shot.
-    pub fn can_shoot(&self) -> bool {
-        self.energy >= SHOT_COST
+    pub fn can_shoot(&self, stats: &CombatStats) -> bool {
+        self.energy >= stats.shot_cost
     }
     /// Charge only successfully allocated projectiles, including each burst emitter.
-    pub fn spend_shot(&mut self) -> bool {
-        if !self.can_shoot() {
+    pub fn spend_shot(&mut self, stats: &CombatStats) -> bool {
+        if !self.can_shoot(stats) {
             return false;
         }
-        self.energy -= SHOT_COST;
-        self.recharging |= self.energy < SHOT_COST;
+        self.energy -= stats.shot_cost;
+        self.recharging |= self.energy < stats.shot_cost;
         if self.recharging {
             self.ranged_phase = false;
         }
@@ -111,7 +115,7 @@ impl CombatFlow {
         true
     }
     /// Contacts, never swings at air or defeated bodies, earn energy.
-    pub fn melee_hit(&mut self, heavy: bool) {
+    pub fn melee_hit(&mut self, heavy: bool, stats: &CombatStats) {
         if heavy {
             self.followup = 1;
             self.followup_ticks = FOLLOWUP_TICKS;
@@ -120,8 +124,12 @@ impl CombatFlow {
         }
         self.energy = self
             .energy
-            .saturating_add(if heavy { HEAVY_GAIN } else { MELEE_GAIN })
-            .min(ENERGY_MAX);
+            .saturating_add(if heavy {
+                stats.heavy_gain
+            } else {
+                stats.light_gain
+            })
+            .min(stats.energy_max);
         if self.energy >= AI_RESUME_ENERGY {
             self.recharging = false;
             self.ranged_phase = true;
@@ -129,7 +137,13 @@ impl CombatFlow {
     }
     /// The allowance belongs to the whole airborne excursion. Neither another
     /// arch nor briefly touching ground refreshes it. Shooting pauses recharge.
-    pub fn air_tick(&mut self, attached: bool, grounded: bool, firing: bool) -> bool {
+    pub fn air_tick(
+        &mut self,
+        attached: bool,
+        grounded: bool,
+        firing: bool,
+        stats: &CombatStats,
+    ) -> bool {
         if grounded && !attached {
             self.ground_ticks = self.ground_ticks.saturating_add(1).min(GROUND_REARM_TICKS);
             if self.ground_ticks == GROUND_REARM_TICKS {
@@ -144,7 +158,7 @@ impl CombatFlow {
                 self.float_fraction += FLOAT_GAIN_PER_SECOND;
                 if self.float_fraction >= 60 {
                     self.float_fraction -= 60;
-                    self.energy = (self.energy + 1).min(ENERGY_MAX);
+                    self.energy = (self.energy + 1).min(stats.energy_max);
                     if self.energy >= AI_RESUME_ENERGY {
                         self.recharging = false;
                         self.ranged_phase = true;
@@ -167,10 +181,10 @@ impl CombatFlow {
         self.contest_ticks = CONTEST_SPACE_TICKS;
     }
     /// AI preference is an opportunity, not an automatic attack or forced player switch.
-    pub fn preferred_stance(&self, _fallback: u8, separated: bool) -> u8 {
+    pub fn preferred_stance(&self, _fallback: u8, separated: bool, stats: &CombatStats) -> u8 {
         // Close combat stays melee unless a connected heavy attack creates an
         // exit opportunity; resources still govern whether ranged is affordable.
-        if self.needs_melee_energy()
+        if self.needs_melee_energy(stats)
             || self.contest_ticks > 0
             || self.followup == 2
             || !self.ranged_phase
@@ -182,12 +196,12 @@ impl CombatFlow {
         }
     }
     /// Hysteresis prevents one hit / one shot oscillation after emptying the bar.
-    pub fn needs_melee_energy(&self) -> bool {
-        self.recharging || !self.can_shoot()
+    pub fn needs_melee_energy(&self, stats: &CombatStats) -> bool {
+        self.recharging || !self.can_shoot(stats)
     }
     /// Stable reason codes for the resource-driven cycle, independent of distance.
-    pub fn stance_reason(&self, _fallback: u8, _separated: bool) -> u8 {
-        if self.needs_melee_energy() {
+    pub fn stance_reason(&self, _fallback: u8, _separated: bool, stats: &CombatStats) -> u8 {
+        if self.needs_melee_energy(stats) {
             5
         } else if self.contest_ticks > 0 {
             10
@@ -224,16 +238,17 @@ impl CombatFlow {
 #[cfg(test)]
 mod tests {
     use super::*;
+    const S: &CombatStats = &CombatStats::PLAYER;
     #[test]
     fn failed_escape_commits_to_melee_without_losing_the_ranged_reserve() {
         let mut flow = CombatFlow::FULL;
         flow.contest_space();
-        assert_eq!(flow.preferred_stance(1, false), 0);
-        flow.melee_hit(true);
-        assert_eq!(flow.preferred_stance(1, false), 0);
+        assert_eq!(flow.preferred_stance(1, false, S), 0);
+        flow.melee_hit(true, S);
+        assert_eq!(flow.preferred_stance(1, false, S), 0);
         flow.tick(CONTEST_SPACE_TICKS, false);
-        assert_eq!(flow.energy, ENERGY_MAX);
-        assert_eq!(flow.preferred_stance(0, false), 1);
+        assert_eq!(flow.energy, S.energy_max);
+        assert_eq!(flow.preferred_stance(0, false, S), 1);
     }
     #[test]
     fn firing_requires_real_separation_and_resource_phase_survives_contact() {
@@ -241,43 +256,43 @@ mod tests {
         assert_eq!(ranged_band(64, 50, 128), (96, 128));
         let mut f = CombatFlow::FULL;
         assert_eq!(
-            f.preferred_stance(0, false),
+            f.preferred_stance(0, false, S),
             0,
             "close combat stays melee without an opening"
         );
-        assert_eq!(f.preferred_stance(1, true), 1);
-        f.melee_hit(false);
+        assert_eq!(f.preferred_stance(1, true, S), 1);
+        f.melee_hit(false, S);
         assert_eq!(
-            f.preferred_stance(1, false),
+            f.preferred_stance(1, false, S),
             0,
             "a light hit does not force an exit from melee"
         );
         for _ in 0..5 {
-            f.spend_shot();
+            f.spend_shot(S);
         }
-        assert_eq!(f.preferred_stance(1, true), 0);
+        assert_eq!(f.preferred_stance(1, true, S), 0);
         for _ in 0..3 {
-            f.melee_hit(true);
+            f.melee_hit(true, S);
         }
         assert_eq!(
-            f.preferred_stance(0, false),
+            f.preferred_stance(0, false, S),
             1,
             "must plan escape before separation exists"
         );
         f.shot_hit(true);
-        assert_eq!(f.preferred_stance(1, true), 0);
+        assert_eq!(f.preferred_stance(1, true, S), 0);
     }
     #[test]
     fn shots_exhaust_and_only_real_melee_replenishes() {
         let mut f = CombatFlow::FULL;
         for _ in 0..5 {
-            assert!(f.spend_shot());
+            assert!(f.spend_shot(S));
         }
-        assert!(!f.spend_shot());
-        f.melee_hit(false);
-        assert!(!f.can_shoot());
-        f.melee_hit(false);
-        assert!(f.spend_shot());
+        assert!(!f.spend_shot(S));
+        f.melee_hit(false, S);
+        assert!(!f.can_shoot(S));
+        f.melee_hit(false, S);
+        assert!(f.spend_shot(S));
         assert_eq!(f.energy, 4);
     }
     #[test]
@@ -285,43 +300,43 @@ mod tests {
         let mut f = CombatFlow::FULL;
         f.energy = 0;
         for _ in 0..60 {
-            assert!(!f.air_tick(true, false, false));
+            assert!(!f.air_tick(true, false, false, S));
         }
         assert_eq!(f.energy, 20);
         for _ in 0..60 {
-            f.air_tick(true, false, true);
+            f.air_tick(true, false, true, S);
         }
         assert_eq!(f.energy, 20);
-        f.air_tick(false, false, false);
+        f.air_tick(false, false, false, S);
         for _ in 0..239 {
-            assert!(!f.air_tick(true, false, false));
+            assert!(!f.air_tick(true, false, false, S));
         }
-        assert!(f.air_tick(true, false, false));
+        assert!(f.air_tick(true, false, false, S));
         for _ in 0..119 {
-            f.air_tick(false, true, false);
+            f.air_tick(false, true, false, S);
         }
         assert_eq!(f.air_left, 0);
-        f.air_tick(false, true, false);
+        f.air_tick(false, true, false, S);
         assert_eq!(f.air_left, AIR_TICKS);
     }
     #[test]
     fn ai_rebuilds_a_reserve_without_blocking_human_shots() {
         let mut f = CombatFlow::FULL;
         for _ in 0..5 {
-            f.spend_shot();
+            f.spend_shot(S);
         }
-        f.melee_hit(true);
-        assert!(f.can_shoot());
-        assert_eq!(f.preferred_stance(1, true), 0);
-        f.melee_hit(true);
-        assert_eq!(f.preferred_stance(1, true), 0);
-        f.melee_hit(true);
-        assert_eq!(f.preferred_stance(0, true), 1);
-        assert_eq!(f.stance_reason(0, true), 6);
+        f.melee_hit(true, S);
+        assert!(f.can_shoot(S));
+        assert_eq!(f.preferred_stance(1, true, S), 0);
+        f.melee_hit(true, S);
+        assert_eq!(f.preferred_stance(1, true, S), 0);
+        f.melee_hit(true, S);
+        assert_eq!(f.preferred_stance(0, true, S), 1);
+        assert_eq!(f.stance_reason(0, true, S), 6);
         f.tick(300, false);
-        assert_eq!(f.preferred_stance(0, true), 1);
+        assert_eq!(f.preferred_stance(0, true, S), 1);
         f.tick(180, false);
-        assert_eq!(f.preferred_stance(0, true), 1);
+        assert_eq!(f.preferred_stance(0, true, S), 1);
     }
     #[test]
     fn reaction_and_grace_prevent_stun_refresh() {

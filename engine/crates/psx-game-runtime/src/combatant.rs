@@ -13,8 +13,15 @@
 //!
 //! Every hit, whatever dealt it, lands through [`Combatant::receive_hit`]. A
 //! [`HitIn`] is the [`Strike`] (what the attacker sent) plus the defender's
-//! [`HitRoute`] and [`PoiseRule`]. Today's player and enemy formulas still
-//! differ, so they arrive as those two parameters, never as a side flag.
+//! [`CombatStats`], [`HitRoute`] and [`PoiseRule`]. Damage and poise follow
+//! one rule for every fighter, [`stance_scaled`]: a hit from the stance
+//! opposite the defender's active one is multiplied by the defender's
+//! opposite-stance multipliers, a matching hit is taken as authored.
+//! Characters differ only in their stats. The route still differs (the
+//! player's active pool against the enemy's spill) until the two pools
+//! become one bar.
+
+use psx_level::CombatStats;
 
 use crate::combat_flow::CombatFlow;
 use crate::poise::Poise;
@@ -23,21 +30,23 @@ use crate::vitality::{
     VitalityPool, VITALITY_Q12_ONE,
 };
 
-/// Damage against the channel an enemy currently guards: a token 1 to 3
-/// points whatever the attack's authored value, so a wrong-stance hit reads
-/// at once as pointless and pushes the player to swap. The value is the
-/// authored damage divided by [`GAME_ENTITY_GUARDED_DAMAGE_DIVISOR`] and
-/// clamped into this range, so heavier swings still chip a little harder.
-pub const GAME_ENTITY_GUARDED_DAMAGE_MIN: u16 = 1;
+/// The one stance rule: health and posture damage a hit of `damage` and
+/// `poise` deals to a defender with `stats`, `opposite` when the hit's
+/// stance is not the defender's active one. Zero stays zero.
+pub fn stance_scaled(stats: &CombatStats, opposite: bool, damage: u16, poise: u16) -> (u16, u16) {
+    if !opposite {
+        return (damage, poise);
+    }
+    (
+        scale_q12(damage, stats.opposite_damage_q12),
+        scale_q12(poise, stats.opposite_poise_q12),
+    )
+}
 
-/// Upper bound of the guarded-channel chip damage.
-pub const GAME_ENTITY_GUARDED_DAMAGE_MAX: u16 = 3;
-
-/// Authored damage per point of guarded-channel chip damage.
-pub const GAME_ENTITY_GUARDED_DAMAGE_DIVISOR: u16 = 16;
-
-/// Damage against the channel an enemy leaves exposed (Q12 = 1.5x).
-pub const GAME_ENTITY_OPPOSED_DAMAGE_Q12: u16 = 6144;
+fn scale_q12(value: u16, q12: u16) -> u16 {
+    (u32::from(value) * u32::from(q12) / u32::from(VITALITY_Q12_ONE)).min(u32::from(u16::MAX))
+        as u16
+}
 
 /// Who dealt a hit: an entity slot, the player, or the world.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,94 +92,48 @@ pub struct Strike {
     pub poise: u16,
 }
 
-/// How a defender's guard scales a hit routed with [`HitRoute::Spill`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Guard {
-    /// The authored damage and poise, unscaled.
-    Raw,
-    /// The guarded channel takes a 1 to 3 point chip with its poise scaled
-    /// by the same fraction; the exposed channel takes 1.5x and full poise.
-    Chip,
-    /// The guarded channel takes 1.0x, the exposed one 1.25x; poise as
-    /// authored.
-    Flow,
-}
-
-impl Guard {
-    /// Health damage a hit of `damage` deals when it does (`guarded`) or
-    /// does not match the defender's active channel. Zero stays zero.
-    pub fn damage(self, guarded: bool, damage: u16) -> u16 {
-        if damage == 0 {
-            return 0;
-        }
-        match self {
-            Self::Raw => damage,
-            Self::Flow => (u32::from(damage) * if guarded { 4 } else { 5 } / 4).min(65535) as u16,
-            Self::Chip if guarded => (damage / GAME_ENTITY_GUARDED_DAMAGE_DIVISOR).clamp(
-                GAME_ENTITY_GUARDED_DAMAGE_MIN,
-                GAME_ENTITY_GUARDED_DAMAGE_MAX,
-            ),
-            Self::Chip => ((u32::from(damage) * u32::from(GAME_ENTITY_OPPOSED_DAMAGE_Q12)) / 4096)
-                .min(u32::from(u16::MAX)) as u16,
-        }
-    }
-
-    /// Posture damage for the same hit: under [`Self::Chip`] a guarded hit
-    /// keeps the fraction of its authored poise that [`Self::damage`] kept
-    /// of its damage, so a 1-point chip cannot stagger. Everything else keeps
-    /// its authored poise.
-    pub fn poise(self, guarded: bool, damage: u16, poise: u16) -> u16 {
-        if self != Self::Chip || damage == 0 || !guarded {
-            return poise;
-        }
-        let applied = self.damage(guarded, damage);
-        (u32::from(poise) * u32::from(applied) / u32::from(damage)) as u16
-    }
-}
-
 /// How the defender's pools take the health damage of a hit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// The damage is already scaled by [`stance_scaled`]; the route only says
+/// which pool takes it. This is the last per-side difference in a hit and
+/// goes away with the second pool.
 pub enum HitRoute {
-    /// Only the active pool takes the hit, scaled by `config` for a
-    /// matching or opposite channel, and a pool that empties forces a swap.
-    /// With `carry`, what the emptied pool could not take carries into the
-    /// newly active one, so a hit bigger than a pool can still be lethal.
+    /// Only the active pool takes the hit, and a pool that empties forces a
+    /// swap. With `carry`, what the emptied pool could not take carries into
+    /// the newly active one, so a hit bigger than a pool can still be lethal.
     Stance {
-        /// Alignment scaling, regen delays and the forced-swap cooldown.
+        /// Regen delays and the forced-swap cooldown.
         config: CombatStanceConfig,
         /// Carry the excess of an emptied pool into the other one.
         carry: bool,
     },
-    /// The strike's channel takes the hit after `guard` scaling, and only
-    /// the excess spills into the other pool.
-    Spill {
-        /// How the defender's active channel scales the strike.
-        guard: Guard,
-    },
+    /// The strike's channel takes the hit, and only the excess spills into
+    /// the other pool.
+    Spill,
 }
 
-/// The defender's posture rules for one hit.
+/// The defender's posture state for one hit. The capacity is
+/// [`CombatStats::poise`], and break grace always applies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PoiseRule {
-    /// Posture damage that breaks.
-    pub capacity: u16,
     /// Armour doubles the capacity for this hit.
     pub armored: bool,
-    /// The break-grace window of [`CombatFlow`] applies.
-    pub grace: bool,
     /// The defender cannot be broken right now (already in a break).
     pub blocked: bool,
 }
 
 /// Everything [`Combatant::receive_hit`] needs: the strike and the
-/// defender's routing and posture rules.
+/// defender's stats, routing and posture state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HitIn {
     /// The attacker's half.
     pub strike: Strike,
-    /// How the pools take the damage.
+    /// The defender's numbers.
+    pub stats: CombatStats,
+    /// Which pool takes the damage.
     pub route: HitRoute,
-    /// How posture takes the poise.
+    /// The defender's posture state.
     pub poise: PoiseRule,
 }
 
@@ -213,24 +176,29 @@ impl Combatant {
         stance: CombatStance::new(VitalityChannelId::One),
     };
 
-    /// A fresh life: both pools full at `maximum`, posture clear, energy
+    /// A fresh life for `stats`: both pools full, posture clear, energy
     /// full, side One with no cooldown and no swap showing.
-    pub fn reset(&mut self, maximum: [u16; 2]) {
-        self.respawn(maximum);
+    pub fn reset(&mut self, stats: &CombatStats) {
+        self.respawn(stats);
         self.stance = CombatStance::new(VitalityChannelId::One);
     }
 
     /// Like [`Self::reset`] but keeps the stance side and its cooldown, only
     /// ending any swap presentation. This is what an entity slot does when
     /// it spawns. A zero maximum gives an empty pool, as the cook allows.
-    pub fn respawn(&mut self, maximum: [u16; 2]) {
-        self.vitality = DualVitality::from_pools(
-            VitalityPool::at(maximum[0], maximum[0]),
-            VitalityPool::at(maximum[1], maximum[1]),
-        );
+    pub fn respawn(&mut self, stats: &CombatStats) {
+        let [one, two] = [stats.max_health, stats.max_health_secondary];
+        self.vitality =
+            DualVitality::from_pools(VitalityPool::at(one, one), VitalityPool::at(two, two));
         self.poise = Poise::EMPTY;
-        self.flow = CombatFlow::FULL;
+        self.flow = CombatFlow::full(stats);
         self.stance.settle();
+    }
+
+    /// Whether a hit on `channel` comes from the stance opposite this
+    /// fighter's active one.
+    pub fn opposes(&self, channel: VitalityChannelId) -> bool {
+        channel != self.stance.active()
     }
 
     /// Current health of both pools.
@@ -273,8 +241,9 @@ impl Combatant {
         self.stance.swap_elapsed_ticks() <= frames
     }
 
-    /// Take one hit: health through `hit.route`, then posture through
-    /// `hit.poise`. This is the only way damage reaches a fighter.
+    /// Take one hit: health and posture scaled by [`stance_scaled`], health
+    /// into the pools through `hit.route`, then posture against
+    /// [`CombatStats::poise`]. This is the only way damage reaches a fighter.
     ///
     /// A hit that kills leaves posture alone. A zero-damage hit (poise only)
     /// never touches the pools.
@@ -283,16 +252,18 @@ impl Combatant {
         let [one, two] = self.health();
         let before = u32::from(one) + u32::from(two);
         let was_defeated = self.vitality.is_defeated();
-        let mut poise = strike.poise;
-        if strike.damage != 0 {
+        let (damage, poise) = stance_scaled(
+            &hit.stats,
+            self.opposes(strike.channel),
+            strike.damage,
+            strike.poise,
+        );
+        if damage != 0 {
             match hit.route {
                 HitRoute::Stance { config, carry } => {
-                    self.take_stance_hit(strike.channel, strike.damage, &config, carry);
+                    self.take_stance_hit(damage, &config, carry);
                 }
-                HitRoute::Spill { guard } => {
-                    let guarded = strike.channel == self.stance.active();
-                    poise = guard.poise(guarded, strike.damage, poise);
-                    let damage = guard.damage(guarded, strike.damage);
+                HitRoute::Spill => {
                     self.vitality.apply_spill(strike.channel, damage);
                 }
             }
@@ -301,14 +272,8 @@ impl Combatant {
         let after = u32::from(one) + u32::from(two);
         let defeated = self.vitality.is_defeated();
         let killed = !was_defeated && defeated;
-        let poise_broken = !killed
-            && self.poise_hit(
-                poise,
-                hit.poise.capacity,
-                hit.poise.armored,
-                hit.poise.grace,
-                hit.poise.blocked,
-            );
+        let poise_broken =
+            !killed && self.poise_hit(poise, hit.stats.poise, hit.poise.armored, hit.poise.blocked);
         HitOut {
             damage_applied: before.saturating_sub(after).min(u32::from(u16::MAX)) as u16,
             defeated,
@@ -317,66 +282,43 @@ impl Combatant {
         }
     }
 
-    /// Stance routing for [`Self::receive_hit`], with the optional carry of
-    /// an emptied pool's excess into the newly active one.
-    fn take_stance_hit(
-        &mut self,
-        channel: VitalityChannelId,
-        damage: u16,
-        config: &CombatStanceConfig,
-        carry: bool,
-    ) {
+    /// Active-pool routing for [`Self::receive_hit`], with the optional
+    /// carry of an emptied pool's excess into the newly active one.
+    fn take_stance_hit(&mut self, damage: u16, config: &CombatStanceConfig, carry: bool) {
         let active = self.stance.active();
-        let room = u32::from(self.vitality.pool(active).current());
-        let first = self.take_stance_damage(channel, damage, config);
+        let room = self.vitality.pool(active).current();
+        let first = self.take_stance_damage(damage, config);
         if !carry || first.defeated || self.vitality.pool(active).current() != 0 {
             return;
         }
-        // The pool ran dry. Convert what it could not take back into hit
-        // units (the stance scales an aligned hit before the pool sees it).
-        let scale = u32::from(config.aligned_damage_q12).max(1);
-        let one = u32::from(VITALITY_Q12_ONE);
-        let scaled = u32::from(damage) * scale / one;
-        let Some(rest) = scaled.checked_sub(room).filter(|rest| *rest > 0) else {
-            return;
-        };
-        let rest = (rest * one).div_ceil(scale).min(u32::from(u16::MAX)) as u16;
-        let other = self.stance.active();
-        self.take_stance_damage(other, rest, config);
+        // The pool ran dry; what it could not take lands on the other one.
+        let rest = damage.saturating_sub(room);
+        if rest > 0 {
+            self.take_stance_damage(rest, config);
+        }
     }
 
-    /// Damage routed through the stance: only the active pool takes it,
-    /// scaled by `config` for a matching or opposite `attack`, and a pool
-    /// that empties forces a swap.
+    /// Damage routed through the stance: only the active pool takes it, and
+    /// a pool that empties forces a swap.
     fn take_stance_damage(
         &mut self,
-        attack: VitalityChannelId,
         damage: u16,
         config: &CombatStanceConfig,
     ) -> StanceDamageOutcome {
-        self.stance
-            .apply_damage(&mut self.vitality, attack, damage, config)
+        self.stance.apply_damage(&mut self.vitality, damage, config)
     }
 
     /// Apply `amount` posture damage against `capacity`; true on a break.
     ///
     /// `blocked` refuses the hit outright (the fighter is already in a
-    /// break reaction). `grace` makes the break-grace window of
-    /// [`CombatFlow`] apply: a hit inside it cannot break, and a break opens
-    /// a new one.
-    fn poise_hit(
-        &mut self,
-        amount: u16,
-        capacity: u16,
-        armored: bool,
-        grace: bool,
-        blocked: bool,
-    ) -> bool {
-        if blocked || (grace && !self.flow.can_interrupt()) {
+    /// break reaction). The break-grace window of [`CombatFlow`] applies: a
+    /// hit inside it cannot break, and a break opens a new one.
+    fn poise_hit(&mut self, amount: u16, capacity: u16, armored: bool, blocked: bool) -> bool {
+        if blocked || !self.flow.can_interrupt() {
             return false;
         }
         let broken = self.poise.hit(amount, capacity, armored);
-        if broken && grace {
+        if broken {
             self.flow.broke();
         }
         broken
@@ -388,9 +330,12 @@ mod tests {
     use super::*;
     use crate::combat_flow::BREAK_GRACE_TICKS;
 
+    /// 100 per pool, poise 60, the starting multipliers and energy.
+    const STATS: CombatStats = CombatStats::PLAYER;
+
     fn fighter() -> Combatant {
         let mut c = Combatant::EMPTY;
-        c.reset([100, 100]);
+        c.reset(&STATS);
         c
     }
 
@@ -400,14 +345,21 @@ mod tests {
         assert_eq!(c.health(), [100, 100]);
         assert!(c.request_swap(30));
         c.vitality.apply_spill(VitalityChannelId::One, 150);
-        c.flow.spend_shot();
-        c.respawn([80, 0]);
+        c.flow.spend_shot(&STATS);
+        let small = CombatStats {
+            max_health: 80,
+            max_health_secondary: 0,
+            energy_max: 40,
+            ..STATS
+        };
+        c.respawn(&small);
         assert_eq!(c.health(), [80, 0]);
-        assert_eq!(c.flow, CombatFlow::FULL);
+        assert_eq!(c.flow, CombatFlow::full(&small));
+        assert_eq!(c.flow.energy, 40, "energy starts at the stats' ceiling");
         assert_eq!(c.stance.active(), VitalityChannelId::Two);
         assert_eq!(c.stance.swap_cooldown(), 30);
         assert_eq!(c.stance.swap_elapsed_ticks(), u16::MAX);
-        c.reset([100, 100]);
+        c.reset(&STATS);
         assert_eq!(c, fighter());
     }
 
@@ -425,20 +377,14 @@ mod tests {
     }
 
     #[test]
-    fn poise_grace_is_a_parameter_not_a_side() {
-        let mut graced = fighter();
-        assert!(graced.poise_hit(60, 60, false, true, false));
-        assert!(
-            !graced.poise_hit(60, 60, false, true, false),
-            "inside grace"
-        );
-        graced.tick(BREAK_GRACE_TICKS, false);
-        assert!(graced.poise_hit(60, 60, false, true, false));
-
-        let mut legacy = fighter();
-        assert!(legacy.poise_hit(60, 60, false, false, false));
-        assert!(legacy.poise_hit(60, 60, false, false, false), "no grace");
-        assert!(!legacy.poise_hit(60, 60, false, false, true), "blocked");
+    fn poise_grace_applies_to_every_fighter() {
+        let mut c = fighter();
+        assert!(c.poise_hit(60, 60, false, false));
+        assert!(!c.poise_hit(60, 60, false, false), "inside grace");
+        c.tick(BREAK_GRACE_TICKS, false);
+        assert!(c.poise_hit(60, 60, false, false));
+        c.tick(BREAK_GRACE_TICKS, false);
+        assert!(!c.poise_hit(60, 60, false, true), "blocked");
     }
 
     fn strike(channel: VitalityChannelId, damage: u16, poise: u16) -> Strike {
@@ -451,36 +397,58 @@ mod tests {
         }
     }
 
-    const POISE_60: PoiseRule = PoiseRule {
-        capacity: 60,
+    const UNARMORED: PoiseRule = PoiseRule {
         armored: false,
-        grace: false,
         blocked: false,
     };
 
-    fn spill(guard: Guard, strike: Strike) -> HitIn {
+    fn spill(strike: Strike) -> HitIn {
         HitIn {
             strike,
-            route: HitRoute::Spill { guard },
-            poise: POISE_60,
+            stats: STATS,
+            route: HitRoute::Spill,
+            poise: UNARMORED,
         }
     }
 
     #[test]
-    fn spill_route_scales_by_the_guard_then_spills() {
+    fn one_stance_rule_scales_only_opposite_hits() {
+        assert_eq!(stance_scaled(&STATS, false, 32, 48), (32, 48));
+        assert_eq!(stance_scaled(&STATS, true, 32, 48), (40, 60));
+        assert_eq!(stance_scaled(&STATS, true, 0, 0), (0, 0));
+        let custom = CombatStats {
+            opposite_damage_q12: 8192,
+            opposite_poise_q12: 2048,
+            ..STATS
+        };
+        assert_eq!(stance_scaled(&custom, true, 32, 48), (64, 24));
+    }
+
+    #[test]
+    fn spill_route_takes_the_scaled_hit_then_spills() {
         let mut c = fighter();
-        // Guarded (side One is active): a 1 to 3 point chip, poise scaled
-        // by the same fraction.
-        let out = c.receive_hit(spill(Guard::Chip, strike(VitalityChannelId::One, 32, 64)));
-        assert_eq!(out.damage_applied, 2);
-        assert!(!out.poise_broken, "64 * 2 / 32 = 4 poise");
-        // Exposed: 1.5x, spilling the excess into the other pool.
-        let out = c.receive_hit(spill(Guard::Chip, strike(VitalityChannelId::Two, 80, 0)));
+        // Matching stance (side One is active): taken as authored.
+        let out = c.receive_hit(spill(strike(VitalityChannelId::One, 32, 48)));
+        assert_eq!(out.damage_applied, 32);
+        assert!(!out.poise_broken, "48 of 60");
+        assert_eq!(c.health(), [68, 100]);
+        // Opposite stance: 1.25x, spilling the excess into the other pool.
+        let out = c.receive_hit(spill(strike(VitalityChannelId::Two, 96, 0)));
         assert_eq!(out.damage_applied, 120);
-        assert_eq!(c.health(), [78, 0]);
-        let out = c.receive_hit(spill(Guard::Raw, strike(VitalityChannelId::One, 78, 60)));
+        assert_eq!(c.health(), [48, 0]);
+        let out = c.receive_hit(spill(strike(VitalityChannelId::One, 48, 60)));
         assert!(out.killed && out.defeated);
         assert!(!out.poise_broken, "a killing blow leaves posture alone");
+    }
+
+    #[test]
+    fn an_opposite_hit_breaks_posture_sooner() {
+        let mut matching = fighter();
+        let out = matching.receive_hit(spill(strike(VitalityChannelId::One, 0, 50)));
+        assert!(!out.poise_broken, "50 of 60");
+        let mut opposite = fighter();
+        let out = opposite.receive_hit(spill(strike(VitalityChannelId::Two, 0, 50)));
+        assert!(out.poise_broken, "50 x 1.25 = 62 of 60");
     }
 
     #[test]
@@ -488,8 +456,9 @@ mod tests {
         let config = CombatStanceConfig::DEFAULT;
         let hazard = |carry| HitIn {
             strike: strike(VitalityChannelId::One, 1000, 0),
+            stats: STATS,
             route: HitRoute::Stance { config, carry },
-            poise: POISE_60,
+            poise: UNARMORED,
         };
         let mut plain = fighter();
         let out = plain.receive_hit(hazard(false));
@@ -506,11 +475,12 @@ mod tests {
         let mut c = fighter();
         let hit = HitIn {
             strike: strike(VitalityChannelId::Two, 0, 60),
+            stats: STATS,
             route: HitRoute::Stance {
                 config: CombatStanceConfig::DEFAULT,
                 carry: false,
             },
-            poise: POISE_60,
+            poise: UNARMORED,
         };
         let out = c.receive_hit(hit);
         assert_eq!(c.health(), [100, 100]);

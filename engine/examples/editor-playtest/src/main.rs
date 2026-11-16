@@ -65,8 +65,8 @@ use psx_engine::{
 };
 use psx_font::FontAtlas;
 use psx_game_runtime::vitality::{
-    BoostInventory, BoostModuleId, BoostSlotId, CombatStance, CombatStanceConfig,
-    PowerUpLoadout, VitalityChannelId, VitalityModifiers,
+    BoostInventory, BoostModuleId, BoostSlotId, CombatStance, CombatStanceConfig, PowerUpLoadout,
+    VitalityChannelId, VitalityModifiers,
 };
 use psx_game_runtime::vitality_circles::VitalityCircleState;
 use psx_game_runtime::{
@@ -86,10 +86,11 @@ use psx_gpu::{
     Gpu,
 };
 use psx_level::{
-    find_asset_of_kind, room_flags, AssetId, AssetKind, CharacterAnimationAction, InteractableKind,
-    InteractableRecord, LevelBoxPropRecord, LevelCameraRecord, LevelCharacterRecord,
-    LevelGameEntityRecord, LevelGameplaySfxEvent, LevelImagePropRecord, LevelRoomRecord,
-    LevelSkyRecord, LevelUiValueBinding, ModelClipIndex, ParticleEmitterRecord, RoomIndex,
+    find_asset_of_kind, room_flags, AssetId, AssetKind, CharacterAnimationAction, CombatStats,
+    InteractableKind, InteractableRecord, LevelBoxPropRecord, LevelCameraRecord,
+    LevelCharacterRecord, LevelGameEntityRecord, LevelGameplaySfxEvent, LevelImagePropRecord,
+    LevelRoomRecord, LevelSkyRecord, LevelUiValueBinding, ModelClipIndex, ParticleEmitterRecord,
+    RoomIndex,
 };
 use psx_vram::{TextureDepth, TexturePage};
 
@@ -361,9 +362,13 @@ struct Playtest {
     /// damage and only the inactive one recovers, so swapping is how the
     /// player heals.
     player: Combatant,
-    /// Authored tuning for the stance: damage multipliers, recovery delays and
-    /// rate, break threshold, and the swap cooldown.
+    /// Authored tuning for the stance: recovery delays and rate, break
+    /// threshold, and the swap cooldown.
     player_stance_config: CombatStanceConfig,
+    /// The player character's combat numbers (health, poise, stance
+    /// multipliers, energy): the same record every enemy carries, cooked
+    /// on its `LevelCharacterRecord`.
+    player_stats: CombatStats,
     /// Compact claim/effect state for authored vitality fields.
     vitality_circles: VitalityCircleState,
     /// Four runtime-assignable unique modules around the two health endpoints.
@@ -722,15 +727,16 @@ impl Playtest {
         self.destructibles = RuntimeDestructibles::EMPTY;
         self.motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
         self.player_contents_memo = None;
-        self.player.reset([PLAYER_MAX_HEALTH; 2]);
+        // Playtest lives in a zeroed MaybeUninit, and zeroed stats or stance
+        // config would mean no health and no recovery at all, so they are set
+        // explicitly on every reset rather than relying on the zero pattern.
+        self.player_stats = CombatStats::PLAYER;
+        self.player.reset(&self.player_stats);
         self.vitality_circles = VitalityCircleState::EMPTY;
-        // Playtest lives in a zeroed MaybeUninit, and a zeroed stance config
-        // would mean no damage and no recovery at all, so it is set explicitly
-        // on every reset rather than relying on the zero pattern.
         self.player_stance_config = CombatStanceConfig::DEFAULT;
         self.power_up_loadout = PowerUpLoadout::DEFAULT;
         self.power_up_inventory = BoostInventory::EMPTY;
-        self.poi_save = SaveBlock::new(PLAYER_MAX_HEALTH, PERSISTENT_FLAG_COUNT);
+        self.poi_save = SaveBlock::new(self.player_stats.max_health, PERSISTENT_FLAG_COUNT);
         self.poi_save_loaded = false;
         self.poi_save_load_attempted = false;
         self.poi_save_dirty = false;

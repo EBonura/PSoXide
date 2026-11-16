@@ -200,11 +200,11 @@ fn target_ui_value(
     match binding {
         LevelUiValueBinding::TargetHealth => {
             Some(target.zip(record).map_or(0, |(index, record)| {
-                health_q12(entities.health(index), record.max_health)
+                health_q12(entities.health(index), record.combat.max_health)
             }))
         }
         LevelUiValueBinding::TargetHealthMax => Some(record.map_or(0, |record| {
-            if record.max_health == 0 {
+            if record.combat.max_health == 0 {
                 0
             } else {
                 PLAYER_HEALTH_MAX_Q12
@@ -214,12 +214,12 @@ fn target_ui_value(
             Some(target.zip(record).map_or(0, |(index, record)| {
                 health_q12(
                     entities.health_secondary(index),
-                    record.max_health_secondary,
+                    record.combat.max_health_secondary,
                 )
             }))
         }
         LevelUiValueBinding::TargetHealthSecondaryMax => Some(record.map_or(0, |record| {
-            if record.max_health_secondary == 0 {
+            if record.combat.max_health_secondary == 0 {
                 0
             } else {
                 PLAYER_HEALTH_MAX_Q12
@@ -263,9 +263,9 @@ mod target_ui_tests {
             Some(0)
         );
 
-        entities.apply_stance_hit(GAME_ENTITIES.as_slice(), 0, VitalityChannelId::One, 10, 0);
-        let expected =
-            (i32::from(entities.health(0)) * PLAYER_HEALTH_MAX_Q12) / i32::from(record.max_health);
+        entities.apply_hit(GAME_ENTITIES.as_slice(), 0, VitalityChannelId::One, 10, 0);
+        let expected = (i32::from(entities.health(0)) * PLAYER_HEALTH_MAX_Q12)
+            / i32::from(record.combat.max_health);
         assert_eq!(
             target_ui_value(LevelUiValueBinding::TargetHealth, &entities, Some(0)),
             Some(expected)
@@ -1785,12 +1785,13 @@ impl Scene for Playtest {
                         let active = self.game_entities.stance(target_index);
                         let health_share = |channel| {
                             let (current, maximum) = match channel {
-                                VitalityChannelId::One => {
-                                    (self.game_entities.health(target_index), record.max_health)
-                                }
+                                VitalityChannelId::One => (
+                                    self.game_entities.health(target_index),
+                                    record.combat.max_health,
+                                ),
                                 VitalityChannelId::Two => (
                                     self.game_entities.health_secondary(target_index),
-                                    record.max_health_secondary,
+                                    record.combat.max_health_secondary,
                                 ),
                             };
                             if maximum == 0 {

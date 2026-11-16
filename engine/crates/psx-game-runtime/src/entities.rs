@@ -42,12 +42,12 @@ pub use tactics::{EnemyGoal, EnemyGoalResult, EnemyTacticalSnapshot};
 
 use crate::combat::{arc_hits_circle, MeleeArc};
 use crate::combatant::{
-    Combatant, CombatantId, Guard, HitIn, HitKind, HitRoute, PoiseRule, Strike,
+    stance_scaled, Combatant, CombatantId, HitIn, HitKind, HitRoute, PoiseRule, Strike,
 };
 use crate::vitality::VitalityChannelId;
 use psx_level::{
-    game_entity_flags, CharacterActionFrameRange, CharacterAnimationAction, LevelGameEntityRecord,
-    RoomIndex, CHARACTER_ACTION_SPEED_UNSCALED_Q8,
+    combat_armour, game_entity_flags, CharacterActionFrameRange, CharacterAnimationAction,
+    LevelGameEntityRecord, RoomIndex, CHARACTER_ACTION_SPEED_UNSCALED_Q8,
 };
 use psx_math::atan2_q12;
 
@@ -155,11 +155,6 @@ const GAME_ENTITY_STANCE_PULSE_TICKS: u16 = 30;
 
 /// Duration of the enemy guard-colour sweep in 60 Hz simulation ticks.
 pub const GAME_ENTITY_STANCE_SWAP_DURATION_TICKS: u8 = 12;
-
-pub use crate::combatant::{
-    GAME_ENTITY_GUARDED_DAMAGE_DIVISOR, GAME_ENTITY_GUARDED_DAMAGE_MAX,
-    GAME_ENTITY_GUARDED_DAMAGE_MIN, GAME_ENTITY_OPPOSED_DAMAGE_Q12,
-};
 
 /// Front-arc half-width for entity attacks, PSX angle units
 /// (60 degrees). The entity faced the player when it committed to
@@ -591,7 +586,6 @@ pub struct GameEntities<
     player_attack_read: u8,
     projectile_threats: [Option<crate::projectiles::ProjectileThreat>; MAX_ENTITIES],
     exchanges: [crate::ranged_tactics::RangedExchange; MAX_ENTITIES],
-    flow_enabled: bool,
     recoil: [[i16; 3]; MAX_ENTITIES],
     /// Same cooked cooldown as the player, with independent per-enemy clocks.
     stance_swap_delay: u16,
@@ -796,7 +790,6 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         player_attack_read: 0,
         projectile_threats: [None; MAX_ENTITIES],
         exchanges: [crate::ranged_tactics::RangedExchange::EMPTY; MAX_ENTITIES],
-        flow_enabled: false,
         recoil: [[0; 3]; MAX_ENTITIES],
         stance_swap_delay: 0,
         ranged_aim_target: [[0; 3]; MAX_ENTITIES],
@@ -1012,42 +1005,22 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         (age < GAME_ENTITY_STANCE_PULSE_TICKS).then(|| age * 4096 / 30)
     }
 
-    /// The guard every enemy runs today: the flow rules when they are on,
-    /// the legacy chip guard otherwise.
-    fn guard(&self) -> Guard {
-        if self.flow_enabled {
-            Guard::Flow
-        } else {
-            Guard::Chip
-        }
-    }
-
-    /// Apply the current enemy guard to one authored damage value: the
-    /// exposed channel takes 1.5x, the guarded one a token 1 to 3 points.
-    /// A zero-damage hit stays zero.
+    /// Health damage `damage` on `attack` would deal entity `index` under
+    /// the one stance rule (its record's opposite-stance multiplier). What
+    /// the pools then absorb can be less. Zero stays zero.
     pub fn scaled_stance_damage(
         &self,
+        records: &[LevelGameEntityRecord],
         index: usize,
         attack: VitalityChannelId,
         damage: u16,
     ) -> u16 {
-        self.guard().damage(attack == self.stance(index), damage)
-    }
-
-    /// Poise damage for one hit, scaled like [`Self::scaled_stance_damage`]:
-    /// a hit on the guarded channel keeps the same fraction of its authored
-    /// poise as of its authored damage, so a 1-point chip cannot stagger and
-    /// the only way to break an enemy's poise is to match its open channel.
-    /// The exposed channel and zero-damage hits keep their authored poise.
-    pub fn scaled_stance_poise(
-        &self,
-        index: usize,
-        attack: VitalityChannelId,
-        damage: u16,
-        poise_damage: u16,
-    ) -> u16 {
-        self.guard()
-            .poise(attack == self.stance(index), damage, poise_damage)
+        match (records.get(index), self.combatants.get(index)) {
+            (Some(record), Some(combatant)) => {
+                stance_scaled(&record.combat, combatant.opposes(attack), damage, 0).0
+            }
+            _ => damage,
+        }
     }
 
     /// Ticks since the entity's latest stance change began; `u16::MAX` when
@@ -1277,20 +1250,19 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         }
     }
 
-    /// Apply a hit to entity `index`: channel-routed health damage plus poise
-    /// damage. Accumulated poise damage past the record's pool staggers (and
-    /// the accumulator resets). This is the raw, unscaled path retained for
-    /// callers that do not participate in Cortex stance combat; authored
-    /// player attacks use [`Self::apply_stance_hit`].
+    /// Apply a hit to entity `index`: health damage on `channel` plus poise
+    /// damage, both through the one stance rule over the record's
+    /// [`CombatStats`](psx_level::CombatStats): a hit from the stance
+    /// opposite the entity's active one takes the record's opposite-stance
+    /// multipliers, a matching hit lands as authored. Accumulated poise
+    /// damage past the record's capacity staggers.
     ///
     /// `channel` is the attack's vitality channel, which the player side
-    /// already derives from the swing (horizontal = Horizon, vertical =
-    /// Zenith). Routing mirrors the player's own untyped path exactly:
-    /// [`DualVitality::apply_spill`] consumes the named channel first and
-    /// spills only the excess into the other, so a single-channel attacker
-    /// still kills at the same total damage while each half of the gauge
-    /// drains on the attacks that own it. The entity dies when BOTH pools are
-    /// empty, which is [`DualVitality::is_defeated`] and nothing local.
+    /// derives from the swing (horizontal = Horizon, vertical = Zenith).
+    /// [`DualVitality::apply_spill`](crate::vitality::DualVitality::apply_spill)
+    /// consumes the named channel first and spills only the excess into the
+    /// other, so a single-channel attacker still kills at the same total
+    /// damage. The entity dies when BOTH pools are empty.
     pub fn apply_hit(
         &mut self,
         records: &'static [LevelGameEntityRecord],
@@ -1300,36 +1272,18 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         poise_damage: u16,
     ) -> GameEntityHitOutcome {
         let strike = player_strike(HitKind::Melee, channel, damage, poise_damage);
-        self.receive_hit(records, index, strike, Guard::Raw)
-    }
-
-    /// Apply a Cortex-style stance-aware hit. The guarded channel takes a
-    /// token 1 to 3 points, with poise scaled by the same fraction (see
-    /// [`Self::scaled_stance_poise`]); the exposed channel takes 150% damage
-    /// and its authored poise. Routing and spill remain the same as
-    /// [`Self::apply_hit`].
-    pub fn apply_stance_hit(
-        &mut self,
-        records: &'static [LevelGameEntityRecord],
-        index: usize,
-        channel: VitalityChannelId,
-        damage: u16,
-        poise_damage: u16,
-    ) -> GameEntityHitOutcome {
-        let strike = player_strike(HitKind::Melee, channel, damage, poise_damage);
-        self.receive_hit(records, index, strike, self.guard())
+        self.receive_hit(records, index, strike)
     }
 
     /// Land `strike` on entity `index` through [`Combatant::receive_hit`]
-    /// under `guard`, with the enemy's posture rules, then move the entity
-    /// into Dead or Staggered when the hit killed or broke it. An out of
-    /// range or dead entity is a miss.
+    /// with the entity's record stats, then move the entity into Dead or
+    /// Staggered when the hit killed or broke it. An out of range or dead
+    /// entity is a miss.
     pub fn receive_hit(
         &mut self,
         records: &'static [LevelGameEntityRecord],
         index: usize,
         strike: Strike,
-        guard: Guard,
     ) -> GameEntityHitOutcome {
         if index >= self.count() || index >= records.len() {
             return GameEntityHitOutcome::MISS;
@@ -1338,18 +1292,17 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         if state == GameEntityState::Dead {
             return GameEntityHitOutcome::MISS;
         }
-        // Break grace and the no-break-while-staggered rule are flow rules.
-        let grace = self.flow_enabled;
+        let stats = records[index].combat;
         let poise = PoiseRule {
-            capacity: records[index].poise,
-            armored: state == GameEntityState::Attack
+            armored: stats.armour & combat_armour::HEAVY_ATTACK != 0
+                && state == GameEntityState::Attack
                 && self.selected_attack_kind(index) == GAME_ENTITY_ATTACK_HEAVY,
-            grace,
-            blocked: grace && state == GameEntityState::Staggered,
+            blocked: state == GameEntityState::Staggered,
         };
         let out = self.combatants[index].receive_hit(HitIn {
             strike,
-            route: HitRoute::Spill { guard },
+            stats,
+            route: HitRoute::Spill,
             poise,
         });
         let delay = u16::from(records[index].group_attack_delay_ticks);
@@ -1384,7 +1337,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     /// Sweep the player's melee arc over the live entities: every
     /// enemy in the arc's room whose hurtbox cylinder the arc reaches
     /// (and whose bit in `already_hit` is clear) takes one
-    /// [`Self::apply_stance_hit`], and its bit latches so one swing connects
+    /// [`Self::apply_hit`], and its bit latches so one swing connects
     /// at most once per enemy. `O(live entities)` with the
     /// per-axis/squared early-outs of [`arc_hits_circle`]; the owning
     /// game clears `already_hit` when a new swing starts. Bit `i`
@@ -1447,7 +1400,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
                 || occluded(entity, self.position(entity));
             if !skip {
                 *already_hit |= mask;
-                let outcome = self.apply_stance_hit(records, entity, channel, damage, poise_damage);
+                let outcome = self.apply_hit(records, entity, channel, damage, poise_damage);
                 stats.hits += u16::from(outcome.connected);
                 stats.staggers += u16::from(outcome.staggered);
                 stats.deaths += u16::from(outcome.died);
@@ -1539,9 +1492,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             combatant.advance_stance(delta_ticks);
             combatant.tick(delta_ticks, state == GameEntityState::Staggered);
             self.exchanges[index].tick(delta_ticks);
-            if self.flow_enabled {
-                self.step_recoil(record, index, mover, delta_ticks);
-            }
+            self.step_recoil(record, index, mover, delta_ticks);
             let behavior_awake = !matches!(state, GameEntityState::Idle | GameEntityState::Patrol);
             let spatially_active = index < 64 && self.spatial_active_mask & (1u64 << index) != 0;
             // PVS is a rendering broad phase, not a perception verdict.
@@ -1833,9 +1784,9 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             let ready = state == GameEntityState::Aggro
                 // A dry cannon must not monopolize the shared attack slot
                 // while another enemy has a legal attack available.
-                && (!self.flow_enabled || !STANCE_BOUND_ATTACKS
+                && (!STANCE_BOUND_ATTACKS
                     || self.stance(index) == VitalityChannelId::One
-                    || self.can_fire_energy(index))
+                    || self.can_fire_energy(record, index))
                 && self.tactical_attack_ready(record, index)
                 && self.attack_cooldown[index] == 0
                 && self.state_ticks[index] >= u16::from(record.reaction_ticks)
@@ -2648,6 +2599,7 @@ fn within_xz(a: [i32; 2], b: [i32; 2], radius: i32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use psx_level::CombatStats;
 
     pub(super) const fn test_record(
         x: i32,
@@ -2715,13 +2667,16 @@ mod tests {
             recovery_ticks: 4,
             attack_min_range: 0,
             attack_max_range: 0,
-            poise: 50,
             touch_damage: 10,
-            max_health: 100,
-            // Single-channel by default so every pre-existing behavior test
-            // keeps its original arithmetic. `DUAL_ENEMY` below is the
-            // two-channel actor the vitality tests use.
-            max_health_secondary: 0,
+            combat: CombatStats {
+                poise: 50,
+                max_health: 100,
+                // Single-channel by default so every pre-existing behavior
+                // test keeps its original arithmetic. `DUAL_ENEMY` below is
+                // the two-channel actor the vitality tests use.
+                max_health_secondary: 0,
+                ..CombatStats::ENEMY
+            },
             soul_value: 0,
             flags,
         }
@@ -2920,16 +2875,21 @@ mod tests {
     fn prototype_both_colours_damage_and_share_poise() {
         let mut e = GameEntities::<8>::EMPTY;
         e.spawn_from_records(&DUAL_ENEMY);
-        e.enable_combat_flow(true);
-        assert_eq!(e.scaled_stance_damage(0, VitalityChannelId::One, 40), 40);
-        assert_eq!(e.scaled_stance_damage(0, VitalityChannelId::Two, 40), 50);
-        let capacity = DUAL_ENEMY[0].poise;
+        assert_eq!(
+            e.scaled_stance_damage(&DUAL_ENEMY, 0, VitalityChannelId::One, 40),
+            40
+        );
+        assert_eq!(
+            e.scaled_stance_damage(&DUAL_ENEMY, 0, VitalityChannelId::Two, 40),
+            50
+        );
+        let capacity = DUAL_ENEMY[0].combat.poise;
         assert!(
-            !e.apply_stance_hit(&DUAL_ENEMY, 0, VitalityChannelId::One, 1, capacity / 2)
+            !e.apply_hit(&DUAL_ENEMY, 0, VitalityChannelId::One, 1, capacity / 2)
                 .staggered
         );
         assert!(
-            e.apply_stance_hit(
+            e.apply_hit(
                 &DUAL_ENEMY,
                 0,
                 VitalityChannelId::Two,
@@ -2940,7 +2900,7 @@ mod tests {
         );
         let ticks = e.state_ticks[0];
         assert!(
-            !e.apply_stance_hit(&DUAL_ENEMY, 0, VitalityChannelId::One, 1, capacity * 2)
+            !e.apply_hit(&DUAL_ENEMY, 0, VitalityChannelId::One, 1, capacity * 2)
                 .staggered
         );
         assert_eq!(e.state_ticks[0], ticks);
@@ -2949,7 +2909,6 @@ mod tests {
     fn prototype_shot_interrupts_late_tell_and_cancels_retained_attack() {
         let mut e = GameEntities::<8>::EMPTY;
         e.spawn_from_records(&DUAL_ENEMY);
-        e.enable_combat_flow(true);
         e.enter_state(
             0,
             GameEntityState::Windup,
@@ -2968,11 +2927,11 @@ mod tests {
                 .staggered
         );
         for _ in 0..5 {
-            e.spend_shot_energy(0);
+            e.spend_shot_energy(&DUAL_ENEMY[0], 0);
         }
-        assert!(!e.can_fire_energy(0));
-        e.gain_melee_energy(0, true);
-        assert!(e.can_fire_energy(0));
+        assert!(!e.can_fire_energy(&DUAL_ENEMY[0], 0));
+        e.gain_melee_energy(&DUAL_ENEMY[0], 0, true);
+        assert!(e.can_fire_energy(&DUAL_ENEMY[0], 0));
     }
 
     #[test]
@@ -4352,8 +4311,12 @@ mod tests {
 
     /// The shipped cortex enemy shape: two equal 50-point pools.
     static EVEN_ENEMY: [LevelGameEntityRecord; 1] = [LevelGameEntityRecord {
-        max_health: 50,
-        max_health_secondary: 50,
+        combat: CombatStats {
+            max_health: 50,
+            max_health_secondary: 50,
+            poise: 50,
+            ..CombatStats::ENEMY
+        },
         ..test_record(
             1000,
             1000,
@@ -4365,8 +4328,12 @@ mod tests {
 
     /// Two unequal pools, so a test that reads the wrong one is obvious.
     static DUAL_ENEMY: [LevelGameEntityRecord; 1] = [LevelGameEntityRecord {
-        max_health: 60,
-        max_health_secondary: 40,
+        combat: CombatStats {
+            max_health: 60,
+            max_health_secondary: 40,
+            poise: 50,
+            ..CombatStats::ENEMY
+        },
         ..test_record(
             1000,
             1000,
@@ -4388,83 +4355,50 @@ mod tests {
     }
 
     #[test]
-    fn guarded_hits_scale_poise_with_the_chip_and_never_stagger() {
-        // IDLE_ENEMY guards Horizon (One) and has a 50 poise pool.
-        let mut guarded = GameEntities::<8>::EMPTY;
-        guarded.spawn_from_records(&IDLE_ENEMY);
-        // Light swing 25/25 chips 1 health and 1 poise; heavy 38/50 chips 2 and 2.
-        assert_eq!(
-            guarded.scaled_stance_poise(0, VitalityChannelId::One, 25, 25),
-            1
-        );
-        assert_eq!(
-            guarded.scaled_stance_poise(0, VitalityChannelId::One, 38, 50),
-            2
-        );
-        // The exposed channel and poise-only hits keep the authored poise.
-        assert_eq!(
-            guarded.scaled_stance_poise(0, VitalityChannelId::Two, 38, 50),
-            50
-        );
-        assert_eq!(
-            guarded.scaled_stance_poise(0, VitalityChannelId::One, 0, 50),
-            50
-        );
-        // Two 40-poise swings broke the 50 pool before; on the guard they chip.
-        for _ in 0..2 {
-            let hit = guarded.apply_stance_hit(&IDLE_ENEMY, 0, VitalityChannelId::One, 60, 40);
-            assert!(hit.connected && !hit.staggered);
-        }
-        assert_ne!(guarded.state(0), GameEntityState::Staggered);
+    fn matching_hits_land_as_authored_and_opposite_hits_break_posture_sooner() {
+        // IDLE_ENEMY is on Horizon (One) with a 50 poise pool.
+        let mut matching = GameEntities::<8>::EMPTY;
+        matching.spawn_from_records(&IDLE_ENEMY);
+        // Two 40-poise matching swings: 40 does not break 50, 80 does.
+        let first = matching.apply_hit(&IDLE_ENEMY, 0, VitalityChannelId::One, 20, 40);
+        let second = matching.apply_hit(&IDLE_ENEMY, 0, VitalityChannelId::One, 20, 40);
+        assert!(first.connected && !first.staggered && second.staggered);
 
-        let mut exposed = GameEntities::<8>::EMPTY;
-        exposed.spawn_from_records(&IDLE_ENEMY);
-        exposed.combatants[0]
+        let mut opposite = GameEntities::<8>::EMPTY;
+        opposite.spawn_from_records(&IDLE_ENEMY);
+        opposite.combatants[0]
             .stance
             .set_active(VitalityChannelId::Two);
-        let first = exposed.apply_stance_hit(&IDLE_ENEMY, 0, VitalityChannelId::One, 20, 40);
-        let second = exposed.apply_stance_hit(&IDLE_ENEMY, 0, VitalityChannelId::One, 20, 40);
-        assert!(!first.staggered && second.staggered);
+        // 40 x 1.25 = 50 breaks the 50 pool on the first swing.
+        let first = opposite.apply_hit(&IDLE_ENEMY, 0, VitalityChannelId::One, 20, 40);
+        assert!(first.staggered);
     }
 
     #[test]
-    fn guarded_hits_chip_and_exposed_hits_use_half_again_damage() {
-        let mut guarded = GameEntities::<8>::EMPTY;
-        guarded.spawn_from_records(&DUAL_ENEMY);
-        let hit = guarded.apply_stance_hit(&DUAL_ENEMY, 0, VitalityChannelId::One, 40, 0);
+    fn matching_hits_land_as_authored_and_opposite_hits_take_the_multiplier() {
+        let mut matching = GameEntities::<8>::EMPTY;
+        matching.spawn_from_records(&DUAL_ENEMY);
+        let hit = matching.apply_hit(&DUAL_ENEMY, 0, VitalityChannelId::One, 40, 0);
         assert!(hit.connected && !hit.died);
-        // 40 / 16 = 2: a token scratch, nowhere near the 60 an exposed hit does.
-        assert_eq!((guarded.health(0), guarded.health_secondary(0)), (58, 40));
-        for (damage, chip) in [
-            (1, 1),
-            (15, 1),
-            (16, 1),
-            (25, 1),
-            (38, 2),
-            (48, 3),
-            (999, 3),
-        ] {
+        assert_eq!((matching.health(0), matching.health_secondary(0)), (20, 40));
+        for damage in [0, 1, 16, 38, 999] {
             assert_eq!(
-                guarded.scaled_stance_damage(0, VitalityChannelId::One, damage),
-                chip,
+                matching.scaled_stance_damage(&DUAL_ENEMY, 0, VitalityChannelId::One, damage),
+                damage,
                 "authored {damage}"
             );
         }
         assert_eq!(
-            guarded.scaled_stance_damage(0, VitalityChannelId::One, 0),
-            0
-        );
-        assert_eq!(
-            guarded.scaled_stance_damage(0, VitalityChannelId::Two, 38),
-            57
+            matching.scaled_stance_damage(&DUAL_ENEMY, 0, VitalityChannelId::Two, 38),
+            47
         );
 
-        let mut exposed = GameEntities::<8>::EMPTY;
-        exposed.spawn_from_records(&DUAL_ENEMY);
-        let hit = exposed.apply_stance_hit(&DUAL_ENEMY, 0, VitalityChannelId::Two, 40, 0);
+        let mut opposite = GameEntities::<8>::EMPTY;
+        opposite.spawn_from_records(&DUAL_ENEMY);
+        let hit = opposite.apply_hit(&DUAL_ENEMY, 0, VitalityChannelId::Two, 40, 0);
         assert!(hit.connected && !hit.died);
-        // 1.5x = 60: Zenith's 40 drains first, then the remaining 20 spills.
-        assert_eq!((exposed.health(0), exposed.health_secondary(0)), (40, 0));
+        // 1.25x = 50: Zenith's 40 drains first, then the remaining 10 spills.
+        assert_eq!((opposite.health(0), opposite.health_secondary(0)), (50, 0));
     }
 
     #[test]
@@ -4702,8 +4636,10 @@ mod tests {
         entities.set_spatial_active_mask(u64::MAX);
         entities.apply_hit(&DUAL_ENEMY, 0, VitalityChannelId::One, 20, 0);
         assert_eq!((entities.health(0), entities.health_secondary(0)), (40, 40));
+        // Zenith is the opposite stance here (the actor is on Horizon), so
+        // the 15 lands at 1.25x, still only in its own channel.
         entities.apply_hit(&DUAL_ENEMY, 0, VitalityChannelId::Two, 15, 0);
-        assert_eq!((entities.health(0), entities.health_secondary(0)), (40, 25));
+        assert_eq!((entities.health(0), entities.health_secondary(0)), (40, 22));
     }
 
     /// The player's own untyped path is `DualVitality::apply_spill`, so the
@@ -4722,8 +4658,9 @@ mod tests {
         // And symmetrically, from the Zenith side on a fresh actor.
         entities.spawn_from_records(&DUAL_ENEMY);
         entities.set_spatial_active_mask(u64::MAX);
+        // Opposite stance: 55 x 1.25 = 68, Zenith's 40 then 28 spills.
         entities.apply_hit(&DUAL_ENEMY, 0, VitalityChannelId::Two, 55, 0);
-        assert_eq!((entities.health(0), entities.health_secondary(0)), (45, 0));
+        assert_eq!((entities.health(0), entities.health_secondary(0)), (32, 0));
     }
 
     /// Death is `DualVitality::is_defeated`: BOTH pools empty. Emptying one
@@ -4734,12 +4671,13 @@ mod tests {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&DUAL_ENEMY);
         entities.set_spatial_active_mask(u64::MAX);
+        // Opposite stance: 40 x 1.25 = 50 empties Zenith and spills 10.
         let outcome = entities.apply_hit(&DUAL_ENEMY, 0, VitalityChannelId::Two, 40, 0);
         assert!(outcome.connected && !outcome.died);
         assert_ne!(entities.state(0), GameEntityState::Dead);
-        assert_eq!((entities.health(0), entities.health_secondary(0)), (60, 0));
+        assert_eq!((entities.health(0), entities.health_secondary(0)), (50, 0));
 
-        let outcome = entities.apply_hit(&DUAL_ENEMY, 0, VitalityChannelId::One, 59, 0);
+        let outcome = entities.apply_hit(&DUAL_ENEMY, 0, VitalityChannelId::One, 49, 0);
         assert!(!outcome.died);
         assert_eq!(entities.health(0), 1);
 
@@ -4838,8 +4776,8 @@ mod tests {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&EVEN_ENEMY);
         entities.set_spatial_active_mask(u64::MAX);
-        // Guard Zenith so the Horizon (One) swings below land on the exposed
-        // channel (1.5x); these tests are about arc mechanics, not the chip.
+        // Put the enemy on Zenith so the Horizon (One) swing is an
+        // opposite-stance hit; the test is about arc width, not the rule.
         entities.combatants[0]
             .stance
             .set_active(VitalityChannelId::Two);
@@ -4996,11 +4934,9 @@ mod tests {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&IDLE_ENEMY);
         entities.set_spatial_active_mask(u64::MAX);
-        // Guard Zenith so the Horizon (One) swings below land on the exposed
-        // channel (1.5x); these tests are about arc mechanics, not the chip.
-        entities.combatants[0]
-            .stance
-            .set_active(VitalityChannelId::Two);
+        // The enemy is on Horizon, so the Horizon (One) swings below match
+        // its stance and land as authored; these tests are about arc
+        // mechanics, not the stance rule.
         let arc = MeleeArc {
             room: RoomIndex(0),
             x: 1200,
@@ -5050,7 +4986,7 @@ mod tests {
                 deaths: 0
             }
         );
-        assert_eq!(entities.health(0), 85);
+        assert_eq!(entities.health(0), 90);
         assert_eq!(probed, Some((0, entities.position(0))));
         assert_ne!(swing, 0);
     }
@@ -5060,11 +4996,9 @@ mod tests {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&IDLE_ENEMY);
         entities.set_spatial_active_mask(u64::MAX);
-        // Guard Zenith so the Horizon (One) swings below land on the exposed
-        // channel (1.5x); these tests are about arc mechanics, not the chip.
-        entities.combatants[0]
-            .stance
-            .set_active(VitalityChannelId::Two);
+        // The enemy is on Horizon, so the Horizon (One) swings below match
+        // its stance and land as authored; these tests are about arc
+        // mechanics, not the stance rule.
         // Player at (1200, 1000) facing -X: the enemy at (1000, 1000)
         // sits dead ahead, 200 units out.
         let arc = MeleeArc {
@@ -5094,7 +5028,7 @@ mod tests {
                 deaths: 0
             }
         );
-        assert_eq!(entities.health(0), 70);
+        assert_eq!(entities.health(0), 80);
         // ...and the same swing never double-taps.
         let stats = entities.apply_melee_arc(
             &IDLE_ENEMY,
@@ -5117,13 +5051,13 @@ mod tests {
         );
         assert_eq!(stats.staggers, 1);
         assert_eq!(entities.state(0), GameEntityState::Staggered);
-        // Swing 3 (health 40 - 30 = 10), swing 4 kills.
+        // Swing 3 (health 60 - 50 = 10), swing 4 kills.
         swing = 0;
         entities.apply_melee_arc(
             &IDLE_ENEMY,
             &arc,
             VitalityChannelId::One,
-            20,
+            50,
             40,
             &mut swing,
         );

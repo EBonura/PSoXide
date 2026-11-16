@@ -186,57 +186,44 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         stats.retreating = stats.retreating.saturating_add(1);
         true
     }
-    /// Switch the Cortex energy/poise rules on or off; legacy records keep their old rules when off.
-    pub fn enable_combat_flow(&mut self, enabled: bool) {
-        self.flow_enabled = enabled;
-    }
     /// Current energy of entity `index`, 0 when out of range.
     pub fn energy(&self, index: usize) -> u16 {
         self.combatants.get(index).map_or(0, |c| c.flow.energy)
     }
-    /// True when flow rules are off or entity `index` can afford a shot.
-    pub fn can_fire_energy(&self, index: usize) -> bool {
-        !self.flow_enabled
-            || self
-                .combatants
-                .get(index)
-                .is_some_and(|c| c.flow.can_shoot())
+    /// True when entity `index` can afford a shot under its `record`'s stats.
+    pub fn can_fire_energy(&self, record: &LevelGameEntityRecord, index: usize) -> bool {
+        self.combatants
+            .get(index)
+            .is_some_and(|c| c.flow.can_shoot(&record.combat))
     }
     /// Report that a shot by entity `index` landed; `interrupted` marks an interrupting hit.
     pub fn projectile_connected(&mut self, index: usize, interrupted: bool) {
-        if self.flow_enabled {
-            if let Some(f) = self.combatants.get_mut(index).map(|c| &mut c.flow) {
-                f.shot_hit(interrupted);
-            }
+        if let Some(f) = self.combatants.get_mut(index).map(|c| &mut c.flow) {
+            f.shot_hit(interrupted);
         }
     }
-    /// Charge one shot to entity `index` (flow mode only).
-    pub fn spend_shot_energy(&mut self, index: usize) {
-        if self.flow_enabled {
-            if let Some(f) = self.combatants.get_mut(index).map(|c| &mut c.flow) {
-                f.spend_shot();
-            }
+    /// Charge one shot to entity `index` at its `record`'s shot cost.
+    pub fn spend_shot_energy(&mut self, record: &LevelGameEntityRecord, index: usize) {
+        if let Some(c) = self.combatants.get_mut(index) {
+            c.flow.spend_shot(&record.combat);
         }
     }
-    /// Credit entity `index` for a connected melee hit (flow mode only).
-    pub fn gain_melee_energy(&mut self, index: usize, heavy: bool) {
-        if self.flow_enabled {
-            if let Some(f) = self.combatants.get_mut(index).map(|c| &mut c.flow) {
-                f.melee_hit(heavy);
-            }
+    /// Credit entity `index` for a connected melee hit at its `record`'s gain.
+    pub fn gain_melee_energy(&mut self, record: &LevelGameEntityRecord, index: usize, heavy: bool) {
+        if let Some(c) = self.combatants.get_mut(index) {
+            c.flow.melee_hit(heavy, &record.combat);
         }
     }
     /// True when entity `index` is in the second half of a windup and may be broken by a bolt.
     pub fn shot_opening(&self, records: &[LevelGameEntityRecord], index: usize) -> bool {
-        self.flow_enabled
-            && index < self.count()
+        index < self.count()
             && records.get(index).is_some_and(|r| {
                 self.state(index) == GameEntityState::Windup
                     && self.state_ticks[index] >= u16::from(r.windup_ticks) / 2
                     && self.combatants[index].flow.can_interrupt()
             })
     }
-    /// Apply a projectile hit; in flow mode the bolt's poise comes from `CombatFlow::shot_poise`.
+    /// Apply a projectile hit; the bolt's poise comes from `CombatFlow::shot_poise`.
     pub fn apply_projectile_hit(
         &mut self,
         records: &'static [LevelGameEntityRecord],
@@ -248,22 +235,17 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         if index >= self.count() || index >= records.len() {
             return GameEntityHitOutcome::MISS;
         }
-        let poise = if self.flow_enabled {
-            self.combatants[index].flow.shot_poise(
-                poise,
-                records[index].poise,
-                self.shot_opening(records, index),
-            )
-        } else {
-            poise
-        };
+        let poise = self.combatants[index].flow.shot_poise(
+            poise,
+            records[index].combat.poise,
+            self.shot_opening(records, index),
+        );
         let strike = super::player_strike(HitKind::Projectile, channel, damage, poise);
-        self.receive_hit(records, index, strike, self.guard())
+        self.receive_hit(records, index, strike)
     }
     /// A heavy connection creates separation through the same body collision as AI walking.
     pub fn recoil_from(&mut self, index: usize, from: [i32; 3]) {
-        if !self.flow_enabled || index >= self.count() || self.state(index) == GameEntityState::Dead
-        {
+        if index >= self.count() || self.state(index) == GameEntityState::Dead {
             return;
         }
         let yaw = psx_engine::Angle::from_q12(atan2_q12(
@@ -308,7 +290,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         mover: &mut impl GameEntityMover,
         delta: u16,
     ) {
-        if !self.flow_enabled || self.selected_attack_is_ranged(i) {
+        if self.selected_attack_is_ranged(i) {
             return;
         }
         self.tactics[i].moved = false;
@@ -345,8 +327,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
     }
     /// Locomotion clip and phase to show while a moving entity winds up or fires; `None` otherwise.
     pub fn firing_gait(&self, r: &LevelGameEntityRecord, i: usize) -> Option<(u16, u16)> {
-        (self.flow_enabled
-            && i < self.count()
+        (i < self.count()
             && (self.selected_attack_is_ranged(i) || self.state(i) == GameEntityState::Windup)
             && matches!(
                 self.state(i),
@@ -368,7 +349,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         mover: &mut impl GameEntityMover,
         delta: u16,
     ) {
-        if !self.flow_enabled || !Self::is_tactical(r) || !self.selected_attack_is_ranged(i) {
+        if !Self::is_tactical(r) || !self.selected_attack_is_ranged(i) {
             return;
         }
         let before = self.position(i);

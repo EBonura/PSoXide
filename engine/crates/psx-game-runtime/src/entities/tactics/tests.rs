@@ -29,8 +29,8 @@ const fn enemy() -> LevelGameEntityRecord {
     r.heavy_attack_active_ticks = 96;
     r.ranged_attack_active_ticks = 148;
     r.recovery_ticks = 24;
-    r.max_health = 600;
-    r.max_health_secondary = 600;
+    r.combat.max_health = 600;
+    r.combat.max_health_secondary = 600;
     r
 }
 static ENEMY: [LevelGameEntityRecord; 1] = [enemy()];
@@ -113,17 +113,22 @@ fn stalk_run_hysteresis_and_real_walk_clip() {
     assert!(!e.tactics[0].running);
 }
 #[test]
-fn circle_keeps_side_for_seconds_and_does_not_own_attack() {
+fn circle_keeps_side_until_it_may_replan_and_does_not_own_attack() {
     let mut e = engaged();
     let mut m = Arena::default();
     e.begin_goal(0, EnemyGoal::CircleLeft, 240, 64);
-    for _ in 0..100 {
+    // A spacing circle is reconsidered from its 24th tick on (the energy
+    // rules replan spacing); until then it keeps its side.
+    for _ in 0..11 {
         tick(&mut e, &mut m, [0, 0, 100], 2);
         assert_eq!(e.tactics[0].goal, EnemyGoal::CircleLeft);
         assert_eq!(e.attack_owner(), None);
     }
-    assert_eq!(e.tactics[0].remaining, 40);
+    assert_eq!(e.tactics[0].remaining, 218);
     assert_eq!(e.clip_for_state(&ENEMY, 0).clip, ENEMY[0].strafe_left_clip);
+    tick(&mut e, &mut m, [0, 0, 100], 2);
+    assert_ne!(e.tactics[0].goal, EnemyGoal::CircleLeft);
+    assert_eq!(e.attack_owner(), None);
 }
 #[test]
 fn turn_is_bounded_and_target_behind_cannot_be_attacked() {
@@ -266,12 +271,15 @@ fn goal_seconds_match_both_npc_cadences() {
     for delta in [1, 2] {
         let mut e = engaged();
         let mut m = Arena::default();
-        e.begin_goal(0, EnemyGoal::Hold, 60, 64);
+        // Hold is replanned at once under the energy rules, so the clock is
+        // read off a circle before its replan point.
+        e.begin_goal(0, EnemyGoal::CircleLeft, 240, 64);
         e.attack_cooldown[0] = 600;
-        for _ in 0..(58 / delta) {
+        for _ in 0..(22 / delta) {
             tick(&mut e, &mut m, [0, 0, 100], delta);
         }
-        assert_eq!(e.tactics[0].remaining, 2);
+        assert_eq!(e.tactics[0].goal, EnemyGoal::CircleLeft);
+        assert_eq!(e.tactics[0].remaining, 218);
     }
 }
 #[test]
@@ -528,7 +536,8 @@ fn post_attack_circling_uses_a_wider_personal_space() {
         ) {
             saw_circle = true;
             assert_eq!(e.tactics[0].separation, 96);
-            assert!((210..=300).contains(&e.tactics[0].remaining));
+            // A short reset, not a multi-second refusal: 36 plus up to 36.
+            assert!((36..=72).contains(&e.tactics[0].remaining));
         }
     }
     assert!(saw_circle);
@@ -559,13 +568,16 @@ fn slower_spacing_gait_clock_uses_its_own_nominal_speed() {
 }
 
 #[test]
-fn two_cannon_attacks_lead_to_a_close_approach_after_spacing() {
+fn an_empty_cannon_leads_to_a_close_approach_after_spacing() {
     let mut e = engaged();
     let mut m = Arena::default();
     e.combatants[0].stance.set_active(VitalityChannelId::Two);
     e.tactics[0].last_attack = GAME_ENTITY_ATTACK_RANGED;
     e.tactics[0].repeat_count = 2;
     e.attack_cooldown[0] = 240;
+    // Energy decides the stance: a cannon with no shot left goes to the
+    // blade to earn it back.
+    e.combatants[0].flow.energy = 0;
     let mut approached = false;
     for _ in 0..100 {
         tick(&mut e, &mut m, [0, 0, 128], 2);
@@ -671,12 +683,11 @@ fn elevated_target_does_not_bait_ground_melee() {
 #[test]
 fn energy_replan_interrupts_spacing_but_not_an_attack() {
     let mut e = engaged();
-    e.enable_combat_flow(true);
     e.mutate_stance(0);
     e.advance_stance_swap(0, 12);
     e.combatants[0].stance.set_swap_cooldown(0);
     for _ in 0..5 {
-        e.spend_shot_energy(0);
+        e.spend_shot_energy(&ENEMY[0], 0);
     }
     e.begin_goal(0, EnemyGoal::CircleRight, 300, 64);
     e.tactics[0].phase = 24;
@@ -697,9 +708,8 @@ fn energy_replan_interrupts_spacing_but_not_an_attack() {
 #[test]
 fn empty_enemy_does_not_claw_at_an_overhead_perch_or_invent_energy() {
     let mut e = engaged();
-    e.enable_combat_flow(true);
     for _ in 0..5 {
-        e.spend_shot_energy(0);
+        e.spend_shot_energy(&ENEMY[0], 0);
     }
     for _ in 0..150 {
         tick(&mut e, &mut Arena::default(), [0, 150, 100], 2);
@@ -713,7 +723,6 @@ fn empty_enemy_does_not_claw_at_an_overhead_perch_or_invent_energy() {
 #[test]
 fn crowded_melee_tell_moves_through_collision_then_plants() {
     let mut e = engaged();
-    e.enable_combat_flow(true);
     e.select_attack(0, false);
     e.enter_state(
         0,
@@ -736,8 +745,7 @@ fn crowded_melee_tell_moves_through_collision_then_plants() {
 #[test]
 fn heavy_contact_creates_firing_distance_before_attacking() {
     let mut e = engaged();
-    e.enable_combat_flow(true);
-    e.combatants[0].flow.melee_hit(true);
+    e.combatants[0].flow.melee_hit(true, &ENEMY[0].combat);
     let mut arena = Arena::default();
     let mut escaped = false;
     let mut attacked = false;
@@ -761,7 +769,6 @@ fn heavy_contact_creates_firing_distance_before_attacking() {
 #[test]
 fn blocked_breakaway_never_fakes_arrival_or_shoots_at_contact() {
     let mut e = engaged();
-    e.enable_combat_flow(true);
     let mut arena = Arena {
         blocked: true,
         ..Arena::default()
@@ -785,7 +792,6 @@ fn blocked_breakaway_never_fakes_arrival_or_shoots_at_contact() {
 #[test]
 fn breakaway_defends_before_dragging_a_chaser_outside_the_home_leash() {
     let mut e = engaged();
-    e.enable_combat_flow(true);
     let edge = i32::from(ENEMY[0].aggro_radius);
     e.z[0] = edge;
     let mut arena = Arena::default();
@@ -806,7 +812,6 @@ fn breakaway_defends_before_dragging_a_chaser_outside_the_home_leash() {
 #[test]
 fn boundary_defender_only_switches_to_cannon_when_there_is_firing_space() {
     let mut e = engaged();
-    e.enable_combat_flow(true);
     let edge = i32::from(ENEMY[0].aggro_radius);
     e.z[0] = edge;
     e.attack_cooldown[0] = 600;
@@ -860,7 +865,6 @@ fn visible_melee_recovery_releases_an_active_defensive_retreat() {
 fn empty_energy_melee_enemy_sidesteps_with_lateral_clip_then_plants() {
     let mut e = engaged();
     let mut m = Arena::default();
-    e.enable_combat_flow(true);
     e.combatants[0].flow.energy = 0;
     e.combatants[0].stance.set_swap_cooldown(6000);
     e.projectile_threats[0] = Some(crate::projectiles::ProjectileThreat {
@@ -895,7 +899,6 @@ fn projectile_evade_does_not_cancel_committed_actions() {
     ] {
         let mut e = engaged();
         let mut m = Arena::default();
-        e.enable_combat_flow(true);
         e.state[0] = state as u8;
         e.state_ticks[0] = 0;
         e.projectile_threats[0] = Some(crate::projectiles::ProjectileThreat {

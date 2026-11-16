@@ -226,17 +226,20 @@ impl Playtest {
             );
             let separated = distance
                 > (self.character.map_or(40, |c| c.radius) + i32::from(record.radius) + 24) * 2;
-            let wanted = if self
-                .player
-                .flow
-                .preferred_stance(wanted.index() as u8, separated)
-                == 0
+            let wanted = if self.player.flow.preferred_stance(
+                wanted.index() as u8,
+                separated,
+                &self.player_stats,
+            ) == 0
             {
                 VitalityChannelId::One
             } else {
                 VitalityChannelId::Two
             };
-            self.duel.reason = self.player.flow.stance_reason(reason as u8, separated);
+            self.duel.reason =
+                self.player
+                    .flow
+                    .stance_reason(reason as u8, separated, &self.player_stats);
             self.duel.movement = [0, 0];
             self.duel.aim = false;
             self.duel.sprint = false;
@@ -356,7 +359,7 @@ impl Playtest {
                         self.duel.repeats,
                         roll,
                     );
-                    if !ranged || self.player.flow.can_shoot() {
+                    if !ranged || self.player.flow.can_shoot(&self.player_stats) {
                         buttons |= if kind == 0 { button::R1 } else { button::R2 };
                         self.duel.intent = if ranged { 3 } else { 2 };
                     }
