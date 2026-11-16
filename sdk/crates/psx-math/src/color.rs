@@ -28,6 +28,20 @@ pub const fn scale_rgb_q8(rgb: (u8, u8, u8), num: u32) -> (u8, u8, u8) {
         ((rgb.2 as u32 * num) >> 8) as u8,
     )
 }
+/// [`scale_rgb_q8`] always inlined, for a per-frame caller on a path where the call costs more
+/// than the bytes: NitroXide's HUD dim lost 5 flips in its heavy window with the call. Same
+/// value. Which form: a caller with many sites or a cold path (menus, loaders, a launcher) uses
+/// `scale_rgb_q8`, one shared body; a hot per-frame caller with few sites uses this one, about
+/// 70 B a site.
+#[inline(always)]
+#[must_use]
+pub const fn scale_rgb_q8_inline(rgb: (u8, u8, u8), num: u32) -> (u8, u8, u8) {
+    (
+        ((rgb.0 as u32 * num) >> 8) as u8,
+        ((rgb.1 as u32 * num) >> 8) as u8,
+        ((rgb.2 as u32 * num) >> 8) as u8,
+    )
+}
 /// Interpolate using signed division toward zero. Clamp the numerator to the
 /// original denominator before replacing a zero divisor with one. Therefore
 /// a zero denominator always returns `a`, matching the caller contract.
@@ -93,6 +107,16 @@ mod tests {
                     scale_rgb_q8((v, v, v), num).0,
                     ((i32::from(v) * num as i32) / 256) as u8
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn the_inline_q8_scale_is_the_call_form() {
+        for v in 0..=255u8 {
+            for num in 0..=300u32 {
+                let c = (v, 255 - v, v / 3);
+                assert_eq!(scale_rgb_q8_inline(c, num), scale_rgb_q8(c, num));
             }
         }
     }
