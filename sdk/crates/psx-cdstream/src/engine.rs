@@ -675,7 +675,9 @@ impl<H: CdHw> Engine<H> {
                 self.command(CMD_SEEKL, &[], Phase::StartingSeek)
             }
             (Phase::StartingSeek, flag::ACKNOWLEDGE) => self.change(Phase::Seeking),
-            (Phase::Seeking, flag::COMPLETE) if self.active.is_some_and(|a| a.request.is_park()) => {
+            (Phase::Seeking, flag::COMPLETE)
+                if self.active.is_some_and(|a| a.request.is_park()) =>
+            {
                 // A park: the head is where it was sent.
                 self.change(Phase::Done);
                 self.hw.silence_output();
