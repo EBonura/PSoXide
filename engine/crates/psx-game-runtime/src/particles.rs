@@ -487,6 +487,17 @@ pub fn draw_projectile_impact<'a, const OT_DEPTH: usize>(
     let Some(center) = center else {
         return 0;
     };
+    if impact.visual.star_points != 0 {
+        return draw_parry_star(
+            impact,
+            center,
+            camera.projection.focal_length,
+            depth_range,
+            particle_material,
+            ot,
+            primitive_packets,
+        );
+    }
     if impact.visual.crystal && impact.kind != ProjectileEffectKind::Muzzle {
         let from = projectile_offset(impact.position, impact.velocity, -4);
         let from = WorldVertex::new(from[0], from[1], from[2]);
@@ -623,6 +634,100 @@ pub fn draw_projectile_impact<'a, const OT_DEPTH: usize>(
         };
         submitted +=
             draw_particle_diamond(shard, shard_half, material, slot, ot, primitive_packets);
+    }
+    submitted
+}
+
+/// The parry burst: a bright core, an expanding ring and a star of spokes
+/// (alternately long and short), all additive, in the impact colour, with a
+/// near-white core on the long spokes. Larger and brighter than any hit
+/// spark, and ring-shaped, so a parry does not read as a hit. Sized from the
+/// effect radius on screen and `glow_scale_q8`; progress is the pool's age.
+#[allow(clippy::too_many_arguments)]
+fn draw_parry_star<'a, const OT_DEPTH: usize>(
+    impact: ProjectileImpactEffect,
+    center: ProjectedVertex,
+    focal_length: i32,
+    depth_range: DepthRange,
+    particle_material: TextureMaterial,
+    ot: &mut OtFrame<'a, OT_DEPTH>,
+    primitive_packets: &mut PrimitivePacketArena<'a>,
+) -> usize {
+    const RING_SEGMENTS: u16 = 16;
+    let lifetime = i32::from(impact.visual.impact_lifetime_ticks.max(1));
+    let age = i32::from(impact.age_ticks).min(lifetime);
+    let progress = age * 4096 / lifetime;
+    let remaining = 4096 - progress;
+    // Quadratic fade, so the burst is brightest on its first ticks.
+    let brightness = (remaining * remaining / 4096) as u16;
+    let size = ((i32::from(impact.radius) * focal_length) / center.sz.max(1)).clamp(3, 48);
+    let reach = (size * i32::from(impact.visual.glow_scale_q8) / 256).max(4);
+    // The ring leaves the contact point fast and slows as it reaches out.
+    let eased = 4096 - remaining * remaining / 4096;
+    let ring = (reach * (1024 + eased * 3 / 4) / 4096).max(2);
+    let slot = depth_range.slot::<OT_DEPTH>(center.sz);
+    let accent = particle_material
+        .with_tint(rgb_tuple(scale_rgb(
+            impact.visual.impact_rgb,
+            brightness,
+            4096,
+        )))
+        .with_blend_mode(BlendMode::Add);
+    let core = particle_material
+        .with_tint(rgb_tuple(scale_rgb(
+            impact.visual.core_rgb,
+            brightness,
+            4096,
+        )))
+        .with_blend_mode(BlendMode::Add);
+    let at = |angle: i32, radius: i32| ProjectedVertex {
+        sx: clamp_i16(i32::from(center.sx) + psx_math::cos_q12(angle as u16) * radius / 4096),
+        sy: clamp_i16(i32::from(center.sy) + psx_math::sin_q12(angle as u16) * radius / 4096),
+        ..center
+    };
+    let mut submitted = 0;
+    // The hot core, only while the burst is young.
+    let core_ticks = (lifetime / 3).max(1);
+    if age < core_ticks {
+        let half = (reach / 3).max(2) * (core_ticks - age) as i32 / core_ticks;
+        submitted += draw_particle_diamond(
+            center,
+            clamp_i16(half.max(2)),
+            core,
+            slot,
+            ot,
+            primitive_packets,
+        );
+    }
+    let segments = i32::from(RING_SEGMENTS);
+    for i in 0..segments {
+        submitted += draw_projectile_segment(
+            at(i * 4096 / segments, ring),
+            at((i + 1) * 4096 / segments, ring),
+            2,
+            accent,
+            slot,
+            ot,
+            primitive_packets,
+        );
+    }
+    let points = i32::from(impact.visual.star_points);
+    // A slow spin: the star is never the same shape twice in a row.
+    let spin = progress / 8;
+    for k in 0..points {
+        let long = k % 2 == 0;
+        let angle = spin + k * 4096 / points;
+        let outer = if long { reach * 5 / 4 } else { reach * 3 / 4 };
+        let outer = outer.max(ring + 2);
+        submitted += draw_projectile_segment(
+            at(angle, ring / 3),
+            at(angle, outer),
+            if long { 2 } else { 1 },
+            if long { core } else { accent },
+            slot,
+            ot,
+            primitive_packets,
+        );
     }
     submitted
 }

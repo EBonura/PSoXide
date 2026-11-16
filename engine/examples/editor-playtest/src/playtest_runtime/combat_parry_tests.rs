@@ -515,3 +515,142 @@ fn the_swap_and_parry_windows_are_exactly_each_characters_count() {
     assert_eq!(protected, u16::from(record.roll_invulnerable_frames));
     assert_eq!(parrying, record.combat.parry_ticks);
 }
+
+// ---------------------------------------------------------------------------
+// Parry feedback: a flash on the parrier's model and a burst at the contact,
+// the same for either side, in the parrier's stance colour.
+// ---------------------------------------------------------------------------
+
+/// The burst effects live in the impact pool, as (impact colour, position).
+fn bursts(scene: &Playtest) -> std::vec::Vec<([u8; 3], [i32; 3])> {
+    (0..MAX_PROJECTILE_IMPACTS)
+        .filter_map(|i| scene.combat_projectile_impacts.get(i))
+        .filter(|effect| effect.visual.star_points != 0)
+        .map(|effect| (effect.visual.impact_rgb, effect.position))
+        .collect()
+}
+
+/// Both swaps of the player: Zenith first, then (past the cooldown) back to
+/// Horizon, so a parry in her second swap is a Horizon parry.
+fn player_swaps_back_to_horizon(scene: &mut Playtest) {
+    player_swaps(scene);
+    scene.player.advance_stance(10_000);
+    player_swaps(scene);
+    assert_eq!(scene.player.stance.active(), VitalityChannelId::One);
+}
+
+#[test]
+fn the_players_parry_flashes_her_and_bursts_in_her_stance_colour() {
+    let data = PARRY_FEEDBACK;
+    for horizon in [false, true] {
+        let mut scene = duel();
+        if horizon {
+            player_swaps_back_to_horizon(&mut scene);
+        } else {
+            player_swaps(&mut scene);
+        }
+        assert!(!scene.player_parry_flash.is_active());
+        assert!(bursts(&scene).is_empty(), "nothing before the parry");
+        scene
+            .combat_projectiles
+            .spawn(shot_at(CombatTeam::Enemy))
+            .unwrap();
+        scene.resolve_combat(&ctx(100));
+        let rgb = data.stance_rgb(!horizon);
+        // The flash is on her, in her colour; the enemy she parried is not lit.
+        assert!(scene.player_parry_flash.is_active());
+        assert_eq!(scene.player_parry_flash.is_zenith(), !horizon);
+        assert_eq!(
+            scene
+                .player_parry_flash
+                .lit_tint(&data, None)
+                .unwrap()
+                .color,
+            (rgb[0], rgb[1], rgb[2])
+        );
+        assert!(!scene.game_entities.parry_flash(0).is_active());
+        // One burst, in her colour, between her and the attacker.
+        let found = bursts(&scene);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, rgb);
+        let player = scene.motor.position();
+        let enemy = scene.game_entities.position(0);
+        assert_eq!(found[0].1[0], player.x / 2 + enemy[0] / 2);
+        assert_eq!(found[0].1[2], player.z / 2 + enemy[2] / 2);
+    }
+}
+
+#[test]
+fn the_enemys_parry_flashes_it_and_bursts_in_its_stance_colour() {
+    let data = PARRY_FEEDBACK;
+    let mut scene = duel();
+    enemy_swaps(&mut scene);
+    let zenith = scene.game_entities.stance(0) == VitalityChannelId::Two;
+    assert!(
+        zenith,
+        "the fixture enemy starts in Horizon and swaps to Zenith"
+    );
+    for _ in 0..5 {
+        scene.game_entities.spend_shot_energy(enemy_record(), 0);
+    }
+    scene
+        .combat_projectiles
+        .spawn(shot_at(CombatTeam::Player))
+        .unwrap();
+    scene.resolve_combat(&ctx(100));
+    let flash = scene.game_entities.parry_flash(0);
+    let rgb = data.stance_rgb(zenith);
+    assert!(flash.is_active() && flash.is_zenith());
+    assert_eq!(
+        flash.lit_tint(&data, None).unwrap().color,
+        (rgb[0], rgb[1], rgb[2])
+    );
+    assert!(
+        !scene.player_parry_flash.is_active(),
+        "the player is not lit"
+    );
+    let found = bursts(&scene);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].0, rgb);
+}
+
+#[test]
+fn a_flash_fades_out_and_a_hit_that_is_not_a_parry_shows_neither_tell() {
+    let data = PARRY_FEEDBACK;
+    // The flash ends after its ticks; one resolve_combat is one tick.
+    let mut scene = duel();
+    player_swaps(&mut scene);
+    scene
+        .combat_projectiles
+        .spawn(shot_at(CombatTeam::Enemy))
+        .unwrap();
+    scene.resolve_combat(&ctx(100));
+    assert_eq!(scene.player_parry_flash.ticks_left(), data.flash_ticks);
+    for _ in 0..data.flash_ticks {
+        scene.resolve_combat(&ctx(101));
+    }
+    assert!(!scene.player_parry_flash.is_active());
+    // A swap-window hit past the parry window is no parry: no flash, no burst.
+    let mut scene = duel();
+    player_swaps(&mut scene);
+    let parry = scene.player_stats.parry_ticks;
+    scene.player.advance_stance(parry);
+    scene
+        .combat_projectiles
+        .spawn(shot_at(CombatTeam::Enemy))
+        .unwrap();
+    scene.resolve_combat(&ctx(100));
+    assert!(!scene.player_parry_flash.is_active());
+    assert!(bursts(&scene).is_empty());
+    let mut scene = duel();
+    enemy_swaps(&mut scene);
+    let parry = enemy_record().combat.parry_ticks;
+    scene.game_entities.advance_stances(parry);
+    scene
+        .combat_projectiles
+        .spawn(shot_at(CombatTeam::Player))
+        .unwrap();
+    scene.resolve_combat(&ctx(100));
+    assert!(!scene.game_entities.any_parry_flash());
+    assert!(bursts(&scene).is_empty());
+}

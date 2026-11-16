@@ -64,6 +64,7 @@ use psx_engine::{
     WorldVertex, PRIMITIVE_PACKET_SLOT_WORDS, Q12,
 };
 use psx_font::FontAtlas;
+use psx_game_runtime::parry_feedback::{ParryFlash, PARRY_FEEDBACK};
 use psx_game_runtime::vitality::{
     BoostBars, BoostInventory, BoostModuleId, BoostSlotId, CombatStance, CombatStanceConfig,
     PowerUpLoadout, VitalityChannelId, VitalityModifiers, VitalityPole, VitalityPool,
@@ -422,6 +423,8 @@ struct Playtest {
     player_actor_pose: Option<PlayerActorPoseSnapshot>,
     player_dash_assembly: psx_game_runtime::model_rendering::PlayerDashAssembly,
     player_scarf: psx_game_runtime::model_rendering::PlayerScarf,
+    /// The player's parry flash (presentation only).
+    player_parry_flash: psx_game_runtime::parry_feedback::ParryFlash,
     /// Previous consecutive player pose. Active sword hitboxes sweep from
     /// this pose into `player_actor_pose`, preventing fast animation motion
     /// from tunnelling through an enemy between retained samples.

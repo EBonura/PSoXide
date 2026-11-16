@@ -123,6 +123,10 @@ pub struct ProjectileVisualStyle {
     /// the compact four-way projectile impact; non-zero selects the chunkier
     /// destruction presentation and is clamped by the renderer.
     pub break_fragment_count: u8,
+    /// Spokes of a parry star. Zero keeps every other impact; non-zero draws
+    /// the parry burst instead (a ring with this many spokes, alternately
+    /// long and short), reaching `glow_scale_q8` times its on-screen size.
+    pub star_points: u8,
 }
 
 impl ProjectileVisualStyle {
@@ -138,6 +142,7 @@ impl ProjectileVisualStyle {
         trail_spacing_ticks: 1,
         impact_lifetime_ticks: 1,
         break_fragment_count: 0,
+        star_points: 0,
     };
 }
 
@@ -980,6 +985,7 @@ mod tests {
                 trail_spacing_ticks: 1,
                 impact_lifetime_ticks: 10,
                 break_fragment_count: 0,
+                star_points: 0,
                 crystal: false,
             },
         }

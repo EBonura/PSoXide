@@ -1390,7 +1390,10 @@ impl Scene for Playtest {
                             phase_assembly,
                             &mut self.player_dash_assembly,
                             stance_clut,
-                            Some(player_stance_lit_tint(self.player.stance.active())),
+                            self.player_parry_flash.lit_tint(
+                                &PARRY_FEEDBACK,
+                                Some(player_stance_lit_tint(self.player.stance.active())),
+                            ),
                             &mut primitive_packets,
                             &mut world,
                         )

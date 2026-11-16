@@ -622,6 +622,8 @@ pub struct GameEntities<
     /// Combat latch byte: [`GAME_ENTITY_ATTACK_CONNECTED`] while the current
     /// Attack window already connected.
     combat_flags: [u8; MAX_ENTITIES],
+    /// Parry flash of each entity's model (presentation only).
+    parry_flash: [crate::parry_feedback::ParryFlash; MAX_ENTITIES],
     /// Wrapping identity of each entity's current swing. Deferred tokens use
     /// it to reject a contact retained across a later attack.
     attack_sequence: [u16; MAX_ENTITIES],
@@ -822,6 +824,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         move_yaw_valid: [0; MAX_ENTITIES],
         move_tried: [0; MAX_ENTITIES],
         combat_flags: [0; MAX_ENTITIES],
+        parry_flash: [crate::parry_feedback::ParryFlash::NONE; MAX_ENTITIES],
         attack_sequence: [0; MAX_ENTITIES],
         authored_connection_mask: [0; MAX_ENTITIES],
         attack_mode: [0; MAX_ENTITIES],
@@ -906,6 +909,41 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     /// Ticks entity `index` has spent in its current behavior state.
     pub fn state_age(&self, index: usize) -> u16 {
         self.state_ticks.get(index).copied().unwrap_or(0)
+    }
+
+    /// Start entity `index`'s parry flash in the stance colour it parried in.
+    /// Presentation only: nothing in the simulation reads it.
+    pub fn start_parry_flash(
+        &mut self,
+        index: usize,
+        data: &crate::parry_feedback::ParryFeedback,
+        zenith: bool,
+    ) {
+        if let Some(flash) = self.parry_flash.get_mut(index) {
+            *flash = crate::parry_feedback::ParryFlash::start(data, zenith);
+        }
+    }
+
+    /// Entity `index`'s parry flash ([`ParryFlash::NONE`] when it has none).
+    ///
+    /// [`ParryFlash::NONE`]: crate::parry_feedback::ParryFlash::NONE
+    pub fn parry_flash(&self, index: usize) -> crate::parry_feedback::ParryFlash {
+        self.parry_flash
+            .get(index)
+            .copied()
+            .unwrap_or(crate::parry_feedback::ParryFlash::NONE)
+    }
+
+    /// Whether any entity's model is flashing (a cheap gate for the draw).
+    pub fn any_parry_flash(&self) -> bool {
+        self.parry_flash.iter().any(|flash| flash.is_active())
+    }
+
+    /// Advance every entity's parry flash one 60 Hz simulation tick.
+    pub fn tick_parry_flashes(&mut self) {
+        for flash in &mut self.parry_flash {
+            flash.tick();
+        }
     }
 
     /// Whether entity `index`'s current stagger is a parry's riposte, over

@@ -43,6 +43,7 @@ pub mod image_props;
 pub mod logic;
 pub mod model_rendering;
 pub mod panel_stream;
+pub mod parry_feedback;
 pub mod particles;
 pub mod poi;
 pub mod poise;

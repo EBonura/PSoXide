@@ -1483,6 +1483,16 @@ impl Playtest {
         let now = self.gameplay_tick(ctx.sim_tick);
         let player = self.motor.position();
         let height = self.character.map_or(0, |c| c.height.max(0) as u16);
+        let attacker = usize::from(strike.attacker.0);
+        let zenith = self.player.stance.active() == VitalityChannelId::Two;
+        self.player_parry_flash = ParryFlash::start(&PARRY_FEEDBACK, zenith);
+        self.spawn_parry_burst(
+            [player.x, player.y, player.z],
+            height,
+            (attacker < self.game_entities.count()).then(|| self.game_entities.position(attacker)),
+            self.room_index,
+            zenith,
+        );
         self.damage_numbers.spawn(
             player_hit_anchor([player.x, player.y, player.z], height),
             self.room_index,
@@ -1490,7 +1500,6 @@ impl Playtest {
             DamageNumberChannel::Parry,
             now,
         );
-        let attacker = usize::from(strike.attacker.0);
         let Some(record) = GAME_ENTITIES.get(attacker) else {
             return;
         };
@@ -1530,8 +1539,18 @@ impl Playtest {
             DamageNumberChannel::Parry,
             now,
         );
-        let staggered = self.riposte_player(CombatantId::entity(index), ctx);
+        let zenith = self.game_entities.stance(index) == VitalityChannelId::Two;
+        self.game_entities
+            .start_parry_flash(index, &PARRY_FEEDBACK, zenith);
         let player = self.motor.position();
+        self.spawn_parry_burst(
+            self.game_entities.position(index),
+            record.height,
+            Some([player.x, player.y, player.z]),
+            record.room,
+            zenith,
+        );
+        let staggered = self.riposte_player(CombatantId::entity(index), ctx);
         self.spawn_combat_hit_sparks(
             [player.x, player.y, player.z],
             self.character.map_or(0, |c| c.height.max(0) as u16),
@@ -1651,6 +1670,35 @@ impl Playtest {
             now.saturating_add(u32::from(self.player_stats.knockdown_ticks.max(1)));
         self.anim_blend_from = None;
         telemetry::debug_log("player poise:knockdown");
+    }
+
+    /// The parry burst, in the parrier's stance colour, at the contact point:
+    /// halfway between the parrier at `parrier` (feet, `height` tall) and the
+    /// attacker at `attacker` (feet; the parrier's own spot when unknown, as
+    /// for a bolt with no owner), at the parrier's chest height. Always the
+    /// same effect for either side; ordinary hit sparks are unchanged.
+    // Rare (a parry): kept out of line and small.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
+    fn spawn_parry_burst(
+        &mut self,
+        parrier: [i32; 3],
+        height: u16,
+        attacker: Option<[i32; 3]>,
+        room: RoomIndex,
+        zenith: bool,
+    ) {
+        let other = attacker.unwrap_or(parrier);
+        let _ = self.combat_projectile_impacts.spawn_effect(
+            [
+                parrier[0] / 2 + other[0] / 2,
+                parrier[1].saturating_add(i32::from(height) * 5 / 8),
+                parrier[2] / 2 + other[2] / 2,
+            ],
+            room,
+            PARRY_FEEDBACK.burst_radius,
+            PARRY_FEEDBACK.burst_style(zenith),
+        );
     }
 
     pub(super) fn spawn_combat_hit_sparks(
@@ -2162,7 +2210,7 @@ impl Playtest {
             // Use the same half-sector clearance as actor meshes. A hit on a
             // large floor/wall polygon also needs this allowance for its centre
             // sort key. Effects still sort in world depth, never the HUD band.
-            let depth_range = if impact.visual.crystal {
+            let depth_range = if impact.visual.crystal || impact.visual.star_points != 0 {
                 let clearance = -current_actor_surface_options(impact.room).depth_bias
                     + i32::from(impact.radius.max(2));
                 DepthRange::new(

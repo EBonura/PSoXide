@@ -552,6 +552,8 @@ impl Playtest {
     /// player's swing before it can connect.
     pub(super) fn resolve_combat(&mut self, ctx: &Ctx) {
         self.combat_projectile_impacts.tick();
+        self.player_parry_flash.tick();
+        self.game_entities.tick_parry_flashes();
         self.release_player_projectile(ctx);
         if !self.deferred_enemy_attacks.is_empty() || !self.combat_projectiles.is_empty() {
             self.resolve_attacks_on_player(ctx);
@@ -1947,6 +1949,7 @@ impl Playtest {
                 crystal: false,
                 // Only the emissive impact flare, no debris.
                 break_fragment_count: 0,
+                star_points: 0,
             },
         );
     }

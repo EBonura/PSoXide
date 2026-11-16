@@ -570,6 +570,7 @@ pub fn draw_model_instance_from_pose<
     model_parts: &[ModelPart],
     model_vertices: &[ModelVertex],
     resolve_override_texture: &mut impl FnMut(AssetId) -> Option<VramSlot>,
+    lit_tint: Option<LitTintBias>,
     triangles: &mut impl PrimitiveSink<TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> ModelInstanceDrawStats {
@@ -634,6 +635,13 @@ pub fn draw_model_instance_from_pose<
         inst.visual_scale_q8,
         base_material,
     );
+    // A reflection map contains its lighting: it keeps its authored palette.
+    let material = match (lit_tint, uv_mapping) {
+        (Some(bias), mapping) if !matches!(mapping, ModelUvMapping::FacetReflection { .. }) => {
+            bias.apply(material)
+        }
+        _ => material,
+    };
     let model_options = options
         .with_depth_policy(DepthPolicy::Average)
         .with_cull_mode(cull_mode)
@@ -805,6 +813,7 @@ pub fn draw_model_instances<
             model_parts,
             model_vertices,
             resolve_override_texture,
+            None,
             triangles,
             world,
         );

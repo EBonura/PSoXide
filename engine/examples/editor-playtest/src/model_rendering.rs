@@ -340,6 +340,24 @@ pub(super) fn player_phase_assembly(
     )
 }
 
+/// The parry flash of the entity that owns this model instance, as the lit
+/// tint its draw wears. `None` for static props, for an entity that is not
+/// flashing, and whenever no entity flashes at all (`any_flash` false).
+fn enemy_parry_tint(
+    entities: &RuntimeGameEntities,
+    pose: &InstanceActorPoseSnapshot,
+    any_flash: bool,
+) -> Option<mr::LitTintBias> {
+    if !any_flash {
+        return None;
+    }
+    let instance = u16::try_from(pose.instance_index()).ok()?;
+    let entity = game_entity_for_instance(instance)?;
+    entities
+        .parry_flash(entity)
+        .lit_tint(&psx_game_runtime::parry_feedback::PARRY_FEEDBACK, None)
+}
+
 /// Resolve the same colour tell for one entity-owned model instance. Static
 /// props have no game-entity owner and return `None`; enemy stance remains the
 /// sole state authority.
@@ -1316,6 +1334,8 @@ pub(super) fn draw_model_instances(
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> ModelInstanceDrawStats {
     let mut out = ModelInstanceDrawStats::default();
+    // Nobody parried lately: no instance looks its entity up.
+    let any_flash = entities.any_parry_flash();
     for pose in instance_poses
         .iter()
         .take(MODEL_DRAW_KNOBS.max_model_instances)
@@ -1354,6 +1374,7 @@ pub(super) fn draw_model_instances(
             model_parts,
             model_vertices,
             &mut model_texture_slot,
+            enemy_parry_tint(entities, pose, any_flash),
             triangles,
             world,
         );
