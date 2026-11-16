@@ -979,12 +979,6 @@ macro_rules! lean_front {
         pub fn is_idle() -> bool {
             with_engine(|engine| engine.is_idle())
         }
-
-        /// Requests accepted so far; see [`submissions`](fn@crate::submissions).
-        #[must_use]
-        pub fn submissions() -> u32 {
-            with_engine(|engine| engine.submissions())
-        }
     };
 }
 
@@ -1001,6 +995,12 @@ macro_rules! lean_front {
 /// the polled reader may follow the first `Done` or `Failed`. [`lean::stop_and_wait`] cancels and waits.
 pub mod lean {
     lean_front!(super::Lean);
+
+    /// Requests accepted so far; see [`submissions`](fn@crate::submissions).
+    #[must_use]
+    pub fn submissions() -> u32 {
+        with_engine(|engine| engine.submissions())
+    }
 }
 
 /// [`lean`] plus the one counter a program that decodes a request while it runs asks for
@@ -1018,6 +1018,17 @@ pub mod lean {
 pub mod counted {
     use super::Counted;
     lean_front!(Counted);
+
+    /// Requests accepted so far, parks included (a refused submit is not counted), wrapping at
+    /// 2^32; see [`submissions`](fn@crate::submissions). One volatile load, no masking: a head
+    /// parked at the last park is still there while this equals its value at the park's
+    /// submission.
+    #[must_use]
+    pub fn submissions() -> u32 {
+        // SAFETY: the global is a live static; the load is one aligned word that only
+        // `submit` stores, from the foreground.
+        unsafe { Counted::submissions_of(Counted::global().0.get()) }
+    }
 
     /// The code of the latest failure ([`Failure::code`](crate::Failure::code)): 0 when nothing
     /// has failed and after a request started, so a [`Status::Failed`] with 0 is a cancel

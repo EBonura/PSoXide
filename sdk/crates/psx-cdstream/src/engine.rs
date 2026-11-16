@@ -523,6 +523,18 @@ impl<
         unsafe { (&raw const (*this).stats.sectors).read_volatile() }
     }
 
+    /// [`submissions`](Self::submissions) read like [`counted_sectors`](Self::counted_sectors):
+    /// one volatile load from `this`, no reference to the engine.
+    ///
+    /// # Safety
+    ///
+    /// `this` must point to a live engine.
+    #[must_use]
+    pub unsafe fn submissions_of(this: *const Self) -> u32 {
+        // SAFETY: as `counted_sectors`.
+        unsafe { (&raw const (*this).next_ticket).read_volatile() }.wrapping_sub(1)
+    }
+
     /// The code of the latest failure ([`Failure::code`]), 0 after a request started and when
     /// nothing has failed, read like [`counted_sectors`](Self::counted_sectors). Kept by an
     /// engine with `STATS` or `COUNT` on (0 always otherwise). A request that was cancelled

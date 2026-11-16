@@ -177,12 +177,18 @@ fn check_in_flight(report: &mut Report, lba: u32, file_sectors: u32) {
     );
     report.check("1 submit", started);
     report.check("1 count never goes down", monotonic);
-    report.check("1 count seen in flight (more than two values)", distinct > 2);
+    report.check(
+        "1 count seen in flight (more than two values)",
+        distinct > 2,
+    );
     report.check("1 announced sectors are stored", announced_stored);
     report.check("1 busy while counting", busy_while_counting);
     report.check("1 count ends at the sector count", end == LONG_SECTORS);
     report.check("1 done, bytes whole", status == Status::Done && whole_ok);
-    report.check("1 no error", counted::last_error() == 0 && counted::is_idle());
+    report.check(
+        "1 no error",
+        counted::last_error() == 0 && counted::is_idle(),
+    );
 }
 
 /// 2. A byte bound inside a sector: the partly stored last sector counts once.
@@ -190,8 +196,7 @@ fn check_bound(report: &mut Report, lba: u32, file_sectors: u32) {
     fill_canary();
     let mark = counted::sectors_landed();
     // SAFETY: as above; the first request has finished and the drive has stopped.
-    let request =
-        unsafe { Request::new_raw(lba + 16, 4, chunk()) }.with_byte_len(BOUND_BYTES);
+    let request = unsafe { Request::new_raw(lba + 16, 4, chunk()) }.with_byte_len(BOUND_BYTES);
     let started = counted::submit(request).is_ok();
     let status = finish();
     let landed = counted::sectors_landed().wrapping_sub(mark);
@@ -283,7 +288,12 @@ fn check_error(report: &mut Report, lba: u32, file_sectors: u32) {
             && cleared
             && status == Status::Done
             && counted::sectors_landed().wrapping_sub(mark) == 4
-            && words_are(0, 16 * SECTOR_WORDS as u32, 4 * SECTOR_WORDS as u32, file_sectors),
+            && words_are(
+                0,
+                16 * SECTOR_WORDS as u32,
+                4 * SECTOR_WORDS as u32,
+                file_sectors,
+            ),
     );
 }
 
