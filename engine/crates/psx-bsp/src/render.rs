@@ -10,9 +10,8 @@ use alloc::vec::Vec;
 use psx_engine::scratchpad::{assert_disjoint, Region, ScratchpadStack};
 use psx_engine::{
     compose_model_view_transform, materialize_baked_surface_vertices, materialize_surface_vertices,
-    submit_surface_batch_near, submit_surface_batch_near_with_rule, submit_surface_batch_screened,
-    submit_surface_batch_screened_with_rule, AffineSurface, AffineVertex, ErrorBounded, NearView,
-    SplitRule, SurfaceProfile, SurfaceSourceVertex, SurfaceSubmit,
+    submit_surface_batch_near, submit_surface_batch_screened, AffineSurface, AffineVertex,
+    NearView, SurfaceProfile, SurfaceSourceVertex, SurfaceSubmit,
 };
 use psx_gte::math::{Mat3I16, Vec3I16 as GteVec3I16, Vec3I32 as GteVec3I32};
 use psx_gte::scene;
@@ -2046,8 +2045,7 @@ impl Renderer {
                 }
                 let flush_start = next;
                 let submitted = unsafe {
-                    flush_pxbsp_batch_for(
-                        &*hooks,
+                    flush_pxbsp_batch_zone(
                         batch_vertices,
                         batch_vertex_count,
                         &batch_surfaces,
@@ -2115,8 +2113,7 @@ impl Renderer {
         }
         let flush_start = next;
         let submitted = unsafe {
-            flush_pxbsp_batch_for(
-                &*hooks,
+            flush_pxbsp_batch_zone(
                 batch_vertices,
                 batch_vertex_count,
                 &batch_surfaces,
@@ -3381,46 +3378,6 @@ unsafe fn flush_pxbsp_batch(
     }
 }
 
-unsafe fn flush_pxbsp_batch_ruled<S: SplitRule>(
-    vertices: &mut [AffineVertex],
-    vertex_count: usize,
-    surfaces: &[AffineSurface],
-    surface_count: usize,
-    output: *mut u32,
-    rule: S,
-) -> FlushedBatch {
-    if vertex_count == 0 || surface_count == 0 {
-        return FlushedBatch {
-            submitted: SurfaceSubmit {
-                next_packet: output,
-                packets: 0,
-                hardware_triangles: 0,
-            },
-            deferred: 0,
-        };
-    }
-    // SAFETY: the planes and the batch are the only scratchpad bytes live
-    // around the flush (see PxbspWriterStack), the writer installs no
-    // exception handler, and stack-guard proves its call tree fits.
-    let (submitted, deferred) = unsafe {
-        PxbspWriterStack::run(|| {
-            submit_surface_batch_screened_with_rule(
-                vertices.as_mut_ptr(),
-                vertex_count,
-                surfaces.as_ptr(),
-                surface_count,
-                output,
-                &PXBSP_RENDER_PROFILE,
-                rule,
-            )
-        })
-    };
-    FlushedBatch {
-        submitted,
-        deferred,
-    }
-}
-
 /// Flush a batch, then draw the surfaces the writer left because the GTE
 /// cannot place one of their vertices: each is projected exactly and any
 /// polygon the GPU would drop is clipped to its window instead.
@@ -3446,96 +3403,6 @@ unsafe fn flush_pxbsp_batch_zone(
         return submitted;
     }
     unsafe { draw_zone_surfaces(vertices, surfaces, deferred, submitted, end, view) }
-}
-
-/// Flush a batch, then draw the surfaces the writer left because the GTE
-/// cannot place one of their vertices: each is projected exactly and any
-/// polygon the GPU would drop is clipped to its window instead.
-///
-/// # Safety
-/// As [`flush_pxbsp_batch`]; `end` is the end of the packet storage `output`
-/// lies in.
-#[inline(always)]
-#[allow(clippy::too_many_arguments)]
-unsafe fn flush_pxbsp_batch_zone_ruled<S: SplitRule>(
-    vertices: &mut [AffineVertex],
-    vertex_count: usize,
-    surfaces: &[AffineSurface],
-    surface_count: usize,
-    output: *mut u32,
-    end: *mut u32,
-    view: &NearView,
-    rule: S,
-) -> SurfaceSubmit {
-    let FlushedBatch {
-        submitted,
-        deferred,
-    } = unsafe {
-        flush_pxbsp_batch_ruled(
-            vertices,
-            vertex_count,
-            surfaces,
-            surface_count,
-            output,
-            rule,
-        )
-    };
-    if deferred == 0 {
-        return submitted;
-    }
-    unsafe { draw_zone_surfaces_ruled(vertices, surfaces, deferred, submitted, end, view, rule) }
-}
-
-/// [`flush_pxbsp_batch_zone`] with the edge-split rule the game's hooks ask
-/// for: the profile's depth bands unless [`WorldHooks::BOUNDS_TESSELLATION_ERROR`]
-/// is set. The constant selects one instantiation at compile time.
-///
-/// # Safety
-/// As [`flush_pxbsp_batch_zone`].
-#[inline(always)]
-#[allow(clippy::too_many_arguments)]
-unsafe fn flush_pxbsp_batch_for<H: WorldHooks>(
-    hooks: &H,
-    vertices: &mut [AffineVertex],
-    vertex_count: usize,
-    surfaces: &[AffineSurface],
-    surface_count: usize,
-    output: *mut u32,
-    end: *mut u32,
-    view: &NearView,
-) -> SurfaceSubmit {
-    if H::BOUNDS_TESSELLATION_ERROR {
-        let rule = ErrorBounded {
-            budget_q3: hooks.tessellation_budget_q3(),
-        };
-        unsafe {
-            flush_pxbsp_batch_zone_ruled(
-                vertices,
-                vertex_count,
-                surfaces,
-                surface_count,
-                output,
-                end,
-                view,
-                rule,
-            )
-        }
-    } else {
-        // The depth-band path is the original, un-generic one: it is what
-        // every world draw ran before the rule existed, and keeping it
-        // literally unchanged keeps its machine code unchanged.
-        unsafe {
-            flush_pxbsp_batch_zone(
-                vertices,
-                vertex_count,
-                surfaces,
-                surface_count,
-                output,
-                end,
-                view,
-            )
-        }
-    }
 }
 
 /// Shift the ordering-table slot of every packet in `start..end` by `bias`
@@ -3603,64 +3470,6 @@ unsafe fn draw_zone_surfaces(
                 end,
                 PXBSP_RENDER_PROFILE,
                 view,
-            )
-        };
-        submitted = SurfaceSubmit {
-            next_packet: drawn.next_packet,
-            packets: submitted.packets.wrapping_add(drawn.packets),
-            hardware_triangles: submitted
-                .hardware_triangles
-                .wrapping_add(drawn.hardware_triangles),
-        };
-    }
-    submitted
-}
-
-/// Draw the surfaces of a flushed batch the writer left for the zone path.
-///
-/// The flush already projected every vertex in place, so each surface is
-/// drawn from the batch itself, highest first: the splitter's scratch slots
-/// follow the surface's own vertices, and only surfaces after it (written
-/// already, or deferred and drawn before it) sit there.
-///
-/// # Safety
-/// As [`flush_pxbsp_batch_zone`]; `deferred` names surfaces of `surfaces`, and
-/// `vertices` holds the batch's scratch slots after its last vertex.
-#[inline(never)]
-unsafe fn draw_zone_surfaces_ruled<S: SplitRule>(
-    vertices: &mut [AffineVertex],
-    surfaces: &[AffineSurface],
-    mut deferred: u32,
-    mut submitted: SurfaceSubmit,
-    end: *mut u32,
-    view: &NearView,
-    rule: S,
-) -> SurfaceSubmit {
-    while deferred != 0 {
-        let index = 31 - deferred.leading_zeros() as usize;
-        deferred &= !(1 << index);
-        let surface = surfaces[index];
-        let first = usize::from(surface.first_vertex);
-        let count = usize::from(surface.vertex_count);
-        let window = &mut vertices[first..first + count + SUBDIVISION_SCRATCH_VERTICES];
-        let own = AffineSurface {
-            first_vertex: 0,
-            ..surface
-        };
-        // SAFETY: the window is the surface's own projected vertices and the
-        // scratch after them, and `end` bounds the storage the batch reserved
-        // room in.
-        let drawn = unsafe {
-            submit_surface_batch_near_with_rule(
-                window.as_mut_ptr(),
-                count,
-                &own,
-                1,
-                submitted.next_packet,
-                end,
-                PXBSP_RENDER_PROFILE,
-                view,
-                rule,
             )
         };
         submitted = SurfaceSubmit {
