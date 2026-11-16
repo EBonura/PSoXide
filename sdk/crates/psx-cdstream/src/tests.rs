@@ -1415,18 +1415,16 @@ fn a_few_workloads_under_the_interpreter() {
 }
 
 #[test]
-fn a_park_seeks_and_stops_without_reading() {
+fn a_park_reads_the_sector_before_and_keeps_one_word() {
     let mut engine = engine();
     let ticket = submit(&mut engine, Request::park(500));
     run(&mut engine);
     let done = finished(&mut engine, ticket);
     assert_eq!(done.outcome, Outcome::Done);
-    assert_eq!(done.received, 0);
-    assert!(engine.hw().popped.is_empty());
-    assert_eq!(engine.hw().commands(), [CMD_SETLOC, CMD_SEEKL]);
-    assert_eq!(engine.phase(), Phase::Done);
+    assert_eq!(done.received, 1);
+    assert_eq!(engine.hw().popped, [499]);
     assert!(engine.is_idle());
-    // A read after it starts again from the stopped drive and lands whole.
+    // A read after it lands whole.
     let buf = Buf::new(2);
     let read = submit(&mut engine, request(500, 2, &buf));
     run(&mut engine);

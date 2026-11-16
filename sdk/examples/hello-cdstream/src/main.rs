@@ -580,7 +580,7 @@ fn check_slow_frame(report: &mut Report) {
     report.finish(ok);
 }
 
-/// A park seeks and stops, and a read after it still lands whole.
+/// A park is one short read, and a read after it still lands whole.
 fn check_park(report: &mut Report) {
     report.begin("6b park then read");
     let parked = psx_cdstream::submit(Request::park(file_lba() + 100)).ok();
@@ -588,7 +588,7 @@ fn check_park(report: &mut Report) {
         parked.and_then(wait),
         Some(Completion {
             outcome: Outcome::Done,
-            received: 0,
+            received: 1,
             ..
         })
     );

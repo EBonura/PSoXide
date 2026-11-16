@@ -42,9 +42,14 @@ pub struct Request {
     pub(crate) resumes: u8,
 }
 
-/// The `byte_len` of a park: no read has a bound this large, so the field says it without a
-/// flag of its own.
-const PARK_BYTE_LEN: u32 = u32::MAX;
+/// Where a park's one sector lands: a park stores its first word here and nothing else.
+struct ParkSink(core::cell::UnsafeCell<u32>);
+
+// SAFETY: written only by the transport's interrupt handler while a park is active and never
+// read.
+unsafe impl Sync for ParkSink {}
+
+static PARK_SINK: ParkSink = ParkSink(core::cell::UnsafeCell::new(0));
 
 impl Request {
     /// Read `sectors` sectors starting at `lba` (program-relative, shifted by
@@ -70,27 +75,21 @@ impl Request {
         }
     }
 
-    /// Seek to `lba` (program-relative, like every read) and stop there, reading nothing: the
-    /// head waits at the sector the next read will start at, so that read pays no long seek.
-    /// It ends [`Outcome::Done`] with 0 sectors when the seek completes, and takes no
-    /// destination. Queued and prioritised like a read.
+    /// Leave the head next to `lba` (program-relative, like every read): a read of the sector
+    /// before it that stores one word of it in a private word, so the read that follows pays a
+    /// short seek instead of a long one. It ends [`Outcome::Done`] with 1 sector, takes no
+    /// destination, and is queued and prioritised like a read. The transport has no park
+    /// state of its own, so a program that never calls this carries no park code.
     #[must_use]
     pub const fn park(lba: u32) -> Self {
         Request {
-            lba,
-            sectors: 0,
-            // Never written: a park stores nothing. A non-null aligned address keeps the
-            // submit checks one rule.
-            destination: core::ptr::NonNull::<u32>::dangling().as_ptr(),
-            byte_len: PARK_BYTE_LEN,
+            lba: lba.saturating_sub(1),
+            sectors: 1,
+            destination: PARK_SINK.0.get(),
+            byte_len: 1,
             priority: Priority::NORMAL,
             resumes: 0,
         }
-    }
-
-    /// Whether this is a park.
-    pub(crate) const fn is_park(&self) -> bool {
-        self.byte_len == PARK_BYTE_LEN
     }
 
     /// Serve this request at `priority`.
