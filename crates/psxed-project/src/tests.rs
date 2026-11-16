@@ -325,6 +325,8 @@ fn a_two_pool_combat_record_loads_as_one_health_bar() {
     // The current form: one bar, as written, or the starting 200.
     assert_eq!(load("(max_health: 90)").max_health, 90);
     assert_eq!(load("()"), CombatStats::PLAYER);
+    // RON that names the struct, as the project writer does.
+    assert_eq!(load("CombatStats(max_health: 90)").max_health, 90);
     assert_eq!(CombatStats::PLAYER.max_health, 200);
     // And it writes back in the current form.
     let text = ron::to_string(&stats).unwrap();

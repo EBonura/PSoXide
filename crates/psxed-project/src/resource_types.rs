@@ -2735,6 +2735,7 @@ const LEGACY_POOL: u16 = 100;
 /// default, [`LEGACY_POOL`]), which keeps time-to-kill for attackers that hit
 /// one channel. A record without the second pool is the current form.
 #[derive(Deserialize)]
+#[serde(rename = "CombatStats")]
 struct CombatStatsFile {
     #[serde(default, deserialize_with = "legacy_u16")]
     max_health: Option<u16>,
