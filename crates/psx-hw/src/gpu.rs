@@ -259,6 +259,41 @@ pub mod gp1 {
             | ((interlace as u32) << 5)
     }
 
+    /// [`display_mode`] for arguments the caller keeps in range (`hres_1` below 4, `vres` below
+    /// 2): no masking, a debug assertion only, like the other `_in_range` builders. For a
+    /// caller that folds its own runtime mode bits (a mode set from a table, a BIOS layer): the
+    /// masks are code `display_mode` carries and such a caller does not need.
+    #[inline(always)]
+    #[must_use]
+    pub const fn display_mode_in_range(
+        hres_1: u32,
+        vres: u32,
+        pal: bool,
+        depth_24: bool,
+        interlace: bool,
+    ) -> u32 {
+        debug_assert!(hres_1 < 4 && vres < 2);
+        0x0800_0000
+            | hres_1
+            | (vres << 2)
+            | ((pal as u32) << 3)
+            | ((depth_24 as u32) << 4)
+            | ((interlace as u32) << 5)
+    }
+
+    /// [`display_mode_in_range`] with bit 6 set, the 368-wide mode.
+    #[inline(always)]
+    #[must_use]
+    pub const fn display_mode_hres2_in_range(
+        hres_1: u32,
+        vres: u32,
+        pal: bool,
+        depth_24: bool,
+        interlace: bool,
+    ) -> u32 {
+        display_mode_in_range(hres_1, vres, pal, depth_24, interlace) | 0x40
+    }
+
     /// [`display_mode`] with bit 6 set, the horizontal 368 mode ("hres 2"): the mode word a
     /// 368-wide picture sends. `hres_1` is carried as in [`display_mode`] (the width is 368
     /// whatever it says); every other bit is `display_mode`'s, which is unchanged.
@@ -607,6 +642,25 @@ pub mod packet {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_in_range_display_modes_equal_the_masking_ones_for_every_in_range_input() {
+        for hres in 0..4 {
+            for vres in 0..2 {
+                for flags in 0..8u32 {
+                    let (pal, d24, il) = (flags & 1 != 0, flags & 2 != 0, flags & 4 != 0);
+                    assert_eq!(
+                        gp1::display_mode_in_range(hres, vres, pal, d24, il),
+                        gp1::display_mode(hres, vres, pal, d24, il)
+                    );
+                    assert_eq!(
+                        gp1::display_mode_hres2_in_range(hres, vres, pal, d24, il),
+                        gp1::display_mode_hres2(hres, vres, pal, d24, il)
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn display_mode_hres2_sets_bit_6_and_leaves_the_rest_alone() {

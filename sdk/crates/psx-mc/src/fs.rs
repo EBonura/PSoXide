@@ -59,6 +59,15 @@ pub mod dir {
         state & 0xf0 == 0xa0
     }
 
+    /// [`checksum`] always inlined: the same XOR, for a caller that has its own loop inline today
+    /// (the restored games' card layer): through the call form the loop is an outlined function
+    /// and a call, 148 B more in its `open`. `checksum` itself is unchanged.
+    #[inline(always)]
+    #[must_use]
+    pub fn checksum_inline(frame: &[u8; FRAME_SIZE]) -> u8 {
+        frame[..E_CHK].iter().fold(0u8, |a, &b| a ^ b)
+    }
+
     /// XOR of a frame's first 127 bytes (the directory checksum).
     #[must_use]
     pub fn checksum(frame: &[u8; FRAME_SIZE]) -> u8 {

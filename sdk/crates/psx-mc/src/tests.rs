@@ -467,3 +467,15 @@ fn a_card_pulled_during_a_compressed_read_reports_the_transport_error() {
     let mut buf = [0u8; 512];
     assert_eq!(c.read(NAME, &mut buf), Err(Error::NoCard));
 }
+
+#[test]
+fn the_inline_directory_checksum_is_the_call_form() {
+    use crate::dir::{checksum, checksum_inline};
+    let mut frame = [0u8; crate::FRAME_SIZE];
+    for seed in 0..64u32 {
+        for (i, b) in frame.iter_mut().enumerate() {
+            *b = (i as u32).wrapping_mul(seed.wrapping_mul(31) + 7) as u8;
+        }
+        assert_eq!(checksum_inline(&frame), checksum(&frame));
+    }
+}
