@@ -26,7 +26,7 @@ use psx_game_runtime::entities::{DeferredGameEntityAttack, GameEntityState, Mele
 use psx_game_runtime::model_rendering as mr;
 use psx_game_runtime::projectiles::{
     CombatTeam, ProjectileImpactKind, ProjectileImpacts, ProjectileSpawn, ProjectileTarget,
-    ProjectileVisualStyle, ProjectileWorldTrace, ProjectileWorldTracer,
+    ProjectileVisualStyle, ProjectileWorldTrace, ProjectileWorldTracer, NO_PROJECTILE_OWNER,
 };
 
 const PLAYER_PROJECTILE_TARGET: u16 = u16::MAX - 1;
@@ -481,7 +481,10 @@ struct PlayerDefence {
     /// legacy fallback arc keeps its Character-derived reach.
     radius: i32,
     height: i32,
-    invulnerable: bool,
+    /// A fighter's hit passes through her: i-frames past the parry window.
+    passes_through: bool,
+    /// A fighter's hit is parried: the parry window of her swap.
+    parries: bool,
     capsules: &'static [psx_level::CombatCapsuleRecord],
     pose: Option<psx_game_runtime::actor_pose::ActorPoseSnapshot>,
 }
@@ -498,7 +501,7 @@ fn projectile_vitality_channel(
 
 /// What the player took this tick. Damage and posture land together after
 /// the projectile tick, as one reaction.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 struct PlayerHitsTaken {
     hits: u16,
     /// Untyped melee damage from enemy swings.
@@ -508,7 +511,37 @@ struct PlayerHitsTaken {
     zenith_shots: u16,
     /// A bolt landed inside the player's readable shot opening.
     shot_opening: bool,
+    /// The fighter whose hit landed last this tick ([`CombatantId::WORLD`]
+    /// when none did).
+    attacker: CombatantId,
+    /// An enemy swing that landed this tick was a crit.
+    crit: bool,
 }
+
+impl PlayerHitsTaken {
+    const NONE: Self = Self {
+        hits: 0,
+        melee_damage: 0,
+        poise: 0,
+        horizon_shots: 0,
+        zenith_shots: 0,
+        shot_opening: false,
+        attacker: CombatantId::WORLD,
+        crit: false,
+    };
+}
+
+/// The bolt of a crit shot: the crit gold over its own colours, and a wider
+/// halo, so it reads in flight and its impact can be told apart.
+fn crit_projectile_visual(mut visual: ProjectileVisualStyle) -> ProjectileVisualStyle {
+    visual.glow_rgb = CRIT_BOLT_RGB;
+    visual.impact_rgb = CRIT_BOLT_RGB;
+    visual.glow_scale_q8 = visual.glow_scale_q8.saturating_mul(2);
+    visual
+}
+
+/// Glow and impact colour of a crit shot.
+const CRIT_BOLT_RGB: [u8; 3] = [247, 198, 99];
 
 impl Playtest {
     /// Resolve every attack of this tick after the player and instance pose
@@ -539,7 +572,7 @@ impl Playtest {
             || self
                 .collect_static_prop_aabb_blockers_checked_into(&mut prop_blockers)
                 .is_some();
-        let mut taken = PlayerHitsTaken::default();
+        let mut taken = PlayerHitsTaken::NONE;
         self.resolve_enemy_attacks(
             ctx,
             &player,
@@ -560,6 +593,7 @@ impl Playtest {
     }
 
     fn player_defence(&self, ctx: &Ctx) -> PlayerDefence {
+        let defender = self.player_defender(ctx);
         let player = self.motor.position();
         let (radius, height) = match &self.character {
             Some(character) => (character.radius, character.height),
@@ -570,7 +604,8 @@ impl Playtest {
             position: [player.x, player.y, player.z],
             radius,
             height,
-            invulnerable: self.player_invulnerable(ctx),
+            passes_through: defender.passes_through(),
+            parries: defender.parries(),
             capsules: self
                 .character
                 .as_ref()
@@ -650,7 +685,7 @@ impl Playtest {
                 self.release_enemy_projectiles(ctx, attack, attacker_capsules, attacker_pose);
                 continue;
             }
-            if player.invulnerable {
+            if player.passes_through {
                 continue;
             }
             let previous_attacker_pose = self
@@ -702,13 +737,41 @@ impl Playtest {
             {
                 continue;
             }
+            let (damage, poise_damage) = self.game_entities.crit_scaled(
+                GAME_ENTITIES.as_slice(),
+                attack.entity(),
+                damage,
+                poise_damage,
+            );
             let connected = if window_mask == 0 {
                 self.game_entities.connect_deferred_attack(attack)
             } else {
                 self.game_entities
                     .connect_deferred_melee_window(attack, window_mask)
             };
-            if connected {
+            if !connected {
+                continue;
+            }
+            // The swing that reached her uses up the crit, parried or not.
+            let crit = self.game_entities.spend_crit(attack.entity());
+            if crit {
+                self.duel_log_event(ctx, 1, duel::DUEL_EVENT_CRIT);
+            }
+            let attacker = CombatantId::entity(attack.entity());
+            if player.parries {
+                self.parry_on_player(
+                    Strike {
+                        attacker,
+                        kind: HitKind::Melee,
+                        channel: self.player.stance.active(),
+                        damage,
+                        poise: poise_damage,
+                    },
+                    ctx,
+                );
+                continue;
+            }
+            {
                 self.game_entities.gain_melee_energy(
                     entity,
                     attack.entity(),
@@ -717,6 +780,8 @@ impl Playtest {
                 taken.hits = taken.hits.saturating_add(1);
                 taken.melee_damage = taken.melee_damage.saturating_add(damage);
                 taken.poise = taken.poise.saturating_add(poise_damage);
+                taken.attacker = attacker;
+                taken.crit |= crit;
             }
         }
     }
@@ -737,7 +802,7 @@ impl Playtest {
             ProjectileTarget,
             { MAX_GAME_ENTITIES + psx_level::MAX_CHARACTER_COMBAT_CAPSULES },
         >::new();
-        if !player.invulnerable {
+        if !player.passes_through {
             if let Some(pose) = player.pose {
                 for record in player
                     .capsules
@@ -785,12 +850,12 @@ impl Playtest {
             .enumerate()
             .take(self.game_entities.count())
         {
-            // An entity in its i-frames is not a target, exactly as the
-            // player above: the bolt flies on through it.
+            // An entity in its i-frames past its parry window is not a
+            // target, exactly as the player above: the bolt flies on through.
             if self.game_entities.state(index) == GameEntityState::Dead
                 || self
                     .game_entities
-                    .invulnerable(GAME_ENTITIES.as_slice(), index)
+                    .passes_through(GAME_ENTITIES.as_slice(), index)
             {
                 continue;
             }
@@ -848,6 +913,29 @@ impl Playtest {
                 continue;
             };
             if target == PLAYER_PROJECTILE_TARGET {
+                let attacker = if impact.owner == NO_PROJECTILE_OWNER {
+                    CombatantId::WORLD
+                } else {
+                    CombatantId::entity(usize::from(impact.owner))
+                };
+                if player.parries {
+                    // A world bolt (no owner) cannot be parried; inside the
+                    // parry window it is spent on her i-frames.
+                    if attacker != CombatantId::WORLD {
+                        self.parry_on_player(
+                            Strike {
+                                attacker,
+                                kind: HitKind::Projectile,
+                                channel: projectile_vitality_channel(impact.damage_channel),
+                                damage: impact.damage,
+                                poise: impact.poise_damage,
+                            },
+                            ctx,
+                        );
+                    }
+                    continue;
+                }
+                taken.attacker = attacker;
                 telemetry::debug_log("enemy projectile:player-hit");
                 taken.hits = taken.hits.saturating_add(1);
                 let exposed = self.player_shot_opening();
@@ -918,6 +1006,10 @@ impl Playtest {
             impact.damage,
             impact.poise_damage,
         );
+        if outcome.parried {
+            self.entity_parried_player(index, ctx);
+            return;
+        }
         self.player.flow.shot_hit(opening && outcome.staggered);
         if opening && outcome.staggered {
             telemetry::debug_log("flow:enemy-shot-interrupt");
@@ -929,7 +1021,9 @@ impl Playtest {
                 struck_actor_anchor(self.game_entities.position(index), record.height),
                 record.room,
                 applied,
-                if channel == VitalityChannelId::Two {
+                if impact.visual.impact_rgb == CRIT_BOLT_RGB {
+                    DamageNumberChannel::Crit
+                } else if channel == VitalityChannelId::Two {
                     DamageNumberChannel::Zenith
                 } else {
                     DamageNumberChannel::Horizon
@@ -961,7 +1055,12 @@ impl Playtest {
             // into Zenith. Shell reduction is applied before routing; only
             // emptying BOTH pools arms the existing shared death sequence.
             let died = self.hazard_death_ticks_remaining == 0
-                && self.apply_untyped_player_damage(taken.melee_damage);
+                && self.player_take_damage(
+                    taken.attacker,
+                    HitKind::Melee,
+                    None,
+                    taken.melee_damage,
+                );
             // Damage taken floats off the player, not off whoever threw
             // it, and it carries the channel it drained -- Horizon here,
             // matching the migration routing above.
@@ -969,7 +1068,11 @@ impl Playtest {
                 anchor,
                 self.room_index,
                 taken.melee_damage,
-                DamageNumberChannel::Horizon,
+                if taken.crit {
+                    DamageNumberChannel::Crit
+                } else {
+                    DamageNumberChannel::Horizon
+                },
                 gameplay_now,
             );
             if died {
@@ -992,7 +1095,7 @@ impl Playtest {
                 continue;
             }
             let died = self.hazard_death_ticks_remaining == 0
-                && self.apply_typed_player_damage(channel, damage);
+                && self.apply_typed_player_damage_from(taken.attacker, channel, damage);
             // A projectile carries its own channel, so a Choir Needle
             // reads teal on the way in exactly as the bolt did.
             self.damage_numbers
@@ -1023,7 +1126,8 @@ impl Playtest {
             .active(psx_level::CombatWindowKind::Armored)
             .unwrap_or(armored);
         let shot_only = taken.melee_damage == 0;
-        let staggered = self.react_player_to_hit(taken.poise, armored, shot_only, ctx);
+        let staggered =
+            self.react_player_to_hit(taken.attacker, taken.poise, armored, shot_only, ctx);
         if shot_only && staggered && taken.shot_opening {
             self.duel_log_flow(ctx, 1);
             for impact in impacts.as_slice() {
@@ -1103,6 +1207,10 @@ impl Playtest {
     /// them today is data on the [`Volley`].
     pub(super) fn release_projectiles(&mut self, ctx: &Ctx, volley: Volley) {
         let mut released = volley.released;
+        // Every bolt of the first volley released inside the shooter's crit
+        // window is a crit, and the volley uses the crit up.
+        let crit = self.shooter_crit_armed(volley.shooter);
+        let mut crit_released = false;
         while let Some((emitter, release)) = combat::authored_projectile_release_pending_at_frame(
             volley.capsules,
             volley.action,
@@ -1138,6 +1246,12 @@ impl Playtest {
                 },
                 release.damage,
             );
+            let (damage, poise_damage) = if crit {
+                self.shooter_crit_scaled(volley.shooter, damage, release.poise_damage)
+            } else {
+                (damage, release.poise_damage)
+            };
+            let visual = (volley.visual)(release.visual);
             let spawn = ProjectileSpawn {
                 position: release.position,
                 velocity: psx_game_runtime::projectiles::velocity_toward(
@@ -1148,14 +1262,18 @@ impl Playtest {
                 radius: release.radius,
                 damage,
                 // The receiving actor evaluates the visible interrupt window.
-                poise_damage: release.poise_damage,
+                poise_damage,
                 lifetime_ticks: release.lifetime_ticks,
                 room: volley.room,
                 team: volley.team,
                 owner: volley.owner,
                 tint_rgb: release.tint_rgb,
                 damage_channel,
-                visual: (volley.visual)(release.visual),
+                visual: if crit {
+                    crit_projectile_visual(visual)
+                } else {
+                    visual
+                },
             };
             let spawned = if volley.precise {
                 self.combat_projectiles
@@ -1169,6 +1287,7 @@ impl Playtest {
                 break;
             }
             self.shooter_spend_shot(volley.shooter);
+            crit_released |= crit;
             self.duel_log_shot(ctx, volley.shooter);
             let _ = self.combat_projectile_impacts.spawn_muzzle(&spawn);
             self.commit_shot(volley.shooter, emitter);
@@ -1182,6 +1301,40 @@ impl Playtest {
                     self.debug_log_enemy_shot(ctx, &spawn);
                 }
             }
+        }
+        if crit_released {
+            let actor = match volley.shooter {
+                Shooter::Player => {
+                    self.player.spend_crit();
+                    0
+                }
+                Shooter::Entity(attack) => {
+                    self.game_entities.spend_crit(attack.entity());
+                    1
+                }
+            };
+            self.duel_log_event(ctx, actor, duel::DUEL_EVENT_CRIT);
+        }
+    }
+
+    /// Whether the shooter's next attack is a crit.
+    fn shooter_crit_armed(&self, shooter: Shooter) -> bool {
+        match shooter {
+            Shooter::Player => self.player.crit != 0,
+            Shooter::Entity(attack) => self.game_entities.crit_armed(attack.entity()),
+        }
+    }
+
+    /// Damage and poise of one of the shooter's bolts through its crit.
+    fn shooter_crit_scaled(&self, shooter: Shooter, damage: u16, poise: u16) -> (u16, u16) {
+        match shooter {
+            Shooter::Player => self.player.crit_scaled(&self.player_stats, damage, poise),
+            Shooter::Entity(attack) => self.game_entities.crit_scaled(
+                GAME_ENTITIES.as_slice(),
+                attack.entity(),
+                damage,
+                poise,
+            ),
         }
     }
 
@@ -1450,6 +1603,7 @@ impl Playtest {
         let phase = player_pose.pose().phase_q12();
         let gameplay_now = self.gameplay_tick(now);
         if let Some(stats) = self.resolve_player_combat_capsules(
+            ctx,
             &character,
             player_pose,
             self.previous_player_actor_pose,
@@ -1457,8 +1611,8 @@ impl Playtest {
             action,
             spec.reach,
             prop_blockers.as_slice(),
-            gameplay_now,
         ) {
+            self.spend_player_melee_crit(stats, ctx);
             self.report_player_melee_stats(stats);
             return;
         }
@@ -1487,9 +1641,13 @@ impl Playtest {
             spec.reach.clamp(0, i32::from(u16::MAX)) as u16,
             vitality_channel,
         );
-        let outgoing_damage = self
-            .vitality_modifiers()
-            .outgoing_damage(vitality_channel, spec.damage);
+        let crit = self.player.crit != 0;
+        let (outgoing_damage, poise_damage) = self.player.crit_scaled(
+            &self.player_stats,
+            self.vitality_modifiers()
+                .outgoing_damage(vitality_channel, spec.damage),
+            spec.poise_damage,
+        );
         let channel = match vitality_channel {
             VitalityChannelId::One => DamageChannel::Horizon,
             VitalityChannelId::Two => DamageChannel::Zenith,
@@ -1508,7 +1666,7 @@ impl Playtest {
             &arc,
             vitality_channel,
             outgoing_damage,
-            spec.poise_damage,
+            poise_damage,
             &mut self.swing_hit_mask,
             |_, target| match world_rt.as_deref_mut() {
                 Some(world_rt) => !world_rt.melee_segment_clear(
@@ -1525,14 +1683,46 @@ impl Playtest {
                 swing_mask_before,
                 outgoing_damage,
                 vitality_channel,
-                damage_number_channel_for(channel),
+                if crit {
+                    DamageNumberChannel::Crit
+                } else {
+                    damage_number_channel_for(channel)
+                },
                 gameplay_now,
             );
+        }
+        if stats.parries > 0 {
+            // The arc reports a count; the parrier is the newly struck
+            // entity still inside its parry window.
+            // psx-numeric-allow-next-line: swing bitmask diff; bit ops only, two-word on R3000
+            let connected = self.swing_hit_mask & !swing_mask_before;
+            if let Some(entity) = (0..self.game_entities.count().min(GAME_ENTITIES.len())).find(
+                // psx-numeric-allow-next-line: swing bitmask bit select; no 64-bit arithmetic
+                |&entity| connected & (1u64 << entity) != 0 && self.entity_parries(entity),
+            ) {
+                self.entity_parried_player(entity, ctx);
+            }
         }
         if stats.deaths > 0 {
             self.award_melee_arc_souls(swing_mask_before, gameplay_now);
         }
+        self.spend_player_melee_crit(stats, ctx);
         self.report_player_melee_stats(stats);
+    }
+
+    /// Whether entity `index` parries a hit this tick.
+    fn entity_parries(&self, index: usize) -> bool {
+        self.game_entities
+            .defender(GAME_ENTITIES.as_slice(), index)
+            .is_some_and(|defender| defender.parries())
+    }
+
+    /// The swing that reached anyone, hit or parried, uses up the player's
+    /// crit.
+    pub(super) fn spend_player_melee_crit(&mut self, stats: MeleeArcStats, ctx: &Ctx) {
+        if stats.hits.saturating_add(stats.parries) > 0 && self.player.spend_crit() {
+            self.duel_log_event(ctx, 0, duel::DUEL_EVENT_CRIT);
+        }
     }
 
     /// Credit the cooked award of every entity this arc sweep killed.
@@ -1586,7 +1776,7 @@ impl Playtest {
         let count = self.game_entities.count().min(GAME_ENTITIES.len());
         for entity in 0..count {
             // psx-numeric-allow-next-line: swing bitmask bit select; no 64-bit arithmetic
-            if connected & (1u64 << entity) == 0 {
+            if connected & (1u64 << entity) == 0 || self.entity_parries(entity) {
                 continue;
             }
             self.damage_numbers.spawn(
@@ -1765,6 +1955,7 @@ impl Playtest {
     /// window is authoritative, including frames with no active capsule.
     fn resolve_player_combat_capsules(
         &mut self,
+        ctx: &Ctx,
         character: &RuntimeCharacter,
         player_pose: PlayerActorPoseSnapshot,
         previous_player_pose: Option<PlayerActorPoseSnapshot>,
@@ -1772,8 +1963,9 @@ impl Playtest {
         action: CharacterAnimationAction,
         environment_reach: i32,
         prop_blockers: &[CharacterCollisionAabb],
-        now: SimTick,
     ) -> Option<MeleeArcStats> {
+        let now = self.gameplay_tick(ctx.sim_tick);
+        let crit = self.player.crit != 0;
         let first = character.combat_capsule_first.to_usize();
         let end = first.saturating_add(usize::from(character.combat_capsule_count));
         let records = COMBAT_CAPSULES.get(first..end)?;
@@ -1819,13 +2011,17 @@ impl Playtest {
             ) else {
                 continue;
             };
+            let (damage, poise_damage) = self.player.crit_scaled(
+                &self.player_stats,
+                self.vitality_modifiers()
+                    .outgoing_damage(Self::player_attack_channel(self.anim_state), record.damage),
+                record.poise_damage,
+            );
             active[active_count] = ActivePlayerCapsule {
                 capsule,
                 previous_capsule,
-                damage: self
-                    .vitality_modifiers()
-                    .outgoing_damage(Self::player_attack_channel(self.anim_state), record.damage),
-                poise_damage: record.poise_damage,
+                damage,
+                poise_damage,
             };
             active_count += 1;
         }
@@ -1850,7 +2046,11 @@ impl Playtest {
             VitalityChannelId::One => DamageChannel::Horizon,
             VitalityChannelId::Two => DamageChannel::Zenith,
         };
-        let damage_number_channel = damage_number_channel_for(channel);
+        let damage_number_channel = if crit {
+            DamageNumberChannel::Crit
+        } else {
+            damage_number_channel_for(channel)
+        };
         for hit in &active[..active_count] {
             // A blocking prop needs a short forward contact volume rather than
             // an inflated copy of a lateral blade capsule. Use the weapon's
@@ -1874,15 +2074,16 @@ impl Playtest {
                 entity += 1;
                 continue;
             }
-            // An entity in its i-frames is passed through without latching
-            // the swing, as an enemy swing passes through the player: a
-            // later active frame of the same swing can still land.
+            // An entity in its i-frames (past its parry window) is passed
+            // through without latching the swing, as an enemy swing passes
+            // through the player: a later active frame of the same swing can
+            // still land.
             if entity_record.room != self.room_index
                 || self.game_entities.state(entity)
                     == psx_game_runtime::entities::GameEntityState::Dead
                 || self
                     .game_entities
-                    .invulnerable(GAME_ENTITIES.as_slice(), entity)
+                    .passes_through(GAME_ENTITIES.as_slice(), entity)
             {
                 entity += 1;
                 continue;
@@ -1932,6 +2133,10 @@ impl Playtest {
                     hit.damage,
                     hit.poise_damage,
                 );
+                if outcome.parried {
+                    stats.parries = stats.parries.saturating_add(1);
+                    self.entity_parried_player(entity, ctx);
+                }
                 if outcome.connected {
                     if matches!(
                         self.anim_state,
@@ -2180,7 +2385,7 @@ impl Playtest {
             return;
         };
         if damage != 0 {
-            self.react_player_to_hit(damage, false, false, ctx);
+            self.react_player_to_hit(CombatantId::WORLD, damage, false, false, ctx);
         }
         let mut toward_max = push.toward_max;
         if push.tie {

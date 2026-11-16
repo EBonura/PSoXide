@@ -928,18 +928,28 @@ impl Playtest {
         // Untyped damage has no colour to compare, so it is treated as aligned
         // with whatever is active: the player cannot read an axis that was
         // never authored, and should not be punished for it.
-        self.player_take_damage(HitKind::Melee, None, damage)
+        self.player_take_damage(CombatantId::WORLD, HitKind::Melee, None, damage)
     }
 
     /// Damage from a hazard volume, untyped like a legacy hit. A hit bigger
     /// than the health left is lethal.
     pub(super) fn apply_hazard_player_damage(&mut self, damage: u16) -> bool {
-        self.player_take_damage(HitKind::Hazard, None, damage)
+        self.player_take_damage(CombatantId::WORLD, HitKind::Hazard, None, damage)
     }
 
     /// The projectile colour sets the multiplier; the active stance receives damage.
     pub(super) fn apply_typed_player_damage(
         &mut self,
+        channel: psx_game_runtime::projectiles::ProjectileDamageChannel,
+        damage: u16,
+    ) -> bool {
+        self.apply_typed_player_damage_from(CombatantId::WORLD, channel, damage)
+    }
+
+    /// [`Self::apply_typed_player_damage`] from the fighter that shot it.
+    pub(super) fn apply_typed_player_damage_from(
+        &mut self,
+        attacker: CombatantId,
         channel: psx_game_runtime::projectiles::ProjectileDamageChannel,
         damage: u16,
     ) -> bool {
@@ -951,23 +961,25 @@ impl Playtest {
                 VitalityChannelId::Two
             }
         };
-        self.player_take_damage(HitKind::Projectile, Some(channel), damage)
+        self.player_take_damage(attacker, HitKind::Projectile, Some(channel), damage)
     }
 
     /// The player's health damage, through [`Combatant::receive_hit`].
     ///
     /// Shell modifiers reduce the hit first. `channel` `None` is untyped and
-    /// counts as aligned with the active stance. True when the health bar is
+    /// counts as aligned with the active stance. `attacker` is who dealt it
+    /// ([`CombatantId::WORLD`] for hazards). True when the health bar is
     /// empty afterwards.
-    fn player_take_damage(
+    pub(super) fn player_take_damage(
         &mut self,
+        attacker: CombatantId,
         kind: HitKind,
         channel: Option<VitalityChannelId>,
         damage: u16,
     ) -> bool {
         let damage = self.vitality_modifiers().incoming_damage(damage);
         let strike = Strike {
-            attacker: CombatantId::WORLD,
+            attacker,
             kind,
             channel: channel.unwrap_or(self.player.stance.active()),
             damage,
@@ -1430,8 +1442,12 @@ impl Playtest {
             .is_some_and(|start| frame >= start / 2 && frame < start)
     }
 
+    /// Land the tick's summed posture damage, dealt by `attacker`, as one
+    /// poise-only hit, then start the reaction it calls for. True when it
+    /// broke posture.
     pub(super) fn react_player_to_hit(
         &mut self,
+        attacker: CombatantId,
         damage: u16,
         armored: bool,
         shot_only: bool,
@@ -1440,20 +1456,110 @@ impl Playtest {
         if self.hazard_death_ticks_remaining != 0 {
             return false;
         }
-        // The tick's summed posture damage lands as one poise-only hit.
         let strike = Strike {
-            attacker: CombatantId::WORLD,
+            attacker,
             kind: HitKind::Melee,
             channel: self.player.stance.active(),
             damage: 0,
             poise: damage,
         };
-        let poise_broken = self
-            .player
-            .receive_hit(self.player_hit(strike, armored))
-            .poise_broken;
-        if shot_only && !poise_broken {
+        let out = self.player.receive_hit(self.player_hit(strike, armored));
+        self.react_player(out, armored, shot_only, ctx)
+    }
+
+    /// Stagger the player with the riposte of a parry by `by`: the same
+    /// [`Combatant::receive_hit`] and reaction as any hit. True when it broke
+    /// her posture.
+    pub(super) fn riposte_player(&mut self, by: CombatantId, ctx: &Ctx) -> bool {
+        if self.hazard_death_ticks_remaining != 0 {
             return false;
+        }
+        let strike = Strike::parry(by, self.player.stance.active());
+        let out = self.player.receive_hit(self.player_hit(strike, false));
+        self.react_player(out, false, false, ctx)
+    }
+
+    /// A fighter's `strike` reached the player inside her parry window: her
+    /// [`Combatant::receive_hit`] parries it (refund, swap cooldown, crit),
+    /// the attacking entity takes the riposte, and the tell shows: the
+    /// refund over her in the parry colour and break sparks on the attacker.
+    pub(super) fn parry_on_player(&mut self, strike: Strike, ctx: &Ctx) {
+        let out = self.player.receive_hit(self.player_hit(strike, false));
+        if !out.parried {
+            return;
+        }
+        telemetry::debug_log("player parry");
+        self.duel_log_event(ctx, 0, duel::DUEL_EVENT_PARRY);
+        let now = self.gameplay_tick(ctx.sim_tick);
+        let player = self.motor.position();
+        let height = self.character.map_or(0, |c| c.height.max(0) as u16);
+        self.damage_numbers.spawn(
+            player_hit_anchor([player.x, player.y, player.z], height),
+            self.room_index,
+            self.player_stats.parry_refund,
+            DamageNumberChannel::Parry,
+            now,
+        );
+        let attacker = usize::from(strike.attacker.0);
+        let Some(record) = GAME_ENTITIES.get(attacker) else {
+            return;
+        };
+        if attacker >= self.game_entities.count() {
+            return;
+        }
+        let outcome =
+            self.game_entities
+                .riposte(GAME_ENTITIES.as_slice(), attacker, CombatantId::PLAYER);
+        self.spawn_combat_hit_sparks(
+            self.game_entities.position(attacker),
+            record.height,
+            record.room,
+            false,
+            outcome.staggered,
+            false,
+        );
+    }
+
+    /// Entity `index` parried the player's hit: she takes the riposte, and
+    /// the tell shows as for the player's own parry, the refund over the
+    /// entity in the parry colour and break sparks on her.
+    pub(super) fn entity_parried_player(&mut self, index: usize, ctx: &Ctx) {
+        let Some(record) = GAME_ENTITIES.get(index) else {
+            return;
+        };
+        telemetry::debug_log("enemy parry");
+        self.duel_log_event(ctx, 1, duel::DUEL_EVENT_PARRY);
+        let now = self.gameplay_tick(ctx.sim_tick);
+        self.damage_numbers.spawn(
+            struck_actor_anchor(self.game_entities.position(index), record.height),
+            record.room,
+            record.combat.parry_refund,
+            DamageNumberChannel::Parry,
+            now,
+        );
+        let staggered = self.riposte_player(CombatantId::entity(index), ctx);
+        let player = self.motor.position();
+        self.spawn_combat_hit_sparks(
+            [player.x, player.y, player.z],
+            self.character.map_or(0, |c| c.height.max(0) as u16),
+            self.room_index,
+            false,
+            staggered,
+            false,
+        );
+    }
+
+    /// Start the reaction a landed hit calls for: a knockdown on a break that
+    /// knocked her down, the stagger (Stun) on any other break, a hit
+    /// reaction otherwise. Nothing interrupts a knockdown.
+    fn react_player(&mut self, out: HitOut, armored: bool, shot_only: bool, ctx: &Ctx) -> bool {
+        let poise_broken = out.poise_broken;
+        if out.knocked_down {
+            self.knock_player_down(ctx);
+            return true;
+        }
+        if self.player.knocked_down() || (shot_only && !poise_broken) {
+            return poise_broken;
         }
         // Player animation starts and locks use the absolute simulation clock.
         // Enemy animation phases use gameplay_tick; using that epoch here makes
@@ -1483,15 +1589,7 @@ impl Playtest {
         {
             return false;
         }
-        self.motor.interrupt_action();
-        self.ranged_ready = combat_input::RangedReady::EMPTY;
-        self.aim_control = aim_control::AimControl::EMPTY;
-        self.attack_buffer.clear();
-        self.authored_attack.clear();
-        self.authored_dodge.clear();
-        self.attack_chain.clear();
-        self.evade_buffer_vblanks = 0;
-        self.loco = LocoPhase::Idle;
+        self.interrupt_player_for_reaction();
         let has_reaction = self.start_player_anim_action(reaction, now, ctx.video_hz);
         let recovery = if has_reaction {
             // Follow authored speed and range through the final recovery pose.
@@ -1511,6 +1609,33 @@ impl Playtest {
             "player hit:react"
         });
         poise_broken
+    }
+
+    /// Drop every action, buffer and aim the player had going: a reaction
+    /// owns her from here.
+    fn interrupt_player_for_reaction(&mut self) {
+        self.motor.interrupt_action();
+        self.ranged_ready = combat_input::RangedReady::EMPTY;
+        self.aim_control = aim_control::AimControl::EMPTY;
+        self.attack_buffer.clear();
+        self.authored_attack.clear();
+        self.authored_dodge.clear();
+        self.attack_chain.clear();
+        self.evade_buffer_vblanks = 0;
+        self.loco = LocoPhase::Idle;
+    }
+
+    /// Knock the player down: the knockdown clip (her stagger clip until one
+    /// is authored) held for her `knockdown_ticks`, during which she can
+    /// neither act nor move, the same count her [`Combatant`] is down for.
+    fn knock_player_down(&mut self, ctx: &Ctx) {
+        let now = ctx.sim_tick;
+        self.interrupt_player_for_reaction();
+        self.switch_player_anim(PlayerAnim::Knockdown, now, ctx.video_hz);
+        self.anim_lock_until_tick =
+            now.saturating_add(u32::from(self.player_stats.knockdown_ticks.max(1)));
+        self.anim_blend_from = None;
+        telemetry::debug_log("player poise:knockdown");
     }
 
     pub(super) fn spawn_combat_hit_sparks(
@@ -1635,7 +1760,19 @@ impl Playtest {
         Defender {
             combatant: &self.player,
             swap_invulnerable_ticks: config.roll_invulnerable_frames,
+            parry_ticks: self.player_stats.parry_ticks,
             action: self.player_action_protection(ctx, config),
+        }
+    }
+
+    /// The moves the player character has, which decide whether she may swap
+    /// stance, under the same [`StanceMoves`] rule as every enemy: the blade
+    /// is always there (an authored swing or the fallback arc), the Zenith
+    /// cannon only when her character binds it.
+    pub(super) fn player_stance_moves(&self) -> StanceMoves {
+        StanceMoves {
+            melee: true,
+            ranged: self.player_has_ranged_weapon(),
         }
     }
 
@@ -2854,6 +2991,9 @@ pub(super) fn live_action_speed_q8(
 
 #[cfg(test)]
 mod combat_baseline_tests;
+
+#[cfg(test)]
+mod combat_parry_tests;
 
 #[cfg(test)]
 mod life_reset_tests {

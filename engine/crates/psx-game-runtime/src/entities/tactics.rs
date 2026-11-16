@@ -829,7 +829,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
                 stance_reason = 8;
             }
             if desired != self.stance(i) && self.stance_swap_cooldown(i) == 0 && visible {
-                self.mutate_stance(i);
+                let _ = self.swap_stance(r, i);
                 if self.stance(i) == desired {
                     self.tactics[i].stance_reason = stance_reason;
                     self.finish_goal(i, EnemyGoalResult::Cancelled);

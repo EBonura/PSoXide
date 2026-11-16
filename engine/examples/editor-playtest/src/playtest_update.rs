@@ -283,6 +283,7 @@ impl Playtest {
                     player_target: Defender {
                         combatant: &self.player,
                         swap_invulnerable_ticks: motor_config.roll_invulnerable_frames,
+                        parry_ticks: self.player_stats.parry_ticks,
                         action: player_action,
                     },
                     player_combat: Some(self.player.stance.active()),
@@ -299,6 +300,11 @@ impl Playtest {
         } else {
             psx_game_runtime::entities::GameEntityTickStats::default()
         };
+        // Every fighter's swap clock advances once per simulation tick, after
+        // any swap this tick: the entities' here, after their 30 Hz think,
+        // the player's after her press. Both swap windows (and parry
+        // windows) are then exactly their character's count of ticks.
+        self.game_entities.advance_stances(1);
         if npc_tick_due {
             for index in 0..entity_count {
                 let record = &GAME_ENTITIES[index];
@@ -705,7 +711,13 @@ impl Playtest {
             &mut self.player,
             &self.player_stats,
         );
-        if ctx.just_pressed(button::TRIANGLE) && !circle_locks_stance {
+        // Swapping needs both a blade and a Zenith move (the same rule as
+        // every enemy), and a fighter that is down cannot act.
+        if ctx.just_pressed(button::TRIANGLE)
+            && !circle_locks_stance
+            && self.player_stance_moves().can_swap()
+            && !self.player.knocked_down()
+        {
             let config = self.player_stance_config;
             if self.player.request_swap(config.swap_cooldown_ticks) {
                 self.attack_buffer.clear();
@@ -912,6 +924,11 @@ impl Playtest {
             action_locked = false;
             telemetry::debug_log("player window:movement");
         }
+        // Down after a poise break: no action and no movement, whatever
+        // windows the held clip authors.
+        if self.player.knocked_down() {
+            action_locked = true;
+        }
         let mut input = if action_locked {
             CharacterMotorInput::default()
         } else {
@@ -1106,7 +1123,7 @@ impl Playtest {
             && self.motor.grounded()
             && !matches!(
                 self.anim_state,
-                PlayerAnim::Death | PlayerAnim::HitReact | PlayerAnim::Stun
+                PlayerAnim::Death | PlayerAnim::HitReact | PlayerAnim::Stun | PlayerAnim::Knockdown
             )
             && self.character.is_some_and(|c| {
                 c.action_clip(CharacterAnimationAction::Land)

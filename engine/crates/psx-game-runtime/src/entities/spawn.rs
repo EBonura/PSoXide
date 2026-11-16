@@ -18,6 +18,12 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         self.z[index] = record.z;
         self.yaw[index] = record.yaw;
         self.combatants[index].respawn(&record.combat);
+        // A fighter that cannot swap holds the stance of its one kind of
+        // move from spawn on (a ranged-only one starts in Zenith).
+        let moves = Self::stance_moves(record);
+        if !moves.can_swap() {
+            self.combatants[index].stance.hold(moves.starting_stance());
+        }
         self.exchanges[index] = crate::ranged_tactics::RangedExchange::EMPTY;
         self.projectile_threats[index] = None;
         self.recoil[index] = [0; 3];

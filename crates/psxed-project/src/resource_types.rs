@@ -284,6 +284,9 @@ pub enum CharacterAnimationAction {
     ArchPerch,
     Fall,
     Land,
+    /// Poise broken: down until the fighter gets up. Falls back to the
+    /// stagger clip until authored.
+    Knockdown,
 }
 
 impl CharacterAnimationAction {
@@ -341,6 +344,7 @@ impl CharacterAnimationAction {
         Self::ArchPerch,
         Self::Fall,
         Self::Land,
+        Self::Knockdown,
     ];
 
     /// Actions exposed by current editor authoring. `StunRecovery` remains in
@@ -390,6 +394,7 @@ impl CharacterAnimationAction {
         Self::ArchPerch,
         Self::Fall,
         Self::Land,
+        Self::Knockdown,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -441,6 +446,7 @@ impl CharacterAnimationAction {
             Self::ArchPerch => "Arch Perch",
             Self::Fall => "Fall",
             Self::Land => "Land",
+            Self::Knockdown => "Knockdown",
         }
     }
 
@@ -491,6 +497,7 @@ impl CharacterAnimationAction {
             Self::ArchPerch => 42,
             Self::Fall => 43,
             Self::Land => 44,
+            Self::Knockdown => 45,
         }
     }
 
@@ -516,7 +523,14 @@ impl CharacterAnimationAction {
             Self::DashLeft | Self::DashRight => Some(AnimationRole::Roll),
             // A spawn intro is its own thing; no existing role fits, and
             // guessing one would auto-assign it to gameplay slots.
-            Self::Intro | Self::HookLaunch | Self::ArchPerch | Self::Fall | Self::Land => None,
+            // Knockdown binds only when authored: until then the cook and
+            // the runtime fall back to the stagger clip.
+            Self::Intro
+            | Self::HookLaunch
+            | Self::ArchPerch
+            | Self::Fall
+            | Self::Land
+            | Self::Knockdown => None,
             Self::WalkWindup | Self::WalkWinddown | Self::WalkWinddownAlt => {
                 Some(AnimationRole::Walk)
             }
@@ -2647,6 +2661,27 @@ pub struct CombatStats {
     /// Energy a connected heavy blade hit gains.
     #[serde(default = "default_combat_heavy_gain")]
     pub heavy_gain: u16,
+    /// Parry window: ticks from a swap during which a fighter's hit is
+    /// parried. Zero turns parrying off. PLACEHOLDER, the duel harness tunes it.
+    #[serde(default = "default_combat_parry_ticks")]
+    pub parry_ticks: u16,
+    /// Energy a parry refunds. PLACEHOLDER, the duel harness tunes it.
+    #[serde(default = "default_combat_parry_refund")]
+    pub parry_refund: u16,
+    /// Ticks after a parry in which the next attack crits. PLACEHOLDER, the
+    /// duel harness tunes it.
+    #[serde(default = "default_combat_crit_window_ticks")]
+    pub crit_window_ticks: u16,
+    /// Crit damage multiplier, Q12. PLACEHOLDER, the duel harness tunes it.
+    #[serde(default = "default_combat_crit_damage_q12")]
+    pub crit_damage_q12: u16,
+    /// Crit poise multiplier, Q12. PLACEHOLDER, the duel harness tunes it.
+    #[serde(default = "default_combat_crit_poise_q12")]
+    pub crit_poise_q12: u16,
+    /// Ticks a poise break keeps the fighter down. Zero turns knockdown off
+    /// (a break staggers). PLACEHOLDER, the duel harness tunes it.
+    #[serde(default = "default_combat_knockdown_ticks")]
+    pub knockdown_ticks: u16,
 }
 
 impl CombatStats {
@@ -2669,6 +2704,12 @@ impl CombatStats {
             shot_cost: stats.shot_cost,
             light_gain: stats.light_gain,
             heavy_gain: stats.heavy_gain,
+            parry_ticks: stats.parry_ticks,
+            parry_refund: stats.parry_refund,
+            crit_window_ticks: stats.crit_window_ticks,
+            crit_damage_q12: stats.crit_damage_q12,
+            crit_poise_q12: stats.crit_poise_q12,
+            knockdown_ticks: stats.knockdown_ticks,
         }
     }
 
@@ -2692,6 +2733,12 @@ impl CombatStats {
             shot_cost: self.shot_cost,
             light_gain: self.light_gain,
             heavy_gain: self.heavy_gain,
+            parry_ticks: self.parry_ticks,
+            parry_refund: self.parry_refund,
+            crit_window_ticks: self.crit_window_ticks,
+            crit_damage_q12: self.crit_damage_q12,
+            crit_poise_q12: self.crit_poise_q12,
+            knockdown_ticks: self.knockdown_ticks,
         }
     }
 
@@ -2759,6 +2806,18 @@ struct CombatStatsFile {
     light_gain: u16,
     #[serde(default = "default_combat_heavy_gain")]
     heavy_gain: u16,
+    #[serde(default = "default_combat_parry_ticks")]
+    parry_ticks: u16,
+    #[serde(default = "default_combat_parry_refund")]
+    parry_refund: u16,
+    #[serde(default = "default_combat_crit_window_ticks")]
+    crit_window_ticks: u16,
+    #[serde(default = "default_combat_crit_damage_q12")]
+    crit_damage_q12: u16,
+    #[serde(default = "default_combat_crit_poise_q12")]
+    crit_poise_q12: u16,
+    #[serde(default = "default_combat_knockdown_ticks")]
+    knockdown_ticks: u16,
 }
 
 impl From<CombatStatsFile> for CombatStats {
@@ -2781,6 +2840,12 @@ impl From<CombatStatsFile> for CombatStats {
             shot_cost: file.shot_cost,
             light_gain: file.light_gain,
             heavy_gain: file.heavy_gain,
+            parry_ticks: file.parry_ticks,
+            parry_refund: file.parry_refund,
+            crit_window_ticks: file.crit_window_ticks,
+            crit_damage_q12: file.crit_damage_q12,
+            crit_poise_q12: file.crit_poise_q12,
+            knockdown_ticks: file.knockdown_ticks,
         }
     }
 }
@@ -2819,6 +2884,30 @@ pub(crate) const fn default_combat_light_gain() -> u16 {
 
 pub(crate) const fn default_combat_heavy_gain() -> u16 {
     CombatStats::PLAYER.heavy_gain
+}
+
+pub(crate) const fn default_combat_parry_ticks() -> u16 {
+    CombatStats::PLAYER.parry_ticks
+}
+
+pub(crate) const fn default_combat_parry_refund() -> u16 {
+    CombatStats::PLAYER.parry_refund
+}
+
+pub(crate) const fn default_combat_crit_window_ticks() -> u16 {
+    CombatStats::PLAYER.crit_window_ticks
+}
+
+pub(crate) const fn default_combat_crit_damage_q12() -> u16 {
+    CombatStats::PLAYER.crit_damage_q12
+}
+
+pub(crate) const fn default_combat_crit_poise_q12() -> u16 {
+    CombatStats::PLAYER.crit_poise_q12
+}
+
+pub(crate) const fn default_combat_knockdown_ticks() -> u16 {
+    CombatStats::PLAYER.knockdown_ticks
 }
 
 /// Tunable movement/collision settings authored on a

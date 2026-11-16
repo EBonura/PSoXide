@@ -1095,6 +1095,10 @@ pub mod game_entity_flags {
     pub const TACTICAL: u16 = 1 << 3;
     /// Opt-in single-enemy encounter reset and diagnostic overlay.
     pub const TRAINING: u16 = 1 << 4;
+    /// The Character has a melee move (an authored light, heavy or combo
+    /// attack, or a melee hitbox), or no projectile attack at all. A
+    /// character swaps stance only with both a melee and a ranged move.
+    pub const MELEE_ATTACK: u16 = 1 << 5;
 }
 
 /// One cooked logic entity, shaped after hl-psx's campaign-proven
@@ -1195,6 +1199,22 @@ pub struct CombatStats {
     pub light_gain: u16,
     /// Energy a connected heavy blade hit gains.
     pub heavy_gain: u16,
+    /// Parry window: a fighter's hit received while its latest swap began
+    /// no more than this many ticks ago is parried. Zero turns parrying off.
+    pub parry_ticks: u16,
+    /// Energy a successful parry refunds to the defender.
+    pub parry_refund: u16,
+    /// Ticks after a parry during which the defender's next attack crits.
+    pub crit_window_ticks: u16,
+    /// Damage multiplier of a crit, Q12.
+    pub crit_damage_q12: u16,
+    /// Poise multiplier of a crit, Q12.
+    pub crit_poise_q12: u16,
+    /// Ticks a poise break keeps the fighter down. Zero turns knockdown off:
+    /// a break then staggers as a parry does. The clip held while down is the
+    /// character's [`CharacterAnimationAction::Knockdown`] role, which falls
+    /// back to its stagger clip until one is authored.
+    pub knockdown_ticks: u16,
 }
 
 impl CombatStats {
@@ -1219,6 +1239,19 @@ impl CombatStats {
         shot_cost: 20,
         light_gain: 12,
         heavy_gain: 20,
+        // PLACEHOLDER, harness tunes: the first third of the duel player's
+        // 25-tick swap window.
+        parry_ticks: 8,
+        // PLACEHOLDER, harness tunes: one Zenith shot.
+        parry_refund: 20,
+        // PLACEHOLDER, harness tunes: one second.
+        crit_window_ticks: 60,
+        // PLACEHOLDER, harness tunes: 2x damage.
+        crit_damage_q12: 8192,
+        // PLACEHOLDER, harness tunes: 2x poise.
+        crit_poise_q12: 8192,
+        // PLACEHOLDER, harness tunes: one second down.
+        knockdown_ticks: 60,
     };
 
     /// An enemy's numbers when nothing was authored: 200 health (the two
@@ -1226,6 +1259,9 @@ impl CombatStats {
     /// [`Self::PLAYER`].
     pub const ENEMY: Self = Self {
         poise: 100,
+        // PLACEHOLDER, harness tunes: the first third of the default
+        // 10-tick swap window.
+        parry_ticks: 3,
         ..Self::PLAYER
     };
 }
@@ -1303,6 +1339,10 @@ pub struct LevelGameEntityRecord {
     pub stagger_frame_range: CharacterActionFrameRange,
     /// Complete stun duration at 60 Hz; zero preserves the legacy 32 ticks.
     pub stagger_ticks: u16,
+    /// One-shot held while knocked down: the character's
+    /// [`CharacterAnimationAction::Knockdown`] role, falling back to
+    /// `stagger_clip` at cook time.
+    pub knockdown_clip: u16,
     /// One-shot clip on death; holds its final frame as the corpse
     /// pose.
     pub death_clip: u16,
@@ -3233,7 +3273,7 @@ pub struct ParticleEmitterRecord {
 pub const CHARACTER_CLIP_NONE: OptionalModelClipIndex = OptionalModelClipIndex::NONE;
 
 /// Fixed action slots used by [`LevelCharacterRecord::action_clips`].
-pub const CHARACTER_ANIMATION_ACTION_COUNT: usize = 45;
+pub const CHARACTER_ANIMATION_ACTION_COUNT: usize = 46;
 
 /// Runtime animation action slot.
 ///
@@ -3337,6 +3377,9 @@ pub enum CharacterAnimationAction {
     Fall = 43,
     /// Ground-contact compression and recovery.
     Land = 44,
+    /// Poise broken: down on the ground, held until the fighter gets up.
+    /// Falls back to [`Self::Stun`], then [`Self::HitReact`], until authored.
+    Knockdown = 45,
 }
 
 impl CharacterAnimationAction {
@@ -3387,6 +3430,7 @@ impl CharacterAnimationAction {
         Self::ArchPerch,
         Self::Fall,
         Self::Land,
+        Self::Knockdown,
     ];
 
     /// Convert to the cooked action slot index.

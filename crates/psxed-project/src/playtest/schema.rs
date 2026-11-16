@@ -1662,6 +1662,9 @@ pub struct PlaytestGameEntity {
     pub stagger_frame_range: psx_level::CharacterActionFrameRange,
     /// Complete stun duration at 60 Hz; zero preserves the legacy 32 ticks.
     pub stagger_ticks: u16,
+    /// One-shot held while knocked down: the Knockdown role, else the
+    /// stagger clip.
+    pub knockdown_clip: u16,
     /// Death one-shot clip.
     pub death_clip: u16,
     /// First rig-attached volume in [`PlaytestPackage::combat_capsules`].

@@ -71,7 +71,8 @@ use psx_game_runtime::vitality::{
 use psx_game_runtime::vitality_circles::VitalityCircleState;
 use psx_game_runtime::{
     combatant::{
-        ActionProtection, Combatant, CombatantId, Defender, HitIn, HitKind, PoiseRule, Strike,
+        ActionProtection, Combatant, CombatantId, Defender, HitIn, HitKind, HitOut, PoiseRule,
+        StanceMoves, Strike,
     },
     destructibles::RuntimeDestructibles,
     poi::MessageController,

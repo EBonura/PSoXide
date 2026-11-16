@@ -43,7 +43,7 @@ pub use tactics::{EnemyGoal, EnemyGoalResult, EnemyTacticalSnapshot};
 use crate::combat::{arc_hits_circle, MeleeArc};
 use crate::combatant::{
     stance_scaled, ActionProtection, Combatant, CombatantId, Defender, HitIn, HitKind, PoiseRule,
-    Strike,
+    StanceMoves, Strike,
 };
 use crate::vitality::VitalityChannelId;
 use psx_level::{
@@ -75,6 +75,9 @@ pub enum GameEntityState {
     Staggered = 6,
     /// Health reached zero (or the record spawned disabled).
     Dead = 7,
+    /// Poise broke: down and helpless for the record's
+    /// `combat.knockdown_ticks`, then back up.
+    KnockedDown = 8,
 }
 
 impl GameEntityState {
@@ -89,6 +92,7 @@ impl GameEntityState {
             4 => Self::Attack,
             5 => Self::Recover,
             6 => Self::Staggered,
+            8 => Self::KnockedDown,
             _ => Self::Dead,
         }
     }
@@ -352,10 +356,17 @@ pub(crate) fn player_strike(
 pub struct GameEntityHitOutcome {
     /// The hit landed on a live entity.
     pub connected: bool,
-    /// The hit broke poise (entity is now [`GameEntityState::Staggered`]).
+    /// The hit broke poise (entity is now [`GameEntityState::KnockedDown`],
+    /// or [`GameEntityState::Staggered`] after a parry's riposte).
     pub staggered: bool,
+    /// The break knocked the entity down.
+    pub knocked_down: bool,
     /// The hit was lethal (entity is now [`GameEntityState::Dead`]).
     pub died: bool,
+    /// The entity parried the hit: nothing landed on it (`connected` stays
+    /// false). The owner staggers the attacker when the attacker is not an
+    /// entity.
+    pub parried: bool,
 }
 
 impl GameEntityHitOutcome {
@@ -363,7 +374,9 @@ impl GameEntityHitOutcome {
     pub const MISS: Self = Self {
         connected: false,
         staggered: false,
+        knocked_down: false,
         died: false,
+        parried: false,
     };
 }
 
@@ -540,6 +553,8 @@ pub struct MeleeArcStats {
     pub staggers: u16,
     /// Connections that killed.
     pub deaths: u16,
+    /// Connections the target parried.
+    pub parries: u16,
 }
 
 /// SoA runtime state for cooked game entities. Entity `i` mirrors
@@ -710,8 +725,12 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         index: usize,
         input: GameEntityTickInput<'_>,
     ) -> bool {
-        if !Self::has_ranged_attack(record) {
+        let moves = Self::stance_moves(record);
+        if !moves.ranged {
             return true;
+        }
+        if !moves.melee {
+            return false;
         }
         let was_melee = if STANCE_BOUND_ATTACKS {
             self.stance(index) == VitalityChannelId::One
@@ -1019,19 +1038,99 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         if index >= self.count() {
             return None;
         }
+        let record = records.get(index)?;
         Some(Defender {
             combatant: self.combatants.get(index)?,
-            swap_invulnerable_ticks: records.get(index)?.roll_invulnerable_frames,
+            swap_invulnerable_ticks: record.roll_invulnerable_frames,
+            parry_ticks: record.combat.parry_ticks,
             action: ActionProtection::NONE,
         })
     }
 
-    /// Whether a hit on entity `index` passes through it this tick, see
-    /// [`Self::defender`]. Hit resolvers ask before a hit may connect, so a
-    /// hit that passes through neither lands nor latches the swing.
+    /// Whether entity `index` is inside its i-frames this tick, see
+    /// [`Self::defender`].
     pub fn invulnerable(&self, records: &[LevelGameEntityRecord], index: usize) -> bool {
         self.defender(records, index)
             .is_some_and(|defender| defender.invulnerable())
+    }
+
+    /// Whether a fighter's hit on entity `index` passes through it this tick
+    /// ([`Defender::passes_through`]): inside its i-frames but past its
+    /// parry window. Hit resolvers ask before a hit may connect, so a hit
+    /// that passes through neither lands nor latches the swing; a hit in the
+    /// parry window lands and is parried.
+    pub fn passes_through(&self, records: &[LevelGameEntityRecord], index: usize) -> bool {
+        self.defender(records, index)
+            .is_some_and(|defender| defender.passes_through())
+    }
+
+    /// The moves entity `index`'s record gives it, which decide whether it
+    /// may swap stance ([`StanceMoves`]). A record without a projectile
+    /// attack counts as melee.
+    fn stance_moves(record: &LevelGameEntityRecord) -> StanceMoves {
+        let ranged = Self::has_ranged_attack(record);
+        StanceMoves {
+            melee: !ranged || record.flags & game_entity_flags::MELEE_ATTACK != 0,
+            ranged,
+        }
+    }
+
+    /// Damage and poise of an attack entity `index` deals, through its crit
+    /// ([`Combatant::crit_scaled`]).
+    pub fn crit_scaled(
+        &self,
+        records: &[LevelGameEntityRecord],
+        index: usize,
+        damage: u16,
+        poise: u16,
+    ) -> (u16, u16) {
+        match (records.get(index), self.combatants.get(index)) {
+            (Some(record), Some(combatant)) => combatant.crit_scaled(&record.combat, damage, poise),
+            _ => (damage, poise),
+        }
+    }
+
+    /// Whether entity `index`'s next attack is a crit.
+    pub fn crit_armed(&self, index: usize) -> bool {
+        self.combatants.get(index).is_some_and(|c| c.crit != 0)
+    }
+
+    /// Use up entity `index`'s armed crit; true when one was armed.
+    pub fn spend_crit(&mut self, index: usize) -> bool {
+        self.combatants
+            .get_mut(index)
+            .is_some_and(Combatant::spend_crit)
+    }
+
+    /// Stagger entity `index` with the riposte of a parry by `by`
+    /// ([`Strike::parry`]), through the same [`Self::receive_hit`] as any
+    /// hit.
+    pub fn riposte(
+        &mut self,
+        records: &'static [LevelGameEntityRecord],
+        index: usize,
+        by: CombatantId,
+    ) -> GameEntityHitOutcome {
+        let channel = self.stance(index);
+        self.receive_hit(records, index, Strike::parry(by, channel))
+    }
+
+    /// Advance every live entity's swap cooldown and swap clock by `delta`
+    /// ticks. The owner calls this once per simulation tick, after the
+    /// entity tick, exactly as it advances the player's stance clock after
+    /// her swap press: every fighter's swap window is then the same count of
+    /// simulation ticks, whatever cadence the entities think at.
+    /// [`Self::tick_delta_deferred`] leaves the clocks to this call;
+    /// [`Self::tick_delta`] calls it itself.
+    pub fn advance_stances(&mut self, delta: u16) {
+        let count = self.count();
+        let mut index = 0usize;
+        while index < count {
+            if self.state(index) != GameEntityState::Dead {
+                self.combatants[index].advance_stance(delta);
+            }
+            index += 1;
+        }
     }
 
     /// Ticks since the entity's latest stance change began; `u16::MAX` when
@@ -1046,6 +1145,18 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         self.combatants[index].stance.advance_swap(delta_ticks);
     }
 
+    /// Swap entity `index`'s stance when its `record`'s moves allow a swap
+    /// at all ([`StanceMoves::can_swap`]) and its cooldown has run out: the
+    /// one swap request every controller of an entity makes. True when it
+    /// swapped.
+    pub fn swap_stance(&mut self, record: &LevelGameEntityRecord, index: usize) -> bool {
+        index < self.count()
+            && Self::stance_moves(record).can_swap()
+            && self.combatants[index].request_swap(self.stance_swap_delay)
+    }
+
+    /// Test hook: swap regardless of the moves rule.
+    #[cfg(test)]
     fn mutate_stance(&mut self, index: usize) {
         self.combatants[index].request_swap(self.stance_swap_delay);
     }
@@ -1257,6 +1368,21 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
                 frame_range: record.stagger_frame_range,
                 ..one_shot(record.stagger_clip, ticks)
             },
+            // The knockdown clip plays once and holds its last frame while
+            // the entity is down. Until a knockdown clip is authored it is the
+            // stagger clip, at the stagger's authored playback.
+            GameEntityState::KnockedDown if record.knockdown_clip == record.stagger_clip => {
+                GameEntityClip {
+                    speed_q8: if record.stagger_speed_q8 == 0 {
+                        768
+                    } else {
+                        record.stagger_speed_q8
+                    },
+                    frame_range: record.stagger_frame_range,
+                    ..one_shot(record.stagger_clip, ticks)
+                }
+            }
+            GameEntityState::KnockedDown => one_shot(record.knockdown_clip, ticks),
             GameEntityState::Dead => one_shot(record.death_clip, ticks),
         }
     }
@@ -1305,13 +1431,29 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             armored: stats.armour & combat_armour::HEAVY_ATTACK != 0
                 && state == GameEntityState::Attack
                 && self.selected_attack_kind(index) == GAME_ENTITY_ATTACK_HEAVY,
-            blocked: state == GameEntityState::Staggered,
+            blocked: matches!(
+                state,
+                GameEntityState::Staggered | GameEntityState::KnockedDown
+            ),
         };
         let out = self.combatants[index].receive_hit(HitIn {
             strike,
             stats,
             poise,
         });
+        if out.parried {
+            // An entity's attacker is staggered here; the owner staggers any
+            // other attacker (the player) from the outcome.
+            let attacker = usize::from(strike.attacker.0);
+            if attacker < self.count() && attacker != index {
+                self.riposte(records, attacker, CombatantId::entity(index));
+            }
+            // Nothing landed: not a connection, so no energy for the attacker.
+            return GameEntityHitOutcome {
+                parried: true,
+                ..GameEntityHitOutcome::MISS
+            };
+        }
         let delay = u16::from(records[index].group_attack_delay_ticks);
         if out.killed {
             self.release_attack_owner(index, delay);
@@ -1322,22 +1464,27 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             );
             return GameEntityHitOutcome {
                 connected: true,
-                staggered: false,
                 died: true,
+                ..GameEntityHitOutcome::MISS
             };
         }
         if out.poise_broken {
             self.release_attack_owner(index, delay);
             self.enter_state(
                 index,
-                GameEntityState::Staggered,
+                if out.knocked_down {
+                    GameEntityState::KnockedDown
+                } else {
+                    GameEntityState::Staggered
+                },
                 &mut GameEntityTickStats::default(),
             );
         }
         GameEntityHitOutcome {
             connected: true,
             staggered: out.poise_broken,
-            died: false,
+            knocked_down: out.knocked_down,
+            ..GameEntityHitOutcome::MISS
         }
     }
 
@@ -1400,7 +1547,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             let skip = *already_hit & mask != 0
                 || record.room != arc.room
                 || self.state(entity) == GameEntityState::Dead
-                || self.invulnerable(records, entity)
+                || self.passes_through(records, entity)
                 || !arc_hits_circle(
                     arc,
                     self.x[entity],
@@ -1414,6 +1561,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
                 stats.hits += u16::from(outcome.connected);
                 stats.staggers += u16::from(outcome.staggered);
                 stats.deaths += u16::from(outcome.died);
+                stats.parries += u16::from(outcome.parried);
             }
             entity += 1;
         }
@@ -1444,7 +1592,9 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         mover: &mut impl GameEntityMover,
         delta_ticks: u16,
     ) -> GameEntityTickStats {
-        self.tick_delta_impl::<0>(records, input, mover, delta_ticks, None)
+        let stats = self.tick_delta_impl::<0>(records, input, mover, delta_ticks, None);
+        self.advance_stances(delta_ticks.max(1));
+        stats
     }
 
     /// Advance entity behaviour while deferring attack contact to the owner of
@@ -1498,9 +1648,13 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             self.tactics[index].home_cooldown = self.tactics[index]
                 .home_cooldown
                 .saturating_sub(delta_ticks);
-            let combatant = &mut self.combatants[index];
-            combatant.advance_stance(delta_ticks);
-            combatant.tick(delta_ticks, state == GameEntityState::Staggered);
+            self.combatants[index].tick(
+                delta_ticks,
+                matches!(
+                    state,
+                    GameEntityState::Staggered | GameEntityState::KnockedDown
+                ),
+            );
             self.exchanges[index].tick(delta_ticks);
             self.step_recoil(record, index, mover, delta_ticks);
             let behavior_awake = !matches!(state, GameEntityState::Idle | GameEntityState::Patrol);
@@ -1581,6 +1735,13 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
                         self.enter_state(index, GameEntityState::Aggro, &mut stats);
                         // The authored reaction is for first acquisition, not
                         // an extra pause after the player already won a stagger.
+                        self.state_ticks[index] = u16::from(record.reaction_ticks);
+                    }
+                }
+                GameEntityState::KnockedDown => {
+                    if !self.combatants[index].knocked_down() {
+                        self.enter_state(index, GameEntityState::Aggro, &mut stats);
+                        // Getting up is not a new acquisition.
                         self.state_ticks[index] = u16::from(record.reaction_ticks);
                     }
                 }
@@ -1847,12 +2008,18 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         state: GameEntityState,
         stats: &mut GameEntityTickStats,
     ) {
-        if matches!(state, GameEntityState::Staggered | GameEntityState::Dead) {
+        if matches!(
+            state,
+            GameEntityState::Staggered | GameEntityState::KnockedDown | GameEntityState::Dead
+        ) {
             self.finish_goal(index, EnemyGoalResult::Cancelled);
         }
         self.state[index] = state as u8;
         self.state_ticks[index] = 0;
-        if matches!(state, GameEntityState::Staggered | GameEntityState::Dead) {
+        if matches!(
+            state,
+            GameEntityState::Staggered | GameEntityState::KnockedDown | GameEntityState::Dead
+        ) {
             // A pose retained earlier this tick cannot deal damage after its
             // owner was interrupted, even on the final Attack -> Recover tick.
             self.attack_sequence[index] = self.attack_sequence[index].wrapping_add(1);
@@ -2127,7 +2294,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
                 && self.stance_swap_cooldown(index) == 0
                 && self.player_in_line_of_sight(record, index, input, mover)
             {
-                self.mutate_stance(index);
+                let _ = self.swap_stance(record, index);
             }
             if self.stance_swap_in_progress(index) {
                 self.set_intent(index, GameEntityIntent::Hold);
@@ -2648,6 +2815,7 @@ mod tests {
             stagger_speed_q8: 0,
             stagger_frame_range: CharacterActionFrameRange::FULL,
             stagger_ticks: 0,
+            knockdown_clip: 4,
             death_clip: 5,
             combat_capsule_first: psx_level::CombatCapsuleIndex(0),
             combat_capsule_count: 0,
@@ -2737,7 +2905,8 @@ mod tests {
         attack_max_range: 1600,
         flags: game_entity_flags::ENABLED
             | game_entity_flags::CAN_RUN
-            | game_entity_flags::RANGED_ATTACK,
+            | game_entity_flags::RANGED_ATTACK
+            | game_entity_flags::MELEE_ATTACK,
         ..test_record(
             1000,
             1000,
@@ -2745,7 +2914,8 @@ mod tests {
             4096,
             game_entity_flags::ENABLED
                 | game_entity_flags::CAN_RUN
-                | game_entity_flags::RANGED_ATTACK,
+                | game_entity_flags::RANGED_ATTACK
+                | game_entity_flags::MELEE_ATTACK,
         )
     }];
     static RANGED_PAIR: [LevelGameEntityRecord; 2] = [
@@ -3036,7 +3206,9 @@ mod tests {
             e.tick_delta(&RANGED_ENEMY, far, &mut BlockedMover, delta);
             e.tick_delta(&RANGED_ENEMY, far, &mut BlockedMover, delta);
             assert_eq!(e.stance(0), VitalityChannelId::Two);
-            assert_eq!(e.stance_swap_cooldown(0), 300);
+            // The clock advances after the swap in the same tick, as the
+            // player's does after her press.
+            assert_eq!(e.stance_swap_cooldown(0), 300 - delta);
             let mut shots = 0;
             for elapsed in (delta..300).step_by(usize::from(delta)) {
                 // Let one shot commit, then rush inside melee distance.
@@ -3058,7 +3230,7 @@ mod tests {
             assert!(shots > 0);
             e.tick_delta(&RANGED_ENEMY, near, &mut BlockedMover, delta);
             assert_eq!(e.stance(0), VitalityChannelId::One);
-            assert_eq!(e.stance_swap_cooldown(0), 300);
+            assert_eq!(e.stance_swap_cooldown(0), 300 - delta);
             let mut melee = 0;
             for elapsed in (delta..300).step_by(usize::from(delta)) {
                 let input = if elapsed < 70 { near } else { far };
@@ -3685,9 +3857,10 @@ mod tests {
             );
         }
         assert_eq!(entities.state(0), GameEntityState::Recover);
-        // Stagger restarts as its own one-shot.
+        // A poise break restarts as its own one-shot: the knockdown, on the
+        // stagger clip until a knockdown clip is authored.
         entities.apply_hit(&IDLE_ENEMY, 0, VitalityChannelId::One, 10, 60);
-        assert_eq!(entities.state(0), GameEntityState::Staggered);
+        assert_eq!(entities.state(0), GameEntityState::KnockedDown);
         assert_eq!(
             entities.clip_for_state(&IDLE_ENEMY, 0),
             GameEntityClip {
@@ -4238,7 +4411,9 @@ mod tests {
                 1000,
                 0,
                 512,
-                game_entity_flags::ENABLED | game_entity_flags::RANGED_ATTACK,
+                game_entity_flags::ENABLED
+                    | game_entity_flags::RANGED_ATTACK
+                    | game_entity_flags::MELEE_ATTACK,
             )
         }];
         let mut entities = GameEntities::<8>::EMPTY;
@@ -4274,6 +4449,11 @@ mod tests {
             stagger_speed_q8: 256,
             stagger_frame_range: CharacterActionFrameRange { start: 0, end: 42 },
             stagger_ticks: 85,
+            // Knockdown off: a break then staggers, which is what this pins.
+            combat: psx_level::CombatStats {
+                knockdown_ticks: 0,
+                ..test_record(0, 0, 0, 0, 0).combat
+            },
             ..test_record(1000, 1000, 0, 512, game_entity_flags::ENABLED)
         }];
         let mut entities = GameEntities::<8>::EMPTY;
@@ -4297,13 +4477,13 @@ mod tests {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&IDLE_ENEMY);
         entities.set_spatial_active_mask(u64::MAX);
-        // Poise pool is 50: 60 poise damage staggers.
+        // Poise pool is 50: 60 poise damage breaks it and knocks it down.
         let outcome = entities.apply_hit(&IDLE_ENEMY, 0, VitalityChannelId::One, 10, 60);
-        assert_eq!(entities.state(0), GameEntityState::Staggered);
+        assert_eq!(entities.state(0), GameEntityState::KnockedDown);
         assert_eq!(entities.health(0), 90);
-        assert!(outcome.connected && outcome.staggered && !outcome.died);
-        // Stagger expires back into Aggro.
-        for _ in 0..GAME_ENTITY_STAGGER_TICKS {
+        assert!(outcome.connected && outcome.staggered && outcome.knocked_down && !outcome.died);
+        // It gets up into Aggro after the record's knockdown ticks.
+        for _ in 0..IDLE_ENEMY[0].combat.knockdown_ticks {
             entities.tick(&IDLE_ENEMY, far_input(), &mut NoClipMover);
         }
         assert_eq!(entities.state(0), GameEntityState::Aggro);
@@ -4444,10 +4624,10 @@ mod tests {
         assert!(e.deferred_attack_can_connect(attack));
         assert!(
             e.apply_hit(&IDLE_ENEMY, 0, VitalityChannelId::One, 1, 50)
-                .staggered
+                .knocked_down
         );
         assert!(!e.deferred_attack_can_connect(attack));
-        assert_eq!(e.state(0), GameEntityState::Staggered);
+        assert_eq!(e.state(0), GameEntityState::KnockedDown);
     }
 
     #[test]
@@ -4814,9 +4994,13 @@ mod tests {
         };
         let full = entities.health(0);
         entities.mutate_stance(0);
+        // Past the parry window (its own test pins that part).
+        let parry = EVEN_ENEMY[0].combat.parry_ticks;
+        entities.advance_stance_swap(0, parry + 1);
         let mut swing = 0u64;
-        for _ in 0..=TEST_SWAP_INVULNERABLE_TICKS {
+        for _ in parry + 1..=u16::from(TEST_SWAP_INVULNERABLE_TICKS) {
             assert!(entities.invulnerable(&EVEN_ENEMY, 0));
+            assert!(entities.passes_through(&EVEN_ENEMY, 0));
             let stats = entities.apply_melee_arc(
                 &EVEN_ENEMY,
                 &arc,
@@ -4920,6 +5104,7 @@ mod tests {
             player_target: Defender {
                 combatant: &rolling_player,
                 swap_invulnerable_ticks: 0,
+                parry_ticks: 0,
                 action: ActionProtection {
                     authored: None,
                     dodge: true,
@@ -5045,7 +5230,8 @@ mod tests {
             MeleeArcStats {
                 hits: 1,
                 staggers: 0,
-                deaths: 0
+                deaths: 0,
+                parries: 0
             }
         );
         assert_eq!(entities.health(0), 90);
@@ -5087,7 +5273,8 @@ mod tests {
             MeleeArcStats {
                 hits: 1,
                 staggers: 0,
-                deaths: 0
+                deaths: 0,
+                parries: 0
             }
         );
         assert_eq!(entities.health(0), 80);
@@ -5112,7 +5299,7 @@ mod tests {
             &mut swing,
         );
         assert_eq!(stats.staggers, 1);
-        assert_eq!(entities.state(0), GameEntityState::Staggered);
+        assert_eq!(entities.state(0), GameEntityState::KnockedDown);
         // Swing 3 (health 60 - 50 = 10), swing 4 kills.
         swing = 0;
         entities.apply_melee_arc(

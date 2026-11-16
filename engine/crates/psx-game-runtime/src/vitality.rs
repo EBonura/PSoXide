@@ -1065,6 +1065,18 @@ impl CombatStance {
         self.advance_swap(1);
     }
 
+    /// Clear the swap cooldown: a parry earns the next swap at once.
+    pub fn clear_cooldown(&mut self) {
+        self.swap_cooldown = 0;
+    }
+
+    /// Start on `active` with no swap showing, keeping the cooldown: what a
+    /// fighter that cannot swap is given at spawn.
+    pub fn hold(&mut self, active: VitalityChannelId) {
+        self.active = active;
+        self.swap_elapsed = u16::MAX;
+    }
+
     /// End any swap presentation, keeping the side and the cooldown.
     pub fn settle(&mut self) {
         self.swap_elapsed = u16::MAX;

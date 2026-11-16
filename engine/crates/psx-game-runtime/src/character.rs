@@ -50,6 +50,9 @@ pub enum PlayerAnim {
     HitReact,
     /// A poise break plays the complete stagger and recovery one-shot.
     Stun,
+    /// A poise break knocked the fighter down: the knockdown clip, held
+    /// until it gets up.
+    Knockdown,
     /// Idle-to-walk transition, one shot; Walk begins where it ends.
     WalkWindup,
     /// Walk-to-idle transition, one shot, over the motor's deceleration.
@@ -98,6 +101,7 @@ impl PlayerAnim {
             Self::Death => CharacterAnimationAction::Death,
             Self::HitReact => CharacterAnimationAction::HitReact,
             Self::Stun => CharacterAnimationAction::Stun,
+            Self::Knockdown => CharacterAnimationAction::Knockdown,
             Self::WalkWindup => CharacterAnimationAction::WalkWindup,
             Self::WalkWinddown => CharacterAnimationAction::WalkWinddown,
             Self::WalkWinddownAlt => CharacterAnimationAction::WalkWinddownAlt,
@@ -515,6 +519,16 @@ impl RuntimeCharacter {
             CharacterAnimationAction::Stun => self
                 .action_clip(CharacterAnimationAction::Stun)
                 .to_option()
+                .or_else(|| {
+                    self.action_clip(CharacterAnimationAction::HitReact)
+                        .to_option()
+                })
+                .unwrap_or(idle),
+            // Down: an unbound knockdown is the stagger clip, held.
+            CharacterAnimationAction::Knockdown => self
+                .action_clip(CharacterAnimationAction::Knockdown)
+                .to_option()
+                .or_else(|| self.action_clip(CharacterAnimationAction::Stun).to_option())
                 .or_else(|| {
                     self.action_clip(CharacterAnimationAction::HitReact)
                         .to_option()

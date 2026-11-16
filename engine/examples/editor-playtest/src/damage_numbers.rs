@@ -127,6 +127,13 @@ const HORIZON_RGB: (u8, u8, u8) = (214, 75, 48);
 /// Needle projectile tint.
 const ZENITH_RGB: (u8, u8, u8) = (67, 169, 154);
 
+/// A crit's damage: the gold of the energy highlight, apart from both
+/// stance colours.
+const CRIT_RGB: (u8, u8, u8) = (247, 198, 99);
+
+/// A parry: the energy it refunded, in near white, read as "nothing landed".
+const PARRY_RGB: (u8, u8, u8) = (232, 236, 244);
+
 /// Peak strength of the subtractive backing plate. The tint multiplier
 /// is `texel * tint / 128`, so 104 subtracts 207/255 of each channel at
 /// full envelope.
@@ -195,6 +202,10 @@ pub(super) enum DamageNumberChannel {
     Horizon,
     /// L1/L2 player attacks and the Choir Needle projectile.
     Zenith,
+    /// Any attack that landed as a crit.
+    Crit,
+    /// A parry: the number is the energy it refunded.
+    Parry,
 }
 
 impl DamageNumberChannel {
@@ -202,14 +213,17 @@ impl DamageNumberChannel {
         match self {
             Self::Horizon => 0,
             Self::Zenith => 1,
+            Self::Crit => 2,
+            Self::Parry => 3,
         }
     }
 
     const fn rgb_from_raw(raw: u8) -> (u8, u8, u8) {
-        if raw == 0 {
-            HORIZON_RGB
-        } else {
-            ZENITH_RGB
+        match raw {
+            0 => HORIZON_RGB,
+            1 => ZENITH_RGB,
+            2 => CRIT_RGB,
+            _ => PARRY_RGB,
         }
     }
 }
@@ -667,6 +681,13 @@ mod tests {
         // The two channels never collide, or the feedback would be
         // telling the player nothing.
         assert_ne!(channel_tint(0, 256), channel_tint(1, 256));
+        // Nor do the crit and parry tells with them or each other.
+        let tints = [0, 1, 2, 3].map(|raw| channel_tint(raw, 256));
+        for (i, a) in tints.iter().enumerate() {
+            for b in &tints[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
     }
 
     /// The plate must never outrun the number it clears space for. At

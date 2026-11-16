@@ -2524,6 +2524,9 @@ pub(crate) fn push_game_entity(
     if projectile_attack_range.is_some() {
         flags |= psx_level::game_entity_flags::RANGED_ATTACK;
     }
+    if state_clips.melee_move {
+        flags |= psx_level::game_entity_flags::MELEE_ATTACK;
+    }
     let (attack_min_range, attack_max_range) = projectile_attack_range.unwrap_or((0, 0));
     game_entities.push(PlaytestGameEntity {
         room: room_index,
@@ -2551,6 +2554,7 @@ pub(crate) fn push_game_entity(
         stagger_speed_q8: state_clips.stagger_speed_q8,
         stagger_frame_range: state_clips.stagger_frame_range,
         stagger_ticks,
+        knockdown_clip: state_clips.knockdown,
         death_clip: state_clips.death,
         combat_capsule_first,
         combat_capsule_count,

@@ -17,6 +17,23 @@
 //! so it can never go stale. Every hit resolver asks the defender through a
 //! [`Defender`] before a hit may connect.
 //!
+//! Parry, crit and knockdown are the same rules for every fighter too. A hit
+//! a fighter deals ([`CombatantId::WORLD`] never parries) landing in the
+//! first [`CombatStats::parry_ticks`] of the defender's swap window is
+//! parried ([`HitOut::parried`]): it deals nothing, refunds the defender
+//! energy, clears its swap cooldown and arms a crit for its next attack. The
+//! owner then staggers the attacker with [`Strike::parry`], through the same
+//! [`Combatant::receive_hit`]. A crit ([`Combatant::crit_scaled`]) multiplies
+//! the damage and poise of the next attack that lands (a swing) or is
+//! released (a shot) within [`CombatStats::crit_window_ticks`]. Any other
+//! poise break knocks the fighter down for [`CombatStats::knockdown_ticks`]
+//! ([`Combatant::knocked_down`]): it cannot act or move, it takes damage, and
+//! it cannot be broken again until it is up.
+//!
+//! Who may swap at all is data too, [`StanceMoves`]: only a fighter with both
+//! a melee and a ranged move swaps; one with a single kind of move holds the
+//! stance of that move.
+//!
 //! Every hit, whatever dealt it, lands through [`Combatant::receive_hit`]. A
 //! [`HitIn`] is the [`Strike`] (what the attacker sent) plus the defender's
 //! [`CombatStats`] and [`PoiseRule`]. Damage and poise follow
@@ -51,6 +68,35 @@ fn scale_q12(value: u16, q12: u16) -> u16 {
         as u16
 }
 
+/// The moves a character has, which decide whether it may swap stance: a
+/// fighter swaps only with both a melee and a ranged move. One with a single
+/// kind of move holds the stance of that move (blade for melee, Zenith for
+/// ranged) from spawn on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StanceMoves {
+    /// A blade (melee) move.
+    pub melee: bool,
+    /// A Zenith (ranged) move.
+    pub ranged: bool,
+}
+
+impl StanceMoves {
+    /// Whether this fighter may swap stance at all.
+    pub const fn can_swap(self) -> bool {
+        self.melee && self.ranged
+    }
+
+    /// The stance a fresh life starts in: Zenith for a ranged-only fighter,
+    /// blade otherwise.
+    pub const fn starting_stance(self) -> VitalityChannelId {
+        if self.ranged && !self.melee {
+            VitalityChannelId::Two
+        } else {
+            VitalityChannelId::One
+        }
+    }
+}
+
 /// Who dealt a hit: an entity slot, the player, or the world.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CombatantId(pub u16);
@@ -78,6 +124,9 @@ pub enum HitKind {
     Hazard,
     /// Anything else the world deals.
     Environment,
+    /// The riposte of a parry on the attacker: posture only, and its break
+    /// is a stagger, never a knockdown.
+    Parry,
 }
 
 /// The attacker's half of a hit: who, how, on which channel and how hard.
@@ -93,6 +142,29 @@ pub struct Strike {
     pub damage: u16,
     /// Posture damage before the defender's routing scales it.
     pub poise: u16,
+}
+
+impl Strike {
+    /// The riposte a fighter that parried (`by`) sends its attacker: a
+    /// posture-only hit on the attacker's own `channel` (so no stance
+    /// multiplier applies) big enough to break any posture outside break
+    /// grace, armour included.
+    pub const fn parry(by: CombatantId, channel: VitalityChannelId) -> Self {
+        Self {
+            attacker: by,
+            kind: HitKind::Parry,
+            channel,
+            damage: 0,
+            poise: u16::MAX,
+        }
+    }
+
+    /// Whether a fighter dealt this strike as an attack, so it can be
+    /// parried: a swing or a shot by anyone but the world.
+    pub fn parryable(&self) -> bool {
+        self.attacker != CombatantId::WORLD
+            && matches!(self.kind, HitKind::Melee | HitKind::Projectile)
+    }
 }
 
 /// The defender's posture state for one hit. The capacity is
@@ -147,14 +219,17 @@ impl ActionProtection {
 }
 
 /// A fighter as the target of a hit: its combat state, how many ticks a swap
-/// protects it (its character's `roll_invulnerable_frames`, data) and what
-/// its current action grants. Hit resolvers ask [`Self::invulnerable`].
+/// protects it (its character's `roll_invulnerable_frames`, data), how many
+/// of those parry (its [`CombatStats::parry_ticks`]) and what its current
+/// action grants. Hit resolvers ask [`Self::passes_through`].
 #[derive(Clone, Copy, Debug)]
 pub struct Defender<'a> {
     /// The target's combat state.
     pub combatant: &'a Combatant,
     /// Ticks a swap protects this fighter.
     pub swap_invulnerable_ticks: u8,
+    /// Ticks from the swap during which a fighter's hit is parried.
+    pub parry_ticks: u16,
     /// What the target's current action grants.
     pub action: ActionProtection,
 }
@@ -165,6 +240,7 @@ impl Defender<'static> {
     pub const OPEN: Self = Self {
         combatant: &Combatant::EMPTY,
         swap_invulnerable_ticks: 0,
+        parry_ticks: 0,
         action: ActionProtection::NONE,
     };
 }
@@ -175,6 +251,19 @@ impl Defender<'_> {
     pub fn invulnerable(&self) -> bool {
         self.combatant
             .invulnerable(self.swap_invulnerable_ticks, self.action)
+    }
+
+    /// Whether a fighter's hit on this target would be parried this tick,
+    /// see [`Combatant::parrying`].
+    pub fn parries(&self) -> bool {
+        self.combatant.parrying(self.parry_ticks)
+    }
+
+    /// Whether a fighter's hit passes through this target without landing:
+    /// invulnerable and not parrying. A hit inside the parry window lands
+    /// and [`Combatant::receive_hit`] turns it into a parry.
+    pub fn passes_through(&self) -> bool {
+        !self.parries() && self.invulnerable()
     }
 }
 
@@ -189,6 +278,13 @@ pub struct HitOut {
     pub killed: bool,
     /// The hit broke posture.
     pub poise_broken: bool,
+    /// The break knocked the fighter down (every break but a parry's
+    /// riposte, while the stats allow knockdown).
+    pub knocked_down: bool,
+    /// The defender parried: nothing landed, the defender gained its
+    /// refund, its swap cooldown and a crit. The owner staggers the
+    /// attacker with [`Strike::parry`].
+    pub parried: bool,
 }
 
 /// Health, posture, energy and stance of one fighter.
@@ -205,6 +301,10 @@ pub struct Combatant {
     pub flow: CombatFlow,
     /// Active side, swap cooldown and swap clock.
     pub stance: CombatStance,
+    /// Ticks left down after a poise break; zero when standing.
+    pub knockdown: u16,
+    /// Ticks left in which the next attack crits; zero when none is armed.
+    pub crit: u16,
 }
 
 impl Combatant {
@@ -215,6 +315,8 @@ impl Combatant {
         poise: Poise::EMPTY,
         flow: CombatFlow::FULL,
         stance: CombatStance::new(VitalityChannelId::One),
+        knockdown: 0,
+        crit: 0,
     };
 
     /// A fresh life for `stats`: health full, posture clear, energy full,
@@ -232,6 +334,8 @@ impl Combatant {
         self.poise = Poise::EMPTY;
         self.flow = CombatFlow::full(stats);
         self.stance.settle();
+        self.knockdown = 0;
+        self.crit = 0;
     }
 
     /// Whether a hit on `channel` comes from the stance opposite this
@@ -276,11 +380,47 @@ impl Combatant {
         tick.exhausted
     }
 
-    /// Advance posture recovery and the energy timers by `delta` ticks.
-    /// Break grace only drains once `recovering` (a hit reaction) is over.
+    /// Advance posture recovery, the energy timers, the knockdown and the
+    /// crit window by `delta` ticks. Break grace only drains once
+    /// `recovering` (a hit reaction) is over.
     pub fn tick(&mut self, delta: u16, recovering: bool) {
         self.poise.tick(delta);
         self.flow.tick(delta, recovering);
+        self.knockdown = self.knockdown.saturating_sub(delta);
+        self.crit = self.crit.saturating_sub(delta);
+    }
+
+    /// Whether the fighter is down after a poise break: it cannot act or
+    /// move until [`CombatStats::knockdown_ticks`] have passed.
+    pub fn knocked_down(&self) -> bool {
+        self.knockdown != 0
+    }
+
+    /// Whether a fighter's hit would be parried now: the latest swap began
+    /// no more than `parry_ticks` ago. Zero turns parrying off.
+    pub fn parrying(&self, parry_ticks: u16) -> bool {
+        parry_ticks != 0 && self.in_swap_window(parry_ticks)
+    }
+
+    /// Damage and poise of an attack this fighter deals, through its crit:
+    /// multiplied by `stats`' crit multipliers while a crit is armed,
+    /// unchanged otherwise. [`Self::spend_crit`] once the attack lands or
+    /// is released.
+    pub fn crit_scaled(&self, stats: &CombatStats, damage: u16, poise: u16) -> (u16, u16) {
+        if self.crit == 0 {
+            return (damage, poise);
+        }
+        (
+            scale_q12(damage, stats.crit_damage_q12),
+            scale_q12(poise, stats.crit_poise_q12),
+        )
+    }
+
+    /// Use up an armed crit; true when one was armed.
+    pub fn spend_crit(&mut self) -> bool {
+        let armed = self.crit != 0;
+        self.crit = 0;
+        armed
     }
 
     /// Advance the swap cooldown and swap clock by `delta` ticks.
@@ -314,10 +454,27 @@ impl Combatant {
     /// off the one bar, then posture against [`CombatStats::poise`]. This is
     /// the only way damage reaches a fighter.
     ///
+    /// A fighter's swing or shot inside the parry window
+    /// ([`CombatStats::parry_ticks`]) is parried instead: nothing lands, the
+    /// defender gains [`CombatStats::parry_refund`] energy, its swap cooldown
+    /// clears and its next attack within [`CombatStats::crit_window_ticks`]
+    /// crits. A posture break knocks the fighter down for
+    /// [`CombatStats::knockdown_ticks`], except a parry's riposte, which
+    /// staggers. A fighter that is down takes damage but cannot be broken.
+    ///
     /// A hit that kills leaves posture alone. A zero-damage hit (poise only)
     /// never touches the bar.
     pub fn receive_hit(&mut self, hit: HitIn) -> HitOut {
         let strike = hit.strike;
+        if strike.parryable() && self.parrying(hit.stats.parry_ticks) {
+            self.flow.gain_energy(hit.stats.parry_refund, &hit.stats);
+            self.stance.clear_cooldown();
+            self.crit = hit.stats.crit_window_ticks;
+            return HitOut {
+                parried: true,
+                ..HitOut::default()
+            };
+        }
         let was_defeated = self.defeated();
         let (damage, poise) = stance_scaled(
             &hit.stats,
@@ -328,13 +485,21 @@ impl Combatant {
         let damage_applied = self.health.apply_damage(damage);
         let defeated = self.defeated();
         let killed = !was_defeated && defeated;
+        let blocked = hit.poise.blocked || self.knocked_down();
         let poise_broken =
-            !killed && self.poise_hit(poise, hit.stats.poise, hit.poise.armored, hit.poise.blocked);
+            !killed && self.poise_hit(poise, hit.stats.poise, hit.poise.armored, blocked);
+        let knocked_down =
+            poise_broken && strike.kind != HitKind::Parry && hit.stats.knockdown_ticks != 0;
+        if knocked_down {
+            self.knockdown = hit.stats.knockdown_ticks;
+        }
         HitOut {
             damage_applied,
             defeated,
             killed,
             poise_broken,
+            knocked_down,
+            parried: false,
         }
     }
 
@@ -472,6 +637,7 @@ mod tests {
         let target = Defender {
             combatant: &swapping,
             swap_invulnerable_ticks: 0,
+            parry_ticks: 0,
             action: open,
         };
         assert!(target.invulnerable());
@@ -591,5 +757,132 @@ mod tests {
             c.air_tick(true, false, true, &STATS);
         }
         assert_eq!((c.health(), c.flow.energy), (120, 20), "firing pauses both");
+    }
+
+    fn swapped() -> Combatant {
+        let mut c = fighter();
+        assert!(c.request_swap(30));
+        c.advance_stance(1);
+        c
+    }
+
+    #[test]
+    fn a_fighters_hit_early_in_the_swap_is_parried_with_all_four_effects() {
+        let mut c = swapped();
+        c.flow.energy = 0;
+        let out = c.receive_hit(hit(strike(VitalityChannelId::One, 50, 50)));
+        assert!(out.parried);
+        assert_eq!((out.damage_applied, out.poise_broken), (0, false));
+        assert_eq!(c.health(), 200);
+        assert_eq!(c.flow.energy, STATS.parry_refund);
+        assert_eq!(c.stance.swap_cooldown(), 0);
+        assert_eq!(c.crit, STATS.crit_window_ticks);
+        // The riposte the owner sends back breaks any posture as a stagger.
+        let mut attacker = fighter();
+        let riposte = attacker.receive_hit(HitIn {
+            poise: PoiseRule {
+                armored: true,
+                blocked: false,
+            },
+            ..hit(Strike::parry(CombatantId::PLAYER, VitalityChannelId::One))
+        });
+        assert!(riposte.poise_broken && !riposte.knocked_down && !riposte.parried);
+    }
+
+    #[test]
+    fn past_the_parry_window_or_from_the_world_nothing_is_parried() {
+        let mut c = swapped();
+        c.advance_stance(STATS.parry_ticks);
+        assert!(
+            !c.receive_hit(hit(strike(VitalityChannelId::One, 5, 0)))
+                .parried
+        );
+        let mut c = swapped();
+        let world = Strike {
+            attacker: CombatantId::WORLD,
+            ..strike(VitalityChannelId::One, 5, 0)
+        };
+        assert!(!c.receive_hit(hit(world)).parried);
+        let mut off = swapped();
+        let no_parry = HitIn {
+            stats: CombatStats {
+                parry_ticks: 0,
+                ..STATS
+            },
+            ..hit(strike(VitalityChannelId::One, 5, 0))
+        };
+        assert!(
+            !off.receive_hit(no_parry).parried,
+            "zero turns parrying off"
+        );
+    }
+
+    #[test]
+    fn a_crit_scales_the_next_attack_until_spent_or_expired() {
+        let mut c = fighter();
+        assert_eq!(c.crit_scaled(&STATS, 10, 3), (10, 3));
+        c.crit = STATS.crit_window_ticks;
+        assert_eq!(c.crit_scaled(&STATS, 10, 3), (20, 6));
+        assert!(c.spend_crit());
+        assert!(!c.spend_crit());
+        c.crit = 2;
+        c.tick(1, false);
+        assert_ne!(c.crit, 0);
+        c.tick(1, false);
+        assert_eq!(c.crit, 0);
+    }
+
+    #[test]
+    fn a_poise_break_knocks_down_and_a_downed_fighter_cannot_break_again() {
+        let mut c = fighter();
+        let out = c.receive_hit(hit(strike(VitalityChannelId::One, 0, 60)));
+        assert!(out.poise_broken && out.knocked_down);
+        assert_eq!(c.knockdown, STATS.knockdown_ticks);
+        c.tick(BREAK_GRACE_TICKS, false);
+        c.tick(BREAK_GRACE_TICKS, false);
+        c.knockdown = 5;
+        let out = c.receive_hit(hit(strike(VitalityChannelId::One, 7, 1000)));
+        assert_eq!(out.damage_applied, 7);
+        assert!(!out.poise_broken, "down: no second break");
+        c.tick(5, false);
+        assert!(!c.knocked_down());
+        let mut off = fighter();
+        let out = off.receive_hit(HitIn {
+            stats: CombatStats {
+                knockdown_ticks: 0,
+                ..STATS
+            },
+            ..hit(strike(VitalityChannelId::One, 0, 60))
+        });
+        assert!(
+            out.poise_broken && !out.knocked_down,
+            "zero turns knockdown off"
+        );
+    }
+
+    #[test]
+    fn only_a_fighter_with_both_moves_swaps() {
+        let both = StanceMoves {
+            melee: true,
+            ranged: true,
+        };
+        let melee = StanceMoves {
+            melee: true,
+            ranged: false,
+        };
+        let ranged = StanceMoves {
+            melee: false,
+            ranged: true,
+        };
+        assert!(both.can_swap() && !melee.can_swap() && !ranged.can_swap());
+        assert_eq!(melee.starting_stance(), VitalityChannelId::One);
+        assert_eq!(both.starting_stance(), VitalityChannelId::One);
+        assert_eq!(ranged.starting_stance(), VitalityChannelId::Two);
+    }
+
+    #[test]
+    fn a_fighter_stays_small() {
+        // Every entity slot holds one: 32 B before parry, crit and knockdown.
+        assert_eq!(core::mem::size_of::<Combatant>(), 36);
     }
 }

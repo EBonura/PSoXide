@@ -379,6 +379,7 @@ impl OwnedLevelRecords {
                     stagger_speed_q8: e.stagger_speed_q8,
                     stagger_frame_range: e.stagger_frame_range,
                     stagger_ticks: e.stagger_ticks,
+                    knockdown_clip: e.knockdown_clip,
                     death_clip: e.death_clip,
                     combat_capsule_first: CombatCapsuleIndex(e.combat_capsule_first),
                     combat_capsule_count: e.combat_capsule_count,

@@ -3180,7 +3180,11 @@ pub(crate) struct GameEntityStateClips {
     pub stagger: u16,
     pub stagger_speed_q8: u16,
     pub stagger_frame_range: psx_level::CharacterActionFrameRange,
+    pub knockdown: u16,
     pub death: u16,
+    /// The Character authors a blade move: a light, heavy or combo attack
+    /// role, or a melee hitbox. With a projectile attack too, it may swap.
+    pub melee_move: bool,
 }
 
 impl GameEntityStateClips {
@@ -3210,7 +3214,9 @@ impl GameEntityStateClips {
             stagger: clip,
             stagger_speed_q8: 0,
             stagger_frame_range: psx_level::CharacterActionFrameRange::FULL,
+            knockdown: clip,
             death: clip,
+            melee_move: true,
         }
     }
 }
@@ -3297,6 +3303,19 @@ pub(crate) fn game_entity_state_clips(
     let stagger = optional(CharacterAnimationAction::Stun)
         .or_else(|| optional(CharacterAnimationAction::HitReact))
         .unwrap_or(fallback_attack);
+    // A blade move: an authored light, heavy or combo attack, or a melee
+    // hitbox on the character.
+    let melee_move = [
+        CharacterAnimationAction::LightAttack,
+        CharacterAnimationAction::HeavyAttack,
+        CharacterAnimationAction::ComboAttack,
+    ]
+    .into_iter()
+    .any(|action| optional(action).is_some())
+        || character
+            .combat_capsules
+            .iter()
+            .any(|volume| matches!(volume.role, crate::CombatCapsuleRole::Hitbox { .. }));
     Some(GameEntityStateClips {
         idle,
         // Intro is the first-activation role for non-player Characters; for
@@ -3340,9 +3359,14 @@ pub(crate) fn game_entity_state_clips(
             0
         },
         stagger_frame_range: stagger.frame_range,
+        // Held while down; the stagger clip until a Knockdown is authored.
+        knockdown: optional(CharacterAnimationAction::Knockdown)
+            .map(|playback| playback.clip)
+            .unwrap_or(stagger.clip),
         death: optional(CharacterAnimationAction::Death)
             .map(|playback| playback.clip)
             .unwrap_or(idle),
+        melee_move,
     })
 }
 

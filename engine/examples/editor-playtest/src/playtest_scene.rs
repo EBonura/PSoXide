@@ -1144,7 +1144,10 @@ impl Scene for Playtest {
         }
         self.player.tick(
             1,
-            matches!(self.anim_state, PlayerAnim::Stun | PlayerAnim::HitReact),
+            matches!(
+                self.anim_state,
+                PlayerAnim::Stun | PlayerAnim::HitReact | PlayerAnim::Knockdown
+            ),
         );
         self.update_gameplay(ctx);
         self.tick_poi_presentation();

@@ -11,6 +11,13 @@ use psx_game_runtime::{combat_policy, entities::GameEntityState};
 /// same order.
 const SAMPLE_COLUMNS: usize = 21;
 
+/// `duel:event` kind: the actor parried a hit.
+pub(super) const DUEL_EVENT_PARRY: u32 = 1;
+/// `duel:event` kind: the actor's attack was a crit.
+pub(super) const DUEL_EVENT_CRIT: u32 = 2;
+/// `duel:event` kind: the actor was knocked down.
+pub(super) const DUEL_EVENT_KNOCKDOWN: u32 = 3;
+
 pub(super) struct Duel {
     pub active: bool,
     pub finished: bool,
@@ -334,7 +341,9 @@ impl Playtest {
                     if !ranged
                         && matches!(
                             enemy_state,
-                            GameEntityState::Recover | GameEntityState::Staggered
+                            GameEntityState::Recover
+                                | GameEntityState::Staggered
+                                | GameEntityState::KnockedDown
                         )
                     {
                         self.duel.combat_role = 7;
@@ -561,6 +570,18 @@ impl Playtest {
         [0, 0]
     }
 
+    /// Duel trace: a parry, crit or knockdown. `actor` 0 is the player, 1
+    /// the enemy: the fighter that parried, landed the crit or was knocked
+    /// down. `kind` is one of the `DUEL_EVENT_*` codes.
+    pub(super) fn duel_log_event(&self, ctx: &Ctx, actor: u32, kind: u32) {
+        if self.duel.active && !self.duel.finished {
+            log_values(
+                "duel:event",
+                &[ctx.sim_tick.as_u32() - self.duel.started, actor, kind],
+            );
+        }
+    }
+
     fn duel_end(&mut self, result: u32, ctx: &Ctx) {
         if !self.duel.finished {
             self.duel.finished = true;
@@ -649,6 +670,13 @@ impl Playtest {
                 };
                 self.duel.last_attack = kind;
             }
+        }
+        // A knockdown is the moment either fighter enters its down state.
+        if snap[9] == CharacterAnimationAction::Knockdown.to_index() as u32 && old[9] != snap[9] {
+            self.duel_log_event(ctx, 0, DUEL_EVENT_KNOCKDOWN);
+        }
+        if snap[10] == GameEntityState::KnockedDown as u32 && old[10] != snap[10] {
+            self.duel_log_event(ctx, 1, DUEL_EVENT_KNOCKDOWN);
         }
         if tick == 0 || tick % 60 == 0 || damage || changed {
             log_values("duel:sample", &snap);
