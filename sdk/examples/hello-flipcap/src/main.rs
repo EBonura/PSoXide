@@ -28,6 +28,7 @@ extern crate psx_rt;
 use psx_font::fonts::BASIC;
 use psx_font::FontAtlas;
 use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
+use psx_gpu::prim::{RectFlat, TriFlat};
 use psx_gpu::Gpu;
 use psx_rt::present::{self, PresentCap, Presenter};
 use psx_rt::{interrupts, tty, Peripherals};
@@ -42,6 +43,9 @@ const RED: (u8, u8, u8) = (230, 80, 80);
 
 /// Flips each phase makes.
 const FLIPS: u32 = 90;
+
+/// Frames of each mixed-shape run (the uncapped one runs twice as many).
+const MIXED_FRAMES: u32 = 600;
 
 /// Frames of the long run that must leave the presenter in signal mode.
 const LONG_FRAMES: u32 = 1500;
@@ -112,6 +116,109 @@ fn lossy(
     present::wait_idle();
 }
 
+/// What `mixed` measured.
+struct Mixed {
+    frames: u32,
+    vblanks: u32,
+    flips: u32,
+    fast: u32,
+    missed: u32,
+    /// Frame numbers at which the presenter's mode changed (first 8), and how many changes in all.
+    changes: [u16; 8],
+    changed: u32,
+}
+
+/// `frames` frames of mixed shapes (nothing extra, small rects, a big triangle, a rect field),
+/// so that a target which loses the signal for some shapes only loses it on some frames, run
+/// at whatever cap is set. Records the frame at which the presenter's mode moves.
+fn mixed(
+    gpu: &mut Gpu,
+    fb: &mut DoubleBuffer,
+    presenter: &mut Presenter,
+    frames: u32,
+    loss_sixteenths: u32,
+) -> Mixed {
+    interrupts::reset_flip_histogram();
+    let start = interrupts::vblank_count();
+    let missed_before = interrupts::draw_done_fallback_count();
+    let mut state = 0x2545_f491u32;
+    let mut out = Mixed {
+        frames,
+        vblanks: 0,
+        flips: 0,
+        fast: 0,
+        missed: 0,
+        changes: [0; 8],
+        changed: 0,
+    };
+    let mut mode = interrupts::flip_signal_distrusted();
+    for n in 0..frames {
+        presenter.begin_frame(fb);
+        fb.clear(gpu, (24, 8 + (n % 8) as u8 * 12, 8));
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        match state % 6 {
+            1 => gpu.draw(&RectFlat::new(8, 8, 1, 1, 200, 40, 40)),
+            2 => gpu.draw(&RectFlat::new(8, 8, 5, 1, 40, 200, 40)),
+            3 => gpu.draw(&RectFlat::new(8, 8, 16, 4, 40, 40, 200)),
+            4 => gpu.draw(&TriFlat::new([(0, 0), (300, 10), (20, 220)], 90, 90, 200)),
+            5 => {
+                for i in 0..5 {
+                    gpu.draw(&RectFlat::new(8 + 20 * i, 30, 8, 8, 200, 200, 40));
+                }
+            }
+            _ => {}
+        }
+        presenter.present_drawn(fb);
+        // A pseudo-random share of frames loses its signal: the program acknowledges bit 24 itself
+        // once the frame is drawn, as a core that drops GP0(1Fh) would have left it.
+        if (state >> 8) % 16 < loss_sixteenths {
+            gpu.wait_idle();
+            gpu.arm_draw_done();
+        }
+        let now = interrupts::flip_signal_distrusted();
+        if now != mode {
+            mode = now;
+            if let Some(slot) = out.changes.get_mut(out.changed as usize) {
+                *slot = n as u16;
+            }
+            out.changed += 1;
+        }
+    }
+    present::wait_idle();
+    let histogram = FlipHistogram::from_buckets(interrupts::flip_histogram());
+    out.vblanks = interrupts::vblank_count().wrapping_sub(start);
+    out.flips = histogram.total();
+    out.fast = histogram.below(2);
+    out.missed = interrupts::draw_done_fallback_count().wrapping_sub(missed_before);
+    out
+}
+
+/// One TTY line for a `mixed` run.
+fn print_mixed(label: &str, run: &Mixed) {
+    tty::print("FLIPCAP MIX ");
+    tty::print(label);
+    for (name, value) in [
+        ("frames", run.frames),
+        ("vblanks", run.vblanks),
+        ("flips", run.flips),
+        ("fast", run.fast),
+        ("missed", run.missed),
+        ("changes", run.changed),
+    ] {
+        tty::print(" ");
+        let (text, len) = line(name, value);
+        tty::print(as_str(&text[..len]));
+    }
+    for at in run.changes.iter().take(run.changed as usize) {
+        let (text, len) = line("at", u32::from(*at));
+        tty::print(" ");
+        tty::print(as_str(&text[..len]));
+    }
+    tty::println("");
+}
+
 /// `FLIPS` direct flips with nothing between them but a clear.
 fn direct(gpu: &mut Gpu, fb: &mut DoubleBuffer) -> u32 {
     for _ in 0..FLIPS {
@@ -154,6 +261,7 @@ fn main() {
     let default_cap = present::cap();
     let mut presenter = Presenter::new(None);
 
+    let cold = mixed(&mut gpu, &mut fb, &mut presenter, 120, 0);
     let capped_queue = measure(|| queued(&mut gpu, &mut fb, &mut presenter));
     let missed_capped = interrupts::draw_done_fallback_count();
     let distrust_capped = interrupts::flip_signal_distrusted();
@@ -196,6 +304,35 @@ fn main() {
             interrupts::flip_signal_distrusted(),
         ));
     }
+    // Mixed frame shapes at 30 and at 60 fps over a long run, for a target that loses the signal on
+    // some shapes only: how many flips per VBlank, and when the mode moved.
+    present::set_cap(PresentCap::HZ30);
+    let mixed_capped = mixed(&mut gpu, &mut fb, &mut presenter, MIXED_FRAMES, 0);
+    present::set_cap(PresentCap::UNCAPPED);
+    let mixed_uncapped = mixed(&mut gpu, &mut fb, &mut presenter, 2 * MIXED_FRAMES, 0);
+    print_mixed("cold capped", &cold);
+    print_mixed("capped loss0", &mixed_capped);
+    print_mixed("uncapped loss0", &mixed_uncapped);
+    // The signal coming and going: 1/8, 1/2 and 7/8 of the frames lose it, at 60 and at 30 fps.
+    for (cap, name) in [
+        (PresentCap::UNCAPPED, "uncapped"),
+        (PresentCap::HZ30, "capped"),
+    ] {
+        present::set_cap(cap);
+        for (sixteenths, label) in [(2, "loss2/16"), (8, "loss8/16"), (14, "loss14/16")] {
+            let run = mixed(&mut gpu, &mut fb, &mut presenter, MIXED_FRAMES, sixteenths);
+            let mut text = [0u8; 40];
+            let parts = [name.as_bytes(), b" ", label.as_bytes()];
+            let mut at = 0;
+            for part in parts {
+                text[at..at + part.len()].copy_from_slice(part);
+                at += part.len();
+            }
+            print_mixed(as_str(&text[..at]), &run);
+        }
+    }
+    present::set_cap(PresentCap::HZ30);
+    gpu.wait_idle();
     present::set_cap(PresentCap::HZ30);
     gpu.wait_idle();
     let missed_end = interrupts::draw_done_fallback_count();

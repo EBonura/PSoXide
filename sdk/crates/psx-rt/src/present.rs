@@ -493,6 +493,7 @@ impl Presenter {
         let port = &mut Hardware;
         let vblanks = wait_slot_empty_on(port);
         add(addr_of_mut!(SLOT_WAIT_VBLANKS), vblanks);
+        observe_signal();
         let mut first = head as u32;
         if !self.frame_open {
             first = self.write_preamble(buffers, first);
@@ -575,6 +576,7 @@ impl Presenter {
         if port.flip() != 0 || port.head() != 0 {
             wait_idle_on(port);
         }
+        observe_signal();
         let display = buffers.begin_deferred_swap();
         present_drawn_on(port, display);
     }
@@ -739,6 +741,53 @@ fn wait_idle_on<P: Port>(port: &mut P) {
     }
 }
 
+/// Signal mode keeps a leaky count of misses: a miss adds `TRUST_MISS_WEIGHT`, a clean frame takes
+/// one off, and `TRUST_MISS_LIMIT` puts the handler in conventional mode. Four misses in a row do
+/// it, and so does a signal that is lost on more than about one frame in five, while one that
+/// is lost on one frame in eight (a lone dip each time) drains faster than it fills. A PS1, with
+/// the signal on every frame, never has a miss. The way back needs `TRUST_CLEAN` clean frames in
+/// a row, long on purpose: a core that raises the signal on a few frame shapes would otherwise
+/// flap and pay the misses again on every lucky streak, and the signal is the only test that
+/// cannot flip early, so it is trusted again only after a long run.
+const TRUST_MISS_WEIGHT: u32 = 4;
+const TRUST_MISS_LIMIT: u32 = 16;
+const TRUST_CLEAN: u32 = 32;
+
+/// Fallback count seen at the last frame, and the run (thread-only).
+static mut TRUST_SEEN: u32 = 0;
+static mut TRUST_RUN: u32 = 0;
+
+/// Once per frame, from the frame's present call: a frame is a miss when the handler flipped the
+/// one before by its timeout instead of by bit 24. In conventional mode a frame is clean when it
+/// flipped with bit 24. On a PS1 this never changes anything: no miss ever happens.
+#[inline(never)]
+fn observe_signal() {
+    // SAFETY: thread-only statics; the mode word is written here and only read by the handler.
+    unsafe {
+        let fallbacks = crate::interrupts::draw_done_fallback_count();
+        let missed = fallbacks != read_volatile(addr_of!(TRUST_SEEN));
+        write_volatile(addr_of_mut!(TRUST_SEEN), fallbacks);
+        let conv = read_volatile(addr_of!(crate::interrupts::__psx_rt_flip_conv)) != 0;
+        let run = read_volatile(addr_of!(TRUST_RUN));
+        let run = match (conv, missed) {
+            (false, true) => run + TRUST_MISS_WEIGHT,
+            (false, false) => run.saturating_sub(1),
+            (true, true) => 0,
+            (true, false) => run + 1,
+        };
+        let limit = if conv { TRUST_CLEAN } else { TRUST_MISS_LIMIT };
+        if run >= limit {
+            write_volatile(
+                addr_of_mut!(crate::interrupts::__psx_rt_flip_conv),
+                u32::from(!conv),
+            );
+            write_volatile(addr_of_mut!(TRUST_RUN), 0);
+        } else {
+            write_volatile(addr_of_mut!(TRUST_RUN), run);
+        }
+    }
+}
+
 /// Add `vblanks` to a thread-only counter.
 fn add(counter: *mut u32, vblanks: u32) {
     // SAFETY: `counter` is one of this module's thread-only statics; no handler touches it.
@@ -754,12 +803,8 @@ fn add(counter: *mut u32, vblanks: u32) {
 fn stop_walk_and_raise() {
     #[cfg(target_arch = "mips")]
     {
-        use psx_io::dma::{self, Channel};
-        if dma::is_busy(Channel::Gpu) && !dma::wait_done(Channel::Gpu, dma::DEFAULT_SPINS) {
-            dma::abort(Channel::Gpu);
-            psx_io::gpu::write_display_control_unguarded(gp1::RESET_CMD_BUFFER);
-        }
-        // `wait_command_ready`, with its timeout reset written past the guard.
+        // A walk that does not end is waited out and aborted by the draw-done sequence itself
+        // (`signal_draw_done_unguarded`), so only a GPU stuck inside a command needs the reset.
         if !psx_io::gpu::try_wait_command_ready(psx_io::gpu::READY_SPINS) {
             psx_io::gpu::write_display_control_unguarded(gp1::RESET_CMD_BUFFER);
         }
