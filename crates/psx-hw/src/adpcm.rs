@@ -90,8 +90,8 @@ pub const fn header(filter: usize, shift: u32) -> u8 {
 ///
 /// If `filter` is not below five.
 #[inline(always)]
-pub fn quantise_block(
-    x: &[i32; BLOCK_SAMPLES],
+pub fn quantise_block<S: Copy + Into<i32>>(
+    x: &[S; BLOCK_SAMPLES],
     state: (i32, i32),
     filter: usize,
     shift: u32,
@@ -103,15 +103,157 @@ pub fn quantise_block(
     let mut i = 0;
     while i < BLOCK_SAMPLES {
         let p = predict(f, s1, s2);
-        let q = nearest_nibble(x[i] - p, shift);
+        let target: i32 = x[i].into();
+        let q = nearest_nibble(target - p, shift);
         let v = reconstruct(q, shift, p);
-        error(x[i] - v);
+        error(target - v);
         nib[i] = (q & 0xf) as u8;
         s2 = s1;
         s1 = v;
         i += 1;
     }
     (nib, (s1, s2))
+}
+
+/// The nibble (`-8..=7`) for `residual` at `shift` when ties round up: `(residual + half) >> step`,
+/// floored, then clamped. This is the rounding the run-time guest encoders ship; it differs from
+/// [`nearest_nibble`] only when a negative residual sits exactly halfway between two steps (which
+/// goes to the larger nibble here, away from zero there).
+#[inline(always)]
+#[must_use]
+pub const fn nibble_half_up(residual: i32, shift: u32) -> i32 {
+    let step_log = 12 - shift as i32;
+    let q = if step_log == 0 {
+        residual
+    } else {
+        (residual + (1 << (step_log - 1))) >> step_log
+    };
+    if q < -8 {
+        -8
+    } else if q > 7 {
+        7
+    } else {
+        q
+    }
+}
+
+/// The largest absolute open-loop residual of the block under `filter`: each sample against the
+/// prediction from the *source* history (the previous two target samples), the cheap measure a
+/// run-time encoder picks its shift from.
+#[inline(always)]
+#[must_use]
+pub fn residual_peak<S: Copy + Into<i32>>(
+    x: &[S; BLOCK_SAMPLES],
+    state: (i32, i32),
+    filter: usize,
+) -> i32 {
+    let f = FILTERS[filter];
+    let (mut s1, mut s2) = state;
+    let mut peak = 0;
+    let mut i = 0;
+    while i < BLOCK_SAMPLES {
+        let target: i32 = x[i].into();
+        let r = target - predict(f, s1, s2);
+        peak = if r.abs() > peak { r.abs() } else { peak };
+        s2 = s1;
+        s1 = target;
+        i += 1;
+    }
+    peak
+}
+
+/// [`residual_peak`] for all five filters in one pass, with the table folded in as constants.
+#[inline(always)]
+#[must_use]
+pub fn filter_peaks<S: Copy + Into<i32>>(x: &[S; BLOCK_SAMPLES], state: (i32, i32)) -> [i32; 5] {
+    let (mut s1, mut s2) = state;
+    let mut peak = [0i32; 5];
+    let mut i = 0;
+    while i < BLOCK_SAMPLES {
+        let t: i32 = x[i].into();
+        let r = [
+            t,
+            t - predict(FILTERS[1], s1, s2),
+            t - predict(FILTERS[2], s1, s2),
+            t - predict(FILTERS[3], s1, s2),
+            t - predict(FILTERS[4], s1, s2),
+        ];
+        let mut f = 0;
+        while f < 5 {
+            let a = r[f].abs();
+            peak[f] = if a > peak[f] { a } else { peak[f] };
+            f += 1;
+        }
+        s2 = s1;
+        s1 = t;
+        i += 1;
+    }
+    peak
+}
+
+/// The filter with the smallest peak (the lowest index on a tie) and that peak.
+#[inline(always)]
+#[must_use]
+pub const fn best_filter(peaks: &[i32; 5]) -> (usize, i32) {
+    let mut best = 0;
+    let mut f = 1;
+    while f < 5 {
+        if peaks[f] < peaks[best] {
+            best = f;
+        }
+        f += 1;
+    }
+    (best, peaks[best])
+}
+
+/// The finest shift (at most [`MAX_SHIFT`]) whose nibble range still covers a residual `peak`.
+#[inline(always)]
+#[must_use]
+pub const fn shift_for_peak(peak: i32) -> u32 {
+    let mut shift = MAX_SHIFT;
+    while shift > 0 && peak > (7 << (12 - shift)) {
+        shift -= 1;
+    }
+    shift
+}
+
+/// Quantise one block closed-loop under `filter` and `shift` ([`nibble_half_up`] rounding) and
+/// write the whole 16 bytes into `out`: header, `flags` and the 28 nibbles. Returns the history
+/// after the block. The run-time encoders' form: no error accounting, nibbles stored in place.
+///
+/// # Panics
+///
+/// If `filter` is not below five.
+#[inline(always)]
+pub fn encode_block<S: Copy + Into<i32>>(
+    x: &[S; BLOCK_SAMPLES],
+    state: (i32, i32),
+    filter: usize,
+    shift: u32,
+    flags: u8,
+    out: &mut [u8; BLOCK_BYTES],
+) -> (i32, i32) {
+    let f = FILTERS[filter];
+    let (mut s1, mut s2) = state;
+    out[0] = header(filter, shift);
+    out[1] = flags;
+    let mut i = 0;
+    while i < BLOCK_SAMPLES {
+        let p = predict(f, s1, s2);
+        let target: i32 = x[i].into();
+        let q = nibble_half_up(target - p, shift);
+        let v = reconstruct(q, shift, p);
+        s2 = s1;
+        s1 = v;
+        let nib = (q & 0xf) as u8;
+        if i & 1 == 0 {
+            out[2 + i / 2] = nib;
+        } else {
+            out[2 + i / 2] |= nib << 4;
+        }
+        i += 1;
+    }
+    (s1, s2)
 }
 
 /// Pack a block: `header`, `flags` and the 28 nibbles, two to a byte, the first in the low half.
@@ -130,7 +272,9 @@ pub fn pack_block(header: u8, flags: u8, nib: &[u8; BLOCK_SAMPLES]) -> [u8; BLOC
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
     use super::*;
+    use std::eprintln;
 
     #[test]
     fn the_table_is_the_published_one_and_xa_takes_its_prefix() {
@@ -180,6 +324,306 @@ mod tests {
                 }
                 assert_eq!((s1, s2), end);
                 assert_eq!(err, sum);
+            }
+        }
+    }
+
+    /// A deterministic stream of blocks the way the synths make them: tones, noise, silence,
+    /// full-scale clipping and steps, so every filter and shift gets picked.
+    fn block(rng: &mut u32, n: u32) -> [i16; BLOCK_SAMPLES] {
+        let mut next = || {
+            *rng ^= *rng << 13;
+            *rng ^= *rng >> 17;
+            *rng ^= *rng << 5;
+            *rng
+        };
+        let kind = next() % 6;
+        let amp = (next() % 32768) as i32 + 1;
+        let period = (next() % 60 + 2) as i32;
+        core::array::from_fn(|i| {
+            let ph = ((i as u32 + n * 28) as i32 % period) * 2 - period;
+            let v = match kind {
+                0 => 0,
+                1 => (next() as i32 >> 16) * amp / 32768,
+                2 => ph * amp / period,
+                3 => {
+                    if ph < 0 {
+                        -amp
+                    } else {
+                        amp
+                    }
+                }
+                4 => (ph * ph / period - period / 3) * amp / period,
+                _ => (next() as i32 >> 20) * (1 + (next() % 8) as i32),
+            };
+            v.clamp(-32768, 32767) as i16
+        })
+    }
+
+    /// Celeste's shipped encoder (`shared/src/synth.rs encode_block`, `shift_for`, `quantize`),
+    /// verbatim apart from the statics being fields.
+    struct OldCeleste {
+        s1: i32,
+        s2: i32,
+        filter: usize,
+        count: u32,
+    }
+
+    impl OldCeleste {
+        fn encode(&mut self, pcm: &[i16; BLOCK_SAMPLES], flags: u8, out: &mut [u8; BLOCK_BYTES]) {
+            let (s1, s2) = (self.s1, self.s2);
+            let search = self.count & 3 == 0;
+            let mut best_f = self.filter;
+            let mut best_max = 0i32;
+            let (mut p1, mut p2) = (s1, s2);
+            if search {
+                let mut rmax = [0i32; 5];
+                for &x in pcm.iter() {
+                    let x = x as i32;
+                    let r = [
+                        x,
+                        x - ((p1 * 60) >> 6),
+                        x - ((p1 * 115) >> 6) - ((p2 * -52) >> 6),
+                        x - ((p1 * 98) >> 6) - ((p2 * -55) >> 6),
+                        x - ((p1 * 122) >> 6) - ((p2 * -60) >> 6),
+                    ];
+                    for f in 0..5 {
+                        rmax[f] = rmax[f].max(r[f].abs());
+                    }
+                    p2 = p1;
+                    p1 = x;
+                }
+                best_f = 0;
+                best_max = rmax[0];
+                for f in 1..5 {
+                    if rmax[f] < best_max {
+                        best_max = rmax[f];
+                        best_f = f;
+                    }
+                }
+            } else {
+                let (k0, k1) = FILTERS[best_f];
+                for &x in pcm.iter() {
+                    let x = x as i32;
+                    best_max = best_max.max((x - ((p1 * k0) >> 6) - ((p2 * k1) >> 6)).abs());
+                    p2 = p1;
+                    p1 = x;
+                }
+            }
+            self.filter = best_f;
+            self.count = self.count.wrapping_add(1);
+            let mut shift = 12u32;
+            while shift > 0 && best_max > (7 << (12 - shift)) {
+                shift -= 1;
+            }
+            let (k0, k1) = FILTERS[best_f];
+            let (mut p1, mut p2) = (s1, s2);
+            let rs = 12 - shift;
+            for i in 0..BLOCK_SAMPLES {
+                let pred = ((p1 * k0) >> 6) + ((p2 * k1) >> 6);
+                let r = pcm[i] as i32 - pred;
+                let q = (if rs > 0 {
+                    (r + (1 << (rs - 1))) >> rs
+                } else {
+                    r
+                })
+                .clamp(-8, 7);
+                let dec = (((q << 12) >> shift) + pred).clamp(-0x8000, 0x7fff);
+                p2 = p1;
+                p1 = dec;
+                let n = (q & 0xf) as u8;
+                if i & 1 == 0 {
+                    out[2 + i / 2] = n;
+                } else {
+                    out[2 + i / 2] |= n << 4;
+                }
+            }
+            self.s1 = p1;
+            self.s2 = p2;
+            out[0] = ((best_f as u8) << 4) | shift as u8;
+            out[1] = flags;
+        }
+    }
+
+    /// The same encoder through this module: what the game calls after adopting it.
+    struct NewCeleste {
+        state: (i32, i32),
+        filter: usize,
+        count: u32,
+    }
+
+    impl NewCeleste {
+        fn encode(&mut self, pcm: &[i16; BLOCK_SAMPLES], flags: u8, out: &mut [u8; BLOCK_BYTES]) {
+            let peak = if self.count & 3 == 0 {
+                let (f, peak) = best_filter(&filter_peaks(pcm, self.state));
+                self.filter = f;
+                peak
+            } else {
+                residual_peak(pcm, self.state, self.filter)
+            };
+            self.count = self.count.wrapping_add(1);
+            self.state = encode_block(
+                pcm,
+                self.state,
+                self.filter,
+                shift_for_peak(peak),
+                flags,
+                out,
+            );
+        }
+    }
+
+    #[test]
+    fn the_celeste_encoder_through_this_module_writes_the_same_bytes() {
+        let mut rng = 0x1234_5678u32;
+        let mut old = OldCeleste {
+            s1: 0,
+            s2: 0,
+            filter: 0,
+            count: 0,
+        };
+        let mut new = NewCeleste {
+            state: (0, 0),
+            filter: 0,
+            count: 0,
+        };
+        let (mut blocks, mut filters_seen, mut shifts_seen) = (0u32, [false; 5], [false; 13]);
+        for n in 0..600_000u32 {
+            if n % 5000 == 0 {
+                // A stream restart, as reset_encoder does.
+                old = OldCeleste {
+                    s1: 0,
+                    s2: 0,
+                    filter: 0,
+                    count: 0,
+                };
+                new = NewCeleste {
+                    state: (0, 0),
+                    filter: 0,
+                    count: 0,
+                };
+            }
+            let pcm = block(&mut rng, n);
+            let flags = (n % 8) as u8;
+            let (mut a, mut b) = ([0u8; BLOCK_BYTES], [0xaau8; BLOCK_BYTES]);
+            old.encode(&pcm, flags, &mut a);
+            new.encode(&pcm, flags, &mut b);
+            assert_eq!(a, b, "block {n}");
+            assert_eq!((old.s1, old.s2), new.state, "history after block {n}");
+            filters_seen[(a[0] >> 4) as usize] = true;
+            shifts_seen[(a[0] & 15) as usize] = true;
+            blocks += 1;
+        }
+        assert_eq!(blocks, 600_000);
+        assert!(filters_seen.iter().all(|&s| s), "{filters_seen:?}");
+        assert!(shifts_seen[..=12].iter().all(|&s| s), "{shifts_seen:?}");
+    }
+
+    /// VoXide's shipped `adpcm_block`, with the prediction either as it ships (one `>> 6` of
+    /// the sum of products) or as the SPU decodes (two floored products).
+    fn old_voxide(s: &[i32; 28], p1: &mut i32, p2: &mut i32, out: &mut [u8; 16], spu_exact: bool) {
+        let pred = |a: i32, b: i32, k: (i32, i32)| {
+            if spu_exact {
+                ((a * k.0) >> 6) + ((b * k.1) >> 6)
+            } else {
+                (a * k.0 + b * k.1) >> 6
+            }
+        };
+        let mut best = (i32::MAX, 0usize);
+        let mut f = 0;
+        while f < 5 {
+            let (mut a, mut b) = (*p1, *p2);
+            let mut m = 0;
+            let mut i = 0;
+            while i < 28 {
+                let r = s[i] - pred(a, b, FILTERS[f]);
+                m = m.max(r.abs());
+                b = a;
+                a = s[i];
+                i += 1;
+            }
+            if m < best.0 {
+                best = (m, f);
+            }
+            f += 1;
+        }
+        let f = best.1;
+        let mut range = 12;
+        while range > 0 && (7 << (12 - range)) < best.0 {
+            range -= 1;
+        }
+        let shift = range;
+        out[0] = (shift as u8) | ((f as u8) << 4);
+        out[1] = 0;
+        let step = 12 - shift;
+        let mut i = 0;
+        while i < 28 {
+            let pr = pred(*p1, *p2, FILTERS[f]);
+            let r = s[i] - pr;
+            let q = if step > 0 {
+                ((r + (1 << (step - 1))) >> step).clamp(-8, 7)
+            } else {
+                r.clamp(-8, 7)
+            };
+            let dec = ((q << step) + pr).clamp(-32_768, 32_767);
+            *p2 = *p1;
+            *p1 = dec;
+            let nib = (q & 0xf) as u8;
+            if i % 2 == 0 {
+                out[2 + i / 2] = nib;
+            } else {
+                out[2 + i / 2] |= nib << 4;
+            }
+            i += 1;
+        }
+    }
+
+    /// VoXide's encoder through this module: every block searches all five filters.
+    fn new_voxide(s: &[i32; 28], state: &mut (i32, i32), out: &mut [u8; 16]) {
+        let (f, peak) = best_filter(&filter_peaks(s, *state));
+        *state = encode_block(s, *state, f, shift_for_peak(peak), 0, out);
+    }
+
+    #[test]
+    fn the_voxide_encoder_matches_with_the_spu_prediction_and_differs_without_it() {
+        let mut rng = 0x9e37_79b9u32;
+        let (mut exact_old, mut shipped_old) = ((0, 0), (0, 0));
+        let mut new = (0, 0);
+        let (mut differing, mut total, mut worst) = (0u32, 0u32, 0i32);
+        for n in 0..400_000u32 {
+            let s16 = block(&mut rng, n);
+            let s: [i32; 28] = core::array::from_fn(|i| i32::from(s16[i]));
+            let (mut a, mut b, mut c) = ([0u8; 16], [0u8; 16], [0xaau8; 16]);
+            old_voxide(&s, &mut exact_old.0, &mut exact_old.1, &mut a, true);
+            old_voxide(&s, &mut shipped_old.0, &mut shipped_old.1, &mut b, false);
+            new_voxide(&s, &mut new, &mut c);
+            assert_eq!(
+                a, c,
+                "block {n}: the SPU-exact old form must equal the module"
+            );
+            assert_eq!(exact_old, new);
+            total += 1;
+            differing += u32::from(a != b);
+            worst = worst.max((shipped_old.0 - new.0).abs());
+        }
+        // The shipped form drifts from what the SPU plays; the module does not.
+        assert!(differing > 0, "{differing} of {total}");
+        eprintln!("voxide shipped vs spu-exact: {differing} of {total} blocks differ, worst history gap {worst}");
+    }
+
+    #[test]
+    fn half_up_differs_from_nearest_only_on_negative_ties() {
+        for shift in 0..=MAX_SHIFT {
+            for r in -70_000..70_000 {
+                let (a, b) = (nibble_half_up(r, shift), nearest_nibble(r, shift));
+                if a != b {
+                    let step = 1 << (12 - shift);
+                    assert!(
+                        r < 0 && step > 1 && (-r) % step == step / 2,
+                        "{r} at {shift}: {a} {b}"
+                    );
+                    assert_eq!(a, b + 1);
+                }
             }
         }
     }
