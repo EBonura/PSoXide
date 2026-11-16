@@ -7,6 +7,21 @@ pub fn scale_rgb(rgb: (u8, u8, u8), num: i32, den: i32) -> (u8, u8, u8) {
     let channel = |v: u8| ((i32::from(v) * num) / den).clamp(0, 255) as u8;
     (channel(rgb.0), channel(rgb.1), channel(rgb.2))
 }
+/// Scale each channel by `num / 256`, truncating (a right shift of the product), for a brightness
+/// or fade `num` in `0..=256`. No division and no clamp: three multiplies and three shifts, the
+/// body the launcher and the loader's disc art wrote by hand. Unlike [`scale_rgb`] it does not
+/// clamp, so a `num` above 256 wraps the channel (`as u8`) the way those callers' code did; keep
+/// `num` at 256 or below, or use [`scale_rgb`] when a boost must saturate. `num` up to
+/// 16,843,009 cannot overflow the 32-bit product.
+#[inline]
+#[must_use]
+pub const fn scale_rgb_q8(rgb: (u8, u8, u8), num: u32) -> (u8, u8, u8) {
+    (
+        ((rgb.0 as u32 * num) >> 8) as u8,
+        ((rgb.1 as u32 * num) >> 8) as u8,
+        ((rgb.2 as u32 * num) >> 8) as u8,
+    )
+}
 /// Interpolate using signed division toward zero. Clamp the numerator to the
 /// original denominator before replacing a zero divisor with one. Therefore
 /// a zero denominator always returns `a`, matching the caller contract.
@@ -44,6 +59,38 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn scale_rgb_q8_is_the_disc_art_body_and_truncates() {
+        // The launcher/loader `scale`, as the oracle, over every channel and a numerator range.
+        let oracle = |c: (u8, u8, u8), num: u32| {
+            (
+                ((c.0 as u32 * num) >> 8) as u8,
+                ((c.1 as u32 * num) >> 8) as u8,
+                ((c.2 as u32 * num) >> 8) as u8,
+            )
+        };
+        for v in 0..=255u8 {
+            for num in 0..=300u32 {
+                assert_eq!(
+                    scale_rgb_q8((v, 255 - v, v / 2), num),
+                    oracle((v, 255 - v, v / 2), num)
+                );
+            }
+        }
+        assert_eq!(scale_rgb_q8((255, 128, 1), 256), (255, 128, 1));
+        assert_eq!(scale_rgb_q8((255, 128, 1), 128), (127, 64, 0));
+        assert_eq!(scale_rgb_q8((255, 128, 1), 0), (0, 0, 0));
+        // Equal to scale_rgb on the range where nothing clamps.
+        for v in [0u8, 1, 77, 128, 255] {
+            for num in 0..=256u32 {
+                assert_eq!(
+                    scale_rgb_q8((v, v, v), num).0,
+                    ((i32::from(v) * num as i32) / 256) as u8
+                );
+            }
+        }
+    }
+
     #[test]
     fn descending_rounding_is_explicit() {
         assert_eq!(lerp_rgb((3, 0, 255), (0, 3, 0), 1, 2), (2, 1, 128));
