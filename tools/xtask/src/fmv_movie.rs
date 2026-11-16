@@ -4,7 +4,7 @@
 //! Everything is generated: an FFmpeg test pattern with temporal noise on
 //! top (so every frame fills the whole 2x sector budget) and a stereo beep
 //! track (left 440 Hz, right 660 Hz, 100 ms at the start of every second, in
-//! step with the pattern's seconds counter). psxavenc encodes it as a
+//! step with the pattern's seconds counter). psx-str-cook encodes it as a
 //! 320x240, 15 fps, BS v2 STR with interleaved 37.8 kHz stereo XA-ADPCM,
 //! 2336-byte sectors, XA file 1 / channel 0.
 //!
@@ -25,7 +25,7 @@
 //! BAD and a skipped one as LOST.
 //!
 //! ```text
-//! fmv-test-movie --psxavenc PATH --out MOVIE.STR [--seconds 75] [--noise 40]
+//! fmv-test-movie --str-cook PATH --out MOVIE.STR [--seconds 75] [--noise 40]
 //! ```
 //!
 //! Writes MOVIE.STR (2336-byte sectors, for `mkisopsx --xa-file`) and
@@ -56,7 +56,7 @@ pub fn checksum(payload: &[u8], ordinal: u32) -> u32 {
 /// `(sectors, video sectors, audio sectors, distinct frames)`.
 pub fn stamp(data: &mut [u8]) -> Result<(usize, usize, usize, usize), String> {
     if !data.len().is_multiple_of(XA_SECTOR) {
-        return Err("psxavenc -t str writes 2336-byte sectors".into());
+        return Err("psx-str-cook writes 2336-byte sectors".into());
     }
     let sectors = data.len() / XA_SECTOR;
     let sector = |data: &[u8], i: usize| data[i * XA_SECTOR..(i + 1) * XA_SECTOR].to_vec();
@@ -96,7 +96,7 @@ fn run(command: &mut Command) -> Result<(), String> {
     }
 }
 
-fn movie(psxavenc: &str, out: &Path, seconds: u32, noise: u32) -> Result<(), String> {
+fn movie(str_cook: &str, out: &Path, seconds: u32, noise: u32) -> Result<(), String> {
     let parent = match out.parent() {
         Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
         _ => PathBuf::from("."),
@@ -120,12 +120,45 @@ fn movie(psxavenc: &str, out: &Path, seconds: u32, noise: u32) -> Result<(), Str
             ))
             .args(["-c:v", "ffv1", "-c:a", "pcm_s16le", "-shortest"])
             .arg(&src))?;
-        run(Command::new(psxavenc)
-            .args([
-                "-q", "-t", "str", "-v", "v2", "-s", "320x240", "-r", "15", "-x", "2", "-f",
-                "37800", "-c", "2", "-b", "4", "-F", "1", "-C", "0",
-            ])
+        // FFmpeg only decodes: the encoder is the SDK's own psx-str-cook.
+        let video = tmp.join("video.y4m");
+        let audio = tmp.join("audio.wav");
+        run(Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-i"])
             .arg(&src)
+            .args(["-map", "0:v:0", "-f", "yuv4mpegpipe", "-pix_fmt", "yuv420p"])
+            .arg(&video))?;
+        run(Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-i"])
+            .arg(&src)
+            .args([
+                "-map",
+                "0:a:0",
+                "-ac",
+                "2",
+                "-ar",
+                "37800",
+                "-c:a",
+                "pcm_s16le",
+                "-f",
+                "wav",
+            ])
+            .arg(&audio))?;
+        run(Command::new(str_cook)
+            .args([
+                "encode",
+                "--size",
+                "320x240",
+                "--speed",
+                "2",
+                "--channels",
+                "2",
+            ])
+            .args(["--xa-file", "1", "--xa-channel", "0", "--video"])
+            .arg(&video)
+            .arg("--audio")
+            .arg(&audio)
+            .arg("--out")
             .arg(&raw))?;
         fs::read(&raw).map_err(|e| e.to_string())
     })();
@@ -149,7 +182,7 @@ fn movie(psxavenc: &str, out: &Path, seconds: u32, noise: u32) -> Result<(), Str
 
 /// Parse the arguments and build the movie.
 pub fn main(args: &[String]) -> Result<(), String> {
-    let (mut psxavenc, mut out, mut seconds, mut noise) = (None, None, 75, 40);
+    let (mut str_cook, mut out, mut seconds, mut noise) = (None, None, 75, 40);
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         let mut value = || {
@@ -158,16 +191,16 @@ pub fn main(args: &[String]) -> Result<(), String> {
                 .ok_or_else(|| format!("{arg} needs a value"))
         };
         match arg.as_str() {
-            "--psxavenc" => psxavenc = Some(value()?),
+            "--str-cook" => str_cook = Some(value()?),
             "--out" => out = Some(value()?),
             "--seconds" => seconds = value()?.parse().map_err(|_| "--seconds wants an integer")?,
             "--noise" => noise = value()?.parse().map_err(|_| "--noise wants an integer")?,
             other => return Err(format!("unknown argument {other}")),
         }
     }
-    let usage = "usage: fmv-test-movie --psxavenc PATH --out MOVIE.STR [--seconds 75] [--noise 40]";
+    let usage = "usage: fmv-test-movie --str-cook PATH --out MOVIE.STR [--seconds 75] [--noise 40]";
     movie(
-        &psxavenc.ok_or(usage)?,
+        &str_cook.ok_or(usage)?,
         Path::new(&out.ok_or(usage)?),
         seconds,
         noise,

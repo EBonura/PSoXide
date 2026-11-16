@@ -19,8 +19,9 @@ This program needs `MOVIE.STR` with the synthetic test pattern and sector metada
 ```sh
 make example EXAMPLE=hello-fmv
 mkdir -p build/fmv-docs
+cargo build --locked --release -q -p psx-str-cook
 cargo run --locked -q -p xtask -- fmv-test-movie \
-  --psxavenc /path/to/psxavenc --out build/fmv-docs/MOVIE.STR
+  --str-cook target/release/psx-str-cook --out build/fmv-docs/MOVIE.STR
 cargo run --locked --release -p mkisopsx -- \
   --exe build/examples/mipsel-sony-psx/release/hello-fmv.exe \
   --out build/examples/mipsel-sony-psx/release/hello-fmv.bin \

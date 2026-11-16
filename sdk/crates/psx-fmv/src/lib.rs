@@ -24,8 +24,8 @@
 //! Bitstream versions 1 and 2 (the same coding) are decoded; v3 differs in the DC
 //! coding and is rejected with [`bitstream::DecodeError::Version`].
 //!
-//! The encoder is `psxavenc` (zlib license), run as a host build tool:
-//! `psxavenc -t strv -v v2 -s 320x240 -r 15 -x 2 in.mp4 out.str`.
+//! The encoder is the SDK's own `psx-str-cook` (`crates/psx-str-cook`), run as a host build tool:
+//! `psx-str-cook encode --video in.y4m --audio in.wav --out out.str --size 320x240 --speed 2`.
 
 #![no_std]
 
