@@ -422,8 +422,10 @@ fn run(frames: &[Frame], min: u32, schedule: &[(usize, Event)]) -> Model {
                 }
                 m.draw_direct(f);
                 // `present_drawn`'s own check, then the rest.
-                if m.flip != 0 || m.head != 0 {
-                    wait_idle_on(&mut m);
+                // The guard (`wait_idle_on`, above) emptied the slot; the drawn wait has no slot loop.
+                assert_eq!(m.head, 0, "a drawn frame with the slot full");
+                if m.flip != 0 {
+                    wait_drawn_idle_on(&mut m);
                 }
                 m.drawn_frame = Some(f);
                 present_drawn_on(&mut m, display_word(f));
