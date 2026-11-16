@@ -9,13 +9,20 @@
 //! Not a cryptographic hash -- stable fingerprinting of trusted data
 //! only.
 
+#[cfg(not(target_arch = "mips"))]
 const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+#[cfg(not(target_arch = "mips"))]
 const PRIME: u64 = 0x0000_0100_0000_01b3;
 
+/// Host only (`cfg(not(target_arch = "mips"))`): the 64-bit multiply is not guest code. A guest
+/// that needs this hash folds it with `psx_math::WideU::fnv1a_step`.
+///
 /// Incremental FNV-1a-64 for callers that hash non-contiguous parts
 /// (clipped display rows, multi-slice fingerprints).
+#[cfg(not(target_arch = "mips"))]
 pub struct Fnv1a64(u64);
 
+#[cfg(not(target_arch = "mips"))]
 impl Fnv1a64 {
     /// Hasher seeded with the FNV-1a offset basis.
     pub const fn new() -> Self {
@@ -36,13 +43,15 @@ impl Fnv1a64 {
     }
 }
 
+#[cfg(not(target_arch = "mips"))]
 impl Default for Fnv1a64 {
     fn default() -> Self {
         Self::new()
     }
 }
 
-/// One-shot FNV-1a-64 of a byte slice.
+/// One-shot FNV-1a-64 of a byte slice. Host only, like [`Fnv1a64`].
+#[cfg(not(target_arch = "mips"))]
 pub fn fnv1a_64(bytes: &[u8]) -> u64 {
     let mut h = Fnv1a64::new();
     h.update(bytes);
