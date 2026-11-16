@@ -26,22 +26,49 @@ use crate::{
     FLAG_COMPRESSED, FRAMES_PER_BLOCK, FRAME_SIZE, MAX_NAME_LEN,
 };
 
-// Directory entry field offsets.
-const E_STATE: usize = 0;
-const E_SIZE: usize = 4;
-const E_LINK: usize = 8;
-const E_NAME: usize = 10;
-const E_CHK: usize = 127;
+/// The directory-entry layout, shared with any program that reads a card's directory itself (the
+/// restored games' BIOS-style card layer): field offsets, allocation states, the free test and
+/// the XOR checksum of a 128-byte entry.
+pub mod dir {
+    use crate::FRAME_SIZE;
 
-// Allocation states.
-const ST_FIRST: u8 = 0x51;
-const ST_MIDDLE: u8 = 0x52;
-const ST_LAST: u8 = 0x53;
-const ST_FREE: u8 = 0xa0;
-/// A block is free if its state's high nibble is `0xA` (formatted or deleted).
-fn is_free(state: u8) -> bool {
-    state & 0xf0 == 0xa0
+    /// Offset of the allocation state byte.
+    pub const E_STATE: usize = 0;
+    /// Offset of the little-endian file size (first block only).
+    pub const E_SIZE: usize = 4;
+    /// Offset of the little-endian next-block link.
+    pub const E_LINK: usize = 8;
+    /// Offset of the NUL-terminated name.
+    pub const E_NAME: usize = 10;
+    /// Offset of the XOR checksum of bytes `0..127`.
+    pub const E_CHK: usize = 127;
+
+    /// State of a file's first block.
+    pub const ST_FIRST: u8 = 0x51;
+    /// State of a file's middle block.
+    pub const ST_MIDDLE: u8 = 0x52;
+    /// State of a file's last block.
+    pub const ST_LAST: u8 = 0x53;
+    /// State of a free (formatted) block.
+    pub const ST_FREE: u8 = 0xa0;
+    /// The link value that ends a chain.
+    pub const LINK_NONE: u16 = 0xffff;
+    /// A block is free if its state's high nibble is `0xA` (formatted or deleted).
+    #[must_use]
+    pub fn is_free(state: u8) -> bool {
+        state & 0xf0 == 0xa0
+    }
+
+    /// XOR of a frame's first 127 bytes (the directory checksum).
+    #[must_use]
+    pub fn checksum(frame: &[u8; FRAME_SIZE]) -> u8 {
+        frame[..E_CHK].iter().fold(0u8, |a, &b| a ^ b)
+    }
 }
+use dir::{
+    checksum, is_free, E_CHK, E_LINK, E_NAME, E_SIZE, E_STATE, LINK_NONE, ST_FIRST, ST_FREE,
+    ST_LAST, ST_MIDDLE,
+};
 
 // Title (`SC`) header offsets within a file's first frame.
 const T_ICON_FLAG: usize = 2;
@@ -50,18 +77,12 @@ const T_TITLE: usize = 4;
 const T_TITLE_LEN: usize = 64;
 const T_CLUT: usize = 0x60;
 
-const LINK_NONE: u16 = 0xffff;
 /// Payload frames in a file's first block (title + icon consume 2 frames).
 const FIRST_BLOCK_FRAMES: usize = FRAMES_PER_BLOCK - 2;
 /// Payload bytes in a file's first block.
 const FIRST_BLOCK_CAP: usize = FIRST_BLOCK_FRAMES * FRAME_SIZE; // 7936
 /// Payload bytes in a continuation block.
 const BLOCK_CAP: usize = FRAMES_PER_BLOCK * FRAME_SIZE; // 8192
-
-/// XOR of a frame's first 127 bytes (the directory checksum).
-fn checksum(frame: &[u8; FRAME_SIZE]) -> u8 {
-    frame[..E_CHK].iter().fold(0u8, |a, &b| a ^ b)
-}
 
 /// Blocks needed to hold `total` payload bytes (including the container header).
 pub(crate) const fn blocks_for(total: usize) -> usize {
@@ -84,9 +105,13 @@ fn read_u32(buf: &[u8]) -> u32 {
 // A file's block chain: physical block numbers (1..=15), in order.
 // --------------------------------------------------------------------------
 
-struct Chain {
-    blocks: [u8; DATA_BLOCKS],
-    len: usize,
+/// A file's block chain: physical block numbers (1..=15), in order ([`Card::chain`]).
+#[non_exhaustive]
+pub struct Chain {
+    /// The physical block numbers in order; `blocks[..len]` is valid.
+    pub blocks: [u8; DATA_BLOCKS],
+    /// How many blocks the chain holds.
+    pub len: usize,
 }
 
 /// The directory entries of the files a write replaces, one bit per entry.
@@ -223,8 +248,12 @@ impl<B: Block> Card<B> {
     /// Read directory entry `index`, refusing one whose XOR checksum does not
     /// match. Every operation walks these entries, so a flipped link or state
     /// byte must stop it before it frees or reuses another save's blocks.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Corrupt`] on a checksum mismatch, or whatever the device reports.
     #[inline(never)]
-    fn read_dir(&mut self, index: usize) -> Result<[u8; FRAME_SIZE]> {
+    pub fn read_dir(&mut self, index: usize) -> Result<[u8; FRAME_SIZE]> {
         let mut f = [0u8; FRAME_SIZE];
         self.dev.read_frame(1 + index as u16, &mut f)?;
         if checksum(&f) != f[E_CHK] {
@@ -392,7 +421,11 @@ impl<B: Block> Card<B> {
     }
 
     /// Find the first-block directory index of `name`, if present.
-    fn find(&mut self, name: &[u8]) -> Result<Option<usize>> {
+    ///
+    /// # Errors
+    ///
+    /// As [`read_dir`](Self::read_dir), for any entry it walks.
+    pub fn find(&mut self, name: &[u8]) -> Result<Option<usize>> {
         for i in 0..block_count() {
             let e = self.read_dir(i)?;
             if e[E_STATE] == ST_FIRST && entry_name_eq(&e, name) {
@@ -403,8 +436,13 @@ impl<B: Block> Card<B> {
     }
 
     /// Follow the link chain from a first-block entry.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Corrupt`] on a loop, an overrun, a link out of range or a state that is not a
+    /// file block, or as [`read_dir`](Self::read_dir).
     #[inline(never)]
-    fn chain(&mut self, first: usize) -> Result<Chain> {
+    pub fn chain(&mut self, first: usize) -> Result<Chain> {
         let mut blocks = [0u8; DATA_BLOCKS];
         let mut len = 0;
         let mut idx = first;
