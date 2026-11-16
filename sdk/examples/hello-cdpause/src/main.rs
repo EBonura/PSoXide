@@ -24,7 +24,6 @@ extern crate psx_rt;
 
 use psx_hw::cd::{STAT_PLAYING, STAT_READING, STAT_SEEKING};
 use psx_io::cd::reader::{SectorReader, DIAG_CD_ERROR, DIAG_PAUSE, SECTOR_WORDS};
-use psx_io::iso;
 
 const FILE_NAME: &str = "CDTEST.BIN";
 /// Spins for one GetStat.
@@ -83,16 +82,7 @@ fn read_n(reader: &mut SectorReader, lba: u32, count: u32) -> bool {
 }
 
 fn file_lba(reader: &mut SectorReader) -> Option<(u32, u32)> {
-    iso::find(
-        sector(),
-        |lba, into| {
-            let ok = reader.start_read(lba) && reader.read_sector(into);
-            reader.stop();
-            ok
-        },
-        None,
-        &[FILE_NAME],
-    )
+    reader.find(sector(), None, &[FILE_NAME])
 }
 
 #[no_mangle]

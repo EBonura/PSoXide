@@ -36,7 +36,6 @@ use psx_gpu::ot::OrderingTable;
 use psx_gpu::prim::{FillRect, TriGouraud};
 use psx_gpu::Gpu;
 use psx_io::cd::reader::SectorReader;
-use psx_io::iso;
 use psx_io::periph::Cd;
 use psx_rt::present::{self, Part, Presenter};
 use psx_rt::{dispatch, interrupts, tty};
@@ -385,16 +384,7 @@ fn print(label: &str, value: u32) {
 fn lookup(reader: &mut SectorReader) -> Option<(u32, u32)> {
     // SAFETY: single thread, one borrow at a time.
     let sector = unsafe { &mut *addr_of_mut!(SECTOR) };
-    iso::find(
-        sector,
-        |lba, into| {
-            let ok = reader.start_read(lba) && reader.read_sector(into);
-            reader.stop();
-            ok
-        },
-        None,
-        &[FILE_NAME],
-    )
+    reader.find(sector, None, &[FILE_NAME])
 }
 
 #[no_mangle]

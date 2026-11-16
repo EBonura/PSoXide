@@ -46,7 +46,6 @@ use psx_font::{BitOrder, BitmapFont, FontAtlas};
 use psx_gpu::display::{DisplayConfig, Resolution, VideoMode};
 use psx_gpu::prim::FillRect;
 use psx_gpu::Gpu;
-use psx_io::iso;
 use psx_io::periph::{Cd, MdecDma};
 use psx_pack::cd::{SectorReader, SECTOR_WORDS};
 use psx_rt::{interrupts, tty, Peripherals};
@@ -300,16 +299,7 @@ impl Stream {
 fn find_movie() -> Option<(u32, u32)> {
     // SAFETY: single-threaded use of the reader and its sector buffer.
     let (reader, sector) = unsafe { (reader(), &mut *addr_of_mut!(SECTOR)) };
-    iso::find(
-        sector,
-        |lba, into| {
-            let ok = reader.start_read(lba) && reader.read_sector(into);
-            reader.stop();
-            ok
-        },
-        None,
-        &[MOVIE],
-    )
+    reader.find(sector, None, &[MOVIE])
 }
 
 /// Small fixed text buffer for overlay lines.

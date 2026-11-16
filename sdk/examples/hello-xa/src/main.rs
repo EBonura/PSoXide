@@ -18,7 +18,6 @@ use psx_font::FontAtlas;
 use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
 use psx_gpu::Gpu;
 use psx_io::cd::xa::{DriveSpeed, Event, File, Player};
-use psx_io::iso;
 use psx_io::periph::Cd;
 use psx_pack::cd::{SectorReader, SECTOR_WORDS};
 use psx_pad::{button, poll_on, ButtonState, Port};
@@ -53,16 +52,7 @@ fn lookup(reader: &mut SectorReader, sector: &mut [u32; SECTOR_WORDS]) -> Option
     if !reader.prepare() {
         return None;
     }
-    let (lba, size) = iso::find(
-        sector,
-        |lba, into| {
-            let ok = reader.start_read(lba) && reader.read_sector(into);
-            reader.stop();
-            ok
-        },
-        None,
-        &[SONGS_FILE],
-    )?;
+    let (lba, size) = reader.find(sector, None, &[SONGS_FILE])?;
     Some(File::from_directory_entry(lba, size, FILE_NUMBER, SPEED))
 }
 

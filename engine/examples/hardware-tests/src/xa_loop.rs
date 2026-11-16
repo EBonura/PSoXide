@@ -21,7 +21,6 @@
 use crate::console_tests::{bit, record, spread, XA_COUNT, XA_RECORD};
 use crate::TimingRecord;
 use core::ptr::addr_of_mut;
-use psx_io::iso;
 use psx_io::cd::xa::{DriveSpeed, Event, File, Player};
 use psx_io::timers;
 use psx_pack::cd::{SectorReader, SECTOR_WORDS};
@@ -307,9 +306,5 @@ fn find(name: &str) -> Option<(u32, u32)> {
     // SAFETY: single-threaded use of the reader and its sector buffer, with nothing else driving
     // the controller.
     let (reader, sector) = unsafe { (&mut *addr_of_mut!(READER), &mut *addr_of_mut!(SECTOR)) };
-    iso::find(sector, |lba, into| {
-            let ok = reader.start_read(lba) && reader.read_sector(into);
-            reader.stop();
-            ok
-        }, None, &[name])
+    reader.find(sector, None, &[name])
 }
