@@ -25,7 +25,7 @@ const CDDA_CHANNELS: usize = 2;
 const CDDA_SECTOR_BYTES: usize = 2352;
 const ADPCM_BLOCK_BYTES: usize = 16;
 const ADPCM_SAMPLES_PER_BLOCK: usize = 28;
-const ADPCM_FILTERS: [(i32, i32); 5] = [(0, 0), (60, 0), (115, -52), (98, -55), (122, -60)];
+use psx_hw::adpcm::FILTERS as ADPCM_FILTERS;
 
 /// Options for a manifest-based import.
 #[derive(Clone, Debug)]

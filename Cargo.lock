@@ -850,6 +850,7 @@ dependencies = [
 name = "psxed-audio"
 version = "0.1.0"
 dependencies = [
+ "psx-hw",
  "psxed-format",
  "serde",
  "serde_json",

@@ -28,12 +28,11 @@
 //! which ignores history, so it decodes identically on the first pass and
 //! on every wrap (no click at the seam).
 
-/// Bytes per ADPCM block.
-pub const BLOCK_BYTES: usize = 16;
-/// Samples per ADPCM block.
-pub const BLOCK_SAMPLES: usize = 28;
-/// SPU prediction filters `(s1, s2)` weights in Q6.
-pub const FILTERS: [(i32, i32); 5] = [(0, 0), (60, 0), (115, -52), (98, -55), (122, -60)];
+use psx_hw::adpcm::{nearest_nibble as nearest, pack_block, predict, quantise_block, reconstruct};
+/// Bytes per ADPCM block, samples per block and the SPU's prediction filters `(s1, s2)` in Q6:
+/// the model every encoder shares, in `psx_hw::adpcm` (it is `no_std`, so guest synthesisers use
+/// the same table and quantiser).
+pub use psx_hw::adpcm::{BLOCK_BYTES, BLOCK_SAMPLES, FILTERS};
 
 /// Block flag: end of sample (jump to the repeat address).
 pub const FLAG_END: u8 = 0x01;
@@ -41,11 +40,6 @@ pub const FLAG_END: u8 = 0x01;
 pub const FLAG_REPEAT: u8 = 0x02;
 /// Block flag: loop start (latch this block as the repeat address).
 pub const FLAG_LOOP_START: u8 = 0x04;
-
-#[inline(always)]
-fn predict(f: (i32, i32), s1: i32, s2: i32) -> i32 {
-    ((s1 * f.0) >> 6) + ((s2 * f.1) >> 6)
-}
 
 /// Decode ADPCM blocks exactly as the SPU does (flags are ignored; blocks
 /// decode in order). Returns 28 samples per block.
@@ -116,52 +110,19 @@ struct Block {
 
 impl Block {
     fn bytes(&self, flags: u8) -> [u8; BLOCK_BYTES] {
-        let mut b = [0u8; BLOCK_BYTES];
-        b[0] = self.header;
-        b[1] = flags;
-        for i in 0..14 {
-            b[2 + i] = (self.nib[2 * i] & 0xf) | (self.nib[2 * i + 1] << 4);
-        }
-        b
+        pack_block(self.header, flags, &self.nib)
     }
-}
-
-#[inline(always)]
-fn nearest(residual: i32, shift: u32) -> i32 {
-    // Reconstruction step is 2^(12 - shift); round half away from zero.
-    let step_log = 12 - shift as i32;
-    let q = if step_log == 0 {
-        residual
-    } else {
-        let half = 1 << (step_log - 1);
-        if residual >= 0 {
-            (residual + half) >> step_log
-        } else {
-            -((-residual + half) >> step_log)
-        }
-    };
-    q.clamp(-8, 7)
 }
 
 fn greedy(x: &[i32; BLOCK_SAMPLES], state: (i32, i32), filter: usize, shift: u32) -> Block {
-    let f = FILTERS[filter];
-    let (mut s1, mut s2) = state;
-    let mut nib = [0u8; BLOCK_SAMPLES];
     let mut err = 0i64;
-    for i in 0..BLOCK_SAMPLES {
-        let p = predict(f, s1, s2);
-        let q = nearest(x[i] - p, shift);
-        let v = (((q << 12) >> shift) + p).clamp(-0x8000, 0x7fff);
-        let d = (x[i] - v) as i64;
-        err += d * d;
-        nib[i] = (q & 0xf) as u8;
-        s2 = s1;
-        s1 = v;
-    }
+    let (nib, end) = quantise_block(x, state, filter, shift, |d| {
+        err += i64::from(d) * i64::from(d)
+    });
     Block {
         header: ((filter as u8) << 4) | shift as u8,
         nib,
-        end: (s1, s2),
+        end,
         err,
     }
 }
@@ -199,7 +160,7 @@ fn trellis(
                 if !(-8..=7).contains(&q) {
                     continue;
                 }
-                let v = (((q << 12) >> shift) + pred).clamp(-0x8000, 0x7fff);
+                let v = reconstruct(q, shift, pred);
                 let d = (x[i] - v) as i64;
                 let mut np = *p;
                 np.err += d * d;
