@@ -171,6 +171,7 @@ impl Playlist {
     /// never opens it: a collision swaps the first song with the second (a round of one has no
     /// choice and repeats). The draw uses the stream's upper 24 bits, whose low bits are the
     /// stream's weakest.
+    #[inline(never)]
     fn shuffle(&mut self, avoid_first: Option<u8>) {
         let n = self.count as usize;
         for (i, slot) in self.order.iter_mut().enumerate().take(n) {
