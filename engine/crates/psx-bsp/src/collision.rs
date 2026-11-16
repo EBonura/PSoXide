@@ -1036,6 +1036,7 @@ pub struct PointTraceScratch {
 }
 
 impl PointTraceScratch {
+    #[must_use]
     pub const fn new() -> Self {
         Self {
             continuations: [const { MaybeUninit::uninit() }; TRACE_STACK_CAPACITY],
@@ -1103,12 +1104,15 @@ fn trace_point<P: PlaneSource, N: NodeSource>(
             if P::CHECKED && plane >= planes.len() {
                 return false;
             }
+            // SAFETY: `plane` is in range (validated, or tested above).
             let (ds, de) = unsafe { planes.distances_unchecked(plane, &from, &to) };
             if ds >= 0 && de >= 0 {
+                // SAFETY: `index` is in range and 0 < 2.
                 node = unsafe { nodes.child_unchecked(index, 0) };
                 continue;
             }
             if ds < 0 && de < 0 {
+                // SAFETY: `index` is in range and 1 < 2.
                 node = unsafe { nodes.child_unchecked(index, 1) };
                 continue;
             }
@@ -1127,8 +1131,10 @@ fn trace_point<P: PlaneSource, N: NodeSource>(
             if deferred == TRACE_STACK_CAPACITY {
                 return false;
             }
+            // SAFETY: `index` is in range and `side ^ 1` is 0 or 1.
+            let far_child = unsafe { nodes.child_unchecked(index, side ^ 1) };
             scratch.continuations[deferred].write(PointContinuation {
-                far_child: unsafe { nodes.child_unchecked(index, side ^ 1) },
+                far_child,
                 plane_index: plane as u16,
                 side: side as u8,
                 middle_fraction,
@@ -1137,6 +1143,7 @@ fn trace_point<P: PlaneSource, N: NodeSource>(
                 end: to,
             });
             deferred += 1;
+            // SAFETY: `index` is in range and `side` is 0 or 1.
             node = unsafe { nodes.child_unchecked(index, side) };
             end_fraction = middle_fraction;
             to = middle;
