@@ -66,7 +66,7 @@ engine clippy::ptr_arg 0
 engine clippy::new_without_default 0
 engine clippy::new_ret_no_self 0
 engine clippy::missing_safety_doc 0
-engine clippy::undocumented_unsafe_blocks 169
+engine clippy::undocumented_unsafe_blocks 165
 engine clippy::unnecessary_unwrap 0
 engine clippy::from_over_into 0
 engine clippy::inherent_to_string 0
@@ -74,7 +74,7 @@ engine clippy::enum_glob_use 0
 engine clippy::rc_buffer 0
 engine clippy::rc_mutex 0
 engine clippy::get_first 0
-engine clippy::must_use_candidate 1292
+engine clippy::must_use_candidate 1290
 engine clippy::unwrap_used 50
 engine clippy::exhaustive_enums 107
 engine clippy::exhaustive_structs 370
