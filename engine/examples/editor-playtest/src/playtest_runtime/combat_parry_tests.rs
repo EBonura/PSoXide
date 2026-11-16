@@ -565,8 +565,10 @@ fn the_players_parry_flashes_her_and_bursts_in_her_stance_colour() {
         assert_eq!(scene.player_flash.is_zenith(), !horizon);
         assert_eq!(
             scene.player_flash.lit_tint(&data, None).unwrap().color,
-            (rgb[0], rgb[1], rgb[2])
+            (rgb[0] / 2, rgb[1] / 2, rgb[2] / 2),
+            "a silhouette: the all-white palette times half the colour"
         );
+        assert!(scene.player_flash.solid(&data));
         assert!(!scene.game_entities.flash(0).is_active());
         // One burst, in her colour, between her and the attacker.
         let found = bursts(&scene);
@@ -602,8 +604,9 @@ fn the_enemys_parry_flashes_it_and_bursts_in_its_stance_colour() {
     assert!(flash.is_active() && flash.is_zenith());
     assert_eq!(
         flash.lit_tint(&data, None).unwrap().color,
-        (rgb[0], rgb[1], rgb[2])
+        (rgb[0] / 2, rgb[1] / 2, rgb[2] / 2)
     );
+    assert!(flash.solid(&data));
     assert!(!scene.player_flash.is_active(), "the player is not lit");
     let found = bursts(&scene);
     assert_eq!(found.len(), 1);

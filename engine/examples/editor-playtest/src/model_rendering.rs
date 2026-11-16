@@ -133,17 +133,33 @@ fn enemy_stance_palette(entries: &mut [u16], color: (u8, u8, u8)) {
     }
 }
 
+/// The all-white palette copy a combat flash draws a model through: every
+/// visible entry white, the cut-out kept, so the model is a flat silhouette
+/// in whatever its lit tint says.
+fn flash_palette(entries: &mut [u16]) {
+    for entry in entries.iter_mut() {
+        if *entry & 0x7fff != 0 {
+            *entry = 0x7fff;
+        }
+    }
+}
+
+/// `StanceCluts` variant of the white flash copy (0 and 1 are the stances).
+const FLASH_CLUT_VARIANT: u8 = 2;
+
 /// Stance palette copies. Drawing through a copy swaps one CLUT word, so the
 /// stance colour costs nothing per frame.
 ///
 /// `rows` holds the enemies' model atlases keyed by the atlas's own CLUT word,
-/// `[base, Horizon, Zenith]`. `player` holds the Horizon and Zenith copies of
-/// the player's covering texture (its material override), built on the first
-/// frame that texture is resident. Zero means not built.
+/// `[base, Horizon, Zenith, flash white]`. `player` holds the Horizon and
+/// Zenith copies of the player's covering texture (its material override),
+/// built on the first frame that texture is resident, and `player_flash` its
+/// white flash copy. Zero means not built.
 #[derive(Copy, Clone)]
 pub(super) struct StanceCluts {
-    rows: [[u16; 3]; STANCE_CLUT_ATLASES],
+    rows: [[u16; 4]; STANCE_CLUT_ATLASES],
     player: [u16; 2],
+    player_flash: u16,
 }
 
 /// Distinct enemy atlases (Cortex shares one between all its enemies).
@@ -151,9 +167,27 @@ const STANCE_CLUT_ATLASES: usize = 2;
 
 impl StanceCluts {
     pub(super) const EMPTY: Self = Self {
-        rows: [[0; 3]; STANCE_CLUT_ATLASES],
+        rows: [[0; 4]; STANCE_CLUT_ATLASES],
         player: [0; 2],
+        player_flash: 0,
     };
+
+    /// The player's covering texture and the CLUT word of its white flash
+    /// copy, for the silhouette ticks of a combat flash. Whatever the
+    /// material (palette, crystal reflection), the copy is one flat colour
+    /// the lit tint then colours.
+    pub(super) fn player_flash_clut(
+        &mut self,
+        character: &RuntimeCharacter,
+    ) -> Option<(AssetId, u16)> {
+        let texture = character.material_override?.texture_asset?;
+        if self.player_flash == 0 {
+            model_texture_slot(texture)?;
+            self.player_flash =
+                ensure_resident_clut_variant(texture, FLASH_CLUT_VARIANT, flash_palette)?;
+        }
+        Some((texture, self.player_flash))
+    }
 
     /// The player's covering texture and the CLUT word of its `stance` copy.
     /// Characters without a covering texture keep their own look.
@@ -236,7 +270,7 @@ impl StanceCluts {
         else {
             return;
         };
-        let mut words = [base; 3];
+        let mut words = [base; 4];
         for (variant, color) in [HORIZON_TEXTURE_RGB, ZENITH_TEXTURE_RGB]
             .into_iter()
             .enumerate()
@@ -250,21 +284,28 @@ impl StanceCluts {
             };
             words[1 + variant] = word;
         }
+        let Some(white) = ensure_clut_variant(
+            texture_asset,
+            atlas_bytes,
+            FLASH_CLUT_VARIANT,
+            flash_palette,
+        ) else {
+            return;
+        };
+        words[3] = white;
         *row = words;
     }
 
     /// `material` redirected to its `stance` palette copy, if it has one.
-    fn material(&self, material: TextureMaterial, stance: VitalityChannelId) -> TextureMaterial {
+    fn material(&self, material: TextureMaterial, variant: usize) -> TextureMaterial {
         let base = material.clut_word();
         match self.rows.iter().find(|row| row[0] == base && base != 0) {
             // Runtime atlas materials are plain `opaque` materials over the
             // slot's CLUT and tpage, so this rebuilds exactly that with the
             // copy's CLUT word.
-            Some(row) => TextureMaterial::opaque(
-                row[1 + stance.index()],
-                material.texture_page_word(),
-                material.tint(),
-            ),
+            Some(row) => {
+                TextureMaterial::opaque(row[variant], material.texture_page_word(), material.tint())
+            }
             None => material,
         }
     }
@@ -278,8 +319,15 @@ impl StanceCluts {
             .ok()
             .and_then(game_entity_for_instance);
         match entity {
-            Some(entity) => pose
-                .with_atlas_material(self.material(pose.model().material, entities.stance(entity))),
+            Some(entity) => {
+                // The silhouette ticks of a combat flash draw the white copy.
+                let variant = if entities.flash(entity).solid(&COMBAT_FEEDBACK) {
+                    3
+                } else {
+                    1 + entities.stance(entity).index()
+                };
+                pose.with_atlas_material(self.material(pose.model().material, variant))
+            }
             None => pose,
         }
     }

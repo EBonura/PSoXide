@@ -1374,9 +1374,12 @@ impl Scene for Playtest {
                             flash_q8,
                         )
                         .map(|effect| effect.with_crystal_material(stance_crystal_material));
-                        let stance_clut = self
-                            .stance_cluts
-                            .player_override_clut(character, self.player.stance.active());
+                        let stance_clut = if self.player_flash.solid(&COMBAT_FEEDBACK) {
+                            self.stance_cluts.player_flash_clut(character)
+                        } else {
+                            self.stance_cluts
+                                .player_override_clut(character, self.player.stance.active())
+                        };
                         draw_player(
                             self.room_index,
                             character,

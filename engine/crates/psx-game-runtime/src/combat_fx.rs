@@ -74,6 +74,10 @@ pub struct FlashLook {
     /// How far the lit tint moves toward the flash colour on the first tick,
     /// Q8 (256 replaces the lit tint). It fades linearly to zero.
     pub peak_q8: u16,
+    /// How many of the first ticks draw the model as a flat silhouette in the
+    /// flash colour (its palette swapped for an all-white copy, tinted),
+    /// before it returns to its own texture and fades. Zero is no silhouette.
+    pub solid_ticks: u8,
 }
 
 /// The data of every combat tell. One global value today
@@ -119,18 +123,22 @@ pub const COMBAT_FEEDBACK: CombatFeedback = CombatFeedback {
         FlashLook {
             ticks: 6,
             peak_q8: 224,
+            solid_ticks: 3,
         },
         FlashLook {
             ticks: 8,
             peak_q8: 256,
+            solid_ticks: 4,
         },
         FlashLook {
             ticks: 11,
             peak_q8: 256,
+            solid_ticks: 4,
         },
         FlashLook {
             ticks: 12,
             peak_q8: 256,
+            solid_ticks: 6,
         },
     ],
     burst_ticks: 20,
@@ -282,6 +290,15 @@ impl CombatFlash {
         (u32::from(look.peak_q8) * left / u32::from(look.ticks)).min(256) as u16
     }
 
+    /// Whether the model is drawn as a flat silhouette this tick: the first
+    /// `solid_ticks` of the flash. The draws swap the model's palette for its
+    /// all-white copy and wear [`Self::lit_tint`], which is then the flash
+    /// colour itself (half of it, as the GPU doubles `texel * tint / 128`).
+    pub fn solid(self, data: &CombatFeedback) -> bool {
+        let look = data.flash[self.kind() as usize];
+        self.is_active() && self.ticks_left() + look.solid_ticks > look.ticks
+    }
+
     /// The flash colour this tick. A parry is the stance colour throughout.
     /// A hit starts in the hot core colour and cools into the stance colour
     /// as it fades.
@@ -313,8 +330,15 @@ impl CombatFlash {
         if !self.is_active() {
             return base;
         }
-        let weight = u32::from(self.weight_q8(data));
         let [r, g, b] = self.rgb(data);
+        if self.solid(data) {
+            // The all-white palette times this tint is the flash colour.
+            return Some(LitTintBias {
+                color: (r / 2, g / 2, b / 2),
+                strength_q8: 256,
+            });
+        }
+        let weight = u32::from(self.weight_q8(data));
         let Some(base) = base else {
             return Some(LitTintBias {
                 color: (r, g, b),
@@ -343,13 +367,22 @@ mod tests {
 
     const PARRY: FlashKind = FlashKind::Parry;
 
+    /// The data with no silhouette ticks: the textured fade, tested alone.
+    fn no_silhouette() -> CombatFeedback {
+        let mut data = COMBAT_FEEDBACK;
+        for look in &mut data.flash {
+            look.solid_ticks = 0;
+        }
+        data
+    }
+
     fn parry_ticks() -> u8 {
         COMBAT_FEEDBACK.flash[PARRY as usize].ticks
     }
 
     #[test]
     fn a_parry_flash_fades_to_nothing_in_its_stance_colour() {
-        let data = COMBAT_FEEDBACK;
+        let data = no_silhouette();
         let mut flash = CombatFlash::start(&data, PARRY, true);
         let first = flash.lit_tint(&data, None).unwrap();
         assert_eq!(first.color, (108, 224, 198));
@@ -379,7 +412,7 @@ mod tests {
 
     #[test]
     fn over_a_base_tint_the_flash_starts_at_the_flash_colour_and_returns_to_the_base() {
-        let data = COMBAT_FEEDBACK;
+        let data = no_silhouette();
         let base = LitTintBias {
             color: (214, 75, 48),
             strength_q8: 208,
@@ -403,7 +436,7 @@ mod tests {
 
     #[test]
     fn a_hit_flash_starts_white_hot_and_cools_into_the_attackers_stance_colour() {
-        let data = COMBAT_FEEDBACK;
+        let data = no_silhouette();
         let mut flash = CombatFlash::start(&data, FlashKind::Hit, true);
         let first = flash.lit_tint(&data, None).unwrap();
         // First tick: nearly the hot core colour, not the teal.
@@ -436,6 +469,46 @@ mod tests {
         ] {
             assert_eq!(look(kind).0.kind(), kind);
         }
+    }
+
+    #[test]
+    fn the_first_ticks_are_a_flat_silhouette_in_the_flash_colour() {
+        let data = COMBAT_FEEDBACK;
+        for kind in [
+            FlashKind::Hit,
+            FlashKind::Heavy,
+            FlashKind::Crit,
+            FlashKind::Parry,
+        ] {
+            let look = data.flash[kind as usize];
+            let mut flash = CombatFlash::start(&data, kind, false);
+            let base = LitTintBias {
+                color: (10, 20, 30),
+                strength_q8: 208,
+            };
+            for tick in 0..look.ticks {
+                assert_eq!(
+                    flash.solid(&data),
+                    tick < look.solid_ticks,
+                    "{kind:?} {tick}"
+                );
+                if flash.solid(&data) {
+                    // Over any base, the tint replaces it outright.
+                    let tint = flash.lit_tint(&data, Some(base)).unwrap();
+                    assert_eq!(tint.strength_q8, 256);
+                    assert_eq!(flash.lit_tint(&data, None).unwrap(), tint);
+                }
+                flash.tick();
+            }
+            assert!(!flash.solid(&data));
+        }
+        assert!(data.flash[PARRY as usize].solid_ticks > data.flash[0].solid_ticks);
+        // A parry's silhouette is the stance colour: half of it as the tint.
+        let tint = CombatFlash::start(&data, PARRY, true)
+            .lit_tint(&data, None)
+            .unwrap();
+        assert_eq!(tint.color, (54, 112, 99));
+        assert!(!CombatFlash::NONE.solid(&data));
     }
 
     #[test]
