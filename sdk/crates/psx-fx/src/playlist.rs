@@ -91,6 +91,7 @@ impl Playlist {
 
     /// Where the playlist stands.
     #[must_use]
+    #[inline]
     pub fn slot(&self) -> Slot {
         if self.pos >= self.count {
             Slot::Off
@@ -106,6 +107,7 @@ impl Playlist {
 
     /// The shoulder button forward: the next song, then the off slot if there is one, then a
     /// fresh shuffle from its first song.
+    #[inline(never)]
     pub fn skip_forward(&mut self) -> Slot {
         if self.count == 0 {
             return Slot::Off;
@@ -120,6 +122,7 @@ impl Playlist {
 
     /// The shoulder button back: the previous slot of this shuffle, wrapping to the last slot
     /// (the off slot if there is one, else the last song) from the first.
+    #[inline(never)]
     pub fn skip_back(&mut self) -> Slot {
         if self.count == 0 {
             return Slot::Off;
@@ -134,6 +137,7 @@ impl Playlist {
 
     /// The song ended by itself: on to the next song, reshuffling (without opening on the song
     /// just heard) when this shuffle is spent. Never lands on the off slot.
+    #[inline(never)]
     pub fn song_finished(&mut self) -> Slot {
         if self.count == 0 {
             return Slot::Off;
