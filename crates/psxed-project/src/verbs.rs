@@ -27,6 +27,7 @@ impl CharacterResource {
 pub struct CharacterVerbBindings<'a> {
     project: &'a ProjectDocument,
     set: Option<&'a AnimationSetResource>,
+    model: Option<crate::ResourceId>,
     shoot: CharacterAnimationAction,
 }
 
@@ -43,6 +44,7 @@ impl<'a> CharacterVerbBindings<'a> {
         Self {
             project,
             set,
+            model: character.model,
             shoot: character.shoot_action(),
         }
     }
@@ -53,15 +55,24 @@ impl<'a> CharacterVerbBindings<'a> {
     }
 }
 
-/// Whether `set` gives `action` a clip of its own, resolved as the cook
-/// resolves it (an explicit binding, a legacy role slot, or a role-matched
-/// clip in the set's extra clips).
+/// Whether `set` gives `action` a clip of its own on `model`, resolved as
+/// the cook resolves it: an explicit binding, a legacy role slot, or a
+/// role-matched clip in the set's extra clips, and (with a model) a clip
+/// that resolves on that model. A clip baked for another model counts as
+/// missing, because the cook cannot play it on this one.
 pub fn animation_set_binds(
     project: &ProjectDocument,
     set: &AnimationSetResource,
+    model: Option<crate::ResourceId>,
     action: CharacterAnimationAction,
 ) -> bool {
-    crate::playtest::animation_set_action_clip(project, set, action).is_some()
+    crate::playtest::animation_set_action_clip(project, set, action).is_some_and(|clip| {
+        model.is_none_or(|model| {
+            project
+                .resolved_model_animation_index(model, clip)
+                .is_some()
+        })
+    })
 }
 
 impl VerbBindings for CharacterVerbBindings<'_> {
@@ -70,6 +81,7 @@ impl VerbBindings for CharacterVerbBindings<'_> {
             animation_set_binds(
                 self.project,
                 set,
+                self.model,
                 CharacterAnimationAction::from_level(action),
             )
         })
