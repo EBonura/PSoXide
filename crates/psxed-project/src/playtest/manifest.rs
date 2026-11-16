@@ -1141,14 +1141,13 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             .join(", ");
         let _ = writeln!(
             out,
-            "    LevelCharacterRecord {{ model: ModelIndex({}), action_clips: [{}], action_flags: [{}], action_speeds: [{}], action_frame_ranges: [{}], action_pushes: [{}], action_chains: [{}], combat_windows: [{}], combat_capsule_first: CombatCapsuleIndex({}), combat_capsule_count: {}, visual_offset: [{}, {}, {}], visual_yaw: {}, visual_scale_q8: {}, weight_q8: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, turn_speed_degrees_per_second: {}, stamina_max_q12: {}, sprint_min_q12: {}, sprint_drain_q12: {}, stamina_recover_q12: {}, roll_cost_q12: {}, roll_speed: {}, roll_active_frames: {}, roll_recovery_frames: {}, roll_invulnerable_frames: {}, backstep_cost_q12: {}, backstep_speed: {}, backstep_active_frames: {}, backstep_recovery_frames: {}, backstep_invulnerable_frames: {}, combat: {}, stance_swap_cooldown_ticks: {}, stance_swap_duration_ticks: {}, camera_distance: {}, camera_height: {}, camera_target_height: {}, material_override: {}, flags: 0 }},",
+            "    LevelCharacterRecord {{ model: ModelIndex({}), action_clips: [{}], action_flags: [{}], action_speeds: [{}], action_frame_ranges: [{}], action_pushes: [{}], combat_windows: [{}], combat_capsule_first: CombatCapsuleIndex({}), combat_capsule_count: {}, visual_offset: [{}, {}, {}], visual_yaw: {}, visual_scale_q8: {}, weight_q8: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, turn_speed_degrees_per_second: {}, stamina_max_q12: {}, sprint_min_q12: {}, sprint_drain_q12: {}, stamina_recover_q12: {}, roll_cost_q12: {}, roll_speed: {}, roll_active_frames: {}, roll_recovery_frames: {}, roll_invulnerable_frames: {}, backstep_cost_q12: {}, backstep_speed: {}, backstep_active_frames: {}, backstep_recovery_frames: {}, backstep_invulnerable_frames: {}, combat: {}, stance_swap_cooldown_ticks: {}, stance_swap_duration_ticks: {}, camera_distance: {}, camera_height: {}, camera_target_height: {}, material_override: {}, flags: 0 }},",
             character.model,
             action_clips,
             action_flags,
             action_speeds,
             action_frame_ranges,
             action_pushes,
-            character.action_chains.iter().map(|c| format!("psx_level::CharacterActionChain {{ action: {}, next_action: {}, input_start: {}, input_end: {}, handoff_frame: {}, blend_ticks: {} }}", c.action, c.next_action, c.input_start, c.input_end, c.handoff_frame, c.blend_ticks)).collect::<Vec<_>>().join(", "),
             character.combat_windows.iter().map(|w| format!("psx_level::CharacterCombatWindow {{ action: {}, kind: psx_level::CombatWindowKind::{:?}, start: {}, end: {} }}", w.action, w.kind, w.start, w.end)).collect::<Vec<_>>().join(", "),
             character.combat_capsule_first,
             character.combat_capsule_count,

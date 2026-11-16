@@ -428,9 +428,9 @@ fn a_fighter_without_both_moves_never_swaps() {
     // The player without a Zenith cannon has one kind of move too.
     let mut scene = scene();
     scene.character = Some(character(false));
-    assert!(!scene.player_stance_moves().can_swap());
+    assert!(!scene.player_kits().can_swap());
     scene.character = Some(character(true));
-    assert!(scene.player_stance_moves().can_swap());
+    assert!(scene.player_kits().can_swap());
 }
 
 #[test]

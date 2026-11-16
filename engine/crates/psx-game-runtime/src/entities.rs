@@ -43,9 +43,10 @@ pub use tactics::{EnemyGoal, EnemyGoalResult, EnemyTacticalSnapshot};
 use crate::combat::{arc_hits_circle, MeleeArc};
 use crate::combatant::{
     stance_scaled, ActionProtection, Combatant, CombatantId, Defender, HitIn, HitKind, PoiseRule,
-    StanceMoves, Strike,
+    Strike,
 };
 use crate::vitality::VitalityChannelId;
+use psx_level::combat_verbs::CombatKits;
 use psx_level::{
     combat_armour, game_entity_flags, CharacterActionFrameRange, CharacterAnimationAction,
     LevelGameEntityRecord, RoomIndex, CHARACTER_ACTION_SPEED_UNSCALED_Q8,
@@ -726,10 +727,10 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         input: GameEntityTickInput<'_>,
     ) -> bool {
         let moves = Self::stance_moves(record);
-        if !moves.ranged {
+        if !moves.can_shoot() {
             return true;
         }
-        if !moves.melee {
+        if !moves.can_melee() {
             return false;
         }
         let was_melee = if STANCE_BOUND_ATTACKS {
@@ -1065,14 +1066,10 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     }
 
     /// The moves entity `index`'s record gives it, which decide whether it
-    /// may swap stance ([`StanceMoves`]). A record without a projectile
-    /// attack counts as melee.
-    fn stance_moves(record: &LevelGameEntityRecord) -> StanceMoves {
-        let ranged = Self::has_ranged_attack(record);
-        StanceMoves {
-            melee: !ranged || record.flags & game_entity_flags::MELEE_ATTACK != 0,
-            ranged,
-        }
+    /// may swap stance: the kits the cook derived from its bindings
+    /// ([`CombatKits`], the same derivation as the player's).
+    fn stance_moves(record: &LevelGameEntityRecord) -> CombatKits {
+        psx_level::game_entity_combat_kits(record.flags)
     }
 
     /// Damage and poise of an attack entity `index` deals, through its crit
@@ -1146,7 +1143,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     }
 
     /// Swap entity `index`'s stance when its `record`'s moves allow a swap
-    /// at all ([`StanceMoves::can_swap`]) and its cooldown has run out: the
+    /// at all ([`CombatKits::can_swap`]) and its cooldown has run out: the
     /// one swap request every controller of an entity makes. True when it
     /// swapped.
     pub fn swap_stance(&mut self, record: &LevelGameEntityRecord, index: usize) -> bool {

@@ -46,11 +46,9 @@ pub(super) fn enemy_projectile_visual(mut visual: ProjectileVisualStyle) -> Proj
 fn weapon_swing_sfx(action: psx_level::CharacterAnimationAction) -> Option<LevelGameplaySfxEvent> {
     use psx_level::CharacterAnimationAction as Action;
     match action {
-        Action::LightAttack
-        | Action::LightAttackFollowup
-        | Action::LightAttackFinisher
-        | Action::VertLightAttack
-        | Action::AltLightAttack => Some(LevelGameplaySfxEvent::LightWeaponSwing),
+        Action::LightAttack | Action::VertLightAttack | Action::AltLightAttack => {
+            Some(LevelGameplaySfxEvent::LightWeaponSwing)
+        }
         Action::HeavyAttack
         | Action::VertHeavyAttack
         | Action::AltHeavyAttack

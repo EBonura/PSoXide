@@ -2521,11 +2521,16 @@ pub(crate) fn push_game_entity(
     if state_clips.run_supported {
         flags |= psx_level::game_entity_flags::CAN_RUN;
     }
-    if projectile_attack_range.is_some() {
+    // The kits the Character binds (psx_level::combat_verbs). A shot also
+    // needs its projectile's cooked range band.
+    if projectile_attack_range.is_some() && state_clips.kits.can_shoot() {
         flags |= psx_level::game_entity_flags::RANGED_ATTACK;
     }
-    if state_clips.melee_move {
+    if state_clips.kits.can_melee() {
         flags |= psx_level::game_entity_flags::MELEE_ATTACK;
+    }
+    if state_clips.kits.can_dodge() {
+        flags |= psx_level::game_entity_flags::MOBILITY;
     }
     let (attack_min_range, attack_max_range) = projectile_attack_range.unwrap_or((0, 0));
     game_entities.push(PlaytestGameEntity {

@@ -210,7 +210,10 @@ pub enum NodeKind {
         /// Gameplay action to model-local animation clip mapping.
         /// This is the authoritative authoring location for
         /// player/NPC action animation.
-        #[serde(default)]
+        #[serde(
+            default,
+            deserialize_with = "crate::resource_types::without_retired_actions"
+        )]
         action_clips: Vec<CharacterActionClip>,
         /// Whether this animation should run automatically in the
         /// editor/playtest runtime.

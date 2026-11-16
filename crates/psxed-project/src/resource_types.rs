@@ -273,8 +273,12 @@ pub enum CharacterAnimationAction {
     /// so the Animation Studio can author projectile release events against a
     /// stable, unambiguous timeline.
     RangedAttack,
-    LightAttackFollowup,
-    LightAttackFinisher,
+    /// Getting back up after a knockdown. No fallback: until authored, the
+    /// knockdown simply ends.
+    GetUp,
+    /// The stance swap itself. No fallback: until authored, a swap plays no
+    /// clip.
+    StanceSwap,
     RangedAim,
     RangedWalk,
     RangedBackward,
@@ -287,6 +291,10 @@ pub enum CharacterAnimationAction {
     /// Poise broken: down until the fighter gets up. Falls back to the
     /// stagger clip until authored.
     Knockdown,
+    /// The blade riposte a parry arms. Falls back to the light strike.
+    CritStrike,
+    /// The Zenith point-blank riposte a parry arms. Falls back to the shot.
+    CritShot,
 }
 
 impl CharacterAnimationAction {
@@ -333,8 +341,8 @@ impl CharacterAnimationAction {
         Self::VertHeavyAttack,
         Self::VertComboAttack,
         Self::RangedAttack,
-        Self::LightAttackFollowup,
-        Self::LightAttackFinisher,
+        Self::GetUp,
+        Self::StanceSwap,
         Self::RangedAim,
         Self::RangedWalk,
         Self::RangedBackward,
@@ -345,6 +353,8 @@ impl CharacterAnimationAction {
         Self::Fall,
         Self::Land,
         Self::Knockdown,
+        Self::CritStrike,
+        Self::CritShot,
     ];
 
     /// Actions exposed by current editor authoring. `StunRecovery` remains in
@@ -383,8 +393,8 @@ impl CharacterAnimationAction {
         Self::VertHeavyAttack,
         Self::VertComboAttack,
         Self::RangedAttack,
-        Self::LightAttackFollowup,
-        Self::LightAttackFinisher,
+        Self::GetUp,
+        Self::StanceSwap,
         Self::RangedAim,
         Self::RangedWalk,
         Self::RangedBackward,
@@ -395,6 +405,8 @@ impl CharacterAnimationAction {
         Self::Fall,
         Self::Land,
         Self::Knockdown,
+        Self::CritStrike,
+        Self::CritShot,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -435,8 +447,8 @@ impl CharacterAnimationAction {
             Self::VertHeavyAttack => "Zenith Heavy",
             Self::VertComboAttack => "Legacy Zenith Combo",
             Self::RangedAttack => "Ranged Attack",
-            Self::LightAttackFollowup => "Horizon Light 2",
-            Self::LightAttackFinisher => "Horizon Light 3",
+            Self::GetUp => "Get Up",
+            Self::StanceSwap => "Stance Swap",
             Self::RangedAim => "Ranged Aim",
             Self::RangedWalk => "Ranged Walk",
             Self::RangedBackward => "Ranged Backward",
@@ -447,6 +459,8 @@ impl CharacterAnimationAction {
             Self::Fall => "Fall",
             Self::Land => "Land",
             Self::Knockdown => "Knockdown",
+            Self::CritStrike => "Crit Strike",
+            Self::CritShot => "Crit Shot",
         }
     }
 
@@ -486,8 +500,8 @@ impl CharacterAnimationAction {
             Self::VertHeavyAttack => 31,
             Self::VertComboAttack => 32,
             Self::RangedAttack => 33,
-            Self::LightAttackFollowup => 34,
-            Self::LightAttackFinisher => 35,
+            Self::GetUp => 34,
+            Self::StanceSwap => 35,
             Self::RangedAim => 36,
             Self::RangedWalk => 37,
             Self::RangedBackward => 38,
@@ -498,6 +512,8 @@ impl CharacterAnimationAction {
             Self::Fall => 43,
             Self::Land => 44,
             Self::Knockdown => 45,
+            Self::CritStrike => 46,
+            Self::CritShot => 47,
         }
     }
 
@@ -530,7 +546,11 @@ impl CharacterAnimationAction {
             | Self::ArchPerch
             | Self::Fall
             | Self::Land
-            | Self::Knockdown => None,
+            | Self::Knockdown
+            | Self::GetUp
+            | Self::StanceSwap
+            | Self::CritStrike
+            | Self::CritShot => None,
             Self::WalkWindup | Self::WalkWinddown | Self::WalkWinddownAlt => {
                 Some(AnimationRole::Walk)
             }
@@ -542,14 +562,22 @@ impl CharacterAnimationAction {
             Self::VertLightAttack
             | Self::VertHeavyAttack
             | Self::VertComboAttack
-            | Self::LightAttackFollowup
-            | Self::LightAttackFinisher
             | Self::RangedAim
             | Self::RangedWalk
             | Self::RangedBackward
             | Self::RangedLeft
             | Self::RangedRight => None,
         }
+    }
+
+    /// The runtime action slot with the same index.
+    pub fn to_level(self) -> psx_level::CharacterAnimationAction {
+        psx_level::CharacterAnimationAction::ALL[self.to_index()]
+    }
+
+    /// The editor action for a runtime action slot.
+    pub fn from_level(action: psx_level::CharacterAnimationAction) -> Self {
+        Self::ALL[action.to_index()]
     }
 
     pub const fn required_for_player(self) -> bool {
@@ -572,11 +600,18 @@ impl CharacterAnimationAction {
 
     pub fn guess_from_name(name: &str) -> Option<Self> {
         let name = name.to_ascii_lowercase();
-        if name.contains("light_attack_followup") {
-            return Some(Self::LightAttackFollowup);
+        if name.contains("get_up") || name.contains("getup") {
+            return Some(Self::GetUp);
         }
-        if name.contains("light_attack_finisher") {
-            return Some(Self::LightAttackFinisher);
+        if name.contains("stance_swap") {
+            return Some(Self::StanceSwap);
+        }
+        if name.contains("crit") {
+            return Some(if name.contains("shot") {
+                Self::CritShot
+            } else {
+                Self::CritStrike
+            });
         }
         // Directional shorthands (lft/rgt/fwd/bwd/bkw) follow the delivered
         // Aletha clip naming; spelled-out forms keep matching below.
@@ -752,6 +787,7 @@ impl CombatWindowKind {
 /// Omit a channel to retain legacy behavior. One interval per action/channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnimationCombatWindow {
+    #[serde(deserialize_with = "action_or_retired")]
     pub action: CharacterAnimationAction,
     pub kind: CombatWindowKind,
     pub start: u16,
@@ -761,6 +797,7 @@ pub struct AnimationCombatWindow {
 /// Resource-based action binding used by Animation Sets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnimationActionBinding {
+    #[serde(deserialize_with = "action_or_retired")]
     pub action: CharacterAnimationAction,
     pub clip: ResourceId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -776,6 +813,7 @@ pub struct AnimationActionBinding {
 /// sentinel means the weapon is gone at the end of the selected action clip.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WeaponAppearanceTrack {
+    #[serde(deserialize_with = "action_or_retired")]
     pub action: CharacterAnimationAction,
     pub weapon: ResourceId,
     #[serde(default = "default_character_socket")]
@@ -874,6 +912,7 @@ const fn default_weapon_trail_tip_color() -> [u8; 3] {
 /// Model-local fallback action binding used directly on Characters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CharacterActionClip {
+    #[serde(deserialize_with = "action_or_retired")]
     pub action: CharacterAnimationAction,
     pub clip: u16,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1176,17 +1215,6 @@ impl AnimationClipResource {
     }
 }
 
-/// Authorable Horizon light chain. Entry poses are authored at target frame zero.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AnimationActionChain {
-    pub action: CharacterAnimationAction,
-    pub next_action: CharacterAnimationAction,
-    pub input_start: u16,
-    pub input_end: u16,
-    pub handoff_frame: u16,
-    pub blend_ticks: u8,
-}
-
 /// Reusable role mapping for one skeleton. Characters combine a
 /// visual model with an Animation Set rather than raw clip indices.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1209,18 +1237,23 @@ pub struct AnimationSetResource {
     /// Preferred action mapping. These bindings are used first
     /// when cooking and let authors assign any compatible clip to
     /// any gameplay action.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "without_retired_actions")]
     pub action_clips: Vec<AnimationActionBinding>,
     /// Weapon visibility beats authored against action clips. A single action
     /// may contain several tracks (for example a weapon swap plus an off-hand
     /// appearance) and each track matches one equipped weapon/socket pair.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "without_retired_actions"
+    )]
     pub weapon_appearance_tracks: Vec<WeaponAppearanceTrack>,
-    /// Optional R1 handoffs, expressed on the source action timeline.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub action_chains: Vec<AnimationActionChain>,
     /// Shared combat permissions, authored in source frames.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "without_retired_actions"
+    )]
     pub combat_windows: Vec<AnimationCombatWindow>,
     /// Extra clips included with the set, such as attacks, hit
     /// reactions, death clips, emotes, and experiments.
@@ -1240,7 +1273,6 @@ impl AnimationSetResource {
             backstep_clip: None,
             action_clips: Vec::new(),
             weapon_appearance_tracks: Vec::new(),
-            action_chains: Vec::new(),
             combat_windows: Vec::new(),
             clips: Vec::new(),
         }
@@ -1658,6 +1690,7 @@ pub enum CombatCapsuleRole {
     /// Deals damage during one animation action's active frame window.
     Hitbox {
         /// Character action whose clip drives this volume.
+        #[serde(deserialize_with = "action_or_retired")]
         action: CharacterAnimationAction,
         /// First active animation frame, inclusive.
         active_start_frame: u16,
@@ -1676,6 +1709,7 @@ pub enum CombatCapsuleRole {
     /// a continuous stream; the attack state latches after the first spawn.
     ProjectileEmitter {
         /// Character action whose clip drives the release.
+        #[serde(deserialize_with = "action_or_retired")]
         action: CharacterAnimationAction,
         /// First frame of the readable charge-up presentation.
         #[serde(default)]
@@ -2000,7 +2034,7 @@ pub struct CharacterResource {
     /// Precise damage-dealing and damage-receiving capsules attached to the
     /// animated rig. Empty preserves the legacy coarse body-cylinder combat
     /// path until a project opts into the authored volume pipeline.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "without_retired_actions")]
     pub combat_capsules: Vec<CharacterCombatCapsule>,
     /// How a freshly placed instance of this profile should be controlled.
     /// `Auto` preserves the legacy behavior: the first character in a scene
@@ -3605,3 +3639,113 @@ impl std::fmt::Display for ResourceDeleteError {
 }
 
 impl std::error::Error for ResourceDeleteError {}
+
+/// Action names older project files may still carry for actions retired
+/// from the verb contract: the Horizon light follow-up and finisher
+/// (removed 2026-11-16, together with action chains, which only ever linked
+/// them). A binding, weapon track, combat window or capsule naming one is
+/// dropped on load.
+pub const RETIRED_ACTION_NAMES: [&str; 2] = ["LightAttackFollowup", "LightAttackFinisher"];
+
+thread_local! {
+    /// Set while one list element is read when it named a retired action, so
+    /// [`without_retired_actions`] drops that element. Loading is
+    /// synchronous on one thread.
+    static RETIRED_ACTION_SEEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A serialized action name: a current action, or `None` for a retired one.
+fn stored_action<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<CharacterAnimationAction>, D::Error> {
+    struct Name(String);
+    impl<'de> Deserialize<'de> for Name {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            struct NameVisitor;
+            impl serde::de::Visitor<'_> for NameVisitor {
+                type Value = Name;
+                fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    f.write_str("an animation action name")
+                }
+                fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Name, E> {
+                    Ok(Name(value.to_string()))
+                }
+            }
+            deserializer.deserialize_identifier(NameVisitor)
+        }
+    }
+    fn lookup<E: serde::de::Error>(name: &str) -> Result<Option<CharacterAnimationAction>, E> {
+        if let Some(action) = CharacterAnimationAction::ALL
+            .into_iter()
+            .find(|action| format!("{action:?}") == name)
+        {
+            return Ok(Some(action));
+        }
+        if RETIRED_ACTION_NAMES.contains(&name) {
+            return Ok(None);
+        }
+        Err(E::unknown_variant(name, &[]))
+    }
+    struct ActionVisitor;
+    impl<'de> serde::de::Visitor<'de> for ActionVisitor {
+        type Value = Option<CharacterAnimationAction>;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a CharacterAnimationAction")
+        }
+        fn visit_enum<A: serde::de::EnumAccess<'de>>(
+            self,
+            data: A,
+        ) -> Result<Self::Value, A::Error> {
+            use serde::de::VariantAccess;
+            let (name, variant): (Name, _) = data.variant()?;
+            variant.unit_variant()?;
+            lookup(&name.0)
+        }
+        fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+            lookup(value)
+        }
+    }
+    deserializer.deserialize_enum("CharacterAnimationAction", &[], ActionVisitor)
+}
+
+/// `deserialize_with` for an `action` field of a list element: a retired
+/// action name ([`RETIRED_ACTION_NAMES`]) reads as `Idle` and marks the
+/// element for [`without_retired_actions`] to drop.
+pub(crate) fn action_or_retired<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<CharacterAnimationAction, D::Error> {
+    Ok(stored_action(deserializer)?.unwrap_or_else(|| {
+        RETIRED_ACTION_SEEN.with(|seen| seen.set(true));
+        CharacterAnimationAction::Idle
+    }))
+}
+
+/// `deserialize_with` for a list whose elements name an action: elements
+/// that named a retired action are dropped.
+pub(crate) fn without_retired_actions<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct ListVisitor<T>(std::marker::PhantomData<T>);
+    impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for ListVisitor<T> {
+        type Value = Vec<T>;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a list")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<T>, A::Error> {
+            let mut out = Vec::new();
+            loop {
+                RETIRED_ACTION_SEEN.with(|seen| seen.set(false));
+                let Some(element) = seq.next_element::<T>()? else {
+                    break;
+                };
+                if !RETIRED_ACTION_SEEN.with(|seen| seen.replace(false)) {
+                    out.push(element);
+                }
+            }
+            Ok(out)
+        }
+    }
+    deserializer.deserialize_seq(ListVisitor(std::marker::PhantomData))
+}

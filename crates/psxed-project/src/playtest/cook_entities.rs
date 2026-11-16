@@ -1,4 +1,5 @@
 use super::*;
+use psx_level::combat_verbs::{self, BoundWithShot, CombatKit, CombatKits, VerbBindings};
 
 pub(crate) fn cook_scene_sky_texture_asset(
     project: &ProjectDocument,
@@ -1197,96 +1198,6 @@ pub(crate) fn cook_player_character(
         action_pushes[action.to_index()] = push;
     }
 
-    let mut action_chains =
-        [psx_level::CharacterActionChain::NONE; psx_level::MAX_CHARACTER_ACTION_CHAINS];
-    if let Some((set_id, _, set)) = animation_set {
-        if set.action_chains.len() > action_chains.len() {
-            report.error_at(
-                PlaytestValidationTarget::Resource(set_id),
-                "Too many action chains".to_owned(),
-            );
-            return None;
-        }
-        for (index, chain) in set.action_chains.iter().enumerate() {
-            let fail = |report: &mut PlaytestValidationReport, message: &str| {
-                report.error_at(
-                    PlaytestValidationTarget::Resource(set_id),
-                    format!("Invalid {:?} chain: {message}", chain.action),
-                );
-            };
-            let supported = matches!(
-                (chain.action, chain.next_action),
-                (
-                    CharacterAnimationAction::LightAttack,
-                    CharacterAnimationAction::LightAttackFollowup
-                ) | (
-                    CharacterAnimationAction::LightAttackFollowup,
-                    CharacterAnimationAction::LightAttackFinisher
-                )
-            );
-            if !supported
-                || set.action_chains[..index]
-                    .iter()
-                    .any(|c| c.action == chain.action)
-            {
-                fail(report, "expected unique Light -> Light 2 -> Light 3 links");
-                return None;
-            }
-            let source = action_clips[chain.action.to_index()];
-            let target = action_clips[chain.next_action.to_index()];
-            if source == CHARACTER_CLIP_NONE
-                || target == CHARACTER_CLIP_NONE
-                || !set
-                    .action_clips
-                    .iter()
-                    .any(|binding| binding.action == chain.action)
-                || !set
-                    .action_clips
-                    .iter()
-                    .any(|binding| binding.action == chain.next_action)
-            {
-                fail(report, "both clips must be explicitly bound");
-                return None;
-            }
-            let clip = model_clips.get(usize::from(model.clip_first + source))?;
-            if chain.input_start > chain.input_end
-                || chain.input_end > chain.handoff_frame
-                || chain.input_start < clip.source_frame_first
-                || chain.handoff_frame >= clip.source_frame_last
-                || chain.blend_ticks == 0
-                || chain.blend_ticks > 12
-                || action_flags[chain.action.to_index()]
-                    & psx_level::character_action_flags::LOOPING
-                    != 0
-                || action_flags[chain.next_action.to_index()]
-                    & psx_level::character_action_flags::LOOPING
-                    != 0
-            {
-                fail(
-                    report,
-                    "invalid input/handoff range, looping clip, or blend (1..12 ticks)",
-                );
-                return None;
-            }
-            let remap = |frame| {
-                remap_authored_frame(
-                    frame,
-                    clip.source_frame_first,
-                    clip.source_frame_last,
-                    clip.cooked_frame_count,
-                )
-            };
-            action_chains[index] = psx_level::CharacterActionChain {
-                action: chain.action.to_index() as u8,
-                next_action: chain.next_action.to_index() as u8,
-                input_start: remap(chain.input_start),
-                input_end: remap(chain.input_end),
-                handoff_frame: remap(chain.handoff_frame),
-                blend_ticks: chain.blend_ticks,
-            };
-        }
-    }
-
     let mut combat_windows =
         [psx_level::CharacterCombatWindow::NONE; psx_level::MAX_CHARACTER_COMBAT_WINDOWS];
     if let Some((set_id, _, set)) = animation_set {
@@ -1502,14 +1413,14 @@ pub(crate) fn cook_player_character(
             "Character '{character_name}' has no run clip -- sprinting is disabled",
         ));
     }
-    if action_clips[CharacterAnimationAction::Turn.to_index()] == CHARACTER_CLIP_NONE {
-        report.warn(format!("Character '{character_name}' has no turn clip"));
-    }
-    if action_clips[CharacterAnimationAction::Roll.to_index()] == CHARACTER_CLIP_NONE {
-        report.warn(format!(
-            "Character '{character_name}' has no roll clip -- runtime will fall back to run/walk",
-        ));
-    }
+    // The player runtime shoots from the RangedAttack slot.
+    warn_combat_verb_gaps(
+        report,
+        character_name,
+        &combat_verbs::BoundBy(|action: psx_level::CharacterAnimationAction| {
+            action_clips[action.to_index()] != CHARACTER_CLIP_NONE
+        }),
+    );
     // A character that authors any hit volume means its damage to come from
     // those volumes, yet an attack action with none falls back to the legacy
     // arc, which for the player is live on every frame of the clip. That is
@@ -1555,7 +1466,6 @@ pub(crate) fn cook_player_character(
         action_speeds,
         action_frame_ranges,
         action_pushes,
-        action_chains,
         combat_windows,
         combat_capsule_first,
         combat_capsule_count,
@@ -3182,9 +3092,9 @@ pub(crate) struct GameEntityStateClips {
     pub stagger_frame_range: psx_level::CharacterActionFrameRange,
     pub knockdown: u16,
     pub death: u16,
-    /// The Character authors a blade move: a light, heavy or combo attack
-    /// role, or a melee hitbox. With a projectile attack too, it may swap.
-    pub melee_move: bool,
+    /// The combat kits the Character binds ([`CombatKits`]), the same
+    /// derivation the player runtime makes from her clips.
+    pub kits: CombatKits,
 }
 
 impl GameEntityStateClips {
@@ -3216,7 +3126,9 @@ impl GameEntityStateClips {
             stagger_frame_range: psx_level::CharacterActionFrameRange::FULL,
             knockdown: clip,
             death: clip,
-            melee_move: true,
+            // Bindings unknown without the Character's own model: nothing is
+            // restricted (a projectile still needs its cooked range band).
+            kits: CombatKits::from_bits(CombatKits::MELEE | CombatKits::RANGED),
         }
     }
 }
@@ -3284,38 +3196,31 @@ pub(crate) fn game_entity_state_clips(
             model_clip_remaps,
         )
     };
-    let walk = optional(CharacterAnimationAction::Walk)
+    let ranged_action = character.shoot_action();
+    // Every state plays its verb or the first bound action of the verb's
+    // documented fallback chain (psx_level::combat_verbs), the chain the
+    // player runtime and the editor use too; past it, the rest pose.
+    let bindings = BoundWithShot {
+        bound: |action: psx_level::CharacterAnimationAction| {
+            optional(CharacterAnimationAction::from_level(action)).is_some()
+        },
+        shoot: ranged_action.to_level(),
+    };
+    let play = |action: CharacterAnimationAction| {
+        combat_verbs::resolve(&bindings, action.to_level())
+            .and_then(|found| optional(CharacterAnimationAction::from_level(found)))
+    };
+    let kits = CombatKits::from_bindings(&bindings);
+    warn_combat_verb_gaps(report, character_name, &bindings);
+    let walk = play(CharacterAnimationAction::Walk)
         .map(|playback| playback.clip)
         .unwrap_or(idle);
     let run = optional(CharacterAnimationAction::Run);
-    let fallback_attack = GameEntityActionPlayback::unscaled(idle);
-    let attack = optional(CharacterAnimationAction::LightAttack).unwrap_or(fallback_attack);
-    let heavy_attack = optional(CharacterAnimationAction::HeavyAttack).unwrap_or(attack);
-    let ranged_action = character
-        .combat_capsules
-        .iter()
-        .find_map(|volume| match volume.role {
-            crate::CombatCapsuleRole::ProjectileEmitter { action, .. } => Some(action),
-            _ => None,
-        })
-        .unwrap_or(CharacterAnimationAction::RangedAttack);
-    let ranged_attack = optional(ranged_action).unwrap_or(attack);
-    let stagger = optional(CharacterAnimationAction::Stun)
-        .or_else(|| optional(CharacterAnimationAction::HitReact))
-        .unwrap_or(fallback_attack);
-    // A blade move: an authored light, heavy or combo attack, or a melee
-    // hitbox on the character.
-    let melee_move = [
-        CharacterAnimationAction::LightAttack,
-        CharacterAnimationAction::HeavyAttack,
-        CharacterAnimationAction::ComboAttack,
-    ]
-    .into_iter()
-    .any(|action| optional(action).is_some())
-        || character
-            .combat_capsules
-            .iter()
-            .any(|volume| matches!(volume.role, crate::CombatCapsuleRole::Hitbox { .. }));
+    let rest = GameEntityActionPlayback::unscaled(idle);
+    let attack = play(CharacterAnimationAction::LightAttack).unwrap_or(rest);
+    let heavy_attack = play(CharacterAnimationAction::HeavyAttack).unwrap_or(rest);
+    let ranged_attack = play(CharacterAnimationAction::RangedAttack).unwrap_or(rest);
+    let stagger = play(CharacterAnimationAction::Stun).unwrap_or(rest);
     Some(GameEntityStateClips {
         idle,
         // Intro is the first-activation role for non-player Characters; for
@@ -3327,13 +3232,13 @@ pub(crate) fn game_entity_state_clips(
             .map(|playback| playback.clip)
             .unwrap_or(idle),
         walk,
-        walk_backward: optional(CharacterAnimationAction::WalkBackward)
+        walk_backward: play(CharacterAnimationAction::WalkBackward)
             .map(|playback| playback.clip)
             .unwrap_or(walk),
-        strafe_left: optional(CharacterAnimationAction::StrafeLeft)
+        strafe_left: play(CharacterAnimationAction::StrafeLeft)
             .map(|playback| playback.clip)
             .unwrap_or(walk),
-        strafe_right: optional(CharacterAnimationAction::StrafeRight)
+        strafe_right: play(CharacterAnimationAction::StrafeRight)
             .map(|playback| playback.clip)
             .unwrap_or(walk),
         run: run.map(|playback| playback.clip).unwrap_or(walk),
@@ -3359,15 +3264,63 @@ pub(crate) fn game_entity_state_clips(
             0
         },
         stagger_frame_range: stagger.frame_range,
-        // Held while down; the stagger clip until a Knockdown is authored.
-        knockdown: optional(CharacterAnimationAction::Knockdown)
+        // Held while down: Knockdown, else its chain (Stun, HitReact).
+        knockdown: play(CharacterAnimationAction::Knockdown)
             .map(|playback| playback.clip)
             .unwrap_or(stagger.clip),
         death: optional(CharacterAnimationAction::Death)
             .map(|playback| playback.clip)
             .unwrap_or(idle),
-        melee_move,
+        kits,
     })
+}
+
+/// Warn about every verb a Character's kits expect but it does not bind
+/// ([`combat_verbs::for_each_gap`]), naming the stand-in that plays instead,
+/// and note in one line the kits it does not have at all. The same list the
+/// editor's verb coverage table shows and `verb-coverage` writes out.
+pub(crate) fn warn_combat_verb_gaps(
+    report: &mut PlaytestValidationReport,
+    character_name: &str,
+    bindings: &impl VerbBindings,
+) {
+    combat_verbs::for_each_gap(bindings, |verb, cover| {
+        let action = CharacterAnimationAction::from_level(verb.action);
+        let instead = match cover {
+            combat_verbs::VerbCoverage::Fallback(found) => format!(
+                "plays {} instead",
+                CharacterAnimationAction::from_level(found).label()
+            ),
+            _ => "no stand-in".to_string(),
+        };
+        warn_once(
+            report,
+            format!(
+                "Character '{character_name}' {} kit has no {} clip -- {instead}",
+                verb.kit.label(),
+                action.label(),
+            ),
+        );
+    });
+    let kits = CombatKits::from_bindings(bindings);
+    let absent = [CombatKit::Melee, CombatKit::Ranged, CombatKit::Mobility]
+        .into_iter()
+        .filter(|kit| !kits.has(*kit))
+        .map(|kit| format!("no {}", kit.label().to_ascii_lowercase()))
+        .collect::<Vec<_>>();
+    if !absent.is_empty() {
+        warn_once(
+            report,
+            format!("Character '{character_name}' kits: {}", absent.join(", ")),
+        );
+    }
+}
+
+/// A Character placed many times warns once.
+fn warn_once(report: &mut PlaytestValidationReport, message: String) {
+    if !report.warnings.contains(&message) {
+        report.warn(message);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

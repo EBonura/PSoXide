@@ -22,7 +22,9 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         // move from spawn on (a ranged-only one starts in Zenith).
         let moves = Self::stance_moves(record);
         if !moves.can_swap() {
-            self.combatants[index].stance.hold(moves.starting_stance());
+            self.combatants[index]
+                .stance
+                .hold(crate::combatant::starting_stance(moves));
         }
         self.exchanges[index] = crate::ranged_tactics::RangedExchange::EMPTY;
         self.projectile_threats[index] = None;

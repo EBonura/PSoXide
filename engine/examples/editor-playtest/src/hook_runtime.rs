@@ -270,7 +270,6 @@ impl Playtest {
         self.hook_burst_started = false;
         self.hook_camera_pitch = self.camera.pitch_q12();
         self.attack_buffer.clear();
-        self.attack_chain.clear();
         self.ranged_ready = combat_input::RangedReady::EMPTY;
         self.lock_target = None;
         self.soft_lock_target = None;

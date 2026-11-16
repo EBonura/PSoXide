@@ -5,6 +5,7 @@
 //! `LevelCharacterRecord`; speed scaling arrives as plain values.
 
 use psx_engine::{Angle, CharacterMotorConfig};
+use psx_level::combat_verbs::{self, CombatKits, VerbBindings};
 use psx_level::{
     character_action_flags, CharacterAnimationAction, LevelCharacterRecord,
     LevelModelMaterialOverride, ModelClipIndex, ModelIndex, OptionalModelClipIndex,
@@ -28,8 +29,6 @@ pub enum PlayerAnim {
     DashRight,
     LightAttack,
     HeavyAttack,
-    LightAttackFollowup,
-    LightAttackFinisher,
     RangedAttack,
     RangedAim,
     RangedWalk,
@@ -84,8 +83,6 @@ impl PlayerAnim {
             Self::DashRight => CharacterAnimationAction::DashRight,
             Self::LightAttack => CharacterAnimationAction::LightAttack,
             Self::HeavyAttack => CharacterAnimationAction::HeavyAttack,
-            Self::LightAttackFollowup => CharacterAnimationAction::LightAttackFollowup,
-            Self::LightAttackFinisher => CharacterAnimationAction::LightAttackFinisher,
             Self::RangedAttack => CharacterAnimationAction::RangedAttack,
             Self::RangedAim => CharacterAnimationAction::RangedAim,
             Self::RangedWalk => CharacterAnimationAction::RangedWalk,
@@ -164,8 +161,6 @@ pub const fn player_anim_is_attack(anim: PlayerAnim) -> bool {
     matches!(
         anim,
         PlayerAnim::LightAttack
-            | PlayerAnim::LightAttackFollowup
-            | PlayerAnim::LightAttackFinisher
             | PlayerAnim::HeavyAttack
             | PlayerAnim::VertLightAttack
             | PlayerAnim::VertHeavyAttack
@@ -206,7 +201,6 @@ pub struct RuntimeCharacter {
     pub action_frame_ranges:
         [psx_level::CharacterActionFrameRange; CHARACTER_ANIMATION_ACTION_COUNT],
     pub action_pushes: [psx_level::CharacterActionPush; CHARACTER_ANIMATION_ACTION_COUNT],
-    pub action_chains: [psx_level::CharacterActionChain; psx_level::MAX_CHARACTER_ACTION_CHAINS],
     /// Explicit combat permissions and protection windows.
     pub combat_windows: [psx_level::CharacterCombatWindow; psx_level::MAX_CHARACTER_COMBAT_WINDOWS],
     pub combat_capsule_first: psx_level::CombatCapsuleIndex,
@@ -266,7 +260,6 @@ impl RuntimeCharacter {
             action_speeds: c.action_speeds,
             action_frame_ranges: c.action_frame_ranges,
             action_pushes: c.action_pushes,
-            action_chains: c.action_chains,
             combat_windows: c.combat_windows,
             combat_capsule_first: c.combat_capsule_first,
             combat_capsule_count: c.combat_capsule_count,
@@ -365,214 +358,27 @@ impl RuntimeCharacter {
         }
     }
 
-    /// Pick the clip index for an animation state, with
-    /// cheap deterministic fallbacks for unassigned optional actions.
+    /// Pick the clip index for an animation state. An unbound action plays
+    /// the first bound action of its documented fallback chain
+    /// ([`psx_level::combat_verbs::fallback_chain`]), the same chain the
+    /// cook and the editor report; past the chain the rest pose (Idle) holds.
+    /// Actions the player may not perform at all (an attack without the
+    /// melee kit, a dodge without the mobility kit) are refused before they
+    /// get here.
     pub fn clip_for(&self, anim: PlayerAnim) -> ModelClipIndex {
-        let idle = self
+        let rest = self
             .action_clip(CharacterAnimationAction::Idle)
             .unwrap_or(ModelClipIndex::ZERO);
-        let walk = self
-            .action_clip(CharacterAnimationAction::Walk)
-            .unwrap_or(idle);
-        let run = self
-            .action_clip(CharacterAnimationAction::Run)
-            .unwrap_or(walk);
-        match anim.action() {
-            CharacterAnimationAction::Idle => idle,
-            CharacterAnimationAction::Walk => walk,
-            // The playtest only enters these states when the clip is bound;
-            // the walk itself is the fallback for any other caller.
-            CharacterAnimationAction::WalkWindup => self
-                .action_clip(CharacterAnimationAction::WalkWindup)
-                .unwrap_or(walk),
-            CharacterAnimationAction::WalkWinddown => self
-                .action_clip(CharacterAnimationAction::WalkWinddown)
-                .unwrap_or(walk),
-            CharacterAnimationAction::WalkWinddownAlt => self
-                .action_clip(CharacterAnimationAction::WalkWinddownAlt)
-                .unwrap_or(
-                    self.action_clip(CharacterAnimationAction::WalkWinddown)
-                        .unwrap_or(walk),
-                ),
-            // Run transitions fall back to the run cruise, then the walk.
-            CharacterAnimationAction::RunWindup => self
-                .action_clip(CharacterAnimationAction::RunWindup)
-                .unwrap_or(run),
-            CharacterAnimationAction::RunWinddown => self
-                .action_clip(CharacterAnimationAction::RunWinddown)
-                .unwrap_or(run),
-            CharacterAnimationAction::RunWinddownAlt => self
-                .action_clip(CharacterAnimationAction::RunWinddownAlt)
-                .unwrap_or(
-                    self.action_clip(CharacterAnimationAction::RunWinddown)
-                        .unwrap_or(run),
-                ),
-            CharacterAnimationAction::WalkBackward => self
-                .action_clip(CharacterAnimationAction::WalkBackward)
-                .unwrap_or(walk),
-            CharacterAnimationAction::StrafeLeft => self
-                .action_clip(CharacterAnimationAction::StrafeLeft)
-                .unwrap_or(walk),
-            CharacterAnimationAction::StrafeRight => self
-                .action_clip(CharacterAnimationAction::StrafeRight)
-                .unwrap_or(walk),
-            CharacterAnimationAction::Run => self
-                .action_clip(CharacterAnimationAction::Run)
-                .unwrap_or(walk),
-            CharacterAnimationAction::Roll => {
-                self.action_clip(CharacterAnimationAction::Roll).unwrap_or(
-                    self.action_clip(CharacterAnimationAction::Run)
-                        .unwrap_or(walk),
-                )
-            }
-            CharacterAnimationAction::Backstep => self
-                .action_clip(CharacterAnimationAction::Backstep)
-                .unwrap_or(
-                    self.action_clip(CharacterAnimationAction::Roll)
-                        .unwrap_or(walk),
-                ),
-            // The vertical axis has NO fallback on purpose: an unauthored
-            // level must resolve to nothing so the input can refuse it,
-            // rather than swinging some other clip.
-            CharacterAnimationAction::VertLightAttack => self
-                .action_clip(CharacterAnimationAction::VertLightAttack)
-                .unwrap_or(idle),
-            CharacterAnimationAction::VertHeavyAttack => self
-                .action_clip(CharacterAnimationAction::VertHeavyAttack)
-                .unwrap_or(idle),
-            CharacterAnimationAction::VertComboAttack => self
-                .action_clip(CharacterAnimationAction::VertComboAttack)
-                .unwrap_or(idle),
-            CharacterAnimationAction::LightAttackFollowup
-            | CharacterAnimationAction::LightAttackFinisher => {
-                self.action_clip(anim.action()).to_option().unwrap_or(idle)
-            }
-            CharacterAnimationAction::HookLaunch
-            | CharacterAnimationAction::ArchPerch
-            | CharacterAnimationAction::Fall
-            | CharacterAnimationAction::Land
-            | CharacterAnimationAction::RangedAim
-            | CharacterAnimationAction::RangedWalk
-            | CharacterAnimationAction::RangedBackward
-            | CharacterAnimationAction::RangedLeft
-            | CharacterAnimationAction::RangedRight => {
-                self.action_clip(anim.action()).unwrap_or(idle)
-            }
-            CharacterAnimationAction::RangedAttack => self
-                .action_clip(CharacterAnimationAction::RangedAttack)
-                .unwrap_or(idle),
-            CharacterAnimationAction::LightAttack => self
-                .action_clip(CharacterAnimationAction::LightAttack)
-                .to_option()
-                .or_else(|| {
-                    self.action_clip(CharacterAnimationAction::ComboAttack)
-                        .to_option()
-                })
-                .unwrap_or(idle),
-            CharacterAnimationAction::HeavyAttack => self
-                .action_clip(CharacterAnimationAction::HeavyAttack)
-                .to_option()
-                .or_else(|| {
-                    self.action_clip(CharacterAnimationAction::LightAttack)
-                        .to_option()
-                })
-                .unwrap_or(idle),
-            CharacterAnimationAction::ComboAttack => self
-                .action_clip(CharacterAnimationAction::ComboAttack)
-                .to_option()
-                .or_else(|| {
-                    self.action_clip(CharacterAnimationAction::LightAttack)
-                        .to_option()
-                })
-                .unwrap_or(idle),
-            CharacterAnimationAction::Block => self
-                .action_clip(CharacterAnimationAction::Block)
-                .unwrap_or(idle),
-            CharacterAnimationAction::HitReact => self
-                .action_clip(CharacterAnimationAction::HitReact)
-                .unwrap_or(idle),
-            CharacterAnimationAction::Death => self
-                .action_clip(CharacterAnimationAction::Death)
-                .unwrap_or(idle),
-            // An unauthored intro degrades to idle: the spawn lock is
-            // skipped entirely when the clip is missing, so the player
-            // never loses control waiting for an animation that is not
-            // there.
-            CharacterAnimationAction::Intro => self
-                .action_clip(CharacterAnimationAction::Intro)
-                .unwrap_or(idle),
-            CharacterAnimationAction::Turn => idle,
-            // Locked-on fast locomotion degrades to the walk-speed strafe
-            // set, then plain locomotion, so a character bound before the
-            // full moveset existed keeps moving.
-            CharacterAnimationAction::DashLeft => self
-                .action_clip(CharacterAnimationAction::DashLeft)
-                .to_option()
-                .or_else(|| self.action_clip(CharacterAnimationAction::Roll).to_option())
-                .unwrap_or(walk),
-            CharacterAnimationAction::DashRight => self
-                .action_clip(CharacterAnimationAction::DashRight)
-                .to_option()
-                .or_else(|| self.action_clip(CharacterAnimationAction::Roll).to_option())
-                .unwrap_or(walk),
-            // Poise break: an unbound stun reads as a long hit reaction.
-            CharacterAnimationAction::Stun => self
-                .action_clip(CharacterAnimationAction::Stun)
-                .to_option()
-                .or_else(|| {
-                    self.action_clip(CharacterAnimationAction::HitReact)
-                        .to_option()
-                })
-                .unwrap_or(idle),
-            // Down: an unbound knockdown is the stagger clip, held.
-            CharacterAnimationAction::Knockdown => self
-                .action_clip(CharacterAnimationAction::Knockdown)
-                .to_option()
-                .or_else(|| self.action_clip(CharacterAnimationAction::Stun).to_option())
-                .or_else(|| {
-                    self.action_clip(CharacterAnimationAction::HitReact)
-                        .to_option()
-                })
-                .unwrap_or(idle),
-            CharacterAnimationAction::StunRecovery => self
-                .action_clip(CharacterAnimationAction::StunRecovery)
-                .to_option()
-                .or_else(|| self.action_clip(CharacterAnimationAction::Stun).to_option())
-                .unwrap_or(idle),
-            CharacterAnimationAction::HitReactAlt => self
-                .action_clip(CharacterAnimationAction::HitReactAlt)
-                .to_option()
-                .or_else(|| {
-                    self.action_clip(CharacterAnimationAction::HitReact)
-                        .to_option()
-                })
-                .unwrap_or(idle),
-            // The alternate weapon class falls back to the primary set.
-            CharacterAnimationAction::AltLightAttack => self
-                .action_clip(CharacterAnimationAction::AltLightAttack)
-                .to_option()
-                .or_else(|| {
-                    self.action_clip(CharacterAnimationAction::LightAttack)
-                        .to_option()
-                })
-                .unwrap_or(idle),
-            CharacterAnimationAction::AltHeavyAttack => self
-                .action_clip(CharacterAnimationAction::AltHeavyAttack)
-                .to_option()
-                .or_else(|| {
-                    self.action_clip(CharacterAnimationAction::HeavyAttack)
-                        .to_option()
-                })
-                .unwrap_or(idle),
-            CharacterAnimationAction::AltComboAttack => self
-                .action_clip(CharacterAnimationAction::AltComboAttack)
-                .to_option()
-                .or_else(|| {
-                    self.action_clip(CharacterAnimationAction::ComboAttack)
-                        .to_option()
-                })
-                .unwrap_or(idle),
+        match combat_verbs::resolve(self, anim.action()) {
+            Some(action) => self.action_clip(action).unwrap_or(rest),
+            None => rest,
         }
+    }
+
+    /// The combat kits this character binds, which decide what it may do
+    /// ([`CombatKits`]): the same derivation the enemy cook uses.
+    pub fn combat_kits(&self) -> CombatKits {
+        CombatKits::from_bindings(self)
     }
 
     /// The motor configuration this character drives.
@@ -601,6 +407,15 @@ impl RuntimeCharacter {
         config.backstep_recovery_frames = self.backstep_recovery_frames;
         config.backstep_invulnerable_frames = self.backstep_invulnerable_frames;
         config
+    }
+}
+
+/// The player character's bindings for the verb rules. Her shot is always
+/// the [`CharacterAnimationAction::RangedAttack`] slot: her runtime plays
+/// that action for every shot.
+impl VerbBindings for RuntimeCharacter {
+    fn bound(&self, action: CharacterAnimationAction) -> bool {
+        self.supports_action(action)
     }
 }
 

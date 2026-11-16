@@ -59,6 +59,7 @@ pub mod streaming;
 pub mod texture_import;
 mod ui_types;
 pub mod units;
+pub mod verbs;
 pub use ui_types::*;
 mod scene_grid_types;
 pub use scene_grid_types::*;

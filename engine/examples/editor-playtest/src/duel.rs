@@ -660,9 +660,7 @@ impl Playtest {
             let kind = match self.anim_state {
                 PlayerAnim::RangedAttack => Some(2),
                 PlayerAnim::HeavyAttack => Some(1),
-                PlayerAnim::LightAttack
-                | PlayerAnim::LightAttackFollowup
-                | PlayerAnim::LightAttackFinisher => Some(0),
+                PlayerAnim::LightAttack => Some(0),
                 _ => None,
             };
             if let Some(kind) = kind {

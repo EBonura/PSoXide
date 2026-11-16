@@ -1794,7 +1794,6 @@ pub struct PlaytestCharacter {
         [psx_level::CharacterActionFrameRange; PLAYTEST_CHARACTER_ACTION_COUNT],
     /// Forward push per action.
     pub action_pushes: [psx_level::CharacterActionPush; PLAYTEST_CHARACTER_ACTION_COUNT],
-    pub action_chains: [psx_level::CharacterActionChain; psx_level::MAX_CHARACTER_ACTION_CHAINS],
     /// Explicit combat permissions and protection windows.
     pub combat_windows: [psx_level::CharacterCombatWindow; psx_level::MAX_CHARACTER_COMBAT_WINDOWS],
     /// First rig-attached volume in [`PlaytestPackage::combat_capsules`].

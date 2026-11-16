@@ -28,7 +28,7 @@ use crate::*;
 pub const MAGIC: [u8; 4] = *b"PXLR";
 /// Version of the layout below. Bump it whenever a record or the table list
 /// changes.
-pub const VERSION: u16 = 9;
+pub const VERSION: u16 = 10;
 
 /// A cursor over the chunk's bytes. The bytes live for the whole run, so a
 /// string decoded from them can be `&'static`.

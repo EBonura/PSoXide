@@ -1544,13 +1544,13 @@ pub(super) fn draw_model_instance_projected_shadows(
 }
 
 #[cfg(test)]
-mod combo_appearance_tests {
+mod appearance_tests {
     use super::*;
     #[test]
-    fn followup_starts_solid_and_dissolves_only_at_recovery() {
+    fn a_continuing_track_starts_solid_and_dissolves_only_at_recovery() {
         let track = psx_level::WeaponAppearanceRecord {
             character: psx_level::CharacterIndex::ZERO,
-            action: psx_level::CharacterAnimationAction::LightAttackFollowup,
+            action: psx_level::CharacterAnimationAction::LightAttack,
             weapon: psx_level::WeaponIndex::ZERO,
             character_socket: "right_hand_grip",
             fully_visible_frame: 0,

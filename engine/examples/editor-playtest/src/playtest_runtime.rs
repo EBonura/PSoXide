@@ -900,8 +900,6 @@ impl Playtest {
         let modifiers = self.vitality_modifiers();
         for anim in [
             PlayerAnim::LightAttack,
-            PlayerAnim::LightAttackFollowup,
-            PlayerAnim::LightAttackFinisher,
             PlayerAnim::HeavyAttack,
             PlayerAnim::VertLightAttack,
             PlayerAnim::VertHeavyAttack,
@@ -1102,7 +1100,6 @@ impl Playtest {
         self.attack_buffer.clear();
         self.authored_attack.clear();
         self.authored_dodge.clear();
-        self.attack_chain.clear();
         self.logic.init_from_records(LOGIC.as_slice());
         self.logic_fired_reported = 0;
         // Playtest lives in a zeroed MaybeUninit, so the combatant is set
@@ -1141,7 +1138,6 @@ impl Playtest {
         self.attack_buffer.clear();
         self.authored_attack.clear();
         self.authored_dodge.clear();
-        self.attack_chain.clear();
         self.evade_buffer_vblanks = 0;
         self.swing_hit_mask = 0;
         self.camera_recenter_requested = false;
@@ -1272,8 +1268,6 @@ impl Playtest {
     pub(super) fn switch_player_anim(&mut self, anim: PlayerAnim, now: SimTick, video_hz: VideoHz) {
         self.authored_attack.clear();
         self.authored_dodge.clear();
-        self.attack_chain.clear();
-        self.chain_blend_ticks = 0;
         let old = self.anim_state;
         self.anim_blend_from = Some((old, now.saturating_sub(self.anim_start_tick), now));
         // Gait to gait, enter the incoming cycle at the phase the outgoing one
@@ -1330,11 +1324,7 @@ impl Playtest {
     /// that stride would show extra steps after the motor is already still.
     pub(super) fn player_anim_blend(&self, now: SimTick) -> Option<PlayerAnimBlend> {
         let (anim, local_tick, switch_tick) = self.anim_blend_from?;
-        let duration = if self.chain_blend_ticks != 0 {
-            u32::from(self.chain_blend_ticks)
-        } else {
-            player_blend_ticks(anim, self.anim_state)
-        };
+        let duration = player_blend_ticks(anim, self.anim_state);
         let elapsed = now.saturating_sub(switch_tick);
         if elapsed >= duration {
             return None;
@@ -1376,10 +1366,7 @@ impl Playtest {
     pub(super) fn player_melee_read(&self) -> u8 {
         if !matches!(
             self.anim_state,
-            PlayerAnim::LightAttack
-                | PlayerAnim::LightAttackFollowup
-                | PlayerAnim::LightAttackFinisher
-                | PlayerAnim::HeavyAttack
+            PlayerAnim::LightAttack | PlayerAnim::HeavyAttack
         ) {
             return 0;
         }
@@ -1417,10 +1404,7 @@ impl Playtest {
     pub(super) fn player_shot_opening(&self) -> bool {
         if !matches!(
             self.anim_state,
-            PlayerAnim::LightAttack
-                | PlayerAnim::LightAttackFollowup
-                | PlayerAnim::LightAttackFinisher
-                | PlayerAnim::HeavyAttack
+            PlayerAnim::LightAttack | PlayerAnim::HeavyAttack
         ) {
             return false;
         }
@@ -1629,7 +1613,6 @@ impl Playtest {
         self.attack_buffer.clear();
         self.authored_attack.clear();
         self.authored_dodge.clear();
-        self.attack_chain.clear();
         self.evade_buffer_vblanks = 0;
         self.loco = LocoPhase::Idle;
     }
@@ -1777,14 +1760,15 @@ impl Playtest {
         }
     }
 
-    /// The moves the player character has, which decide whether she may swap
-    /// stance, under the same [`StanceMoves`] rule as every enemy: the blade
-    /// is always there (an authored swing or the fallback arc), the Zenith
-    /// cannon only when her character binds it.
-    pub(super) fn player_stance_moves(&self) -> StanceMoves {
-        StanceMoves {
-            melee: true,
-            ranged: self.player_has_ranged_weapon(),
+    /// The combat kits the player character binds, which decide what she
+    /// may do under the same rules as every enemy ([`CombatKits`]): strike
+    /// with the melee kit, shoot with the ranged kit, dodge with the
+    /// mobility kit, swap with both weapons. A model-less debug body binds
+    /// nothing but keeps its dodge.
+    pub(super) fn player_kits(&self) -> CombatKits {
+        match &self.character {
+            Some(character) => character.combat_kits(),
+            None => CombatKits::from_bits(CombatKits::MOBILITY),
         }
     }
 
@@ -3006,6 +2990,9 @@ mod combat_baseline_tests;
 
 #[cfg(test)]
 mod combat_parry_tests;
+
+#[cfg(test)]
+mod combat_verbs_tests;
 
 #[cfg(test)]
 mod life_reset_tests {

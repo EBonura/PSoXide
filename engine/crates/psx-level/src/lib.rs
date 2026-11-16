@@ -31,6 +31,7 @@
 #[cfg(feature = "wire")]
 extern crate alloc;
 
+pub mod combat_verbs;
 pub mod sky_tiles;
 mod stable;
 #[cfg(feature = "wire")]
@@ -1087,18 +1088,40 @@ pub mod game_entity_flags {
     pub const ENABLED: u16 = 1 << 0;
     /// The Character authors a Run action, enabling chase-speed locomotion.
     pub const CAN_RUN: u16 = 1 << 1;
-    /// The Character has an authored projectile attack variant. The runtime
-    /// uses its cooked range band at distance and keeps close-range attacks
-    /// on the Horizon light/heavy actions.
+    /// The Character has the ranged kit
+    /// ([`CombatKits::can_shoot`](crate::combat_verbs::CombatKits::can_shoot)):
+    /// a shot clip with its projectile. The runtime uses its cooked range
+    /// band at distance and keeps close-range attacks on the Horizon
+    /// light/heavy actions.
     pub const RANGED_ATTACK: u16 = 1 << 2;
     /// Sustained tactical goals, contextual attacks and movement recovery.
     pub const TACTICAL: u16 = 1 << 3;
     /// Opt-in single-enemy encounter reset and diagnostic overlay.
     pub const TRAINING: u16 = 1 << 4;
-    /// The Character has a melee move (an authored light, heavy or combo
-    /// attack, or a melee hitbox), or no projectile attack at all. A
-    /// character swaps stance only with both a melee and a ranged move.
+    /// The Character has the melee kit
+    /// ([`CombatKits::can_melee`](crate::combat_verbs::CombatKits::can_melee)).
+    /// With [`RANGED_ATTACK`] too it may swap stance.
     pub const MELEE_ATTACK: u16 = 1 << 5;
+    /// The Character has the mobility kit
+    /// ([`CombatKits::can_dodge`](crate::combat_verbs::CombatKits::can_dodge)).
+    pub const MOBILITY: u16 = 1 << 6;
+}
+
+/// The combat kits a cooked game entity record carries in its
+/// [`game_entity_flags`]: the same [`combat_verbs::CombatKits`] the cook
+/// derived from the character's bindings.
+pub const fn game_entity_combat_kits(flags: u16) -> combat_verbs::CombatKits {
+    let mut bits = 0;
+    if flags & game_entity_flags::MELEE_ATTACK != 0 {
+        bits |= combat_verbs::CombatKits::MELEE;
+    }
+    if flags & game_entity_flags::RANGED_ATTACK != 0 {
+        bits |= combat_verbs::CombatKits::RANGED;
+    }
+    if flags & game_entity_flags::MOBILITY != 0 {
+        bits |= combat_verbs::CombatKits::MOBILITY;
+    }
+    combat_verbs::CombatKits::from_bits(bits)
 }
 
 /// One cooked logic entity, shaped after hl-psx's campaign-proven
@@ -3273,7 +3296,7 @@ pub struct ParticleEmitterRecord {
 pub const CHARACTER_CLIP_NONE: OptionalModelClipIndex = OptionalModelClipIndex::NONE;
 
 /// Fixed action slots used by [`LevelCharacterRecord::action_clips`].
-pub const CHARACTER_ANIMATION_ACTION_COUNT: usize = 46;
+pub const CHARACTER_ANIMATION_ACTION_COUNT: usize = 48;
 
 /// Runtime animation action slot.
 ///
@@ -3355,10 +3378,13 @@ pub enum CharacterAnimationAction {
     /// Dedicated NPC/projectile attack. Appended to preserve every pre-existing
     /// cooked action index.
     RangedAttack = 33,
-    /// Second Horizon light strike, entered through an authored chain.
-    LightAttackFollowup = 34,
-    /// Final Horizon light strike.
-    LightAttackFinisher = 35,
+    /// Getting back up after [`Self::Knockdown`]. Slot 34 held the retired
+    /// Horizon light follow-up until 2026-11-16; cooked packages are rebuilt
+    /// from project files, which name actions, so the index is free to reuse.
+    GetUp = 34,
+    /// The stance swap itself (blade to Zenith or back). Slot 35 held the
+    /// retired Horizon light finisher.
+    StanceSwap = 35,
     /// Ready-weapon aim pose.
     RangedAim = 36,
     /// Ready-weapon walk pose.
@@ -3380,6 +3406,10 @@ pub enum CharacterAnimationAction {
     /// Poise broken: down on the ground, held until the fighter gets up.
     /// Falls back to [`Self::Stun`], then [`Self::HitReact`], until authored.
     Knockdown = 45,
+    /// The blade riposte a parry arms: the crit melee strike.
+    CritStrike = 46,
+    /// The Zenith point-blank riposte a parry arms: the crit shot.
+    CritShot = 47,
 }
 
 impl CharacterAnimationAction {
@@ -3419,8 +3449,8 @@ impl CharacterAnimationAction {
         Self::VertHeavyAttack,
         Self::VertComboAttack,
         Self::RangedAttack,
-        Self::LightAttackFollowup,
-        Self::LightAttackFinisher,
+        Self::GetUp,
+        Self::StanceSwap,
         Self::RangedAim,
         Self::RangedWalk,
         Self::RangedBackward,
@@ -3431,6 +3461,8 @@ impl CharacterAnimationAction {
         Self::Fall,
         Self::Land,
         Self::Knockdown,
+        Self::CritStrike,
+        Self::CritShot,
     ];
 
     /// Convert to the cooked action slot index.
@@ -3477,37 +3509,6 @@ impl CharacterActionPush {
     pub const NONE: Self = Self {
         distance: 0,
         frame_range: CharacterActionFrameRange::FULL,
-    };
-}
-
-/// Maximum authored handoffs per character; no runtime allocation.
-pub const MAX_CHARACTER_ACTION_CHAINS: usize = 4;
-
-/// A single R1 continuation, in cooked source-clip frames.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CharacterActionChain {
-    /// Source action index, or 255 for an unused entry.
-    pub action: u8,
-    /// Incoming action index.
-    pub next_action: u8,
-    /// Inclusive input acceptance window.
-    pub input_start: u16,
-    /// Inclusive last accepted input frame; never after the handoff.
-    pub input_end: u16,
-    /// Frame where a queued continuation replaces recovery.
-    pub handoff_frame: u16,
-    /// Crossfade duration in fixed simulation ticks (60 Hz).
-    pub blend_ticks: u8,
-}
-impl CharacterActionChain {
-    /// Disabled chain; safe for projects predating combos.
-    pub const NONE: Self = Self {
-        action: 255,
-        next_action: 255,
-        input_start: 0,
-        input_end: 0,
-        handoff_frame: 0,
-        blend_ticks: 0,
     };
 }
 
@@ -3583,8 +3584,6 @@ pub struct LevelCharacterRecord {
     pub action_frame_ranges: [CharacterActionFrameRange; CHARACTER_ANIMATION_ACTION_COUNT],
     /// Per-action forward push applied by locked one-shot actions.
     pub action_pushes: [CharacterActionPush; CHARACTER_ANIMATION_ACTION_COUNT],
-    /// Bounded, optional attack handoffs. Empty entries use `CharacterActionChain::NONE`.
-    pub action_chains: [CharacterActionChain; MAX_CHARACTER_ACTION_CHAINS],
     /// Optional animation permissions and protection windows.
     pub combat_windows: [CharacterCombatWindow; MAX_CHARACTER_COMBAT_WINDOWS],
     /// First rig-attached volume in `COMBAT_CAPSULES`.

@@ -72,7 +72,7 @@ use psx_game_runtime::vitality_circles::VitalityCircleState;
 use psx_game_runtime::{
     combatant::{
         ActionProtection, Combatant, CombatantId, Defender, HitIn, HitKind, HitOut, PoiseRule,
-        StanceMoves, Strike,
+        Strike,
     },
     destructibles::RuntimeDestructibles,
     poi::MessageController,
@@ -88,6 +88,7 @@ use psx_gpu::{
     },
     Gpu,
 };
+use psx_level::combat_verbs::{self, CombatKits};
 use psx_level::{
     find_asset_of_kind, room_flags, AssetId, AssetKind, CharacterAnimationAction, CombatStats,
     InteractableKind, InteractableRecord, LevelBoxPropRecord, LevelCameraRecord,
@@ -343,8 +344,6 @@ struct Playtest {
     attack_buffer: combat_input::AttackBuffer,
     authored_attack: psx_game_runtime::combat_timing::Request,
     authored_dodge: psx_game_runtime::combat_timing::Request,
-    attack_chain: psx_game_runtime::attack_chain::AttackChainState,
-    chain_blend_ticks: u8,
     /// Floating damage numbers for hits dealt and taken. Purely
     /// presentational: spawned from the damage sites, expired by their
     /// own clock, and read only by the overlay pass. All-zero is a

@@ -172,8 +172,6 @@ impl PlayerDashAssembly {
                 | CharacterAnimationAction::Stun
                 | CharacterAnimationAction::Death
                 | CharacterAnimationAction::LightAttack
-                | CharacterAnimationAction::LightAttackFollowup
-                | CharacterAnimationAction::LightAttackFinisher
                 | CharacterAnimationAction::HeavyAttack
                 | CharacterAnimationAction::VertLightAttack
                 | CharacterAnimationAction::VertHeavyAttack

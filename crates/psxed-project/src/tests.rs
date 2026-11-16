@@ -3027,7 +3027,6 @@ fn animation_library_resources_roundtrip_and_resolve_by_path() {
             backstep_clip: None,
             action_clips: Vec::new(),
             weapon_appearance_tracks: Vec::new(),
-            action_chains: Vec::new(),
             combat_windows: Vec::new(),
             clips: Vec::new(),
         }),
@@ -4117,63 +4116,165 @@ fn a_weapon_reachable_only_through_a_loadout_is_still_a_reference() {
 // the enemy/target bars stay authored as UI scene Bars.
 
 #[test]
-fn action_chains_default_empty_for_legacy_sets() {
-    let set: AnimationSetResource = ron::from_str("(clips: [])").unwrap();
-    assert!(set.action_chains.is_empty());
+fn verb_roles_keep_their_slots_and_match_the_runtime() {
     assert_eq!(CharacterAnimationAction::RangedAttack.to_index(), 33);
-    assert_eq!(CharacterAnimationAction::LightAttackFollowup.to_index(), 34);
-    assert_eq!(CharacterAnimationAction::LightAttackFinisher.to_index(), 35);
+    // Slots 34 and 35 held the retired light follow-up and finisher.
+    assert_eq!(CharacterAnimationAction::GetUp.to_index(), 34);
+    assert_eq!(CharacterAnimationAction::StanceSwap.to_index(), 35);
+    assert_eq!(CharacterAnimationAction::Knockdown.to_index(), 45);
+    assert_eq!(CharacterAnimationAction::CritStrike.to_index(), 46);
+    assert_eq!(CharacterAnimationAction::CritShot.to_index(), 47);
+    for action in CharacterAnimationAction::ALL {
+        assert_eq!(
+            format!("{action:?}"),
+            format!("{:?}", action.to_level()),
+            "editor and runtime name slot {} alike",
+            action.to_index()
+        );
+        assert_eq!(
+            CharacterAnimationAction::from_level(action.to_level()),
+            action
+        );
+        // Every name round-trips through the project format.
+        let text = ron::to_string(&action).unwrap();
+        assert_eq!(
+            ron::from_str::<CharacterAnimationAction>(&text).unwrap(),
+            action
+        );
+    }
 }
 
 #[test]
-fn action_chains_cook_and_reject_missing_targets_bad_windows_and_duplicates() {
+fn an_old_set_drops_its_follow_up_bindings_and_chains_on_load() {
+    let old = r#"(
+        action_clips: [
+            (action: LightAttack, clip: (7)),
+            (action: LightAttackFollowup, clip: (8)),
+            (action: LightAttackFinisher, clip: (9)),
+            (action: HeavyAttack, clip: (10)),
+        ],
+        weapon_appearance_tracks: [
+            (action: LightAttackFollowup, weapon: (30)),
+            (action: LightAttack, weapon: (30)),
+        ],
+        action_chains: [(action: LightAttack, next_action: LightAttackFollowup, input_start: 12, input_end: 34, handoff_frame: 34, blend_ticks: 4)],
+        combat_windows: [
+            (action: LightAttackFollowup, kind: Attack, start: 1, end: 2),
+            (action: HeavyAttack, kind: Armored, start: 3, end: 9),
+        ],
+        clips: [],
+    )"#;
+    let set: AnimationSetResource = ron::from_str(old).expect("an old set still loads");
+    let actions = |list: Vec<CharacterAnimationAction>| list;
+    assert_eq!(
+        actions(set.action_clips.iter().map(|b| b.action).collect()),
+        [
+            CharacterAnimationAction::LightAttack,
+            CharacterAnimationAction::HeavyAttack
+        ]
+    );
+    assert_eq!(set.action_clips[1].clip, ResourceId(10));
+    assert_eq!(set.weapon_appearance_tracks.len(), 1);
+    assert_eq!(
+        set.weapon_appearance_tracks[0].action,
+        CharacterAnimationAction::LightAttack
+    );
+    assert_eq!(set.combat_windows.len(), 1);
+    assert_eq!(
+        set.combat_windows[0].action,
+        CharacterAnimationAction::HeavyAttack
+    );
+    let saved = ron::to_string(&set).unwrap();
+    assert!(!saved.contains("Followup") && !saved.contains("Finisher") && !saved.contains("chain"));
+    // A name that never existed is still an error, not silently dropped.
+    assert!(
+        ron::from_str::<AnimationSetResource>("(action_clips: [(action: Jump, clip: (1))])")
+            .is_err()
+    );
+}
+
+#[test]
+fn the_default_project_loads_without_its_follow_up_and_still_cooks() {
+    let root = default_project_dir();
+    let text = std::fs::read_to_string(root.join("project.ron")).unwrap();
+    assert!(
+        text.contains("LightAttackFollowup") && text.contains("action_chains"),
+        "the starter is an old project with a follow-up binding, track, hitbox and chain"
+    );
+    let mut project = ProjectDocument::load_from_path(root.join("project.ron")).unwrap();
+    let saved = ron::ser::to_string(&project).unwrap();
+    assert!(!saved.contains("LightAttackFollowup") && !saved.contains("action_chains"));
+    let aletha = project
+        .resources
+        .iter()
+        .find_map(|r| match &r.data {
+            ResourceData::Character(c) if r.name == "Aletha" => Some(c),
+            _ => None,
+        })
+        .expect("Aletha");
+    // Her three hitboxes were light, heavy and the follow-up.
+    assert!(aletha
+        .combat_capsules
+        .iter()
+        .all(|capsule| match capsule.role {
+            CombatCapsuleRole::Hitbox { action, .. } => matches!(
+                action,
+                CharacterAnimationAction::LightAttack | CharacterAnimationAction::HeavyAttack
+            ),
+            _ => true,
+        }));
+    crate::grid::starter::attach_starter_world(&mut project);
+    let (package, report) = playtest::build_package(&project, &root);
+    assert!(report.is_ok(), "{:?}", report.errors);
+    assert!(package.is_some());
+}
+
+#[test]
+fn the_cook_warns_once_per_missing_verb_of_a_kit_a_character_has() {
     let root = default_project_dir();
     let mut project = ProjectDocument::load_from_path(root.join("project.ron")).unwrap();
     crate::grid::starter::attach_starter_world(&mut project);
-    let set_id = project
-        .resources
-        .iter()
-        .find(|r| r.name == "Aletha Delivered Animation Set")
-        .unwrap()
-        .id;
     let (package, report) = playtest::build_package(&project, &root);
     assert!(report.is_ok(), "{:?}", report.errors);
-    let package = package.unwrap();
-    let player = package
-        .characters
-        .iter()
-        .find(|c| c.source_resource == ResourceId(62))
-        .unwrap();
-    assert_eq!(player.action_chains[0].action, 6);
-    assert_eq!(player.action_chains[0].next_action, 34);
-    assert_eq!(player.action_chains[0].handoff_frame, 34);
-    assert_eq!(player.action_chains[0].input_start, 12);
-    assert_eq!(player.action_chains[0].input_end, 34);
-    assert_eq!(
-        player.action_chains[1],
-        psx_level::CharacterActionChain::NONE
+    let warnings = &report.warnings;
+    let has = |message: &str| warnings.iter().any(|w| w == message);
+    // Aletha here has the blade and the roll but no cannon: her core and
+    // mobility gaps are listed with their stand-ins, the cannon only as one
+    // "no ranged" line, never verb by verb.
+    assert!(
+        has("Character 'Aletha' Core kit has no Get Up clip -- no stand-in"),
+        "{warnings:#?}"
     );
-    for case in 0..4 {
-        let mut broken = project.clone();
-        let ResourceData::AnimationSet(set) = &mut broken.resource_mut(set_id).unwrap().data else {
-            panic!()
-        };
-        match case {
-            0 => set
-                .action_clips
-                .retain(|b| b.action != CharacterAnimationAction::LightAttackFollowup),
-            1 => set.action_chains[0].input_end = 61,
-            2 => set.action_chains.push(set.action_chains[0]),
-            _ => set.action_chains[0].next_action = CharacterAnimationAction::LightAttack,
-        }
-        let (_, report) = playtest::build_package(&broken, &root);
-        assert!(!report.is_ok(), "invalid chain case {case} was accepted");
-        assert!(
-            report.errors.iter().any(|e| e.contains("chain")),
-            "{:?}",
-            report.errors
-        );
-    }
+    assert!(has(
+        "Character 'Aletha' Core kit has no Knockdown clip -- plays Stun + Recovery instead"
+    ));
+    assert!(has(
+        "Character 'Aletha' Mobility kit has no Dash Left clip -- plays Roll instead"
+    ));
+    assert!(has("Character 'Aletha' kits: no ranged"));
+    assert!(!warnings
+        .iter()
+        .any(|w| w.starts_with("Character 'Aletha' Ranged kit")
+            || w.starts_with("Character 'Aletha' Swap kit")));
+    // The heavy enemy has both weapons, so its swap kit is expected.
+    assert!(warnings.iter().any(
+        |w| w.contains("Swap kit has no Stance Swap clip -- no stand-in") && w.contains("Heavy")
+    ));
+    // A character placed several times warns once.
+    let kit_lines: Vec<&String> = warnings
+        .iter()
+        .filter(|w| w.contains(" kit has no "))
+        .collect();
+    let mut unique = kit_lines.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), kit_lines.len());
+    // The enemies carry their kits in the cooked flags.
+    let package = package.unwrap();
+    assert!(package.game_entities.iter().any(|entity| {
+        let kits = psx_level::game_entity_combat_kits(entity.flags);
+        kits.can_swap() && !kits.can_dodge()
+    }));
 }
 
 #[test]

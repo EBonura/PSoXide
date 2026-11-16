@@ -30,9 +30,10 @@
 //! ([`Combatant::knocked_down`]): it cannot act or move, it takes damage, and
 //! it cannot be broken again until it is up.
 //!
-//! Who may swap at all is data too, [`StanceMoves`]: only a fighter with both
-//! a melee and a ranged move swaps; one with a single kind of move holds the
-//! stance of that move.
+//! Who may swap at all follows from the fighter's kits
+//! ([`psx_level::combat_verbs::CombatKits`], derived from what it binds):
+//! only a fighter with both the melee and the ranged kit swaps; one with a
+//! single weapon holds that weapon's stance ([`starting_stance`]).
 //!
 //! Every hit, whatever dealt it, lands through [`Combatant::receive_hit`]. A
 //! [`HitIn`] is the [`Strike`] (what the attacker sent) plus the defender's
@@ -44,6 +45,7 @@
 //! health bar, which nothing refills during play: only a respawn, an arch or
 //! a checkpoint restores it.
 
+use psx_level::combat_verbs::CombatKits;
 use psx_level::CombatStats;
 
 use crate::combat_flow::CombatFlow;
@@ -68,32 +70,15 @@ fn scale_q12(value: u16, q12: u16) -> u16 {
         as u16
 }
 
-/// The moves a character has, which decide whether it may swap stance: a
-/// fighter swaps only with both a melee and a ranged move. One with a single
-/// kind of move holds the stance of that move (blade for melee, Zenith for
-/// ranged) from spawn on.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct StanceMoves {
-    /// A blade (melee) move.
-    pub melee: bool,
-    /// A Zenith (ranged) move.
-    pub ranged: bool,
-}
-
-impl StanceMoves {
-    /// Whether this fighter may swap stance at all.
-    pub const fn can_swap(self) -> bool {
-        self.melee && self.ranged
-    }
-
-    /// The stance a fresh life starts in: Zenith for a ranged-only fighter,
-    /// blade otherwise.
-    pub const fn starting_stance(self) -> VitalityChannelId {
-        if self.ranged && !self.melee {
-            VitalityChannelId::Two
-        } else {
-            VitalityChannelId::One
-        }
+/// The stance a fresh life starts in, from the fighter's kits
+/// ([`CombatKits`]): Zenith for a fighter with the cannon and no blade, the
+/// blade otherwise. A fighter that cannot swap ([`CombatKits::can_swap`])
+/// holds this stance for good.
+pub const fn starting_stance(kits: CombatKits) -> VitalityChannelId {
+    if kits.can_shoot() && !kits.can_melee() {
+        VitalityChannelId::Two
+    } else {
+        VitalityChannelId::One
     }
 }
 
@@ -861,23 +846,15 @@ mod tests {
     }
 
     #[test]
-    fn only_a_fighter_with_both_moves_swaps() {
-        let both = StanceMoves {
-            melee: true,
-            ranged: true,
-        };
-        let melee = StanceMoves {
-            melee: true,
-            ranged: false,
-        };
-        let ranged = StanceMoves {
-            melee: false,
-            ranged: true,
-        };
+    fn only_a_fighter_with_both_kits_swaps() {
+        let both = CombatKits::from_bits(CombatKits::MELEE | CombatKits::RANGED);
+        let melee = CombatKits::from_bits(CombatKits::MELEE);
+        let ranged = CombatKits::from_bits(CombatKits::RANGED);
         assert!(both.can_swap() && !melee.can_swap() && !ranged.can_swap());
-        assert_eq!(melee.starting_stance(), VitalityChannelId::One);
-        assert_eq!(both.starting_stance(), VitalityChannelId::One);
-        assert_eq!(ranged.starting_stance(), VitalityChannelId::Two);
+        assert_eq!(starting_stance(melee), VitalityChannelId::One);
+        assert_eq!(starting_stance(both), VitalityChannelId::One);
+        assert_eq!(starting_stance(ranged), VitalityChannelId::Two);
+        assert_eq!(starting_stance(CombatKits::NONE), VitalityChannelId::One);
     }
 
     #[test]

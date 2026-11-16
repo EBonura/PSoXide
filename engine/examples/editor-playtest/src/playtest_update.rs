@@ -715,7 +715,7 @@ impl Playtest {
         // every enemy), and a fighter that is down cannot act.
         if ctx.just_pressed(button::TRIANGLE)
             && !circle_locks_stance
-            && self.player_stance_moves().can_swap()
+            && self.player_kits().can_swap()
             && !self.player.knocked_down()
         {
             let config = self.player_stance_config;
@@ -723,7 +723,6 @@ impl Playtest {
                 self.attack_buffer.clear();
                 self.authored_attack.clear();
                 self.authored_dodge.clear();
-                self.attack_chain.clear();
                 self.queue_gameplay_sfx(LevelGameplaySfxEvent::StanceSwap);
                 telemetry::debug_log("player stance:swap");
             }
@@ -807,7 +806,11 @@ impl Playtest {
                 }
             }
         }
-        let circle = self.update_evade_run_button(ctx, delta_vblanks);
+        let mut circle = self.update_evade_run_button(ctx, delta_vblanks);
+        // Only a character with the mobility kit dodges; Circle still runs.
+        if !self.player_kits().can_dodge() {
+            circle.evade = false;
+        }
         let ranged = self.player_has_ranged_weapon();
         let interrupted = circle.evade
             || !self.motor.action().is_idle()
@@ -858,9 +861,7 @@ impl Playtest {
         {
             self.evade_latched_move = (stick_input.move_x, stick_input.move_z);
         }
-        if circle.evade {
-            self.attack_chain.clear();
-        }
+        if circle.evade {}
         use psx_level::CombatWindowKind as WindowKind;
         let timing = self.player_combat_sample(ctx);
         let actor_free = !action_locked && self.motor.action().is_idle();
@@ -972,7 +973,6 @@ impl Playtest {
             self.authored_dodge.clear();
             // An explicit dodge wins over a remembered attack.
             self.attack_buffer.clear();
-            self.attack_chain.clear();
         } else if self.update_attack_input(ctx, now, action_locked) {
             if self.hook_travel.is_some() {
                 self.step_hook(ctx);
@@ -1588,12 +1588,10 @@ impl Playtest {
         if self.hazard_death_ticks_remaining != 0 {
             self.attack_buffer.clear();
             self.authored_attack.clear();
-            self.attack_chain.clear();
             return false;
         }
         if self.player_has_ranged_weapon() && self.player.stance.active() == VitalityChannelId::Two
         {
-            self.attack_chain.clear();
             if ctx.just_pressed(ACTIVE_HEAVY_ATTACK_BUTTON)
                 && !action_locked
                 && self.motor.action().is_idle()
@@ -1638,79 +1636,7 @@ impl Playtest {
         } else {
             0
         };
-        // Chain inputs are scoped to this strike. A rejected/terminal press
-        // cannot leak into the ordinary late-recovery attack buffer.
         let action = self.anim_state.action();
-        let chain = self.character.as_ref().and_then(|c| {
-            c.action_chains
-                .iter()
-                .copied()
-                .find(|c| c.action == action.to_index() as u8)
-        });
-        let is_followup = matches!(
-            self.anim_state,
-            PlayerAnim::LightAttackFollowup | PlayerAnim::LightAttackFinisher
-        );
-        if action_locked && (chain.is_some() || is_followup) {
-            self.attack_buffer.clear();
-            self.authored_attack.clear();
-            if stance_offset == 0 && self.evade_buffer_vblanks == 0 {
-                if let (Some(rule), Some(character)) = (chain, self.character.as_ref()) {
-                    let phase = self
-                        .models
-                        .get(character.model.to_usize())
-                        .copied()
-                        .flatten()
-                        .and_then(|model| {
-                            model.clip(&self.clips, character.clip_for(self.anim_state))
-                        })
-                        .map(|clip| {
-                            psx_game_runtime::model_rendering::animation_phase_at_tick_q12(
-                                clip,
-                                now.saturating_sub(self.anim_start_tick),
-                                ctx.video_hz,
-                                false,
-                                self.player_action_speed_q8(character, self.anim_state),
-                                character.action_frame_range(action),
-                            )
-                        });
-                    if let Some(phase) = phase {
-                        let next = self.attack_chain.update(
-                            action.to_index() as u8,
-                            phase,
-                            ctx.just_pressed(ACTIVE_LIGHT_ATTACK_BUTTON)
-                                && !ctx.just_pressed(ACTIVE_HEAVY_ATTACK_BUTTON),
-                            rule,
-                        );
-                        let anim = match next {
-                            Some(index)
-                                if usize::from(index)
-                                    == CharacterAnimationAction::LightAttackFollowup.to_index() =>
-                            {
-                                Some(PlayerAnim::LightAttackFollowup)
-                            }
-                            Some(index)
-                                if usize::from(index)
-                                    == CharacterAnimationAction::LightAttackFinisher.to_index() =>
-                            {
-                                Some(PlayerAnim::LightAttackFinisher)
-                            }
-                            _ => None,
-                        };
-                        if let Some(anim) = anim {
-                            if self.start_player_anim_action(anim, now, ctx.video_hz) {
-                                self.chain_blend_ticks = rule.blend_ticks;
-                                telemetry::debug_log("player combo:handoff");
-                                telemetry::counter(telemetry::counter::PLAYER_ATTACK_STARTS, 1);
-                            }
-                        }
-                    }
-                }
-            } else {
-                self.attack_chain.clear();
-            }
-            return true;
-        }
         use psx_level::CombatWindowKind as WindowKind;
         let timing = self.player_combat_sample(ctx);
         let authored = timing.window(WindowKind::Attack).is_some();
@@ -1742,16 +1668,19 @@ impl Playtest {
             self.attack_buffer.take(now.as_u32())
         };
         if let Some(tag) = request {
-            let anim = match tag {
-                1 => PlayerAnim::LightAttack,
-                2 => PlayerAnim::HeavyAttack,
-                3 => PlayerAnim::VertLightAttack,
-                _ => PlayerAnim::VertHeavyAttack,
+            let wanted = match tag {
+                1 => CharacterAnimationAction::LightAttack,
+                2 => CharacterAnimationAction::HeavyAttack,
+                3 => CharacterAnimationAction::VertLightAttack,
+                _ => CharacterAnimationAction::VertHeavyAttack,
             };
-            let bound = self
-                .character
-                .as_ref()
-                .is_some_and(|character| character.action_clip(anim.action()).is_some());
+            // Only a character with the melee kit strikes. A strike it does
+            // not bind is the first bound strike of its fallback chain (a
+            // heavy with no clip is the light strike, with the light's
+            // hitboxes and timing); one with no stand-in is refused.
+            let resolved = player_strike(self.character.as_ref(), wanted);
+            let bound = resolved.is_some();
+            let anim = resolved.unwrap_or(PlayerAnim::LightAttack);
             if bound && authored {
                 self.motor.interrupt_action();
                 self.anim_lock_until_tick = now;
@@ -1810,6 +1739,23 @@ impl Playtest {
 fn nearest_stop_uses_mirror(position: u32, cycle: u32) -> bool {
     let position = position % cycle.max(1);
     position.abs_diff(cycle / 2) < position.min(cycle.saturating_sub(position))
+}
+
+/// The strike a press for `wanted` performs: none without the melee kit,
+/// else `wanted` or the first bound strike of its fallback chain, as long as
+/// the player has a state for it.
+pub(super) fn player_strike(
+    character: Option<&RuntimeCharacter>,
+    wanted: CharacterAnimationAction,
+) -> Option<PlayerAnim> {
+    let character = character.filter(|character| character.combat_kits().can_melee())?;
+    match combat_verbs::resolve(character, wanted)? {
+        CharacterAnimationAction::LightAttack => Some(PlayerAnim::LightAttack),
+        CharacterAnimationAction::HeavyAttack => Some(PlayerAnim::HeavyAttack),
+        CharacterAnimationAction::VertLightAttack => Some(PlayerAnim::VertLightAttack),
+        CharacterAnimationAction::VertHeavyAttack => Some(PlayerAnim::VertHeavyAttack),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

@@ -22,7 +22,6 @@ pub mod actor_pose;
 pub mod arch_props;
 #[cfg(feature = "cd-stream-bench")]
 pub mod asset_streaming;
-pub mod attack_chain;
 pub mod box_props;
 pub mod card_stream;
 pub mod cd_stream;
@@ -30,6 +29,7 @@ pub mod character;
 pub mod combat;
 pub mod combat_feedback;
 pub mod combat_flow;
+pub mod combat_intent;
 pub mod combat_policy;
 pub mod combat_timing;
 pub mod combatant;

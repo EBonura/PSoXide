@@ -20,10 +20,9 @@ use psx_game_runtime::projectiles::{
     CombatTeam, ProjectileDamageChannel, ProjectileSpawn, ProjectileVisualStyle,
 };
 use psx_level::{
-    CharacterActionChain, CharacterActionFrameRange, CharacterActionPush, CharacterAnimationAction,
+    CharacterActionFrameRange, CharacterActionPush, CharacterAnimationAction,
     CharacterCombatWindow, CombatCapsuleIndex, CombatWindowKind, LevelCharacterRecord, ModelIndex,
-    OptionalModelClipIndex, CHARACTER_ANIMATION_ACTION_COUNT, MAX_CHARACTER_ACTION_CHAINS,
-    MAX_CHARACTER_COMBAT_WINDOWS,
+    OptionalModelClipIndex, CHARACTER_ANIMATION_ACTION_COUNT, MAX_CHARACTER_COMBAT_WINDOWS,
 };
 
 /// The player character's combat numbers when nothing else is cooked
@@ -63,6 +62,15 @@ pub(super) fn ctx(tick: u32) -> Ctx {
 /// project.
 pub(super) fn character(ranged: bool) -> RuntimeCharacter {
     let mut clips = [OptionalModelClipIndex::NONE; CHARACTER_ANIMATION_ACTION_COUNT];
+    // The blade and the roll every playable character binds; the cannon is
+    // the variable.
+    for action in [
+        CharacterAnimationAction::LightAttack,
+        CharacterAnimationAction::HeavyAttack,
+        CharacterAnimationAction::Roll,
+    ] {
+        clips[action.to_index()] = OptionalModelClipIndex::from_raw(0);
+    }
     if ranged {
         for action in [
             CharacterAnimationAction::RangedAttack,
@@ -78,7 +86,6 @@ pub(super) fn character(ranged: bool) -> RuntimeCharacter {
         action_speeds: [256; CHARACTER_ANIMATION_ACTION_COUNT],
         action_frame_ranges: [CharacterActionFrameRange::FULL; CHARACTER_ANIMATION_ACTION_COUNT],
         action_pushes: [CharacterActionPush::NONE; CHARACTER_ANIMATION_ACTION_COUNT],
-        action_chains: [CharacterActionChain::NONE; MAX_CHARACTER_ACTION_CHAINS],
         combat_windows: [CharacterCombatWindow::NONE; MAX_CHARACTER_COMBAT_WINDOWS],
         combat_capsule_first: CombatCapsuleIndex::ZERO,
         combat_capsule_count: 0,

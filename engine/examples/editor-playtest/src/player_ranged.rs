@@ -16,12 +16,11 @@ pub(super) fn player_projectile_visual(mut visual: ProjectileVisualStyle) -> Pro
 }
 
 impl Playtest {
+    /// Whether the player has the Zenith cannon: the ranged kit, which is a
+    /// bound shot ([`CombatKits::can_shoot`]). An unbound aim pose falls back
+    /// to the rest pose.
     pub(super) fn player_has_ranged_weapon(&self) -> bool {
-        self.character.as_ref().is_some_and(|c| {
-            c.action_clip(CharacterAnimationAction::RangedAttack)
-                .is_some()
-                && c.action_clip(CharacterAnimationAction::RangedAim).is_some()
-        })
+        self.player_kits().can_shoot()
     }
 
     pub(super) fn ranged_locomotion(anim: PlayerAnim) -> PlayerAnim {
