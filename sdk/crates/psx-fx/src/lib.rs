@@ -36,6 +36,7 @@
 #![warn(missing_docs)]
 
 pub mod particles;
+pub mod playlist;
 pub mod rng;
 pub mod shake;
 
