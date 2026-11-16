@@ -614,6 +614,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "psx-fmv"
+version = "0.1.0"
+dependencies = [
+ "psx-gpu",
+ "psx-hw",
+ "psx-io",
+ "psx-math",
+ "psx-pack",
+ "psx-rt",
+ "psx-spu",
+ "psx-vram",
+]
+
+[[package]]
 name = "psx-font"
 version = "0.1.0"
 dependencies = [
@@ -804,6 +818,15 @@ version = "0.1.0"
 dependencies = [
  "psx-hw",
  "psx-io",
+]
+
+[[package]]
+name = "psx-str-cook"
+version = "0.1.0"
+dependencies = [
+ "psx-audio-cook",
+ "psx-fmv",
+ "psx-hw",
 ]
 
 [[package]]

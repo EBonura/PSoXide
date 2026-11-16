@@ -1,0 +1,16 @@
+[package]
+name = "psx-str-cook"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Host-side STR movie encoder: decoded pictures and PCM in, a 2x STR with bitstream v2 video and interleaved XA-ADPCM out, checked with the SDK's own decoder."
+
+[dependencies]
+psx-audio-cook = { path = "../psx-audio-cook" }
+psx-fmv = { path = "../../sdk/crates/psx-fmv" }
+psx-hw = { path = "../psx-hw" }
+
+[lints]
+workspace = true
