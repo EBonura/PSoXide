@@ -898,10 +898,10 @@ pub mod single {
 /// no ticket records. A program uses this module, [`single`] or the crate root, not two of
 /// them: each registers for the CD source with psx-rt's dispatcher and holds its own engine.
 ///
-/// [`install`] and [`ensure_installed`] work as at the root. [`submit`] starts the request or
+/// [`lean::install`] and [`lean::ensure_installed`] work as at the root. [`lean::submit`] starts the request or
 /// refuses it with [`SubmitError::QueueFull`] while a transfer is running or the drive is still
-/// stopping; [`status`] says how it is going, and is `Busy` until the drive has stopped, so
-/// the polled reader may follow the first `Done` or `Failed`. [`stop_and_wait`] cancels and waits.
+/// stopping; [`lean::status`] says how it is going, and is `Busy` until the drive has stopped, so
+/// the polled reader may follow the first `Done` or `Failed`. [`lean::stop_and_wait`] cancels and waits.
 pub mod lean {
     use super::{install_in, stop_in, uninstall_in, with, Lean, Transport};
     use crate::engine::{Config, Status};
