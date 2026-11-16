@@ -12,6 +12,18 @@
 //! four tests and four loads. Callers that need a recoverable failure check
 //! the length first. The `_unchecked` readers are the same load without the
 //! test, for offsets that are in range by construction.
+//!
+//! The unchecked readers are indexed byte loads joined with `from_le_bytes`, not a
+//! `read_unaligned`. The R3000 backend merges four consecutive byte loads into one
+//! `lwl`/`lwr` pair either way, so the machine code of one read is the same, but LLVM
+//! prices an accessor on the IR it sees before that merge: a one-instruction
+//! `read_unaligned` makes every accessor that reads fields look about ten instructions
+//! cheaper per field, so the inliner and unroller treat it differently.
+//! In Counter-Strike's `map.rs`, adopting the `read_unaligned` form took 3,216 B of free
+//! RAM (accessors such as `Map::entity`, `nav_node`, `leaf` and `prop` went from
+//! outlined to inlined at every call site, 2 to 11 sites each, and `mark_leaf_faces`
+//! grew from 680 to 3,248 B); the same adoption with the byte form gave 2,752 B back.
+//! Keep this shape unless the same comparison on a ship link says otherwise.
 
 /// Little-endian `u16` at `offset`.
 ///
@@ -78,7 +90,12 @@ pub fn read_i32(bytes: &[u8], offset: usize) -> i32 {
 #[must_use]
 pub unsafe fn read_u16_unchecked(bytes: &[u8], offset: usize) -> u16 {
     // SAFETY: the caller keeps the two bytes inside `bytes`.
-    u16::from_le(unsafe { bytes.as_ptr().add(offset).cast::<u16>().read_unaligned() })
+    unsafe {
+        u16::from_le_bytes([
+            *bytes.get_unchecked(offset),
+            *bytes.get_unchecked(offset + 1),
+        ])
+    }
 }
 
 /// [`read_u32`] without the length test.
@@ -90,7 +107,14 @@ pub unsafe fn read_u16_unchecked(bytes: &[u8], offset: usize) -> u16 {
 #[must_use]
 pub unsafe fn read_u32_unchecked(bytes: &[u8], offset: usize) -> u32 {
     // SAFETY: the caller keeps the four bytes inside `bytes`.
-    u32::from_le(unsafe { bytes.as_ptr().add(offset).cast::<u32>().read_unaligned() })
+    unsafe {
+        u32::from_le_bytes([
+            *bytes.get_unchecked(offset),
+            *bytes.get_unchecked(offset + 1),
+            *bytes.get_unchecked(offset + 2),
+            *bytes.get_unchecked(offset + 3),
+        ])
+    }
 }
 
 /// [`read_i16`] without the length test.
