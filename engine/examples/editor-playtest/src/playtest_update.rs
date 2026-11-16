@@ -259,8 +259,7 @@ impl Playtest {
             // update, pairing it with the same retained pose contact uses.
             let motor_config = self.motor_config();
             let player_action = self.player_action_protection(ctx, motor_config);
-            self.game_entities
-                .set_player_attack_read(self.player_melee_read());
+            let attack_read = self.player_melee_read();
             self.game_entities
                 .observe_projectiles(GAME_ENTITIES.as_slice(), &self.combat_projectiles);
             let mut mover = SceneEntityMover {
@@ -277,21 +276,24 @@ impl Playtest {
             self.game_entities.tick_delta_deferred(
                 GAME_ENTITIES.as_slice(),
                 psx_game_runtime::entities::GameEntityTickInput {
-                    player: player_pos,
-                    player_radius,
-                    player_height,
-                    player_target: Defender {
-                        combatant: &self.player,
-                        swap_invulnerable_ticks: motor_config.roll_invulnerable_frames,
-                        parry_ticks: self.player_stats.parry_ticks,
-                        action: player_action,
+                    target: psx_game_runtime::entities::CombatTarget {
+                        position: player_pos,
+                        radius: player_radius,
+                        height: player_height,
+                        defender: Defender {
+                            combatant: &self.player,
+                            swap_invulnerable_ticks: motor_config.roll_invulnerable_frames,
+                            parry_ticks: self.player_stats.parry_ticks,
+                            action: player_action,
+                        },
+                        stance: Some(self.player.stance.active()),
+                        noise_radius: player_noise_radius(
+                            self.player_moved_last_tick,
+                            self.anim_state,
+                            player_height,
+                        ),
+                        attack_read,
                     },
-                    player_combat: Some(self.player.stance.active()),
-                    player_noise_radius: player_noise_radius(
-                        self.player_moved_last_tick,
-                        self.anim_state,
-                        player_height,
-                    ),
                 },
                 &mut mover,
                 npc_delta_ticks,

@@ -59,7 +59,7 @@ use psx_math::atan2_q12;
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GameEntityState {
-    /// Holding position, scanning for the player.
+    /// Holding position, scanning for a target.
     Idle = 0,
     /// Walking between the spawn anchor and the patrol anchor.
     Patrol = 1,
@@ -105,15 +105,15 @@ impl GameEntityState {
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GameEntityIntent {
-    /// Face the player and wait.
+    /// Face the target and wait.
     Hold = 0,
-    /// Close distance toward the player.
+    /// Close distance toward the target.
     Approach = 1,
-    /// Orbit counter-clockwise around the player.
+    /// Orbit counter-clockwise around the target.
     CircleLeft = 2,
-    /// Orbit clockwise around the player.
+    /// Orbit clockwise around the target.
     CircleRight = 3,
-    /// Back away while keeping the player faced.
+    /// Back away while keeping the target faced.
     Retreat = 4,
 }
 
@@ -277,30 +277,42 @@ impl GameEntityMover for NoClipMover {
     }
 }
 
-/// Per-tick inputs the owning game threads in: the player pose. Which
-/// entities think is the owner's spatial mask, see
+/// What an entity perceives of the fighter it is engaging this tick. The
+/// owner fills it from whichever fighter that is; the entity's decisions
+/// read only this record, never a particular character.
+#[derive(Clone, Copy)]
+pub struct CombatTarget<'a> {
+    /// Target position, world/room-local engine units (the same space the
+    /// cooked records use).
+    pub position: [i32; 3],
+    /// Target body radius, engine units (the target Character's capsule;
+    /// the other half of Character-derived attack reach).
+    pub radius: i32,
+    /// Target body height, used to trace sight at torso height instead of
+    /// along the floor.
+    pub height: i32,
+    /// Current movement noise radius, in world units. Zero means silent.
+    pub noise_radius: i32,
+    /// The target as a defender. Entity attacks ask it
+    /// [`Defender::invulnerable`] and resolve no contact against an
+    /// invulnerable target -- the swing stays live, so i-framing only the
+    /// first half of a window still eats the tail (souls timing rules).
+    pub defender: Defender<'a>,
+    /// Visible target's active stance, for shared stance decisions. None
+    /// retains distance-only policy for legacy callers and fixtures.
+    pub stance: Option<VitalityChannelId>,
+    /// The target's visible attack phase: 0 neutral, 1 tell, 2 swing,
+    /// 3 recovery.
+    pub attack_read: u8,
+}
+
+/// Per-tick inputs the owning game threads in: the target each entity
+/// engages. Which entities think is the owner's spatial mask, see
 /// [`GameEntities::set_spatial_active_mask`].
 #[derive(Clone, Copy)]
 pub struct GameEntityTickInput<'a> {
-    /// Player position, world/room-local engine units (the same space
-    /// the cooked records use).
-    pub player: [i32; 3],
-    /// Player body radius, engine units (the player Character's
-    /// capsule; the other half of Character-derived attack reach).
-    pub player_radius: i32,
-    /// Player body height, used to trace sight at torso height instead of
-    /// along the floor.
-    pub player_height: i32,
-    /// Current movement noise radius, in world units. Zero means silent.
-    pub player_noise_radius: i32,
-    /// The player as a target. Entity attacks ask it
-    /// [`Defender::invulnerable`] and resolve no contact against an
-    /// invulnerable player -- the swing stays live, so i-framing only the
-    /// first half of a window still eats the tail (souls timing rules).
-    pub player_target: Defender<'a>,
-    /// Visible target's active stance, for shared stance decisions. None
-    /// retains distance-only policy for legacy callers and fixtures.
-    pub player_combat: Option<VitalityChannelId>,
+    /// The fighter the entities engage, as they perceive it.
+    pub target: CombatTarget<'a>,
 }
 
 /// Per-tick outcome counters, for overlays and budget telemetry.
@@ -603,7 +615,6 @@ pub struct GameEntities<
     /// Health, poise, energy and stance of each entity: the same
     /// [`Combatant`] the player holds.
     combatants: [Combatant; MAX_ENTITIES],
-    player_attack_read: u8,
     projectile_threats: [Option<crate::projectiles::ProjectileThreat>; MAX_ENTITIES],
     exchanges: [crate::ranged_tactics::RangedExchange; MAX_ENTITIES],
     recoil: [[i16; 3]; MAX_ENTITIES],
@@ -753,7 +764,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             i32::from(record.spacing_tolerance),
             was_melee,
         );
-        let melee = self.player_within(index, input, limit);
+        let melee = self.target_within(index, input, limit);
         if !STANCE_BOUND_ATTACKS {
             if melee {
                 self.attack_mode[index] |= GAME_ENTITY_ATTACK_MELEE_CHASE;
@@ -813,7 +824,6 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         turn_ticks: [0; MAX_ENTITIES],
         turn_phase_ticks: [0; MAX_ENTITIES],
         combatants: [Combatant::EMPTY; MAX_ENTITIES],
-        player_attack_read: 0,
         projectile_threats: [None; MAX_ENTITIES],
         exchanges: [crate::ranged_tactics::RangedExchange::EMPTY; MAX_ENTITIES],
         recoil: [[0; 3]; MAX_ENTITIES],
@@ -1208,7 +1218,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     }
 
     fn capture_ranged_aim(&mut self, index: usize, input: GameEntityTickInput<'_>) {
-        self.capture_ranged_target(index, input.player, input.player_height);
+        self.capture_ranged_target(index, input.target.position, input.target.height);
     }
 
     fn capture_ranged_target(&mut self, index: usize, player: [i32; 3], height: i32) {
@@ -1245,8 +1255,8 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         if self.state_ticks[index].saturating_add(6) >= u16::from(record.windup_ticks) {
             return;
         }
-        let dx = input.player[0].saturating_sub(self.x[index]);
-        let dz = input.player[2].saturating_sub(self.z[index]);
+        let dx = input.target.position[0].saturating_sub(self.x[index]);
+        let dz = input.target.position[2].saturating_sub(self.z[index]);
         if dx != 0 || dz != 0 {
             self.yaw[index] = psx_engine::Angle::from_q12(self.yaw[index] as u16)
                 .approach_q12(
@@ -1719,7 +1729,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             // PVS is a rendering broad phase, not a perception verdict.
             // Nearby actors must still test sight/hearing around corners.
             let activation_allows =
-                spatially_active || self.player_in_notice_range(record, index, input);
+                spatially_active || self.target_in_notice_range(record, index, input);
             if !behavior_awake && !activation_allows {
                 stats.gated += 1;
                 index += 1;
@@ -2018,7 +2028,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
                 && self.tactical_attack_ready(record, index)
                 && self.attack_cooldown[index] == 0
                 && self.state_ticks[index] >= u16::from(record.reaction_ticks)
-                && self.player_within(
+                && self.target_within(
                     index,
                     input,
                     i32::from(record.preferred_distance)
@@ -2026,8 +2036,8 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
                         .saturating_add(i32::from(record.spacing_tolerance)),
                 );
             if ready {
-                let dx = self.x[index].saturating_sub(input.player[0]).abs();
-                let dz = self.z[index].saturating_sub(input.player[2]).abs();
+                let dx = self.x[index].saturating_sub(input.target.position[0]).abs();
+                let dz = self.z[index].saturating_sub(input.target.position[2]).abs();
                 let distance_penalty = dx.max(dz) >> 4;
                 let score = i32::from(self.attack_wait_ticks[index])
                     .saturating_add(i32::from(record.attack_priority) * 64)
@@ -2117,7 +2127,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     /// Character-derived reach that committed the windup, gated to a
     /// front arc around the facing the entity locked when it
     /// committed. Connects at most once per swing, and never against
-    /// an i-framing player (see [`GameEntityTickInput::player_target`]).
+    /// an i-framing player (see [`CombatTarget::defender`]).
     fn resolve_attack_contact(
         &mut self,
         record: &LevelGameEntityRecord,
@@ -2127,7 +2137,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     ) {
         if self.selected_attack_is_ranged(index)
             || self.combat_flags[index] & GAME_ENTITY_ATTACK_CONNECTED != 0
-            || input.player_target.invulnerable()
+            || input.target.defender.invulnerable()
         {
             return;
         }
@@ -2143,7 +2153,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         // is already inside `attack_reach` (radius + radius + margin),
         // so the arc tests the CENTER (radius 0) to avoid counting the
         // player capsule twice.
-        if !arc_hits_circle(&arc, input.player[0], input.player[2], 0) {
+        if !arc_hits_circle(&arc, input.target.position[0], input.target.position[2], 0) {
             return;
         }
         self.combat_flags[index] |= GAME_ENTITY_ATTACK_CONNECTED;
@@ -2151,10 +2161,10 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         stats.player_damage = stats.player_damage.saturating_add(record.touch_damage);
     }
 
-    fn player_within(&self, index: usize, input: GameEntityTickInput<'_>, radius: i32) -> bool {
+    fn target_within(&self, index: usize, input: GameEntityTickInput<'_>, radius: i32) -> bool {
         within_xz(
             [self.x[index], self.z[index]],
-            [input.player[0], input.player[2]],
+            [input.target.position[0], input.target.position[2]],
             radius,
         )
     }
@@ -2166,33 +2176,33 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             i32::from(record.attack_max_range)
         } else {
             i32::from(record.radius)
-                .saturating_add(input.player_radius.max(0))
+                .saturating_add(input.target.radius.max(0))
                 .saturating_add(GAME_ENTITY_ATTACK_REACH_MARGIN)
         }
     }
 
     fn melee_attack_reach(record: &LevelGameEntityRecord, input: GameEntityTickInput<'_>) -> i32 {
         i32::from(record.radius)
-            .saturating_add(input.player_radius.max(0))
+            .saturating_add(input.target.radius.max(0))
             .saturating_add(GAME_ENTITY_ATTACK_REACH_MARGIN)
     }
 
-    fn player_in_notice_range(
+    fn target_in_notice_range(
         &self,
         record: &LevelGameEntityRecord,
         index: usize,
         input: GameEntityTickInput<'_>,
     ) -> bool {
-        psx_math::int32::abs_i32(self.y[index].saturating_sub(input.player[1]))
+        psx_math::int32::abs_i32(self.y[index].saturating_sub(input.target.position[1]))
             <= i32::from(record.height)
-                .max(input.player_height)
+                .max(input.target.height)
                 .saturating_mul(2)
-            && self.player_within(index, input, i32::from(record.aggro_radius))
+            && self.target_within(index, input, i32::from(record.aggro_radius))
     }
 
     // Shared by idle and patrol; keep one copy in the RAM-limited guest.
     #[inline(never)]
-    fn player_noticed(
+    fn target_noticed(
         &self,
         record: &LevelGameEntityRecord,
         index: usize,
@@ -2202,42 +2212,42 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         if Self::is_tactical(record)
             && (!within_xz(
                 [record.x, record.z],
-                [input.player[0], input.player[2]],
+                [input.target.position[0], input.target.position[2]],
                 i32::from(record.aggro_radius),
             ) || self.tactics[index].home_cooldown != 0)
         {
             return false;
         }
-        if !self.player_in_notice_range(record, index, input) {
+        if !self.target_in_notice_range(record, index, input) {
             return false;
         }
-        let clear = self.player_in_line_of_sight(record, index, input, mover);
+        let clear = self.target_in_line_of_sight(record, index, input, mover);
         // Omni-directional short-range hearing, attenuated through cover.
         // Hearing wakes the normal alert/pursuit state; it never bypasses the
         // separate line-of-sight check required to commit an attack.
         let hearing = if clear {
-            input.player_noise_radius
+            input.target.noise_radius
         } else {
-            input.player_noise_radius / 3
+            input.target.noise_radius / 3
         };
-        if hearing > 0 && self.player_within(index, input, hearing) {
+        if hearing > 0 && self.target_within(index, input, hearing) {
             return true;
         }
         if !clear {
             return false;
         }
         // Close peripheral awareness prevents touching an idle enemy unseen.
-        let close = i32::from(record.height).max(input.player_height);
-        if self.player_within(index, input, close) {
+        let close = i32::from(record.height).max(input.target.height);
+        if self.target_within(index, input, close) {
             return true;
         }
-        let dx = input.player[0].saturating_sub(self.x[index]);
-        let dz = input.player[2].saturating_sub(self.z[index]);
+        let dx = input.target.position[0].saturating_sub(self.x[index]);
+        let dz = input.target.position[2].saturating_sub(self.z[index]);
         let yaw = psx_engine::Angle::from_q12(self.yaw[index] as u16);
         yaw.sin().mul_i32(dx).saturating_add(yaw.cos().mul_i32(dz)) >= 0
     }
 
-    fn player_in_line_of_sight(
+    fn target_in_line_of_sight(
         &self,
         record: &LevelGameEntityRecord,
         index: usize,
@@ -2250,9 +2260,9 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             self.z[index],
         ];
         let to = [
-            input.player[0],
-            input.player[1].saturating_add(input.player_height.max(1) / 2),
-            input.player[2],
+            input.target.position[0],
+            input.target.position[1].saturating_add(input.target.height.max(1) / 2),
+            input.target.position[2],
         ];
         mover.line_of_sight(record.room, from, to)
     }
@@ -2265,9 +2275,9 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         mover: &mut impl GameEntityMover,
         stats: &mut GameEntityTickStats,
     ) {
-        if self.player_noticed(record, index, input, mover) {
+        if self.target_noticed(record, index, input, mover) {
             if Self::is_tactical(record) {
-                self.remember_target(index, input.player);
+                self.remember_target(index, input.target.position);
             }
             self.enter_state(index, GameEntityState::Aggro, stats);
             return;
@@ -2289,9 +2299,9 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         delta_ticks: u16,
         stats: &mut GameEntityTickStats,
     ) {
-        if self.player_noticed(record, index, input, mover) {
+        if self.target_noticed(record, index, input, mover) {
             if Self::is_tactical(record) {
-                self.remember_target(index, input.player);
+                self.remember_target(index, input.target.position);
             }
             self.enter_state(index, GameEntityState::Aggro, stats);
             return;
@@ -2322,7 +2332,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             return;
         }
         let leash = i32::from(record.aggro_radius).saturating_mul(GAME_ENTITY_LEASH_FACTOR);
-        if !self.player_within(index, input, leash) {
+        if !self.target_within(index, input, leash) {
             // Souls de-aggro: drop the chase and return to the idle
             // loop (return-to-post pathing is the nav slice).
             self.release_attack_owner(index, u16::from(record.group_attack_delay_ticks));
@@ -2332,7 +2342,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
 
         if self.state_ticks[index] < u16::from(record.reaction_ticks) {
             self.set_intent(index, GameEntityIntent::Hold);
-            self.face_toward(index, input.player);
+            self.face_toward(index, input.target.position);
             // The acquisition one-shot owns this window. A facing snap here
             // must not leak a stale turn phase into the first combat hold.
             self.turn_ticks[index] = 0;
@@ -2350,23 +2360,23 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             };
             if desired != self.stance(index)
                 && self.stance_swap_cooldown(index) == 0
-                && self.player_in_line_of_sight(record, index, input, mover)
+                && self.target_in_line_of_sight(record, index, input, mover)
             {
                 let _ = self.swap_stance(record, index);
             }
             if self.stance_swap_in_progress(index) {
                 self.set_intent(index, GameEntityIntent::Hold);
-                self.face_toward(index, input.player);
+                self.face_toward(index, input.target.position);
                 stats.holding = stats.holding.saturating_add(1);
                 return;
             }
             if self.stance(index) == VitalityChannelId::Two
-                && self.player_within(index, input, i32::from(record.attack_min_range))
+                && self.target_within(index, input, i32::from(record.attack_min_range))
             {
                 // A Zenith enemy caught up close creates firing room instead
                 // of cheating the stance restriction with a melee attack.
                 self.set_intent(index, GameEntityIntent::Retreat);
-                self.step_relative_to_player(
+                self.step_relative_to_target(
                     record,
                     index,
                     input,
@@ -2396,10 +2406,10 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             } else {
                 Self::attack_reach(record, input)
             };
-            if self.player_within(index, input, commit_reach)
-                && self.player_in_line_of_sight(record, index, input, mover)
+            if self.target_within(index, input, commit_reach)
+                && self.target_in_line_of_sight(record, index, input, mover)
             {
-                self.face_toward(index, input.player);
+                self.face_toward(index, input.target.position);
                 self.select_attack(index, !melee_chase);
                 if !melee_chase {
                     self.capture_ranged_aim(index, input);
@@ -2410,7 +2420,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             self.step_toward(
                 record,
                 index,
-                input.player,
+                input.target.position,
                 Self::approach_speed(record).saturating_mul(i32::from(delta_ticks)),
                 mover,
             );
@@ -2419,18 +2429,18 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
 
         if melee_chase && Self::has_ranged_attack(record) {
             let melee_reach = Self::melee_attack_reach(record, input);
-            if !self.player_within(index, input, melee_reach) {
+            if !self.target_within(index, input, melee_reach) {
                 self.set_intent(index, GameEntityIntent::Approach);
                 self.step_toward(
                     record,
                     index,
-                    input.player,
+                    input.target.position,
                     Self::approach_speed(record).saturating_mul(i32::from(delta_ticks)),
                     mover,
                 );
             } else {
                 self.set_intent(index, GameEntityIntent::Hold);
-                self.face_toward(index, input.player);
+                self.face_toward(index, input.target.position);
                 stats.holding = stats.holding.saturating_add(1);
             }
             return;
@@ -2444,20 +2454,20 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         let tolerance = i32::from(record.spacing_tolerance).min(preferred);
         let near_edge = preferred.saturating_sub(tolerance);
         let far_edge = preferred.saturating_add(tolerance);
-        if !self.player_within(index, input, far_edge) {
+        if !self.target_within(index, input, far_edge) {
             self.set_intent(index, GameEntityIntent::Approach);
             self.step_toward(
                 record,
                 index,
-                input.player,
+                input.target.position,
                 Self::approach_speed(record).saturating_mul(i32::from(delta_ticks)),
                 mover,
             );
             return;
         }
-        if self.player_within(index, input, near_edge) {
+        if self.target_within(index, input, near_edge) {
             self.set_intent(index, GameEntityIntent::Retreat);
-            self.step_relative_to_player(
+            self.step_relative_to_target(
                 record,
                 index,
                 input,
@@ -2485,7 +2495,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             } else {
                 GAME_ENTITY_QUARTER_TURN
             };
-            self.step_relative_to_player(
+            self.step_relative_to_target(
                 record,
                 index,
                 input,
@@ -2496,18 +2506,18 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             stats.circling = stats.circling.saturating_add(1);
         } else {
             self.set_intent(index, GameEntityIntent::Hold);
-            self.face_toward(index, input.player);
+            self.face_toward(index, input.target.position);
             stats.holding = stats.holding.saturating_add(1);
         }
     }
 
-    /// Move at a yaw offset from the direction to the player, then restore
-    /// player-facing. This gives circle/retreat movement without requiring a
+    /// Move at a yaw offset from the direction to the target, then restore
+    /// target-facing. This gives circle/retreat movement without requiring a
     /// navigation allocation or a second target point.
     // Chase, retreat and circling share collision movement; avoid duplicating
     // the full movement path inside each AI branch on the PS1.
     #[inline(never)]
-    fn step_relative_to_player(
+    fn step_relative_to_target(
         &mut self,
         record: &LevelGameEntityRecord,
         index: usize,
@@ -2516,8 +2526,8 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         speed: i32,
         mover: &mut impl GameEntityMover,
     ) {
-        let dx = input.player[0].saturating_sub(self.x[index]);
-        let dz = input.player[2].saturating_sub(self.z[index]);
+        let dx = input.target.position[0].saturating_sub(self.x[index]);
+        let dz = input.target.position[2].saturating_sub(self.z[index]);
         if dx == 0 && dz == 0 {
             return;
         }
@@ -2540,7 +2550,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         self.x[index] = committed[0];
         self.y[index] = committed[1];
         self.z[index] = committed[2];
-        self.face_toward(index, input.player);
+        self.face_toward(index, input.target.position);
     }
 
     /// One motor-checked step toward `goal` in XZ at `speed` engine units
@@ -2988,23 +2998,29 @@ mod tests {
 
     fn far_input() -> GameEntityTickInput<'static> {
         GameEntityTickInput {
-            player: [100_000, 0, 100_000],
-            player_radius: 192,
-            player_height: 1024,
-            player_noise_radius: 0,
-            player_target: Defender::OPEN,
-            player_combat: None,
+            target: CombatTarget {
+                position: [100_000, 0, 100_000],
+                radius: 192,
+                height: 1024,
+                noise_radius: 0,
+                defender: Defender::OPEN,
+                stance: None,
+                attack_read: 0,
+            },
         }
     }
 
     fn near_input() -> GameEntityTickInput<'static> {
         GameEntityTickInput {
-            player: [1200, 0, 1000],
-            player_radius: 192,
-            player_height: 1024,
-            player_noise_radius: 0,
-            player_target: Defender::OPEN,
-            player_combat: None,
+            target: CombatTarget {
+                position: [1200, 0, 1000],
+                radius: 192,
+                height: 1024,
+                noise_radius: 0,
+                defender: Defender::OPEN,
+                stance: None,
+                attack_read: 0,
+            },
         }
     }
 
@@ -3231,10 +3247,12 @@ mod tests {
             entities.spawn_from_records(&ENEMY);
             entities.set_spatial_active_mask(u64::MAX);
             let input = GameEntityTickInput {
-                player: [140, 0, 0],
-                player_radius: 12,
-                player_height: 64,
-                ..near_input()
+                target: CombatTarget {
+                    position: [140, 0, 0],
+                    radius: 12,
+                    height: 64,
+                    ..near_input().target
+                },
             };
             let mut ranged = 0;
             let mut melee = 0;
@@ -3258,8 +3276,10 @@ mod tests {
             e.spawn_from_records(&RANGED_ENEMY);
             e.set_stance_swap_delay(300);
             let far = GameEntityTickInput {
-                player: [2550, 0, 1000],
-                ..near_input()
+                target: CombatTarget {
+                    position: [2550, 0, 1000],
+                    ..near_input().target
+                },
             };
             let near = near_input();
             e.tick_delta(&RANGED_ENEMY, far, &mut BlockedMover, delta);
@@ -3330,8 +3350,10 @@ mod tests {
         e.advance_stance_swap(0, 12);
         let before = e.position(0);
         let far = GameEntityTickInput {
-            player: [2550, 0, 1000],
-            ..near_input()
+            target: CombatTarget {
+                position: [2550, 0, 1000],
+                ..near_input().target
+            },
         };
         e.tick(&RANGED_ENEMY, far, &mut NoClipMover);
         assert_eq!(e.stance(0), VitalityChannelId::One);
@@ -3349,12 +3371,16 @@ mod tests {
             &mut GameEntityTickStats::default(),
         );
         let band = GameEntityTickInput {
-            player: [2350, 0, 1000],
-            ..near_input()
+            target: CombatTarget {
+                position: [2350, 0, 1000],
+                ..near_input().target
+            },
         };
         let far = GameEntityTickInput {
-            player: [2550, 0, 1000],
-            ..near_input()
+            target: CombatTarget {
+                position: [2550, 0, 1000],
+                ..near_input().target
+            },
         };
         e.tick_delta(&RANGED_ENEMY, band, &mut BlockedMover, 1);
         assert_eq!(
@@ -3392,8 +3418,10 @@ mod tests {
             e.select_attack(0, false);
             e.enter_state(0, state, &mut GameEntityTickStats::default());
             let input = GameEntityTickInput {
-                player: [2550, 0, 1000],
-                ..near_input()
+                target: CombatTarget {
+                    position: [2550, 0, 1000],
+                    ..near_input().target
+                },
             };
             e.tick_delta(&RANGED_ENEMY, input, &mut BlockedMover, 1);
             assert_eq!(e.stance(0), VitalityChannelId::One, "swap during {state:?}");
@@ -3405,8 +3433,10 @@ mod tests {
         let mut close = GameEntities::<8>::EMPTY;
         close.spawn_from_records(&RANGED_ENEMY);
         let close_input = GameEntityTickInput {
-            player: [1450, 0, 1000],
-            ..near_input()
+            target: CombatTarget {
+                position: [1450, 0, 1000],
+                ..near_input().target
+            },
         };
         close.tick(&RANGED_ENEMY, close_input, &mut NoClipMover);
         close.tick(&RANGED_ENEMY, close_input, &mut NoClipMover);
@@ -3415,8 +3445,10 @@ mod tests {
         assert!(close.position(0)[0] > 1000, "hybrid owner closes for melee");
 
         let still_close_input = GameEntityTickInput {
-            player: [2300, 0, 1000],
-            ..near_input()
+            target: CombatTarget {
+                position: [2300, 0, 1000],
+                ..near_input().target
+            },
         };
         let before_follow = close.position(0)[0];
         close.tick(&RANGED_ENEMY, still_close_input, &mut NoClipMover);
@@ -3428,8 +3460,10 @@ mod tests {
         );
 
         let escaped_input = GameEntityTickInput {
-            player: [2500, 0, 1000],
-            ..near_input()
+            target: CombatTarget {
+                position: [2500, 0, 1000],
+                ..near_input().target
+            },
         };
         close.tick(&RANGED_ENEMY, escaped_input, &mut NoClipMover);
         assert_eq!(close.state(0), GameEntityState::Windup);
@@ -3453,8 +3487,10 @@ mod tests {
         entities.spawn_from_records(&RANGED_PAIR);
         entities.set_spatial_active_mask(u64::MAX);
         let input = GameEntityTickInput {
-            player: [1450, 0, 1000],
-            ..near_input()
+            target: CombatTarget {
+                position: [1450, 0, 1000],
+                ..near_input().target
+            },
         };
 
         entities.tick(&RANGED_PAIR, input, &mut NoClipMover);
@@ -3689,12 +3725,15 @@ mod tests {
             )
         }];
         let input = GameEntityTickInput {
-            player: [1600, 0, 1000],
-            player_radius: 192,
-            player_height: 1024,
-            player_noise_radius: 0,
-            player_target: Defender::OPEN,
-            player_combat: None,
+            target: CombatTarget {
+                position: [1600, 0, 1000],
+                radius: 192,
+                height: 1024,
+                noise_radius: 0,
+                defender: Defender::OPEN,
+                stance: None,
+                attack_read: 0,
+            },
         };
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&TRACKING);
@@ -3833,8 +3872,10 @@ mod tests {
         entities.state_ticks[0] = 100;
         entities.attack_cooldown[0] = 100;
         let in_band = GameEntityTickInput {
-            player: [1700, 0, 1000],
-            ..near_input()
+            target: CombatTarget {
+                position: [1700, 0, 1000],
+                ..near_input().target
+            },
         };
         entities.tick(&SPACED, in_band, &mut NoClipMover);
         let expected_clip = match entities.intent(0) {
@@ -4018,17 +4059,22 @@ mod tests {
         entities.spawn_from_records(&IDLE_ENEMY);
         entities.set_spatial_active_mask(u64::MAX);
         let chase_input = GameEntityTickInput {
-            player: [1800, 0, 1000],
-            player_radius: 192,
-            player_height: 1024,
-            player_noise_radius: 0,
-            player_target: Defender::OPEN,
-            player_combat: None,
+            target: CombatTarget {
+                position: [1800, 0, 1000],
+                radius: 192,
+                height: 1024,
+                noise_radius: 0,
+                defender: Defender::OPEN,
+                stance: None,
+                attack_read: 0,
+            },
         };
         // Move the player into the 512 aggro radius first.
         let notice_input = GameEntityTickInput {
-            player: [1500, 0, 1000],
-            ..chase_input
+            target: CombatTarget {
+                position: [1500, 0, 1000],
+                ..chase_input.target
+            },
         };
         entities.tick(&IDLE_ENEMY, notice_input, &mut NoClipMover);
         assert_eq!(entities.state(0), GameEntityState::Aggro);
@@ -4049,18 +4095,23 @@ mod tests {
         entities.spawn_from_records(&WALK_ONLY_ENEMY);
         entities.set_spatial_active_mask(u64::MAX);
         let chase_input = GameEntityTickInput {
-            player: [1800, 0, 1000],
-            player_radius: 192,
-            player_height: 1024,
-            player_noise_radius: 0,
-            player_target: Defender::OPEN,
-            player_combat: None,
+            target: CombatTarget {
+                position: [1800, 0, 1000],
+                radius: 192,
+                height: 1024,
+                noise_radius: 0,
+                defender: Defender::OPEN,
+                stance: None,
+                attack_read: 0,
+            },
         };
         entities.tick(
             &WALK_ONLY_ENEMY,
             GameEntityTickInput {
-                player: [1500, 0, 1000],
-                ..chase_input
+                target: CombatTarget {
+                    position: [1500, 0, 1000],
+                    ..chase_input.target
+                },
             },
             &mut NoClipMover,
         );
@@ -4260,19 +4311,24 @@ mod tests {
     #[test]
     fn owner_spatial_mask_keeps_nearby_perception_and_engaged_combat_awake() {
         let input = GameEntityTickInput {
-            player: [1200, 0, 1000],
-            player_radius: 192,
-            player_height: 1024,
-            player_noise_radius: 0,
-            player_target: Defender::OPEN,
-            player_combat: None,
+            target: CombatTarget {
+                position: [1200, 0, 1000],
+                radius: 192,
+                height: 1024,
+                noise_radius: 0,
+                defender: Defender::OPEN,
+                stance: None,
+                attack_read: 0,
+            },
         };
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&FAR_ROOM_ENEMY);
         entities.set_spatial_active_mask(0);
         let far = GameEntityTickInput {
-            player: [12000, 0, 1000],
-            ..input
+            target: CombatTarget {
+                position: [12000, 0, 1000],
+                ..input.target
+            },
         };
         let stats = entities.tick(&FAR_ROOM_ENEMY, far, &mut NoClipMover);
         assert_eq!((stats.thought, stats.gated), (0, 1));
@@ -4337,10 +4393,12 @@ mod tests {
             ..IDLE_ENEMY[0]
         }];
         let base = GameEntityTickInput {
-            player: [0, 0, -180],
-            player_height: 64,
-            player_radius: 12,
-            ..near_input()
+            target: CombatTarget {
+                position: [0, 0, -180],
+                height: 64,
+                radius: 12,
+                ..near_input().target
+            },
         };
         for delta in [1, 2] {
             let mut entities = GameEntities::<8>::EMPTY;
@@ -4353,8 +4411,10 @@ mod tests {
                 "silent rear approach"
             );
             let walking = GameEntityTickInput {
-                player_noise_radius: 128,
-                ..base
+                target: CombatTarget {
+                    noise_radius: 128,
+                    ..base.target
+                },
             };
             entities.tick_delta(&ENEMY, walking, &mut NoClipMover, delta);
             assert_eq!(
@@ -4363,8 +4423,10 @@ mod tests {
                 "outside walking earshot"
             );
             let running = GameEntityTickInput {
-                player_noise_radius: 256,
-                ..base
+                target: CombatTarget {
+                    noise_radius: 256,
+                    ..base.target
+                },
             };
             entities.tick_delta(&ENEMY, running, &mut NoClipMover, delta);
             assert_eq!(
@@ -4375,8 +4437,10 @@ mod tests {
             entities.spawn_from_records(&ENEMY);
             entities.set_spatial_active_mask(u64::MAX);
             let front = GameEntityTickInput {
-                player: [0, 0, 300],
-                ..base
+                target: CombatTarget {
+                    position: [0, 0, 300],
+                    ..base.target
+                },
             };
             entities.tick_delta(&ENEMY, front, &mut NoClipMover, delta);
             assert_eq!(
@@ -4387,8 +4451,10 @@ mod tests {
             entities.spawn_from_records(&ENEMY);
             entities.set_spatial_active_mask(u64::MAX);
             let close = GameEntityTickInput {
-                player: [0, 0, -90],
-                ..walking
+                target: CombatTarget {
+                    position: [0, 0, -90],
+                    ..walking.target
+                },
             };
             entities.tick_delta(&ENEMY, close, &mut NoClipMover, delta);
             assert_eq!(
@@ -4418,17 +4484,21 @@ mod tests {
         entities.set_spatial_active_mask(u64::MAX);
         let mut blocked = SightMover::default();
         let input = GameEntityTickInput {
-            player: [0, 0, -120],
-            player_height: 64,
-            player_radius: 12,
-            player_noise_radius: 256,
-            ..near_input()
+            target: CombatTarget {
+                position: [0, 0, -120],
+                height: 64,
+                radius: 12,
+                noise_radius: 256,
+                ..near_input().target
+            },
         };
         entities.tick(&ENEMY, input, &mut blocked);
         assert_eq!(entities.state(0), GameEntityState::Idle);
         let close = GameEntityTickInput {
-            player: [0, 0, -40],
-            ..input
+            target: CombatTarget {
+                position: [0, 0, -40],
+                ..input.target
+            },
         };
         entities.tick(&ENEMY, close, &mut blocked);
         assert_eq!(entities.state(0), GameEntityState::Aggro);
@@ -4443,8 +4513,10 @@ mod tests {
         entities.spawn_from_records(&ENEMY);
         entities.set_spatial_active_mask(u64::MAX);
         let upstairs = GameEntityTickInput {
-            player: [0, 512, -40],
-            ..input
+            target: CombatTarget {
+                position: [0, 512, -40],
+                ..input.target
+            },
         };
         entities.tick(&ENEMY, upstairs, &mut blocked);
         assert_eq!(entities.state(0), GameEntityState::Idle);
@@ -4698,21 +4770,23 @@ mod tests {
         let mut e = GameEntities::<8>::EMPTY;
         e.spawn_from_records(&ENEMY);
         let mut input = GameEntityTickInput {
-            player: [2500, 0, 1000],
-            ..near_input()
+            target: CombatTarget {
+                position: [2500, 0, 1000],
+                ..near_input().target
+            },
         };
         e.tick(&ENEMY, input, &mut NoClipMover);
         e.tick(&ENEMY, input, &mut NoClipMover);
         assert_eq!(e.state(0), GameEntityState::Windup);
         let initial_yaw = e.yaw(0);
-        input.player = [2300, 0, 1600];
+        input.target.position = [2300, 0, 1600];
         for _ in 0..14 {
             e.tick(&ENEMY, input, &mut NoClipMover);
         }
         assert_ne!(e.yaw(0), initial_yaw);
         let velocity = e.ranged_velocity(0, [1000, 500, 1000], 160);
         let yaw = e.yaw(0);
-        input.player = [0, 1000, 0];
+        input.target.position = [0, 1000, 0];
         for _ in 0..10 {
             e.tick(&ENEMY, input, &mut NoClipMover);
         }
@@ -4730,9 +4804,11 @@ mod tests {
         e.capture_ranged_aim(
             0,
             GameEntityTickInput {
-                player: [0, 0, -384],
-                player_height: 64,
-                ..near_input()
+                target: CombatTarget {
+                    position: [0, 0, -384],
+                    height: 64,
+                    ..near_input().target
+                },
             },
         );
         assert_eq!(e.ranged_target(0), Some([0, 48, -384]));
@@ -4752,9 +4828,11 @@ mod tests {
         e.capture_ranged_aim(
             0,
             GameEntityTickInput {
-                player: [0, 0, -128],
-                player_height: 64,
-                ..near_input()
+                target: CombatTarget {
+                    position: [0, 0, -128],
+                    height: 64,
+                    ..near_input().target
+                },
             },
         );
         assert_eq!(e.ranged_target(0), Some([0, 48, 128]));
@@ -4768,8 +4846,10 @@ mod tests {
         let mut e = GameEntities::<8>::EMPTY;
         e.spawn_from_records(&RANGED_ENEMY);
         let input = GameEntityTickInput {
-            player: [2500, 0, 1000],
-            ..near_input()
+            target: CombatTarget {
+                position: [2500, 0, 1000],
+                ..near_input().target
+            },
         };
         for _ in 0..40 {
             e.tick(&RANGED_ENEMY, input, &mut NoClipMover);
@@ -4800,8 +4880,10 @@ mod tests {
         let mut e = GameEntities::<8>::EMPTY;
         e.spawn_from_records(&RANGED_PAIR);
         let input = GameEntityTickInput {
-            player: [1450, 0, 1000],
-            ..near_input()
+            target: CombatTarget {
+                position: [1450, 0, 1000],
+                ..near_input().target
+            },
         };
         e.tick(&RANGED_PAIR, input, &mut BlockedMover);
         e.tick(&RANGED_PAIR, input, &mut BlockedMover);
@@ -5160,17 +5242,19 @@ mod tests {
         advance_into_attack(&mut entities, near_input());
         let rolling_player = Combatant::EMPTY;
         let rolling = GameEntityTickInput {
-            player_target: Defender {
-                combatant: &rolling_player,
-                swap_invulnerable_ticks: 0,
-                parry_ticks: 0,
-                action: ActionProtection {
-                    authored: None,
-                    dodge: true,
+            target: CombatTarget {
+                defender: Defender {
+                    combatant: &rolling_player,
+                    swap_invulnerable_ticks: 0,
+                    parry_ticks: 0,
+                    action: ActionProtection {
+                        authored: None,
+                        dodge: true,
+                    },
                 },
+                stance: None,
+                ..near_input().target
             },
-            player_combat: None,
-            ..near_input()
         };
         let mut damage = 0u16;
         for _ in 0..GAME_ENTITY_ATTACK_ACTIVE_TICKS {
@@ -5204,8 +5288,10 @@ mod tests {
         // ...then the player rolls PAST the body to -X: same reach,
         // outside the front arc, outside the point-blank ring.
         let behind = GameEntityTickInput {
-            player: [800, 0, 1000],
-            ..near_input()
+            target: CombatTarget {
+                position: [800, 0, 1000],
+                ..near_input().target
+            },
         };
         let mut damage = 0u16;
         for _ in 0..GAME_ENTITY_ATTACK_ACTIVE_TICKS {

@@ -1,15 +1,11 @@
 //! Optional Cortex prototype; legacy records retain their original rules.
 use super::*;
 impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
-    /// Visible animation phase supplied by the game: 0 neutral, 1 tell, 2 swing, 3 recovery.
-    pub fn set_player_attack_read(&mut self, phase: u8) {
-        self.player_attack_read = phase;
-    }
     /// Ranged-exchange role of entity `index` (cover, peek, evade ...), 0 when unknown.
     pub fn combat_role(&self, index: usize) -> u8 {
         self.tactics.get(index).map_or(0, |t| t.combat_role)
     }
-    /// Record the nearest incoming player projectile threat for each entity.
+    /// Record the nearest incoming projectile threat for each entity.
     pub fn observe_projectiles<const P: usize>(
         &mut self,
         records: &[LevelGameEntityRecord],
@@ -64,13 +60,13 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         }
         self.release_attack_owner(i, 0);
         if !order.moving {
-            self.face_tactical(i, input.player, delta);
+            self.face_tactical(i, input.target.position, delta);
             self.set_intent(i, GameEntityIntent::Hold);
             stats.holding = stats.holding.saturating_add(1);
             return true;
         }
         let facing_target = if order.evade {
-            input.player
+            input.target.position
         } else {
             order.destination
         };
@@ -134,11 +130,11 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
     ) -> bool {
         self.tactics[i].defend_cooldown = self.tactics[i].defend_cooldown.saturating_sub(delta);
         self.tactics[i].defend_ticks = self.tactics[i].defend_ticks.saturating_sub(delta);
-        if !self.player_in_line_of_sight(r, i, input, mover) {
+        if !self.target_in_line_of_sight(r, i, input, mover) {
             return false;
         }
         let reach = Self::melee_attack_reach(r, input);
-        if self.player_attack_read == 3 {
+        if input.target.attack_read == 3 {
             if self.tactics[i].defend_ticks > 0 && self.tactics[i].goal == EnemyGoal::Retreat {
                 self.finish_goal(i, EnemyGoalResult::Cancelled);
             }
@@ -146,9 +142,9 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
             self.tactics[i].combat_role = 7;
             return false;
         }
-        if self.player_attack_read == 1
+        if input.target.attack_read == 1
             && self.tactics[i].defend_cooldown == 0
-            && self.player_within(i, input, reach * 2)
+            && self.target_within(i, input, reach * 2)
         {
             self.tactics[i].defend_ticks = 24;
             self.tactics[i].defend_cooldown = 90;
@@ -161,12 +157,12 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         if self.tactics[i].goal != EnemyGoal::Retreat {
             self.begin_goal(i, EnemyGoal::Retreat, 24, reach + 32);
         }
-        self.face_tactical(i, input.player, delta);
-        if self.player_within(i, input, reach + 32) {
+        self.face_tactical(i, input.target.position, delta);
+        if self.target_within(i, input, reach + 32) {
             let before = self.position(i);
             let yaw = psx_engine::Angle::from_q12(atan2_q12(
-                before[0] - input.player[0],
-                before[2] - input.player[2],
+                before[0] - input.target.position[0],
+                before[2] - input.target.position[2],
             ));
             let step = r.walk_speed.max(1) * i32::from(delta);
             let p = mover.step(
@@ -296,18 +292,18 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         self.tactics[i].moved = false;
         self.tactics[i].running = false;
         if self.state_ticks[i] >= u16::from(r.windup_ticks) / 2
-            || !self.player_in_line_of_sight(r, i, input, mover)
+            || !self.target_in_line_of_sight(r, i, input, mover)
         {
             return;
         }
-        self.face_tactical(i, input.player, delta);
-        if !self.player_within(i, input, Self::melee_attack_reach(r, input) + 8) {
+        self.face_tactical(i, input.target.position, delta);
+        if !self.target_within(i, input, Self::melee_attack_reach(r, input) + 8) {
             return;
         }
         let before = self.position(i);
         let away = psx_engine::Angle::from_q12(atan2_q12(
-            before[0] - input.player[0],
-            before[2] - input.player[2],
+            before[0] - input.target.position[0],
+            before[2] - input.target.position[2],
         ));
         let step = r.walk_speed.max(1).saturating_mul(i32::from(delta));
         let p = mover.step(
@@ -355,18 +351,18 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         let before = self.position(i);
         self.tactics[i].moved = false;
         self.tactics[i].running = false;
-        if !self.player_in_line_of_sight(r, i, input, mover) {
+        if !self.target_in_line_of_sight(r, i, input, mover) {
             return;
         }
-        let dx = input.player[0] - before[0];
-        let dz = input.player[2] - before[2];
+        let dx = input.target.position[0] - before[0];
+        let dz = input.target.position[2] - before[2];
         let toward = psx_engine::Angle::from_q12(atan2_q12(dx, dz));
         let (near, _) = crate::combat_flow::ranged_band(
             i32::from(r.preferred_distance),
             Self::melee_attack_reach(r, input) + 16,
             i32::from(r.attack_max_range),
         );
-        let retreat = self.player_within(i, input, near);
+        let retreat = self.target_within(i, input, near);
         let side = if i & 1 == 0 { 1024 } else { 3072 };
         let yaw = toward.add(psx_engine::Angle::from_q12(if retreat {
             2048

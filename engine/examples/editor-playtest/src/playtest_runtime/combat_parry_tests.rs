@@ -8,7 +8,7 @@
 
 use super::combat_baseline_tests::{bolt, character, ctx, scene, TEST_I_FRAMES};
 use super::*;
-use psx_game_runtime::entities::{GameEntityState, GameEntityTickInput, NoClipMover};
+use psx_game_runtime::entities::{CombatTarget, GameEntityState, GameEntityTickInput, NoClipMover};
 use psx_game_runtime::projectiles::{CombatTeam, ProjectileDamageChannel, NO_PROJECTILE_OWNER};
 use psx_level::{game_entity_flags, LevelGameEntityRecord, StableId};
 
@@ -74,12 +74,15 @@ fn shot_at(team: CombatTeam) -> psx_game_runtime::projectiles::ProjectileSpawn {
 
 fn far() -> GameEntityTickInput<'static> {
     GameEntityTickInput {
-        player: [100_000, 0, 100_000],
-        player_radius: 40,
-        player_height: 160,
-        player_noise_radius: 0,
-        player_target: Defender::OPEN,
-        player_combat: None,
+        target: CombatTarget {
+            position: [100_000, 0, 100_000],
+            radius: 40,
+            height: 160,
+            noise_radius: 0,
+            defender: Defender::OPEN,
+            stance: None,
+            attack_read: 0,
+        },
     }
 }
 
@@ -428,8 +431,10 @@ fn a_poise_break_knocks_the_enemy_down_and_it_gets_up() {
     assert_eq!(scene.game_entities.health(0), health - 5);
     // It does not move while down, even with the player in reach.
     let near = GameEntityTickInput {
-        player: [60, 0, 0],
-        ..far()
+        target: CombatTarget {
+            position: [60, 0, 0],
+            ..far().target
+        },
     };
     let at = scene.game_entities.position(0);
     for _ in 1..down {
@@ -464,7 +469,12 @@ fn a_fighter_without_both_moves_never_swaps() {
         for _ in 0..120 {
             entities.tick_delta(
                 ranged_only,
-                GameEntityTickInput { player, ..far() },
+                GameEntityTickInput {
+                    target: CombatTarget {
+                        position: player,
+                        ..far().target
+                    },
+                },
                 &mut NoClipMover,
                 2,
             );

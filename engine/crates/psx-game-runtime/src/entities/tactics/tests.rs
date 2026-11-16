@@ -37,12 +37,15 @@ const fn enemy() -> LevelGameEntityRecord {
 static ENEMY: [LevelGameEntityRecord; 1] = [enemy()];
 fn input(p: [i32; 3]) -> GameEntityTickInput<'static> {
     GameEntityTickInput {
-        player: p,
-        player_radius: 12,
-        player_height: 64,
-        player_noise_radius: 100,
-        player_target: crate::combatant::Defender::OPEN,
-        player_combat: None,
+        target: CombatTarget {
+            position: p,
+            radius: 12,
+            height: 64,
+            noise_radius: 100,
+            defender: crate::combatant::Defender::OPEN,
+            stance: None,
+            attack_read: 0,
+        },
     }
 }
 #[derive(Default)]
@@ -668,7 +671,7 @@ fn elevated_target_does_not_bait_ground_melee() {
     for _ in 0..900 {
         let mut target = input([0, 160, 180]);
         // Ordinarily this exposed-channel hint would request the melee stance.
-        target.player_combat = Some(VitalityChannelId::Two);
+        target.target.stance = Some(VitalityChannelId::Two);
         e.tick_delta(&ENEMY, target, &mut arena, 1);
         if e.state(0) == GameEntityState::Windup {
             assert_eq!(e.selected_attack_kind(0), GAME_ENTITY_ATTACK_RANGED);
@@ -754,7 +757,7 @@ fn heavy_contact_creates_firing_distance_before_attacking() {
         tick(&mut e, &mut arena, [0, 0, 26], 2);
         escaped |= e.tactics[0].goal == EnemyGoal::BreakAway;
         if e.state(0) == GameEntityState::Windup {
-            assert!(!e.player_within(0, input([0, 0, 26]), 192));
+            assert!(!e.target_within(0, input([0, 0, 26]), 192));
             assert!(e.selected_attack_is_ranged(0));
             attacked = true;
             break;
@@ -853,11 +856,13 @@ fn visible_melee_recovery_releases_an_active_defensive_retreat() {
     let mut e = engaged();
     let mut m = Arena::default();
     let mut stats = GameEntityTickStats::default();
-    e.set_player_attack_read(1);
-    assert!(e.step_melee_defense(&ENEMY[0], 0, input([0, 0, 50]), &mut m, 1, &mut stats));
+    let mut swing = input([0, 0, 50]);
+    swing.target.attack_read = 1;
+    assert!(e.step_melee_defense(&ENEMY[0], 0, swing, &mut m, 1, &mut stats));
     assert_eq!(e.tactics[0].goal, EnemyGoal::Retreat);
-    e.set_player_attack_read(3);
-    assert!(!e.step_melee_defense(&ENEMY[0], 0, input([0, 0, 50]), &mut m, 1, &mut stats));
+    let mut recovery = input([0, 0, 50]);
+    recovery.target.attack_read = 3;
+    assert!(!e.step_melee_defense(&ENEMY[0], 0, recovery, &mut m, 1, &mut stats));
     assert_eq!(e.tactics[0].goal, EnemyGoal::None);
     assert_eq!(e.combat_role(0), 7);
 }
