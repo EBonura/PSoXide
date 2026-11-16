@@ -20,3 +20,4 @@ psx-engine = { path = "../psx-engine" }
 psx-gpu    = { path = "../../../sdk/crates/psx-gpu" }
 psx-gte    = { path = "../../../sdk/crates/psx-gte" }
 psx-math   = { path = "../../../sdk/crates/psx-math" }
+psx-pack   = { path = "../../../sdk/crates/psx-pack" }

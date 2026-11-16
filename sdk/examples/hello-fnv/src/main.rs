@@ -4,7 +4,9 @@
 //! the multiplier with a small first operand), which the host tests of `psx-pack` do not compile.
 //! This runs them: every length 0..=67 at every alignment 0..=3 against a plain reference, fed
 //! whole, as `fnv1a32`, bytewise through `push`, and cut at every two-way and three-way split,
-//! then long buffers. The verdict goes to the TTY: `FNV PASS cases=N` or `FNV FAIL bad=N`.
+//! then long buffers; the same for `WordFnv32` over every word count 0..=67 (`update`, `update_raw`,
+//! `push`, every two-way split) against `(hash ^ word) * 0x0100_0193`. The verdict goes to the TTY:
+//! `FNV PASS cases=N` or `FNV FAIL bad=N`.
 
 #![no_std]
 #![no_main]
@@ -12,13 +14,21 @@
 extern crate psx_rt;
 
 use core::hint::black_box;
-use psx_pack::{fnv1a32, Fnv32};
+use psx_pack::{fnv1a32, Fnv32, WordFnv32};
 use psx_rt::tty;
 
 /// Plain FNV-1a over `bytes` from `hash`.
 fn reference(mut hash: u32, bytes: &[u8]) -> u32 {
     for &byte in bytes {
         hash = (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193);
+    }
+    hash
+}
+
+/// Plain word FNV from `hash`.
+fn reference_words(mut hash: u32, words: &[u32]) -> u32 {
+    for &word in words {
+        hash = (hash ^ word).wrapping_mul(0x0100_0193);
     }
     hash
 }
@@ -85,6 +95,36 @@ fn main() {
                     check(three.finish(), want, &mut cases, &mut bad);
                 }
             }
+        }
+    }
+    // SAFETY: the buffer is word aligned and 1100 bytes long; the words are the first 256 of it.
+    let words: &[u32] =
+        black_box(unsafe { core::slice::from_raw_parts(buffer.as_ptr().cast::<u32>(), 256) });
+    for len in (0..=67).chain([128, 255, 256]) {
+        let w = &words[..len];
+        let want = reference_words(WordFnv32::OFFSET_BASIS, w);
+        check(WordFnv32::of(w), want, &mut cases, &mut bad);
+        let mut raw = WordFnv32::new();
+        // SAFETY: `w` is readable and aligned for its own length.
+        unsafe { raw.update_raw(w.as_ptr(), len) };
+        check(raw.finish(), want, &mut cases, &mut bad);
+        let mut pushed = WordFnv32::new();
+        for &word in w {
+            pushed.push(word);
+        }
+        check(pushed.finish(), want, &mut cases, &mut bad);
+        if len > 67 {
+            continue;
+        }
+        for a in 0..=len {
+            let mut two = WordFnv32::new();
+            two.update(&w[..a]);
+            two.update(&w[a..]);
+            check(two.finish(), want, &mut cases, &mut bad);
+            let mut resumed =
+                WordFnv32::from_state(reference_words(WordFnv32::OFFSET_BASIS, &w[..a]));
+            resumed.update(&w[a..]);
+            check(resumed.finish(), want, &mut cases, &mut bad);
         }
     }
     if bad == 0 {

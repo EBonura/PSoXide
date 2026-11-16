@@ -8,3 +8,4 @@ repository.workspace = true
 description = "BIN/CUE and ISO9660 parsing for PS1 disc images. Shared by emulator, SDK, and disc-builder."
 
 [dependencies]
+psx-pack = { path = "../../sdk/crates/psx-pack" }

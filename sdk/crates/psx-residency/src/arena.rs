@@ -175,11 +175,10 @@ impl<'a> VeneerImport<'a> {
     }
 }
 
-/// Word checksum matching the existing HK module transport.
+/// Word checksum matching the existing HK module transport
+/// ([`psx_pack::WordFnv32`], the one kernel for it).
 pub fn checksum(words: &[u32]) -> u32 {
-    words.iter().fold(0x811c9dc5, |hash, word| {
-        (hash ^ word).wrapping_mul(16777619)
-    })
+    psx_pack::WordFnv32::of(words)
 }
 #[derive(Clone, Copy)]
 struct Installed {

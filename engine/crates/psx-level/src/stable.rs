@@ -38,13 +38,7 @@ impl StableId {
     }
 
     const fn of_bytes(bytes: &[u8]) -> Self {
-        let mut hash = 0x811c_9dc5u32;
-        let mut i = 0;
-        while i < bytes.len() {
-            hash ^= bytes[i] as u32;
-            hash = hash.wrapping_mul(0x0100_0193);
-            i += 1;
-        }
+        let hash = psx_pack::fnv1a32_const(bytes);
         // Zero is "none": the one hash that lands on it moves to one.
         Self(if hash == 0 { 1 } else { hash })
     }

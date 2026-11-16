@@ -300,13 +300,11 @@ impl Host for SimHost<'_> {
     }
 }
 
-struct Fnv(u32);
+struct Fnv(psx_pack::Fnv32);
 
 impl Fnv {
     fn feed(&mut self, value: u32) {
-        for byte in value.to_le_bytes() {
-            self.0 = (self.0 ^ byte as u32).wrapping_mul(0x0100_0193);
-        }
+        self.0.update(&value.to_le_bytes());
     }
 }
 
@@ -387,7 +385,7 @@ impl<'a> Sim<'a> {
             need_tick: vec![None; regions],
             installing: None,
             report: SimReport::default(),
-            hash: Fnv(0x811c_9dc5),
+            hash: Fnv(psx_pack::Fnv32::new()),
             now_tick: 0,
             origin: u32::MAX,
         }
@@ -629,7 +627,7 @@ pub fn simulate(graph: &RegionGraph, route: &Route, config: &SimConfig) -> SimRe
     report.min_slack_millis = report
         .min_slack_ticks
         .map_or(0, |ticks| ticks * config.tick_micros as i64 / 1000);
-    report.checksum = sim.hash.0;
+    report.checksum = sim.hash.0.finish();
     report
 }
 
