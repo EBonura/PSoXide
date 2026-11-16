@@ -4,8 +4,9 @@
 //! [`remaining`] work on the program's one heap, the range between `__heap_start` and
 //! `__heap_end` that `psoxide.ld` leaves above `.bss`, and need no cargo feature: a program that
 //! brings its own allocation API (the restored games' libc layer) calls them without enabling
-//! `alloc`, which would pull in `build-std` `alloc`. Without the feature the heap seeds itself
-//! from the linker symbols on the first call; a program that never calls them links none of this.
+//! `alloc`, which would pull in `build-std` `alloc`. On the guest the heap's state is initialised
+//! by the linker (the address of `__heap_start` and `__heap_end`, in `.data`), so there is no
+//! seeding code and no test for it; a program that never calls these links none of this.
 //!
 //! The `alloc` feature adds a `GlobalAlloc` over the same heap, seeded by `_start`, for homebrew
 //! that wants `Vec` and `Box`. It never frees, so it suits a permanent arena for assets and
@@ -22,18 +23,28 @@ use core::cell::UnsafeCell;
 /// the tip may grow or shrink in place ([`resize_tip`](Self::resize_tip)). Nothing is freed.
 #[derive(Clone, Copy, Debug)]
 pub struct Bump {
-    next: usize,
-    end: usize,
+    // Addresses, held as pointers so that a static can start out as the linker's symbols (an
+    // address is not an integer until the program runs). Never dereferenced: blocks are handed
+    // out as `usize` arithmetic on them.
+    next: *mut u8,
+    end: *mut u8,
 }
+
+// SAFETY: a `Bump` is two addresses and owns no memory; moving it to another thread is what
+// moving the two integers it used to hold was.
+unsafe impl Send for Bump {}
 
 impl Bump {
     /// An allocator with no memory: every allocation fails.
-    pub const EMPTY: Self = Self { next: 0, end: 0 };
+    pub const EMPTY: Self = Self::new(0, 0);
 
     /// An allocator over `start..end`.
     #[must_use]
     pub const fn new(start: usize, end: usize) -> Self {
-        Self { next: start, end }
+        Self {
+            next: start as *mut u8,
+            end: end as *mut u8,
+        }
     }
 
     /// A block of `size` bytes aligned to `align` (a power of two), or null when it does not fit.
@@ -42,8 +53,7 @@ impl Bump {
     pub fn alloc(&mut self, size: usize, align: usize) -> *mut u8 {
         // Checked: on the 32-bit guest a size near `isize::MAX` (legal for a safe caller) would
         // otherwise wrap past the `end` test and hand out a block running off the heap.
-        let Some(end) = self
-            .next
+        let Some(end) = (self.next as usize)
             .checked_add(align - 1)
             .map(|bumped| bumped & !(align - 1))
             .and_then(|aligned| aligned.checked_add(size))
@@ -51,10 +61,10 @@ impl Bump {
             return core::ptr::null_mut();
         };
         let aligned = end - size;
-        if end > self.end {
+        if end > self.end as usize {
             return core::ptr::null_mut();
         }
-        self.next = end;
+        self.next = end as *mut u8;
         aligned as *mut u8
     }
 
@@ -69,12 +79,12 @@ impl Bump {
     #[inline(always)]
     pub unsafe fn resize_tip(&mut self, ptr: *mut u8, old_size: usize, new_size: usize) -> bool {
         let start = ptr as usize;
-        if start.wrapping_add(old_size) != self.next {
+        if start.wrapping_add(old_size) != self.next as usize {
             return false;
         }
         match start.checked_add(new_size) {
-            Some(end) if end <= self.end => {
-                self.next = end;
+            Some(end) if end <= self.end as usize => {
+                self.next = end as *mut u8;
                 true
             }
             _ => false,
@@ -83,8 +93,8 @@ impl Bump {
 
     /// Bytes left between the tip and the end.
     #[must_use]
-    pub const fn remaining(&self) -> usize {
-        self.end.saturating_sub(self.next)
+    pub fn remaining(&self) -> usize {
+        (self.end as usize).saturating_sub(self.next as usize)
     }
 }
 
@@ -101,42 +111,40 @@ struct Allocator {
 // break this.
 unsafe impl Sync for Allocator {}
 
-/// Only registered as *the* allocator when targeting PS1 hardware with the `alloc` feature, for
-/// the same reason the panic handler is (see [`crate`]): only [`crate::_start`] seeds it, so on
-/// the host it would be installed still spanning `0..0` and fail the first allocation any
-/// linking test harness makes. Host builds use `std`'s allocator. The cfg is true for every
-/// guest build with the feature, so that PS1 artifact is unaffected.
-#[cfg_attr(all(target_arch = "mips", feature = "alloc"), global_allocator)]
-static ALLOCATOR: Allocator = Allocator {
-    state: UnsafeCell::new(Bump::EMPTY),
-};
-
-#[cfg(all(target_arch = "mips", not(feature = "alloc")))]
+#[cfg(target_arch = "mips")]
 extern "C" {
     static __heap_start: u8;
     static __heap_end: u8;
 }
 
-/// The heap's state; on the guest without the `alloc` feature (nothing seeds it at boot), seeded
-/// from the linker symbols if it is still empty.
+/// Only registered as *the* allocator when targeting PS1 hardware with the `alloc` feature, for
+/// the same reason the panic handler is (see [`crate`]): on the host it would span `0..0` and fail
+/// the first allocation any linking test harness makes. Host builds use `std`'s allocator.
+///
+/// On the guest the state starts as the linker's heap range, `__heap_start..__heap_end`. When
+/// `.bss` ends in the 0x100-byte window above `__heap_end` the start lies past the end: that
+/// leaves no heap (every allocation fails, `remaining` is 0), not a wrapped one.
+#[cfg_attr(all(target_arch = "mips", feature = "alloc"), global_allocator)]
+static ALLOCATOR: Allocator = Allocator {
+    state: UnsafeCell::new(INITIAL),
+};
+
+#[cfg(target_arch = "mips")]
+const INITIAL: Bump = Bump {
+    next: &raw const __heap_start as *mut u8,
+    end: &raw const __heap_end as *mut u8,
+};
+#[cfg(not(target_arch = "mips"))]
+const INITIAL: Bump = Bump::EMPTY;
+
+/// The heap's state.
 ///
 /// # Safety
 /// Single-threaded access per the `Sync` impl: no other reference to the state is live.
 #[inline(always)]
 unsafe fn state() -> &'static mut Bump {
     // SAFETY: the caller upholds this fn's `# Safety`.
-    let state = unsafe { &mut *ALLOCATOR.state.get() };
-    #[cfg(all(target_arch = "mips", not(feature = "alloc")))]
-    {
-        if state.end == 0 {
-            let start = &raw const __heap_start as usize;
-            let end = &raw const __heap_end as usize;
-            // The RAM region ends 0x100 bytes above __heap_end, so a .bss that ends in that
-            // window puts __heap_start past __heap_end: that leaves no heap, not a wrapped one.
-            *state = Bump::new(start, end.max(start));
-        }
-    }
-    state
+    unsafe { &mut *ALLOCATOR.state.get() }
 }
 
 /// A block of `size` bytes aligned to `align` (a power of two) from the program's heap, or null
