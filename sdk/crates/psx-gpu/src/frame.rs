@@ -21,6 +21,9 @@
 //! Every type here is a thin wrapper over the same stores and kicks as
 //! [`OtFrame::add_raw`] and [`crate::chain::submit_raw`].
 //!
+//! [`OtFrame`] is the one frame type of the SDK and the engine: `psx_engine::OtFrame` is this
+//! type, and the engine's depth-slot insertion methods are a trait on it (`psx_engine::OtFrameDepth`).
+//!
 //! # Usage
 //!
 //! ```no_run
@@ -160,6 +163,24 @@ impl<const N: usize> OrderingTable<N> {
 }
 
 impl<'f, const N: usize> OtFrame<'f, N> {
+    /// Clear `ot` and begin a frame in it: [`OrderingTable::frame`], by the name the engine's
+    /// callers use.
+    #[inline]
+    pub fn begin(ot: &'f mut OrderingTable<N>) -> Self {
+        ot.frame()
+    }
+
+    /// Continue a frame in `ot` without clearing it: [`OrderingTable::resume_frame`].
+    ///
+    /// # Safety
+    ///
+    /// The contract of [`OrderingTable::resume_frame`].
+    #[inline]
+    pub unsafe fn resume(ot: &'f mut OrderingTable<N>) -> Self {
+        // SAFETY: forwarded contract.
+        unsafe { ot.resume_frame() }
+    }
+
     /// Prepend `packet` to depth slot `z` (clamped to `N - 1`). Slot `N - 1`
     /// is walked first, slot 0 last, so lower slots draw on top.
     #[inline(always)]

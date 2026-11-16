@@ -7,7 +7,7 @@
 //! plain values, and the example's VRAM slot resolvers arrive as
 //! closures until their glue fully migrates.
 
-use psx_engine::{Angle, OtFrame, SkyDirectionProjector, WorldCamera};
+use psx_engine::{Angle, OtFrame, OtFrameDepth, SkyDirectionProjector, WorldCamera};
 use psx_gpu::{material::TextureMaterial, prim::QuadTexturedMaterial};
 use psx_level::{
     find_asset_of_kind, sky_flags, AssetId, AssetKind, LevelAssetRecord, LevelSkyRecord,
