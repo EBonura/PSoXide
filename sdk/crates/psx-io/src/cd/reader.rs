@@ -709,6 +709,34 @@ impl SectorReader {
         self.restore_irq_mask();
     }
 
+    /// Read the one sector `lba` into `buffer`: [`start_read`](Self::start_read), one
+    /// [`read_sector`](Self::read_sector), then [`stop`](Self::stop), so the drive is left quiet
+    /// whether or not the read worked. `true` when the sector arrived. [`prepare`](Self::prepare)
+    /// must have succeeded first. This is the read closure every lookup used to write out
+    /// (`start_read && read_sector`, then `stop`), as one call; it is what
+    /// [`iso::find`](crate::iso::find) and [`iso::find_in_root`](crate::iso::find_in_root) take
+    /// as `|lba, into| reader.read_at(lba, into)`, or through [`find`](Self::find).
+    #[inline(always)]
+    pub fn read_at(&mut self, lba: u32, buffer: &mut [u32; SECTOR_WORDS]) -> bool {
+        let ok = self.start_read(lba) && self.read_sector(buffer);
+        self.stop();
+        ok
+    }
+
+    /// [`iso::find`](crate::iso::find) over this reader: the file or directory `path` names, down
+    /// from `from` (the root directory when `None`), one [`read_at`](Self::read_at) a sector.
+    /// `sector` is the caller's buffer and holds the last sector read. Always inlined for the
+    /// reason `iso::find` is.
+    #[inline(always)]
+    pub fn find(
+        &mut self,
+        sector: &mut crate::iso::Sector,
+        from: Option<crate::iso::Extent>,
+        path: &[&str],
+    ) -> Option<crate::iso::Extent> {
+        crate::iso::find(sector, |lba, into| self.read_at(lba, into), from, path)
+    }
+
     /// [`stop`](Self::stop), then wait until the drive has really stopped, with
     /// the protocol the console needs ([`pause::pause_until_stopped`]): wait for
     /// the second response up to [`pause::COMPLETE_SPINS`], settle by status

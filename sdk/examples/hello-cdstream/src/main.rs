@@ -38,7 +38,6 @@ use psx_font::FontAtlas;
 use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
 use psx_gpu::Gpu;
 use psx_io::cd::reader::SectorReader;
-use psx_io::iso;
 use psx_io::periph::Cd;
 use psx_rt::interrupts::{vblank_count, wait_vblank};
 use psx_vram::{Clut, TextureDepth, TexturePage};
@@ -697,16 +696,7 @@ fn start(cd: Cd) -> Result<(), &'static str> {
 }
 
 fn lookup(reader: &mut SectorReader, sector: &mut [u32; SECTOR_WORDS]) -> Option<(u32, u32)> {
-    iso::find(
-        sector,
-        |lba, into| {
-            let ok = reader.start_read(lba) && reader.read_sector(into);
-            reader.stop();
-            ok
-        },
-        None,
-        &[FILE_NAME],
-    )
+    reader.find(sector, None, &[FILE_NAME])
 }
 
 #[no_mangle]

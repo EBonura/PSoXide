@@ -341,16 +341,7 @@ pub fn find_root_file(name: &str) -> Option<(u32, u32)> {
     }
     // SAFETY: single-threaded use of the reader and its sector buffer.
     let sector = unsafe { &mut *addr_of_mut!(SECTOR) };
-    psx_io::iso::find(
-        sector,
-        |lba, into| {
-            let ok = r.start_read(lba) && r.read_sector(into);
-            r.stop();
-            ok
-        },
-        None,
-        &[name],
-    )
+    r.find(sector, None, &[name])
 }
 
 /// The drive side: sectors into frame slots.
