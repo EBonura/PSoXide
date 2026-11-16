@@ -11,6 +11,7 @@ use super::{
     SECTOR_BYTES, STATUS_CHUNK_NOT_FOUND, STATUS_OK, STATUS_UNSUPPORTED,
 };
 use psx_level::{LevelWorldPackEntryRecord, RoomIndex};
+use psx_math::le::get_u32 as le_u32;
 
 use super::Console;
 
@@ -25,11 +26,6 @@ const HEADER_BYTES: usize = 28;
 const ENTRY_BYTES: usize = 24;
 /// Status: the first sector is not a `WORLD.PAK` header.
 pub const STATUS_PACK_HEADER_INVALID: u32 = 9;
-
-fn le_u32(bytes: &[u8], at: usize) -> Option<u32> {
-    let word = bytes.get(at..at.checked_add(4)?)?;
-    Some(u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
-}
 
 /// Look `ids` up in the header sector `sector` of a `WORLD.PAK`, filling
 /// `out[i]` for `ids[i]`. Only entries that fit in the first sector are

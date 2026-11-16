@@ -50,9 +50,8 @@ impl Chunk {
         if sector.len() < CHUNK_HEADER_BYTES {
             return None;
         }
-        let h = |i: usize| u16::from_le_bytes([sector[i], sector[i + 1]]);
-        let w =
-            |i: usize| u32::from_le_bytes([sector[i], sector[i + 1], sector[i + 2], sector[i + 3]]);
+        let h = |i: usize| psx_math::le::read_u16(sector, i);
+        let w = |i: usize| psx_math::le::read_u32(sector, i);
         if h(0) != 0x0160 || h(2) != 0x8001 {
             return None;
         }

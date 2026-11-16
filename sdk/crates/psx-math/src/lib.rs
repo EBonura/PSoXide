@@ -91,6 +91,7 @@ pub mod color;
 pub mod ease;
 pub mod fmt;
 pub mod int32;
+pub mod le;
 pub mod sincos;
 pub mod wide;
 pub mod wide_div;

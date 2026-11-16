@@ -155,6 +155,52 @@ pub fn find(
     None
 }
 
+/// The most root-directory sectors [`find_in_root`] searches. A root of about a hundred files fits
+/// in four; a descriptor that claims more is damaged or not ours, and the walk stays bounded.
+pub const ROOT_SECTORS_MAX: u32 = 4;
+
+/// Look several names up in the root directory in one pass: the volume descriptor, then up to
+/// [`ROOT_SECTORS_MAX`] sectors of the root, each name searched in each sector. `out[i]` is the
+/// extent of `names[i]`, or `None` (every slot is written, so stale entries cannot survive);
+/// `names` and `out` are matched pairwise up to the shorter. The XA players, the launcher and the
+/// games with a handful of files to find on the disc use this instead of walking the directory
+/// by hand. `read(lba, sector)` is the same read [`find`] takes (a closure over
+/// `SectorReader::read_at`, or a program's own held-session read).
+///
+/// `false` when the volume descriptor or a root sector could not be read, or the descriptor is
+/// not one; names found before a failed read stay in `out`. Always inlined, like [`find`].
+#[inline(always)]
+pub fn find_in_root(
+    sector: &mut Sector,
+    mut read: impl FnMut(u32, &mut Sector) -> bool,
+    names: &[&str],
+    out: &mut [Option<Extent>],
+) -> bool {
+    for slot in out.iter_mut() {
+        *slot = None;
+    }
+    if !read(PVD_LBA, sector) {
+        return false;
+    }
+    let Some((root, size)) = root_directory(as_bytes(sector)) else {
+        return false;
+    };
+    let mut at = 0;
+    while at < sectors(size).min(ROOT_SECTORS_MAX) {
+        if !read(root.wrapping_add(at), sector) {
+            return false;
+        }
+        let bytes = as_bytes(sector);
+        for (slot, name) in out.iter_mut().zip(names) {
+            if slot.is_none() {
+                *slot = find_in_directory(bytes, name);
+            }
+        }
+        at += 1;
+    }
+    true
+}
+
 /// Whether two slices of one length hold the same bytes: a loop right here, so the function around
 /// it stays a leaf that makes no call and saves no registers (the library's compare is a call).
 #[inline(always)]
@@ -193,7 +239,7 @@ fn extent(s: &[u8; BYTES], at: usize) -> Extent {
 
 #[inline(always)]
 fn le32(s: &[u8; BYTES], at: usize) -> u32 {
-    u32::from_le_bytes([s[at], s[at + 1], s[at + 2], s[at + 3]])
+    psx_math::le::read_u32(s, at)
 }
 
 #[cfg(test)]
@@ -287,6 +333,83 @@ mod tests {
         let mut sector = [0; SECTOR_WORDS];
         let mut log = Vec::new();
         find(&mut sector, im.reader(&mut log), None, &names)
+    }
+
+    #[test]
+    fn find_in_root_looks_every_name_up_in_one_pass() {
+        let im = standard();
+        let mut sector = [0; SECTOR_WORDS];
+        let mut log = Vec::new();
+        let mut out = [Some((1, 1)); 4];
+        let names = ["MUSIC.XA", "SYSTEM.CNF", "MISSING.BIN", "GAME"];
+        assert!(find_in_root(
+            &mut sector,
+            im.reader(&mut log),
+            &names,
+            &mut out
+        ));
+        assert_eq!(
+            out,
+            [
+                Some((40, 4_096_000)),
+                Some((30, 60)),
+                None,
+                Some((21, 2048))
+            ]
+        );
+        assert_eq!(log, [PVD_LBA, 20], "the descriptor and the one root sector");
+    }
+
+    #[test]
+    fn find_in_root_agrees_with_find_for_each_name() {
+        let im = standard();
+        for name in [
+            "MUSIC.XA",
+            "SYSTEM.CNF",
+            "NOVERSION.BIN",
+            "GAME",
+            "A.BIN",
+            "NOPE",
+        ] {
+            let mut sector = [0; SECTOR_WORDS];
+            let mut log = Vec::new();
+            let mut out = [None];
+            assert!(find_in_root(
+                &mut sector,
+                im.reader(&mut log),
+                &[name],
+                &mut out
+            ));
+            assert_eq!(out[0], lookup(&im, name), "{name}");
+        }
+    }
+
+    #[test]
+    fn find_in_root_fails_on_a_bad_descriptor_or_a_failed_read() {
+        let im = standard();
+        let mut sector = [0; SECTOR_WORDS];
+        let mut out = [Some((9, 9))];
+        assert!(!find_in_root(
+            &mut sector,
+            |_, _| false,
+            &["MUSIC.XA"],
+            &mut out
+        ));
+        assert_eq!(out, [None]);
+        let blank = Image::new();
+        let mut log = Vec::new();
+        assert!(!find_in_root(
+            &mut sector,
+            blank.reader(&mut log),
+            &["MUSIC.XA"],
+            &mut out
+        ));
+        let mut calls = 0;
+        let flaky = |lba: u32, into: &mut Sector| {
+            calls += 1;
+            calls == 1 && im.reader(&mut Vec::new())(lba, into)
+        };
+        assert!(!find_in_root(&mut sector, flaky, &["MUSIC.XA"], &mut out));
     }
 
     #[test]

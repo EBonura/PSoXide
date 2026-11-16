@@ -8,6 +8,7 @@ repository.workspace = true
 description  = "PlayStation 1 memory-card driver: SIO0 transport, card-manager-interoperable on-card filesystem format, optional compression."
 
 [dependencies]
+psx-math = { workspace = true }
 # Only needed by the hardware (SIO0) transport; the filesystem + compression
 # layers are pure and build/test on the host without them.
 psx-io = { workspace = true, optional = true }
