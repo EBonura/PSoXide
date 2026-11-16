@@ -166,8 +166,9 @@ const ENDED_DONE: u32 = 1;
 /// `results_written` of an engine without results: the latest request failed or was cancelled.
 const ENDED_FAILED: u32 = 2;
 
-/// Where the transfer of a [`LeanEngine`] is.
+/// Where the transfer of a [`LeanEngine`] is. Match with a wildcard arm: more states may come.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Status {
     /// Nothing has been started.
     Idle,
