@@ -955,38 +955,45 @@ impl Playtest {
             // The visibility mask discards the pose after resolving it, so
             // test it first. `resolve_instance_actor_pose` reads only shared
             // tables, which makes the skip output-identical.
-            let corpse_gone = GAME_ENTITIES
+            let owner = GAME_ENTITIES
                 .iter()
                 .enumerate()
-                .find(|(_, r)| usize::from(r.model_instance) == index)
-                .is_some_and(|(entity, record)| {
-                    if record.flags & psx_level::game_entity_flags::ENABLED == 0 {
-                        return true;
-                    }
-                    if self.game_entities.state(entity)
-                        != psx_game_runtime::entities::GameEntityState::Dead
-                    {
-                        return false;
-                    }
-                    self.models
-                        .get(MODEL_INSTANCES[index].model.to_usize())
-                        .copied()
-                        .flatten()
-                        .and_then(|model| {
-                            model.clip(&self.clips, psx_level::ModelClipIndex(record.death_clip))
-                        })
-                        .and_then(|animation| {
-                            enemy_death_dissolve(
-                                &self.game_entities,
-                                index,
-                                animation,
-                                ctx.video_hz,
-                            )
-                        })
-                        .is_some_and(|effect| effect.finished())
-                });
-            if corpse_gone || (world_resident && self.instance_visible_mask & (1u16 << index) == 0)
-            {
+                .find(|(_, r)| usize::from(r.model_instance) == index);
+            // A fighter's pose carries its hitboxes and hurtboxes. Contact
+            // must not depend on whether the camera sees it (a camera pushed
+            // into a wall culls an enemy standing next to the player), so an
+            // engaged entity keeps its pose whatever the visibility mask says.
+            let fighting = owner.is_some_and(|(entity, _)| {
+                !matches!(
+                    self.game_entities.state(entity),
+                    psx_game_runtime::entities::GameEntityState::Idle
+                        | psx_game_runtime::entities::GameEntityState::Patrol
+                        | psx_game_runtime::entities::GameEntityState::Dead
+                )
+            });
+            let corpse_gone = owner.is_some_and(|(entity, record)| {
+                if record.flags & psx_level::game_entity_flags::ENABLED == 0 {
+                    return true;
+                }
+                if self.game_entities.state(entity)
+                    != psx_game_runtime::entities::GameEntityState::Dead
+                {
+                    return false;
+                }
+                self.models
+                    .get(MODEL_INSTANCES[index].model.to_usize())
+                    .copied()
+                    .flatten()
+                    .and_then(|model| {
+                        model.clip(&self.clips, psx_level::ModelClipIndex(record.death_clip))
+                    })
+                    .and_then(|animation| {
+                        enemy_death_dissolve(&self.game_entities, index, animation, ctx.video_hz)
+                    })
+                    .is_some_and(|effect| effect.finished())
+            });
+            let visible = self.instance_visible_mask & (1u16 << index) != 0;
+            if !actor_pose_needed(corpse_gone, fighting, world_resident, visible) {
                 self.instance_actor_poses[index] = None;
                 self.previous_instance_actor_poses[index] = None;
                 index += 1;
@@ -1674,5 +1681,36 @@ mod stance_colour_tests {
                 assert!(*g > 2 * r && *b > 2 * r, "{room:?}: not teal ({r},{g},{b})");
             }
         }
+    }
+}
+
+/// Whether a model instance's pose is resolved this tick: never for a corpse
+/// that has dissolved; always for an engaged fighter, whose hitboxes and
+/// hurtboxes need it; otherwise only when it is drawn (or there is no world
+/// to cull against).
+fn actor_pose_needed(
+    corpse_gone: bool,
+    fighting: bool,
+    world_resident: bool,
+    visible: bool,
+) -> bool {
+    !corpse_gone && (fighting || !world_resident || visible)
+}
+
+#[cfg(test)]
+mod actor_pose_tests {
+    use super::actor_pose_needed;
+
+    #[test]
+    fn an_engaged_fighter_keeps_its_pose_when_the_camera_cannot_see_it() {
+        // The grid-cave seed 2 stall: the camera in a wall, the enemy culled,
+        // every swing on both sides a miss for lack of a pose.
+        assert!(actor_pose_needed(false, true, true, false));
+        // Drawn instances and world-less scenes as before.
+        assert!(actor_pose_needed(false, false, true, true));
+        assert!(actor_pose_needed(false, false, false, false));
+        // A culled prop or idle actor is still skipped; a dissolved corpse always.
+        assert!(!actor_pose_needed(false, false, true, false));
+        assert!(!actor_pose_needed(true, true, true, true));
     }
 }
