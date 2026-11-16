@@ -2736,9 +2736,9 @@ const LEGACY_POOL: u16 = 100;
 /// one channel. A record without the second pool is the current form.
 #[derive(Deserialize)]
 struct CombatStatsFile {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "legacy_u16")]
     max_health: Option<u16>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "legacy_u16")]
     max_health_secondary: Option<u16>,
     #[serde(default = "default_combat_poise")]
     poise: u16,
