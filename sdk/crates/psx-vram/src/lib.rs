@@ -1259,6 +1259,9 @@ impl<const ROOM_PAGES: usize, const CLUT_ROWS: usize> VramRegionSource
 /// For a 15bpp direct-color upload, each halfword is a
 /// [`Color555`]. For pre-packed 4bpp / 8bpp index data, each
 /// halfword packs 4 or 2 indices respectively.
+// One copy: inlined it is about 400 B at each of its callers (the font atlas, the splash), and an
+// upload is a load-time call.
+#[inline(never)]
 pub fn upload_16bpp(rect: VramRect, pixels: &[u16]) {
     let expected = rect.pixel_count();
     // Literal messages: formatting the counts links core::fmt (about 4 KB)
