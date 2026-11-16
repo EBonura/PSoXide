@@ -66,7 +66,7 @@ engine clippy::ptr_arg 0
 engine clippy::new_without_default 0
 engine clippy::new_ret_no_self 0
 engine clippy::missing_safety_doc 0
-engine clippy::undocumented_unsafe_blocks 169
+engine clippy::undocumented_unsafe_blocks 165
 engine clippy::unnecessary_unwrap 0
 engine clippy::from_over_into 0
 engine clippy::inherent_to_string 0
