@@ -192,6 +192,7 @@ version = "0.1.0"
 name = "psx-vector"
 version = "0.1.0"
 dependencies = [
+ "psx-asset",
  "psx-gpu",
  "psx-math",
 ]
