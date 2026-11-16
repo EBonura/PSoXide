@@ -26,7 +26,7 @@ use psx_hw::gpu::{gp0, gp1, packet, GP1};
 /// packet is the protocol the SDK uses for every draw the launcher
 /// makes on this same console. Bounded so a dead GPU cannot hang the
 /// panel that is trying to report on it.
-fn gp0_packet(words: &[u32]) {
+pub fn gp0_packet(words: &[u32]) {
     // Preserve best-effort diagnostics on timeout; no reset or unbounded wait.
     let _ = psx_io::gpu::try_wait_command_ready(1_000_000);
     for &word in words {
@@ -75,8 +75,25 @@ pub fn set_draw_buffer(y: i16) {
     gp0_packet(&[gp0::draw_offset(0, y as i32)]);
 }
 
-fn display_buffer(y: i16) {
+/// Show the buffer at VRAM row `y` now (GP1(05h) display start at x 0).
+pub fn display_buffer(y: i16) {
     unsafe { psx_io::write_u32(GP1, gp1::display_start(0, y as u32)) };
+}
+
+/// [`set_draw_buffer`] with a clip rectangle: aim drawing at buffer row `y`, clipped to the
+/// screen rectangle `x0, y0, w, h` (drawing area and offset in one packet, one wait). Coordinates
+/// sent afterwards stay screen-relative through the draw offset, so a program that repaints one
+/// panel of a buffer clips to it without translating its own coordinates. The caller keeps the
+/// rectangle inside the buffer (`w, h > 0`, within 320x240 of row `y`): the fields are masked to
+/// the VRAM range only, not clamped.
+pub fn set_draw_rect(y: i16, x0: i16, y0: i16, w: i16, h: i16) {
+    let top = (y + y0) as u32 & 0x1ff;
+    let bottom = (y + y0 + h - 1) as u32 & 0x1ff;
+    gp0_packet(&[
+        gp0::draw_area_top_left_in_range(x0 as u32, top),
+        gp0::draw_area_bottom_right_in_range((x0 + w - 1) as u32, bottom),
+        gp0::draw_offset_in_range(0, y as u32 & 0x7ff),
+    ]);
 }
 
 /// Show a completed loading buffer exactly at a fresh VBlank edge. I_STAT is
