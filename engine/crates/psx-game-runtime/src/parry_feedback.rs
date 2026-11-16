@@ -55,8 +55,8 @@ pub const PARRY_FEEDBACK: ParryFeedback = ParryFeedback {
     flash_ticks: 12,
     flash_peak_q8: 256,
     burst_ticks: 20,
-    burst_radius: 48,
-    burst_reach_q8: 640,
+    burst_radius: 32,
+    burst_reach_q8: 512,
     burst_points: 8,
     horizon_rgb: [255, 113, 58],
     zenith_rgb: [108, 224, 198],
@@ -138,6 +138,18 @@ impl ParryFlash {
         }
     }
 
+    /// The flash's weight this tick, Q8: the peak strength on the first tick,
+    /// fading linearly to zero (0 when there is no flash). The model draws
+    /// read it as a lit tint ([`Self::lit_tint`]) or, for a player mid stance
+    /// swap, through the phase assembly's own flash.
+    pub fn weight_q8(self, data: &ParryFeedback) -> u16 {
+        if !self.is_active() || data.flash_ticks == 0 {
+            return 0;
+        }
+        let left = u32::from(self.ticks_left());
+        (u32::from(data.flash_peak_q8) * left / u32::from(data.flash_ticks)).min(256) as u16
+    }
+
     /// The lit tint bias for this tick, over the fighter's `base` bias (the
     /// player's stance tint; `None` for a fighter with none). The flash's
     /// weight is its peak strength on the first tick, fading linearly to
@@ -148,8 +160,7 @@ impl ParryFlash {
         if !self.is_active() || data.flash_ticks == 0 {
             return base;
         }
-        let left = u32::from(self.ticks_left());
-        let weight = (u32::from(data.flash_peak_q8) * left / u32::from(data.flash_ticks)).min(256);
+        let weight = u32::from(self.weight_q8(data));
         let [r, g, b] = data.stance_rgb(self.is_zenith());
         let Some(base) = base else {
             return Some(LitTintBias {

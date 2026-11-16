@@ -330,6 +330,7 @@ pub(super) fn player_phase_assembly(
     config: &CombatStanceConfig,
     position: RoomPoint,
     height: i32,
+    flash_q8: u16,
 ) -> Option<mr::ModelPhaseAssembly> {
     mr::ModelPhaseAssembly::new(
         stance.swap_elapsed_ticks(),
@@ -338,6 +339,7 @@ pub(super) fn player_phase_assembly(
         position.y,
         height,
     )
+    .map(|effect| effect.with_flash(flash_q8))
 }
 
 /// The parry flash of the entity that owns this model instance, as the lit

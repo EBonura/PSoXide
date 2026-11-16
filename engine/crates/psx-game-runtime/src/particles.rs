@@ -653,16 +653,20 @@ fn draw_parry_star<'a, const OT_DEPTH: usize>(
     ot: &mut OtFrame<'a, OT_DEPTH>,
     primitive_packets: &mut PrimitivePacketArena<'a>,
 ) -> usize {
-    const RING_SEGMENTS: u16 = 16;
+    const RING_SEGMENTS: i32 = 16;
     let lifetime = i32::from(impact.visual.impact_lifetime_ticks.max(1));
     let age = i32::from(impact.age_ticks).min(lifetime);
     let progress = age * 4096 / lifetime;
-    let remaining = 4096 - progress;
-    // Quadratic fade, so the burst is brightest on its first ticks.
-    let brightness = (remaining * remaining / 4096) as u16;
-    let size = ((i32::from(impact.radius) * focal_length) / center.sz.max(1)).clamp(3, 48);
+    // Full brightness for the first quarter, then a linear fade to nothing.
+    let brightness = if progress < 1024 {
+        4096
+    } else {
+        (4096 - progress) * 4096 / 3072
+    } as u16;
+    let size = ((i32::from(impact.radius) * focal_length) / center.sz.max(1)).clamp(3, 22);
     let reach = (size * i32::from(impact.visual.glow_scale_q8) / 256).max(4);
     // The ring leaves the contact point fast and slows as it reaches out.
+    let remaining = 4096 - progress;
     let eased = 4096 - remaining * remaining / 4096;
     let ring = (reach * (1024 + eased * 3 / 4) / 4096).max(2);
     let slot = depth_range.slot::<OT_DEPTH>(center.sz);
@@ -686,24 +690,27 @@ fn draw_parry_star<'a, const OT_DEPTH: usize>(
         ..center
     };
     let mut submitted = 0;
-    // The hot core, only while the burst is young.
-    let core_ticks = (lifetime / 3).max(1);
+    // The hot core: a glow in the stance colour with a white heart, only
+    // while the burst is young.
+    let core_ticks = (lifetime / 2).max(1);
     if age < core_ticks {
-        let half = (reach / 3).max(2) * (core_ticks - age) as i32 / core_ticks;
+        let left = core_ticks - age;
+        let half = ((reach / 2).max(3) * left / core_ticks).max(2);
         submitted += draw_particle_diamond(
             center,
-            clamp_i16(half.max(2)),
-            core,
+            clamp_i16(half + half / 2),
+            accent,
             slot,
             ot,
             primitive_packets,
         );
+        submitted +=
+            draw_particle_diamond(center, clamp_i16(half), core, slot, ot, primitive_packets);
     }
-    let segments = i32::from(RING_SEGMENTS);
-    for i in 0..segments {
+    for i in 0..RING_SEGMENTS {
         submitted += draw_projectile_segment(
-            at(i * 4096 / segments, ring),
-            at((i + 1) * 4096 / segments, ring),
+            at(i * 4096 / RING_SEGMENTS, ring),
+            at((i + 1) * 4096 / RING_SEGMENTS, ring),
             2,
             accent,
             slot,
@@ -722,7 +729,7 @@ fn draw_parry_star<'a, const OT_DEPTH: usize>(
         submitted += draw_projectile_segment(
             at(angle, ring / 3),
             at(angle, outer),
-            if long { 2 } else { 1 },
+            if long { 3 } else { 2 },
             if long { core } else { accent },
             slot,
             ot,

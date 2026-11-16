@@ -18,6 +18,8 @@ pub struct ModelPhaseAssembly {
     floor_y: i32,
     height: i32,
     crystal_material: Option<TextureMaterial>,
+    /// Parry flash weight, Q8 (0 draws exactly as without it).
+    flash_q8: u16,
 }
 
 impl ModelPhaseAssembly {
@@ -41,6 +43,7 @@ impl ModelPhaseAssembly {
             floor_y,
             height: height.max(1),
             crystal_material: None,
+            flash_q8: 0,
         })
     }
 
@@ -48,6 +51,27 @@ impl ModelPhaseAssembly {
     pub fn with_crystal_material(mut self, material: Option<TextureMaterial>) -> Self {
         self.crystal_material = material;
         self
+    }
+
+    /// A parry's flash, at `weight_q8` of 256: the wireframe, the flying
+    /// pieces and the rebuilt body all move toward the stance colour at full
+    /// brightness. Zero (the default) changes nothing.
+    pub fn with_flash(mut self, weight_q8: u16) -> Self {
+        self.flash_q8 = weight_q8.min(256);
+        self
+    }
+
+    /// `base` pulled toward the stance colour by the parry flash.
+    fn flash_tint(self, base: (u8, u8, u8)) -> (u8, u8, u8) {
+        if self.flash_q8 == 0 {
+            return base;
+        }
+        let weight = i32::from(self.flash_q8);
+        (
+            lerp_tint_channel(base.0, self.color.0, weight),
+            lerp_tint_channel(base.1, self.color.1, weight),
+            lerp_tint_channel(base.2, self.color.2, weight),
+        )
     }
 
     fn arrival(self, height_q12: u16) -> u16 {
@@ -187,7 +211,7 @@ impl ModelPhaseAssembly {
     }
 
     pub(super) fn wire_color(self) -> (u8, u8, u8) {
-        (self.color.0 / 3, self.color.1 / 3, self.color.2 / 3)
+        self.flash_tint((self.color.0 / 3, self.color.1 / 3, self.color.2 / 3))
     }
 }
 
@@ -354,20 +378,22 @@ pub(super) fn draw<const OT_DEPTH: usize>(
     let wire_style = world.line_style(&wire_options, wire_color);
     let crystal = assembly.crystal_material;
     let material = crystal.unwrap_or(material);
-    let tint = if crystal.is_some() {
+    let tint = assembly.flash_tint(if crystal.is_some() {
         (128, 128, 128)
     } else {
         assembly.tint(material.tint())
-    };
+    });
     let bursting = assembly.elapsed < BURST_TICKS;
     let burst_progress =
         i32::from(assembly.elapsed.min(BURST_TICKS)) * 256 / i32::from(BURST_TICKS);
     let burst_fade = 256 - burst_progress;
-    let burst_material = material.with_raw_texture(false).with_tint((
-        ((i32::from(material.tint().0) * burst_fade) >> 8) as u8,
-        ((i32::from(material.tint().1) * burst_fade) >> 8) as u8,
-        ((i32::from(material.tint().2) * burst_fade) >> 8) as u8,
-    ));
+    let burst_material = material
+        .with_raw_texture(false)
+        .with_tint(assembly.flash_tint((
+            ((i32::from(material.tint().0) * burst_fade) >> 8) as u8,
+            ((i32::from(material.tint().1) * burst_fade) >> 8) as u8,
+            ((i32::from(material.tint().2) * burst_fade) >> 8) as u8,
+        )));
     let attached_material = if bursting {
         burst_material
     } else {
@@ -667,20 +693,22 @@ mod reference {
         let wire_color = assembly.wire_color();
         let crystal = assembly.crystal_material;
         let material = crystal.unwrap_or(material);
-        let tint = if crystal.is_some() {
+        let tint = assembly.flash_tint(if crystal.is_some() {
             (128, 128, 128)
         } else {
             assembly.tint(material.tint())
-        };
+        });
         let bursting = assembly.elapsed < BURST_TICKS;
         let burst_progress =
             i32::from(assembly.elapsed.min(BURST_TICKS)) * 256 / i32::from(BURST_TICKS);
         let burst_fade = 256 - burst_progress;
-        let burst_material = material.with_raw_texture(false).with_tint((
-            ((i32::from(material.tint().0) * burst_fade) >> 8) as u8,
-            ((i32::from(material.tint().1) * burst_fade) >> 8) as u8,
-            ((i32::from(material.tint().2) * burst_fade) >> 8) as u8,
-        ));
+        let burst_material = material
+            .with_raw_texture(false)
+            .with_tint(assembly.flash_tint((
+                ((i32::from(material.tint().0) * burst_fade) >> 8) as u8,
+                ((i32::from(material.tint().1) * burst_fade) >> 8) as u8,
+                ((i32::from(material.tint().2) * burst_fade) >> 8) as u8,
+            )));
         let attached_material = if bursting {
             burst_material
         } else {
