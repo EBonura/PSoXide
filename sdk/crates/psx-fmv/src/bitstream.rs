@@ -63,11 +63,12 @@ pub struct Header {
 
 impl Header {
     /// Parse the 8-byte header.
+    #[inline]
     pub fn parse(frame: &[u8]) -> Result<Self, DecodeError> {
         if frame.len() < HEADER_BYTES {
             return Err(DecodeError::Truncated);
         }
-        let h = |i: usize| u16::from_le_bytes([frame[i], frame[i + 1]]);
+        let h = |i: usize| psx_math::le::read_u16_inline(frame, i);
         Ok(Header {
             mdec_words: h(0),
             qscale: h(4),

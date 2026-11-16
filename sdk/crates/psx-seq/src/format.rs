@@ -36,6 +36,7 @@
 //! multiplies one number. `0xFFFF` means "none" for sample and envelope
 //! indices.
 
+use psx_math::le::{get_u16 as le16, get_u32 as le32};
 use psx_sfx::Sample;
 use psx_spu::SpuAddr;
 
@@ -55,19 +56,6 @@ pub enum FormatError {
     BadHeader,
     /// A table runs past the end of the data.
     Truncated,
-}
-
-fn le16(b: &[u8], at: usize) -> Option<u16> {
-    Some(u16::from_le_bytes([*b.get(at)?, *b.get(at + 1)?]))
-}
-
-fn le32(b: &[u8], at: usize) -> Option<u32> {
-    Some(u32::from_le_bytes([
-        *b.get(at)?,
-        *b.get(at + 1)?,
-        *b.get(at + 2)?,
-        *b.get(at + 3)?,
-    ]))
 }
 
 /// The parsed header of a song.

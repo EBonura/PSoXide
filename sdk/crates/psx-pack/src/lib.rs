@@ -37,6 +37,8 @@
 #![warn(missing_docs)]
 
 pub mod cd;
+
+use psx_math::le::get_u32 as le32;
 /// Allocation-free Quake and GoldSrc visibility row codecs.
 pub mod visibility;
 
@@ -79,11 +81,6 @@ pub struct PackEntry {
     pub byte_size: u32,
     /// FNV-1a over the payload bytes (see [`fnv1a32`]).
     pub checksum: u32,
-}
-
-fn le32(bytes: &[u8], offset: usize) -> Option<u32> {
-    let b = bytes.get(offset..offset + 4)?;
-    Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
 }
 
 /// Parse and validate the fixed header from the first pack bytes

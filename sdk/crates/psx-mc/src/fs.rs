@@ -75,8 +75,9 @@ pub(crate) const fn blocks_for(total: usize) -> usize {
 fn write_u32(buf: &mut [u8], v: u32) {
     buf[0..4].copy_from_slice(&v.to_le_bytes());
 }
+#[inline(always)]
 fn read_u32(buf: &[u8]) -> u32 {
-    u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]])
+    psx_math::le::read_u32_inline(buf, 0)
 }
 
 // --------------------------------------------------------------------------

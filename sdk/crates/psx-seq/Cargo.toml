@@ -7,6 +7,7 @@ repository.workspace = true
 description  = "Sequenced music on the PS1 SPU: a three-level script interpreter (sequence, channel, layer), software envelopes, vibrato and portamento, and a note allocator, over psx-sfx's hardware seam. No heap, no float, no 64-bit arithmetic."
 
 [dependencies]
+psx-math = { path = "../psx-math" }
 psx-spu = { path = "../psx-spu" }
 psx-sfx = { path = "../psx-sfx" }
 

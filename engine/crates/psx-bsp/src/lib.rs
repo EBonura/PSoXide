@@ -23,6 +23,9 @@ pub mod world_hooks;
 
 use core::fmt;
 use core::marker::PhantomData;
+use psx_math::le::{
+    read_i16 as i16_at, read_i32 as i32_at, read_u16 as u16_at, read_u32 as u32_at,
+};
 
 /// `PSX%` as emitted by the original Quake PSX map cooker.
 pub const PSB_MAGIC: u32 = 0x2558_5350;
@@ -1543,27 +1546,6 @@ impl CookedRecord for SoundEffect {
             spu_address: u32_at(bytes, 4),
         }
     }
-}
-
-fn u16_at(bytes: &[u8], offset: usize) -> u16 {
-    u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
-}
-
-fn i16_at(bytes: &[u8], offset: usize) -> i16 {
-    u16_at(bytes, offset) as i16
-}
-
-fn u32_at(bytes: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes([
-        bytes[offset],
-        bytes[offset + 1],
-        bytes[offset + 2],
-        bytes[offset + 3],
-    ])
-}
-
-fn i32_at(bytes: &[u8], offset: usize) -> i32 {
-    u32_at(bytes, offset) as i32
 }
 
 fn vec3_i16(bytes: &[u8], offset: usize) -> Vec3I16 {

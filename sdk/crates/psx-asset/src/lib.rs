@@ -43,8 +43,8 @@
 
 pub mod hma1;
 pub mod hmd8;
-pub mod le;
 mod quat;
+pub use psx_math::le;
 pub mod tracks;
 
 use psx_gte::math::{Vec3I16, Vec3I32};

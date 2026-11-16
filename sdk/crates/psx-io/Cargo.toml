@@ -8,6 +8,7 @@ description  = "Volatile MMIO primitives for PSoXide target code."
 
 [dependencies]
 psx-hw = { workspace = true }
+psx-math = { workspace = true }
 
 [lints]
 workspace = true

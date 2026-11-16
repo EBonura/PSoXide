@@ -460,20 +460,7 @@ fn put_u32(out: &mut [u8], offset: usize, value: u32) {
     out[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
 }
 
-#[inline]
-fn get_u16(bytes: &[u8], offset: usize) -> u16 {
-    u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
-}
-
-#[inline]
-fn get_u32(bytes: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes([
-        bytes[offset],
-        bytes[offset + 1],
-        bytes[offset + 2],
-        bytes[offset + 3],
-    ])
-}
+use psx_math::le::{read_u16 as get_u16, read_u32 as get_u32};
 
 fn checksum(header: &[u8], payload: &[u8]) -> u8 {
     let mut value = 0xa7u8;
