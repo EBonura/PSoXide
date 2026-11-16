@@ -475,9 +475,15 @@ impl DamageNumbers {
             // and no extra glyphs -- the same characters are drawn
             // either way.
             let tint = channel_tint(slot.channel, envelope);
-            font.draw_text_blended(x, y + MINUS_DROP, MINUS_SIGN, tint, TextBlend::Add);
+            // A parry's number is the energy it refunded: a gain, so `+`.
+            let (sign, sign_char) = if slot.channel == DamageNumberChannel::Parry.to_raw() {
+                (PLUS_SIGN, PLUS_CHAR)
+            } else {
+                (MINUS_SIGN, MINUS_CHAR)
+            };
+            font.draw_text_blended(x, y + MINUS_DROP, sign, tint, TextBlend::Add);
             font.draw_text_blended(
-                x + font.glyph_advance(MINUS_CHAR) as i16,
+                x + font.glyph_advance(sign_char) as i16,
                 y,
                 &text[MINUS_SIGN.len()..],
                 tint,
@@ -494,12 +500,18 @@ impl DamageNumbers {
 const DIGIT_BUFFER: usize = 6;
 
 /// The sign every damage number carries. Damage is always a loss to
-/// whoever took it, in both directions, so it is always negative --
-/// there is no case here that would want a `+`.
+/// whoever took it, in both directions, so it is negative; only a
+/// parry's refund ([`PLUS_SIGN`]) is drawn as a gain.
 const MINUS_SIGN: &str = "-";
 
 /// [`MINUS_SIGN`] as the character the font is measured by.
 const MINUS_CHAR: char = '-';
+
+/// The sign of a parry's number, the one gain these numbers show.
+const PLUS_SIGN: &str = "+";
+
+/// [`PLUS_SIGN`] as the character the font is measured by.
+const PLUS_CHAR: char = '+';
 
 /// Rows the sign drops to sit at the digits' mid-height.
 ///
@@ -681,6 +693,8 @@ mod tests {
         // The two channels never collide, or the feedback would be
         // telling the player nothing.
         assert_ne!(channel_tint(0, 256), channel_tint(1, 256));
+        // The parry's `+` exists in the face, as the `-` does.
+        assert!(DAMAGE_NUMBER_FACE.glyph_index(PLUS_CHAR).is_some());
         // Nor do the crit and parry tells with them or each other.
         let tints = [0, 1, 2, 3].map(|raw| channel_tint(raw, 256));
         for (i, a) in tints.iter().enumerate() {
