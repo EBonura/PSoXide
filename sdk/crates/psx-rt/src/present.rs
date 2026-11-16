@@ -426,6 +426,17 @@ pub fn show(origin: (u16, u16)) {
     );
 }
 
+/// [`show`] for a program that presents without queueing parts, a movie player: the guard empties the
+/// slot if a part was ever submitted (`submit` arms it), so there is no slot wait of its own, no
+/// thread kick, and the program does not link the slot loop. Same flip, same order.
+pub fn show_drawn(origin: (u16, u16)) {
+    arm_confirmation();
+    psx_io::gpu::run_direct_access_guard();
+    let port = &mut Hardware;
+    wait_flip_on(port);
+    present_drawn_on(port, gp1::display_start(u32::from(origin.0), u32::from(origin.1)));
+}
+
 /// Turn the video output on or off (GP1(03h)) at the next edge on which bit 24
 /// is up, never held by the cap. Waits first for the slot to empty and any
 /// earlier flip to land. Call it between frames.
