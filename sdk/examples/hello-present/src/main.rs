@@ -138,7 +138,9 @@ fn main() {
         let gpu = Gpu::from_dma_mut(&mut dma);
         presenter.begin_frame(&fb);
         fb.clear(gpu, (8, 8, 24));
-        if f > 0 && !is_draw_done() {
+        // Bit 24 is the flip's only witness while the signal works; a flip by the draw-done
+        // timeout (a target that never raises it, `fallbacks` above 0) shows no bit 24 by design.
+        if f > 0 && !is_draw_done() && interrupts::draw_done_fallback_count() == 0 {
             early += 1;
         }
         let (in_flight, ()) =
