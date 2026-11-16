@@ -49,9 +49,98 @@ pub fn fnv1a_64(bytes: &[u8]) -> u64 {
     h.finish()
 }
 
+/// The reflected CRC-32 polynomial (IEEE 802.3, zlib, PNG, `binascii.crc32`).
+const CRC32_POLY: u32 = 0xedb8_8320;
+
+/// The CRC-32 of every 4-bit value: 64 bytes, so a byte is two table steps instead of eight
+/// bit steps (the guest has no data cache, so a bigger table costs a bus read per byte for
+/// little more speed than this one gives).
+const CRC32_NIBBLES: [u32; 16] = {
+    let mut table = [0u32; 16];
+    let mut n = 0;
+    while n < 16 {
+        let mut crc = n as u32;
+        let mut bit = 0;
+        while bit < 4 {
+            crc = (crc >> 1) ^ (CRC32_POLY & 0u32.wrapping_sub(crc & 1));
+            bit += 1;
+        }
+        table[n] = crc;
+        n += 1;
+    }
+    table
+};
+
+/// Incremental CRC-32 (IEEE 802.3): the one every PSoXide check of that kind uses (PNG chunks,
+/// hardware-test payload frames, save frames). The same function as `binascii.crc32`.
+pub struct Crc32(u32);
+
+impl Crc32 {
+    /// A CRC that has seen no bytes.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self(!0)
+    }
+
+    /// Fold `bytes` into the running CRC.
+    pub fn update(&mut self, bytes: &[u8]) {
+        let mut crc = self.0;
+        for &byte in bytes {
+            crc ^= u32::from(byte);
+            crc = (crc >> 4) ^ CRC32_NIBBLES[(crc & 15) as usize];
+            crc = (crc >> 4) ^ CRC32_NIBBLES[(crc & 15) as usize];
+        }
+        self.0 = crc;
+    }
+
+    /// The CRC of everything fed so far. The hasher stays usable afterwards.
+    #[must_use]
+    pub const fn finish(&self) -> u32 {
+        !self.0
+    }
+}
+
+impl Default for Crc32 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// One-shot CRC-32 of a byte slice.
+#[must_use]
+pub fn crc32(bytes: &[u8]) -> u32 {
+    let mut c = Crc32::new();
+    c.update(bytes);
+    c.finish()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn crc32_matches_the_check_value_and_the_bitwise_form() {
+        assert_eq!(crc32(b"123456789"), 0xcbf4_3926);
+        assert_eq!(crc32(b""), 0);
+        let bitwise = |data: &[u8]| {
+            let mut crc = !0u32;
+            for &byte in data {
+                crc ^= u32::from(byte);
+                for _ in 0..8 {
+                    crc = (crc >> 1) ^ (CRC32_POLY & 0u32.wrapping_sub(crc & 1));
+                }
+            }
+            !crc
+        };
+        let data: [u8; 300] = core::array::from_fn(|i| (i as u32 * 61 + 9) as u8);
+        for len in 0..=data.len() {
+            assert_eq!(crc32(&data[..len]), bitwise(&data[..len]), "len {len}");
+        }
+        let mut split = Crc32::default();
+        split.update(&data[..100]);
+        split.update(&data[100..]);
+        assert_eq!(split.finish(), crc32(&data));
+    }
 
     #[test]
     fn matches_reference_vectors() {
