@@ -122,8 +122,9 @@ pub trait WorldLattice {
     const PROFILE: WorldProfile;
 }
 
-/// [`WorldProfile::FIRST_PERSON`].
+/// [`WorldProfile::FIRST_PERSON`], as a type parameter.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct FirstPerson;
 
 impl WorldLattice for FirstPerson {
@@ -583,8 +584,10 @@ unsafe fn face_level_flagged(
 ) -> u8 {
     // SAFETY: `vertex_count` records per the contract.
     let end = unsafe { vertices.add(vertex_count) };
+    // SAFETY: inside the range the caller hands over.
     let first = unsafe { &*vertices };
     let (mut z0, mut z1) = (first.depth, first.depth);
+    // SAFETY: inside the range the caller hands over.
     let mut vertex = unsafe { vertices.add(1) };
     while vertex != end {
         // SAFETY: `vertex` is inside the range.
@@ -594,6 +597,7 @@ unsafe fn face_level_flagged(
         } else if z > z1 {
             z1 = z;
         }
+        // SAFETY: inside the range the caller hands over.
         vertex = unsafe { vertex.add(1) };
     }
     if z0 == 0 || (gate_depth != 0 && z0 >= u32::from(gate_depth)) {
@@ -603,6 +607,7 @@ unsafe fn face_level_flagged(
     // re-extension.
     let (mut x0, mut y0) = (i32::from(first.screen[0]), i32::from(first.screen[1]));
     let (mut x1, mut y1) = (x0, y0);
+    // SAFETY: inside the range the caller hands over.
     let mut vertex = unsafe { vertices.add(1) };
     while vertex != end {
         // SAFETY: `vertex` is inside the range.
@@ -618,6 +623,7 @@ unsafe fn face_level_flagged(
         } else if y > y1 {
             y1 = y;
         }
+        // SAFETY: inside the range the caller hands over.
         vertex = unsafe { vertex.add(1) };
     }
     let extent = gpu_extent_level(x1 - x0, y1 - y0);
@@ -794,11 +800,13 @@ unsafe fn submit_quad_lattice<L: WorldLattice>(
 
     // SAFETY: rows of five in the ten scratch records.
     let rows = [scratch, unsafe { scratch.add(5) }];
+    // SAFETY: the first row lies in the scratch records.
     unsafe { fill_lattice_row(rows[0], *c[0], *c[1], na, true) };
     if seal && na > 1 {
         // SAFETY: the row was just filled.
         let r = unsafe { core::slice::from_raw_parts(rows[0], na + 1) };
         let e = ends(r);
+        // SAFETY: the row was just filled; room per the contract.
         unsafe { seal_split_edge(writer, e.map(|v| &*v), na, seal_otz) };
     }
     let mut j = 1usize;
@@ -817,6 +825,7 @@ unsafe fn submit_quad_lattice<L: WorldLattice>(
         }
         // SAFETY: both rows are filled.
         let p = unsafe { core::slice::from_raw_parts(prev, na + 1) };
+        // SAFETY: both rows are filled.
         let q = unsafe { core::slice::from_raw_parts(cur, na + 1) };
         let mut i = 0usize;
         while i < na {
@@ -1140,6 +1149,7 @@ pub unsafe fn submit_world_batch<L: WorldLattice>(
         // in RAM, where each load stalls.
         // SAFETY: inside the descriptors; aligned to four.
         let [range, material] = unsafe { ptr::read(surface_ptr.cast::<[u32; 2]>()) };
+        // SAFETY: inside the range the caller hands over.
         surface_ptr = unsafe { surface_ptr.add(1) };
         // Opaque per surface, so the loops below address the vertices from it
         // instead of from hoisted copies parked on the RAM stack.
@@ -1217,12 +1227,16 @@ pub unsafe fn submit_world_batch<L: WorldLattice>(
         // leaf calls.
         // SAFETY: inside the surface.
         let root = unsafe { &*first };
+        // SAFETY: inside the range the caller hands over.
         let end = unsafe { first.add(count) };
+        // SAFETY: inside the range the caller hands over.
         let mut current = unsafe { first.add(2) };
         while current != end {
             // SAFETY: `current` is inside the surface, past its second vertex.
             let previous_ref = unsafe { &*current.sub(1) };
+            // SAFETY: inside the range the caller hands over.
             let current_ref = unsafe { &*current };
+            // SAFETY: inside the range the caller hands over.
             let root_depth = unsafe { ptr::read_volatile(ptr::addr_of!(root.depth)) } as u16;
             let otz = average3_depths(
                 root_depth,
@@ -1230,6 +1244,7 @@ pub unsafe fn submit_world_batch<L: WorldLattice>(
                 current_ref.depth as u16,
             );
             if otz > 0 && otz < ot_depth {
+                // SAFETY: inside the range the caller hands over.
                 let next = unsafe { current.add(1) };
                 if next != end {
                     // SAFETY: inside the surface.
@@ -1254,6 +1269,7 @@ pub unsafe fn submit_world_batch<L: WorldLattice>(
                         };
                         packets += u32::from(emitted != next_packet);
                         next_packet = emitted;
+                        // SAFETY: inside the range the caller hands over.
                         current = unsafe { next.add(1) };
                         continue;
                     }
@@ -1265,6 +1281,7 @@ pub unsafe fn submit_world_batch<L: WorldLattice>(
                 packets += u32::from(emitted != next_packet);
                 next_packet = emitted;
             }
+            // SAFETY: inside the range the caller hands over.
             current = unsafe { current.add(1) };
         }
     }
@@ -1380,14 +1397,18 @@ unsafe fn split_fan<L: WorldLattice>(
     // SAFETY: per the contract.
     let root = unsafe { &*first };
     let ot_depth = L::PROFILE.ot_depth;
+    // SAFETY: inside the range the caller hands over.
     let end = unsafe { first.add(count) };
+    // SAFETY: inside the range the caller hands over.
     let first_previous = unsafe { first.add(1) };
     let mut previous = first_previous;
+    // SAFETY: inside the range the caller hands over.
     let mut current = unsafe { first.add(2) };
     while current != end {
         let scratch = opaque(generated);
         // SAFETY: inside the surface.
         let previous_ref = unsafe { &*previous };
+        // SAFETY: inside the range the caller hands over.
         let current_ref = unsafe { &*current };
         let otz = average3_depths(
             root.depth as u16,
@@ -1395,6 +1416,7 @@ unsafe fn split_fan<L: WorldLattice>(
             current_ref.depth as u16,
         );
         if otz > 0 && otz < ot_depth {
+            // SAFETY: inside the range the caller hands over.
             let next = unsafe { current.add(1) };
             let underdraw_edges =
                 2 | u8::from(previous == first_previous) | (u8::from(next == end) << 2);
@@ -1426,6 +1448,7 @@ unsafe fn split_fan<L: WorldLattice>(
             }
         }
         previous = current;
+        // SAFETY: inside the range the caller hands over.
         current = unsafe { current.add(1) };
     }
     lent.next = writer.next;
