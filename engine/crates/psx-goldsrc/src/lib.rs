@@ -7,6 +7,7 @@
 pub mod affine_edges;
 pub mod chunk_stream;
 pub mod driver;
+pub mod emit;
 pub mod fx;
 pub mod ground_logic;
 pub mod hitbox_logic;
