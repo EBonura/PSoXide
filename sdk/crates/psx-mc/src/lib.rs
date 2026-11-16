@@ -56,7 +56,7 @@
 #![allow(clippy::result_unit_err)]
 
 mod fs;
-pub use fs::{dir, Chain};
+pub use fs::{dir, Chain, DirOptions};
 pub mod job;
 mod ram;
 

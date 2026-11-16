@@ -74,6 +74,77 @@ pub mod dir {
         frame[..E_CHK].iter().fold(0u8, |a, &b| a ^ b)
     }
 }
+
+/// How a directory walk treats a damaged or pattern-bearing card, for a program that must behave
+/// as the console BIOS does (the restored games' card layer). The default, [`STRICT`](Self::STRICT),
+/// is what [`Card::find`], [`Card::chain`] and [`Card::read_dir`] do; those functions are
+/// unchanged. Use through [`Card::read_dir_with`], [`Card::find_with`] and [`Card::chain_with`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DirOptions {
+    /// Take a directory frame whose XOR checksum does not match as it is.
+    pub accept_bad_checksum: bool,
+    /// In [`Card::find_with`], read `?` as any one character and `*` as the rest of the name.
+    pub wildcards: bool,
+    /// In [`Card::chain_with`], end the chain at a link out of range, at a repeat of the
+    /// fifteen-block limit or at the last block, instead of returning [`Error::Corrupt`]. The
+    /// state byte of a linked block is not examined (only the last-block state ends the chain),
+    /// as the BIOS follows links.
+    pub stop_at_bad_link: bool,
+}
+
+impl DirOptions {
+    /// What [`Card::find`], [`Card::chain`] and [`Card::read_dir`] do.
+    pub const STRICT: Self = Self {
+        accept_bad_checksum: false,
+        wildcards: false,
+        stop_at_bad_link: false,
+    };
+    /// All three options on: the console BIOS's directory behaviour.
+    pub const BIOS: Self = Self {
+        accept_bad_checksum: true,
+        wildcards: true,
+        stop_at_bad_link: true,
+    };
+
+    /// `self` with a bad checksum accepted.
+    #[must_use]
+    pub const fn accepting_bad_checksum(mut self) -> Self {
+        self.accept_bad_checksum = true;
+        self
+    }
+
+    /// `self` with `?` and `*` wildcards in a find.
+    #[must_use]
+    pub const fn with_wildcards(mut self) -> Self {
+        self.wildcards = true;
+        self
+    }
+
+    /// `self` with a chain that stops at a bad link.
+    #[must_use]
+    pub const fn stopping_at_bad_link(mut self) -> Self {
+        self.stop_at_bad_link = true;
+        self
+    }
+}
+
+/// The BIOS name match: `?` is any one character, `*` is the rest of the name (and matches
+/// even an empty rest). `name` is the stored name up to its NUL.
+fn wildcard_matches(pattern: &[u8], name: &[u8]) -> bool {
+    let mut i = 0;
+    for &p in pattern {
+        match p {
+            b'*' => return true,
+            b'?' if i < name.len() => {}
+            c if i < name.len() && name[i] == c => {}
+            _ => return false,
+        }
+        i += 1;
+    }
+    i == name.len()
+}
+
 use dir::{
     checksum, is_free, E_CHK, E_LINK, E_NAME, E_SIZE, E_STATE, LINK_NONE, ST_FIRST, ST_FREE,
     ST_LAST, ST_MIDDLE,
@@ -476,6 +547,103 @@ impl<B: Block> Card<B> {
                 }
                 _ => return Err(Error::Corrupt),
             }
+        }
+        Ok(Chain { blocks, len })
+    }
+
+    /// [`read_dir`](Self::read_dir) with `options`: with `accept_bad_checksum` a frame whose
+    /// checksum does not match is returned as it is.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Corrupt`] on a checksum mismatch unless it is accepted, or what the device reports.
+    pub fn read_dir_with(&mut self, index: usize, options: DirOptions) -> Result<[u8; FRAME_SIZE]> {
+        if options.accept_bad_checksum {
+            let mut f = [0u8; FRAME_SIZE];
+            self.dev.read_frame(1 + index as u16, &mut f)?;
+            Ok(f)
+        } else {
+            self.read_dir(index)
+        }
+    }
+
+    /// [`find`](Self::find) with `options`: `wildcards` makes `name` a pattern, and
+    /// `accept_bad_checksum` lets the walk pass a damaged entry.
+    ///
+    /// # Errors
+    ///
+    /// As [`read_dir_with`](Self::read_dir_with), for any entry it walks.
+    pub fn find_with(&mut self, name: &[u8], options: DirOptions) -> Result<Option<usize>> {
+        for i in 0..block_count() {
+            let e = self.read_dir_with(i, options)?;
+            if e[E_STATE] != ST_FIRST {
+                continue;
+            }
+            let hit = if options.wildcards {
+                let mut buf = [0u8; MAX_NAME_LEN + 1];
+                let len = copy_entry_name(&e, &mut buf) as usize;
+                wildcard_matches(name, &buf[..len])
+            } else {
+                entry_name_eq(&e, name)
+            };
+            if hit {
+                return Ok(Some(i));
+            }
+        }
+        Ok(None)
+    }
+
+    /// [`chain`](Self::chain) with `options`: with `stop_at_bad_link` the chain ends where the
+    /// BIOS's would (the last-block state, a link that is `FFFF` or out of range, or fifteen
+    /// blocks) and the blocks so far are returned; `accept_bad_checksum` applies to each entry.
+    ///
+    /// # Errors
+    ///
+    /// As [`chain`](Self::chain) unless `stop_at_bad_link` turns the fault into an end.
+    pub fn chain_with(&mut self, first: usize, options: DirOptions) -> Result<Chain> {
+        if !options.stop_at_bad_link {
+            if !options.accept_bad_checksum {
+                return self.chain(first);
+            }
+            return self.chain_walk(first, options, true);
+        }
+        self.chain_walk(first, options, false)
+    }
+
+    fn chain_walk(
+        &mut self,
+        first: usize,
+        options: DirOptions,
+        strict_links: bool,
+    ) -> Result<Chain> {
+        let mut blocks = [0u8; DATA_BLOCKS];
+        let mut len = 0;
+        let mut idx = first;
+        while len < DATA_BLOCKS {
+            let e = self.read_dir_with(idx, options)?;
+            blocks[len] = (idx + 1) as u8;
+            len += 1;
+            let link = u16::from_le_bytes([e[E_LINK], e[E_LINK + 1]]);
+            if strict_links {
+                match e[E_STATE] {
+                    ST_LAST => return Ok(Chain { blocks, len }),
+                    ST_FIRST | ST_MIDDLE => {
+                        if link == LINK_NONE {
+                            return Ok(Chain { blocks, len });
+                        }
+                        if link as usize >= DATA_BLOCKS {
+                            return Err(Error::Corrupt);
+                        }
+                    }
+                    _ => return Err(Error::Corrupt),
+                }
+            } else if e[E_STATE] == ST_LAST || link as usize >= DATA_BLOCKS {
+                break;
+            }
+            idx = link as usize;
+        }
+        if strict_links && len >= DATA_BLOCKS {
+            return Err(Error::Corrupt);
         }
         Ok(Chain { blocks, len })
     }
