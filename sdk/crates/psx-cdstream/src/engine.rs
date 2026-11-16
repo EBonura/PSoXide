@@ -318,6 +318,7 @@ impl<H: CdHw> SingleEngine<H> {
     /// queue, no priorities, no chaining, no resumes, no audio lease. It is the transfer
     /// state machine and nothing else, so a program that reads one chunk at a time links no
     /// code for the rest. See [`SingleEngine`].
+    #[must_use]
     pub const fn single(hw: H, config: Config) -> Self {
         Self::with_hw(hw, config)
     }

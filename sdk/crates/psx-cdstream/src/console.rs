@@ -494,6 +494,7 @@ fn install_in<T: Transport>(cd: Cd, config: Config) -> Result<(), Cd> {
 /// Give the controller back to polled code. Succeeds only when the transport
 /// is idle with nothing queued; call [`cancel_all`] and poll [`is_idle`]
 /// first. The CD source is closed and the handler unregistered.
+#[must_use]
 pub fn uninstall() -> Option<Cd> {
     uninstall_in::<Full>()
 }
