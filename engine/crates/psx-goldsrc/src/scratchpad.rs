@@ -11,16 +11,6 @@
 /// Total hardware scratchpad capacity.
 pub use psx_engine::scratchpad::SIZE;
 
-#[cfg(feature = "main-ram-render-scratch")]
-#[repr(C, align(16))]
-struct AlignedScratchpad([u8; SIZE]);
-
-// Host builds and the explicit A/B baseline use an identically sized/aligned
-// main-RAM block. That keeps all callers and data layouts identical: only the
-// physical memory backing changes.
-#[cfg(feature = "main-ram-render-scratch")]
-static mut MAIN_RAM_SCRATCHPAD: AlignedScratchpad = AlignedScratchpad([0; SIZE]);
-
 // `a0=context`, `a1=entry`, `a2=new stack top`, `a3=save area`. Preserve the
 // old stack, return address, and s0 in the arena below the guarded stack floor;
 // s0 is callee-saved, so it remains a reliable way back after the Rust entry
@@ -64,27 +54,12 @@ const PROJECTION_GUARD_OFFSET: usize = PROJECTION_SAVE_OFFSET + 3 * core::mem::s
 // `call_on_projection_stack`): the stack-guard proof of the linked chain is what keeps the
 // stack off it, and the canary only has to catch what static analysis cannot see.
 const PROJECTION_GUARD: u32 = 0x5a17_c0de;
-// Both A/B builds retain the same runtime branch and both projection paths.
-// Distinct non-zero values keep this byte in `.data` in either build; the
-// volatile read prevents the selector from folding either path away.
-static mut PROJECTION_STACK_MODE: u8 = if cfg!(feature = "main-ram-projection-stack") {
-    2
-} else {
-    1
-};
 
+/// The scratchpad (a main-RAM stand-in on the host, `psx_engine::scratchpad::base_ptr`).
 #[inline(always)]
 unsafe fn base() -> *mut u8 {
-    #[cfg(not(feature = "main-ram-render-scratch"))]
-    {
-        // SAFETY: the contract in this function's `# Safety` section (or the arena it names) covers this access.
-        unsafe { psx_engine::scratchpad::base_ptr() }
-    }
-
-    #[cfg(feature = "main-ram-render-scratch")]
-    {
-        core::ptr::addr_of_mut!(MAIN_RAM_SCRATCHPAD).cast::<u8>()
-    }
+    // SAFETY: the contract in this function's `# Safety` section (or the arena it names) covers this access.
+    unsafe { psx_engine::scratchpad::base_ptr() }
 }
 
 /// Execute one context entry on the recyclable projection stack.
@@ -104,17 +79,6 @@ pub unsafe fn call_on_projection_stack<const GUARD_END: usize>(
 ) -> bool {
     const { assert!(GUARD_END > PROJECTION_GUARD_OFFSET && GUARD_END < SIZE) };
     let guard_words = (GUARD_END - PROJECTION_GUARD_OFFSET) / core::mem::size_of::<u32>();
-    // The A/B control retains the same non-inlined entry function but lets it
-    // use the ordinary CPU stack. It needs no second main-RAM arena and makes
-    // the scratchpad candidate earn back its trampoline and guard overhead.
-    // SAFETY: the contract in this function's `# Safety` section (or the arena it names) covers this access.
-    let mode = unsafe { core::ptr::addr_of!(PROJECTION_STACK_MODE).read_volatile() };
-    if mode == 2 {
-        // SAFETY: the contract in this function's `# Safety` section (or the arena it names) covers this access.
-        unsafe { entry(context) };
-        return true;
-    }
-
     // SAFETY: the contract in this function's `# Safety` section (or the arena it names) covers this access.
     let arena = unsafe { base() };
     // SAFETY: the contract in this function's `# Safety` section (or the arena it names) covers this access.
