@@ -295,31 +295,18 @@ impl Line {
 
     #[inline(never)]
     fn hex(&mut self, v: u32, digits: usize) -> &mut Self {
-        let mut i = digits;
-        while i > 0 {
-            i -= 1;
-            let n = ((v >> (i * 4)) & 15) as u8;
-            self.byte(if n < 10 { b'0' + n } else { b'A' + n - 10 });
+        let mut buf = [0u8; psx_math::fmt::U32_HEX_MAX];
+        for &c in psx_math::fmt::u32_hex(&mut buf, v, digits).as_bytes() {
+            self.byte(c);
         }
         self
     }
 
     #[inline(never)]
-    fn dec(&mut self, mut v: u32) -> &mut Self {
-        let mut tmp = [0u8; 10];
-        let mut n = 0;
-        if v == 0 {
-            tmp[0] = b'0';
-            n = 1;
-        }
-        while v > 0 {
-            tmp[n] = b'0' + (v % 10) as u8;
-            v /= 10;
-            n += 1;
-        }
-        while n > 0 {
-            n -= 1;
-            self.byte(tmp[n]);
+    fn dec(&mut self, v: u32) -> &mut Self {
+        let mut buf = [0u8; psx_math::fmt::U32_DEC_MAX];
+        for &c in psx_math::fmt::u32_dec(&mut buf, v).as_bytes() {
+            self.byte(c);
         }
         self
     }

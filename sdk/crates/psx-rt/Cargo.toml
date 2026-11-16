@@ -8,6 +8,7 @@ description  = "PS1 bare-metal runtime: _start, panic, heap. Makes no BIOS call.
 
 [dependencies]
 psx-hw = { workspace = true }
+psx-math = { workspace = true }
 psx-io = { path = "../psx-io" }
 psx-gpu = { path = "../psx-gpu" }
 psx-tick = { path = "../psx-tick" }

@@ -47,11 +47,8 @@ pub fn println(_s: &str) {}
 /// Write a single u32 as 8 hex digits, no prefix, uppercase.
 #[cfg(feature = "host-tty")]
 pub fn print_hex_u32(v: u32) {
-    const DIGITS: &[u8; 16] = b"0123456789ABCDEF";
-    for shift in (0..8).rev() {
-        let nib = ((v >> (shift * 4)) & 0xf) as usize;
-        write_byte(DIGITS[nib]);
-    }
+    let mut buf = [0u8; psx_math::fmt::U32_HEX_MAX];
+    print(psx_math::fmt::u32_hex(&mut buf, v, 8));
 }
 
 /// Write a single u32 as 8 hex digits. A no-op without the `host-tty` feature.

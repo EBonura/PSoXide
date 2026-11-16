@@ -469,13 +469,8 @@ pub fn step_hex(id: u32, tag: &str, a: u32, b: u32) {
             text[i] = t[i];
             i += 1;
         }
-        let digits = b"0123456789ABCDEF";
-        let mut n = 0;
-        while n < 8 {
-            text[7 + n] = digits[((a >> (28 - 4 * n)) & 15) as usize];
-            text[16 + n] = digits[((b >> (28 - 4 * n)) & 15) as usize];
-            n += 1;
-        }
+        psx_math::fmt::u32_hex(&mut text[7..15], a, 8);
+        psx_math::fmt::u32_hex(&mut text[16..24], b, 8);
         // SAFETY: only ASCII bytes were written.
         step(id, unsafe { core::str::from_utf8_unchecked(&text) });
     }
