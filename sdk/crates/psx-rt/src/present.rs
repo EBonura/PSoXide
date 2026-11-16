@@ -671,7 +671,8 @@ fn recover<P: Port>(port: &mut P) {
     }
 }
 
-/// Returns the VBlanks waited.
+/// Returns the VBlanks waited. One copy per port type: `submit` and `wait_idle_on` call it.
+#[inline(never)]
 fn wait_slot_empty_on<P: Port>(port: &mut P) -> u32 {
     let start = port.vblanks();
     let mut spins = 0u32;
