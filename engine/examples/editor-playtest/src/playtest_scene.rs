@@ -1363,7 +1363,7 @@ impl Scene for Playtest {
                 let stance_crystal_material = self
                     .stance_cluts
                     .crystal_material(character, self.player.stance.active());
-                let parry_flash_q8 = self.player_parry_flash.weight_q8(&PARRY_FEEDBACK);
+                let flash_q8 = self.player_flash.weight_q8(&COMBAT_FEEDBACK);
                 let player_draw =
                     player_lighting.map_or(PlayerModelDrawStats::default(), |lighting| {
                         let phase_assembly = player_phase_assembly(
@@ -1371,7 +1371,7 @@ impl Scene for Playtest {
                             &self.player_stance_config,
                             player,
                             player_phase_height(character),
-                            parry_flash_q8,
+                            flash_q8,
                         )
                         .map(|effect| effect.with_crystal_material(stance_crystal_material));
                         let stance_clut = self
@@ -1392,8 +1392,8 @@ impl Scene for Playtest {
                             phase_assembly,
                             &mut self.player_dash_assembly,
                             stance_clut,
-                            self.player_parry_flash.lit_tint(
-                                &PARRY_FEEDBACK,
+                            self.player_flash.lit_tint(
+                                &COMBAT_FEEDBACK,
                                 Some(player_stance_lit_tint(self.player.stance.active())),
                             ),
                             &mut primitive_packets,
@@ -1411,7 +1411,7 @@ impl Scene for Playtest {
                             &self.player_stance_config,
                             player,
                             player_phase_height(character),
-                            parry_flash_q8,
+                            flash_q8,
                         )
                         .filter(|_| {
                             matches!(

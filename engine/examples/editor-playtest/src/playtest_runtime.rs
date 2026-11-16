@@ -1485,7 +1485,8 @@ impl Playtest {
         let height = self.character.map_or(0, |c| c.height.max(0) as u16);
         let attacker = usize::from(strike.attacker.0);
         let zenith = self.player.stance.active() == VitalityChannelId::Two;
-        self.player_parry_flash = ParryFlash::start(&PARRY_FEEDBACK, zenith);
+        self.player_flash
+            .begin(&COMBAT_FEEDBACK, FlashKind::Parry, zenith);
         self.spawn_parry_burst(
             [player.x, player.y, player.z],
             height,
@@ -1541,7 +1542,7 @@ impl Playtest {
         );
         let zenith = self.game_entities.stance(index) == VitalityChannelId::Two;
         self.game_entities
-            .start_parry_flash(index, &PARRY_FEEDBACK, zenith);
+            .start_flash(index, &COMBAT_FEEDBACK, FlashKind::Parry, zenith);
         let player = self.motor.position();
         self.spawn_parry_burst(
             self.game_entities.position(index),
@@ -1696,8 +1697,55 @@ impl Playtest {
                 parrier[2] / 2 + other[2] / 2,
             ],
             room,
-            PARRY_FEEDBACK.burst_radius,
-            PARRY_FEEDBACK.burst_style(zenith),
+            COMBAT_FEEDBACK.burst_radius,
+            COMBAT_FEEDBACK.burst_style(zenith),
+        );
+    }
+
+    /// The tells of a landed hit, the same for either side: a flash on the
+    /// struck fighter's model, white-hot cooling into the attacker's stance
+    /// colour ([`LandedHit::zenith`]), and, for a melee contact, a small
+    /// spark halfway between the fighters at the victim's chest height. A
+    /// bolt has its own impact, so it flashes only. A parry never comes
+    /// through here, and a parry flash is not replaced by a hit.
+    // Out of line and small: it runs on every landed hit, three call sites.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
+    pub(super) fn show_hit(&mut self, hit: LandedHit) {
+        let (feet, height, room) = if hit.victim == CombatantId::PLAYER {
+            self.player_flash
+                .begin(&COMBAT_FEEDBACK, hit.kind, hit.zenith);
+            let p = self.motor.position();
+            (
+                [p.x, p.y, p.z],
+                self.character.map_or(0, |c| c.height.max(0) as u16),
+                self.room_index,
+            )
+        } else {
+            let index = usize::from(hit.victim.0);
+            let Some(record) = GAME_ENTITIES.get(index) else {
+                return;
+            };
+            self.game_entities
+                .start_flash(index, &COMBAT_FEEDBACK, hit.kind, hit.zenith);
+            (
+                self.game_entities.position(index),
+                record.height,
+                record.room,
+            )
+        };
+        let Some(from) = hit.contact_from else {
+            return;
+        };
+        let _ = self.combat_projectile_impacts.spawn_effect(
+            [
+                feet[0] / 2 + from[0] / 2,
+                feet[1].saturating_add(i32::from(height) * 5 / 8),
+                feet[2] / 2 + from[2] / 2,
+            ],
+            room,
+            COMBAT_FEEDBACK.spark_radius,
+            COMBAT_FEEDBACK.spark_style(hit.kind, hit.zenith),
         );
     }
 
@@ -3055,6 +3103,9 @@ pub(super) fn live_action_speed_q8(
 
 #[cfg(test)]
 mod combat_baseline_tests;
+
+#[cfg(test)]
+mod combat_hit_fx_tests;
 
 #[cfg(test)]
 mod combat_parry_tests;

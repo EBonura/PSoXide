@@ -36,7 +36,7 @@ fn hybrid() -> &'static LevelGameEntityRecord {
 
 /// A scene whose player carries the Zenith cannon (so she may swap) and
 /// whose enemy slot 0 is alive, can swap, and stands at the origin with her.
-fn duel() -> std::boxed::Box<Playtest> {
+pub(super) fn duel() -> std::boxed::Box<Playtest> {
     let mut scene = scene();
     scene.character = Some(character(true));
     assert!(scene.game_entities.spawn_slot(0, StableId(1), hybrid()));
@@ -47,7 +47,7 @@ fn duel() -> std::boxed::Box<Playtest> {
 
 /// The swap press of one frame as the scene runs it: the swap, then the
 /// clock advance of that same frame.
-fn player_swaps(scene: &mut Playtest) {
+pub(super) fn player_swaps(scene: &mut Playtest) {
     let cooldown = scene.player_stance_config.swap_cooldown_ticks;
     assert!(scene.player.request_swap(cooldown));
     scene.player.advance_stance(1);
@@ -55,14 +55,14 @@ fn player_swaps(scene: &mut Playtest) {
 
 /// The enemy's swap in its tick, then the per-frame clock advance the scene
 /// makes after the entity tick.
-fn enemy_swaps(scene: &mut Playtest) {
+pub(super) fn enemy_swaps(scene: &mut Playtest) {
     assert!(scene.game_entities.swap_stance(hybrid(), 0));
     scene.game_entities.advance_stances(1);
 }
 
 /// A Zenith bolt fired by `team` (owner entity 0 for the enemy, none for the
 /// player) already inside its target, the player at y 80 or the enemy at 40.
-fn shot_at(team: CombatTeam) -> psx_game_runtime::projectiles::ProjectileSpawn {
+pub(super) fn shot_at(team: CombatTeam) -> psx_game_runtime::projectiles::ProjectileSpawn {
     let mut spawn = bolt(ProjectileDamageChannel::Zenith, 20, 40);
     spawn.team = team;
     if team == CombatTeam::Player {
@@ -525,7 +525,10 @@ fn the_swap_and_parry_windows_are_exactly_each_characters_count() {
 fn bursts(scene: &Playtest) -> std::vec::Vec<([u8; 3], [i32; 3])> {
     (0..MAX_PROJECTILE_IMPACTS)
         .filter_map(|i| scene.combat_projectile_impacts.get(i))
-        .filter(|effect| effect.visual.star_points != 0)
+        .filter(|effect| {
+            let points = effect.visual.star_points;
+            points != 0 && points & psx_game_runtime::combat_fx::STAR_NO_RING == 0
+        })
         .map(|effect| (effect.visual.impact_rgb, effect.position))
         .collect()
 }
@@ -541,7 +544,7 @@ fn player_swaps_back_to_horizon(scene: &mut Playtest) {
 
 #[test]
 fn the_players_parry_flashes_her_and_bursts_in_her_stance_colour() {
-    let data = PARRY_FEEDBACK;
+    let data = COMBAT_FEEDBACK;
     for horizon in [false, true] {
         let mut scene = duel();
         if horizon {
@@ -549,7 +552,7 @@ fn the_players_parry_flashes_her_and_bursts_in_her_stance_colour() {
         } else {
             player_swaps(&mut scene);
         }
-        assert!(!scene.player_parry_flash.is_active());
+        assert!(!scene.player_flash.is_active());
         assert!(bursts(&scene).is_empty(), "nothing before the parry");
         scene
             .combat_projectiles
@@ -558,17 +561,13 @@ fn the_players_parry_flashes_her_and_bursts_in_her_stance_colour() {
         scene.resolve_combat(&ctx(100));
         let rgb = data.stance_rgb(!horizon);
         // The flash is on her, in her colour; the enemy she parried is not lit.
-        assert!(scene.player_parry_flash.is_active());
-        assert_eq!(scene.player_parry_flash.is_zenith(), !horizon);
+        assert!(scene.player_flash.is_active());
+        assert_eq!(scene.player_flash.is_zenith(), !horizon);
         assert_eq!(
-            scene
-                .player_parry_flash
-                .lit_tint(&data, None)
-                .unwrap()
-                .color,
+            scene.player_flash.lit_tint(&data, None).unwrap().color,
             (rgb[0], rgb[1], rgb[2])
         );
-        assert!(!scene.game_entities.parry_flash(0).is_active());
+        assert!(!scene.game_entities.flash(0).is_active());
         // One burst, in her colour, between her and the attacker.
         let found = bursts(&scene);
         assert_eq!(found.len(), 1);
@@ -582,7 +581,7 @@ fn the_players_parry_flashes_her_and_bursts_in_her_stance_colour() {
 
 #[test]
 fn the_enemys_parry_flashes_it_and_bursts_in_its_stance_colour() {
-    let data = PARRY_FEEDBACK;
+    let data = COMBAT_FEEDBACK;
     let mut scene = duel();
     enemy_swaps(&mut scene);
     let zenith = scene.game_entities.stance(0) == VitalityChannelId::Two;
@@ -598,17 +597,14 @@ fn the_enemys_parry_flashes_it_and_bursts_in_its_stance_colour() {
         .spawn(shot_at(CombatTeam::Player))
         .unwrap();
     scene.resolve_combat(&ctx(100));
-    let flash = scene.game_entities.parry_flash(0);
+    let flash = scene.game_entities.flash(0);
     let rgb = data.stance_rgb(zenith);
     assert!(flash.is_active() && flash.is_zenith());
     assert_eq!(
         flash.lit_tint(&data, None).unwrap().color,
         (rgb[0], rgb[1], rgb[2])
     );
-    assert!(
-        !scene.player_parry_flash.is_active(),
-        "the player is not lit"
-    );
+    assert!(!scene.player_flash.is_active(), "the player is not lit");
     let found = bursts(&scene);
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].0, rgb);
@@ -616,7 +612,7 @@ fn the_enemys_parry_flashes_it_and_bursts_in_its_stance_colour() {
 
 #[test]
 fn a_flash_fades_out_and_a_hit_that_is_not_a_parry_shows_neither_tell() {
-    let data = PARRY_FEEDBACK;
+    let data = COMBAT_FEEDBACK;
     // The flash ends after its ticks; one resolve_combat is one tick.
     let mut scene = duel();
     player_swaps(&mut scene);
@@ -625,12 +621,15 @@ fn a_flash_fades_out_and_a_hit_that_is_not_a_parry_shows_neither_tell() {
         .spawn(shot_at(CombatTeam::Enemy))
         .unwrap();
     scene.resolve_combat(&ctx(100));
-    assert_eq!(scene.player_parry_flash.ticks_left(), data.flash_ticks);
-    for _ in 0..data.flash_ticks {
+    let ticks = data.flash[FlashKind::Parry as usize].ticks;
+    assert_eq!(scene.player_flash.ticks_left(), ticks);
+    assert_eq!(scene.player_flash.kind(), FlashKind::Parry);
+    for _ in 0..ticks {
         scene.resolve_combat(&ctx(101));
     }
-    assert!(!scene.player_parry_flash.is_active());
-    // A swap-window hit past the parry window is no parry: no flash, no burst.
+    assert!(!scene.player_flash.is_active());
+    // A swap-window hit past the parry window is no parry: it is spent on the
+    // swap's i-frames, so no flash and no burst (nothing landed).
     let mut scene = duel();
     player_swaps(&mut scene);
     let parry = scene.player_stats.parry_ticks;
@@ -640,7 +639,7 @@ fn a_flash_fades_out_and_a_hit_that_is_not_a_parry_shows_neither_tell() {
         .spawn(shot_at(CombatTeam::Enemy))
         .unwrap();
     scene.resolve_combat(&ctx(100));
-    assert!(!scene.player_parry_flash.is_active());
+    assert!(!scene.player_flash.is_active());
     assert!(bursts(&scene).is_empty());
     let mut scene = duel();
     enemy_swaps(&mut scene);
@@ -651,6 +650,6 @@ fn a_flash_fades_out_and_a_hit_that_is_not_a_parry_shows_neither_tell() {
         .spawn(shot_at(CombatTeam::Player))
         .unwrap();
     scene.resolve_combat(&ctx(100));
-    assert!(!scene.game_entities.any_parry_flash());
+    assert!(!scene.game_entities.any_flash());
     assert!(bursts(&scene).is_empty());
 }

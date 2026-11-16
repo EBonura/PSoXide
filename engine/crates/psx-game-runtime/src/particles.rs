@@ -641,7 +641,9 @@ pub fn draw_projectile_impact<'a, const OT_DEPTH: usize>(
 /// The parry burst: a bright core, an expanding ring and a star of spokes
 /// (alternately long and short), all additive, in the impact colour, with a
 /// near-white core on the long spokes. Larger and brighter than any hit
-/// spark, and ring-shaped, so a parry does not read as a hit. Sized from the
+/// spark, and ring-shaped, so a parry does not read as a hit. With
+/// [`crate::combat_fx::STAR_NO_RING`] set it is a melee hit's spark instead:
+/// no ring, short streaks flying out from the contact point. Sized from the
 /// effect radius on screen and `glow_scale_q8`; progress is the pool's age.
 #[allow(clippy::too_many_arguments)]
 fn draw_parry_star<'a, const OT_DEPTH: usize>(
@@ -699,7 +701,8 @@ fn draw_parry_star<'a, const OT_DEPTH: usize>(
         submitted +=
             draw_particle_diamond(center, clamp_i16(half), core, slot, ot, primitive_packets);
     }
-    for i in 0..RING_SEGMENTS {
+    let ringless = impact.visual.star_points & crate::combat_fx::STAR_NO_RING != 0;
+    for i in 0..if ringless { 0 } else { RING_SEGMENTS } {
         submitted += draw_projectile_segment(
             at(i * 4096 / RING_SEGMENTS, ring),
             at((i + 1) * 4096 / RING_SEGMENTS, ring),
@@ -710,7 +713,7 @@ fn draw_parry_star<'a, const OT_DEPTH: usize>(
             primitive_packets,
         );
     }
-    let points = i32::from(impact.visual.star_points);
+    let points = i32::from(impact.visual.star_points & !crate::combat_fx::STAR_NO_RING);
     // A slow spin: the star is never the same shape twice in a row.
     let spin = progress / 8;
     for k in 0..points {
@@ -718,8 +721,17 @@ fn draw_parry_star<'a, const OT_DEPTH: usize>(
         let angle = spin + k * 4096 / points;
         let outer = if long { reach * 5 / 4 } else { reach * 3 / 4 };
         let outer = outer.max(ring + 2);
+        // A spark's spokes are streaks that fly out from the contact point.
+        let (inner, outer) = if ringless {
+            (
+                ring * 2 / 3,
+                ring + if long { reach / 2 } else { reach / 3 },
+            )
+        } else {
+            (ring / 3, outer)
+        };
         submitted += draw_projectile_segment(
-            at(angle, ring / 3),
+            at(angle, inner),
             at(angle, outer),
             if long { 3 } else { 2 },
             if long { core } else { accent },
