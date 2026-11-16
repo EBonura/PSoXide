@@ -5,7 +5,7 @@
 //! the same time and against the closest one within three frames, and with
 //! `--audio` the sound's SNR against the source WAV.
 
-use std::io::BufRead;
+use std::io::{BufRead, Write};
 use std::process::ExitCode;
 
 use psx_audio_cook::xa::DriveSpeed;
@@ -47,6 +47,20 @@ fn read(path: &str) -> Result<Vec<u8>, String> {
     std::fs::read(path).map_err(|e| format!("{path}: {e}"))
 }
 
+/// `println!` for a command that returns `Result`: a closed pipe (`inspect | head`) ends the
+/// command quietly instead of panicking.
+macro_rules! out {
+    ($($arg:tt)*) => {
+        if let Err(e) = writeln!(std::io::stdout(), $($arg)*) {
+            return if e.kind() == std::io::ErrorKind::BrokenPipe {
+                Ok(())
+            } else {
+                Err(e.to_string())
+            };
+        }
+    };
+}
+
 fn inspect_command(args: &[String]) -> Result<(), String> {
     let path = args.first().ok_or(USAGE)?;
     let list = args.iter().any(|a| a == "--frames");
@@ -54,15 +68,20 @@ fn inspect_command(args: &[String]) -> Result<(), String> {
     let layout = inspect::layout(&raw)?;
     if list {
         for f in &layout.frames {
-            println!(
+            out!(
                 "frame {:4} chunks {:2} bytes {:6} qscale {:2} sectors {:5}..={:5}",
-                f.number, f.chunks, f.size, f.qscale, f.sectors.0, f.sectors.1
+                f.number,
+                f.chunks,
+                f.size,
+                f.qscale,
+                f.sectors.0,
+                f.sectors.1
             );
         }
     }
     let chunks: usize = layout.frames.iter().map(|f| usize::from(f.chunks)).sum();
     let bytes: usize = layout.frames.iter().map(|f| f.size as usize).sum();
-    println!(
+    out!(
         "{path}: {} sectors, {} frames in {chunks} video sectors ({bytes} bitstream bytes), {} audio, {} other, {} dropped, max {} chunks, max {} RLE words",
         layout.sectors,
         layout.frames.len(),
@@ -73,7 +92,7 @@ fn inspect_command(args: &[String]) -> Result<(), String> {
         layout.frames.iter().map(|f| f.rle_words).max().unwrap_or(0)
     );
     if let Ok((hz, pcm)) = inspect::audio(&raw, raw[1]) {
-        println!(
+        out!(
             "sound: {} samples at {hz} Hz ({:.3} s)",
             pcm.len(),
             pcm.len() as f64 / f64::from(hz)
