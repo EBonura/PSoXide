@@ -640,7 +640,7 @@ impl Player {
                     // the GPU got past this frame's uploads: `show` sends
                     // GP0(1Fh) after them, acknowledged afresh now that no flip
                     // is queued.
-                    psx_rt::present::show(self.origins[b]);
+                    psx_rt::present::show_drawn(self.origins[b]);
                     let late = edge.wrapping_sub(due) as i32;
                     if late > 0 {
                         self.late += 1;
