@@ -298,7 +298,7 @@ fn a_slime_hazard_costs_the_active_pool_two_health_per_hit() {
 
 #[test]
 fn an_enemy_bolt_routes_by_its_channel_through_the_resolver() {
-    // End to end through `resolve_enemy_melee`: a Horizon bolt on a Horizon
+    // End to end through `resolve_combat`: a Horizon bolt on a Horizon
     // stance is aligned (0.5x), a Zenith bolt on the same stance is opposed
     // (1.5x). The bolt starts inside the body capsule, so one tick connects.
     for (channel, expected) in [
@@ -311,7 +311,7 @@ fn an_enemy_bolt_routes_by_its_channel_through_the_resolver() {
             .combat_projectiles
             .spawn(bolt(channel, 20, 40))
             .unwrap();
-        scene.resolve_enemy_melee(&ctx(100));
+        scene.resolve_combat(&ctx(100));
         assert_eq!(
             pool(&scene, VitalityChannelId::One),
             expected,
@@ -330,7 +330,7 @@ fn an_enemy_bolt_does_not_touch_the_energy_bar() {
         .combat_projectiles
         .spawn(bolt(ProjectileDamageChannel::Horizon, 20, 40))
         .unwrap();
-    scene.resolve_enemy_melee(&ctx(100));
+    scene.resolve_combat(&ctx(100));
     assert_eq!(scene.player.flow, CombatFlow::FULL);
 }
 
@@ -344,7 +344,7 @@ fn an_unreadable_bolt_poise_is_a_quarter_capped_at_ten_and_never_breaks_the_play
         .combat_projectiles
         .spawn(bolt(ProjectileDamageChannel::Horizon, 20, 400))
         .unwrap();
-    scene.resolve_enemy_melee(&ctx(100));
+    scene.resolve_combat(&ctx(100));
     assert_eq!(scene.player.flow.break_grace, 0);
     assert_ne!(scene.player.poise, psx_game_runtime::poise::Poise::EMPTY);
     assert_ne!(scene.anim_state, PlayerAnim::HitReact);
@@ -361,7 +361,7 @@ fn a_player_inside_the_swap_window_is_not_a_projectile_target() {
         .combat_projectiles
         .spawn(bolt(ProjectileDamageChannel::Horizon, 20, 40))
         .unwrap();
-    scene.resolve_enemy_melee(&ctx(100));
+    scene.resolve_combat(&ctx(100));
     assert_eq!(pool(&scene, VitalityChannelId::One), PLAYER_MAX_HEALTH);
     assert_eq!(pool(&scene, VitalityChannelId::Two), PLAYER_MAX_HEALTH);
     assert_eq!(scene.combat_projectiles.len(), 1, "the bolt flew through");

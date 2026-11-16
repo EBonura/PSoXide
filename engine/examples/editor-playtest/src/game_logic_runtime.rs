@@ -433,42 +433,55 @@ pub(super) fn game_entity_for_instance(instance: u16) -> Option<usize> {
         .position(|record| record.model_instance == instance)
 }
 
+/// The player as a defender for one tick, frozen before any attack resolves.
+#[derive(Clone, Copy)]
+struct PlayerDefence {
+    position: [i32; 3],
+    /// The same body-radius source the entity tick input uses, so the
+    /// legacy fallback arc keeps its Character-derived reach.
+    radius: i32,
+    height: i32,
+    invulnerable: bool,
+    capsules: &'static [psx_level::CombatCapsuleRecord],
+    pose: Option<psx_game_runtime::actor_pose::ActorPoseSnapshot>,
+}
+
+/// What the player took this tick. Damage and posture land together after
+/// the projectile tick, as one reaction.
+#[derive(Clone, Copy, Default)]
+struct PlayerHitsTaken {
+    hits: u16,
+    /// Untyped melee damage from enemy swings.
+    melee_damage: u16,
+    poise: u16,
+    horizon_shots: u16,
+    zenith_shots: u16,
+    /// A bolt landed inside the player's readable shot opening.
+    shot_opening: bool,
+}
+
 impl Playtest {
-    /// Resolve enemy attack contact after this tick's player and instance pose
-    /// snapshots have been frozen. Authored HITBOX/HURTBOX geometry is
-    /// authoritative whenever both sides provide it. The legacy entity arc is
-    /// used only when either side has no authored role at all; inactive
-    /// authored frames, invalid authored joints, and authored geometric misses
-    /// stay misses.
-    pub(super) fn resolve_enemy_melee(&mut self, ctx: &Ctx) {
+    /// Resolve every attack of this tick after the player and instance pose
+    /// snapshots have been frozen, always in this order: the player's
+    /// projectile release, every enemy attack token (a projectile release or
+    /// a melee contact on the player), the projectile tick, the hits the
+    /// player took, and last the player's own swing on the entities. The
+    /// order is load-bearing: a bolt that staggers an enemy this tick lands
+    /// before the player's blade reaches it, and a hit reaction cancels the
+    /// player's swing before it can connect.
+    pub(super) fn resolve_combat(&mut self, ctx: &Ctx) {
         self.combat_projectile_impacts.tick();
         self.release_player_projectile(ctx);
-        if self.deferred_enemy_attacks.is_empty() && self.combat_projectiles.is_empty() {
-            return;
+        if !self.deferred_enemy_attacks.is_empty() || !self.combat_projectiles.is_empty() {
+            self.resolve_attacks_on_player(ctx);
         }
-        let player = self.motor.position();
-        let player_position = [player.x, player.y, player.z];
-        // The same body-radius source the entity tick input uses, so the
-        // legacy fallback arc keeps its Character-derived reach.
-        let (player_radius, player_height) = match &self.character {
-            Some(character) => (character.radius, character.height),
-            None if self.world_rt.is_some() => (WORLD_PLAYER_RADIUS, WORLD_PLAYER_HEIGHT),
-            None => (0, 0),
-        };
-        let player_invulnerable = self.player_invulnerable(ctx);
-        let player_capsules = self
-            .character
-            .as_ref()
-            .and_then(|character| {
-                let first = character.combat_capsule_first.to_usize();
-                let end = first.saturating_add(usize::from(character.combat_capsule_count));
-                COMBAT_CAPSULES.get(first..end)
-            })
-            .unwrap_or(&[]);
-        let player_pose = self
-            .player_actor_pose
-            .as_ref()
-            .map(|snapshot| *snapshot.pose());
+        self.resolve_player_melee(ctx);
+    }
+
+    /// The enemy attack tokens and every live projectile against this tick's
+    /// frozen player, then the hits she took.
+    fn resolve_attacks_on_player(&mut self, ctx: &Ctx) {
+        let player = self.player_defence(ctx);
         let mut prop_blockers =
             psx_engine::FixedScratch::<CharacterCollisionAabb, MAX_STATIC_PROP_AABB_BLOCKERS>::new(
             );
@@ -476,9 +489,87 @@ impl Playtest {
             || self
                 .collect_static_prop_aabb_blockers_checked_into(&mut prop_blockers)
                 .is_some();
-        let mut hits = 0u16;
-        let mut damage_total = 0u16;
-        let mut poise_total = 0u16;
+        let mut taken = PlayerHitsTaken::default();
+        self.resolve_enemy_attacks(
+            ctx,
+            &player,
+            prop_blockers.as_slice(),
+            prop_blockers_valid,
+            &mut taken,
+        );
+        let mut impacts = ProjectileImpacts::<MAX_PROJECTILE_IMPACTS>::new();
+        self.tick_combat_projectiles(
+            ctx,
+            &player,
+            prop_blockers.as_slice(),
+            prop_blockers_valid,
+            &mut impacts,
+            &mut taken,
+        );
+        self.land_player_hits(ctx, &player, &impacts, taken);
+    }
+
+    fn player_defence(&self, ctx: &Ctx) -> PlayerDefence {
+        let player = self.motor.position();
+        let (radius, height) = match &self.character {
+            Some(character) => (character.radius, character.height),
+            None if self.world_rt.is_some() => (WORLD_PLAYER_RADIUS, WORLD_PLAYER_HEIGHT),
+            None => (0, 0),
+        };
+        PlayerDefence {
+            position: [player.x, player.y, player.z],
+            radius,
+            height,
+            invulnerable: self.player_invulnerable(ctx),
+            capsules: self
+                .character
+                .as_ref()
+                .and_then(|character| {
+                    let first = character.combat_capsule_first.to_usize();
+                    let end = first.saturating_add(usize::from(character.combat_capsule_count));
+                    COMBAT_CAPSULES.get(first..end)
+                })
+                .unwrap_or(&[]),
+            pose: self
+                .player_actor_pose
+                .as_ref()
+                .map(|snapshot| *snapshot.pose()),
+        }
+    }
+
+    /// Whether nothing in the world blocks a melee contact between two
+    /// actors' eye points. Always clear without a world runtime.
+    fn melee_line_clear(
+        &mut self,
+        from: [i32; 3],
+        to: [i32; 3],
+        prop_blockers: &[CharacterCollisionAabb],
+    ) -> bool {
+        match self.world_rt.as_mut() {
+            Some(world_rt) => world_rt.melee_segment_clear(
+                melee_eye_point(from),
+                melee_eye_point(to),
+                prop_blockers,
+                &self.destructibles,
+            ),
+            None => true,
+        }
+    }
+
+    /// Every deferred enemy attack token in order: a ranged token releases
+    /// its authored projectiles, a melee token tests contact on the player.
+    /// Authored HITBOX/HURTBOX geometry is authoritative whenever both sides
+    /// provide it. The legacy entity arc is used only when either side has
+    /// no authored role at all; inactive authored frames, invalid authored
+    /// joints, and authored geometric misses stay misses.
+    fn resolve_enemy_attacks(
+        &mut self,
+        ctx: &Ctx,
+        player: &PlayerDefence,
+        prop_blockers: &[CharacterCollisionAabb],
+        prop_blockers_valid: bool,
+        taken: &mut PlayerHitsTaken,
+    ) {
         let mut attack_index = 0usize;
         while attack_index < self.deferred_enemy_attacks.len() {
             let Some(attack) = self.deferred_enemy_attacks.get(attack_index) else {
@@ -502,6 +593,22 @@ impl Playtest {
                 .copied()
                 .flatten();
             let attacker_pose = attacker_snapshot.map(|snapshot| snapshot.pose());
+            if attack.is_ranged() {
+                // An authored ranged attack never falls through to the legacy
+                // body-radius melee arc, including frames outside its release
+                // window and pool-full retries.
+                self.release_enemy_projectiles(
+                    ctx,
+                    attack,
+                    attacker_capsules,
+                    attacker_pose,
+                    player,
+                );
+                continue;
+            }
+            if player.invulnerable {
+                continue;
+            }
             let previous_attacker_pose = self
                 .previous_instance_actor_poses
                 .get(entity.model_instance as usize)
@@ -512,118 +619,13 @@ impl Playtest {
                         .is_some_and(|current| old.clip_local() == current.clip_local())
                 })
                 .map(|snapshot| snapshot.pose());
-            if attack.is_ranged() {
-                let mut released = self
-                    .game_entities
-                    .deferred_projectile_release_mask(attack)
-                    .unwrap_or(u16::MAX);
-                while let Some((emitter, release)) = combat::authored_projectile_release_pending(
-                    attacker_capsules,
-                    attack.action(),
-                    attacker_pose,
-                    released,
-                ) {
-                    if !self.game_entities.can_fire_energy(attack.entity()) {
-                        break;
-                    }
-                    let velocity = self.game_entities.ranged_velocity(
-                        attack.entity(),
-                        release.position,
-                        release.speed,
-                    );
-                    let spawn = ProjectileSpawn {
-                        position: release.position,
-                        velocity,
-                        radius: release.radius,
-                        damage: release.damage,
-                        poise_damage: release.poise_damage,
-                        lifetime_ticks: release.lifetime_ticks,
-                        room: attack.room(),
-                        team: CombatTeam::Enemy,
-                        owner: attack.entity().min(u16::MAX as usize) as u16,
-                        tint_rgb: release.tint_rgb,
-                        damage_channel: release.damage_channel,
-                        visual: enemy_projectile_visual(release.visual),
-                    };
-                    let Some(target) = self.game_entities.ranged_target(attack.entity()) else {
-                        break;
-                    };
-                    if self
-                        .combat_projectiles
-                        .spawn_toward(spawn, target, release.speed)
-                        .is_ok()
-                    {
-                        let _ = self.combat_projectile_impacts.spawn_muzzle(&spawn);
-                        self.game_entities.spend_shot_energy(attack.entity());
-                        if self.duel.active {
-                            duel::log_values(
-                                "duel:shot",
-                                &[
-                                    ctx.sim_tick.as_u32() - self.duel.started_tick(),
-                                    1,
-                                    u32::from(self.game_entities.energy(attack.entity())),
-                                ],
-                            );
-                        }
-                        telemetry::debug_log("enemy projectile:release");
-                        #[cfg(feature = "emulator-telemetry")]
-                        {
-                            let hurt = player_capsules
-                                .iter()
-                                .find(|c| c.flags & psx_level::combat_capsule_flags::HURTBOX != 0)
-                                .and_then(|c| {
-                                    player_pose.and_then(|pose| {
-                                        combat::transform_actor_combat_capsule(c, pose)
-                                    })
-                                });
-                            if let Some(hurt) = hurt {
-                                crate::debug_runtime::debug_log_enemy_shot([
-                                    release.position[0],
-                                    release.position[1],
-                                    release.position[2],
-                                    velocity[0],
-                                    velocity[1],
-                                    velocity[2],
-                                    player_position[0],
-                                    player_position[1],
-                                    player_position[2],
-                                    player_height,
-                                    hurt.start[0],
-                                    hurt.start[1],
-                                    hurt.start[2],
-                                    hurt.end[0],
-                                    hurt.end[1],
-                                    hurt.end[2],
-                                    i32::from(hurt.radius),
-                                ]);
-                            }
-                        }
-                        self.queue_gameplay_sfx(LevelGameplaySfxEvent::ProjectileLaunch);
-                        let _ = self
-                            .game_entities
-                            .commit_deferred_projectile(attack, emitter);
-                        released |= 1u16 << emitter;
-                    } else {
-                        // Retry on a later retained pose; never consume a shot
-                        // that the bounded pool could not hold.
-                        break;
-                    }
-                }
-                // An authored ranged attack never falls through to the legacy
-                // body-radius melee arc, including frames outside its release
-                // window and pool-full retries.
-                continue;
-            }
-            if player_invulnerable {
-                continue;
-            }
             let (contact, window_mask) = combat::resolve_authored_actor_contact_swept_pending(
                 attacker_capsules,
                 attack.action(),
                 attacker_pose,
                 previous_attacker_pose,
-                player_capsules,
-                player_pose,
+                player.capsules,
+                player.pose,
                 self.game_entities
                     .deferred_melee_hit_mask(attack)
                     .unwrap_or(u16::MAX),
@@ -639,8 +641,8 @@ impl Playtest {
                     .deferred_attack_legacy_arc_hits(
                         GAME_ENTITIES.as_slice(),
                         attack,
-                        player_position,
-                        player_radius,
+                        player.position,
+                        player.radius,
                     )
                     .then_some((entity.touch_damage, entity.touch_damage.max(20))),
             };
@@ -651,19 +653,10 @@ impl Playtest {
             // and the legacy arc outcome: a closed door between the frozen
             // attacker position and the player blocks the connection. The
             // token is deliberately not consumed, mirroring an i-frame whiff.
-            let attacker = attack.position();
-            if !prop_blockers_valid {
+            if !prop_blockers_valid
+                || !self.melee_line_clear(attack.position(), player.position, prop_blockers)
+            {
                 continue;
-            }
-            if let Some(world_rt) = self.world_rt.as_mut() {
-                if !world_rt.melee_segment_clear(
-                    melee_eye_point(attacker),
-                    melee_eye_point(player_position),
-                    prop_blockers.as_slice(),
-                    &self.destructibles,
-                ) {
-                    continue;
-                }
             }
             let connected = if window_mask == 0 {
                 self.game_entities.connect_deferred_attack(attack)
@@ -676,18 +669,33 @@ impl Playtest {
                     attack.entity(),
                     self.game_entities.attack_kind(attack.entity()) == 1,
                 );
-                hits = hits.saturating_add(1);
-                damage_total = damage_total.saturating_add(damage);
-                poise_total = poise_total.saturating_add(poise_damage);
+                taken.hits = taken.hits.saturating_add(1);
+                taken.melee_damage = taken.melee_damage.saturating_add(damage);
+                taken.poise = taken.poise.saturating_add(poise_damage);
             }
         }
+    }
+
+    /// Advance every live projectile against the player's hurtboxes (unless
+    /// she is invulnerable) and every live entity's. A bolt on an entity
+    /// lands at once; a bolt on the player is summed into `taken`.
+    fn tick_combat_projectiles<const I: usize>(
+        &mut self,
+        ctx: &Ctx,
+        player: &PlayerDefence,
+        prop_blockers: &[CharacterCollisionAabb],
+        prop_blockers_valid: bool,
+        impacts: &mut ProjectileImpacts<I>,
+        taken: &mut PlayerHitsTaken,
+    ) {
         let mut projectile_targets = psx_engine::FixedScratch::<
             ProjectileTarget,
             { MAX_GAME_ENTITIES + psx_level::MAX_CHARACTER_COMBAT_CAPSULES },
         >::new();
-        if !player_invulnerable {
-            if let Some(pose) = player_pose {
-                for record in player_capsules
+        if !player.invulnerable {
+            if let Some(pose) = player.pose {
+                for record in player
+                    .capsules
                     .iter()
                     .take(psx_level::MAX_CHARACTER_COMBAT_CAPSULES)
                 {
@@ -705,20 +713,20 @@ impl Playtest {
                     });
                 }
             }
-            if projectile_targets.is_empty() && player_radius > 0 && player_height > 0 {
-                let radius = player_radius.min(i32::from(u16::MAX)) as u16;
-                let segment_start_y = player_position[1].saturating_add(player_radius);
-                let segment_end_y = player_position[1]
-                    .saturating_add(player_height)
-                    .saturating_sub(player_radius)
+            if projectile_targets.is_empty() && player.radius > 0 && player.height > 0 {
+                let radius = player.radius.min(i32::from(u16::MAX)) as u16;
+                let segment_start_y = player.position[1].saturating_add(player.radius);
+                let segment_end_y = player.position[1]
+                    .saturating_add(player.height)
+                    .saturating_sub(player.radius)
                     .max(segment_start_y);
                 let _ = projectile_targets.try_push(ProjectileTarget {
                     target: PLAYER_PROJECTILE_TARGET,
                     team: CombatTeam::Player,
                     room: self.room_index,
                     hurtbox: WorldCombatCapsule {
-                        start: [player_position[0], segment_start_y, player_position[2]],
-                        end: [player_position[0], segment_end_y, player_position[2]],
+                        start: [player.position[0], segment_start_y, player.position[2]],
+                        end: [player.position[0], segment_end_y, player.position[2]],
                         radius,
                     },
                 });
@@ -772,95 +780,28 @@ impl Playtest {
                 hurtbox,
             });
         }
-        let mut projectile_opening_hit = false;
-        let mut projectile_impacts = ProjectileImpacts::<MAX_PROJECTILE_IMPACTS>::new();
         {
             let mut tracer = SceneProjectileWorldTracer {
                 world_rt: self.world_rt.as_mut(),
                 destructibles: &self.destructibles,
-                prop_blockers: prop_blockers.as_slice(),
+                prop_blockers,
                 valid: prop_blockers_valid,
             };
-            let _ = self.combat_projectiles.tick(
-                projectile_targets.as_slice(),
-                &mut tracer,
-                &mut projectile_impacts,
-            );
+            let _ =
+                self.combat_projectiles
+                    .tick(projectile_targets.as_slice(), &mut tracer, impacts);
         }
-        let mut horizon_projectile_damage = 0u16;
-        let mut zenith_projectile_damage = 0u16;
-        for impact in projectile_impacts.as_slice() {
+        for impact in impacts.as_slice() {
             let _ = self.combat_projectile_impacts.spawn(impact);
-            if let ProjectileImpactKind::Target { target } = impact.kind {
-                if target != PLAYER_PROJECTILE_TARGET {
-                    let index = usize::from(target);
-                    if let Some(record) = GAME_ENTITIES.get(index) {
-                        let channel = match impact.damage_channel {
-                            psx_game_runtime::projectiles::ProjectileDamageChannel::Horizon => {
-                                VitalityChannelId::One
-                            }
-                            psx_game_runtime::projectiles::ProjectileDamageChannel::Zenith => {
-                                VitalityChannelId::Two
-                            }
-                        };
-                        let applied =
-                            self.game_entities
-                                .scaled_stance_damage(index, channel, impact.damage);
-                        let opening = self
-                            .game_entities
-                            .shot_opening(GAME_ENTITIES.as_slice(), index);
-                        let outcome = self.game_entities.apply_projectile_hit(
-                            GAME_ENTITIES.as_slice(),
-                            index,
-                            channel,
-                            impact.damage,
-                            impact.poise_damage,
-                        );
-                        self.player.flow.shot_hit(opening && outcome.staggered);
-                        if opening && outcome.staggered {
-                            telemetry::debug_log("flow:enemy-shot-interrupt");
-                            if self.duel.active {
-                                duel::log_values(
-                                    "duel:flow",
-                                    &[ctx.sim_tick.as_u32() - self.duel.started_tick(), 0, 1],
-                                );
-                            }
-                        }
-                        let now = self.gameplay_tick(ctx.sim_tick);
-                        if outcome.connected {
-                            self.damage_numbers.spawn(
-                                struck_actor_anchor(
-                                    self.game_entities.position(index),
-                                    record.height,
-                                ),
-                                record.room,
-                                applied,
-                                if channel == VitalityChannelId::Two {
-                                    DamageNumberChannel::Zenith
-                                } else {
-                                    DamageNumberChannel::Horizon
-                                },
-                                now,
-                            );
-                            telemetry::debug_log("player projectile:hit");
-                        }
-                        if outcome.died {
-                            self.souls.award(record.soul_value, now.as_u32());
-                        }
-                    }
-                }
-            }
-
-            if impact.kind
-                == (ProjectileImpactKind::Target {
-                    target: PLAYER_PROJECTILE_TARGET,
-                })
-            {
+            let ProjectileImpactKind::Target { target } = impact.kind else {
+                continue;
+            };
+            if target == PLAYER_PROJECTILE_TARGET {
                 telemetry::debug_log("enemy projectile:player-hit");
-                hits = hits.saturating_add(1);
+                taken.hits = taken.hits.saturating_add(1);
                 let exposed = self.player_shot_opening();
-                projectile_opening_hit |= exposed && self.player.flow.can_interrupt();
-                poise_total = poise_total.saturating_add(self.player.flow.shot_poise(
+                taken.shot_opening |= exposed && self.player.flow.can_interrupt();
+                taken.poise = taken.poise.saturating_add(self.player.flow.shot_poise(
                     impact.poise_damage,
                     psx_game_runtime::character::PLAYER_POISE,
                     exposed,
@@ -870,31 +811,100 @@ impl Playtest {
                 }
                 match impact.damage_channel {
                     psx_game_runtime::projectiles::ProjectileDamageChannel::Horizon => {
-                        horizon_projectile_damage =
-                            horizon_projectile_damage.saturating_add(impact.damage);
+                        taken.horizon_shots = taken.horizon_shots.saturating_add(impact.damage);
                     }
                     psx_game_runtime::projectiles::ProjectileDamageChannel::Zenith => {
-                        zenith_projectile_damage =
-                            zenith_projectile_damage.saturating_add(impact.damage);
+                        taken.zenith_shots = taken.zenith_shots.saturating_add(impact.damage);
                     }
                 }
+            } else {
+                self.land_shot_on_entity(ctx, usize::from(target), impact);
             }
         }
+    }
+
+    /// One player bolt on entity `index`, through the entity's hit path.
+    fn land_shot_on_entity(
+        &mut self,
+        ctx: &Ctx,
+        index: usize,
+        impact: &psx_game_runtime::projectiles::ProjectileImpact,
+    ) {
+        let Some(record) = GAME_ENTITIES.get(index) else {
+            return;
+        };
+        let channel = match impact.damage_channel {
+            psx_game_runtime::projectiles::ProjectileDamageChannel::Horizon => {
+                VitalityChannelId::One
+            }
+            psx_game_runtime::projectiles::ProjectileDamageChannel::Zenith => {
+                VitalityChannelId::Two
+            }
+        };
+        let applied = self
+            .game_entities
+            .scaled_stance_damage(index, channel, impact.damage);
+        let opening = self
+            .game_entities
+            .shot_opening(GAME_ENTITIES.as_slice(), index);
+        let outcome = self.game_entities.apply_projectile_hit(
+            GAME_ENTITIES.as_slice(),
+            index,
+            channel,
+            impact.damage,
+            impact.poise_damage,
+        );
+        self.player.flow.shot_hit(opening && outcome.staggered);
+        if opening && outcome.staggered {
+            telemetry::debug_log("flow:enemy-shot-interrupt");
+            self.duel_log_flow(ctx, 0);
+        }
+        let now = self.gameplay_tick(ctx.sim_tick);
+        if outcome.connected {
+            self.damage_numbers.spawn(
+                struck_actor_anchor(self.game_entities.position(index), record.height),
+                record.room,
+                applied,
+                if channel == VitalityChannelId::Two {
+                    DamageNumberChannel::Zenith
+                } else {
+                    DamageNumberChannel::Horizon
+                },
+                now,
+            );
+            telemetry::debug_log("player projectile:hit");
+        }
+        if outcome.died {
+            self.souls.award(record.soul_value, now.as_u32());
+        }
+    }
+
+    /// Land what the player took this tick: enemy melee as one untyped hit,
+    /// then the bolts by channel, then the summed posture damage as one
+    /// reaction.
+    fn land_player_hits<const I: usize>(
+        &mut self,
+        ctx: &Ctx,
+        player: &PlayerDefence,
+        impacts: &ProjectileImpacts<I>,
+        taken: PlayerHitsTaken,
+    ) {
         let gameplay_now = self.gameplay_tick(ctx.sim_tick);
-        if damage_total > 0 {
+        let anchor = player_hit_anchor(player.position, player.height.max(0) as u16);
+        if taken.melee_damage > 0 {
             // Legacy enemy attacks are not axis-authored yet, so Horizon is
             // their deterministic migration channel and excess damage spills
             // into Zenith. Shell reduction is applied before routing; only
             // emptying BOTH pools arms the existing shared death sequence.
             let died = self.hazard_death_ticks_remaining == 0
-                && self.apply_untyped_player_damage(damage_total);
+                && self.apply_untyped_player_damage(taken.melee_damage);
             // Damage taken floats off the player, not off whoever threw
             // it, and it carries the channel it drained -- Horizon here,
             // matching the migration routing above.
             self.damage_numbers.spawn(
-                player_hit_anchor(player_position, player_height.max(0) as u16),
+                anchor,
                 self.room_index,
-                damage_total,
+                taken.melee_damage,
                 DamageNumberChannel::Horizon,
                 gameplay_now,
             );
@@ -902,14 +912,16 @@ impl Playtest {
                 self.arm_player_death(true, HAZARD_DEATH_TICKS, ctx.sim_tick, ctx.video_hz);
             }
         }
-        for (channel, damage) in [
+        for (channel, number, damage) in [
             (
                 psx_game_runtime::projectiles::ProjectileDamageChannel::Horizon,
-                horizon_projectile_damage,
+                DamageNumberChannel::Horizon,
+                taken.horizon_shots,
             ),
             (
                 psx_game_runtime::projectiles::ProjectileDamageChannel::Zenith,
-                zenith_projectile_damage,
+                DamageNumberChannel::Zenith,
+                taken.zenith_shots,
             ),
         ] {
             if damage == 0 {
@@ -919,70 +931,179 @@ impl Playtest {
                 && self.apply_typed_player_damage(channel, damage);
             // A projectile carries its own channel, so a Choir Needle
             // reads teal on the way in exactly as the bolt did.
-            self.damage_numbers.spawn(
-                player_hit_anchor(player_position, player_height.max(0) as u16),
-                self.room_index,
-                damage,
-                match channel {
-                    psx_game_runtime::projectiles::ProjectileDamageChannel::Horizon => {
-                        DamageNumberChannel::Horizon
-                    }
-                    psx_game_runtime::projectiles::ProjectileDamageChannel::Zenith => {
-                        DamageNumberChannel::Zenith
-                    }
-                },
-                gameplay_now,
-            );
+            self.damage_numbers
+                .spawn(anchor, self.room_index, damage, number, gameplay_now);
             if died {
                 self.arm_player_death(true, HAZARD_DEATH_TICKS, ctx.sim_tick, ctx.video_hz);
             }
         }
-        if hits > 0 {
-            telemetry::counter(telemetry::counter::PLAYER_HITS_TAKEN, u32::from(hits));
-            let action = self.anim_state.action();
-            let armored = matches!(
-                self.anim_state,
-                PlayerAnim::HeavyAttack | PlayerAnim::VertHeavyAttack
-            ) && player_pose.is_some_and(|pose| {
-                let frame = (pose.phase_q12() >> 12).min(u32::from(u16::MAX)) as u16;
-                player_capsules.iter().any(|capsule| {
-                    capsule.flags & psx_level::combat_capsule_flags::HITBOX != 0
-                        && capsule.action == action.to_index() as u8
-                        && frame >= capsule.active_start_frame
-                        && frame <= capsule.active_end_frame
-                })
-            });
-            let armored = self
-                .player_combat_sample(ctx)
-                .active(psx_level::CombatWindowKind::Armored)
-                .unwrap_or(armored);
-            let staggered = self.react_player_to_hit(poise_total, armored, damage_total == 0, ctx);
-            if damage_total == 0 && staggered && projectile_opening_hit {
-                if self.duel.active {
-                    duel::log_values(
-                        "duel:flow",
-                        &[ctx.sim_tick.as_u32() - self.duel.started_tick(), 1, 1],
-                    );
-                }
-                for impact in projectile_impacts.as_slice() {
-                    if impact.kind
-                        == (ProjectileImpactKind::Target {
-                            target: PLAYER_PROJECTILE_TARGET,
-                        })
-                    {
-                        self.game_entities
-                            .projectile_connected(usize::from(impact.owner), true);
-                    }
+        if taken.hits == 0 {
+            return;
+        }
+        telemetry::counter(telemetry::counter::PLAYER_HITS_TAKEN, u32::from(taken.hits));
+        let action = self.anim_state.action();
+        let armored = matches!(
+            self.anim_state,
+            PlayerAnim::HeavyAttack | PlayerAnim::VertHeavyAttack
+        ) && player.pose.is_some_and(|pose| {
+            let frame = (pose.phase_q12() >> 12).min(u32::from(u16::MAX)) as u16;
+            player.capsules.iter().any(|capsule| {
+                capsule.flags & psx_level::combat_capsule_flags::HITBOX != 0
+                    && capsule.action == action.to_index() as u8
+                    && frame >= capsule.active_start_frame
+                    && frame <= capsule.active_end_frame
+            })
+        });
+        let armored = self
+            .player_combat_sample(ctx)
+            .active(psx_level::CombatWindowKind::Armored)
+            .unwrap_or(armored);
+        let shot_only = taken.melee_damage == 0;
+        let staggered = self.react_player_to_hit(taken.poise, armored, shot_only, ctx);
+        if shot_only && staggered && taken.shot_opening {
+            self.duel_log_flow(ctx, 1);
+            for impact in impacts.as_slice() {
+                if impact.kind
+                    == (ProjectileImpactKind::Target {
+                        target: PLAYER_PROJECTILE_TARGET,
+                    })
+                {
+                    self.game_entities
+                        .projectile_connected(usize::from(impact.owner), true);
                 }
             }
-            self.spawn_combat_hit_sparks(
-                player_position,
-                player_height.max(0) as u16,
-                self.room_index,
-                self.player.stance.active() == VitalityChannelId::Two,
-                staggered,
-                self.hazard_death_ticks_remaining != 0,
+        }
+        self.spawn_combat_hit_sparks(
+            player.position,
+            player.height.max(0) as u16,
+            self.room_index,
+            self.player.stance.active() == VitalityChannelId::Two,
+            staggered,
+            self.hazard_death_ticks_remaining != 0,
+        );
+    }
+
+    /// Duel trace: a bolt interrupted a windup. `victim` 0 is the enemy,
+    /// 1 the player.
+    fn duel_log_flow(&self, ctx: &Ctx, victim: u32) {
+        if self.duel.active {
+            duel::log_values(
+                "duel:flow",
+                &[ctx.sim_tick.as_u32() - self.duel.started_tick(), victim, 1],
             );
+        }
+    }
+
+    /// Release every authored projectile a ranged enemy token has reached.
+    fn release_enemy_projectiles(
+        &mut self,
+        ctx: &Ctx,
+        attack: psx_game_runtime::entities::DeferredGameEntityAttack,
+        attacker_capsules: &[psx_level::CombatCapsuleRecord],
+        attacker_pose: Option<psx_game_runtime::actor_pose::ActorPoseSnapshot>,
+        player: &PlayerDefence,
+    ) {
+        let mut released = self
+            .game_entities
+            .deferred_projectile_release_mask(attack)
+            .unwrap_or(u16::MAX);
+        while let Some((emitter, release)) = combat::authored_projectile_release_pending(
+            attacker_capsules,
+            attack.action(),
+            attacker_pose,
+            released,
+        ) {
+            if !self.game_entities.can_fire_energy(attack.entity()) {
+                break;
+            }
+            let velocity = self.game_entities.ranged_velocity(
+                attack.entity(),
+                release.position,
+                release.speed,
+            );
+            let spawn = ProjectileSpawn {
+                position: release.position,
+                velocity,
+                radius: release.radius,
+                damage: release.damage,
+                poise_damage: release.poise_damage,
+                lifetime_ticks: release.lifetime_ticks,
+                room: attack.room(),
+                team: CombatTeam::Enemy,
+                owner: attack.entity().min(u16::MAX as usize) as u16,
+                tint_rgb: release.tint_rgb,
+                damage_channel: release.damage_channel,
+                visual: enemy_projectile_visual(release.visual),
+            };
+            let Some(target) = self.game_entities.ranged_target(attack.entity()) else {
+                break;
+            };
+            if self
+                .combat_projectiles
+                .spawn_toward(spawn, target, release.speed)
+                .is_err()
+            {
+                // Retry on a later retained pose; never consume a shot
+                // that the bounded pool could not hold.
+                break;
+            }
+            let _ = self.combat_projectile_impacts.spawn_muzzle(&spawn);
+            self.game_entities.spend_shot_energy(attack.entity());
+            if self.duel.active {
+                duel::log_values(
+                    "duel:shot",
+                    &[
+                        ctx.sim_tick.as_u32() - self.duel.started_tick(),
+                        1,
+                        u32::from(self.game_entities.energy(attack.entity())),
+                    ],
+                );
+            }
+            telemetry::debug_log("enemy projectile:release");
+            #[cfg(feature = "emulator-telemetry")]
+            self.debug_log_enemy_shot(&spawn, player);
+            #[cfg(not(feature = "emulator-telemetry"))]
+            let _ = player;
+            self.queue_gameplay_sfx(LevelGameplaySfxEvent::ProjectileLaunch);
+            let _ = self
+                .game_entities
+                .commit_deferred_projectile(attack, emitter);
+            released |= 1u16 << emitter;
+        }
+    }
+
+    /// Emulator telemetry: an enemy shot with the player's hurtbox.
+    #[cfg(feature = "emulator-telemetry")]
+    fn debug_log_enemy_shot(&self, spawn: &ProjectileSpawn, player: &PlayerDefence) {
+        let hurt = player
+            .capsules
+            .iter()
+            .find(|c| c.flags & psx_level::combat_capsule_flags::HURTBOX != 0)
+            .and_then(|c| {
+                player
+                    .pose
+                    .and_then(|pose| combat::transform_actor_combat_capsule(c, pose))
+            });
+        if let Some(hurt) = hurt {
+            crate::debug_runtime::debug_log_enemy_shot([
+                spawn.position[0],
+                spawn.position[1],
+                spawn.position[2],
+                spawn.velocity[0],
+                spawn.velocity[1],
+                spawn.velocity[2],
+                player.position[0],
+                player.position[1],
+                player.position[2],
+                player.height,
+                hurt.start[0],
+                hurt.start[1],
+                hurt.start[2],
+                hurt.end[0],
+                hurt.end[1],
+                hurt.end[2],
+                i32::from(hurt.radius),
+            ]);
         }
     }
 
@@ -1122,7 +1243,7 @@ impl Playtest {
     /// entities. The swing mask keeps one swing to one connection per
     /// enemy; `start_player_anim_action` clears it when a new attack
     /// starts. Outside attack locks this is two compares.
-    pub(super) fn resolve_player_melee(&mut self, ctx: &Ctx) {
+    fn resolve_player_melee(&mut self, ctx: &Ctx) {
         let now = ctx.sim_tick;
         if self.anim_state == PlayerAnim::RangedAttack
             || !player_anim_is_attack(self.anim_state)
@@ -1614,16 +1735,9 @@ impl Playtest {
                 // the swing bit, so the same swing can still land once the
                 // door finishes opening inside the active window.
                 let player = self.motor.position();
-                if let Some(world_rt) = self.world_rt.as_mut() {
-                    if !world_rt.melee_segment_clear(
-                        melee_eye_point([player.x, player.y, player.z]),
-                        melee_eye_point(position),
-                        prop_blockers,
-                        &self.destructibles,
-                    ) {
-                        entity += 1;
-                        continue;
-                    }
+                if !self.melee_line_clear([player.x, player.y, player.z], position, prop_blockers) {
+                    entity += 1;
+                    continue;
                 }
                 self.swing_hit_mask |= mask;
                 let applied_damage =

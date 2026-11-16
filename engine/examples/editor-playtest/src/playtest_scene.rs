@@ -1175,8 +1175,7 @@ impl Scene for Playtest {
         // from the same snapshots the next body/equipment render consumes.
         self.refresh_actor_pose_snapshots(ctx);
         if !self.opening.active() && !self.initial_world_message_active() {
-            self.resolve_enemy_melee(ctx);
-            self.resolve_player_melee(ctx);
+            self.resolve_combat(ctx);
         }
         self.duel_observe(ctx);
         #[cfg(feature = "sim-trace")]

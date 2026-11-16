@@ -255,7 +255,7 @@ impl Playtest {
         let entity_stats = if npc_tick_due {
             // Souls i-frames: the deferred tick never resolves contact, so
             // this pre-motor value only feeds the shared tick-input contract.
-            // `resolve_enemy_melee` re-queries invulnerability after the motor
+            // `resolve_combat` re-queries invulnerability after the motor
             // update, pairing it with the same retained pose contact uses.
             let player_invulnerable = self.player_invulnerable(ctx);
             self.game_entities
@@ -1086,7 +1086,7 @@ impl Playtest {
         }
 
         // The countdown/respawn below serves EVERY death cause: combat
-        // damage arms it from `resolve_enemy_melee`, hazards from the site
+        // damage arms it from `resolve_combat`, hazards from the site
         // above.
         if hazard_countdown_was_active {
             self.hazard_death_ticks_remaining = self.hazard_death_ticks_remaining.saturating_sub(1);
