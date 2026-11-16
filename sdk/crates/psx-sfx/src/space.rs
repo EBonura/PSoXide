@@ -213,6 +213,7 @@ impl Curve {
     /// assert_eq!(Curve::quake_q12(Attn::Norm).level(0), 4096);
     /// assert_eq!(Curve::quake_q12(Attn::Idle).level(500), 1);
     /// ```
+    #[must_use]
     pub const fn quake_q12(attn: Attn) -> Self {
         Curve::Ramp {
             peak: 4096,
@@ -471,10 +472,11 @@ impl Space {
     /// # use psx_sfx::space::{Attn, Space};
     /// assert_eq!(Space::quake_q12(Attn::Norm).cull(), 3);
     /// ```
+    #[must_use]
     pub const fn quake_q12(attn: Attn) -> Self {
         let slope = (attn.milli() * 1_048_576) / 1_000_000;
         let clip = 1_000_000 / attn.milli();
-        let cull = 4096 - ((clip as u32 * slope) >> 8) as i32;
+        let cull = 4096 - ((clip * slope) >> 8) as i32;
         Self {
             shift: 12,
             law: PanLaw::Dot,
@@ -835,6 +837,7 @@ pub fn gains<const N: usize>(
 /// assert!(quake_scales(Attn::Norm, [0; 3], 0, [1000 << 12, 0, 0]).is_none());
 /// ```
 #[inline]
+#[must_use]
 pub fn quake_scales(
     attn: Attn,
     listener: [i32; 3],
