@@ -466,24 +466,16 @@ impl Engine {
         Ok(())
     }
 
-    /// Pause a running drive. The drive refuses a pause during the seek that
-    /// starts a read, so a refused pause is retried by [`Self::poll`].
+    /// Stop and wait for the drive: the non-blocking stop, then its last look, which waits for
+    /// the Pause (sending it again when the drive refuses it mid-seek). A song queued behind a
+    /// stop already out is dropped, and that stop is waited for too.
     #[inline(never)]
     fn stop(&mut self, drive: &mut impl Drive) {
+        self.stop_without_waiting(drive);
         if self.stopping != 0 {
-            // A song queued behind the pending stop is dropped: this stop is the later request.
-            self.state = State::Idle;
-            // The last look: wait for the Pause.
             self.stopping = 1;
             self.poll_stopping(drive);
         }
-        self.suspended = false;
-        self.suspend_pending = false;
-        if self.state != State::Idle {
-            self.pause_pending = !drive.pause();
-        }
-        self.state = State::Idle;
-        self.song = None;
     }
 
     /// Silence the song and send Pause without waiting for either answer;
@@ -733,7 +725,8 @@ impl Player {
     /// Pause the drive and forget the song, waiting for the drive to settle: the blocking form
     /// of [`stop`](Self::stop), for a boot or a load screen, where a data read follows and
     /// nothing is presenting. Also completes a [`stop`](Self::stop) still pending (dropping a
-    /// song `play` queued behind it).
+    /// song `play` queued behind it). A Pause the drive refuses (the head is mid-seek, up to a
+    /// third of a second after a start) is sent again until it is accepted and completes.
     pub fn stop_and_wait(&mut self) {
         self.engine.stop(&mut self.cd);
     }
@@ -1278,23 +1271,30 @@ mod tests {
         engine
             .start(&mut drive, song(DriveSpeed::Single), false)
             .unwrap();
+        drive.log.clear();
         engine.stop(&mut drive);
-        assert_eq!(drive.log.last().unwrap(), "pause");
+        assert_eq!(drive.log, ["begin_stop", "look", "end_stop 0x1f 128 128"]);
         assert_eq!(engine.poll(&mut drive), Event::Idle);
+        assert_eq!(drive.log.len(), 3);
     }
 
     #[test]
     fn a_stop_on_an_idle_player_keeps_a_refused_pause_retry() {
         let mut drive = Fake {
-            pause_refusals: 1,
+            stuck: true,
+            // The fallback's Pause and the retry the same poll makes.
+            pause_refusals: 2,
             ..Fake::default()
         };
         let mut engine = Engine::new();
         engine
             .start(&mut drive, song(DriveSpeed::Single), false)
             .unwrap();
-        engine.stop(&mut drive);
-        assert!(engine.pause_pending);
+        engine.stop_without_waiting(&mut drive);
+        for _ in 0..STOP_POLLS {
+            engine.poll(&mut drive);
+        }
+        assert!(engine.pause_pending, "the fallback Pause was refused");
         engine.stop_without_waiting(&mut drive);
         assert!(engine.pause_pending, "the retry of the refused Pause stays");
         drive.log.clear();
@@ -1303,9 +1303,9 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_pause_is_retried_at_the_next_polls() {
+    fn the_blocking_stop_waits_out_a_refused_pause() {
         let mut drive = Fake {
-            pause_refusals: 2,
+            looks: vec![PauseLook::Refused, PauseLook::Refused, PauseLook::Waiting],
             ..Fake::default()
         };
         let mut engine = Engine::new();
@@ -1314,12 +1314,23 @@ mod tests {
             .unwrap();
         drive.log.clear();
         engine.stop(&mut drive);
+        assert_eq!(
+            drive.log,
+            [
+                "begin_stop",
+                "look",
+                "begin_stop",
+                "look",
+                "begin_stop",
+                "look",
+                "look",
+                "end_stop 0x1f 128 128"
+            ]
+        );
+        assert_eq!(engine.stopping, 0);
+        assert!(!engine.pause_pending);
         assert_eq!(engine.poll(&mut drive), Event::Idle);
-        assert_eq!(engine.poll(&mut drive), Event::Idle);
-        assert_eq!(drive.log, ["pause", "pause", "pause"]);
-        // Accepted: no further commands.
-        assert_eq!(engine.poll(&mut drive), Event::Idle);
-        assert_eq!(drive.log.len(), 3);
+        assert_eq!(drive.log.len(), 8);
     }
 
     #[test]

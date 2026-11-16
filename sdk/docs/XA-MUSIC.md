@@ -179,7 +179,8 @@ quiet yet. A song that reaches its end by itself is stopped the same way, inside
 `poll`. Nothing else may drive the controller until `is_stopping` is false: a
 data read through a token of your own (a boot, a level load) calls
 `stop_and_wait` instead, the blocking form, which also finishes a pending
-`stop`. A Pause not complete after 60 polls is finished by the blocking protocol.
+`stop` and waits out a Pause the drive refuses mid-seek. A Pause not complete after 60 polls is
+finished by the blocking protocol.
 
 `play` sends Demute, Setmode, Setfilter, Setloc and ReadS (a few
 milliseconds), starting from the top of the file. Playing another song is the
