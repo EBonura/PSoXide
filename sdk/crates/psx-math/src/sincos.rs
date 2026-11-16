@@ -9,6 +9,10 @@
 //!
 //! Values are Q1.12 fixed-point: `4096` = 1.0, `-4096` = -1.0.
 //!
+//! There are two arctangents on purpose: [`atan2_q12`] is the coarse one (inlined, 4.2 degrees
+//! worst case, output frozen for replays) and [`atan2_q12_fine`] the accurate one (under one unit,
+//! never inlined). Each one's documentation says which job it is for and why one body would not do.
+//!
 //! # Example
 //!
 //! ```ignore
