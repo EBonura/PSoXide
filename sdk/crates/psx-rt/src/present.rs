@@ -725,6 +725,7 @@ fn wait_arena_free_on<P: Port>(port: &mut P) -> u32 {
     since(port, start)
 }
 
+#[inline(never)]
 fn wait_idle_on<P: Port>(port: &mut P) {
     wait_slot_empty_on(port);
     let start = port.vblanks();

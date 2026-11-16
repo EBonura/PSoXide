@@ -319,6 +319,9 @@ pub fn signal_draw_done_unguarded() {
     kick_draw_done_list();
 }
 
+/// One body for [`signal_draw_done`] and [`signal_draw_done_unguarded`]: inlined into both it
+/// was two 340 B copies in every program on the present path.
+#[inline(never)]
 fn kick_draw_done_list() {
     use crate::dma::{self, Channel};
     if !dma::wait_done(Channel::Gpu, dma::DEFAULT_SPINS) {
