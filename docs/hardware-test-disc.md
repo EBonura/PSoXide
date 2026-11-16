@@ -845,9 +845,8 @@ The SDK's FMV console test (`sdk/examples/hello-fmv`, run as a library; the
 suite's side is `src/fmv_test.rs`). The disc carries `MOVIE.STR` at LBA 1024:
 75 s of synthetic 320x240 15 fps video at the full double-speed sector budget
 with interleaved XA-ADPCM stereo beeps (440 Hz left, 660 Hz right, one a
-second), built by the SDK's `tools/fmv_test_movie.py` (FFmpeg and psxavenc;
-`make hardware-tests-disc` builds it once into `build/`, `PSXAVENC=` names the
-encoder). Every video sector carries its ordinal, the file's total and a
+second), built by `cargo run -p xtask -- fmv-test-movie`, which encodes it with the
+SDK's `psx-str-cook` (FFmpeg only decodes the synthetic source). Every video sector carries its ordinal, the file's total and a
 checksum, and the player streams all 9,826 of them through the SDK's polled
 PIO path.
 
