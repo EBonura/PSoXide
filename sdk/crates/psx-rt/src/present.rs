@@ -220,7 +220,7 @@ fn arm_confirmation() {
     unsafe {
         write_volatile(
             addr_of_mut!(__psx_rt_flip_miss),
-            __psx_rt_flip_confirm as usize as u32,
+            __psx_rt_flip_confirm as *const () as usize as u32,
         );
     }
 }
