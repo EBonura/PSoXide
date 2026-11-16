@@ -201,6 +201,28 @@ impl Curve {
         Self::attenuated(peak, attn.milli())
     }
 
+    /// Quake PSX's distance scale in Q12: `4096 - (d * slope >> 8)`, floored at zero, with
+    /// `slope = attn * 4096 * 256 / 1000` rounded down (1048, 2097, 3145 for the three
+    /// classes). The level is a fraction of one in Q12, not an SPU level: the caller scales
+    /// its own volume by it. Unlike [`Curve::quake`] this reproduces the integer form the
+    /// game shipped, bit for bit, so pair it with [`Space::quake_q12`] for the same audible
+    /// set.
+    ///
+    /// ```
+    /// # use psx_sfx::space::{Attn, Curve};
+    /// assert_eq!(Curve::quake_q12(Attn::Norm).level(0), 4096);
+    /// assert_eq!(Curve::quake_q12(Attn::Idle).level(500), 1);
+    /// ```
+    pub const fn quake_q12(attn: Attn) -> Self {
+        Curve::Ramp {
+            peak: 4096,
+            start: 0,
+            slope: ((attn.milli() * 1_048_576) / 1_000_000) as u16,
+            shift: 8,
+            floor: 0,
+        }
+    }
+
     /// GoldSrc's linear gain. `attn_milli` is the attenuation in thousandths
     /// ([`GOLDSRC_NORM`], [`GOLDSRC_IDLE`], [`GOLDSRC_STATIC`], or any other);
     /// `0` is `ATTN_NONE`.
@@ -436,6 +458,27 @@ impl Space {
             shift,
             law,
             cull: 0,
+        }
+    }
+
+    /// Quake PSX's placement: the world is in Q12 units so distances are `>> 12`, the
+    /// ears split with [`PanLaw::Dot`], and a sound at or beyond the class's clip distance
+    /// (1000, 500 and 333 units) is inaudible. Use it with [`Curve::quake_q12`] of the same
+    /// class: the cull is that curve's level at the clip distance, the first distance where
+    /// the game's own squared-distance test says silent.
+    ///
+    /// ```
+    /// # use psx_sfx::space::{Attn, Space};
+    /// assert_eq!(Space::quake_q12(Attn::Norm).cull(), 3);
+    /// ```
+    pub const fn quake_q12(attn: Attn) -> Self {
+        let slope = (attn.milli() * 1_048_576) / 1_000_000;
+        let clip = 1_000_000 / attn.milli();
+        let cull = 4096 - ((clip as u32 * slope) >> 8) as i32;
+        Self {
+            shift: 12,
+            law: PanLaw::Dot,
+            cull: cull as i16,
         }
     }
 
@@ -771,6 +814,45 @@ pub fn gains<const N: usize>(
             evaluate(space, 0, &mean, emitter, curve)
         }
     }
+}
+
+/// Quake PSX's two ear scales for one sound, in Q12 (`4096` is full level): `S_Spatialize`'s
+/// `(1 - dist) * (1 -+ dot(right, source))`, from positions and a yaw in Quake's own frame
+/// (`x` forward at yaw 0, `y` to the left, `z` up, world units in Q12). `None` once the source
+/// is at or beyond the clip distance of `attn`, or fully quiet. The caller multiplies its
+/// volume by each scale.
+///
+/// The SDK's frame has `z` forward, `x` to the right and `y` up, so this hands `gains` the
+/// positions as `[y, z, x]` (no axis is negated, so the per-axis floor of the shift matches the
+/// game's) and reads the ears back swapped: the SDK's left is Quake's right.
+///
+/// ```
+/// # use psx_sfx::space::{quake_scales, Attn};
+/// // Dead ahead and 100 units away: both ears equal.
+/// let (l, r) = quake_scales(Attn::Norm, [0; 3], 0, [100 << 12, 0, 0]).unwrap();
+/// assert_eq!(l, r);
+/// // Beyond 1000 units a Norm sound is gone.
+/// assert!(quake_scales(Attn::Norm, [0; 3], 0, [1000 << 12, 0, 0]).is_none());
+/// ```
+#[inline]
+pub fn quake_scales(
+    attn: Attn,
+    listener: [i32; 3],
+    yaw_q12: u16,
+    source: [i32; 3],
+) -> Option<(i32, i32)> {
+    let ears = Listeners::new([Listener::new(
+        [listener[1], listener[2], listener[0]],
+        yaw_q12 & 0x0fff,
+    )]);
+    let g = gains(
+        &Space::quake_q12(attn),
+        &ears,
+        ListenerRule::Loudest,
+        &Emitter::new([source[1], source[2], source[0]]),
+        &Curve::quake_q12(attn),
+    )?;
+    Some((i32::from(g.right), i32::from(g.left)))
 }
 
 #[cfg(test)]
@@ -1209,5 +1291,89 @@ mod tests {
             dist: 0,
         };
         assert_eq!(g.audibility(), 900);
+    }
+
+    /// Quake PSX's shipped `spatial_volumes` scale stage, copied from the game with its `Wide`
+    /// arithmetic written as `i64`: the SDK form must agree on every sound.
+    fn quake_old(o: [i32; 3], l: [i32; 3], yaw: u16, attenuation_q20: i32) -> Option<(i32, i32)> {
+        let dx = o[0].saturating_sub(l[0]) >> 12;
+        let dy = o[1].saturating_sub(l[1]) >> 12;
+        let dz = o[2].saturating_sub(l[2]) >> 12;
+        let distance_squared = i64::from(dx) * i64::from(dx)
+            + i64::from(dy) * i64::from(dy)
+            + i64::from(dz) * i64::from(dz);
+        let clip_distance = (4096 << 8) / attenuation_q20;
+        if distance_squared >= i64::from(clip_distance) * i64::from(clip_distance) {
+            return None;
+        }
+        let distance = isqrt_i32(distance_squared as i32);
+        let distance_scale = 4096i32
+            .saturating_sub((distance.saturating_mul(attenuation_q20)) >> 8)
+            .max(0);
+        if distance_scale == 0 {
+            return None;
+        }
+        let angle = yaw & 0x0fff;
+        let (rx, ry) = (sin_q12(angle), -cos_q12(angle));
+        let pan = if distance == 0 {
+            0
+        } else {
+            let dot = i64::from(dx) * i64::from(rx) + i64::from(dy) * i64::from(ry);
+            (dot / i64::from(distance)).clamp(-4096, 4096) as i32
+        };
+        let left = ((i64::from(distance_scale) * i64::from(4096 - pan)) >> 12) as i32;
+        let right = ((i64::from(distance_scale) * i64::from(4096 + pan)) >> 12) as i32;
+        Some((left, right))
+    }
+
+    #[test]
+    fn quake_scales_equal_the_games_own_function_on_every_sound() {
+        let mut s = 0x2545_f491u32;
+        let mut next = || {
+            s ^= s << 13;
+            s ^= s >> 17;
+            s ^= s << 5;
+            s
+        };
+        let (mut checked, mut audible) = (0u64, 0u64);
+        for (attn, q20) in [(Attn::Norm, 1048), (Attn::Idle, 2097), (Attn::Static, 3145)] {
+            for _ in 0..400_000 {
+                let r = [next(), next(), next(), next()];
+                let rr = |w: u32, m: i32| (w % (2 * m as u32 + 1)) as i32 - m;
+                // Listener anywhere in a +-3000 unit box, fractions included; the
+                // source within a bit more than the clip distance of it.
+                let l = [
+                    (rr(r[0], 3000) << 12) + (r[0] >> 20) as i32,
+                    (rr(r[1], 3000) << 12) + (r[1] >> 20) as i32,
+                    (rr(r[2], 500) << 12) + (r[2] >> 20) as i32,
+                ];
+                let o = [
+                    l[0] + (rr(r[3], 1100) << 12) + (r[1] >> 18) as i32 % 4096,
+                    l[1] + (rr(r[3] >> 8, 1100) << 12) + (r[2] >> 18) as i32 % 4096,
+                    l[2] + (rr(r[3] >> 16, 300) << 12) + (r[0] >> 18) as i32 % 4096,
+                ];
+                let yaw = (r[3] >> 4) as u16 & 0x0fff;
+                let old = quake_old(o, l, yaw, q20);
+                assert_eq!(
+                    quake_scales(attn, l, yaw, o),
+                    old,
+                    "{attn:?} {o:?} {l:?} {yaw}"
+                );
+                checked += 1;
+                audible += u64::from(old.is_some());
+            }
+            // Every distance across the clip edge, all four quadrants of heading.
+            for d in 0..1100 {
+                for yaw in [0u16, 1024, 2048, 3072, 77] {
+                    let o = [d << 12, 0, 0];
+                    assert_eq!(
+                        quake_scales(attn, [0; 3], yaw, o),
+                        quake_old(o, [0; 3], yaw, q20),
+                        "{attn:?} d {d} yaw {yaw}"
+                    );
+                }
+            }
+        }
+        assert!(audible > checked / 10, "{audible} of {checked} audible");
     }
 }
