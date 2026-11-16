@@ -159,6 +159,32 @@ pub fn find(
 /// in four; a descriptor that claims more is damaged or not ours, and the walk stays bounded.
 pub const ROOT_SECTORS_MAX: u32 = 4;
 
+/// Read the volume descriptor and the first sector of the root directory into `sector`,
+/// leaving the root sector there: the single-sector start of a lookup for a caller that walks
+/// the entries itself with [`find_in_directory`] (several names, a size check on each hit,
+/// its own failure policy). `read(lba, sector)` is the read [`find`] takes. `false` when a read
+/// fails or the volume descriptor is not one. Always inlined: the caller's read stays its own
+/// function, so the call adds nothing the hand-written two reads did not have.
+///
+/// ```
+/// use psx_io::iso::{read_root_sector, Sector};
+/// let mut sector: Sector = [0; psx_io::cd::reader::SECTOR_WORDS];
+/// assert!(!read_root_sector(&mut sector, |_lba, _into| false));
+/// ```
+#[inline(always)]
+pub fn read_root_sector(
+    sector: &mut Sector,
+    mut read: impl FnMut(u32, &mut Sector) -> bool,
+) -> bool {
+    if !read(PVD_LBA, sector) {
+        return false;
+    }
+    let Some((root, _)) = root_directory(as_bytes(sector)) else {
+        return false;
+    };
+    read(root, sector)
+}
+
 /// Look several names up in the root directory in one pass: the volume descriptor, then up to
 /// [`ROOT_SECTORS_MAX`] sectors of the root, each name searched in each sector. `out[i]` is the
 /// extent of `names[i]`, or `None` (every slot is written, so stale entries cannot survive);
@@ -333,6 +359,24 @@ mod tests {
         let mut sector = [0; SECTOR_WORDS];
         let mut log = Vec::new();
         find(&mut sector, im.reader(&mut log), None, &names)
+    }
+
+    #[test]
+    fn read_root_sector_leaves_the_first_root_sector_for_the_callers_own_walk() {
+        let im = standard();
+        let mut sector = [0; SECTOR_WORDS];
+        let mut log = Vec::new();
+        assert!(read_root_sector(&mut sector, im.reader(&mut log)));
+        assert_eq!(log, [PVD_LBA, 20]);
+        assert_eq!(
+            find_in_directory(as_bytes(&sector), "MUSIC.XA"),
+            Some((40, 4_096_000))
+        );
+        let blank = Image::new();
+        assert!(!read_root_sector(
+            &mut sector,
+            blank.reader(&mut Vec::new())
+        ));
     }
 
     #[test]
