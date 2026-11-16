@@ -166,6 +166,7 @@ pub fn directional_texel(direction: [i32; 3], layer_width: u8) -> [i32; 2] {
 /// `world_to_view_q12` is the rotation already loaded for the frame. Its
 /// transpose is sufficient because Quake's coordinate conversion has a
 /// uniform scale, which disappears during sky normalisation.
+#[inline]
 pub fn screen_view_ray(
     screen: [i16; 2],
     center: [i16; 2],
@@ -185,6 +186,39 @@ pub fn screen_view_ray(
         world[axis] = value >> 12;
     }
     world
+}
+
+/// Fill a layered-sky texel lattice for a fixed screen: the rays of every lattice corner through
+/// [`screen_view_ray`] and [`directional_texel`], with the screen size a compile-time constant
+/// and everything inlined into the caller, so the 143 corners are unrolled and each corner's
+/// screen offset, clamp and halving test fold to constants where they can. For a renderer that
+/// keeps its own lattice cache (Quake's) and recomputes it when the camera turns; the rolled
+/// loop over the out-of-line functions cost it +0.117% of its bench against the unrolled
+/// private copy it replaced. `direction` is the world ray as the caller's renderer wants it
+/// (Quake passes it as is; a y-up renderer passes `quake_direction_from_y_up`).
+///
+/// Same samples as calling the two functions per corner (a test holds them equal).
+#[inline(always)]
+pub fn fill_layered_sky_samples<const SCREEN_W: usize, const SCREEN_H: usize>(
+    out: &mut LayeredSkySamples,
+    rotation: [[i16; 3]; 3],
+    center: [i16; 2],
+    projection: i16,
+    width: u8,
+    direction: impl Fn([i32; 3]) -> [i32; 3],
+) {
+    let mut row = 0;
+    while row <= SKY_ROWS {
+        let y = (row * SCREEN_H / SKY_ROWS) as i16;
+        let mut column = 0;
+        while column <= SKY_COLUMNS {
+            let x = (column * SCREEN_W / SKY_COLUMNS) as i16;
+            let ray = screen_view_ray([x, y], center, projection, rotation);
+            out[row][column] = directional_texel(direction(ray), width);
+            column += 1;
+        }
+        row += 1;
+    }
 }
 
 /// Select the cube face whose plane is most perpendicular to `direction`.
@@ -1862,6 +1896,21 @@ mod tests {
 #[cfg(test)]
 mod sample_emission_tests {
     use super::*;
+
+    #[test]
+    fn the_unrolled_lattice_equals_the_per_corner_calls() {
+        let rotation = [[4096, 0, 0], [0, 3900, -1200], [0, 1200, 3900]];
+        let mut unrolled: LayeredSkySamples = [[[0; 2]; SKY_COLUMNS + 1]; SKY_ROWS + 1];
+        fill_layered_sky_samples::<320, 240>(&mut unrolled, rotation, [160, 120], 160, 64, |r| r);
+        for (row, samples) in unrolled.iter().enumerate() {
+            for (column, sample) in samples.iter().enumerate() {
+                let y = (row * 240 / SKY_ROWS) as i16;
+                let x = (column * 320 / SKY_COLUMNS) as i16;
+                let ray = screen_view_ray([x, y], [160, 120], 160, rotation);
+                assert_eq!(*sample, directional_texel(ray, 64), "{row},{column}");
+            }
+        }
+    }
 
     #[test]
     fn caller_samples_preserve_quake_packet_words_and_bounds() {
