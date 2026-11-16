@@ -318,8 +318,12 @@ extern "C" fn report_panic(info: *const u8) -> ! {
             tty::print(":");
             // The line number through psx_math::fmt: no fmt machinery, and no UTF-8 validator
             // (its writers return the digits as `&str` unchecked).
-            let mut buf = [0u8; psx_math::fmt::U32_DEC_MAX];
-            tty::print(psx_math::fmt::u32_dec(&mut buf, loc.line()));
+            // Only when the console prints: `tty::print` is a no-op without `host-tty`, but
+            // the formatting call is not, and a build that prints nothing must not carry it.
+            if tty::ENABLED {
+                let mut buf = [0u8; psx_math::fmt::U32_DEC_MAX];
+                tty::print(psx_math::fmt::u32_dec(&mut buf, loc.line()));
+            }
             tty::print("\n");
         }
         halt()
