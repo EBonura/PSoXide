@@ -99,6 +99,48 @@ impl<const MUL: u32, const ADD: u32> Lcg<MUL, ADD> {
     }
 }
 
+/// Marsaglia's 32-bit xorshift (shifts 13, 17, 5): the generator NitroXide, VoXide's playlist,
+/// the launcher's playlist and Celeste's synth each wrote out by hand. Three shift-xor pairs, no
+/// multiply, so it costs about the same as an [`Lcg`] step without touching the multiplier. A
+/// state of zero stays zero forever: seed it with something else. Like the LCG it is not for
+/// masks of the low bit alone; the callers shape the output (`>> 8`, `>> 15`) themselves.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct Xorshift32(u32);
+
+impl Xorshift32 {
+    /// Build with an explicit seed, which must not be zero.
+    #[must_use]
+    pub const fn new(seed: u32) -> Self {
+        Self(seed)
+    }
+
+    /// The next state after `state`: one step on a bare `u32`, for code that keeps the state in
+    /// its own field or save record (`x = Xorshift32::step(x)`).
+    #[inline(always)]
+    #[must_use]
+    pub const fn step(mut state: u32) -> u32 {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        state
+    }
+
+    /// Step once and return the fresh state.
+    #[inline]
+    #[allow(clippy::should_implement_trait)]
+    pub fn next(&mut self) -> u32 {
+        self.0 = Self::step(self.0);
+        self.0
+    }
+
+    /// Current internal state.
+    #[must_use]
+    pub const fn state(self) -> u32 {
+        self.0
+    }
+}
+
 /// Map five random bits (`0..=31`) onto `[-range, +range]`: odd multiples of
 /// `range / 31` from `-31` to `+31`, so the two ends are exactly `-range` and
 /// `+range` and the mapping is odd (`spread(31 - raw) == -spread(raw)`).
@@ -129,6 +171,24 @@ mod tests {
             y = LcgRng::step(y);
         }
         assert_eq!((x, y), (a, b));
+    }
+
+    #[test]
+    fn xorshift_equals_the_hand_written_steps() {
+        let mut g = Xorshift32::new(0x2545_f491);
+        let mut x = 0x2545_f491u32;
+        let mut y = x;
+        for _ in 0..100_000 {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            y = Xorshift32::step(y);
+            assert_eq!(g.next(), x);
+            assert_eq!(y, x);
+        }
+        // Marsaglia's published first output for state 1.
+        assert_eq!(Xorshift32::step(1), 270_369);
+        assert_eq!(Xorshift32::step(0), 0);
     }
 
     #[test]
