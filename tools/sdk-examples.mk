@@ -42,7 +42,7 @@ PGO_ARGS ?=
 PGO_VARIANTS ?= --variant off --variant default --variant hot=500 --variant hot=500+profi
 GATE ?=
 
-.PHONY: example disc hello-tri hello-tri-disc run-tri examples pgo-collect pgo-choose hello-xa-disc hello-xa-gate hello-xa-resume-disc hello-xa-resume-gate hello-cdstream-disc hello-cdstream-gate hello-cddrain-disc hello-cddrain-gate hello-gteirq-disc hello-gteirq-gate hello-cdpause-disc hello-cdpause-gate hello-present-queue-disc hello-present-queue-gate hello-present-cd-disc hello-present-cd-gate hello-wide-gate
+.PHONY: example disc hello-tri hello-tri-disc run-tri examples pgo-collect pgo-choose hello-xa-disc hello-xa-gate hello-xa-resume-disc hello-xa-resume-gate hello-cdstream-disc hello-cdstream-gate hello-cdsingle-disc hello-cdsingle-gate hello-cdchunk-disc hello-cdchunk-gate hello-cddrain-disc hello-cddrain-gate hello-gteirq-disc hello-gteirq-gate hello-cdpause-disc hello-cdpause-gate hello-present-queue-disc hello-present-queue-gate hello-present-cd-disc hello-present-cd-gate hello-wide-gate
 examples:
 	@set -e; for example in hello-tri hello-input hello-ot hello-gte hello-tex hello-memcard hello-spstack hello-gteirq hello-present hello-present-queue hello-asmprobe; do $(MAKE) -f tools/sdk-examples.mk disc EXAMPLE=$$example; done
 
@@ -116,6 +116,27 @@ hello-cdstream-disc:
 hello-cdstream-gate: hello-cdstream-disc
 	@test -n "$(FRONTEND)" || (echo "Set FRONTEND to the PSoXide-emulator executable"; exit 1)
 	sh tools/cdstream_gate.sh "$(FRONTEND)" "$(BUILD)/$(TARGET)/release/hello-cdstream.cue"
+# hello-cdsingle streams CDTEST.BIN through the single-transfer transport (psx_cdstream::single):
+# one request at a time, the cheap progress counter, cancel, park, the byte bound, the source closed
+# between requests, a hand-off to polled code.
+hello-cdsingle-disc:
+	$(MAKE) example EXAMPLE=hello-cdsingle
+	cargo run --locked --release -p mkisopsx -- --diag --exe "$(BUILD)/$(TARGET)/release/hello-cdsingle.exe" \
+		--out "$(BUILD)/$(TARGET)/release/hello-cdsingle.bin" --volume PSOXIDESDK --cdtest-sectors $(CDSTREAM_SECTORS)
+# Runs hello-cdsingle headless and checks its verdict: make hello-cdsingle-gate FRONTEND=/path/to/frontend
+hello-cdsingle-gate: hello-cdsingle-disc
+	@test -n "$(FRONTEND)" || (echo "Set FRONTEND to the PSoXide-emulator executable"; exit 1)
+	sh tools/cdsingle_gate.sh "$(FRONTEND)" "$(BUILD)/$(TARGET)/release/hello-cdsingle.cue"
+# hello-cdchunk is the smallest user of psx_cdstream::single: one chunk with an exact byte bound,
+# a cancel, then a polled read (no screen output; its image is the size probe of such a game).
+hello-cdchunk-disc:
+	$(MAKE) example EXAMPLE=hello-cdchunk
+	cargo run --locked --release -p mkisopsx -- --diag --exe "$(BUILD)/$(TARGET)/release/hello-cdchunk.exe" \
+		--out "$(BUILD)/$(TARGET)/release/hello-cdchunk.bin" --volume PSOXIDESDK --cdtest-sectors $(CDSTREAM_SECTORS)
+# Runs hello-cdchunk headless and checks its verdict: make hello-cdchunk-gate FRONTEND=/path/to/frontend
+hello-cdchunk-gate: hello-cdchunk-disc
+	@test -n "$(FRONTEND)" || (echo "Set FRONTEND to the PSoXide-emulator executable"; exit 1)
+	sh tools/cdchunk_gate.sh "$(FRONTEND)" "$(BUILD)/$(TARGET)/release/hello-cdchunk.cue"
 # hello-cddrain reads CDTEST.BIN with the polled reader while psx_cdstream::drain pops the sectors
 # from the CD interrupt, and checks every byte.
 hello-cddrain-disc:
