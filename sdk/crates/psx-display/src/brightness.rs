@@ -18,6 +18,18 @@ use crate::label::Label;
 /// five bits per channel and a rectangle's grey is its top five bits, so 8 is
 /// the smallest grey that changes the picture by one blend unit: every step
 /// moves it by exactly one more than the step before.
+///
+/// One step for the whole fleet. Celeste, NitroXide and VoXide
+/// ship this overlay (8 either way); Hollow Knight and WipEout
+/// each drew a private overlay with 8 up and 6 down (a comment of theirs says
+/// brighter "lifts the blacks" so it needs more). Six is not a whole step on
+/// the GPU's five-bit blend (by the arithmetic here; not measured on a console): grey 6, 12, 18, 24 and 30 are blend units 0, 1,
+/// 2, 3 and 3, so their DARKER 1 changed nothing and DARKER 4 and 5 were the
+/// same picture. A game that replaces its overlay with this type gets the
+/// darker steps 1 to 5 as 1 to 5 units (its old step n was n - 1 units, and 3
+/// at the end) and an unchanged brighter side. The overlay is the one packet
+/// ([`BrightnessOverlay::words`]) either game can copy into its own arena, and
+/// [`Brightness::faded_overlay`] is the fade-scaled form they wrote by hand.
 const GAIN_PER_STEP: u8 = 8;
 
 /// GP0(E1h) semi-transparency field value for `background + foreground`.
@@ -281,6 +293,36 @@ mod tests {
                 table[steps as usize]
             );
             assert_eq!(Brightness::new(steps).overlay_gain(), table[steps as usize]);
+        }
+    }
+
+    /// The private overlays this one replaces (Hollow Knight, WipEout): brighter was 8 per step,
+    /// darker 6. On the GPU's five blend bits (grey >> 3) their darker steps were these units,
+    /// and this type's are one more each (the picture consequence of the single step).
+    #[test]
+    fn darker_steps_against_the_two_private_overlays() {
+        let old_darker_units = [0u32, 1, 2, 3, 3];
+        for steps in 1..=5i8 {
+            let old_grey = steps as u32 * 6;
+            assert_eq!(old_grey >> 3, old_darker_units[steps as usize - 1]);
+            let new_units = u32::from(Brightness::new(-steps).overlay_gain()) >> 3;
+            assert_eq!(new_units, steps as u32, "darker {steps}");
+            // Brighter was already 8 a step: nothing moves.
+            assert_eq!(
+                Brightness::new(steps).overlay_gain() as u32,
+                steps as u32 * 8
+            );
+        }
+    }
+
+    #[test]
+    fn the_faded_gain_is_the_formula_both_games_wrote_by_hand() {
+        for level in -5..=5i8 {
+            for fade in [0u8, 1, 64, 127, 128, 200, 255] {
+                let b = Brightness::new(level);
+                let hand = (level.unsigned_abs() as u32 * 8 * fade as u32 / 128).min(255) as u8;
+                assert_eq!(b.faded_gain(fade), hand, "level {level} fade {fade}");
+            }
         }
     }
 
