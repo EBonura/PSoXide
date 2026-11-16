@@ -32,10 +32,12 @@ use alloc::vec::Vec;
 
 pub mod boot;
 pub mod exe;
+pub mod files;
 pub mod iso9660;
 pub mod receipt;
 pub use boot::{load_boot_exe_from_disc, BootError, BootExe};
 pub use exe::{pad_to_payload, Exe, ExeError, EXE_HEADER_BYTES};
+pub use files::{DiscFile, FileError};
 pub use iso9660::{
     default_system_cnf, protect_mode1, protect_mode2_form1, protect_mode2_form2, sector_edc,
     sector_edc_continue, write_sector_parity, IsoBuilder, IsoFile, XA_SECTOR_SIZE,
