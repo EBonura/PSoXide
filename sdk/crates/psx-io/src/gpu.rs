@@ -84,7 +84,10 @@ pub fn write_commands_when_ready(words: &[u32]) {
 #[inline(never)]
 fn write_commands_when_ready_slow(words: &[u32]) {
     wait_command_ready();
-    write_commands(words);
+    // The slow half handles every state: a recording, an armed guard, and neither (the
+    // guard test is then a no-op and the words go to the port), so this holds no second copy
+    // of the write loop.
+    handoff::write_commands_slow(words);
 }
 
 /// [`write_command`] straight to the port: never recorded, never behind the
