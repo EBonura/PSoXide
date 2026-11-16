@@ -196,7 +196,7 @@ if [ "${PSOXIDE_GUEST_STAGE:-1}" = "0" ]; then
     fi
     (
         cd "$ROOT/$GUEST_DIR"
-        PSX_GATE_PROGRAM=editor-playtest CARGO_TARGET_DIR="$ROOT/build/examples" RUSTFLAGS="$RUSTFLAGS_VALUE" \
+        PSX_GATE_PROGRAM=editor-playtest PSX_HAZARD_TRAMPOLINE_WORDS=256 CARGO_TARGET_DIR="$ROOT/build/examples" RUSTFLAGS="$RUSTFLAGS_VALUE" \
             cargo build --release "$@"
     )
     if [ -n "${PSOXIDE_GUEST_LINK_ELF:-}" ]; then
@@ -288,6 +288,7 @@ cd "$STAGE/$GUEST_DIR"
 CARGO_HOME="$GUEST_CARGO_HOME" \
 CARGO_TARGET_DIR="$STAGE/build/examples" \
 PSX_GATE_PROGRAM=editor-playtest \
+PSX_HAZARD_TRAMPOLINE_WORDS=256 \
 RUSTFLAGS="$RUSTFLAGS_VALUE" \
 RUSTC_WRAPPER="$repro_rustc" \
 PSOXIDE_REPRO_ROOT="$STAGE" \

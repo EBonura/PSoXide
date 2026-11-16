@@ -42,13 +42,6 @@ boot-trace = ["host-tty"]
 # ([`entry::inherited`]): the hardware tests report it to learn what each BIOS leaves. About 120
 # bytes of `.bss` and a few dozen register reads at boot; never in a shipping build.
 entry-census = []
-# Reserve 192 trampoline words instead of 96 (+384 bytes of `.data`).
-# The 256-word option takes precedence if both features are enabled.
-hazard-trampolines-192 = []
-# Reserve 256 trampoline words for the post-link load-delay hazard patcher
-# instead of 96 (+640 bytes of `.data`). Opt in only when a guest's linked
-# exe reports "trampoline array full".
-hazard-trampolines-256 = []
 # Guard every `scratchpad::ScratchpadStack::run`: a canary word at the bottom
 # of the region, checked after the call, and a trap when interrupts are on
 # with an exception handler other than psx-rt's or one the game declared
