@@ -643,9 +643,6 @@ pub fn draw_projectile_impact<'a, const OT_DEPTH: usize>(
 /// near-white core on the long spokes. Larger and brighter than any hit
 /// spark, and ring-shaped, so a parry does not read as a hit. Sized from the
 /// effect radius on screen and `glow_scale_q8`; progress is the pool's age.
-// Rare (a parry, a few ticks): kept out of line and small, off the hot impact path.
-#[inline(never)]
-#[cfg_attr(target_arch = "mips", optimize(size))]
 #[allow(clippy::too_many_arguments)]
 fn draw_parry_star<'a, const OT_DEPTH: usize>(
     impact: ProjectileImpactEffect,
