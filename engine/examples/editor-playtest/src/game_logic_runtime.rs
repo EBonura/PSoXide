@@ -539,7 +539,7 @@ fn crit_projectile_visual(mut visual: ProjectileVisualStyle) -> ProjectileVisual
 }
 
 /// Glow and impact colour of a crit shot.
-const CRIT_BOLT_RGB: [u8; 3] = [247, 198, 99];
+pub(super) const CRIT_BOLT_RGB: [u8; 3] = [247, 198, 99];
 
 impl Playtest {
     /// Resolve every attack of this tick after the player and instance pose
@@ -552,8 +552,8 @@ impl Playtest {
     /// player's swing before it can connect.
     pub(super) fn resolve_combat(&mut self, ctx: &Ctx) {
         self.combat_projectile_impacts.tick();
-        self.player_parry_flash.tick();
-        self.game_entities.tick_parry_flashes();
+        self.player_flash.tick();
+        self.game_entities.tick_flashes();
         self.release_player_projectile(ctx);
         if !self.deferred_enemy_attacks.is_empty() || !self.combat_projectiles.is_empty() {
             self.resolve_attacks_on_player(ctx);
@@ -1031,6 +1031,15 @@ impl Playtest {
                 now,
             );
             telemetry::debug_log("player projectile:hit");
+            self.show_hit(LandedHit {
+                victim: CombatantId::entity(index),
+                contact_from: None,
+                kind: FlashKind::of_hit(
+                    impact.visual.impact_rgb == CRIT_BOLT_RGB,
+                    outcome.staggered,
+                ),
+                zenith: channel == VitalityChannelId::Two,
+            });
         }
         if outcome.died {
             self.souls.award(record.soul_value, now.as_u32());
@@ -1149,6 +1158,45 @@ impl Playtest {
             staggered,
             self.hazard_death_ticks_remaining != 0,
         );
+        self.show_hit_on_player(&taken, impacts, staggered);
+    }
+
+    /// The flash and, for a melee swing, the contact spark of the hits the
+    /// player took this tick, in the stance colour of the fighter that dealt
+    /// the last of them. A hazard (no fighter) shows nothing here.
+    // Out of line and small: one call per tick she is hit.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
+    fn show_hit_on_player<const I: usize>(
+        &mut self,
+        taken: &PlayerHitsTaken,
+        impacts: &ProjectileImpacts<I>,
+        staggered: bool,
+    ) {
+        let attacker = usize::from(taken.attacker.0);
+        if attacker >= self.game_entities.count() {
+            return;
+        }
+        let melee = taken.melee_damage > 0;
+        let crit = taken.crit
+            || impacts.as_slice().iter().any(|impact| {
+                impact.visual.impact_rgb == CRIT_BOLT_RGB
+                    && impact.kind
+                        == (ProjectileImpactKind::Target {
+                            target: PLAYER_PROJECTILE_TARGET,
+                        })
+            });
+        let from = self.game_entities.position(attacker);
+        self.show_hit(LandedHit {
+            victim: CombatantId::PLAYER,
+            contact_from: melee.then_some(from),
+            kind: FlashKind::of_hit(crit, staggered),
+            zenith: if melee {
+                self.game_entities.stance(attacker) == VitalityChannelId::Two
+            } else {
+                taken.zenith_shots > taken.horizon_shots
+            },
+        });
     }
 
     /// Duel trace: a bolt interrupted a windup. `victim` 0 is the enemy,
@@ -1806,6 +1854,23 @@ impl Playtest {
                 state == psx_game_runtime::entities::GameEntityState::Staggered,
                 state == psx_game_runtime::entities::GameEntityState::Dead,
             );
+            let player = self.motor.position();
+            self.show_hit(LandedHit {
+                victim: CombatantId::entity(entity),
+                contact_from: Some([player.x, player.y, player.z]),
+                kind: FlashKind::of_hit(
+                    channel == DamageNumberChannel::Crit,
+                    matches!(
+                        state,
+                        psx_game_runtime::entities::GameEntityState::Staggered
+                            | psx_game_runtime::entities::GameEntityState::KnockedDown
+                    ) || matches!(
+                        self.anim_state,
+                        PlayerAnim::HeavyAttack | PlayerAnim::VertHeavyAttack
+                    ),
+                ),
+                zenith: attack == VitalityChannelId::Two,
+            });
         }
     }
 
@@ -2167,6 +2232,19 @@ impl Playtest {
                         outcome.staggered,
                         outcome.died,
                     );
+                    self.show_hit(LandedHit {
+                        victim: CombatantId::entity(entity),
+                        contact_from: Some([player.x, player.y, player.z]),
+                        kind: FlashKind::of_hit(
+                            crit,
+                            outcome.staggered
+                                || matches!(
+                                    self.anim_state,
+                                    PlayerAnim::HeavyAttack | PlayerAnim::VertHeavyAttack
+                                ),
+                        ),
+                        zenith: vitality_channel == VitalityChannelId::Two,
+                    });
                 }
                 if outcome.died {
                     // The authored-capsule path knows exactly which entity

@@ -126,6 +126,8 @@ pub struct ProjectileVisualStyle {
     /// Spokes of a parry star. Zero keeps every other impact; non-zero draws
     /// the parry burst instead (a ring with this many spokes, alternately
     /// long and short), reaching `glow_scale_q8` times its on-screen size.
+    /// With [`crate::combat_fx::STAR_NO_RING`] set in it, the spokes alone: a
+    /// melee hit's spark.
     pub star_points: u8,
 }
 

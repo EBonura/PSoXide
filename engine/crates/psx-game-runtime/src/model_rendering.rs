@@ -1721,7 +1721,12 @@ pub fn draw_player_from_pose<
     );
     // The reflection map contains its lighting. Keep its authored neutral
     // palette intact while reviewing the crystal material.
-    let material = if matches!(uv_mapping, ModelUvMapping::FacetReflection { .. }) {
+    // A full-strength bias is a combat flash's silhouette, and replaces the
+    // tint even over a reflection palette.
+    let flash = lit_tint.filter(|bias| bias.strength_q8 >= 256);
+    let material = if let Some(bias) = flash {
+        bias.apply(base_material)
+    } else if matches!(uv_mapping, ModelUvMapping::FacetReflection { .. }) {
         base_material
     } else {
         lit_tint.map_or(material, |bias| bias.apply(material))
