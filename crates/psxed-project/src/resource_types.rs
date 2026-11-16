@@ -2059,18 +2059,6 @@ pub struct CharacterResource {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub combat: Option<CombatStats>,
     /// Authored stance tuning; see CombatStanceConfig.
-    #[serde(default = "default_stance_regen_delay_ticks")]
-    pub stance_regen_delay_ticks: u16,
-    /// Authored stance tuning; see CombatStanceConfig.
-    #[serde(default = "default_stance_broken_regen_delay_ticks")]
-    pub stance_broken_regen_delay_ticks: u16,
-    /// Authored stance tuning; see CombatStanceConfig.
-    #[serde(default = "default_stance_regen_per_tick_q12")]
-    pub stance_regen_per_tick_q12: u16,
-    /// Authored stance tuning; see CombatStanceConfig.
-    #[serde(default = "default_stance_break_threshold_q12")]
-    pub stance_break_threshold_q12: u16,
-    /// Authored stance tuning; see CombatStanceConfig.
     #[serde(default = "default_stance_swap_cooldown_ticks")]
     pub stance_swap_cooldown_ticks: u16,
     /// Authored stance tuning; see CombatStanceConfig.
@@ -2265,10 +2253,6 @@ impl CharacterResource {
             backstep_recovery_frames: default_character_backstep_recovery_frames(),
             backstep_invulnerable_frames: default_character_backstep_invulnerable_frames(),
             combat: None,
-            stance_regen_delay_ticks: default_stance_regen_delay_ticks(),
-            stance_broken_regen_delay_ticks: default_stance_broken_regen_delay_ticks(),
-            stance_regen_per_tick_q12: default_stance_regen_per_tick_q12(),
-            stance_break_threshold_q12: default_stance_break_threshold_q12(),
             stance_swap_cooldown_ticks: default_stance_swap_cooldown_ticks(),
             stance_swap_duration_ticks: default_stance_swap_duration_ticks(),
             camera_distance: 6144,
@@ -2357,22 +2341,6 @@ pub(crate) const fn default_character_roll_cost_q12() -> i32 {
 
 pub(crate) const fn default_character_roll_speed() -> i32 {
     96
-}
-
-pub(crate) const fn default_stance_regen_delay_ticks() -> u16 {
-    90
-}
-
-pub(crate) const fn default_stance_broken_regen_delay_ticks() -> u16 {
-    300
-}
-
-pub(crate) const fn default_stance_regen_per_tick_q12() -> u16 {
-    1024
-}
-
-pub(crate) const fn default_stance_break_threshold_q12() -> u16 {
-    1024
 }
 
 pub(crate) const fn default_stance_swap_cooldown_ticks() -> u16 {
@@ -2639,14 +2607,16 @@ pub(crate) const fn default_enemy_soul_value() -> u16 {
 /// of [`psx_level::CombatStats`], cooked through [`Self::cooked`] for every
 /// character alike. Every field is serde-defaulted to the player
 /// character's starting numbers.
+///
+/// Health is one bar. A record written while health was two pools
+/// (`max_health` plus `max_health_secondary`) loads as their sum, see
+/// [`CombatStatsFile`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "CombatStatsFile")]
 pub struct CombatStats {
-    /// First vitality pool at spawn (Horizon).
+    /// Health at spawn: the one health bar.
     #[serde(default = "default_combat_max_health")]
     pub max_health: u16,
-    /// Second vitality pool at spawn (Zenith).
-    #[serde(default = "default_combat_max_health_secondary")]
-    pub max_health_secondary: u16,
     /// Poise capacity: posture damage past it breaks (staggers).
     #[serde(default = "default_combat_poise")]
     pub poise: u16,
@@ -2690,7 +2660,6 @@ impl CombatStats {
         use psx_level::combat_armour;
         Self {
             max_health: stats.max_health,
-            max_health_secondary: stats.max_health_secondary,
             poise: stats.poise,
             armour_heavy_attack: stats.armour & combat_armour::HEAVY_ATTACK != 0,
             armour_authored_window: stats.armour & combat_armour::AUTHORED_WINDOW != 0,
@@ -2715,7 +2684,6 @@ impl CombatStats {
         }
         psx_level::CombatStats {
             max_health: self.max_health,
-            max_health_secondary: self.max_health_secondary,
             poise: self.poise,
             armour,
             opposite_damage_q12: self.opposite_damage_q12,
@@ -2730,15 +2698,15 @@ impl CombatStats {
     /// The numbers a character written before this record existed ran
     /// with: an enemy's health and poise from its behaviour block (or the
     /// old enemy defaults, 100 per pool and poise 100), a player's from the
-    /// old constants (100 per pool, poise 60). Everything else starts at
-    /// the shared defaults.
+    /// old constants (100 per pool, poise 60). Health is the sum of the two
+    /// old pools. Everything else starts at the shared defaults.
     pub fn legacy(enemy: Option<&EnemyBehaviorSettings>) -> Self {
         match enemy {
             Some(enemy) => Self {
-                max_health: enemy.legacy_max_health.unwrap_or(Self::ENEMY.max_health),
-                max_health_secondary: enemy
-                    .legacy_max_health_secondary
-                    .unwrap_or(Self::ENEMY.max_health_secondary),
+                max_health: enemy
+                    .legacy_max_health
+                    .unwrap_or(LEGACY_POOL)
+                    .saturating_add(enemy.legacy_max_health_secondary.unwrap_or(LEGACY_POOL)),
                 poise: enemy.legacy_poise.unwrap_or(Self::ENEMY.poise),
                 ..Self::ENEMY
             },
@@ -2757,8 +2725,63 @@ pub(crate) const fn default_combat_max_health() -> u16 {
     CombatStats::PLAYER.max_health
 }
 
-pub(crate) const fn default_combat_max_health_secondary() -> u16 {
-    CombatStats::PLAYER.max_health_secondary
+/// What each of the two old health pools defaulted to, for loading a
+/// record written while health was two pools.
+const LEGACY_POOL: u16 = 100;
+
+/// [`CombatStats`] as a file may hold it: the current fields, plus the second
+/// health pool a record written before the one health bar carried. Such a
+/// record loads with its two pools summed (a missing pool counts as the old
+/// default, [`LEGACY_POOL`]), which keeps time-to-kill for attackers that hit
+/// one channel. A record without the second pool is the current form.
+#[derive(Deserialize)]
+struct CombatStatsFile {
+    #[serde(default)]
+    max_health: Option<u16>,
+    #[serde(default)]
+    max_health_secondary: Option<u16>,
+    #[serde(default = "default_combat_poise")]
+    poise: u16,
+    #[serde(default = "default_combat_armour_heavy_attack")]
+    armour_heavy_attack: bool,
+    #[serde(default = "default_combat_armour_authored_window")]
+    armour_authored_window: bool,
+    #[serde(default = "default_combat_opposite_damage_q12")]
+    opposite_damage_q12: u16,
+    #[serde(default = "default_combat_opposite_poise_q12")]
+    opposite_poise_q12: u16,
+    #[serde(default = "default_combat_energy_max")]
+    energy_max: u16,
+    #[serde(default = "default_combat_shot_cost")]
+    shot_cost: u16,
+    #[serde(default = "default_combat_light_gain")]
+    light_gain: u16,
+    #[serde(default = "default_combat_heavy_gain")]
+    heavy_gain: u16,
+}
+
+impl From<CombatStatsFile> for CombatStats {
+    fn from(file: CombatStatsFile) -> Self {
+        let max_health = match file.max_health_secondary {
+            Some(secondary) => file
+                .max_health
+                .unwrap_or(LEGACY_POOL)
+                .saturating_add(secondary),
+            None => file.max_health.unwrap_or_else(default_combat_max_health),
+        };
+        Self {
+            max_health,
+            poise: file.poise,
+            armour_heavy_attack: file.armour_heavy_attack,
+            armour_authored_window: file.armour_authored_window,
+            opposite_damage_q12: file.opposite_damage_q12,
+            opposite_poise_q12: file.opposite_poise_q12,
+            energy_max: file.energy_max,
+            shot_cost: file.shot_cost,
+            light_gain: file.light_gain,
+            heavy_gain: file.heavy_gain,
+        }
+    }
 }
 
 pub(crate) const fn default_combat_poise() -> u16 {
@@ -2870,18 +2893,6 @@ pub struct CharacterControllerSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub combat: Option<CombatStats>,
     /// Authored stance tuning; see CombatStanceConfig.
-    #[serde(default = "default_stance_regen_delay_ticks")]
-    pub stance_regen_delay_ticks: u16,
-    /// Authored stance tuning; see CombatStanceConfig.
-    #[serde(default = "default_stance_broken_regen_delay_ticks")]
-    pub stance_broken_regen_delay_ticks: u16,
-    /// Authored stance tuning; see CombatStanceConfig.
-    #[serde(default = "default_stance_regen_per_tick_q12")]
-    pub stance_regen_per_tick_q12: u16,
-    /// Authored stance tuning; see CombatStanceConfig.
-    #[serde(default = "default_stance_break_threshold_q12")]
-    pub stance_break_threshold_q12: u16,
-    /// Authored stance tuning; see CombatStanceConfig.
     #[serde(default = "default_stance_swap_cooldown_ticks")]
     pub stance_swap_cooldown_ticks: u16,
     /// Authored stance tuning; see CombatStanceConfig.
@@ -2913,10 +2924,6 @@ impl CharacterControllerSettings {
             backstep_invulnerable_frames: default_character_backstep_invulnerable_frames(),
             enemy: None,
             combat: None,
-            stance_regen_delay_ticks: default_stance_regen_delay_ticks(),
-            stance_broken_regen_delay_ticks: default_stance_broken_regen_delay_ticks(),
-            stance_regen_per_tick_q12: default_stance_regen_per_tick_q12(),
-            stance_break_threshold_q12: default_stance_break_threshold_q12(),
             stance_swap_cooldown_ticks: default_stance_swap_cooldown_ticks(),
             stance_swap_duration_ticks: default_stance_swap_duration_ticks(),
         }
@@ -2966,10 +2973,6 @@ impl CharacterControllerSettings {
             enemy: (character.spawn_role == CharacterSpawnRole::Enemy)
                 .then_some(character.enemy_behavior.unwrap_or_default()),
             combat: Some(character.combat_stats()),
-            stance_regen_delay_ticks: character.stance_regen_delay_ticks,
-            stance_broken_regen_delay_ticks: character.stance_broken_regen_delay_ticks,
-            stance_regen_per_tick_q12: character.stance_regen_per_tick_q12,
-            stance_break_threshold_q12: character.stance_break_threshold_q12,
             stance_swap_cooldown_ticks: character.stance_swap_cooldown_ticks,
             stance_swap_duration_ticks: character.stance_swap_duration_ticks,
         }

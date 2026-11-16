@@ -7,8 +7,6 @@ use crate::vitality::VitalityChannelId;
 pub enum StanceReason {
     /// Match the current separation with hysteresis.
     Distance = 0,
-    /// Leave a depleted active pool while a healthy reserve is available.
-    RecoverPool = 1,
     /// Commit to closing after repeated shots.
     PressAfterShots = 2,
     /// Pressure a visible exposed pool rather than repeatedly chipping the guard.
@@ -25,25 +23,16 @@ pub fn wants_melee(distance: i32, entry: i32, tolerance: i32, was_melee: bool) -
     distance <= melee_limit(entry, tolerance, was_melee)
 }
 
-/// Same recovery, distance and repeated-shot choices for player bot and tactical NPC.
+/// Same distance and repeated-shot choices for player bot and tactical NPC.
 /// Permission to actually switch remains the controller's responsibility.
+///
+/// There is no health reason to swap: the one health bar does not depend on
+/// the stance. (Value 1, the old "recover pool" reason, is retired.)
 pub fn stance_choice(
     melee: bool,
-    active: VitalityChannelId,
-    pools: [u16; 2],
-    maxima: [u16; 2],
     repeated_shots: bool,
-    opponent: Option<(VitalityChannelId, [u16; 2])>,
+    opponent: Option<VitalityChannelId>,
 ) -> (VitalityChannelId, StanceReason) {
-    let a = active.index();
-    let b = active.other().index();
-    // Recover only when the reserve is substantially healthier; cooldowns and
-    // broken-pool gates remain in the real stance implementation.
-    if u32::from(pools[a]) * 4 < u32::from(maxima[a].max(1))
-        && u32::from(pools[b]) * 2 > u32::from(maxima[b].max(1))
-    {
-        return (active.other(), StanceReason::RecoverPool);
-    }
     if repeated_shots {
         return (VitalityChannelId::One, StanceReason::PressAfterShots);
     }
@@ -90,56 +79,26 @@ mod tests {
         assert!(wants_melee(100, 100, 20, false));
     }
     #[test]
-    fn both_stances_and_health_recovery_have_reasons() {
+    fn both_stances_have_reasons_and_health_is_not_one() {
         use VitalityChannelId::*;
         assert_eq!(
-            stance_choice(false, One, [100, 100], [100, 100], false, None),
+            stance_choice(false, false, None),
             (Two, StanceReason::Distance)
         );
         assert_eq!(
-            stance_choice(true, Two, [100, 100], [100, 100], false, None),
+            stance_choice(true, false, None),
             (One, StanceReason::Distance)
         );
         assert_eq!(
-            stance_choice(true, One, [20, 90], [100, 100], false, None),
-            (Two, StanceReason::RecoverPool)
-        );
-        assert_eq!(
-            stance_choice(false, Two, [100, 100], [100, 100], true, None),
+            stance_choice(false, true, None),
             (One, StanceReason::PressAfterShots)
-        );
-        assert_eq!(
-            stance_choice(true, One, [20, 30], [100, 100], false, None).0,
-            One
         );
     }
     #[test]
     fn guard_colour_does_not_override_spacing() {
         use VitalityChannelId::*;
-        assert_eq!(
-            stance_choice(
-                true,
-                One,
-                [100, 100],
-                [100, 100],
-                false,
-                Some((One, [100, 100]))
-            )
-            .0,
-            One
-        );
-        assert_eq!(
-            stance_choice(
-                false,
-                Two,
-                [100, 100],
-                [100, 100],
-                false,
-                Some((Two, [100, 100]))
-            )
-            .0,
-            Two
-        );
+        assert_eq!(stance_choice(true, false, Some(One)).0, One);
+        assert_eq!(stance_choice(false, false, Some(Two)).0, Two);
     }
     #[test]
     fn attacks_mix_without_an_endless_heavy_repeat() {

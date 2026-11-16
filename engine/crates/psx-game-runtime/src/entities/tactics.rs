@@ -790,9 +790,6 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         if S && can_replan {
             let (stance, reason) = crate::combat_policy::stance_choice(
                 melee,
-                self.stance(i),
-                self.combatants[i].health(),
-                [r.combat.max_health, r.combat.max_health_secondary],
                 press_after_cannon,
                 if visible { input.player_combat } else { None },
             );

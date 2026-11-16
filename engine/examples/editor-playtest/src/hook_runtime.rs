@@ -395,7 +395,7 @@ impl Playtest {
                 return true;
             }
         }
-        if self.player.flow.air_tick(
+        if self.player.air_tick(
             self.hook_attached.is_some(),
             self.hook_travel.is_none() && self.motor.grounded(),
             self.ranged_ready.firing(ctx.sim_tick.as_u32()),

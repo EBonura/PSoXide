@@ -865,16 +865,24 @@ impl Playtest {
     }
 
     /// Fixed-point stat multipliers from the four endpoint sockets at the
-    /// current Horizon/Zenith health positions.
+    /// current health and energy levels.
     pub(super) fn vitality_modifiers(&self) -> VitalityModifiers {
-        // Only the active state's two sockets act. The inactive state's modules
-        // are dormant until it is swapped to, which is what makes the boon
-        // layout a choice rather than four always-on bonuses.
+        // Only the active stance's two sockets act. The other stance's
+        // modules are dormant until it is swapped to, which is what makes the
+        // boon layout a choice rather than four always-on bonuses.
         self.power_up_loadout.modifiers_for(
-            &self.player.vitality,
+            self.boost_bars(),
             BOOST_MODULES,
             Some(self.player.stance.active()),
         )
+    }
+
+    /// The levels the boost sockets read: the health bar and the energy bar.
+    pub(super) fn boost_bars(&self) -> BoostBars {
+        BoostBars {
+            health: self.player.health,
+            energy: VitalityPool::at(self.player.flow.energy, self.player_stats.energy_max),
+        }
     }
 
     /// Live authored playback rate for an animation. Only the four attack
@@ -925,17 +933,13 @@ impl Playtest {
         // Untyped damage has no colour to compare, so it is treated as aligned
         // with whatever is active: the player cannot read an axis that was
         // never authored, and should not be punished for it.
-        self.player_take_damage(HitKind::Melee, None, damage, false)
+        self.player_take_damage(HitKind::Melee, None, damage)
     }
 
-    /// Damage from a hazard volume: a hit bigger than the active pool does not stop
-    /// at the pool. The forced stance swap would otherwise absorb the whole hit
-    /// and hand the player its invulnerable frames, so a lethal wall that
-    /// deals more than the pool holds only spent the pool and let the player
-    /// walk through the rest of the volume. What the active pool could not take
-    /// carries into the other one, and the hit is lethal when both run out.
+    /// Damage from a hazard volume, untyped like a legacy hit. A hit bigger
+    /// than the health left is lethal.
     pub(super) fn apply_hazard_player_damage(&mut self, damage: u16) -> bool {
-        self.player_take_damage(HitKind::Hazard, None, damage, true)
+        self.player_take_damage(HitKind::Hazard, None, damage)
     }
 
     /// The projectile colour sets the multiplier; the active stance receives damage.
@@ -952,21 +956,19 @@ impl Playtest {
                 VitalityChannelId::Two
             }
         };
-        self.player_take_damage(HitKind::Projectile, Some(channel), damage, false)
+        self.player_take_damage(HitKind::Projectile, Some(channel), damage)
     }
 
     /// The player's health damage, through [`Combatant::receive_hit`].
     ///
     /// Shell modifiers reduce the hit first. `channel` `None` is untyped and
-    /// counts as aligned with the active stance. Only the active pool is
-    /// damaged; `carry` lets what an emptied pool could not take spill into
-    /// the other (hazards). True when both pools are empty afterwards.
+    /// counts as aligned with the active stance. True when the health bar is
+    /// empty afterwards.
     fn player_take_damage(
         &mut self,
         kind: HitKind,
         channel: Option<VitalityChannelId>,
         damage: u16,
-        carry: bool,
     ) -> bool {
         let damage = self.vitality_modifiers().incoming_damage(damage);
         let strike = Strike {
@@ -976,29 +978,22 @@ impl Playtest {
             damage,
             poise: 0,
         };
-        let hit = self
-            .player
-            .receive_hit(self.player_hit(strike, carry, false));
+        let hit = self.player.receive_hit(self.player_hit(strike, false));
         if hit.damage_applied > 0 {
             self.queue_gameplay_sfx(LevelGameplaySfxEvent::PlayerDamage);
         }
         hit.defeated
     }
 
-    /// The player's stats, routing and posture state around `strike`.
+    /// The player's stats and posture state around `strike`.
     ///
     /// Damage and poise follow the one stance rule over
-    /// [`Self::player_stats`], the same rule every enemy runs; only the
-    /// active pool takes the damage until the two pools become one bar. A
-    /// Stun cannot be broken.
-    fn player_hit(&self, strike: Strike, carry: bool, armored: bool) -> HitIn {
+    /// [`Self::player_stats`], the same rule every enemy runs, off the same
+    /// one health bar. A Stun cannot be broken.
+    fn player_hit(&self, strike: Strike, armored: bool) -> HitIn {
         HitIn {
             strike,
             stats: self.player_stats,
-            route: HitRoute::Stance {
-                config: self.player_stance_config,
-                carry,
-            },
             poise: PoiseRule {
                 armored,
                 blocked: matches!(self.anim_state, PlayerAnim::Stun),
@@ -1112,7 +1107,7 @@ impl Playtest {
         self.vitality_circles = VitalityCircleState::EMPTY;
         self.power_up_loadout = PowerUpLoadout::DEFAULT;
         self.power_up_inventory = BoostInventory::EMPTY;
-        self.selected_power_up_slot = BoostSlotId::HorizonEmpty as u8;
+        self.selected_power_up_slot = BoostSlotId::HealthEmpty as u8;
         self.selected_power_up_item = BoostModuleId::NONE;
         self.inventory_ui_state = crate::playtest_scene::INVENTORY_UI_SOCKETS;
         self.inventory_overlay_active = false;
@@ -1460,7 +1455,7 @@ impl Playtest {
         };
         let poise_broken = self
             .player
-            .receive_hit(self.player_hit(strike, false, armored))
+            .receive_hit(self.player_hit(strike, armored))
             .poise_broken;
         if shot_only && !poise_broken {
             return false;
@@ -2849,7 +2844,6 @@ mod life_reset_tests {
     use super::*;
     const PLAYER_MAX_HEALTH: u16 = CombatStats::PLAYER.max_health;
     use psx_game_runtime::projectiles::{CombatTeam, ProjectileSpawn};
-    use psx_game_runtime::vitality::DualVitality;
 
     fn test_scene() -> std::boxed::Box<Playtest> {
         let layout = std::alloc::Layout::new::<Playtest>();
@@ -3218,14 +3212,7 @@ mod life_reset_tests {
         assert_eq!(scene.evade_buffer_vblanks, 0);
         assert!(!scene.gameplay_epoch_set);
         assert_eq!(scene.hazard_death_ticks_remaining, 0);
-        assert_eq!(
-            scene.player.vitality.pool(VitalityChannelId::One).current(),
-            PLAYER_MAX_HEALTH
-        );
-        assert_eq!(
-            scene.player.vitality.pool(VitalityChannelId::Two).current(),
-            PLAYER_MAX_HEALTH
-        );
+        assert_eq!(scene.player.health(), PLAYER_MAX_HEALTH);
         assert!(scene.power_up_inventory.is_empty());
         assert!(scene.checkpoint.is_none());
         assert_eq!(scene.game_entities.count(), GAME_ENTITIES.len());
@@ -3241,7 +3228,7 @@ mod life_reset_tests {
     }
 
     #[test]
-    fn a_hazard_hit_bigger_than_the_active_pool_is_lethal_and_an_ordinary_one_is_not() {
+    fn a_hit_bigger_than_the_bar_is_lethal_whatever_dealt_it_and_an_ordinary_one_is_not() {
         let layout = std::alloc::Layout::new::<Playtest>();
         let raw = unsafe { std::alloc::alloc_zeroed(layout) as *mut Playtest };
         assert!(!raw.is_null());
@@ -3250,29 +3237,22 @@ mod life_reset_tests {
         }
         let mut storage = unsafe { std::boxed::Box::from_raw(raw) };
         let scene = &mut *storage;
-        scene.player.vitality = DualVitality::equal(PLAYER_MAX_HEALTH);
-        // An ordinary untyped hit spends the pool and swaps the stance: the
-        // player lives, and gets the swap's invulnerable frames.
-        assert!(!scene.apply_untyped_player_damage(1000));
-        assert!(!scene.player.vitality.is_defeated());
-        scene.player.vitality = DualVitality::equal(PLAYER_MAX_HEALTH);
-        scene.player.stance = CombatStance::new(VitalityChannelId::One);
-        // A hazard's hit carries over into the other pool and kills outright.
+        // An untyped hit and a hazard hit bigger than the bar both kill:
+        // there is no other pool to swap into.
+        assert!(scene.apply_untyped_player_damage(1000));
+        assert!(scene.player.defeated());
+        scene.player.reset(&scene.player_stats);
         assert!(scene.apply_hazard_player_damage(1000));
-        assert!(scene.player.vitality.is_defeated());
-        // A small hit leaves the pool alone and does not spill.
-        scene.player.vitality = DualVitality::equal(PLAYER_MAX_HEALTH);
-        scene.player.stance = CombatStance::new(VitalityChannelId::One);
+        assert!(scene.player.defeated());
+        // A small hit takes only what it deals.
+        scene.player.reset(&scene.player_stats);
         assert!(!scene.apply_hazard_player_damage(10));
-        assert!(!scene.player.vitality.is_defeated());
-        assert_eq!(
-            scene.player.vitality.pool(VitalityChannelId::Two).current(),
-            PLAYER_MAX_HEALTH
-        );
+        assert!(!scene.player.defeated());
+        assert_eq!(scene.player.health(), PLAYER_MAX_HEALTH - 10);
     }
 
     #[test]
-    fn respawn_discards_old_projectiles_broken_guard_and_queued_actions() {
+    fn respawn_discards_old_projectiles_spent_health_swap_and_queued_actions() {
         // Use the production validity initializer on heap storage: the scene
         // contains non-zero Option niches and is too large for the test stack.
         let layout = std::alloc::Layout::new::<Playtest>();
@@ -3284,12 +3264,8 @@ mod life_reset_tests {
         let mut storage = unsafe { std::boxed::Box::from_raw(raw) };
         let scene = &mut *storage;
         let config = scene.player_stance_config;
-        let first = scene
-            .player
-            .stance
-            .apply_damage(&mut scene.player.vitality, u16::MAX, &config);
-        assert!(first.forced_swap);
-        assert!(scene.player.stance.is_broken(VitalityChannelId::One));
+        assert!(scene.player.stance.request_swap(&config));
+        scene.player.health.apply_damage(150);
         scene.attack_buffer.request(1, 100);
         scene.evade_buffer_vblanks = 8;
         scene.swing_hit_mask = 3;
@@ -3321,15 +3297,7 @@ mod life_reset_tests {
         assert!(!scene.camera_recenter_requested);
         assert_eq!(scene.player.stance.active(), VitalityChannelId::One);
         assert!(scene.player.stance.can_swap());
-        assert!(!scene.player.stance.is_broken(VitalityChannelId::One));
-        assert_eq!(
-            scene.player.vitality.pool(VitalityChannelId::One).current(),
-            PLAYER_MAX_HEALTH
-        );
-        assert_eq!(
-            scene.player.vitality.pool(VitalityChannelId::Two).current(),
-            PLAYER_MAX_HEALTH
-        );
+        assert_eq!(scene.player.health(), PLAYER_MAX_HEALTH);
         assert_eq!(
             scene.souls.total(),
             50,

@@ -1845,10 +1845,6 @@ pub struct PlaytestCharacter {
     /// Health, poise, stance multipliers and energy, cooked by
     /// [`crate::CombatStats::cooked`] exactly as every enemy's are.
     pub combat: psx_level::CombatStats,
-    pub stance_regen_delay_ticks: u16,
-    pub stance_broken_regen_delay_ticks: u16,
-    pub stance_regen_per_tick_q12: u16,
-    pub stance_break_threshold_q12: u16,
     pub stance_swap_cooldown_ticks: u16,
     pub stance_swap_duration_ticks: u16,
     /// Camera follow distance (engine units).

@@ -1,9 +1,10 @@
 //! Combat state one fighter carries, the same type for the player and enemies.
 //!
 //! A [`Combatant`] is plain data plus thin rules over the shared leaf types:
-//! health ([`DualVitality`]), posture ([`Poise`]), energy and poise-break
-//! grace ([`CombatFlow`]) and the stance ([`CombatStance`]: side, swap
-//! cooldown and swap clock). It holds no scene, no entity tables and no AI.
+//! health (one [`VitalityPool`] bar), posture ([`Poise`]), energy and
+//! poise-break grace ([`CombatFlow`]) and the stance ([`CombatStance`]: side,
+//! swap cooldown and swap clock). It holds no scene, no entity tables and no
+//! AI.
 //! Where today's player and enemy rules still differ, the difference is a
 //! parameter of the call (a cooldown, a capacity, whether break grace
 //! applies) rather than a branch on who is fighting.
@@ -13,22 +14,19 @@
 //!
 //! Every hit, whatever dealt it, lands through [`Combatant::receive_hit`]. A
 //! [`HitIn`] is the [`Strike`] (what the attacker sent) plus the defender's
-//! [`CombatStats`], [`HitRoute`] and [`PoiseRule`]. Damage and poise follow
+//! [`CombatStats`] and [`PoiseRule`]. Damage and poise follow
 //! one rule for every fighter, [`stance_scaled`]: a hit from the stance
 //! opposite the defender's active one is multiplied by the defender's
 //! opposite-stance multipliers, a matching hit is taken as authored.
-//! Characters differ only in their stats. The route still differs (the
-//! player's active pool against the enemy's spill) until the two pools
-//! become one bar.
+//! Characters differ only in their stats. The damage comes off the one
+//! health bar, which nothing refills during play: only a respawn, an arch or
+//! a checkpoint restores it.
 
 use psx_level::CombatStats;
 
 use crate::combat_flow::CombatFlow;
 use crate::poise::Poise;
-use crate::vitality::{
-    CombatStance, CombatStanceConfig, DualVitality, StanceDamageOutcome, VitalityChannelId,
-    VitalityPool, VITALITY_Q12_ONE,
-};
+use crate::vitality::{CombatStance, VitalityChannelId, VitalityPool, VITALITY_Q12_ONE};
 
 /// The one stance rule: health and posture damage a hit of `damage` and
 /// `poise` deals to a defender with `stats`, `opposite` when the hit's
@@ -92,27 +90,6 @@ pub struct Strike {
     pub poise: u16,
 }
 
-/// How the defender's pools take the health damage of a hit.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-///
-/// The damage is already scaled by [`stance_scaled`]; the route only says
-/// which pool takes it. This is the last per-side difference in a hit and
-/// goes away with the second pool.
-pub enum HitRoute {
-    /// Only the active pool takes the hit, and a pool that empties forces a
-    /// swap. With `carry`, what the emptied pool could not take carries into
-    /// the newly active one, so a hit bigger than a pool can still be lethal.
-    Stance {
-        /// Regen delays and the forced-swap cooldown.
-        config: CombatStanceConfig,
-        /// Carry the excess of an emptied pool into the other one.
-        carry: bool,
-    },
-    /// The strike's channel takes the hit, and only the excess spills into
-    /// the other pool.
-    Spill,
-}
-
 /// The defender's posture state for one hit. The capacity is
 /// [`CombatStats::poise`], and break grace always applies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -124,15 +101,13 @@ pub struct PoiseRule {
 }
 
 /// Everything [`Combatant::receive_hit`] needs: the strike and the
-/// defender's stats, routing and posture state.
+/// defender's stats and posture state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HitIn {
     /// The attacker's half.
     pub strike: Strike,
     /// The defender's numbers.
     pub stats: CombatStats,
-    /// Which pool takes the damage.
-    pub route: HitRoute,
     /// The defender's posture state.
     pub poise: PoiseRule,
 }
@@ -140,11 +115,11 @@ pub struct HitIn {
 /// What one [`Combatant::receive_hit`] did.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct HitOut {
-    /// Health actually removed from both pools together.
+    /// Health actually removed.
     pub damage_applied: u16,
-    /// Both pools are empty after the hit.
+    /// The health bar is empty after the hit.
     pub defeated: bool,
-    /// This hit emptied the last pool. Posture is left alone when it does.
+    /// This hit emptied the health bar. Posture is left alone when it does.
     pub killed: bool,
     /// The hit broke posture.
     pub poise_broken: bool,
@@ -156,8 +131,8 @@ pub struct HitOut {
 /// them in zero-initialised scene storage.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Combatant {
-    /// The two vitality pools.
-    pub vitality: DualVitality,
+    /// The one health bar.
+    pub health: VitalityPool,
     /// Accumulated posture damage.
     pub poise: Poise,
     /// Energy, poise-break grace and the ranged/melee resource cycle.
@@ -167,17 +142,17 @@ pub struct Combatant {
 }
 
 impl Combatant {
-    /// Empty pools on side One with no timers running. Not a live fighter
+    /// An empty bar on side One with no timers running. Not a live fighter
     /// until [`Self::reset`] or [`Self::respawn`] gives it health.
     pub const EMPTY: Self = Self {
-        vitality: DualVitality::from_pools(VitalityPool::at(0, 0), VitalityPool::at(0, 0)),
+        health: VitalityPool::at(0, 0),
         poise: Poise::EMPTY,
         flow: CombatFlow::FULL,
         stance: CombatStance::new(VitalityChannelId::One),
     };
 
-    /// A fresh life for `stats`: both pools full, posture clear, energy
-    /// full, side One with no cooldown and no swap showing.
+    /// A fresh life for `stats`: health full, posture clear, energy full,
+    /// side One with no cooldown and no swap showing.
     pub fn reset(&mut self, stats: &CombatStats) {
         self.respawn(stats);
         self.stance = CombatStance::new(VitalityChannelId::One);
@@ -185,11 +160,9 @@ impl Combatant {
 
     /// Like [`Self::reset`] but keeps the stance side and its cooldown, only
     /// ending any swap presentation. This is what an entity slot does when
-    /// it spawns. A zero maximum gives an empty pool, as the cook allows.
+    /// it spawns. A zero maximum gives an empty bar, as the cook allows.
     pub fn respawn(&mut self, stats: &CombatStats) {
-        let [one, two] = [stats.max_health, stats.max_health_secondary];
-        self.vitality =
-            DualVitality::from_pools(VitalityPool::at(one, one), VitalityPool::at(two, two));
+        self.health = VitalityPool::at(stats.max_health, stats.max_health);
         self.poise = Poise::EMPTY;
         self.flow = CombatFlow::full(stats);
         self.stance.settle();
@@ -201,12 +174,40 @@ impl Combatant {
         channel != self.stance.active()
     }
 
-    /// Current health of both pools.
-    pub fn health(&self) -> [u16; 2] {
-        [
-            self.vitality.pool(VitalityChannelId::One).current(),
-            self.vitality.pool(VitalityChannelId::Two).current(),
-        ]
+    /// Current health.
+    pub fn health(&self) -> u16 {
+        self.health.current()
+    }
+
+    /// Whether the health bar is empty.
+    pub fn defeated(&self) -> bool {
+        self.health.is_empty()
+    }
+
+    /// Restore up to `health` points and `energy` energy (to the stats'
+    /// ceiling), as an arch or a checkpoint does. Returns the health
+    /// actually restored.
+    pub fn restore(&mut self, health: u16, energy: u16, stats: &CombatStats) -> u16 {
+        self.flow.gain_energy(energy, stats);
+        self.health.heal(health)
+    }
+
+    /// One tick of the arch: the air allowance, and while hanging on with
+    /// allowance left and not firing, one point of energy and one of health
+    /// at [`crate::combat_flow::FLOAT_GAIN_PER_SECOND`]. True when the
+    /// allowance ran out and the arch lets go.
+    pub fn air_tick(
+        &mut self,
+        attached: bool,
+        grounded: bool,
+        firing: bool,
+        stats: &CombatStats,
+    ) -> bool {
+        let tick = self.flow.air_tick(attached, grounded, firing, stats);
+        if tick.restored {
+            self.health.heal(1);
+        }
+        tick.exhausted
     }
 
     /// Advance posture recovery and the energy timers by `delta` ticks.
@@ -216,22 +217,14 @@ impl Combatant {
         self.flow.tick(delta, recovering);
     }
 
-    /// Advance the swap cooldown and swap clock by `delta` ticks, without
-    /// inactive-pool recovery.
+    /// Advance the swap cooldown and swap clock by `delta` ticks.
     pub fn advance_stance(&mut self, delta: u16) {
         self.stance.cool_down(delta);
         self.stance.advance_swap(delta);
     }
 
-    /// One fixed tick of the stance with inactive-pool recovery: cooldown,
-    /// swap clock and regeneration under `config`.
-    pub fn tick_stance(&mut self, config: &CombatStanceConfig, regen_bonus_q12: u16) {
-        self.stance
-            .tick(&mut self.vitality, config, regen_bonus_q12);
-    }
-
-    /// Voluntary swap arming `cooldown_ticks` of cooldown. False when the
-    /// cooldown is running or the other side is broken.
+    /// Voluntary swap arming `cooldown_ticks` of cooldown. False while the
+    /// cooldown is running.
     pub fn request_swap(&mut self, cooldown_ticks: u16) -> bool {
         self.stance.try_swap(cooldown_ticks)
     }
@@ -242,70 +235,31 @@ impl Combatant {
     }
 
     /// Take one hit: health and posture scaled by [`stance_scaled`], health
-    /// into the pools through `hit.route`, then posture against
-    /// [`CombatStats::poise`]. This is the only way damage reaches a fighter.
+    /// off the one bar, then posture against [`CombatStats::poise`]. This is
+    /// the only way damage reaches a fighter.
     ///
     /// A hit that kills leaves posture alone. A zero-damage hit (poise only)
-    /// never touches the pools.
+    /// never touches the bar.
     pub fn receive_hit(&mut self, hit: HitIn) -> HitOut {
         let strike = hit.strike;
-        let [one, two] = self.health();
-        let before = u32::from(one) + u32::from(two);
-        let was_defeated = self.vitality.is_defeated();
+        let was_defeated = self.defeated();
         let (damage, poise) = stance_scaled(
             &hit.stats,
             self.opposes(strike.channel),
             strike.damage,
             strike.poise,
         );
-        if damage != 0 {
-            match hit.route {
-                HitRoute::Stance { config, carry } => {
-                    self.take_stance_hit(damage, &config, carry);
-                }
-                HitRoute::Spill => {
-                    self.vitality.apply_spill(strike.channel, damage);
-                }
-            }
-        }
-        let [one, two] = self.health();
-        let after = u32::from(one) + u32::from(two);
-        let defeated = self.vitality.is_defeated();
+        let damage_applied = self.health.apply_damage(damage);
+        let defeated = self.defeated();
         let killed = !was_defeated && defeated;
         let poise_broken =
             !killed && self.poise_hit(poise, hit.stats.poise, hit.poise.armored, hit.poise.blocked);
         HitOut {
-            damage_applied: before.saturating_sub(after).min(u32::from(u16::MAX)) as u16,
+            damage_applied,
             defeated,
             killed,
             poise_broken,
         }
-    }
-
-    /// Active-pool routing for [`Self::receive_hit`], with the optional
-    /// carry of an emptied pool's excess into the newly active one.
-    fn take_stance_hit(&mut self, damage: u16, config: &CombatStanceConfig, carry: bool) {
-        let active = self.stance.active();
-        let room = self.vitality.pool(active).current();
-        let first = self.take_stance_damage(damage, config);
-        if !carry || first.defeated || self.vitality.pool(active).current() != 0 {
-            return;
-        }
-        // The pool ran dry; what it could not take lands on the other one.
-        let rest = damage.saturating_sub(room);
-        if rest > 0 {
-            self.take_stance_damage(rest, config);
-        }
-    }
-
-    /// Damage routed through the stance: only the active pool takes it, and
-    /// a pool that empties forces a swap.
-    fn take_stance_damage(
-        &mut self,
-        damage: u16,
-        config: &CombatStanceConfig,
-    ) -> StanceDamageOutcome {
-        self.stance.apply_damage(&mut self.vitality, damage, config)
     }
 
     /// Apply `amount` posture damage against `capacity`; true on a break.
@@ -330,7 +284,7 @@ mod tests {
     use super::*;
     use crate::combat_flow::BREAK_GRACE_TICKS;
 
-    /// 100 per pool, poise 60, the starting multipliers and energy.
+    /// 200 health, poise 60, the starting multipliers and energy.
     const STATS: CombatStats = CombatStats::PLAYER;
 
     fn fighter() -> Combatant {
@@ -342,18 +296,17 @@ mod tests {
     #[test]
     fn reset_is_a_fresh_life_and_respawn_keeps_the_side() {
         let mut c = fighter();
-        assert_eq!(c.health(), [100, 100]);
+        assert_eq!(c.health(), 200);
         assert!(c.request_swap(30));
-        c.vitality.apply_spill(VitalityChannelId::One, 150);
+        c.health.apply_damage(150);
         c.flow.spend_shot(&STATS);
         let small = CombatStats {
             max_health: 80,
-            max_health_secondary: 0,
             energy_max: 40,
             ..STATS
         };
         c.respawn(&small);
-        assert_eq!(c.health(), [80, 0]);
+        assert_eq!(c.health(), 80);
         assert_eq!(c.flow, CombatFlow::full(&small));
         assert_eq!(c.flow.energy, 40, "energy starts at the stats' ceiling");
         assert_eq!(c.stance.active(), VitalityChannelId::Two);
@@ -402,11 +355,10 @@ mod tests {
         blocked: false,
     };
 
-    fn spill(strike: Strike) -> HitIn {
+    fn hit(strike: Strike) -> HitIn {
         HitIn {
             strike,
             stats: STATS,
-            route: HitRoute::Spill,
             poise: UNARMORED,
         }
     }
@@ -425,18 +377,19 @@ mod tests {
     }
 
     #[test]
-    fn spill_route_takes_the_scaled_hit_then_spills() {
+    fn the_one_bar_takes_the_scaled_hit() {
         let mut c = fighter();
         // Matching stance (side One is active): taken as authored.
-        let out = c.receive_hit(spill(strike(VitalityChannelId::One, 32, 48)));
+        let out = c.receive_hit(hit(strike(VitalityChannelId::One, 32, 48)));
         assert_eq!(out.damage_applied, 32);
         assert!(!out.poise_broken, "48 of 60");
-        assert_eq!(c.health(), [68, 100]);
-        // Opposite stance: 1.25x, spilling the excess into the other pool.
-        let out = c.receive_hit(spill(strike(VitalityChannelId::Two, 96, 0)));
+        assert_eq!(c.health(), 168);
+        // Opposite stance: 1.25x, off the same bar.
+        let out = c.receive_hit(hit(strike(VitalityChannelId::Two, 96, 0)));
         assert_eq!(out.damage_applied, 120);
-        assert_eq!(c.health(), [48, 0]);
-        let out = c.receive_hit(spill(strike(VitalityChannelId::One, 48, 60)));
+        assert_eq!(c.health(), 48);
+        assert!(!out.defeated);
+        let out = c.receive_hit(hit(strike(VitalityChannelId::One, 48, 60)));
         assert!(out.killed && out.defeated);
         assert!(!out.poise_broken, "a killing blow leaves posture alone");
     }
@@ -444,47 +397,62 @@ mod tests {
     #[test]
     fn an_opposite_hit_breaks_posture_sooner() {
         let mut matching = fighter();
-        let out = matching.receive_hit(spill(strike(VitalityChannelId::One, 0, 50)));
+        let out = matching.receive_hit(hit(strike(VitalityChannelId::One, 0, 50)));
         assert!(!out.poise_broken, "50 of 60");
         let mut opposite = fighter();
-        let out = opposite.receive_hit(spill(strike(VitalityChannelId::Two, 0, 50)));
+        let out = opposite.receive_hit(hit(strike(VitalityChannelId::Two, 0, 50)));
         assert!(out.poise_broken, "50 x 1.25 = 62 of 60");
     }
 
     #[test]
-    fn stance_route_carries_only_when_asked() {
-        let config = CombatStanceConfig::DEFAULT;
-        let hazard = |carry| HitIn {
-            strike: strike(VitalityChannelId::One, 1000, 0),
-            stats: STATS,
-            route: HitRoute::Stance { config, carry },
-            poise: UNARMORED,
-        };
-        let mut plain = fighter();
-        let out = plain.receive_hit(hazard(false));
-        assert_eq!(plain.health(), [0, 100]);
-        assert!(!out.defeated, "the forced swap absorbs the rest");
-        let mut carried = fighter();
-        let out = carried.receive_hit(hazard(true));
-        assert_eq!(carried.health(), [0, 0]);
+    fn a_hit_bigger_than_the_bar_is_lethal() {
+        let mut c = fighter();
+        let out = c.receive_hit(hit(Strike {
+            kind: HitKind::Hazard,
+            ..strike(VitalityChannelId::One, 1000, 0)
+        }));
+        assert_eq!(c.health(), 0);
+        assert_eq!(out.damage_applied, 200);
         assert!(out.defeated && out.killed);
+        let again = c.receive_hit(hit(strike(VitalityChannelId::One, 5, 0)));
+        assert!(
+            again.defeated && !again.killed,
+            "only the emptying hit kills"
+        );
     }
 
     #[test]
-    fn a_poise_only_hit_leaves_the_pools_alone() {
+    fn a_poise_only_hit_leaves_the_bar_alone() {
         let mut c = fighter();
-        let hit = HitIn {
-            strike: strike(VitalityChannelId::Two, 0, 60),
-            stats: STATS,
-            route: HitRoute::Stance {
-                config: CombatStanceConfig::DEFAULT,
-                carry: false,
-            },
-            poise: UNARMORED,
-        };
-        let out = c.receive_hit(hit);
-        assert_eq!(c.health(), [100, 100]);
+        let out = c.receive_hit(hit(strike(VitalityChannelId::Two, 0, 60)));
+        assert_eq!(c.health(), 200);
         assert_eq!(out.damage_applied, 0);
         assert!(out.poise_broken);
+    }
+
+    #[test]
+    fn restoring_tops_up_health_and_energy_to_their_ceilings() {
+        let mut c = fighter();
+        c.health.apply_damage(150);
+        assert!(c.flow.spend_shot(&STATS));
+        assert_eq!(c.restore(30, 5, &STATS), 30);
+        assert_eq!((c.health(), c.flow.energy), (80, 85));
+        assert_eq!(c.restore(500, 500, &STATS), 120);
+        assert_eq!((c.health(), c.flow.energy), (200, 100));
+    }
+
+    #[test]
+    fn an_arch_restores_health_and_energy_on_one_beat() {
+        let mut c = fighter();
+        c.health.apply_damage(100);
+        c.flow.energy = 0;
+        for _ in 0..60 {
+            assert!(!c.air_tick(true, false, false, &STATS));
+        }
+        assert_eq!((c.health(), c.flow.energy), (120, 20));
+        for _ in 0..60 {
+            c.air_tick(true, false, true, &STATS);
+        }
+        assert_eq!((c.health(), c.flow.energy), (120, 20), "firing pauses both");
     }
 }

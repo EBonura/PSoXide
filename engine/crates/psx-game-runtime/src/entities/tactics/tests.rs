@@ -29,8 +29,8 @@ const fn enemy() -> LevelGameEntityRecord {
     r.heavy_attack_active_ticks = 96;
     r.ranged_attack_active_ticks = 148;
     r.recovery_ticks = 24;
-    r.combat.max_health = 600;
-    r.combat.max_health_secondary = 600;
+    // The two old 600 pools as one bar.
+    r.combat.max_health = 1200;
     r
 }
 static ENEMY: [LevelGameEntityRecord; 1] = [enemy()];
@@ -667,7 +667,7 @@ fn elevated_target_does_not_bait_ground_melee() {
     for _ in 0..900 {
         let mut target = input([0, 160, 180]);
         // Ordinarily this exposed-channel hint would request the melee stance.
-        target.player_combat = Some((VitalityChannelId::Two, [100, 100]));
+        target.player_combat = Some(VitalityChannelId::Two);
         e.tick_delta(&ENEMY, target, &mut arena, 1);
         if e.state(0) == GameEntityState::Windup {
             assert_eq!(e.selected_attack_kind(0), GAME_ENTITY_ATTACK_RANGED);

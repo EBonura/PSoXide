@@ -554,72 +554,46 @@ fn draw_chamfered(gpu: &mut Gpu, x: i16, y: i16, w: i16, h: i16, cut: i16, color
     ));
 }
 
-/// Draw the targeted enemy's dual vitality with the same visual grammar and
-/// swap motion as the player HUD, but at a much smaller scale and without a
-/// cooldown diamond. Enemy swap timing is intentionally internal; the moving
-/// bars and model-colour sweep communicate the stance change itself.
+/// Draw the targeted enemy's health and energy with the same visual grammar
+/// as the player HUD, at a much smaller scale. The health bar is on top, in
+/// the colour of the stance the enemy holds (the stance reads off it); the
+/// energy bar sits under it in the ammunition gems' colour.
 pub(crate) fn draw_enemy_vitality_hud(
     gpu: &mut Gpu,
     font: &FontAtlas,
     left_x: i16,
     top_y: i16,
-    active: VitalityChannelId,
-    active_fill_q12: u16,
-    inactive_fill_q12: u16,
-    swap_motion_progress_q12: u16,
+    stance: VitalityChannelId,
+    health_q12: u16,
+    energy_q12: u16,
 ) {
-    let (active_rgb, _) = vitality_channel_style(active);
-    let (inactive_rgb, _) = vitality_channel_style(active.other());
-    let (incoming, outgoing) =
-        enemy_vitality_swap_geometry(left_x, top_y, swap_motion_progress_q12);
-
-    if swap_motion_progress_q12 < 2048 {
-        draw_vitality_bar(
-            gpu,
-            font,
-            incoming.bounds,
-            incoming.cut,
-            active_fill_q12,
-            active_rgb,
-            "",
-        );
-        draw_vitality_bar(
-            gpu,
-            font,
-            outgoing.bounds,
-            outgoing.cut,
-            inactive_fill_q12,
-            inactive_rgb,
-            "",
-        );
-    } else {
-        draw_vitality_bar(
-            gpu,
-            font,
-            outgoing.bounds,
-            outgoing.cut,
-            inactive_fill_q12,
-            inactive_rgb,
-            "",
-        );
-        draw_vitality_bar(
-            gpu,
-            font,
-            incoming.bounds,
-            incoming.cut,
-            active_fill_q12,
-            active_rgb,
-            "",
-        );
-    }
+    let (health, energy) = enemy_vitality_resting_geometry(left_x, top_y);
+    draw_vitality_bar(
+        gpu,
+        font,
+        health.bounds,
+        health.cut,
+        health_q12,
+        vitality_channel_rgb(stance),
+        "",
+    );
+    draw_vitality_bar(
+        gpu,
+        font,
+        energy.bounds,
+        energy.cut,
+        energy_q12,
+        ENERGY_RGB,
+        "",
+    );
 }
 
 #[inline(always)]
-fn vitality_channel_style(channel: VitalityChannelId) -> ((u8, u8, u8), &'static str) {
+fn vitality_channel_rgb(channel: VitalityChannelId) -> (u8, u8, u8) {
     if channel == VitalityChannelId::One {
-        ((234, 82, 48), "HRZ")
+        (234, 82, 48)
     } else {
-        ((76, 202, 181), "ZTH")
+        (76, 202, 181)
     }
 }
 
@@ -629,92 +603,23 @@ struct VitalityBarGeometry {
     cut: i16,
 }
 
-/// Resting enemy bars share one left edge and touch at one horizontal edge. The
-/// active shell is one pixel taller above and below and appreciably wider,
-/// while the whole 76x18 cluster stays smaller than even the player's
-/// inactive 104x11 bar.
+/// The enemy bars share one left edge and touch at one horizontal edge. The
+/// health shell is one pixel taller above and below and appreciably wider,
+/// while the whole 76x18 cluster stays smaller than the player's HUD.
 #[inline(always)]
 fn enemy_vitality_resting_geometry(
     left_x: i16,
     top_y: i16,
 ) -> (VitalityBarGeometry, VitalityBarGeometry) {
-    let active = VitalityBarGeometry {
+    let health = VitalityBarGeometry {
         bounds: (left_x, top_y, 76, 10),
         cut: 5,
     };
-    let inactive = VitalityBarGeometry {
+    let energy = VitalityBarGeometry {
         bounds: (left_x, top_y + 10, 56, 8),
         cut: 4,
     };
-    (active, inactive)
-}
-
-#[inline(always)]
-fn enemy_vitality_swap_geometry(
-    left_x: i16,
-    top_y: i16,
-    progress_q12: u16,
-) -> (VitalityBarGeometry, VitalityBarGeometry) {
-    let (active, inactive) = enemy_vitality_resting_geometry(left_x, top_y);
-    vitality_swap_geometry_between(inactive, active, progress_q12, -2, 4)
-}
-
-#[inline(always)]
-fn vitality_swap_geometry_between(
-    inactive: VitalityBarGeometry,
-    active: VitalityBarGeometry,
-    progress_q12: u16,
-    incoming_arc_pixels: i16,
-    outgoing_arc_pixels: i16,
-) -> (VitalityBarGeometry, VitalityBarGeometry) {
-    let raw_t = progress_q12.min(4096);
-    let t = smoothstep_q12(raw_t);
-    // 4t(1-t), in Q12: zero at both endpoints and one at the midpoint.
-    let arc_q12 = ((i32::from(raw_t) * i32::from(4096 - raw_t)) >> 10) as u16;
-
-    let incoming = lerp_bar(inactive, active, t, incoming_arc_pixels, arc_q12);
-    let outgoing = lerp_bar(active, inactive, t, outgoing_arc_pixels, arc_q12);
-    (incoming, outgoing)
-}
-
-#[inline(always)]
-fn lerp_bar(
-    from: VitalityBarGeometry,
-    to: VitalityBarGeometry,
-    t_q12: u16,
-    arc_pixels: i16,
-    arc_q12: u16,
-) -> VitalityBarGeometry {
-    let (from_x, from_y, from_w, from_h) = from.bounds;
-    let (to_x, to_y, to_w, to_h) = to.bounds;
-    VitalityBarGeometry {
-        bounds: (
-            lerp_i16(from_x, to_x, t_q12) + lerp_i16(0, arc_pixels, arc_q12),
-            lerp_i16(from_y, to_y, t_q12),
-            lerp_i16(from_w, to_w, t_q12),
-            lerp_i16(from_h, to_h, t_q12),
-        ),
-        cut: lerp_i16(from.cut, to.cut, t_q12),
-    }
-}
-
-#[inline(always)]
-fn smoothstep_q12(value: u16) -> u16 {
-    let t = i32::from(value.min(4096));
-    let t_squared = (t * t) >> 12;
-    ((t_squared * (12288 - 2 * t)) >> 12) as u16
-}
-
-#[inline(always)]
-fn lerp_i16(from: i16, to: i16, t_q12: u16) -> i16 {
-    let delta = i32::from(to) - i32::from(from);
-    let scaled = delta * i32::from(t_q12.min(4096));
-    let rounded = if scaled >= 0 {
-        scaled + 2048
-    } else {
-        scaled - 2048
-    };
-    from + (rounded / 4096) as i16
+    (health, energy)
 }
 
 #[inline(never)]
@@ -788,25 +693,15 @@ fn draw_vitality_bar(
 
 #[cfg(test)]
 mod vitality_hud_tests {
-    use super::{enemy_vitality_resting_geometry, enemy_vitality_swap_geometry};
+    use super::enemy_vitality_resting_geometry;
 
     #[test]
     fn enemy_bars_are_smaller_left_aligned_and_edge_attached() {
-        let (active, inactive) = enemy_vitality_resting_geometry(160, 34);
-        assert_eq!(active.bounds.3, inactive.bounds.3 + 2);
-        assert_eq!(active.bounds.1 + active.bounds.3, inactive.bounds.1);
-        assert_eq!(active.bounds.0, 160);
-        assert_eq!(inactive.bounds.0, 160);
-    }
-
-    #[test]
-    fn enemy_swap_preserves_both_compact_resting_endpoints() {
-        let (active, inactive) = enemy_vitality_resting_geometry(160, 34);
-        assert_eq!(enemy_vitality_swap_geometry(160, 34, 0), (inactive, active));
-        assert_eq!(
-            enemy_vitality_swap_geometry(160, 34, 4096),
-            (active, inactive)
-        );
+        let (health, energy) = enemy_vitality_resting_geometry(160, 34);
+        assert_eq!(health.bounds.3, energy.bounds.3 + 2);
+        assert_eq!(health.bounds.1 + health.bounds.3, energy.bounds.1);
+        assert_eq!(health.bounds.0, 160);
+        assert_eq!(energy.bounds.0, 160);
     }
 }
 

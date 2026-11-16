@@ -265,9 +265,9 @@ fn an_old_project_folds_enemy_health_and_poise_into_combat_stats() {
         )
         .replace("touch_damage: 12,", "poise: 40, touch_damage: 12,")
         .replace(
-            "stance_regen_delay_ticks:",
+            "stance_swap_cooldown_ticks:",
             "stance_aligned_damage_q12: 2048, stance_opposed_damage_q12: 6144, \
-             stance_regen_delay_ticks:",
+             stance_regen_delay_ticks: 90, stance_swap_cooldown_ticks:",
         );
     assert!(text.contains("max_health: 300"));
     assert!(text.contains("poise: 40"));
@@ -279,21 +279,17 @@ fn an_old_project_folds_enemy_health_and_poise_into_combat_stats() {
         _ => unreachable!(),
     };
     let stats = character(enemy).combat.expect("folded on load");
-    assert_eq!(
-        (stats.max_health, stats.max_health_secondary, stats.poise),
-        (300, 200, 25)
-    );
+    // The two old pools, 300 and 200, load as one 500 bar.
+    assert_eq!((stats.max_health, stats.poise), (500, 25));
     assert_eq!(stats.opposite_damage_q12, 5120);
     assert_eq!(character(enemy).enemy_behavior.unwrap().legacy_poise, None);
     // An enemy with no block ran on the old enemy defaults, and needs no
     // record to keep them.
     assert_eq!(character(bare_enemy).combat, None);
     let stats = character(bare_enemy).combat_stats();
-    assert_eq!(
-        (stats.max_health, stats.max_health_secondary, stats.poise),
-        (100, 100, 100)
-    );
-    // The player ran on the old constants: 100 per pool, poise 60.
+    assert_eq!((stats.max_health, stats.poise), (200, 100));
+    // The player ran on the old constants: 100 per pool (one 200 bar),
+    // poise 60.
     assert_eq!(character(player).combat_stats(), CombatStats::PLAYER);
     assert_eq!(CombatStats::PLAYER.poise, 60);
     let NodeKind::CharacterController {
@@ -304,15 +300,60 @@ fn an_old_project_folds_enemy_health_and_poise_into_combat_stats() {
         unreachable!()
     };
     assert_eq!(settings.combat.unwrap().poise, 40);
-    assert_eq!(settings.combat.unwrap().max_health, 100);
+    // No old pools written: both old defaults, 100 and 100.
+    assert_eq!(settings.combat.unwrap().max_health, 200);
 
     // Saved again, the record is written and the old fields are gone, and
     // it reads back the same.
     let saved = loaded.to_ron_string().unwrap();
     assert!(saved.contains("combat: Some("));
     assert!(!saved.contains("stance_opposed_damage_q12"));
+    assert!(!saved.contains("stance_regen_delay_ticks"));
+    assert!(!saved.contains("max_health_secondary"));
     let again = ProjectDocument::from_ron_str(&saved).unwrap();
     assert_eq!(again.to_ron_string().unwrap(), saved);
+}
+
+#[test]
+fn a_two_pool_combat_record_loads_as_one_health_bar() {
+    let load = |text: &str| ron::from_str::<CombatStats>(text).unwrap();
+    // Written while health was two pools: they load summed.
+    let stats = load("(max_health: 120, max_health_secondary: 80, poise: 30)");
+    assert_eq!((stats.max_health, stats.poise), (200, 30));
+    // A missing first pool was the old default, 100.
+    assert_eq!(load("(max_health_secondary: 50)").max_health, 150);
+    // The current form: one bar, as written, or the starting 200.
+    assert_eq!(load("(max_health: 90)").max_health, 90);
+    assert_eq!(load("()"), CombatStats::PLAYER);
+    assert_eq!(CombatStats::PLAYER.max_health, 200);
+    // And it writes back in the current form.
+    let text = ron::to_string(&stats).unwrap();
+    assert!(!text.contains("max_health_secondary"));
+    assert_eq!(load(&text), stats);
+}
+
+#[test]
+fn two_pool_ui_bindings_load_as_health_and_energy() {
+    let load = |text: &str| ron::from_str::<UiValueBinding>(text).unwrap();
+    assert_eq!(load("TargetHealthSecondary"), UiValueBinding::TargetEnergy);
+    assert_eq!(
+        load("TargetHealthSecondaryMax"),
+        UiValueBinding::TargetEnergyMax
+    );
+    assert_eq!(load("PlayerHealthSecondary"), UiValueBinding::PlayerEnergy);
+    assert_eq!(
+        load("PlayerHealthSecondaryFullInfluence"),
+        UiValueBinding::PlayerEnergyFullInfluence
+    );
+    assert_eq!(
+        load("PlayerStanceActiveHealth"),
+        UiValueBinding::PlayerHealth
+    );
+    assert_eq!(
+        load("PlayerStanceInactiveHealthMax"),
+        UiValueBinding::PlayerHealthMax
+    );
+    assert_eq!(load("TargetHealth"), UiValueBinding::TargetHealth);
 }
 
 #[test]

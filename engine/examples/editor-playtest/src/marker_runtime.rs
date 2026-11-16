@@ -837,14 +837,16 @@ pub(super) fn draw_target_reticle(
     }
 }
 
-/// Dual vitality around the shared aim brackets. The active coloured rim
-/// marks the guarded stance even when that channel's vitality is empty.
+/// Health (left arc) and energy (right arc) around the shared aim brackets.
+/// The health arc and its outline take the colour of the stance the target
+/// holds, so the stance reads even when its health is low; energy is in the
+/// ammunition gems' colour.
 pub(super) fn draw_lock_target_readout(
     gpu: &mut Gpu,
     mut center: ProjectedVertex,
     stance: VitalityChannelId,
-    horizon: u16,
-    zenith: u16,
+    health: u16,
+    energy: u16,
 ) {
     center.sx = center.sx.saturating_sub(4);
     center.sy = center.sy.saturating_sub(2);
@@ -852,7 +854,6 @@ pub(super) fn draw_lock_target_readout(
         return;
     }
     let muted = (44, 48, 52);
-    let inactive = (128, 136, 140);
     let line = |gpu: &mut Gpu, a: (i32, i32), b: (i32, i32), color| {
         let x0 = center.sx.saturating_add(a.0 as i16);
         let y0 = center.sy.saturating_add(a.1 as i16);
@@ -894,14 +895,14 @@ pub(super) fn draw_lock_target_readout(
             color.2,
         ));
     };
-    for (channel, fill, start) in [
-        (VitalityChannelId::One, horizon, 130 * 4096 / 360),
-        (VitalityChannelId::Two, zenith, -50 * 4096 / 360),
+    for (is_health, fill, start) in [
+        (true, health, 130 * 4096 / 360),
+        (false, energy, -50 * 4096 / 360),
     ] {
-        let rgb = if channel == stance {
-            stance_rgb(channel)
+        let rgb = if is_health {
+            stance_rgb(stance)
         } else {
-            inactive
+            ENERGY_RGB
         };
         for segment in 0..10 {
             let a = start + segment * 100 * 4096 / 3600;
@@ -912,7 +913,7 @@ pub(super) fn draw_lock_target_readout(
             if amount > 0 {
                 sector(gpu, a, a + (b - a) * amount / 4096, 48, 53, rgb);
             }
-            if channel == stance {
+            if is_health {
                 // An independent outline never pretends to be remaining HP.
                 let end = start + (segment + 1) * 100 * 4096 / 3600;
                 line(gpu, point(a, 57), point(end, 57), rgb);

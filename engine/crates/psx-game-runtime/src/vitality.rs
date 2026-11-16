@@ -1,20 +1,26 @@
-//! Dual-pool vitality and continuous endpoint-power policy.
+//! The health bar, the boost sockets on the health and energy bars, and the
+//! stance.
 //!
-//! Every vitality pool has two boost sockets: one at empty and one at full.
-//! Their influence fades linearly toward the pool midpoint, where both are
-//! dormant. Damage routing remains game-owned: typed attacks may select one
-//! channel, while legacy untyped attacks can use [`DualVitality::apply_spill`].
+//! Every fighter has one health bar ([`VitalityPool`]). Damage empties it and
+//! nothing refills it during play: only a respawn, an arch or a checkpoint
+//! restores it. The stance ([`CombatStance`]) is which of the two sides,
+//! blade (Horizon) or Zenith, a fighter fights from; it no longer owns any
+//! health.
+//!
+//! Every bar has two boost sockets, one at empty and one at full. Their
+//! influence fades linearly toward the bar's midpoint, where both are
+//! dormant. Two sockets sit on the health bar and two on the energy bar.
 
 /// Fixed-point unity used by vitality influence and player modifiers.
 pub const VITALITY_Q12_ONE: u16 = 4096;
 
-/// One of the actor's two equal-status vitality channels.
+/// One of the two stances, and the channel an attack comes from.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum VitalityChannelId {
-    /// First vitality channel (Horizon in Cortex Ignition).
+    /// The blade stance (Horizon in Cortex Ignition).
     One = 0,
-    /// Second vitality channel (Zenith in Cortex Ignition).
+    /// The Zenith stance.
     Two = 1,
 }
 
@@ -24,7 +30,7 @@ impl VitalityChannelId {
         self as usize
     }
 
-    /// The other vitality channel.
+    /// The other channel.
     pub const fn other(self) -> Self {
         match self {
             Self::One => Self::Two,
@@ -33,51 +39,29 @@ impl VitalityChannelId {
     }
 }
 
-/// One endpoint of a vitality channel.
+/// One endpoint of a bar.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum VitalityPole {
-    /// Zero-health, high-risk endpoint.
+    /// Empty, high-risk endpoint.
     Empty = 0,
-    /// Full-health, stable endpoint.
+    /// Full, stable endpoint.
     Full = 1,
 }
 
-/// Whether a vitality channel is exactly at an endpoint or between them.
+/// Whether a bar is exactly at an endpoint or between them.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum VitalityEdgeState {
-    /// No vitality remains.
+    /// Nothing remains.
     Empty,
-    /// The channel is neither empty nor full.
+    /// The bar is neither empty nor full.
     Between,
-    /// Vitality is at its maximum.
+    /// The bar is at its maximum.
     Full,
 }
 
-/// Opposing empty/full influence weights for one vitality channel.
-///
-/// Both values are Q12. At zero health `empty_q12` is 4096; at half health
-/// both are zero; at full health `full_q12` is 4096. The two sides never
-/// overlap, keeping the midpoint a genuine no-upgrade neutral state.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub struct VitalityPolarity {
-    /// Empty-end influence, `0..=4096`.
-    pub empty_q12: u16,
-    /// Full-end influence, `0..=4096`.
-    pub full_q12: u16,
-}
-
-impl VitalityPolarity {
-    /// Influence at one endpoint.
-    pub const fn at(self, pole: VitalityPole) -> u16 {
-        match pole {
-            VitalityPole::Empty => self.empty_q12,
-            VitalityPole::Full => self.full_q12,
-        }
-    }
-}
-
-/// One bounded vitality pool.
+/// One bounded bar: a fighter's health, or a view of its energy for the
+/// boost sockets.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct VitalityPool {
     current: u16,
@@ -85,7 +69,7 @@ pub struct VitalityPool {
 }
 
 impl VitalityPool {
-    /// Create a full pool. A zero authored maximum is normalized to one so all
+    /// Create a full bar. A zero authored maximum is normalized to one so all
     /// ratio consumers keep a valid denominator.
     pub const fn full(maximum: u16) -> Self {
         let maximum = if maximum == 0 { 1 } else { maximum };
@@ -95,27 +79,27 @@ impl VitalityPool {
         }
     }
 
-    /// Create a pool at an explicit current value.
-    ///
-    /// Runtimes that keep `current` in a dense state table and `maximum` in
-    /// the cooked record (the entity SoA does exactly that) rehydrate a pool
-    /// through here rather than duplicating the maximum per actor. A zero
-    /// authored maximum normalizes exactly as [`Self::full`] does, and a
-    /// current past the maximum clamps.
+    /// Create a bar at an explicit current value. A zero maximum normalizes
+    /// exactly as [`Self::full`] does, and a current past the maximum clamps.
     pub const fn at(current: u16, maximum: u16) -> Self {
         let maximum = if maximum == 0 { 1 } else { maximum };
         let current = if current > maximum { maximum } else { current };
         Self { current, maximum }
     }
 
-    /// Current vitality.
+    /// Current value.
     pub const fn current(self) -> u16 {
         self.current
     }
 
-    /// Maximum vitality.
+    /// Maximum value.
     pub const fn maximum(self) -> u16 {
         self.maximum
+    }
+
+    /// Whether nothing remains: for health, the fighter is defeated.
+    pub const fn is_empty(self) -> bool {
+        self.current == 0
     }
 
     /// Exact endpoint state, retained for endpoint-specific presentation.
@@ -129,180 +113,43 @@ impl VitalityPool {
         }
     }
 
-    /// Continuous empty/full influence around the neutral midpoint.
-    pub fn polarity(self) -> VitalityPolarity {
+    /// Influence of one endpoint's socket, Q12: 4096 exactly at that
+    /// endpoint, fading linearly to zero at the midpoint and staying zero
+    /// past it. The two endpoints never overlap, which keeps the midpoint a
+    /// genuine no-upgrade neutral state.
+    pub fn influence_q12(self, pole: VitalityPole) -> u16 {
         let maximum = u32::from(self.maximum.max(1));
         let twice_current = u32::from(self.current.min(self.maximum)).saturating_mul(2);
-        if twice_current < maximum {
-            VitalityPolarity {
-                empty_q12: (((maximum - twice_current) * u32::from(VITALITY_Q12_ONE)) / maximum)
-                    as u16,
-                full_q12: 0,
-            }
-        } else if twice_current > maximum {
-            VitalityPolarity {
-                empty_q12: 0,
-                full_q12: (((twice_current - maximum) * u32::from(VITALITY_Q12_ONE)) / maximum)
-                    as u16,
-            }
-        } else {
-            VitalityPolarity::default()
-        }
+        let distance = match pole {
+            VitalityPole::Empty => maximum.saturating_sub(twice_current),
+            VitalityPole::Full => twice_current.saturating_sub(maximum),
+        };
+        ((distance * u32::from(VITALITY_Q12_ONE)) / maximum) as u16
     }
 
-    fn apply_damage(&mut self, damage: u16) -> u16 {
+    /// Remove up to `damage`, returning what was actually removed.
+    pub fn apply_damage(&mut self, damage: u16) -> u16 {
         let before = self.current;
         self.current = self.current.saturating_sub(damage);
         before - self.current
     }
 
-    fn refill(&mut self) {
+    /// Fill to the maximum.
+    pub fn refill(&mut self) {
         self.current = self.maximum;
     }
 
-    fn heal(&mut self, amount: u16) -> u16 {
+    /// Restore up to `amount`, returning what was actually restored.
+    pub fn heal(&mut self, amount: u16) -> u16 {
         let before = self.current;
         self.current = self.current.saturating_add(amount).min(self.maximum);
         self.current - before
     }
 
-    fn empty(&mut self) {
+    /// Empty the bar, for an unconditional environmental death.
+    pub fn empty(&mut self) {
         self.current = 0;
     }
-}
-
-/// A player's or enemy's two vitality pools.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct DualVitality {
-    pools: [VitalityPool; 2],
-}
-
-impl DualVitality {
-    /// Create two full, equal-capacity vitality pools.
-    pub const fn equal(maximum_each: u16) -> Self {
-        let pool = VitalityPool::full(maximum_each);
-        Self {
-            pools: [pool, pool],
-        }
-    }
-
-    /// Rehydrate both channels from separately stored pools, so a runtime
-    /// holding its two currents in parallel arrays can borrow this type's
-    /// damage/spill/defeat rules verbatim instead of restating them.
-    pub const fn from_pools(first: VitalityPool, second: VitalityPool) -> Self {
-        Self {
-            pools: [first, second],
-        }
-    }
-
-    /// Read one channel.
-    pub const fn pool(&self, channel: VitalityChannelId) -> VitalityPool {
-        self.pools[channel.index()]
-    }
-
-    /// Whether both vitality channels are empty.
-    pub const fn is_defeated(&self) -> bool {
-        self.pools[0].current == 0 && self.pools[1].current == 0
-    }
-
-    /// Apply damage to an explicitly selected channel.
-    ///
-    /// Typed attacks use this path: excess damage does not cross into the
-    /// other colour/channel.
-    pub fn apply_damage(
-        &mut self,
-        channel: VitalityChannelId,
-        damage: u16,
-    ) -> DualVitalityDamageOutcome {
-        let was_defeated = self.is_defeated();
-        let pool = &mut self.pools[channel.index()];
-        let was_alive = pool.current > 0;
-        let damage_applied = pool.apply_damage(damage);
-        let channel_depleted = damage_applied > 0 && was_alive && pool.current == 0;
-        let current = pool.current;
-        DualVitalityDamageOutcome {
-            channel,
-            current,
-            damage_applied,
-            channel_depleted,
-            actor_defeated: !was_defeated && channel_depleted && self.is_defeated(),
-        }
-    }
-
-    /// Apply legacy/untyped damage to `first`, spilling only the excess into
-    /// the other pool. This gives old attacks a deterministic migration path
-    /// while preserving typed attacks' channel isolation.
-    pub fn apply_spill(
-        &mut self,
-        first: VitalityChannelId,
-        damage: u16,
-    ) -> DualVitalitySpillOutcome {
-        let was_defeated = self.is_defeated();
-        let first_before = self.pool(first).current();
-        let first_outcome = self.apply_damage(first, damage);
-        let remainder = damage.saturating_sub(first_before);
-        let second = first.other();
-        let second_outcome = self.apply_damage(second, remainder);
-        DualVitalitySpillOutcome {
-            first,
-            first_current: first_outcome.current,
-            second_current: second_outcome.current,
-            damage_applied: first_outcome
-                .damage_applied
-                .saturating_add(second_outcome.damage_applied),
-            actor_defeated: !was_defeated && self.is_defeated(),
-        }
-    }
-
-    /// Refill both channels for a spawn or checkpoint respawn.
-    pub fn refill(&mut self) {
-        self.pools[0].refill();
-        self.pools[1].refill();
-    }
-
-    /// Restore up to `amount` to one channel, returning what was actually
-    /// restored. Regeneration needs a partial top-up; `refill` is all or
-    /// nothing.
-    pub fn heal(&mut self, channel: VitalityChannelId, amount: u16) -> u16 {
-        self.pools[channel.index()].heal(amount)
-    }
-
-    /// Empty both channels for an unconditional environmental death.
-    pub fn empty_all(&mut self) {
-        self.pools[0].empty();
-        self.pools[1].empty();
-    }
-}
-
-/// Result of one channel-targeted damage application.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct DualVitalityDamageOutcome {
-    /// Channel that received the damage.
-    pub channel: VitalityChannelId,
-    /// Remaining vitality in that channel.
-    pub current: u16,
-    /// Damage consumed by this channel after saturation.
-    pub damage_applied: u16,
-    /// Whether this application newly emptied the selected channel.
-    pub channel_depleted: bool,
-    /// Whether this application newly emptied the actor's second remaining
-    /// channel and should therefore arm one death/game-over sequence.
-    pub actor_defeated: bool,
-}
-
-/// Result of one legacy damage application that may cross both channels.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct DualVitalitySpillOutcome {
-    /// Channel consumed first.
-    pub first: VitalityChannelId,
-    /// Remaining vitality in the first channel.
-    pub first_current: u16,
-    /// Remaining vitality in the other channel.
-    pub second_current: u16,
-    /// Total damage consumed across both channels.
-    pub damage_applied: u16,
-    /// Whether both channels became empty in this application.
-    pub actor_defeated: bool,
 }
 
 /// Dense id into the cooked unique module table.
@@ -343,27 +190,40 @@ impl Default for BoostModuleId {
     }
 }
 
-/// One of the four assignment sockets around the mirrored dual-health module.
+/// The two bars a fighter's boost sockets sit on.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum BoostBar {
+    /// The health bar.
+    Health,
+    /// The energy bar.
+    Energy,
+}
+
+/// One of the four assignment sockets, two on each bar's endpoints.
+///
+/// The health sockets are the ones that sat on the Horizon pool and the
+/// energy sockets the ones that sat on the Zenith pool, so a loadout keeps
+/// its meaning and its stance across the change to one health bar.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum BoostSlotId {
-    /// Horizon empty endpoint.
-    HorizonEmpty = 0,
-    /// Horizon full endpoint.
-    HorizonFull = 1,
-    /// Zenith empty endpoint.
-    ZenithEmpty = 2,
-    /// Zenith full endpoint.
-    ZenithFull = 3,
+    /// Health bar, empty endpoint.
+    HealthEmpty = 0,
+    /// Health bar, full endpoint.
+    HealthFull = 1,
+    /// Energy bar, empty endpoint.
+    EnergyEmpty = 2,
+    /// Energy bar, full endpoint.
+    EnergyFull = 3,
 }
 
 impl BoostSlotId {
     /// All slots in runtime/menu order.
     pub const ALL: [Self; 4] = [
-        Self::HorizonEmpty,
-        Self::HorizonFull,
-        Self::ZenithEmpty,
-        Self::ZenithFull,
+        Self::HealthEmpty,
+        Self::HealthFull,
+        Self::EnergyEmpty,
+        Self::EnergyFull,
     ];
 
     /// Dense index into [`PowerUpLoadout`].
@@ -371,34 +231,63 @@ impl BoostSlotId {
         self as usize
     }
 
-    /// Owning vitality channel.
-    pub const fn channel(self) -> VitalityChannelId {
+    /// The bar whose level drives this socket.
+    pub const fn bar(self) -> BoostBar {
         match self {
-            Self::HorizonEmpty | Self::HorizonFull => VitalityChannelId::One,
-            Self::ZenithEmpty | Self::ZenithFull => VitalityChannelId::Two,
+            Self::HealthEmpty | Self::HealthFull => BoostBar::Health,
+            Self::EnergyEmpty | Self::EnergyFull => BoostBar::Energy,
+        }
+    }
+
+    /// The stance whose sockets these are: only the active stance's two
+    /// sockets act. Health sockets belong to the blade stance (they were the
+    /// Horizon pool's), energy sockets to Zenith.
+    pub const fn stance(self) -> VitalityChannelId {
+        match self.bar() {
+            BoostBar::Health => VitalityChannelId::One,
+            BoostBar::Energy => VitalityChannelId::Two,
         }
     }
 
     /// Endpoint this socket radiates from.
     pub const fn pole(self) -> VitalityPole {
         match self {
-            Self::HorizonEmpty | Self::ZenithEmpty => VitalityPole::Empty,
-            Self::HorizonFull | Self::ZenithFull => VitalityPole::Full,
+            Self::HealthEmpty | Self::EnergyEmpty => VitalityPole::Empty,
+            Self::HealthFull | Self::EnergyFull => VitalityPole::Full,
         }
     }
 
     /// Decode a dense menu selection index.
     pub const fn from_index(index: u8) -> Self {
         match index {
-            1 => Self::HorizonFull,
-            2 => Self::ZenithEmpty,
-            3 => Self::ZenithFull,
-            _ => Self::HorizonEmpty,
+            1 => Self::HealthFull,
+            2 => Self::EnergyEmpty,
+            3 => Self::EnergyFull,
+            _ => Self::HealthEmpty,
         }
     }
 }
 
-/// Four assignable power-up sockets, two around each vitality channel.
+/// The levels the boost sockets read: the health bar and the energy bar.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct BoostBars {
+    /// The fighter's health.
+    pub health: VitalityPool,
+    /// The fighter's energy, as current over its ceiling.
+    pub energy: VitalityPool,
+}
+
+impl BoostBars {
+    /// The bar one socket reads.
+    pub const fn of(self, slot: BoostSlotId) -> VitalityPool {
+        match slot.bar() {
+            BoostBar::Health => self.health,
+            BoostBar::Energy => self.energy,
+        }
+    }
+}
+
+/// Four assignable power-up sockets, two on each bar.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct PowerUpLoadout {
     slots: [BoostModuleId; 4],
@@ -429,26 +318,25 @@ impl PowerUpLoadout {
     /// Resolve the live fixed-point modifiers contributed by all four sockets.
     pub fn modifiers(
         self,
-        vitality: &DualVitality,
+        bars: BoostBars,
         modules: &[psx_level::BoostModuleRecord],
     ) -> VitalityModifiers {
-        self.modifiers_for(vitality, modules, None)
+        self.modifiers_for(bars, modules, None)
     }
 
-    /// The same sum restricted to one channel's two sockets.
+    /// The same sum restricted to one stance's two sockets.
     ///
-    /// Under the active-stance rules only the active state's boons act, so the
-    /// inactive state's sockets are inert until it is swapped to. Passing
-    /// `None` keeps the historical behaviour of summing all four.
+    /// Only the active stance's sockets act, so the other stance's sockets
+    /// are inert until it is swapped to. Passing `None` sums all four.
     pub fn modifiers_for(
         self,
-        vitality: &DualVitality,
+        bars: BoostBars,
         modules: &[psx_level::BoostModuleRecord],
         active: Option<VitalityChannelId>,
     ) -> VitalityModifiers {
         let mut bonuses_q12 = [0i32; psx_level::boost_stat::COUNT];
         for slot in BoostSlotId::ALL {
-            if active.is_some_and(|channel| slot.channel() != channel) {
+            if active.is_some_and(|channel| slot.stance() != channel) {
                 continue;
             }
             let module_id = self.module(slot);
@@ -456,7 +344,7 @@ impl PowerUpLoadout {
                 continue;
             };
             for (index, bonus) in bonuses_q12.iter_mut().enumerate() {
-                *bonus = bonus.saturating_add(module_stat_bonus_q12(vitality, slot, module, index));
+                *bonus = bonus.saturating_add(module_stat_bonus_q12(bars, slot, module, index));
             }
         }
 
@@ -478,8 +366,8 @@ impl PowerUpLoadout {
                 as u16,
             movement_speed_q12: multiplier(bonuses_q12[psx_level::boost_stat::MOVEMENT_SPEED]),
             attack_speed_q12: multiplier(bonuses_q12[psx_level::boost_stat::ATTACK_SPEED]),
-            // Keep the percentage bonus separate from the base recovery rate.
-            // Opposing module effects can cancel the bonus, never drain health.
+            // Keep the percentage bonus separate from any base rate.
+            // Opposing module effects can cancel the bonus, never go negative.
             regeneration_q12: bonuses_q12[psx_level::boost_stat::REGENERATION]
                 .clamp(0, i32::from(u16::MAX)) as u16,
         }
@@ -487,11 +375,11 @@ impl PowerUpLoadout {
 }
 
 /// One module's live signed percentage-point contribution in Q12 for a
-/// particular vitality socket and stat lane. The inventory uses the same
-/// calculation as gameplay so its `MODULE` column cannot disagree with the
-/// damage, defence, movement, or timeline multipliers actually applied.
+/// particular socket and stat lane. The inventory uses the same calculation
+/// as gameplay so its `MODULE` column cannot disagree with the damage,
+/// defence, movement, or timeline multipliers actually applied.
 pub fn module_stat_bonus_q12(
-    vitality: &DualVitality,
+    bars: BoostBars,
     slot: BoostSlotId,
     module: &psx_level::BoostModuleRecord,
     stat: usize,
@@ -499,10 +387,10 @@ pub fn module_stat_bonus_q12(
     let Some(percent) = module.percentages.get(stat) else {
         return 0;
     };
-    let influence = vitality.pool(slot.channel()).polarity().at(slot.pole());
-    // Empty-end sockets are the risk/reward side: 200% at zero health,
+    let influence = bars.of(slot).influence_q12(slot.pole());
+    // Empty-end sockets are the risk/reward side: 200% at an empty bar,
     // fading linearly to zero at the midpoint. Full-end sockets reach 100%
-    // only at full health and also fade to zero at the midpoint.
+    // only at a full bar and also fade to zero at the midpoint.
     let potency_q12 = match slot.pole() {
         VitalityPole::Empty => i32::from(influence).saturating_mul(2),
         VitalityPole::Full => i32::from(influence),
@@ -622,7 +510,7 @@ impl Default for BoostInventory {
     }
 }
 
-/// Live player-stat multipliers derived from vitality and assigned modules.
+/// Live player-stat multipliers derived from the bars and assigned modules.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct VitalityModifiers {
     /// Horizon attack damage multiplier (`4096 = 1.0x`).
@@ -635,8 +523,9 @@ pub struct VitalityModifiers {
     pub movement_speed_q12: u16,
     /// Whole attack-timeline speed multiplier (`4096 = 1.0x`).
     pub attack_speed_q12: u16,
-    /// Percentage recovery bonus for the inactive pool from the active state's
-    /// Regeneration modules (`4096` adds 100% of the authored base rate).
+    /// The Regeneration lane, `4096` = +100%. It sped up the inactive pool's
+    /// recovery, which the one health bar no longer has: nothing consumes it
+    /// until the owner gives Regeneration modules a one-bar effect.
     pub regeneration_q12: u16,
 }
 
@@ -835,106 +724,59 @@ mod tests {
         },
     ];
 
-    /// A single hit larger than BOTH pools must defeat the actor, and the
-    /// spill remainder must be computed in a width that can hold it. This is
-    /// the case a narrowing subtraction silently gets wrong: `damage` is u16
-    /// and so is the pool, so `damage - first_pool` looks safe right up until
-    /// someone changes a type.
-    #[test]
-    fn one_hit_larger_than_both_pools_defeats_the_actor() {
-        for damage in [u16::MAX, u16::MAX - 1, 60_000, 201, 200] {
-            let mut vitality = DualVitality::equal(100);
-            let outcome = vitality.apply_spill(VitalityChannelId::One, damage);
-            assert!(outcome.actor_defeated, "damage {damage} must defeat");
-            assert!(vitality.is_defeated(), "damage {damage}");
-            assert_eq!(outcome.first_current, 0);
-            assert_eq!(outcome.second_current, 0);
-            assert_eq!(outcome.damage_applied, 200, "damage {damage}");
+    /// Both bars full: health 200, energy 100.
+    fn full_bars() -> BoostBars {
+        BoostBars {
+            health: VitalityPool::full(200),
+            energy: VitalityPool::full(100),
         }
     }
 
-    /// Exactly one short leaves one point in the SECOND pool, alive.
+    /// A single hit larger than the bar must empty it, whatever its size,
+    /// and report only what the bar held.
     #[test]
-    fn one_short_of_both_pools_leaves_the_actor_alive() {
-        let mut vitality = DualVitality::equal(100);
-        let outcome = vitality.apply_spill(VitalityChannelId::One, 199);
-        assert!(!outcome.actor_defeated);
-        assert_eq!((outcome.first_current, outcome.second_current), (0, 1));
-        assert_eq!(outcome.damage_applied, 199);
-        assert!(
-            vitality
-                .apply_spill(VitalityChannelId::Two, 1)
-                .actor_defeated
-        );
+    fn one_hit_larger_than_the_bar_empties_it() {
+        for damage in [u16::MAX, u16::MAX - 1, 60_000, 201, 200] {
+            let mut health = VitalityPool::full(200);
+            assert_eq!(health.apply_damage(damage), 200, "damage {damage}");
+            assert!(health.is_empty(), "damage {damage}");
+        }
+    }
+
+    /// Exactly one short leaves one point, alive.
+    #[test]
+    fn one_short_of_the_bar_leaves_the_fighter_alive() {
+        let mut health = VitalityPool::full(200);
+        assert_eq!(health.apply_damage(199), 199);
+        assert_eq!(health.current(), 1);
+        assert!(!health.is_empty());
+        assert_eq!(health.apply_damage(1), 1);
+        assert!(health.is_empty());
     }
 
     #[test]
-    fn polarity_is_full_at_endpoints_and_zero_at_midpoint() {
-        let mut vitality = DualVitality::equal(100);
-        assert_eq!(
-            vitality.pool(VitalityChannelId::One).polarity(),
-            VitalityPolarity {
-                empty_q12: 0,
-                full_q12: 4096,
-            }
-        );
-
-        let _ = vitality.apply_damage(VitalityChannelId::One, 25);
-        assert_eq!(
-            vitality.pool(VitalityChannelId::One).polarity(),
-            VitalityPolarity {
-                empty_q12: 0,
-                full_q12: 2048,
-            }
-        );
-        let _ = vitality.apply_damage(VitalityChannelId::One, 25);
-        assert_eq!(
-            vitality.pool(VitalityChannelId::One).polarity(),
-            VitalityPolarity::default()
-        );
-        let _ = vitality.apply_damage(VitalityChannelId::One, 25);
-        assert_eq!(
-            vitality.pool(VitalityChannelId::One).polarity(),
-            VitalityPolarity {
-                empty_q12: 2048,
-                full_q12: 0,
-            }
-        );
-        let _ = vitality.apply_damage(VitalityChannelId::One, 25);
-        assert_eq!(
-            vitality.pool(VitalityChannelId::One).polarity(),
-            VitalityPolarity {
-                empty_q12: 4096,
-                full_q12: 0,
-            }
-        );
+    fn influence_is_full_at_endpoints_and_zero_at_midpoint() {
+        let influence = |current| {
+            let bar = VitalityPool::at(current, 100);
+            (
+                bar.influence_q12(VitalityPole::Empty),
+                bar.influence_q12(VitalityPole::Full),
+            )
+        };
+        assert_eq!(influence(100), (0, 4096));
+        assert_eq!(influence(75), (0, 2048));
+        assert_eq!(influence(50), (0, 0));
+        assert_eq!(influence(25), (2048, 0));
+        assert_eq!(influence(0), (4096, 0));
     }
 
     #[test]
-    fn defeat_requires_both_channels_to_be_empty() {
-        let mut vitality = DualVitality::equal(100);
-        let first = vitality.apply_damage(VitalityChannelId::One, 100);
-        assert!(first.channel_depleted);
-        assert!(!first.actor_defeated);
-        assert!(!vitality.is_defeated());
-
-        let second = vitality.apply_damage(VitalityChannelId::Two, 100);
-        assert!(second.channel_depleted);
-        assert!(second.actor_defeated);
-        assert!(vitality.is_defeated());
-    }
-
-    #[test]
-    fn legacy_damage_spills_in_order_and_only_defeats_after_both() {
-        let mut vitality = DualVitality::equal(100);
-        let first = vitality.apply_spill(VitalityChannelId::One, 130);
-        assert_eq!(first.first_current, 0);
-        assert_eq!(first.second_current, 70);
-        assert!(!first.actor_defeated);
-
-        let lethal = vitality.apply_spill(VitalityChannelId::One, 80);
-        assert_eq!(lethal.second_current, 0);
-        assert!(lethal.actor_defeated);
+    fn defeat_is_the_one_bar_empty() {
+        let mut health = VitalityPool::full(200);
+        assert_eq!(health.apply_damage(100), 100);
+        assert!(!health.is_empty(), "half the bar is not defeat");
+        assert_eq!(health.apply_damage(100), 100);
+        assert!(health.is_empty());
     }
 
     #[test]
@@ -947,21 +789,21 @@ mod tests {
                 BoostModuleId::NONE,
             ],
         };
-        let mut vitality = DualVitality::equal(100);
-        let full = loadout.modifiers(&vitality, &MODULES);
+        let full = loadout.modifiers(full_bars(), &MODULES);
         assert!(full.incoming_damage_q12 < VITALITY_Q12_ONE);
 
-        let _ = vitality.apply_damage(VitalityChannelId::One, 50);
-        let _ = vitality.apply_damage(VitalityChannelId::Two, 50);
+        let midpoint = BoostBars {
+            health: VitalityPool::at(100, 200),
+            energy: VitalityPool::at(50, 100),
+        };
         assert_eq!(
-            loadout.modifiers(&vitality, &MODULES),
+            loadout.modifiers(midpoint, &MODULES),
             VitalityModifiers::IDENTITY
         );
     }
 
     #[test]
     fn empty_socket_reaches_twice_the_full_socket_percentage() {
-        let mut vitality = DualVitality::equal(100);
         let empty_kinetic = PowerUpLoadout {
             slots: [
                 BoostModuleId(0),
@@ -979,11 +821,14 @@ mod tests {
             ],
         };
         let full_bonus = full_kinetic
-            .modifiers(&vitality, &MODULES)
+            .modifiers(full_bars(), &MODULES)
             .horizon_damage_q12;
-        let _ = vitality.apply_damage(VitalityChannelId::One, 100);
+        let empty_health = BoostBars {
+            health: VitalityPool::at(0, 200),
+            ..full_bars()
+        };
         let empty_bonus = empty_kinetic
-            .modifiers(&vitality, &MODULES)
+            .modifiers(empty_health, &MODULES)
             .horizon_damage_q12;
         assert_eq!(
             empty_bonus - VITALITY_Q12_ONE,
@@ -993,6 +838,8 @@ mod tests {
 
     #[test]
     fn module_effect_is_global_while_owning_bar_drives_its_strength() {
+        // A Horizon-attack module on the energy bar's full socket: the
+        // effect is the module's, the strength is the energy bar's.
         let loadout = PowerUpLoadout {
             slots: [
                 BoostModuleId::NONE,
@@ -1001,10 +848,18 @@ mod tests {
                 BoostModuleId(0),
             ],
         };
-        let vitality = DualVitality::equal(100);
-        let modifiers = loadout.modifiers(&vitality, &MODULES);
+        let modifiers = loadout.modifiers(full_bars(), &MODULES);
         assert!(modifiers.horizon_damage_q12 > VITALITY_Q12_ONE);
         assert_eq!(modifiers.zenith_damage_q12, VITALITY_Q12_ONE);
+        let spent = BoostBars {
+            energy: VitalityPool::at(50, 100),
+            ..full_bars()
+        };
+        assert_eq!(
+            loadout.modifiers(spent, &MODULES).horizon_damage_q12,
+            VITALITY_Q12_ONE,
+            "the energy bar at its midpoint silences it"
+        );
     }
 
     #[test]
@@ -1025,9 +880,11 @@ mod tests {
                 BoostModuleId::NONE,
             ],
         };
-        let mut vitality = DualVitality::equal(100);
-        let _ = vitality.apply_damage(VitalityChannelId::One, 100);
-        let modifiers = loadout.modifiers(&vitality, &ARMOUR);
+        let empty_health = BoostBars {
+            health: VitalityPool::at(0, 200),
+            ..full_bars()
+        };
+        let modifiers = loadout.modifiers(empty_health, &ARMOUR);
         assert_eq!(modifiers.incoming_damage_q12, VITALITY_Q12_ONE / 5);
     }
 
@@ -1046,15 +903,15 @@ mod tests {
         for slot in BoostSlotId::ALL {
             assert_eq!(loadout.module(slot), BoostModuleId::NONE);
         }
-        assert!(inventory.assign(&mut loadout, BoostSlotId::ZenithFull, kinetic,));
+        assert!(inventory.assign(&mut loadout, BoostSlotId::EnergyFull, kinetic,));
 
-        assert_eq!(loadout.module(BoostSlotId::ZenithFull), kinetic);
+        assert_eq!(loadout.module(BoostSlotId::EnergyFull), kinetic);
         assert!(!inventory.contains(kinetic));
         assert!(inventory.is_empty());
         for slot in [
-            BoostSlotId::HorizonEmpty,
-            BoostSlotId::HorizonFull,
-            BoostSlotId::ZenithEmpty,
+            BoostSlotId::HealthEmpty,
+            BoostSlotId::HealthFull,
+            BoostSlotId::EnergyEmpty,
         ] {
             assert_eq!(loadout.module(slot), BoostModuleId::NONE);
         }
@@ -1078,14 +935,11 @@ mod tests {
         let mut loadout = PowerUpLoadout::DEFAULT;
         let guard = BoostModuleId(1);
         assert!(inventory.add(guard));
-        assert!(inventory.assign(&mut loadout, BoostSlotId::HorizonFull, guard,));
+        assert!(inventory.assign(&mut loadout, BoostSlotId::HealthFull, guard,));
         assert!(!inventory.contains(guard));
 
-        assert!(inventory.assign(&mut loadout, BoostSlotId::HorizonFull, BoostModuleId::NONE,));
-        assert_eq!(
-            loadout.module(BoostSlotId::HorizonFull),
-            BoostModuleId::NONE
-        );
+        assert!(inventory.assign(&mut loadout, BoostSlotId::HealthFull, BoostModuleId::NONE,));
+        assert_eq!(loadout.module(BoostSlotId::HealthFull), BoostModuleId::NONE);
         assert!(inventory.contains(guard));
     }
 
@@ -1095,40 +949,29 @@ mod tests {
         let mut loadout = PowerUpLoadout::DEFAULT;
         let before = loadout;
 
-        assert!(!inventory.assign(&mut loadout, BoostSlotId::HorizonEmpty, BoostModuleId(2),));
+        assert!(!inventory.assign(&mut loadout, BoostSlotId::HealthEmpty, BoostModuleId(2),));
         assert_eq!(loadout, before);
         assert_eq!(inventory, BoostInventory::EMPTY);
     }
 
     #[test]
-    fn refill_restores_both_equal_pools() {
-        let mut vitality = DualVitality::equal(75);
-        let _ = vitality.apply_damage(VitalityChannelId::One, 50);
-        let _ = vitality.apply_damage(VitalityChannelId::Two, 75);
-        vitality.refill();
-        assert_eq!(vitality.pool(VitalityChannelId::One).current(), 75);
-        assert_eq!(vitality.pool(VitalityChannelId::Two).current(), 75);
+    fn refill_restores_the_bar() {
+        let mut health = VitalityPool::full(150);
+        health.apply_damage(120);
+        assert_eq!(health.heal(20), 20);
+        assert_eq!(health.current(), 50);
+        health.refill();
+        assert_eq!(health.current(), 150);
+        assert_eq!(health.heal(5), 0, "a full bar takes nothing");
     }
 }
 
-/// Authored numbers governing the active/inactive vitality stance.
+/// Authored numbers governing the stance swap.
 ///
-/// Every value is exposed rather than baked so the feel can be tuned without a
-/// rebuild. Q12 fields are multipliers where 4096 is unity. How much a hit
-/// hurts is not here: that is the one stance rule over the defender's
-/// `psx_level::CombatStats`, applied before the stance sees the damage.
+/// How much a hit hurts is not here: that is the one stance rule over the
+/// defender's `psx_level::CombatStats`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct CombatStanceConfig {
-    /// Ticks after taking damage before the inactive pool starts recovering.
-    pub regen_delay_ticks: u16,
-    /// Ticks before a pool that reached zero starts recovering. Longer than
-    /// [`Self::regen_delay_ticks`]: breaking a state is meant to cost.
-    pub broken_regen_delay_ticks: u16,
-    /// Health restored per tick, Q12, so a rate below one per tick is
-    /// expressible without a separate accumulator in the caller.
-    pub regen_per_tick_q12: u16,
-    /// Fraction of maximum a broken pool must reach to be selectable again.
-    pub break_threshold_q12: u16,
     /// Ticks before another voluntary swap is allowed.
     pub swap_cooldown_ticks: u16,
     /// Ticks the HUD spends animating a swap. Presentation only.
@@ -1138,10 +981,6 @@ pub struct CombatStanceConfig {
 impl CombatStanceConfig {
     /// Starting point for authoring.
     pub const DEFAULT: Self = Self {
-        regen_delay_ticks: 90,
-        broken_regen_delay_ticks: 300,
-        regen_per_tick_q12: VITALITY_Q12_ONE / 4,
-        break_threshold_q12: VITALITY_Q12_ONE / 4,
         swap_cooldown_ticks: 30,
         swap_duration_ticks: 12,
     };
@@ -1153,45 +992,19 @@ impl Default for CombatStanceConfig {
     }
 }
 
-/// Why a swap happened, so presentation and cooldown can differ.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum StanceSwap {
-    /// The player pressed swap and it was allowed.
-    Voluntary,
-    /// The active pool broke, so the stance had nowhere to stay.
-    Forced,
-}
-
-/// Result of one damage event routed through the stance.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub struct StanceDamageOutcome {
-    /// Damage actually removed.
-    pub damage_applied: u16,
-    /// The active pool reached zero on this event.
-    pub broke: bool,
-    /// The break forced a swap to the other channel.
-    pub forced_swap: bool,
-    /// Both pools are empty.
-    pub defeated: bool,
-}
-
-/// Which vitality channel is active, and the timers around swapping.
+/// Which stance is active, and the timers around swapping.
 ///
-/// Only the active pool takes damage; only the inactive pool recovers. Swapping
-/// is therefore the healing mechanic, and the cooldown is what stops it being
-/// free.
+/// The stance owns no health: swapping changes the weapon and which boost
+/// sockets act, and only the cooldown limits it.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct CombatStance {
     active: VitalityChannelId,
     swap_cooldown: u16,
     swap_elapsed: u16,
-    regen_delay: [u16; 2],
-    broken: [bool; 2],
-    regen_fraction_q12: [u16; 2],
 }
 
 impl CombatStance {
-    /// Start in `active` with both pools whole and no timers running.
+    /// Start in `active` with no timers running.
     pub const fn new(active: VitalityChannelId) -> Self {
         Self {
             active,
@@ -1200,25 +1013,17 @@ impl CombatStance {
             // Saturation keeps the no-swap state valid for any authored
             // duration without another flag.
             swap_elapsed: u16::MAX,
-            regen_delay: [0; 2],
-            broken: [false; 2],
-            regen_fraction_q12: [0; 2],
         }
     }
 
-    /// The channel taking damage and using its boons.
+    /// The active stance.
     pub const fn active(self) -> VitalityChannelId {
         self.active
     }
 
-    /// The channel recovering.
+    /// The stance a swap would go to.
     pub const fn inactive(self) -> VitalityChannelId {
         self.active.other()
-    }
-
-    /// Whether a channel is broken and unselectable.
-    pub const fn is_broken(self, channel: VitalityChannelId) -> bool {
-        self.broken[channel.index()]
     }
 
     /// Ticks left before another voluntary swap.
@@ -1253,17 +1058,14 @@ impl CombatStance {
         config.swap_duration_ticks > 0 && self.swap_elapsed < config.swap_duration_ticks
     }
 
-    /// Whether the player may swap right now.
+    /// Whether a swap is allowed right now: only the cooldown refuses one.
     pub const fn can_swap(self) -> bool {
-        self.swap_cooldown == 0 && !self.broken[self.inactive().index()]
+        self.swap_cooldown == 0
     }
 
-    /// Attempt a voluntary swap.
-    pub fn request_swap(&mut self, config: &CombatStanceConfig) -> Option<StanceSwap> {
-        if !self.try_swap(config.swap_cooldown_ticks) {
-            return None;
-        }
-        Some(StanceSwap::Voluntary)
+    /// Attempt a voluntary swap under `config`'s cooldown.
+    pub fn request_swap(&mut self, config: &CombatStanceConfig) -> bool {
+        self.try_swap(config.swap_cooldown_ticks)
     }
 
     /// Attempt a voluntary swap that arms `cooldown_ticks` of cooldown.
@@ -1275,14 +1077,10 @@ impl CombatStance {
         if !self.can_swap() {
             return false;
         }
-        self.swap_to(self.inactive(), cooldown_ticks);
-        true
-    }
-
-    fn swap_to(&mut self, channel: VitalityChannelId, cooldown_ticks: u16) {
-        self.active = channel;
+        self.active = self.inactive();
         self.swap_cooldown = cooldown_ticks;
         self.swap_elapsed = 0;
+        true
     }
 
     /// Count `delta` ticks off the swap cooldown.
@@ -1293,6 +1091,12 @@ impl CombatStance {
     /// Advance the swap presentation clock by `delta` ticks.
     pub fn advance_swap(&mut self, delta: u16) {
         self.swap_elapsed = self.swap_elapsed.saturating_add(delta);
+    }
+
+    /// One fixed tick: the cooldown and the swap clock.
+    pub fn tick(&mut self) {
+        self.cool_down(1);
+        self.advance_swap(1);
     }
 
     /// End any swap presentation, keeping the side and the cooldown.
@@ -1311,90 +1115,6 @@ impl CombatStance {
     pub(crate) fn set_swap_cooldown(&mut self, ticks: u16) {
         self.swap_cooldown = ticks;
     }
-
-    /// Route one incoming hit, already scaled by the stance rule. Only the
-    /// active pool is damaged.
-    pub fn apply_damage(
-        &mut self,
-        vitality: &mut DualVitality,
-        damage: u16,
-        config: &CombatStanceConfig,
-    ) -> StanceDamageOutcome {
-        let outcome = vitality.apply_damage(self.active, damage);
-
-        let active = self.active.index();
-        if outcome.damage_applied > 0 {
-            self.regen_delay[active] = config.regen_delay_ticks;
-            self.regen_fraction_q12[active] = 0;
-        }
-
-        let mut result = StanceDamageOutcome {
-            damage_applied: outcome.damage_applied,
-            broke: outcome.channel_depleted,
-            forced_swap: false,
-            defeated: vitality.is_defeated(),
-        };
-        if outcome.channel_depleted {
-            self.broken[active] = true;
-            // A broken pool cannot stay active, so the swap ignores the
-            // cooldown: refusing it would leave the player with no selectable
-            // state at all. It still costs the longer recovery delay.
-            self.regen_delay[active] = config.broken_regen_delay_ticks;
-            if !result.defeated {
-                self.swap_to(self.inactive(), config.swap_cooldown_ticks);
-                result.forced_swap = true;
-            }
-        }
-        result
-    }
-
-    /// Advance one fixed tick: cooldowns, then recovery on the inactive pool.
-    ///
-    /// `regen_bonus_q12` is the Regeneration boon's contribution, which comes
-    /// from the *active* state's boons and heals the inactive pool. It is a
-    /// percentage of the authored rate: 4096 adds another 100%.
-    pub fn tick(
-        &mut self,
-        vitality: &mut DualVitality,
-        config: &CombatStanceConfig,
-        regen_bonus_q12: u16,
-    ) {
-        self.cool_down(1);
-        self.advance_swap(1);
-
-        let inactive = self.inactive();
-        let index = inactive.index();
-        if self.regen_delay[index] > 0 {
-            self.regen_delay[index] -= 1;
-            return;
-        }
-
-        let pool = vitality.pool(inactive);
-        if pool.current() >= pool.maximum() {
-            return;
-        }
-        // Module bonuses are percentages of the authored recovery rate, not
-        // flat health per tick; slowing the base must also slow boosted recovery.
-        let bonus = ((u32::from(config.regen_per_tick_q12) * u32::from(regen_bonus_q12)) >> 12)
-            .min(u32::from(u16::MAX)) as u16;
-        let rate = config.regen_per_tick_q12.saturating_add(bonus);
-        let carried = self.regen_fraction_q12[index].saturating_add(rate);
-        let whole = carried / VITALITY_Q12_ONE;
-        self.regen_fraction_q12[index] = carried % VITALITY_Q12_ONE;
-        if whole > 0 {
-            vitality.heal(inactive, whole);
-        }
-
-        // Selectable again once recovery passes the authored threshold.
-        if self.broken[index] {
-            let pool = vitality.pool(inactive);
-            let threshold = ((u32::from(pool.maximum()) * u32::from(config.break_threshold_q12))
-                / u32::from(VITALITY_Q12_ONE)) as u16;
-            if pool.current() >= threshold.max(1) {
-                self.broken[index] = false;
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1403,211 +1123,50 @@ mod stance_tests {
 
     fn config() -> CombatStanceConfig {
         CombatStanceConfig {
-            regen_delay_ticks: 2,
-            broken_regen_delay_ticks: 5,
-            regen_per_tick_q12: VITALITY_Q12_ONE,
-            break_threshold_q12: VITALITY_Q12_ONE / 2,
             swap_cooldown_ticks: 3,
             swap_duration_ticks: 4,
         }
     }
 
     #[test]
-    fn only_the_active_pool_takes_damage() {
-        let mut vitality = DualVitality::equal(100);
-        let mut stance = CombatStance::new(VitalityChannelId::One);
-        stance.apply_damage(&mut vitality, 20, &config());
-        assert_eq!(
-            vitality.pool(VitalityChannelId::Two).current(),
-            100,
-            "the inactive pool is never touched by an attack"
-        );
-    }
-
-    #[test]
-    fn the_active_pool_takes_the_damage_as_given() {
-        // The stance no longer scales: the one stance rule over the
-        // defender's CombatStats has already done that.
+    fn only_the_cooldown_refuses_a_swap() {
         let config = config();
-        let mut vitality = DualVitality::equal(200);
         let mut stance = CombatStance::new(VitalityChannelId::One);
-        let hit = stance.apply_damage(&mut vitality, 40, &config);
-        assert_eq!(hit.damage_applied, 40);
-        assert_eq!(vitality.pool(VitalityChannelId::One).current(), 160);
-        assert_eq!(vitality.pool(VitalityChannelId::Two).current(), 200);
-    }
-
-    #[test]
-    fn breaking_the_active_pool_forces_a_swap_through_the_cooldown() {
-        let config = config();
-        let mut vitality = DualVitality::equal(30);
-        let mut stance = CombatStance::new(VitalityChannelId::One);
-        // Put a cooldown on the clock so the forced swap has one to ignore.
-        stance.request_swap(&config);
-        stance.request_swap(&config);
-        assert!(!stance.can_swap(), "a voluntary swap is on cooldown");
-
-        let active = stance.active();
-        let hit = stance.apply_damage(&mut vitality, 1000, &config);
-        assert!(hit.broke);
-        assert!(hit.forced_swap, "a broken pool cannot stay active");
-        assert!(!hit.defeated, "the other pool is still whole");
-        assert_eq!(stance.active(), active.other());
-        assert!(stance.is_broken(active));
-        assert!(
-            !stance.can_swap(),
-            "swapping back into a broken pool is refused"
-        );
-    }
-
-    #[test]
-    fn a_broken_pool_waits_longer_then_becomes_selectable_at_the_threshold() {
-        let config = config();
-        let mut vitality = DualVitality::equal(10);
-        let mut stance = CombatStance::new(VitalityChannelId::One);
-        stance.apply_damage(&mut vitality, 1000, &config);
-        assert!(stance.is_broken(VitalityChannelId::One));
-
-        // The longer delay runs before a single point comes back.
-        for _ in 0..config.broken_regen_delay_ticks {
-            stance.tick(&mut vitality, &config, 0);
-            assert_eq!(vitality.pool(VitalityChannelId::One).current(), 0);
+        assert!(stance.request_swap(&config));
+        assert_eq!(stance.active(), VitalityChannelId::Two);
+        assert!(!stance.request_swap(&config), "cooldown");
+        for _ in 0..config.swap_cooldown_ticks {
+            stance.tick();
         }
-        // Then one point per tick. The threshold is half of ten.
-        for _ in 0..4 {
-            stance.tick(&mut vitality, &config, 0);
-        }
-        assert_eq!(vitality.pool(VitalityChannelId::One).current(), 4);
-        assert!(stance.is_broken(VitalityChannelId::One), "still under half");
-        stance.tick(&mut vitality, &config, 0);
-        assert_eq!(vitality.pool(VitalityChannelId::One).current(), 5);
-        assert!(
-            !stance.is_broken(VitalityChannelId::One),
-            "reaching the threshold makes it selectable again"
-        );
+        assert!(stance.can_swap());
+        assert!(stance.request_swap(&config));
+        assert_eq!(stance.active(), VitalityChannelId::One);
     }
 
     #[test]
-    fn only_the_inactive_pool_regenerates_and_only_after_the_delay() {
-        let config = config();
-        let mut vitality = DualVitality::equal(100);
-        let mut stance = CombatStance::new(VitalityChannelId::One);
-        // Damage the inactive pool by swapping, taking a hit, swapping back.
-        stance.apply_damage(&mut vitality, 40, &config);
-        let hurt = vitality.pool(VitalityChannelId::One).current();
-        stance.request_swap(&config);
-
-        // The delay set by that damage still has to run out.
-        for _ in 0..config.regen_delay_ticks {
-            stance.tick(&mut vitality, &config, 0);
-            assert_eq!(vitality.pool(VitalityChannelId::One).current(), hurt);
-        }
-        stance.tick(&mut vitality, &config, 0);
-        assert_eq!(vitality.pool(VitalityChannelId::One).current(), hurt + 1);
-        assert_eq!(
-            vitality.pool(VitalityChannelId::Two).current(),
-            100,
-            "the active pool never regenerates"
-        );
-    }
-
-    #[test]
-    fn the_regeneration_boon_speeds_the_inactive_pool() {
-        let config = config();
-        let mut plain =
-            DualVitality::from_pools(VitalityPool::at(50, 100), VitalityPool::full(100));
-        let mut boosted =
-            DualVitality::from_pools(VitalityPool::at(50, 100), VitalityPool::full(100));
-        let mut a = CombatStance::new(VitalityChannelId::Two);
-        let mut b = CombatStance::new(VitalityChannelId::Two);
-        for _ in 0..4 {
-            a.tick(&mut plain, &config, 0);
-            b.tick(&mut boosted, &config, VITALITY_Q12_ONE);
-        }
-        assert_eq!(plain.pool(VitalityChannelId::One).current(), 54);
-        assert_eq!(
-            boosted.pool(VitalityChannelId::One).current(),
-            58,
-            "the boon doubles the authored rate here"
-        );
-    }
-
-    #[test]
-    fn slow_recovery_and_percentage_bonuses_keep_the_authored_rate() {
-        let mut config = config();
-        config.regen_per_tick_q12 = 256;
-        config.regen_delay_ticks = 0;
-        for (bonus, recovered) in [(0, 15), (4096, 30), (328, 16)] {
-            let mut vitality =
-                DualVitality::from_pools(VitalityPool::at(20, 100), VitalityPool::at(50, 100));
-            let mut stance = CombatStance::new(VitalityChannelId::Two);
-            for _ in 0..240 {
-                stance.tick(&mut vitality, &config, bonus);
-            }
-            assert_eq!(
-                vitality.pool(VitalityChannelId::One).current(),
-                20 + recovered
-            );
-            assert_eq!(vitality.pool(VitalityChannelId::Two).current(), 50);
-        }
-    }
-
-    #[test]
-    fn a_fractional_rate_accumulates_instead_of_rounding_to_nothing() {
-        let mut config = config();
-        // A quarter point per tick must still heal, four ticks at a time.
-        config.regen_per_tick_q12 = VITALITY_Q12_ONE / 4;
-        config.regen_delay_ticks = 0;
-        let mut vitality =
-            DualVitality::from_pools(VitalityPool::at(50, 100), VitalityPool::full(100));
-        let mut stance = CombatStance::new(VitalityChannelId::Two);
-        for _ in 0..3 {
-            stance.tick(&mut vitality, &config, 0);
-        }
-        assert_eq!(vitality.pool(VitalityChannelId::One).current(), 50);
-        stance.tick(&mut vitality, &config, 0);
-        assert_eq!(vitality.pool(VitalityChannelId::One).current(), 51);
-    }
-
-    #[test]
-    fn death_needs_both_pools_empty() {
-        let config = config();
-        let mut vitality = DualVitality::equal(10);
-        let mut stance = CombatStance::new(VitalityChannelId::One);
-        let first = stance.apply_damage(&mut vitality, 1000, &config);
-        assert!(!first.defeated, "one broken pool is not death");
-        let second = stance.apply_damage(&mut vitality, 1000, &config);
-        assert!(second.defeated);
-        assert!(
-            !second.forced_swap,
-            "there is nowhere to swap to once both are gone"
-        );
-    }
-
-    #[test]
-    fn only_the_active_states_sockets_contribute() {
-        // Two sockets sit on each channel. Under the stance rules the inactive
-        // state's boons are inert, so a per-channel sum must not reach across.
+    fn each_stance_owns_one_bars_two_sockets() {
+        // Two sockets sit on each bar, and each bar's sockets belong to one
+        // stance: health with blade (Horizon), energy with Zenith.
         for channel in [VitalityChannelId::One, VitalityChannelId::Two] {
             let mine = BoostSlotId::ALL
                 .into_iter()
-                .filter(|slot| slot.channel() == channel)
+                .filter(|slot| slot.stance() == channel)
                 .count();
-            assert_eq!(mine, 2, "each state owns exactly two boon slots");
+            assert_eq!(mine, 2, "each stance owns exactly two boon slots");
         }
         for slot in BoostSlotId::ALL {
-            assert_ne!(
-                slot.channel(),
-                slot.channel().other(),
-                "a socket belongs to one state only"
-            );
+            let expected = match slot.bar() {
+                BoostBar::Health => VitalityChannelId::One,
+                BoostBar::Energy => VitalityChannelId::Two,
+            };
+            assert_eq!(slot.stance(), expected);
         }
     }
 
     #[test]
-    fn a_regeneration_module_on_the_active_state_speeds_the_resting_pool() {
-        // The lane is additive, not a multiplier: "+10" adds recovery rather
-        // than scaling a base the player never sees.
+    fn a_regeneration_module_on_the_active_stance_still_sums() {
+        // The lane is computed as before (additive, not a multiplier); it
+        // has no consumer without the inactive pool, see VitalityModifiers.
         let modules = [psx_level::BoostModuleRecord {
             name: "Mending Coil",
             description: "Rest recovery.",
@@ -1616,45 +1175,39 @@ mod stance_tests {
             remove_label: "REMOVE MENDING COIL",
             percentages: [0, 0, 0, 0, 0, 10],
         }];
-        let vitality = DualVitality::equal(100);
-
+        let bars = BoostBars {
+            health: VitalityPool::full(200),
+            energy: VitalityPool::full(100),
+        };
         let mut loadout = PowerUpLoadout::EMPTY;
-        // Socket it on channel One's full-end pole: an empty-end socket is
-        // weighted by how hurt the pool is and contributes nothing at full
-        // health, which would prove nothing here.
-        let slot = BoostSlotId::ALL
-            .into_iter()
-            .find(|slot| {
-                slot.channel() == VitalityChannelId::One && slot.pole() == VitalityPole::Full
-            })
-            .expect("channel one owns a full-end socket");
-        loadout.set(slot, BoostModuleId::from_index(0));
+        // A full-end socket: an empty-end socket contributes nothing on a
+        // full bar, which would prove nothing here.
+        loadout.set(BoostSlotId::HealthFull, BoostModuleId::from_index(0));
 
-        let active_one = loadout.modifiers_for(&vitality, &modules, Some(VitalityChannelId::One));
-        let active_two = loadout.modifiers_for(&vitality, &modules, Some(VitalityChannelId::Two));
+        let active_one = loadout.modifiers_for(bars, &modules, Some(VitalityChannelId::One));
+        let active_two = loadout.modifiers_for(bars, &modules, Some(VitalityChannelId::Two));
         assert!(
             active_one.regeneration_q12 > 0,
-            "the state holding the module contributes while active"
+            "the stance holding the module contributes while active"
         );
         assert_eq!(
             active_two.regeneration_q12, 0,
-            "the other state's sockets are dormant"
+            "the other stance's sockets are dormant"
         );
     }
 
     #[test]
     fn the_swap_animation_reports_progress_and_completes() {
         let config = config();
-        let mut vitality = DualVitality::equal(100);
         let mut stance = CombatStance::new(VitalityChannelId::One);
-        stance.request_swap(&config);
+        assert!(stance.request_swap(&config));
         assert!(stance.swap_in_progress(&config));
         assert_eq!(stance.swap_progress_q12(&config), 0);
-        stance.tick(&mut vitality, &config, 0);
-        stance.tick(&mut vitality, &config, 0);
+        stance.tick();
+        stance.tick();
         assert_eq!(stance.swap_progress_q12(&config), VITALITY_Q12_ONE / 2);
         for _ in 0..4 {
-            stance.tick(&mut vitality, &config, 0);
+            stance.tick();
         }
         assert_eq!(stance.swap_progress_q12(&config), VITALITY_Q12_ONE);
         assert!(!stance.swap_in_progress(&config));

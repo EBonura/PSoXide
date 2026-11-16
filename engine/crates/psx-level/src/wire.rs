@@ -28,7 +28,7 @@ use crate::*;
 pub const MAGIC: [u8; 4] = *b"PXLR";
 /// Version of the layout below. Bump it whenever a record or the table list
 /// changes.
-pub const VERSION: u16 = 6;
+pub const VERSION: u16 = 7;
 
 /// A cursor over the chunk's bytes. The bytes live for the whole run, so a
 /// string decoded from them can be `&'static`.
@@ -366,7 +366,7 @@ wire_struct! {
         attack_min_range, attack_max_range, touch_damage, combat, soul_value, flags
     }
     CombatStats {
-        max_health, max_health_secondary, poise, armour, opposite_damage_q12,
+        max_health, poise, armour, opposite_damage_q12,
         opposite_poise_q12, energy_max, shot_cost, light_gain, heavy_gain
     }
 }

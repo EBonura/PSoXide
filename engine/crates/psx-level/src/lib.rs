@@ -1180,11 +1180,9 @@ pub mod combat_armour {
 /// differ only here. Q12 multipliers use 4096 for 1.0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CombatStats {
-    /// First vitality pool at spawn (Horizon).
+    /// Health at spawn: the one health bar. Restored only on respawn and
+    /// at arches and checkpoints.
     pub max_health: u16,
-    /// Second vitality pool at spawn (Zenith). Zero is a legal
-    /// single-pool fighter.
-    pub max_health_secondary: u16,
     /// Poise capacity: posture damage past it breaks.
     pub poise: u16,
     /// Armour sources, bits of [`combat_armour`].
@@ -1215,11 +1213,10 @@ impl CombatStats {
     /// [`Self::OPPOSITE_DAMAGE_Q12`] until the duel harness tunes it.
     pub const OPPOSITE_POISE_Q12: u16 = 5120;
 
-    /// The player character's numbers before they became data: 100 per
-    /// pool, poise 60, the shared energy economy.
+    /// The player character's starting numbers: 200 health (the two old
+    /// 100 pools as one bar), poise 60, the shared energy economy.
     pub const PLAYER: Self = Self {
-        max_health: 100,
-        max_health_secondary: 100,
+        max_health: 200,
         poise: 60,
         armour: combat_armour::HEAVY_ATTACK | combat_armour::AUTHORED_WINDOW,
         opposite_damage_q12: Self::OPPOSITE_DAMAGE_Q12,
@@ -1230,8 +1227,9 @@ impl CombatStats {
         heavy_gain: 20,
     };
 
-    /// An enemy's numbers when nothing was authored: 100 per pool and
-    /// poise 100, otherwise as [`Self::PLAYER`].
+    /// An enemy's numbers when nothing was authored: 200 health (the two
+    /// old 100 pools as one bar) and poise 100, otherwise as
+    /// [`Self::PLAYER`].
     pub const ENEMY: Self = Self {
         poise: 100,
         ..Self::PLAYER
@@ -2274,45 +2272,32 @@ pub enum LevelUiValueBinding {
     PlayerHealth,
     /// Player health maximum.
     PlayerHealthMax,
-    /// Player secondary health value.
-    PlayerHealthSecondary,
-    /// Player secondary health maximum.
-    PlayerHealthSecondaryMax,
-    /// Empty-end influence of the primary health channel (Q12).
+    /// Player energy value.
+    PlayerEnergy,
+    /// Player energy maximum.
+    PlayerEnergyMax,
+    /// Empty-end influence of the health bar (Q12).
     PlayerHealthEmptyInfluence,
-    /// Full-end influence of the primary health channel (Q12).
+    /// Full-end influence of the health bar (Q12).
     PlayerHealthFullInfluence,
-    /// Empty-end influence of the secondary health channel (Q12).
-    PlayerHealthSecondaryEmptyInfluence,
-    /// Full-end influence of the secondary health channel (Q12).
-    PlayerHealthSecondaryFullInfluence,
-    /// Health of whichever pool is currently active, so a bar can follow the
-    /// stance instead of a fixed colour.
-    PlayerStanceActiveHealth,
-    /// Maximum of the active pool.
-    PlayerStanceActiveHealthMax,
-    /// Health of the pool that is currently recovering.
-    PlayerStanceInactiveHealth,
-    /// Maximum of the inactive pool.
-    PlayerStanceInactiveHealthMax,
+    /// Empty-end influence of the energy bar (Q12).
+    PlayerEnergyEmptyInfluence,
+    /// Full-end influence of the energy bar (Q12).
+    PlayerEnergyFullInfluence,
     /// How far through a stance swap the HUD is, Q12, reaching one when the
     /// swap has settled. Presentation only.
     PlayerStanceSwapProgress,
-    /// One when Zenith is the active pool, zero when Horizon is. Lets an
-    /// authored bar tint itself for the state it is showing.
+    /// One when Zenith is the active stance, zero when Horizon is. Lets an
+    /// authored bar tint itself for the stance it is showing.
     PlayerStanceActiveIsZenith,
-    /// One while the active pool is broken.
-    PlayerStanceActiveBroken,
-    /// One while the inactive pool is broken and cannot be swapped to.
-    PlayerStanceInactiveBroken,
-    /// Current hard/soft combat target's Horizon pool, or zero without one.
+    /// Current hard/soft combat target's health, or zero without one.
     TargetHealth,
-    /// Current hard/soft combat target's Horizon maximum, or zero without one.
+    /// Current hard/soft combat target's health maximum, or zero without one.
     TargetHealthMax,
-    /// Current hard/soft combat target's Zenith pool, or zero without one.
-    TargetHealthSecondary,
-    /// Current hard/soft combat target's Zenith maximum, or zero without one.
-    TargetHealthSecondaryMax,
+    /// Current hard/soft combat target's energy, or zero without one.
+    TargetEnergy,
+    /// Current hard/soft combat target's energy maximum, or zero without one.
+    TargetEnergyMax,
     /// Current combat target's guard-mutation progress in Q12.
     TargetStanceSwapProgress,
     /// One when the current combat target guards Zenith, zero otherwise.
@@ -3606,14 +3591,6 @@ pub struct LevelCharacterRecord {
     /// Health, poise, stance multipliers and energy: the same record every
     /// enemy carries.
     pub combat: CombatStats,
-    /// Authored stance tuning: see CombatStanceConfig.
-    pub stance_regen_delay_ticks: u16,
-    /// Authored stance tuning: see CombatStanceConfig.
-    pub stance_broken_regen_delay_ticks: u16,
-    /// Authored stance tuning: see CombatStanceConfig.
-    pub stance_regen_per_tick_q12: u16,
-    /// Authored stance tuning: see CombatStanceConfig.
-    pub stance_break_threshold_q12: u16,
     /// Authored stance tuning: see CombatStanceConfig.
     pub stance_swap_cooldown_ticks: u16,
     /// Authored stance tuning: see CombatStanceConfig.

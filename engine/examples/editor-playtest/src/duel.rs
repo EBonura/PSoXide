@@ -4,6 +4,13 @@ use psx_engine::{AnalogSticks, PadMode, PadState};
 use psx_game_runtime::{combat_policy, entities::GameEntityState};
 
 // All-zero storage is inactive, matching Playtest's zeroed initialization.
+/// Columns of one `duel:sample` row: tick, player x/z, enemy x/z, player
+/// health, enemy health, stances, action and state, bot intent and stance
+/// reason, stamina, tactical goal, action start, goal, enemy stance reason,
+/// attack kind, then both energies. The summariser in `psxed-mcp` reads the
+/// same order.
+const SAMPLE_COLUMNS: usize = 21;
+
 pub(super) struct Duel {
     pub active: bool,
     pub finished: bool,
@@ -30,7 +37,7 @@ pub(super) struct Duel {
     pub reason: u8,
     pub outcome: u8,
     intent: u8,
-    last_snapshot: [u32; 23],
+    last_snapshot: [u32; SAMPLE_COLUMNS],
     last_progress: u32,
 }
 impl Duel {
@@ -129,10 +136,12 @@ impl Playtest {
                 reason: 0,
                 outcome: 0,
                 intent: 0,
-                last_snapshot: [0; 23],
+                last_snapshot: [0; SAMPLE_COLUMNS],
                 last_progress: 0,
             };
-            log_values("duel:start", &[seed, target as u32]);
+            // The third value is the sample format: 1 is one health value
+            // per fighter (before it, two pools each and no third value).
+            log_values("duel:start", &[seed, target as u32, 1]);
         } else if self.duel.active
             && !self.duel.releasing_start
             && ctx.pad.buttons.bits() != 0
@@ -186,15 +195,6 @@ impl Playtest {
                 isqrt_i32(square_i32_saturating(dx).saturating_add(square_i32_saturating(dz)))
                     .max(1);
             let active = self.player.stance.active();
-            let pool = |c| self.player.vitality.pool(c);
-            let hp = [
-                pool(VitalityChannelId::One).current(),
-                pool(VitalityChannelId::Two).current(),
-            ];
-            let maxima = [
-                pool(VitalityChannelId::One).maximum(),
-                pool(VitalityChannelId::Two).maximum(),
-            ];
             let entry = i32::from(record.preferred_distance.max(record.attack_min_range))
                 + i32::from(record.spacing_tolerance);
             let melee = combat_policy::wants_melee(
@@ -208,21 +208,8 @@ impl Playtest {
                 && distance < i32::from(record.preferred_distance) * 3;
             let (wanted, reason) = combat_policy::stance_choice(
                 melee,
-                active,
-                hp,
-                maxima,
                 press,
-                if visible {
-                    Some((
-                        self.game_entities.stance(i),
-                        [
-                            self.game_entities.health(i),
-                            self.game_entities.health_secondary(i),
-                        ],
-                    ))
-                } else {
-                    None
-                },
+                visible.then(|| self.game_entities.stance(i)),
             );
             let separated = distance
                 > (self.character.map_or(40, |c| c.radius) + i32::from(record.radius) + 24) * 2;
@@ -602,10 +589,8 @@ impl Playtest {
             p.z as u32,
             e[0] as u32,
             e[2] as u32,
-            self.player.vitality.pool(VitalityChannelId::One).current() as u32,
-            self.player.vitality.pool(VitalityChannelId::Two).current() as u32,
+            self.player.health() as u32,
             self.game_entities.health(i) as u32,
-            self.game_entities.health_secondary(i) as u32,
             self.player.stance.active().index() as u32,
             self.game_entities.stance(i).index() as u32,
             self.anim_state.action().to_index() as u32,
@@ -632,22 +617,22 @@ impl Playtest {
         }
         self.duel.last_roles = roles;
         let old = self.duel.last_snapshot;
-        // A broken-pool forced switch is not an accepted policy request.
-        snap[14] = if snap[9] != old[9] {
+        // A switch the bot did not press for is not an accepted policy request.
+        snap[12] = if snap[7] != old[7] {
             if self.duel.previous & button::TRIANGLE != 0 {
                 self.duel.reason as u32
             } else {
                 4
             }
         } else {
-            old[14]
+            old[12]
         };
-        let damage = (5..9).any(|n| snap[n] < old[n]);
-        let changed = snap[9..13] != old[9..13] || snap[17] != old[17];
+        let damage = (5..7).any(|n| snap[n] < old[n]);
+        let changed = snap[7..11] != old[7..11] || snap[15] != old[15];
         if damage {
             self.duel.last_progress = tick;
         }
-        if snap[17] != old[17] {
+        if snap[15] != old[15] {
             let kind = match self.anim_state {
                 PlayerAnim::RangedAttack => Some(2),
                 PlayerAnim::HeavyAttack => Some(1),
@@ -669,8 +654,7 @@ impl Playtest {
             log_values("duel:sample", &snap);
         }
         self.duel.last_snapshot = snap;
-        let player_dead =
-            self.player.vitality.is_defeated() || self.hazard_death_ticks_remaining != 0;
+        let player_dead = self.player.defeated() || self.hazard_death_ticks_remaining != 0;
         let enemy_dead = self.game_entities.state(i) == GameEntityState::Dead;
         if player_dead || enemy_dead {
             self.duel_end(

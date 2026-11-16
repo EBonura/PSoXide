@@ -1141,7 +1141,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             .join(", ");
         let _ = writeln!(
             out,
-            "    LevelCharacterRecord {{ model: ModelIndex({}), action_clips: [{}], action_flags: [{}], action_speeds: [{}], action_frame_ranges: [{}], action_pushes: [{}], action_chains: [{}], combat_windows: [{}], combat_capsule_first: CombatCapsuleIndex({}), combat_capsule_count: {}, visual_offset: [{}, {}, {}], visual_yaw: {}, visual_scale_q8: {}, weight_q8: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, turn_speed_degrees_per_second: {}, stamina_max_q12: {}, sprint_min_q12: {}, sprint_drain_q12: {}, stamina_recover_q12: {}, roll_cost_q12: {}, roll_speed: {}, roll_active_frames: {}, roll_recovery_frames: {}, roll_invulnerable_frames: {}, backstep_cost_q12: {}, backstep_speed: {}, backstep_active_frames: {}, backstep_recovery_frames: {}, backstep_invulnerable_frames: {}, combat: {}, stance_regen_delay_ticks: {}, stance_broken_regen_delay_ticks: {}, stance_regen_per_tick_q12: {}, stance_break_threshold_q12: {}, stance_swap_cooldown_ticks: {}, stance_swap_duration_ticks: {}, camera_distance: {}, camera_height: {}, camera_target_height: {}, material_override: {}, flags: 0 }},",
+            "    LevelCharacterRecord {{ model: ModelIndex({}), action_clips: [{}], action_flags: [{}], action_speeds: [{}], action_frame_ranges: [{}], action_pushes: [{}], action_chains: [{}], combat_windows: [{}], combat_capsule_first: CombatCapsuleIndex({}), combat_capsule_count: {}, visual_offset: [{}, {}, {}], visual_yaw: {}, visual_scale_q8: {}, weight_q8: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, turn_speed_degrees_per_second: {}, stamina_max_q12: {}, sprint_min_q12: {}, sprint_drain_q12: {}, stamina_recover_q12: {}, roll_cost_q12: {}, roll_speed: {}, roll_active_frames: {}, roll_recovery_frames: {}, roll_invulnerable_frames: {}, backstep_cost_q12: {}, backstep_speed: {}, backstep_active_frames: {}, backstep_recovery_frames: {}, backstep_invulnerable_frames: {}, combat: {}, stance_swap_cooldown_ticks: {}, stance_swap_duration_ticks: {}, camera_distance: {}, camera_height: {}, camera_target_height: {}, material_override: {}, flags: 0 }},",
             character.model,
             action_clips,
             action_flags,
@@ -1178,10 +1178,6 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             character.backstep_recovery_frames,
             character.backstep_invulnerable_frames,
             combat_stats_literal(&character.combat),
-            character.stance_regen_delay_ticks,
-            character.stance_broken_regen_delay_ticks,
-            character.stance_regen_per_tick_q12,
-            character.stance_break_threshold_q12,
             character.stance_swap_cooldown_ticks,
             character.stance_swap_duration_ticks,
             character.camera_distance,
@@ -1198,9 +1194,8 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
 /// A `psx_level::CombatStats` as Rust source for the generated manifest.
 fn combat_stats_literal(stats: &psx_level::CombatStats) -> String {
     format!(
-        "psx_level::CombatStats {{ max_health: {}, max_health_secondary: {}, poise: {}, armour: {}, opposite_damage_q12: {}, opposite_poise_q12: {}, energy_max: {}, shot_cost: {}, light_gain: {}, heavy_gain: {} }}",
+        "psx_level::CombatStats {{ max_health: {}, poise: {}, armour: {}, opposite_damage_q12: {}, opposite_poise_q12: {}, energy_max: {}, shot_cost: {}, light_gain: {}, heavy_gain: {} }}",
         stats.max_health,
-        stats.max_health_secondary,
         stats.poise,
         stats.armour,
         stats.opposite_damage_q12,
@@ -1901,66 +1896,40 @@ fn render_ui_value_binding(binding: UiValueBinding) -> String {
                 crate::playtest::cook_option_id(option)
             )
         }
-        UiValueBinding::PlayerStanceActiveHealth => {
-            "LevelUiValueBinding::PlayerStanceActiveHealth".to_string()
-        }
-        UiValueBinding::PlayerStanceActiveHealthMax => {
-            "LevelUiValueBinding::PlayerStanceActiveHealthMax".to_string()
-        }
-        UiValueBinding::PlayerStanceInactiveHealth => {
-            "LevelUiValueBinding::PlayerStanceInactiveHealth".to_string()
-        }
-        UiValueBinding::PlayerStanceInactiveHealthMax => {
-            "LevelUiValueBinding::PlayerStanceInactiveHealthMax".to_string()
-        }
-        UiValueBinding::PlayerStanceSwapProgress => {
-            "LevelUiValueBinding::PlayerStanceSwapProgress".to_string()
-        }
-        UiValueBinding::PlayerStanceActiveIsZenith => {
-            "LevelUiValueBinding::PlayerStanceActiveIsZenith".to_string()
-        }
-        UiValueBinding::PlayerStanceActiveBroken => {
-            "LevelUiValueBinding::PlayerStanceActiveBroken".to_string()
-        }
-        UiValueBinding::PlayerStanceInactiveBroken => {
-            "LevelUiValueBinding::PlayerStanceInactiveBroken".to_string()
-        }
-        UiValueBinding::TargetHealth => "LevelUiValueBinding::TargetHealth".to_string(),
-        UiValueBinding::TargetHealthMax => "LevelUiValueBinding::TargetHealthMax".to_string(),
-        UiValueBinding::TargetHealthSecondary => {
-            "LevelUiValueBinding::TargetHealthSecondary".to_string()
-        }
-        UiValueBinding::TargetHealthSecondaryMax => {
-            "LevelUiValueBinding::TargetHealthSecondaryMax".to_string()
-        }
-        UiValueBinding::TargetStanceSwapProgress => {
-            "LevelUiValueBinding::TargetStanceSwapProgress".to_string()
-        }
-        UiValueBinding::TargetStanceActiveIsZenith => {
-            "LevelUiValueBinding::TargetStanceActiveIsZenith".to_string()
-        }
         UiValueBinding::PlayerHealth => "LevelUiValueBinding::PlayerHealth".to_string(),
         UiValueBinding::PlayerHealthMax => "LevelUiValueBinding::PlayerHealthMax".to_string(),
-        UiValueBinding::PlayerHealthSecondary => {
-            "LevelUiValueBinding::PlayerHealthSecondary".to_string()
-        }
-        UiValueBinding::PlayerHealthSecondaryMax => {
-            "LevelUiValueBinding::PlayerHealthSecondaryMax".to_string()
-        }
+        UiValueBinding::PlayerEnergy => "LevelUiValueBinding::PlayerEnergy".to_string(),
+        UiValueBinding::PlayerEnergyMax => "LevelUiValueBinding::PlayerEnergyMax".to_string(),
         UiValueBinding::PlayerHealthEmptyInfluence => {
             "LevelUiValueBinding::PlayerHealthEmptyInfluence".to_string()
         }
         UiValueBinding::PlayerHealthFullInfluence => {
             "LevelUiValueBinding::PlayerHealthFullInfluence".to_string()
         }
-        UiValueBinding::PlayerHealthSecondaryEmptyInfluence => {
-            "LevelUiValueBinding::PlayerHealthSecondaryEmptyInfluence".to_string()
+        UiValueBinding::PlayerEnergyEmptyInfluence => {
+            "LevelUiValueBinding::PlayerEnergyEmptyInfluence".to_string()
         }
-        UiValueBinding::PlayerHealthSecondaryFullInfluence => {
-            "LevelUiValueBinding::PlayerHealthSecondaryFullInfluence".to_string()
+        UiValueBinding::PlayerEnergyFullInfluence => {
+            "LevelUiValueBinding::PlayerEnergyFullInfluence".to_string()
         }
         UiValueBinding::PlayerStamina => "LevelUiValueBinding::PlayerStamina".to_string(),
         UiValueBinding::PlayerStaminaMax => "LevelUiValueBinding::PlayerStaminaMax".to_string(),
+        UiValueBinding::PlayerStanceSwapProgress => {
+            "LevelUiValueBinding::PlayerStanceSwapProgress".to_string()
+        }
+        UiValueBinding::PlayerStanceActiveIsZenith => {
+            "LevelUiValueBinding::PlayerStanceActiveIsZenith".to_string()
+        }
+        UiValueBinding::TargetHealth => "LevelUiValueBinding::TargetHealth".to_string(),
+        UiValueBinding::TargetHealthMax => "LevelUiValueBinding::TargetHealthMax".to_string(),
+        UiValueBinding::TargetEnergy => "LevelUiValueBinding::TargetEnergy".to_string(),
+        UiValueBinding::TargetEnergyMax => "LevelUiValueBinding::TargetEnergyMax".to_string(),
+        UiValueBinding::TargetStanceSwapProgress => {
+            "LevelUiValueBinding::TargetStanceSwapProgress".to_string()
+        }
+        UiValueBinding::TargetStanceActiveIsZenith => {
+            "LevelUiValueBinding::TargetStanceActiveIsZenith".to_string()
+        }
         UiValueBinding::LoadingProgress => "LevelUiValueBinding::LoadingProgress".to_string(),
     }
 }

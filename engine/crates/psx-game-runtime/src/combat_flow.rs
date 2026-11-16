@@ -44,6 +44,15 @@ pub fn ranged_band(preferred: i32, melee_reach: i32, weapon_max: i32) -> (i32, i
     (near, far.max(near))
 }
 
+/// What one [`CombatFlow::air_tick`] did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AirTick {
+    /// The air allowance ran out while attached: the arch lets go.
+    pub exhausted: bool,
+    /// The arch restored a point this tick (energy already added).
+    pub restored: bool,
+}
+
 /// Per-actor energy, poise-break grace and stance-preference state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CombatFlow {
@@ -135,15 +144,28 @@ impl CombatFlow {
             self.ranged_phase = true;
         }
     }
+    /// Add up to `amount` energy, capped at the stats' ceiling, as an arch
+    /// or a checkpoint restores it. Enough energy reopens the ranged phase.
+    pub fn gain_energy(&mut self, amount: u16, stats: &CombatStats) {
+        self.energy = self.energy.saturating_add(amount).min(stats.energy_max);
+        if self.energy >= AI_RESUME_ENERGY {
+            self.recharging = false;
+            self.ranged_phase = true;
+        }
+    }
     /// The allowance belongs to the whole airborne excursion. Neither another
     /// arch nor briefly touching ground refreshes it. Shooting pauses recharge.
+    ///
+    /// While attached, with allowance left and not firing, the arch restores
+    /// one point at [`FLOAT_GAIN_PER_SECOND`]: energy here, and the caller
+    /// restores health on the same beat (see [`AirTick::restored`]).
     pub fn air_tick(
         &mut self,
         attached: bool,
         grounded: bool,
         firing: bool,
         stats: &CombatStats,
-    ) -> bool {
+    ) -> AirTick {
         if grounded && !attached {
             self.ground_ticks = self.ground_ticks.saturating_add(1).min(GROUND_REARM_TICKS);
             if self.ground_ticks == GROUND_REARM_TICKS {
@@ -152,21 +174,22 @@ impl CombatFlow {
         } else {
             self.ground_ticks = 0;
         }
+        let mut restored = false;
         if attached {
             self.air_left = self.air_left.saturating_sub(1);
             if !firing && self.air_left > 0 {
                 self.float_fraction += FLOAT_GAIN_PER_SECOND;
                 if self.float_fraction >= 60 {
                     self.float_fraction -= 60;
-                    self.energy = (self.energy + 1).min(stats.energy_max);
-                    if self.energy >= AI_RESUME_ENERGY {
-                        self.recharging = false;
-                        self.ranged_phase = true;
-                    }
+                    self.gain_energy(1, stats);
+                    restored = true;
                 }
             }
         }
-        attached && self.air_left == 0
+        AirTick {
+            exhausted: attached && self.air_left == 0,
+            restored,
+        }
     }
     /// Record a shot landing; an interrupting hit ends the ranged phase and opens a follow-up.
     pub fn shot_hit(&mut self, interrupted: bool) {
@@ -299,19 +322,26 @@ mod tests {
     fn float_rate_fire_and_rehook_share_one_allowance() {
         let mut f = CombatFlow::FULL;
         f.energy = 0;
+        let mut restored = 0;
         for _ in 0..60 {
-            assert!(!f.air_tick(true, false, false, S));
+            let tick = f.air_tick(true, false, false, S);
+            assert!(!tick.exhausted);
+            restored += u16::from(tick.restored);
         }
         assert_eq!(f.energy, 20);
+        assert_eq!(restored, 20, "health is restored on the same beat");
         for _ in 0..60 {
-            f.air_tick(true, false, true, S);
+            assert!(
+                !f.air_tick(true, false, true, S).restored,
+                "firing pauses it"
+            );
         }
         assert_eq!(f.energy, 20);
         f.air_tick(false, false, false, S);
         for _ in 0..239 {
-            assert!(!f.air_tick(true, false, false, S));
+            assert!(!f.air_tick(true, false, false, S).exhausted);
         }
-        assert!(f.air_tick(true, false, false, S));
+        assert!(f.air_tick(true, false, false, S).exhausted);
         for _ in 0..119 {
             f.air_tick(false, true, false, S);
         }

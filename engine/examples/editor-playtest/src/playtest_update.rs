@@ -280,13 +280,7 @@ impl Playtest {
                     player_radius,
                     player_height,
                     player_invulnerable,
-                    player_combat: Some((
-                        self.player.stance.active(),
-                        [
-                            self.player.vitality.pool(VitalityChannelId::One).current(),
-                            self.player.vitality.pool(VitalityChannelId::Two).current(),
-                        ],
-                    )),
+                    player_combat: Some(self.player.stance.active()),
                     player_noise_radius: player_noise_radius(
                         self.player_moved_last_tick,
                         self.anim_state,
@@ -486,16 +480,12 @@ impl Playtest {
             Some(pc) => {
                 let record = CHARACTERS.get(pc.character.to_usize());
                 // Authored stance tuning travels with the character record, so
-                // a project can retune damage, recovery and the swap without a
-                // rebuild. The reset above installed the defaults; this
-                // replaces them once the cooked values are in hand.
+                // a project can retune damage and the swap without a rebuild.
+                // The reset above installed the defaults; this replaces them
+                // once the cooked values are in hand.
                 if let Some(record) = record {
                     self.player_stats = record.combat;
                     self.player_stance_config = CombatStanceConfig {
-                        regen_delay_ticks: record.stance_regen_delay_ticks,
-                        broken_regen_delay_ticks: record.stance_broken_regen_delay_ticks,
-                        regen_per_tick_q12: record.stance_regen_per_tick_q12,
-                        break_threshold_q12: record.stance_break_threshold_q12,
                         swap_cooldown_ticks: record.stance_swap_cooldown_ticks,
                         swap_duration_ticks: record.stance_swap_duration_ticks,
                     };
@@ -696,10 +686,8 @@ impl Playtest {
             }
         }
 
-        // Swap the active vitality state. Only the active pool takes damage and
-        // only the inactive one recovers, so this is both the defensive and the
-        // healing move. A refused press is silent: the cooldown and a broken
-        // target are the two reasons, and both are already on the HUD.
+        // Swap stance, which changes weapon. A refused press is silent: the
+        // cooldown is the only reason, and it is already on the HUD.
         if self.step_hook(ctx) {
             return;
         }
@@ -709,8 +697,8 @@ impl Playtest {
             self.room_index,
             circle_position.x,
             circle_position.z,
-            self.player.stance.active(),
-            &mut self.player.vitality,
+            &mut self.player,
+            &self.player_stats,
         );
         if ctx.just_pressed(button::TRIANGLE) && !circle_locks_stance {
             let config = self.player_stance_config;
@@ -723,14 +711,10 @@ impl Playtest {
                 telemetry::debug_log("player stance:swap");
             }
         }
-        // Recovery and cooldowns advance once per fixed tick, after any swap so
-        // a fresh swap does not lose its first tick of cooldown.
-        let config = self.player_stance_config;
-        // Regeneration comes from the active state's modules and heals the
-        // inactive pool, so the bonus is read before the tick that spends it.
-        let regeneration = self.vitality_modifiers().regeneration_q12;
+        // The cooldown and swap clock advance once per fixed tick, after any
+        // swap so a fresh swap does not lose its first tick of cooldown.
         let swap_cooldown_before_tick = self.player.stance.swap_cooldown();
-        self.player.tick_stance(&config, regeneration);
+        self.player.advance_stance(1);
         if swap_cooldown_before_tick > 0 && self.player.stance.swap_cooldown() == 0 {
             self.queue_gameplay_sfx(LevelGameplaySfxEvent::StanceSwapReady);
         }
@@ -1111,7 +1095,6 @@ impl Playtest {
                 p.z,
                 i32::from(self.is_locked()),
                 i32::from(self.game_entities.health(0)),
-                i32::from(self.game_entities.health_secondary(0)),
             ]);
         }
         if falling_before_solve

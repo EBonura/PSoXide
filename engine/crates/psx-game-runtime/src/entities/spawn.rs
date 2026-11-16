@@ -87,7 +87,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         }
         if dormant.get(id) & dormant_state::DEAD != 0 {
             self.state[slot] = GameEntityState::Dead as u8;
-            self.combatants[slot].vitality.empty_all();
+            self.combatants[slot].health.empty();
         }
         true
     }

@@ -2332,26 +2332,20 @@ fn resolve_ui_value(
         LevelUiValueBinding::LoadingProgress => loading_progress_q12,
         LevelUiValueBinding::PlayerHealth
         | LevelUiValueBinding::PlayerHealthMax
-        | LevelUiValueBinding::PlayerHealthSecondary
-        | LevelUiValueBinding::PlayerHealthSecondaryMax
+        | LevelUiValueBinding::PlayerEnergy
+        | LevelUiValueBinding::PlayerEnergyMax
         | LevelUiValueBinding::PlayerHealthEmptyInfluence
         | LevelUiValueBinding::PlayerHealthFullInfluence
-        | LevelUiValueBinding::PlayerHealthSecondaryEmptyInfluence
-        | LevelUiValueBinding::PlayerHealthSecondaryFullInfluence
+        | LevelUiValueBinding::PlayerEnergyEmptyInfluence
+        | LevelUiValueBinding::PlayerEnergyFullInfluence
         | LevelUiValueBinding::PlayerStamina
         | LevelUiValueBinding::PlayerStaminaMax
-        | LevelUiValueBinding::PlayerStanceActiveHealth
-        | LevelUiValueBinding::PlayerStanceActiveHealthMax
-        | LevelUiValueBinding::PlayerStanceInactiveHealth
-        | LevelUiValueBinding::PlayerStanceInactiveHealthMax
         | LevelUiValueBinding::PlayerStanceSwapProgress
         | LevelUiValueBinding::PlayerStanceActiveIsZenith
-        | LevelUiValueBinding::PlayerStanceActiveBroken
-        | LevelUiValueBinding::PlayerStanceInactiveBroken
         | LevelUiValueBinding::TargetHealth
         | LevelUiValueBinding::TargetHealthMax
-        | LevelUiValueBinding::TargetHealthSecondary
-        | LevelUiValueBinding::TargetHealthSecondaryMax
+        | LevelUiValueBinding::TargetEnergy
+        | LevelUiValueBinding::TargetEnergyMax
         | LevelUiValueBinding::TargetStanceSwapProgress
         | LevelUiValueBinding::TargetStanceActiveIsZenith => gameplay_value(binding).unwrap_or(0),
     }
@@ -2832,8 +2826,8 @@ mod tests {
         let gameplay_value = |binding| match binding {
             LevelUiValueBinding::PlayerHealth => Some(3072),
             LevelUiValueBinding::PlayerHealthMax => Some(4096),
-            LevelUiValueBinding::PlayerHealthSecondary => Some(2048),
-            LevelUiValueBinding::PlayerHealthSecondaryMax => Some(4096),
+            LevelUiValueBinding::PlayerEnergy => Some(2048),
+            LevelUiValueBinding::PlayerEnergyMax => Some(4096),
             _ => None,
         };
 
@@ -2861,7 +2855,7 @@ mod tests {
         );
         assert_eq!(
             resolve_ui_value(
-                LevelUiValueBinding::PlayerHealthSecondary,
+                LevelUiValueBinding::PlayerEnergy,
                 &[],
                 &values,
                 0,

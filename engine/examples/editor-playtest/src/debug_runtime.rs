@@ -147,7 +147,7 @@ pub(super) fn debug_log_enemy_tactics(
 
 /// Input and stance evidence for the ranged weapon acceptance tape.
 #[cfg(feature = "emulator-telemetry")]
-pub(super) fn debug_log_player_weapon(values: [i32; 13]) {
+pub(super) fn debug_log_player_weapon(values: [i32; 12]) {
     let mut line = DebugLogLine::new("player-weapon,");
     for value in values {
         line.push_i32(value);

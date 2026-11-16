@@ -1,4 +1,5 @@
-//! Fixed-capacity dual-vitality field state.
+//! Fixed-capacity vitality field state: the checkpoints that restore health
+//! and energy.
 //!
 //! Authored records stay in the generated manifest; the mutable console state
 //! is one claim bit per field plus a single fractional-rate accumulator for
@@ -7,7 +8,10 @@
 use psx_level::{LevelVitalityCircleRecord, RoomIndex, MAX_VITALITY_CIRCLES};
 
 use crate::poi::xz_within_radius;
-use crate::vitality::{DualVitality, VitalityChannelId};
+use psx_level::CombatStats;
+
+use crate::combatant::Combatant;
+use crate::vitality::VitalityChannelId;
 
 const TICKS_PER_SECOND: u16 = 60;
 const NO_ACTIVE_CIRCLE: u8 = u8::MAX;
@@ -64,15 +68,18 @@ impl VitalityCircleState {
     }
 
     /// Apply the containing claimed field once for one 60 Hz simulation tick.
-    /// Returns whether voluntary stance swapping must be locked this tick.
+    /// A field matching `fighter`'s stance restores health and energy at its
+    /// refill rate; a mismatched one drains health at its drain rate, but a
+    /// field never kills. Returns whether voluntary stance swapping must be
+    /// locked this tick.
     pub fn tick(
         &mut self,
         circles: &[LevelVitalityCircleRecord],
         room: RoomIndex,
         player_x: i32,
         player_z: i32,
-        active: VitalityChannelId,
-        vitality: &mut DualVitality,
+        fighter: &mut Combatant,
+        stats: &CombatStats,
     ) -> bool {
         let containing =
             circles
@@ -94,7 +101,7 @@ impl VitalityCircleState {
             self.active_circle = compact_index;
             self.rate_fraction = 0;
         }
-        let aligned = circle_axis(circle) == active;
+        let aligned = circle_axis(circle) == fighter.stance.active();
         let per_second = if aligned {
             circle.refill_per_second
         } else {
@@ -105,18 +112,14 @@ impl VitalityCircleState {
         self.rate_fraction = accumulated % TICKS_PER_SECOND;
         if amount != 0 {
             if aligned {
-                vitality.heal(active, amount);
+                fighter.restore(amount, amount, stats);
             } else {
-                // A circle may empty the active pool, except when the other
-                // pool is already empty: environmental field drain is never a
-                // direct two-pool death source. Combat can still finish it.
-                let current = vitality.pool(active).current();
-                let safe_amount = if vitality.pool(active.other()).current() == 0 {
-                    amount.min(current.saturating_sub(1))
-                } else {
-                    amount
-                };
-                vitality.apply_damage(active, safe_amount);
+                // Environmental field drain is never a death source; combat
+                // can still finish the fighter.
+                let current = fighter.health.current();
+                fighter
+                    .health
+                    .apply_damage(amount.min(current.saturating_sub(1)));
             }
         }
         true
@@ -140,7 +143,6 @@ fn within_circle(x: i32, z: i32, circle: &LevelVitalityCircleRecord) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vitality::{VitalityChannelId, VitalityPool};
 
     const CIRCLE: LevelVitalityCircleRecord = LevelVitalityCircleRecord {
         room: RoomIndex(2),
@@ -152,6 +154,20 @@ mod tests {
         refill_per_second: 60,
         drain_per_second: 120,
     };
+
+    const STATS: CombatStats = CombatStats::PLAYER;
+
+    /// A fighter on `side` with `health` and `energy` left.
+    fn fighter(side: VitalityChannelId, health: u16, energy: u16) -> Combatant {
+        let mut c = Combatant::EMPTY;
+        c.reset(&STATS);
+        if side != c.stance.active() {
+            assert!(c.request_swap(0));
+        }
+        c.health.apply_damage(STATS.max_health - health);
+        c.flow.energy = energy;
+        c
+    }
 
     #[test]
     fn matching_hit_claims_and_claim_persists_after_leaving() {
@@ -165,72 +181,32 @@ mod tests {
             state.claim_struck(&[CIRCLE], RoomIndex(2), 100, 200, 0, VitalityChannelId::One),
             1
         );
-        let mut vitality = DualVitality::equal(100);
-        assert!(!state.tick(
-            &[CIRCLE],
-            RoomIndex(2),
-            1000,
-            200,
-            VitalityChannelId::One,
-            &mut vitality
-        ));
+        let mut c = fighter(VitalityChannelId::One, 200, 100);
+        assert!(!state.tick(&[CIRCLE], RoomIndex(2), 1000, 200, &mut c, &STATS));
         assert!(state.is_claimed(0));
     }
 
     #[test]
-    fn field_heals_match_drains_mismatch_and_locks_swap() {
+    fn field_restores_health_and_energy_on_match_and_drains_on_mismatch() {
         let mut state = VitalityCircleState::EMPTY;
         state.claim_struck(&[CIRCLE], RoomIndex(2), 100, 200, 0, VitalityChannelId::One);
-        let mut vitality =
-            DualVitality::from_pools(VitalityPool::at(50, 100), VitalityPool::full(100));
-        assert!(state.tick(
-            &[CIRCLE],
-            RoomIndex(2),
-            100,
-            200,
-            VitalityChannelId::One,
-            &mut vitality
-        ));
-        assert_eq!(vitality.pool(VitalityChannelId::One).current(), 51);
-        assert!(state.tick(
-            &[CIRCLE],
-            RoomIndex(2),
-            100,
-            200,
-            VitalityChannelId::Two,
-            &mut vitality
-        ));
-        assert_eq!(vitality.pool(VitalityChannelId::Two).current(), 98);
+        let mut c = fighter(VitalityChannelId::One, 50, 30);
+        assert!(state.tick(&[CIRCLE], RoomIndex(2), 100, 200, &mut c, &STATS));
+        assert_eq!((c.health(), c.flow.energy), (51, 31));
+        let mut c = fighter(VitalityChannelId::Two, 100, 30);
+        assert!(state.tick(&[CIRCLE], RoomIndex(2), 100, 200, &mut c, &STATS));
+        assert_eq!((c.health(), c.flow.energy), (98, 30));
     }
 
     #[test]
-    fn drain_can_empty_one_pool_but_cannot_finish_a_two_pool_death() {
+    fn drain_never_kills() {
         let mut state = VitalityCircleState::EMPTY;
         state.claim_struck(&[CIRCLE], RoomIndex(2), 100, 200, 0, VitalityChannelId::One);
-        let mut vitality =
-            DualVitality::from_pools(VitalityPool::at(100, 100), VitalityPool::at(1, 100));
-        state.tick(
-            &[CIRCLE],
-            RoomIndex(2),
-            100,
-            200,
-            VitalityChannelId::Two,
-            &mut vitality,
-        );
-        assert_eq!(vitality.pool(VitalityChannelId::Two).current(), 0);
-
-        let mut vitality =
-            DualVitality::from_pools(VitalityPool::at(0, 100), VitalityPool::at(1, 100));
+        let mut c = fighter(VitalityChannelId::Two, 2, 100);
         for _ in 0..60 {
-            state.tick(
-                &[CIRCLE],
-                RoomIndex(2),
-                100,
-                200,
-                VitalityChannelId::Two,
-                &mut vitality,
-            );
+            state.tick(&[CIRCLE], RoomIndex(2), 100, 200, &mut c, &STATS);
         }
-        assert_eq!(vitality.pool(VitalityChannelId::Two).current(), 1);
+        assert_eq!(c.health(), 1);
+        assert!(!c.defeated());
     }
 }

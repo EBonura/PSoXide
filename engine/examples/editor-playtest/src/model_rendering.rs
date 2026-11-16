@@ -33,6 +33,9 @@ pub(super) fn model_tables() -> mr::ModelTables {
 const HORIZON_STANCE_RGB: (u8, u8, u8) = (255, 113, 58);
 const ZENITH_STANCE_RGB: (u8, u8, u8) = (108, 224, 198);
 
+/// Energy in the enemy readouts: the lit ammunition gem of the player HUD.
+pub(super) const ENERGY_RGB: (u8, u8, u8) = (247, 140, 41);
+
 pub(super) fn stance_rgb(stance: VitalityChannelId) -> (u8, u8, u8) {
     match stance {
         VitalityChannelId::One => HORIZON_STANCE_RGB,

@@ -41,9 +41,7 @@ mod tactics;
 pub use tactics::{EnemyGoal, EnemyGoalResult, EnemyTacticalSnapshot};
 
 use crate::combat::{arc_hits_circle, MeleeArc};
-use crate::combatant::{
-    stance_scaled, Combatant, CombatantId, HitIn, HitKind, HitRoute, PoiseRule, Strike,
-};
+use crate::combatant::{stance_scaled, Combatant, CombatantId, HitIn, HitKind, PoiseRule, Strike};
 use crate::vitality::VitalityChannelId;
 use psx_level::{
     combat_armour, game_entity_flags, CharacterActionFrameRange, CharacterAnimationAction,
@@ -289,9 +287,9 @@ pub struct GameEntityTickInput {
     /// live, so i-framing only the first half of a window still eats
     /// the tail (souls timing rules).
     pub player_invulnerable: bool,
-    /// Visible target's stance and vitality, for shared dual-stance decisions.
-    /// None retains distance-only policy for legacy callers and fixtures.
-    pub player_combat: Option<(VitalityChannelId, [u16; 2])>,
+    /// Visible target's active stance, for shared stance decisions. None
+    /// retains distance-only policy for legacy callers and fixtures.
+    pub player_combat: Option<VitalityChannelId>,
 }
 
 /// Per-tick outcome counters, for overlays and budget telemetry.
@@ -943,29 +941,12 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         }
     }
 
-    /// Remaining first-channel (Horizon) health of entity `index`.
+    /// Remaining health of entity `index`.
     pub fn health(&self, index: usize) -> u16 {
         if index >= self.count() {
             0
         } else {
-            self.combatants[index].health()[0]
-        }
-    }
-
-    /// Remaining second-channel (Zenith) health of entity `index`.
-    pub fn health_secondary(&self, index: usize) -> u16 {
-        if index >= self.count() {
-            0
-        } else {
-            self.combatants[index].health()[1]
-        }
-    }
-
-    /// Remaining health in one named vitality channel of entity `index`.
-    pub fn health_channel(&self, index: usize, channel: VitalityChannelId) -> u16 {
-        match channel {
-            VitalityChannelId::One => self.health(index),
-            VitalityChannelId::Two => self.health_secondary(index),
+            self.combatants[index].health()
         }
     }
 
@@ -1258,11 +1239,8 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     /// damage past the record's capacity staggers.
     ///
     /// `channel` is the attack's vitality channel, which the player side
-    /// derives from the swing (horizontal = Horizon, vertical = Zenith).
-    /// [`DualVitality::apply_spill`](crate::vitality::DualVitality::apply_spill)
-    /// consumes the named channel first and spills only the excess into the
-    /// other, so a single-channel attacker still kills at the same total
-    /// damage. The entity dies when BOTH pools are empty.
+    /// derives from the swing (horizontal = Horizon, vertical = Zenith). The
+    /// damage comes off the one health bar; the entity dies when it is empty.
     pub fn apply_hit(
         &mut self,
         records: &'static [LevelGameEntityRecord],
@@ -1302,7 +1280,6 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         let out = self.combatants[index].receive_hit(HitIn {
             strike,
             stats,
-            route: HitRoute::Spill,
             poise,
         });
         let delay = u16::from(records[index].group_attack_delay_ticks);
@@ -2671,10 +2648,6 @@ mod tests {
             combat: CombatStats {
                 poise: 50,
                 max_health: 100,
-                // Single-channel by default so every pre-existing behavior
-                // test keeps its original arithmetic. `DUAL_ENEMY` below is
-                // the two-channel actor the vitality tests use.
-                max_health_secondary: 0,
                 ..CombatStats::ENEMY
             },
             soul_value: 0,
@@ -4309,11 +4282,11 @@ mod tests {
         );
     }
 
-    /// The shipped cortex enemy shape: two equal 50-point pools.
+    /// The shipped cortex enemy shape: the two old 50-point pools as one
+    /// 100 bar.
     static EVEN_ENEMY: [LevelGameEntityRecord; 1] = [LevelGameEntityRecord {
         combat: CombatStats {
-            max_health: 50,
-            max_health_secondary: 50,
+            max_health: 100,
             poise: 50,
             ..CombatStats::ENEMY
         },
@@ -4326,11 +4299,10 @@ mod tests {
         )
     }];
 
-    /// Two unequal pools, so a test that reads the wrong one is obvious.
+    /// The old two-pool test actor (60 and 40) as its one 100 bar.
     static DUAL_ENEMY: [LevelGameEntityRecord; 1] = [LevelGameEntityRecord {
         combat: CombatStats {
-            max_health: 60,
-            max_health_secondary: 40,
+            max_health: 100,
             poise: 50,
             ..CombatStats::ENEMY
         },
@@ -4344,14 +4316,11 @@ mod tests {
     }];
 
     #[test]
-    fn spawn_fills_both_vitality_channels() {
+    fn spawn_fills_the_health_bar() {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&DUAL_ENEMY);
         entities.set_spatial_active_mask(u64::MAX);
-        assert_eq!(entities.health(0), 60);
-        assert_eq!(entities.health_secondary(0), 40);
-        assert_eq!(entities.health_channel(0, VitalityChannelId::One), 60);
-        assert_eq!(entities.health_channel(0, VitalityChannelId::Two), 40);
+        assert_eq!(entities.health(0), 100);
     }
 
     #[test]
@@ -4380,7 +4349,7 @@ mod tests {
         matching.spawn_from_records(&DUAL_ENEMY);
         let hit = matching.apply_hit(&DUAL_ENEMY, 0, VitalityChannelId::One, 40, 0);
         assert!(hit.connected && !hit.died);
-        assert_eq!((matching.health(0), matching.health_secondary(0)), (20, 40));
+        assert_eq!(matching.health(0), 60);
         for damage in [0, 1, 16, 38, 999] {
             assert_eq!(
                 matching.scaled_stance_damage(&DUAL_ENEMY, 0, VitalityChannelId::One, damage),
@@ -4397,8 +4366,8 @@ mod tests {
         opposite.spawn_from_records(&DUAL_ENEMY);
         let hit = opposite.apply_hit(&DUAL_ENEMY, 0, VitalityChannelId::Two, 40, 0);
         assert!(hit.connected && !hit.died);
-        // 1.25x = 50: Zenith's 40 drains first, then the remaining 10 spills.
-        assert_eq!((opposite.health(0), opposite.health_secondary(0)), (50, 0));
+        // 1.25x = 50 off the one bar.
+        assert_eq!(opposite.health(0), 50);
     }
 
     #[test]
@@ -4627,55 +4596,51 @@ mod tests {
         assert_eq!(e.stance_eye_pulse_q12(0), None);
     }
 
-    /// A hit inside the named channel's pool never touches the other one.
-    /// This is the whole reason the channel is threaded down from the swing.
+    /// A hit from either channel comes off the one bar; the channel only
+    /// decides the stance multiplier.
     #[test]
-    fn a_hit_drains_only_its_own_channel() {
+    fn a_hit_of_either_channel_comes_off_the_one_bar() {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&DUAL_ENEMY);
         entities.set_spatial_active_mask(u64::MAX);
         entities.apply_hit(&DUAL_ENEMY, 0, VitalityChannelId::One, 20, 0);
-        assert_eq!((entities.health(0), entities.health_secondary(0)), (40, 40));
+        assert_eq!(entities.health(0), 80);
         // Zenith is the opposite stance here (the actor is on Horizon), so
-        // the 15 lands at 1.25x, still only in its own channel.
+        // the 15 lands at 1.25x.
         entities.apply_hit(&DUAL_ENEMY, 0, VitalityChannelId::Two, 15, 0);
-        assert_eq!((entities.health(0), entities.health_secondary(0)), (40, 22));
+        assert_eq!(entities.health(0), 62);
     }
 
-    /// The player's own untyped path is `DualVitality::apply_spill`, so the
-    /// enemy path spills the same way: only the EXCESS crosses, and it crosses
-    /// in whichever direction the attack came from.
+    /// A hit bigger than either old pool is just damage now: nothing spills,
+    /// the bar takes it all, and the actor lives while health remains.
     #[test]
-    fn overkill_spills_into_the_other_channel() {
+    fn a_hit_bigger_than_an_old_pool_is_just_damage() {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&DUAL_ENEMY);
         entities.set_spatial_active_mask(u64::MAX);
-        // 75 against a 60 Horizon pool: 60 lands, 15 crosses into Zenith.
         let outcome = entities.apply_hit(&DUAL_ENEMY, 0, VitalityChannelId::One, 75, 0);
-        assert_eq!((entities.health(0), entities.health_secondary(0)), (0, 25));
+        assert_eq!(entities.health(0), 25);
         assert!(outcome.connected && !outcome.died);
 
-        // And symmetrically, from the Zenith side on a fresh actor.
         entities.spawn_from_records(&DUAL_ENEMY);
         entities.set_spatial_active_mask(u64::MAX);
-        // Opposite stance: 55 x 1.25 = 68, Zenith's 40 then 28 spills.
+        // Opposite stance: 55 x 1.25 = 68.
         entities.apply_hit(&DUAL_ENEMY, 0, VitalityChannelId::Two, 55, 0);
-        assert_eq!((entities.health(0), entities.health_secondary(0)), (32, 0));
+        assert_eq!(entities.health(0), 32);
     }
 
-    /// Death is `DualVitality::is_defeated`: BOTH pools empty. Emptying one
-    /// channel outright leaves a live actor, which is exactly why the health
-    /// bar's visibility rule reads both pools too.
+    /// Death is the one bar empty, from whichever channel the last point
+    /// went.
     #[test]
-    fn death_needs_both_channels_empty() {
+    fn death_is_the_bar_empty() {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&DUAL_ENEMY);
         entities.set_spatial_active_mask(u64::MAX);
-        // Opposite stance: 40 x 1.25 = 50 empties Zenith and spills 10.
+        // Opposite stance: 40 x 1.25 = 50.
         let outcome = entities.apply_hit(&DUAL_ENEMY, 0, VitalityChannelId::Two, 40, 0);
         assert!(outcome.connected && !outcome.died);
         assert_ne!(entities.state(0), GameEntityState::Dead);
-        assert_eq!((entities.health(0), entities.health_secondary(0)), (50, 0));
+        assert_eq!(entities.health(0), 50);
 
         let outcome = entities.apply_hit(&DUAL_ENEMY, 0, VitalityChannelId::One, 49, 0);
         assert!(!outcome.died);
@@ -4686,9 +4651,9 @@ mod tests {
         assert_eq!(entities.state(0), GameEntityState::Dead);
     }
 
-    /// Total effective vitality is the sum, so a single-channel attacker kills
-    /// a 60/40 actor on the same 100 damage a 100/0 actor took. That is what
-    /// keeps an authored pool split from silently changing time-to-kill.
+    /// The bar is the old two pools summed, so a single-channel attacker
+    /// kills the old 60/40 actor on the same 100 damage it took before the
+    /// pools became one bar: time-to-kill did not move for it.
     #[test]
     fn one_channel_attacker_still_kills_at_the_summed_pool() {
         let mut entities = GameEntities::<8>::EMPTY;
@@ -4708,11 +4673,9 @@ mod tests {
         );
     }
 
-    /// One overwhelming hit must kill outright. `u16::MAX` damage against a
-    /// 50/50 actor is the exact place a spill remainder can wrap or clamp: the
-    /// remainder is `damage - first_pool`, which is still far wider than the
-    /// second pool, and any narrowing on the way through leaves the second
-    /// channel standing and the actor alive. Reported from live combat.
+    /// One overwhelming hit must kill outright, whatever its width: any
+    /// narrowing on the way through would leave the actor standing. Reported
+    /// from live combat (against the old two-pool spill).
     #[test]
     fn one_overwhelming_hit_kills_outright() {
         for damage in [u16::MAX, u16::MAX - 1, 60_000, 101, 100] {
@@ -4722,28 +4685,23 @@ mod tests {
             let outcome = entities.apply_hit(&EVEN_ENEMY, 0, VitalityChannelId::One, damage, 0);
             assert!(
                 outcome.connected && outcome.died,
-                "{damage} damage against a 50/50 actor must kill, got {outcome:?}"
+                "{damage} damage against a 100 bar must kill, got {outcome:?}"
             );
             assert_eq!(entities.state(0), GameEntityState::Dead, "damage {damage}");
-            assert_eq!(
-                (entities.health(0), entities.health_secondary(0)),
-                (0, 0),
-                "damage {damage}"
-            );
+            assert_eq!(entities.health(0), 0, "damage {damage}");
         }
     }
 
-    /// One short of the combined pools must leave exactly one point standing in
-    /// the SECOND channel, which pins both the spill arithmetic and the death
-    /// rule against an off-by-one in either direction.
+    /// One short of the bar must leave exactly one point standing, which pins
+    /// the death rule against an off-by-one in either direction.
     #[test]
-    fn one_short_of_the_combined_pools_does_not_kill() {
+    fn one_short_of_the_bar_does_not_kill() {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&EVEN_ENEMY);
         entities.set_spatial_active_mask(u64::MAX);
         let outcome = entities.apply_hit(&EVEN_ENEMY, 0, VitalityChannelId::One, 99, 0);
         assert!(outcome.connected && !outcome.died);
-        assert_eq!((entities.health(0), entities.health_secondary(0)), (0, 1));
+        assert_eq!(entities.health(0), 1);
         assert_ne!(entities.state(0), GameEntityState::Dead);
         // And the last point finishes it.
         assert!(
@@ -4765,11 +4723,11 @@ mod tests {
                 .apply_hit(&EVEN_ENEMY, 0, VitalityChannelId::Two, u16::MAX, 0)
                 .died
         );
-        assert_eq!((entities.health(0), entities.health_secondary(0)), (0, 0));
+        assert_eq!(entities.health(0), 0);
     }
 
     /// The same overwhelming hit through the arc sweep, which is the other
-    /// public way damage reaches a two-channel actor. A width bug in the
+    /// public way damage reaches an actor. A width bug in the
     /// wrapper would be invisible to the direct `apply_hit` tests above.
     #[test]
     fn an_overwhelming_arc_hit_kills_outright() {
@@ -4800,24 +4758,7 @@ mod tests {
         );
         assert_eq!(stats.hits, 1);
         assert_eq!(stats.deaths, 1);
-        assert_eq!((entities.health(0), entities.health_secondary(0)), (0, 0));
-    }
-
-    /// A zero second pool is a legal single-channel actor: it counts as
-    /// already spent, so the first pool alone decides death. Cooked projects
-    /// author both channels, but the runtime contract is wider.
-    #[test]
-    fn a_zero_second_pool_is_a_single_channel_actor() {
-        let mut entities = GameEntities::<8>::EMPTY;
-        entities.spawn_from_records(&IDLE_ENEMY);
-        entities.set_spatial_active_mask(u64::MAX);
-        assert_eq!(entities.health_secondary(0), 0);
-        assert!(
-            entities
-                .apply_hit(&IDLE_ENEMY, 0, VitalityChannelId::One, 100, 0)
-                .died
-        );
-        assert_eq!(entities.state(0), GameEntityState::Dead);
+        assert_eq!(entities.health(0), 0);
     }
 
     /// Drive IDLE_ENEMY from spawn into its Attack window against the

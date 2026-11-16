@@ -339,6 +339,11 @@ pub const fn default_ui_shape_border_color() -> [u8; 3] {
 }
 
 /// Runtime value a UI element can bind to.
+///
+/// Health is one bar and energy the other. A project written while health
+/// was two pools loads its second-pool bindings as energy (the bar the
+/// Zenith sockets moved to) and its stance-relative health bindings as the
+/// one health bar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UiValueBinding {
     /// Literal fixed-point Q12 value.
@@ -346,51 +351,52 @@ pub enum UiValueBinding {
     /// Live project option value.
     Option(OptionId),
     /// Player health value.
+    #[serde(
+        alias = "PlayerStanceActiveHealth",
+        alias = "PlayerStanceInactiveHealth"
+    )]
     PlayerHealth,
     /// Player health maximum.
+    #[serde(
+        alias = "PlayerStanceActiveHealthMax",
+        alias = "PlayerStanceInactiveHealthMax"
+    )]
     PlayerHealthMax,
-    /// Player secondary health value.
-    PlayerHealthSecondary,
-    /// Player secondary health maximum.
-    PlayerHealthSecondaryMax,
-    /// Empty-end influence of the primary health channel (Q12).
+    /// Player energy value.
+    #[serde(alias = "PlayerHealthSecondary")]
+    PlayerEnergy,
+    /// Player energy maximum.
+    #[serde(alias = "PlayerHealthSecondaryMax")]
+    PlayerEnergyMax,
+    /// Empty-end influence of the health bar (Q12).
     PlayerHealthEmptyInfluence,
-    /// Full-end influence of the primary health channel (Q12).
+    /// Full-end influence of the health bar (Q12).
     PlayerHealthFullInfluence,
-    /// Empty-end influence of the secondary health channel (Q12).
-    PlayerHealthSecondaryEmptyInfluence,
-    /// Full-end influence of the secondary health channel (Q12).
-    PlayerHealthSecondaryFullInfluence,
+    /// Empty-end influence of the energy bar (Q12).
+    #[serde(alias = "PlayerHealthSecondaryEmptyInfluence")]
+    PlayerEnergyEmptyInfluence,
+    /// Full-end influence of the energy bar (Q12).
+    #[serde(alias = "PlayerHealthSecondaryFullInfluence")]
+    PlayerEnergyFullInfluence,
     /// Player stamina value.
     PlayerStamina,
     /// Player stamina maximum.
     PlayerStaminaMax,
-    /// Health of whichever pool is currently active, so a bar follows the
-    /// stance rather than a fixed colour.
-    PlayerStanceActiveHealth,
-    /// Maximum of the active pool.
-    PlayerStanceActiveHealthMax,
-    /// Health of the pool that is currently recovering.
-    PlayerStanceInactiveHealth,
-    /// Maximum of the inactive pool.
-    PlayerStanceInactiveHealthMax,
     /// How far through a stance swap the HUD is (Q12), reaching one when the
     /// swap has settled.
     PlayerStanceSwapProgress,
     /// One when Zenith is active, zero when Horizon is.
     PlayerStanceActiveIsZenith,
-    /// One while the active pool is broken.
-    PlayerStanceActiveBroken,
-    /// One while the inactive pool is broken and cannot be swapped to.
-    PlayerStanceInactiveBroken,
-    /// Current hard/soft combat target's Horizon pool.
+    /// Current hard/soft combat target's health.
     TargetHealth,
-    /// Current hard/soft combat target's Horizon maximum.
+    /// Current hard/soft combat target's health maximum.
     TargetHealthMax,
-    /// Current hard/soft combat target's Zenith pool.
-    TargetHealthSecondary,
-    /// Current hard/soft combat target's Zenith maximum.
-    TargetHealthSecondaryMax,
+    /// Current hard/soft combat target's energy.
+    #[serde(alias = "TargetHealthSecondary")]
+    TargetEnergy,
+    /// Current hard/soft combat target's energy maximum.
+    #[serde(alias = "TargetHealthSecondaryMax")]
+    TargetEnergyMax,
     /// Current target's guard-mutation progress (Q12).
     TargetStanceSwapProgress,
     /// One when the current target guards Zenith, zero otherwise.
@@ -408,26 +414,20 @@ impl UiValueBinding {
             Self::Option(_) => "Option",
             Self::PlayerHealth => "Player Health",
             Self::PlayerHealthMax => "Player Health Max",
-            Self::PlayerHealthSecondary => "Player Secondary Health",
-            Self::PlayerHealthSecondaryMax => "Player Secondary Health Max",
+            Self::PlayerEnergy => "Player Energy",
+            Self::PlayerEnergyMax => "Player Energy Max",
             Self::PlayerHealthEmptyInfluence => "Player Health Empty Influence",
             Self::PlayerHealthFullInfluence => "Player Health Full Influence",
-            Self::PlayerHealthSecondaryEmptyInfluence => "Player Secondary Health Empty Influence",
-            Self::PlayerHealthSecondaryFullInfluence => "Player Secondary Health Full Influence",
+            Self::PlayerEnergyEmptyInfluence => "Player Energy Empty Influence",
+            Self::PlayerEnergyFullInfluence => "Player Energy Full Influence",
             Self::PlayerStamina => "Player Stamina",
             Self::PlayerStaminaMax => "Player Stamina Max",
-            Self::PlayerStanceActiveHealth => "Active State Health",
-            Self::PlayerStanceActiveHealthMax => "Active State Health Max",
-            Self::PlayerStanceInactiveHealth => "Inactive State Health",
-            Self::PlayerStanceInactiveHealthMax => "Inactive State Health Max",
             Self::PlayerStanceSwapProgress => "State Swap Progress",
             Self::PlayerStanceActiveIsZenith => "Active State Is Zenith",
-            Self::PlayerStanceActiveBroken => "Active State Broken",
-            Self::PlayerStanceInactiveBroken => "Inactive State Broken",
-            Self::TargetHealth => "Target Horizon Health",
-            Self::TargetHealthMax => "Target Horizon Health Max",
-            Self::TargetHealthSecondary => "Target Zenith Health",
-            Self::TargetHealthSecondaryMax => "Target Zenith Health Max",
+            Self::TargetHealth => "Target Health",
+            Self::TargetHealthMax => "Target Health Max",
+            Self::TargetEnergy => "Target Energy",
+            Self::TargetEnergyMax => "Target Energy Max",
             Self::TargetStanceSwapProgress => "Target State Swap Progress",
             Self::TargetStanceActiveIsZenith => "Target State Is Zenith",
             Self::LoadingProgress => "Loading Progress",

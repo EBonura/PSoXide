@@ -2,10 +2,10 @@
 //!
 //! These pin what the code does TODAY, so the combat unification can prove it
 //! changed nothing (or exactly what it meant to change). They are not a
-//! statement of the target design: where the code differs from the one-bar,
-//! symmetric-rules target (dual pools, a stance-scaled hit that only touches
-//! the active pool, swap i-frames that exist for the player alone) the test
-//! asserts the current behaviour and says so. When a later step changes a
+//! statement of the target design: where the code differs from the
+//! symmetric-rules target (swap i-frames that exist for the player alone) the
+//! test asserts the current behaviour and says so. Step 5 made health one
+//! bar: the two-pool tests were rewritten to pin that rule. When a later step changes a
 //! number or a rule on purpose, the failing test names the behaviour that
 //! moved.
 //!
@@ -101,10 +101,6 @@ fn character(ranged: bool) -> RuntimeCharacter {
         roll_recovery_frames: 10,
         roll_invulnerable_frames: TEST_I_FRAMES,
         combat: CombatStats::PLAYER,
-        stance_regen_delay_ticks: 90,
-        stance_broken_regen_delay_ticks: 300,
-        stance_regen_per_tick_q12: 1024,
-        stance_break_threshold_q12: 1024,
         stance_swap_cooldown_ticks: 30,
         stance_swap_duration_ticks: 12,
         backstep_cost_q12: 0,
@@ -121,8 +117,8 @@ fn character(ranged: bool) -> RuntimeCharacter {
     crate::character_runtime::runtime_character_from_record(&record)
 }
 
-fn pool(scene: &Playtest, channel: VitalityChannelId) -> u16 {
-    scene.player.vitality.pool(channel).current()
+fn health(scene: &Playtest) -> u16 {
+    scene.player.health()
 }
 
 fn bolt(channel: ProjectileDamageChannel, damage: u16, poise: u16) -> ProjectileSpawn {
@@ -145,15 +141,14 @@ fn bolt(channel: ProjectileDamageChannel, damage: u16, poise: u16) -> Projectile
 }
 
 // ---------------------------------------------------------------------------
-// Hit routing: which pool a hit lands in, and how it is scaled.
+// Hit routing: every hit comes off the one health bar, scaled by stance.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn a_fresh_player_starts_with_two_full_pools_in_the_horizon_stance() {
+fn a_fresh_player_starts_with_a_full_bar_in_the_horizon_stance() {
     let scene = scene();
-    assert_eq!(PLAYER_MAX_HEALTH, 100);
-    assert_eq!(pool(&scene, VitalityChannelId::One), PLAYER_MAX_HEALTH);
-    assert_eq!(pool(&scene, VitalityChannelId::Two), PLAYER_MAX_HEALTH);
+    assert_eq!(PLAYER_MAX_HEALTH, 200, "the two old 100 pools as one bar");
+    assert_eq!(health(&scene), PLAYER_MAX_HEALTH);
     assert_eq!(scene.player.stance.active(), VitalityChannelId::One);
     assert_eq!(scene.player_stance_config, CombatStanceConfig::DEFAULT);
     assert_eq!(scene.player.flow, CombatFlow::FULL);
@@ -161,40 +156,35 @@ fn a_fresh_player_starts_with_two_full_pools_in_the_horizon_stance() {
 }
 
 #[test]
-fn an_untyped_hit_counts_as_matching_and_lands_as_authored_on_the_active_pool_only() {
+fn an_untyped_hit_counts_as_matching_and_lands_as_authored() {
     let mut scene = scene();
     assert!(!scene.apply_untyped_player_damage(20));
-    assert_eq!(pool(&scene, VitalityChannelId::One), 80);
-    assert_eq!(pool(&scene, VitalityChannelId::Two), PLAYER_MAX_HEALTH);
+    assert_eq!(health(&scene), 180);
 }
 
 #[test]
-fn an_untyped_hit_follows_the_active_stance_into_the_zenith_pool() {
+fn an_untyped_hit_matches_whichever_stance_is_active() {
     let mut scene = scene();
     let config = scene.player_stance_config;
-    assert!(scene.player.stance.request_swap(&config).is_some());
+    assert!(scene.player.stance.request_swap(&config));
     assert!(!scene.apply_untyped_player_damage(20));
-    assert_eq!(pool(&scene, VitalityChannelId::Two), 80);
-    assert_eq!(pool(&scene, VitalityChannelId::One), PLAYER_MAX_HEALTH);
+    assert_eq!(health(&scene), 180);
 }
 
 #[test]
 fn a_typed_hit_matching_the_active_channel_lands_as_authored() {
     let mut scene = scene();
     assert!(!scene.apply_typed_player_damage(ProjectileDamageChannel::Horizon, 20));
-    assert_eq!(pool(&scene, VitalityChannelId::One), 80);
-    assert_eq!(pool(&scene, VitalityChannelId::Two), PLAYER_MAX_HEALTH);
+    assert_eq!(health(&scene), 180);
 }
 
 #[test]
-fn a_typed_hit_on_the_other_channel_takes_a_quarter_extra_from_the_active_pool() {
+fn a_typed_hit_on_the_other_channel_takes_a_quarter_extra() {
     // The one stance rule: an opposite-stance hit takes the defender's
-    // opposite multiplier (1.25x to start). The penalty still lands in the
-    // ACTIVE pool until the two pools become one bar.
+    // opposite multiplier (1.25x to start), off the one bar.
     let mut scene = scene();
     assert!(!scene.apply_typed_player_damage(ProjectileDamageChannel::Zenith, 20));
-    assert_eq!(pool(&scene, VitalityChannelId::One), 75);
-    assert_eq!(pool(&scene, VitalityChannelId::Two), PLAYER_MAX_HEALTH);
+    assert_eq!(health(&scene), 175);
 }
 
 #[test]
@@ -217,10 +207,9 @@ fn a_ranged_weapon_character_takes_full_matching_and_a_quarter_extra_opposed_dam
     scene.character = Some(character(true));
     assert!(scene.player_has_ranged_weapon());
     assert!(!scene.apply_untyped_player_damage(20));
-    assert_eq!(pool(&scene, VitalityChannelId::One), 80);
+    assert_eq!(health(&scene), 180);
     assert!(!scene.apply_typed_player_damage(ProjectileDamageChannel::Zenith, 20));
-    assert_eq!(pool(&scene, VitalityChannelId::One), 55);
-    assert_eq!(pool(&scene, VitalityChannelId::Two), PLAYER_MAX_HEALTH);
+    assert_eq!(health(&scene), 155);
 }
 
 #[test]
@@ -229,56 +218,52 @@ fn a_melee_only_character_runs_the_same_rule() {
     scene.character = Some(character(false));
     assert!(!scene.player_has_ranged_weapon());
     assert!(!scene.apply_untyped_player_damage(20));
-    assert_eq!(pool(&scene, VitalityChannelId::One), 80);
+    assert_eq!(health(&scene), 180);
     assert!(!scene.apply_typed_player_damage(ProjectileDamageChannel::Zenith, 20));
-    assert_eq!(pool(&scene, VitalityChannelId::One), 55);
+    assert_eq!(health(&scene), 155);
 }
 
 #[test]
-fn a_hit_that_empties_the_active_pool_forces_a_swap_and_is_not_lethal() {
+fn a_hit_bigger_than_the_bar_is_lethal_and_swaps_nothing() {
     let mut scene = scene();
-    assert!(!scene.apply_untyped_player_damage(1000));
-    assert_eq!(pool(&scene, VitalityChannelId::One), 0);
-    assert_eq!(pool(&scene, VitalityChannelId::Two), PLAYER_MAX_HEALTH);
-    assert_eq!(scene.player.stance.active(), VitalityChannelId::Two);
-    assert!(scene.player.stance.is_broken(VitalityChannelId::One));
-    assert_eq!(scene.player.stance.swap_elapsed_ticks(), 0);
-    assert!(!scene.player.vitality.is_defeated());
-}
-
-#[test]
-fn only_emptying_both_pools_is_lethal() {
-    let mut scene = scene();
-    assert!(!scene.apply_untyped_player_damage(1000));
     assert!(scene.apply_untyped_player_damage(1000));
-    assert!(scene.player.vitality.is_defeated());
+    assert_eq!(health(&scene), 0);
+    assert_eq!(scene.player.stance.active(), VitalityChannelId::One);
+    assert_eq!(scene.player.stance.swap_elapsed_ticks(), u16::MAX);
+    assert!(scene.player.defeated());
 }
 
 #[test]
-fn a_hazard_hit_the_active_pool_exactly_absorbs_does_not_spill() {
-    // 100 is exactly the 100 the pool holds: pool empty, forced swap,
-    // nothing left over, not lethal.
+fn only_emptying_the_bar_is_lethal() {
     let mut scene = scene();
-    assert!(!scene.apply_hazard_player_damage(100));
-    assert_eq!(pool(&scene, VitalityChannelId::One), 0);
-    assert_eq!(pool(&scene, VitalityChannelId::Two), PLAYER_MAX_HEALTH);
+    assert!(!scene.apply_untyped_player_damage(199));
+    assert_eq!(health(&scene), 1);
+    assert!(scene.apply_untyped_player_damage(1));
+    assert!(scene.player.defeated());
 }
 
 #[test]
-fn a_hazard_hit_past_the_pool_carries_the_rest_into_the_other_pool() {
-    // 105: the pool takes 100, and the 5 left over lands on the other pool.
+fn a_hazard_hit_bigger_than_an_old_pool_is_just_damage() {
+    // 105 was past the old 100 pool (it emptied it, forced a swap and
+    // carried 5 over); on the one bar it is 105 off 200.
     let mut scene = scene();
     assert!(!scene.apply_hazard_player_damage(105));
-    assert_eq!(pool(&scene, VitalityChannelId::One), 0);
-    assert_eq!(pool(&scene, VitalityChannelId::Two), 95);
-    assert_eq!(scene.player.stance.active(), VitalityChannelId::Two);
+    assert_eq!(health(&scene), 95);
+    assert_eq!(scene.player.stance.active(), VitalityChannelId::One);
 }
 
 #[test]
-fn a_hazard_hit_inside_the_pool_behaves_like_any_other_hit() {
+fn a_hazard_hit_bigger_than_the_bar_is_lethal() {
+    let mut scene = scene();
+    assert!(scene.apply_hazard_player_damage(PLAYER_MAX_HEALTH));
+    assert_eq!(health(&scene), 0);
+}
+
+#[test]
+fn a_hazard_hit_inside_the_bar_behaves_like_any_other_hit() {
     let mut scene = scene();
     assert!(!scene.apply_hazard_player_damage(10));
-    assert_eq!(pool(&scene, VitalityChannelId::One), 90);
+    assert_eq!(health(&scene), 190);
     assert_eq!(scene.player.stance.active(), VitalityChannelId::One);
 }
 
@@ -292,13 +277,13 @@ fn liquid_hazards_tick_on_their_own_rhythm() {
 }
 
 #[test]
-fn a_slime_hazard_costs_the_active_pool_four_health_per_hit() {
+fn a_slime_hazard_costs_four_health_per_hit() {
     // 4 raw hazard damage through the untyped route, as authored.
     let mut scene = scene();
     let tick = 30;
     let damage = hazard_damage(psx_grid::contents::CONTENTS_SLIME, tick);
     assert!(!scene.apply_untyped_player_damage(damage));
-    assert_eq!(pool(&scene, VitalityChannelId::One), 96);
+    assert_eq!(health(&scene), 196);
 }
 
 #[test]
@@ -308,8 +293,8 @@ fn an_enemy_bolt_routes_by_its_channel_through_the_resolver() {
     // opposite stance (1.25x). The bolt starts inside the body capsule, so
     // one tick connects.
     for (channel, expected) in [
-        (ProjectileDamageChannel::Horizon, 80),
-        (ProjectileDamageChannel::Zenith, 75),
+        (ProjectileDamageChannel::Horizon, 180),
+        (ProjectileDamageChannel::Zenith, 175),
     ] {
         let mut scene = scene();
         scene.character = Some(character(false));
@@ -318,12 +303,7 @@ fn an_enemy_bolt_routes_by_its_channel_through_the_resolver() {
             .spawn(bolt(channel, 20, 40))
             .unwrap();
         scene.resolve_combat(&ctx(100));
-        assert_eq!(
-            pool(&scene, VitalityChannelId::One),
-            expected,
-            "{channel:?}"
-        );
-        assert_eq!(pool(&scene, VitalityChannelId::Two), PLAYER_MAX_HEALTH);
+        assert_eq!(health(&scene), expected, "{channel:?}");
         assert_eq!(scene.combat_projectiles.len(), 0, "the bolt is consumed");
     }
 }
@@ -368,8 +348,7 @@ fn a_player_inside_the_swap_window_is_not_a_projectile_target() {
         .spawn(bolt(ProjectileDamageChannel::Horizon, 20, 40))
         .unwrap();
     scene.resolve_combat(&ctx(100));
-    assert_eq!(pool(&scene, VitalityChannelId::One), PLAYER_MAX_HEALTH);
-    assert_eq!(pool(&scene, VitalityChannelId::Two), PLAYER_MAX_HEALTH);
+    assert_eq!(health(&scene), PLAYER_MAX_HEALTH);
     assert_eq!(scene.combat_projectiles.len(), 1, "the bolt flew through");
 }
 
@@ -501,7 +480,7 @@ fn a_swap_flips_the_stance_and_starts_the_default_cooldown() {
     let mut scene = scene();
     let config = scene.player_stance_config;
     assert_eq!(config.swap_cooldown_ticks, 30);
-    assert!(scene.player.stance.request_swap(&config).is_some());
+    assert!(scene.player.stance.request_swap(&config));
     assert_eq!(scene.player.stance.active(), VitalityChannelId::Two);
     assert_eq!(scene.player.stance.swap_cooldown(), 30);
     assert_eq!(scene.player.stance.swap_elapsed_ticks(), 0);
@@ -514,33 +493,28 @@ fn a_second_swap_is_refused_for_exactly_the_cooldown() {
     let config = scene.player_stance_config;
     scene.player.stance.request_swap(&config);
     for _ in 0..29 {
-        scene
-            .player
-            .stance
-            .tick(&mut scene.player.vitality, &config, 0);
-        assert!(scene.player.stance.request_swap(&config).is_none());
+        scene.player.stance.tick();
+        assert!(!scene.player.stance.request_swap(&config));
     }
-    scene
-        .player
-        .stance
-        .tick(&mut scene.player.vitality, &config, 0);
+    scene.player.stance.tick();
     assert!(scene.player.stance.can_swap());
-    assert!(scene.player.stance.request_swap(&config).is_some());
+    assert!(scene.player.stance.request_swap(&config));
     assert_eq!(scene.player.stance.active(), VitalityChannelId::One);
 }
 
 #[test]
-fn a_forced_swap_ignores_the_cooldown_and_a_broken_pool_cannot_be_swapped_back_to() {
+fn a_hit_never_swaps_the_stance_or_touches_the_cooldown() {
     let mut scene = scene();
     let config = scene.player_stance_config;
     scene.player.stance.request_swap(&config);
-    // Mid-cooldown, the Zenith pool breaks: the swap back is forced anyway.
-    scene.apply_untyped_player_damage(1000);
-    assert_eq!(scene.player.stance.active(), VitalityChannelId::One);
-    assert_eq!(scene.player.stance.swap_elapsed_ticks(), 0);
-    // The stance the player left is broken, so it is not selectable.
-    assert!(scene.player.stance.is_broken(VitalityChannelId::Two));
-    assert!(!scene.player.stance.can_swap());
+    for _ in 0..20 {
+        scene.player.stance.tick();
+    }
+    // Mid-cooldown, a big hit: there is no pool to break, so no forced swap.
+    assert!(!scene.apply_untyped_player_damage(150));
+    assert_eq!(scene.player.stance.active(), VitalityChannelId::Two);
+    assert_eq!(scene.player.stance.swap_elapsed_ticks(), 20);
+    assert_eq!(scene.player.stance.swap_cooldown(), 10);
 }
 
 #[test]
@@ -556,28 +530,19 @@ fn the_swap_cooldown_is_the_one_the_enemies_receive() {
 }
 
 #[test]
-fn the_inactive_pool_recovers_after_its_delay_and_the_active_one_never_does() {
+fn nothing_regenerates_health_during_play() {
+    // The old inactive pool recovered 10 here (90 ticks of delay, then a
+    // quarter point a tick). The one bar has no recovery: a swap and the
+    // passing ticks leave the damage where it is.
     let mut scene = scene();
-    scene.apply_untyped_player_damage(20); // 20 off Horizon
+    scene.apply_untyped_player_damage(20);
     let config = scene.player_stance_config;
     scene.player.stance.request_swap(&config);
-    // Horizon is now inactive. Nothing heals until regen_delay (90) passes.
-    for _ in 0..90 {
-        scene
-            .player
-            .stance
-            .tick(&mut scene.player.vitality, &config, 0);
+    for _ in 0..600 {
+        scene.player.advance_stance(1);
+        scene.player.tick(1, false);
     }
-    assert_eq!(pool(&scene, VitalityChannelId::One), 80);
-    // Then a quarter point per tick: four ticks per health point.
-    for _ in 0..40 {
-        scene
-            .player
-            .stance
-            .tick(&mut scene.player.vitality, &config, 0);
-    }
-    assert_eq!(pool(&scene, VitalityChannelId::One), 90);
-    assert_eq!(pool(&scene, VitalityChannelId::Two), PLAYER_MAX_HEALTH);
+    assert_eq!(health(&scene), 180);
 }
 
 // ---------------------------------------------------------------------------
@@ -607,10 +572,7 @@ fn a_swap_is_invulnerable_for_the_roll_window_counting_the_press_tick() {
         } else {
             break;
         }
-        scene
-            .player
-            .stance
-            .tick(&mut scene.player.vitality, &config, 0);
+        scene.player.stance.tick();
     }
     // elapsed 0..=TEST_I_FRAMES inclusive.
     assert_eq!(protected, u16::from(TEST_I_FRAMES) + 1);
@@ -618,10 +580,12 @@ fn a_swap_is_invulnerable_for_the_roll_window_counting_the_press_tick() {
 }
 
 #[test]
-fn a_forced_swap_grants_the_same_invulnerable_window() {
+fn a_hit_grants_no_invulnerable_window() {
+    // The old forced swap on an emptied pool handed out the swap i-frames;
+    // with one bar a hit swaps nothing.
     let mut scene = scene();
-    scene.apply_untyped_player_damage(1000);
-    assert!(scene.player_invulnerable(&ctx(100)));
+    scene.apply_untyped_player_damage(150);
+    assert!(!scene.player_invulnerable(&ctx(100)));
 }
 
 #[test]
@@ -798,20 +762,24 @@ fn a_connected_melee_hit_queues_a_weight_matched_hit_cue() {
 }
 
 #[test]
-fn an_arch_refills_twenty_energy_a_second_and_stops_while_firing() {
-    let mut flow = CombatFlow::FULL;
-    flow.energy = 0;
+fn an_arch_refills_twenty_energy_and_health_a_second_and_stops_while_firing() {
+    let mut scene = scene();
+    scene.apply_untyped_player_damage(100);
+    scene.player.flow.energy = 0;
+    let stats = scene.player_stats;
     // 20 per second at 60 ticks: one point every third tick.
     for _ in 0..60 {
-        flow.air_tick(true, false, false, &CombatStats::PLAYER);
+        scene.player.air_tick(true, false, false, &stats);
     }
-    assert_eq!(flow.energy, 20);
+    assert_eq!(scene.player.flow.energy, 20);
+    assert_eq!(health(&scene), 120, "health comes back on the same beat");
     for _ in 0..60 {
-        flow.air_tick(true, false, true, &CombatStats::PLAYER);
+        scene.player.air_tick(true, false, true, &stats);
     }
-    assert_eq!(flow.energy, 20, "firing pauses the recharge");
+    assert_eq!(scene.player.flow.energy, 20, "firing pauses the recharge");
+    assert_eq!(health(&scene), 120);
     assert_eq!(
-        flow.air_left,
+        scene.player.flow.air_left,
         AIR_TICKS - 120,
         "but the allowance still drains"
     );
@@ -822,7 +790,9 @@ fn the_arch_allowance_runs_out_after_its_ticks_and_needs_ground_time_to_rearm() 
     let mut flow = CombatFlow::FULL;
     let mut expired = false;
     for _ in 0..AIR_TICKS {
-        expired = flow.air_tick(true, false, false, &CombatStats::PLAYER);
+        expired = flow
+            .air_tick(true, false, false, &CombatStats::PLAYER)
+            .exhausted;
     }
     assert!(expired);
     assert_eq!(flow.air_left, 0);
@@ -861,16 +831,14 @@ fn the_energy_economy_and_health_are_the_characters_data() {
     // constants, so a character can carry its own.
     let mut scene = scene();
     scene.player_stats = CombatStats {
-        max_health: 70,
-        max_health_secondary: 30,
+        max_health: 100,
         energy_max: 60,
         shot_cost: 30,
         light_gain: 5,
         ..CombatStats::PLAYER
     };
     scene.reset_life_combat();
-    assert_eq!(pool(&scene, VitalityChannelId::One), 70);
-    assert_eq!(pool(&scene, VitalityChannelId::Two), 30);
+    assert_eq!(health(&scene), 100);
     assert_eq!(scene.player.flow.energy, 60);
     assert!(scene.player.flow.spend_shot(&scene.player_stats));
     assert!(scene.player.flow.spend_shot(&scene.player_stats));
@@ -936,9 +904,8 @@ fn a_zero_delay_still_arms_a_one_tick_countdown() {
 fn a_new_combat_life_restores_every_player_combat_resource() {
     let mut scene = scene();
     scene.character = Some(character(true));
-    scene.apply_untyped_player_damage(1000);
-    scene.apply_untyped_player_damage(1000);
-    assert!(scene.player.vitality.is_defeated());
+    assert!(scene.apply_untyped_player_damage(1000));
+    assert!(scene.player.defeated());
     scene.player.flow.energy = 0;
     scene.player.flow.broke();
     scene.player.poise.hit(30, 60, false);
@@ -950,8 +917,7 @@ fn a_new_combat_life_restores_every_player_combat_resource() {
         .spawn(bolt(ProjectileDamageChannel::Horizon, 20, 40))
         .unwrap();
     scene.reset_life_combat();
-    assert_eq!(pool(&scene, VitalityChannelId::One), PLAYER_MAX_HEALTH);
-    assert_eq!(pool(&scene, VitalityChannelId::Two), PLAYER_MAX_HEALTH);
+    assert_eq!(health(&scene), PLAYER_MAX_HEALTH);
     assert_eq!(scene.player.stance.active(), VitalityChannelId::One);
     assert_eq!(scene.player.stance.swap_elapsed_ticks(), u16::MAX);
     assert_eq!(scene.player.flow, CombatFlow::FULL);
@@ -966,7 +932,6 @@ fn a_new_combat_life_restores_every_player_combat_resource() {
 fn respawn_after_a_combat_death_restores_the_life_and_clears_the_countdown() {
     let mut scene = scene();
     scene.apply_untyped_player_damage(1000);
-    scene.apply_untyped_player_damage(1000);
     scene.player.flow.energy = 7;
     scene.arm_player_death(
         true,
@@ -979,7 +944,6 @@ fn respawn_after_a_combat_death_restores_the_life_and_clears_the_countdown() {
     assert!(!scene.death_by_combat);
     assert_eq!(scene.anim_state, PlayerAnim::Idle);
     assert_eq!(scene.anim_lock_until_tick, SimTick::ZERO);
-    assert_eq!(pool(&scene, VitalityChannelId::One), PLAYER_MAX_HEALTH);
-    assert_eq!(pool(&scene, VitalityChannelId::Two), PLAYER_MAX_HEALTH);
+    assert_eq!(health(&scene), PLAYER_MAX_HEALTH);
     assert_eq!(scene.player.flow.energy, ENERGY_MAX);
 }

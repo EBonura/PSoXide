@@ -2492,15 +2492,7 @@ pub(crate) fn push_game_entity(
     }
     let combat = settings.combat_stats();
     if combat.max_health == 0 {
-        report.error(format!(
-            "Enemy on '{node_name}' has Horizon health 0 (must be > 0)"
-        ));
-        return false;
-    }
-    if combat.max_health_secondary == 0 {
-        report.error(format!(
-            "Enemy on '{node_name}' has Zenith health 0 (must be > 0)"
-        ));
+        report.error(format!("Enemy on '{node_name}' has health 0 (must be > 0)"));
         return false;
     }
     // The same > 0 contract the player controller cook enforces:

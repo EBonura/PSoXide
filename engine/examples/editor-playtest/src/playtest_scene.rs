@@ -210,16 +210,13 @@ fn target_ui_value(
                 PLAYER_HEALTH_MAX_Q12
             }
         })),
-        LevelUiValueBinding::TargetHealthSecondary => {
+        LevelUiValueBinding::TargetEnergy => {
             Some(target.zip(record).map_or(0, |(index, record)| {
-                health_q12(
-                    entities.health_secondary(index),
-                    record.combat.max_health_secondary,
-                )
+                health_q12(entities.energy(index), record.combat.energy_max)
             }))
         }
-        LevelUiValueBinding::TargetHealthSecondaryMax => Some(record.map_or(0, |record| {
-            if record.combat.max_health_secondary == 0 {
+        LevelUiValueBinding::TargetEnergyMax => Some(record.map_or(0, |record| {
+            if record.combat.energy_max == 0 {
                 0
             } else {
                 PLAYER_HEALTH_MAX_Q12
@@ -495,8 +492,7 @@ impl Scene for Playtest {
         ) {
             return Some(value);
         }
-        let horizon = self.player.vitality.pool(VitalityChannelId::One);
-        let zenith = self.player.vitality.pool(VitalityChannelId::Two);
+        let bars = self.boost_bars();
         let health_q12 = |current: u16, maximum: u16| {
             if maximum == 0 {
                 PLAYER_HEALTH_MAX_Q12
@@ -506,26 +502,13 @@ impl Scene for Playtest {
         };
         match binding {
             LevelUiValueBinding::PlayerHealth => {
-                Some(health_q12(horizon.current(), horizon.maximum()))
+                Some(health_q12(bars.health.current(), bars.health.maximum()))
             }
             LevelUiValueBinding::PlayerHealthMax => Some(PLAYER_HEALTH_MAX_Q12),
-            LevelUiValueBinding::PlayerHealthSecondary => {
-                Some(health_q12(zenith.current(), zenith.maximum()))
+            LevelUiValueBinding::PlayerEnergy => {
+                Some(health_q12(bars.energy.current(), bars.energy.maximum()))
             }
-            LevelUiValueBinding::PlayerHealthSecondaryMax => Some(PLAYER_HEALTH_MAX_Q12),
-            // Stance-relative readings. A bar bound to these follows whichever
-            // pool is live rather than a fixed colour, so the HUD keeps saying
-            // "this is the one taking damage" across a swap.
-            LevelUiValueBinding::PlayerStanceActiveHealth => {
-                let pool = self.player.vitality.pool(self.player.stance.active());
-                Some(health_q12(pool.current(), pool.maximum()))
-            }
-            LevelUiValueBinding::PlayerStanceActiveHealthMax => Some(PLAYER_HEALTH_MAX_Q12),
-            LevelUiValueBinding::PlayerStanceInactiveHealth => {
-                let pool = self.player.vitality.pool(self.player.stance.inactive());
-                Some(health_q12(pool.current(), pool.maximum()))
-            }
-            LevelUiValueBinding::PlayerStanceInactiveHealthMax => Some(PLAYER_HEALTH_MAX_Q12),
+            LevelUiValueBinding::PlayerEnergyMax => Some(PLAYER_HEALTH_MAX_Q12),
             LevelUiValueBinding::PlayerStanceSwapProgress => Some(i32::from(
                 self.player
                     .stance
@@ -534,23 +517,17 @@ impl Scene for Playtest {
             LevelUiValueBinding::PlayerStanceActiveIsZenith => Some(i32::from(
                 self.player.stance.active() == VitalityChannelId::Two,
             )),
-            LevelUiValueBinding::PlayerStanceActiveBroken => Some(i32::from(
-                self.player.stance.is_broken(self.player.stance.active()),
-            )),
-            LevelUiValueBinding::PlayerStanceInactiveBroken => Some(i32::from(
-                self.player.stance.is_broken(self.player.stance.inactive()),
-            )),
             LevelUiValueBinding::PlayerHealthEmptyInfluence => {
-                Some(i32::from(horizon.polarity().empty_q12))
+                Some(i32::from(bars.health.influence_q12(VitalityPole::Empty)))
             }
             LevelUiValueBinding::PlayerHealthFullInfluence => {
-                Some(i32::from(horizon.polarity().full_q12))
+                Some(i32::from(bars.health.influence_q12(VitalityPole::Full)))
             }
-            LevelUiValueBinding::PlayerHealthSecondaryEmptyInfluence => {
-                Some(i32::from(zenith.polarity().empty_q12))
+            LevelUiValueBinding::PlayerEnergyEmptyInfluence => {
+                Some(i32::from(bars.energy.influence_q12(VitalityPole::Empty)))
             }
-            LevelUiValueBinding::PlayerHealthSecondaryFullInfluence => {
-                Some(i32::from(zenith.polarity().full_q12))
+            LevelUiValueBinding::PlayerEnergyFullInfluence => {
+                Some(i32::from(bars.energy.influence_q12(VitalityPole::Full)))
             }
             LevelUiValueBinding::PlayerStamina => Some(self.motor.stamina_q12()),
             LevelUiValueBinding::PlayerStaminaMax => Some(self.motor_config().stamina_max_q12),
@@ -589,11 +566,12 @@ impl Scene for Playtest {
             matches!(inventory_mode, INVENTORY_UI_MODULES | INVENTORY_UI_ASSIGN)
                 && detail.is_some();
         // The socket view reports the complete configured loadout, including
-        // the inactive stance. Otherwise assigning a Zenith module while in
-        // Horizon would misleadingly report +0% immediately after assignment.
+        // the inactive stance. Otherwise assigning an energy-bar module while
+        // in the blade stance would misleadingly report +0% immediately after
+        // assignment.
         let modifiers = self
             .power_up_loadout
-            .modifiers(&self.player.vitality, BOOST_MODULES);
+            .modifiers(self.boost_bars(), BOOST_MODULES);
         let module_bonus = |stat| {
             detail
                 .and_then(|module| module.percentages.get(stat))
@@ -607,18 +585,20 @@ impl Scene for Playtest {
                 final_value
             }
         };
+        // The projects' socket tags keep their old names: the Horizon
+        // sockets are the health bar's, the Zenith sockets the energy bar's.
         match tag {
             "boost.horizon.empty" => Some(boost_module_socket_name(
-                self.power_up_loadout.module(BoostSlotId::HorizonEmpty),
+                self.power_up_loadout.module(BoostSlotId::HealthEmpty),
             )),
             "boost.horizon.full" => Some(boost_module_socket_name(
-                self.power_up_loadout.module(BoostSlotId::HorizonFull),
+                self.power_up_loadout.module(BoostSlotId::HealthFull),
             )),
             "boost.zenith.empty" => Some(boost_module_socket_name(
-                self.power_up_loadout.module(BoostSlotId::ZenithEmpty),
+                self.power_up_loadout.module(BoostSlotId::EnergyEmpty),
             )),
             "boost.zenith.full" => Some(boost_module_socket_name(
-                self.power_up_loadout.module(BoostSlotId::ZenithFull),
+                self.power_up_loadout.module(BoostSlotId::EnergyFull),
             )),
             "inventory.item.0" => Some(boost_module_name(self.power_up_inventory.item_at(0))),
             "inventory.item.1" => Some(boost_module_name(self.power_up_inventory.item_at(1))),
@@ -851,10 +831,10 @@ impl Scene for Playtest {
         }
 
         let slot = match id {
-            200 => Some(BoostSlotId::HorizonEmpty),
-            201 => Some(BoostSlotId::HorizonFull),
-            202 => Some(BoostSlotId::ZenithEmpty),
-            203 => Some(BoostSlotId::ZenithFull),
+            200 => Some(BoostSlotId::HealthEmpty),
+            201 => Some(BoostSlotId::HealthFull),
+            202 => Some(BoostSlotId::EnergyEmpty),
+            203 => Some(BoostSlotId::EnergyFull),
             _ => None,
         };
         if let Some(slot) = slot {
@@ -1772,8 +1752,8 @@ impl Scene for Playtest {
             let _drawn = self.damage_numbers.draw(&font, camera, room, overlay_tick);
         }
 
-        // Hard lock wraps the existing reticle with dual vitality arcs.
-        // Soft targets keep their compact vitality stack beside the model.
+        // Hard lock wraps the existing reticle with the health and energy
+        // arcs. Soft targets keep their compact stack beside the model.
         if !self.inventory_overlay_active {
             if let (Some(font), Some(target_index)) =
                 (self.ui_fonts[0].as_ref(), self.combat_target_entity_index())
@@ -1783,35 +1763,27 @@ impl Scene for Playtest {
                     let head = RoomPoint::new(x, y.saturating_add(i32::from(record.height)), z);
                     if let Some(projected) = camera.project_world(head) {
                         let active = self.game_entities.stance(target_index);
-                        let health_share = |channel| {
-                            let (current, maximum) = match channel {
-                                VitalityChannelId::One => (
-                                    self.game_entities.health(target_index),
-                                    record.combat.max_health,
-                                ),
-                                VitalityChannelId::Two => (
-                                    self.game_entities.health_secondary(target_index),
-                                    record.combat.max_health_secondary,
-                                ),
-                            };
+                        let share = |current: u16, maximum: u16| {
                             if maximum == 0 {
                                 0
                             } else {
                                 ((u32::from(current) * 4096) / u32::from(maximum)) as u16
                             }
                         };
+                        let health = share(
+                            self.game_entities.health(target_index),
+                            record.combat.max_health,
+                        );
+                        let energy = share(
+                            self.game_entities.energy(target_index),
+                            record.combat.energy_max,
+                        );
                         if self.is_locked() {
                             if let Some(center) = self
                                 .lock_target_indicator_position()
                                 .and_then(|p| camera.project_world(p))
                             {
-                                draw_lock_target_readout(
-                                    gpu,
-                                    center,
-                                    active,
-                                    health_share(VitalityChannelId::One),
-                                    health_share(VitalityChannelId::Two),
-                                );
+                                draw_lock_target_readout(gpu, center, active, health, energy);
                             }
                         } else {
                             draw_enemy_vitality_hud(
@@ -1820,9 +1792,8 @@ impl Scene for Playtest {
                                 projected.sx.saturating_add(40).clamp(4, SCREEN_W - 80),
                                 projected.sy.clamp(4, SCREEN_H - 20),
                                 active,
-                                health_share(active),
-                                health_share(active.other()),
-                                self.game_entities.stance_swap_progress_q12(target_index),
+                                health,
+                                energy,
                             );
                         }
                     }

@@ -1,6 +1,10 @@
 //! The stance HUD in the game: the pixel-art sprite HUD of `stance_hud_sprites.rs` and
 //! `stance_hud_packets.rs`, fed from the real stance, health and ammunition state.
 //!
+//! One health bar and one energy bar: the bar in the active stance's colour is the health, the
+//! ammunition pills are the energy, and the emblem shows the stance. A swap still plays the two
+//! bars trading places (both showing the one health), then the other colour folds away.
+//!
 //! Its packets are built once when gameplay starts, with the atlas and palettes in VRAM, and every
 //! frame only the few that changed are patched (a health cell's palette, a pill, a bar sliding)
 //! and the packets are linked into slot 0 of the frame's ordering table, so the HUD is drawn
@@ -59,8 +63,8 @@ pub(crate) fn hud() -> &'static mut StanceHud {
 pub(crate) struct HudInput {
     /// The active stance.
     pub active: VitalityChannelId,
-    /// Each channel's health as a Q12 share, indexed like [`VitalityChannelId`].
-    pub share_q12: [u16; 2],
+    /// Health as a Q12 share of the maximum.
+    pub health_q12: u16,
     /// Ammunition energy, 0 to 100.
     pub energy: u16,
     /// The squared distance to the nearest live hostile, if any.
@@ -120,7 +124,7 @@ impl StanceHud {
         let Some(vram) = upload_stance_hud() else {
             return;
         };
-        self.cells = [cells(input.share_q12[0]), cells(input.share_q12[1])];
+        self.cells = [cells(input.health_q12); 2];
         // SAFETY: single-threaded guest; PACKETS is only touched here and in `link`/`update`.
         unsafe { (*core::ptr::addr_of_mut!(PACKETS)).build(&vram, ORIGIN) };
         self.vram = Some(vram);
@@ -140,7 +144,7 @@ impl StanceHud {
         if !self.ready {
             return;
         }
-        let cells_now = [cells(input.share_q12[0]), cells(input.share_q12[1])];
+        let cells_now = [cells(input.health_q12); 2];
         let units = input.energy / ENERGY_PER_PILL;
         let damaged = cells_now
             .iter()
@@ -191,6 +195,7 @@ impl StanceHud {
         }
         self.anim.apply(&mut state);
         self.ammo.apply(&mut state);
+        state.one_bar();
         self.state = state;
     }
 
@@ -235,13 +240,11 @@ impl Playtest {
     /// What the HUD needs from the game this tick.
     pub(crate) fn stance_hud_input(&mut self) -> HudInput {
         const VITALITY_Q12_ONE: u32 = 4096;
-        let share = |channel| {
-            let pool = self.player.vitality.pool(channel);
-            if pool.maximum() == 0 {
-                0
-            } else {
-                (u32::from(pool.current()) * VITALITY_Q12_ONE / u32::from(pool.maximum())) as u16
-            }
+        let health = self.player.health;
+        let health_q12 = if health.maximum() == 0 {
+            0
+        } else {
+            (u32::from(health.current()) * VITALITY_Q12_ONE / u32::from(health.maximum())) as u16
         };
         // The nearest live hostile, looked for a few times a second.
         hud().scan = hud().scan.saturating_sub(1);
@@ -263,7 +266,7 @@ impl Playtest {
         }
         HudInput {
             active: self.player.stance.active(),
-            share_q12: [share(VitalityChannelId::One), share(VitalityChannelId::Two)],
+            health_q12,
             energy: self.player.flow.energy,
             nearest_hostile_sq: hud().nearest,
             targeting: self.lock_target.is_some() || self.ranged_ready.aiming(),

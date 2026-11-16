@@ -108,8 +108,7 @@ pub static GAME_ENTITIES: &[LevelGameEntityRecord] = &[LevelGameEntityRecord {
     attack_max_range: 256,
     touch_damage: 10,
     combat: CombatStats {
-        max_health: 300,
-        max_health_secondary: 300,
+        max_health: 600,
         poise: 25,
         ..CombatStats::ENEMY
     },

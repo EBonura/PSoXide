@@ -134,6 +134,16 @@ pub struct HudState {
 }
 
 impl HudState {
+    /// One health bar: at rest the other stance's bar is folded away, so the
+    /// active stance's bar is the only one showing. During a swap both are
+    /// drawn, trading places, which is how the change of stance reads. Both
+    /// bars show the same health, so give `health` one count for both.
+    pub fn one_bar(&mut self) {
+        if self.swap == 0 || self.swap >= 4096 {
+            self.reveal[self.stance.other().index()] = 0;
+        }
+    }
+
     /// The HUD at rest and fully unfolded.
     pub const fn rest(stance: Stance, health: [u8; 2], energy: u8) -> Self {
         Self {
