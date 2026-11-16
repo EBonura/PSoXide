@@ -145,7 +145,8 @@ fn probes_are_programs_of_this_repository_and_get_no_line_entries() {
         assert!(local.contains(name), "probe {name} is not an example here");
         for e in profile.exceptions.iter().filter(|e| &e.program == name) {
             assert!(
-                !["register-literal", "vector-write", "cop0-asm"].contains(&e.kind.as_str()),
+                !["register-literal", "vector-write", "cop0-asm", "gpu-word"]
+                    .contains(&e.kind.as_str()),
                 "{name} is a probe: its {} entry for {} is dead",
                 e.kind,
                 e.item

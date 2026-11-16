@@ -31,21 +31,23 @@ pub struct Exception {
 }
 
 /// Every kind of exception.
-pub const KINDS: [&str; 7] = [
+pub const KINDS: [&str; 8] = [
     "feature",
     "register-literal",
     "vector-write",
     "cop0-asm",
+    "gpu-word",
     "deprecated-use",
     "private-copy",
     "no-receipt",
 ];
 
 /// The kinds that count hit lines in a file.
-pub const COUNTED: [&str; 4] = [
+pub const COUNTED: [&str; 5] = [
     "register-literal",
     "vector-write",
     "cop0-asm",
+    "gpu-word",
     "deprecated-use",
 ];
 
@@ -72,6 +74,9 @@ pub struct Profile {
     /// Exceptions: of the programs inside the SDK repository (`sdk/profile.toml`) or of one
     /// program (its `psx-gate.toml`).
     pub exceptions: Vec<Exception>,
+    /// Also refuse raw GP0 and GP1 command words (`gpu-word`). Not part of the file: `psx-gate
+    /// --gpu-words` turns it on for a program that wants the rule in its own gate.
+    pub gpu_words: bool,
     /// The file this was read from.
     pub path: PathBuf,
 }
