@@ -62,10 +62,18 @@ impl ModelPhaseAssembly {
     }
 
     /// `base` pulled toward the stance colour by the parry flash.
+    #[inline(always)]
     fn flash_tint(self, base: (u8, u8, u8)) -> (u8, u8, u8) {
         if self.flash_q8 == 0 {
-            return base;
+            base
+        } else {
+            self.flash_tint_active(base)
         }
+    }
+
+    // Only while a parry flashes: kept out of the draw functions.
+    #[inline(never)]
+    fn flash_tint_active(self, base: (u8, u8, u8)) -> (u8, u8, u8) {
         let weight = i32::from(self.flash_q8);
         (
             lerp_tint_channel(base.0, self.color.0, weight),
