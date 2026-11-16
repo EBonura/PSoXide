@@ -209,7 +209,9 @@ __psx_rt_exception_handler:
     nop
     srl   $26, $26, {gpustat_irq1_shift}
     andi  $26, $26, 1
-    beqz  $26, 41f
+    bnez  $26, 44f
+    nop
+    j     41f
     nop
 44:
     lui   $26, %hi(__psx_rt_pending_gp1)
@@ -236,6 +238,9 @@ __psx_rt_exception_handler:
     # flip by this test is counted. Conventional mode (a target that does not
     # raise bit 24 on most frames: an FPGA PSX core, PCSX-ReARMed): the first edge
     # that sees it flips. The loop counter lives in `__psx_rt_flip_reads`.
+    # Out of line, past all other text (`.psx_cold`, farther than a branch reaches, so jumps): the
+    # handler's hot path and the code behind it keep their size and place whatever this grows to.
+    .pushsection .psx_cold.psx_rt_exception_slow,"ax"
 41:
     lui   $26, %hi(__psx_rt_flip_reads)
     addiu $27, $zero, {confirm_reads}
@@ -245,14 +250,14 @@ __psx_rt_exception_handler:
     lw    $27, {gp1}($26)
     lui   $26, 0x1400
     and   $27, $27, $26
-    bne   $27, $26, 8f
+    bne   $27, $26, 47f
     nop
     lui   $26, {io_hi}
     lw    $27, {gpu_chcr}($26)
     nop
     srl   $27, $27, {chcr_start_shift}
     andi  $27, $27, 1
-    bnez  $27, 8f
+    bnez  $27, 47f
     nop
     lui   $26, %hi(__psx_rt_flip_reads)
     lw    $27, %lo(__psx_rt_flip_reads)($26)
@@ -274,7 +279,7 @@ __psx_rt_exception_handler:
     beq   $26, $27, 43f
     nop
     lui   $26, %hi(__psx_rt_flip_quiet)
-    b     8f
+    j     8f
     sw    $27, %lo(__psx_rt_flip_quiet)($26)
 43:
     lui   $26, %hi(__psx_rt_draw_done_fallbacks)
@@ -285,8 +290,12 @@ __psx_rt_exception_handler:
     lui   $26, %hi(__psx_rt_pending_gp1)
     lw    $27, %lo(__psx_rt_pending_gp1)($26)
     nop
-    b     44b
+    j     44b
     nop
+47:
+    j     8f
+    nop
+    .popsection
 
     # The kick. A part that waits (for the flip above, or for channel 2) is
     # counted as a skipped edge, out of line (`7:` below the stray path). With
