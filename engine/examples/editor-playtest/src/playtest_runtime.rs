@@ -1470,6 +1470,9 @@ impl Playtest {
     /// Stagger the player with the riposte of a parry by `by`: the same
     /// [`Combatant::receive_hit`] and reaction as any hit. True when it broke
     /// her posture.
+    // Rare (a parry, crit or knockdown): kept out of line and small.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     pub(super) fn riposte_player(&mut self, by: CombatantId, ctx: &Ctx) -> bool {
         if self.hazard_death_ticks_remaining != 0 {
             return false;
@@ -1483,6 +1486,9 @@ impl Playtest {
     /// [`Combatant::receive_hit`] parries it (refund, swap cooldown, crit),
     /// the attacking entity takes the riposte, and the tell shows: the
     /// refund over her in the parry colour and break sparks on the attacker.
+    // Rare (a parry, crit or knockdown): kept out of line and small.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     pub(super) fn parry_on_player(&mut self, strike: Strike, ctx: &Ctx) {
         let out = self.player.receive_hit(self.player_hit(strike, false));
         if !out.parried {
@@ -1523,6 +1529,9 @@ impl Playtest {
     /// Entity `index` parried the player's hit: she takes the riposte, and
     /// the tell shows as for the player's own parry, the refund over the
     /// entity in the parry colour and break sparks on her.
+    // Rare (a parry, crit or knockdown): kept out of line and small.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     pub(super) fn entity_parried_player(&mut self, index: usize, ctx: &Ctx) {
         let Some(record) = GAME_ENTITIES.get(index) else {
             return;
@@ -1628,6 +1637,9 @@ impl Playtest {
     /// Knock the player down: the knockdown clip (her stagger clip until one
     /// is authored) held for her `knockdown_ticks`, during which she can
     /// neither act nor move, the same count her [`Combatant`] is down for.
+    // Rare (a parry, crit or knockdown): kept out of line and small.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     fn knock_player_down(&mut self, ctx: &Ctx) {
         let now = ctx.sim_tick;
         self.interrupt_player_for_reaction();

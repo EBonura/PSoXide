@@ -1719,6 +1719,9 @@ impl Playtest {
 
     /// The swing that reached anyone, hit or parried, uses up the player's
     /// crit.
+    // Rare (a parry, crit or knockdown): kept out of line and small.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     pub(super) fn spend_player_melee_crit(&mut self, stats: MeleeArcStats, ctx: &Ctx) {
         if stats.hits.saturating_add(stats.parries) > 0 && self.player.spend_crit() {
             self.duel_log_event(ctx, 0, duel::DUEL_EVENT_CRIT);

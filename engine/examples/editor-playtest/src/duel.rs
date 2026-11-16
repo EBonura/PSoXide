@@ -573,6 +573,9 @@ impl Playtest {
     /// Duel trace: a parry, crit or knockdown. `actor` 0 is the player, 1
     /// the enemy: the fighter that parried, landed the crit or was knocked
     /// down. `kind` is one of the `DUEL_EVENT_*` codes.
+    // Rare (a parry, crit or knockdown): kept out of line and small.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     pub(super) fn duel_log_event(&self, ctx: &Ctx, actor: u32, kind: u32) {
         if self.duel.active && !self.duel.finished {
             log_values(
