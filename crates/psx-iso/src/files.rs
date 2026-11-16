@@ -22,6 +22,7 @@ use crate::{BootError, Disc};
 const MAX_DEPTH: usize = 16;
 
 /// A file on a disc: where its first sector is and how many bytes it holds.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiscFile {
     /// Path from the root without a leading slash, `;version` removed, as the disc spells it
