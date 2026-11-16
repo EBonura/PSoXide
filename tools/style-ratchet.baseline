@@ -44,7 +44,7 @@ content clippy::enum_glob_use 0
 content clippy::rc_buffer 1
 content clippy::rc_mutex 0
 content clippy::get_first 0
-content clippy::must_use_candidate 1139
+content clippy::must_use_candidate 1138
 content clippy::unwrap_used 14
 content clippy::exhaustive_enums 171
 content clippy::exhaustive_structs 415
@@ -66,7 +66,7 @@ engine clippy::ptr_arg 0
 engine clippy::new_without_default 0
 engine clippy::new_ret_no_self 0
 engine clippy::missing_safety_doc 0
-engine clippy::undocumented_unsafe_blocks 170
+engine clippy::undocumented_unsafe_blocks 169
 engine clippy::unnecessary_unwrap 0
 engine clippy::from_over_into 0
 engine clippy::inherent_to_string 0
@@ -74,7 +74,7 @@ engine clippy::enum_glob_use 0
 engine clippy::rc_buffer 0
 engine clippy::rc_mutex 0
 engine clippy::get_first 0
-engine clippy::must_use_candidate 1293
+engine clippy::must_use_candidate 1292
 engine clippy::unwrap_used 50
 engine clippy::exhaustive_enums 107
 engine clippy::exhaustive_structs 370
@@ -87,7 +87,7 @@ engine clippy::fn_params_excessive_bools 3
 engine clippy::needless_for_each 0
 engine clippy::disallowed_types 5
 engine clippy::disallowed_methods 0
-engine missing_docs 147
+engine missing_docs 146
 sdk clippy::wrong_self_convention 0
 sdk clippy::should_implement_trait 0
 sdk clippy::len_without_is_empty 0
