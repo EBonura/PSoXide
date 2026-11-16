@@ -348,6 +348,8 @@ pub(crate) fn music_poll() -> Poll {
     {
         use psx_io::cd::xa::Event;
         with_player(|player| match player.poll() {
+            // A song asked for while the last one's Pause is still out waits in the player.
+            Event::Idle if player.is_playing() => Poll::Playing,
             Event::Idle => Poll::Idle,
             Event::Playing => Poll::Playing,
             Event::Looped => Poll::Looped,
@@ -546,7 +548,8 @@ pub(crate) fn stop_playback() {
     #[cfg(target_arch = "mips")]
     {
         psx_spu::enable_cd_audio(false);
-        let _ = with_player(|player| player.stop());
+        // The lease goes back to the transport next, so the drive must be quiet first.
+        let _ = with_player(|player| player.stop_and_wait());
     }
     #[cfg(all(not(target_arch = "mips"), test))]
     HOST_PLAYING.with(|flag| flag.set(false));

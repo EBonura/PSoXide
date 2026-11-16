@@ -760,6 +760,7 @@ impl Player {
     }
 
     /// Whether a [`stop`](Self::stop) has been sent and the drive has not yet confirmed it.
+    #[must_use]
     pub fn is_stopping(&self) -> bool {
         self.engine.stopping
     }
