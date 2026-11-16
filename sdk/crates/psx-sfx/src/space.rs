@@ -201,29 +201,6 @@ impl Curve {
         Self::attenuated(peak, attn.milli())
     }
 
-    /// Quake PSX's distance scale in Q12: `4096 - (d * slope >> 8)`, floored at zero, with
-    /// `slope = attn * 4096 * 256 / 1000` rounded down (1048, 2097, 3145 for the three
-    /// classes). The level is a fraction of one in Q12, not an SPU level: the caller scales
-    /// its own volume by it. Unlike [`Curve::quake`] this reproduces the integer form the
-    /// game shipped, bit for bit, so pair it with [`Space::quake_q12`] for the same audible
-    /// set.
-    ///
-    /// ```
-    /// # use psx_sfx::space::{Attn, Curve};
-    /// assert_eq!(Curve::quake_q12(Attn::Norm).level(0), 4096);
-    /// assert_eq!(Curve::quake_q12(Attn::Idle).level(500), 1);
-    /// ```
-    #[must_use]
-    pub const fn quake_q12(attn: Attn) -> Self {
-        Curve::Ramp {
-            peak: 4096,
-            start: 0,
-            slope: ((attn.milli() * 1_048_576) / 1_000_000) as u16,
-            shift: 8,
-            floor: 0,
-        }
-    }
-
     /// GoldSrc's linear gain. `attn_milli` is the attenuation in thousandths
     /// ([`GOLDSRC_NORM`], [`GOLDSRC_IDLE`], [`GOLDSRC_STATIC`], or any other);
     /// `0` is `ATTN_NONE`.
@@ -459,28 +436,6 @@ impl Space {
             shift,
             law,
             cull: 0,
-        }
-    }
-
-    /// Quake PSX's placement: the world is in Q12 units so distances are `>> 12`, the
-    /// ears split with [`PanLaw::Dot`], and a sound at or beyond the class's clip distance
-    /// (1000, 500 and 333 units) is inaudible. Use it with [`Curve::quake_q12`] of the same
-    /// class: the cull is that curve's level at the clip distance, the first distance where
-    /// the game's own squared-distance test says silent.
-    ///
-    /// ```
-    /// # use psx_sfx::space::{Attn, Space};
-    /// assert_eq!(Space::quake_q12(Attn::Norm).cull(), 3);
-    /// ```
-    #[must_use]
-    pub const fn quake_q12(attn: Attn) -> Self {
-        let slope = (attn.milli() * 1_048_576) / 1_000_000;
-        let clip = 1_000_000 / attn.milli();
-        let cull = 4096 - ((clip * slope) >> 8) as i32;
-        Self {
-            shift: 12,
-            law: PanLaw::Dot,
-            cull: cull as i16,
         }
     }
 
@@ -824,9 +779,11 @@ pub fn gains<const N: usize>(
 /// is at or beyond the clip distance of `attn`, or fully quiet. The caller multiplies its
 /// volume by each scale.
 ///
-/// The SDK's frame has `z` forward, `x` to the right and `y` up, so this hands `gains` the
-/// positions as `[y, z, x]` (no axis is negated, so the per-axis floor of the shift matches the
-/// game's) and reads the ears back swapped: the SDK's left is Quake's right.
+/// This is its own short form rather than a [`gains`] call: the shipped integers (Q12 slope
+/// `attn * 4096 * 256 / 1000` rounded down, a cut at the clip distance, a pan from the
+/// horizontal offset only) are cheaper written straight than composed from the general
+/// pieces, and a source farther than the clip on any axis is rejected before any square is
+/// taken, so nothing overflows.
 ///
 /// ```
 /// # use psx_sfx::space::{quake_scales, Attn};
@@ -844,18 +801,33 @@ pub fn quake_scales(
     yaw_q12: u16,
     source: [i32; 3],
 ) -> Option<(i32, i32)> {
-    let ears = Listeners::new([Listener::new(
-        [listener[1], listener[2], listener[0]],
-        yaw_q12 & 0x0fff,
-    )]);
-    let g = gains(
-        &Space::quake_q12(attn),
-        &ears,
-        ListenerRule::Loudest,
-        &Emitter::new([source[1], source[2], source[0]]),
-        &Curve::quake_q12(attn),
-    )?;
-    Some((i32::from(g.right), i32::from(g.left)))
+    let milli = attn.milli();
+    // 1048, 2097, 3145: the game's slope, rounded down; 1000, 500, 333: where it cuts.
+    let slope = ((milli * 1_048_576) / 1_000_000) as i32;
+    let clip = (1_000_000 / milli) as i32;
+    let dx = source[0].saturating_sub(listener[0]) >> 12;
+    let dy = source[1].saturating_sub(listener[1]) >> 12;
+    let dz = source[2].saturating_sub(listener[2]) >> 12;
+    if dx.abs() >= clip || dy.abs() >= clip || dz.abs() >= clip {
+        return None;
+    }
+    let dist_sq = dx * dx + dy * dy + dz * dz;
+    if dist_sq >= clip * clip {
+        return None;
+    }
+    let dist = isqrt_i32(dist_sq);
+    let scale = 4096 - ((dist * slope) >> 8);
+    if scale <= 0 {
+        return None;
+    }
+    let angle = yaw_q12 & 0x0fff;
+    let pan = if dist == 0 {
+        0
+    } else {
+        let dot = dx * sin_q12(angle) - dy * cos_q12(angle);
+        (dot / dist).clamp(-4096, 4096)
+    };
+    Some(((scale * (4096 - pan)) >> 12, (scale * (4096 + pan)) >> 12))
 }
 
 #[cfg(test)]
@@ -1364,6 +1336,18 @@ mod tests {
                 );
                 checked += 1;
                 audible += u64::from(old.is_some());
+            }
+            // Anywhere in the whole i32 range, so far sources take the early reject.
+            for _ in 0..100_000 {
+                let r = [next(), next(), next(), next(), next(), next()];
+                let l = [r[0] as i32, r[1] as i32, r[2] as i32];
+                let o = [r[3] as i32, r[4] as i32, r[5] as i32];
+                let yaw = (r[0] >> 3) as u16;
+                assert_eq!(
+                    quake_scales(attn, l, yaw, o),
+                    quake_old(o, l, yaw, q20),
+                    "{attn:?} {o:?} {l:?} {yaw}"
+                );
             }
             // Every distance across the clip edge, all four quadrants of heading.
             for d in 0..1100 {
