@@ -401,7 +401,7 @@ impl Lighting {
         )) else {
             return;
         };
-        ot.add_packet(BG_SLOT, bg);
+        ot.add(BG_SLOT, bg);
 
         let mesh_options = GouraudMeshOptions::new(WORLD_BAND, WORLD_DEPTH_RANGE);
         let mut world_pass =
@@ -497,7 +497,7 @@ impl Lighting {
             )) else {
                 break;
             };
-            ot.add_packet(LIGHT_MARKER_SLOT, marker);
+            ot.add(LIGHT_MARKER_SLOT, marker);
         }
 
         ot.submit(dma);

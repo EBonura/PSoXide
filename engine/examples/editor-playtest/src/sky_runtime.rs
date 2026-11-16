@@ -8,6 +8,7 @@ use psx_engine::sky::{
     submit_view_ray_cube_sky, submit_view_ray_layered_sky, VIEW_RAY_CUBE_SKY_PACKET_WORDS,
     VIEW_RAY_SKY_PACKET_WORDS,
 };
+use psx_engine::OtFrameDepth;
 use psx_engine::SurfaceSubmit;
 
 /// Draw the room's cooked sky panorama through the arena-owned
