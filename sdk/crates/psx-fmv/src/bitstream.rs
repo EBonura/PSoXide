@@ -33,7 +33,7 @@ pub const HEADER_BYTES: usize = 8;
 /// MDEC end-of-block / padding halfword.
 pub const END_OF_BLOCK: u16 = 0xfe00;
 /// Version-2 DC value that ends the frame.
-const V2_END_OF_FRAME: u32 = 0x1ff;
+pub const V2_END_OF_FRAME: u32 = 0x1ff;
 
 /// Why a frame could not be decoded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,7 +91,8 @@ const fn entry(kind: u32, len: u32, hw: u32) -> u32 {
 
 /// (code length without sign, code, run, level) for every AC code.
 /// `11` (run 0, level 1) and the end-of-block `10` share the top level.
-const AC_CODES: [(u8, u16, u8, u8); 111] = [
+/// The encoder (`psx-str-cook`) writes from this same table.
+pub const AC_CODES: [(u8, u16, u8, u8); 111] = [
     (2, 0x3, 0, 1),
     (3, 0x3, 1, 1),
     (4, 0x4, 0, 2),
