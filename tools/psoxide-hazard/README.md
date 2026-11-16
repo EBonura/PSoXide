@@ -121,10 +121,10 @@ Module guard ranges include the complete 136-byte trampoline reserve, beginning
 at its eight-byte magic/count header. This is required for hazard-tool discovery;
 the reserved size and executable entry offsets do not change.
 
-A resident guest that exceeds psx-rt's default 96 trampoline words can enable
-`psx-rt/hazard-trampolines-192` (+384 bytes of initialized data), or the existing
-`psx-rt/hazard-trampolines-256` (+640 bytes). If both are enabled, 256 wins.
-These features change only the resident array's capacity. Each packed cold
+A resident guest that exceeds psx-rt's default 96 trampoline words sets the build variable
+`PSX_HAZARD_TRAMPOLINE_WORDS` (a whole number of words, 1 to 1024; 192 costs 384 bytes of
+initialized data more, 256 costs 640 more) in the environment of its guest build or in the `[env]`
+table of its `.cargo/config.toml`. The variable changes only the resident array's capacity. Each packed cold
 image retains its separate 136-byte reservation: an eight-byte header and
 32 instruction words.
 
