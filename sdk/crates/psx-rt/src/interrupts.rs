@@ -211,8 +211,17 @@ __psx_rt_exception_handler:
     andi  $26, $26, 1
     bnez  $26, 44f
     nop
-    j     41f
+    # Bit 24 is down for a queued word: leave through the slot (a load and a jump). The slot holds
+    # `__psx_rt_flip_resume` (below: leave the word queued for the next edge) until the presenter
+    # points it at `__psx_rt_flip_confirm`. Only the presenter queues a word, so a program that
+    # never calls it never takes this branch and links none of the confirmation code.
+    lui   $26, %hi(__psx_rt_flip_miss)
+    lw    $27, %lo(__psx_rt_flip_miss)($26)
     nop
+    jr    $27
+    nop
+    .globl __psx_rt_flip_apply
+__psx_rt_flip_apply:
 44:
     lui   $26, %hi(__psx_rt_pending_gp1)
     sw    $zero, %lo(__psx_rt_pending_gp1)($26)
@@ -226,80 +235,19 @@ __psx_rt_exception_handler:
 
     b     8f
     nop
-    # GPUSTAT bit 24 is down for a queued GP1 word. DMA 2 idle and GPUSTAT bits
-    # 26 and 28 up, held on {confirm_reads} reads in a row (the test OpenBIOS's GPU_sync and
-    # PSn00bSDK's DrawSync use; bit 26 can pulse up between the primitives of a
-    # chain, and bit 28 idles early on silicon, so neither is enough alone), means
-    # the GPU has nothing left to draw. What that decides depends on the mode
-    # (`__psx_rt_flip_conv`, set by the thread: `crate::present`'s trust).
-    # Signal mode (the start, and always on a PS1, where the signal arrives): only
-    # a second edge in a row that sees it flips, so a frame whose drawing spans a
-    # VBlank is never flipped early and a lost GP0(1Fh) costs one VBlank more. A
-    # flip by this test is counted. Conventional mode (a target that does not
-    # raise bit 24 on most frames: an FPGA PSX core, PCSX-ReARMed): the first edge
-    # that sees it flips. The loop counter lives in `__psx_rt_flip_reads`.
-    # Out of line, past all other text (`.psx_cold`, farther than a branch reaches, so jumps): the
-    # handler's hot path and the code behind it keep their size and place whatever this grows to.
-    .pushsection .psx_cold.psx_rt_exception_slow,"ax"
-41:
-    lui   $26, %hi(__psx_rt_flip_reads)
-    addiu $27, $zero, {confirm_reads}
-    sw    $27, %lo(__psx_rt_flip_reads)($26)
-45:
-    lui   $26, {io_hi}
-    lw    $27, {gp1}($26)
-    lui   $26, 0x1400
-    and   $27, $27, $26
-    bne   $27, $26, 47f
-    nop
-    lui   $26, {io_hi}
-    lw    $27, {gpu_chcr}($26)
-    nop
-    srl   $27, $27, {chcr_start_shift}
-    andi  $27, $27, 1
-    bnez  $27, 47f
-    nop
-    lui   $26, %hi(__psx_rt_flip_reads)
-    lw    $27, %lo(__psx_rt_flip_reads)($26)
-    nop
-    addiu $27, $27, -1
-    bnez  $27, 45b
-    sw    $27, %lo(__psx_rt_flip_reads)($26)
-    lui   $26, %hi(__psx_rt_flip_conv)
-    lw    $27, %lo(__psx_rt_flip_conv)($26)
-    nop
-    bnez  $27, 43f
-    nop
-    lui   $26, %hi(__psx_rt_vblank_count)
-    lw    $27, %lo(__psx_rt_vblank_count)($26)
-    lui   $26, %hi(__psx_rt_flip_quiet)
-    lw    $26, %lo(__psx_rt_flip_quiet)($26)
-    nop
-    addiu $26, $26, 1
-    beq   $26, $27, 43f
-    nop
-    lui   $26, %hi(__psx_rt_flip_quiet)
-    j     8f
-    sw    $27, %lo(__psx_rt_flip_quiet)($26)
-43:
-    lui   $26, %hi(__psx_rt_draw_done_fallbacks)
-    lw    $27, %lo(__psx_rt_draw_done_fallbacks)($26)
-    nop
-    addiu $27, $27, 1
-    sw    $27, %lo(__psx_rt_draw_done_fallbacks)($26)
-    lui   $26, %hi(__psx_rt_pending_gp1)
-    lw    $27, %lo(__psx_rt_pending_gp1)($26)
-    nop
-    j     44b
-    nop
-47:
-    j     8f
-    nop
+    # The slot of the branch above. It starts as the resume point and is written by the presenter.
+    .pushsection .data.psx_rt_flip_miss,"aw",@progbits
+    .align 2
+    .globl __psx_rt_flip_miss
+__psx_rt_flip_miss:
+    .word __psx_rt_flip_resume
     .popsection
 
     # The kick. A part that waits (for the flip above, or for channel 2) is
     # counted as a skipped edge, out of line (`7:` below the stray path). With
     # the slot empty this costs one load and falls through.
+    .globl __psx_rt_flip_resume
+__psx_rt_flip_resume:
 8:
     PSX_RT_PRESENT_KICK $26, $27, __psx_rt_present_kick_count, 7f
 
@@ -576,7 +524,6 @@ __psx_rt_present_kick:
     dma_dir_lo = const gpu::gp1::dma_direction(gpu::DmaDirection::CpuToGp0 as u32) & 0xFFFF,
     gpu_madr = const (dma::CHANNEL_BASE + dma::CHANNEL_STRIDE * dma::channel::GPU + dma::MADR) & 0xFFFF,
     gpu_bcr = const (dma::CHANNEL_BASE + dma::CHANNEL_STRIDE * dma::channel::GPU + dma::BCR) & 0xFFFF,
-    confirm_reads = const 64,
     gpu_chcr = const (dma::CHANNEL_BASE + dma::CHANNEL_STRIDE * dma::channel::GPU + dma::CHCR) & 0xFFFF,
     chcr_start_shift = const dma::CHCR_START.trailing_zeros(),
     chcr_hi = const dma::CHCR_LINKED_LIST_TO_DEVICE >> 16,
@@ -587,6 +534,98 @@ __psx_rt_present_kick:
     gte_prefix_shift = const gte::PREFIX_SHIFT,
     gte_prefix = const gte::COMMAND >> gte::PREFIX_SHIFT,
 );
+// The handler's confirmation of a queued flip whose GPUSTAT bit 24 is down (the handler's slot,
+// `__psx_rt_flip_miss`, jumps here once the presenter has pointed it here). Its own object and
+// section: only `crate::present` refers to it, so a program that never presents does not link it.
+// Out of line, past all other text (`.psx_cold`, farther than a branch reaches, so jumps). Enters
+// with nothing live; leaves for `__psx_rt_flip_apply` (flip, `$27` the queued word) or
+// `__psx_rt_flip_resume` (leave it queued).
+#[cfg(target_arch = "mips")]
+core::arch::global_asm!(
+    r#"
+    .set noreorder
+    # GPUSTAT bit 24 is down for a queued GP1 word. DMA 2 idle and GPUSTAT bits
+    # 26 and 28 up, held on {confirm_reads} reads in a row (the test OpenBIOS's GPU_sync and
+    # PSn00bSDK's DrawSync use; bit 26 can pulse up between the primitives of a
+    # chain, and bit 28 idles early on silicon, so neither is enough alone), means
+    # the GPU has nothing left to draw. What that decides depends on the mode
+    # (`__psx_rt_flip_conv`, set by the thread: `crate::present`'s trust).
+    # Signal mode (the start, and always on a PS1, where the signal arrives): only
+    # a second edge in a row that sees it flips, so a frame whose drawing spans a
+    # VBlank is never flipped early and a lost GP0(1Fh) costs one VBlank more. A
+    # flip by this test is counted. Conventional mode (a target that does not
+    # raise bit 24 on most frames: an FPGA PSX core, PCSX-ReARMed): the first edge
+    # that sees it flips. The loop counter lives in `__psx_rt_flip_reads`.
+    .pushsection .psx_cold.psx_rt_flip_confirm,"ax",@progbits
+    .globl __psx_rt_flip_confirm
+__psx_rt_flip_confirm:
+    lui   $26, %hi(__psx_rt_flip_reads)
+    addiu $27, $zero, {confirm_reads}
+    sw    $27, %lo(__psx_rt_flip_reads)($26)
+45:
+    lui   $26, {io_hi}
+    lw    $27, {gp1}($26)
+    lui   $26, 0x1400
+    and   $27, $27, $26
+    bne   $27, $26, 47f
+    nop
+    lui   $26, {io_hi}
+    lw    $27, {gpu_chcr}($26)
+    nop
+    srl   $27, $27, {chcr_start_shift}
+    andi  $27, $27, 1
+    bnez  $27, 47f
+    nop
+    lui   $26, %hi(__psx_rt_flip_reads)
+    lw    $27, %lo(__psx_rt_flip_reads)($26)
+    nop
+    addiu $27, $27, -1
+    bnez  $27, 45b
+    sw    $27, %lo(__psx_rt_flip_reads)($26)
+    lui   $26, %hi(__psx_rt_flip_conv)
+    lw    $27, %lo(__psx_rt_flip_conv)($26)
+    nop
+    bnez  $27, 43f
+    nop
+    lui   $26, %hi(__psx_rt_vblank_count)
+    lw    $27, %lo(__psx_rt_vblank_count)($26)
+    lui   $26, %hi(__psx_rt_flip_quiet)
+    lw    $26, %lo(__psx_rt_flip_quiet)($26)
+    nop
+    addiu $26, $26, 1
+    beq   $26, $27, 43f
+    nop
+    lui   $26, %hi(__psx_rt_flip_quiet)
+    j     __psx_rt_flip_resume
+    sw    $27, %lo(__psx_rt_flip_quiet)($26)
+43:
+    lui   $26, %hi(__psx_rt_draw_done_fallbacks)
+    lw    $27, %lo(__psx_rt_draw_done_fallbacks)($26)
+    nop
+    addiu $27, $27, 1
+    sw    $27, %lo(__psx_rt_draw_done_fallbacks)($26)
+    lui   $26, %hi(__psx_rt_pending_gp1)
+    lw    $27, %lo(__psx_rt_pending_gp1)($26)
+    nop
+    j     __psx_rt_flip_apply
+    nop
+47:
+    j     __psx_rt_flip_resume
+    nop
+    .popsection
+    .set reorder
+    "#,
+    confirm_reads = const CONFIRM_READS,
+    io_hi = const memory::io::BASE >> 16,
+    gp1 = const gpu::GP1 & 0xFFFF,
+    gpu_chcr = const (dma::CHANNEL_BASE + dma::CHANNEL_STRIDE * dma::channel::GPU + dma::CHCR) & 0xFFFF,
+    chcr_start_shift = const dma::CHCR_START.trailing_zeros(),
+);
+
+/// Reads of GPUSTAT and channel 2's CHCR the confirmation holds the idle test over.
+#[cfg(target_arch = "mips")]
+const CONFIRM_READS: u32 = 64;
+
 // The handler reaches every register through one `lui` of the I/O window's
 // high half plus a signed 16-bit offset, and builds its GP1 and CHCR words
 // from immediates; check each the way the template spells them.
@@ -753,20 +792,20 @@ pub(crate) static mut __psx_rt_pending_gp1: u32 = 0;
 
 /// The VBlank count of the last edge at which the signal-mode timeout saw the GPU idle with
 /// bit 24 down (the timeout fires on the next edge). Handler scratch, in `.data`.
-#[cfg_attr(target_arch = "mips", link_section = ".data")]
+#[cfg_attr(target_arch = "mips", link_section = ".data.psx_rt_flip_quiet")]
 #[no_mangle]
 static mut __psx_rt_flip_quiet: u32 = 0;
 
 /// The conventional-mode confirmation loop's counter (the reads left before it fires).
 /// Handler scratch, in `.data`.
-#[cfg_attr(target_arch = "mips", link_section = ".data")]
+#[cfg_attr(target_arch = "mips", link_section = ".data.psx_rt_flip_reads")]
 #[no_mangle]
 static mut __psx_rt_flip_reads: u32 = 0;
 
 /// The presenter's mode (see `crate::present`'s trust): 0 = signal mode, where the draw-done
 /// timeout needs two idle edges in a row, nonzero = conventional mode, where the first idle edge
 /// flips. Written by the thread, read by the handler. In `.data`.
-#[cfg_attr(target_arch = "mips", link_section = ".data")]
+#[cfg_attr(target_arch = "mips", link_section = ".data.psx_rt_flip_conv")]
 #[no_mangle]
 pub(crate) static mut __psx_rt_flip_conv: u32 = 0;
 
@@ -783,7 +822,7 @@ pub fn flip_signal_distrusted() -> bool {
 /// queued flip waiting. A GPU that raises bit 24 for every
 /// closing GP0(1Fh) (a PS1) leaves it at 0; an FPGA PSX core that loses some of
 /// them counts them here.
-#[cfg_attr(target_arch = "mips", link_section = ".data")]
+#[cfg_attr(target_arch = "mips", link_section = ".data.psx_rt_draw_done_fallbacks")]
 #[no_mangle]
 static mut __psx_rt_draw_done_fallbacks: u32 = 0;
 

@@ -199,7 +199,34 @@ extern "C" {
     /// The thread's kick (`interrupts.rs`): masks interrupts, runs the kick,
     /// restores them. Clobbers `$8`-`$10` only.
     fn __psx_rt_present_kick();
+    /// The handler's own jump target for a queued flip whose bit 24 is down (`interrupts.rs`):
+    /// where it resumes unless [`arm_confirmation`] has pointed it at the confirmation.
+    static mut __psx_rt_flip_miss: u32;
+    /// The handler's confirmation of such a flip (`interrupts.rs`). Named only here, so only a
+    /// program that presents links it.
+    fn __psx_rt_flip_confirm();
 }
+
+/// Point the handler's miss branch at the confirmation of a queued flip. Every function of this
+/// module that can queue a flip or a part calls it first (`Presenter::new`, [`show`],
+/// [`set_display_enabled`], `publish_raw`), so the handler never meets a queued word with the slot
+/// unarmed; a program that calls none of them never queues a word, and links neither this word's
+/// writer nor the confirmation it names.
+#[cfg(target_arch = "mips")]
+#[inline(always)]
+fn arm_confirmation() {
+    // SAFETY: a volatile aligned word store of an address; the slot is read by the handler with
+    // one load, and holds either the resume point or the confirmation, both valid targets.
+    unsafe {
+        write_volatile(
+            addr_of_mut!(__psx_rt_flip_miss),
+            __psx_rt_flip_confirm as usize as u32,
+        );
+    }
+}
+#[cfg(not(target_arch = "mips"))]
+#[inline(always)]
+fn arm_confirmation() {}
 
 impl Port for Hardware {
     #[inline(always)]
@@ -392,6 +419,7 @@ pub fn wait_idle() {
 /// was sent: acknowledge bit 24, send the draw-done sequence, queue the flip.
 /// Waits first for the slot to empty and any earlier flip to land.
 pub fn show(origin: (u16, u16)) {
+    arm_confirmation();
     show_on(
         &mut Hardware,
         gp1::display_start(u32::from(origin.0), u32::from(origin.1)),
@@ -402,6 +430,7 @@ pub fn show(origin: (u16, u16)) {
 /// is up, never held by the cap. Waits first for the slot to empty and any
 /// earlier flip to land. Call it between frames.
 pub fn set_display_enabled(enabled: bool) {
+    arm_confirmation();
     let port = &mut Hardware;
     wait_slot_empty_on(port);
     wait_flip_on(port);
@@ -454,6 +483,7 @@ impl Presenter {
     /// cleared to before its first part draws (`None`: not cleared).
     #[must_use]
     pub fn new(clear: Option<(u8, u8, u8)>) -> Presenter {
+        arm_confirmation();
         #[cfg(not(target_arch = "mips"))]
         psx_io::gpu::set_direct_access_guard(wait_idle);
         #[cfg(target_arch = "mips")]
@@ -607,6 +637,7 @@ impl Presenter {
     note = "use `Presenter::submit`, which links the draw target and shows each frame when it is drawn"
 )]
 pub unsafe fn publish_raw(head: *const u32, display: u32) {
+    arm_confirmation();
     let port = &mut Hardware;
     compiler_barrier();
     // The old contract carries the previous frame's flip with the next frame;
