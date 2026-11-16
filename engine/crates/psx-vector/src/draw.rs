@@ -214,7 +214,7 @@ const QUAD_TRANSLUCENT: u32 = QuadGouraud::new([(0, 0); 4], [(0, 0, 0); 4])
 
 #[inline(always)]
 fn pack_pos(x: i32, y: i32) -> u32 {
-    (x as u16 as u32) | ((y as u16 as u32) << 16)
+    psx_hw::gpu::pack_vertex(x as i16, y as i16)
 }
 
 /// Scale an 8-bit factor to 0..=256 so 255 is exactly identity and 0 is zero.

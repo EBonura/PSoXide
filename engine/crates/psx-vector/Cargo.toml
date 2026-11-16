@@ -14,6 +14,7 @@ workspace = true
 # native workspace too.
 psx-asset = { path = "../../../sdk/crates/psx-asset" }
 psx-gpu = { path = "../../../sdk/crates/psx-gpu" }
+psx-hw = { path = "../../../crates/psx-hw" }
 psx-math = { path = "../../../sdk/crates/psx-math" }
 
 [features]

@@ -674,7 +674,7 @@ fn screen_of(p: scene::Projected, camera: &CardCamera) -> GridScreen {
         }
     }
     GridScreen {
-        sxy: (p.sx as u16 as u32) | ((p.sy as u16 as u32) << 16),
+        sxy: psx_hw::gpu::pack_vertex(p.sx, p.sy),
         sz: p.sz,
         code,
     }
@@ -788,7 +788,7 @@ pub fn write_backdrop(
             return;
         }
         let pack = |c: [u8; 3]| u32::from(c[0]) | u32::from(c[1]) << 8 | u32::from(c[2]) << 16;
-        let xy = |(x, y): (i32, i32)| (x as u16 as u32) | ((y as u16 as u32) << 16);
+        let xy = |(x, y): (i32, i32)| psx_hw::gpu::pack_vertex(x as i16, y as i16);
         let o = &mut out[words..words + BACKDROP_PACKET_WORDS];
         o[0] = ((BACKDROP_PACKET_WORDS as u32 - 1) << 24) | u32::from(slot);
         o[1] = 0x3800_0000 | pack(colour[0]);

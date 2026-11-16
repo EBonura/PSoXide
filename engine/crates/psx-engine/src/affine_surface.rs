@@ -525,7 +525,7 @@ fn midpoint(a: &AffineVertex, b: &AffineVertex) -> AffineVertex {
 
 #[inline(always)]
 const fn screen_word(vertex: &AffineVertex) -> u32 {
-    (vertex.screen[0] as u16 as u32) | ((vertex.screen[1] as u16 as u32) << 16)
+    psx_hw::gpu::pack_vertex(vertex.screen[0], vertex.screen[1])
 }
 
 /// The loaded GTE view, for projecting the vertices the GTE cannot.

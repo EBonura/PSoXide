@@ -409,7 +409,7 @@ fn screen_of(p: scene::Projected, camera: &SkinCamera<'_>) -> GridScreen {
         }
     }
     GridScreen {
-        sxy: (p.sx as u16 as u32) | ((p.sy as u16 as u32) << 16),
+        sxy: psx_hw::gpu::pack_vertex(p.sx, p.sy),
         sz: p.sz,
         code,
     }
