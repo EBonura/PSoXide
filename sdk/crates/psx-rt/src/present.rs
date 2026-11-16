@@ -495,7 +495,6 @@ impl Presenter {
         let port = &mut Hardware;
         let vblanks = wait_slot_empty_on(port);
         add(addr_of_mut!(SLOT_WAIT_VBLANKS), vblanks);
-        observe_signal();
         let mut first = head as u32;
         if !self.frame_open {
             first = self.write_preamble(buffers, first);
@@ -514,6 +513,9 @@ impl Presenter {
         compiler_barrier();
         submit_on(port, first, display);
         psx_io::gpu::arm_direct_access_guard();
+        // After the part is published and kicked: the miss counting is bookkeeping, and ahead of
+        // the kick it would delay the walk (and so the frame's end) by its own length.
+        observe_signal();
     }
 
     /// Write this frame's preamble, linked to `head`, and return its address.
@@ -580,9 +582,10 @@ impl Presenter {
         if port.flip() != 0 {
             wait_drawn_idle_on(port);
         }
-        observe_signal();
         let display = buffers.begin_deferred_swap();
         present_drawn_on(port, display);
+        // After the flip is armed, not before the draw-done request: see `submit`.
+        observe_signal();
     }
 
     /// [`present_drawn`](Self::present_drawn) and wait until the frame is on
