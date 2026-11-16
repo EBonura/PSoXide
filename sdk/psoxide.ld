@@ -117,11 +117,21 @@ SECTIONS {
            (`psx_io::gpu::arm_direct_access_guard` carries an R_MIPS_NONE reference to it,
            which section collection honours), and `wait_idle` callers that need it call it
            directly. See sdk/docs/PRESENT.md. */
+        /* A program's own hot placement: functions it marks
+           `#[link_section = ".psx_hot.<NN>_<name>"]` are placed here, in name order (so the
+           numbers choose which sit side by side in the 4 KiB direct-mapped I-cache), ahead of
+           the rest of the text. Nothing in it, nothing changes. A program that needs a layout
+           the SDK's rules do not give it uses this instead of rewriting this script. */
+        *(SORT_BY_NAME(.psx_hot .psx_hot.*))
         . = ALIGN(4);
         __psx_guard_window_start = .;
         *(.text.__psx_rt_wait_idle)
         __psx_guard_window_end = .;
         *(.text .text.*);
+        /* Cold code, after everything else (`#[link_section = ".psx_cold.<name>"]`): code that
+           runs once or rarely (a loader, a settings screen) kept apart from the hot text so it
+           does not share I-cache sets or pages with it. */
+        *(.psx_cold .psx_cold.*);
         __text_end = .;
     } > IMAGE
 

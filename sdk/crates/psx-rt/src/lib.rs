@@ -19,6 +19,16 @@
 //! 3. With the `alloc` feature, the bump allocator is seeded from
 //!    `__heap_start..__heap_end`.
 //! 4. `main()` is called. When it returns, we halt.
+//!
+//! # Placing code
+//!
+//! `psoxide.ld` places two groups of functions a program asks for, so a program does not edit
+//! the script text. `#[link_section = ".psx_cold.<name>"]` puts a function after all other
+//! text (code that runs once or rarely); `#[link_section = ".psx_hot.<NN>_<name>"]` puts it
+//! ahead of the rest, in name order, so the `NN` prefixes choose which functions sit side by
+//! side in the 4 KiB direct-mapped I-cache. A program that uses neither links byte for byte
+//! as before. The stack is `STACK_RESERVE_OVERRIDE`, the RAM size `RAM_SIZE_OVERRIDE`, the
+//! initial PC `__initial_pc` and boot-only memory `psoxide-boot.ld` (see the script).
 
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]
