@@ -40,7 +40,7 @@
 //! running cook's table (stale save against re-authored content),
 //! or a checksum mismatch. Loud, never partial.
 
-use psx_hw::hash::fnv1a_64;
+use psx_math::WideU;
 
 /// Identifies a PSoXide save frame.
 pub const SAVE_MAGIC: [u8; 4] = *b"PXSV";
@@ -61,6 +61,21 @@ const V2_ROOM_NONE: u16 = u16::MAX;
 const LEGACY_V1_BYTES: usize = 128;
 const LEGACY_V1_CHECKSUM_OFFSET: usize = LEGACY_V1_BYTES - 8;
 const LEGACY_V1_FLAGS_OFFSET: usize = 16;
+
+/// FNV-1a-64 of `bytes` as the eight little-endian bytes stored in a frame, computed with
+/// [`WideU`] so the guest does no 64-bit arithmetic of its own. The bytes are the ones
+/// `psx_hw::hash::fnv1a_64(bytes).to_le_bytes()` gives (the saved format is unchanged; a test
+/// holds the two equal).
+fn frame_checksum(bytes: &[u8]) -> [u8; 8] {
+    let mut hash = WideU::FNV1A_OFFSET;
+    for &byte in bytes {
+        hash = hash.fnv1a_step(byte);
+    }
+    let (low, high) = (hash.low().to_le_bytes(), hash.high().to_le_bytes());
+    [
+        low[0], low[1], low[2], low[3], high[0], high[1], high[2], high[3],
+    ]
+}
 
 /// Player pose captured at an intentional gameplay exit boundary.
 ///
@@ -153,8 +168,8 @@ impl SaveBlock {
         }
         // The future-state reserve remains zero.
         out[FLAGS_OFFSET..FLAGS_OFFSET + SAVE_FLAG_BYTES].copy_from_slice(&self.flags);
-        let checksum = fnv1a_64(&out[..CHECKSUM_OFFSET]);
-        out[CHECKSUM_OFFSET..].copy_from_slice(&checksum.to_le_bytes());
+        let checksum = frame_checksum(&out[..CHECKSUM_OFFSET]);
+        out[CHECKSUM_OFFSET..].copy_from_slice(&checksum);
     }
 
     /// Decode a card frame. `expected_flag_count` is the running
@@ -168,18 +183,7 @@ impl SaveBlock {
         if version != SAVE_VERSION && version != 2 {
             return None;
         }
-        // psx-numeric-allow-next-line: FNV-1a-64 checksum decode; xor/mul via compiler builtins at save/load only
-        let checksum = u64::from_le_bytes([
-            buf[CHECKSUM_OFFSET],
-            buf[CHECKSUM_OFFSET + 1],
-            buf[CHECKSUM_OFFSET + 2],
-            buf[CHECKSUM_OFFSET + 3],
-            buf[CHECKSUM_OFFSET + 4],
-            buf[CHECKSUM_OFFSET + 5],
-            buf[CHECKSUM_OFFSET + 6],
-            buf[CHECKSUM_OFFSET + 7],
-        ]);
-        if checksum != fnv1a_64(&buf[..CHECKSUM_OFFSET]) {
+        if buf[CHECKSUM_OFFSET..CHECKSUM_OFFSET + 8] != frame_checksum(&buf[..CHECKSUM_OFFSET]) {
             return None;
         }
         let flag_count = u16::from_le_bytes([buf[6], buf[7]]);
@@ -234,18 +238,9 @@ impl SaveBlock {
         if u16::from_le_bytes([buf[4], buf[5]]) != 1 {
             return None;
         }
-        // psx-numeric-allow-next-line: FNV-1a-64 checksum decode; xor/mul via compiler builtins at save/load only
-        let checksum = u64::from_le_bytes([
-            buf[LEGACY_V1_CHECKSUM_OFFSET],
-            buf[LEGACY_V1_CHECKSUM_OFFSET + 1],
-            buf[LEGACY_V1_CHECKSUM_OFFSET + 2],
-            buf[LEGACY_V1_CHECKSUM_OFFSET + 3],
-            buf[LEGACY_V1_CHECKSUM_OFFSET + 4],
-            buf[LEGACY_V1_CHECKSUM_OFFSET + 5],
-            buf[LEGACY_V1_CHECKSUM_OFFSET + 6],
-            buf[LEGACY_V1_CHECKSUM_OFFSET + 7],
-        ]);
-        if checksum != fnv1a_64(&buf[..LEGACY_V1_CHECKSUM_OFFSET]) {
+        if buf[LEGACY_V1_CHECKSUM_OFFSET..LEGACY_V1_CHECKSUM_OFFSET + 8]
+            != frame_checksum(&buf[..LEGACY_V1_CHECKSUM_OFFSET])
+        {
             return None;
         }
         let flag_count = u16::from_le_bytes([buf[6], buf[7]]);
@@ -272,6 +267,56 @@ impl SaveBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use psx_hw::hash::fnv1a_64;
+
+    /// Old function against new on real save data: every frame the encoder writes for a spread of
+    /// states carries exactly the bytes `fnv1a_64(..).to_le_bytes()` (the old checksum) gives, and
+    /// a frame built with the old checksum decodes with the new code.
+    #[test]
+    fn frames_carry_the_old_checksum_bytes_and_old_frames_still_decode() {
+        for seed in 0..64u32 {
+            let mut block = SaveBlock::new(100 + seed as u16, 7);
+            block.checkpoint_id = seed.wrapping_mul(0x9e37_79b9);
+            block.hp = (seed * 3 % 100) as u16;
+            if seed % 3 != 0 {
+                block.set_resume_position(SavedPlayerPosition {
+                    x: seed as i32 * 311 - 5000,
+                    y: -(seed as i32) * 17,
+                    z: seed as i32 * 4099,
+                    yaw: (seed * 97 % 4096) as u16,
+                });
+            }
+            for flag in 0..7 {
+                if (seed >> flag) & 1 == 1 {
+                    block.set_flag(flag);
+                }
+            }
+            let mut frame = [0u8; SAVE_BLOCK_BYTES];
+            block.encode(&mut frame);
+            let old = fnv1a_64(&frame[..CHECKSUM_OFFSET]).to_le_bytes();
+            assert_eq!(frame[CHECKSUM_OFFSET..], old, "seed {seed}");
+            // A frame written by the old encoder: old checksum over the same bytes.
+            let mut old_frame = frame;
+            old_frame[CHECKSUM_OFFSET..].copy_from_slice(&old);
+            assert_eq!(
+                SaveBlock::decode(&old_frame, 7),
+                SaveBlock::decode(&frame, 7)
+            );
+            assert_eq!(SaveBlock::decode(&old_frame, 7), Some(block));
+        }
+    }
+
+    /// The stored checksum bytes are the FNV-1a-64 ones the format always held.
+    #[test]
+    fn frame_checksum_is_fnv1a_64_little_endian() {
+        let data: [u8; 256] = core::array::from_fn(|i| (i as u32 * 131 + 17) as u8);
+        for len in 0..=data.len() {
+            assert_eq!(
+                frame_checksum(&data[..len]),
+                fnv1a_64(&data[..len]).to_le_bytes()
+            );
+        }
+    }
 
     fn sample() -> SaveBlock {
         let mut block = SaveBlock::new(100, 7);
