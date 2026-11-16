@@ -315,6 +315,34 @@ fn an_old_project_folds_enemy_health_and_poise_into_combat_stats() {
 }
 
 #[test]
+fn a_combat_record_written_before_parry_loads_with_the_placeholder_numbers() {
+    let load = |text: &str| ron::from_str::<CombatStats>(text).unwrap();
+    // A step 6 record: no parry, crit or knockdown fields.
+    let old = load("CombatStats(max_health: 90, poise: 30, shot_cost: 25)");
+    assert_eq!((old.max_health, old.poise, old.shot_cost), (90, 30, 25));
+    assert_eq!(old.parry_ticks, CombatStats::PLAYER.parry_ticks);
+    assert_eq!(old.parry_refund, 20);
+    assert_eq!(old.crit_window_ticks, 60);
+    assert_eq!((old.crit_damage_q12, old.crit_poise_q12), (8192, 8192));
+    assert_eq!(old.knockdown_ticks, 60);
+    // A character with no record keeps the role's starting numbers: the
+    // player's parry is a third of her 25-tick swap, an enemy's of its 10.
+    assert_eq!(CombatStats::PLAYER.parry_ticks, 8);
+    assert_eq!(
+        CombatStats::legacy(Some(&EnemyBehaviorSettings::default())).parry_ticks,
+        3
+    );
+    // The new fields cook and round-trip.
+    let tuned = CombatStats {
+        parry_ticks: 5,
+        knockdown_ticks: 0,
+        ..old
+    };
+    assert_eq!(CombatStats::from_cooked(tuned.cooked()), tuned);
+    assert_eq!(load(&ron::to_string(&tuned).unwrap()), tuned);
+}
+
+#[test]
 fn a_two_pool_combat_record_loads_as_one_health_bar() {
     let load = |text: &str| ron::from_str::<CombatStats>(text).unwrap();
     // Written while health was two pools: they load summed.
