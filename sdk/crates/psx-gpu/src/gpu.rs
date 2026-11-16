@@ -222,6 +222,7 @@ pub(crate) fn reset(display: DisplayConfig) {
     ]);
 }
 
+#[inline]
 pub(crate) fn set_draw_area(top_left: (u16, u16), bottom_right: (u16, u16)) {
     write_commands_when_ready(&[
         gp0::draw_area_top_left(top_left.0 as u32, top_left.1 as u32),
@@ -229,6 +230,7 @@ pub(crate) fn set_draw_area(top_left: (u16, u16), bottom_right: (u16, u16)) {
     ]);
 }
 
+#[inline]
 pub(crate) fn set_draw_offset(offset: (i16, i16)) {
     write_commands_when_ready(&[gp0::draw_offset(offset.0 as i32, offset.1 as i32)]);
 }
