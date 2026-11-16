@@ -97,6 +97,10 @@ fn gpu_command_byte(v: u64) -> bool {
 /// 8-digit hex literal (`0xE100_0200`), a decimal literal of the same value (`3774874112`) or a
 /// command byte shifted up by 24 (`0xE1 << 24`, `0xA0u32 << 24`). See [`gpu_word`] for what
 /// counts and what does not.
+///
+/// # Panics
+///
+/// Never: the patterns are fixed and valid.
 pub fn gpu_word_in(code: &str) -> bool {
     static PATTERNS: std::sync::OnceLock<[Regex; 3]> = std::sync::OnceLock::new();
     let [hex, decimal, shifted] = PATTERNS.get_or_init(|| {
@@ -846,6 +850,10 @@ pub fn run(
 }
 
 /// [`run`] with the optional `gpu-word` rule (`psx-gate --gpu-words`).
+///
+/// # Errors
+///
+/// As [`run`].
 pub fn run_with(
     sdk: &Path,
     metadata: Option<&Path>,
