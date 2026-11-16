@@ -50,6 +50,11 @@ pub(super) struct Duel {
     intent: u8,
     last_snapshot: [u32; SAMPLE_COLUMNS],
     last_progress: u32,
+    /// Whether the enemy was in sight at the latest decision.
+    visible: bool,
+    /// Ticks to the enemy's incoming hit at the previous tick, `u16::MAX`
+    /// when none: a parry is decided once, when a hit enters the window.
+    ticks_to_hit: u16,
 }
 impl Duel {
     pub(super) fn started_tick(&self) -> u32 {
@@ -149,6 +154,8 @@ impl Playtest {
                 intent: 0,
                 last_snapshot: [0; SAMPLE_COLUMNS],
                 last_progress: 0,
+                visible: false,
+                ticks_to_hit: u16::MAX,
             };
             // The third value is the sample format: 1 is one health value
             // per fighter (before it, two pools each and no third value).
@@ -273,23 +280,7 @@ impl Playtest {
                 buttons |= button::TRIANGLE;
                 self.duel.intent = 5;
             }
-            // Parry on purpose: swap so a hit seen coming lands inside the
-            // parry window. The same choice every tactical enemy makes.
-            let parrying = crit.is_none() && !swapping && visible && free && {
-                let ticks_to_hit = self.duel_ticks_to_hit(i, p, height);
-                let can_swap = self.player.stance.can_swap() && self.player_kits().can_swap();
-                let parry_ticks = self.player_stats.parry_ticks;
-                let percent = self.player_stats.parry_swap_percent;
-                let duel = &mut self.duel;
-                combat_policy::parry_swap(ticks_to_hit, parry_ticks, can_swap, percent, || {
-                    duel.roll()
-                })
-            };
-            if parrying {
-                buttons |= button::TRIANGLE;
-                self.duel.intent = DUEL_INTENT_PARRY;
-            }
-            let swapping = swapping || parrying;
+            self.duel.visible = visible;
             {
                 // Movement follows the intended weapon phase through a legal stance swap.
                 let ranged = wanted == VitalityChannelId::Two;
@@ -465,6 +456,12 @@ impl Playtest {
                 ],
             );
         }
+        // Parry on purpose, checked every tick rather than at the 5 Hz
+        // decisions: swap the tick a hit seen coming enters the parry window.
+        // The same choice every tactical enemy makes.
+        if !self.duel.finished {
+            self.duel_parry_check(ctx, &mut buttons);
+        }
         // Decisions stay at 5 Hz, but steering must stop at the chosen point.
         // Holding a 12-tick-old direction overshoots small cover/peek targets.
         if (1..=5).contains(&self.duel.combat_role) {
@@ -504,6 +501,51 @@ impl Playtest {
         ctx.pad_prev.buttons = psx_pad::ButtonState::from_bits(self.duel.previous);
         ctx.pad = pad;
         self.duel.previous = buttons;
+    }
+
+    /// The bot's parry: swap when the enemy's hit enters the parry window
+    /// this tick ([`combat_policy::parry_swap`]), unless it already asked
+    /// for a swap, is busy, or holds a crit to spend.
+    fn duel_parry_check(&mut self, ctx: &Ctx, buttons: &mut u16) {
+        let i = self.duel.target;
+        let p = self.motor.position();
+        let height = self.character.map_or(40, |c| c.height);
+        let ticks_to_hit = self.duel_ticks_to_hit(i, p, height);
+        let before = core::mem::replace(
+            &mut self.duel.ticks_to_hit,
+            ticks_to_hit.unwrap_or(u16::MAX),
+        );
+        let before = (before != u16::MAX).then_some(before);
+        let free = self.motor.action().is_idle()
+            && self.anim_lock_until_tick <= ctx.sim_tick
+            && !self
+                .player
+                .stance
+                .swap_in_progress(&self.player_stance_config);
+        if *buttons & button::TRIANGLE != 0 || !self.duel.visible || !free || self.player.crit != 0
+        {
+            return;
+        }
+        let can_swap = self.player.stance.can_swap() && self.player_kits().can_swap();
+        let parry_ticks = self.player_stats.parry_ticks;
+        let percent = self.player_stats.parry_swap_percent;
+        let duel = &mut self.duel;
+        if combat_policy::parry_swap(ticks_to_hit, before, parry_ticks, can_swap, percent, || {
+            duel.roll()
+        }) {
+            *buttons |= button::TRIANGLE;
+            self.duel.intent = DUEL_INTENT_PARRY;
+            log_values(
+                "duel:decision",
+                &[
+                    ctx.sim_tick.as_u32() - self.duel.started,
+                    u32::from(DUEL_INTENT_PARRY),
+                    u32::from(self.duel.reason),
+                    u32::from(*buttons),
+                    0,
+                ],
+            );
+        }
     }
 
     /// Ticks until the enemy's hit the bot can see lands on the player: its

@@ -108,6 +108,9 @@ pub(super) struct TacticalState {
     pub(super) defend_ticks: u16,
     pub(super) defend_cooldown: u16,
     pub(super) combat_role: u8,
+    /// Ticks to the incoming hit at the previous decision, `u16::MAX` when
+    /// none ([`crate::combat_policy::parry_swap`] decides on entry).
+    ticks_to_hit: u16,
 }
 impl TacticalState {
     pub(super) const EMPTY: Self = Self {
@@ -141,6 +144,7 @@ impl TacticalState {
         defend_ticks: 0,
         defend_cooldown: 0,
         combat_role: 0,
+        ticks_to_hit: u16::MAX,
     };
 }
 
@@ -789,16 +793,22 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         // Parry on purpose: swap so a hit seen coming lands inside the parry
         // window. The same choice as the duel's player bot; how often is the
         // character's data.
+        let swing = (input.target.attack_read == 2).then_some(0);
+        let bolt = self.projectile_threats[i].map(|threat| threat.ticks_to_contact);
+        let ticks_to_hit = match (swing, bolt) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        let before = core::mem::replace(
+            &mut self.tactics[i].ticks_to_hit,
+            ticks_to_hit.unwrap_or(u16::MAX),
+        );
+        let before = (before != u16::MAX).then_some(before);
         if S && visible && !self.stance_swap_in_progress(i) {
-            let swing = (input.target.attack_read == 2).then_some(0);
-            let bolt = self.projectile_threats[i].map(|threat| threat.ticks_to_contact);
-            let ticks_to_hit = match (swing, bolt) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (a, b) => a.or(b),
-            };
             let can_swap = self.swap_permitted(r, i);
             if crate::combat_policy::parry_swap(
                 ticks_to_hit,
+                before,
                 r.combat.parry_ticks,
                 can_swap,
                 r.combat.parry_swap_percent,

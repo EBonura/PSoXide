@@ -70,25 +70,31 @@ pub fn attack_choice(ranged: bool, close: bool, last: u8, repeats: u8, roll: u16
     }
 }
 
-/// Whether to swap on purpose to parry: a hit is seen `ticks_to_hit` ticks
-/// away, inside the fighter's parry window of `parry_ticks`, the fighter may
-/// swap now, and its roll falls under `percent` (its
+/// Whether to swap on purpose to parry: a hit seen `ticks_to_hit` ticks away
+/// has just entered the fighter's parry window of `parry_ticks` (it was not
+/// inside it at the previous check, `before`), the fighter may swap now,
+/// and its roll falls under `percent` (its
 /// [`CombatStats::parry_swap_percent`](psx_level::CombatStats::parry_swap_percent)).
-/// `roll` (0..100) is drawn only when everything else holds, so a fighter
-/// that never sees a parryable hit keeps its random sequence. The same
-/// choice for the duel's player bot and every tactical enemy; what each
-/// can see of the incoming hit is the controller's own perception.
+/// Deciding on entry gives one roll per incoming hit at any check cadence,
+/// and swaps at the earliest tick that still parries. `roll` (0..100) is
+/// drawn only when everything else holds, so a fighter that never sees a
+/// parryable hit keeps its random sequence. The same choice for the duel's
+/// player bot and every tactical enemy; what each can see of the incoming
+/// hit is the controller's own perception.
 pub fn parry_swap(
     ticks_to_hit: Option<u16>,
+    before: Option<u16>,
     parry_ticks: u16,
     can_swap: bool,
     percent: u8,
     roll: impl FnOnce() -> u16,
 ) -> bool {
+    let inside = |ticks: Option<u16>| ticks.is_some_and(|ticks| ticks <= parry_ticks);
     can_swap
         && percent != 0
         && parry_ticks != 0
-        && ticks_to_hit.is_some_and(|ticks| ticks <= parry_ticks)
+        && inside(ticks_to_hit)
+        && !inside(before)
         && roll() % 100 < u16::from(percent)
 }
 
@@ -147,17 +153,19 @@ mod tests {
     fn a_parry_swap_needs_a_hit_inside_the_window_and_a_roll() {
         let yes = || 10;
         let no = || 90;
-        assert!(parry_swap(Some(3), 8, true, 50, yes));
-        assert!(parry_swap(Some(8), 8, true, 50, yes));
-        assert!(!parry_swap(Some(9), 8, true, 50, yes));
-        assert!(!parry_swap(None, 8, true, 50, yes));
-        assert!(!parry_swap(Some(3), 8, false, 50, yes));
-        assert!(!parry_swap(Some(3), 8, true, 0, yes));
-        assert!(!parry_swap(Some(3), 0, true, 50, yes));
-        assert!(!parry_swap(Some(3), 8, true, 50, no));
+        assert!(parry_swap(Some(3), None, 8, true, 50, yes));
+        assert!(parry_swap(Some(8), Some(9), 8, true, 50, yes));
+        assert!(!parry_swap(Some(9), None, 8, true, 50, yes));
+        assert!(!parry_swap(None, Some(9), 8, true, 50, yes));
+        assert!(!parry_swap(Some(3), None, 8, false, 50, yes));
+        assert!(!parry_swap(Some(3), None, 8, true, 0, yes));
+        assert!(!parry_swap(Some(3), None, 0, true, 50, yes));
+        assert!(!parry_swap(Some(3), None, 8, true, 50, no));
+        // One roll per hit: already inside the window at the last check.
+        assert!(!parry_swap(Some(3), Some(4), 8, true, 50, yes));
         // No draw unless everything else holds.
         let mut drawn = false;
-        assert!(!parry_swap(Some(20), 8, true, 50, || {
+        assert!(!parry_swap(Some(20), None, 8, true, 50, || {
             drawn = true;
             0
         }));
