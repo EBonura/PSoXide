@@ -17,6 +17,7 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+pub mod adpcm;
 pub mod cd;
 pub mod cop0;
 pub mod dma;
