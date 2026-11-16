@@ -159,10 +159,7 @@ impl Cd {
 
     /// Restore the CD-ROM IRQ enable saved by [`Self::dispatch_command`].
     pub fn restore_irq_output(&mut self, saved: u8) {
-        drain_response_fifo();
-        ack_irq(code::ACK_ALL);
-        restore_irq_enable(saved);
-        select_index(0);
+        finish_failed_polled_command(saved);
     }
 
     /// Nonblocking readiness probe for a sector reader that owns the INT1 ACK.
@@ -717,6 +714,8 @@ impl PlayPosition {
     }
 }
 
+// One copy of the prologue and of the epilogue below, not one inlined at every command path.
+#[inline(never)]
 fn begin_polled_command() -> u8 {
     let irq_enable = irq_enable();
     set_irq_enable(0);
@@ -781,10 +780,7 @@ fn try_command_until_complete_inner(command: u8, params: &[u8], spin_limit: u32)
     write_byte(reg::COMMAND_RESPONSE, command);
 
     let ok = wait_ack_then_complete(spin_limit);
-    drain_response_fifo();
-    ack_irq(code::ACK_ALL);
-    restore_irq_enable(irq_enable);
-    select_index(0);
+    finish_failed_polled_command(irq_enable);
     ok
 }
 
@@ -803,6 +799,9 @@ fn wait_ack_then_complete(spin_limit: u32) -> bool {
     true
 }
 
+/// What every polled command path ends with, failed or not: drain the response, acknowledge
+/// everything, give the controller's interrupt enable back.
+#[inline(never)]
 fn finish_failed_polled_command(irq_enable: u8) {
     drain_response_fifo();
     ack_irq(code::ACK_ALL);
