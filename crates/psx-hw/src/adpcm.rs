@@ -271,6 +271,7 @@ pub fn pack_block(header: u8, flags: u8, nib: &[u8; BLOCK_SAMPLES]) -> [u8; BLOC
 }
 
 #[cfg(test)]
+#[allow(clippy::needless_range_loop)] // the oracles are the games' own loops, verbatim
 mod tests {
     extern crate std;
     use super::*;
