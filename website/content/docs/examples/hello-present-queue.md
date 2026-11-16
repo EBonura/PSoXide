@@ -8,7 +8,7 @@ eyebrow = "SDK example · full source"
 
 ## What this program does
 
-Publish whole frames through psx-rt's VBlank-kicked present queue (the `present-queue` feature). Each frame is one chain: a recorded preamble (draw target and clear), the ordering table, a recorded HUD band, then GP0(1Fh). The CPU never kicks or flips: the VBlank handler shows the previous frame and kicks the next chain on the first edge that finds the one before it drawn. Everything a chain links is double buffered, and `wait_arena_free` keeps the CPU off the side a walk may still read.
+Publish whole frames through psx-rt's VBlank-kicked present queue. Each frame is one chain: a recorded preamble (draw target and clear), the ordering table, a recorded HUD band, then GP0(1Fh). The CPU never kicks or flips: the VBlank handler shows the previous frame and kicks the next chain on the first edge that finds the one before it drawn. Everything a chain links is double buffered, and `wait_arena_free` keeps the CPU off the side a walk may still read.
 
 ## Build and run
 

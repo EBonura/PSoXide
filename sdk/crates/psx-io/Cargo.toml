@@ -15,10 +15,6 @@ workspace = true
 
 [features]
 default = []
-# No effect: command recording and the direct-access guard (`gpu::start_recording_raw`,
-# `gpu::arm_direct_access_guard`) are part of every build. Kept so a manifest that still names it
-# resolves; it goes with the old present entry points.
-present-queue = []
 # Counters and wait-site records a stop-panel can print (see `diag`). Off in every
 # shipping build; every hook compiles to nothing without it.
 console-diag = []

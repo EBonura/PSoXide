@@ -236,7 +236,7 @@
     {
       "name": "hello-present-queue",
       "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-present-queue",
-      "shows": "psx-rt's VBlank-kicked present queue (`present-queue` feature): whole frames published as one chain each, preamble and HUD recorded with `psx_io::gpu::start_recording_raw`, kicked and flipped by the VBlank handler."
+      "shows": "psx-rt's VBlank-kicked present queue: whole frames published as one chain each, preamble and HUD recorded with `psx_io::gpu::start_recording_raw`, kicked and flipped by the VBlank handler."
     },
     {
       "name": "hello-fmv",

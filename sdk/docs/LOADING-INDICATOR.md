@@ -94,6 +94,5 @@ inside the TV's safe area (12 pixels from each edge in the shipped look).
 - Erase is built in: each draw first fills the box with `ground`. A game that
   wants the picture to show through does not use a plate; it clears the region
   itself and calls `invalidate()` so the next poll draws again.
-- The `Gp0` sink goes through `psx_io::gpu::write_command`, so with the
-  `present-queue` feature it goes into an open recording like any other
-  command. Poll from a blocking load, not from inside a recorded frame.
+- The `Gp0` sink goes through `psx_io::gpu::write_command`, so it goes into an
+  open recording like any other command. Poll from a blocking load, not from inside a recorded frame.
