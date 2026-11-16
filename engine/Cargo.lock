@@ -238,6 +238,7 @@ dependencies = [
  "psx-io",
  "psx-level",
  "psx-math",
+ "psx-pack",
  "psx-residency",
  "psx-telemetry",
  "psx-vram",
@@ -284,7 +285,9 @@ dependencies = [
  "psx-engine",
  "psx-gpu",
  "psx-gte",
+ "psx-hw",
  "psx-math",
+ "psx-pack",
 ]
 
 [[package]]
@@ -315,6 +318,7 @@ name = "psx-io"
 version = "0.1.0"
 dependencies = [
  "psx-hw",
+ "psx-math",
 ]
 
 [[package]]
@@ -322,6 +326,7 @@ name = "psx-level"
 version = "0.1.0"
 dependencies = [
  "psx-math",
+ "psx-pack",
 ]
 
 [[package]]
@@ -333,6 +338,7 @@ name = "psx-pack"
 version = "0.1.0"
 dependencies = [
  "psx-io",
+ "psx-math",
 ]
 
 [[package]]
@@ -352,6 +358,7 @@ version = "0.1.0"
 name = "psx-residency"
 version = "0.1.0"
 dependencies = [
+ "psx-pack",
  "psx-rt",
 ]
 
@@ -362,6 +369,7 @@ dependencies = [
  "psx-gpu",
  "psx-hw",
  "psx-io",
+ "psx-math",
  "psx-tick",
 ]
 
@@ -370,6 +378,7 @@ name = "psx-settings"
 version = "0.1.0"
 dependencies = [
  "psx-display",
+ "psx-math",
  "psx-pad",
 ]
 
@@ -419,6 +428,7 @@ version = "0.1.0"
 dependencies = [
  "psx-asset",
  "psx-gpu",
+ "psx-hw",
  "psx-math",
  "psx-vector",
 ]
@@ -428,6 +438,7 @@ name = "psx-vector-cook"
 version = "0.1.0"
 dependencies = [
  "psx-gpu",
+ "psx-hw",
  "psx-vector",
 ]
 

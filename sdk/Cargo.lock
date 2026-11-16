@@ -130,17 +130,22 @@ name = "psx-io"
 version = "0.1.0"
 dependencies = [
  "psx-hw",
+ "psx-math",
 ]
 
 [[package]]
 name = "psx-iso"
 version = "0.1.0"
+dependencies = [
+ "psx-pack",
+]
 
 [[package]]
 name = "psx-loading"
 version = "0.1.0"
 dependencies = [
  "psx-font",
+ "psx-hw",
  "psx-io",
 ]
 
@@ -154,6 +159,7 @@ version = "0.1.0"
 dependencies = [
  "psx-hw",
  "psx-io",
+ "psx-math",
 ]
 
 [[package]]
@@ -171,6 +177,7 @@ dependencies = [
  "lz4_flex",
  "psx-io",
  "psx-iso",
+ "psx-math",
 ]
 
 [[package]]
@@ -186,6 +193,7 @@ dependencies = [
 name = "psx-residency"
 version = "0.1.0"
 dependencies = [
+ "psx-pack",
  "psx-rt",
 ]
 
@@ -193,6 +201,7 @@ dependencies = [
 name = "psx-residency-sim"
 version = "0.1.0"
 dependencies = [
+ "psx-pack",
  "psx-residency",
 ]
 
@@ -204,6 +213,7 @@ dependencies = [
  "psx-gpu",
  "psx-hw",
  "psx-io",
+ "psx-math",
  "psx-tick",
 ]
 
@@ -215,6 +225,7 @@ version = "0.1.0"
 name = "psx-seq"
 version = "0.1.0"
 dependencies = [
+ "psx-math",
  "psx-sfx",
  "psx-spu",
 ]
@@ -224,6 +235,7 @@ name = "psx-settings"
 version = "0.1.0"
 dependencies = [
  "psx-display",
+ "psx-math",
  "psx-mc",
  "psx-pad",
 ]

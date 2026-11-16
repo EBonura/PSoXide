@@ -647,7 +647,9 @@ dependencies = [
  "psx-engine",
  "psx-gpu",
  "psx-gte",
+ "psx-hw",
  "psx-math",
+ "psx-pack",
 ]
 
 [[package]]
@@ -678,17 +680,22 @@ name = "psx-io"
 version = "0.1.0"
 dependencies = [
  "psx-hw",
+ "psx-math",
 ]
 
 [[package]]
 name = "psx-iso"
 version = "0.1.0"
+dependencies = [
+ "psx-pack",
+]
 
 [[package]]
 name = "psx-level"
 version = "0.1.0"
 dependencies = [
  "psx-math",
+ "psx-pack",
 ]
 
 [[package]]
@@ -702,6 +709,14 @@ dependencies = [
 [[package]]
 name = "psx-math"
 version = "0.1.0"
+
+[[package]]
+name = "psx-pack"
+version = "0.1.0"
+dependencies = [
+ "psx-io",
+ "psx-math",
+]
 
 [[package]]
 name = "psx-pad"
@@ -720,6 +735,7 @@ version = "0.1.0"
 name = "psx-residency"
 version = "0.1.0"
 dependencies = [
+ "psx-pack",
  "psx-rt",
 ]
 
@@ -730,6 +746,7 @@ dependencies = [
  "psx-gpu",
  "psx-hw",
  "psx-io",
+ "psx-math",
  "psx-tick",
 ]
 
@@ -737,6 +754,7 @@ dependencies = [
 name = "psx-seq"
 version = "0.1.0"
 dependencies = [
+ "psx-math",
  "psx-sfx",
  "psx-spu",
 ]
@@ -755,6 +773,7 @@ name = "psx-settings"
 version = "0.1.0"
 dependencies = [
  "psx-display",
+ "psx-math",
  "psx-pad",
 ]
 
@@ -831,6 +850,7 @@ dependencies = [
 name = "psxed-audio"
 version = "0.1.0"
 dependencies = [
+ "psx-hw",
  "psxed-format",
  "serde",
  "serde_json",
