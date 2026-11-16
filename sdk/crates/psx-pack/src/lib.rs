@@ -479,13 +479,19 @@ impl WordFnv32 {
         Self(state)
     }
 
-    /// The hash of `words` from the offset basis.
-    #[inline]
+    /// The hash of `words` from the offset basis. Always inlined with the kernel in it: a
+    /// one-shot caller with one call site (a checksum function) pays the kernel's own bytes and
+    /// no second function, as the loop it replaces did. A caller with many sites, or one that
+    /// hashes in pieces, uses [`update`](Self::update), whose kernel is shared.
+    #[inline(always)]
     #[must_use]
     pub fn of(words: &[u32]) -> u32 {
-        let mut hash = Self::new();
-        hash.update(words);
-        hash.finish()
+        if words.is_empty() {
+            return Self::OFFSET_BASIS;
+        }
+        let start = words.as_ptr();
+        // SAFETY: a slice is a readable, aligned, non-empty range of its own length.
+        unsafe { fold_word_rounds(Self::OFFSET_BASIS, start, start.add(words.len())) }
     }
 
     /// Fold one word into the hash, inline (for a caller that computes each word first).

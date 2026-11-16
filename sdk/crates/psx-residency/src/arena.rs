@@ -177,6 +177,7 @@ impl<'a> VeneerImport<'a> {
 
 /// Word checksum matching the existing HK module transport
 /// ([`psx_pack::WordFnv32`], the one kernel for it).
+#[inline(never)]
 pub fn checksum(words: &[u32]) -> u32 {
     psx_pack::WordFnv32::of(words)
 }
