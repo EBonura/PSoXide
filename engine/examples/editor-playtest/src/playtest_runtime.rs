@@ -2872,6 +2872,9 @@ impl Playtest {
         self.find_lock_target(range, self.ranged_ready.aiming())
     }
 
+    // Rare (a lock press or a target switch): keep it out of the gameplay
+    // update, which otherwise inlines it whole (1.6 KB on the PS1).
+    #[inline(never)]
     pub(super) fn find_lock_target(&self, range: i32, aiming: bool) -> Option<usize> {
         let player = self.motor.position();
         let view_yaw = self.camera.yaw().add(Angle::HALF);
