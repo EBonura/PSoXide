@@ -1431,3 +1431,221 @@ fn a_park_reads_the_sector_before_and_keeps_one_word() {
     assert_eq!(finished(&mut engine, read).outcome, Outcome::Done);
     buf.assert_sectors(500, 2);
 }
+
+#[test]
+fn the_setloc_location_is_the_library_conversion() {
+    let mut lba = 0u32;
+    while lba < 450_000 {
+        assert_eq!(
+            super::engine::location_for_test(lba),
+            psx_io::cd::lba_to_bcd_msf(psx_io::disc_base::shift_lba(lba)),
+            "lba {lba}"
+        );
+        lba += 37;
+    }
+    for lba in [
+        0,
+        1,
+        74,
+        75,
+        4499,
+        4500,
+        449_849,
+        449_850,
+        449_851,
+        9_000_000,
+        u32::MAX - 150,
+        u32::MAX,
+    ] {
+        assert_eq!(
+            super::engine::location_for_test(lba),
+            psx_io::cd::lba_to_bcd_msf(psx_io::disc_base::shift_lba(lba)),
+            "lba {lba}"
+        );
+    }
+}
+
+// ------------------------------------------------------------ single transfer
+
+fn single() -> SingleEngine<FakeDrive> {
+    let mut engine = SingleEngine::single(FakeDrive::new(), Config::DEFAULT);
+    engine.attach();
+    engine
+}
+
+fn run_single(engine: &mut SingleEngine<FakeDrive>) {
+    let mut delivered = 0;
+    while engine.hw_mut().raise() {
+        engine.on_interrupt();
+        delivered += 1;
+        assert!(delivered < 100_000, "interrupt storm");
+    }
+}
+
+#[test]
+fn a_single_engine_reads_one_request_and_refuses_a_second_while_it_runs() {
+    let mut engine = single();
+    let buf = Buf::new(3);
+    let ticket = engine.submit(request(100, 3, &buf)).expect("accepted");
+    let other = Buf::new(1);
+    assert_eq!(
+        engine.submit(request(500, 1, &other)),
+        Err(SubmitError::QueueFull)
+    );
+    assert_eq!(engine.stats().rejected, 1);
+    run_single(&mut engine);
+    let RequestState::Finished(done) = engine.state(ticket) else {
+        panic!("not finished");
+    };
+    assert_eq!((done.outcome, done.received), (Outcome::Done, 3));
+    buf.assert_sectors(100, 3);
+    buf.assert_untouched_from(3);
+    assert_eq!(
+        engine
+            .hw()
+            .log
+            .iter()
+            .map(|s| s.command)
+            .collect::<Vec<_>>(),
+        BRACKET
+    );
+    assert!(engine.is_idle());
+}
+
+#[test]
+fn a_single_engine_takes_the_next_request_once_the_drive_has_stopped() {
+    let mut engine = single();
+    let (a, b) = (Buf::new(2), Buf::new(2));
+    let first = engine.submit(request(10, 2, &a)).expect("accepted");
+    // The request is done when its last sector lands, before the drive has paused.
+    loop {
+        assert!(engine.hw_mut().raise());
+        engine.on_interrupt();
+        if matches!(engine.state(first), RequestState::Finished(_)) {
+            break;
+        }
+    }
+    assert!(!engine.is_idle());
+    assert_eq!(
+        engine.submit(request(40, 2, &b)),
+        Err(SubmitError::QueueFull)
+    );
+    run_single(&mut engine);
+    assert!(engine.is_idle());
+    let second = engine.submit(request(40, 2, &b)).expect("accepted");
+    run_single(&mut engine);
+    b.assert_sectors(40, 2);
+    // One result is remembered: the latest.
+    assert!(matches!(engine.state(second), RequestState::Finished(_)));
+    assert_eq!(engine.state(first), RequestState::Unknown);
+    assert_eq!(engine.submissions(), 2);
+}
+
+#[test]
+fn a_single_engine_refuses_requests_before_it_is_attached() {
+    let mut engine = SingleEngine::single(FakeDrive::new(), Config::DEFAULT);
+    let buf = Buf::new(1);
+    assert_eq!(
+        engine.submit(request(1, 1, &buf)),
+        Err(SubmitError::QueueFull)
+    );
+    assert_eq!(engine.submissions(), 0);
+    engine.attach();
+    assert!(engine.submit(request(1, 1, &buf)).is_ok());
+    assert_eq!(engine.submissions(), 1);
+}
+
+#[test]
+fn a_single_engine_cancels_at_the_next_sector_and_recovers() {
+    let mut engine = single();
+    let buf = Buf::new(50);
+    let ticket = engine.submit(request(0, 50, &buf)).expect("accepted");
+    let mut landed = 0;
+    while landed < 5 {
+        assert!(engine.hw_mut().raise());
+        engine.on_interrupt();
+        if let RequestState::Active { received } = engine.state(ticket) {
+            landed = received;
+        }
+    }
+    assert!(engine.cancel(ticket));
+    run_single(&mut engine);
+    let RequestState::Finished(done) = engine.state(ticket) else {
+        panic!("not finished");
+    };
+    assert_eq!(done.outcome, Outcome::Cancelled);
+    assert!(done.received >= 5 && done.received < 50);
+    assert!(engine.is_idle());
+    let next = Buf::new(2);
+    let again = engine.submit(request(7, 2, &next)).expect("accepted");
+    run_single(&mut engine);
+    assert!(matches!(
+        engine.state(again),
+        RequestState::Finished(Completion {
+            outcome: Outcome::Done,
+            ..
+        })
+    ));
+    next.assert_sectors(7, 2);
+}
+
+#[test]
+fn a_single_engine_parks_and_bounds_the_last_sector() {
+    let mut engine = single();
+    let park = engine.submit(Request::park(100)).expect("accepted");
+    run_single(&mut engine);
+    let RequestState::Finished(done) = engine.state(park) else {
+        panic!("not finished");
+    };
+    assert_eq!((done.outcome, done.received), (Outcome::Done, 1));
+    assert_eq!(engine.hw().popped, [99]);
+    let buf = Buf::new(3);
+    let bounded = request(100, 3, &buf).with_byte_len(2 * 2048 + 100);
+    let ticket = engine.submit(bounded).expect("accepted");
+    run_single(&mut engine);
+    assert!(matches!(
+        engine.state(ticket),
+        RequestState::Finished(Completion {
+            outcome: Outcome::Done,
+            received: 3,
+            ..
+        })
+    ));
+    buf.assert_sectors(100, 2);
+    for word in 0..25 {
+        assert_eq!(buf.word(2 * 512 + word), sector_word(102, word as u32));
+    }
+    assert_eq!(buf.word(2 * 512 + 25), CANARY);
+}
+
+#[test]
+fn a_single_engine_fails_a_drive_error_and_the_next_start_recovers() {
+    let mut engine = single();
+    engine.hw_mut().error_at.push(3);
+    let buf = Buf::new(8);
+    let ticket = engine.submit(request(0, 8, &buf)).expect("accepted");
+    run_single(&mut engine);
+    let RequestState::Finished(done) = engine.state(ticket) else {
+        panic!("not finished");
+    };
+    assert!(matches!(done.outcome, Outcome::Failed(_)));
+    engine.hw_mut().error_at.clear();
+    let again = engine.submit(request(20, 2, &buf)).expect("accepted");
+    run_single(&mut engine);
+    assert!(matches!(
+        engine.state(again),
+        RequestState::Finished(Completion {
+            outcome: Outcome::Done,
+            ..
+        })
+    ));
+    assert!(
+        engine
+            .hw()
+            .log
+            .iter()
+            .filter(|s| s.command == CMD_PAUSE)
+            .count()
+            >= 2
+    );
+}

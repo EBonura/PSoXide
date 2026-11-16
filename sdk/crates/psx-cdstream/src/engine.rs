@@ -228,7 +228,12 @@ struct Queued {
 /// On the console the one instance lives in the crate's global and is reached
 /// through the free functions at the crate root; on the host a scripted drive
 /// stands in.
-pub struct Engine<H: CdHw> {
+pub struct Engine<
+    H: CdHw,
+    const SLOTS: usize = { QUEUE_DEPTH + 1 },
+    const RESULTS: usize = RECENT_RESULTS,
+    const LEASE: bool = true,
+> {
     hw: H,
     config: Config,
     owner: Owner,
@@ -248,18 +253,97 @@ pub struct Engine<H: CdHw> {
     active: Option<Active>,
     /// One spare slot beyond [`QUEUE_DEPTH`]: a failing request that resumes
     /// goes back in the queue even when it is full.
-    queue: [Option<Queued>; QUEUE_DEPTH + 1],
-    results: [Option<Completion>; RECENT_RESULTS],
+    queue: [Option<Queued>; SLOTS],
+    results: [Option<Completion>; RESULTS],
     results_written: u32,
     next_ticket: u32,
     next_seq: u32,
     stats: StreamStats,
 }
 
+/// The engine for a program that reads one request at a time: the transfer state machine
+/// and the interrupt handler, with nothing else compiled in.
+///
+/// It is [`Engine`] with `SLOTS` 0, `RESULTS` 1 and `LEASE` off, so the compiler removes by
+/// construction what such a program cannot use (no cargo feature selects it):
+///
+/// - no queue, priorities, chaining or resumes: [`Engine::submit`] starts the request now
+///   or returns [`SubmitError::QueueFull`], whether a transfer is running, the drive is
+///   still stopping after the last one (poll [`Engine::is_idle`]), or the transport is
+///   not attached. [`Request::with_priority`] and [`Request::with_resumes`] have no effect;
+/// - no audio lease: the lease calls do not compile for it. A program that plays music
+///   through polled commands stops the read ([`Engine::cancel_all`], wait for
+///   [`Engine::is_idle`]) and closes the source itself ([`Engine::detach`]);
+/// - one remembered result: [`Engine::state`] knows the latest finished request only.
+///
+/// Everything else behaves as in [`Engine`]: the seek-first bracket, one PIO sector per
+/// interrupt, cancel at the next sector, [`Request::park`], the exact byte bound, the
+/// watchdog, the CD source open only while busy.
+pub type SingleEngine<H> = Engine<H, 0, 1, false>;
+
+/// The Setloc parameters (BCD minute, second, frame) of program-relative sector `lba`, shifted by
+/// the loader's disc base. The same as `psx_io::cd::lba_to_bcd_msf` of the shifted sector, with
+/// the divisions left to the CPU's divider: this runs once per transfer, and the compiler's
+/// multiply-and-shift expansion of five constant divisions is four times the code.
+#[inline(never)]
+fn location(lba: u32) -> [u8; 3] {
+    let ten = core::hint::black_box(10);
+    let bcd = |value: u32| (((value / ten) << 4) | (value % ten)) as u8;
+    let absolute = psx_io::disc_base::shift_lba(lba).saturating_add(150);
+    let frames = core::hint::black_box(75);
+    let seconds = absolute / frames;
+    let frame = absolute - seconds * frames;
+    let minute_length = core::hint::black_box(60);
+    let minutes = seconds / minute_length;
+    let second = seconds - minutes * minute_length;
+    [bcd(minutes.min(99)), bcd(second), bcd(frame)]
+}
+
+#[cfg(test)]
+pub(crate) fn location_for_test(lba: u32) -> [u8; 3] {
+    location(lba)
+}
+
 impl<H: CdHw> Engine<H> {
-    /// An engine in the [`Owner::Boot`] state: nothing runs until
-    /// [`attach`](Self::attach).
+    /// The full engine in the [`Owner::Boot`] state: nothing runs until
+    /// [`attach`](Self::attach). It queues [`QUEUE_DEPTH`] requests behind the active one,
+    /// chains contiguous ones, resumes after drive errors and arbitrates audio leases.
     pub const fn new(hw: H, config: Config) -> Self {
+        Self::with_hw(hw, config)
+    }
+}
+
+impl<H: CdHw> SingleEngine<H> {
+    /// The single-transfer engine in the [`Owner::Boot`] state: one request at a time, no
+    /// queue, no priorities, no chaining, no resumes, no audio lease. It is the transfer
+    /// state machine and nothing else, so a program that reads one chunk at a time links no
+    /// code for the rest. See [`SingleEngine`].
+    pub const fn single(hw: H, config: Config) -> Self {
+        Self::with_hw(hw, config)
+    }
+}
+
+impl<H: CdHw, const SLOTS: usize, const RESULTS: usize, const LEASE: bool>
+    Engine<H, SLOTS, RESULTS, LEASE>
+{
+    /// Requests that can wait behind the active one: the slots, less the spare a resumed
+    /// request needs when the queue is full.
+    const DEPTH: usize = if SLOTS == 0 { 0 } else { SLOTS - 1 };
+
+    /// Rejected at compile time unless the configuration makes sense.
+    const VALID: () = {
+        assert!(
+            SLOTS != 1,
+            "a queue has no slot beyond its spare: use 0 or at least 2"
+        );
+        assert!(
+            RESULTS >= 1,
+            "an engine remembers at least the latest result"
+        );
+    };
+
+    const fn with_hw(hw: H, config: Config) -> Self {
+        let () = Self::VALID;
         Engine {
             hw,
             config,
@@ -273,8 +357,8 @@ impl<H: CdHw> Engine<H> {
             stamp: 0,
             location: [0; 3],
             active: None,
-            queue: [None; QUEUE_DEPTH + 1],
-            results: [None; RECENT_RESULTS],
+            queue: [None; SLOTS],
+            results: [None; RESULTS],
             results_written: 0,
             next_ticket: 1,
             next_seq: 1,
@@ -320,6 +404,31 @@ impl<H: CdHw> Engine<H> {
         self.phase
     }
 
+    /// Write the counters, with the current phase and error filled in, to `out`, one volatile
+    /// store per field.
+    ///
+    /// # Safety
+    ///
+    /// `out` must be valid for writes of a [`StreamStats`].
+    pub unsafe fn publish_to(&self, out: *mut StreamStats) {
+        let s = &self.stats;
+        // SAFETY: the caller vouches for `out`; the stores go through the field addresses.
+        unsafe {
+            (&raw mut (*out).irq_count).write_volatile(s.irq_count);
+            (&raw mut (*out).sectors).write_volatile(s.sectors);
+            (&raw mut (*out).discarded_sectors).write_volatile(s.discarded_sectors);
+            (&raw mut (*out).max_irq_ticks).write_volatile(s.max_irq_ticks);
+            (&raw mut (*out).phase).write_volatile(self.phase as u32);
+            (&raw mut (*out).error).write_volatile(self.error);
+            (&raw mut (*out).requests_done).write_volatile(s.requests_done);
+            (&raw mut (*out).requests_cancelled).write_volatile(s.requests_cancelled);
+            (&raw mut (*out).requests_failed).write_volatile(s.requests_failed);
+            (&raw mut (*out).chained).write_volatile(s.chained);
+            (&raw mut (*out).resumed).write_volatile(s.resumed);
+            (&raw mut (*out).rejected).write_volatile(s.rejected);
+        }
+    }
+
     /// A copy of the counters, with the current phase and error filled in.
     pub fn stats(&self) -> StreamStats {
         StreamStats {
@@ -334,6 +443,14 @@ impl<H: CdHw> Engine<H> {
     /// next stretch of work.
     pub fn reset_max_irq_ticks(&mut self) {
         self.stats.max_irq_ticks = 0;
+    }
+
+    /// Requests accepted so far (a refused one is not counted), parks included, wrapping at
+    /// 2^32: the transfers that may have moved the drive's head. A head parked next to a
+    /// sector (see [`Request::park`]) is still there while this equals its value at the
+    /// park's submission.
+    pub fn submissions(&self) -> u32 {
+        self.next_ticket.wrapping_sub(1)
     }
 
     /// Requests waiting behind the active one.
@@ -360,8 +477,7 @@ impl<H: CdHw> Engine<H> {
         }
         self.owner = Owner::Data;
         self.recover_next = false;
-        self.hw.discard_response();
-        self.hw.acknowledge(flag::ACK_ALL);
+        self.hw.finish_response(flag::ACK_ALL);
         self.settle();
         self.sync_source();
     }
@@ -406,6 +522,7 @@ impl<H: CdHw> Engine<H> {
     /// Before [`attach`](Self::attach) the program already holds the drive
     /// and this returns `Granted` without changing anything.
     pub fn request_audio_lease(&mut self) -> LeaseState {
+        const { assert!(LEASE, "this engine was built without audio leases") };
         match self.owner {
             Owner::Boot => return LeaseState::Granted,
             Owner::Audio => return LeaseState::Granted,
@@ -436,6 +553,7 @@ impl<H: CdHw> Engine<H> {
     /// must displace a read; this is for audio that only wants the drive
     /// while nobody else is using it.
     pub fn try_audio_lease(&mut self) -> bool {
+        const { assert!(LEASE, "this engine was built without audio leases") };
         match self.owner {
             Owner::Boot | Owner::Audio => true,
             Owner::Data => {
@@ -460,6 +578,7 @@ impl<H: CdHw> Engine<H> {
     /// A lease that is already granted is ended with
     /// [`release_audio_lease`](Self::release_audio_lease).
     pub fn withdraw_audio_lease(&mut self) -> bool {
+        const { assert!(LEASE, "this engine was built without audio leases") };
         if self.owner == Owner::Data && self.lease_pending {
             self.lease_pending = false;
             return true;
@@ -475,14 +594,14 @@ impl<H: CdHw> Engine<H> {
     /// started in that window failed on a console). The next transfer starts
     /// with a recovery Pause if [`Config::pause_after_audio`] is set.
     pub fn release_audio_lease(&mut self) -> bool {
+        const { assert!(LEASE, "this engine was built without audio leases") };
         if self.withdraw_audio_lease() {
             return true;
         }
         if self.owner != Owner::Audio {
             return false;
         }
-        self.hw.discard_response();
-        self.hw.acknowledge(flag::ACK_ALL);
+        self.hw.finish_response(flag::ACK_ALL);
         self.owner = Owner::Data;
         self.recover_next = self.config.pause_after_audio;
         self.settle();
@@ -513,7 +632,10 @@ impl<H: CdHw> Engine<H> {
         if request.sectors == 0 {
             return Err(SubmitError::Empty);
         }
-        if self.queued_count() >= QUEUE_DEPTH {
+        if SLOTS == 0 {
+            return self.submit_unqueued(request);
+        }
+        if self.queued_count() >= Self::DEPTH {
             self.stats.rejected = self.stats.rejected.wrapping_add(1);
             return Err(SubmitError::QueueFull);
         }
@@ -531,6 +653,26 @@ impl<H: CdHw> Engine<H> {
         // A free drive picks the request up now; a busy one keeps it queued
         // and `settle` runs when it frees up.
         self.settle();
+        self.sync_source();
+        Ok(ticket)
+    }
+
+    /// [`submit`](Self::submit) for an engine without a queue: the request starts now or is
+    /// refused with [`SubmitError::QueueFull`], because a transfer is running, the drive is
+    /// still stopping after the last one, or the transport is not attached.
+    fn submit_unqueued(&mut self, request: Request) -> Result<Ticket, SubmitError> {
+        if self.owner != Owner::Data || !self.is_ready_to_start() {
+            self.stats.rejected = self.stats.rejected.wrapping_add(1);
+            return Err(SubmitError::QueueFull);
+        }
+        let ticket = self.new_ticket();
+        self.begin(Queued {
+            ticket,
+            request,
+            base: 0,
+            seq: 0,
+            resumes_left: 0,
+        });
         self.sync_source();
         Ok(ticket)
     }
@@ -649,13 +791,11 @@ impl<H: CdHw> Engine<H> {
         if code == flag::DATA_READY {
             match self.take_sector() {
                 Ok(()) => {
-                    self.hw.discard_response();
-                    self.hw.acknowledge(code);
+                    self.hw.finish_response(code);
                     self.after_sector();
                 }
                 Err(failure) => {
-                    self.hw.discard_response();
-                    self.hw.acknowledge(flag::ACK_ALL);
+                    self.hw.finish_response(flag::ACK_ALL);
                     self.fail(failure);
                 }
             }
@@ -663,13 +803,11 @@ impl<H: CdHw> Engine<H> {
         }
         if code == flag::ERROR {
             let (status, detail) = self.hw.error_response();
-            self.hw.discard_response();
-            self.hw.acknowledge(flag::ACK_ALL);
+            self.hw.finish_response(flag::ACK_ALL);
             self.fail(Failure::drive(status, self.phase as u32, detail));
             return;
         }
-        self.hw.discard_response();
-        self.hw.acknowledge(code);
+        self.hw.finish_response(code);
         match (self.phase, code) {
             (Phase::SettingTarget, flag::ACKNOWLEDGE) => {
                 self.command(CMD_SEEKL, &[], Phase::StartingSeek)
@@ -789,6 +927,7 @@ impl<H: CdHw> Engine<H> {
     }
 
     /// Send a command; its acknowledge and completion arrive as interrupts.
+    #[inline(never)]
     fn command(&mut self, command: u8, params: &[u8], next: Phase) {
         self.trace(6, command);
         if !self.hw.issue(command, params) {
@@ -805,6 +944,7 @@ impl<H: CdHw> Engine<H> {
 
     /// End the transfer in the failed state. The active request resumes from
     /// where it stopped if it has resumes left, else it ends `Failed`.
+    #[inline(never)]
     fn fail(&mut self, failure: Failure) {
         self.trace(4, (failure.0 >> 24) as u8);
         self.trace(5, (failure.0 >> 8) as u8);
@@ -844,12 +984,20 @@ impl<H: CdHw> Engine<H> {
     /// The drive has stopped (or is in an unknown state after a failure) and
     /// no request holds it: grant a waiting lease, start the next request, or
     /// stay idle.
-    #[inline(never)]
+    #[inline(always)]
     fn settle(&mut self) {
+        // An engine with no queue and no lease has nothing to hand the drive to.
+        if SLOTS > 0 || LEASE {
+            self.settle_drive();
+        }
+    }
+
+    #[inline(never)]
+    fn settle_drive(&mut self) {
         if self.owner != Owner::Data || !self.is_ready_to_start() {
             return;
         }
-        if self.lease_pending {
+        if LEASE && self.lease_pending {
             self.grant_lease();
             return;
         }
@@ -877,8 +1025,7 @@ impl<H: CdHw> Engine<H> {
             cancelled: false,
             resumes_left: queued.resumes_left,
         });
-        self.location =
-            psx_io::cd::lba_to_bcd_msf(psx_io::disc_base::shift_lba(queued.request.lba));
+        self.location = location(queued.request.lba);
         self.trace(3, 0);
         if recover {
             // The drive may still be reading or playing: stop it, then seek.
@@ -973,7 +1120,7 @@ impl<H: CdHw> Engine<H> {
     }
 
     fn record(&mut self, completion: Completion) {
-        let slot = self.results_written as usize % RECENT_RESULTS;
+        let slot = self.results_written as usize % RESULTS;
         self.results[slot] = Some(completion);
         self.results_written = self.results_written.wrapping_add(1);
     }

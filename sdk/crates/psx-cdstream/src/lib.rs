@@ -74,6 +74,30 @@
 //! }
 //! ```
 //!
+//! # One transfer at a time
+//!
+//! A program that reads one chunk at a time (a loader that decodes each chunk as its sectors land,
+//! a weapon stream that must not wait for the frame loop) does not need the queue, the priorities,
+//! the chaining, the resumes or the audio lease, and a program cannot drop code it does not use. So
+//! the engine is generic over what it carries ([`Engine`]'s `SLOTS`, `RESULTS` and `LEASE`
+//! parameters, resolved at compile time; no cargo feature selects it) and [`SingleEngine`] is the
+//! configuration with none of them: the transfer state machine and the interrupt handler, and the
+//! compiler removes the rest. Its console front is the [`single`] module, with the same calls as
+//! the crate root (`install`, `submit`, `state`, `cancel`, `stop_and_wait`, ...) and one
+//! difference: [`single::submit`] starts the request now or returns [`SubmitError::QueueFull`].
+//! Use [`Request::park`] to leave the head next to the next read, [`Request::with_byte_len`] for an
+//! exact last sector, [`Config::irq_mask_policy`] with [`IrqMaskPolicy::OnlyWhileBusy`] when polled
+//! reads share the controller, and [`sectors_landed`] for a progress read that is one volatile
+//! load. A program that plays music through polled commands stops the read
+//! ([`single::stop_and_wait`]), gives the controller back ([`single::uninstall`]) and installs
+//! again afterwards: with one request at a time there is no lease to arbitrate.
+//!
+//! The handler (either engine) runs on psx-rt's dispatcher stack, [`HANDLER_STACK_BYTES`] bytes of
+//! which the saved context takes 112: 400 for the handler, whose deepest path in the
+//! single-transfer engine is measured by `stack-guard` in `hello-cdchunk` (see the crate's
+//! `ADOPT` notes in the repository). The count of transfers a program started
+//! ([`submissions`]) and the counters in [`PSX_CD_STATS`] are what a gate reads.
+//!
 //! # Next to the polled reader
 //!
 //! A program that loads with `SectorReader` (maps, tables, boot assets) and only
