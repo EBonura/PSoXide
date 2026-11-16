@@ -24,7 +24,7 @@
 //! the engine opens or closes the source, not around every call.
 
 use crate::engine::{
-    Config, Engine, LeanEngine, LeaseState, Owner, Phase, SingleEngine, StreamStats,
+    Config, CountedEngine, Engine, LeanEngine, LeaseState, Owner, Phase, SingleEngine, StreamStats,
 };
 use crate::hw::CdHw;
 use crate::request::{Request, RequestState, SubmitError, Ticket};
@@ -51,14 +51,15 @@ pub const HANDLER_STACK_BYTES: usize = psx_rt::dispatch::STACK_BYTES;
 
 // -------------------------------------------------------------------- drive
 
-/// The CD-ROM controller, through the SDK's register steps. `SINGLE` and `LEAN` pick which of
-/// the three transports its interrupt handler belongs to: the full [`Engine`], the
-/// [`SingleEngine`] of the [`single`] module, or the [`LeanEngine`] of the [`lean`] module.
-pub struct Mmio<const SINGLE: bool = false, const LEAN: bool = false> {
+/// The CD-ROM controller, through the SDK's register steps. `SINGLE`, `LEAN` and `COUNT` pick
+/// which of the four transports its interrupt handler belongs to: the full [`Engine`], the
+/// [`SingleEngine`] of the [`single`] module, the [`LeanEngine`] of the [`lean`] module, or the
+/// [`CountedEngine`] of the [`counted`] module (`LEAN` and `COUNT` both on).
+pub struct Mmio<const SINGLE: bool = false, const LEAN: bool = false, const COUNT: bool = false> {
     time_handler: bool,
 }
 
-impl<const SINGLE: bool, const LEAN: bool> Mmio<SINGLE, LEAN> {
+impl<const SINGLE: bool, const LEAN: bool, const COUNT: bool> Mmio<SINGLE, LEAN, COUNT> {
     const fn new() -> Self {
         Mmio {
             time_handler: false,
@@ -84,7 +85,7 @@ fn token() -> Cd {
     unsafe { Cd::steal() }
 }
 
-impl<const SINGLE: bool, const LEAN: bool> CdHw for Mmio<SINGLE, LEAN> {
+impl<const SINGLE: bool, const LEAN: bool, const COUNT: bool> CdHw for Mmio<SINGLE, LEAN, COUNT> {
     const TRACE: bool = cfg!(feature = "trace");
 
     fn issue(&mut self, command: u8, params: &[u8]) -> bool {
@@ -183,7 +184,9 @@ impl<const SINGLE: bool, const LEAN: bool> CdHw for Mmio<SINGLE, LEAN> {
         // of an exception taken again for ever. The registration comes before the
         // mask bit and goes after it, so the source is never open without it.
         if enabled {
-            let handler = if LEAN {
+            let handler = if LEAN && COUNT {
+                on_counted_interrupt
+            } else if LEAN {
                 on_lean_interrupt
             } else if SINGLE {
                 on_single_interrupt
@@ -238,6 +241,7 @@ unsafe impl<T> Sync for Global<T> {}
 type Full = Engine<Mmio>;
 type Single = SingleEngine<Mmio<true>>;
 type Lean = LeanEngine<Mmio<true, true>>;
+type Counted = CountedEngine<Mmio<true, true, true>>;
 
 static ENGINE: Global<Full> = Global(UnsafeCell::new(Engine::new(Mmio::new(), Config::DEFAULT)));
 static SINGLE: Global<Single> = Global(UnsafeCell::new(SingleEngine::single(
@@ -246,6 +250,11 @@ static SINGLE: Global<Single> = Global(UnsafeCell::new(SingleEngine::single(
 )));
 
 static LEAN: Global<Lean> = Global(UnsafeCell::new(LeanEngine::lean(
+    Mmio::new(),
+    Config::DEFAULT,
+)));
+
+static COUNTED: Global<Counted> = Global(UnsafeCell::new(CountedEngine::counted(
     Mmio::new(),
     Config::DEFAULT,
 )));
@@ -328,6 +337,7 @@ macro_rules! transport {
 transport!(Full, ENGINE, true, true);
 transport!(Single, SINGLE, true, false);
 transport!(Lean, LEAN, false, false);
+transport!(Counted, COUNTED, false, false);
 
 /// The controller token while the transport holds it.
 struct TokenSlot(UnsafeCell<Option<Cd>>);
@@ -458,6 +468,11 @@ fn on_single_interrupt() {
 /// The same for the lean engine.
 fn on_lean_interrupt() {
     handle::<Lean>();
+}
+
+/// The same for the lean engine with the sector counter.
+fn on_counted_interrupt() {
+    handle::<Counted>();
 }
 
 #[inline(always)]
@@ -891,90 +906,141 @@ pub mod single {
 
 // ------------------------------------------------------------ lean transfer
 
+/// The calls shared by the [`lean`] and [`counted`] modules: the same fronts on two engines
+/// that differ only in one counter.
+macro_rules! lean_front {
+    ($engine:ty) => {
+        use super::{install_in, stop_in, uninstall_in, with, Transport};
+        use psx_io::periph::Cd;
+        use $crate::engine::{Config, Status};
+        use $crate::request::{Request, SubmitError};
+
+        #[inline(always)]
+        fn with_engine<R>(f: impl FnOnce(&mut $engine) -> R) -> R {
+            with::<$engine, R>(f)
+        }
+
+        /// Take over the controller; see [`install`](fn@crate::install).
+        ///
+        /// # Errors
+        ///
+        /// The token comes back when the transport is already installed.
+        pub fn install(cd: Cd, config: Config) -> Result<(), Cd> {
+            install_in::<$engine>(cd, config)
+        }
+
+        /// Give the controller back to polled code; see [`uninstall`](fn@crate::uninstall).
+        #[must_use]
+        pub fn uninstall() -> Option<Cd> {
+            uninstall_in::<$engine>()
+        }
+
+        /// Install if not installed, taking the token itself; see
+        /// [`ensure_installed`](fn@crate::ensure_installed).
+        #[must_use]
+        pub fn ensure_installed(config: Config) -> bool {
+            super::ensure_in::<$engine>(config)
+        }
+
+        /// Cancel the read and wait for the drive to stop; see
+        /// [`stop_and_wait`](fn@crate::stop_and_wait).
+        #[must_use]
+        pub fn stop_and_wait(max_vblanks: u32) -> bool {
+            stop_in::<$engine>(max_vblanks)
+        }
+
+        /// Start a read now. `request` is read as for [`single::submit`](super::single::submit):
+        /// [`Request::with_byte_len`] bounds the last sector, [`Request::park`] is an ordinary
+        /// request, priorities and resumes have no effect.
+        ///
+        /// # Errors
+        ///
+        /// [`SubmitError::QueueFull`] while a transfer is running or the drive is still stopping,
+        /// and before [`install`]; the other variants as for any request.
+        pub fn submit(request: Request) -> Result<(), SubmitError> {
+            with_engine(|engine| engine.submit(request).map(drop))
+        }
+
+        /// Cancel the running read, if any; it stops at the next sector and the drive pauses.
+        pub fn cancel() {
+            with_engine(<$engine as Transport>::cancel_all);
+        }
+
+        /// Where the transfer is; see [`Engine::status`](crate::Engine::status). Also fails a
+        /// transfer that has made no progress for [`Config::timeout_vblanks`], so call it once per
+        /// frame while a read is in flight.
+        #[must_use]
+        pub fn status() -> Status {
+            with_engine(|engine| engine.status())
+        }
+
+        /// Whether the drive is stopped and no read holds it.
+        #[must_use]
+        pub fn is_idle() -> bool {
+            with_engine(|engine| engine.is_idle())
+        }
+
+        /// Requests accepted so far; see [`submissions`](fn@crate::submissions).
+        #[must_use]
+        pub fn submissions() -> u32 {
+            with_engine(|engine| engine.submissions())
+        }
+    };
+}
+
 /// The smallest transport, for a program that reads one request at a time and wants neither
 /// counters nor tickets ([`LeanEngine`]): a Counter-Strike-style streamer that starts a read,
 /// asks once a frame whether it is done, and cancels or waits for the drive before polled reads.
 /// Everything [`single`] does not need is gone as well: no `PSX_CD_STATS`, no handler timing,
-/// no ticket records. A program uses this module, [`single`] or the crate root, not two of
-/// them: each registers for the CD source with psx-rt's dispatcher and holds its own engine.
+/// no ticket records. A program uses this module, [`counted`], [`single`] or the crate root, not
+/// two of them: each registers for the CD source with psx-rt's dispatcher and holds its own engine.
 ///
 /// [`lean::install`] and [`lean::ensure_installed`] work as at the root. [`lean::submit`] starts the request or
 /// refuses it with [`SubmitError::QueueFull`] while a transfer is running or the drive is still
 /// stopping; [`lean::status`] says how it is going, and is `Busy` until the drive has stopped, so
 /// the polled reader may follow the first `Done` or `Failed`. [`lean::stop_and_wait`] cancels and waits.
 pub mod lean {
-    use super::{install_in, stop_in, uninstall_in, with, Lean, Transport};
-    use crate::engine::{Config, Status};
-    use crate::request::{Request, SubmitError};
-    use psx_io::periph::Cd;
+    lean_front!(super::Lean);
+}
 
-    #[inline(always)]
-    fn with_engine<R>(f: impl FnOnce(&mut Lean) -> R) -> R {
-        with::<Lean, R>(f)
-    }
+/// [`lean`] plus the one counter a program that decodes a request while it runs asks for
+/// ([`CountedEngine`]): the sectors the interrupt handler has stored, [`counted::sectors_landed`].
+/// The handler adds one load, add and store per stored sector; nothing else is counted,
+/// published or timed, there are no tickets and no `PSX_CD_STATS`. A program that does not read
+/// the count uses [`lean`], which links none of it.
+///
+/// Everything else is the [`lean`] front with the same names and meaning: [`counted::install`],
+/// [`counted::ensure_installed`], [`counted::uninstall`], [`counted::stop_and_wait`],
+/// [`counted::submit`] (parks included), [`counted::cancel`], [`counted::status`] (once per frame,
+/// with the watchdog inside), [`counted::is_idle`], [`counted::submissions`] and
+/// [`counted::last_error`]. A program uses this module, [`lean`], [`single`] or the crate root,
+/// not two of them.
+pub mod counted {
+    use super::Counted;
+    lean_front!(Counted);
 
-    /// Take over the controller; see [`install`](fn@crate::install).
-    ///
-    /// # Errors
-    ///
-    /// The token comes back when the transport is already installed.
-    pub fn install(cd: Cd, config: Config) -> Result<(), Cd> {
-        install_in::<Lean>(cd, config)
-    }
-
-    /// Give the controller back to polled code; see [`uninstall`](fn@crate::uninstall).
+    /// The code of the latest failure ([`Failure::code`](crate::Failure::code)): 0 when nothing
+    /// has failed and after a request started, so a [`Status::Failed`] with 0 is a cancel
+    /// (`0x05..` is a drive error, `0xff..` the watchdog; see
+    /// [`FailureKind`](crate::FailureKind)). One volatile load, no masking: it is as fresh as
+    /// the last interrupt.
     #[must_use]
-    pub fn uninstall() -> Option<Cd> {
-        uninstall_in::<Lean>()
+    pub fn last_error() -> u32 {
+        // SAFETY: the global is a live static; the load is one aligned word that the handler
+        // stores whole.
+        unsafe { Counted::error_code(Counted::global().0.get()) }
     }
 
-    /// Install if not installed, taking the token itself; see
-    /// [`ensure_installed`](fn@crate::ensure_installed).
+    /// Sectors the handler has stored at a destination since the transport started, wrapping at
+    /// 2^32: one volatile load of one word of the engine, no masking, no lookup, no watchdog. It
+    /// is as fresh as the last interrupt. Take it before [`submit`] and subtract
+    /// (`sectors_landed().wrapping_sub(mark)`): that is how many sectors the request has stored
+    /// so far, valid with one request at a time, which this transport always is. [`status`]
+    /// says how the request ended.
     #[must_use]
-    pub fn ensure_installed(config: Config) -> bool {
-        super::ensure_in::<Lean>(config)
-    }
-
-    /// Cancel the read and wait for the drive to stop; see
-    /// [`stop_and_wait`](fn@crate::stop_and_wait).
-    #[must_use]
-    pub fn stop_and_wait(max_vblanks: u32) -> bool {
-        stop_in::<Lean>(max_vblanks)
-    }
-
-    /// Start a read now. `request` is read as for [`single::submit`](super::single::submit):
-    /// [`Request::with_byte_len`] bounds the last sector, priorities and resumes have no effect.
-    ///
-    /// # Errors
-    ///
-    /// [`SubmitError::QueueFull`] while a transfer is running or the drive is still stopping,
-    /// and before [`install`]; the other variants as for any request.
-    pub fn submit(request: Request) -> Result<(), SubmitError> {
-        with_engine(|engine| engine.submit(request).map(drop))
-    }
-
-    /// Cancel the running read, if any; it stops at the next sector and the drive pauses.
-    pub fn cancel() {
-        with_engine(<Lean as Transport>::cancel_all);
-    }
-
-    /// Where the transfer is; see [`Engine::status`](crate::Engine::status). Also fails a
-    /// transfer that has made no progress for [`Config::timeout_vblanks`], so call it once per
-    /// frame while a read is in flight.
-    #[must_use]
-    pub fn status() -> Status {
-        with_engine(|engine| engine.status())
-    }
-
-    /// Whether the drive is stopped and no read holds it.
-    #[must_use]
-    pub fn is_idle() -> bool {
-        with_engine(|engine| engine.is_idle())
-    }
-
-    /// Requests accepted so far; see [`submissions`](fn@crate::submissions).
-    #[must_use]
-    pub fn submissions() -> u32 {
-        with_engine(|engine| engine.submissions())
+    pub fn sectors_landed() -> u32 {
+        // SAFETY: the global is a live static; the load is one aligned word that the handler
+        // stores whole.
+        unsafe { Counted::counted_sectors(Counted::global().0.get()) }
     }
 }

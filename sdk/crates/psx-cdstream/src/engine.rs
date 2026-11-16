@@ -253,6 +253,7 @@ pub struct Engine<
     const RESULTS: usize = RECENT_RESULTS,
     const LEASE: bool = true,
     const STATS: bool = true,
+    const COUNT: bool = false,
 > {
     hw: H,
     config: Config,
@@ -318,6 +319,17 @@ pub type SingleEngine<H> = Engine<H, 0, 1, false>;
 /// Its console front is the [`lean`](crate::lean) module.
 pub type LeanEngine<H> = Engine<H, 0, 0, false, false>;
 
+/// [`LeanEngine`] plus one counter: the sectors the handler has stored at a destination. It is
+/// [`Engine`] with `SLOTS` 0, `RESULTS` 0, `LEASE` off, `STATS` off and `COUNT` on, so the
+/// interrupt handler does one load, add and store per stored sector and nothing else is
+/// counted, published or timed. A program that does not want the counter uses [`LeanEngine`],
+/// which carries none of that code.
+///
+/// The count is for a program that decodes a request chunk by chunk while its sectors land:
+/// [`Engine::counted_sectors`] reads it with one volatile load, no masking and no lookup, from
+/// the foreground at any time. Its console front is the [`counted`](crate::counted) module.
+pub type CountedEngine<H> = Engine<H, 0, 0, false, false, true>;
+
 /// The Setloc parameters (BCD minute, second, frame) of program-relative sector `lba`, shifted by
 /// the loader's disc base. The same as `psx_io::cd::lba_to_bcd_msf` of the shifted sector, with
 /// the divisions left to the CPU's divider: this runs once per transfer, and the compiler's
@@ -375,8 +387,23 @@ impl<H: CdHw> LeanEngine<H> {
     }
 }
 
-impl<H: CdHw, const SLOTS: usize, const RESULTS: usize, const LEASE: bool, const STATS: bool>
-    Engine<H, SLOTS, RESULTS, LEASE, STATS>
+impl<H: CdHw> CountedEngine<H> {
+    /// The lean engine with the sector counter, in the [`Owner::Boot`] state. See
+    /// [`CountedEngine`].
+    #[must_use]
+    pub const fn counted(hw: H, config: Config) -> Self {
+        Self::with_hw(hw, config)
+    }
+}
+
+impl<
+        H: CdHw,
+        const SLOTS: usize,
+        const RESULTS: usize,
+        const LEASE: bool,
+        const STATS: bool,
+        const COUNT: bool,
+    > Engine<H, SLOTS, RESULTS, LEASE, STATS, COUNT>
 {
     /// Requests that can wait behind the active one: the slots, less the spare a resumed
     /// request needs when the queue is full.
@@ -479,6 +506,35 @@ impl<H: CdHw, const SLOTS: usize, const RESULTS: usize, const LEASE: bool, const
             (&raw mut (*out).resumed).write_volatile(s.resumed);
             (&raw mut (*out).rejected).write_volatile(s.rejected);
         }
+    }
+
+    /// Sectors stored at a destination since the engine started, wrapping at 2^32, read with
+    /// one volatile load from `this` and no reference to the engine, so it is safe while the
+    /// interrupt handler is writing it. Counted by an engine with `STATS` or `COUNT` on (0
+    /// always otherwise).
+    ///
+    /// # Safety
+    ///
+    /// `this` must point to a live engine.
+    #[must_use]
+    pub unsafe fn counted_sectors(this: *const Self) -> u32 {
+        // SAFETY: the caller vouches for `this`; a field address, no reference, one aligned
+        // word that the handler stores whole.
+        unsafe { (&raw const (*this).stats.sectors).read_volatile() }
+    }
+
+    /// The code of the latest failure ([`Failure::code`]), 0 after a request started and when
+    /// nothing has failed, read like [`counted_sectors`](Self::counted_sectors). Kept by an
+    /// engine with `STATS` or `COUNT` on (0 always otherwise). A request that was cancelled
+    /// leaves it 0: with [`Status::Failed`] that is how a caller tells a cancel from a failure.
+    ///
+    /// # Safety
+    ///
+    /// `this` must point to a live engine.
+    #[must_use]
+    pub unsafe fn error_code(this: *const Self) -> u32 {
+        // SAFETY: as `counted_sectors`.
+        unsafe { (&raw const (*this).error).read_volatile() }
     }
 
     /// A copy of the counters, with the current phase and error filled in.
@@ -944,7 +1000,7 @@ impl<H: CdHw, const SLOTS: usize, const RESULTS: usize, const LEASE: bool, const
             if let Some(a) = self.active.as_mut() {
                 a.received += 1;
             }
-            if STATS {
+            if STATS || COUNT {
                 self.stats.sectors = self.stats.sectors.wrapping_add(1);
             }
         } else if STATS {
@@ -1032,7 +1088,7 @@ impl<H: CdHw, const SLOTS: usize, const RESULTS: usize, const LEASE: bool, const
     fn fail(&mut self, failure: Failure) {
         self.trace(4, (failure.0 >> 24) as u8);
         self.trace(5, (failure.0 >> 8) as u8);
-        if STATS {
+        if STATS || COUNT {
             self.error = failure.0;
         }
         self.recovering = false;
@@ -1104,7 +1160,7 @@ impl<H: CdHw, const SLOTS: usize, const RESULTS: usize, const LEASE: bool, const
     fn begin(&mut self, queued: Queued) {
         let recover = self.phase == Phase::Failed || self.recover_next;
         self.recover_next = false;
-        if STATS {
+        if STATS || COUNT {
             self.error = 0;
         }
         self.active = Some(Active {

@@ -97,7 +97,14 @@
 //! through the [`lean`] module: the same state machine without `PSX_CD_STATS`, the handler timing
 //! and the ticket records, and with [`lean::status`] in place of `state`.
 //!
-//! The handler (either engine) runs on psx-rt's dispatcher stack, [`HANDLER_STACK_BYTES`] bytes of
+//! A program that decodes a request while it runs (it reads how many sectors have landed to
+//! decode a chunk at a time) and otherwise wants the same one-`status()`-a-frame shape uses
+//! [`CountedEngine`] through the [`counted`] module: the lean engine plus one counter, the
+//! sectors the interrupt handler stored ([`counted::sectors_landed`], one load, add and store per
+//! sector in the handler), and [`counted::last_error`], the latest failure's code. A program that
+//! does not read the count links none of it, because it uses [`lean`].
+//!
+//! The handler (any engine) runs on psx-rt's dispatcher stack, [`HANDLER_STACK_BYTES`] bytes of
 //! which the saved context takes 112: 400 for the handler, whose deepest path in the
 //! single-transfer engine is measured by `stack-guard` in `hello-cdchunk` (see the crate's
 //! `ADOPT` notes in the repository). The count of transfers a program started
