@@ -14,23 +14,12 @@ use super::*;
 /// (a tap; a hold runs) and R3 toggles the lock. The stick is the move, in
 /// the pad's own frame ([`CombatMove::Stick`]). The camera stick, menus and
 /// interaction stay on the pad: they are not combat verbs.
+// One small out-of-line call per tick keeps the large gameplay update from
+// growing (and from changing how much else gets inlined into it).
+#[inline(never)]
 pub(crate) fn pad_intent(ctx: &Ctx, deadzone: i16) -> CombatIntent {
-    let edges = |held: fn(&Ctx, u16) -> bool| {
-        CombatActions::NONE
-            .with_if(CombatAction::Swap, held(ctx, button::TRIANGLE))
-            .with_if(
-                CombatAction::LightAttack,
-                held(ctx, ACTIVE_LIGHT_ATTACK_BUTTON),
-            )
-            .with_if(
-                CombatAction::HeavyAttack,
-                held(ctx, ACTIVE_HEAVY_ATTACK_BUTTON),
-            )
-            .with_if(CombatAction::Shoot, held(ctx, ACTIVE_HEAVY_ATTACK_BUTTON))
-            .with_if(CombatAction::Aim, held(ctx, button::L2))
-            .with_if(CombatAction::Evade, held(ctx, EVADE_RUN_BUTTON))
-            .with_if(CombatAction::Lock, held(ctx, button::R3))
-    };
+    let held = ctx.pad.buttons.bits();
+    let before = ctx.pad_prev.buttons.bits();
     let (x, z) = local_move_axes(ctx, deadzone).raw();
     CombatIntent {
         movement: if x == 0 && z == 0 {
@@ -40,10 +29,23 @@ pub(crate) fn pad_intent(ctx: &Ctx, deadzone: i16) -> CombatIntent {
         },
         face: None,
         aim: None,
-        pressed: edges(Ctx::just_pressed),
-        held: edges(Ctx::is_held),
-        released: edges(Ctx::just_released),
+        pressed: pad_actions(held & !before),
+        held: pad_actions(held),
+        released: pad_actions(before & !held),
     }
+}
+
+/// The combat actions a mask of pad buttons asks for.
+fn pad_actions(buttons: u16) -> CombatActions {
+    let on = |mask: u16| buttons & mask != 0;
+    CombatActions::NONE
+        .with_if(CombatAction::Swap, on(button::TRIANGLE))
+        .with_if(CombatAction::LightAttack, on(ACTIVE_LIGHT_ATTACK_BUTTON))
+        .with_if(CombatAction::HeavyAttack, on(ACTIVE_HEAVY_ATTACK_BUTTON))
+        .with_if(CombatAction::Shoot, on(ACTIVE_HEAVY_ATTACK_BUTTON))
+        .with_if(CombatAction::Aim, on(button::L2))
+        .with_if(CombatAction::Evade, on(EVADE_RUN_BUTTON))
+        .with_if(CombatAction::Lock, on(button::R3))
 }
 
 /// The stick of a pad intent, as the motor's local input vector.
