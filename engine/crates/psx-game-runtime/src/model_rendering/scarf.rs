@@ -10,7 +10,7 @@ const ROWS: usize = 8;
 const POINTS: usize = ROWS * 2;
 /// Tail row spacing is `height / TAIL_PITCH`. The simulation segment length,
 /// the rest pose and the velocity clamp all derive from it.
-const TAIL_PITCH: i32 = 15;
+const TAIL_PITCH: i32 = 21;
 /// Tail strip width at the first row is `height / TAIL_WIDTH`; the last row
 /// keeps `(TAIL_TAPER - 7) / TAIL_TAPER` of it, so the strip stays a scarf.
 const TAIL_WIDTH: i32 = 22;
