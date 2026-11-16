@@ -34,13 +34,13 @@ const fn enemy() -> LevelGameEntityRecord {
     r
 }
 static ENEMY: [LevelGameEntityRecord; 1] = [enemy()];
-fn input(p: [i32; 3]) -> GameEntityTickInput {
+fn input(p: [i32; 3]) -> GameEntityTickInput<'static> {
     GameEntityTickInput {
         player: p,
         player_radius: 12,
         player_height: 64,
         player_noise_radius: 100,
-        player_invulnerable: false,
+        player_target: crate::combatant::Defender::OPEN,
         player_combat: None,
     }
 }

@@ -580,6 +580,29 @@ fn a_swap_is_invulnerable_for_the_roll_window_counting_the_press_tick() {
 }
 
 #[test]
+fn the_player_asks_the_combatant_rule_every_enemy_asks() {
+    // The player's i-frames are `Combatant::invulnerable` over her own data
+    // (the character's roll frames) and her action, the same call an enemy
+    // defender makes with its record's count and no action protection.
+    let mut scene = scene();
+    scene.character = Some(character(false));
+    let config = scene.player_stance_config;
+    scene.player.stance.request_swap(&config);
+    for _ in 0..40 {
+        let defender = scene.player_defender(&ctx(100));
+        assert_eq!(defender.swap_invulnerable_ticks, TEST_I_FRAMES);
+        assert_eq!(defender.action, ActionProtection::NONE, "idle: no action");
+        assert_eq!(
+            scene.player_invulnerable(&ctx(100)),
+            scene
+                .player
+                .invulnerable(TEST_I_FRAMES, ActionProtection::NONE)
+        );
+        scene.player.stance.tick();
+    }
+}
+
+#[test]
 fn a_hit_grants_no_invulnerable_window() {
     // The old forced swap on an emptied pool handed out the swap i-frames;
     // with one bar a hit swaps nothing.

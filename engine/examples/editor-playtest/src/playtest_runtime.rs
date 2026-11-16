@@ -867,14 +867,9 @@ impl Playtest {
     /// Fixed-point stat multipliers from the four endpoint sockets at the
     /// current health and energy levels.
     pub(super) fn vitality_modifiers(&self) -> VitalityModifiers {
-        // Only the active stance's two sockets act. The other stance's
-        // modules are dormant until it is swapped to, which is what makes the
-        // boon layout a choice rather than four always-on bonuses.
-        self.power_up_loadout.modifiers_for(
-            self.boost_bars(),
-            BOOST_MODULES,
-            Some(self.player.stance.active()),
-        )
+        // All four sockets act in both stances.
+        self.power_up_loadout
+            .modifiers(self.boost_bars(), BOOST_MODULES)
     }
 
     /// The levels the boost sockets read: the health bar and the energy bar.
@@ -1610,22 +1605,43 @@ impl Playtest {
         )
     }
 
-    /// Whether enemy melee and projectiles pass through the player this tick.
+    /// What the player's current action grants this tick: the authored
+    /// `Invulnerable` window of the playing clip, else the motor's dodge
+    /// i-frames (`roll_invulnerable_frames` motor ticks from its first frame).
+    pub(super) fn player_action_protection(
+        &self,
+        ctx: &Ctx,
+        config: CharacterMotorConfig,
+    ) -> ActionProtection {
+        ActionProtection {
+            authored: self
+                .player_combat_sample(ctx)
+                .active(psx_level::CombatWindowKind::Invulnerable),
+            dodge: self.motor.is_action_invulnerable(config),
+        }
+    }
+
+    /// The player as the target of a hit, asked through the same
+    /// [`Defender::invulnerable`] rule as every enemy.
     ///
-    /// The dodge's window is `roll_invulnerable_frames` motor ticks from its
-    /// first frame. A stance change bursts the body apart the same way, so it
-    /// grants the same count of ticks from the swap. The swap is pressed
-    /// before `CombatStance::tick` in the same update, so contact resolution
-    /// first sees elapsed = 1: `1..=frames` is `frames` ticks, the dodge's
-    /// count, press tick included.
-    pub(super) fn player_invulnerable(&self, ctx: &Ctx) -> bool {
+    /// A stance change bursts the body apart the way the dodge does, so the
+    /// swap window is the character's `roll_invulnerable_frames`, the same
+    /// field an enemy's swap window reads from its own record. The swap is
+    /// pressed before the stance clock advances in the same update, so
+    /// contact resolution first sees elapsed = 1: `1..=frames` is `frames`
+    /// ticks, the dodge's count, press tick included.
+    pub(super) fn player_defender(&self, ctx: &Ctx) -> Defender<'_> {
         let config = self.motor_config();
-        self.player_combat_sample(ctx)
-            .active(psx_level::CombatWindowKind::Invulnerable)
-            .unwrap_or_else(|| self.motor.is_action_invulnerable(config))
-            || self
-                .player
-                .in_swap_window(u16::from(config.roll_invulnerable_frames))
+        Defender {
+            combatant: &self.player,
+            swap_invulnerable_ticks: config.roll_invulnerable_frames,
+            action: self.player_action_protection(ctx, config),
+        }
+    }
+
+    /// Whether enemy melee and projectiles pass through the player this tick.
+    pub(super) fn player_invulnerable(&self, ctx: &Ctx) -> bool {
+        self.player_defender(ctx).invulnerable()
     }
 
     pub(super) fn motor_config(&self) -> CharacterMotorConfig {

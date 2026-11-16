@@ -254,10 +254,11 @@ impl Playtest {
         }
         let entity_stats = if npc_tick_due {
             // Souls i-frames: the deferred tick never resolves contact, so
-            // this pre-motor value only feeds the shared tick-input contract.
+            // this pre-motor target only feeds the shared tick-input contract.
             // `resolve_combat` re-queries invulnerability after the motor
             // update, pairing it with the same retained pose contact uses.
-            let player_invulnerable = self.player_invulnerable(ctx);
+            let motor_config = self.motor_config();
+            let player_action = self.player_action_protection(ctx, motor_config);
             self.game_entities
                 .set_player_attack_read(self.player_melee_read());
             self.game_entities
@@ -279,7 +280,11 @@ impl Playtest {
                     player: player_pos,
                     player_radius,
                     player_height,
-                    player_invulnerable,
+                    player_target: Defender {
+                        combatant: &self.player,
+                        swap_invulnerable_ticks: motor_config.roll_invulnerable_frames,
+                        action: player_action,
+                    },
                     player_combat: Some(self.player.stance.active()),
                     player_noise_radius: player_noise_radius(
                         self.player_moved_last_tick,

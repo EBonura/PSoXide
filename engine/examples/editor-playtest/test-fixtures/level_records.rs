@@ -112,6 +112,7 @@ pub static GAME_ENTITIES: &[LevelGameEntityRecord] = &[LevelGameEntityRecord {
         poise: 25,
         ..CombatStats::ENEMY
     },
+    roll_invulnerable_frames: 10,
     soul_value: 50,
     flags: 0,
 }];

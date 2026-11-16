@@ -203,7 +203,8 @@ pub enum BoostBar {
 ///
 /// The health sockets are the ones that sat on the Horizon pool and the
 /// energy sockets the ones that sat on the Zenith pool, so a loadout keeps
-/// its meaning and its stance across the change to one health bar.
+/// its meaning across the change to one health bar. All four act in both
+/// stances.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum BoostSlotId {
@@ -236,16 +237,6 @@ impl BoostSlotId {
         match self {
             Self::HealthEmpty | Self::HealthFull => BoostBar::Health,
             Self::EnergyEmpty | Self::EnergyFull => BoostBar::Energy,
-        }
-    }
-
-    /// The stance whose sockets these are: only the active stance's two
-    /// sockets act. Health sockets belong to the blade stance (they were the
-    /// Horizon pool's), energy sockets to Zenith.
-    pub const fn stance(self) -> VitalityChannelId {
-        match self.bar() {
-            BoostBar::Health => VitalityChannelId::One,
-            BoostBar::Energy => VitalityChannelId::Two,
         }
     }
 
@@ -315,30 +306,15 @@ impl PowerUpLoadout {
         previous
     }
 
-    /// Resolve the live fixed-point modifiers contributed by all four sockets.
+    /// Resolve the live fixed-point modifiers contributed by all four
+    /// sockets. Every socket acts whichever stance is active.
     pub fn modifiers(
         self,
         bars: BoostBars,
         modules: &[psx_level::BoostModuleRecord],
     ) -> VitalityModifiers {
-        self.modifiers_for(bars, modules, None)
-    }
-
-    /// The same sum restricted to one stance's two sockets.
-    ///
-    /// Only the active stance's sockets act, so the other stance's sockets
-    /// are inert until it is swapped to. Passing `None` sums all four.
-    pub fn modifiers_for(
-        self,
-        bars: BoostBars,
-        modules: &[psx_level::BoostModuleRecord],
-        active: Option<VitalityChannelId>,
-    ) -> VitalityModifiers {
         let mut bonuses_q12 = [0i32; psx_level::boost_stat::COUNT];
         for slot in BoostSlotId::ALL {
-            if active.is_some_and(|channel| slot.stance() != channel) {
-                continue;
-            }
             let module_id = self.module(slot);
             let Some(module) = module_id.index().and_then(|index| modules.get(index)) else {
                 continue;
@@ -366,10 +342,6 @@ impl PowerUpLoadout {
                 as u16,
             movement_speed_q12: multiplier(bonuses_q12[psx_level::boost_stat::MOVEMENT_SPEED]),
             attack_speed_q12: multiplier(bonuses_q12[psx_level::boost_stat::ATTACK_SPEED]),
-            // Keep the percentage bonus separate from any base rate.
-            // Opposing module effects can cancel the bonus, never go negative.
-            regeneration_q12: bonuses_q12[psx_level::boost_stat::REGENERATION]
-                .clamp(0, i32::from(u16::MAX)) as u16,
         }
     }
 }
@@ -523,10 +495,6 @@ pub struct VitalityModifiers {
     pub movement_speed_q12: u16,
     /// Whole attack-timeline speed multiplier (`4096 = 1.0x`).
     pub attack_speed_q12: u16,
-    /// The Regeneration lane, `4096` = +100%. It sped up the inactive pool's
-    /// recovery, which the one health bar no longer has: nothing consumes it
-    /// until the owner gives Regeneration modules a one-bar effect.
-    pub regeneration_q12: u16,
 }
 
 impl VitalityModifiers {
@@ -537,8 +505,6 @@ impl VitalityModifiers {
         incoming_damage_q12: VITALITY_Q12_ONE,
         movement_speed_q12: VITALITY_Q12_ONE,
         attack_speed_q12: VITALITY_Q12_ONE,
-        // Additive, so identity is no extra recovery rather than unity.
-        regeneration_q12: 0,
     };
 
     /// Scale outgoing damage for the authored attack axis.
@@ -704,7 +670,7 @@ mod tests {
             effect_summary: "HRZ ATK +15%",
             assignment_label: "ASSIGN KINETIC RELAY: CHOOSE SLOT",
             remove_label: "REMOVE KINETIC RELAY",
-            percentages: [15, 0, 0, 0, 0, 0],
+            percentages: [15, 0, 0, 0, 0],
         },
         psx_level::BoostModuleRecord {
             name: "Guard Matrix",
@@ -712,7 +678,7 @@ mod tests {
             effect_summary: "DEF +20%",
             assignment_label: "ASSIGN GUARD MATRIX: CHOOSE SLOT",
             remove_label: "REMOVE GUARD MATRIX",
-            percentages: [0, 0, 20, 0, 0, 0],
+            percentages: [0, 0, 20, 0, 0],
         },
         psx_level::BoostModuleRecord {
             name: "Overdrive Coil",
@@ -720,7 +686,7 @@ mod tests {
             effect_summary: "MOVE +10% / ATK SPD +5%",
             assignment_label: "ASSIGN OVERDRIVE COIL: CHOOSE SLOT",
             remove_label: "REMOVE OVERDRIVE COIL",
-            percentages: [0, 0, 0, 10, 5, 0],
+            percentages: [0, 0, 0, 10, 5],
         },
     ];
 
@@ -870,7 +836,7 @@ mod tests {
             effect_summary: "DEF +100%",
             assignment_label: "",
             remove_label: "",
-            percentages: [0, 0, 100, 0, 0, 0],
+            percentages: [0, 0, 100, 0, 0],
         }];
         let loadout = PowerUpLoadout {
             slots: [
@@ -1144,56 +1110,29 @@ mod stance_tests {
     }
 
     #[test]
-    fn each_stance_owns_one_bars_two_sockets() {
-        // Two sockets sit on each bar, and each bar's sockets belong to one
-        // stance: health with blade (Horizon), energy with Zenith.
-        for channel in [VitalityChannelId::One, VitalityChannelId::Two] {
-            let mine = BoostSlotId::ALL
-                .into_iter()
-                .filter(|slot| slot.stance() == channel)
-                .count();
-            assert_eq!(mine, 2, "each stance owns exactly two boon slots");
-        }
-        for slot in BoostSlotId::ALL {
-            let expected = match slot.bar() {
-                BoostBar::Health => VitalityChannelId::One,
-                BoostBar::Energy => VitalityChannelId::Two,
-            };
-            assert_eq!(slot.stance(), expected);
-        }
-    }
-
-    #[test]
-    fn a_regeneration_module_on_the_active_stance_still_sums() {
-        // The lane is computed as before (additive, not a multiplier); it
-        // has no consumer without the inactive pool, see VitalityModifiers.
+    fn every_socket_acts_in_both_stances() {
+        // Health and energy sockets alike: the loadout sums all four, and
+        // nothing in it depends on the active stance.
         let modules = [psx_level::BoostModuleRecord {
-            name: "Mending Coil",
-            description: "Rest recovery.",
-            effect_summary: "REGEN +10",
-            assignment_label: "ASSIGN MENDING COIL: CHOOSE SLOT",
-            remove_label: "REMOVE MENDING COIL",
-            percentages: [0, 0, 0, 0, 0, 10],
+            name: "Edge",
+            description: "Blade output.",
+            effect_summary: "HRZ ATK +10",
+            assignment_label: "ASSIGN EDGE: CHOOSE SLOT",
+            remove_label: "REMOVE EDGE",
+            percentages: [10, 0, 0, 0, 0],
         }];
         let bars = BoostBars {
             health: VitalityPool::full(200),
             energy: VitalityPool::full(100),
         };
-        let mut loadout = PowerUpLoadout::EMPTY;
-        // A full-end socket: an empty-end socket contributes nothing on a
-        // full bar, which would prove nothing here.
-        loadout.set(BoostSlotId::HealthFull, BoostModuleId::from_index(0));
-
-        let active_one = loadout.modifiers_for(bars, &modules, Some(VitalityChannelId::One));
-        let active_two = loadout.modifiers_for(bars, &modules, Some(VitalityChannelId::Two));
-        assert!(
-            active_one.regeneration_q12 > 0,
-            "the stance holding the module contributes while active"
-        );
-        assert_eq!(
-            active_two.regeneration_q12, 0,
-            "the other stance's sockets are dormant"
-        );
+        for slot in [BoostSlotId::HealthFull, BoostSlotId::EnergyFull] {
+            let mut loadout = PowerUpLoadout::EMPTY;
+            loadout.set(slot, BoostModuleId::from_index(0));
+            assert!(
+                loadout.modifiers(bars, &modules).horizon_damage_q12 > VITALITY_Q12_ONE,
+                "{slot:?} acts"
+            );
+        }
     }
 
     #[test]

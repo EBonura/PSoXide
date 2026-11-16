@@ -650,7 +650,10 @@ pub struct PointOfInterestReward {
     pub description_it: String,
     /// Signed percentage modifiers. Multiple entries may target the same stat
     /// and are added together by the cooker.
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::resource_types::boost_modifiers_without_removed_lanes"
+    )]
     pub modifiers: Vec<crate::BoostStatModifier>,
     /// Abilities this pickup unlocks for good. A reward with no item name
     /// and no legacy module grants only these (an arch fragment); with an

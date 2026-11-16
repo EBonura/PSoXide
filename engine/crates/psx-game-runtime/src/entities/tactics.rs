@@ -414,7 +414,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         &mut self,
         r: &LevelGameEntityRecord,
         i: usize,
-        input: GameEntityTickInput,
+        input: GameEntityTickInput<'_>,
     ) {
         let p = i32::from(r.preferred_distance).max(Self::melee_attack_reach(r, input));
         let roll = self.draw(i, 100);
@@ -461,7 +461,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         &mut self,
         r: &LevelGameEntityRecord,
         i: usize,
-        input: GameEntityTickInput,
+        input: GameEntityTickInput<'_>,
         ranged: bool,
     ) {
         let close = self.player_within(i, input, Self::melee_attack_reach(r, input) * 3 / 4);
@@ -567,7 +567,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         &mut self,
         r: &LevelGameEntityRecord,
         i: usize,
-        input: GameEntityTickInput,
+        input: GameEntityTickInput<'_>,
         mover: &mut impl GameEntityMover,
         delta: u16,
         stats: &mut GameEntityTickStats,
@@ -589,7 +589,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         &mut self,
         r: &LevelGameEntityRecord,
         i: usize,
-        input: GameEntityTickInput,
+        input: GameEntityTickInput<'_>,
         mover: &mut impl GameEntityMover,
         delta: u16,
         stats: &mut GameEntityTickStats,

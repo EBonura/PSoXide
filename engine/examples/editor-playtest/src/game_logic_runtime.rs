@@ -785,7 +785,13 @@ impl Playtest {
             .enumerate()
             .take(self.game_entities.count())
         {
-            if self.game_entities.state(index) == GameEntityState::Dead {
+            // An entity in its i-frames is not a target, exactly as the
+            // player above: the bolt flies on through it.
+            if self.game_entities.state(index) == GameEntityState::Dead
+                || self
+                    .game_entities
+                    .invulnerable(GAME_ENTITIES.as_slice(), index)
+            {
                 continue;
             }
             let p = self.game_entities.position(index);
@@ -1868,9 +1874,15 @@ impl Playtest {
                 entity += 1;
                 continue;
             }
+            // An entity in its i-frames is passed through without latching
+            // the swing, as an enemy swing passes through the player: a
+            // later active frame of the same swing can still land.
             if entity_record.room != self.room_index
                 || self.game_entities.state(entity)
                     == psx_game_runtime::entities::GameEntityState::Dead
+                || self
+                    .game_entities
+                    .invulnerable(GAME_ENTITIES.as_slice(), entity)
             {
                 entity += 1;
                 continue;

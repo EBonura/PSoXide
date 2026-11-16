@@ -414,6 +414,7 @@ impl OwnedLevelRecords {
                     attack_max_range: e.attack_max_range,
                     touch_damage: e.touch_damage,
                     combat: e.combat,
+                    roll_invulnerable_frames: e.roll_invulnerable_frames,
                     soul_value: e.soul_value,
                     flags: e.flags,
                 })

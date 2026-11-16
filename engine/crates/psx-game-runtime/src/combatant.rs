@@ -9,8 +9,13 @@
 //! parameter of the call (a cooldown, a capacity, whether break grace
 //! applies) rather than a branch on who is fighting.
 //!
-//! Invulnerability is not stored: the swap window is read from the stance
-//! clock with [`Combatant::in_swap_window`], so it can never go stale.
+//! Invulnerability is one rule for every fighter, [`Combatant::invulnerable`]:
+//! the protection the current action grants (an authored `Invulnerable`
+//! combat window, else the dodge's i-frames) or the swap window. Nothing of it
+//! is stored: the swap window is read from the stance clock and the action's
+//! protection is read by the owner off its animation and motor when it asks,
+//! so it can never go stale. Every hit resolver asks the defender through a
+//! [`Defender`] before a hit may connect.
 //!
 //! Every hit, whatever dealt it, lands through [`Combatant::receive_hit`]. A
 //! [`HitIn`] is the [`Strike`] (what the attacker sent) plus the defender's
@@ -110,6 +115,67 @@ pub struct HitIn {
     pub stats: CombatStats,
     /// The defender's posture state.
     pub poise: PoiseRule,
+}
+
+/// The protection a fighter's current action grants, read by its owner off
+/// the action's animation and motor at the moment a hit resolver asks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ActionProtection {
+    /// The action's authored `Invulnerable` combat window at this frame:
+    /// `Some(open)` when the action authors that channel, `None` when it does
+    /// not. An authored window replaces the dodge's i-frames.
+    pub authored: Option<bool>,
+    /// The motor's dodge (roll or backstep) i-frames.
+    pub dodge: bool,
+}
+
+impl ActionProtection {
+    /// No action protection: no authored window, no dodge. What a fighter
+    /// without combat windows or a dodge (every enemy today) always has.
+    pub const NONE: Self = Self {
+        authored: None,
+        dodge: false,
+    };
+
+    /// Whether the action alone protects the fighter.
+    pub const fn active(self) -> bool {
+        match self.authored {
+            Some(open) => open,
+            None => self.dodge,
+        }
+    }
+}
+
+/// A fighter as the target of a hit: its combat state, how many ticks a swap
+/// protects it (its character's `roll_invulnerable_frames`, data) and what
+/// its current action grants. Hit resolvers ask [`Self::invulnerable`].
+#[derive(Clone, Copy, Debug)]
+pub struct Defender<'a> {
+    /// The target's combat state.
+    pub combatant: &'a Combatant,
+    /// Ticks a swap protects this fighter.
+    pub swap_invulnerable_ticks: u8,
+    /// What the target's current action grants.
+    pub action: ActionProtection,
+}
+
+impl Defender<'static> {
+    /// A target that is never invulnerable: a settled fighter with no swap
+    /// window and no action protection.
+    pub const OPEN: Self = Self {
+        combatant: &Combatant::EMPTY,
+        swap_invulnerable_ticks: 0,
+        action: ActionProtection::NONE,
+    };
+}
+
+impl Defender<'_> {
+    /// Whether a hit on this target passes through it, see
+    /// [`Combatant::invulnerable`].
+    pub fn invulnerable(&self) -> bool {
+        self.combatant
+            .invulnerable(self.swap_invulnerable_ticks, self.action)
+    }
 }
 
 /// What one [`Combatant::receive_hit`] did.
@@ -234,6 +300,16 @@ impl Combatant {
         self.stance.swap_elapsed_ticks() <= frames
     }
 
+    /// The one i-frame rule: a hit passes through this fighter while its
+    /// current `action` protects it (an authored `Invulnerable` window, else
+    /// the dodge) or while it is inside the swap window of
+    /// `swap_invulnerable_ticks`. A fighter that never swaps never enters the
+    /// swap window. A hit that passes through does nothing: it neither lands
+    /// nor uses up the attack.
+    pub fn invulnerable(&self, swap_invulnerable_ticks: u8, action: ActionProtection) -> bool {
+        action.active() || self.in_swap_window(u16::from(swap_invulnerable_ticks))
+    }
+
     /// Take one hit: health and posture scaled by [`stance_scaled`], health
     /// off the one bar, then posture against [`CombatStats::poise`]. This is
     /// the only way damage reaches a fighter.
@@ -338,6 +414,67 @@ mod tests {
         assert!(c.poise_hit(60, 60, false, false));
         c.tick(BREAK_GRACE_TICKS, false);
         assert!(!c.poise_hit(60, 60, false, true), "blocked");
+    }
+
+    const DODGING: ActionProtection = ActionProtection {
+        authored: None,
+        dodge: true,
+    };
+
+    #[test]
+    fn the_swap_window_protects_any_fighter_for_its_own_tick_count() {
+        // The player and an enemy hold the same Combatant; only the count,
+        // each character's own data, differs.
+        for ticks in [10u8, 6] {
+            let mut c = fighter();
+            assert!(!c.invulnerable(ticks, ActionProtection::NONE), "settled");
+            assert!(c.request_swap(30));
+            for elapsed in 0..=u16::from(ticks) {
+                assert!(c.invulnerable(ticks, ActionProtection::NONE), "{elapsed}");
+                c.advance_stance(1);
+            }
+            assert!(!c.invulnerable(ticks, ActionProtection::NONE));
+        }
+    }
+
+    #[test]
+    fn a_fighter_that_never_swaps_is_always_hittable() {
+        let mut c = fighter();
+        for _ in 0..200 {
+            assert!(!c.invulnerable(10, ActionProtection::NONE));
+            c.advance_stance(1);
+            c.tick(1, false);
+        }
+        assert!(!Defender::OPEN.invulnerable());
+    }
+
+    #[test]
+    fn an_authored_window_replaces_the_dodge_on_every_fighter() {
+        let c = fighter();
+        let open = ActionProtection {
+            authored: Some(true),
+            dodge: false,
+        };
+        let closed = ActionProtection {
+            authored: Some(false),
+            dodge: true,
+        };
+        assert!(c.invulnerable(10, open), "an open window protects");
+        assert!(c.invulnerable(10, DODGING), "no window: the dodge decides");
+        assert!(
+            !c.invulnerable(10, closed),
+            "a closed window ends the dodge"
+        );
+        // A closed window does not end the swap window.
+        let mut swapping = fighter();
+        assert!(swapping.request_swap(30));
+        assert!(swapping.invulnerable(10, closed));
+        let target = Defender {
+            combatant: &swapping,
+            swap_invulnerable_ticks: 0,
+            action: open,
+        };
+        assert!(target.invulnerable());
     }
 
     fn strike(channel: VitalityChannelId, damage: u16, poise: u16) -> Strike {

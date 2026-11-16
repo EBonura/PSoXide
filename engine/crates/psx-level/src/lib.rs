@@ -818,14 +818,8 @@ pub mod boost_stat {
     pub const MOVEMENT_SPEED: usize = 3;
     /// Complete attack timeline speed.
     pub const ATTACK_SPEED: usize = 4;
-    /// Recovery rate of the inactive vitality pool. Equipped on the active
-    /// state like every other lane, but it acts on the pool that is resting:
-    /// a pool only recovers while inactive, and an inactive state's modules do
-    /// not act, so a lane that boosted its own pool would be inert by
-    /// construction.
-    pub const REGENERATION: usize = 5;
     /// Number of stat lanes in one cooked module.
-    pub const COUNT: usize = 6;
+    pub const COUNT: usize = 5;
 }
 
 /// Maximum unique boost modules addressable by the fixed runtime inventory.
@@ -1385,6 +1379,11 @@ pub struct LevelGameEntityRecord {
     /// Health, poise, stance multipliers and energy: the same record the
     /// player character carries.
     pub combat: CombatStats,
+    /// Swap i-frames: ticks a stance swap protects this entity from hits.
+    /// The same field as [`LevelCharacterRecord::roll_invulnerable_frames`],
+    /// cooked from the entity's own Character Controller, so every fighter
+    /// reads its swap window from its own character data.
+    pub roll_invulnerable_frames: u8,
     /// Souls the player is credited for landing the killing blow.
     ///
     /// Authored per enemy so the reward curve is tuned in the editor next to

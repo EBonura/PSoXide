@@ -359,6 +359,31 @@ fn two_pool_ui_bindings_load_as_health_and_energy() {
 }
 
 #[test]
+fn a_removed_regeneration_effect_loads_and_is_dropped() {
+    // Regeneration sped up the resting health pool, which went with the one
+    // health bar. A project that still names it loads, keeps its other
+    // effects, and saves without it.
+    let module: BoostModuleResource = ron::from_str(
+        "(kind: Surge, description: \"Old.\", \
+         modifiers: [(stat: ZenithAttack, percent: 18), (stat: Regeneration, percent: 8)])",
+    )
+    .unwrap();
+    assert_eq!(
+        module.modifiers,
+        vec![BoostStatModifier {
+            stat: BoostStatKind::ZenithAttack,
+            percent: 18,
+        }]
+    );
+    let reward: PointOfInterestReward =
+        ron::from_str("(item_name: \"Coil\", modifiers: [(stat: Regeneration, percent: 8)])")
+            .unwrap();
+    assert!(reward.modifiers.is_empty());
+    assert!(!ron::to_string(&module).unwrap().contains("Regeneration"));
+    assert_eq!(BoostStatKind::ALL.len(), psx_level::boost_stat::COUNT);
+}
+
+#[test]
 fn player_and_enemy_stats_cook_through_one_path() {
     let stats = CombatStats {
         max_health: 70,
@@ -4200,6 +4225,40 @@ fn graybox_single_enemy_tactical_encounter_cooks_with_approved_walk() {
         walk.psxanim_path,
         "assets/animations/light_walk_v5/walk.psxanim"
     );
+}
+
+#[test]
+fn an_enemys_swap_i_frames_cook_from_its_own_character_field() {
+    // The player's swap window is her character's roll_invulnerable_frames;
+    // an enemy's is the same field of its own Character Controller.
+    let root = projects_dir().join("graybox-reach");
+    let source = std::fs::read_to_string(root.join("project.ron")).unwrap();
+    let mut project = ProjectDocument::from_ron_str(&source).unwrap();
+    crate::grid::starter::attach_starter_world(&mut project);
+    for resource in &mut project.resources {
+        if let ResourceData::Character(character) = &mut resource.data {
+            character.roll_invulnerable_frames = 7;
+        }
+    }
+    for scene in &mut project.scenes {
+        for node in &mut scene.nodes {
+            if let NodeKind::CharacterController {
+                settings: Some(settings),
+                ..
+            } = &mut node.kind
+            {
+                settings.roll_invulnerable_frames = 7;
+            }
+        }
+    }
+    let (package, report) = playtest::build_package(&project, &root);
+    assert!(report.is_ok(), "{:?}", report.errors);
+    let package = package.unwrap();
+    assert_eq!(package.game_entities[0].roll_invulnerable_frames, 7);
+    assert!(package
+        .characters
+        .iter()
+        .all(|character| character.roll_invulnerable_frames == 7));
 }
 
 #[test]

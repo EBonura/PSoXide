@@ -3160,21 +3160,15 @@ pub enum BoostStatKind {
     Defence,
     MovementSpeed,
     AttackSpeed,
-    /// Recovery rate of the resting pool. Equipped on the active state like
-    /// every other lane, but it speeds the pool that is inactive, because a
-    /// pool only recovers while inactive and an inactive state's modules do
-    /// not act.
-    Regeneration,
 }
 
 impl BoostStatKind {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 5] = [
         Self::HorizonAttack,
         Self::ZenithAttack,
         Self::Defence,
         Self::MovementSpeed,
         Self::AttackSpeed,
-        Self::Regeneration,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -3184,7 +3178,6 @@ impl BoostStatKind {
             Self::Defence => "Defence",
             Self::MovementSpeed => "Movement Speed",
             Self::AttackSpeed => "Attack Speed",
-            Self::Regeneration => "Regeneration",
         }
     }
 
@@ -3195,7 +3188,6 @@ impl BoostStatKind {
             Self::Defence => psx_level::boost_stat::DEFENCE,
             Self::MovementSpeed => psx_level::boost_stat::MOVEMENT_SPEED,
             Self::AttackSpeed => psx_level::boost_stat::ATTACK_SPEED,
-            Self::Regeneration => psx_level::boost_stat::REGENERATION,
         }
     }
 }
@@ -3207,6 +3199,52 @@ pub struct BoostStatModifier {
     pub stat: BoostStatKind,
     #[serde(default)]
     pub percent: i16,
+}
+
+/// A module's effects as a file may hold them: the current lanes plus
+/// `Regeneration`, which sped up the resting health pool and went with it.
+/// Loading drops a `Regeneration` effect and keeps the rest, the same way a
+/// removed field is ignored on load; the project saves without it.
+pub(crate) fn boost_modifiers_without_removed_lanes<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<BoostStatModifier>, D::Error> {
+    #[derive(Deserialize, Default)]
+    #[serde(rename = "BoostStatKind")]
+    enum StatFile {
+        #[default]
+        HorizonAttack,
+        ZenithAttack,
+        Defence,
+        MovementSpeed,
+        AttackSpeed,
+        Regeneration,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename = "BoostStatModifier")]
+    struct ModifierFile {
+        #[serde(default)]
+        stat: StatFile,
+        #[serde(default)]
+        percent: i16,
+    }
+    let files = Vec::<ModifierFile>::deserialize(deserializer)?;
+    Ok(files
+        .into_iter()
+        .filter_map(|file| {
+            let stat = match file.stat {
+                StatFile::HorizonAttack => BoostStatKind::HorizonAttack,
+                StatFile::ZenithAttack => BoostStatKind::ZenithAttack,
+                StatFile::Defence => BoostStatKind::Defence,
+                StatFile::MovementSpeed => BoostStatKind::MovementSpeed,
+                StatFile::AttackSpeed => BoostStatKind::AttackSpeed,
+                StatFile::Regeneration => return None,
+            };
+            Some(BoostStatModifier {
+                stat,
+                percent: file.percent,
+            })
+        })
+        .collect())
 }
 
 impl Default for BoostStatModifier {
@@ -3228,7 +3266,7 @@ pub struct BoostModuleResource {
     pub kind: BoostModuleKind,
     #[serde(default)]
     pub description: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "boost_modifiers_without_removed_lanes")]
     pub modifiers: Vec<BoostStatModifier>,
 }
 

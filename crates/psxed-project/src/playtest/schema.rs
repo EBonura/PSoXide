@@ -1730,6 +1730,9 @@ pub struct PlaytestGameEntity {
     /// Health, poise, stance multipliers and energy, cooked by
     /// [`crate::CombatStats::cooked`] exactly as the player's are.
     pub combat: psx_level::CombatStats,
+    /// Swap i-frames, from the Character Controller's
+    /// `roll_invulnerable_frames` exactly as the player's are.
+    pub roll_invulnerable_frames: u8,
     /// Souls credited to the player for the killing blow. Zero grants none.
     pub soul_value: u16,
     /// Runtime flags from `psx_level::game_entity_flags`.

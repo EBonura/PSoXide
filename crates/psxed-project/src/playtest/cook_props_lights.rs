@@ -1757,7 +1757,7 @@ fn legacy_boost_modifier(kind: crate::BoostModuleKind) -> crate::BoostStatModifi
 
 fn boost_effect_summary(percentages: [i16; psx_level::boost_stat::COUNT]) -> String {
     const LABELS: [&str; psx_level::boost_stat::COUNT] =
-        ["HRZ ATK", "ZTH ATK", "DEF", "MOVE", "ATK SPD", "REGEN"];
+        ["HRZ ATK", "ZTH ATK", "DEF", "MOVE", "ATK SPD"];
     let mut summary = String::new();
     for (index, percent) in percentages.iter().enumerate() {
         if *percent == 0 {
@@ -2589,6 +2589,8 @@ pub(crate) fn push_game_entity(
         attack_max_range,
         touch_damage: enemy.touch_damage,
         combat: combat.cooked(),
+        // The swap window reads the same Character field as the player's.
+        roll_invulnerable_frames: settings.roll_invulnerable_frames,
         soul_value: enemy.soul_value,
         flags,
     });

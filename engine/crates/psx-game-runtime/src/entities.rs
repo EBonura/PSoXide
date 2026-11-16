@@ -41,7 +41,10 @@ mod tactics;
 pub use tactics::{EnemyGoal, EnemyGoalResult, EnemyTacticalSnapshot};
 
 use crate::combat::{arc_hits_circle, MeleeArc};
-use crate::combatant::{stance_scaled, Combatant, CombatantId, HitIn, HitKind, PoiseRule, Strike};
+use crate::combatant::{
+    stance_scaled, ActionProtection, Combatant, CombatantId, Defender, HitIn, HitKind, PoiseRule,
+    Strike,
+};
 use crate::vitality::VitalityChannelId;
 use psx_level::{
     combat_armour, game_entity_flags, CharacterActionFrameRange, CharacterAnimationAction,
@@ -269,7 +272,7 @@ impl GameEntityMover for NoClipMover {
 /// entities think is the owner's spatial mask, see
 /// [`GameEntities::set_spatial_active_mask`].
 #[derive(Clone, Copy)]
-pub struct GameEntityTickInput {
+pub struct GameEntityTickInput<'a> {
     /// Player position, world/room-local engine units (the same space
     /// the cooked records use).
     pub player: [i32; 3],
@@ -281,12 +284,11 @@ pub struct GameEntityTickInput {
     pub player_height: i32,
     /// Current movement noise radius, in world units. Zero means silent.
     pub player_noise_radius: i32,
-    /// True while the player's motor action grants i-frames (roll /
-    /// active roll invulnerability). Entity attacks resolve no
-    /// contact against an invulnerable player -- the swing stays
-    /// live, so i-framing only the first half of a window still eats
-    /// the tail (souls timing rules).
-    pub player_invulnerable: bool,
+    /// The player as a target. Entity attacks ask it
+    /// [`Defender::invulnerable`] and resolve no contact against an
+    /// invulnerable player -- the swing stays live, so i-framing only the
+    /// first half of a window still eats the tail (souls timing rules).
+    pub player_target: Defender<'a>,
     /// Visible target's active stance, for shared stance decisions. None
     /// retains distance-only policy for legacy callers and fixtures.
     pub player_combat: Option<VitalityChannelId>,
@@ -706,7 +708,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         &mut self,
         record: &LevelGameEntityRecord,
         index: usize,
-        input: GameEntityTickInput,
+        input: GameEntityTickInput<'_>,
     ) -> bool {
         if !Self::has_ranged_attack(record) {
             return true;
@@ -1004,6 +1006,34 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         }
     }
 
+    /// Entity `index` as the target of a hit. Enemies carry no combat
+    /// windows and no dodge, so only the swap window can protect one, for
+    /// its record's `roll_invulnerable_frames` (the same field the player
+    /// character's swap window reads). An entity that never swaps never
+    /// enters it. `None` for an out of range slot.
+    pub fn defender<'a>(
+        &'a self,
+        records: &[LevelGameEntityRecord],
+        index: usize,
+    ) -> Option<Defender<'a>> {
+        if index >= self.count() {
+            return None;
+        }
+        Some(Defender {
+            combatant: self.combatants.get(index)?,
+            swap_invulnerable_ticks: records.get(index)?.roll_invulnerable_frames,
+            action: ActionProtection::NONE,
+        })
+    }
+
+    /// Whether a hit on entity `index` passes through it this tick, see
+    /// [`Self::defender`]. Hit resolvers ask before a hit may connect, so a
+    /// hit that passes through neither lands nor latches the swing.
+    pub fn invulnerable(&self, records: &[LevelGameEntityRecord], index: usize) -> bool {
+        self.defender(records, index)
+            .is_some_and(|defender| defender.invulnerable())
+    }
+
     /// Ticks since the entity's latest stance change began; `u16::MAX` when
     /// it has not changed since spawning. The eye pulse is read off the same
     /// clock, so it needs no state of its own.
@@ -1020,7 +1050,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         self.combatants[index].request_swap(self.stance_swap_delay);
     }
 
-    fn capture_ranged_aim(&mut self, index: usize, input: GameEntityTickInput) {
+    fn capture_ranged_aim(&mut self, index: usize, input: GameEntityTickInput<'_>) {
         self.capture_ranged_target(index, input.player, input.player_height);
     }
 
@@ -1050,7 +1080,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         &mut self,
         record: &LevelGameEntityRecord,
         index: usize,
-        input: GameEntityTickInput,
+        input: GameEntityTickInput<'_>,
         delta: u16,
     ) {
         // Track only during the early tell. The final six ticks and the
@@ -1315,8 +1345,10 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     /// enemy in the arc's room whose hurtbox cylinder the arc reaches
     /// (and whose bit in `already_hit` is clear) takes one
     /// [`Self::apply_hit`], and its bit latches so one swing connects
-    /// at most once per enemy. `O(live entities)` with the
-    /// per-axis/squared early-outs of [`arc_hits_circle`]; the owning
+    /// at most once per enemy. An entity inside its i-frames
+    /// ([`Self::invulnerable`]) is passed through without latching.
+    /// `O(live entities)` with the per-axis/squared early-outs of
+    /// [`arc_hits_circle`]; the owning
     /// game clears `already_hit` when a new swing starts. Bit `i`
     /// tracks entity `i` (the [`psx_level::MAX_GAME_ENTITY_RECORDS`]
     /// = 64 contract cap is exactly the u64 width).
@@ -1368,6 +1400,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             let skip = *already_hit & mask != 0
                 || record.room != arc.room
                 || self.state(entity) == GameEntityState::Dead
+                || self.invulnerable(records, entity)
                 || !arc_hits_circle(
                     arc,
                     self.x[entity],
@@ -1394,7 +1427,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     pub fn tick(
         &mut self,
         records: &'static [LevelGameEntityRecord],
-        input: GameEntityTickInput,
+        input: GameEntityTickInput<'_>,
         mover: &mut impl GameEntityMover,
     ) -> GameEntityTickStats {
         self.tick_delta(records, input, mover, 1)
@@ -1407,7 +1440,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     pub fn tick_delta(
         &mut self,
         records: &'static [LevelGameEntityRecord],
-        input: GameEntityTickInput,
+        input: GameEntityTickInput<'_>,
         mover: &mut impl GameEntityMover,
         delta_ticks: u16,
     ) -> GameEntityTickStats {
@@ -1428,7 +1461,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     pub fn tick_delta_deferred<const MAX_ATTACKS: usize>(
         &mut self,
         records: &'static [LevelGameEntityRecord],
-        input: GameEntityTickInput,
+        input: GameEntityTickInput<'_>,
         mover: &mut impl GameEntityMover,
         delta_ticks: u16,
         attacks: &mut DeferredGameEntityAttacks<MAX_ATTACKS>,
@@ -1440,7 +1473,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     fn tick_delta_impl<const MAX_ATTACKS: usize>(
         &mut self,
         records: &'static [LevelGameEntityRecord],
-        input: GameEntityTickInput,
+        input: GameEntityTickInput<'_>,
         mover: &mut impl GameEntityMover,
         delta_ticks: u16,
         mut deferred: Option<&mut DeferredGameEntityAttacks<MAX_ATTACKS>>,
@@ -1703,7 +1736,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     fn update_combat_director(
         &mut self,
         records: &'static [LevelGameEntityRecord],
-        input: GameEntityTickInput,
+        input: GameEntityTickInput<'_>,
         delta_ticks: u16,
         stats: &mut GameEntityTickStats,
     ) {
@@ -1859,17 +1892,17 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     /// Character-derived reach that committed the windup, gated to a
     /// front arc around the facing the entity locked when it
     /// committed. Connects at most once per swing, and never against
-    /// an i-framing player (see [`GameEntityTickInput::player_invulnerable`]).
+    /// an i-framing player (see [`GameEntityTickInput::player_target`]).
     fn resolve_attack_contact(
         &mut self,
         record: &LevelGameEntityRecord,
         index: usize,
-        input: GameEntityTickInput,
+        input: GameEntityTickInput<'_>,
         stats: &mut GameEntityTickStats,
     ) {
         if self.selected_attack_is_ranged(index)
             || self.combat_flags[index] & GAME_ENTITY_ATTACK_CONNECTED != 0
-            || input.player_invulnerable
+            || input.player_target.invulnerable()
         {
             return;
         }
@@ -1893,7 +1926,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         stats.player_damage = stats.player_damage.saturating_add(record.touch_damage);
     }
 
-    fn player_within(&self, index: usize, input: GameEntityTickInput, radius: i32) -> bool {
+    fn player_within(&self, index: usize, input: GameEntityTickInput<'_>, radius: i32) -> bool {
         within_xz(
             [self.x[index], self.z[index]],
             [input.player[0], input.player[2]],
@@ -1903,7 +1936,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
 
     /// Attack-band outer edge. Ranged attacks use their authored maximum;
     /// melee uses both body radii plus the close-in margin.
-    fn attack_reach(record: &LevelGameEntityRecord, input: GameEntityTickInput) -> i32 {
+    fn attack_reach(record: &LevelGameEntityRecord, input: GameEntityTickInput<'_>) -> i32 {
         if Self::has_ranged_attack(record) {
             i32::from(record.attack_max_range)
         } else {
@@ -1913,7 +1946,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         }
     }
 
-    fn melee_attack_reach(record: &LevelGameEntityRecord, input: GameEntityTickInput) -> i32 {
+    fn melee_attack_reach(record: &LevelGameEntityRecord, input: GameEntityTickInput<'_>) -> i32 {
         i32::from(record.radius)
             .saturating_add(input.player_radius.max(0))
             .saturating_add(GAME_ENTITY_ATTACK_REACH_MARGIN)
@@ -1923,7 +1956,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         &self,
         record: &LevelGameEntityRecord,
         index: usize,
-        input: GameEntityTickInput,
+        input: GameEntityTickInput<'_>,
     ) -> bool {
         psx_math::int32::abs_i32(self.y[index].saturating_sub(input.player[1]))
             <= i32::from(record.height)
@@ -1938,7 +1971,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         &self,
         record: &LevelGameEntityRecord,
         index: usize,
-        input: GameEntityTickInput,
+        input: GameEntityTickInput<'_>,
         mover: &mut impl GameEntityMover,
     ) -> bool {
         if Self::is_tactical(record)
@@ -1983,7 +2016,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         &self,
         record: &LevelGameEntityRecord,
         index: usize,
-        input: GameEntityTickInput,
+        input: GameEntityTickInput<'_>,
         mover: &mut impl GameEntityMover,
     ) -> bool {
         let from = [
@@ -2003,7 +2036,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         &mut self,
         record: &LevelGameEntityRecord,
         index: usize,
-        input: GameEntityTickInput,
+        input: GameEntityTickInput<'_>,
         mover: &mut impl GameEntityMover,
         stats: &mut GameEntityTickStats,
     ) {
@@ -2026,7 +2059,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         &mut self,
         record: &LevelGameEntityRecord,
         index: usize,
-        input: GameEntityTickInput,
+        input: GameEntityTickInput<'_>,
         mover: &mut impl GameEntityMover,
         delta_ticks: u16,
         stats: &mut GameEntityTickStats,
@@ -2054,7 +2087,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         &mut self,
         record: &LevelGameEntityRecord,
         index: usize,
-        input: GameEntityTickInput,
+        input: GameEntityTickInput<'_>,
         mover: &mut impl GameEntityMover,
         delta_ticks: u16,
         stats: &mut GameEntityTickStats,
@@ -2253,7 +2286,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         &mut self,
         record: &LevelGameEntityRecord,
         index: usize,
-        input: GameEntityTickInput,
+        input: GameEntityTickInput<'_>,
         yaw_offset: u16,
         speed: i32,
         mover: &mut impl GameEntityMover,
@@ -2578,6 +2611,10 @@ mod tests {
     use super::*;
     use psx_level::CombatStats;
 
+    /// The test records' swap i-frames: the editor's default
+    /// `roll_invulnerable_frames`.
+    pub(super) const TEST_SWAP_INVULNERABLE_TICKS: u8 = 10;
+
     pub(super) const fn test_record(
         x: i32,
         z: i32,
@@ -2650,6 +2687,7 @@ mod tests {
                 max_health: 100,
                 ..CombatStats::ENEMY
             },
+            roll_invulnerable_frames: TEST_SWAP_INVULNERABLE_TICKS,
             soul_value: 0,
             flags,
         }
@@ -2719,24 +2757,24 @@ mod tests {
         },
     ];
 
-    fn far_input() -> GameEntityTickInput {
+    fn far_input() -> GameEntityTickInput<'static> {
         GameEntityTickInput {
             player: [100_000, 0, 100_000],
             player_radius: 192,
             player_height: 1024,
             player_noise_radius: 0,
-            player_invulnerable: false,
+            player_target: Defender::OPEN,
             player_combat: None,
         }
     }
 
-    fn near_input() -> GameEntityTickInput {
+    fn near_input() -> GameEntityTickInput<'static> {
         GameEntityTickInput {
             player: [1200, 0, 1000],
             player_radius: 192,
             player_height: 1024,
             player_noise_radius: 0,
-            player_invulnerable: false,
+            player_target: Defender::OPEN,
             player_combat: None,
         }
     }
@@ -3424,7 +3462,7 @@ mod tests {
             player_radius: 192,
             player_height: 1024,
             player_noise_radius: 0,
-            player_invulnerable: false,
+            player_target: Defender::OPEN,
             player_combat: None,
         };
         let mut entities = GameEntities::<8>::EMPTY;
@@ -3752,7 +3790,7 @@ mod tests {
             player_radius: 192,
             player_height: 1024,
             player_noise_radius: 0,
-            player_invulnerable: false,
+            player_target: Defender::OPEN,
             player_combat: None,
         };
         // Move the player into the 512 aggro radius first.
@@ -3783,7 +3821,7 @@ mod tests {
             player_radius: 192,
             player_height: 1024,
             player_noise_radius: 0,
-            player_invulnerable: false,
+            player_target: Defender::OPEN,
             player_combat: None,
         };
         entities.tick(
@@ -3994,7 +4032,7 @@ mod tests {
             player_radius: 192,
             player_height: 1024,
             player_noise_radius: 0,
-            player_invulnerable: false,
+            player_target: Defender::OPEN,
             player_combat: None,
         };
         let mut entities = GameEntities::<8>::EMPTY;
@@ -4761,10 +4799,85 @@ mod tests {
         assert_eq!(entities.health(0), 0);
     }
 
+    #[test]
+    fn an_enemy_mid_swap_lets_the_players_swing_pass_through() {
+        let mut entities = GameEntities::<8>::EMPTY;
+        entities.spawn_from_records(&EVEN_ENEMY);
+        entities.set_spatial_active_mask(u64::MAX);
+        let arc = MeleeArc {
+            room: RoomIndex(0),
+            x: 1000,
+            z: 800,
+            yaw: 1024,
+            reach: 400,
+            half_angle: 1024,
+        };
+        let full = entities.health(0);
+        entities.mutate_stance(0);
+        let mut swing = 0u64;
+        for _ in 0..=TEST_SWAP_INVULNERABLE_TICKS {
+            assert!(entities.invulnerable(&EVEN_ENEMY, 0));
+            let stats = entities.apply_melee_arc(
+                &EVEN_ENEMY,
+                &arc,
+                VitalityChannelId::One,
+                10,
+                0,
+                &mut swing,
+            );
+            assert_eq!(stats.hits, 0, "the swing passes through");
+            assert_eq!(swing, 0, "and is not used up");
+            entities.advance_stance_swap(0, 1);
+        }
+        assert_eq!(entities.health(0), full);
+        // The window is the record's data, then the same swing lands.
+        assert!(!entities.invulnerable(&EVEN_ENEMY, 0));
+        let stats =
+            entities.apply_melee_arc(&EVEN_ENEMY, &arc, VitalityChannelId::One, 10, 0, &mut swing);
+        assert_eq!(stats.hits, 1);
+        assert_eq!(swing, 1);
+        assert!(entities.health(0) < full);
+    }
+
+    #[test]
+    fn a_non_swapping_enemy_is_always_hittable() {
+        // Melee-only: under stance-bound attacks it always wants Horizon, so
+        // it never swaps and never enters the window.
+        let mut entities = GameEntities::<8, true>::EMPTY;
+        entities.spawn_from_records(&IDLE_ENEMY);
+        entities.set_spatial_active_mask(u64::MAX);
+        for _ in 0..240 {
+            entities.tick(&IDLE_ENEMY, near_input(), &mut NoClipMover);
+            assert!(!entities.invulnerable(&IDLE_ENEMY, 0));
+            assert_eq!(entities.stance(0), VitalityChannelId::One);
+        }
+        let out = entities.apply_hit(&IDLE_ENEMY, 0, VitalityChannelId::One, 1, 0);
+        assert!(out.connected);
+    }
+
+    #[test]
+    fn an_enemy_reads_its_swap_window_from_its_own_record() {
+        static SHORT: [LevelGameEntityRecord; 1] = [LevelGameEntityRecord {
+            roll_invulnerable_frames: 2,
+            ..EVEN_ENEMY[0]
+        }];
+        let mut entities = GameEntities::<8>::EMPTY;
+        entities.spawn_from_records(&SHORT);
+        entities.mutate_stance(0);
+        entities.advance_stance_swap(0, 2);
+        assert!(entities.invulnerable(&SHORT, 0));
+        entities.advance_stance_swap(0, 1);
+        assert!(!entities.invulnerable(&SHORT, 0));
+        assert!(
+            entities.invulnerable(&EVEN_ENEMY, 0),
+            "the same clock under a 10-tick record is still protected"
+        );
+    }
+
     /// Drive IDLE_ENEMY from spawn into its Attack window against the
     /// near-input player (windup_ticks = 3): Idle -> Aggro -> Windup
     /// -> 3 windup ticks -> Attack.
-    fn advance_into_attack(entities: &mut GameEntities<8>, input: GameEntityTickInput) {
+    fn advance_into_attack(entities: &mut GameEntities<8>, input: GameEntityTickInput<'_>) {
         for _ in 0..5 {
             entities.tick(&IDLE_ENEMY, input, &mut NoClipMover);
         }
@@ -4802,8 +4915,16 @@ mod tests {
         entities.spawn_from_records(&IDLE_ENEMY);
         entities.set_spatial_active_mask(u64::MAX);
         advance_into_attack(&mut entities, near_input());
+        let rolling_player = Combatant::EMPTY;
         let rolling = GameEntityTickInput {
-            player_invulnerable: true,
+            player_target: Defender {
+                combatant: &rolling_player,
+                swap_invulnerable_ticks: 0,
+                action: ActionProtection {
+                    authored: None,
+                    dodge: true,
+                },
+            },
             player_combat: None,
             ..near_input()
         };
