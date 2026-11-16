@@ -5,7 +5,10 @@ use crate::display::DisplayConfig;
 use crate::material::{TextureMaterial, TextureWindow};
 use crate::prim::GpuPacket;
 use psx_hw::gpu::{gp0, gp1, DmaDirection};
-use psx_io::gpu::{wait_command_ready, write_command, write_commands, write_display_control};
+use psx_io::gpu::{
+    wait_command_ready, write_command, write_commands, write_display_control,
+    write_display_controls,
+};
 use psx_io::periph::GpuDma;
 
 bitflags::bitflags! {
@@ -96,8 +99,11 @@ impl Gpu {
     /// Reprogram the display mode and the picture position.
     #[doc(alias = "PutDispEnv")]
     pub fn set_display(&mut self, display: DisplayConfig) {
-        write_display_control(display.mode_command());
-        write_display_window(display);
+        write_display_controls([
+            display.mode_command(),
+            display.horizontal_range_command(),
+            display.vertical_range_command(),
+        ]);
     }
 
     /// Show VRAM from `origin` (GP1(05h)): a double-buffer flip.
@@ -206,17 +212,14 @@ impl Gpu {
 
 /// [`Gpu::new`]'s port writes.
 pub(crate) fn reset(display: DisplayConfig) {
-    write_display_control(gp1::RESET);
-    write_display_control(display.mode_command());
-    write_display_window(display);
-    write_display_control(gp1::dma_direction(DmaDirection::CpuToGp0 as u32));
-    write_display_control(gp1::display_enable(true));
-}
-
-/// GP1(06h) and GP1(07h) for `display`.
-pub(crate) fn write_display_window(display: DisplayConfig) {
-    write_display_control(display.horizontal_range_command());
-    write_display_control(display.vertical_range_command());
+    write_display_controls([
+        gp1::RESET,
+        display.mode_command(),
+        display.horizontal_range_command(),
+        display.vertical_range_command(),
+        gp1::dma_direction(DmaDirection::CpuToGp0 as u32),
+        gp1::display_enable(true),
+    ]);
 }
 
 pub(crate) fn set_draw_area(top_left: (u16, u16), bottom_right: (u16, u16)) {

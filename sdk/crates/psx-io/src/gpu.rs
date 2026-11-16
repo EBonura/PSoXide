@@ -86,6 +86,26 @@ pub fn write_display_control(word: u32) {
     unsafe { crate::write_u32(GP1, word) }
 }
 
+/// [`write_display_control`] for a run of words: the same words, in order.
+///
+/// The recording and guard test of the port write happens once for the run,
+/// not once per word, so a sequence of display-control writes (a reset, a
+/// display window) carries one flag load, one branch and one cold call
+/// instead of one of each per word. After the first word the guard is spent
+/// and the rest are plain stores, which is what the per-word form does too.
+#[inline(always)]
+pub fn write_display_controls<const N: usize>(words: [u32; N]) {
+    if handoff::is_slow() {
+        handoff::display_control_guard_slow();
+    }
+    for word in words {
+        crate::diag::gp1_write();
+        // SAFETY: GP1 (`psx_hw::gpu::GP1`) is the GPU's aligned 32-bit control port on every PS1; any word is
+        // a legal write and only changes GPU state.
+        unsafe { crate::write_u32(GP1, word) }
+    }
+}
+
 /// The function a display flip waits in, installed by the runtime that owns the
 /// VBlank clock (`psx_rt::interrupts::install_vblank_counter`).
 static mut FLIP_PACER: Option<fn()> = None;

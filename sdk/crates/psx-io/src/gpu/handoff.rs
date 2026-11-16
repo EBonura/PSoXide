@@ -140,6 +140,16 @@ pub(super) fn write_display_control_slow(word: u32) {
     super::write_display_control_unguarded(word);
 }
 
+/// The slow half of [`super::write_display_controls`]: the guard half of
+/// [`write_display_control_slow`], once for the whole run.
+#[cold]
+#[inline(never)]
+pub(super) fn display_control_guard_slow() {
+    if !is_recording() {
+        run_direct_access_guard();
+    }
+}
+
 /// A command stream recorded by [`start_recording_raw`]: DMA linked-list
 /// nodes that end the list until [`link_to`](Self::link_to) chains them
 /// onward.
