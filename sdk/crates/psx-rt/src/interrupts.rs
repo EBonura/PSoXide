@@ -211,6 +211,22 @@ __psx_rt_exception_handler:
     andi  $26, $26, 1
     beqz  $26, 41f
     nop
+    # Bit 24 rose: the signal works. Trust word (`__psx_rt_flip_trust`): 0 or the
+    # misses so far (signal mode), negative while in conventional mode.
+    lui   $26, %hi(__psx_rt_flip_trust)
+    lw    $27, %lo(__psx_rt_flip_trust)($26)
+    nop
+    beqz  $27, 46f
+    nop
+    bltz  $27, 47f
+    addiu $27, $27, 1
+    move  $27, $zero
+47:
+    sw    $27, %lo(__psx_rt_flip_trust)($26)
+46:
+    lui   $26, %hi(__psx_rt_pending_gp1)
+    lw    $27, %lo(__psx_rt_pending_gp1)($26)
+    nop
 44:
     lui   $26, %hi(__psx_rt_pending_gp1)
     sw    $zero, %lo(__psx_rt_pending_gp1)($26)
@@ -224,21 +240,55 @@ __psx_rt_exception_handler:
 
     b     8f
     nop
-    # GPUSTAT bit 24 is down for a queued GP1 word. A target that never raises it
-    # (an FPGA PSX core that loses GP0(1Fh), PCSX-ReARMed) is told apart from a
-    # GPU still drawing by the test OpenBIOS's GPU_sync and PSn00bSDK's DrawSync
-    # use: DMA 2 not busy and GPUSTAT bit 26 (ready for DMA block) up. Bit 28
-    # idles early on silicon and is not enough alone; bit 26 can pulse up between
-    # the primitives of a chain, so the pair must hold on {confirm_reads} reads in a row (a
-    # few tens of microseconds, far longer than any gap between primitives) and
-    # on any read that fails the wait ends here and the word stays queued. Held
-    # on the first edge that sees it, not the second: the frame is drawn, so the
-    # flip applies now and is counted. The loop counter lives in
-    # `__psx_rt_flip_quiet`.
+    # GPUSTAT bit 24 is down for a queued GP1 word. Two modes, by the trust word.
+    #
+    # Signal mode (the start, and always on a PS1, where the signal arrives): only
+    # bit 24 presents. If it stays down, DMA 2 idle and GPUSTAT bits 26 and 28 up
+    # on two edges in a row means a VBlank passed with the GPU idle and nothing
+    # arriving, so the frame is drawn and its GP0(1Fh) was lost: apply the word and
+    # count it as a miss. {trust_k} misses in a row switch to conventional mode. A frame
+    # with the signal clears the run.
+    #
+    # Conventional mode (a target that does not raise bit 24 on most frames: an FPGA
+    # PSX core, PCSX-ReARMed): the test OpenBIOS's GPU_sync and PSn00bSDK's DrawSync
+    # use, DMA 2 not busy and bit 26 (ready for DMA block) up, held on {confirm_reads} reads in
+    # a row (bit 26 can pulse up between primitives; bit 28 idles early on silicon
+    # and is not enough alone), at the first edge that sees it. {trust_m} frames in a row
+    # that do show bit 24 switch back to signal mode.
 41:
+    lui   $26, %hi(__psx_rt_flip_trust)
+    lw    $27, %lo(__psx_rt_flip_trust)($26)
+    nop
+    bltz  $27, 50f
+    nop
+    lui   $26, {io_hi}
+    lw    $26, {gp1}($26)
+    lui   $27, 0x1400
+    and   $26, $26, $27
+    bne   $26, $27, 8f
+    nop
+    lui   $26, {io_hi}
+    lw    $27, {gpu_chcr}($26)
+    nop
+    srl   $27, $27, {chcr_start_shift}
+    andi  $27, $27, 1
+    bnez  $27, 8f
+    nop
+    lui   $26, %hi(__psx_rt_vblank_count)
+    lw    $27, %lo(__psx_rt_vblank_count)($26)
     lui   $26, %hi(__psx_rt_flip_quiet)
-    addiu $27, $zero, {confirm_reads}
+    lw    $26, %lo(__psx_rt_flip_quiet)($26)
+    nop
+    addiu $26, $26, 1
+    beq   $26, $27, 42f
+    nop
+    lui   $26, %hi(__psx_rt_flip_quiet)
+    b     8f
     sw    $27, %lo(__psx_rt_flip_quiet)($26)
+50:
+    lui   $26, %hi(__psx_rt_flip_reads)
+    addiu $27, $zero, {confirm_reads}
+    sw    $27, %lo(__psx_rt_flip_reads)($26)
 45:
     lui   $26, {io_hi}
     lw    $27, {gp1}($26)
@@ -253,12 +303,28 @@ __psx_rt_exception_handler:
     andi  $27, $27, 1
     bnez  $27, 8f
     nop
-    lui   $26, %hi(__psx_rt_flip_quiet)
-    lw    $27, %lo(__psx_rt_flip_quiet)($26)
+    lui   $26, %hi(__psx_rt_flip_reads)
+    lw    $27, %lo(__psx_rt_flip_reads)($26)
     nop
     addiu $27, $27, -1
     bnez  $27, 45b
-    sw    $27, %lo(__psx_rt_flip_quiet)($26)
+    sw    $27, %lo(__psx_rt_flip_reads)($26)
+    lui   $26, %hi(__psx_rt_flip_trust)
+    addiu $27, $zero, -{trust_m}
+    b     43f
+    sw    $27, %lo(__psx_rt_flip_trust)($26)
+42:
+    lui   $26, %hi(__psx_rt_flip_trust)
+    lw    $27, %lo(__psx_rt_flip_trust)($26)
+    nop
+    addiu $27, $27, 1
+    addiu $26, $27, -{trust_k}
+    bnez  $26, 48f
+    nop
+    addiu $27, $zero, -{trust_m}
+48:
+    lui   $26, %hi(__psx_rt_flip_trust)
+    sw    $27, %lo(__psx_rt_flip_trust)($26)
 43:
     lui   $26, %hi(__psx_rt_draw_done_fallbacks)
     lw    $27, %lo(__psx_rt_draw_done_fallbacks)($26)
@@ -551,6 +617,8 @@ __psx_rt_present_kick:
     gpu_madr = const (dma::CHANNEL_BASE + dma::CHANNEL_STRIDE * dma::channel::GPU + dma::MADR) & 0xFFFF,
     gpu_bcr = const (dma::CHANNEL_BASE + dma::CHANNEL_STRIDE * dma::channel::GPU + dma::BCR) & 0xFFFF,
     confirm_reads = const 64,
+    trust_k = const FLIP_TRUST_MISSES,
+    trust_m = const FLIP_TRUST_SIGNALS,
     gpu_chcr = const (dma::CHANNEL_BASE + dma::CHANNEL_STRIDE * dma::channel::GPU + dma::CHCR) & 0xFFFF,
     chcr_start_shift = const dma::CHCR_START.trailing_zeros(),
     chcr_hi = const dma::CHCR_LINKED_LIST_TO_DEVICE >> 16,
@@ -725,11 +793,47 @@ static mut __psx_rt_fault_badvaddr: u32 = 0;
 #[no_mangle]
 pub(crate) static mut __psx_rt_pending_gp1: u32 = 0;
 
-/// The draw-done fallback's confirmation loop counter (the reads left before it
-/// fires). Handler scratch; In `.data` like the other counters.
+/// The VBlank count of the last edge at which the signal-mode timeout saw the GPU idle with
+/// bit 24 down (the timeout fires on the next edge). Handler scratch, in `.data`.
 #[cfg_attr(target_arch = "mips", link_section = ".data")]
 #[no_mangle]
 static mut __psx_rt_flip_quiet: u32 = 0;
+
+/// The conventional-mode confirmation loop's counter (the reads left before it fires).
+/// Handler scratch, in `.data`.
+#[cfg_attr(target_arch = "mips", link_section = ".data")]
+#[no_mangle]
+static mut __psx_rt_flip_reads: u32 = 0;
+
+/// Consecutive frames the signal-mode timeout presented (bit 24 missed) before the handler
+/// stops waiting for the signal. A PS1 raises it for every frame, so it never gets here; a
+/// target that loses it on most frames gets here within this many frames, which cost one
+/// extra VBlank each. Small, because a run this long without the signal is not a fluke.
+#[cfg_attr(not(target_arch = "mips"), allow(dead_code))]
+const FLIP_TRUST_MISSES: i32 = 4;
+
+/// Consecutive frames that show bit 24 before conventional mode hands back to the signal. Large
+/// on purpose: a core that raises it on a few frame shapes would otherwise flip modes (and
+/// pay the miss run again) on every lucky streak, and the signal is the only test that never
+/// presents early, so it is trusted again only after a long run.
+#[cfg_attr(not(target_arch = "mips"), allow(dead_code))]
+const FLIP_TRUST_SIGNALS: i32 = 32;
+
+/// The presenter's trust in GPUSTAT bit 24: 0 or a count of misses (signal mode, where only
+/// bit 24 presents and a timeout of two idle edges covers a lost signal), or negative
+/// (conventional mode, the count of signal frames still needed to switch back). Handler
+/// state, in `.data`.
+#[cfg_attr(target_arch = "mips", link_section = ".data")]
+#[no_mangle]
+static mut __psx_rt_flip_trust: i32 = 0;
+
+/// Whether the presenter has stopped waiting for GPUSTAT bit 24 (see `__psx_rt_flip_trust`):
+/// `true` in conventional mode. Stays `false` for the life of a program on a PS1.
+#[must_use]
+pub fn flip_signal_distrusted() -> bool {
+    // SAFETY: a volatile aligned read of a word only the handler writes.
+    unsafe { core::ptr::addr_of!(__psx_rt_flip_trust).read_volatile() < 0 }
+}
 
 /// Times the VBlank handler acted on a frame without seeing GPUSTAT bit 24:
 /// DMA 2 idle and GPUSTAT bits 26 and 28 up on a run of reads at one edge, with a

@@ -35,10 +35,17 @@ word is zero and channel 2 is idle, it acknowledges bit 24, starts the walk, mov
 display word to the flip word and empties the slot. The kick is one assembler macro assembled twice:
 into the handler, and into `__psx_rt_present_kick`, which the thread calls with CPU interrupts
 masked (at submit and in every wait). The flip is the handler's alone, so it always lands in the
-blanking interval. When bit 24 never rises (an FPGA core that loses GP0(1Fh)) the handler flips at
-the first edge where channel 2 is idle and GPUSTAT bits 26 and 28 stay up over a run of 64 reads,
-and counts it
-(`interrupts::draw_done_fallback_count`).
+blanking interval. The handler starts in **signal mode**: only bit 24 flips, and a frame whose signal was lost (DMA 2
+idle and bits 26 and 28 up on two edges in a row, bit 24 still down) flips at the second edge and
+is counted (`interrupts::draw_done_fallback_count`). Four such frames in a row switch it to
+**conventional mode** (`interrupts::flip_signal_distrusted`), for a target that does not raise the
+signal on most frames (an FPGA core, PCSX-ReARMed): it flips at the first edge where channel 2 is
+idle and bits 26 and 28 stay up over a run of 64 reads, the test OpenBIOS's GPU_sync and PSn00bSDK's
+DrawSync use. Thirty-two frames in a row that do show bit 24 switch it back. A frame with the signal
+ends a run of misses, so on a PS1, where the signal arrives on every frame, the conventional test
+is never consulted: a frame whose drawing spans a VBlank has bit 24 down at that edge, and the
+conventional test's signals are not measured on silicon (bit 28 idles about 39,000 clocks before a
+large primitive ends). Four misses cost four frames at one extra VBlank each, once.
 
 Which word each side writes, and why a VBlank between any two thread instructions cannot lose a
 frame, kick twice, show a buffer still being drawn, draw into the buffer on screen, or leave a part

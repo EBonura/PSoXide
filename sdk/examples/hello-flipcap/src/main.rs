@@ -43,6 +43,9 @@ const RED: (u8, u8, u8) = (230, 80, 80);
 /// Flips each phase makes.
 const FLIPS: u32 = 90;
 
+/// Frames of the long run that must leave the presenter in signal mode.
+const LONG_FRAMES: u32 = 1500;
+
 /// What one phase measured.
 #[derive(Clone, Copy)]
 struct Phase {
@@ -84,6 +87,29 @@ fn queued(gpu: &mut Gpu, fb: &mut DoubleBuffer, presenter: &mut Presenter) -> u3
     }
     present::wait_idle();
     present::stats().recovery_count.wrapping_sub(before)
+}
+
+/// `frames` empty frames where the signal is taken away on every frame `lose` names: after the
+/// frame is drawn (its GP0(1Fh) has raised GPUSTAT bit 24) the program acknowledges bit 24
+/// itself, so the presenter sees a frame whose signal never arrived. Nothing waits for a
+/// flip here, so the run costs what the cap lets it.
+fn lossy(
+    gpu: &mut Gpu,
+    fb: &mut DoubleBuffer,
+    presenter: &mut Presenter,
+    frames: u32,
+    lose: impl Fn(u32) -> bool,
+) {
+    for n in 0..frames {
+        presenter.begin_frame(fb);
+        fb.clear(gpu, (24, 8 + (n % 8) as u8 * 12, 8));
+        presenter.present_drawn(fb);
+        if lose(n) {
+            gpu.wait_idle();
+            gpu.arm_draw_done();
+        }
+    }
+    present::wait_idle();
 }
 
 /// `FLIPS` direct flips with nothing between them but a clear.
@@ -129,11 +155,51 @@ fn main() {
     let mut presenter = Presenter::new(None);
 
     let capped_queue = measure(|| queued(&mut gpu, &mut fb, &mut presenter));
+    let missed_capped = interrupts::draw_done_fallback_count();
+    let distrust_capped = interrupts::flip_signal_distrusted();
     let capped_direct = measure(|| direct(&mut gpu, &mut fb));
     present::set_cap(PresentCap::UNCAPPED);
     let uncapped = measure(|| queued(&mut gpu, &mut fb, &mut presenter));
     present::set_cap(PresentCap::HZ30);
     gpu.wait_idle();
+    // The signal's trust, on a target where the signal arrived in the phases above (a PS1 and the
+    // models that raise it): a lone lost signal in eight must not move the presenter to the
+    // conventional test, a burst of lost signals must, and a long run with the signal must bring
+    // it back. A target that never raised it skips these (the phases above showed it).
+    let signal_works = interrupts::draw_done_fallback_count() == 0;
+    present::set_cap(PresentCap::UNCAPPED);
+    let (mut isolated, mut burst, mut recovered) = (None, None, None);
+    let mut long = None;
+    if signal_works {
+        // A long run with the signal on every frame: the mode must never move.
+        lossy(&mut gpu, &mut fb, &mut presenter, LONG_FRAMES, |_| false);
+        long = Some((
+            interrupts::draw_done_fallback_count(),
+            interrupts::flip_signal_distrusted(),
+        ));
+        let before = interrupts::draw_done_fallback_count();
+        lossy(&mut gpu, &mut fb, &mut presenter, 64, |n| n % 8 == 3);
+        isolated = Some((
+            interrupts::draw_done_fallback_count() - before,
+            interrupts::flip_signal_distrusted(),
+        ));
+        let before = interrupts::draw_done_fallback_count();
+        lossy(&mut gpu, &mut fb, &mut presenter, 6, |_| true);
+        burst = Some((
+            interrupts::draw_done_fallback_count() - before,
+            interrupts::flip_signal_distrusted(),
+        ));
+        let before = interrupts::draw_done_fallback_count();
+        lossy(&mut gpu, &mut fb, &mut presenter, 40, |_| false);
+        recovered = Some((
+            interrupts::draw_done_fallback_count() - before,
+            interrupts::flip_signal_distrusted(),
+        ));
+    }
+    present::set_cap(PresentCap::HZ30);
+    gpu.wait_idle();
+    let missed_end = interrupts::draw_done_fallback_count();
+    let distrust_end = interrupts::flip_signal_distrusted();
 
     // Two VBlanks per flip, with a little slack at both ends of the phase.
     let paced = |p: &Phase| p.vblanks >= 2 * FLIPS - 4 && p.vblanks <= 2 * FLIPS + 8;
@@ -162,6 +228,22 @@ fn main() {
         ),
         (uncapped.vblanks <= FLIPS + 8, "opt-out: slower than 60 fps"),
         (interrupts::fault_count() == 0, "exceptions other than IRQs"),
+        (
+            long.is_none_or(|(missed, distrust)| missed == 0 && !distrust),
+            "trust: the signal missed or the mode moved in a long run",
+        ),
+        (
+            isolated.is_none_or(|(missed, distrust)| missed == 8 && !distrust),
+            "trust: a lone lost signal in eight changed the mode",
+        ),
+        (
+            burst.is_none_or(|(missed, distrust)| missed == 6 && distrust),
+            "trust: a burst of lost signals did not switch the mode",
+        ),
+        (
+            recovered.is_none_or(|(missed, distrust)| missed == 0 && !distrust),
+            "trust: the signal did not win the mode back",
+        ),
     ];
     let failures = checks.iter().filter(|check| !check.0).count() as u32;
     for (_, what) in checks.iter().filter(|check| !check.0) {
@@ -176,6 +258,22 @@ fn main() {
         line("direct fast", capped_direct.fast),
         line("optout vblanks", uncapped.vblanks),
         line("optout at 1", uncapped.single),
+        // The signal: bit 24 missed on this many frames, and whether the presenter had stopped
+        // waiting for it. A PS1 reads 0 and 0 on every row.
+        line("missed capped", missed_capped),
+        line("distrust capped", u32::from(distrust_capped)),
+        line("missed end", missed_end),
+        line("distrust end", u32::from(distrust_end)),
+        // Lost-signal phases (a program-made loss): frames missed and the mode after each, or
+        // FFFFFFFF where the target never raised the signal and the phase did not run.
+        line("long missed", long.map_or(u32::MAX, |p| p.0)),
+        line("lone missed", isolated.map_or(u32::MAX, |p| p.0)),
+        line("burst missed", burst.map_or(u32::MAX, |p| p.0)),
+        line("burst distrust", burst.map_or(u32::MAX, |p| u32::from(p.1))),
+        line(
+            "regain distrust",
+            recovered.map_or(u32::MAX, |p| u32::from(p.1)),
+        ),
     ];
     let (banner, tint) = if failures == 0 {
         ("FLIPCAP PASS", GREEN)
@@ -196,9 +294,9 @@ fn main() {
         font.draw_text(8, 6, "PRESENTATION CAP: 30 FPS", WHITE);
         font.draw_text(8, 30, banner, tint);
         for (row, (text, len)) in lines.iter().enumerate() {
-            font.draw_text(8, 54 + 12 * row as i16, as_str(&text[..*len]), WHITE);
+            font.draw_text(8, 36 + 10 * row as i16, as_str(&text[..*len]), WHITE);
         }
-        let mut y = 150;
+        let mut y = 224;
         for (_, what) in checks.iter().filter(|check| !check.0) {
             font.draw_text(8, y, what, RED);
             y += 12;
