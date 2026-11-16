@@ -3,7 +3,8 @@
 //! whole directory/allocation/container logic is exercised without hardware.
 
 use crate::{
-    Block, Card, Entry, Error, RamCard, SaveIcon, DATA_BLOCKS, FRAMES_PER_BLOCK, FRAME_SIZE,
+    Block, Card, DirOptions, Entry, Error, RamCard, SaveIcon, DATA_BLOCKS, FRAMES_PER_BLOCK,
+    FRAME_SIZE,
 };
 
 const NAME: &str = "BASLUS-99999SHEET01";
@@ -478,4 +479,122 @@ fn the_inline_directory_checksum_is_the_call_form() {
         }
         assert_eq!(checksum_inline(&frame), checksum(&frame));
     }
+}
+
+#[test]
+fn bios_options_accept_a_directory_frame_with_a_bad_checksum() {
+    let mut c = cross_linked_card();
+    assert_eq!(c.read_dir_with(0, DirOptions::STRICT), Err(Error::Corrupt));
+    let e = c
+        .read_dir_with(0, DirOptions::STRICT.accepting_bad_checksum())
+        .unwrap();
+    assert_eq!(e[0], 0x51);
+    assert_eq!(&e[8..10], &[1, 0]);
+    // find passes the damaged entry 0 and still finds B; strict refuses the walk.
+    assert_eq!(
+        c.find_with(NAME2.as_bytes(), DirOptions::STRICT),
+        Err(Error::Corrupt)
+    );
+    assert_eq!(
+        c.find_with(
+            NAME2.as_bytes(),
+            DirOptions::STRICT.accepting_bad_checksum()
+        ),
+        Ok(Some(1))
+    );
+    assert_eq!(c.find_with(NAME.as_bytes(), DirOptions::BIOS), Ok(Some(0)));
+}
+
+#[test]
+fn find_with_wildcards_matches_like_the_bios() {
+    let mut c = fresh();
+    c.write(NAME, "A", b"a").unwrap();
+    c.write(NAME2, "B", b"b").unwrap();
+    let w = DirOptions::STRICT.with_wildcards();
+    assert_eq!(c.find_with(b"BASLUS-99999SHEET01", w), Ok(Some(0)));
+    assert_eq!(c.find_with(b"BASLUS-99999SHEET0?", w), Ok(Some(0)));
+    assert_eq!(c.find_with(b"BASLUS-99999SHEET02", w), Ok(Some(1)));
+    assert_eq!(c.find_with(b"BASLUS-99999SHEET?2", w), Ok(Some(1)));
+    assert_eq!(c.find_with(b"BASLUS*", w), Ok(Some(0)));
+    assert_eq!(c.find_with(b"*", w), Ok(Some(0)));
+    assert_eq!(c.find_with(b"BASLUS-99999SHEET0*", w), Ok(Some(0)));
+    // `?` is one character, not zero and not two; the whole name must be consumed.
+    assert_eq!(c.find_with(b"BASLUS-99999SHEET0", w), Ok(None));
+    assert_eq!(c.find_with(b"BASLUS-99999SHEET0??", w), Ok(None));
+    assert_eq!(c.find_with(b"BASLUS-99999SHEET001", w), Ok(None));
+    assert_eq!(c.find_with(b"BASLUT*", w), Ok(None));
+    // Without the option a pattern is a literal name.
+    assert_eq!(c.find_with(b"BASLUS*", DirOptions::STRICT), Ok(None));
+    assert_eq!(
+        c.find_with(b"BASLUS-99999SHEET0?", DirOptions::STRICT),
+        Ok(None)
+    );
+    assert_eq!(
+        c.find_with(NAME.as_bytes(), DirOptions::STRICT),
+        c.find(NAME.as_bytes())
+    );
+}
+
+/// A two-block file whose second link points out of range (entry 0 first, link 1; entry 1
+/// middle with link 0x0099).
+fn bad_link_card(second_state: u8, second_link: u16) -> Card<RamCard> {
+    let mut c = fresh();
+    c.write(NAME, "A", &[7u8; 9000]).unwrap();
+    assert_eq!(c.chain(0).unwrap().len, 2);
+    let mut image = *c.into_inner().image();
+    let e1 = 2 * FRAME_SIZE;
+    image[e1] = second_state;
+    image[e1 + 8..e1 + 10].copy_from_slice(&second_link.to_le_bytes());
+    image[e1 + 127] = image[e1..e1 + 127].iter().fold(0, |a, &b| a ^ b);
+    Card::new(RamCard::from_image(&image).unwrap())
+}
+
+#[test]
+fn chain_with_stops_at_a_bad_link_instead_of_failing() {
+    // Link out of range after the second block.
+    let mut c = bad_link_card(0x52, 0x0099);
+    assert_eq!(c.chain(0).err(), Some(Error::Corrupt));
+    let stop = DirOptions::STRICT.stopping_at_bad_link();
+    let ch = c.chain_with(0, stop).unwrap();
+    assert_eq!((ch.len, &ch.blocks[..2]), (2, &[1u8, 2][..]));
+    // A middle block with no link (FFFF) also ends the chain without error.
+    let mut c = bad_link_card(0x52, 0xffff);
+    let ch = c.chain_with(0, stop).unwrap();
+    assert_eq!(ch.len, 2);
+    // Strict chain_with is the old chain, error for error.
+    assert_eq!(
+        c.chain_with(0, DirOptions::STRICT).unwrap().len,
+        c.chain(0).unwrap().len
+    );
+    let mut c = bad_link_card(0x52, 0x0099);
+    assert_eq!(
+        c.chain_with(0, DirOptions::STRICT).err(),
+        Some(Error::Corrupt)
+    );
+}
+
+#[test]
+fn chain_with_stops_at_a_loop_after_fifteen_blocks() {
+    // The second block links back to the first: strict is Corrupt, the BIOS form stops at 15.
+    let mut c = bad_link_card(0x52, 0x0000);
+    assert_eq!(c.chain(0).err(), Some(Error::Corrupt));
+    let ch = c.chain_with(0, DirOptions::BIOS).unwrap();
+    assert_eq!(ch.len, DATA_BLOCKS);
+    assert_eq!(&ch.blocks[..4], &[1, 2, 1, 2]);
+}
+
+#[test]
+fn chain_with_bad_checksum_option_is_independent_of_link_option() {
+    let mut c = cross_linked_card();
+    // Entry 0 has a bad checksum and links to entry 1 (a first-block state, link none).
+    assert_eq!(
+        c.chain_with(0, DirOptions::STRICT).err(),
+        Some(Error::Corrupt)
+    );
+    let ch = c
+        .chain_with(0, DirOptions::STRICT.accepting_bad_checksum())
+        .unwrap();
+    assert_eq!((ch.len, ch.blocks[0], ch.blocks[1]), (2, 1, 2));
+    let ch = c.chain_with(0, DirOptions::BIOS).unwrap();
+    assert_eq!(ch.len, 2);
 }
