@@ -11,7 +11,7 @@
 
 # Features any guest build may enable.
 [shipping]
-psx-rt   = ["runtime", "hazard-trampolines-192", "hazard-trampolines-256"]
+psx-rt   = ["runtime"]
 psx-mc   = ["hw"]
 psx-settings = ["card"]
 
