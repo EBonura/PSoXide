@@ -822,7 +822,10 @@ pub fn flip_signal_distrusted() -> bool {
 /// queued flip waiting. A GPU that raises bit 24 for every
 /// closing GP0(1Fh) (a PS1) leaves it at 0; an FPGA PSX core that loses some of
 /// them counts them here.
-#[cfg_attr(target_arch = "mips", link_section = ".data.psx_rt_draw_done_fallbacks")]
+#[cfg_attr(
+    target_arch = "mips",
+    link_section = ".data.psx_rt_draw_done_fallbacks"
+)]
 #[no_mangle]
 static mut __psx_rt_draw_done_fallbacks: u32 = 0;
 

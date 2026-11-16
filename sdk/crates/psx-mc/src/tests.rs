@@ -612,7 +612,12 @@ fn random_directory_card(seed: &mut u32) -> RamCard {
     let mut image = [0u8; crate::CARD_SIZE];
     image[0] = b'M';
     image[1] = if next(9) == 0 { b'X' } else { b'C' };
-    const NAMES: [&[u8]; 4] = [b"BASLUS-00000SAVE0", b"BASLUS-00000SAVE1", b"A", b"01234567890123456789"];
+    const NAMES: [&[u8]; 4] = [
+        b"BASLUS-00000SAVE0",
+        b"BASLUS-00000SAVE1",
+        b"A",
+        b"01234567890123456789",
+    ];
     for i in 0..DATA_BLOCKS {
         let e = &mut image[(1 + i) * FRAME_SIZE..(2 + i) * FRAME_SIZE];
         e[E_STATE] = [0x51, 0x52, 0x53, 0xa0, 0x00][next(5) as usize];
@@ -635,7 +640,14 @@ fn random_directory_card(seed: &mut u32) -> RamCard {
 fn the_borrowed_directory_forms_equal_the_card_forms() {
     use crate::dir::{chain_in, find_in, read_into, Directory};
     const PATTERNS: [&[u8]; 9] = [
-        b"BASLUS-00000SAVE0", b"BASLUS-0000?SAVE?", b"BAS*", b"*", b"?", b"A", b"A?", b"",
+        b"BASLUS-00000SAVE0",
+        b"BASLUS-0000?SAVE?",
+        b"BAS*",
+        b"*",
+        b"?",
+        b"A",
+        b"A?",
+        b"",
         b"01234567890123456789",
     ];
     let mut seed = 0x1234_5678u32;
@@ -651,13 +663,19 @@ fn the_borrowed_directory_forms_equal_the_card_forms() {
         for i in 0..DATA_BLOCKS {
             assert_eq!(dir[i], c.read_dir_with(i, DirOptions::BIOS).unwrap());
         }
-        for opts in [DirOptions::BIOS, DirOptions::STRICT.accepting_bad_checksum()] {
+        for opts in [
+            DirOptions::BIOS,
+            DirOptions::STRICT.accepting_bad_checksum(),
+        ] {
             for p in PATTERNS {
                 assert_eq!(find_in(&dir, p, opts), c.find_with(p, opts).unwrap());
             }
         }
         for first in 0..DATA_BLOCKS {
-            let (a, b) = (chain_in(&dir, first), c.chain_with(first, DirOptions::BIOS).unwrap());
+            let (a, b) = (
+                chain_in(&dir, first),
+                c.chain_with(first, DirOptions::BIOS).unwrap(),
+            );
             assert_eq!((a.len, a.blocks), (b.len, b.blocks));
         }
         let strict = read_into(c.device(), DirOptions::STRICT, &mut dir);

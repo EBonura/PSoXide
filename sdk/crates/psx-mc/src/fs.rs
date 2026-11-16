@@ -112,8 +112,9 @@ pub mod dir {
     /// checksums are [`read_into`]'s concern.
     #[must_use]
     pub fn find_in(dir: &Directory, name: &[u8], options: DirOptions) -> Option<usize> {
-        (0..DATA_BLOCKS)
-            .find(|&i| dir[i][E_STATE] == ST_FIRST && entry_matches(name, &dir[i], options.wildcards))
+        (0..DATA_BLOCKS).find(|&i| {
+            dir[i][E_STATE] == ST_FIRST && entry_matches(name, &dir[i], options.wildcards)
+        })
     }
 
     /// A file's blocks from its first entry, following links in `dir` in place as the BIOS does:
