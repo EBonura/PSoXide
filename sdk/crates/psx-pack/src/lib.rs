@@ -227,6 +227,16 @@ impl Fnv32 {
         self.0 = mul_prime(self.0 ^ u32::from(byte));
     }
 
+    /// [`push`](Self::push) as a call: the same hash, one shared body. `push` inlines about nine
+    /// instructions (36 bytes) at every site, which suits a loop that maps each byte first and
+    /// costs a caller that hashes a handful of scalars at many sites (Hollow Knight's atlas
+    /// fingerprint: +524 B inlined). Such a caller uses this, or collects the values and calls
+    /// [`update`](Self::update).
+    #[inline(never)]
+    pub fn push_shared(&mut self, byte: u8) {
+        self.push(byte);
+    }
+
     /// Fold `bytes` into the hash, one byte at a time.
     #[inline(never)]
     pub fn update(&mut self, bytes: &[u8]) {
@@ -500,6 +510,14 @@ impl WordFnv32 {
         self.0 = mul_prime(self.0 ^ word);
     }
 
+    /// [`push`](Self::push) as a call: the same hash, one shared body, for a caller that hashes
+    /// a few scalars at many sites (Ocarina's `proxy_key`: the inlined form grew `run_game` by
+    /// 384 B); `push` is for a loop that computes each word first.
+    #[inline(never)]
+    pub fn push_shared(&mut self, word: u32) {
+        self.push(word);
+    }
+
     /// Fold `words` into the hash.
     #[inline(never)]
     pub fn update(&mut self, words: &[u32]) {
@@ -748,6 +766,21 @@ mod tests {
             assert_eq!(pushed.finish(), want);
         }
         assert_eq!(WordFnv32::of(&[]), WordFnv32::OFFSET_BASIS);
+    }
+
+    #[test]
+    fn push_shared_is_push() {
+        let mut a = Fnv32::new();
+        let mut b = Fnv32::new();
+        let mut c = WordFnv32::new();
+        let mut d = WordFnv32::new();
+        for i in 0..200u32 {
+            a.push(i as u8);
+            b.push_shared(i as u8);
+            c.push(i.wrapping_mul(0x9e37_79b9));
+            d.push_shared(i.wrapping_mul(0x9e37_79b9));
+        }
+        assert_eq!((a.finish(), c.finish()), (b.finish(), d.finish()));
     }
 
     #[test]
