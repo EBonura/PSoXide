@@ -2713,8 +2713,10 @@ mod tests {
         }];
         // SAFETY: the indices are in range; the cycle is the point.
         let hull = unsafe { CollisionHull::from_native_clip_nodes(&planes, &cycle, 0) };
-        let mut out = Trace::default();
-        out.fraction = 77;
+        let mut out = Trace {
+            fraction: 77,
+            ..Trace::default()
+        };
         assert!(!hull.trace_render_point_into(
             &point(0),
             &point(50),
