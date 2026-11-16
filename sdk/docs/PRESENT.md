@@ -76,8 +76,7 @@ Kept, with the same behaviour, until the last program has moved, and listed in
 `sdk/profile.toml`'s `[deprecated]` so a program still calling them needs an exception:
 `interrupts::queue_display_control_at_vblank`, `is_display_control_queued`,
 `take_queued_display_control`, `set_min_flip_vblanks`, `min_flip_vblanks` and `present::publish_raw`;
-`present::start` carries the Rust deprecation only (the gate matches by name, and `start` is everywhere). The `present-queue` features of psx-io, psx-rt and psx-engine have no effect
-and remain only so an old manifest resolves. A direct flip (`DoubleBuffer::swap`,
+`present::start` carries the Rust deprecation only (the gate matches by name, and `start` is everywhere). A direct flip (`DoubleBuffer::swap`,
 `Gpu::set_display_start`) still waits for the cap before it writes GP1(05h).
 
 ## Moving a program onto it
