@@ -648,6 +648,7 @@ dependencies = [
  "psx-gpu",
  "psx-gte",
  "psx-math",
+ "psx-pack",
 ]
 
 [[package]]
@@ -684,12 +685,16 @@ dependencies = [
 [[package]]
 name = "psx-iso"
 version = "0.1.0"
+dependencies = [
+ "psx-pack",
+]
 
 [[package]]
 name = "psx-level"
 version = "0.1.0"
 dependencies = [
  "psx-math",
+ "psx-pack",
 ]
 
 [[package]]
@@ -703,6 +708,14 @@ dependencies = [
 [[package]]
 name = "psx-math"
 version = "0.1.0"
+
+[[package]]
+name = "psx-pack"
+version = "0.1.0"
+dependencies = [
+ "psx-io",
+ "psx-math",
+]
 
 [[package]]
 name = "psx-pad"
@@ -721,6 +734,7 @@ version = "0.1.0"
 name = "psx-residency"
 version = "0.1.0"
 dependencies = [
+ "psx-pack",
  "psx-rt",
 ]
 

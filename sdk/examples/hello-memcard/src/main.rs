@@ -849,14 +849,10 @@ fn validate_payload(payload: &[u8; PAYLOAD_LEN], len: usize) -> Option<u32> {
     }
 }
 
-fn hash_bytes(mut hash: u32, bytes: &[u8]) -> u32 {
-    let mut i = 0;
-    while i < bytes.len() {
-        hash ^= bytes[i] as u32;
-        hash = hash.wrapping_mul(0x0100_0193);
-        i += 1;
-    }
-    hash
+fn hash_bytes(hash: u32, bytes: &[u8]) -> u32 {
+    let mut hash = psx_pack::Fnv32::from_state(hash);
+    hash.update(bytes);
+    hash.finish()
 }
 
 fn error_name(error: Error) -> &'static str {

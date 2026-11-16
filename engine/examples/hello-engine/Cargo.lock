@@ -126,11 +126,20 @@ name = "psx-level"
 version = "0.1.0"
 dependencies = [
  "psx-math",
+ "psx-pack",
 ]
 
 [[package]]
 name = "psx-math"
 version = "0.1.0"
+
+[[package]]
+name = "psx-pack"
+version = "0.1.0"
+dependencies = [
+ "psx-io",
+ "psx-math",
+]
 
 [[package]]
 name = "psx-pad"

@@ -133,6 +133,7 @@ name = "psx-level"
 version = "0.1.0"
 dependencies = [
  "psx-math",
+ "psx-pack",
 ]
 
 [[package]]
@@ -144,6 +145,14 @@ name = "psx-mc"
 version = "0.1.0"
 dependencies = [
  "psx-hw",
+ "psx-io",
+ "psx-math",
+]
+
+[[package]]
+name = "psx-pack"
+version = "0.1.0"
+dependencies = [
  "psx-io",
  "psx-math",
 ]

@@ -45,9 +45,18 @@ name = "psx-math"
 version = "0.1.0"
 
 [[package]]
+name = "psx-pack"
+version = "0.1.0"
+dependencies = [
+ "psx-io",
+ "psx-math",
+]
+
+[[package]]
 name = "psx-residency"
 version = "0.1.0"
 dependencies = [
+ "psx-pack",
  "psx-rt",
 ]
 

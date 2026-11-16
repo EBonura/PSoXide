@@ -238,6 +238,7 @@ dependencies = [
  "psx-io",
  "psx-level",
  "psx-math",
+ "psx-pack",
  "psx-residency",
  "psx-telemetry",
  "psx-vram",
@@ -285,6 +286,7 @@ dependencies = [
  "psx-gpu",
  "psx-gte",
  "psx-math",
+ "psx-pack",
 ]
 
 [[package]]
@@ -323,6 +325,7 @@ name = "psx-level"
 version = "0.1.0"
 dependencies = [
  "psx-math",
+ "psx-pack",
 ]
 
 [[package]]
@@ -354,6 +357,7 @@ version = "0.1.0"
 name = "psx-residency"
 version = "0.1.0"
 dependencies = [
+ "psx-pack",
  "psx-rt",
 ]
 

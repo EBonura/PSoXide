@@ -136,6 +136,9 @@ dependencies = [
 [[package]]
 name = "psx-iso"
 version = "0.1.0"
+dependencies = [
+ "psx-pack",
+]
 
 [[package]]
 name = "psx-loading"
@@ -189,6 +192,7 @@ dependencies = [
 name = "psx-residency"
 version = "0.1.0"
 dependencies = [
+ "psx-pack",
  "psx-rt",
 ]
 
@@ -196,6 +200,7 @@ dependencies = [
 name = "psx-residency-sim"
 version = "0.1.0"
 dependencies = [
+ "psx-pack",
  "psx-residency",
 ]
 

@@ -8,6 +8,7 @@ repository.workspace = true
 description  = "Host-side drive model and route simulator for psx-residency: replays a route through a region graph against the real residency engine and a drive model built from the silicon seek and read measurements, and reports deadline slack and misses."
 
 [dependencies]
+psx-pack = { workspace = true }
 psx-residency = { workspace = true }
 
 [lints]

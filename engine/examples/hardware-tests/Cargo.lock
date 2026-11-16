@@ -38,6 +38,7 @@ dependencies = [
  "psx-font",
  "psx-gpu",
  "psx-mc",
+ "psx-pack",
  "psx-pad",
  "psx-rt",
  "psx-vram",
@@ -165,6 +166,7 @@ name = "psx-level"
 version = "0.1.0"
 dependencies = [
  "psx-math",
+ "psx-pack",
 ]
 
 [[package]]

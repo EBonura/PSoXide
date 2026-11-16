@@ -40,8 +40,7 @@ use crate::view::{CollisionView, LevelView, RoomView};
 use alloc::vec::Vec;
 use psx_engine::{CollisionTrace, CollisionTraceProvider, CollisionTraceQuery, RoomPoint};
 
-const FNV_OFFSET: u32 = 0x811c_9dc5;
-const FNV_PRIME: u32 = 0x0100_0193;
+const FNV_OFFSET: u32 = psx_pack::Fnv32::OFFSET_BASIS;
 
 /// Body traces run against the level.
 const BODY_TRACES: usize = 600;
@@ -53,14 +52,9 @@ const POINT_QUERIES: usize = 300;
 pub const LOAD_FAILED: u32 = 0xDEAD_0001;
 
 fn fold(hash: u32, value: i32) -> u32 {
-    let mut hash = hash;
-    let bytes = (value as u32).to_le_bytes();
-    let mut index = 0;
-    while index < 4 {
-        hash = (hash ^ bytes[index] as u32).wrapping_mul(FNV_PRIME);
-        index += 1;
-    }
-    hash
+    let mut hash = psx_pack::Fnv32::from_state(hash);
+    hash.update(&(value as u32).to_le_bytes());
+    hash.finish()
 }
 
 /// Deterministic sweep. A fixed LCG rather than anything from the host, so the
