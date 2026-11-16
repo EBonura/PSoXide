@@ -39,6 +39,7 @@ pub(crate) fn pad_intent(ctx: &Ctx, deadzone: i16) -> CombatIntent {
             CombatMove::Stick { x, z }
         },
         face: None,
+        aim: None,
         pressed: edges(Ctx::just_pressed),
         held: edges(Ctx::is_held),
         released: edges(Ctx::just_released),

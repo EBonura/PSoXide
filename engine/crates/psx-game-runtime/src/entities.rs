@@ -1211,6 +1211,15 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             && self.combatants[index].request_swap(self.stance_swap_delay)
     }
 
+    /// Whether [`Self::swap_stance`] would swap entity `index` now: the
+    /// same moves rule and cooldown, asked without swapping. A controller
+    /// asks before it plans what follows a swap.
+    pub fn swap_permitted(&self, record: &LevelGameEntityRecord, index: usize) -> bool {
+        index < self.count()
+            && Self::stance_moves(record).can_swap()
+            && self.combatants[index].stance.can_swap()
+    }
+
     /// Test hook: swap regardless of the moves rule.
     #[cfg(test)]
     fn mutate_stance(&mut self, index: usize) {
@@ -1221,9 +1230,29 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         self.capture_ranged_target(index, input.target.position, input.target.height);
     }
 
+    /// Where a shot at `input`'s target aims: its position raised to three
+    /// quarters of its height.
+    fn aim_point(input: GameEntityTickInput<'_>) -> [i32; 3] {
+        Self::raised_aim(input.target.position, input.target.height)
+    }
+
+    fn raised_aim(position: [i32; 3], height: i32) -> [i32; 3] {
+        [
+            position[0],
+            position[1].saturating_add(height.max(0).saturating_mul(3) / 4),
+            position[2],
+        ]
+    }
+
     fn capture_ranged_target(&mut self, index: usize, player: [i32; 3], height: i32) {
-        let dx = player[0].saturating_sub(self.x[index]);
-        let dz = player[2].saturating_sub(self.z[index]);
+        self.capture_ranged_point(index, Self::raised_aim(player, height));
+    }
+
+    /// Commit the aim of a shot at `point` (already raised to the aim
+    /// height), along the entity's current bearing.
+    fn capture_ranged_point(&mut self, index: usize, point: [i32; 3]) {
+        let dx = point[0].saturating_sub(self.x[index]);
+        let dz = point[2].saturating_sub(self.z[index]);
         let distance =
             psx_math::int32::isqrt_i32(dx.saturating_mul(dx).saturating_add(dz.saturating_mul(dz)));
         let yaw = self.yaw[index] as u16;
@@ -1235,7 +1264,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
                 distance,
                 psx_math::sin_q12(yaw),
             )),
-            player[1].saturating_add(height.max(0).saturating_mul(3) / 4),
+            point[1],
             self.z[index].saturating_add(psx_math::int32::mul_q12_i32(
                 distance,
                 psx_math::cos_q12(yaw),

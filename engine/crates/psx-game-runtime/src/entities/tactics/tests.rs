@@ -169,8 +169,7 @@ fn contextual_melee_varies_and_never_repeats_three_times() {
     let mut previous = 255;
     let mut repeats = 0;
     for _ in 0..200 {
-        e.choose_attack(&ENEMY[0], 0, input([0, 0, 30]), false);
-        let k = e.selected_attack_kind(0);
+        let k = e.choose_attack(&ENEMY[0], 0, input([0, 0, 30]), false);
         kinds[k as usize] = true;
         repeats = if k == previous { repeats + 1 } else { 1 };
         assert!(repeats <= 2);
@@ -843,12 +842,18 @@ fn bullet_evasion_uses_its_own_lane_and_respects_collision() {
         ticks_to_contact: 20,
     });
     let mut stats = GameEntityTickStats::default();
-    assert!(e.step_ranged_exchange(&ENEMY[0], 0, input([0, 0, 224]), &mut m, 1, 256, &mut stats));
+    let plan = e
+        .plan_ranged_exchange(&ENEMY[0], 0, input([0, 0, 224]), &mut m, 1, 256, &mut stats)
+        .expect("evading, not firing");
+    e.apply_intent(&ENEMY[0], 0, plan.intent, &mut m, 1, &mut stats);
     assert!(e.x[0] > 0);
     assert_eq!(e.z[0], 0);
     let before = e.position(0);
     m.blocked = true;
-    assert!(e.step_ranged_exchange(&ENEMY[0], 0, input([0, 0, 224]), &mut m, 1, 256, &mut stats));
+    let plan = e
+        .plan_ranged_exchange(&ENEMY[0], 0, input([0, 0, 224]), &mut m, 1, 256, &mut stats)
+        .expect("evading, not firing");
+    e.apply_intent(&ENEMY[0], 0, plan.intent, &mut m, 1, &mut stats);
     assert_eq!(e.position(0), before);
 }
 #[test]
@@ -858,11 +863,15 @@ fn visible_melee_recovery_releases_an_active_defensive_retreat() {
     let mut stats = GameEntityTickStats::default();
     let mut swing = input([0, 0, 50]);
     swing.target.attack_read = 1;
-    assert!(e.step_melee_defense(&ENEMY[0], 0, swing, &mut m, 1, &mut stats));
+    assert!(e
+        .plan_melee_defense(&ENEMY[0], 0, swing, &mut m, 1, &mut stats)
+        .is_some());
     assert_eq!(e.tactics[0].goal, EnemyGoal::Retreat);
     let mut recovery = input([0, 0, 50]);
     recovery.target.attack_read = 3;
-    assert!(!e.step_melee_defense(&ENEMY[0], 0, recovery, &mut m, 1, &mut stats));
+    assert!(e
+        .plan_melee_defense(&ENEMY[0], 0, recovery, &mut m, 1, &mut stats)
+        .is_none());
     assert_eq!(e.tactics[0].goal, EnemyGoal::None);
     assert_eq!(e.combat_role(0), 7);
 }

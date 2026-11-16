@@ -89,3 +89,59 @@ fn several_presses_in_one_tick_all_arrive() {
     assert!(both.pressed(CombatAction::Swap) && both.pressed(CombatAction::LightAttack));
     assert_eq!(both.attack(), Some(CombatAction::LightAttack));
 }
+
+/// An engaged enemy with both moves (it may swap and strike), alone in its
+/// own entity table.
+fn hybrid_fighter() -> (
+    &'static [LevelGameEntityRecord],
+    std::boxed::Box<RuntimeGameEntities>,
+) {
+    let records: &'static [LevelGameEntityRecord] =
+        std::boxed::Box::leak(std::boxed::Box::new([LevelGameEntityRecord {
+            flags: psx_level::game_entity_flags::ENABLED
+                | psx_level::game_entity_flags::RANGED_ATTACK
+                | psx_level::game_entity_flags::MELEE_ATTACK,
+            ..GAME_ENTITIES[0]
+        }]));
+    let mut entities = std::boxed::Box::new(RuntimeGameEntities::EMPTY);
+    entities.spawn_from_records(records);
+    entities.set_stance_swap_delay(30);
+    entities.set_spatial_active_mask(u64::MAX);
+    (records, entities)
+}
+
+#[test]
+fn an_intent_runs_the_same_whether_the_pad_or_the_ai_sent_it() {
+    use psx_game_runtime::entities::{GameEntityState, GameEntityTickStats, NoClipMover};
+    for (bit, action) in [
+        (button::TRIANGLE, CombatAction::Swap),
+        (button::R1, CombatAction::LightAttack),
+        (button::R2, CombatAction::HeavyAttack),
+    ] {
+        let from_pad = pad_intent(&pad_ctx(0, bit, (0, 0)), 0);
+        let from_ai = CombatIntent {
+            pressed: CombatActions::of(action),
+            ..CombatIntent::IDLE
+        };
+        let (records, mut pad_driven) = hybrid_fighter();
+        let (_, mut ai_driven) = hybrid_fighter();
+        let stance_before = pad_driven.stance(0);
+        let mut stats = GameEntityTickStats::default();
+        pad_driven.apply_intent(&records[0], 0, from_pad, &mut NoClipMover, 2, &mut stats);
+        ai_driven.apply_intent(&records[0], 0, from_ai, &mut NoClipMover, 2, &mut stats);
+        let outcome = |e: &RuntimeGameEntities| {
+            (
+                e.stance(0),
+                e.state(0),
+                e.attack_kind(0),
+                e.position(0),
+                e.stance_swap_cooldown(0),
+            )
+        };
+        assert_eq!(outcome(&pad_driven), outcome(&ai_driven), "{action:?}");
+        match action {
+            CombatAction::Swap => assert_ne!(pad_driven.stance(0), stance_before),
+            _ => assert_eq!(pad_driven.state(0), GameEntityState::Windup),
+        }
+    }
+}

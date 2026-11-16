@@ -1,5 +1,6 @@
 //! Optional Cortex prototype; legacy records retain their original rules.
 use super::*;
+use crate::combat_intent::{CombatIntent, CombatMove};
 impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
     /// Ranged-exchange role of entity `index` (cover, peek, evade ...), 0 when unknown.
     pub fn combat_role(&self, index: usize) -> u8 {
@@ -21,8 +22,11 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
             );
         }
     }
+    /// The ranged exchange as a controller: cover, peek and bullet evasion.
+    /// None when the exchange wants to fire (the caller's attack decision
+    /// takes over); otherwise the plan for this tick.
     #[cfg_attr(target_arch = "mips", optimize(size))]
-    pub(super) fn step_ranged_exchange(
+    pub(super) fn plan_ranged_exchange(
         &mut self,
         r: &LevelGameEntityRecord,
         i: usize,
@@ -31,7 +35,8 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         delta: u16,
         far: i32,
         stats: &mut GameEntityTickStats,
-    ) -> bool {
+    ) -> Option<tactics::TacticalPlan> {
+        let mut intent = CombatIntent::IDLE;
         let before = self.position(i);
         let energy = self.combatants[i].flow.energy;
         let order = self.exchanges[i].decide(
@@ -46,7 +51,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         );
         self.tactics[i].combat_role = self.exchanges[i].mode;
         if order.fire {
-            return false;
+            return None;
         }
         let goal = if order.evade {
             EnemyGoal::Evade
@@ -60,21 +65,23 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         }
         self.release_attack_owner(i, 0);
         if !order.moving {
-            self.face_tactical(i, input.target.position, delta);
+            self.plan_face(i, &mut intent, input.target.position, delta);
             self.set_intent(i, GameEntityIntent::Hold);
             stats.holding = stats.holding.saturating_add(1);
-            return true;
+            return Some(tactics::TacticalPlan::run(intent));
         }
         let facing_target = if order.evade {
             input.target.position
         } else {
             order.destination
         };
-        let facing_error = self.face_tactical(i, facing_target, delta);
+        let facing_error = self.plan_face(i, &mut intent, facing_target, delta);
         if !order.evade && facing_error > 683 {
-            return true;
+            return Some(tactics::TacticalPlan::run(intent));
         }
-        let facing = self.yaw[i];
+        let facing = self
+            .tactical_turn(i, facing_target, delta)
+            .map_or(self.yaw[i], |(yaw, _)| yaw);
         self.tactics[i].running =
             !order.evade && Self::can_run(r) && Self::distance(before, order.destination) > 96;
         let speed = if order.evade {
@@ -90,19 +97,10 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         let dz = order.destination[2] - before[2];
         let length = psx_math::int32::isqrt_i32(dx * dx + dz * dz).max(1);
         let step = (speed * i32::from(delta)).min(length);
-        let p = mover.step(
-            i,
-            r.room,
-            before,
-            dx * step / length,
-            dz * step / length,
-            i32::from(r.radius),
-            i32::from(r.height),
-        );
-        self.x[i] = p[0];
-        self.y[i] = p[1];
-        self.z[i] = p[2];
-        self.yaw[i] = facing;
+        intent.movement = CombatMove::Step {
+            dx: dx * step / length,
+            dz: dz * step / length,
+        };
         self.set_intent(
             i,
             if order.evade {
@@ -116,10 +114,12 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
                 GameEntityIntent::Approach
             },
         );
-        true
+        Some(tactics::TacticalPlan::run(intent))
     }
+    /// Melee defence as a controller: back off from a telegraphed swing.
+    /// None when there is nothing to defend against this tick.
     #[cfg_attr(target_arch = "mips", optimize(size))]
-    pub(super) fn step_melee_defense(
+    pub(super) fn plan_melee_defense(
         &mut self,
         r: &LevelGameEntityRecord,
         i: usize,
@@ -127,11 +127,12 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         mover: &mut impl GameEntityMover,
         delta: u16,
         stats: &mut GameEntityTickStats,
-    ) -> bool {
+    ) -> Option<tactics::TacticalPlan> {
+        let mut intent = CombatIntent::IDLE;
         self.tactics[i].defend_cooldown = self.tactics[i].defend_cooldown.saturating_sub(delta);
         self.tactics[i].defend_ticks = self.tactics[i].defend_ticks.saturating_sub(delta);
         if !self.target_in_line_of_sight(r, i, input, mover) {
-            return false;
+            return None;
         }
         let reach = Self::melee_attack_reach(r, input);
         if input.target.attack_read == 3 {
@@ -140,7 +141,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
             }
             self.tactics[i].defend_ticks = 0;
             self.tactics[i].combat_role = 7;
-            return false;
+            return None;
         }
         if input.target.attack_read == 1
             && self.tactics[i].defend_cooldown == 0
@@ -150,14 +151,14 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
             self.tactics[i].defend_cooldown = 90;
         }
         if self.tactics[i].defend_ticks == 0 {
-            return false;
+            return None;
         }
         self.tactics[i].combat_role = 6;
         self.release_attack_owner(i, 0);
         if self.tactics[i].goal != EnemyGoal::Retreat {
             self.begin_goal(i, EnemyGoal::Retreat, 24, reach + 32);
         }
-        self.face_tactical(i, input.target.position, delta);
+        self.plan_face(i, &mut intent, input.target.position, delta);
         if self.target_within(i, input, reach + 32) {
             let before = self.position(i);
             let yaw = psx_engine::Angle::from_q12(atan2_q12(
@@ -165,22 +166,14 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
                 before[2] - input.target.position[2],
             ));
             let step = r.walk_speed.max(1) * i32::from(delta);
-            let p = mover.step(
-                i,
-                r.room,
-                before,
-                yaw.sin().mul_i32(step),
-                yaw.cos().mul_i32(step),
-                i32::from(r.radius),
-                i32::from(r.height),
-            );
-            self.x[i] = p[0];
-            self.y[i] = p[1];
-            self.z[i] = p[2];
+            intent.movement = CombatMove::Step {
+                dx: yaw.sin().mul_i32(step),
+                dz: yaw.cos().mul_i32(step),
+            };
         }
         self.set_intent(i, GameEntityIntent::Retreat);
         stats.retreating = stats.retreating.saturating_add(1);
-        true
+        Some(tactics::TacticalPlan::run(intent))
     }
     /// Current energy of entity `index`, 0 when out of range.
     pub fn energy(&self, index: usize) -> u16 {

@@ -3,6 +3,7 @@
 //! movement-obstacle-recovery and movement-goal-lifecycle (October 2026).
 //! Local steering reports physical progress; it never claims navmesh reachability.
 use super::*;
+use crate::combat_intent::{CombatAction, CombatIntent, CombatMove};
 
 /// Persistent movement objective, independent of the committed attack state.
 #[repr(u8)]
@@ -289,19 +290,52 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
             .max(a[2].saturating_sub(b[2]).saturating_abs())
     }
 
-    pub(super) fn face_tactical(&mut self, index: usize, target: [i32; 3], delta: u16) -> u16 {
+    /// The turn toward `target` entity `index` makes this tick at its turn
+    /// rate: the new yaw and the angle still to go. None when the target
+    /// is straight above or below it (no bearing, no turn).
+    pub(super) fn tactical_turn(
+        &self,
+        index: usize,
+        target: [i32; 3],
+        delta: u16,
+    ) -> Option<(i16, u16)> {
         let dx = target[0].saturating_sub(self.x[index]);
         let dz = target[2].saturating_sub(self.z[index]);
         if dx == 0 && dz == 0 {
-            return 0;
+            return None;
         }
         let target = psx_engine::Angle::from_q12(atan2_q12(dx, dz));
         let current = psx_engine::Angle::from_q12(self.yaw[index] as u16);
         // 180 degrees/sec: fast enough to engage, visibly planted when flanked.
         let next = current.approach_q12(target, 34u16.saturating_mul(delta));
-        self.yaw[index] = next.as_q12() as i16;
         let d = target.as_q12().wrapping_sub(next.as_q12()) & 4095;
-        let error = d.min(4096 - d);
+        Some((next.as_q12() as i16, d.min(4096 - d)))
+    }
+
+    pub(super) fn face_tactical(&mut self, index: usize, target: [i32; 3], delta: u16) -> u16 {
+        let Some((yaw, error)) = self.tactical_turn(index, target, delta) else {
+            return 0;
+        };
+        self.yaw[index] = yaw;
+        self.tactics[index].turning = error > 57;
+        error
+    }
+
+    /// Plan this tick's turn toward `target` into `intent`, as the decision
+    /// sees it: the angle still to go after the turn (0 with no bearing).
+    /// The turning flag (which picks the turn clip) is decision state and is
+    /// set here; the rules turn the body when the intent runs.
+    pub(super) fn plan_face(
+        &mut self,
+        index: usize,
+        intent: &mut CombatIntent,
+        target: [i32; 3],
+        delta: u16,
+    ) -> u16 {
+        intent.face = Some(target);
+        let Some((_, error)) = self.tactical_turn(index, target, delta) else {
+            return 0;
+        };
         self.tactics[index].turning = error > 57;
         error
     }
@@ -457,13 +491,15 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         }
     }
 
+    /// Pick the attack (light 0, heavy 1, ranged 2) through the shared
+    /// policy and remember it for the repeat cap.
     fn choose_attack(
         &mut self,
         r: &LevelGameEntityRecord,
         i: usize,
         input: GameEntityTickInput<'_>,
         ranged: bool,
-    ) {
+    ) -> u8 {
         let close = self.target_within(i, input, Self::melee_attack_reach(r, input) * 3 / 4);
         let roll = if ranged || self.tactics[i].repeat_count >= 2 {
             0
@@ -484,7 +520,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
             1
         };
         t.last_attack = kind;
-        self.attack_mode[i] = kind;
+        kind
     }
 
     fn go_home(&mut self, r: &LevelGameEntityRecord, i: usize) {
@@ -582,9 +618,9 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         self.advance_tactical_animation(r, i, before, delta);
     }
 
-    // Keep low-frequency AI decisions compact on the PS1; rendering stays at opt-level 2.
-    #[inline(never)]
-    #[cfg_attr(target_arch = "mips", optimize(size))]
+    /// One tactical tick: the controller decides a [`CombatIntent`], the
+    /// rules run it ([`Self::apply_intent`]), and the controller then reads
+    /// what the move achieved.
     fn tick_tactical_policy(
         &mut self,
         r: &LevelGameEntityRecord,
@@ -594,6 +630,28 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         delta: u16,
         stats: &mut GameEntityTickStats,
     ) {
+        let plan = self.decide_tactical(r, i, input, mover, delta, stats);
+        let before = self.position(i);
+        self.apply_intent(r, i, plan.intent, mover, delta, stats);
+        self.after_tactical_intent(r, i, plan.then, before, input, delta, stats);
+    }
+
+    /// The tactical controller: decides this tick's [`CombatIntent`] for
+    /// entity `i` and keeps its own goal, timer and random state. It never
+    /// moves, turns, swaps or attacks; [`Self::apply_intent`] does.
+    // Keep low-frequency AI decisions compact on the PS1; rendering stays at opt-level 2.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
+    fn decide_tactical(
+        &mut self,
+        r: &LevelGameEntityRecord,
+        i: usize,
+        input: GameEntityTickInput<'_>,
+        mover: &mut impl GameEntityMover,
+        delta: u16,
+        stats: &mut GameEntityTickStats,
+    ) -> TacticalPlan {
+        let mut intent = CombatIntent::IDLE;
         self.tactics[i].moved = false;
         self.tactics[i].turning = false;
         self.tactics[i].phase = self.tactics[i].phase.wrapping_add(delta);
@@ -611,8 +669,8 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
             self.tactics[i].unseen_ticks = self.tactics[i].unseen_ticks.saturating_add(delta);
         }
         if self.state_ticks[i] < u16::from(r.reaction_ticks) {
-            self.face_tactical(i, self.tactics[i].last_seen, delta);
-            return;
+            self.plan_face(i, &mut intent, self.tactics[i].last_seen, delta);
+            return TacticalPlan::run(intent);
         }
         if (!inside_leash || self.tactics[i].unseen_ticks >= 240)
             && !matches!(
@@ -633,7 +691,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
                 self.finish_goal(i, EnemyGoalResult::Arrived);
                 self.tactics[i].home_cooldown = 120;
                 self.enter_state(i, GameEntityState::Idle, stats);
-                return;
+                return TacticalPlan::run(intent);
             }
             // A nearby, visible threat can interrupt returning home, without
             // recording false arrival; death and stagger use the same cancellation contract.
@@ -649,68 +707,28 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         self.tactics[i].remaining = previous.saturating_sub(delta);
         if goal == EnemyGoal::WaitRetry {
             self.set_intent(i, GameEntityIntent::Hold);
-            self.face_tactical(i, self.tactics[i].last_seen, delta);
+            self.plan_face(i, &mut intent, self.tactics[i].last_seen, delta);
             // Policy-2-like two-second wait, with one-second local movement retry.
-            if previous > 60 && self.tactics[i].remaining <= 60 && visible {
+            let probe = previous > 60 && self.tactics[i].remaining <= 60 && visible;
+            if probe {
                 let before = self.position(i);
                 let heading = psx_engine::Angle::from_q12(atan2_q12(
                     input.target.position[0].saturating_sub(before[0]),
                     input.target.position[2].saturating_sub(before[2]),
                 ));
                 let step = r.walk_speed.max(1);
-                let committed = mover.step_direction(
-                    i,
-                    r.room,
-                    before,
-                    Self::q12_step_component(heading.sin().raw(), step),
-                    Self::q12_step_component(heading.cos().raw(), step),
-                    i32::from(r.radius),
-                    i32::from(r.height),
-                );
-                self.x[i] = committed[0];
-                self.y[i] = committed[1];
-                self.z[i] = committed[2];
-                // Sliding sideways inside an enclosure is movement, but is
-                // not evidence that the approach can resume. Do not erase
-                // repeated failure just because a fallback direction moved.
-                if self.tactics[i].retries < 3
-                    && Self::distance(committed, input.target.position)
-                        < Self::distance(before, input.target.position)
-                {
-                    self.finish_goal(i, EnemyGoalResult::Cancelled);
-                    self.begin_goal(
-                        i,
-                        EnemyGoal::Approach,
-                        240,
-                        Self::melee_attack_reach(r, input),
-                    );
-                    return;
-                }
+                intent.movement = CombatMove::Direction {
+                    dx: Self::q12_step_component(heading.sin().raw(), step),
+                    dz: Self::q12_step_component(heading.cos().raw(), step),
+                };
             }
-            if self.tactics[i].remaining != 0 {
-                return;
-            }
-            self.finish_goal(i, EnemyGoalResult::Expired);
-            if self.tactics[i].home_cooldown != 0 {
-                self.enter_state(i, GameEntityState::Idle, stats);
-                return;
-            }
-            if self.tactics[i].retries >= 3 || !inside_leash || self.tactics[i].unseen_ticks >= 240
-            {
-                self.go_home(r, i);
-            } else {
-                let left = self.draw(i, 2) == 0;
-                let p = i32::from(r.preferred_distance).max(i32::from(r.radius) * 3);
-                let yaw = psx_engine::Angle::from_q12(self.yaw[i] as u16)
-                    .add(psx_engine::Angle::from_q12(if left { 1024 } else { 3072 }));
-                self.begin_goal(i, EnemyGoal::Reposition, 180, i32::from(r.radius));
-                self.tactics[i].destination = [
-                    self.x[i] + yaw.sin().mul_i32(p),
-                    self.y[i],
-                    self.z[i] + yaw.cos().mul_i32(p),
-                ];
-            }
-            return;
+            return TacticalPlan {
+                intent,
+                then: Then::WaitRetry {
+                    probed: probe,
+                    inside_leash,
+                },
+            };
         }
         if goal != EnemyGoal::None && previous > 0 && self.tactics[i].remaining == 0 {
             if goal == EnemyGoal::BreakAway
@@ -723,7 +741,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
             if goal == EnemyGoal::ReturnHome {
                 self.tactics[i].home_cooldown = 180;
                 self.enter_state(i, GameEntityState::Idle, stats);
-                return;
+                return TacticalPlan::run(intent);
             }
             goal = EnemyGoal::None;
         }
@@ -779,16 +797,17 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
                 &mut |a, b| mover.line_of_sight(r.room, a, b),
             )
         {
-            self.step_ranged_exchange(
-                r,
-                i,
-                input,
-                mover,
-                delta,
-                i32::from(r.attack_max_range),
-                stats,
-            );
-            return;
+            return self
+                .plan_ranged_exchange(
+                    r,
+                    i,
+                    input,
+                    mover,
+                    delta,
+                    i32::from(r.attack_max_range),
+                    stats,
+                )
+                .unwrap_or(TacticalPlan::run(intent));
         }
         if S && can_replan {
             let (stance, reason) = crate::combat_policy::stance_choice(
@@ -831,17 +850,22 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
                 desired = VitalityChannelId::Two;
                 stance_reason = 8;
             }
-            if desired != self.stance(i) && self.stance_swap_cooldown(i) == 0 && visible {
-                let _ = self.swap_stance(r, i);
-                if self.stance(i) == desired {
-                    self.tactics[i].stance_reason = stance_reason;
-                    self.finish_goal(i, EnemyGoalResult::Cancelled);
-                    goal = EnemyGoal::None;
-                }
+            if desired != self.stance(i)
+                && self.stance_swap_cooldown(i) == 0
+                && visible
+                && self.swap_permitted(r, i)
+            {
+                // Two stances: the swap lands on the desired one, and the
+                // swap tell then holds the entity for this tick.
+                intent.pressed = intent.pressed.with(CombatAction::Swap);
+                self.tactics[i].stance_reason = stance_reason;
+                self.finish_goal(i, EnemyGoalResult::Cancelled);
+                self.plan_face(i, &mut intent, target, delta);
+                return TacticalPlan::run(intent);
             }
             if self.stance_swap_in_progress(i) {
-                self.face_tactical(i, target, delta);
-                return;
+                self.plan_face(i, &mut intent, target, delta);
+                return TacticalPlan::run(intent);
             }
         }
         let melee = if S {
@@ -863,15 +887,18 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         self.tactics[i].combat_role = 0;
         if melee {
             self.exchanges[i].reset();
-            if self.step_melee_defense(r, i, input, mover, delta, stats) {
-                return;
+            if let Some(plan) = self.plan_melee_defense(r, i, input, mover, delta, stats) {
+                return plan;
             }
             goal = self.tactics[i].goal;
         } else if self.can_fire_energy(r, i)
             && !self.target_within(i, input, Self::melee_attack_reach(r, input) * 2)
-            && self.step_ranged_exchange(r, i, input, mover, delta, fire_far, stats)
         {
-            return;
+            if let Some(plan) =
+                self.plan_ranged_exchange(r, i, input, mover, delta, fire_far, stats)
+            {
+                return plan;
+            }
         }
         if matches!(
             goal,
@@ -931,7 +958,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         ) {
             0
         } else {
-            self.face_tactical(i, target, delta)
+            self.plan_face(i, &mut intent, target, delta)
         };
         if visible
             && goal != EnemyGoal::BreakAway
@@ -949,13 +976,13 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
             && error <= 341
             && (melee || !self.target_within(i, input, fire_near))
         {
-            self.choose_attack(r, i, input, !melee);
+            let kind = self.choose_attack(r, i, input, !melee);
+            intent.pressed = intent.pressed.with(CombatAction::from_attack_id(kind));
             if !melee {
-                self.capture_ranged_aim(i, input);
+                intent.aim = Some(Self::aim_point(input));
             }
             self.finish_goal(i, EnemyGoalResult::Arrived);
-            self.enter_state(i, GameEntityState::Windup, stats);
-            return;
+            return TacticalPlan::run(intent);
         }
         if !melee
             && visible
@@ -975,10 +1002,9 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         if goal == EnemyGoal::Hold {
             self.set_intent(i, GameEntityIntent::Hold);
             stats.holding = stats.holding.saturating_add(1);
-            return;
+            return TacticalPlan::run(intent);
         }
         let before = self.position(i);
-        let old_yaw = self.yaw[i];
         let mut destination = target;
         let mut running = false;
         let separation = i32::from(self.tactics[i].separation);
@@ -1002,22 +1028,22 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
                         // Keep the settled goal while turning/acquiring the attack
                         // token instead of restarting it on every policy tick.
                         self.set_intent(i, GameEntityIntent::Hold);
-                        return;
+                        return TacticalPlan::run(intent);
                     }
                     self.finish_goal(i, EnemyGoalResult::Arrived);
                     if self.attack_cooldown[i] != 0 {
                         self.choose_spacing(r, i, input);
                     }
-                    return;
+                    return TacticalPlan::run(intent);
                 }
                 if error > 683 {
-                    return;
+                    return TacticalPlan::run(intent);
                 }
             }
             EnemyGoal::CircleLeft | EnemyGoal::CircleRight => {
                 if !visible || !self.target_within(i, input, p * 4) {
                     self.finish_goal(i, EnemyGoalResult::Cancelled);
-                    return;
+                    return TacticalPlan::run(intent);
                 }
                 let offset = if goal == EnemyGoal::CircleLeft {
                     3072
@@ -1047,18 +1073,18 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
             EnemyGoal::BreakAway => {
                 if !visible {
                     self.finish_goal(i, EnemyGoalResult::Cancelled);
-                    return;
+                    return TacticalPlan::run(intent);
                 }
                 if !self.target_within(i, input, separation) {
                     self.finish_goal(i, EnemyGoalResult::Arrived);
-                    return;
+                    return TacticalPlan::run(intent);
                 }
                 // Do not kite a live opponent past the home leash and then
                 // attempt to walk through them to reset. Contest the space here.
                 if Self::distance(before, home) >= i32::from(r.aggro_radius) {
                     self.combatants[i].flow.contest_space();
                     self.finish_goal(i, EnemyGoalResult::Cancelled);
-                    return;
+                    return TacticalPlan::run(intent);
                 }
                 destination = [
                     before[0].saturating_add(before[0].saturating_sub(target[0])),
@@ -1067,8 +1093,8 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
                 ];
                 self.set_intent(i, GameEntityIntent::Retreat);
                 // Turning and running are visible, collision-bound and vulnerable.
-                if self.face_tactical(i, destination, delta) > 683 {
-                    return;
+                if self.plan_face(i, &mut intent, destination, delta) > 683 {
+                    return TacticalPlan::run(intent);
                 }
                 running = Self::can_run(r);
                 speed = if running {
@@ -1081,11 +1107,11 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
             EnemyGoal::Retreat => {
                 if !visible {
                     self.finish_goal(i, EnemyGoalResult::Cancelled);
-                    return;
+                    return TacticalPlan::run(intent);
                 }
                 if !self.target_within(i, input, separation) {
                     self.finish_goal(i, EnemyGoalResult::Arrived);
-                    return;
+                    return TacticalPlan::run(intent);
                 }
                 destination = [
                     before[0].saturating_add(before[0].saturating_sub(target[0])),
@@ -1106,19 +1132,18 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
                     && goal == EnemyGoal::Reposition
                 {
                     self.finish_goal(i, EnemyGoalResult::Arrived);
-                    return;
+                    return TacticalPlan::run(intent);
                 }
-                if self.face_tactical(i, destination, delta) > 683 {
-                    return;
+                if self.plan_face(i, &mut intent, destination, delta) > 683 {
+                    return TacticalPlan::run(intent);
                 }
             }
-            _ => return,
+            _ => return TacticalPlan::run(intent),
         }
         if self.tactics[i].running != running {
             self.tactics[i].phase = 0;
         }
         self.tactics[i].running = running;
-        let facing = self.yaw[i];
         // Refresh steering every 0.3 s at either NPC cadence. The legacy
         // state_tick modulo-four choice can alias when delta is two.
         if self.tactics[i].phase % 18 < delta {
@@ -1143,7 +1168,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
             self.tactics[i].movement_fraction_q8 = (budget_q8 & 255) as u8;
             if step == 0 {
                 self.tactics[i].motion_deferred = true;
-                return;
+                return TacticalPlan::run(intent);
             }
             let mut dx = Self::q12_step_component(yaw.sin().raw(), step);
             let mut dz = Self::q12_step_component(yaw.cos().raw(), step);
@@ -1167,36 +1192,213 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
                 dx += radial.sin().mul_i32(step / 2) * correction;
                 dz += radial.cos().mul_i32(step / 2) * correction;
             }
-            let committed = mover.step(
-                i,
-                r.room,
-                before,
-                dx,
-                dz,
-                i32::from(r.radius),
-                i32::from(r.height),
-            );
-            self.commit_step(i, before, committed);
+            intent.movement = CombatMove::Step { dx, dz };
         } else {
-            self.step_toward(
-                r,
-                i,
-                destination,
-                speed.saturating_mul(i32::from(delta)),
-                mover,
-            );
+            intent.movement = CombatMove::Toward {
+                point: destination,
+                distance: speed.saturating_mul(i32::from(delta)),
+            };
         }
-        // Steering commits position, while the tactical policy owns bounded facing.
-        self.yaw[i] = if matches!(
-            goal,
-            EnemyGoal::ReturnHome | EnemyGoal::Reposition | EnemyGoal::BreakAway
-        ) {
-            facing
-        } else {
-            old_yaw
-        };
-        self.tactics[i].moved = Self::distance(before, self.position(i)) > 0;
-        self.monitor_progress(r, i, before, destination, requested_step, delta);
+        TacticalPlan {
+            intent,
+            then: Then::Progress {
+                destination,
+                requested: requested_step,
+            },
+        }
+    }
+
+    /// Run `intent` for entity `i` under the rules every fighter shares: a
+    /// swap when its moves and cooldown allow, the turn toward the face
+    /// point at the entity's turn rate, the requested strike or shot (aimed
+    /// at the intent's aim point), then the move through the collision
+    /// mover. Moving never turns the body; facing is the controller's turn.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
+    pub fn apply_intent(
+        &mut self,
+        r: &LevelGameEntityRecord,
+        i: usize,
+        intent: CombatIntent,
+        mover: &mut impl GameEntityMover,
+        delta: u16,
+        stats: &mut GameEntityTickStats,
+    ) {
+        if i >= self.count() {
+            return;
+        }
+        if intent.pressed(CombatAction::Swap) {
+            let _ = self.swap_stance(r, i);
+        }
+        if let Some(point) = intent.face {
+            if let Some((yaw, _)) = self.tactical_turn(i, point, delta) {
+                self.yaw[i] = yaw;
+            }
+        }
+        if let Some(attack) = intent.attack() {
+            self.attack_mode[i] = match attack {
+                CombatAction::HeavyAttack => GAME_ENTITY_ATTACK_HEAVY,
+                CombatAction::Shoot => GAME_ENTITY_ATTACK_RANGED,
+                _ => GAME_ENTITY_ATTACK_LIGHT,
+            };
+            if attack == CombatAction::Shoot {
+                if let Some(point) = intent.aim {
+                    self.capture_ranged_point(i, point);
+                }
+            }
+            self.enter_state(i, GameEntityState::Windup, stats);
+        }
+        let facing = self.yaw[i];
+        let before = self.position(i);
+        match intent.movement {
+            CombatMove::Still | CombatMove::Stick { .. } => {}
+            CombatMove::Step { dx, dz } => {
+                let p = mover.step(
+                    i,
+                    r.room,
+                    before,
+                    dx,
+                    dz,
+                    i32::from(r.radius),
+                    i32::from(r.height),
+                );
+                self.x[i] = p[0];
+                self.y[i] = p[1];
+                self.z[i] = p[2];
+            }
+            CombatMove::Direction { dx, dz } => {
+                let p = mover.step_direction(
+                    i,
+                    r.room,
+                    before,
+                    dx,
+                    dz,
+                    i32::from(r.radius),
+                    i32::from(r.height),
+                );
+                self.x[i] = p[0];
+                self.y[i] = p[1];
+                self.z[i] = p[2];
+            }
+            CombatMove::Toward { point, distance } => {
+                self.step_toward(r, i, point, distance, mover);
+            }
+        }
+        self.yaw[i] = facing;
+    }
+
+    /// The controller's follow-up once its intent has run: bookkeeping that
+    /// depends on what the move achieved.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
+    fn after_tactical_intent(
+        &mut self,
+        r: &LevelGameEntityRecord,
+        i: usize,
+        then: Then,
+        before: [i32; 3],
+        input: GameEntityTickInput<'_>,
+        delta: u16,
+        stats: &mut GameEntityTickStats,
+    ) {
+        match then {
+            Then::Done => {}
+            Then::Progress {
+                destination,
+                requested,
+            } => {
+                self.tactics[i].moved = Self::distance(before, self.position(i)) > 0;
+                self.monitor_progress(r, i, before, destination, requested, delta);
+            }
+            Then::WaitRetry {
+                probed,
+                inside_leash,
+            } => {
+                if probed {
+                    let committed = self.position(i);
+                    // Sliding sideways inside an enclosure is movement, but is
+                    // not evidence that the approach can resume. Do not erase
+                    // repeated failure just because a fallback direction moved.
+                    if self.tactics[i].retries < 3
+                        && Self::distance(committed, input.target.position)
+                            < Self::distance(before, input.target.position)
+                    {
+                        self.finish_goal(i, EnemyGoalResult::Cancelled);
+                        self.begin_goal(
+                            i,
+                            EnemyGoal::Approach,
+                            240,
+                            Self::melee_attack_reach(r, input),
+                        );
+                        return;
+                    }
+                }
+                if self.tactics[i].remaining != 0 {
+                    return;
+                }
+                self.finish_goal(i, EnemyGoalResult::Expired);
+                if self.tactics[i].home_cooldown != 0 {
+                    self.enter_state(i, GameEntityState::Idle, stats);
+                    return;
+                }
+                if self.tactics[i].retries >= 3
+                    || !inside_leash
+                    || self.tactics[i].unseen_ticks >= 240
+                {
+                    self.go_home(r, i);
+                } else {
+                    let left = self.draw(i, 2) == 0;
+                    let p = i32::from(r.preferred_distance).max(i32::from(r.radius) * 3);
+                    let yaw = psx_engine::Angle::from_q12(self.yaw[i] as u16)
+                        .add(psx_engine::Angle::from_q12(if left { 1024 } else { 3072 }));
+                    self.begin_goal(i, EnemyGoal::Reposition, 180, i32::from(r.radius));
+                    self.tactics[i].destination = [
+                        self.x[i] + yaw.sin().mul_i32(p),
+                        self.y[i],
+                        self.z[i] + yaw.cos().mul_i32(p),
+                    ];
+                }
+            }
+        }
+    }
+}
+
+/// What the tactical controller does once its intent has run.
+#[derive(Clone, Copy)]
+pub(super) enum Then {
+    /// Nothing more this tick.
+    Done,
+    /// Note whether the body moved and watch progress toward `destination`.
+    Progress {
+        /// Where the move was headed.
+        destination: [i32; 3],
+        /// Travel asked for this tick.
+        requested: i32,
+    },
+    /// Finish the wait-and-retry goal: read the probe step, then time out.
+    WaitRetry {
+        /// Whether a probe step toward the target was asked for.
+        probed: bool,
+        /// Whether the target was inside the home leash this tick.
+        inside_leash: bool,
+    },
+}
+
+/// One tick of tactical control: the intent for the rules and the
+/// controller's follow-up.
+#[derive(Clone, Copy)]
+pub(super) struct TacticalPlan {
+    pub(super) intent: CombatIntent,
+    pub(super) then: Then,
+}
+
+impl TacticalPlan {
+    /// Run `intent` with no follow-up.
+    pub(super) const fn run(intent: CombatIntent) -> Self {
+        Self {
+            intent,
+            then: Then::Done,
+        }
     }
 }
 

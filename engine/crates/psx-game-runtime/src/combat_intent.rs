@@ -182,6 +182,9 @@ pub struct CombatIntent {
     /// A world point to turn toward, at the fighter's own turn rate. None
     /// keeps the facing the movement and the rules give.
     pub face: Option<[i32; 3]>,
+    /// The world point a shot requested this tick aims at. None lets the
+    /// fighter's own aim decide (the pad's reticle).
+    pub aim: Option<[i32; 3]>,
     /// Actions requested this tick (press edges).
     pub pressed: CombatActions,
     /// Actions held this tick.
@@ -195,6 +198,7 @@ impl CombatIntent {
     pub const IDLE: Self = Self {
         movement: CombatMove::Still,
         face: None,
+        aim: None,
         pressed: CombatActions::NONE,
         held: CombatActions::NONE,
         released: CombatActions::NONE,
@@ -273,6 +277,7 @@ mod tests {
         let intent = CombatIntent {
             movement: CombatMove::Step { dx: 3, dz: -4 },
             face: Some([1, 2, 3]),
+            aim: None,
             pressed: every,
             held: every,
             released: every,
