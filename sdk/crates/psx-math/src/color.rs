@@ -13,7 +13,13 @@ pub fn scale_rgb(rgb: (u8, u8, u8), num: i32, den: i32) -> (u8, u8, u8) {
 /// clamp, so a `num` above 256 wraps the channel (`as u8`) the way those callers' code did; keep
 /// `num` at 256 or below, or use [`scale_rgb`] when a boost must saturate. `num` up to
 /// 16,843,009 cannot overflow the 32-bit product.
-#[inline]
+///
+/// Out of line on purpose: a call per use shares one body of about 100 bytes. Inlined it is
+/// about 70 bytes at every site, and a caller with many sites (the launcher has about sixty,
+/// NitroXide's `fx::dim` four) grows: measured, the launcher is 2,580 B smaller and
+/// NitroXide 272 B smaller with the call than with the inlined body, and 236 B smaller than
+/// with [`scale_rgb`] inlined at its four sites.
+#[inline(never)]
 #[must_use]
 pub const fn scale_rgb_q8(rgb: (u8, u8, u8), num: u32) -> (u8, u8, u8) {
     (
