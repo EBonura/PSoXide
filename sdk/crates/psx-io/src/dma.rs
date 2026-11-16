@@ -505,6 +505,11 @@ pub fn wait_done(ch: Channel, spins: u32) -> bool {
 /// CD channel's console wedges were (START latched, MADR frozen). Burst-mode
 /// channels without chopping need no assumption; see
 /// [`OrderingTableClearDma::clear_table`].
+///
+/// Always inlined: a sample-profiled caller (Half-Life's `psx_spu::dma_write`) otherwise keeps
+/// or drops it at the edge of the hot-call threshold, so an unrelated edit in the program moves
+/// an out-of-line copy (152 B) in and out of the image.
+#[inline(always)]
 pub fn wait_or_abort(ch: Channel, spins: u32) -> bool {
     let done = wait_done(ch, spins);
     if !done {
