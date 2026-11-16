@@ -152,8 +152,12 @@ unsafe fn state() -> &'static mut Bump {
 ///
 /// The heap is `__heap_start..__heap_end`. With the `alloc` feature the same heap is the global
 /// allocator's, so a block from here and a `Vec` share it.
+///
+/// Inlined: the one body a program with its own allocation API wraps (`malloc(size)` is
+/// `alloc_raw(size, 8)`) folds the alignment to a constant, which is smaller than the shared
+/// body called with a variable one.
 #[must_use]
-#[inline(never)]
+#[inline]
 pub fn alloc_raw(size: usize, align: usize) -> *mut u8 {
     // SAFETY: single-threaded foreground access per the `Sync` impl.
     unsafe { state().alloc(size, align) }
