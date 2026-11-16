@@ -37,7 +37,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         stats: &mut GameEntityTickStats,
     ) -> bool {
         let before = self.position(i);
-        let energy = self.flow[i].energy;
+        let energy = self.combatants[i].flow.energy;
         let order = self.exchanges[i].decide(
             before,
             self.tactics[i].last_seen,
@@ -192,16 +192,20 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
     }
     /// Current energy of entity `index`, 0 when out of range.
     pub fn energy(&self, index: usize) -> u16 {
-        self.flow.get(index).map_or(0, |f| f.energy)
+        self.combatants.get(index).map_or(0, |c| c.flow.energy)
     }
     /// True when flow rules are off or entity `index` can afford a shot.
     pub fn can_fire_energy(&self, index: usize) -> bool {
-        !self.flow_enabled || self.flow.get(index).is_some_and(|f| f.can_shoot())
+        !self.flow_enabled
+            || self
+                .combatants
+                .get(index)
+                .is_some_and(|c| c.flow.can_shoot())
     }
     /// Report that a shot by entity `index` landed; `interrupted` marks an interrupting hit.
     pub fn projectile_connected(&mut self, index: usize, interrupted: bool) {
         if self.flow_enabled {
-            if let Some(f) = self.flow.get_mut(index) {
+            if let Some(f) = self.combatants.get_mut(index).map(|c| &mut c.flow) {
                 f.shot_hit(interrupted);
             }
         }
@@ -209,7 +213,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
     /// Charge one shot to entity `index` (flow mode only).
     pub fn spend_shot_energy(&mut self, index: usize) {
         if self.flow_enabled {
-            if let Some(f) = self.flow.get_mut(index) {
+            if let Some(f) = self.combatants.get_mut(index).map(|c| &mut c.flow) {
                 f.spend_shot();
             }
         }
@@ -217,7 +221,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
     /// Credit entity `index` for a connected melee hit (flow mode only).
     pub fn gain_melee_energy(&mut self, index: usize, heavy: bool) {
         if self.flow_enabled {
-            if let Some(f) = self.flow.get_mut(index) {
+            if let Some(f) = self.combatants.get_mut(index).map(|c| &mut c.flow) {
                 f.melee_hit(heavy);
             }
         }
@@ -229,7 +233,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
             && records.get(index).is_some_and(|r| {
                 self.state(index) == GameEntityState::Windup
                     && self.state_ticks[index] >= u16::from(r.windup_ticks) / 2
-                    && self.flow[index].can_interrupt()
+                    && self.combatants[index].flow.can_interrupt()
             })
     }
     /// Apply a projectile hit; in flow mode the bolt's poise comes from `CombatFlow::shot_poise`.
@@ -245,7 +249,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
             return GameEntityHitOutcome::MISS;
         }
         let poise = if self.flow_enabled {
-            self.flow[index].shot_poise(
+            self.combatants[index].flow.shot_poise(
                 poise,
                 records[index].poise,
                 self.shot_opening(records, index),

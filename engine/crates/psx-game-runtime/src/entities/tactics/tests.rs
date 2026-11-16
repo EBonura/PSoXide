@@ -93,7 +93,7 @@ fn tick(
 #[test]
 fn stalk_run_hysteresis_and_real_walk_clip() {
     let mut e = engaged();
-    e.stance_swap_cooldown[0] = 6000;
+    e.combatants[0].stance.set_swap_cooldown(6000);
     let mut m = Arena::default();
     e.attack_cooldown[0] = 600;
     for _ in 0..8 {
@@ -340,8 +340,8 @@ fn single_enemy_encounter_replay_is_repeatable() {
 fn locked_cannon_approach_keeps_a_firing_band_instead_of_shuffling() {
     let mut e = engaged();
     let mut m = Arena::default();
-    e.combat_flags[0] |= GAME_ENTITY_STANCE_ZENITH;
-    e.stance_swap_cooldown[0] = 300;
+    e.combatants[0].stance.set_active(VitalityChannelId::Two);
+    e.combatants[0].stance.set_swap_cooldown(300);
     e.begin_goal(0, EnemyGoal::Approach, 300, 34);
     let mut fired = false;
     for _ in 0..100 {
@@ -439,7 +439,7 @@ fn spacing_speed_slows_only_directional_movement_at_both_tick_rates() {
                 let records = std::boxed::Box::leak(std::boxed::Box::new([record]));
                 let mut e = engaged();
                 e.attack_cooldown[0] = 600;
-                e.stance_swap_cooldown[0] = 600;
+                e.combatants[0].stance.set_swap_cooldown(600);
                 let target = [0, 0, if goal == EnemyGoal::Retreat { 30 } else { 64 }];
                 e.remember_target(0, target);
                 e.begin_goal(
@@ -562,7 +562,7 @@ fn slower_spacing_gait_clock_uses_its_own_nominal_speed() {
 fn two_cannon_attacks_lead_to_a_close_approach_after_spacing() {
     let mut e = engaged();
     let mut m = Arena::default();
-    e.combat_flags[0] |= GAME_ENTITY_STANCE_ZENITH;
+    e.combatants[0].stance.set_active(VitalityChannelId::Two);
     e.tactics[0].last_attack = GAME_ENTITY_ATTACK_RANGED;
     e.tactics[0].repeat_count = 2;
     e.attack_cooldown[0] = 240;
@@ -612,7 +612,7 @@ fn fractional_spacing_keeps_short_steps_and_cadence_without_idle_flicker() {
         let records = std::boxed::Box::leak(std::boxed::Box::new([r]));
         let mut e = engaged();
         e.attack_cooldown[0] = 600;
-        e.stance_swap_cooldown[0] = 600;
+        e.combatants[0].stance.set_swap_cooldown(600);
         e.remember_target(0, [0, 0, 30]);
         e.begin_goal(0, EnemyGoal::Retreat, 210, 128);
         let mut arena = Arena::default();
@@ -674,7 +674,7 @@ fn energy_replan_interrupts_spacing_but_not_an_attack() {
     e.enable_combat_flow(true);
     e.mutate_stance(0);
     e.advance_stance_swap(0, 12);
-    e.stance_swap_cooldown[0] = 0;
+    e.combatants[0].stance.set_swap_cooldown(0);
     for _ in 0..5 {
         e.spend_shot_energy(0);
     }
@@ -689,7 +689,7 @@ fn energy_replan_interrupts_spacing_but_not_an_attack() {
         GameEntityState::Attack,
         &mut GameEntityTickStats::default(),
     );
-    e.stance_swap_cooldown[0] = 0;
+    e.combatants[0].stance.set_swap_cooldown(0);
     tick(&mut e, &mut Arena::default(), [0, 200, 140], 2);
     assert_eq!(e.stance(0), VitalityChannelId::One);
 }
@@ -737,7 +737,7 @@ fn crowded_melee_tell_moves_through_collision_then_plants() {
 fn heavy_contact_creates_firing_distance_before_attacking() {
     let mut e = engaged();
     e.enable_combat_flow(true);
-    e.flow[0].melee_hit(true);
+    e.combatants[0].flow.melee_hit(true);
     let mut arena = Arena::default();
     let mut escaped = false;
     let mut attacked = false;
@@ -861,8 +861,8 @@ fn empty_energy_melee_enemy_sidesteps_with_lateral_clip_then_plants() {
     let mut e = engaged();
     let mut m = Arena::default();
     e.enable_combat_flow(true);
-    e.flow[0].energy = 0;
-    e.stance_swap_cooldown[0] = 6000;
+    e.combatants[0].flow.energy = 0;
+    e.combatants[0].stance.set_swap_cooldown(6000);
     e.projectile_threats[0] = Some(crate::projectiles::ProjectileThreat {
         position: [0, 32, 160],
         velocity: [0, 0, -8],
@@ -873,7 +873,7 @@ fn empty_energy_melee_enemy_sidesteps_with_lateral_clip_then_plants() {
     assert_eq!(e.intent(0), GameEntityIntent::CircleRight);
     assert_eq!(e.clip_for_state(&ENEMY, 0).clip, ENEMY[0].strafe_right_clip);
     assert_eq!(e.x[0], 8);
-    assert_eq!(e.flow[0].energy, 0);
+    assert_eq!(e.combatants[0].flow.energy, 0);
     e.projectile_threats[0] = None;
     for _ in 0..9 {
         tick(&mut e, &mut m, [0, 0, 224], 2);

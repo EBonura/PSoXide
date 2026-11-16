@@ -17,14 +17,10 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         self.y[index] = record.y;
         self.z[index] = record.z;
         self.yaw[index] = record.yaw;
-        self.health[index] = record.max_health;
-        self.health_secondary[index] = record.max_health_secondary;
-        self.poise[index] = crate::poise::Poise::EMPTY;
-        self.flow[index] = crate::combat_flow::CombatFlow::FULL;
+        self.combatants[index].respawn([record.max_health, record.max_health_secondary]);
         self.exchanges[index] = crate::ranged_tactics::RangedExchange::EMPTY;
         self.projectile_threats[index] = None;
         self.recoil[index] = [0; 3];
-        self.stance_pulse[index] = 0;
         self.patrol_leg[index] = 0;
         self.move_yaw[index] = 0;
         self.move_yaw_valid[index] = 0;
@@ -36,7 +32,6 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         self.attack_cooldown[index] = 0;
         self.attack_wait_ticks[index] = 0;
         self.attack_mode[index] = GAME_ENTITY_ATTACK_LIGHT;
-        self.set_stance_swap_elapsed(index, GAME_ENTITY_STANCE_SWAP_DURATION_TICKS);
         let enabled = record.flags & game_entity_flags::ENABLED != 0;
         self.state[index] = if enabled {
             GameEntityState::Idle as u8
@@ -92,8 +87,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         }
         if dormant.get(id) & dormant_state::DEAD != 0 {
             self.state[slot] = GameEntityState::Dead as u8;
-            self.health[slot] = 0;
-            self.health_secondary[slot] = 0;
+            self.combatants[slot].vitality.empty_all();
         }
         true
     }

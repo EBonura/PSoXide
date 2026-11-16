@@ -41,7 +41,8 @@ mod tactics;
 pub use tactics::{EnemyGoal, EnemyGoalResult, EnemyTacticalSnapshot};
 
 use crate::combat::{arc_hits_circle, MeleeArc};
-use crate::vitality::{DualVitality, VitalityChannelId, VitalityPool};
+use crate::combatant::Combatant;
+use crate::vitality::VitalityChannelId;
 use psx_level::{
     game_entity_flags, CharacterActionFrameRange, CharacterAnimationAction, LevelGameEntityRecord,
     RoomIndex, CHARACTER_ACTION_SPEED_UNSCALED_Q8,
@@ -143,14 +144,12 @@ const GAME_ENTITY_ATTACK_KIND_MASK: u8 = 3;
 const GAME_ENTITY_ATTACK_MELEE_CHASE: u8 = 1 << 6;
 const GAME_ENTITY_ATTACK_NEXT_HEAVY: u8 = 1 << 7;
 
-/// Enemy guard is packed into the spare bits of the one-hit-per-swing byte.
-/// Bit zero remains the contact latch, bit seven is the guarded channel, and
-/// bits one through four carry the short mutation tell. This costs no extra
-/// per-entity RAM at the 64 actor cap.
+/// One-hit-per-swing latch: set while the current Attack window already
+/// connected.
 const GAME_ENTITY_ATTACK_CONNECTED: u8 = 1;
-const GAME_ENTITY_STANCE_SWAP_SHIFT: u8 = 1;
-const GAME_ENTITY_STANCE_SWAP_MASK: u8 = 0b0001_1110;
-const GAME_ENTITY_STANCE_ZENITH: u8 = 1 << 7;
+
+/// Ticks the one-shot eye pulse lasts after a stance change.
+const GAME_ENTITY_STANCE_PULSE_TICKS: u16 = 30;
 
 /// Duration of the enemy guard-colour sweep in 60 Hz simulation ticks.
 pub const GAME_ENTITY_STANCE_SWAP_DURATION_TICKS: u8 = 12;
@@ -579,25 +578,16 @@ pub struct GameEntities<
     turn_ticks: [u8; MAX_ENTITIES],
     /// Phase local to the current continuous tracking turn.
     turn_phase_ticks: [u16; MAX_ENTITIES],
-    /// Remaining first-channel health (Horizon).
-    health: [u16; MAX_ENTITIES],
-    /// Remaining second-channel health (Zenith). Each entity carries the same
-    /// two vitality pools the player does; the maxima live in the cooked
-    /// record, so only the two currents are per-entity state here.
-    health_secondary: [u16; MAX_ENTITIES],
-    /// Accumulated poise damage (staggers past the record's pool).
-    poise: [crate::poise::Poise; MAX_ENTITIES],
+    /// Health, poise, energy and stance of each entity: the same
+    /// [`Combatant`] the player holds.
+    combatants: [Combatant; MAX_ENTITIES],
     player_attack_read: u8,
     projectile_threats: [Option<crate::projectiles::ProjectileThreat>; MAX_ENTITIES],
     exchanges: [crate::ranged_tactics::RangedExchange; MAX_ENTITIES],
     flow_enabled: bool,
-    flow: [crate::combat_flow::CombatFlow; MAX_ENTITIES],
     recoil: [[i16; 3]; MAX_ENTITIES],
-    /// One-shot eye pulse age plus one; zero means no pulse (including spawn).
-    stance_pulse: [u8; MAX_ENTITIES],
     /// Same cooked cooldown as the player, with independent per-enemy clocks.
     stance_swap_delay: u16,
-    stance_swap_cooldown: [u16; MAX_ENTITIES],
     /// World aim point frozen at the charge cutoff, independent of muzzle offset.
     ranged_aim_target: [[i32; 3]; MAX_ENTITIES],
     /// Patrol leg: 0 = toward the patrol anchor, 1 = toward spawn.
@@ -608,9 +598,8 @@ pub struct GameEntities<
     move_yaw_valid: [u8; MAX_ENTITIES],
     /// Directions rejected during the current bounded local search.
     move_tried: [u8; MAX_ENTITIES],
-    /// Packed combat presentation/latch byte. Bit zero is one while the
-    /// current Attack window already connected; bits one through four retain
-    /// stance-mutation elapsed ticks; bit seven selects Zenith guard.
+    /// Combat latch byte: [`GAME_ENTITY_ATTACK_CONNECTED`] while the current
+    /// Attack window already connected.
     combat_flags: [u8; MAX_ENTITIES],
     /// Wrapping identity of each entity's current swing. Deferred tokens use
     /// it to reject a contact retained across a later attack.
@@ -796,18 +785,13 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         state_ticks: [0; MAX_ENTITIES],
         turn_ticks: [0; MAX_ENTITIES],
         turn_phase_ticks: [0; MAX_ENTITIES],
-        health: [0; MAX_ENTITIES],
-        health_secondary: [0; MAX_ENTITIES],
-        poise: [crate::poise::Poise::EMPTY; MAX_ENTITIES],
+        combatants: [Combatant::EMPTY; MAX_ENTITIES],
         player_attack_read: 0,
         projectile_threats: [None; MAX_ENTITIES],
         exchanges: [crate::ranged_tactics::RangedExchange::EMPTY; MAX_ENTITIES],
         flow_enabled: false,
-        flow: [crate::combat_flow::CombatFlow::FULL; MAX_ENTITIES],
         recoil: [[0; 3]; MAX_ENTITIES],
-        stance_pulse: [0; MAX_ENTITIES],
         stance_swap_delay: 0,
-        stance_swap_cooldown: [0; MAX_ENTITIES],
         ranged_aim_target: [[0; 3]; MAX_ENTITIES],
         patrol_leg: [0; MAX_ENTITIES],
         move_yaw: [0; MAX_ENTITIES],
@@ -877,7 +861,9 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
 
     /// Remaining voluntary guard-swap cooldown for a living enemy.
     pub fn stance_swap_cooldown(&self, index: usize) -> u16 {
-        self.stance_swap_cooldown.get(index).copied().unwrap_or(0)
+        self.combatants
+            .get(index)
+            .map_or(0, |c| c.stance.swap_cooldown())
     }
 
     /// Cooked records that did not fit `MAX_ENTITIES` at spawn.
@@ -962,7 +948,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         if index >= self.count() {
             0
         } else {
-            self.health[index]
+            self.combatants[index].health()[0]
         }
     }
 
@@ -971,7 +957,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         if index >= self.count() {
             0
         } else {
-            self.health_secondary[index]
+            self.combatants[index].health()[1]
         }
     }
 
@@ -984,10 +970,10 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     }
 
     /// Vitality channel currently guarded by entity `index`.
-    /// Out-of-range entities fail to Horizon, the all-zero packed default.
+    /// Out-of-range entities fail to Horizon, the side a fresh combatant holds.
     pub fn stance(&self, index: usize) -> VitalityChannelId {
-        if index < self.count() && self.combat_flags[index] & GAME_ENTITY_STANCE_ZENITH != 0 {
-            VitalityChannelId::Two
+        if index < self.count() {
+            self.combatants[index].stance.active()
         } else {
             VitalityChannelId::One
         }
@@ -1007,7 +993,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     /// Whether the entity's rising stance-colour tell is still active.
     pub fn stance_swap_in_progress(&self, index: usize) -> bool {
         index < self.count()
-            && self.stance_swap_elapsed(index) < GAME_ENTITY_STANCE_SWAP_DURATION_TICKS
+            && self.stance_swap_elapsed(index) < u16::from(GAME_ENTITY_STANCE_SWAP_DURATION_TICKS)
     }
 
     /// Half-second eye pulse, once per actual stance change. No pulse on spawn.
@@ -1015,9 +1001,8 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         if index >= self.count() || self.state(index) == GameEntityState::Dead {
             return None;
         }
-        self.stance_pulse[index]
-            .checked_sub(1)
-            .map(|age| u16::from(age) * 4096 / 30)
+        let age = self.stance_swap_elapsed(index);
+        (age < GAME_ENTITY_STANCE_PULSE_TICKS).then(|| age * 4096 / 30)
     }
 
     /// Apply the current enemy guard to one authored damage value: the
@@ -1068,35 +1053,20 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         (u32::from(poise_damage) * u32::from(applied) / u32::from(damage)) as u16
     }
 
-    fn stance_swap_elapsed(&self, index: usize) -> u8 {
-        (self.combat_flags[index] & GAME_ENTITY_STANCE_SWAP_MASK) >> GAME_ENTITY_STANCE_SWAP_SHIFT
+    /// Ticks since the entity's latest stance change began; `u16::MAX` when
+    /// it has not changed since spawning. The eye pulse is read off the same
+    /// clock, so it needs no state of its own.
+    fn stance_swap_elapsed(&self, index: usize) -> u16 {
+        self.combatants[index].stance.swap_elapsed_ticks()
     }
 
-    fn set_stance_swap_elapsed(&mut self, index: usize, elapsed: u8) {
-        let elapsed = elapsed.min(GAME_ENTITY_STANCE_SWAP_DURATION_TICKS);
-        self.combat_flags[index] = (self.combat_flags[index] & !GAME_ENTITY_STANCE_SWAP_MASK)
-            | (elapsed << GAME_ENTITY_STANCE_SWAP_SHIFT);
-    }
-
+    #[cfg(test)]
     fn advance_stance_swap(&mut self, index: usize, delta_ticks: u16) {
-        if self.stance_pulse[index] != 0 {
-            let next = u16::from(self.stance_pulse[index]).saturating_add(delta_ticks);
-            self.stance_pulse[index] = if next > 30 { 0 } else { next as u8 };
-        }
-        let elapsed = self
-            .stance_swap_elapsed(index)
-            .saturating_add(delta_ticks.min(u16::from(u8::MAX)) as u8);
-        self.set_stance_swap_elapsed(index, elapsed);
+        self.combatants[index].stance.advance_swap(delta_ticks);
     }
 
     fn mutate_stance(&mut self, index: usize) {
-        if self.stance_swap_cooldown[index] != 0 {
-            return;
-        }
-        self.combat_flags[index] ^= GAME_ENTITY_STANCE_ZENITH;
-        self.set_stance_swap_elapsed(index, 0);
-        self.stance_pulse[index] = 1;
-        self.stance_swap_cooldown[index] = self.stance_swap_delay;
+        self.combatants[index].request_swap(self.stance_swap_delay);
     }
 
     fn capture_ranged_aim(&mut self, index: usize, input: GameEntityTickInput) {
@@ -1219,17 +1189,6 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             return [0; 3];
         };
         crate::projectiles::velocity_toward(muzzle, target, speed)
-    }
-
-    /// Entity `index`'s two vitality pools, rehydrated from the dense state
-    /// tables and the cooked maxima. The whole point is that enemy vitality
-    /// obeys [`DualVitality`] itself rather than a parallel reimplementation.
-    fn vitality(&self, records: &[LevelGameEntityRecord], index: usize) -> DualVitality {
-        let record = &records[index];
-        DualVitality::from_pools(
-            VitalityPool::at(self.health[index], record.max_health),
-            VitalityPool::at(self.health_secondary[index], record.max_health_secondary),
-        )
     }
 
     /// Clip selection for entity `index`'s current state. Locomotion
@@ -1378,10 +1337,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         if self.state(index) == GameEntityState::Dead {
             return GameEntityHitOutcome::MISS;
         }
-        let mut vitality = self.vitality(records, index);
-        let defeated = vitality.apply_spill(channel, damage).actor_defeated;
-        self.health[index] = vitality.pool(VitalityChannelId::One).current();
-        self.health_secondary[index] = vitality.pool(VitalityChannelId::Two).current();
+        let defeated = self.combatants[index].take_spill_damage(channel, damage);
         if defeated {
             self.release_attack_owner(index, u16::from(records[index].group_attack_delay_ticks));
             self.enter_state(
@@ -1397,15 +1353,17 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         }
         let armored = self.state(index) == GameEntityState::Attack
             && self.selected_attack_kind(index) == GAME_ENTITY_ATTACK_HEAVY;
-        let protected = self.flow_enabled
-            && (!self.flow[index].can_interrupt()
-                || self.state(index) == GameEntityState::Staggered);
-        let staggered =
-            !protected && self.poise[index].hit(poise_damage, records[index].poise, armored);
+        // Break grace and the no-break-while-staggered rule are flow rules.
+        let grace = self.flow_enabled;
+        let blocked = grace && self.state(index) == GameEntityState::Staggered;
+        let staggered = self.combatants[index].poise_hit(
+            poise_damage,
+            records[index].poise,
+            armored,
+            grace,
+            blocked,
+        );
         if staggered {
-            if self.flow_enabled {
-                self.flow[index].broke();
-            }
             self.release_attack_owner(index, u16::from(records[index].group_attack_delay_ticks));
             self.enter_state(
                 index,
@@ -1574,11 +1532,9 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             self.tactics[index].home_cooldown = self.tactics[index]
                 .home_cooldown
                 .saturating_sub(delta_ticks);
-            self.advance_stance_swap(index, delta_ticks);
-            self.stance_swap_cooldown[index] =
-                self.stance_swap_cooldown[index].saturating_sub(delta_ticks);
-            self.poise[index].tick(delta_ticks);
-            self.flow[index].tick(delta_ticks, state == GameEntityState::Staggered);
+            let combatant = &mut self.combatants[index];
+            combatant.advance_stance(delta_ticks);
+            combatant.tick(delta_ticks, state == GameEntityState::Staggered);
             self.exchanges[index].tick(delta_ticks);
             if self.flow_enabled {
                 self.step_recoil(record, index, mover, delta_ticks);
@@ -2204,7 +2160,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
                 VitalityChannelId::Two
             };
             if desired != self.stance(index)
-                && self.stance_swap_cooldown[index] == 0
+                && self.stance_swap_cooldown(index) == 0
                 && self.player_in_line_of_sight(record, index, input, mover)
             {
                 self.mutate_stance(index);
@@ -3165,7 +3121,7 @@ mod tests {
         assert_eq!(e.stance(0), VitalityChannelId::Two);
         assert_eq!(e.intent(0), GameEntityIntent::Retreat);
         assert!(e.position(0)[0] < 1000);
-        e.stance_swap_cooldown[0] = 0;
+        e.combatants[0].stance.set_swap_cooldown(0);
         e.mutate_stance(0);
         e.advance_stance_swap(0, 12);
         let before = e.position(0);
@@ -3210,7 +3166,7 @@ mod tests {
         );
         e.tick_delta(&RANGED_ENEMY, far, &mut BlockedMover, 1);
         assert_eq!(e.stance(0), VitalityChannelId::Two);
-        e.stance_swap_cooldown[0] = 0;
+        e.combatants[0].stance.set_swap_cooldown(0);
         e.advance_stance_swap(0, 12);
         e.tick_delta(&RANGED_ENEMY, band, &mut BlockedMover, 1);
         assert_eq!(
@@ -4460,7 +4416,9 @@ mod tests {
 
         let mut exposed = GameEntities::<8>::EMPTY;
         exposed.spawn_from_records(&IDLE_ENEMY);
-        exposed.combat_flags[0] |= GAME_ENTITY_STANCE_ZENITH;
+        exposed.combatants[0]
+            .stance
+            .set_active(VitalityChannelId::Two);
         let first = exposed.apply_stance_hit(&IDLE_ENEMY, 0, VitalityChannelId::One, 20, 40);
         let second = exposed.apply_stance_hit(&IDLE_ENEMY, 0, VitalityChannelId::One, 20, 40);
         assert!(!first.staggered && second.staggered);
@@ -4718,7 +4676,7 @@ mod tests {
         assert_eq!(e.stance_eye_pulse_q12(0), before);
         e.advance_stance_swap(0, 18);
         assert_eq!(e.stance_eye_pulse_q12(0), None);
-        e.stance_swap_cooldown[0] = 0;
+        e.combatants[0].stance.set_swap_cooldown(0);
         e.mutate_stance(0);
         assert_eq!(e.stance(0), VitalityChannelId::One);
         assert_eq!(e.stance_eye_pulse_q12(0), Some(0));
@@ -4879,7 +4837,9 @@ mod tests {
         entities.set_spatial_active_mask(u64::MAX);
         // Guard Zenith so the Horizon (One) swings below land on the exposed
         // channel (1.5x); these tests are about arc mechanics, not the chip.
-        entities.combat_flags[0] |= GAME_ENTITY_STANCE_ZENITH;
+        entities.combatants[0]
+            .stance
+            .set_active(VitalityChannelId::Two);
         let arc = MeleeArc {
             room: RoomIndex(0),
             x: 1000,
@@ -5035,7 +4995,9 @@ mod tests {
         entities.set_spatial_active_mask(u64::MAX);
         // Guard Zenith so the Horizon (One) swings below land on the exposed
         // channel (1.5x); these tests are about arc mechanics, not the chip.
-        entities.combat_flags[0] |= GAME_ENTITY_STANCE_ZENITH;
+        entities.combatants[0]
+            .stance
+            .set_active(VitalityChannelId::Two);
         let arc = MeleeArc {
             room: RoomIndex(0),
             x: 1200,
@@ -5097,7 +5059,9 @@ mod tests {
         entities.set_spatial_active_mask(u64::MAX);
         // Guard Zenith so the Horizon (One) swings below land on the exposed
         // channel (1.5x); these tests are about arc mechanics, not the chip.
-        entities.combat_flags[0] |= GAME_ENTITY_STANCE_ZENITH;
+        entities.combatants[0]
+            .stance
+            .set_active(VitalityChannelId::Two);
         // Player at (1200, 1000) facing -X: the enemy at (1000, 1000)
         // sits dead ahead, 200 units out.
         let arc = MeleeArc {

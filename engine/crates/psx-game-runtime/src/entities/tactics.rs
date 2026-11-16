@@ -533,7 +533,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
             && t.sample_ticks >= 180;
         if no_travel || no_progress {
             if self.flow_enabled && t.goal == EnemyGoal::BreakAway {
-                self.flow[i].contest_space();
+                self.combatants[i].flow.contest_space();
                 self.finish_goal(i, EnemyGoalResult::Blocked);
                 self.release_attack_owner(i, 0);
                 return;
@@ -723,7 +723,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
                 && visible
                 && self.player_within(i, input, Self::melee_attack_reach(r, input) * 3)
             {
-                self.flow[i].contest_space();
+                self.combatants[i].flow.contest_space();
             }
             self.finish_goal(i, EnemyGoalResult::Expired);
             if goal == EnemyGoal::ReturnHome {
@@ -800,7 +800,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
             let (stance, reason) = crate::combat_policy::stance_choice(
                 melee,
                 self.stance(i),
-                [self.health[i], self.health_secondary[i]],
+                self.combatants[i].health(),
                 [r.max_health, r.max_health_secondary],
                 press_after_cannon,
                 if visible { input.player_combat } else { None },
@@ -808,12 +808,18 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
             let mut stance_reason = reason as u8;
             let mut desired = stance;
             if self.flow_enabled {
-                desired = if self.flow[i].preferred_stance(stance.index() as u8, separated) == 0 {
+                desired = if self.combatants[i]
+                    .flow
+                    .preferred_stance(stance.index() as u8, separated)
+                    == 0
+                {
                     VitalityChannelId::One
                 } else {
                     VitalityChannelId::Two
                 };
-                stance_reason = self.flow[i].stance_reason(stance_reason, separated);
+                stance_reason = self.combatants[i]
+                    .flow
+                    .stance_reason(stance_reason, separated);
                 let (near, _) = crate::combat_flow::ranged_band(
                     i32::from(r.preferred_distance),
                     Self::melee_attack_reach(r, input) + 16,
@@ -836,7 +842,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
                 desired = VitalityChannelId::Two;
                 stance_reason = 8;
             }
-            if desired != self.stance(i) && self.stance_swap_cooldown[i] == 0 && visible {
+            if desired != self.stance(i) && self.stance_swap_cooldown(i) == 0 && visible {
                 self.mutate_stance(i);
                 if self.stance(i) == desired {
                     self.tactics[i].stance_reason = stance_reason;
@@ -1084,7 +1090,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
                 // Do not kite a live opponent past the home leash and then
                 // attempt to walk through them to reset. Contest the space here.
                 if Self::distance(before, home) >= i32::from(r.aggro_radius) {
-                    self.flow[i].contest_space();
+                    self.combatants[i].flow.contest_space();
                     self.finish_goal(i, EnemyGoalResult::Cancelled);
                     return;
                 }
