@@ -64,6 +64,7 @@ dependencies = [
  "psx-gpu",
  "psx-hw",
  "psx-io",
+ "psx-math",
  "psx-tick",
 ]
 

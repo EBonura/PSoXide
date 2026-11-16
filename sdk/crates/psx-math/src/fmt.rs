@@ -68,6 +68,37 @@ pub fn u32_dec(buf: &mut [u8], mut v: u32) -> &str {
     ascii(&buf[i..])
 }
 
+/// Maximum bytes `u32_hex` can produce (eight digits).
+pub const U32_HEX_MAX: usize = 8;
+
+/// Format the low `digits` hex digits of `v` (0 to 8) as upper-case ASCII at the START of `buf`
+/// and return them as `&str`. Fixed width, zero-padded, no `0x` prefix: a register, an address
+/// or a checksum as every diagnostic prints it. `buf` must hold `digits` bytes (an undersized
+/// one panics, like the decimal writers).
+///
+/// Built for size and kept out of line on the console, like [`u32_dec`].
+///
+/// ```
+/// use psx_math::fmt::{u32_hex, U32_HEX_MAX};
+/// let mut buf = [0u8; U32_HEX_MAX];
+/// assert_eq!(u32_hex(&mut buf, 0xBEEF, 8), "0000BEEF");
+/// assert_eq!(u32_hex(&mut buf, 0x1234_ABCD, 4), "ABCD");
+/// ```
+#[cfg_attr(target_arch = "mips", optimize(size), inline(never))]
+pub fn u32_hex(buf: &mut [u8], v: u32, digits: usize) -> &str {
+    let mut i = digits;
+    while i > 0 {
+        i -= 1;
+        let nibble = ((v >> (i * 4)) & 15) as u8;
+        buf[digits - 1 - i] = if nibble < 10 {
+            b'0' + nibble
+        } else {
+            b'A' + nibble - 10
+        };
+    }
+    ascii(&buf[..digits])
+}
+
 /// Format `v` as decimal ASCII into `buf`, returning the digits as `&str`.
 ///
 /// Right-aligned like [`u32_dec`]. `buf` must be at least [`I32_DEC_MAX`] bytes
@@ -165,6 +196,35 @@ pub fn tenths_dec(buf: &mut [u8], tenths: u32) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn u32_hex_matches_the_format_macro_for_every_width() {
+        extern crate std;
+        use std::format;
+        let mut b = [0u8; U32_HEX_MAX];
+        for v in [
+            0u32,
+            1,
+            9,
+            10,
+            15,
+            16,
+            0xbeef,
+            0x1234_abcd,
+            u32::MAX,
+            0x8000_0000,
+        ] {
+            for digits in 0..=8usize {
+                let want = if digits == 0 {
+                    std::string::String::new()
+                } else {
+                    let full = format!("{v:08X}");
+                    full[8 - digits..].into()
+                };
+                assert_eq!(u32_hex(&mut b, v, digits), want, "{v:#x} x{digits}");
+            }
+        }
+    }
 
     #[test]
     fn u32_basics() {

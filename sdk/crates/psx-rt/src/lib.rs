@@ -316,22 +316,10 @@ extern "C" fn report_panic(info: *const u8) -> ! {
             tty::print("  at ");
             tty::print(loc.file());
             tty::print(":");
-            // Print the line number (no fmt machinery in no_std): up to 8 digits.
-            let mut line = loc.line();
-            let mut buf = [0u8; 8];
-            let mut i = buf.len();
-            if line == 0 {
-                i -= 1;
-                buf[i] = b'0';
-            }
-            while line > 0 && i > 0 {
-                i -= 1;
-                buf[i] = b'0' + (line % 10) as u8;
-                line /= 10;
-            }
-            // SAFETY: the bytes are ASCII digits, valid UTF-8. Checking them with `from_utf8` would keep
-            // the whole UTF-8 validator (1 KB) in every game whose panic handler reaches here.
-            tty::print(unsafe { core::str::from_utf8_unchecked(&buf[i..]) });
+            // The line number through psx_math::fmt: no fmt machinery, and no UTF-8 validator
+            // (its writers return the digits as `&str` unchecked).
+            let mut buf = [0u8; psx_math::fmt::U32_DEC_MAX];
+            tty::print(psx_math::fmt::u32_dec(&mut buf, loc.line()));
             tty::print("\n");
         }
         halt()
