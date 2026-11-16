@@ -28,7 +28,16 @@ pub struct RangedOrder {
     pub fire: bool,
     /// True while a projectile sidestep is active.
     pub evade: bool,
+    /// True when the exchange has gone [`DRY_CYCLES`] cover cycles without
+    /// a shot: neither side can see the other from cover, so the caller
+    /// should contest the space (close in) instead of hiding again.
+    pub contest: bool,
 }
+
+/// Cover cycles (a peek that never saw the target, or an open spell that
+/// fired nothing) after which the exchange asks its owner to contest the
+/// space. PLACEHOLDER, the duel harness tunes it.
+pub const DRY_CYCLES: u8 = 2;
 
 /// Fixed storage, including an incremental search rather than an unbounded frame spike.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,6 +54,7 @@ pub struct RangedExchange {
     shots: u8,
     candidate: u8,
     side: i32,
+    dry: u8,
 }
 impl RangedExchange {
     /// Open-field state with no timers running.
@@ -60,6 +70,7 @@ impl RangedExchange {
         shots: 0,
         candidate: 0,
         side: 1,
+        dry: 0,
     };
     /// Advance the timers by `delta` ticks.
     pub fn tick(&mut self, delta: u16) {
@@ -90,7 +101,18 @@ impl RangedExchange {
                 && distance(from, self.destination) > 4,
             fire: self.mode == OPEN,
             evade: self.mode == EVADE,
+            contest: false,
         }
+    }
+    /// The order after a decision, asking to contest the space once the
+    /// exchange has run dry.
+    fn decided(&mut self, from: [i32; 3]) -> RangedOrder {
+        let mut order = self.order(from);
+        if self.dry >= DRY_CYCLES {
+            self.dry = 0;
+            order.contest = true;
+        }
+        order
     }
     /// Observe released projectiles independently of cover's slower decision cadence.
     /// An active sidestep includes its vulnerable recovery; no attack can start in it.
@@ -139,6 +161,7 @@ impl RangedExchange {
     ) -> RangedOrder {
         if energy < self.last_energy {
             self.shots = self.shots.saturating_add(1);
+            self.dry = 0;
         }
         self.last_energy = energy;
         if self.try_evade(from, radius, height, threat, clear) {
@@ -174,10 +197,16 @@ impl RangedExchange {
                     self.shots = 0;
                     self.enter(OPEN, 120, from);
                 } else if self.timer == 0 {
+                    // The peek never saw the target: a dry cycle.
+                    self.dry = self.dry.saturating_add(1);
                     self.enter(SEARCH, 144, from);
                 }
             }
             OPEN if self.shots >= 2 || self.timer == 0 => {
+                if self.shots == 0 {
+                    // In the open the whole spell and nothing fired.
+                    self.dry = self.dry.saturating_add(1);
+                }
                 self.enter(SEARCH, 144, from);
                 self.candidate = 0;
             }
@@ -217,7 +246,7 @@ impl RangedExchange {
                             self.peek = peek;
                             self.side = sign;
                             self.enter(SEEK_COVER, 180, candidate);
-                            return self.order(from);
+                            return self.decided(from);
                         }
                     }
                 }
@@ -237,7 +266,7 @@ impl RangedExchange {
                 }
             }
         }
-        self.order(from)
+        self.decided(from)
     }
 }
 fn eye(mut p: [i32; 3], height: i32) -> [i32; 3] {
@@ -337,6 +366,33 @@ mod tests {
         assert!(e.current_order([0; 3]).destination[0] < 0);
         e = RangedExchange::EMPTY;
         assert!(!e.try_evade([0; 3], 12, 72, threat, &mut |_, b| b[0].abs() < 32));
+    }
+    #[test]
+    fn a_blind_exchange_asks_to_contest_the_space() {
+        // Nothing near the target is ever visible: every peek fails.
+        let mut blind = |a: [i32; 3], b: [i32; 3]| a[2] < 200 && b[2] < 200;
+        let mut exchange = RangedExchange::EMPTY;
+        let mut p = [0, 0, 0];
+        let target = [0, 0, 224];
+        let mut contest_at = None;
+        for step in 0..400 {
+            exchange.tick(12);
+            let o = exchange.decide(p, target, 12, 72, 256, 100, None, &mut blind);
+            assert!(!o.contest || exchange.dry == 0);
+            if o.contest {
+                contest_at = Some(step);
+                break;
+            }
+            if o.moving {
+                p = o.destination;
+            }
+        }
+        assert!(contest_at.is_some(), "a blind exchange must end");
+        // A shot (energy spent) clears the dry count.
+        let mut e = RangedExchange::EMPTY;
+        e.dry = DRY_CYCLES - 1;
+        let _ = e.decide([0; 3], target, 12, 72, 256, 80, None, &mut blind);
+        assert_eq!(e.dry, 0);
     }
     #[test]
     fn hides_behind_actual_geometry_then_peeks_before_firing() {

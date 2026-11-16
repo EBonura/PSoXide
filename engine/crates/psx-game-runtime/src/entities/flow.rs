@@ -50,6 +50,11 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
             &mut |a, b| mover.line_of_sight(r.room, a, b),
         );
         self.tactics[i].combat_role = self.exchanges[i].mode;
+        // A dry exchange (nobody can see anybody from cover): close in, the
+        // same answer the duel bot gives.
+        if order.contest {
+            self.combatants[i].flow.contest_space();
+        }
         if order.fire {
             return None;
         }

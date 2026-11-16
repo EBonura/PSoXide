@@ -561,7 +561,7 @@ impl Playtest {
             .is_some();
         let world_rt = &mut self.world_rt;
         let destructibles = &self.destructibles;
-        self.duel.exchange.decide(
+        let order = self.duel.exchange.decide(
             from,
             target,
             radius,
@@ -582,7 +582,12 @@ impl Playtest {
                             .is_ok_and(|trace| !trace.hit())
                     })
             },
-        )
+        );
+        // A dry exchange (nobody can see anybody from cover): close in.
+        if order.contest {
+            self.player.flow.contest_space();
+        }
+        order
     }
     fn duel_last_ranged_order(
         &self,
