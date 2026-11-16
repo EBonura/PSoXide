@@ -1045,6 +1045,17 @@ fn a_parry_crit_is_spent_with_the_swapped_to_weapon() {
     assert_eq!(e.state(0), GameEntityState::Windup);
     assert_eq!(e.selected_attack_kind(0), GAME_ENTITY_ATTACK_LIGHT);
     assert_eq!(e.attack_owner(), Some(0));
+    // The strike reaches its active frames inside the crit window: it is
+    // the crit strike (double damage and poise under the placeholders).
+    let mut ticks = 0;
+    while e.state(0) == GameEntityState::Windup {
+        e.tick_delta(&records[..], input([0, 0, 30]), &mut Arena::default(), 2);
+        ticks += 2;
+    }
+    assert_eq!(e.state(0), GameEntityState::Attack);
+    assert!(ticks < records[0].combat.crit_window_ticks);
+    assert!(e.crit_armed(0));
+    assert_eq!(e.crit_scaled(&records[..], 0, 10, 3), (20, 6));
     // Zenith stance, crit armed, energy to spare: the crit shot, even at range.
     let mut g: GameEntities<2, true> = GameEntities::EMPTY;
     g.spawn_from_records(&records[..]);
