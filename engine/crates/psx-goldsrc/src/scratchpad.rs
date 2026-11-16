@@ -14,7 +14,7 @@ pub use psx_rt::scratchpad::{clear, ptr_at, ScratchpadStack, SIZE};
 const PROJECTION_GUARD_OFFSET: usize = 140;
 const PROJECTION_GUARD: u32 = 0x5a17_c0de;
 
-/// Execute one context entry on the recyclable projection stack.
+/// Run `f` on the recyclable projection stack.
 ///
 /// The stack is `ScratchpadStack<GUARD_END, SIZE>`: `stack-guard` proves the linked chain fits
 /// its budget after every link. A canary extends from byte 140 to `GUARD_END`, below the
@@ -23,12 +23,10 @@ const PROJECTION_GUARD: u32 = 0x5a17_c0de;
 ///
 /// # Safety
 /// The caller must ensure the face-group bitsets at bytes 128..840 are dead,
-/// `entry` follows the C ABI, and `context` remains valid until it returns.
+/// and `f` keeps its own data out of bytes 140..SIZE. `f` is called directly (no function pointer),
+/// so `stack-guard` can bound its whole call tree.
 #[inline(always)]
-pub unsafe fn call_on_projection_stack<const GUARD_END: usize>(
-    context: *mut u8,
-    entry: unsafe extern "C" fn(*mut u8),
-) -> bool {
+pub unsafe fn call_on_projection_stack<const GUARD_END: usize, F: FnOnce()>(f: F) -> bool {
     const { assert!(GUARD_END > PROJECTION_GUARD_OFFSET && GUARD_END < SIZE) };
     let guard_words = (GUARD_END - PROJECTION_GUARD_OFFSET) / core::mem::size_of::<u32>();
     // SAFETY: bytes 140..GUARD_END are this call's canary; the caller guarantees nothing else
@@ -40,9 +38,9 @@ pub unsafe fn call_on_projection_stack<const GUARD_END: usize>(
         unsafe { guard.add(i).write(PROJECTION_GUARD ^ i as u32) };
         i += 1;
     }
-    // SAFETY: the caller guarantees GUARD_END..SIZE is free and `entry`/`context` are valid;
+    // SAFETY: the caller guarantees GUARD_END..SIZE is free;
     // `stack-guard` proves the linked call tree fits the stack's budget.
-    unsafe { ScratchpadStack::<GUARD_END, SIZE>::run(|| entry(context)) };
+    unsafe { ScratchpadStack::<GUARD_END, SIZE>::run(f) };
     i = 0;
     while i < guard_words {
         // SAFETY: as above.
