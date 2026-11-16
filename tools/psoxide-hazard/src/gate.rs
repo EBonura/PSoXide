@@ -9,7 +9,8 @@
 //! * a feature of an SDK crate that `[shipping]` and `[diag]` do not list (sdk/docs/GATE.md rule 2);
 //! * a hardware register address, an exception-vector write or COP0 assembly in the program's
 //!   own sources, and a private copy of an SDK crate in its graph (rule 3);
-//! * a call of a deprecated SDK entry point.
+//! * a call of a deprecated SDK entry point;
+//! * with `--gpu-words`, a raw GP0 or GP1 command word (`gpu-word`, see [`gpu_word_in`]).
 //!
 //! Today's violations are listed as exceptions (a ratchet): a violation not listed is refused, a
 //! listed one that is gone or has fewer hits than its count is refused too, so the list can only
@@ -61,6 +62,73 @@ const REGISTER: &str = r"(?i)0x1f80|0xbf80|0x9f80|1f80_|1f80[0-9a-f]{4}h";
 const VECTOR: &str = r"(?i)0x[0-9a-f_]*(8000|a000)_?0080|declare_stack_safe_handler";
 const COP0: &str = r"\b(mfc0|mtc0|rfe|cfc0|ctc0)\b";
 
+/// Whether `v` reads as a GP0 or GP1 command word: a command byte in the top eight bits and a
+/// payload that fits that command. The payload test is what keeps hash primes (`0x0100_0193`),
+/// flag bits (`1 << 24`, `0x8000_0000`, `0x4000_0000`), KSEG bases (`0xA000_0000`) and GTE command
+/// words (`0x4A18_0001`) out: a constant that happens to start with an `E1` byte almost never has
+/// the bits above the command's payload clear. Commands covered: GP1 `02` to `09` (acknowledge,
+/// display enable, DMA direction, display start, horizontal and vertical range, display mode,
+/// texture disable), GP0 `1F` (IRQ), `E1` to `E6` (draw mode, window, area, offset, mask), and the
+/// bare primitive and copy commands with no payload (`20`..`7F` that are not a single bit).
+fn gpu_word(v: u32) -> bool {
+    let (top, payload) = ((v >> 24) as u8, v & 0x00ff_ffff);
+    match top {
+        0x02 | 0x1f => payload == 0,
+        0x03 | 0x09 => payload < 2,
+        0x04 => payload < 4,
+        0x05 => payload < 1 << 19,
+        0x06 | 0x07 => payload < 1 << 20,
+        0x08 => payload < 0x100,
+        0xe1 => payload < 1 << 16,
+        0xe2..=0xe4 => payload < 1 << 20,
+        0xe5 => payload < 1 << 22,
+        0xe6 => payload < 4,
+        0x20..=0x7f => payload == 0 && !top.is_power_of_two(),
+        _ => false,
+    }
+}
+
+/// The command byte of a `<< 24` form: `0xE1 << 24`, `(0x30u32) << 24`, `225 << 24`.
+fn gpu_command_byte(v: u64) -> bool {
+    matches!(v, 0x1f | 0x20..=0x7f | 0x80 | 0xa0 | 0xc0 | 0xe1..=0xe6)
+}
+
+/// Whether a line of code (comments blanked) holds a raw GP0 or GP1 command word, as an
+/// 8-digit hex literal (`0xE100_0200`), a decimal literal of the same value (`3774874112`) or a
+/// command byte shifted up by 24 (`0xE1 << 24`, `0xA0u32 << 24`). See [`gpu_word`] for what
+/// counts and what does not.
+pub fn gpu_word_in(code: &str) -> bool {
+    static PATTERNS: std::sync::OnceLock<[Regex; 3]> = std::sync::OnceLock::new();
+    let [hex, decimal, shifted] = PATTERNS.get_or_init(|| {
+        [
+            Regex::new(r"\b0[xX]([0-9a-fA-F_]+)").expect("valid"),
+            Regex::new(r"(?:^|[^\w.])(\d[\d_]{6,})(?:u32|i32|u64|i64|usize)?\b(?:[^.]|$)").expect("valid"),
+            Regex::new(r"\b(0[xX][0-9a-fA-F_]+|\d[\d_]*)(?:u8|u16|u32|i32|u64|i64|usize)?\s*\)?\s*<<\s*24\b")
+                .expect("valid"),
+        ]
+    });
+    let digits = |s: &str| s.chars().filter(|c| *c != '_').collect::<String>();
+    let hit_hex = hex.captures_iter(code).any(|c| {
+        let d = digits(&c[1]);
+        // An integer suffix after the digits (`0xE1000000u32`) is not a hex digit; `_` was dropped.
+        d.len() == 8 && u32::from_str_radix(&d, 16).is_ok_and(gpu_word)
+    });
+    let hit_decimal = decimal.captures_iter(code).any(|c| {
+        digits(&c[1])
+            .parse::<u32>()
+            .is_ok_and(|v| v > 0x00ff_ffff && gpu_word(v))
+    });
+    let hit_shift = shifted.captures_iter(code).any(|c| {
+        let text = digits(&c[1]);
+        let value = match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+            Some(h) => u64::from_str_radix(h, 16),
+            None => text.parse(),
+        };
+        value.is_ok_and(gpu_command_byte)
+    });
+    hit_hex || hit_decimal || hit_shift
+}
+
 /// The sdk/docs/GATE.md rule and the remedy for a kind.
 fn advice(kind: &str) -> &'static str {
     match kind {
@@ -75,6 +143,10 @@ fn advice(kind: &str) -> &'static str {
         "vector-write" => {
             "sdk/docs/GATE.md rule 3 (a game does not wrap the exception vector); register with \
              psx_rt::interrupts (the dispatcher) instead"
+        }
+        "gpu-word" => {
+            "sdk/docs/GATE.md rule 3 (a game does not write a GPU command word by hand); use the \
+             psx_hw::gpu constants and builders (or psx_gpu's typed commands)"
         }
         "cop0-asm" => {
             "sdk/docs/GATE.md rule 3 (a game does not run COP0 code); use psx_rt::interrupts and \
@@ -466,6 +538,7 @@ pub fn check(
             ("cop0-asm", &cop0),
         ]);
     }
+    let gpu_words = profile.gpu_words && !probe;
     if let Some(pattern) = &deprecated {
         line_rules.push(("deprecated-use", pattern));
     }
@@ -543,6 +616,14 @@ pub fn check(
                             text: code.trim().chars().take(100).collect(),
                         });
                     }
+                }
+                if gpu_words && gpu_word_in(code) {
+                    hits.push(Hit {
+                        kind: "gpu-word",
+                        item: item.clone(),
+                        line: Some(n as u32 + 1),
+                        text: code.trim().chars().take(100).collect(),
+                    });
                 }
                 // A line the bare-name rule already counted is not counted twice.
                 if qualified_lines.contains(&n)
@@ -640,7 +721,7 @@ pub fn check(
 }
 
 /// `psx-gate [--sdk DIR] [--metadata FILE | --crate DIR] [--package NAME] [--program-file FILE]
-/// [--receipt EXE] [-- CARGO-ARGS]`:
+/// [--receipt EXE] [--gpu-words] [-- CARGO-ARGS]`:
 /// run the gate and print the refusals. Exit 1 when there are any. With `--receipt EXE` a pass
 /// also writes the gate receipt into the linked, patched PSX-EXE (what `psoxide-pgo apply` does
 /// at the end of its build; a staged guest build, which does not go through `apply`, calls it).
@@ -651,6 +732,7 @@ pub fn main(args: &[String]) -> i32 {
     let mut propose = false;
     let mut program_file: Option<PathBuf> = None;
     let mut receipt: Option<PathBuf> = None;
+    let mut gpu_words = false;
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -659,6 +741,7 @@ pub fn main(args: &[String]) -> i32 {
             "--crate" => crate_dir = PathBuf::from(it.next().cloned().unwrap_or_default()),
             "--package" => package = it.next().cloned(),
             "--propose" => propose = true,
+            "--gpu-words" => gpu_words = true,
             "--program-file" => program_file = it.next().map(PathBuf::from),
             "--receipt" => receipt = it.next().map(PathBuf::from),
             "--" => {
@@ -670,13 +753,14 @@ pub fn main(args: &[String]) -> i32 {
             }
         }
     }
-    match run(
+    match run_with(
         &sdk,
         metadata.as_deref(),
         &crate_dir,
         package.as_deref(),
         &cargo,
         program_file.as_deref(),
+        gpu_words,
     ) {
         Ok(outcome) if propose => {
             for e in &outcome.proposed {
@@ -750,7 +834,29 @@ pub fn run(
     cargo_args: &[String],
     program_file: Option<&Path>,
 ) -> Result<Outcome, String> {
-    let profile = Profile::read(&sdk.join("sdk").join("profile.toml"))?;
+    run_with(
+        sdk,
+        metadata,
+        crate_dir,
+        package,
+        cargo_args,
+        program_file,
+        false,
+    )
+}
+
+/// [`run`] with the optional `gpu-word` rule (`psx-gate --gpu-words`).
+pub fn run_with(
+    sdk: &Path,
+    metadata: Option<&Path>,
+    crate_dir: &Path,
+    package: Option<&str>,
+    cargo_args: &[String],
+    program_file: Option<&Path>,
+    gpu_words: bool,
+) -> Result<Outcome, String> {
+    let mut profile = Profile::read(&sdk.join("sdk").join("profile.toml"))?;
+    profile.gpu_words = gpu_words;
     let value: Value = match metadata {
         Some(file) => serde_json::from_slice(&fs::read(file).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?,
@@ -1075,6 +1181,85 @@ mod tests {
             v.contains("sdk/docs/GATE.md rule 3") && v.contains("psx_hw"),
             "{v}"
         );
+    }
+
+    #[test]
+    fn gpu_command_words_are_flagged_in_hex_decimal_and_shifted_forms() {
+        for hit in [
+            "let a = 0xE1000000;",
+            "gp0(0xE100_0200 | mode);",
+            "0xe3000000u32",
+            "send(0xE6000003)",
+            "0xE5_00_00_00",
+            "gp1(0x0800_0001);",
+            "gp1(0x0300_0000)",
+            "gp1(0x0400_0002)",
+            "gp1(0x0500_0000 | y << 10 | x)",
+            "gp1(0x0200_0000)",
+            "gp0(0x1F00_0000)",
+            "let tri = 0x3000_0000;",
+            "let cmd = (0xE1 << 24) | bits;",
+            "let c = 0xA0u32 << 24;",
+            "let c = 0xC0 << 24;",
+            "let c = 225 << 24 | 5;",
+            "gp0(3774873600)",
+            "gp0(3_825_205_248u32)",
+        ] {
+            assert!(gpu_word_in(hit), "{hit}");
+        }
+    }
+
+    #[test]
+    fn hash_primes_flag_bits_bases_and_gte_words_are_not_gpu_words() {
+        for pass in [
+            "h = h.wrapping_mul(0x0100_0193);",
+            "let basis = 0x811C_9DC5;",
+            "let k = 0x9E37_79B9;",
+            "let c = 0xE654_6B64;",
+            "let c = 0x85EB_CA6B;",
+            "let flag = 1 << 24;",
+            "let busy = 1 << 28;",
+            "let sign = 0x8000_0000;",
+            "let kseg1 = 0xA000_0000;",
+            "let bit = 0x4000_0000;",
+            "let gte = 0x4A18_0001;",
+            "let gte = 0x4B18_0001;",
+            "let n = 16_777_619;",
+            "let n = 1_000_000_000;",
+            "let x = 0xE1;",
+            "let x = 0xE100;",
+            "let f = 3.0e10;",
+            "let v = bytes[3] as u32) << 24;",
+            "let w = (a as u32) << 24 | b;",
+            "let w = 0x12 << 24;",
+            "let w = 3 << 24;",
+            "let one = 0x0100_0000;",
+            "let id = 0x0000_E100;",
+        ] {
+            assert!(!gpu_word_in(pass), "{pass}");
+        }
+    }
+
+    #[test]
+    fn the_gpu_word_rule_is_off_unless_asked_and_a_probe_is_exempt() {
+        let src = "fn f() {\n    gp0(0xE1000000);\n}\n";
+        let f = fixture("gpuw", src, &["runtime"], &[]);
+        let off = run_check(&f, &profile(""), NOTHING);
+        assert!(off.violations.is_empty(), "{:?}", off.violations);
+        let mut on = profile("");
+        on.gpu_words = true;
+        let out = run_check(&f, &on, NOTHING);
+        assert_eq!(out.violations.len(), 1, "{:?}", out.violations);
+        assert!(
+            out.violations[0].contains("src/lib.rs:2") && out.violations[0].contains("gpu-word")
+        );
+        // A listed count passes it like the other counted kinds.
+        let listed = exception("gpu-word", "src/lib.rs", Some(1));
+        assert!(run_check(&f, &on, &listed).violations.is_empty());
+        let mut probe = profile("[probe]\nprograms = [\"game\"]\n");
+        probe.gpu_words = true;
+        let inside = local_fixture("gpuw-probe", src, &["runtime"]);
+        assert!(run_check(&inside, &probe, NOTHING).violations.is_empty());
     }
 
     #[test]
