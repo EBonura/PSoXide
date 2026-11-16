@@ -632,6 +632,9 @@ impl Playtest {
             }
             return;
         }
+        // The one read of the combat buttons and the stick: every combat rule
+        // below reads this intent, never the pad.
+        let intent = pad_intent(ctx, self.analog_deadzone);
         // First gameplay update after loading: anchor the animation
         // epoch here so value-based phases do not inherit the variable
         // loading duration (see `gameplay_epoch` in main.rs).
@@ -701,7 +704,7 @@ impl Playtest {
 
         // Swap stance, which changes weapon. A refused press is silent: the
         // cooldown is the only reason, and it is already on the HUD.
-        if self.step_hook(ctx) {
+        if self.step_hook(ctx, &intent) {
             return;
         }
         let circle_position = self.motor.position();
@@ -715,7 +718,7 @@ impl Playtest {
         );
         // Swapping needs both a blade and a Zenith move (the same rule as
         // every enemy), and a fighter that is down cannot act.
-        if ctx.just_pressed(button::TRIANGLE)
+        if intent.pressed(CombatAction::Swap)
             && !circle_locks_stance
             && self.player_kits().can_swap()
             && !self.player.knocked_down()
@@ -737,13 +740,13 @@ impl Playtest {
             self.queue_gameplay_sfx(LevelGameplaySfxEvent::StanceSwapReady);
         }
 
-        if ctx.just_pressed(button::R3) {
+        if intent.pressed(CombatAction::Lock) {
             if self.is_locked() {
                 self.lock_target = None;
             } else {
                 // Read the current hold so simultaneous L2/R3 uses the reticle
                 // even before this tick has readied the weapon.
-                let aiming = ctx.is_held(button::L2)
+                let aiming = intent.held(CombatAction::Aim)
                     && self.player_has_ranged_weapon()
                     && self.player.stance.active() == VitalityChannelId::Two;
                 self.lock_target = self.find_lock_target(LOCK_RANGE, aiming);
@@ -808,7 +811,7 @@ impl Playtest {
                 }
             }
         }
-        let mut circle = self.update_evade_run_button(ctx, delta_vblanks);
+        let mut circle = self.update_evade_run_button(&intent, delta_vblanks);
         // Only a character with the mobility kit dodges; Circle still runs.
         if !self.player_kits().can_dodge() {
             circle.evade = false;
@@ -825,7 +828,7 @@ impl Playtest {
                 .swap_in_progress(&self.player_stance_config);
         self.ranged_ready.tick(
             ranged && self.player.stance.active() == VitalityChannelId::Two,
-            ctx.is_held(button::L2),
+            intent.held(CombatAction::Aim),
             interrupted,
         );
         self.aim_control.tick(
@@ -851,7 +854,7 @@ impl Playtest {
         // The stick is read every tick, locked or not, so the evade latch
         // below always sees the direction the player is holding.
         let stick_input = motor_input(
-            ctx,
+            &intent,
             self.camera.yaw(),
             self.analog_deadzone,
             circle.sprint && !self.ranged_ready.ready(now.as_u32()),
@@ -859,7 +862,8 @@ impl Playtest {
             lock_facing_yaw,
         );
         let stick_deflected = stick_input.move_x.raw() != 0 || stick_input.move_z.raw() != 0;
-        if ctx.just_pressed(EVADE_RUN_BUTTON) || (ctx.is_held(EVADE_RUN_BUTTON) && stick_deflected)
+        if intent.pressed(CombatAction::Evade)
+            || (intent.held(CombatAction::Evade) && stick_deflected)
         {
             self.evade_latched_move = (stick_input.move_x, stick_input.move_z);
         }
@@ -975,9 +979,9 @@ impl Playtest {
             self.authored_dodge.clear();
             // An explicit dodge wins over a remembered attack.
             self.attack_buffer.clear();
-        } else if self.update_attack_input(ctx, now, action_locked) {
+        } else if self.update_attack_input(ctx, &intent, now, action_locked) {
             if self.hook_travel.is_some() {
-                self.step_hook(ctx);
+                self.step_hook(ctx, &intent);
                 return;
             }
             input = CharacterMotorInput::default();
@@ -1584,13 +1588,21 @@ impl Playtest {
         }
     }
 
-    /// R1/R2 select melee light/heavy; ranged Zenith requires held L2 + R2. Remember one
+    /// Light/heavy strike requests select melee light/heavy; in Zenith with
+    /// the cannon the shot request fires (the pad's R2 asks for both and the
+    /// stance picks). Remember one
     /// press for 12 ticks, allowing a late input to chain out of recovery.
     /// Capture its stance at press time; a later swap cannot change intent.
     ///
     /// Returns true while an attack owns the player's input.
     #[inline(never)]
-    fn update_attack_input(&mut self, ctx: &Ctx, now: SimTick, action_locked: bool) -> bool {
+    fn update_attack_input(
+        &mut self,
+        ctx: &Ctx,
+        intent: &CombatIntent,
+        now: SimTick,
+        action_locked: bool,
+    ) -> bool {
         if self.hazard_death_ticks_remaining != 0 {
             self.attack_buffer.clear();
             self.authored_attack.clear();
@@ -1598,7 +1610,7 @@ impl Playtest {
         }
         if self.player_has_ranged_weapon() && self.player.stance.active() == VitalityChannelId::Two
         {
-            if ctx.just_pressed(ACTIVE_HEAVY_ATTACK_BUTTON)
+            if intent.pressed(CombatAction::Shoot)
                 && !action_locked
                 && self.motor.action().is_idle()
                 && self.ranged_ready.aiming()
@@ -1608,7 +1620,7 @@ impl Playtest {
             {
                 return true;
             }
-            if ctx.just_pressed(ACTIVE_HEAVY_ATTACK_BUTTON) {
+            if intent.pressed(CombatAction::Shoot) {
                 self.attack_buffer.request(5, now.as_u32());
             }
             if !action_locked
@@ -1646,9 +1658,9 @@ impl Playtest {
         use psx_level::CombatWindowKind as WindowKind;
         let timing = self.player_combat_sample(ctx);
         let authored = timing.window(WindowKind::Attack).is_some();
-        let pressed = if ctx.just_pressed(ACTIVE_HEAVY_ATTACK_BUTTON) {
+        let pressed = if intent.pressed(CombatAction::HeavyAttack) {
             2 + stance_offset
-        } else if ctx.just_pressed(ACTIVE_LIGHT_ATTACK_BUTTON) {
+        } else if intent.pressed(CombatAction::LightAttack) {
             1 + stance_offset
         } else {
             0

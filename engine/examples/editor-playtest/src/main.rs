@@ -64,6 +64,7 @@ use psx_engine::{
     WorldVertex, PRIMITIVE_PACKET_SLOT_WORDS, Q12,
 };
 use psx_font::FontAtlas;
+use psx_game_runtime::combat_intent::{CombatAction, CombatActions, CombatIntent, CombatMove};
 use psx_game_runtime::parry_feedback::{ParryFlash, PARRY_FEEDBACK};
 use psx_game_runtime::vitality::{
     BoostBars, BoostInventory, BoostModuleId, BoostSlotId, CombatStance, CombatStanceConfig,
@@ -952,11 +953,15 @@ impl Playtest {
         }
     }
 
-    fn update_evade_run_button(&mut self, ctx: &Ctx, delta_vblanks: u16) -> EvadeRunIntent {
+    fn update_evade_run_button(
+        &mut self,
+        intent: &CombatIntent,
+        delta_vblanks: u16,
+    ) -> EvadeRunIntent {
         self.evade_run_intent(
-            ctx.just_pressed(EVADE_RUN_BUTTON),
-            ctx.is_held(EVADE_RUN_BUTTON),
-            ctx.just_released(EVADE_RUN_BUTTON),
+            intent.pressed(CombatAction::Evade),
+            intent.held(CombatAction::Evade),
+            intent.released(CombatAction::Evade),
             delta_vblanks,
         )
     }

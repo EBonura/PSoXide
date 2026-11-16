@@ -384,7 +384,7 @@ impl Playtest {
         true
     }
 
-    pub(super) fn step_hook(&mut self, ctx: &Ctx) -> bool {
+    pub(super) fn step_hook(&mut self, ctx: &Ctx, intent: &CombatIntent) -> bool {
         if self.hook_attached.is_some() || self.hook_travel.is_some() {
             if self.hazard_death_ticks_remaining != 0
                 || matches!(
@@ -398,7 +398,7 @@ impl Playtest {
                 self.detach_arch(ctx.sim_tick);
                 return false;
             }
-            if ctx.just_pressed(button::CIRCLE) {
+            if intent.pressed(CombatAction::Evade) {
                 self.detach_arch(ctx.sim_tick);
                 // Consume this press so release cannot accidentally start a dodge.
                 return true;

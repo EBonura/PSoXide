@@ -4,19 +4,65 @@ use psx_engine::{camera_relative_move_axes, Angle, InputAxis, InputAxisProfile, 
 
 use super::*;
 
+/// The pad as a combat controller: the one adapter from buttons and the
+/// left stick to the player's [`CombatIntent`]. Real input and the duel's
+/// synthetic pad both come through here, and the player's combat rules read
+/// only the intent.
+///
+/// Triangle swaps, R1 strikes light, R2 strikes heavy or fires (one trigger:
+/// the stance picks which verb the rules perform), L2 aims, Circle evades
+/// (a tap; a hold runs) and R3 toggles the lock. The stick is the move, in
+/// the pad's own frame ([`CombatMove::Stick`]). The camera stick, menus and
+/// interaction stay on the pad: they are not combat verbs.
+pub(crate) fn pad_intent(ctx: &Ctx, deadzone: i16) -> CombatIntent {
+    let edges = |held: fn(&Ctx, u16) -> bool| {
+        CombatActions::NONE
+            .with_if(CombatAction::Swap, held(ctx, button::TRIANGLE))
+            .with_if(
+                CombatAction::LightAttack,
+                held(ctx, ACTIVE_LIGHT_ATTACK_BUTTON),
+            )
+            .with_if(
+                CombatAction::HeavyAttack,
+                held(ctx, ACTIVE_HEAVY_ATTACK_BUTTON),
+            )
+            .with_if(CombatAction::Shoot, held(ctx, ACTIVE_HEAVY_ATTACK_BUTTON))
+            .with_if(CombatAction::Aim, held(ctx, button::L2))
+            .with_if(CombatAction::Evade, held(ctx, EVADE_RUN_BUTTON))
+            .with_if(CombatAction::Lock, held(ctx, button::R3))
+    };
+    let (x, z) = local_move_axes(ctx, deadzone).raw();
+    CombatIntent {
+        movement: if x == 0 && z == 0 {
+            CombatMove::Still
+        } else {
+            CombatMove::Stick { x, z }
+        },
+        face: None,
+        pressed: edges(Ctx::just_pressed),
+        held: edges(Ctx::is_held),
+        released: edges(Ctx::just_released),
+    }
+}
+
+/// The stick of a pad intent, as the motor's local input vector.
+pub(crate) fn intent_stick(intent: &CombatIntent) -> InputVector {
+    match intent.movement {
+        CombatMove::Stick { x, z } => InputVector::from_centered(x, z),
+        _ => InputVector::ZERO,
+    }
+}
+
 pub(crate) fn motor_input(
-    ctx: &Ctx,
+    intent: &CombatIntent,
     camera_yaw: Angle,
     deadzone: i16,
     sprint: bool,
     evade: bool,
     facing_yaw: Option<Angle>,
 ) -> CharacterMotorInput {
-    let movement = camera_relative_move_axes(
-        local_move_axes(ctx, deadzone),
-        camera_yaw,
-        axis_profile(deadzone),
-    );
+    let movement =
+        camera_relative_move_axes(intent_stick(intent), camera_yaw, axis_profile(deadzone));
 
     CharacterMotorInput {
         turn: 0,

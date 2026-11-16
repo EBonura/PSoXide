@@ -3060,6 +3060,9 @@ mod combat_baseline_tests;
 mod combat_parry_tests;
 
 #[cfg(test)]
+mod combat_controller_tests;
+
+#[cfg(test)]
 mod combat_verbs_tests;
 
 #[cfg(test)]

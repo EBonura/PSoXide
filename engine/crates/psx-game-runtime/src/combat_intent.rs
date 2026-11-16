@@ -2,75 +2,243 @@
 //!
 //! Player and enemies share one rule set and the AI is only a controller.
 //! A controller (the pad, an enemy's tactics, the duel bot) says what it
-//! wants with [`CombatIntent`]s; the fighter's rules decide whether and how
-//! each one happens. Whether a fighter may perform an intent at all is its
-//! kits ([`CombatKits`], [`CombatIntent::permitted`]): no blade, no strike;
-//! no cannon, no shot; no mobility kit, no dodge; not both weapons, no swap.
+//! wants with one [`CombatIntent`] per tick; the fighter's rules decide
+//! whether and how each request happens. Whether a fighter may perform an
+//! action at all is its kits ([`CombatKits`], [`CombatAction::permitted`]):
+//! no blade, no strike; no cannon, no shot; no mobility kit, no dodge; not
+//! both weapons, no swap.
 //!
 //! The parry ripostes are not separate requests: a light strike or a shot
 //! made while a crit is armed is the crit strike or crit shot.
 //!
-//! Nothing produces or consumes intents yet; wiring the enemy AI and the pad
-//! through them is the next step of the controller seam.
+//! Actions come as edges and holds, the way a pad reports them, so a
+//! controller that presses (the pad) and one that decides (an AI) speak the
+//! same language: a strike is a press, aiming is a hold, and a tap of the
+//! evade button is a press followed by a release.
 
 use psx_level::combat_verbs::{CombatKit, CombatKits};
 
-/// One request from a controller for one simulation tick.
+/// One action a controller can request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CombatIntent {
-    /// Stand still.
-    Idle,
-    /// Move along a stick vector in Q12 (`x` right, `z` forward, each
-    /// -4096..=4096), running when `run` is set. While aiming this is the
-    /// ranged walk.
-    Move {
-        /// Q12 sideways component.
-        x: i16,
-        /// Q12 forward component.
-        z: i16,
-        /// Run instead of walk.
-        run: bool,
-    },
-    /// Turn in place to face `yaw` (PSX angle units, 4096 per turn).
-    Turn {
-        /// Target facing.
-        yaw: i16,
-    },
+#[repr(u8)]
+pub enum CombatAction {
     /// Blade light strike (the crit strike while a crit is armed).
-    LightAttack,
+    LightAttack = 0,
     /// Blade heavy strike.
-    HeavyAttack,
+    HeavyAttack = 1,
     /// Raise the cannon and hold the aim.
-    Aim,
+    Aim = 2,
     /// Fire the cannon (the crit shot while a crit is armed).
-    Shoot,
+    Shoot = 3,
     /// Swap stance: blade to Zenith or back.
-    Swap,
-    /// Forward evade.
-    Roll,
-    /// Backward evade.
-    Backstep,
-    /// Locked-on evade to the left.
-    DashLeft,
-    /// Locked-on evade to the right.
-    DashRight,
+    Swap = 4,
+    /// Evade. The mover picks the roll, backstep or locked-on dash from the
+    /// movement and the lock; a pad's evade button also runs while held.
+    Evade = 5,
+    /// Toggle the lock on the nearest target.
+    Lock = 6,
 }
 
-impl CombatIntent {
-    /// The kit a fighter needs to perform this intent.
+impl CombatAction {
+    /// Every action, in bit order.
+    pub const ALL: [Self; 7] = [
+        Self::LightAttack,
+        Self::HeavyAttack,
+        Self::Aim,
+        Self::Shoot,
+        Self::Swap,
+        Self::Evade,
+        Self::Lock,
+    ];
+
+    /// The kit a fighter needs to perform this action.
     pub const fn kit(self) -> CombatKit {
         match self {
-            Self::Idle | Self::Move { .. } | Self::Turn { .. } => CombatKit::Core,
+            Self::Lock => CombatKit::Core,
             Self::LightAttack | Self::HeavyAttack => CombatKit::Melee,
             Self::Aim | Self::Shoot => CombatKit::Ranged,
             Self::Swap => CombatKit::Swap,
-            Self::Roll | Self::Backstep | Self::DashLeft | Self::DashRight => CombatKit::Mobility,
+            Self::Evade => CombatKit::Mobility,
         }
     }
 
-    /// Whether a fighter with `kits` may perform this intent at all.
+    /// Whether a fighter with `kits` may perform this action at all.
     pub const fn permitted(self, kits: CombatKits) -> bool {
         kits.has(self.kit())
+    }
+
+    /// The strike or shot the shared attack policy names by its id
+    /// (light 0, heavy 1, ranged 2, as
+    /// [`attack_choice`](crate::combat_policy::attack_choice) returns them).
+    pub const fn from_attack_id(id: u8) -> Self {
+        match id {
+            0 => Self::LightAttack,
+            1 => Self::HeavyAttack,
+            _ => Self::Shoot,
+        }
+    }
+
+    const fn bit(self) -> u8 {
+        1 << self as u8
+    }
+}
+
+/// A set of [`CombatAction`]s.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CombatActions(u8);
+
+impl CombatActions {
+    /// No action.
+    pub const NONE: Self = Self(0);
+
+    /// The set holding exactly `action`.
+    pub const fn of(action: CombatAction) -> Self {
+        Self(action.bit())
+    }
+
+    /// This set plus `action`.
+    #[must_use]
+    pub const fn with(self, action: CombatAction) -> Self {
+        Self(self.0 | action.bit())
+    }
+
+    /// This set plus `action` when `on`.
+    #[must_use]
+    pub const fn with_if(self, action: CombatAction, on: bool) -> Self {
+        if on {
+            self.with(action)
+        } else {
+            self
+        }
+    }
+
+    /// Whether `action` is in the set.
+    pub const fn has(self, action: CombatAction) -> bool {
+        self.0 & action.bit() != 0
+    }
+
+    /// Whether the set is empty.
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// The actions of this set a fighter with `kits` may perform.
+    #[must_use]
+    pub fn permitted(self, kits: CombatKits) -> Self {
+        let mut kept = Self::NONE;
+        for action in CombatAction::ALL {
+            kept = kept.with_if(action, self.has(action) && action.permitted(kits));
+        }
+        kept
+    }
+}
+
+/// Where a controller wants the fighter to go this tick.
+///
+/// The pad speaks in its own frame (a stick the owner turns into a
+/// camera-relative motor input). The AI speaks in world units, in the
+/// forms the entity mover offers; they meet when the movers are unified.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CombatMove {
+    /// Stand still.
+    #[default]
+    Still,
+    /// A stick in the controller's frame (`x` right, `z` forward, centred
+    /// pad units).
+    Stick {
+        /// Sideways component.
+        x: i16,
+        /// Forward component.
+        z: i16,
+    },
+    /// One collision-bound world step (the mover's body step).
+    Step {
+        /// World x displacement.
+        dx: i32,
+        /// World z displacement.
+        dz: i32,
+    },
+    /// One exact-direction world step (the mover's direction probe).
+    Direction {
+        /// World x displacement.
+        dx: i32,
+        /// World z displacement.
+        dz: i32,
+    },
+    /// Steer toward a world point, at most `distance` units this tick.
+    Toward {
+        /// The point to close on.
+        point: [i32; 3],
+        /// Travel budget this tick.
+        distance: i32,
+    },
+}
+
+/// One request from a controller for one simulation tick.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CombatIntent {
+    /// Where to go.
+    pub movement: CombatMove,
+    /// A world point to turn toward, at the fighter's own turn rate. None
+    /// keeps the facing the movement and the rules give.
+    pub face: Option<[i32; 3]>,
+    /// Actions requested this tick (press edges).
+    pub pressed: CombatActions,
+    /// Actions held this tick.
+    pub held: CombatActions,
+    /// Actions let go this tick (release edges).
+    pub released: CombatActions,
+}
+
+impl CombatIntent {
+    /// Stand still and do nothing.
+    pub const IDLE: Self = Self {
+        movement: CombatMove::Still,
+        face: None,
+        pressed: CombatActions::NONE,
+        held: CombatActions::NONE,
+        released: CombatActions::NONE,
+    };
+
+    /// Whether `action` was pressed this tick.
+    pub const fn pressed(&self, action: CombatAction) -> bool {
+        self.pressed.has(action)
+    }
+
+    /// Whether `action` is held this tick.
+    pub const fn held(&self, action: CombatAction) -> bool {
+        self.held.has(action)
+    }
+
+    /// Whether `action` was let go this tick.
+    pub const fn released(&self, action: CombatAction) -> bool {
+        self.released.has(action)
+    }
+
+    /// The strike or shot pressed this tick, if any: the light strike
+    /// first, then the heavy, then the shot.
+    pub const fn attack(&self) -> Option<CombatAction> {
+        if self.pressed(CombatAction::LightAttack) {
+            Some(CombatAction::LightAttack)
+        } else if self.pressed(CombatAction::HeavyAttack) {
+            Some(CombatAction::HeavyAttack)
+        } else if self.pressed(CombatAction::Shoot) {
+            Some(CombatAction::Shoot)
+        } else {
+            None
+        }
+    }
+
+    /// This intent with only the actions a fighter with `kits` may
+    /// perform. Movement and facing need no kit.
+    #[must_use]
+    pub fn permitted(self, kits: CombatKits) -> Self {
+        Self {
+            pressed: self.pressed.permitted(kits),
+            held: self.held.permitted(kits),
+            released: self.released.permitted(kits),
+            ..self
+        }
     }
 }
 
@@ -79,26 +247,61 @@ mod tests {
     use super::*;
 
     #[test]
-    fn kits_permit_exactly_their_intents() {
+    fn kits_permit_exactly_their_actions() {
         let melee = CombatKits::from_bits(CombatKits::MELEE);
         let ranged = CombatKits::from_bits(CombatKits::RANGED);
         let full =
             CombatKits::from_bits(CombatKits::MELEE | CombatKits::RANGED | CombatKits::MOBILITY);
-        let mover = CombatIntent::Move {
-            x: 0,
-            z: 4096,
-            run: true,
-        };
         for kits in [CombatKits::NONE, melee, ranged, full] {
-            assert!(CombatIntent::Idle.permitted(kits) && mover.permitted(kits));
+            assert!(CombatAction::Lock.permitted(kits));
         }
-        assert!(CombatIntent::LightAttack.permitted(melee));
-        assert!(!CombatIntent::Shoot.permitted(melee));
-        assert!(!CombatIntent::Swap.permitted(melee));
-        assert!(!CombatIntent::Roll.permitted(melee));
+        assert!(CombatAction::LightAttack.permitted(melee));
+        assert!(!CombatAction::Shoot.permitted(melee));
+        assert!(!CombatAction::Swap.permitted(melee));
+        assert!(!CombatAction::Evade.permitted(melee));
         assert!(
-            CombatIntent::Aim.permitted(ranged) && !CombatIntent::HeavyAttack.permitted(ranged)
+            CombatAction::Aim.permitted(ranged) && !CombatAction::HeavyAttack.permitted(ranged)
         );
-        assert!(CombatIntent::Swap.permitted(full) && CombatIntent::DashLeft.permitted(full));
+        assert!(CombatAction::Swap.permitted(full) && CombatAction::Evade.permitted(full));
+    }
+
+    #[test]
+    fn an_intent_keeps_only_what_the_kits_allow() {
+        let every = CombatAction::ALL
+            .iter()
+            .fold(CombatActions::NONE, |set, &action| set.with(action));
+        let intent = CombatIntent {
+            movement: CombatMove::Step { dx: 3, dz: -4 },
+            face: Some([1, 2, 3]),
+            pressed: every,
+            held: every,
+            released: every,
+        };
+        let melee = intent.permitted(CombatKits::from_bits(CombatKits::MELEE));
+        assert_eq!(melee.movement, intent.movement);
+        assert_eq!(melee.face, intent.face);
+        for set in [melee.pressed, melee.held, melee.released] {
+            assert!(set.has(CombatAction::LightAttack) && set.has(CombatAction::HeavyAttack));
+            assert!(set.has(CombatAction::Lock));
+            assert!(!set.has(CombatAction::Shoot) && !set.has(CombatAction::Swap));
+            assert!(!set.has(CombatAction::Evade) && !set.has(CombatAction::Aim));
+        }
+        assert_eq!(melee.attack(), Some(CombatAction::LightAttack));
+        assert_eq!(CombatIntent::IDLE.attack(), None);
+        assert_eq!(
+            CombatIntent {
+                pressed: CombatActions::of(CombatAction::Shoot),
+                ..CombatIntent::IDLE
+            }
+            .attack(),
+            Some(CombatAction::Shoot)
+        );
+    }
+
+    #[test]
+    fn attack_ids_name_the_policy_attacks() {
+        assert_eq!(CombatAction::from_attack_id(0), CombatAction::LightAttack);
+        assert_eq!(CombatAction::from_attack_id(1), CombatAction::HeavyAttack);
+        assert_eq!(CombatAction::from_attack_id(2), CombatAction::Shoot);
     }
 }
