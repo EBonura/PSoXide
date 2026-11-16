@@ -1803,10 +1803,8 @@ fn a_counted_engine_counts_each_stored_sector_as_it_lands_and_nothing_else() {
     assert_eq!(landed(&engine), 6);
     assert_eq!(engine.submissions(), 2);
     // SAFETY: `engine` is live and nothing else touches it.
-    assert_eq!(
-        unsafe { CountedEngine::<FakeDrive>::submissions_of(&engine) },
-        2
-    );
+    let accepted = unsafe { CountedEngine::<FakeDrive>::submissions_of(&engine) };
+    assert_eq!(accepted, 2);
     assert_eq!(engine.status(), Status::Done);
 }
 
