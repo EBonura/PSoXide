@@ -304,6 +304,11 @@ pub struct CombatTarget<'a> {
     /// The target's visible attack phase: 0 neutral, 1 tell, 2 swing,
     /// 3 recovery.
     pub attack_read: u8,
+    /// Ticks until the target's swing first makes contact, 0 while it is
+    /// live, None when it is not swinging: the owner's reading of the
+    /// swing's first contact frame, the same reading the duel bot makes of
+    /// an enemy's.
+    pub swing_ticks: Option<u16>,
 }
 
 /// Per-tick inputs the owning game threads in: the target each entity
@@ -715,6 +720,31 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             ),
             _ => (record.attack_speed_q8, record.attack_frame_range),
         }
+    }
+
+    /// The attack entity `index` is committed to while it winds up or
+    /// swings, as a watcher reads it: the action, and the swing ticks over
+    /// which its record times contact (from the end of the windup through
+    /// its active ticks). The swing's clock is
+    /// [`Self::clip_for_state`]'s `phase_ticks`. None when it is not
+    /// attacking.
+    pub fn committed_swing(
+        &self,
+        records: &[LevelGameEntityRecord],
+        index: usize,
+    ) -> Option<(CharacterAnimationAction, u16, u16)> {
+        let record = records.get(index).filter(|_| index < self.count())?;
+        if !matches!(
+            self.state(index),
+            GameEntityState::Windup | GameEntityState::Attack
+        ) {
+            return None;
+        }
+        let first = u16::from(record.windup_ticks);
+        let last = first
+            .saturating_add(self.selected_attack_active_ticks(record, index))
+            .saturating_sub(1);
+        Some((self.selected_attack_action(record, index), first, last))
     }
 
     fn selected_attack_action(
@@ -3066,6 +3096,7 @@ mod tests {
                 defender: Defender::OPEN,
                 stance: None,
                 attack_read: 0,
+                swing_ticks: None,
             },
         }
     }
@@ -3080,6 +3111,7 @@ mod tests {
                 defender: Defender::OPEN,
                 stance: None,
                 attack_read: 0,
+                swing_ticks: None,
             },
         }
     }
@@ -3793,6 +3825,7 @@ mod tests {
                 defender: Defender::OPEN,
                 stance: None,
                 attack_read: 0,
+                swing_ticks: None,
             },
         };
         let mut entities = GameEntities::<8>::EMPTY;
@@ -4127,6 +4160,7 @@ mod tests {
                 defender: Defender::OPEN,
                 stance: None,
                 attack_read: 0,
+                swing_ticks: None,
             },
         };
         // Move the player into the 512 aggro radius first.
@@ -4163,6 +4197,7 @@ mod tests {
                 defender: Defender::OPEN,
                 stance: None,
                 attack_read: 0,
+                swing_ticks: None,
             },
         };
         entities.tick(
@@ -4379,6 +4414,7 @@ mod tests {
                 defender: Defender::OPEN,
                 stance: None,
                 attack_read: 0,
+                swing_ticks: None,
             },
         };
         let mut entities = GameEntities::<8>::EMPTY;

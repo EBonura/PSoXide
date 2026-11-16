@@ -48,6 +48,7 @@ fn input(p: [i32; 3]) -> GameEntityTickInput<'static> {
             defender: crate::combatant::Defender::OPEN,
             stance: None,
             attack_read: 0,
+            swing_ticks: None,
         },
     }
 }
@@ -994,6 +995,7 @@ fn an_enemy_swaps_on_purpose_to_parry_a_swing_it_sees() {
     let stance = e.stance(0);
     let mut swing = input([0, 0, 40]);
     swing.target.attack_read = 2;
+    swing.target.swing_ticks = Some(0);
     // Never on purpose at zero percent.
     let mut never = LevelGameEntityRecord { ..records[0] };
     never.combat.parry_swap_percent = 0;
@@ -1075,4 +1077,29 @@ fn a_parry_crit_is_spent_with_the_swapped_to_weapon() {
     h.attack_cooldown[0] = 600;
     h.tick_delta(&records[..], input([0, 0, 30]), &mut Arena::default(), 2);
     assert_ne!(h.state(0), GameEntityState::Windup);
+}
+
+#[test]
+fn a_committed_swing_reads_its_record_contact_ticks() {
+    let records = enemy_with_flags(enemy().flags);
+    let mut e: GameEntities<2, true> = GameEntities::EMPTY;
+    e.spawn_from_records(&records[..]);
+    e.state[0] = GameEntityState::Aggro as u8;
+    assert_eq!(e.committed_swing(&records[..], 0), None);
+    let mut stats = GameEntityTickStats::default();
+    let intent = CombatIntent {
+        pressed: crate::combat_intent::CombatActions::of(CombatAction::LightAttack),
+        ..CombatIntent::IDLE
+    };
+    e.apply_intent(&records[0], 0, intent, &mut Arena::default(), 2, &mut stats);
+    let (action, first, last) = e.committed_swing(&records[..], 0).expect("winding up");
+    assert_eq!(action, psx_level::CharacterAnimationAction::LightAttack);
+    assert_eq!(first, u16::from(records[0].windup_ticks));
+    assert_eq!(last, first + records[0].attack_active_ticks - 1);
+    // Five ticks in, the record-timed swing is eleven ticks from contact.
+    let clip = e.clip_for_state(&records[..], 0);
+    assert_eq!(
+        crate::combat::ticks_to_contact(first, last, u32::from(clip.phase_ticks + 5) << 12, 4096),
+        Some(first - clip.phase_ticks - 5)
+    );
 }

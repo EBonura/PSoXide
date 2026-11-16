@@ -484,6 +484,51 @@ pub fn melee_window_started(
     })
 }
 
+/// The authored contact frames of `action` among a fighter's capsules: the
+/// first frame any of its hitboxes is active and the last. None when the
+/// action has no authored hitbox (its contact is timed by its record).
+pub fn authored_contact_frames(
+    records: &[CombatCapsuleRecord],
+    action: CharacterAnimationAction,
+) -> Option<(u16, u16)> {
+    records
+        .iter()
+        .filter(|record| {
+            record.flags & combat_capsule_flags::HITBOX != 0
+                && record.action == action.to_index() as u8
+        })
+        .fold(None, |span, record| {
+            let (first, last) = span.unwrap_or((u16::MAX, 0));
+            Some((
+                first.min(record.active_start_frame),
+                last.max(record.active_end_frame),
+            ))
+        })
+}
+
+/// Ticks until a swing first makes contact, as anyone watching it reads
+/// it: its contact runs over frames `first..=last` of its own timeline
+/// (animation frames, or ticks for a swing timed by its record), it stands
+/// at `phase_q12` (Q12 frames) and advances `rate_q12` per tick. 0 while
+/// contact is live; None once the last contact frame has passed or when
+/// the swing does not advance. The one reading every controller uses,
+/// whichever fighter swings.
+pub fn ticks_to_contact(first: u16, last: u16, phase_q12: u32, rate_q12: u32) -> Option<u16> {
+    let start = u32::from(first) << 12;
+    let end = (u32::from(last) + 1) << 12;
+    if phase_q12 >= end {
+        return None;
+    }
+    if phase_q12 >= start {
+        return Some(0);
+    }
+    if rate_q12 == 0 {
+        return None;
+    }
+    let ticks = (start - phase_q12).div_ceil(rate_q12);
+    Some(ticks.min(u32::from(u16::MAX - 1)) as u16)
+}
+
 /// Follow the target during the first melee tell, then commit before contact.
 /// Using the first window also prevents turning back toward a dodging player
 /// between strikes of an already committed combo.
@@ -1091,6 +1136,20 @@ pub fn angle_within(angle: u16, center: u16, half_angle: u16) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_swing_reads_ticks_to_its_first_contact_frame() {
+        // Contact over frames 10..=12, one frame every two ticks.
+        assert_eq!(ticks_to_contact(10, 12, 0, 2048), Some(20));
+        assert_eq!(ticks_to_contact(10, 12, 9 << 12, 2048), Some(2));
+        assert_eq!(ticks_to_contact(10, 12, (9 << 12) + 1, 2048), Some(2));
+        assert_eq!(ticks_to_contact(10, 12, 10 << 12, 2048), Some(0));
+        assert_eq!(ticks_to_contact(10, 12, (12 << 12) + 4095, 2048), Some(0));
+        assert_eq!(ticks_to_contact(10, 12, 13 << 12, 2048), None);
+        assert_eq!(ticks_to_contact(10, 12, 0, 0), None);
+        // A record-timed swing: ticks are its frames, one per tick.
+        assert_eq!(ticks_to_contact(16, 21, 5 << 12, 4096), Some(11));
+    }
+
     use super::*;
     use psx_level::{WeaponHitShapeRecord, WeaponHitboxIndex, WeaponIndex};
 

@@ -147,3 +147,34 @@ fn an_intent_runs_the_same_whether_the_pad_or_the_ai_sent_it() {
         }
     }
 }
+
+#[test]
+fn only_a_swing_under_way_has_a_contact_reading() {
+    use psx_game_runtime::entities::{GameEntityState, GameEntityTickStats, NoClipMover};
+    let mut scene = super::combat_baseline_tests::scene();
+    assert!(scene
+        .game_entities
+        .spawn_slot(0, psx_level::StableId(1), &GAME_ENTITIES[0]));
+    scene.game_entities.set_spatial_active_mask(u64::MAX);
+    // Not attacking: nothing to read.
+    assert!(scene.entity_swing(0).is_none());
+    let mut stats = GameEntityTickStats::default();
+    scene.game_entities.apply_intent(
+        &GAME_ENTITIES[0],
+        0,
+        CombatIntent {
+            pressed: CombatActions::of(CombatAction::LightAttack),
+            ..CombatIntent::IDLE
+        },
+        &mut NoClipMover,
+        2,
+        &mut stats,
+    );
+    // The fixture enemy binds no blade, so the strike is refused and there
+    // is no swing to read (the record-timed reading is covered in the
+    // runtime's `committed_swing` test).
+    assert_ne!(scene.game_entities.state(0), GameEntityState::Windup);
+    assert!(scene.entity_swing(0).is_none());
+    // The player is not striking: nothing to read on her side.
+    assert!(scene.player_swing(SimTick::from_u32(100)).is_none());
+}

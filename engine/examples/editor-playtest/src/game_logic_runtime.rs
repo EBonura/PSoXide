@@ -1477,6 +1477,76 @@ impl Playtest {
         }
     }
 
+    /// The player's swing as a watcher reads it: her strike clip, how far
+    /// into it she is, and her authored hitboxes. None when she is not
+    /// striking.
+    pub(super) fn player_swing(&self, now: SimTick) -> Option<SwingClock> {
+        if !matches!(
+            self.anim_state,
+            PlayerAnim::LightAttack
+                | PlayerAnim::HeavyAttack
+                | PlayerAnim::VertLightAttack
+                | PlayerAnim::VertHeavyAttack
+        ) {
+            return None;
+        }
+        let character = self.character.as_ref()?;
+        let action = self.anim_state.action();
+        let first = character.combat_capsule_first.to_usize();
+        let end = first.saturating_add(usize::from(character.combat_capsule_count));
+        Some(SwingClock {
+            animation: self
+                .models
+                .get(character.model.to_usize())
+                .copied()
+                .flatten()
+                .and_then(|model| model.clip(&self.clips, character.clip_for(self.anim_state))),
+            local_tick: now.saturating_sub(self.anim_start_tick),
+            looping: character.action_loops(action),
+            speed_q8: crate::playtest_runtime::live_action_speed_q8(
+                self.vitality_modifiers(),
+                character,
+                self.anim_state,
+            ),
+            frame_range: character.action_frame_range(action),
+            action,
+            capsules: COMBAT_CAPSULES.get(first..end).unwrap_or(&[]),
+            record_contact: None,
+        })
+    }
+
+    /// Entity `index`'s melee swing as a watcher reads it: its attack clip,
+    /// its swing clock, its authored hitboxes and its record's contact
+    /// ticks. None when it is not winding up or swinging a blade.
+    pub(super) fn entity_swing(&self, index: usize) -> Option<SwingClock> {
+        let records = GAME_ENTITIES.as_slice();
+        let entity = records.get(index)?;
+        let (action, first, last) = self.game_entities.committed_swing(records, index)?;
+        if self.game_entities.attack_kind(index) == 2 {
+            return None;
+        }
+        let clip = self.game_entities.clip_for_state(records, index);
+        let capsule_first = entity.combat_capsule_first.to_usize();
+        let capsule_end = capsule_first.saturating_add(usize::from(entity.combat_capsule_count));
+        Some(SwingClock {
+            animation: MODEL_INSTANCES
+                .get(usize::from(entity.model_instance))
+                .and_then(|instance| self.models.get(instance.model.to_usize()))
+                .copied()
+                .flatten()
+                .and_then(|model| model.clip(&self.clips, ModelClipIndex(clip.clip))),
+            local_tick: u32::from(clip.phase_ticks),
+            looping: !clip.one_shot,
+            speed_q8: clip.speed_q8,
+            frame_range: clip.frame_range,
+            action,
+            capsules: COMBAT_CAPSULES
+                .get(capsule_first..capsule_end)
+                .unwrap_or(&[]),
+            record_contact: Some((first, last)),
+        })
+    }
+
     pub(super) fn track_enemy_tell(&mut self, index: usize, ctx: &Ctx, delta: u16) {
         let Some(attack) = self
             .deferred_enemy_attacks
@@ -2699,4 +2769,46 @@ mod encounter_audio_tests {
         assert_eq!(gate.tick(false), None);
         assert_eq!(gate.tick(true), Some(true));
     }
+}
+
+/// A swing as anyone watching it reads it, whichever fighter makes it: the
+/// attack clip and how far into it the swing is, the action, the fighter's
+/// authored hitboxes, and the contact ticks its record times when it has no
+/// authored hitbox for the action.
+pub(super) struct SwingClock {
+    pub(super) animation: Option<psx_asset::Animation<'static>>,
+    pub(super) local_tick: u32,
+    pub(super) looping: bool,
+    pub(super) speed_q8: u16,
+    pub(super) frame_range: psx_level::CharacterActionFrameRange,
+    pub(super) action: CharacterAnimationAction,
+    pub(super) capsules: &'static [psx_level::CombatCapsuleRecord],
+    pub(super) record_contact: Option<(u16, u16)>,
+}
+
+/// Ticks until `swing` first makes contact: from its first authored
+/// contact frame when it has one, from its record's contact ticks
+/// otherwise ([`combat::ticks_to_contact`]). The one reading the enemy
+/// makes of the player's swing and the duel bot makes of the enemy's.
+pub(super) fn swing_ticks_to_contact(swing: &SwingClock, video_hz: VideoHz) -> Option<u16> {
+    if let (Some(animation), Some((first, last))) = (
+        swing.animation,
+        combat::authored_contact_frames(swing.capsules, swing.action),
+    ) {
+        let at = |tick: u32| {
+            mr::animation_phase_at_tick_q12(
+                animation,
+                tick,
+                video_hz,
+                swing.looping,
+                swing.speed_q8,
+                swing.frame_range,
+            )
+        };
+        let now = at(swing.local_tick);
+        let next = at(swing.local_tick.saturating_add(1));
+        return combat::ticks_to_contact(first, last, now, next.saturating_sub(now));
+    }
+    let (first, last) = swing.record_contact?;
+    combat::ticks_to_contact(first, last, swing.local_tick << 12, 1 << 12)
 }

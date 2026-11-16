@@ -83,6 +83,7 @@ fn far() -> GameEntityTickInput<'static> {
             defender: Defender::OPEN,
             stance: None,
             attack_read: 0,
+            swing_ticks: None,
         },
     }
 }

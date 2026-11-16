@@ -510,7 +510,7 @@ impl Playtest {
         let i = self.duel.target;
         let p = self.motor.position();
         let height = self.character.map_or(40, |c| c.height);
-        let ticks_to_hit = self.duel_ticks_to_hit(i, p, height);
+        let ticks_to_hit = self.duel_ticks_to_hit(i, p, height, ctx.video_hz);
         let before = core::mem::replace(
             &mut self.duel.ticks_to_hit,
             ticks_to_hit.unwrap_or(u16::MAX),
@@ -549,18 +549,19 @@ impl Playtest {
     }
 
     /// Ticks until the enemy's hit the bot can see lands on the player: its
-    /// melee swing from the windup clock (now, once the swing is out), or
-    /// the nearest incoming bolt. None when nothing is coming.
-    fn duel_ticks_to_hit(&self, i: usize, p: RoomPoint, height: i32) -> Option<u16> {
-        let record = &GAME_ENTITIES[i];
-        let melee = self.game_entities.attack_kind(i) != 2;
-        let swing = match self.game_entities.state(i) {
-            GameEntityState::Windup if melee => {
-                Some(u16::from(record.windup_ticks).saturating_sub(self.game_entities.state_age(i)))
-            }
-            GameEntityState::Attack if melee => Some(0),
-            _ => None,
-        };
+    /// melee swing's first contact frame ([`swing_ticks_to_contact`], the
+    /// reading the enemy makes of the player's swing), or the nearest
+    /// incoming bolt. None when nothing is coming.
+    fn duel_ticks_to_hit(
+        &self,
+        i: usize,
+        p: RoomPoint,
+        height: i32,
+        video_hz: VideoHz,
+    ) -> Option<u16> {
+        let swing = self
+            .entity_swing(i)
+            .and_then(|swing| swing_ticks_to_contact(&swing, video_hz));
         let bolt = self
             .combat_projectiles
             .incoming_threat(

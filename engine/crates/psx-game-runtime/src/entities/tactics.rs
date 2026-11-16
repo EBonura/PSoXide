@@ -793,7 +793,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         // Parry on purpose: swap so a hit seen coming lands inside the parry
         // window. The same choice as the duel's player bot; how often is the
         // character's data.
-        let swing = (input.target.attack_read == 2).then_some(0);
+        let swing = input.target.swing_ticks;
         let bolt = self.projectile_threats[i].map(|threat| threat.ticks_to_contact);
         let ticks_to_hit = match (swing, bolt) {
             (Some(a), Some(b)) => Some(a.min(b)),

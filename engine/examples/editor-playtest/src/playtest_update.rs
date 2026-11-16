@@ -260,6 +260,9 @@ impl Playtest {
             let motor_config = self.motor_config();
             let player_action = self.player_action_protection(ctx, motor_config);
             let attack_read = self.player_melee_read();
+            let swing_ticks = self
+                .player_swing(ctx.sim_tick)
+                .and_then(|swing| swing_ticks_to_contact(&swing, ctx.video_hz));
             self.game_entities
                 .observe_projectiles(GAME_ENTITIES.as_slice(), &self.combat_projectiles);
             let mut mover = SceneEntityMover {
@@ -293,6 +296,7 @@ impl Playtest {
                             player_height,
                         ),
                         attack_read,
+                        swing_ticks,
                     },
                 },
                 &mut mover,
