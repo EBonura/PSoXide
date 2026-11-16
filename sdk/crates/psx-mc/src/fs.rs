@@ -30,7 +30,8 @@ use crate::{
 /// restored games' BIOS-style card layer): field offsets, allocation states, the free test and
 /// the XOR checksum of a 128-byte entry.
 pub mod dir {
-    use crate::FRAME_SIZE;
+    use super::{Chain, DirOptions};
+    use crate::{Block, Error, Result, DATA_BLOCKS, FRAME_SIZE, MAX_NAME_LEN};
 
     /// Offset of the allocation state byte.
     pub const E_STATE: usize = 0;
@@ -72,6 +73,90 @@ pub mod dir {
     #[must_use]
     pub fn checksum(frame: &[u8; FRAME_SIZE]) -> u8 {
         frame[..E_CHK].iter().fold(0u8, |a, &b| a ^ b)
+    }
+
+    /// The fifteen directory entries (frames 1 to 15 of block 0), for a program that reads them
+    /// once and walks them in place with [`find_in`] and [`chain_in`].
+    pub type Directory = [[u8; FRAME_SIZE]; DATA_BLOCKS];
+
+    /// Read the directory from `dev` into `out`: the `MC` header frame first, then the fifteen
+    /// entries in order. Unless `options` accepts a bad checksum, an entry whose XOR checksum does
+    /// not match ends the read. Only `accept_bad_checksum` is consulted.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NotFormatted`] when frame 0 does not start with `MC`, [`Error::Corrupt`] on a
+    /// checksum mismatch that is not accepted, or what the device reports.
+    pub fn read_into<B: Block>(
+        dev: &mut B,
+        options: DirOptions,
+        out: &mut Directory,
+    ) -> Result<()> {
+        let mut head = [0u8; FRAME_SIZE];
+        dev.read_frame(0, &mut head)?;
+        if head[0] != b'M' || head[1] != b'C' {
+            return Err(Error::NotFormatted);
+        }
+        for (i, e) in out.iter_mut().enumerate() {
+            dev.read_frame(1 + i as u16, e)?;
+            if !options.accept_bad_checksum && checksum_inline(e) != e[E_CHK] {
+                return Err(Error::Corrupt);
+            }
+        }
+        Ok(())
+    }
+
+    /// The index of the first file whose first-block entry matches `name`, walking `dir` in
+    /// place (nothing is copied): the walk [`Card::find_with`] does over a card, over a directory
+    /// already read. Only `wildcards` is consulted (`?` any one character, `*` the rest);
+    /// checksums are [`read_into`]'s concern.
+    #[must_use]
+    pub fn find_in(dir: &Directory, name: &[u8], options: DirOptions) -> Option<usize> {
+        (0..DATA_BLOCKS)
+            .find(|&i| dir[i][E_STATE] == ST_FIRST && entry_matches(name, &dir[i], options.wildcards))
+    }
+
+    /// A file's blocks from its first entry, following links in `dir` in place as the BIOS does:
+    /// the chain ends at the last-block state, at a link out of range or at fifteen blocks, and
+    /// the blocks so far are returned. The state of a linked block is not examined. This is
+    /// [`Card::chain_with`] with `stop_at_bad_link` over a directory already read.
+    ///
+    /// # Panics
+    ///
+    /// If `first` is not below fifteen.
+    #[must_use]
+    pub fn chain_in(dir: &Directory, first: usize) -> Chain {
+        let (mut blocks, mut len, mut i) = ([0u8; DATA_BLOCKS], 0, first);
+        while len < DATA_BLOCKS {
+            blocks[len] = i as u8 + 1;
+            len += 1;
+            let link = u16::from_le_bytes([dir[i][E_LINK], dir[i][E_LINK + 1]]) as usize;
+            if dir[i][E_STATE] == ST_LAST || link >= DATA_BLOCKS {
+                break;
+            }
+            i = link;
+        }
+        Chain { blocks, len }
+    }
+
+    /// Does `pattern` match the NUL-terminated name in `entry`: exactly, or with `wildcards`
+    /// where `?` is any one character and `*` is the rest of the name (even an empty rest)?
+    /// A name with no NUL in its twenty bytes is twenty long.
+    pub(super) fn entry_matches(pattern: &[u8], entry: &[u8; FRAME_SIZE], wildcards: bool) -> bool {
+        let name = &entry[E_NAME..E_NAME + MAX_NAME_LEN + 1];
+        let len = name.iter().position(|&b| b == 0).unwrap_or(MAX_NAME_LEN);
+        let name = &name[..len];
+        let mut i = 0;
+        for &p in pattern {
+            match p {
+                b'*' if wildcards => return true,
+                b'?' if wildcards && i < name.len() => {}
+                c if i < name.len() && name[i] == c => {}
+                _ => return false,
+            }
+            i += 1;
+        }
+        i == name.len()
     }
 }
 
@@ -127,22 +212,6 @@ impl DirOptions {
         self.stop_at_bad_link = true;
         self
     }
-}
-
-/// The BIOS name match: `?` is any one character, `*` is the rest of the name (and matches
-/// even an empty rest). `name` is the stored name up to its NUL.
-fn wildcard_matches(pattern: &[u8], name: &[u8]) -> bool {
-    let mut i = 0;
-    for &p in pattern {
-        match p {
-            b'*' => return true,
-            b'?' if i < name.len() => {}
-            c if i < name.len() && name[i] == c => {}
-            _ => return false,
-        }
-        i += 1;
-    }
-    i == name.len()
 }
 
 use dir::{
@@ -579,14 +648,7 @@ impl<B: Block> Card<B> {
             if e[E_STATE] != ST_FIRST {
                 continue;
             }
-            let hit = if options.wildcards {
-                let mut buf = [0u8; MAX_NAME_LEN + 1];
-                let len = copy_entry_name(&e, &mut buf) as usize;
-                wildcard_matches(name, &buf[..len])
-            } else {
-                entry_name_eq(&e, name)
-            };
-            if hit {
+            if dir::entry_matches(name, &e, options.wildcards) {
                 return Ok(Some(i));
             }
         }

@@ -598,3 +598,70 @@ fn chain_with_bad_checksum_option_is_independent_of_link_option() {
     let ch = c.chain_with(0, DirOptions::BIOS).unwrap();
     assert_eq!(ch.len, 2);
 }
+
+/// A pseudo-random directory image: damaged checksums, broken links and loops, names with and
+/// without a NUL, an optional unformatted header.
+fn random_directory_card(seed: &mut u32) -> RamCard {
+    use crate::dir::{E_CHK, E_LINK, E_NAME, E_STATE};
+    let mut next = |m: u32| {
+        *seed ^= *seed << 13;
+        *seed ^= *seed >> 17;
+        *seed ^= *seed << 5;
+        *seed % m
+    };
+    let mut image = [0u8; crate::CARD_SIZE];
+    image[0] = b'M';
+    image[1] = if next(9) == 0 { b'X' } else { b'C' };
+    const NAMES: [&[u8]; 4] = [b"BASLUS-00000SAVE0", b"BASLUS-00000SAVE1", b"A", b"01234567890123456789"];
+    for i in 0..DATA_BLOCKS {
+        let e = &mut image[(1 + i) * FRAME_SIZE..(2 + i) * FRAME_SIZE];
+        e[E_STATE] = [0x51, 0x52, 0x53, 0xa0, 0x00][next(5) as usize];
+        let link = [0xffffu16, next(15) as u16, next(30) as u16, i as u16][next(4) as usize];
+        e[E_LINK..E_LINK + 2].copy_from_slice(&link.to_le_bytes());
+        let name = NAMES[next(4) as usize];
+        e[E_NAME..E_NAME + name.len()].copy_from_slice(name);
+        if next(5) == 0 {
+            e[E_NAME + 20] = b'Z';
+        }
+        e[E_CHK] = e[..E_CHK].iter().fold(0, |a, &b| a ^ b);
+        if next(4) == 0 {
+            e[E_CHK] ^= 1 + next(255) as u8;
+        }
+    }
+    RamCard::from_image(&image).unwrap()
+}
+
+#[test]
+fn the_borrowed_directory_forms_equal_the_card_forms() {
+    use crate::dir::{chain_in, find_in, read_into, Directory};
+    const PATTERNS: [&[u8]; 9] = [
+        b"BASLUS-00000SAVE0", b"BASLUS-0000?SAVE?", b"BAS*", b"*", b"?", b"A", b"A?", b"",
+        b"01234567890123456789",
+    ];
+    let mut seed = 0x1234_5678u32;
+    for _ in 0..2000 {
+        let mut c = Card::new(random_directory_card(&mut seed));
+        let mut dir: Directory = [[0; FRAME_SIZE]; DATA_BLOCKS];
+        let read = read_into(c.device(), DirOptions::BIOS, &mut dir);
+        if !c.is_formatted().unwrap() {
+            assert_eq!(read, Err(Error::NotFormatted));
+            continue;
+        }
+        read.unwrap();
+        for i in 0..DATA_BLOCKS {
+            assert_eq!(dir[i], c.read_dir_with(i, DirOptions::BIOS).unwrap());
+        }
+        for opts in [DirOptions::BIOS, DirOptions::STRICT.accepting_bad_checksum()] {
+            for p in PATTERNS {
+                assert_eq!(find_in(&dir, p, opts), c.find_with(p, opts).unwrap());
+            }
+        }
+        for first in 0..DATA_BLOCKS {
+            let (a, b) = (chain_in(&dir, first), c.chain_with(first, DirOptions::BIOS).unwrap());
+            assert_eq!((a.len, a.blocks), (b.len, b.blocks));
+        }
+        let strict = read_into(c.device(), DirOptions::STRICT, &mut dir);
+        let any_bad = (0..DATA_BLOCKS).any(|i| c.read_dir(i).is_err());
+        assert_eq!(strict.is_err(), any_bad);
+    }
+}
