@@ -100,6 +100,15 @@ impl Playlist {
         }
     }
 
+    /// The song at the current position, without the off-slot test: for a playlist built with
+    /// [`OffSlot::Without`], where the position is always a song. On the off slot of an
+    /// [`OffSlot::After`] list this is not a song of the shuffle; use [`slot`](Self::slot).
+    #[inline(always)]
+    #[must_use]
+    pub fn current_song(&self) -> u8 {
+        self.order[self.pos as usize & (MAX_SONGS - 1)]
+    }
+
     /// Positions a player can stand on: the songs, and the off slot if there is one.
     fn slots(&self) -> u8 {
         self.count + u8::from(self.off == OffSlot::After)
@@ -391,6 +400,18 @@ mod tests {
         assert_eq!(list.skip_back(), forward[5]);
         // Forward from the last song starts a new shuffle, which does not open on it.
         assert!(matches!(list.skip_forward(), Slot::Song(n) if Slot::Song(n) != forward[5]));
+    }
+
+    #[test]
+    fn current_song_is_the_slot_without_an_off_slot() {
+        let mut list = Playlist::new(6, 99, OffSlot::Without);
+        for _ in 0..40 {
+            assert_eq!(Slot::Song(list.current_song()), list.slot());
+            list.skip_forward();
+            assert_eq!(Slot::Song(list.current_song()), list.slot());
+            list.skip_back();
+            list.song_finished();
+        }
     }
 
     #[test]
