@@ -410,7 +410,9 @@ impl Engine {
         self.launch(drive)
     }
 
-    /// Start `self.song`: the drive's setup, then the read.
+    /// Start `self.song`: the drive's setup, then the read. One copy, called by a start and by
+    /// the poll that sees a stop complete (a PGO build inlined it into both).
+    #[inline(never)]
     fn launch(&mut self, drive: &mut impl Drive) -> Result<(), Error> {
         let Some(song) = self.song else {
             return Ok(());
