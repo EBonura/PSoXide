@@ -42,7 +42,7 @@ PGO_ARGS ?=
 PGO_VARIANTS ?= --variant off --variant default --variant hot=500 --variant hot=500+profi
 GATE ?=
 
-.PHONY: example disc hello-tri hello-tri-disc run-tri examples pgo-collect pgo-choose hello-xa-disc hello-xa-gate hello-xa-resume-disc hello-xa-resume-gate hello-cdstream-disc hello-cdstream-gate hello-cdsingle-disc hello-cdsingle-gate hello-cdchunk-disc hello-cdchunk-gate hello-cdlean-disc hello-cdlean-gate hello-cddrain-disc hello-cddrain-gate hello-gteirq-disc hello-gteirq-gate hello-cdpause-disc hello-cdpause-gate hello-present-queue-disc hello-present-queue-gate hello-present-cd-disc hello-present-cd-gate hello-wide-gate
+.PHONY: example disc hello-tri hello-tri-disc run-tri examples pgo-collect pgo-choose hello-xa-disc hello-xa-gate hello-xa-stop-gate hello-xa-resume-disc hello-xa-resume-gate hello-cdstream-disc hello-cdstream-gate hello-cdsingle-disc hello-cdsingle-gate hello-cdchunk-disc hello-cdchunk-gate hello-cdlean-disc hello-cdlean-gate hello-cddrain-disc hello-cddrain-gate hello-gteirq-disc hello-gteirq-gate hello-cdpause-disc hello-cdpause-gate hello-present-queue-disc hello-present-queue-gate hello-present-cd-disc hello-present-cd-gate hello-wide-gate
 examples:
 	@set -e; for example in hello-tri hello-input hello-ot hello-gte hello-tex hello-memcard hello-spstack hello-gteirq hello-present hello-present-queue hello-asmprobe; do $(MAKE) -f tools/sdk-examples.mk disc EXAMPLE=$$example; done
 
@@ -79,6 +79,11 @@ hello-xa-gate: hello-xa-disc
 	@test -n "$(FRONTEND)" || (echo "Set FRONTEND to the PSoXide-emulator executable"; exit 1)
 	cargo build -q --release --locked -p psx-audio-cook
 	sh tools/xa_gate.sh "$(FRONTEND)" "$(BUILD)/$(TARGET)/release/hello-xa.cue" $(or $(CARGO_TARGET_DIR),target)/release/psx-audio-cook
+# Stops hello-xa's songs while it keeps polling: make hello-xa-stop-gate FRONTEND=/path/to/frontend
+hello-xa-stop-gate: hello-xa-disc
+	@test -n "$(FRONTEND)" || (echo "Set FRONTEND to the PSoXide-emulator executable"; exit 1)
+	cargo build -q --release --locked -p psx-audio-cook
+	sh tools/xa_stop_gate.sh "$(FRONTEND)" "$(BUILD)/$(TARGET)/release/hello-xa.cue" $(or $(CARGO_TARGET_DIR),target)/release/psx-audio-cook
 # hello-xa-resume plays one song, reads data sectors while it is suspended,
 # resumes it and checks the player, the song clock, the drive command log and
 # the audio capture. The songs run 24 s so the pause and the resume both land

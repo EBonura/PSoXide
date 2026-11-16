@@ -161,11 +161,25 @@ loop {
     if player.poll() == Event::Looped { /* optional */ }
     // ...
 }
-player.stop();                           // pause; play() starts again from the top
+player.stop();                           // silence now, Pause without waiting; play() starts from the top
 ```
 
 `Player` owns the CD token, so nothing else drives the controller while it
-exists; `release()` stops the music and returns the token.
+exists; `release()` stops the music (waiting for the drive) and returns the token.
+
+**Stopping does not block.** A Pause out of a read completes 1.2 to 3.9 million
+clocks after the command (several frames, and 7 to 8 vblanks measured in both
+NitroXide and VoXide in the emulator's `real` and `mister` models), so `stop`
+silences the song at the drive's mixer, sends the Pause and returns. Call
+`poll` once a frame, or `poll_stop` once a frame for a game that polls only
+near a song's end, until `is_stopping` is false. Meanwhile the player reports
+`Event::Idle`, a second `stop` does nothing, `play` queues its song (the poll
+that sees the Pause complete starts it) and `suspend` reports the drive as not
+quiet yet. A song that reaches its end by itself is stopped the same way, inside
+`poll`. Nothing else may drive the controller until `is_stopping` is false: a
+data read through a token of your own (a boot, a level load) calls
+`stop_and_wait` instead, the blocking form, which also finishes a pending
+`stop`. A Pause not complete after 60 polls is finished by the blocking protocol.
 
 `play` sends Demute, Setmode, Setfilter, Setloc and ReadS (a few
 milliseconds), starting from the top of the file. Playing another song is the
@@ -230,8 +244,8 @@ does its other data.
 **The drive is busy while music plays.** XA music is a read: the laser follows
 the music file, so the CPU cannot read other data from the disc meanwhile,
 not even at the same speed. Load first and then start the song, or suspend the
-music for a load and `resume` it afterwards (or `stop` it and `play` it again,
-which restarts from the top).
+music for a load and `resume` it afterwards (or `stop_and_wait` it and `play` it
+again, which restarts from the top).
 Games that stream levels from the disc cannot use XA music for the stream's
 duration. Streaming data and music together needs the data interleaved into
 the filler slots, which neither the encoder nor the player does. CD-DA has
