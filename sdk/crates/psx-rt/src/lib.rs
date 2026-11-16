@@ -71,7 +71,6 @@ pub mod tty;
 )]
 mod wait;
 
-#[cfg(feature = "alloc")]
 pub mod heap;
 
 pub use peripherals::Peripherals;
