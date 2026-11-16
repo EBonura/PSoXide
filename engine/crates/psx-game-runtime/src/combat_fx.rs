@@ -118,14 +118,14 @@ pub const COMBAT_FEEDBACK: CombatFeedback = CombatFeedback {
     flash: [
         FlashLook {
             ticks: 6,
-            peak_q8: 176,
-        },
-        FlashLook {
-            ticks: 8,
             peak_q8: 224,
         },
         FlashLook {
-            ticks: 10,
+            ticks: 8,
+            peak_q8: 256,
+        },
+        FlashLook {
+            ticks: 11,
             peak_q8: 256,
         },
         FlashLook {
