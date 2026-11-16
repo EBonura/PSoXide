@@ -6,9 +6,11 @@
 //! `0..=ONE`, so `lerp_q8(a, b, ease_out_quart_q8(t))` is a complete tween.
 //!
 //! These are the curves the launcher, NitroXide and WipEout each wrote for
-//! themselves. They are not interchangeable, so each keeps its own name and
-//! unit; the rounding of every one is that of the copy it replaces (shifts,
-//! not rounded divisions).
+//! themselves, lifted here once (the tests below hold each equal to its
+//! original over the whole input range). A program that still carries its own
+//! copy replaces it with the function of the same job. They are not
+//! interchangeable, so each keeps its own name and unit; the rounding of every
+//! one is that of the copy it replaces (shifts, not rounded divisions).
 
 /// 1.0 in Q8.
 pub const ONE_Q8: i32 = 256;
