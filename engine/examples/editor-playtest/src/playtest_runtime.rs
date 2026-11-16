@@ -922,12 +922,10 @@ impl Playtest {
 
     /// Apply an untyped incoming hit as aligned with the active stance.
     pub(super) fn apply_untyped_player_damage(&mut self, damage: u16) -> bool {
-        let damage = self.vitality_modifiers().incoming_damage(damage);
         // Untyped damage has no colour to compare, so it is treated as aligned
         // with whatever is active: the player cannot read an axis that was
         // never authored, and should not be punished for it.
-        let active = self.player.stance.active();
-        self.apply_stance_damage(active, damage)
+        self.player_take_damage(HitKind::Melee, None, damage, false)
     }
 
     /// Damage from a hazard volume: a hit bigger than the active pool does not stop
@@ -937,29 +935,7 @@ impl Playtest {
     /// walk through the rest of the volume. What the active pool could not take
     /// carries into the other one, and the hit is lethal when both run out.
     pub(super) fn apply_hazard_player_damage(&mut self, damage: u16) -> bool {
-        let damage = self.vitality_modifiers().incoming_damage(damage);
-        let active = self.player.stance.active();
-        let room = u32::from(self.player.vitality.pool(active).current());
-        if self.apply_stance_damage(active, damage) {
-            return true;
-        }
-        if self.player.vitality.pool(active).current() != 0 {
-            return false;
-        }
-        // The pool ran dry. Convert what it could not take back into hit
-        // units (the stance scales an aligned hit before the pool sees it).
-        let scale = if self.player_has_ranged_weapon() {
-            4096
-        } else {
-            u32::from(self.player_stance_config.aligned_damage_q12).max(1)
-        };
-        let scaled = u32::from(damage) * scale / 4096;
-        let Some(rest) = scaled.checked_sub(room).filter(|rest| *rest > 0) else {
-            return false;
-        };
-        let rest = (rest * 4096).div_ceil(scale).min(u32::from(u16::MAX)) as u16;
-        let other = self.player.stance.active();
-        self.apply_stance_damage(other, rest)
+        self.player_take_damage(HitKind::Hazard, None, damage, true)
     }
 
     /// The projectile colour sets the multiplier; the active stance receives damage.
@@ -968,7 +944,6 @@ impl Playtest {
         channel: psx_game_runtime::projectiles::ProjectileDamageChannel,
         damage: u16,
     ) -> bool {
-        let damage = self.vitality_modifiers().incoming_damage(damage);
         let channel = match channel {
             psx_game_runtime::projectiles::ProjectileDamageChannel::Horizon => {
                 VitalityChannelId::One
@@ -977,32 +952,61 @@ impl Playtest {
                 VitalityChannelId::Two
             }
         };
-        self.apply_stance_damage(channel, damage)
+        self.player_take_damage(HitKind::Projectile, Some(channel), damage, false)
     }
 
-    /// Route one incoming hit through the stance.
+    /// The player's health damage, through [`Combatant::receive_hit`].
     ///
-    /// Only the active pool is damaged. Ranged-equipped prototypes use 100%
-    /// matching / 125% opposite damage; other projects retain authored scaling.
-    /// A depleted pool swaps the stance here.
-    fn apply_stance_damage(&mut self, attack: VitalityChannelId, damage: u16) -> bool {
-        let before = u32::from(self.player.vitality.pool(VitalityChannelId::One).current())
-            + u32::from(self.player.vitality.pool(VitalityChannelId::Two).current());
+    /// Shell modifiers reduce the hit first. `channel` `None` is untyped and
+    /// counts as aligned with the active stance. Only the active pool is
+    /// damaged; `carry` lets what an emptied pool could not take spill into
+    /// the other (hazards). True when both pools are empty afterwards.
+    fn player_take_damage(
+        &mut self,
+        kind: HitKind,
+        channel: Option<VitalityChannelId>,
+        damage: u16,
+        carry: bool,
+    ) -> bool {
+        let damage = self.vitality_modifiers().incoming_damage(damage);
+        let strike = Strike {
+            attacker: CombatantId::WORLD,
+            kind,
+            channel: channel.unwrap_or(self.player.stance.active()),
+            damage,
+            poise: 0,
+        };
+        let hit = self
+            .player
+            .receive_hit(self.player_hit(strike, carry, false));
+        if hit.damage_applied > 0 {
+            self.queue_gameplay_sfx(LevelGameplaySfxEvent::PlayerDamage);
+        }
+        hit.defeated
+    }
+
+    /// The player's routing and posture rules around `strike`.
+    ///
+    /// Ranged-equipped prototypes use 100% matching / 125% opposite damage;
+    /// other projects retain authored scaling. Posture always runs break
+    /// grace against [`PLAYER_POISE`](psx_game_runtime::character::PLAYER_POISE),
+    /// and a Stun cannot be broken.
+    fn player_hit(&self, strike: Strike, carry: bool, armored: bool) -> HitIn {
         let mut config = self.player_stance_config;
         if self.player_has_ranged_weapon() {
             config.aligned_damage_q12 = 4096;
             config.opposed_damage_q12 = 5120;
         }
-        let outcome = self
-            .player
-            .take_stance_damage(attack, damage, &config)
-            .defeated;
-        let after = u32::from(self.player.vitality.pool(VitalityChannelId::One).current())
-            + u32::from(self.player.vitality.pool(VitalityChannelId::Two).current());
-        if after < before {
-            self.queue_gameplay_sfx(LevelGameplaySfxEvent::PlayerDamage);
+        HitIn {
+            strike,
+            route: HitRoute::Stance { config, carry },
+            poise: PoiseRule {
+                capacity: psx_game_runtime::character::PLAYER_POISE,
+                armored,
+                grace: true,
+                blocked: matches!(self.anim_state, PlayerAnim::Stun),
+            },
         }
-        outcome
     }
 
     #[inline]
@@ -1453,14 +1457,18 @@ impl Playtest {
         if self.hazard_death_ticks_remaining != 0 {
             return false;
         }
-        // The player always runs break grace, and a Stun cannot be broken.
-        let poise_broken = self.player.poise_hit(
-            damage,
-            psx_game_runtime::character::PLAYER_POISE,
-            armored,
-            true,
-            matches!(self.anim_state, PlayerAnim::Stun),
-        );
+        // The tick's summed posture damage lands as one poise-only hit.
+        let strike = Strike {
+            attacker: CombatantId::WORLD,
+            kind: HitKind::Melee,
+            channel: self.player.stance.active(),
+            damage: 0,
+            poise: damage,
+        };
+        let poise_broken = self
+            .player
+            .receive_hit(self.player_hit(strike, false, armored))
+            .poise_broken;
         if shot_only && !poise_broken {
             return false;
         }

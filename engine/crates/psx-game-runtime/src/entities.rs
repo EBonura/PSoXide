@@ -41,7 +41,9 @@ mod tactics;
 pub use tactics::{EnemyGoal, EnemyGoalResult, EnemyTacticalSnapshot};
 
 use crate::combat::{arc_hits_circle, MeleeArc};
-use crate::combatant::Combatant;
+use crate::combatant::{
+    Combatant, CombatantId, Guard, HitIn, HitKind, HitRoute, PoiseRule, Strike,
+};
 use crate::vitality::VitalityChannelId;
 use psx_level::{
     game_entity_flags, CharacterActionFrameRange, CharacterAnimationAction, LevelGameEntityRecord,
@@ -154,21 +156,10 @@ const GAME_ENTITY_STANCE_PULSE_TICKS: u16 = 30;
 /// Duration of the enemy guard-colour sweep in 60 Hz simulation ticks.
 pub const GAME_ENTITY_STANCE_SWAP_DURATION_TICKS: u8 = 12;
 
-/// Damage against the channel an enemy currently guards: a token 1 to 3
-/// points whatever the attack's authored value, so a wrong-stance hit reads
-/// at once as pointless and pushes the player to swap. The value is the
-/// authored damage divided by [`GAME_ENTITY_GUARDED_DAMAGE_DIVISOR`] and
-/// clamped into this range, so heavier swings still chip a little harder.
-pub const GAME_ENTITY_GUARDED_DAMAGE_MIN: u16 = 1;
-
-/// Upper bound of the guarded-channel chip damage.
-pub const GAME_ENTITY_GUARDED_DAMAGE_MAX: u16 = 3;
-
-/// Authored damage per point of guarded-channel chip damage.
-pub const GAME_ENTITY_GUARDED_DAMAGE_DIVISOR: u16 = 16;
-
-/// Damage against the channel an enemy leaves exposed (Q12 = 1.5x).
-pub const GAME_ENTITY_OPPOSED_DAMAGE_Q12: u16 = 6144;
+pub use crate::combatant::{
+    GAME_ENTITY_GUARDED_DAMAGE_DIVISOR, GAME_ENTITY_GUARDED_DAMAGE_MAX,
+    GAME_ENTITY_GUARDED_DAMAGE_MIN, GAME_ENTITY_OPPOSED_DAMAGE_Q12,
+};
 
 /// Front-arc half-width for entity attacks, PSX angle units
 /// (60 degrees). The entity faced the player when it committed to
@@ -343,6 +334,22 @@ pub struct GameEntityTickStats {
     /// Total damage those connections apply to the player this tick
     /// (the owning game subtracts it from its player health).
     pub player_damage: u16,
+}
+
+/// A strike the player sends at an entity.
+pub(crate) fn player_strike(
+    kind: HitKind,
+    channel: VitalityChannelId,
+    damage: u16,
+    poise: u16,
+) -> Strike {
+    Strike {
+        attacker: CombatantId::PLAYER,
+        kind,
+        channel,
+        damage,
+        poise,
+    }
 }
 
 /// What one [`GameEntities::apply_hit`] did.
@@ -1005,6 +1012,16 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         (age < GAME_ENTITY_STANCE_PULSE_TICKS).then(|| age * 4096 / 30)
     }
 
+    /// The guard every enemy runs today: the flow rules when they are on,
+    /// the legacy chip guard otherwise.
+    fn guard(&self) -> Guard {
+        if self.flow_enabled {
+            Guard::Flow
+        } else {
+            Guard::Chip
+        }
+    }
+
     /// Apply the current enemy guard to one authored damage value: the
     /// exposed channel takes 1.5x, the guarded one a token 1 to 3 points.
     /// A zero-damage hit stays zero.
@@ -1014,21 +1031,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         attack: VitalityChannelId,
         damage: u16,
     ) -> u16 {
-        if damage == 0 {
-            return 0;
-        }
-        if self.flow_enabled {
-            return (u32::from(damage) * if attack == self.stance(index) { 4 } else { 5 } / 4)
-                .min(65535) as u16;
-        }
-        if attack == self.stance(index) {
-            return (damage / GAME_ENTITY_GUARDED_DAMAGE_DIVISOR).clamp(
-                GAME_ENTITY_GUARDED_DAMAGE_MIN,
-                GAME_ENTITY_GUARDED_DAMAGE_MAX,
-            );
-        }
-        ((u32::from(damage) * u32::from(GAME_ENTITY_OPPOSED_DAMAGE_Q12)) / 4096)
-            .min(u32::from(u16::MAX)) as u16
+        self.guard().damage(attack == self.stance(index), damage)
     }
 
     /// Poise damage for one hit, scaled like [`Self::scaled_stance_damage`]:
@@ -1043,14 +1046,8 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         damage: u16,
         poise_damage: u16,
     ) -> u16 {
-        if self.flow_enabled {
-            return poise_damage;
-        }
-        if damage == 0 || attack != self.stance(index) {
-            return poise_damage;
-        }
-        let applied = self.scaled_stance_damage(index, attack, damage);
-        (u32::from(poise_damage) * u32::from(applied) / u32::from(damage)) as u16
+        self.guard()
+            .poise(attack == self.stance(index), damage, poise_damage)
     }
 
     /// Ticks since the entity's latest stance change began; `u16::MAX` when
@@ -1302,7 +1299,8 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         damage: u16,
         poise_damage: u16,
     ) -> GameEntityHitOutcome {
-        self.apply_scaled_hit(records, index, channel, damage, poise_damage)
+        let strike = player_strike(HitKind::Melee, channel, damage, poise_damage);
+        self.receive_hit(records, index, strike, Guard::Raw)
     }
 
     /// Apply a Cortex-style stance-aware hit. The guarded channel takes a
@@ -1318,28 +1316,45 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         damage: u16,
         poise_damage: u16,
     ) -> GameEntityHitOutcome {
-        let poise_damage = self.scaled_stance_poise(index, channel, damage, poise_damage);
-        let damage = self.scaled_stance_damage(index, channel, damage);
-        self.apply_scaled_hit(records, index, channel, damage, poise_damage)
+        let strike = player_strike(HitKind::Melee, channel, damage, poise_damage);
+        self.receive_hit(records, index, strike, self.guard())
     }
 
-    fn apply_scaled_hit(
+    /// Land `strike` on entity `index` through [`Combatant::receive_hit`]
+    /// under `guard`, with the enemy's posture rules, then move the entity
+    /// into Dead or Staggered when the hit killed or broke it. An out of
+    /// range or dead entity is a miss.
+    pub fn receive_hit(
         &mut self,
         records: &'static [LevelGameEntityRecord],
         index: usize,
-        channel: VitalityChannelId,
-        damage: u16,
-        poise_damage: u16,
+        strike: Strike,
+        guard: Guard,
     ) -> GameEntityHitOutcome {
         if index >= self.count() || index >= records.len() {
             return GameEntityHitOutcome::MISS;
         }
-        if self.state(index) == GameEntityState::Dead {
+        let state = self.state(index);
+        if state == GameEntityState::Dead {
             return GameEntityHitOutcome::MISS;
         }
-        let defeated = self.combatants[index].take_spill_damage(channel, damage);
-        if defeated {
-            self.release_attack_owner(index, u16::from(records[index].group_attack_delay_ticks));
+        // Break grace and the no-break-while-staggered rule are flow rules.
+        let grace = self.flow_enabled;
+        let poise = PoiseRule {
+            capacity: records[index].poise,
+            armored: state == GameEntityState::Attack
+                && self.selected_attack_kind(index) == GAME_ENTITY_ATTACK_HEAVY,
+            grace,
+            blocked: grace && state == GameEntityState::Staggered,
+        };
+        let out = self.combatants[index].receive_hit(HitIn {
+            strike,
+            route: HitRoute::Spill { guard },
+            poise,
+        });
+        let delay = u16::from(records[index].group_attack_delay_ticks);
+        if out.killed {
+            self.release_attack_owner(index, delay);
             self.enter_state(
                 index,
                 GameEntityState::Dead,
@@ -1351,20 +1366,8 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
                 died: true,
             };
         }
-        let armored = self.state(index) == GameEntityState::Attack
-            && self.selected_attack_kind(index) == GAME_ENTITY_ATTACK_HEAVY;
-        // Break grace and the no-break-while-staggered rule are flow rules.
-        let grace = self.flow_enabled;
-        let blocked = grace && self.state(index) == GameEntityState::Staggered;
-        let staggered = self.combatants[index].poise_hit(
-            poise_damage,
-            records[index].poise,
-            armored,
-            grace,
-            blocked,
-        );
-        if staggered {
-            self.release_attack_owner(index, u16::from(records[index].group_attack_delay_ticks));
+        if out.poise_broken {
+            self.release_attack_owner(index, delay);
             self.enter_state(
                 index,
                 GameEntityState::Staggered,
@@ -1373,7 +1376,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         }
         GameEntityHitOutcome {
             connected: true,
-            staggered,
+            staggered: out.poise_broken,
             died: false,
         }
     }

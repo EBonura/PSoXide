@@ -257,7 +257,8 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         } else {
             poise
         };
-        self.apply_stance_hit(records, index, channel, damage, poise)
+        let strike = super::player_strike(HitKind::Projectile, channel, damage, poise);
+        self.receive_hit(records, index, strike, self.guard())
     }
     /// A heavy connection creates separation through the same body collision as AI walking.
     pub fn recoil_from(&mut self, index: usize, from: [i32; 3]) {
