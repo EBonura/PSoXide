@@ -26,6 +26,14 @@
 //!   silicon.) The request ends [`Outcome::Cancelled`] with the sectors that
 //!   had landed; [`Request::remaining_after`] builds the request that
 //!   continues it.
+//! - **Park.** [`Request::park`] seeks to a sector and stops there, reading nothing, so the
+//!   next read from it pays no long seek (a gate that knows where it reads next parks the
+//!   head there while the frame renders).
+//! - **An exact byte bound.** [`Request::with_byte_len`] stores only the chunk's bytes: the
+//!   last sector is popped whole but written only as far as the chunk goes.
+//! - **A watchdog.** [`Config::timeout_vblanks`] ends a transfer with no progress as
+//!   [`FailureKind::Watchdog`], and [`IrqMaskPolicy::OnlyWhileBusy`] keeps the CD source
+//!   closed between requests so the polled reader and the handler never share the controller.
 //! - **A small priority queue.** [`QUEUE_DEPTH`] requests wait behind the
 //!   active one, most urgent [`Priority`] first.
 //! - **Contiguous chaining.** A queued request that starts at the sector

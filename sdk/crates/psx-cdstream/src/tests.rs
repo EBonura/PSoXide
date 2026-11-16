@@ -1413,3 +1413,23 @@ fn a_few_workloads_under_the_interpreter() {
         model_run(seed);
     }
 }
+
+#[test]
+fn a_park_seeks_and_stops_without_reading() {
+    let mut engine = engine();
+    let ticket = submit(&mut engine, Request::park(500));
+    run(&mut engine);
+    let done = finished(&mut engine, ticket);
+    assert_eq!(done.outcome, Outcome::Done);
+    assert_eq!(done.received, 0);
+    assert!(engine.hw().popped.is_empty());
+    assert_eq!(engine.hw().commands(), [CMD_SETLOC, CMD_SEEKL]);
+    assert_eq!(engine.phase(), Phase::Done);
+    assert!(engine.is_idle());
+    // A read after it starts again from the stopped drive and lands whole.
+    let buf = Buf::new(2);
+    let read = submit(&mut engine, request(500, 2, &buf));
+    run(&mut engine);
+    assert_eq!(finished(&mut engine, read).outcome, Outcome::Done);
+    buf.assert_sectors(500, 2);
+}

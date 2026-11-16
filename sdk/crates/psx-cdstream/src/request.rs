@@ -40,6 +40,8 @@ pub struct Request {
     pub(crate) byte_len: u32,
     pub(crate) priority: Priority,
     pub(crate) resumes: u8,
+    /// A park: seek to `lba` and stop, reading nothing.
+    pub(crate) park: bool,
 }
 
 impl Request {
@@ -63,6 +65,25 @@ impl Request {
             byte_len: 0,
             priority: Priority::NORMAL,
             resumes: 0,
+            park: false,
+        }
+    }
+
+    /// Seek to `lba` (program-relative, like every read) and stop there, reading nothing: the
+    /// head waits at the sector the next read will start at, so that read pays no long seek.
+    /// It ends [`Outcome::Done`] with 0 sectors when the seek completes, and takes no
+    /// destination. Queued and prioritised like a read.
+    pub const fn park(lba: u32) -> Self {
+        Request {
+            lba,
+            sectors: 0,
+            // Never written: a park stores nothing. A non-null aligned address keeps the
+            // submit checks one rule.
+            destination: core::ptr::NonNull::<u32>::dangling().as_ptr(),
+            byte_len: 0,
+            priority: Priority::NORMAL,
+            resumes: 0,
+            park: true,
         }
     }
 
@@ -158,6 +179,7 @@ impl Request {
             byte_len,
             priority: self.priority,
             resumes: self.resumes,
+            park: false,
         })
     }
 

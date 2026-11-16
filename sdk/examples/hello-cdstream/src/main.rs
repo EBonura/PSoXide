@@ -544,6 +544,97 @@ fn check_cpu(report: &mut Report) {
     report.finish(ok);
 }
 
+/// A read under a deliberately slow main loop: the foreground looks at the request once every six
+/// VBlanks (a split-screen frame), a polled pump would read one sector per look while the drive
+/// delivers about fifteen, and the interrupt handler must lose none.
+fn check_slow_frame(report: &mut Report) {
+    report.begin("6a slow main loop");
+    const SECTORS: u32 = 64;
+    let dropped_before = psx_cdstream::stats().discarded_sectors;
+    let ticket = submit_file(16, SECTORS, big());
+    let mut looks = 0u32;
+    let mut finished = None;
+    if let Some(ticket) = ticket {
+        let start = vblank_count();
+        while vblank_count().wrapping_sub(start) <= PATIENCE_VBLANKS {
+            for _ in 0..6 {
+                wait_vblank();
+            }
+            looks += 1;
+            if let RequestState::Finished(done) = psx_cdstream::state(ticket) {
+                finished = Some(done);
+                break;
+            }
+        }
+    }
+    let landed = matches!(
+        finished,
+        Some(Completion { outcome: Outcome::Done, received, .. }) if received == SECTORS
+    );
+    let ok = landed
+        && verify(big(), 16, SECTORS)
+        && psx_cdstream::stats().discarded_sectors == dropped_before;
+    report.push("64 sectors, looked ");
+    report.num(looks);
+    report.push(" times");
+    report.finish(ok);
+}
+
+/// A park seeks and stops, and a read after it still lands whole.
+fn check_park(report: &mut Report) {
+    report.begin("6b park then read");
+    let parked = psx_cdstream::submit(Request::park(file_lba() + 100)).ok();
+    let parked_ok = matches!(
+        parked.and_then(wait),
+        Some(Completion {
+            outcome: Outcome::Done,
+            received: 0,
+            ..
+        })
+    );
+    let ticket = submit_file(100, 8, big());
+    let ok = parked_ok && wait_done(ticket, 8) && verify(big(), 100, 8);
+    report.push("park, then 8 sectors");
+    report.finish(ok);
+}
+
+/// A byte bound stores nothing past the chunk's last byte.
+fn check_byte_bound(report: &mut Report) {
+    report.begin("6c byte bound");
+    const SECTORS: u32 = 3;
+    const BYTES: u32 = 2 * 2048 + 100;
+    // SAFETY: `big()` is a static buffer far larger than this; nothing else touches it here.
+    unsafe {
+        for word in 0..(SECTORS as usize * SECTOR_WORDS) {
+            big().add(word).write_volatile(0xdead_beef);
+        }
+    }
+    // SAFETY: as in `submit`.
+    let request = unsafe { Request::new_raw(file_lba() + 40, SECTORS, big()) }.with_byte_len(BYTES);
+    let ticket = psx_cdstream::submit(request).ok();
+    let done = wait_done(ticket, SECTORS);
+    // The first 2 sectors and 25 words of the third land; the rest stays the canary.
+    let first = verify(big(), 40, 2);
+    let words_stored = (BYTES as usize).div_ceil(4);
+    // SAFETY: inside the buffer written above.
+    let (last_stored, first_untouched) = unsafe {
+        (
+            big().add(words_stored - 1).read_volatile(),
+            big().add(words_stored).read_volatile(),
+        )
+    };
+    let ok = done
+        && first
+        && last_stored
+            == expected_word(
+                40 * SECTOR_WORDS as u32 + words_stored as u32 - 1,
+                file_sectors(),
+            )
+        && first_untouched == 0xdead_beef;
+    report.push("2048*2+100 bytes");
+    report.finish(ok);
+}
+
 fn check_lease(report: &mut Report) {
     report.begin("7 audio lease");
     wait_idle();
@@ -737,6 +828,9 @@ fn main() {
             check_abort_resume(&mut report);
             check_stream(&mut report);
             check_cpu(&mut report);
+            check_slow_frame(&mut report);
+            check_park(&mut report);
+            check_byte_bound(&mut report);
             check_lease(&mut report);
             check_error(&mut report);
             let stats = psx_cdstream::stats();
