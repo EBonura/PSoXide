@@ -235,6 +235,9 @@ pub(crate) fn set_draw_offset(offset: (i16, i16)) {
     write_commands_when_ready(&[gp0::draw_offset(offset.0 as i32, offset.1 as i32)]);
 }
 
+/// One shared body: a program with several draw-mode sites (a menu, a HUD) links the
+/// two-word packet write once instead of at every site.
+#[inline(never)]
 pub(crate) fn set_draw_mode(material: TextureMaterial) {
     write_commands_when_ready(&[material.draw_mode_word(), material.texture_window_word()]);
 }
