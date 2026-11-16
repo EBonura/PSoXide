@@ -6,7 +6,7 @@ use crate::material::{TextureMaterial, TextureWindow};
 use crate::prim::GpuPacket;
 use psx_hw::gpu::{gp0, gp1, DmaDirection};
 use psx_io::gpu::{
-    wait_command_ready, write_command, write_commands, write_display_control,
+    wait_command_ready, write_command, write_commands_when_ready, write_display_control,
     write_display_controls,
 };
 use psx_io::periph::GpuDma;
@@ -223,25 +223,18 @@ pub(crate) fn reset(display: DisplayConfig) {
 }
 
 pub(crate) fn set_draw_area(top_left: (u16, u16), bottom_right: (u16, u16)) {
-    wait_command_ready();
-    write_command(gp0::draw_area_top_left(
-        top_left.0 as u32,
-        top_left.1 as u32,
-    ));
-    write_command(gp0::draw_area_bottom_right(
-        bottom_right.0 as u32,
-        bottom_right.1 as u32,
-    ));
+    write_commands_when_ready(&[
+        gp0::draw_area_top_left(top_left.0 as u32, top_left.1 as u32),
+        gp0::draw_area_bottom_right(bottom_right.0 as u32, bottom_right.1 as u32),
+    ]);
 }
 
 pub(crate) fn set_draw_offset(offset: (i16, i16)) {
-    wait_command_ready();
-    write_command(gp0::draw_offset(offset.0 as i32, offset.1 as i32));
+    write_commands_when_ready(&[gp0::draw_offset(offset.0 as i32, offset.1 as i32)]);
 }
 
 pub(crate) fn set_draw_mode(material: TextureMaterial) {
-    wait_command_ready();
-    write_commands(&[material.draw_mode_word(), material.texture_window_word()]);
+    write_commands_when_ready(&[material.draw_mode_word(), material.texture_window_word()]);
 }
 
 /// One ready-wait, then the packet's payload words, in order.
@@ -253,12 +246,11 @@ pub(crate) fn set_draw_mode(material: TextureMaterial) {
 #[inline(never)]
 pub(crate) fn draw<P: GpuPacket>(packet: &P) {
     let words = core::ptr::from_ref(packet).cast::<u32>();
-    wait_command_ready();
     // SAFETY: `GpuPacket` guarantees a `repr(C)` layout of a tag word and
     // then at least `WORDS` initialised `u32`s, so words 1..=WORDS are
     // inside `packet`, which the borrow keeps alive and unchanged.
     let payload = unsafe { core::slice::from_raw_parts(words.add(1), P::WORDS as usize) };
-    write_commands(payload);
+    write_commands_when_ready(payload);
 }
 
 /// GP0(E3h), GP0(E4h) and GP0(E5h): the draw area and offset for a buffer at

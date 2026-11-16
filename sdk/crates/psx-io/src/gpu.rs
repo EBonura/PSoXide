@@ -56,6 +56,37 @@ pub fn write_commands(words: &[u32]) {
     }
 }
 
+/// [`wait_command_ready`] then [`write_commands`], as one test on the way in.
+///
+/// The common case, a ready GPU with no recording open and no guard armed,
+/// is the status read, one flag load and the plain stores. Anything else
+/// (a busy GPU, a recording, an armed guard) is one tail call into a single
+/// out-of-line body that does the ready-wait and then the guarded write, so a
+/// packet's call site carries no stack frame and no second call for the
+/// wait. Same order as the two calls: wait first, then record or guard.
+#[inline(always)]
+pub fn write_commands_when_ready(words: &[u32]) {
+    #[cfg(target_arch = "mips")]
+    if !handoff::is_slow() && status().contains(GpuStat::READY_CMD) {
+        for &word in words {
+            // SAFETY: GP0 (`psx_hw::gpu::GP0`) is the GPU's aligned 32-bit command/data port on every PS1. Any
+            // word is a legal write: the GPU parses it as a command or parameter, with no effect on
+            // CPU-visible memory.
+            unsafe { crate::write_u32(GP0, word) }
+        }
+        return;
+    }
+    write_commands_when_ready_slow(words);
+}
+
+/// The rare half of [`write_commands_when_ready`].
+#[cold]
+#[inline(never)]
+fn write_commands_when_ready_slow(words: &[u32]) {
+    wait_command_ready();
+    write_commands(words);
+}
+
 /// [`write_command`] straight to the port: never recorded, never behind the
 /// direct-access guard. For code that has already made the port safe, such
 /// as the present queue's stall recovery, which the guard itself runs.

@@ -90,7 +90,7 @@
 #![warn(missing_docs)]
 
 use psx_hw::gpu::{gp0, pack_color, pack_texcoord, pack_vertex, pack_xy, packet};
-use psx_io::gpu::{wait_command_ready, write_command, write_commands};
+use psx_io::gpu::write_commands_when_ready;
 use psx_math::sincos;
 use psx_vram::{
     upload_16bpp, upload_clut, Clut, Color555, TextureDepth, TexturePage, VramHandle, VramRect,
@@ -301,8 +301,7 @@ fn round_q8_to_i16(value_q8: i32) -> i16 {
 
 #[inline]
 fn reset_texture_window() {
-    wait_command_ready();
-    write_command(gp0::tex_window(0, 0, 0, 0));
+    write_commands_when_ready(&[gp0::tex_window(0, 0, 0, 0)]);
 }
 
 /// GPU semi-transparency equation for [`FontAtlas::draw_text_blended`].
@@ -387,8 +386,7 @@ fn write_textured_quad_packet(
     clut_word: u16,
     tpage_word: u16,
 ) {
-    wait_command_ready();
-    write_commands(&[
+    write_commands_when_ready(&[
         color_cmd,
         pack_vertex(verts[0].0, verts[0].1),
         pack_uv_word(uvs[0].0, uvs[0].1, clut_word),
@@ -410,8 +408,7 @@ fn write_textured_gouraud_quad_packet(
     clut_word: u16,
     tpage_word: u16,
 ) {
-    wait_command_ready();
-    write_commands(&[
+    write_commands_when_ready(&[
         color0_cmd,
         pack_vertex(verts[0].0, verts[0].1),
         pack_uv_word(uvs[0].0, uvs[0].1, clut_word),
@@ -1046,12 +1043,11 @@ impl FontAtlas {
                 continue;
             };
 
-            wait_command_ready();
             // GP0 0x64 = variable-size textured rectangle, no blend,
             // opaque. First word: 0x64_BB_GG_RR (color is the tint
             // multiplier -- NOT a fill colour: CLUT index 1's white
             // texel gets modulated by this).
-            write_commands(&[
+            write_commands_when_ready(&[
                 color_cmd,
                 pack_vertex(cursor_x, y),
                 pack_texcoord(u, v, clut_word),
@@ -1104,8 +1100,7 @@ impl FontAtlas {
         tint: (u8, u8, u8),
         blend: TextBlend,
     ) {
-        wait_command_ready();
-        write_command(blended_draw_mode_word(self.tpage, blend));
+        write_commands_when_ready(&[blended_draw_mode_word(self.tpage, blend)]);
         reset_texture_window();
 
         let font = self.font;
@@ -1125,8 +1120,7 @@ impl FontAtlas {
                 continue;
             };
 
-            wait_command_ready();
-            write_commands(&[
+            write_commands_when_ready(&[
                 color_cmd,
                 pack_vertex(cursor_x, y),
                 pack_texcoord(u, v, clut_word),
@@ -1171,11 +1165,12 @@ impl FontAtlas {
         if w == 0 || h == 0 {
             return;
         }
-        wait_command_ready();
-        write_command(blended_draw_mode_word(self.tpage, blend));
-        write_command(SEMI_TRANSPARENT_FLAT_RECT_CMD | pack_color(tint.0, tint.1, tint.2));
-        write_command(pack_vertex(x, y));
-        write_command(pack_xy(w, h));
+        write_commands_when_ready(&[
+            blended_draw_mode_word(self.tpage, blend),
+            SEMI_TRANSPARENT_FLAT_RECT_CMD | pack_color(tint.0, tint.1, tint.2),
+            pack_vertex(x, y),
+            pack_xy(w, h),
+        ]);
         self.tpage.apply_as_draw_mode();
     }
 

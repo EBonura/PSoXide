@@ -65,7 +65,7 @@ pub mod map;
 
 use psx_hw::gpu::{gp0, gp1, pack_xy};
 use psx_io::dma::{self, Channel};
-use psx_io::gpu::{pause_recording, wait_command_ready, write_command, write_display_control};
+use psx_io::gpu::{pause_recording, write_commands_when_ready, write_display_control};
 use psx_io::periph::GpuDma;
 use psx_math::Mask64;
 
@@ -644,20 +644,20 @@ impl TexturePage {
     /// "current" tpage for sprite / rect primitives that don't
     /// embed a tpage of their own.
     pub fn apply_as_draw_mode(self) {
-        wait_command_ready();
-        write_command(gp0::draw_mode(
-            (self.x / 64) as u32,
-            if self.y == 256 { 1 } else { 0 },
-            0,
-            self.depth as u32,
-            false,
-            true,
-        ));
-        // Plain tpage application means "sample the page directly".
-        // Material-aware helpers re-apply their own texture window after
-        // setting draw mode.
-        wait_command_ready();
-        write_command(gp0::tex_window(0, 0, 0, 0));
+        // Plain tpage application means "sample the page directly": the
+        // texture window is reset to the whole page. Material-aware helpers
+        // re-apply their own texture window after setting draw mode.
+        write_commands_when_ready(&[
+            gp0::draw_mode(
+                (self.x / 64) as u32,
+                if self.y == 256 { 1 } else { 0 },
+                0,
+                self.depth as u32,
+                false,
+                true,
+            ),
+            gp0::tex_window(0, 0, 0, 0),
+        ]);
     }
 }
 
@@ -1403,10 +1403,11 @@ fn copy_to_vram_header(rect: VramRect) {
     if !dma::wait_done(Channel::Gpu, dma::DEFAULT_SPINS) {
         dma::abort(Channel::Gpu);
     }
-    wait_command_ready();
-    write_command(gp0::COPY_CPU_TO_VRAM);
-    write_command(pack_xy(rect.x, rect.y));
-    write_command(pack_xy(rect.w, rect.h));
+    write_commands_when_ready(&[
+        gp0::COPY_CPU_TO_VRAM,
+        pack_xy(rect.x, rect.y),
+        pack_xy(rect.w, rect.h),
+    ]);
 }
 
 /// Upload `words` to `rect` over block-mode DMA (channel 2) instead of
