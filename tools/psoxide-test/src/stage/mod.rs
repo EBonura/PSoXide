@@ -119,6 +119,9 @@ impl Ctx<'_> {
         stage_root: &Path,
     ) -> Result<Vec<(String, Option<String>)>, String> {
         let mut env = self.child_env(stage_root);
+        for name in &build.env_remove {
+            env.push((name.clone(), None));
+        }
         for (name, value) in &build.env {
             env.push((
                 name.clone(),

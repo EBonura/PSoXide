@@ -13,6 +13,21 @@ pub fn run(ctx: &Ctx<'_>) -> StageResult {
     for host in &ctx.game.hosts {
         let mut key = Key::new("host");
         key.part("command", &host.command.join("\0"));
+        let mut command = host.command.clone();
+        if let Some(name) = &host.build {
+            let Some(b) = ctx.game.build(name) else {
+                checks.push(Check::fail(&host.name, format!("unknown build `{name}`")));
+                continue;
+            };
+            let out = b.out_dir(&ctx.repo).display().to_string();
+            let cue = b.cue(&ctx.repo).display().to_string();
+            for arg in &mut command {
+                *arg = arg.replace("{out}", &out).replace("{disc}", &cue);
+            }
+            for (file, digest) in ctx.artifacts.get(name).into_iter().flatten() {
+                key.part(file, digest);
+            }
+        }
         for f in &files {
             if let Err(e) = key.file(f, &ctx.repo.join(f)) {
                 checks.push(Check::fail(&host.name, e));
@@ -32,13 +47,8 @@ pub fn run(ctx: &Ctx<'_>) -> StageResult {
                 Err(e) => return Outcome::error(&host.name, e),
             };
             let stage_root = ctx.work.join("guest-stage");
-            let done = util::run_logged(
-                &host.command,
-                &ctx.repo,
-                &ctx.child_env(&stage_root),
-                &log,
-                None,
-            );
+            let done =
+                util::run_logged(&command, &ctx.repo, &ctx.child_env(&stage_root), &log, None);
             let after = util::git(&ctx.repo, &["status", "--porcelain"]).unwrap_or_default();
             let check = match done {
                 Ok(d) if d.code != 0 => Check::fail(

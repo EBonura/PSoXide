@@ -50,6 +50,9 @@ pub struct Build {
     /// the original game files of that name (`[inputs]`); a missing one is an error naming it.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// Variables removed from the commands' environment (a build that must not see them).
+    #[serde(default)]
+    pub env_remove: Vec<String>,
     /// The disc's cue inside `out`.
     pub disc: String,
     /// The link map inside `out` (size and symbols read it).
@@ -182,7 +185,13 @@ fn default_min_distinct() -> u32 {
 #[serde(deny_unknown_fields)]
 pub struct Host {
     pub name: String,
+    /// argv run at the repo root. With `build`, `{out}` and `{disc}` are that build's output
+    /// directory and cue, and the receipt follows its artifacts: a check that drives an older
+    /// frontend or a game's own script against the built disc. Host checks run one at a time,
+    /// so one that starts an emulator stays inside the budget.
     pub command: Vec<String>,
+    #[serde(default)]
+    pub build: Option<String>,
 }
 
 /// The clean-clone proof.
@@ -291,6 +300,14 @@ impl Game {
                         w.name
                     ))
                 }
+            }
+        }
+        for h in &self.hosts {
+            if let Some(b) = &h.build {
+                known(b, "[[host]]")?;
+            }
+            if h.command.is_empty() {
+                return Err(format!("[[host]] `{}` has no command", h.name));
             }
         }
         if let Some(cross) = &self.cross {
