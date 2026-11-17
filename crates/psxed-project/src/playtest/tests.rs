@@ -600,6 +600,24 @@ fn an_enemys_states_play_their_authored_clips_and_nothing_else_is_resident() {
             entity.death_clip,
             bound(Action::Death).unwrap_or(idle),
         ),
+        // Down after a poise break: the Knockdown clip, else the stagger.
+        (
+            "knockdown",
+            entity.knockdown_clip,
+            bound(Action::Knockdown)
+                .or_else(|| bound(Action::Stun))
+                .or_else(|| bound(Action::HitReact))
+                .unwrap_or_else(|| attack.clone()),
+        ),
+        // A riposte's stagger: the Parried clip, else its chain (Stun, HitReact).
+        (
+            "parried",
+            entity.parried_clip,
+            bound(Action::Parried)
+                .or_else(|| bound(Action::Stun))
+                .or_else(|| bound(Action::HitReact))
+                .unwrap_or_else(|| attack.clone()),
+        ),
     ];
     let mut reachable = std::collections::BTreeSet::new();
     for (state, clip, name) in expected {
