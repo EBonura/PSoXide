@@ -109,6 +109,14 @@ fn input_section(body: &str) -> Option<&str> {
     Some(&inner[at + 2..]).filter(|name| name.starts_with(".text"))
 }
 
+/// Whether an input-section line names a `.psx_hot` section (placed by the program in
+/// `psoxide.ld`, ahead of the laid-out text).
+fn program_placed(body: &str) -> bool {
+    body.strip_suffix(')')
+        .and_then(|inner| inner.rfind(":(").map(|at| &inner[at + 2..]))
+        .is_some_and(|name| name.starts_with(".psx_hot"))
+}
+
 /// A plain linker name, as opposed to a demangled path from the map's
 /// symbol column (which an ordering file cannot name).
 fn plain(symbol: &str) -> bool {
@@ -201,9 +209,10 @@ pub fn read_map(text: &str) -> Vec<Section> {
     sections
 }
 
-/// The sized symbols of an ld.lld `-Map` that lie in an input section the
-/// layout does not place (anything not `.text*`: `.psx_cold.*`, data), as
-/// (start, size, name) in address order.
+/// The sized symbols of an ld.lld `-Map` that lie in an input section nothing places
+/// (anything not `.text*` or `.psx_hot*`: `.psx_cold.*`, data), as (start, size, name) in
+/// address order. `.psx_hot.<NN>_<name>` is placed by the program itself, at the front of the
+/// text in name order, so where it lands is not luck.
 pub fn read_unplaced(text: &str) -> Vec<(u32, u32, String)> {
     let mut found = Vec::new();
     let mut placed = true;
@@ -226,7 +235,8 @@ pub fn read_unplaced(text: &str) -> Vec<(u32, u32, String)> {
                 .strip_suffix(')')
                 .and_then(|inner| inner.rfind(":("))
                 .is_none()
-                || input_section(body).is_some();
+                || input_section(body).is_some()
+                || program_placed(body);
         } else if depth >= 16 && !placed && size > 0 && !body.contains(" = ") {
             found.push((start, size, body.to_string()));
         }
@@ -1550,6 +1560,8 @@ mod tests {
         text += &map_line(0x8001_0000, 0x10, 0, ".text");
         text += &map_line(0x8001_0000, 0x10, 8, &format!("{OBJ}:(.text.{TICK_A})"));
         text += &map_line(0x8001_0000, 0x10, 16, "game::tick");
+        text += &map_line(0x8001_0000, 0x10, 8, &format!("{OBJ}:(.psx_hot.01_sky)"));
+        text += &map_line(0x8001_0000, 0x10, 16, "game::sky");
         text += &map_line(0x8001_0010, 0x18, 0, ".psx_cold");
         text += &map_line(
             0x8001_0010,
