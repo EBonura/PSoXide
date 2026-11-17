@@ -1,26 +1,29 @@
-//! Opt-in training duel. Synthetic pad input passes through the ordinary player controller.
+//! Opt-in training duel. Aletha's moves are decided by the tactical
+//! controller every entity uses (`GameEntities::actor_intent`) and run by her
+//! own rules, the ones the pad drives.
 use super::*;
-use psx_engine::{AnalogSticks, PadMode, PadState};
-use psx_game_runtime::{combat_policy, entities::GameEntityState, projectiles::CombatTeam};
+use psx_game_runtime::combat_intent::{CombatAction, CombatActions};
+use psx_game_runtime::{entities::GameEntityState, projectiles::CombatTeam};
 
 // All-zero storage is inactive, matching Playtest's zeroed initialization.
 /// Columns of one `duel:sample` row: tick, player x/z, enemy x/z, player
-/// health, enemy health, stances, action and state, bot intent and stance
-/// reason, stamina, tactical goal, action start, goal, enemy stance reason,
-/// attack kind, then both energies. The summariser in `psxed-mcp` reads the
-/// same order.
+/// health, enemy health, stances, action and state, her tactical goal and
+/// stance reason, stamina, tactical goal, action start, goal, enemy stance
+/// reason, attack kind, then both energies. The summariser in `psxed-mcp`
+/// reads the same order.
 const SAMPLE_COLUMNS: usize = 21;
 
-/// `duel:decision` intent: the bot swapped on purpose to parry.
-pub(super) const DUEL_INTENT_PARRY: u8 = 7;
-/// `duel:decision` intent: the bot spent its parry's crit.
-pub(super) const DUEL_INTENT_CRIT: u8 = 8;
 /// `duel:event` kind: the actor parried a hit.
 pub(super) const DUEL_EVENT_PARRY: u32 = 1;
 /// `duel:event` kind: the actor's attack was a crit.
 pub(super) const DUEL_EVENT_CRIT: u32 = 2;
 /// `duel:event` kind: the actor was knocked down.
 pub(super) const DUEL_EVENT_KNOCKDOWN: u32 = 3;
+
+/// Ticks her controller keeps the weapon raised after it asks for a shot:
+/// her rules fire only from a raised weapon (8 ticks), and the press waits
+/// in her attack buffer meanwhile. The shot itself is her clip's.
+const DUEL_AIM_TICKS: u32 = 24;
 
 pub(super) struct Duel {
     pub active: bool,
@@ -31,45 +34,26 @@ pub(super) struct Duel {
     rival: Option<u8>,
     started: u32,
     releasing_start: bool,
-    last_seen: [i32; 3],
-    seed: u32,
-    previous: u16,
-    movement: [i32; 2],
-    aim: bool,
-    sprint: bool,
-    escaping: bool,
-    escape_heading: [i32; 2],
-    escape_rethink: u32,
-    escape_until: u32,
-    dodge_ready: u32,
-    exchange: psx_game_runtime::ranged_tactics::RangedExchange,
-    combat_role: u8,
-    last_roles: [u8; 2],
-    last_attack: u8,
-    repeats: u8,
-    next_think: u32,
-    pub reason: u8,
+    /// The record her tactical controller decides by: the training enemy's
+    /// persona (spacing, reach, reaction, kits) at her own spawn and with her
+    /// own body, as the host harness gives her.
+    persona: LevelGameEntityRecord,
+    /// Her controller's latest intent, and whether its presses are still to
+    /// be run (they run on the first tick after the think).
+    plan: CombatIntent,
+    fresh: bool,
+    /// The actions she held last tick, for the release edges.
+    held: CombatActions,
+    /// The tick until which her controller keeps her weapon raised.
+    aim_until: u32,
     pub outcome: u8,
-    intent: u8,
     last_snapshot: [u32; SAMPLE_COLUMNS],
     last_progress: u32,
-    /// Whether the enemy was in sight at the latest decision.
-    visible: bool,
-    /// Ticks to the enemy's incoming hit at the previous tick, `u16::MAX`
-    /// when none: a parry is decided once, when a hit enters the window.
-    ticks_to_hit: u16,
+    last_roles: [u8; 2],
 }
 impl Duel {
     pub(super) fn started_tick(&self) -> u32 {
         self.started
-    }
-    fn roll(&mut self) -> u16 {
-        let mut x = self.seed.max(1);
-        x ^= x << 13;
-        x ^= x >> 17;
-        x ^= x << 5;
-        self.seed = x;
-        (x % 100) as u16
     }
 }
 
@@ -90,19 +74,8 @@ pub(super) fn log_values(label: &str, values: &[u32]) {
 }
 
 impl Playtest {
-    /// The bot plans its dodge with the player's own (as an enemy plans with
-    /// its own): her roll, or a walk aside without the kit. Once per duel;
-    /// out of line so the duel's per-tick code stays as it was.
-    #[inline(never)]
-    fn duel_plan_dodge(&mut self) {
-        let evade = psx_game_runtime::ranged_tactics::EvadeMove::of(
-            &self.motor_config(),
-            self.player_kits().can_dodge(),
-        );
-        self.duel.exchange.set_evade(evade);
-    }
-
-    /// Called before the gameplay controller; physical input is restored by the caller.
+    /// Start or stop the duel (Select+L2), and hand the pad back on any
+    /// physical press. Called before the gameplay controller.
     #[inline(never)]
     #[cfg_attr(target_arch = "mips", optimize(size))]
     pub(super) fn duel_pad(&mut self, ctx: &mut Ctx) {
@@ -141,44 +114,42 @@ impl Playtest {
                 target,
                 seed ^ 0x9e3779b9,
             );
+            let spawn = self.game_entities.actor_motor().position();
+            let mut persona = GAME_ENTITIES[target];
+            persona.x = spawn.x;
+            persona.y = spawn.y;
+            persona.z = spawn.z;
+            if let Some(character) = self.character {
+                persona.radius = character.radius.clamp(0, i32::from(u16::MAX)) as u16;
+                persona.height = character.height.clamp(0, i32::from(u16::MAX)) as u16;
+            }
             self.duel = Duel {
                 active: true,
                 finished: false,
                 target,
+                rival: None,
                 started: ctx.sim_tick.as_u32(),
                 releasing_start: true,
-                last_seen: self.game_entities.position(target),
-                seed,
-                previous: 0,
-                movement: [0, 0],
-                aim: false,
-                sprint: false,
-                escaping: false,
-                escape_heading: [0, 0],
-                escape_rethink: 0,
-                escape_until: 0,
-                dodge_ready: 0,
-                exchange: psx_game_runtime::ranged_tactics::RangedExchange::EMPTY,
-                combat_role: 0,
-                last_roles: [255; 2],
-                last_attack: 255,
-                repeats: 0,
-                next_think: 0,
-                reason: 0,
+                persona,
+                plan: CombatIntent::IDLE,
+                fresh: false,
+                held: CombatActions::NONE,
+                aim_until: 0,
                 outcome: 0,
-                intent: 0,
                 last_snapshot: [0; SAMPLE_COLUMNS],
                 last_progress: 0,
-                visible: false,
-                ticks_to_hit: u16::MAX,
-                rival: None,
+                last_roles: [255; 2],
             };
-            self.duel_plan_dodge();
             // The third value is the sample format: 1 is one health value
             // per fighter (before it, two pools each and no third value).
             log_values("duel:start", &[seed, target as u32, 1]);
             if ctx.pad.sticks.right_y == 0 {
                 self.duel_start_rivals(target, seed);
+            } else {
+                self.game_entities
+                    .engage_actor(&persona, target, seed.rotate_left(8) ^ 0x9e3779b9);
+                // She keeps her rival in view as an entity faces its target.
+                self.lock_target = Some(target);
             }
         } else if self.duel.active
             && !self.duel.releasing_start
@@ -190,563 +161,93 @@ impl Playtest {
             self.duel.active = false;
             return;
         }
-        if !self.duel.active {
-            return;
-        }
         if self.duel.releasing_start && !ctx.is_held(button::SELECT | button::L2) {
             self.duel.releasing_start = false;
         }
-        if self.duel.rival.is_some() {
-            // Two entities fight; the player is left on her own pad.
-            return;
-        }
-        self.duel.exchange.tick(1);
-        let mut buttons = 0;
-        if !self.duel.finished && ctx.sim_tick.as_u32() >= self.duel.next_think {
-            self.duel.next_think = ctx.sim_tick.as_u32() + 12;
-            let i = self.duel.target;
-            let record = &GAME_ENTITIES[i];
-            let p = self.game_entities.actor_motor().position();
-            let e = self.game_entities.position(i);
+    }
 
-            let height = self.character.map_or(40, |c| c.height);
-            let from = RoomPoint::new(p.x, p.y + height / 2, p.z);
-            let to = RoomPoint::new(e[0], e[1] + i32::from(record.height) / 2, e[2]);
-            let visible = {
-                let mut blockers = psx_engine::FixedScratch::<
-                    CharacterCollisionAabb,
-                    MAX_STATIC_PROP_AABB_BLOCKERS,
-                >::new();
-                let valid = self
-                    .collect_static_prop_aabb_blockers_checked_into(&mut blockers)
-                    .is_some();
-                valid
-                    && self.world_rt.as_mut().is_none_or(|world_rt| {
-                        world_rt
-                            .trace_point_segment(from, to, blockers.as_slice(), &self.destructibles)
-                            .is_ok_and(|t| !t.hit())
-                    })
-            };
-            if visible {
-                self.duel.last_seen = e;
-            }
-            let seen = self.duel.last_seen;
-            let dx = seen[0].saturating_sub(p.x);
-            let dz = seen[2].saturating_sub(p.z);
-            let distance =
-                isqrt_i32(square_i32_saturating(dx).saturating_add(square_i32_saturating(dz)))
-                    .max(1);
-            let active = self.game_entities.actor().stance.active();
-            let entry = i32::from(record.preferred_distance.max(record.attack_min_range))
-                + i32::from(record.spacing_tolerance);
-            let melee = combat_policy::wants_melee(
-                distance,
-                entry,
-                i32::from(record.spacing_tolerance),
-                active == VitalityChannelId::One,
-            );
-            let press = self.duel.last_attack == 2
-                && self.duel.repeats >= 2
-                && distance < i32::from(record.preferred_distance) * 3;
-            let (wanted, reason) = combat_policy::stance_choice(
-                melee,
-                press,
-                visible.then(|| self.game_entities.stance(i)),
-            );
-            let separated = distance
-                > (self.character.map_or(40, |c| c.radius) + i32::from(record.radius) + 24) * 2;
-            let wanted = if self.game_entities.actor().flow.preferred_stance(
-                wanted.index() as u8,
-                separated,
-                &self.player_stats,
-            ) == 0
-            {
-                VitalityChannelId::One
+    /// The record her tactical controller decides by.
+    pub(super) fn duel_persona(&self) -> LevelGameEntityRecord {
+        self.duel.persona
+    }
+
+    /// Whether her tactical controller drives her this tick.
+    pub(super) fn duel_drives_actor(&self) -> bool {
+        self.duel.active && !self.duel.finished && self.duel.rival.is_none()
+    }
+
+    /// Her controller's think, at the entities' cadence: what holds her now
+    /// (0 nothing, 1 an action, 2 an attack), then its intent.
+    pub(super) fn duel_actor_busy(&self, now: SimTick) -> u8 {
+        if self.game_entities.actor_action().locked(now) {
+            if player_anim_is_attack(self.anim_state) {
+                2
             } else {
-                VitalityChannelId::Two
-            };
-            self.duel.reason = self.game_entities.actor().flow.stance_reason(
-                reason as u8,
-                separated,
-                &self.player_stats,
-            );
-            self.duel.movement = [0, 0];
-            self.duel.aim = false;
-            self.duel.sprint = false;
-            self.duel.intent = 0;
-            let free = self.game_entities.actor_motor().action().is_idle()
-                && self.game_entities.actor_action().lock_until <= ctx.sim_tick
-                && !self
-                    .game_entities
-                    .actor()
-                    .stance
-                    .swap_in_progress(&self.player_stance_config);
-            // A parry armed a crit: spend it with the weapon the parry
-            // swapped to, the same choice every tactical enemy makes. It
-            // comes before the stance choice, which would otherwise swap
-            // straight back (a parry clears the swap cooldown). A strike may
-            // start during the swap's own animation (the rules allow it).
-            let crit = combat_policy::crit_followup(
-                self.game_entities.actor().crit != 0,
-                active,
-                distance < self.character.map_or(40, |c| c.radius) + i32::from(record.radius) + 24,
-                self.player_has_ranged_weapon()
-                    && self
-                        .game_entities
-                        .actor()
-                        .flow
-                        .can_shoot(&self.player_stats),
-            )
-            .filter(|_| {
-                visible
-                    && self.game_entities.actor_motor().action().is_idle()
-                    && self.game_entities.actor_action().lock_until <= ctx.sim_tick
-            });
-            let swapping = crit.is_none()
-                && visible
-                && wanted != active
-                && free
-                && self.game_entities.actor().stance.can_swap();
-            if swapping {
-                buttons |= button::TRIANGLE;
-                self.duel.intent = 5;
+                1
             }
-            self.duel.visible = visible;
-            {
-                // Movement follows the intended weapon phase through a legal stance swap.
-                let ranged = wanted == VitalityChannelId::Two;
-                let reach = self.character.map_or(40, |c| c.radius) + i32::from(record.radius) + 24;
-                let (fire_near, fire_far) = psx_game_runtime::combat_flow::ranged_band(
-                    i32::from(record.preferred_distance),
-                    reach,
-                    i32::from(record.attack_max_range),
-                );
-                let ranged_order = if ranged && distance > reach * 2 {
-                    Some(self.duel_ranged_order(p, seen, height, fire_far))
-                } else {
-                    self.duel.exchange.reset();
-                    None
-                };
-                self.duel.combat_role = ranged_order.map_or(0, |_| self.duel.exchange.mode);
-                let near = if ranged { fire_near } else { reach };
-                let far = if ranged { fire_far } else { reach };
-                let settle = fire_near + (fire_far - fire_near) / 2;
-                let was_escaping = self.duel.escaping;
-                self.duel.escaping = ranged
-                    && visible
-                    && (distance < fire_near || (self.duel.escaping && distance < settle));
-                if self.duel.escaping && !was_escaping {
-                    self.duel.escape_until = ctx.sim_tick.as_u32() + 180;
-                }
-                if self.duel.escaping && ctx.sim_tick.as_u32() >= self.duel.escape_until {
-                    self.game_entities.actor_mut().flow.contest_space();
-                    self.duel.escaping = false;
-                }
-                let mut direction = if !visible || distance > far {
-                    1
-                } else if self.duel.escaping {
-                    -1
-                } else {
-                    0
-                };
-                if self.duel.escaping && self.game_entities.actor_motor().stamina_q12() > 768 {
-                    self.duel.sprint = true;
-                }
-                let enemy_state = self.game_entities.state(i);
-                let roll = self.duel.roll();
-                // Observe committed animation states on a 12-tick decision cadence,
-                // never future player inputs or the enemy's random stream.
-                if let Some(action) = crit {
-                    buttons |= if action == CombatAction::Shoot {
-                        button::R2
-                    } else {
-                        button::R1
-                    };
-                    self.duel.intent = DUEL_INTENT_CRIT;
-                    direction = 0;
-                } else if visible
-                    && !swapping
-                    && wanted == active
-                    && !self.duel.sprint
-                    && ctx.sim_tick.as_u32() >= self.duel.dodge_ready
-                    && enemy_state == GameEntityState::Windup
-                    && self
-                        .game_entities
-                        .committed_swing(GAME_ENTITIES.as_slice(), i)
-                        .is_some_and(|swing| self.game_entities.state_age(i) >= swing.1 / 2)
-                    && distance < reach * 2
-                    && free
-                    && self.game_entities.actor_motor().stamina_q12() > 768
-                    && roll < 75
-                {
-                    buttons |= button::CIRCLE;
-                    direction = -1;
-                    self.duel.intent = 4;
-                    self.duel.combat_role = 6;
-                    self.duel.dodge_ready = ctx.sim_tick.as_u32() + 90;
-                } else if !ranged
-                    && (self.game_entities.actor_motor().stamina_q12() < 1024
-                        || matches!(
-                            enemy_state,
-                            GameEntityState::Windup | GameEntityState::Attack
-                        ))
-                {
-                    self.duel.combat_role = if self.game_entities.actor_motor().stamina_q12() < 1024
-                    {
-                        8
-                    } else {
-                        6
-                    };
-                    if free && distance < reach * 2 {
-                        direction = -1;
-                    }
-                } else if visible
-                    && !swapping
-                    && wanted == active
-                    && !self
-                        .game_entities
-                        .actor()
-                        .stance
-                        .swap_in_progress(&self.player_stance_config)
-                    && ranged_order.is_none_or(|o| o.fire)
-                    && !self.duel.escaping
-                    && distance <= far
-                    && distance >= if ranged { near } else { 0 }
-                {
-                    self.duel.aim = false; // Direct R2 fire exercises the real optional-aim controls.
-                    if !ranged
-                        && matches!(
-                            enemy_state,
-                            GameEntityState::Recover
-                                | GameEntityState::Staggered
-                                | GameEntityState::KnockedDown
-                        )
-                    {
-                        self.duel.combat_role = 7;
-                    }
-                    let kind = combat_policy::attack_choice(
-                        ranged,
-                        distance < reach * 3 / 4,
-                        self.duel.last_attack,
-                        self.duel.repeats,
-                        roll,
-                    );
-                    if !ranged
-                        || self
-                            .game_entities
-                            .actor()
-                            .flow
-                            .can_shoot(&self.player_stats)
-                    {
-                        buttons |= if kind == 0 { button::R1 } else { button::R2 };
-                        self.duel.intent = if ranged { 3 } else { 2 };
-                    }
-                }
-                if direction != 0 {
-                    self.duel.movement = [dx * direction, dz * direction];
-                    if self.duel.escaping {
-                        if ctx.sim_tick.as_u32() >= self.duel.escape_rethink {
-                            self.duel.escape_heading = self.duel_escape_heading(p, seen, height);
-                            self.duel.escape_rethink = ctx.sim_tick.as_u32() + 24;
-                        }
-                        self.duel.movement = self.duel.escape_heading;
-                        if self.duel.movement == [0, 0] {
-                            self.game_entities.actor_mut().flow.contest_space();
-                            self.duel.sprint = false;
-                        }
-                    } else {
-                        self.duel.escape_rethink = 0;
-                        self.duel.escape_heading = [0, 0];
-                    }
-                    if self.duel.intent == 0 {
-                        self.duel.intent = if direction > 0 { 1 } else { 6 };
-                    }
-                } else if visible && !free && !ranged {
-                    // Hold footing while an attack is committed.
-                    self.duel.movement = [0, 0];
-                }
-            }
-            // Cover, peeking and real bullet evasion override ordinary radial spacing.
-            if self.duel.combat_role > 0 && self.duel.combat_role <= 5 {
-                let order = self.duel_last_ranged_order(p);
-                self.duel.sprint = false;
-                self.duel.movement = if order.moving {
-                    [order.destination[0] - p.x, order.destination[2] - p.z]
-                } else {
-                    [0, 0]
-                };
-                if order.evade
-                    && free
-                    && self.game_entities.actor_motor().stamina_q12() >= 1024
-                    && ctx.sim_tick.as_u32() >= self.duel.dodge_ready
-                {
-                    buttons |= button::CIRCLE;
-                    self.duel.dodge_ready = ctx.sim_tick.as_u32() + 90;
-                }
-            }
-            if !self.is_locked() && visible {
-                buttons |= button::R3;
-            }
-            log_values(
-                "duel:decision",
-                &[
-                    ctx.sim_tick.as_u32() - self.duel.started,
-                    self.duel.intent as u32,
-                    self.duel.reason as u32,
-                    buttons as u32,
-                    distance as u32,
-                ],
-            );
+        } else {
+            u8::from(!self.game_entities.actor_motor().action().is_idle())
         }
-        // Parry on purpose, checked every tick rather than at the 5 Hz
-        // decisions: swap the tick a hit seen coming enters the parry window.
-        // The same choice every tactical enemy makes.
-        if !self.duel.finished {
-            self.duel_parry_check(ctx, &mut buttons);
+    }
+
+    /// Store her controller's latest decision.
+    pub(super) fn duel_set_plan(&mut self, ctx: &Ctx, plan: CombatIntent) {
+        self.duel.plan = plan;
+        self.duel.fresh = true;
+        let snapshot = self
+            .game_entities
+            .tactical_snapshot(RuntimeGameEntities::ACTOR_SLOT);
+        log_values(
+            "duel:decision",
+            &[
+                ctx.sim_tick.as_u32() - self.duel.started,
+                snapshot.goal as u32,
+                u32::from(snapshot.stance_reason),
+                CombatAction::ALL
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, action)| plan.pressed.has(**action))
+                    .fold(0, |bits, (n, _)| bits | 1 << n),
+                0,
+            ],
+        );
+    }
+
+    /// The intent her rules run this tick: the pad's, or in a duel her
+    /// controller's latest decision, its presses on the first tick after
+    /// it, with the release edges a pad would give.
+    pub(super) fn duel_intent(&mut self, pad: CombatIntent, now: SimTick) -> CombatIntent {
+        if !self.duel_drives_actor() {
+            return pad;
         }
-        // Decisions stay at 5 Hz, but steering must stop at the chosen point.
-        // Holding a 12-tick-old direction overshoots small cover/peek targets.
-        if (1..=5).contains(&self.duel.combat_role) {
-            let p = self.game_entities.actor_motor().position();
-            let order = self.duel_last_ranged_order(p);
-            self.duel.movement = if order.moving {
-                [order.destination[0] - p.x, order.destination[2] - p.z]
-            } else {
-                [0, 0]
-            };
-            self.duel.sprint = false;
-        }
-        if self.duel.aim {
-            buttons |= button::L2;
-        }
-        if self.duel.sprint {
-            buttons |= button::CIRCLE;
-        }
-        let [x, z] = self.duel.movement;
-        let len =
-            isqrt_i32(square_i32_saturating(x).saturating_add(square_i32_saturating(z))).max(1);
-        let forward = self.camera.yaw().add(Angle::HALF);
-        let right = forward.sub(Angle::QUARTER);
-        let f = (forward.sin().mul_i32(x) + forward.cos().mul_i32(z)) * 110 / len;
-        let r = (right.sin().mul_i32(x) + right.cos().mul_i32(z)) * 110 / len;
-        let mut pad = PadState::NONE;
-        pad.mode = PadMode::Analog;
-        pad.id_low = 0x73;
-        pad.buttons = psx_pad::ButtonState::from_bits(buttons);
-        pad.sticks = AnalogSticks {
-            left_x: (128 + r.clamp(-127, 127)) as u8,
-            left_y: (128 - f.clamp(-127, 127)) as u8,
-            right_x: 128,
-            right_y: 128,
+        let mut intent = self.duel.plan;
+        intent.pressed = if core::mem::take(&mut self.duel.fresh) {
+            // She keeps her rival in view as an entity faces its target: a
+            // lost lock is taken again at the next think.
+            intent
+                .pressed
+                .with_if(CombatAction::Lock, !self.is_locked())
+        } else {
+            CombatActions::NONE
         };
-        ctx.pad_prev = pad;
-        ctx.pad_prev.buttons = psx_pad::ButtonState::from_bits(self.duel.previous);
-        ctx.pad = pad;
-        self.duel.previous = buttons;
+        if intent.pressed.has(CombatAction::Shoot) {
+            self.duel.aim_until = now.as_u32().saturating_add(DUEL_AIM_TICKS);
+        }
+        let mut held = intent.held;
+        for action in CombatAction::ALL {
+            held = held.with_if(action, intent.pressed.has(action));
+        }
+        held = held.with_if(CombatAction::Aim, now.as_u32() < self.duel.aim_until);
+        let mut released = CombatActions::NONE;
+        for action in CombatAction::ALL {
+            released = released.with_if(action, self.duel.held.has(action) && !held.has(action));
+        }
+        intent.held = held;
+        intent.released = released;
+        self.duel.held = held;
+        intent
     }
 
-    /// The bot's parry: swap when the enemy's hit enters the parry window
-    /// this tick ([`combat_policy::parry_swap`]), unless it already asked
-    /// for a swap, is busy, or holds a crit to spend.
-    fn duel_parry_check(&mut self, ctx: &Ctx, buttons: &mut u16) {
-        let i = self.duel.target;
-        let p = self.game_entities.actor_motor().position();
-        let height = self.character.map_or(40, |c| c.height);
-        let ticks_to_hit = self.duel_ticks_to_hit(i, p, height, ctx.video_hz);
-        let before = core::mem::replace(
-            &mut self.duel.ticks_to_hit,
-            ticks_to_hit.unwrap_or(u16::MAX),
-        );
-        let before = (before != u16::MAX).then_some(before);
-        let free = self.game_entities.actor_motor().action().is_idle()
-            && self.game_entities.actor_action().lock_until <= ctx.sim_tick
-            && !self
-                .game_entities
-                .actor()
-                .stance
-                .swap_in_progress(&self.player_stance_config);
-        if *buttons & button::TRIANGLE != 0
-            || !self.duel.visible
-            || !free
-            || self.game_entities.actor().crit != 0
-        {
-            return;
-        }
-        let can_swap =
-            self.game_entities.actor().stance.can_swap() && self.player_kits().can_swap();
-        let parry_ticks = self.player_stats.parry_ticks;
-        let percent = self.player_stats.parry_swap_percent;
-        let duel = &mut self.duel;
-        if combat_policy::parry_swap(ticks_to_hit, before, parry_ticks, can_swap, percent, || {
-            duel.roll()
-        }) {
-            *buttons |= button::TRIANGLE;
-            self.duel.intent = DUEL_INTENT_PARRY;
-            log_values(
-                "duel:decision",
-                &[
-                    ctx.sim_tick.as_u32() - self.duel.started,
-                    u32::from(DUEL_INTENT_PARRY),
-                    u32::from(self.duel.reason),
-                    u32::from(*buttons),
-                    0,
-                ],
-            );
-        }
-    }
-
-    /// Ticks until the enemy's hit the bot can see lands on the player: its
-    /// melee swing's first contact frame ([`swing_ticks_to_contact`], the
-    /// reading the enemy makes of the player's swing), or the nearest
-    /// incoming bolt. None when nothing is coming.
-    fn duel_ticks_to_hit(
-        &self,
-        i: usize,
-        p: RoomPoint,
-        height: i32,
-        video_hz: VideoHz,
-    ) -> Option<u16> {
-        let swing = self
-            .entity_swing(i)
-            .and_then(|swing| swing_ticks_to_contact(&swing, video_hz));
-        let bolt = self
-            .combat_projectiles
-            .incoming_threat(
-                psx_game_runtime::projectiles::CombatTeam::Player,
-                self.room_index,
-                [p.x, p.y, p.z],
-                self.character.map_or(12, |c| c.radius),
-                height,
-            )
-            .map(|threat| threat.ticks_to_contact);
-        match (swing, bolt) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
-    }
-
-    #[inline(never)]
-    #[cfg_attr(target_arch = "mips", optimize(size))]
-    fn duel_ranged_order(
-        &mut self,
-        p: RoomPoint,
-        target: [i32; 3],
-        height: i32,
-        far: i32,
-    ) -> psx_game_runtime::ranged_tactics::RangedOrder {
-        let radius = self.character.map_or(12, |c| c.radius);
-        let from = [p.x, p.y, p.z];
-        let threat = self.combat_projectiles.incoming_threat(
-            psx_game_runtime::projectiles::CombatTeam::Player,
-            self.room_index,
-            from,
-            radius,
-            height,
-        );
-        let mut blockers =
-            psx_engine::FixedScratch::<CharacterCollisionAabb, MAX_STATIC_PROP_AABB_BLOCKERS>::new(
-            );
-        let valid = self
-            .collect_static_prop_aabb_blockers_checked_into(&mut blockers)
-            .is_some();
-        let world_rt = &mut self.world_rt;
-        let destructibles = &self.destructibles;
-        let order = self.duel.exchange.decide(
-            from,
-            target,
-            radius,
-            height,
-            far,
-            self.game_entities.actor().flow.energy,
-            threat,
-            &mut |a, b| {
-                valid
-                    && world_rt.as_mut().is_none_or(|world_rt| {
-                        world_rt
-                            .trace_point_segment(
-                                RoomPoint::new(a[0], a[1], a[2]),
-                                RoomPoint::new(b[0], b[1], b[2]),
-                                blockers.as_slice(),
-                                destructibles,
-                            )
-                            .is_ok_and(|trace| !trace.hit())
-                    })
-            },
-        );
-        // A dry exchange (nobody can see anybody from cover): close in.
-        if order.contest {
-            self.game_entities.actor_mut().flow.contest_space();
-        }
-        order
-    }
-    fn duel_last_ranged_order(
-        &self,
-        p: RoomPoint,
-    ) -> psx_game_runtime::ranged_tactics::RangedOrder {
-        self.duel.exchange.current_order([p.x, p.y, p.z])
-    }
-
-    /// Short local probes choose an escape lane; the ordinary motor still owns collision.
-    #[inline(never)]
-    #[cfg_attr(target_arch = "mips", optimize(size))]
-    fn duel_escape_heading(&mut self, p: RoomPoint, target: [i32; 3], height: i32) -> [i32; 2] {
-        let dx = p.x.saturating_sub(target[0]);
-        let dz = p.z.saturating_sub(target[2]);
-        let side = if self.duel.seed & 1 == 0 { 1 } else { -1 };
-        let cached = self.duel.escape_heading;
-        let candidates = [
-            cached,
-            [dx, dz],
-            [dx - dz * side, dz + dx * side],
-            [dx + dz * side, dz - dx * side],
-            [-dz * side, dx * side],
-            [dz * side, -dx * side],
-        ];
-        let mut blockers =
-            psx_engine::FixedScratch::<CharacterCollisionAabb, MAX_STATIC_PROP_AABB_BLOCKERS>::new(
-            );
-        if self
-            .collect_static_prop_aabb_blockers_checked_into(&mut blockers)
-            .is_none()
-        {
-            return [0, 0];
-        }
-        for v in candidates {
-            let len =
-                isqrt_i32(square_i32_saturating(v[0]).saturating_add(square_i32_saturating(v[1])));
-            let toward = v[0]
-                .saturating_mul(dx)
-                .saturating_add(v[1].saturating_mul(dz));
-            if len == 0 || toward < 0 {
-                continue;
-            }
-            let step = [v[0] * 160 / len, v[1] * 160 / len];
-            let radius = self.character.map_or(12, |c| c.radius) + 8;
-            let side = [-v[1] * radius / len, v[0] * radius / len];
-            let clear = self.world_rt.as_mut().is_none_or(|world_rt| {
-                [-1, 0, 1].into_iter().all(|offset| {
-                    let from = RoomPoint::new(
-                        p.x + side[0] * offset,
-                        p.y + height / 2,
-                        p.z + side[1] * offset,
-                    );
-                    let to = RoomPoint::new(from.x + step[0], from.y, from.z + step[1]);
-                    world_rt
-                        .trace_point_segment(from, to, blockers.as_slice(), &self.destructibles)
-                        .is_ok_and(|trace| !trace.hit())
-                })
-            });
-            if clear {
-                return step;
-            }
-        }
-        [0, 0]
-    }
-
-    /// Duel trace: a parry, crit or knockdown. `actor` 0 is the player, 1
-    /// the enemy: the fighter that parried, landed the crit or was knocked
-    /// down. `kind` is one of the `DUEL_EVENT_*` codes.
-    // Rare (a parry, crit or knockdown): kept out of line and small.
     #[inline(never)]
     #[cfg_attr(target_arch = "mips", optimize(size))]
     pub(super) fn duel_log_event(&self, ctx: &Ctx, actor: u32, kind: u32) {
@@ -894,7 +395,10 @@ impl Playtest {
         let p = self.game_entities.actor_motor().position();
         let e = self.game_entities.position(i);
         let tick = ctx.sim_tick.as_u32() - self.duel.started;
-        let mut snap = [
+        let actor = self
+            .game_entities
+            .tactical_snapshot(RuntimeGameEntities::ACTOR_SLOT);
+        let snap = [
             tick,
             p.x as u32,
             p.z as u32,
@@ -906,8 +410,8 @@ impl Playtest {
             self.game_entities.stance(i).index() as u32,
             self.anim_state.action().to_index() as u32,
             self.game_entities.state(i) as u32,
-            self.duel.intent as u32,
-            self.duel.reason as u32,
+            actor.goal as u32,
+            u32::from(actor.stance_reason),
             self.game_entities.actor_motor().stamina_q12() as u32,
             self.game_entities.tactical_snapshot(i).generation as u32,
             self.game_entities.actor_action().start.as_u32(),
@@ -917,7 +421,11 @@ impl Playtest {
             self.game_entities.actor().flow.energy as u32,
             self.game_entities.energy(i) as u32,
         ];
-        let roles = [self.duel.combat_role, self.game_entities.combat_role(i)];
+        let roles = [
+            self.game_entities
+                .combat_role(RuntimeGameEntities::ACTOR_SLOT),
+            self.game_entities.combat_role(i),
+        ];
         for actor in 0..2 {
             if roles[actor] != self.duel.last_roles[actor] {
                 log_values(
@@ -928,36 +436,10 @@ impl Playtest {
         }
         self.duel.last_roles = roles;
         let old = self.duel.last_snapshot;
-        // A switch the bot did not press for is not an accepted policy request.
-        snap[12] = if snap[7] != old[7] {
-            if self.duel.previous & button::TRIANGLE != 0 {
-                self.duel.reason as u32
-            } else {
-                4
-            }
-        } else {
-            old[12]
-        };
         let damage = (5..7).any(|n| snap[n] < old[n]);
         let changed = snap[7..11] != old[7..11] || snap[15] != old[15];
         if damage {
             self.duel.last_progress = tick;
-        }
-        if snap[15] != old[15] {
-            let kind = match self.anim_state {
-                PlayerAnim::RangedAttack => Some(2),
-                PlayerAnim::HeavyAttack => Some(1),
-                PlayerAnim::LightAttack => Some(0),
-                _ => None,
-            };
-            if let Some(kind) = kind {
-                self.duel.repeats = if self.duel.last_attack == kind {
-                    self.duel.repeats.saturating_add(1)
-                } else {
-                    1
-                };
-                self.duel.last_attack = kind;
-            }
         }
         // A knockdown is the moment either fighter enters its down state.
         if snap[9] == CharacterAnimationAction::Knockdown.to_index() as u32 && old[9] != snap[9] {

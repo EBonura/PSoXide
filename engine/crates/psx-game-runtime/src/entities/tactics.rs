@@ -149,6 +149,73 @@ impl TacticalState {
 }
 
 impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
+    /// Hand the actor slot to the tactical controller for a fight against
+    /// slot `rival`, deciding by `persona` (spacing, reach, reaction, kits):
+    /// it engages at once, as an entity that has already noticed its rival.
+    /// The actor's own rules run what it decides ([`Self::actor_intent`]).
+    pub fn engage_actor(&mut self, persona: &LevelGameEntityRecord, rival: usize, seed: u32) {
+        let i = Self::ACTOR_SLOT;
+        self.tactics[i] = TacticalState::EMPTY;
+        self.tactics[i].seed = seed;
+        self.state[i] = GameEntityState::Aggro as u8;
+        self.state_ticks[i] = u16::from(persona.reaction_ticks);
+        self.attack_cooldown[i] = 0;
+        self.exchanges[i] = crate::ranged_tactics::RangedExchange::EMPTY;
+        self.rivals[i] = rival.min(usize::from(NO_RIVAL)) as u8;
+        self.actor_plan = None;
+        self.actor_busy = 0;
+    }
+
+    /// What the tactical controller decides for the actor slot this think,
+    /// against its rival ([`Self::engage_actor`]), exactly as it decides for
+    /// an entity: it thinks only while the actor is free (an entity decides
+    /// only in Aggro), and an attack that ends starts the persona's cooldown
+    /// as an entity's recovery does. `busy` is what holds the actor now: 0
+    /// nothing, 1 an action, 2 an attack. The actor's own rules run the
+    /// intent; the follow-up reads what they achieved at the next think.
+    pub fn actor_intent(
+        &mut self,
+        persona: &LevelGameEntityRecord,
+        records: &[LevelGameEntityRecord],
+        mover: &mut impl FighterWorld,
+        delta: u16,
+        busy: u8,
+    ) -> CombatIntent {
+        let i = Self::ACTOR_SLOT;
+        let Some(rival) = self
+            .rival(i)
+            .filter(|&rival| rival < self.count() && rival < records.len())
+        else {
+            return CombatIntent::IDLE;
+        };
+        let fighter = self.combatants[rival];
+        let input = GameEntityTickInput {
+            target: self.rival_target(&records[rival], rival, &fighter),
+        };
+        let mut stats = GameEntityTickStats::default();
+        self.attack_cooldown[i] = self.attack_cooldown[i].saturating_sub(delta);
+        if let Some((then, before)) = self.actor_plan.take() {
+            self.after_tactical_intent(persona, i, then, before, input, delta, &mut stats);
+        }
+        if busy != 0 {
+            self.actor_busy = self.actor_busy.max(busy);
+            return CombatIntent::IDLE;
+        }
+        if self.actor_busy == 2 {
+            // The attack's recovery is over: the cooldown an entity starts
+            // when its Recover ends, and no new acquisition pause.
+            self.attack_cooldown[i] = u16::from(persona.attack_cooldown_ticks);
+            self.release_attack_owner(i, u16::from(persona.group_attack_delay_ticks));
+            self.state_ticks[i] = u16::from(persona.reaction_ticks);
+        }
+        self.actor_busy = 0;
+        self.state[i] = GameEntityState::Aggro as u8;
+        self.state_ticks[i] = self.state_ticks[i].saturating_add(delta);
+        let plan = self.decide_tactical(persona, i, input, mover, delta, &mut stats);
+        self.actor_plan = Some((plan.then, self.position(i)));
+        plan.intent
+    }
+
     pub(super) fn is_tactical(record: &LevelGameEntityRecord) -> bool {
         T && record.flags & game_entity_flags::TACTICAL != 0
     }

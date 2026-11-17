@@ -698,6 +698,12 @@ pub struct GameEntities<
     /// Each fighter's current action: its clip clock, lock and waiting
     /// attack and dodge requests ([`crate::fighter_action`]).
     actions: [crate::fighter_action::FighterAction; MAX_ENTITIES],
+    /// The tactical controller's follow-up for the actor slot, kept until its
+    /// next think (when the actor's own rules have run what it decided).
+    actor_plan: Option<(tactics::Then, [i32; 3])>,
+    /// What held the actor at its latest think: 0 free, 1 an action, 2 an
+    /// attack ([`Self::actor_intent`]).
+    actor_busy: u8,
     /// How each entity's light, heavy and ranged attacks run: read off its
     /// Character's clips by [`Self::time_attacks`], else its record's ticks.
     attack_timings: [[crate::fighter_action::ActionTiming; 3]; MAX_ENTITIES],
@@ -997,6 +1003,8 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         turn_phase_ticks: [0; MAX_ENTITIES],
         combatants: [Combatant::EMPTY; MAX_ENTITIES],
         actions: [crate::fighter_action::FighterAction::IDLE; MAX_ENTITIES],
+        actor_plan: None,
+        actor_busy: 0,
         attack_timings: [[crate::fighter_action::ActionTiming {
             windup: 0,
             active: 0,

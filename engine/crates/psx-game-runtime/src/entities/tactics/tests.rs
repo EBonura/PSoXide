@@ -1212,3 +1212,35 @@ fn a_possessed_entity_runs_its_owners_intent_instead_of_its_tactics() {
     held.tick_delta(&ENEMY, input(target), &mut strike, 2);
     assert_eq!(held.state(0), GameEntityState::Windup);
 }
+
+#[test]
+fn the_tactical_controller_decides_for_the_actor_as_for_an_entity() {
+    let mut e = engaged();
+    let actor = GameEntities::<2, true>::ACTOR_SLOT;
+    // Her body far from the entity and facing it, the entity's own persona
+    // at her spot.
+    e.actor_motor_mut().snap_to(
+        psx_engine::RoomPoint::new(0, 0, 600),
+        psx_engine::Angle::HALF,
+    );
+    let mut persona = enemy();
+    persona.z = 600;
+    e.engage_actor(&persona, 0, 7);
+    assert_eq!(e.rival(actor), Some(0));
+    let mut world = crate::entities::OpenWorld;
+    // Out of reach and in sight: it turns to its rival, then closes in (an
+    // entity's approach). Nothing moves her here, so it keeps asking.
+    let moves = (0..30)
+        .map(|_| e.actor_intent(&persona, &ENEMY, &mut world, 2, 0))
+        .filter(|intent| matches!(intent.movement, CombatMove::Move { .. }))
+        .count();
+    assert!(moves > 0);
+    // Held by an action, it does not decide; when an attack ends, the
+    // persona's cooldown starts as an entity's recovery starts it.
+    assert_eq!(
+        e.actor_intent(&persona, &ENEMY, &mut world, 2, 2),
+        CombatIntent::IDLE
+    );
+    e.actor_intent(&persona, &ENEMY, &mut world, 2, 0);
+    assert!(e.attack_cooldown[actor] > 0);
+}

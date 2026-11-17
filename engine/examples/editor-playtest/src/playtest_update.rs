@@ -265,6 +265,9 @@ impl Playtest {
                 .and_then(|swing| swing_ticks_to_contact(&swing, ctx.video_hz));
             self.game_entities
                 .observe_projectiles(GAME_ENTITIES.as_slice(), &self.combat_projectiles);
+            let actor_busy = self
+                .duel_drives_actor()
+                .then(|| (self.duel_actor_busy(ctx.sim_tick), self.duel_persona()));
             let mut mover = SceneEntityMover {
                 world_rt: self.world_rt.as_mut(),
                 destructibles: &self.destructibles,
@@ -278,7 +281,7 @@ impl Playtest {
             };
             // The target reads her fighter as it stood before the tick.
             let player_fighter = *self.game_entities.actor();
-            self.game_entities.tick_delta_deferred(
+            let stats = self.game_entities.tick_delta_deferred(
                 GAME_ENTITIES.as_slice(),
                 psx_game_runtime::entities::GameEntityTickInput {
                     target: psx_game_runtime::entities::CombatTarget {
@@ -304,7 +307,20 @@ impl Playtest {
                 &mut mover,
                 npc_delta_ticks,
                 &mut self.deferred_enemy_attacks,
-            )
+            );
+            // In a duel her tactical controller thinks with the entities,
+            // through the same world and against the same snapshot.
+            if let Some((busy, persona)) = actor_busy {
+                let plan = self.game_entities.actor_intent(
+                    &persona,
+                    GAME_ENTITIES.as_slice(),
+                    &mut mover,
+                    npc_delta_ticks,
+                    busy,
+                );
+                self.duel_set_plan(ctx, plan);
+            }
+            stats
         } else {
             psx_game_runtime::entities::GameEntityTickStats::default()
         };
@@ -692,6 +708,8 @@ impl Playtest {
         }
         self.tick_gameplay_layer(ctx);
         self.pump_poi_flush(ctx);
+        // In a duel her tactical controller's intent replaces the pad's.
+        let intent = self.duel_intent(intent, ctx.sim_tick);
         {
             use psx_game_runtime::entities::GameEntityState;
             let count = self.game_entities.count().min(GAME_ENTITIES.len());
