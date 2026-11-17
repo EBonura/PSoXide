@@ -1,0 +1,391 @@
+//! The per-game file, `psoxide-test.toml` at the repo root: what to build, which artifacts the
+//! stages read, the bars and windows, the journeys, the smoke, the host checks, the install.
+//! It declares; the harness decides how. Unknown keys are errors.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+/// The fixed path of the game file inside a repo.
+pub const GAME_FILE: &str = "psoxide-test.toml";
+/// The fixed path of the baseline beside it.
+pub const BASELINE_FILE: &str = "psoxide-test.baseline.toml";
+
+/// The whole game file.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Game {
+    pub schema: u32,
+    /// Report and library name.
+    pub name: String,
+    /// `owner/name` on GitHub, for the clean-clone stage.
+    pub repository: String,
+    #[serde(rename = "build")]
+    pub builds: Vec<Build>,
+    pub size: Option<Size>,
+    #[serde(default, rename = "speed")]
+    pub windows: Vec<Window>,
+    pub journeys: Option<Journeys>,
+    pub cross: Option<Cross>,
+    #[serde(default, rename = "host")]
+    pub hosts: Vec<Host>,
+    pub clean: Option<Clean>,
+    pub install: Option<Install>,
+}
+
+/// One build: commands run in order at the repo root, then files collected into `out`.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Build {
+    pub name: String,
+    /// Output directory, relative to the repo root; `{out}` in a command is its absolute path.
+    pub out: String,
+    pub commands: Vec<Vec<String>>,
+    /// Destination name in `out` -> source path relative to the repo root. A source ending in
+    /// `*` takes the newest file with that prefix, which must have been written by this build.
+    #[serde(default)]
+    pub collect: BTreeMap<String, String>,
+    /// Extra environment for the commands. `{input:NAME}` is the path the user config gives
+    /// the original game files of that name (`[inputs]`); a missing one is an error naming it.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    /// The disc's cue inside `out`.
+    pub disc: String,
+    /// The link map inside `out` (size and symbols read it).
+    #[serde(default)]
+    pub map: Option<String>,
+    /// Path prefixes of the files whose bytes form the receipt key. Empty: every file git would
+    /// hand a clone, minus `exclude`. A cook lists only its sources and cooker here.
+    #[serde(default)]
+    pub inputs: Vec<String>,
+    /// Path prefixes left out of the default key (journeys and the harness files never change a
+    /// build).
+    #[serde(default = "default_exclude")]
+    pub exclude: Vec<String>,
+}
+
+fn default_exclude() -> Vec<String> {
+    ["tests/", GAME_FILE, BASELINE_FILE]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect()
+}
+
+/// The size bars.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Size {
+    pub build: String,
+    /// Bytes `.text` may grow over the baseline (default 0).
+    #[serde(default)]
+    pub text_max_growth: u32,
+    /// Bytes free RAM may fall under the baseline (default 0).
+    #[serde(default)]
+    pub free_min_drop: u32,
+    /// Required when either tolerance is not 0.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// One speed window on a poll-bound tape.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct Window {
+    pub name: String,
+    pub build: String,
+    /// Poll-bound tape the window replays, relative to the repo root.
+    #[serde(default)]
+    pub tape: Option<String>,
+    /// `[from, to]` in the game's own pad polls of the tape.
+    #[serde(default)]
+    pub polls: Option<[u32; 2]>,
+    /// The window starts when this game-state condition first holds (the journey condition
+    /// syntax: `{ kind = "ram", sym, offset, op, value }`). Accepted in the schema; the measuring
+    /// tool cannot start a window on a condition yet, so a window that uses it fails with that
+    /// message instead of being skipped.
+    #[serde(default)]
+    pub from: Option<toml::Table>,
+    /// The window ends when this condition first holds after `from`.
+    #[serde(default)]
+    pub until: Option<toml::Table>,
+    /// Phase shifts of the window, in polls; must contain 0. The quick tier runs 0 only.
+    #[serde(default = "zero_offset")]
+    pub offsets: Vec<i32>,
+    /// Extra frontend arguments the replay needs.
+    #[serde(default)]
+    pub launch_args: Vec<String>,
+}
+
+fn zero_offset() -> Vec<i32> {
+    vec![0]
+}
+
+/// The journeys every model runs.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Journeys {
+    /// Glob of journey files, relative to the repo root.
+    pub files: String,
+    /// Journey names (file stems) the quick tier runs on `real`.
+    #[serde(default)]
+    pub precheck: Vec<String>,
+    /// Conformance rules enforced on every run.
+    #[serde(default = "default_conformance")]
+    pub conformance: Vec<String>,
+    /// Journeys allowed the gate's forced-analog pad: name -> reason.
+    #[serde(default)]
+    pub forced_analog: BTreeMap<String, String>,
+}
+
+/// The fleet's enforced conformance rules, defined here once. A game file may list more (or a
+/// documented subset with its reason); a rule the gate gains is added here in one line.
+fn default_conformance() -> Vec<String> {
+    vec!["cd-ack-partial".into(), "cd-ack-param-reset".into()]
+}
+
+/// The cross-emulator smoke.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Cross {
+    /// Smoke journeys (gate TOML, adapter subset), relative to the repo root.
+    pub smoke: Vec<String>,
+    /// Pads every smoke runs with on the other emulators.
+    #[serde(default = "default_pads")]
+    pub pads: Vec<String>,
+    /// Fewest distinct pictures a run must present (a hang presents few).
+    #[serde(default = "default_min_distinct")]
+    pub min_distinct: u32,
+    /// A run of another build with no input and no state (a shipping disc whose state blocks
+    /// are compiled out): it must boot, present `min_distinct` pictures and not pause or crash.
+    #[serde(default)]
+    pub boot: Option<Boot>,
+}
+
+/// The input-free boot run of `[cross]`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Boot {
+    pub build: String,
+    pub frames: u64,
+}
+
+fn default_pads() -> Vec<String> {
+    vec!["digital".into(), "dualshock".into()]
+}
+fn default_min_distinct() -> u32 {
+    60
+}
+
+/// A host check: a command that must exit 0.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Host {
+    pub name: String,
+    pub command: Vec<String>,
+}
+
+/// The clean-clone proof.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Clean {
+    pub build: String,
+    /// Self-verifying caches APFS-cloned from the working tree into the fresh clone.
+    #[serde(default)]
+    pub seed: Vec<String>,
+    /// Files of `out` that must be byte-identical (default: the disc's cue and bin).
+    #[serde(default)]
+    pub compare: Vec<String>,
+}
+
+/// The library install.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Install {
+    pub build: String,
+    /// The library entry (default: the game name). The disc goes in `<library>/<dir>/`.
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+impl Game {
+    /// Read and check `<repo>/psoxide-test.toml`.
+    pub fn load(repo: &Path) -> Result<Game, String> {
+        let path = repo.join(GAME_FILE);
+        let text = std::fs::read_to_string(&path).map_err(|e| {
+            format!(
+                "read {}: {e}\n  a game is tested from its own {GAME_FILE}; MIGRATE.md says how \
+                 to write one",
+                path.display()
+            )
+        })?;
+        Game::parse(&text).map_err(|e| format!("{}: {e}", path.display()))
+    }
+
+    /// Parse and validate the text of a game file.
+    pub fn parse(text: &str) -> Result<Game, String> {
+        let game: Game = toml::from_str(text).map_err(|e| e.to_string())?;
+        game.validate()?;
+        Ok(game)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.schema != 1 {
+            return Err(format!("schema {} is not 1", self.schema));
+        }
+        if !self.repository.contains('/') {
+            return Err("repository must be `owner/name`".into());
+        }
+        if self.builds.is_empty() {
+            return Err("at least one [[build]] is needed".into());
+        }
+        let mut names = std::collections::BTreeSet::new();
+        for b in &self.builds {
+            if !names.insert(b.name.as_str()) {
+                return Err(format!("duplicate build `{}`", b.name));
+            }
+            if b.commands.is_empty() || b.commands.iter().any(Vec::is_empty) {
+                return Err(format!("build `{}`: every command needs a program", b.name));
+            }
+            if b.out.is_empty() || b.out.starts_with('/') || b.out.contains("..") {
+                return Err(format!(
+                    "build `{}`: out must be a path inside the repo",
+                    b.name
+                ));
+            }
+        }
+        let known = |name: &str, what: &str| {
+            if names.contains(name) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "{what} names build `{name}`, which no [[build]] declares"
+                ))
+            }
+        };
+        if let Some(size) = &self.size {
+            known(&size.build, "[size]")?;
+            if self.build(&size.build).is_some_and(|b| b.map.is_none()) {
+                return Err(format!("[size]: build `{}` declares no map", size.build));
+            }
+            if (size.text_max_growth != 0 || size.free_min_drop != 0)
+                && size.reason.as_deref().is_none_or(str::is_empty)
+            {
+                return Err("[size]: a tolerance other than 0 needs `reason`".into());
+            }
+        }
+        for w in &self.windows {
+            known(&w.build, "[[speed]]")?;
+            if !w.offsets.contains(&0) {
+                return Err(format!("[[speed]] `{}`: offsets must contain 0", w.name));
+            }
+            match (&w.tape, w.polls, &w.from, &w.until) {
+                (Some(_), Some([a, b]), None, None) if a < b => {}
+                (Some(_), Some(_), None, None) => {
+                    return Err(format!("[[speed]] `{}`: polls must be [from, to]", w.name))
+                }
+                (_, None, Some(_), Some(_)) => {}
+                _ => {
+                    return Err(format!(
+                        "[[speed]] `{}`: a window is tape + polls, or from + until conditions",
+                        w.name
+                    ))
+                }
+            }
+        }
+        if let Some(cross) = &self.cross {
+            if let Some(boot) = &cross.boot {
+                known(&boot.build, "[cross] boot")?;
+            }
+            for pad in &cross.pads {
+                if !["digital", "dualshock"].contains(&pad.as_str()) {
+                    return Err(format!("[cross] pads: `{pad}` is not digital or dualshock"));
+                }
+            }
+        }
+        for name in [
+            self.clean.as_ref().map(|c| c.build.as_str()),
+            self.install.as_ref().map(|i| i.build.as_str()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            known(name, "[clean]/[install]")?;
+        }
+        Ok(())
+    }
+
+    /// The build of this name.
+    pub fn build(&self, name: &str) -> Option<&Build> {
+        self.builds.iter().find(|b| b.name == name)
+    }
+}
+
+impl Build {
+    /// The output directory.
+    pub fn out_dir(&self, repo: &Path) -> PathBuf {
+        repo.join(&self.out)
+    }
+
+    /// The disc cue.
+    pub fn cue(&self, repo: &Path) -> PathBuf {
+        self.out_dir(repo).join(&self.disc)
+    }
+
+    /// The link map, when declared.
+    pub fn map_path(&self, repo: &Path) -> Option<PathBuf> {
+        self.map.as_ref().map(|m| self.out_dir(repo).join(m))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MINIMAL: &str = r#"
+schema = 1
+name = "Game"
+repository = "o/game"
+[[build]]
+name = "ship"
+out = "build/ship"
+commands = [["make", "build"]]
+disc = "Game.cue"
+map = "link.map"
+"#;
+
+    #[test]
+    fn a_minimal_file_loads() {
+        let game = Game::parse(MINIMAL).unwrap();
+        assert_eq!(game.builds[0].exclude.len(), 3);
+    }
+
+    #[test]
+    fn a_size_tolerance_needs_a_reason() {
+        let text = format!("{MINIMAL}[size]\nbuild = \"ship\"\ntext_max_growth = 64\n");
+        assert!(Game::parse(&text).unwrap_err().contains("reason"));
+        let text = format!("{text}reason = \"measured\"\n");
+        assert!(Game::parse(&text).is_ok());
+    }
+
+    #[test]
+    fn a_stage_must_name_a_declared_build() {
+        let text = format!("{MINIMAL}[size]\nbuild = \"gate\"\n");
+        assert!(Game::parse(&text).unwrap_err().contains("`gate`"));
+    }
+
+    #[test]
+    fn a_window_needs_offset_zero_and_unknown_keys_fail() {
+        let w = "[[speed]]\nname = \"t\"\nbuild = \"ship\"\ntape = \"t.pxtape\"\npolls = [1, 9]\n";
+        assert!(Game::parse(&format!("{MINIMAL}{w}offsets = [12]\n")).is_err());
+        assert!(Game::parse(&format!("{MINIMAL}{w}")).is_ok());
+        assert!(Game::parse(&format!("{MINIMAL}{w}offset = [0]\n")).is_err());
+        let c = "[[speed]]\nname = \"c\"\nbuild = \"ship\"\nfrom = { kind = \"ram\", sym = \"S\", value = 3 }\nuntil = { kind = \"ram\", sym = \"S\", value = 4 }\n";
+        assert!(
+            Game::parse(&format!("{MINIMAL}{c}")).is_ok(),
+            "a window by conditions loads"
+        );
+        let half = "[[speed]]\nname = \"c\"\nbuild = \"ship\"\nfrom = { kind = \"ram\", sym = \"S\", value = 3 }\n";
+        assert!(Game::parse(&format!("{MINIMAL}{half}")).is_err());
+    }
+}

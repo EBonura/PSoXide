@@ -1,0 +1,29 @@
+# psoxide-test user config: ~/.config/psoxide-test/config.toml, or point PSOXIDE_TEST_CONFIG at a
+# copy. Machine-local and never committed. Every path below is a placeholder.
+
+# Receipts, logs, results and adapter evidence, one directory per game under here.
+work = "/path/to/psoxide-test-work"
+# The games library the install stage writes to (one directory per game).
+library = "/path/to/ps1-games"
+
+[budget]
+jobs = 3        # CARGO_BUILD_JOBS for builds
+emulators = 2   # emulator processes at once (gate, psoxide-pgo replays, ReARMed)
+redux = 1       # PCSX-Redux processes at once
+
+[tools]
+# The PSoXide frontend that `psoxide-pgo measure` replays tapes on.
+frontend = "/path/to/PSoXide-emulator/target/pgo/release/frontend"
+# The PCSX-ReARMed libretro core.
+rearmed_core = "/path/to/pcsx_rearmed_libretro.dylib"
+# The official PCSX-Redux bundle's Contents directory (run windowless, never the installed app).
+redux = "/path/to/PCSX-Redux.app/Contents"
+
+[tools.gate]
+# psoxide-gate and the PSoXide-emulator revision it was built from; the harness refuses any other.
+path = "/path/to/psoxide-gate"
+revision = "477d8b21"
+
+# Original game files a build needs, by the name its psoxide-test.toml uses in `{input:NAME}`.
+[inputs]
+# original-disc = "/path/to/the/original/game/files"
