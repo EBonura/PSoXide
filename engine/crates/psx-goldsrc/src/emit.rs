@@ -321,6 +321,7 @@ pub const AFFINE_ERROR_BUCKETS: usize = 128;
 /// The 50th, 95th and 99th percentile of `total` samples counted in `histogram`, in Q8 texels
 /// (a bucket's lower edge). Telemetry only.
 #[inline(never)]
+#[must_use]
 pub fn affine_error_percentiles(histogram: &[u16; AFFINE_ERROR_BUCKETS], total: u32) -> [u32; 3] {
     let percentile = |numerator: u32, denominator: u32| -> u32 {
         let target = total.saturating_mul(numerator).div_ceil(denominator);
