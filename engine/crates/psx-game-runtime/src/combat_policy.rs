@@ -84,20 +84,35 @@ pub fn attack_choice(ranged: bool, close: bool, last: u8, repeats: u8, roll: u16
 /// parryable hit keeps its random sequence. The same choice for the duel's
 /// player bot and every tactical enemy; what each can see of the incoming
 /// hit is the controller's own perception.
+///
+/// Reaction: the fighter must have seen the hit coming (`watched` ticks ago,
+/// counted from the first decision that saw it) at least `reaction_ticks`
+/// before it lands, `watched + ticks_to_hit >= reaction_ticks` (its
+/// [`CombatStats::parry_reaction_ticks`](psx_level::CombatStats::parry_reaction_ticks)),
+/// so a deliberate parry follows a readable tell. A hit first seen too late
+/// is not parried on purpose; it is still parried if it happens to land in a
+/// swap's window.
+#[allow(clippy::too_many_arguments)]
 pub fn parry_swap(
     ticks_to_hit: Option<u16>,
     before: Option<u16>,
+    watched: u16,
     parry_ticks: u16,
+    reaction_ticks: u16,
     can_swap: bool,
     percent: u8,
     roll: impl FnOnce() -> u16,
 ) -> bool {
     let inside = |ticks: Option<u16>| ticks.is_some_and(|ticks| ticks < parry_ticks);
+    let readable = |ticks: Option<u16>| {
+        ticks.is_some_and(|ticks| u32::from(watched) + u32::from(ticks) >= u32::from(reaction_ticks))
+    };
     can_swap
         && percent != 0
         && parry_ticks != 0
         && inside(ticks_to_hit)
         && !inside(before)
+        && readable(ticks_to_hit)
         && roll() % 100 < u16::from(percent)
 }
 
@@ -156,25 +171,44 @@ mod tests {
     fn a_parry_swap_needs_a_hit_inside_the_window_and_a_roll() {
         let yes = || 10;
         let no = || 90;
-        assert!(parry_swap(Some(3), None, 8, true, 50, yes));
-        assert!(parry_swap(Some(7), Some(8), 8, true, 50, yes));
+        assert!(parry_swap(Some(3), None, 0, 8, 0, true, 50, yes));
+        assert!(parry_swap(Some(7), Some(8), 0, 8, 0, true, 50, yes));
         // Eight ticks away lands nine ticks into the swap: past the window.
-        assert!(!parry_swap(Some(8), None, 8, true, 50, yes));
-        assert!(!parry_swap(Some(9), None, 8, true, 50, yes));
-        assert!(!parry_swap(None, Some(9), 8, true, 50, yes));
-        assert!(!parry_swap(Some(3), None, 8, false, 50, yes));
-        assert!(!parry_swap(Some(3), None, 8, true, 0, yes));
-        assert!(!parry_swap(Some(3), None, 0, true, 50, yes));
-        assert!(!parry_swap(Some(3), None, 8, true, 50, no));
+        assert!(!parry_swap(Some(8), None, 0, 8, 0, true, 50, yes));
+        assert!(!parry_swap(Some(9), None, 0, 8, 0, true, 50, yes));
+        assert!(!parry_swap(None, Some(9), 0, 8, 0, true, 50, yes));
+        assert!(!parry_swap(Some(3), None, 0, 8, 0, false, 50, yes));
+        assert!(!parry_swap(Some(3), None, 0, 8, 0, true, 0, yes));
+        assert!(!parry_swap(Some(3), None, 0, 0, 0, true, 50, yes));
+        assert!(!parry_swap(Some(3), None, 0, 8, 0, true, 50, no));
         // One roll per hit: already inside the window at the last check.
-        assert!(!parry_swap(Some(3), Some(4), 8, true, 50, yes));
+        assert!(!parry_swap(Some(3), Some(4), 0, 8, 0, true, 50, yes));
         // No draw unless everything else holds.
         let mut drawn = false;
-        assert!(!parry_swap(Some(20), None, 8, true, 50, || {
+        assert!(!parry_swap(Some(20), None, 0, 8, 0, true, 50, || {
             drawn = true;
             0
         }));
         assert!(!drawn);
+    }
+    #[test]
+    fn a_parry_swap_needs_the_hit_seen_its_reaction_time_before_contact() {
+        let yes = || 10;
+        // Seen 12 ticks before contact (watched 9, lands in 3): reaction 12 holds.
+        assert!(parry_swap(Some(3), None, 9, 8, 12, true, 50, yes));
+        // Seen 11 ticks before contact: too late for a 12-tick reaction.
+        assert!(!parry_swap(Some(3), None, 8, 8, 12, true, 50, yes));
+        // First seen already inside the window: no deliberate parry.
+        assert!(!parry_swap(Some(3), None, 0, 8, 12, true, 50, yes));
+        // No draw when the hit was seen too late.
+        let mut drawn = false;
+        assert!(!parry_swap(Some(3), None, 0, 8, 12, true, 50, || {
+            drawn = true;
+            0
+        }));
+        assert!(!drawn);
+        // Zero reaction: the old rule.
+        assert!(parry_swap(Some(3), None, 0, 8, 0, true, 50, yes));
     }
     #[test]
     fn a_crit_is_spent_with_the_swapped_to_weapon() {

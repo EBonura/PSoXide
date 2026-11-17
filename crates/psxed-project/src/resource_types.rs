@@ -2732,6 +2732,12 @@ pub struct CombatStats {
     /// Zero never parries on purpose. PLACEHOLDER, the duel harness tunes it.
     #[serde(default = "default_combat_parry_swap_percent")]
     pub parry_swap_percent: u8,
+    /// For an AI controller of this character: the least ticks before
+    /// contact at which it must have seen a hit coming to parry it on
+    /// purpose (a readable tell, never a perfect read). Zero adds no delay.
+    /// PLACEHOLDER, the duel harness tunes it.
+    #[serde(default = "default_combat_parry_reaction_ticks")]
+    pub parry_reaction_ticks: u16,
 }
 
 impl CombatStats {
@@ -2761,6 +2767,7 @@ impl CombatStats {
             crit_poise_q12: stats.crit_poise_q12,
             knockdown_ticks: stats.knockdown_ticks,
             parry_swap_percent: stats.parry_swap_percent,
+            parry_reaction_ticks: stats.parry_reaction_ticks,
         }
     }
 
@@ -2791,6 +2798,7 @@ impl CombatStats {
             crit_poise_q12: self.crit_poise_q12,
             knockdown_ticks: self.knockdown_ticks,
             parry_swap_percent: self.parry_swap_percent,
+            parry_reaction_ticks: self.parry_reaction_ticks,
         }
     }
 
@@ -2872,6 +2880,8 @@ struct CombatStatsFile {
     knockdown_ticks: u16,
     #[serde(default = "default_combat_parry_swap_percent")]
     parry_swap_percent: u8,
+    #[serde(default = "default_combat_parry_reaction_ticks")]
+    parry_reaction_ticks: u16,
 }
 
 impl From<CombatStatsFile> for CombatStats {
@@ -2901,6 +2911,7 @@ impl From<CombatStatsFile> for CombatStats {
             crit_poise_q12: file.crit_poise_q12,
             knockdown_ticks: file.knockdown_ticks,
             parry_swap_percent: file.parry_swap_percent,
+            parry_reaction_ticks: file.parry_reaction_ticks,
         }
     }
 }
@@ -2967,6 +2978,10 @@ pub(crate) const fn default_combat_knockdown_ticks() -> u16 {
 
 pub(crate) const fn default_combat_parry_swap_percent() -> u8 {
     CombatStats::PLAYER.parry_swap_percent
+}
+
+pub(crate) const fn default_combat_parry_reaction_ticks() -> u16 {
+    CombatStats::PLAYER.parry_reaction_ticks
 }
 
 /// Tunable movement/collision settings authored on a

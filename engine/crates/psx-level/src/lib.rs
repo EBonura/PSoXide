@@ -1303,6 +1303,12 @@ pub struct CombatStats {
     /// purpose when it sees a hit about to land inside its parry window.
     /// Zero never parries on purpose. The pad ignores it.
     pub parry_swap_percent: u8,
+    /// For an AI controller of this character: the least ticks before
+    /// contact at which it must have seen an incoming hit (a swing's tell
+    /// from its windup, a bolt from its release) to parry it on purpose, so
+    /// a deliberate parry follows a readable tell, never a perfect read at
+    /// the window's entry. Zero adds no delay. The pad ignores it.
+    pub parry_reaction_ticks: u16,
 }
 
 impl CombatStats {
@@ -1342,6 +1348,8 @@ impl CombatStats {
         knockdown_ticks: 60,
         // PLACEHOLDER, harness tunes: half the hits an AI sees coming.
         parry_swap_percent: 50,
+        // PLACEHOLDER: no reaction delay, the rule before the field existed.
+        parry_reaction_ticks: 0,
     };
 
     /// An enemy's numbers when nothing was authored: 200 health (the two

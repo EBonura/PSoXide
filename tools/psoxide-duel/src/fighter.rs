@@ -178,6 +178,8 @@ pub enum Placeholder {
     Poise,
     /// `CombatStats::parry_swap_percent`.
     ParrySwapPercent,
+    /// `CombatStats::parry_reaction_ticks`.
+    ParryReactionTicks,
     /// `ranged_tactics::DRY_CYCLES` (a code constant; the harness feature
     /// makes it a setting).
     DryCycles,
@@ -185,7 +187,7 @@ pub enum Placeholder {
 
 impl Placeholder {
     /// Every placeholder, in report order.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::ParryTicks,
         Self::ParryRefund,
         Self::CritWindowTicks,
@@ -194,6 +196,7 @@ impl Placeholder {
         Self::KnockdownTicks,
         Self::Poise,
         Self::ParrySwapPercent,
+        Self::ParryReactionTicks,
         Self::DryCycles,
     ];
 
@@ -208,6 +211,7 @@ impl Placeholder {
             Self::KnockdownTicks => "knockdown_ticks",
             Self::Poise => "poise",
             Self::ParrySwapPercent => "parry_swap_percent",
+            Self::ParryReactionTicks => "parry_reaction_ticks",
             Self::DryCycles => "dry_cycles",
         }
     }
@@ -224,6 +228,7 @@ impl Placeholder {
             Self::KnockdownTicks => 20,
             Self::Poise => (current / 5).max(1),
             Self::ParrySwapPercent => 25,
+            Self::ParryReactionTicks => 4,
             Self::DryCycles => 1,
         }
     }
@@ -241,6 +246,7 @@ impl Placeholder {
             Self::CritPoiseQ12 => &mut c.crit_poise_q12,
             Self::KnockdownTicks => &mut c.knockdown_ticks,
             Self::Poise => &mut c.poise,
+            Self::ParryReactionTicks => &mut c.parry_reaction_ticks,
             Self::ParrySwapPercent => {
                 let step = i32::from(self.step(0));
                 let value = (i32::from(c.parry_swap_percent) + step * direction).clamp(0, 100);
@@ -268,6 +274,7 @@ impl Placeholder {
             Self::KnockdownTicks => c.knockdown_ticks = value,
             Self::Poise => c.poise = value,
             Self::ParrySwapPercent => c.parry_swap_percent = value.min(100) as u8,
+            Self::ParryReactionTicks => c.parry_reaction_ticks = value,
             Self::DryCycles => {}
         }
     }
@@ -289,6 +296,7 @@ impl Placeholder {
             Self::KnockdownTicks => c.knockdown_ticks,
             Self::Poise => c.poise,
             Self::ParrySwapPercent => u16::from(c.parry_swap_percent),
+            Self::ParryReactionTicks => c.parry_reaction_ticks,
             Self::DryCycles => u16::from(psx_game_runtime::ranged_tactics::DRY_CYCLES),
         }
     }

@@ -156,6 +156,11 @@ pub(super) struct TacticalState {
     /// Ticks to the incoming hit at the previous decision, `u16::MAX` when
     /// none ([`crate::combat_policy::parry_swap`] decides on entry).
     ticks_to_hit: u16,
+    /// Ticks the incoming hit has been watched, from the first decision that
+    /// saw it (a swing's tell or a bolt), capped at 254, `u8::MAX` when none
+    /// was seen at the previous decision: the reaction half of
+    /// [`crate::combat_policy::parry_swap`].
+    threat_watched: u8,
     /// The owner's prediction of the incoming swing's first contact
     /// ([`GameEntities::predict_swing_contact`]), packed by
     /// [`PredictedContact::to_raw`].
@@ -193,6 +198,7 @@ impl TacticalState {
         defend_cooldown: 0,
         combat_role: 0,
         ticks_to_hit: u16::MAX,
+        threat_watched: u8::MAX,
         predicted_contact: PredictedContact::UNREAD_RAW,
     };
 }
@@ -962,12 +968,25 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
             ticks_to_hit.unwrap_or(u16::MAX),
         );
         let before = (before != u16::MAX).then_some(before);
+        // How long the hit has been in view: a swing from its tell (the
+        // attacker's windup), a bolt from its release.
+        let seen = visible
+            && (input.target.swing_ticks.is_some() || bolt.is_some() || ticks_to_hit.is_some());
+        let watched = match (seen, self.tactics[i].threat_watched) {
+            (false, _) => u8::MAX,
+            (true, u8::MAX) => 0,
+            (true, watched) => (u16::from(watched) + delta).min(254) as u8,
+        };
+        self.tactics[i].threat_watched = watched;
+        let watched = if seen { u16::from(watched) } else { 0 };
         if S && visible && !self.stance_swap_in_progress(i) {
             let can_swap = self.swap_permitted(r, i);
             if crate::combat_policy::parry_swap(
                 ticks_to_hit,
                 before,
+                watched,
                 r.combat.parry_ticks,
+                r.combat.parry_reaction_ticks,
                 can_swap,
                 r.combat.parry_swap_percent,
                 || self.draw(i, 100),

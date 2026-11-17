@@ -1077,6 +1077,42 @@ fn a_predicted_contact_replaces_the_swings_own_clock_for_the_parry() {
     assert_eq!(e.tactical_snapshot(0).stance_reason, STANCE_REASON_PARRY);
 }
 
+#[test]
+fn a_deliberate_parry_needs_the_swing_seen_its_reaction_time_before_contact() {
+    let mut slow = enemy_with_flags(enemy().flags)[0];
+    slow.combat.parry_swap_percent = 100;
+    slow.combat.parry_ticks = 3;
+    slow.combat.parry_reaction_ticks = 12;
+    let slow: &'static [LevelGameEntityRecord] =
+        std::boxed::Box::leak(std::boxed::Box::new([slow]));
+    let fresh = || {
+        let mut e: GameEntities<2, true> = GameEntities::EMPTY;
+        e.spawn_from_records(slow);
+        e.set_stance_swap_delay(300);
+        e.state[0] = GameEntityState::Aggro as u8;
+        e.state_ticks[0] = 42;
+        e
+    };
+    let mut swing = input([0, 0, 40]);
+    swing.target.attack_read = 2;
+    // First seen already inside the window: a perfect read, no swap.
+    swing.target.swing_ticks = Some(1);
+    let mut e = fresh();
+    let stance = e.stance(0);
+    e.tick_delta(slow, swing, &mut Arena::default(), 2);
+    assert_eq!(e.stance(0), stance, "seen 1 tick before contact: no parry");
+    // Seen from its tell, 13 ticks out, then followed in: the swap comes at
+    // the window's entry.
+    let mut e = fresh();
+    swing.target.attack_read = 1;
+    for ticks in [13, 11, 9, 7, 5, 3, 1] {
+        swing.target.swing_ticks = Some(ticks);
+        e.tick_delta(slow, swing, &mut Arena::default(), 2);
+    }
+    assert_ne!(e.stance(0), stance);
+    assert_eq!(e.tactical_snapshot(0).stance_reason, STANCE_REASON_PARRY);
+}
+
 /// Put entity 0 in `stance`, its swap long finished and its cooldown clear
 /// (as a parry leaves it).
 fn settle_in(e: &mut GameEntities<2, true>, stance: VitalityChannelId) {
