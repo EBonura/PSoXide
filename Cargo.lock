@@ -535,6 +535,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "psoxide-test"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "libc",
+ "psoxide-size",
+ "psx-library",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "toml",
+]
+
+[[package]]
 name = "psx-anim-cook"
 version = "0.1.0"
 dependencies = [

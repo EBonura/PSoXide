@@ -1,0 +1,25 @@
+[package]
+name = "psoxide-test"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "One test harness for every PSoXide game: build, size, journeys, speed, cross-emulator smoke, clean-clone proof and install, declared per game in psoxide-test.toml."
+
+[dependencies]
+image = { workspace = true }
+libc = "0.2"
+psoxide-size = { path = "../psoxide-size" }
+psx-library = { path = "../../crates/psx-library" }
+serde = { workspace = true, features = ["std"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+toml = "1"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
