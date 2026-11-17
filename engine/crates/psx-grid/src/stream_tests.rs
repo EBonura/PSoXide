@@ -7,7 +7,7 @@ use crate::format::*;
 use crate::render::{FrustumPlanes, GridMaterial, GridRenderer, RoomCamera, ViewProjection};
 use crate::resident::ResidentRooms;
 use crate::view::{LevelView, RoomView};
-use crate::write::{aligned_copy, words_as_bytes, LevelCore, RoomChunk};
+use crate::write::{aligned_copy, words_as_bytes, FloodBlock, LevelCore, RoomChunk};
 use alloc::vec;
 use alloc::vec::Vec;
 use psx_gte::math::{Mat3I16, Vec3I32 as GteVec3I32};
@@ -63,6 +63,11 @@ fn chunk() -> Vec<u8> {
 /// A corridor of `ROOMS` one sector rooms along X, every neighbour pair
 /// joined by a portal both ways.
 fn core(draw_far: u8) -> Vec<u8> {
+    core_with(draw_far, None)
+}
+
+/// [`core`] with a flood block.
+fn core_with(draw_far: u8, flood: Option<FloodBlock>) -> Vec<u8> {
     let mut rooms = Vec::new();
     let mut portals = Vec::new();
     for i in 0..ROOMS {
@@ -106,6 +111,7 @@ fn core(draw_far: u8) -> Vec<u8> {
             quads: 1,
             ..RenderMaxima::default()
         },
+        flood,
         ..LevelCore::default()
     }
     .to_bytes()
@@ -326,4 +332,37 @@ fn the_draw_distance_bounds_the_rooms_that_are_drawn() {
     // resident: the bound, not residency, keeps it out of the draw set.
     let rooms = near(&mut activity, &resident, 0, [10, 40, 40]);
     assert!(!rooms.contains(&4) || !rooms.contains(&5), "{rooms:?}");
+}
+
+#[test]
+fn a_flood_level_held_whole_draws_every_room_whatever_its_draw_distance() {
+    // The cook writes the flood's near radius into the core's draw distance
+    // (3 sectors here) and holds the level whole (`pool_cap_pages` 0) when its
+    // rooms fit the pool: every room is resident and every room is drawn.
+    let portals = 2 * (ROOMS - 1);
+    let flood = FloodBlock {
+        header: FloodHeader {
+            pool_cap_pages: 0,
+            near_radius: 3,
+            res_radius: 4,
+            bias: 0,
+            peak_rooms: 0,
+            reserved: [0; 2],
+        },
+        portal_weight: vec![FLOOD_WEIGHT_ONE; portals],
+    };
+    let core_words = aligned_copy(&core_with(3, Some(flood)));
+    let level = LevelView::parse(words_as_bytes(&core_words, core_words.len() * 4)).unwrap();
+    assert!(level.held_whole());
+    let chunks: Vec<Vec<u32>> = (0..ROOMS).map(|_| aligned_copy(&chunk())).collect();
+    let mut resident = ResidentRooms::new(level).unwrap();
+    for (room, words) in chunks.iter().enumerate() {
+        let v = RoomView::parse(words_as_bytes(words, words.len() * 4)).unwrap();
+        resident.insert(room, v).unwrap();
+    }
+    let mut activity = RoomActivity::new(&level);
+    let mut rooms = Vec::new();
+    activity.draw_rooms(&level, &resident, Some(0), [10, 40, 40], &mut rooms);
+    rooms.sort_unstable();
+    assert_eq!(rooms, (0..ROOMS).collect::<Vec<_>>());
 }
