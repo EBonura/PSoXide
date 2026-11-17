@@ -363,16 +363,26 @@ impl Combatant {
     };
 
     /// A fresh life for `stats`: health full, posture clear, energy full,
-    /// side One with no cooldown and no swap showing.
-    pub fn reset(&mut self, stats: &CombatStats) {
-        self.respawn(stats);
+    /// side One with no cooldown and no swap showing; a fighter whose `kits`
+    /// cannot swap holds its [`starting_stance`] instead.
+    pub fn reset(&mut self, stats: &CombatStats, kits: CombatKits) {
         self.stance = CombatStance::new(VitalityChannelId::One);
+        self.respawn(stats, kits);
     }
 
     /// Like [`Self::reset`] but keeps the stance side and its cooldown, only
     /// ending any swap presentation. This is what an entity slot does when
-    /// it spawns. A zero maximum gives an empty bar, as the cook allows.
-    pub fn respawn(&mut self, stats: &CombatStats) {
+    /// it spawns. A zero maximum gives an empty bar, as the cook allows. A
+    /// fighter whose `kits` cannot swap holds its [`starting_stance`] (a
+    /// ranged-only one starts in Zenith), whoever controls it.
+    pub fn respawn(&mut self, stats: &CombatStats, kits: CombatKits) {
+        self.respawn_numbers(stats);
+        if !kits.can_swap() {
+            self.stance.hold(starting_stance(kits));
+        }
+    }
+
+    fn respawn_numbers(&mut self, stats: &CombatStats) {
         self.health = VitalityPool::at(stats.max_health, stats.max_health);
         self.poise = Poise::EMPTY;
         self.flow = CombatFlow::full(stats);
@@ -601,11 +611,14 @@ mod tests {
     use crate::combat_flow::BREAK_GRACE_TICKS;
 
     /// 200 health, poise 60, the starting multipliers and energy.
-    const STATS: CombatStats = CombatStats::PLAYER;
+    const STATS: CombatStats = CombatStats::DEFAULT;
 
     fn fighter() -> Combatant {
         let mut c = Combatant::EMPTY;
-        c.reset(&STATS);
+        c.reset(
+            &STATS,
+            CombatKits::from_bits(CombatKits::MELEE | CombatKits::RANGED),
+        );
         c
     }
 
@@ -621,14 +634,20 @@ mod tests {
             energy_max: 40,
             ..STATS
         };
-        c.respawn(&small);
+        c.respawn(
+            &small,
+            CombatKits::from_bits(CombatKits::MELEE | CombatKits::RANGED),
+        );
         assert_eq!(c.health(), 80);
         assert_eq!(c.flow, CombatFlow::full(&small));
         assert_eq!(c.flow.energy, 40, "energy starts at the stats' ceiling");
         assert_eq!(c.stance.active(), VitalityChannelId::Two);
         assert_eq!(c.stance.swap_cooldown(), 30);
         assert_eq!(c.stance.swap_elapsed_ticks(), u16::MAX);
-        c.reset(&STATS);
+        c.reset(
+            &STATS,
+            CombatKits::from_bits(CombatKits::MELEE | CombatKits::RANGED),
+        );
         assert_eq!(c, fighter());
     }
 
@@ -982,7 +1001,7 @@ mod tests {
 
     #[test]
     fn one_armour_rule_authored_window_first_then_heavy_contact() {
-        let both = CombatStats::PLAYER;
+        let both = CombatStats::DEFAULT;
         assert_eq!(
             both.armour,
             combat_armour::HEAVY_ATTACK | combat_armour::AUTHORED_WINDOW

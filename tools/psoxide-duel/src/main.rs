@@ -115,7 +115,6 @@ fn standard<'a>(placed: &'a Placed, layout: Layout) -> Vec<Matchup<'a>> {
         fighters: [a, b],
         controllers: [ca, cb],
         layout,
-        swap_cooldown_ticks: placed.loaded.swap_cooldown_ticks,
         distance: placed.loaded.start_distance,
     };
     vec![
@@ -214,7 +213,7 @@ fn apply_set(loaded: &mut ProjectFighters, set: &str) {
         "stagger_ticks" => spec.record.stagger_ticks = value,
         _ => Placeholder::from_name(name)
             .unwrap_or_else(|| panic!("--set {set}: unknown number {name}"))
-            .set(&mut spec.record, value),
+            .set(&mut spec.body, value),
     }
 }
 
@@ -229,19 +228,19 @@ fn load(path: &Path, sets: &[String]) -> Placed {
         loaded.project,
         started.elapsed().as_secs_f64(),
         loaded.enemy.name,
-        loaded.enemy.record.combat.poise,
-        loaded.enemy.record.combat.parry_ticks,
-        loaded.aletha.record.combat.poise,
-        loaded.aletha.record.combat.parry_ticks,
+        loaded.enemy.body.combat.poise,
+        loaded.enemy.body.combat.parry_ticks,
+        loaded.aletha.body.combat.poise,
+        loaded.aletha.body.combat.parry_ticks,
         loaded.start_distance,
     );
     for spec in [&loaded.enemy, &loaded.aletha] {
         let r = &spec.record;
         eprintln!(
             "  {}: radius {} height {} walk {} run {} pref {} tol {} range {}..{} windup {} active {}/{}/{} recover {} stagger {} knockdown {} touch {} flags {:#x} hp {} strikes {:?} emitters {:?}",
-            spec.name, r.radius, r.height, r.motion.walk_speed, r.motion.run_speed, r.preferred_distance, r.spacing_tolerance,
+            spec.name, spec.body.radius, spec.body.height, spec.body.walk_speed, spec.body.run_speed, r.preferred_distance, r.spacing_tolerance,
             r.attack_min_range, r.attack_max_range, r.windup_ticks, r.attack_active_ticks, r.heavy_attack_active_ticks,
-            r.ranged_attack_active_ticks, r.recovery_ticks, r.stagger_ticks, r.combat.knockdown_ticks, r.touch_damage, r.flags, r.combat.max_health, spec.strikes, spec.emitters
+            r.ranged_attack_active_ticks, r.recovery_ticks, r.stagger_ticks, spec.body.combat.knockdown_ticks, r.touch_damage, r.flags, spec.body.combat.max_health, spec.strikes, spec.emitters
         );
         eprintln!(
             "    clip timings (light, heavy, ranged): {:?}",
@@ -310,7 +309,6 @@ fn main() {
                 fighters: [fa, fb],
                 controllers: [ca, cb],
                 layout: args.layouts[0],
-                swap_cooldown_ticks: placed.loaded.swap_cooldown_ticks,
                 distance: placed.loaded.start_distance,
             };
             let result = sweep::fight(&matchup, args.seed, true);
@@ -344,15 +342,15 @@ fn sensitivity(args: &Args) {
                         format!("{dry} / {dry}")
                     }
                     Some(p) => {
-                        let va = p.nudge(&mut aletha.record, direction);
-                        let ve = p.nudge(&mut enemy.record, direction);
+                        let va = p.nudge(&mut aletha.body, direction);
+                        let ve = p.nudge(&mut enemy.body, direction);
                         format!("{va} / {ve}")
                     }
                     None => {
                         let show = |s: &FighterSpec| {
                             Placeholder::ALL
                                 .iter()
-                                .map(|p| format!("{}={}", p.name(), p.value(&s.record)))
+                                .map(|p| format!("{}={}", p.name(), p.value(&s.body)))
                                 .collect::<Vec<_>>()
                                 .join(" ")
                         };
@@ -375,7 +373,6 @@ fn sensitivity(args: &Args) {
                         fighters: [a, b],
                         controllers: [ai, ai],
                         layout,
-                        swap_cooldown_ticks: base.loaded.swap_cooldown_ticks,
                         distance,
                     };
                     let summary = sweep::sweep(&matchup, 1..=args.seeds);

@@ -1185,16 +1185,11 @@ fn build_package_cooked(
                                         node_model_instance,
                                         entity_character,
                                         state_clips,
-                                        combat_capsule_first,
-                                        combat_capsule_count,
                                         attack_active_ticks,
                                         heavy_attack_active_ticks,
                                         ranged_attack_active_ticks,
                                         stagger_ticks,
                                         projectile_attack_range,
-                                        // Gravity weight from the placement's
-                                        // physics body, as the player's.
-                                        entity_weight_q8,
                                         &mut names,
                                         &mut game_entities,
                                         report,

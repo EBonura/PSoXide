@@ -698,12 +698,16 @@ impl Playtest {
         self.destructibles = RuntimeDestructibles::EMPTY;
         *self.game_entities.actor_motor_mut() =
             CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
+        self.game_entities.set_characters(&CHARACTERS[..]);
         self.player_contents_memo = None;
         // Playtest lives in a zeroed MaybeUninit, and zeroed stats or stance
         // config would mean no health and no swap timing, so they are set
         // explicitly on every reset rather than relying on the zero pattern.
-        self.player_stats = CombatStats::PLAYER;
-        self.game_entities.actor_mut().reset(&self.player_stats);
+        self.player_stats = CombatStats::DEFAULT;
+        let kits = self.player_kits();
+        self.game_entities
+            .actor_mut()
+            .reset(&self.player_stats, kits);
         self.vitality_circles = VitalityCircleState::EMPTY;
         self.player_stance_config = CombatStanceConfig::DEFAULT;
         self.power_up_loadout = PowerUpLoadout::DEFAULT;

@@ -35,7 +35,7 @@ use psx_game_runtime::projectiles::{
     ProjectileWorldTrace, ProjectileWorldTracer,
 };
 use psx_game_runtime::vitality::VitalityChannelId;
-use psx_level::{CharacterAnimationAction, LevelGameEntityRecord, RoomIndex};
+use psx_level::{CharacterAnimationAction, LevelCharacterRecord, LevelGameEntityRecord, RoomIndex};
 
 use crate::fighter::FighterSpec;
 
@@ -174,8 +174,10 @@ impl Layout {
 pub struct Fighter {
     /// The fighter's data.
     pub spec: FighterSpec,
-    /// Its record, home at the arena centre.
+    /// Its record, home at the arena centre, linking body 0 of `bodies`.
     record: &'static [LevelGameEntityRecord],
+    /// Its body, as its side's one Character.
+    bodies: &'static [LevelCharacterRecord],
 }
 
 impl Fighter {
@@ -190,8 +192,14 @@ impl Fighter {
         record.patrol_x = 0;
         record.patrol_y = 0;
         record.patrol_z = 0;
+        record.character = psx_level::CharacterIndex(0);
         let record: &'static [LevelGameEntityRecord] = Box::leak(Box::new([record]));
-        Self { spec, record }
+        let bodies: &'static [LevelCharacterRecord] = Box::leak(Box::new([spec.body]));
+        Self {
+            spec,
+            record,
+            bodies,
+        }
     }
 }
 
@@ -319,8 +327,6 @@ pub struct Duel<'a> {
     pub controllers: [Controller; 2],
     /// Each side's random seed (the tactical controller's stream).
     pub seeds: [u32; 2],
-    /// The swap cooldown every fighter uses.
-    pub swap_cooldown_ticks: u16,
     /// Start distance.
     pub distance: i32,
     /// Start bearing ([`start`]).
@@ -374,8 +380,13 @@ impl Side {
         &self.records[0]
     }
 
+    /// Its body: the Character its record links.
+    fn body(&self) -> &'static LevelCharacterRecord {
+        self.entities.body(self.record())
+    }
+
     fn seen(&self) -> Seen {
-        let r = self.record();
+        let r = self.body();
         let defender = self
             .entities
             .defender(self.records, 0)
@@ -427,7 +438,7 @@ impl Side {
 
     /// The body capsule bolts hit (the disc's fallback hurtbox).
     fn hurtbox(&self) -> WorldCombatCapsule {
-        let r = self.record();
+        let r = self.body();
         let p = self.entities.position(0);
         let radius = i32::from(r.radius).min(i32::from(r.height) / 2);
         WorldCombatCapsule {
@@ -666,12 +677,12 @@ pub fn run(duel: &Duel<'_>) -> DuelResult {
             let fighter = duel.fighters[n];
             let records = fighter.record;
             let mut entities = Box::new(Entities::EMPTY);
+            entities.set_characters(fighter.bodies);
             entities.spawn_from_records(records);
             let (at, yaw) = start(n, duel.distance, duel.bearing);
             let placed = entities.place_training_actor(records, 0, at, yaw);
             assert!(placed, "a duel fighter is a training record");
             entities.set_spatial_active_mask(u64::MAX);
-            entities.set_stance_swap_delay(duel.swap_cooldown_ticks);
             entities.seed_training_actor(records, 0, duel.seeds[n]);
             // The game times its entities' attacks after spawning them.
             entities.time_attacks(records, |_, action, _, _, _| fighter.spec.timing(action));
@@ -715,7 +726,7 @@ pub fn run(duel: &Duel<'_>) -> DuelResult {
                 let intent = match side.controller {
                     Controller::Ai => None,
                     Controller::Pad(script) => {
-                        let reach = swing_reach(i32::from(side.record().radius), other.radius) - 8;
+                        let reach = swing_reach(i32::from(side.body().radius), other.radius) - 8;
                         Some(pad_intent(
                             script,
                             side.entities.position(0),
@@ -784,7 +795,7 @@ pub fn run(duel: &Duel<'_>) -> DuelResult {
             }
             let (victim_position, victim_radius) = (
                 sides[j].entities.position(0),
-                i32::from(sides[j].record().radius),
+                i32::from(sides[j].body().radius),
             );
             if sides[j].entities.passes_through(sides[j].records, 0) {
                 continue;
@@ -797,7 +808,7 @@ pub fn run(duel: &Duel<'_>) -> DuelResult {
                 x: attack.position()[0],
                 z: attack.position()[2],
                 yaw: sides[i].entities.yaw(0) as u16,
-                reach: swing_reach(i32::from(records[0].radius), victim_radius),
+                reach: swing_reach(i32::from(sides[i].body().radius), victim_radius),
                 half_angle: GAME_ENTITY_ATTACK_HALF_ANGLE,
             };
             if !arc_hits_circle(&arc, victim_position[0], victim_position[2], 0)
@@ -1007,7 +1018,7 @@ fn release_bolts(
         if !sides[i].entities.can_fire_energy(&records[0], 0) {
             break;
         }
-        let r = &records[0];
+        let r = sides[i].body();
         let p = sides[i].entities.position(0);
         let yaw = Angle::from_q12(sides[i].entities.yaw(0) as u16);
         let reach = i32::from(r.radius);
@@ -1053,7 +1064,7 @@ fn release_bolts(
         {
             break;
         }
-        sides[i].entities.spend_shot_energy(r, 0);
+        sides[i].entities.spend_shot_energy(&records[0], 0);
         let _ = sides[i]
             .entities
             .commit_deferred_projectile(attack, emitter.latch);

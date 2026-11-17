@@ -290,8 +290,8 @@ fn an_old_project_folds_enemy_health_and_poise_into_combat_stats() {
     assert_eq!((stats.max_health, stats.poise), (200, 100));
     // The player ran on the old constants: 100 per pool (one 200 bar),
     // poise 60.
-    assert_eq!(character(player).combat_stats(), CombatStats::PLAYER);
-    assert_eq!(CombatStats::PLAYER.poise, 60);
+    assert_eq!(character(player).combat_stats(), CombatStats::DEFAULT);
+    assert_eq!(CombatStats::DEFAULT.poise, 60);
     let NodeKind::CharacterController {
         settings: Some(settings),
         ..
@@ -320,16 +320,16 @@ fn a_combat_record_written_before_parry_loads_with_the_placeholder_numbers() {
     // A step 6 record: no parry, crit or knockdown fields.
     let old = load("CombatStats(max_health: 90, poise: 30, shot_cost: 25)");
     assert_eq!((old.max_health, old.poise, old.shot_cost), (90, 30, 25));
-    assert_eq!(old.parry_ticks, CombatStats::PLAYER.parry_ticks);
+    assert_eq!(old.parry_ticks, CombatStats::DEFAULT.parry_ticks);
     assert_eq!(old.parry_refund, 20);
     assert_eq!(old.crit_window_ticks, 60);
     assert_eq!((old.crit_damage_q12, old.crit_poise_q12), (8192, 8192));
     assert_eq!(old.knockdown_ticks, 60);
     assert_eq!(old.parry_swap_percent, 50);
     assert_eq!(old.parry_reaction_ticks, 0);
-    // A character with no record keeps the role's starting numbers: the
-    // player's parry is a third of her 25-tick swap, an enemy's of its 10.
-    assert_eq!(CombatStats::PLAYER.parry_ticks, 8);
+    // One default for every character; only a file written before combat
+    // stats existed loads an enemy with the old enemy parry window.
+    assert_eq!(CombatStats::DEFAULT.parry_ticks, 8);
     assert_eq!(
         CombatStats::legacy(Some(&EnemyBehaviorSettings::default())).parry_ticks,
         3
@@ -356,10 +356,10 @@ fn a_two_pool_combat_record_loads_as_one_health_bar() {
     assert_eq!(load("(max_health_secondary: 50)").max_health, 150);
     // The current form: one bar, as written, or the starting 200.
     assert_eq!(load("(max_health: 90)").max_health, 90);
-    assert_eq!(load("()"), CombatStats::PLAYER);
+    assert_eq!(load("()"), CombatStats::DEFAULT);
     // RON that names the struct, as the project writer does.
     assert_eq!(load("CombatStats(max_health: 90)").max_health, 90);
-    assert_eq!(CombatStats::PLAYER.max_health, 200);
+    assert_eq!(CombatStats::DEFAULT.max_health, 200);
     // And it writes back in the current form.
     let text = ron::to_string(&stats).unwrap();
     assert!(!text.contains("max_health_secondary"));
@@ -423,13 +423,15 @@ fn player_and_enemy_stats_cook_through_one_path() {
         armour_authored_window: false,
         opposite_poise_q12: 6000,
         shot_cost: 25,
-        ..CombatStats::ENEMY
+        ..CombatStats::DEFAULT
     };
     let cooked = stats.cooked();
     assert_eq!(CombatStats::from_cooked(cooked), stats);
     assert_eq!(cooked.armour, psx_level::combat_armour::HEAVY_ATTACK);
-    assert_eq!(CombatStats::PLAYER.cooked(), psx_level::CombatStats::PLAYER);
-    assert_eq!(CombatStats::ENEMY.cooked(), psx_level::CombatStats::ENEMY);
+    assert_eq!(
+        CombatStats::DEFAULT.cooked(),
+        psx_level::CombatStats::DEFAULT
+    );
 }
 
 #[test]
@@ -4331,14 +4333,44 @@ fn every_entity_links_to_its_character_whose_clips_are_its_state_clips() {
             character.action_frame_ranges[Action::LightAttack.to_index()],
             entity.attack_frame_range
         );
-        assert_eq!(
-            (
-                character.combat_capsule_first,
-                character.combat_capsule_count
-            ),
-            (entity.combat_capsule_first, entity.combat_capsule_count)
-        );
     }
+}
+
+#[test]
+fn each_placement_links_the_character_its_own_controller_tunes() {
+    // Two training enemies of one Character: a placement whose controller
+    // overrides a number gets a body of its own, the other keeps the shared
+    // one, and each body carries its own placement's numbers.
+    let rivals = projects_dir().join("grid-rivals");
+    let mut project = ProjectDocument::load_from_path(rivals.join("project.ron")).unwrap();
+    let mut tuned = None;
+    for scene in &mut project.scenes {
+        for node in &mut scene.nodes {
+            if let NodeKind::CharacterController {
+                settings: Some(settings),
+                player: false,
+                ..
+            } = &mut node.kind
+            {
+                if tuned.is_none() && settings.enemy.is_some() {
+                    settings.stance_swap_duration_ticks = 9;
+                    tuned = Some(node.name.clone());
+                }
+            }
+        }
+    }
+    assert!(tuned.is_some());
+    let (package, report) = playtest::build_package(&project, &rivals);
+    assert!(report.is_ok(), "{:?}", report.errors);
+    let package = package.unwrap();
+    let durations: Vec<u16> = package
+        .game_entities
+        .iter()
+        .map(|entity| package.characters[usize::from(entity.character)].stance_swap_duration_ticks)
+        .collect();
+    assert!(durations.len() >= 2, "{durations:?}");
+    assert_eq!(durations.iter().filter(|&&ticks| ticks == 9).count(), 1);
+    assert!(durations.iter().any(|&ticks| ticks != 9));
 }
 
 #[test]
@@ -4447,7 +4479,11 @@ fn an_enemys_swap_i_frames_cook_from_its_own_character_field() {
     let (package, report) = playtest::build_package(&project, &root);
     assert!(report.is_ok(), "{:?}", report.errors);
     let package = package.unwrap();
-    assert_eq!(package.game_entities[0].motion.roll_invulnerable_frames, 7);
+    let entity = &package.game_entities[0];
+    assert_eq!(
+        package.characters[usize::from(entity.character)].roll_invulnerable_frames,
+        7
+    );
     assert!(package
         .characters
         .iter()

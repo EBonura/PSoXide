@@ -17,8 +17,8 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
                 self.teams[i],
                 r.room,
                 self.position(i),
-                i32::from(r.radius),
-                i32::from(r.height),
+                i32::from(self.body(r).radius),
+                i32::from(self.body(r).height),
             );
         }
     }
@@ -35,8 +35,8 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
             crate::projectiles::CombatTeam::Player,
             persona.room,
             self.position(i),
-            i32::from(persona.radius),
-            i32::from(persona.height),
+            i32::from(self.body(persona).radius),
+            i32::from(self.body(persona).height),
         );
     }
     /// The ranged exchange as a controller: cover, peek and bullet evasion.
@@ -61,8 +61,8 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         let order = self.exchanges[i].decide(
             before,
             self.tactics[i].last_seen,
-            i32::from(r.radius),
-            i32::from(r.height),
+            i32::from(self.body(r).radius),
+            i32::from(self.body(r).height),
             far,
             energy,
             self.projectile_threats[i],
@@ -157,7 +157,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         if !self.target_in_line_of_sight(r, i, input, mover) {
             return None;
         }
-        let reach = Self::melee_attack_reach(r, input);
+        let reach = self.melee_attack_reach(r, input);
         if input.target.attack_read == 3 {
             if self.tactics[i].defend_ticks > 0 && self.tactics[i].goal == EnemyGoal::Retreat {
                 self.finish_goal(i, EnemyGoalResult::Cancelled);
@@ -206,7 +206,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
     pub fn can_fire_energy(&self, record: &LevelGameEntityRecord, index: usize) -> bool {
         self.combatants
             .get(index)
-            .is_some_and(|c| c.flow.can_shoot(&record.combat))
+            .is_some_and(|c| c.flow.can_shoot(&self.body(record).combat))
     }
     /// Report that a shot by entity `index` landed; `interrupted` marks an interrupting hit.
     pub fn projectile_connected(&mut self, index: usize, interrupted: bool) {
@@ -216,14 +216,16 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
     }
     /// Charge one shot to entity `index` at its `record`'s shot cost.
     pub fn spend_shot_energy(&mut self, record: &LevelGameEntityRecord, index: usize) {
+        let stats = self.body(record).combat;
         if let Some(c) = self.combatants.get_mut(index) {
-            c.flow.spend_shot(&record.combat);
+            c.flow.spend_shot(&stats);
         }
     }
     /// Credit entity `index` for a connected melee hit at its `record`'s gain.
     pub fn gain_melee_energy(&mut self, record: &LevelGameEntityRecord, index: usize, heavy: bool) {
+        let stats = self.body(record).combat;
         if let Some(c) = self.combatants.get_mut(index) {
-            c.flow.melee_hit(heavy, &record.combat);
+            c.flow.melee_hit(heavy, &stats);
         }
     }
     /// True when entity `index` is in the second half of a windup and may be broken by a bolt.
@@ -274,7 +276,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         }
         let poise = self.combatants[index].flow.shot_poise(
             poise,
-            records[index].combat.poise,
+            self.body(&records[index]).combat.poise,
             self.shot_opening(records, index),
         );
         let strike = Strike {
@@ -313,8 +315,8 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
             self.position(i),
             i32::from(dx) * i32::from(step),
             i32::from(dz) * i32::from(step),
-            i32::from(r.radius),
-            i32::from(r.height),
+            i32::from(self.body(r).radius),
+            i32::from(self.body(r).height),
         );
         self.place(i, p);
     }
@@ -338,7 +340,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
             return;
         }
         self.face_tactical(i, input.target.position, delta);
-        if !self.target_within(i, input, Self::melee_attack_reach(r, input) + 8) {
+        if !self.target_within(i, input, self.melee_attack_reach(r, input) + 8) {
             return;
         }
         let before = self.position(i);
@@ -374,7 +376,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         let toward = psx_engine::Angle::from_q12(atan2_q12(dx, dz));
         let (near, _) = crate::combat_flow::ranged_band(
             i32::from(r.preferred_distance),
-            Self::melee_attack_reach(r, input) + 16,
+            self.melee_attack_reach(r, input) + 16,
             i32::from(r.attack_max_range),
         );
         let retreat = self.target_within(i, input, near);

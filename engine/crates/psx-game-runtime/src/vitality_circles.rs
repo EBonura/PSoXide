@@ -155,12 +155,18 @@ mod tests {
         drain_per_second: 120,
     };
 
-    const STATS: CombatStats = CombatStats::PLAYER;
+    const STATS: CombatStats = CombatStats::DEFAULT;
 
     /// A fighter on `side` with `health` and `energy` left.
     fn fighter(side: VitalityChannelId, health: u16, energy: u16) -> Combatant {
         let mut c = Combatant::EMPTY;
-        c.reset(&STATS);
+        c.reset(
+            &STATS,
+            psx_level::combat_verbs::CombatKits::from_bits(
+                psx_level::combat_verbs::CombatKits::MELEE
+                    | psx_level::combat_verbs::CombatKits::RANGED,
+            ),
+        );
         if side != c.stance.active() {
             assert!(c.request_swap(0));
         }

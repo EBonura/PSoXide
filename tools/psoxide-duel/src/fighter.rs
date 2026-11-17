@@ -1,7 +1,9 @@
 //! One fighter as the arena runs it: a cooked entity record (body, motion,
 //! combat stats, kits, AI persona) and what its authored attacks deal.
 
-use psx_level::{combat_capsule_flags, CharacterAnimationAction, LevelGameEntityRecord};
+use psx_level::{
+    combat_capsule_flags, CharacterAnimationAction, LevelCharacterRecord, LevelGameEntityRecord,
+};
 use psxed_project::playtest::PlaytestCombatCapsule;
 
 /// Damage and poise of one strike, as its authored hitbox deals them.
@@ -45,8 +47,11 @@ pub struct Emitter {
 pub struct FighterSpec {
     /// Display name (the Character resource).
     pub name: String,
-    /// The cooked entity record. `combat_capsule_first` is meaningless here.
+    /// The cooked entity record: placement and controller data.
     pub record: LevelGameEntityRecord,
+    /// Its body: the Character the record links, as the cook made it
+    /// (combat numbers, capsule, motion, swap timing).
+    pub body: LevelCharacterRecord,
     /// Authored strike per action index, `None` where the character has no
     /// hitbox for it (the legacy contact then deals the record's touch
     /// damage, as on the disc).
@@ -71,6 +76,7 @@ impl FighterSpec {
     pub fn new(
         name: &str,
         record: LevelGameEntityRecord,
+        body: LevelCharacterRecord,
         capsules: &[PlaytestCombatCapsule],
     ) -> Self {
         let mut strikes: Vec<(u8, StrikeData)> = Vec::new();
@@ -104,6 +110,7 @@ impl FighterSpec {
         Self {
             name: name.to_owned(),
             record,
+            body,
             strikes,
             emitters,
             contact: Vec::new(),
@@ -233,11 +240,11 @@ impl Placeholder {
         }
     }
 
-    /// Nudge this placeholder on `record` by `direction` steps (-1 or +1).
+    /// Nudge this placeholder on `body` by `direction` steps (-1 or +1).
     /// Returns the value set. `DryCycles` is not on the record (see
-    /// [`crate::arena::set_dry_cycles`]); it returns the record unchanged.
-    pub fn nudge(self, record: &mut LevelGameEntityRecord, direction: i32) -> u16 {
-        let c = &mut record.combat;
+    /// [`crate::arena::set_dry_cycles`]); it returns the body unchanged.
+    pub fn nudge(self, body: &mut LevelCharacterRecord, direction: i32) -> u16 {
+        let c = &mut body.combat;
         let field: &mut u16 = match self {
             Self::ParryTicks => &mut c.parry_ticks,
             Self::ParryRefund => &mut c.parry_refund,
@@ -261,10 +268,10 @@ impl Placeholder {
         value as u16
     }
 
-    /// Set this placeholder on `record` to `value`. `DryCycles` is not on the
-    /// record; it leaves the record unchanged.
-    pub fn set(self, record: &mut LevelGameEntityRecord, value: u16) {
-        let c = &mut record.combat;
+    /// Set this placeholder on `body` to `value`. `DryCycles` is not on the
+    /// body; it leaves the body unchanged.
+    pub fn set(self, body: &mut LevelCharacterRecord, value: u16) {
+        let c = &mut body.combat;
         match self {
             Self::ParryTicks => c.parry_ticks = value,
             Self::ParryRefund => c.parry_refund = value,
@@ -284,9 +291,9 @@ impl Placeholder {
         Self::ALL.into_iter().find(|p| p.name() == name)
     }
 
-    /// The value of this placeholder on `record`.
-    pub fn value(self, record: &LevelGameEntityRecord) -> u16 {
-        let c = &record.combat;
+    /// The value of this placeholder on `body`.
+    pub fn value(self, body: &LevelCharacterRecord) -> u16 {
+        let c = &body.combat;
         match self {
             Self::ParryTicks => c.parry_ticks,
             Self::ParryRefund => c.parry_refund,

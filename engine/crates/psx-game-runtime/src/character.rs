@@ -541,12 +541,12 @@ mod tests {
     #[test]
     fn player_poise_separates_light_heavy_and_accumulated_hits() {
         let mut poise = crate::poise::Poise::EMPTY;
-        assert!(!poise.hit(50, psx_level::CombatStats::PLAYER.poise, false));
-        assert!(poise.hit(50, psx_level::CombatStats::PLAYER.poise, false));
+        assert!(!poise.hit(50, psx_level::CombatStats::DEFAULT.poise, false));
+        assert!(poise.hit(50, psx_level::CombatStats::DEFAULT.poise, false));
         let mut poise = crate::poise::Poise::EMPTY;
-        assert!(poise.hit(75, psx_level::CombatStats::PLAYER.poise, false));
+        assert!(poise.hit(75, psx_level::CombatStats::DEFAULT.poise, false));
         let mut poise = crate::poise::Poise::EMPTY;
-        assert!(!poise.hit(75, psx_level::CombatStats::PLAYER.poise, true));
+        assert!(!poise.hit(75, psx_level::CombatStats::DEFAULT.poise, true));
     }
 
     #[test]

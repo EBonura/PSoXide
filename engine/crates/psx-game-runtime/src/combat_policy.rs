@@ -105,7 +105,8 @@ pub fn parry_swap(
 ) -> bool {
     let inside = |ticks: Option<u16>| ticks.is_some_and(|ticks| ticks < parry_ticks);
     let readable = |ticks: Option<u16>| {
-        ticks.is_some_and(|ticks| u32::from(watched) + u32::from(ticks) >= u32::from(reaction_ticks))
+        ticks
+            .is_some_and(|ticks| u32::from(watched) + u32::from(ticks) >= u32::from(reaction_ticks))
     };
     can_swap
         && percent != 0

@@ -1321,9 +1321,10 @@ impl CombatStats {
     /// [`Self::OPPOSITE_DAMAGE_Q12`] until the duel harness tunes it.
     pub const OPPOSITE_POISE_Q12: u16 = 5120;
 
-    /// The player character's starting numbers: 200 health (the two old
-    /// 100 pools as one bar), poise 60, the shared energy economy.
-    pub const PLAYER: Self = Self {
+    /// Every character's starting numbers, the player's and every enemy's
+    /// alike: 200 health (the two old 100 pools as one bar), poise 60, the
+    /// shared energy economy. What differs between characters is authored.
+    pub const DEFAULT: Self = Self {
         max_health: 200,
         poise: 60,
         armour: combat_armour::HEAVY_ATTACK | combat_armour::AUTHORED_WINDOW,
@@ -1351,17 +1352,6 @@ impl CombatStats {
         // PLACEHOLDER: no reaction delay, the rule before the field existed.
         parry_reaction_ticks: 0,
     };
-
-    /// An enemy's numbers when nothing was authored: 200 health (the two
-    /// old 100 pools as one bar) and poise 100, otherwise as
-    /// [`Self::PLAYER`].
-    pub const ENEMY: Self = Self {
-        poise: 100,
-        // PLACEHOLDER, harness tunes: the first third of the default
-        // 10-tick swap window.
-        parry_ticks: 3,
-        ..Self::PLAYER
-    };
 }
 
 /// One placed souls-like game entity (enemy). Cooked today from an
@@ -1376,10 +1366,11 @@ pub const GAME_ENTITY_CHARACTER_NONE: CharacterIndex = CharacterIndex(u16::MAX);
 /// floor-anchor convention of [`PlayerSpawnRecord`]. The spawn
 /// position is patrol anchor zero; `patrol_*` is anchor one (equal to
 /// the spawn when no patrol is authored, which reads as "hold
-/// position"). Body/speed fields are Character-bound: cooked from the
-/// controller's effective `CharacterControllerSettings`, the same
-/// source the player motor config uses, so entity movement and the
-/// player share one unit system (engine units per 60 Hz tick).
+/// position"). The body (combat numbers, capsule, motion, swap timing,
+/// windows, volumes) is the linked [`Self::character`], cooked from the
+/// controller's effective `CharacterControllerSettings` as the player's
+/// is, so entity movement and the player share one unit system (engine
+/// units per 60 Hz tick).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LevelGameEntityRecord {
     /// Owning room index.
@@ -1392,9 +1383,15 @@ pub struct LevelGameEntityRecord {
     /// [`GAME_ENTITY_MODEL_INSTANCE_NONE`].
     pub model_instance: u16,
     /// The entity's Character in the generated `CHARACTERS` table: its
-    /// action clips, playback and combat windows, the record every fighter
-    /// times its actions from. [`GAME_ENTITY_CHARACTER_NONE`] (or any index
-    /// past the table) when the cook had none to link.
+    /// body, the same record the player's character is. Combat numbers,
+    /// capsule size, motion, stance swap timing, combat windows and the
+    /// rig-attached volumes are read there, never here: this record holds
+    /// only where the entity stands and how its controller behaves (and,
+    /// until animation selection reads the Character's action clips, the
+    /// state clips the cook resolved from that same Character).
+    /// [`GAME_ENTITY_CHARACTER_NONE`] (or any index past the table) when the
+    /// cook had none to link; such an entity has the default body
+    /// ([`LevelCharacterRecord::DEFAULT_BODY`]).
     pub character: CharacterIndex,
     /// Model-local clip index played while Idle. All state clips
     /// are resolved AT COOK TIME from the entity Character's
@@ -1460,11 +1457,6 @@ pub struct LevelGameEntityRecord {
     /// One-shot clip on death; holds its final frame as the corpse
     /// pose.
     pub death_clip: u16,
-    /// First rig-attached volume in `COMBAT_CAPSULES`.
-    pub combat_capsule_first: CombatCapsuleIndex,
-    /// Number of rig-attached volumes (bounded by
-    /// [`MAX_CHARACTER_COMBAT_CAPSULES`]).
-    pub combat_capsule_count: u8,
     /// [`CharacterAnimationAction`] index owning the projectile emitter.
     pub ranged_attack_action: u8,
     /// Room-local spawn X.
@@ -1475,14 +1467,6 @@ pub struct LevelGameEntityRecord {
     pub z: i32,
     /// Spawn yaw, PSX angle units.
     pub yaw: i16,
-    /// Body cylinder radius, engine units (Character-bound).
-    pub radius: u16,
-    /// Body cylinder height, engine units (Character-bound).
-    pub height: u16,
-    /// How the entity moves: its own Character Controller's numbers, read
-    /// by the same motor the player's character drives. It runs only with
-    /// [`game_entity_flags::CAN_RUN`] (a bound Run clip), as the player does.
-    pub motion: CharacterMotion,
     /// Patrol anchor one X (== `x` when no patrol is authored).
     pub patrol_x: i32,
     /// Patrol anchor one Y.
@@ -1528,9 +1512,6 @@ pub struct LevelGameEntityRecord {
     pub attack_max_range: u16,
     /// Damage dealt by a connecting touch/melee attack.
     pub touch_damage: u16,
-    /// Health, poise, stance multipliers and energy: the same record the
-    /// player character carries.
-    pub combat: CombatStats,
     /// Souls the player is credited for landing the killing blow.
     ///
     /// Authored per enemy so the reward curve is tuned in the editor next to
@@ -3752,6 +3733,83 @@ pub struct LevelCharacterRecord {
     pub material_override: Option<LevelModelMaterialOverride>,
     /// Reserved.
     pub flags: u16,
+}
+
+impl LevelCharacterRecord {
+    /// The body of a fighter whose cook linked no Character: no clips, no
+    /// windows, no volumes, and the editor's default controller numbers
+    /// (the same numbers a new Character Controller starts with).
+    pub const DEFAULT_BODY: Self = Self {
+        model: ModelIndex(0),
+        action_clips: [CHARACTER_CLIP_NONE; CHARACTER_ANIMATION_ACTION_COUNT],
+        action_flags: [0; CHARACTER_ANIMATION_ACTION_COUNT],
+        action_speeds: [CHARACTER_ACTION_SPEED_UNSCALED_Q8; CHARACTER_ANIMATION_ACTION_COUNT],
+        action_frame_ranges: [CharacterActionFrameRange::FULL; CHARACTER_ANIMATION_ACTION_COUNT],
+        action_pushes: [CharacterActionPush::NONE; CHARACTER_ANIMATION_ACTION_COUNT],
+        combat_windows: [CharacterCombatWindow::NONE; MAX_CHARACTER_COMBAT_WINDOWS],
+        combat_capsule_first: CombatCapsuleIndex(0),
+        combat_capsule_count: 0,
+        visual_offset: [0; 3],
+        visual_yaw: 0,
+        visual_scale_q8: 256,
+        weight_q8: 256,
+        radius: 192,
+        height: 1024,
+        walk_speed: 48,
+        run_speed: 96,
+        turn_speed_degrees_per_second: 180,
+        stamina_max_q12: 4096,
+        sprint_min_q12: 384,
+        sprint_drain_q12: 10,
+        stamina_recover_q12: 36,
+        roll_cost_q12: 768,
+        roll_speed: 96,
+        roll_active_frames: 14,
+        roll_recovery_frames: 12,
+        roll_invulnerable_frames: 10,
+        combat: CombatStats::DEFAULT,
+        stance_swap_cooldown_ticks: 30,
+        stance_swap_duration_ticks: 12,
+        backstep_cost_q12: 512,
+        backstep_speed: 72,
+        backstep_active_frames: 8,
+        backstep_recovery_frames: 10,
+        backstep_invulnerable_frames: 6,
+        camera_distance: 6144,
+        camera_height: 1280,
+        camera_target_height: 640,
+        material_override: None,
+        flags: 0,
+    };
+
+    /// How this character moves, as the motor reads it: the same numbers
+    /// for the player and every entity.
+    pub const fn motion(&self) -> CharacterMotion {
+        CharacterMotion {
+            walk_speed: self.walk_speed,
+            run_speed: self.run_speed,
+            turn_speed_degrees_per_second: self.turn_speed_degrees_per_second,
+            weight_q8: self.weight_q8,
+            stamina_max_q12: self.stamina_max_q12,
+            sprint_min_q12: self.sprint_min_q12,
+            sprint_drain_q12: self.sprint_drain_q12,
+            stamina_recover_q12: self.stamina_recover_q12,
+            roll_cost_q12: self.roll_cost_q12,
+            roll_speed: self.roll_speed,
+            roll_active_frames: self.roll_active_frames,
+            roll_recovery_frames: self.roll_recovery_frames,
+            roll_invulnerable_frames: self.roll_invulnerable_frames,
+        }
+    }
+
+    /// The rig-attached volumes of this character in `capsules` (the
+    /// level's `COMBAT_CAPSULES`), empty when the range is out of the table.
+    pub fn capsules<'a>(&self, capsules: &'a [CombatCapsuleRecord]) -> &'a [CombatCapsuleRecord] {
+        let first = self.combat_capsule_first.to_usize();
+        capsules
+            .get(first..first.saturating_add(usize::from(self.combat_capsule_count)))
+            .unwrap_or(&[])
+    }
 }
 
 /// Player-controller record: which spawn the player starts at

@@ -117,15 +117,13 @@ impl Playtest {
             // Her persona is the training placement's, home included (the
             // host harness cooks her into that placement): the leash is the
             // training ground's, not her spawn's.
+            // Her body is her own Character (capsule, combat numbers, parry
+            // rate and reaction), as the host harness's Aletha's is, not the
+            // training placement's.
             let mut persona = GAME_ENTITIES[target];
-            if let Some(character) = self.character {
-                persona.radius = character.radius.clamp(0, i32::from(u16::MAX)) as u16;
-                persona.height = character.height.clamp(0, i32::from(u16::MAX)) as u16;
+            if let Some(pc) = PLAYER_CONTROLLER.get() {
+                persona.character = pc.character;
             }
-            // Her controller decides with her own numbers (parry window,
-            // parry rate and reaction), as the host harness's Aletha does,
-            // not the training placement's.
-            persona.combat = self.player_stats;
             self.duel = Duel {
                 active: true,
                 finished: false,

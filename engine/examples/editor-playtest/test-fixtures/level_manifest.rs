@@ -5,15 +5,15 @@
 // `psx-level` records change; a stale copy fails to compile under `cargo test`.
 
 use psx_level::{
-    AssetId, BoostModuleRecord, CombatCapsuleRecord, EntityRecord, EquipmentRecord, FlowState,
-    GameFlow, InteractableMessageRecord, InteractableRecord, LevelArchPropCollisionRecord,
-    LevelArchPropRecord, LevelArchPropSurfaceRecord, LevelAssetRecord, LevelBoxPropRecord,
-    LevelBoxPropSurfaceRecord, LevelCameraRecord, LevelCharacterRecord, LevelCylinderPropRecord, LevelCylinderPropSurfaceRecord, LevelDestructibleRecord,
-    LevelGameEntityRecord, LevelGameplaySfxCueRecord, LevelImagePropRecord,
-    LevelLogicRecord, LevelModelClipBoundsRecord, LevelModelClipRecord,
-    LevelModelFrameBoundsRecord, LevelModelInstanceRecord, LevelModelRecord,
-    LevelModelSocketRecord, LevelOptionDef, LevelRoomRecord,
-    LevelSceneState, LevelSkyRecord, CharacterActionFrameRange, CombatCapsuleIndex,
+    AssetId, BoostModuleRecord, CharacterActionFrameRange, CombatCapsuleIndex, CombatCapsuleRecord,
+    EntityRecord, EquipmentRecord, FlowState, GameFlow, InteractableMessageRecord,
+    InteractableRecord, LevelArchPropCollisionRecord, LevelArchPropRecord,
+    LevelArchPropSurfaceRecord, LevelAssetRecord, LevelBoxPropRecord, LevelBoxPropSurfaceRecord,
+    LevelCameraRecord, LevelCharacterRecord, LevelCylinderPropRecord,
+    LevelCylinderPropSurfaceRecord, LevelDestructibleRecord, LevelGameEntityRecord,
+    LevelGameplaySfxCueRecord, LevelImagePropRecord, LevelLogicRecord, LevelModelClipBoundsRecord,
+    LevelModelClipRecord, LevelModelFrameBoundsRecord, LevelModelInstanceRecord, LevelModelRecord,
+    LevelModelSocketRecord, LevelOptionDef, LevelRoomRecord, LevelSceneState, LevelSkyRecord,
     LevelTransition, LevelUiNodeRecord, LevelUiPaintRecord, LevelUiScene, LevelUiSfxCueRecord,
     LevelUiSfxSampleRecord, LevelVitalityCircleRecord, LevelWeaponRecord, LevelWorldObjectRecord,
     LevelWorldPackEntryRecord, ParticleEmitterRecord, PlayerControllerRecord, PlayerSpawnRecord,
@@ -117,7 +117,6 @@ pub const PLAYTEST_HAS_WORLD: bool = false;
 pub const PLAYTEST_PACKET_CAPACITY: usize = 1536;
 pub static ASSETS: &[LevelAssetRecord] = &[];
 
-
 pub static MODEL_CLIPS: &[LevelModelClipRecord] = &[];
 pub static MODEL_CLIP_BOUNDS: &[LevelModelClipBoundsRecord] = &[];
 pub static MODEL_FRAME_BOUNDS: &[LevelModelFrameBoundsRecord] = &[];
@@ -144,7 +143,36 @@ pub static WEAPONS: &[LevelWeaponRecord] = &[];
 pub static EQUIPMENT: &[EquipmentRecord] = &[];
 pub static WEAPON_APPEARANCES: &[WeaponAppearanceRecord] = &[];
 pub static BOOST_MODULES: &[BoostModuleRecord] = &[];
-pub static CHARACTERS: &[LevelCharacterRecord] = &[];
+/// The training enemy's body (the fixture's one game entity links it).
+pub static CHARACTERS: &[LevelCharacterRecord] = &[LevelCharacterRecord {
+    radius: 14,
+    height: 77,
+    walk_speed: 2 * 256,
+    run_speed: 6 * 256,
+    turn_speed_degrees_per_second: 180,
+    weight_q8: 256,
+    stamina_max_q12: 4096,
+    sprint_min_q12: 384,
+    sprint_drain_q12: 40,
+    stamina_recover_q12: 36,
+    roll_cost_q12: 768,
+    roll_speed: 6 * 256,
+    roll_active_frames: 14,
+    roll_recovery_frames: 12,
+    roll_invulnerable_frames: 10,
+    combat: psx_level::CombatStats {
+        max_health: 600,
+        poise: 25,
+        parry_ticks: 3,
+        ..psx_level::CombatStats::DEFAULT
+    },
+    // The fixed swap the fixture's entity ran with before bodies were
+    // Characters: 12 ticks, and the 30-tick cooldown the player had
+    // when the game copied hers to every enemy.
+    stance_swap_duration_ticks: 12,
+    stance_swap_cooldown_ticks: 30,
+    ..LevelCharacterRecord::DEFAULT_BODY
+}];
 pub static COMBAT_CAPSULES: &[CombatCapsuleRecord] = &[];
 pub const ANY_TRAINING_ENTITY: bool = false;
 pub const ANY_TACTICAL_ENTITY: bool = false;

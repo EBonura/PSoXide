@@ -82,6 +82,9 @@ pub struct ActionTiming {
     /// and the armour rule falls back to its contact
     /// ([`crate::combatant::armoured`]).
     pub armour: Option<(u16, u16)>,
+    /// The action's authored `Invulnerable` window, placed as
+    /// [`Self::armour`] is; None when its clip authors none.
+    pub invulnerable: Option<(u16, u16)>,
 }
 
 impl ActionTiming {
@@ -107,21 +110,32 @@ impl ActionTiming {
             active: clamp(end.saturating_sub(u32::from(windup))).max(1),
             recovery: clamp(total.saturating_sub(end)),
             armour: None,
+            invulnerable: None,
         })
     }
 
-    /// This timing with the action's authored `Armored` window, frames
-    /// `start..end` (first excluded) on the same clip clock as
-    /// [`Self::from_clip`], placed as ticks from the action's start.
-    pub fn with_armour(self, start_q12: u32, rate_q12: u32, (start, end): (u16, u16)) -> Self {
+    /// This timing with the action's authored `Armored` and `Invulnerable`
+    /// windows, frames `start..end` (first excluded) on the same clip clock
+    /// as [`Self::from_clip`], placed as ticks from the action's start.
+    pub fn with_windows(
+        self,
+        start_q12: u32,
+        rate_q12: u32,
+        armour: Option<(u16, u16)>,
+        invulnerable: Option<(u16, u16)>,
+    ) -> Self {
         let tick = |frame: u16| {
             let ticks = (u32::from(frame) << 12)
                 .saturating_sub(start_q12)
                 .div_ceil(rate_q12.max(1));
             ticks.min(u32::from(u16::MAX)) as u16
         };
+        let place = |window: Option<(u16, u16)>| {
+            window.and_then(|(start, end)| (start < end).then(|| (tick(start), tick(end))))
+        };
         Self {
-            armour: (start < end).then(|| (tick(start), tick(end))),
+            armour: place(armour),
+            invulnerable: place(invulnerable),
             ..self
         }
     }
@@ -130,6 +144,13 @@ impl ActionTiming {
     /// after the action started; None when it authors none.
     pub fn armoured_at(self, since: u16) -> Option<bool> {
         self.armour
+            .map(|(start, end)| since >= start && since < end)
+    }
+
+    /// Whether the action's authored `Invulnerable` window is open `since`
+    /// ticks after the action started; None when it authors none.
+    pub fn invulnerable_at(self, since: u16) -> Option<bool> {
+        self.invulnerable
             .map(|(start, end)| since >= start && since < end)
     }
 }
@@ -419,7 +440,8 @@ mod tests {
                 windup: 10,
                 active: 5,
                 recovery: 25,
-                armour: None
+                armour: None,
+                invulnerable: None,
             })
         );
         // Half a frame a tick from frame 2 (a frame range's start).
@@ -429,7 +451,8 @@ mod tests {
                 windup: 16,
                 active: 10,
                 recovery: 34,
-                armour: None
+                armour: None,
+                invulnerable: None,
             })
         );
         // Contact the clip never reaches, or a clip that does not advance.
@@ -445,8 +468,12 @@ mod tests {
         // Half a frame a tick from frame 2: frames 10..14 are ticks 16..24.
         let timing = ActionTiming::from_clip(60, 2 << 12, 1 << 11, (10, 14))
             .unwrap()
-            .with_armour(2 << 12, 1 << 11, (10, 14));
+            .with_windows(2 << 12, 1 << 11, Some((10, 14)), Some((12, 13)));
         assert_eq!(timing.armour, Some((16, 24)));
+        assert_eq!(timing.invulnerable, Some((20, 22)));
+        assert_eq!(timing.invulnerable_at(19), Some(false));
+        assert_eq!(timing.invulnerable_at(21), Some(true));
+        assert_eq!(ActionTiming::default().invulnerable_at(21), None);
         assert_eq!(timing.armoured_at(15), Some(false));
         assert_eq!(timing.armoured_at(16), Some(true));
         assert_eq!(timing.armoured_at(23), Some(true));

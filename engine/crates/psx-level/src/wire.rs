@@ -28,7 +28,7 @@ use crate::*;
 pub const MAGIC: [u8; 4] = *b"PXLR";
 /// Version of the layout below. Bump it whenever a record or the table list
 /// changes.
-pub const VERSION: u16 = 15;
+pub const VERSION: u16 = 16;
 
 /// A cursor over the chunk's bytes. The bytes live for the whole run, so a
 /// string decoded from them can be `&'static`.
@@ -360,13 +360,13 @@ wire_struct! {
         attack_speed_q8, attack_frame_range, heavy_attack_clip, heavy_attack_speed_q8,
         heavy_attack_frame_range, ranged_attack_clip, ranged_attack_speed_q8,
         ranged_attack_frame_range, stagger_clip, stagger_speed_q8, stagger_frame_range,
-        stagger_ticks, knockdown_clip, parried_clip, roll_clip, death_clip, combat_capsule_first, combat_capsule_count,
-        ranged_attack_action, x, y, z, yaw, radius, height, motion, patrol_x,
+        stagger_ticks, knockdown_clip, parried_clip, roll_clip, death_clip,
+        ranged_attack_action, x, y, z, yaw, patrol_x,
         patrol_y, patrol_z, patrol_wait_ticks, aggro_radius, reaction_ticks, preferred_distance,
         spacing_tolerance, spacing_speed_percent, decision_interval_ticks, circle_chance,
         attack_priority, attack_cooldown_ticks, group_attack_delay_ticks, windup_ticks,
         attack_active_ticks, heavy_attack_active_ticks, ranged_attack_active_ticks, recovery_ticks,
-        attack_min_range, attack_max_range, touch_damage, combat, soul_value, flags
+        attack_min_range, attack_max_range, touch_damage, soul_value, flags
     }
     CharacterMotion {
         walk_speed, run_speed, turn_speed_degrees_per_second, weight_q8, stamina_max_q12,

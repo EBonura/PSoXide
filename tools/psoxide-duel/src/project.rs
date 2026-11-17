@@ -30,14 +30,60 @@ pub struct ProjectFighters {
     /// XZ distance between the player spawn and the training enemy: where
     /// the disc duel starts them.
     pub start_distance: i32,
-    /// The swap cooldown every entity uses (the player character's, as on
-    /// the disc: `set_stance_swap_delay(player swap cooldown)`).
-    pub swap_cooldown_ticks: u16,
 }
 
 fn cook(project: &ProjectDocument, root: &Path) -> Result<PlaytestPackage, String> {
     let (package, report) = build_package(project, root);
     package.ok_or_else(|| format!("cook failed: {report:?}"))
+}
+
+/// A cooked Character as the runtime record the guest reads. The render
+/// override is left out: the host draws nothing.
+fn cooked_body(c: &psxed_project::playtest::PlaytestCharacter) -> psx_level::LevelCharacterRecord {
+    psx_level::LevelCharacterRecord {
+        model: psx_level::ModelIndex(c.model),
+        action_clips: c
+            .action_clips
+            .map(psx_level::OptionalModelClipIndex::from_raw),
+        action_flags: c.action_flags,
+        action_speeds: c.action_speeds,
+        action_frame_ranges: c.action_frame_ranges,
+        action_pushes: c.action_pushes,
+        combat_windows: c.combat_windows,
+        combat_capsule_first: psx_level::CombatCapsuleIndex(c.combat_capsule_first),
+        combat_capsule_count: c.combat_capsule_count,
+        visual_offset: c.visual_offset,
+        visual_yaw: c.visual_yaw,
+        visual_scale_q8: c.visual_scale_q8,
+        weight_q8: c.weight_q8,
+        radius: c.radius,
+        height: c.height,
+        walk_speed: c.walk_speed,
+        run_speed: c.run_speed,
+        turn_speed_degrees_per_second: c.turn_speed_degrees_per_second,
+        stamina_max_q12: c.stamina_max_q12,
+        sprint_min_q12: c.sprint_min_q12,
+        sprint_drain_q12: c.sprint_drain_q12,
+        stamina_recover_q12: c.stamina_recover_q12,
+        roll_cost_q12: c.roll_cost_q12,
+        roll_speed: c.roll_speed,
+        roll_active_frames: c.roll_active_frames,
+        roll_recovery_frames: c.roll_recovery_frames,
+        roll_invulnerable_frames: c.roll_invulnerable_frames,
+        combat: c.combat,
+        stance_swap_cooldown_ticks: c.stance_swap_cooldown_ticks,
+        stance_swap_duration_ticks: c.stance_swap_duration_ticks,
+        backstep_cost_q12: c.backstep_cost_q12,
+        backstep_speed: c.backstep_speed,
+        backstep_active_frames: c.backstep_active_frames,
+        backstep_recovery_frames: c.backstep_recovery_frames,
+        backstep_invulnerable_frames: c.backstep_invulnerable_frames,
+        camera_distance: c.camera_distance,
+        camera_height: c.camera_height,
+        camera_target_height: c.camera_target_height,
+        material_override: None,
+        flags: 0,
+    }
 }
 
 /// The training enemy's record and its capsules in `package`.
@@ -53,13 +99,17 @@ fn training_fighter(
         .position(|r| r.flags & game_entity_flags::TRAINING != 0)
         .ok_or("no TRAINING enemy in the project")?;
     let record = records.game_entities[index];
-    let cooked = &package.game_entities[index];
-    let first = usize::from(cooked.combat_capsule_first);
+    let body = package
+        .characters
+        .get(record.character.to_usize())
+        .map(cooked_body)
+        .ok_or("the training enemy links no Character")?;
+    let first = body.combat_capsule_first.to_usize();
     let capsules = package
         .combat_capsules
-        .get(first..first + usize::from(cooked.combat_capsule_count))
+        .get(first..first + usize::from(body.combat_capsule_count))
         .unwrap_or(&[]);
-    let mut spec = FighterSpec::new(name, record, capsules);
+    let mut spec = FighterSpec::new(name, record, body, capsules);
     let clocks = entity_clocks(package, &spec.record);
     attach_clocks(&mut spec, clocks, capsules);
     spec.capsules = capsules.to_vec();
@@ -225,7 +275,7 @@ pub fn load(project_dir: &Path) -> Result<ProjectFighters, String> {
     let (mut aletha, _) =
         training_fighter(&swapped_package, &character_name(Some(player_char_id)))?;
     // Exactly the stats the disc gives her.
-    aletha.record.combat = player_character.combat;
+    aletha.body.combat = player_character.combat;
     // Her attacks play her own action clips, at her speeds and frame
     // ranges, as the disc plays them (the entity cook resolves attack clips
     // from animation-set roles, which her set does not bind the way an
@@ -300,7 +350,6 @@ pub fn load(project_dir: &Path) -> Result<ProjectFighters, String> {
         enemy,
         aletha,
         start_distance,
-        swap_cooldown_ticks: player_character.stance_swap_cooldown_ticks,
     })
 }
 
@@ -372,7 +421,16 @@ fn attack_timings(
                 speed_q8,
                 range,
                 contact,
-                psx_game_runtime::model_rendering::armour_window(windows, actions[kind]),
+                psx_game_runtime::model_rendering::authored_window(
+                    windows,
+                    actions[kind],
+                    psx_level::CombatWindowKind::Armored,
+                ),
+                psx_game_runtime::model_rendering::authored_window(
+                    windows,
+                    actions[kind],
+                    psx_level::CombatWindowKind::Invulnerable,
+                ),
             )
         })();
     }

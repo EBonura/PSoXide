@@ -672,8 +672,9 @@ impl Playtest {
             let Some(entity) = GAME_ENTITIES.get(attack.entity()) else {
                 continue;
             };
-            let first = entity.combat_capsule_first.to_usize();
-            let end = first.saturating_add(usize::from(entity.combat_capsule_count));
+            let capsule_body = self.game_entities.body(entity);
+            let first = capsule_body.combat_capsule_first.to_usize();
+            let end = first.saturating_add(usize::from(capsule_body.combat_capsule_count));
             let attacker_capsules = COMBAT_CAPSULES.get(first..end).unwrap_or(&[]);
             let attacker_snapshot = self
                 .instance_actor_poses
@@ -835,8 +836,9 @@ impl Playtest {
         {
             return;
         }
-        let first = rival_record.combat_capsule_first.to_usize();
-        let end = first.saturating_add(usize::from(rival_record.combat_capsule_count));
+        let capsule_body = self.game_entities.body(rival_record);
+        let first = capsule_body.combat_capsule_first.to_usize();
+        let end = first.saturating_add(usize::from(capsule_body.combat_capsule_count));
         let rival_capsules = COMBAT_CAPSULES.get(first..end).unwrap_or(&[]);
         let rival_pose = self
             .instance_actor_poses
@@ -877,7 +879,7 @@ impl Playtest {
                     GAME_ENTITIES.as_slice(),
                     attack,
                     position,
-                    i32::from(rival_record.radius),
+                    i32::from(self.game_entities.body(rival_record).radius),
                 )
                 .then_some((record.touch_damage, record.touch_damage.max(20))),
         };
@@ -1032,15 +1034,21 @@ impl Playtest {
                 continue;
             }
             let p = self.game_entities.position(index);
-            let r = i32::from(record.radius).min(i32::from(record.height) / 2);
+            let r = i32::from(self.game_entities.body(record).radius)
+                .min(i32::from(self.game_entities.body(record).height) / 2);
             let fallback = WorldCombatCapsule {
                 start: [p[0], p[1] + r, p[2]],
-                end: [p[0], p[1] + i32::from(record.height) - r, p[2]],
+                end: [
+                    p[0],
+                    p[1] + i32::from(self.game_entities.body(record).height) - r,
+                    p[2],
+                ],
                 radius: r.max(1) as u16,
             };
-            let first = record.combat_capsule_first.to_usize();
+            let capsule_body = self.game_entities.body(record);
+            let first = capsule_body.combat_capsule_first.to_usize();
             let authored = COMBAT_CAPSULES
-                .get(first..first + usize::from(record.combat_capsule_count))
+                .get(first..first + usize::from(capsule_body.combat_capsule_count))
                 .unwrap_or(&[])
                 .iter()
                 .find(|c| c.flags & psx_level::combat_capsule_flags::HURTBOX != 0);
@@ -1222,7 +1230,10 @@ impl Playtest {
         let now = self.gameplay_tick(ctx.sim_tick);
         if outcome.connected {
             self.damage_numbers.spawn(
-                struck_actor_anchor(self.game_entities.position(index), record.height),
+                struck_actor_anchor(
+                    self.game_entities.position(index),
+                    self.game_entities.body(record).height,
+                ),
                 record.room,
                 applied,
                 if impact.visual.impact_rgb == CRIT_BOLT_RGB {
@@ -1778,8 +1789,17 @@ impl Playtest {
                 let capsules = COMBAT_CAPSULES
                     .get(first..first + usize::from(character.combat_capsule_count))?;
                 let contact = combat::authored_event_frames(capsules, action)?;
-                let armour = mr::armour_window(&character.combat_windows, action);
-                mr::action_timing(animation, video_hz, speed_q8, frame_range, contact, armour)
+                let window =
+                    |kind| mr::authored_window(&character.combat_windows, action, kind);
+                mr::action_timing(
+                    animation,
+                    video_hz,
+                    speed_q8,
+                    frame_range,
+                    contact,
+                    window(psx_level::CombatWindowKind::Armored),
+                    window(psx_level::CombatWindowKind::Invulnerable),
+                )
             },
         );
         self.entity_attacks_timed = true;
@@ -1799,8 +1819,10 @@ impl Playtest {
             return None;
         }
         let clip = self.game_entities.clip_for_state(records, index);
-        let capsule_first = entity.combat_capsule_first.to_usize();
-        let capsule_end = capsule_first.saturating_add(usize::from(entity.combat_capsule_count));
+        let capsule_body = self.game_entities.body(entity);
+        let capsule_first = capsule_body.combat_capsule_first.to_usize();
+        let capsule_end =
+            capsule_first.saturating_add(usize::from(capsule_body.combat_capsule_count));
         Some(SwingClock {
             animation: MODEL_INSTANCES
                 .get(usize::from(entity.model_instance))
@@ -1847,10 +1869,12 @@ impl Playtest {
                 .flatten()
                 .map(|snapshot| snapshot.pose())
         };
+        let characters = self.game_entities.characters();
         let entity_capsules = |slot: usize| {
             records.get(slot).map_or(&[][..], |record| {
-                let first = record.combat_capsule_first.to_usize();
-                let end = first.saturating_add(usize::from(record.combat_capsule_count));
+                let capsule_body = psx_game_runtime::entities::body_of(characters, record);
+                let first = capsule_body.combat_capsule_first.to_usize();
+                let end = first.saturating_add(usize::from(capsule_body.combat_capsule_count));
                 COMBAT_CAPSULES.get(first..end).unwrap_or(&[])
             })
         };
@@ -1873,7 +1897,7 @@ impl Playtest {
                     attacker_pose,
                     entity_capsules(slot),
                     entity_pose(slot),
-                    records[slot].combat.parry_ticks,
+                    self.game_entities.body(&records[slot]).combat.parry_ticks,
                     video_hz,
                 )
             };
@@ -1941,8 +1965,9 @@ impl Playtest {
             clip.speed_q8,
             clip.frame_range,
         );
-        let first = entity.combat_capsule_first.to_usize();
-        let end = first + usize::from(entity.combat_capsule_count);
+        let capsule_body = self.game_entities.body(entity);
+        let first = capsule_body.combat_capsule_first.to_usize();
+        let end = first + usize::from(capsule_body.combat_capsule_count);
         let capsules = COMBAT_CAPSULES.get(first..end).unwrap_or(&[]);
         // The tell tracks the fighter it is aimed at: its rival, or her.
         let rival = self
@@ -1965,7 +1990,7 @@ impl Playtest {
         }
         if combat::ranged_charge_tracks(capsules, attack.action(), phase) {
             let height = match rival {
-                Some((_, record)) => i32::from(record.height),
+                Some((_, record)) => i32::from(self.game_entities.body(record).height),
                 None => self
                     .character
                     .as_ref()
@@ -2029,8 +2054,9 @@ impl Playtest {
             return;
         };
         let entity = &GAME_ENTITIES[attack.entity()];
-        let first = entity.combat_capsule_first.to_usize();
-        let end = first + usize::from(entity.combat_capsule_count);
+        let capsule_body = self.game_entities.body(entity);
+        let first = capsule_body.combat_capsule_first.to_usize();
+        let end = first + usize::from(capsule_body.combat_capsule_count);
         let previous = previous
             .filter(|old| old.clip_local() == pose.clip_local())
             .map(|old| old.pose().phase_q12());
@@ -2276,7 +2302,7 @@ impl Playtest {
             self.damage_numbers.spawn(
                 struck_actor_anchor(
                     self.game_entities.position(entity),
-                    GAME_ENTITIES[entity].height,
+                    self.game_entities.body(&GAME_ENTITIES[entity]).height,
                 ),
                 GAME_ENTITIES[entity].room,
                 self.game_entities.scaled_stance_damage(
@@ -2291,7 +2317,7 @@ impl Playtest {
             let state = self.game_entities.state(entity);
             self.spawn_combat_hit_sparks(
                 self.game_entities.position(entity),
-                GAME_ENTITIES[entity].height,
+                self.game_entities.body(&GAME_ENTITIES[entity]).height,
                 GAME_ENTITIES[entity].room,
                 channel == DamageNumberChannel::Zenith,
                 state == psx_game_runtime::entities::GameEntityState::Staggered,
@@ -2605,10 +2631,11 @@ impl Playtest {
                 start: position,
                 end: [
                     position[0],
-                    position[1].saturating_add(i32::from(entity_record.height)),
+                    position[1]
+                        .saturating_add(i32::from(self.game_entities.body(entity_record).height)),
                     position[2],
                 ],
-                radius: entity_record.radius,
+                radius: self.game_entities.body(entity_record).radius,
             };
             let coarse_candidate = active[..active_count]
                 .iter()
@@ -2666,7 +2693,10 @@ impl Playtest {
                     // because the damage is per-capsule: only this site
                     // knows which capsule actually connected.
                     self.damage_numbers.spawn(
-                        struck_actor_anchor(position, entity_record.height),
+                        struck_actor_anchor(
+                            position,
+                            self.game_entities.body(entity_record).height,
+                        ),
                         entity_record.room,
                         applied_damage,
                         damage_number_channel,
@@ -2674,7 +2704,7 @@ impl Playtest {
                     );
                     self.spawn_combat_hit_sparks(
                         position,
-                        entity_record.height,
+                        self.game_entities.body(entity_record).height,
                         entity_record.room,
                         vitality_channel == VitalityChannelId::Two,
                         outcome.staggered,
@@ -2715,8 +2745,9 @@ impl Playtest {
         active: &[ActivePlayerCapsule],
         body_fallback: WorldCombatCapsule,
     ) -> Option<ActivePlayerCapsule> {
-        let first = entity_record.combat_capsule_first.to_usize();
-        let end = first.saturating_add(usize::from(entity_record.combat_capsule_count));
+        let capsule_body = self.game_entities.body(entity_record);
+        let first = capsule_body.combat_capsule_first.to_usize();
+        let end = first.saturating_add(usize::from(capsule_body.combat_capsule_count));
         let hurtboxes = COMBAT_CAPSULES.get(first..end).unwrap_or(&[]);
         let has_authored_hurtbox = hurtboxes
             .iter()

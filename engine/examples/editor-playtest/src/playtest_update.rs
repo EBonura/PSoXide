@@ -148,8 +148,8 @@ impl Playtest {
                 };
                 entity_activation_bounds[index].write(VisibilityBounds::cylinder(
                     entity_positions[index],
-                    i32::from(record.radius),
-                    i32::from(record.height),
+                    i32::from(self.game_entities.body(record).radius),
+                    i32::from(self.game_entities.body(record).height),
                 ));
             }
             // SAFETY: every branch above writes the complete prefix.
@@ -193,8 +193,8 @@ impl Playtest {
                 }
                 *bounds = VisibilityBounds::cylinder(
                     entity_positions[entity],
-                    i32::from(record.radius),
-                    i32::from(record.height),
+                    i32::from(self.game_entities.body(record).radius),
+                    i32::from(self.game_entities.body(record).height),
                 );
             }
             let instance_mask = world_rt.visible_view_bounds_mask(
@@ -516,7 +516,7 @@ impl Playtest {
         // PLAYER_SPAWN for placeholder manifests. The spawn room
         // may be a manual portal room rather than room zero.
         self.player_stance_config = CombatStanceConfig::DEFAULT;
-        self.player_stats = CombatStats::PLAYER;
+        self.player_stats = CombatStats::DEFAULT;
         let (spawn, character) = match PLAYER_CONTROLLER.get() {
             Some(pc) => {
                 let record = CHARACTERS.get(pc.character.to_usize());

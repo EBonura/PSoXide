@@ -1,8 +1,8 @@
 extern crate std;
 use super::*;
 use crate::combat_intent::CombatIntent;
-use crate::entities::tests::test_record;
 use crate::entities::tests::StepRule;
+use crate::entities::tests::{test_record, BODY_SUB_UNIT, BODY_TACTICAL, TEST_BODIES};
 use psx_engine::SimTick;
 
 const fn enemy() -> LevelGameEntityRecord {
@@ -19,10 +19,7 @@ const fn enemy() -> LevelGameEntityRecord {
             | game_entity_flags::LIGHT_ATTACK
             | game_entity_flags::HEAVY_ATTACK,
     );
-    r.radius = 14;
-    r.height = 77;
-    r.motion.walk_speed = 2 * 256;
-    r.motion.run_speed = 6 * 256;
+    r.character = psx_level::CharacterIndex(BODY_TACTICAL);
     r.preferred_distance = 64;
     r.spacing_tolerance = 12;
     r.attack_min_range = 32;
@@ -35,9 +32,17 @@ const fn enemy() -> LevelGameEntityRecord {
     r.heavy_attack_active_ticks = 96;
     r.ranged_attack_active_ticks = 148;
     r.recovery_ticks = 24;
-    // The two old 600 pools as one bar.
-    r.combat.max_health = 1200;
     r
+}
+
+/// The test bodies with the tactical enemy's combat numbers changed by
+/// `change`, for a fighter set to read them ([`GameEntities::set_characters`]).
+fn tactical_bodies(
+    change: impl FnOnce(&mut psx_level::CombatStats),
+) -> &'static [LevelCharacterRecord] {
+    let mut bodies = TEST_BODIES;
+    change(&mut bodies[usize::from(BODY_TACTICAL)].combat);
+    std::boxed::Box::leak(std::boxed::Box::new(bodies))
 }
 static ENEMY: [LevelGameEntityRecord; 1] = [enemy()];
 fn input(p: [i32; 3]) -> GameEntityTickInput<'static> {
@@ -712,7 +717,9 @@ fn crowded_melee_tell_moves_through_collision_then_plants() {
 #[test]
 fn heavy_contact_creates_firing_distance_before_attacking() {
     let mut e = engaged();
-    e.combatants[0].flow.melee_hit(true, &ENEMY[0].combat);
+    e.combatants[0]
+        .flow
+        .melee_hit(true, &TEST_BODIES[usize::from(BODY_TACTICAL)].combat);
     let mut arena = Arena::default();
     let mut escaped = false;
     let mut attacked = false;
@@ -955,7 +962,7 @@ fn an_enemy_swaps_on_purpose_to_parry_a_swing_it_sees() {
     let records = enemy_with_flags(enemy().flags);
     let mut e: GameEntities<2, true> = GameEntities::EMPTY;
     e.spawn_from_records(&records[..]);
-    e.set_stance_swap_delay(300);
+    e.set_swap_cooldown_for_tests(300);
     e.state[0] = GameEntityState::Aggro as u8;
     e.state_ticks[0] = 42;
     let stance = e.stance(0);
@@ -963,37 +970,32 @@ fn an_enemy_swaps_on_purpose_to_parry_a_swing_it_sees() {
     swing.target.attack_read = 2;
     swing.target.swing_ticks = Some(0);
     // Never on purpose at zero percent.
-    let mut never = LevelGameEntityRecord { ..records[0] };
-    never.combat.parry_swap_percent = 0;
-    let never: &'static [LevelGameEntityRecord] =
-        std::boxed::Box::leak(std::boxed::Box::new([never]));
+    let never: &'static [LevelGameEntityRecord] = &records[..];
     let mut quiet: GameEntities<2, true> = GameEntities::EMPTY;
+    quiet.set_characters(tactical_bodies(|c| c.parry_swap_percent = 0));
     quiet.spawn_from_records(never);
     quiet.state[0] = GameEntityState::Aggro as u8;
     quiet.state_ticks[0] = 42;
     quiet.tick_delta(never, swing, &mut Arena::default(), 2);
     assert_eq!(quiet.stance(0), stance);
     // Always at a hundred: the swing it sees lands in its parry window.
-    let mut always = LevelGameEntityRecord { ..records[0] };
-    always.combat.parry_swap_percent = 100;
-    let always: &'static [LevelGameEntityRecord] =
-        std::boxed::Box::leak(std::boxed::Box::new([always]));
+    let always: &'static [LevelGameEntityRecord] = &records[..];
+    e.set_characters(tactical_bodies(|c| c.parry_swap_percent = 100));
     e.tick_delta(always, swing, &mut Arena::default(), 2);
     assert_ne!(e.stance(0), stance);
     assert_eq!(e.tactical_snapshot(0).stance_reason, STANCE_REASON_PARRY);
-    assert!(e.combatants[0].parrying(always[0].combat.parry_ticks));
+    assert!(e.combatants[0].parrying(e.body(&always[0]).combat.parry_ticks));
 }
 
 #[test]
 fn a_predicted_contact_replaces_the_swings_own_clock_for_the_parry() {
-    let mut always = enemy_with_flags(enemy().flags)[0];
-    always.combat.parry_swap_percent = 100;
-    let always: &'static [LevelGameEntityRecord] =
-        std::boxed::Box::leak(std::boxed::Box::new([always]));
+    let always: &'static [LevelGameEntityRecord] = &enemy_with_flags(enemy().flags)[..];
+    let bodies = tactical_bodies(|c| c.parry_swap_percent = 100);
     let fresh = || {
         let mut e: GameEntities<2, true> = GameEntities::EMPTY;
+        e.set_characters(bodies);
         e.spawn_from_records(always);
-        e.set_stance_swap_delay(300);
+        e.set_swap_cooldown_for_tests(300);
         e.state[0] = GameEntityState::Aggro as u8;
         e.state_ticks[0] = 42;
         e
@@ -1019,16 +1021,17 @@ fn a_predicted_contact_replaces_the_swings_own_clock_for_the_parry() {
 
 #[test]
 fn a_deliberate_parry_needs_the_swing_seen_its_reaction_time_before_contact() {
-    let mut slow = enemy_with_flags(enemy().flags)[0];
-    slow.combat.parry_swap_percent = 100;
-    slow.combat.parry_ticks = 3;
-    slow.combat.parry_reaction_ticks = 12;
-    let slow: &'static [LevelGameEntityRecord] =
-        std::boxed::Box::leak(std::boxed::Box::new([slow]));
+    let slow: &'static [LevelGameEntityRecord] = &enemy_with_flags(enemy().flags)[..];
+    let bodies = tactical_bodies(|c| {
+        c.parry_swap_percent = 100;
+        c.parry_ticks = 3;
+        c.parry_reaction_ticks = 12;
+    });
     let fresh = || {
         let mut e: GameEntities<2, true> = GameEntities::EMPTY;
+        e.set_characters(bodies);
         e.spawn_from_records(slow);
-        e.set_stance_swap_delay(300);
+        e.set_swap_cooldown_for_tests(300);
         e.state[0] = GameEntityState::Aggro as u8;
         e.state_ticks[0] = 42;
         e
@@ -1076,7 +1079,9 @@ fn a_parry_crit_is_spent_with_the_swapped_to_weapon() {
     e.state_ticks[0] = 42;
     settle_in(&mut e, VitalityChannelId::One);
     e.attack_cooldown[0] = 600;
-    e.combatants[0].crit = records[0].combat.crit_window_ticks;
+    e.combatants[0].crit = TEST_BODIES[usize::from(BODY_TACTICAL)]
+        .combat
+        .crit_window_ticks;
     assert_eq!(e.attack_owner(), None);
     e.tick_delta(&records[..], input([0, 0, 30]), &mut Arena::default(), 2);
     assert_eq!(e.state(0), GameEntityState::Windup);
@@ -1090,7 +1095,12 @@ fn a_parry_crit_is_spent_with_the_swapped_to_weapon() {
         ticks += 2;
     }
     assert_eq!(e.state(0), GameEntityState::Attack);
-    assert!(ticks < records[0].combat.crit_window_ticks);
+    assert!(
+        ticks
+            < TEST_BODIES[usize::from(BODY_TACTICAL)]
+                .combat
+                .crit_window_ticks
+    );
     assert!(e.crit_armed(0));
     assert_eq!(e.crit_scaled(&records[..], 0, 10, 3), (20, 6));
     // Zenith stance, crit armed, energy to spare: the crit shot, even at range.
@@ -1100,7 +1110,9 @@ fn a_parry_crit_is_spent_with_the_swapped_to_weapon() {
     g.state_ticks[0] = 42;
     settle_in(&mut g, VitalityChannelId::Two);
     g.attack_cooldown[0] = 600;
-    g.combatants[0].crit = records[0].combat.crit_window_ticks;
+    g.combatants[0].crit = TEST_BODIES[usize::from(BODY_TACTICAL)]
+        .combat
+        .crit_window_ticks;
     g.tick_delta(&records[..], input([0, 0, 200]), &mut Arena::default(), 2);
     assert_eq!(g.state(0), GameEntityState::Windup);
     assert_eq!(g.selected_attack_kind(0), GAME_ENTITY_ATTACK_RANGED);
@@ -1262,7 +1274,7 @@ fn the_tactical_controller_decides_for_the_actor_as_for_an_entity() {
 /// every pace below lands a whole unit only every few thinks.
 fn sub_unit_enemy() -> &'static [LevelGameEntityRecord; 1] {
     let mut r = enemy();
-    r.motion.walk_speed = 384;
+    r.character = psx_level::CharacterIndex(BODY_SUB_UNIT);
     r.spacing_speed_percent = 25;
     std::boxed::Box::leak(std::boxed::Box::new([r]))
 }

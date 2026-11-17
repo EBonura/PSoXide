@@ -7,16 +7,16 @@
 
 use psx_level::wire::{caps, LevelRecords};
 use psx_level::{
-    AssetId, CharacterIndex, CombatCapsuleIndex, EntityKind, EntityRecord, InteractableKind,
-    InteractableMessageRecord, InteractableRecord, LevelArchPropCollisionRecord,
-    LevelArchPropRecord, LevelArchPropSurfaceRecord, LevelBoxPropRecord, LevelBoxPropSurfaceRecord,
-    LevelCameraProfile, LevelCameraRecord, LevelCloudLayerRecord, LevelCycloramaQuadRecord,
-    LevelCylinderPropRecord, LevelCylinderPropSurfaceRecord, LevelDestructibleRecord,
-    LevelGameEntityRecord, LevelImagePropRecord, LevelLogicRecord, LevelMaterialUvMotion,
-    LevelModelInstanceRecord, LevelModelMaterialOverride, LevelModelSecondaryLayer,
-    LevelRoomRecord, LevelSkyRecord, LevelVitalityCircleRecord, LevelWorldObjectRecord, ModelIndex,
-    OptionalModelClipIndex, ParticleEmitterRecord, PlayerControllerRecord, PlayerSpawnRecord,
-    PointLightRecord, ResourceSlot, RoomIndex, StableId,
+    AssetId, CharacterIndex, EntityKind, EntityRecord, InteractableKind, InteractableMessageRecord,
+    InteractableRecord, LevelArchPropCollisionRecord, LevelArchPropRecord,
+    LevelArchPropSurfaceRecord, LevelBoxPropRecord, LevelBoxPropSurfaceRecord, LevelCameraProfile,
+    LevelCameraRecord, LevelCloudLayerRecord, LevelCycloramaQuadRecord, LevelCylinderPropRecord,
+    LevelCylinderPropSurfaceRecord, LevelDestructibleRecord, LevelGameEntityRecord,
+    LevelImagePropRecord, LevelLogicRecord, LevelMaterialUvMotion, LevelModelInstanceRecord,
+    LevelModelMaterialOverride, LevelModelSecondaryLayer, LevelRoomRecord, LevelSkyRecord,
+    LevelVitalityCircleRecord, LevelWorldObjectRecord, ModelIndex, OptionalModelClipIndex,
+    ParticleEmitterRecord, PlayerControllerRecord, PlayerSpawnRecord, PointLightRecord,
+    ResourceSlot, RoomIndex, StableId,
 };
 
 use super::manifest::{model_material_flags, model_override_blend_code, reflection_material_flags};
@@ -384,16 +384,11 @@ impl OwnedLevelRecords {
                     parried_clip: e.parried_clip,
                     roll_clip: e.roll_clip,
                     death_clip: e.death_clip,
-                    combat_capsule_first: CombatCapsuleIndex(e.combat_capsule_first),
-                    combat_capsule_count: e.combat_capsule_count,
                     ranged_attack_action: e.ranged_attack_action,
                     x: e.x,
                     y: e.y,
                     z: e.z,
                     yaw: e.yaw,
-                    radius: e.radius,
-                    height: e.height,
-                    motion: e.motion,
                     patrol_x: e.patrol[0],
                     patrol_y: e.patrol[1],
                     patrol_z: e.patrol[2],
@@ -416,7 +411,6 @@ impl OwnedLevelRecords {
                     attack_min_range: e.attack_min_range,
                     attack_max_range: e.attack_max_range,
                     touch_damage: e.touch_damage,
-                    combat: e.combat,
                     soul_value: e.soul_value,
                     flags: e.flags,
                 })
@@ -784,16 +778,12 @@ mod tests {
         assert_eq!(records.game_entities.len(), package.game_entities.len());
         assert!(!records.game_entities.is_empty());
         for (record, entity) in records.game_entities.iter().zip(&package.game_entities) {
-            assert_eq!(record.combat, entity.combat);
             assert_eq!(
                 (record.patrol_x, record.patrol_y, record.patrol_z),
                 (entity.patrol[0], entity.patrol[1], entity.patrol[2])
             );
             assert_eq!(record.attack_frame_range, entity.attack_frame_range);
-            assert_eq!(
-                record.combat_capsule_first.raw(),
-                entity.combat_capsule_first
-            );
+            assert_eq!(record.character.raw(), entity.character);
         }
         assert_eq!(records.game_entity_ids.len(), package.game_entity_ids.len());
         assert_eq!(records.interactables.len(), package.interactables.len());

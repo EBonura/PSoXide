@@ -940,16 +940,23 @@ mod tests {
 pub struct CombatStanceConfig {
     /// Ticks before another voluntary swap is allowed.
     pub swap_cooldown_ticks: u16,
-    /// Ticks the HUD spends animating a swap. Presentation only.
+    /// Ticks a swap takes: its presentation, and for a tactical controller
+    /// how long the swap blocks its next stance decision.
     pub swap_duration_ticks: u16,
 }
 
 impl CombatStanceConfig {
-    /// Starting point for authoring.
-    pub const DEFAULT: Self = Self {
-        swap_cooldown_ticks: 30,
-        swap_duration_ticks: 12,
-    };
+    /// Starting point for authoring (a body without a Character's numbers).
+    pub const DEFAULT: Self = Self::of(&psx_level::LevelCharacterRecord::DEFAULT_BODY);
+
+    /// `character`'s authored swap: the same numbers for the player and
+    /// every entity whose body it is.
+    pub const fn of(character: &psx_level::LevelCharacterRecord) -> Self {
+        Self {
+            swap_cooldown_ticks: character.stance_swap_cooldown_ticks,
+            swap_duration_ticks: character.stance_swap_duration_ticks,
+        }
+    }
 }
 
 impl Default for CombatStanceConfig {

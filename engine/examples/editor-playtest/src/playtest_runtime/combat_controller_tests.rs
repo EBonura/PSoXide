@@ -136,8 +136,8 @@ fn hybrid_fighter() -> (
             ..GAME_ENTITIES[0]
         }]));
     let mut entities = std::boxed::Box::new(RuntimeGameEntities::EMPTY);
+    entities.set_characters(&CHARACTERS[..]);
     entities.spawn_from_records(records);
-    entities.set_stance_swap_delay(30);
     entities.set_spatial_active_mask(u64::MAX);
     (records, entities)
 }

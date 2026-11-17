@@ -2742,9 +2742,7 @@ pub struct CombatStats {
 
 impl CombatStats {
     /// The player character's starting numbers.
-    pub const PLAYER: Self = Self::from_cooked(psx_level::CombatStats::PLAYER);
-    /// An enemy's numbers when nothing was authored.
-    pub const ENEMY: Self = Self::from_cooked(psx_level::CombatStats::ENEMY);
+    pub const DEFAULT: Self = Self::from_cooked(psx_level::CombatStats::DEFAULT);
 
     /// The authored form of a cooked record.
     pub const fn from_cooked(stats: psx_level::CombatStats) -> Self {
@@ -2814,27 +2812,38 @@ impl CombatStats {
                     .legacy_max_health
                     .unwrap_or(LEGACY_POOL)
                     .saturating_add(enemy.legacy_max_health_secondary.unwrap_or(LEGACY_POOL)),
-                poise: enemy.legacy_poise.unwrap_or(Self::ENEMY.poise),
-                ..Self::ENEMY
+                poise: enemy.legacy_poise.unwrap_or(LEGACY_ENEMY_POISE),
+                parry_ticks: LEGACY_ENEMY_PARRY_TICKS,
+                ..Self::DEFAULT
             },
-            None => Self::PLAYER,
+            None => Self::DEFAULT,
         }
     }
 }
 
 impl Default for CombatStats {
     fn default() -> Self {
-        Self::PLAYER
+        Self::DEFAULT
     }
 }
 
 pub(crate) const fn default_combat_max_health() -> u16 {
-    CombatStats::PLAYER.max_health
+    CombatStats::DEFAULT.max_health
 }
 
 /// What each of the two old health pools defaulted to, for loading a
 /// record written while health was two pools.
 const LEGACY_POOL: u16 = 100;
+
+/// The poise an enemy written before combat stats existed ran with: the
+/// old enemy constant. Only the loader of such a file reads it; every
+/// character's default is [`CombatStats::DEFAULT`].
+const LEGACY_ENEMY_POISE: u16 = 100;
+
+/// The parry window an enemy written before combat stats existed loads
+/// with: a third of the old 10-tick enemy swap. Loader only, as
+/// [`LEGACY_ENEMY_POISE`].
+const LEGACY_ENEMY_PARRY_TICKS: u16 = 3;
 
 /// [`CombatStats`] as a file may hold it: the current fields, plus the second
 /// health pool a record written before the one health bar carried. Such a
@@ -2917,71 +2926,71 @@ impl From<CombatStatsFile> for CombatStats {
 }
 
 pub(crate) const fn default_combat_poise() -> u16 {
-    CombatStats::PLAYER.poise
+    CombatStats::DEFAULT.poise
 }
 
 pub(crate) const fn default_combat_armour_heavy_attack() -> bool {
-    CombatStats::PLAYER.armour_heavy_attack
+    CombatStats::DEFAULT.armour_heavy_attack
 }
 
 pub(crate) const fn default_combat_armour_authored_window() -> bool {
-    CombatStats::PLAYER.armour_authored_window
+    CombatStats::DEFAULT.armour_authored_window
 }
 
 pub(crate) const fn default_combat_opposite_damage_q12() -> u16 {
-    CombatStats::PLAYER.opposite_damage_q12
+    CombatStats::DEFAULT.opposite_damage_q12
 }
 
 pub(crate) const fn default_combat_opposite_poise_q12() -> u16 {
-    CombatStats::PLAYER.opposite_poise_q12
+    CombatStats::DEFAULT.opposite_poise_q12
 }
 
 pub(crate) const fn default_combat_energy_max() -> u16 {
-    CombatStats::PLAYER.energy_max
+    CombatStats::DEFAULT.energy_max
 }
 
 pub(crate) const fn default_combat_shot_cost() -> u16 {
-    CombatStats::PLAYER.shot_cost
+    CombatStats::DEFAULT.shot_cost
 }
 
 pub(crate) const fn default_combat_light_gain() -> u16 {
-    CombatStats::PLAYER.light_gain
+    CombatStats::DEFAULT.light_gain
 }
 
 pub(crate) const fn default_combat_heavy_gain() -> u16 {
-    CombatStats::PLAYER.heavy_gain
+    CombatStats::DEFAULT.heavy_gain
 }
 
 pub(crate) const fn default_combat_parry_ticks() -> u16 {
-    CombatStats::PLAYER.parry_ticks
+    CombatStats::DEFAULT.parry_ticks
 }
 
 pub(crate) const fn default_combat_parry_refund() -> u16 {
-    CombatStats::PLAYER.parry_refund
+    CombatStats::DEFAULT.parry_refund
 }
 
 pub(crate) const fn default_combat_crit_window_ticks() -> u16 {
-    CombatStats::PLAYER.crit_window_ticks
+    CombatStats::DEFAULT.crit_window_ticks
 }
 
 pub(crate) const fn default_combat_crit_damage_q12() -> u16 {
-    CombatStats::PLAYER.crit_damage_q12
+    CombatStats::DEFAULT.crit_damage_q12
 }
 
 pub(crate) const fn default_combat_crit_poise_q12() -> u16 {
-    CombatStats::PLAYER.crit_poise_q12
+    CombatStats::DEFAULT.crit_poise_q12
 }
 
 pub(crate) const fn default_combat_knockdown_ticks() -> u16 {
-    CombatStats::PLAYER.knockdown_ticks
+    CombatStats::DEFAULT.knockdown_ticks
 }
 
 pub(crate) const fn default_combat_parry_swap_percent() -> u8 {
-    CombatStats::PLAYER.parry_swap_percent
+    CombatStats::DEFAULT.parry_swap_percent
 }
 
 pub(crate) const fn default_combat_parry_reaction_ticks() -> u16 {
-    CombatStats::PLAYER.parry_reaction_ticks
+    CombatStats::DEFAULT.parry_reaction_ticks
 }
 
 /// Tunable movement/collision settings authored on a

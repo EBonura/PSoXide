@@ -52,7 +52,6 @@ fn matchup<'a>(
         fighters: [a, b],
         controllers,
         layout: Layout::Room,
-        swap_cooldown_ticks: p.loaded.swap_cooldown_ticks,
         distance: p.loaded.start_distance,
     }
 }

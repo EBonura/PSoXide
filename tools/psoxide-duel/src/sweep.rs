@@ -19,8 +19,6 @@ pub struct Matchup<'a> {
     pub controllers: [Controller; 2],
     /// The ground.
     pub layout: Layout,
-    /// The swap cooldown every fighter uses.
-    pub swap_cooldown_ticks: u16,
     /// Start distance the fighters were placed with.
     pub distance: i32,
 }
@@ -156,7 +154,6 @@ pub fn fight(matchup: &Matchup<'_>, seed: u32, log: bool) -> arena::DuelResult {
         fighters: matchup.fighters,
         controllers: matchup.controllers,
         seeds: seeds_of(seed),
-        swap_cooldown_ticks: matchup.swap_cooldown_ticks,
         distance: matchup.distance,
         bearing: arena::bearing_of(seed),
         layout: matchup.layout,

@@ -17,20 +17,16 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
             RoomPoint::new(record.x, record.y, record.z),
             Angle::from_q12(record.yaw as u16),
         );
-        self.combatants[index].respawn(&record.combat);
+        let body = self.body(record);
+        // A fighter that cannot swap holds the stance of its one kind of
+        // move from spawn on (a ranged-only one starts in Zenith).
+        self.combatants[index].respawn(&body.combat, Self::stance_moves(record));
+        self.swap_timing[index] = CombatStanceConfig::of(body);
         self.attack_timings[index] = Self::record_timings(record);
         self.actions[index] = crate::fighter_action::FighterAction::IDLE;
         self.motor_anims[index] = CharacterMotorAnim::Idle;
         self.bodies[index] = crate::fighter_anim::AnimTrack::new(EntityAnim::NONE);
         self.gaits[index] = crate::fighter_anim::AnimTrack::new(EntityAnim::NONE);
-        // A fighter that cannot swap holds the stance of its one kind of
-        // move from spawn on (a ranged-only one starts in Zenith).
-        let moves = Self::stance_moves(record);
-        if !moves.can_swap() {
-            self.combatants[index]
-                .stance
-                .hold(crate::combatant::starting_stance(moves));
-        }
         self.exchanges[index] = crate::ranged_tactics::RangedExchange::EMPTY;
         self.projectile_threats[index] = None;
         self.recoil[index] = [0; 3];

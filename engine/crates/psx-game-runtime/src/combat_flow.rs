@@ -67,9 +67,9 @@ pub struct CombatFlow {
     float_fraction: u16,
 }
 impl CombatFlow {
-    /// Full energy for the starting stats ([`CombatStats::PLAYER`]) and the
+    /// Full energy for the starting stats ([`CombatStats::DEFAULT`]) and the
     /// air allowance, ranged phase open.
-    pub const FULL: Self = Self::full(&CombatStats::PLAYER);
+    pub const FULL: Self = Self::full(&CombatStats::DEFAULT);
 
     /// A fresh life for `stats`: energy at its ceiling, full air allowance,
     /// ranged phase open.
@@ -256,7 +256,7 @@ impl CombatFlow {
 #[cfg(test)]
 mod tests {
     use super::*;
-    const S: &CombatStats = &CombatStats::PLAYER;
+    const S: &CombatStats = &CombatStats::DEFAULT;
     #[test]
     fn failed_escape_commits_to_melee_without_losing_the_ranged_reserve() {
         let mut flow = CombatFlow::FULL;

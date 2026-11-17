@@ -25,15 +25,16 @@ fn fighter(
             ..GAME_ENTITIES[0]
         }]));
     let mut entities = std::boxed::Box::new(RuntimeGameEntities::EMPTY);
+    entities.set_characters(&CHARACTERS[..]);
     entities.spawn_from_records(records);
     entities.set_spatial_active_mask(u64::MAX);
     let r = &records[0];
     // The one builder both sides use (the player's goes through
     // RuntimeCharacter::motor_config, which calls it).
     let config = psx_game_runtime::character::motion_motor_config(
-        i32::from(r.radius),
-        i32::from(r.height),
-        &r.motion,
+        i32::from(entities.body(r).radius),
+        i32::from(entities.body(r).height),
+        &entities.body(r).motion(),
         r.flags & psx_level::game_entity_flags::CAN_RUN != 0,
         (1, 1),
     );
@@ -89,7 +90,7 @@ fn an_enemy_rolls_with_the_players_i_frames() {
         pressed: CombatActions::of(CombatAction::Evade),
         ..CombatIntent::IDLE
     };
-    let roll = &records[0].motion;
+    let roll = CHARACTERS[0].motion();
     let frames = u16::from(roll.roll_active_frames) + u16::from(roll.roll_recovery_frames);
     let mut protected = 0;
     for frame in 0..frames + 4 {
@@ -268,6 +269,7 @@ fn a_sub_unit_strafe_keeps_one_gait_on_one_clock_for_her_and_an_enemy() {
         }]));
     // The tactical policy, whatever this fixture level's entities use.
     let mut enemy = std::boxed::Box::new(psx_game_runtime::entities::GameEntities::<2>::EMPTY);
+    enemy.set_characters(&CHARACTERS[..]);
     enemy.spawn_from_records(records);
     enemy.engage(0, psx_game_runtime::combatant::CombatantId::PLAYER);
     assert_eq!(

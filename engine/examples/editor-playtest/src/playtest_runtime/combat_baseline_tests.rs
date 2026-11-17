@@ -26,13 +26,13 @@ use psx_level::{
 };
 
 /// The player character's combat numbers when nothing else is cooked
-/// (`CombatStats::PLAYER`). Their names are the constants they replaced.
-const PLAYER_MAX_HEALTH: u16 = CombatStats::PLAYER.max_health;
-const PLAYER_POISE: u16 = CombatStats::PLAYER.poise;
-const ENERGY_MAX: u16 = CombatStats::PLAYER.energy_max;
-const SHOT_COST: u16 = CombatStats::PLAYER.shot_cost;
-const MELEE_GAIN: u16 = CombatStats::PLAYER.light_gain;
-const HEAVY_GAIN: u16 = CombatStats::PLAYER.heavy_gain;
+/// (`CombatStats::DEFAULT`). Their names are the constants they replaced.
+const PLAYER_MAX_HEALTH: u16 = CombatStats::DEFAULT.max_health;
+const PLAYER_POISE: u16 = CombatStats::DEFAULT.poise;
+const ENERGY_MAX: u16 = CombatStats::DEFAULT.energy_max;
+const SHOT_COST: u16 = CombatStats::DEFAULT.shot_cost;
+const MELEE_GAIN: u16 = CombatStats::DEFAULT.light_gain;
+const HEAVY_GAIN: u16 = CombatStats::DEFAULT.heavy_gain;
 
 /// Roll / backstep invulnerable frames of the test character.
 pub(super) const TEST_I_FRAMES: u8 = 12;
@@ -107,7 +107,7 @@ pub(super) fn character(ranged: bool) -> RuntimeCharacter {
         roll_active_frames: 20,
         roll_recovery_frames: 10,
         roll_invulnerable_frames: TEST_I_FRAMES,
-        combat: CombatStats::PLAYER,
+        combat: CombatStats::DEFAULT,
         stance_swap_cooldown_ticks: 30,
         stance_swap_duration_ticks: 12,
         backstep_cost_q12: 0,
@@ -601,15 +601,21 @@ fn a_hit_never_swaps_the_stance_or_touches_the_cooldown() {
 }
 
 #[test]
-fn the_swap_cooldown_is_the_one_the_enemies_receive() {
+fn each_fighter_swaps_on_its_own_characters_timing() {
+    // Her swap runs on her Character's numbers; an entity's on its own
+    // Character's, not a copy of hers.
     let mut scene = scene();
+    scene.spawn_entities();
     scene.player_stance_config.swap_cooldown_ticks = 77;
-    scene
-        .game_entities
-        .set_stance_swap_delay(scene.player_stance_config.swap_cooldown_ticks);
     let config = scene.player_stance_config;
     scene.game_entities.actor_mut().stance.request_swap(&config);
     assert_eq!(scene.game_entities.actor_mut().stance.swap_cooldown(), 77);
+    let body = scene.game_entities.body(&GAME_ENTITIES[0]);
+    assert_eq!(
+        scene.game_entities.swap_timing(0),
+        psx_game_runtime::vitality::CombatStanceConfig::of(body)
+    );
+    assert_ne!(body.stance_swap_cooldown_ticks, 77);
 }
 
 #[test]
@@ -794,12 +800,12 @@ fn a_shot_costs_twenty_and_five_shots_empty_the_bar() {
             .game_entities
             .actor()
             .flow
-            .can_shoot(&CombatStats::PLAYER));
+            .can_shoot(&CombatStats::DEFAULT));
         assert!(scene
             .game_entities
             .actor_mut()
             .flow
-            .spend_shot(&CombatStats::PLAYER));
+            .spend_shot(&CombatStats::DEFAULT));
         assert_eq!(
             scene.game_entities.actor_mut().flow.energy,
             left * SHOT_COST
@@ -809,12 +815,12 @@ fn a_shot_costs_twenty_and_five_shots_empty_the_bar() {
         .game_entities
         .actor_mut()
         .flow
-        .can_shoot(&CombatStats::PLAYER));
+        .can_shoot(&CombatStats::DEFAULT));
     assert!(!scene
         .game_entities
         .actor_mut()
         .flow
-        .spend_shot(&CombatStats::PLAYER));
+        .spend_shot(&CombatStats::DEFAULT));
     assert_eq!(scene.game_entities.actor_mut().flow.energy, 0);
 }
 
@@ -942,17 +948,17 @@ fn the_arch_allowance_runs_out_after_its_ticks_and_needs_ground_time_to_rearm() 
     let mut expired = false;
     for _ in 0..AIR_TICKS {
         expired = flow
-            .air_tick(true, false, false, &CombatStats::PLAYER)
+            .air_tick(true, false, false, &CombatStats::DEFAULT)
             .exhausted;
     }
     assert!(expired);
     assert_eq!(flow.air_left, 0);
     // Touching ground briefly does not refresh it.
     for _ in 0..119 {
-        flow.air_tick(false, true, false, &CombatStats::PLAYER);
+        flow.air_tick(false, true, false, &CombatStats::DEFAULT);
     }
     assert_eq!(flow.air_left, 0);
-    flow.air_tick(false, true, false, &CombatStats::PLAYER);
+    flow.air_tick(false, true, false, &CombatStats::DEFAULT);
     assert_eq!(flow.air_left, AIR_TICKS);
 }
 
@@ -970,10 +976,10 @@ fn a_shot_is_free_to_aim_but_the_energy_gate_follows_the_stance_for_the_player()
     // The player's gate is energy plus the Zenith stance; the energy leaf is
     // the same `CombatFlow` the enemies carry.
     let flow = CombatFlow::FULL;
-    assert!(flow.can_shoot(&CombatStats::PLAYER));
+    assert!(flow.can_shoot(&CombatStats::DEFAULT));
     let mut empty = flow;
     empty.energy = SHOT_COST - 1;
-    assert!(!empty.can_shoot(&CombatStats::PLAYER));
+    assert!(!empty.can_shoot(&CombatStats::DEFAULT));
 }
 
 #[test]
@@ -986,7 +992,7 @@ fn the_energy_economy_and_health_are_the_characters_data() {
         energy_max: 60,
         shot_cost: 30,
         light_gain: 5,
-        ..CombatStats::PLAYER
+        ..CombatStats::DEFAULT
     };
     scene.reset_life_combat();
     assert_eq!(health(&scene), 100);

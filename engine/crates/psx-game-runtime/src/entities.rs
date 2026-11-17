@@ -50,15 +50,15 @@ use crate::combatant::{
     stance_scaled, ActionProtection, Combatant, CombatantId, Defender, HitIn, HitKind, PoiseRule,
     Strike,
 };
-use crate::vitality::VitalityChannelId;
+use crate::vitality::{CombatStanceConfig, VitalityChannelId};
 use psx_engine::{
     Angle, CharacterMotorAnim, CharacterMotorConfig, CharacterMotorFrame, CharacterMotorInput,
     CharacterMotorState, RoomPoint,
 };
 use psx_level::combat_verbs::CombatKits;
 use psx_level::{
-    game_entity_flags, CharacterActionFrameRange, CharacterAnimationAction, LevelGameEntityRecord,
-    RoomIndex, CHARACTER_ACTION_SPEED_UNSCALED_Q8,
+    game_entity_flags, CharacterActionFrameRange, CharacterAnimationAction, LevelCharacterRecord,
+    LevelGameEntityRecord, RoomIndex, CHARACTER_ACTION_SPEED_UNSCALED_Q8,
 };
 use psx_math::atan2_q12;
 
@@ -142,7 +142,7 @@ impl GameEntityIntent {
 
 /// Melee close-in margin added on top of the two body radii when
 /// deriving attack reach: an entity commits to its windup when the
-/// player is within `record.radius + player_radius + MARGIN` in XZ.
+/// player is within `self.body(record).radius + player_radius + MARGIN` in XZ.
 /// The radii are Character-bound (cooked from the same
 /// `CharacterControllerSettings` the motors use); this constant is the
 /// one runtime tuning knob (roughly half a demo-scale step) standing
@@ -173,8 +173,17 @@ const GAME_ENTITY_PARRIED_STAGGER: u8 = 1 << 1;
 /// Ticks the one-shot eye pulse lasts after a stance change.
 const GAME_ENTITY_STANCE_PULSE_TICKS: u16 = 30;
 
-/// Duration of the enemy guard-colour sweep in 60 Hz simulation ticks.
-pub const GAME_ENTITY_STANCE_SWAP_DURATION_TICKS: u8 = 12;
+/// The body of the entity `record` places, among the level's `characters`:
+/// its linked Character, else [`LevelCharacterRecord::DEFAULT_BODY`].
+#[inline]
+pub fn body_of(
+    characters: &'static [LevelCharacterRecord],
+    record: &LevelGameEntityRecord,
+) -> &'static LevelCharacterRecord {
+    characters
+        .get(record.character.to_usize())
+        .unwrap_or(&LevelCharacterRecord::DEFAULT_BODY)
+}
 
 /// Front-arc half-width for entity attacks, PSX angle units
 /// (60 degrees). The entity faced the player when it committed to
@@ -715,8 +724,15 @@ pub struct GameEntities<
     projectile_threats: [Option<crate::projectiles::ProjectileThreat>; MAX_ENTITIES],
     exchanges: [crate::ranged_tactics::RangedExchange; MAX_ENTITIES],
     recoil: [[i16; 3]; MAX_ENTITIES],
-    /// Same cooked cooldown as the player, with independent per-enemy clocks.
-    stance_swap_delay: u16,
+    /// The level's Characters: every entity's body is the one its record
+    /// links ([`LevelGameEntityRecord::character`], read by [`Self::body`]).
+    // An Option so the all-zero pattern (a game that keeps its entities in
+    // zeroed storage) is a valid value: no table yet.
+    characters: Option<&'static [LevelCharacterRecord]>,
+    /// Each fighter's stance swap: how long a swap takes and the cooldown
+    /// it starts, in 60 Hz ticks, from its Character (the actor's from
+    /// hers, [`Self::set_swap_timing`]).
+    swap_timing: [CombatStanceConfig; MAX_ENTITIES],
     /// World aim point frozen at the charge cutoff, independent of muzzle offset.
     ranged_aim_target: [[i32; 3]; MAX_ENTITIES],
     /// Patrol leg: 0 = toward the patrol anchor, 1 = toward spawn.
@@ -827,6 +843,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             active: active.max(GAME_ENTITY_ATTACK_ACTIVE_TICKS),
             recovery: u16::from(record.recovery_ticks),
             armour: None,
+            invulnerable: None,
         };
         [
             timing(record.attack_active_ticks),
@@ -1033,11 +1050,16 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             active: 0,
             recovery: 0,
             armour: None,
+            invulnerable: None,
         }; 3]; MAX_ENTITIES],
         projectile_threats: [None; MAX_ENTITIES],
         exchanges: [crate::ranged_tactics::RangedExchange::EMPTY; MAX_ENTITIES],
         recoil: [[0; 3]; MAX_ENTITIES],
-        stance_swap_delay: 0,
+        #[cfg(not(test))]
+        characters: None,
+        #[cfg(test)]
+        characters: Some(&tests::TEST_BODIES),
+        swap_timing: [CombatStanceConfig::DEFAULT; MAX_ENTITIES],
         ranged_aim_target: [[0; 3]; MAX_ENTITIES],
         patrol_leg: [0; MAX_ENTITIES],
         move_yaw: [0; MAX_ENTITIES],
@@ -1083,13 +1105,18 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             self.motors[Self::ACTOR_SLOT],
             self.combatants[Self::ACTOR_SLOT],
             self.actions[Self::ACTOR_SLOT],
+            self.swap_timing[Self::ACTOR_SLOT],
         );
+        // The level's Characters outlive a respawn of its entities.
+        let characters = self.characters;
         *self = Self::EMPTY;
+        self.characters = characters;
         let count = records.len().min(MAX_ENTITIES);
         if count <= Self::ACTOR_SLOT {
             self.motors[Self::ACTOR_SLOT] = actor.0;
             self.combatants[Self::ACTOR_SLOT] = actor.1;
             self.actions[Self::ACTOR_SLOT] = actor.2;
+            self.swap_timing[Self::ACTOR_SLOT] = actor.3;
         }
         self.count = count as u16;
         self.overflow = (records.len() - count).min(u16::MAX as usize) as u16;
@@ -1122,9 +1149,50 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         any
     }
 
-    /// Configure from the player's cooked stance record after spawning.
-    pub fn set_stance_swap_delay(&mut self, ticks: u16) {
-        self.stance_swap_delay = ticks;
+    /// The level's Characters (its generated `CHARACTERS` table), where
+    /// every entity's body is read: combat numbers, capsule, motion, stance
+    /// swap timing, combat windows and volumes. Set before spawning; an
+    /// entity whose link is past the table has
+    /// [`LevelCharacterRecord::DEFAULT_BODY`].
+    pub fn set_characters(&mut self, characters: &'static [LevelCharacterRecord]) {
+        self.characters = Some(characters);
+    }
+
+    /// Set slot `index`'s stance swap timing: the actor's from her
+    /// Character (an entity's is set from its own when it spawns).
+    pub fn set_swap_timing(&mut self, index: usize, timing: CombatStanceConfig) {
+        if let Some(slot) = self.swap_timing.get_mut(index) {
+            *slot = timing;
+        }
+    }
+
+    /// Slot `index`'s stance swap timing.
+    pub fn swap_timing(&self, index: usize) -> CombatStanceConfig {
+        self.swap_timing
+            .get(index)
+            .copied()
+            .unwrap_or(CombatStanceConfig::DEFAULT)
+    }
+
+    /// Test hook: every slot's swap cooldown, as the one global the
+    /// tests were written against.
+    #[cfg(test)]
+    fn set_swap_cooldown_for_tests(&mut self, ticks: u16) {
+        for timing in &mut self.swap_timing {
+            timing.swap_cooldown_ticks = ticks;
+        }
+    }
+
+    /// The body of the entity `record` places: its linked Character, the
+    /// same record the player's character is ([`body_of`]).
+    #[inline]
+    pub fn body(&self, record: &LevelGameEntityRecord) -> &'static LevelCharacterRecord {
+        body_of(self.characters(), record)
+    }
+
+    /// The level's Characters ([`Self::set_characters`]).
+    pub fn characters(&self) -> &'static [LevelCharacterRecord] {
+        self.characters.unwrap_or(&[])
     }
 
     /// Remaining voluntary guard-swap cooldown for a living enemy.
@@ -1289,14 +1357,14 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             return 4096;
         }
         let elapsed = self.stance_swap_elapsed(index);
-        ((u32::from(elapsed) * 4096) / u32::from(GAME_ENTITY_STANCE_SWAP_DURATION_TICKS)).min(4096)
-            as u16
+        let duration = u32::from(self.swap_timing[index].swap_duration_ticks).max(1);
+        ((u32::from(elapsed) * 4096) / duration).min(4096) as u16
     }
 
     /// Whether the entity's rising stance-colour tell is still active.
     pub fn stance_swap_in_progress(&self, index: usize) -> bool {
         self.holds_fighter(index)
-            && self.stance_swap_elapsed(index) < u16::from(GAME_ENTITY_STANCE_SWAP_DURATION_TICKS)
+            && self.stance_swap_elapsed(index) < self.swap_timing[index].swap_duration_ticks
     }
 
     /// Half-second eye pulse, once per actual stance change. No pulse on spawn.
@@ -1309,7 +1377,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     }
 
     /// Health damage `damage` on `attack` would deal entity `index` under
-    /// the one stance rule (its record's opposite-stance multiplier). What
+    /// the one stance rule (its body's opposite-stance multiplier). What
     /// the pools then absorb can be less. Zero stays zero.
     pub fn scaled_stance_damage(
         &self,
@@ -1320,17 +1388,22 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     ) -> u16 {
         match (records.get(index), self.combatants.get(index)) {
             (Some(record), Some(combatant)) => {
-                stance_scaled(&record.combat, combatant.opposes(attack), damage, 0).0
+                stance_scaled(
+                    &self.body(record).combat,
+                    combatant.opposes(attack),
+                    damage,
+                    0,
+                )
+                .0
             }
             _ => damage,
         }
     }
 
-    /// Entity `index` as the target of a hit. Enemies carry no combat
-    /// windows and no dodge, so only the swap window can protect one, for
-    /// its record's `roll_invulnerable_frames` (the same field the player
-    /// character's swap window reads). An entity that never swaps never
-    /// enters it. `None` for an out of range slot.
+    /// Entity `index` as the target of a hit: its swap window for its
+    /// body's `roll_invulnerable_frames` (the field the player character's
+    /// swap window reads), its attack's authored `Invulnerable` window and
+    /// its roll's i-frames. `None` for an out of range slot.
     // Cold AI-side helper: one small copy on the PS1 instead of one per caller.
     #[inline(never)]
     #[cfg_attr(target_arch = "mips", optimize(size))]
@@ -1356,12 +1429,15 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     ) -> Defender<'a> {
         Defender {
             combatant,
-            swap_invulnerable_ticks: record.motion.roll_invulnerable_frames,
-            parry_ticks: record.combat.parry_ticks,
-            // The roll's i-frames, read from the motor exactly as the
-            // player's are. Enemies author no combat windows.
+            swap_invulnerable_ticks: self.body(record).roll_invulnerable_frames,
+            parry_ticks: self.body(record).combat.parry_ticks,
+            // The attack's authored `Invulnerable` window from its
+            // Character, on the attack's clock as the armour window is; the
+            // roll's i-frames from the motor exactly as the player's are.
             action: ActionProtection {
-                authored: None,
+                authored: self
+                    .attack_since(index)
+                    .and_then(|since| self.selected_timing(index).invulnerable_at(since)),
                 dodge: self.motors[index].is_action_invulnerable(self.motor_config(record)),
             },
         }
@@ -1430,12 +1506,12 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         let state = self.state(rival);
         CombatTarget {
             position: self.position(rival),
-            radius: i32::from(record.radius),
-            height: i32::from(record.height),
+            radius: i32::from(self.body(record).radius),
+            height: i32::from(self.body(record).height),
             noise_radius: movement_noise(
                 self.moving[rival] != 0,
                 self.moving[rival] > 1,
-                i32::from(record.height),
+                i32::from(self.body(record).height),
             ),
             defender: self.defender_with(record, rival, fighter),
             stance: Some(fighter.stance.active()),
@@ -1581,7 +1657,9 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         poise: u16,
     ) -> (u16, u16) {
         match (records.get(index), self.combatants.get(index)) {
-            (Some(record), Some(combatant)) => combatant.crit_scaled(&record.combat, damage, poise),
+            (Some(record), Some(combatant)) => {
+                combatant.crit_scaled(&self.body(record).combat, damage, poise)
+            }
             _ => (damage, poise),
         }
     }
@@ -1660,7 +1738,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     pub fn swap_stance(&mut self, record: &LevelGameEntityRecord, index: usize) -> bool {
         index < self.count()
             && Self::stance_moves(record).can_swap()
-            && self.combatants[index].request_swap(self.stance_swap_delay)
+            && self.combatants[index].request_swap(self.swap_timing[index].swap_cooldown_ticks)
     }
 
     /// Whether [`Self::swap_stance`] would swap entity `index` now: the
@@ -1675,7 +1753,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     /// Test hook: swap regardless of the moves rule.
     #[cfg(test)]
     fn mutate_stance(&mut self, index: usize) {
-        self.combatants[index].request_swap(self.stance_swap_delay);
+        self.combatants[index].request_swap(self.swap_timing[index].swap_cooldown_ticks);
     }
 
     fn capture_ranged_aim(&mut self, index: usize, input: GameEntityTickInput<'_>) {
@@ -1975,11 +2053,11 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     }
 
     /// Apply a hit to entity `index`: health damage on `channel` plus poise
-    /// damage, both through the one stance rule over the record's
+    /// damage, both through the one stance rule over its body's
     /// [`CombatStats`](psx_level::CombatStats): a hit from the stance
-    /// opposite the entity's active one takes the record's opposite-stance
+    /// opposite the entity's active one takes the body's opposite-stance
     /// multipliers, a matching hit lands as authored. Accumulated poise
-    /// damage past the record's capacity staggers.
+    /// damage past the body's capacity staggers.
     ///
     /// `channel` is the attack's vitality channel, which the player side
     /// derives from the swing (horizontal = Horizon, vertical = Zenith). The
@@ -2013,7 +2091,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         if state == GameEntityState::Dead {
             return GameEntityHitOutcome::MISS;
         }
-        let stats = records[index].combat;
+        let stats = self.body(&records[index]).combat;
         let poise = PoiseRule {
             armored: self.armoured(records, index),
             blocked: matches!(
@@ -2091,8 +2169,21 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             return false;
         };
         let timing = self.selected_timing(index);
+        crate::combatant::armoured(
+            &self.body(record).combat,
+            self.attack_since(index)
+                .and_then(|since| timing.armoured_at(since)),
+            self.state(index) == GameEntityState::Attack
+                && self.selected_attack_kind(index) == GAME_ENTITY_ATTACK_HEAVY,
+        )
+    }
+
+    /// Ticks since entity `index`'s attack started (windup, contact and
+    /// recovery on its attack's clock); None outside an attack.
+    fn attack_since(&self, index: usize) -> Option<u16> {
+        let timing = self.selected_timing(index);
         let ticks = self.state_ticks[index];
-        let since = match self.state(index) {
+        match self.state(index) {
             GameEntityState::Windup => Some(ticks),
             GameEntityState::Attack => Some(timing.windup.saturating_add(ticks)),
             GameEntityState::Recover => Some(
@@ -2102,13 +2193,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
                     .saturating_add(ticks),
             ),
             _ => None,
-        };
-        crate::combatant::armoured(
-            &record.combat,
-            since.and_then(|since| timing.armoured_at(since)),
-            self.state(index) == GameEntityState::Attack
-                && self.selected_attack_kind(index) == GAME_ENTITY_ATTACK_HEAVY,
-        )
+        }
     }
 
     /// Sweep the player's melee arc over the live entities: every
@@ -2181,7 +2266,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
                     arc,
                     self.px(entity),
                     self.pz(entity),
-                    i32::from(record.radius),
+                    i32::from(self.body(record).radius),
                 )
                 || occluded(entity, self.position(entity));
             if !skip {
@@ -2517,7 +2602,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             x: attack.position[0],
             z: attack.position[2],
             yaw: attack.yaw,
-            reach: i32::from(record.radius)
+            reach: i32::from(self.body(record).radius)
                 .saturating_add(player_radius.max(0))
                 .saturating_add(GAME_ENTITY_ATTACK_REACH_MARGIN),
             half_angle: GAME_ENTITY_ATTACK_HALF_ANGLE,
@@ -2620,7 +2705,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
                     index,
                     input,
                     i32::from(record.preferred_distance)
-                        .max(Self::attack_reach(record, input))
+                        .max(self.attack_reach(record, input))
                         .saturating_add(i32::from(record.spacing_tolerance)),
                 );
             if ready {
@@ -2776,7 +2861,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             x: self.px(index),
             z: self.pz(index),
             yaw: self.yaw_raw(index) as u16,
-            reach: Self::melee_attack_reach(record, input),
+            reach: self.melee_attack_reach(record, input),
             half_angle: GAME_ENTITY_ATTACK_HALF_ANGLE,
         };
         // The player hurtbox center is the motor position; its radius
@@ -2801,18 +2886,22 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
 
     /// Attack-band outer edge. Ranged attacks use their authored maximum;
     /// melee uses both body radii plus the close-in margin.
-    fn attack_reach(record: &LevelGameEntityRecord, input: GameEntityTickInput<'_>) -> i32 {
+    fn attack_reach(&self, record: &LevelGameEntityRecord, input: GameEntityTickInput<'_>) -> i32 {
         if Self::has_ranged_attack(record) {
             i32::from(record.attack_max_range)
         } else {
-            i32::from(record.radius)
+            i32::from(self.body(record).radius)
                 .saturating_add(input.target.radius.max(0))
                 .saturating_add(GAME_ENTITY_ATTACK_REACH_MARGIN)
         }
     }
 
-    fn melee_attack_reach(record: &LevelGameEntityRecord, input: GameEntityTickInput<'_>) -> i32 {
-        i32::from(record.radius)
+    fn melee_attack_reach(
+        &self,
+        record: &LevelGameEntityRecord,
+        input: GameEntityTickInput<'_>,
+    ) -> i32 {
+        i32::from(self.body(record).radius)
             .saturating_add(input.target.radius.max(0))
             .saturating_add(GAME_ENTITY_ATTACK_REACH_MARGIN)
     }
@@ -2824,7 +2913,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         input: GameEntityTickInput<'_>,
     ) -> bool {
         psx_math::int32::abs_i32(self.py(index).saturating_sub(input.target.position[1]))
-            <= i32::from(record.height)
+            <= i32::from(self.body(record).height)
                 .max(input.target.height)
                 .saturating_mul(2)
             && self.target_within(index, input, i32::from(record.aggro_radius))
@@ -2867,7 +2956,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             return false;
         }
         // Close peripheral awareness prevents touching an idle enemy unseen.
-        let close = i32::from(record.height).max(input.target.height);
+        let close = i32::from(self.body(record).height).max(input.target.height);
         if self.target_within(index, input, close) {
             return true;
         }
@@ -2886,7 +2975,8 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     ) -> bool {
         let from = [
             self.px(index),
-            self.py(index).saturating_add(i32::from(record.height) / 2),
+            self.py(index)
+                .saturating_add(i32::from(self.body(record).height) / 2),
             self.pz(index),
         ];
         let to = [
@@ -3035,9 +3125,9 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         if self.holds_attack(index) {
             self.set_intent(index, GameEntityIntent::Approach);
             let commit_reach = if melee_chase {
-                Self::melee_attack_reach(record, input)
+                self.melee_attack_reach(record, input)
             } else {
-                Self::attack_reach(record, input)
+                self.attack_reach(record, input)
             };
             if self.target_within(index, input, commit_reach)
                 && self.target_in_line_of_sight(record, index, input, mover)
@@ -3062,7 +3152,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         }
 
         if melee_chase && Self::has_ranged_attack(record) {
-            let melee_reach = Self::melee_attack_reach(record, input);
+            let melee_reach = self.melee_attack_reach(record, input);
             if !self.target_within(index, input, melee_reach) {
                 self.set_intent(index, GameEntityIntent::Approach);
                 self.step_toward(
@@ -3085,7 +3175,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         // standoff distance. Using it here kept hybrids retreating to their
         // firing ring during every cooldown, so they never closed for melee.
         let preferred =
-            i32::from(record.preferred_distance).max(Self::melee_attack_reach(record, input));
+            i32::from(record.preferred_distance).max(self.melee_attack_reach(record, input));
         let tolerance = i32::from(record.spacing_tolerance).min(preferred);
         let near_edge = preferred.saturating_sub(tolerance);
         let far_edge = preferred.saturating_add(tolerance);
@@ -3201,9 +3291,9 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     #[cfg_attr(target_arch = "mips", optimize(size))]
     fn motor_config(&self, record: &LevelGameEntityRecord) -> CharacterMotorConfig {
         crate::character::motion_motor_config(
-            i32::from(record.radius),
-            i32::from(record.height),
-            &record.motion,
+            i32::from(self.body(record).radius),
+            i32::from(self.body(record).height),
+            &self.body(record).motion(),
             Self::can_run(record),
             self.speed_scale,
         )
@@ -3226,9 +3316,9 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     /// or its run when `run`.
     fn pace_q8(&self, record: &LevelGameEntityRecord, run: bool) -> i32 {
         let speed = if run && Self::can_run(record) {
-            record.motion.run_speed
+            self.body(record).run_speed
         } else {
-            record.motion.walk_speed
+            self.body(record).walk_speed
         };
         crate::character::scaled_motion_speed(speed, self.speed_scale).max(1)
     }
@@ -3673,6 +3763,7 @@ mod tests {
                 active: 4,
                 recovery: 20,
                 armour: Some((6, 12)),
+                invulnerable: None,
             };
         assert!(!at(&mut entities, GameEntityState::Windup, 5));
         assert!(at(&mut entities, GameEntityState::Windup, 6));
@@ -3684,6 +3775,35 @@ mod tests {
         // A light attack has no armour of its own.
         entities.attack_mode[0] = GAME_ENTITY_ATTACK_LIGHT;
         assert!(!at(&mut entities, GameEntityState::Attack, 0));
+    }
+
+    #[test]
+    fn an_entity_attack_reads_its_characters_authored_invulnerable_window() {
+        static RECORDS: [LevelGameEntityRecord; 1] =
+            [test_record(0, 0, 0, 400, game_entity_flags::ENABLED)];
+        let mut entities = GameEntities::<4>::EMPTY;
+        entities.spawn_from_records(&RECORDS);
+        entities.attack_mode[0] = GAME_ENTITY_ATTACK_LIGHT;
+        let at = |entities: &mut GameEntities<4>, state, ticks| {
+            entities.state[0] = state as u8;
+            entities.state_ticks[0] = ticks;
+            entities.invulnerable(&RECORDS, 0)
+        };
+        // No authored window: nothing protects the attack.
+        assert!(!at(&mut entities, GameEntityState::Windup, 6));
+        // Ticks 6..12 from the attack's start, as the player's own window.
+        entities.attack_timings[0][usize::from(GAME_ENTITY_ATTACK_LIGHT)] =
+            crate::fighter_action::ActionTiming {
+                windup: 10,
+                active: 4,
+                recovery: 20,
+                armour: None,
+                invulnerable: Some((6, 12)),
+            };
+        assert!(!at(&mut entities, GameEntityState::Windup, 5));
+        assert!(at(&mut entities, GameEntityState::Windup, 6));
+        assert!(at(&mut entities, GameEntityState::Attack, 1));
+        assert!(!at(&mut entities, GameEntityState::Attack, 2));
     }
 
     #[test]
@@ -3699,6 +3819,7 @@ mod tests {
             active: 4,
             recovery: 21,
             armour: None,
+            invulnerable: None,
         };
         // Only the first entity's light attack has a clip with contact.
         entities.time_attacks(&RECORDS, |record, action, _, _, _| {
@@ -3846,7 +3967,7 @@ mod tests {
             kind: 1,
             targetname: 0,
             model_instance: psx_level::GAME_ENTITY_MODEL_INSTANCE_NONE,
-            character: psx_level::GAME_ENTITY_CHARACTER_NONE,
+            character: psx_level::CharacterIndex(BODY_STANDARD),
             idle_clip: 0,
             alert_clip: 9,
             turn_clip: 10,
@@ -3872,16 +3993,11 @@ mod tests {
             parried_clip: 4,
             roll_clip: 4,
             death_clip: 5,
-            combat_capsule_first: psx_level::CombatCapsuleIndex(0),
-            combat_capsule_count: 0,
             ranged_attack_action: CharacterAnimationAction::RangedAttack.to_index() as u8,
             x,
             y: 0,
             z,
             yaw: 0,
-            radius: 192,
-            height: 1024,
-            motion: test_motion(16, 48),
             patrol_x: x + patrol_dx,
             patrol_y: 0,
             patrol_z: z,
@@ -3904,15 +4020,112 @@ mod tests {
             attack_min_range: 0,
             attack_max_range: 0,
             touch_damage: 10,
-            combat: CombatStats {
-                poise: 50,
-                max_health: 100,
-                ..CombatStats::ENEMY
-            },
             soul_value: 0,
             flags,
         }
     }
+
+    /// The test entities' combat numbers: one 100 bar, poise 50, the old
+    /// enemy parry window of 3.
+    pub(super) const TEST_COMBAT: CombatStats = CombatStats {
+        poise: 50,
+        max_health: 100,
+        parry_ticks: 3,
+        ..CombatStats::DEFAULT
+    };
+
+    /// A test body: capsule, motion and combat numbers, the old fixed
+    /// 12-tick swap and no swap cooldown (what every test ran with before
+    /// bodies were Characters).
+    pub(super) const fn test_body(
+        radius: u16,
+        height: u16,
+        motion: psx_level::CharacterMotion,
+        combat: CombatStats,
+    ) -> LevelCharacterRecord {
+        LevelCharacterRecord {
+            radius,
+            height,
+            walk_speed: motion.walk_speed,
+            run_speed: motion.run_speed,
+            turn_speed_degrees_per_second: motion.turn_speed_degrees_per_second,
+            weight_q8: motion.weight_q8,
+            stamina_max_q12: motion.stamina_max_q12,
+            sprint_min_q12: motion.sprint_min_q12,
+            sprint_drain_q12: motion.sprint_drain_q12,
+            stamina_recover_q12: motion.stamina_recover_q12,
+            roll_cost_q12: motion.roll_cost_q12,
+            roll_speed: motion.roll_speed,
+            roll_active_frames: motion.roll_active_frames,
+            roll_recovery_frames: motion.roll_recovery_frames,
+            roll_invulnerable_frames: motion.roll_invulnerable_frames,
+            combat,
+            stance_swap_duration_ticks: 12,
+            stance_swap_cooldown_ticks: 0,
+            ..LevelCharacterRecord::DEFAULT_BODY
+        }
+    }
+
+    /// The bodies the test records link (by these indices).
+    pub(super) const BODY_STANDARD: u16 = 0;
+    pub(super) const BODY_TACTICAL: u16 = 1;
+    pub(super) const BODY_HYBRID: u16 = 2;
+    pub(super) const BODY_SMALL: u16 = 3;
+    pub(super) const BODY_NO_KNOCKDOWN: u16 = 4;
+    pub(super) const BODY_SHORT_SWAP: u16 = 5;
+    pub(super) const BODY_SUB_UNIT: u16 = 6;
+    const TACTICAL_MOTION: psx_level::CharacterMotion = psx_level::CharacterMotion {
+        walk_speed: 2 * 256,
+        run_speed: 6 * 256,
+        ..test_motion(16, 48)
+    };
+    pub(super) static TEST_BODIES: [LevelCharacterRecord; 7] = [
+        test_body(192, 1024, test_motion(16, 48), TEST_COMBAT),
+        // The two old 600 pools as one bar.
+        test_body(
+            14,
+            77,
+            TACTICAL_MOTION,
+            CombatStats {
+                max_health: 1200,
+                ..TEST_COMBAT
+            },
+        ),
+        test_body(14, 77, test_motion(1, 6), TEST_COMBAT),
+        test_body(12, 64, test_motion(16, 48), TEST_COMBAT),
+        // Knockdown off: a break then staggers.
+        test_body(
+            192,
+            1024,
+            test_motion(16, 48),
+            CombatStats {
+                knockdown_ticks: 0,
+                ..TEST_COMBAT
+            },
+        ),
+        test_body(
+            192,
+            1024,
+            psx_level::CharacterMotion {
+                roll_invulnerable_frames: 2,
+                ..test_motion(16, 48)
+            },
+            TEST_COMBAT,
+        ),
+        // The cooked training enemy's walk (512 Q8) at the 3/4 speed knob.
+        test_body(
+            14,
+            77,
+            psx_level::CharacterMotion {
+                walk_speed: 384,
+                ..TACTICAL_MOTION
+            },
+            CombatStats {
+                max_health: 1200,
+                ..TEST_COMBAT
+            },
+        ),
+    ];
 
     static IDLE_ENEMY: [LevelGameEntityRecord; 1] = [test_record(
         1000,
@@ -4125,7 +4338,7 @@ mod tests {
             e.scaled_stance_damage(&DUAL_ENEMY, 0, VitalityChannelId::Two, 40),
             50
         );
-        let capacity = DUAL_ENEMY[0].combat.poise;
+        let capacity = TEST_COMBAT.poise;
         assert!(
             !e.apply_hit(&DUAL_ENEMY, 0, VitalityChannelId::One, 1, capacity / 2)
                 .staggered
@@ -4292,9 +4505,7 @@ mod tests {
             z: 0,
             patrol_x: 0,
             patrol_z: 0,
-            radius: 14,
-            height: 77,
-            motion: test_motion(1, 6),
+            character: psx_level::CharacterIndex(BODY_HYBRID),
             aggro_radius: 146,
             preferred_distance: 48,
             spacing_tolerance: 8,
@@ -4341,7 +4552,7 @@ mod tests {
         for delta in [1, 2] {
             let mut e = GameEntities::<8, true>::EMPTY;
             e.spawn_from_records(&RANGED_ENEMY);
-            e.set_stance_swap_delay(300);
+            e.set_swap_cooldown_for_tests(300);
             let far = GameEntityTickInput {
                 target: CombatTarget {
                     position: [2550, 0, 1000],
@@ -4400,7 +4611,7 @@ mod tests {
     fn a_locked_stance_changes_spacing_instead_of_using_the_wrong_attack() {
         let mut e = GameEntities::<8, true>::EMPTY;
         e.spawn_from_records(&RANGED_ENEMY);
-        e.set_stance_swap_delay(300);
+        e.set_swap_cooldown_for_tests(300);
         e.mutate_stance(0);
         e.advance_stance_swap(0, 12);
         e.enter_state(
@@ -5118,7 +5329,7 @@ mod tests {
         entities.tick(&PATROL_ENEMY, far_input(), &mut OpenWorld);
         assert_eq!(
             entities.position(0)[0] - before,
-            (PATROL_ENEMY[0].motion.walk_speed >> 8),
+            (TEST_BODIES[0].walk_speed >> 8),
             "patrol leg advances at Character walk speed"
         );
 
@@ -5152,7 +5363,7 @@ mod tests {
         entities.tick(&IDLE_ENEMY, chase_input, &mut OpenWorld);
         assert_eq!(
             entities.position(0)[0] - before,
-            (IDLE_ENEMY[0].motion.run_speed >> 8),
+            (TEST_BODIES[0].run_speed >> 8),
             "chase closes at Character run speed"
         );
     }
@@ -5191,7 +5402,7 @@ mod tests {
         entities.tick(&WALK_ONLY_ENEMY, chase_input, &mut OpenWorld);
         assert_eq!(
             entities.position(0)[0] - before,
-            (WALK_ONLY_ENEMY[0].motion.walk_speed >> 8),
+            (TEST_BODIES[0].walk_speed >> 8),
             "a character without Run must approach at walk speed"
         );
         assert_eq!(
@@ -5455,8 +5666,7 @@ mod tests {
             patrol_x: 0,
             patrol_y: 0,
             patrol_z: 0,
-            height: 64,
-            radius: 12,
+            character: psx_level::CharacterIndex(BODY_SMALL),
             aggro_radius: 352,
             ..IDLE_ENEMY[0]
         }];
@@ -5542,8 +5752,7 @@ mod tests {
             patrol_x: 0,
             patrol_y: 0,
             patrol_z: 0,
-            height: 64,
-            radius: 12,
+            character: psx_level::CharacterIndex(BODY_SMALL),
             aggro_radius: 352,
             ..IDLE_ENEMY[0]
         }];
@@ -5649,10 +5858,7 @@ mod tests {
             stagger_frame_range: CharacterActionFrameRange { start: 0, end: 42 },
             stagger_ticks: 85,
             // Knockdown off: a break then staggers, which is what this pins.
-            combat: psx_level::CombatStats {
-                knockdown_ticks: 0,
-                ..test_record(0, 0, 0, 0, 0).combat
-            },
+            character: psx_level::CharacterIndex(BODY_NO_KNOCKDOWN),
             ..test_record(1000, 1000, 0, 512, game_entity_flags::ENABLED)
         }];
         let mut entities = GameEntities::<8>::EMPTY;
@@ -5697,7 +5903,7 @@ mod tests {
         );
         assert_eq!(entities.state(0), GameEntityState::KnockedDown);
         assert!(outcome.connected && outcome.staggered && outcome.knocked_down);
-        for _ in 0..IDLE_ENEMY[0].combat.knockdown_ticks {
+        for _ in 0..TEST_COMBAT.knockdown_ticks {
             entities.tick(&IDLE_ENEMY, far_input(), &mut OpenWorld);
         }
         assert_eq!(entities.state(0), GameEntityState::Aggro);
@@ -5717,11 +5923,6 @@ mod tests {
     /// The shipped cortex enemy shape: the two old 50-point pools as one
     /// 100 bar.
     static EVEN_ENEMY: [LevelGameEntityRecord; 1] = [LevelGameEntityRecord {
-        combat: CombatStats {
-            max_health: 100,
-            poise: 50,
-            ..CombatStats::ENEMY
-        },
         ..test_record(
             1000,
             1000,
@@ -5733,11 +5934,6 @@ mod tests {
 
     /// The old two-pool test actor (60 and 40) as its one 100 bar.
     static DUAL_ENEMY: [LevelGameEntityRecord; 1] = [LevelGameEntityRecord {
-        combat: CombatStats {
-            max_health: 100,
-            poise: 50,
-            ..CombatStats::ENEMY
-        },
         ..test_record(
             1000,
             1000,
@@ -5807,7 +6003,7 @@ mod tests {
         for delta in [1, 2] {
             let mut e = GameEntities::<8>::EMPTY;
             e.spawn_from_records(&DUAL_ENEMY);
-            e.set_stance_swap_delay(900);
+            e.set_swap_cooldown_for_tests(900);
             e.mutate_stance(0);
             assert_eq!(e.stance_swap_cooldown(0), 900);
             for elapsed in (delta..900).step_by(usize::from(delta)) {
@@ -6013,7 +6209,7 @@ mod tests {
         e.spawn_from_records(&DUAL_ENEMY);
         assert_eq!(e.stance_eye_pulse_q12(0), None);
         assert_eq!(e.stance_eye_pulse_q12(99), None);
-        e.set_stance_swap_delay(60);
+        e.set_swap_cooldown_for_tests(60);
         e.mutate_stance(0);
         assert_eq!(e.stance_eye_pulse_q12(0), Some(0));
         e.advance_stance_swap(0, 12);
@@ -6219,7 +6415,7 @@ mod tests {
         let full = entities.health(0);
         entities.mutate_stance(0);
         // Past the parry window (its own test pins that part).
-        let parry = EVEN_ENEMY[0].combat.parry_ticks;
+        let parry = TEST_COMBAT.parry_ticks;
         entities.advance_stance_swap(0, parry + 1);
         let mut swing = 0u64;
         for _ in parry + 1..=u16::from(TEST_SWAP_INVULNERABLE_TICKS) {
@@ -6266,10 +6462,7 @@ mod tests {
     #[test]
     fn an_enemy_reads_its_swap_window_from_its_own_record() {
         static SHORT: [LevelGameEntityRecord; 1] = [LevelGameEntityRecord {
-            motion: psx_level::CharacterMotion {
-                roll_invulnerable_frames: 2,
-                ..EVEN_ENEMY[0].motion
-            },
+            character: psx_level::CharacterIndex(BODY_SHORT_SWAP),
             ..EVEN_ENEMY[0]
         }];
         let mut entities = GameEntities::<8>::EMPTY;

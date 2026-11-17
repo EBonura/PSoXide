@@ -200,11 +200,14 @@ fn target_ui_value(
     match binding {
         LevelUiValueBinding::TargetHealth => {
             Some(target.zip(record).map_or(0, |(index, record)| {
-                health_q12(entities.health(index), record.combat.max_health)
+                health_q12(
+                    entities.health(index),
+                    entities.body(record).combat.max_health,
+                )
             }))
         }
         LevelUiValueBinding::TargetHealthMax => Some(record.map_or(0, |record| {
-            if record.combat.max_health == 0 {
+            if entities.body(record).combat.max_health == 0 {
                 0
             } else {
                 PLAYER_HEALTH_MAX_Q12
@@ -212,11 +215,14 @@ fn target_ui_value(
         })),
         LevelUiValueBinding::TargetEnergy => {
             Some(target.zip(record).map_or(0, |(index, record)| {
-                health_q12(entities.energy(index), record.combat.energy_max)
+                health_q12(
+                    entities.energy(index),
+                    entities.body(record).combat.energy_max,
+                )
             }))
         }
         LevelUiValueBinding::TargetEnergyMax => Some(record.map_or(0, |record| {
-            if record.combat.energy_max == 0 {
+            if entities.body(record).combat.energy_max == 0 {
                 0
             } else {
                 PLAYER_HEALTH_MAX_Q12
@@ -240,6 +246,7 @@ mod target_ui_tests {
     fn target_bindings_resolve_live_pools_guard_and_absence() {
         assert!(!GAME_ENTITIES.is_empty(), "cortex fixture has an enemy");
         let mut entities = RuntimeGameEntities::EMPTY;
+        entities.set_characters(&CHARACTERS[..]);
         entities.spawn_from_records(GAME_ENTITIES.as_slice());
         let record = &GAME_ENTITIES[0];
 
@@ -262,7 +269,7 @@ mod target_ui_tests {
 
         entities.apply_hit(GAME_ENTITIES.as_slice(), 0, VitalityChannelId::One, 10, 0);
         let expected = (i32::from(entities.health(0)) * PLAYER_HEALTH_MAX_Q12)
-            / i32::from(record.combat.max_health);
+            / i32::from(entities.body(&GAME_ENTITIES[0]).combat.max_health);
         assert_eq!(
             target_ui_value(LevelUiValueBinding::TargetHealth, &entities, Some(0)),
             Some(expected)
@@ -1610,8 +1617,9 @@ impl Scene for Playtest {
             else {
                 continue;
             };
-            let first = entity.combat_capsule_first.to_usize();
-            let end = first + usize::from(entity.combat_capsule_count);
+            let capsule_body = self.game_entities.body(entity);
+            let first = capsule_body.combat_capsule_first.to_usize();
+            let end = first + usize::from(capsule_body.combat_capsule_count);
             let Some(capsules) = COMBAT_CAPSULES.get(first..end) else {
                 continue;
             };
@@ -1795,7 +1803,11 @@ impl Scene for Playtest {
             {
                 if let Some(record) = GAME_ENTITIES.get(target_index) {
                     let [x, y, z] = self.game_entities.position(target_index);
-                    let head = RoomPoint::new(x, y.saturating_add(i32::from(record.height)), z);
+                    let head = RoomPoint::new(
+                        x,
+                        y.saturating_add(i32::from(self.game_entities.body(record).height)),
+                        z,
+                    );
                     if let Some(projected) = camera.project_world(head) {
                         let active = self.game_entities.stance(target_index);
                         let share = |current: u16, maximum: u16| {
@@ -1807,11 +1819,11 @@ impl Scene for Playtest {
                         };
                         let health = share(
                             self.game_entities.health(target_index),
-                            record.combat.max_health,
+                            self.game_entities.body(record).combat.max_health,
                         );
                         let energy = share(
                             self.game_entities.energy(target_index),
-                            record.combat.energy_max,
+                            self.game_entities.body(record).combat.energy_max,
                         );
                         if self.is_locked() {
                             if let Some(center) = self

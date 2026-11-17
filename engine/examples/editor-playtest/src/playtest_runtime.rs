@@ -1053,11 +1053,7 @@ impl Playtest {
         // calls re-run on future checkpoint respawns), then push the
         // initial door states onto their box props (START_ON doors
         // begin open without a fire event).
-        self.game_entities
-            .spawn_from_records_with_ids(GAME_ENTITIES.as_slice(), GAME_ENTITY_IDS.as_slice());
-        self.entity_attacks_timed = false;
-        self.game_entities
-            .set_stance_swap_delay(self.player_stance_config.swap_cooldown_ticks);
+        self.spawn_entities();
         self.deferred_enemy_attacks.clear();
         self.combat_projectiles.clear();
         self.combat_projectile_impacts.clear();
@@ -1071,7 +1067,10 @@ impl Playtest {
         self.logic_fired_reported = 0;
         // Playtest lives in a zeroed MaybeUninit, so the combatant is set
         // explicitly on every reset rather than relying on the zero pattern.
-        self.game_entities.actor_mut().reset(&self.player_stats);
+        let kits = self.player_kits();
+        self.game_entities
+            .actor_mut()
+            .reset(&self.player_stats, kits);
         self.camera_recenter_requested = false;
         self.ranged_ready = combat_input::RangedReady::EMPTY;
         self.aim_control = aim_control::AimControl::EMPTY;
@@ -1093,10 +1092,24 @@ impl Playtest {
         self.clear_actor_pose_snapshots();
     }
 
+    /// Spawn every entity from the cooked tables, each with its own
+    /// Character as its body, and give the actor slot her swap timing.
+    fn spawn_entities(&mut self) {
+        self.game_entities.set_characters(&CHARACTERS[..]);
+        self.game_entities
+            .spawn_from_records_with_ids(GAME_ENTITIES.as_slice(), GAME_ENTITY_IDS.as_slice());
+        self.entity_attacks_timed = false;
+        self.game_entities
+            .set_swap_timing(RuntimeGameEntities::ACTOR_SLOT, self.player_stance_config);
+    }
+
     /// Start a fresh combat life without changing checkpoints or collected items.
     /// In-flight shots and queued inputs belong to the old life, not the spawn.
     fn reset_life_combat(&mut self) {
-        self.game_entities.actor_mut().reset(&self.player_stats);
+        let kits = self.player_kits();
+        self.game_entities
+            .actor_mut()
+            .reset(&self.player_stats, kits);
         self.ranged_ready = combat_input::RangedReady::EMPTY;
         self.aim_control = aim_control::AimControl::EMPTY;
         self.combat_projectiles.clear();
@@ -1119,11 +1132,7 @@ impl Playtest {
     /// persistent doors and levers keep what the player did to them, box
     /// props reset. A death and a rest at a checkpoint both do this.
     fn rearm_world(&mut self) {
-        self.game_entities
-            .spawn_from_records_with_ids(GAME_ENTITIES.as_slice(), GAME_ENTITY_IDS.as_slice());
-        self.entity_attacks_timed = false;
-        self.game_entities
-            .set_stance_swap_delay(self.player_stance_config.swap_cooldown_ticks);
+        self.spawn_entities();
         self.logic.init_from_records(LOGIC.as_slice());
         self.restore_persistent_logic();
         // The logic runtime restarts its rolling fired total with the
@@ -1479,7 +1488,7 @@ impl Playtest {
                 .riposte(GAME_ENTITIES.as_slice(), attacker, CombatantId::PLAYER);
         self.spawn_combat_hit_sparks(
             self.game_entities.position(attacker),
-            record.height,
+            self.game_entities.body(record).height,
             record.room,
             false,
             outcome.staggered,
@@ -1502,9 +1511,12 @@ impl Playtest {
         self.duel_log_event(ctx, 1, duel::DUEL_EVENT_PARRY);
         let now = self.gameplay_tick(ctx.sim_tick);
         self.damage_numbers.spawn(
-            struck_actor_anchor(self.game_entities.position(index), record.height),
+            struck_actor_anchor(
+                self.game_entities.position(index),
+                self.game_entities.body(record).height,
+            ),
             record.room,
-            record.combat.parry_refund,
+            self.game_entities.body(record).combat.parry_refund,
             DamageNumberChannel::Parry,
             now,
         );
@@ -1514,7 +1526,7 @@ impl Playtest {
         let player = self.game_entities.actor_motor().position();
         self.spawn_parry_burst(
             self.game_entities.position(index),
-            record.height,
+            self.game_entities.body(record).height,
             Some([player.x, player.y, player.z]),
             record.room,
             zenith,
@@ -1699,7 +1711,7 @@ impl Playtest {
                 .start_flash(index, &COMBAT_FEEDBACK, hit.kind, hit.zenith);
             (
                 self.game_entities.position(index),
-                record.height,
+                self.game_entities.body(record).height,
                 record.room,
             )
         };
@@ -2160,8 +2172,9 @@ impl Playtest {
             if !attack.is_ranged() {
                 continue;
             }
-            let first = entity.combat_capsule_first.to_usize();
-            let end = first.saturating_add(usize::from(entity.combat_capsule_count));
+            let capsule_body = self.game_entities.body(entity);
+            let first = capsule_body.combat_capsule_first.to_usize();
+            let end = first.saturating_add(usize::from(capsule_body.combat_capsule_count));
             let capsules = COMBAT_CAPSULES.get(first..end).unwrap_or(&[]);
             let pose = self
                 .instance_actor_poses
@@ -3111,7 +3124,7 @@ mod combat_verbs_tests;
 #[cfg(test)]
 mod life_reset_tests {
     use super::*;
-    const PLAYER_MAX_HEALTH: u16 = CombatStats::PLAYER.max_health;
+    const PLAYER_MAX_HEALTH: u16 = CombatStats::DEFAULT.max_health;
     use psx_game_runtime::fighter_anim::AnimSwitch;
     use psx_game_runtime::projectiles::{CombatTeam, ProjectileSpawn};
 
@@ -3538,11 +3551,19 @@ mod life_reset_tests {
         // there is no other pool to swap into.
         assert!(scene.apply_untyped_player_damage(1000));
         assert!(scene.game_entities.actor().defeated());
-        scene.game_entities.actor_mut().reset(&scene.player_stats);
+        let kits = scene.player_kits();
+        scene
+            .game_entities
+            .actor_mut()
+            .reset(&scene.player_stats, kits);
         assert!(scene.apply_hazard_player_damage(1000));
         assert!(scene.game_entities.actor_mut().defeated());
         // A small hit takes only what it deals.
-        scene.game_entities.actor_mut().reset(&scene.player_stats);
+        let kits = scene.player_kits();
+        scene
+            .game_entities
+            .actor_mut()
+            .reset(&scene.player_stats, kits);
         assert!(!scene.apply_hazard_player_damage(10));
         assert!(!scene.game_entities.actor_mut().defeated());
         assert_eq!(

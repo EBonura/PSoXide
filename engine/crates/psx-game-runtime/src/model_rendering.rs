@@ -993,6 +993,7 @@ pub fn action_timing(
     frame_range: psx_level::CharacterActionFrameRange,
     contact: (u16, u16),
     armour: Option<(u16, u16)>,
+    invulnerable: Option<(u16, u16)>,
 ) -> Option<crate::fighter_action::ActionTiming> {
     let start = animation_phase_at_tick_q12(animation, 0, video_hz, false, speed_q8, frame_range);
     let next = animation_phase_at_tick_q12(animation, 1, video_hz, false, speed_q8, frame_range);
@@ -1003,23 +1004,19 @@ pub fn action_timing(
         rate,
         contact,
     )?;
-    Some(match armour {
-        Some(window) => timing.with_armour(start, rate, window),
-        None => timing,
-    })
+    Some(timing.with_windows(start, rate, armour, invulnerable))
 }
 
-/// The authored `Armored` window of `action` among a character's combat
-/// windows: its frames, first excluded. None when it authors none.
-pub fn armour_window(
+/// The authored window of channel `kind` for `action` among a character's
+/// combat windows: its frames, first excluded. None when it authors none.
+pub fn authored_window(
     windows: &[psx_level::CharacterCombatWindow],
     action: psx_level::CharacterAnimationAction,
+    kind: psx_level::CombatWindowKind,
 ) -> Option<(u16, u16)> {
     windows
         .iter()
-        .find(|w| {
-            w.action == action.to_index() as u8 && w.kind == psx_level::CombatWindowKind::Armored
-        })
+        .find(|w| w.action == action.to_index() as u8 && w.kind == kind)
         .map(|w| (w.start, w.end))
 }
 

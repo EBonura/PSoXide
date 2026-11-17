@@ -1674,10 +1674,6 @@ pub struct PlaytestGameEntity {
     pub roll_clip: u16,
     /// Death one-shot clip.
     pub death_clip: u16,
-    /// First rig-attached volume in [`PlaytestPackage::combat_capsules`].
-    pub combat_capsule_first: u16,
-    /// Number of rig-attached volumes.
-    pub combat_capsule_count: u8,
     /// Compact `CharacterAnimationAction` index owning the projectile emitter.
     pub ranged_attack_action: u8,
     /// Room-local spawn X.
@@ -1688,13 +1684,6 @@ pub struct PlaytestGameEntity {
     pub z: i32,
     /// Spawn yaw, PSX angle units.
     pub yaw: i16,
-    /// Body cylinder radius, engine units (Character-bound).
-    pub radius: u16,
-    /// Body cylinder height, engine units (Character-bound).
-    pub height: u16,
-    /// How it moves: its Character Controller's motion numbers, the same
-    /// ones the player's motor reads.
-    pub motion: psx_level::CharacterMotion,
     /// Patrol anchor one, room-local (== spawn when unauthored).
     pub patrol: [i32; 3],
     /// 60 Hz ticks idled at a reached patrol anchor.
@@ -1736,9 +1725,6 @@ pub struct PlaytestGameEntity {
     pub attack_max_range: u16,
     /// Touch/melee damage.
     pub touch_damage: u16,
-    /// Health, poise, stance multipliers and energy, cooked by
-    /// [`crate::CombatStats::cooked`] exactly as the player's are.
-    pub combat: psx_level::CombatStats,
     /// Souls credited to the player for the killing blow. Zero grants none.
     pub soul_value: u16,
     /// Runtime flags from `psx_level::game_entity_flags`.
