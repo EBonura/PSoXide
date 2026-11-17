@@ -21,6 +21,9 @@ cd-stream-benchmark = ["cd-stream-bench"]
 # the helper is intentionally explicit and sizeable on MIPS, and is only useful
 # while tuning authored collision bounds.
 collision-debug-overlay = []
+# Host duel harness only (tools/psoxide-duel): placeholder numbers that are code
+# constants become settings a sensitivity sweep can nudge. Never in a game build.
+harness = []
 # Counters of the far panels for a replay to read (`PANEL_COUNTERS` fills more of itself,
 # the stream tallies what the screen shows against what has a picture): measurement builds
 # only, it costs code and time.

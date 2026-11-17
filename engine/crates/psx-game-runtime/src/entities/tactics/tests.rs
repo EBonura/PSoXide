@@ -1129,3 +1129,86 @@ fn a_committed_swing_reads_its_record_contact_ticks() {
         Some(first - clip.phase_ticks - 5)
     );
 }
+
+/// An owner that drives entity 0 itself through the possession seam
+/// ([`FighterWorld::controller_intent`]), over open ground.
+struct Possessed(CombatIntent);
+
+impl FighterWorld for Possessed {
+    fn move_body(
+        &mut self,
+        entity: usize,
+        room: RoomIndex,
+        motor: &mut CharacterMotorState,
+        input: CharacterMotorInput,
+        config: CharacterMotorConfig,
+        delta: u16,
+    ) -> CharacterMotorFrame {
+        crate::entities::OpenWorld.move_body(entity, room, motor, input, config, delta)
+    }
+
+    fn push_body(
+        &mut self,
+        entity: usize,
+        room: RoomIndex,
+        position: [i32; 3],
+        dx: i32,
+        dz: i32,
+        radius: i32,
+        height: i32,
+    ) -> [i32; 3] {
+        crate::entities::OpenWorld.push_body(entity, room, position, dx, dz, radius, height)
+    }
+
+    fn controller_intent(&mut self, _entity: usize) -> Option<CombatIntent> {
+        Some(self.0)
+    }
+}
+
+#[test]
+fn a_possessed_entity_runs_its_owners_intent_instead_of_its_tactics() {
+    use crate::combat_intent::{CombatAction, CombatActions, CombatMove};
+    let target = [0, 0, 400];
+    // Left to its tactics, the entity closes on the target.
+    let mut free = engaged();
+    free.combatants[0].stance.set_swap_cooldown(6000);
+    free.attack_cooldown[0] = 600;
+    for _ in 0..20 {
+        tick(&mut free, &mut Arena::default(), target, 2);
+    }
+    assert!(free.pz(0) > 0, "the tactics approach");
+    // Possessed by a pad that asks nothing, it stays where it is.
+    let mut held = engaged();
+    held.combatants[0].stance.set_swap_cooldown(6000);
+    held.attack_cooldown[0] = 600;
+    let start = held.position(0);
+    let mut idle = Possessed(CombatIntent::IDLE);
+    for _ in 0..20 {
+        held.tick_delta(&ENEMY, input(target), &mut idle, 2);
+    }
+    assert_eq!(held.position(0), start, "an idle pad holds it");
+    // A pad pushing along -x moves it that way, away from the target.
+    let mut away = Possessed(CombatIntent {
+        movement: CombatMove::Move {
+            x: -4096,
+            z: 0,
+            forward: 0,
+        },
+        ..CombatIntent::IDLE
+    });
+    for _ in 0..20 {
+        held.tick_delta(&ENEMY, input(target), &mut away, 2);
+    }
+    assert!(
+        held.px(0) < start[0],
+        "the pad's direction, not the tactics'"
+    );
+    assert!(held.pz(0) <= start[2]);
+    // A pad's strike starts the same windup the tactics would.
+    let mut strike = Possessed(CombatIntent {
+        pressed: CombatActions::of(CombatAction::LightAttack),
+        ..CombatIntent::IDLE
+    });
+    held.tick_delta(&ENEMY, input(target), &mut strike, 2);
+    assert_eq!(held.state(0), GameEntityState::Windup);
+}

@@ -265,6 +265,18 @@ pub trait FighterWorld {
     fn line_of_sight(&mut self, _room: RoomIndex, _from: [i32; 3], _to: [i32; 3]) -> bool {
         true
     }
+
+    /// The intent of an owner that drives entity `entity` itself this think
+    /// (a pad, a script): the possession seam. The entity's tactical
+    /// controller then sits the think out and the rules run this intent
+    /// exactly as they run the controller's, so whoever drives a fighter,
+    /// the same rules move, swap, strike and shoot it. Only a tactical
+    /// record in combat asks. `None` (the default) lets the tactical
+    /// controller decide; a game that never possesses keeps the default and
+    /// pays nothing for it.
+    fn controller_intent(&mut self, _entity: usize) -> Option<crate::combat_intent::CombatIntent> {
+        None
+    }
 }
 
 /// Collision provider with nothing in it: no floor, no walls. A motor over

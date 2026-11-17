@@ -1,0 +1,28 @@
+[package]
+name    = "psoxide-duel"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+description = "Headless host duel harness: any two fighters of a project, each driven by the enemy AI or a scripted pad, on the shared combat rules and motor"
+
+[dependencies]
+# `harness` turns the code-constant placeholders (DRY_CYCLES) into settings a
+# sensitivity sweep can nudge. Host only: no game build enables it.
+psx-game-runtime = { path = "../../engine/crates/psx-game-runtime", features = ["harness"] }
+psx-engine       = { path = "../../engine/crates/psx-engine" }
+psx-level        = { path = "../../engine/crates/psx-level", features = ["wire"] }
+psx-asset        = { path = "../../sdk/crates/psx-asset" }
+psx-math         = { path = "../../sdk/crates/psx-math" }
+psxed-project    = { path = "../../crates/psxed-project" }
+serde_json       = { workspace = true }
+
+[lib]
+name = "psoxide_duel"
+path = "src/lib.rs"
+
+[[bin]]
+name = "psoxide-duel"
+path = "src/main.rs"
+
+[lints]
+workspace = true

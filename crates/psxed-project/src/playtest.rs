@@ -63,6 +63,9 @@ pub use grid_world::{
     room_card_eye, CardInputs, CookedLevelBytes, MaterialBinding,
 };
 mod level_records;
+/// A level's records as the runtime decodes them (the host duel harness reads
+/// its fighters from here).
+pub use level_records::OwnedLevelRecords;
 mod manifest;
 mod mesh_sockets;
 /// The hook entities a world's mesh sockets cook to (for the grid tests).

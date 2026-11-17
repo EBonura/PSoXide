@@ -642,7 +642,10 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         delta: u16,
         stats: &mut GameEntityTickStats,
     ) {
-        let plan = self.decide_tactical(r, i, input, mover, delta, stats);
+        let plan = match mover.controller_intent(i) {
+            Some(intent) => TacticalPlan::run(intent),
+            None => self.decide_tactical(r, i, input, mover, delta, stats),
+        };
         let before = self.position(i);
         let requested = plan.intent.movement != CombatMove::Still;
         let frame = self.apply_intent(r, i, plan.intent, mover, delta, stats);

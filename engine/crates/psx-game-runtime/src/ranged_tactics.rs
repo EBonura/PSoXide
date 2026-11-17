@@ -74,6 +74,26 @@ impl EvadeMove {
 /// space. PLACEHOLDER, the duel harness tunes it.
 pub const DRY_CYCLES: u8 = 2;
 
+/// The duel harness's setting of [`DRY_CYCLES`] (host builds with the
+/// `harness` feature only), so a sensitivity sweep can nudge it without a
+/// rebuild. A game build never has it: there the constant is read directly.
+#[cfg(feature = "harness")]
+pub static DRY_CYCLES_SETTING: core::sync::atomic::AtomicU8 =
+    core::sync::atomic::AtomicU8::new(DRY_CYCLES);
+
+/// The dry cycles in force: [`DRY_CYCLES`], or the harness's setting.
+#[inline(always)]
+fn dry_cycles() -> u8 {
+    #[cfg(feature = "harness")]
+    {
+        DRY_CYCLES_SETTING.load(core::sync::atomic::Ordering::Relaxed)
+    }
+    #[cfg(not(feature = "harness"))]
+    {
+        DRY_CYCLES
+    }
+}
+
 /// Fixed storage, including an incremental search rather than an unbounded frame spike.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RangedExchange {
@@ -156,7 +176,7 @@ impl RangedExchange {
     /// exchange has run dry.
     fn decided(&mut self, from: [i32; 3]) -> RangedOrder {
         let mut order = self.order(from);
-        if self.dry >= DRY_CYCLES {
+        if self.dry >= dry_cycles() {
             self.dry = 0;
             order.contest = true;
         }
