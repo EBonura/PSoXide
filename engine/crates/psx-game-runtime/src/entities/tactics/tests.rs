@@ -1208,7 +1208,7 @@ fn think_and_show(
     e.tick_delta(records, input(target), &mut Arena::default(), 2);
     *now += 2;
     e.update_animation(records, SimTick::from_u32(*now), |_, _| 40);
-    e.animation(records, 0)
+    e.animation(0)
 }
 
 #[test]
@@ -1309,14 +1309,14 @@ fn a_clip_change_crossfades_and_carries_the_stride() {
     for _ in 0..8 {
         think_and_show(&mut e, &records[..], [0, 0, 100], &mut now);
     }
-    let strafing = e.animation(&records[..], 0).clip;
+    let strafing = e.animation(0).clip;
     assert_eq!(strafing.clip, records[0].strafe_right_clip);
     // The motor now reports a backward walk: gait to gait, the stride keeps
     // its place in the cycle (both clips 40 ticks here) and the strafe fades.
     e.motor_anims[0] = CharacterMotorAnim::WalkBackward;
     now += 2;
     e.update_animation(&records[..], SimTick::from_u32(now), |_, _| 40);
-    let shown = e.animation(&records[..], 0);
+    let shown = e.animation(0);
     assert_eq!(shown.clip.clip, records[0].walk_backward_clip);
     assert_eq!(shown.clip.phase_ticks % 40, (strafing.phase_ticks + 2) % 40);
     let (from, weight) = shown.fade.expect("a gait change crossfades");
@@ -1328,7 +1328,7 @@ fn a_clip_change_crossfades_and_carries_the_stride() {
     e.update_animation(&records[..], SimTick::from_u32(now), |_, _| 40);
     now += 2;
     e.update_animation(&records[..], SimTick::from_u32(now), |_, _| 40);
-    let shown = e.animation(&records[..], 0);
+    let shown = e.animation(0);
     assert_eq!(shown.clip.clip, records[0].idle_clip);
     let (from, weight) = shown.fade.expect("a stop crossfades");
     assert_eq!(from.clip, records[0].walk_backward_clip);

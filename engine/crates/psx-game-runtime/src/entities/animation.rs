@@ -75,6 +75,15 @@ pub struct GameEntityAnimation {
     pub legs: Option<(GameEntityClip, u16)>,
 }
 
+impl GameEntityAnimation {
+    /// Nothing resolved yet: the default clip, no layer.
+    pub const NONE: Self = Self {
+        clip: EntityAnim::NONE.clip,
+        fade: None,
+        legs: None,
+    };
+}
+
 impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
     /// The locomotion entity `i` shows: what its motor's latest frame asked
     /// for (the motor reports idle for a requested move only when it was
@@ -160,33 +169,26 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
             // clock) is where its phase reads as zero.
             self.body_starts[i] =
                 SimTick::from_u32(now.as_u32().wrapping_sub(u32::from(clip.phase_ticks)));
+            let fade = self.bodies[i]
+                .fade(now)
+                .filter(|fade| fade.from != EntityAnim::NONE)
+                .map(|fade| (fade.from.at(fade.local_tick as u16), fade.alpha_q12));
+            self.shown[i] = GameEntityAnimation {
+                clip,
+                fade,
+                legs: self.moving_legs(i),
+            };
         }
     }
 
-    /// What entity `index` shows at the latest [`Self::update_animation`].
-    pub fn animation(
-        &self,
-        records: &'static [LevelGameEntityRecord],
-        index: usize,
-    ) -> GameEntityAnimation {
-        let clip = self.clip_for_state(records, index);
-        if index >= self.count() || index >= records.len() {
-            return GameEntityAnimation {
-                clip,
-                fade: None,
-                legs: None,
-            };
-        }
-        let now = self.anim_clock;
-        let fade = self.bodies[index]
-            .fade(now)
-            .filter(|fade| fade.from != EntityAnim::NONE)
-            .map(|fade| (fade.from.at(fade.local_tick as u16), fade.alpha_q12));
-        GameEntityAnimation {
-            clip,
-            fade,
-            legs: self.moving_legs(index),
-        }
+    /// What entity `index` shows, as the latest [`Self::update_animation`]
+    /// resolved it (resolved once per tick, read by every consumer).
+    pub fn animation(&self, index: usize) -> GameEntityAnimation {
+        self.shown
+            .get(index)
+            .copied()
+            .filter(|_| index < self.count())
+            .unwrap_or(GameEntityAnimation::NONE)
     }
 
     /// The gait on entity `index`'s legs while it winds up, fires or

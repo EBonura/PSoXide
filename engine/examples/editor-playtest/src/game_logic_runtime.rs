@@ -2724,9 +2724,7 @@ impl Playtest {
             // before presentation freezes. The deferred token retains the
             // exact attack clip/phase that contact evaluates, so body and
             // equipment visibly sample that same pose this tick.
-            let animation = self
-                .game_entities
-                .animation(GAME_ENTITIES.as_slice(), index);
+            let animation = self.game_entities.animation(index);
             let clip = self
                 .deferred_enemy_attacks
                 .as_slice()

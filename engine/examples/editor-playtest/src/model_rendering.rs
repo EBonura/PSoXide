@@ -1070,11 +1070,7 @@ impl Playtest {
             if let (Some(pose), Some((entity, _))) = (self.instance_actor_poses[index], owner) {
                 let legs = pose.model().body_masks.legs;
                 if legs != 0 {
-                    if let Some((gait, weight)) = self
-                        .game_entities
-                        .animation(GAME_ENTITIES.as_slice(), entity)
-                        .legs
-                    {
+                    if let Some((gait, weight)) = self.game_entities.animation(entity).legs {
                         if let Some(animation) = pose
                             .model()
                             .clip(&self.clips, psx_level::ModelClipIndex(gait.clip))

@@ -313,7 +313,7 @@ fn a_sub_unit_strafe_keeps_one_gait_on_one_clock_for_her_and_an_enemy() {
         }
         // Theirs: the same mapping and track, at the presentation tick.
         enemy.update_animation(records, now, |_, _| 40);
-        let shown = enemy.animation(records, 0);
+        let shown = enemy.animation(0);
         assert_eq!(theirs.anim, hers.anim, "think {think}");
         if think == 0 {
             continue;

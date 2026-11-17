@@ -774,6 +774,9 @@ pub struct GameEntities<
     gaits: [crate::fighter_anim::AnimTrack<EntityAnim>; MAX_ENTITIES],
     /// The tick of the latest [`Self::update_animation`].
     anim_clock: psx_engine::SimTick,
+    /// What each entity shows, as the latest [`Self::update_animation`]
+    /// resolved it.
+    shown: [GameEntityAnimation; MAX_ENTITIES],
     /// Owner-supplied per-record activation (area residency).
     // psx-numeric-allow-next-line: fixed 64-record activation mask; bit ops only, two-word on R3000
     spatial_active_mask: u64,
@@ -1056,6 +1059,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         body_starts: [psx_engine::SimTick::ZERO; MAX_ENTITIES],
         gaits: [crate::fighter_anim::AnimTrack::new(EntityAnim::NONE); MAX_ENTITIES],
         anim_clock: psx_engine::SimTick::ZERO,
+        shown: [GameEntityAnimation::NONE; MAX_ENTITIES],
         spatial_active_mask: 0,
     };
 
