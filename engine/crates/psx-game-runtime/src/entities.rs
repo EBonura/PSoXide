@@ -3094,42 +3094,35 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         let unit = Self::HEADING_UNIT_Q12[usize::from(heading & 7)];
         unit[0] * direction[0] + unit[1] * direction[1]
     }
-    /// The eight headings, most goal-closing first. Ties go to the heading
-    /// nearer the anchor, then to the entity's preferred turning side. The
-    /// anchor's reverse is moved to the end whatever its score.
+    /// The eight headings, most goal-closing first: the heading nearest the
+    /// goal, then alternately one step either side, starting on the side the
+    /// goal leans to (the order of their projections on the goal), and the
+    /// heading away from it last. A goal exactly on a heading leans toward
+    /// the anchor, else to the entity's preferred turning side. The anchor's
+    /// reverse is moved to the end whatever its rank.
     fn ranked_headings(direction: [i32; 2], anchor: Option<u8>, index: usize) -> [u8; 8] {
-        let clockwise_first = index & 1 == 0;
-        let key = |heading: u8| -> (i32, u8, bool) {
-            let score = Self::heading_score(heading, direction);
-            let (separation, clockwise) = match anchor {
-                Some(anchor) => {
-                    let turn = heading.wrapping_sub(anchor) & 7;
-                    (turn.min(8 - turn), turn <= 4)
-                }
-                None => (0, true),
+        let yaw = atan2_q12(direction[0], direction[1]) & GAME_ENTITY_YAW_MASK;
+        let nearest = (((yaw + 256) >> 9) & 7) as u8;
+        // The goal's lean off the nearest heading, -256..=255.
+        let lean = (yaw.wrapping_sub(u16::from(nearest) * 512).wrapping_add(256)
+            & GAME_ENTITY_YAW_MASK) as i32
+            - 256;
+        let toward_anchor = anchor.map(|anchor| anchor.wrapping_sub(nearest) & 7);
+        let clockwise = match (lean, toward_anchor) {
+            (lean, _) if lean != 0 => lean > 0,
+            (_, Some(turn)) if turn != 0 && turn != 4 => turn < 4,
+            _ => index & 1 == 0,
+        };
+        let step: u8 = if clockwise { 1 } else { 7 };
+        let mut order = [nearest; 8];
+        for rank in 1..8u8 {
+            let reach = rank.div_ceil(2);
+            let heading = if rank % 2 == 1 {
+                nearest.wrapping_add(step.wrapping_mul(reach))
+            } else {
+                nearest.wrapping_sub(step.wrapping_mul(reach))
             };
-            (score, separation, clockwise == clockwise_first)
-        };
-        // `a` ranks before `b`: higher score, then smaller separation from
-        // the anchor, then the preferred side.
-        let before = |a: u8, b: u8| -> bool {
-            let (score_a, separation_a, side_a) = key(a);
-            let (score_b, separation_b, side_b) = key(b);
-            if score_a != score_b {
-                return score_a > score_b;
-            }
-            if separation_a != separation_b {
-                return separation_a < separation_b;
-            }
-            side_a && !side_b
-        };
-        let mut order = [0u8, 1, 2, 3, 4, 5, 6, 7];
-        for position in 1..order.len() {
-            let mut slot = position;
-            while slot > 0 && before(order[slot], order[slot - 1]) {
-                order.swap(slot, slot - 1);
-                slot -= 1;
-            }
+            order[usize::from(rank)] = heading & 7;
         }
         if let Some(anchor) = anchor {
             let reverse = (anchor + 4) & 7;
