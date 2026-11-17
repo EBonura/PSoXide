@@ -60,6 +60,13 @@ pub fn set_dry_cycles(cycles: u8) {
         .store(cycles, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Set the downed rule the fighters run (`combatant::DOWNED_PROTECTED`, a
+/// code constant the `harness` feature makes a setting).
+pub fn set_downed_protected(protected: bool) {
+    psx_game_runtime::combatant::DOWNED_PROTECTED_SETTING
+        .store(protected, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Who drives a fighter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Controller {

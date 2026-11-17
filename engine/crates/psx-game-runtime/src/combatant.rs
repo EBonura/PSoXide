@@ -25,10 +25,12 @@
 //! owner then staggers the attacker with [`Strike::parry`], through the same
 //! [`Combatant::receive_hit`]. A crit ([`Combatant::crit_scaled`]) multiplies
 //! the damage and poise of the next attack that lands (a swing) or is
-//! released (a shot) within [`CombatStats::crit_window_ticks`]. Any other
-//! poise break knocks the fighter down for [`CombatStats::knockdown_ticks`]
-//! ([`Combatant::knocked_down`]): it cannot act or move, it takes damage, and
-//! it cannot be broken again until it is up.
+//! released (a shot) within [`CombatStats::crit_window_ticks`]. A crit that
+//! breaks posture knocks the fighter down for [`CombatStats::knockdown_ticks`]
+//! ([`Combatant::knocked_down`]): it cannot act or move and it cannot be
+//! broken again until it is up ([`DOWNED_PROTECTED`] says whether hits pass
+//! through it meanwhile). Every other break, a parry's riposte included, is a
+//! stagger: the owner plays the fighter's Stun clip through.
 //!
 //! Who may swap at all follows from the fighter's kits
 //! ([`psx_level::combat_verbs::CombatKits`], derived from what it binds):
@@ -51,6 +53,32 @@ use psx_level::CombatStats;
 use crate::combat_flow::CombatFlow;
 use crate::poise::Poise;
 use crate::vitality::{CombatStance, VitalityChannelId, VitalityPool, VITALITY_Q12_ONE};
+
+/// Whether a knocked-down fighter is protected: hits pass through it until it
+/// is up, as most of the reference games do for a downed fighter. The same
+/// rule for every fighter; chosen by the duel harness (combat tuning,
+/// change 1).
+pub const DOWNED_PROTECTED: bool = true;
+
+/// The duel harness's setting of [`DOWNED_PROTECTED`] (host builds with the
+/// `harness` feature only), so a sweep can test both rules without a rebuild.
+/// A game build never has it: there the constant is read directly.
+#[cfg(feature = "harness")]
+pub static DOWNED_PROTECTED_SETTING: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(DOWNED_PROTECTED);
+
+/// The downed rule in force: [`DOWNED_PROTECTED`], or the harness's setting.
+#[inline(always)]
+fn downed_protected() -> bool {
+    #[cfg(feature = "harness")]
+    {
+        DOWNED_PROTECTED_SETTING.load(core::sync::atomic::Ordering::Relaxed)
+    }
+    #[cfg(not(feature = "harness"))]
+    {
+        DOWNED_PROTECTED
+    }
+}
 
 /// The one stance rule: health and posture damage a hit of `damage` and
 /// `poise` deals to a defender with `stats`, `opposite` when the hit's
@@ -129,7 +157,7 @@ pub struct Strike {
     pub poise: u16,
     /// A crit (the swing or volley a parry armed): its posture damage lands
     /// even on a fighter staggered by that parry's riposte, inside the
-    /// riposte's break grace, and its break is a knockdown.
+    /// riposte's break grace, and its break is the only knockdown.
     pub crit: bool,
 }
 
@@ -268,8 +296,8 @@ pub struct HitOut {
     pub killed: bool,
     /// The hit broke posture.
     pub poise_broken: bool,
-    /// The break knocked the fighter down (every break but a parry's
-    /// riposte, while the stats allow knockdown).
+    /// The break knocked the fighter down (a crit's break, while the stats
+    /// allow knockdown); any other break is a stagger.
     pub knocked_down: bool,
     /// The defender parried: nothing landed, the defender gained its
     /// refund, its swap cooldown and a crit. The owner staggers the
@@ -454,12 +482,15 @@ impl Combatant {
 
     /// The one i-frame rule: a hit passes through this fighter while its
     /// current `action` protects it (an authored `Invulnerable` window, else
-    /// the dodge) or while it is inside the swap window of
-    /// `swap_invulnerable_ticks`. A fighter that never swaps never enters the
+    /// the dodge), while it is inside the swap window of
+    /// `swap_invulnerable_ticks`, or while it is down when
+    /// [`DOWNED_PROTECTED`] holds. A fighter that never swaps never enters the
     /// swap window. A hit that passes through does nothing: it neither lands
     /// nor uses up the attack.
     pub fn invulnerable(&self, swap_invulnerable_ticks: u8, action: ActionProtection) -> bool {
-        action.active() || self.in_swap_window(u16::from(swap_invulnerable_ticks))
+        action.active()
+            || self.in_swap_window(u16::from(swap_invulnerable_ticks))
+            || (downed_protected() && self.knocked_down())
     }
 
     /// Take one hit: health and posture scaled by [`stance_scaled`], health
@@ -470,9 +501,9 @@ impl Combatant {
     /// ([`CombatStats::parry_ticks`]) is parried instead: nothing lands, the
     /// defender gains [`CombatStats::parry_refund`] energy, its swap cooldown
     /// clears and its next attack within [`CombatStats::crit_window_ticks`]
-    /// crits. A posture break knocks the fighter down for
-    /// [`CombatStats::knockdown_ticks`], except a parry's riposte, which
-    /// staggers. A fighter that is down takes damage but cannot be broken.
+    /// crits. A crit's posture break knocks the fighter down for
+    /// [`CombatStats::knockdown_ticks`]; every other break staggers. A
+    /// fighter that is down cannot be broken.
     ///
     /// A hit that kills leaves posture alone. A zero-damage hit (poise only)
     /// never touches the bar.
@@ -509,8 +540,7 @@ impl Combatant {
                 blocked,
                 strike.crit,
             );
-        let knocked_down =
-            poise_broken && strike.kind != HitKind::Parry && hit.stats.knockdown_ticks != 0;
+        let knocked_down = poise_broken && strike.crit && hit.stats.knockdown_ticks != 0;
         if knocked_down {
             self.knockdown = hit.stats.knockdown_ticks;
         }
@@ -888,15 +918,33 @@ mod tests {
     }
 
     #[test]
-    fn a_poise_break_knocks_down_and_a_downed_fighter_cannot_break_again() {
+    fn only_a_crit_break_knocks_down_and_a_downed_fighter_cannot_break_again() {
         let mut c = fighter();
         let out = c.receive_hit(hit(strike(VitalityChannelId::One, 0, 60)));
-        assert!(out.poise_broken && out.knocked_down);
+        assert!(
+            out.poise_broken && !out.knocked_down,
+            "an ordinary break staggers"
+        );
+        assert_eq!(c.knockdown, 0);
+        c.tick(BREAK_GRACE_TICKS, false, false);
+        let crit = Strike {
+            crit: true,
+            ..strike(VitalityChannelId::One, 0, 60)
+        };
+        let out = c.receive_hit(hit(crit));
+        assert!(
+            out.poise_broken && out.knocked_down,
+            "a crit break knocks down"
+        );
         assert_eq!(c.knockdown, STATS.knockdown_ticks);
         c.tick(BREAK_GRACE_TICKS, false, false);
         c.tick(BREAK_GRACE_TICKS, false, false);
         c.knockdown = 5;
-        let out = c.receive_hit(hit(strike(VitalityChannelId::One, 7, 1000)));
+        let out = c.receive_hit(hit(Strike {
+            damage: 7,
+            poise: 1000,
+            ..crit
+        }));
         assert_eq!(out.damage_applied, 7);
         assert!(!out.poise_broken, "down: no second break");
         c.tick(5, false, false);
@@ -907,12 +955,22 @@ mod tests {
                 knockdown_ticks: 0,
                 ..STATS
             },
-            ..hit(strike(VitalityChannelId::One, 0, 60))
+            ..hit(crit)
         });
         assert!(
             out.poise_broken && !out.knocked_down,
             "zero turns knockdown off"
         );
+    }
+
+    #[test]
+    fn a_downed_fighter_is_protected_by_the_one_downed_rule() {
+        let mut c = fighter();
+        assert!(!c.invulnerable(10, ActionProtection::NONE));
+        c.knockdown = 3;
+        assert_eq!(c.invulnerable(10, ActionProtection::NONE), DOWNED_PROTECTED);
+        c.tick(3, false, false);
+        assert!(!c.invulnerable(10, ActionProtection::NONE), "up again");
     }
 
     #[test]

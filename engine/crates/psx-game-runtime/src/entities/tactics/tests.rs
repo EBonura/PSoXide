@@ -269,7 +269,7 @@ fn stagger_cancels_goal_and_attack_ownership() {
     e.begin_goal(0, EnemyGoal::CircleRight, 300, 64);
     e.attack_owner_plus_one = 1;
     e.apply_hit(&ENEMY, 0, VitalityChannelId::Two, 1, 100);
-    assert_eq!(e.state(0), GameEntityState::KnockedDown);
+    assert_eq!(e.state(0), GameEntityState::Staggered);
     assert_eq!(e.tactics[0].goal, EnemyGoal::None);
     assert_eq!(e.tactics[0].result, EnemyGoalResult::Cancelled);
     assert_eq!(e.attack_owner(), None);

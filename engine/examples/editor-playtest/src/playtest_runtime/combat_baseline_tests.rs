@@ -474,11 +474,13 @@ fn a_shot_only_hit_never_interrupts_unless_it_breaks_posture() {
     assert!(!scene.react_player_to_hit(CombatantId::WORLD, 30, false, true, false, &ctx(100)));
     assert_eq!(scene.anim_state, PlayerAnim::Idle);
     assert!(scene.react_player_to_hit(CombatantId::WORLD, 30, false, true, false, &ctx(101)));
+    // An ordinary break is a stagger: Stun, HitReact while Stun is unbound.
     assert_eq!(
         scene.anim_state,
-        PlayerAnim::Knockdown,
-        "a break knocks her down"
+        PlayerAnim::HitReact,
+        "a break staggers her"
     );
+    assert!(!scene.game_entities.actor().knocked_down());
 }
 
 #[test]

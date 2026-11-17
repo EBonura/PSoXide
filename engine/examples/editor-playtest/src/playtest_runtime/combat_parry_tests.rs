@@ -436,11 +436,28 @@ fn an_unused_crit_expires_after_its_window_on_both_sides() {
 }
 
 // ---------------------------------------------------------------------------
-// Knockdown on a poise break, and getting up.
+// A stagger on an ordinary poise break, a knockdown on a crit's, and
+// getting up.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn a_poise_break_knocks_the_player_down_and_she_gets_up() {
+fn an_ordinary_break_staggers_the_player_and_never_knocks_her_down() {
+    let mut scene = duel();
+    let capacity = scene.player_stats.poise;
+    assert!(scene.react_player_to_hit(
+        CombatantId::entity(0),
+        capacity,
+        false,
+        false,
+        false,
+        &ctx(100)
+    ));
+    assert!(!scene.game_entities.actor().knocked_down());
+    assert_ne!(scene.anim_state, PlayerAnim::Knockdown);
+}
+
+#[test]
+fn a_crit_break_knocks_the_player_down_and_she_gets_up() {
     let mut scene = duel();
     let down = scene.player_stats.knockdown_ticks;
     let capacity = scene.player_stats.poise;
@@ -449,7 +466,7 @@ fn a_poise_break_knocks_the_player_down_and_she_gets_up() {
         capacity,
         false,
         false,
-        false,
+        true,
         &ctx(100)
     ));
     assert!(scene.game_entities.actor().knocked_down());
@@ -484,16 +501,36 @@ fn a_poise_break_knocks_the_player_down_and_she_gets_up() {
 }
 
 #[test]
-fn a_poise_break_knocks_the_enemy_down_and_it_gets_up() {
+fn an_ordinary_break_staggers_the_enemy_and_never_knocks_it_down() {
     let mut scene = duel();
     let record = enemy_record();
-    let down = record.combat.knockdown_ticks;
     let outcome = scene.game_entities.apply_hit(
         GAME_ENTITIES.as_slice(),
         0,
         VitalityChannelId::One,
         1,
         record.combat.poise,
+    );
+    assert!(outcome.staggered && !outcome.knocked_down);
+    assert_eq!(scene.game_entities.state(0), GameEntityState::Staggered);
+}
+
+#[test]
+fn a_crit_break_knocks_the_enemy_down_and_it_gets_up() {
+    let mut scene = duel();
+    let record = enemy_record();
+    let down = record.combat.knockdown_ticks;
+    let outcome = scene.game_entities.receive_hit(
+        GAME_ENTITIES.as_slice(),
+        0,
+        Strike {
+            attacker: CombatantId::PLAYER,
+            kind: HitKind::Melee,
+            channel: VitalityChannelId::One,
+            damage: 1,
+            poise: record.combat.poise,
+            crit: true,
+        },
     );
     assert!(outcome.knocked_down);
     assert_eq!(scene.game_entities.state(0), GameEntityState::KnockedDown);

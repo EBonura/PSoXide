@@ -77,11 +77,12 @@ pub enum GameEntityState {
     /// Post-attack recovery; the record's `recovery_ticks` long (the
     /// punish window).
     Recover = 5,
-    /// Poise broke; briefly helpless.
+    /// Poise broke (any break but a crit's): its Stun clip played through,
+    /// the record's `stagger_ticks`.
     Staggered = 6,
     /// Health reached zero (or the record spawned disabled).
     Dead = 7,
-    /// Poise broke: down and helpless for the record's
+    /// A crit broke poise: down and helpless for the record's
     /// `combat.knockdown_ticks`, then back up.
     KnockedDown = 8,
 }
@@ -448,10 +449,10 @@ pub(crate) fn player_strike(
 pub struct GameEntityHitOutcome {
     /// The hit landed on a live entity.
     pub connected: bool,
-    /// The hit broke poise (entity is now [`GameEntityState::KnockedDown`],
-    /// or [`GameEntityState::Staggered`] after a parry's riposte).
+    /// The hit broke poise (entity is now [`GameEntityState::Staggered`],
+    /// or [`GameEntityState::KnockedDown`] after a crit's break).
     pub staggered: bool,
-    /// The break knocked the entity down.
+    /// The break knocked the entity down (a crit's break).
     pub knocked_down: bool,
     /// The hit was lethal (entity is now [`GameEntityState::Dead`]).
     pub died: bool,
@@ -4890,10 +4891,9 @@ mod tests {
             );
         }
         assert_eq!(entities.state(0), GameEntityState::Recover);
-        // A poise break restarts as its own one-shot: the knockdown, on the
-        // stagger clip until a knockdown clip is authored.
+        // A poise break restarts as its own one-shot: the stagger clip.
         entities.apply_hit(&IDLE_ENEMY, 0, VitalityChannelId::One, 10, 60);
-        assert_eq!(entities.state(0), GameEntityState::KnockedDown);
+        assert_eq!(entities.state(0), GameEntityState::Staggered);
         assert_eq!(
             entities.clip_for_state(&IDLE_ENEMY, 0),
             GameEntityClip {
@@ -5542,12 +5542,27 @@ mod tests {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&IDLE_ENEMY);
         entities.set_spatial_active_mask(u64::MAX);
-        // Poise pool is 50: 60 poise damage breaks it and knocks it down.
+        // Poise pool is 50: 60 poise damage breaks it, a stagger.
         let outcome = entities.apply_hit(&IDLE_ENEMY, 0, VitalityChannelId::One, 10, 60);
-        assert_eq!(entities.state(0), GameEntityState::KnockedDown);
+        assert_eq!(entities.state(0), GameEntityState::Staggered);
         assert_eq!(entities.health(0), 90);
-        assert!(outcome.connected && outcome.staggered && outcome.knocked_down && !outcome.died);
-        // It gets up into Aggro after the record's knockdown ticks.
+        assert!(outcome.connected && outcome.staggered && !outcome.knocked_down && !outcome.died);
+        for _ in 0..GAME_ENTITY_STAGGER_TICKS {
+            entities.tick(&IDLE_ENEMY, far_input(), &mut OpenWorld);
+        }
+        assert_eq!(entities.state(0), GameEntityState::Aggro);
+        // Past the break grace, a crit's break knocks it down; it gets up
+        // into Aggro after the record's knockdown ticks.
+        for _ in 0..crate::combat_flow::BREAK_GRACE_TICKS {
+            entities.tick(&IDLE_ENEMY, far_input(), &mut OpenWorld);
+        }
+        let outcome = entities.receive_hit(
+            &IDLE_ENEMY,
+            0,
+            player_strike(HitKind::Melee, VitalityChannelId::One, 10, 60, true),
+        );
+        assert_eq!(entities.state(0), GameEntityState::KnockedDown);
+        assert!(outcome.connected && outcome.staggered && outcome.knocked_down);
         for _ in 0..IDLE_ENEMY[0].combat.knockdown_ticks {
             entities.tick(&IDLE_ENEMY, far_input(), &mut OpenWorld);
         }
@@ -5689,10 +5704,10 @@ mod tests {
         assert!(e.deferred_attack_can_connect(attack));
         assert!(
             e.apply_hit(&IDLE_ENEMY, 0, VitalityChannelId::One, 1, 50)
-                .knocked_down
+                .staggered
         );
         assert!(!e.deferred_attack_can_connect(attack));
-        assert_eq!(e.state(0), GameEntityState::KnockedDown);
+        assert_eq!(e.state(0), GameEntityState::Staggered);
     }
 
     #[test]
@@ -6383,7 +6398,7 @@ mod tests {
             &mut swing,
         );
         assert_eq!(stats.staggers, 1);
-        assert_eq!(entities.state(0), GameEntityState::KnockedDown);
+        assert_eq!(entities.state(0), GameEntityState::Staggered);
         // Swing 3 (health 60 - 50 = 10), swing 4 kills.
         swing = 0;
         entities.apply_melee_arc(

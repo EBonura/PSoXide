@@ -9,7 +9,8 @@
 //!
 //! Every command takes `--set FIGHTER.NAME=VALUE` (repeatable) to run with a
 //! number changed: FIGHTER is `aletha` or `enemy`, NAME a placeholder's report
-//! name or `stagger_ticks`. The sweep that picks a number reports these.
+//! name or `stagger_ticks`; `--set downed_protected=0|1` picks the downed
+//! rule. The sweep that picks a number reports these.
 //!
 //! `sweep` runs the standard matchups (Aletha and the training enemy, each
 //! side driven by the enemy AI or a scripted pad, and both mirrors) and
@@ -195,6 +196,10 @@ fn apply_set(loaded: &mut ProjectFighters, set: &str) {
     let value: u16 = value
         .parse()
         .unwrap_or_else(|_| panic!("--set {set}: value is not a number"));
+    if key == "downed_protected" {
+        arena::set_downed_protected(value != 0);
+        return;
+    }
     let (fighter, name) = key
         .split_once('.')
         .unwrap_or_else(|| panic!("--set {set}: expected FIGHTER.NAME"));
