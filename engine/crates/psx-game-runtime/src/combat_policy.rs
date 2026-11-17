@@ -76,7 +76,10 @@ pub fn attack_choice(ranged: bool, close: bool, last: u8, repeats: u8, roll: u16
 /// and its roll falls under `percent` (its
 /// [`CombatStats::parry_swap_percent`](psx_level::CombatStats::parry_swap_percent)).
 /// Deciding on entry gives one roll per incoming hit at any check cadence,
-/// and swaps at the earliest tick that still parries. `roll` (0..100) is
+/// and swaps at the earliest tick that still parries. A hit `ticks_to_hit`
+/// away is inside the window when `ticks_to_hit < parry_ticks`: the swap clock
+/// advances once on the swap's own tick, so the hit lands with the swap
+/// `ticks_to_hit + 1` ticks old, and the window covers `parry_ticks` of them. `roll` (0..100) is
 /// drawn only when everything else holds, so a fighter that never sees a
 /// parryable hit keeps its random sequence. The same choice for the duel's
 /// player bot and every tactical enemy; what each can see of the incoming
@@ -89,7 +92,7 @@ pub fn parry_swap(
     percent: u8,
     roll: impl FnOnce() -> u16,
 ) -> bool {
-    let inside = |ticks: Option<u16>| ticks.is_some_and(|ticks| ticks <= parry_ticks);
+    let inside = |ticks: Option<u16>| ticks.is_some_and(|ticks| ticks < parry_ticks);
     can_swap
         && percent != 0
         && parry_ticks != 0
@@ -154,7 +157,9 @@ mod tests {
         let yes = || 10;
         let no = || 90;
         assert!(parry_swap(Some(3), None, 8, true, 50, yes));
-        assert!(parry_swap(Some(8), Some(9), 8, true, 50, yes));
+        assert!(parry_swap(Some(7), Some(8), 8, true, 50, yes));
+        // Eight ticks away lands nine ticks into the swap: past the window.
+        assert!(!parry_swap(Some(8), None, 8, true, 50, yes));
         assert!(!parry_swap(Some(9), None, 8, true, 50, yes));
         assert!(!parry_swap(None, Some(9), 8, true, 50, yes));
         assert!(!parry_swap(Some(3), None, 8, false, 50, yes));

@@ -1044,6 +1044,39 @@ fn an_enemy_swaps_on_purpose_to_parry_a_swing_it_sees() {
     assert!(e.combatants[0].parrying(always[0].combat.parry_ticks));
 }
 
+#[test]
+fn a_predicted_contact_replaces_the_swings_own_clock_for_the_parry() {
+    let mut always = enemy_with_flags(enemy().flags)[0];
+    always.combat.parry_swap_percent = 100;
+    let always: &'static [LevelGameEntityRecord] =
+        std::boxed::Box::leak(std::boxed::Box::new([always]));
+    let fresh = || {
+        let mut e: GameEntities<2, true> = GameEntities::EMPTY;
+        e.spawn_from_records(always);
+        e.set_stance_swap_delay(300);
+        e.state[0] = GameEntityState::Aggro as u8;
+        e.state_ticks[0] = 42;
+        e
+    };
+    // The swing's clock says contact now; the posed blade does not reach
+    // within the window, so no swap.
+    let mut swing = input([0, 0, 40]);
+    swing.target.attack_read = 2;
+    swing.target.swing_ticks = Some(0);
+    let mut e = fresh();
+    let stance = e.stance(0);
+    e.predict_swing_contact(0, PredictedContact::Outside);
+    e.tick_delta(always, swing, &mut Arena::default(), 2);
+    assert_eq!(e.stance(0), stance, "no real contact coming: no parry swap");
+    // The clock says nothing is coming, the blade meets it next tick: swap.
+    swing.target.swing_ticks = None;
+    let mut e = fresh();
+    e.predict_swing_contact(0, PredictedContact::In(1));
+    e.tick_delta(always, swing, &mut Arena::default(), 2);
+    assert_ne!(e.stance(0), stance);
+    assert_eq!(e.tactical_snapshot(0).stance_reason, STANCE_REASON_PARRY);
+}
+
 /// Put entity 0 in `stance`, its swap long finished and its cooldown clear
 /// (as a parry leaves it).
 fn settle_in(e: &mut GameEntities<2, true>, stance: VitalityChannelId) {

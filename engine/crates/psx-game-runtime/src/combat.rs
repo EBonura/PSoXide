@@ -463,6 +463,51 @@ pub fn resolve_authored_actor_contact_swept_pending(
     (AuthoredActorContact::Miss, 0)
 }
 
+/// The first of the coming ticks `from..=until` on which an authored swing
+/// connects with a defender, predicted with the contact code itself
+/// ([`resolve_authored_actor_contact_swept_pending`]): the attacker's retained
+/// pose replayed at the phase its swing reaches on each of those ticks
+/// (`phase_at(k)`, `k` ticks from now on the swing's own clock), swept from
+/// the tick before, against the defender's retained pose, both fighters where
+/// they stand now. None when the blade does not reach the defender within
+/// those ticks, or when either side has no authored capsules.
+///
+/// This is the moment a parry has to meet: the first authored hitbox frame
+/// can come several ticks before the blade reaches the body.
+#[allow(clippy::too_many_arguments)]
+pub fn predicted_contact_tick(
+    attacker_capsules: &[CombatCapsuleRecord],
+    action: CharacterAnimationAction,
+    attacker_pose: ActorPoseSnapshot,
+    phase_at: impl Fn(u16) -> u32,
+    defender_capsules: &[CombatCapsuleRecord],
+    defender_pose: ActorPoseSnapshot,
+    from: u16,
+    until: u16,
+) -> Option<u16> {
+    let at = |k: u16| {
+        attacker_pose
+            .with_tick(attacker_pose.tick().wrapping_add(u32::from(k)))
+            .with_phase_q12(phase_at(k))
+    };
+    (from..=until).find(|&k| {
+        let previous = k.checked_sub(1).map(at);
+        matches!(
+            resolve_authored_actor_contact_swept_pending(
+                attacker_capsules,
+                action,
+                Some(at(k)),
+                previous,
+                defender_capsules,
+                Some(defender_pose),
+                0,
+            )
+            .0,
+            AuthoredActorContact::Hit { .. }
+        )
+    })
+}
+
 /// Whether this pose interval begins an authored melee swing. Overlapping
 /// blades with the same start produce one cue; separated starts produce new
 /// cues even if the attack animation stays the same.
@@ -1965,6 +2010,52 @@ mod tests {
                     AuthoredActorContact::Hit { .. }
                 ));
             }
+        }
+
+        /// A swing whose first authored hitbox is active from frame 2 but
+        /// out of reach, and whose blade reaches the defender only on frames
+        /// 6 and 7: the prediction names frame 6, the first real contact.
+        #[test]
+        fn the_prediction_finds_the_first_real_blade_contact() {
+            let mut early = HITBOXES[0];
+            early.start = [-300, 0, 0];
+            early.end = [-300, 100, 0];
+            early.active_start_frame = 2;
+            early.active_end_frame = 3;
+            let mut late = HITBOXES[0];
+            late.active_start_frame = 6;
+            late.active_end_frame = 7;
+            let swing = [early, late];
+            assert_eq!(authored_contact_frames(&swing, ATTACK), Some((2, 7)));
+            let predict = |defender: [i32; 3], until: u16| {
+                predicted_contact_tick(
+                    &swing,
+                    ATTACK,
+                    retained_pose(1, 0, 0),
+                    |k| u32::from(k) << 12,
+                    &HURTBOXES,
+                    pose_at(defender, 0),
+                    2,
+                    until,
+                )
+            };
+            assert_eq!(predict([50, 0, 0], 10), Some(6));
+            assert_eq!(predict([50, 0, 0], 5), None, "not within the window");
+            assert_eq!(predict([1000, 0, 0], 10), None, "out of reach");
+            assert_eq!(
+                predicted_contact_tick(
+                    &swing,
+                    ATTACK,
+                    retained_pose(1, 0, 0),
+                    |k| u32::from(k) << 12,
+                    &[],
+                    pose_at([50, 0, 0], 0),
+                    2,
+                    10,
+                ),
+                None,
+                "no hurtbox"
+            );
         }
 
         #[test]

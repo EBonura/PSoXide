@@ -38,7 +38,9 @@
 mod flow;
 mod spawn;
 mod tactics;
-pub use tactics::{EnemyGoal, EnemyGoalResult, EnemyTacticalSnapshot, STANCE_REASON_PARRY};
+pub use tactics::{
+    EnemyGoal, EnemyGoalResult, EnemyTacticalSnapshot, PredictedContact, STANCE_REASON_PARRY,
+};
 
 use crate::combat::{arc_hits_circle, MeleeArc};
 use crate::combat_intent::CombatMove;

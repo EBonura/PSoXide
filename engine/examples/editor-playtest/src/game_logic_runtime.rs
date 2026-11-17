@@ -26,7 +26,9 @@ use psx_game_runtime::combatant::stance_scaled;
 
 use crate::playtest_runtime::fighter_motor_rules;
 use psx_game_runtime::destructibles::{DamageChannel, DamageOutcome};
-use psx_game_runtime::entities::{DeferredGameEntityAttack, GameEntityState, MeleeArcStats};
+use psx_game_runtime::entities::{
+    DeferredGameEntityAttack, GameEntityState, MeleeArcStats, PredictedContact,
+};
 use psx_game_runtime::model_rendering as mr;
 use psx_game_runtime::projectiles::{
     CombatTeam, ProjectileImpactKind, ProjectileImpacts, ProjectileSpawn, ProjectileTarget,
@@ -615,15 +617,7 @@ impl Playtest {
             height,
             passes_through: defender.passes_through(),
             parries: defender.parries(),
-            capsules: self
-                .character
-                .as_ref()
-                .and_then(|character| {
-                    let first = character.combat_capsule_first.to_usize();
-                    let end = first.saturating_add(usize::from(character.combat_capsule_count));
-                    COMBAT_CAPSULES.get(first..end)
-                })
-                .unwrap_or(&[]),
+            capsules: self.player_defence_capsules(),
             pose: self
                 .player_actor_pose
                 .as_ref()
@@ -1820,6 +1814,96 @@ impl Playtest {
                 .unwrap_or(&[]),
             record_contact: Some((first, last)),
         })
+    }
+
+    /// Predict, for every fighter a blade is swinging at, the tick the blade
+    /// first meets its body, and hand it to the fighter's controller for its
+    /// parry ([`RuntimeGameEntities::predict_swing_contact`]): an entity's
+    /// swing comes from its rival or else from her, hers in a duel from her
+    /// rival. Once per entity think, before it.
+    // Read once per think; kept out of the large callers.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
+    pub(super) fn predict_swing_contacts(&mut self, now: SimTick, video_hz: VideoHz) {
+        let records = GAME_ENTITIES.as_slice();
+        let count = self.game_entities.count().min(records.len());
+        let player_pose = self
+            .player_actor_pose
+            .as_ref()
+            .map(|snapshot| *snapshot.pose());
+        let player_capsules = self.player_defence_capsules();
+        let entity_pose = |slot: usize| {
+            records
+                .get(slot)
+                .and_then(|record| {
+                    self.instance_actor_poses
+                        .get(usize::from(record.model_instance))
+                })
+                .copied()
+                .flatten()
+                .map(|snapshot| snapshot.pose())
+        };
+        let entity_capsules = |slot: usize| {
+            records.get(slot).map_or(&[][..], |record| {
+                let first = record.combat_capsule_first.to_usize();
+                let end = first.saturating_add(usize::from(record.combat_capsule_count));
+                COMBAT_CAPSULES.get(first..end).unwrap_or(&[])
+            })
+        };
+        let player_swing = self.player_swing(now);
+        let mut slot = 0usize;
+        while slot < count {
+            let engaged = !matches!(
+                self.game_entities.state(slot),
+                GameEntityState::Idle | GameEntityState::Patrol | GameEntityState::Dead
+            );
+            let contact = if !engaged {
+                PredictedContact::Unread
+            } else {
+                let (swing, attacker_pose) = match self.game_entities.rival(slot) {
+                    Some(rival) => (self.entity_swing(rival), entity_pose(rival)),
+                    None => (player_swing, player_pose),
+                };
+                predicted_contact(
+                    swing.as_ref(),
+                    attacker_pose,
+                    entity_capsules(slot),
+                    entity_pose(slot),
+                    records[slot].combat.parry_ticks,
+                    video_hz,
+                )
+            };
+            self.game_entities.predict_swing_contact(slot, contact);
+            slot += 1;
+        }
+        if self.duel_drives_actor() {
+            let actor = RuntimeGameEntities::ACTOR_SLOT;
+            let contact = match self.game_entities.rival(actor) {
+                Some(rival) => predicted_contact(
+                    self.entity_swing(rival).as_ref(),
+                    entity_pose(rival),
+                    player_capsules,
+                    player_pose,
+                    self.player_stats.parry_ticks,
+                    video_hz,
+                ),
+                None => PredictedContact::Unread,
+            };
+            self.game_entities.predict_swing_contact(actor, contact);
+        }
+    }
+
+    /// Her authored combat capsules (hurtboxes and hitboxes), empty without
+    /// a Character.
+    fn player_defence_capsules(&self) -> &'static [psx_level::CombatCapsuleRecord] {
+        self.character
+            .as_ref()
+            .and_then(|character| {
+                let first = character.combat_capsule_first.to_usize();
+                let end = first.saturating_add(usize::from(character.combat_capsule_count));
+                COMBAT_CAPSULES.get(first..end)
+            })
+            .unwrap_or(&[])
     }
 
     pub(super) fn track_enemy_tell(&mut self, index: usize, ctx: &Ctx, delta: u16) {
@@ -3068,6 +3152,7 @@ mod encounter_audio_tests {
 /// attack clip and how far into it the swing is, the action, the fighter's
 /// authored hitboxes, and the contact ticks its record times when it has no
 /// authored hitbox for the action.
+#[derive(Clone, Copy)]
 pub(super) struct SwingClock {
     pub(super) animation: Option<psx_asset::Animation<'static>>,
     pub(super) local_tick: u32,
@@ -3077,6 +3162,62 @@ pub(super) struct SwingClock {
     pub(super) action: CharacterAnimationAction,
     pub(super) capsules: &'static [psx_level::CombatCapsuleRecord],
     pub(super) record_contact: Option<(u16, u16)>,
+}
+
+/// When the blade of `swing` (posed by `attacker_pose`) first meets a
+/// defender with `defender_capsules` posed by `defender_pose`, for a parry
+/// window of `parry_ticks`: [`combat::predicted_contact_tick`] over the ticks
+/// from the swing's first authored contact frame to the last one a swap made
+/// now still parries, `parry_ticks - 1`
+/// ([`psx_game_runtime::combat_policy::parry_swap`]). Unread (the controller
+/// keeps the swing's own clock) with no swing, no contact coming within the
+/// window yet, or a side without authored capsules or a pose.
+fn predicted_contact(
+    swing: Option<&SwingClock>,
+    attacker_pose: Option<psx_game_runtime::actor_pose::ActorPoseSnapshot>,
+    defender_capsules: &[psx_level::CombatCapsuleRecord],
+    defender_pose: Option<psx_game_runtime::actor_pose::ActorPoseSnapshot>,
+    parry_ticks: u16,
+    video_hz: VideoHz,
+) -> PredictedContact {
+    let Some(swing) = swing else {
+        return PredictedContact::Unread;
+    };
+    let Some(from) = swing_ticks_to_contact(swing, video_hz).filter(|&t| t < parry_ticks) else {
+        return PredictedContact::Unread;
+    };
+    let authored = combat::authored_contact_frames(swing.capsules, swing.action).is_some()
+        && defender_capsules
+            .iter()
+            .any(|record| record.flags & psx_level::combat_capsule_flags::HURTBOX != 0);
+    let (true, Some(animation), Some(attacker_pose), Some(defender_pose)) =
+        (authored, swing.animation, attacker_pose, defender_pose)
+    else {
+        return PredictedContact::Unread;
+    };
+    let phase_at = |k: u16| {
+        mr::animation_phase_at_tick_q12(
+            animation,
+            swing.local_tick.saturating_add(u32::from(k)),
+            video_hz,
+            swing.looping,
+            swing.speed_q8,
+            swing.frame_range,
+        )
+    };
+    match combat::predicted_contact_tick(
+        swing.capsules,
+        swing.action,
+        attacker_pose,
+        phase_at,
+        defender_capsules,
+        defender_pose,
+        from,
+        parry_ticks - 1,
+    ) {
+        Some(ticks) => PredictedContact::In(ticks),
+        None => PredictedContact::Outside,
+    }
 }
 
 /// Ticks until `swing` first makes contact: from its first authored

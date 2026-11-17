@@ -80,6 +80,13 @@ impl ActorPoseSnapshot {
         self
     }
 
+    /// The same pose stamped as tick `tick`: a prediction replays a retained
+    /// pose on the coming ticks so the swept contact sees consecutive poses.
+    pub const fn with_tick(mut self, tick: SimTick) -> Self {
+        self.tick = tick;
+        self
+    }
+
     /// Overlay selected joints without changing the phase used for attack windows.
     pub fn with_joint_layer(
         mut self,

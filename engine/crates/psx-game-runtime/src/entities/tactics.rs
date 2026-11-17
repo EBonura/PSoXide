@@ -76,6 +76,50 @@ pub struct EnemyTacticalSnapshot {
     pub stance_reason: u8,
 }
 
+/// When the swing coming at a fighter first meets its body, as the fighter's
+/// owner predicts it from the posed blade
+/// ([`crate::combat::predicted_contact_tick`]). A controller's parry decision
+/// reads it in place of the swing's first authored contact frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PredictedContact {
+    /// No prediction: the controller reads the swing's own clock
+    /// ([`super::CombatTarget::swing_ticks`]).
+    #[default]
+    Unread,
+    /// The blade does not reach the fighter within its parry window.
+    Outside,
+    /// The blade first meets the fighter this many ticks from now.
+    In(u16),
+}
+
+impl PredictedContact {
+    const UNREAD_RAW: u16 = u16::MAX;
+    const OUTSIDE_RAW: u16 = u16::MAX - 1;
+
+    /// Packed into one `u16` per fighter: the tactical state stays small.
+    const fn to_raw(self) -> u16 {
+        match self {
+            Self::Unread => Self::UNREAD_RAW,
+            Self::Outside => Self::OUTSIDE_RAW,
+            Self::In(ticks) => {
+                if ticks < Self::OUTSIDE_RAW {
+                    ticks
+                } else {
+                    Self::OUTSIDE_RAW
+                }
+            }
+        }
+    }
+
+    const fn from_raw(raw: u16) -> Self {
+        match raw {
+            Self::UNREAD_RAW => Self::Unread,
+            Self::OUTSIDE_RAW => Self::Outside,
+            ticks => Self::In(ticks),
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct TacticalState {
     pub(super) goal: EnemyGoal,
@@ -112,6 +156,10 @@ pub(super) struct TacticalState {
     /// Ticks to the incoming hit at the previous decision, `u16::MAX` when
     /// none ([`crate::combat_policy::parry_swap`] decides on entry).
     ticks_to_hit: u16,
+    /// The owner's prediction of the incoming swing's first contact
+    /// ([`GameEntities::predict_swing_contact`]), packed by
+    /// [`PredictedContact::to_raw`].
+    predicted_contact: u16,
 }
 impl TacticalState {
     pub(super) const EMPTY: Self = Self {
@@ -145,10 +193,21 @@ impl TacticalState {
         defend_cooldown: 0,
         combat_role: 0,
         ticks_to_hit: u16::MAX,
+        predicted_contact: PredictedContact::UNREAD_RAW,
     };
 }
 
 impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
+    /// Set when the swing coming at slot `index`'s fighter first meets its
+    /// body, as the owner predicts it from the posed blade, for the slot's
+    /// next think ([`PredictedContact::Unread`] leaves the controller to the
+    /// swing's own clock). The same reading for an entity and the actor.
+    pub fn predict_swing_contact(&mut self, index: usize, contact: PredictedContact) {
+        if let Some(tactics) = self.tactics.get_mut(index) {
+            tactics.predicted_contact = contact.to_raw();
+        }
+    }
+
     /// Hand the actor slot to the tactical controller for a fight against
     /// slot `rival`, deciding by `persona` (spacing, reach, reaction, kits):
     /// it engages at once, with the reaction pause of an entity that notices.
@@ -885,9 +944,14 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
                 | EnemyGoal::BreakAway
         ) && self.tactics[i].phase >= 24);
         // Parry on purpose: swap so a hit seen coming lands inside the parry
-        // window. The same choice as the duel's player bot; how often is the
-        // character's data.
-        let swing = input.target.swing_ticks;
+        // window. The same choice for every controller; how often is the
+        // character's data. A swing is read at its first real contact when
+        // the owner predicted it from the posed blade.
+        let swing = match PredictedContact::from_raw(self.tactics[i].predicted_contact) {
+            PredictedContact::Unread => input.target.swing_ticks,
+            PredictedContact::Outside => None,
+            PredictedContact::In(ticks) => Some(ticks),
+        };
         let bolt = self.projectile_threats[i].map(|threat| threat.ticks_to_contact);
         let ticks_to_hit = match (swing, bolt) {
             (Some(a), Some(b)) => Some(a.min(b)),
