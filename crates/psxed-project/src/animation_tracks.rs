@@ -114,13 +114,18 @@ pub(crate) fn pack_tracks(
         budget_units: f64::from(budget_units),
         ..Options::default()
     };
+    // The choice between keyed tracks and the pose table compares the keyed clip before
+    // repeated tracks are shared: sharing only lays the same keys out once, and judging it
+    // here would move clips the shared layout does not otherwise touch onto the keyed
+    // decoder, a different pose.
     match encode(&clip, &options) {
-        Ok((packed, report)) if packed.len() < bytes.len() => {
+        Ok((packed, report)) if report.unshared_bytes < bytes.len() => {
             crate::playtest::emit_cook_output(format_args!(
-                "[cook] tracks {label}: {} -> {} B, worst {:.2} units ({:.2} vs stored poses), \
-                 {} segment counts {:?}",
+                "[cook] tracks {label}: {} -> {} B ({} B before repeated tracks were shared), \
+                 worst {:.2} units ({:.2} vs stored poses), {} segment counts {:?}",
                 bytes.len(),
                 packed.len(),
+                report.unshared_bytes,
                 report.worst_error,
                 report.worst_vs_input,
                 report.rates.len(),
@@ -128,9 +133,11 @@ pub(crate) fn pack_tracks(
             ));
             packed
         }
-        Ok((packed, _)) => {
+        Ok((packed, report)) => {
             crate::playtest::emit_cook_output(format_args!(
-                "[cook] tracks {label}: kept pose table, keyed tracks would be {} B against {} B",
+                "[cook] tracks {label}: kept pose table, keyed tracks would be {} B ({} B with \
+                 repeated tracks shared) against {} B",
+                report.unshared_bytes,
                 packed.len(),
                 bytes.len(),
             ));

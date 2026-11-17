@@ -308,3 +308,31 @@ fn layout_constants_are_consistent() {
     assert_eq!(fmt::rotation_key_bytes(2), 6);
     assert_eq!(fmt::rotation_bits(1), 12);
 }
+
+/// A joint with no motion of its own carries its parent's pose, so its tracks
+/// repeat the parent's byte for byte. The clip stores those keys once, and every
+/// phase the sampler can produce decodes the same poses as the unshared layout.
+#[test]
+fn repeated_tracks_are_stored_once() {
+    let mut clip = synthetic(40, 6, 11);
+    clip.joints[3] = clip.joints[1].clone();
+    clip.joints[5] = clip.joints[1].clone();
+    let (blob, report) = encode(&clip, &Options::default()).expect("clip encodes");
+    let anim = Animation::from_bytes(&blob).expect("blob parses");
+    let joint_bytes = report.joints[1].bytes as usize;
+    assert!(joint_bytes > 0);
+    assert_eq!(report.shared_bytes, 2 * joint_bytes, "{report:?}");
+    assert_eq!(
+        report.unshared_bytes,
+        (blob.len() + report.shared_bytes).next_multiple_of(4)
+    );
+    // The repeated joints point at the first copy and decode exactly like it.
+    let desc = |j: usize| &blob[52 + j * fmt::DESCRIPTOR_SIZE..][..8];
+    assert_eq!(desc(3)[4..8], desc(1)[4..8]);
+    assert_eq!(desc(5)[4..8], desc(1)[4..8]);
+    for phase in (0..39u32 << 12).step_by(16) {
+        let sample = anim.looped_pose_sample_q12(phase).unwrap();
+        assert_eq!(sample.pose(3), sample.pose(1), "phase {phase:#x}");
+        assert_eq!(sample.pose(5), sample.pose(1), "phase {phase:#x}");
+    }
+}

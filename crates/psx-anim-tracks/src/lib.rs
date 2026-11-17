@@ -19,6 +19,8 @@
 
 #![allow(clippy::needless_range_loop)]
 
+use std::collections::HashMap;
+
 use psx_asset::tracks::{host, RotKey};
 use psx_asset::Animation;
 use psxed_format::animation::{tracks as fmt, MAGIC, VERSION_V6};
@@ -145,6 +147,12 @@ pub struct Report {
     pub input_shrink: f64,
     /// Per joint choices.
     pub joints: Vec<JointReport>,
+    /// Key bytes not stored because a track repeats an earlier track of the
+    /// clip byte for byte (a joint with no motion of its own has its parent's
+    /// pose); its descriptor points at the earlier copy.
+    pub shared_bytes: usize,
+    /// Blob size had every track kept its own copy of its keys.
+    pub unshared_bytes: usize,
 }
 
 fn norm4(q: [f64; 4]) -> [f64; 4] {
@@ -798,15 +806,31 @@ pub fn encode(clip: &ClipInput, opts: &Options) -> Result<(Vec<u8>, Report), Rej
     let mut area: Vec<u8> = Vec::new();
     let mut descs: Vec<u8> = Vec::with_capacity(joints * fmt::DESCRIPTOR_SIZE);
     let mut reports = Vec::with_capacity(joints);
+    // Tracks already in the key area, by their key bytes and stride. A track
+    // whose keys repeat one of them byte for byte reads that copy: the decoder
+    // sees the same bytes at the same stride, so every pose is unchanged, and
+    // the copy already passed the bounds the validator checks for this shape.
+    let mut stored: HashMap<(Vec<u8>, usize), usize> = HashMap::new();
+    let mut shared_bytes = 0usize;
+    let mut place = |area: &mut Vec<u8>, keys: &[u8], stride: usize| -> usize {
+        if let Some(&off) = stored.get(&(keys.to_vec(), stride)) {
+            shared_bytes += keys.len();
+            return off;
+        }
+        let off = area.len();
+        area.extend_from_slice(keys);
+        stored.insert((keys.to_vec(), stride), off);
+        off
+    };
     for j in 0..joints {
         let (rc, rrate) = pick(&rot_c[j]);
         let (tc, trate) = pick(&tr_c[j]);
-        let rot_off = area.len();
-        area.extend_from_slice(&rc.keys);
-        let trans_off = if tc.key_bytes == 0 { 0 } else { area.len() };
-        if tc.key_bytes != 0 {
-            area.extend_from_slice(&tc.keys);
-        }
+        let rot_off = place(&mut area, &rc.keys, fmt::rotation_key_bytes(rc.param));
+        let trans_off = if tc.key_bytes == 0 {
+            0
+        } else {
+            place(&mut area, &tc.keys, tc.key_bytes)
+        };
         if area.len() > fmt::MAX_KEY_AREA - 8 {
             return Err(Reject::KeyAreaTooLarge);
         }
@@ -841,6 +865,7 @@ pub fn encode(clip: &ClipInput, opts: &Options) -> Result<(Vec<u8>, Report), Rej
     }
     // Pad so the whole blob is a multiple of four bytes.
     let fixed = psxed_format::AssetHeader::SIZE + 8 + fmt::RATE_TABLE_SIZE + descs.len();
+    let unshared_bytes = (fixed + area.len() + shared_bytes + fmt::SLACK_BYTES).next_multiple_of(4);
     while !(fixed + area.len() + fmt::SLACK_BYTES).is_multiple_of(4) {
         area.push(0);
     }
@@ -912,6 +937,8 @@ pub fn encode(clip: &ClipInput, opts: &Options) -> Result<(Vec<u8>, Report), Rej
         worst_vs_input: worst_input,
         input_shrink: shrink,
         joints: reports,
+        shared_bytes,
+        unshared_bytes,
     };
     Ok((blob, report))
 }
