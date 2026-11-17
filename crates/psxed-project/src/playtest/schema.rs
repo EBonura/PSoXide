@@ -1618,6 +1618,9 @@ pub struct PlaytestGameEntity {
     /// Index into [`PlaytestPackage::model_instances`], or
     /// `psx_level::GAME_ENTITY_MODEL_INSTANCE_NONE`.
     pub model_instance: u16,
+    /// Index into [`PlaytestPackage::characters`], or
+    /// `psx_level::GAME_ENTITY_CHARACTER_NONE`.
+    pub character: u16,
     /// Model-local clip index for the Idle state, resolved at cook
     /// from the Character's AnimationSet roles (like all state
     /// clips; missing roles already fell back at cook).

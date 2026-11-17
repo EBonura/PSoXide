@@ -1198,121 +1198,16 @@ pub(crate) fn cook_player_character(
         action_pushes[action.to_index()] = push;
     }
 
-    let mut combat_windows =
-        [psx_level::CharacterCombatWindow::NONE; psx_level::MAX_CHARACTER_COMBAT_WINDOWS];
-    if let Some((set_id, _, set)) = animation_set {
-        for (index, window) in set.combat_windows.iter().enumerate() {
-            // A window on an action left out of the level has no clip to sit in; its slot
-            // stays unused (action 255, which no lookup matches).
-            if omitted.contains(&window.action) {
-                continue;
-            }
-            let action = window.action.to_index();
-            let fallback = matches!(
-                window.action,
-                CharacterAnimationAction::Backstep
-                    | CharacterAnimationAction::DashLeft
-                    | CharacterAnimationAction::DashRight
-            ) && action_clips[action] == CHARACTER_CLIP_NONE;
-            let source_action = if fallback {
-                CharacterAnimationAction::Roll
-            } else {
-                window.action
-            };
-            let source = action_clips[source_action.to_index()];
-            let clip = (source != CHARACTER_CLIP_NONE)
-                .then(|| model_clips.get(usize::from(model.clip_first + source)))
-                .flatten();
-            let valid = index < combat_windows.len()
-                && !set.combat_windows[..index]
-                    .iter()
-                    .any(|w| w.action == window.action && w.kind == window.kind)
-                && set.action_clips.iter().any(|b| b.action == source_action)
-                && action_flags[action] & psx_level::character_action_flags::LOOPING == 0
-                && !matches!(
-                    window.action,
-                    CharacterAnimationAction::Death
-                        | CharacterAnimationAction::Intro
-                        | CharacterAnimationAction::HookLaunch
-                )
-                && clip.is_some_and(|c| {
-                    window.start <= window.end
-                        && window.start >= c.source_frame_first
-                        && u32::from(window.end) <= u32::from(c.source_frame_last) + 1
-                });
-            if !valid {
-                report.error_at(PlaytestValidationTarget::Resource(set_id), format!("Invalid {:?} {:?} combat window: require unique action/channel, bound non-looping clip, [start,end) inside clip, and at most {} windows; Death/Intro/HookLaunch cannot be cancelled", window.action, window.kind, combat_windows.len()));
-                return None;
-            }
-            let clip = clip?;
-            let remap = |frame| {
-                remap_authored_frame(
-                    frame,
-                    clip.source_frame_first,
-                    clip.source_frame_last,
-                    clip.cooked_frame_count,
-                )
-            };
-            let start = remap(window.start);
-            let end = if window.start == window.end {
-                start
-            } else {
-                remap(window.end - 1).saturating_add(1)
-            };
-            let range = action_frame_ranges[action];
-            // The final stored pose is the endpoint sentinel; the renderer's
-            // normalized one-shot range ends at frame_count - 2.
-            let playable_end = range
-                .end
-                .min(clip.cooked_frame_count.saturating_sub(2))
-                .saturating_add(1);
-            if start < range.start || end > playable_end {
-                report.error_at(
-                    PlaytestValidationTarget::Resource(set_id),
-                    format!(
-                        "Invalid {:?} combat window outside selected playback range",
-                        window.action
-                    ),
-                );
-                return None;
-            }
-            combat_windows[index] = psx_level::CharacterCombatWindow {
-                action: action as u8,
-                kind: window.kind.cooked(),
-                start,
-                end,
-            };
-        }
-        for window in set
-            .combat_windows
-            .iter()
-            .filter(|w| !omitted.contains(&w.action))
-        {
-            use crate::CombatWindowKind as K;
-            let allowed = match window.kind {
-                K::AttackBuffer => Some(K::Attack),
-                K::DodgeBuffer => Some(K::Dodge),
-                _ => None,
-            };
-            if allowed.is_some_and(|kind| {
-                !set.combat_windows.iter().any(|w| {
-                    w.action == window.action
-                        && w.kind == kind
-                        && w.end > w.start
-                        && w.end > window.start
-                })
-            }) {
-                report.error_at(
-                    PlaytestValidationTarget::Resource(set_id),
-                    format!(
-                        "Invalid {:?} combat buffer: requires a reachable permission window",
-                        window.action
-                    ),
-                );
-                return None;
-            }
-        }
-    }
+    let combat_windows = cook_combat_windows(
+        animation_set,
+        omitted,
+        &action_clips,
+        &action_flags,
+        &action_frame_ranges,
+        model.clip_first,
+        model_clips,
+        report,
+    )?;
 
     if settings.radius == 0 {
         report.error_maybe_at(
@@ -4693,4 +4588,276 @@ mod socket_anchor_tests {
             );
         }
     }
+}
+
+/// The combat windows `animation_set` authors, cooked against the clips the
+/// character binds: one rule for the player's Character and every entity's.
+/// `None` (with the report naming why) for an invalid window.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn cook_combat_windows(
+    animation_set: Option<(ResourceId, &str, &crate::AnimationSetResource)>,
+    omitted: &[CharacterAnimationAction],
+    action_clips: &[u16; PLAYTEST_CHARACTER_ACTION_COUNT],
+    action_flags: &[u8; PLAYTEST_CHARACTER_ACTION_COUNT],
+    action_frame_ranges: &[psx_level::CharacterActionFrameRange; PLAYTEST_CHARACTER_ACTION_COUNT],
+    clip_first: u16,
+    model_clips: &[PlaytestModelClip],
+    report: &mut PlaytestValidationReport,
+) -> Option<[psx_level::CharacterCombatWindow; psx_level::MAX_CHARACTER_COMBAT_WINDOWS]> {
+    let mut combat_windows =
+        [psx_level::CharacterCombatWindow::NONE; psx_level::MAX_CHARACTER_COMBAT_WINDOWS];
+    if let Some((set_id, _, set)) = animation_set {
+        for (index, window) in set.combat_windows.iter().enumerate() {
+            // A window on an action left out of the level has no clip to sit in; its slot
+            // stays unused (action 255, which no lookup matches).
+            if omitted.contains(&window.action) {
+                continue;
+            }
+            let action = window.action.to_index();
+            let fallback = matches!(
+                window.action,
+                CharacterAnimationAction::Backstep
+                    | CharacterAnimationAction::DashLeft
+                    | CharacterAnimationAction::DashRight
+            ) && action_clips[action] == CHARACTER_CLIP_NONE;
+            let source_action = if fallback {
+                CharacterAnimationAction::Roll
+            } else {
+                window.action
+            };
+            let source = action_clips[source_action.to_index()];
+            let clip = (source != CHARACTER_CLIP_NONE)
+                .then(|| model_clips.get(usize::from(clip_first + source)))
+                .flatten();
+            let valid = index < combat_windows.len()
+                && !set.combat_windows[..index]
+                    .iter()
+                    .any(|w| w.action == window.action && w.kind == window.kind)
+                && set.action_clips.iter().any(|b| b.action == source_action)
+                && action_flags[action] & psx_level::character_action_flags::LOOPING == 0
+                && !matches!(
+                    window.action,
+                    CharacterAnimationAction::Death
+                        | CharacterAnimationAction::Intro
+                        | CharacterAnimationAction::HookLaunch
+                )
+                && clip.is_some_and(|c| {
+                    window.start <= window.end
+                        && window.start >= c.source_frame_first
+                        && u32::from(window.end) <= u32::from(c.source_frame_last) + 1
+                });
+            if !valid {
+                report.error_at(PlaytestValidationTarget::Resource(set_id), format!("Invalid {:?} {:?} combat window: require unique action/channel, bound non-looping clip, [start,end) inside clip, and at most {} windows; Death/Intro/HookLaunch cannot be cancelled", window.action, window.kind, combat_windows.len()));
+                return None;
+            }
+            let clip = clip?;
+            let remap = |frame| {
+                remap_authored_frame(
+                    frame,
+                    clip.source_frame_first,
+                    clip.source_frame_last,
+                    clip.cooked_frame_count,
+                )
+            };
+            let start = remap(window.start);
+            let end = if window.start == window.end {
+                start
+            } else {
+                remap(window.end - 1).saturating_add(1)
+            };
+            let range = action_frame_ranges[action];
+            // The final stored pose is the endpoint sentinel; the renderer's
+            // normalized one-shot range ends at frame_count - 2.
+            let playable_end = range
+                .end
+                .min(clip.cooked_frame_count.saturating_sub(2))
+                .saturating_add(1);
+            if start < range.start || end > playable_end {
+                report.error_at(
+                    PlaytestValidationTarget::Resource(set_id),
+                    format!(
+                        "Invalid {:?} combat window outside selected playback range",
+                        window.action
+                    ),
+                );
+                return None;
+            }
+            combat_windows[index] = psx_level::CharacterCombatWindow {
+                action: action as u8,
+                kind: window.kind.cooked(),
+                start,
+                end,
+            };
+        }
+        for window in set
+            .combat_windows
+            .iter()
+            .filter(|w| !omitted.contains(&w.action))
+        {
+            use crate::CombatWindowKind as K;
+            let allowed = match window.kind {
+                K::AttackBuffer => Some(K::Attack),
+                K::DodgeBuffer => Some(K::Dodge),
+                _ => None,
+            };
+            if allowed.is_some_and(|kind| {
+                !set.combat_windows.iter().any(|w| {
+                    w.action == window.action
+                        && w.kind == kind
+                        && w.end > w.start
+                        && w.end > window.start
+                })
+            }) {
+                report.error_at(
+                    PlaytestValidationTarget::Resource(set_id),
+                    format!(
+                        "Invalid {:?} combat buffer: requires a reachable permission window",
+                        window.action
+                    ),
+                );
+                return None;
+            }
+        }
+    }
+    Some(combat_windows)
+}
+
+/// The Character an entity's record links to (`LevelGameEntityRecord::character`):
+/// its action clips through the AnimationSet, playback and combat windows,
+/// cooked by the rules the player's Character is cooked by, against the
+/// entity's own model. An action whose clip the level did not package (or a
+/// visual that is not the Character's own model) is unbound, never an error:
+/// enemies keep exactly the clips they already had. Returns the index in
+/// `entity_characters`, shared by every placement of one Character on one
+/// model.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn cook_entity_character(
+    project: &ProjectDocument,
+    character_id: ResourceId,
+    character: &crate::CharacterResource,
+    settings: &CharacterControllerSettings,
+    model_index: Option<u16>,
+    models: &[PlaytestModel],
+    model_clips: &[PlaytestModelClip],
+    model_for_resource: &HashMap<ResourceId, u16>,
+    model_clip_remaps: &HashMap<ResourceId, Vec<Option<u16>>>,
+    combat_capsule_first: u16,
+    combat_capsule_count: u8,
+    weight_q8: u16,
+    entity_characters: &mut Vec<PlaytestCharacter>,
+    report: &mut PlaytestValidationReport,
+) -> Option<u16> {
+    let model = model_index.unwrap_or(u16::MAX);
+    if let Some(existing) = entity_characters
+        .iter()
+        .position(|c| c.source_resource == character_id && c.model == model)
+    {
+        return u16::try_from(existing).ok();
+    }
+    // Clips are local to the entity's model: only its own Character model
+    // names them (as for the entity's state clips).
+    let own_model = model_index.and_then(|index| {
+        character
+            .model
+            .filter(|resource| model_for_resource.get(resource).copied() == Some(index))
+            .zip(models.get(usize::from(index)))
+    });
+    let animation_set = character.animation_set.and_then(|id| {
+        let resource = project.resource(id)?;
+        match &resource.data {
+            ResourceData::AnimationSet(set) => Some((id, resource.name.as_str(), set)),
+            _ => None,
+        }
+    });
+    let mut action_clips = [CHARACTER_CLIP_NONE; PLAYTEST_CHARACTER_ACTION_COUNT];
+    let mut action_flags = [0u8; PLAYTEST_CHARACTER_ACTION_COUNT];
+    let mut action_speeds =
+        [psx_level::CHARACTER_ACTION_SPEED_UNSCALED_Q8; PLAYTEST_CHARACTER_ACTION_COUNT];
+    let mut action_frame_ranges =
+        [psx_level::CharacterActionFrameRange::FULL; PLAYTEST_CHARACTER_ACTION_COUNT];
+    let mut action_pushes = [psx_level::CharacterActionPush::NONE; PLAYTEST_CHARACTER_ACTION_COUNT];
+    let mut unbound = Vec::new();
+    for action in CharacterAnimationAction::ALL {
+        let resolved =
+            own_model
+                .zip(animation_set)
+                .and_then(|((model_resource, _), (_, _, set))| {
+                    let animation_id = animation_set_action_clip(project, set, action)?;
+                    let options = set
+                        .action_binding(action)
+                        .filter(|binding| binding.clip == animation_id)
+                        .and_then(|binding| binding.options);
+                    let index =
+                        project.resolved_model_animation_index(model_resource, animation_id)?;
+                    remap_runtime_model_clip(model_clip_remaps, model_resource, index)
+                        .map(|clip| (clip, options))
+                });
+        let options = resolved.and_then(|(_, options)| options);
+        action_flags[action.to_index()] = character_action_flags_for(action, options);
+        action_speeds[action.to_index()] = character_action_speed_for(options);
+        action_frame_ranges[action.to_index()] = character_action_frame_range_for(options);
+        action_pushes[action.to_index()] = character_action_push_for(options);
+        match resolved {
+            Some((clip, _)) => action_clips[action.to_index()] = clip,
+            None => unbound.push(action),
+        }
+    }
+    let combat_windows = match own_model {
+        Some((_, cooked_model)) => cook_combat_windows(
+            animation_set,
+            &unbound,
+            &action_clips,
+            &action_flags,
+            &action_frame_ranges,
+            cooked_model.clip_first,
+            model_clips,
+            report,
+        )?,
+        None => [psx_level::CharacterCombatWindow::NONE; psx_level::MAX_CHARACTER_COMBAT_WINDOWS],
+    };
+    let camera = character.camera_settings().normalized();
+    let index = u16::try_from(entity_characters.len()).ok()?;
+    entity_characters.push(PlaytestCharacter {
+        source_resource: character_id,
+        model,
+        action_clips,
+        action_flags,
+        action_speeds,
+        action_frame_ranges,
+        action_pushes,
+        combat_windows,
+        combat_capsule_first,
+        combat_capsule_count,
+        visual_offset: [0; 3],
+        visual_yaw: 0,
+        visual_scale_q8: crate::MODEL_SCALE_ONE_Q8,
+        material_override: None,
+        weight_q8,
+        radius: settings.radius,
+        height: settings.height,
+        walk_speed: settings.walk_speed,
+        run_speed: settings.run_speed,
+        turn_speed_degrees_per_second: settings.turn_speed_degrees_per_second,
+        stamina_max_q12: settings.stamina_max_q12,
+        sprint_min_q12: settings.sprint_min_q12,
+        sprint_drain_q12: settings.sprint_drain_q12,
+        stamina_recover_q12: settings.stamina_recover_q12,
+        roll_cost_q12: settings.roll_cost_q12,
+        roll_speed: settings.roll_speed,
+        roll_active_frames: settings.roll_active_frames,
+        roll_recovery_frames: settings.roll_recovery_frames,
+        roll_invulnerable_frames: settings.roll_invulnerable_frames,
+        backstep_cost_q12: settings.backstep_cost_q12,
+        backstep_speed: settings.backstep_speed,
+        backstep_active_frames: settings.backstep_active_frames,
+        backstep_recovery_frames: settings.backstep_recovery_frames,
+        backstep_invulnerable_frames: settings.backstep_invulnerable_frames,
+        combat: settings.combat_stats().cooked(),
+        stance_swap_cooldown_ticks: settings.stance_swap_cooldown_ticks,
+        stance_swap_duration_ticks: settings.stance_swap_duration_ticks,
+        camera_distance: camera.distance,
+        camera_height: camera.height,
+        camera_target_height: camera.target_height,
+    });
+    Some(index)
 }

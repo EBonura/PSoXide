@@ -687,6 +687,9 @@ fn build_package_cooked(
     let mut visual_slots = crate::grid::VisualSlots::from_world(grid_doc);
     let mut logic: Vec<PlaytestLogic> = Vec::new();
     let mut game_entities: Vec<PlaytestGameEntity> = Vec::new();
+    // Each entity's Character, appended to `characters` after the player's
+    // (see below), so the player's index is unchanged.
+    let mut entity_characters: Vec<PlaytestCharacter> = Vec::new();
     // Stable ids parallel to `game_entities` and `logic`: hashes of the
     // authored node, never table indices.
     let mut game_entity_ids: Vec<u32> = Vec::new();
@@ -1143,6 +1146,30 @@ fn build_package_cooked(
                                 state_clips.stagger_speed_q8,
                                 state_clips.stagger_frame_range,
                             );
+                            let entity_settings = controller.settings.unwrap_or_else(|| {
+                                crate::CharacterControllerSettings::from_character(enemy_character)
+                            });
+                            let entity_weight_q8 = physics_body_weight_q8(scene, node);
+                            let Some(entity_character) = cook_entity_character(
+                                project,
+                                character_id,
+                                enemy_character,
+                                &entity_settings,
+                                node_model_instance
+                                    .and_then(|instance| model_instances.get(instance as usize))
+                                    .map(|instance| instance.model),
+                                &models,
+                                &model_clips,
+                                &model_for_resource,
+                                &model_clip_remaps,
+                                combat_capsule_first,
+                                combat_capsule_count,
+                                entity_weight_q8,
+                                &mut entity_characters,
+                                &mut report,
+                            ) else {
+                                return (None, report);
+                            };
                             let ok =
                                 report.blaming(PlaytestValidationTarget::Node(node.id), |report| {
                                     push_game_entity(
@@ -1153,13 +1180,10 @@ fn build_package_cooked(
                                         yaw,
                                         // Override if the placement has one,
                                         // otherwise the Character's own tuning.
-                                        &controller.settings.unwrap_or_else(|| {
-                                            crate::CharacterControllerSettings::from_character(
-                                                enemy_character,
-                                            )
-                                        }),
+                                        &entity_settings,
                                         enemy,
                                         node_model_instance,
+                                        entity_character,
                                         state_clips,
                                         combat_capsule_first,
                                         combat_capsule_count,
@@ -1170,7 +1194,7 @@ fn build_package_cooked(
                                         projectile_attack_range,
                                         // Gravity weight from the placement's
                                         // physics body, as the player's.
-                                        physics_body_weight_q8(scene, node),
+                                        entity_weight_q8,
                                         &mut names,
                                         &mut game_entities,
                                         report,
@@ -2244,6 +2268,16 @@ fn build_package_cooked(
         &mut assets,
         &mut report,
     );
+
+    // Entity Characters follow the player's (after the player-only passes
+    // above, which they must not join); their records link by index.
+    let entity_character_base = u16::try_from(characters.len()).unwrap_or(u16::MAX);
+    for entity in &mut game_entities {
+        if entity.character != psx_level::GAME_ENTITY_CHARACTER_NONE.raw() {
+            entity.character = entity.character.saturating_add(entity_character_base);
+        }
+    }
+    characters.extend(entity_characters);
 
     if !report.is_ok() {
         return (None, report);

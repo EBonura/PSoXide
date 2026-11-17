@@ -28,7 +28,7 @@ use crate::*;
 pub const MAGIC: [u8; 4] = *b"PXLR";
 /// Version of the layout below. Bump it whenever a record or the table list
 /// changes.
-pub const VERSION: u16 = 13;
+pub const VERSION: u16 = 14;
 
 /// A cursor over the chunk's bytes. The bytes live for the whole run, so a
 /// string decoded from them can be `&'static`.
@@ -355,7 +355,7 @@ wire_struct! {
     }
     CharacterActionFrameRange { start, end }
     LevelGameEntityRecord {
-        room, kind, targetname, model_instance, idle_clip, alert_clip, turn_clip, walk_clip,
+        room, kind, targetname, model_instance, character, idle_clip, alert_clip, turn_clip, walk_clip,
         walk_backward_clip, strafe_left_clip, strafe_right_clip, run_clip, attack_clip,
         attack_speed_q8, attack_frame_range, heavy_attack_clip, heavy_attack_speed_q8,
         heavy_attack_frame_range, ranged_attack_clip, ranged_attack_speed_q8,

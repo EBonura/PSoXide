@@ -52,6 +52,7 @@ pub static GAME_ENTITIES: &[LevelGameEntityRecord] = &[LevelGameEntityRecord {
     kind: 1,
     targetname: 0,
     model_instance: 0,
+    character: psx_level::GAME_ENTITY_CHARACTER_NONE,
     idle_clip: 0,
     alert_clip: 0,
     turn_clip: 0,

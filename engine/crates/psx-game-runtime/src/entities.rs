@@ -3547,6 +3547,7 @@ mod tests {
             kind: 1,
             targetname: 0,
             model_instance: psx_level::GAME_ENTITY_MODEL_INSTANCE_NONE,
+            character: psx_level::GAME_ENTITY_CHARACTER_NONE,
             idle_clip: 0,
             alert_clip: 9,
             turn_clip: 10,

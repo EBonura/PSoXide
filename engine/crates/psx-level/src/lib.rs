@@ -1357,6 +1357,10 @@ impl CombatStats {
 }
 
 /// One placed souls-like game entity (enemy). Cooked today from an
+/// [`LevelGameEntityRecord::character`] of an entity with no linked
+/// Character.
+pub const GAME_ENTITY_CHARACTER_NONE: CharacterIndex = CharacterIndex(u16::MAX);
+
 /// Entity node whose non-player Character Controller opts in with
 /// `EnemyBehaviorSettings`; `kind` is the interned Character resource
 /// name (the archetype tag), so every placement of one archetype
@@ -1379,6 +1383,11 @@ pub struct LevelGameEntityRecord {
     /// Index of this entity's cooked visual in `MODEL_INSTANCES`, or
     /// [`GAME_ENTITY_MODEL_INSTANCE_NONE`].
     pub model_instance: u16,
+    /// The entity's Character in the generated `CHARACTERS` table: its
+    /// action clips, playback and combat windows, the record every fighter
+    /// times its actions from. [`GAME_ENTITY_CHARACTER_NONE`] (or any index
+    /// past the table) when the cook had none to link.
+    pub character: CharacterIndex,
     /// Model-local clip index played while Idle. All state clips
     /// are resolved AT COOK TIME from the entity Character's
     /// AnimationSet roles; a missing role falls back at cook (attack/

@@ -358,6 +358,7 @@ impl OwnedLevelRecords {
                     kind: e.kind,
                     targetname: e.targetname,
                     model_instance: e.model_instance,
+                    character: psx_level::CharacterIndex(e.character),
                     idle_clip: e.idle_clip,
                     alert_clip: e.alert_clip,
                     turn_clip: e.turn_clip,

@@ -4297,6 +4297,49 @@ fn the_cook_warns_once_per_missing_verb_of_a_kit_a_character_has() {
 }
 
 #[test]
+fn every_entity_links_to_its_character_whose_clips_are_its_state_clips() {
+    use psx_level::CharacterAnimationAction as Action;
+    let dungeon = projects_dir().join("grid-dungeon");
+    let project = ProjectDocument::load_from_path(dungeon.join("project.ron")).unwrap();
+    let (package, report) = playtest::build_package(&project, &dungeon);
+    assert!(report.is_ok(), "{:?}", report.errors);
+    let package = package.unwrap();
+    let player = package.player_controller.unwrap().character;
+    // The player's Character keeps its index; entity Characters follow it.
+    assert_eq!(player, 0);
+    assert!(!package.game_entities.is_empty());
+    for entity in &package.game_entities {
+        let character = &package.characters[usize::from(entity.character)];
+        assert_ne!(entity.character, player);
+        let instance = &package.model_instances[usize::from(entity.model_instance)];
+        assert_eq!(character.model, instance.model);
+        assert_eq!(
+            character.action_clips[Action::Idle.to_index()],
+            entity.idle_clip
+        );
+        assert_eq!(
+            character.action_clips[Action::LightAttack.to_index()],
+            entity.attack_clip
+        );
+        assert_eq!(
+            character.action_speeds[Action::LightAttack.to_index()],
+            entity.attack_speed_q8
+        );
+        assert_eq!(
+            character.action_frame_ranges[Action::LightAttack.to_index()],
+            entity.attack_frame_range
+        );
+        assert_eq!(
+            (
+                character.combat_capsule_first,
+                character.combat_capsule_count
+            ),
+            (entity.combat_capsule_first, entity.combat_capsule_count)
+        );
+    }
+}
+
+#[test]
 fn camera_vertical_smoothing_preserves_legacy_settings_and_clamps_overrides() {
     let legacy: WorldCameraSettings = ron::from_str("(position_lag_shift: 1, focus_lag_shift: 5)")
         .expect("older camera settings load");
