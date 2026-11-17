@@ -1230,13 +1230,15 @@ fn the_tactical_controller_decides_for_the_actor_as_for_an_entity() {
     // The controller reads her body where it is.
     assert_eq!(e.position(actor), [0, 0, 600]);
     let mut world = crate::entities::OpenWorld;
-    // Out of reach and in sight: it turns to its rival, then closes in (an
-    // entity's approach). Nothing moves her here, so it keeps asking.
-    let moves = (0..30)
+    // In sight: it acts on its rival as an entity does (closes in, or
+    // swaps to shoot). Nothing moves her here, so it keeps asking.
+    let acts = (0..30)
         .map(|_| e.actor_intent(&persona, &ENEMY, &mut world, 2, 0))
-        .filter(|intent| matches!(intent.movement, CombatMove::Move { .. }))
+        .filter(|intent| {
+            matches!(intent.movement, CombatMove::Move { .. }) || !intent.pressed.is_empty()
+        })
         .count();
-    assert!(moves > 0);
+    assert!(acts > 0);
     // Held by an action, it does not decide; when an attack ends, the
     // persona's cooldown starts as an entity's recovery starts it.
     assert_eq!(
