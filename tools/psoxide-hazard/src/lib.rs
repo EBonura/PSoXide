@@ -12,7 +12,8 @@
 //! * [`inline_gate`] (`inline-gate`) proves the frame-path functions `sdk/profile.toml` lists under `[inline]`
 //!   are inlined into their callers, not linked as functions.
 //! * [`stack_guard`] (`stack-guard`) proves every scratchpad stack call tree
-//!   fits its region.
+//!   fits its region, and (in [`dispatch_guard`]) every interrupt handler fits
+//!   psx-rt's dispatcher stack.
 //!
 //! These replace `tools/hazard_patch.py`, `hazard_scan.py` and
 //! `stack_guard.py`, with the same command lines, reports and patched bytes,
@@ -23,6 +24,7 @@ use std::io::Write;
 
 pub mod cache_gate;
 pub mod detect;
+pub mod dispatch_guard;
 pub mod gate;
 pub mod inline_gate;
 pub mod linkmap;

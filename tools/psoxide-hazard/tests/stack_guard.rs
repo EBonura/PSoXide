@@ -1302,3 +1302,316 @@ fn forbidding_the_flush_forbids_the_range_flush_too() {
         "{out}"
     );
 }
+
+// ------------------------------------------------------- the dispatcher stack
+
+const ATTACH: &str = "psx_rt::dispatch::attach";
+const ON_VBLANK: &str = "psx_rt::dispatch::on_vblank";
+/// Where the fixture puts them (functions sit every `SLOT` bytes from `BASE`).
+const ATTACH_AT: u32 = BASE + 3 * SLOT;
+const ON_VBLANK_AT: u32 = BASE + 4 * SLOT;
+const WRAPPER_AT: u32 = BASE + 7 * SLOT;
+
+/// What the dispatcher fixtures register: a registrar that stores its handler argument, the
+/// dispatcher routine that saves a 112-byte context, and a program whose `main` is `main`.
+struct Dispatcher {
+    fx: Fixture,
+    /// The dispatcher stack's size in the map.
+    stack_bytes: u32,
+}
+
+impl Dispatcher {
+    fn new(stack_bytes: u32) -> Self {
+        let mut fx = Fixture::new();
+        // The saved context: stores up to 108(sp), so 112 bytes.
+        let mut tramp: Vec<u32> = (0..28).map(|n| sw("at", 4 * n, "sp")).collect();
+        tramp.extend(epilogue(0));
+        fx.function_slots(1, "__psx_rt_dispatch_tramp", &tramp, 2);
+        // `attach(source, handler)`: reads its second argument, so the argument is live.
+        fx.function(3, ATTACH, &[sw("a1", 20, "a0"), jr("ra"), NOP]);
+        fx.function(4, ON_VBLANK, &[sw("a0", 0, "t0"), jr("ra"), NOP]);
+        Self { fx, stack_bytes }
+    }
+
+    /// A handler with a frame of `frame` bytes.
+    fn handler(&mut self, index: u32, name: &str, frame: i64) -> u32 {
+        self.fx.leaf(index, name, frame)
+    }
+
+    /// Run the whole guard with `flags`; the stack is in the map as a symbol.
+    fn guard(&self, flags: &[&str]) -> (i32, String) {
+        let (exe, map) = self.fx.write();
+        let mut text = std::fs::read_to_string(&map).unwrap();
+        text.push_str(&format!(
+            "{:8x} {:8x} {:8x}    16                 __psx_rt_dispatch_stack\n",
+            BASE + 0x900,
+            BASE + 0x900,
+            self.stack_bytes
+        ));
+        std::fs::write(&map, text).unwrap();
+        let (exe, map) = (exe.display().to_string(), map.display().to_string());
+        let mut args = vec![exe.as_str(), map.as_str()];
+        args.extend(flags);
+        call(stack_guard::main, &args)
+    }
+}
+
+/// `lui a1,hi(handler) ; addiu a1,a1,lo(handler) ; jal registrar ; nop`.
+fn register(registrar: u32, argument: &str, handler: u32) -> Vec<u32> {
+    vec![
+        lui(argument, hi(handler)),
+        addiu(argument, argument, lo(handler)),
+        jal(registrar),
+        NOP,
+    ]
+}
+
+fn main_calling(d: &mut Dispatcher, body: Vec<u32>) {
+    let words = [prologue(8), body, epilogue(8)].concat();
+    d.fx.function_slots(10, "main", &words, 2);
+}
+
+#[test]
+fn a_handler_that_fits_the_dispatcher_stack_passes() {
+    let mut d = Dispatcher::new(512);
+    let handler = d.handler(6, "t::on_cd", 200);
+    main_calling(&mut d, register(ATTACH_AT, "a1", handler));
+    let (status, out) = d.guard(&[]);
+    assert_eq!(status, 0, "{out}");
+    assert!(
+        out.contains("dispatcher stack: 512 bytes, 112 for the saved context, 400 for a handler"),
+        "{out}"
+    );
+    assert!(
+        out.contains("ok   dispatcher handler t::on_cd: 200 of 400 bytes"),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_handler_deeper_than_what_the_stack_leaves_fails() {
+    // 256 bytes less the 112 of context is 144: a 200-byte handler does not fit, a 100-byte one does.
+    let mut d = Dispatcher::new(256);
+    let big = d.handler(6, "t::big", 200);
+    let small = d.handler(7, "t::small", 100);
+    let mut body = register(ATTACH_AT, "a1", big);
+    body.extend(register(ON_VBLANK_AT, "a0", small));
+    main_calling(&mut d, body);
+    let (status, out) = d.guard(&[]);
+    assert_eq!(status, 1, "{out}");
+    assert!(
+        out.contains("FAIL dispatcher handler t::big: 200 of 144 bytes"),
+        "{out}"
+    );
+    assert!(
+        out.contains("ok   dispatcher handler t::small: 100 of 144 bytes"),
+        "{out}"
+    );
+    assert!(out.contains("1 dispatcher stack failures"), "{out}");
+}
+
+#[test]
+fn the_handlers_own_callees_count() {
+    let mut d = Dispatcher::new(256);
+    let leaf = d.handler(6, "t::leaf", 80);
+    let handler = d.fx.caller(7, "t::on_irq", 80, &[leaf]);
+    main_calling(&mut d, register(ATTACH_AT, "a1", handler));
+    let (status, out) = d.guard(&[]);
+    assert_eq!(status, 1, "{out}");
+    assert!(
+        out.contains("160 of 144 bytes") && out.contains("t::on_irq(80) > t::leaf(80)"),
+        "{out}"
+    );
+}
+
+#[test]
+fn the_delay_slot_and_a_far_lui_resolve_the_handler() {
+    let mut d = Dispatcher::new(512);
+    let handler = d.handler(6, "t::on_timer", 24);
+    // `lui` far ahead of the call, `addiu` in the call's delay slot.
+    let body = vec![
+        lui("a1", hi(handler)),
+        addiu("t1", "zero", 7),
+        addiu("t2", "t1", 1),
+        jal(ATTACH_AT),
+        addiu("a1", "a1", lo(handler)),
+    ];
+    main_calling(&mut d, body);
+    let (status, out) = d.guard(&[]);
+    assert_eq!(status, 0, "{out}");
+    assert!(
+        out.contains("ok   dispatcher handler t::on_timer: 24 of 400 bytes"),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_registration_through_a_wrapper_is_followed() {
+    let mut d = Dispatcher::new(256);
+    let handler = d.handler(6, "t::on_cd", 200);
+    // `fn start(source, handler) { attach(source, handler) }`: a1 passes through untouched.
+    d.fx.function(7, "t::start", &[jal(ATTACH_AT), NOP, jr("ra"), NOP]);
+    main_calling(&mut d, register(WRAPPER_AT, "a1", handler));
+    let (status, out) = d.guard(&[]);
+    assert_eq!(status, 1, "{out}");
+    assert!(
+        out.contains("FAIL dispatcher handler t::on_cd: 200 of 144 bytes"),
+        "{out}"
+    );
+}
+
+#[test]
+fn an_argument_the_compiler_removed_leaves_the_handler_in_the_registrar() {
+    // Every caller passed the same handler, so `attach` writes a1 before it reads it and
+    // stores the address itself: the handler is the constant it stores.
+    let mut d = Dispatcher::new(256);
+    let handler = d.handler(6, "t::on_cd", 200);
+    d.fx.function(
+        3,
+        ATTACH,
+        &[
+            lui("a1", hi(handler)),
+            addiu("a1", "a1", lo(handler)),
+            sw("a1", 20, "t0"),
+            jr("ra"),
+            NOP,
+        ],
+    );
+    // A caller that sets no argument at all.
+    main_calling(&mut d, vec![jal(ATTACH_AT), NOP]);
+    let (status, out) = d.guard(&[]);
+    assert_eq!(status, 1, "{out}");
+    assert!(
+        out.contains("FAIL dispatcher handler t::on_cd: 200 of 144 bytes")
+            && out.contains("the handler is in its code"),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_handler_read_from_memory_needs_the_proof_only_on_a_shrunk_stack() {
+    let table = |stack| {
+        let mut d = Dispatcher::new(stack);
+        d.handler(6, "t::on_cd", 16);
+        main_calling(&mut d, vec![lw("a1", 0, "t0"), NOP, jal(ATTACH_AT), NOP]);
+        d
+    };
+    // At the default size it is a note: nothing was shrunk, nothing was promised.
+    let (status, out) = table(512).guard(&[]);
+    assert_eq!(status, 0, "{out}");
+    assert!(
+        out.contains("note: dispatcher registration main at") && out.contains("not proved"),
+        "{out}"
+    );
+    // Shrunk, the program must register with constants or name its handlers.
+    let (status, out) = table(256).guard(&[]);
+    assert_eq!(status, 1, "{out}");
+    assert!(
+        out.contains("FAIL dispatcher registration main at"),
+        "{out}"
+    );
+    // `--handler` names them: each is proved, and the registrations are covered by the list.
+    let (status, out) = table(256).guard(&["--handler", "^t::on_cd$"]);
+    assert_eq!(status, 0, "{out}");
+    assert!(
+        out.contains("ok   dispatcher handler t::on_cd: 16 of 144 bytes")
+            && out.contains("covered by --handler"),
+        "{out}"
+    );
+    let (status, out) = table(256).guard(&["--handler", "^t::nothing$"]);
+    assert_eq!(status, 1, "{out}");
+    assert!(out.contains("no symbol matches --handler"), "{out}");
+}
+
+#[test]
+fn paths_that_set_different_handlers_are_not_resolved() {
+    let mut d = Dispatcher::new(256);
+    let one = d.handler(6, "t::one", 16);
+    let two = d.handler(7, "t::two", 16);
+    // beqz a2 -> else; a1 = one; b join; else: a1 = two; join: jal attach
+    let body = vec![
+        i_type(4, "a2", "zero", 5),
+        NOP,
+        lui("a1", hi(one)),
+        addiu("a1", "a1", lo(one)),
+        b(3),
+        NOP,
+        lui("a1", hi(two)),
+        addiu("a1", "a1", lo(two)),
+        jal(ATTACH_AT),
+        NOP,
+    ];
+    main_calling(&mut d, body);
+    let (status, out) = d.guard(&[]);
+    assert_eq!(status, 1, "{out}");
+    assert!(out.contains("paths set different values"), "{out}");
+}
+
+#[test]
+fn paths_that_set_the_same_handler_are_resolved() {
+    let mut d = Dispatcher::new(256);
+    let one = d.handler(6, "t::one", 16);
+    // The handler is set before the branch; both paths reach the call with it.
+    let body = vec![
+        lui("a1", hi(one)),
+        addiu("a1", "a1", lo(one)),
+        i_type(4, "a2", "zero", 2),
+        NOP,
+        addiu("t1", "zero", 1),
+        jal(ATTACH_AT),
+        NOP,
+    ];
+    main_calling(&mut d, body);
+    let (status, out) = d.guard(&[]);
+    assert_eq!(status, 0, "{out}");
+    assert!(
+        out.contains("ok   dispatcher handler t::one: 16 of 144 bytes"),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_handler_that_calls_through_a_register_cannot_be_bounded_on_a_shrunk_stack() {
+    let build = |stack| {
+        let mut d = Dispatcher::new(stack);
+        let handler =
+            d.fx.function(6, "t::on_cd", &[jalr("t9"), NOP, jr("ra"), NOP]);
+        main_calling(&mut d, register(ATTACH_AT, "a1", handler));
+        d
+    };
+    let (status, out) = build(512).guard(&[]);
+    assert_eq!(status, 0, "{out}");
+    assert!(
+        out.contains("note: dispatcher handler t::on_cd cannot be bounded"),
+        "{out}"
+    );
+    let (status, out) = build(256).guard(&[]);
+    assert_eq!(status, 1, "{out}");
+    assert!(
+        out.contains("FAIL dispatcher handler t::on_cd: t::on_cd calls through a register"),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_program_without_the_dispatcher_has_nothing_to_prove() {
+    let mut fx = Fixture::new();
+    fx.caller(1, "t::main", 8, &[]);
+    let (status, out) = {
+        let (exe, map) = fx.write();
+        let (exe, map) = (exe.display().to_string(), map.display().to_string());
+        call(stack_guard::main, &[exe.as_str(), map.as_str()])
+    };
+    assert_eq!(status, 0, "{out}");
+    assert!(!out.contains("dispatcher"), "{out}");
+}
+
+#[test]
+fn a_custom_root_checks_that_tree_alone() {
+    let mut d = Dispatcher::new(256);
+    let big = d.handler(6, "t::big", 200);
+    main_calling(&mut d, register(ATTACH_AT, "a1", big));
+    let (status, out) = d.guard(&["--root", "^t::big$", "--budget", "400"]);
+    assert_eq!(status, 0, "{out}");
+    assert!(!out.contains("dispatcher"), "{out}");
+}

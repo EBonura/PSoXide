@@ -1,5 +1,5 @@
 //! `stack-guard`: prove every scratchpad stack call tree in a linked PS-EXE
-//! fits its region.
+//! fits its region, and every interrupt handler fits the dispatcher's stack.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -16,7 +16,9 @@ use crate::text::{int_auto, sp_adjust, squeeze, strip, trailing_hex};
 
 /// Usage text.
 pub const USAGE: &str = "\
-Prove every scratchpad stack call tree in a linked PS-EXE fits its region.
+Prove every scratchpad stack call tree in a linked PS-EXE fits its region, and
+every interrupt handler it registers with psx-rt's dispatcher fits the
+dispatcher's stack.
 
 `psx_rt::scratchpad::ScratchpadStack::<START, END>::run(f)` runs `f` with $sp
 in scratchpad bytes START..END. Nothing at run time can stop a deep call tree
@@ -49,6 +51,20 @@ because symbol reachability cannot be proved; otherwise the tool only checks
 that the image does not contain psx-rt's stack switch.
 `--module` (repeatable) maps compact appended module bytes to their link
 addresses for the proof, including calls into module code and trampolines.
+
+The dispatcher's stack (`psx_rt::dispatch`, `PSX_DISPATCH_STACK_BYTES` bytes, 512
+by default) is checked whenever the program links the dispatcher and no `--root`
+is given. Its size is the map's size for `__psx_rt_dispatch_stack`; the saved
+context at the top of it (112 bytes) is subtracted; every handler passed to
+`psx_rt::dispatch::attach` or `on_vblank` with a constant function address is
+walked like a scratchpad tree and must fit the rest, through any wrapper of up to
+three levels. A registration it cannot resolve (a handler read from a table, say)
+fails the proof when the stack is under 512 bytes. `--handler REGEX` (repeatable)
+adds the functions whose symbol matches REGEX as handlers to prove and accepts
+the unresolved registrations as covered by that list.
+
+    stack-guard game.exe game.map                       (the whole proof)
+    stack-guard game.exe game.map --handler 'game::on_timer'
 ";
 
 const STACK_OVERHEAD: i64 = 20;
@@ -171,7 +187,7 @@ impl GuardImage {
         self.image().word_at(addr)
     }
 
-    fn in_trampolines(&self, addr: i64) -> bool {
+    pub(crate) fn in_trampolines(&self, addr: i64) -> bool {
         self.trampolines
             .iter()
             .any(|&(t0, t1)| t0 <= addr && addr < t1)
@@ -478,7 +494,8 @@ pub fn check_forbidding(
     check_forbidding_modules(exe, map_path, pattern, budget, forbidden, &[], out)
 }
 
-/// Check a compact image with streamed modules mapped to their link addresses.
+/// Check a compact image with streamed modules mapped to their link addresses. The failures
+/// are the scratchpad stack entries' and the dispatcher handlers' together.
 pub fn check_forbidding_modules(
     exe: &Path,
     map_path: Option<&Path>,
@@ -486,6 +503,36 @@ pub fn check_forbidding_modules(
     budget: Option<i64>,
     forbidden: &[String],
     modules: &[Module],
+    out: &mut dyn Write,
+) -> usize {
+    let mut dispatcher = 0;
+    let scratchpad = check_everything(
+        exe,
+        map_path,
+        pattern,
+        budget,
+        forbidden,
+        modules,
+        &[],
+        &mut dispatcher,
+        out,
+    );
+    scratchpad + dispatcher
+}
+
+/// [`check_forbidding_modules`] with the handlers named by `--handler` (symbol regexes proved
+/// against the dispatcher's stack as well), returning the scratchpad failures and storing the
+/// dispatcher's in `dispatcher`.
+#[allow(clippy::too_many_arguments)]
+pub fn check_everything(
+    exe: &Path,
+    map_path: Option<&Path>,
+    pattern: Option<&str>,
+    budget: Option<i64>,
+    forbidden: &[String],
+    modules: &[Module],
+    handlers: &[String],
+    dispatcher: &mut usize,
     out: &mut dyn Write,
 ) -> usize {
     let Some(map_path) = map_path else {
@@ -569,7 +616,6 @@ pub fn check_forbidding_modules(
             "stack guard: no scratchpad stack entries in {}",
             exe.display()
         );
-        return 0;
     }
     let no_leaves = HashMap::new();
     let mut walker = Walker::new(&image, forbidden, &no_leaves);
@@ -595,6 +641,20 @@ pub fn check_forbidding_modules(
             failures += 1;
         }
     }
+    // A custom `--root` checks that one tree and nothing else.
+    if pattern.is_none() {
+        let mut named = Vec::new();
+        for handler in handlers {
+            match Regex::new(handler) {
+                Ok(regex) => named.push(regex),
+                Err(error) => {
+                    let _ = writeln!(out, "stack guard: bad --handler pattern: {error}");
+                    *dispatcher += 1;
+                }
+            }
+        }
+        *dispatcher += crate::dispatch_guard::check(&image, map_path, &named, out);
+    }
     failures
 }
 
@@ -608,6 +668,7 @@ pub fn jump_table(image: &GuardImage, jr_addr: i64) -> Option<Vec<(i64, i64)>> {
 pub fn main(args: &[String], out: &mut dyn Write) -> i32 {
     let (mut paths, mut pattern, mut budget) = (Vec::new(), None, None);
     let mut forbidden = Vec::new();
+    let mut handlers = Vec::new();
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -628,6 +689,13 @@ pub fn main(args: &[String], out: &mut dyn Write) -> i32 {
                 }
                 None => {
                     let _ = writeln!(out, "stack guard: --forbid needs a symbol");
+                    return 1;
+                }
+            },
+            "--handler" => match it.next() {
+                Some(value) => handlers.push(value.clone()),
+                None => {
+                    let _ = writeln!(out, "stack guard: --handler needs a symbol pattern");
                     return 1;
                 }
             },
@@ -660,13 +728,16 @@ pub fn main(args: &[String], out: &mut dyn Write) -> i32 {
     }
     let exe = Path::new(&paths[0]);
     let map = paths.get(1).map(Path::new);
-    let failures = check_forbidding_modules(
+    let mut dispatcher = 0;
+    let failures = check_everything(
         exe,
         map,
         pattern.as_deref(),
         budget,
         &forbidden,
         &modules,
+        &handlers,
+        &mut dispatcher,
         out,
     );
     if failures != 0 {
@@ -676,7 +747,14 @@ pub fn main(args: &[String], out: &mut dyn Write) -> i32 {
             paths[0]
         );
     }
-    i32::from(failures != 0)
+    if dispatcher != 0 {
+        let _ = writeln!(
+            out,
+            "stack guard: {dispatcher} dispatcher stack failures in {}",
+            paths[0]
+        );
+    }
+    i32::from(failures + dispatcher != 0)
 }
 
 /// Static stack depth, in bytes of frames, of the call tree rooted at `addr`, with every address in `leaves` counted

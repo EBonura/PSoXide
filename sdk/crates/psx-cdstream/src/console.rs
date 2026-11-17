@@ -46,7 +46,10 @@ const FIFO_POLLS: u32 = 256;
 ///
 /// The deepest call measured used 248 bytes (a Half-Life run of five weapon
 /// switches in the emulator, every sector popped by the handler), and the
-/// dispatcher's saved context takes 112 more.
+/// dispatcher's saved context takes 112 more. A program that sets a smaller
+/// `PSX_DISPATCH_STACK_BYTES` proves its handlers fit with `stack-guard`
+/// (`stack-guard EXE MAP`; the counted, lean and single handlers use 80 to 88
+/// bytes of frames, the full engine's recursion cannot be bounded statically).
 pub const HANDLER_STACK_BYTES: usize = psx_rt::dispatch::STACK_BYTES;
 
 // -------------------------------------------------------------------- drive
