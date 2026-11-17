@@ -585,6 +585,9 @@ struct Playtest {
     models: [Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
     /// Persistent model bytes are resident and the parsed runtime tables are valid.
     runtime_models_loaded: bool,
+    /// Whether the live entities' attacks are timed from their Characters'
+    /// clips since their latest spawn (see `time_entity_attacks`).
+    entity_attacks_timed: bool,
     /// Horizon/Zenith palette copies of the player's and enemies' atlases.
     /// All-zero (the `init_zeroed` state) is empty.
     stance_cluts: model_rendering::StanceCluts,

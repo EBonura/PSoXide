@@ -506,6 +506,29 @@ pub fn authored_contact_frames(
         })
 }
 
+/// The authored frames an attack's contact covers: its hit volumes' active
+/// frames, or for an attack with none (a shot), its projectile emitters'.
+pub fn authored_event_frames(
+    records: &[CombatCapsuleRecord],
+    action: CharacterAnimationAction,
+) -> Option<(u16, u16)> {
+    authored_contact_frames(records, action).or_else(|| {
+        records
+            .iter()
+            .filter(|record| {
+                record.flags & combat_capsule_flags::PROJECTILE_EMITTER != 0
+                    && record.action == action.to_index() as u8
+            })
+            .fold(None, |span, record| {
+                let (first, last) = span.unwrap_or((u16::MAX, 0));
+                Some((
+                    first.min(record.active_start_frame),
+                    last.max(record.active_end_frame),
+                ))
+            })
+    })
+}
+
 /// Ticks until a swing first makes contact, as anyone watching it reads
 /// it: its contact runs over frames `first..=last` of its own timeline
 /// (animation frames, or ticks for a swing timed by its record), it stands

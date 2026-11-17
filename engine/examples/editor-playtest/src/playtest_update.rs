@@ -249,6 +249,9 @@ impl Playtest {
                 telemetry::counter(telemetry::counter::GAME_ENTITY_PVS_SUPPRESSIONS, suppressed);
             }
         }
+        if npc_tick_due && !self.entity_attacks_timed && self.runtime_models_loaded {
+            self.time_entity_attacks(ctx.video_hz);
+        }
         let entity_stats = if npc_tick_due {
             // Souls i-frames: the deferred tick never resolves contact, so
             // this pre-motor target only feeds the shared tick-input contract.

@@ -67,6 +67,44 @@ pub fn pressed_strike(intent: &CombatIntent, zenith: bool) -> u8 {
     }
 }
 
+/// How an attack runs, in ticks from its start: the telegraph before its
+/// first contact, the span contact is live, and the recovery after the last.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ActionTiming {
+    /// Ticks before the first contact.
+    pub windup: u16,
+    /// Ticks contact stays live.
+    pub active: u16,
+    /// Ticks from the end of contact to the end of the action.
+    pub recovery: u16,
+}
+
+impl ActionTiming {
+    /// The timing of an action read off its clip: the clip is `total` ticks
+    /// long, its phase (Q12 frames, the frame range's start included) is
+    /// `start_q12` on its first tick and advances `rate_q12` per tick, and its
+    /// authored contact covers frames `first..=last`. None when the clip
+    /// does not advance or never reaches that contact: the action then keeps
+    /// the timing its record authors.
+    pub fn from_clip(
+        total: u32,
+        start_q12: u32,
+        rate_q12: u32,
+        (first, last): (u16, u16),
+    ) -> Option<Self> {
+        let windup = crate::combat::ticks_to_contact(first, last, start_q12, rate_q12)?;
+        let end_q12 = (u32::from(last) + 1) << 12;
+        let end = end_q12.saturating_sub(start_q12).div_ceil(rate_q12.max(1));
+        let end = end.min(u32::from(u16::MAX));
+        let clamp = |ticks: u32| ticks.min(u32::from(u16::MAX)) as u16;
+        Some(Self {
+            windup,
+            active: clamp(end.saturating_sub(u32::from(windup))).max(1),
+            recovery: clamp(total.saturating_sub(end)),
+        })
+    }
+}
+
 /// What [`FighterAction::dodge`] decided.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DodgeStep {
@@ -205,10 +243,8 @@ impl FighterAction {
                 .min(u32::from(EVADE_BUFFER_LOCK_CAP_TICKS))
                 .max(u32::from(EVADE_BUFFER_TICKS)) as u8;
             false
-        } else if pressed {
-            self.evade_buffer = 0;
-            true
-        } else if self.evade_buffer != 0 && free {
+        } else if pressed || (self.evade_buffer != 0 && free) {
+            // A press while free, or a remembered one now that it is.
             self.evade_buffer = 0;
             true
         } else {
@@ -343,5 +379,33 @@ mod tests {
                 .dodge(0, false, Sample::LEGACY, SimTick::from_u32(1000), true, 1)
                 .evade
         );
+    }
+
+    #[test]
+    fn a_clip_times_an_attack_by_its_contact_frames() {
+        // One frame a tick from frame 0, contact on frames 10 to 14, 40 ticks.
+        assert_eq!(
+            ActionTiming::from_clip(40, 0, 1 << 12, (10, 14)),
+            Some(ActionTiming {
+                windup: 10,
+                active: 5,
+                recovery: 25
+            })
+        );
+        // Half a frame a tick from frame 2 (a frame range's start).
+        assert_eq!(
+            ActionTiming::from_clip(60, 2 << 12, 1 << 11, (10, 14)),
+            Some(ActionTiming {
+                windup: 16,
+                active: 10,
+                recovery: 34
+            })
+        );
+        // Contact the clip never reaches, or a clip that does not advance.
+        assert_eq!(
+            ActionTiming::from_clip(40, 20 << 12, 1 << 12, (10, 14)),
+            None
+        );
+        assert_eq!(ActionTiming::from_clip(40, 0, 0, (10, 14)), None);
     }
 }

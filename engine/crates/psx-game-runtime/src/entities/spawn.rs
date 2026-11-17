@@ -18,6 +18,8 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
             Angle::from_q12(record.yaw as u16),
         );
         self.combatants[index].respawn(&record.combat);
+        self.attack_timings[index] = Self::record_timings(record);
+        self.actions[index] = crate::fighter_action::FighterAction::IDLE;
         // A fighter that cannot swap holds the stance of its one kind of
         // move from spawn on (a ranged-only one starts in Zenith).
         let moves = Self::stance_moves(record);

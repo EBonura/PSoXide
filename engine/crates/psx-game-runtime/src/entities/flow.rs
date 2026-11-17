@@ -212,11 +212,10 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
     /// True when entity `index` is in the second half of a windup and may be broken by a bolt.
     pub fn shot_opening(&self, records: &[LevelGameEntityRecord], index: usize) -> bool {
         index < self.count()
-            && records.get(index).is_some_and(|r| {
-                self.state(index) == GameEntityState::Windup
-                    && self.state_ticks[index] >= u16::from(r.windup_ticks) / 2
-                    && self.combatants[index].flow.can_interrupt()
-            })
+            && index < records.len()
+            && self.state(index) == GameEntityState::Windup
+            && self.state_ticks[index] >= self.selected_timing(index).windup / 2
+            && self.combatants[index].flow.can_interrupt()
     }
     /// Apply a projectile hit; the bolt's poise comes from `CombatFlow::shot_poise`.
     /// `crit` marks a bolt of a crit volley ([`Strike::crit`]).
@@ -317,7 +316,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         }
         self.tactics[i].moved = false;
         self.tactics[i].running = false;
-        if self.state_ticks[i] >= u16::from(r.windup_ticks) / 2
+        if self.state_ticks[i] >= self.selected_timing(i).windup / 2
             || !self.target_in_line_of_sight(r, i, input, mover)
         {
             return;

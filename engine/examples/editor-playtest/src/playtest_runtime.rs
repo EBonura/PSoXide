@@ -1098,6 +1098,7 @@ impl Playtest {
         // begin open without a fire event).
         self.game_entities
             .spawn_from_records_with_ids(GAME_ENTITIES.as_slice(), GAME_ENTITY_IDS.as_slice());
+        self.entity_attacks_timed = false;
         self.game_entities
             .set_stance_swap_delay(self.player_stance_config.swap_cooldown_ticks);
         self.deferred_enemy_attacks.clear();
@@ -1163,6 +1164,7 @@ impl Playtest {
     fn rearm_world(&mut self) {
         self.game_entities
             .spawn_from_records_with_ids(GAME_ENTITIES.as_slice(), GAME_ENTITY_IDS.as_slice());
+        self.entity_attacks_timed = false;
         self.game_entities
             .set_stance_swap_delay(self.player_stance_config.swap_cooldown_ticks);
         self.logic.init_from_records(LOGIC.as_slice());

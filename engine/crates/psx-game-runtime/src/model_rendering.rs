@@ -951,12 +951,48 @@ pub fn player_clip_duration_vblanks<
 ) -> Option<u32> {
     let runtime_model = models.get(character.model.to_usize()).copied().flatten()?;
     let animation = runtime_model.clip(clips, clip)?;
+    Some(clip_duration_ticks(
+        animation,
+        video_hz,
+        speed_q8,
+        frame_range,
+    ))
+}
+
+/// How many ticks one play of `animation` over `frame_range` at `speed_q8`
+/// lasts: the length of every fighter's action on that clip.
+pub fn clip_duration_ticks(
+    animation: Animation<'static>,
+    video_hz: VideoHz,
+    speed_q8: u16,
+    frame_range: psx_level::CharacterActionFrameRange,
+) -> u32 {
     let sample_rate = animation.sample_rate_hz().max(1) as u32;
     let frames = action_frame_range_frame_count(animation, frame_range);
     let unscaled = frames
         .saturating_mul(video_hz.as_nonzero_u32())
         .div_ceil(sample_rate);
-    Some(scale_duration_for_action_speed(unscaled, speed_q8))
+    scale_duration_for_action_speed(unscaled, speed_q8)
+}
+
+/// How an attack played on `animation` runs
+/// ([`crate::fighter_action::ActionTiming`]): its clip's length, with its
+/// authored `contact` frames placed on the clip's own clock.
+pub fn action_timing(
+    animation: Animation<'static>,
+    video_hz: VideoHz,
+    speed_q8: u16,
+    frame_range: psx_level::CharacterActionFrameRange,
+    contact: (u16, u16),
+) -> Option<crate::fighter_action::ActionTiming> {
+    let start = animation_phase_at_tick_q12(animation, 0, video_hz, false, speed_q8, frame_range);
+    let next = animation_phase_at_tick_q12(animation, 1, video_hz, false, speed_q8, frame_range);
+    crate::fighter_action::ActionTiming::from_clip(
+        clip_duration_ticks(animation, video_hz, speed_q8, frame_range),
+        start,
+        next.saturating_sub(start),
+        contact,
+    )
 }
 
 /// Forward push speed for the current attack frame, if the action

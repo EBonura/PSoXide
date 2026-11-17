@@ -698,6 +698,9 @@ pub struct GameEntities<
     /// Each fighter's current action: its clip clock, lock and waiting
     /// attack and dodge requests ([`crate::fighter_action`]).
     actions: [crate::fighter_action::FighterAction; MAX_ENTITIES],
+    /// How each entity's light, heavy and ranged attacks run: read off its
+    /// Character's clips by [`Self::time_attacks`], else its record's ticks.
+    attack_timings: [[crate::fighter_action::ActionTiming; 3]; MAX_ENTITIES],
     projectile_threats: [Option<crate::projectiles::ProjectileThreat>; MAX_ENTITIES],
     exchanges: [crate::ranged_tactics::RangedExchange; MAX_ENTITIES],
     recoil: [[i16; 3]; MAX_ENTITIES],
@@ -781,13 +784,74 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         }
     }
 
-    fn selected_attack_active_ticks(&self, record: &LevelGameEntityRecord, index: usize) -> u16 {
-        match self.selected_attack_kind(index) {
-            GAME_ENTITY_ATTACK_HEAVY => record.heavy_attack_active_ticks,
-            GAME_ENTITY_ATTACK_RANGED => record.ranged_attack_active_ticks,
-            _ => record.attack_active_ticks,
+    /// How entity `index`'s selected attack runs ([`Self::time_attacks`]).
+    fn selected_timing(&self, index: usize) -> crate::fighter_action::ActionTiming {
+        self.attack_timings[index][usize::from(self.selected_attack_kind(index)).min(2)]
+    }
+
+    /// The timing an attack of `kind` has from its record alone: the
+    /// authored windup and recovery around the cooked active ticks.
+    pub(crate) fn record_timings(
+        record: &LevelGameEntityRecord,
+    ) -> [crate::fighter_action::ActionTiming; 3] {
+        let timing = |active: u16| crate::fighter_action::ActionTiming {
+            windup: u16::from(record.windup_ticks),
+            active: active.max(GAME_ENTITY_ATTACK_ACTIVE_TICKS),
+            recovery: u16::from(record.recovery_ticks),
+        };
+        [
+            timing(record.attack_active_ticks),
+            timing(record.heavy_attack_active_ticks),
+            timing(record.ranged_attack_active_ticks),
+        ]
+    }
+
+    /// Time every entity's attacks from its Character's clips: `timing` reads
+    /// one attack (the record, the action, and the clip, speed and frame
+    /// range the entity plays for it) and answers None when the clip authors
+    /// no contact, which keeps the record's ticks. The same clip rules time
+    /// the player's actions. Call after spawning; a spawn resets to the
+    /// record's ticks.
+    pub fn time_attacks(
+        &mut self,
+        records: &[LevelGameEntityRecord],
+        mut timing: impl FnMut(
+            &LevelGameEntityRecord,
+            CharacterAnimationAction,
+            u16,
+            u16,
+            CharacterActionFrameRange,
+        ) -> Option<crate::fighter_action::ActionTiming>,
+    ) {
+        let count = self.count().min(records.len());
+        for (index, record) in records.iter().enumerate().take(count) {
+            let attacks = [
+                (
+                    CharacterAnimationAction::LightAttack,
+                    record.attack_clip,
+                    record.attack_speed_q8,
+                    record.attack_frame_range,
+                ),
+                (
+                    CharacterAnimationAction::HeavyAttack,
+                    record.heavy_attack_clip,
+                    record.heavy_attack_speed_q8,
+                    record.heavy_attack_frame_range,
+                ),
+                (
+                    CharacterAnimationAction::from_index(usize::from(record.ranged_attack_action))
+                        .unwrap_or(CharacterAnimationAction::RangedAttack),
+                    record.ranged_attack_clip,
+                    record.ranged_attack_speed_q8,
+                    record.ranged_attack_frame_range,
+                ),
+            ];
+            for (kind, (action, clip, speed_q8, range)) in attacks.into_iter().enumerate() {
+                if let Some(read) = timing(record, action, clip, speed_q8, range) {
+                    self.attack_timings[index][kind] = read;
+                }
+            }
         }
-        .max(GAME_ENTITY_ATTACK_ACTIVE_TICKS)
     }
 
     fn selected_attack_playback(
@@ -826,10 +890,9 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         ) {
             return None;
         }
-        let first = u16::from(record.windup_ticks);
-        let last = first
-            .saturating_add(self.selected_attack_active_ticks(record, index))
-            .saturating_sub(1);
+        let timing = self.selected_timing(index);
+        let first = timing.windup;
+        let last = first.saturating_add(timing.active).saturating_sub(1);
         Some((self.selected_attack_action(record, index), first, last))
     }
 
@@ -934,6 +997,11 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         turn_phase_ticks: [0; MAX_ENTITIES],
         combatants: [Combatant::EMPTY; MAX_ENTITIES],
         actions: [crate::fighter_action::FighterAction::IDLE; MAX_ENTITIES],
+        attack_timings: [[crate::fighter_action::ActionTiming {
+            windup: 0,
+            active: 0,
+            recovery: 0,
+        }; 3]; MAX_ENTITIES],
         projectile_threats: [None; MAX_ENTITIES],
         exchanges: [crate::ranged_tactics::RangedExchange::EMPTY; MAX_ENTITIES],
         recoil: [[0; 3]; MAX_ENTITIES],
@@ -1315,9 +1383,11 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
                 _ => 0,
             },
             swing_ticks: match state {
-                GameEntityState::Windup => {
-                    Some(u16::from(record.windup_ticks).saturating_sub(self.state_ticks[rival]))
-                }
+                GameEntityState::Windup => Some(
+                    self.selected_timing(rival)
+                        .windup
+                        .saturating_sub(self.state_ticks[rival]),
+                ),
                 GameEntityState::Attack => Some(0),
                 _ => None,
             },
@@ -1586,16 +1656,10 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         ];
     }
 
-    fn track_ranged_tell(
-        &mut self,
-        record: &LevelGameEntityRecord,
-        index: usize,
-        input: GameEntityTickInput<'_>,
-        delta: u16,
-    ) {
+    fn track_ranged_tell(&mut self, index: usize, input: GameEntityTickInput<'_>, delta: u16) {
         // Track only during the early tell. The final six ticks and the
         // complete active animation commit to that bearing: no input reading.
-        if self.state_ticks[index].saturating_add(6) >= u16::from(record.windup_ticks) {
+        if self.state_ticks[index].saturating_add(6) >= self.selected_timing(index).windup {
             return;
         }
         let dx = input.target.position[0].saturating_sub(self.px(index));
@@ -1727,7 +1791,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         }
         let ticks = self.state_ticks[index];
         let attack_clip = self.selected_attack_clip(record, index);
-        let attack_active_ticks = self.selected_attack_active_ticks(record, index);
+        let timing = self.selected_timing(index);
         let (attack_speed_q8, attack_frame_range) = self.selected_attack_playback(record, index);
         let looping = |clip: u16| GameEntityClip {
             clip,
@@ -1771,12 +1835,11 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
                 GameEntityIntent::Hold => looping(record.idle_clip),
             },
             GameEntityState::Windup => attack_one_shot(ticks),
-            GameEntityState::Attack => {
-                attack_one_shot(u16::from(record.windup_ticks).saturating_add(ticks))
-            }
+            GameEntityState::Attack => attack_one_shot(timing.windup.saturating_add(ticks)),
             GameEntityState::Recover => attack_one_shot(
-                u16::from(record.windup_ticks)
-                    .saturating_add(attack_active_ticks)
+                timing
+                    .windup
+                    .saturating_add(timing.active)
                     .saturating_add(ticks),
             ),
             // A parried attacker plays its Parried clip over the same
@@ -2152,9 +2215,9 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
                     self.step_firing(record, index, input, mover, delta_ticks);
                     self.step_melee_tell(record, index, input, mover, delta_ticks);
                     if self.selected_attack_is_ranged(index) {
-                        self.track_ranged_tell(record, index, input, delta_ticks);
+                        self.track_ranged_tell(index, input, delta_ticks);
                     }
-                    if self.state_ticks[index] >= u16::from(record.windup_ticks) {
+                    if self.state_ticks[index] >= self.selected_timing(index).windup {
                         self.enter_state(index, GameEntityState::Attack, &mut stats);
                     }
                 }
@@ -2165,13 +2228,13 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
                         Some(attacks) => attacks.push(self.deferred_attack(record, index)),
                         None => self.resolve_attack_contact(record, index, input, &mut stats),
                     }
-                    if self.state_ticks[index] >= self.selected_attack_active_ticks(record, index) {
+                    if self.state_ticks[index] >= self.selected_timing(index).active {
                         self.enter_state(index, GameEntityState::Recover, &mut stats);
                     }
                 }
                 GameEntityState::Recover => {
                     self.step_firing(record, index, input, mover, delta_ticks);
-                    if self.state_ticks[index] >= u16::from(record.recovery_ticks) {
+                    if self.state_ticks[index] >= self.selected_timing(index).recovery {
                         self.attack_cooldown[index] = u16::from(record.attack_cooldown_ticks);
                         self.release_attack_owner(
                             index,
@@ -2231,7 +2294,10 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             swing_sequence: self.attack_sequence[index],
             clip: GameEntityClip {
                 clip: self.selected_attack_clip(record, index),
-                phase_ticks: u16::from(record.windup_ticks).saturating_add(self.state_ticks[index]),
+                phase_ticks: self
+                    .selected_timing(index)
+                    .windup
+                    .saturating_add(self.state_ticks[index]),
                 one_shot: true,
                 speed_q8,
                 frame_range,
@@ -3453,6 +3519,52 @@ fn within_xz(a: [i32; 2], b: [i32; 2], radius: i32) -> bool {
 mod tests {
     use super::*;
     use psx_level::CombatStats;
+
+    #[test]
+    fn an_attack_runs_on_the_timing_read_off_its_clip_else_on_its_record() {
+        static RECORDS: [LevelGameEntityRecord; 2] = [
+            test_record(0, 0, 0, 400, game_entity_flags::ENABLED),
+            test_record(64, 0, 0, 400, game_entity_flags::ENABLED),
+        ];
+        let mut entities = GameEntities::<4>::EMPTY;
+        entities.spawn_from_records(&RECORDS);
+        let clip = crate::fighter_action::ActionTiming {
+            windup: 9,
+            active: 4,
+            recovery: 21,
+        };
+        // Only the first entity's light attack has a clip with contact.
+        entities.time_attacks(&RECORDS, |record, action, _, _, _| {
+            (record.x == 0 && action == CharacterAnimationAction::LightAttack).then_some(clip)
+        });
+        let mut stats = GameEntityTickStats::default();
+        for index in 0..2 {
+            entities.enter_state(index, GameEntityState::Windup, &mut stats);
+        }
+        assert_eq!(
+            entities.committed_swing(&RECORDS, 0),
+            Some((CharacterAnimationAction::LightAttack, 9, 12))
+        );
+        let windup = u16::from(RECORDS[1].windup_ticks);
+        let active = RECORDS[1]
+            .attack_active_ticks
+            .max(GAME_ENTITY_ATTACK_ACTIVE_TICKS);
+        assert_eq!(
+            entities.committed_swing(&RECORDS, 1),
+            Some((
+                CharacterAnimationAction::LightAttack,
+                windup,
+                windup + active - 1
+            ))
+        );
+        // A spawn goes back to the record's ticks until the game times it.
+        entities.spawn_from_records(&RECORDS);
+        entities.enter_state(0, GameEntityState::Windup, &mut stats);
+        assert_eq!(
+            entities.committed_swing(&RECORDS, 0).map(|swing| swing.1),
+            Some(windup)
+        );
+    }
 
     /// The test records' swap i-frames: the editor's default
     /// `roll_invulnerable_frames`.

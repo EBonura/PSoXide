@@ -370,7 +370,10 @@ impl Playtest {
                     && !self.duel.sprint
                     && ctx.sim_tick.as_u32() >= self.duel.dodge_ready
                     && enemy_state == GameEntityState::Windup
-                    && self.game_entities.state_age(i) >= u16::from(record.windup_ticks) / 2
+                    && self
+                        .game_entities
+                        .committed_swing(GAME_ENTITIES.as_slice(), i)
+                        .is_some_and(|swing| self.game_entities.state_age(i) >= swing.1 / 2)
                     && distance < reach * 2
                     && free
                     && self.game_entities.actor_motor().stamina_q12() > 768

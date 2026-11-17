@@ -1764,6 +1764,35 @@ impl Playtest {
     // Read once per think by a controller; kept out of the large callers.
     #[inline(never)]
     #[cfg_attr(target_arch = "mips", optimize(size))]
+    /// Time every live entity's attacks from its Character's clips: the clip
+    /// rules her actions are timed by, with each attack's authored contact
+    /// frames placed on its clip's clock. Once per spawn, before the entities
+    /// first think after it; an attack whose clip authors no contact keeps its
+    /// record's ticks.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
+    pub(super) fn time_entity_attacks(&mut self, video_hz: VideoHz) {
+        let models = &self.models;
+        let clips = &self.clips;
+        self.game_entities.time_attacks(
+            GAME_ENTITIES.as_slice(),
+            |record, action, clip, speed_q8, frame_range| {
+                let character = CHARACTERS.get(record.character.to_usize())?;
+                let animation = models
+                    .get(character.model.to_usize())
+                    .copied()
+                    .flatten()?
+                    .clip(clips, ModelClipIndex(clip))?;
+                let first = character.combat_capsule_first.to_usize();
+                let capsules = COMBAT_CAPSULES
+                    .get(first..first + usize::from(character.combat_capsule_count))?;
+                let contact = combat::authored_event_frames(capsules, action)?;
+                mr::action_timing(animation, video_hz, speed_q8, frame_range, contact)
+            },
+        );
+        self.entity_attacks_timed = true;
+    }
+
     pub(super) fn entity_swing(&self, index: usize) -> Option<SwingClock> {
         let records = GAME_ENTITIES.as_slice();
         let entity = records.get(index)?;
