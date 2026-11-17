@@ -1198,7 +1198,8 @@ const MODES: [&str; 16] = [
 /// A layout profile from one link and per-word logs (`--pc-log-words
 /// --pc-line-log`) of replays of its image.
 fn layout_profile(map: &Path, exe: &Path, logs: &[&str], out: &Path) -> Result<()> {
-    let sections = layout::read_map(&fs::read_to_string(map)?);
+    let map_text = fs::read_to_string(map)?;
+    let sections = layout::read_map(&map_text);
     let image = layout::Image::parse(&fs::read(exe)?)?;
     let mut counts: HashMap<u32, u64> = HashMap::new();
     for log in logs {
@@ -1207,6 +1208,7 @@ fn layout_profile(map: &Path, exe: &Path, logs: &[&str], out: &Path) -> Result<(
         }
     }
     let collected = layout::collect(&sections, &image, &counts);
+    layout::check_unplaced(&map_text, &counts, collected.instructions)?;
     fs::write(out, collected.layout.to_text())?;
     println!(
         "functions {}  instructions {}  outside them {}  indirect calls {}",

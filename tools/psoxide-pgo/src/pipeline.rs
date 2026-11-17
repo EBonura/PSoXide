@@ -1988,7 +1988,8 @@ fn order(guest: &Guest, options: &Options) -> Result<()> {
         .map
         .as_deref()
         .ok_or("order needs the link map, and the link wrote none")?;
-    let sections = layout::read_map(&fs::read_to_string(map)?);
+    let map_text = fs::read_to_string(map)?;
+    let sections = layout::read_map(&map_text);
     let image_bytes = fs::read(&linked.exe)?;
     let work = guest.work_dir(&linked.exe)?;
     let disc = work.join("order.bin");
@@ -2029,8 +2030,9 @@ fn order(guest: &Guest, options: &Options) -> Result<()> {
     let mut collected = layout::collect(&sections, &layout::Image::parse(&image_bytes)?, &counts);
     collected.layout.features = features_of(&guest.cargo);
     collected.layout.variant = compile;
-    fs::write(out, collected.layout.to_text())?;
     let share = |part: u64| 100.0 * part as f64 / collected.instructions.max(1) as f64;
+    layout::check_unplaced(&map_text, &counts, collected.instructions)?;
+    fs::write(out, collected.layout.to_text())?;
     println!(
         "psoxide-pgo: layout profile -> {}: {} functions ran; {:.2}% of instructions outside \
          them (BIOS, trampolines), {} indirect calls (jalr) not in the call graph",

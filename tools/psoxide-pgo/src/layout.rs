@@ -52,6 +52,14 @@ const STEP: u32 = 4;
 /// profile binds 94.4% onto its monster-route feature build.
 pub const MIN_BOUND: f64 = 0.98;
 
+/// The most of a layout profile's instructions one function may run outside
+/// the laid-out text (a `.psx_cold.*` or data section) before `order` refuses
+/// the profile. Such a function is invisible to the placement, so where it
+/// lands against the hot loops is luck: Half-Life's brightness curve, in
+/// `.psx_cold`, took 1.4% of a gameplay window and shared I-cache lines with
+/// the viewmodel's triangle loop once unrelated text moved (3.5% fewer frames).
+pub const MAX_UNPLACED: f64 = 0.005;
+
 /// The largest share of a layout profile's instructions one function may
 /// have and still not bind. The total above would let a hot function slip
 /// through: one `play` loop at 1.5% of the profile is placed as cold code, in
@@ -191,6 +199,87 @@ pub fn read_map(text: &str) -> Vec<Section> {
         keep
     });
     sections
+}
+
+/// The sized symbols of an ld.lld `-Map` that lie in an input section the
+/// layout does not place (anything not `.text*`: `.psx_cold.*`, data), as
+/// (start, size, name) in address order.
+pub fn read_unplaced(text: &str) -> Vec<(u32, u32, String)> {
+    let mut found = Vec::new();
+    let mut placed = true;
+    for line in text.lines() {
+        if line.len() < 34 || line.as_bytes()[8] != b' ' {
+            continue;
+        }
+        let (Some(start), Some(size), Some(rest)) =
+            (hex(line.get(0..8)), hex(line.get(18..26)), line.get(33..))
+        else {
+            continue;
+        };
+        let body = rest.trim_start_matches(' ');
+        let depth = rest.len() - body.len();
+        let body = body.trim_end();
+        if depth == 0 {
+            placed = true;
+        } else if depth == 8 {
+            placed = body
+                .strip_suffix(')')
+                .and_then(|inner| inner.rfind(":("))
+                .is_none()
+                || input_section(body).is_some();
+        } else if depth >= 16 && !placed && size > 0 && !body.contains(" = ") {
+            found.push((start, size, body.to_string()));
+        }
+    }
+    found.sort_by_key(|&(start, _, _)| start);
+    found
+}
+
+/// The instructions `counts` holds in each of `unplaced` (from
+/// [`read_unplaced`]), the most first; functions that never ran are left out.
+pub fn unplaced_counts(
+    unplaced: &[(u32, u32, String)],
+    counts: &HashMap<u32, u64>,
+) -> Vec<(String, u64)> {
+    let mut ran: Vec<(String, u64)> = unplaced
+        .iter()
+        .map(|(start, size, name)| {
+            let count = (0..size / 4)
+                .filter_map(|word| counts.get(&(start + 4 * word)))
+                .sum();
+            (name.clone(), count)
+        })
+        .filter(|&(_, count)| count > 0)
+        .collect();
+    ran.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    ran
+}
+
+/// Name every function that ran 0.05% or more of `instructions` outside the
+/// laid-out text (on stderr), and refuse when one ran [`MAX_UNPLACED`] or more.
+/// Such a function lands wherever its section does, so whether it shares
+/// I-cache lines with a hot loop is luck.
+pub fn check_unplaced(map: &str, counts: &HashMap<u32, u64>, instructions: u64) -> Result<()> {
+    let share = |part: u64| 100.0 * part as f64 / instructions.max(1) as f64;
+    let unplaced = unplaced_counts(&read_unplaced(map), counts);
+    for (name, count) in unplaced.iter().filter(|(_, count)| share(*count) >= 0.05) {
+        eprintln!(
+            "psoxide-pgo: {:.2}% of the instructions ran in {name}, outside the laid-out text \
+             (a .psx_cold or data section): the layout cannot place it",
+            share(*count)
+        );
+    }
+    match unplaced.first() {
+        Some((name, count)) if share(*count) >= 100.0 * MAX_UNPLACED => Err(format!(
+            "{name} ran {:.2}% of the profiled instructions outside the laid-out text, over the \
+             {:.1}% one function may: move it into .text (drop its .psx_cold link_section) or off \
+             the hot path, then collect again",
+            share(*count),
+            100.0 * MAX_UNPLACED
+        )
+        .into()),
+        _ => Ok(()),
+    }
 }
 
 /// Each section's portable name, or `None` when it has no symbol or shares
@@ -1453,6 +1542,44 @@ mod tests {
         text += &map_line(at, 0x20, 0, ".data");
         text += &map_line(at, 0x20, 8, &format!("{OBJ}:(.data.HAZARD_TRAMPOLINES)"));
         text
+    }
+
+    #[test]
+    fn functions_outside_the_laid_out_text_are_named_with_their_counts() {
+        let mut text = String::from("     VMA      LMA     Size Align Out     In      Symbol\n");
+        text += &map_line(0x8001_0000, 0x10, 0, ".text");
+        text += &map_line(0x8001_0000, 0x10, 8, &format!("{OBJ}:(.text.{TICK_A})"));
+        text += &map_line(0x8001_0000, 0x10, 16, "game::tick");
+        text += &map_line(0x8001_0010, 0x18, 0, ".psx_cold");
+        text += &map_line(
+            0x8001_0010,
+            0x18,
+            8,
+            &format!("{OBJ}:(.psx_cold.brightness)"),
+        );
+        text += &map_line(0x8001_0010, 0x08, 16, "game::cold_once");
+        text += &map_line(0x8001_0018, 0x10, 16, "game::curve");
+        text += &map_line(0x8001_0028, 0, 16, "__marker");
+        let unplaced = read_unplaced(&text);
+        assert_eq!(
+            unplaced,
+            vec![
+                (0x8001_0010, 0x08, "game::cold_once".to_string()),
+                (0x8001_0018, 0x10, "game::curve".to_string()),
+            ]
+        );
+        let mut counts = HashMap::new();
+        counts.insert(0x8001_0000, 50); // game::tick: placed, not listed
+        counts.insert(0x8001_0018, 30);
+        counts.insert(0x8001_0024, 30);
+        counts.insert(0xbfc0_0000, 7); // the BIOS: no symbol
+        assert_eq!(
+            unplaced_counts(&unplaced, &counts),
+            vec![("game::curve".to_string(), 60)]
+        );
+        // 60 of 10,000 instructions (0.6%) is over the bar; of 20,000 (0.3%) it is not.
+        assert!(check_unplaced(&text, &counts, 10_000).is_err());
+        assert!(check_unplaced(&text, &counts, 20_000).is_ok());
     }
 
     #[test]

@@ -227,6 +227,12 @@ it will join:
    `jal` or `j` word that ran and lands in another function (through a hazard
    trampoline, too) with its count. A `jalr` calls through a register, so
    indirect calls are invisible; the summary line counts how many ran.
+   Before writing (here and in `layout`), it names every function that ran 0.05% or more of the
+   instructions outside the laid-out text (a `.psx_cold.*` or data section,
+   which the layout cannot place), and refuses the profile when one ran 0.5%
+   or more: such a function lands wherever its section does, so whether it
+   shares I-cache lines with a hot loop is luck (Half-Life's brightness curve,
+   1.4% of a window, cost 3.5% of its frames that way).
 
 The code hash masks what the linker fills in (`j`/`jal` targets, `lui`
 halves and the low halves added to them), so linking in another order keeps
