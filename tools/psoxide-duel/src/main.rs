@@ -7,6 +7,10 @@
 //! psoxide-duel log --project projects/grid-dungeon --seed 1 [--matchup aletha-ai:enemy-ai]
 //! ```
 //!
+//! Every command takes `--set FIGHTER.NAME=VALUE` (repeatable) to run with a
+//! number changed: FIGHTER is `aletha` or `enemy`, NAME a placeholder's report
+//! name or `stagger_ticks`. The sweep that picks a number reports these.
+//!
 //! `sweep` runs the standard matchups (Aletha and the training enemy, each
 //! side driven by the enemy AI or a scripted pad, and both mirrors) and
 //! prints one table row per matchup; `--out` keeps one JSON per matchup.
@@ -31,6 +35,7 @@ struct Args {
     layouts: Vec<Layout>,
     out: Option<PathBuf>,
     matchup: String,
+    sets: Vec<String>,
 }
 
 fn parse() -> Args {
@@ -44,6 +49,7 @@ fn parse() -> Args {
         layouts: Vec::new(),
         out: None,
         matchup: "aletha-ai:enemy-ai".into(),
+        sets: Vec::new(),
     };
     while let Some(flag) = args.next() {
         let mut value = || {
@@ -62,6 +68,7 @@ fn parse() -> Args {
             }
             "--out" => parsed.out = Some(PathBuf::from(value())),
             "--matchup" => parsed.matchup = value(),
+            "--set" => parsed.sets.push(value()),
             other => panic!("unknown flag {other}"),
         }
     }
@@ -148,7 +155,7 @@ fn standard<'a>(placed: &'a Placed, layout: Layout) -> Vec<Matchup<'a>> {
 fn row(project: &str, layout: Layout, matchup: &Matchup<'_>, s: &Summary) -> String {
     let p = |v: [u32; 2]| format!("{} / {}", v[0], v[1]);
     format!(
-        "| {project} | {} | {} | {} / {} | {:.0}% (fair: 50 +/- {:.0}) | {} | {} | {} | {} | {} | {} | {:.0} |",
+        "| {project} | {} | {} | {} / {} | {:.0}% (fair: 50 +/- {:.0}) | {} | {} | {} | {} | {} | {} | {:.0} | {} | {} |",
         layout.name(),
         matchup.name,
         s.a_won(),
@@ -162,10 +169,12 @@ fn row(project: &str, layout: Layout, matchup: &Matchup<'_>, s: &Summary) -> Str
         p(s.total(|t| t.knockdowns)),
         p(s.total(|t| t.evades)),
         s.mean_length(),
+        p(s.total(|t| t.staggers)),
+        p(s.total(|t| t.parry_swaps)),
     )
 }
 
-const HEADER: &str = "| project | layout | matchup (A:B) | wins A / B | A share | stalls+timeouts | double KO | parries A / B | crits A / B | knockdowns A / B | evades A / B | mean length (ticks) |\n|---|---|---|---|---|---|---|---|---|---|---|---|";
+const HEADER: &str = "| project | layout | matchup (A:B) | wins A / B | A share | stalls+timeouts | double KO | parries A / B | crits A / B | knockdowns A / B | evades A / B | mean length (ticks) | staggers A / B | parry swaps A / B |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|---|";
 
 fn write_json(out: &Option<PathBuf>, name: &str, value: &serde_json::Value) {
     if let Some(dir) = out {
@@ -178,9 +187,36 @@ fn write_json(out: &Option<PathBuf>, name: &str, value: &serde_json::Value) {
     }
 }
 
-fn load(path: &Path) -> Placed {
+/// Apply one `--set FIGHTER.NAME=VALUE` to the loaded fighters.
+fn apply_set(loaded: &mut ProjectFighters, set: &str) {
+    let (key, value) = set
+        .split_once('=')
+        .unwrap_or_else(|| panic!("--set {set}: expected FIGHTER.NAME=VALUE"));
+    let value: u16 = value
+        .parse()
+        .unwrap_or_else(|_| panic!("--set {set}: value is not a number"));
+    let (fighter, name) = key
+        .split_once('.')
+        .unwrap_or_else(|| panic!("--set {set}: expected FIGHTER.NAME"));
+    let spec = match fighter {
+        "aletha" => &mut loaded.aletha,
+        "enemy" => &mut loaded.enemy,
+        other => panic!("--set {set}: unknown fighter {other}"),
+    };
+    match name {
+        "stagger_ticks" => spec.record.stagger_ticks = value,
+        _ => Placeholder::from_name(name)
+            .unwrap_or_else(|| panic!("--set {set}: unknown number {name}"))
+            .set(&mut spec.record, value),
+    }
+}
+
+fn load(path: &Path, sets: &[String]) -> Placed {
     let started = std::time::Instant::now();
-    let loaded = project::load(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let mut loaded = project::load(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    for set in sets {
+        apply_set(&mut loaded, set);
+    }
     eprintln!(
         "{}: cooked in {:.1}s; enemy {} (poise {}, parry {} ticks), aletha (poise {}, parry {} ticks), start {} units",
         loaded.project,
@@ -195,10 +231,10 @@ fn load(path: &Path) -> Placed {
     for spec in [&loaded.enemy, &loaded.aletha] {
         let r = &spec.record;
         eprintln!(
-            "  {}: radius {} height {} walk {} run {} pref {} tol {} range {}..{} windup {} active {}/{}/{} recover {} touch {} flags {:#x} hp {} strikes {:?} emitters {:?}",
+            "  {}: radius {} height {} walk {} run {} pref {} tol {} range {}..{} windup {} active {}/{}/{} recover {} stagger {} knockdown {} touch {} flags {:#x} hp {} strikes {:?} emitters {:?}",
             spec.name, r.radius, r.height, r.motion.walk_speed, r.motion.run_speed, r.preferred_distance, r.spacing_tolerance,
             r.attack_min_range, r.attack_max_range, r.windup_ticks, r.attack_active_ticks, r.heavy_attack_active_ticks,
-            r.ranged_attack_active_ticks, r.recovery_ticks, r.touch_damage, r.flags, r.combat.max_health, spec.strikes, spec.emitters
+            r.ranged_attack_active_ticks, r.recovery_ticks, r.stagger_ticks, r.combat.knockdown_ticks, r.touch_damage, r.flags, r.combat.max_health, spec.strikes, spec.emitters
         );
         eprintln!(
             "    clip timings (light, heavy, ranged): {:?}",
@@ -214,7 +250,7 @@ fn main() {
         "sweep" => {
             println!("{HEADER}");
             for path in &args.projects {
-                let placed = load(path);
+                let placed = load(path, &args.sets);
                 for &layout in &args.layouts {
                     for matchup in standard(&placed, layout) {
                         let started = std::time::Instant::now();
@@ -249,7 +285,7 @@ fn main() {
         }
         "sensitivity" => sensitivity(&args),
         "log" => {
-            let placed = load(&args.projects[0]);
+            let placed = load(&args.projects[0], &args.sets);
             let (a, b) = args.matchup.split_once(':').expect("--matchup A:B");
             let side = |s: &str| -> (&Fighter, Controller) {
                 let (who, by) = s.split_once('-').expect("fighter-controller");
@@ -283,7 +319,7 @@ fn sensitivity(args: &Args) {
     println!("| project | layout | placeholder | value (aletha / enemy) | aletha mirror A share | enemy mirror A share | aletha vs enemy: aletha share | parries aletha / enemy | crits aletha / enemy | knockdowns aletha / enemy | mean length |\n|---|---|---|---|---|---|---|---|---|---|---|");
     let mut all = Vec::new();
     for path in &args.projects {
-        let base = load(path);
+        let base = load(path, &args.sets);
         for &layout in &args.layouts {
             let mut configs: Vec<(String, i32)> = vec![("baseline".into(), 0)];
             for p in Placeholder::ALL {

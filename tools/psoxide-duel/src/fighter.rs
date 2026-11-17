@@ -255,6 +255,28 @@ impl Placeholder {
         value as u16
     }
 
+    /// Set this placeholder on `record` to `value`. `DryCycles` is not on the
+    /// record; it leaves the record unchanged.
+    pub fn set(self, record: &mut LevelGameEntityRecord, value: u16) {
+        let c = &mut record.combat;
+        match self {
+            Self::ParryTicks => c.parry_ticks = value,
+            Self::ParryRefund => c.parry_refund = value,
+            Self::CritWindowTicks => c.crit_window_ticks = value,
+            Self::CritDamageQ12 => c.crit_damage_q12 = value,
+            Self::CritPoiseQ12 => c.crit_poise_q12 = value,
+            Self::KnockdownTicks => c.knockdown_ticks = value,
+            Self::Poise => c.poise = value,
+            Self::ParrySwapPercent => c.parry_swap_percent = value.min(100) as u8,
+            Self::DryCycles => {}
+        }
+    }
+
+    /// The placeholder report name `name` names.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|p| p.name() == name)
+    }
+
     /// The value of this placeholder on `record`.
     pub fn value(self, record: &LevelGameEntityRecord) -> u16 {
         let c = &record.combat;

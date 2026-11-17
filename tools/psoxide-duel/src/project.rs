@@ -270,6 +270,20 @@ pub fn load(project_dir: &Path) -> Result<ProjectFighters, String> {
         )
     };
 
+    // Her stagger is her Stun clip played through, as the disc locks her for
+    // it (`react_player`); her set does not bind Stun the way an enemy set
+    // does, so the entity cook leaves her the legacy 32 ticks.
+    let stun = psx_level::CharacterAnimationAction::Stun.to_index();
+    if let Some(ticks) = clip_ticks(
+        &package,
+        usize::from(player_character.model),
+        player_character.action_clips[stun],
+        player_character.action_speeds[stun],
+        player_character.action_frame_ranges[stun],
+    ) {
+        aletha.record.stagger_ticks = ticks;
+    }
+
     let spawn = player.spawn;
     let dx = i64::from(spawn.x) - i64::from(enemy_record.x);
     let dz = i64::from(spawn.z) - i64::from(enemy_record.z);
@@ -283,6 +297,33 @@ pub fn load(project_dir: &Path) -> Result<ProjectFighters, String> {
         start_distance,
         swap_cooldown_ticks: player_character.stance_swap_cooldown_ticks,
     })
+}
+
+/// How long clip `clip` (model-local) of model `model` plays at `speed_q8`
+/// over `range`, in 60 Hz ticks: the guest's `clip_duration_ticks`, the
+/// length an action locks its fighter for. None when the clip is not cooked.
+fn clip_ticks(
+    package: &PlaytestPackage,
+    model: usize,
+    clip: u16,
+    speed_q8: u16,
+    range: psx_level::CharacterActionFrameRange,
+) -> Option<u16> {
+    let model = package.models.get(model)?;
+    let cooked = package
+        .model_clips
+        .get(usize::from(model.clip_first) + usize::from(clip))?;
+    let asset = package.assets.get(cooked.animation_asset_index)?;
+    // The guest's clip is 'static; a host tool leaks its one copy.
+    let bytes: &'static [u8] = Box::leak(asset.bytes.clone().into_boxed_slice());
+    let animation = psx_asset::Animation::from_bytes(bytes).ok()?;
+    let ticks = psx_game_runtime::model_rendering::clip_duration_ticks(
+        animation,
+        psx_engine::VideoHz::NTSC,
+        speed_q8,
+        range,
+    );
+    Some(ticks.min(u32::from(u16::MAX)) as u16)
 }
 
 /// How `spec`'s light, heavy and ranged attacks run when played on `clips`

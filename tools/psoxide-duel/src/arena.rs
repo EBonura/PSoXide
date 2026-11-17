@@ -269,6 +269,11 @@ pub struct SideTally {
     pub crits: u32,
     /// Times this side was knocked down.
     pub knockdowns: u32,
+    /// Times this side was staggered (a poise break that is not a
+    /// knockdown, a parry's riposte included).
+    pub staggers: u32,
+    /// Swaps this side's controller made on purpose to parry.
+    pub parry_swaps: u32,
     /// Projectile evade decisions (ranged-exchange mode 4 entries, the
     /// disc report's `projectile_evade_attempts`).
     pub evades: u32,
@@ -869,6 +874,9 @@ pub fn run(duel: &Duel<'_>) -> DuelResult {
             side.moved = position != side.last_position;
             side.last_position = position;
             if state != side.last_state {
+                if state == GameEntityState::Staggered {
+                    side.tally.staggers += 1;
+                }
                 if state == GameEntityState::KnockedDown {
                     side.tally.knockdowns += 1;
                     if duel.log {
@@ -884,6 +892,11 @@ pub fn run(duel: &Duel<'_>) -> DuelResult {
             let stance = side.entities.stance(0);
             if stance != side.last_stance {
                 side.tally.swaps += 1;
+                if side.entities.tactical_snapshot(0).stance_reason
+                    == psx_game_runtime::entities::STANCE_REASON_PARRY
+                {
+                    side.tally.parry_swaps += 1;
+                }
                 side.last_stance = stance;
             }
             let health = side.entities.health(0);
