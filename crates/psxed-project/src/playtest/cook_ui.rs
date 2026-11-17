@@ -192,9 +192,12 @@ pub(crate) fn cook_ui_nodes(
         (
             // Kronbits Free SFX "Retro Impact Metal 36" (CC0), the cooked
             // `freesfx/psau/hit_metal.psau` as is. Manny's pick for a parry.
+            // Volume 73 puts its loudest 50 ms of the mixed output level with
+            // the hit cues (measured on `--dump-audio`: about 14,200 RMS at 100
+            // against about 10,500 for the hit bursts).
             "assets/audio/gameplay/parry.psau",
             psx_level::LevelGameplaySfxEvent::Parry,
-            100,
+            73,
             crate::UI_SFX_PITCH_UNITY_Q12,
         ),
         (
