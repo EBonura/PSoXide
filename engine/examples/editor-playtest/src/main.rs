@@ -54,18 +54,19 @@ use psx_asset::{Animation, ModelPart, ModelVertex};
 use psx_engine::ui::UiTextureSlot;
 use psx_engine::{
     button, horizontal_view_coordinates, telemetry, AdaptiveSubdivisionKindMask, Angle, App,
-    CharacterCollisionAabb, CharacterCollisionCylinder, CharacterMotorAnim, CharacterMotorConfig,
-    CharacterMotorInput, CharacterMotorState, Config, Ctx, DepthBand, DepthRange,
-    LoadedWorldCameraGte, OtFrame, PacketFramePair, PrimitivePacketArena, PrimitivePacketScratch,
-    PrimitiveSink, ProjectedVertex, QueuedFrame, RenderSubmission, Rgb8, RoomPoint, Scene,
-    SceneStateRef, SchedulerConfig, SimTick, TexturedModelRenderFace, ThirdPersonCameraConfig,
-    ThirdPersonCameraInput, ThirdPersonCameraState, ThirdPersonCameraTarget, VideoHz, VisualPacing,
-    WorldCamera, WorldProjection, WorldRenderPass, WorldSurfaceOptions, WorldTriCommand,
-    WorldVertex, PRIMITIVE_PACKET_SLOT_WORDS, Q12,
+    CharacterCollisionAabb, CharacterCollisionCylinder, CharacterMotorConfig, CharacterMotorInput,
+    CharacterMotorState, Config, Ctx, DepthBand, DepthRange, LoadedWorldCameraGte, OtFrame,
+    PacketFramePair, PrimitivePacketArena, PrimitivePacketScratch, PrimitiveSink, ProjectedVertex,
+    QueuedFrame, RenderSubmission, Rgb8, RoomPoint, Scene, SceneStateRef, SchedulerConfig, SimTick,
+    TexturedModelRenderFace, ThirdPersonCameraConfig, ThirdPersonCameraInput,
+    ThirdPersonCameraState, ThirdPersonCameraTarget, VideoHz, VisualPacing, WorldCamera,
+    WorldProjection, WorldRenderPass, WorldSurfaceOptions, WorldTriCommand, WorldVertex,
+    PRIMITIVE_PACKET_SLOT_WORDS, Q12,
 };
 use psx_font::FontAtlas;
 use psx_game_runtime::combat_fx::{FlashKind, LandedHit, COMBAT_FEEDBACK};
 use psx_game_runtime::combat_intent::{CombatAction, CombatActions, CombatIntent, CombatMove};
+use psx_game_runtime::fighter_anim::{self, AnimTrack};
 use psx_game_runtime::vitality::{
     BoostBars, BoostInventory, BoostModuleId, BoostSlotId, CombatStance, CombatStanceConfig,
     PowerUpLoadout, VitalityChannelId, VitalityModifiers, VitalityPole, VitalityPool,
@@ -246,25 +247,6 @@ fn world_camera_from_position_focus(
     )
 }
 
-/// Locomotion crossfade window in sim ticks (60 Hz): long enough to
-/// soften idle/walk/run cuts, short enough that matrix-lerp shrink
-/// stays invisible.
-const PLAYER_ANIM_BLEND_LOCOMOTION_TICKS: u32 = 8;
-/// Attack/action crossfade window in sim ticks: snappier so combat
-/// startup frames are not softened away.
-const PLAYER_ANIM_BLEND_ACTION_TICKS: u32 = 4;
-/// Crossfade window when LEAVING a committed one-shot (attack, intro).
-/// Entering one stays snappy so its startup frames read, but a 2.5-4.5s
-/// swing cut to idle in four ticks is the harshest transition in the game;
-/// it wants a settle roughly as long as a footfall.
-const PLAYER_ANIM_BLEND_ACTION_OUT_TICKS: u32 = 14;
-/// Crossfade window between two stepping gaits (walk <-> run <-> strafe).
-/// Longer than the generic locomotion window because gait clips are
-/// cook-time aligned to foot-down and the incoming clip is entered at the
-/// outgoing clip's phase, so a long fade blends like poses instead of
-/// averaging opposite halves of a stride.
-const PLAYER_ANIM_BLEND_GAIT_TICKS: u32 = 10;
-
 mod duel;
 mod opening_sequence;
 
@@ -284,13 +266,13 @@ struct Playtest {
     /// `PLAYER_CONTROLLER` was authored. Falls back to the
     /// pre-character debug controls in that case.
     character: Option<RuntimeCharacter>,
-    /// Current animation state. Source of truth for which clip
-    /// `draw_player` plays each frame.
-    anim_state: PlayerAnim,
-    /// Active clip-transition crossfade: outgoing state, its frozen
-    /// clip-local tick, and the switch tick the blend ramps from.
-    /// Cleared on init/respawn; expires by elapsed ticks at render.
-    anim_blend_from: Option<(PlayerAnim, u32, SimTick)>,
+    /// Current animation state (source of truth for which clip
+    /// `draw_player` plays each frame) and the switch it crossfades from,
+    /// on the one animation track every fighter runs
+    /// ([`psx_game_runtime::fighter_anim`]). Its clock is her
+    /// `actor_action().start`. The crossfade is cleared on init/respawn
+    /// and expires by elapsed ticks at render.
+    anim: AnimTrack<PlayerAnim>,
     /// Three-part gait (windup / cruise / winddown) phase; see
     /// `walk_transition_input` and `walk_transition_state`.
     loco: LocoPhase,
@@ -749,8 +731,8 @@ impl Playtest {
         self.inventory_overlay_active = false;
         self.acquired_module = BoostModuleId::NONE;
         // Zero bytes already decode as `Idle`; stamped for self-documentation.
-        self.anim_state = PlayerAnim::Idle;
-        self.anim_blend_from = None;
+        self.anim.state = PlayerAnim::Idle;
+        self.anim.switched = None;
         self.loco = LocoPhase::Idle;
         self.box_props.init();
         self.orbit_yaw = CAMERA_START_YAW;

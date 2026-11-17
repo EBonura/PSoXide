@@ -127,11 +127,6 @@ pub(super) struct TacticalState {
     generation: u16,
     remaining: u16,
     phase: u16,
-    pub(super) animation_phase_q8: u32,
-    animation_clip: u16,
-    /// A move was asked for and not blocked, but the motor carried it as a
-    /// sub-unit step this tick: still walking, for the clip.
-    motion_deferred: bool,
     separation: u16,
     sample_ticks: u16,
     travel: u16,
@@ -143,8 +138,7 @@ pub(super) struct TacticalState {
     unseen_ticks: u16,
     retries: u8,
     pub(super) running: bool,
-    pub(super) moved: bool,
-    turning: bool,
+    pub(super) turning: bool,
     last_attack: u8,
     stance_reason: u8,
     repeat_count: u8,
@@ -173,9 +167,6 @@ impl TacticalState {
         generation: 0,
         remaining: 0,
         phase: 0,
-        animation_phase_q8: 0,
-        animation_clip: u16::MAX,
-        motion_deferred: false,
         separation: 0,
         sample_ticks: 0,
         travel: 0,
@@ -187,7 +178,6 @@ impl TacticalState {
         unseen_ticks: 0,
         retries: 0,
         running: false,
-        moved: false,
         turning: false,
         last_attack: 255,
         stance_reason: 0,
@@ -389,7 +379,6 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         }
         t.goal = EnemyGoal::None;
         t.remaining = 0;
-        t.moved = false;
         t.running = false;
         t.turning = false;
     }
@@ -486,49 +475,20 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         error
     }
 
+    /// The clip a tactical entity shows in Aggro once it has reacted: its
+    /// locomotion ([`Self::locomotion_anim`]) on the locomotion clock.
     pub(super) fn tactical_clip(
         &self,
         r: &LevelGameEntityRecord,
         i: usize,
-    ) -> Option<GameEntityClip> {
+    ) -> Option<(CharacterAnimationAction, GameEntityClip)> {
         if self.state(i) != GameEntityState::Aggro
             || self.state_ticks[i] < u16::from(r.reaction_ticks)
         {
             return None;
         }
-        Some(GameEntityClip {
-            clip: self.tactical_locomotion_clip(r, i),
-            phase_ticks: (self.tactics[i].animation_phase_q8 >> 8) as u16,
-            one_shot: false,
-            speed_q8: CHARACTER_ACTION_SPEED_UNSCALED_Q8,
-            frame_range: CharacterActionFrameRange::FULL,
-        })
-    }
-
-    pub(super) fn tactical_locomotion_clip(&self, r: &LevelGameEntityRecord, i: usize) -> u16 {
-        let t = self.tactics[i];
-        if !t.moved {
-            if t.turning {
-                r.turn_clip
-            } else {
-                r.idle_clip
-            }
-        } else {
-            match t.goal {
-                EnemyGoal::Evade => {
-                    if self.intent(i) == GameEntityIntent::CircleLeft {
-                        r.strafe_left_clip
-                    } else {
-                        r.strafe_right_clip
-                    }
-                }
-                EnemyGoal::CircleLeft => r.strafe_left_clip,
-                EnemyGoal::CircleRight => r.strafe_right_clip,
-                EnemyGoal::Retreat => r.walk_backward_clip,
-                _ if t.running => r.run_clip,
-                _ => r.walk_clip,
-            }
-        }
+        let shown = self.locomotion_anim(r, i);
+        Some((shown.action, self.locomotion_clip(shown, i)))
     }
 
     /// Pace (Q8 per frame) of a tactical goal: the walk, at the spacing
@@ -553,49 +513,6 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
 
     fn tactical_walk_speed(&self, r: &LevelGameEntityRecord, goal: EnemyGoal) -> i32 {
         ((self.tactical_walk_speed_q8(r, goal) + 255) >> 8).max(1)
-    }
-
-    pub(super) fn advance_tactical_animation(
-        &mut self,
-        r: &LevelGameEntityRecord,
-        i: usize,
-        before: [i32; 3],
-        delta: u16,
-    ) {
-        if self.state(i) != GameEntityState::Aggro
-            && !((self.selected_attack_is_ranged(i) || self.state(i) == GameEntityState::Windup)
-                && matches!(
-                    self.state(i),
-                    GameEntityState::Windup | GameEntityState::Attack | GameEntityState::Recover
-                ))
-        {
-            self.tactics[i].animation_clip = u16::MAX;
-            return;
-        }
-        let dx = self.px(i).saturating_sub(before[0]).clamp(-64, 64);
-        let dz = self.pz(i).saturating_sub(before[2]).clamp(-64, 64);
-        self.tactics[i].moved =
-            dx != 0 || dz != 0 || (self.tactics[i].motion_deferred && self.tactics[i].moved);
-        let clip = self.tactical_locomotion_clip(r, i);
-        // Objective lifetimes and animation clocks are independent. Replanning
-        // the same gait must not snap both feet back to their first frame.
-        if self.tactics[i].animation_clip != clip {
-            self.tactics[i].animation_clip = clip;
-            self.tactics[i].animation_phase_q8 = 0;
-        }
-        let advance = if self.tactics[i].moved {
-            let travel_q8 = psx_math::int32::isqrt_i32((dx * dx + dz * dz) << 16);
-            let nominal_speed_q8 = if self.tactics[i].running {
-                self.pace_q8(r, true)
-            } else {
-                self.tactical_walk_speed_q8(r, self.tactics[i].goal)
-            };
-            ((travel_q8 << 8) / nominal_speed_q8.max(1)) as u32
-        } else {
-            u32::from(delta) * 256
-        };
-        self.tactics[i].animation_phase_q8 =
-            self.tactics[i].animation_phase_q8.wrapping_add(advance) & 0x00ff_ffff;
     }
 
     pub(super) fn choose_spacing(
@@ -753,29 +670,10 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         }
     }
 
-    pub(super) fn tick_tactical(
-        &mut self,
-        r: &LevelGameEntityRecord,
-        i: usize,
-        input: GameEntityTickInput<'_>,
-        mover: &mut impl FighterWorld,
-        delta: u16,
-        stats: &mut GameEntityTickStats,
-    ) {
-        let before = self.position(i);
-        let was_moving = self.tactics[i].moved;
-        self.tactics[i].motion_deferred = false;
-        self.tick_tactical_policy(r, i, input, mover, delta, stats);
-        if self.tactics[i].motion_deferred {
-            self.tactics[i].moved = was_moving;
-        }
-        self.advance_tactical_animation(r, i, before, delta);
-    }
-
     /// One tactical tick: the controller decides a [`CombatIntent`], the
     /// rules run it ([`Self::apply_intent`]), and the controller then reads
     /// what the move achieved.
-    fn tick_tactical_policy(
+    pub(super) fn tick_tactical(
         &mut self,
         r: &LevelGameEntityRecord,
         i: usize,
@@ -789,9 +687,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
             None => self.decide_tactical(r, i, input, mover, delta, stats),
         };
         let before = self.position(i);
-        let requested = plan.intent.movement != CombatMove::Still;
-        let frame = self.apply_intent(r, i, plan.intent, mover, delta, stats);
-        self.tactics[i].motion_deferred = requested && !frame.moved && !frame.blocked;
+        self.apply_intent(r, i, plan.intent, mover, delta, stats);
         self.after_tactical_intent(r, i, plan.then, before, input, delta, stats);
     }
 
@@ -811,7 +707,6 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         stats: &mut GameEntityTickStats,
     ) -> TacticalPlan {
         let mut intent = CombatIntent::IDLE;
-        self.tactics[i].moved = false;
         self.tactics[i].turning = false;
         self.tactics[i].phase = self.tactics[i].phase.wrapping_add(delta);
         let home = [r.x, r.y, r.z];
@@ -1552,7 +1447,6 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
                 destination,
                 requested,
             } => {
-                self.tactics[i].moved = Self::distance(before, self.position(i)) > 0;
                 self.monitor_progress(r, i, before, destination, requested, delta);
             }
             Then::WaitRetry {

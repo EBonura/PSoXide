@@ -88,17 +88,25 @@ impl ActorPoseSnapshot {
     }
 
     /// Overlay selected joints without changing the phase used for attack windows.
-    pub fn with_joint_layer(
+    pub fn with_joint_layer(self, animation: Animation<'static>, phase: u32, mask: u32) -> Self {
+        self.with_weighted_joint_layer(animation, phase, mask, 0)
+    }
+
+    /// [`Self::with_joint_layer`] at a weight: `alpha_q12` is the Q12 weight
+    /// of this pose's own clip on the masked joints (0 shows the layer alone
+    /// there), so a layer can fade in and out.
+    pub fn with_weighted_joint_layer(
         mut self,
         animation: Animation<'static>,
         phase: u32,
         mask: u32,
+        alpha_q12: u16,
     ) -> Self {
         self.blend_from = animation
             .looped_pose_sample_q12(phase)
             .map(|sample| ModelPoseBlend {
                 sample,
-                alpha_q12: 0,
+                alpha_q12,
                 joint_mask: mask,
             });
         self
@@ -209,7 +217,8 @@ mod tests {
     use super::*;
     use crate::combat::transform_actor_combat_capsule;
     use psx_level::CombatCapsuleRecord;
-    use std::{boxed::Box, vec::Vec};
+    use std::boxed::Box;
+    use std::vec::Vec;
 
     fn one_joint_animation(translations: &[i16]) -> Animation<'static> {
         const ANIMATION_HEADER_SIZE: usize = 8;

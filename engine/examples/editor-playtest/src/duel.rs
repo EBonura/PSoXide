@@ -187,7 +187,7 @@ impl Playtest {
     /// (0 nothing, 1 an action, 2 an attack), then its intent.
     pub(super) fn duel_actor_busy(&self, now: SimTick) -> u8 {
         if self.game_entities.actor_action().locked(now) {
-            if player_anim_is_attack(self.anim_state) {
+            if player_anim_is_attack(self.anim.state) {
                 2
             } else {
                 1
@@ -415,7 +415,7 @@ impl Playtest {
             self.game_entities.health(i) as u32,
             self.game_entities.actor().stance.active().index() as u32,
             self.game_entities.stance(i).index() as u32,
-            self.anim_state.action().to_index() as u32,
+            self.anim.state.action().to_index() as u32,
             self.game_entities.state(i) as u32,
             actor.goal as u32,
             u32::from(actor.stance_reason),
