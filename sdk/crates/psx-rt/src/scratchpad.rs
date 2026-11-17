@@ -684,6 +684,11 @@ mod tests {
         assert!(!is_on_scratchpad_stack());
     }
 
+    const _: () = assert!(!InRegister::<[usize; 2], ()>::FITS);
+    const _: () = assert!(!InRegister::<u8, u32>::FITS);
+    const _: () = assert!(InRegister::<u32, ()>::FITS);
+    const _: () = assert!(InRegister::<(), ()>::FITS);
+
     #[test]
     fn a_unit_closure_of_one_word_travels_in_the_context_register() {
         let mut count = 0u32;
@@ -691,10 +696,6 @@ mod tests {
         // SAFETY: as above, the host only calls the closure.
         unsafe { Stack::run(by_ref) };
         assert_eq!(count, 3);
-        assert!(!InRegister::<[usize; 2], ()>::FITS);
-        assert!(!InRegister::<u8, u32>::FITS);
-        assert!(InRegister::<u32, ()>::FITS);
-        assert!(InRegister::<(), ()>::FITS);
         let text = std::string::String::from("dropped once");
         // SAFETY: as above. The captured `String` is moved in and dropped by the closure.
         unsafe { Stack::run(move || drop(text)) };
