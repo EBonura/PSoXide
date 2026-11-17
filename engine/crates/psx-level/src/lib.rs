@@ -3735,7 +3735,27 @@ pub struct LevelCharacterRecord {
     pub flags: u16,
 }
 
+/// A Character binds an action when its clip slot holds a clip: the same
+/// verb rules ([`combat_verbs`]) for every body.
+impl combat_verbs::VerbBindings for LevelCharacterRecord {
+    fn bound(&self, action: CharacterAnimationAction) -> bool {
+        self.action_clips[action.to_index()].is_some()
+    }
+}
+
 impl LevelCharacterRecord {
+    /// The model-local clip this character plays for `action`: its own
+    /// clip, else the first bound stand-in of the verb's fallback chain
+    /// ([`combat_verbs::resolve`]), with the action that clip belongs to.
+    pub fn verb_clip(
+        &self,
+        action: CharacterAnimationAction,
+    ) -> Option<(CharacterAnimationAction, u16)> {
+        let found = combat_verbs::resolve(self, action)?;
+        let clip = self.action_clips[found.to_index()];
+        clip.is_some().then(|| (found, clip.raw()))
+    }
+
     /// The body of a fighter whose cook linked no Character: no clips, no
     /// windows, no volumes, and the editor's default controller numbers
     /// (the same numbers a new Character Controller starts with).
@@ -4269,5 +4289,36 @@ mod persistent_slot_tests {
             assert_eq!(slot, persistent_flag_slot(StableId(raw)));
         }
         assert_eq!(persistent_flag_slot(StableId(832 + 7)), 7);
+    }
+}
+
+#[cfg(test)]
+mod character_verb_clip_tests {
+    use super::*;
+
+    #[test]
+    fn a_body_plays_its_own_dash_else_the_verbs_stand_in() {
+        let mut body = LevelCharacterRecord::DEFAULT_BODY;
+        body.action_clips[CharacterAnimationAction::Roll.to_index()] =
+            OptionalModelClipIndex::from_raw(4);
+        // No dash bound: the dash plays the roll, its first stand-in.
+        assert_eq!(
+            body.verb_clip(CharacterAnimationAction::DashLeft),
+            Some((CharacterAnimationAction::Roll, 4))
+        );
+        body.action_clips[CharacterAnimationAction::DashLeft.to_index()] =
+            OptionalModelClipIndex::from_raw(7);
+        assert_eq!(
+            body.verb_clip(CharacterAnimationAction::DashLeft),
+            Some((CharacterAnimationAction::DashLeft, 7))
+        );
+        assert_eq!(
+            body.verb_clip(CharacterAnimationAction::DashRight),
+            Some((CharacterAnimationAction::Roll, 4))
+        );
+        assert_eq!(
+            LevelCharacterRecord::DEFAULT_BODY.verb_clip(CharacterAnimationAction::DashLeft),
+            None
+        );
     }
 }

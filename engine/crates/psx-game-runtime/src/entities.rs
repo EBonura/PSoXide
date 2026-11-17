@@ -1930,14 +1930,26 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             return (Action::Idle, GameEntityClip::default());
         }
         let record = &records[index];
-        // A roll shows the character's roll clip whatever the state, as the
-        // player's does: the motor owns the body until it ends.
+        // An evade shows the clip of the evade the motor makes (roll,
+        // backstep, dash left or right, by its side), as the player's does,
+        // through the verb's fallback chain on its Character; the motor owns
+        // the body until it ends.
         let motor = &self.motors[index];
         if !motor.action().is_idle() {
+            let wanted = match self.motor_anims[index] {
+                CharacterMotorAnim::DashLeft => Action::DashLeft,
+                CharacterMotorAnim::DashRight => Action::DashRight,
+                CharacterMotorAnim::Quickstep => Action::Backstep,
+                _ => Action::Roll,
+            };
+            let (action, clip) = self
+                .body(record)
+                .verb_clip(wanted)
+                .unwrap_or((Action::Roll, record.roll_clip));
             return (
-                Action::Roll,
+                action,
                 GameEntityClip {
-                    clip: record.roll_clip,
+                    clip,
                     phase_ticks: u16::from(motor.action_frame()),
                     one_shot: true,
                     speed_q8: CHARACTER_ACTION_SPEED_UNSCALED_Q8,
