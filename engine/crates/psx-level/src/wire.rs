@@ -70,6 +70,9 @@ macro_rules! wire_int {
             fn put(&self, out: &mut Vec<u8>) {
                 out.extend_from_slice(&self.to_le_bytes());
             }
+            // Decoding runs once, at level load: one copy of each integer read
+            // instead of one per field of every record (about 13 KB of PS1 code).
+            #[inline(never)]
             fn get(r: &mut Reader) -> Option<Self> {
                 let bytes = r.take(core::mem::size_of::<$t>())?;
                 Some(<$t>::from_le_bytes(bytes.try_into().ok()?))
