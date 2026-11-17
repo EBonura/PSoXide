@@ -397,16 +397,29 @@ fn enemy_flash_tint(
     entities: &RuntimeGameEntities,
     pose: &InstanceActorPoseSnapshot,
     any_flash: bool,
+    tick: u32,
 ) -> Option<mr::LitTintBias> {
     if !any_flash {
         return None;
     }
     let instance = u16::try_from(pose.instance_index()).ok()?;
     let entity = game_entity_for_instance(instance)?;
-    entities
-        .flash(entity)
-        .lit_tint(&psx_game_runtime::combat_fx::COMBAT_FEEDBACK, None)
+    let data = &psx_game_runtime::combat_fx::COMBAT_FEEDBACK;
+    let flash = entities.flash(entity).lit_tint(data, None);
+    if flash.is_none() && entities.crit_armed(entity) {
+        // An armed crit: a fighter with no weapon model of its own (the
+        // training enemies swing their arms) glows over its whole body.
+        let zenith = entities.stance(entity) == VitalityChannelId::Two;
+        return Some(mr::LitTintBias {
+            color: data.armed_glow_rgb(zenith, tick),
+            strength_q8: ARMED_BODY_GLOW_Q8,
+        });
+    }
+    flash
 }
+
+/// How far an armed crit pulls a weaponless enemy's lit tint toward the glow.
+const ARMED_BODY_GLOW_Q8: u16 = 168;
 
 /// Resolve the same colour tell for one entity-owned model instance. Static
 /// props have no game-entity owner and return `None`; enemy stance remains the
@@ -1194,6 +1207,7 @@ pub(super) fn draw_player(
 /// per-room enemy weapon pass) through the crate policy.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_instance_equipment(
+    entities: &RuntimeGameEntities,
     current_room: RoomIndex,
     instance_poses: &[Option<InstanceActorPoseSnapshot>; MAX_MODEL_INSTANCES],
     max_draws: usize,
@@ -1223,6 +1237,17 @@ pub(super) fn draw_instance_equipment(
         let mut knobs = MODEL_DRAW_KNOBS;
         knobs.max_equipment_draws = remaining;
         knobs.instance_equipment_skin = instance_equipment_skin;
+        if let Some(entity) = u16::try_from(pose.instance_index())
+            .ok()
+            .and_then(game_entity_for_instance)
+            .filter(|&entity| entities.crit_armed(entity))
+        {
+            // The blade of a fighter with an armed crit pulses in its stance colour.
+            let zenith = entities.stance(entity) == VitalityChannelId::Two;
+            knobs.instance_equipment_skin = Some(mr::EquipmentMaterializationSkin::opaque(
+                COMBAT_FEEDBACK.armed_glow_rgb(zenith, elapsed_tick.as_u32()),
+            ));
+        }
         let stats = mr::draw_instance_equipment_from_pose::<
             MAX_RUNTIME_MODELS,
             MAX_RUNTIME_MODEL_CLIPS,
@@ -1262,6 +1287,7 @@ pub(super) fn draw_instance_equipment(
 pub(super) fn draw_player_equipment(
     anim: PlayerAnim,
     wire_q12: [u16; mr::MAX_PLAYER_EQUIPMENT],
+    armed_glow: Option<(u8, u8, u8)>,
     player_pose: PlayerActorPoseSnapshot,
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
     model_faces: &[TexturedModelRenderFace],
@@ -1281,6 +1307,13 @@ pub(super) fn draw_player_equipment(
     let mut knobs = MODEL_DRAW_KNOBS;
     knobs.equipment_wire_q12 = wire_q12;
     knobs.equipment_materialization_skins = equipment_materialization_skins(anim);
+    if let Some(glow) = armed_glow {
+        // An armed crit shows the weapon, whatever the action's beat, in the
+        // pulsing glow colour.
+        knobs.equipment_wire_q12 = [mr::ASSEMBLED_Q12; mr::MAX_PLAYER_EQUIPMENT];
+        knobs.equipment_materialization_skins =
+            [Some(mr::EquipmentMaterializationSkin::opaque(glow)); mr::MAX_PLAYER_EQUIPMENT];
+    }
     knobs.equipment_materialization = true;
     let mut out = mr::draw_player_equipment_from_pose::<
         MAX_RUNTIME_MODELS,
@@ -1395,7 +1428,7 @@ pub(super) fn draw_model_instances(
 ) -> ModelInstanceDrawStats {
     let mut out = ModelInstanceDrawStats::default();
     // Nobody parried lately: no instance looks its entity up.
-    let any_flash = entities.any_flash();
+    let any_flash = entities.any_flash() || entities.any_crit_armed();
     for pose in instance_poses
         .iter()
         .take(MODEL_DRAW_KNOBS.max_model_instances)
@@ -1434,7 +1467,7 @@ pub(super) fn draw_model_instances(
             model_parts,
             model_vertices,
             &mut model_texture_slot,
-            enemy_flash_tint(entities, pose, any_flash),
+            enemy_flash_tint(entities, pose, any_flash, elapsed_tick.as_u32()),
             triangles,
             world,
         );

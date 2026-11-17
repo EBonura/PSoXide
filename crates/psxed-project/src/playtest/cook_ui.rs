@@ -190,6 +190,17 @@ pub(crate) fn cook_ui_nodes(
             crate::UI_SFX_PITCH_UNITY_Q12,
         ),
         (
+            // Kronbits Free SFX "Retro Impact Metal 36" (CC0), the cooked
+            // `freesfx/psau/hit_metal.psau` as is. Manny's pick for a parry.
+            // Volume 73 puts its loudest 50 ms of the mixed output level with
+            // the hit cues (measured on `--dump-audio`: about 14,200 RMS at 100
+            // against about 10,500 for the hit bursts).
+            "assets/audio/gameplay/parry.psau",
+            psx_level::LevelGameplaySfxEvent::Parry,
+            73,
+            crate::UI_SFX_PITCH_UNITY_Q12,
+        ),
+        (
             "assets/audio/gameplay/warp.wav",
             psx_level::LevelGameplaySfxEvent::Dash,
             90,
@@ -1587,13 +1598,11 @@ pub(crate) fn cook_ui_sfx_sample_index(
     if trimmed.is_empty() {
         return None;
     }
-    if !trimmed
-        .rsplit_once('.')
-        .map(|(_, ext)| ext.eq_ignore_ascii_case("wav"))
-        .unwrap_or(false)
-    {
+    let extension = trimmed.rsplit_once('.').map(|(_, ext)| ext);
+    let is_psau = extension.is_some_and(|ext| ext.eq_ignore_ascii_case("psau"));
+    if !is_psau && !extension.is_some_and(|ext| ext.eq_ignore_ascii_case("wav")) {
         report.warn(format!(
-            "UI SFX source '{trimmed}' is not a .wav file and was skipped"
+            "UI SFX source '{trimmed}' is not a .wav or .psau file and was skipped"
         ));
         return None;
     }
@@ -1621,14 +1630,27 @@ pub(crate) fn cook_ui_sfx_sample_index(
             return None;
         }
     };
-    let psau = match psxed_audio::cook_sfx_from_wav(&bytes) {
-        Ok(psau) => psau,
-        Err(error) => {
+    // A `.psau` is already cooked (rate and ADPCM exactly as authored), so it
+    // is used as it is; a `.wav` is cooked here.
+    let psau = if is_psau {
+        if psx_asset::Audio::from_bytes(&bytes).is_err() {
             report.warn(format!(
-                "UI SFX source '{}' could not be cooked: {error}",
+                "UI SFX source '{}' is not a valid .psau and was skipped",
                 abs.display()
             ));
             return None;
+        }
+        bytes
+    } else {
+        match psxed_audio::cook_sfx_from_wav(&bytes) {
+            Ok(psau) => psau,
+            Err(error) => {
+                report.warn(format!(
+                    "UI SFX source '{}' could not be cooked: {error}",
+                    abs.display()
+                ));
+                return None;
+            }
         }
     };
     let index = samples.len() as u16;
@@ -1790,5 +1812,46 @@ mod resident_image_tests {
             0,
             "image nodes must not lose authored visibility while cooking"
         );
+    }
+}
+
+#[cfg(test)]
+mod psau_sfx_tests {
+    use super::*;
+
+    fn cook_one(dir: &Path, name: &str) -> (Vec<PlaytestUiSfxSample>, PlaytestValidationReport) {
+        let mut samples = Vec::new();
+        let mut by_path = HashMap::new();
+        let mut report = PlaytestValidationReport::default();
+        cook_ui_sfx_sample_index(name, dir, &mut samples, &mut by_path, &mut report);
+        (samples, report)
+    }
+
+    #[test]
+    fn a_cooked_psau_is_used_byte_for_byte() {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/audio/freesfx/psau/hit_metal.psau");
+        let Ok(bytes) = std::fs::read(&source) else {
+            return; // the audio bank is hydrated, not part of every checkout
+        };
+        let dir = std::env::temp_dir().join("psxed-psau-sfx-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("parry.psau"), &bytes).unwrap();
+        let (samples, report) = cook_one(&dir, "parry.psau");
+        assert_eq!(samples.len(), 1, "{:?}", report.warnings);
+        assert_eq!(samples[0].bytes, bytes, "no trim, resample or re-pitch");
+    }
+
+    #[test]
+    fn a_broken_psau_is_skipped_with_a_warning() {
+        let dir = std::env::temp_dir().join("psxed-psau-sfx-test-bad");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("bad.psau"), b"not a psau").unwrap();
+        let (samples, report) = cook_one(&dir, "bad.psau");
+        assert!(samples.is_empty());
+        assert!(report
+            .warnings
+            .iter()
+            .any(|w| w.contains("not a valid .psau")));
     }
 }

@@ -1470,6 +1470,7 @@ impl Scene for Playtest {
                                 player_pose.pose().phase_q12(),
                                 player_pose.pose().animation().frame_count(),
                             ),
+                            self.player_armed_glow(ctx.sim_tick),
                             player_pose,
                             &self.models,
                             &self.model_faces[..self.model_face_count],
@@ -1517,6 +1518,7 @@ impl Scene for Playtest {
                     );
                     telemetry::stage_begin(telemetry::stage::EQUIPMENT);
                     let _ = draw_instance_equipment(
+                        &self.game_entities,
                         self.room_index,
                         &self.instance_actor_poses,
                         MAX_EQUIPMENT_DRAWS,

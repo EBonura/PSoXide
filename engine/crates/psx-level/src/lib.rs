@@ -2527,6 +2527,8 @@ pub enum LevelGameplaySfxEvent {
     Dash = 16,
     /// The player successfully began switching stance.
     StanceSwap = 17,
+    /// A fighter parried a strike (the player or an enemy).
+    Parry = 18,
 }
 
 impl LevelGameplaySfxEvent {
@@ -2549,6 +2551,7 @@ mod gameplay_sfx_event_tests {
         assert_eq!(LevelGameplaySfxEvent::CombatStart.bit(), 1 << 15);
         assert_eq!(LevelGameplaySfxEvent::Dash.bit(), 1 << 16);
         assert_eq!(LevelGameplaySfxEvent::StanceSwap.bit(), 1 << 17);
+        assert_eq!(LevelGameplaySfxEvent::Parry.bit(), 1 << 18);
     }
 }
 

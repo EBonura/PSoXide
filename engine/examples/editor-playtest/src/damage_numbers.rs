@@ -449,8 +449,17 @@ impl DamageNumbers {
 
             let mut digits = [0u8; DIGIT_BUFFER];
             let text = format_amount(&mut digits, slot.amount);
-            let width = font.text_width(text) as i32;
-            let x = i32::from(projected.sx) - width / 2 + i32::from(slot.x_offset);
+            let crit = slot.channel == DamageNumberChannel::Crit.to_raw();
+            let width = font.text_width(text) as i32
+                + if crit {
+                    font.glyph_advance(CRIT_MARK) as i32
+                } else {
+                    0
+                };
+            // A crit's "!" grows the number to the left, so its right edge
+            // (the side facing the enemy bar) stays where a plain number's is.
+            let mark_advance = width - font.text_width(text) as i32;
+            let x = i32::from(projected.sx) - (width + mark_advance) / 2 + i32::from(slot.x_offset);
             let y = i32::from(projected.sy) - rise_pixels(age);
             if !on_screen(x, y, width) {
                 continue;
@@ -489,6 +498,16 @@ impl DamageNumbers {
                 tint,
                 TextBlend::Add,
             );
+            if crit {
+                // The "!" that marks a crit sits right after the digits.
+                font.draw_text_blended(
+                    x + (width - font.glyph_advance(CRIT_MARK) as i32) as i16,
+                    y,
+                    CRIT_MARK_STR,
+                    tint,
+                    TextBlend::Add,
+                );
+            }
             drawn += 1;
         }
         drawn
@@ -506,6 +525,10 @@ const MINUS_SIGN: &str = "-";
 
 /// [`MINUS_SIGN`] as the character the font is measured by.
 const MINUS_CHAR: char = '-';
+
+/// The mark after a crit's digits.
+const CRIT_MARK: char = '!';
+const CRIT_MARK_STR: &str = "!";
 
 /// The sign of a parry's number, the one gain these numbers show.
 const PLUS_SIGN: &str = "+";

@@ -1888,6 +1888,7 @@ fn render_gameplay_sfx_event(event: psx_level::LevelGameplaySfxEvent) -> &'stati
         psx_level::LevelGameplaySfxEvent::CombatStart => "LevelGameplaySfxEvent::CombatStart",
         psx_level::LevelGameplaySfxEvent::Dash => "LevelGameplaySfxEvent::Dash",
         psx_level::LevelGameplaySfxEvent::StanceSwap => "LevelGameplaySfxEvent::StanceSwap",
+        psx_level::LevelGameplaySfxEvent::Parry => "LevelGameplaySfxEvent::Parry",
     }
 }
 

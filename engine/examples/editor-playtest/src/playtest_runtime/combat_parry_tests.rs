@@ -680,6 +680,11 @@ fn the_players_parry_flashes_her_and_bursts_in_her_stance_colour() {
         }
         assert!(!scene.player_flash.is_active());
         assert!(bursts(&scene).is_empty(), "nothing before the parry");
+        assert_eq!(scene.player_armed_glow(SimTick::from_u32(0)), None);
+        assert_eq!(
+            scene.gameplay_sfx_events & LevelGameplaySfxEvent::Parry.bit(),
+            0
+        );
         scene
             .combat_projectiles
             .spawn(shot_at(CombatTeam::Enemy))
@@ -696,6 +701,15 @@ fn the_players_parry_flashes_her_and_bursts_in_her_stance_colour() {
         );
         assert!(scene.player_flash.solid(&data));
         assert!(!scene.game_entities.flash(0).is_active());
+        // The parry sounds, and her armed crit shows on her weapon in her colour.
+        assert_ne!(
+            scene.gameplay_sfx_events & LevelGameplaySfxEvent::Parry.bit(),
+            0
+        );
+        assert_eq!(
+            scene.player_armed_glow(SimTick::from_u32(0)),
+            Some((rgb[0], rgb[1], rgb[2]))
+        );
         // One burst, in her colour, between her and the attacker.
         let found = bursts(&scene);
         assert_eq!(found.len(), 1);
@@ -728,6 +742,14 @@ fn the_enemys_parry_flashes_it_and_bursts_in_its_stance_colour() {
     let flash = scene.game_entities.flash(0);
     let rgb = data.stance_rgb(zenith);
     assert!(flash.is_active() && flash.is_zenith());
+    assert_ne!(
+        scene.gameplay_sfx_events & LevelGameplaySfxEvent::Parry.bit(),
+        0
+    );
+    assert!(
+        scene.game_entities.crit_armed(0),
+        "its parry armed its crit"
+    );
     assert_eq!(
         flash.lit_tint(&data, None).unwrap().color,
         (rgb[0] / 2, rgb[1] / 2, rgb[2] / 2)
