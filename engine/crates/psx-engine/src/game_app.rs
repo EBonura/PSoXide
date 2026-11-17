@@ -912,7 +912,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
     }
 
     fn play_gameplay_sfx_events(&mut self, events: u32) {
-        const EVENTS: [LevelGameplaySfxEvent; 18] = [
+        const EVENTS: [LevelGameplaySfxEvent; 19] = [
             LevelGameplaySfxEvent::EnemyFootstep,
             LevelGameplaySfxEvent::EnemyIdle,
             LevelGameplaySfxEvent::Footstep,
@@ -931,6 +931,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
             LevelGameplaySfxEvent::CombatStart,
             LevelGameplaySfxEvent::Dash,
             LevelGameplaySfxEvent::StanceSwap,
+            LevelGameplaySfxEvent::Parry,
         ];
         for event in EVENTS {
             if events & event.bit() == 0 {

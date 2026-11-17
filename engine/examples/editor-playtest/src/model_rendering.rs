@@ -1194,6 +1194,7 @@ pub(super) fn draw_player(
 /// per-room enemy weapon pass) through the crate policy.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_instance_equipment(
+    entities: &RuntimeGameEntities,
     current_room: RoomIndex,
     instance_poses: &[Option<InstanceActorPoseSnapshot>; MAX_MODEL_INSTANCES],
     max_draws: usize,
@@ -1223,6 +1224,17 @@ pub(super) fn draw_instance_equipment(
         let mut knobs = MODEL_DRAW_KNOBS;
         knobs.max_equipment_draws = remaining;
         knobs.instance_equipment_skin = instance_equipment_skin;
+        if let Some(entity) = u16::try_from(pose.instance_index())
+            .ok()
+            .and_then(game_entity_for_instance)
+            .filter(|&entity| entities.crit_armed(entity))
+        {
+            // The blade of a fighter with an armed crit pulses in its stance colour.
+            let zenith = entities.stance(entity) == VitalityChannelId::Two;
+            knobs.instance_equipment_skin = Some(mr::EquipmentMaterializationSkin::opaque(
+                COMBAT_FEEDBACK.armed_glow_rgb(zenith, elapsed_tick.as_u32()),
+            ));
+        }
         let stats = mr::draw_instance_equipment_from_pose::<
             MAX_RUNTIME_MODELS,
             MAX_RUNTIME_MODEL_CLIPS,
@@ -1262,6 +1274,7 @@ pub(super) fn draw_instance_equipment(
 pub(super) fn draw_player_equipment(
     anim: PlayerAnim,
     wire_q12: [u16; mr::MAX_PLAYER_EQUIPMENT],
+    armed_glow: Option<(u8, u8, u8)>,
     player_pose: PlayerActorPoseSnapshot,
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
     model_faces: &[TexturedModelRenderFace],
@@ -1281,6 +1294,13 @@ pub(super) fn draw_player_equipment(
     let mut knobs = MODEL_DRAW_KNOBS;
     knobs.equipment_wire_q12 = wire_q12;
     knobs.equipment_materialization_skins = equipment_materialization_skins(anim);
+    if let Some(glow) = armed_glow {
+        // An armed crit shows the weapon, whatever the action's beat, in the
+        // pulsing glow colour.
+        knobs.equipment_wire_q12 = [mr::ASSEMBLED_Q12; mr::MAX_PLAYER_EQUIPMENT];
+        knobs.equipment_materialization_skins =
+            [Some(mr::EquipmentMaterializationSkin::opaque(glow)); mr::MAX_PLAYER_EQUIPMENT];
+    }
     knobs.equipment_materialization = true;
     let mut out = mr::draw_player_equipment_from_pose::<
         MAX_RUNTIME_MODELS,

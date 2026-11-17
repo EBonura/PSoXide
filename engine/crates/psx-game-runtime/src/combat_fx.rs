@@ -206,6 +206,35 @@ impl CombatFeedback {
     }
 }
 
+/// Ticks in one pulse of the armed-crit weapon glow.
+pub const ARMED_GLOW_PERIOD: u32 = 16;
+
+impl CombatFeedback {
+    /// The tint of a weapon while its fighter's crit is armed: the stance
+    /// colour pulsing toward the hot core colour, a triangle wave over
+    /// [`ARMED_GLOW_PERIOD`] ticks of `tick`. Over-bright on purpose (a lit
+    /// tint of 128 is the texture as authored).
+    pub fn armed_glow_rgb(&self, zenith: bool, tick: u32) -> (u8, u8, u8) {
+        let phase = (tick % ARMED_GLOW_PERIOD) as i32;
+        let half = (ARMED_GLOW_PERIOD / 2) as i32;
+        let hot = if phase < half {
+            phase
+        } else {
+            2 * half - phase
+        } * 256
+            / half;
+        let stance = self.stance_rgb(zenith);
+        let mix = |cool: u8, hot_value: u8| {
+            (cool as i32 + (hot_value as i32 - cool as i32) * hot / 256) as u8
+        };
+        (
+            mix(stance[0], self.burst_core_rgb[0]),
+            mix(stance[1], self.burst_core_rgb[1]),
+            mix(stance[2], self.burst_core_rgb[2]),
+        )
+    }
+}
+
 /// One fighter's model flash: the ticks left, the kind and the stance colour
 /// it was started in (a later swap does not recolor it). One byte per
 /// fighter.
@@ -572,5 +601,18 @@ mod tests {
             "a hit is smaller"
         );
         assert!(COMBAT_FEEDBACK.spark_radius < COMBAT_FEEDBACK.burst_radius);
+    }
+
+    #[test]
+    fn the_armed_glow_pulses_between_the_stance_colour_and_the_hot_core() {
+        let data = COMBAT_FEEDBACK;
+        assert_eq!(data.armed_glow_rgb(false, 0), (255, 113, 58));
+        assert_eq!(data.armed_glow_rgb(true, 0), (108, 224, 198));
+        assert_eq!(data.armed_glow_rgb(false, 8), (255, 244, 224));
+        assert_eq!(
+            data.armed_glow_rgb(true, ARMED_GLOW_PERIOD),
+            data.armed_glow_rgb(true, 0)
+        );
+        assert_ne!(data.armed_glow_rgb(false, 3), data.armed_glow_rgb(false, 5));
     }
 }

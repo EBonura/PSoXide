@@ -190,6 +190,15 @@ pub(crate) fn cook_ui_nodes(
             crate::UI_SFX_PITCH_UNITY_Q12,
         ),
         (
+            // The parry cue slot. The file is not shipped yet: Manny picks
+            // the sample, and until a file of this name exists the cue is
+            // silent.
+            "assets/audio/gameplay/parry.wav",
+            psx_level::LevelGameplaySfxEvent::Parry,
+            96,
+            crate::UI_SFX_PITCH_UNITY_Q12,
+        ),
+        (
             "assets/audio/gameplay/warp.wav",
             psx_level::LevelGameplaySfxEvent::Dash,
             90,

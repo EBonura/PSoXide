@@ -1503,6 +1503,7 @@ impl Playtest {
             return;
         }
         telemetry::debug_log("player parry");
+        self.queue_gameplay_sfx(LevelGameplaySfxEvent::Parry);
         self.duel_log_event(ctx, 0, duel::DUEL_EVENT_PARRY);
         let now = self.gameplay_tick(ctx.sim_tick);
         let player = self.game_entities.actor_motor().position();
@@ -1555,6 +1556,7 @@ impl Playtest {
             return;
         };
         telemetry::debug_log("enemy parry");
+        self.queue_gameplay_sfx(LevelGameplaySfxEvent::Parry);
         self.duel_log_event(ctx, 1, duel::DUEL_EVENT_PARRY);
         let now = self.gameplay_tick(ctx.sim_tick);
         self.damage_numbers.spawn(
@@ -2319,6 +2321,18 @@ impl Playtest {
     /// inheriting the build- and disc-dependent loading duration.
     pub(super) fn gameplay_tick(&self, now: SimTick) -> SimTick {
         SimTick::from_u32(now.as_u32().wrapping_sub(self.gameplay_epoch.as_u32()))
+    }
+
+    /// The pulsing weapon tint while her parry's crit is armed (presentation
+    /// only), in her stance colour; `None` otherwise.
+    pub(super) fn player_armed_glow(&self, now: SimTick) -> Option<(u8, u8, u8)> {
+        let actor = self.game_entities.actor();
+        (actor.crit != 0).then(|| {
+            COMBAT_FEEDBACK.armed_glow_rgb(
+                actor.stance.active() == VitalityChannelId::Two,
+                self.gameplay_tick(now).as_u32(),
+            )
+        })
     }
 
     pub(super) fn camera_config(&self) -> ThirdPersonCameraConfig {
