@@ -122,6 +122,10 @@ impl Playtest {
                 persona.radius = character.radius.clamp(0, i32::from(u16::MAX)) as u16;
                 persona.height = character.height.clamp(0, i32::from(u16::MAX)) as u16;
             }
+            // Her controller decides with her own numbers (parry window,
+            // parry rate and reaction), as the host harness's Aletha does,
+            // not the training placement's.
+            persona.combat = self.player_stats;
             self.duel = Duel {
                 active: true,
                 finished: false,
