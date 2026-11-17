@@ -1090,8 +1090,6 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     }
 
     /// Facing yaw of entity `index`, PSX angle units.
-    // Read from many places; one copy on the PS1, like the position.
-    #[inline(never)]
     pub fn yaw(&self, index: usize) -> i16 {
         if index >= self.count() {
             0
