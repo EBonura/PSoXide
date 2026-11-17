@@ -1190,10 +1190,15 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             .filter(|index| *index < self.count())
     }
 
+    /// Whether slot `index` holds a fighter: a live entity, or the actor.
+    fn holds_fighter(&self, index: usize) -> bool {
+        index < self.count() || index == Self::ACTOR_SLOT
+    }
+
     /// Position of entity `index` (or of the actor's body in
     /// [`Self::ACTOR_SLOT`]), room-local engine units.
     pub fn position(&self, index: usize) -> [i32; 3] {
-        if index >= self.count() && index != Self::ACTOR_SLOT {
+        if !self.holds_fighter(index) {
             return [0; 3];
         }
         let p = self.motors[index].position();
@@ -1221,7 +1226,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     /// Facing yaw of entity `index` (or of the actor's body), PSX angle
     /// units.
     pub fn yaw(&self, index: usize) -> i16 {
-        if index >= self.count() && index != Self::ACTOR_SLOT {
+        if !self.holds_fighter(index) {
             0
         } else {
             self.yaw_raw(index)
@@ -1230,7 +1235,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
 
     /// Remaining health of entity `index`.
     pub fn health(&self, index: usize) -> u16 {
-        if index >= self.count() {
+        if !self.holds_fighter(index) {
             0
         } else {
             self.combatants[index].health()
@@ -1240,7 +1245,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     /// Vitality channel currently guarded by entity `index`.
     /// Out-of-range entities fail to Horizon, the side a fresh combatant holds.
     pub fn stance(&self, index: usize) -> VitalityChannelId {
-        if index < self.count() {
+        if self.holds_fighter(index) {
             self.combatants[index].stance.active()
         } else {
             VitalityChannelId::One
@@ -1250,7 +1255,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     /// Q12 presentation progress for the entity's current guard mutation.
     /// Settled and invalid entities return one, matching player HUD semantics.
     pub fn stance_swap_progress_q12(&self, index: usize) -> u16 {
-        if index >= self.count() {
+        if !self.holds_fighter(index) {
             return 4096;
         }
         let elapsed = self.stance_swap_elapsed(index);
@@ -1260,7 +1265,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
 
     /// Whether the entity's rising stance-colour tell is still active.
     pub fn stance_swap_in_progress(&self, index: usize) -> bool {
-        index < self.count()
+        self.holds_fighter(index)
             && self.stance_swap_elapsed(index) < u16::from(GAME_ENTITY_STANCE_SWAP_DURATION_TICKS)
     }
 
@@ -1609,7 +1614,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     /// same moves rule and cooldown, asked without swapping. A controller
     /// asks before it plans what follows a swap.
     pub fn swap_permitted(&self, record: &LevelGameEntityRecord, index: usize) -> bool {
-        index < self.count()
+        self.holds_fighter(index)
             && Self::stance_moves(record).can_swap()
             && self.combatants[index].stance.can_swap()
     }

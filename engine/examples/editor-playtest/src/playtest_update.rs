@@ -311,6 +311,8 @@ impl Playtest {
             // In a duel her tactical controller thinks with the entities,
             // through the same world and against the same snapshot.
             if let Some((busy, persona)) = actor_busy {
+                self.game_entities
+                    .observe_actor_projectiles(&persona, &self.combat_projectiles);
                 let plan = self.game_entities.actor_intent(
                     &persona,
                     GAME_ENTITIES.as_slice(),

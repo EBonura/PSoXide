@@ -22,6 +22,23 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
             );
         }
     }
+    /// Record the nearest bolt coming at the actor's body, for her tactical
+    /// controller ([`Self::actor_intent`]): the reading every entity gets
+    /// from [`Self::observe_projectiles`], on the player's side.
+    pub fn observe_actor_projectiles<const P: usize>(
+        &mut self,
+        persona: &LevelGameEntityRecord,
+        projectiles: &crate::projectiles::CombatProjectiles<P>,
+    ) {
+        let i = Self::ACTOR_SLOT;
+        self.projectile_threats[i] = projectiles.incoming_threat(
+            crate::projectiles::CombatTeam::Player,
+            persona.room,
+            self.position(i),
+            i32::from(persona.radius),
+            i32::from(persona.height),
+        );
+    }
     /// The ranged exchange as a controller: cover, peek and bullet evasion.
     /// None when the exchange wants to fire (the caller's attack decision
     /// takes over); otherwise the plan for this tick.
