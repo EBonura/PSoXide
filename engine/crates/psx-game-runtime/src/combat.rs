@@ -512,21 +512,35 @@ pub fn authored_event_frames(
     records: &[CombatCapsuleRecord],
     action: CharacterAnimationAction,
 ) -> Option<(u16, u16)> {
-    authored_contact_frames(records, action).or_else(|| {
-        records
-            .iter()
-            .filter(|record| {
-                record.flags & combat_capsule_flags::PROJECTILE_EMITTER != 0
-                    && record.action == action.to_index() as u8
+    event_frames(
+        records.iter().map(|record| {
+            (
+                record.flags,
+                record.action,
+                record.active_start_frame,
+                record.active_end_frame,
+            )
+        }),
+        action,
+    )
+}
+
+/// [`authored_event_frames`] over any capsule table's `(flags, action, first
+/// frame, last frame)`: the cooked tables a host tool reads use the same rule.
+pub fn event_frames(
+    capsules: impl Iterator<Item = (u8, u8, u16, u16)> + Clone,
+    action: CharacterAnimationAction,
+) -> Option<(u16, u16)> {
+    let span = |kind: u8| {
+        capsules
+            .clone()
+            .filter(|(flags, owner, _, _)| flags & kind != 0 && *owner == action.to_index() as u8)
+            .fold(None, |span, (_, _, first, last)| {
+                let (low, high) = span.unwrap_or((u16::MAX, 0));
+                Some((low.min(first), high.max(last)))
             })
-            .fold(None, |span, record| {
-                let (first, last) = span.unwrap_or((u16::MAX, 0));
-                Some((
-                    first.min(record.active_start_frame),
-                    last.max(record.active_end_frame),
-                ))
-            })
-    })
+    };
+    span(combat_capsule_flags::HITBOX).or_else(|| span(combat_capsule_flags::PROJECTILE_EMITTER))
 }
 
 /// Ticks until a swing first makes contact, as anyone watching it reads

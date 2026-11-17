@@ -63,6 +63,32 @@ fn training_fighter(
     let clocks = entity_clocks(package, &spec.record);
     attach_clocks(&mut spec, clocks, capsules);
     spec.capsules = capsules.to_vec();
+    let model = package
+        .model_instances
+        .get(usize::from(record.model_instance))
+        .map(|instance| usize::from(instance.model));
+    spec.timings = attack_timings(
+        package,
+        model,
+        [
+            (
+                record.attack_clip,
+                record.attack_speed_q8,
+                record.attack_frame_range,
+            ),
+            (
+                record.heavy_attack_clip,
+                record.heavy_attack_speed_q8,
+                record.heavy_attack_frame_range,
+            ),
+            (
+                record.ranged_attack_clip,
+                record.ranged_attack_speed_q8,
+                record.ranged_attack_frame_range,
+            ),
+        ],
+        &spec,
+    );
     Ok((spec, record))
 }
 
@@ -219,19 +245,30 @@ pub fn load(project_dir: &Path) -> Result<ProjectFighters, String> {
             clock(psx_level::CharacterAnimationAction::RangedAttack),
         ]
     };
-    {
-        let r = &mut aletha.record;
-        let fixed = u16::from(r.windup_ticks) + u16::from(r.recovery_ticks);
-        let active = |clock: Option<ClipClock>, cooked: u16| {
-            clock.map_or(cooked, |c| c.length().saturating_sub(fixed).max(6))
-        };
-        r.attack_active_ticks = active(player_clocks[0], r.attack_active_ticks);
-        r.heavy_attack_active_ticks = active(player_clocks[1], r.heavy_attack_active_ticks);
-        r.ranged_attack_active_ticks = active(player_clocks[2], r.ranged_attack_active_ticks);
-        r.ranged_attack_action = psx_level::CharacterAnimationAction::RangedAttack.to_index() as u8;
-    }
+    aletha.record.ranged_attack_action =
+        psx_level::CharacterAnimationAction::RangedAttack.to_index() as u8;
     let capsules = aletha.capsules.clone();
     attach_clocks(&mut aletha, player_clocks, &capsules);
+    aletha.timings = {
+        let clip = |action: psx_level::CharacterAnimationAction| {
+            let i = action.to_index();
+            (
+                player_character.action_clips[i],
+                player_character.action_speeds[i],
+                player_character.action_frame_ranges[i],
+            )
+        };
+        attack_timings(
+            &package,
+            Some(usize::from(player_character.model)),
+            [
+                clip(psx_level::CharacterAnimationAction::LightAttack),
+                clip(psx_level::CharacterAnimationAction::HeavyAttack),
+                clip(psx_level::CharacterAnimationAction::RangedAttack),
+            ],
+            &aletha,
+        )
+    };
 
     let spawn = player.spawn;
     let dx = i64::from(spawn.x) - i64::from(enemy_record.x);
@@ -246,6 +283,52 @@ pub fn load(project_dir: &Path) -> Result<ProjectFighters, String> {
         start_distance,
         swap_cooldown_ticks: player_character.stance_swap_cooldown_ticks,
     })
+}
+
+/// How `spec`'s light, heavy and ranged attacks run when played on `clips`
+/// (clip, speed, frame range) of `model`: the guest's own rules
+/// (`model_rendering::action_timing` over the authored contact frames), at
+/// the disc's 60 Hz.
+fn attack_timings(
+    package: &PlaytestPackage,
+    model: Option<usize>,
+    clips: [(u16, u16, psx_level::CharacterActionFrameRange); 3],
+    spec: &FighterSpec,
+) -> [Option<psx_game_runtime::fighter_action::ActionTiming>; 3] {
+    use psx_level::CharacterAnimationAction as Action;
+    let actions = [
+        Action::LightAttack,
+        Action::HeavyAttack,
+        Action::from_index(usize::from(spec.record.ranged_attack_action))
+            .unwrap_or(Action::RangedAttack),
+    ];
+    let mut out = [None; 3];
+    for (kind, (clip, speed_q8, range)) in clips.into_iter().enumerate() {
+        out[kind] = (|| {
+            let model = package.models.get(model?)?;
+            let cooked = package
+                .model_clips
+                .get(usize::from(model.clip_first) + usize::from(clip))?;
+            let asset = package.assets.get(cooked.animation_asset_index)?;
+            // The guest's clip is 'static; a host tool leaks its one copy.
+            let bytes: &'static [u8] = Box::leak(asset.bytes.clone().into_boxed_slice());
+            let animation = psx_asset::Animation::from_bytes(bytes).ok()?;
+            let contact = psx_game_runtime::combat::event_frames(
+                spec.capsules
+                    .iter()
+                    .map(|c| (c.flags, c.action, c.active_start_frame, c.active_end_frame)),
+                actions[kind],
+            )?;
+            psx_game_runtime::model_rendering::action_timing(
+                animation,
+                psx_engine::VideoHz::NTSC,
+                speed_q8,
+                range,
+                contact,
+            )
+        })();
+    }
+    out
 }
 
 /// A clip's playback clock as the guest runs it: which tick into the clip a

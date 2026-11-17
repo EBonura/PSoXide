@@ -60,6 +60,10 @@ pub struct FighterSpec {
     pub contact: Vec<(u8, u16, u16)>,
     /// The cooked capsules the above came from.
     pub capsules: Vec<PlaytestCombatCapsule>,
+    /// How its light, heavy and ranged attacks run, read off its clips by the
+    /// guest's own rules (`GameEntities::time_attacks`); `None` keeps the
+    /// record's ticks, as on the disc.
+    pub timings: [Option<psx_game_runtime::fighter_action::ActionTiming>; 3],
 }
 
 impl FighterSpec {
@@ -104,6 +108,7 @@ impl FighterSpec {
             emitters,
             contact: Vec::new(),
             capsules: capsules.to_vec(),
+            timings: [None; 3],
         }
     }
 
@@ -129,6 +134,22 @@ impl FighterSpec {
             .iter()
             .find(|(a, _, _)| *a == index)
             .map(|(_, first, last)| (*first, *last))
+    }
+
+    /// The timing of the attack kind `action` names ([`Self::timings`]).
+    pub fn timing(
+        &self,
+        action: CharacterAnimationAction,
+    ) -> Option<psx_game_runtime::fighter_action::ActionTiming> {
+        let index = action.to_index() as u8;
+        let kind = if action == CharacterAnimationAction::HeavyAttack {
+            1
+        } else if index == self.record.ranged_attack_action {
+            2
+        } else {
+            0
+        };
+        self.timings[kind]
     }
 
     /// The emitters `action` fires.

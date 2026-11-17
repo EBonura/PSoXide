@@ -200,6 +200,10 @@ fn load(path: &Path) -> Placed {
             r.attack_min_range, r.attack_max_range, r.windup_ticks, r.attack_active_ticks, r.heavy_attack_active_ticks,
             r.ranged_attack_active_ticks, r.recovery_ticks, r.touch_damage, r.flags, r.combat.max_health, spec.strikes, spec.emitters
         );
+        eprintln!(
+            "    clip timings (light, heavy, ranged): {:?}",
+            spec.timings
+        );
     }
     place(loaded)
 }

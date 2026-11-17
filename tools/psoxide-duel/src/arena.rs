@@ -653,6 +653,8 @@ pub fn run(duel: &Duel<'_>) -> DuelResult {
             entities.set_spatial_active_mask(u64::MAX);
             entities.set_stance_swap_delay(duel.swap_cooldown_ticks);
             entities.seed_training_actor(records, 0, duel.seeds[n]);
+            // The game times its entities' attacks after spawning them.
+            entities.time_attacks(records, |_, action, _, _, _| fighter.spec.timing(action));
             let position = entities.position(0);
             Side {
                 spec: fighter.spec.clone(),
