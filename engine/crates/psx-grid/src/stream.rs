@@ -219,7 +219,7 @@ impl StreamWindow {
         let sectors = |n: u8| i32::from(n) * s;
         // A flood level whose rooms all fit the pool is held whole: no draw
         // distance and no flood.
-        let held_whole = level.budget_flood().is_some_and(|h| h.pool_cap_pages == 0);
+        let held_whole = level.held_whole();
         let flood = level
             .budget_flood()
             .filter(|h| h.pool_cap_pages != 0)

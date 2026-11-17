@@ -63,7 +63,14 @@ impl RoomActivity {
                 WalkSet::sharing(level, scratch.clone()),
                 WalkSet::sharing(level, scratch),
             ],
-            draw_radius: radius(level.header.draw_far),
+            // A flood level held whole draws every room, as its stream window
+            // wants every room ([`crate::stream::StreamWindow::new`]): the draw
+            // distance the cook gave the core is the flood's, which never runs.
+            draw_radius: if level.held_whole() {
+                UNBOUNDED
+            } else {
+                radius(level.header.draw_far)
+            },
             active_radius: radius(level.header.active_radius),
             tolerance: s.max(1),
             ring: level.ring_stream(),

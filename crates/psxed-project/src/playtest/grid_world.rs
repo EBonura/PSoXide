@@ -356,21 +356,32 @@ pub(super) fn cook(
     // Far cards and panels take the sky atlas: no chunk sky is baked to stream over them.
     let cards_on = world.stream.flood.on && world.stream.flood.cards;
     let panels_on = world.stream.flood.on && world.stream.flood.panels > 0;
-    let (chunk_skies, sky_tables) = if world.stream.ring && cube_sky && !cards_on && !panels_on {
-        use crate::grid::lighting::BakeMaterials;
-        let materials = cook::sky_bake::WorldColours::materials(world);
-        let table = crate::grid::lighting::AlbedoTable::from_project(
-            project,
-            project_root,
-            materials.iter().copied(),
-        );
-        let albedo = materials.iter().map(|&m| (m, table.albedo(m))).collect();
-        let colours =
-            cook::sky_bake::WorldColours::new(world, i32::from(cooked.level.sector_units), albedo);
-        bake_chunk_skies(&cooked, &colours, report)
-    } else {
-        (Vec::new(), PlaytestSkyTables::default())
-    };
+    // A flood level held whole draws every room, so there is no world beyond
+    // the drawn rooms for a chunk sky to show.
+    let held_whole = cooked
+        .level
+        .flood
+        .as_ref()
+        .is_some_and(|block| block.header.pool_cap_pages == 0);
+    let (chunk_skies, sky_tables) =
+        if world.stream.ring && cube_sky && !cards_on && !panels_on && !held_whole {
+            use crate::grid::lighting::BakeMaterials;
+            let materials = cook::sky_bake::WorldColours::materials(world);
+            let table = crate::grid::lighting::AlbedoTable::from_project(
+                project,
+                project_root,
+                materials.iter().copied(),
+            );
+            let albedo = materials.iter().map(|&m| (m, table.albedo(m))).collect();
+            let colours = cook::sky_bake::WorldColours::new(
+                world,
+                i32::from(cooked.level.sector_units),
+                albedo,
+            );
+            bake_chunk_skies(&cooked, &colours, report)
+        } else {
+            (Vec::new(), PlaytestSkyTables::default())
+        };
     let cards = if cards_on {
         match bake_cards(project, project_root, world, &cooked, report) {
             Ok(cards) => cards,

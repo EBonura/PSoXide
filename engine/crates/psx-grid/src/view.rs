@@ -198,6 +198,14 @@ impl<'a> LevelView<'a> {
         self.flood
     }
 
+    /// Whether the level streams by flood but its rooms all fit the pool, so
+    /// the cook held it whole (`pool_cap_pages` 0): every room is resident,
+    /// none is beyond a draw distance and the flood never runs.
+    #[inline]
+    pub fn held_whole(&self) -> bool {
+        self.flood.is_some_and(|h| h.pool_cap_pages == 0)
+    }
+
     /// Rooms listed in the lattice cell holding the world point `(x, z)`
     /// (see [`Lattice::rooms_at`]), computed straight from the header so a
     /// hot caller carries no copy of the lattice descriptor.
