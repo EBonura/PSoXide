@@ -1562,6 +1562,11 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         self.combatants.get(index).is_some_and(|c| c.crit != 0)
     }
 
+    /// Whether any entity has a crit armed (a cheap gate for the draw).
+    pub fn any_crit_armed(&self) -> bool {
+        self.combatants.iter().any(|c| c.crit != 0)
+    }
+
     /// Whether entity `index`'s attack under way is a crit (it started
     /// while a crit was armed, [`Combatant::start_attack`]).
     pub fn attack_is_crit(&self, index: usize) -> bool {

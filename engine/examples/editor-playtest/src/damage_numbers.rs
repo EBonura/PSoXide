@@ -456,7 +456,10 @@ impl DamageNumbers {
                 } else {
                     0
                 };
-            let x = i32::from(projected.sx) - width / 2 + i32::from(slot.x_offset);
+            // A crit's "!" grows the number to the left, so its right edge
+            // (the side facing the enemy bar) stays where a plain number's is.
+            let mark_advance = width - font.text_width(text) as i32;
+            let x = i32::from(projected.sx) - (width + mark_advance) / 2 + i32::from(slot.x_offset);
             let y = i32::from(projected.sy) - rise_pixels(age);
             if !on_screen(x, y, width) {
                 continue;
