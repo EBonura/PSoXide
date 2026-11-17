@@ -35,8 +35,8 @@ pub(super) struct Duel {
     started: u32,
     releasing_start: bool,
     /// The record her tactical controller decides by: the training enemy's
-    /// persona (spacing, reach, reaction, kits) at her own spawn and with her
-    /// own body, as the host harness gives her.
+    /// persona (spacing, reach, reaction, kits, home) with her own body, as
+    /// the host harness gives her.
     persona: LevelGameEntityRecord,
     /// Her controller's latest intent, and whether its presses are still to
     /// be run (they run on the first tick after the think).
@@ -114,11 +114,10 @@ impl Playtest {
                 target,
                 seed ^ 0x9e3779b9,
             );
-            let spawn = self.game_entities.actor_motor().position();
+            // Her persona is the training placement's, home included (the
+            // host harness cooks her into that placement): the leash is the
+            // training ground's, not her spawn's.
             let mut persona = GAME_ENTITIES[target];
-            persona.x = spawn.x;
-            persona.y = spawn.y;
-            persona.z = spawn.z;
             if let Some(character) = self.character {
                 persona.radius = character.radius.clamp(0, i32::from(u16::MAX)) as u16;
                 persona.height = character.height.clamp(0, i32::from(u16::MAX)) as u16;
