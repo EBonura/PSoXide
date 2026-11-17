@@ -6,7 +6,7 @@
 //! DMA. Keep GPU packets and streamed payloads in main RAM; this module is for
 //! small CPU-only working sets that are hottest while DMA owns the main bus.
 
-pub use psx_rt::scratchpad::{clear, ptr_at, ScratchpadStack, SIZE};
+pub use psx_rt::scratchpad::{clear, ptr_at, ScratchpadStack, StackEntry, SIZE};
 
 /// Start of the projection stack's canary. Bytes 0..128 stay owned by the persistent
 /// viewmodel bucket heads; 128..140 held the old trampoline's save record and are left unused
