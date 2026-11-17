@@ -455,6 +455,19 @@ impl CharacterMotorConfig {
         }
     }
 
+    /// This configuration for one step that covers `frames` display frames
+    /// of locomotion: the paces, the turn and the per-frame stamina flow
+    /// summed over them. Gates (sprint minimum, roll cost) stay per action.
+    fn strided(mut self, frames: u8) -> Self {
+        let frames = i32::from(frames);
+        self.walk_speed = self.walk_speed.saturating_mul(frames);
+        self.run_speed = self.run_speed.saturating_mul(frames);
+        self.yaw_step = Angle::from_q12(self.yaw_step.as_q12().saturating_mul(frames as u16));
+        self.sprint_drain_q12 = self.sprint_drain_q12.saturating_mul(frames);
+        self.stamina_recover_q12 = self.stamina_recover_q12.saturating_mul(frames);
+        self
+    }
+
     /// Disable every stamina gate and cost while preserving the authored
     /// maximum for compatibility with UI bindings and saved character data.
     ///
@@ -781,44 +794,11 @@ impl CharacterMotorState {
         delta_vblanks: u16,
     ) -> Result<CharacterMotorFrame, CollisionQueryError> {
         let config = normalize_config(config);
-        let steps = delta_vblanks.clamp(1, MAX_MOTOR_CATCHUP_VBLANKS);
-        let mut final_frame: Option<CharacterMotorFrame> = None;
-
-        for step in 0..steps {
-            let mut step_input = input;
-            if step > 0 {
-                step_input.evade = false;
-            }
-            let frame = self.update_one_frame(collision, step_input, config)?;
-            final_frame = Some(match final_frame {
-                Some(mut aggregate) => {
-                    aggregate.position = frame.position;
-                    aggregate.yaw = frame.yaw;
-                    aggregate.anim = frame.anim;
-                    aggregate.action = frame.action;
-                    aggregate.moved |= frame.moved;
-                    aggregate.blocked |= frame.blocked;
-                    aggregate.sprinting = frame.sprinting;
-                    aggregate.invulnerable |= frame.invulnerable;
-                    aggregate.recovery |= frame.recovery;
-                    aggregate.stamina_q12 = frame.stamina_q12;
-                    aggregate
-                }
-                None => frame,
-            });
-        }
-
-        Ok(final_frame.unwrap_or_else(|| {
-            self.frame(
-                CharacterMotorAnim::Idle,
-                self.action,
-                false,
-                false,
-                false,
-                false,
-                false,
-            )
-        }))
+        // Several display frames are one step: the distance, turn, stamina
+        // and action clocks of every frame, through one set of collision
+        // traces (a fighter thinking at 30 Hz steps two frames at once).
+        let frames = delta_vblanks.clamp(1, MAX_MOTOR_CATCHUP_VBLANKS) as u8;
+        self.update_one_frame(collision, input, config, frames)
     }
 
     fn update_one_frame<C: CharacterCollisionBackend>(
@@ -826,17 +806,25 @@ impl CharacterMotorState {
         collision: &mut C,
         input: CharacterMotorInput,
         config: CharacterMotorConfig,
+        frames: u8,
     ) -> Result<CharacterMotorFrame, CollisionQueryError> {
         self.stamina_q12 = self.stamina_q12.clamp(0, config.stamina_max_q12);
-        self.apply_vertical(collision, config)?;
+        self.apply_vertical(collision, config, frames)?;
 
         if self.action.is_idle() && input.evade {
             self.try_start_evade(input, config);
         }
 
         if !self.action.is_idle() {
-            return self.update_action(collision, config);
+            return self.update_action(collision, config, frames);
         }
+        // Locomotion over several frames is one frame of the summed pace,
+        // turn and stamina; one frame is the configuration as it is.
+        let config = if frames > 1 {
+            config.strided(frames)
+        } else {
+            config
+        };
 
         if let Some((move_x, move_z, move_mag)) = analog_move_vector(input) {
             let move_yaw = yaw_from_vector(move_x, move_z);
@@ -1103,6 +1091,7 @@ impl CharacterMotorState {
         &mut self,
         collision: &mut C,
         config: CharacterMotorConfig,
+        frames: u8,
     ) -> Result<CharacterMotorFrame, CollisionQueryError> {
         let profile = ActionProfile::for_action(self.action, config);
         let frame = self.action_frame;
@@ -1111,11 +1100,18 @@ impl CharacterMotorState {
         let recovery = frame >= profile.active_frames;
 
         let (moved, blocked) = if active {
-            let speed = if config.roll_decelerates && self.action == CharacterMotorAction::Roll {
-                decelerating_roll_step(profile.speed, frame, profile.active_frames)
-            } else {
-                profile.speed
-            };
+            // The travel of every active frame in this step, in one move.
+            let decelerates = config.roll_decelerates && self.action == CharacterMotorAction::Roll;
+            let mut speed = 0i32;
+            let mut at = frame;
+            while at < frame.saturating_add(frames) && at < profile.active_frames {
+                speed = speed.saturating_add(if decelerates {
+                    decelerating_roll_step(profile.speed, at, profile.active_frames)
+                } else {
+                    profile.speed
+                });
+                at += 1;
+            }
             let signed_speed = speed.saturating_mul(profile.direction as i32);
             self.try_move_at_yaw(
                 collision,
@@ -1128,7 +1124,7 @@ impl CharacterMotorState {
             (false, false)
         };
 
-        self.action_frame = self.action_frame.saturating_add(1);
+        self.action_frame = self.action_frame.saturating_add(frames);
         let finished = self.action_frame >= profile.total_frames();
         let action = self.action;
         if finished {
@@ -1346,6 +1342,7 @@ impl CharacterMotorState {
         &mut self,
         collision: &mut C,
         config: CharacterMotorConfig,
+        frames: u8,
     ) -> Result<(), CollisionQueryError> {
         // Grounded fast path: a body that is grounded and has not moved in XZ
         // sits on the same (static) floor as last tick, so reuse the cached
@@ -1397,22 +1394,25 @@ impl CharacterMotorState {
             .gravity_per_tick_q8
             .saturating_mul(config.weight_q8 as i32)
             / DEFAULT_WEIGHT_Q8 as i32;
-        // Gravity is never negative (`normalize_config`), so the speed only
-        // falls from zero to the terminal clamp and fits 16 bits.
-        let velocity = i32::from(self.velocity_y_q8)
-            .saturating_sub(gravity)
-            .max(-MAX_FALL_SPEED * 256);
-        self.velocity_y_q8 = velocity as i16;
-        let remainder = i32::from(self.remainder_y_q8).saturating_add(velocity);
-        let dy = remainder / 256;
-        self.remainder_y_q8 = (remainder - dy * 256) as i16;
-        let next = self.position.y.saturating_add(dy);
-        if next <= floor {
-            self.position.y = floor;
-            self.velocity_y_q8 = 0;
-            self.remainder_y_q8 = 0;
-            self.set_grounded(floor);
-        } else {
+        // One fall per frame of the step, against the floor found once.
+        for _ in 0..frames.max(1) {
+            // Gravity is never negative (`normalize_config`), so the speed
+            // only falls from zero to the terminal clamp and fits 16 bits.
+            let velocity = i32::from(self.velocity_y_q8)
+                .saturating_sub(gravity)
+                .max(-MAX_FALL_SPEED * 256);
+            self.velocity_y_q8 = velocity as i16;
+            let remainder = i32::from(self.remainder_y_q8).saturating_add(velocity);
+            let dy = remainder / 256;
+            self.remainder_y_q8 = (remainder - dy * 256) as i16;
+            let next = self.position.y.saturating_add(dy);
+            if next <= floor {
+                self.position.y = floor;
+                self.velocity_y_q8 = 0;
+                self.remainder_y_q8 = 0;
+                self.set_grounded(floor);
+                break;
+            }
             self.position.y = next;
         }
         Ok(())
@@ -4520,9 +4520,11 @@ mod tests {
             2,
         );
 
-        assert_eq!(frame.anim, CharacterMotorAnim::Walk);
-        assert_eq!(frame.action, CharacterMotorAction::Idle);
+        // Two frames are one step: the roll starts once (one cost) and, one
+        // frame long, is over by the end of the step.
+        assert_eq!(frame.action, CharacterMotorAction::Roll);
         assert_eq!(frame.stamina_q12, 512);
+        assert!(motor.action().is_idle());
     }
 
     #[test]
