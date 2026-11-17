@@ -197,6 +197,7 @@ fn a_parried_attacker_plays_parried_on_both_sides() {
             channel: VitalityChannelId::One,
             damage: 0,
             poise: u16::MAX,
+            crit: false,
         },
     );
     assert!(broken.staggered || broken.knocked_down);
@@ -235,6 +236,7 @@ fn the_world_is_never_parried_on_either_side() {
         channel: VitalityChannelId::One,
         damage: 10,
         poise: 0,
+        crit: false,
     };
     let outcome = scene
         .game_entities
@@ -308,6 +310,7 @@ fn player_crit_armed() -> std::boxed::Box<Playtest> {
             channel: VitalityChannelId::One,
             damage: 10,
             poise: 10,
+            crit: false,
         },
         &ctx(100),
     );
@@ -414,7 +417,14 @@ fn a_poise_break_knocks_the_player_down_and_she_gets_up() {
     let mut scene = duel();
     let down = scene.player_stats.knockdown_ticks;
     let capacity = scene.player_stats.poise;
-    assert!(scene.react_player_to_hit(CombatantId::entity(0), capacity, false, false, &ctx(100)));
+    assert!(scene.react_player_to_hit(
+        CombatantId::entity(0),
+        capacity,
+        false,
+        false,
+        false,
+        &ctx(100)
+    ));
     assert!(scene.player.knocked_down());
     assert_eq!(scene.anim_state, PlayerAnim::Knockdown);
     assert_eq!(
@@ -424,7 +434,14 @@ fn a_poise_break_knocks_the_player_down_and_she_gets_up() {
     );
     // Down: a hit lands but cannot break her again or restart a reaction.
     let health = scene.player.health();
-    assert!(!scene.react_player_to_hit(CombatantId::entity(0), 1000, false, false, &ctx(101)));
+    assert!(!scene.react_player_to_hit(
+        CombatantId::entity(0),
+        1000,
+        false,
+        false,
+        false,
+        &ctx(101)
+    ));
     assert!(!scene.player_take_damage(CombatantId::entity(0), HitKind::Melee, None, 5));
     assert_eq!(scene.player.health(), health - 5);
     assert_eq!(scene.anim_state, PlayerAnim::Knockdown);
@@ -694,4 +711,50 @@ fn a_flash_fades_out_and_a_hit_that_is_not_a_parry_shows_neither_tell() {
     scene.resolve_combat(&ctx(100));
     assert!(!scene.game_entities.any_flash());
     assert!(bursts(&scene).is_empty());
+}
+
+/// A crit lands on the fighter its parry staggered, whose posture is
+/// blocked by the riposte. Its posture damage counts anyway and knocks that
+/// fighter down; the same hit without the crit leaves the stagger as it is.
+/// Both sides.
+#[test]
+fn a_crit_knocks_down_the_riposted_fighter_on_both_sides() {
+    let records = GAME_ENTITIES.as_slice();
+    let blow = |crit: bool, poise: u16| Strike {
+        attacker: CombatantId::PLAYER,
+        kind: HitKind::Melee,
+        channel: VitalityChannelId::One,
+        damage: 1,
+        poise,
+        crit,
+    };
+    // The player's crit on the enemy her parry staggered.
+    for crit in [false, true] {
+        let mut scene = player_crit_armed();
+        assert_eq!(scene.game_entities.state(0), GameEntityState::Staggered);
+        let poise = enemy_record().combat.poise;
+        let outcome = scene
+            .game_entities
+            .receive_hit(records, 0, blow(crit, poise));
+        assert!(outcome.connected);
+        assert_eq!(outcome.knocked_down, crit, "crit {crit}");
+        assert_eq!(
+            scene.game_entities.state(0),
+            if crit {
+                GameEntityState::KnockedDown
+            } else {
+                GameEntityState::Staggered
+            }
+        );
+    }
+    // The enemy's crit on the player its parry staggered.
+    for crit in [false, true] {
+        let mut scene = enemy_crit_armed();
+        assert!(scene.riposte_player(CombatantId::entity(0), &ctx(100)));
+        let poise = scene.player_stats.poise;
+        let broke =
+            scene.react_player_to_hit(CombatantId::entity(0), poise, false, false, crit, &ctx(101));
+        assert_eq!(broke, crit, "crit {crit}");
+        assert_eq!(scene.player.knocked_down(), crit);
+    }
 }

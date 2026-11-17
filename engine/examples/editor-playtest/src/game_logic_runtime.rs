@@ -775,6 +775,7 @@ impl Playtest {
                         channel: self.player.stance.active(),
                         damage,
                         poise: poise_damage,
+                        crit: false,
                     },
                     ctx,
                 );
@@ -938,6 +939,7 @@ impl Playtest {
                                 channel: projectile_vitality_channel(impact.damage_channel),
                                 damage: impact.damage,
                                 poise: impact.poise_damage,
+                                crit: false,
                             },
                             ctx,
                         );
@@ -1014,6 +1016,7 @@ impl Playtest {
             channel,
             impact.damage,
             impact.poise_damage,
+            impact.visual.impact_rgb == CRIT_BOLT_RGB,
         );
         if outcome.parried {
             self.entity_parried_player(index, ctx);
@@ -1144,8 +1147,14 @@ impl Playtest {
             .active(psx_level::CombatWindowKind::Armored)
             .unwrap_or(armored);
         let shot_only = taken.melee_damage == 0;
-        let staggered =
-            self.react_player_to_hit(taken.attacker, taken.poise, armored, shot_only, ctx);
+        let staggered = self.react_player_to_hit(
+            taken.attacker,
+            taken.poise,
+            armored,
+            shot_only,
+            Self::crit_reached_player(&taken, impacts),
+            ctx,
+        );
         if shot_only && staggered && taken.shot_opening {
             self.duel_log_flow(ctx, 1);
             for impact in impacts.as_slice() {
@@ -1170,6 +1179,22 @@ impl Playtest {
         self.show_hit_on_player(&taken, impacts, staggered);
     }
 
+    /// Whether a crit reached the player this tick: a crit swing among the
+    /// melee hits, or a crit bolt among the impacts on her.
+    fn crit_reached_player<const I: usize>(
+        taken: &PlayerHitsTaken,
+        impacts: &ProjectileImpacts<I>,
+    ) -> bool {
+        taken.crit
+            || impacts.as_slice().iter().any(|impact| {
+                impact.visual.impact_rgb == CRIT_BOLT_RGB
+                    && impact.kind
+                        == (ProjectileImpactKind::Target {
+                            target: PLAYER_PROJECTILE_TARGET,
+                        })
+            })
+    }
+
     /// The flash and, for a melee swing, the contact spark of the hits the
     /// player took this tick, in the stance colour of the fighter that dealt
     /// the last of them. A hazard (no fighter) shows nothing here.
@@ -1187,14 +1212,7 @@ impl Playtest {
             return;
         }
         let melee = taken.melee_damage > 0;
-        let crit = taken.crit
-            || impacts.as_slice().iter().any(|impact| {
-                impact.visual.impact_rgb == CRIT_BOLT_RGB
-                    && impact.kind
-                        == (ProjectileImpactKind::Target {
-                            target: PLAYER_PROJECTILE_TARGET,
-                        })
-            });
+        let crit = Self::crit_reached_player(taken, impacts);
         let from = self.game_entities.position(attacker);
         self.show_hit(LandedHit {
             victim: CombatantId::PLAYER,
@@ -1800,6 +1818,7 @@ impl Playtest {
             vitality_channel,
             outgoing_damage,
             poise_damage,
+            crit,
             &mut self.swing_hit_mask,
             |_, target| match world_rt.as_deref_mut() {
                 Some(world_rt) => !world_rt.melee_segment_clear(
@@ -2280,12 +2299,17 @@ impl Playtest {
                     vitality_channel,
                     hit.damage,
                 );
-                let outcome = self.game_entities.apply_hit(
+                let outcome = self.game_entities.receive_hit(
                     GAME_ENTITIES.as_slice(),
                     entity,
-                    vitality_channel,
-                    hit.damage,
-                    hit.poise_damage,
+                    Strike {
+                        attacker: CombatantId::PLAYER,
+                        kind: HitKind::Melee,
+                        channel: vitality_channel,
+                        damage: hit.damage,
+                        poise: hit.poise_damage,
+                        crit,
+                    },
                 );
                 if outcome.parried {
                     stats.parries = stats.parries.saturating_add(1);
@@ -2552,7 +2576,7 @@ impl Playtest {
             return;
         };
         if damage != 0 {
-            self.react_player_to_hit(CombatantId::WORLD, damage, false, false, ctx);
+            self.react_player_to_hit(CombatantId::WORLD, damage, false, false, false, ctx);
         }
         let mut toward_max = push.toward_max;
         if push.tie {

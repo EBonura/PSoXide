@@ -982,6 +982,7 @@ impl Playtest {
             channel: channel.unwrap_or(self.player.stance.active()),
             damage,
             poise: 0,
+            crit: false,
         };
         let hit = self.player.receive_hit(self.player_hit(strike, false));
         if hit.damage_applied > 0 {
@@ -1429,12 +1430,14 @@ impl Playtest {
     /// Land the tick's summed posture damage, dealt by `attacker`, as one
     /// poise-only hit, then start the reaction it calls for. True when it
     /// broke posture.
+    /// `crit` when a crit was among the hits ([`Strike::crit`]).
     pub(super) fn react_player_to_hit(
         &mut self,
         attacker: CombatantId,
         damage: u16,
         armored: bool,
         shot_only: bool,
+        crit: bool,
         ctx: &Ctx,
     ) -> bool {
         if self.hazard_death_ticks_remaining != 0 {
@@ -1446,6 +1449,7 @@ impl Playtest {
             channel: self.player.stance.active(),
             damage: 0,
             poise: damage,
+            crit,
         };
         let out = self.player.receive_hit(self.player_hit(strike, armored));
         self.react_player(out, armored, shot_only, false, ctx)

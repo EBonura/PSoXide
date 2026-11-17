@@ -375,9 +375,9 @@ fn the_player_poise_capacity_is_sixty() {
 #[test]
 fn poise_accumulates_then_breaks_and_the_break_starts_the_grace_window() {
     let mut scene = scene();
-    assert!(!scene.react_player_to_hit(CombatantId::WORLD, 30, false, false, &ctx(100)));
+    assert!(!scene.react_player_to_hit(CombatantId::WORLD, 30, false, false, false, &ctx(100)));
     assert_eq!(scene.player.flow.break_grace, 0);
-    assert!(scene.react_player_to_hit(CombatantId::WORLD, 30, false, false, &ctx(101)));
+    assert!(scene.react_player_to_hit(CombatantId::WORLD, 30, false, false, false, &ctx(101)));
     assert_eq!(scene.player.flow.break_grace, BREAK_GRACE_TICKS);
     assert_eq!(
         scene.player.poise,
@@ -391,7 +391,7 @@ fn a_break_without_a_stun_clip_falls_back_to_hit_react_with_an_eighteen_tick_loc
     let mut scene = scene();
     // Knockdown off: a break then staggers, which is what this pins.
     scene.player_stats.knockdown_ticks = 0;
-    assert!(scene.react_player_to_hit(CombatantId::WORLD, 60, false, false, &ctx(100)));
+    assert!(scene.react_player_to_hit(CombatantId::WORLD, 60, false, false, false, &ctx(100)));
     assert_eq!(scene.anim_state, PlayerAnim::HitReact);
     assert_eq!(scene.anim_lock_until_tick, SimTick::from_u32(118));
 }
@@ -401,9 +401,9 @@ fn a_second_break_is_refused_until_the_grace_window_has_drained() {
     let mut scene = scene();
     // Knockdown off: the knockdown's own block is pinned elsewhere.
     scene.player_stats.knockdown_ticks = 0;
-    assert!(scene.react_player_to_hit(CombatantId::WORLD, 60, false, false, &ctx(100)));
+    assert!(scene.react_player_to_hit(CombatantId::WORLD, 60, false, false, false, &ctx(100)));
     scene.anim_state = PlayerAnim::Idle;
-    assert!(!scene.react_player_to_hit(CombatantId::WORLD, 60, false, false, &ctx(101)));
+    assert!(!scene.react_player_to_hit(CombatantId::WORLD, 60, false, false, false, &ctx(101)));
     // Grace only drains once the reaction is over.
     scene.player.flow.tick(BREAK_GRACE_TICKS - 1, true);
     assert!(!scene.player.flow.can_interrupt());
@@ -411,21 +411,21 @@ fn a_second_break_is_refused_until_the_grace_window_has_drained() {
     assert!(!scene.player.flow.can_interrupt());
     scene.player.flow.tick(1, false);
     assert!(scene.player.flow.can_interrupt());
-    assert!(scene.react_player_to_hit(CombatantId::WORLD, 60, false, false, &ctx(300)));
+    assert!(scene.react_player_to_hit(CombatantId::WORLD, 60, false, false, false, &ctx(300)));
 }
 
 #[test]
 fn armour_doubles_the_capacity_without_granting_immunity() {
     let mut scene = scene();
-    assert!(!scene.react_player_to_hit(CombatantId::WORLD, 119, true, false, &ctx(100)));
-    assert!(scene.react_player_to_hit(CombatantId::WORLD, 1, true, false, &ctx(101)));
+    assert!(!scene.react_player_to_hit(CombatantId::WORLD, 119, true, false, false, &ctx(100)));
+    assert!(scene.react_player_to_hit(CombatantId::WORLD, 1, true, false, false, &ctx(101)));
 }
 
 #[test]
 fn an_ordinary_hit_without_a_reaction_clip_does_not_interrupt_the_player() {
     let mut scene = scene();
     scene.anim_state = PlayerAnim::Run;
-    assert!(!scene.react_player_to_hit(CombatantId::WORLD, 10, false, false, &ctx(100)));
+    assert!(!scene.react_player_to_hit(CombatantId::WORLD, 10, false, false, false, &ctx(100)));
     assert_eq!(scene.anim_state, PlayerAnim::Run);
     assert_eq!(scene.anim_lock_until_tick, SimTick::ZERO);
     assert_ne!(
@@ -438,9 +438,9 @@ fn an_ordinary_hit_without_a_reaction_clip_does_not_interrupt_the_player() {
 #[test]
 fn a_shot_only_hit_never_interrupts_unless_it_breaks_posture() {
     let mut scene = scene();
-    assert!(!scene.react_player_to_hit(CombatantId::WORLD, 30, false, true, &ctx(100)));
+    assert!(!scene.react_player_to_hit(CombatantId::WORLD, 30, false, true, false, &ctx(100)));
     assert_eq!(scene.anim_state, PlayerAnim::Idle);
-    assert!(scene.react_player_to_hit(CombatantId::WORLD, 30, false, true, &ctx(101)));
+    assert!(scene.react_player_to_hit(CombatantId::WORLD, 30, false, true, false, &ctx(101)));
     assert_eq!(
         scene.anim_state,
         PlayerAnim::Knockdown,
@@ -452,7 +452,7 @@ fn a_shot_only_hit_never_interrupts_unless_it_breaks_posture() {
 fn a_stunned_player_accumulates_no_posture_and_cannot_be_broken_again() {
     let mut scene = scene();
     scene.anim_state = PlayerAnim::Stun;
-    assert!(!scene.react_player_to_hit(CombatantId::WORLD, 1000, false, false, &ctx(100)));
+    assert!(!scene.react_player_to_hit(CombatantId::WORLD, 1000, false, false, false, &ctx(100)));
     assert_eq!(scene.player.poise, psx_game_runtime::poise::Poise::EMPTY);
     assert_eq!(scene.player.flow.break_grace, 0);
 }
@@ -461,7 +461,7 @@ fn a_stunned_player_accumulates_no_posture_and_cannot_be_broken_again() {
 fn a_dying_player_ignores_further_hits() {
     let mut scene = scene();
     scene.hazard_death_ticks_remaining = 10;
-    assert!(!scene.react_player_to_hit(CombatantId::WORLD, 1000, false, false, &ctx(100)));
+    assert!(!scene.react_player_to_hit(CombatantId::WORLD, 1000, false, false, false, &ctx(100)));
     assert_eq!(scene.player.poise, psx_game_runtime::poise::Poise::EMPTY);
     assert_eq!(scene.anim_state, PlayerAnim::Idle);
 }
@@ -472,7 +472,7 @@ fn a_break_discards_queued_attack_and_dodge_input() {
     scene.attack_buffer.request(1, 100);
     scene.evade_buffer_vblanks = 8;
     scene.loco = LocoPhase::Cruise;
-    assert!(scene.react_player_to_hit(CombatantId::WORLD, 60, false, false, &ctx(101)));
+    assert!(scene.react_player_to_hit(CombatantId::WORLD, 60, false, false, false, &ctx(101)));
     assert_eq!(scene.attack_buffer.take(102), None);
     assert_eq!(scene.evade_buffer_vblanks, 0);
     assert_eq!(scene.loco, LocoPhase::Idle);
@@ -481,13 +481,13 @@ fn a_break_discards_queued_attack_and_dodge_input() {
 #[test]
 fn posture_recovers_after_a_quiet_interval_not_per_update_cadence() {
     let mut scene = scene();
-    assert!(!scene.react_player_to_hit(CombatantId::WORLD, 30, false, false, &ctx(100)));
+    assert!(!scene.react_player_to_hit(CombatantId::WORLD, 30, false, false, false, &ctx(100)));
     scene
         .player
         .poise
         .tick(psx_game_runtime::poise::POISE_RESET_TICKS);
     assert_eq!(scene.player.poise, psx_game_runtime::poise::Poise::EMPTY);
-    assert!(!scene.react_player_to_hit(CombatantId::WORLD, 30, false, false, &ctx(300)));
+    assert!(!scene.react_player_to_hit(CombatantId::WORLD, 30, false, false, false, &ctx(300)));
 }
 
 // ---------------------------------------------------------------------------

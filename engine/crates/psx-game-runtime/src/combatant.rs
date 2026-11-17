@@ -127,6 +127,10 @@ pub struct Strike {
     pub damage: u16,
     /// Posture damage before the defender's routing scales it.
     pub poise: u16,
+    /// A crit (the swing or volley a parry armed): its posture damage lands
+    /// even on a fighter staggered by that parry's riposte, inside the
+    /// riposte's break grace, and its break is a knockdown.
+    pub crit: bool,
 }
 
 impl Strike {
@@ -141,6 +145,7 @@ impl Strike {
             channel,
             damage: 0,
             poise: u16::MAX,
+            crit: false,
         }
     }
 
@@ -492,9 +497,18 @@ impl Combatant {
         let damage_applied = self.health.apply_damage(damage);
         let defeated = self.defeated();
         let killed = !was_defeated && defeated;
-        let blocked = hit.poise.blocked || self.knocked_down();
-        let poise_broken =
-            !killed && self.poise_hit(poise, hit.stats.poise, hit.poise.armored, blocked);
+        // A crit ignores the stagger and the break grace of the riposte that
+        // armed it (a knockdown still blocks it): otherwise the riposte's own
+        // break swallows every crit's posture damage.
+        let blocked = (hit.poise.blocked && !strike.crit) || self.knocked_down();
+        let poise_broken = !killed
+            && self.poise_hit(
+                poise,
+                hit.stats.poise,
+                hit.poise.armored,
+                blocked,
+                strike.crit,
+            );
         let knocked_down =
             poise_broken && strike.kind != HitKind::Parry && hit.stats.knockdown_ticks != 0;
         if knocked_down {
@@ -515,8 +529,15 @@ impl Combatant {
     /// `blocked` refuses the hit outright (the fighter is already in a
     /// break reaction). The break-grace window of [`CombatFlow`] applies: a
     /// hit inside it cannot break, and a break opens a new one.
-    fn poise_hit(&mut self, amount: u16, capacity: u16, armored: bool, blocked: bool) -> bool {
-        if blocked || !self.flow.can_interrupt() {
+    fn poise_hit(
+        &mut self,
+        amount: u16,
+        capacity: u16,
+        armored: bool,
+        blocked: bool,
+        crit: bool,
+    ) -> bool {
+        if blocked || (!crit && !self.flow.can_interrupt()) {
             return false;
         }
         let broken = self.poise.hit(amount, capacity, armored);
@@ -580,12 +601,12 @@ mod tests {
     #[test]
     fn poise_grace_applies_to_every_fighter() {
         let mut c = fighter();
-        assert!(c.poise_hit(60, 60, false, false));
-        assert!(!c.poise_hit(60, 60, false, false), "inside grace");
+        assert!(c.poise_hit(60, 60, false, false, false));
+        assert!(!c.poise_hit(60, 60, false, false, false), "inside grace");
         c.tick(BREAK_GRACE_TICKS, false, false);
-        assert!(c.poise_hit(60, 60, false, false));
+        assert!(c.poise_hit(60, 60, false, false, false));
         c.tick(BREAK_GRACE_TICKS, false, false);
-        assert!(!c.poise_hit(60, 60, false, true), "blocked");
+        assert!(!c.poise_hit(60, 60, false, true, false), "blocked");
     }
 
     const DODGING: ActionProtection = ActionProtection {
@@ -657,6 +678,7 @@ mod tests {
             channel,
             damage,
             poise,
+            crit: false,
         }
     }
 
@@ -910,5 +932,47 @@ mod tests {
         // Every entity slot holds one: 32 B before parry, crit and knockdown,
         // 36 before the crit latch.
         assert_eq!(core::mem::size_of::<Combatant>(), 38);
+    }
+
+    /// A crit follows the parry that armed it, so it lands on a fighter
+    /// staggered by that parry's riposte (poise blocked, break grace open).
+    /// Its posture damage still counts and the break is a knockdown; the
+    /// same strike without the crit does nothing to posture.
+    #[test]
+    fn a_crit_breaks_a_riposted_fighter_into_a_knockdown() {
+        let staggered = PoiseRule {
+            armored: false,
+            blocked: true,
+        };
+        let riposted = || {
+            let mut c = fighter();
+            let out = c.receive_hit(hit(Strike::parry(
+                CombatantId::entity(3),
+                VitalityChannelId::One,
+            )));
+            assert!(
+                out.poise_broken && !out.knocked_down,
+                "the riposte staggers"
+            );
+            c
+        };
+        let blow = strike(VitalityChannelId::One, 10, STATS.poise);
+        let mut plain = riposted();
+        let out = plain.receive_hit(HitIn {
+            poise: staggered,
+            ..hit(blow)
+        });
+        assert!(!out.poise_broken && !out.knocked_down);
+        assert_eq!(out.damage_applied, 10, "damage lands either way");
+        let mut critted = riposted();
+        let out = critted.receive_hit(HitIn {
+            poise: staggered,
+            ..hit(Strike { crit: true, ..blow })
+        });
+        assert!(out.poise_broken && out.knocked_down);
+        assert_eq!(critted.knockdown, STATS.knockdown_ticks);
+        // A knockdown still blocks it: no chain of crit knockdowns.
+        let again = critted.receive_hit(hit(Strike { crit: true, ..blow }));
+        assert!(!again.poise_broken);
     }
 }

@@ -219,6 +219,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
             })
     }
     /// Apply a projectile hit; the bolt's poise comes from `CombatFlow::shot_poise`.
+    /// `crit` marks a bolt of a crit volley ([`Strike::crit`]).
     pub fn apply_projectile_hit(
         &mut self,
         records: &'static [LevelGameEntityRecord],
@@ -226,6 +227,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         channel: VitalityChannelId,
         damage: u16,
         poise: u16,
+        crit: bool,
     ) -> GameEntityHitOutcome {
         if index >= self.count() || index >= records.len() {
             return GameEntityHitOutcome::MISS;
@@ -235,7 +237,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
             records[index].combat.poise,
             self.shot_opening(records, index),
         );
-        let strike = super::player_strike(HitKind::Projectile, channel, damage, poise);
+        let strike = super::player_strike(HitKind::Projectile, channel, damage, poise, crit);
         self.receive_hit(records, index, strike)
     }
     /// A heavy connection creates separation through the same body collision as AI walking.

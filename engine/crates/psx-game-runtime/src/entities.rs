@@ -417,6 +417,7 @@ pub(crate) fn player_strike(
     channel: VitalityChannelId,
     damage: u16,
     poise: u16,
+    crit: bool,
 ) -> Strike {
     Strike {
         attacker: CombatantId::PLAYER,
@@ -424,6 +425,7 @@ pub(crate) fn player_strike(
         channel,
         damage,
         poise,
+        crit,
     }
 }
 
@@ -1625,7 +1627,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         damage: u16,
         poise_damage: u16,
     ) -> GameEntityHitOutcome {
-        let strike = player_strike(HitKind::Melee, channel, damage, poise_damage);
+        let strike = player_strike(HitKind::Melee, channel, damage, poise_damage, false);
         self.receive_hit(records, index, strike)
     }
 
@@ -1738,6 +1740,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             channel,
             damage,
             poise_damage,
+            false,
             already_hit,
             |_, _| false,
         )
@@ -1747,6 +1750,8 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     /// `occluded(entity, position)` returning true blocks the connection
     /// WITHOUT latching the swing bit, so a target revealed later in the same
     /// active window (a door finishing its travel) can still be hit once.
+    /// `crit` marks the swing as a crit (its posture lands on a riposted
+    /// fighter, see [`Strike::crit`]).
     pub fn apply_melee_arc_occluded(
         &mut self,
         records: &'static [LevelGameEntityRecord],
@@ -1754,6 +1759,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         channel: VitalityChannelId,
         damage: u16,
         poise_damage: u16,
+        crit: bool,
         // psx-numeric-allow-next-line: one-hit-per-swing bitmask; bit ops only, two-word on R3000
         already_hit: &mut u64,
         mut occluded: impl FnMut(usize, [i32; 3]) -> bool,
@@ -1780,7 +1786,11 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
                 || occluded(entity, self.position(entity));
             if !skip {
                 *already_hit |= mask;
-                let outcome = self.apply_hit(records, entity, channel, damage, poise_damage);
+                let outcome = self.receive_hit(
+                    records,
+                    entity,
+                    player_strike(HitKind::Melee, channel, damage, poise_damage, crit),
+                );
                 stats.hits += u16::from(outcome.connected);
                 stats.staggers += u16::from(outcome.staggered);
                 stats.deaths += u16::from(outcome.died);
@@ -3622,11 +3632,11 @@ mod tests {
         e.state_ticks[0] = u16::from(DUAL_ENEMY[0].windup_ticks) / 2;
         assert!(e.shot_opening(&DUAL_ENEMY, 0));
         assert!(
-            e.apply_projectile_hit(&DUAL_ENEMY, 0, VitalityChannelId::Two, 1, 10)
+            e.apply_projectile_hit(&DUAL_ENEMY, 0, VitalityChannelId::Two, 1, 10, false)
                 .staggered
         );
         assert!(
-            !e.apply_projectile_hit(&DUAL_ENEMY, 0, VitalityChannelId::Two, 1, 10)
+            !e.apply_projectile_hit(&DUAL_ENEMY, 0, VitalityChannelId::Two, 1, 10, false)
                 .staggered
         );
         for _ in 0..5 {
@@ -5799,6 +5809,7 @@ mod tests {
             VitalityChannelId::One,
             10,
             40,
+            false,
             &mut swing,
             |_, _| true,
         );
@@ -5815,6 +5826,7 @@ mod tests {
             VitalityChannelId::One,
             10,
             40,
+            false,
             &mut swing,
             |entity, position| {
                 probed = Some((entity, position));

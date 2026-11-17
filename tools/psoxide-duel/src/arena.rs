@@ -606,6 +606,10 @@ fn clear_line(pillars: &[CharacterCollisionAabb], a: [i32; 3], b: [i32; 3]) -> b
         .any(|box_| segment_enters(lift(a), lift(b), box_).is_some())
 }
 
+/// The impact colour that marks a bolt of a crit volley (the disc tags its
+/// crit bolts by their impact colour too).
+const CRIT_BOLT_MARK: [u8; 3] = [255, 0, 255];
+
 /// A pending hit on `victim`, latched this tick, landed after both sides'
 /// contacts are known.
 #[derive(Clone, Copy)]
@@ -620,6 +624,8 @@ struct PendingHit {
     /// Whether the victim's windup was open to a bolt interrupt before
     /// any hit this tick.
     opening: bool,
+    /// A crit swing or a bolt of a crit volley.
+    crit: bool,
 }
 
 fn log_line(log: &mut String, label: &str, values: &[u32]) {
@@ -793,7 +799,8 @@ pub fn run(duel: &Duel<'_>) -> DuelResult {
             }
             // The swing that reached its target uses up the crit, parried
             // or not.
-            if sides[i].entities.spend_crit(0) {
+            let crit = sides[i].entities.spend_crit(0);
+            if crit {
                 sides[i].tally.crits += 1;
                 if duel.log {
                     log_line(&mut log, "duel:event", &[tick, i as u32, 2]);
@@ -808,6 +815,7 @@ pub fn run(duel: &Duel<'_>) -> DuelResult {
                 poise,
                 heavy: sides[i].entities.attack_kind(0) == 1,
                 opening: false,
+                crit,
             });
         }
         // Bolts: each side's incoming pool against its own body.
@@ -844,6 +852,7 @@ pub fn run(duel: &Duel<'_>) -> DuelResult {
                     poise: impact.poise_damage,
                     heavy: false,
                     opening,
+                    crit: impact.visual.impact_rgb == CRIT_BOLT_MARK,
                 });
             }
         }
@@ -997,7 +1006,14 @@ fn release_bolts(
             owner: 1,
             tint_rgb: [0; 3],
             damage_channel: ProjectileDamageChannel::from_raw(emitter.channel),
-            visual: ProjectileVisualStyle::EMPTY,
+            visual: if crit {
+                ProjectileVisualStyle {
+                    impact_rgb: CRIT_BOLT_MARK,
+                    ..ProjectileVisualStyle::EMPTY
+                }
+            } else {
+                ProjectileVisualStyle::EMPTY
+            },
         };
         if sides[j]
             .incoming
@@ -1042,6 +1058,7 @@ fn land(sides: &mut [Side], hit: PendingHit, logging: bool, tick: u32, log: &mut
             hit.channel,
             hit.damage,
             hit.poise,
+            hit.crit,
         ),
         _ => sides[j].entities.receive_hit(
             victim_records,
@@ -1054,6 +1071,7 @@ fn land(sides: &mut [Side], hit: PendingHit, logging: bool, tick: u32, log: &mut
                 channel: hit.channel,
                 damage: hit.damage,
                 poise: hit.poise,
+                crit: hit.crit,
             },
         ),
     };
