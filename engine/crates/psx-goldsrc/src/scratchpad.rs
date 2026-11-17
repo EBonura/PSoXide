@@ -25,7 +25,11 @@ const PROJECTION_GUARD: u32 = 0x5a17_c0de;
 /// The caller must ensure the face-group bitsets at bytes 128..840 are dead,
 /// and `f` keeps its own data out of bytes 140..SIZE. `f` is called directly (no function pointer),
 /// so `stack-guard` can bound its whole call tree.
-#[inline(always)]
+///
+/// Never inlined: the canary loops and the stack switch stay one out-of-line copy per closure
+/// type. Inlined, the closure form copied that body into every caller of a game's projection
+/// call (Half-Life: 556 B more text across two callers).
+#[inline(never)]
 pub unsafe fn call_on_projection_stack<const GUARD_END: usize, F: FnOnce()>(f: F) -> bool {
     const { assert!(GUARD_END > PROJECTION_GUARD_OFFSET && GUARD_END < SIZE) };
     let guard_words = (GUARD_END - PROJECTION_GUARD_OFFSET) / core::mem::size_of::<u32>();
