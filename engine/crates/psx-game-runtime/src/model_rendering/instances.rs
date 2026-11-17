@@ -63,6 +63,22 @@ pub struct ModelInstancePoseOverride {
     pub speed_q8: u16,
     /// Inclusive source-frame window carried by the live state selection.
     pub frame_range: psx_level::CharacterActionFrameRange,
+    /// A second clip blended over the live one: the clip it crossfades
+    /// from, or a layer on some joints. Only read when `clip` is some.
+    pub layer: Option<ModelInstancePoseLayer>,
+}
+
+/// A clip blended over an instance's live clip
+/// ([`ModelInstancePoseOverride::layer`]).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct ModelInstancePoseLayer {
+    /// The blended clip and where it is in its playback.
+    pub clip: crate::entities::GameEntityClip,
+    /// Q12 weight of the live clip on the masked joints (0 shows the
+    /// layer alone there).
+    pub alpha_q12: u16,
+    /// Joints the layer covers; all bits is the whole skeleton.
+    pub joint_mask: u32,
 }
 
 /// Look up the pose override for instance `index`, if any (linear
@@ -450,6 +466,10 @@ fn resolve_instance_actor_pose_record<
             }
         }
     };
+    let blend_from = live
+        .filter(|_| live_clip.is_some())
+        .and_then(|live| live.layer)
+        .and_then(|layer| instance_layer_blend(runtime_model, clips, layer, video_hz));
     Some(InstanceActorPoseSnapshot {
         instance_index,
         model: runtime_model,
@@ -462,6 +482,7 @@ fn resolve_instance_actor_pose_record<
             anim,
             phase,
             clip_local,
+            blend_from,
             inst_x,
             inst_y,
             inst_z,
@@ -470,6 +491,39 @@ fn resolve_instance_actor_pose_record<
     })
 }
 
+/// The pose a [`ModelInstancePoseLayer`] blends in, sampled on `model`'s
+/// clips; `None` when its clip is not loaded (a hard cut, never a corrupt
+/// pose).
+fn instance_layer_blend<const MAX_RUNTIME_MODEL_CLIPS: usize>(
+    model: RuntimeModelAsset,
+    clips: &[Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
+    layer: ModelInstancePoseLayer,
+    video_hz: VideoHz,
+) -> Option<ModelPoseBlend<'static>> {
+    let clip_local = ModelClipIndex(layer.clip.clip);
+    if layer.clip.clip >= model.clip_count {
+        return None;
+    }
+    let animation = model.clip(clips, clip_local)?;
+    let phase = animation_phase_at_tick_q12(
+        animation,
+        u32::from(layer.clip.phase_ticks),
+        video_hz,
+        !layer.clip.one_shot,
+        layer.clip.speed_q8,
+        layer.clip.frame_range,
+    );
+    animation
+        .looped_pose_sample_q12(phase)
+        .map(|sample| ModelPoseBlend {
+            sample,
+            alpha_q12: layer.alpha_q12,
+            joint_mask: layer.joint_mask,
+        })
+}
+
+/// An instance's pose through the one actor resolver ([`actor_pose`]), with
+/// its placement's scale, offset, yaw, pitch and roll.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn instance_actor_pose_from_components(
     tables: ModelTables,
@@ -479,22 +533,12 @@ pub(super) fn instance_actor_pose_from_components(
     animation: Animation<'static>,
     phase_q12: u32,
     clip_local: ModelClipIndex,
+    blend_from: Option<ModelPoseBlend<'static>>,
     x: i32,
     y: i32,
     z: i32,
     yaw: i16,
 ) -> ActorPoseSnapshot {
-    let clip_anchor = model_clip_anchor(tables, runtime_model, clip_local);
-    let reference_anchor = model_clip_anchor(tables, runtime_model, runtime_model.default_clip);
-    let pose_translation = model_pose_anchor_translation(
-        animation,
-        phase_q12,
-        clip_anchor,
-        reference_anchor,
-        None,
-        None,
-    );
-
     // Instance rotation from the authored transform (or the live
     // entity pose). The entity yaw and the renderer's visual yaw
     // share the Y axis; pitch and roll come from the entity
@@ -508,31 +552,27 @@ pub(super) fn instance_actor_pose_from_components(
     } else {
         euler_q12_rotation([inst.pitch, combined_yaw.as_q12() as i16, inst.roll])
     };
-    // Authored instance positions are floor anchors. Ground the reference
-    // (default) clip from its cooked posed floor, then reconcile every live
-    // clip to that reference through `pose_translation`. Using only the mesh
-    // bind-pose lift here leaves animated entities a few world units below
-    // the floor; painter ordering then clips their feet and makes them
-    // appear to hover even though their gameplay anchor is correct.
-    let origin = visual_model_origin(
-        x,
-        y,
-        z,
-        clip_floor_lift(reference_anchor, runtime_model),
-        visual_model_local_to_world(runtime_model, inst.visual_scale_q8),
-        inst.visual_offset,
-        &rotation,
-    );
-    let local_to_world = visual_model_local_to_world(runtime_model, inst.visual_scale_q8);
-    ActorPoseSnapshot::new(
+    actor_pose(
+        tables,
+        runtime_model,
+        ActorPoseSource {
+            animation,
+            clip_local,
+            phase_q12,
+            blend_from,
+            in_place_override: None,
+            clip_first_root_xz: None,
+            bind_floor: false,
+        },
+        ActorPlacement {
+            x,
+            y,
+            z,
+            rotation,
+            visual_scale_q8: inst.visual_scale_q8,
+            visual_offset: inst.visual_offset,
+        },
         tick,
-        animation,
-        phase_q12,
-        None,
-        origin,
-        rotation,
-        local_to_world,
-        pose_translation,
     )
 }
 
@@ -841,7 +881,8 @@ mod tests {
         LevelModelSocketRecord, ModelClipTableIndex, ModelFrameBoundsIndex, ModelIndex,
         ModelSocketIndex, OptionalModelClipIndex,
     };
-    use std::{boxed::Box, vec::Vec};
+    use std::boxed::Box;
+    use std::vec::Vec;
 
     fn one_joint_model() -> Model<'static> {
         const ASSET_HEADER_SIZE: usize = 12;
@@ -909,6 +950,7 @@ mod tests {
             collision_radius: 24,
             local_to_world: LocalToWorldScale::IDENTITY,
             floor_lift: 0,
+            body_masks: crate::fighter_anim::BodyJointMasks::default(),
         }
     }
 
@@ -977,6 +1019,7 @@ mod tests {
             one_shot,
             speed_q8: psx_level::CHARACTER_ACTION_SPEED_UNSCALED_Q8,
             frame_range: psx_level::CharacterActionFrameRange::FULL,
+            layer: None,
         }
     }
 
@@ -1010,7 +1053,9 @@ mod tests {
             snapshot.pose().pose_translation(),
             ModelPoseTranslation {
                 x: -96,
-                y: -15,
+                // The clip grounds on its own floor, as the player's does:
+                // no clip-to-default reconciliation term (it was -20).
+                y: 5,
                 z: 6
             }
         );
@@ -1026,7 +1071,7 @@ mod tests {
             .expect("body joint");
         assert_eq!(
             body_joint.translation,
-            WorldVertex::new(1_010, 1_974, 2_784)
+            WorldVertex::new(1_010, 2_014, 2_784)
         );
         let legacy_joint = super::super::model_instance_joint_world_transform(
             tables,
@@ -1056,7 +1101,7 @@ mod tests {
         let socket_pose =
             super::super::equipment::attachment_socket_pose(&snapshot.pose(), &socket)
                 .expect("socket pose");
-        assert_eq!(socket_pose.origin, WorldVertex::new(1_030, 1_974, 2_784));
+        assert_eq!(socket_pose.origin, WorldVertex::new(1_030, 2_014, 2_784));
         assert_eq!(
             socket_pose.rotation,
             snapshot.pose().joint_world_basis(0).unwrap()
@@ -1095,8 +1140,8 @@ mod tests {
             snapshot.pose(),
         )
         .expect("combat capsule");
-        assert_eq!(combat.start, [1_010, 1_974, 2_764]);
-        assert_eq!(combat.end, [1_010, 1_974, 2_724]);
+        assert_eq!(combat.start, [1_010, 2_014, 2_764]);
+        assert_eq!(combat.end, [1_010, 2_014, 2_724]);
     }
 
     #[test]

@@ -235,3 +235,103 @@ fn the_motor_stays_small_enough_for_every_slot() {
     // 44 bytes per fighter: the RAM the one mover costs each enemy slot.
     assert_eq!(core::mem::size_of::<CharacterMotorState>(), 44);
 }
+
+/// Her scene, zeroed and initialised as the game does.
+fn scene() -> std::boxed::Box<Playtest> {
+    let layout = std::alloc::Layout::new::<Playtest>();
+    // SAFETY: Playtest is plain data whose zero pattern init_zeroed expects.
+    let raw = unsafe { std::alloc::alloc_zeroed(layout) as *mut Playtest };
+    assert!(!raw.is_null());
+    // SAFETY: raw is a fresh, zeroed, correctly sized allocation.
+    unsafe { Playtest::init_zeroed(raw) };
+    // SAFETY: allocated with the global allocator at Playtest's layout.
+    unsafe { std::boxed::Box::from_raw(raw) }
+}
+
+#[test]
+fn a_sub_unit_strafe_keeps_one_gait_on_one_clock_for_her_and_an_enemy() {
+    let (_, _, config) = fighter(0);
+    // An engaged tactical enemy whose locomotion clips are told apart.
+    let records: &'static [LevelGameEntityRecord] =
+        std::boxed::Box::leak(std::boxed::Box::new([LevelGameEntityRecord {
+            flags: psx_level::game_entity_flags::ENABLED
+                | psx_level::game_entity_flags::MELEE_ATTACK
+                | psx_level::game_entity_flags::LIGHT_ATTACK
+                | psx_level::game_entity_flags::TACTICAL,
+            reaction_ticks: 0,
+            idle_clip: 0,
+            walk_clip: 1,
+            walk_backward_clip: 2,
+            strafe_left_clip: 3,
+            strafe_right_clip: 4,
+            ..GAME_ENTITIES[0]
+        }]));
+    // The tactical policy, whatever this fixture level's entities use.
+    let mut enemy = std::boxed::Box::new(psx_game_runtime::entities::GameEntities::<2>::EMPTY);
+    enemy.spawn_from_records(records);
+    enemy.engage(0, psx_game_runtime::combatant::CombatantId::PLAYER);
+    assert_eq!(
+        enemy.state(0),
+        psx_game_runtime::entities::GameEntityState::Aggro
+    );
+    let p = enemy.position(0);
+    let mut her = CharacterMotorState::new(
+        RoomPoint::new(p[0], p[1], p[2]),
+        Angle::from_q12(enemy.yaw(0) as u16),
+    );
+    let mut scene = scene();
+    // A slow side step: well under one unit per think at this walk.
+    let intent = CombatIntent {
+        movement: CombatMove::Move {
+            x: 1200,
+            z: 0,
+            forward: 0,
+        },
+        ..CombatIntent::IDLE
+    };
+    let (mut her_whole_steps, mut her_still) = (0, 0);
+    let mut last: Option<(u32, u16)> = None;
+    for think in 0..30u32 {
+        let now = SimTick::from_u32(1000 + 2 * think);
+        let mut stats = GameEntityTickStats::default();
+        let theirs = enemy.apply_intent(&records[0], 0, intent, &mut OpenWorld, 2, &mut stats);
+        let input = motor_input(&intent, false, false, Some(her.yaw()));
+        let before = her.position();
+        let hers = her
+            .update_vblanks_with_trace_provider(&mut OpenSpace, input, config, 2)
+            .expect("open space");
+        if her.position() == before {
+            her_still += 1;
+        } else {
+            her_whole_steps += 1;
+        }
+        // Her selection: the shared mapping of the motor's intent, switched
+        // on the shared track (a strafe has no windup phase).
+        let anim = fighter_anim::locomotion_anim(hers.anim);
+        if anim != scene.anim.state {
+            scene.switch_player_anim(anim, now, VideoHz::NTSC);
+        }
+        // Theirs: the same mapping and track, at the presentation tick.
+        enemy.update_animation(records, now, |_, _| 40);
+        let shown = enemy.animation(0);
+        assert_eq!(theirs.anim, hers.anim, "think {think}");
+        if think == 0 {
+            continue;
+        }
+        assert_eq!(scene.anim.state, PlayerAnim::StrafeLeft, "think {think}");
+        assert_eq!(
+            shown.clip.clip, records[0].strafe_left_clip,
+            "think {think}"
+        );
+        let her_clock = now.saturating_sub(scene.game_entities.actor_action().start);
+        if let Some((her_before, theirs_before)) = last {
+            assert_eq!(her_clock, her_before + 2, "think {think}");
+            assert_eq!(shown.clip.phase_ticks, theirs_before + 2, "think {think}");
+        }
+        last = Some((her_clock, shown.clip.phase_ticks));
+    }
+    assert!(
+        her_whole_steps > 0 && her_still > 0,
+        "{her_whole_steps} {her_still}"
+    );
+}

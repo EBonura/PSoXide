@@ -276,13 +276,12 @@ impl Playtest {
         self.aim_control = aim_control::AimControl::EMPTY;
         self.hook_selected = None;
         self.hook_visible = 0;
-        self.anim_blend_from = Some((
-            self.anim_state,
-            now.saturating_sub(self.game_entities.actor_action().start),
+        self.anim.switch(
+            PlayerAnim::HookLaunch,
+            &mut self.game_entities.actor_action_mut().start,
             now,
-        ));
-        self.anim_state = PlayerAnim::HookLaunch;
-        self.game_entities.actor_action_mut().start = now;
+            0,
+        );
         self.game_entities.actor_action_mut().lock_until = now;
         self.game_entities.actor_motor_mut().interrupt_action();
         if let Some(yaw) = psx_engine::yaw_to_point(
@@ -315,7 +314,7 @@ impl Playtest {
         // Start the release pose on the same tick as detachment: otherwise
         // one ordinary standing/aim frame flashes before gravity resumes.
         if !matches!(
-            self.anim_state,
+            self.anim.state,
             PlayerAnim::Death
                 | PlayerAnim::HitReact
                 | PlayerAnim::Stun
@@ -326,7 +325,7 @@ impl Playtest {
                 .to_option()
                 .is_some()
         }) {
-            self.anim_state = PlayerAnim::Fall;
+            self.anim.state = PlayerAnim::Fall;
             self.game_entities.actor_action_mut().start =
                 SimTick::from_u32(now.as_u32().saturating_sub(if self.fall_from_arch {
                     0
@@ -334,7 +333,7 @@ impl Playtest {
                     14
                 }));
             self.game_entities.actor_action_mut().lock_until = now;
-            self.anim_blend_from = None;
+            self.anim.switched = None;
         }
         self.hook_attached = None;
         self.hook_target = None;
@@ -391,7 +390,7 @@ impl Playtest {
         if self.hook_attached.is_some() || self.hook_travel.is_some() {
             if self.hazard_death_ticks_remaining != 0
                 || matches!(
-                    self.anim_state,
+                    self.anim.state,
                     PlayerAnim::Stun
                         | PlayerAnim::Parried
                         | PlayerAnim::Knockdown
@@ -449,7 +448,7 @@ impl Playtest {
             return false;
         }
         self.player_scarf = psx_game_runtime::model_rendering::PlayerScarf::new();
-        self.anim_state = PlayerAnim::HookLaunch;
+        self.anim.state = PlayerAnim::HookLaunch;
         self.ranged_ready = combat_input::RangedReady::EMPTY;
         self.render_camera = self.update_follow_camera(ctx);
         if flight.finished(ctx.sim_tick.as_u32()) {

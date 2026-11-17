@@ -384,10 +384,10 @@ impl Playtest {
         }
         if self.opening.handoff() {
             self.player_dash_assembly.cancel();
-            self.anim_state = PlayerAnim::Idle;
+            self.anim.state = PlayerAnim::Idle;
             self.game_entities.actor_action_mut().start = ctx.sim_tick;
             self.game_entities.actor_action_mut().lock_until = SimTick::ZERO;
-            self.anim_blend_from = None;
+            self.anim.switched = None;
             self.camera
                 .snap_to_player(self.camera_target(None, false), self.camera_config());
         }

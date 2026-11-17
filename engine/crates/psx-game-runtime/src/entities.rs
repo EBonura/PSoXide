@@ -35,9 +35,11 @@
 //!
 //! [`commit_body_step`]: psx_engine::character_motor::commit_body_step
 
+mod animation;
 mod flow;
 mod spawn;
 mod tactics;
+pub use animation::{EntityAnim, GameEntityAnimation};
 pub use tactics::{
     EnemyGoal, EnemyGoalResult, EnemyTacticalSnapshot, PredictedContact, STANCE_REASON_PARRY,
 };
@@ -50,8 +52,8 @@ use crate::combatant::{
 };
 use crate::vitality::VitalityChannelId;
 use psx_engine::{
-    Angle, CharacterMotorConfig, CharacterMotorFrame, CharacterMotorInput, CharacterMotorState,
-    RoomPoint,
+    Angle, CharacterMotorAnim, CharacterMotorConfig, CharacterMotorFrame, CharacterMotorInput,
+    CharacterMotorState, RoomPoint,
 };
 use psx_level::combat_verbs::CombatKits;
 use psx_level::{
@@ -761,6 +763,23 @@ pub struct GameEntities<
     moving: [u8; MAX_ENTITIES],
     /// The side each entity's bolts and body are on.
     teams: [crate::projectiles::CombatTeam; MAX_ENTITIES],
+    /// The animation intent of each entity's motor at its latest think:
+    /// what its locomotion clip shows ([`Self::update_animation`]).
+    motor_anims: [CharacterMotorAnim; MAX_ENTITIES],
+    /// Each entity's shown clip and the switch it crossfades from
+    /// ([`crate::fighter_anim::AnimTrack`]).
+    bodies: [crate::fighter_anim::AnimTrack<EntityAnim>; MAX_ENTITIES],
+    /// Clock of each shown clip: the tick its phase reads as zero.
+    body_starts: [psx_engine::SimTick; MAX_ENTITIES],
+    /// Each entity's locomotion (its gait, idle or turn), on the clock of
+    /// its [`crate::fighter_action::FighterAction::start`]: the full body in
+    /// tactical Aggro, the legs while it moves through an attack.
+    gaits: [crate::fighter_anim::AnimTrack<EntityAnim>; MAX_ENTITIES],
+    /// The tick of the latest [`Self::update_animation`].
+    anim_clock: psx_engine::SimTick,
+    /// What each entity shows, as the latest [`Self::update_animation`]
+    /// resolved it.
+    shown: [GameEntityAnimation; MAX_ENTITIES],
     /// Owner-supplied per-record activation (area residency).
     // psx-numeric-allow-next-line: fixed 64-record activation mask; bit ops only, two-word on R3000
     spatial_active_mask: u64,
@@ -1040,6 +1059,12 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         rivals: [NO_RIVAL; MAX_ENTITIES],
         moving: [0; MAX_ENTITIES],
         teams: [crate::projectiles::CombatTeam::Enemy; MAX_ENTITIES],
+        motor_anims: [CharacterMotorAnim::Idle; MAX_ENTITIES],
+        bodies: [crate::fighter_anim::AnimTrack::new(EntityAnim::NONE); MAX_ENTITIES],
+        body_starts: [psx_engine::SimTick::ZERO; MAX_ENTITIES],
+        gaits: [crate::fighter_anim::AnimTrack::new(EntityAnim::NONE); MAX_ENTITIES],
+        anim_clock: psx_engine::SimTick::ZERO,
+        shown: [GameEntityAnimation::NONE; MAX_ENTITIES],
         spatial_active_mask: 0,
     };
 
@@ -1811,25 +1836,40 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         records: &'static [LevelGameEntityRecord],
         index: usize,
     ) -> GameEntityClip {
+        self.state_anim(records, index).1
+    }
+
+    /// [`Self::clip_for_state`] and the animation action it plays, which
+    /// decides how a change to or from it crossfades
+    /// ([`crate::fighter_anim::blend_ticks`]).
+    pub(super) fn state_anim(
+        &self,
+        records: &'static [LevelGameEntityRecord],
+        index: usize,
+    ) -> (CharacterAnimationAction, GameEntityClip) {
+        use CharacterAnimationAction as Action;
         if index >= self.count() || index >= records.len() {
-            return GameEntityClip::default();
+            return (Action::Idle, GameEntityClip::default());
         }
         let record = &records[index];
         // A roll shows the character's roll clip whatever the state, as the
         // player's does: the motor owns the body until it ends.
         let motor = &self.motors[index];
         if !motor.action().is_idle() {
-            return GameEntityClip {
-                clip: record.roll_clip,
-                phase_ticks: u16::from(motor.action_frame()),
-                one_shot: true,
-                speed_q8: CHARACTER_ACTION_SPEED_UNSCALED_Q8,
-                frame_range: CharacterActionFrameRange::FULL,
-            };
+            return (
+                Action::Roll,
+                GameEntityClip {
+                    clip: record.roll_clip,
+                    phase_ticks: u16::from(motor.action_frame()),
+                    one_shot: true,
+                    speed_q8: CHARACTER_ACTION_SPEED_UNSCALED_Q8,
+                    frame_range: CharacterActionFrameRange::FULL,
+                },
+            );
         }
         if Self::is_tactical(record) {
-            if let Some(clip) = self.tactical_clip(record, index) {
-                return clip;
+            if let Some(shown) = self.tactical_clip(record, index) {
+                return shown;
             }
         }
         let ticks = self.state_ticks[index];
@@ -1850,32 +1890,59 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             speed_q8: CHARACTER_ACTION_SPEED_UNSCALED_Q8,
             frame_range: CharacterActionFrameRange::FULL,
         };
-        let attack_one_shot = |phase_ticks: u16| GameEntityClip {
-            clip: attack_clip,
-            phase_ticks,
-            one_shot: true,
-            speed_q8: attack_speed_q8,
-            frame_range: attack_frame_range,
+        let attack_one_shot = |phase_ticks: u16| {
+            (
+                self.selected_attack_action(record, index),
+                GameEntityClip {
+                    clip: attack_clip,
+                    phase_ticks,
+                    one_shot: true,
+                    speed_q8: attack_speed_q8,
+                    frame_range: attack_frame_range,
+                },
+            )
+        };
+        let stagger = |ticks: u16| GameEntityClip {
+            speed_q8: if record.stagger_speed_q8 == 0 {
+                768
+            } else {
+                record.stagger_speed_q8
+            },
+            frame_range: record.stagger_frame_range,
+            ..one_shot(record.stagger_clip, ticks)
         };
         match self.state(index) {
-            GameEntityState::Idle => looping(record.idle_clip),
-            GameEntityState::Patrol => looping(record.walk_clip),
+            GameEntityState::Idle => (Action::Idle, looping(record.idle_clip)),
+            GameEntityState::Patrol => (Action::Walk, looping(record.walk_clip)),
+            // The alert one-shot crossfades as a reaction does.
             GameEntityState::Aggro if ticks < u16::from(record.reaction_ticks) => {
-                one_shot(record.alert_clip, ticks)
+                (Action::HitReact, one_shot(record.alert_clip, ticks))
             }
             GameEntityState::Aggro => match self.intent(index) {
-                GameEntityIntent::Approach => looping(Self::approach_clip(record)),
-                GameEntityIntent::CircleLeft => looping(record.strafe_left_clip),
-                GameEntityIntent::CircleRight => looping(record.strafe_right_clip),
-                GameEntityIntent::Retreat => looping(record.walk_backward_clip),
-                GameEntityIntent::Hold if self.turn_ticks[index] != 0 => GameEntityClip {
-                    clip: record.turn_clip,
-                    phase_ticks: self.turn_phase_ticks[index],
-                    one_shot: false,
-                    speed_q8: CHARACTER_ACTION_SPEED_UNSCALED_Q8,
-                    frame_range: CharacterActionFrameRange::FULL,
-                },
-                GameEntityIntent::Hold => looping(record.idle_clip),
+                GameEntityIntent::Approach if Self::can_run(record) => {
+                    (Action::Run, looping(Self::approach_clip(record)))
+                }
+                GameEntityIntent::Approach => (Action::Walk, looping(Self::approach_clip(record))),
+                GameEntityIntent::CircleLeft => {
+                    (Action::StrafeLeft, looping(record.strafe_left_clip))
+                }
+                GameEntityIntent::CircleRight => {
+                    (Action::StrafeRight, looping(record.strafe_right_clip))
+                }
+                GameEntityIntent::Retreat => {
+                    (Action::WalkBackward, looping(record.walk_backward_clip))
+                }
+                GameEntityIntent::Hold if self.turn_ticks[index] != 0 => (
+                    Action::Turn,
+                    GameEntityClip {
+                        clip: record.turn_clip,
+                        phase_ticks: self.turn_phase_ticks[index],
+                        one_shot: false,
+                        speed_q8: CHARACTER_ACTION_SPEED_UNSCALED_Q8,
+                        frame_range: CharacterActionFrameRange::FULL,
+                    },
+                ),
+                GameEntityIntent::Hold => (Action::Idle, looping(record.idle_clip)),
             },
             GameEntityState::Windup => attack_one_shot(ticks),
             GameEntityState::Attack => attack_one_shot(timing.windup.saturating_add(ticks)),
@@ -1891,33 +1958,19 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
                 if self.combat_flags[index] & GAME_ENTITY_PARRIED_STAGGER != 0
                     && record.parried_clip != record.stagger_clip =>
             {
-                one_shot(record.parried_clip, ticks)
+                (Action::Parried, one_shot(record.parried_clip, ticks))
             }
-            GameEntityState::Staggered => GameEntityClip {
-                speed_q8: if record.stagger_speed_q8 == 0 {
-                    768
-                } else {
-                    record.stagger_speed_q8
-                },
-                frame_range: record.stagger_frame_range,
-                ..one_shot(record.stagger_clip, ticks)
-            },
+            GameEntityState::Staggered => (Action::Stun, stagger(ticks)),
             // The knockdown clip plays once and holds its last frame while
             // the entity is down. Until a knockdown clip is authored it is the
             // stagger clip, at the stagger's authored playback.
             GameEntityState::KnockedDown if record.knockdown_clip == record.stagger_clip => {
-                GameEntityClip {
-                    speed_q8: if record.stagger_speed_q8 == 0 {
-                        768
-                    } else {
-                        record.stagger_speed_q8
-                    },
-                    frame_range: record.stagger_frame_range,
-                    ..one_shot(record.stagger_clip, ticks)
-                }
+                (Action::Knockdown, stagger(ticks))
             }
-            GameEntityState::KnockedDown => one_shot(record.knockdown_clip, ticks),
-            GameEntityState::Dead => one_shot(record.death_clip, ticks),
+            GameEntityState::KnockedDown => {
+                (Action::Knockdown, one_shot(record.knockdown_clip, ticks))
+            }
+            GameEntityState::Dead => (Action::Death, one_shot(record.death_clip, ticks)),
         }
     }
 
@@ -3296,6 +3349,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         if input == NO_MOTION {
             if let Some(frame) = self.motors[index].rest(&config) {
                 self.moving[index] = 0;
+                self.motor_anims[index] = frame.anim;
                 return frame;
             }
         }
@@ -3307,6 +3361,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             config,
             delta.max(1),
         );
+        self.motor_anims[index] = frame.anim;
         self.moving[index] = if !frame.moved {
             0
         } else if input.sprint || !self.motors[index].action().is_idle() {
@@ -3752,6 +3807,10 @@ mod tests {
                     frame.position = p;
                     frame.moved = p.x != start.x || p.z != start.z;
                     frame.blocked = true;
+                    if !frame.moved {
+                        // The motor's own rule: a refused move stands still.
+                        frame.anim = CharacterMotorAnim::Idle;
+                    }
                 }
             }
             frame
