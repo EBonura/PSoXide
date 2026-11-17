@@ -48,11 +48,25 @@
 //! a checkpoint restores it.
 
 use psx_level::combat_verbs::CombatKits;
-use psx_level::CombatStats;
+use psx_level::{combat_armour, CombatStats};
 
 use crate::combat_flow::CombatFlow;
 use crate::poise::Poise;
 use crate::vitality::{CombatStance, VitalityChannelId, VitalityPool, VITALITY_Q12_ONE};
+
+/// The one armour rule for every fighter: the current action's authored
+/// `Armored` window (`authored`, None when its clip authors none) decides
+/// when the character's stats take authored windows
+/// ([`combat_armour::AUTHORED_WINDOW`]); otherwise a heavy attack armours its
+/// fighter while its contact is live (`heavy_contact`, with
+/// [`combat_armour::HEAVY_ATTACK`]). Armour doubles the poise capacity for a
+/// hit ([`PoiseRule::armored`]).
+pub fn armoured(stats: &CombatStats, authored: Option<bool>, heavy_contact: bool) -> bool {
+    match authored {
+        Some(open) if stats.armour & combat_armour::AUTHORED_WINDOW != 0 => open,
+        _ => stats.armour & combat_armour::HEAVY_ATTACK != 0 && heavy_contact,
+    }
+}
 
 /// Whether a knocked-down fighter is protected: hits pass through it until it
 /// is up, as most of the reference games do for a downed fighter. The same
@@ -961,6 +975,29 @@ mod tests {
             out.poise_broken && !out.knocked_down,
             "zero turns knockdown off"
         );
+    }
+
+    #[test]
+    fn one_armour_rule_authored_window_first_then_heavy_contact() {
+        let both = CombatStats::PLAYER;
+        assert_eq!(
+            both.armour,
+            combat_armour::HEAVY_ATTACK | combat_armour::AUTHORED_WINDOW
+        );
+        assert!(armoured(&both, Some(true), false));
+        assert!(!armoured(&both, Some(false), true), "the window decides");
+        assert!(
+            armoured(&both, None, true),
+            "no window: the heavy's contact"
+        );
+        assert!(!armoured(&both, None, false));
+        let heavy_only = CombatStats {
+            armour: combat_armour::HEAVY_ATTACK,
+            ..both
+        };
+        assert!(armoured(&heavy_only, Some(false), true));
+        let none = CombatStats { armour: 0, ..both };
+        assert!(!armoured(&none, Some(true), true));
     }
 
     #[test]

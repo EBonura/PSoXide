@@ -77,6 +77,11 @@ pub struct ActionTiming {
     pub active: u16,
     /// Ticks from the end of contact to the end of the action.
     pub recovery: u16,
+    /// The action's authored `Armored` window, as ticks from its start
+    /// (first included, first excluded); None when its clip authors none,
+    /// and the armour rule falls back to its contact
+    /// ([`crate::combatant::armoured`]).
+    pub armour: Option<(u16, u16)>,
 }
 
 impl ActionTiming {
@@ -101,7 +106,31 @@ impl ActionTiming {
             windup,
             active: clamp(end.saturating_sub(u32::from(windup))).max(1),
             recovery: clamp(total.saturating_sub(end)),
+            armour: None,
         })
+    }
+
+    /// This timing with the action's authored `Armored` window, frames
+    /// `start..end` (first excluded) on the same clip clock as
+    /// [`Self::from_clip`], placed as ticks from the action's start.
+    pub fn with_armour(self, start_q12: u32, rate_q12: u32, (start, end): (u16, u16)) -> Self {
+        let tick = |frame: u16| {
+            let ticks = (u32::from(frame) << 12)
+                .saturating_sub(start_q12)
+                .div_ceil(rate_q12.max(1));
+            ticks.min(u32::from(u16::MAX)) as u16
+        };
+        Self {
+            armour: (start < end).then(|| (tick(start), tick(end))),
+            ..self
+        }
+    }
+
+    /// Whether the action's authored `Armored` window is open `since` ticks
+    /// after the action started; None when it authors none.
+    pub fn armoured_at(self, since: u16) -> Option<bool> {
+        self.armour
+            .map(|(start, end)| since >= start && since < end)
     }
 }
 
@@ -389,7 +418,8 @@ mod tests {
             Some(ActionTiming {
                 windup: 10,
                 active: 5,
-                recovery: 25
+                recovery: 25,
+                armour: None
             })
         );
         // Half a frame a tick from frame 2 (a frame range's start).
@@ -398,7 +428,8 @@ mod tests {
             Some(ActionTiming {
                 windup: 16,
                 active: 10,
-                recovery: 34
+                recovery: 34,
+                armour: None
             })
         );
         // Contact the clip never reaches, or a clip that does not advance.
@@ -407,5 +438,19 @@ mod tests {
             None
         );
         assert_eq!(ActionTiming::from_clip(40, 0, 0, (10, 14)), None);
+    }
+
+    #[test]
+    fn an_armour_window_sits_on_the_clip_clock() {
+        // Half a frame a tick from frame 2: frames 10..14 are ticks 16..24.
+        let timing = ActionTiming::from_clip(60, 2 << 12, 1 << 11, (10, 14))
+            .unwrap()
+            .with_armour(2 << 12, 1 << 11, (10, 14));
+        assert_eq!(timing.armour, Some((16, 24)));
+        assert_eq!(timing.armoured_at(15), Some(false));
+        assert_eq!(timing.armoured_at(16), Some(true));
+        assert_eq!(timing.armoured_at(23), Some(true));
+        assert_eq!(timing.armoured_at(24), Some(false));
+        assert_eq!(ActionTiming::default().armoured_at(16), None);
     }
 }

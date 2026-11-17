@@ -88,6 +88,10 @@ fn training_fighter(
             ),
         ],
         &spec,
+        package
+            .characters
+            .get(record.character.to_usize())
+            .map_or(&[][..], |character| &character.combat_windows[..]),
     );
     Ok((spec, record))
 }
@@ -267,6 +271,7 @@ pub fn load(project_dir: &Path) -> Result<ProjectFighters, String> {
                 clip(psx_level::CharacterAnimationAction::RangedAttack),
             ],
             &aletha,
+            &player_character.combat_windows,
         )
     };
 
@@ -335,6 +340,7 @@ fn attack_timings(
     model: Option<usize>,
     clips: [(u16, u16, psx_level::CharacterActionFrameRange); 3],
     spec: &FighterSpec,
+    windows: &[psx_level::CharacterCombatWindow],
 ) -> [Option<psx_game_runtime::fighter_action::ActionTiming>; 3] {
     use psx_level::CharacterAnimationAction as Action;
     let actions = [
@@ -366,6 +372,7 @@ fn attack_timings(
                 speed_q8,
                 range,
                 contact,
+                psx_game_runtime::model_rendering::armour_window(windows, actions[kind]),
             )
         })();
     }

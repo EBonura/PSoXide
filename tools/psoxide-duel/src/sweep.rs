@@ -122,6 +122,8 @@ impl Summary {
             "knockdowns_a_b": pair(self.total(|s| s.knockdowns)),
             "staggers_a_b": pair(self.total(|s| s.staggers)),
             "parry_swaps_a_b": pair(self.total(|s| s.parry_swaps)),
+            "armour_absorbs_a_b": pair(self.total(|s| s.armour_absorbs)),
+            "trades_a_b": pair(self.total(|s| s.trades)),
             "evades_a_b": pair(self.total(|s| s.evades)),
             "swaps_a_b": pair(self.total(|s| s.swaps)),
             "shots_a_b": pair(self.total(|s| s.shots)),

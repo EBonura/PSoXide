@@ -55,8 +55,8 @@ use psx_engine::{
 };
 use psx_level::combat_verbs::CombatKits;
 use psx_level::{
-    combat_armour, game_entity_flags, CharacterActionFrameRange, CharacterAnimationAction,
-    LevelGameEntityRecord, RoomIndex, CHARACTER_ACTION_SPEED_UNSCALED_Q8,
+    game_entity_flags, CharacterActionFrameRange, CharacterAnimationAction, LevelGameEntityRecord,
+    RoomIndex, CHARACTER_ACTION_SPEED_UNSCALED_Q8,
 };
 use psx_math::atan2_q12;
 
@@ -807,6 +807,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             windup: u16::from(record.windup_ticks),
             active: active.max(GAME_ENTITY_ATTACK_ACTIVE_TICKS),
             recovery: u16::from(record.recovery_ticks),
+            armour: None,
         };
         [
             timing(record.attack_active_ticks),
@@ -1012,6 +1013,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             windup: 0,
             active: 0,
             recovery: 0,
+            armour: None,
         }; 3]; MAX_ENTITIES],
         projectile_threats: [None; MAX_ENTITIES],
         exchanges: [crate::ranged_tactics::RangedExchange::EMPTY; MAX_ENTITIES],
@@ -1955,9 +1957,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         }
         let stats = records[index].combat;
         let poise = PoiseRule {
-            armored: stats.armour & combat_armour::HEAVY_ATTACK != 0
-                && state == GameEntityState::Attack
-                && self.selected_attack_kind(index) == GAME_ENTITY_ATTACK_HEAVY,
+            armored: self.armoured(records, index),
             blocked: matches!(
                 state,
                 GameEntityState::Staggered | GameEntityState::KnockedDown
@@ -2019,6 +2019,35 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             knocked_down: out.knocked_down,
             ..GameEntityHitOutcome::MISS
         }
+    }
+
+    /// Whether entity `index`'s attack armours it now, by the one armour
+    /// rule ([`crate::combatant::armoured`]): the attack's authored `Armored`
+    /// window on its clip clock ([`crate::fighter_action::ActionTiming`]),
+    /// else a heavy attack while its contact is live (the Attack state).
+    pub fn armoured(&self, records: &[LevelGameEntityRecord], index: usize) -> bool {
+        let Some(record) = records.get(index) else {
+            return false;
+        };
+        let timing = self.selected_timing(index);
+        let ticks = self.state_ticks[index];
+        let since = match self.state(index) {
+            GameEntityState::Windup => Some(ticks),
+            GameEntityState::Attack => Some(timing.windup.saturating_add(ticks)),
+            GameEntityState::Recover => Some(
+                timing
+                    .windup
+                    .saturating_add(timing.active)
+                    .saturating_add(ticks),
+            ),
+            _ => None,
+        };
+        crate::combatant::armoured(
+            &record.combat,
+            since.and_then(|since| timing.armoured_at(since)),
+            self.state(index) == GameEntityState::Attack
+                && self.selected_attack_kind(index) == GAME_ENTITY_ATTACK_HEAVY,
+        )
     }
 
     /// Sweep the player's melee arc over the live entities: every
@@ -3560,6 +3589,41 @@ mod tests {
     use psx_level::CombatStats;
 
     #[test]
+    fn a_heavy_armours_by_its_authored_window_else_by_its_contact() {
+        static RECORDS: [LevelGameEntityRecord; 1] =
+            [test_record(0, 0, 0, 400, game_entity_flags::ENABLED)];
+        let mut entities = GameEntities::<4>::EMPTY;
+        entities.spawn_from_records(&RECORDS);
+        entities.attack_mode[0] = GAME_ENTITY_ATTACK_HEAVY;
+        let at = |entities: &mut GameEntities<4>, state, ticks| {
+            entities.state[0] = state as u8;
+            entities.state_ticks[0] = ticks;
+            entities.armoured(&RECORDS, 0)
+        };
+        // No authored window: armoured only while its contact is live.
+        assert!(!at(&mut entities, GameEntityState::Windup, 3));
+        assert!(at(&mut entities, GameEntityState::Attack, 0));
+        // Its window on the clip clock, ticks 6..12 from the attack's start.
+        entities.attack_timings[0][usize::from(GAME_ENTITY_ATTACK_HEAVY)] =
+            crate::fighter_action::ActionTiming {
+                windup: 10,
+                active: 4,
+                recovery: 20,
+                armour: Some((6, 12)),
+            };
+        assert!(!at(&mut entities, GameEntityState::Windup, 5));
+        assert!(at(&mut entities, GameEntityState::Windup, 6));
+        assert!(at(&mut entities, GameEntityState::Attack, 1));
+        assert!(
+            !at(&mut entities, GameEntityState::Attack, 2),
+            "window closed"
+        );
+        // A light attack has no armour of its own.
+        entities.attack_mode[0] = GAME_ENTITY_ATTACK_LIGHT;
+        assert!(!at(&mut entities, GameEntityState::Attack, 0));
+    }
+
+    #[test]
     fn an_attack_runs_on_the_timing_read_off_its_clip_else_on_its_record() {
         static RECORDS: [LevelGameEntityRecord; 2] = [
             test_record(0, 0, 0, 400, game_entity_flags::ENABLED),
@@ -3571,6 +3635,7 @@ mod tests {
             windup: 9,
             active: 4,
             recovery: 21,
+            armour: None,
         };
         // Only the first entity's light attack has a clip with contact.
         entities.time_attacks(&RECORDS, |record, action, _, _, _| {

@@ -977,22 +977,44 @@ pub fn clip_duration_ticks(
 
 /// How an attack played on `animation` runs
 /// ([`crate::fighter_action::ActionTiming`]): its clip's length, with its
-/// authored `contact` frames placed on the clip's own clock.
+/// authored `contact` frames and its authored `Armored` window frames
+/// (`armour`, first excluded; None when it authors none) placed on the
+/// clip's own clock.
 pub fn action_timing(
     animation: Animation<'static>,
     video_hz: VideoHz,
     speed_q8: u16,
     frame_range: psx_level::CharacterActionFrameRange,
     contact: (u16, u16),
+    armour: Option<(u16, u16)>,
 ) -> Option<crate::fighter_action::ActionTiming> {
     let start = animation_phase_at_tick_q12(animation, 0, video_hz, false, speed_q8, frame_range);
     let next = animation_phase_at_tick_q12(animation, 1, video_hz, false, speed_q8, frame_range);
-    crate::fighter_action::ActionTiming::from_clip(
+    let rate = next.saturating_sub(start);
+    let timing = crate::fighter_action::ActionTiming::from_clip(
         clip_duration_ticks(animation, video_hz, speed_q8, frame_range),
         start,
-        next.saturating_sub(start),
+        rate,
         contact,
-    )
+    )?;
+    Some(match armour {
+        Some(window) => timing.with_armour(start, rate, window),
+        None => timing,
+    })
+}
+
+/// The authored `Armored` window of `action` among a character's combat
+/// windows: its frames, first excluded. None when it authors none.
+pub fn armour_window(
+    windows: &[psx_level::CharacterCombatWindow],
+    action: psx_level::CharacterAnimationAction,
+) -> Option<(u16, u16)> {
+    windows
+        .iter()
+        .find(|w| {
+            w.action == action.to_index() as u8 && w.kind == psx_level::CombatWindowKind::Armored
+        })
+        .map(|w| (w.start, w.end))
 }
 
 /// Forward push speed for the current attack frame, if the action

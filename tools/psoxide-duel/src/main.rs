@@ -156,7 +156,7 @@ fn standard<'a>(placed: &'a Placed, layout: Layout) -> Vec<Matchup<'a>> {
 fn row(project: &str, layout: Layout, matchup: &Matchup<'_>, s: &Summary) -> String {
     let p = |v: [u32; 2]| format!("{} / {}", v[0], v[1]);
     format!(
-        "| {project} | {} | {} | {} / {} | {:.0}% (fair: 50 +/- {:.0}) | {} | {} | {} | {} | {} | {} | {:.0} | {} | {} |",
+        "| {project} | {} | {} | {} / {} | {:.0}% (fair: 50 +/- {:.0}) | {} | {} | {} | {} | {} | {} | {:.0} | {} | {} | {} | {} |",
         layout.name(),
         matchup.name,
         s.a_won(),
@@ -172,10 +172,12 @@ fn row(project: &str, layout: Layout, matchup: &Matchup<'_>, s: &Summary) -> Str
         s.mean_length(),
         p(s.total(|t| t.staggers)),
         p(s.total(|t| t.parry_swaps)),
+        p(s.total(|t| t.armour_absorbs)),
+        p(s.total(|t| t.trades)),
     )
 }
 
-const HEADER: &str = "| project | layout | matchup (A:B) | wins A / B | A share | stalls+timeouts | double KO | parries A / B | crits A / B | knockdowns A / B | evades A / B | mean length (ticks) | staggers A / B | parry swaps A / B |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|---|";
+const HEADER: &str = "| project | layout | matchup (A:B) | wins A / B | A share | stalls+timeouts | double KO | parries A / B | crits A / B | knockdowns A / B | evades A / B | mean length (ticks) | staggers A / B | parry swaps A / B | armour absorbs A / B | trades A / B |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|";
 
 fn write_json(out: &Option<PathBuf>, name: &str, value: &serde_json::Value) {
     if let Some(dir) = out {

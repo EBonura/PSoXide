@@ -1334,10 +1334,13 @@ impl Playtest {
                     && frame <= capsule.active_end_frame
             })
         });
-        let armored = self
-            .player_combat_sample(ctx)
-            .active(psx_level::CombatWindowKind::Armored)
-            .unwrap_or(armored);
+        // The one armour rule: her authored window, else her heavy's contact.
+        let armored = psx_game_runtime::combatant::armoured(
+            &self.player_stats,
+            self.player_combat_sample(ctx)
+                .active(psx_level::CombatWindowKind::Armored),
+            armored,
+        );
         let shot_only = taken.melee_damage == 0;
         let staggered = self.react_player_to_hit(
             taken.attacker,
@@ -1775,7 +1778,8 @@ impl Playtest {
                 let capsules = COMBAT_CAPSULES
                     .get(first..first + usize::from(character.combat_capsule_count))?;
                 let contact = combat::authored_event_frames(capsules, action)?;
-                mr::action_timing(animation, video_hz, speed_q8, frame_range, contact)
+                let armour = mr::armour_window(&character.combat_windows, action);
+                mr::action_timing(animation, video_hz, speed_q8, frame_range, contact, armour)
             },
         );
         self.entity_attacks_timed = true;

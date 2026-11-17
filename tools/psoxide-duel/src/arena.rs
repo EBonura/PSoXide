@@ -281,6 +281,11 @@ pub struct SideTally {
     pub staggers: u32,
     /// Swaps this side's controller made on purpose to parry.
     pub parry_swaps: u32,
+    /// Hits this side took under armour without breaking.
+    pub armour_absorbs: u32,
+    /// Trades: heavy hits this side landed with an attack that had absorbed
+    /// a hit under armour.
+    pub trades: u32,
     /// Projectile evade decisions (ranged-exchange mode 4 entries, the
     /// disc report's `projectile_evade_attempts`).
     pub evades: u32,
@@ -342,6 +347,9 @@ struct Side {
     last_health: u16,
     last_role: u8,
     attack_start: u32,
+    /// The start tick of the attack during which this side last absorbed a
+    /// hit under armour.
+    absorbed_in: Option<u32>,
     tally: SideTally,
 }
 
@@ -682,6 +690,7 @@ pub fn run(duel: &Duel<'_>) -> DuelResult {
                 last_position: position,
                 last_role: 0,
                 attack_start: 0,
+                absorbed_in: None,
                 tally: SideTally::default(),
             }
         })
@@ -1073,6 +1082,7 @@ fn land(sides: &mut [Side], hit: PendingHit, logging: bool, tick: u32, log: &mut
     let (i, j) = (hit.attacker, hit.victim);
     let victim_records = sides[j].records;
     let attacker_records = sides[i].records;
+    let armoured = sides[j].entities.armoured(victim_records, 0);
     let outcome = match hit.kind {
         HitKind::Projectile => sides[j].entities.apply_projectile_hit(
             victim_records,
@@ -1106,6 +1116,13 @@ fn land(sides: &mut [Side], hit: PendingHit, logging: bool, tick: u32, log: &mut
             .entities
             .riposte(attacker_records, 0, CombatantId::PLAYER);
         return;
+    }
+    if armoured && outcome.connected && !outcome.staggered {
+        sides[j].tally.armour_absorbs += 1;
+        sides[j].absorbed_in = Some(sides[j].attack_start);
+    }
+    if hit.heavy && outcome.connected && sides[i].absorbed_in == Some(sides[i].attack_start) {
+        sides[i].tally.trades += 1;
     }
     match hit.kind {
         HitKind::Projectile => sides[i]
