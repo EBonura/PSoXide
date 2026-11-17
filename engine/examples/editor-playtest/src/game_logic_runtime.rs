@@ -1480,6 +1480,9 @@ impl Playtest {
     /// The player's swing as a watcher reads it: her strike clip, how far
     /// into it she is, and her authored hitboxes. None when she is not
     /// striking.
+    // Read once per think by a controller; kept out of the large callers.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     pub(super) fn player_swing(&self, now: SimTick) -> Option<SwingClock> {
         if !matches!(
             self.anim_state,
@@ -1518,6 +1521,9 @@ impl Playtest {
     /// Entity `index`'s melee swing as a watcher reads it: its attack clip,
     /// its swing clock, its authored hitboxes and its record's contact
     /// ticks. None when it is not winding up or swinging a blade.
+    // Read once per think by a controller; kept out of the large callers.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     pub(super) fn entity_swing(&self, index: usize) -> Option<SwingClock> {
         let records = GAME_ENTITIES.as_slice();
         let entity = records.get(index)?;
