@@ -256,7 +256,7 @@ impl RangedExchange {
                 self.candidate = 0;
             }
             EVADE => return self.order(from),
-            SEEK_COVER if distance(from, self.cover) <= 4 => {
+            SEEK_COVER if distance(from, self.cover) <= arrival(radius) => {
                 // Arrival is only cover while geometry still conceals this actor.
                 if concealed(from, target, radius, height, clear) {
                     self.enter(COVERED, 54, from);
@@ -264,12 +264,19 @@ impl RangedExchange {
                     self.enter(SEARCH, 144, from);
                 }
             }
-            SEEK_COVER if self.timer == 0 => self.enter(SEARCH, 144, from),
+            SEEK_COVER if self.timer == 0 => {
+                // Cover it never reached is a cover cycle that saw nothing:
+                // a dry cycle, or two fighters can hunt cover forever.
+                self.dry = self.dry.saturating_add(1);
+                self.enter(SEARCH, 144, from);
+            }
             COVERED if (self.timer == 0 || !concealed(from, target, radius, height, clear)) => {
                 self.enter(PEEK, 120, self.peek);
             }
             PEEK => {
-                if distance(from, self.peek) <= 4 && clear(eye(from, height), eye(target, height)) {
+                if distance(from, self.peek) <= arrival(radius)
+                    && clear(eye(from, height), eye(target, height))
+                {
                     self.shots = 0;
                     self.enter(OPEN, 120, from);
                 } else if self.timer == 0 {
@@ -344,6 +351,12 @@ impl RangedExchange {
         }
         self.decided(from)
     }
+}
+/// How close a fighter must stand to a cover or peek point to be there:
+/// half its body, at least 4 units. A body that moves several units a tick
+/// at full pace never lands within a fixed 4.
+fn arrival(radius: i32) -> i32 {
+    (radius / 2).max(4)
 }
 fn eye(mut p: [i32; 3], height: i32) -> [i32; 3] {
     p[1] += height * 3 / 4;
@@ -575,5 +588,18 @@ mod tests {
             )
             .evade
         );
+    }
+
+    #[test]
+    fn cover_never_reached_counts_as_a_dry_cycle() {
+        let mut e = RangedExchange::EMPTY;
+        e.enter(SEEK_COVER, 0, [500, 0, 0]);
+        e.cover = [500, 0, 0];
+        let mut open = |_: [i32; 3], _: [i32; 3]| true;
+        e.decide([0; 3], [0, 0, 300], 12, 64, 256, 100, None, &mut open);
+        assert_eq!(e.dry, 1);
+        // A body within half its width of the point has arrived.
+        assert_eq!(arrival(12), 6);
+        assert_eq!(arrival(4), 4);
     }
 }
