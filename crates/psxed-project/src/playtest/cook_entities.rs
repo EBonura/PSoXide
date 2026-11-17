@@ -282,7 +282,8 @@ pub(crate) fn omitted_player_actions(scene: &crate::Scene) -> Vec<CharacterAnima
 }
 
 /// The actions an enemy's cooked state clips read (see [`game_entity_state_clips`]), and no
-/// others: an enemy never rolls, blocks or aims, so those clips are not resident for it. The
+/// others: an enemy never rolls, blocks or aims, so those clips are not resident for it. Its
+/// Parried and Knockdown clips are resident when bound; unbound, those states play the stun. The
 /// ranged action is the one its projectile emitter names. A hit reaction is only the stagger
 /// when the set has no stun clip, so it is resident only then.
 fn enemy_clip_actions(
@@ -311,6 +312,8 @@ fn enemy_clip_actions(
         CharacterAnimationAction::HeavyAttack,
         ranged,
         CharacterAnimationAction::Stun,
+        CharacterAnimationAction::Parried,
+        CharacterAnimationAction::Knockdown,
         CharacterAnimationAction::Death,
     ];
     if animation_set_action_clip(project, set, CharacterAnimationAction::Stun).is_none() {
@@ -4078,6 +4081,7 @@ mod socket_anchor_tests {
             CharacterAnimationAction::HitReact,
             CharacterAnimationAction::Roll,
             CharacterAnimationAction::Death,
+            CharacterAnimationAction::Knockdown,
         ];
         let mut set = crate::AnimationSetResource::defaults();
         let mut clip_ids = Vec::new();
@@ -4121,6 +4125,7 @@ mod socket_anchor_tests {
             "hit react, a stun exists"
         );
         assert!(!enemy.contains(&index_of(&project, 3)), "roll");
+        assert!(enemy.contains(&index_of(&project, 5)), "knockdown");
 
         // Without a stun clip the hit reaction is the stagger and stays.
         let mut set = crate::AnimationSetResource::defaults();
