@@ -475,6 +475,8 @@ pub fn resolve_authored_actor_contact_swept_pending(
 /// This is the moment a parry has to meet: the first authored hitbox frame
 /// can come several ticks before the blade reaches the body.
 #[allow(clippy::too_many_arguments)]
+// Read a few ticks per swing, once per think: small over fast.
+#[cfg_attr(target_arch = "mips", optimize(size))]
 pub fn predicted_contact_tick(
     attacker_capsules: &[CombatCapsuleRecord],
     action: CharacterAnimationAction,

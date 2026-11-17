@@ -61,6 +61,9 @@ use crate::vitality::{CombatStance, VitalityChannelId, VitalityPool, VITALITY_Q1
 /// fighter while its contact is live (`heavy_contact`, with
 /// [`combat_armour::HEAVY_ATTACK`]). Armour doubles the poise capacity for a
 /// hit ([`PoiseRule::armored`]).
+// Asked once per landed hit: one out-of-line copy for every caller.
+#[inline(never)]
+#[cfg_attr(target_arch = "mips", optimize(size))]
 pub fn armoured(stats: &CombatStats, authored: Option<bool>, heavy_contact: bool) -> bool {
     match authored {
         Some(open) if stats.armour & combat_armour::AUTHORED_WINDOW != 0 => open,

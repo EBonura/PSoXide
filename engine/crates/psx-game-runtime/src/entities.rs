@@ -2025,6 +2025,9 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     /// rule ([`crate::combatant::armoured`]): the attack's authored `Armored`
     /// window on its clip clock ([`crate::fighter_action::ActionTiming`]),
     /// else a heavy attack while its contact is live (the Attack state).
+    // Asked once per landed hit: kept out of line and small.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     pub fn armoured(&self, records: &[LevelGameEntityRecord], index: usize) -> bool {
         let Some(record) = records.get(index) else {
             return false;
