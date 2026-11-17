@@ -695,6 +695,9 @@ pub struct GameEntities<
     /// Health, poise, energy and stance of each entity: the same
     /// [`Combatant`] the player holds.
     combatants: [Combatant; MAX_ENTITIES],
+    /// Each fighter's current action: its clip clock, lock and waiting
+    /// attack and dodge requests ([`crate::fighter_action`]).
+    actions: [crate::fighter_action::FighterAction; MAX_ENTITIES],
     projectile_threats: [Option<crate::projectiles::ProjectileThreat>; MAX_ENTITIES],
     exchanges: [crate::ranged_tactics::RangedExchange; MAX_ENTITIES],
     recoil: [[i16; 3]; MAX_ENTITIES],
@@ -930,6 +933,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         turn_ticks: [0; MAX_ENTITIES],
         turn_phase_ticks: [0; MAX_ENTITIES],
         combatants: [Combatant::EMPTY; MAX_ENTITIES],
+        actions: [crate::fighter_action::FighterAction::IDLE; MAX_ENTITIES],
         projectile_threats: [None; MAX_ENTITIES],
         exchanges: [crate::ranged_tactics::RangedExchange::EMPTY; MAX_ENTITIES],
         recoil: [[0; 3]; MAX_ENTITIES],
@@ -972,12 +976,14 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         let actor = (
             self.motors[Self::ACTOR_SLOT],
             self.combatants[Self::ACTOR_SLOT],
+            self.actions[Self::ACTOR_SLOT],
         );
         *self = Self::EMPTY;
         let count = records.len().min(MAX_ENTITIES);
         if count <= Self::ACTOR_SLOT {
             self.motors[Self::ACTOR_SLOT] = actor.0;
             self.combatants[Self::ACTOR_SLOT] = actor.1;
+            self.actions[Self::ACTOR_SLOT] = actor.2;
         }
         self.count = count as u16;
         self.overflow = (records.len() - count).min(u16::MAX as usize) as u16;
@@ -1390,6 +1396,16 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     #[inline(always)]
     pub fn actor_mut(&mut self) -> &mut Combatant {
         &mut self.combatants[Self::ACTOR_SLOT]
+    }
+
+    /// The actor's current action ([`crate::fighter_action::FighterAction`]).
+    pub fn actor_action(&self) -> &crate::fighter_action::FighterAction {
+        &self.actions[Self::ACTOR_SLOT]
+    }
+
+    /// Mutable [`Self::actor_action`].
+    pub fn actor_action_mut(&mut self) -> &mut crate::fighter_action::FighterAction {
+        &mut self.actions[Self::ACTOR_SLOT]
     }
 
     /// The body of entity `index`: the motor the player's character drives

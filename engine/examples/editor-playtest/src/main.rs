@@ -287,14 +287,6 @@ struct Playtest {
     /// Current animation state. Source of truth for which clip
     /// `draw_player` plays each frame.
     anim_state: PlayerAnim,
-    /// Tick the current animation started at -- used to phase
-    /// the loop relative to clip switches so transitions don't
-    /// pop into the middle of the new clip.
-    anim_start_tick: SimTick,
-    /// Non-looping gameplay animation lock. While active,
-    /// locomotion input is ignored and the current action clip
-    /// plays from start to finish.
-    anim_lock_until_tick: SimTick,
     /// Active clip-transition crossfade: outgoing state, its frozen
     /// clip-local tick, and the switch tick the blend ramps from.
     /// Cleared on init/respawn; expires by elapsed ticks at render.
@@ -343,9 +335,6 @@ struct Playtest {
     aim_control: aim_control::AimControl,
     /// Fixed-capacity visual aftermath for stopped combat projectiles.
     combat_projectile_impacts: RuntimeProjectileImpactEffects,
-    attack_buffer: combat_input::AttackBuffer,
-    authored_attack: psx_game_runtime::combat_timing::Request,
-    authored_dodge: psx_game_runtime::combat_timing::Request,
     /// Floating damage numbers for hits dealt and taken. Purely
     /// presentational: spawned from the damage sites, expired by their
     /// own clock, and read only by the overlay pass. All-zero is a
@@ -445,10 +434,6 @@ struct Playtest {
     /// the direction the player expressed at the press is what the dodge
     /// takes.
     evade_latched_move: (Q12, Q12),
-    /// Vblanks left on a buffered evade: a Circle tap that lands during an
-    /// attack, a hit reaction, or the previous dodge waits here and fires
-    /// on the first tick the actor is free again instead of being dropped.
-    evade_buffer_vblanks: u8,
     orbit_yaw: Angle,
     orbit_radius: i32,
     /// Runtime third-person camera rig. Updated at simulation cadence

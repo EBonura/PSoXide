@@ -917,7 +917,7 @@ impl Playtest {
                     self.game_entities.actor_motor().yaw(),
                     self.anim_state.action(),
                     clip_local,
-                    self.anim_start_tick,
+                    self.game_entities.actor_action().start,
                     blend,
                     speeds,
                     cached_clip_first_root_xz,

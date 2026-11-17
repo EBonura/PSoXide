@@ -69,6 +69,13 @@ pub struct Request {
     tag: u8,
 }
 impl Request {
+    /// Nothing requested.
+    pub const EMPTY: Self = Self {
+        source_start: 0,
+        phase: 0,
+        action: 0,
+        tag: 0,
+    };
     /// Discard queued intent on hit, death, stance change, or an accepted action.
     pub fn clear(&mut self) {
         self.tag = 0;

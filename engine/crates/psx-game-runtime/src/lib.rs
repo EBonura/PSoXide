@@ -39,6 +39,7 @@ pub mod cylinder_props;
 pub mod destructibles;
 pub mod dormant;
 pub mod entities;
+pub mod fighter_action;
 pub mod grid_stream;
 pub mod image_props;
 pub mod logic;

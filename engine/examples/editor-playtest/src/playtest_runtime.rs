@@ -1033,7 +1033,8 @@ impl Playtest {
         self.hazard_death_ticks_remaining = delay_ticks.max(1);
         self.death_by_combat = by_combat;
         self.switch_player_anim(PlayerAnim::Death, now, video_hz);
-        self.anim_lock_until_tick = now.saturating_add(u32::from(delay_ticks));
+        self.game_entities.actor_action_mut().lock_until =
+            now.saturating_add(u32::from(delay_ticks));
         self.lock_target = None;
         self.camera_recenter_requested = false;
         self.soft_lock_target = None;
@@ -1080,11 +1081,11 @@ impl Playtest {
         self.evade_run_hold_ticks = 0;
         self.evade_run_hold_consumed = false;
         self.evade_latched_move = (Q12::ZERO, Q12::ZERO);
-        self.evade_buffer_vblanks = 0;
+        self.game_entities.actor_action_mut().evade_buffer = 0;
         self.anim_state = PlayerAnim::Idle;
-        self.anim_start_tick = SimTick::ZERO;
+        self.game_entities.actor_action_mut().start = SimTick::ZERO;
         self.anim_blend_from = None;
-        self.anim_lock_until_tick = SimTick::ZERO;
+        self.game_entities.actor_action_mut().lock_until = SimTick::ZERO;
         self.loco = LocoPhase::Idle;
         self.active_interactable = None;
         self.checkpoint = None;
@@ -1102,9 +1103,12 @@ impl Playtest {
         self.deferred_enemy_attacks.clear();
         self.combat_projectiles.clear();
         self.combat_projectile_impacts.clear();
-        self.attack_buffer.clear();
-        self.authored_attack.clear();
-        self.authored_dodge.clear();
+        self.game_entities.actor_action_mut().buffer.clear();
+        self.game_entities
+            .actor_action_mut()
+            .authored_attack
+            .clear();
+        self.game_entities.actor_action_mut().authored_dodge.clear();
         self.logic.init_from_records(LOGIC.as_slice());
         self.logic_fired_reported = 0;
         // Playtest lives in a zeroed MaybeUninit, so the combatant is set
@@ -1140,10 +1144,7 @@ impl Playtest {
         self.combat_projectiles.clear();
         self.combat_projectile_impacts.clear();
         self.deferred_enemy_attacks.clear();
-        self.attack_buffer.clear();
-        self.authored_attack.clear();
-        self.authored_dodge.clear();
-        self.evade_buffer_vblanks = 0;
+        self.game_entities.actor_action_mut().clear_requests();
         self.swing_hit_mask = 0;
         self.camera_recenter_requested = false;
         self.player_actor_pose = None;
@@ -1232,7 +1233,7 @@ impl Playtest {
         self.hazard_death_ticks_remaining = 0;
         self.anim_state = PlayerAnim::Idle;
         self.anim_blend_from = None;
-        self.anim_lock_until_tick = SimTick::ZERO;
+        self.game_entities.actor_action_mut().lock_until = SimTick::ZERO;
         self.lock_target = None;
         self.soft_lock_target = None;
         self.active_interactable = None;
@@ -1273,10 +1274,17 @@ impl Playtest {
     /// Switch the player animation state, recording the outgoing
     /// pose so the renderer can crossfade instead of hard-cutting.
     pub(super) fn switch_player_anim(&mut self, anim: PlayerAnim, now: SimTick, video_hz: VideoHz) {
-        self.authored_attack.clear();
-        self.authored_dodge.clear();
+        self.game_entities
+            .actor_action_mut()
+            .authored_attack
+            .clear();
+        self.game_entities.actor_action_mut().authored_dodge.clear();
         let old = self.anim_state;
-        self.anim_blend_from = Some((old, now.saturating_sub(self.anim_start_tick), now));
+        self.anim_blend_from = Some((
+            old,
+            now.saturating_sub(self.game_entities.actor_action().start),
+            now,
+        ));
         // Gait to gait, enter the incoming cycle at the phase the outgoing one
         // had reached. Cook-time alignment puts foot-down at frame 0 of every
         // gait clip, so equal phase is the same point in the stride and the
@@ -1284,7 +1292,8 @@ impl Playtest {
         // how the phase is expressed: the clip reads as having begun earlier.
         let carried = self.gait_phase_carry(old, anim, now, video_hz);
         self.anim_state = anim;
-        self.anim_start_tick = SimTick::from_u32(now.as_u32().saturating_sub(carried));
+        self.game_entities.actor_action_mut().start =
+            SimTick::from_u32(now.as_u32().saturating_sub(carried));
     }
 
     /// Ticks to backdate the incoming gait clip by so it starts in phase with
@@ -1316,7 +1325,7 @@ impl Playtest {
         let (Some(out_cycle), Some(in_cycle)) = (cycle(from), cycle(to)) else {
             return 0;
         };
-        let local = now.saturating_sub(self.anim_start_tick) % out_cycle;
+        let local = now.saturating_sub(self.game_entities.actor_action().start) % out_cycle;
         // local < out_cycle guarantees the exact quotient is < in_cycle,
         // even when the intermediate product needs both MULTU result words.
         psx_math::int32::mul_div_u32(local, in_cycle, out_cycle)
@@ -1604,7 +1613,7 @@ impl Playtest {
             poise_broken,
             armored,
             self.anim_state,
-            self.anim_lock_until_tick > now,
+            self.game_entities.actor_action().lock_until > now,
         ) else {
             return poise_broken;
         };
@@ -1628,7 +1637,11 @@ impl Playtest {
         let has_reaction = self.start_player_anim_action(reaction, now, ctx.video_hz);
         let recovery = if has_reaction {
             // Follow authored speed and range through the final recovery pose.
-            self.anim_lock_until_tick.saturating_sub(now).max(1)
+            self.game_entities
+                .actor_action()
+                .lock_until
+                .saturating_sub(now)
+                .max(1)
         } else {
             18
         };
@@ -1636,7 +1649,7 @@ impl Playtest {
         if !has_reaction {
             self.switch_player_anim(reaction, now, ctx.video_hz);
         }
-        self.anim_lock_until_tick = now.saturating_add(recovery);
+        self.game_entities.actor_action_mut().lock_until = now.saturating_add(recovery);
         // Same lock, same rules: only the clip differs. Unbound, Parried's
         // chain (Stun, then HitReact) is exactly the reaction already playing,
         // at its own authored speed and range.
@@ -1663,10 +1676,7 @@ impl Playtest {
         self.game_entities.actor_motor_mut().interrupt_action();
         self.ranged_ready = combat_input::RangedReady::EMPTY;
         self.aim_control = aim_control::AimControl::EMPTY;
-        self.attack_buffer.clear();
-        self.authored_attack.clear();
-        self.authored_dodge.clear();
-        self.evade_buffer_vblanks = 0;
+        self.game_entities.actor_action_mut().clear_requests();
         self.loco = LocoPhase::Idle;
     }
 
@@ -1680,7 +1690,7 @@ impl Playtest {
         let now = ctx.sim_tick;
         self.interrupt_player_for_reaction();
         self.switch_player_anim(PlayerAnim::Knockdown, now, ctx.video_hz);
-        self.anim_lock_until_tick =
+        self.game_entities.actor_action_mut().lock_until =
             now.saturating_add(u32::from(self.player_stats.knockdown_ticks.max(1)));
         self.anim_blend_from = None;
         telemetry::debug_log("player poise:knockdown");
@@ -1810,7 +1820,7 @@ impl Playtest {
             )
             .unwrap_or(24)
             .max(1);
-        self.anim_lock_until_tick = now.saturating_add(duration);
+        self.game_entities.actor_action_mut().hold(now, duration);
         true
     }
 
@@ -1841,7 +1851,8 @@ impl Playtest {
         };
         let phase = psx_game_runtime::model_rendering::animation_phase_at_tick_q12(
             clip,
-            ctx.sim_tick.saturating_sub(self.anim_start_tick),
+            ctx.sim_tick
+                .saturating_sub(self.game_entities.actor_action().start),
             ctx.video_hz,
             false,
             self.player_action_speed_q8(character, self.anim_state),
@@ -3186,7 +3197,11 @@ mod life_reset_tests {
             scene.evade_run_intent(false, false, true, 1)
         };
         assert!(!tap(&mut scene).evade, "locked: the tap does nothing");
-        assert_eq!(scene.evade_buffer_vblanks, 0, "and nothing is buffered");
+        assert_eq!(
+            scene.game_entities.actor_action().evade_buffer,
+            0,
+            "and nothing is buffered"
+        );
         // Sprint alone does not unlock the dash.
         scene.poi_save.grant_abilities(ability::SPRINT);
         assert!(!tap(&mut scene).evade);
@@ -3461,8 +3476,12 @@ mod life_reset_tests {
         scene.souls.award(200, 100);
         scene.lock_target = Some(1);
         scene.soft_lock_target = Some(1);
-        scene.attack_buffer.request(1, 100);
-        scene.evade_buffer_vblanks = 8;
+        scene
+            .game_entities
+            .actor_action_mut()
+            .buffer
+            .request(1, 100);
+        scene.game_entities.actor_action_mut().evade_buffer = 8;
         scene.gameplay_epoch_set = true;
         scene.hazard_death_ticks_remaining = 10;
         scene.checkpoint = Some(RuntimeCheckpoint {
@@ -3508,8 +3527,11 @@ mod life_reset_tests {
         assert!(!scene.poi_closing);
         assert_eq!(scene.souls.total(), 0);
         assert!(scene.lock_target.is_none() && scene.soft_lock_target.is_none());
-        assert_eq!(scene.attack_buffer.take(101), None);
-        assert_eq!(scene.evade_buffer_vblanks, 0);
+        assert_eq!(
+            scene.game_entities.actor_action_mut().buffer.take(101),
+            None
+        );
+        assert_eq!(scene.game_entities.actor_action().evade_buffer, 0);
         assert!(!scene.gameplay_epoch_set);
         assert_eq!(scene.hazard_death_ticks_remaining, 0);
         assert_eq!(scene.game_entities.actor().health(), PLAYER_MAX_HEALTH);
@@ -3569,8 +3591,12 @@ mod life_reset_tests {
         let config = scene.player_stance_config;
         assert!(scene.game_entities.actor_mut().stance.request_swap(&config));
         scene.game_entities.actor_mut().health.apply_damage(150);
-        scene.attack_buffer.request(1, 100);
-        scene.evade_buffer_vblanks = 8;
+        scene
+            .game_entities
+            .actor_action_mut()
+            .buffer
+            .request(1, 100);
+        scene.game_entities.actor_action_mut().evade_buffer = 8;
         scene.swing_hit_mask = 3;
         scene.camera_recenter_requested = true;
         scene
@@ -3594,8 +3620,11 @@ mod life_reset_tests {
         scene.souls.award(50, 100);
         scene.reset_life_combat();
         assert_eq!(scene.combat_projectiles.len(), 0);
-        assert_eq!(scene.attack_buffer.take(101), None);
-        assert_eq!(scene.evade_buffer_vblanks, 0);
+        assert_eq!(
+            scene.game_entities.actor_action_mut().buffer.take(101),
+            None
+        );
+        assert_eq!(scene.game_entities.actor_action().evade_buffer, 0);
         assert_eq!(scene.swing_hit_mask, 0);
         assert!(!scene.camera_recenter_requested);
         assert_eq!(

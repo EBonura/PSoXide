@@ -1744,7 +1744,7 @@ impl Playtest {
                 .copied()
                 .flatten()
                 .and_then(|model| model.clip(&self.clips, character.clip_for(self.anim_state))),
-            local_tick: now.saturating_sub(self.anim_start_tick),
+            local_tick: now.saturating_sub(self.game_entities.actor_action().start),
             looping: character.action_loops(action),
             speed_q8: crate::playtest_runtime::live_action_speed_q8(
                 self.vitality_modifiers(),
@@ -1940,7 +1940,7 @@ impl Playtest {
         let now = ctx.sim_tick;
         if self.anim_state == PlayerAnim::RangedAttack
             || !player_anim_is_attack(self.anim_state)
-            || self.anim_lock_until_tick <= now
+            || self.game_entities.actor_action().lock_until <= now
         {
             return;
         }

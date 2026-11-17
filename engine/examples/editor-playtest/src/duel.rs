@@ -135,7 +135,7 @@ impl Playtest {
             self.respawn_after_death();
             self.gameplay_epoch = ctx.sim_tick;
             self.gameplay_epoch_set = true;
-            self.anim_start_tick = ctx.sim_tick;
+            self.game_entities.actor_action_mut().start = ctx.sim_tick;
             self.game_entities.seed_training_actor(
                 GAME_ENTITIES.as_slice(),
                 target,
@@ -275,7 +275,7 @@ impl Playtest {
             self.duel.sprint = false;
             self.duel.intent = 0;
             let free = self.game_entities.actor_motor().action().is_idle()
-                && self.anim_lock_until_tick <= ctx.sim_tick
+                && self.game_entities.actor_action().lock_until <= ctx.sim_tick
                 && !self
                     .game_entities
                     .actor()
@@ -300,7 +300,7 @@ impl Playtest {
             .filter(|_| {
                 visible
                     && self.game_entities.actor_motor().action().is_idle()
-                    && self.anim_lock_until_tick <= ctx.sim_tick
+                    && self.game_entities.actor_action().lock_until <= ctx.sim_tick
             });
             let swapping = crit.is_none()
                 && visible
@@ -556,7 +556,7 @@ impl Playtest {
         );
         let before = (before != u16::MAX).then_some(before);
         let free = self.game_entities.actor_motor().action().is_idle()
-            && self.anim_lock_until_tick <= ctx.sim_tick
+            && self.game_entities.actor_action().lock_until <= ctx.sim_tick
             && !self
                 .game_entities
                 .actor()
@@ -907,7 +907,7 @@ impl Playtest {
             self.duel.reason as u32,
             self.game_entities.actor_motor().stamina_q12() as u32,
             self.game_entities.tactical_snapshot(i).generation as u32,
-            self.anim_start_tick.as_u32(),
+            self.game_entities.actor_action().start.as_u32(),
             self.game_entities.tactical_snapshot(i).goal as u32,
             self.game_entities.tactical_snapshot(i).stance_reason as u32,
             self.game_entities.attack_kind(i) as u32,

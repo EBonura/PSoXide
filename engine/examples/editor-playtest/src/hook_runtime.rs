@@ -269,7 +269,7 @@ impl Playtest {
         self.player_dash_assembly.cancel();
         self.hook_burst_started = false;
         self.hook_camera_pitch = self.camera.pitch_q12();
-        self.attack_buffer.clear();
+        self.game_entities.actor_action_mut().buffer.clear();
         self.ranged_ready = combat_input::RangedReady::EMPTY;
         self.lock_target = None;
         self.soft_lock_target = None;
@@ -278,12 +278,12 @@ impl Playtest {
         self.hook_visible = 0;
         self.anim_blend_from = Some((
             self.anim_state,
-            now.saturating_sub(self.anim_start_tick),
+            now.saturating_sub(self.game_entities.actor_action().start),
             now,
         ));
         self.anim_state = PlayerAnim::HookLaunch;
-        self.anim_start_tick = now;
-        self.anim_lock_until_tick = now;
+        self.game_entities.actor_action_mut().start = now;
+        self.game_entities.actor_action_mut().lock_until = now;
         self.game_entities.actor_motor_mut().interrupt_action();
         if let Some(yaw) = psx_engine::yaw_to_point(
             self.game_entities.actor_motor_mut().position(),
@@ -327,13 +327,13 @@ impl Playtest {
                 .is_some()
         }) {
             self.anim_state = PlayerAnim::Fall;
-            self.anim_start_tick =
+            self.game_entities.actor_action_mut().start =
                 SimTick::from_u32(now.as_u32().saturating_sub(if self.fall_from_arch {
                     0
                 } else {
                     14
                 }));
-            self.anim_lock_until_tick = now;
+            self.game_entities.actor_action_mut().lock_until = now;
             self.anim_blend_from = None;
         }
         self.hook_attached = None;
@@ -343,7 +343,7 @@ impl Playtest {
         self.player_dash_assembly.cancel();
         self.evade_run_hold_consumed = true;
         self.evade_run_hold_ticks = 0;
-        self.evade_buffer_vblanks = 0;
+        self.game_entities.actor_action_mut().evade_buffer = 0;
         // Preserve an active hit/stun lock when enemy damage breaks the tether.
         telemetry::debug_log("arch:drop");
     }

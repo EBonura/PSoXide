@@ -221,7 +221,7 @@ fn a_parried_attacker_plays_parried_on_both_sides() {
     assert!(scene.riposte_player(CombatantId::entity(0), &ctx(100)));
     assert_eq!(scene.anim_state, PlayerAnim::Parried);
     assert_eq!(aletha.clip_for(PlayerAnim::Parried).to_usize(), 7);
-    assert!(scene.anim_lock_until_tick > ctx(100).sim_tick);
+    assert!(scene.game_entities.actor_action().lock_until > ctx(100).sim_tick);
     let mut scene = duel();
     assert!(scene.riposte_player(CombatantId::entity(0), &ctx(100)));
     assert_ne!(scene.anim_state, PlayerAnim::Parried);
@@ -455,7 +455,7 @@ fn a_poise_break_knocks_the_player_down_and_she_gets_up() {
     assert!(scene.game_entities.actor().knocked_down());
     assert_eq!(scene.anim_state, PlayerAnim::Knockdown);
     assert_eq!(
-        scene.anim_lock_until_tick,
+        scene.game_entities.actor_action().lock_until,
         SimTick::from_u32(100 + u32::from(down)),
         "locked out of every action and all movement while down"
     );

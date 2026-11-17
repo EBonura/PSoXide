@@ -415,7 +415,10 @@ fn a_break_without_a_stun_clip_falls_back_to_hit_react_with_an_eighteen_tick_loc
     scene.player_stats.knockdown_ticks = 0;
     assert!(scene.react_player_to_hit(CombatantId::WORLD, 60, false, false, false, &ctx(100)));
     assert_eq!(scene.anim_state, PlayerAnim::HitReact);
-    assert_eq!(scene.anim_lock_until_tick, SimTick::from_u32(118));
+    assert_eq!(
+        scene.game_entities.actor_action().lock_until,
+        SimTick::from_u32(118)
+    );
 }
 
 #[test]
@@ -457,7 +460,7 @@ fn an_ordinary_hit_without_a_reaction_clip_does_not_interrupt_the_player() {
     scene.anim_state = PlayerAnim::Run;
     assert!(!scene.react_player_to_hit(CombatantId::WORLD, 10, false, false, false, &ctx(100)));
     assert_eq!(scene.anim_state, PlayerAnim::Run);
-    assert_eq!(scene.anim_lock_until_tick, SimTick::ZERO);
+    assert_eq!(scene.game_entities.actor_action().lock_until, SimTick::ZERO);
     assert_ne!(
         scene.game_entities.actor().poise,
         psx_game_runtime::poise::Poise::EMPTY,
@@ -505,12 +508,19 @@ fn a_dying_player_ignores_further_hits() {
 #[test]
 fn a_break_discards_queued_attack_and_dodge_input() {
     let mut scene = scene();
-    scene.attack_buffer.request(1, 100);
-    scene.evade_buffer_vblanks = 8;
+    scene
+        .game_entities
+        .actor_action_mut()
+        .buffer
+        .request(1, 100);
+    scene.game_entities.actor_action_mut().evade_buffer = 8;
     scene.loco = LocoPhase::Cruise;
     assert!(scene.react_player_to_hit(CombatantId::WORLD, 60, false, false, false, &ctx(101)));
-    assert_eq!(scene.attack_buffer.take(102), None);
-    assert_eq!(scene.evade_buffer_vblanks, 0);
+    assert_eq!(
+        scene.game_entities.actor_action_mut().buffer.take(102),
+        None
+    );
+    assert_eq!(scene.game_entities.actor_action().evade_buffer, 0);
     assert_eq!(scene.loco, LocoPhase::Idle);
 }
 
@@ -1028,7 +1038,10 @@ fn arming_death_locks_the_death_clip_and_drops_targeting() {
     assert_eq!(scene.hazard_death_ticks_remaining, HAZARD_DEATH_TICKS);
     assert!(scene.death_by_combat);
     assert_eq!(scene.anim_state, PlayerAnim::Death);
-    assert_eq!(scene.anim_lock_until_tick, SimTick::from_u32(130));
+    assert_eq!(
+        scene.game_entities.actor_action().lock_until,
+        SimTick::from_u32(130)
+    );
     assert!(scene.lock_target.is_none() && scene.soft_lock_target.is_none());
     assert!(!scene.camera_recenter_requested);
 }
@@ -1061,8 +1074,12 @@ fn a_new_combat_life_restores_every_player_combat_resource() {
     scene.game_entities.actor_mut().flow.energy = 0;
     scene.game_entities.actor_mut().flow.broke();
     scene.game_entities.actor_mut().poise.hit(30, 60, false);
-    scene.attack_buffer.request(1, 100);
-    scene.evade_buffer_vblanks = 8;
+    scene
+        .game_entities
+        .actor_action_mut()
+        .buffer
+        .request(1, 100);
+    scene.game_entities.actor_action_mut().evade_buffer = 8;
     scene.swing_hit_mask = 5;
     scene
         .combat_projectiles
@@ -1083,8 +1100,11 @@ fn a_new_combat_life_restores_every_player_combat_resource() {
         scene.game_entities.actor().poise,
         psx_game_runtime::poise::Poise::EMPTY
     );
-    assert_eq!(scene.attack_buffer.take(101), None);
-    assert_eq!(scene.evade_buffer_vblanks, 0);
+    assert_eq!(
+        scene.game_entities.actor_action_mut().buffer.take(101),
+        None
+    );
+    assert_eq!(scene.game_entities.actor_action().evade_buffer, 0);
     assert_eq!(scene.swing_hit_mask, 0);
     assert_eq!(scene.combat_projectiles.len(), 0);
 }
@@ -1104,7 +1124,7 @@ fn respawn_after_a_combat_death_restores_the_life_and_clears_the_countdown() {
     assert_eq!(scene.hazard_death_ticks_remaining, 0);
     assert!(!scene.death_by_combat);
     assert_eq!(scene.anim_state, PlayerAnim::Idle);
-    assert_eq!(scene.anim_lock_until_tick, SimTick::ZERO);
+    assert_eq!(scene.game_entities.actor_action().lock_until, SimTick::ZERO);
     assert_eq!(health(&scene), PLAYER_MAX_HEALTH);
     assert_eq!(scene.game_entities.actor().flow.energy, ENERGY_MAX);
 }
