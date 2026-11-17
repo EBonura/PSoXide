@@ -476,7 +476,7 @@ fn spacing_speed_slows_only_directional_movement_at_both_tick_rates() {
                         // The planned pace: the walk, at the spacing share
                         // and the locked-on strafe or backward pace.
                         let expected =
-                            (e.tactical_walk_speed_q8(&records[0], goal) * i32::from(delta) >> 8)
+                            ((e.tactical_walk_speed_q8(&records[0], goal) * i32::from(delta)) >> 8)
                                 .max(1);
                         assert_eq!(i32::from(e.tactics[0].requested), expected);
                     }

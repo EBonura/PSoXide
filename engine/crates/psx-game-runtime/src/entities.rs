@@ -2893,6 +2893,13 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         self.driven = true;
         let input = core::mem::replace(&mut self.motion, NO_MOTION);
         let config = self.motor_config(record);
+        // Nothing asked of a body at rest: the update would change nothing,
+        // so skip its collision work (most thinking enemies, most ticks).
+        if input == NO_MOTION {
+            if let Some(frame) = self.motors[index].rest(&config) {
+                return frame;
+            }
+        }
         let frame = mover.move_body(
             index,
             record.room,

@@ -1012,6 +1012,35 @@ impl CharacterMotorState {
         self.action
     }
 
+    /// The frame an update with no input would return when it would change
+    /// nothing: the body stands on its cached floor with no action, no
+    /// fall, no sprint latch and full stamina. None otherwise. A caller with
+    /// nothing to ask of a body at rest can skip the collision work of an
+    /// update and take this frame instead; the state is the same either way.
+    pub fn rest(&self, config: &CharacterMotorConfig) -> Option<CharacterMotorFrame> {
+        let at_rest = self.grounded
+            && self.action.is_idle()
+            && self.position.x == self.ground_anchor_x
+            && self.position.z == self.ground_anchor_z
+            && self.position.y == self.ground_floor
+            && self.velocity_y_q8 == 0
+            && self.remainder_y_q8 == 0
+            && !self.sprint_latched
+            && !self.sprint_exhausted
+            && self.stamina_q12 == config.stamina_max_q12.max(1);
+        at_rest.then(|| {
+            self.frame(
+                CharacterMotorAnim::Idle,
+                CharacterMotorAction::Idle,
+                false,
+                false,
+                false,
+                false,
+                false,
+            )
+        })
+    }
+
     /// Display frames since the current fixed action started (0 when idle).
     pub const fn action_frame(&self) -> u8 {
         self.action_frame
@@ -4288,6 +4317,38 @@ mod tests {
                 cfg,
             );
             assert_eq!(f.position.y, 0, "feet stay on the flat floor while walking");
+        }
+    }
+
+    #[test]
+    fn a_body_at_rest_reports_the_frame_an_idle_update_returns() {
+        let mut motor = CharacterMotorState::new(RoomPoint::new(128, 0, 128), Angle::ZERO);
+        let cfg = config();
+        // Not yet grounded: no shortcut.
+        assert_eq!(motor.rest(&cfg), None);
+        let first = motor.update(None, CharacterMotorInput::default(), cfg);
+        assert_eq!(first.position.y, 0);
+        let rest = motor.rest(&cfg).expect("standing on its floor");
+        let before = motor;
+        let idle = motor.update(None, CharacterMotorInput::default(), cfg);
+        assert_eq!(rest, idle, "the same frame");
+        assert_eq!(before, motor, "and an idle update changed nothing");
+        // Moving, it is no longer at rest until it stands again.
+        let mut walking = cfg;
+        walking.walk_speed = 4 << 8;
+        motor.update(
+            None,
+            CharacterMotorInput {
+                walk: 1,
+                ..CharacterMotorInput::default()
+            },
+            walking,
+        );
+        let moved = motor;
+        if moved.rest(&cfg).is_some() {
+            let before = motor;
+            motor.update(None, CharacterMotorInput::default(), cfg);
+            assert_eq!(before, motor);
         }
     }
 
