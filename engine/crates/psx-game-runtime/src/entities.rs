@@ -700,7 +700,7 @@ pub struct GameEntities<
     actions: [crate::fighter_action::FighterAction; MAX_ENTITIES],
     /// The tactical controller's follow-up for the actor slot, kept until its
     /// next think (when the actor's own rules have run what it decided).
-    actor_plan: Option<(tactics::Then, [i32; 3])>,
+    actor_plan: Option<(tactics::Then, [i32; 3], Option<u8>)>,
     /// What held the actor at its latest think: 0 free, 1 an action, 2 an
     /// attack ([`Self::actor_intent`]).
     actor_busy: u8,
@@ -3255,25 +3255,31 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             1
         };
         if let Some(heading) = self.probing.take() {
-            if frame.moved {
-                let yaw = u16::from(heading) * GAME_ENTITY_DIRECTION_STEP;
-                if self.move_yaw[index] == yaw && self.move_yaw_valid[index] > 1 {
-                    self.move_yaw_valid[index] -= 1;
-                } else {
-                    self.move_yaw[index] = yaw;
-                    self.move_yaw_valid[index] = Self::reaim_countdown(index);
-                }
-                self.move_tried[index] = 0;
-            } else {
-                // Blocked: the search goes on from here next tick.
-                self.move_tried[index] |= 1 << heading;
-                self.move_yaw_valid[index] = 0;
-                if self.move_tried[index] == u8::MAX {
-                    self.move_tried[index] = 0;
-                }
-            }
+            self.heading_feedback(index, heading, frame.moved);
         }
         frame
+    }
+
+    /// What the body's move along the compass `heading` it tried told the
+    /// heading search: keep it while it moves, try the next when blocked.
+    pub(super) fn heading_feedback(&mut self, index: usize, heading: u8, moved: bool) {
+        if moved {
+            let yaw = u16::from(heading) * GAME_ENTITY_DIRECTION_STEP;
+            if self.move_yaw[index] == yaw && self.move_yaw_valid[index] > 1 {
+                self.move_yaw_valid[index] -= 1;
+            } else {
+                self.move_yaw[index] = yaw;
+                self.move_yaw_valid[index] = Self::reaim_countdown(index);
+            }
+            self.move_tried[index] = 0;
+        } else {
+            // Blocked: the search goes on from here next tick.
+            self.move_tried[index] |= 1 << heading;
+            self.move_yaw_valid[index] = 0;
+            if self.move_tried[index] == u8::MAX {
+                self.move_tried[index] = 0;
+            }
+        }
     }
 
     /// Move at a yaw offset from the direction to the target, facing the

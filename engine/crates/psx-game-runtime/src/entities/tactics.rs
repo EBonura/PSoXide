@@ -194,7 +194,12 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         };
         let mut stats = GameEntityTickStats::default();
         self.attack_cooldown[i] = self.attack_cooldown[i].saturating_sub(delta);
-        if let Some((then, before)) = self.actor_plan.take() {
+        if let Some((then, before, heading)) = self.actor_plan.take() {
+            // Her own rules moved her body since: the heading search hears
+            // whether it moved, as an entity's does from its motor.
+            if let Some(heading) = heading {
+                self.heading_feedback(i, heading, Self::distance(before, self.position(i)) > 0);
+            }
             self.after_tactical_intent(persona, i, then, before, input, delta, &mut stats);
         }
         if busy != 0 {
@@ -211,8 +216,9 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         self.actor_busy = 0;
         self.state[i] = GameEntityState::Aggro as u8;
         self.state_ticks[i] = self.state_ticks[i].saturating_add(delta);
+        self.probing = None;
         let plan = self.decide_tactical(persona, i, input, mover, delta, &mut stats);
-        self.actor_plan = Some((plan.then, self.position(i)));
+        self.actor_plan = Some((plan.then, self.position(i), self.probing.take()));
         plan.intent
     }
 
