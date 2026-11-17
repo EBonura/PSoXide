@@ -775,6 +775,13 @@ impl CharacterMotorState {
         config: CharacterMotorConfig,
         delta_vblanks: u16,
     ) -> Result<CharacterMotorFrame, CollisionQueryError> {
+        // Nothing asked of a body at rest: the frame it would get, without
+        // the solve (most bodies, most ticks: the player standing included).
+        if self.asks_nothing(&input) {
+            if let Some(frame) = self.rest(&config) {
+                return Ok(frame);
+            }
+        }
         let saved = *self;
         let mut collision = TraceCharacterCollision { provider };
         match self.update_vblanks_with_backend(&mut collision, input, config, delta_vblanks) {
@@ -998,6 +1005,18 @@ impl CharacterMotorState {
     /// Current fixed action.
     pub const fn action(&self) -> CharacterMotorAction {
         self.action
+    }
+
+    /// Whether `input` asks nothing that changes a body at rest: no move, no
+    /// turn, no evade, and any facing it holds is the one it has. A held
+    /// sprint without a move changes nothing.
+    fn asks_nothing(&self, input: &CharacterMotorInput) -> bool {
+        input.move_x.raw() == 0
+            && input.move_z.raw() == 0
+            && input.turn == 0
+            && input.walk == 0
+            && !input.evade
+            && input.facing_yaw.is_none_or(|yaw| yaw == self.yaw)
     }
 
     /// The frame an update with no input would return when it would change
@@ -3130,6 +3149,34 @@ mod tests {
             assert!(motor.grounded());
             assert_eq!(motor.vertical_speed_q8(), 0);
         }
+    }
+
+    #[test]
+    fn a_body_at_rest_asked_nothing_skips_the_traces_and_changes_nothing() {
+        let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
+        let mut provider = FlatTraceProvider::new(None);
+        let idle = CharacterMotorInput::default();
+        motor
+            .update_vblanks_with_trace_provider(&mut provider, idle, config(), 1)
+            .expect("settle");
+        let settled = motor;
+        let calls = provider.calls;
+        // Holding the facing it has and a sprint without a move ask nothing.
+        for input in [
+            idle,
+            CharacterMotorInput {
+                facing_yaw: Some(motor.yaw()),
+                sprint: true,
+                ..idle
+            },
+        ] {
+            let frame = motor
+                .update_vblanks_with_trace_provider(&mut provider, input, config(), 1)
+                .expect("rest");
+            assert_eq!(Some(frame), settled.rest(&config()));
+            assert_eq!(motor, settled);
+        }
+        assert_eq!(provider.calls, calls, "no trace at rest");
     }
 
     #[test]
