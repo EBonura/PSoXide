@@ -157,6 +157,13 @@ impl Playtest {
                 visible: false,
                 ticks_to_hit: u16::MAX,
             };
+            // The bot plans its dodge with the player's own (as an enemy plans
+            // with its own): her roll, or a walk aside without the kit.
+            let evade = psx_game_runtime::ranged_tactics::EvadeMove::of(
+                &self.motor_config(),
+                self.player_kits().can_dodge(),
+            );
+            self.duel.exchange.set_evade(evade);
             // The third value is the sample format: 1 is one health value
             // per fighter (before it, two pools each and no third value).
             log_values("duel:start", &[seed, target as u32, 1]);
@@ -602,13 +609,6 @@ impl Playtest {
         let valid = self
             .collect_static_prop_aabb_blockers_checked_into(&mut blockers)
             .is_some();
-        // The bot plans its dodge with the player's own (as an enemy plans
-        // with its own): her roll, or a walk aside without the kit.
-        let evade = psx_game_runtime::ranged_tactics::EvadeMove::of(
-            &self.motor_config(),
-            self.player_kits().can_dodge(),
-        );
-        self.duel.exchange.set_evade(evade);
         let world_rt = &mut self.world_rt;
         let destructibles = &self.destructibles;
         let order = self.duel.exchange.decide(
