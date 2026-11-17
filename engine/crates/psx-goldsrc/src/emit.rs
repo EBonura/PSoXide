@@ -11,6 +11,8 @@ use psx_gpu::material::TexturedGouraudPacketMaterial;
 
 use crate::render;
 
+pub mod words;
+
 /// Back faces are culled (front faces wind with a negative screen cross product).
 pub const CULL: bool = true;
 /// Recursion depth after which a soft cell is emitted as a leaf without further LOD tests.
