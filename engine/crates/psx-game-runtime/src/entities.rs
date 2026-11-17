@@ -2824,19 +2824,22 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         }
         let mut x = dx;
         let mut z = dz;
+        let mut far = false;
         while x.unsigned_abs() >= 1 << 14 || z.unsigned_abs() >= 1 << 14 {
             x >>= 1;
             z >>= 1;
+            far = true;
         }
+        // Unscaled, `length` is the distance; scaled, the distance is beyond
+        // any pace.
         let length = psx_math::int32::isqrt_i32(x * x + z * z).max(1);
-        let distance =
-            psx_math::int32::isqrt_i32(dx.saturating_mul(dx).saturating_add(dz.saturating_mul(dz)));
+        let distance = length;
         let capacity = self
             .pace_q8(record, run)
             .saturating_mul(i32::from(delta.max(1)));
         // Under one pace the share is distance / capacity; both sides stay
         // small there, so the Q12 product cannot overflow.
-        let share = if distance.saturating_mul(256) >= capacity {
+        let share = if far || distance.saturating_mul(256) >= capacity {
             4096
         } else {
             (distance * 256 * 4096 / capacity).max(1)
@@ -3100,6 +3103,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     /// heading away from it last. A goal exactly on a heading leans toward
     /// the anchor, else to the entity's preferred turning side. The anchor's
     /// reverse is moved to the end whatever its rank.
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     fn ranked_headings(direction: [i32; 2], anchor: Option<u8>, index: usize) -> [u8; 8] {
         let yaw = atan2_q12(direction[0], direction[1]) & GAME_ENTITY_YAW_MASK;
         let nearest = (((yaw + 256) >> 9) & 7) as u8;
