@@ -26,7 +26,7 @@ from running off the bottom of the region, and an inlining change can grow a
 tree by hundreds of bytes without any source change. This walks the linked
 image's static call graph from every monomorphised entry,
 
-    <psx_rt::scratchpad::ScratchpadStack<START, END>>::stack_entry::<R, F>
+    <psx_rt::scratchpad::ScratchpadStack<START, END>>::stack_entry::<E>
 
 sums frame sizes (every `addiu sp,sp,-N`; a tail call counts as a call) down
 the deepest path, and fails when the total exceeds the region minus psx-rt's
@@ -462,11 +462,12 @@ fn roots(image: &GuardImage, pattern: Option<&Regex>, budget: Option<i64>) -> Ve
     found
 }
 
-/// psx-rt's switch: `jalr t9` with `move sp,a2` in its delay slot.
+/// psx-rt's switch: a `jalr` with `move sp,a2` in its delay slot (`jalr a1`
+/// today, `jalr t9` before the switch kept its record in a static).
 fn has_switch(listing: &Listing) -> bool {
-    listing.iter().any(|(a, e)| {
-        e.op == "jalr" && strip(&e.args) == "t9" && squeeze(listing.args(a + 4)) == "sp,a2"
-    })
+    listing
+        .iter()
+        .any(|(a, e)| e.op == "jalr" && squeeze(listing.args(a + 4)) == "sp,a2")
 }
 
 /// Print one line per entry to `out`; return the number of failures.

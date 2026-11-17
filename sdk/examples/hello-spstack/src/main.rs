@@ -3,9 +3,11 @@
 //!
 //! A deterministic, stack-heavy workload (three levels of calls, each holding
 //! an array in its frame, reading a table kept in the scratchpad below the
-//! stack) runs once on the RAM stack and once through
-//! `psx_rt::scratchpad::ScratchpadStack::run`, long enough that many VBlank
-//! IRQs land while `$sp` is in the scratchpad. The two results must match,
+//! stack) runs once on the RAM stack and three times on the scratchpad stack
+//! (`psx_rt::scratchpad::ScratchpadStack::run` with a closure kept in the
+//! caller's frame, `run` with a one-word closure carried in the context
+//! register, and `call` with a known entry), each long enough that many VBlank
+//! IRQs land while `$sp` is in the scratchpad. The results must match,
 //! the workload must have seen the IRQs from the scratchpad stack, the table
 //! and the caller's RAM frame must be intact, and a nested call must run in
 //! place. psx-rt's `scratchpad-stack-check` feature is on, so the region's
@@ -34,7 +36,7 @@ use psx_font::fonts::BASIC;
 use psx_font::FontAtlas;
 use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
 use psx_gpu::Gpu;
-use psx_rt::scratchpad::{self, assert_disjoint, Region, ScratchpadStack};
+use psx_rt::scratchpad::{self, assert_disjoint, Region, ScratchpadStack, StackEntry};
 use psx_rt::{interrupts, tty};
 use psx_vram::{Clut, TextureDepth, TexturePage};
 
@@ -129,6 +131,17 @@ fn workload(rounds: u32) -> Outcome {
         checksum,
         irqs: interrupts::vblank_count().wrapping_sub(start),
         on_scratchpad: [entered, scratchpad::is_on_scratchpad_stack()],
+    }
+}
+
+/// The workload as a known entry for `ScratchpadStack::call`: the context is
+/// the `Outcome` it writes.
+struct LeanWorkload;
+
+impl StackEntry for LeanWorkload {
+    unsafe extern "C" fn enter(context: *mut u8) {
+        // SAFETY: `main` passes a live `Outcome`.
+        unsafe { context.cast::<Outcome>().write(workload(black_box(ROUNDS))) };
     }
 }
 
@@ -312,6 +325,13 @@ fn main() {
         })
     };
     let spad_vblanks = interrupts::vblank_count().wrapping_sub(start);
+    // The lean form: a known entry and one context pointer.
+    let mut lean = ram;
+    unsafe { WorkStack::call::<LeanWorkload>((&raw mut lean).cast()) };
+    // A closure that returns nothing and captures one word travels in the
+    // context register.
+    let mut in_register = ram;
+    unsafe { WorkStack::run(|| in_register = workload(black_box(ROUNDS))) };
 
     let checks = [
         (ram.checksum == spad.checksum, "checksums differ"),
@@ -328,6 +348,14 @@ fn main() {
             "too few IRQs on the scratchpad stack",
         ),
         (nested == [true, true], "nested run did not run in place"),
+        (
+            lean.checksum == ram.checksum && lean.on_scratchpad == [true, true],
+            "call did not run the entry on the scratchpad",
+        ),
+        (
+            in_register.checksum == ram.checksum && in_register.on_scratchpad == [true, true],
+            "a one-word closure did not run on the scratchpad",
+        ),
         (!scratchpad::is_on_scratchpad_stack(), "$sp not restored"),
         (
             black_box(ram_frame) == [0xa5a5_1111, 0x2222, 0x3333, 0x4444],

@@ -342,13 +342,11 @@ fn switch_and_panic_handler_count_only_their_own_frames() {
         3,
         "__psx_rt_call_on_stack",
         &[
-            addiu("sp", "sp", -24),
-            or("s0", "sp", "zero"),
-            jalr("t9"),
+            jalr("a1"),
             or("sp", "a2", "zero"),
-            or("sp", "s0", "zero"),
+            or("sp", "t0", "zero"),
             jr("ra"),
-            addiu("sp", "sp", 24),
+            NOP,
         ],
     );
     let handler = fx.caller(4, "__rustc::rust_begin_unwind", 32, &[deep]);
@@ -883,7 +881,7 @@ fn without_a_map_only_the_switch_is_looked_for() {
         "{}",
         String::from_utf8_lossy(&out)
     );
-    let body = [vec![jalr("t9"), or("sp", "a2", "zero")], epilogue(0)].concat();
+    let body = [vec![jalr("a1"), or("sp", "a2", "zero")], epilogue(0)].concat();
     fx.function(3, "__psx_rt_call_on_stack", &body);
     let (exe, _) = fx.write();
     let mut out = Vec::new();
