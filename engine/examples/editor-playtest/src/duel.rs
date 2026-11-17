@@ -3,6 +3,7 @@
 //! own rules, the ones the pad drives.
 use super::*;
 use psx_game_runtime::combat_intent::{CombatAction, CombatActions};
+use psx_game_runtime::dormant::DormantStates;
 use psx_game_runtime::{entities::GameEntityState, projectiles::CombatTeam};
 
 // All-zero storage is inactive, matching Playtest's zeroed initialization.
@@ -57,6 +58,24 @@ impl Duel {
     }
 }
 
+/// The training entity a duel with the player takes on: the level's first,
+/// or with the right stick held down at the start, a later one. Fully down
+/// (248..=255) is the second, and each eight below that one further, down to
+/// 192 for the ninth. None when the level has no such entity.
+fn duel_opponent(right_y: u8) -> Option<usize> {
+    let skip = if right_y >= 0xc0 {
+        usize::from((0xff - right_y) / 8) + 1
+    } else {
+        0
+    };
+    GAME_ENTITIES
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.flags & psx_level::game_entity_flags::TRAINING != 0)
+        .nth(skip)
+        .map(|(index, _)| index)
+}
+
 pub(super) fn log_values(label: &str, values: &[u32]) {
     #[cfg(target_arch = "mips")]
     {
@@ -86,10 +105,8 @@ impl Playtest {
                 self.duel.active = false;
                 return;
             }
-            let Some(target) = GAME_ENTITIES
-                .iter()
-                .position(|r| r.flags & psx_level::game_entity_flags::TRAINING != 0)
-            else {
+            let Some(target) = duel_opponent(ctx.pad.sticks.right_y) else {
+                log_values("duel:unavailable", &[3]);
                 return;
             };
             // A duel must exercise ranged combat on both characters.
@@ -147,6 +164,18 @@ impl Playtest {
             if ctx.pad.sticks.right_y == 0 {
                 self.duel_start_rivals(target, seed);
             } else {
+                // A duel is one fight: the level's other training entities
+                // leave it (dead and nameless, as a room leaving the active
+                // set leaves them; New Game spawns them again), so a second
+                // training enemy on the way cannot join in.
+                // Nothing is remembered of them: they are alive when they leave.
+                let mut forgotten = DormantStates::<0>::EMPTY;
+                for (index, record) in GAME_ENTITIES.iter().enumerate() {
+                    if index != target && record.flags & psx_level::game_entity_flags::TRAINING != 0
+                    {
+                        self.game_entities.release_slot(index, &mut forgotten);
+                    }
+                }
                 // Both fighters start engaged, as the rivals duel's do: each
                 // notices the other, reaction pause included.
                 self.game_entities
