@@ -80,6 +80,7 @@ pub mod irq {
 
     /// The interrupt flag write that acknowledges `bits`: any nonzero `bits`
     /// clears the whole response code ([`ACK_RESPONSE`]); `0` clears nothing.
+    #[must_use]
     pub const fn acknowledge_value(bits: u8) -> u8 {
         if bits == 0 {
             0
