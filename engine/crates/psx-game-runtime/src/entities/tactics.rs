@@ -151,14 +151,15 @@ impl TacticalState {
 impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
     /// Hand the actor slot to the tactical controller for a fight against
     /// slot `rival`, deciding by `persona` (spacing, reach, reaction, kits):
-    /// it engages at once, as an entity that has already noticed its rival.
+    /// it engages at once, with the reaction pause of an entity that notices.
     /// The actor's own rules run what it decides ([`Self::actor_intent`]).
     pub fn engage_actor(&mut self, persona: &LevelGameEntityRecord, rival: usize, seed: u32) {
         let i = Self::ACTOR_SLOT;
         self.tactics[i] = TacticalState::EMPTY;
         self.tactics[i].seed = seed;
         self.state[i] = GameEntityState::Aggro as u8;
-        self.state_ticks[i] = u16::from(persona.reaction_ticks);
+        // Engaged with her reaction pause ahead, as an entity that notices.
+        self.state_ticks[i] = 0;
         self.attack_cooldown[i] = 0;
         self.exchanges[i] = crate::ranged_tactics::RangedExchange::EMPTY;
         self.rivals[i] = rival.min(usize::from(NO_RIVAL)) as u8;
@@ -193,6 +194,9 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
             target: self.rival_target(&records[rival], rival, &fighter),
         };
         let mut stats = GameEntityTickStats::default();
+        // Her controller's clocks run as every entity's do: without them her
+        // ranged exchange never left cover, so she never shot.
+        self.advance_controller_clocks(i, delta);
         self.attack_cooldown[i] = self.attack_cooldown[i].saturating_sub(delta);
         if let Some((then, before, heading)) = self.actor_plan.take() {
             // Her own rules moved her body since: the heading search hears

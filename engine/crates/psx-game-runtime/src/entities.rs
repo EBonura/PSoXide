@@ -1343,6 +1343,24 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     // Rare: a hit on an unaware fighter.
     #[inline(never)]
     #[cfg_attr(target_arch = "mips", optimize(size))]
+    /// Entity `index` turns on `attacker` now, as when a hit reaches it: it
+    /// remembers where the attacker stands and enters Aggro (its reaction
+    /// pause included). A duel starts its fighters engaged this way.
+    pub fn engage(&mut self, index: usize, attacker: CombatantId) {
+        if index < self.count() && self.state(index) != GameEntityState::Dead {
+            self.notice_attacker(index, attacker);
+        }
+    }
+
+    /// The clocks a fighter's tactical controller runs on, advanced once per
+    /// think: its return-home cooldown and its ranged exchange's timers
+    /// (cover, peek, decision and dodge delays). Every controller's think
+    /// advances them, the actor's included.
+    fn advance_controller_clocks(&mut self, index: usize, delta: u16) {
+        self.tactics[index].home_cooldown = self.tactics[index].home_cooldown.saturating_sub(delta);
+        self.exchanges[index].tick(delta);
+    }
+
     fn notice_attacker(&mut self, index: usize, attacker: CombatantId) {
         let slot = if attacker == CombatantId::PLAYER {
             (self.count() <= Self::ACTOR_SLOT).then_some(Self::ACTOR_SLOT)
@@ -2183,9 +2201,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
                 index += 1;
                 continue;
             }
-            self.tactics[index].home_cooldown = self.tactics[index]
-                .home_cooldown
-                .saturating_sub(delta_ticks);
+            self.advance_controller_clocks(index, delta_ticks);
             let swapping = self.stance_swap_in_progress(index);
             self.combatants[index].tick(
                 delta_ticks,
@@ -2195,7 +2211,6 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
                 ),
                 swapping,
             );
-            self.exchanges[index].tick(delta_ticks);
             self.step_recoil(record, index, mover, delta_ticks);
             let behavior_awake = !matches!(state, GameEntityState::Idle | GameEntityState::Patrol);
             let spatially_active = index < 64 && self.spatial_active_mask & (1u64 << index) != 0;

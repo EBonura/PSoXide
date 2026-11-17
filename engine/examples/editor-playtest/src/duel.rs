@@ -145,8 +145,12 @@ impl Playtest {
             if ctx.pad.sticks.right_y == 0 {
                 self.duel_start_rivals(target, seed);
             } else {
+                // Both fighters start engaged, as the rivals duel's do: each
+                // notices the other, reaction pause included.
                 self.game_entities
                     .engage_actor(&persona, target, seed.rotate_left(8) ^ 0x9e3779b9);
+                self.game_entities
+                    .engage(target, psx_game_runtime::combatant::CombatantId::PLAYER);
                 // She keeps her rival in view as an entity faces its target.
                 self.lock_target = Some(target);
             }
