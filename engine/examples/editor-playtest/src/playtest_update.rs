@@ -50,9 +50,6 @@ fn gait_footstep_crossed(
 /// Movement noise is independent of the audio mix/volume. Blocked movement
 /// and idle animations are silent. Sprinting/dodging carries farther.
 fn player_noise_radius(moved: bool, animation: PlayerAnim, height: i32) -> i32 {
-    if !moved {
-        return 0;
-    }
     let loud = matches!(
         animation,
         PlayerAnim::Run
@@ -64,7 +61,7 @@ fn player_noise_radius(moved: bool, animation: PlayerAnim, height: i32) -> i32 {
             | PlayerAnim::DashLeft
             | PlayerAnim::DashRight
     );
-    height.max(0).saturating_mul(if loud { 4 } else { 2 })
+    psx_game_runtime::entities::movement_noise(moved, loud, height)
 }
 
 fn enemy_idle_cue_due(now: u32, delta_ticks: u16, index: usize) -> bool {

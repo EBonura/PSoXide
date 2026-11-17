@@ -1666,7 +1666,10 @@ impl Playtest {
         }
         let (side, energy) = match shooter {
             Shooter::Player => (0, self.game_entities.actor().flow.energy),
-            Shooter::Entity(attack) => (1, self.game_entities.energy(attack.entity())),
+            Shooter::Entity(attack) => (
+                self.duel_side(attack.entity()),
+                self.game_entities.energy(attack.entity()),
+            ),
         };
         duel::log_values(
             "duel:shot",

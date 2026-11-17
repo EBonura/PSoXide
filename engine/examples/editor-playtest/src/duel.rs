@@ -787,7 +787,14 @@ impl Playtest {
     /// A duel event of the entity in `slot`: actor 0 is the duel's training
     /// entity, 1 its rival.
     pub(super) fn duel_log_rival_event(&self, ctx: &Ctx, slot: usize, kind: u32) {
-        self.duel_log_event(ctx, u32::from(slot != self.duel.target), kind);
+        self.duel_log_event(ctx, self.duel_side(slot), kind);
+    }
+
+    /// The duel side of the entity in `slot`: 1 in a duel with the player
+    /// (she is 0); in a duel between entities, 0 for the training entity and
+    /// 1 for its rival.
+    pub(super) fn duel_side(&self, slot: usize) -> u32 {
+        u32::from(self.duel.rival.is_none() || slot != self.duel.target)
     }
 
     /// One sample of a fight between two entities: tick, both positions

@@ -184,6 +184,16 @@ pub const GAME_ENTITY_STAGGER_TICKS: u16 = 32;
 /// (the tick input's, the player) rather than another slot.
 pub const NO_RIVAL: u8 = u8::MAX;
 
+/// How far a fighter's movement carries, in world units: nothing while it
+/// stands, twice its height walking, four times running or evading. The one
+/// rule for the player and every entity.
+pub fn movement_noise(moved: bool, loud: bool, height: i32) -> i32 {
+    if !moved {
+        return 0;
+    }
+    height.max(0).saturating_mul(if loud { 4 } else { 2 })
+}
+
 /// De-aggro leash: the player escaping `aggro_radius` times this
 /// factor drops the entity back to its idle/patrol loop.
 pub const GAME_ENTITY_LEASH_FACTOR: i32 = 2;
@@ -731,6 +741,9 @@ pub struct GameEntities<
     /// The slot each entity fights, [`NO_RIVAL`] when it engages the
     /// owner's target (the player) from the tick input.
     rivals: [u8; MAX_ENTITIES],
+    /// How each entity's body moved at its latest think: 0 still, 1
+    /// walking, 2 running or evading ([`movement_noise`]).
+    moving: [u8; MAX_ENTITIES],
     /// The side each entity's bolts and body are on.
     teams: [crate::projectiles::CombatTeam; MAX_ENTITIES],
     /// Owner-supplied per-record activation (area residency).
@@ -940,6 +953,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         attack_tick_generation: 0,
         spawn_ids: [0; MAX_ENTITIES],
         rivals: [NO_RIVAL; MAX_ENTITIES],
+        moving: [0; MAX_ENTITIES],
         teams: [crate::projectiles::CombatTeam::Enemy; MAX_ENTITIES],
         spatial_active_mask: 0,
     };
@@ -1234,6 +1248,29 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         }
     }
 
+    /// An idle or patrolling entity a hit reached turns on whoever dealt it,
+    /// as if it had noticed them there: an entity at its slot, the player at
+    /// the actor slot. The world's hits (hazards) wake it without a place.
+    // Rare: a hit on an unaware fighter.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
+    fn notice_attacker(&mut self, index: usize, attacker: CombatantId) {
+        let slot = if attacker == CombatantId::PLAYER {
+            (self.count() <= Self::ACTOR_SLOT).then_some(Self::ACTOR_SLOT)
+        } else {
+            Some(usize::from(attacker.0)).filter(|&slot| slot < self.count())
+        };
+        if let Some(slot) = slot {
+            let position = self.motors[slot].position();
+            self.remember_target(index, [position.x, position.y, position.z]);
+        }
+        self.enter_state(
+            index,
+            GameEntityState::Aggro,
+            &mut GameEntityTickStats::default(),
+        );
+    }
+
     /// The rival of entity `index` while it is a live slot of this tick.
     fn live_rival(&self, index: usize, count: usize) -> Option<usize> {
         let rival = usize::from(self.rivals[index]);
@@ -1258,7 +1295,11 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             position: self.position(rival),
             radius: i32::from(record.radius),
             height: i32::from(record.height),
-            noise_radius: 0,
+            noise_radius: movement_noise(
+                self.moving[rival] != 0,
+                self.moving[rival] > 1,
+                i32::from(record.height),
+            ),
             defender: self.defender_with(record, rival, fighter),
             stance: Some(fighter.stance.active()),
             attack_read: match state {
@@ -1838,6 +1879,9 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
                 died: true,
                 ..GameEntityHitOutcome::MISS
             };
+        }
+        if matches!(state, GameEntityState::Idle | GameEntityState::Patrol) && !out.poise_broken {
+            self.notice_attacker(index, strike.attacker);
         }
         if out.poise_broken {
             self.release_attack_owner(index, delay);
@@ -3099,6 +3143,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         // so skip its collision work (most thinking enemies, most ticks).
         if input == NO_MOTION {
             if let Some(frame) = self.motors[index].rest(&config) {
+                self.moving[index] = 0;
                 return frame;
             }
         }
@@ -3110,6 +3155,13 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             config,
             delta.max(1),
         );
+        self.moving[index] = if !frame.moved {
+            0
+        } else if input.sprint || !self.motors[index].action().is_idle() {
+            2
+        } else {
+            1
+        };
         if let Some(heading) = self.probing.take() {
             if frame.moved {
                 let yaw = u16::from(heading) * GAME_ENTITY_DIRECTION_STEP;
@@ -3884,6 +3936,36 @@ mod tests {
         rivals.spawn_from_records(&PAIR);
         assert_eq!(rivals.rival(0), None);
         assert_eq!(rivals.team(1), crate::projectiles::CombatTeam::Enemy);
+    }
+
+    #[test]
+    fn an_idle_entity_a_hit_reaches_turns_on_its_attacker() {
+        static ENEMY: [LevelGameEntityRecord; 1] = [test_record(
+            1000,
+            1000,
+            0,
+            512,
+            game_entity_flags::ENABLED | game_entity_flags::CAN_RUN,
+        )];
+        // One record and the actor slot: the player shoots from behind.
+        let mut entities = GameEntities::<2>::EMPTY;
+        entities.spawn_from_records(&ENEMY);
+        assert_eq!(entities.state(0), GameEntityState::Idle);
+        let out = entities.apply_projectile_hit(&ENEMY, 0, VitalityChannelId::One, 1, 0, false);
+        assert!(out.connected);
+        assert_eq!(entities.state(0), GameEntityState::Aggro);
+        // The same for a hit from another entity.
+        let mut pair = GameEntities::<2>::EMPTY;
+        pair.spawn_from_records(&ENEMY);
+        pair.receive_hit(
+            &ENEMY,
+            0,
+            Strike {
+                attacker: CombatantId::entity(1),
+                ..player_strike(HitKind::Melee, VitalityChannelId::One, 1, 0, false)
+            },
+        );
+        assert_eq!(pair.state(0), GameEntityState::Aggro);
     }
 
     #[test]
