@@ -175,7 +175,9 @@ const GAME_ENTITY_STANCE_PULSE_TICKS: u16 = 30;
 
 /// The body of the entity `record` places, among the level's `characters`:
 /// its linked Character, else [`LevelCharacterRecord::DEFAULT_BODY`].
-#[inline]
+// Read from dozens of call sites: one small copy on the PS1 rather than the
+// bounds check and fallback inlined into each.
+#[inline(never)]
 pub fn body_of(
     characters: &'static [LevelCharacterRecord],
     record: &LevelGameEntityRecord,
@@ -1185,7 +1187,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
 
     /// The body of the entity `record` places: its linked Character, the
     /// same record the player's character is ([`body_of`]).
-    #[inline]
+    #[inline(always)]
     pub fn body(&self, record: &LevelGameEntityRecord) -> &'static LevelCharacterRecord {
         body_of(self.characters(), record)
     }
