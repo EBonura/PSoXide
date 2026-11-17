@@ -1163,6 +1163,9 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     /// its record's `roll_invulnerable_frames` (the same field the player
     /// character's swap window reads). An entity that never swaps never
     /// enters it. `None` for an out of range slot.
+    // Cold AI-side helper: one small copy on the PS1 instead of one per caller.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     pub fn defender<'a>(
         &'a self,
         records: &[LevelGameEntityRecord],
@@ -2745,6 +2748,9 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     /// The motor configuration of `record`'s character: its own motion
     /// numbers under the game's speed scale, built by the same function as
     /// the player's ([`crate::character::motion_motor_config`]).
+    // Cold AI-side helper: one small copy on the PS1 instead of one per caller.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     fn motor_config(&self, record: &LevelGameEntityRecord) -> CharacterMotorConfig {
         crate::character::motion_motor_config(
             i32::from(record.radius),
@@ -2758,6 +2764,9 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     /// The dodge `record`'s character has, for its ranged exchange to plan
     /// with: its roll with the mobility kit (the roll's reach and frames),
     /// otherwise a walk aside over the same frames.
+    // Cold AI-side helper: one small copy on the PS1 instead of one per caller.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     fn evade_move(&self, record: &LevelGameEntityRecord) -> crate::ranged_tactics::EvadeMove {
         crate::ranged_tactics::EvadeMove::of(
             &self.motor_config(record),
@@ -2768,13 +2777,12 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     /// Pace of `record`'s character in Q8 engine units per frame: its walk,
     /// or its run when `run`.
     fn pace_q8(&self, record: &LevelGameEntityRecord, run: bool) -> i32 {
-        let config = self.motor_config(record);
-        if run && config.run_enabled {
-            config.run_speed
+        let speed = if run && Self::can_run(record) {
+            record.motion.run_speed
         } else {
-            config.walk_speed
-        }
-        .max(1)
+            record.motion.walk_speed
+        };
+        crate::character::scaled_motion_speed(speed, self.speed_scale).max(1)
     }
 
     /// Whole engine units `record`'s character covers per tick at a walk.
@@ -2797,6 +2805,9 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     /// (or run, when `run`): its direction, at the share of the pace that
     /// distance needs, full pace at most. The same world-space stick a pad
     /// gives, so the motor cannot tell who asked.
+    // Cold AI-side helper: one small copy on the PS1 instead of one per caller.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     fn move_toward(
         &self,
         record: &LevelGameEntityRecord,
@@ -2915,6 +2926,9 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     /// Move at a yaw offset from the direction to the target, facing the
     /// target: circling and backing off, at the motor's locked-on pace for
     /// that direction (the player's strafe and backward speeds).
+    // Cold AI-side helper: one small copy on the PS1 instead of one per caller.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     fn step_relative_to_target(
         &mut self,
         record: &LevelGameEntityRecord,
@@ -2952,6 +2966,9 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     /// how directly they close on the goal and saves the reverse of the
     /// blocked heading for last; each tick tries one heading, so a long
     /// search resumes on the next tick from `move_tried`.
+    // Cold AI-side helper: one small copy on the PS1 instead of one per caller.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     fn steer(
         &mut self,
         record: &LevelGameEntityRecord,
@@ -3004,6 +3021,9 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
 
     /// [`Self::steer`] straight into this tick's motor input, turning the
     /// body into the move. Returns `true` once on the goal.
+    // Cold AI-side helper: one small copy on the PS1 instead of one per caller.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     fn step_toward(
         &mut self,
         record: &LevelGameEntityRecord,

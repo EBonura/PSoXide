@@ -393,6 +393,8 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
     /// share while circling or backing off, and there at the motor's
     /// locked-on strafe or backward pace (the body faces the target), the
     /// pace the feet actually cover.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     fn tactical_walk_speed_q8(&self, r: &LevelGameEntityRecord, goal: EnemyGoal) -> i32 {
         let speed = self.pace_q8(r, false);
         let locked = match goal {

@@ -53,6 +53,9 @@ impl EvadeMove {
     /// The dodge of a fighter whose motor runs `config`: its roll (reach and
     /// frames) when it `can_dodge` (the mobility kit), otherwise a walk
     /// aside over the same frames. The same for every fighter.
+    // Read once per decision: one small copy on the PS1.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     pub fn of(config: &psx_engine::CharacterMotorConfig, can_dodge: bool) -> Self {
         let frames = i32::from(config.roll_active_frames.max(1));
         let (speed, recovery) = if can_dodge {

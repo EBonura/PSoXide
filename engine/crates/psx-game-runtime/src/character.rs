@@ -437,6 +437,16 @@ pub fn yaw_step_for(turn_speed_degrees_per_second: u16) -> Angle {
     Angle::from_q12(((turn_speed_degrees_per_second as u32 * 4096) / (360 * 60)) as u16)
 }
 
+/// An authored speed under the game's speed knob `(numerator,
+/// denominator)` ([`scaled_player_speed`]); an unset knob (a zeroed table)
+/// is one.
+pub fn scaled_motion_speed(speed: i32, speed_scale: (i32, i32)) -> i32 {
+    match speed_scale {
+        (_, 0) => scaled_player_speed(speed, 1, 1),
+        (num, den) => scaled_player_speed(speed, num, den),
+    }
+}
+
 /// The motor configuration of a character: the one builder every fighter's
 /// motor configuration comes from, the player's and every enemy's. Speeds
 /// scale by `speed_scale` (numerator, denominator), the game's speed knob;
@@ -448,17 +458,11 @@ pub fn motion_motor_config(
     run_enabled: bool,
     speed_scale: (i32, i32),
 ) -> CharacterMotorConfig {
-    // An unset scale (a zeroed table) is one.
-    let (num, den) = if speed_scale.1 == 0 {
-        (1, 1)
-    } else {
-        speed_scale
-    };
     let mut config = CharacterMotorConfig::character_with_body(
         radius,
         height,
-        scaled_player_speed(motion.walk_speed, num, den),
-        scaled_player_speed(motion.run_speed, num, den),
+        scaled_motion_speed(motion.walk_speed, speed_scale),
+        scaled_motion_speed(motion.run_speed, speed_scale),
         yaw_step_for(motion.turn_speed_degrees_per_second),
     );
     config.run_enabled = run_enabled;
