@@ -1824,28 +1824,35 @@ impl Playtest {
         let first = entity.combat_capsule_first.to_usize();
         let end = first + usize::from(entity.combat_capsule_count);
         let capsules = COMBAT_CAPSULES.get(first..end).unwrap_or(&[]);
-        let player = self.game_entities.actor_motor().position();
+        // The tell tracks the fighter it is aimed at: its rival, or her.
+        let rival = self
+            .game_entities
+            .rival(index)
+            .and_then(|slot| GAME_ENTITIES.get(slot).map(|record| (slot, record)));
+        let target = match rival {
+            Some((slot, _)) => self.game_entities.position(slot),
+            None => {
+                let player = self.game_entities.actor_motor().position();
+                [player.x, player.y, player.z]
+            }
+        };
         if !attack.is_ranged() {
             if combat::melee_tell_tracks(capsules, attack.action(), phase) {
-                self.game_entities.track_authored_melee_tell(
-                    index,
-                    [player.x, player.y, player.z],
-                    delta,
-                );
+                self.game_entities
+                    .track_authored_melee_tell(index, target, delta);
             }
             return;
         }
         if combat::ranged_charge_tracks(capsules, attack.action(), phase) {
-            let height = self
-                .character
-                .as_ref()
-                .map_or(WORLD_PLAYER_HEIGHT, |character| character.height);
-            self.game_entities.track_authored_ranged_charge(
-                index,
-                [player.x, player.y, player.z],
-                height,
-                delta,
-            );
+            let height = match rival {
+                Some((_, record)) => i32::from(record.height),
+                None => self
+                    .character
+                    .as_ref()
+                    .map_or(WORLD_PLAYER_HEIGHT, |character| character.height),
+            };
+            self.game_entities
+                .track_authored_ranged_charge(index, target, height, delta);
         }
     }
 
