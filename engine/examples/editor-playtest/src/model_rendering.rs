@@ -419,7 +419,7 @@ fn enemy_flash_tint(
 }
 
 /// How far an armed crit pulls a weaponless enemy's lit tint toward the glow.
-const ARMED_BODY_GLOW_Q8: u16 = 96;
+const ARMED_BODY_GLOW_Q8: u16 = 168;
 
 /// Resolve the same colour tell for one entity-owned model instance. Static
 /// props have no game-entity owner and return `None`; enemy stance remains the
