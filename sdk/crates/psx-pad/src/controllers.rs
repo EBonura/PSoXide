@@ -396,6 +396,7 @@ mod tests {
         parked: [Model; 2],
         active: usize,
         selects: [usize; 2],
+        ack_irq: [bool; 2],
     }
 
     impl TwoPorts {
@@ -405,6 +406,7 @@ mod tests {
                 parked: [Model::default(), two],
                 active: 0,
                 selects: [0, 0],
+                ack_irq: [false; 2],
             }
         }
         fn model(&mut self, port: usize, f: impl FnOnce(&mut Model)) {
@@ -440,6 +442,12 @@ mod tests {
         }
         fn clock(&mut self) -> u16 {
             MockBus.clock()
+        }
+        fn pad_ack_irq(&mut self, port: Port) -> bool {
+            self.ack_irq[usize::from(port.is_two())]
+        }
+        fn set_pad_ack_irq(&mut self, port: Port, armed: bool) {
+            self.ack_irq[usize::from(port.is_two())] = armed;
         }
         fn select_with(&mut self, port: Port, arm_ack_irq: bool) {
             let index = usize::from(port.is_two());
@@ -558,6 +566,52 @@ mod tests {
         let [_, two] = both(&mut pads, &mut bus);
         assert!(two.is_analog() && two.buttons.bits() == button::START);
         assert_eq!(command_count(&mut bus, 1, 0x44), 1);
+    }
+
+    /// A port that reports `/ACK` only as the latched interrupt bit and latches it only while the
+    /// interrupt is armed, as PCSX-Redux does: no byte is acknowledged on an unarmed select.
+    fn latched_only_when_armed(buttons: u16) -> Model {
+        Model {
+            latch_only: true,
+            latch_free_bytes: 0,
+            ..dualshock(buttons)
+        }
+    }
+
+    #[test]
+    fn a_port_that_latches_only_when_armed_is_read_from_the_second_poll() {
+        let mut bus = TwoPorts::new(latched_only_when_armed(button::CROSS), empty());
+        let mut pads = Controllers::digital();
+        assert_eq!(pads.poll(&mut bus, Port::One).mode, PadMode::Disconnected);
+        assert!(
+            bus.ack_irq[0],
+            "nobody answered unarmed: the next poll arms"
+        );
+        for _ in 0..100 {
+            let state = *pads.poll(&mut bus, Port::One);
+            assert_eq!(state.buttons.bits(), button::CROSS);
+        }
+        assert!(
+            bus.ack_irq[0],
+            "an answering port keeps the setting that works"
+        );
+    }
+
+    #[test]
+    fn a_port_that_shows_the_level_is_never_armed_and_an_empty_one_alternates() {
+        let mut bus = TwoPorts::new(dualshock(button::CROSS), empty());
+        let mut pads = Controllers::new();
+        for _ in 0..100 {
+            let [one, _] = both(&mut pads, &mut bus);
+            assert_eq!(one.buttons.bits(), button::CROSS);
+            assert!(!bus.ack_irq[0], "a pad that answers unarmed is never armed");
+        }
+        let before = bus.ack_irq[1];
+        let _ = both(&mut pads, &mut bus);
+        assert_ne!(
+            bus.ack_irq[1], before,
+            "every probe of an empty socket flips it"
+        );
     }
 
     /// PCSX-ReARMed's DualShock, as the wire log of the first polls records it: the address byte

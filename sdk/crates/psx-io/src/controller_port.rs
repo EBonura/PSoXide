@@ -198,7 +198,8 @@ pub trait Transport {
                 }
             }
             _ => {
-                self.select(port);
+                let armed = self.pad_ack_irq(port);
+                self.select_with(port, armed);
                 // Measured time, not a spin count: no change to the loop can shorten it.
                 let at = self.clock();
                 let mut spins = 2 * Timing::PAD.setup_spins;
@@ -219,6 +220,24 @@ pub trait Transport {
     /// so the transport watches the live `/ACK` level in `STAT` instead.
     fn select(&mut self, port: Port) {
         self.select_with(port, false);
+    }
+
+    /// Whether a pad transaction on `port` arms the `/ACK` interrupt from its
+    /// select. Ports that show the live `/ACK` level never need it. A port that
+    /// reports `/ACK` only as the latched interrupt bit, and latches it only
+    /// while the interrupt is armed (PCSX-Redux, and the BIOS and Sony's pad
+    /// library always arm it), answers no byte otherwise. A model of a port
+    /// keeps this off.
+    fn pad_ack_irq(&mut self, port: Port) -> bool {
+        let _ = port;
+        false
+    }
+
+    /// Set what [`pad_ack_irq`](Self::pad_ack_irq) returns for `port`. The pad
+    /// driver flips it after a poll that found nobody, so an empty socket is
+    /// probed both ways and a port of either kind keeps the setting that works.
+    fn set_pad_ack_irq(&mut self, port: Port, armed: bool) {
+        let _ = (port, armed);
     }
 
     /// [`select`](Self::select) with the `/ACK` interrupt armed when
@@ -477,6 +496,18 @@ pub trait Transport {
     }
 }
 
+/// Bit 0 for port 1, bit 1 for port 2: pad transactions on that port arm the `/ACK` interrupt
+/// (see [`Transport::pad_ack_irq`]).
+static mut PAD_ACK_IRQ: u8 = 0;
+
+const fn port_bit(port: Port) -> u8 {
+    if port.is_two() {
+        2
+    } else {
+        1
+    }
+}
+
 impl Transport for ControllerPort {
     #[inline(always)]
     fn status(&mut self) -> u32 {
@@ -527,6 +558,24 @@ impl Transport for ControllerPort {
     #[inline(always)]
     fn clock(&mut self) -> u16 {
         crate::timers::counter(crate::timers::Timer::Timer0)
+    }
+
+    #[inline(always)]
+    fn pad_ack_irq(&mut self, port: Port) -> bool {
+        // SAFETY: a volatile byte load of a private static only the pad driver's thread writes.
+        unsafe { core::ptr::read_volatile(&raw const PAD_ACK_IRQ) & port_bit(port) != 0 }
+    }
+
+    #[inline(always)]
+    fn set_pad_ack_irq(&mut self, port: Port, armed: bool) {
+        // SAFETY: as above; the `&mut` token is the proof no other driver runs a transaction.
+        unsafe {
+            let bits = core::ptr::read_volatile(&raw const PAD_ACK_IRQ) & !port_bit(port);
+            core::ptr::write_volatile(
+                &raw mut PAD_ACK_IRQ,
+                bits | (u8::from(armed) * port_bit(port)),
+            );
+        }
     }
 
     #[inline(always)]

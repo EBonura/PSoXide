@@ -1051,6 +1051,7 @@ fn poll_state<T: Transport>(
             return s;
         }
         if s.mode == PadMode::Disconnected && !confirm_absent {
+            nobody_answered(bus, socket);
             return s;
         }
         all_absent &= s.mode == PadMode::Disconnected;
@@ -1063,10 +1064,24 @@ fn poll_state<T: Transport>(
     }
     // Four complete address-byte replies of FF without ACK establish an
     // absent device. Any other failed stage means an invalid transaction.
-    if !all_absent {
+    if all_absent {
+        nobody_answered(bus, socket);
+    } else {
         last.mode = PadMode::Unknown;
     }
     last
+}
+
+/// Nobody answered a poll of `socket`: the next one arms the `/ACK` interrupt if this one did
+/// not, and the other way round ([`Transport::pad_ack_irq`]). A pad on a port that shows the live
+/// `/ACK` level (the console) answers unarmed and keeps it so; one on a port that latches `/ACK`
+/// only while the interrupt is armed (PCSX-Redux) answers armed and keeps that. An empty
+/// socket is probed both ways in turn. A poll that answers keeps the setting as it is.
+#[cold]
+#[inline(never)]
+fn nobody_answered<T: Transport>(bus: &mut T, socket: Port) {
+    let armed = bus.pad_ack_irq(socket);
+    bus.set_pad_ack_irq(socket, !armed);
 }
 
 fn poll_once_raw<T: Transport>(bus: &mut T, socket: Port, pacing: Pacing) -> RawPoll {
