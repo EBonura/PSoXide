@@ -4294,9 +4294,10 @@ fn the_cook_warns_once_per_missing_verb_of_a_kit_a_character_has() {
         .game_entities
         .iter()
         .all(|entity| entity.parried_clip == entity.stagger_clip));
+    // The light enemy binds both weapons and its dashes: it swaps and dodges.
     assert!(package.game_entities.iter().any(|entity| {
         let kits = psx_level::game_entity_combat_kits(entity.flags);
-        kits.can_swap() && !kits.can_dodge()
+        kits.can_swap() && kits.can_dodge()
     }));
 }
 

@@ -496,11 +496,12 @@ fn play_from_here_moves_the_cooked_spawn_without_editing_the_project() {
 }
 
 /// What an enemy's cooked states play must not depend on which other clips are resident: every
-/// state resolves to the clip its animation set binds to the action (with the cook's fallbacks),
-/// and no clip of an enemy is resident that none of its states can reach. Needs the editor
-/// repository's `projects/` (`PSOXIDE_PROJECTS_DIR`), like every project test.
+/// state resolves to the clip its animation set binds to the action (with the cook's fallbacks).
+/// Resident are exactly the clips its Character binds (the player's rule) and the model's default
+/// clip. Needs the editor repository's `projects/` (`PSOXIDE_PROJECTS_DIR`), like every project
+/// test.
 #[test]
-fn an_enemys_states_play_their_authored_clips_and_nothing_else_is_resident() {
+fn an_enemys_states_play_their_authored_clips_and_every_bound_clip_is_resident() {
     use crate::CharacterAnimationAction as Action;
     let root = crate::projects_dir().join("graybox-reach");
     let mut project = ProjectDocument::load_from_path(root.join("project.ron")).unwrap();
@@ -619,18 +620,22 @@ fn an_enemys_states_play_their_authored_clips_and_nothing_else_is_resident() {
                 .unwrap_or_else(|| attack.clone()),
         ),
     ];
-    let mut reachable = std::collections::BTreeSet::new();
     for (state, clip, name) in expected {
         assert_eq!(played(clip), name, "{state} plays its authored clip");
-        reachable.insert(name);
     }
-    // The model's own default clip stays resident as well; nothing else may.
-    reachable.insert(played(model.default_clip));
-    for clip in clips {
+    let resident: std::collections::BTreeSet<String> =
+        clips.iter().map(|clip| clip.name.clone()).collect();
+    let mut bound_names: std::collections::BTreeSet<String> =
+        Action::ALL.into_iter().filter_map(bound).collect();
+    for name in &bound_names {
+        assert!(resident.contains(name), "{name} is bound but not resident");
+    }
+    // The model's own default clip stays resident as well; nothing else does.
+    bound_names.insert(played(model.default_clip));
+    for name in &resident {
         assert!(
-            reachable.contains(&clip.name),
-            "{} is resident but no state of the enemy plays it",
-            clip.name
+            bound_names.contains(name),
+            "{name} is resident but not bound"
         );
     }
 }
