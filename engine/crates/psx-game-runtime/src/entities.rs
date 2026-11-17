@@ -1190,9 +1190,10 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             .filter(|index| *index < self.count())
     }
 
-    /// Position of entity `index`, room-local engine units.
+    /// Position of entity `index` (or of the actor's body in
+    /// [`Self::ACTOR_SLOT`]), room-local engine units.
     pub fn position(&self, index: usize) -> [i32; 3] {
-        if index >= self.count() {
+        if index >= self.count() && index != Self::ACTOR_SLOT {
             return [0; 3];
         }
         let p = self.motors[index].position();
@@ -1217,9 +1218,10 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         (self.state(index) != GameEntityState::Dead).then(|| self.position(index))
     }
 
-    /// Facing yaw of entity `index`, PSX angle units.
+    /// Facing yaw of entity `index` (or of the actor's body), PSX angle
+    /// units.
     pub fn yaw(&self, index: usize) -> i16 {
-        if index >= self.count() {
+        if index >= self.count() && index != Self::ACTOR_SLOT {
             0
         } else {
             self.yaw_raw(index)

@@ -1227,6 +1227,8 @@ fn the_tactical_controller_decides_for_the_actor_as_for_an_entity() {
     persona.z = 600;
     e.engage_actor(&persona, 0, 7);
     assert_eq!(e.rival(actor), Some(0));
+    // The controller reads her body where it is.
+    assert_eq!(e.position(actor), [0, 0, 600]);
     let mut world = crate::entities::OpenWorld;
     // Out of reach and in sight: it turns to its rival, then closes in (an
     // entity's approach). Nothing moves her here, so it keeps asking.
