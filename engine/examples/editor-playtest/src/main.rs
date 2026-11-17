@@ -73,8 +73,7 @@ use psx_game_runtime::vitality::{
 use psx_game_runtime::vitality_circles::VitalityCircleState;
 use psx_game_runtime::{
     combatant::{
-        ActionProtection, Combatant, CombatantId, Defender, HitIn, HitKind, HitOut, PoiseRule,
-        Strike,
+        ActionProtection, CombatantId, Defender, HitIn, HitKind, HitOut, PoiseRule, Strike,
     },
     destructibles::RuntimeDestructibles,
     poi::MessageController,
@@ -281,8 +280,6 @@ struct Playtest {
     /// Index in ROOMS the player is currently in. Used to scope
     /// model-instance + light queries.
     room_index: RoomIndex,
-    /// Player locomotion state: position, yaw, stamina, and evade actions.
-    motor: CharacterMotorState,
     /// Resolved Character driving the player -- `None` when no
     /// `PLAYER_CONTROLLER` was authored. Falls back to the
     /// pre-character debug controls in that case.
@@ -320,7 +317,10 @@ struct Playtest {
     destructibles: RuntimeDestructibles<{ psx_level::MAX_DESTRUCTIBLES }>,
     /// Souls-like game-entity SoA state over the cooked
     /// `GAME_ENTITIES` records (phase 3; empty for record-free
-    /// projects and then inert).
+    /// projects and then inert), plus the player in its actor slot: her
+    /// motor (position, yaw, stamina, evade actions) and her `Combatant`
+    /// (the one health bar, poise, energy, stance), the same body and
+    /// fighter each enemy holds. Her rules still run here in `Playtest`.
     game_entities: RuntimeGameEntities,
     /// Exact attack clip/phase tokens emitted by the latest NPC tick. The
     /// post-update pose pass consumes these before player melee, keeping enemy
@@ -360,11 +360,6 @@ struct Playtest {
     /// Rolling fired total already reported to telemetry, so the
     /// LOGIC_RECORDS_FIRED counter emits per-tick deltas.
     logic_fired_reported: u16,
-    /// The player's health, poise, energy and stance: the same `Combatant`
-    /// each enemy holds. The one health bar reaching zero arms the shared
-    /// death sequence; nothing refills it during play except arches and
-    /// checkpoints.
-    player: Combatant,
     /// Authored tuning for the stance: the swap cooldown and the HUD's
     /// swap animation length.
     player_stance_config: CombatStanceConfig,
@@ -731,13 +726,14 @@ impl Playtest {
     fn init_boot_state(&mut self) {
         self.current_ambient_rgb = [0x80; 3];
         self.destructibles = RuntimeDestructibles::EMPTY;
-        self.motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
+        *self.game_entities.actor_motor_mut() =
+            CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
         self.player_contents_memo = None;
         // Playtest lives in a zeroed MaybeUninit, and zeroed stats or stance
         // config would mean no health and no swap timing, so they are set
         // explicitly on every reset rather than relying on the zero pattern.
         self.player_stats = CombatStats::PLAYER;
-        self.player.reset(&self.player_stats);
+        self.game_entities.actor_mut().reset(&self.player_stats);
         self.vitality_circles = VitalityCircleState::EMPTY;
         self.player_stance_config = CombatStanceConfig::DEFAULT;
         self.power_up_loadout = PowerUpLoadout::DEFAULT;
@@ -812,7 +808,7 @@ impl Playtest {
         // The resident grid world owns geometry, activation and collision.
         // Its rooms stream in around the player every tick; shared VRAM
         // uploads and material resolution follow on background ticks.
-        let player = self.motor.position();
+        let player = self.game_entities.actor_motor().position();
         let eye = self.render_camera.position;
         let demand_only = self.combat_music.engaged;
         if let Some(world_rt) = self.world_rt.as_mut() {

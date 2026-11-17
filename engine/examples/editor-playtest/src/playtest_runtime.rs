@@ -241,7 +241,7 @@ impl Playtest {
         !self.persistent_door_moving()
             && !self.combat_music.engaged
             && self.message_overlay.is_none()
-            && self.motor.grounded()
+            && self.game_entities.actor_motor().grounded()
     }
 
     /// Write the save after a persistent door or lever changed, at the first
@@ -875,8 +875,11 @@ impl Playtest {
     /// The levels the boost sockets read: the health bar and the energy bar.
     pub(super) fn boost_bars(&self) -> BoostBars {
         BoostBars {
-            health: self.player.health,
-            energy: VitalityPool::at(self.player.flow.energy, self.player_stats.energy_max),
+            health: self.game_entities.actor().health,
+            energy: VitalityPool::at(
+                self.game_entities.actor().flow.energy,
+                self.player_stats.energy_max,
+            ),
         }
     }
 
@@ -979,12 +982,13 @@ impl Playtest {
         let strike = Strike {
             attacker,
             kind,
-            channel: channel.unwrap_or(self.player.stance.active()),
+            channel: channel.unwrap_or(self.game_entities.actor().stance.active()),
             damage,
             poise: 0,
             crit: false,
         };
-        let hit = self.player.receive_hit(self.player_hit(strike, false));
+        let hit_in = self.player_hit(strike, false);
+        let hit = self.game_entities.actor_mut().receive_hit(hit_in);
         if hit.damage_applied > 0 {
             self.queue_gameplay_sfx(LevelGameplaySfxEvent::PlayerDamage);
         }
@@ -1105,7 +1109,7 @@ impl Playtest {
         self.logic_fired_reported = 0;
         // Playtest lives in a zeroed MaybeUninit, so the combatant is set
         // explicitly on every reset rather than relying on the zero pattern.
-        self.player.reset(&self.player_stats);
+        self.game_entities.actor_mut().reset(&self.player_stats);
         self.camera_recenter_requested = false;
         self.ranged_ready = combat_input::RangedReady::EMPTY;
         self.aim_control = aim_control::AimControl::EMPTY;
@@ -1130,7 +1134,7 @@ impl Playtest {
     /// Start a fresh combat life without changing checkpoints or collected items.
     /// In-flight shots and queued inputs belong to the old life, not the spawn.
     fn reset_life_combat(&mut self) {
-        self.player.reset(&self.player_stats);
+        self.game_entities.actor_mut().reset(&self.player_stats);
         self.ranged_ready = combat_input::RangedReady::EMPTY;
         self.aim_control = aim_control::AimControl::EMPTY;
         self.combat_projectiles.clear();
@@ -1145,7 +1149,7 @@ impl Playtest {
         self.player_actor_pose = None;
         self.previous_player_actor_pose = None;
         self.player_contents_memo = None;
-        self.motor.interrupt_action();
+        self.game_entities.actor_motor_mut().interrupt_action();
         self.ranged_ready = combat_input::RangedReady::EMPTY;
         self.aim_control = aim_control::AimControl::EMPTY;
         self.loco = LocoPhase::Idle;
@@ -1221,7 +1225,9 @@ impl Playtest {
         } else {
             yaw
         };
-        self.motor.snap_to(position, motor_yaw);
+        self.game_entities
+            .actor_motor_mut()
+            .snap_to(position, motor_yaw);
         self.reset_life_combat();
         self.hazard_death_ticks_remaining = 0;
         self.anim_state = PlayerAnim::Idle;
@@ -1446,12 +1452,13 @@ impl Playtest {
         let strike = Strike {
             attacker,
             kind: HitKind::Melee,
-            channel: self.player.stance.active(),
+            channel: self.game_entities.actor().stance.active(),
             damage: 0,
             poise: damage,
             crit,
         };
-        let out = self.player.receive_hit(self.player_hit(strike, armored));
+        let hit_in = self.player_hit(strike, armored);
+        let out = self.game_entities.actor_mut().receive_hit(hit_in);
         self.react_player(out, armored, shot_only, false, ctx)
     }
 
@@ -1465,8 +1472,9 @@ impl Playtest {
         if self.hazard_death_ticks_remaining != 0 {
             return false;
         }
-        let strike = Strike::parry(by, self.player.stance.active());
-        let out = self.player.receive_hit(self.player_hit(strike, false));
+        let strike = Strike::parry(by, self.game_entities.actor().stance.active());
+        let hit_in = self.player_hit(strike, false);
+        let out = self.game_entities.actor_mut().receive_hit(hit_in);
         self.react_player(out, false, false, true, ctx)
     }
 
@@ -1478,17 +1486,18 @@ impl Playtest {
     #[inline(never)]
     #[cfg_attr(target_arch = "mips", optimize(size))]
     pub(super) fn parry_on_player(&mut self, strike: Strike, ctx: &Ctx) {
-        let out = self.player.receive_hit(self.player_hit(strike, false));
+        let hit_in = self.player_hit(strike, false);
+        let out = self.game_entities.actor_mut().receive_hit(hit_in);
         if !out.parried {
             return;
         }
         telemetry::debug_log("player parry");
         self.duel_log_event(ctx, 0, duel::DUEL_EVENT_PARRY);
         let now = self.gameplay_tick(ctx.sim_tick);
-        let player = self.motor.position();
+        let player = self.game_entities.actor_motor().position();
         let height = self.character.map_or(0, |c| c.height.max(0) as u16);
         let attacker = usize::from(strike.attacker.0);
-        let zenith = self.player.stance.active() == VitalityChannelId::Two;
+        let zenith = self.game_entities.actor().stance.active() == VitalityChannelId::Two;
         self.player_flash
             .begin(&COMBAT_FEEDBACK, FlashKind::Parry, zenith);
         self.spawn_parry_burst(
@@ -1547,7 +1556,7 @@ impl Playtest {
         let zenith = self.game_entities.stance(index) == VitalityChannelId::Two;
         self.game_entities
             .start_flash(index, &COMBAT_FEEDBACK, FlashKind::Parry, zenith);
-        let player = self.motor.position();
+        let player = self.game_entities.actor_motor().position();
         self.spawn_parry_burst(
             self.game_entities.position(index),
             record.height,
@@ -1584,7 +1593,7 @@ impl Playtest {
             self.knock_player_down(ctx);
             return true;
         }
-        if self.player.knocked_down() || (shot_only && !poise_broken) {
+        if self.game_entities.actor().knocked_down() || (shot_only && !poise_broken) {
             return poise_broken;
         }
         // Player animation starts and locks use the absolute simulation clock.
@@ -1651,7 +1660,7 @@ impl Playtest {
     /// Drop every action, buffer and aim the player had going: a reaction
     /// owns her from here.
     fn interrupt_player_for_reaction(&mut self) {
-        self.motor.interrupt_action();
+        self.game_entities.actor_motor_mut().interrupt_action();
         self.ranged_ready = combat_input::RangedReady::EMPTY;
         self.aim_control = aim_control::AimControl::EMPTY;
         self.attack_buffer.clear();
@@ -1719,7 +1728,7 @@ impl Playtest {
         let (feet, height, room) = if hit.victim == CombatantId::PLAYER {
             self.player_flash
                 .begin(&COMBAT_FEEDBACK, hit.kind, hit.zenith);
-            let p = self.motor.position();
+            let p = self.game_entities.actor_motor().position();
             (
                 [p.x, p.y, p.z],
                 self.character.map_or(0, |c| c.height.max(0) as u16),
@@ -1857,7 +1866,10 @@ impl Playtest {
             authored: self
                 .player_combat_sample(ctx)
                 .active(psx_level::CombatWindowKind::Invulnerable),
-            dodge: self.motor.is_action_invulnerable(config),
+            dodge: self
+                .game_entities
+                .actor_motor()
+                .is_action_invulnerable(config),
         }
     }
 
@@ -1873,7 +1885,7 @@ impl Playtest {
     pub(super) fn player_defender(&self, ctx: &Ctx) -> Defender<'_> {
         let config = self.motor_config();
         Defender {
-            combatant: &self.player,
+            combatant: &self.game_entities.actor(),
             swap_invulnerable_ticks: config.roll_invulnerable_frames,
             parry_ticks: self.player_stats.parry_ticks,
             action: self.player_action_protection(ctx, config),
@@ -2000,7 +2012,7 @@ impl Playtest {
         if let Some(character) = self.character.as_ref() {
             draw_collision_cylinder_debug(
                 gpu,
-                self.motor.position(),
+                self.game_entities.actor_motor().position(),
                 character.radius,
                 character.height,
                 camera,
@@ -2399,8 +2411,8 @@ impl Playtest {
         moving: bool,
     ) -> ThirdPersonCameraTarget {
         ThirdPersonCameraTarget {
-            player: self.motor.position(),
-            player_yaw: self.motor.yaw(),
+            player: self.game_entities.actor_motor().position(),
+            player_yaw: self.game_entities.actor_motor().yaw(),
             moving,
             lock_target,
         }
@@ -2481,7 +2493,7 @@ impl Playtest {
         }
         #[cfg(feature = "camera-pose-log")]
         {
-            let player = self.motor.position();
+            let player = self.game_entities.actor_motor().position();
             let eye = self.camera.position();
             let focus = self.camera.focus();
             let (right_x, _) = ctx.pad.sticks.right_centered();
@@ -2692,7 +2704,7 @@ impl Playtest {
     }
 
     pub(super) fn find_best_interactable(&mut self) -> Option<usize> {
-        let player = self.motor.position();
+        let player = self.game_entities.actor_motor().position();
         let mut best = None;
         let mut best_distance = u32::MAX;
         for (index, interactable) in INTERACTABLES.iter().enumerate() {
@@ -2799,8 +2811,8 @@ impl Playtest {
                 self.set_checkpoint(
                     RuntimeCheckpoint {
                         room: self.room_index,
-                        position: self.motor.position(),
-                        yaw: self.motor.yaw(),
+                        position: self.game_entities.actor_motor().position(),
+                        yaw: self.game_entities.actor_motor().yaw(),
                         checkpoint_id: interactable.checkpoint_id,
                     },
                     port,
@@ -2917,7 +2929,8 @@ impl Playtest {
         let Some(target) = self.target_position(index) else {
             return false;
         };
-        distance_xz_sq(self.motor.position(), target) <= square_i32_saturating(range)
+        distance_xz_sq(self.game_entities.actor_motor().position(), target)
+            <= square_i32_saturating(range)
     }
 
     pub(super) fn find_best_lock_target(&self, range: i32) -> Option<usize> {
@@ -2928,7 +2941,7 @@ impl Playtest {
     // update, which otherwise inlines it whole (1.6 KB on the PS1).
     #[inline(never)]
     pub(super) fn find_lock_target(&self, range: i32, aiming: bool) -> Option<usize> {
-        let player = self.motor.position();
+        let player = self.game_entities.actor_motor().position();
         let view_yaw = self.camera.yaw().add(Angle::HALF);
         let range_sq = square_i32_saturating(range);
         let mut best: Option<(usize, i32)> = None;
@@ -3037,7 +3050,7 @@ impl Playtest {
             self.lock_target = None;
             return;
         };
-        let player = self.motor.position();
+        let player = self.game_entities.actor_motor().position();
         let view_yaw = self.camera.yaw().add(Angle::HALF);
         let Some((current_screen_x, _)) = horizontal_view_coordinates(player, current, view_yaw)
         else {
@@ -3499,7 +3512,7 @@ mod life_reset_tests {
         assert_eq!(scene.evade_buffer_vblanks, 0);
         assert!(!scene.gameplay_epoch_set);
         assert_eq!(scene.hazard_death_ticks_remaining, 0);
-        assert_eq!(scene.player.health(), PLAYER_MAX_HEALTH);
+        assert_eq!(scene.game_entities.actor().health(), PLAYER_MAX_HEALTH);
         assert!(scene.power_up_inventory.is_empty());
         assert!(scene.checkpoint.is_none());
         assert_eq!(scene.game_entities.count(), GAME_ENTITIES.len());
@@ -3527,15 +3540,18 @@ mod life_reset_tests {
         // An untyped hit and a hazard hit bigger than the bar both kill:
         // there is no other pool to swap into.
         assert!(scene.apply_untyped_player_damage(1000));
-        assert!(scene.player.defeated());
-        scene.player.reset(&scene.player_stats);
+        assert!(scene.game_entities.actor().defeated());
+        scene.game_entities.actor_mut().reset(&scene.player_stats);
         assert!(scene.apply_hazard_player_damage(1000));
-        assert!(scene.player.defeated());
+        assert!(scene.game_entities.actor_mut().defeated());
         // A small hit takes only what it deals.
-        scene.player.reset(&scene.player_stats);
+        scene.game_entities.actor_mut().reset(&scene.player_stats);
         assert!(!scene.apply_hazard_player_damage(10));
-        assert!(!scene.player.defeated());
-        assert_eq!(scene.player.health(), PLAYER_MAX_HEALTH - 10);
+        assert!(!scene.game_entities.actor_mut().defeated());
+        assert_eq!(
+            scene.game_entities.actor_mut().health(),
+            PLAYER_MAX_HEALTH - 10
+        );
     }
 
     #[test]
@@ -3551,8 +3567,8 @@ mod life_reset_tests {
         let mut storage = unsafe { std::boxed::Box::from_raw(raw) };
         let scene = &mut *storage;
         let config = scene.player_stance_config;
-        assert!(scene.player.stance.request_swap(&config));
-        scene.player.health.apply_damage(150);
+        assert!(scene.game_entities.actor_mut().stance.request_swap(&config));
+        scene.game_entities.actor_mut().health.apply_damage(150);
         scene.attack_buffer.request(1, 100);
         scene.evade_buffer_vblanks = 8;
         scene.swing_hit_mask = 3;
@@ -3582,9 +3598,12 @@ mod life_reset_tests {
         assert_eq!(scene.evade_buffer_vblanks, 0);
         assert_eq!(scene.swing_hit_mask, 0);
         assert!(!scene.camera_recenter_requested);
-        assert_eq!(scene.player.stance.active(), VitalityChannelId::One);
-        assert!(scene.player.stance.can_swap());
-        assert_eq!(scene.player.health(), PLAYER_MAX_HEALTH);
+        assert_eq!(
+            scene.game_entities.actor().stance.active(),
+            VitalityChannelId::One
+        );
+        assert!(scene.game_entities.actor().stance.can_swap());
+        assert_eq!(scene.game_entities.actor().health(), PLAYER_MAX_HEALTH);
         assert_eq!(
             scene.souls.total(),
             50,

@@ -38,7 +38,7 @@ impl Playtest {
         let Some(index) = self.hook_attached else {
             return target;
         };
-        let p = self.motor.position();
+        let p = self.game_entities.actor_motor().position();
         let dx = target[0] - p.x;
         let dz = target[2] - p.z;
         let facing = Self::arch_facing(index);
@@ -69,9 +69,9 @@ impl Playtest {
         if let Some(target) = self.lock_target_indicator_position() {
             // Anchor the offset to the player/target axis, not the pursuing
             // camera, so following it cannot feed back into the aim point.
-            let player = self.motor.position();
+            let player = self.game_entities.actor_motor().position();
             let back = psx_engine::yaw_to_point(player, target)
-                .unwrap_or(self.motor.yaw())
+                .unwrap_or(self.game_entities.actor_motor().yaw())
                 .add(Angle::HALF);
             let depth = psx_math::int32::isqrt_i32(distance_xz_sq(player, target))
                 .saturating_add(self.camera.distance())
@@ -89,8 +89,8 @@ impl Playtest {
             ];
         }
         if !self.ranged_ready.aiming() {
-            let p = self.motor.position();
-            let yaw = self.motor.yaw();
+            let p = self.game_entities.actor_motor().position();
+            let yaw = self.game_entities.actor_motor().yaw();
             return [
                 p.x + yaw.sin().mul_i32(2048),
                 p.y + self.motor_config().height / 2,
@@ -110,13 +110,16 @@ impl Playtest {
 
     pub(super) fn ranged_facing_yaw(&self) -> Angle {
         let t = self.ranged_target();
-        psx_engine::yaw_to_point(self.motor.position(), RoomPoint::new(t[0], t[1], t[2]))
-            .unwrap_or(self.motor.yaw())
+        psx_engine::yaw_to_point(
+            self.game_entities.actor_motor().position(),
+            RoomPoint::new(t[0], t[1], t[2]),
+        )
+        .unwrap_or(self.game_entities.actor_motor().yaw())
     }
 
     pub(super) fn release_player_projectile(&mut self, ctx: &Ctx) {
         if !self.ranged_ready.firing(ctx.sim_tick.as_u32())
-            || self.player.stance.active() != VitalityChannelId::Two
+            || self.game_entities.actor().stance.active() != VitalityChannelId::Two
         {
             return;
         }
@@ -143,7 +146,7 @@ impl Playtest {
             self.player_action_speed_q8(&c, PlayerAnim::RangedAttack),
             c.action_frame_range(CharacterAnimationAction::RangedAttack),
         );
-        let p = self.motor.position();
+        let p = self.game_entities.actor_motor().position();
         self.release_projectiles(
             ctx,
             Volley {

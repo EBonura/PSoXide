@@ -295,7 +295,7 @@ impl Playtest {
             sort_probe_class(SORT_CLASS_WORLD);
             let cinematic_visibility = (self.opening.active() && !self.opening.gameplay_camera())
                 .then(|| {
-                    let player = self.motor.position();
+                    let player = self.game_entities.actor_motor().position();
                     RoomPoint::new(player.x, player.y + 32, player.z)
                 });
             visible_sky_aperture = world_rt.draw(
@@ -510,12 +510,13 @@ impl Scene for Playtest {
             }
             LevelUiValueBinding::PlayerEnergyMax => Some(PLAYER_HEALTH_MAX_Q12),
             LevelUiValueBinding::PlayerStanceSwapProgress => Some(i32::from(
-                self.player
+                self.game_entities
+                    .actor()
                     .stance
                     .swap_progress_q12(&self.player_stance_config),
             )),
             LevelUiValueBinding::PlayerStanceActiveIsZenith => Some(i32::from(
-                self.player.stance.active() == VitalityChannelId::Two,
+                self.game_entities.actor().stance.active() == VitalityChannelId::Two,
             )),
             LevelUiValueBinding::PlayerHealthEmptyInfluence => {
                 Some(i32::from(bars.health.influence_q12(VitalityPole::Empty)))
@@ -529,7 +530,9 @@ impl Scene for Playtest {
             LevelUiValueBinding::PlayerEnergyFullInfluence => {
                 Some(i32::from(bars.energy.influence_q12(VitalityPole::Full)))
             }
-            LevelUiValueBinding::PlayerStamina => Some(self.motor.stamina_q12()),
+            LevelUiValueBinding::PlayerStamina => {
+                Some(self.game_entities.actor_motor().stamina_q12())
+            }
             LevelUiValueBinding::PlayerStaminaMax => Some(self.motor_config().stamina_max_q12),
             _ => None,
         }
@@ -1143,10 +1146,11 @@ impl Scene for Playtest {
             return;
         }
         let swapping = self
-            .player
+            .game_entities
+            .actor()
             .stance
             .swap_in_progress(&self.player_stance_config);
-        self.player.tick(
+        self.game_entities.actor_mut().tick(
             1,
             matches!(
                 self.anim_state,
@@ -1311,7 +1315,7 @@ impl Scene for Playtest {
                         (m[2][2] as i32 + 4096) as u32,
                     );
                 }
-                let player = self.motor.position();
+                let player = self.game_entities.actor_motor().position();
                 // Borrows only the world, so the draw calls below may take other fields
                 // mutably while the lighting is alive.
                 let player_lighting = crate::playtest_runtime::room_lighting_of(
@@ -1367,12 +1371,12 @@ impl Scene for Playtest {
                 let player_lighting = player_lighting.filter(|_| !camera_in_player);
                 let stance_crystal_material = self
                     .stance_cluts
-                    .crystal_material(character, self.player.stance.active());
+                    .crystal_material(character, self.game_entities.actor().stance.active());
                 let flash_q8 = self.player_flash.weight_q8(&COMBAT_FEEDBACK);
                 let player_draw =
                     player_lighting.map_or(PlayerModelDrawStats::default(), |lighting| {
                         let phase_assembly = player_phase_assembly(
-                            self.player.stance,
+                            self.game_entities.actor().stance,
                             &self.player_stance_config,
                             player,
                             player_phase_height(character),
@@ -1382,8 +1386,10 @@ impl Scene for Playtest {
                         let stance_clut = if self.player_flash.solid(&COMBAT_FEEDBACK) {
                             self.stance_cluts.player_flash_clut(character)
                         } else {
-                            self.stance_cluts
-                                .player_override_clut(character, self.player.stance.active())
+                            self.stance_cluts.player_override_clut(
+                                character,
+                                self.game_entities.actor().stance.active(),
+                            )
                         };
                         draw_player(
                             self.room_index,
@@ -1402,7 +1408,9 @@ impl Scene for Playtest {
                             stance_clut,
                             self.player_flash.lit_tint(
                                 &COMBAT_FEEDBACK,
-                                Some(player_stance_lit_tint(self.player.stance.active())),
+                                Some(player_stance_lit_tint(
+                                    self.game_entities.actor().stance.active(),
+                                )),
                             ),
                             &mut primitive_packets,
                             &mut world,
@@ -1413,9 +1421,9 @@ impl Scene for Playtest {
                 if !camera_in_player && player_lighting.is_some() {
                     self.player_scarf.draw_crystal_with_dash(
                         camera,
-                        stance_rgb(self.player.stance.active()),
+                        stance_rgb(self.game_entities.actor().stance.active()),
                         player_phase_assembly(
-                            self.player.stance,
+                            self.game_entities.actor().stance,
                             &self.player_stance_config,
                             player,
                             player_phase_height(character),
@@ -1736,7 +1744,7 @@ impl Scene for Playtest {
         if self.hook_selected.is_none()
             && self.player_has_ranged_weapon()
             && self.ranged_ready.aiming()
-            && self.player.stance.active() == VitalityChannelId::Two
+            && self.game_entities.actor().stance.active() == VitalityChannelId::Two
         {
             let center = if self.is_locked() {
                 let [x, y, z] = self.ranged_target();
@@ -1749,7 +1757,12 @@ impl Scene for Playtest {
                 ))
             };
             if let Some(center) = center {
-                draw_target_reticle(gpu, center, overlay_tick, self.player.stance.active());
+                draw_target_reticle(
+                    gpu,
+                    center,
+                    overlay_tick,
+                    self.game_entities.actor().stance.active(),
+                );
             }
         } else if let Some(target) = self.lock_target_indicator_position() {
             draw_lock_target_indicator(
@@ -1757,7 +1770,7 @@ impl Scene for Playtest {
                 target,
                 camera,
                 overlay_tick,
-                self.player.stance.active(),
+                self.game_entities.actor().stance.active(),
             );
         }
 
@@ -1826,7 +1839,10 @@ impl Scene for Playtest {
         if !self.inventory_overlay_active {
             if let Some(font) = self.ui_fonts[0].as_ref() {
                 if self.player_has_ranged_weapon() {
-                    if let Some(air_left) = self.hook_attached.map(|_| self.player.flow.air_left) {
+                    if let Some(air_left) = self
+                        .hook_attached
+                        .map(|_| self.game_entities.actor().flow.air_left)
+                    {
                         draw_tether_meter(gpu, font, air_left);
                     }
                 }

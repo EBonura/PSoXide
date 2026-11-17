@@ -603,7 +603,7 @@ impl Playtest {
 
     fn player_defence(&self, ctx: &Ctx) -> PlayerDefence {
         let defender = self.player_defender(ctx);
-        let player = self.motor.position();
+        let player = self.game_entities.actor_motor().position();
         let (radius, height) = match &self.character {
             Some(character) => (character.radius, character.height),
             None if self.world_rt.is_some() => (WORLD_PLAYER_RADIUS, WORLD_PLAYER_HEIGHT),
@@ -772,7 +772,7 @@ impl Playtest {
                     Strike {
                         attacker,
                         kind: HitKind::Melee,
-                        channel: self.player.stance.active(),
+                        channel: self.game_entities.actor().stance.active(),
                         damage,
                         poise: poise_damage,
                         crit: false,
@@ -950,23 +950,24 @@ impl Playtest {
                 telemetry::debug_log("enemy projectile:player-hit");
                 taken.hits = taken.hits.saturating_add(1);
                 let exposed = self.player_shot_opening();
-                taken.shot_opening |= exposed && self.player.flow.can_interrupt();
+                taken.shot_opening |= exposed && self.game_entities.actor().flow.can_interrupt();
                 // The tick's posture lands summed and unscaled, so each bolt
                 // takes the stance rule here, by its own channel.
-                let poise = self.player.flow.shot_poise(
+                let poise = self.game_entities.actor().flow.shot_poise(
                     impact.poise_damage,
                     self.player_stats.poise,
                     exposed,
                 );
                 let (_, poise) = stance_scaled(
                     &self.player_stats,
-                    self.player
+                    self.game_entities
+                        .actor()
                         .opposes(projectile_vitality_channel(impact.damage_channel)),
                     0,
                     poise,
                 );
                 taken.poise = taken.poise.saturating_add(poise);
-                if exposed && self.player.flow.can_interrupt() {
+                if exposed && self.game_entities.actor().flow.can_interrupt() {
                     telemetry::debug_log("flow:player-shot-interrupt");
                 }
                 match impact.damage_channel {
@@ -1022,7 +1023,10 @@ impl Playtest {
             self.entity_parried_player(index, ctx);
             return;
         }
-        self.player.flow.shot_hit(opening && outcome.staggered);
+        self.game_entities
+            .actor_mut()
+            .flow
+            .shot_hit(opening && outcome.staggered);
         if opening && outcome.staggered {
             telemetry::debug_log("flow:enemy-shot-interrupt");
             self.duel_log_flow(ctx, 0);
@@ -1172,7 +1176,7 @@ impl Playtest {
             player.position,
             player.height.max(0) as u16,
             self.room_index,
-            self.player.stance.active() == VitalityChannelId::Two,
+            self.game_entities.actor().stance.active() == VitalityChannelId::Two,
             staggered,
             self.hazard_death_ticks_remaining != 0,
         );
@@ -1380,7 +1384,7 @@ impl Playtest {
         if crit_released {
             let actor = match volley.shooter {
                 Shooter::Player => {
-                    self.player.spend_crit();
+                    self.game_entities.actor_mut().spend_crit();
                     0
                 }
                 Shooter::Entity(attack) => {
@@ -1395,7 +1399,7 @@ impl Playtest {
     /// Whether the shooter's volley under way is a crit.
     fn shooter_crit_armed(&self, shooter: Shooter) -> bool {
         match shooter {
-            Shooter::Player => self.player.crit_attack,
+            Shooter::Player => self.game_entities.actor().crit_attack,
             Shooter::Entity(attack) => self.game_entities.attack_is_crit(attack.entity()),
         }
     }
@@ -1403,7 +1407,11 @@ impl Playtest {
     /// Damage and poise of one of the shooter's bolts through its crit.
     fn shooter_crit_scaled(&self, shooter: Shooter, damage: u16, poise: u16) -> (u16, u16) {
         match shooter {
-            Shooter::Player => self.player.crit_scaled(&self.player_stats, damage, poise),
+            Shooter::Player => {
+                self.game_entities
+                    .actor()
+                    .crit_scaled(&self.player_stats, damage, poise)
+            }
             Shooter::Entity(attack) => self.game_entities.crit_scaled(
                 GAME_ENTITIES.as_slice(),
                 attack.entity(),
@@ -1415,7 +1423,11 @@ impl Playtest {
 
     fn shooter_can_shoot(&self, shooter: Shooter) -> bool {
         match shooter {
-            Shooter::Player => self.player.flow.can_shoot(&self.player_stats),
+            Shooter::Player => self
+                .game_entities
+                .actor()
+                .flow
+                .can_shoot(&self.player_stats),
             Shooter::Entity(attack) => GAME_ENTITIES
                 .get(attack.entity())
                 .is_some_and(|record| self.game_entities.can_fire_energy(record, attack.entity())),
@@ -1425,7 +1437,11 @@ impl Playtest {
     fn shooter_spend_shot(&mut self, shooter: Shooter) {
         match shooter {
             Shooter::Player => {
-                let _ = self.player.flow.spend_shot(&self.player_stats);
+                let _ = self
+                    .game_entities
+                    .actor_mut()
+                    .flow
+                    .spend_shot(&self.player_stats);
             }
             Shooter::Entity(attack) => {
                 if let Some(record) = GAME_ENTITIES.get(attack.entity()) {
@@ -1455,7 +1471,7 @@ impl Playtest {
             return;
         }
         let (side, energy) = match shooter {
-            Shooter::Player => (0, self.player.flow.energy),
+            Shooter::Player => (0, self.game_entities.actor().flow.energy),
             Shooter::Entity(attack) => (1, self.game_entities.energy(attack.entity())),
         };
         duel::log_values(
@@ -1614,7 +1630,7 @@ impl Playtest {
         let first = entity.combat_capsule_first.to_usize();
         let end = first + usize::from(entity.combat_capsule_count);
         let capsules = COMBAT_CAPSULES.get(first..end).unwrap_or(&[]);
-        let player = self.motor.position();
+        let player = self.game_entities.actor_motor().position();
         if !attack.is_ranged() {
             if combat::melee_tell_tracks(capsules, attack.action(), phase) {
                 self.game_entities.track_authored_melee_tell(
@@ -1770,12 +1786,12 @@ impl Playtest {
         if !spec.frame_active(phase >> 12) {
             return;
         }
-        let player = self.motor.position();
+        let player = self.game_entities.actor_motor().position();
         let arc = MeleeArc {
             room: self.room_index,
             x: player.x,
             z: player.z,
-            yaw: self.motor.yaw().as_q12(),
+            yaw: self.game_entities.actor_motor().yaw().as_q12(),
             reach: spec.reach,
             half_angle: spec.half_angle,
         };
@@ -1792,8 +1808,8 @@ impl Playtest {
             spec.reach.clamp(0, i32::from(u16::MAX)) as u16,
             vitality_channel,
         );
-        let crit = self.player.crit_attack;
-        let (outgoing_damage, poise_damage) = self.player.crit_scaled(
+        let crit = self.game_entities.actor().crit_attack;
+        let (outgoing_damage, poise_damage) = self.game_entities.actor().crit_scaled(
             &self.player_stats,
             self.vitality_modifiers()
                 .outgoing_damage(vitality_channel, spec.damage),
@@ -1875,7 +1891,9 @@ impl Playtest {
     #[inline(never)]
     #[cfg_attr(target_arch = "mips", optimize(size))]
     pub(super) fn spend_player_melee_crit(&mut self, stats: MeleeArcStats, ctx: &Ctx) {
-        if stats.hits.saturating_add(stats.parries) > 0 && self.player.spend_crit() {
+        if stats.hits.saturating_add(stats.parries) > 0
+            && self.game_entities.actor_mut().spend_crit()
+        {
             self.duel_log_event(ctx, 0, duel::DUEL_EVENT_CRIT);
         }
     }
@@ -1958,7 +1976,7 @@ impl Playtest {
                 state == psx_game_runtime::entities::GameEntityState::Staggered,
                 state == psx_game_runtime::entities::GameEntityState::Dead,
             );
-            let player = self.motor.position();
+            let player = self.game_entities.actor_motor().position();
             self.show_hit(LandedHit {
                 victim: CombatantId::entity(entity),
                 contact_from: Some([player.x, player.y, player.z]),
@@ -1982,8 +2000,8 @@ impl Playtest {
     /// forward volume. This is deliberately separate from projectile traces:
     /// only the authored/legacy melee windows above call it.
     fn damage_player_environment_melee(&mut self, reach: i32, channel: DamageChannel, damage: u16) {
-        let player = self.motor.position();
-        let yaw = self.motor.yaw();
+        let player = self.game_entities.actor_motor().position();
+        let yaw = self.game_entities.actor_motor().yaw();
         let reach = reach.max(0);
         let radius = self
             .character
@@ -2138,7 +2156,7 @@ impl Playtest {
         prop_blockers: &[CharacterCollisionAabb],
     ) -> Option<MeleeArcStats> {
         let now = self.gameplay_tick(ctx.sim_tick);
-        let crit = self.player.crit_attack;
+        let crit = self.game_entities.actor().crit_attack;
         let first = character.combat_capsule_first.to_usize();
         let end = first.saturating_add(usize::from(character.combat_capsule_count));
         let records = COMBAT_CAPSULES.get(first..end)?;
@@ -2184,7 +2202,7 @@ impl Playtest {
             ) else {
                 continue;
             };
-            let (damage, poise_damage) = self.player.crit_scaled(
+            let (damage, poise_damage) = self.game_entities.actor().crit_scaled(
                 &self.player_stats,
                 self.vitality_modifiers()
                     .outgoing_damage(Self::player_attack_channel(self.anim_state), record.damage),
@@ -2206,7 +2224,7 @@ impl Playtest {
         }
 
         let vitality_channel = Self::player_attack_channel(self.anim_state);
-        let player = self.motor.position();
+        let player = self.game_entities.actor_motor().position();
         self.vitality_circles.claim_struck(
             VITALITY_CIRCLES.as_slice(),
             self.room_index,
@@ -2287,7 +2305,7 @@ impl Playtest {
                 // between the actors blocks the connection without latching
                 // the swing bit, so the same swing can still land once the
                 // door finishes opening inside the active window.
-                let player = self.motor.position();
+                let player = self.game_entities.actor_motor().position();
                 if !self.melee_line_clear([player.x, player.y, player.z], position, prop_blockers) {
                     entity += 1;
                     continue;
@@ -2320,7 +2338,7 @@ impl Playtest {
                         self.anim_state,
                         PlayerAnim::HeavyAttack | PlayerAnim::VertHeavyAttack
                     ) {
-                        let p = self.motor.position();
+                        let p = self.game_entities.actor_motor().position();
                         self.game_entities.recoil_from(entity, [p.x, p.y, p.z]);
                     }
                     // Spawned here rather than from the returned stats
@@ -2417,7 +2435,10 @@ impl Playtest {
                 PlayerAnim::HeavyAttack | PlayerAnim::VertHeavyAttack
             );
             for _ in 0..stats.hits {
-                self.player.flow.melee_hit(heavy, &self.player_stats);
+                self.game_entities
+                    .actor_mut()
+                    .flow
+                    .melee_hit(heavy, &self.player_stats);
             }
             telemetry::counter(telemetry::counter::PLAYER_MELEE_HITS, u32::from(stats.hits));
             let event = if matches!(
@@ -2541,8 +2562,8 @@ impl Playtest {
                     self.set_checkpoint(
                         RuntimeCheckpoint {
                             room: self.room_index,
-                            position: self.motor.position(),
-                            yaw: self.motor.yaw(),
+                            position: self.game_entities.actor_motor().position(),
+                            yaw: self.game_entities.actor_motor().yaw(),
                             checkpoint_id: interactable_for_logic(index)
                                 .map(|interactable| interactable.checkpoint_id)
                                 .unwrap_or(""),
@@ -2581,7 +2602,7 @@ impl Playtest {
         let mut toward_max = push.toward_max;
         if push.tie {
             // Dead centre: carry on the way she faces.
-            let yaw = self.motor.yaw();
+            let yaw = self.game_entities.actor_motor().yaw();
             let facing = if push.axis_z {
                 yaw.cos_q12()
             } else {
@@ -2623,7 +2644,7 @@ impl Playtest {
             (signed, 0)
         };
         let config = self.motor_config();
-        let start = self.motor.position();
+        let start = self.game_entities.actor_motor().position();
         let Some(world_rt) = self.world_rt.as_mut() else {
             self.hazard_push_left = 0;
             return;
@@ -2651,7 +2672,7 @@ impl Playtest {
             });
         match moved {
             Some(end) => {
-                self.motor.relocate(end);
+                self.game_entities.actor_motor_mut().relocate(end);
                 self.hazard_push_left -= step as u16;
             }
             None => self.hazard_push_left = 0,

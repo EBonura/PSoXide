@@ -873,7 +873,7 @@ impl Playtest {
     /// Freeze actor presentation after the simulation tick. Rendering,
     /// equipment sockets, and combat consume these values until the next tick.
     pub(super) fn refresh_actor_pose_snapshots(&mut self, ctx: &Ctx) {
-        let player = self.motor.position();
+        let player = self.game_entities.actor_motor().position();
         self.previous_player_actor_pose = self.player_actor_pose;
         // `RuntimeCharacter` is 672 bytes and the R3000A has no data cache, so
         // every by-value hop through this path is a full-latency RAM copy. The
@@ -914,7 +914,7 @@ impl Playtest {
                     player.x,
                     player.y,
                     player.z,
-                    self.motor.yaw(),
+                    self.game_entities.actor_motor().yaw(),
                     self.anim_state.action(),
                     clip_local,
                     self.anim_start_tick,

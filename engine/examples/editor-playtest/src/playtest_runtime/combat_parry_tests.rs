@@ -50,8 +50,8 @@ pub(super) fn duel() -> std::boxed::Box<Playtest> {
 /// clock advance of that same frame.
 pub(super) fn player_swaps(scene: &mut Playtest) {
     let cooldown = scene.player_stance_config.swap_cooldown_ticks;
-    assert!(scene.player.request_swap(cooldown));
-    scene.player.advance_stance(1);
+    assert!(scene.game_entities.actor_mut().request_swap(cooldown));
+    scene.game_entities.actor_mut().advance_stance(1);
 }
 
 /// The enemy's swap in its tick, then the per-frame clock advance the scene
@@ -104,22 +104,26 @@ fn tick_enemy(scene: &mut Playtest, ticks: u16) {
 fn the_player_parries_an_enemy_bolt_early_in_her_swap() {
     let mut scene = duel();
     player_swaps(&mut scene);
-    scene.player.flow.energy = 0;
-    assert_ne!(scene.player.stance.swap_cooldown(), 0);
-    let health = scene.player.health();
+    scene.game_entities.actor_mut().flow.energy = 0;
+    assert_ne!(scene.game_entities.actor_mut().stance.swap_cooldown(), 0);
+    let health = scene.game_entities.actor_mut().health();
     scene
         .combat_projectiles
         .spawn(shot_at(CombatTeam::Enemy))
         .unwrap();
     scene.resolve_combat(&ctx(100));
-    assert_eq!(scene.player.health(), health, "nothing landed");
+    assert_eq!(
+        scene.game_entities.actor().health(),
+        health,
+        "nothing landed"
+    );
     // (a) the attacker is staggered through its own receive_hit.
     assert_eq!(scene.game_entities.state(0), GameEntityState::Staggered);
     // (b) the refund, (c) the cooldown, (d) the crit.
     let stats = scene.player_stats;
-    assert_eq!(scene.player.flow.energy, stats.parry_refund);
-    assert_eq!(scene.player.stance.swap_cooldown(), 0);
-    assert_eq!(scene.player.crit, stats.crit_window_ticks);
+    assert_eq!(scene.game_entities.actor().flow.energy, stats.parry_refund);
+    assert_eq!(scene.game_entities.actor().stance.swap_cooldown(), 0);
+    assert_eq!(scene.game_entities.actor().crit, stats.crit_window_ticks);
     assert!(scene.combat_projectiles.is_empty(), "the bolt is spent");
 }
 
@@ -141,12 +145,15 @@ fn the_enemy_parries_a_player_bolt_early_in_its_swap() {
     assert_eq!(scene.game_entities.health(0), health, "nothing landed");
     // (a) the attacker (the player) is staggered through her receive_hit:
     // a posture break, her stagger reaction, and no knockdown.
-    assert_eq!(scene.player.flow.break_grace, BREAK_GRACE_TICKS_FOR_TEST);
+    assert_eq!(
+        scene.game_entities.actor().flow.break_grace,
+        BREAK_GRACE_TICKS_FOR_TEST
+    );
     assert!(matches!(
         scene.anim_state,
         PlayerAnim::Stun | PlayerAnim::HitReact
     ));
-    assert!(!scene.player.knocked_down());
+    assert!(!scene.game_entities.actor().knocked_down());
     // (b) the refund, (c) the cooldown, (d) the crit.
     assert_eq!(scene.game_entities.energy(0), record.combat.parry_refund);
     assert_eq!(scene.game_entities.stance_swap_cooldown(0), 0);
@@ -165,7 +172,7 @@ fn a_parried_attacker_is_staggered_not_knocked_down_on_both_sides() {
     assert!(outcome.staggered && !outcome.knocked_down);
     assert_eq!(scene.game_entities.state(0), GameEntityState::Staggered);
     assert!(scene.riposte_player(CombatantId::entity(0), &ctx(100)));
-    assert!(!scene.player.knocked_down());
+    assert!(!scene.game_entities.actor().knocked_down());
     assert_ne!(scene.anim_state, PlayerAnim::Knockdown);
 }
 
@@ -224,10 +231,14 @@ fn a_parried_attacker_plays_parried_on_both_sides() {
 fn the_world_is_never_parried_on_either_side() {
     let mut scene = duel();
     player_swaps(&mut scene);
-    let before = scene.player.health();
+    let before = scene.game_entities.actor().health();
     assert!(!scene.apply_hazard_player_damage(10));
-    assert_eq!(scene.player.health(), before - 10, "a hazard lands");
-    assert_eq!(scene.player.crit, 0);
+    assert_eq!(
+        scene.game_entities.actor().health(),
+        before - 10,
+        "a hazard lands"
+    );
+    assert_eq!(scene.game_entities.actor().crit, 0);
     enemy_swaps(&mut scene);
     let before = scene.game_entities.health(0);
     let strike = Strike {
@@ -255,19 +266,22 @@ fn a_late_swap_window_hit_on_the_player_does_nothing() {
     let mut scene = duel();
     player_swaps(&mut scene);
     let parry = scene.player_stats.parry_ticks;
-    scene.player.advance_stance(parry);
+    scene.game_entities.actor_mut().advance_stance(parry);
     assert!(scene.player_invulnerable(&ctx(100)));
-    let (health, energy) = (scene.player.health(), scene.player.flow.energy);
-    let cooldown = scene.player.stance.swap_cooldown();
+    let (health, energy) = (
+        scene.game_entities.actor_mut().health(),
+        scene.game_entities.actor_mut().flow.energy,
+    );
+    let cooldown = scene.game_entities.actor_mut().stance.swap_cooldown();
     scene
         .combat_projectiles
         .spawn(shot_at(CombatTeam::Enemy))
         .unwrap();
     scene.resolve_combat(&ctx(100));
-    assert_eq!(scene.player.health(), health);
-    assert_eq!(scene.player.flow.energy, energy);
-    assert_eq!(scene.player.stance.swap_cooldown(), cooldown);
-    assert_eq!(scene.player.crit, 0);
+    assert_eq!(scene.game_entities.actor().health(), health);
+    assert_eq!(scene.game_entities.actor().flow.energy, energy);
+    assert_eq!(scene.game_entities.actor().stance.swap_cooldown(), cooldown);
+    assert_eq!(scene.game_entities.actor().crit, 0);
     assert_ne!(scene.game_entities.state(0), GameEntityState::Staggered);
     assert_eq!(scene.combat_projectiles.len(), 1, "the bolt flew through");
 }
@@ -291,7 +305,11 @@ fn a_late_swap_window_hit_on_the_enemy_does_nothing() {
     assert_eq!(scene.game_entities.health(0), health);
     assert_eq!(scene.game_entities.stance_swap_cooldown(0), cooldown);
     assert!(!scene.game_entities.crit_armed(0));
-    assert_eq!(scene.player.flow.break_grace, 0, "no riposte");
+    assert_eq!(
+        scene.game_entities.actor().flow.break_grace,
+        0,
+        "no riposte"
+    );
     assert_eq!(scene.combat_projectiles.len(), 1, "the bolt flew through");
 }
 
@@ -314,7 +332,7 @@ fn player_crit_armed() -> std::boxed::Box<Playtest> {
         },
         &ctx(100),
     );
-    assert_ne!(scene.player.crit, 0);
+    assert_ne!(scene.game_entities.actor().crit, 0);
     scene
 }
 
@@ -343,13 +361,22 @@ fn a_crit_doubles_the_next_attack_and_is_used_up_by_it_on_both_sides() {
     let mut scene = player_crit_armed();
     let stats = scene.player_stats;
     // Armed, but nothing started yet: nothing doubles.
-    assert_eq!(scene.player.crit_scaled(&stats, 10, 7), (10, 7));
+    assert_eq!(
+        scene.game_entities.actor().crit_scaled(&stats, 10, 7),
+        (10, 7)
+    );
     // The player's next swing: doubled, then used up by the swing.
-    scene.player.start_attack();
-    assert_eq!(scene.player.crit_scaled(&stats, 10, 7), (20, 14));
+    scene.game_entities.actor_mut().start_attack();
+    assert_eq!(
+        scene.game_entities.actor_mut().crit_scaled(&stats, 10, 7),
+        (20, 14)
+    );
     scene.spend_player_melee_crit(swing(1), &ctx(101));
-    assert_eq!(scene.player.crit, 0);
-    assert_eq!(scene.player.crit_scaled(&stats, 10, 7), (10, 7));
+    assert_eq!(scene.game_entities.actor_mut().crit, 0);
+    assert_eq!(
+        scene.game_entities.actor().crit_scaled(&stats, 10, 7),
+        (10, 7)
+    );
     // The enemy's next attack, the same rule over its own stats.
     let mut scene = enemy_crit_armed();
     let records = GAME_ENTITIES.as_slice();
@@ -379,7 +406,7 @@ fn a_crit_doubles_the_next_attack_and_is_used_up_by_it_on_both_sides() {
 fn a_swing_that_reaches_no_one_keeps_the_crit() {
     let mut scene = player_crit_armed();
     scene.spend_player_melee_crit(swing(0), &ctx(101));
-    assert_ne!(scene.player.crit, 0);
+    assert_ne!(scene.game_entities.actor().crit, 0);
 }
 
 #[test]
@@ -387,11 +414,11 @@ fn an_unused_crit_expires_after_its_window_on_both_sides() {
     let mut scene = player_crit_armed();
     let window = scene.player_stats.crit_window_ticks;
     for _ in 1..window {
-        scene.player.tick(1, false, false);
+        scene.game_entities.actor_mut().tick(1, false, false);
     }
-    assert_ne!(scene.player.crit, 0);
-    scene.player.tick(1, false, false);
-    assert_eq!(scene.player.crit, 0);
+    assert_ne!(scene.game_entities.actor_mut().crit, 0);
+    scene.game_entities.actor_mut().tick(1, false, false);
+    assert_eq!(scene.game_entities.actor_mut().crit, 0);
     // The enemy parried inside its swap: its window waits for the swap
     // animation to end, then runs for the same ticks as the player's.
     let mut scene = enemy_crit_armed();
@@ -425,7 +452,7 @@ fn a_poise_break_knocks_the_player_down_and_she_gets_up() {
         false,
         &ctx(100)
     ));
-    assert!(scene.player.knocked_down());
+    assert!(scene.game_entities.actor().knocked_down());
     assert_eq!(scene.anim_state, PlayerAnim::Knockdown);
     assert_eq!(
         scene.anim_lock_until_tick,
@@ -433,7 +460,7 @@ fn a_poise_break_knocks_the_player_down_and_she_gets_up() {
         "locked out of every action and all movement while down"
     );
     // Down: a hit lands but cannot break her again or restart a reaction.
-    let health = scene.player.health();
+    let health = scene.game_entities.actor().health();
     assert!(!scene.react_player_to_hit(
         CombatantId::entity(0),
         1000,
@@ -443,14 +470,17 @@ fn a_poise_break_knocks_the_player_down_and_she_gets_up() {
         &ctx(101)
     ));
     assert!(!scene.player_take_damage(CombatantId::entity(0), HitKind::Melee, None, 5));
-    assert_eq!(scene.player.health(), health - 5);
+    assert_eq!(scene.game_entities.actor().health(), health - 5);
     assert_eq!(scene.anim_state, PlayerAnim::Knockdown);
     for _ in 1..down {
-        scene.player.tick(1, true, false);
+        scene.game_entities.actor_mut().tick(1, true, false);
     }
-    assert!(scene.player.knocked_down());
-    scene.player.tick(1, true, false);
-    assert!(!scene.player.knocked_down(), "up after her knockdown ticks");
+    assert!(scene.game_entities.actor_mut().knocked_down());
+    scene.game_entities.actor_mut().tick(1, true, false);
+    assert!(
+        !scene.game_entities.actor_mut().knocked_down(),
+        "up after her knockdown ticks"
+    );
 }
 
 #[test]
@@ -550,7 +580,7 @@ fn the_swap_and_parry_windows_are_exactly_each_characters_count() {
         let defender = scene.player_defender(&ctx(100));
         protected += u16::from(defender.invulnerable());
         parrying += u16::from(defender.parries());
-        scene.player.advance_stance(1);
+        scene.game_entities.actor_mut().advance_stance(1);
     }
     assert_eq!(protected, u16::from(TEST_I_FRAMES));
     assert_eq!(parrying, scene.player_stats.parry_ticks);
@@ -593,9 +623,12 @@ fn bursts(scene: &Playtest) -> std::vec::Vec<([u8; 3], [i32; 3])> {
 /// Horizon, so a parry in her second swap is a Horizon parry.
 fn player_swaps_back_to_horizon(scene: &mut Playtest) {
     player_swaps(scene);
-    scene.player.advance_stance(10_000);
+    scene.game_entities.actor_mut().advance_stance(10_000);
     player_swaps(scene);
-    assert_eq!(scene.player.stance.active(), VitalityChannelId::One);
+    assert_eq!(
+        scene.game_entities.actor_mut().stance.active(),
+        VitalityChannelId::One
+    );
 }
 
 #[test]
@@ -630,7 +663,7 @@ fn the_players_parry_flashes_her_and_bursts_in_her_stance_colour() {
         let found = bursts(&scene);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].0, rgb);
-        let player = scene.motor.position();
+        let player = scene.game_entities.actor_motor().position();
         let enemy = scene.game_entities.position(0);
         assert_eq!(found[0].1[0], player.x / 2 + enemy[0] / 2);
         assert_eq!(found[0].1[2], player.z / 2 + enemy[2] / 2);
@@ -692,7 +725,7 @@ fn a_flash_fades_out_and_a_hit_that_is_not_a_parry_shows_neither_tell() {
     let mut scene = duel();
     player_swaps(&mut scene);
     let parry = scene.player_stats.parry_ticks;
-    scene.player.advance_stance(parry);
+    scene.game_entities.actor_mut().advance_stance(parry);
     scene
         .combat_projectiles
         .spawn(shot_at(CombatTeam::Enemy))
@@ -755,6 +788,6 @@ fn a_crit_knocks_down_the_riposted_fighter_on_both_sides() {
         let broke =
             scene.react_player_to_hit(CombatantId::entity(0), poise, false, false, crit, &ctx(101));
         assert_eq!(broke, crit, "crit {crit}");
-        assert_eq!(scene.player.knocked_down(), crit);
+        assert_eq!(scene.game_entities.actor().knocked_down(), crit);
     }
 }

@@ -71,7 +71,7 @@ impl Playtest {
         }
         let facing = Self::arch_facing(index);
         let target = self.ranged_target();
-        let p = self.motor.position();
+        let p = self.game_entities.actor_motor().position();
         let dx = target[0] - p.x;
         let dz = target[2] - p.z;
         let yaw = psx_math::atan2_q12(dx, dz);
@@ -153,7 +153,7 @@ impl Playtest {
         {
             return;
         }
-        let player = self.motor.position();
+        let player = self.game_entities.actor_motor().position();
         let mut best = i32::MAX;
         for (slot, (index, hook)) in ENTITIES
             .iter()
@@ -227,7 +227,7 @@ impl Playtest {
             return false;
         }
         let landing = self.arch_perch(index, self.hook_overlay_absolute_tick());
-        let start = self.motor.position();
+        let start = self.game_entities.actor_motor().position();
         let Some(world_rt) = self.world_rt.as_mut() else {
             return false;
         };
@@ -250,7 +250,7 @@ impl Playtest {
     }
 
     pub(super) fn begin_hook(&mut self, now: SimTick) -> bool {
-        if self.player.flow.air_left == 0 {
+        if self.game_entities.actor().flow.air_left == 0 {
             return false;
         }
         let Some(index) = self.hook_selected else {
@@ -261,7 +261,7 @@ impl Playtest {
         }
         self.fall_from_arch = false;
         self.hook_travel = Some(HookTravel {
-            start: self.motor.position(),
+            start: self.game_entities.actor_motor().position(),
             landing: self.arch_perch(index, now.as_u32()),
             started: now.as_u32(),
         });
@@ -284,11 +284,12 @@ impl Playtest {
         self.anim_state = PlayerAnim::HookLaunch;
         self.anim_start_tick = now;
         self.anim_lock_until_tick = now;
-        self.motor.interrupt_action();
-        if let Some(yaw) =
-            psx_engine::yaw_to_point(self.motor.position(), self.arch_perch(index, now.as_u32()))
-        {
-            self.motor.face(yaw);
+        self.game_entities.actor_motor_mut().interrupt_action();
+        if let Some(yaw) = psx_engine::yaw_to_point(
+            self.game_entities.actor_motor_mut().position(),
+            self.arch_perch(index, now.as_u32()),
+        ) {
+            self.game_entities.actor_motor_mut().face(yaw);
         }
         self.queue_gameplay_sfx(LevelGameplaySfxEvent::StanceSwap);
         #[cfg(target_arch = "mips")]
@@ -307,7 +308,9 @@ impl Playtest {
     fn detach_arch(&mut self, now: SimTick) {
         self.fall_from_arch = self.hook_attached.is_some();
         if let Some(index) = self.hook_attached {
-            self.motor.face(Self::arch_facing(index));
+            self.game_entities
+                .actor_motor_mut()
+                .face(Self::arch_facing(index));
         }
         // Start the release pose on the same tick as detachment: otherwise
         // one ordinary standing/aim frame flashes before gravity resumes.
@@ -362,7 +365,7 @@ impl Playtest {
         if !self.world_rt.as_mut().is_some_and(|world_rt| {
             world_rt
                 .trace_hook_body(
-                    self.motor.position(),
+                    self.game_entities.actor_motor().position(),
                     next,
                     config,
                     &self.destructibles,
@@ -373,8 +376,8 @@ impl Playtest {
         }) {
             return false;
         }
-        let old = self.motor.position();
-        self.motor.teleport_to(next);
+        let old = self.game_entities.actor_motor().position();
+        self.game_entities.actor_motor_mut().teleport_to(next);
         self.camera.relocate_room_space(RoomPoint::new(
             next.x - old.x,
             next.y - old.y,
@@ -404,12 +407,14 @@ impl Playtest {
                 return true;
             }
         }
-        if self.player.air_tick(
-            self.hook_attached.is_some(),
-            self.hook_travel.is_none() && self.motor.grounded(),
-            self.ranged_ready.firing(ctx.sim_tick.as_u32()),
-            &self.player_stats,
-        ) {
+        let attached = self.hook_attached.is_some();
+        let grounded = self.hook_travel.is_none() && self.game_entities.actor_motor().grounded();
+        let firing = self.ranged_ready.firing(ctx.sim_tick.as_u32());
+        if self
+            .game_entities
+            .actor_mut()
+            .air_tick(attached, grounded, firing, &self.player_stats)
+        {
             self.detach_arch(ctx.sim_tick);
             telemetry::debug_log("arch:timeout");
             return false;
@@ -424,7 +429,8 @@ impl Playtest {
             return false;
         }
         let Some(mut flight) = self.hook_travel else {
-            self.hook_charge.tick(false, self.motor.grounded());
+            self.hook_charge
+                .tick(false, self.game_entities.actor_motor().grounded());
             return false;
         };
         if let Some(index) = self.hook_target {
@@ -450,7 +456,9 @@ impl Playtest {
             self.hook_travel = None;
             self.hook_attached = self.hook_target.take();
             if let Some(index) = self.hook_attached {
-                self.motor.face(Self::arch_facing(index));
+                self.game_entities
+                    .actor_motor_mut()
+                    .face(Self::arch_facing(index));
             }
             self.switch_player_anim(PlayerAnim::Idle, ctx.sim_tick, ctx.video_hz);
             telemetry::debug_log("arch:attached");

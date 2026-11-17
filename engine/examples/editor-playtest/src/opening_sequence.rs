@@ -353,13 +353,14 @@ use super::*;
 impl Playtest {
     /// Cinematics freeze the motor, so settle the authored spawn before doing so.
     pub(super) fn ground_opening_player(&mut self) {
-        let from = self.motor.position();
+        let from = self.game_entities.actor_motor().position();
         let depth = self.character.map_or(64, |character| character.height) * 4;
         let to = RoomPoint::new(from.x, from.y - depth, from.z);
         if let Some(world_rt) = self.world_rt.as_mut() {
             if let Ok(trace) = world_rt.trace_point_segment(from, to, &[], &self.destructibles) {
                 if trace.hit() && !trace.start_solid && trace.normal_q12[1] >= 2048 {
-                    self.motor.snap_to(trace.end, self.motor.yaw());
+                    let yaw = self.game_entities.actor_motor().yaw();
+                    self.game_entities.actor_motor_mut().snap_to(trace.end, yaw);
                 }
             }
         }

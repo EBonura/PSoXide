@@ -36,8 +36,8 @@ impl Playtest {
         self.box_props.break_for_movement(
             BOX_PROPS.as_slice(),
             self.room_index,
-            self.motor.position(),
-            self.motor.yaw(),
+            self.game_entities.actor_motor().position(),
+            self.game_entities.actor_motor().yaw(),
             trigger,
             input,
             config,
@@ -49,8 +49,8 @@ impl Playtest {
         self.box_props.break_for_attack(
             BOX_PROPS.as_slice(),
             self.room_index,
-            self.motor.position(),
-            self.motor.yaw(),
+            self.game_entities.actor_motor().position(),
+            self.game_entities.actor_motor().yaw(),
             config,
         );
     }

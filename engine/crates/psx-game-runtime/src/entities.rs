@@ -939,11 +939,21 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     /// [`Self::overflow_count`]; records without
     /// `game_entity_flags::ENABLED` spawn [`GameEntityState::Dead`]
     /// so indices stay stable.
+    /// The actor slot ([`Self::ACTOR_SLOT`]) keeps its body and fighter when
+    /// the records leave it free.
     // Shared by initial load, New Game and respawn; keep one copy on PS1.
     #[inline(never)]
     pub fn spawn_from_records(&mut self, records: &'static [LevelGameEntityRecord]) {
+        let actor = (
+            self.motors[Self::ACTOR_SLOT],
+            self.combatants[Self::ACTOR_SLOT],
+        );
         *self = Self::EMPTY;
         let count = records.len().min(MAX_ENTITIES);
+        if count <= Self::ACTOR_SLOT {
+            self.motors[Self::ACTOR_SLOT] = actor.0;
+            self.combatants[Self::ACTOR_SLOT] = actor.1;
+        }
         self.count = count as u16;
         self.overflow = (records.len() - count).min(u16::MAX as usize) as u16;
         for (index, record) in records.iter().enumerate().take(count) {
@@ -1200,6 +1210,39 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
                 dodge: self.motors[index].is_action_invulnerable(self.motor_config(record)),
             },
         })
+    }
+
+    /// The last slot: the fighter a controller outside the table drives (the
+    /// player's character). An owner that sizes the table one past its
+    /// records gets a slot the entity tick never runs and a spawn never
+    /// clears; its body and fighter are read and written through
+    /// [`Self::actor_motor`] and [`Self::actor`]. When the records fill the
+    /// table the slot is an ordinary entity.
+    pub const ACTOR_SLOT: usize = MAX_ENTITIES - 1;
+
+    /// The actor slot's body ([`Self::ACTOR_SLOT`]).
+    #[inline(always)]
+    pub fn actor_motor(&self) -> &CharacterMotorState {
+        &self.motors[Self::ACTOR_SLOT]
+    }
+
+    /// The actor slot's body, to drive ([`Self::ACTOR_SLOT`]).
+    #[inline(always)]
+    pub fn actor_motor_mut(&mut self) -> &mut CharacterMotorState {
+        &mut self.motors[Self::ACTOR_SLOT]
+    }
+
+    /// The actor slot's health, poise, energy and stance
+    /// ([`Self::ACTOR_SLOT`]).
+    #[inline(always)]
+    pub fn actor(&self) -> &Combatant {
+        &self.combatants[Self::ACTOR_SLOT]
+    }
+
+    /// The actor slot's fighter, to change ([`Self::ACTOR_SLOT`]).
+    #[inline(always)]
+    pub fn actor_mut(&mut self) -> &mut Combatant {
+        &mut self.combatants[Self::ACTOR_SLOT]
     }
 
     /// The body of entity `index`: the motor the player's character drives
@@ -1765,7 +1808,9 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         mut occluded: impl FnMut(usize, [i32; 3]) -> bool,
     ) -> MeleeArcStats {
         // psx-numeric-allow-next-line: the 64-record cap IS the mask width
-        const { assert!(MAX_ENTITIES <= 64, "swing mask is a u64") };
+        // The records stop at 64 (`psx_level::MAX_GAME_ENTITY_RECORDS`); a 65th
+        // slot can only be the actor slot, which no swing walks.
+        const { assert!(MAX_ENTITIES <= 65, "swing mask is a u64") };
         let mut stats = MeleeArcStats::default();
         let count = self.count().min(records.len());
         let mut entity = 0usize;

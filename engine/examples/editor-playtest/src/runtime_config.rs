@@ -447,9 +447,10 @@ pub(super) const LOGIC_FIRED_WORDS: usize = MAX_LOGIC_RECORDS.div_ceil(32);
 pub(super) const MAX_LOGIC_EVENTS: usize = if LEN_LOGIC == 0 { 0 } else { 32 };
 
 /// The crate souls-like entity state instantiated with this example's
-/// entity cap.
+/// entity cap, plus one slot past the records for the player (its
+/// `ACTOR_SLOT`).
 pub(super) type RuntimeGameEntities = psx_game_runtime::entities::GameEntities<
-    MAX_GAME_ENTITIES,
+    { MAX_GAME_ENTITIES + 1 },
     true,
     { crate::generated::ANY_TACTICAL_ENTITY },
 >;

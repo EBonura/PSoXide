@@ -195,7 +195,7 @@ impl Playtest {
             self.duel.next_think = ctx.sim_tick.as_u32() + 12;
             let i = self.duel.target;
             let record = &GAME_ENTITIES[i];
-            let p = self.motor.position();
+            let p = self.game_entities.actor_motor().position();
             let e = self.game_entities.position(i);
 
             let height = self.character.map_or(40, |c| c.height);
@@ -225,7 +225,7 @@ impl Playtest {
             let distance =
                 isqrt_i32(square_i32_saturating(dx).saturating_add(square_i32_saturating(dz)))
                     .max(1);
-            let active = self.player.stance.active();
+            let active = self.game_entities.actor().stance.active();
             let entry = i32::from(record.preferred_distance.max(record.attack_min_range))
                 + i32::from(record.spacing_tolerance);
             let melee = combat_policy::wants_melee(
@@ -244,7 +244,7 @@ impl Playtest {
             );
             let separated = distance
                 > (self.character.map_or(40, |c| c.radius) + i32::from(record.radius) + 24) * 2;
-            let wanted = if self.player.flow.preferred_stance(
+            let wanted = if self.game_entities.actor().flow.preferred_stance(
                 wanted.index() as u8,
                 separated,
                 &self.player_stats,
@@ -254,18 +254,20 @@ impl Playtest {
             } else {
                 VitalityChannelId::Two
             };
-            self.duel.reason =
-                self.player
-                    .flow
-                    .stance_reason(reason as u8, separated, &self.player_stats);
+            self.duel.reason = self.game_entities.actor().flow.stance_reason(
+                reason as u8,
+                separated,
+                &self.player_stats,
+            );
             self.duel.movement = [0, 0];
             self.duel.aim = false;
             self.duel.sprint = false;
             self.duel.intent = 0;
-            let free = self.motor.action().is_idle()
+            let free = self.game_entities.actor_motor().action().is_idle()
                 && self.anim_lock_until_tick <= ctx.sim_tick
                 && !self
-                    .player
+                    .game_entities
+                    .actor()
                     .stance
                     .swap_in_progress(&self.player_stance_config);
             // A parry armed a crit: spend it with the weapon the parry
@@ -274,21 +276,26 @@ impl Playtest {
             // straight back (a parry clears the swap cooldown). A strike may
             // start during the swap's own animation (the rules allow it).
             let crit = combat_policy::crit_followup(
-                self.player.crit != 0,
+                self.game_entities.actor().crit != 0,
                 active,
                 distance < self.character.map_or(40, |c| c.radius) + i32::from(record.radius) + 24,
-                self.player_has_ranged_weapon() && self.player.flow.can_shoot(&self.player_stats),
+                self.player_has_ranged_weapon()
+                    && self
+                        .game_entities
+                        .actor()
+                        .flow
+                        .can_shoot(&self.player_stats),
             )
             .filter(|_| {
                 visible
-                    && self.motor.action().is_idle()
+                    && self.game_entities.actor_motor().action().is_idle()
                     && self.anim_lock_until_tick <= ctx.sim_tick
             });
             let swapping = crit.is_none()
                 && visible
                 && wanted != active
                 && free
-                && self.player.stance.can_swap();
+                && self.game_entities.actor().stance.can_swap();
             if swapping {
                 buttons |= button::TRIANGLE;
                 self.duel.intent = 5;
@@ -321,7 +328,7 @@ impl Playtest {
                     self.duel.escape_until = ctx.sim_tick.as_u32() + 180;
                 }
                 if self.duel.escaping && ctx.sim_tick.as_u32() >= self.duel.escape_until {
-                    self.player.flow.contest_space();
+                    self.game_entities.actor_mut().flow.contest_space();
                     self.duel.escaping = false;
                 }
                 let mut direction = if !visible || distance > far {
@@ -331,7 +338,7 @@ impl Playtest {
                 } else {
                     0
                 };
-                if self.duel.escaping && self.motor.stamina_q12() > 768 {
+                if self.duel.escaping && self.game_entities.actor_motor().stamina_q12() > 768 {
                     self.duel.sprint = true;
                 }
                 let enemy_state = self.game_entities.state(i);
@@ -355,7 +362,7 @@ impl Playtest {
                     && self.game_entities.state_age(i) >= u16::from(record.windup_ticks) / 2
                     && distance < reach * 2
                     && free
-                    && self.motor.stamina_q12() > 768
+                    && self.game_entities.actor_motor().stamina_q12() > 768
                     && roll < 75
                 {
                     buttons |= button::CIRCLE;
@@ -364,13 +371,14 @@ impl Playtest {
                     self.duel.combat_role = 6;
                     self.duel.dodge_ready = ctx.sim_tick.as_u32() + 90;
                 } else if !ranged
-                    && (self.motor.stamina_q12() < 1024
+                    && (self.game_entities.actor_motor().stamina_q12() < 1024
                         || matches!(
                             enemy_state,
                             GameEntityState::Windup | GameEntityState::Attack
                         ))
                 {
-                    self.duel.combat_role = if self.motor.stamina_q12() < 1024 {
+                    self.duel.combat_role = if self.game_entities.actor_motor().stamina_q12() < 1024
+                    {
                         8
                     } else {
                         6
@@ -382,7 +390,8 @@ impl Playtest {
                     && !swapping
                     && wanted == active
                     && !self
-                        .player
+                        .game_entities
+                        .actor()
                         .stance
                         .swap_in_progress(&self.player_stance_config)
                     && ranged_order.is_none_or(|o| o.fire)
@@ -408,7 +417,13 @@ impl Playtest {
                         self.duel.repeats,
                         roll,
                     );
-                    if !ranged || self.player.flow.can_shoot(&self.player_stats) {
+                    if !ranged
+                        || self
+                            .game_entities
+                            .actor()
+                            .flow
+                            .can_shoot(&self.player_stats)
+                    {
                         buttons |= if kind == 0 { button::R1 } else { button::R2 };
                         self.duel.intent = if ranged { 3 } else { 2 };
                     }
@@ -422,7 +437,7 @@ impl Playtest {
                         }
                         self.duel.movement = self.duel.escape_heading;
                         if self.duel.movement == [0, 0] {
-                            self.player.flow.contest_space();
+                            self.game_entities.actor_mut().flow.contest_space();
                             self.duel.sprint = false;
                         }
                     } else {
@@ -448,7 +463,7 @@ impl Playtest {
                 };
                 if order.evade
                     && free
-                    && self.motor.stamina_q12() >= 1024
+                    && self.game_entities.actor_motor().stamina_q12() >= 1024
                     && ctx.sim_tick.as_u32() >= self.duel.dodge_ready
                 {
                     buttons |= button::CIRCLE;
@@ -478,7 +493,7 @@ impl Playtest {
         // Decisions stay at 5 Hz, but steering must stop at the chosen point.
         // Holding a 12-tick-old direction overshoots small cover/peek targets.
         if (1..=5).contains(&self.duel.combat_role) {
-            let p = self.motor.position();
+            let p = self.game_entities.actor_motor().position();
             let order = self.duel_last_ranged_order(p);
             self.duel.movement = if order.moving {
                 [order.destination[0] - p.x, order.destination[2] - p.z]
@@ -521,7 +536,7 @@ impl Playtest {
     /// for a swap, is busy, or holds a crit to spend.
     fn duel_parry_check(&mut self, ctx: &Ctx, buttons: &mut u16) {
         let i = self.duel.target;
-        let p = self.motor.position();
+        let p = self.game_entities.actor_motor().position();
         let height = self.character.map_or(40, |c| c.height);
         let ticks_to_hit = self.duel_ticks_to_hit(i, p, height, ctx.video_hz);
         let before = core::mem::replace(
@@ -529,17 +544,22 @@ impl Playtest {
             ticks_to_hit.unwrap_or(u16::MAX),
         );
         let before = (before != u16::MAX).then_some(before);
-        let free = self.motor.action().is_idle()
+        let free = self.game_entities.actor_motor().action().is_idle()
             && self.anim_lock_until_tick <= ctx.sim_tick
             && !self
-                .player
+                .game_entities
+                .actor()
                 .stance
                 .swap_in_progress(&self.player_stance_config);
-        if *buttons & button::TRIANGLE != 0 || !self.duel.visible || !free || self.player.crit != 0
+        if *buttons & button::TRIANGLE != 0
+            || !self.duel.visible
+            || !free
+            || self.game_entities.actor().crit != 0
         {
             return;
         }
-        let can_swap = self.player.stance.can_swap() && self.player_kits().can_swap();
+        let can_swap =
+            self.game_entities.actor().stance.can_swap() && self.player_kits().can_swap();
         let parry_ticks = self.player_stats.parry_ticks;
         let percent = self.player_stats.parry_swap_percent;
         let duel = &mut self.duel;
@@ -623,7 +643,7 @@ impl Playtest {
             radius,
             height,
             far,
-            self.player.flow.energy,
+            self.game_entities.actor().flow.energy,
             threat,
             &mut |a, b| {
                 valid
@@ -641,7 +661,7 @@ impl Playtest {
         );
         // A dry exchange (nobody can see anybody from cover): close in.
         if order.contest {
-            self.player.flow.contest_space();
+            self.game_entities.actor_mut().flow.contest_space();
         }
         order
     }
@@ -743,7 +763,7 @@ impl Playtest {
             return;
         }
         let i = self.duel.target;
-        let p = self.motor.position();
+        let p = self.game_entities.actor_motor().position();
         let e = self.game_entities.position(i);
         let tick = ctx.sim_tick.as_u32() - self.duel.started;
         let mut snap = [
@@ -752,21 +772,21 @@ impl Playtest {
             p.z as u32,
             e[0] as u32,
             e[2] as u32,
-            self.player.health() as u32,
+            self.game_entities.actor().health() as u32,
             self.game_entities.health(i) as u32,
-            self.player.stance.active().index() as u32,
+            self.game_entities.actor().stance.active().index() as u32,
             self.game_entities.stance(i).index() as u32,
             self.anim_state.action().to_index() as u32,
             self.game_entities.state(i) as u32,
             self.duel.intent as u32,
             self.duel.reason as u32,
-            self.motor.stamina_q12() as u32,
+            self.game_entities.actor_motor().stamina_q12() as u32,
             self.game_entities.tactical_snapshot(i).generation as u32,
             self.anim_start_tick.as_u32(),
             self.game_entities.tactical_snapshot(i).goal as u32,
             self.game_entities.tactical_snapshot(i).stance_reason as u32,
             self.game_entities.attack_kind(i) as u32,
-            self.player.flow.energy as u32,
+            self.game_entities.actor().flow.energy as u32,
             self.game_entities.energy(i) as u32,
         ];
         let roles = [self.duel.combat_role, self.game_entities.combat_role(i)];
@@ -822,7 +842,8 @@ impl Playtest {
             log_values("duel:sample", &snap);
         }
         self.duel.last_snapshot = snap;
-        let player_dead = self.player.defeated() || self.hazard_death_ticks_remaining != 0;
+        let player_dead =
+            self.game_entities.actor().defeated() || self.hazard_death_ticks_remaining != 0;
         let enemy_dead = self.game_entities.state(i) == GameEntityState::Dead;
         if player_dead || enemy_dead {
             self.duel_end(

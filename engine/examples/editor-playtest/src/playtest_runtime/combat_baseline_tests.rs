@@ -125,7 +125,7 @@ pub(super) fn character(ranged: bool) -> RuntimeCharacter {
 }
 
 fn health(scene: &Playtest) -> u16 {
-    scene.player.health()
+    scene.game_entities.actor().health()
 }
 
 pub(super) fn bolt(channel: ProjectileDamageChannel, damage: u16, poise: u16) -> ProjectileSpawn {
@@ -156,9 +156,12 @@ fn a_fresh_player_starts_with_a_full_bar_in_the_horizon_stance() {
     let scene = scene();
     assert_eq!(PLAYER_MAX_HEALTH, 200, "the two old 100 pools as one bar");
     assert_eq!(health(&scene), PLAYER_MAX_HEALTH);
-    assert_eq!(scene.player.stance.active(), VitalityChannelId::One);
+    assert_eq!(
+        scene.game_entities.actor().stance.active(),
+        VitalityChannelId::One
+    );
     assert_eq!(scene.player_stance_config, CombatStanceConfig::DEFAULT);
-    assert_eq!(scene.player.flow, CombatFlow::FULL);
+    assert_eq!(scene.game_entities.actor().flow, CombatFlow::FULL);
     assert_eq!(scene.hazard_death_ticks_remaining, 0);
 }
 
@@ -173,7 +176,7 @@ fn an_untyped_hit_counts_as_matching_and_lands_as_authored() {
 fn an_untyped_hit_matches_whichever_stance_is_active() {
     let mut scene = scene();
     let config = scene.player_stance_config;
-    assert!(scene.player.stance.request_swap(&config));
+    assert!(scene.game_entities.actor_mut().stance.request_swap(&config));
     assert!(!scene.apply_untyped_player_damage(20));
     assert_eq!(health(&scene), 180);
 }
@@ -235,9 +238,15 @@ fn a_hit_bigger_than_the_bar_is_lethal_and_swaps_nothing() {
     let mut scene = scene();
     assert!(scene.apply_untyped_player_damage(1000));
     assert_eq!(health(&scene), 0);
-    assert_eq!(scene.player.stance.active(), VitalityChannelId::One);
-    assert_eq!(scene.player.stance.swap_elapsed_ticks(), u16::MAX);
-    assert!(scene.player.defeated());
+    assert_eq!(
+        scene.game_entities.actor().stance.active(),
+        VitalityChannelId::One
+    );
+    assert_eq!(
+        scene.game_entities.actor().stance.swap_elapsed_ticks(),
+        u16::MAX
+    );
+    assert!(scene.game_entities.actor().defeated());
 }
 
 #[test]
@@ -246,7 +255,7 @@ fn only_emptying_the_bar_is_lethal() {
     assert!(!scene.apply_untyped_player_damage(199));
     assert_eq!(health(&scene), 1);
     assert!(scene.apply_untyped_player_damage(1));
-    assert!(scene.player.defeated());
+    assert!(scene.game_entities.actor().defeated());
 }
 
 #[test]
@@ -256,7 +265,10 @@ fn a_hazard_hit_bigger_than_an_old_pool_is_just_damage() {
     let mut scene = scene();
     assert!(!scene.apply_hazard_player_damage(105));
     assert_eq!(health(&scene), 95);
-    assert_eq!(scene.player.stance.active(), VitalityChannelId::One);
+    assert_eq!(
+        scene.game_entities.actor().stance.active(),
+        VitalityChannelId::One
+    );
 }
 
 #[test]
@@ -271,7 +283,10 @@ fn a_hazard_hit_inside_the_bar_behaves_like_any_other_hit() {
     let mut scene = scene();
     assert!(!scene.apply_hazard_player_damage(10));
     assert_eq!(health(&scene), 190);
-    assert_eq!(scene.player.stance.active(), VitalityChannelId::One);
+    assert_eq!(
+        scene.game_entities.actor().stance.active(),
+        VitalityChannelId::One
+    );
 }
 
 #[test]
@@ -324,7 +339,7 @@ fn an_enemy_bolt_does_not_touch_the_energy_bar() {
         .spawn(bolt(ProjectileDamageChannel::Horizon, 20, 40))
         .unwrap();
     scene.resolve_combat(&ctx(100));
-    assert_eq!(scene.player.flow, CombatFlow::FULL);
+    assert_eq!(scene.game_entities.actor().flow, CombatFlow::FULL);
 }
 
 #[test]
@@ -338,8 +353,11 @@ fn an_unreadable_bolt_poise_is_a_quarter_capped_at_ten_and_never_breaks_the_play
         .spawn(bolt(ProjectileDamageChannel::Horizon, 20, 400))
         .unwrap();
     scene.resolve_combat(&ctx(100));
-    assert_eq!(scene.player.flow.break_grace, 0);
-    assert_ne!(scene.player.poise, psx_game_runtime::poise::Poise::EMPTY);
+    assert_eq!(scene.game_entities.actor().flow.break_grace, 0);
+    assert_ne!(
+        scene.game_entities.actor().poise,
+        psx_game_runtime::poise::Poise::EMPTY
+    );
     assert_ne!(scene.anim_state, PlayerAnim::HitReact);
 }
 
@@ -348,10 +366,11 @@ fn a_player_inside_the_swap_window_is_not_a_projectile_target() {
     let mut scene = scene();
     scene.character = Some(character(false));
     let config = scene.player_stance_config;
-    scene.player.stance.request_swap(&config);
+    scene.game_entities.actor_mut().stance.request_swap(&config);
     // Past the parry window: the parry tests pin the early part.
     scene
-        .player
+        .game_entities
+        .actor_mut()
         .advance_stance(scene.player_stats.parry_ticks + 1);
     assert!(scene.player_invulnerable(&ctx(100)));
     scene
@@ -376,11 +395,14 @@ fn the_player_poise_capacity_is_sixty() {
 fn poise_accumulates_then_breaks_and_the_break_starts_the_grace_window() {
     let mut scene = scene();
     assert!(!scene.react_player_to_hit(CombatantId::WORLD, 30, false, false, false, &ctx(100)));
-    assert_eq!(scene.player.flow.break_grace, 0);
+    assert_eq!(scene.game_entities.actor().flow.break_grace, 0);
     assert!(scene.react_player_to_hit(CombatantId::WORLD, 30, false, false, false, &ctx(101)));
-    assert_eq!(scene.player.flow.break_grace, BREAK_GRACE_TICKS);
     assert_eq!(
-        scene.player.poise,
+        scene.game_entities.actor().flow.break_grace,
+        BREAK_GRACE_TICKS
+    );
+    assert_eq!(
+        scene.game_entities.actor().poise,
         psx_game_runtime::poise::Poise::EMPTY,
         "a break spends the accumulated posture"
     );
@@ -405,12 +427,20 @@ fn a_second_break_is_refused_until_the_grace_window_has_drained() {
     scene.anim_state = PlayerAnim::Idle;
     assert!(!scene.react_player_to_hit(CombatantId::WORLD, 60, false, false, false, &ctx(101)));
     // Grace only drains once the reaction is over.
-    scene.player.flow.tick(BREAK_GRACE_TICKS - 1, true);
-    assert!(!scene.player.flow.can_interrupt());
-    scene.player.flow.tick(BREAK_GRACE_TICKS - 1, false);
-    assert!(!scene.player.flow.can_interrupt());
-    scene.player.flow.tick(1, false);
-    assert!(scene.player.flow.can_interrupt());
+    scene
+        .game_entities
+        .actor_mut()
+        .flow
+        .tick(BREAK_GRACE_TICKS - 1, true);
+    assert!(!scene.game_entities.actor_mut().flow.can_interrupt());
+    scene
+        .game_entities
+        .actor_mut()
+        .flow
+        .tick(BREAK_GRACE_TICKS - 1, false);
+    assert!(!scene.game_entities.actor_mut().flow.can_interrupt());
+    scene.game_entities.actor_mut().flow.tick(1, false);
+    assert!(scene.game_entities.actor_mut().flow.can_interrupt());
     assert!(scene.react_player_to_hit(CombatantId::WORLD, 60, false, false, false, &ctx(300)));
 }
 
@@ -429,7 +459,7 @@ fn an_ordinary_hit_without_a_reaction_clip_does_not_interrupt_the_player() {
     assert_eq!(scene.anim_state, PlayerAnim::Run);
     assert_eq!(scene.anim_lock_until_tick, SimTick::ZERO);
     assert_ne!(
-        scene.player.poise,
+        scene.game_entities.actor().poise,
         psx_game_runtime::poise::Poise::EMPTY,
         "the hit still counted toward posture"
     );
@@ -453,8 +483,11 @@ fn a_stunned_player_accumulates_no_posture_and_cannot_be_broken_again() {
     let mut scene = scene();
     scene.anim_state = PlayerAnim::Stun;
     assert!(!scene.react_player_to_hit(CombatantId::WORLD, 1000, false, false, false, &ctx(100)));
-    assert_eq!(scene.player.poise, psx_game_runtime::poise::Poise::EMPTY);
-    assert_eq!(scene.player.flow.break_grace, 0);
+    assert_eq!(
+        scene.game_entities.actor().poise,
+        psx_game_runtime::poise::Poise::EMPTY
+    );
+    assert_eq!(scene.game_entities.actor().flow.break_grace, 0);
 }
 
 #[test]
@@ -462,7 +495,10 @@ fn a_dying_player_ignores_further_hits() {
     let mut scene = scene();
     scene.hazard_death_ticks_remaining = 10;
     assert!(!scene.react_player_to_hit(CombatantId::WORLD, 1000, false, false, false, &ctx(100)));
-    assert_eq!(scene.player.poise, psx_game_runtime::poise::Poise::EMPTY);
+    assert_eq!(
+        scene.game_entities.actor().poise,
+        psx_game_runtime::poise::Poise::EMPTY
+    );
     assert_eq!(scene.anim_state, PlayerAnim::Idle);
 }
 
@@ -483,10 +519,14 @@ fn posture_recovers_after_a_quiet_interval_not_per_update_cadence() {
     let mut scene = scene();
     assert!(!scene.react_player_to_hit(CombatantId::WORLD, 30, false, false, false, &ctx(100)));
     scene
-        .player
+        .game_entities
+        .actor_mut()
         .poise
         .tick(psx_game_runtime::poise::POISE_RESET_TICKS);
-    assert_eq!(scene.player.poise, psx_game_runtime::poise::Poise::EMPTY);
+    assert_eq!(
+        scene.game_entities.actor().poise,
+        psx_game_runtime::poise::Poise::EMPTY
+    );
     assert!(!scene.react_player_to_hit(CombatantId::WORLD, 30, false, false, false, &ctx(300)));
 }
 
@@ -499,41 +539,53 @@ fn a_swap_flips_the_stance_and_starts_the_default_cooldown() {
     let mut scene = scene();
     let config = scene.player_stance_config;
     assert_eq!(config.swap_cooldown_ticks, 30);
-    assert!(scene.player.stance.request_swap(&config));
-    assert_eq!(scene.player.stance.active(), VitalityChannelId::Two);
-    assert_eq!(scene.player.stance.swap_cooldown(), 30);
-    assert_eq!(scene.player.stance.swap_elapsed_ticks(), 0);
-    assert!(!scene.player.stance.can_swap());
+    assert!(scene.game_entities.actor_mut().stance.request_swap(&config));
+    assert_eq!(
+        scene.game_entities.actor_mut().stance.active(),
+        VitalityChannelId::Two
+    );
+    assert_eq!(scene.game_entities.actor_mut().stance.swap_cooldown(), 30);
+    assert_eq!(
+        scene.game_entities.actor_mut().stance.swap_elapsed_ticks(),
+        0
+    );
+    assert!(!scene.game_entities.actor().stance.can_swap());
 }
 
 #[test]
 fn a_second_swap_is_refused_for_exactly_the_cooldown() {
     let mut scene = scene();
     let config = scene.player_stance_config;
-    scene.player.stance.request_swap(&config);
+    scene.game_entities.actor_mut().stance.request_swap(&config);
     for _ in 0..29 {
-        scene.player.stance.tick();
-        assert!(!scene.player.stance.request_swap(&config));
+        scene.game_entities.actor_mut().stance.tick();
+        assert!(!scene.game_entities.actor_mut().stance.request_swap(&config));
     }
-    scene.player.stance.tick();
-    assert!(scene.player.stance.can_swap());
-    assert!(scene.player.stance.request_swap(&config));
-    assert_eq!(scene.player.stance.active(), VitalityChannelId::One);
+    scene.game_entities.actor_mut().stance.tick();
+    assert!(scene.game_entities.actor_mut().stance.can_swap());
+    assert!(scene.game_entities.actor_mut().stance.request_swap(&config));
+    assert_eq!(
+        scene.game_entities.actor_mut().stance.active(),
+        VitalityChannelId::One
+    );
 }
 
 #[test]
 fn a_hit_never_swaps_the_stance_or_touches_the_cooldown() {
     let mut scene = scene();
     let config = scene.player_stance_config;
-    scene.player.stance.request_swap(&config);
+    scene.game_entities.actor_mut().stance.request_swap(&config);
     for _ in 0..20 {
-        scene.player.stance.tick();
+        scene.game_entities.actor_mut().stance.tick();
     }
     // Mid-cooldown, a big hit: there is no pool to break, so no forced swap.
     assert!(!scene.apply_untyped_player_damage(150));
-    assert_eq!(scene.player.stance.active(), VitalityChannelId::Two);
-    assert_eq!(scene.player.stance.swap_elapsed_ticks(), 20);
-    assert_eq!(scene.player.stance.swap_cooldown(), 10);
+    assert_eq!(
+        scene.game_entities.actor().stance.active(),
+        VitalityChannelId::Two
+    );
+    assert_eq!(scene.game_entities.actor().stance.swap_elapsed_ticks(), 20);
+    assert_eq!(scene.game_entities.actor().stance.swap_cooldown(), 10);
 }
 
 #[test]
@@ -544,8 +596,8 @@ fn the_swap_cooldown_is_the_one_the_enemies_receive() {
         .game_entities
         .set_stance_swap_delay(scene.player_stance_config.swap_cooldown_ticks);
     let config = scene.player_stance_config;
-    scene.player.stance.request_swap(&config);
-    assert_eq!(scene.player.stance.swap_cooldown(), 77);
+    scene.game_entities.actor_mut().stance.request_swap(&config);
+    assert_eq!(scene.game_entities.actor_mut().stance.swap_cooldown(), 77);
 }
 
 #[test]
@@ -556,10 +608,10 @@ fn nothing_regenerates_health_during_play() {
     let mut scene = scene();
     scene.apply_untyped_player_damage(20);
     let config = scene.player_stance_config;
-    scene.player.stance.request_swap(&config);
+    scene.game_entities.actor_mut().stance.request_swap(&config);
     for _ in 0..600 {
-        scene.player.advance_stance(1);
-        scene.player.tick(1, false, false);
+        scene.game_entities.actor_mut().advance_stance(1);
+        scene.game_entities.actor_mut().tick(1, false, false);
     }
     assert_eq!(health(&scene), 180);
 }
@@ -571,7 +623,10 @@ fn nothing_regenerates_health_during_play() {
 #[test]
 fn a_fresh_player_is_vulnerable() {
     let scene = scene();
-    assert_eq!(scene.player.stance.swap_elapsed_ticks(), u16::MAX);
+    assert_eq!(
+        scene.game_entities.actor().stance.swap_elapsed_ticks(),
+        u16::MAX
+    );
     assert!(!scene.player_invulnerable(&ctx(100)));
 }
 
@@ -583,7 +638,7 @@ fn a_swap_is_invulnerable_for_the_roll_window_counting_the_press_tick() {
     let config = scene.player_stance_config;
     // The press and the first contact check share a tick: elapsed 0 at the
     // press, 1 when the first contact is resolved after `tick`.
-    scene.player.stance.request_swap(&config);
+    scene.game_entities.actor_mut().stance.request_swap(&config);
     let mut protected = 0u16;
     for _ in 0..40 {
         if scene.player_invulnerable(&ctx(100)) {
@@ -591,7 +646,7 @@ fn a_swap_is_invulnerable_for_the_roll_window_counting_the_press_tick() {
         } else {
             break;
         }
-        scene.player.stance.tick();
+        scene.game_entities.actor_mut().stance.tick();
     }
     // elapsed 0..=TEST_I_FRAMES inclusive.
     assert_eq!(protected, u16::from(TEST_I_FRAMES) + 1);
@@ -606,7 +661,7 @@ fn the_player_asks_the_combatant_rule_every_enemy_asks() {
     let mut scene = scene();
     scene.character = Some(character(false));
     let config = scene.player_stance_config;
-    scene.player.stance.request_swap(&config);
+    scene.game_entities.actor_mut().stance.request_swap(&config);
     for _ in 0..40 {
         let defender = scene.player_defender(&ctx(100));
         assert_eq!(defender.swap_invulnerable_ticks, TEST_I_FRAMES);
@@ -614,10 +669,11 @@ fn the_player_asks_the_combatant_rule_every_enemy_asks() {
         assert_eq!(
             scene.player_invulnerable(&ctx(100)),
             scene
-                .player
+                .game_entities
+                .actor()
                 .invulnerable(TEST_I_FRAMES, ActionProtection::NONE)
         );
-        scene.player.stance.tick();
+        scene.game_entities.actor_mut().stance.tick();
     }
 }
 
@@ -651,14 +707,16 @@ fn a_roll_is_invulnerable_for_its_authored_frames_then_vulnerable() {
         ..CharacterMotorInput::default()
     };
     scene
-        .motor
+        .game_entities
+        .actor_motor_mut()
         .update_vblanks_with_trace_provider(&mut OpenFloor, evade, config, 1)
         .unwrap();
     let mut protected = 0;
     while scene.player_invulnerable(&ctx(100)) && protected < 100 {
         protected += 1;
         scene
-            .motor
+            .game_entities
+            .actor_motor_mut()
             .update_vblanks_with_trace_provider(
                 &mut OpenFloor,
                 CharacterMotorInput::default(),
@@ -720,19 +778,38 @@ fn energy_constants_are_the_prototype_economy() {
 fn a_shot_costs_twenty_and_five_shots_empty_the_bar() {
     let mut scene = scene();
     for left in (0..5u16).rev() {
-        assert!(scene.player.flow.can_shoot(&CombatStats::PLAYER));
-        assert!(scene.player.flow.spend_shot(&CombatStats::PLAYER));
-        assert_eq!(scene.player.flow.energy, left * SHOT_COST);
+        assert!(scene
+            .game_entities
+            .actor()
+            .flow
+            .can_shoot(&CombatStats::PLAYER));
+        assert!(scene
+            .game_entities
+            .actor_mut()
+            .flow
+            .spend_shot(&CombatStats::PLAYER));
+        assert_eq!(
+            scene.game_entities.actor_mut().flow.energy,
+            left * SHOT_COST
+        );
     }
-    assert!(!scene.player.flow.can_shoot(&CombatStats::PLAYER));
-    assert!(!scene.player.flow.spend_shot(&CombatStats::PLAYER));
-    assert_eq!(scene.player.flow.energy, 0);
+    assert!(!scene
+        .game_entities
+        .actor_mut()
+        .flow
+        .can_shoot(&CombatStats::PLAYER));
+    assert!(!scene
+        .game_entities
+        .actor_mut()
+        .flow
+        .spend_shot(&CombatStats::PLAYER));
+    assert_eq!(scene.game_entities.actor_mut().flow.energy, 0);
 }
 
 #[test]
 fn a_light_melee_hit_gains_twelve_and_a_heavy_hit_twenty_and_the_bar_caps() {
     let mut scene = scene();
-    scene.player.flow.energy = 0;
+    scene.game_entities.actor_mut().flow.energy = 0;
     scene.anim_state = PlayerAnim::LightAttack;
     scene.report_player_melee_stats(MeleeArcStats {
         hits: 1,
@@ -740,8 +817,8 @@ fn a_light_melee_hit_gains_twelve_and_a_heavy_hit_twenty_and_the_bar_caps() {
         deaths: 0,
         parries: 0,
     });
-    assert_eq!(scene.player.flow.energy, MELEE_GAIN);
-    assert_eq!(scene.player.flow.followup, 0);
+    assert_eq!(scene.game_entities.actor().flow.energy, MELEE_GAIN);
+    assert_eq!(scene.game_entities.actor().flow.followup, 0);
     scene.anim_state = PlayerAnim::HeavyAttack;
     scene.report_player_melee_stats(MeleeArcStats {
         hits: 1,
@@ -749,9 +826,13 @@ fn a_light_melee_hit_gains_twelve_and_a_heavy_hit_twenty_and_the_bar_caps() {
         deaths: 0,
         parries: 0,
     });
-    assert_eq!(scene.player.flow.energy, MELEE_GAIN + HEAVY_GAIN);
     assert_eq!(
-        scene.player.flow.followup, 1,
+        scene.game_entities.actor().flow.energy,
+        MELEE_GAIN + HEAVY_GAIN
+    );
+    assert_eq!(
+        scene.game_entities.actor().flow.followup,
+        1,
         "a heavy hit opens a follow-up"
     );
     scene.report_player_melee_stats(MeleeArcStats {
@@ -760,13 +841,13 @@ fn a_light_melee_hit_gains_twelve_and_a_heavy_hit_twenty_and_the_bar_caps() {
         deaths: 0,
         parries: 0,
     });
-    assert_eq!(scene.player.flow.energy, ENERGY_MAX);
+    assert_eq!(scene.game_entities.actor().flow.energy, ENERGY_MAX);
 }
 
 #[test]
 fn every_enemy_connected_by_one_swing_pays_energy_separately() {
     let mut scene = scene();
-    scene.player.flow.energy = 0;
+    scene.game_entities.actor_mut().flow.energy = 0;
     scene.anim_state = PlayerAnim::LightAttack;
     scene.report_player_melee_stats(MeleeArcStats {
         hits: 3,
@@ -774,7 +855,7 @@ fn every_enemy_connected_by_one_swing_pays_energy_separately() {
         deaths: 0,
         parries: 0,
     });
-    assert_eq!(scene.player.flow.energy, 3 * MELEE_GAIN);
+    assert_eq!(scene.game_entities.actor().flow.energy, 3 * MELEE_GAIN);
 }
 
 #[test]
@@ -813,21 +894,31 @@ fn a_connected_melee_hit_queues_a_weight_matched_hit_cue() {
 fn an_arch_refills_twenty_energy_and_health_a_second_and_stops_while_firing() {
     let mut scene = scene();
     scene.apply_untyped_player_damage(100);
-    scene.player.flow.energy = 0;
+    scene.game_entities.actor_mut().flow.energy = 0;
     let stats = scene.player_stats;
     // 20 per second at 60 ticks: one point every third tick.
     for _ in 0..60 {
-        scene.player.air_tick(true, false, false, &stats);
+        scene
+            .game_entities
+            .actor_mut()
+            .air_tick(true, false, false, &stats);
     }
-    assert_eq!(scene.player.flow.energy, 20);
+    assert_eq!(scene.game_entities.actor_mut().flow.energy, 20);
     assert_eq!(health(&scene), 120, "health comes back on the same beat");
     for _ in 0..60 {
-        scene.player.air_tick(true, false, true, &stats);
+        scene
+            .game_entities
+            .actor_mut()
+            .air_tick(true, false, true, &stats);
     }
-    assert_eq!(scene.player.flow.energy, 20, "firing pauses the recharge");
+    assert_eq!(
+        scene.game_entities.actor_mut().flow.energy,
+        20,
+        "firing pauses the recharge"
+    );
     assert_eq!(health(&scene), 120);
     assert_eq!(
-        scene.player.flow.air_left,
+        scene.game_entities.actor().flow.air_left,
         AIR_TICKS - 120,
         "but the allowance still drains"
     );
@@ -856,10 +947,10 @@ fn the_arch_allowance_runs_out_after_its_ticks_and_needs_ground_time_to_rearm() 
 #[test]
 fn taking_damage_does_not_change_the_energy_bar() {
     let mut scene = scene();
-    scene.player.flow.energy = 40;
+    scene.game_entities.actor_mut().flow.energy = 40;
     scene.apply_untyped_player_damage(20);
     scene.apply_typed_player_damage(ProjectileDamageChannel::Zenith, 20);
-    assert_eq!(scene.player.flow.energy, 40);
+    assert_eq!(scene.game_entities.actor_mut().flow.energy, 40);
 }
 
 #[test]
@@ -887,10 +978,22 @@ fn the_energy_economy_and_health_are_the_characters_data() {
     };
     scene.reset_life_combat();
     assert_eq!(health(&scene), 100);
-    assert_eq!(scene.player.flow.energy, 60);
-    assert!(scene.player.flow.spend_shot(&scene.player_stats));
-    assert!(scene.player.flow.spend_shot(&scene.player_stats));
-    assert!(!scene.player.flow.can_shoot(&scene.player_stats));
+    assert_eq!(scene.game_entities.actor().flow.energy, 60);
+    assert!(scene
+        .game_entities
+        .actor_mut()
+        .flow
+        .spend_shot(&scene.player_stats));
+    assert!(scene
+        .game_entities
+        .actor_mut()
+        .flow
+        .spend_shot(&scene.player_stats));
+    assert!(!scene
+        .game_entities
+        .actor_mut()
+        .flow
+        .can_shoot(&scene.player_stats));
     scene.anim_state = PlayerAnim::LightAttack;
     scene.report_player_melee_stats(MeleeArcStats {
         hits: 1,
@@ -898,7 +1001,7 @@ fn the_energy_economy_and_health_are_the_characters_data() {
         deaths: 0,
         parries: 0,
     });
-    assert_eq!(scene.player.flow.energy, 5);
+    assert_eq!(scene.game_entities.actor().flow.energy, 5);
 }
 
 // ---------------------------------------------------------------------------
@@ -954,10 +1057,10 @@ fn a_new_combat_life_restores_every_player_combat_resource() {
     let mut scene = scene();
     scene.character = Some(character(true));
     assert!(scene.apply_untyped_player_damage(1000));
-    assert!(scene.player.defeated());
-    scene.player.flow.energy = 0;
-    scene.player.flow.broke();
-    scene.player.poise.hit(30, 60, false);
+    assert!(scene.game_entities.actor().defeated());
+    scene.game_entities.actor_mut().flow.energy = 0;
+    scene.game_entities.actor_mut().flow.broke();
+    scene.game_entities.actor_mut().poise.hit(30, 60, false);
     scene.attack_buffer.request(1, 100);
     scene.evade_buffer_vblanks = 8;
     scene.swing_hit_mask = 5;
@@ -967,10 +1070,19 @@ fn a_new_combat_life_restores_every_player_combat_resource() {
         .unwrap();
     scene.reset_life_combat();
     assert_eq!(health(&scene), PLAYER_MAX_HEALTH);
-    assert_eq!(scene.player.stance.active(), VitalityChannelId::One);
-    assert_eq!(scene.player.stance.swap_elapsed_ticks(), u16::MAX);
-    assert_eq!(scene.player.flow, CombatFlow::FULL);
-    assert_eq!(scene.player.poise, psx_game_runtime::poise::Poise::EMPTY);
+    assert_eq!(
+        scene.game_entities.actor().stance.active(),
+        VitalityChannelId::One
+    );
+    assert_eq!(
+        scene.game_entities.actor().stance.swap_elapsed_ticks(),
+        u16::MAX
+    );
+    assert_eq!(scene.game_entities.actor().flow, CombatFlow::FULL);
+    assert_eq!(
+        scene.game_entities.actor().poise,
+        psx_game_runtime::poise::Poise::EMPTY
+    );
     assert_eq!(scene.attack_buffer.take(101), None);
     assert_eq!(scene.evade_buffer_vblanks, 0);
     assert_eq!(scene.swing_hit_mask, 0);
@@ -981,7 +1093,7 @@ fn a_new_combat_life_restores_every_player_combat_resource() {
 fn respawn_after_a_combat_death_restores_the_life_and_clears_the_countdown() {
     let mut scene = scene();
     scene.apply_untyped_player_damage(1000);
-    scene.player.flow.energy = 7;
+    scene.game_entities.actor_mut().flow.energy = 7;
     scene.arm_player_death(
         true,
         HAZARD_DEATH_TICKS,
@@ -994,5 +1106,5 @@ fn respawn_after_a_combat_death_restores_the_life_and_clears_the_countdown() {
     assert_eq!(scene.anim_state, PlayerAnim::Idle);
     assert_eq!(scene.anim_lock_until_tick, SimTick::ZERO);
     assert_eq!(health(&scene), PLAYER_MAX_HEALTH);
-    assert_eq!(scene.player.flow.energy, ENERGY_MAX);
+    assert_eq!(scene.game_entities.actor().flow.energy, ENERGY_MAX);
 }

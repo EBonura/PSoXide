@@ -240,7 +240,7 @@ impl Playtest {
     /// What the HUD needs from the game this tick.
     pub(crate) fn stance_hud_input(&mut self) -> HudInput {
         const VITALITY_Q12_ONE: u32 = 4096;
-        let health = self.player.health;
+        let health = self.game_entities.actor().health;
         let health_q12 = if health.maximum() == 0 {
             0
         } else {
@@ -250,7 +250,7 @@ impl Playtest {
         hud().scan = hud().scan.saturating_sub(1);
         if hud().scan == 0 {
             hud().scan = SCAN_TICKS;
-            let player = self.motor.position();
+            let player = self.game_entities.actor_motor().position();
             let mut nearest: Option<i32> = None;
             for index in 0..MODEL_INSTANCES.len() {
                 let Some(point) = self.target_position(index) else {
@@ -265,9 +265,9 @@ impl Playtest {
             hud().nearest = nearest;
         }
         HudInput {
-            active: self.player.stance.active(),
+            active: self.game_entities.actor().stance.active(),
             health_q12,
-            energy: self.player.flow.energy,
+            energy: self.game_entities.actor().flow.energy,
             nearest_hostile_sq: hud().nearest,
             targeting: self.lock_target.is_some() || self.ranged_ready.aiming(),
             attached: self.hook_attached.is_some(),

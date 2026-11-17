@@ -235,7 +235,7 @@ impl Playtest {
                 debug_log_stream_state(&values);
             }
         }
-        let player = self.motor.position();
+        let player = self.game_entities.actor_motor().position();
         let eye = self.render_camera.position;
         let count = self.game_entities.count();
         let mut hash: u32 = 0x811c_9dc5;
@@ -263,9 +263,9 @@ impl Playtest {
             player.x,
             player.y,
             player.z,
-            i32::from(self.motor.yaw().as_q12()),
-            self.motor.vertical_speed_q8(),
-            i32::from(self.motor.grounded()),
+            i32::from(self.game_entities.actor_motor().yaw().as_q12()),
+            self.game_entities.actor_motor().vertical_speed_q8(),
+            i32::from(self.game_entities.actor_motor().grounded()),
             i32::from(self.room_index.raw()),
             eye.x,
             eye.y,

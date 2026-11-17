@@ -90,7 +90,7 @@ fn a_crit_bolt_flashes_harder_than_a_plain_one_on_either_side() {
 fn a_melee_contact_sparks_halfway_between_the_fighters_for_either_side() {
     let data = COMBAT_FEEDBACK;
     let mut scene = duel();
-    let player = scene.motor.position();
+    let player = scene.game_entities.actor_motor().position();
     let enemy = scene.game_entities.position(0);
     // The player's swing lands on the enemy (she is the attacker, Horizon).
     scene.show_hit(LandedHit {
