@@ -342,13 +342,11 @@ fn switch_and_panic_handler_count_only_their_own_frames() {
         3,
         "__psx_rt_call_on_stack",
         &[
-            addiu("sp", "sp", -24),
-            or("s0", "sp", "zero"),
-            jalr("t9"),
+            jalr("a1"),
             or("sp", "a2", "zero"),
-            or("sp", "s0", "zero"),
+            or("sp", "t0", "zero"),
             jr("ra"),
-            addiu("sp", "sp", 24),
+            NOP,
         ],
     );
     let handler = fx.caller(4, "__rustc::rust_begin_unwind", 32, &[deep]);
@@ -883,7 +881,7 @@ fn without_a_map_only_the_switch_is_looked_for() {
         "{}",
         String::from_utf8_lossy(&out)
     );
-    let body = [vec![jalr("t9"), or("sp", "a2", "zero")], epilogue(0)].concat();
+    let body = [vec![jalr("a1"), or("sp", "a2", "zero")], epilogue(0)].concat();
     fx.function(3, "__psx_rt_call_on_stack", &body);
     let (exe, _) = fx.write();
     let mut out = Vec::new();
@@ -1614,4 +1612,17 @@ fn a_custom_root_checks_that_tree_alone() {
     let (status, out) = d.guard(&["--root", "^t::big$", "--budget", "400"]);
     assert_eq!(status, 0, "{out}");
     assert!(!out.contains("dispatcher"), "{out}");
+}
+
+#[test]
+fn both_entry_forms_are_roots() {
+    for form in ["stack_entry", "stack_entry_fn"] {
+        let mut fx = Fixture::new();
+        let b = fx.leaf(3, "t::b", 24);
+        let root = format!("<psx_rt::scratchpad::ScratchpadStack<512, 1024>>::{form}::<u32, t::f>");
+        fx.caller(1, &root, 16, &[b]);
+        let (failures, out) = fx.guard();
+        assert_eq!(failures, 0, "{out}");
+        assert!(out.contains("40 of 492 bytes"), "{out}");
+    }
 }
