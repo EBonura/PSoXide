@@ -249,15 +249,18 @@ static SINGLE: Global<Single> = Global(UnsafeCell::new(SingleEngine::single(
     Config::DEFAULT,
 )));
 
-static LEAN: Global<Lean> = Global(UnsafeCell::new(LeanEngine::lean(
-    Mmio::new(),
-    Config::DEFAULT,
-)));
+// The lean and counted engines are zero-initialised, so each lives in `.bss` (a `.data` static
+// costs its bytes in the executable and, in a section aligned for another input, padding). The
+// configuration the zero bytes stand for is replaced by `begin`, which every install runs first.
+static LEAN: Global<Lean> = Global(UnsafeCell::new(
+    // SAFETY: `Mmio` is one `bool`, valid at zero.
+    unsafe { LeanEngine::zeroed() },
+));
 
-static COUNTED: Global<Counted> = Global(UnsafeCell::new(CountedEngine::counted(
-    Mmio::new(),
-    Config::DEFAULT,
-)));
+static COUNTED: Global<Counted> = Global(UnsafeCell::new(
+    // SAFETY: as `LEAN`.
+    unsafe { CountedEngine::zeroed() },
+));
 
 /// What the foreground and handler glue needs of an engine: where its one global lives and
 /// the few operations on it. The two engines have the same operations; a program links the

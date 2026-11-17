@@ -122,6 +122,19 @@ impl Config {
     };
 }
 
+impl Config {
+    /// The all-zero configuration: a zero watchdog, no recovery pause, single speed. Only a
+    /// placeholder for an engine whose static is zero-initialised ([`CountedEngine::zeroed`]);
+    /// every program installs its own before the engine runs.
+    pub const UNSET: Config = Config {
+        timeout_vblanks: 0,
+        irq_mask_policy: IrqMaskPolicy::AlwaysOn,
+        pause_after_audio: false,
+        time_handler: false,
+        double_speed: false,
+    };
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self::DEFAULT
@@ -161,6 +174,146 @@ pub struct StreamStats {
     pub rejected: u32,
 }
 
+/// The one counter a [`CountedEngine`] keeps: sectors stored at a destination.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(C)]
+#[doc(hidden)]
+#[non_exhaustive]
+pub struct SectorCount {
+    sectors: u32,
+}
+
+/// Picks what an [`Engine`] keeps of the counters from its `STATS` and `COUNT` parameters, so an
+/// engine that keeps no statistics has no statistics block in its static (the 48 bytes of
+/// [`StreamStats`] it never reads), and one that only counts sectors has one word. Type-level, no
+/// cargo feature.
+#[doc(hidden)]
+#[non_exhaustive]
+pub struct Select<const STATS: bool, const COUNT: bool>;
+
+/// What [`Select`] chose: the block type an engine holds.
+#[doc(hidden)]
+pub trait Counters {
+    /// The counters kept.
+    type Block: Block;
+}
+
+impl Counters for Select<true, true> {
+    type Block = StreamStats;
+}
+impl Counters for Select<true, false> {
+    type Block = StreamStats;
+}
+impl Counters for Select<false, true> {
+    type Block = SectorCount;
+}
+impl Counters for Select<false, false> {
+    type Block = NoCounters;
+}
+
+/// The counters of an engine with `STATS` and `COUNT` off: nothing, and zero bytes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[doc(hidden)]
+#[non_exhaustive]
+pub struct NoCounters;
+
+/// What the engine does with its counters block, resolved at compile time.
+#[doc(hidden)]
+pub trait Block: Copy + Default {
+    /// The block with every counter zero: all-zero bytes.
+    const ZERO: Self;
+    /// The whole block, for an engine that keeps every counter.
+    fn full(&mut self) -> Option<&mut StreamStats>;
+    /// The stored-sectors counter, for an engine that keeps it.
+    fn sectors_mut(&mut self) -> Option<&mut u32>;
+    /// The counters as a [`StreamStats`] (zero for what the block does not keep).
+    fn snapshot(&self) -> StreamStats;
+    /// The stored-sectors counter read with one volatile load, 0 if not kept.
+    ///
+    /// # Safety
+    ///
+    /// `this` must point to a live block.
+    unsafe fn read_sectors(this: *const Self) -> u32;
+}
+
+impl Block for StreamStats {
+    const ZERO: Self = StreamStats {
+        irq_count: 0,
+        sectors: 0,
+        discarded_sectors: 0,
+        max_irq_ticks: 0,
+        phase: 0,
+        error: 0,
+        requests_done: 0,
+        requests_cancelled: 0,
+        requests_failed: 0,
+        chained: 0,
+        resumed: 0,
+        rejected: 0,
+    };
+    #[inline(always)]
+    fn full(&mut self) -> Option<&mut StreamStats> {
+        Some(self)
+    }
+    #[inline(always)]
+    fn sectors_mut(&mut self) -> Option<&mut u32> {
+        Some(&mut self.sectors)
+    }
+    #[inline(always)]
+    fn snapshot(&self) -> StreamStats {
+        *self
+    }
+    #[inline(always)]
+    unsafe fn read_sectors(this: *const Self) -> u32 {
+        // SAFETY: the caller's contract; a field address, no reference.
+        unsafe { (&raw const (*this).sectors).read_volatile() }
+    }
+}
+
+impl Block for SectorCount {
+    const ZERO: Self = SectorCount { sectors: 0 };
+    #[inline(always)]
+    fn full(&mut self) -> Option<&mut StreamStats> {
+        None
+    }
+    #[inline(always)]
+    fn sectors_mut(&mut self) -> Option<&mut u32> {
+        Some(&mut self.sectors)
+    }
+    #[inline(always)]
+    fn snapshot(&self) -> StreamStats {
+        StreamStats {
+            sectors: self.sectors,
+            ..StreamStats::default()
+        }
+    }
+    #[inline(always)]
+    unsafe fn read_sectors(this: *const Self) -> u32 {
+        // SAFETY: the caller's contract; a field address, no reference.
+        unsafe { (&raw const (*this).sectors).read_volatile() }
+    }
+}
+
+impl Block for NoCounters {
+    const ZERO: Self = NoCounters;
+    #[inline(always)]
+    fn full(&mut self) -> Option<&mut StreamStats> {
+        None
+    }
+    #[inline(always)]
+    fn sectors_mut(&mut self) -> Option<&mut u32> {
+        None
+    }
+    #[inline(always)]
+    fn snapshot(&self) -> StreamStats {
+        StreamStats::default()
+    }
+    #[inline(always)]
+    unsafe fn read_sectors(_this: *const Self) -> u32 {
+        0
+    }
+}
+
 /// `results_written` of an engine without results: the latest request read every sector.
 const ENDED_DONE: u32 = 1;
 /// `results_written` of an engine without results: the latest request failed or was cancelled.
@@ -188,7 +341,9 @@ struct Active {
     /// activation; `request` is only the rest.
     base: u32,
     received: u32,
-    cancelled: bool,
+    /// 1 once cancelled, else 0: a `u8`, not a `bool`, so that `Option<Active>` has no niche to use
+    /// and its `None` is the zero tag.
+    cancelled: u8,
     resumes_left: u8,
 }
 
@@ -254,7 +409,9 @@ pub struct Engine<
     const LEASE: bool = true,
     const STATS: bool = true,
     const COUNT: bool = false,
-> {
+> where
+    Select<STATS, COUNT>: Counters,
+{
     hw: H,
     config: Config,
     owner: Owner,
@@ -271,6 +428,8 @@ pub struct Engine<
     stamp: u32,
     /// Absolute BCD Setloc parameters of the active request.
     location: [u8; 3],
+    /// Its `None` is a zero tag byte, which keeps the engine's initial bytes zero: `Active` holds no
+    /// field with a niche (hence the `u8` flag), so `Option` stores the variant in a tag of its own.
     active: Option<Active>,
     /// One spare slot beyond [`QUEUE_DEPTH`]: a failing request that resumes
     /// goes back in the queue even when it is full.
@@ -279,9 +438,12 @@ pub struct Engine<
     /// Results recorded so far; for an engine that keeps none (`RESULTS` 0) how the latest
     /// request ended instead: [`ENDED_DONE`] or [`ENDED_FAILED`], 0 before any.
     results_written: u32,
-    next_ticket: u32,
-    next_seq: u32,
-    stats: StreamStats,
+    /// Requests accepted so far, which is also the number of the latest ticket (tickets start
+    /// at 1). Counting from zero keeps the engine's initial bytes zero.
+    submitted: u32,
+    /// Queued requests numbered so far, which is also the latest `Queued::seq` (they start at 1).
+    queued_seq: u32,
+    stats: <Select<STATS, COUNT> as Counters>::Block,
 }
 
 /// The engine for a program that reads one request at a time: the transfer state machine
@@ -387,6 +549,34 @@ impl<H: CdHw> LeanEngine<H> {
     }
 }
 
+impl<H: CdHw, const COUNT: bool> Engine<H, 0, 0, false, false, COUNT>
+where
+    Select<false, COUNT>: Counters,
+{
+    /// A [`LeanEngine`] or [`CountedEngine`] whose every byte is zero: [`Owner::Boot`], nothing
+    /// active, counters 0 and the all-zero configuration ([`Config::UNSET`]), which
+    /// [`configure`](Self::configure) replaces before the engine runs. A static of it is emitted
+    /// as zero-initialised data and lives in `.bss`; one built with [`lean`](LeanEngine::lean) or
+    /// [`counted`](CountedEngine::counted) carries a non-zero configuration and lives in `.data`,
+    /// which costs its bytes in the executable and padding in a section aligned for other input.
+    ///
+    /// Only these two engines have it: with a queue or result slots the initial `Option`s are
+    /// not all zero bytes (a result slot's `None` is a niche value), and making them so costs
+    /// the full and single engines more code than the `.bss` placement saves.
+    ///
+    /// # Safety
+    ///
+    /// All-zero bytes must be a valid `H`.
+    #[must_use]
+    pub const unsafe fn zeroed() -> Self {
+        // SAFETY: the caller's contract for `H`. Every other field is valid at zero and means
+        // what `with_hw` gives it: `Owner::Boot` and `Phase::Idle` are 0, `active` is an
+        // `Option` of a type with no niche, so `None` is the zero tag (a host test proves it),
+        // there are no queue or result slots, and the rest are numbers and bools.
+        unsafe { core::mem::zeroed() }
+    }
+}
+
 impl<H: CdHw> CountedEngine<H> {
     /// The lean engine with the sector counter, in the [`Owner::Boot`] state. See
     /// [`CountedEngine`].
@@ -404,6 +594,8 @@ impl<
         const STATS: bool,
         const COUNT: bool,
     > Engine<H, SLOTS, RESULTS, LEASE, STATS, COUNT>
+where
+    Select<STATS, COUNT>: Counters,
 {
     /// Requests that can wait behind the active one: the slots, less the spare a resumed
     /// request needs when the queue is full.
@@ -439,22 +631,9 @@ impl<
             queue: [None; SLOTS],
             results: [None; RESULTS],
             results_written: 0,
-            next_ticket: 1,
-            next_seq: 1,
-            stats: StreamStats {
-                irq_count: 0,
-                sectors: 0,
-                discarded_sectors: 0,
-                max_irq_ticks: 0,
-                phase: 0,
-                error: 0,
-                requests_done: 0,
-                requests_cancelled: 0,
-                requests_failed: 0,
-                chained: 0,
-                resumed: 0,
-                rejected: 0,
-            },
+            submitted: 0,
+            queued_seq: 0,
+            stats: <<Select<STATS, COUNT> as Counters>::Block as Block>::ZERO,
         }
     }
 
@@ -490,7 +669,7 @@ impl<
     ///
     /// `out` must be valid for writes of a [`StreamStats`].
     pub unsafe fn publish_to(&self, out: *mut StreamStats) {
-        let s = &self.stats;
+        let s = self.stats.snapshot();
         // SAFETY: the caller vouches for `out`; the stores go through the field addresses.
         unsafe {
             (&raw mut (*out).irq_count).write_volatile(s.irq_count);
@@ -520,7 +699,7 @@ impl<
     pub unsafe fn counted_sectors(this: *const Self) -> u32 {
         // SAFETY: the caller vouches for `this`; a field address, no reference, one aligned
         // word that the handler stores whole.
-        unsafe { (&raw const (*this).stats.sectors).read_volatile() }
+        unsafe { Block::read_sectors(&raw const (*this).stats) }
     }
 
     /// [`submissions`](Self::submissions) read like [`counted_sectors`](Self::counted_sectors):
@@ -532,7 +711,7 @@ impl<
     #[must_use]
     pub unsafe fn submissions_of(this: *const Self) -> u32 {
         // SAFETY: as `counted_sectors`.
-        unsafe { (&raw const (*this).next_ticket).read_volatile() }.wrapping_sub(1)
+        unsafe { (&raw const (*this).submitted).read_volatile() }
     }
 
     /// The code of the latest failure ([`Failure::code`]), 0 after a request started and when
@@ -554,7 +733,7 @@ impl<
         StreamStats {
             phase: self.phase as u32,
             error: self.error,
-            ..self.stats
+            ..self.stats.snapshot()
         }
     }
 
@@ -581,7 +760,9 @@ impl<
     /// ([`StreamStats::max_irq_ticks`] to 0), to attribute the peak to the
     /// next stretch of work.
     pub fn reset_max_irq_ticks(&mut self) {
-        self.stats.max_irq_ticks = 0;
+        if let Some(stats) = self.stats.full() {
+            stats.max_irq_ticks = 0;
+        }
     }
 
     /// Requests accepted so far (a refused one is not counted), parks included, wrapping at
@@ -590,7 +771,7 @@ impl<
     /// park's submission.
     #[must_use]
     pub fn submissions(&self) -> u32 {
-        self.next_ticket.wrapping_sub(1)
+        self.submitted
     }
 
     /// Requests waiting behind the active one.
@@ -670,7 +851,7 @@ impl<
         }
         self.lease_pending = true;
         if let Some(active) = self.active.as_mut() {
-            active.cancelled = true;
+            active.cancelled = 1;
         }
         if self.is_idle() {
             self.grant_lease();
@@ -776,14 +957,14 @@ impl<
             return self.submit_unqueued(request);
         }
         if self.queued_count() >= Self::DEPTH {
-            if STATS {
-                self.stats.rejected = self.stats.rejected.wrapping_add(1);
+            if let Some(stats) = self.stats.full() {
+                stats.rejected = stats.rejected.wrapping_add(1);
             }
             return Err(SubmitError::QueueFull);
         }
         let ticket = self.new_ticket();
-        let seq = self.next_seq;
-        self.next_seq = self.next_seq.wrapping_add(1).max(1);
+        self.queued_seq = self.queued_seq.wrapping_add(1);
+        let seq = self.queued_seq;
         self.enqueue(Queued {
             ticket,
             request,
@@ -804,8 +985,8 @@ impl<
     /// still stopping after the last one, or the transport is not attached.
     fn submit_unqueued(&mut self, request: Request) -> Result<Ticket, SubmitError> {
         if self.owner != Owner::Data || !self.is_ready_to_start() {
-            if STATS {
-                self.stats.rejected = self.stats.rejected.wrapping_add(1);
+            if let Some(stats) = self.stats.full() {
+                stats.rejected = stats.rejected.wrapping_add(1);
             }
             return Err(SubmitError::QueueFull);
         }
@@ -854,7 +1035,7 @@ impl<
     fn cancel_active(&mut self) {
         self.trace(2, 0);
         if let Some(active) = self.active.as_mut() {
-            active.cancelled = true;
+            active.cancelled = 1;
         }
     }
 
@@ -920,8 +1101,8 @@ impl<
     /// dispatcher handler on the console, the test harness on the host).
     pub fn on_interrupt(&mut self) {
         let started = if STATS { self.hw.clock() } else { 0 };
-        if STATS {
-            self.stats.irq_count = self.stats.irq_count.wrapping_add(1);
+        if let Some(stats) = self.stats.full() {
+            stats.irq_count = stats.irq_count.wrapping_add(1);
         }
         if self.owner == Owner::Data {
             let code = self.hw.interrupt_code();
@@ -929,9 +1110,9 @@ impl<
             self.dispatch(code);
             self.sync_source();
         }
-        if STATS {
+        if let Some(stats) = self.stats.full() {
             let ticks = u32::from(self.hw.clock().wrapping_sub(started));
-            self.stats.max_irq_ticks = self.stats.max_irq_ticks.max(ticks);
+            stats.max_irq_ticks = stats.max_irq_ticks.max(ticks);
         }
     }
 
@@ -974,7 +1155,7 @@ impl<
             }
             (Phase::StartingRead, flag::ACKNOWLEDGE) => {
                 self.change(Phase::Reading);
-                if self.active.is_some_and(|a| a.cancelled) {
+                if self.active.is_some_and(|a| a.cancelled != 0) {
                     self.pause();
                 }
             }
@@ -990,7 +1171,7 @@ impl<
     fn take_sector(&mut self) -> Result<(), Failure> {
         let reading = matches!(self.phase, Phase::Reading | Phase::StartingRead);
         let (destination, words) = match self.active {
-            Some(a) if reading && !a.cancelled && a.received < a.request.sectors => {
+            Some(a) if reading && a.cancelled == 0 && a.received < a.request.sectors => {
                 // SAFETY: `received < sectors`, so this stays inside the
                 // `sectors * 2048` bytes `Request::new_raw` vouched for.
                 let at = unsafe {
@@ -1012,11 +1193,11 @@ impl<
             if let Some(a) = self.active.as_mut() {
                 a.received += 1;
             }
-            if STATS || COUNT {
-                self.stats.sectors = self.stats.sectors.wrapping_add(1);
+            if let Some(sectors) = self.stats.sectors_mut() {
+                *sectors = sectors.wrapping_add(1);
             }
-        } else if STATS {
-            self.stats.discarded_sectors = self.stats.discarded_sectors.wrapping_add(1);
+        } else if let Some(stats) = self.stats.full() {
+            stats.discarded_sectors = stats.discarded_sectors.wrapping_add(1);
         }
         self.stamp = self.hw.vblank_count();
         Ok(())
@@ -1031,7 +1212,7 @@ impl<
         let Some(active) = self.active else {
             return;
         };
-        if active.cancelled {
+        if active.cancelled != 0 {
             self.pause();
             return;
         }
@@ -1043,8 +1224,8 @@ impl<
         match self.take_chain(active.request.end_lba()) {
             Some(next) => {
                 self.start_chained(next);
-                if STATS {
-                    self.stats.chained = self.stats.chained.wrapping_add(1);
+                if let Some(stats) = self.stats.full() {
+                    stats.chained = stats.chained.wrapping_add(1);
                 }
             }
             None => self.pause(),
@@ -1053,7 +1234,7 @@ impl<
 
     #[inline(never)]
     fn pause_complete(&mut self) {
-        if self.recovering && self.active.is_some_and(|a| !a.cancelled) {
+        if self.recovering && self.active.is_some_and(|a| a.cancelled == 0) {
             // The recovery Pause is done: start the seek it was clearing the
             // way for.
             self.recovering = false;
@@ -1108,7 +1289,7 @@ impl<
         self.hw.silence_output();
         self.hw.acknowledge(0);
         if let Some(active) = self.active.take() {
-            if active.cancelled {
+            if active.cancelled != 0 {
                 self.finish(active, Outcome::Cancelled);
             } else if active.resumes_left > 0 && active.received < active.request.sectors {
                 self.requeue_remainder(active);
@@ -1124,8 +1305,8 @@ impl<
         // begins inside the request's destination (`Request::new_raw`).
         let rest = unsafe { active.request.remaining_after(active.received) };
         if let Some(request) = rest {
-            if STATS {
-                self.stats.resumed = self.stats.resumed.wrapping_add(1);
+            if let Some(stats) = self.stats.full() {
+                stats.resumed = stats.resumed.wrapping_add(1);
             }
             self.enqueue(Queued {
                 ticket: active.ticket,
@@ -1180,7 +1361,7 @@ impl<
             request: queued.request,
             base: queued.base,
             received: 0,
-            cancelled: false,
+            cancelled: 0,
             resumes_left: queued.resumes_left,
         });
         self.location = location(queued.request.lba);
@@ -1204,7 +1385,7 @@ impl<
             request: queued.request,
             base: queued.base,
             received: 0,
-            cancelled: false,
+            cancelled: 0,
             resumes_left: queued.resumes_left,
         });
         self.stamp = self.hw.vblank_count();
@@ -1255,22 +1436,21 @@ impl<
     }
 
     fn new_ticket(&mut self) -> Ticket {
-        let ticket = Ticket(self.next_ticket);
-        self.next_ticket = self.next_ticket.wrapping_add(1).max(1);
-        ticket
+        self.submitted = self.submitted.wrapping_add(1);
+        Ticket(self.submitted)
     }
 
     fn finish(&mut self, active: Active, outcome: Outcome) {
-        if STATS {
+        if let Some(stats) = self.stats.full() {
             match outcome {
                 Outcome::Done => {
-                    self.stats.requests_done = self.stats.requests_done.wrapping_add(1);
+                    stats.requests_done = stats.requests_done.wrapping_add(1);
                 }
                 Outcome::Cancelled => {
-                    self.stats.requests_cancelled = self.stats.requests_cancelled.wrapping_add(1);
+                    stats.requests_cancelled = stats.requests_cancelled.wrapping_add(1);
                 }
                 Outcome::Failed(_) => {
-                    self.stats.requests_failed = self.stats.requests_failed.wrapping_add(1);
+                    stats.requests_failed = stats.requests_failed.wrapping_add(1);
                 }
             }
         }

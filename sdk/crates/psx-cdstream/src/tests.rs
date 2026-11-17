@@ -1860,3 +1860,85 @@ fn the_lean_engine_still_keeps_no_count_and_no_error_code() {
         assert_eq!(LeanEngine::<FakeDrive>::error_code(&engine), 0);
     }
 }
+
+// ------------------------------------------------- zero-initialised engines
+
+/// A drive that does nothing and holds no bytes, so it is valid at all-zero bytes like the console's `Mmio`.
+struct NullDrive;
+
+impl CdHw for NullDrive {
+    fn issue(&mut self, _command: u8, _params: &[u8]) -> bool {
+        true
+    }
+    fn interrupt_code(&mut self) -> u8 {
+        0
+    }
+    fn error_response(&mut self) -> (u8, u8) {
+        (0, 0)
+    }
+    fn discard_response(&mut self) {}
+    fn acknowledge(&mut self, _bits: u8) {}
+    fn silence_output(&mut self) {}
+    fn drop_data_request(&mut self) {}
+    unsafe fn pop_sector(&mut self, _destination: *mut u32, _store_words: usize) -> bool {
+        false
+    }
+    fn set_source_enabled(&mut self, _enabled: bool) {}
+    fn vblank_count(&mut self) -> u32 {
+        0
+    }
+}
+
+#[test]
+fn a_zeroed_engine_is_the_engine_before_attach() {
+    // SAFETY: `NullDrive` has no bytes.
+    let mut counted = unsafe { CountedEngine::<NullDrive>::zeroed() };
+    // SAFETY: as above.
+    let mut lean = unsafe { LeanEngine::<NullDrive>::zeroed() };
+    assert_eq!(counted.owner(), Owner::Boot);
+    assert_eq!(lean.owner(), Owner::Boot);
+    assert_eq!(counted.phase(), Phase::Idle);
+    assert!(counted.is_idle() && lean.is_idle());
+    assert_eq!(counted.status(), Status::Idle);
+    assert_eq!(lean.status(), Status::Idle);
+    assert_eq!((counted.submissions(), lean.submissions()), (0, 0));
+    // SAFETY: the engines are live and nothing else touches them.
+    unsafe {
+        assert_eq!(CountedEngine::<NullDrive>::counted_sectors(&counted), 0);
+        assert_eq!(CountedEngine::<NullDrive>::error_code(&counted), 0);
+        assert_eq!(LeanEngine::<NullDrive>::error_code(&lean), 0);
+    }
+    // A request before the engine is attached is refused, as for any engine that is not attached.
+    let buf = Buf::new(2);
+    assert_eq!(
+        counted.submit(request(1, 2, &buf)),
+        Err(SubmitError::QueueFull)
+    );
+    // The install path configures first and attaches; the engine is then the one `counted(..)`
+    // builds.
+    counted.configure(Config::DEFAULT);
+    counted.attach();
+    assert_eq!(counted.owner(), Owner::Data);
+}
+
+#[test]
+fn an_engine_without_statistics_holds_no_statistics_block() {
+    use core::mem::size_of;
+    type Stats = Engine<NullDrive, 0, 0, false, true, false>;
+    // The lean engine drops the 48 bytes of `StreamStats`; the counted one keeps one word of it.
+    let (lean, counted, stats) = (
+        size_of::<LeanEngine<NullDrive>>(),
+        size_of::<CountedEngine<NullDrive>>(),
+        size_of::<Stats>(),
+    );
+    assert_eq!(
+        lean + size_of::<StreamStats>(),
+        stats,
+        "{lean} {counted} {stats}"
+    );
+    // One word, which padding may round up on a host with 8-byte pointers.
+    assert!(
+        (lean + 4..=lean + 8).contains(&counted),
+        "{lean} {counted} {stats}"
+    );
+}
