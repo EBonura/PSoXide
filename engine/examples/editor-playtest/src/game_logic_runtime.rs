@@ -1758,12 +1758,6 @@ impl Playtest {
         })
     }
 
-    /// Entity `index`'s melee swing as a watcher reads it: its attack clip,
-    /// its swing clock, its authored hitboxes and its record's contact
-    /// ticks. None when it is not winding up or swinging a blade.
-    // Read once per think by a controller; kept out of the large callers.
-    #[inline(never)]
-    #[cfg_attr(target_arch = "mips", optimize(size))]
     /// Time every live entity's attacks from its Character's clips: the clip
     /// rules her actions are timed by, with each attack's authored contact
     /// frames placed on its clip's clock. Once per spawn, before the entities
@@ -1793,6 +1787,12 @@ impl Playtest {
         self.entity_attacks_timed = true;
     }
 
+    /// Entity `index`'s melee swing as a watcher reads it: its attack clip,
+    /// its swing clock, its authored hitboxes and its record's contact
+    /// ticks. None when it is not winding up or swinging a blade.
+    // Read once per think by a controller; kept out of the large callers.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     pub(super) fn entity_swing(&self, index: usize) -> Option<SwingClock> {
         let records = GAME_ENTITIES.as_slice();
         let entity = records.get(index)?;
