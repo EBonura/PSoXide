@@ -14,18 +14,31 @@ use super::*;
 /// (a tap; a hold runs) and R3 toggles the lock. The stick is the move, in
 /// the pad's own frame ([`CombatMove::Stick`]). The camera stick, menus and
 /// interaction stay on the pad: they are not combat verbs.
+///
+/// The stick becomes the world-space move every controller gives
+/// ([`CombatMove::Move`]): turned by the camera's `camera_yaw` here, so the
+/// motor reads the same form from the pad as from an AI.
 // One small out-of-line call per tick keeps the large gameplay update from
 // growing (and from changing how much else gets inlined into it).
 #[inline(never)]
-pub(crate) fn pad_intent(ctx: &Ctx, deadzone: i16) -> CombatIntent {
+pub(crate) fn pad_intent(ctx: &Ctx, deadzone: i16, camera_yaw: Angle) -> CombatIntent {
     let held = ctx.pad.buttons.bits();
     let before = ctx.pad_prev.buttons.bits();
-    let (x, z) = local_move_axes(ctx, deadzone).raw();
+    let movement = camera_relative_move_axes(
+        local_move_axes(ctx, deadzone),
+        camera_yaw,
+        axis_profile(deadzone),
+    );
     CombatIntent {
-        movement: if x == 0 && z == 0 {
+        movement: if movement.x.raw() == 0 && movement.z.raw() == 0 && movement.forward == 0 {
             CombatMove::Still
         } else {
-            CombatMove::Stick { x, z }
+            // A Q12 component of a vector no longer than one fits 16 bits.
+            CombatMove::Move {
+                x: movement.x.raw() as i16,
+                z: movement.z.raw() as i16,
+                forward: movement.forward,
+            }
         },
         face: None,
         aim: None,
@@ -48,30 +61,27 @@ fn pad_actions(buttons: u16) -> CombatActions {
         .with_if(CombatAction::Lock, on(button::R3))
 }
 
-/// The stick of a pad intent, as the motor's local input vector.
-pub(crate) fn intent_stick(intent: &CombatIntent) -> InputVector {
-    match intent.movement {
-        CombatMove::Stick { x, z } => InputVector::from_centered(x, z),
-        _ => InputVector::ZERO,
-    }
-}
-
+/// The motor input for an intent's move: the one form every controller
+/// gives, read the same way for every fighter.
 pub(crate) fn motor_input(
     intent: &CombatIntent,
-    camera_yaw: Angle,
-    deadzone: i16,
     sprint: bool,
     evade: bool,
     facing_yaw: Option<Angle>,
 ) -> CharacterMotorInput {
-    let movement =
-        camera_relative_move_axes(intent_stick(intent), camera_yaw, axis_profile(deadzone));
-
+    let (move_x, move_z, walk) = match intent.movement {
+        CombatMove::Move { x, z, forward } => (
+            Q12::from_raw(i32::from(x)),
+            Q12::from_raw(i32::from(z)),
+            forward,
+        ),
+        CombatMove::Still => (Q12::ZERO, Q12::ZERO, 0),
+    };
     CharacterMotorInput {
         turn: 0,
-        walk: movement.forward,
-        move_x: movement.x,
-        move_z: movement.z,
+        walk,
+        move_x,
+        move_z,
         facing_yaw,
         sprint,
         evade,
@@ -189,7 +199,7 @@ pub(crate) fn scale_i16_by_vblanks(value: i16, delta_vblanks: u16) -> i16 {
     clamp_i16(scaled)
 }
 
-fn axis_profile(deadzone: i16) -> InputAxisProfile {
+pub(crate) fn axis_profile(deadzone: i16) -> InputAxisProfile {
     InputAxisProfile::new(deadzone, STICK_MAX)
 }
 

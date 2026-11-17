@@ -43,14 +43,14 @@ fn each_combat_button_is_its_verb() {
         (button::START, CombatActions::NONE),
     ];
     for (bit, actions) in cases {
-        let press = pad_intent(&pad_ctx(0, bit, (0, 0)), 0);
+        let press = pad_intent(&pad_ctx(0, bit, (0, 0)), 0, Angle::ZERO);
         assert_eq!(press.pressed, actions, "press {bit:#06x}");
         assert_eq!(press.held, actions, "press {bit:#06x}");
         assert_eq!(press.released, CombatActions::NONE);
-        let hold = pad_intent(&pad_ctx(bit, bit, (0, 0)), 0);
+        let hold = pad_intent(&pad_ctx(bit, bit, (0, 0)), 0, Angle::ZERO);
         assert_eq!(hold.pressed, CombatActions::NONE, "hold {bit:#06x}");
         assert_eq!(hold.held, actions, "hold {bit:#06x}");
-        let release = pad_intent(&pad_ctx(bit, 0, (0, 0)), 0);
+        let release = pad_intent(&pad_ctx(bit, 0, (0, 0)), 0, Angle::ZERO);
         assert_eq!(release.held, CombatActions::NONE, "release {bit:#06x}");
         assert_eq!(release.released, actions, "release {bit:#06x}");
     }
@@ -58,34 +58,64 @@ fn each_combat_button_is_its_verb() {
 
 #[test]
 fn the_stick_is_the_move_and_a_centred_stick_stands_still() {
-    let still = pad_intent(&pad_ctx(0, 0, (0, 0)), 8);
+    let still = pad_intent(&pad_ctx(0, 0, (0, 0)), 8, Angle::ZERO);
     assert_eq!(still.movement, CombatMove::Still);
     assert_eq!(still, CombatIntent::IDLE);
     // Inside the deadzone is still too.
     assert_eq!(
-        pad_intent(&pad_ctx(0, 0, (5, -5)), 8).movement,
+        pad_intent(&pad_ctx(0, 0, (5, -5)), 8, Angle::ZERO).movement,
         CombatMove::Still
     );
-    let forward = pad_intent(&pad_ctx(0, 0, (0, 100)), 8);
-    let CombatMove::Stick { x, z } = forward.movement else {
-        panic!("stick expected, got {:?}", forward.movement);
+    // The stick becomes the world move through the camera: the same form
+    // an AI gives. The camera at yaw 0 looks down -z, so stick-forward is
+    // world -z.
+    let forward = pad_intent(&pad_ctx(0, 0, (0, 100)), 8, Angle::ZERO);
+    let CombatMove::Move {
+        x,
+        z,
+        forward: sense,
+    } = forward.movement
+    else {
+        panic!("move expected, got {:?}", forward.movement);
     };
-    assert_eq!(x, 0);
-    assert!(z > 0);
-    // The motor reads the very vector the stick gave.
+    let expected = psx_engine::camera_relative_move_axes(
+        local_move_axes(&pad_ctx(0, 0, (0, 100)), 8),
+        Angle::ZERO,
+        crate::input::axis_profile(8),
+    );
     assert_eq!(
-        intent_stick(&forward).raw(),
-        local_move_axes(&pad_ctx(0, 0, (0, 100)), 8).raw()
+        (x, z, sense),
+        (expected.x.raw() as i16, expected.z.raw() as i16, 1)
+    );
+    // The motor reads the very vector the stick gave.
+    let input = motor_input(&forward, false, false, None);
+    assert_eq!(
+        (input.move_x, input.move_z, input.walk),
+        (expected.x, expected.z, 1)
     );
     // The D-pad is a full stick when the analog stick rests.
-    let right = pad_intent(&pad_ctx(0, button::RIGHT, (0, 0)), 8);
-    assert_eq!(right.movement, CombatMove::Stick { x: STICK_MAX, z: 0 });
+    let right = pad_intent(&pad_ctx(0, button::RIGHT, (0, 0)), 8, Angle::ZERO);
+    let CombatMove::Move {
+        x, forward: sense, ..
+    } = right.movement
+    else {
+        panic!("move expected, got {:?}", right.movement);
+    };
+    assert!(
+        x.unsigned_abs() > 4000 && sense == 0,
+        "{:?}",
+        right.movement
+    );
     assert!(right.pressed.is_empty() && right.held.is_empty());
 }
 
 #[test]
 fn several_presses_in_one_tick_all_arrive() {
-    let both = pad_intent(&pad_ctx(0, button::TRIANGLE | button::R1, (0, 0)), 0);
+    let both = pad_intent(
+        &pad_ctx(0, button::TRIANGLE | button::R1, (0, 0)),
+        0,
+        Angle::ZERO,
+    );
     assert!(both.pressed(CombatAction::Swap) && both.pressed(CombatAction::LightAttack));
     assert_eq!(both.attack(), Some(CombatAction::LightAttack));
 }
@@ -114,13 +144,13 @@ fn hybrid_fighter() -> (
 
 #[test]
 fn an_intent_runs_the_same_whether_the_pad_or_the_ai_sent_it() {
-    use psx_game_runtime::entities::{GameEntityState, GameEntityTickStats, NoClipMover};
+    use psx_game_runtime::entities::{GameEntityState, GameEntityTickStats, OpenWorld};
     for (bit, action) in [
         (button::TRIANGLE, CombatAction::Swap),
         (button::R1, CombatAction::LightAttack),
         (button::R2, CombatAction::HeavyAttack),
     ] {
-        let from_pad = pad_intent(&pad_ctx(0, bit, (0, 0)), 0);
+        let from_pad = pad_intent(&pad_ctx(0, bit, (0, 0)), 0, Angle::ZERO);
         let from_ai = CombatIntent {
             pressed: CombatActions::of(action),
             ..CombatIntent::IDLE
@@ -129,8 +159,8 @@ fn an_intent_runs_the_same_whether_the_pad_or_the_ai_sent_it() {
         let (_, mut ai_driven) = hybrid_fighter();
         let stance_before = pad_driven.stance(0);
         let mut stats = GameEntityTickStats::default();
-        pad_driven.apply_intent(&records[0], 0, from_pad, &mut NoClipMover, 2, &mut stats);
-        ai_driven.apply_intent(&records[0], 0, from_ai, &mut NoClipMover, 2, &mut stats);
+        pad_driven.apply_intent(&records[0], 0, from_pad, &mut OpenWorld, 2, &mut stats);
+        ai_driven.apply_intent(&records[0], 0, from_ai, &mut OpenWorld, 2, &mut stats);
         let outcome = |e: &RuntimeGameEntities| {
             (
                 e.stance(0),
@@ -150,7 +180,7 @@ fn an_intent_runs_the_same_whether_the_pad_or_the_ai_sent_it() {
 
 #[test]
 fn only_a_swing_under_way_has_a_contact_reading() {
-    use psx_game_runtime::entities::{GameEntityState, GameEntityTickStats, NoClipMover};
+    use psx_game_runtime::entities::{GameEntityState, GameEntityTickStats, OpenWorld};
     let mut scene = super::combat_baseline_tests::scene();
     assert!(scene
         .game_entities
@@ -166,7 +196,7 @@ fn only_a_swing_under_way_has_a_contact_reading() {
             pressed: CombatActions::of(CombatAction::LightAttack),
             ..CombatIntent::IDLE
         },
-        &mut NoClipMover,
+        &mut OpenWorld,
         2,
         &mut stats,
     );

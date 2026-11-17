@@ -9,7 +9,7 @@
 use super::combat_baseline_tests::{bolt, character, ctx, scene, TEST_I_FRAMES};
 use super::*;
 use psx_game_runtime::combat_intent::{CombatAction, CombatActions, CombatIntent};
-use psx_game_runtime::entities::{CombatTarget, GameEntityState, GameEntityTickInput, NoClipMover};
+use psx_game_runtime::entities::{CombatTarget, GameEntityState, GameEntityTickInput, OpenWorld};
 use psx_game_runtime::projectiles::{CombatTeam, ProjectileDamageChannel, NO_PROJECTILE_OWNER};
 use psx_level::{game_entity_flags, LevelGameEntityRecord, StableId};
 
@@ -92,7 +92,7 @@ fn tick_enemy(scene: &mut Playtest, ticks: u16) {
     for _ in 0..ticks {
         scene
             .game_entities
-            .tick(GAME_ENTITIES.as_slice(), far(), &mut NoClipMover);
+            .tick(GAME_ENTITIES.as_slice(), far(), &mut OpenWorld);
     }
 }
 
@@ -361,7 +361,7 @@ fn a_crit_doubles_the_next_attack_and_is_used_up_by_it_on_both_sides() {
             aim: Some([0, 0, 100]),
             ..CombatIntent::IDLE
         },
-        &mut NoClipMover,
+        &mut OpenWorld,
         2,
         &mut stats,
     );
@@ -469,13 +469,13 @@ fn a_poise_break_knocks_the_enemy_down_and_it_gets_up() {
     for _ in 1..down {
         scene
             .game_entities
-            .tick(GAME_ENTITIES.as_slice(), near, &mut NoClipMover);
+            .tick(GAME_ENTITIES.as_slice(), near, &mut OpenWorld);
         assert_eq!(scene.game_entities.state(0), GameEntityState::KnockedDown);
     }
     assert_eq!(scene.game_entities.position(0), at);
     scene
         .game_entities
-        .tick(GAME_ENTITIES.as_slice(), near, &mut NoClipMover);
+        .tick(GAME_ENTITIES.as_slice(), near, &mut OpenWorld);
     assert_eq!(scene.game_entities.state(0), GameEntityState::Aggro);
 }
 
@@ -504,7 +504,7 @@ fn a_fighter_without_both_moves_never_swaps() {
                         ..far().target
                     },
                 },
-                &mut NoClipMover,
+                &mut OpenWorld,
                 2,
             );
             assert_eq!(entities.stance(0), VitalityChannelId::Two);
@@ -551,7 +551,7 @@ fn the_swap_and_parry_windows_are_exactly_each_characters_count() {
         scene.game_entities.advance_stances(1);
     }
     let record = enemy_record();
-    assert_eq!(protected, u16::from(record.roll_invulnerable_frames));
+    assert_eq!(protected, u16::from(record.motion.roll_invulnerable_frames));
     assert_eq!(parrying, record.combat.parry_ticks);
 }
 

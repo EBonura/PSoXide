@@ -13,10 +13,10 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
     #[inline(never)]
     pub(super) fn init_slot(&mut self, index: usize, record: &LevelGameEntityRecord, seed: u32) {
         self.tactics[index].seed = seed;
-        self.x[index] = record.x;
-        self.y[index] = record.y;
-        self.z[index] = record.z;
-        self.yaw[index] = record.yaw;
+        self.motors[index] = CharacterMotorState::new(
+            RoomPoint::new(record.x, record.y, record.z),
+            Angle::from_q12(record.yaw as u16),
+        );
         self.combatants[index].respawn(&record.combat);
         // A fighter that cannot swap holds the stance of its one kind of
         // move from spawn on (a ranged-only one starts in Zenith).

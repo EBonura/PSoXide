@@ -16,12 +16,12 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use psx_engine::{
-    commit_body_direction_with_trace_provider, commit_body_step_with_trace_provider,
-    trace_collision, BodyStep, CharacterBlockerTraceProvider, CharacterCollisionAabb,
-    CharacterCollisionCylinder, CharacterMotorConfig, CharacterMotorFrame, CharacterMotorInput,
-    CharacterMotorState, CollisionQueryError, CollisionTrace, CollisionTraceQuery, OtFrame,
-    PrimitivePacketArena, RoomPoint, ThirdPersonCameraConfig, ThirdPersonCameraFrame,
-    ThirdPersonCameraInput, ThirdPersonCameraState, ThirdPersonCameraTarget, WorldCamera,
+    commit_body_step_with_trace_provider, trace_collision, BodyStep, CharacterBlockerTraceProvider,
+    CharacterCollisionAabb, CharacterCollisionCylinder, CharacterMotorConfig, CharacterMotorFrame,
+    CharacterMotorInput, CharacterMotorState, CollisionQueryError, CollisionTrace,
+    CollisionTraceQuery, OtFrame, PrimitivePacketArena, RoomPoint, ThirdPersonCameraConfig,
+    ThirdPersonCameraFrame, ThirdPersonCameraInput, ThirdPersonCameraState,
+    ThirdPersonCameraTarget, WorldCamera,
 };
 use psx_game_runtime::cd_stream::{
     read_world_chunk_blocking, read_world_pack_entries_blocking, CdController, WorldChunkInfo,
@@ -974,25 +974,6 @@ impl GridRuntime {
         let mut provider =
             CharacterBlockerTraceProvider::new_with_aabbs(&mut provider, blockers, aabb_blockers);
         commit_body_step_with_trace_provider(&mut provider, start, dx, dz, radius, height)
-    }
-
-    pub(super) fn commit_body_direction(
-        &mut self,
-        start: RoomPoint,
-        dx: i32,
-        dz: i32,
-        radius: i32,
-        height: i32,
-        _destructibles: &RuntimeDestructibles<{ psx_level::MAX_DESTRUCTIBLES }>,
-        blockers: &[CharacterCollisionCylinder],
-        aabb_blockers: &[CharacterCollisionAabb],
-    ) -> Result<BodyStep, CollisionQueryError> {
-        let (radius, height) = (radius.max(0), height.max(1));
-        let world = self.resident.collision();
-        let mut provider = GridTraceProvider::new(&world);
-        let mut provider =
-            CharacterBlockerTraceProvider::new_with_aabbs(&mut provider, blockers, aabb_blockers);
-        commit_body_direction_with_trace_provider(&mut provider, start, dx, dz, radius, height)
     }
 
     pub(super) fn melee_segment_clear(

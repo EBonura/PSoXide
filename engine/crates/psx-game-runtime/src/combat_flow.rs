@@ -20,16 +20,6 @@ pub const GROUND_REARM_TICKS: u16 = 120;
 /// Ticks after a poise break reaction ends during which no further break can occur.
 pub const BREAK_GRACE_TICKS: u16 = 60;
 
-/// Ground sidestep tuning, on the 60 Hz simulation clock.
-/// Sidestep length in runtime units.
-pub const EVADE_DISTANCE: i32 = 72;
-/// Ticks spent moving during a sidestep.
-pub const EVADE_MOVE_TICKS: u16 = 18;
-/// Vulnerable ticks after the sidestep movement ends.
-pub const EVADE_RECOVERY_TICKS: u16 = 12;
-/// Ticks before another sidestep may start.
-pub const EVADE_COOLDOWN_TICKS: u16 = 120;
-
 /// Actual firing space: several body lengths beyond contact, bounded by the weapon.
 pub fn ranged_band(preferred: i32, melee_reach: i32, weapon_max: i32) -> (i32, i32) {
     let far = preferred

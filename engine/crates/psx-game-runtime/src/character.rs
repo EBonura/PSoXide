@@ -224,6 +224,8 @@ pub struct RuntimeCharacter {
     /// Yaw rate translated from degrees/second to PSX angle
     /// units / 60 Hz frame at init time.
     pub yaw_step: Angle,
+    /// The authored turn rate `yaw_step` comes from.
+    pub turn_speed_degrees_per_second: u16,
     pub stamina_max_q12: i32,
     pub sprint_min_q12: i32,
     pub sprint_drain_q12: i32,
@@ -252,11 +254,6 @@ impl RuntimeCharacter {
         speed_scale_num: i32,
         speed_scale_den: i32,
     ) -> Self {
-        // 4096 q12 / 360 deg = 11 q12 per deg, divided by
-        // 60 Hz target ≈ 0.19 q12 per deg/frame. We approximate
-        // as `(deg * 4096) / (360 * 60)` which is exact for the
-        // 180 deg/s default (= 34 quanta/frame).
-        let yaw_step_q12 = ((c.turn_speed_degrees_per_second as u32 * 4096) / (360 * 60)) as u16;
         Self {
             model: c.model,
             action_clips: c.action_clips,
@@ -276,7 +273,8 @@ impl RuntimeCharacter {
             height: c.height as i32,
             walk_speed: scaled_player_speed(c.walk_speed, speed_scale_num, speed_scale_den),
             run_speed: scaled_player_speed(c.run_speed, speed_scale_num, speed_scale_den),
-            yaw_step: Angle::from_q12(yaw_step_q12),
+            yaw_step: yaw_step_for(c.turn_speed_degrees_per_second),
+            turn_speed_degrees_per_second: c.turn_speed_degrees_per_second,
             stamina_max_q12: c.stamina_max_q12,
             sprint_min_q12: c.sprint_min_q12,
             sprint_drain_q12: c.sprint_drain_q12,
@@ -386,25 +384,33 @@ impl RuntimeCharacter {
     }
 
     /// The motor configuration this character drives.
+    ///
+    /// Built by [`motion_motor_config`], the builder every enemy's
+    /// configuration comes from too. The speeds here are already scaled by
+    /// the game's knob (see [`Self::from_record`]), so it scales by one.
     pub fn motor_config(&self) -> CharacterMotorConfig {
-        let mut config = CharacterMotorConfig::character_with_body(
+        let motion = psx_level::CharacterMotion {
+            walk_speed: self.walk_speed,
+            run_speed: self.run_speed,
+            turn_speed_degrees_per_second: self.turn_speed_degrees_per_second,
+            weight_q8: self.weight_q8,
+            stamina_max_q12: self.stamina_max_q12,
+            sprint_min_q12: self.sprint_min_q12,
+            sprint_drain_q12: self.sprint_drain_q12,
+            stamina_recover_q12: self.stamina_recover_q12,
+            roll_cost_q12: self.roll_cost_q12,
+            roll_speed: self.roll_speed,
+            roll_active_frames: self.roll_active_frames,
+            roll_recovery_frames: self.roll_recovery_frames,
+            roll_invulnerable_frames: self.roll_invulnerable_frames,
+        };
+        let mut config = motion_motor_config(
             self.radius,
             self.height,
-            self.walk_speed,
-            self.run_speed,
-            self.yaw_step,
+            &motion,
+            self.supports_action(CharacterAnimationAction::Run),
+            (1, 1),
         );
-        config.run_enabled = self.supports_action(CharacterAnimationAction::Run);
-        config.weight_q8 = self.weight_q8;
-        config.stamina_max_q12 = self.stamina_max_q12;
-        config.sprint_min_q12 = self.sprint_min_q12;
-        config.sprint_drain_q12 = self.sprint_drain_q12;
-        config.stamina_recover_q12 = self.stamina_recover_q12;
-        config.roll_cost_q12 = self.roll_cost_q12;
-        config.roll_speed = self.roll_speed;
-        config.roll_active_frames = self.roll_active_frames;
-        config.roll_recovery_frames = self.roll_recovery_frames;
-        config.roll_invulnerable_frames = self.roll_invulnerable_frames;
         config.backstep_cost_q12 = self.backstep_cost_q12;
         config.backstep_speed = self.backstep_speed;
         config.backstep_active_frames = self.backstep_active_frames;
@@ -421,6 +427,52 @@ impl VerbBindings for RuntimeCharacter {
     fn bound(&self, action: CharacterAnimationAction) -> bool {
         self.supports_action(action)
     }
+}
+
+/// Per-frame turn step for an authored turn rate. 4096 q12 / 360 deg = 11
+/// q12 per deg, divided by the 60 Hz target is about 0.19 q12 per
+/// deg/frame; `(deg * 4096) / (360 * 60)` is exact for the 180 deg/s
+/// default (34 quanta per frame).
+pub fn yaw_step_for(turn_speed_degrees_per_second: u16) -> Angle {
+    Angle::from_q12(((turn_speed_degrees_per_second as u32 * 4096) / (360 * 60)) as u16)
+}
+
+/// The motor configuration of a character: the one builder every fighter's
+/// motor configuration comes from, the player's and every enemy's. Speeds
+/// scale by `speed_scale` (numerator, denominator), the game's speed knob;
+/// a character runs only with a Run action bound (`run_enabled`).
+pub fn motion_motor_config(
+    radius: i32,
+    height: i32,
+    motion: &psx_level::CharacterMotion,
+    run_enabled: bool,
+    speed_scale: (i32, i32),
+) -> CharacterMotorConfig {
+    // An unset scale (a zeroed table) is one.
+    let (num, den) = if speed_scale.1 == 0 {
+        (1, 1)
+    } else {
+        speed_scale
+    };
+    let mut config = CharacterMotorConfig::character_with_body(
+        radius,
+        height,
+        scaled_player_speed(motion.walk_speed, num, den),
+        scaled_player_speed(motion.run_speed, num, den),
+        yaw_step_for(motion.turn_speed_degrees_per_second),
+    );
+    config.run_enabled = run_enabled;
+    config.weight_q8 = motion.weight_q8;
+    config.stamina_max_q12 = motion.stamina_max_q12;
+    config.sprint_min_q12 = motion.sprint_min_q12;
+    config.sprint_drain_q12 = motion.sprint_drain_q12;
+    config.stamina_recover_q12 = motion.stamina_recover_q12;
+    config.roll_cost_q12 = motion.roll_cost_q12;
+    config.roll_speed = motion.roll_speed;
+    config.roll_active_frames = motion.roll_active_frames;
+    config.roll_recovery_frames = motion.roll_recovery_frames;
+    config.roll_invulnerable_frames = motion.roll_invulnerable_frames;
+    config
 }
 
 /// Scale an authored speed by the game's `num / den` player-speed

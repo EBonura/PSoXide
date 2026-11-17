@@ -638,7 +638,7 @@ impl Playtest {
         }
         // The one read of the combat buttons and the stick: every combat rule
         // below reads this intent, never the pad.
-        let intent = pad_intent(ctx, self.analog_deadzone);
+        let intent = pad_intent(ctx, self.analog_deadzone, self.camera.yaw());
         // First gameplay update after loading: anchor the animation
         // epoch here so value-based phases do not inherit the variable
         // loading duration (see `gameplay_epoch` in main.rs).
@@ -859,8 +859,6 @@ impl Playtest {
         // below always sees the direction the player is holding.
         let stick_input = motor_input(
             &intent,
-            self.camera.yaw(),
-            self.analog_deadzone,
             circle.sprint && !self.ranged_ready.ready(now.as_u32()),
             circle.evade,
             lock_facing_yaw,

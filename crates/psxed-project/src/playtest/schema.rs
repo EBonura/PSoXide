@@ -1667,6 +1667,8 @@ pub struct PlaytestGameEntity {
     pub knockdown_clip: u16,
     /// Clip over a parry's stagger (Parried, else its chain).
     pub parried_clip: u16,
+    /// Clip while rolling (Roll, else its chain, else walk).
+    pub roll_clip: u16,
     /// Death one-shot clip.
     pub death_clip: u16,
     /// First rig-attached volume in [`PlaytestPackage::combat_capsules`].
@@ -1687,10 +1689,9 @@ pub struct PlaytestGameEntity {
     pub radius: u16,
     /// Body cylinder height, engine units (Character-bound).
     pub height: u16,
-    /// Patrol speed, engine units per 60 Hz tick (Character walk).
-    pub walk_speed: i32,
-    /// Chase speed, engine units per 60 Hz tick (Character run).
-    pub run_speed: i32,
+    /// How it moves: its Character Controller's motion numbers, the same
+    /// ones the player's motor reads.
+    pub motion: psx_level::CharacterMotion,
     /// Patrol anchor one, room-local (== spawn when unauthored).
     pub patrol: [i32; 3],
     /// 60 Hz ticks idled at a reached patrol anchor.
@@ -1735,9 +1736,6 @@ pub struct PlaytestGameEntity {
     /// Health, poise, stance multipliers and energy, cooked by
     /// [`crate::CombatStats::cooked`] exactly as the player's are.
     pub combat: psx_level::CombatStats,
-    /// Swap i-frames, from the Character Controller's
-    /// `roll_invulnerable_frames` exactly as the player's are.
-    pub roll_invulnerable_frames: u8,
     /// Souls credited to the player for the killing blow. Zero grants none.
     pub soul_value: u16,
     /// Runtime flags from `psx_level::game_entity_flags`.

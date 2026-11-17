@@ -2448,6 +2448,7 @@ pub(crate) fn push_game_entity(
     ranged_attack_active_ticks: u16,
     stagger_ticks: u16,
     projectile_attack_range: Option<(u16, u16)>,
+    weight_q8: u16,
     names: &mut NameInterner,
     game_entities: &mut Vec<PlaytestGameEntity>,
     report: &mut PlaytestValidationReport,
@@ -2561,6 +2562,7 @@ pub(crate) fn push_game_entity(
         stagger_ticks,
         knockdown_clip: state_clips.knockdown,
         parried_clip: state_clips.parried,
+        roll_clip: state_clips.roll,
         death_clip: state_clips.death,
         combat_capsule_first,
         combat_capsule_count,
@@ -2571,9 +2573,22 @@ pub(crate) fn push_game_entity(
         yaw,
         radius: settings.radius,
         height: settings.height,
-        // Enemy movement is whole units per tick; settings arrive in Q8.
-        walk_speed: (settings.walk_speed >> 8).max(1),
-        run_speed: (settings.run_speed >> 8).max(1),
+        // The same motion numbers the player's character record carries.
+        motion: psx_level::CharacterMotion {
+            walk_speed: settings.walk_speed,
+            run_speed: settings.run_speed,
+            turn_speed_degrees_per_second: settings.turn_speed_degrees_per_second,
+            weight_q8,
+            stamina_max_q12: settings.stamina_max_q12,
+            sprint_min_q12: settings.sprint_min_q12,
+            sprint_drain_q12: settings.sprint_drain_q12,
+            stamina_recover_q12: settings.stamina_recover_q12,
+            roll_cost_q12: settings.roll_cost_q12,
+            roll_speed: settings.roll_speed,
+            roll_active_frames: settings.roll_active_frames,
+            roll_recovery_frames: settings.roll_recovery_frames,
+            roll_invulnerable_frames: settings.roll_invulnerable_frames,
+        },
         patrol: [
             pos[0].saturating_add(enemy.patrol_offset[0]),
             pos[1].saturating_add(enemy.patrol_offset[1]),
@@ -2599,8 +2614,6 @@ pub(crate) fn push_game_entity(
         attack_max_range,
         touch_damage: enemy.touch_damage,
         combat: combat.cooked(),
-        // The swap window reads the same Character field as the player's.
-        roll_invulnerable_frames: settings.roll_invulnerable_frames,
         soul_value: enemy.soul_value,
         flags,
     });

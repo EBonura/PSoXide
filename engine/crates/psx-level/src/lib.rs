@@ -1221,6 +1221,42 @@ pub mod combat_armour {
     pub const AUTHORED_WINDOW: u8 = 1 << 1;
 }
 
+/// How one character moves: the numbers its motor reads. Every fighter (the
+/// player and every enemy) moves through the same motor; characters differ
+/// only here. Cooked from each character's own Character Controller, in the
+/// same units as the player's [`LevelCharacterRecord`] fields of the same
+/// names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CharacterMotion {
+    /// Walk speed, Q8 engine units per 60 Hz frame (256 = one unit).
+    pub walk_speed: i32,
+    /// Run speed, Q8 engine units per 60 Hz frame.
+    pub run_speed: i32,
+    /// Turn rate.
+    pub turn_speed_degrees_per_second: u16,
+    /// Gravity multiplier in Q8 (`256 = 1.0x`).
+    pub weight_q8: u16,
+    /// Maximum stamina, Q12-style units.
+    pub stamina_max_q12: i32,
+    /// Minimum stamina to start running.
+    pub sprint_min_q12: i32,
+    /// Stamina spent per running frame.
+    pub sprint_drain_q12: i32,
+    /// Stamina recovered per grounded non-running frame.
+    pub stamina_recover_q12: i32,
+    /// Stamina spent to start a roll.
+    pub roll_cost_q12: i32,
+    /// Roll travel speed, Q8 engine units per frame.
+    pub roll_speed: i32,
+    /// Frames the roll moves.
+    pub roll_active_frames: u8,
+    /// Recovery frames after the roll moves.
+    pub roll_recovery_frames: u8,
+    /// Roll i-frames from the start of the roll. Also the stance swap's
+    /// i-frames: a swap bursts the body apart the way the roll does.
+    pub roll_invulnerable_frames: u8,
+}
+
 /// The combat numbers of one character, the same record for the player and
 /// for enemies. Every fighter runs the same rules over these; characters
 /// differ only here. Q12 multipliers use 4096 for 1.0.
@@ -1401,6 +1437,9 @@ pub struct LevelGameEntityRecord {
     /// resolved through the Parried verb's chain (Stun, HitReact) at cook
     /// time, so it is the stagger clip until a Parried clip is authored.
     pub parried_clip: u16,
+    /// Clip played while rolling: the character's Roll role through its
+    /// fallback chain at cook time.
+    pub roll_clip: u16,
     /// One-shot clip on death; holds its final frame as the corpse
     /// pose.
     pub death_clip: u16,
@@ -1423,12 +1462,10 @@ pub struct LevelGameEntityRecord {
     pub radius: u16,
     /// Body cylinder height, engine units (Character-bound).
     pub height: u16,
-    /// Patrol movement speed, engine units per 60 Hz tick
-    /// (Character walk speed).
-    pub walk_speed: i32,
-    /// Chase movement speed, engine units per 60 Hz tick. Used only when
-    /// [`game_entity_flags::CAN_RUN`] is present.
-    pub run_speed: i32,
+    /// How the entity moves: its own Character Controller's numbers, read
+    /// by the same motor the player's character drives. It runs only with
+    /// [`game_entity_flags::CAN_RUN`] (a bound Run clip), as the player does.
+    pub motion: CharacterMotion,
     /// Patrol anchor one X (== `x` when no patrol is authored).
     pub patrol_x: i32,
     /// Patrol anchor one Y.
@@ -1477,11 +1514,6 @@ pub struct LevelGameEntityRecord {
     /// Health, poise, stance multipliers and energy: the same record the
     /// player character carries.
     pub combat: CombatStats,
-    /// Swap i-frames: ticks a stance swap protects this entity from hits.
-    /// The same field as [`LevelCharacterRecord::roll_invulnerable_frames`],
-    /// cooked from the entity's own Character Controller, so every fighter
-    /// reads its swap window from its own character data.
-    pub roll_invulnerable_frames: u8,
     /// Souls the player is credited for landing the killing blow.
     ///
     /// Authored per enemy so the reward curve is tuned in the editor next to

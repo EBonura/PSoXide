@@ -1,7 +1,4 @@
 //! Shared cover/peek decisions. World queries and legal movement belong to the caller.
-use crate::combat_flow::{
-    EVADE_COOLDOWN_TICKS, EVADE_DISTANCE, EVADE_MOVE_TICKS, EVADE_RECOVERY_TICKS,
-};
 use crate::projectiles::ProjectileThreat;
 
 /// Mode: in the open, free to fire.
@@ -34,6 +31,43 @@ pub struct RangedOrder {
     pub contest: bool,
 }
 
+/// Ticks after a dodge starts before the exchange may order another: how
+/// often a fighter tries to dodge, a decision, not a movement rule.
+pub const EVADE_COOLDOWN_TICKS: u16 = 120;
+
+/// The dodge an exchange plans with, from the evader's own character: how
+/// far its evade carries it, the ticks it moves and the vulnerable ticks
+/// after. A roll for a fighter with the mobility kit, a walk aside for one
+/// without; the evade itself runs through the fighter's motor.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EvadeMove {
+    /// Distance the evade covers, engine units. Zero: no evade.
+    pub distance: i16,
+    /// Ticks the evade moves.
+    pub move_ticks: u8,
+    /// Vulnerable ticks after it stops moving.
+    pub recovery_ticks: u8,
+}
+
+impl EvadeMove {
+    /// The dodge of a fighter whose motor runs `config`: its roll (reach and
+    /// frames) when it `can_dodge` (the mobility kit), otherwise a walk
+    /// aside over the same frames. The same for every fighter.
+    pub fn of(config: &psx_engine::CharacterMotorConfig, can_dodge: bool) -> Self {
+        let frames = i32::from(config.roll_active_frames.max(1));
+        let (speed, recovery) = if can_dodge {
+            (config.roll_speed, config.roll_recovery_frames)
+        } else {
+            (config.walk_speed, 0)
+        };
+        Self {
+            distance: (speed.saturating_mul(frames) >> 8).clamp(0, i32::from(i16::MAX)) as i16,
+            move_ticks: config.roll_active_frames,
+            recovery_ticks: recovery,
+        }
+    }
+}
+
 /// Cover cycles (a peek that never saw the target, or an open spell that
 /// fired nothing) after which the exchange asks its owner to contest the
 /// space. PLACEHOLDER, the duel harness tunes it.
@@ -55,6 +89,7 @@ pub struct RangedExchange {
     candidate: u8,
     side: i32,
     dry: u8,
+    evade: EvadeMove,
 }
 impl RangedExchange {
     /// Open-field state with no timers running.
@@ -71,6 +106,11 @@ impl RangedExchange {
         candidate: 0,
         side: 1,
         dry: 0,
+        evade: EvadeMove {
+            distance: 0,
+            move_ticks: 0,
+            recovery_ticks: 0,
+        },
     };
     /// Advance the timers by `delta` ticks.
     pub fn tick(&mut self, delta: u16) {
@@ -78,11 +118,18 @@ impl RangedExchange {
         self.decision_delay = self.decision_delay.saturating_sub(delta);
         self.evade_delay = self.evade_delay.saturating_sub(delta);
     }
-    /// Return to the open state; the sidestep cooldown carries over.
+    /// Return to the open state; the dodge cooldown and the evader's dodge
+    /// carry over.
     pub fn reset(&mut self) {
         let cooldown = self.evade_delay;
+        let evade = self.evade;
         *self = Self::EMPTY;
         self.evade_delay = cooldown;
+        self.evade = evade;
+    }
+    /// Plan dodges with `evade`, the evader's own (see [`EvadeMove`]).
+    pub fn set_evade(&mut self, evade: EvadeMove) {
+        self.evade = evade;
     }
     /// The order implied by the current mode, without making a new decision.
     pub fn current_order(&self, from: [i32; 3]) -> RangedOrder {
@@ -97,7 +144,7 @@ impl RangedExchange {
         RangedOrder {
             destination: self.destination,
             moving: matches!(self.mode, SEEK_COVER | PEEK | EVADE | SEARCH)
-                && (self.mode != EVADE || self.timer > EVADE_RECOVERY_TICKS)
+                && (self.mode != EVADE || self.timer > u16::from(self.evade.recovery_ticks))
                 && distance(from, self.destination) > 4,
             fire: self.mode == OPEN,
             evade: self.mode == EVADE,
@@ -129,15 +176,23 @@ impl RangedExchange {
         if self.mode == EVADE && self.timer != 0 {
             return true;
         }
-        if let Some(threat) =
-            threat.filter(|t| self.evade_delay == 0 && clear(eye(from, height), t.position))
-        {
+        if let Some(threat) = threat.filter(|t| {
+            self.evade.distance > 0 && self.evade_delay == 0 && clear(eye(from, height), t.position)
+        }) {
             let v = threat.velocity;
             for sign in [self.side, -self.side] {
-                let to = offset(from, [-v[2] * sign, v[0] * sign], EVADE_DISTANCE);
+                let to = offset(
+                    from,
+                    [-v[2] * sign, v[0] * sign],
+                    i32::from(self.evade.distance),
+                );
                 if lane(from, to, radius, height, clear) {
                     self.side = sign;
-                    self.enter(EVADE, EVADE_MOVE_TICKS + EVADE_RECOVERY_TICKS, to);
+                    self.enter(
+                        EVADE,
+                        u16::from(self.evade.move_ticks) + u16::from(self.evade.recovery_ticks),
+                        to,
+                    );
                     self.evade_delay = EVADE_COOLDOWN_TICKS;
                     return true;
                 }
@@ -328,6 +383,17 @@ fn concealed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A test dodge: 72 units over 18 ticks, 12 vulnerable after.
+    const DODGE: EvadeMove = EvadeMove {
+        distance: 72,
+        move_ticks: 18,
+        recovery_ticks: 12,
+    };
+    fn dodging() -> RangedExchange {
+        let mut e = RangedExchange::EMPTY;
+        e.set_evade(DODGE);
+        e
+    }
     fn pillar(a: [i32; 3], b: [i32; 3]) -> bool {
         (0..=64).all(|n| {
             let x = a[0] + (b[0] - a[0]) * n / 64;
@@ -337,26 +403,28 @@ mod tests {
     }
     #[test]
     fn evade_has_recovery_and_cooldown_survives_stance_reset() {
-        let mut e = RangedExchange::EMPTY;
+        let mut e = dodging();
         let threat = Some(ProjectileThreat {
             position: [0, 36, 160],
             velocity: [0, 0, -8],
             ticks_to_contact: 20,
         });
         assert!(e.try_evade([0; 3], 12, 72, threat, &mut |_, _| true));
-        e.tick(EVADE_MOVE_TICKS);
+        e.tick(u16::from(DODGE.move_ticks));
         let recovery = e.current_order([20, 0, 0]);
         assert!(recovery.evade);
         assert!(!recovery.moving && !recovery.fire);
-        e.tick(EVADE_RECOVERY_TICKS);
+        e.tick(u16::from(DODGE.recovery_ticks));
         e.reset();
         assert!(!e.try_evade([0; 3], 12, 72, threat, &mut |_, _| true));
-        e.tick(EVADE_COOLDOWN_TICKS - EVADE_MOVE_TICKS - EVADE_RECOVERY_TICKS);
+        e.tick(
+            EVADE_COOLDOWN_TICKS - u16::from(DODGE.move_ticks) - u16::from(DODGE.recovery_ticks),
+        );
         assert!(e.try_evade([0; 3], 12, 72, threat, &mut |_, _| true));
     }
     #[test]
     fn evade_chooses_the_other_lane_when_first_side_is_blocked() {
-        let mut e = RangedExchange::EMPTY;
+        let mut e = dodging();
         let threat = Some(ProjectileThreat {
             position: [0, 36, 160],
             velocity: [0, 0, -8],
@@ -364,14 +432,14 @@ mod tests {
         });
         assert!(e.try_evade([0; 3], 12, 72, threat, &mut |_, b| b[0] <= 32));
         assert!(e.current_order([0; 3]).destination[0] < 0);
-        e = RangedExchange::EMPTY;
+        e = dodging();
         assert!(!e.try_evade([0; 3], 12, 72, threat, &mut |_, b| b[0].abs() < 32));
     }
     #[test]
     fn a_blind_exchange_asks_to_contest_the_space() {
         // Nothing near the target is ever visible: every peek fails.
         let mut blind = |a: [i32; 3], b: [i32; 3]| a[2] < 200 && b[2] < 200;
-        let mut exchange = RangedExchange::EMPTY;
+        let mut exchange = dodging();
         let mut p = [0, 0, 0];
         let target = [0, 0, 224];
         let mut contest_at = None;
@@ -389,14 +457,14 @@ mod tests {
         }
         assert!(contest_at.is_some(), "a blind exchange must end");
         // A shot (energy spent) clears the dry count.
-        let mut e = RangedExchange::EMPTY;
+        let mut e = dodging();
         e.dry = DRY_CYCLES - 1;
         let _ = e.decide([0; 3], target, 12, 72, 256, 80, None, &mut blind);
         assert_eq!(e.dry, 0);
     }
     #[test]
     fn hides_behind_actual_geometry_then_peeks_before_firing() {
-        let mut exchange = RangedExchange::EMPTY;
+        let mut exchange = dodging();
         exchange.timer = 0;
         let mut p = [0, 0, 0];
         let target = [0, 0, 224];
@@ -426,7 +494,7 @@ mod tests {
     }
     #[test]
     fn open_ground_never_counts_as_cover_and_search_is_bounded() {
-        let mut exchange = RangedExchange::EMPTY;
+        let mut exchange = dodging();
         exchange.timer = 0;
         for _ in 0..13 {
             exchange.tick(12);
@@ -445,7 +513,7 @@ mod tests {
             velocity: [0, 0, -8],
             ticks_to_contact: 20,
         });
-        let mut e = RangedExchange::EMPTY;
+        let mut e = dodging();
         let o = e.decide(
             [0; 3],
             [0, 0, 224],

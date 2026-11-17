@@ -1165,6 +1165,9 @@ fn build_package_cooked(
                                         ranged_attack_active_ticks,
                                         stagger_ticks,
                                         projectile_attack_range,
+                                        // Gravity weight from the placement's
+                                        // physics body, as the player's.
+                                        physics_body_weight_q8(scene, node),
                                         &mut names,
                                         &mut game_entities,
                                         report,

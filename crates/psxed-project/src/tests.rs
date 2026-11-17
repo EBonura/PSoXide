@@ -4402,7 +4402,7 @@ fn an_enemys_swap_i_frames_cook_from_its_own_character_field() {
     let (package, report) = playtest::build_package(&project, &root);
     assert!(report.is_ok(), "{:?}", report.errors);
     let package = package.unwrap();
-    assert_eq!(package.game_entities[0].roll_invulnerable_frames, 7);
+    assert_eq!(package.game_entities[0].motion.roll_invulnerable_frames, 7);
     assert!(package
         .characters
         .iter()

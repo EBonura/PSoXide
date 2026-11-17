@@ -2,10 +2,11 @@
 //! example-side movement backend and effect dispatch the runtime
 //! crate's `GameEntities`/`LogicRuntime` leave to the owning game.
 //!
-//! - [`SceneEntityMover`] backs entity Patrol/Aggro steps with the active
-//!   world's movement solver (`commit_body_step`). A grid room whose collision
-//!   is not resident refuses movement (the entity keeps thinking; it walks
-//!   again when the room streams in).
+//! - [`SceneEntityMover`] is the world every enemy moves through: its motor
+//!   (the player's motor) runs the same collision solve as the player's
+//!   (`WorldRuntime::update_motor`) under the same game rules. A grid room
+//!   whose collision is not resident holds the body still (the entity keeps
+//!   thinking; it walks again when the room streams in).
 //! - Effect dispatch drains `LogicRuntime::take_fired` marks into the
 //!   example's presentation: DOOR records toggle their linked box
 //!   prop (draw + collision), MESSAGE records open the interactable
@@ -19,8 +20,11 @@
 //!   path plays, so contact frames match what the player sees.
 
 use super::*;
+use psx_engine::CharacterMotorFrame;
 use psx_game_runtime::combat::{self, MeleeArc, WorldCombatCapsule};
 use psx_game_runtime::combatant::stance_scaled;
+
+use crate::playtest_runtime::fighter_motor_rules;
 use psx_game_runtime::destructibles::{DamageChannel, DamageOutcome};
 use psx_game_runtime::entities::{DeferredGameEntityAttack, GameEntityState, MeleeArcStats};
 use psx_game_runtime::model_rendering as mr;
@@ -199,26 +203,25 @@ pub(super) struct SceneEntityMover<'a> {
 }
 
 impl SceneEntityMover<'_> {
-    #[allow(clippy::too_many_arguments)]
-    fn step_inner(
-        &mut self,
+    /// What blocks entity `entity` in `room`: every other fighter's body
+    /// (the other entities at their pre-tick positions, the player) and
+    /// the props. None when the cooked prop tables do not fit, which
+    /// freezes the body rather than letting it through a dropped blocker
+    /// (the player's rule too).
+    fn blockers(
+        &self,
         entity: usize,
         room: RoomIndex,
-        position: [i32; 3],
-        dx: i32,
-        dz: i32,
-        radius: i32,
-        height: i32,
-        exact_direction: bool,
-    ) -> [i32; 3] {
-        // Body blockers: other entities' cooked instances at their
-        // LIVE positions (self excluded), plus the player's capsule.
+        cylinders: &mut psx_engine::FixedScratch<
+            CharacterCollisionCylinder,
+            MAX_COLLISION_CYLINDERS,
+        >,
+        aabbs: &mut psx_engine::FixedScratch<CharacterCollisionAabb, MAX_STATIC_PROP_AABB_BLOCKERS>,
+    ) -> Option<()> {
         let own_instance = GAME_ENTITIES
             .get(entity)
             .map(|record| record.model_instance)
             .unwrap_or(psx_level::GAME_ENTITY_MODEL_INSTANCE_NONE);
-        let mut cylinders =
-            psx_engine::FixedScratch::<CharacterCollisionCylinder, MAX_COLLISION_CYLINDERS>::new();
         for (index, inst) in MODEL_INSTANCES.iter().enumerate() {
             if inst.room != room {
                 continue;
@@ -268,96 +271,76 @@ impl SceneEntityMover<'_> {
         psx_game_runtime::cylinder_props::collect_cylinder_prop_collision_blockers_into(
             CYLINDER_PROPS.as_slice(),
             room,
-            &mut cylinders,
+            cylinders,
         );
-
-        let start = RoomPoint::new(position[0], position[1], position[2]);
-        let mut aabbs =
-            psx_engine::FixedScratch::<CharacterCollisionAabb, MAX_STATIC_PROP_AABB_BLOCKERS>::new(
-            );
-        {
-            let Some(world_rt) = self.world_rt.as_deref_mut() else {
-                // No world cooked yet (the placeholder manifest).
-                return position;
-            };
-            let Some(_) = self.box_props.collect_collision_blockers_checked_into(
-                BOX_PROPS.as_slice(),
-                room,
-                &mut aabbs,
-            ) else {
-                return position;
-            };
-            let Some(_) =
-                psx_game_runtime::arch_props::collect_arch_prop_collision_blockers_checked_into(
-                    ARCH_PROPS.as_slice(),
-                    ARCH_PROP_COLLISIONS.as_slice(),
-                    room,
-                    &mut aabbs,
-                )
-            else {
-                return position;
-            };
-            let Some(_) =
-                psx_game_runtime::image_props::collect_image_prop_collision_blockers_checked_into_filtered(
-                    IMAGE_PROPS.as_slice(),
-                    room,
-                    &mut aabbs,
-                    |index| {
-                        typed_world_object_active(
-                            WORLD_OBJECTS.as_slice(),
-                            self.destructibles,
-                            psx_level::world_object_kind::IMAGE_PROP,
-                            index,
-                        )
-                    },
-                )
-            else {
-                return position;
-            };
-            let step = if exact_direction {
-                world_rt.commit_body_direction(
-                    start,
-                    dx,
-                    dz,
-                    radius,
-                    height,
+        self.box_props.collect_collision_blockers_checked_into(
+            BOX_PROPS.as_slice(),
+            room,
+            aabbs,
+        )?;
+        psx_game_runtime::arch_props::collect_arch_prop_collision_blockers_checked_into(
+            ARCH_PROPS.as_slice(),
+            ARCH_PROP_COLLISIONS.as_slice(),
+            room,
+            aabbs,
+        )?;
+        psx_game_runtime::image_props::collect_image_prop_collision_blockers_checked_into_filtered(
+            IMAGE_PROPS.as_slice(),
+            room,
+            aabbs,
+            |index| {
+                typed_world_object_active(
+                    WORLD_OBJECTS.as_slice(),
                     self.destructibles,
-                    cylinders.as_slice(),
-                    aabbs.as_slice(),
+                    psx_level::world_object_kind::IMAGE_PROP,
+                    index,
                 )
-            } else {
-                world_rt.commit_body_step(
-                    start,
-                    dx,
-                    dz,
-                    radius,
-                    height,
-                    self.destructibles,
-                    cylinders.as_slice(),
-                    aabbs.as_slice(),
-                )
-            }
-            .expect("grid entity trace failed");
-            [step.position.x, step.position.y, step.position.z]
-        }
+            },
+        )?;
+        Some(())
     }
 }
 
-impl psx_game_runtime::entities::GameEntityMover for SceneEntityMover<'_> {
-    fn step(
+impl psx_game_runtime::entities::FighterWorld for SceneEntityMover<'_> {
+    /// The entity's motor through the same collision solve the player's
+    /// motor runs ([`WorldRuntime::update_motor`]), under the same game
+    /// rules ([`fighter_motor_rules`]).
+    fn move_body(
         &mut self,
         entity: usize,
         room: RoomIndex,
-        position: [i32; 3],
-        dx: i32,
-        dz: i32,
-        radius: i32,
-        height: i32,
-    ) -> [i32; 3] {
-        self.step_inner(entity, room, position, dx, dz, radius, height, false)
+        motor: &mut CharacterMotorState,
+        input: CharacterMotorInput,
+        config: CharacterMotorConfig,
+        delta: u16,
+    ) -> CharacterMotorFrame {
+        let mut cylinders =
+            psx_engine::FixedScratch::<CharacterCollisionCylinder, MAX_COLLISION_CYLINDERS>::new();
+        let mut aabbs =
+            psx_engine::FixedScratch::<CharacterCollisionAabb, MAX_STATIC_PROP_AABB_BLOCKERS>::new(
+            );
+        let gathered = self.blockers(entity, room, &mut cylinders, &mut aabbs);
+        match (gathered, self.world_rt.as_deref_mut()) {
+            (Some(()), Some(world_rt)) => world_rt
+                .update_motor(
+                    motor,
+                    input,
+                    fighter_motor_rules(config, room, true),
+                    delta,
+                    self.destructibles,
+                    cylinders.as_slice(),
+                    aabbs.as_slice(),
+                )
+                .expect("grid entity trace failed"),
+            // No world cooked yet (the placeholder manifest), or a prop
+            // table that does not fit: the body holds still.
+            _ => motor.suspended_frame(None),
+        }
     }
 
-    fn step_direction(
+    /// The knockback push: the same collision-checked body step as the
+    /// player's hazard push.
+    fn push_body(
         &mut self,
         entity: usize,
         room: RoomIndex,
@@ -367,7 +350,33 @@ impl psx_game_runtime::entities::GameEntityMover for SceneEntityMover<'_> {
         radius: i32,
         height: i32,
     ) -> [i32; 3] {
-        self.step_inner(entity, room, position, dx, dz, radius, height, true)
+        let mut cylinders =
+            psx_engine::FixedScratch::<CharacterCollisionCylinder, MAX_COLLISION_CYLINDERS>::new();
+        let mut aabbs =
+            psx_engine::FixedScratch::<CharacterCollisionAabb, MAX_STATIC_PROP_AABB_BLOCKERS>::new(
+            );
+        let gathered = self.blockers(entity, room, &mut cylinders, &mut aabbs);
+        let (Some(()), Some(world_rt)) = (gathered, self.world_rt.as_deref_mut()) else {
+            return position;
+        };
+        let step = world_rt
+            .commit_body_step(
+                RoomPoint::new(position[0], position[1], position[2]),
+                dx,
+                dz,
+                radius,
+                height,
+                self.destructibles,
+                cylinders.as_slice(),
+                aabbs.as_slice(),
+            )
+            .expect("grid entity trace failed");
+        [step.position.x, step.position.y, step.position.z]
+    }
+
+    /// The game's speed knob, the player's: every character runs it.
+    fn speed_scale(&self) -> (i32, i32) {
+        (PLAYER_SPEED_SCALE_NUM, PLAYER_SPEED_SCALE_DEN)
     }
 
     fn line_of_sight(&mut self, room: RoomIndex, from: [i32; 3], to: [i32; 3]) -> bool {

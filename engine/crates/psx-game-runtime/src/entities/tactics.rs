@@ -85,7 +85,8 @@ pub(super) struct TacticalState {
     phase: u16,
     pub(super) animation_phase_q8: u32,
     animation_clip: u16,
-    pub(super) movement_fraction_q8: u8,
+    /// A move was asked for and not blocked, but the motor carried it as a
+    /// sub-unit step this tick: still walking, for the clip.
     motion_deferred: bool,
     separation: u16,
     sample_ticks: u16,
@@ -121,7 +122,6 @@ impl TacticalState {
         phase: 0,
         animation_phase_q8: 0,
         animation_clip: u16::MAX,
-        movement_fraction_q8: 0,
         motion_deferred: false,
         separation: 0,
         sample_ticks: 0,
@@ -170,10 +170,10 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         {
             return false;
         }
-        self.x[index] = position[0];
-        self.y[index] = position[1];
-        self.z[index] = position[2];
-        self.yaw[index] = yaw;
+        self.motors[index].snap_to(
+            RoomPoint::new(position[0], position[1], position[2]),
+            Angle::from_q12(yaw as u16),
+        );
         true
     }
 
@@ -303,13 +303,13 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         target: [i32; 3],
         delta: u16,
     ) -> Option<(i16, u16)> {
-        let dx = target[0].saturating_sub(self.x[index]);
-        let dz = target[2].saturating_sub(self.z[index]);
+        let dx = target[0].saturating_sub(self.px(index));
+        let dz = target[2].saturating_sub(self.pz(index));
         if dx == 0 && dz == 0 {
             return None;
         }
         let target = psx_engine::Angle::from_q12(atan2_q12(dx, dz));
-        let current = psx_engine::Angle::from_q12(self.yaw[index] as u16);
+        let current = psx_engine::Angle::from_q12(self.yaw_raw(index) as u16);
         // 180 degrees/sec: fast enough to engage, visibly planted when flanked.
         let next = current.approach_q12(target, 34u16.saturating_mul(delta));
         let d = target.as_q12().wrapping_sub(next.as_q12()) & 4095;
@@ -320,7 +320,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         let Some((yaw, error)) = self.tactical_turn(index, target, delta) else {
             return 0;
         };
-        self.yaw[index] = yaw;
+        self.set_yaw(index, yaw);
         self.tactics[index].turning = error > 57;
         error
     }
@@ -389,20 +389,26 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         }
     }
 
-    fn tactical_walk_speed_q8(r: &LevelGameEntityRecord, goal: EnemyGoal) -> i32 {
-        let speed = r.walk_speed.max(1).saturating_mul(256);
-        if matches!(
-            goal,
-            EnemyGoal::CircleLeft | EnemyGoal::CircleRight | EnemyGoal::Retreat
-        ) {
-            (speed.saturating_mul(i32::from(r.spacing_speed_percent.clamp(1, 100))) / 100).max(1)
-        } else {
-            speed
-        }
+    /// Pace (Q8 per frame) of a tactical goal: the walk, at the spacing
+    /// share while circling or backing off, and there at the motor's
+    /// locked-on strafe or backward pace (the body faces the target), the
+    /// pace the feet actually cover.
+    fn tactical_walk_speed_q8(&self, r: &LevelGameEntityRecord, goal: EnemyGoal) -> i32 {
+        let speed = self.pace_q8(r, false);
+        let locked = match goal {
+            EnemyGoal::CircleLeft | EnemyGoal::CircleRight => {
+                psx_engine::character_motor::LOCKED_STRAFE_SPEED_PERCENT
+            }
+            EnemyGoal::Retreat => psx_engine::character_motor::LOCKED_BACKWARD_SPEED_PERCENT,
+            _ => return speed,
+        };
+        (speed.saturating_mul(i32::from(r.spacing_speed_percent.clamp(1, 100))) / 100 * locked
+            / 100)
+            .max(1)
     }
 
-    fn tactical_walk_speed(r: &LevelGameEntityRecord, goal: EnemyGoal) -> i32 {
-        ((Self::tactical_walk_speed_q8(r, goal) + 255) >> 8).max(1)
+    fn tactical_walk_speed(&self, r: &LevelGameEntityRecord, goal: EnemyGoal) -> i32 {
+        ((self.tactical_walk_speed_q8(r, goal) + 255) >> 8).max(1)
     }
 
     pub(super) fn advance_tactical_animation(
@@ -422,8 +428,8 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
             self.tactics[i].animation_clip = u16::MAX;
             return;
         }
-        let dx = self.x[i].saturating_sub(before[0]).clamp(-64, 64);
-        let dz = self.z[i].saturating_sub(before[2]).clamp(-64, 64);
+        let dx = self.px(i).saturating_sub(before[0]).clamp(-64, 64);
+        let dz = self.pz(i).saturating_sub(before[2]).clamp(-64, 64);
         self.tactics[i].moved =
             dx != 0 || dz != 0 || (self.tactics[i].motion_deferred && self.tactics[i].moved);
         let clip = self.tactical_locomotion_clip(r, i);
@@ -436,9 +442,9 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         let advance = if self.tactics[i].moved {
             let travel_q8 = psx_math::int32::isqrt_i32((dx * dx + dz * dz) << 16);
             let nominal_speed_q8 = if self.tactics[i].running {
-                r.run_speed.max(1).saturating_mul(256)
+                self.pace_q8(r, true)
             } else {
-                Self::tactical_walk_speed_q8(r, self.tactics[i].goal)
+                self.tactical_walk_speed_q8(r, self.tactics[i].goal)
             };
             ((travel_q8 << 8) / nominal_speed_q8.max(1)) as u32
         } else {
@@ -608,7 +614,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         r: &LevelGameEntityRecord,
         i: usize,
         input: GameEntityTickInput<'_>,
-        mover: &mut impl GameEntityMover,
+        mover: &mut impl FighterWorld,
         delta: u16,
         stats: &mut GameEntityTickStats,
     ) {
@@ -630,13 +636,15 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         r: &LevelGameEntityRecord,
         i: usize,
         input: GameEntityTickInput<'_>,
-        mover: &mut impl GameEntityMover,
+        mover: &mut impl FighterWorld,
         delta: u16,
         stats: &mut GameEntityTickStats,
     ) {
         let plan = self.decide_tactical(r, i, input, mover, delta, stats);
         let before = self.position(i);
-        self.apply_intent(r, i, plan.intent, mover, delta, stats);
+        let requested = plan.intent.movement != CombatMove::Still;
+        let frame = self.apply_intent(r, i, plan.intent, mover, delta, stats);
+        self.tactics[i].motion_deferred = requested && !frame.moved && !frame.blocked;
         self.after_tactical_intent(r, i, plan.then, before, input, delta, stats);
     }
 
@@ -651,7 +659,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         r: &LevelGameEntityRecord,
         i: usize,
         input: GameEntityTickInput<'_>,
-        mover: &mut impl GameEntityMover,
+        mover: &mut impl FighterWorld,
         delta: u16,
         stats: &mut GameEntityTickStats,
     ) -> TacticalPlan {
@@ -687,10 +695,10 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         let mut goal = self.tactics[i].goal;
         if goal == EnemyGoal::ReturnHome {
             if within_xz(
-                [self.x[i], self.z[i]],
+                [self.px(i), self.pz(i)],
                 [r.x, r.z],
                 i32::from(r.radius).max(2),
-            ) && self.y[i].saturating_sub(r.y).saturating_abs() <= i32::from(r.height) / 2
+            ) && self.py(i).saturating_sub(r.y).saturating_abs() <= i32::from(r.height) / 2
             {
                 self.finish_goal(i, EnemyGoalResult::Arrived);
                 self.tactics[i].home_cooldown = 120;
@@ -720,11 +728,15 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
                     input.target.position[0].saturating_sub(before[0]),
                     input.target.position[2].saturating_sub(before[2]),
                 ));
-                let step = r.walk_speed.max(1);
-                intent.movement = CombatMove::Direction {
-                    dx: Self::q12_step_component(heading.sin().raw(), step),
-                    dz: Self::q12_step_component(heading.cos().raw(), step),
-                };
+                // One walking step: the share of the pace one unit needs.
+                let step = self.walk_units(r);
+                intent.movement = self.move_toward(
+                    r,
+                    Self::q12_step_component(heading.sin().raw(), step),
+                    Self::q12_step_component(heading.cos().raw(), step),
+                    delta,
+                    false,
+                );
             }
             return TacticalPlan {
                 intent,
@@ -764,7 +776,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         // loop. After two shots, commit to closing when the target is nearby;
         // the existing stance cooldown still gates when the switch can happen.
         let melee_height_reachable =
-            (input.target.position[1] - self.y[i]).abs() <= i32::from(r.height);
+            (input.target.position[1] - self.py(i)).abs() <= i32::from(r.height);
         let press_after_cannon = visible
             && melee_height_reachable
             && self.tactics[i].last_attack == GAME_ENTITY_ATTACK_RANGED
@@ -823,6 +835,8 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         }
         // Free locomotion can evade in either stance, including with an empty
         // Energy reserve. Windup/attack/recovery never enter this policy.
+        let evade = self.evade_move(r);
+        self.exchanges[i].set_evade(evade);
         if !self.stance_swap_in_progress(i)
             && self.exchanges[i].try_evade(
                 self.position(i),
@@ -1071,7 +1085,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         let mut destination = target;
         let mut running = false;
         let separation = i32::from(self.tactics[i].separation);
-        let mut speed = Self::tactical_walk_speed(r, goal);
+        let mut speed = self.tactical_walk_speed(r, goal);
         match goal {
             EnemyGoal::Approach => {
                 let far = p * 5;
@@ -1083,7 +1097,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
                         if self.tactics[i].running { near } else { far },
                     );
                 if running {
-                    speed = r.run_speed.max(1);
+                    speed = self.run_units(r);
                 }
                 self.set_intent(i, GameEntityIntent::Approach);
                 if visible && self.target_within(i, input, separation) {
@@ -1161,9 +1175,9 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
                 }
                 running = Self::can_run(r);
                 speed = if running {
-                    r.run_speed.max(1)
+                    self.run_units(r)
                 } else {
-                    r.walk_speed.max(1)
+                    self.walk_units(r)
                 };
                 stats.retreating = stats.retreating.saturating_add(1);
             }
@@ -1221,20 +1235,15 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
                 destination[0] - before[0],
                 destination[2] - before[2],
             ));
-            // Keep sub-unit spacing speeds without forcing a one-unit move
-            // on every 60 Hz update. The remainder also survives batched ticks.
-            let budget_q8 = Self::tactical_walk_speed_q8(r, goal)
+            // The spacing pace is a share of the walk; the motor carries the
+            // sub-unit steps between ticks.
+            requested_step = (self
+                .tactical_walk_speed_q8(r, goal)
                 .saturating_mul(i32::from(delta))
-                .saturating_add(i32::from(self.tactics[i].movement_fraction_q8));
-            let step = budget_q8 >> 8;
-            requested_step = step;
-            self.tactics[i].movement_fraction_q8 = (budget_q8 & 255) as u8;
-            if step == 0 {
-                self.tactics[i].motion_deferred = true;
-                return TacticalPlan::run(intent);
-            }
-            let mut dx = Self::q12_step_component(yaw.sin().raw(), step);
-            let mut dz = Self::q12_step_component(yaw.cos().raw(), step);
+                >> 8)
+                .max(1);
+            let mut dx = yaw.sin().raw();
+            let mut dz = yaw.cos().raw();
             if matches!(goal, EnemyGoal::CircleLeft | EnemyGoal::CircleRight) {
                 let radial = psx_engine::Angle::from_q12(atan2_q12(
                     target[0] - before[0],
@@ -1252,15 +1261,30 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
                     } else {
                         0
                     };
-                dx += radial.sin().mul_i32(step / 2) * correction;
-                dz += radial.cos().mul_i32(step / 2) * correction;
+                dx += radial.sin().raw() / 2 * correction;
+                dz += radial.cos().raw() / 2 * correction;
             }
-            intent.movement = CombatMove::Step { dx, dz };
-        } else {
-            intent.movement = CombatMove::Toward {
-                point: destination,
-                distance: speed.saturating_mul(i32::from(delta)),
+            let length = psx_math::int32::isqrt_i32(dx * dx + dz * dz).max(1);
+            let strength =
+                Self::tilt_for_share(4096 * i32::from(r.spacing_speed_percent.clamp(1, 100)) / 100);
+            intent.movement = CombatMove::Move {
+                x: (dx * strength / length) as i16,
+                z: (dz * strength / length) as i16,
+                forward: 0,
             };
+        } else {
+            let (movement, _) = self.steer(
+                r,
+                i,
+                destination,
+                speed.saturating_mul(i32::from(delta)),
+                delta,
+                running,
+            );
+            intent.movement = movement;
+            if running {
+                intent.held = intent.held.with(CombatAction::Evade);
+            }
         }
         TacticalPlan {
             intent,
@@ -1272,10 +1296,11 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
     }
 
     /// Run `intent` for entity `i` under the rules every fighter shares: a
-    /// swap when its moves and cooldown allow, the turn toward the face
-    /// point at the entity's turn rate, the requested strike or shot (aimed
-    /// at the intent's aim point), then the move through the collision
-    /// mover. Moving never turns the body; facing is the controller's turn.
+    /// swap when its moves and cooldown allow, the requested strike or shot
+    /// (aimed at the intent's aim point), then the move, the turn toward the
+    /// face point, the run and the roll through the entity's motor, the same
+    /// motor update the player's pad intent gets. Without a face point the
+    /// body keeps its facing while it moves (the controller turns it).
     #[inline(never)]
     #[cfg_attr(target_arch = "mips", optimize(size))]
     pub fn apply_intent(
@@ -1283,20 +1308,15 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         r: &LevelGameEntityRecord,
         i: usize,
         intent: CombatIntent,
-        mover: &mut impl GameEntityMover,
+        mover: &mut impl FighterWorld,
         delta: u16,
         stats: &mut GameEntityTickStats,
-    ) {
+    ) -> CharacterMotorFrame {
         if i >= self.count() {
-            return;
+            return self.motors[i.min(N - 1)].suspended_frame(None);
         }
         if intent.pressed(CombatAction::Swap) {
             let _ = self.swap_stance(r, i);
-        }
-        if let Some(point) = intent.face {
-            if let Some((yaw, _)) = self.tactical_turn(i, point, delta) {
-                self.yaw[i] = yaw;
-            }
         }
         if let Some(kind) = intent
             .attack()
@@ -1310,43 +1330,18 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
             }
             self.enter_state(i, GameEntityState::Windup, stats);
         }
-        let facing = self.yaw[i];
-        let before = self.position(i);
-        match intent.movement {
-            CombatMove::Still | CombatMove::Stick { .. } => {}
-            CombatMove::Step { dx, dz } => {
-                let p = mover.step(
-                    i,
-                    r.room,
-                    before,
-                    dx,
-                    dz,
-                    i32::from(r.radius),
-                    i32::from(r.height),
-                );
-                self.x[i] = p[0];
-                self.y[i] = p[1];
-                self.z[i] = p[2];
-            }
-            CombatMove::Direction { dx, dz } => {
-                let p = mover.step_direction(
-                    i,
-                    r.room,
-                    before,
-                    dx,
-                    dz,
-                    i32::from(r.radius),
-                    i32::from(r.height),
-                );
-                self.x[i] = p[0];
-                self.y[i] = p[1];
-                self.z[i] = p[2];
-            }
-            CombatMove::Toward { point, distance } => {
-                self.step_toward(r, i, point, distance, mover);
-            }
-        }
-        self.yaw[i] = facing;
+        let here = self.position(i);
+        let face = match intent.face {
+            Some(point) if point[0] != here[0] || point[2] != here[2] => Some(Angle::from_q12(
+                atan2_q12(point[0] - here[0], point[2] - here[2]),
+            )),
+            _ => Some(Angle::from_q12(self.yaw_raw(i) as u16)),
+        };
+        self.request(intent.movement, face, intent.held(CombatAction::Evade));
+        // Only a fighter with the mobility kit dodges; a held evade still runs.
+        self.motion.evade = intent.pressed(CombatAction::Evade)
+            && CombatAction::Evade.permitted(Self::stance_moves(r));
+        self.drive(r, i, mover, delta)
     }
 
     /// The attack family (light, heavy, ranged) entity record `r` performs
@@ -1434,13 +1429,13 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
                 } else {
                     let left = self.draw(i, 2) == 0;
                     let p = i32::from(r.preferred_distance).max(i32::from(r.radius) * 3);
-                    let yaw = psx_engine::Angle::from_q12(self.yaw[i] as u16)
+                    let yaw = psx_engine::Angle::from_q12(self.yaw_raw(i) as u16)
                         .add(psx_engine::Angle::from_q12(if left { 1024 } else { 3072 }));
                     self.begin_goal(i, EnemyGoal::Reposition, 180, i32::from(r.radius));
                     self.tactics[i].destination = [
-                        self.x[i] + yaw.sin().mul_i32(p),
-                        self.y[i],
-                        self.z[i] + yaw.cos().mul_i32(p),
+                        self.px(i) + yaw.sin().mul_i32(p),
+                        self.py(i),
+                        self.pz(i) + yaw.cos().mul_i32(p),
                     ];
                 }
             }

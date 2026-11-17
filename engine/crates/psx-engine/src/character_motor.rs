@@ -601,10 +601,12 @@ pub struct CharacterMotorState {
     sprint_exhausted: bool,
     /// Vertical velocity in Q8 engine units per tick (negative = falling).
     /// Non-zero only while the body is airborne over a ledge or hole;
-    /// reset to zero on landing.
-    velocity_y_q8: i32,
-    /// Fractional downward displacement retained between fixed ticks.
-    remainder_y_q8: i32,
+    /// reset to zero on landing. Held in 16 bits: gravity only ever
+    /// lowers it from zero and it is clamped at `-MAX_FALL_SPEED * 256`.
+    velocity_y_q8: i16,
+    /// Fractional downward displacement retained between fixed ticks,
+    /// always inside one unit (`-255..=255`).
+    remainder_y_q8: i16,
     /// `true` while the feet rest on a floor. Gates the per-tick vertical
     /// work: a grounded body that has not moved in XZ reuses its cached
     /// floor and skips the multi-room ground query entirely. Cleared on
@@ -620,9 +622,11 @@ pub struct CharacterMotorState {
     ground_anchor_z: i32,
     /// Sub-unit XZ displacement carried between ticks (Q8). Speeds are Q8
     /// units per tick, so a walk below one unit per tick moves the integer
-    /// position only when the remainder rolls over a whole unit.
-    remainder_x_q8: i32,
-    remainder_z_q8: i32,
+    /// position only when the remainder rolls over a whole unit. What is left
+    /// after the whole units are taken is always `0..=255`, so one byte
+    /// holds it.
+    remainder_x_q8: u8,
+    remainder_z_q8: u8,
 }
 
 impl CharacterMotorState {
@@ -652,12 +656,13 @@ impl CharacterMotorState {
     /// Fold a Q8 displacement into the remainders and return the whole
     /// units to move this tick.
     fn take_whole_units(&mut self, dx_q8: i32, dz_q8: i32) -> (i32, i32) {
-        self.remainder_x_q8 = self.remainder_x_q8.saturating_add(dx_q8);
-        self.remainder_z_q8 = self.remainder_z_q8.saturating_add(dz_q8);
-        let dx = self.remainder_x_q8 >> 8;
-        let dz = self.remainder_z_q8 >> 8;
-        self.remainder_x_q8 -= dx << 8;
-        self.remainder_z_q8 -= dz << 8;
+        let x_q8 = i32::from(self.remainder_x_q8).saturating_add(dx_q8);
+        let z_q8 = i32::from(self.remainder_z_q8).saturating_add(dz_q8);
+        let dx = x_q8 >> 8;
+        let dz = z_q8 >> 8;
+        // An arithmetic shift floors, so what is left is 0..=255.
+        self.remainder_x_q8 = (x_q8 - (dx << 8)) as u8;
+        self.remainder_z_q8 = (z_q8 - (dz << 8)) as u8;
         (dx, dz)
     }
 
@@ -692,7 +697,7 @@ impl CharacterMotorState {
 
     /// Signed airborne speed in Q8 world units per fixed tick.
     pub const fn vertical_speed_q8(&self) -> i32 {
-        self.velocity_y_q8
+        self.velocity_y_q8 as i32
     }
 
     /// Hold a tethered body without running gravity, locomotion or stamina recovery.
@@ -1005,6 +1010,11 @@ impl CharacterMotorState {
     /// Current fixed action.
     pub const fn action(&self) -> CharacterMotorAction {
         self.action
+    }
+
+    /// Display frames since the current fixed action started (0 when idle).
+    pub const fn action_frame(&self) -> u8 {
+        self.action_frame
     }
 
     /// True while the current fixed action grants invulnerability
@@ -1358,13 +1368,15 @@ impl CharacterMotorState {
             .gravity_per_tick_q8
             .saturating_mul(config.weight_q8 as i32)
             / DEFAULT_WEIGHT_Q8 as i32;
-        self.velocity_y_q8 = self
-            .velocity_y_q8
+        // Gravity is never negative (`normalize_config`), so the speed only
+        // falls from zero to the terminal clamp and fits 16 bits.
+        let velocity = i32::from(self.velocity_y_q8)
             .saturating_sub(gravity)
             .max(-MAX_FALL_SPEED * 256);
-        self.remainder_y_q8 = self.remainder_y_q8.saturating_add(self.velocity_y_q8);
-        let dy = self.remainder_y_q8 / 256;
-        self.remainder_y_q8 -= dy * 256;
+        self.velocity_y_q8 = velocity as i16;
+        let remainder = i32::from(self.remainder_y_q8).saturating_add(velocity);
+        let dy = remainder / 256;
+        self.remainder_y_q8 = (remainder - dy * 256) as i16;
         let next = self.position.y.saturating_add(dy);
         if next <= floor {
             self.position.y = floor;
@@ -1673,7 +1685,9 @@ pub struct BodyStep {
     pub blocked: bool,
 }
 
-/// Collision-check one non-player body step through a trace provider.
+/// Collision-check one body push through a trace provider: a knockback or a
+/// hazard push, for the player and every enemy alike (walking goes through
+/// [`CharacterMotorState`]).
 ///
 /// This is the BSP/provider counterpart of [`commit_body_step`]. It keeps the
 /// same deterministic full-step, X-only, then Z-only cascade while sharing the
@@ -1732,49 +1746,6 @@ pub fn commit_body_step_with_trace_provider<P: CollisionTraceProvider + ?Sized>(
         moved: false,
         blocked: true,
     })
-}
-
-/// Collision-check one exact non-player movement direction through a trace
-/// provider. Unlike [`commit_body_step_with_trace_provider`], this does not
-/// retry X-only and Z-only slides after a blocked diagonal. The entity heading
-/// search already probes the cardinal headings as candidates of their own, so
-/// a slide cascade inside every candidate would only repeat hull traces.
-pub fn commit_body_direction_with_trace_provider<P: CollisionTraceProvider + ?Sized>(
-    provider: &mut P,
-    start: RoomPoint,
-    dx: i32,
-    dz: i32,
-    radius: i32,
-    height: i32,
-) -> Result<BodyStep, CollisionQueryError> {
-    let target = RoomPoint::new(
-        start.x.saturating_add(dx),
-        start.y,
-        start.z.saturating_add(dz),
-    );
-    if target.x == start.x && target.z == start.z {
-        return Ok(BodyStep {
-            position: start,
-            moved: false,
-            blocked: false,
-        });
-    }
-    let shape = CollisionTraceShape::Body {
-        radius: radius.max(0),
-        height: height.max(1),
-    };
-    match trace_body_grounded_stand_position(provider, start, target, shape)? {
-        Some(position) => Ok(BodyStep {
-            position,
-            moved: true,
-            blocked: false,
-        }),
-        None => Ok(BodyStep {
-            position: start,
-            moved: false,
-            blocked: true,
-        }),
-    }
 }
 
 fn trace_body_grounded_stand_position<P: CollisionTraceProvider + ?Sized>(
@@ -3808,23 +3779,6 @@ mod tests {
                 .expect("trace body step");
         assert_eq!(step.position, RoomPoint::new(20, 0, 0));
         assert!(step.moved);
-        assert!(step.blocked);
-    }
-
-    #[test]
-    fn trace_body_direction_rejects_blocked_diagonal_without_axis_slide() {
-        let blockers = [CharacterCollisionCylinder::new(
-            RoomPoint::new(10, 0, 10),
-            2,
-            8,
-        )];
-        let mut world = FlatTraceProvider::new(None);
-        let mut provider = CharacterBlockerTraceProvider::new(&mut world, &blockers);
-        let step =
-            commit_body_direction_with_trace_provider(&mut provider, RoomPoint::ZERO, 20, 20, 2, 8)
-                .expect("trace body direction");
-        assert_eq!(step.position, RoomPoint::ZERO);
-        assert!(!step.moved);
         assert!(step.blocked);
     }
 

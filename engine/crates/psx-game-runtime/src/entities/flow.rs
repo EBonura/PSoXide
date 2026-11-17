@@ -1,6 +1,6 @@
 //! Optional Cortex prototype; legacy records retain their original rules.
 use super::*;
-use crate::combat_intent::{CombatIntent, CombatMove};
+use crate::combat_intent::{CombatAction, CombatIntent, CombatMove};
 impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
     /// Ranged-exchange role of entity `index` (cover, peek, evade ...), 0 when unknown.
     pub fn combat_role(&self, index: usize) -> u8 {
@@ -31,13 +31,15 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         r: &LevelGameEntityRecord,
         i: usize,
         input: GameEntityTickInput<'_>,
-        mover: &mut impl GameEntityMover,
+        mover: &mut impl FighterWorld,
         delta: u16,
         far: i32,
         stats: &mut GameEntityTickStats,
     ) -> Option<tactics::TacticalPlan> {
         let mut intent = CombatIntent::IDLE;
         let before = self.position(i);
+        let evade = self.evade_move(r);
+        self.exchanges[i].set_evade(evade);
         let energy = self.combatants[i].flow.energy;
         let order = self.exchanges[i].decide(
             before,
@@ -65,7 +67,8 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         } else {
             EnemyGoal::TakeCover
         };
-        if self.tactics[i].goal != goal {
+        let starting = self.tactics[i].goal != goal;
+        if starting {
             self.begin_goal(i, goal, 240, 12);
         }
         self.release_attack_owner(i, 0);
@@ -86,26 +89,24 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         }
         let facing = self
             .tactical_turn(i, facing_target, delta)
-            .map_or(self.yaw[i], |(yaw, _)| yaw);
+            .map_or(self.yaw_raw(i), |(yaw, _)| yaw);
         self.tactics[i].running =
             !order.evade && Self::can_run(r) && Self::distance(before, order.destination) > 96;
-        let speed = if order.evade {
-            crate::combat_flow::EVADE_DISTANCE / i32::from(crate::combat_flow::EVADE_MOVE_TICKS)
-        } else if self.tactics[i].running {
-            r.run_speed.max(1)
-        } else {
-            r.walk_speed.max(1)
-        };
         // Cover lanes have already been checked. Follow that segment directly;
         // the chase motor can retain its previous eight-way heading past a peek.
         let dx = order.destination[0] - before[0];
         let dz = order.destination[2] - before[2];
-        let length = psx_math::int32::isqrt_i32(dx * dx + dz * dz).max(1);
-        let step = (speed * i32::from(delta)).min(length);
-        intent.movement = CombatMove::Step {
-            dx: dx * step / length,
-            dz: dz * step / length,
-        };
+        let running = self.tactics[i].running;
+        intent.movement = self.move_toward(r, dx, dz, delta, running);
+        if running {
+            intent.held = intent.held.with(CombatAction::Evade);
+        }
+        // Dodging a bolt is the evade every fighter has: a roll (with its
+        // i-frames) for one with the mobility kit, pressed as the dodge
+        // starts; without the kit it is a walk aside.
+        if order.evade && starting {
+            intent.pressed = intent.pressed.with(CombatAction::Evade);
+        }
         self.set_intent(
             i,
             if order.evade {
@@ -129,7 +130,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         r: &LevelGameEntityRecord,
         i: usize,
         input: GameEntityTickInput<'_>,
-        mover: &mut impl GameEntityMover,
+        mover: &mut impl FighterWorld,
         delta: u16,
         stats: &mut GameEntityTickStats,
     ) -> Option<tactics::TacticalPlan> {
@@ -170,10 +171,10 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
                 before[0] - input.target.position[0],
                 before[2] - input.target.position[2],
             ));
-            let step = r.walk_speed.max(1) * i32::from(delta);
-            intent.movement = CombatMove::Step {
-                dx: yaw.sin().mul_i32(step),
-                dz: yaw.cos().mul_i32(step),
+            intent.movement = CombatMove::Move {
+                x: yaw.sin().raw() as i16,
+                z: yaw.cos().raw() as i16,
+                forward: 0,
             };
         }
         self.set_intent(i, GameEntityIntent::Retreat);
@@ -243,8 +244,8 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
             return;
         }
         let yaw = psx_engine::Angle::from_q12(atan2_q12(
-            self.x[index] - from[0],
-            self.z[index] - from[2],
+            self.px(index) - from[0],
+            self.pz(index) - from[2],
         ));
         self.recoil[index] = [yaw.sin().mul_i32(5) as i16, yaw.cos().mul_i32(5) as i16, 8];
     }
@@ -252,7 +253,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         &mut self,
         r: &LevelGameEntityRecord,
         i: usize,
-        mover: &mut impl GameEntityMover,
+        mover: &mut impl FighterWorld,
         delta: u16,
     ) {
         let [dx, dz, ticks] = self.recoil[i];
@@ -261,7 +262,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
             return;
         }
         self.recoil[i][2] -= step as i16;
-        let p = mover.step(
+        let p = mover.push_body(
             i,
             r.room,
             self.position(i),
@@ -270,9 +271,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
             i32::from(r.radius),
             i32::from(r.height),
         );
-        self.x[i] = p[0];
-        self.y[i] = p[1];
-        self.z[i] = p[2];
+        self.place(i, p);
     }
     /// Correct crowding during the first half of a melee tell, then plant.
     /// Collision and a fixed turn rate apply; attacks never track through impact.
@@ -281,7 +280,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         r: &LevelGameEntityRecord,
         i: usize,
         input: GameEntityTickInput<'_>,
-        mover: &mut impl GameEntityMover,
+        mover: &mut impl FighterWorld,
         delta: u16,
     ) {
         if self.selected_attack_is_ranged(i) {
@@ -303,19 +302,11 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
             before[0] - input.target.position[0],
             before[2] - input.target.position[2],
         ));
-        let step = r.walk_speed.max(1).saturating_mul(i32::from(delta));
-        let p = mover.step(
-            i,
-            r.room,
-            before,
-            away.sin().mul_i32(step),
-            away.cos().mul_i32(step),
-            i32::from(r.radius),
-            i32::from(r.height),
-        );
-        self.x[i] = p[0];
-        self.y[i] = p[1];
-        self.z[i] = p[2];
+        // Back off at a walk, still facing the target: the motor's
+        // locked-on backward pace.
+        let facing = Angle::from_q12(self.yaw_raw(i) as u16);
+        self.request_heading(away, 4096, Some(facing), false);
+        self.drive(r, i, mover, delta);
         self.tactics[i].goal = tactics::EnemyGoal::Retreat;
         self.advance_tactical_animation(r, i, before, delta);
     }
@@ -340,7 +331,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         r: &LevelGameEntityRecord,
         i: usize,
         input: GameEntityTickInput<'_>,
-        mover: &mut impl GameEntityMover,
+        mover: &mut impl FighterWorld,
         delta: u16,
     ) {
         if !Self::is_tactical(r) || !self.selected_attack_is_ranged(i) {
@@ -374,27 +365,12 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         } else {
             tactics::EnemyGoal::CircleLeft
         };
-        // Half normal walking speed while committing a shot; never sprint away.
-        let budget = r.walk_speed.max(1) * i32::from(r.spacing_speed_percent.clamp(1, 100)) * 128
-            / 100
-            * i32::from(delta)
-            + i32::from(self.tactics[i].movement_fraction_q8);
-        let step = budget >> 8;
-        self.tactics[i].movement_fraction_q8 = (budget & 255) as u8;
-        if step > 0 {
-            let p = mover.step(
-                i,
-                r.room,
-                before,
-                yaw.sin().mul_i32(step),
-                yaw.cos().mul_i32(step),
-                i32::from(r.radius),
-                i32::from(r.height),
-            );
-            self.x[i] = p[0];
-            self.y[i] = p[1];
-            self.z[i] = p[2];
-        }
+        // Half the spacing pace while committing a shot, still facing the
+        // target; never sprint away. The motor carries the sub-unit steps.
+        let strength = 4096 * i32::from(r.spacing_speed_percent.clamp(1, 100)) / 200;
+        let facing = Angle::from_q12(self.yaw_raw(i) as u16);
+        self.request_heading(yaw, strength, Some(facing), false);
+        self.drive(r, i, mover, delta);
         self.advance_tactical_animation(r, i, before, delta);
     }
 }

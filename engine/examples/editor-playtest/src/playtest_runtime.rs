@@ -1902,12 +1902,8 @@ impl Playtest {
                 scaled_player_speed(FALLBACK_PLAYER_SPEED),
                 FALLBACK_PLAYER_YAW_STEP,
             ),
-        }
-        .without_stamina_limit();
-        config.roll_decelerates = self.character.is_some();
-        if let Some(room) = ROOMS.get(self.room_index.to_usize()) {
-            config.gravity_per_tick_q8 = room.gravity_per_tick_q8;
-        }
+        };
+        config = fighter_motor_rules(config, self.room_index, self.character.is_some());
         // Characterless projects use the cooker's matching debug body.
         // Authored characters keep their Character-bound radius and height
         // instead of silently shrinking the player.
@@ -3584,4 +3580,21 @@ mod life_reset_tests {
             "progress survives a new combat life"
         );
     }
+}
+
+/// This game's rules over a fighter's motor configuration, the player's and
+/// every enemy's alike: no stamina limit (Cortex has no stamina), the
+/// decelerating roll of an authored character, and the gravity of the room
+/// the fighter is in.
+pub(super) fn fighter_motor_rules(
+    config: CharacterMotorConfig,
+    room: RoomIndex,
+    authored: bool,
+) -> CharacterMotorConfig {
+    let mut config = config.without_stamina_limit();
+    config.roll_decelerates = authored;
+    if let Some(room) = ROOMS.get(room.to_usize()) {
+        config.gravity_per_tick_q8 = room.gravity_per_tick_q8;
+    }
+    config
 }

@@ -133,44 +133,29 @@ impl CombatActions {
     }
 }
 
-/// Where a controller wants the fighter to go this tick.
+/// Where a controller wants the fighter to go this tick: one form for every
+/// controller.
 ///
-/// The pad speaks in its own frame (a stick the owner turns into a
-/// camera-relative motor input). The AI speaks in world units, in the
-/// forms the entity mover offers; they meet when the movers are unified.
+/// A pad turns its stick into this through the camera; an AI writes it
+/// from where it wants to be. The fighter's motor (the same one for every
+/// character) reads only this, so it cannot tell who asked.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CombatMove {
     /// Stand still.
     #[default]
     Still,
-    /// A stick in the controller's frame (`x` right, `z` forward, centred
-    /// pad units).
-    Stick {
-        /// Sideways component.
+    /// Move along a world direction (`x`, `z`, Q12 with 4096 for full
+    /// strength: full walking pace, or running pace while running).
+    Move {
+        /// World x component, Q12.
         x: i16,
-        /// Forward component.
+        /// World z component, Q12.
         z: i16,
-    },
-    /// One collision-bound world step (the mover's body step).
-    Step {
-        /// World x displacement.
-        dx: i32,
-        /// World z displacement.
-        dz: i32,
-    },
-    /// One exact-direction world step (the mover's direction probe).
-    Direction {
-        /// World x displacement.
-        dx: i32,
-        /// World z displacement.
-        dz: i32,
-    },
-    /// Steer toward a world point, at most `distance` units this tick.
-    Toward {
-        /// The point to close on.
-        point: [i32; 3],
-        /// Travel budget this tick.
-        distance: i32,
+        /// The controller's own forward/back sense: +1, -1 or 0. A pad
+        /// gives its stick's forward axis; the motor walks along the body's
+        /// facing on it only when the vector has been scaled to nothing
+        /// (a walk-start ramp). An AI leaves it 0.
+        forward: i8,
     },
 }
 
@@ -275,7 +260,11 @@ mod tests {
             .iter()
             .fold(CombatActions::NONE, |set, &action| set.with(action));
         let intent = CombatIntent {
-            movement: CombatMove::Step { dx: 3, dz: -4 },
+            movement: CombatMove::Move {
+                x: 1229,
+                z: -1638,
+                forward: 0,
+            },
             face: Some([1, 2, 3]),
             aim: None,
             pressed: every,
