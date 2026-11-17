@@ -87,6 +87,18 @@ pub(super) fn log_values(label: &str, values: &[u32]) {
 }
 
 impl Playtest {
+    /// The bot plans its dodge with the player's own (as an enemy plans with
+    /// its own): her roll, or a walk aside without the kit. Once per duel;
+    /// out of line so the duel's per-tick code stays as it was.
+    #[inline(never)]
+    fn duel_plan_dodge(&mut self) {
+        let evade = psx_game_runtime::ranged_tactics::EvadeMove::of(
+            &self.motor_config(),
+            self.player_kits().can_dodge(),
+        );
+        self.duel.exchange.set_evade(evade);
+    }
+
     /// Called before the gameplay controller; physical input is restored by the caller.
     #[inline(never)]
     #[cfg_attr(target_arch = "mips", optimize(size))]
@@ -157,13 +169,7 @@ impl Playtest {
                 visible: false,
                 ticks_to_hit: u16::MAX,
             };
-            // The bot plans its dodge with the player's own (as an enemy plans
-            // with its own): her roll, or a walk aside without the kit.
-            let evade = psx_game_runtime::ranged_tactics::EvadeMove::of(
-                &self.motor_config(),
-                self.player_kits().can_dodge(),
-            );
-            self.duel.exchange.set_evade(evade);
+            self.duel_plan_dodge();
             // The third value is the sample format: 1 is one health value
             // per fighter (before it, two pools each and no third value).
             log_values("duel:start", &[seed, target as u32, 1]);

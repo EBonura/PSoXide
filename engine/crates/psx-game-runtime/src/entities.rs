@@ -1060,6 +1060,9 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     }
 
     /// Position of entity `index`, room-local engine units.
+    // Read from many places; one copy on the PS1 (a motor is 44 bytes, so
+    // its index is not a shift).
+    #[inline(never)]
     pub fn position(&self, index: usize) -> [i32; 3] {
         if index >= self.count() {
             return [0; 3];
