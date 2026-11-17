@@ -31,9 +31,7 @@ pub struct RangedOrder {
     pub contest: bool,
 }
 
-/// Ticks after a dodge starts before the exchange may order another: how
-/// often a fighter tries to dodge, a decision, not a movement rule.
-pub const EVADE_COOLDOWN_TICKS: u16 = 120;
+pub use crate::combat_flow::EVADE_COOLDOWN_TICKS;
 
 /// The dodge an exchange plans with, from the evader's own character: how
 /// far its evade carries it, the ticks it moves and the vulnerable ticks

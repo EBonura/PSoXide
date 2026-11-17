@@ -20,6 +20,11 @@ pub const GROUND_REARM_TICKS: u16 = 120;
 /// Ticks after a poise break reaction ends during which no further break can occur.
 pub const BREAK_GRACE_TICKS: u16 = 60;
 
+/// Ticks after a projectile dodge starts before a ranged exchange may order
+/// another: how often a fighter tries to dodge, a decision, not a movement
+/// rule (the dodge itself is the fighter's own roll or walk).
+pub const EVADE_COOLDOWN_TICKS: u16 = 120;
+
 /// Actual firing space: several body lengths beyond contact, bounded by the weapon.
 pub fn ranged_band(preferred: i32, melee_reach: i32, weapon_max: i32) -> (i32, i32) {
     let far = preferred
