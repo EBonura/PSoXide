@@ -3113,6 +3113,9 @@ mod combat_parry_tests;
 mod combat_controller_tests;
 
 #[cfg(test)]
+mod combat_mover_tests;
+
+#[cfg(test)]
 mod combat_verbs_tests;
 
 #[cfg(test)]

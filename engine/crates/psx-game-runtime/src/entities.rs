@@ -1185,6 +1185,12 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         })
     }
 
+    /// The body of entity `index`: the motor the player's character drives
+    /// too. None out of range.
+    pub fn motor(&self, index: usize) -> Option<&CharacterMotorState> {
+        self.motors.get(index).filter(|_| index < self.count())
+    }
+
     /// Whether entity `index` is inside its i-frames this tick, see
     /// [`Self::defender`].
     pub fn invulnerable(&self, records: &[LevelGameEntityRecord], index: usize) -> bool {
