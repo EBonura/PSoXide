@@ -1011,13 +1011,16 @@ impl Playtest {
             // must not depend on whether the camera sees it (a camera pushed
             // into a wall culls an enemy standing next to the player), so an
             // engaged entity keeps its pose whatever the visibility mask says.
+            // So does one set against a rival, before it has noticed it: the
+            // rival's swings and bolts land on that pose.
             let fighting = owner.is_some_and(|(entity, _)| {
-                !matches!(
-                    self.game_entities.state(entity),
-                    psx_game_runtime::entities::GameEntityState::Idle
-                        | psx_game_runtime::entities::GameEntityState::Patrol
-                        | psx_game_runtime::entities::GameEntityState::Dead
-                )
+                self.game_entities.rival(entity).is_some()
+                    || !matches!(
+                        self.game_entities.state(entity),
+                        psx_game_runtime::entities::GameEntityState::Idle
+                            | psx_game_runtime::entities::GameEntityState::Patrol
+                            | psx_game_runtime::entities::GameEntityState::Dead
+                    )
             });
             let corpse_gone = owner.is_some_and(|(entity, record)| {
                 if record.flags & psx_level::game_entity_flags::ENABLED == 0 {
