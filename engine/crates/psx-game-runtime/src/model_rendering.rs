@@ -62,7 +62,7 @@ pub use self::instances::{
     accumulate_model_instance_draw_stats, actor_shadow_radius, draw_actor_shadow,
     draw_ground_decal, draw_model_instance_from_pose, draw_model_instance_shadows,
     draw_model_instances, resolve_instance_actor_pose, InstanceActorPoseSnapshot,
-    ModelInstanceDrawStats, ModelInstancePoseOverride,
+    ModelInstanceDrawStats, ModelInstancePoseLayer, ModelInstancePoseOverride,
 };
 
 /// The cooked model-family tables the render policy walks, bundled so
@@ -340,6 +340,8 @@ pub struct RuntimeModelAsset {
     /// the instance's composed local-to-world to get the floor lift. See
     /// `Model::bind_pose_floor_lift`.
     pub floor_lift: i32,
+    /// The skeleton's upper body and legs, for layered clips.
+    pub body_masks: crate::fighter_anim::BodyJointMasks,
 }
 
 /// Resolved player model plus its render-independent pose authority.
@@ -538,6 +540,10 @@ impl RuntimeModelAsset {
             collision_radius: record.collision_radius,
             local_to_world: LocalToWorldScale::from_q12(model.local_to_world_q12()),
             floor_lift: model.bind_pose_floor_lift(),
+            body_masks: crate::fighter_anim::BodyJointMasks::from_parents(
+                model.joint_count(),
+                |joint| model.joint(joint).and_then(|record| record.parent()),
+            ),
         })
     }
 
@@ -1299,11 +1305,6 @@ pub fn resolve_player_actor_pose<
         character.action_frame_range(anim_action),
     );
     let blend_from = player_pose_blend(character, model, clips, blend, speeds.blend_q8, video_hz);
-    let clip_anchor = model_clip_anchor(tables, model, clip_local);
-    // The origin below grounds this clip by its own cooked floor, so the
-    // clip-to-reference reconciliation is the identity and the `floor_y` term
-    // `model_pose_anchor_translation` derives from it is always exactly zero.
-    let reference_anchor = clip_anchor;
     // Resolved once per clip and then carried on the snapshot: the caller hands
     // last tick's value back whenever the clip has not changed, which removes
     // one full pose decode from every simulation tick.
@@ -1311,31 +1312,31 @@ pub fn resolve_player_actor_pose<
         Some(cached) => Some(cached),
         None => clip_first_root_xz(animation),
     };
-    let pose_translation = model_pose_anchor_translation(
-        animation,
-        phase_q12,
-        clip_anchor,
-        reference_anchor,
-        character.action_in_place_override(anim_action),
-        clip_first_root_xz,
-    );
     let rotation = yaw_rotation_matrix(yaw.add_signed_q12(character.visual_yaw));
-    let local_to_world = visual_model_local_to_world(model, character.visual_scale_q8);
-    let origin = visual_model_origin(
-        x,
-        y,
-        z,
-        if matches!(
-            anim_action,
-            CharacterAnimationAction::Fall | CharacterAnimationAction::Land
-        ) {
-            model.floor_lift
-        } else {
-            clip_floor_lift(clip_anchor, model)
+    let pose = actor_pose(
+        tables,
+        model,
+        ActorPoseSource {
+            animation,
+            clip_local,
+            phase_q12,
+            blend_from,
+            in_place_override: character.action_in_place_override(anim_action),
+            clip_first_root_xz,
+            bind_floor: matches!(
+                anim_action,
+                CharacterAnimationAction::Fall | CharacterAnimationAction::Land
+            ),
         },
-        local_to_world,
-        character.visual_offset,
-        &rotation,
+        ActorPlacement {
+            x,
+            y,
+            z,
+            rotation,
+            visual_scale_q8: character.visual_scale_q8,
+            visual_offset: character.visual_offset,
+        },
+        elapsed_tick,
     );
     Some(PlayerActorPoseSnapshot {
         model,
@@ -1343,17 +1344,83 @@ pub fn resolve_player_actor_pose<
         clip_local,
         clip_first_root_xz,
         action_tick: local_tick,
-        pose: ActorPoseSnapshot::new(
-            elapsed_tick,
-            animation,
-            phase_q12,
-            blend_from,
-            origin,
-            rotation,
-            local_to_world,
-            pose_translation,
-        ),
+        pose,
     })
+}
+
+/// Where one actor's clip is in its playback, for [`actor_pose`].
+#[derive(Clone, Copy)]
+pub(crate) struct ActorPoseSource {
+    pub(crate) animation: Animation<'static>,
+    pub(crate) clip_local: ModelClipIndex,
+    pub(crate) phase_q12: u32,
+    pub(crate) blend_from: Option<ModelPoseBlend<'static>>,
+    /// The character's in-place choice for the action, `None` for the clip's
+    /// own cooked flag.
+    pub(crate) in_place_override: Option<bool>,
+    /// The clip's first-frame root XZ when the caller already has it.
+    pub(crate) clip_first_root_xz: Option<[i32; 2]>,
+    /// Ground on the bind pose rather than the clip's own floor (an airborne
+    /// clip, whose cooked floor is not the ground).
+    pub(crate) bind_floor: bool,
+}
+
+/// Where one actor stands and how its model is presented, for [`actor_pose`].
+#[derive(Clone, Copy)]
+pub(crate) struct ActorPlacement {
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+    pub(crate) z: i32,
+    pub(crate) rotation: Mat3I16,
+    pub(crate) visual_scale_q8: u16,
+    pub(crate) visual_offset: [i16; 3],
+}
+
+/// One actor's pose, by one rule for the player and every placed instance:
+/// the clip grounds on its own cooked floor (so the clip-to-reference
+/// reconciliation is the identity and its floor term is zero), its root is
+/// held in place as the clip or the character asks, and the model is
+/// scaled, offset and turned by its placement.
+pub(crate) fn actor_pose(
+    tables: ModelTables,
+    model: RuntimeModelAsset,
+    source: ActorPoseSource,
+    placement: ActorPlacement,
+    tick: SimTick,
+) -> ActorPoseSnapshot {
+    let clip_anchor = model_clip_anchor(tables, model, source.clip_local);
+    let pose_translation = model_pose_anchor_translation(
+        source.animation,
+        source.phase_q12,
+        clip_anchor,
+        clip_anchor,
+        source.in_place_override,
+        source.clip_first_root_xz,
+    );
+    let local_to_world = visual_model_local_to_world(model, placement.visual_scale_q8);
+    let origin = visual_model_origin(
+        placement.x,
+        placement.y,
+        placement.z,
+        if source.bind_floor {
+            model.floor_lift
+        } else {
+            clip_floor_lift(clip_anchor, model)
+        },
+        local_to_world,
+        placement.visual_offset,
+        &placement.rotation,
+    );
+    ActorPoseSnapshot::new(
+        tick,
+        source.animation,
+        source.phase_q12,
+        source.blend_from,
+        origin,
+        placement.rotation,
+        local_to_world,
+        pose_translation,
+    )
 }
 
 /// Muted mesh edges remain readable while the textured fragments are absent.
@@ -2520,38 +2587,27 @@ pub fn player_joint_world_transform(
     clip_local: ModelClipIndex,
     joint: u8,
 ) -> Option<JointWorldTransform> {
-    let clip_anchor = model_clip_anchor(tables, runtime_model, clip_local);
-    // The origin already grounds this clip by its own cooked floor, so the
-    // clip-to-reference reconciliation is the identity here.
-    let reference_anchor = clip_anchor;
-    let pose_translation = model_pose_anchor_translation(
-        animation,
-        phase_q12,
-        clip_anchor,
-        reference_anchor,
-        character.action_in_place_override(action),
-        None,
-    );
-    let model_rotation = yaw_rotation_matrix(yaw.add_signed_q12(character.visual_yaw));
-    let origin = visual_model_origin(
-        x,
-        y,
-        z,
-        clip_floor_lift(clip_anchor, runtime_model),
-        visual_model_local_to_world(runtime_model, character.visual_scale_q8),
-        character.visual_offset,
-        &model_rotation,
-    );
-    let local_to_world = visual_model_local_to_world(runtime_model, character.visual_scale_q8);
-    ActorPoseSnapshot::new(
+    actor_pose(
+        tables,
+        runtime_model,
+        ActorPoseSource {
+            animation,
+            clip_local,
+            phase_q12,
+            blend_from: None,
+            in_place_override: character.action_in_place_override(action),
+            clip_first_root_xz: None,
+            bind_floor: false,
+        },
+        ActorPlacement {
+            x,
+            y,
+            z,
+            rotation: yaw_rotation_matrix(yaw.add_signed_q12(character.visual_yaw)),
+            visual_scale_q8: character.visual_scale_q8,
+            visual_offset: character.visual_offset,
+        },
         SimTick::ZERO,
-        animation,
-        phase_q12,
-        None,
-        origin,
-        model_rotation,
-        local_to_world,
-        pose_translation,
     )
     .joint_world_transform(u16::from(joint))
 }
@@ -2585,6 +2641,7 @@ pub fn model_instance_joint_world_transform(
         animation,
         phase_q12,
         clip_local,
+        None,
         x,
         y,
         z,

@@ -297,7 +297,7 @@ impl Playtest {
                         stance: Some(self.game_entities.actor().stance.active()),
                         noise_radius: player_noise_radius(
                             self.player_moved_last_tick,
-                            self.anim_state,
+                            self.anim.state,
                             player_height,
                         ),
                         attack_read,
@@ -688,7 +688,7 @@ impl Playtest {
                         .lock_until
                         .saturating_sub(ctx.sim_tick),
                 );
-                self.anim_blend_from = None;
+                self.anim.switched = None;
             } else {
                 self.open_world_message_once();
                 self.queue_gameplay_sfx(LevelGameplaySfxEvent::GameplayEnter);
@@ -862,7 +862,7 @@ impl Playtest {
             || !self.game_entities.actor_motor().action().is_idle()
             || self.hazard_death_ticks_remaining != 0
             || (action_locked
-                && !matches!(self.anim_state, PlayerAnim::RangedAttack | PlayerAnim::Land))
+                && !matches!(self.anim.state, PlayerAnim::RangedAttack | PlayerAnim::Land))
             || self
                 .game_entities
                 .actor()
@@ -878,7 +878,7 @@ impl Playtest {
             self.is_locked(),
             camera_stick_axes(ctx, self.analog_deadzone),
         );
-        if !self.ranged_ready.ready(now.as_u32()) && self.anim_state == PlayerAnim::RangedAttack {
+        if !self.ranged_ready.ready(now.as_u32()) && self.anim.state == PlayerAnim::RangedAttack {
             // Lowering the weapon or dodging cancels a shot not yet released.
             self.game_entities.actor_action_mut().lock_until = now;
             action_locked = false;
@@ -913,7 +913,7 @@ impl Playtest {
         }
         let timing = self.player_combat_sample(ctx);
         let actor_free = !action_locked && self.game_entities.actor_motor().action().is_idle();
-        let action = self.anim_state.action().to_index() as u8;
+        let action = self.anim.state.action().to_index() as u8;
         let dodge = self.game_entities.actor_action_mut().dodge(
             action,
             circle.evade,
@@ -1017,13 +1017,13 @@ impl Playtest {
             config.walk_speed = config.walk_speed.saturating_mul(60) / 100;
             config.run_speed = config.run_speed.saturating_mul(60) / 100;
         }
-        if action_locked && player_anim_is_attack(self.anim_state) {
+        if action_locked && player_anim_is_attack(self.anim.state) {
             if let Some(character) = self.character.as_ref() {
-                let character = self.player_character_for_anim(character, self.anim_state);
+                let character = self.player_character_for_anim(character, self.anim.state);
                 let local_tick = now.saturating_sub(self.game_entities.actor_action().start);
                 if let Some(push_speed) = self.player_action_push_speed(
                     &character,
-                    self.anim_state,
+                    self.anim.state,
                     local_tick,
                     ctx.video_hz,
                 ) {
@@ -1034,7 +1034,7 @@ impl Playtest {
             }
         }
         if self.game_entities.actor_action().lock_until > now
-            && player_anim_is_attack(self.anim_state)
+            && player_anim_is_attack(self.anim.state)
         {
             self.break_box_props_for_attack(config);
         } else if let Some(trigger) = box_prop_movement_break_trigger(
@@ -1135,7 +1135,7 @@ impl Playtest {
                 i32::from(ctx.is_held(button::R1)),
                 i32::from(self.game_entities.actor().stance.active() == VitalityChannelId::Two),
                 i32::from(self.ranged_ready.aiming()),
-                self.anim_state.action().to_index() as i32,
+                self.anim.state.action().to_index() as i32,
                 p.x,
                 p.y,
                 p.z,
@@ -1146,7 +1146,7 @@ impl Playtest {
         if falling_before_solve
             && self.game_entities.actor_motor().grounded()
             && !matches!(
-                self.anim_state,
+                self.anim.state,
                 PlayerAnim::Death
                     | PlayerAnim::HitReact
                     | PlayerAnim::Stun
@@ -1168,7 +1168,7 @@ impl Playtest {
             self.fall_from_arch = false;
         }
         #[cfg(feature = "emulator-telemetry")]
-        if self.anim_state == PlayerAnim::Fall
+        if self.anim.state == PlayerAnim::Fall
             || (falling_before_solve && self.game_entities.actor_motor().grounded())
         {
             psx_rt::tty::print("player fall:sample ");
@@ -1183,11 +1183,11 @@ impl Playtest {
             }
             psx_rt::tty::println("");
         }
-        let previous_anim = self.anim_state;
+        let previous_anim = self.anim.state;
         let new_state = if self.game_entities.actor_action().lock_until > now {
             // Any locked action (attack, evade, hit) cancels the walk phases.
             self.loco = LocoPhase::Idle;
-            self.anim_state
+            self.anim.state
         } else if self.hook_attached.is_none()
             && !self.game_entities.actor_motor().grounded()
             && self.game_entities.actor_motor().vertical_speed_q8() < 0
@@ -1200,7 +1200,7 @@ impl Playtest {
             self.loco = LocoPhase::Idle;
             PlayerAnim::Fall
         } else {
-            let motor_anim = player_anim_from_motor(motor_frame.anim);
+            let motor_anim = fighter_anim::locomotion_anim(motor_frame.anim);
             if self.ranged_ready.ready(now.as_u32()) && !motor_anim.is_motor_fixed_action() {
                 self.loco = LocoPhase::Idle;
                 if motor_anim == PlayerAnim::Idle && self.ranged_ready.firing(now.as_u32()) {
@@ -1216,7 +1216,7 @@ impl Playtest {
             telemetry::counter::PLAYER_ANIM_ACTION,
             new_state.action().to_index() as u32,
         );
-        if new_state != self.anim_state {
+        if new_state != self.anim.state {
             self.switch_player_anim(new_state, now, ctx.video_hz);
             if new_state == PlayerAnim::Fall && !self.fall_from_arch {
                 self.game_entities.actor_action_mut().start =
@@ -1236,15 +1236,15 @@ impl Playtest {
                 }
             }
         }
-        if self.anim_state.is_gait() && motor_frame.moved {
+        if self.anim.state.is_gait() && motor_frame.moved {
             if let Some(character) = self.character {
                 let cycle = self
                     .player_clip_duration_vblanks(
                         &character,
-                        character.clip_for(self.anim_state),
+                        character.clip_for(self.anim.state),
                         ctx.video_hz,
-                        self.player_action_speed_q8(&character, self.anim_state),
-                        character.action_frame_range(self.anim_state.action()),
+                        self.player_action_speed_q8(&character, self.anim.state),
+                        character.action_frame_range(self.anim.state.action()),
                     )
                     .unwrap_or(0);
                 let local_tick = now.saturating_sub(self.game_entities.actor_action().start);
@@ -1700,7 +1700,7 @@ impl Playtest {
             intent,
             self.game_entities.actor().stance.active() == VitalityChannelId::Two,
         );
-        let action = self.anim_state.action().to_index() as u8;
+        let action = self.anim.state.action().to_index() as u8;
         let timing = self.player_combat_sample(ctx);
         let free = !action_locked && self.game_entities.actor_motor().action().is_idle();
         let request = self

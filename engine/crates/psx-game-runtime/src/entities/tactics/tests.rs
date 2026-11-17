@@ -3,6 +3,7 @@ use super::*;
 use crate::combat_intent::CombatIntent;
 use crate::entities::tests::test_record;
 use crate::entities::tests::StepRule;
+use psx_engine::SimTick;
 
 const fn enemy() -> LevelGameEntityRecord {
     let mut r = test_record(
@@ -134,7 +135,9 @@ fn circle_keeps_side_until_it_may_replan_and_does_not_own_attack() {
         assert_eq!(e.attack_owner(), None);
     }
     assert_eq!(e.tactics[0].remaining, 218);
-    assert_eq!(e.clip_for_state(&ENEMY, 0).clip, ENEMY[0].strafe_left_clip);
+    // Circling left around the target steps to the body's own right, and
+    // the clip is the motor's: the step it took.
+    assert_eq!(e.clip_for_state(&ENEMY, 0).clip, ENEMY[0].strafe_right_clip);
     tick(&mut e, &mut m, [0, 0, 100], 2);
     assert_ne!(e.tactics[0].goal, EnemyGoal::CircleLeft);
     assert_eq!(e.attack_owner(), None);
@@ -480,7 +483,7 @@ fn spacing_speed_slows_only_directional_movement_at_both_tick_rates() {
                                 .max(1);
                         assert_eq!(i32::from(e.tactics[0].requested), expected);
                     }
-                    moved |= e.tactics[0].moved;
+                    moved |= e.motor_anims[0] != CharacterMotorAnim::Idle;
                 }
                 assert!(moved);
                 displacements[index] = e.px(0).abs() + e.pz(0).abs();
@@ -503,50 +506,6 @@ fn spacing_speed_slows_only_directional_movement_at_both_tick_rates() {
 }
 
 #[test]
-fn replanning_same_gait_keeps_its_animation_phase() {
-    let mut e = engaged();
-    e.begin_goal(0, EnemyGoal::Approach, 300, 30);
-    e.set_axis(0, 2, 4);
-    e.advance_tactical_animation(&ENEMY[0], 0, [0, 0, 0], 2);
-    assert_eq!(e.clip_for_state(&ENEMY, 0).phase_ticks, 2);
-    e.begin_goal(0, EnemyGoal::Approach, 300, 30);
-    e.set_axis(0, 2, 8);
-    e.advance_tactical_animation(&ENEMY[0], 0, [0, 0, 4], 2);
-    assert_eq!(e.clip_for_state(&ENEMY, 0).phase_ticks, 4);
-}
-
-#[test]
-fn gait_clock_tracks_committed_travel_at_both_cadences() {
-    for delta in [1, 2] {
-        let mut e = engaged();
-        e.begin_goal(0, EnemyGoal::CircleLeft, 240, 96);
-        for _ in 0..(12 / delta) {
-            let before = e.position(0);
-            e.set_axis(0, 0, e.px(0) - i32::from(delta)); // half of the authored 2-unit walk speed
-            e.advance_tactical_animation(&ENEMY[0], 0, before, delta);
-        }
-        assert_eq!(e.clip_for_state(&ENEMY, 0).phase_ticks, 6);
-        let before = e.position(0);
-        e.advance_tactical_animation(&ENEMY[0], 0, before, delta);
-        assert_eq!(e.clip_for_state(&ENEMY, 0).clip, ENEMY[0].idle_clip);
-    }
-}
-
-#[test]
-fn diagonal_gait_uses_distance_instead_of_axis_maximum() {
-    let mut e = engaged();
-    e.begin_goal(0, EnemyGoal::Approach, 300, 30);
-    for _ in 0..8 {
-        let before = e.position(0);
-        e.set_axis(0, 0, e.px(0) + 3);
-        e.set_axis(0, 2, e.pz(0) + 3);
-        e.advance_tactical_animation(&ENEMY[0], 0, before, 2);
-    }
-    // sqrt(18) * 8 / authored speed 2, rounded to ticks.
-    assert_eq!(e.clip_for_state(&ENEMY, 0).phase_ticks, 16);
-}
-
-#[test]
 fn post_attack_circling_uses_a_wider_personal_space() {
     let mut e = engaged();
     let mut saw_circle = false;
@@ -563,32 +522,6 @@ fn post_attack_circling_uses_a_wider_personal_space() {
         }
     }
     assert!(saw_circle);
-}
-
-#[test]
-fn slower_spacing_gait_clock_uses_its_own_nominal_speed() {
-    let mut r = enemy();
-    r.spacing_speed_percent = 50;
-    for goal in [
-        EnemyGoal::CircleLeft,
-        EnemyGoal::CircleRight,
-        EnemyGoal::Retreat,
-    ] {
-        for delta in [1, 2] {
-            let mut e = engaged();
-            e.begin_goal(0, goal, 240, 96);
-            for _ in 0..(12 / delta) {
-                let before = e.position(0);
-                e.set_axis(0, 0, e.px(0) - i32::from(delta));
-                e.advance_tactical_animation(&r, 0, before, delta);
-            }
-            // These clips already encode the slower cadence in their sample rate.
-            // Movement near their nominal speed must not halve playback a second
-            // time (the nominal is the locked-on spacing pace, 0.9 or 0.4 units).
-            let phase = (e.tactics[0].animation_phase_q8 >> 8) as u16;
-            assert!((12..=30).contains(&phase), "{goal:?} {delta}: {phase}");
-        }
-    }
 }
 
 #[test]
@@ -654,6 +587,7 @@ fn fractional_spacing_keeps_short_steps_and_cadence_without_idle_flicker() {
         let mut arena = Arena::default();
         for elapsed in (delta..=12).step_by(usize::from(delta)) {
             e.tick_delta(records, input([0, 0, 30]), &mut arena, delta);
+            e.update_animation(records, SimTick::from_u32(u32::from(elapsed)), |_, _| 0);
             if elapsed >= 2 {
                 assert_eq!(e.clip_for_state(records, 0).clip, r.walk_backward_clip);
             }
@@ -662,14 +596,19 @@ fn fractional_spacing_keeps_short_steps_and_cadence_without_idle_flicker() {
         // backward pace (40%), at a quarter of the walk: sub-unit steps the
         // motor carries, so it still gets somewhere.
         assert!(e.pz(0) < 0, "{}", e.pz(0));
+        // The stride runs on the clock since the gait began (the first
+        // think, or the second at one tick per think).
         let phase = e.clip_for_state(records, 0).phase_ticks;
-        assert!((10..=15).contains(&phase), "{phase}");
-        // A real collision still stops the gait; a deferred sub-unit step does not restart it.
+        assert!((10..=12).contains(&phase), "{phase}");
+        // A real collision stops the gait: the motor reports idle for a move
+        // it refused (a sub-unit step tries no collision, so it walks on).
         arena.blocked = true;
+        let mut stopped = false;
         for _ in 0..4 {
             e.tick_delta(records, input([0, 0, 30]), &mut arena, delta);
+            stopped |= e.clip_for_state(records, 0).clip == r.idle_clip;
         }
-        assert_eq!(e.clip_for_state(records, 0).clip, r.idle_clip);
+        assert!(stopped);
     }
 }
 
@@ -915,7 +854,8 @@ fn empty_energy_melee_enemy_sidesteps_with_lateral_clip_then_plants() {
     tick(&mut e, &mut m, [0, 0, 224], 2);
     assert_eq!(e.tactics[0].goal, EnemyGoal::Evade);
     assert_eq!(e.intent(0), GameEntityIntent::CircleRight);
-    assert_eq!(e.clip_for_state(&ENEMY, 0).clip, ENEMY[0].strafe_right_clip);
+    // The step aside is to the body's left (+x facing +z): the motor's clip.
+    assert_eq!(e.clip_for_state(&ENEMY, 0).clip, ENEMY[0].strafe_left_clip);
     // Without the mobility kit the dodge is a walk aside through the motor:
     // the locked-on strafe pace (90% of the 2-unit walk) over two frames.
     assert_eq!(e.px(0), 3);
@@ -1247,4 +1187,150 @@ fn the_tactical_controller_decides_for_the_actor_as_for_an_entity() {
     );
     e.actor_intent(&persona, &ENEMY, &mut world, 2, 0);
     assert!(e.attack_cooldown[actor] > 0);
+}
+
+/// The cooked training enemy's walk (512 Q8) at the game's 3/4 speed knob:
+/// every pace below lands a whole unit only every few thinks.
+fn sub_unit_enemy() -> &'static [LevelGameEntityRecord; 1] {
+    let mut r = enemy();
+    r.motion.walk_speed = 384;
+    r.spacing_speed_percent = 25;
+    std::boxed::Box::leak(std::boxed::Box::new([r]))
+}
+
+/// One 30 Hz think and the presentation tick after it, at `now`.
+fn think_and_show(
+    e: &mut GameEntities<2, true>,
+    records: &'static [LevelGameEntityRecord],
+    target: [i32; 3],
+    now: &mut u32,
+) -> GameEntityAnimation {
+    e.tick_delta(records, input(target), &mut Arena::default(), 2);
+    *now += 2;
+    e.update_animation(records, SimTick::from_u32(*now), |_, _| 40);
+    e.animation(records, 0)
+}
+
+#[test]
+fn a_sub_unit_circle_keeps_one_gait_on_a_continuous_clock() {
+    let records = sub_unit_enemy();
+    let mut e: GameEntities<2, true> = GameEntities::EMPTY;
+    e.spawn_from_records(&records[..]);
+    e.state[0] = GameEntityState::Aggro as u8;
+    e.state_ticks[0] = 42;
+    e.attack_cooldown[0] = 600;
+    e.combatants[0].stance.set_swap_cooldown(600);
+    e.remember_target(0, [0, 0, 100]);
+    e.begin_goal(0, EnemyGoal::CircleLeft, 240, 64);
+    let mut now = 100;
+    let first = think_and_show(&mut e, &records[..], [0, 0, 100], &mut now);
+    assert_eq!(first.clip.clip, records[0].strafe_right_clip);
+    let mut phase = first.clip.phase_ticks;
+    let (mut whole_steps, mut still_thinks) = (0, 0);
+    for _ in 0..10 {
+        let before = e.position(0);
+        let shown = think_and_show(&mut e, &records[..], [0, 0, 100], &mut now);
+        if e.position(0) == before {
+            still_thinks += 1;
+        } else {
+            whole_steps += 1;
+        }
+        // No flapping to idle on a think with no whole unit, and the stride
+        // advances by the think's two ticks every think.
+        assert_eq!(shown.clip.clip, records[0].strafe_right_clip);
+        assert_eq!(shown.clip.phase_ticks, phase + 2);
+        phase = shown.clip.phase_ticks;
+    }
+    assert!(
+        still_thinks > 0 && whole_steps > 0,
+        "{still_thinks} {whole_steps}"
+    );
+}
+
+#[test]
+fn a_ranged_windup_backing_off_keeps_its_legs_on_the_gait() {
+    let records = sub_unit_enemy();
+    let mut e: GameEntities<2, true> = GameEntities::EMPTY;
+    e.spawn_from_records(&records[..]);
+    e.state[0] = GameEntityState::Aggro as u8;
+    e.state_ticks[0] = 42;
+    settle_in(&mut e, VitalityChannelId::Two);
+    e.attack_cooldown[0] = 0;
+    let mut now = 100;
+    for _ in 0..300 {
+        think_and_show(&mut e, &records[..], [0, 0, 200], &mut now);
+        if e.state(0) == GameEntityState::Windup {
+            break;
+        }
+    }
+    assert_eq!(e.state(0), GameEntityState::Windup);
+    assert!(e.selected_attack_is_ranged(0));
+    // The target steps inside the band: the shot is wound up backing off.
+    let p = e.position(0);
+    let target = [p[0], p[1], p[2] + 40];
+    let mut legs_phase = None;
+    let (mut whole_steps, mut still_thinks) = (0, 0);
+    while e.state(0) == GameEntityState::Windup {
+        let before = e.position(0);
+        let shown = think_and_show(&mut e, &records[..], target, &mut now);
+        if e.position(0) == before {
+            still_thinks += 1;
+        } else {
+            whole_steps += 1;
+        }
+        if e.state(0) != GameEntityState::Windup {
+            break;
+        }
+        let (legs, _) = shown.legs.expect("the legs stay on the gait every think");
+        assert_eq!(legs.clip, records[0].walk_backward_clip);
+        if let Some(previous) = legs_phase {
+            assert_eq!(legs.phase_ticks, previous + 2);
+        }
+        legs_phase = Some(legs.phase_ticks);
+    }
+    assert!(
+        still_thinks > 0 && whole_steps > 0,
+        "{still_thinks} {whole_steps}"
+    );
+}
+
+#[test]
+fn a_clip_change_crossfades_and_carries_the_stride() {
+    let records = sub_unit_enemy();
+    let mut e: GameEntities<2, true> = GameEntities::EMPTY;
+    e.spawn_from_records(&records[..]);
+    e.state[0] = GameEntityState::Aggro as u8;
+    e.state_ticks[0] = 42;
+    e.attack_cooldown[0] = 600;
+    e.combatants[0].stance.set_swap_cooldown(600);
+    e.remember_target(0, [0, 0, 100]);
+    e.begin_goal(0, EnemyGoal::CircleLeft, 240, 64);
+    let mut now = 100;
+    for _ in 0..8 {
+        think_and_show(&mut e, &records[..], [0, 0, 100], &mut now);
+    }
+    let strafing = e.animation(&records[..], 0).clip;
+    assert_eq!(strafing.clip, records[0].strafe_right_clip);
+    // The motor now reports a backward walk: gait to gait, the stride keeps
+    // its place in the cycle (both clips 40 ticks here) and the strafe fades.
+    e.motor_anims[0] = CharacterMotorAnim::WalkBackward;
+    now += 2;
+    e.update_animation(&records[..], SimTick::from_u32(now), |_, _| 40);
+    let shown = e.animation(&records[..], 0);
+    assert_eq!(shown.clip.clip, records[0].walk_backward_clip);
+    assert_eq!(shown.clip.phase_ticks % 40, (strafing.phase_ticks + 2) % 40);
+    let (from, weight) = shown.fade.expect("a gait change crossfades");
+    assert_eq!(from.clip, records[0].strafe_right_clip);
+    assert_eq!(weight, 0);
+    // Stopping: the walk fades into idle over the stop window, its pose held.
+    e.motor_anims[0] = CharacterMotorAnim::Idle;
+    now += 2;
+    e.update_animation(&records[..], SimTick::from_u32(now), |_, _| 40);
+    now += 2;
+    e.update_animation(&records[..], SimTick::from_u32(now), |_, _| 40);
+    let shown = e.animation(&records[..], 0);
+    assert_eq!(shown.clip.clip, records[0].idle_clip);
+    let (from, weight) = shown.fade.expect("a stop crossfades");
+    assert_eq!(from.clip, records[0].walk_backward_clip);
+    assert_eq!(weight, 2048);
 }

@@ -331,7 +331,6 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         if self.selected_attack_is_ranged(i) {
             return;
         }
-        self.tactics[i].moved = false;
         self.tactics[i].running = false;
         if self.state_ticks[i] >= self.selected_timing(i).windup / 2
             || !self.target_in_line_of_sight(r, i, input, mover)
@@ -353,23 +352,6 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         self.request_heading(away, 4096, Some(facing), false);
         self.drive(r, i, mover, delta);
         self.tactics[i].goal = tactics::EnemyGoal::Retreat;
-        self.advance_tactical_animation(r, i, before, delta);
-    }
-    /// Locomotion clip and phase to show while a moving entity winds up or fires; `None` otherwise.
-    pub fn firing_gait(&self, r: &LevelGameEntityRecord, i: usize) -> Option<(u16, u16)> {
-        (i < self.count()
-            && (self.selected_attack_is_ranged(i) || self.state(i) == GameEntityState::Windup)
-            && matches!(
-                self.state(i),
-                GameEntityState::Windup | GameEntityState::Attack | GameEntityState::Recover
-            )
-            && self.tactics[i].moved)
-            .then(|| {
-                (
-                    self.tactical_locomotion_clip(r, i),
-                    (self.tactics[i].animation_phase_q8 >> 8) as u16,
-                )
-            })
     }
     pub(super) fn step_firing(
         &mut self,
@@ -383,7 +365,6 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
             return;
         }
         let before = self.position(i);
-        self.tactics[i].moved = false;
         self.tactics[i].running = false;
         if !self.target_in_line_of_sight(r, i, input, mover) {
             return;
@@ -416,6 +397,5 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         let facing = Angle::from_q12(self.yaw_raw(i) as u16);
         self.request_heading(yaw, strength, Some(facing), false);
         self.drive(r, i, mover, delta);
-        self.advance_tactical_animation(r, i, before, delta);
     }
 }

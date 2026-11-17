@@ -150,7 +150,7 @@ fn the_enemy_parries_a_player_bolt_early_in_its_swap() {
         BREAK_GRACE_TICKS_FOR_TEST
     );
     assert!(matches!(
-        scene.anim_state,
+        scene.anim.state,
         PlayerAnim::Stun | PlayerAnim::HitReact
     ));
     assert!(!scene.game_entities.actor().knocked_down());
@@ -173,7 +173,7 @@ fn a_parried_attacker_is_staggered_not_knocked_down_on_both_sides() {
     assert_eq!(scene.game_entities.state(0), GameEntityState::Staggered);
     assert!(scene.riposte_player(CombatantId::entity(0), &ctx(100)));
     assert!(!scene.game_entities.actor().knocked_down());
-    assert_ne!(scene.anim_state, PlayerAnim::Knockdown);
+    assert_ne!(scene.anim.state, PlayerAnim::Knockdown);
 }
 
 #[test]
@@ -219,12 +219,12 @@ fn a_parried_attacker_plays_parried_on_both_sides() {
         OptionalModelClipIndex::from_raw(7);
     scene.character = Some(aletha);
     assert!(scene.riposte_player(CombatantId::entity(0), &ctx(100)));
-    assert_eq!(scene.anim_state, PlayerAnim::Parried);
+    assert_eq!(scene.anim.state, PlayerAnim::Parried);
     assert_eq!(aletha.clip_for(PlayerAnim::Parried).to_usize(), 7);
     assert!(scene.game_entities.actor_action().lock_until > ctx(100).sim_tick);
     let mut scene = duel();
     assert!(scene.riposte_player(CombatantId::entity(0), &ctx(100)));
-    assert_ne!(scene.anim_state, PlayerAnim::Parried);
+    assert_ne!(scene.anim.state, PlayerAnim::Parried);
 }
 
 #[test]
@@ -453,7 +453,7 @@ fn a_poise_break_knocks_the_player_down_and_she_gets_up() {
         &ctx(100)
     ));
     assert!(scene.game_entities.actor().knocked_down());
-    assert_eq!(scene.anim_state, PlayerAnim::Knockdown);
+    assert_eq!(scene.anim.state, PlayerAnim::Knockdown);
     assert_eq!(
         scene.game_entities.actor_action().lock_until,
         SimTick::from_u32(100 + u32::from(down)),
@@ -471,7 +471,7 @@ fn a_poise_break_knocks_the_player_down_and_she_gets_up() {
     ));
     assert!(!scene.player_take_damage(CombatantId::entity(0), HitKind::Melee, None, 5));
     assert_eq!(scene.game_entities.actor().health(), health - 5);
-    assert_eq!(scene.anim_state, PlayerAnim::Knockdown);
+    assert_eq!(scene.anim.state, PlayerAnim::Knockdown);
     for _ in 1..down {
         scene.game_entities.actor_mut().tick(1, true, false);
     }

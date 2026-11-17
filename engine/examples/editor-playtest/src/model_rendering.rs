@@ -887,12 +887,12 @@ impl Playtest {
                 let blend = self.player_anim_blend(ctx.sim_tick);
                 let modifiers = self.vitality_modifiers();
                 let speeds = mr::PlayerActionSpeeds {
-                    action_q8: live_action_speed_q8(modifiers, character, self.anim_state),
+                    action_q8: live_action_speed_q8(modifiers, character, self.anim.state),
                     blend_q8: blend.map_or(0, |blend| {
                         live_action_speed_q8(modifiers, character, blend.anim)
                     }),
                 };
-                let clip_local = character.clip_for(self.anim_state);
+                let clip_local = character.clip_for(self.anim.state);
                 // The clip's first-frame root is constant for the clip, and
                 // sampling it was a whole pose decode per tick. Last tick's
                 // snapshot already carries it; reuse it while the same clip of
@@ -915,7 +915,7 @@ impl Playtest {
                     player.y,
                     player.z,
                     self.game_entities.actor_motor().yaw(),
-                    self.anim_state.action(),
+                    self.anim.state.action(),
                     clip_local,
                     self.game_entities.actor_action().start,
                     blend,
@@ -931,10 +931,13 @@ impl Playtest {
         // Keep Aletha's authored legs running while the cannon plays its own
         // upper-body shot. This retained pose also owns muzzle/hurtbox sampling.
         if self.ranged_ready.firing(ctx.sim_tick.as_u32())
-            && self.anim_state != PlayerAnim::RangedAttack
+            && self.anim.state != PlayerAnim::RangedAttack
         {
             if let (Some(c), Some(pose)) = (self.character, self.player_actor_pose) {
-                if pose.pose().animation().joint_count() == 26 {
+                // The upper body is read off her skeleton, as every
+                // fighter's is (fighter_anim::BodyJointMasks).
+                let upper_body = pose.model().body_masks.upper_body;
+                if upper_body != 0 {
                     if let Some(fire) = c
                         .action_clip(CharacterAnimationAction::RangedAttack)
                         .to_option()
@@ -951,7 +954,7 @@ impl Playtest {
                             c.action_frame_range(CharacterAnimationAction::RangedAttack),
                         );
                         self.player_actor_pose = Some(
-                            pose.with_pose(pose.pose().with_joint_layer(fire, phase, 0x03ffff80)),
+                            pose.with_pose(pose.pose().with_joint_layer(fire, phase, upper_body)),
                         );
                     }
                 }
@@ -991,6 +994,7 @@ impl Playtest {
         }
 
         self.player_swing_sound();
+        self.update_entity_animation(ctx);
         let mut overrides =
             psx_engine::FixedScratch::<ModelInstancePoseOverride, MAX_GAME_ENTITIES>::new();
         self.game_entity_pose_overrides(&mut overrides);
@@ -1061,30 +1065,34 @@ impl Playtest {
                 elapsed_tick,
                 ctx.video_hz,
             );
-            if let Some(pose) = self.instance_actor_poses[index] {
-                if pose.pose().animation().joint_count() == 22 {
-                    if let Some((entity, r)) = GAME_ENTITIES
-                        .iter()
-                        .enumerate()
-                        .find(|(_, r)| usize::from(r.model_instance) == index)
+            // Moving through an attack, the gait plays on the legs read off
+            // the entity's own skeleton (fighter_anim::BodyJointMasks).
+            if let (Some(pose), Some((entity, _))) = (self.instance_actor_poses[index], owner) {
+                let legs = pose.model().body_masks.legs;
+                if legs != 0 {
+                    if let Some((gait, weight)) = self
+                        .game_entities
+                        .animation(GAME_ENTITIES.as_slice(), entity)
+                        .legs
                     {
-                        if let Some((clip, ticks)) = self.game_entities.firing_gait(r, entity) {
-                            if let Some(gait) = pose
-                                .model()
-                                .clip(&self.clips, psx_level::ModelClipIndex(clip))
-                            {
-                                let phase = mr::animation_phase_at_tick_q12(
-                                    gait,
-                                    u32::from(ticks),
-                                    ctx.video_hz,
-                                    true,
-                                    256,
-                                    psx_level::CharacterActionFrameRange::FULL,
-                                );
-                                self.instance_actor_poses[index] = Some(pose.with_pose(
-                                    pose.pose().with_joint_layer(gait, phase, 0x003fc000),
-                                ));
-                            }
+                        if let Some(animation) = pose
+                            .model()
+                            .clip(&self.clips, psx_level::ModelClipIndex(gait.clip))
+                        {
+                            let phase = mr::animation_phase_at_tick_q12(
+                                animation,
+                                u32::from(gait.phase_ticks),
+                                ctx.video_hz,
+                                true,
+                                gait.speed_q8,
+                                gait.frame_range,
+                            );
+                            self.instance_actor_poses[index] = Some(
+                                pose.with_pose(
+                                    pose.pose()
+                                        .with_weighted_joint_layer(animation, phase, legs, weight),
+                                ),
+                            );
                         }
                     }
                 }

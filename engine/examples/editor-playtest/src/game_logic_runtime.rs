@@ -1327,9 +1327,9 @@ impl Playtest {
             return;
         }
         telemetry::counter(telemetry::counter::PLAYER_HITS_TAKEN, u32::from(taken.hits));
-        let action = self.anim_state.action();
+        let action = self.anim.state.action();
         let armored = matches!(
-            self.anim_state,
+            self.anim.state,
             PlayerAnim::HeavyAttack | PlayerAnim::VertHeavyAttack
         ) && player.pose.is_some_and(|pose| {
             let frame = (pose.phase_q12() >> 12).min(u32::from(u16::MAX)) as u16;
@@ -1725,7 +1725,7 @@ impl Playtest {
     #[cfg_attr(target_arch = "mips", optimize(size))]
     pub(super) fn player_swing(&self, now: SimTick) -> Option<SwingClock> {
         if !matches!(
-            self.anim_state,
+            self.anim.state,
             PlayerAnim::LightAttack
                 | PlayerAnim::HeavyAttack
                 | PlayerAnim::VertLightAttack
@@ -1734,7 +1734,7 @@ impl Playtest {
             return None;
         }
         let character = self.character.as_ref()?;
-        let action = self.anim_state.action();
+        let action = self.anim.state.action();
         let first = character.combat_capsule_first.to_usize();
         let end = first.saturating_add(usize::from(character.combat_capsule_count));
         Some(SwingClock {
@@ -1743,13 +1743,13 @@ impl Playtest {
                 .get(character.model.to_usize())
                 .copied()
                 .flatten()
-                .and_then(|model| model.clip(&self.clips, character.clip_for(self.anim_state))),
+                .and_then(|model| model.clip(&self.clips, character.clip_for(self.anim.state))),
             local_tick: now.saturating_sub(self.game_entities.actor_action().start),
             looping: character.action_loops(action),
             speed_q8: crate::playtest_runtime::live_action_speed_q8(
                 self.vitality_modifiers(),
                 character,
-                self.anim_state,
+                self.anim.state,
             ),
             frame_range: character.action_frame_range(action),
             action,
@@ -1889,7 +1889,7 @@ impl Playtest {
     }
 
     pub(super) fn player_swing_sound(&mut self) {
-        if !player_anim_is_attack(self.anim_state) {
+        if !player_anim_is_attack(self.anim.state) {
             return;
         }
         let (Some(character), Some(pose)) = (self.character.as_ref(), self.player_actor_pose)
@@ -1904,11 +1904,11 @@ impl Playtest {
             .map(|old| old.pose().phase_q12());
         if combat::melee_window_started(
             COMBAT_CAPSULES.get(first..end).unwrap_or(&[]),
-            self.anim_state.action(),
+            self.anim.state.action(),
             previous,
             pose.pose().phase_q12(),
         ) {
-            if let Some(event) = weapon_swing_sfx(self.anim_state.action()) {
+            if let Some(event) = weapon_swing_sfx(self.anim.state.action()) {
                 self.queue_gameplay_sfx(event);
             }
             self.swing_hit_mask = 0;
@@ -1967,8 +1967,8 @@ impl Playtest {
     /// starts. Outside attack locks this is two compares.
     fn resolve_player_melee(&mut self, ctx: &Ctx) {
         let now = ctx.sim_tick;
-        if self.anim_state == PlayerAnim::RangedAttack
-            || !player_anim_is_attack(self.anim_state)
+        if self.anim.state == PlayerAnim::RangedAttack
+            || !player_anim_is_attack(self.anim.state)
             || self.game_entities.actor_action().lock_until <= now
         {
             return;
@@ -1992,14 +1992,14 @@ impl Playtest {
             return;
         }
         let spec = combat::player_melee_spec(EQUIPMENT, WEAPONS, WEAPON_HITBOXES);
-        let spec = if self.anim_state == PlayerAnim::HeavyAttack {
+        let spec = if self.anim.state == PlayerAnim::HeavyAttack {
             spec.heavy()
         } else {
             spec
         };
         // The active frame comes from the exact snapshot the visible body and
         // equipped weapon consume; combat never reconstructs animation phase.
-        let action = self.anim_state.action();
+        let action = self.anim.state.action();
         let phase = player_pose.pose().phase_q12();
         let gameplay_now = self.gameplay_tick(now);
         if let Some(stats) = self.resolve_player_combat_capsules(
@@ -2032,7 +2032,7 @@ impl Playtest {
         // has no blade geometry, so a closed door inside its reach must
         // still block the connection.
         let player_eye = melee_eye_point([player.x, player.y, player.z]);
-        let vitality_channel = Self::player_attack_channel(self.anim_state);
+        let vitality_channel = Self::player_attack_channel(self.anim.state);
         self.vitality_circles.claim_struck(
             VITALITY_CIRCLES.as_slice(),
             self.room_index,
@@ -2220,7 +2220,7 @@ impl Playtest {
                         psx_game_runtime::entities::GameEntityState::Staggered
                             | psx_game_runtime::entities::GameEntityState::KnockedDown
                     ) || matches!(
-                        self.anim_state,
+                        self.anim.state,
                         PlayerAnim::HeavyAttack | PlayerAnim::VertHeavyAttack
                     ),
                 ),
@@ -2438,7 +2438,7 @@ impl Playtest {
             let (damage, poise_damage) = self.game_entities.actor().crit_scaled(
                 &self.player_stats,
                 self.vitality_modifiers()
-                    .outgoing_damage(Self::player_attack_channel(self.anim_state), record.damage),
+                    .outgoing_damage(Self::player_attack_channel(self.anim.state), record.damage),
                 record.poise_damage,
             );
             active[active_count] = ActivePlayerCapsule {
@@ -2456,7 +2456,7 @@ impl Playtest {
             return Some(MeleeArcStats::default());
         }
 
-        let vitality_channel = Self::player_attack_channel(self.anim_state);
+        let vitality_channel = Self::player_attack_channel(self.anim.state);
         let player = self.game_entities.actor_motor().position();
         self.vitality_circles.claim_struck(
             VITALITY_CIRCLES.as_slice(),
@@ -2568,7 +2568,7 @@ impl Playtest {
                 }
                 if outcome.connected {
                     if matches!(
-                        self.anim_state,
+                        self.anim.state,
                         PlayerAnim::HeavyAttack | PlayerAnim::VertHeavyAttack
                     ) {
                         let p = self.game_entities.actor_motor().position();
@@ -2599,7 +2599,7 @@ impl Playtest {
                             crit,
                             outcome.staggered
                                 || matches!(
-                                    self.anim_state,
+                                    self.anim.state,
                                     PlayerAnim::HeavyAttack | PlayerAnim::VertHeavyAttack
                                 ),
                         ),
@@ -2664,7 +2664,7 @@ impl Playtest {
     pub(super) fn report_player_melee_stats(&mut self, stats: MeleeArcStats) {
         if stats.hits > 0 {
             let heavy = matches!(
-                self.anim_state,
+                self.anim.state,
                 PlayerAnim::HeavyAttack | PlayerAnim::VertHeavyAttack
             );
             for _ in 0..stats.hits {
@@ -2675,7 +2675,7 @@ impl Playtest {
             }
             telemetry::counter(telemetry::counter::PLAYER_MELEE_HITS, u32::from(stats.hits));
             let event = if matches!(
-                self.anim_state,
+                self.anim.state,
                 PlayerAnim::HeavyAttack | PlayerAnim::VertHeavyAttack
             ) {
                 LevelGameplaySfxEvent::HeavyHit
@@ -2724,17 +2724,16 @@ impl Playtest {
             // before presentation freezes. The deferred token retains the
             // exact attack clip/phase that contact evaluates, so body and
             // equipment visibly sample that same pose this tick.
+            let animation = self
+                .game_entities
+                .animation(GAME_ENTITIES.as_slice(), index);
             let clip = self
                 .deferred_enemy_attacks
                 .as_slice()
                 .iter()
                 .copied()
                 .find(|attack| attack.entity() == index)
-                .map(|attack| attack.clip())
-                .unwrap_or_else(|| {
-                    self.game_entities
-                        .clip_for_state(GAME_ENTITIES.as_slice(), index)
-                });
+                .map_or(animation.clip, |attack| attack.clip());
             out.try_push(ModelInstancePoseOverride {
                 instance: record.model_instance,
                 x: position[0],
@@ -2746,8 +2745,43 @@ impl Playtest {
                 one_shot: clip.one_shot,
                 speed_q8: clip.speed_q8,
                 frame_range: clip.frame_range,
+                layer: animation
+                    .fade
+                    .map(|(clip, alpha_q12)| mr::ModelInstancePoseLayer {
+                        clip,
+                        alpha_q12,
+                        joint_mask: u32::MAX,
+                    }),
             });
         }
+    }
+
+    /// Advance every entity's animation to this tick, before its pose is
+    /// resolved: the same tracks, clocks and crossfades as hers
+    /// ([`psx_game_runtime::fighter_anim`]).
+    pub(super) fn update_entity_animation(&mut self, ctx: &Ctx) {
+        let models = &self.models;
+        let clips = &self.clips;
+        let video_hz = ctx.video_hz;
+        self.game_entities.update_animation(
+            GAME_ENTITIES.as_slice(),
+            ctx.sim_tick,
+            |index, clip| {
+                GAME_ENTITIES
+                    .get(index)
+                    .and_then(|record| MODEL_INSTANCES.get(usize::from(record.model_instance)))
+                    .and_then(|instance| models.get(instance.model.to_usize()).copied().flatten())
+                    .and_then(|model| model.clip(clips, ModelClipIndex(clip.clip)))
+                    .map_or(0, |animation| {
+                        mr::clip_duration_ticks(
+                            animation,
+                            video_hz,
+                            clip.speed_q8,
+                            clip.frame_range,
+                        )
+                    })
+            },
+        );
     }
 
     /// Drain the logic fire marks into example-side effects: doors

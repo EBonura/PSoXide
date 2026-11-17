@@ -113,21 +113,6 @@ pub(crate) fn local_move_axes(ctx: &Ctx, deadzone: i16) -> InputVector {
     InputVector::from_centered(strafe, forward)
 }
 
-pub(crate) fn player_anim_from_motor(anim: CharacterMotorAnim) -> PlayerAnim {
-    match anim {
-        CharacterMotorAnim::Idle => PlayerAnim::Idle,
-        CharacterMotorAnim::Walk => PlayerAnim::Walk,
-        CharacterMotorAnim::WalkBackward => PlayerAnim::WalkBackward,
-        CharacterMotorAnim::StrafeLeft => PlayerAnim::StrafeLeft,
-        CharacterMotorAnim::StrafeRight => PlayerAnim::StrafeRight,
-        CharacterMotorAnim::Run => PlayerAnim::Run,
-        CharacterMotorAnim::Roll => PlayerAnim::Roll,
-        CharacterMotorAnim::Quickstep => PlayerAnim::Quickstep,
-        CharacterMotorAnim::DashLeft => PlayerAnim::DashLeft,
-        CharacterMotorAnim::DashRight => PlayerAnim::DashRight,
-    }
-}
-
 pub(crate) fn camera_input(
     ctx: &Ctx,
     orbit_speed_level: u8,
