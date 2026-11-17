@@ -1893,6 +1893,10 @@ impl Playtest {
         self.player_defender(ctx).invulnerable()
     }
 
+    /// The player's motor configuration: her character's, under the game's
+    /// fighter rules, her boosts and abilities.
+    // Read from a dozen places a tick; one copy on the PS1.
+    #[inline(never)]
     pub(super) fn motor_config(&self) -> CharacterMotorConfig {
         let mut config = match &self.character {
             Some(c) => c.motor_config(),
