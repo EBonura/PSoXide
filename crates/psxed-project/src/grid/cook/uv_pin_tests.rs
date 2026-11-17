@@ -11,7 +11,9 @@ const PROJECTS: [(&str, u64); 11] = [
     ("grid-cathedral", 0x05782fa4b4d023d2),
     ("grid-cave", 0x87f3191835359ed8),
     ("grid-corridor", 0xae7c3988a32b6bd1),
-    ("grid-dungeon", 0x528cd2149c345931),
+    // Re-pinned 11-17: Room 0 floor took a real texture (it was the
+    // importer's no-texture checker); a content change, not the density.
+    ("grid-dungeon", 0xb3d7a2a379a2a873),
     ("grid-gate", 0x13c9cb5b1f376f8b),
     ("grid-level008", 0x8f0c984a0d16a75a),
     ("grid-sewers", 0xde6d0bffc419b732),
