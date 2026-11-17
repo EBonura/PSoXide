@@ -74,6 +74,10 @@ pub enum CombatTeam {
     Player = 1,
     /// Enemy and enemy-owned attacks.
     Enemy = 2,
+    /// The other side of a fight between entities: an entity set against
+    /// another (`GameEntities::set_rival`) fights from here, so each
+    /// side's bolts hit the other and the player.
+    Rival = 3,
 }
 
 /// Which half of the player's dual vitality receives projectile damage.

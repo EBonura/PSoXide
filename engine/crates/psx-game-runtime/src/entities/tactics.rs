@@ -1045,7 +1045,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         if visible
             && goal != EnemyGoal::BreakAway
             && (!melee || melee_height_reachable)
-            && self.attack_owner() == Some(i)
+            && self.holds_attack(i)
             && self.tactical_attack_ready(r, i)
             && (melee || self.can_fire_energy(r, i))
             && self.target_within(

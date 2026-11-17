@@ -1,7 +1,7 @@
 //! Opt-in training duel. Synthetic pad input passes through the ordinary player controller.
 use super::*;
 use psx_engine::{AnalogSticks, PadMode, PadState};
-use psx_game_runtime::{combat_policy, entities::GameEntityState};
+use psx_game_runtime::{combat_policy, entities::GameEntityState, projectiles::CombatTeam};
 
 // All-zero storage is inactive, matching Playtest's zeroed initialization.
 /// Columns of one `duel:sample` row: tick, player x/z, enemy x/z, player
@@ -26,6 +26,9 @@ pub(super) struct Duel {
     pub active: bool,
     pub finished: bool,
     target: usize,
+    /// The second training entity when the duel sets two entities against
+    /// each other (`target` is the first); None in a duel with the player.
+    rival: Option<u8>,
     started: u32,
     releasing_start: bool,
     last_seen: [i32; 3],
@@ -168,11 +171,15 @@ impl Playtest {
                 last_progress: 0,
                 visible: false,
                 ticks_to_hit: u16::MAX,
+                rival: None,
             };
             self.duel_plan_dodge();
             // The third value is the sample format: 1 is one health value
             // per fighter (before it, two pools each and no third value).
             log_values("duel:start", &[seed, target as u32, 1]);
+            if ctx.pad.sticks.right_y == 0 {
+                self.duel_start_rivals(target, seed);
+            }
         } else if self.duel.active
             && !self.duel.releasing_start
             && ctx.pad.buttons.bits() != 0
@@ -188,6 +195,10 @@ impl Playtest {
         }
         if self.duel.releasing_start && !ctx.is_held(button::SELECT | button::L2) {
             self.duel.releasing_start = false;
+        }
+        if self.duel.rival.is_some() {
+            // Two entities fight; the player is left on her own pad.
+            return;
         }
         self.duel.exchange.tick(1);
         let mut buttons = 0;
@@ -744,7 +755,110 @@ impl Playtest {
         }
     }
 
+    /// Set the duel's training entity against the next training entity (a
+    /// right stick held up at the start): each the other's rival, on
+    /// opposite sides, the player out of it.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
+    fn duel_start_rivals(&mut self, first: usize, seed: u32) {
+        let Some(second) = GAME_ENTITIES
+            .iter()
+            .enumerate()
+            .skip(first + 1)
+            .find(|(_, r)| r.flags & psx_level::game_entity_flags::TRAINING != 0)
+            .map(|(index, _)| index)
+        else {
+            log_values("duel:unavailable", &[2]);
+            return;
+        };
+        self.game_entities.seed_training_actor(
+            GAME_ENTITIES.as_slice(),
+            second,
+            seed.rotate_left(16) ^ 0x9e3779b9,
+        );
+        self.game_entities
+            .set_rival(first, Some(second), CombatTeam::Enemy);
+        self.game_entities
+            .set_rival(second, Some(first), CombatTeam::Rival);
+        self.duel.rival = Some(second as u8);
+        log_values("duel:rivals", &[first as u32, second as u32]);
+    }
+
+    /// A duel event of the entity in `slot`: actor 0 is the duel's training
+    /// entity, 1 its rival.
+    pub(super) fn duel_log_rival_event(&self, ctx: &Ctx, slot: usize, kind: u32) {
+        self.duel_log_event(ctx, u32::from(slot != self.duel.target), kind);
+    }
+
+    /// One sample of a fight between two entities: tick, both positions
+    /// (x/z), health, stance, state, energy; then knockdowns and the end.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
+    fn duel_observe_rivals(&mut self, ctx: &Ctx, second: usize) {
+        let first = self.duel.target;
+        let tick = ctx.sim_tick.as_u32() - self.duel.started;
+        let a = self.game_entities.position(first);
+        let b = self.game_entities.position(second);
+        let mut snap = [0u32; SAMPLE_COLUMNS];
+        let row = [
+            tick,
+            a[0] as u32,
+            a[2] as u32,
+            b[0] as u32,
+            b[2] as u32,
+            u32::from(self.game_entities.health(first)),
+            u32::from(self.game_entities.health(second)),
+            self.game_entities.stance(first).index() as u32,
+            self.game_entities.stance(second).index() as u32,
+            self.game_entities.state(first) as u32,
+            self.game_entities.state(second) as u32,
+            u32::from(self.game_entities.energy(first)),
+            u32::from(self.game_entities.energy(second)),
+        ];
+        snap[..row.len()].copy_from_slice(&row);
+        let old = self.duel.last_snapshot;
+        let damage = (5..7).any(|n| snap[n] < old[n]);
+        if damage {
+            self.duel.last_progress = tick;
+        }
+        for actor in 0..2 {
+            if snap[9 + actor] == GameEntityState::KnockedDown as u32
+                && old[9 + actor] != snap[9 + actor]
+            {
+                self.duel_log_event(ctx, actor as u32, DUEL_EVENT_KNOCKDOWN);
+            }
+        }
+        if tick == 0 || tick % 60 == 0 || damage || snap[7..11] != old[7..11] {
+            log_values("duel:rival-sample", &row);
+        }
+        self.duel.last_snapshot = snap;
+        let first_dead = self.game_entities.state(first) == GameEntityState::Dead;
+        let second_dead = self.game_entities.state(second) == GameEntityState::Dead;
+        if first_dead || second_dead {
+            self.duel_end(
+                if first_dead && second_dead {
+                    3
+                } else if second_dead {
+                    1
+                } else {
+                    2
+                },
+                ctx,
+            );
+        } else if tick >= 10800 {
+            self.duel_end(5, ctx);
+        } else if tick.saturating_sub(self.duel.last_progress) >= 1800 {
+            self.duel_end(6, ctx);
+        }
+    }
+
     fn duel_end(&mut self, result: u32, ctx: &Ctx) {
+        if let Some(second) = self.duel.rival {
+            let first = self.duel.target;
+            self.game_entities.set_rival(first, None, CombatTeam::Enemy);
+            self.game_entities
+                .set_rival(usize::from(second), None, CombatTeam::Enemy);
+        }
         if !self.duel.finished {
             self.duel.finished = true;
             self.duel.outcome = result as u8;
@@ -760,6 +874,10 @@ impl Playtest {
     #[cfg_attr(target_arch = "mips", optimize(size))]
     pub(super) fn duel_observe(&mut self, ctx: &Ctx) {
         if !self.duel.active || self.duel.finished {
+            return;
+        }
+        if let Some(second) = self.duel.rival {
+            self.duel_observe_rivals(ctx, usize::from(second));
             return;
         }
         let i = self.duel.target;

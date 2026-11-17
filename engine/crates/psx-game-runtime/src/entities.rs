@@ -180,6 +180,10 @@ pub const GAME_ENTITY_ATTACK_HALF_ANGLE: u16 = 683;
 /// Legacy interruption duration for records without authored stun timing.
 pub const GAME_ENTITY_STAGGER_TICKS: u16 = 32;
 
+/// [`GameEntities::rival`] of an entity that engages the owner's target
+/// (the tick input's, the player) rather than another slot.
+pub const NO_RIVAL: u8 = u8::MAX;
+
 /// De-aggro leash: the player escaping `aggro_radius` times this
 /// factor drops the entity back to its idle/patrol loop.
 pub const GAME_ENTITY_LEASH_FACTOR: i32 = 2;
@@ -724,6 +728,11 @@ pub struct GameEntities<
     /// Stable spawn id of the record in each slot, [`psx_level::StableId::NONE`]
     /// (zero) for a slot spawned without one.
     spawn_ids: [u32; MAX_ENTITIES],
+    /// The slot each entity fights, [`NO_RIVAL`] when it engages the
+    /// owner's target (the player) from the tick input.
+    rivals: [u8; MAX_ENTITIES],
+    /// The side each entity's bolts and body are on.
+    teams: [crate::projectiles::CombatTeam; MAX_ENTITIES],
     /// Owner-supplied per-record activation (area residency).
     // psx-numeric-allow-next-line: fixed 64-record activation mask; bit ops only, two-word on R3000
     spatial_active_mask: u64,
@@ -930,6 +939,8 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         director_delay_ticks: 0,
         attack_tick_generation: 0,
         spawn_ids: [0; MAX_ENTITIES],
+        rivals: [NO_RIVAL; MAX_ENTITIES],
+        teams: [crate::projectiles::CombatTeam::Enemy; MAX_ENTITIES],
         spatial_active_mask: 0,
     };
 
@@ -1199,8 +1210,19 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             return None;
         }
         let record = records.get(index)?;
-        Some(Defender {
-            combatant: self.combatants.get(index)?,
+        Some(self.defender_with(record, index, self.combatants.get(index)?))
+    }
+
+    /// Entity `index` as a defender, over `combatant` (its own fighter or a
+    /// copy of it).
+    fn defender_with<'a>(
+        &self,
+        record: &LevelGameEntityRecord,
+        index: usize,
+        combatant: &'a Combatant,
+    ) -> Defender<'a> {
+        Defender {
+            combatant,
             swap_invulnerable_ticks: record.motion.roll_invulnerable_frames,
             parry_ticks: record.combat.parry_ticks,
             // The roll's i-frames, read from the motor exactly as the
@@ -1209,7 +1231,91 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
                 authored: None,
                 dodge: self.motors[index].is_action_invulnerable(self.motor_config(record)),
             },
-        })
+        }
+    }
+
+    /// The rival of entity `index` while it is a live slot of this tick.
+    fn live_rival(&self, index: usize, count: usize) -> Option<usize> {
+        let rival = usize::from(self.rivals[index]);
+        (self.rivals[index] != NO_RIVAL && rival < count).then_some(rival)
+    }
+
+    /// Entity `rival` as the target another entity engages: what the owner
+    /// supplies for the player, read off the rival's own slot. Its attack
+    /// phase and swing timing come from its state clock (the record's
+    /// windup), where the owner reads the player's off her pose.
+    // Only fights between entities build one; keep it out of the hot tick.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
+    fn rival_target<'f>(
+        &self,
+        record: &LevelGameEntityRecord,
+        rival: usize,
+        fighter: &'f Combatant,
+    ) -> CombatTarget<'f> {
+        let state = self.state(rival);
+        CombatTarget {
+            position: self.position(rival),
+            radius: i32::from(record.radius),
+            height: i32::from(record.height),
+            noise_radius: 0,
+            defender: self.defender_with(record, rival, fighter),
+            stance: Some(fighter.stance.active()),
+            attack_read: match state {
+                GameEntityState::Windup => 1,
+                GameEntityState::Attack => 2,
+                GameEntityState::Recover => 3,
+                _ => 0,
+            },
+            swing_ticks: match state {
+                GameEntityState::Windup => {
+                    Some(u16::from(record.windup_ticks).saturating_sub(self.state_ticks[rival]))
+                }
+                GameEntityState::Attack => Some(0),
+                _ => None,
+            },
+        }
+    }
+
+    /// Set entity `index` to fight the entity in slot `rival`, on side
+    /// `team` (its bolts hit the other sides, and theirs hit it), or with
+    /// `None` to engage the owner's target again. A spawn clears every
+    /// rival and puts every entity on [`crate::projectiles::CombatTeam::Enemy`].
+    /// False when a slot is out of range.
+    pub fn set_rival(
+        &mut self,
+        index: usize,
+        rival: Option<usize>,
+        team: crate::projectiles::CombatTeam,
+    ) -> bool {
+        let raw = match rival {
+            Some(slot) if slot < MAX_ENTITIES && slot < usize::from(NO_RIVAL) && slot != index => {
+                slot as u8
+            }
+            Some(_) => return false,
+            None => NO_RIVAL,
+        };
+        if index >= MAX_ENTITIES {
+            return false;
+        }
+        self.rivals[index] = raw;
+        self.teams[index] = team;
+        true
+    }
+
+    /// The slot entity `index` fights, None when it engages the owner's
+    /// target ([`Self::set_rival`]).
+    pub fn rival(&self, index: usize) -> Option<usize> {
+        let raw = *self.rivals.get(index)?;
+        (raw != NO_RIVAL).then_some(usize::from(raw))
+    }
+
+    /// The side entity `index` is on ([`Self::set_rival`]).
+    pub fn team(&self, index: usize) -> crate::projectiles::CombatTeam {
+        self.teams
+            .get(index)
+            .copied()
+            .unwrap_or(crate::projectiles::CombatTeam::Enemy)
     }
 
     /// The last slot: the fighter a controller outside the table drives (the
@@ -1901,7 +2007,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     fn tick_delta_impl<const MAX_ATTACKS: usize>(
         &mut self,
         records: &'static [LevelGameEntityRecord],
-        input: GameEntityTickInput<'_>,
+        shared: GameEntityTickInput<'_>,
         mover: &mut impl FighterWorld,
         delta_ticks: u16,
         mut deferred: Option<&mut DeferredGameEntityAttacks<MAX_ATTACKS>>,
@@ -1910,11 +2016,23 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         self.attack_tick_generation = self.attack_tick_generation.wrapping_add(1);
         let mut stats = GameEntityTickStats::default();
         let count = self.count().min(records.len());
-        self.update_combat_director(records, input, delta_ticks, &mut stats);
+        self.update_combat_director(records, shared, delta_ticks, &mut stats);
         self.speed_scale = mover.speed_scale();
         let mut index = 0usize;
         while index < count {
             let record = &records[index];
+            // An entity with a rival engages that slot as it stands before
+            // this entity thinks; the rest engage the owner's target.
+            let rival_fighter;
+            let input = match self.live_rival(index, count) {
+                Some(rival) => {
+                    rival_fighter = self.combatants[rival];
+                    GameEntityTickInput {
+                        target: self.rival_target(&records[rival], rival, &rival_fighter),
+                    }
+                }
+                None => shared,
+            };
             let state = GameEntityState::from_raw(self.state[index]);
             self.motion = NO_MOTION;
             self.probing = None;
@@ -2240,6 +2358,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             let record = &records[index];
             let state = self.state(index);
             let ready = state == GameEntityState::Aggro
+                && self.rivals[index] == NO_RIVAL
                 // A dry cannon must not monopolize the shared attack slot
                 // while another enemy has a legal attack available.
                 && (!STANCE_BOUND_ATTACKS
@@ -2288,6 +2407,9 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
     /// it, without the director's wait: a riposte is a reflex. True when
     /// `index` holds the slot.
     fn claim_attack_owner(&mut self, index: usize) -> bool {
+        if self.rivals[index] != NO_RIVAL {
+            return true;
+        }
         match self.attack_owner() {
             Some(owner) => owner == index,
             None => {
@@ -2297,6 +2419,13 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
                 true
             }
         }
+    }
+
+    /// Whether entity `index` may start an attack: a fighter with a rival
+    /// always holds its own slot (it is the only one fighting that rival);
+    /// the others take turns with the shared slot the director grants.
+    fn holds_attack(&self, index: usize) -> bool {
+        self.rivals[index] != NO_RIVAL || self.attack_owner() == Some(index)
     }
 
     fn release_attack_owner(&mut self, index: usize, delay_ticks: u16) {
@@ -2384,7 +2513,10 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
         input: GameEntityTickInput<'_>,
         stats: &mut GameEntityTickStats,
     ) {
+        // Contact on a rival resolves only through the deferred tokens,
+        // on both fighters' poses (the owner's resolver).
         if self.selected_attack_is_ranged(index)
+            || self.rivals[index] != NO_RIVAL
             || self.combat_flags[index] & GAME_ENTITY_ATTACK_CONNECTED != 0
             || input.target.defender.invulnerable()
         {
@@ -2651,7 +2783,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool, const TACTICAL
             wants_melee
         };
 
-        if self.attack_owner() == Some(index) {
+        if self.holds_attack(index) {
             self.set_intent(index, GameEntityIntent::Approach);
             let commit_reach = if melee_chase {
                 Self::melee_attack_reach(record, input)
@@ -3700,6 +3832,58 @@ mod tests {
         let stats = entities.tick(&[], far_input(), &mut OpenWorld);
         assert_eq!(entities.count(), 0);
         assert_eq!(stats, GameEntityTickStats::default());
+    }
+
+    #[test]
+    fn an_entity_with_a_rival_engages_it_instead_of_the_owners_target() {
+        static PAIR: [LevelGameEntityRecord; 2] = [
+            test_record(
+                1000,
+                1000,
+                0,
+                512,
+                game_entity_flags::ENABLED | game_entity_flags::CAN_RUN,
+            ),
+            test_record(
+                1400,
+                1000,
+                0,
+                512,
+                game_entity_flags::ENABLED | game_entity_flags::CAN_RUN,
+            ),
+        ];
+        let gap = |e: &GameEntities<2>| (e.position(1)[0] - e.position(0)[0]).abs();
+        let mut alone = GameEntities::<2>::EMPTY;
+        alone.spawn_from_records(&PAIR);
+        alone.set_spatial_active_mask(u64::MAX);
+        let mut rivals = GameEntities::<2>::EMPTY;
+        rivals.spawn_from_records(&PAIR);
+        rivals.set_spatial_active_mask(u64::MAX);
+        assert!(!rivals.set_rival(0, Some(0), crate::projectiles::CombatTeam::Enemy));
+        assert!(rivals.set_rival(0, Some(1), crate::projectiles::CombatTeam::Enemy));
+        assert!(rivals.set_rival(1, Some(0), crate::projectiles::CombatTeam::Rival));
+        assert_eq!(rivals.rival(1), Some(0));
+        assert_eq!(rivals.team(1), crate::projectiles::CombatTeam::Rival);
+        let mut engaged = false;
+        for _ in 0..240 {
+            alone.tick(&PAIR, far_input(), &mut OpenWorld);
+            rivals.tick(&PAIR, far_input(), &mut OpenWorld);
+            engaged |= matches!(
+                rivals.state(0),
+                GameEntityState::Windup | GameEntityState::Attack
+            );
+        }
+        // The player is far away: alone, neither notices anything.
+        assert_eq!(alone.state(0), GameEntityState::Idle);
+        assert_eq!(alone.state(1), GameEntityState::Idle);
+        assert_eq!(gap(&alone), 400);
+        // Set against each other they close in and swing at each other.
+        assert!(gap(&rivals) < 400, "gap {}", gap(&rivals));
+        assert!(engaged);
+        // A spawn puts everyone back on the owner's target and side.
+        rivals.spawn_from_records(&PAIR);
+        assert_eq!(rivals.rival(0), None);
+        assert_eq!(rivals.team(1), crate::projectiles::CombatTeam::Enemy);
     }
 
     #[test]

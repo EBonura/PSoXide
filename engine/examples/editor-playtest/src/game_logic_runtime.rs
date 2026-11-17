@@ -694,6 +694,18 @@ impl Playtest {
                 self.release_enemy_projectiles(ctx, attack, attacker_capsules, attacker_pose);
                 continue;
             }
+            if let Some(rival) = self.game_entities.rival(attack.entity()) {
+                self.resolve_rival_melee(
+                    ctx,
+                    attack,
+                    rival,
+                    attacker_capsules,
+                    attacker_snapshot,
+                    prop_blockers,
+                    prop_blockers_valid,
+                );
+                continue;
+            }
             if player.passes_through {
                 continue;
             }
@@ -794,6 +806,162 @@ impl Playtest {
                 taken.crit |= crit;
             }
         }
+    }
+
+    /// One entity's melee token against its rival: the same contact the
+    /// player's defence gets above (authored capsules on both poses, the
+    /// legacy arc only when a side has none, world occlusion, the window
+    /// mask), landed through the rival's own hit path. A parry there
+    /// staggers the attacker.
+    // Only fights between entities reach it: out of line and small.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_rival_melee(
+        &mut self,
+        ctx: &Ctx,
+        attack: DeferredGameEntityAttack,
+        rival: usize,
+        attacker_capsules: &'static [psx_level::CombatCapsuleRecord],
+        attacker_snapshot: Option<InstanceActorPoseSnapshot>,
+        prop_blockers: &[CharacterCollisionAabb],
+        prop_blockers_valid: bool,
+    ) {
+        let entity = attack.entity();
+        let (Some(record), Some(rival_record)) =
+            (GAME_ENTITIES.get(entity), GAME_ENTITIES.get(rival))
+        else {
+            return;
+        };
+        if rival >= self.game_entities.count()
+            || self.game_entities.state(rival) == GameEntityState::Dead
+            || self
+                .game_entities
+                .passes_through(GAME_ENTITIES.as_slice(), rival)
+        {
+            return;
+        }
+        let first = rival_record.combat_capsule_first.to_usize();
+        let end = first.saturating_add(usize::from(rival_record.combat_capsule_count));
+        let rival_capsules = COMBAT_CAPSULES.get(first..end).unwrap_or(&[]);
+        let rival_pose = self
+            .instance_actor_poses
+            .get(usize::from(rival_record.model_instance))
+            .copied()
+            .flatten()
+            .map(|snapshot| snapshot.pose());
+        let previous_attacker_pose = self
+            .previous_instance_actor_poses
+            .get(usize::from(record.model_instance))
+            .copied()
+            .flatten()
+            .filter(|old| {
+                attacker_snapshot.is_some_and(|current| old.clip_local() == current.clip_local())
+            })
+            .map(|snapshot| snapshot.pose());
+        let (contact, window_mask) = combat::resolve_authored_actor_contact_swept_pending(
+            attacker_capsules,
+            attack.action(),
+            attacker_snapshot.map(|snapshot| snapshot.pose()),
+            previous_attacker_pose,
+            rival_capsules,
+            rival_pose,
+            self.game_entities
+                .deferred_melee_hit_mask(attack)
+                .unwrap_or(u16::MAX),
+        );
+        let position = self.game_entities.position(rival);
+        let damage = match contact {
+            combat::AuthoredActorContact::Hit {
+                damage,
+                poise_damage,
+            } => Some((damage, poise_damage)),
+            combat::AuthoredActorContact::Miss => None,
+            combat::AuthoredActorContact::FallbackRequired => self
+                .game_entities
+                .deferred_attack_legacy_arc_hits(
+                    GAME_ENTITIES.as_slice(),
+                    attack,
+                    position,
+                    i32::from(rival_record.radius),
+                )
+                .then_some((record.touch_damage, record.touch_damage.max(20))),
+        };
+        let Some((damage, poise_damage)) = damage else {
+            return;
+        };
+        if !prop_blockers_valid
+            || !self.melee_line_clear(attack.position(), position, prop_blockers)
+        {
+            return;
+        }
+        let (damage, poise_damage) =
+            self.game_entities
+                .crit_scaled(GAME_ENTITIES.as_slice(), entity, damage, poise_damage);
+        let connected = if window_mask == 0 {
+            self.game_entities.connect_deferred_attack(attack)
+        } else {
+            self.game_entities
+                .connect_deferred_melee_window(attack, window_mask)
+        };
+        if !connected {
+            return;
+        }
+        let crit = self.game_entities.spend_crit(entity);
+        let outcome = self.game_entities.receive_hit(
+            GAME_ENTITIES.as_slice(),
+            rival,
+            Strike {
+                attacker: CombatantId::entity(entity),
+                kind: HitKind::Melee,
+                channel: self.game_entities.stance(entity),
+                damage,
+                poise: poise_damage,
+                crit,
+            },
+        );
+        self.show_rival_outcome(ctx, entity, rival, outcome, crit);
+        if outcome.connected {
+            self.game_entities.gain_melee_energy(
+                record,
+                entity,
+                self.game_entities.attack_kind(entity) == 1,
+            );
+        }
+    }
+
+    /// What a hit between rivals shows: the parrier's flash or the struck
+    /// fighter's, and the duel's event lines.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
+    fn show_rival_outcome(
+        &mut self,
+        ctx: &Ctx,
+        attacker: usize,
+        victim: usize,
+        outcome: psx_game_runtime::entities::GameEntityHitOutcome,
+        crit: bool,
+    ) {
+        if crit {
+            self.duel_log_rival_event(ctx, attacker, duel::DUEL_EVENT_CRIT);
+        }
+        if outcome.parried {
+            self.duel_log_rival_event(ctx, victim, duel::DUEL_EVENT_PARRY);
+            let zenith = self.game_entities.stance(victim) == VitalityChannelId::Two;
+            self.game_entities
+                .start_flash(victim, &COMBAT_FEEDBACK, FlashKind::Parry, zenith);
+            return;
+        }
+        if !outcome.connected {
+            return;
+        }
+        let zenith = self.game_entities.stance(attacker) == VitalityChannelId::Two;
+        self.game_entities.start_flash(
+            victim,
+            &COMBAT_FEEDBACK,
+            FlashKind::of_hit(crit, outcome.staggered),
+            zenith,
+        );
     }
 
     /// Advance every live projectile against the player's hurtboxes (unless
@@ -901,7 +1069,7 @@ impl Playtest {
             };
             let _ = projectile_targets.try_push(ProjectileTarget {
                 target: index as u16,
-                team: CombatTeam::Enemy,
+                team: self.game_entities.team(index),
                 room: record.room,
                 hurtbox,
             });
@@ -978,10 +1146,36 @@ impl Playtest {
                         taken.zenith_shots = taken.zenith_shots.saturating_add(impact.damage);
                     }
                 }
+            } else if impact.owner != NO_PROJECTILE_OWNER {
+                self.land_rival_shot(ctx, usize::from(target), impact);
             } else {
                 self.land_shot_on_entity(ctx, usize::from(target), impact);
             }
         }
+    }
+
+    /// An entity's bolt on another entity (its rival's side), through the
+    /// struck entity's hit path; a parry there staggers the shooter.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
+    fn land_rival_shot(
+        &mut self,
+        ctx: &Ctx,
+        index: usize,
+        impact: &psx_game_runtime::projectiles::ProjectileImpact,
+    ) {
+        let shooter = usize::from(impact.owner);
+        let crit = impact.visual.impact_rgb == CRIT_BOLT_RGB;
+        let outcome = self.game_entities.apply_projectile_hit_by(
+            GAME_ENTITIES.as_slice(),
+            index,
+            CombatantId::entity(shooter),
+            projectile_vitality_channel(impact.damage_channel),
+            impact.damage,
+            impact.poise_damage,
+            crit,
+        );
+        self.show_rival_outcome(ctx, shooter, index, outcome, crit);
     }
 
     /// One player bolt on entity `index`, through the entity's hit path.
@@ -1269,7 +1463,7 @@ impl Playtest {
                     .unwrap_or(u16::MAX),
                 target,
                 room: attack.room(),
-                team: CombatTeam::Enemy,
+                team: self.game_entities.team(entity),
                 owner: entity.min(u16::MAX as usize) as u16,
                 channel: None,
                 modifiers: VitalityModifiers::IDENTITY,

@@ -14,7 +14,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
     ) {
         for (i, r) in records.iter().enumerate().take(self.count()) {
             self.projectile_threats[i] = projectiles.incoming_threat(
-                crate::projectiles::CombatTeam::Enemy,
+                self.teams[i],
                 r.room,
                 self.position(i),
                 i32::from(r.radius),
@@ -229,6 +229,30 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         poise: u16,
         crit: bool,
     ) -> GameEntityHitOutcome {
+        self.apply_projectile_hit_by(
+            records,
+            index,
+            CombatantId::PLAYER,
+            channel,
+            damage,
+            poise,
+            crit,
+        )
+    }
+
+    /// [`Self::apply_projectile_hit`] for a bolt `by` any fighter: an
+    /// entity's bolt on its rival, whose parry staggers that shooter.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_projectile_hit_by(
+        &mut self,
+        records: &'static [LevelGameEntityRecord],
+        index: usize,
+        by: CombatantId,
+        channel: VitalityChannelId,
+        damage: u16,
+        poise: u16,
+        crit: bool,
+    ) -> GameEntityHitOutcome {
         if index >= self.count() || index >= records.len() {
             return GameEntityHitOutcome::MISS;
         }
@@ -237,7 +261,10 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
             records[index].combat.poise,
             self.shot_opening(records, index),
         );
-        let strike = super::player_strike(HitKind::Projectile, channel, damage, poise, crit);
+        let strike = Strike {
+            attacker: by,
+            ..super::player_strike(HitKind::Projectile, channel, damage, poise, crit)
+        };
         self.receive_hit(records, index, strike)
     }
     /// A heavy connection creates separation through the same body collision as AI walking.
