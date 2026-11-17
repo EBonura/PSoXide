@@ -124,7 +124,7 @@ impl Cd {
         irq_flag()
     }
 
-    /// Acknowledge the given CD-ROM IRQ bits.
+    /// Acknowledge CD-ROM IRQ `bits`: any nonzero value clears the whole code (`bits | 0x07`).
     pub fn acknowledge_irq(&mut self, bits: u8) {
         ack_irq(bits);
     }
@@ -423,8 +423,8 @@ impl Cd {
 /// leaves register index 0 selected, so the byte steps that follow need not
 /// select it again.
 impl Cd {
-    /// Acknowledge every controller IRQ (writing `0x5F`, which also resets
-    /// the parameter FIFO) and the CD-ROM bit of `I_STAT`.
+    /// Acknowledge every controller IRQ (writing `0x1F`) and the CD-ROM bit of `I_STAT`. Each
+    /// command path empties the parameter FIFO itself (`psx_hw::cd::irq::CLEAR_PARAMETER_FIFO`).
     pub fn acknowledge_all_and_reset_parameters(&mut self) {
         ack_all_and_reset_parameters();
     }
@@ -849,12 +849,12 @@ fn drain_response_limited(limit: u32) {
     }
 }
 
-/// Acknowledge every controller IRQ and reset the parameter FIFO, then the
-/// CD-ROM bit of I_STAT.
+/// Acknowledge every controller IRQ (1Fh), then the CD-ROM bit of I_STAT. The parameter FIFO
+/// is emptied by each command path before its parameters, not here.
 #[inline(never)]
 fn ack_all_and_reset_parameters() {
     select_index(1);
-    write_byte(reg::REQUEST_IRQ, code::ACK_ALL | code::CLEAR_PARAMETER_FIFO);
+    write_byte(reg::REQUEST_IRQ, code::ACK_ALL);
     irq::acknowledge(1 << psx_hw::irq::source::CDROM);
     select_index(0);
 }
@@ -873,7 +873,7 @@ fn clear_parameter_fifo() {
 fn ack_irq(bits: u8) {
     crate::diag::cd_irq_acked(bits);
     select_index(1);
-    write_byte(reg::REQUEST_IRQ, bits & code::ACK_ALL);
+    write_byte(reg::REQUEST_IRQ, code::acknowledge_value(bits));
     irq::acknowledge(1 << psx_hw::irq::source::CDROM);
     select_index(0);
 }

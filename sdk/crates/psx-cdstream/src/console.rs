@@ -130,7 +130,7 @@ impl<const SINGLE: bool, const LEAN: bool, const COUNT: bool> CdHw for Mmio<SING
     fn finish_response(&mut self, bits: u8) {
         let mut cd = token();
         cd.discard_response();
-        cd.acknowledge_irq(bits);
+        cd.acknowledge_irq(bits | flag::ACK_RESPONSE);
     }
 
     fn silence_output(&mut self) {
