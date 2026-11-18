@@ -25,6 +25,8 @@ pub struct Info {
     pub open_loop: u32,
     /// Disc paths the journey boots (first existing wins in the gate).
     pub discs: Vec<String>,
+    /// The journey's own `name` (the gate names its golden folder after it).
+    pub name: Option<String>,
 }
 
 /// Read a journey file far enough to lint it.
@@ -54,6 +56,10 @@ pub fn inspect(path: &Path) -> Result<Info, String> {
         pad,
         open_loop,
         discs: strings(value.get("disc")),
+        name: value
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::to_string),
     })
 }
 
@@ -575,6 +581,7 @@ press = ["down"]
             pad: None,
             open_loop: 0,
             discs: Vec::new(),
+            name: None,
         };
         let none = BTreeMap::new();
         assert!(check_pad(&info, &none).unwrap_err().contains("dualshock"));

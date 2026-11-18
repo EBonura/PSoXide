@@ -251,7 +251,17 @@ pub fn run(ctx: &Ctx<'_>, bless: bool) -> StageResult {
     let width = ctx.config.budget.emulators;
     let outcomes = sched::run_all(&jobs, width, |job| {
         ctx.timed(&format!("journey:{}@{}", job.info.id, job.model), || {
-            one(ctx, &gate, job, &[render, &conformance], &receipts)
+            let mut flags = vec![render.to_string(), conformance.clone()];
+            if let (Some(dir), Some(name)) = (&spec.golden_dir, &job.info.name) {
+                flags.push("--golden-dir".into());
+                flags.push(
+                    ctx.repo
+                        .join(dir.replace("{name}", name))
+                        .display()
+                        .to_string(),
+                );
+            }
+            one(ctx, &gate, job, &flags, &receipts)
         })
     });
     let mut hits = 0;
@@ -325,7 +335,7 @@ fn one(
     ctx: &Ctx<'_>,
     gate: &Path,
     job: &Job,
-    flags: &[&str],
+    flags: &[String],
     receipts: &Path,
 ) -> (Check, Option<GateLine>) {
     let conformance = flags.join(" ");
@@ -354,16 +364,17 @@ fn one(
         gate.display().to_string(),
         "run".into(),
         job.info.path.display().to_string(),
-        flags[0].to_string(),
+        flags[0].clone(),
         "--hardware".into(),
         job.model.clone(),
         "--receipts".into(),
         receipts.display().to_string(),
         "--out".into(),
         out.display().to_string(),
-        flags[1].to_string(),
     ]
-    .into();
+    .into_iter()
+    .chain(flags[1..].iter().cloned())
+    .collect();
     let env = ctx.child_env(&ctx.work.join("guest-stage"));
     let done = match util::run_logged(&argv, &ctx.repo, &env, &log, None) {
         Ok(d) => d,

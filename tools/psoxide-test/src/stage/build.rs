@@ -64,6 +64,7 @@ pub fn run(ctx: &mut Ctx<'_>) -> StageResult {
         let resolved: Vec<String> = build
             .env
             .values()
+            .chain(build.commands.iter().flatten())
             .map(|v| ctx.resolve(v).unwrap_or_default())
             .collect();
         let key = match key(&ctx.repo, build, &files, &resolved.join("\0")) {
@@ -143,10 +144,14 @@ fn one(ctx: &Ctx<'_>, build: &Build, key: &str) -> Outcome {
     };
     let start = util::now_seconds() - 1.0;
     for (i, command) in build.commands.iter().enumerate() {
-        let argv: Vec<String> = command
+        let argv: Vec<String> = match command
             .iter()
-            .map(|a| a.replace("{out}", &out.display().to_string()))
-            .collect();
+            .map(|a| ctx.resolve(&a.replace("{out}", &out.display().to_string())))
+            .collect::<Result<_, _>>()
+        {
+            Ok(a) => a,
+            Err(e) => return Outcome::error(&build.name, e),
+        };
         let log = log_dir.join(format!("{}-{}-{}.log", build.name, util::short(key), i + 1));
         match util::run_logged(&argv, &ctx.repo, &env, &log, None) {
             Ok(done) if done.code == 0 => {}

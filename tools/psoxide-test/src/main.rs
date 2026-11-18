@@ -254,7 +254,7 @@ fn run(o: &Options) -> Result<ExitCode, String> {
         }
     }
     for (section, declared) in [
-        ("[size]", game.size.is_some()),
+        ("[[size]]", !game.sizes.is_empty()),
         (
             "[[speed]] (or a [[host]] metric)",
             !game.windows.is_empty() || game.hosts.iter().any(|h| h.metric.is_some()),
@@ -328,14 +328,15 @@ fn bless(o: &Options) -> Result<ExitCode, String> {
         sdk_pin: stage::sdk_pin(&o.repo),
         ..Baseline::default()
     };
-    if let Some(size) = &game.size {
+    for size in &game.sizes {
         let map = game
             .build(&size.build)
             .and_then(|b| b.map_path(&o.repo))
             .ok_or("[size] build has no map")?;
         let text =
             std::fs::read_to_string(&map).map_err(|e| format!("read {}: {e}", map.display()))?;
-        base.size = Some(stage::size::measure(&text)?);
+        base.size
+            .insert(size.build.clone(), stage::size::measure(&text)?);
     }
     let journeys = stage::journeys::run(&ctx, true);
     print_stage(&journeys);

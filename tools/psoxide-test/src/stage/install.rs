@@ -14,17 +14,30 @@ use crate::util;
 /// The install stage: reads the latest result in the work tree and refuses unless it is a
 /// complete PASS for exactly these bytes.
 pub fn run(ctx: &Ctx<'_>) -> StageResult {
+    let mut checks = Vec::new();
+    for install in &ctx.game.installs {
+        checks.extend(one(ctx, install).outcome.checks);
+    }
+    if ctx.game.installs.is_empty() {
+        checks.push(Check::skip("install", "the game file has no [[install]]"));
+    }
+    StageResult {
+        name: "install".into(),
+        source: Source::Run,
+        key: String::new(),
+        outcome: Outcome {
+            checks,
+            ..Outcome::default()
+        },
+    }
+}
+
+fn one(ctx: &Ctx<'_>, install: &crate::game::Install) -> StageResult {
     let result = |outcome| StageResult {
         name: "install".into(),
         source: Source::Run,
         key: String::new(),
         outcome,
-    };
-    let Some(install) = &ctx.game.install else {
-        return result(Outcome {
-            checks: vec![Check::skip("install", "the game file has no [install]")],
-            ..Outcome::default()
-        });
     };
     let Some(library) = &ctx.config.library else {
         return result(Outcome::error(

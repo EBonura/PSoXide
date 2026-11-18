@@ -76,36 +76,59 @@ pub fn judge(now: SizeBase, base: Option<SizeBase>, growth: u32, drop: u32) -> V
     ]
 }
 
-/// The size stage.
+/// The size stage: one link per `[[size]]` entry, checks named after its build when there are
+/// several.
 pub fn run(ctx: &Ctx<'_>) -> StageResult {
-    let result = |source, key: String, outcome| StageResult {
+    let mut checks = Vec::new();
+    let mut facts = std::collections::BTreeMap::new();
+    let mut hits = 0;
+    for size in &ctx.game.sizes {
+        let prefix = if ctx.game.sizes.len() > 1 {
+            format!("{} ", size.build)
+        } else {
+            String::new()
+        };
+        match one(ctx, size) {
+            Ok((outcome, hit)) => {
+                hits += usize::from(hit);
+                for mut c in outcome.checks {
+                    c.name = format!("{prefix}{}", c.name);
+                    checks.push(c);
+                }
+                for (k, v) in outcome.facts {
+                    facts.insert(format!("{}/{k}", size.build), v);
+                }
+            }
+            Err(e) => checks.push(Check::fail(format!("{prefix}size"), e)),
+        }
+    }
+    if ctx.game.sizes.is_empty() {
+        checks.push(Check::skip("size", "the game file has no [[size]]"));
+    }
+    StageResult {
         name: "size".into(),
-        source,
-        key,
-        outcome,
-    };
-    let Some(size) = &ctx.game.size else {
-        return result(
-            Source::Run,
-            String::new(),
-            Outcome {
-                checks: vec![Check::skip("size", "the game file has no [size]")],
-                ..Outcome::default()
-            },
-        );
-    };
-    let Some(map) = ctx
+        source: if hits > 0 && hits == ctx.game.sizes.len() {
+            Source::Hit
+        } else {
+            Source::Run
+        },
+        key: String::new(),
+        outcome: Outcome { checks, facts },
+    }
+}
+
+fn one(ctx: &Ctx<'_>, size: &crate::game::Size) -> Result<(Outcome, bool), String> {
+    let map = ctx
         .game
         .build(&size.build)
         .and_then(|b| b.map_path(&ctx.repo))
-    else {
-        return result(Source::Run, String::new(), Outcome::error("size", "no map"));
-    };
+        .ok_or("no map")?;
     let mut key = Key::new("size");
-    if let Err(e) = key.file("map", &map) {
-        return result(Source::Run, String::new(), Outcome::error("size", e));
-    }
-    let base = ctx.baseline.as_ref().and_then(|b| b.size);
+    key.file("map", &map)?;
+    let base = ctx
+        .baseline
+        .as_ref()
+        .and_then(|b| b.size.get(&size.build).copied());
     key.part("baseline", &format!("{base:?}"));
     key.part(
         "tolerance",
@@ -113,27 +136,23 @@ pub fn run(ctx: &Ctx<'_>) -> StageResult {
     );
     let key = key.finish();
     if let Some(outcome) = ctx.receipts.get("size", &key) {
-        println!("RECEIPT HIT size {}", util::short(&key));
-        return result(Source::Hit, key, outcome);
+        println!("RECEIPT HIT size {} {}", size.build, util::short(&key));
+        return Ok((outcome, true));
     }
-    let outcome = match std::fs::read_to_string(&map)
-        .map_err(|e| format!("read {}: {e}", map.display()))
-        .and_then(|t| measure(&t))
-    {
-        Ok(now) => Outcome {
-            checks: judge(now, base, size.text_max_growth, size.free_min_drop),
-            facts: [
-                ("text".to_string(), now.text.to_string()),
-                ("data".to_string(), now.data.to_string()),
-                ("bss".to_string(), now.bss.to_string()),
-                ("free".to_string(), now.free.to_string()),
-            ]
-            .into(),
-        },
-        Err(e) => Outcome::error("size", e),
+    let text = std::fs::read_to_string(&map).map_err(|e| format!("read {}: {e}", map.display()))?;
+    let now = measure(&text)?;
+    let outcome = Outcome {
+        checks: judge(now, base, size.text_max_growth, size.free_min_drop),
+        facts: [
+            ("text".to_string(), now.text.to_string()),
+            ("data".to_string(), now.data.to_string()),
+            ("bss".to_string(), now.bss.to_string()),
+            ("free".to_string(), now.free.to_string()),
+        ]
+        .into(),
     };
     let _ = ctx.receipts.put("size", &key, &outcome);
-    result(Source::Run, key, outcome)
+    Ok((outcome, false))
 }
 
 #[cfg(test)]

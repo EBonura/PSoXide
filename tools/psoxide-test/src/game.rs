@@ -23,7 +23,9 @@ pub struct Game {
     pub repository: String,
     #[serde(rename = "build")]
     pub builds: Vec<Build>,
-    pub size: Option<Size>,
+    /// One `[[size]]` per program whose link is judged (a repo may build several).
+    #[serde(default, rename = "size")]
+    pub sizes: Vec<Size>,
     #[serde(default, rename = "speed")]
     pub windows: Vec<Window>,
     pub journeys: Option<Journeys>,
@@ -31,7 +33,9 @@ pub struct Game {
     #[serde(default, rename = "host")]
     pub hosts: Vec<Host>,
     pub clean: Option<Clean>,
-    pub install: Option<Install>,
+    /// One `[[install]]` per library entry the repo produces.
+    #[serde(default, rename = "install")]
+    pub installs: Vec<Install>,
 }
 
 /// One build: commands run in order at the repo root, then files collected into `out`.
@@ -143,6 +147,10 @@ pub struct Journeys {
     /// on every model instead of the CPU frame alone (`--no-hw`).
     #[serde(default)]
     pub hw: bool,
+    /// Where a journey's goldens are, `{name}` being its `name` (default: the gate's
+    /// tests/golden/<name>), e.g. one golden set per region.
+    #[serde(default)]
+    pub golden_dir: Option<String>,
     /// Journeys that run on some models only, each with the reason; the others are reported as
     /// SKIP with that reason on every run.
     #[serde(default)]
@@ -326,8 +334,8 @@ impl Game {
                 ))
             }
         };
-        if let Some(size) = &self.size {
-            known(&size.build, "[size]")?;
+        for size in &self.sizes {
+            known(&size.build, "[[size]]")?;
             if self.build(&size.build).is_some_and(|b| b.map.is_none()) {
                 return Err(format!("[size]: build `{}` declares no map", size.build));
             }
@@ -397,12 +405,11 @@ impl Game {
                 }
             }
         }
-        for name in [
-            self.clean.as_ref().map(|c| c.build.as_str()),
-            self.install.as_ref().map(|i| i.build.as_str()),
-        ]
-        .into_iter()
-        .flatten()
+        for name in self
+            .clean
+            .iter()
+            .map(|c| c.build.as_str())
+            .chain(self.installs.iter().map(|i| i.build.as_str()))
         {
             known(name, "[clean]/[install]")?;
         }
@@ -456,7 +463,7 @@ map = "link.map"
 
     #[test]
     fn a_size_tolerance_needs_a_reason() {
-        let text = format!("{MINIMAL}[size]\nbuild = \"ship\"\ntext_max_growth = 64\n");
+        let text = format!("{MINIMAL}[[size]]\nbuild = \"ship\"\ntext_max_growth = 64\n");
         assert!(Game::parse(&text).unwrap_err().contains("reason"));
         let text = format!("{text}reason = \"measured\"\n");
         assert!(Game::parse(&text).is_ok());
@@ -464,7 +471,7 @@ map = "link.map"
 
     #[test]
     fn a_stage_must_name_a_declared_build() {
-        let text = format!("{MINIMAL}[size]\nbuild = \"gate\"\n");
+        let text = format!("{MINIMAL}[[size]]\nbuild = \"gate\"\n");
         assert!(Game::parse(&text).unwrap_err().contains("`gate`"));
     }
 

@@ -17,8 +17,9 @@ pub struct Baseline {
     pub blessed_commit: String,
     /// The SDK revision that commit pins.
     pub sdk_pin: String,
+    /// One link's size per `[[size]]` build, by build name.
     #[serde(default)]
-    pub size: Option<SizeBase>,
+    pub size: BTreeMap<String, SizeBase>,
     /// One table per speed window.
     #[serde(default)]
     pub speed: BTreeMap<String, WindowBase>,
@@ -130,12 +131,15 @@ mod tests {
             sdk_pin: "def".into(),
             ..Baseline::default()
         };
-        base.size = Some(SizeBase {
-            text: 1,
-            data: 2,
-            bss: 3,
-            free: 4,
-        });
+        base.size.insert(
+            "ship".into(),
+            SizeBase {
+                text: 1,
+                data: 2,
+                bss: 3,
+                free: 4,
+            },
+        );
         base.journeys.insert(
             "journey".into(),
             JourneyBase {
