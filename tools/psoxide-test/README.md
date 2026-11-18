@@ -34,3 +34,13 @@ the number of open-loop steps (fixed `wait`, frame-counted `hold`) as a ratchet 
 condition, wait until one, check RAM at a named checkpoint) on the other emulators.
 
 Machine-local paths and the budget live in the user config: see `config.example.toml`.
+
+Original game files (`{input:NAME}`) enter receipts, result facts (`input:NAME`) and the
+clean-clone key by content: SHA-256 over every file of the configured file or tree, cached per
+file by size, modification time and inode in `<work>/input-digests.json`. A game file may pin
+them with `[originals] NAME = "<digest>"`; other bytes then fail the build before it starts.
+
+Every child the harness starts leads its own process group. A group is killed when its job
+returns, on SIGINT, SIGTERM and SIGHUP, and, if the harness itself is killed outright, by a small
+`psoxide-test reap` process that watches a pipe from it. The machine-wide budget slots are file
+locks the kernel drops with the harness.

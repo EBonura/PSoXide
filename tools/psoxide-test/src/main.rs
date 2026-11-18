@@ -9,6 +9,8 @@ mod baseline;
 mod config;
 mod game;
 mod journey;
+mod originals;
+mod procs;
 mod rearmed;
 mod receipt;
 mod redux;
@@ -102,7 +104,18 @@ fn options(args: &[String]) -> Result<Options, String> {
 }
 
 fn dispatch(args: &[String]) -> Result<ExitCode, String> {
-    match args.first().map(String::as_str) {
+    let command = args.first().map(String::as_str);
+    if command == Some("reap") {
+        procs::reap();
+    }
+    if matches!(command, Some("run" | "bless" | "install" | "adapter")) {
+        // Nothing this process starts may outlive it (procs.rs).
+        procs::install_signal_handlers();
+        if command != Some("adapter") {
+            procs::start_reaper();
+        }
+    }
+    match command {
         Some("run") => {
             let o = options(&args[1..])?;
             run(&o)
@@ -186,6 +199,9 @@ fn context<'a>(o: &Options, game: &'a Game, config: &'a Config) -> Result<Ctx<'a
         tier: o.tier,
         artifacts: BTreeMap::new(),
         timing: Mutex::new(Vec::new()),
+        originals: Mutex::new(originals::Cache::load(
+            &config.work.join("input-digests.json"),
+        )),
     })
 }
 

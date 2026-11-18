@@ -61,13 +61,26 @@ pub fn run(ctx: &mut Ctx<'_>) -> StageResult {
     let mut keys = Vec::new();
     facts.insert("sdk_pin".into(), sdk_pin(&ctx.repo));
     for build in &ctx.game.builds {
-        let resolved: Vec<String> = build
+        // Original game files enter the key by content, never by path (originals.rs).
+        let keyed: Result<Vec<String>, String> = build
             .env
             .values()
             .chain(build.commands.iter().flatten())
-            .map(|v| ctx.resolve(v).unwrap_or_default())
+            .map(|v| ctx.key_text(v))
             .collect();
-        let key = match key(&ctx.repo, build, &files, &resolved.join("\0")) {
+        let keyed = match keyed {
+            Ok(k) => k,
+            Err(e) => return failed(&build.name, e),
+        };
+        match ctx.build_originals(build) {
+            Ok(originals) => {
+                for (name, digest) in originals {
+                    facts.insert(format!("input:{name}"), digest);
+                }
+            }
+            Err(e) => return failed(&build.name, e),
+        }
+        let key = match key(&ctx.repo, build, &files, &keyed.join("\0")) {
             Ok(k) => k,
             Err(e) => return failed(&build.name, e),
         };

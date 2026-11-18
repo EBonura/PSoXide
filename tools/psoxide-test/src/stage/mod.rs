@@ -64,6 +64,8 @@ pub struct Ctx<'a> {
     /// Per build: file name in `out` -> SHA-256, filled by the build stage.
     pub artifacts: BTreeMap<String, BTreeMap<String, String>>,
     pub timing: Mutex<Vec<Timing>>,
+    /// Content digests of the original game files (`originals.rs`), cached by stat.
+    pub originals: Mutex<crate::originals::Cache>,
 }
 
 impl Ctx<'_> {
@@ -147,6 +149,65 @@ impl Ctx<'_> {
             env.push((name.clone(), None));
         }
         Ok(env)
+    }
+
+    /// The content digest of the original game files `name`, checked against the game file's
+    /// `[originals]` when it names them.
+    pub fn input_digest(&self, name: &str) -> Result<String, String> {
+        let path = self.config.inputs.get(name).ok_or_else(|| {
+            format!(
+                "the build needs the original game files `{name}`: set [inputs] {name} = \"/path\" \
+                 in the psoxide-test config"
+            )
+        })?;
+        let digest = self
+            .originals
+            .lock()
+            .map_err(|_| "input digest cache lock".to_string())?
+            .digest(path)?;
+        if let Some(want) = self.game.originals.get(name) {
+            if *want != digest {
+                return Err(format!(
+                    "original game files `{name}` at {} have content {} but the game file's \
+                     [originals] requires {}: point [inputs] {name} at the right files",
+                    path.display(),
+                    util::short(&digest),
+                    util::short(want)
+                ));
+            }
+        }
+        Ok(digest)
+    }
+
+    /// `value` as a receipt key sees it: `{input:NAME}` becomes the content digest of those
+    /// files (never their path), `{tool:NAME}` the configured tool path.
+    pub fn key_text(&self, value: &str) -> Result<String, String> {
+        let mut keyed = value.to_string();
+        for name in crate::originals::names(value) {
+            let digest = self.input_digest(&name)?;
+            keyed = keyed.replace(
+                &format!("{{input:{name}}}"),
+                &format!("<original {name} {digest}>"),
+            );
+        }
+        self.resolve(&keyed)
+    }
+
+    /// Every `{input:NAME}` a build's commands and env use, with its content digest.
+    pub fn build_originals(
+        &self,
+        build: &crate::game::Build,
+    ) -> Result<BTreeMap<String, String>, String> {
+        let mut out = BTreeMap::new();
+        for text in build.env.values().chain(build.commands.iter().flatten()) {
+            for name in crate::originals::names(text) {
+                if let std::collections::btree_map::Entry::Vacant(slot) = out.entry(name) {
+                    let digest = self.input_digest(slot.key())?;
+                    slot.insert(digest);
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// Resolve `{input:NAME}` and `{tool:NAME}` placeholders from the user config.

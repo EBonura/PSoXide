@@ -68,6 +68,15 @@ pub fn run(ctx: &Ctx<'_>) -> StageResult {
     let mut key = Key::new("clean");
     key.part("commit", &commit);
     key.part("seed", &clean.seed.join("\0"));
+    // The clone builds from the same original game files: keyed by their content.
+    match ctx.build_originals(b) {
+        Ok(originals) => {
+            for (name, digest) in originals {
+                key.part(&format!("input:{name}"), &digest);
+            }
+        }
+        Err(e) => return result(Source::Run, String::new(), Outcome::error("clean", e)),
+    }
     for f in &compare {
         key.part(f, expected.get(f).map_or("", String::as_str));
     }

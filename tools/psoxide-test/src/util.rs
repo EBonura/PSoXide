@@ -125,8 +125,8 @@ pub fn run_watched(
             None => command.env_remove(name),
         };
     }
-    let mut child = command
-        .spawn()
+    // Its own process group, killed when `group` drops: nothing it starts outlives this call.
+    let (mut child, group) = crate::procs::spawn(&mut command)
         .map_err(|e| format!("start `{program}` in {}: {e}", dir.display()))?;
     let start = std::time::Instant::now();
     let mut timed_out = false;
@@ -142,21 +142,23 @@ pub fn run_watched(
             polls.is_multiple_of(20) && fs::read_to_string(log).is_ok_and(|t| t.contains(needle))
         });
         if stop {
-            let _ = child.kill();
+            crate::procs::kill(&group);
             break child
                 .wait()
                 .map_err(|e| format!("wait for `{program}`: {e}"))?;
         }
         if timeout_s.is_some_and(|t| start.elapsed().as_secs() >= t) {
             timed_out = true;
-            // Our own child only, by PID.
-            let _ = child.kill();
+            // Our own child's process group only.
+            crate::procs::kill(&group);
             break child
                 .wait()
                 .map_err(|e| format!("wait for `{program}`: {e}"))?;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     };
+    // Grandchildren the child left running die with the group here.
+    drop(group);
     let output = fs::read_to_string(log).unwrap_or_default();
     Ok(Finished {
         code: status.code().unwrap_or(-1),
