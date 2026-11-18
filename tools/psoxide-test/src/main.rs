@@ -353,6 +353,9 @@ fn bless(o: &Options) -> Result<ExitCode, String> {
             std::fs::read_to_string(&map).map_err(|e| format!("read {}: {e}", map.display()))?;
         base.size
             .insert(size.build.clone(), stage::size::measure(&text)?);
+        // Kept under its digest so a later size change can be explained by function.
+        base.maps
+            .insert(size.build.clone(), stage::size::keep_map(&ctx, &map)?);
     }
     let journeys = stage::journeys::run(&ctx, true);
     print_stage(&journeys);
@@ -401,13 +404,6 @@ fn bless(o: &Options) -> Result<ExitCode, String> {
     }
     let speed = stage::speed::run(&ctx, true);
     for w in &game.windows {
-        if w.polls.is_none() {
-            println!(
-                "window {} is declared by conditions: not measurable yet, not blessed",
-                w.name
-            );
-            continue;
-        }
         let mut table = WindowBase {
             offsets: w.offsets.clone(),
             ..WindowBase::default()

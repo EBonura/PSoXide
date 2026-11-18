@@ -89,6 +89,8 @@ type Row = (i32, BTreeMap<String, String>);
 
 struct Job<'w> {
     window: &'w Window,
+    /// The window in polls: declared, or located from its conditions.
+    polls: [u32; 2],
     offset: i32,
     disc: PathBuf,
     disc_digest: String,
@@ -137,19 +139,11 @@ pub fn run(ctx: &Ctx<'_>, all_offsets: bool) -> StageResult {
     };
     let mut jobs = Vec::new();
     let mut unmeasurable = Vec::new();
+    let mut located_facts = BTreeMap::new();
     for w in windows {
         let Some(build) = ctx.game.build(&w.build) else {
             continue;
         };
-        if w.polls.is_none() {
-            unmeasurable.push(Check::fail(
-                &w.name,
-                "this window starts and ends on game-state conditions (from / until), which \
-                 psoxide-pgo measure cannot do yet: it measures poll windows of a tape only \
-                 (phase 2 of the harness)",
-            ));
-            continue;
-        }
         let disc = build.cue(&ctx.repo);
         let disc_digest = ctx
             .artifacts
@@ -157,6 +151,20 @@ pub fn run(ctx: &Ctx<'_>, all_offsets: bool) -> StageResult {
             .and_then(|a| a.get(&build.disc.replace(".cue", ".bin")))
             .cloned()
             .unwrap_or_default();
+        let polls = match w.polls {
+            Some(p) => p,
+            None => match locate(ctx, w, build, &disc, &disc_digest, &frontend) {
+                Ok(p) => {
+                    located_facts
+                        .insert(format!("{}/polls", w.name), format!("{}..{}", p[0], p[1]));
+                    p
+                }
+                Err(e) => {
+                    unmeasurable.push(Check::fail(format!("{} window", w.name), e));
+                    continue;
+                }
+            },
+        };
         let offsets: Vec<i32> = if all_offsets || ctx.tier == Tier::Full {
             w.offsets.clone()
         } else {
@@ -165,6 +173,7 @@ pub fn run(ctx: &Ctx<'_>, all_offsets: bool) -> StageResult {
         for offset in offsets {
             jobs.push(Job {
                 window: w,
+                polls,
                 offset,
                 disc: disc.clone(),
                 disc_digest: disc_digest.clone(),
@@ -178,7 +187,7 @@ pub fn run(ctx: &Ctx<'_>, all_offsets: bool) -> StageResult {
         })
     });
     let mut checks = unmeasurable;
-    let mut facts = BTreeMap::new();
+    let mut facts = located_facts;
     let mut hits = 0;
     let mut by_window: BTreeMap<&str, Vec<Row>> = BTreeMap::new();
     for (job, (metrics, hit)) in jobs.iter().zip(outcomes) {
@@ -297,18 +306,27 @@ fn measure_one(
     tools_digest: &str,
 ) -> (Result<BTreeMap<String, String>, String>, bool) {
     let w = job.window;
-    let (Some([first, last]), Some(tape)) = (w.polls, w.tape.as_ref()) else {
-        return (Err("a tape window needs tape and polls".into()), false);
-    };
+    let [first, last] = job.polls;
     let from = i64::from(first) + i64::from(job.offset);
     let to = i64::from(last) + i64::from(job.offset);
-    let tape = ctx.repo.join(tape);
+    if from < 0 {
+        return (
+            Err(format!(
+                "offset {} moves the window before poll 0",
+                job.offset
+            )),
+            false,
+        );
+    }
+    let tape = w.tape.as_ref().map(|t| ctx.repo.join(t));
     let mut key = Key::new("speed");
     key.part("disc", &job.disc_digest);
     key.part("tools", tools_digest);
     key.part("window", &format!("{from}..{to} {:?}", w.launch_args));
-    if let Err(e) = key.file("tape", &tape) {
-        return (Err(e), false);
+    if let Some(tape) = &tape {
+        if let Err(e) = key.file("tape", tape) {
+            return (Err(e), false);
+        }
     }
     let key = key.finish();
     if let Some(o) = ctx.receipts.get("speed", &key) {
@@ -336,13 +354,17 @@ fn measure_one(
         frontend.display().to_string(),
         "--image".into(),
         job.disc.display().to_string(),
-        "--tape".into(),
-        tape.display().to_string(),
+    ];
+    if let Some(tape) = &tape {
+        argv.push("--tape".into());
+        argv.push(tape.display().to_string());
+    }
+    argv.extend([
         "--polls".into(),
         format!("{from}..{to}"),
         "--name".into(),
         "m".into(),
-    ];
+    ]);
     for a in &w.launch_args {
         argv.push("--launch-arg".into());
         argv.push(a.clone());
@@ -372,9 +394,200 @@ fn measure_one(
     (metrics, false)
 }
 
+/// Steps cap of the locating replay (the same ceiling psoxide-pgo gives its replays).
+const LOCATE_STEPS: &str = "40000000000";
+
+/// Find the polls of a window declared by conditions: one plain replay of the window's tape
+/// (no profiling logs) with the condition words on the route log. The window starts after the
+/// poll in whose route tick `from` first holds and ends at the poll in whose tick `until` first
+/// holds after that. Receipt-keyed per window, so every offset shares one locating replay.
+fn locate(
+    ctx: &Ctx<'_>,
+    w: &Window,
+    build: &crate::game::Build,
+    disc: &Path,
+    disc_digest: &str,
+    frontend: &Path,
+) -> Result<[u32; 2], String> {
+    let (Some(from), Some(until), Some(max_polls)) = (&w.from, &w.until, w.max_polls) else {
+        return Err("a window by conditions needs from, until and max_polls".into());
+    };
+    let map = build
+        .map_path(&ctx.repo)
+        .ok_or_else(|| format!("build `{}` declares no map", build.name))?;
+    let mut symbols = crate::journey::Symbols::default();
+    symbols.load(&map)?;
+    let from = crate::journey::condition(from, &symbols)?;
+    let until = crate::journey::condition(until, &symbols)?;
+    let tape = w.tape.as_ref().map(|t| ctx.repo.join(t));
+    let mut key = Key::new("speed-locate");
+    key.part("disc", disc_digest);
+    key.file("frontend", frontend)?;
+    if let Some(tape) = &tape {
+        key.file("tape", tape)?;
+    }
+    for probe in [&from, &until] {
+        key.part(
+            "probe",
+            &serde_json::to_string(probe).map_err(|e| e.to_string())?,
+        );
+    }
+    key.part("limit", &format!("{max_polls} {:?}", w.launch_args));
+    let key = key.finish();
+    let read = |o: &Outcome| -> Option<[u32; 2]> {
+        Some([
+            o.facts.get("from")?.parse().ok()?,
+            o.facts.get("until")?.parse().ok()?,
+        ])
+    };
+    if let Some(found) = ctx
+        .receipts
+        .get("speed-locate", &key)
+        .as_ref()
+        .and_then(read)
+    {
+        println!("RECEIPT HIT speed-locate {} {}", w.name, util::short(&key));
+        return Ok(found);
+    }
+    let dir = ctx.dir(&["speed", "locate"])?;
+    let stem = format!("{}-{}", w.name, util::short(&key));
+    let route = dir.join(format!("{stem}.route.csv"));
+    let log = dir.join(format!("{stem}.log"));
+    let mut argv: Vec<String> = vec![
+        frontend.display().to_string(),
+        "launch".into(),
+        "--path".into(),
+        disc.display().to_string(),
+    ];
+    if let Some(tape) = &tape {
+        argv.push("--input-tape".into());
+        argv.push(tape.display().to_string());
+    }
+    argv.extend([
+        "--stop-at-poll".into(),
+        max_polls.to_string(),
+        "--steps".into(),
+        LOCATE_STEPS.into(),
+        "--route-log".into(),
+        route.display().to_string(),
+    ]);
+    let mut words: Vec<u32> = [from.addr & !3, until.addr & !3].to_vec();
+    words.dedup();
+    for word in &words {
+        argv.push("--route-watch-u32".into());
+        argv.push(format!("{word:#010x}"));
+    }
+    argv.extend(w.launch_args.iter().cloned());
+    let env = ctx.child_env(&ctx.work.join("guest-stage"));
+    let done = ctx.machine("emu", || {
+        util::run_logged(&argv, &ctx.repo, &env, &log, None)
+    })?;
+    if done.code != 0 {
+        return Err(format!(
+            "the locating replay exited {}; log {}",
+            done.code,
+            log.display()
+        ));
+    }
+    let text =
+        std::fs::read_to_string(&route).map_err(|e| format!("read {}: {e}", route.display()))?;
+    let found = find_window(&text, &from, &until, max_polls)?;
+    let outcome = Outcome {
+        checks: vec![Check::pass("located", "")],
+        facts: BTreeMap::from([
+            ("from".to_string(), found[0].to_string()),
+            ("until".to_string(), found[1].to_string()),
+        ]),
+    };
+    let _ = ctx.receipts.put("speed-locate", &key, &outcome);
+    println!(
+        "speed window {} located at polls {}..{} ({} .. {})",
+        w.name, found[0], found[1], from.text, until.text
+    );
+    Ok(found)
+}
+
+/// Read a route log with `ram_XXXXXXXX` columns and return `[from poll, until poll]`.
+fn find_window(
+    route: &str,
+    from: &crate::journey::Probe,
+    until: &crate::journey::Probe,
+    max_polls: u32,
+) -> Result<[u32; 2], String> {
+    let mut lines = route.lines();
+    let header: Vec<&str> = lines.next().unwrap_or("").split(',').collect();
+    let column = |name: &str| {
+        header
+            .iter()
+            .position(|h| *h == name)
+            .ok_or_else(|| format!("the route log has no {name} column"))
+    };
+    let polls_at = column("port1_polls")?;
+    let word = |probe: &crate::journey::Probe| -> Result<(usize, u32), String> {
+        let at = column(&format!("ram_{:08x}", probe.addr & !3))?;
+        Ok((at, (probe.addr & 3) * 8))
+    };
+    let (from_at, from_shift) = word(from)?;
+    let (until_at, until_shift) = word(until)?;
+    let mut start: Option<u32> = None;
+    for line in lines {
+        let fields: Vec<&str> = line.split(',').collect();
+        let number = |at: usize| -> Option<u64> { fields.get(at)?.parse().ok() };
+        let (Some(polls), Some(f), Some(u)) = (number(polls_at), number(from_at), number(until_at))
+        else {
+            continue;
+        };
+        let polls = u32::try_from(polls).map_err(|_| "poll count out of range")?;
+        match start {
+            None if from.holds((f as u32) >> from_shift) => start = Some(polls),
+            Some(s) if polls > s && until.holds((u as u32) >> until_shift) => {
+                return Ok([s, polls]);
+            }
+            _ => {}
+        }
+    }
+    Err(match start {
+        None => format!("`{}` never held before poll {max_polls}", from.text),
+        Some(s) => format!(
+            "`{}` held at poll {s} but `{}` never held after it before poll {max_polls}",
+            from.text, until.text
+        ),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn probe(addr: u32, size: u8, op: &str, value: i64) -> crate::journey::Probe {
+        crate::journey::Probe {
+            text: format!("{addr:x} {op} {value}"),
+            addr,
+            size,
+            signed: false,
+            op: op.into(),
+            value,
+            value_hi: 0,
+        }
+    }
+
+    #[test]
+    fn a_window_is_found_from_the_condition_words() {
+        let route = "route_tick,port1_polls,ram_80001000\n\
+                     0,0,0\n1,1,0\n2,2,5\n3,2,6\n4,3,9\n5,4,12\n";
+        let from = probe(0x8000_1000, 4, "ge", 5);
+        let until = probe(0x8000_1000, 4, "ge", 9);
+        assert_eq!(find_window(route, &from, &until, 10).unwrap(), [2, 3]);
+        // A byte inside the word: bits 8..15.
+        let route = "route_tick,port1_polls,ram_80001000\n0,0,0\n1,1,256\n2,2,512\n";
+        let from = probe(0x8000_1001, 1, "eq", 1);
+        let until = probe(0x8000_1001, 1, "eq", 2);
+        assert_eq!(find_window(route, &from, &until, 10).unwrap(), [1, 2]);
+        let never = probe(0x8000_1001, 1, "eq", 7);
+        assert!(find_window(route, &from, &never, 10)
+            .unwrap_err()
+            .contains("never held after"));
+    }
 
     fn base() -> WindowBase {
         WindowBase {

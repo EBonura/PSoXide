@@ -29,6 +29,10 @@ pub struct Baseline {
     /// Host-check metrics, by check name (`name` or `name@model`).
     #[serde(default)]
     pub host: BTreeMap<String, u64>,
+    /// Per `[[size]]` build: the SHA-256 of the blessed link map, kept by `bless` in the work
+    /// tree (`<work>/<game>/maps/<sha256>.map`) so a size change can be explained by function.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub maps: BTreeMap<String, String>,
 }
 
 /// One link's size, from `psoxide_size::ram`.

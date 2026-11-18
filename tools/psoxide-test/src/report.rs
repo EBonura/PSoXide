@@ -234,8 +234,12 @@ impl RunResult {
                     if !c.baseline.is_empty() {
                         let _ = write!(line, "  (baseline {})", c.baseline);
                     }
-                    if !c.detail.is_empty() && c.status != Status::Pass {
-                        let _ = write!(line, "  {}", c.detail);
+                    // A red stage shows every check's detail: a passing check's detail there is
+                    // the explanation of the red (the size stage's text by function).
+                    if !c.detail.is_empty() && (c.status != Status::Pass || !stage.outcome.passed())
+                    {
+                        let indent = "\n          ";
+                        let _ = write!(line, "  {}", c.detail.replace('\n', indent));
                     }
                     let _ = writeln!(out, "{line}");
                 }
