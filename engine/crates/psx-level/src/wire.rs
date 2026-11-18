@@ -179,6 +179,11 @@ impl<T: Wire + 'static> Wire for &'static [T] {
 
 /// A table: a count, then the records, decoded into an allocation that lives
 /// for the rest of the run.
+///
+/// Runs once per table at level load: compiled for size, since its many
+/// instantiations (one per record type, each with the record's decoder
+/// inlined) are code the frame never runs.
+#[cfg_attr(target_arch = "mips", optimize(size))]
 pub fn decode_slice<T: Wire>(r: &mut Reader) -> Option<&'static [T]> {
     let count = u32::get(r)? as usize;
     // Every element takes at least one byte; a count the bytes cannot hold is

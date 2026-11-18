@@ -25,6 +25,7 @@
 //! `&'static [AssetId]` slices that the linker pins next to the
 //! `include_bytes!` data. Heap-free by construction.
 
+#![cfg_attr(target_arch = "mips", feature(optimize_attribute))]
 #![no_std]
 #![warn(missing_docs)]
 
