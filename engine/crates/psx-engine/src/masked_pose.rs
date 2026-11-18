@@ -65,6 +65,7 @@ impl<'a> PoseBlends<'a> {
 
     /// The composed pose for `joint`. A joint the layer replaces outright
     /// (weight 0 of the body there) skips the crossfade's decode.
+    #[inline]
     pub fn blend_toward(&self, primary: psx_asset::JointPose, joint: u16) -> psx_asset::JointPose {
         // By reference: a blend is about 100 bytes, and copying one per
         // joint costs more than the blend.

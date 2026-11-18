@@ -150,7 +150,11 @@ impl ActorPoseSnapshot {
     /// snapshot between ticks without copying it.
     pub fn joint_pose_at(&self, phase_q12: u32, joint: u16) -> Option<JointPose> {
         let primary = self.animation.pose_looped_q12(phase_q12, joint)?;
-        let blended = self.blends.blend_toward(primary, joint);
+        let blended = if self.blends.crossfade.is_none() && self.blends.layer.is_none() {
+            primary
+        } else {
+            self.blends.blend_toward(primary, joint)
+        };
         Some(apply_model_pose_translation(blended, self.pose_translation))
     }
 
