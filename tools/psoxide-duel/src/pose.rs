@@ -139,6 +139,7 @@ impl Rig {
                     floor_y: b.floor_y,
                     pose_offset: b.pose_offset,
                     flags: b.flags,
+                    first_root_xz: b.first_root_xz,
                 })
                 .collect(),
         );
