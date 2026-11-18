@@ -320,8 +320,9 @@ pub(super) fn release_gameplay_vram() {
     // SAFETY: single-threaded guest; the stream is touched only here and in
     // `step_chunk_sky`.
     unsafe {
-        (*core::ptr::addr_of_mut!(CHUNK_SKY))
-            .release(&mut psx_game_runtime::grid_stream::DiscTransport);
+        if let Some(stream) = (*core::ptr::addr_of_mut!(CHUNK_SKY)).first_mut() {
+            stream.release(&mut psx_game_runtime::grid_stream::DiscTransport);
+        }
     }
     #[cfg(feature = "cd-stream-bench")]
     // SAFETY: single-threaded guest; see `step_cards`.
@@ -329,17 +330,27 @@ pub(super) fn release_gameplay_vram() {
         #[cfg(feature = "far-cards")]
         (*core::ptr::addr_of_mut!(CARDS))
             .release_all(&mut psx_game_runtime::grid_stream::DiscTransport);
-        (*core::ptr::addr_of_mut!(PANELS))
-            .release_all(&mut psx_game_runtime::grid_stream::DiscTransport);
+        if let Some(panels) = (*core::ptr::addr_of_mut!(PANELS)).first_mut() {
+            panels.release_all(&mut psx_game_runtime::grid_stream::DiscTransport);
+        }
     }
     vram_arena().release_gameplay_vram();
 }
 
-/// The chunk sky being streamed in, and the RAM its reads land in.
+/// The chunk sky being streamed in, and the RAM its reads land in. A level that bakes no chunk
+/// skies keeps no stream (an empty array), so it pays none of the stream's RAM.
 #[cfg(feature = "cd-stream-bench")]
-static mut CHUNK_SKY: psx_game_runtime::cube_sky_stream::CubeSkyStream<
+static mut CHUNK_SKY: [psx_game_runtime::cube_sky_stream::CubeSkyStream<
     <psx_game_runtime::grid_stream::DiscTransport as psx_game_runtime::grid_stream::RoomTransport>::Ticket,
-> = psx_game_runtime::cube_sky_stream::CubeSkyStream::new();
+>; CHUNK_SKY_STREAMS] = [const { psx_game_runtime::cube_sky_stream::CubeSkyStream::new() }; CHUNK_SKY_STREAMS];
+
+/// Chunk sky streams the level keeps: one when it bakes chunk skies, none otherwise.
+#[cfg(feature = "cd-stream-bench")]
+const CHUNK_SKY_STREAMS: usize = if crate::generated::GRID_SKY_BG_ROWS.is_empty() {
+    0
+} else {
+    1
+};
 #[cfg(feature = "cd-stream-bench")]
 static mut CHUNK_SKY_WINDOW: psx_game_runtime::cube_sky_stream::CubeSkyWindow<WINDOW_WORDS> =
     psx_game_runtime::cube_sky_stream::CubeSkyWindow::new();
@@ -378,7 +389,10 @@ pub(super) fn step_chunk_sky(room: Option<usize>) {
     let resident = vram_arena().cube_sky_origin(key).is_some();
     // SAFETY: single-threaded guest; see `release_gameplay_vram`.
     unsafe {
-        (*core::ptr::addr_of_mut!(CHUNK_SKY)).step(
+        let Some(stream) = (*core::ptr::addr_of_mut!(CHUNK_SKY)).first_mut() else {
+            return;
+        };
+        stream.step(
             &mut psx_game_runtime::grid_stream::DiscTransport,
             &mut *core::ptr::addr_of_mut!(CHUNK_SKY_WINDOW),
             resident,
@@ -386,7 +400,7 @@ pub(super) fn step_chunk_sky(room: Option<usize>) {
             sectors,
             GRID_SKY_INITIAL_MASK,
         );
-        CHUNK_SKY_COUNTERS = (*core::ptr::addr_of!(CHUNK_SKY)).counters;
+        CHUNK_SKY_COUNTERS = stream.counters;
     }
 }
 
@@ -425,11 +439,13 @@ pub(super) fn emit_chunk_sky_tiles(
         return;
     }
     // SAFETY: single-threaded guest; see `release_gameplay_vram`.
-    let (stream, window) = unsafe {
+    let (Some(stream), window) = (unsafe {
         (
-            &mut *core::ptr::addr_of_mut!(CHUNK_SKY),
+            (*core::ptr::addr_of_mut!(CHUNK_SKY)).first_mut(),
             &*core::ptr::addr_of!(CHUNK_SKY_WINDOW),
         )
+    }) else {
+        return;
     };
     if !stream.active() {
         return;
@@ -566,11 +582,13 @@ pub(super) fn panels_loaded() -> bool {
     };
     let second = panel_atlas_origin();
     // SAFETY: single-threaded guest; see `step_panels`.
-    let (stream, window) = unsafe {
+    let (Some(stream), window) = (unsafe {
         (
-            &mut *core::ptr::addr_of_mut!(PANELS),
+            (*core::ptr::addr_of_mut!(PANELS)).first_mut(),
             (*core::ptr::addr_of_mut!(CHUNK_SKY_WINDOW)).words_mut(),
         )
+    }) else {
+        return true;
     };
     loop {
         let (uploads, count) = stream.uploads::<8>(8);
@@ -684,11 +702,20 @@ pub(super) fn step_cards(eye: [i32; 3], hold_near: i32) {
 }
 
 /// The far panels' stream and its counters. Their tiles read through the chunk sky's window,
-/// like the cards' pictures: a world that has panels bakes no chunk skies.
+/// like the cards' pictures: a world that has panels bakes no chunk skies. A world without
+/// panels keeps no stream (an empty array), so it pays none of the stream's RAM.
 #[cfg(feature = "cd-stream-bench")]
-static mut PANELS: psx_game_runtime::panel_stream::PanelStream<
+static mut PANELS: [psx_game_runtime::panel_stream::PanelStream<
     <psx_game_runtime::grid_stream::DiscTransport as psx_game_runtime::grid_stream::RoomTransport>::Ticket,
-> = psx_game_runtime::panel_stream::PanelStream::new();
+>; PANEL_STREAMS] = [const { psx_game_runtime::panel_stream::PanelStream::new() }; PANEL_STREAMS];
+
+/// Panel streams the level keeps: one when it has far panels, none otherwise.
+#[cfg(feature = "cd-stream-bench")]
+const PANEL_STREAMS: usize = if crate::generated::GRID_PANEL_BLOCKS.is_empty() {
+    0
+} else {
+    1
+};
 
 /// The panel stream's counters, at a fixed address so a RAM dump of a run shows what the
 /// stream did.
@@ -785,15 +812,18 @@ pub(super) fn step_panels(eye: [i32; 3], focal: i32) {
     // SAFETY: single-threaded guest; the stream and the window are touched only here, in
     // `emit_panel_uploads`, `panel_drawables` and `release_gameplay_vram`.
     unsafe {
-        (*core::ptr::addr_of_mut!(PANELS)).update(
+        let Some(panels) = (*core::ptr::addr_of_mut!(PANELS)).first_mut() else {
+            return;
+        };
+        panels.update(
             &mut psx_game_runtime::grid_stream::DiscTransport,
             (*core::ptr::addr_of_mut!(CHUNK_SKY_WINDOW)).words_mut(),
             &input,
         );
-        PANEL_COUNTERS = (*core::ptr::addr_of!(PANELS)).counters;
+        PANEL_COUNTERS = panels.counters;
         #[cfg(feature = "panel-meter")]
         {
-            let (next, next2) = (*core::ptr::addr_of!(PANELS)).ahead();
+            let (next, next2) = panels.ahead();
             (*core::ptr::addr_of_mut!(PANEL_DRAW))[6] =
                 u32::from(next.unwrap_or(0xffff)) | (u32::from(next2.unwrap_or(0xffff)) << 16);
         }
@@ -807,14 +837,22 @@ pub(super) fn step_panels(eye: [i32; 3], focal: i32) {
 pub(super) fn panel_drawables(out: &mut [Option<psx_grid::render::PanelRef<'static>>]) -> usize {
     // SAFETY: single-threaded guest; the draw reads after the tick's update, and the stream
     // lives for the program.
-    unsafe { (*core::ptr::addr_of!(PANELS)).drawables(crate::generated::GRID_PANEL_EYES, out) }
+    unsafe {
+        (*core::ptr::addr_of!(PANELS)).first().map_or(0, |panels| {
+            panels.drawables(crate::generated::GRID_PANEL_EYES, out)
+        })
+    }
 }
 
 /// The bake eye the panels are drawn from (for the trace).
 #[cfg(feature = "cd-stream-bench")]
 pub(super) fn panel_eye() -> u32 {
     // SAFETY: single-threaded guest; see `step_panels`.
-    unsafe { (*core::ptr::addr_of!(PANELS)).counters.eye }
+    unsafe {
+        (*core::ptr::addr_of!(PANELS))
+            .first()
+            .map_or(0, |panels| panels.counters.eye)
+    }
 }
 
 /// Panel tiles the GPU uploads per frame at most: 770 words of packets each. A landed read holds
@@ -845,11 +883,13 @@ pub(super) fn emit_panel_uploads(
         return;
     };
     // SAFETY: single-threaded guest; see `step_panels`.
-    let (stream, window) = unsafe {
+    let (Some(stream), window) = (unsafe {
         (
-            &mut *core::ptr::addr_of_mut!(PANELS),
+            (*core::ptr::addr_of_mut!(PANELS)).first_mut(),
             (*core::ptr::addr_of_mut!(CHUNK_SKY_WINDOW)).words_mut(),
         )
+    }) else {
+        return;
     };
     let (mut uploads, mut count) =
         stream.uploads::<PANEL_UPLOADS_PER_FRAME>(PANEL_UPLOADS_PER_FRAME);
