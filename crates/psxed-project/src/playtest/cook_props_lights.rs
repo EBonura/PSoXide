@@ -2514,9 +2514,6 @@ pub(crate) fn push_game_entity(
     if enemy.training {
         flags |= psx_level::game_entity_flags::TRAINING;
     }
-    if enemy.tactical {
-        flags |= psx_level::game_entity_flags::TACTICAL;
-    }
     if state_clips.run_supported {
         flags |= psx_level::game_entity_flags::CAN_RUN;
     }

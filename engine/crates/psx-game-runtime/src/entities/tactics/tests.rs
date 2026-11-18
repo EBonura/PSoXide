@@ -13,7 +13,6 @@ const fn enemy() -> LevelGameEntityRecord {
         400,
         game_entity_flags::ENABLED
             | game_entity_flags::CAN_RUN
-            | game_entity_flags::TACTICAL
             | game_entity_flags::RANGED_ATTACK
             | game_entity_flags::MELEE_ATTACK
             | game_entity_flags::LIGHT_ATTACK
@@ -930,9 +929,9 @@ fn committed(records: &'static [LevelGameEntityRecord; 1], attack: CombatAction)
 #[test]
 fn enemy_attacks_pass_the_same_kit_gate_as_the_player() {
     use game_entity_flags::{
-        ENABLED, HEAVY_ATTACK, LIGHT_ATTACK, MELEE_ATTACK, RANGED_ATTACK, TACTICAL,
+        ENABLED, HEAVY_ATTACK, LIGHT_ATTACK, MELEE_ATTACK, RANGED_ATTACK,
     };
-    let base = ENABLED | TACTICAL;
+    let base = ENABLED;
     let both_strikes = enemy_with_flags(base | MELEE_ATTACK | LIGHT_ATTACK | HEAVY_ATTACK);
     assert_eq!(committed(both_strikes, CombatAction::LightAttack), Some(0));
     assert_eq!(committed(both_strikes, CombatAction::HeavyAttack), Some(1));
@@ -1246,7 +1245,7 @@ fn the_tactical_controller_decides_for_the_actor_as_for_an_entity() {
     );
     let mut persona = enemy();
     persona.z = 600;
-    e.engage_actor(&persona, 0, 7);
+    e.engage_actor(0, 7);
     assert_eq!(e.rival(actor), Some(0));
     // The controller reads her body where it is.
     assert_eq!(e.position(actor), [0, 0, 600]);

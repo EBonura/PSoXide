@@ -193,7 +193,7 @@ impl TacticalState {
     };
 }
 
-impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
+impl<const N: usize, const S: bool> GameEntities<N, S> {
     /// Set when the swing coming at slot `index`'s fighter first meets its
     /// body, as the owner predicts it from the posed blade, for the slot's
     /// next think ([`PredictedContact::Unread`] leaves the controller to the
@@ -205,10 +205,10 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
     }
 
     /// Hand the actor slot to the tactical controller for a fight against
-    /// slot `rival`, deciding by `persona` (spacing, reach, reaction, kits):
-    /// it engages at once, with the reaction pause of an entity that notices.
-    /// The actor's own rules run what it decides ([`Self::actor_intent`]).
-    pub fn engage_actor(&mut self, persona: &LevelGameEntityRecord, rival: usize, seed: u32) {
+    /// slot `rival`: it engages at once, with the reaction pause of an entity
+    /// that notices. The actor's own rules run what it decides, by the persona
+    /// passed to [`Self::actor_intent`].
+    pub fn engage_actor(&mut self, rival: usize, seed: u32) {
         let i = Self::ACTOR_SLOT;
         self.tactics[i] = TacticalState::EMPTY;
         self.tactics[i].seed = seed;
@@ -279,10 +279,6 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         let plan = self.decide_tactical(persona, i, input, mover, delta, &mut stats);
         self.actor_plan = Some((plan.then, self.position(i), self.probing.take()));
         plan.intent
-    }
-
-    pub(super) fn is_tactical(record: &LevelGameEntityRecord) -> bool {
-        T && record.flags & game_entity_flags::TACTICAL != 0
     }
 
     /// Relocate the one authored training actor for an obstacle fixture. This
@@ -405,16 +401,11 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         self.move_tried[index] = 0;
     }
 
-    pub(super) fn tactical_attack_ready(
-        &self,
-        record: &LevelGameEntityRecord,
-        index: usize,
-    ) -> bool {
-        !Self::is_tactical(record)
-            || (matches!(
-                self.tactics[index].goal,
-                EnemyGoal::None | EnemyGoal::Approach | EnemyGoal::Hold
-            ) && self.tactics[index].unseen_ticks == 0)
+    pub(super) fn tactical_attack_ready(&self, index: usize) -> bool {
+        matches!(
+            self.tactics[index].goal,
+            EnemyGoal::None | EnemyGoal::Approach | EnemyGoal::Hold
+        ) && self.tactics[index].unseen_ticks == 0
     }
 
     pub(super) fn distance(a: [i32; 3], b: [i32; 3]) -> i32 {
@@ -1109,7 +1100,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
             && goal != EnemyGoal::BreakAway
             && (!melee || melee_height_reachable)
             && self.holds_attack(i)
-            && self.tactical_attack_ready(r, i)
+            && self.tactical_attack_ready(i)
             && (melee || self.can_fire_energy(r, i))
             && self.target_within(
                 i,

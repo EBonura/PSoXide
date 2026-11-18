@@ -6,7 +6,7 @@ use super::*;
 use crate::dormant::{dormant_state, DormantStates};
 use psx_level::StableId;
 
-impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
+impl<const N: usize, const S: bool> GameEntities<N, S> {
     /// Initialise slot `index` from `record`. `seed` seeds the entity's
     /// tactical randomness.
     // Shared by every spawn path; keep one copy on PS1.
@@ -35,8 +35,6 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         self.move_yaw_valid[index] = 0;
         self.move_tried[index] = 0;
         self.state_ticks[index] = 0;
-        self.turn_ticks[index] = 0;
-        self.turn_phase_ticks[index] = 0;
         self.intent[index] = GameEntityIntent::Hold as u8;
         self.attack_cooldown[index] = 0;
         self.attack_wait_ticks[index] = 0;

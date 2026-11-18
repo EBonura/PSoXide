@@ -2457,9 +2457,6 @@ impl Default for CharacterResource {
 /// projects load (and round-trip) unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnemyBehaviorSettings {
-    /// Enable sustained tactical movement and explicit blocked-path recovery.
-    #[serde(default)]
-    pub tactical: bool,
     /// Show encounter diagnostics and enable Select + L1 to restart the encounter.
     #[serde(default)]
     pub training: bool,
@@ -2567,7 +2564,6 @@ impl EnemyBehaviorSettings {
     /// Authoring defaults for a freshly enabled enemy.
     pub const fn defaults() -> Self {
         Self {
-            tactical: false,
             training: false,
             aggro_radius: default_enemy_aggro_radius(),
             patrol_offset: [0; 3],

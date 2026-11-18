@@ -257,8 +257,7 @@ fn a_sub_unit_strafe_keeps_one_gait_on_one_clock_for_her_and_an_enemy() {
         std::boxed::Box::leak(std::boxed::Box::new([LevelGameEntityRecord {
             flags: psx_level::game_entity_flags::ENABLED
                 | psx_level::game_entity_flags::MELEE_ATTACK
-                | psx_level::game_entity_flags::LIGHT_ATTACK
-                | psx_level::game_entity_flags::TACTICAL,
+                | psx_level::game_entity_flags::LIGHT_ATTACK,
             reaction_ticks: 0,
             idle_clip: 0,
             walk_clip: 1,

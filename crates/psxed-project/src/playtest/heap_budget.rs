@@ -121,10 +121,9 @@ const CHUNK_SKY_CODE_BYTES: usize = 39_100;
 const ACTOR_MODEL_SURCHARGE_BYTES: usize = 31_200;
 /// What a level with enemies adds beyond the sum of its tables: the template levels with an enemy
 /// linked 34 KB above the sum of the tables measured one at a time (a toolkit manifest edited to
-/// their shape agrees), the actor code the tables share.
-const ENEMY_BUNDLE_BYTES: usize = 34_500;
-/// What an enemy using the tactical policy (`ANY_TACTICAL_ENTITY`) adds to the image.
-const TACTICAL_CODE_BYTES: usize = 26_400;
+/// their shape agrees), the actor code the tables share, plus the 26.4 KB the tactical controller
+/// added when it was optional (every enemy runs it now).
+const ENEMY_BUNDLE_BYTES: usize = 34_500 + 26_400;
 /// What a training-pen enemy (`ANY_TRAINING_ENTITY`) adds to the image.
 const TRAINING_CODE_BYTES: usize = 11_400;
 
@@ -145,15 +144,14 @@ pub fn table_bytes(package: &PlaytestPackage) -> usize {
     sky_bytes
         + table_bytes_of(
             &package.world_geometry.record_lens,
-            any(psx_level::game_entity_flags::TACTICAL),
             any(psx_level::game_entity_flags::TRAINING),
         )
 }
 
-/// [`table_bytes`] from the record counts (by `psx_level::wire::TABLE_NAMES` order) and the two
-/// enemy flags.
+/// [`table_bytes`] from the record counts (by `psx_level::wire::TABLE_NAMES` order) and whether a
+/// training enemy is placed.
 #[must_use]
-pub fn table_bytes_of(lens: &[usize], tactical: bool, training: bool) -> usize {
+pub fn table_bytes_of(lens: &[usize], training: bool) -> usize {
     let mut bytes = 0;
     for &(name, code, per_record) in TABLE_IMAGE {
         let count = psx_level::wire::TABLE_NAMES
@@ -179,9 +177,6 @@ pub fn table_bytes_of(lens: &[usize], tactical: bool, training: bool) -> usize {
         if count("model_instances") > 0 {
             bytes += ACTOR_MODEL_SURCHARGE_BYTES;
         }
-    }
-    if tactical {
-        bytes += TACTICAL_CODE_BYTES;
     }
     if training {
         bytes += TRAINING_CODE_BYTES;
@@ -529,7 +524,7 @@ mod tests {
         let model = IMAGE_FIXED_BYTES
             + 142 * 2048
             + 125 * PERSISTENT_SLOT_BYTES
-            + table_bytes_of(&lens, false, false)
+            + table_bytes_of(&lens, false)
             + CHUNK_SKY_CODE_BYTES
             + 1537 * 2
             + 7992
@@ -548,7 +543,7 @@ mod tests {
         let without = IMAGE_FIXED_BYTES
             + 142 * 2048
             + 125 * PERSISTENT_SLOT_BYTES
-            + table_bytes_of(&lens, false, false)
+            + table_bytes_of(&lens, false)
             + CHUNK_SKY_CODE_BYTES
             + 1537 * 2
             + 7992

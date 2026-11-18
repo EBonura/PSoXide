@@ -40,7 +40,7 @@ use psx_level::{CharacterAnimationAction, LevelCharacterRecord, LevelGameEntityR
 use crate::fighter::FighterSpec;
 
 /// One fighter's entity table: one slot, stance-bound attacks, tactical.
-pub type Entities = GameEntities<1, true, true>;
+pub type Entities = GameEntities<1, true>;
 
 /// The disc duel's time limit (`duel_observe`: three minutes).
 pub const TIME_LIMIT_TICKS: u32 = 10_800;

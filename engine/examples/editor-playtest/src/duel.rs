@@ -150,7 +150,7 @@ impl Playtest {
                 // Both fighters start engaged, as the rivals duel's do: each
                 // notices the other, reaction pause included.
                 self.game_entities
-                    .engage_actor(&persona, target, seed.rotate_left(8) ^ 0x9e3779b9);
+                    .engage_actor(target, seed.rotate_left(8) ^ 0x9e3779b9);
                 self.game_entities
                     .engage(target, psx_game_runtime::combatant::CombatantId::PLAYER);
                 // She keeps her rival in view as an entity faces its target.

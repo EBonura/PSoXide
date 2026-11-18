@@ -1100,8 +1100,7 @@ pub mod game_entity_flags {
     /// band at distance and keeps close-range attacks on the Horizon
     /// light/heavy actions.
     pub const RANGED_ATTACK: u16 = 1 << 2;
-    /// Sustained tactical goals, contextual attacks and movement recovery.
-    pub const TACTICAL: u16 = 1 << 3;
+    // Bit 3 was TACTICAL: every enemy runs the tactical controller now.
     /// Opt-in single-enemy encounter reset and diagnostic overlay.
     pub const TRAINING: u16 = 1 << 4;
     /// The Character has the melee kit

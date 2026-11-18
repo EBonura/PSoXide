@@ -451,7 +451,6 @@ pub(super) const MAX_LOGIC_EVENTS: usize = if LEN_LOGIC == 0 { 0 } else { 32 };
 pub(super) type RuntimeGameEntities = psx_game_runtime::entities::GameEntities<
     { MAX_GAME_ENTITIES + 1 },
     true,
-    { crate::generated::ANY_TACTICAL_ENTITY },
 >;
 
 /// Caller-owned one-tick handoff between entity state advancement and the

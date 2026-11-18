@@ -1,7 +1,7 @@
 //! Optional Cortex prototype; legacy records retain their original rules.
 use super::*;
 use crate::combat_intent::{CombatAction, CombatIntent, CombatMove};
-impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
+impl<const N: usize, const S: bool> GameEntities<N, S> {
     /// Ranged-exchange role of entity `index` (cover, peek, evade ...), 0 when unknown.
     pub fn combat_role(&self, index: usize) -> u8 {
         self.tactics.get(index).map_or(0, |t| t.combat_role)
@@ -363,7 +363,7 @@ impl<const N: usize, const S: bool, const T: bool> GameEntities<N, S, T> {
         mover: &mut impl FighterWorld,
         delta: u16,
     ) {
-        if !Self::is_tactical(r) || !self.selected_attack_is_ranged(i) {
+        if !self.selected_attack_is_ranged(i) {
             return;
         }
         let before = self.position(i);

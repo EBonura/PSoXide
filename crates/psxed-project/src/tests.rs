@@ -4434,7 +4434,6 @@ fn graybox_single_enemy_tactical_encounter_cooks_with_approved_walk() {
     let package = package.unwrap();
     assert_eq!(package.game_entities.len(), 1);
     let enemy = &package.game_entities[0];
-    assert_ne!(enemy.flags & psx_level::game_entity_flags::TACTICAL, 0);
     assert_ne!(enemy.flags & psx_level::game_entity_flags::TRAINING, 0);
     assert_ne!(enemy.walk_clip, enemy.run_clip);
     assert_ne!(enemy.attack_clip, enemy.heavy_attack_clip);
