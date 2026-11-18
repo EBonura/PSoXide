@@ -235,7 +235,7 @@ fn run(o: &Options) -> Result<ExitCode, String> {
         }
         let r = ctx.timed(name, || match *name {
             "size" => stage::size::run(&ctx),
-            "host" => stage::host::run(&ctx),
+            "host" => stage::host::run(&ctx, false),
             "journeys" => stage::journeys::run(&ctx, false),
             "speed" => stage::speed::run(&ctx, false),
             "cross" => stage::cross::run(&ctx),
@@ -255,7 +255,10 @@ fn run(o: &Options) -> Result<ExitCode, String> {
     }
     for (section, declared) in [
         ("[size]", game.size.is_some()),
-        ("[[speed]]", !game.windows.is_empty()),
+        (
+            "[[speed]] (or a [[host]] metric)",
+            !game.windows.is_empty() || game.hosts.iter().any(|h| h.metric.is_some()),
+        ),
         ("[journeys]", game.journeys.is_some()),
         ("[cross]", game.cross.is_some()),
         ("[clean]", game.clean.is_some()),
@@ -369,6 +372,16 @@ fn bless(o: &Options) -> Result<ExitCode, String> {
         "open-loop steps remaining in {}: {total} (target 0)",
         game.name
     );
+    let host = stage::host::run(&ctx, true);
+    print_stage(&host);
+    if !host.passed() {
+        return Err("a host check failed: nothing blessed".into());
+    }
+    for (k, v) in &host.outcome.facts {
+        if let Some(name) = k.strip_prefix("metric/") {
+            base.host.insert(name.to_string(), v.parse().unwrap_or(0));
+        }
+    }
     let speed = stage::speed::run(&ctx, true);
     for w in &game.windows {
         if w.polls.is_none() {

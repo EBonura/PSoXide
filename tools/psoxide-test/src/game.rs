@@ -143,6 +143,18 @@ pub struct Journeys {
     /// on every model instead of the CPU frame alone (`--no-hw`).
     #[serde(default)]
     pub hw: bool,
+    /// Journeys that run on some models only, each with the reason; the others are reported as
+    /// SKIP with that reason on every run.
+    #[serde(default)]
+    pub only_on: BTreeMap<String, OnlyOn>,
+}
+
+/// A journey's model subset.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OnlyOn {
+    pub models: Vec<String>,
+    pub reason: String,
 }
 
 /// The fleet's enforced conformance rules, defined here once. A game file may list more (or a
@@ -200,6 +212,40 @@ pub struct Host {
     /// relies on its own `.cargo/config.toml`.
     #[serde(default)]
     pub dir: Option<String>,
+    /// Extra environment; `{input:NAME}` and `{tool:NAME}` (frontend, gate, rearmed_core,
+    /// redux) resolve from the user config, as in a build's `env`. The same two placeholders
+    /// work in `command`.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    /// Variables the command must not see (the harness's own CARGO_BUILD_JOBS included).
+    #[serde(default)]
+    pub env_remove: Vec<String>,
+    /// Run once per hardware model, with PSOXIDE_HARDWARE set (default: once, unset).
+    #[serde(default)]
+    pub models: Vec<String>,
+    /// A number the command prints, judged like a bar and stored by `bless`.
+    #[serde(default)]
+    pub metric: Option<Metric>,
+}
+
+/// A number read from a host check's output: the first integer after `key=` or `key:`.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct Metric {
+    pub key: String,
+    /// `lower` or `higher`: the direction that is better, judged against the baseline.
+    #[serde(default)]
+    pub better: Option<String>,
+    /// How far the worse direction may go past the baseline (default 0; needs `reason`).
+    #[serde(default)]
+    pub tolerance: u64,
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// Absolute floor and ceiling, judged on every run with or without a baseline.
+    #[serde(default)]
+    pub min: Option<u64>,
+    #[serde(default)]
+    pub max: Option<u64>,
 }
 
 /// The clean-clone proof.
@@ -316,6 +362,29 @@ impl Game {
             }
             if h.command.is_empty() {
                 return Err(format!("[[host]] `{}` has no command", h.name));
+            }
+            if let Some(m) = &h.metric {
+                if !matches!(m.better.as_deref(), None | Some("lower" | "higher")) {
+                    return Err(format!(
+                        "[[host]] `{}`: metric better is lower or higher",
+                        h.name
+                    ));
+                }
+                if m.tolerance != 0 && m.reason.as_deref().is_none_or(str::is_empty) {
+                    return Err(format!(
+                        "[[host]] `{}`: a metric tolerance needs `reason`",
+                        h.name
+                    ));
+                }
+            }
+        }
+        if let Some(j) = &self.journeys {
+            for (id, only) in &j.only_on {
+                if only.models.is_empty() || only.reason.trim().is_empty() {
+                    return Err(format!(
+                        "[journeys] only_on `{id}`: needs models and a reason"
+                    ));
+                }
             }
         }
         if let Some(cross) = &self.cross {

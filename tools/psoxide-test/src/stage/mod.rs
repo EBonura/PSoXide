@@ -118,17 +118,49 @@ impl Ctx<'_> {
         build: &crate::game::Build,
         stage_root: &Path,
     ) -> Result<Vec<(String, Option<String>)>, String> {
+        self.command_env(stage_root, &build.env, &build.env_remove)
+    }
+
+    /// `child_env`, minus `remove`, plus `extra` with its placeholders resolved.
+    pub fn command_env(
+        &self,
+        stage_root: &Path,
+        extra: &BTreeMap<String, String>,
+        remove: &[String],
+    ) -> Result<Vec<(String, Option<String>)>, String> {
         let mut env = self.child_env(stage_root);
-        for name in &build.env_remove {
+        for (name, value) in extra {
+            env.push((name.clone(), Some(self.resolve(value)?)));
+        }
+        for name in remove {
             env.push((name.clone(), None));
         }
-        for (name, value) in &build.env {
-            env.push((
-                name.clone(),
-                Some(resolve_inputs(value, &self.config.inputs)?),
-            ));
-        }
         Ok(env)
+    }
+
+    /// Resolve `{input:NAME}` and `{tool:NAME}` placeholders from the user config.
+    pub fn resolve(&self, value: &str) -> Result<String, String> {
+        let value = resolve_inputs(value, &self.config.inputs)?;
+        let tools = &self.config.tools;
+        let mut out = value.clone();
+        for (name, path) in [
+            ("frontend", tools.frontend.clone()),
+            ("gate", tools.gate.as_ref().map(|g| g.path.clone())),
+            ("rearmed_core", tools.rearmed_core.clone()),
+            ("redux", tools.redux.clone()),
+        ] {
+            let token = format!("{{tool:{name}}}");
+            if out.contains(&token) {
+                let path = path.ok_or_else(|| {
+                    format!("`{value}` needs {{tool:{name}}}: set it under [tools] in the config")
+                })?;
+                out = out.replace(&token, &path.display().to_string());
+            }
+        }
+        if let Some(at) = out.find("{tool:") {
+            return Err(format!("unknown tool placeholder in `{}`", &out[at..]));
+        }
+        Ok(out)
     }
 }
 
