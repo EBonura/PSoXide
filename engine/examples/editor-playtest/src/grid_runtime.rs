@@ -213,6 +213,7 @@ impl GridRuntime {
     /// scene calls it ([`Playtest::on_enter_state`]): the front end's resource
     /// sets (the sky among them) run before the scene's own `init` and read
     /// those tables.
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     pub(super) fn read_level(cd: &mut CdController) -> Result<(), GridRuntimeInitError> {
         if crate::level_data::core_kept() {
             return Ok(());

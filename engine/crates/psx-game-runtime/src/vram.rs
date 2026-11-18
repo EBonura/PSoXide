@@ -1531,6 +1531,7 @@ impl<
         slot
     }
 
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     fn ensure_large_ui_texture_uploaded_with_clut_mode(
         &mut self,
         layout: VramLayout,
@@ -1618,6 +1619,7 @@ impl<
     /// Queue `asset_bytes` for upload with an explicit CLUT stamping mode.
     /// Returns the already-resident slot when the asset is up; `None` while
     /// the upload is pending (or dropped).
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     pub fn ensure_texture_uploaded_with_clut_mode(
         &mut self,
         layout: VramLayout,
@@ -1887,6 +1889,7 @@ impl<
     /// Upload the streamed sky panorama (two 4bpp pages + one CLUT per
     /// band) synchronously from `asset_bytes`. Reuses the resident slot on
     /// re-entry.
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     pub fn ensure_sky_panorama_uploaded(
         &mut self,
         asset_id: AssetId,

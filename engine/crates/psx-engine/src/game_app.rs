@@ -1080,6 +1080,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
     /// state then `on_enter_state` on the incoming one, but skips both when the
     /// two states share a resource key (so a resource shared across states is
     /// acquired once and never thrashed). Idempotent for same-set transitions.
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     fn switch_resources(&mut self, next_index: u16, ctx: &mut Ctx) {
         let next = self.state_ref_at(next_index);
         let next_key = self.gameplay.state_resource_key(next);
@@ -1149,6 +1150,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
 
     /// Move the cursor onto `state_index`, initialising the session if the
     /// target carries gameplay and the session has not been loaded yet.
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     fn enter_flow_state(&mut self, state_index: u16, return_to: Option<u16>, ctx: &mut Ctx) {
         // Acquire/release scene resources before the cursor moves and before
         // any gameplay init below reads them.
@@ -1891,6 +1893,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
     /// activation and [`Self::update_ui_timers`], so a Timer node's
     /// auto-advance walks exactly the same flow paths a button press
     /// does.
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     fn perform_action(&mut self, action: LevelUiAction, ctx: &mut Ctx) {
         match action {
             LevelUiAction::GotoState { state } => {

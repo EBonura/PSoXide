@@ -449,6 +449,7 @@ impl RuntimeModelAsset {
     /// atlas. All data needed after loading is copied into the supplied pools,
     /// so `mesh_bytes` may be reused as soon as this function returns.
     #[allow(clippy::too_many_arguments)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     pub fn from_record_bytes(
         index: ModelIndex,
         record: &LevelModelRecord,
@@ -1068,6 +1069,7 @@ pub fn player_action_push_speed<
 /// Parse every cooked model + animation into the runtime tables:
 /// clears the caches, decodes clips, then decodes each model's faces,
 /// parts, and vertices into the shared pools.
+#[cfg_attr(target_arch = "mips", optimize(size))]
 pub fn load_runtime_models<
     const MAX_RUNTIME_MODELS: usize,
     const MAX_RUNTIME_MODEL_CLIPS: usize,

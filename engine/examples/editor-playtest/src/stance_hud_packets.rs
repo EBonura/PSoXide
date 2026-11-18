@@ -614,6 +614,7 @@ impl HudPackets {
 
     /// Set the packets up for `state`: patch the pills and the sprites of their effects.
     #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     fn set_up(&mut self, state: &HudState) {
         let origin = self.origin;
         let vram = self.vram;

@@ -292,6 +292,7 @@ pub(super) fn model_texture_slot(texture_asset: AssetId) -> Option<VramSlot> {
 }
 
 /// Upload the streamed sky panorama synchronously from `asset_bytes`.
+#[cfg_attr(target_arch = "mips", optimize(size))]
 pub(super) fn ensure_sky_panorama_uploaded(
     asset_id: AssetId,
     asset_bytes: &[u8],

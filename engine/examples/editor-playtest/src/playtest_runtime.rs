@@ -1002,6 +1002,7 @@ impl Playtest {
     /// Clear run progress while keeping front-end settings and loaded assets.
     // Initial load and the menu share the full reset; keep one copy in RAM.
     #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     pub(super) fn reset_new_game(&mut self) {
         self.hook_travel = None;
         self.hook_target = None;
@@ -1162,6 +1163,7 @@ impl Playtest {
     /// death and decides the respawn pose; enemies, logic records
     /// (including fired-once triggers), door states, and box props are
     /// TRANSIENT and re-arm 1:1 from their cooked tables below.
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     pub(super) fn respawn_after_death(&mut self) {
         self.hook_travel = None;
         self.hook_target = None;
