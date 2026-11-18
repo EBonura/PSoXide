@@ -348,7 +348,9 @@ fn measure_one(
         argv.push(a.clone());
     }
     let env = ctx.child_env(&ctx.work.join("guest-stage"));
-    let metrics = match util::run_logged(&argv, &ctx.repo, &env, &log, None) {
+    let metrics = match ctx.machine("emu", || {
+        util::run_logged(&argv, &ctx.repo, &env, &log, None)
+    }) {
         Ok(d) if d.code == 0 => {
             let m = parse_measure(&d.output);
             if m.contains_key("flips") && m.contains_key("work_per_frame") {

@@ -229,12 +229,14 @@ fn one(ctx: &Ctx<'_>, job: &Job, self_exe: &Path) -> (Check, bool) {
         util::short(&key)
     ));
     let replay = ctx.timed(&format!("cross:{name}"), || match job.emulator {
-        Emulator::Rearmed => rearmed(ctx, job, self_exe, &out),
+        Emulator::Rearmed => ctx.machine("emu", || rearmed(ctx, job, self_exe, &out)),
         Emulator::Redux => {
             let contents = ctx.config.tools.redux.clone().unwrap_or_default();
             let cfg = ctx.work.join("redux-cfg");
             let seconds = (job.plan.max_frames / 20).clamp(120, 1800);
-            crate::redux::replay(&job.plan, &contents, &cfg, &out, seconds)
+            ctx.machine("redux", || {
+                crate::redux::replay(&job.plan, &contents, &cfg, &out, seconds)
+            })
         }
     });
     let check = judge(&name, &job.plan, replay, &out);

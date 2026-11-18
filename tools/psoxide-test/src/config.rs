@@ -30,7 +30,7 @@ pub struct Config {
 }
 
 /// How much runs at once.
-#[derive(Debug, Deserialize, Clone, Copy)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct Budget {
     /// Cargo jobs for builds (`CARGO_BUILD_JOBS`).
@@ -42,6 +42,19 @@ pub struct Budget {
     /// PCSX-Redux processes at once (counted inside `emulators` too).
     #[serde(default = "one")]
     pub redux: usize,
+    /// A directory every harness run on this machine shares: emulator and Redux jobs then also
+    /// hold one of `machine_emulators` / `machine_redux` lock slots there, so several lanes
+    /// together stay inside one machine-wide budget.
+    #[serde(default)]
+    pub shared_dir: Option<std::path::PathBuf>,
+    #[serde(default = "four")]
+    pub machine_emulators: usize,
+    #[serde(default = "one")]
+    pub machine_redux: usize,
+}
+
+fn four() -> usize {
+    4
 }
 
 fn one() -> usize {
@@ -60,6 +73,9 @@ impl Default for Budget {
             jobs: 3,
             emulators: 2,
             redux: 1,
+            shared_dir: None,
+            machine_emulators: 4,
+            machine_redux: 1,
         }
     }
 }

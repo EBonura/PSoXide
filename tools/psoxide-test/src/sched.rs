@@ -1,6 +1,8 @@
 //! The budget: run jobs on at most `width` threads, in the order given (callers sort longest
 //! first), and return the results in that same order.
 
+use std::os::fd::AsRawFd;
+use std::path::Path;
 use std::sync::Mutex;
 
 /// Run `work` on every job, at most `width` at once. Results come back in job order.
@@ -34,6 +36,46 @@ pub fn run_all<J: Sync, R: Send>(
         .collect()
 }
 
+/// Hold one of `count` machine-wide slots named `kind` in `dir` while `work` runs: an exclusive
+/// `flock` on `<dir>/<kind>-<n>.lock`, released when the file closes (also when the process dies).
+/// With no shared directory configured the work runs at once.
+pub fn machine_slot<R>(
+    dir: Option<&Path>,
+    kind: &str,
+    count: usize,
+    work: impl FnOnce() -> R,
+) -> R {
+    let Some(dir) = dir else {
+        return work();
+    };
+    if std::fs::create_dir_all(dir).is_err() {
+        return work();
+    }
+    loop {
+        for n in 0..count.max(1) {
+            let path = dir.join(format!("{kind}-{n}.lock"));
+            let Ok(file) = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&path)
+            else {
+                continue;
+            };
+            // SAFETY: a valid open descriptor owned by `file`, which outlives the lock: the lock
+            // is released when `file` drops at the end of this scope.
+            let locked =
+                unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
+            if locked {
+                let r = work();
+                drop(file);
+                return r;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -53,5 +95,23 @@ mod tests {
         });
         assert_eq!(out, (0..12).map(|j| j * 2).collect::<Vec<_>>());
         assert!(peak.load(Ordering::SeqCst) <= 3);
+    }
+
+    #[test]
+    fn machine_slots_bound_work_across_threads() {
+        let dir = tempfile::tempdir().unwrap();
+        let running = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+        let jobs: Vec<u32> = (0..6).collect();
+        run_all(&jobs, 6, |_| {
+            machine_slot(Some(dir.path()), "emu", 2, || {
+                let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(now, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(30));
+                running.fetch_sub(1, Ordering::SeqCst);
+            })
+        });
+        assert!(peak.load(Ordering::SeqCst) <= 2);
+        assert_eq!(machine_slot(None, "emu", 1, || 7), 7);
     }
 }

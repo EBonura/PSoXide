@@ -376,7 +376,9 @@ fn one(
     .chain(flags[1..].iter().cloned())
     .collect();
     let env = ctx.child_env(&ctx.work.join("guest-stage"));
-    let done = match util::run_logged(&argv, &ctx.repo, &env, &log, None) {
+    let done = match ctx.machine("emu", || {
+        util::run_logged(&argv, &ctx.repo, &env, &log, None)
+    }) {
         Ok(d) => d,
         Err(e) => return (Check::fail(name, e), None),
     };
