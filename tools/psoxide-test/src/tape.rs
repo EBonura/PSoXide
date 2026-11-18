@@ -18,12 +18,15 @@ pub struct Request {
     pub press: String,
     pub out: PathBuf,
     pub steps: u64,
+    /// Stop both runs at this port-1 poll (the frontend's `--stop-at-poll`); for games whose display
+    /// start moves. Without it the runs end at `steps` (a game whose display start never moves).
+    pub stop_at_poll: Option<u64>,
     /// `analog` (the frontend's default pad), `dualshock` or `digital`.
     pub pad: String,
 }
 
 pub const USAGE: &str = "psoxide-test tape --disc CUE --press SCHEDULE --out TAPE --steps N \
-                         [--pad analog|dualshock|digital]";
+                         [--stop-at-poll P] [--pad analog|dualshock|digital]";
 
 /// Read the command line after `tape`.
 pub fn parse(args: &[String]) -> Result<Request, String> {
@@ -31,6 +34,7 @@ pub fn parse(args: &[String]) -> Result<Request, String> {
     let mut press = None;
     let mut out = None;
     let mut steps = None;
+    let mut stop_at_poll = None;
     let mut pad = "analog".to_string();
     let mut it = args.iter();
     while let Some(flag) = it.next() {
@@ -50,6 +54,13 @@ pub fn parse(args: &[String]) -> Result<Request, String> {
                         .map_err(|_| format!("--steps `{v}` is not a number"))?,
                 );
             }
+            "--stop-at-poll" => {
+                let v = value()?;
+                stop_at_poll = Some(
+                    v.parse()
+                        .map_err(|_| format!("--stop-at-poll `{v}` is not a number"))?,
+                );
+            }
             "--pad" => pad = value()?,
             other => return Err(format!("unknown option `{other}`\nusage: {USAGE}")),
         }
@@ -60,6 +71,7 @@ pub fn parse(args: &[String]) -> Result<Request, String> {
         press: press.ok_or_else(|| missing("--press"))?,
         out: out.ok_or_else(|| missing("--out"))?,
         steps: steps.ok_or_else(|| missing("--steps"))?,
+        stop_at_poll,
         pad,
     };
     if !["analog", "dualshock", "digital"].contains(&request.pad.as_str()) {
@@ -104,6 +116,10 @@ pub fn argv(frontend: &Path, r: &Request, dumps: [&Path; 2]) -> [Vec<String>; 2]
             "--dump-hw".into(),
             dump.display().to_string(),
         ];
+        if let Some(poll) = r.stop_at_poll {
+            v.push("--stop-at-poll".into());
+            v.push(poll.to_string());
+        }
         v.extend(pad_flags(&r.pad));
         v
     };

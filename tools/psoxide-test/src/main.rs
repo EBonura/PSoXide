@@ -42,7 +42,7 @@ usage:
       measure the reference build and write psoxide-test.baseline.toml (refuses a red journey)
   psoxide-test lint [--repo DIR]
       load the game file and every journey; print the pad and open-loop findings
-  psoxide-test tape --disc CUE --press SCHEDULE --out TAPE --steps N [--pad analog|dualshock|digital]
+  psoxide-test tape --disc CUE --press SCHEDULE --out TAPE --steps N [--stop-at-poll P] [--pad analog|dualshock|digital]
       record a press schedule as a poll-bound tape and keep it only if it replays identically
   psoxide-test install [--repo DIR]
       install the judged disc into the configured library (needs a complete full PASS)
