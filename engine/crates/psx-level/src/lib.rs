@@ -3956,6 +3956,14 @@ pub fn find_asset(
     assets: &'static [LevelAssetRecord],
     id: AssetId,
 ) -> Option<&'static LevelAssetRecord> {
+    // The cook numbers assets by their place in the table, so the record is
+    // almost always at its own index; the scan is the fallback for a table
+    // built any other way.
+    if let Some(asset) = assets.get(usize::from(id.0)) {
+        if asset.id == id {
+            return Some(asset);
+        }
+    }
     let mut i = 0;
     while i < assets.len() {
         if assets[i].id == id {
