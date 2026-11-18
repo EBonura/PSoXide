@@ -940,6 +940,7 @@ fn room_reflection_probe_slot(room: RoomIndex) -> Option<VramSlot> {
 impl Playtest {
     /// Freeze actor presentation after the simulation tick. Rendering,
     /// equipment sockets, and combat consume these values until the next tick.
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     pub(super) fn refresh_actor_pose_snapshots(&mut self, ctx: &Ctx) {
         let player = self.game_entities.actor_motor().position();
         self.previous_player_actor_pose = self.player_actor_pose;

@@ -1018,7 +1018,6 @@ impl GridRuntime {
         trace_collision(&mut provider, CollisionTraceQuery::point(from, to))
     }
 
-    #[cfg_attr(target_arch = "mips", optimize(size))]
     pub(super) fn update_camera(
         &mut self,
         camera: &mut ThirdPersonCameraState,
