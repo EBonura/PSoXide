@@ -269,16 +269,26 @@ pub struct Probe {
 }
 
 impl Probe {
-    /// Whether the condition holds for `raw`, the little-endian bytes read at `addr`.
-    pub fn holds(&self, raw: u32) -> bool {
-        let v: i64 = match (self.size, self.signed) {
+    /// The value the condition compares: `size` bytes of `raw`, signed when `signed`.
+    pub fn value_of(&self, raw: u32) -> i64 {
+        match (self.size, self.signed) {
             (1, false) => i64::from(raw as u8),
             (1, true) => i64::from(raw as u8 as i8),
             (2, false) => i64::from(raw as u16),
             (2, true) => i64::from(raw as u16 as i16),
             (_, false) => i64::from(raw),
             (_, true) => i64::from(raw as i32),
-        };
+        }
+    }
+
+    /// The condition and the value read, for a failure message: `SYM eq 1 (read 6)`.
+    pub fn describe(&self, raw: u32) -> String {
+        format!("{} (read {})", self.text, self.value_of(raw))
+    }
+
+    /// Whether the condition holds for `raw`, the little-endian bytes read at `addr`.
+    pub fn holds(&self, raw: u32) -> bool {
+        let v = self.value_of(raw);
         match self.op.as_str() {
             "eq" => v == self.value,
             "ne" => v != self.value,
@@ -658,6 +668,21 @@ press = ["down"]
         );
         assert_eq!(info.pad.as_deref(), Some("dualshock"));
         assert_eq!(info.discs, ["build/x.cue"]);
+    }
+
+    #[test]
+    fn a_failure_names_the_value_read() {
+        let p = Probe {
+            text: "INTRO_MOVIE+0 eq 1".into(),
+            addr: 0x8001_0000,
+            size: 2,
+            signed: true,
+            op: "eq".into(),
+            value: 1,
+            value_hi: 0,
+        };
+        assert_eq!(p.describe(0xdead_0006), "INTRO_MOVIE+0 eq 1 (read 6)");
+        assert_eq!(p.value_of(0x0000_ffff), -1);
     }
 
     #[test]
