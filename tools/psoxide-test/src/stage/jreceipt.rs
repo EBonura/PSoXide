@@ -130,7 +130,7 @@ impl Shared {
             for file in files_under(&dir, &|rel: &str| {
                 !(rel.starts_with("golden/") || rel.ends_with(".toml") && !rel.contains('/'))
             }) {
-                key.file(&file.display().to_string(), &file)?;
+                key.file(&relative(&ctx.repo, &file), &file)?;
             }
         }
         Ok(Shared {
@@ -138,6 +138,14 @@ impl Shared {
             fixtures: key.finish(),
         })
     }
+}
+
+/// `path` relative to the repo, so a key does not depend on where the clone lives.
+fn relative(repo: &Path, path: &Path) -> String {
+    path.strip_prefix(repo)
+        .unwrap_or(path)
+        .display()
+        .to_string()
 }
 
 /// Every file under `dir` whose path relative to it passes `keep`, sorted.
@@ -194,12 +202,12 @@ pub fn content_key(
     }
     key.part("fixtures", &shared.fixtures);
     for file in files_under(golden, &|_| true) {
-        key.file(&file.display().to_string(), &file)?;
+        key.file(&relative(&ctx.repo, &file), &file)?;
     }
     // Flags carry the renderer, the conformance rules and a golden directory path; the path is
     // machine-local, its content is keyed above.
     for f in flags {
-        key.part("flag", f);
+        key.part("flag", &relative(&ctx.repo, Path::new(f)));
     }
     key.part("check-gpu-ll-fifo", "1");
     Ok(key.finish())
