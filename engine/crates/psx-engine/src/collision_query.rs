@@ -110,6 +110,13 @@ pub struct CollisionQueryError;
 pub trait CollisionTraceProvider {
     /// Trace one request into caller-owned output.
     fn trace_into(&mut self, query: CollisionTraceQuery, output: &mut CollisionTrace) -> bool;
+
+    /// Whether `query` is sure to hit something without tracing the world:
+    /// an actor body the provider adds that the sweep meets. `false` says
+    /// nothing (the default, for a provider with nothing of the kind).
+    fn surely_hits(&mut self, _query: CollisionTraceQuery) -> bool {
+        false
+    }
 }
 
 /// Run one provider trace while preserving an explicit failure channel.

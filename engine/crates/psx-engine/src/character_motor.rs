@@ -196,6 +196,39 @@ impl<P: CollisionTraceProvider + ?Sized> CollisionTraceProvider
         // tools/stack_guard.py proves the call tree fits.
         unsafe { TraceStack::run(|| self.trace_into_on_current_stack(query, output)) }
     }
+
+    /// An actor cylinder the sweep meets: the merged trace hits whatever the
+    /// world does (the earliest fraction wins and a hit is never undone).
+    fn surely_hits(&mut self, query: CollisionTraceQuery) -> bool {
+        self.blockers.iter().any(|&blocker| {
+            !cylinder_out_of_reach(query, blocker)
+                && trace_character_blocker(query, blocker).is_some_and(CollisionTrace::hit)
+        })
+    }
+}
+
+/// Whether `blocker` is farther from the sweep's XZ box than the two radii:
+/// every point the sweep passes is then out of its reach, and
+/// [`trace_character_blocker`] would answer `None` (a point trace never
+/// meets an actor body at all).
+#[inline(always)]
+fn cylinder_out_of_reach(query: CollisionTraceQuery, blocker: CharacterCollisionCylinder) -> bool {
+    let CollisionTraceShape::Body { radius, .. } = query.shape else {
+        return true;
+    };
+    let reach = radius.max(0).saturating_add(blocker.radius.max(0));
+    let (min_x, max_x) = (
+        query.start.x.min(query.end.x),
+        query.start.x.max(query.end.x),
+    );
+    let (min_z, max_z) = (
+        query.start.z.min(query.end.z),
+        query.start.z.max(query.end.z),
+    );
+    blocker.position.x > max_x.saturating_add(reach)
+        || blocker.position.x < min_x.saturating_sub(reach)
+        || blocker.position.z > max_z.saturating_add(reach)
+        || blocker.position.z < min_z.saturating_sub(reach)
 }
 
 impl<P: CollisionTraceProvider + ?Sized> CharacterBlockerTraceProvider<'_, '_, P> {
@@ -219,6 +252,9 @@ impl<P: CollisionTraceProvider + ?Sized> CharacterBlockerTraceProvider<'_, '_, P
             return false;
         }
         for &blocker in self.blockers {
+            if cylinder_out_of_reach(query, blocker) {
+                continue;
+            }
             if let Some(candidate) = trace_character_blocker(query, blocker) {
                 merge_collision_trace(&mut best, candidate);
             }
@@ -1658,6 +1694,16 @@ fn trace_stand_position<P: CollisionTraceProvider + ?Sized>(
     // lift, sweep at the raised height, then settle back onto an upward-facing
     // floor. Tall walls/ceilings reject either the lift or raised sweep.
     let raised_start = start.with_y(start.y.saturating_add(STEP_UP_HEIGHT));
+    let raised_target = target.with_y(raised_start.y);
+    // An actor body across the raised sweep fails the step whatever the lift
+    // and the world find (actors are never steppable): skip both traces.
+    if provider.surely_hits(CollisionTraceQuery {
+        start: raised_start,
+        end: raised_target,
+        shape,
+    }) {
+        return Ok(None);
+    }
     let lift = trace_collision(
         provider,
         CollisionTraceQuery {
@@ -1673,7 +1719,6 @@ fn trace_stand_position<P: CollisionTraceProvider + ?Sized>(
     if lift.all_solid || lift.fraction_q12 < COLLISION_FRACTION_ONE_Q12 {
         return Ok(None);
     }
-    let raised_target = target.with_y(raised_start.y);
     let across = trace_collision(
         provider,
         CollisionTraceQuery {
