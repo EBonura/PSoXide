@@ -129,20 +129,23 @@ impl Playtest {
         // SAFETY: both prefixes were initialized in the loop above.
         let entity_dead = unsafe { initialized_prefix(&entity_dead, entity_count) };
         // A fighter whose room is not resident is away: no per-tick work
-        // for it anywhere until its room streams back in.
-        // psx-numeric-allow-next-line: fixed 64-record mask; bit ops only
-        let mut away = 0u64;
-        if let Some(world_rt) = self.world_rt.as_ref() {
-            for index in 0..entity_count.min(64) {
-                if world_rt
-                    .fighter_room(&mut self.fighter_rooms[index], entity_positions[index])
-                    .is_none()
-                {
-                    away |= 1u64 << index;
+        // for it anywhere until its room streams back in. Tested at the
+        // 30 Hz cadence fighters think at.
+        if npc_tick_due {
+            // psx-numeric-allow-next-line: fixed 64-record mask; bit ops only
+            let mut away = 0u64;
+            if let Some(world_rt) = self.world_rt.as_ref() {
+                for index in 0..entity_count.min(64) {
+                    if world_rt
+                        .fighter_room(&mut self.fighter_rooms[index], entity_positions[index])
+                        .is_none()
+                    {
+                        away |= 1u64 << index;
+                    }
                 }
             }
+            self.game_entities.set_away_mask(away);
         }
-        self.game_entities.set_away_mask(away);
         let eye = self.camera.position();
         let spatial_masks = self.world_rt.as_mut().map(|world_rt| {
             // The observer stays inside the player's body rather than on the
@@ -354,6 +357,9 @@ impl Playtest {
         self.game_entities.advance_stances(1);
         if npc_tick_due {
             for index in 0..entity_count {
+                if self.game_entities.away(index) {
+                    continue;
+                }
                 let record = &GAME_ENTITIES[index];
                 self.track_enemy_tell(index, ctx, npc_delta_ticks);
                 let position = self.game_entities.position(index);

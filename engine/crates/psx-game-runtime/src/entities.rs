@@ -1850,7 +1850,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         let count = self.count();
         let mut index = 0usize;
         while index < count {
-            if self.state(index) != GameEntityState::Dead {
+            if self.state(index) != GameEntityState::Dead && !self.away(index) {
                 self.combatants[index].advance_stance(delta);
             }
             index += 1;
