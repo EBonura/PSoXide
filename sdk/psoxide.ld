@@ -96,10 +96,6 @@ SECTIONS {
         *(.text.*point_contents_from*)
         *(.text.*plane_contact*)
         *(.text.*model_collision_hull*)
-        *(.text.*handoff*record_words*)
-        *(.text.*handoff*write_commands_slow*)
-        *(.text.*set_draw_mode*)
-        *(.text.*signal_draw_done*)
         *(.text .text.*);
         __text_end = .;
     } > IMAGE
