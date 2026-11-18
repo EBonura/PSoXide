@@ -26,15 +26,53 @@ pub const HEAP_BUDGET_FILENAME: &str = "heap_budget.txt";
 pub const MARGIN_BYTES: usize = psoxide_hazard::heap_guard::MARGIN_BYTES as usize;
 /// Bytes of one resident room slot on the guest (`RoomSlot` plus its table entry).
 const SLOT_BYTES: usize = 228;
-/// Bytes of heap every level needs whatever its size: the level core's tables, the record decode
-/// buffers, the chunk read buffer, the material lists. Fitted to the guest's heap in use after a
-/// long walk (`ReuseHeap` bump pointer less its free space): verbs-demo (7 rooms) 48.5 KB with
-/// 31.6 KB of renderer scratch and table, Citadel (93 rooms) 62.7 KB with 17.1 KB, grid-starter
-/// (1 room) 3.7 KB with 1.7 KB. The line through the first two is 14.6 KB plus 334 B a room; the
-/// constants round both up.
-const FIXED_BYTES: usize = 16 * 1024;
+/// Bytes of heap every level needs beyond what [`level_bytes`] counts: the gameplay set-up's
+/// small blocks (the 2,280 B list, the camera and streamer lists), the flood planner's lists and
+/// the first frames' scratch lists. Measured from the guest's heap (every allocation logged, and
+/// the `ReuseHeap` bump pointer read from a RAM dump after a walk or a duel): rib-room-h with its
+/// duel enemies and grid-dungeon both stay within this.
+const FIXED_BYTES: usize = 5 * 1024;
 /// Bytes of heap per room beyond [`FIXED_BYTES`]: the per-room tables and lists.
-const ROOM_BYTES: usize = 360;
+const ROOM_BYTES: usize = 64;
+/// Bytes each grid material takes in the uploaded-material list (`grid_materials::bind_uploaded`).
+const UPLOADED_MATERIAL_BYTES: usize = 20;
+
+/// The heap block `ReuseHeap` (psx-game-runtime) carves for a request of `bytes`: its size class
+/// up to 2 KiB, the request rounded to its 8-byte alignment beyond.
+#[must_use]
+pub fn heap_block(bytes: usize) -> usize {
+    const SIZES: [usize; 16] = [
+        8, 16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 1536, 2048,
+    ];
+    if bytes == 0 {
+        return 0;
+    }
+    SIZES
+        .iter()
+        .copied()
+        .find(|&size| size >= bytes)
+        .unwrap_or(bytes.div_ceil(8) * 8)
+}
+
+/// Heap the level's own data takes for the run: the level core and the record chunk, each read
+/// whole (as words), every record table decoded from it (`psx_level::wire::decode_slice`, guest
+/// record sizes from [`psx_level::wire::GUEST_RECORD_BYTES`]) and the uploaded-material list.
+#[must_use]
+pub fn level_bytes(package: &PlaytestPackage, materials: usize) -> usize {
+    let owned = super::OwnedLevelRecords::build(package);
+    let records = owned.records();
+    let chunk = records.encode().len();
+    let decoded: usize = records
+        .table_lens()
+        .iter()
+        .zip(psx_level::wire::GUEST_RECORD_BYTES)
+        .map(|(count, size)| heap_block(count * size))
+        .sum();
+    heap_block(package.world_geometry.core.len().div_ceil(4) * 4)
+        + heap_block(chunk.div_ceil(4) * 4)
+        + decoded
+        + heap_block(materials * UPLOADED_MATERIAL_BYTES)
+}
 
 /// The sizes `heap_budget.txt` carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,7 +81,7 @@ pub struct HeapBudget {
     pub renderer: usize,
     /// The resident table: slots for every room the streamer tracks.
     pub resident_table: usize,
-    /// Everything else, a constant.
+    /// The level's own data ([`level_bytes`]) and the rest ([`FIXED_BYTES`], [`ROOM_BYTES`]).
     pub fixed: usize,
     /// The room pool the guest reserves in its BSS (not heap, listed because it competes with it).
     pub pool: usize,
@@ -352,7 +390,7 @@ pub fn plan(package: &PlaytestPackage) -> Option<HeapBudget> {
     Some(HeapBudget {
         renderer: GridRenderer::with_maxima(&level.maxima()).working_bytes(),
         resident_table: entries * SLOT_BYTES,
-        fixed: FIXED_BYTES + ROOM_BYTES * rooms,
+        fixed: FIXED_BYTES + ROOM_BYTES * rooms + level_bytes(package, level.materials.len()),
         pool: world.pool.pool_pages.max(1) * 2048,
         rooms,
     })
@@ -486,6 +524,30 @@ mod tests {
             }
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The guest's heap at its peak, read from RAM dumps (the `ReuseHeap` bump pointer less the
+    /// heap's start; it never retreats) on SDK 8d4e9a705: rib-room-h with its two duel enemies after
+    /// the 2,000-poll walk, grid-dungeon after the seed-1 duel to poll 900. The need must cover
+    /// each and stay close to it, so a build the guard passes cannot run out and a level is not
+    /// refused for heap it does not use.
+    #[test]
+    fn the_need_covers_the_measured_heap_peak() {
+        for (name, peak) in [("rib-room-h", 60_740usize), ("grid-dungeon", 15_100)] {
+            let dir = crate::projects_dir().join(name);
+            let project = ProjectDocument::load_from_path(dir.join("project.ron"))
+                .expect("the project loads");
+            let (package, report) = super::super::build_package(&project, &dir);
+            assert!(report.is_ok(), "{name}: {:?}", report.error_messages());
+            let budget = plan(&package.expect("a package")).expect("a grid world");
+            std::println!("{name}: need {} (peak {peak}) {budget:?}", budget.need());
+            assert!(budget.need() >= peak, "{name}: need {} under the peak {peak}", budget.need());
+            assert!(
+                budget.need() <= peak + 2048,
+                "{name}: need {} more than 2 KiB over the peak {peak}",
+                budget.need()
+            );
+        }
     }
 
     #[test]

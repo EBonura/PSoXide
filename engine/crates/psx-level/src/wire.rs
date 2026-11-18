@@ -387,7 +387,16 @@ wire_struct! {
 }
 
 macro_rules! level_tables {
-    ($(table $tf:ident: $tt:ty;)* $(one $of:ident: $ot:ty;)*) => {
+    ($(table $tf:ident: $tt:ty = $guest:literal;)* $(one $of:ident: $ot:ty;)*) => {
+        /// The guest (32-bit MIPS) size in bytes of one record of each table, by
+        /// [`TABLE_NAMES`] order: what decoding a table takes off the guest's heap
+        /// (the cook's heap need counts it). A guest build fails when one is wrong.
+        pub const GUEST_RECORD_BYTES: &[usize] = &[$($guest),*];
+        #[cfg(target_arch = "mips")]
+        const _: () = {
+            $(let _: [(); $guest] = [(); core::mem::size_of::<$tt>()];)*
+        };
+
         /// Every record one level owns.
         #[derive(Debug, Clone, Copy)]
         pub struct LevelRecords<'a> {
@@ -434,33 +443,33 @@ macro_rules! level_tables {
 }
 
 level_tables! {
-    table rooms: LevelRoomRecord;
-    table room_reflection_probes: Option<AssetId>;
-    table lights: PointLightRecord;
-    table particle_emitters: ParticleEmitterRecord;
-    table interactable_messages: InteractableMessageRecord;
-    table interactable_message_pages: &'static str;
-    table interactable_message_pages_it: &'static str;
-    table interactables: InteractableRecord;
-    table vitality_circles: LevelVitalityCircleRecord;
-    table logic: LevelLogicRecord;
-    table logic_slots: u16;
-    table visual_links: u16;
-    table game_entities: LevelGameEntityRecord;
-    table game_entity_ids: StableId;
-    table entities: EntityRecord;
-    table destructibles: LevelDestructibleRecord;
-    table world_objects: LevelWorldObjectRecord;
-    table image_props: LevelImagePropRecord;
-    table box_props: LevelBoxPropRecord;
-    table box_prop_surfaces: LevelBoxPropSurfaceRecord;
-    table cylinder_props: LevelCylinderPropRecord;
-    table cylinder_prop_surfaces: LevelCylinderPropSurfaceRecord;
-    table arch_props: LevelArchPropRecord;
-    table arch_prop_surfaces: LevelArchPropSurfaceRecord;
-    table arch_prop_collisions: LevelArchPropCollisionRecord;
-    table model_instances: LevelModelInstanceRecord;
-    table grid_uv_motions: LevelMaterialUvMotion;
+    table rooms: LevelRoomRecord = 148;
+    table room_reflection_probes: Option<AssetId> = 4;
+    table lights: PointLightRecord = 24;
+    table particle_emitters: ParticleEmitterRecord = 60;
+    table interactable_messages: InteractableMessageRecord = 20;
+    table interactable_message_pages: &'static str = 8;
+    table interactable_message_pages_it: &'static str = 8;
+    table interactables: InteractableRecord = 52;
+    table vitality_circles: LevelVitalityCircleRecord = 24;
+    table logic: LevelLogicRecord = 68;
+    table logic_slots: u16 = 2;
+    table visual_links: u16 = 2;
+    table game_entities: LevelGameEntityRecord = 128;
+    table game_entity_ids: StableId = 4;
+    table entities: EntityRecord = 24;
+    table destructibles: LevelDestructibleRecord = 6;
+    table world_objects: LevelWorldObjectRecord = 32;
+    table image_props: LevelImagePropRecord = 68;
+    table box_props: LevelBoxPropRecord = 272;
+    table box_prop_surfaces: LevelBoxPropSurfaceRecord = 96;
+    table cylinder_props: LevelCylinderPropRecord = 100;
+    table cylinder_prop_surfaces: LevelCylinderPropSurfaceRecord = 96;
+    table arch_props: LevelArchPropRecord = 80;
+    table arch_prop_surfaces: LevelArchPropSurfaceRecord = 96;
+    table arch_prop_collisions: LevelArchPropCollisionRecord = 24;
+    table model_instances: LevelModelInstanceRecord = 76;
+    table grid_uv_motions: LevelMaterialUvMotion = 8;
     one player_spawn: PlayerSpawnRecord;
     one player_controller: Option<PlayerControllerRecord>;
     one world_message: Option<InteractableMessageRecord>;
@@ -760,3 +769,4 @@ mod tests {
         assert!(LevelRecords::decode(leak(huge)).is_none());
     }
 }
+
