@@ -215,10 +215,24 @@ impl Playtest {
             let entity_mask =
                 world_rt.visible_bounds_mask(observer, entity_activation_bounds, away_now);
             let instance_count = MODEL_INSTANCES.len().min(MAX_MODEL_INSTANCES);
+            // The instances of this tick's away fighters: the query skips
+            // them, so nothing below builds their bounds.
+            // psx-numeric-allow-next-line: one bit per model instance, the mask width of the visibility query
+            let mut away_instances = 0u64;
+            for (entity, record) in GAME_ENTITIES.iter().enumerate().take(64) {
+                let instance = usize::from(record.model_instance);
+                if instance < 64 && away_now & (1u64 << entity) != 0 {
+                    away_instances |= 1u64 << instance;
+                }
+            }
             let mut instance_activation_bounds =
                 [const { core::mem::MaybeUninit::<VisibilityBounds>::uninit() };
                     MAX_MODEL_INSTANCES];
             for index in 0..instance_count {
+                if index < 64 && away_instances & (1u64 << index) != 0 {
+                    instance_activation_bounds[index].write(VisibilityBounds::EMPTY);
+                    continue;
+                }
                 let instance = &MODEL_INSTANCES[index];
                 let model = self
                     .models
@@ -241,8 +255,6 @@ impl Playtest {
             // cheaper to draw than to ask about.
             // psx-numeric-allow-next-line: one bit per model instance, the mask width of the visibility query
             let mut actor_instances = 0u64;
-            // psx-numeric-allow-next-line: one bit per model instance, the mask width of the visibility query
-            let mut away_instances = 0u64;
             for (entity, record) in GAME_ENTITIES.iter().enumerate() {
                 let instance = usize::from(record.model_instance);
                 let Some(bounds) = instance_activation_bounds.get_mut(instance) else {
@@ -250,8 +262,7 @@ impl Playtest {
                 };
                 if instance < 64 {
                     actor_instances |= 1u64 << instance;
-                    if entity < 64 && away_now & (1u64 << entity) != 0 {
-                        away_instances |= 1u64 << instance;
+                    if away_instances & (1u64 << instance) != 0 {
                         continue;
                     }
                 }
@@ -403,6 +414,11 @@ impl Playtest {
         self.game_entities.advance_stances(1);
         if npc_tick_due {
             for index in 0..entity_count {
+                // An away fighter is frozen: no tick work and no sound, its
+                // idle cue included.
+                if self.game_entities.away(index) {
+                    continue;
+                }
                 let record = &GAME_ENTITIES[index];
                 self.track_enemy_tell(index, ctx, npc_delta_ticks);
                 let position = self.game_entities.position(index);
