@@ -2283,7 +2283,7 @@ impl Playtest {
     /// is neither seen nor posed (`refresh_actor_pose_snapshots` keeps a pose
     /// only for a fighter that is fighting or seen), and nothing reads its
     /// pose override.
-    fn dormant_away(&self, index: usize) -> bool {
+    pub(super) fn dormant_away(&self, index: usize) -> bool {
         index < 64
             && self.fighters_away_now & (1u64 << index) != 0
             && self.game_entities.rival(index).is_none()

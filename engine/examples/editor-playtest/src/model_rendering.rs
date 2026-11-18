@@ -1095,6 +1095,15 @@ impl Playtest {
             } else {
                 None
             };
+            // An away fighter that is not fighting is neither seen nor
+            // fighting: the test below would discard its pose, so skip the
+            // corpse and visibility questions too.
+            if world_resident && owner.is_some_and(|(entity, _)| self.dormant_away(entity)) {
+                self.instance_actor_poses[index] = None;
+                self.previous_instance_actor_poses[index] = None;
+                index += 1;
+                continue;
+            }
             // A fighter's pose carries its hitboxes and hurtboxes. Contact
             // must not depend on whether the camera sees it (a camera pushed
             // into a wall culls an enemy standing next to the player), so an
