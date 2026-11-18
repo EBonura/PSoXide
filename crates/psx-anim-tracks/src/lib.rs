@@ -812,6 +812,9 @@ pub fn encode(clip: &ClipInput, opts: &Options) -> Result<(Vec<u8>, Report), Rej
     // the copy already passed the bounds the validator checks for this shape.
     let mut stored: HashMap<(Vec<u8>, usize), usize> = HashMap::new();
     let mut shared_bytes = 0usize;
+    // The decoder reads six bytes at every key start; the slack after the key
+    // area covers four. A track of 1-byte keys ending the area needs one more.
+    let mut read_end = 0usize;
     let mut place = |area: &mut Vec<u8>, keys: &[u8], stride: usize| -> usize {
         if let Some(&off) = stored.get(&(keys.to_vec(), stride)) {
             shared_bytes += keys.len();
@@ -820,6 +823,7 @@ pub fn encode(clip: &ClipInput, opts: &Options) -> Result<(Vec<u8>, Report), Rej
         let off = area.len();
         area.extend_from_slice(keys);
         stored.insert((keys.to_vec(), stride), off);
+        read_end = read_end.max(off + keys.len() - stride + 6);
         off
     };
     for j in 0..joints {
@@ -862,6 +866,9 @@ pub fn encode(clip: &ClipInput, opts: &Options) -> Result<(Vec<u8>, Report), Rej
             trans_key_bytes: tc.key_bytes as u8,
             bytes: (rc.bytes + tc.bytes) as u32,
         });
+    }
+    while area.len() + fmt::SLACK_BYTES < read_end {
+        area.push(0);
     }
     // Pad so the whole blob is a multiple of four bytes.
     let fixed = psxed_format::AssetHeader::SIZE + 8 + fmt::RATE_TABLE_SIZE + descs.len();

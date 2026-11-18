@@ -35,7 +35,7 @@ fn axis_points(radius: f64) -> impl Iterator<Item = [f64; 3]> {
 
 /// Bind-space points each joint drives: its own vertices, vertices that blend
 /// towards it, plus lever-arm points.
-fn joint_probes(model: &Model<'_>, socket_joints: &[u16]) -> Vec<Vec<[f64; 3]>> {
+pub fn joint_probes(model: &Model<'_>, socket_joints: &[u16]) -> Vec<Vec<[f64; 3]>> {
     let mut out: Vec<Vec<[f64; 3]>> = vec![Vec::new(); model.joint_count() as usize];
     for p in 0..model.part_count() {
         let Some(part) = model.part(p) else { continue };

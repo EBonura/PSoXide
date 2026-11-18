@@ -18,7 +18,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 mod animation_pose_correction;
 pub mod animation_resample;
-pub(crate) mod animation_tracks;
+pub mod animation_tracks;
 pub mod clip_window;
 /// Compatibility shim for the pinned emulator frontend, whose `cli.rs` still
 /// asks for a brush world leak diagnostic when it dumps an editor frame. A grid
