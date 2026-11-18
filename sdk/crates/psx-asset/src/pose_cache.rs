@@ -121,7 +121,7 @@ impl PoseCache {
             let mut pose = unsafe { tracks::joint_pose(tracks, joint, pos) };
             if let Some(p) = parent {
                 // SAFETY: a v7 clip; the parent is valid in `entry`.
-                unsafe { tracks::derive(tracks, joint, &mut pose, &entry.poses[p]) };
+                unsafe { tracks::derive(tracks, joint, &mut pose, &entry.poses[p], false) };
             }
             entry.poses[joint] = pose;
             entry.valid |= 1 << joint;
@@ -151,7 +151,7 @@ impl PoseCache {
             if let Some(p) = unsafe { tracks::parent(tracks, j) } {
                 // SAFETY: a v7 clip; the parent is valid in `entry` (decoded
                 // above or held before).
-                unsafe { tracks::derive(tracks, j, &mut pose, &entry.poses[p]) };
+                unsafe { tracks::derive(tracks, j, &mut pose, &entry.poses[p], false) };
             }
             entry.poses[j] = pose;
             entry.valid |= 1 << j;
@@ -187,7 +187,7 @@ pub(crate) unsafe fn chain_pose(tracks: &Tracks, pos: &TrackPos, joint: usize) -
         // SAFETY: as above.
         let mut child = unsafe { tracks::joint_pose(tracks, j, pos) };
         // SAFETY: a joint with a parent belongs to a v7 clip.
-        unsafe { tracks::derive(tracks, j, &mut child, &pose) };
+        unsafe { tracks::derive(tracks, j, &mut child, &pose, false) };
         pose = child;
     }
     pose

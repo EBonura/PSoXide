@@ -1617,7 +1617,9 @@ impl AnimationPoseSample<'_> {
     /// [`Self::pose`] for a caller that already holds the parent's pose from
     /// this same sample (a renderer walking parents first): `parent` must be
     /// `Some` exactly when [`Self::parent`] is, and then hold that joint's
-    /// pose. Skips the cache and the chain walk.
+    /// pose. Skips the cache and the chain walk. On the console the derivation
+    /// runs on the GTE and replaces its rotation matrix (RT): call it where the
+    /// GTE's matrices are reloaded before use (the renderer's decode loop).
     #[inline]
     pub fn pose_after_parent(
         &self,
@@ -1637,7 +1639,7 @@ impl AnimationPoseSample<'_> {
             if unsafe { tracks::parent(tracks, joint_index as usize) }.is_some() {
                 let parent = parent?;
                 // SAFETY: a v7 clip, a checked joint, the parent's pose given.
-                unsafe { tracks::derive(tracks, joint_index as usize, &mut pose, parent) };
+                unsafe { tracks::derive(tracks, joint_index as usize, &mut pose, parent, true) };
             }
         }
         Some(pose)

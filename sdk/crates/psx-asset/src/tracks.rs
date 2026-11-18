@@ -279,8 +279,37 @@ pub fn rotate_pivot(m: &[[i16; 3]; 3], v: [i32; 3]) -> [i32; 3] {
     [row(0), row(1), row(2)]
 }
 
+/// [`rotate_pivot`] on the GTE on the console (the same integers: an `sf = 0`
+/// MVMVA's MAC1..MAC3 are the exact row products, shifted here); it replaces
+/// the rotation matrix (RT) the GTE holds. Elsewhere it is [`rotate_pivot`].
+#[inline(always)]
+fn rotate_pivot_gte(m: &[[i16; 3]; 3], v: [i32; 3]) -> [i32; 3] {
+    #[cfg(target_arch = "mips")]
+    {
+        use psx_gte::math::{Mat3I16, Vec3I16};
+        psx_gte::scene::load_rotation(&Mat3I16 {
+            m: [
+                [m[0][0], m[1][0], m[2][0]],
+                [m[0][1], m[1][1], m[2][1]],
+                [m[0][2], m[1][2], m[2][2]],
+            ],
+        });
+        let r = psx_gte::scene::rotate_vector_unshifted_scheduled(Vec3I16::new(
+            v[0] as i16,
+            v[1] as i16,
+            v[2] as i16,
+        ));
+        [r.x >> 12, r.y >> 12, r.z >> 12]
+    }
+    #[cfg(not(target_arch = "mips"))]
+    {
+        rotate_pivot(m, v)
+    }
+}
+
 /// Turn `pose` (joint `joint`'s own rotation and residual) into its full pose
-/// given its parent's decoded pose: `t = t_p + R_p p - R p + residual`.
+/// given its parent's decoded pose: `t = t_p + R_p p - R p + residual`. With
+/// `gte` the products run on the GTE (console only; replaces its RT).
 ///
 /// # Safety
 /// `tracks` must come from [`validate`] for a v7 clip and `joint < joint_count`.
@@ -290,6 +319,7 @@ pub(crate) unsafe fn derive(
     joint: usize,
     pose: &mut JointPose,
     parent: &JointPose,
+    gte: bool,
 ) {
     // SAFETY: the pivot table of a validated v7 clip holds `joint_count`
     // pivots; `joint < joint_count`.
@@ -315,8 +345,17 @@ pub(crate) unsafe fn derive(
             ]
         }
     };
-    let a = rotate_pivot(&parent.matrix, pivot);
-    let b = rotate_pivot(&pose.matrix, pivot);
+    let (a, b) = if gte {
+        (
+            rotate_pivot_gte(&parent.matrix, pivot),
+            rotate_pivot_gte(&pose.matrix, pivot),
+        )
+    } else {
+        (
+            rotate_pivot(&parent.matrix, pivot),
+            rotate_pivot(&pose.matrix, pivot),
+        )
+    };
     pose.translation = Vec3I32::new(
         parent.translation.x + a[0] - b[0] + pose.translation.x,
         parent.translation.y + a[1] - b[1] + pose.translation.y,
