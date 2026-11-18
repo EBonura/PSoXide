@@ -149,10 +149,14 @@ fn prove(
     };
     let start = crate::util::now_seconds() - 1.0;
     for (i, command) in b.commands.iter().enumerate() {
-        let argv: Vec<String> = command
+        let argv: Vec<String> = match command
             .iter()
-            .map(|a| a.replace("{out}", &out.display().to_string()))
-            .collect();
+            .map(|a| ctx.resolve(&a.replace("{out}", &out.display().to_string())))
+            .collect::<Result<_, _>>()
+        {
+            Ok(a) => a,
+            Err(e) => return Outcome::error("clean", e),
+        };
         let log = logs.join(format!("{}-{}.log", b.name, i + 1));
         match util::run_logged(&argv, &src, &env, &log, None) {
             Ok(d) if d.code == 0 => {}
