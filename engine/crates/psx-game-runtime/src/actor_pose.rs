@@ -140,7 +140,14 @@ impl ActorPoseSnapshot {
     /// Sample one joint through the exact phase, crossfade, and root
     /// correction frozen into this snapshot.
     pub fn joint_pose(&self, joint: u16) -> Option<JointPose> {
-        let primary = self.animation.pose_looped_q12(self.phase_q12, joint)?;
+        self.joint_pose_at(self.phase_q12, joint)
+    }
+
+    /// [`Self::joint_pose`] at phase `phase_q12` of the same clip (the
+    /// crossfade and root correction as frozen): a sweep samples the
+    /// snapshot between ticks without copying it.
+    pub fn joint_pose_at(&self, phase_q12: u32, joint: u16) -> Option<JointPose> {
+        let primary = self.animation.pose_looped_q12(phase_q12, joint)?;
         let blended = match self.blend_from {
             Some(blend) => blend.blend_toward(primary, joint),
             None => primary,
@@ -150,8 +157,18 @@ impl ActorPoseSnapshot {
 
     /// Sample one joint in world space for combat and attachment geometry.
     pub fn joint_world_transform(&self, joint: u16) -> Option<JointWorldTransform> {
+        self.joint_world_transform_at(self.phase_q12, joint)
+    }
+
+    /// [`Self::joint_world_transform`] at phase `phase_q12`
+    /// ([`Self::joint_pose_at`]).
+    pub fn joint_world_transform_at(
+        &self,
+        phase_q12: u32,
+        joint: u16,
+    ) -> Option<JointWorldTransform> {
         Some(compute_joint_world_transform(
-            self.joint_pose(joint)?,
+            self.joint_pose_at(phase_q12, joint)?,
             self.rotation,
             self.local_to_world,
             self.origin,
@@ -332,7 +349,7 @@ mod tests {
             projectile_impact_lifetime_ticks: 0,
             projectile_reserved: 0,
         };
-        let capsule = transform_actor_combat_capsule(&record, pose).expect("combat capsule");
+        let capsule = transform_actor_combat_capsule(&record, &pose).expect("combat capsule");
         assert_eq!(capsule.start, [1_260, 2_000, 3_000]);
         assert_eq!(capsule.end, [1_280, 2_000, 3_000]);
     }
@@ -417,7 +434,7 @@ mod tests {
                         projectile_reserved: 0,
                     };
                     let capsule =
-                        transform_actor_combat_capsule(&record, pose).expect("extreme capsule");
+                        transform_actor_combat_capsule(&record, &pose).expect("extreme capsule");
                     for (axis, what) in ["x", "y", "z"].iter().enumerate() {
                         assert_sane(capsule.start[axis], &std::format!("blade start {what}"));
                         assert_sane(capsule.end[axis], &std::format!("blade end {what}"));

@@ -123,7 +123,7 @@ impl Playtest {
         {
             return;
         }
-        let (Some(c), Some(pose)) = (self.character, self.player_actor_pose) else {
+        let (Some(c), true) = (self.character.as_ref(), self.player_actor_pose.is_some()) else {
             return;
         };
         let first = c.combat_capsule_first.to_usize();
@@ -143,7 +143,7 @@ impl Playtest {
                 .saturating_sub(self.ranged_ready.fire_started),
             ctx.video_hz,
             false,
-            self.player_action_speed_q8(&c, PlayerAnim::RangedAttack),
+            self.player_action_speed_q8(c, PlayerAnim::RangedAttack),
             c.action_frame_range(CharacterAnimationAction::RangedAttack),
         );
         let p = self.game_entities.actor_motor().position();
@@ -153,7 +153,7 @@ impl Playtest {
                 shooter: Shooter::Player,
                 capsules: records,
                 action: CharacterAnimationAction::RangedAttack,
-                pose: Some(*pose.pose()),
+                pose: PoseAt::Player,
                 frame: (phase >> 12).min(u32::from(u16::MAX)) as u16,
                 released: self.ranged_ready.released,
                 target,

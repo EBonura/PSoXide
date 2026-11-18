@@ -151,6 +151,20 @@ fn melee_eye_point(position: [i32; 3]) -> RoomPoint {
     )
 }
 
+/// Where a fighter's pose snapshot of this tick lives: read by reference
+/// where it is used ([`Playtest::actor_pose`]), never copied.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum PoseAt {
+    /// Her snapshot this tick.
+    Player,
+    /// Her snapshot one tick earlier.
+    PreviousPlayer,
+    /// Model instance `n`'s snapshot this tick.
+    Instance(u16),
+    /// Model instance `n`'s snapshot one tick earlier.
+    PreviousInstance(u16),
+}
+
 /// One fighter's swing on this tick, frozen before any attack resolves.
 #[derive(Clone, Copy)]
 struct Swing {
@@ -158,9 +172,9 @@ struct Swing {
     attacker: usize,
     capsules: &'static [psx_level::CombatCapsuleRecord],
     action: CharacterAnimationAction,
-    pose: psx_game_runtime::actor_pose::ActorPoseSnapshot,
+    pose: PoseAt,
     /// The attacker's pose one tick earlier on the same clip.
-    previous: Option<psx_game_runtime::actor_pose::ActorPoseSnapshot>,
+    previous: Option<PoseAt>,
     /// Root position, the start of the occlusion segment.
     position: [i32; 3],
     room: RoomIndex,
@@ -175,7 +189,7 @@ struct Swing {
 #[derive(Clone, Copy)]
 struct SwingTarget {
     capsules: &'static [psx_level::CombatCapsuleRecord],
-    pose: Option<psx_game_runtime::actor_pose::ActorPoseSnapshot>,
+    pose: PoseAt,
     position: [i32; 3],
     room: RoomIndex,
 }
@@ -469,7 +483,7 @@ pub(super) struct Volley {
     pub(super) shooter: Shooter,
     pub(super) capsules: &'static [psx_level::CombatCapsuleRecord],
     pub(super) action: psx_level::CharacterAnimationAction,
-    pub(super) pose: Option<psx_game_runtime::actor_pose::ActorPoseSnapshot>,
+    pub(super) pose: PoseAt,
     /// Frame of the event clock the release windows are read at.
     pub(super) frame: u16,
     /// Emitters already consumed this attack.
@@ -503,7 +517,6 @@ struct PlayerDefence {
     /// A fighter's hit is parried: the parry window of her swap.
     parries: bool,
     capsules: &'static [psx_level::CombatCapsuleRecord],
-    pose: Option<psx_game_runtime::actor_pose::ActorPoseSnapshot>,
 }
 
 /// The table slot of the fighter `id` names: the player's character in the
@@ -598,10 +611,6 @@ impl Playtest {
             passes_through: defender.passes_through(),
             parries: defender.parries(),
             capsules: self.player_defence_capsules(),
-            pose: self
-                .player_actor_pose
-                .as_ref()
-                .map(|snapshot| *snapshot.pose()),
         }
     }
 
@@ -655,37 +664,29 @@ impl Playtest {
             let first = capsule_body.combat_capsule_first.to_usize();
             let end = first.saturating_add(usize::from(capsule_body.combat_capsule_count));
             let attacker_capsules = COMBAT_CAPSULES.get(first..end).unwrap_or(&[]);
-            let attacker_snapshot = self
-                .instance_actor_poses
-                .get(entity.model_instance as usize)
-                .copied()
-                .flatten();
-            let attacker_pose = attacker_snapshot.map(|snapshot| snapshot.pose());
+            let instance = entity.model_instance;
             if attack.is_ranged() {
                 // A ranged attack only releases its authored emitters,
                 // including frames outside its release window and pool-full
                 // retries.
-                self.release_enemy_projectiles(ctx, attack, attacker_capsules, attacker_pose);
+                self.release_enemy_projectiles(ctx, attack, attacker_capsules, instance);
                 continue;
             }
-            let Some(pose) = attacker_pose else {
+            let Some(now) = self.instance_pose(instance) else {
                 continue;
             };
             let previous = self
                 .previous_instance_actor_poses
-                .get(usize::from(entity.model_instance))
-                .copied()
-                .flatten()
-                .filter(|old| {
-                    attacker_snapshot.is_some_and(|now| old.clip_local() == now.clip_local())
-                })
-                .map(|snapshot| snapshot.pose());
+                .get(usize::from(instance))
+                .and_then(Option::as_ref)
+                .is_some_and(|old| old.clip_local() == now.clip_local())
+                .then_some(PoseAt::PreviousInstance(instance));
             let index = attack.entity();
             let swing = Swing {
                 attacker: index,
                 capsules: attacker_capsules,
                 action: attack.action(),
-                pose,
+                pose: PoseAt::Instance(instance),
                 previous,
                 position: attack.position(),
                 room: attack.room(),
@@ -716,7 +717,17 @@ impl Playtest {
         prop_blockers: &[CharacterCollisionAabb],
     ) -> MeleeArcStats {
         let mut stats = MeleeArcStats::default();
-        let strike = ActiveStrike::sample(swing.capsules, swing.action, swing.pose, swing.previous);
+        let Some(pose) = self.actor_pose(swing.pose) else {
+            return stats;
+        };
+        let strike = ActiveStrike::sample(
+            swing.capsules,
+            swing.action,
+            pose,
+            swing
+                .previous
+                .and_then(|previous| self.actor_pose(previous)),
+        );
         if strike.is_empty() {
             return stats;
         }
@@ -738,7 +749,7 @@ impl Playtest {
                 match player {
                     Some(player) if !player.passes_through => SwingTarget {
                         capsules: player.capsules,
-                        pose: player.pose,
+                        pose: PoseAt::Player,
                         position: player.position,
                         room: self.room_index,
                     },
@@ -758,12 +769,7 @@ impl Playtest {
                 let end = first.saturating_add(usize::from(body.combat_capsule_count));
                 SwingTarget {
                     capsules: COMBAT_CAPSULES.get(first..end).unwrap_or(&[]),
-                    pose: self
-                        .instance_actor_poses
-                        .get(usize::from(record.model_instance))
-                        .copied()
-                        .flatten()
-                        .map(|snapshot| snapshot.pose()),
+                    pose: PoseAt::Instance(record.model_instance),
                     position: self.game_entities.position(slot),
                     room: record.room,
                 }
@@ -772,8 +778,12 @@ impl Playtest {
                 continue;
             }
             let spent = self.game_entities.spent_windows(swing.attacker, slot);
-            let Some(contact) = strike.contact(swing.capsules, target.capsules, target.pose, spent)
-            else {
+            let Some(contact) = strike.contact(
+                swing.capsules,
+                target.capsules,
+                self.actor_pose(target.pose),
+                spent,
+            ) else {
                 continue;
             };
             // Capsule overlap alone has no world knowledge: a closed door
@@ -852,6 +862,31 @@ impl Playtest {
         } else {
             self.game_entities.team(fighter)
         }
+    }
+
+    /// The pose snapshot `at` names, by reference (None when that actor
+    /// has no pose this tick).
+    pub(super) fn actor_pose(
+        &self,
+        at: PoseAt,
+    ) -> Option<&psx_game_runtime::actor_pose::ActorPoseSnapshot> {
+        match at {
+            PoseAt::Player => self.player_actor_pose.as_ref().map(|s| s.pose()),
+            PoseAt::PreviousPlayer => self.previous_player_actor_pose.as_ref().map(|s| s.pose()),
+            PoseAt::Instance(n) => self.instance_pose(n).map(|s| s.pose()),
+            PoseAt::PreviousInstance(n) => self
+                .previous_instance_actor_poses
+                .get(usize::from(n))
+                .and_then(Option::as_ref)
+                .map(|s| s.pose()),
+        }
+    }
+
+    /// Model instance `n`'s snapshot this tick, by reference.
+    fn instance_pose(&self, n: u16) -> Option<&InstanceActorPoseSnapshot> {
+        self.instance_actor_poses
+            .get(usize::from(n))
+            .and_then(Option::as_ref)
     }
 
     /// Slot `fighter` as the attacker a strike names.
@@ -1173,7 +1208,7 @@ impl Playtest {
             { MAX_GAME_ENTITIES + psx_level::MAX_CHARACTER_COMBAT_CAPSULES },
         >::new();
         if !player.passes_through {
-            if let Some(pose) = player.pose {
+            if let Some(pose) = self.actor_pose(PoseAt::Player) {
                 for record in player
                     .capsules
                     .iter()
@@ -1252,8 +1287,7 @@ impl Playtest {
                 let Some(pose) = self
                     .instance_actor_poses
                     .get(usize::from(record.model_instance))
-                    .copied()
-                    .flatten()
+                    .and_then(Option::as_ref)
                 else {
                     continue;
                 };
@@ -1363,7 +1397,7 @@ impl Playtest {
         ctx: &Ctx,
         attack: DeferredGameEntityAttack,
         attacker_capsules: &'static [psx_level::CombatCapsuleRecord],
-        attacker_pose: Option<psx_game_runtime::actor_pose::ActorPoseSnapshot>,
+        instance: u16,
     ) {
         let entity = attack.entity();
         let Some(target) = self.game_entities.ranged_target(entity) else {
@@ -1375,10 +1409,12 @@ impl Playtest {
                 shooter: Shooter::Entity(attack),
                 capsules: attacker_capsules,
                 action: attack.action(),
-                pose: attacker_pose,
-                frame: attacker_pose.map_or(0, |pose| {
-                    (pose.phase_q12() >> 12).min(u32::from(u16::MAX)) as u16
-                }),
+                pose: PoseAt::Instance(instance),
+                frame: self
+                    .actor_pose(PoseAt::Instance(instance))
+                    .map_or(0, |pose| {
+                        (pose.phase_q12() >> 12).min(u32::from(u16::MAX)) as u16
+                    }),
                 released: self
                     .game_entities
                     .deferred_projectile_release_mask(attack)
@@ -1410,7 +1446,7 @@ impl Playtest {
         while let Some((emitter, release)) = combat::authored_projectile_release_pending_at_frame(
             volley.capsules,
             volley.action,
-            volley.pose,
+            self.actor_pose(volley.pose),
             released,
             volley.frame,
         ) {
@@ -1780,7 +1816,7 @@ impl Playtest {
         let player_pose = self
             .player_actor_pose
             .as_ref()
-            .map(|snapshot| *snapshot.pose());
+            .map(|snapshot| snapshot.pose());
         let player_capsules = self.player_defence_capsules();
         let entity_pose = |slot: usize| {
             records
@@ -1789,8 +1825,7 @@ impl Playtest {
                     self.instance_actor_poses
                         .get(usize::from(record.model_instance))
                 })
-                .copied()
-                .flatten()
+                .and_then(Option::as_ref)
                 .map(|snapshot| snapshot.pose())
         };
         let characters = self.game_entities.characters();
@@ -1929,7 +1964,8 @@ impl Playtest {
         if !player_anim_is_attack(self.anim.state) {
             return;
         }
-        let (Some(character), Some(pose)) = (self.character.as_ref(), self.player_actor_pose)
+        let (Some(character), Some(pose)) =
+            (self.character.as_ref(), self.player_actor_pose.as_ref())
         else {
             return;
         };
@@ -1937,6 +1973,7 @@ impl Playtest {
         let end = first + usize::from(character.combat_capsule_count);
         let previous = self
             .previous_player_actor_pose
+            .as_ref()
             .filter(|old| old.clip_local() == pose.clip_local())
             .map(|old| old.pose().phase_q12());
         if combat::melee_window_started(
@@ -2009,10 +2046,9 @@ impl Playtest {
         {
             return;
         }
-        let Some(character) = self.character else {
-            return;
-        };
-        let Some(player_pose) = self.player_actor_pose else {
+        let (Some(character), Some(player_pose)) =
+            (self.character.as_ref(), self.player_actor_pose.as_ref())
+        else {
             return;
         };
         let mut prop_blockers =
@@ -2034,11 +2070,12 @@ impl Playtest {
             attacker: RuntimeGameEntities::ACTOR_SLOT,
             capsules: COMBAT_CAPSULES.get(first..end).unwrap_or(&[]),
             action: self.anim.state.action(),
-            pose: *player_pose.pose(),
+            pose: PoseAt::Player,
             previous: self
                 .previous_player_actor_pose
-                .filter(|previous| previous.clip_local() == player_pose.clip_local())
-                .map(|previous| *previous.pose()),
+                .as_ref()
+                .is_some_and(|previous| previous.clip_local() == player_pose.clip_local())
+                .then_some(PoseAt::PreviousPlayer),
             position: [player.x, player.y, player.z],
             room: self.room_index,
             channel: Self::player_attack_channel(self.anim.state),
@@ -2054,7 +2091,11 @@ impl Playtest {
             if !self
                 .game_entities
                 .swing_connected(RuntimeGameEntities::ACTOR_SLOT)
-                && combat::melee_tell_tracks(swing.capsules, swing.action, swing.pose.phase_q12())
+                && combat::melee_tell_tracks(
+                    swing.capsules,
+                    swing.action,
+                    player_pose.pose().phase_q12(),
+                )
             {
                 self.game_entities.track_tell(
                     RuntimeGameEntities::ACTOR_SLOT,
@@ -2679,9 +2720,9 @@ pub(super) struct SwingClock {
 /// window yet, or a side without authored capsules or a pose.
 fn predicted_contact(
     swing: Option<&SwingClock>,
-    attacker_pose: Option<psx_game_runtime::actor_pose::ActorPoseSnapshot>,
+    attacker_pose: Option<&psx_game_runtime::actor_pose::ActorPoseSnapshot>,
     defender_capsules: &[psx_level::CombatCapsuleRecord],
-    defender_pose: Option<psx_game_runtime::actor_pose::ActorPoseSnapshot>,
+    defender_pose: Option<&psx_game_runtime::actor_pose::ActorPoseSnapshot>,
     parry_ticks: u16,
     video_hz: VideoHz,
 ) -> PredictedContact {

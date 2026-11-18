@@ -1625,8 +1625,7 @@ impl Scene for Playtest {
             let Some(pose) = self
                 .instance_actor_poses
                 .get(entity.model_instance as usize)
-                .copied()
-                .flatten()
+                .and_then(Option::as_ref)
             else {
                 continue;
             };

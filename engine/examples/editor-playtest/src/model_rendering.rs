@@ -1002,7 +1002,9 @@ impl Playtest {
         if self.ranged_ready.firing(ctx.sim_tick.as_u32())
             && self.anim.state != PlayerAnim::RangedAttack
         {
-            if let (Some(c), Some(pose)) = (self.character, self.player_actor_pose) {
+            if let (Some(c), Some(pose)) =
+                (self.character.as_ref(), self.player_actor_pose.as_ref())
+            {
                 // The upper body is read off her skeleton, as every
                 // fighter's is (fighter_anim::BodyJointMasks).
                 let upper_body = pose.model().body_masks.upper_body;

@@ -1381,7 +1381,8 @@ impl Playtest {
         ) {
             return 0;
         }
-        let (Some(c), Some(pose)) = (self.character, self.player_actor_pose) else {
+        let (Some(c), Some(pose)) = (self.character.as_ref(), self.player_actor_pose.as_ref())
+        else {
             return 0;
         };
         let first = c.combat_capsule_first.to_usize();
@@ -1419,7 +1420,8 @@ impl Playtest {
         ) {
             return false;
         }
-        let (Some(c), Some(pose)) = (self.character, self.player_actor_pose) else {
+        let (Some(c), Some(pose)) = (self.character.as_ref(), self.player_actor_pose.as_ref())
+        else {
             return false;
         };
         let first = c.combat_capsule_first.to_usize();
@@ -2130,8 +2132,7 @@ impl Playtest {
             let Some(snapshot) = self
                 .instance_actor_poses
                 .get(usize::from(record.model_instance))
-                .copied()
-                .flatten()
+                .and_then(Option::as_ref)
             else {
                 continue;
             };
@@ -2171,7 +2172,9 @@ impl Playtest {
                 .wrapping_add(self.gameplay_epoch.as_u32()),
         ) && self.ranged_ready.released == 0
         {
-            if let (Some(character), Some(pose)) = (self.character, self.player_actor_pose) {
+            if let (Some(character), Some(pose)) =
+                (self.character.as_ref(), self.player_actor_pose.as_ref())
+            {
                 let first = character.combat_capsule_first.to_usize();
                 let capsules = COMBAT_CAPSULES
                     .get(first..first + usize::from(character.combat_capsule_count))
@@ -2179,7 +2182,7 @@ impl Playtest {
                 if let Some(mut charge) = psx_game_runtime::combat::authored_projectile_charge(
                     capsules,
                     CharacterAnimationAction::RangedAttack,
-                    Some(*pose.pose()),
+                    Some(pose.pose()),
                 ) {
                     charge.visual.core_rgb = [224, 255, 248];
                     charge.visual.glow_rgb = [64, 208, 168];
@@ -2217,8 +2220,7 @@ impl Playtest {
             let pose = self
                 .instance_actor_poses
                 .get(entity.model_instance as usize)
-                .copied()
-                .flatten()
+                .and_then(Option::as_ref)
                 .map(|snapshot| snapshot.pose());
             let Some(mut charge) = psx_game_runtime::combat::authored_projectile_charge(
                 capsules,

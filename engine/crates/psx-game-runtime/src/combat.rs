@@ -57,7 +57,7 @@ pub fn transform_combat_capsule(
 /// visible body and its equipment sockets.
 pub fn transform_actor_combat_capsule(
     record: &CombatCapsuleRecord,
-    pose: ActorPoseSnapshot,
+    pose: &ActorPoseSnapshot,
 ) -> Option<WorldCombatCapsule> {
     Some(transform_combat_capsule(
         record,
@@ -71,13 +71,16 @@ pub fn transform_actor_combat_capsule(
 /// The previous pose must belong to the same consecutive action as `current`.
 pub fn transform_actor_combat_capsule_sweep(
     record: &CombatCapsuleRecord,
-    previous: Option<ActorPoseSnapshot>,
-    current: ActorPoseSnapshot,
+    previous: Option<&ActorPoseSnapshot>,
+    current: &ActorPoseSnapshot,
     start_phase: u32,
     end_phase: u32,
 ) -> Option<(WorldCombatCapsule, Option<WorldCombatCapsule>)> {
-    let sample = |pose: ActorPoseSnapshot, phase| {
-        let mut capsule = transform_actor_combat_capsule(record, pose.with_phase_q12(phase))?;
+    let sample = |pose: &ActorPoseSnapshot, phase| {
+        let mut capsule = transform_combat_capsule(
+            record,
+            pose.joint_world_transform_at(phase, u16::from(record.joint))?,
+        );
         if let Some(previous) = previous {
             let from = previous.origin();
             let to = current.origin();
@@ -181,7 +184,7 @@ fn projectile_visual(record: &CombatCapsuleRecord) -> ProjectileVisualStyle {
 pub fn authored_projectile_release(
     capsules: &[CombatCapsuleRecord],
     action: CharacterAnimationAction,
-    pose: Option<ActorPoseSnapshot>,
+    pose: Option<&ActorPoseSnapshot>,
 ) -> Option<AuthoredProjectileRelease> {
     authored_projectile_release_pending(capsules, action, pose, 0).map(|(_, release)| release)
 }
@@ -192,7 +195,7 @@ pub fn authored_projectile_release(
 pub fn authored_projectile_release_pending(
     capsules: &[CombatCapsuleRecord],
     action: CharacterAnimationAction,
-    pose: Option<ActorPoseSnapshot>,
+    pose: Option<&ActorPoseSnapshot>,
     released_mask: u16,
 ) -> Option<(u8, AuthoredProjectileRelease)> {
     let pose = pose?;
@@ -204,7 +207,7 @@ pub fn authored_projectile_release_pending(
 pub fn authored_projectile_release_pending_at_frame(
     capsules: &[CombatCapsuleRecord],
     action: CharacterAnimationAction,
-    pose: Option<ActorPoseSnapshot>,
+    pose: Option<&ActorPoseSnapshot>,
     released_mask: u16,
     frame: u16,
 ) -> Option<(u8, AuthoredProjectileRelease)> {
@@ -255,7 +258,7 @@ pub fn authored_projectile_release_pending_at_frame(
 pub fn authored_projectile_charge(
     capsules: &[CombatCapsuleRecord],
     action: CharacterAnimationAction,
-    pose: Option<ActorPoseSnapshot>,
+    pose: Option<&ActorPoseSnapshot>,
 ) -> Option<AuthoredProjectileCharge> {
     let pose = pose?;
     let frame = (pose.phase_q12() >> 12).min(u32::from(u16::MAX)) as u16;
@@ -346,8 +349,8 @@ impl ActiveStrike {
     pub fn sample(
         attacker_capsules: &[CombatCapsuleRecord],
         action: CharacterAnimationAction,
-        pose: ActorPoseSnapshot,
-        previous: Option<ActorPoseSnapshot>,
+        pose: &ActorPoseSnapshot,
+        previous: Option<&ActorPoseSnapshot>,
     ) -> Self {
         let action = action.to_index() as u8;
         let phase = pose.phase_q12();
@@ -411,7 +414,7 @@ impl ActiveStrike {
         &self,
         attacker_capsules: &[CombatCapsuleRecord],
         defender_capsules: &[CombatCapsuleRecord],
-        defender_pose: Option<ActorPoseSnapshot>,
+        defender_pose: Option<&ActorPoseSnapshot>,
         spent: u16,
     ) -> Option<StrikeContact> {
         let defender_pose = defender_pose?;
@@ -482,9 +485,9 @@ impl ActiveStrike {
 pub fn resolve_authored_actor_contact(
     attacker_capsules: &[CombatCapsuleRecord],
     action: CharacterAnimationAction,
-    attacker_pose: Option<ActorPoseSnapshot>,
+    attacker_pose: Option<&ActorPoseSnapshot>,
     defender_capsules: &[CombatCapsuleRecord],
-    defender_pose: Option<ActorPoseSnapshot>,
+    defender_pose: Option<&ActorPoseSnapshot>,
 ) -> AuthoredActorContact {
     resolve_authored_actor_contact_pending(
         attacker_capsules,
@@ -503,9 +506,9 @@ pub fn resolve_authored_actor_contact(
 pub fn resolve_authored_actor_contact_pending(
     attacker_capsules: &[CombatCapsuleRecord],
     action: CharacterAnimationAction,
-    attacker_pose: Option<ActorPoseSnapshot>,
+    attacker_pose: Option<&ActorPoseSnapshot>,
     defender_capsules: &[CombatCapsuleRecord],
-    defender_pose: Option<ActorPoseSnapshot>,
+    defender_pose: Option<&ActorPoseSnapshot>,
     connected_mask: u16,
 ) -> (AuthoredActorContact, u16) {
     resolve_authored_actor_contact_swept_pending(
@@ -527,10 +530,10 @@ pub fn resolve_authored_actor_contact_pending(
 pub fn resolve_authored_actor_contact_swept_pending(
     attacker_capsules: &[CombatCapsuleRecord],
     action: CharacterAnimationAction,
-    attacker_pose: Option<ActorPoseSnapshot>,
-    previous_attacker_pose: Option<ActorPoseSnapshot>,
+    attacker_pose: Option<&ActorPoseSnapshot>,
+    previous_attacker_pose: Option<&ActorPoseSnapshot>,
     defender_capsules: &[CombatCapsuleRecord],
-    defender_pose: Option<ActorPoseSnapshot>,
+    defender_pose: Option<&ActorPoseSnapshot>,
     connected_mask: u16,
 ) -> (AuthoredActorContact, u16) {
     let Some(attacker_pose) = attacker_pose else {
@@ -576,10 +579,10 @@ pub fn resolve_authored_actor_contact_swept_pending(
 pub fn predicted_contact_tick(
     attacker_capsules: &[CombatCapsuleRecord],
     action: CharacterAnimationAction,
-    attacker_pose: ActorPoseSnapshot,
+    attacker_pose: &ActorPoseSnapshot,
     phase_at: impl Fn(u16) -> u32,
     defender_capsules: &[CombatCapsuleRecord],
-    defender_pose: ActorPoseSnapshot,
+    defender_pose: &ActorPoseSnapshot,
     from: u16,
     until: u16,
 ) -> Option<u16> {
@@ -594,8 +597,8 @@ pub fn predicted_contact_tick(
             resolve_authored_actor_contact_swept_pending(
                 attacker_capsules,
                 action,
-                Some(at(k)),
-                previous,
+                Some(&at(k)),
+                previous.as_ref(),
                 defender_capsules,
                 Some(defender_pose),
                 0,
@@ -1381,7 +1384,7 @@ mod tests {
             let release = authored_projectile_release(
                 &EMITTERS,
                 ATTACK,
-                Some(pose_at([1000, 2000, 3000], ACTIVE_PHASE)),
+                Some(&pose_at([1000, 2000, 3000], ACTIVE_PHASE)),
             )
             .expect("active emitter releases");
             assert_eq!(release.position, [1020, 2030, 3040]);
@@ -1397,7 +1400,7 @@ mod tests {
                 authored_projectile_release(
                     &EMITTERS,
                     ATTACK,
-                    Some(pose_at([1000, 2000, 3000], 4 << 12)),
+                    Some(&pose_at([1000, 2000, 3000], 4 << 12)),
                 )
                 .is_some(),
                 "a skipped exact frame releases on the first retained pose after it"
@@ -1405,7 +1408,7 @@ mod tests {
             let charge = authored_projectile_charge(
                 &EMITTERS,
                 ATTACK,
-                Some(pose_at([1000, 2000, 3000], 2 << 12)),
+                Some(&pose_at([1000, 2000, 3000], 2 << 12)),
             )
             .expect("charge window is visible before release");
             assert_eq!(charge.position, [1020, 2030, 3040]);
@@ -1414,7 +1417,7 @@ mod tests {
                 authored_projectile_release(
                     &EMITTERS,
                     ATTACK,
-                    Some(pose_at([1000, 2000, 3000], INACTIVE_PHASE)),
+                    Some(&pose_at([1000, 2000, 3000], INACTIVE_PHASE)),
                 ),
                 None
             );
@@ -1434,7 +1437,7 @@ mod tests {
                 authored_projectile_release_pending(
                     &emitters,
                     ATTACK,
-                    Some(pose_at([0; 3], frame << 12)),
+                    Some(&pose_at([0; 3], frame << 12)),
                     mask,
                 )
             };
@@ -1511,28 +1514,47 @@ mod tests {
             // Gait phase is unrelated to the shot; the muzzle follows the moving actor.
             let actor_pose = pose_at([90, 20, -40], 18 << 12);
             let pose = Some(actor_pose);
-            assert!(authored_projectile_release_pending(&[emitter], ATTACK, pose, 0).is_none());
             assert!(
-                authored_projectile_release_pending_at_frame(&[emitter], ATTACK, pose, 0, 1)
-                    .is_none()
+                authored_projectile_release_pending(&[emitter], ATTACK, pose.as_ref(), 0).is_none()
             );
-            let (_, release) =
-                authored_projectile_release_pending_at_frame(&[emitter], ATTACK, pose, 0, 2)
-                    .unwrap();
+            assert!(authored_projectile_release_pending_at_frame(
+                &[emitter],
+                ATTACK,
+                pose.as_ref(),
+                0,
+                1
+            )
+            .is_none());
+            let (_, release) = authored_projectile_release_pending_at_frame(
+                &[emitter],
+                ATTACK,
+                pose.as_ref(),
+                0,
+                2,
+            )
+            .unwrap();
             assert_eq!(
                 release.position,
-                transform_actor_combat_capsule(&emitter, actor_pose)
+                transform_actor_combat_capsule(&emitter, &actor_pose)
                     .unwrap()
                     .start
             );
-            assert!(
-                authored_projectile_release_pending_at_frame(&[emitter], ATTACK, pose, 1, 2)
-                    .is_none()
-            );
-            assert!(
-                authored_projectile_release_pending_at_frame(&[emitter], ATTACK, pose, 0, 4)
-                    .is_none()
-            );
+            assert!(authored_projectile_release_pending_at_frame(
+                &[emitter],
+                ATTACK,
+                pose.as_ref(),
+                1,
+                2
+            )
+            .is_none());
+            assert!(authored_projectile_release_pending_at_frame(
+                &[emitter],
+                ATTACK,
+                pose.as_ref(),
+                0,
+                4
+            )
+            .is_none());
         }
 
         #[test]
@@ -1544,8 +1566,12 @@ mod tests {
             assert!(!ranged_charge_tracks(&[emitter], ATTACK, 25 << 12));
             assert!(!ranged_charge_tracks(&[emitter], ATTACK, 28 << 12));
             let pose = Some(pose_at([0; 3], 28 << 12));
-            assert!(authored_projectile_release_pending(&[emitter], ATTACK, pose, 0).is_some());
-            assert!(authored_projectile_release_pending(&[emitter], ATTACK, pose, 1).is_none());
+            assert!(
+                authored_projectile_release_pending(&[emitter], ATTACK, pose.as_ref(), 0).is_some()
+            );
+            assert!(
+                authored_projectile_release_pending(&[emitter], ATTACK, pose.as_ref(), 1).is_none()
+            );
         }
 
         #[test]
@@ -1562,9 +1588,9 @@ mod tests {
                     resolve_authored_actor_contact_pending(
                         &swings,
                         ATTACK,
-                        Some(pose_at([0; 3], frame << 12)),
+                        Some(&pose_at([0; 3], frame << 12)),
                         &HURTBOXES,
-                        defender,
+                        defender.as_ref(),
                         mask,
                     )
                 };
@@ -1583,9 +1609,9 @@ mod tests {
                     resolve_authored_actor_contact_pending(
                         &swings,
                         ATTACK,
-                        Some(pose_at([0; 3], gap << 12)),
+                        Some(&pose_at([0; 3], gap << 12)),
                         &HURTBOXES,
-                        defender,
+                        defender.as_ref(),
                         used
                     ),
                     (AuthoredActorContact::Miss, 0)
@@ -1596,9 +1622,9 @@ mod tests {
             let (_, window) = resolve_authored_actor_contact_pending(
                 &copies,
                 ATTACK,
-                Some(pose_at([0; 3], 4 << 12)),
+                Some(&pose_at([0; 3], 4 << 12)),
                 &HURTBOXES,
-                defender,
+                defender.as_ref(),
                 0,
             );
             assert_eq!(window, 3);
@@ -1628,9 +1654,9 @@ mod tests {
                 resolve_authored_actor_contact_pending(
                     &HITBOXES,
                     ATTACK,
-                    Some(current),
+                    Some(&current),
                     &HURTBOXES,
-                    defender,
+                    defender.as_ref(),
                     0,
                 ),
                 (AuthoredActorContact::Miss, 0)
@@ -1639,10 +1665,10 @@ mod tests {
                 resolve_authored_actor_contact_swept_pending(
                     &HITBOXES,
                     ATTACK,
-                    Some(current),
-                    Some(previous),
+                    Some(&current),
+                    Some(&previous),
                     &HURTBOXES,
-                    defender,
+                    defender.as_ref(),
                     mask,
                 )
             };
@@ -1661,10 +1687,10 @@ mod tests {
                 resolve_authored_actor_contact_swept_pending(
                     &HITBOXES,
                     ATTACK,
-                    Some(current),
-                    Some(previous),
+                    Some(&current),
+                    Some(&previous),
                     &HURTBOXES,
-                    Some(pose_at([0, 0, 500], 0)),
+                    Some(&pose_at([0, 0, 500], 0)),
                     0,
                 ),
                 (AuthoredActorContact::Miss, 0)
@@ -1678,34 +1704,34 @@ mod tests {
             swings[2].active_start_frame = 8;
             swings[2].active_end_frame = 10;
             let defender = Some(pose_at([0; 3], 0));
-            let query = |old, current, mask| {
+            let query = |old: &ActorPoseSnapshot, current: &ActorPoseSnapshot, mask| {
                 resolve_authored_actor_contact_swept_pending(
                     &swings,
                     ATTACK,
                     Some(current),
                     Some(old),
                     &HURTBOXES,
-                    defender,
+                    defender.as_ref(),
                     mask,
                 )
             };
             let first = query(
-                retained_pose(1, -400, 1 << 12),
-                retained_pose(2, 400, 6 << 12),
+                &retained_pose(1, -400, 1 << 12),
+                &retained_pose(2, 400, 6 << 12),
                 0,
             );
             assert_eq!(first.1, 3);
             assert_eq!(
                 query(
-                    retained_pose(2, -400, 6 << 12),
-                    retained_pose(3, 400, 7 << 12),
+                    &retained_pose(2, -400, 6 << 12),
+                    &retained_pose(3, 400, 7 << 12),
                     0
                 ),
                 (AuthoredActorContact::Miss, 0)
             );
             let second = query(
-                retained_pose(3, -400, 7 << 12),
-                retained_pose(4, 400, 11 << 12),
+                &retained_pose(3, -400, 7 << 12),
+                &retained_pose(4, 400, 11 << 12),
                 first.1,
             );
             assert!(matches!(second.0, AuthoredActorContact::Hit { .. }));
@@ -1724,10 +1750,10 @@ mod tests {
                     resolve_authored_actor_contact_swept_pending(
                         &[hitbox],
                         ATTACK,
-                        Some(current),
-                        Some(previous),
+                        Some(&current),
+                        Some(&previous),
                         &HURTBOXES,
-                        Some(pose_at([x, 0, 0], 0)),
+                        Some(&pose_at([x, 0, 0], 0)),
                         0,
                     )
                 };
@@ -1760,10 +1786,10 @@ mod tests {
                 predicted_contact_tick(
                     &swing,
                     ATTACK,
-                    retained_pose(1, 0, 0),
+                    &retained_pose(1, 0, 0),
                     |k| u32::from(k) << 12,
                     &HURTBOXES,
-                    pose_at(defender, 0),
+                    &pose_at(defender, 0),
                     2,
                     until,
                 )
@@ -1775,10 +1801,10 @@ mod tests {
                 predicted_contact_tick(
                     &swing,
                     ATTACK,
-                    retained_pose(1, 0, 0),
+                    &retained_pose(1, 0, 0),
                     |k| u32::from(k) << 12,
                     &[],
-                    pose_at([50, 0, 0], 0),
+                    &pose_at([50, 0, 0], 0),
                     2,
                     10,
                 ),
@@ -1790,14 +1816,14 @@ mod tests {
         #[test]
         fn enemy_sweep_rejects_stale_interrupted_and_restarted_poses() {
             let defender = Some(pose_at([0; 3], 0));
-            let query = |old, current| {
+            let query = |old: Option<&ActorPoseSnapshot>, current: &ActorPoseSnapshot| {
                 resolve_authored_actor_contact_swept_pending(
                     &HITBOXES,
                     ATTACK,
                     Some(current),
                     old,
                     &HURTBOXES,
-                    defender,
+                    defender.as_ref(),
                     0,
                 )
             };
@@ -1809,13 +1835,16 @@ mod tests {
                 Some(retained_pose(1, -400, 2 << 12)),
                 Some(retained_pose(4, -400, 9 << 12)),
             ] {
-                assert_eq!(query(old, current), (AuthoredActorContact::Miss, 0));
+                assert_eq!(
+                    query(old.as_ref(), &current),
+                    (AuthoredActorContact::Miss, 0)
+                );
             }
             // A new action may still deal a legitimate current-pose hit.
             assert!(matches!(
                 query(
-                    Some(retained_pose(4, -400, 9 << 12)),
-                    retained_pose(5, 0, 3 << 12)
+                    Some(&retained_pose(4, -400, 9 << 12)),
+                    &retained_pose(5, 0, 3 << 12)
                 )
                 .0,
                 AuthoredActorContact::Hit { .. }
@@ -1830,7 +1859,13 @@ mod tests {
 
             // Attacker with no HITBOX at all.
             assert_eq!(
-                resolve_authored_actor_contact(&HURTBOXES, ATTACK, attacker, &HURTBOXES, defender),
+                resolve_authored_actor_contact(
+                    &HURTBOXES,
+                    ATTACK,
+                    attacker.as_ref(),
+                    &HURTBOXES,
+                    defender.as_ref()
+                ),
                 AuthoredActorContact::Miss
             );
             // Attacker authored only for a DIFFERENT action slot.
@@ -1840,22 +1875,46 @@ mod tests {
                 CharacterAnimationAction::HeavyAttack,
             )];
             assert_eq!(
-                resolve_authored_actor_contact(&HEAVY_ONLY, ATTACK, attacker, &HURTBOXES, defender),
+                resolve_authored_actor_contact(
+                    &HEAVY_ONLY,
+                    ATTACK,
+                    attacker.as_ref(),
+                    &HURTBOXES,
+                    defender.as_ref()
+                ),
                 AuthoredActorContact::Miss
             );
             // Defender with no HURTBOX at all.
             assert_eq!(
-                resolve_authored_actor_contact(&HITBOXES, ATTACK, attacker, &[], defender),
+                resolve_authored_actor_contact(
+                    &HITBOXES,
+                    ATTACK,
+                    attacker.as_ref(),
+                    &[],
+                    defender.as_ref()
+                ),
                 AuthoredActorContact::Miss
             );
             assert_eq!(
-                resolve_authored_actor_contact(&HITBOXES, ATTACK, attacker, &HITBOXES, defender),
+                resolve_authored_actor_contact(
+                    &HITBOXES,
+                    ATTACK,
+                    attacker.as_ref(),
+                    &HITBOXES,
+                    defender.as_ref()
+                ),
                 AuthoredActorContact::Miss
             );
 
             // Both sides authored and connecting: the authored numbers land.
             assert_eq!(
-                resolve_authored_actor_contact(&HITBOXES, ATTACK, attacker, &HURTBOXES, defender),
+                resolve_authored_actor_contact(
+                    &HITBOXES,
+                    ATTACK,
+                    attacker.as_ref(),
+                    &HURTBOXES,
+                    defender.as_ref()
+                ),
                 AuthoredActorContact::Hit {
                     damage: 25,
                     poise_damage: 35,
@@ -1871,30 +1930,60 @@ mod tests {
 
             // A missing retained snapshot on either side is a miss.
             assert_eq!(
-                resolve_authored_actor_contact(&HITBOXES, ATTACK, None, &HURTBOXES, defender),
+                resolve_authored_actor_contact(
+                    &HITBOXES,
+                    ATTACK,
+                    None,
+                    &HURTBOXES,
+                    defender.as_ref()
+                ),
                 AuthoredActorContact::Miss
             );
             assert_eq!(
-                resolve_authored_actor_contact(&HITBOXES, ATTACK, attacker, &HURTBOXES, None),
+                resolve_authored_actor_contact(
+                    &HITBOXES,
+                    ATTACK,
+                    attacker.as_ref(),
+                    &HURTBOXES,
+                    None
+                ),
                 AuthoredActorContact::Miss
             );
             // A frame outside the authored active window is a miss.
             let early = Some(pose_at(near, INACTIVE_PHASE));
             assert_eq!(
-                resolve_authored_actor_contact(&HITBOXES, ATTACK, early, &HURTBOXES, defender),
+                resolve_authored_actor_contact(
+                    &HITBOXES,
+                    ATTACK,
+                    early.as_ref(),
+                    &HURTBOXES,
+                    defender.as_ref()
+                ),
                 AuthoredActorContact::Miss
             );
             // A hitbox naming a joint the rig does not have is a miss.
             const BAD_JOINT: [CombatCapsuleRecord; 1] =
                 [capsule_record(9, combat_capsule_flags::HITBOX, ATTACK)];
             assert_eq!(
-                resolve_authored_actor_contact(&BAD_JOINT, ATTACK, attacker, &HURTBOXES, defender),
+                resolve_authored_actor_contact(
+                    &BAD_JOINT,
+                    ATTACK,
+                    attacker.as_ref(),
+                    &HURTBOXES,
+                    defender.as_ref()
+                ),
                 AuthoredActorContact::Miss
             );
             // Geometric separation is a miss.
             let far = Some(pose_at([1000, 2000, 30_000], 0));
             assert_eq!(
-                resolve_authored_actor_contact(&HITBOXES, ATTACK, attacker, &HURTBOXES, far),
+                resolve_authored_actor_contact(
+                    &HITBOXES,
+                    ATTACK,
+                    attacker.as_ref(),
+                    &HURTBOXES,
+                    far.as_ref()
+                ),
                 AuthoredActorContact::Miss
             );
         }

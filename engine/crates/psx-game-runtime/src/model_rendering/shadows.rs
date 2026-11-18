@@ -360,7 +360,7 @@ pub fn draw_model_instance_projected_shadows<
             continue;
         }
         let runtime_model = pose.model();
-        let actor_pose = pose.pose();
+        let actor_pose = *pose.pose();
         // The pose's own origin, not the cooked `record.y`: a live entity
         // bound to this instance moves, and the cooked spawn height would
         // leave its shadow behind on the floor it started on.

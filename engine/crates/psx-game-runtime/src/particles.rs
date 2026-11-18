@@ -144,7 +144,7 @@ pub fn draw_dash_sample<'a, const OT_DEPTH: usize>(
 pub fn draw_melee_window_trail<'a, const OT_DEPTH: usize>(
     record: &psx_level::CombatCapsuleRecord,
     action: psx_level::CharacterAnimationAction,
-    pose: crate::actor_pose::ActorPoseSnapshot,
+    pose: &crate::actor_pose::ActorPoseSnapshot,
     zenith: bool,
     camera: WorldCamera,
     projector: Option<LoadedWorldCameraGte>,
@@ -157,11 +157,10 @@ pub fn draw_melee_window_trail<'a, const OT_DEPTH: usize>(
     };
     let mut edges = [[ProjectedVertex::INVALID; 2]; 4];
     for (i, phase) in phases.into_iter().enumerate() {
-        let Some(capsule) =
-            crate::combat::transform_actor_combat_capsule(record, pose.with_phase_q12(phase))
-        else {
+        let Some(joint) = pose.joint_world_transform_at(phase, u16::from(record.joint)) else {
             return 0;
         };
+        let capsule = crate::combat::transform_combat_capsule(record, joint);
         for (j, point) in [capsule.start, capsule.end].into_iter().enumerate() {
             let point = WorldVertex::new(point[0], point[1], point[2]);
             edges[i][j] = if let Some(projector) = projector {

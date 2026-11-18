@@ -344,12 +344,12 @@ pub struct InstanceActorPoseSnapshot {
 
 impl InstanceActorPoseSnapshot {
     /// Index into the cooked [`ModelTables::model_instances`] table.
-    pub const fn instance_index(self) -> usize {
+    pub const fn instance_index(&self) -> usize {
         self.instance_index as usize
     }
 
     /// Runtime model whose skeleton this snapshot samples.
-    pub const fn model(self) -> RuntimeModelAsset {
+    pub const fn model(&self) -> RuntimeModelAsset {
         self.model
     }
 
@@ -361,7 +361,7 @@ impl InstanceActorPoseSnapshot {
     }
 
     /// Model-local clip selected after applying the live override policy.
-    pub const fn clip_local(self) -> ModelClipIndex {
+    pub const fn clip_local(&self) -> ModelClipIndex {
         self.clip_local
     }
 
@@ -372,8 +372,8 @@ impl InstanceActorPoseSnapshot {
     }
 
     /// Shared actor pose consumed by body, sockets, and combat volumes.
-    pub const fn pose(self) -> ActorPoseSnapshot {
-        self.pose
+    pub const fn pose(&self) -> &ActorPoseSnapshot {
+        &self.pose
     }
 }
 
@@ -1137,7 +1137,7 @@ mod tests {
                 projectile_impact_lifetime_ticks: 0,
                 projectile_reserved: 0,
             },
-            snapshot.pose(),
+            &snapshot.pose(),
         )
         .expect("combat capsule");
         assert_eq!(combat.start, [1_010, 2_014, 2_764]);
