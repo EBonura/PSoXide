@@ -1100,7 +1100,7 @@ impl<'a> Animation<'a> {
         if let Some(tracks) = &self.tracks {
             let pos_q8 = u32::from(frame_index) << 8;
             let pos = tracks::track_pos(self.poses, pos_q8);
-            if tracks::has_hierarchy(tracks) {
+            if tracks::is_derived(tracks, joint_index as usize) {
                 // SAFETY: `tracks` came from `validate` for this v7 blob and the
                 // joint index was checked above.
                 return Some(unsafe {
@@ -1499,7 +1499,9 @@ impl AnimationPoseSample<'_> {
             return None;
         }
         if let Some(tracks) = &self.animation.tracks {
-            if tracks::has_hierarchy(tracks) {
+            // An absolute joint (the root, and every joint gameplay reads on its
+            // own) is one decode with no cache.
+            if tracks::is_derived(tracks, joint_index as usize) {
                 // SAFETY: `tracks` came from `validate` for this animation's v7
                 // blob and the joint index was checked above.
                 return Some(unsafe {
@@ -1602,6 +1604,13 @@ impl AnimationPoseSample<'_> {
 }
 
 impl AnimationPoseSample<'_> {
+    /// `true` when the clip is v7: some joint translations follow their
+    /// parents (see [`Self::parent`]).
+    #[inline]
+    pub fn is_parent_relative(&self) -> bool {
+        self.animation.is_parent_relative()
+    }
+
     /// Parent whose decoded pose a v7 joint's translation follows, or `None`
     /// for an absolute joint and for every joint of any other version.
     #[inline]

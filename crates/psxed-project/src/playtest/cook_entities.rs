@@ -1394,6 +1394,23 @@ pub(crate) fn register_model_for_instance(
         return None;
     };
     let resolved_clips = project.resolved_model_animation_clips(model_resource_id);
+    // Joints gameplay reads one at a time (sockets: weapons, the scarf anchor,
+    // trails; every Character on this model's hurtboxes, hitboxes and
+    // projectile emitters). Their clips keep absolute translations there, so
+    // such a read is one decode; the renderer derives the rest from parents.
+    let gameplay_joints: Vec<u16> = {
+        let mut joints: Vec<u16> = model.attachments.iter().map(|s| s.joint).collect();
+        for resource in &project.resources {
+            if let ResourceData::Character(character) = &resource.data {
+                if character.model == Some(model_resource_id) {
+                    joints.extend(character.combat_capsules.iter().map(|c| c.joint));
+                }
+            }
+        }
+        joints.sort_unstable();
+        joints.dedup();
+        joints
+    };
     if resolved_clips.is_empty() && animation_policy == ModelAnimationPolicy::AuthoredRequired {
         report.error_at(
             PlaytestValidationTarget::Resource(model_resource_id),
@@ -1805,6 +1822,7 @@ pub(crate) fn register_model_for_instance(
             animation_bytes,
             &parsed_model,
             &socket_joints,
+            &gameplay_joints,
             project.animation_track_budget_units,
             &label,
         );

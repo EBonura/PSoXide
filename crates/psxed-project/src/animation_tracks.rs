@@ -75,6 +75,7 @@ pub(crate) fn pack_tracks(
     bytes: Vec<u8>,
     model: &Model<'_>,
     socket_joints: &[u16],
+    gameplay_joints: &[u16],
     budget_units: u16,
     label: &str,
 ) -> Vec<u8> {
@@ -109,12 +110,18 @@ pub(crate) fn pack_tracks(
     }
     // Version 7: a child's translation follows its parent's decoded pose, so
     // limbs stay on their parents between keys on fast moves.
+    // Joints gameplay reads on their own keep absolute translations (one
+    // decode per read, as in v6); the others follow their parents.
     let parents = (0..model.joint_count())
         .map(|j| {
-            model
-                .joint(j)
-                .and_then(|joint| joint.parent())
-                .map(usize::from)
+            if gameplay_joints.contains(&j) {
+                None
+            } else {
+                model
+                    .joint(j)
+                    .and_then(|joint| joint.parent())
+                    .map(usize::from)
+            }
         })
         .collect();
     let clip = ClipInput {

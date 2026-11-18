@@ -263,6 +263,16 @@ pub(crate) unsafe fn parent(tracks: &Tracks, joint: usize) -> Option<usize> {
     }
 }
 
+/// `true` when `joint` is a joint of a v7 clip whose translation follows its
+/// parent (sampling it needs the parent's pose).
+#[inline(always)]
+pub(crate) fn is_derived(tracks: &Tracks, joint: usize) -> bool {
+    // SAFETY: the joint index is checked first.
+    has_hierarchy(tracks)
+        && joint < tracks.joint_count as usize
+        && unsafe { parent(tracks, joint) }.is_some()
+}
+
 /// `true` when the clip is v7 (some translations follow their parents).
 #[inline(always)]
 pub(crate) fn has_hierarchy(tracks: &Tracks) -> bool {
