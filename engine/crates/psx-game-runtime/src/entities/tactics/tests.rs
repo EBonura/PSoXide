@@ -682,24 +682,6 @@ fn empty_enemy_does_not_claw_at_an_overhead_perch_or_invent_energy() {
 }
 
 #[test]
-fn crowded_melee_tell_moves_through_collision_then_plants() {
-    let mut e = engaged();
-    e.select_attack(0, false);
-    e.enter_phase(0, AttackPhase::Windup, 0);
-    let mut arena = Arena::default();
-    e.step_melee_tell(&ENEMY[0], 0, input([0, 0, 26]), &mut arena, 2);
-    assert!(e.position(0)[2] < 0);
-    let planted = e.position(0);
-    e.state_ticks[0] = 8;
-    e.step_melee_tell(&ENEMY[0], 0, input([0, 0, 26]), &mut arena, 2);
-    assert_eq!(e.position(0), planted);
-    e.state_ticks[0] = 0;
-    arena.blocked = true;
-    e.step_melee_tell(&ENEMY[0], 0, input([0, 0, 26]), &mut arena, 2);
-    assert_eq!(e.position(0), planted);
-}
-
-#[test]
 fn heavy_contact_creates_firing_distance_before_attacking() {
     let mut e = engaged();
     e.combatants[0]
@@ -1303,53 +1285,6 @@ fn a_sub_unit_circle_keeps_one_gait_on_a_continuous_clock() {
         assert_eq!(shown.clip.clip, records[0].strafe_right_clip);
         assert_eq!(shown.clip.phase_ticks, phase + 2);
         phase = shown.clip.phase_ticks;
-    }
-    assert!(
-        still_thinks > 0 && whole_steps > 0,
-        "{still_thinks} {whole_steps}"
-    );
-}
-
-#[test]
-fn a_ranged_windup_backing_off_keeps_its_legs_on_the_gait() {
-    let records = sub_unit_enemy();
-    let mut e: GameEntities<2> = GameEntities::EMPTY;
-    e.spawn_from_records(&records[..]);
-    e.state[0] = GameEntityState::Aggro as u8;
-    e.state_ticks[0] = 42;
-    settle_in(&mut e, VitalityChannelId::Two);
-    e.attack_cooldown[0] = 0;
-    let mut now = 100;
-    for _ in 0..300 {
-        think_and_show(&mut e, &records[..], [0, 0, 200], &mut now);
-        if e.attack_phase(0) == Some(AttackPhase::Windup) {
-            break;
-        }
-    }
-    assert_eq!(e.attack_phase(0), Some(AttackPhase::Windup));
-    assert!(e.selected_attack_is_ranged(0));
-    // The target steps inside the band: the shot is wound up backing off.
-    let p = e.position(0);
-    let target = [p[0], p[1], p[2] + 40];
-    let mut legs_phase = None;
-    let (mut whole_steps, mut still_thinks) = (0, 0);
-    while e.attack_phase(0) == Some(AttackPhase::Windup) {
-        let before = e.position(0);
-        let shown = think_and_show(&mut e, &records[..], target, &mut now);
-        if e.position(0) == before {
-            still_thinks += 1;
-        } else {
-            whole_steps += 1;
-        }
-        if e.attack_phase(0) != Some(AttackPhase::Windup) {
-            break;
-        }
-        let (legs, _) = shown.legs.expect("the legs stay on the gait every think");
-        assert_eq!(legs.clip, records[0].walk_backward_clip);
-        if let Some(previous) = legs_phase {
-            assert_eq!(legs.phase_ticks, previous + 2);
-        }
-        legs_phase = Some(legs.phase_ticks);
     }
     assert!(
         still_thinks > 0 && whole_steps > 0,

@@ -707,7 +707,6 @@ pub struct GameEntities<const MAX_ENTITIES: usize> {
     attack_timings: [[crate::fighter_action::ActionTiming; 3]; MAX_ENTITIES],
     projectile_threats: [Option<crate::projectiles::ProjectileThreat>; MAX_ENTITIES],
     exchanges: [crate::ranged_tactics::RangedExchange; MAX_ENTITIES],
-    recoil: [[i16; 3]; MAX_ENTITIES],
     /// The level's Characters: every entity's body is the one its record
     /// links ([`LevelGameEntityRecord::character`], read by [`Self::body`]).
     // An Option so the all-zero pattern (a game that keeps its entities in
@@ -1028,7 +1027,6 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         }; 3]; MAX_ENTITIES],
         projectile_threats: [None; MAX_ENTITIES],
         exchanges: [crate::ranged_tactics::RangedExchange::EMPTY; MAX_ENTITIES],
-        recoil: [[0; 3]; MAX_ENTITIES],
         #[cfg(not(test))]
         characters: None,
         #[cfg(test)]
@@ -2342,7 +2340,6 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
                 ),
                 swapping,
             );
-            self.step_recoil(record, index, mover, delta_ticks);
             let behavior_awake = !matches!(state, GameEntityState::Idle | GameEntityState::Patrol);
             let spatially_active = index < 64 && self.spatial_active_mask & (1u64 << index) != 0;
             // PVS is a rendering broad phase, not a perception verdict.
@@ -2372,8 +2369,6 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
                     let timing = self.selected_timing(index);
                     match Self::phase_at(timing, since.saturating_sub(delta_ticks)) {
                         AttackPhase::Windup => {
-                            self.step_firing(record, index, input, mover, delta_ticks);
-                            self.step_melee_tell(record, index, input, mover, delta_ticks);
                             if self.selected_attack_is_ranged(index) {
                                 self.track_ranged_tell(index, input, delta_ticks);
                             }
@@ -2382,7 +2377,6 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
                             }
                         }
                         AttackPhase::Active => {
-                            self.step_firing(record, index, input, mover, delta_ticks);
                             stats.attacking += 1;
                             if let Some(attacks) = deferred.as_deref_mut() {
                                 attacks.push(self.deferred_attack(record, index));
@@ -2393,7 +2387,6 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
                             }
                         }
                         AttackPhase::Recover => {
-                            self.step_firing(record, index, input, mover, delta_ticks);
                             if !self.actions[index].locked(self.clock) {
                                 self.attack_cooldown[index] =
                                     u16::from(record.attack_cooldown_ticks);
@@ -2763,6 +2756,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
     /// It is the crit strike or shot when a crit is armed now.
     fn begin_attack(&mut self, index: usize, stats: &mut GameEntityTickStats) {
         self.enter_state(index, GameEntityState::Attack, stats);
+        self.tactics[index].running = false;
         stats.windup_enters += 1;
         self.combatants[index].start_attack();
         let timing = self.selected_timing(index);
@@ -3051,19 +3045,13 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         self.motors[index].face(Angle::from_q12(yaw as u16));
     }
 
-    /// Move entity `index` to `position` without walking there (a knockback
-    /// push or a reset), keeping its facing, stamina and any action.
-    fn place(&mut self, index: usize, position: [i32; 3]) {
-        self.motors[index].relocate(RoomPoint::new(position[0], position[1], position[2]));
-    }
-
     /// Set one axis (0 x, 1 y, 2 z) of entity `index`'s position: a test
     /// fixture's teleport.
     #[cfg(test)]
     pub(crate) fn set_axis(&mut self, index: usize, axis: usize, value: i32) {
         let mut p = self.position(index);
         p[axis] = value;
-        self.place(index, p);
+        self.motors[index].relocate(RoomPoint::new(p[0], p[1], p[2]));
     }
 
     /// The motor configuration of `record`'s character: its own motion
@@ -3183,18 +3171,6 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
     /// quarter), so a controller wanting a share tilts its square root.
     fn tilt_for_share(share: i32) -> i32 {
         psx_math::int32::isqrt_i32(share.clamp(0, 4096) * 4096)
-    }
-
-    /// Ask to move along world heading `yaw` at `share` (Q12 share of the
-    /// pace, 4096 for full).
-    fn request_heading(&mut self, yaw: Angle, share: i32, face: Option<Angle>, run: bool) {
-        let strength = Self::tilt_for_share(share);
-        let movement = CombatMove::Move {
-            x: yaw.sin().mul_i32(strength) as i16,
-            z: yaw.cos().mul_i32(strength) as i16,
-            forward: 0,
-        };
-        self.request(movement, face, run);
     }
 
     /// Spend this tick's motor input on entity `index`: the one motor
@@ -5316,16 +5292,6 @@ mod tests {
             entities.capture_ranged_aim(0, input);
         }
         entities.begin_attack(0, &mut GameEntityTickStats::default());
-    }
-
-    /// Drive IDLE_ENEMY into its Attack window against the near-input
-    /// player (windup_ticks = 3): Windup -> 3 windup ticks -> Attack.
-    fn advance_into_attack(entities: &mut GameEntities<8>, input: GameEntityTickInput<'_>) {
-        begin_attack(entities, false);
-        for _ in 0..3 {
-            entities.tick(&IDLE_ENEMY, input, &mut OpenWorld);
-        }
-        assert_eq!(entities.attack_phase(0), Some(AttackPhase::Active));
     }
 
     #[test]

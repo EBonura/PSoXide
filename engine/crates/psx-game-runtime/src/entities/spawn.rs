@@ -29,7 +29,6 @@ impl<const N: usize> GameEntities<N> {
         self.gaits[index] = crate::fighter_anim::AnimTrack::new(EntityAnim::NONE);
         self.exchanges[index] = crate::ranged_tactics::RangedExchange::EMPTY;
         self.projectile_threats[index] = None;
-        self.recoil[index] = [0; 3];
         self.patrol_leg[index] = 0;
         self.move_yaw[index] = 0;
         self.move_yaw_valid[index] = 0;

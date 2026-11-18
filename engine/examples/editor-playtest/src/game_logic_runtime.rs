@@ -1774,8 +1774,7 @@ impl Playtest {
                 let capsules = COMBAT_CAPSULES
                     .get(first..first + usize::from(character.combat_capsule_count))?;
                 let contact = combat::authored_event_frames(capsules, action)?;
-                let window =
-                    |kind| mr::authored_window(&character.combat_windows, action, kind);
+                let window = |kind| mr::authored_window(&character.combat_windows, action, kind);
                 mr::action_timing(
                     animation,
                     video_hz,
@@ -2667,13 +2666,6 @@ impl Playtest {
                     self.entity_parried_player(entity, ctx);
                 }
                 if outcome.connected {
-                    if matches!(
-                        self.anim.state,
-                        PlayerAnim::HeavyAttack | PlayerAnim::VertHeavyAttack
-                    ) {
-                        let p = self.game_entities.actor_motor().position();
-                        self.game_entities.recoil_from(entity, [p.x, p.y, p.z]);
-                    }
                     // Spawned here rather than from the returned stats
                     // because the damage is per-capsule: only this site
                     // knows which capsule actually connected.

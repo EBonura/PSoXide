@@ -438,15 +438,6 @@ impl<const N: usize> GameEntities<N> {
         Some((next.as_q12() as i16, d.min(4096 - d)))
     }
 
-    pub(super) fn face_tactical(&mut self, index: usize, target: [i32; 3], delta: u16) -> u16 {
-        let Some((yaw, error)) = self.tactical_turn(index, target, delta) else {
-            return 0;
-        };
-        self.set_yaw(index, yaw);
-        self.tactics[index].turning = error > 57;
-        error
-    }
-
     /// Plan this tick's turn toward `target` into `intent`, as the decision
     /// sees it: the angle still to go after the turn (0 with no bearing).
     /// The turning flag (which picks the turn clip) is decision state and is
@@ -1390,6 +1381,15 @@ impl<const N: usize> GameEntities<N> {
         ) {
             let kind = tag - 1;
             self.attack_mode[i] = kind;
+            // The attack squares up to what the fighter faces, as the
+            // player's squares up to her lock: the swing then owns the body.
+            let here = self.position(i);
+            if let Some(point) = intent
+                .face
+                .filter(|point| point[0] != here[0] || point[2] != here[2])
+            {
+                self.set_yaw(i, atan2_q12(point[0] - here[0], point[2] - here[2]) as i16);
+            }
             if kind == GAME_ENTITY_ATTACK_RANGED {
                 if let Some(point) = intent.aim {
                     self.capture_ranged_point(i, point);
