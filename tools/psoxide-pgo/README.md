@@ -754,6 +754,7 @@ psoxide-pgo portable <in.prof> <out.prof>                  strip disambiguators
 psoxide-pgo rebind <in.prof> <target-elf-with-dwarf> <out.prof>
 psoxide-pgo layout <link.map> <image.exe> <words.csv>... <out.layout>   layout profile from per-word logs
 psoxide-pgo place <in.layout> <link.map> <image.exe> <linker-script> <out.order>
+psoxide-pgo followed <in.order> <relinked.map>             prove a relink followed the order
 psoxide-pgo ram <link.map> [--floor BYTES]                  free RAM; fails under the floor
 ```
 
@@ -766,7 +767,49 @@ image; `place` binds, places and writes the ordering file without linking.
 `place` exits with status 1 and prints the functions that did not bind when the
 layout does not (see `apply` above); a driver that links by itself must fail on
 that status instead of falling back to the default order, or a stale layout
-ships silently.
+ships silently. `place` also writes `<out.order>.placed` (the address the model
+gave each placed function), which `followed` reads to check the relinked map:
+every listed function in the listed order, and how many start where the model
+put them.
+
+## Link order for editor projects
+
+Editor projects build one guest (`engine/examples/editor-playtest`) through
+`tools/build_guest_staged.sh`, not through `apply`, so they take the order by
+file instead of by variant. A project that wants its hot code laid out
+deliberately commits `link-order.layout` next to its `project.ron`:
+
+1. The cook copies it to `generated/link-order.layout` (and removes another
+   project's when this one has none).
+2. `build_guest_staged.sh` links and patches the guest as always, runs `place`
+   on that link with the project's layout, relinks with the ordering file
+   (`PSOXIDE_LINK_ORDER`, through the guest's `build.rs`), runs `followed`,
+   and patches and proves the relinked image. Code the profile never ran
+   links after the placed functions, so cold code growing or shrinking no
+   longer moves the hot code. Each ordered build links the guest twice.
+3. `PSOXIDE_GUEST_LAYOUT=off` links in plain order; `PSOXIDE_GUEST_LAYOUT=<file>`
+   uses another layout.
+
+When the layout no longer binds (the code its counts came from changed: see
+`apply` for the 98% and 1% rules) the build prints the functions that fell out
+and links in plain order with a warning, because an edit to a level changes
+the cooked tables the guest compiles against and Play must keep working while
+a level is edited. Proof and release builds set
+`PSOXIDE_GUEST_LAYOUT_REQUIRED=1`, which fails the build instead.
+
+Regenerate a project's layout after code, feature or cook changes that make
+the build warn:
+
+1. Build the project's disc with `PSOXIDE_GUEST_LAYOUT=off` and the features
+   the layout is for (a layout binds only onto builds of the same features),
+   and keep the patched image and its link map.
+2. Replay each representative tape on it with
+   `--pc-log-words --pc-line-log <words.csv> --pc-line-start-route-tick <tick>`
+   (start after boot and loading) and `--stop-at-poll <poll>`.
+3. `psoxide-pgo layout <link.map> <image.exe> <words.csv>... <project>/link-order.layout`.
+
+The counts must come from the plain link of the same code, features and cook:
+`place` binds on that link.
 
 The same hl-psx commit built from two checkout paths differed by about 0.4%
 in FPS, because the path changes the code layout. Build every candidate from

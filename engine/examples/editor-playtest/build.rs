@@ -21,4 +21,15 @@ fn main() {
         "cargo:rustc-env=PSXED_PLAYTEST_MANIFEST={}",
         selected.display()
     );
+
+    // The project's link order (tools/build_guest_staged.sh places it from the project's
+    // link-order.layout and relinks with it). An ordering file changes no rustflags, so only this
+    // crate relinks; ld.lld keeps the last --symbol-ordering-file it is given.
+    println!("cargo:rerun-if-env-changed=PSOXIDE_LINK_ORDER");
+    if let Some(order) = std::env::var_os("PSOXIDE_LINK_ORDER") {
+        println!(
+            "cargo:rustc-link-arg=--symbol-ordering-file={}",
+            order.to_string_lossy()
+        );
+    }
 }

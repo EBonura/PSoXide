@@ -64,6 +64,14 @@ pub const XA_MUSIC_FILENAME: &str = "xa_music.txt";
 /// Cooked WORLD.PAK room ordering hint consumed by disc builders.
 pub const WORLD_PACK_ORDER_FILENAME: &str = "world_pack_order.txt";
 
+/// A project's I-cache layout profile (`psoxide-pgo layout`), next to its
+/// `project.ron`. The cook copies it into `generated/` (and removes a stale one
+/// when the project has none); `tools/build_guest_staged.sh` places the guest's
+/// functions from it and relinks. Regenerate it after code changes (the build
+/// warns when it no longer binds): tools/psoxide-pgo/README.md, "Link order for
+/// editor projects".
+pub const LINK_LAYOUT_FILENAME: &str = "link-order.layout";
+
 /// Cooked UI.PAK chunk ordering hint consumed by disc builders.
 /// One streamed UI asset index per line, in pack order.
 pub const UI_PACK_ORDER_FILENAME: &str = "ui_pack_order.txt";
@@ -2059,6 +2067,8 @@ pub struct PlaytestPackage {
     pub player_controller: Option<PlaytestPlayerController>,
     /// Optional entity markers (legacy, non-Model MeshInstance).
     pub entities: Vec<PlaytestEntity>,
+    /// The project's [`LINK_LAYOUT_FILENAME`], when it has one.
+    pub link_layout: Option<Vec<u8>>,
 }
 
 impl PlaytestPackage {
