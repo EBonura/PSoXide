@@ -375,7 +375,11 @@ pub fn write_symbols(map: &Path, out: &Path) -> Result<(), String> {
             ));
         }
     }
-    let mut body: String = lines.into_iter().map(|l| l + "\n").collect();
+    let mut body = String::new();
+    for line in lines {
+        body.push_str(&line);
+        body.push('\n');
+    }
     if body.is_empty() {
         body.push_str("# no symbols in the map\n");
     }
