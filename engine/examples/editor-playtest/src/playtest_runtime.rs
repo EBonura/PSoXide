@@ -1994,7 +1994,9 @@ impl Playtest {
         /// More than any body moves in one tick, its own radius included.
         const BLOCKER_REACH: i32 = 4096;
         let mut count = 0usize;
-        for (index, inst) in MODEL_INSTANCES.iter().enumerate() {
+        // Present instances only: an away fighter's body blocks no one.
+        for &(index, owner) in self.present_instances.entries() {
+            let inst = &MODEL_INSTANCES[usize::from(index)];
             if inst.room != self.room_index {
                 continue;
             }
@@ -2011,12 +2013,13 @@ impl Playtest {
             // with the enemy where it stands, not its spawn point.
             // Dead entities stop blocking (souls corpses are not
             // walls).
-            let inst_index = index.min(u16::MAX as usize) as u16;
-            let center = match game_entity_for_instance(inst_index) {
+            let center = match GAME_ENTITIES
+                .get(usize::from(owner))
+                .map(|_| usize::from(owner))
+            {
                 Some(entity) => {
                     if self.game_entities.state(entity)
                         == psx_game_runtime::entities::GameEntityState::Dead
-                        || self.game_entities.away(entity)
                     {
                         continue;
                     }

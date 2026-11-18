@@ -1084,37 +1084,17 @@ impl Playtest {
         let elapsed_tick = self.gameplay_tick(ctx.sim_tick);
         let count = MODEL_INSTANCES.len().min(self.instance_actor_poses.len());
         let world_resident = self.world_rt.is_some();
-        // The instances a game entity owns, so the rest skip the owner search.
-        // psx-numeric-allow-next-line: one bit per model instance; bit ops only
-        let mut owned = 0u64;
-        for record in GAME_ENTITIES.iter() {
-            let instance = usize::from(record.model_instance);
-            if instance < 64 {
-                owned |= 1u64 << instance;
+        // Present instances only: an away fighter's has no pose (cleared when
+        // it went away, `set_present_instances`).
+        let present = self.present_instances;
+        for &(index, owner) in present.entries() {
+            let index = usize::from(index);
+            if index >= count {
+                break;
             }
-        }
-        let mut index = 0usize;
-        while index < count {
-            // The visibility mask discards the pose after resolving it, so
-            // test it first. `resolve_instance_actor_pose` reads only shared
-            // tables, which makes the skip output-identical.
-            let owner = if index >= 64 || owned & (1u64 << index) != 0 {
-                GAME_ENTITIES
-                    .iter()
-                    .enumerate()
-                    .find(|(_, r)| usize::from(r.model_instance) == index)
-            } else {
-                None
-            };
-            // An away fighter that is not fighting is neither seen nor
-            // fighting: the test below would discard its pose, so skip the
-            // corpse and visibility questions too.
-            if world_resident && owner.is_some_and(|(entity, _)| self.dormant_away(entity)) {
-                self.instance_actor_poses[index] = None;
-                self.previous_instance_actor_poses[index] = None;
-                index += 1;
-                continue;
-            }
+            let owner = GAME_ENTITIES
+                .get(usize::from(owner))
+                .map(|record| (usize::from(owner), record));
             // A fighter's pose carries its hitboxes and hurtboxes. Contact
             // must not depend on whether the camera sees it (a camera pushed
             // into a wall culls an enemy standing next to the player), so an
@@ -1155,7 +1135,6 @@ impl Playtest {
             if !actor_pose_needed(corpse_gone, fighting, world_resident, visible) {
                 self.instance_actor_poses[index] = None;
                 self.previous_instance_actor_poses[index] = None;
-                index += 1;
                 continue;
             }
             let previous = self.instance_actor_poses[index];
@@ -1198,7 +1177,6 @@ impl Playtest {
                 }
             }
             self.enemy_swing_sound(index, previous, self.instance_actor_poses[index]);
-            index += 1;
         }
         self.instance_actor_poses[count..].fill(None);
         self.previous_instance_actor_poses[count..].fill(None);

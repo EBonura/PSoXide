@@ -366,6 +366,9 @@ struct Playtest {
     /// posing read every tick (the entities read theirs at the think cadence).
     // psx-numeric-allow-next-line: one bit per game entity, the away mask's width
     fighters_away_now: u64,
+    /// The model instances the frame works on: all but the away fighters'
+    /// ([`playtest_update::PresentInstances`]).
+    present_instances: playtest_update::PresentInstances,
     /// Whether the running death sequence was armed by combat damage
     /// rather than an environmental hazard (respawn logging only).
     death_by_combat: bool,

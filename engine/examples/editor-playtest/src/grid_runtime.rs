@@ -748,10 +748,10 @@ impl GridRuntime {
         observer: RoomPoint,
         eye: RoomPoint,
         bounds: &[VisibilityBounds],
+        // The bounds to test, by index; the rest are not visible.
+        indices: impl Iterator<Item = usize>,
         // psx-numeric-allow-next-line: bit per bounds that gets a sight-line test; the others are visible in an active room
         sight_tested: u64,
-        // psx-numeric-allow-next-line: bit per bounds known to be in no resident room; never tested
-        skip: u64,
         // psx-numeric-allow-next-line: one bit per queried bounds; return width is the caller's fixed capacity
     ) -> u64 {
         if !self.activate(observer) {
@@ -762,11 +762,14 @@ impl GridRuntime {
         let phase = self.view_phase;
         self.view_phase = phase.wrapping_add(1);
         let mut mask = 0u64;
-        for (index, b) in bounds.iter().enumerate().take(64) {
+        for index in indices {
+            let Some(b) = bounds.get(index).filter(|_| index < 64) else {
+                continue;
+            };
             // psx-numeric-allow-next-line: one bit per model instance, the caller's mask width
             let bit = 1u64 << index;
             let (min, max) = (b.min(), b.max());
-            if skip & bit != 0 || !self.bounds_active(min, max) {
+            if !self.bounds_active(min, max) {
                 continue;
             }
             if sight_tested & bit == 0 {
