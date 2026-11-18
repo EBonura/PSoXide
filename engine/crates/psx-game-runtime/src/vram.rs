@@ -1245,10 +1245,13 @@ impl<
     /// tracks the *contract*, which is pre-marked by `ensure_room_resident`
     /// before any actual upload runs.
     fn find_vram_slot(&self, asset_id: AssetId, clut_mode: VramSlotClutMode) -> Option<VramSlot> {
+        // By reference: copying every 38-byte slot out of the table to test it
+        // cost a frame's lookups more than the tests themselves.
         self.slots
             .iter()
-            .filter_map(|s| *s)
+            .flatten()
             .find(|s| s.ready && s.asset == asset_id && s.clut_mode == clut_mode)
+            .copied()
     }
 
     /// Look up the sky panorama's VRAM slot, if the sky is uploaded. Used by the
@@ -1274,29 +1277,33 @@ impl<
 
     /// Ready room-texture slot (either 4bpp CLUT mode) for `asset_id`.
     pub fn find_room_texture_vram_slot(&self, asset_id: AssetId) -> Option<VramSlot> {
-        self.slots.iter().filter_map(|s| *s).find(|s| {
-            s.ready
-                && s.asset == asset_id
-                && matches!(
-                    s.clut_mode,
-                    VramSlotClutMode::OpaqueZero
-                        | VramSlotClutMode::TransparentZero
-                        | VramSlotClutMode::DirectionalSky
-                )
-        })
+        self.slots
+            .iter()
+            .flatten()
+            .find(|s| {
+                s.ready
+                    && s.asset == asset_id
+                    && matches!(
+                        s.clut_mode,
+                        VramSlotClutMode::OpaqueZero
+                            | VramSlotClutMode::TransparentZero
+                            | VramSlotClutMode::DirectionalSky
+                    )
+            })
+            .copied()
     }
 
     fn pending_vram_upload(&self, asset_id: AssetId, clut_mode: VramSlotClutMode) -> bool {
         self.slots
             .iter()
-            .filter_map(|s| *s)
+            .flatten()
             .any(|s| !s.ready && s.asset == asset_id && s.clut_mode == clut_mode)
             || self.upload_queue.contains(asset_id, clut_mode)
     }
 
     /// True while `asset_id` has a room-texture upload still in flight.
     pub fn pending_room_texture_upload(&self, asset_id: AssetId) -> bool {
-        self.slots.iter().filter_map(|s| *s).any(|s| {
+        self.slots.iter().flatten().any(|s| {
             !s.ready
                 && s.asset == asset_id
                 && matches!(
