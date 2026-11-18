@@ -1054,24 +1054,82 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             // and the pose translation touch no GTE state, so the GTE sees the
             // same commands in the same order. `present` needs one bit per
             // joint; more than 32 joints take the fused loop below.
+            //
+            // Only the joints the model draws are transformed, and only those
+            // and their ancestors are decoded (the masks are measured at load);
+            // nothing reads the other slots. A version 7 joint's translation
+            // follows its parent, so the first loop stages each joint's own
+            // clip pose (parents first, so a child derives from the staged
+            // parent); the crossfade and the pose translation, which are not
+            // part of the clip pose, run in the second loop.
+            let sampled = model.sampled_joints();
+            let drawn = model.drawn_joints();
+            let parent_relative = sample.is_parent_relative();
+            let finish = |pose: JointPose, joint: u16| {
+                let pose = match &active_blend {
+                    Some(blend) => blend.blend_toward(pose, joint),
+                    None => pose,
+                };
+                apply_model_pose_translation(pose, pose_translation)
+            };
             let mut present = 0u32;
-            for (joint, joint_view_transform) in joint_view_transforms
-                .iter_mut()
-                .enumerate()
-                .take(joint_count)
-            {
+            for joint in 0..joint_count {
+                if sampled & (1 << joint) == 0 {
+                    continue;
+                }
                 let joint_index = joint as u16;
-                if let Some(pose) = sample.pose(joint_index) {
-                    let pose = match &active_blend {
-                        Some(blend) => blend.blend_toward(pose, joint_index),
-                        None => pose,
-                    };
-                    let pose = apply_model_pose_translation(pose, pose_translation);
-                    *joint_view_transform = JointViewTransform {
+                let pose = if !parent_relative {
+                    sample
+                        .pose(joint_index)
+                        .map(|pose| finish(pose, joint_index))
+                } else {
+                    match sample.parent(joint_index) {
+                        // With no crossfade the pose translation goes on the
+                        // absolute joints only: a derived child adds its
+                        // parent's translation, so it inherits it exactly.
+                        None if active_blend.is_none() => sample
+                            .pose_after_parent(joint_index, None)
+                            .map(|pose| apply_model_pose_translation(pose, pose_translation)),
+                        None => sample.pose_after_parent(joint_index, None),
+                        Some(parent) if present & (1 << parent) != 0 => {
+                            let staged = &joint_view_transforms[parent as usize];
+                            let parent_pose = JointPose {
+                                matrix: staged.rotation.m,
+                                translation: staged.translation,
+                            };
+                            sample.pose_after_parent(joint_index, Some(&parent_pose))
+                        }
+                        // A parent after its child: the sampler walks the chain.
+                        Some(_) => sample.pose(joint_index),
+                    }
+                };
+                if let Some(pose) = pose {
+                    joint_view_transforms[joint] = JointViewTransform {
                         rotation: Mat3I16 { m: pose.matrix },
                         translation: pose.translation,
                     };
                     present |= 1 << joint;
+                }
+            }
+            if parent_relative && active_blend.is_some() {
+                // Every clip pose is staged; now the crossfade and the pose
+                // translation, which children must not inherit.
+                for joint in 0..joint_count {
+                    if (drawn & present) & (1 << joint) == 0 {
+                        continue;
+                    }
+                    let staged = &mut joint_view_transforms[joint];
+                    let pose = finish(
+                        JointPose {
+                            matrix: staged.rotation.m,
+                            translation: staged.translation,
+                        },
+                        joint as u16,
+                    );
+                    *staged = JointViewTransform {
+                        rotation: Mat3I16 { m: pose.matrix },
+                        translation: pose.translation,
+                    };
                 }
             }
             for (joint, joint_view_transform) in joint_view_transforms
@@ -1079,6 +1137,9 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 .enumerate()
                 .take(joint_count)
             {
+                if drawn & (1 << joint) == 0 {
+                    continue;
+                }
                 super::player_vert_debug::set_joint_slot(joint as u8);
                 *joint_view_transform = if present & (1 << joint) != 0 {
                     let (rotation, translation) = transform_pose(JointPose {

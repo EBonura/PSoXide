@@ -671,16 +671,35 @@ pub struct PredecodedModelInfo {
     joint_count: u16,
     part_count: u16,
     vertex_count: u16,
+    /// Joints a part or a blended vertex is drawn with (bit per joint; all
+    /// bits for a model of more than 32 joints).
+    drawn_joints: u32,
+    /// Drawn joints and their ancestors: a version 7 clip derives a joint's
+    /// translation from its parent's pose.
+    sampled_joints: u32,
 }
 
 impl PredecodedModelInfo {
-    /// Build a descriptor from decoded table counts.
+    /// Build a descriptor from decoded table counts; every joint is treated
+    /// as drawn.
     pub const fn new(joint_count: u16, part_count: u16, vertex_count: u16) -> Self {
         Self {
             joint_count,
             part_count,
             vertex_count,
+            drawn_joints: u32::MAX,
+            sampled_joints: u32::MAX,
         }
+    }
+
+    /// Joints the renderer transforms (bit per joint).
+    pub const fn drawn_joints(self) -> u32 {
+        self.drawn_joints
+    }
+
+    /// Joints the renderer samples: the drawn ones and their ancestors.
+    pub const fn sampled_joints(self) -> u32 {
+        self.sampled_joints
     }
 
     /// Number of animated joints sampled for this model.
@@ -700,12 +719,50 @@ impl PredecodedModelInfo {
 }
 
 impl From<Model<'_>> for PredecodedModelInfo {
+    /// Counts plus the drawn-joint masks, measured once at load: no part and
+    /// no blended vertex reads a joint outside them, so the renderer neither
+    /// decodes nor transforms the others (Heavy Enemy has 7 such joints of 27,
+    /// Aletha her 8 finger joints of 26).
     fn from(model: Model<'_>) -> Self {
-        Self::new(
+        let mut info = Self::new(
             model.joint_count(),
             model.part_count(),
             model.vertex_count(),
-        )
+        );
+        if model.joint_count() > 32 {
+            return info;
+        }
+        let mut drawn = 0u32;
+        for p in 0..model.part_count() {
+            let Some(part) = model.part(p) else { continue };
+            drawn |= 1u32 << (part.joint_index() & 31);
+            for v in part.first_vertex()..part.first_vertex() + part.vertex_count() {
+                if let Some(vertex) = model.vertex(v) {
+                    if vertex.is_blend() && u16::from(vertex.joint1) < model.joint_count() {
+                        drawn |= 1u32 << vertex.joint1;
+                    }
+                }
+            }
+        }
+        let mut sampled = drawn;
+        for j in 0..model.joint_count() {
+            if drawn & (1 << j) == 0 {
+                continue;
+            }
+            let mut k = j;
+            let mut steps = 0;
+            while let Some(parent) = model.joint(k).and_then(|joint| joint.parent()) {
+                if parent >= model.joint_count() || steps > 32 {
+                    break;
+                }
+                sampled |= 1 << parent;
+                k = parent;
+                steps += 1;
+            }
+        }
+        info.drawn_joints = drawn;
+        info.sampled_joints = sampled;
+        info
     }
 }
 

@@ -1,4 +1,4 @@
-//! Version 6 `.psxanim` clips: per-joint keyed tracks.
+//! Version 6 and 7 `.psxanim` clips: per-joint keyed tracks.
 //!
 //! The layout is documented on [`psxed_format::animation::tracks`]. A clip holds
 //! one rotation track (smallest-three quaternion keys) and one translation track
@@ -96,8 +96,8 @@ pub struct RotKey {
     pub omitted: u8,
 }
 
-/// Validated view of a v6 payload. Built only by [`validate`], which proves
-/// every unchecked read in this module stays inside `blob`.
+/// Validated view of a v6 or v7 payload. Built only by [`validate`], which
+/// proves every unchecked read in this module stays inside `blob`.
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct Tracks {
     blob: *const u8,
@@ -105,6 +105,8 @@ pub(crate) struct Tracks {
     key_area: usize,
     len: usize,
     translation_shift: u8,
+    /// Offset of the v7 pivot table, 0 for a v6 clip.
+    pivots: usize,
 }
 
 // SAFETY: `Tracks` is only a pointer to immutable cooked data owned by the
@@ -118,23 +120,33 @@ fn le_u16(blob: &[u8], at: usize) -> u16 {
     u16::from_le_bytes([blob[at], blob[at + 1]])
 }
 
-/// Check a v6 blob completely. On success every key read the decoder can make
-/// lies inside `blob`.
+/// Check a v6 (`hierarchy` false) or v7 blob completely. On success every key
+/// read the decoder can make lies inside `blob`, every v7 parent is a joint of
+/// the clip and no parent chain loops.
 pub(crate) fn validate(
     blob: &[u8],
     joint_count: u16,
     frame_count: u16,
     translation_shift: u8,
+    hierarchy: bool,
 ) -> Result<Tracks, ParseError> {
     let bad = ParseError::InvalidAnimationLayout;
     if !(2..=fmt::MAX_FRAMES).contains(&frame_count) || translation_shift > 8 {
         return Err(bad);
     }
     let joints = joint_count as usize;
-    let key_area = joints
+    if hierarchy && joints > fmt::MAX_JOINTS_V7 {
+        return Err(bad);
+    }
+    let pivots = joints
         .checked_mul(fmt::DESCRIPTOR_SIZE)
         .and_then(|d| d.checked_add(DESCRIPTORS_OFFSET))
         .ok_or(ParseError::TableOverflow)?;
+    let key_area = if hierarchy {
+        pivots + fmt::pivot_table_size(joints)
+    } else {
+        pivots
+    };
     if blob.len() < key_area + fmt::SLACK_BYTES {
         return Err(ParseError::Truncated);
     }
@@ -198,6 +210,28 @@ pub(crate) fn validate(
         if !fits(trans_off, trans_keys, key_bytes) {
             return Err(bad);
         }
+        let parent = blob[d + 15] as usize;
+        if parent > joints || (!hierarchy && parent != 0) {
+            return Err(bad);
+        }
+    }
+    if hierarchy {
+        // Every chain must reach an absolute joint within `joints` steps.
+        for j in 0..joints {
+            let mut k = j;
+            let mut steps = 0;
+            loop {
+                let parent = blob[DESCRIPTORS_OFFSET + k * fmt::DESCRIPTOR_SIZE + 15] as usize;
+                if parent == 0 {
+                    break;
+                }
+                k = parent - 1;
+                steps += 1;
+                if steps >= joints {
+                    return Err(bad);
+                }
+            }
+        }
     }
     Ok(Tracks {
         blob: blob.as_ptr(),
@@ -205,7 +239,138 @@ pub(crate) fn validate(
         key_area,
         len: blob.len(),
         translation_shift,
+        pivots: if hierarchy { pivots } else { 0 },
     })
+}
+
+/// Parent of `joint` in a v7 clip, or `None` when its translation is absolute
+/// (every joint of a v6 clip).
+///
+/// # Safety
+/// `tracks` must come from [`validate`] and `joint < joint_count`.
+#[inline(always)]
+pub(crate) unsafe fn parent(tracks: &Tracks, joint: usize) -> Option<usize> {
+    // SAFETY: the descriptor of a validated joint is inside the blob.
+    let byte = unsafe {
+        *tracks
+            .blob
+            .add(DESCRIPTORS_OFFSET + joint * fmt::DESCRIPTOR_SIZE + 15)
+    };
+    if byte == 0 {
+        None
+    } else {
+        Some(byte as usize - 1)
+    }
+}
+
+/// `true` when `joint` is a joint of a v7 clip whose translation follows its
+/// parent (sampling it needs the parent's pose).
+#[inline(always)]
+pub(crate) fn is_derived(tracks: &Tracks, joint: usize) -> bool {
+    // SAFETY: the joint index is checked first.
+    has_hierarchy(tracks)
+        && joint < tracks.joint_count as usize
+        && unsafe { parent(tracks, joint) }.is_some()
+}
+
+/// `true` when the clip is v7 (some translations follow their parents).
+#[inline(always)]
+pub(crate) fn has_hierarchy(tracks: &Tracks) -> bool {
+    tracks.pivots != 0
+}
+
+/// `(R v) >> 12` per row with `R` applied as the renderer applies a pose
+/// matrix (`matrix[col][row]`): what GTE MVMVA with no translation gives.
+#[inline(always)]
+pub fn rotate_pivot(m: &[[i16; 3]; 3], v: [i32; 3]) -> [i32; 3] {
+    let row = |r: usize| {
+        (i32::from(m[0][r]) * v[0] + i32::from(m[1][r]) * v[1] + i32::from(m[2][r]) * v[2]) >> 12
+    };
+    [row(0), row(1), row(2)]
+}
+
+/// [`rotate_pivot`] on the GTE on the console (the same integers: an `sf = 0`
+/// MVMVA's MAC1..MAC3 are the exact row products, shifted here); it replaces
+/// the rotation matrix (RT) the GTE holds. Elsewhere it is [`rotate_pivot`].
+#[inline(always)]
+fn rotate_pivot_gte(m: &[[i16; 3]; 3], v: [i32; 3]) -> [i32; 3] {
+    #[cfg(target_arch = "mips")]
+    {
+        use psx_gte::math::{Mat3I16, Vec3I16};
+        psx_gte::scene::load_rotation(&Mat3I16 {
+            m: [
+                [m[0][0], m[1][0], m[2][0]],
+                [m[0][1], m[1][1], m[2][1]],
+                [m[0][2], m[1][2], m[2][2]],
+            ],
+        });
+        let r = psx_gte::scene::rotate_vector_unshifted_scheduled(Vec3I16::new(
+            v[0] as i16,
+            v[1] as i16,
+            v[2] as i16,
+        ));
+        [r.x >> 12, r.y >> 12, r.z >> 12]
+    }
+    #[cfg(not(target_arch = "mips"))]
+    {
+        rotate_pivot(m, v)
+    }
+}
+
+/// Turn `pose` (joint `joint`'s own rotation and residual) into its full pose
+/// given its parent's decoded pose: `t = t_p + R_p p - R p + residual`. With
+/// `gte` the products run on the GTE (console only; replaces its RT).
+///
+/// # Safety
+/// `tracks` must come from [`validate`] for a v7 clip and `joint < joint_count`.
+#[inline(always)]
+pub(crate) unsafe fn derive(
+    tracks: &Tracks,
+    joint: usize,
+    pose: &mut JointPose,
+    parent: &JointPose,
+    gte: bool,
+) {
+    // SAFETY: the pivot table of a validated v7 clip holds `joint_count`
+    // pivots; `joint < joint_count`.
+    let p = unsafe { tracks.blob.add(tracks.pivots + joint * fmt::PIVOT_SIZE) };
+    // Shipping clips sit word aligned and the table starts on a word, so every
+    // pivot is halfword aligned there; any other slice takes the byte reads.
+    let pivot = if p as usize & 1 == 0 {
+        // SAFETY: as above, six bytes at `p`, halfword aligned (just checked).
+        unsafe {
+            [
+                i32::from(*p.cast::<i16>()),
+                i32::from(*p.add(2).cast::<i16>()),
+                i32::from(*p.add(4).cast::<i16>()),
+            ]
+        }
+    } else {
+        // SAFETY: as above, six bytes at `p`.
+        unsafe {
+            [
+                i32::from(ptr::read_unaligned(p.cast::<i16>())),
+                i32::from(ptr::read_unaligned(p.add(2).cast::<i16>())),
+                i32::from(ptr::read_unaligned(p.add(4).cast::<i16>())),
+            ]
+        }
+    };
+    let (a, b) = if gte {
+        (
+            rotate_pivot_gte(&parent.matrix, pivot),
+            rotate_pivot_gte(&pose.matrix, pivot),
+        )
+    } else {
+        (
+            rotate_pivot(&parent.matrix, pivot),
+            rotate_pivot(&pose.matrix, pivot),
+        )
+    };
+    pose.translation = Vec3I32::new(
+        parent.translation.x + a[0] - b[0] + pose.translation.x,
+        parent.translation.y + a[1] - b[1] + pose.translation.y,
+        parent.translation.z + a[2] - b[2] + pose.translation.z,
+    );
 }
 
 /// Map a playback position (Q8 source frames in `0..(frame_count - 1) << 8`) to
@@ -449,6 +614,67 @@ pub(crate) unsafe fn joint_pose(tracks: &Tracks, joint: usize, pos: &TrackPos) -
         matrix,
         translation: Vec3I32::new(t[0] << shift, t[1] << shift, t[2] << shift),
     }
+}
+
+/// The translation track of joint `joint` at `pos`, model units: what
+/// [`joint_pose`] returns as the translation, with no rotation decode. For a
+/// derived v7 joint this is its residual, not its translation.
+///
+/// # Safety
+/// `tracks` must come from [`validate`] and `joint < joint_count`.
+#[inline]
+pub(crate) unsafe fn joint_translation(tracks: &Tracks, joint: usize, pos: &TrackPos) -> Vec3I32 {
+    debug_assert!(joint < tracks.joint_count as usize);
+    // SAFETY: `joint < joint_count`, so the 16 byte descriptor is inside the
+    // blob `validate` measured.
+    let d = unsafe {
+        tracks
+            .blob
+            .add(DESCRIPTORS_OFFSET + joint * fmt::DESCRIPTOR_SIZE)
+    };
+    // SAFETY: the descriptor is 16 readable bytes.
+    let w0 = unsafe { read_u32(d) };
+    // SAFETY: as above.
+    let w1 = unsafe { read_u32(d.add(4)) };
+    // SAFETY: as above.
+    let w2 = unsafe { read_u32(d.add(8)) };
+    // SAFETY: as above.
+    let w3 = unsafe { read_u32(d.add(12)) };
+    let trans_rate = ((w0 >> 8) & 7) as usize;
+    let step = (w0 >> 11) & 15;
+    let axis = w0 >> 16;
+    let trans_off = (w1 >> 16) as usize;
+    let kb = ((w3 >> 16) & 0xff) as usize;
+    // SAFETY: `validate` proved offsets, key counts and strides stay inside the
+    // key area plus its slack, for every index `track_pos` can produce.
+    let area = unsafe { tracks.blob.add(tracks.key_area) };
+    let (ti, tf) = (
+        pos.idx[trans_rate] as usize,
+        i32::from(pos.frac[trans_rate]),
+    );
+    let min = [
+        (w2 as i16) as i32,
+        ((w2 >> 16) as i16) as i32,
+        (w3 as i16) as i32,
+    ];
+    let shift = u32::from(tracks.translation_shift);
+    // SAFETY: key `ti` of the translation track starts inside the validated
+    // range.
+    let ca = unsafe { decode_trans_codes(area.add(trans_off + ti * kb), axis) };
+    let mut t = [
+        min[0] + (ca[0] << step),
+        min[1] + (ca[1] << step),
+        min[2] + (ca[2] << step),
+    ];
+    if tf != 0 {
+        // SAFETY: a non zero fraction implies `ti + 1` is a key of the track.
+        let cb = unsafe { decode_trans_codes(area.add(trans_off + (ti + 1) * kb), axis) };
+        for a in 0..3 {
+            let b = min[a] + (cb[a] << step);
+            t[a] += ((b - t[a]) * tf) >> 8;
+        }
+    }
+    Vec3I32::new(t[0] << shift, t[1] << shift, t[2] << shift)
 }
 
 /// Safe single-key helpers the cooker uses to search and verify tracks with the

@@ -572,6 +572,8 @@ pub struct PlaytestModelClipBounds {
     pub pose_offset: [i32; 3],
     /// See `psx_level::model_clip_flags`.
     pub flags: u16,
+    /// Root X and Z at frame 0 (`model_clip_flags::FIRST_ROOT`).
+    pub first_root_xz: [i32; 2],
 }
 
 /// Conservative local-space sphere for one animation frame.

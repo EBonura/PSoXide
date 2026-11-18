@@ -1,4 +1,5 @@
-//! Host-side encoder for version 6 `.psxanim` clips (per-joint keyed tracks).
+//! Host-side encoder for version 6 and 7 `.psxanim` clips (per-joint keyed
+//! tracks; in v7 a child joint's translation follows its parent).
 //!
 //! Input is a clip as sampled poses: for every joint and frame a row-major Q12
 //! rotation and an integer translation, plus the model-space points the joint
@@ -16,14 +17,32 @@
 //! stored matrix, via a quaternion), so a pose the resampler's matrix lerp
 //! shrank is decoded as the rotation it approximates. [`Report`] records how
 //! far the shipped matrices are from those rotations separately.
+//!
+//! Stored pose matrices are column-major: the renderer applies `matrix[col][row]`
+//! (psx-engine render3d.rs `scaled_pose_matrix`), and every displacement here is
+//! measured that way.
+//!
+//! Version 7 ([`ClipInput::parents`] given): rotations stay model-space, and a
+//! joint whose bone is rigid (one pivot keeps it on its parent to within
+//! [`PIVOT_GAP_UNITS`] over the clip) stores only a residual translation:
+//! `t = t_p + R_p p - R p + residual`, with the parent's DECODED pose, so the
+//! residual compensates every error above it and nothing accumulates down a
+//! chain. Between keys the child then swings with its parent instead of
+//! sliding in a straight line.
 
 #![allow(clippy::needless_range_loop)]
 
 use std::collections::HashMap;
 
-use psx_asset::tracks::{host, RotKey};
+use psx_asset::tracks::{host, rotate_pivot, RotKey};
 use psx_asset::Animation;
-use psxed_format::animation::{tracks as fmt, MAGIC, VERSION_V6};
+use psxed_format::animation::{tracks as fmt, MAGIC, VERSION_V6, VERSION_V7};
+
+/// Model units a bone's pivot may miss its parent by, at any source frame,
+/// before the joint keeps an absolute translation track: integer translations
+/// and Q12 matrices at about 1500 units of reach leave 1-3 units of gap on a
+/// rigid chain.
+pub const PIVOT_GAP_UNITS: f64 = 6.0;
 
 type V3 = [f64; 3];
 type M3 = [[f64; 3]; 3];
@@ -46,6 +65,11 @@ pub struct JointInput {
     pub translations: Vec<[i32; 3]>,
     /// Model-space points (bind positions) whose displacement bounds the error.
     pub probes: Vec<[f64; 3]>,
+    /// Lever arm, model units: six more points this far from the model origin
+    /// along each axis bound the error too (hurtboxes, sockets and scarf
+    /// anchors read a joint far from its own vertices). 0 adds none; a joint
+    /// with no probes and no reach gets 600.
+    pub reach: f64,
 }
 
 /// A clip to encode.
@@ -55,6 +79,9 @@ pub struct ClipInput {
     pub sample_rate_hz: u16,
     /// One entry per joint; every joint has the same frame count.
     pub joints: Vec<JointInput>,
+    /// Parent of every joint (the model's skeleton) for a version 7 clip, or
+    /// empty for version 6.
+    pub parents: Vec<Option<usize>>,
 }
 
 /// Encoder settings.
@@ -68,6 +95,13 @@ pub struct Options {
     /// bits, while rotation keys get cheaper with every unit; measured on the
     /// Graybox Reach clips 0.8 is within 1% of the best split.
     pub rotation_share: f64,
+    /// Accept poses that are not rotations (animated scale), encoding their
+    /// nearest rotations; [`Report::worst_vs_input`] gives the difference.
+    pub rigidify: bool,
+    /// Version 7: worst error of every translation track (residuals and the
+    /// absolute tracks alike), model units. The rotation keeps
+    /// `budget_units * rotation_share`; the verified bound is their sum.
+    pub residual_units: f64,
 }
 
 impl Default for Options {
@@ -75,6 +109,8 @@ impl Default for Options {
         Self {
             budget_units: 4.0,
             rotation_share: 0.8,
+            residual_units: 2.5,
+            rigidify: false,
         }
     }
 }
@@ -153,6 +189,8 @@ pub struct Report {
     pub shared_bytes: usize,
     /// Blob size had every track kept its own copy of its keys.
     pub unshared_bytes: usize,
+    /// Version 7: joints whose translation follows their parent.
+    pub derived_joints: usize,
 }
 
 fn norm4(q: [f64; 4]) -> [f64; 4] {
@@ -254,13 +292,23 @@ fn dist(a: V3, b: V3) -> f64 {
     ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
 }
 
+/// `m` applied to `v` as the renderer applies a stored pose matrix
+/// (column-major: row `r` is `m[0][r] v0 + m[1][r] v1 + m[2][r] v2`).
+fn apply_pose(m: &M3, v: V3) -> V3 {
+    [
+        m[0][0] * v[0] + m[1][0] * v[1] + m[2][0] * v[2],
+        m[0][1] * v[0] + m[1][1] * v[1] + m[2][1] * v[2],
+        m[0][2] * v[0] + m[1][2] * v[1] + m[2][2] * v[2],
+    ]
+}
+
 /// Worst rotation-only displacement of `probes` between a Q12 matrix and a
-/// reference rotation.
+/// reference rotation, both applied as the renderer applies them.
 fn rot_err(decoded: &MatQ12, truth: &M3, probes: &[V3]) -> f64 {
     let d = mat_f64(decoded);
     let mut worst: f64 = 0.0;
     for &p in probes {
-        worst = worst.max(dist(apply(&d, p), apply(truth, p)));
+        worst = worst.max(dist(apply_pose(&d, p), apply_pose(truth, p)));
     }
     worst
 }
@@ -661,6 +709,170 @@ fn choose_rates(costs: &[Vec<Option<usize>>], constants: &[Option<usize>]) -> Op
     best.map(|(_, mask)| (0..n).filter(|i| mask & (1 << i) != 0).collect())
 }
 
+/// Rotation of a picked track at every source frame, as the runtime decodes it.
+fn decode_rot_track(c: &Cand, frames: usize) -> Vec<MatQ12> {
+    let stride = fmt::rotation_key_bytes(c.param);
+    (0..frames)
+        .map(|f| {
+            let (idx, frac) = if c.seg == 0 {
+                (0u16, 0u16)
+            } else {
+                host::locate(c.seg as u16, frames as u16, (f as u32) << 8)
+            };
+            let a = host::decode_rotation_key(&window(&c.keys, idx as usize, stride), c.param);
+            let b = (frac != 0).then(|| {
+                host::decode_rotation_key(&window(&c.keys, idx as usize + 1, stride), c.param)
+            });
+            host::blend_rotation(a, b, i32::from(frac))
+        })
+        .collect()
+}
+
+/// Translation of a picked track at every source frame, model units, as the
+/// runtime decodes it (before any parent is added).
+fn decode_trans_track(c: &Cand, frames: usize, tshift: u8) -> Vec<[i32; 3]> {
+    let decode = |i: usize| -> [i32; 3] {
+        if c.key_bytes == 0 {
+            return [0, 1, 2].map(|a| i32::from(c.min[a]));
+        }
+        let codes = host::decode_translation_codes(&window(&c.keys, i, c.key_bytes), c.axis_bits);
+        [0, 1, 2].map(|a| i32::from(c.min[a]) + (codes[a] << c.param))
+    };
+    (0..frames)
+        .map(|f| {
+            let (idx, frac) = if c.seg == 0 {
+                (0u16, 0u16)
+            } else {
+                host::locate(c.seg as u16, frames as u16, (f as u32) << 8)
+            };
+            let mut t = decode(idx as usize);
+            if frac != 0 {
+                let b = decode(idx as usize + 1);
+                for k in 0..3 {
+                    t[k] += ((b[k] - t[k]) * i32::from(frac)) >> 8;
+                }
+            }
+            t.map(|v| v << tshift)
+        })
+        .collect()
+}
+
+/// Least-squares pivot of every joint over the clip, `(A_j - A_p) x = t_p - t_j`
+/// with `A` the renderer's rotation, and the joints whose rounded pivot keeps
+/// them on their parent within [`PIVOT_GAP_UNITS`] at every frame.
+fn fit_pivots(clip: &ClipInput, depth_order: &[usize]) -> Vec<Option<(usize, [i32; 3])>> {
+    let joints = clip.joints.len();
+    let frames = clip.joints[0].rotations.len();
+    let mut out: Vec<Option<(usize, [i32; 3])>> = vec![None; joints];
+    // Pivot of each joint, also for joints that end up absolute: a joint that
+    // never turns against its parent takes its parent's (Tikhonov term).
+    let mut piv = vec![[0.0f64; 3]; joints];
+    let applied = |j: usize, f: usize| -> M3 {
+        let m = mat_f64(&clip.joints[j].rotations[f]);
+        [0, 1, 2].map(|r| [0, 1, 2].map(|c| m[c][r]))
+    };
+    for &j in depth_order {
+        let Some(p) = clip.parents[j] else { continue };
+        let mut ata = [[0.0f64; 3]; 3];
+        let mut atb = [0.0f64; 3];
+        for f in 0..frames {
+            let (a, b) = (applied(j, f), applied(p, f));
+            let (tj, tp) = (
+                clip.joints[j].translations[f],
+                clip.joints[p].translations[f],
+            );
+            for r in 0..3 {
+                let row = [0, 1, 2].map(|c| a[r][c] - b[r][c]);
+                let rhs = f64::from(tp[r] - tj[r]);
+                for c in 0..3 {
+                    for k in 0..3 {
+                        ata[c][k] += row[c] * row[k];
+                    }
+                    atb[c] += row[c] * rhs;
+                }
+            }
+        }
+        let lam = 1e-6;
+        for k in 0..3 {
+            ata[k][k] += lam;
+            atb[k] += lam * piv[p][k];
+        }
+        let x = solve3(ata, atb);
+        piv[j] = x;
+        let rounded = x.map(|v| v.round());
+        if rounded.iter().any(|v| !v.is_finite() || v.abs() > 32767.0) {
+            continue;
+        }
+        let mut worst: f64 = 0.0;
+        for f in 0..frames {
+            let (tj, tp) = (
+                clip.joints[j].translations[f],
+                clip.joints[p].translations[f],
+            );
+            let wc = apply(&applied(j, f), rounded);
+            let wp = apply(&applied(p, f), rounded);
+            let child = [0, 1, 2].map(|r| wc[r] + f64::from(tj[r]));
+            let parent = [0, 1, 2].map(|r| wp[r] + f64::from(tp[r]));
+            worst = worst.max(dist(child, parent));
+        }
+        if worst <= PIVOT_GAP_UNITS {
+            out[j] = Some((p, rounded.map(|v| v as i32)));
+        }
+    }
+    out
+}
+
+fn solve3(a: M3, b: V3) -> V3 {
+    let det = |m: M3| {
+        m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+            - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+            + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+    };
+    let d = det(a);
+    [0, 1, 2].map(|c| {
+        let mut m = a;
+        for r in 0..3 {
+            m[r][c] = b[r];
+        }
+        det(m) / d
+    })
+}
+
+/// Joints ordered so every parent comes before its children; `None` when the
+/// parents do not form a forest over the clip's joints.
+fn depth_order(parents: &[Option<usize>]) -> Option<Vec<usize>> {
+    let n = parents.len();
+    let mut depth = vec![0usize; n];
+    for j in 0..n {
+        let mut k = j;
+        let mut d = 0;
+        while let Some(p) = parents[k] {
+            if p >= n || d >= n {
+                return None;
+            }
+            k = p;
+            d += 1;
+        }
+        depth[j] = d;
+    }
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by_key(|&j| depth[j]);
+    Some(order)
+}
+
+/// Cheapest of `cands` (one per clip rate, same order) and the constant track.
+fn pick_slot(cands: &[Option<Cand>], constant: &Option<Cand>) -> Option<(Cand, u8)> {
+    let mut best: Option<(&Cand, u8)> = constant.as_ref().map(|c| (c, fmt::RATE_CONSTANT));
+    for (slot, c) in cands.iter().enumerate() {
+        if let Some(c) = c {
+            if best.is_none_or(|(b, _)| c.bytes < b.bytes) {
+                best = Some((c, slot as u8));
+            }
+        }
+    }
+    best.map(|(c, r)| (c.clone(), r))
+}
+
 /// Encode a clip. See the crate docs for the guarantees.
 pub fn encode(clip: &ClipInput, opts: &Options) -> Result<(Vec<u8>, Report), Reject> {
     let joints = clip.joints.len();
@@ -676,7 +888,7 @@ pub fn encode(clip: &ClipInput, opts: &Options) -> Result<(Vec<u8>, Report), Rej
         let mut q: Vec<[f64; 4]> = Vec::with_capacity(frames);
         for f in 0..frames {
             let m = mat_f64(&joint.rotations[f]);
-            if !is_rigid(&m) {
+            if !is_rigid(&m) && !opts.rigidify {
                 return Err(Reject::NotRigid { joint: j, frame: f });
             }
             let mut cur = quat_from_mat(&m);
@@ -696,6 +908,20 @@ pub fn encode(clip: &ClipInput, opts: &Options) -> Result<(Vec<u8>, Report), Rej
             .collect();
         truths.push(Truth { q, r, t });
     }
+    // Version 7 needs the skeleton, at most 32 joints and at least one bone
+    // that holds its pivot; otherwise the clip is version 6.
+    let order = if clip.parents.len() == joints && joints <= fmt::MAX_JOINTS_V7 {
+        depth_order(&clip.parents)
+    } else {
+        None
+    };
+    let hierarchy: Vec<Option<(usize, [i32; 3])>> = match &order {
+        Some(order) => fit_pivots(clip, order),
+        None => vec![None; joints],
+    };
+    let v7 = order.is_some() && hierarchy.iter().any(Option::is_some);
+    let order = order.unwrap_or_else(|| (0..joints).collect());
+
     // Clip wide translation shift so every minimum fits an i16.
     let max_t = clip
         .joints
@@ -715,34 +941,94 @@ pub fn encode(clip: &ClipInput, opts: &Options) -> Result<(Vec<u8>, Report), Rej
     ladder.dedup();
 
     let rot_limit = opts.budget_units * opts.rotation_share;
-    let trans_limit = opts.budget_units * (1.0 - opts.rotation_share);
+    let trans_limit = if v7 {
+        opts.residual_units
+    } else {
+        opts.budget_units * (1.0 - opts.rotation_share)
+    };
+    let total_limit = if v7 {
+        rot_limit + trans_limit
+    } else {
+        opts.budget_units
+    };
     // A joint with no points would be unconstrained; bound it by a lever arm.
-    let probe_sets: Vec<Vec<V3>> = clip
+    // A derived joint's vertices turn about its pivot (its translation
+    // compensates the rest), so its rotation is measured from there.
+    // A derived joint's translation is compensated to the true one at every
+    // source frame, so, as in v6, only its rotation error moves its points,
+    // about the model origin.
+    //
+    // A derived joint's residual instead puts its pivot where the true pose
+    // has it, so its rotation error moves its points only by their distance
+    // from the pivot (its own bone, not the whole body's height): rotation is
+    // searched on points relative to the pivot, lever arms sit at the pivot,
+    // and every derived child's pivot is a point of its parent (so the
+    // child's residual stays small).
+    let centre = |j: usize| -> V3 { hierarchy[j].map_or([0.0; 3], |(_, p)| p.map(f64::from)) };
+    let mut probe_sets: Vec<Vec<V3>> = clip
         .joints
         .iter()
-        .map(|j| {
-            if j.probes.is_empty() {
-                vec![
-                    [600.0, 0.0, 0.0],
-                    [-600.0, 0.0, 0.0],
-                    [0.0, 600.0, 0.0],
-                    [0.0, -600.0, 0.0],
-                    [0.0, 0.0, 600.0],
-                    [0.0, 0.0, -600.0],
-                ]
+        .enumerate()
+        .map(|(j, joint)| {
+            let reach = if joint.probes.is_empty() && joint.reach <= 0.0 {
+                600.0
             } else {
-                j.probes.clone()
+                joint.reach
+            };
+            let mut set = joint.probes.clone();
+            if reach > 0.0 {
+                let c = if v7 { centre(j) } else { [0.0; 3] };
+                for axis in 0..3 {
+                    for r in [-reach, reach] {
+                        let mut p = c;
+                        p[axis] += r;
+                        set.push(p);
+                    }
+                }
             }
+            set
+        })
+        .collect();
+    if v7 {
+        for j in 0..joints {
+            if let Some((p, piv)) = hierarchy[j] {
+                probe_sets[p].push(piv.map(f64::from));
+            }
+        }
+    }
+    let search_probes: Vec<Vec<V3>> = probe_sets
+        .iter()
+        .enumerate()
+        .map(|(j, set)| {
+            let c = if v7 { centre(j) } else { [0.0; 3] };
+            set.iter()
+                .map(|v| [v[0] - c[0], v[1] - c[1], v[2] - c[2]])
+                .collect()
+        })
+        .collect();
+    let applied_truth = |j: usize, f: usize| -> M3 { truths[j].r[f] };
+    // Translation targets for choosing the rates: absolute, or for a derived
+    // joint the residual against the true poses (the final residual, against
+    // the decoded parents, is close to it).
+    let estimate: Vec<Vec<V3>> = (0..joints)
+        .map(|j| match hierarchy[j] {
+            None => truths[j].t.clone(),
+            Some((p, piv)) => (0..frames)
+                .map(|f| {
+                    let x = piv.map(f64::from);
+                    let a = apply_pose(&applied_truth(p, f), x);
+                    let b = apply_pose(&applied_truth(j, f), x);
+                    [0, 1, 2].map(|r| truths[j].t[f][r] - (truths[p].t[f][r] + a[r] - b[r]))
+                })
+                .collect(),
         })
         .collect();
     let mut rot_c = Vec::new();
     let mut tr_c = Vec::new();
-    for (j, _) in clip.joints.iter().enumerate() {
-        let probes = reduce_probes(&probe_sets[j], 32);
-        let truth = &truths[j];
-        rot_c.push(rot_candidates(truth, &probes, rot_limit, &ladder));
-        let units: Vec<V3> = truth
-            .t
+    for j in 0..joints {
+        let probes = reduce_probes(&search_probes[j], 32);
+        rot_c.push(rot_candidates(&truths[j], &probes, rot_limit, &ladder));
+        let units: Vec<V3> = estimate[j]
             .iter()
             .map(|t| [t[0] / scale, t[1] / scale, t[2] / scale])
             .collect();
@@ -762,7 +1048,7 @@ pub fn encode(clip: &ClipInput, opts: &Options) -> Result<(Vec<u8>, Report), Rej
         for j in 0..joints {
             let (rc, rk) = &rot_c[j];
             if rk.is_none() && rc.iter().all(Option::is_none) {
-                let probes = reduce_probes(&probe_sets[j], 32);
+                let probes = reduce_probes(&search_probes[j], 32);
                 let finest = rot_finest(&truths[j], &probes);
                 return Reject::Unreachable {
                     joint: j,
@@ -791,17 +1077,83 @@ pub fn encode(clip: &ClipInput, opts: &Options) -> Result<(Vec<u8>, Report), Rej
     let rate_segs: Vec<usize> = chosen.iter().map(|&i| ladder[i]).collect();
 
     let pick = |cands: &(Vec<Option<Cand>>, Option<Cand>)| -> (Cand, u8) {
-        let mut best: Option<(&Cand, u8)> = cands.1.as_ref().map(|c| (c, fmt::RATE_CONSTANT));
-        for (slot, &li) in chosen.iter().enumerate() {
-            if let Some(c) = &cands.0[li] {
-                if best.is_none_or(|(b, _)| c.bytes < b.bytes) {
-                    best = Some((c, slot as u8));
+        let slots: Vec<Option<Cand>> = chosen.iter().map(|&li| cands.0[li].clone()).collect();
+        pick_slot(&slots, &cands.1).expect("choose_rates proved a feasible option")
+    };
+    let rot_pick: Vec<(Cand, u8)> = rot_c.iter().map(pick).collect();
+    let mut trans_pick: Vec<Option<(Cand, u8)>> = vec![None; joints];
+    let mut derived = hierarchy.clone();
+    if v7 {
+        // Residuals against the decoded parents, parents first, each picked on
+        // the clip's rates. A joint whose residual misses every rate falls back
+        // to an absolute track.
+        let rot_dec: Vec<Vec<MatQ12>> = rot_pick
+            .iter()
+            .map(|(c, _)| decode_rot_track(c, frames))
+            .collect();
+        let mut t_dec: Vec<Vec<[i32; 3]>> = vec![Vec::new(); joints];
+        for &j in &order {
+            let absolute = |j: usize| -> Option<(Cand, u8)> {
+                let units: Vec<V3> = truths[j]
+                    .t
+                    .iter()
+                    .map(|t| [t[0] / scale, t[1] / scale, t[2] / scale])
+                    .collect();
+                let (cands, constant) = trans_candidates(&units, scale, trans_limit, &rate_segs);
+                pick_slot(&cands, &constant)
+            };
+            let mut chosen_track = None;
+            if let Some((p, piv)) = derived[j] {
+                // Residual that puts the pivot where the true pose has it:
+                // t = t_true + R_true p - R_decoded p.
+                let x = piv.map(f64::from);
+                let target: Vec<V3> = (0..frames)
+                    .map(|f| {
+                        let a = rotate_pivot(&rot_dec[p][f], piv);
+                        let b = rotate_pivot(&rot_dec[j][f], piv);
+                        let true_pivot = apply_pose(&truths[j].r[f], x);
+                        let decoded_pivot = apply_pose(&mat_f64(&rot_dec[j][f]), x);
+                        [0, 1, 2].map(|r| {
+                            (truths[j].t[f][r] + true_pivot[r]
+                                - decoded_pivot[r]
+                                - f64::from(t_dec[p][f][r] + a[r] - b[r]))
+                                / scale
+                        })
+                    })
+                    .collect();
+                let (cands, constant) = trans_candidates(&target, scale, trans_limit, &rate_segs);
+                if let Some((c, rate)) = pick_slot(&cands, &constant) {
+                    let res = decode_trans_track(&c, frames, tshift);
+                    t_dec[j] = (0..frames)
+                        .map(|f| {
+                            let a = rotate_pivot(&rot_dec[p][f], piv);
+                            let b = rotate_pivot(&rot_dec[j][f], piv);
+                            [0, 1, 2].map(|r| t_dec[p][f][r] + a[r] - b[r] + res[f][r])
+                        })
+                        .collect();
+                    chosen_track = Some((c, rate));
+                } else {
+                    derived[j] = None;
                 }
             }
+            if chosen_track.is_none() {
+                let (c, rate) = absolute(j).ok_or(Reject::Unreachable {
+                    joint: j,
+                    channel: "translation",
+                    finest: f64::NAN,
+                    limit: trans_limit,
+                })?;
+                t_dec[j] = decode_trans_track(&c, frames, tshift);
+                chosen_track = Some((c, rate));
+            }
+            trans_pick[j] = chosen_track;
         }
-        let (c, r) = best.expect("choose_rates proved a feasible option");
-        (c.clone(), r)
-    };
+    } else {
+        for j in 0..joints {
+            trans_pick[j] = Some(pick(&tr_c[j]));
+        }
+    }
+    let v7 = v7 && derived.iter().any(Option::is_some);
 
     let mut area: Vec<u8> = Vec::new();
     let mut descs: Vec<u8> = Vec::with_capacity(joints * fmt::DESCRIPTOR_SIZE);
@@ -812,6 +1164,9 @@ pub fn encode(clip: &ClipInput, opts: &Options) -> Result<(Vec<u8>, Report), Rej
     // the copy already passed the bounds the validator checks for this shape.
     let mut stored: HashMap<(Vec<u8>, usize), usize> = HashMap::new();
     let mut shared_bytes = 0usize;
+    // The decoder reads six bytes at every key start; the slack after the key
+    // area covers four. A track of 1-byte keys ending the area needs one more.
+    let mut read_end = 0usize;
     let mut place = |area: &mut Vec<u8>, keys: &[u8], stride: usize| -> usize {
         if let Some(&off) = stored.get(&(keys.to_vec(), stride)) {
             shared_bytes += keys.len();
@@ -820,11 +1175,12 @@ pub fn encode(clip: &ClipInput, opts: &Options) -> Result<(Vec<u8>, Report), Rej
         let off = area.len();
         area.extend_from_slice(keys);
         stored.insert((keys.to_vec(), stride), off);
+        read_end = read_end.max(off + keys.len() - stride + 6);
         off
     };
     for j in 0..joints {
-        let (rc, rrate) = pick(&rot_c[j]);
-        let (tc, trate) = pick(&tr_c[j]);
+        let (rc, rrate) = &rot_pick[j];
+        let (tc, trate) = trans_pick[j].as_ref().expect("every joint has a track");
         let rot_off = place(&mut area, &rc.keys, fmt::rotation_key_bytes(rc.param));
         let trans_off = if tc.key_bytes == 0 {
             0
@@ -845,15 +1201,18 @@ pub fn encode(clip: &ClipInput, opts: &Options) -> Result<(Vec<u8>, Report), Rej
             descs.extend_from_slice(&m.to_le_bytes());
         }
         descs.push(tc.key_bytes as u8);
-        descs.push(0);
+        descs.push(match derived[j] {
+            Some((p, _)) if v7 => p as u8 + 1,
+            _ => 0,
+        });
         reports.push(JointReport {
-            rot_segments: if rrate == fmt::RATE_CONSTANT {
+            rot_segments: if *rrate == fmt::RATE_CONSTANT {
                 0
             } else {
                 rc.seg as u16
             },
             rot_size: rc.param,
-            trans_segments: if trate == fmt::RATE_CONSTANT {
+            trans_segments: if *trate == fmt::RATE_CONSTANT {
                 0
             } else {
                 tc.seg as u16
@@ -863,8 +1222,22 @@ pub fn encode(clip: &ClipInput, opts: &Options) -> Result<(Vec<u8>, Report), Rej
             bytes: (rc.bytes + tc.bytes) as u32,
         });
     }
+    let mut pivots: Vec<u8> = Vec::new();
+    if v7 {
+        for d in &derived {
+            let p = d.map_or([0; 3], |(_, p)| p);
+            for v in p {
+                pivots.extend_from_slice(&(v as i16).to_le_bytes());
+            }
+        }
+        pivots.resize(fmt::pivot_table_size(joints), 0);
+    }
+    while area.len() + fmt::SLACK_BYTES < read_end {
+        area.push(0);
+    }
     // Pad so the whole blob is a multiple of four bytes.
-    let fixed = psxed_format::AssetHeader::SIZE + 8 + fmt::RATE_TABLE_SIZE + descs.len();
+    let fixed =
+        psxed_format::AssetHeader::SIZE + 8 + fmt::RATE_TABLE_SIZE + descs.len() + pivots.len();
     let unshared_bytes = (fixed + area.len() + shared_bytes + fmt::SLACK_BYTES).next_multiple_of(4);
     while !(fixed + area.len() + fmt::SLACK_BYTES).is_multiple_of(4) {
         area.push(0);
@@ -872,7 +1245,7 @@ pub fn encode(clip: &ClipInput, opts: &Options) -> Result<(Vec<u8>, Report), Rej
 
     let mut blob = Vec::with_capacity(fixed + area.len() + fmt::SLACK_BYTES);
     blob.extend_from_slice(&MAGIC);
-    blob.extend_from_slice(&VERSION_V6.to_le_bytes());
+    blob.extend_from_slice(&(if v7 { VERSION_V7 } else { VERSION_V6 }).to_le_bytes());
     blob.extend_from_slice(&0u16.to_le_bytes());
     let payload = fixed - psxed_format::AssetHeader::SIZE + area.len() + fmt::SLACK_BYTES;
     blob.extend_from_slice(&(payload as u32).to_le_bytes());
@@ -893,11 +1266,13 @@ pub fn encode(clip: &ClipInput, opts: &Options) -> Result<(Vec<u8>, Report), Rej
     }
     blob.extend_from_slice(&[0, 0]);
     blob.extend_from_slice(&descs);
+    blob.extend_from_slice(&pivots);
     blob.extend_from_slice(&area);
     blob.extend_from_slice(&[0u8; fmt::SLACK_BYTES]);
     debug_assert_eq!(blob.len(), psxed_format::AssetHeader::SIZE + payload);
 
-    // Verify with the runtime decoder over every probe.
+    // Verify with the runtime decoder over every probe, as the renderer applies
+    // the poses.
     let decoded = Animation::from_bytes(&blob).map_err(|_| Reject::Unparseable)?;
     let (mut worst, mut worst_input, mut shrink): (f64, f64, f64) = (0.0, 0.0, 0.0);
     for (j, joint) in clip.joints.iter().enumerate() {
@@ -915,11 +1290,11 @@ pub fn encode(clip: &ClipInput, opts: &Options) -> Result<(Vec<u8>, Report), Rej
             ];
             let truth_t = truths[j].t[f];
             for &p in &probe_sets[j] {
-                let g = apply(&got_r, p);
+                let g = apply_pose(&got_r, p);
                 let g = [g[0] + got_t[0], g[1] + got_t[1], g[2] + got_t[2]];
-                let t = apply(truth_r, p);
+                let t = apply_pose(truth_r, p);
                 let t = [t[0] + truth_t[0], t[1] + truth_t[1], t[2] + truth_t[2]];
-                let i = apply(&input_r, p);
+                let i = apply_pose(&input_r, p);
                 let i = [i[0] + truth_t[0], i[1] + truth_t[1], i[2] + truth_t[2]];
                 worst = worst.max(dist(g, t));
                 worst_input = worst_input.max(dist(g, i));
@@ -927,7 +1302,7 @@ pub fn encode(clip: &ClipInput, opts: &Options) -> Result<(Vec<u8>, Report), Rej
             }
         }
     }
-    if worst > opts.budget_units + 1e-9 {
+    if worst > total_limit + 1e-9 {
         return Err(Reject::OverBudget { worst });
     }
     let report = Report {
@@ -939,6 +1314,11 @@ pub fn encode(clip: &ClipInput, opts: &Options) -> Result<(Vec<u8>, Report), Rej
         joints: reports,
         shared_bytes,
         unshared_bytes,
+        derived_joints: if v7 {
+            derived.iter().filter(|d| d.is_some()).count()
+        } else {
+            0
+        },
     };
     Ok((blob, report))
 }

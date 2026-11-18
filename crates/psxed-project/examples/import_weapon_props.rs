@@ -151,7 +151,6 @@ fn main() {
         .collect();
     let clip_resource = |path: String, skeleton, target_model| {
         ResourceData::AnimationClip(AnimationClipResource {
-            preserve_samples: false,
             psxanim_path: path,
             skeleton: Some(skeleton),
             target_model,

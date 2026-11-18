@@ -96,11 +96,13 @@ fn synthetic(frames: usize, joints: usize, seed: u64) -> ClipInput {
             rotations,
             translations,
             probes: probes(),
+            reach: 0.0,
         });
     }
     ClipInput {
         sample_rate_hz: 30,
         joints: out,
+        parents: Vec::new(),
     }
 }
 
@@ -207,10 +209,12 @@ fn static_clip_collapses_to_constants() {
         rotations: vec![m; 20],
         translations: vec![[10, -20, 30]; 20],
         probes: probes(),
+        reach: 0.0,
     };
     let clip = ClipInput {
         sample_rate_hz: 15,
         joints: vec![joint.clone(), joint],
+        parents: Vec::new(),
     };
     let (blob, report) = encode(&clip, &Options::default()).unwrap();
     assert!(report
@@ -248,6 +252,7 @@ fn tighter_budget_never_costs_fewer_bytes() {
             &Options {
                 budget_units: budget,
                 rotation_share: 0.8,
+                ..Options::default()
             },
         )
         .unwrap();
@@ -334,5 +339,180 @@ fn repeated_tracks_are_stored_once() {
         let sample = anim.looped_pose_sample_q12(phase).unwrap();
         assert_eq!(sample.pose(3), sample.pose(1), "phase {phase:#x}");
         assert_eq!(sample.pose(5), sample.pose(1), "phase {phase:#x}");
+    }
+}
+
+/// `m` applied as the renderer applies a stored pose matrix (column-major).
+fn apply_pose(m: &[[i16; 3]; 3], v: [f64; 3]) -> [f64; 3] {
+    [0, 1, 2].map(|r| {
+        (f64::from(m[0][r]) * v[0] + f64::from(m[1][r]) * v[1] + f64::from(m[2][r]) * v[2]) / 4096.0
+    })
+}
+
+/// A rigid chain swinging fast: every bone's pivot stays on its parent.
+fn rigid_chain(frames: usize, joints: usize, seed: u64) -> (ClipInput, Vec<[f64; 3]>) {
+    let mut rng = Lcg(seed);
+    let pivots: Vec<[f64; 3]> = (0..joints)
+        .map(|j| [0.0, 900.0 * j as f64, rng.range(-50.0, 50.0)])
+        .collect();
+    let mut joints_in: Vec<JointInput> = Vec::new();
+    let mut world_t: Vec<Vec<[f64; 3]>> = vec![Vec::new(); joints];
+    let mut mats: Vec<Vec<[[i16; 3]; 3]>> = vec![Vec::new(); joints];
+    let axes: Vec<[f64; 3]> = (0..joints)
+        .map(|_| {
+            [
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+                rng.range(0.2, 1.0),
+            ]
+        })
+        .collect();
+    for f in 0..frames {
+        let u = f as f64 / (frames - 1) as f64 * std::f64::consts::TAU;
+        for j in 0..joints {
+            // Model-space rotations: each joint swings up to 2.4 rad per clip.
+            let m = matq12(quat(
+                axes[j],
+                1.2 * (u + j as f64).sin() * (j + 1) as f64 * 0.6,
+            ));
+            let t = if j == 0 {
+                [100.0 * u.sin(), 50.0, 0.0]
+            } else {
+                // t_j = t_p + R_p p - R_j p keeps pivot p on the parent.
+                let a = apply_pose(&mats[j - 1][f], pivots[j]);
+                let b = apply_pose(&m, pivots[j]);
+                [0, 1, 2].map(|r| world_t[j - 1][f][r] + a[r] - b[r])
+            };
+            world_t[j].push(t);
+            mats[j].push(m);
+        }
+    }
+    for j in 0..joints {
+        joints_in.push(JointInput {
+            rotations: mats[j].clone(),
+            translations: world_t[j]
+                .iter()
+                .map(|t| t.map(|v| v.round() as i32))
+                .collect(),
+            probes: vec![pivots[j]],
+            reach: 600.0,
+        });
+    }
+    let clip = ClipInput {
+        sample_rate_hz: 15,
+        joints: joints_in,
+        parents: (0..joints).map(|j| j.checked_sub(1)).collect(),
+    };
+    (clip, pivots)
+}
+
+#[test]
+fn v7_chain_holds_the_budget_and_stays_attached_between_keys() {
+    let (clip, pivots) = rigid_chain(12, 5, 11);
+    let opts = Options::default();
+    let (blob, report) = encode(&clip, &opts).unwrap();
+    let anim = Animation::from_bytes(&blob).unwrap();
+    assert!(anim.is_parent_relative());
+    assert_eq!(report.derived_joints, 4);
+    assert!(
+        report.worst_error <= opts.budget_units * opts.rotation_share + opts.residual_units,
+        "{}",
+        report.worst_error
+    );
+    // Between keys every pivot stays where its parent carries it (a few units
+    // of integer rounding), where v6 slid the child along a straight line.
+    let v6 = encode(
+        &ClipInput {
+            parents: Vec::new(),
+            ..clip.clone()
+        },
+        &opts,
+    )
+    .unwrap()
+    .0;
+    let v6 = Animation::from_bytes(&v6).unwrap();
+    let gap = |anim: &Animation<'_>, phase: u32| -> f64 {
+        let s = anim.looped_pose_sample_q12(phase).unwrap();
+        let mut worst: f64 = 0.0;
+        for j in 1..5u16 {
+            let (c, p) = (s.pose(j).unwrap(), s.pose(j - 1).unwrap());
+            let x = pivots[j as usize];
+            let wc = apply_pose(&c.matrix, x);
+            let wp = apply_pose(&p.matrix, x);
+            let tc = [c.translation.x, c.translation.y, c.translation.z];
+            let tp = [p.translation.x, p.translation.y, p.translation.z];
+            let d: f64 = (0..3)
+                .map(|r| (wc[r] + f64::from(tc[r]) - wp[r] - f64::from(tp[r])).powi(2))
+                .sum();
+            worst = worst.max(d.sqrt());
+        }
+        worst
+    };
+    let (mut v7_gap, mut v6_gap): (f64, f64) = (0.0, 0.0);
+    for phase in (0..(10u32 << 12)).step_by(256) {
+        v7_gap = v7_gap.max(gap(&anim, phase));
+        v6_gap = v6_gap.max(gap(&v6, phase));
+    }
+    assert!(v7_gap < 12.0, "v7 gap {v7_gap}");
+    assert!(v6_gap > 3.0 * v7_gap, "v6 gap {v6_gap} v7 gap {v7_gap}");
+}
+
+#[test]
+fn v7_blob_with_a_parent_cycle_is_rejected() {
+    let (clip, _) = rigid_chain(8, 3, 3);
+    let (mut blob, _) = encode(&clip, &Options::default()).unwrap();
+    let descriptors = psxed_format::AssetHeader::SIZE + 8 + fmt::RATE_TABLE_SIZE;
+    // Joint 0 names joint 2 as its parent: 0 -> 2 -> 1 -> 0.
+    blob[descriptors + 15] = 3;
+    assert!(Animation::from_bytes(&blob).is_err());
+}
+
+#[test]
+fn v7_pose_cache_matches_walking_the_chain() {
+    let (clip, _) = rigid_chain(16, 6, 21);
+    let (blob, _) = encode(&clip, &Options::default()).unwrap();
+    let anim = Animation::from_bytes(&blob).unwrap();
+    // Interleaved phases (a crossfade), children before parents, repeats and
+    // more distinct positions than the cache holds.
+    let mut rng = Lcg(5);
+    let queries: Vec<(u32, u16)> = (0..3000)
+        .map(|_| {
+            (
+                (rng.range(0.0, 15.0) * 4096.0) as u32 & !15,
+                (rng.range(0.0, 6.0) as u16).min(5),
+            )
+        })
+        .collect();
+    assert_eq!(anim.first_cache_mismatch(&queries), None);
+}
+
+#[test]
+fn translation_only_decode_matches_the_pose() {
+    let (chain, _) = rigid_chain(14, 5, 9);
+    let mut clips = vec![
+        chain.clone(),
+        ClipInput {
+            parents: Vec::new(),
+            ..chain
+        },
+    ];
+    clips.push(synthetic(20, 4, 3));
+    for clip in &clips {
+        let (blob, _) = encode(clip, &Options::default()).unwrap();
+        let anim = Animation::from_bytes(&blob).unwrap();
+        for j in 0..anim.joint_count() {
+            for f in 0..anim.frame_count() {
+                assert_eq!(
+                    anim.translation(f, j),
+                    anim.pose(f, j).map(|p| p.translation)
+                );
+            }
+            for phase in (0..((anim.frame_count() as u32 - 1) << 12)).step_by(97) {
+                assert_eq!(
+                    anim.translation_looped_q12(phase, j),
+                    anim.pose_looped_q12(phase, j).map(|p| p.translation)
+                );
+            }
+        }
     }
 }

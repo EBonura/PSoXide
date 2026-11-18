@@ -41,7 +41,7 @@ fn main() {
         let ResourceData::AnimationClip(clip) = &resource.data else {
             panic!("clip");
         };
-        assert!(clip.preserve_samples && !clip.calibration.in_place);
+        assert!(!clip.calibration.in_place);
         let source_bytes = fs::read(root.join(&clip.psxanim_path)).unwrap();
         let source = psx_asset::Animation::from_bytes(&source_bytes).unwrap();
         let cooked = package

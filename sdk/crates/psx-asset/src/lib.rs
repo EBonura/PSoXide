@@ -43,7 +43,10 @@
 
 pub mod hma1;
 pub mod hmd8;
+mod pose_cache;
 pub mod tracks;
+
+pub use pose_cache::clear_pose_cache;
 
 use psx_gte::math::{Vec3I16, Vec3I32};
 
@@ -852,7 +855,7 @@ impl<'a> Animation<'a> {
         use psxed_format::animation::{
             AnimationHeader, MAGIC, POSE_RECORD_SIZE, POSE_RECORD_SIZE_V1, POSE_RECORD_SIZE_V3,
             POSE_RECORD_SIZE_V4, VERSION, VERSION_V1, VERSION_V3, VERSION_V4, VERSION_V5,
-            VERSION_V6,
+            VERSION_V6, VERSION_V7,
         };
 
         if bytes.len() < psxed_format::AssetHeader::SIZE {
@@ -868,11 +871,16 @@ impl<'a> Animation<'a> {
             VERSION_V1 => POSE_RECORD_SIZE_V1,
             VERSION_V3 => POSE_RECORD_SIZE_V3,
             VERSION_V4 | VERSION_V5 => POSE_RECORD_SIZE_V4,
-            VERSION_V6 => TRACKS_MARK,
+            VERSION_V6 | VERSION_V7 => TRACKS_MARK,
             _ => {
                 return Err(ParseError::UnsupportedVersion(version));
             }
         };
+        // The console decodes keyed tracks only: the cook keys every clip, and
+        // the pose-table decoders (v1 to v5) stay host-side for the tools.
+        if cfg!(target_arch = "mips") && pose_record_size != TRACKS_MARK {
+            return Err(ParseError::UnsupportedVersion(version));
+        }
         let payload_len = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
         let payload_start = psxed_format::AssetHeader::SIZE;
         let actual_payload = bytes.len().saturating_sub(payload_start);
@@ -895,6 +903,7 @@ impl<'a> Animation<'a> {
             || version == VERSION_V4
             || version == VERSION_V5
             || version == VERSION_V6
+            || version == VERSION_V7
         {
             let shift = read_u16(ah, 6);
             if shift > 15 {
@@ -908,8 +917,14 @@ impl<'a> Animation<'a> {
             return Err(ParseError::InvalidAnimationLayout);
         }
 
-        if version == VERSION_V6 {
-            let tracks = tracks::validate(bytes, joint_count, frame_count, translation_shift)?;
+        if version == VERSION_V6 || version == VERSION_V7 {
+            let tracks = tracks::validate(
+                bytes,
+                joint_count,
+                frame_count,
+                translation_shift,
+                version == VERSION_V7,
+            )?;
             return Ok(Self {
                 pose_indices: &[],
                 poses: bytes,
@@ -964,10 +979,49 @@ impl<'a> Animation<'a> {
         })
     }
 
-    /// `true` for a v6 clip of per-joint keyed tracks.
+    /// `true` for a v6 or v7 clip of per-joint keyed tracks.
     #[inline]
     pub fn is_keyed_tracks(&self) -> bool {
         self.tracks.is_some()
+    }
+
+    /// Test support: query a fresh v7 pose cache in the order `queries`
+    /// gives (phase, joint) and return the first query whose pose differs
+    /// from walking the chain uncached, or `None` when every one matches.
+    /// The console serves every v7 joint through such a cache.
+    #[doc(hidden)]
+    pub fn first_cache_mismatch(&self, queries: &[(u32, u16)]) -> Option<usize> {
+        let tracks = self.tracks.as_ref().filter(|t| tracks::has_hierarchy(t))?;
+        let mut cache = pose_cache::PoseCache::EMPTY;
+        for (i, &(phase, joint)) in queries.iter().enumerate() {
+            let sample = self.looped_pose_sample_q12(phase)?;
+            if joint >= self.joint_count {
+                continue;
+            }
+            // SAFETY: a validated v7 clip and a checked joint index.
+            let (cached, walked) = unsafe {
+                (
+                    cache.pose(
+                        tracks,
+                        self.poses.as_ptr() as usize,
+                        sample.track_pos_q8,
+                        &sample.track_pos,
+                        joint as usize,
+                    ),
+                    pose_cache::chain_pose(tracks, &sample.track_pos, joint as usize),
+                )
+            };
+            if cached != walked {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    /// `true` for a v7 clip, whose joint translations follow their parents.
+    #[inline]
+    pub fn is_parent_relative(&self) -> bool {
+        self.tracks.as_ref().is_some_and(tracks::has_hierarchy)
     }
 
     /// Number of joint poses per frame.
@@ -1049,10 +1103,28 @@ impl<'a> Animation<'a> {
             return None;
         }
         if let Some(tracks) = &self.tracks {
-            let pos = tracks::track_pos(self.poses, u32::from(frame_index) << 8);
+            let pos_q8 = u32::from(frame_index) << 8;
+            let pos = tracks::track_pos(self.poses, pos_q8);
+            if tracks::is_derived(tracks, joint_index as usize) {
+                // SAFETY: `tracks` came from `validate` for this v7 blob and the
+                // joint index was checked above.
+                return Some(unsafe {
+                    pose_cache::v7_pose(
+                        tracks,
+                        self.poses.as_ptr() as usize,
+                        pos_q8,
+                        &pos,
+                        joint_index as usize,
+                    )
+                });
+            }
             // SAFETY: `tracks` came from `validate` for this blob and the joint
             // index was checked above.
             return Some(unsafe { tracks::joint_pose(tracks, joint_index as usize, &pos) });
+        }
+        if cfg!(target_arch = "mips") {
+            // Keyed tracks only on the console (see `from_bytes`).
+            return None;
         }
         let base = frame_index as usize * self.joint_count as usize * self.pose_record_size;
         // SAFETY: both indices were checked above. `from_bytes` validates
@@ -1358,6 +1430,33 @@ impl<'a> Animation<'a> {
         })
     }
 
+    /// The translation of joint `joint_index` at stored frame `frame_index`
+    /// ([`Self::pose`]'s translation, without a rotation decode where the
+    /// translation is absolute).
+    pub fn translation(&self, frame_index: u16, joint_index: u16) -> Option<Vec3I32> {
+        if frame_index >= self.frame_count || joint_index >= self.joint_count {
+            return None;
+        }
+        if let Some(tracks) = &self.tracks {
+            if !tracks::is_derived(tracks, joint_index as usize) {
+                let pos = tracks::track_pos(self.poses, u32::from(frame_index) << 8);
+                // SAFETY: a validated clip and checked indices.
+                return Some(unsafe {
+                    tracks::joint_translation(tracks, joint_index as usize, &pos)
+                });
+            }
+        }
+        self.pose(frame_index, joint_index)
+            .map(|pose| pose.translation)
+    }
+
+    /// [`Self::pose_looped_q12`]'s translation, without a rotation decode
+    /// where the translation is absolute.
+    pub fn translation_looped_q12(&self, frame_q12: u32, joint_index: u16) -> Option<Vec3I32> {
+        self.looped_pose_sample_q12(frame_q12)?
+            .translation(joint_index)
+    }
+
     /// Interpolated looping joint pose at a Q12 fixed-point frame phase.
     ///
     /// `frame_q12` uses sampled animation frames as the integer unit
@@ -1389,11 +1488,9 @@ impl<'a> Animation<'a> {
             base_frame + 1
         };
         let alpha_q12 = (frame_q12 & 0x0fff) as u16;
+        let track_pos_q8 = (u32::from(base_frame) << 8) | u32::from(alpha_q12 >> 4);
         let track_pos = if self.tracks.is_some() {
-            tracks::track_pos(
-                self.poses,
-                (u32::from(base_frame) << 8) | u32::from(alpha_q12 >> 4),
-            )
+            tracks::track_pos(self.poses, track_pos_q8)
         } else {
             tracks::TrackPos::ZERO
         };
@@ -1408,6 +1505,7 @@ impl<'a> Animation<'a> {
                 * self.joint_count as usize
                 * self.pose_record_size,
             alpha_q12,
+            track_pos_q8,
             track_pos,
         })
     }
@@ -1422,7 +1520,10 @@ pub struct AnimationPoseSample<'a> {
     base_frame_offset: usize,
     next_frame_offset: usize,
     alpha_q12: u16,
-    /// Key positions of a v6 clip; zero for every other version.
+    /// Q8 track position (`base_frame << 8 | alpha >> 4`): a v7 clip's poses
+    /// are cached by clip and this position.
+    track_pos_q8: u32,
+    /// Key positions of a v6 or v7 clip; zero for every other version.
     track_pos: tracks::TrackPos,
 }
 
@@ -1434,11 +1535,30 @@ impl AnimationPoseSample<'_> {
             return None;
         }
         if let Some(tracks) = &self.animation.tracks {
+            // An absolute joint (the root, and every joint gameplay reads on its
+            // own) is one decode with no cache.
+            if tracks::is_derived(tracks, joint_index as usize) {
+                // SAFETY: `tracks` came from `validate` for this animation's v7
+                // blob and the joint index was checked above.
+                return Some(unsafe {
+                    pose_cache::v7_pose(
+                        tracks,
+                        self.animation.poses.as_ptr() as usize,
+                        self.track_pos_q8,
+                        &self.track_pos,
+                        joint_index as usize,
+                    )
+                });
+            }
             // SAFETY: `tracks` came from `validate` for this animation's blob
             // and the joint index was checked above.
             return Some(unsafe {
                 tracks::joint_pose(tracks, joint_index as usize, &self.track_pos)
             });
+        }
+        if cfg!(target_arch = "mips") {
+            // Keyed tracks only on the console (see `Animation::from_bytes`).
+            return None;
         }
         if self.alpha_q12 == 0 || self.base_frame == self.next_frame {
             // SAFETY: the joint index was checked above and the frame offset
@@ -1507,6 +1627,10 @@ impl AnimationPoseSample<'_> {
     /// files return `None` and callers can fall back to [`Self::pose`].
     #[inline]
     pub fn gte_pose(&self, joint_index: u16) -> Option<GteJointPose> {
+        if cfg!(target_arch = "mips") {
+            // No pose tables on the console (see `Animation::from_bytes`).
+            return None;
+        }
         if self.alpha_q12 == 0 || self.base_frame == self.next_frame {
             return self
                 .animation
@@ -1520,6 +1644,76 @@ impl AnimationPoseSample<'_> {
             .animation
             .packed_pose_at_frame_offset(self.next_frame_offset, joint_index)?;
         Some(lerp_gte_pose_q12(a, b, self.alpha_q12))
+    }
+}
+
+impl AnimationPoseSample<'_> {
+    /// The translation of `joint` at this sample: [`Self::pose`]'s
+    /// translation, decoding no rotation when the joint's translation is
+    /// absolute (in-place root correction reads only this).
+    #[inline]
+    pub fn translation(&self, joint_index: u16) -> Option<Vec3I32> {
+        if let Some(tracks) = &self.animation.tracks {
+            if joint_index < self.animation.joint_count
+                && !tracks::is_derived(tracks, joint_index as usize)
+            {
+                // SAFETY: a validated clip and a checked joint index.
+                return Some(unsafe {
+                    tracks::joint_translation(tracks, joint_index as usize, &self.track_pos)
+                });
+            }
+        }
+        self.pose(joint_index).map(|pose| pose.translation)
+    }
+
+    /// `true` when the clip is v7: some joint translations follow their
+    /// parents (see [`Self::parent`]).
+    #[inline]
+    pub fn is_parent_relative(&self) -> bool {
+        self.animation.is_parent_relative()
+    }
+
+    /// Parent whose decoded pose a v7 joint's translation follows, or `None`
+    /// for an absolute joint and for every joint of any other version.
+    #[inline]
+    pub fn parent(&self, joint_index: u16) -> Option<u16> {
+        let tracks = self.animation.tracks.as_ref()?;
+        if !tracks::has_hierarchy(tracks) || joint_index >= self.animation.joint_count {
+            return None;
+        }
+        // SAFETY: a validated clip and a checked joint index.
+        unsafe { tracks::parent(tracks, joint_index as usize) }.map(|p| p as u16)
+    }
+
+    /// [`Self::pose`] for a caller that already holds the parent's pose from
+    /// this same sample (a renderer walking parents first): `parent` must be
+    /// `Some` exactly when [`Self::parent`] is, and then hold that joint's
+    /// pose. Skips the cache and the chain walk. On the console the derivation
+    /// runs on the GTE and replaces its rotation matrix (RT): call it where the
+    /// GTE's matrices are reloaded before use (the renderer's decode loop).
+    #[inline]
+    pub fn pose_after_parent(
+        &self,
+        joint_index: u16,
+        parent: Option<&JointPose>,
+    ) -> Option<JointPose> {
+        let Some(tracks) = self.animation.tracks.as_ref() else {
+            return self.pose(joint_index);
+        };
+        if joint_index >= self.animation.joint_count {
+            return None;
+        }
+        // SAFETY: a validated clip and a checked joint index.
+        let mut pose = unsafe { tracks::joint_pose(tracks, joint_index as usize, &self.track_pos) };
+        if tracks::has_hierarchy(tracks) {
+            // SAFETY: as above.
+            if unsafe { tracks::parent(tracks, joint_index as usize) }.is_some() {
+                let parent = parent?;
+                // SAFETY: a v7 clip, a checked joint, the parent's pose given.
+                unsafe { tracks::derive(tracks, joint_index as usize, &mut pose, parent, true) };
+            }
+        }
+        Some(pose)
     }
 }
 

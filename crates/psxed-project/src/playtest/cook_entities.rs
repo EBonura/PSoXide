@@ -1394,6 +1394,28 @@ pub(crate) fn register_model_for_instance(
         return None;
     };
     let resolved_clips = project.resolved_model_animation_clips(model_resource_id);
+    // Joints gameplay reads one at a time (sockets: weapons, the scarf anchor,
+    // trails; every Character on this model's hurtboxes, hitboxes and
+    // projectile emitters). Their clips keep absolute translations there, so
+    // such a read is one decode; the renderer derives the rest from parents.
+    let mut capsule_points: Vec<(u16, [i32; 3])> = Vec::new();
+    let gameplay_joints: Vec<u16> = {
+        let mut joints: Vec<u16> = model.attachments.iter().map(|s| s.joint).collect();
+        for resource in &project.resources {
+            if let ResourceData::Character(character) = &resource.data {
+                if character.model == Some(model_resource_id) {
+                    joints.extend(character.combat_capsules.iter().map(|c| c.joint));
+                    for c in &character.combat_capsules {
+                        capsule_points.push((c.joint, c.capsule.start));
+                        capsule_points.push((c.joint, c.capsule.end));
+                    }
+                }
+            }
+        }
+        joints.sort_unstable();
+        joints.dedup();
+        joints
+    };
     if resolved_clips.is_empty() && animation_policy == ModelAnimationPolicy::AuthoredRequired {
         report.error_at(
             PlaytestValidationTarget::Resource(model_resource_id),
@@ -1757,57 +1779,53 @@ pub(crate) fn register_model_for_instance(
         };
         let corrected_source = psx_asset::Animation::from_bytes(&animation_bytes)
             .expect("host-generated corrected animation must parse");
-        let preserve_samples = animation_resource
-            .and_then(|id| project.resource(id))
-            .is_some_and(|resource| {
-                matches!(&resource.data,
-                ResourceData::AnimationClip(clip) if clip.preserve_samples)
-            });
         let source_frame_count = corrected_source.frame_count();
-        let (source_frame_first, source_frame_last) = crate::animation_resample::live_frame_range(
-            &corrected_source,
-            if preserve_samples {
-                0
-            } else {
-                project.animation_trim_still_percent
-            },
-        );
-        // Resample AFTER pose correction, so the budget is measured against the
-        // poses that actually ship, and BEFORE frame bounds are baked, so the
-        // bounds describe the frames the runtime will really read.
         let label = format!("{} / {}", resource.name, clip_name);
-        // Trim BEFORE resampling so the rate is chosen against real motion
-        // rather than against a stretch of stillness that is about to go.
-        let animation_bytes = trim_still_ends(
-            animation_bytes,
-            if preserve_samples {
-                0
-            } else {
-                project.animation_trim_still_percent
-            },
-            &label,
-        );
-        let animation_bytes = resample_under_budget(
-            animation_bytes,
-            if preserve_samples {
-                0
-            } else {
-                project.animation_error_budget_degrees
-            },
-            &label,
-        );
-        // Last, after trimming and resampling have settled which frames ship, so
-        // the error bound is measured against the poses the runtime would
-        // otherwise have read, and so the baked frame bounds below describe the
+        // Keyed tracks first, on the clip as authored. The encoder picks key
+        // rates per track against the source poses and keeps the first and
+        // last frames exact, so nothing before it drops frames or changes the
+        // clip's duration: authored durations and handoff ticks ship exactly.
+        // The error bound is measured against the poses the runtime would
+        // otherwise have read, and the baked frame bounds below describe the
         // keyed clip the runtime will actually decode.
         let socket_joints: Vec<u16> = model.attachments.iter().map(|s| s.joint).collect();
-        let animation_bytes = crate::animation_tracks::pack_tracks(
-            animation_bytes,
-            &parsed_model,
-            &socket_joints,
-            project.animation_track_budget_units,
-            &label,
-        );
+        let pack = |bytes: Vec<u8>| {
+            crate::animation_tracks::pack_tracks(
+                bytes,
+                &parsed_model,
+                &socket_joints,
+                &gameplay_joints,
+                &capsule_points,
+                project.animation_track_budget_units,
+                &label,
+            )
+        };
+        let keyed = pack(animation_bytes.clone());
+        let is_keyed = psx_asset::Animation::from_bytes(&keyed)
+            .map(|animation| animation.is_keyed_tracks())
+            .unwrap_or(false);
+        // A clip that stays a pose table (animated scale, too few frames, or
+        // smaller as a table) still trims its still ends and resamples under
+        // the degree budget, as before.
+        let trim_percent = if is_keyed {
+            0
+        } else {
+            project.animation_trim_still_percent
+        };
+        let (source_frame_first, source_frame_last) =
+            crate::animation_resample::live_frame_range(&corrected_source, trim_percent);
+        let animation_bytes = if is_keyed {
+            keyed
+        } else {
+            // Trim BEFORE resampling so the rate is chosen against real motion
+            // rather than against a stretch of stillness that is about to go.
+            let trimmed = trim_still_ends(animation_bytes, trim_percent, &label);
+            pack(resample_under_budget(
+                trimmed,
+                project.animation_error_budget_degrees,
+                &label,
+            ))
+        };
         let corrected_anim = psx_asset::Animation::from_bytes(&animation_bytes)
             .expect("host-generated corrected animation must parse");
         let cooked_frame_count = corrected_anim.frame_count();
@@ -1839,6 +1857,9 @@ pub(crate) fn register_model_for_instance(
                 return None;
             }
         };
+        // The runtime decoder's own frame-0 root translation, so the per-tick
+        // in-place correction reads it instead of decoding it.
+        let first_root = corrected_anim.translation(0, 0);
         let floor_y = baked_bounds
             .first()
             .map(|bounds| bounds.floor_y)
@@ -1855,7 +1876,12 @@ pub(crate) fn register_model_for_instance(
                 model_clip_flags::IN_PLACE
             } else {
                 0
+            } | if first_root.is_some() {
+                model_clip_flags::FIRST_ROOT
+            } else {
+                0
             },
+            first_root_xz: first_root.map_or([0, 0], |t| [t.x, t.z]),
         });
         // Same contract as the shared atlas above: content identity, not path.
         // Model VARIANTS (one enemy cut into claw/weapon/legless silhouettes)
