@@ -565,6 +565,7 @@ impl Playtest {
     /// order is load-bearing: a bolt that staggers an enemy this tick lands
     /// before the player's blade reaches it, and a hit reaction cancels the
     /// player's swing before it can connect.
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     pub(super) fn resolve_combat(&mut self, ctx: &Ctx) {
         self.combat_projectile_impacts.tick();
         self.player_flash.tick();
@@ -1491,6 +1492,7 @@ impl Playtest {
     /// frame has reached, until the shooter runs out of energy or the pool is
     /// full. The one release path for every shooter: what differs between
     /// them today is data on the [`Volley`].
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     pub(super) fn release_projectiles(&mut self, ctx: &Ctx, volley: Volley) {
         let mut released = volley.released;
         // Every bolt of the first volley released inside the shooter's crit

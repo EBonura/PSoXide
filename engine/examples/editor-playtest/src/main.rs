@@ -772,6 +772,7 @@ impl Playtest {
         self.instance_visible_mask = u16::MAX;
     }
 
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     fn step_streaming_jobs(&mut self, ctx: &mut Ctx) {
         let background_tick = self.streaming_jobs.background_tick(ctx);
         // Every tick, not just background ticks. The controller steps over

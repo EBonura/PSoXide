@@ -2445,6 +2445,7 @@ impl Playtest {
         telemetry::stage_end(telemetry::stage::CAMERA);
     }
 
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     pub(super) fn update_follow_camera(&mut self, ctx: &Ctx) -> WorldCamera {
         #[cfg(feature = "sim-trace")]
         self.camera.pin_throttle_phase(

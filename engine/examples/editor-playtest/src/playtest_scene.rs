@@ -1152,6 +1152,7 @@ impl Scene for Playtest {
         menu_ui_cache_ready()
     }
 
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     fn update(&mut self, ctx: &mut Ctx) {
         let physical = (ctx.pad, ctx.pad_prev);
         if crate::generated::ANY_TRAINING_ENTITY {

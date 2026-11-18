@@ -81,6 +81,7 @@ impl Playtest {
     /// with zero cooked records (cortex today) the guard keeps it to
     /// a two-load check, preserving the bit-identical gates and the
     /// budget's <1k idle rule.
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     pub(super) fn tick_gameplay_layer(&mut self, ctx: &mut Ctx) {
         // Deferred tokens are one-simulation-tick capabilities. Clear even on
         // zero-record and 30 Hz off-ticks so an i-frame whiff can never be
