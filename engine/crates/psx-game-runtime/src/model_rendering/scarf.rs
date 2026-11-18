@@ -8,6 +8,19 @@ use psx_math::int32::isqrt_i32;
 
 const ROWS: usize = 8;
 const POINTS: usize = ROWS * 2;
+/// Tail row spacing is `height / TAIL_PITCH`. The simulation segment length,
+/// the rest pose and the velocity clamp all derive from it.
+const TAIL_PITCH: i32 = 21;
+/// Tail strip width at the first row is `height / TAIL_WIDTH`; the last row
+/// keeps `(TAIL_TAPER - 7) / TAIL_TAPER` of it, so the strip stays a scarf.
+const TAIL_WIDTH: i32 = 22;
+const TAIL_TAPER: i32 = 40;
+/// The tail hangs from the character's right shoulder (model -x), in 1/1024
+/// of the height, not from the middle of the back.
+const TAIL_SIDE: i32 = -50;
+/// Rest depth behind the neck anchor per row, in 1/1024 of the height. The
+/// first rows leave the wrap and the rest settle on the torso capsule.
+const TAIL_BACK: [i32; ROWS] = [30, 52, 76, 98, 102, 102, 102, 102];
 const Q: i32 = 16;
 type Point = [i32; 3];
 // The fixed-update cloth solve has no live renderer/collision scratch data.
@@ -180,7 +193,7 @@ impl PlayerScarf {
             return;
         }
         self.solve_tick = tick;
-        let segment = height * Q / 16;
+        let segment = height * Q / TAIL_PITCH;
         let hz = hz.as_nonzero_u32() as i32 / 2;
         let gravity = (height * 3600 / (64 * hz * hz)).max(1);
         let damping = if hz <= 25 { 236 } else { 240 };
@@ -237,18 +250,19 @@ impl PlayerScarf {
     }
 
     fn width(&self, row: usize) -> i32 {
-        self.height * Q * (16 - row as i32) / (12 * 16)
+        self.height * Q * (TAIL_TAPER - row as i32) / (TAIL_WIDTH * TAIL_TAPER)
     }
 
     fn rest_point(&self, row: usize, side: usize) -> Point {
         let local = [
-            if side == 0 {
-                -self.width(row) / 2
-            } else {
-                self.width(row) / 2
-            },
-            -self.height * Q / 80 - row as i32 * self.height * Q / 16,
-            -self.height * Q / 18 - row as i32 * self.height * Q / 64,
+            self.height * Q * TAIL_SIDE / 1024
+                + if side == 0 {
+                    -self.width(row) / 2
+                } else {
+                    self.width(row) / 2
+                },
+            -self.height * Q / 80 - row as i32 * self.height * Q / TAIL_PITCH,
+            -self.height * Q * TAIL_BACK[row] / 1024,
         ];
         rotate(self.basis, local)
     }
@@ -373,14 +387,14 @@ impl PlayerScarf {
         // collarbones with an off-centre front point. Unequal heights and
         // depths avoid the rigid, circular tube silhouette of the first wrap.
         const WRAP: [[Point; 2]; 8] = [
-            [[30, 4, -2], [44, -24, 0]],
-            [[23, 0, 20], [34, -35, 33]],
-            [[2, -5, 27], [-7, -54, 43]],
-            [[-23, 4, 20], [-34, -29, 30]],
-            [[-31, 6, -4], [-43, -18, -6]],
-            [[-24, 4, -31], [-34, -22, -47]],
-            [[0, 2, -39], [0, -26, -58]],
-            [[25, 4, -29], [37, -20, -43]],
+            [[30, 4, -2], [40, -20, 0]],
+            [[23, 0, 20], [32, -28, 28]],
+            [[2, -5, 27], [-4, -40, 38]],
+            [[-23, 4, 20], [-32, -26, 28]],
+            [[-31, 6, -4], [-40, -18, -5]],
+            [[-24, 4, -31], [-32, -20, -38]],
+            [[0, 2, -39], [0, -22, -46]],
+            [[25, 4, -29], [33, -18, -35]],
         ];
         for (i, edge) in WRAP.into_iter().enumerate() {
             for (side, point) in edge.into_iter().enumerate() {
