@@ -536,12 +536,17 @@ mod tests {
             + 7992
             + 192 * 4
             + 149_504;
+        // The fixed image was re-measured on 2026-11-18 against the rib-room-h duel level and
+        // dropped by 24,400 B (code the combat, v7 and memory work removed); this toolkit shape
+        // was not relinked then, so its anchor moves by the same amount. The link-time guard
+        // prints the model's real error on every build.
+        let anchor = 1_801_104 - 24_400;
         assert!(
-            model >= 1_801_104,
+            model >= anchor,
             "the model never falls below the link: {model}"
         );
         assert!(
-            model <= 1_801_104 + 20 * 1024,
+            model <= anchor + 20 * 1024,
             "and stays close to it: {model}"
         );
         // Without the interactables the link was 25,152 B smaller (measured the same way).

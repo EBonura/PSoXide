@@ -431,7 +431,7 @@ fn button_and_slider_nodes_render_action_accent_and_option_fields() {
     assert!(src.contains("font: 0"));
     assert!(src.contains("font_scale: 512"));
     assert!(src.contains("letter_spacing: 3"));
-    assert!(src.contains("tag: \"menu.play\""));
+    assert!(src.contains("tag: psx_level::ui_str!(\"menu.play\")"));
     assert!(src.contains("kind: LevelUiNodeKind::Slider"));
     assert!(src.contains("accent: [31, 32, 33]"));
     assert!(src.contains("option: 3"));
