@@ -27,7 +27,7 @@ redux = "/path/to/PCSX-Redux.app/Contents"
 [tools.gate]
 # psoxide-gate and the PSoXide-emulator revision it was built from; the harness refuses any other.
 path = "/path/to/psoxide-gate"
-revision = "477d8b21"
+revision = "f280c6e7"
 
 # Original game files a build needs, by the name its psoxide-test.toml uses in `{input:NAME}`.
 [inputs]

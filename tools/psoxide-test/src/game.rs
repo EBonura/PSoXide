@@ -199,7 +199,11 @@ pub struct OnlyOn {
 /// The fleet's enforced conformance rules, defined here once. A game file may list more (or a
 /// documented subset with its reason); a rule the gate gains is added here in one line.
 fn default_conformance() -> Vec<String> {
-    vec!["cd-ack-partial".into(), "cd-ack-param-reset".into()]
+    vec![
+        "cd-ack-partial".into(),
+        "cd-ack-param-reset".into(),
+        "mdec-status-before-feed".into(),
+    ]
 }
 
 /// The cross-emulator smoke.

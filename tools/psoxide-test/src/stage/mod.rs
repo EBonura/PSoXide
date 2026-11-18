@@ -41,14 +41,14 @@ impl Tier {
 
 /// The hardware models of the full tier, spelled as `--hardware` spells them: the console, the
 /// MiSTer core with its two GP0(1Fh) behaviours, and a strict row where PSoXide refuses what the
-/// stricter third-party emulators refuse (CD acknowledges other than 07h/1Fh), far cheaper than a
-/// Redux run. When the pinned gate gains another strict option (`mdec-req=hidden`), it joins that
-/// row here and nowhere else.
+/// stricter third-party emulators refuse (CD acknowledges other than 07h/1Fh; an MDEC whose data
+/// request bits always read 0, as on PCSX-Redux and PCSX-ReARMed), far cheaper than a Redux run.
+/// A strict option the pinned gate gains joins that row here and nowhere else.
 pub const FULL_MODELS: &[&str] = &[
     "real",
     "mister",
     "mister,gpu-irq=never",
-    "real,cd-ack=strict",
+    "real,cd-ack=strict,mdec-req=hidden",
 ];
 
 /// Everything a stage reads.
