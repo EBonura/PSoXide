@@ -1601,6 +1601,49 @@ impl AnimationPoseSample<'_> {
     }
 }
 
+impl AnimationPoseSample<'_> {
+    /// Parent whose decoded pose a v7 joint's translation follows, or `None`
+    /// for an absolute joint and for every joint of any other version.
+    #[inline]
+    pub fn parent(&self, joint_index: u16) -> Option<u16> {
+        let tracks = self.animation.tracks.as_ref()?;
+        if !tracks::has_hierarchy(tracks) || joint_index >= self.animation.joint_count {
+            return None;
+        }
+        // SAFETY: a validated clip and a checked joint index.
+        unsafe { tracks::parent(tracks, joint_index as usize) }.map(|p| p as u16)
+    }
+
+    /// [`Self::pose`] for a caller that already holds the parent's pose from
+    /// this same sample (a renderer walking parents first): `parent` must be
+    /// `Some` exactly when [`Self::parent`] is, and then hold that joint's
+    /// pose. Skips the cache and the chain walk.
+    #[inline]
+    pub fn pose_after_parent(
+        &self,
+        joint_index: u16,
+        parent: Option<&JointPose>,
+    ) -> Option<JointPose> {
+        let Some(tracks) = self.animation.tracks.as_ref() else {
+            return self.pose(joint_index);
+        };
+        if joint_index >= self.animation.joint_count {
+            return None;
+        }
+        // SAFETY: a validated clip and a checked joint index.
+        let mut pose = unsafe { tracks::joint_pose(tracks, joint_index as usize, &self.track_pos) };
+        if tracks::has_hierarchy(tracks) {
+            // SAFETY: as above.
+            if unsafe { tracks::parent(tracks, joint_index as usize) }.is_some() {
+                let parent = parent?;
+                // SAFETY: a v7 clip, a checked joint, the parent's pose given.
+                unsafe { tracks::derive(tracks, joint_index as usize, &mut pose, parent) };
+            }
+        }
+        Some(pose)
+    }
+}
+
 /// Crossfade source: a second animation sample blended toward a
 /// primary pose.
 ///

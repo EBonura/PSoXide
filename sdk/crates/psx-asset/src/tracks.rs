@@ -294,13 +294,26 @@ pub(crate) unsafe fn derive(
     // SAFETY: the pivot table of a validated v7 clip holds `joint_count`
     // pivots; `joint < joint_count`.
     let p = unsafe { tracks.blob.add(tracks.pivots + joint * fmt::PIVOT_SIZE) };
-    // SAFETY: as above, six bytes at `p`.
-    let pivot = unsafe {
-        [
-            i32::from(ptr::read_unaligned(p.cast::<i16>())),
-            i32::from(ptr::read_unaligned(p.add(2).cast::<i16>())),
-            i32::from(ptr::read_unaligned(p.add(4).cast::<i16>())),
-        ]
+    // Shipping clips sit word aligned and the table starts on a word, so every
+    // pivot is halfword aligned there; any other slice takes the byte reads.
+    let pivot = if p as usize & 1 == 0 {
+        // SAFETY: as above, six bytes at `p`, halfword aligned (just checked).
+        unsafe {
+            [
+                i32::from(*p.cast::<i16>()),
+                i32::from(*p.add(2).cast::<i16>()),
+                i32::from(*p.add(4).cast::<i16>()),
+            ]
+        }
+    } else {
+        // SAFETY: as above, six bytes at `p`.
+        unsafe {
+            [
+                i32::from(ptr::read_unaligned(p.cast::<i16>())),
+                i32::from(ptr::read_unaligned(p.add(2).cast::<i16>())),
+                i32::from(ptr::read_unaligned(p.add(4).cast::<i16>())),
+            ]
+        }
     };
     let a = rotate_pivot(&parent.matrix, pivot);
     let b = rotate_pivot(&pose.matrix, pivot);

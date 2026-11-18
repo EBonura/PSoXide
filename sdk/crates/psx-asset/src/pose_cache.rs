@@ -112,6 +112,21 @@ impl PoseCache {
         if entry.valid & (1 << joint) != 0 {
             return entry.poses[joint];
         }
+        // Common case: the parent is held already (joints read parents first)
+        // or the joint is absolute.
+        // SAFETY: `joint` is a joint of the validated clip.
+        let parent = unsafe { tracks::parent(tracks, joint) };
+        if parent.is_none_or(|p| entry.valid & (1 << p) != 0) {
+            // SAFETY: as above.
+            let mut pose = unsafe { tracks::joint_pose(tracks, joint, pos) };
+            if let Some(p) = parent {
+                // SAFETY: a v7 clip; the parent is valid in `entry`.
+                unsafe { tracks::derive(tracks, joint, &mut pose, &entry.poses[p]) };
+            }
+            entry.poses[joint] = pose;
+            entry.valid |= 1 << joint;
+            return pose;
+        }
         // Joints from `joint` up to the first ancestor already held (or the
         // chain's absolute joint), decoded top down. `validate` proved no chain
         // loops, so it visits at most `joint_count <= 32` joints.
