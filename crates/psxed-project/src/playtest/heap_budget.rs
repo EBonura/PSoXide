@@ -78,12 +78,18 @@ const GUEST_RAM_BYTES: usize = psoxide_hazard::heap_guard::RAM_BYTES as usize;
 /// sky 50,848 B ([`CHUNK_SKY_CODE_BYTES`] and its data); the rest, with every table empty and no
 /// sky, is this constant. `psoxide-hazard`'s `heap-guard` prints the model's
 /// error against the link on every build.
-const IMAGE_FIXED_BYTES: usize = 1_248_000;
+///
+/// Re-measured 2026-11-18 (SDK 9bd68b4aa, the combat and v7 lines, per-level sky kernels): the
+/// model read 24,428 B high on rib-room-h with its two duel enemies, 37,760 B on rib-room-h without
+/// them and 36,500 B on grid-dungeon (host-tty), so the constant drops by the smallest of the three
+/// and still errs high on every level measured.
+const IMAGE_FIXED_BYTES: usize = 1_223_600;
 /// Bytes the model may be short by: what `.data` and the small level-sized statics of another level
 /// may add beyond the tables below, plus the layout noise of a different link (about 1 KiB between
 /// builds of the same level). The cook assumes this many more bytes than it modelled: it refuses a
-/// level this much early rather than let the link refuse it.
-const IMAGE_SLACK_BYTES: usize = 16 * 1024;
+/// level this much early rather than let the link refuse it. 4 KiB since the model was re-measured
+/// against the tightest level (the link-time guard stays the exact answer).
+const IMAGE_SLACK_BYTES: usize = 4 * 1024;
 
 /// What a table of the level's records adds to the image: `code` bytes once it holds any record,
 /// `per_record` bytes of arrays for each record. Measured by linking the toolkit's cooked manifest
