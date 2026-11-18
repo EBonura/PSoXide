@@ -648,17 +648,24 @@ impl Playtest {
                     let target = self.camera_target(None, false);
                     self.camera
                         .snap_to_player_with_yaw(target, view, Angle::from_q12(768));
-                    self.camera.update_vblanks(
-                        PROJECTION,
-                        target,
-                        ThirdPersonCameraInput {
-                            yaw_delta_q12: 0,
-                            pitch_delta_q12: 384,
-                            recenter: false,
-                        },
-                        view,
-                        1,
-                    );
+                    // Through the world's camera traces, the one camera
+                    // update the game links (an open-space update here was
+                    // a second 12 KB copy of the camera for this fixture).
+                    if let Some(world_rt) = self.world_rt.as_mut() {
+                        let _ = world_rt.update_camera(
+                            &mut self.camera,
+                            target,
+                            ThirdPersonCameraInput {
+                                yaw_delta_q12: 0,
+                                pitch_delta_q12: 384,
+                                recenter: false,
+                            },
+                            view,
+                            1,
+                            &[],
+                            &self.destructibles,
+                        );
+                    }
                 }
             }
             return;
