@@ -214,11 +214,13 @@ impl Rig {
     }
 
     /// The body presented as the player's character is: her Character's
-    /// scale, offset and yaw on a yaw-only turn (`resolve_player_actor_pose`),
-    /// not the placement she was cooked into.
+    /// model, scale, offset and yaw on a yaw-only turn
+    /// (`resolve_player_actor_pose`), not the placement she was cooked into
+    /// (whose model renderer still draws the enemy's model).
     pub fn presented_as(mut self, body: &psx_level::LevelCharacterRecord) -> Self {
         let mut instances = self.tables.model_instances.to_vec();
         if let Some(instance) = instances.get_mut(usize::from(self.instance)) {
+            instance.model = body.model;
             instance.visual_scale_q8 = body.visual_scale_q8;
             instance.visual_offset = body.visual_offset;
             instance.visual_yaw = body.visual_yaw;

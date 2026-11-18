@@ -4808,3 +4808,119 @@ pub(crate) fn cook_entity_character(
     entity_characters.push(cooked);
     Some(index)
 }
+
+/// How a fighter's model is presented: the placement's (or the
+/// Character's) visual scale, offset and yaw, as the runtime poses it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MeleeReachPresentation {
+    /// Uniform scale, Q8 (`256` = 1.0).
+    pub visual_scale_q8: u16,
+    /// Model offset from the body's centre, body-local units.
+    pub visual_offset: [i16; 3],
+    /// Model yaw on top of the body's facing, PSX angle units.
+    pub visual_yaw: i16,
+}
+
+/// How far ahead of a fighter's centre the hitboxes of `action` reach and
+/// hold: the forward extent (capsule end plus its radius, along the body's
+/// facing) a hitbox bound to the action keeps through a whole frame interval
+/// of its active window (the lower end of the interval, best interval of the
+/// best hitbox), posed by the attack's clip the way the runtime poses the
+/// body (joint pose, cooked pose offset, in-place root correction, model
+/// scale times the presentation's, its offset and yaw). None when the action
+/// has no hitbox or none reaches forward of the centre.
+///
+/// The AI reads this as the distance its swing lands from, so every
+/// fighter's swing distance comes from its own authored blade.
+pub fn cooked_melee_reach(
+    capsules: &[PlaytestCombatCapsule],
+    action: u8,
+    model: &psx_asset::Model<'_>,
+    animation: &psx_asset::Animation<'_>,
+    clip_bounds: Option<&PlaytestModelClipBounds>,
+    presentation: MeleeReachPresentation,
+) -> Option<u16> {
+    use psx_engine::{
+        apply_model_pose_translation, compute_joint_world_transform, Angle, LocalToWorldScale,
+        Mat3I16, ModelPoseTranslation, WorldVertex,
+    };
+    let scale_q8 = u32::from(presentation.visual_scale_q8.max(1));
+    let scale_q12 = (u32::from(model.local_to_world_q12()) * scale_q8 + 128) / 256;
+    let local_to_world = LocalToWorldScale::from_q12(scale_q12.clamp(1, 0xFFFF) as u16);
+    let yaw = Angle::from_q12(presentation.visual_yaw as u16);
+    let (s, c) = (
+        yaw.sin().raw().clamp(-0x1000, 0x1000) as i16,
+        yaw.cos().raw().clamp(-0x1000, 0x1000) as i16,
+    );
+    let rotation = Mat3I16 {
+        m: [[c, 0, s], [0, 0x1000, 0], [-s, 0, c]],
+    };
+    let offset = presentation.visual_offset.map(i32::from);
+    // Forward (+z at yaw 0) component of the rotated offset.
+    let origin_z = (i32::from(rotation.m[2][0]) * offset[0]
+        + i32::from(rotation.m[2][1]) * offset[1]
+        + i32::from(rotation.m[2][2]) * offset[2])
+        >> 12;
+    let in_place = clip_bounds.is_some_and(|b| b.flags & model_clip_flags::IN_PLACE != 0);
+    let pose_offset = clip_bounds.map_or([0; 3], |b| b.pose_offset);
+    let first_root = clip_bounds
+        .filter(|b| b.flags & model_clip_flags::FIRST_ROOT != 0)
+        .map(|b| b.first_root_xz)
+        .or_else(|| animation.translation(0, 0).map(|t| [t.x, t.z]));
+    let last_frame = animation.frame_count().saturating_sub(1);
+    let mut reach: Option<i32> = None;
+    for capsule in capsules.iter().filter(|capsule| {
+        capsule.action == action && capsule.flags & psx_level::combat_capsule_flags::HITBOX != 0
+    }) {
+        let first = capsule.active_start_frame.min(last_frame);
+        let last = capsule.active_end_frame.min(last_frame);
+        // The capsule's forward tip at each whole frame of its window.
+        let mut tips = Vec::new();
+        for frame in first..=last {
+            let Some(pose) = animation.pose(frame, u16::from(capsule.joint)) else {
+                continue;
+            };
+            let root = match (in_place, first_root, animation.translation(frame, 0)) {
+                (true, Some(first), Some(now)) => [first[0] - now.x, first[1] - now.z],
+                _ => [0, 0],
+            };
+            let pose = apply_model_pose_translation(
+                pose,
+                ModelPoseTranslation {
+                    x: root[0] + pose_offset[0],
+                    y: pose_offset[1],
+                    z: root[1] + pose_offset[2],
+                },
+            );
+            let joint = compute_joint_world_transform(
+                pose,
+                rotation,
+                local_to_world,
+                WorldVertex::new(0, 0, origin_z),
+            );
+            let row = joint.rotation.m[2];
+            let forward = |point: [i16; 3]| {
+                joint.translation.z
+                    + ((i32::from(row[0]) * i32::from(point[0])
+                        + i32::from(row[1]) * i32::from(point[1])
+                        + i32::from(row[2]) * i32::from(point[2]))
+                        >> 12)
+            };
+            tips.push(forward(capsule.start).max(forward(capsule.end)) + i32::from(capsule.radius));
+        }
+        // A blade that peaks for one frame is seen there only if a tick
+        // lands on that frame; the reach it holds through a whole frame
+        // interval is the lower end of the interval. Take the best interval.
+        let held = if tips.len() == 1 {
+            tips.first().copied()
+        } else {
+            tips.windows(2).map(|pair| pair[0].min(pair[1])).max()
+        };
+        if let Some(held) = held {
+            reach = Some(reach.map_or(held, |r| r.max(held)));
+        }
+    }
+    reach
+        .filter(|r| *r > 0)
+        .map(|r| r.min(i32::from(u16::MAX)) as u16)
+}

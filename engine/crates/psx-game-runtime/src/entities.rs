@@ -151,15 +151,29 @@ impl GameEntityIntent {
     }
 }
 
-/// Melee close-in margin added on top of the two body radii when
-/// deriving attack reach: an entity commits to its windup when the
-/// player is within `self.body(record).radius + player_radius + MARGIN` in XZ.
-/// The radii are Character-bound (cooked from the same
-/// `CharacterControllerSettings` the motors use); this constant is the
-/// one runtime tuning knob (roughly half a demo-scale step) standing
-/// in for per-weapon reach until the combat slice cooks real melee
-/// arcs.
+/// Melee close-in margin added on top of the two body radii for a fighter
+/// with no cooked blade reach (`melee_reach` zero: no melee hitbox).
 pub const GAME_ENTITY_ATTACK_REACH_MARGIN: i32 = 8;
+
+/// The melee distance a fighter measures from, for a blade that reaches
+/// `melee_reach` ahead of its centre (the cook's `melee_reach`, zero when it
+/// has none) against a target of body radius `target_radius`: the AI swings
+/// from the blade's reach plus half the target's radius (this value plus its
+/// step, `+ 16`), where the blade meets the target's body; one rule for every
+/// fighter. Without a cooked blade, both radii and
+/// [`GAME_ENTITY_ATTACK_REACH_MARGIN`].
+pub const fn melee_swing_reach(melee_reach: u16, radius: i32, target_radius: i32) -> i32 {
+    let target = if target_radius > 0 { target_radius } else { 0 };
+    if melee_reach == 0 {
+        radius
+            .saturating_add(target)
+            .saturating_add(GAME_ENTITY_ATTACK_REACH_MARGIN)
+    } else {
+        (melee_reach as i32)
+            .saturating_add(target / 2)
+            .saturating_sub(16)
+    }
+}
 
 /// Ticks the attack active window lasts.
 pub const GAME_ENTITY_ATTACK_ACTIVE_TICKS: u16 = 6;
@@ -3038,25 +3052,27 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
     }
 
     /// Attack-band outer edge. Ranged attacks use their authored maximum;
-    /// melee uses both body radii plus the close-in margin.
+    /// melee its blade ([`Self::melee_attack_reach`]).
     fn attack_reach(&self, record: &LevelGameEntityRecord, input: GameEntityTickInput<'_>) -> i32 {
         if Self::has_ranged_attack(record) {
             i32::from(record.attack_max_range)
         } else {
-            i32::from(self.body(record).radius)
-                .saturating_add(input.target.radius.max(0))
-                .saturating_add(GAME_ENTITY_ATTACK_REACH_MARGIN)
+            self.melee_attack_reach(record, input)
         }
     }
 
+    /// The melee distance the AI measures its spacing and swings from:
+    /// [`melee_swing_reach`] of its cooked blade.
     fn melee_attack_reach(
         &self,
         record: &LevelGameEntityRecord,
         input: GameEntityTickInput<'_>,
     ) -> i32 {
-        i32::from(self.body(record).radius)
-            .saturating_add(input.target.radius.max(0))
-            .saturating_add(GAME_ENTITY_ATTACK_REACH_MARGIN)
+        melee_swing_reach(
+            record.melee_reach,
+            i32::from(self.body(record).radius),
+            input.target.radius,
+        )
     }
 
     fn target_in_notice_range(
@@ -3920,6 +3936,7 @@ mod tests {
             recovery_ticks: 4,
             attack_min_range: 0,
             attack_max_range: 0,
+            melee_reach: 0,
             soul_value: 0,
             flags,
         }
@@ -4059,6 +4076,7 @@ mod tests {
         spacing_speed_percent: 100,
         attack_min_range: 500,
         attack_max_range: 1600,
+        melee_reach: 0,
         flags: game_entity_flags::ENABLED
             | game_entity_flags::CAN_RUN
             | game_entity_flags::RANGED_ATTACK

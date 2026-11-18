@@ -2447,6 +2447,7 @@ pub(crate) fn push_game_entity(
     ranged_attack_active_ticks: u16,
     stagger_ticks: u16,
     projectile_attack_range: Option<(u16, u16)>,
+    melee_reach: u16,
     names: &mut NameInterner,
     game_entities: &mut Vec<PlaytestGameEntity>,
     report: &mut PlaytestValidationReport,
@@ -2588,6 +2589,7 @@ pub(crate) fn push_game_entity(
         recovery_ticks: enemy.recovery_ticks,
         attack_min_range,
         attack_max_range,
+        melee_reach,
         soul_value: enemy.soul_value,
         flags,
     });

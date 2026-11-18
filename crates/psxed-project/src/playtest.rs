@@ -83,8 +83,9 @@ pub(crate) use cook_ui::*;
 mod cook_entities;
 pub(crate) use cook_entities::*;
 pub use cook_entities::{
-    bake_model_clip_frame_bounds, bake_model_frame_pair_bounds, model_bounds_joint_transform,
-    transform_model_bounds_vertex, ModelBoundsJointTransform, MODEL_FRAME_BOUNDS_PAD_UNITS,
+    bake_model_clip_frame_bounds, bake_model_frame_pair_bounds, cooked_melee_reach,
+    model_bounds_joint_transform, transform_model_bounds_vertex, MeleeReachPresentation,
+    ModelBoundsJointTransform, MODEL_FRAME_BOUNDS_PAD_UNITS,
 };
 mod cook_props_lights;
 pub(crate) use cook_props_lights::*;
@@ -1165,6 +1166,62 @@ fn build_package_cooked(
                                 state_clips.ranged_attack_speed_q8,
                                 state_clips.ranged_attack_frame_range,
                             );
+                            // The AI swings from where its blade lands: the
+                            // shorter of the Light and Heavy hitboxes' reach,
+                            // posed at this placement's presentation.
+                            let melee_reach = {
+                                let instance = node_model_instance
+                                    .and_then(|instance| model_instances.get(instance as usize));
+                                let model = instance
+                                    .and_then(|instance| models.get(instance.model as usize));
+                                let mesh = model
+                                    .and_then(|model| assets.get(model.mesh_asset_index))
+                                    .and_then(|asset| {
+                                        psx_asset::Model::from_bytes(&asset.bytes).ok()
+                                    });
+                                let reach_for =
+                                    |action: CharacterAnimationAction, clip_index: u16| {
+                                        let (instance, model, mesh) =
+                                            (instance?, model?, mesh.as_ref()?);
+                                        let clip = usize::from(model.clip_first)
+                                            .saturating_add(usize::from(clip_index));
+                                        let animation = model_clips
+                                            .get(clip)
+                                            .and_then(|clip| assets.get(clip.animation_asset_index))
+                                            .and_then(|asset| {
+                                                psx_asset::Animation::from_bytes(&asset.bytes).ok()
+                                            })?;
+                                        let bounds = model_clip_bounds
+                                            .iter()
+                                            .find(|b| usize::from(b.clip) == clip);
+                                        cooked_melee_reach(
+                                            cooked_attack_capsules,
+                                            action.to_index() as u8,
+                                            mesh,
+                                            &animation,
+                                            bounds,
+                                            MeleeReachPresentation {
+                                                visual_scale_q8: instance.visual_scale_q8,
+                                                visual_offset: instance.visual_offset,
+                                                visual_yaw: instance.visual_yaw,
+                                            },
+                                        )
+                                    };
+                                [
+                                    reach_for(
+                                        CharacterAnimationAction::LightAttack,
+                                        state_clips.attack,
+                                    ),
+                                    reach_for(
+                                        CharacterAnimationAction::HeavyAttack,
+                                        state_clips.heavy_attack,
+                                    ),
+                                ]
+                                .into_iter()
+                                .flatten()
+                                .min()
+                                .unwrap_or(0)
+                            };
                             let stagger_ticks = cooked_game_entity_stagger_ticks(
                                 clip_timing_for(state_clips.stagger),
                                 state_clips.stagger_speed_q8,
@@ -1214,6 +1271,7 @@ fn build_package_cooked(
                                         ranged_attack_active_ticks,
                                         stagger_ticks,
                                         projectile_attack_range,
+                                        melee_reach,
                                         &mut names,
                                         &mut game_entities,
                                         report,

@@ -33,8 +33,8 @@ use psx_game_runtime::combat::{
 use psx_game_runtime::combat_intent::{CombatAction, CombatActions, CombatIntent, CombatMove};
 use psx_game_runtime::combatant::{Combatant, CombatantId, Defender, HitKind, Strike};
 use psx_game_runtime::entities::{
-    AttackPhase, CombatTarget, DeferredGameEntityAttacks, FighterWorld, GameEntities,
-    GameEntityState, GameEntityTickInput, OpenSpace, GAME_ENTITY_ATTACK_REACH_MARGIN,
+    melee_swing_reach, AttackPhase, CombatTarget, DeferredGameEntityAttacks, FighterWorld,
+    GameEntities, GameEntityState, GameEntityTickInput, OpenSpace,
 };
 use psx_game_runtime::projectiles::{
     CombatProjectiles, CombatTeam, ProjectileDamageChannel, ProjectileImpactKind,
@@ -639,19 +639,6 @@ fn pad_intent(script: PadScript, me: [i32; 3], them: [i32; 3], reach: i32) -> Co
     }
 }
 
-/// How deep a melee swing reaches between bodies of radius `a` and `b`.
-///
-/// On the disc a swing connects where its authored blade capsule, posed by
-/// the animation, meets the defender's hurtbox; the host has no pose. The
-/// legacy arc (`radius + radius + GAME_ENTITY_ATTACK_REACH_MARGIN`) is
-/// shorter than the distance the tactical AI swings from
-/// (`melee_attack_reach + 16`), so on its own every AI swing would whiff.
-/// The host takes the AI's swing distance as the blade's reach: the disc
-/// logs show melee contact at 46 to 49 units for these bodies, this gives 52.
-pub const fn swing_reach(a: i32, b: i32) -> i32 {
-    a + b + GAME_ENTITY_ATTACK_REACH_MARGIN + 16
-}
-
 /// Whether nothing blocks a melee contact between two fighters' chests.
 fn clear_line(pillars: &[CharacterCollisionAabb], a: [i32; 3], b: [i32; 3]) -> bool {
     let lift = |p: [i32; 3]| [p[0], p[1] + 32, p[2]];
@@ -751,7 +738,12 @@ pub fn run(duel: &Duel<'_>) -> DuelResult {
                 let intent = match side.controller {
                     Controller::Ai => None,
                     Controller::Pad(script) => {
-                        let reach = swing_reach(i32::from(side.body().radius), other.radius) - 8;
+                        // The AI's swing distance (its blade's), a step inside.
+                        let reach = melee_swing_reach(
+                            side.record().melee_reach,
+                            i32::from(side.body().radius),
+                            other.radius,
+                        ) + 8;
                         Some(pad_intent(
                             script,
                             side.entities.position(0),

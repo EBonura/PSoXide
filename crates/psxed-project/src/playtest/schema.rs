@@ -1739,6 +1739,9 @@ pub struct PlaytestGameEntity {
     pub attack_min_range: u16,
     /// Furthest ranged-attack distance. Zero for melee entities.
     pub attack_max_range: u16,
+    /// Blade reach ahead of the centre the AI swings from
+    /// (`cooked_melee_reach`, the shorter of Light and Heavy). Zero: none.
+    pub melee_reach: u16,
     /// Souls credited to the player for the killing blow. Zero grants none.
     pub soul_value: u16,
     /// Runtime flags from `psx_level::game_entity_flags`.

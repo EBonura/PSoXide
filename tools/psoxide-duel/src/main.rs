@@ -248,9 +248,9 @@ fn load(path: &Path, sets: &[String], training: usize) -> Placed {
     for spec in [&loaded.enemy, &loaded.aletha] {
         let r = &spec.record;
         eprintln!(
-            "  {}: radius {} height {} walk {} run {} pref {} tol {} range {}..{} windup {} active {}/{}/{} recover {} stagger {} knockdown {} flags {:#x} hp {} strikes {:?} emitters {:?}",
+            "  {}: radius {} height {} walk {} run {} pref {} tol {} range {}..{} reach {} windup {} active {}/{}/{} recover {} stagger {} knockdown {} flags {:#x} hp {} strikes {:?} emitters {:?}",
             spec.name, spec.body.radius, spec.body.height, spec.body.walk_speed, spec.body.run_speed, r.preferred_distance, r.spacing_tolerance,
-            r.attack_min_range, r.attack_max_range, r.windup_ticks, r.attack_active_ticks, r.heavy_attack_active_ticks,
+            r.attack_min_range, r.attack_max_range, r.melee_reach, r.windup_ticks, r.attack_active_ticks, r.heavy_attack_active_ticks,
             r.ranged_attack_active_ticks, r.recovery_ticks, r.stagger_ticks, spec.body.combat.knockdown_ticks, r.flags, spec.body.combat.max_health, spec.strikes, spec.emitters
         );
         eprintln!(

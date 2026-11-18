@@ -310,6 +310,19 @@ pub fn load_training(project_dir: &Path, which: usize) -> Result<ProjectFighters
     )?;
     // Exactly the stats the disc gives her.
     aletha.body.combat = player_character.combat;
+    // Her own model: the swapped node keeps the enemy's model renderer, so
+    // the entity cook links her Character to the enemy's model.
+    let her_model = package
+        .models
+        .get(usize::from(player_character.model))
+        .and_then(|model| {
+            swapped_package
+                .models
+                .iter()
+                .position(|m| m.source_resource == model.source_resource)
+        })
+        .ok_or("the player's model is not in the swapped cook")?;
+    aletha.body.model = psx_level::ModelIndex(her_model as u16);
     // Posed as the disc poses her, not at the size of the placement she was
     // cooked into.
     aletha.rig = aletha
@@ -368,6 +381,14 @@ pub fn load_training(project_dir: &Path, which: usize) -> Result<ProjectFighters
         ) = clip(psx_level::CharacterAnimationAction::RangedAttack);
     }
     let capsules = aletha.capsules.clone();
+    // Her swing distance is her own blade's, posed as the disc poses her.
+    // Read off the package her rig is posed from (the swapped cook).
+    aletha.record.melee_reach = melee_reach(
+        &swapped_package,
+        aletha.body.model.to_usize(),
+        player_character,
+        &capsules,
+    );
     attach_clocks(&mut aletha, player_clocks, &capsules);
     aletha.timings = {
         let clip = |action: psx_level::CharacterAnimationAction| {
@@ -417,6 +438,61 @@ pub fn load_training(project_dir: &Path, which: usize) -> Result<ProjectFighters
         aletha,
         start_distance,
     })
+}
+
+/// The cook's melee reach (`cooked_melee_reach`) for the player's
+/// Character `body` on model `model` of `package`, presented as her
+/// Character presents her: the shorter of her Light and Heavy blades.
+fn melee_reach(
+    package: &PlaytestPackage,
+    model: usize,
+    body: &psxed_project::playtest::PlaytestCharacter,
+    capsules: &[psxed_project::playtest::PlaytestCombatCapsule],
+) -> u16 {
+    let Some(record) = package.models.get(model) else {
+        return 0;
+    };
+    let Some(mesh) = package
+        .assets
+        .get(record.mesh_asset_index)
+        .and_then(|asset| psx_asset::Model::from_bytes(&asset.bytes).ok())
+    else {
+        return 0;
+    };
+    let reach_for = |action: psx_level::CharacterAnimationAction| {
+        let clip = body.action_clips[action.to_index()];
+        (clip != psx_level::CHARACTER_CLIP_NONE.raw()).then_some(())?;
+        let global = usize::from(record.clip_first) + usize::from(clip);
+        let animation = package
+            .model_clips
+            .get(global)
+            .and_then(|clip| package.assets.get(clip.animation_asset_index))
+            .and_then(|asset| psx_asset::Animation::from_bytes(&asset.bytes).ok())?;
+        let bounds = package
+            .model_clip_bounds
+            .iter()
+            .find(|b| usize::from(b.clip) == global);
+        psxed_project::playtest::cooked_melee_reach(
+            capsules,
+            action.to_index() as u8,
+            &mesh,
+            &animation,
+            bounds,
+            psxed_project::playtest::MeleeReachPresentation {
+                visual_scale_q8: body.visual_scale_q8,
+                visual_offset: body.visual_offset,
+                visual_yaw: body.visual_yaw,
+            },
+        )
+    };
+    [
+        reach_for(psx_level::CharacterAnimationAction::LightAttack),
+        reach_for(psx_level::CharacterAnimationAction::HeavyAttack),
+    ]
+    .into_iter()
+    .flatten()
+    .min()
+    .unwrap_or(0)
 }
 
 /// How long clip `clip` (model-local) of model `model` plays at `speed_q8`
