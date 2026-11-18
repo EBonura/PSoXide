@@ -599,6 +599,10 @@ fn lint(o: &Options) -> Result<ExitCode, String> {
                         p.steps.len(),
                         p.max_frames
                     ),
+                    // Symbols come from a build: before the first build that is not a defect.
+                    Err(e) if e.contains("build the artifact that writes it first") => {
+                        println!("smoke {s} {pad}: not planned yet, its symbols are not built");
+                    }
                     Err(e) => {
                         bad += 1;
                         println!("smoke {s} {pad}: {e}");
