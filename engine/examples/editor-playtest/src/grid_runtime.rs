@@ -643,6 +643,11 @@ impl GridRuntime {
     /// The resident room fighter `point` stands in, searched from that
     /// fighter's own `hint` (updated; the player's search stays with the
     /// stream). None while the fighter's room is not resident.
+    /// Changes whenever a room streams in or out.
+    pub(super) fn residency_epoch(&self) -> u32 {
+        self.resident.epoch()
+    }
+
     pub(super) fn fighter_room(&self, hint: &mut u16, point: [i32; 3]) -> Option<usize> {
         let located = self
             .resident
@@ -718,6 +723,8 @@ impl GridRuntime {
         &mut self,
         observer: RoomPoint,
         bounds: &[VisibilityBounds],
+        // psx-numeric-allow-next-line: bit per bounds known to be in no resident room; never tested
+        skip: u64,
         // psx-numeric-allow-next-line: one bit per queried bounds; return width is the caller's fixed capacity
     ) -> u64 {
         if !self.activate(observer) {
@@ -725,7 +732,7 @@ impl GridRuntime {
         }
         let mut mask = 0u64;
         for (index, b) in bounds.iter().enumerate().take(64) {
-            if self.bounds_active(b.min(), b.max()) {
+            if skip & (1u64 << index) == 0 && self.bounds_active(b.min(), b.max()) {
                 mask |= 1u64 << index;
             }
         }
@@ -743,6 +750,8 @@ impl GridRuntime {
         bounds: &[VisibilityBounds],
         // psx-numeric-allow-next-line: bit per bounds that gets a sight-line test; the others are visible in an active room
         sight_tested: u64,
+        // psx-numeric-allow-next-line: bit per bounds known to be in no resident room; never tested
+        skip: u64,
         // psx-numeric-allow-next-line: one bit per queried bounds; return width is the caller's fixed capacity
     ) -> u64 {
         if !self.activate(observer) {
@@ -754,12 +763,12 @@ impl GridRuntime {
         self.view_phase = phase.wrapping_add(1);
         let mut mask = 0u64;
         for (index, b) in bounds.iter().enumerate().take(64) {
-            let (min, max) = (b.min(), b.max());
-            if !self.bounds_active(min, max) {
-                continue;
-            }
             // psx-numeric-allow-next-line: one bit per model instance, the caller's mask width
             let bit = 1u64 << index;
+            let (min, max) = (b.min(), b.max());
+            if skip & bit != 0 || !self.bounds_active(min, max) {
+                continue;
+            }
             if sight_tested & bit == 0 {
                 mask |= bit;
                 continue;

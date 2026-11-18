@@ -1073,15 +1073,28 @@ impl Playtest {
         let elapsed_tick = self.gameplay_tick(ctx.sim_tick);
         let count = MODEL_INSTANCES.len().min(self.instance_actor_poses.len());
         let world_resident = self.world_rt.is_some();
+        // The instances a game entity owns, so the rest skip the owner search.
+        // psx-numeric-allow-next-line: one bit per model instance; bit ops only
+        let mut owned = 0u64;
+        for record in GAME_ENTITIES.iter() {
+            let instance = usize::from(record.model_instance);
+            if instance < 64 {
+                owned |= 1u64 << instance;
+            }
+        }
         let mut index = 0usize;
         while index < count {
             // The visibility mask discards the pose after resolving it, so
             // test it first. `resolve_instance_actor_pose` reads only shared
             // tables, which makes the skip output-identical.
-            let owner = GAME_ENTITIES
-                .iter()
-                .enumerate()
-                .find(|(_, r)| usize::from(r.model_instance) == index);
+            let owner = if index >= 64 || owned & (1u64 << index) != 0 {
+                GAME_ENTITIES
+                    .iter()
+                    .enumerate()
+                    .find(|(_, r)| usize::from(r.model_instance) == index)
+            } else {
+                None
+            };
             // A fighter's pose carries its hitboxes and hurtboxes. Contact
             // must not depend on whether the camera sees it (a camera pushed
             // into a wall culls an enemy standing next to the player), so an

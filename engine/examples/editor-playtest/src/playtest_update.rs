@@ -29,6 +29,16 @@ unsafe fn initialized_prefix_mut<T>(
 /// True once for each authored gait foot-down phase (frame zero and halfway
 /// around the loop). local_tick may grow beyond one cycle, so the bucket
 /// comparison handles wrap without retaining another per-player timer.
+/// One fighter's last away test: the position and resident set it was asked
+/// for, and the answer. All zero (the scene's zeroed BSS) is unknown.
+#[derive(Clone, Copy, Default)]
+pub(super) struct FighterRoomMemo {
+    position: [i32; 3],
+    epoch: u32,
+    known: bool,
+    away: bool,
+}
+
 fn gait_footstep_crossed(
     moved: bool,
     was_gait: bool,
@@ -82,24 +92,37 @@ impl Playtest {
     /// a two-load check, preserving the bit-identical gates and the
     /// budget's <1k idle rule.
     #[cfg_attr(target_arch = "mips", optimize(size))]
-    /// Mark the fighters whose room is not resident as away
-    /// ([`psx_game_runtime::entities::GameEntities::set_away_mask`]).
+    /// The fighters whose room is not resident right now, one bit each
+    /// ([`psx_game_runtime::entities::GameEntities::set_away_mask`]). A
+    /// fighter that has not moved since its last test, with the same rooms
+    /// resident, keeps that answer: locating a point is the cost, and the
+    /// answer is a function of the point and the resident set alone.
     #[inline(never)]
     #[cfg_attr(target_arch = "mips", optimize(size))]
-    fn refresh_away_mask(&mut self, positions: &[[i32; 3]]) {
+    // psx-numeric-allow-next-line: fixed 64-record mask; bit ops only
+    fn locate_fighters(&mut self, positions: &[[i32; 3]]) -> u64 {
         // psx-numeric-allow-next-line: fixed 64-record mask; bit ops only
         let mut away = 0u64;
         if let Some(world_rt) = self.world_rt.as_ref() {
+            let epoch = world_rt.residency_epoch();
             for (index, position) in positions.iter().enumerate().take(64) {
-                if world_rt
-                    .fighter_room(&mut self.fighter_rooms[index], *position)
-                    .is_none()
-                {
+                let memo = &mut self.fighter_room_memo[index];
+                if !(memo.known && memo.epoch == epoch && memo.position == *position) {
+                    *memo = FighterRoomMemo {
+                        position: *position,
+                        epoch,
+                        known: true,
+                        away: world_rt
+                            .fighter_room(&mut self.fighter_rooms[index], *position)
+                            .is_none(),
+                    };
+                }
+                if memo.away {
                     away |= 1u64 << index;
                 }
             }
         }
-        self.game_entities.set_away_mask(away);
+        away
     }
 
     pub(super) fn tick_gameplay_layer(&mut self, ctx: &mut Ctx) {
@@ -149,10 +172,13 @@ impl Playtest {
         // SAFETY: both prefixes were initialized in the loop above.
         let entity_dead = unsafe { initialized_prefix(&entity_dead, entity_count) };
         // A fighter whose room is not resident is away: no per-tick work
-        // for it anywhere until its room streams back in. Tested at the
-        // 30 Hz cadence fighters think at.
+        // for it anywhere until its room streams back in. The fighters see
+        // the mask at the 30 Hz cadence they think at; visibility below asks
+        // every tick, so it reads this tick's answer.
+        let away_now = self.locate_fighters(entity_positions);
+        self.fighters_away_now = away_now;
         if npc_tick_due {
-            self.refresh_away_mask(entity_positions);
+            self.game_entities.set_away_mask(away_now);
         }
         let eye = self.camera.position();
         let spatial_masks = self.world_rt.as_mut().map(|world_rt| {
@@ -167,7 +193,11 @@ impl Playtest {
             let mut entity_activation_bounds =
                 [const { core::mem::MaybeUninit::<VisibilityBounds>::uninit() }; MAX_GAME_ENTITIES];
             for index in 0..entity_count {
-                let Some(record) = GAME_ENTITIES.get(index) else {
+                // An away fighter's room is not resident, so it is in no
+                // active room: the query skips it (`away_now`) and never reads
+                // these bounds.
+                let away = index < 64 && away_now & (1u64 << index) != 0;
+                let Some(record) = GAME_ENTITIES.get(index).filter(|_| !away) else {
                     // Preserve initialization even if a malformed runtime table
                     // violates the cook's one-to-one entity contract.
                     entity_activation_bounds[index].write(VisibilityBounds::EMPTY);
@@ -182,7 +212,8 @@ impl Playtest {
             // SAFETY: every branch above writes the complete prefix.
             let entity_activation_bounds =
                 unsafe { initialized_prefix(&entity_activation_bounds, entity_count) };
-            let entity_mask = world_rt.visible_bounds_mask(observer, entity_activation_bounds);
+            let entity_mask =
+                world_rt.visible_bounds_mask(observer, entity_activation_bounds, away_now);
             let instance_count = MODEL_INSTANCES.len().min(MAX_MODEL_INSTANCES);
             let mut instance_activation_bounds =
                 [const { core::mem::MaybeUninit::<VisibilityBounds>::uninit() };
@@ -210,6 +241,8 @@ impl Playtest {
             // cheaper to draw than to ask about.
             // psx-numeric-allow-next-line: one bit per model instance, the mask width of the visibility query
             let mut actor_instances = 0u64;
+            // psx-numeric-allow-next-line: one bit per model instance, the mask width of the visibility query
+            let mut away_instances = 0u64;
             for (entity, record) in GAME_ENTITIES.iter().enumerate() {
                 let instance = usize::from(record.model_instance);
                 let Some(bounds) = instance_activation_bounds.get_mut(instance) else {
@@ -217,6 +250,10 @@ impl Playtest {
                 };
                 if instance < 64 {
                     actor_instances |= 1u64 << instance;
+                    if entity < 64 && away_now & (1u64 << entity) != 0 {
+                        away_instances |= 1u64 << instance;
+                        continue;
+                    }
                 }
                 *bounds = VisibilityBounds::cylinder(
                     entity_positions[entity],
@@ -229,6 +266,7 @@ impl Playtest {
                 eye,
                 instance_activation_bounds,
                 actor_instances,
+                away_instances,
             );
             let logic_count = LOGIC.len().min(MAX_LOGIC_RECORDS);
             let mut logic_positions =
@@ -516,6 +554,8 @@ impl Playtest {
         self.destructibles
             .init(DESTRUCTIBLES.as_slice())
             .unwrap_or_else(|error| panic!("cooked destructible initialization failed: {error:?}"));
+        // A new world starts its resident set over: no away answer carries.
+        self.fighter_room_memo = [FighterRoomMemo::default(); MAX_GAME_ENTITIES];
         self.world_rt = if generated::PLAYTEST_HAS_WORLD {
             let world_rt = WorldRuntime::load_manifest()
                 .unwrap_or_else(|error| panic!("cooked world initialization failed: {error}"));

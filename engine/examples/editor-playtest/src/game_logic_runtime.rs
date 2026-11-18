@@ -2279,6 +2279,20 @@ impl Playtest {
     /// write 1,536 bytes per call to fill one 24-byte entry; `FixedScratch`
     /// leaves the unused slots untouched.
     #[inline(never)]
+    /// An away fighter that is not fighting: its room is not resident, so it
+    /// is neither seen nor posed (`refresh_actor_pose_snapshots` keeps a pose
+    /// only for a fighter that is fighting or seen), and nothing reads its
+    /// pose override.
+    fn dormant_away(&self, index: usize) -> bool {
+        index < 64
+            && self.fighters_away_now & (1u64 << index) != 0
+            && self.game_entities.rival(index).is_none()
+            && matches!(
+                self.game_entities.state(index),
+                GameEntityState::Idle | GameEntityState::Patrol | GameEntityState::Dead
+            )
+    }
+
     pub(super) fn game_entity_pose_overrides(
         &self,
         out: &mut psx_engine::FixedScratch<ModelInstancePoseOverride, MAX_GAME_ENTITIES>,
@@ -2286,6 +2300,7 @@ impl Playtest {
         for (index, record) in GAME_ENTITIES.iter().enumerate() {
             if record.model_instance == psx_level::GAME_ENTITY_MODEL_INSTANCE_NONE
                 || out.len() >= out.capacity()
+                || self.dormant_away(index)
             {
                 continue;
             }

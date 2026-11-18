@@ -359,6 +359,13 @@ struct Playtest {
     /// Each entity's streamed room, a search hint into the resident rooms
     /// ([`SceneEntityMover::fighter_rooms`]).
     fighter_rooms: [u16; MAX_GAME_ENTITIES],
+    /// Each entity's last away answer and what it was asked for
+    /// ([`playtest_update::FighterRoomMemo`]).
+    fighter_room_memo: [playtest_update::FighterRoomMemo; MAX_GAME_ENTITIES],
+    /// This tick's away fighters, one bit each: the answer visibility and
+    /// posing read every tick (the entities read theirs at the think cadence).
+    // psx-numeric-allow-next-line: one bit per game entity, the away mask's width
+    fighters_away_now: u64,
     /// Whether the running death sequence was armed by combat damage
     /// rather than an environmental hazard (respawn logging only).
     death_by_combat: bool,
