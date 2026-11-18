@@ -128,6 +128,9 @@ pub struct RunResult {
     pub commit: String,
     pub dirty: bool,
     pub sdk_pin: String,
+    /// The SDK pin rule's line: "guest tree equals main <sha12>" or why not.
+    #[serde(default)]
+    pub sdk_guest: String,
     pub harness: String,
     pub gate_revision: String,
     pub tier: String,
@@ -181,11 +184,16 @@ impl RunResult {
         let mut out = String::new();
         let _ = writeln!(
             out,
-            "\n{} at {}{} (SDK {}, gate {}, tier {})",
+            "\n{} at {}{} (SDK {}{}, gate {}, tier {})",
             self.game,
             util::short(&self.commit),
             if self.dirty { " +dirty" } else { "" },
             util::short(&self.sdk_pin),
+            if self.sdk_guest.is_empty() {
+                String::new()
+            } else {
+                format!(", {}", self.sdk_guest)
+            },
             util::short(&self.gate_revision),
             self.tier
         );
@@ -304,6 +312,7 @@ mod tests {
             commit: "c".repeat(40),
             dirty: false,
             sdk_pin: "s".repeat(40),
+            sdk_guest: String::new(),
             harness: "0.1.0".into(),
             gate_revision: "r".repeat(40),
             tier: "quick".into(),

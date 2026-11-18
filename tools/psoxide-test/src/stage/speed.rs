@@ -280,7 +280,7 @@ fn pgo_binary(ctx: &Ctx<'_>) -> Result<PathBuf, String> {
             ));
         }
         let head = util::git(sdk, &["rev-parse", "HEAD"])?;
-        let pin = super::sdk_pin(&ctx.repo);
+        let pin = super::sdk_pin(&ctx.repo, ctx.game);
         if pin != "unknown" && pin != head {
             return Err(format!(
                 "[tools] sdk {} is at {} but the game pins the SDK at {}: check that revision \

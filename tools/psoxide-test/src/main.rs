@@ -10,6 +10,7 @@ mod config;
 mod game;
 mod journey;
 mod originals;
+mod pin;
 mod procs;
 mod rearmed;
 mod receipt;
@@ -124,6 +125,7 @@ fn dispatch(args: &[String]) -> Result<ExitCode, String> {
         Some("lint") => lint(&options(&args[1..])?),
         Some("install") => install(&options(&args[1..])?),
         Some("adapter") => adapter(&args[1..]),
+        Some("pin") => pin_command(&args[1..]),
         Some("-h" | "--help" | "help") | None => {
             println!("{USAGE}");
             Ok(ExitCode::SUCCESS)
@@ -229,6 +231,10 @@ fn run(o: &Options) -> Result<ExitCode, String> {
         in_tier && (o.stages.is_empty() || o.stages.iter().any(|x| x == s))
     };
     let mut stages = Vec::new();
+    // The SDK pin rule first: it is not a receipt (SDK main moves), and a run that cannot
+    // show it is not a landing.
+    let (sdk, sdk_guest) = ctx.timed("sdk", || sdk_stage(&o.repo, &game, config.work.as_path()));
+    stages.push(sdk);
     let t0 = util::now_seconds();
     let build = stage::build::run(&mut ctx);
     ctx.timing
@@ -293,7 +299,8 @@ fn run(o: &Options) -> Result<ExitCode, String> {
         game: game.name.clone(),
         commit,
         dirty,
-        sdk_pin: stage::sdk_pin(&o.repo),
+        sdk_pin: stage::sdk_pin(&o.repo, &game),
+        sdk_guest,
         harness: env!("CARGO_PKG_VERSION").into(),
         gate_revision: GATE_REVISION.into(),
         tier: o.tier.name().into(),
@@ -341,7 +348,7 @@ fn bless(o: &Options) -> Result<ExitCode, String> {
         } else {
             commit
         },
-        sdk_pin: stage::sdk_pin(&o.repo),
+        sdk_pin: stage::sdk_pin(&o.repo, &game),
         ..Baseline::default()
     };
     for size in &game.sizes {
@@ -531,6 +538,128 @@ fn install(o: &Options) -> Result<ExitCode, String> {
         println!("{:?} {} {} {}", c.status, c.name, c.value, c.detail);
     }
     Ok(if r.passed() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
+}
+
+/// The SDK pin rule (pin.rs) as a stage: the pinned commit's guest tree against SDK main's.
+/// Returns the stage and the line the result header shows.
+fn sdk_stage(repo: &Path, game: &Game, work_root: &Path) -> (StageResult, String) {
+    let stage = |checks: Vec<Check>| StageResult {
+        name: "sdk".into(),
+        source: Source::Run,
+        key: String::new(),
+        outcome: Outcome {
+            checks,
+            ..Outcome::default()
+        },
+    };
+    let Some(pin) = pin::read(repo, Some(game)) else {
+        return (
+            stage(vec![Check::skip(
+                "sdk pin",
+                "no pin found in components.lock.json, sdk.lock.json or the game file's [sdk]",
+            )]),
+            "SDK pin unknown".into(),
+        );
+    };
+    let verdict = match pin::judge(work_root, &pin) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                stage(vec![Check::fail(
+                    format!("sdk pin ({})", pin.file),
+                    format!("cannot apply the pin rule: {e}"),
+                )]),
+                "guest tree not checked".into(),
+            )
+        }
+    };
+    let name = format!("sdk pin ({})", verdict.file);
+    let value = format!(
+        "{} guest tree {} {} main {} guest tree {}",
+        util::short(&verdict.pinned),
+        util::short(&verdict.pinned_tree),
+        if verdict.pinned_tree == verdict.main_tree {
+            "equals"
+        } else {
+            "DIFFERS FROM"
+        },
+        util::short(&verdict.main),
+        util::short(&verdict.main_tree)
+    );
+    let mut checks = vec![if verdict.pinned_tree == verdict.main_tree {
+        Check::pass(&name, value)
+    } else {
+        Check::new(&name, Status::Fail, value).detail(
+            "SDK main changed guest content since this pin: repin to main (a host-tool-only \
+             commit never does this)",
+        )
+    }];
+    if let Some(recorded) = verdict
+        .recorded
+        .as_ref()
+        .filter(|r| **r != verdict.pinned_tree)
+    {
+        checks.push(Check::fail(
+            "sdk guest_tree recorded",
+            format!(
+                "the lock records {} but {} has {}: run `psoxide-test pin --write`",
+                util::short(recorded),
+                util::short(&verdict.pinned),
+                util::short(&verdict.pinned_tree)
+            ),
+        ));
+    }
+    debug_assert_eq!(
+        verdict.holds(),
+        checks.iter().all(|c| c.status == Status::Pass)
+    );
+    (stage(checks), verdict.header())
+}
+
+/// `psoxide-test pin [--repo DIR] [--write]`: apply the pin rule and print it; `--write` records
+/// the pinned commit's guest tree in the lock (components.lock.json or sdk.lock.json).
+fn pin_command(args: &[String]) -> Result<ExitCode, String> {
+    let write = args.iter().any(|a| a == "--write");
+    let rest: Vec<String> = args.iter().filter(|a| *a != "--write").cloned().collect();
+    let o = options(&rest)?;
+    let config = Config::load()?;
+    let game = Game::load(&o.repo)?;
+    let pin = pin::read(&o.repo, Some(&game))
+        .ok_or("no SDK pin in components.lock.json, sdk.lock.json or the game file's [sdk]")?;
+    let v = pin::judge(&config.work, &pin)?;
+    println!(
+        "{}: pinned {} guest tree {}\nSDK main {} guest tree {}\n{}",
+        v.file,
+        v.pinned,
+        v.pinned_tree,
+        v.main,
+        v.main_tree,
+        v.header()
+    );
+    if write {
+        let path = o.repo.join(&v.file);
+        let text =
+            std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let section = if v.file == "components.lock.json" {
+            "\"sdk\""
+        } else if v.file == "sdk.lock.json" {
+            "{"
+        } else {
+            return Err(format!(
+                "the pin is in {}: add `guest_tree = \"{}\"` under [sdk] in the game file",
+                v.file, v.pinned_tree
+            ));
+        };
+        let new = pin::record_guest_tree(&text, section, &v.pinned_tree)
+            .ok_or_else(|| format!("cannot find the SDK revision in {}", path.display()))?;
+        std::fs::write(&path, new).map_err(|e| format!("write {}: {e}", path.display()))?;
+        println!("recorded guest_tree in {}", v.file);
+    }
+    Ok(if v.holds() {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE

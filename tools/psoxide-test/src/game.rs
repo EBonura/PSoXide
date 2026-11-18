@@ -44,6 +44,26 @@ pub struct Game {
     /// other bytes fails the build before any command runs. Optional per name.
     #[serde(default)]
     pub originals: BTreeMap<String, String>,
+    /// Where the SDK pin is written when it is not in components.lock.json or sdk.lock.json.
+    #[serde(default)]
+    pub sdk: Option<SdkPin>,
+}
+
+/// An SDK pin written in a script: the hex revision right after `after` in `file`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SdkPin {
+    pub file: String,
+    pub after: String,
+    #[serde(default = "sdk_repository")]
+    pub repository: String,
+    /// The guest tree of that revision, recorded (optional; checked when present).
+    #[serde(default)]
+    pub guest_tree: Option<String>,
+}
+
+fn sdk_repository() -> String {
+    "EBonura/PSoXide".into()
 }
 
 /// One build: commands run in order at the repo root, then files collected into `out`.

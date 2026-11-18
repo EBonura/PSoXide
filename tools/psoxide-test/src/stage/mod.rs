@@ -282,46 +282,39 @@ pub fn resolve_inputs(value: &str, inputs: &BTreeMap<String, PathBuf>) -> Result
 }
 
 /// The SDK revision a game pins, from its components lock (the SDK's hydration convention).
-pub fn sdk_pin(repo: &Path) -> String {
-    // The SDK's components lock first; a game that pins only the SDK keeps `sdk.lock.json`.
-    for (file, pointer) in [
-        ("components.lock.json", "/components/sdk/revision"),
-        ("sdk.lock.json", "/revision"),
-    ] {
-        let pin = std::fs::read_to_string(repo.join(file))
-            .ok()
-            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-            .and_then(|v| {
-                v.pointer(pointer)
-                    .and_then(|r| r.as_str().map(str::to_string))
-            });
-        if let Some(pin) = pin {
-            return pin;
-        }
-    }
-    "unknown".into()
+pub fn sdk_pin(repo: &Path, game: &Game) -> String {
+    // components.lock.json, then sdk.lock.json, then the game file's `[sdk]` (pin.rs).
+    crate::pin::read(repo, Some(game)).map_or_else(|| "unknown".into(), |p| p.revision)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn game() -> Game {
+        Game::parse(
+            "schema = 1\nname = \"g\"\nrepository = \"o/g\"\n[[build]]\nname = \"b\"\nout = \"o\"\n\
+             commands = [[\"true\"]]\ndisc = \"g.cue\"\n",
+        )
+        .unwrap()
+    }
+
     #[test]
     fn the_sdk_pin_comes_from_either_lock() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(sdk_pin(dir.path()), "unknown");
+        assert_eq!(sdk_pin(dir.path(), &game()), "unknown");
         std::fs::write(
             dir.path().join("sdk.lock.json"),
             r#"{"revision": "abc123"}"#,
         )
         .unwrap();
-        assert_eq!(sdk_pin(dir.path()), "abc123");
+        assert_eq!(sdk_pin(dir.path(), &game()), "abc123");
         std::fs::write(
             dir.path().join("components.lock.json"),
             r#"{"components": {"sdk": {"revision": "def456"}}}"#,
         )
         .unwrap();
-        assert_eq!(sdk_pin(dir.path()), "def456");
+        assert_eq!(sdk_pin(dir.path(), &game()), "def456");
     }
 
     #[test]

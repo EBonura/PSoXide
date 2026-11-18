@@ -59,7 +59,7 @@ pub fn run(ctx: &mut Ctx<'_>) -> StageResult {
     let mut facts = BTreeMap::new();
     let mut hits = 0;
     let mut keys = Vec::new();
-    facts.insert("sdk_pin".into(), sdk_pin(&ctx.repo));
+    facts.insert("sdk_pin".into(), sdk_pin(&ctx.repo, ctx.game));
     for build in &ctx.game.builds {
         // Original game files enter the key by content, never by path (originals.rs).
         let keyed: Result<Vec<String>, String> = build

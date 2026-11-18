@@ -93,7 +93,7 @@ fn one(ctx: &Ctx<'_>, install: &crate::game::Install) -> StageResult {
     // psx-library documents it: `<Name>.bin`, `<Name>.cue`, `<Name>.provenance.json` and the map
     // as `<Name>.<pin12>.map`, listed under the provenance's `artifacts.map`.
     let games_dir = library.clone();
-    let pin = sdk_pin(&ctx.repo);
+    let pin = sdk_pin(&ctx.repo, ctx.game);
     let source = match psx_library::Source::from_git(&ctx.repo, &ctx.game.repository) {
         Ok(s) => s,
         Err(e) => return result(Outcome::error("install", e.to_string())),
