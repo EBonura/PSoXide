@@ -147,6 +147,30 @@ pub fn gait_phase_carry(local: u32, out_cycle: u32, in_cycle: u32) -> u32 {
     psx_math::int32::mul_div_u32(local % out_cycle, in_cycle, out_cycle)
 }
 
+/// Whether a fighter's foot lands this tick: it is moving on a gait (walk,
+/// run, strafe, backward walk) and the gait's clock crossed a foot-down beat
+/// (frame zero or halfway around the loop, where cook-time alignment puts the
+/// feet) since `delta_ticks` ago; stepping onto a gait from anything else
+/// lands one at once. `local_tick` is the time since the gait began and may
+/// run past one cycle. Every fighter's footsteps come from this rule.
+pub fn footfall(
+    moving_gait: bool,
+    was_gait: bool,
+    local_tick: u32,
+    delta_ticks: u32,
+    cycle_ticks: u32,
+) -> bool {
+    if !moving_gait || cycle_ticks == 0 {
+        return false;
+    }
+    if !was_gait {
+        return true;
+    }
+    let beat = (cycle_ticks / 2).max(1);
+    let previous = local_tick.saturating_sub(delta_ticks);
+    local_tick / beat != previous / beat
+}
+
 /// What a fighter shows: anything that names the animation action it plays,
 /// which decides how changes to and from it crossfade.
 pub trait AnimState: Copy + PartialEq {
@@ -457,5 +481,22 @@ mod tests {
         assert_eq!(gait_phase_carry(20, 40, 60), 30);
         assert_eq!(gait_phase_carry(20, 0, 60), 0);
         assert_eq!(gait_phase_carry(20, 40, 0), 0);
+    }
+
+    #[test]
+    fn a_footfall_lands_on_each_half_cycle_edge() {
+        assert!(!footfall(true, true, 14, 1, 30));
+        assert!(footfall(true, true, 15, 1, 30));
+        assert!(!footfall(true, true, 16, 1, 30));
+        assert!(footfall(true, true, 30, 1, 30));
+        // Two ticks a step (a 30 Hz think) still lands the crossed beat.
+        assert!(footfall(true, true, 16, 2, 30));
+    }
+
+    #[test]
+    fn a_footfall_needs_a_moving_gait_and_a_known_cycle() {
+        assert!(!footfall(false, true, 15, 1, 30));
+        assert!(!footfall(true, true, 15, 1, 0));
+        assert!(footfall(true, false, 0, 1, 30));
     }
 }

@@ -68,27 +68,6 @@ pub(super) struct FighterRoomMemo {
     away: bool,
 }
 
-/// True once for each authored gait foot-down phase (frame zero and halfway
-/// around the loop). local_tick may grow beyond one cycle, so the bucket
-/// comparison handles wrap without retaining another per-player timer.
-fn gait_footstep_crossed(
-    moved: bool,
-    was_gait: bool,
-    local_tick: u32,
-    delta_ticks: u16,
-    cycle_ticks: u32,
-) -> bool {
-    if !moved || cycle_ticks == 0 {
-        return false;
-    }
-    if !was_gait {
-        return true;
-    }
-    let beat = (cycle_ticks / 2).max(1);
-    let previous = local_tick.saturating_sub(u32::from(delta_ticks));
-    local_tick / beat != previous / beat
-}
-
 /// Movement noise is independent of the audio mix/volume. Blocked movement
 /// and idle animations are silent. Sprinting/dodging carries farther.
 fn player_noise_radius(moved: bool, animation: PlayerAnim, height: i32) -> i32 {
@@ -114,6 +93,24 @@ fn enemy_idle_cue_due(now: u32, delta_ticks: u16, index: usize) -> bool {
 }
 
 impl Playtest {
+    /// Whether the player at `listener` hears entity `index`: it is in her
+    /// room and within twice its aggro radius.
+    pub(super) fn entity_audible(&self, index: usize, listener: [i32; 3]) -> bool {
+        let Some(record) = GAME_ENTITIES.get(index) else {
+            return false;
+        };
+        let position = self.game_entities.position(index);
+        let audible_range = record.aggro_radius.saturating_mul(2);
+        record.room == self.room_index
+            && position[1].saturating_sub(listener[1]).saturating_abs() <= i32::from(audible_range)
+            && psx_game_runtime::poi::xz_distance_squared_within_radius(
+                [listener[0], listener[2]],
+                [position[0], position[2]],
+                audible_range,
+            )
+            .is_some()
+    }
+
     /// Phase-3 gameplay layer tick: entity state machines (moved
     /// through the engine motor's collision by [`SceneEntityMover`]),
     /// the logic event graph, and the effect dispatch that maps fire
@@ -452,56 +449,13 @@ impl Playtest {
                 }
                 let record = &GAME_ENTITIES[index];
                 self.track_enemy_tell(index, ctx, npc_delta_ticks);
-                let position = self.game_entities.position(index);
-                let audible_range = record.aggro_radius.saturating_mul(2);
-                if record.room != self.room_index
-                    || position[1].saturating_sub(player.y).saturating_abs()
-                        > i32::from(audible_range)
-                    || psx_game_runtime::poi::xz_distance_squared_within_radius(
-                        [player.x, player.z],
-                        [position[0], position[2]],
-                        audible_range,
-                    )
-                    .is_none()
-                {
+                if !self.entity_audible(index, [player.x, player.y, player.z]) {
                     continue;
                 }
                 let state = self.game_entities.state(index);
-                let moved = position[0] != entity_positions[index][0]
-                    || position[2] != entity_positions[index][2];
-                if moved
-                    && matches!(
-                        state,
-                        psx_game_runtime::entities::GameEntityState::Patrol
-                            | psx_game_runtime::entities::GameEntityState::Aggro
-                    )
-                {
-                    let clip = self
-                        .game_entities
-                        .clip_for_state(GAME_ENTITIES.as_slice(), index);
-                    let animation = MODEL_INSTANCES
-                        .get(usize::from(record.model_instance))
-                        .and_then(|instance| self.models.get(instance.model.to_usize()))
-                        .copied()
-                        .flatten()
-                        .and_then(|model| model.clip(&self.clips, ModelClipIndex(clip.clip)));
-                    if let Some(animation) = animation {
-                        let cycle = (u32::from(animation.frame_count())
-                            * ctx.video_hz.as_nonzero_u32())
-                        .div_ceil(u32::from(animation.sample_rate_hz()).max(1));
-                        if !clip.one_shot
-                            && gait_footstep_crossed(
-                                true,
-                                true,
-                                u32::from(clip.phase_ticks),
-                                npc_delta_ticks,
-                                cycle,
-                            )
-                        {
-                            self.queue_gameplay_sfx(LevelGameplaySfxEvent::EnemyFootstep);
-                        }
-                    }
-                } else if state == psx_game_runtime::entities::GameEntityState::Idle
+                // Footsteps come from the shared footfall rule as the
+                // animation advances (update_entity_animation).
+                if state == psx_game_runtime::entities::GameEntityState::Idle
                     && enemy_idle_cue_due(now, npc_delta_ticks, index)
                 {
                     self.queue_gameplay_sfx(LevelGameplaySfxEvent::EnemyIdle);
@@ -1388,11 +1342,11 @@ impl Playtest {
                     )
                     .unwrap_or(0);
                 let local_tick = now.saturating_sub(self.game_entities.actor_action().start);
-                if gait_footstep_crossed(
+                if psx_game_runtime::fighter_anim::footfall(
                     true,
                     previous_anim.is_gait(),
                     local_tick,
-                    delta_vblanks,
+                    u32::from(delta_vblanks),
                     cycle,
                 ) {
                     self.queue_gameplay_sfx(LevelGameplaySfxEvent::Footstep);
@@ -1448,7 +1402,7 @@ impl Playtest {
 
 #[cfg(test)]
 mod gameplay_audio_tests {
-    use super::{enemy_idle_cue_due, gait_footstep_crossed, player_noise_radius, PlayerAnim};
+    use super::{enemy_idle_cue_due, player_noise_radius, PlayerAnim};
 
     #[test]
     fn movement_noise_requires_displacement_and_running_carries_farther() {
@@ -1473,20 +1427,6 @@ mod gameplay_audio_tests {
         assert!(!enemy_idle_cue_due(360, 2, 1));
     }
 
-    #[test]
-    fn footstep_is_edge_triggered_at_half_cycle() {
-        assert!(!gait_footstep_crossed(true, true, 14, 1, 30));
-        assert!(gait_footstep_crossed(true, true, 15, 1, 30));
-        assert!(!gait_footstep_crossed(true, true, 16, 1, 30));
-        assert!(gait_footstep_crossed(true, true, 30, 1, 30));
-    }
-
-    #[test]
-    fn footstep_requires_real_movement_and_valid_cycle() {
-        assert!(!gait_footstep_crossed(false, true, 15, 1, 30));
-        assert!(!gait_footstep_crossed(true, true, 15, 1, 0));
-        assert!(gait_footstep_crossed(true, false, 0, 1, 30));
-    }
 }
 
 /// Phase of the three-part walk (idle -> windup -> cruise -> winddown -> idle).

@@ -132,13 +132,17 @@ impl<const N: usize> GameEntities<N> {
         now: SimTick,
         mut cycle: impl FnMut(usize, &GameEntityClip) -> u32,
     ) {
+        let delta = now.as_u32().wrapping_sub(self.anim_clock.as_u32());
         self.anim_clock = now;
+        let mut footfalls = 0u64;
         let count = self.count().min(records.len());
         for i in 0..count {
             if self.away(i) {
                 continue;
             }
             let gait = self.locomotion_anim(&records[i], i);
+            let was_gait = fighter_anim::is_gait(self.gaits[i].state.action)
+                && self.gaits[i].state != EntityAnim::NONE;
             let track = &mut self.gaits[i];
             if track.state == EntityAnim::NONE {
                 *track = AnimTrack::new(gait);
@@ -156,6 +160,19 @@ impl<const N: usize> GameEntities<N> {
                         0
                     };
                 track.switch(gait, &mut self.actions[i].start, now, carried);
+            }
+            // A gait the motor reports is a step it took (blocked, it
+            // reports idle), so a shown gait is a moving one.
+            if i < 64
+                && fighter_anim::footfall(
+                    fighter_anim::is_gait(gait.action),
+                    was_gait,
+                    now.saturating_sub(self.actions[i].start),
+                    delta,
+                    cycle(i, &gait.clip),
+                )
+            {
+                footfalls |= 1u64 << i;
             }
             let (action, clip) = self.state_anim(records, i);
             let shown = EntityAnim {
@@ -186,6 +203,7 @@ impl<const N: usize> GameEntities<N> {
                 legs: self.moving_legs(i),
             };
         }
+        self.footfalls = footfalls;
     }
 
     /// How entity `index` (placed by `record`) is posed this tick: at its
@@ -229,6 +247,13 @@ impl<const N: usize> GameEntities<N> {
             }),
             in_place_override: crate::character::in_place_override(flags),
         }
+    }
+
+    /// Whether entity `index`'s foot landed at the latest
+    /// [`Self::update_animation`] ([`fighter_anim::footfall`], the player's
+    /// rule).
+    pub fn footfall(&self, index: usize) -> bool {
+        index < 64 && self.footfalls & (1u64 << index) != 0
     }
 
     /// What entity `index` shows, as the latest [`Self::update_animation`]

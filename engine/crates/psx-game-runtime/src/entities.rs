@@ -842,6 +842,9 @@ pub struct GameEntities<const MAX_ENTITIES: usize> {
     gaits: [crate::fighter_anim::AnimTrack<EntityAnim>; MAX_ENTITIES],
     /// The tick of the latest [`Self::update_animation`].
     anim_clock: psx_engine::SimTick,
+    /// Entities whose foot landed at the latest [`Self::update_animation`]
+    /// (bit per slot, [`crate::fighter_anim::footfall`]).
+    footfalls: u64,
     /// The entities' simulation clock: every tick advances it by its delta.
     /// An entity's attack holds its [`crate::fighter_action::FighterAction`]
     /// on it.
@@ -1164,6 +1167,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         body_starts: [psx_engine::SimTick::ZERO; MAX_ENTITIES],
         gaits: [crate::fighter_anim::AnimTrack::new(EntityAnim::NONE); MAX_ENTITIES],
         anim_clock: psx_engine::SimTick::ZERO,
+        footfalls: 0,
         clock: psx_engine::SimTick::ZERO,
         shown: [GameEntityAnimation::NONE; MAX_ENTITIES],
         spatial_active_mask: 0,

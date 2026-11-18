@@ -2333,6 +2333,15 @@ impl Playtest {
                     })
             },
         );
+        // Each fighter's footsteps, by the player's footfall rule.
+        let listener = self.game_entities.actor_motor().position();
+        for index in 0..self.game_entities.count().min(GAME_ENTITIES.len()) {
+            if self.game_entities.footfall(index)
+                && self.entity_audible(index, [listener.x, listener.y, listener.z])
+            {
+                self.queue_gameplay_sfx(LevelGameplaySfxEvent::EnemyFootstep);
+            }
+        }
     }
 
     /// Drain the logic fire marks into example-side effects: doors
