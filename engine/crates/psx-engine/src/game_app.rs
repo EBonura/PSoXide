@@ -1483,8 +1483,8 @@ impl<'a, S: Scene> GameApp<'a, S> {
             && focus < end
             && self.nodes.get(focus).is_some_and(|node| {
                 ui::is_focusable(node.kind)
-                    && (node.tag.is_empty() || self.gameplay.ui_node_visible(node.tag))
-                    && (node.tag.is_empty() || self.gameplay.ui_node_focusable(node.tag))
+                    && (node.tag.is_empty() || self.gameplay.ui_node_visible(node.tag.as_str()))
+                    && (node.tag.is_empty() || self.gameplay.ui_node_focusable(node.tag.as_str()))
             });
         if current_ok {
             return Some(focus);
@@ -1494,8 +1494,9 @@ impl<'a, S: Scene> GameApp<'a, S> {
                 self.nodes.get(index).is_some_and(|node| {
                     ui::is_focusable(node.kind)
                         && matches!(node.action, LevelUiAction::Game { id } if id == action)
-                        && (node.tag.is_empty() || self.gameplay.ui_node_visible(node.tag))
-                        && (node.tag.is_empty() || self.gameplay.ui_node_focusable(node.tag))
+                        && (node.tag.is_empty() || self.gameplay.ui_node_visible(node.tag.as_str()))
+                        && (node.tag.is_empty()
+                            || self.gameplay.ui_node_focusable(node.tag.as_str()))
                 })
             }) {
                 self.cursor.menu_focus = preferred as u16;
@@ -1512,8 +1513,8 @@ impl<'a, S: Scene> GameApp<'a, S> {
             self.nodes.get(index).is_some_and(|node| {
                 ui::is_focusable(node.kind)
                     && node.tag.ends_with(".selected")
-                    && self.gameplay.ui_node_visible(node.tag)
-                    && self.gameplay.ui_node_focusable(node.tag)
+                    && self.gameplay.ui_node_visible(node.tag.as_str())
+                    && self.gameplay.ui_node_focusable(node.tag.as_str())
             })
         }) {
             self.cursor.menu_focus = selected as u16;
@@ -1534,8 +1535,8 @@ impl<'a, S: Scene> GameApp<'a, S> {
             &mut node_indices,
             &|node| {
                 node.tag.is_empty()
-                    || (self.gameplay.ui_node_visible(node.tag)
-                        && self.gameplay.ui_node_focusable(node.tag))
+                    || (self.gameplay.ui_node_visible(node.tag.as_str())
+                        && self.gameplay.ui_node_focusable(node.tag.as_str()))
             },
         );
         let slot = first_focus(&rects[..n])?;
@@ -1560,8 +1561,8 @@ impl<'a, S: Scene> GameApp<'a, S> {
             self.nodes.get(index).is_some_and(|node| {
                 ui::is_focusable(node.kind)
                     && matches!(node.action, LevelUiAction::Game { id } if id == action)
-                    && (node.tag.is_empty() || self.gameplay.ui_node_visible(node.tag))
-                    && (node.tag.is_empty() || self.gameplay.ui_node_focusable(node.tag))
+                    && (node.tag.is_empty() || self.gameplay.ui_node_visible(node.tag.as_str()))
+                    && (node.tag.is_empty() || self.gameplay.ui_node_focusable(node.tag.as_str()))
             })
         }) else {
             return false;
@@ -1635,8 +1636,8 @@ impl<'a, S: Scene> GameApp<'a, S> {
             &mut node_indices,
             &|node| {
                 node.tag.is_empty()
-                    || (self.gameplay.ui_node_visible(node.tag)
-                        && self.gameplay.ui_node_focusable(node.tag))
+                    || (self.gameplay.ui_node_visible(node.tag.as_str())
+                        && self.gameplay.ui_node_focusable(node.tag.as_str()))
             },
         );
         // Locate the current node's slot inside the focusable list the
@@ -1872,7 +1873,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
             self.nodes.get(index).is_some_and(|node| {
                 ui::is_focusable(node.kind)
                     && matches!(node.action, LevelUiAction::Back)
-                    && (node.tag.is_empty() || self.gameplay.ui_node_visible(node.tag))
+                    && (node.tag.is_empty() || self.gameplay.ui_node_visible(node.tag.as_str()))
             })
         }) else {
             return false;
@@ -2173,7 +2174,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
         let visible = |node: &LevelUiNodeRecord| {
             (node.flags & ui_node_flags::ANALOG_INACTIVE_ONLY == 0 || !analog_active)
                 && (node.flags & ui_node_flags::LOADING_COMPLETE_ONLY == 0 || loading_complete)
-                && (node.tag.is_empty() || gameplay.ui_node_visible(node.tag))
+                && (node.tag.is_empty() || gameplay.ui_node_visible(node.tag.as_str()))
         };
         // The gameplay scene lends its uploaded font atlases so menu labels
         // and buttons draw with the same glyphs the HUD uses. Empty slots
@@ -3227,8 +3228,8 @@ mod tests {
             max: LevelUiValueBinding::ConstantQ12(1),
             texture_asset: AssetId(u16::MAX),
             image_effect: LevelUiImageEffect::None,
-            text: "",
-            tag: "",
+            text: psx_level::ui_str!(""),
+            tag: psx_level::ui_str!(""),
             action,
             option: UI_OPTION_NONE,
             rotation_degrees: 0,
@@ -3244,7 +3245,7 @@ mod tests {
     const fn tagged_button(
         x: i16,
         y: i16,
-        tag: &'static str,
+        tag: psx_level::UiStr,
         action: LevelUiAction,
     ) -> LevelUiNodeRecord {
         let mut node = button(x, y, action);
@@ -3269,8 +3270,8 @@ mod tests {
         max: LevelUiValueBinding::ConstantQ12(1),
         texture_asset: AssetId(u16::MAX),
         image_effect: LevelUiImageEffect::None,
-        text: "",
-        tag: "",
+        text: psx_level::ui_str!(""),
+        tag: psx_level::ui_str!(""),
         action: LevelUiAction::Back,
         option: UI_OPTION_NONE,
         rotation_degrees: 0,
@@ -3425,8 +3426,18 @@ mod tests {
 
     static DYNAMIC_LIST_NODES: &[LevelUiNodeRecord] = &[
         CANVAS,
-        tagged_button(40, 60, "inventory.item.0", LevelUiAction::Game { id: 1 }),
-        tagged_button(40, 90, "inventory.item.1", LevelUiAction::Game { id: 2 }),
+        tagged_button(
+            40,
+            60,
+            psx_level::ui_str!("inventory.item.0"),
+            LevelUiAction::Game { id: 1 },
+        ),
+        tagged_button(
+            40,
+            90,
+            psx_level::ui_str!("inventory.item.1"),
+            LevelUiAction::Game { id: 2 },
+        ),
     ];
     static DYNAMIC_LIST_SCENES: &[LevelUiScene] = &[LevelUiScene {
         id: 5,
@@ -3445,14 +3456,24 @@ mod tests {
     static TAGGED_TAB_NODES: &[LevelUiNodeRecord] = &[
         CANVAS,
         button(40, 100, LevelUiAction::Game { id: 99 }),
-        tagged_button(200, 20, "tab.player", LevelUiAction::Game { id: 10 }),
+        tagged_button(
+            200,
+            20,
+            psx_level::ui_str!("tab.player"),
+            LevelUiAction::Game { id: 10 },
+        ),
         tagged_button(
             230,
             20,
-            "tab.armament.selected",
+            psx_level::ui_str!("tab.armament.selected"),
             LevelUiAction::Game { id: 11 },
         ),
-        tagged_button(260, 20, "tab.system", LevelUiAction::Game { id: 12 }),
+        tagged_button(
+            260,
+            20,
+            psx_level::ui_str!("tab.system"),
+            LevelUiAction::Game { id: 12 },
+        ),
     ];
     static TAGGED_TAB_SCENES: &[LevelUiScene] = &[LevelUiScene {
         id: 4,
@@ -3525,26 +3546,26 @@ mod tests {
         tagged_button(
             200,
             20,
-            "tab.player.selected",
+            psx_level::ui_str!("tab.player.selected"),
             LevelUiAction::Game { id: 10 },
         ),
         tagged_button(
             260,
             20,
-            "tab.system",
+            psx_level::ui_str!("tab.system"),
             LevelUiAction::GotoState { state: 52 },
         ),
         CANVAS,
         tagged_button(
             200,
             20,
-            "tab.player",
+            psx_level::ui_str!("tab.player"),
             LevelUiAction::GotoState { state: 51 },
         ),
         tagged_button(
             260,
             20,
-            "tab.system.selected",
+            psx_level::ui_str!("tab.system.selected"),
             LevelUiAction::Game { id: 12 },
         ),
     ];
@@ -4706,8 +4727,8 @@ mod tests {
             max: LevelUiValueBinding::ConstantQ12(1),
             texture_asset: AssetId(u16::MAX),
             image_effect: LevelUiImageEffect::None,
-            text: "",
-            tag: "",
+            text: psx_level::ui_str!(""),
+            tag: psx_level::ui_str!(""),
             action: LevelUiAction::Back,
             option,
             rotation_degrees: 0,
@@ -4940,8 +4961,8 @@ mod tests {
             max: LevelUiValueBinding::ConstantQ12(0),
             texture_asset: AssetId(u16::MAX),
             image_effect: LevelUiImageEffect::None,
-            text: "",
-            tag: "",
+            text: psx_level::ui_str!(""),
+            tag: psx_level::ui_str!(""),
             action: LevelUiAction::Back,
             option: 2,
             rotation_degrees: 0,

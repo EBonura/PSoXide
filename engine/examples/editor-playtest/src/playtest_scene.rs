@@ -1902,7 +1902,7 @@ impl Scene for Playtest {
 
         let cross_prompt = UI_NODES
             .iter()
-            .find(|node| node.tag == "prompt.cross.runtime")
+            .find(|node| node.tag.as_str() == "prompt.cross.runtime")
             .and_then(|node| self.ui_texture(node.texture_asset));
 
         if self.character.is_some() {

@@ -781,7 +781,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         let image_effect = render_ui_image_effect(node.image_effect);
         let _ = writeln!(
             out,
-            "    LevelUiNodeRecord {{ parent: {parent}, kind: {kind}, x: {}, y: {}, width: {}, height: {}, color: [{}, {}, {}], background: [{}, {}, {}], accent: [{}, {}, {}], color_paint: {color_paint}, background_paint: {background_paint}, accent_paint: {accent_paint}, value: {value}, max: {max}, texture_asset: {texture_asset}, image_effect: {image_effect}, text: {:?}, tag: {:?}, action: {action}, option: {}, rotation_degrees: {}, flags: {}, sfx_first: {}, sfx_count: {}, font: {}, font_scale: {}, letter_spacing: {} }},",
+            "    LevelUiNodeRecord {{ parent: {parent}, kind: {kind}, x: {}, y: {}, width: {}, height: {}, color: [{}, {}, {}], background: [{}, {}, {}], accent: [{}, {}, {}], color_paint: {color_paint}, background_paint: {background_paint}, accent_paint: {accent_paint}, value: {value}, max: {max}, texture_asset: {texture_asset}, image_effect: {image_effect}, text: psx_level::ui_str!({:?}), tag: psx_level::ui_str!({:?}), action: {action}, option: {}, rotation_degrees: {}, flags: {}, sfx_first: {}, sfx_count: {}, font: {}, font_scale: {}, letter_spacing: {} }},",
             node.x,
             node.y,
             node.width,

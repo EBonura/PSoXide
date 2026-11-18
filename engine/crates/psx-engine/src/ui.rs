@@ -815,7 +815,7 @@ pub fn draw_scene(
         let resolved_text = if authored_node.tag.is_empty() {
             None
         } else {
-            text.resolve(authored_node.tag, &mut text_scratch)
+            text.resolve(authored_node.tag.as_str(), &mut text_scratch)
         };
         let node = authored_node;
         let resolved = if memoised {
@@ -1557,8 +1557,8 @@ mod tests {
             max: LevelUiValueBinding::ConstantQ12(0),
             texture_asset: AssetId(u16::MAX),
             image_effect: LevelUiImageEffect::None,
-            text: "",
-            tag: "",
+            text: psx_level::ui_str!(""),
+            tag: psx_level::ui_str!(""),
             action: LevelUiAction::Back,
             option: UI_OPTION_NONE,
             rotation_degrees: 0,
@@ -2309,7 +2309,7 @@ mod tests {
 
         let mut label = ui_node(None, LevelUiNodeKind::Label, 0, 0, 100, 20);
         label.flags |= ui_node_flags::TEXT_RANDOM_MESSAGE;
-        label.text = "one\u{1f}two\u{1f}three";
+        label.text = psx_level::ui_str!("one\u{1f}two\u{1f}three");
         let first = selected_label_text(&label, 0x1234);
         assert_eq!(first, selected_label_text(&label, 0x1234));
         assert!(["one", "two", "three"].contains(&first));
@@ -2694,19 +2694,19 @@ fn sheened_paint(paint: UiPaint, k: i32) -> UiPaint {
     }
 }
 
-fn selected_label_text(node: &LevelUiNodeRecord, seed: u16) -> &str {
+fn selected_label_text(node: &LevelUiNodeRecord, seed: u16) -> &'static str {
+    let text = node.text.as_str();
     if node.flags & ui_node_flags::TEXT_RANDOM_MESSAGE == 0 {
-        return node.text;
+        return text;
     }
-    let count = node.text.bytes().filter(|byte| *byte == 0x1f).count() + 1;
+    let count = text.bytes().filter(|byte| *byte == 0x1f).count() + 1;
     let mut mixed = seed ^ 0xa361;
     mixed ^= mixed << 7;
     mixed ^= mixed >> 9;
     mixed ^= mixed << 8;
-    node.text
-        .split('\u{1f}')
+    text.split('\u{1f}')
         .nth(usize::from(mixed) % count)
-        .unwrap_or(node.text)
+        .unwrap_or(text)
 }
 
 fn wrapped_line_end(
@@ -3163,7 +3163,7 @@ fn draw_button(
     let Some(font) = font else {
         return;
     };
-    let text = text_override.unwrap_or(node.text);
+    let text = text_override.unwrap_or(node.text.as_str());
     if text.is_empty() {
         return;
     }

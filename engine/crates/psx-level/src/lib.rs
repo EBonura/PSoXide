@@ -2817,6 +2817,92 @@ pub struct LevelOptionDef {
     pub default: i32,
 }
 
+/// A cooked UI string held by one pointer: it points at a little-endian
+/// `u16` byte count followed by the UTF-8 bytes ([`ui_str!`]). Half the size
+/// of a `&'static str` in every [`LevelUiNodeRecord`], which the menus and HUD
+/// keep resident for the whole game.
+#[derive(Clone, Copy)]
+pub struct UiStr(&'static u8);
+
+impl UiStr {
+    /// The string whose length-prefixed bytes start at `bytes[0]`
+    /// ([`ui_str_bytes`]).
+    ///
+    /// # Panics
+    ///
+    /// When `bytes` is shorter than its own length prefix says (a bug in
+    /// the caller; [`ui_str!`] cannot produce one).
+    pub const fn new(bytes: &'static [u8]) -> Self {
+        assert!(bytes.len() >= 2);
+        let len = bytes[0] as usize | (bytes[1] as usize) << 8;
+        assert!(bytes.len() == len + 2);
+        Self(&bytes[0])
+    }
+
+    /// The string.
+    pub fn as_str(self) -> &'static str {
+        let base: *const u8 = self.0;
+        // SAFETY: `new` only accepts a 'static slice of exactly prefix + len
+        // bytes, built by `ui_str_bytes` from a `&str`, so the bytes after the
+        // prefix are in bounds, live forever and are valid UTF-8.
+        unsafe {
+            let len = usize::from(*base) | usize::from(*base.add(1)) << 8;
+            core::str::from_utf8_unchecked(core::slice::from_raw_parts(base.add(2), len))
+        }
+    }
+}
+
+impl core::ops::Deref for UiStr {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl core::fmt::Debug for UiStr {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Debug::fmt(self.as_str(), f)
+    }
+}
+
+impl PartialEq for UiStr {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl Eq for UiStr {}
+
+/// `text` as [`UiStr`] bytes: a little-endian `u16` length, then the bytes.
+/// `N` must be `text.len() + 2` ([`ui_str!`] sizes it).
+///
+/// # Panics
+///
+/// When `N` is not `text.len() + 2` or `text` is longer than `u16::MAX`.
+pub const fn ui_str_bytes<const N: usize>(text: &str) -> [u8; N] {
+    let bytes = text.as_bytes();
+    assert!(N == bytes.len() + 2 && bytes.len() <= u16::MAX as usize);
+    let mut out = [0u8; N];
+    out[0] = bytes.len() as u8;
+    out[1] = (bytes.len() >> 8) as u8;
+    let mut i = 0;
+    while i < bytes.len() {
+        out[i + 2] = bytes[i];
+        i += 1;
+    }
+    out
+}
+
+/// A [`UiStr`] from a string literal (or any `&'static str` constant).
+#[macro_export]
+macro_rules! ui_str {
+    ($text:expr) => {{
+        const BYTES: [u8; $text.len() + 2] = $crate::ui_str_bytes($text);
+        $crate::UiStr::new(&BYTES)
+    }};
+}
+
 /// One cooked screen-space UI node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LevelUiNodeRecord {
@@ -2855,9 +2941,9 @@ pub struct LevelUiNodeRecord {
     /// Animated vertex-colour preset for `Image`.
     pub image_effect: LevelUiImageEffect,
     /// Text for `Label`/`Button`.
-    pub text: &'static str,
+    pub text: UiStr,
     /// Runtime lookup tag for dynamic labels. Empty means untagged.
-    pub tag: &'static str,
+    pub tag: UiStr,
     /// Action fired by a `Button`. Ignored by other kinds.
     pub action: LevelUiAction,
     /// Project option a `Slider` binds to; sprite-strip frame count for a
