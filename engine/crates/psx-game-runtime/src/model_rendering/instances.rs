@@ -739,7 +739,7 @@ pub fn draw_model_instance_from_pose<
             runtime_model,
             anim,
             phase,
-            pose.blend_from(),
+            pose.blends(),
             *camera,
             origin,
             model_rotation,
@@ -1050,7 +1050,7 @@ mod tests {
         assert_eq!(snapshot.clip_local(), ModelClipIndex::new(1));
         assert_eq!(snapshot.pose().tick(), SimTick::from_u32(77));
         assert_eq!(snapshot.pose().phase_q12(), 1 << 12);
-        assert!(snapshot.pose().blend_from().is_none());
+        assert!(snapshot.pose().blends().active().is_none());
         assert_eq!(
             snapshot.pose().pose_translation(),
             ModelPoseTranslation {

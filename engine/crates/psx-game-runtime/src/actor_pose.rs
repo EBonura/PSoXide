@@ -8,6 +8,7 @@
 
 use psx_asset::{Animation, JointPose};
 use psx_engine::MaskedPoseBlend as ModelPoseBlend;
+use psx_engine::PoseBlends;
 use psx_engine::{
     apply_model_pose_translation, compute_joint_world_basis, compute_joint_world_transform,
     JointWorldTransform, LocalToWorldScale, Mat3I16, ModelPoseTranslation, SimTick, WorldVertex,
@@ -23,7 +24,7 @@ pub struct ActorPoseSnapshot {
     tick: SimTick,
     animation: Animation<'static>,
     phase_q12: u32,
-    blend_from: Option<ModelPoseBlend<'static>>,
+    blends: PoseBlends<'static>,
     origin: WorldVertex,
     rotation: Mat3I16,
     local_to_world: LocalToWorldScale,
@@ -47,7 +48,7 @@ impl ActorPoseSnapshot {
             tick,
             animation,
             phase_q12,
-            blend_from,
+            blends: PoseBlends::crossfade(blend_from),
             origin,
             rotation,
             local_to_world,
@@ -94,7 +95,8 @@ impl ActorPoseSnapshot {
 
     /// [`Self::with_joint_layer`] at a weight: `alpha_q12` is the Q12 weight
     /// of this pose's own clip on the masked joints (0 shows the layer alone
-    /// there), so a layer can fade in and out.
+    /// there), so a layer can fade in and out. The layer composes with the
+    /// crossfade already in the snapshot (it does not replace it).
     pub fn with_weighted_joint_layer(
         mut self,
         animation: Animation<'static>,
@@ -102,7 +104,7 @@ impl ActorPoseSnapshot {
         mask: u32,
         alpha_q12: u16,
     ) -> Self {
-        self.blend_from = animation
+        self.blends.layer = animation
             .looped_pose_sample_q12(phase)
             .map(|sample| ModelPoseBlend {
                 sample,
@@ -112,9 +114,9 @@ impl ActorPoseSnapshot {
         self
     }
 
-    /// Optional outgoing-pose crossfade sampled with the body.
-    pub const fn blend_from(&self) -> Option<ModelPoseBlend<'static>> {
-        self.blend_from
+    /// The crossfade and layer sampled with the body.
+    pub const fn blends(&self) -> PoseBlends<'static> {
+        self.blends
     }
 
     /// Floor/visual-offset-adjusted model origin in world space.
@@ -148,10 +150,7 @@ impl ActorPoseSnapshot {
     /// snapshot between ticks without copying it.
     pub fn joint_pose_at(&self, phase_q12: u32, joint: u16) -> Option<JointPose> {
         let primary = self.animation.pose_looped_q12(phase_q12, joint)?;
-        let blended = match self.blend_from {
-            Some(blend) => blend.blend_toward(primary, joint),
-            None => primary,
-        };
+        let blended = self.blends.blend_toward(primary, joint);
         Some(apply_model_pose_translation(blended, self.pose_translation))
     }
 
@@ -293,6 +292,33 @@ mod tests {
             layered.joint_world_transform(0).unwrap().translation.x,
             1350
         );
+    }
+
+    #[test]
+    fn a_layer_composes_with_the_running_crossfade() {
+        // Outgoing 100, incoming 300, half-way crossfade: 200 (+50 pose
+        // translation). A half-weight layer at 500 then blends toward that.
+        let outgoing = one_joint_animation(&[100, 100]);
+        let incoming = one_joint_animation(&[300, 300]);
+        let layer = one_joint_animation(&[500, 500]);
+        let crossfade = outgoing
+            .looped_pose_sample_q12(0)
+            .map(|sample| ModelPoseBlend {
+                joint_mask: u32::MAX,
+                sample,
+                alpha_q12: 1 << 11,
+            });
+        let p = snapshot(1, incoming, crossfade);
+        assert_eq!(p.joint_pose(0).unwrap().translation.x, 250);
+        // A layer that does not select the joint keeps the crossfade.
+        let off = p.with_weighted_joint_layer(layer, 0, 0b10, 0);
+        assert_eq!(off.joint_pose(0).unwrap().translation.x, 250);
+        // A half-weight layer on the joint blends from the crossfaded body.
+        let half = p.with_weighted_joint_layer(layer, 0, 1, 1 << 11);
+        assert_eq!(half.joint_pose(0).unwrap().translation.x, 400);
+        // A full layer replaces the joint outright.
+        let full = p.with_weighted_joint_layer(layer, 0, 1, 0);
+        assert_eq!(full.joint_pose(0).unwrap().translation.x, 550);
     }
 
     #[test]

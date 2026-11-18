@@ -215,4 +215,4 @@ pub use psx_pad::{
 pub use psx_io::periph::ControllerPort;
 
 mod masked_pose;
-pub use masked_pose::MaskedPoseBlend;
+pub use masked_pose::{MaskedPoseBlend, PoseBlends};

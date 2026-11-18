@@ -1720,7 +1720,7 @@ pub fn draw_player_from_pose<
     let actor_pose = player_pose.pose();
     let anim = actor_pose.animation();
     let phase = actor_pose.phase_q12();
-    let blend_from = actor_pose.blend_from();
+    let blend_from = actor_pose.blends();
     let bounds = model_frame_bounds(tables, runtime_model, player_pose.clip_local(), phase);
     let pose_translation = actor_pose.pose_translation();
     let model_rotation = actor_pose.rotation();
@@ -1998,7 +1998,7 @@ fn submit_runtime_model_predecoded<
     runtime_model: RuntimeModelAsset,
     anim: Animation<'static>,
     phase: u32,
-    blend_from: Option<ModelPoseBlend<'static>>,
+    blend_from: psx_engine::PoseBlends<'static>,
     camera: WorldCamera,
     origin: WorldVertex,
     rotation: Mat3I16,

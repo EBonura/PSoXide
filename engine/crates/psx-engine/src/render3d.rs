@@ -15,7 +15,6 @@
 use crate::render::{
     CameraDepth, DepthBand, DepthRange, DepthSlot, OtFrame, PrimitiveArena, PrimitiveSink,
 };
-use crate::MaskedPoseBlend as ModelPoseBlend;
 use crate::{Angle, WorldVertex, Q12};
 use core::mem::MaybeUninit;
 use psx_asset::{Animation, GteJointPose, JointPose, Mesh, Model, ModelPart, ModelVertex};

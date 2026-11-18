@@ -298,7 +298,7 @@ fn submit_equipped_weapon<
         weapon_model,
         anim,
         phase,
-        None,
+        psx_engine::PoseBlends::default(),
         *camera,
         origin,
         weapon_rotation,

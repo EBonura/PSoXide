@@ -814,7 +814,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             model.into(),
             animation,
             frame_q12,
-            None,
+            crate::PoseBlends::default(),
             camera,
             origin,
             instance_rotation,
@@ -851,7 +851,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         options: WorldSurfaceOptions,
         faces: &[TexturedModelRenderFace],
         geometry: TexturedModelGeometry<'_>,
-        blend_from: Option<ModelPoseBlend<'_>>,
+        blend_from: crate::PoseBlends<'_>,
     ) -> TexturedModelRenderStats {
         self.submit_textured_model_geometry_impl(
             triangles,
@@ -903,7 +903,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             model.into(),
             animation,
             frame_q12,
-            None,
+            crate::PoseBlends::default(),
             camera,
             origin,
             instance_rotation,
@@ -940,7 +940,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         options: WorldSurfaceOptions,
         faces: &[TexturedModelRenderFace],
         geometry: TexturedModelGeometry<'_>,
-        blend_from: Option<ModelPoseBlend<'_>>,
+        blend_from: crate::PoseBlends<'_>,
     ) -> TexturedModelRenderStats {
         self.submit_textured_model_geometry_impl(
             triangles,
@@ -970,7 +970,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         model: PredecodedModelInfo,
         animation: Animation<'_>,
         frame_q12: u32,
-        blend_from: Option<ModelPoseBlend<'_>>,
+        blend_from: crate::PoseBlends<'_>,
         camera: WorldCamera,
         origin: WorldVertex,
         instance_rotation: Mat3I16,
@@ -1010,7 +1010,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         // A saturated or absent crossfade uses the packed GTE fast path; an
         // active blend samples both clips unpacked (the packed translations
         // carry per-clip shifts that cannot be lerped directly).
-        let active_blend = blend_from.filter(|blend| blend.alpha_q12 < 1 << 12);
+        let active_blend = blend_from.active();
         let transform_pose = |pose: JointPose| {
             if MODEL_GTE_JOINT_TRANSLATION {
                 textured_model_part_gte_transform_with_view_gte_translation(

@@ -292,7 +292,7 @@ pub fn draw_actor_projected_shadow<
         runtime_model,
         pose.animation(),
         pose.phase_q12(),
-        pose.blend_from(),
+        pose.blends(),
         *camera,
         projected_shadow_origin(origin, plane_y, tuning.light),
         projected_shadow_rotation(pose.rotation(), tuning.light),
