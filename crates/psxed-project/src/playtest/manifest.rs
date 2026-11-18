@@ -635,7 +635,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     for bounds in &package.model_clip_bounds {
         let _ = writeln!(
             out,
-            "    LevelModelClipBoundsRecord {{ model: ModelIndex({}), clip: ModelClipTableIndex({}), first_frame: ModelFrameBoundsIndex({}), frame_count: {}, floor_y: {}, pose_offset: [{}, {}, {}], flags: {} }},",
+            "    LevelModelClipBoundsRecord {{ model: ModelIndex({}), clip: ModelClipTableIndex({}), first_frame: ModelFrameBoundsIndex({}), frame_count: {}, floor_y: {}, pose_offset: [{}, {}, {}], flags: {}, first_root_xz: [{}, {}] }},",
             bounds.model,
             bounds.clip,
             bounds.first_frame,
@@ -645,6 +645,8 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             bounds.pose_offset[1],
             bounds.pose_offset[2],
             bounds.flags,
+            bounds.first_root_xz[0],
+            bounds.first_root_xz[1],
         );
     }
     out.push_str("];\n\n");

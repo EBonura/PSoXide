@@ -984,6 +984,7 @@ mod tests {
                 floor_y: 10,
                 pose_offset: [0, 0, 0],
                 flags: 0,
+                first_root_xz: [0, 0],
             },
             LevelModelClipBoundsRecord {
                 model: ModelIndex::new(0),
@@ -993,6 +994,7 @@ mod tests {
                 floor_y: 30,
                 pose_offset: [4, 5, 6],
                 flags: psx_level::model_clip_flags::IN_PLACE,
+                first_root_xz: [0, 0],
             },
         ]));
         ModelTables {
@@ -1184,6 +1186,7 @@ mod tests {
                 floor_y: -100,
                 pose_offset: [0; 3],
                 flags: 0,
+                first_root_xz: [0, 0],
             }])),
             model_frame_bounds: &[],
             model_sockets: &[],

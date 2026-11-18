@@ -2696,7 +2696,8 @@ fn model_pose_anchor_translation(
     let reference_floor_y = reference_anchor.map(|anchor| anchor.floor_y);
     let in_place = in_place_override.unwrap_or(clip_anchor.in_place);
     let root_translation = if in_place {
-        let first_root_xz = match first_root_xz {
+        // Cooked per clip, else the caller's cached value, else decoded.
+        let first_root_xz = match first_root_xz.or(clip_anchor.first_root_xz) {
             Some(resolved) => Some(resolved),
             None => clip_first_root_xz(animation),
         };
@@ -2755,6 +2756,8 @@ struct ModelClipAnchor {
     floor_y: i32,
     pose_offset: [i32; 3],
     in_place: bool,
+    /// The clip's frame-0 root XZ when the cook stored it.
+    first_root_xz: Option<[i32; 2]>,
 }
 
 #[inline]
@@ -2788,6 +2791,8 @@ fn model_clip_anchor(
         floor_y: record.floor_y,
         pose_offset: record.pose_offset,
         in_place: (record.flags & model_clip_flags::IN_PLACE) != 0,
+        first_root_xz: ((record.flags & model_clip_flags::FIRST_ROOT) != 0)
+            .then_some(record.first_root_xz),
     })
 }
 

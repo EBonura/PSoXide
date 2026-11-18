@@ -1857,6 +1857,9 @@ pub(crate) fn register_model_for_instance(
                 return None;
             }
         };
+        // The runtime decoder's own frame-0 root translation, so the per-tick
+        // in-place correction reads it instead of decoding it.
+        let first_root = corrected_anim.translation(0, 0);
         let floor_y = baked_bounds
             .first()
             .map(|bounds| bounds.floor_y)
@@ -1873,7 +1876,12 @@ pub(crate) fn register_model_for_instance(
                 model_clip_flags::IN_PLACE
             } else {
                 0
+            } | if first_root.is_some() {
+                model_clip_flags::FIRST_ROOT
+            } else {
+                0
             },
+            first_root_xz: first_root.map_or([0, 0], |t| [t.x, t.z]),
         });
         // Same contract as the shared atlas above: content identity, not path.
         // Model VARIANTS (one enemy cut into claw/weapon/legless silhouettes)

@@ -204,6 +204,9 @@ pub mod arch_prop_flags {
 pub mod model_clip_flags {
     /// Runtime should cancel root translation for this clip.
     pub const IN_PLACE: u16 = 1 << 0;
+    /// `first_root_xz` holds the clip's frame-0 root translation, so the
+    /// runtime need not decode it every tick.
+    pub const FIRST_ROOT: u16 = 1 << 1;
 }
 
 /// Per-character action playback flags.
@@ -1562,6 +1565,10 @@ pub struct LevelModelClipBoundsRecord {
     pub pose_offset: [i32; 3],
     /// See [`model_clip_flags`].
     pub flags: u16,
+    /// Root joint X and Z at frame 0, raw model-local units (valid with
+    /// [`model_clip_flags::FIRST_ROOT`]): the reference in-place correction
+    /// cancels root travel against.
+    pub first_root_xz: [i32; 2],
 }
 
 /// Conservative local-space sphere for one sampled animation frame.
