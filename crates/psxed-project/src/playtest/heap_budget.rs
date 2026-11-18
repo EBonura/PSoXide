@@ -31,7 +31,7 @@ const SLOT_BYTES: usize = 228;
 /// the first frames' scratch lists. Measured from the guest's heap (every allocation logged, and
 /// the `ReuseHeap` bump pointer read from a RAM dump after a walk or a duel): grid-dungeon's
 /// peak is the need less 128 B, rib-room-h's (ten rooms) the need less 1.7 KB, so no per-room
-/// term is left.
+/// term is left (test `the_need_covers_the_measured_heap_peak`).
 const FIXED_BYTES: usize = 5_504;
 /// Bytes each grid material takes in the uploaded-material list (`grid_materials::bind_uploaded`).
 const UPLOADED_MATERIAL_BYTES: usize = 20;
@@ -550,13 +550,14 @@ mod tests {
     }
 
     /// The guest's heap at its peak, read from RAM dumps (the `ReuseHeap` bump pointer less the
-    /// heap's start; it never retreats) on SDK 8d4e9a705: rib-room-h with its two duel enemies after
-    /// the 2,000-poll walk, grid-dungeon after the seed-1 duel to poll 900. The need must cover
+    /// heap's start; it never retreats) once the records chunk was read into the room pool:
+    /// rib-room-h with its two duel enemies after the 2,000-poll walk, grid-dungeon after the
+    /// seed-1 duel to poll 900. The need must cover
     /// each and stay close to it, so a build the guard passes cannot run out and a level is not
     /// refused for heap it does not use.
     #[test]
     fn the_need_covers_the_measured_heap_peak() {
-        for (name, peak) in [("rib-room-h", 60_740usize), ("grid-dungeon", 15_100)] {
+        for (name, peak) in [("rib-room-h", 51_964usize), ("grid-dungeon", 14_340)] {
             let dir = crate::projects_dir().join(name);
             let project = ProjectDocument::load_from_path(dir.join("project.ron"))
                 .expect("the project loads");
