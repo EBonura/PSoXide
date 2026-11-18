@@ -54,7 +54,11 @@ local function holds(p)
   return false
 end
 local function all(step)
-  for _, p in ipairs(step.probes) do if not holds(p) then return false, p.text end end
+  for _, p in ipairs(step.probes) do
+    if not holds(p) then
+      return false, string.format('%s (read %s)', p.text, tostring(read(p.addr, p.size, p.signed)))
+    end
+  end
   return true
 end
 

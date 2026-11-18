@@ -451,11 +451,11 @@ pub fn replay(plan: &Plan, core_path: &Path, out: &Path) -> Result<Replay, Strin
         let holds = |read: &dyn Fn(u32) -> u32| step.probes.iter().all(|p| p.holds(read(p.addr)));
         match &step.action {
             Action::Check { name } => {
-                let failing: Vec<&str> = step
+                let failing: Vec<String> = step
                     .probes
                     .iter()
                     .filter(|p| !p.holds(read(p.addr)))
-                    .map(|p| p.text.as_str())
+                    .map(|p| p.describe(read(p.addr)))
                     .collect();
                 save_png(out, name);
                 if failing.is_empty() {
@@ -493,7 +493,7 @@ pub fn replay(plan: &Plan, core_path: &Path, out: &Path) -> Result<Replay, Strin
                             step.label,
                             step.probes
                                 .iter()
-                                .map(|p| p.text.as_str())
+                                .map(|p| p.describe(read(p.addr)))
                                 .collect::<Vec<_>>()
                                 .join(", "),
                             result.frames
