@@ -66,8 +66,13 @@ impl<'a> PoseBlends<'a> {
     /// The composed pose for `joint`. A joint the layer replaces outright
     /// (weight 0 of the body there) skips the crossfade's decode.
     pub fn blend_toward(&self, primary: psx_asset::JointPose, joint: u16) -> psx_asset::JointPose {
-        let layer = self.layer.filter(|layer| layer.selects(joint));
-        let body = match (self.crossfade, layer) {
+        // By reference: a blend is about 100 bytes, and copying one per
+        // joint costs more than the blend.
+        let layer = match &self.layer {
+            Some(layer) if layer.selects(joint) => Some(layer),
+            _ => None,
+        };
+        let body = match (&self.crossfade, layer) {
             (_, Some(layer)) if layer.alpha_q12 == 0 => primary,
             (Some(crossfade), _) => crossfade.blend_toward(primary, joint),
             (None, _) => primary,
