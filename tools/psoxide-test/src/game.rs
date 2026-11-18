@@ -36,6 +36,11 @@ pub struct Game {
     /// One `[[install]]` per library entry the repo produces.
     #[serde(default, rename = "install")]
     pub installs: Vec<Install>,
+    /// Original game files by `{input:NAME}` name -> the content digest they must have
+    /// (`psoxide-test` prints it as `input:NAME` in a run's build facts). A configured input with
+    /// other bytes fails the build before any command runs. Optional per name.
+    #[serde(default)]
+    pub originals: BTreeMap<String, String>,
 }
 
 /// One build: commands run in order at the repo root, then files collected into `out`.

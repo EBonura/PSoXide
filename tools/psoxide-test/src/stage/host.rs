@@ -130,11 +130,14 @@ fn one(
     bless: bool,
 ) -> Result<(Outcome, bool), String> {
     let mut command = Vec::new();
+    let mut keyed = Vec::new();
     for arg in &host.command {
         command.push(ctx.resolve(arg)?);
+        keyed.push(ctx.key_text(arg)?);
     }
     let mut key = Key::new("host");
-    key.part("command", &command.join("\0"));
+    // Original game files by content, not path (originals.rs).
+    key.part("command", &keyed.join("\0"));
     key.part("dir", host.dir.as_deref().unwrap_or("."));
     key.part("model", model.unwrap_or(""));
     key.part("tree", tree);
@@ -143,7 +146,10 @@ fn one(
         env.push(("PSOXIDE_HARDWARE".into(), Some(m.to_string())));
     }
     for (k, v) in &env {
-        key.part(k, v.as_deref().unwrap_or("(removed)"));
+        match host.env.get(k) {
+            Some(declared) if v.is_some() => key.part(k, &ctx.key_text(declared)?),
+            _ => key.part(k, v.as_deref().unwrap_or("(removed)")),
+        }
     }
     if let Some(build) = &host.build {
         let b = ctx
