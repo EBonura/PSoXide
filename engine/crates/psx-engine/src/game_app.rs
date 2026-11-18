@@ -803,6 +803,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
         self.apply_option_values(&values, len, ctx);
     }
 
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     fn apply_option_values(&mut self, values: &[i32; MAX_OPTIONS], len: usize, ctx: &mut Ctx) {
         self.gameplay
             .apply_options(self.options, &values[..len.min(MAX_OPTIONS)], ctx);

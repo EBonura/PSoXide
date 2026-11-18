@@ -146,6 +146,7 @@ impl Playtest {
         }
     }
 
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     pub(super) fn ensure_poi_save_loaded(&mut self, port: &mut psx_engine::ControllerPort) {
         if self.poi_save_loaded {
             return;
@@ -394,6 +395,7 @@ impl Playtest {
     /// Flush pending POI state at an intentional save boundary. Memory-card
     /// filesystem writes take many video periods on real hardware, so they
     /// must never run inside a live interaction or an arbitrary gameplay tick.
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     pub(super) fn flush_poi_save(&mut self, port: &mut psx_engine::ControllerPort) {
         #[cfg(feature = "background-card-write")]
         let busy = self.card_job.is_busy();
@@ -462,6 +464,7 @@ impl Playtest {
         candidate.is_depleted(&self.poi_save)
     }
 
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     fn grant_point_of_interest_reward(&mut self, index: usize) -> Option<BoostModuleId> {
         let Some(interactable) = INTERACTABLES.get(index) else {
             return None;
@@ -532,6 +535,7 @@ impl Playtest {
         self.set_poi_page_type_frame(0);
     }
 
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     pub(super) fn advance_poi_message(&mut self) {
         if self.poi_closing {
             return;
@@ -562,12 +566,14 @@ impl Playtest {
         );
     }
 
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     pub(super) fn dismiss_legacy_message(&mut self) {
         if !self.poi_closing && !self.complete_legacy_message_reveal() {
             self.begin_message_close();
         }
     }
 
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     fn finish_poi_message(&mut self) {
         use psx_game_runtime::poi::{MessageAdvance, MessageSource};
         if !self.acquired_module.is_none() {
@@ -758,6 +764,7 @@ impl Playtest {
     }
 
     #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     pub(super) fn open_demo_outro_once(&mut self) {
         const OUTRO_SCENE: u8 = 1;
         if self.poi_messages.world_message_shown(OUTRO_SCENE)
@@ -1149,6 +1156,7 @@ impl Playtest {
     /// world re-arms (see [`Self::rearm_world`]) and the save, which now holds
     /// the new rest point, is written. The respawn point itself was set by
     /// [`Self::set_checkpoint`].
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     fn rest_at_checkpoint(&mut self, port: &mut psx_engine::ControllerPort) {
         self.reset_life_combat();
         self.deferred_enemy_attacks.clear();
@@ -2756,6 +2764,7 @@ impl Playtest {
     /// refuses the interaction. The legacy direct path remains only
     /// for hand-rolled manifests whose interactables carry no paired
     /// record.
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     pub(super) fn activate_interactable(
         &mut self,
         index: usize,
@@ -2847,6 +2856,7 @@ impl Playtest {
     /// from the same pose is a no-op for the counter, while the first
     /// activation of a life (the checkpoint itself persists across
     /// respawn) and any pose/record change count once.
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     pub(super) fn set_checkpoint(
         &mut self,
         checkpoint: RuntimeCheckpoint,

@@ -2905,6 +2905,7 @@ impl Playtest {
     /// toggle their linked box prop, messages open the interactable
     /// overlay, checkpoints update the in-memory checkpoint (with the
     /// same confirmation overlay the legacy interactable path showed).
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     pub(super) fn dispatch_logic_effects(&mut self, port: &mut psx_engine::ControllerPort) {
         if !self.logic.any_fired() && !self.logic.any_refused() {
             return;
@@ -3083,6 +3084,7 @@ impl Playtest {
     /// Message overlay for a fired MESSAGE/CHECKPOINT record, through
     /// the same text table + fallbacks the legacy interactable path
     /// used (the cook shares the message index between both records).
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     fn open_logic_message(&mut self, index: usize, record: &psx_level::LevelLogicRecord) {
         if self.poi_messages.active().is_some() {
             // POI/world messages are deliberately non-modal. Refuse a hidden

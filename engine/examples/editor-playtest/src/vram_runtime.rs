@@ -118,6 +118,7 @@ pub(super) fn menu_ui_cache_ready() -> bool {
 /// Tracks each created slot so `release_ui_images` can free it when the scene
 /// changes or gameplay starts.
 #[cfg(feature = "cd-stream-bench")]
+#[cfg_attr(target_arch = "mips", optimize(size))]
 pub(super) fn load_ui_images_for_scene(scene_id: u16) -> bool {
     vram_arena().load_ui_images_for_scene(
         VRAM_LAYOUT,

@@ -2536,6 +2536,7 @@ impl<
     /// upload queue re-resolves job bytes through `resolve` per step (phase
     /// 1.5) instead of retaining `&'static` slices across frames.
     #[cfg(feature = "cd-stream-bench")]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     pub fn load_ui_images_for_scene<const STAGE_WORDS: usize, const SLOTS: usize>(
         &mut self,
         layout: VramLayout,
