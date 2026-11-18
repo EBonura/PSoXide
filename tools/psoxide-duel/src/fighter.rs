@@ -72,6 +72,11 @@ pub struct FighterSpec {
     /// Its Hit React clip's length in ticks, as the guest times a flinch
     /// (`GameEntities::time_flinches`); `None` when it binds none.
     pub flinch_ticks: Option<u16>,
+    /// Its cooked model, clips and capsules, posed each tick for contact;
+    /// `None` when the body could not be loaded (it then never connects
+    /// and is never struck by a blade, as a body without a pose on the
+    /// disc).
+    pub rig: Option<std::sync::Arc<crate::pose::Rig>>,
 }
 
 impl FighterSpec {
@@ -120,6 +125,7 @@ impl FighterSpec {
             capsules: capsules.to_vec(),
             timings: [None; 3],
             flinch_ticks: None,
+            rig: None,
         }
     }
 

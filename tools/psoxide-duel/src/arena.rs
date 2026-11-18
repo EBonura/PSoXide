@@ -7,13 +7,14 @@
 //! tactical controller, `apply_intent`, `Combatant` rules: parry, crit,
 //! knockdown, poise, energy), the character motor, `CombatProjectiles`, and
 //! the one landing (`GameEntities::receive_hit` on the victim, then
-//! `GameEntities::answer_strike` on the attacker). The host has no model
-//! pose, so where the disc poses authored capsules the harness stands in
-//! with geometry of its own: a front arc as deep as the AI's swing distance,
-//! gated by the authored contact window, for melee, and the body capsule
-//! for bolts. What it adds: the owner's side of a duel (perception of the
-//! other fighter, contact in both directions, bolt release), which on the
-//! disc is `Playtest`.
+//! `GameEntities::answer_strike` on the attacker). Each fighter is posed
+//! every tick by the game's own model loader and pose resolver
+//! ([`crate::pose`]), and contact is the disc's: its authored hitboxes
+//! swept over the tick against the other's authored hurtboxes
+//! (`combat::ActiveStrike`), a bolt against the first authored hurtbox.
+//! What it adds: the owner's side of a duel (perception of the other
+//! fighter, contact in both directions, bolt release), which on the disc is
+//! `Playtest`.
 //!
 //! Both fighters are treated the same in every step: each thinks from a
 //! snapshot of the other taken before either moved, contacts in both
@@ -26,7 +27,9 @@ use psx_engine::{
     Angle, CharacterBlockerTraceProvider, CharacterCollisionAabb, CharacterCollisionCylinder,
     CharacterMotorConfig, CharacterMotorFrame, CharacterMotorInput, CharacterMotorState, RoomPoint,
 };
-use psx_game_runtime::combat::{ticks_to_contact, WorldCombatCapsule};
+use psx_game_runtime::combat::{
+    ticks_to_contact, transform_actor_combat_capsule, ActiveStrike, WorldCombatCapsule,
+};
 use psx_game_runtime::combat_intent::{CombatAction, CombatActions, CombatIntent, CombatMove};
 use psx_game_runtime::combatant::{Combatant, CombatantId, Defender, HitKind, Strike};
 use psx_game_runtime::entities::{
@@ -361,6 +364,8 @@ struct Side {
     /// hit under armour.
     absorbed_in: Option<u32>,
     tally: SideTally,
+    /// Its pose this tick and the tick before.
+    poses: crate::pose::Poses,
 }
 
 /// Side `j` as side `i` perceives it at the start of a think.
@@ -441,7 +446,21 @@ impl Side {
     }
 
     /// The body capsule bolts hit (the disc's fallback hurtbox).
-    fn hurtbox(&self) -> WorldCombatCapsule {
+    /// What a bolt strikes: the first authored hurtbox on this tick's pose
+    /// (none without a pose), else the body capsule, as on the disc.
+    fn hurtbox(&self) -> Option<WorldCombatCapsule> {
+        let authored = self.spec.rig.as_ref().and_then(|rig| {
+            rig.capsules
+                .iter()
+                .find(|c| c.flags & psx_level::combat_capsule_flags::HURTBOX != 0)
+        });
+        match authored {
+            Some(capsule) => transform_actor_combat_capsule(capsule, self.poses.current()?),
+            None => Some(self.body_capsule()),
+        }
+    }
+
+    fn body_capsule(&self) -> WorldCombatCapsule {
         let r = self.body();
         let p = self.entities.position(0);
         let radius = i32::from(r.radius).min(i32::from(r.height) / 2);
@@ -633,28 +652,6 @@ pub const fn swing_reach(a: i32, b: i32) -> i32 {
     a + b + GAME_ENTITY_ATTACK_REACH_MARGIN + 16
 }
 
-/// Front-arc half-width of the harness's stand-in swing, PSX angle units
-/// (60 degrees).
-const SWING_HALF_ANGLE: i32 = 683;
-
-/// Whether the harness's stand-in swing from `from` facing `yaw` reaches
-/// the body centred at `to`: within `reach` and the front arc, or point
-/// blank (inside the body radius plus 64), whatever the facing.
-fn swing_reaches(from: [i32; 3], yaw: u16, reach: i32, to: [i32; 3]) -> bool {
-    let dx = i64::from(to[0] - from[0]);
-    let dz = i64::from(to[2] - from[2]);
-    let d2 = dx * dx + dz * dz;
-    if d2 > i64::from(reach) * i64::from(reach) {
-        return false;
-    }
-    if d2 <= 64 * 64 {
-        return true;
-    }
-    let to_target = i32::from(psx_math::atan2_q12(dx as i32, dz as i32));
-    let diff = (to_target - i32::from(yaw)).rem_euclid(4096);
-    diff.min(4096 - diff) <= SWING_HALF_ANGLE
-}
-
 /// Whether nothing blocks a melee contact between two fighters' chests.
 fn clear_line(pillars: &[CharacterCollisionAabb], a: [i32; 3], b: [i32; 3]) -> bool {
     let lift = |p: [i32; 3]| [p[0], p[1] + 32, p[2]];
@@ -730,6 +727,7 @@ pub fn run(duel: &Duel<'_>) -> DuelResult {
                 attack_start: 0,
                 absorbed_in: None,
                 tally: SideTally::default(),
+                poses: crate::pose::Poses::default(),
             }
         })
         .collect();
@@ -805,6 +803,19 @@ pub fn run(duel: &Duel<'_>) -> DuelResult {
         for side in &mut sides {
             side.entities.advance_stances(1);
         }
+        // Freeze each body's pose for this tick, as the disc does before
+        // combat resolves.
+        for side in &mut sides {
+            let Some(rig) = side.spec.rig.clone() else {
+                continue;
+            };
+            let now = psx_engine::SimTick::from_u32(tick);
+            side.entities
+                .update_animation(side.records, now, |_, clip| rig.clip_ticks(clip));
+            let attack = side.attacks.get(0).map(|attack| attack.clip());
+            let pose = rig.pose(&side.entities, attack, now);
+            side.poses.advance(pose);
+        }
 
         // Contacts. Melee first, both directions latched before either lands.
         let mut pending: Vec<PendingHit> = Vec::new();
@@ -828,36 +839,43 @@ pub fn run(duel: &Duel<'_>) -> DuelResult {
                 continue;
             }
             let records = sides[i].records;
-            // The swing's contact: the harness's front arc, as deep as the
-            // AI's own swing distance (see [`swing_reach`]).
-            if !swing_reaches(
-                attack.position(),
-                sides[i].entities.yaw(0) as u16,
-                swing_reach(i32::from(sides[i].body().radius), victim_radius),
-                victim_position,
-            ) || !clear_line(&pillars, attack.position(), victim_position)
-            {
-                continue;
-            }
-            // Only inside the authored contact window, on the swing's clock.
-            if let Some((first, last)) = sides[i].spec.contact_window(attack.action()) {
-                let phase = attack.clip().phase_ticks;
-                if phase < first || phase > last {
-                    continue;
-                }
-            }
-            let Some(strike) = sides[i].spec.strike(attack.action()) else {
+            // The swing's contact, the disc's one melee contact path: the
+            // attacker's hitboxes active on its pose, swept from the tick
+            // before, against the defender's hurtboxes on its pose.
+            let (Some(attacker_rig), Some(defender_rig), Some(pose)) = (
+                sides[i].spec.rig.as_ref(),
+                sides[j].spec.rig.as_ref(),
+                sides[i].poses.current(),
+            ) else {
                 continue;
             };
+            let strike = ActiveStrike::sample(
+                attacker_rig.capsules,
+                attack.action(),
+                pose,
+                sides[i].poses.previous(),
+            );
+            let spent = sides[i].entities.spent_windows(0, 1);
+            let Some(contact) = strike.contact(
+                attacker_rig.capsules,
+                defender_rig.capsules,
+                sides[j].poses.current(),
+                spent,
+            ) else {
+                continue;
+            };
+            let _ = victim_radius;
+            if !clear_line(&pillars, attack.position(), victim_position) {
+                continue;
+            }
+            // The one swing latch: the other fighter is defender 1.
+            if !sides[i].entities.latch_strike(0, 1, contact.window) {
+                continue;
+            }
             let (damage, poise) =
                 sides[i]
                     .entities
-                    .crit_scaled(records, 0, strike.damage, strike.poise);
-            // The one swing latch: the stand-in swing is one strike window,
-            // the other fighter one defender.
-            if !sides[i].entities.latch_strike(0, 1, 1) {
-                continue;
-            }
+                    .crit_scaled(records, 0, contact.damage, contact.poise_damage);
             // The swing that reached its target uses up the crit, parried
             // or not.
             let crit = sides[i].entities.spend_crit(0);
@@ -886,12 +904,14 @@ pub fn run(duel: &Duel<'_>) -> DuelResult {
             if sides[j].entities.state(0) != GameEntityState::Dead
                 && !sides[j].entities.passes_through(sides[j].records, 0)
             {
-                targets.push(ProjectileTarget {
-                    target: 0,
-                    team: CombatTeam::Enemy,
-                    room: RoomIndex::ZERO,
-                    hurtbox: sides[j].hurtbox(),
-                });
+                if let Some(hurtbox) = sides[j].hurtbox() {
+                    targets.push(ProjectileTarget {
+                        target: 0,
+                        team: CombatTeam::Enemy,
+                        room: RoomIndex::ZERO,
+                        hurtbox,
+                    });
+                }
             }
             let mut impacts = ProjectileImpacts::<8>::new();
             let opening = sides[j].entities.shot_opening(sides[j].records, 0);

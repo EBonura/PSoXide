@@ -10,5 +10,6 @@
 
 pub mod arena;
 pub mod fighter;
+pub mod pose;
 pub mod project;
 pub mod sweep;

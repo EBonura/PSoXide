@@ -114,6 +114,7 @@ fn training_fighter(
         .get(first..first + usize::from(body.combat_capsule_count))
         .unwrap_or(&[]);
     let mut spec = FighterSpec::new(name, record, body, capsules);
+    spec.rig = crate::pose::Rig::build(package, &record, capsules).map(std::sync::Arc::new);
     let model = package
         .model_instances
         .get(usize::from(record.model_instance))
@@ -309,6 +310,13 @@ pub fn load_training(project_dir: &Path, which: usize) -> Result<ProjectFighters
     )?;
     // Exactly the stats the disc gives her.
     aletha.body.combat = player_character.combat;
+    // Posed as the disc poses her, not at the size of the placement she was
+    // cooked into.
+    aletha.rig = aletha
+        .rig
+        .take()
+        .and_then(std::sync::Arc::into_inner)
+        .map(|rig| std::sync::Arc::new(rig.presented_as(&aletha.body)));
     // Her attacks play her own action clips, at her speeds and frame
     // ranges, as the disc plays them (the entity cook resolves attack clips
     // from animation-set roles, which her set does not bind the way an
@@ -334,6 +342,31 @@ pub fn load_training(project_dir: &Path, which: usize) -> Result<ProjectFighters
     };
     aletha.record.ranged_attack_action =
         psx_level::CharacterAnimationAction::RangedAttack.to_index() as u8;
+    // Her body plays those clips too (her posed blades and hurtboxes are
+    // read off them), not what the entity cook found in her set.
+    {
+        let clip = |action: psx_level::CharacterAnimationAction| {
+            let i = action.to_index();
+            (
+                player_character.action_clips[i],
+                player_character.action_speeds[i],
+                player_character.action_frame_ranges[i],
+            )
+        };
+        let r = &mut aletha.record;
+        (r.attack_clip, r.attack_speed_q8, r.attack_frame_range) =
+            clip(psx_level::CharacterAnimationAction::LightAttack);
+        (
+            r.heavy_attack_clip,
+            r.heavy_attack_speed_q8,
+            r.heavy_attack_frame_range,
+        ) = clip(psx_level::CharacterAnimationAction::HeavyAttack);
+        (
+            r.ranged_attack_clip,
+            r.ranged_attack_speed_q8,
+            r.ranged_attack_frame_range,
+        ) = clip(psx_level::CharacterAnimationAction::RangedAttack);
+    }
     let capsules = aletha.capsules.clone();
     attach_clocks(&mut aletha, player_clocks, &capsules);
     aletha.timings = {

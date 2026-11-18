@@ -484,8 +484,10 @@ dependencies = [
  "psx-asset",
  "psx-engine",
  "psx-game-runtime",
+ "psx-gpu",
  "psx-level",
  "psx-math",
+ "psx-vram",
  "psxed-project",
  "serde_json",
 ]

@@ -13,6 +13,8 @@ psx-engine       = { path = "../../engine/crates/psx-engine" }
 psx-level        = { path = "../../engine/crates/psx-level", features = ["wire"] }
 psx-asset        = { path = "../../sdk/crates/psx-asset" }
 psx-math         = { path = "../../sdk/crates/psx-math" }
+psx-gpu          = { path = "../../sdk/crates/psx-gpu" }
+psx-vram         = { path = "../../sdk/crates/psx-vram" }
 psxed-project    = { path = "../../crates/psxed-project" }
 serde_json       = { workspace = true }
 
