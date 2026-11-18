@@ -359,6 +359,10 @@ struct Playtest {
     /// Each entity's streamed room, a search hint into the resident rooms
     /// ([`SceneEntityMover::fighter_rooms`]).
     fighter_rooms: [u16; MAX_GAME_ENTITIES],
+    /// Where each fighter stood when its residency was last tested, and the think counter that
+    /// staggers the retest of one at rest ([`Playtest::refresh_away_mask`]).
+    away_tested: [[i32; 3]; MAX_GAME_ENTITIES],
+    away_tick: u8,
     /// Whether the running death sequence was armed by combat damage
     /// rather than an environmental hazard (respawn logging only).
     death_by_combat: bool,

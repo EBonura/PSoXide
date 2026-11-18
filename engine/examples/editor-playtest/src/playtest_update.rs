@@ -89,12 +89,23 @@ impl Playtest {
     fn refresh_away_mask(&mut self, positions: &[[i32; 3]]) {
         // psx-numeric-allow-next-line: fixed 64-record mask; bit ops only
         let mut away = 0u64;
+        let tick = self.away_tick;
+        self.away_tick = tick.wrapping_add(1);
         if let Some(world_rt) = self.world_rt.as_ref() {
             for (index, position) in positions.iter().enumerate().take(64) {
-                if world_rt
-                    .fighter_room(&mut self.fighter_rooms[index], *position)
-                    .is_none()
-                {
+                // A fighter that has not moved keeps its answer, retested every sixteenth think
+                // (its room may stream in or out around it).
+                let due = self.away_tested[index] != *position
+                    || (usize::from(tick) + index).is_multiple_of(16);
+                let gone = if due {
+                    self.away_tested[index] = *position;
+                    world_rt
+                        .fighter_room(&mut self.fighter_rooms[index], *position)
+                        .is_none()
+                } else {
+                    self.game_entities.away(index)
+                };
+                if gone {
                     away |= 1u64 << index;
                 }
             }
