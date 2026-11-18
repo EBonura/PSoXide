@@ -612,7 +612,7 @@ fn sdk_stage(repo: &Path, game: &Game, work_root: &Path) -> (StageResult, String
         }
     };
     let name = format!("sdk pin ({})", verdict.file);
-    let value = format!(
+    let mut value = format!(
         "{} guest tree {} {} main {} guest tree {}",
         util::short(&verdict.pinned),
         util::short(&verdict.pinned_tree),
@@ -623,9 +623,13 @@ fn sdk_stage(repo: &Path, game: &Game, work_root: &Path) -> (StageResult, String
         },
         util::short(&verdict.main),
         util::short(&verdict.main_tree)
-    ) + &verdict.main_age.map_or(String::new(), |a| {
-        format!(" (offline: main as fetched {} ago)", pin::age_text(a))
-    });
+    );
+    if let Some(age) = verdict.main_age {
+        value.push_str(&format!(
+            " (offline: main as fetched {} ago)",
+            pin::age_text(age)
+        ));
+    }
     let mut checks = vec![if verdict.pinned_tree == verdict.main_tree {
         Check::pass(&name, value)
     } else {
