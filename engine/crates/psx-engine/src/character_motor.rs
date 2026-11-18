@@ -1666,14 +1666,26 @@ fn trace_stand_position<P: CollisionTraceProvider + ?Sized>(
     target: RoomPoint,
     shape: CollisionTraceShape,
 ) -> Result<Option<StandOutcome>, CollisionQueryError> {
-    let direct = trace_collision(
-        provider,
-        CollisionTraceQuery {
-            start,
-            end: target,
-            shape,
-        },
-    )?;
+    let direct_query = CollisionTraceQuery {
+        start,
+        end: target,
+        shape,
+    };
+    let raised_start = start.with_y(start.y.saturating_add(STEP_UP_HEIGHT));
+    let raised_target = target.with_y(raised_start.y);
+    let raised_query = CollisionTraceQuery {
+        start: raised_start,
+        end: raised_target,
+        shape,
+    };
+    // An actor body across both the direct and the raised sweep: the direct
+    // sweep hits whatever the world does and the step up is blocked too, so
+    // the answer is no stand without tracing the world at all (an enemy
+    // pressed against the player, every candidate move of the slide).
+    if provider.surely_hits(direct_query) && provider.surely_hits(raised_query) {
+        return Ok(None);
+    }
+    let direct = trace_collision(provider, direct_query)?;
     if !direct.hit() {
         let Some(floor) = trace_supporting_floor(provider, target, shape)? else {
             return Ok(None);
@@ -1693,15 +1705,9 @@ fn trace_stand_position<P: CollisionTraceProvider + ?Sized>(
     // A direct body sweep that hits a low riser gets one bounded step attempt:
     // lift, sweep at the raised height, then settle back onto an upward-facing
     // floor. Tall walls/ceilings reject either the lift or raised sweep.
-    let raised_start = start.with_y(start.y.saturating_add(STEP_UP_HEIGHT));
-    let raised_target = target.with_y(raised_start.y);
     // An actor body across the raised sweep fails the step whatever the lift
     // and the world find (actors are never steppable): skip both traces.
-    if provider.surely_hits(CollisionTraceQuery {
-        start: raised_start,
-        end: raised_target,
-        shape,
-    }) {
+    if provider.surely_hits(raised_query) {
         return Ok(None);
     }
     let lift = trace_collision(
