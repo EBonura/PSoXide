@@ -44,8 +44,12 @@ const OFF: bool = cfg!(feature = "stance-hud-off");
 /// Ticks between looks for the nearest hostile: the HUD only needs it a few times a second.
 const SCAN_TICKS: u8 = 8;
 
-/// The packets live in a `static`: the GPU walks them after `render` returns.
-static mut PACKETS: HudPackets = HudPackets::new();
+/// The packets live in a `static`: the GPU walks them after `render` returns. There are two
+/// sets, one for each ordering table: the list of a frame is still being walked while the next
+/// frame is built, and the last packet of a set links on to the frame's own present-queue hook,
+/// so frames in flight together must not share a set (the walk of one would follow the link
+/// written for the other, into overlay memory that frame no longer owns).
+static mut PACKETS: [HudPackets; 2] = [HudPackets::new(), HudPackets::new()];
 
 /// The HUD's state, in a `static` for the same reason: the scene is zero-initialised storage and
 /// this is not all zero.
@@ -126,7 +130,11 @@ impl StanceHud {
         };
         self.cells = [cells(input.health_q12); 2];
         // SAFETY: single-threaded guest; PACKETS is only touched here and in `link`/`update`.
-        unsafe { (*core::ptr::addr_of_mut!(PACKETS)).build(&vram, ORIGIN) };
+        unsafe {
+            for packets in &mut *core::ptr::addr_of_mut!(PACKETS) {
+                packets.build(&vram, ORIGIN);
+            }
+        };
         self.vram = Some(vram);
         self.anim = HudAnim::open();
         self.ammo = AmmoFx::new(input.energy);
@@ -201,13 +209,14 @@ impl StanceHud {
 
     /// Lay out the packets for the current state, if it changed, and link them into slot 0 of `ot`. Link before the
     /// rest of the frame so that the HUD is walked last of slot 0.
-    pub(crate) fn link<const DEPTH: usize>(&mut self, ot: &mut OtFrame<'_, DEPTH>) {
+    pub(crate) fn link<const DEPTH: usize>(&mut self, ot: &mut OtFrame<'_, DEPTH>, table: usize) {
         if !self.ready {
             return;
         }
-        // SAFETY: single-threaded guest; the packets stay untouched until the walk ends, which
-        // `submit` waits for before the next frame's update or link.
-        let packets = unsafe { &mut *core::ptr::addr_of_mut!(PACKETS) };
+        // SAFETY: single-threaded guest; this table's set is not touched again until the frame
+        // after next, by which time the walk of this frame has ended (the arena wait of the
+        // present queue, or the fence of the double-buffered path).
+        let packets = unsafe { &mut (*core::ptr::addr_of_mut!(PACKETS))[table & 1] };
         packets.link(&self.state, |ptr, tag| {
             // SAFETY: the packets are a `static`, so they outlive the walk.
             unsafe { ot.add_raw_tag_unchecked(0, ptr, tag) }

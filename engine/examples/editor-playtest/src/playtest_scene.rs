@@ -1228,12 +1228,14 @@ impl Scene for Playtest {
         let render_scratch = frame_render_scratch();
         // This frame's table and packets never overlap the previous frame's,
         // which the GPU may still be walking: see PACKET_FRAMES.
-        let (mut ot, mut primitive_packets) = unsafe {
+        let (mut ot, mut primitive_packets, table) = unsafe {
             let frames = &mut *core::ptr::addr_of_mut!(PACKET_FRAMES);
-            let ot = &mut *core::ptr::addr_of_mut!(OT[frames.next_frame()]);
+            let table = frames.next_frame();
+            let ot = &mut *core::ptr::addr_of_mut!(OT[table]);
             (
                 OtFrame::begin(ot),
                 PrimitivePacketArena::new_paired(&mut render_scratch.primitive_packets, frames),
+                table,
             )
         };
         self.queued_head = core::ptr::null();
@@ -1246,7 +1248,7 @@ impl Scene for Playtest {
         // The stance HUD goes into slot 0 before anything else does, so that the slot walks it last:
         // over the world and under the overlay.
         if !self.inventory_overlay_active && !self.opening.active() {
-            crate::stance_hud::hud().link(&mut ot);
+            crate::stance_hud::hud().link(&mut ot, table);
         }
 
         let room_record = ROOMS.get(self.room_index.to_usize());
