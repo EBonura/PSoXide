@@ -189,11 +189,13 @@ pub enum Placeholder {
     /// `ranged_tactics::DRY_CYCLES` (a code constant; the harness feature
     /// makes it a setting).
     DryCycles,
+    /// `CombatStats::max_health`.
+    MaxHealth,
 }
 
 impl Placeholder {
     /// Every placeholder, in report order.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::ParryTicks,
         Self::ParryRefund,
         Self::CritWindowTicks,
@@ -204,6 +206,7 @@ impl Placeholder {
         Self::ParrySwapPercent,
         Self::ParryReactionTicks,
         Self::DryCycles,
+        Self::MaxHealth,
     ];
 
     /// Name as the report prints it.
@@ -219,6 +222,7 @@ impl Placeholder {
             Self::ParrySwapPercent => "parry_swap_percent",
             Self::ParryReactionTicks => "parry_reaction_ticks",
             Self::DryCycles => "dry_cycles",
+            Self::MaxHealth => "max_health",
         }
     }
 
@@ -232,7 +236,7 @@ impl Placeholder {
             Self::CritWindowTicks => 20,
             Self::CritDamageQ12 | Self::CritPoiseQ12 => 1024,
             Self::KnockdownTicks => 20,
-            Self::Poise => (current / 5).max(1),
+            Self::Poise | Self::MaxHealth => (current / 5).max(1),
             Self::ParrySwapPercent => 25,
             Self::ParryReactionTicks => 4,
             Self::DryCycles => 1,
@@ -252,6 +256,7 @@ impl Placeholder {
             Self::CritPoiseQ12 => &mut c.crit_poise_q12,
             Self::KnockdownTicks => &mut c.knockdown_ticks,
             Self::Poise => &mut c.poise,
+            Self::MaxHealth => &mut c.max_health,
             Self::ParryReactionTicks => &mut c.parry_reaction_ticks,
             Self::ParrySwapPercent => {
                 let step = i32::from(self.step(0));
@@ -279,6 +284,7 @@ impl Placeholder {
             Self::CritPoiseQ12 => c.crit_poise_q12 = value,
             Self::KnockdownTicks => c.knockdown_ticks = value,
             Self::Poise => c.poise = value,
+            Self::MaxHealth => c.max_health = value,
             Self::ParrySwapPercent => c.parry_swap_percent = value.min(100) as u8,
             Self::ParryReactionTicks => c.parry_reaction_ticks = value,
             Self::DryCycles => {}
@@ -301,6 +307,7 @@ impl Placeholder {
             Self::CritPoiseQ12 => c.crit_poise_q12,
             Self::KnockdownTicks => c.knockdown_ticks,
             Self::Poise => c.poise,
+            Self::MaxHealth => c.max_health,
             Self::ParrySwapPercent => u16::from(c.parry_swap_percent),
             Self::ParryReactionTicks => c.parry_reaction_ticks,
             Self::DryCycles => u16::from(psx_game_runtime::ranged_tactics::DRY_CYCLES),

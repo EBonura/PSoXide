@@ -1846,10 +1846,11 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
     /// tracking every fighter's attack runs while its authored tell frames
     /// say it tracks ([`crate::combat::melee_tell_tracks`],
     /// [`crate::combat::ranged_charge_tracks`]) or its ranged windup is
-    /// early. A strike window that connected, or a released shot, closes it
-    /// for the rest of the swing, so a combo never pivots after connecting.
+    /// early. The callers close a melee tell and a charge once a strike
+    /// window connected or a shot released ([`Self::swing_connected`]), so a
+    /// combo never pivots after connecting.
     pub fn track_tell(&mut self, index: usize, tell: Tell, target: [i32; 3], delta: u16) {
-        if !self.holds_fighter(index) || self.authored_connection_mask[index] != 0 {
+        if !self.holds_fighter(index) {
             return;
         }
         let dx = target[0].saturating_sub(self.px(index));
@@ -1874,6 +1875,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         if index >= self.count()
             || self.attack_phase(index) != Some(AttackPhase::Active)
             || self.selected_attack_is_ranged(index)
+            || self.swing_connected(index)
         {
             return;
         }
@@ -1893,7 +1895,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         if index >= self.count()
             || self.attack_phase(index) != Some(AttackPhase::Active)
             || !self.selected_attack_is_ranged(index)
-            || self.authored_connection_mask[index] != 0
+            || self.swing_connected(index)
         {
             return;
         }
@@ -2522,6 +2524,14 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         }
         self.authored_connection_mask[attack.entity()] = mask | (1u16 << emitter);
         true
+    }
+
+    /// Whether fighter `index`'s current swing has connected (a strike
+    /// window struck someone) or released a shot.
+    pub fn swing_connected(&self, index: usize) -> bool {
+        self.authored_connection_mask
+            .get(index)
+            .is_some_and(|&spent| spent != 0)
     }
 
     /// Start a fresh swing for slot `index` (any fighter, the actor slot
