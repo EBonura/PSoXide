@@ -288,8 +288,9 @@ pub(super) fn prop_texture_slot(texture_asset: AssetId) -> Option<VramSlot> {
 /// use transparent index zero, so forcing both through the prop resolver can
 /// miss an already-resident base slot and expose the model atlas for a frame.
 pub(super) fn model_texture_slot(texture_asset: AssetId) -> Option<VramSlot> {
-    let bytes = upload_bytes_for(texture_asset)?;
-    ensure_texture_uploaded(texture_asset, bytes)
+    vram_arena().ensure_texture_uploaded_lazily(VRAM_LAYOUT, texture_asset, || {
+        upload_bytes_for(texture_asset)
+    })
 }
 
 /// Upload the streamed sky panorama synchronously from `asset_bytes`.

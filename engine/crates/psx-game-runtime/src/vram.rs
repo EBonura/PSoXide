@@ -679,7 +679,16 @@ pub struct VramRuntime<
     /// New slots are taken from the top of the table down instead of from the
     /// bottom up ([`Self::set_slots_from_top`]).
     slots_from_top: bool,
+    /// The palette mode the last few textures' headers picked
+    /// ([`Self::ensure_texture_uploaded_lazily`]): asset id and 1 opaque /
+    /// 2 transparent index zero, 0 for an empty entry.
+    texture_modes: [(u16, u8); TEXTURE_MODE_MEMO],
+    texture_mode_next: u8,
 }
+
+/// Textures whose header mode is remembered: the ones a frame draws models
+/// with (the player's covering texture and a few fighters').
+const TEXTURE_MODE_MEMO: usize = 4;
 
 impl<
         const RAM_ASSETS: usize,
@@ -737,6 +746,8 @@ impl<
             upload_queue: VramUploadQueue::new(),
             ui_image_slots: [None; MAX_UI_IMAGE_SLOTS],
             slots_from_top: false,
+            texture_modes: [(0, 0); TEXTURE_MODE_MEMO],
+            texture_mode_next: 0,
         }
     }
 
@@ -1331,6 +1342,46 @@ impl<
         } else {
             VramSlotClutMode::OpaqueZero
         };
+        self.ensure_texture_uploaded_with_clut_mode(layout, asset_id, asset_bytes, clut_mode)
+    }
+
+    /// [`Self::ensure_texture_uploaded`] that asks for the bytes only when
+    /// the texture is not resident in VRAM. The palette mode its header
+    /// picked is remembered per asset, so a resident texture is one slot
+    /// lookup instead of a byte lookup and a header parse every draw.
+    pub fn ensure_texture_uploaded_lazily<'a>(
+        &mut self,
+        layout: VramLayout,
+        asset_id: AssetId,
+        asset_bytes: impl FnOnce() -> Option<&'a [u8]>,
+    ) -> Option<VramSlot> {
+        let known = self
+            .texture_modes
+            .iter()
+            .find(|(id, mode)| *mode != 0 && *id == asset_id.0)
+            .map(|(_, mode)| *mode);
+        if let Some(mode) = known {
+            let clut_mode = if mode == 2 {
+                VramSlotClutMode::TransparentZero
+            } else {
+                VramSlotClutMode::OpaqueZero
+            };
+            if let Some(slot) = self.find_vram_slot(asset_id, clut_mode) {
+                return Some(slot);
+            }
+        }
+        let asset_bytes = asset_bytes()?;
+        let texture = Texture::from_bytes(asset_bytes).ok()?;
+        let (clut_mode, mode) = if texture.is_index_zero_transparent() {
+            (VramSlotClutMode::TransparentZero, 2)
+        } else {
+            (VramSlotClutMode::OpaqueZero, 1)
+        };
+        if known.is_none() {
+            let next = usize::from(self.texture_mode_next) % TEXTURE_MODE_MEMO;
+            self.texture_modes[next] = (asset_id.0, mode);
+            self.texture_mode_next = ((next + 1) % TEXTURE_MODE_MEMO) as u8;
+        }
         self.ensure_texture_uploaded_with_clut_mode(layout, asset_id, asset_bytes, clut_mode)
     }
 
