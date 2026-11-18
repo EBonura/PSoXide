@@ -767,7 +767,11 @@ impl Playtest {
     #[cfg_attr(target_arch = "mips", optimize(size))]
     pub(super) fn open_demo_outro_once(&mut self) {
         const OUTRO_SCENE: u8 = 1;
-        if self.poi_messages.world_message_shown(OUTRO_SCENE)
+        // A scripted duel is not the demo's story: it releases the other
+        // training entities as dead at its start (a Heavy among them would
+        // read as the boss defeated) and its fighter may kill the boss.
+        if self.duel.active
+            || self.poi_messages.world_message_shown(OUTRO_SCENE)
             || self.death_ticks_remaining != 0
             || self.message_overlay.is_some()
             || !self.acquired_module.is_none()
