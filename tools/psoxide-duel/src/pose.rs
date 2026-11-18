@@ -275,12 +275,14 @@ impl Rig {
             tick,
             VideoHz::NTSC,
         )?;
-        Some(mr::with_entity_legs_layer(
-            pose,
+        let mut pose = pose;
+        mr::add_entity_legs_layer(
+            &mut pose,
             entities.animation(0).legs,
             &self.clips,
             VideoHz::NTSC,
-        ))
+        );
+        Some(pose)
     }
 }
 

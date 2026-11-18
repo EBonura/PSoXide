@@ -499,21 +499,21 @@ fn resolve_instance_actor_pose_record<
     })
 }
 
-/// `pose` with an entity's moving-attack gait layered on its legs
-/// ([`crate::entities::GameEntityAnimation::legs`]): the disc and the host
-/// duel harness both add it here.
-pub fn with_entity_legs_layer<const MAX_RUNTIME_MODEL_CLIPS: usize>(
-    pose: InstanceActorPoseSnapshot,
+/// Layer an entity's moving-attack gait on `pose`'s legs
+/// ([`crate::entities::GameEntityAnimation::legs`]), in place: the disc and
+/// the host duel harness both add it here.
+pub fn add_entity_legs_layer<const MAX_RUNTIME_MODEL_CLIPS: usize>(
+    pose: &mut InstanceActorPoseSnapshot,
     legs: Option<(crate::entities::GameEntityClip, u16)>,
     clips: &[Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
     video_hz: VideoHz,
-) -> InstanceActorPoseSnapshot {
-    let mask = pose.model().body_masks.legs;
+) {
+    let mask = pose.model.body_masks.legs;
     let Some((gait, weight)) = legs.filter(|_| mask != 0) else {
-        return pose;
+        return;
     };
-    let Some(animation) = pose.model().clip(clips, ModelClipIndex(gait.clip)) else {
-        return pose;
+    let Some(animation) = pose.model.clip(clips, ModelClipIndex(gait.clip)) else {
+        return;
     };
     let phase = animation_phase_at_tick_q12(
         animation,
@@ -523,10 +523,8 @@ pub fn with_entity_legs_layer<const MAX_RUNTIME_MODEL_CLIPS: usize>(
         gait.speed_q8,
         gait.frame_range,
     );
-    pose.with_pose(
-        pose.pose()
-            .with_weighted_joint_layer(animation, phase, mask, weight),
-    )
+    pose.pose
+        .set_weighted_joint_layer(animation, phase, mask, weight);
 }
 
 /// The pose a [`ModelInstancePoseLayer`] blends in, sampled on `model`'s

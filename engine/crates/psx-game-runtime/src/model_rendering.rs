@@ -59,9 +59,9 @@ pub use self::shadows::{
 #[cfg(feature = "collision-debug-overlay")]
 pub use self::instances::draw_collision_cylinder_debug;
 pub use self::instances::{
-    accumulate_model_instance_draw_stats, actor_shadow_radius, draw_actor_shadow,
-    draw_ground_decal, draw_model_instance_from_pose, draw_model_instance_shadows,
-    draw_model_instances, resolve_instance_actor_pose, with_entity_legs_layer,
+    accumulate_model_instance_draw_stats, actor_shadow_radius, add_entity_legs_layer,
+    draw_actor_shadow, draw_ground_decal, draw_model_instance_from_pose,
+    draw_model_instance_shadows, draw_model_instances, resolve_instance_actor_pose,
     InstanceActorPoseSnapshot, ModelInstanceDrawStats, ModelInstancePoseLayer,
     ModelInstancePoseOverride,
 };

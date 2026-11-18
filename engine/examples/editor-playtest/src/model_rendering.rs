@@ -1150,13 +1150,15 @@ impl Playtest {
             );
             // Moving through an attack, the gait plays on the legs read off
             // the entity's own skeleton (fighter_anim::BodyJointMasks).
-            if let (Some(pose), Some((entity, _))) = (self.instance_actor_poses[index], owner) {
-                self.instance_actor_poses[index] = Some(mr::with_entity_legs_layer(
+            if let (Some(pose), Some((entity, _))) =
+                (self.instance_actor_poses[index].as_mut(), owner)
+            {
+                mr::add_entity_legs_layer(
                     pose,
                     self.game_entities.animation(entity).legs,
                     &self.clips,
                     ctx.video_hz,
-                ));
+                );
             }
             self.enemy_swing_sound(index, previous, self.instance_actor_poses[index]);
         }

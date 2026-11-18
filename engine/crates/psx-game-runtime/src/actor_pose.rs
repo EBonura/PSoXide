@@ -114,6 +114,24 @@ impl ActorPoseSnapshot {
         self
     }
 
+    /// [`Self::with_weighted_joint_layer`] in place: a snapshot is a few
+    /// hundred bytes, so the per-tick leg layer does not copy one.
+    pub fn set_weighted_joint_layer(
+        &mut self,
+        animation: Animation<'static>,
+        phase: u32,
+        mask: u32,
+        alpha_q12: u16,
+    ) {
+        self.blends.layer = animation
+            .looped_pose_sample_q12(phase)
+            .map(|sample| ModelPoseBlend {
+                sample,
+                alpha_q12,
+                joint_mask: mask,
+            });
+    }
+
     /// The crossfade and layer sampled with the body.
     pub const fn blends(&self) -> PoseBlends<'static> {
         self.blends
