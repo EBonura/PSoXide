@@ -66,7 +66,6 @@
 
 use super::*;
 use psx_font::TextBlend;
-use psx_game_runtime::destructibles::DamageChannel;
 
 /// Live numbers the pool can show at once.
 ///
@@ -267,18 +266,6 @@ fn lift(position: [i32; 3], height: u16, fraction_q8: i32) -> [i32; 3] {
         position[1].saturating_add((i32::from(height).saturating_mul(fraction_q8)) >> 8),
         position[2],
     ]
-}
-
-/// Map the combat system's damage channel onto the presentation one.
-///
-/// They are separate types on purpose: `DamageChannel` also drives
-/// destructible affinity matching, and a number's tint should not
-/// become a reason not to change that.
-pub(super) const fn damage_number_channel_for(channel: DamageChannel) -> DamageNumberChannel {
-    match channel {
-        DamageChannel::Horizon => DamageNumberChannel::Horizon,
-        DamageChannel::Zenith => DamageNumberChannel::Zenith,
-    }
 }
 
 /// One floating number.

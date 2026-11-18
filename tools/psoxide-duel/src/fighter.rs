@@ -123,19 +123,14 @@ impl FighterSpec {
         }
     }
 
-    /// What a melee swing of `action` deals: its authored hitbox, else the
-    /// legacy contact's numbers (the record's touch damage, at least 20
-    /// poise), exactly the disc's fallback.
-    pub fn strike(&self, action: CharacterAnimationAction) -> StrikeData {
+    /// What a melee swing of `action` deals: its authored hitbox; none
+    /// without one (an unauthored swing never connects, as on the disc).
+    pub fn strike(&self, action: CharacterAnimationAction) -> Option<StrikeData> {
         let index = action.to_index() as u8;
         self.strikes
             .iter()
             .find(|(a, _)| *a == index)
             .map(|(_, strike)| *strike)
-            .unwrap_or(StrikeData {
-                damage: self.record.touch_damage,
-                poise: self.record.touch_damage.max(20),
-            })
     }
 
     /// The authored contact window of `action`, ticks into the swing.

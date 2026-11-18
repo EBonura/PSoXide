@@ -1515,8 +1515,6 @@ pub struct LevelGameEntityRecord {
     pub attack_min_range: u16,
     /// Furthest XZ distance at which a ranged attack may begin. Zero for melee.
     pub attack_max_range: u16,
-    /// Damage dealt by a connecting touch/melee attack.
-    pub touch_damage: u16,
     /// Souls the player is credited for landing the killing blow.
     ///
     /// Authored per enemy so the reward curve is tuned in the editor next to

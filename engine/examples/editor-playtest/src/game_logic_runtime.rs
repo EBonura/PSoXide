@@ -13,15 +13,14 @@
 //!   message overlay, CHECKPOINT records update the in-memory
 //!   checkpoint -- the same UI paths the legacy interactable flow
 //!   used, now driven off LOGIC records (the cook pairs them 1:1).
-//! - Player melee resolution (the combat slice) maps the locked
-//!   attack animation onto the crate's melee arc: the cooked weapon
-//!   spec sizes the arc and its hitbox frame windows gate WHEN the
-//!   swing is live, using the exact animation-phase math the render
-//!   path plays, so contact frames match what the player sees.
+//! - Melee resolution (the combat slice) is one path for every fighter
+//!   ([`Playtest::swing_fighters`]): the swing's authored hitboxes on the
+//!   exact pose the body and weapon draw, against every hostile fighter's
+//!   authored hurtboxes, latched once per strike window per defender.
 
 use super::*;
 use psx_engine::CharacterMotorFrame;
-use psx_game_runtime::combat::{self, MeleeArc, WorldCombatCapsule};
+use psx_game_runtime::combat::{self, ActiveStrike, WorldCombatCapsule};
 use psx_game_runtime::combatant::stance_scaled;
 
 use crate::playtest_runtime::fighter_motor_rules;
@@ -152,39 +151,33 @@ fn melee_eye_point(position: [i32; 3]) -> RoomPoint {
     )
 }
 
+/// One fighter's swing on this tick, frozen before any attack resolves.
 #[derive(Clone, Copy)]
-struct ActivePlayerCapsule {
-    capsule: WorldCombatCapsule,
-    previous_capsule: Option<WorldCombatCapsule>,
-    damage: u16,
-    poise_damage: u16,
+struct Swing {
+    /// The swinging slot (the actor slot for the player's character).
+    attacker: usize,
+    capsules: &'static [psx_level::CombatCapsuleRecord],
+    action: CharacterAnimationAction,
+    pose: psx_game_runtime::actor_pose::ActorPoseSnapshot,
+    /// The attacker's pose one tick earlier on the same clip.
+    previous: Option<psx_game_runtime::actor_pose::ActorPoseSnapshot>,
+    /// Root position, the start of the occlusion segment.
+    position: [i32; 3],
+    room: RoomIndex,
+    /// The attacker's stance: the side every strike of the swing lands on.
+    channel: VitalityChannelId,
+    heavy: bool,
+    /// The swing is a crit (it started with a crit armed).
+    crit: bool,
 }
 
-impl ActivePlayerCapsule {
-    const EMPTY: Self = Self {
-        capsule: WorldCombatCapsule::EMPTY,
-        previous_capsule: None,
-        damage: 0,
-        poise_damage: 0,
-    };
-
-    fn aabb_overlaps(self, target: &WorldCombatCapsule) -> bool {
-        match self.previous_capsule {
-            Some(previous) => {
-                combat::combat_capsule_motion_aabbs_overlap(&previous, &self.capsule, target)
-            }
-            None => combat::combat_capsule_aabbs_overlap(&self.capsule, target),
-        }
-    }
-
-    fn overlaps(self, target: &WorldCombatCapsule) -> bool {
-        match self.previous_capsule {
-            Some(previous) => {
-                combat::combat_capsule_motion_overlaps(&previous, &self.capsule, target)
-            }
-            None => combat::combat_capsules_overlap(&self.capsule, target),
-        }
-    }
+/// One fighter as a melee defender this tick.
+#[derive(Clone, Copy)]
+struct SwingTarget {
+    capsules: &'static [psx_level::CombatCapsuleRecord],
+    pose: Option<psx_game_runtime::actor_pose::ActorPoseSnapshot>,
+    position: [i32; 3],
+    room: RoomIndex,
 }
 
 /// Movement backend for game entities. It composes other entities' pre-tick
@@ -486,8 +479,7 @@ pub(super) struct Volley {
 #[derive(Clone, Copy)]
 struct PlayerDefence {
     position: [i32; 3],
-    /// The same body-radius source the entity tick input uses, so the
-    /// legacy fallback arc keeps its Character-derived reach.
+    /// The same body-radius source the entity tick input uses.
     radius: i32,
     height: i32,
     /// A fighter's hit passes through her: i-frames past the parry window.
@@ -688,246 +680,339 @@ impl Playtest {
                 .flatten();
             let attacker_pose = attacker_snapshot.map(|snapshot| snapshot.pose());
             if attack.is_ranged() {
-                // An authored ranged attack never falls through to the legacy
-                // body-radius melee arc, including frames outside its release
-                // window and pool-full retries.
+                // A ranged attack only releases its authored emitters,
+                // including frames outside its release window and pool-full
+                // retries.
                 self.release_enemy_projectiles(ctx, attack, attacker_capsules, attacker_pose);
                 continue;
             }
-            if let Some(rival) = self.game_entities.rival(attack.entity()) {
-                self.resolve_rival_melee(
-                    ctx,
-                    attack,
-                    rival,
-                    attacker_capsules,
-                    attacker_snapshot,
-                    prop_blockers,
-                    prop_blockers_valid,
-                );
-                continue;
-            }
-            if player.passes_through {
-                continue;
-            }
-            let Some((damage, poise_damage)) = self.entity_melee_contact(
-                attack,
-                attacker_capsules,
-                attacker_snapshot,
-                player.capsules,
-                player.pose,
-                player.position,
-                player.radius,
-                prop_blockers,
-                prop_blockers_valid,
-            ) else {
+            let Some(pose) = attacker_pose else {
                 continue;
             };
-            // The swing that reached her uses up the crit, parried or not.
-            let crit = self.game_entities.spend_crit(attack.entity());
-            if crit {
-                self.duel_log_event(ctx, 1, duel::DUEL_EVENT_CRIT);
-            }
-            let attacker = CombatantId::entity(attack.entity());
-            // The swing's side is its attacker's stance, for every defender.
-            let channel = self.game_entities.stance(attack.entity());
-            if player.parries {
-                self.parry_on_player(
-                    Strike {
-                        attacker,
-                        kind: HitKind::Melee,
-                        channel,
-                        damage,
-                        poise: poise_damage,
-                        crit: false,
-                    },
-                    ctx,
-                );
+            let previous = self
+                .previous_instance_actor_poses
+                .get(usize::from(entity.model_instance))
+                .copied()
+                .flatten()
+                .filter(|old| {
+                    attacker_snapshot.is_some_and(|now| old.clip_local() == now.clip_local())
+                })
+                .map(|snapshot| snapshot.pose());
+            let index = attack.entity();
+            let swing = Swing {
+                attacker: index,
+                capsules: attacker_capsules,
+                action: attack.action(),
+                pose,
+                previous,
+                position: attack.position(),
+                room: attack.room(),
+                channel: self.game_entities.stance(index),
+                heavy: self.game_entities.attack_kind(index) == 1,
+                crit: self.game_entities.attack_is_crit(index),
+            };
+            if !prop_blockers_valid {
                 continue;
             }
-            {
-                self.game_entities.gain_melee_energy(
-                    entity,
-                    attack.entity(),
-                    self.game_entities.attack_kind(attack.entity()) == 1,
-                );
-                taken.hits = taken.hits.saturating_add(1);
-                taken.melee_damage = taken.melee_damage.saturating_add(damage);
-                taken.melee_channel = channel;
-                // The tick's posture lands summed, so each swing takes the
-                // stance rule here, by its attacker's stance, as a bolt does.
-                let (_, poise_damage) = stance_scaled(
-                    &self.player_stats,
-                    self.game_entities.actor().opposes(channel),
-                    0,
-                    poise_damage,
-                );
-                taken.poise = taken.poise.saturating_add(poise_damage);
-                taken.attacker = attacker;
-                taken.crit |= crit;
-            }
+            let stats = self.swing_fighters(ctx, swing, Some(player), prop_blockers, taken);
+            self.finish_swing(swing, stats);
         }
     }
 
-    /// One entity melee token against one defender, whoever it is (the
-    /// player or a rival): authored capsules on both poses (swept from the
-    /// attacker's previous pose of the same clip), the legacy arc only when a
-    /// side has none, world occlusion between the frozen attacker and the
-    /// defender, the attacker's crit scaling, then the token's connection.
-    /// The damage and poise that land, or None (a miss, an occluded swing or
-    /// a token already spent; an occluded swing keeps its token, as an
-    /// i-frame whiff does).
-    #[allow(clippy::too_many_arguments)]
-    fn entity_melee_contact(
-        &mut self,
-        attack: DeferredGameEntityAttack,
-        attacker_capsules: &'static [psx_level::CombatCapsuleRecord],
-        attacker_snapshot: Option<InstanceActorPoseSnapshot>,
-        defender_capsules: &'static [psx_level::CombatCapsuleRecord],
-        defender_pose: Option<psx_game_runtime::actor_pose::ActorPoseSnapshot>,
-        defender_position: [i32; 3],
-        defender_radius: i32,
-        prop_blockers: &[CharacterCollisionAabb],
-        prop_blockers_valid: bool,
-    ) -> Option<(u16, u16)> {
-        let record = GAME_ENTITIES.get(attack.entity())?;
-        let previous_attacker_pose = self
-            .previous_instance_actor_poses
-            .get(usize::from(record.model_instance))
-            .copied()
-            .flatten()
-            .filter(|old| {
-                attacker_snapshot.is_some_and(|current| old.clip_local() == current.clip_local())
-            })
-            .map(|snapshot| snapshot.pose());
-        let (contact, window_mask) = combat::resolve_authored_actor_contact_swept_pending(
-            attacker_capsules,
-            attack.action(),
-            attacker_snapshot.map(|snapshot| snapshot.pose()),
-            previous_attacker_pose,
-            defender_capsules,
-            defender_pose,
-            self.game_entities
-                .deferred_melee_hit_mask(attack)
-                .unwrap_or(u16::MAX),
-        );
-        let (damage, poise_damage) = match contact {
-            combat::AuthoredActorContact::Hit {
-                damage,
-                poise_damage,
-            } => (damage, poise_damage),
-            combat::AuthoredActorContact::Miss => return None,
-            combat::AuthoredActorContact::FallbackRequired => {
-                if !self.game_entities.deferred_attack_legacy_arc_hits(
-                    GAME_ENTITIES.as_slice(),
-                    attack,
-                    defender_position,
-                    defender_radius,
-                ) {
-                    return None;
-                }
-                (record.touch_damage, record.touch_damage.max(20))
-            }
-        };
-        if !prop_blockers_valid
-            || !self.melee_line_clear(attack.position(), defender_position, prop_blockers)
-        {
-            return None;
-        }
-        let (damage, poise_damage) = self.game_entities.crit_scaled(
-            GAME_ENTITIES.as_slice(),
-            attack.entity(),
-            damage,
-            poise_damage,
-        );
-        let connected = if window_mask == 0 {
-            self.game_entities.connect_deferred_attack(attack)
-        } else {
-            self.game_entities
-                .connect_deferred_melee_window(attack, window_mask)
-        };
-        connected.then_some((damage, poise_damage))
-    }
-
-    /// One entity's melee token against its rival: the same contact the
-    /// player's defence gets above (authored capsules on both poses, the
-    /// legacy arc only when a side has none, world occlusion, the window
-    /// mask), landed through the rival's own hit path. A parry there
-    /// staggers the attacker.
-    // Only fights between entities reach it: out of line and small.
-    #[inline(never)]
-    #[cfg_attr(target_arch = "mips", optimize(size))]
-    #[allow(clippy::too_many_arguments)]
-    fn resolve_rival_melee(
+    /// One fighter's swing this tick against every other fighter on another
+    /// side, the one melee contact path: its authored hitboxes active on
+    /// this pose (swept from the tick before), each defender's authored
+    /// hurtboxes, world occlusion between the two, the one swing latch
+    /// (each defender once per strike window), the attacker's outgoing
+    /// damage and crit, then the landing: on an entity through
+    /// [`Self::land_on_entity`], on her into `taken` (or her parry). The
+    /// player is a defender when `player` is given (an entity's swing).
+    fn swing_fighters(
         &mut self,
         ctx: &Ctx,
-        attack: DeferredGameEntityAttack,
-        rival: usize,
-        attacker_capsules: &'static [psx_level::CombatCapsuleRecord],
-        attacker_snapshot: Option<InstanceActorPoseSnapshot>,
+        swing: Swing,
+        player: Option<&PlayerDefence>,
         prop_blockers: &[CharacterCollisionAabb],
-        prop_blockers_valid: bool,
-    ) {
-        let entity = attack.entity();
-        let (Some(record), Some(rival_record)) =
-            (GAME_ENTITIES.get(entity), GAME_ENTITIES.get(rival))
-        else {
-            return;
-        };
-        if rival >= self.game_entities.count()
-            || self.game_entities.state(rival) == GameEntityState::Dead
-            || self
-                .game_entities
-                .passes_through(GAME_ENTITIES.as_slice(), rival)
-        {
-            return;
+        taken: &mut PlayerHitsTaken,
+    ) -> MeleeArcStats {
+        let mut stats = MeleeArcStats::default();
+        let strike = ActiveStrike::sample(swing.capsules, swing.action, swing.pose, swing.previous);
+        if strike.is_empty() {
+            return stats;
         }
-        let capsule_body = self.game_entities.body(rival_record);
-        let first = capsule_body.combat_capsule_first.to_usize();
-        let end = first.saturating_add(usize::from(capsule_body.combat_capsule_count));
-        let rival_capsules = COMBAT_CAPSULES.get(first..end).unwrap_or(&[]);
-        let rival_pose = self
-            .instance_actor_poses
-            .get(usize::from(rival_record.model_instance))
-            .copied()
-            .flatten()
-            .map(|snapshot| snapshot.pose());
-        let Some((damage, poise_damage)) = self.entity_melee_contact(
-            attack,
-            attacker_capsules,
-            attacker_snapshot,
-            rival_capsules,
-            rival_pose,
-            self.game_entities.position(rival),
-            i32::from(self.game_entities.body(rival_record).radius),
-            prop_blockers,
-            prop_blockers_valid,
-        ) else {
-            return;
-        };
-        let crit = self.game_entities.spend_crit(entity);
-        if crit {
-            self.duel_log_rival_event(ctx, entity, duel::DUEL_EVENT_CRIT);
+        let actor = RuntimeGameEntities::ACTOR_SLOT;
+        if swing.attacker == actor {
+            self.strike_world(swing, &strike);
         }
-        let outcome = self.land_on_entity(
-            ctx,
-            rival,
-            Strike {
-                attacker: CombatantId::entity(entity),
-                kind: HitKind::Melee,
-                channel: self.game_entities.stance(entity),
-                damage,
-                poise: poise_damage,
-                crit,
-            },
-            Some(attack.position()),
-            self.game_entities.attack_kind(entity) == 1,
-        );
-        if outcome.connected {
-            self.game_entities.gain_melee_energy(
-                record,
-                entity,
-                self.game_entities.attack_kind(entity) == 1,
+        let team = self.fighter_team(swing.attacker);
+        let count = self.game_entities.count().min(GAME_ENTITIES.len());
+        // Every entity in slot order, then the player.
+        let mut defender = 0usize;
+        while defender <= count {
+            let slot = if defender == count { actor } else { defender };
+            defender += 1;
+            if slot == swing.attacker || self.fighter_team(slot) == team {
+                continue;
+            }
+            let target = if slot == actor {
+                match player {
+                    Some(player) if !player.passes_through => SwingTarget {
+                        capsules: player.capsules,
+                        pose: player.pose,
+                        position: player.position,
+                        room: self.room_index,
+                    },
+                    _ => continue,
+                }
+            } else {
+                let record = &GAME_ENTITIES[slot];
+                if self.game_entities.state(slot) == GameEntityState::Dead
+                    || self
+                        .game_entities
+                        .passes_through(GAME_ENTITIES.as_slice(), slot)
+                {
+                    continue;
+                }
+                let body = self.game_entities.body(record);
+                let first = body.combat_capsule_first.to_usize();
+                let end = first.saturating_add(usize::from(body.combat_capsule_count));
+                SwingTarget {
+                    capsules: COMBAT_CAPSULES.get(first..end).unwrap_or(&[]),
+                    pose: self
+                        .instance_actor_poses
+                        .get(usize::from(record.model_instance))
+                        .copied()
+                        .flatten()
+                        .map(|snapshot| snapshot.pose()),
+                    position: self.game_entities.position(slot),
+                    room: record.room,
+                }
+            };
+            if target.room != swing.room {
+                continue;
+            }
+            let spent = self.game_entities.spent_windows(swing.attacker, slot);
+            let Some(contact) = strike.contact(swing.capsules, target.capsules, target.pose, spent)
+            else {
+                continue;
+            };
+            // Capsule overlap alone has no world knowledge: a closed door
+            // between the two blocks the connection without latching it, so
+            // the same swing can still land once the door opens.
+            if !self.melee_line_clear(swing.position, target.position, prop_blockers)
+                || !self
+                    .game_entities
+                    .latch_strike(swing.attacker, slot, contact.window)
+            {
+                continue;
+            }
+            let (damage, poise) = self.fighter_outgoing(
+                swing.attacker,
+                swing.channel,
+                contact.damage,
+                contact.poise_damage,
             );
+            if stats.hits.saturating_add(stats.parries) == 0 && swing.crit {
+                self.duel_log_fighter_event(ctx, swing.attacker, duel::DUEL_EVENT_CRIT);
+            }
+            let strike = Strike {
+                attacker: self.fighter_id(swing.attacker),
+                kind: HitKind::Melee,
+                channel: swing.channel,
+                damage,
+                poise,
+                crit: swing.crit,
+            };
+            if slot == actor {
+                if player.is_some_and(|player| player.parries) {
+                    self.parry_on_player(
+                        Strike {
+                            crit: false,
+                            ..strike
+                        },
+                        ctx,
+                    );
+                    stats.parries = stats.parries.saturating_add(1);
+                    continue;
+                }
+                stats.hits = stats.hits.saturating_add(1);
+                taken.hits = taken.hits.saturating_add(1);
+                taken.melee_damage = taken.melee_damage.saturating_add(damage);
+                taken.melee_channel = swing.channel;
+                // The tick's posture lands summed, so each swing takes the
+                // stance rule here, by its attacker's stance, as a bolt does.
+                let (_, poise) = stance_scaled(
+                    &self.player_stats,
+                    self.game_entities.actor().opposes(swing.channel),
+                    0,
+                    poise,
+                );
+                taken.poise = taken.poise.saturating_add(poise);
+                taken.attacker = strike.attacker;
+                taken.crit |= swing.crit;
+                self.gain_melee_energy(swing.attacker, swing.heavy);
+                continue;
+            }
+            let outcome = self.land_on_entity(ctx, slot, strike, Some(swing.position), swing.heavy);
+            stats.parries = stats.parries.saturating_add(u16::from(outcome.parried));
+            stats.hits = stats.hits.saturating_add(u16::from(outcome.connected));
+            stats.staggers = stats.staggers.saturating_add(u16::from(outcome.staggered));
+            stats.deaths = stats.deaths.saturating_add(u16::from(outcome.died));
+        }
+        stats
+    }
+
+    /// What a swing that reached anyone this tick leaves on its attacker:
+    /// the crit used up (parried or not), and for the player's character the
+    /// hit cues. Energy is paid per landing ([`Self::answer_strike`]).
+    fn finish_swing(&mut self, swing: Swing, stats: MeleeArcStats) {
+        if stats.hits.saturating_add(stats.parries) == 0 {
+            return;
+        }
+        self.spend_swing_crit(swing.attacker, stats);
+        if swing.attacker == RuntimeGameEntities::ACTOR_SLOT {
+            self.report_player_melee_stats(stats);
+        }
+    }
+
+    /// Energy for one connected melee hit by slot `fighter`, at its own
+    /// gain (her hits on an entity are answered in [`Self::answer_strike`],
+    /// an entity's on her where her hits are summed).
+    pub(super) fn gain_melee_energy(&mut self, fighter: usize, heavy: bool) {
+        if fighter == RuntimeGameEntities::ACTOR_SLOT {
+            self.game_entities
+                .actor_mut()
+                .flow
+                .melee_hit(heavy, &self.player_stats);
+        } else if let Some(record) = GAME_ENTITIES.get(fighter) {
+            self.game_entities.gain_melee_energy(record, fighter, heavy);
+        }
+    }
+
+    /// The damage and poise slot `fighter` deals with an authored strike:
+    /// its outgoing boons (the player's modules), then its crit.
+    fn fighter_outgoing(
+        &self,
+        fighter: usize,
+        channel: VitalityChannelId,
+        damage: u16,
+        poise: u16,
+    ) -> (u16, u16) {
+        if fighter == RuntimeGameEntities::ACTOR_SLOT {
+            self.game_entities.actor().crit_scaled(
+                &self.player_stats,
+                self.vitality_modifiers().outgoing_damage(channel, damage),
+                poise,
+            )
+        } else {
+            self.game_entities
+                .crit_scaled(GAME_ENTITIES.as_slice(), fighter, damage, poise)
+        }
+    }
+
+    /// The side slot `fighter` fights on: the player's character on
+    /// [`CombatTeam::Player`], an entity on its own.
+    fn fighter_team(&self, fighter: usize) -> CombatTeam {
+        if fighter == RuntimeGameEntities::ACTOR_SLOT {
+            CombatTeam::Player
+        } else {
+            self.game_entities.team(fighter)
+        }
+    }
+
+    /// Slot `fighter` as the attacker a strike names.
+    fn fighter_id(&self, fighter: usize) -> CombatantId {
+        if fighter == RuntimeGameEntities::ACTOR_SLOT {
+            CombatantId::PLAYER
+        } else {
+            CombatantId::entity(fighter)
+        }
+    }
+
+    /// A duel event of slot `fighter`, on its duel side.
+    fn duel_log_fighter_event(&self, ctx: &Ctx, fighter: usize, kind: u32) {
+        if fighter == RuntimeGameEntities::ACTOR_SLOT {
+            self.duel_log_event(ctx, 0, kind);
+        } else {
+            self.duel_log_rival_event(ctx, fighter, kind);
+        }
+    }
+
+    /// The world a swing of the player's character strikes, on its active
+    /// blade volumes: the vitality circles it touches on its stance's axis
+    /// and the destructible props inside a volume.
+    fn strike_world(&mut self, swing: Swing, strike: &ActiveStrike) {
+        let channel = match swing.channel {
+            VitalityChannelId::One => DamageChannel::Horizon,
+            VitalityChannelId::Two => DamageChannel::Zenith,
+        };
+        let count = strike.volumes().len();
+        for volume in 0..count {
+            let (capsule, record) = strike.volume(volume);
+            for end in [capsule.start, capsule.end] {
+                self.vitality_circles.claim_struck(
+                    VITALITY_CIRCLES.as_slice(),
+                    swing.room,
+                    end[0],
+                    end[2],
+                    capsule.radius,
+                    swing.channel,
+                );
+            }
+            let damage = swing.capsules.get(record).map_or(0, |record| record.damage);
+            let (damage, _) = self.fighter_outgoing(swing.attacker, swing.channel, damage, 0);
+            self.damage_world_destructibles_with_capsule(
+                capsule.start,
+                capsule.end,
+                capsule.radius,
+                channel,
+                damage,
+            );
+        }
+    }
+
+    /// The attacker's side of a strike landed on entity `victim`: an
+    /// entity attacker through the one rule
+    /// ([`psx_game_runtime::entities::GameEntities::answer_strike`]); the
+    /// player's character here, because her stats live with the owner (her
+    /// riposte on a parry is [`Self::entity_parried_player`]).
+    fn answer_strike(
+        &mut self,
+        ctx: &Ctx,
+        victim: usize,
+        strike: Strike,
+        heavy: bool,
+        outcome: psx_game_runtime::entities::GameEntityHitOutcome,
+        opening: bool,
+    ) {
+        if strike.attacker != CombatantId::PLAYER {
+            self.game_entities.answer_strike(
+                GAME_ENTITIES.as_slice(),
+                usize::from(strike.attacker.0),
+                CombatantId::entity(victim),
+                strike.kind,
+                heavy,
+                outcome,
+                opening,
+            );
+            return;
+        }
+        if outcome.parried {
+            return;
+        }
+        match strike.kind {
+            HitKind::Projectile => {
+                let interrupted = opening && outcome.staggered;
+                self.game_entities.actor_mut().flow.shot_hit(interrupted);
+                if interrupted {
+                    telemetry::debug_log("flow:enemy-shot-interrupt");
+                    self.duel_log_flow(ctx, 0);
+                }
+            }
+            HitKind::Melee if outcome.connected => {
+                self.gain_melee_energy(RuntimeGameEntities::ACTOR_SLOT, heavy);
+            }
+            _ => {}
         }
     }
 
@@ -956,9 +1041,15 @@ impl Playtest {
             strike.channel,
             strike.damage,
         );
+        // A bolt reads the victim's open windup before it lands.
+        let opening = strike.kind == HitKind::Projectile
+            && self
+                .game_entities
+                .shot_opening(GAME_ENTITIES.as_slice(), victim);
         let outcome = self
             .game_entities
             .receive_hit(GAME_ENTITIES.as_slice(), victim, strike);
+        self.answer_strike(ctx, victim, strike, heavy, outcome, opening);
         if outcome.parried {
             if strike.attacker == CombatantId::PLAYER {
                 self.entity_parried_player(victim, ctx);
@@ -1243,9 +1334,6 @@ impl Playtest {
         impact: &psx_game_runtime::projectiles::ProjectileImpact,
     ) {
         let channel = projectile_vitality_channel(impact.damage_channel);
-        let opening = self
-            .game_entities
-            .shot_opening(GAME_ENTITIES.as_slice(), index);
         let strike = self.game_entities.projectile_strike(
             GAME_ENTITIES.as_slice(),
             index,
@@ -1255,18 +1343,7 @@ impl Playtest {
             impact.poise_damage,
             impact.visual.impact_rgb == CRIT_BOLT_RGB,
         );
-        let outcome = self.land_on_entity(ctx, index, strike, None, false);
-        if outcome.parried {
-            return;
-        }
-        self.game_entities
-            .actor_mut()
-            .flow
-            .shot_hit(opening && outcome.staggered);
-        if opening && outcome.staggered {
-            telemetry::debug_log("flow:enemy-shot-interrupt");
-            self.duel_log_flow(ctx, 0);
-        }
+        self.land_on_entity(ctx, index, strike, None, false);
     }
 
     /// Land what the player took this tick: enemy melee as one untyped hit,
@@ -2043,7 +2120,6 @@ impl Playtest {
             if let Some(event) = weapon_swing_sfx(self.anim.state.action()) {
                 self.queue_gameplay_sfx(event);
             }
-            self.swing_hit_mask = 0;
             self.destructibles.begin_swing();
             telemetry::debug_log("player swing:active");
         }
@@ -2092,12 +2168,11 @@ impl Playtest {
         }
     }
 
-    /// Player melee resolution for the combat slice: while an attack
-    /// action is locked and the current attack-clip frame is inside
-    /// the weapon's active window, sweep the melee arc over the live
-    /// entities. The swing mask keeps one swing to one connection per
-    /// enemy; `start_player_anim_action` clears it when a new attack
-    /// starts. Outside attack locks this is two compares.
+    /// The player's character's swing this tick, while an attack action is
+    /// locked: the one melee contact path ([`Self::swing_fighters`]) from
+    /// the exact snapshot the visible body and equipped weapon consume;
+    /// combat never reconstructs animation phase. Outside attack locks this
+    /// is two compares.
     fn resolve_player_melee(&mut self, ctx: &Ctx) {
         let now = ctx.sim_tick;
         if self.anim.state == PlayerAnim::RangedAttack
@@ -2120,275 +2195,50 @@ impl Playtest {
                 .collect_static_prop_aabb_blockers_checked_into(&mut prop_blockers)
                 .is_none()
         {
-            // Fail closed before either authored capsules or the legacy
-            // arc can latch a hit through invalid generated prop state.
+            // Fail closed before a hit can latch through invalid generated
+            // prop state.
             return;
         }
-        let spec = combat::player_melee_spec(EQUIPMENT, WEAPONS, WEAPON_HITBOXES);
-        let spec = if self.anim.state == PlayerAnim::HeavyAttack {
-            spec.heavy()
-        } else {
-            spec
-        };
-        // The active frame comes from the exact snapshot the visible body and
-        // equipped weapon consume; combat never reconstructs animation phase.
-        let action = self.anim.state.action();
-        let phase = player_pose.pose().phase_q12();
-        let gameplay_now = self.gameplay_tick(now);
-        if let Some(stats) = self.resolve_player_combat_capsules(
-            ctx,
-            &character,
-            player_pose,
-            self.previous_player_actor_pose,
-            phase,
-            action,
-            spec.reach,
-            prop_blockers.as_slice(),
-        ) {
-            self.spend_player_melee_crit(stats, ctx);
-            self.report_player_melee_stats(stats);
-            return;
-        }
-        if !spec.frame_active(phase >> 12) {
-            return;
-        }
+        let first = character.combat_capsule_first.to_usize();
+        let end = first.saturating_add(usize::from(character.combat_capsule_count));
         let player = self.game_entities.actor_motor().position();
-        let arc = MeleeArc {
+        let swing = Swing {
+            attacker: RuntimeGameEntities::ACTOR_SLOT,
+            capsules: COMBAT_CAPSULES.get(first..end).unwrap_or(&[]),
+            action: self.anim.state.action(),
+            pose: *player_pose.pose(),
+            previous: self
+                .previous_player_actor_pose
+                .filter(|previous| previous.clip_local() == player_pose.clip_local())
+                .map(|previous| *previous.pose()),
+            position: [player.x, player.y, player.z],
             room: self.room_index,
-            x: player.x,
-            z: player.z,
-            yaw: self.game_entities.actor_motor().yaw().as_q12(),
-            reach: spec.reach,
-            half_angle: spec.half_angle,
+            channel: Self::player_attack_channel(self.anim.state),
+            heavy: matches!(
+                self.anim.state,
+                PlayerAnim::HeavyAttack | PlayerAnim::VertHeavyAttack
+            ),
+            crit: self.game_entities.actor().crit_attack,
         };
-        // Same world-occlusion authority as the enemy side: the legacy arc
-        // has no blade geometry, so a closed door inside its reach must
-        // still block the connection.
-        let player_eye = melee_eye_point([player.x, player.y, player.z]);
-        let vitality_channel = Self::player_attack_channel(self.anim.state);
-        self.vitality_circles.claim_struck(
-            VITALITY_CIRCLES.as_slice(),
-            self.room_index,
-            player.x,
-            player.z,
-            spec.reach.clamp(0, i32::from(u16::MAX)) as u16,
-            vitality_channel,
-        );
-        let crit = self.game_entities.actor().crit_attack;
-        let (outgoing_damage, poise_damage) = self.game_entities.actor().crit_scaled(
-            &self.player_stats,
-            self.vitality_modifiers()
-                .outgoing_damage(vitality_channel, spec.damage),
-            spec.poise_damage,
-        );
-        let channel = match vitality_channel {
-            VitalityChannelId::One => DamageChannel::Horizon,
-            VitalityChannelId::Two => DamageChannel::Zenith,
-        };
-        self.damage_player_environment_melee(spec.reach, channel, outgoing_damage);
-        // The arc sweep latches every connection into the swing mask, so
-        // the bits it newly set ARE the entities it hit. Snapshotting the
-        // mask keeps the number spawn on this side of the engine crate's
-        // API instead of widening `MeleeArcStats` with positions that
-        // only presentation wants.
-        let swing_mask_before = self.swing_hit_mask;
-        let entities = &mut self.game_entities;
-        let mut world_rt = self.world_rt.as_mut();
-        let stats = entities.apply_melee_arc_occluded(
-            GAME_ENTITIES.as_slice(),
-            &arc,
-            vitality_channel,
-            outgoing_damage,
-            poise_damage,
-            crit,
-            &mut self.swing_hit_mask,
-            |_, target| match world_rt.as_deref_mut() {
-                Some(world_rt) => !world_rt.melee_segment_clear(
-                    player_eye,
-                    melee_eye_point(target),
-                    prop_blockers.as_slice(),
-                    &self.destructibles,
-                ),
-                None => false,
-            },
-        );
-        if stats.hits > 0 {
-            self.spawn_melee_arc_damage_numbers(
-                swing_mask_before,
-                outgoing_damage,
-                vitality_channel,
-                if crit {
-                    DamageNumberChannel::Crit
-                } else {
-                    damage_number_channel_for(channel)
-                },
-                gameplay_now,
-            );
-        }
-        if stats.parries > 0 {
-            // The arc reports a count; the parrier is the newly struck
-            // entity still inside its parry window.
-            // psx-numeric-allow-next-line: swing bitmask diff; bit ops only, two-word on R3000
-            let connected = self.swing_hit_mask & !swing_mask_before;
-            if let Some(entity) = (0..self.game_entities.count().min(GAME_ENTITIES.len())).find(
-                // psx-numeric-allow-next-line: swing bitmask bit select; no 64-bit arithmetic
-                |&entity| connected & (1u64 << entity) != 0 && self.entity_parries(entity),
-            ) {
-                self.entity_parried_player(entity, ctx);
-            }
-        }
-        if stats.deaths > 0 {
-            self.award_melee_arc_souls(swing_mask_before, gameplay_now);
-        }
-        self.spend_player_melee_crit(stats, ctx);
-        self.report_player_melee_stats(stats);
+        let mut taken = PlayerHitsTaken::NONE;
+        let stats = self.swing_fighters(ctx, swing, None, prop_blockers.as_slice(), &mut taken);
+        self.finish_swing(swing, stats);
     }
 
-    /// Whether entity `index` parries a hit this tick.
-    fn entity_parries(&self, index: usize) -> bool {
-        self.game_entities
-            .defender(GAME_ENTITIES.as_slice(), index)
-            .is_some_and(|defender| defender.parries())
-    }
-
-    /// The swing that reached anyone, hit or parried, uses up the player's
-    /// crit.
+    /// The swing that reached anyone, hit or parried, uses up slot
+    /// `fighter`'s crit.
     // Rare (a parry, crit or knockdown): kept out of line and small.
     #[inline(never)]
     #[cfg_attr(target_arch = "mips", optimize(size))]
-    pub(super) fn spend_player_melee_crit(&mut self, stats: MeleeArcStats, ctx: &Ctx) {
-        if stats.hits.saturating_add(stats.parries) > 0
-            && self.game_entities.actor_mut().spend_crit()
-        {
-            self.duel_log_event(ctx, 0, duel::DUEL_EVENT_CRIT);
-        }
-    }
-
-    /// Credit the cooked award of every entity this arc sweep killed.
-    ///
-    /// The crate's arc API reports only a death COUNT, so the swing mask is
-    /// the way back to identities: a bit set since `before` is one fresh
-    /// connection this sweep made, and the sweep skips entities that were
-    /// already dead, so a newly-connected entity now reading Dead is one this
-    /// swing killed. Guarded by `stats.deaths > 0` at the call site, so a
-    /// swing that kills nothing never walks the list.
-    // psx-numeric-allow-next-line: swing bitmask snapshot; bit ops only, two-word on R3000
-    fn award_melee_arc_souls(&mut self, before: u64, now: SimTick) {
-        // psx-numeric-allow-next-line: swing bitmask diff; bit ops only, two-word on R3000
-        let connected = self.swing_hit_mask & !before;
-        if connected == 0 {
+    pub(super) fn spend_swing_crit(&mut self, fighter: usize, stats: MeleeArcStats) {
+        if stats.hits.saturating_add(stats.parries) == 0 {
             return;
         }
-        let count = self.game_entities.count().min(GAME_ENTITIES.len());
-        for entity in 0..count {
-            // psx-numeric-allow-next-line: swing bitmask bit select; no 64-bit arithmetic
-            if connected & (1u64 << entity) == 0
-                || self.game_entities.state(entity)
-                    != psx_game_runtime::entities::GameEntityState::Dead
-            {
-                continue;
-            }
-            self.souls
-                .award(GAME_ENTITIES[entity].soul_value, now.as_u32());
+        if fighter == RuntimeGameEntities::ACTOR_SLOT {
+            self.game_entities.actor_mut().spend_crit();
+        } else {
+            self.game_entities.spend_crit(fighter);
         }
-    }
-
-    /// Spawn a floating number over every entity this swing newly
-    /// connected with. `before` is the swing mask as it stood prior to
-    /// the sweep; every bit set since is one fresh connection. The arc
-    /// applies one authored `damage`, and each number shows what the
-    /// target's guard made of it, the same value the sweep applied.
-    fn spawn_melee_arc_damage_numbers(
-        &mut self,
-        // psx-numeric-allow-next-line: swing bitmask snapshot; bit ops only, two-word on R3000
-        before: u64,
-        damage: u16,
-        attack: VitalityChannelId,
-        channel: DamageNumberChannel,
-        now: SimTick,
-    ) {
-        // psx-numeric-allow-next-line: swing bitmask diff; bit ops only, two-word on R3000
-        let connected = self.swing_hit_mask & !before;
-        if connected == 0 {
-            return;
-        }
-        let count = self.game_entities.count().min(GAME_ENTITIES.len());
-        for entity in 0..count {
-            // psx-numeric-allow-next-line: swing bitmask bit select; no 64-bit arithmetic
-            if connected & (1u64 << entity) == 0 || self.entity_parries(entity) {
-                continue;
-            }
-            self.damage_numbers.spawn(
-                struck_actor_anchor(
-                    self.game_entities.position(entity),
-                    self.game_entities.body(&GAME_ENTITIES[entity]).height,
-                ),
-                GAME_ENTITIES[entity].room,
-                self.game_entities.scaled_stance_damage(
-                    GAME_ENTITIES.as_slice(),
-                    entity,
-                    attack,
-                    damage,
-                ),
-                channel,
-                now,
-            );
-            let state = self.game_entities.state(entity);
-            self.spawn_combat_hit_sparks(
-                self.game_entities.position(entity),
-                self.game_entities.body(&GAME_ENTITIES[entity]).height,
-                GAME_ENTITIES[entity].room,
-                channel == DamageNumberChannel::Zenith,
-                state == psx_game_runtime::entities::GameEntityState::Staggered,
-                state == psx_game_runtime::entities::GameEntityState::Dead,
-            );
-            let player = self.game_entities.actor_motor().position();
-            self.show_hit(LandedHit {
-                victim: CombatantId::entity(entity),
-                contact_from: Some([player.x, player.y, player.z]),
-                kind: FlashKind::of_hit(
-                    channel == DamageNumberChannel::Crit,
-                    matches!(
-                        state,
-                        psx_game_runtime::entities::GameEntityState::Staggered
-                            | psx_game_runtime::entities::GameEntityState::KnockedDown
-                    ) || matches!(
-                        self.anim.state,
-                        PlayerAnim::HeavyAttack | PlayerAnim::VertHeavyAttack
-                    ),
-                ),
-                zenith: attack == VitalityChannelId::Two,
-            });
-        }
-    }
-
-    /// Apply one active melee frame to blocking world props through a compact
-    /// forward volume. This is deliberately separate from projectile traces:
-    /// only the authored/legacy melee windows above call it.
-    fn damage_player_environment_melee(&mut self, reach: i32, channel: DamageChannel, damage: u16) {
-        let player = self.game_entities.actor_motor().position();
-        let yaw = self.game_entities.actor_motor().yaw();
-        let reach = reach.max(0);
-        let radius = self
-            .character
-            .map(|character| character.radius)
-            .unwrap_or(WORLD_PLAYER_RADIUS)
-            .clamp(1, i32::from(u16::MAX)) as u16;
-        let start = [
-            player.x,
-            player.y.saturating_add(i32::from(radius)),
-            player.z,
-        ];
-        let end = [
-            player
-                .x
-                .saturating_add((yaw.sin_q12().saturating_mul(reach)) >> 12),
-            start[1],
-            player
-                .z
-                .saturating_add((yaw.cos_q12().saturating_mul(reach)) >> 12),
-        ];
-        self.damage_world_destructibles_with_capsule(start, end, radius, channel, damage);
     }
 
     /// Damage every image-card target through the shared destructible state.
@@ -2507,254 +2357,8 @@ impl Playtest {
         );
     }
 
-    /// Resolve authored rig volumes when the selected action has any hitbox.
-    /// `None` selects the legacy arc fallback; `Some` means the authored frame
-    /// window is authoritative, including frames with no active capsule.
-    fn resolve_player_combat_capsules(
-        &mut self,
-        ctx: &Ctx,
-        character: &RuntimeCharacter,
-        player_pose: PlayerActorPoseSnapshot,
-        previous_player_pose: Option<PlayerActorPoseSnapshot>,
-        phase: u32,
-        action: CharacterAnimationAction,
-        environment_reach: i32,
-        prop_blockers: &[CharacterCollisionAabb],
-    ) -> Option<MeleeArcStats> {
-        let crit = self.game_entities.actor().crit_attack;
-        let first = character.combat_capsule_first.to_usize();
-        let end = first.saturating_add(usize::from(character.combat_capsule_count));
-        let records = COMBAT_CAPSULES.get(first..end)?;
-        let action_index = action.to_index() as u8;
-        let previous_pose = previous_player_pose
-            .filter(|previous| {
-                previous.clip_local() == player_pose.clip_local()
-                    && player_pose
-                        .pose()
-                        .tick()
-                        .wrapping_sub(previous.pose().tick())
-                        == 1
-                    && phase >= previous.pose().phase_q12()
-            })
-            .map(|previous| *previous.pose());
-        let mut active = [ActivePlayerCapsule::EMPTY; psx_level::MAX_CHARACTER_COMBAT_CAPSULES];
-        let mut active_count = 0usize;
-        let mut authored_action = false;
-        for record in records {
-            if record.flags & psx_level::combat_capsule_flags::HITBOX == 0
-                || record.action != action_index
-            {
-                continue;
-            }
-            authored_action = true;
-            if active_count >= active.len() {
-                continue;
-            }
-            let Some((sweep_start_phase, sweep_end_phase)) = combat::active_frame_sweep_phase_range(
-                previous_pose.map(|pose| pose.phase_q12()),
-                phase,
-                record.active_start_frame,
-                record.active_end_frame,
-            ) else {
-                continue;
-            };
-            let Some((capsule, previous_capsule)) = combat::transform_actor_combat_capsule_sweep(
-                record,
-                previous_pose,
-                *player_pose.pose(),
-                sweep_start_phase,
-                sweep_end_phase,
-            ) else {
-                continue;
-            };
-            let (damage, poise_damage) = self.game_entities.actor().crit_scaled(
-                &self.player_stats,
-                self.vitality_modifiers()
-                    .outgoing_damage(Self::player_attack_channel(self.anim.state), record.damage),
-                record.poise_damage,
-            );
-            active[active_count] = ActivePlayerCapsule {
-                capsule,
-                previous_capsule,
-                damage,
-                poise_damage,
-            };
-            active_count += 1;
-        }
-        if !authored_action {
-            return None;
-        }
-        if active_count == 0 {
-            return Some(MeleeArcStats::default());
-        }
-
-        let vitality_channel = Self::player_attack_channel(self.anim.state);
-        let player = self.game_entities.actor_motor().position();
-        self.vitality_circles.claim_struck(
-            VITALITY_CIRCLES.as_slice(),
-            self.room_index,
-            player.x,
-            player.z,
-            environment_reach.clamp(0, i32::from(u16::MAX)) as u16,
-            vitality_channel,
-        );
-        let channel = match vitality_channel {
-            VitalityChannelId::One => DamageChannel::Horizon,
-            VitalityChannelId::Two => DamageChannel::Zenith,
-        };
-        for hit in &active[..active_count] {
-            // A blocking prop needs a short forward contact volume rather than
-            // an inflated copy of a lateral blade capsule. Use the weapon's
-            // cooked melee reach, the player's body radius and the exact
-            // authored active frames. Projectiles never enter this path.
-            self.damage_player_environment_melee(environment_reach, channel, hit.damage);
-        }
-
-        let mut stats = MeleeArcStats::default();
-        let count = self.game_entities.count().min(GAME_ENTITIES.len());
-        let mut entity = 0usize;
-        while entity < count {
-            let entity_record = &GAME_ENTITIES[entity];
-            // psx-numeric-allow-next-line: one-hit-per-swing bitmask; bit ops only, two-word on R3000
-            let mask = 1u64 << entity;
-            if self.swing_hit_mask & mask != 0 {
-                // One-hit-per-swing: this swing already connected with
-                // the entity, so its remaining active frames reject the
-                // repeat contact here.
-                telemetry::counter(telemetry::counter::PLAYER_DUPLICATE_HIT_REJECTIONS, 1);
-                entity += 1;
-                continue;
-            }
-            // An entity in its i-frames (past its parry window) is passed
-            // through without latching the swing, as an enemy swing passes
-            // through the player: a later active frame of the same swing can
-            // still land.
-            if entity_record.room != self.room_index
-                || self.game_entities.state(entity)
-                    == psx_game_runtime::entities::GameEntityState::Dead
-                || self
-                    .game_entities
-                    .passes_through(GAME_ENTITIES.as_slice(), entity)
-            {
-                entity += 1;
-                continue;
-            }
-            let position = self.game_entities.position(entity);
-            let body = WorldCombatCapsule {
-                start: position,
-                end: [
-                    position[0],
-                    position[1]
-                        .saturating_add(i32::from(self.game_entities.body(entity_record).height)),
-                    position[2],
-                ],
-                radius: self.game_entities.body(entity_record).radius,
-            };
-            let coarse_candidate = active[..active_count]
-                .iter()
-                .copied()
-                .any(|hit| hit.aabb_overlaps(&body));
-            if !coarse_candidate {
-                entity += 1;
-                continue;
-            }
-
-            let hit =
-                self.authored_capsule_hit_entity(entity_record, &active[..active_count], body);
-            if let Some(hit) = hit {
-                // Capsule overlap alone has no world knowledge; a closed door
-                // between the actors blocks the connection without latching
-                // the swing bit, so the same swing can still land once the
-                // door finishes opening inside the active window.
-                let player = self.game_entities.actor_motor().position();
-                if !self.melee_line_clear([player.x, player.y, player.z], position, prop_blockers) {
-                    entity += 1;
-                    continue;
-                }
-                self.swing_hit_mask |= mask;
-                let heavy = matches!(
-                    self.anim.state,
-                    PlayerAnim::HeavyAttack | PlayerAnim::VertHeavyAttack
-                );
-                let outcome = self.land_on_entity(
-                    ctx,
-                    entity,
-                    Strike {
-                        attacker: CombatantId::PLAYER,
-                        kind: HitKind::Melee,
-                        channel: vitality_channel,
-                        damage: hit.damage,
-                        poise: hit.poise_damage,
-                        crit,
-                    },
-                    Some([player.x, player.y, player.z]),
-                    heavy,
-                );
-                if outcome.parried {
-                    stats.parries = stats.parries.saturating_add(1);
-                }
-                stats.hits = stats.hits.saturating_add(u16::from(outcome.connected));
-                stats.staggers = stats.staggers.saturating_add(u16::from(outcome.staggered));
-                stats.deaths = stats.deaths.saturating_add(u16::from(outcome.died));
-            }
-            entity += 1;
-        }
-        Some(stats)
-    }
-
-    fn authored_capsule_hit_entity(
-        &self,
-        entity_record: &LevelGameEntityRecord,
-        active: &[ActivePlayerCapsule],
-        body_fallback: WorldCombatCapsule,
-    ) -> Option<ActivePlayerCapsule> {
-        let capsule_body = self.game_entities.body(entity_record);
-        let first = capsule_body.combat_capsule_first.to_usize();
-        let end = first.saturating_add(usize::from(capsule_body.combat_capsule_count));
-        let hurtboxes = COMBAT_CAPSULES.get(first..end).unwrap_or(&[]);
-        let has_authored_hurtbox = hurtboxes
-            .iter()
-            .any(|record| record.flags & psx_level::combat_capsule_flags::HURTBOX != 0);
-        if !has_authored_hurtbox {
-            return active
-                .iter()
-                .copied()
-                .find(|hit| hit.overlaps(&body_fallback));
-        }
-
-        let instance_pose = self
-            .instance_actor_poses
-            .get(entity_record.model_instance as usize)
-            .copied()
-            .flatten()?;
-        for hurtbox in hurtboxes {
-            if hurtbox.flags & psx_level::combat_capsule_flags::HURTBOX == 0 {
-                continue;
-            }
-            let Some(hurtbox) =
-                combat::transform_actor_combat_capsule(hurtbox, instance_pose.pose())
-            else {
-                continue;
-            };
-            if let Some(hit) = active.iter().copied().find(|hit| hit.overlaps(&hurtbox)) {
-                return Some(hit);
-            }
-        }
-        None
-    }
-
     pub(super) fn report_player_melee_stats(&mut self, stats: MeleeArcStats) {
         if stats.hits > 0 {
-            let heavy = matches!(
-                self.anim.state,
-                PlayerAnim::HeavyAttack | PlayerAnim::VertHeavyAttack
-            );
-            for _ in 0..stats.hits {
-                self.game_entities
-                    .actor_mut()
-                    .flow
-                    .melee_hit(heavy, &self.player_stats);
-            }
             telemetry::counter(telemetry::counter::PLAYER_MELEE_HITS, u32::from(stats.hits));
             let event = if matches!(
                 self.anim.state,

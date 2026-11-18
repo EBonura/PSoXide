@@ -2503,9 +2503,6 @@ pub struct EnemyBehaviorSettings {
     /// 60 Hz ticks of post-attack recovery (the punish window).
     #[serde(default = "default_enemy_recovery_ticks")]
     pub recovery_ticks: u8,
-    /// Damage dealt by a connecting touch/melee attack.
-    #[serde(default = "default_enemy_touch_damage")]
-    pub touch_damage: u16,
     /// Read-only migration input: the poise a project wrote here before
     /// health and poise moved into [`CombatStats`]. Loading folds it into
     /// the owner's `combat` and clears it; it is never written.
@@ -2579,7 +2576,6 @@ impl EnemyBehaviorSettings {
             group_attack_delay_ticks: default_enemy_group_attack_delay_ticks(),
             windup_ticks: default_enemy_windup_ticks(),
             recovery_ticks: default_enemy_recovery_ticks(),
-            touch_damage: default_enemy_touch_damage(),
             legacy_poise: None,
             legacy_max_health: None,
             legacy_max_health_secondary: None,
@@ -2644,10 +2640,6 @@ pub(crate) const fn default_enemy_windup_ticks() -> u8 {
 
 pub(crate) const fn default_enemy_recovery_ticks() -> u8 {
     24
-}
-
-pub(crate) const fn default_enemy_touch_damage() -> u16 {
-    10
 }
 
 /// Souls a stock enemy is worth. Matched to the Horizon health default so the

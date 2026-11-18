@@ -104,7 +104,6 @@ pub static GAME_ENTITIES: &[LevelGameEntityRecord] = &[LevelGameEntityRecord {
     recovery_ticks: 24,
     attack_min_range: 32,
     attack_max_range: 256,
-    touch_damage: 10,
     soul_value: 50,
     flags: 0,
 }];

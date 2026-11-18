@@ -2588,7 +2588,6 @@ pub(crate) fn push_game_entity(
         recovery_ticks: enemy.recovery_ticks,
         attack_min_range,
         attack_max_range,
-        touch_damage: enemy.touch_damage,
         soul_value: enemy.soul_value,
         flags,
     });

@@ -221,7 +221,7 @@ fn an_old_project_folds_enemy_health_and_poise_into_combat_stats() {
     let enemy = CharacterResource {
         spawn_role: CharacterSpawnRole::Enemy,
         enemy_behavior: Some(EnemyBehaviorSettings {
-            touch_damage: 11,
+            soul_value: 11,
             ..EnemyBehaviorSettings::defaults()
         }),
         ..CharacterResource::defaults()
@@ -246,7 +246,7 @@ fn an_old_project_folds_enemy_health_and_poise_into_combat_stats() {
             character: Some(enemy),
             settings: Some(CharacterControllerSettings {
                 enemy: Some(EnemyBehaviorSettings {
-                    touch_damage: 12,
+                    soul_value: 12,
                     ..EnemyBehaviorSettings::defaults()
                 }),
                 ..CharacterControllerSettings::defaults()
@@ -260,10 +260,10 @@ fn an_old_project_folds_enemy_health_and_poise_into_combat_stats() {
         .to_ron_string()
         .unwrap()
         .replace(
-            "touch_damage: 11,",
-            "poise: 25, touch_damage: 11, max_health: 300, max_health_secondary: 200,",
+            "soul_value: 11",
+            "poise: 25, max_health: 300, max_health_secondary: 200, soul_value: 11",
         )
-        .replace("touch_damage: 12,", "poise: 40, touch_damage: 12,")
+        .replace("soul_value: 12", "poise: 40, soul_value: 12")
         .replace(
             "stance_swap_cooldown_ticks:",
             "stance_aligned_damage_q12: 2048, stance_opposed_damage_q12: 6144, \

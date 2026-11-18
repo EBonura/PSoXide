@@ -9,11 +9,9 @@
 
 use psx_engine::{JointWorldTransform, WorldVertex};
 use psx_level::{
-    combat_capsule_flags, equipment_flags, CharacterAnimationAction, CombatCapsuleRecord,
-    EquipmentRecord, LevelWeaponRecord, RoomIndex, WeaponHitboxRecord,
+    combat_capsule_flags, CharacterAnimationAction, CombatCapsuleRecord,
     MAX_CHARACTER_COMBAT_CAPSULES,
 };
-use psx_math::atan2_q12;
 
 use crate::actor_pose::ActorPoseSnapshot;
 use crate::projectiles::{ProjectileDamageChannel, ProjectileVisualStyle};
@@ -290,17 +288,12 @@ pub fn authored_projectile_charge(
 
 /// Result of resolving one retained-pose actor attack against another.
 ///
-/// `FallbackRequired` has deliberately narrow semantics: it means either the
-/// attacking action has no authored HITBOX at all or the defender has no
-/// authored HURTBOX at all. Once both sides are authored, inactive frames,
-/// invalid joints, missing snapshots, and geometric separation are
-/// authoritative misses and must never invoke a legacy radius/arc test.
+/// Contact is authored geometry only: an action with no HITBOX or a
+/// defender with no HURTBOX never connects, and inactive frames, invalid
+/// joints, missing snapshots and geometric separation are misses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthoredActorContact {
-    /// One side of the authored contract is absent; caller may use its
-    /// explicitly documented legacy fallback.
-    FallbackRequired,
-    /// Both sides are authored but do not connect on this exact pose/frame.
+    /// No authored overlap on this exact pose/frame.
     Miss,
     /// First deterministic authored HITBOX/HURTBOX overlap.
     Hit {
@@ -309,6 +302,175 @@ pub enum AuthoredActorContact {
         /// Poise damage from the attacking HITBOX.
         poise_damage: u16,
     },
+}
+
+/// One authored contact of a swing on a defender: the hitbox's numbers and
+/// the strike window it belongs to (every hitbox of the action whose
+/// active frames overlap the one that connected).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StrikeContact {
+    /// Health damage from the attacking HITBOX.
+    pub damage: u16,
+    /// Poise damage from the attacking HITBOX.
+    pub poise_damage: u16,
+    /// The strike window, one bit per attacker capsule index.
+    pub window: u16,
+}
+
+/// One fighter's swing on one tick: every authored hitbox of its action
+/// active on this pose, swept from the previous pose of the same clip,
+/// sampled once and then tested against any number of defenders
+/// ([`Self::contact`]). Every fighter's melee contact goes through it.
+#[derive(Clone, Copy)]
+pub struct ActiveStrike {
+    capsules: [WorldCombatCapsule; MAX_CHARACTER_COMBAT_CAPSULES],
+    previous: [Option<WorldCombatCapsule>; MAX_CHARACTER_COMBAT_CAPSULES],
+    /// The attacker capsule index of each active volume.
+    records: [u8; MAX_CHARACTER_COMBAT_CAPSULES],
+    count: u8,
+}
+
+impl ActiveStrike {
+    /// No active volume.
+    pub const NONE: Self = Self {
+        capsules: [WorldCombatCapsule::EMPTY; MAX_CHARACTER_COMBAT_CAPSULES],
+        previous: [None; MAX_CHARACTER_COMBAT_CAPSULES],
+        records: [0; MAX_CHARACTER_COMBAT_CAPSULES],
+        count: 0,
+    };
+
+    /// Sample the hitboxes of `action` among `attacker_capsules` that are
+    /// active on `pose`, each swept from `previous` (the attacker's pose
+    /// one tick earlier, same clip; a stale tick or a phase reset drops the
+    /// sweep). The caller discards `previous` on a clip change.
+    pub fn sample(
+        attacker_capsules: &[CombatCapsuleRecord],
+        action: CharacterAnimationAction,
+        pose: ActorPoseSnapshot,
+        previous: Option<ActorPoseSnapshot>,
+    ) -> Self {
+        let action = action.to_index() as u8;
+        let phase = pose.phase_q12();
+        let previous = previous
+            .filter(|old| pose.tick().wrapping_sub(old.tick()) == 1 && old.phase_q12() <= phase);
+        let mut strike = Self::NONE;
+        for (index, record) in attacker_capsules
+            .iter()
+            .take(MAX_CHARACTER_COMBAT_CAPSULES)
+            .enumerate()
+        {
+            if record.flags & combat_capsule_flags::HITBOX == 0 || record.action != action {
+                continue;
+            }
+            let Some((start, end)) = active_frame_sweep_phase_range(
+                previous.map(|pose| pose.phase_q12()),
+                phase,
+                record.active_start_frame,
+                record.active_end_frame,
+            ) else {
+                continue;
+            };
+            let Some((capsule, previous_capsule)) =
+                transform_actor_combat_capsule_sweep(record, previous, pose, start, end)
+            else {
+                continue;
+            };
+            let slot = usize::from(strike.count);
+            strike.capsules[slot] = capsule;
+            strike.previous[slot] = previous_capsule;
+            strike.records[slot] = index as u8;
+            strike.count += 1;
+        }
+        strike
+    }
+
+    /// Whether no hitbox is active this tick.
+    pub const fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// The active volumes this tick, in capsule order.
+    pub fn volumes(&self) -> &[WorldCombatCapsule] {
+        &self.capsules[..usize::from(self.count)]
+    }
+
+    /// Active volume `index` and the attacker capsule index it samples.
+    ///
+    /// # Panics
+    ///
+    /// When `index` is past [`Self::volumes`].
+    pub fn volume(&self, index: usize) -> (WorldCombatCapsule, usize) {
+        assert!(index < usize::from(self.count), "an active volume");
+        (self.capsules[index], usize::from(self.records[index]))
+    }
+
+    /// The first active volume (capsule order) that is not in `spent` and
+    /// overlaps one of the defender's HURTBOXes on `defender_pose`, swept
+    /// over the tick. `attacker_capsules` is the slice [`Self::sample`] read.
+    pub fn contact(
+        &self,
+        attacker_capsules: &[CombatCapsuleRecord],
+        defender_capsules: &[CombatCapsuleRecord],
+        defender_pose: Option<ActorPoseSnapshot>,
+        spent: u16,
+    ) -> Option<StrikeContact> {
+        let defender_pose = defender_pose?;
+        let mut hurtboxes = [WorldCombatCapsule::EMPTY; MAX_CHARACTER_COMBAT_CAPSULES];
+        let mut hurtbox_count = 0;
+        let mut hurtboxes_sampled = false;
+        for slot in 0..usize::from(self.count) {
+            let index = usize::from(self.records[slot]);
+            if spent & (1u16 << index) != 0 {
+                continue;
+            }
+            if !hurtboxes_sampled {
+                for hurtbox in defender_capsules.iter().take(MAX_CHARACTER_COMBAT_CAPSULES) {
+                    if hurtbox.flags & combat_capsule_flags::HURTBOX == 0 {
+                        continue;
+                    }
+                    if let Some(capsule) = transform_actor_combat_capsule(hurtbox, defender_pose) {
+                        hurtboxes[hurtbox_count] = capsule;
+                        hurtbox_count += 1;
+                    }
+                }
+                hurtboxes_sampled = true;
+            }
+            let capsule = self.capsules[slot];
+            let hit = hurtboxes[..hurtbox_count].iter().any(|hurtbox| {
+                self.previous[slot].map_or_else(
+                    || combat_capsules_overlap(&capsule, hurtbox),
+                    |old| combat_capsule_motion_overlaps(&old, &capsule, hurtbox),
+                )
+            });
+            if !hit {
+                continue;
+            }
+            let record = &attacker_capsules[index];
+            // Several blade volumes may describe one strike. The window is
+            // every volume overlapping this one in frames, never a separate
+            // later swing which happens to be crossed by the same interval.
+            let mut window = 0u16;
+            for (other_index, other) in attacker_capsules
+                .iter()
+                .take(MAX_CHARACTER_COMBAT_CAPSULES)
+                .enumerate()
+            {
+                if other.flags & combat_capsule_flags::HITBOX != 0
+                    && other.action == record.action
+                    && other.active_start_frame <= record.active_end_frame
+                    && record.active_start_frame <= other.active_end_frame
+                {
+                    window |= 1u16 << other_index;
+                }
+            }
+            return Some(StrikeContact {
+                damage: record.damage,
+                poise_damage: record.poise_damage,
+                window,
+            });
+        }
+        None
+    }
 }
 
 /// Resolve one authored attack using only two already-retained actor poses.
@@ -371,96 +533,30 @@ pub fn resolve_authored_actor_contact_swept_pending(
     defender_pose: Option<ActorPoseSnapshot>,
     connected_mask: u16,
 ) -> (AuthoredActorContact, u16) {
-    let action = action.to_index() as u8;
-    let has_attack_hitbox = attacker_capsules
-        .iter()
-        .any(|record| record.flags & combat_capsule_flags::HITBOX != 0 && record.action == action);
-    let has_defender_hurtbox = defender_capsules
-        .iter()
-        .any(|record| record.flags & combat_capsule_flags::HURTBOX != 0);
-    if !has_attack_hitbox || !has_defender_hurtbox {
-        return (AuthoredActorContact::FallbackRequired, 0);
-    }
-    let (Some(attacker_pose), Some(defender_pose)) = (attacker_pose, defender_pose) else {
+    let Some(attacker_pose) = attacker_pose else {
         return (AuthoredActorContact::Miss, 0);
     };
-    let phase = attacker_pose.phase_q12();
-    let previous = previous_attacker_pose.filter(|old| {
-        attacker_pose.tick().wrapping_sub(old.tick()) == 1 && old.phase_q12() <= phase
-    });
-    let mut hurtboxes = [WorldCombatCapsule::EMPTY; MAX_CHARACTER_COMBAT_CAPSULES];
-    let mut hurtbox_count = 0;
-    let mut hurtboxes_sampled = false;
-    for (index, record) in attacker_capsules
-        .iter()
-        .take(MAX_CHARACTER_COMBAT_CAPSULES)
-        .enumerate()
-    {
-        if connected_mask & (1u16 << index) != 0
-            || record.flags & combat_capsule_flags::HITBOX == 0
-            || record.action != action
-        {
-            continue;
-        }
-        let Some((start, end)) = active_frame_sweep_phase_range(
-            previous.map(|pose| pose.phase_q12()),
-            phase,
-            record.active_start_frame,
-            record.active_end_frame,
-        ) else {
-            continue;
-        };
-        let Some((capsule, previous_capsule)) =
-            transform_actor_combat_capsule_sweep(record, previous, attacker_pose, start, end)
-        else {
-            continue;
-        };
-        if !hurtboxes_sampled {
-            for hurtbox in defender_capsules.iter().take(MAX_CHARACTER_COMBAT_CAPSULES) {
-                if hurtbox.flags & combat_capsule_flags::HURTBOX == 0 {
-                    continue;
-                }
-                if let Some(capsule) = transform_actor_combat_capsule(hurtbox, defender_pose) {
-                    hurtboxes[hurtbox_count] = capsule;
-                    hurtbox_count += 1;
-                }
-            }
-            hurtboxes_sampled = true;
-        }
-        let hit = hurtboxes[..hurtbox_count].iter().any(|hurtbox| {
-            previous_capsule.map_or_else(
-                || combat_capsules_overlap(&capsule, hurtbox),
-                |old| combat_capsule_motion_overlaps(&old, &capsule, hurtbox),
-            )
-        });
-        if hit {
-            // Several blade volumes may describe one strike. Consume only
-            // windows overlapping this strike, never a separate later swing
-            // which happens to be crossed by the same retained-pose interval.
-            let mut window_mask = 0u16;
-            for (other_index, other) in attacker_capsules
-                .iter()
-                .take(MAX_CHARACTER_COMBAT_CAPSULES)
-                .enumerate()
-            {
-                if other.flags & combat_capsule_flags::HITBOX != 0
-                    && other.action == action
-                    && other.active_start_frame <= record.active_end_frame
-                    && record.active_start_frame <= other.active_end_frame
-                {
-                    window_mask |= 1u16 << other_index;
-                }
-            }
-            return (
-                AuthoredActorContact::Hit {
-                    damage: record.damage,
-                    poise_damage: record.poise_damage,
-                },
-                window_mask,
-            );
-        }
+    match ActiveStrike::sample(
+        attacker_capsules,
+        action,
+        attacker_pose,
+        previous_attacker_pose,
+    )
+    .contact(
+        attacker_capsules,
+        defender_capsules,
+        defender_pose,
+        connected_mask,
+    ) {
+        Some(contact) => (
+            AuthoredActorContact::Hit {
+                damage: contact.damage,
+                poise_damage: contact.poise_damage,
+            },
+            contact.window,
+        ),
+        None => (AuthoredActorContact::Miss, 0),
     }
-    (AuthoredActorContact::Miss, 0)
 }
 
 /// The first of the coming ticks `from..=until` on which an authored swing
@@ -1025,199 +1121,6 @@ fn square_sum_saturating(value: [i32; 3]) -> i32 {
         .saturating_add(value[2].saturating_mul(value[2]))
 }
 
-/// One melee swing volume: a flat arc in the attacker's room, opened
-/// `half_angle` PSX angle units to each side of `yaw`, `reach` engine
-/// units deep. Positions are room-local (the cooked convention), so
-/// the arc only tests targets in the same room; vertical extent is
-/// implicit (one room, one combat floor -- the phase-3 scope).
-#[derive(Debug, Clone, Copy)]
-pub struct MeleeArc {
-    /// Room the attacker stands in.
-    pub room: RoomIndex,
-    /// Attacker origin X, room-local engine units.
-    pub x: i32,
-    /// Attacker origin Z, room-local engine units.
-    pub z: i32,
-    /// Facing, PSX angle units (the motor convention: x = sin,
-    /// z = cos).
-    pub yaw: u16,
-    /// Arc depth from the origin, engine units.
-    pub reach: i32,
-    /// Arc half-width to each side of `yaw`, PSX angle units.
-    pub half_angle: u16,
-}
-
-/// Resolved player melee attack: arc geometry, hit numbers, and the
-/// active window in attack-clip animation frames (`None` = the whole
-/// swing is active, the unarmed/authored-window-free fallback).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PlayerMeleeSpec {
-    /// Arc depth, engine units.
-    pub reach: i32,
-    /// Arc half-width, PSX angle units.
-    pub half_angle: u16,
-    /// Damage per connection.
-    pub damage: u16,
-    /// Poise damage per connection.
-    pub poise_damage: u16,
-    /// Active window in animation frames (inclusive), unioned over
-    /// the weapon's hitboxes.
-    pub active_window: Option<(u16, u16)>,
-}
-
-/// Unarmed fallback spec: fist reach barely past two touching body
-/// capsules, a narrow 45-degree half-arc, chip damage, and the whole
-/// swing active (no cooked window to source).
-pub const UNARMED: PlayerMeleeSpec = PlayerMeleeSpec {
-    reach: 448,
-    half_angle: 512,
-    damage: 10,
-    poise_damage: 15,
-    active_window: None,
-};
-
-/// Heavy-attack scaling over the authored (light-attack) numbers:
-/// damage x3/2, poise damage x2 -- the souls grammar's slower, more
-/// staggering commitment. Runtime policy, deliberately not authored
-/// per-weapon in this slice.
-pub const HEAVY_DAMAGE_NUM: u32 = 3;
-/// See [`HEAVY_DAMAGE_NUM`].
-pub const HEAVY_DAMAGE_DEN: u32 = 2;
-/// Poise-damage multiplier for heavy attacks.
-pub const HEAVY_POISE_MUL: u32 = 2;
-
-impl PlayerMeleeSpec {
-    /// This spec with the heavy-attack scaling applied.
-    pub fn heavy(self) -> Self {
-        Self {
-            damage: scale_u16(self.damage, HEAVY_DAMAGE_NUM, HEAVY_DAMAGE_DEN),
-            poise_damage: scale_u16(self.poise_damage, HEAVY_POISE_MUL, 1),
-            ..self
-        }
-    }
-
-    /// Whether attack-clip animation frame `frame` is inside the
-    /// active window (always true without an authored window).
-    pub fn frame_active(&self, frame: u32) -> bool {
-        match self.active_window {
-            Some((start, end)) => frame >= u32::from(start) && frame <= u32::from(end),
-            None => true,
-        }
-    }
-}
-
-fn scale_u16(value: u16, num: u32, den: u32) -> u16 {
-    ((u32::from(value)).saturating_mul(num) / den.max(1)).min(u32::from(u16::MAX)) as u16
-}
-
-/// Resolve the player's melee spec from the cooked tables: the first
-/// PLAYER-flagged equipment record picks the weapon (souls loadout:
-/// one right-hand arm), its arc fields size the swing, and its hitbox
-/// frame windows union into the active window. Room-agnostic on
-/// purpose -- the weapon follows the player across rooms even though
-/// the equipment RECORD is pinned to the spawn room (the render path
-/// matches: player equipment draws without a room filter). No player
-/// equipment (or an all-zero weapon from a hand-rolled manifest)
-/// falls back to [`UNARMED`].
-pub fn player_melee_spec(
-    equipment: &'static [EquipmentRecord],
-    weapons: &'static [LevelWeaponRecord],
-    weapon_hitboxes: &'static [WeaponHitboxRecord],
-) -> PlayerMeleeSpec {
-    let mut i = 0usize;
-    while i < equipment.len() {
-        let record = &equipment[i];
-        i += 1;
-        if record.flags & equipment_flags::PLAYER == 0 {
-            continue;
-        }
-        let Some(weapon) = weapons.get(record.weapon.to_usize()) else {
-            continue;
-        };
-        // A cooked weapon always carries a positive reach and damage
-        // (the cook rejects zeros); a zero-reach record here is a
-        // hand-rolled manifest, and the unarmed fallback keeps combat
-        // functional instead of authoring-dead.
-        if weapon.arc_reach == 0 || weapon.damage == 0 {
-            continue;
-        }
-        return PlayerMeleeSpec {
-            reach: i32::from(weapon.arc_reach),
-            half_angle: weapon.arc_half_angle,
-            damage: weapon.damage,
-            poise_damage: weapon.poise_damage,
-            active_window: hitbox_active_window(weapon, weapon_hitboxes),
-        };
-    }
-    UNARMED
-}
-
-/// Union of a weapon's hitbox active windows (min start, max end) in
-/// attack-clip animation frames, or `None` for a hitbox-free weapon.
-fn hitbox_active_window(
-    weapon: &LevelWeaponRecord,
-    weapon_hitboxes: &'static [WeaponHitboxRecord],
-) -> Option<(u16, u16)> {
-    let first = weapon.hitbox_first.to_usize();
-    let hitboxes =
-        weapon_hitboxes.get(first..first.saturating_add(weapon.hitbox_count as usize))?;
-    let mut window: Option<(u16, u16)> = None;
-    let mut i = 0usize;
-    while i < hitboxes.len() {
-        let hitbox = &hitboxes[i];
-        i += 1;
-        let end = hitbox.active_end_frame.max(hitbox.active_start_frame);
-        window = Some(match window {
-            Some((start, stop)) => (start.min(hitbox.active_start_frame), stop.max(end)),
-            None => (hitbox.active_start_frame, end),
-        });
-    }
-    window
-}
-
-/// Point-blank pass distance: a target whose center is this close to
-/// the attacker origin is hit regardless of facing (you cannot whiff
-/// a swing through a body you are standing inside).
-pub const ARC_POINT_BLANK: i32 = 64;
-
-/// Does `arc` reach the hurtbox cylinder at `(cx, cz)` with
-/// `radius`? Integer-only capsule/point-vs-arc: per-axis early-out on
-/// `reach + radius`, exact squared distance (radii clamped so the sum
-/// of squares stays inside `i32`, the `entities` convention), a
-/// point-blank pass, then one octant `atan2` compared against the
-/// half-angle. The target's own angular size is absorbed by authored
-/// half-angles (souls swings are generous), documented rather than
-/// computed.
-pub fn arc_hits_circle(arc: &MeleeArc, cx: i32, cz: i32, radius: i32) -> bool {
-    let total = arc
-        .reach
-        .saturating_add(radius.max(0))
-        .clamp(0, i32::from(i16::MAX));
-    let dx = cx.saturating_sub(arc.x);
-    let dz = cz.saturating_sub(arc.z);
-    if dx.abs() > total || dz.abs() > total {
-        return false;
-    }
-    let d2 = dx * dx + dz * dz;
-    if d2 > total * total {
-        return false;
-    }
-    let point_blank = radius.max(0).saturating_add(ARC_POINT_BLANK);
-    if d2 <= point_blank * point_blank {
-        return true;
-    }
-    let to_target = atan2_q12(dx, dz);
-    angle_within(to_target, arc.yaw, arc.half_angle)
-}
-
-/// Wrapped PSX-angle distance test: is `angle` within `half_angle`
-/// units of `center` around the 4096-unit circle?
-pub fn angle_within(angle: u16, center: u16, half_angle: u16) -> bool {
-    let diff = (i32::from(angle) - i32::from(center)).rem_euclid(4096);
-    let diff = if diff > 2048 { 4096 - diff } else { diff };
-    diff <= i32::from(half_angle.min(2048))
-}
-
 #[cfg(test)]
 mod tests {
     #[test]
@@ -1235,18 +1138,6 @@ mod tests {
     }
 
     use super::*;
-    use psx_level::{WeaponHitShapeRecord, WeaponHitboxIndex, WeaponIndex};
-
-    fn arc(yaw: u16, reach: i32, half_angle: u16) -> MeleeArc {
-        MeleeArc {
-            room: RoomIndex(0),
-            x: 1000,
-            z: 1000,
-            yaw,
-            reach,
-            half_angle,
-        }
-    }
 
     fn capsule(start: [i32; 3], end: [i32; 3], radius: u16) -> WorldCombatCapsule {
         WorldCombatCapsule { start, end, radius }
@@ -1356,170 +1247,6 @@ mod tests {
         assert_eq!(
             combat_capsule_sweep_contact_fraction_q12(&miss, &target),
             None
-        );
-    }
-
-    #[test]
-    fn arc_hits_target_dead_ahead_and_respects_reach() {
-        // Yaw 0 faces +Z (x = sin, z = cos).
-        let swing = arc(0, 640, 683);
-        assert!(arc_hits_circle(&swing, 1000, 1600, 192));
-        // reach + radius: 1000 + 640 + 192 = 1832 is the last
-        // reachable center.
-        assert!(arc_hits_circle(&swing, 1000, 1832, 192));
-        assert!(!arc_hits_circle(&swing, 1000, 1833, 192));
-    }
-
-    #[test]
-    fn arc_misses_target_behind() {
-        let swing = arc(0, 640, 683);
-        assert!(!arc_hits_circle(&swing, 1000, 400, 192));
-    }
-
-    #[test]
-    fn arc_edges_follow_the_half_angle() {
-        // 60-degree half-arc = 683 PSX units. A target 45 degrees off
-        // (both axes equal) is inside; one 90 degrees off (straight
-        // +X) is out.
-        let swing = arc(0, 1000, 683);
-        assert!(arc_hits_circle(&swing, 1400, 1400, 0));
-        assert!(!arc_hits_circle(&swing, 1600, 1000, 0));
-        // A narrow 10-degree arc (114 units) drops the diagonal.
-        let narrow = arc(0, 1000, 114);
-        assert!(!arc_hits_circle(&narrow, 1400, 1400, 0));
-    }
-
-    #[test]
-    fn point_blank_targets_hit_regardless_of_facing() {
-        // Target center behind the attacker but overlapping the body.
-        let swing = arc(0, 640, 114);
-        assert!(arc_hits_circle(&swing, 1000, 900, 192));
-    }
-
-    #[test]
-    fn angle_wraps_across_zero() {
-        assert!(angle_within(4090, 10, 30));
-        assert!(angle_within(10, 4090, 30));
-        assert!(!angle_within(2048, 0, 683));
-    }
-
-    #[test]
-    fn heavy_scaling_multiplies_damage_and_poise() {
-        let spec = PlayerMeleeSpec {
-            reach: 640,
-            half_angle: 683,
-            damage: 30,
-            poise_damage: 40,
-            active_window: Some((10, 20)),
-        };
-        let heavy = spec.heavy();
-        assert_eq!(heavy.damage, 45);
-        assert_eq!(heavy.poise_damage, 80);
-        assert_eq!(heavy.reach, spec.reach);
-        assert_eq!(heavy.active_window, spec.active_window);
-    }
-
-    #[test]
-    fn frame_active_honors_window_and_fallback() {
-        let windowed = PlayerMeleeSpec {
-            active_window: Some((8, 14)),
-            ..UNARMED
-        };
-        assert!(!windowed.frame_active(7));
-        assert!(windowed.frame_active(8));
-        assert!(windowed.frame_active(14));
-        assert!(!windowed.frame_active(15));
-        assert!(UNARMED.frame_active(0));
-        assert!(UNARMED.frame_active(999));
-    }
-
-    const fn test_weapon(
-        arc_reach: u16,
-        damage: u16,
-        hitbox_first: u16,
-        hitbox_count: u16,
-    ) -> LevelWeaponRecord {
-        LevelWeaponRecord {
-            name: "Test Cleaver",
-            model: None,
-            default_character_socket: "right_hand_grip",
-            grip_name: "grip",
-            grip_translation: [0; 3],
-            grip_rotation_q12: [0; 3],
-            hitbox_first: WeaponHitboxIndex(hitbox_first),
-            hitbox_count,
-            arc_reach,
-            arc_half_angle: 683,
-            damage,
-            poise_damage: 40,
-            flags: 0,
-        }
-    }
-
-    const fn test_hitbox(start: u16, end: u16) -> WeaponHitboxRecord {
-        WeaponHitboxRecord {
-            name: "Edge",
-            shape: WeaponHitShapeRecord::Capsule {
-                start: [0; 3],
-                end: [0, 512, 0],
-                radius: 48,
-            },
-            active_start_frame: start,
-            active_end_frame: end,
-            flags: 0,
-        }
-    }
-
-    static WEAPONS: [LevelWeaponRecord; 1] = [test_weapon(640, 30, 0, 2)];
-    static HITBOXES: [WeaponHitboxRecord; 2] = [test_hitbox(10, 16), test_hitbox(14, 22)];
-    static PLAYER_EQUIPMENT: [EquipmentRecord; 2] = [
-        EquipmentRecord {
-            room: RoomIndex(0),
-            weapon: WeaponIndex(0),
-            x: 0,
-            y: 0,
-            z: 0,
-            yaw: 0,
-            character_socket: "right_hand_grip",
-            weapon_grip: "grip",
-            model_instance: EquipmentRecord::NO_INSTANCE,
-            flags: 0,
-        },
-        EquipmentRecord {
-            room: RoomIndex(3),
-            weapon: WeaponIndex(0),
-            x: 0,
-            y: 0,
-            z: 0,
-            yaw: 0,
-            character_socket: "right_hand_grip",
-            weapon_grip: "grip",
-            model_instance: EquipmentRecord::NO_INSTANCE,
-            flags: equipment_flags::PLAYER,
-        },
-    ];
-    static ZERO_REACH_WEAPONS: [LevelWeaponRecord; 1] = [test_weapon(0, 30, 0, 0)];
-
-    #[test]
-    fn player_spec_resolves_the_player_flagged_weapon_across_rooms() {
-        // The PLAYER-flagged record is second and pinned to room 3;
-        // resolution must skip the non-player record and ignore rooms.
-        let spec = player_melee_spec(&PLAYER_EQUIPMENT, &WEAPONS, &HITBOXES);
-        assert_eq!(spec.reach, 640);
-        assert_eq!(spec.damage, 30);
-        assert_eq!(spec.poise_damage, 40);
-        // Two hitbox windows union: (10..16) + (14..22) = (10..22).
-        assert_eq!(spec.active_window, Some((10, 22)));
-    }
-
-    #[test]
-    fn player_spec_falls_back_to_unarmed() {
-        // No equipment at all.
-        assert_eq!(player_melee_spec(&[], &WEAPONS, &HITBOXES), UNARMED);
-        // A hand-rolled zero-reach weapon record.
-        assert_eq!(
-            player_melee_spec(&PLAYER_EQUIPMENT, &ZERO_REACH_WEAPONS, &HITBOXES),
-            UNARMED
         );
     }
 
@@ -2096,7 +1823,7 @@ mod tests {
         }
 
         #[test]
-        fn fallback_is_offered_only_while_a_side_is_unauthored() {
+        fn an_unauthored_side_never_connects() {
             let near = [1000, 2000, 3000];
             let attacker = Some(pose_at(near, ACTIVE_PHASE));
             let defender = Some(pose_at(near, 0));
@@ -2104,7 +1831,7 @@ mod tests {
             // Attacker with no HITBOX at all.
             assert_eq!(
                 resolve_authored_actor_contact(&HURTBOXES, ATTACK, attacker, &HURTBOXES, defender),
-                AuthoredActorContact::FallbackRequired
+                AuthoredActorContact::Miss
             );
             // Attacker authored only for a DIFFERENT action slot.
             const HEAVY_ONLY: [CombatCapsuleRecord; 1] = [capsule_record(
@@ -2114,16 +1841,16 @@ mod tests {
             )];
             assert_eq!(
                 resolve_authored_actor_contact(&HEAVY_ONLY, ATTACK, attacker, &HURTBOXES, defender),
-                AuthoredActorContact::FallbackRequired
+                AuthoredActorContact::Miss
             );
             // Defender with no HURTBOX at all.
             assert_eq!(
                 resolve_authored_actor_contact(&HITBOXES, ATTACK, attacker, &[], defender),
-                AuthoredActorContact::FallbackRequired
+                AuthoredActorContact::Miss
             );
             assert_eq!(
                 resolve_authored_actor_contact(&HITBOXES, ATTACK, attacker, &HITBOXES, defender),
-                AuthoredActorContact::FallbackRequired
+                AuthoredActorContact::Miss
             );
 
             // Both sides authored and connecting: the authored numbers land.
@@ -2190,7 +1917,6 @@ mod tests {
     mod tick_authority {
         extern crate std;
 
-        use super::super::{PlayerMeleeSpec, UNARMED};
         use crate::model_rendering::animation_phase_at_tick_q12;
         use psx_asset::Animation;
         use psx_engine::{FrameScheduler, SchedulerAction, SchedulerConfig, VideoHz};
@@ -2253,7 +1979,7 @@ mod tests {
         /// Cost 1 keeps up with the 30 Hz cadence; higher costs overrun it and
         /// force the scheduler's catch-up bursts, exactly as an overloaded
         /// build does on hardware.
-        fn replay(render_cost_vblanks: u32, spec: &PlayerMeleeSpec) -> Replay {
+        fn replay(render_cost_vblanks: u32, window: (u16, u16)) -> Replay {
             let animation = attack_animation();
             let mut scheduler = FrameScheduler::new(SchedulerConfig::new(), VISUAL_INTERVAL);
             let mut elapsed_vblanks = 0u32;
@@ -2276,7 +2002,8 @@ mod tests {
                                 256,
                                 psx_level::CharacterActionFrameRange::FULL,
                             );
-                            if spec.frame_active(phase >> 12) {
+                            let frame = phase >> 12;
+                            if frame >= u32::from(window.0) && frame <= u32::from(window.1) {
                                 out.active_ticks.push(tick);
                             }
                         }
@@ -2298,11 +2025,7 @@ mod tests {
 
         #[test]
         fn attack_window_covers_the_same_simulation_ticks_at_every_frame_rate() {
-            let spec = PlayerMeleeSpec {
-                active_window: Some(ACTIVE_WINDOW),
-                ..UNARMED
-            };
-            let baseline = replay(1, &spec);
+            let baseline = replay(1, ACTIVE_WINDOW);
             let expected_ticks: Vec<u32> = (0..TICKS).collect();
             assert_eq!(
                 baseline.ticks, expected_ticks,
@@ -2318,7 +2041,7 @@ mod tests {
             // Costs above VISUAL_INTERVAL overrun the 30 Hz slot, so the
             // scheduler drops visuals and catches the simulation up in bursts.
             for render_cost_vblanks in [3u32, 5, 9] {
-                let slow = replay(render_cost_vblanks, &spec);
+                let slow = replay(render_cost_vblanks, ACTIVE_WINDOW);
                 assert_eq!(
                     slow.ticks, baseline.ticks,
                     "render cost {render_cost_vblanks} changed which simulation ticks ran"
@@ -2341,16 +2064,12 @@ mod tests {
 
         #[test]
         fn dropping_visual_frames_never_dilates_the_attack() {
-            let spec = PlayerMeleeSpec {
-                active_window: Some(ACTIVE_WINDOW),
-                ..UNARMED
-            };
             // The window opens and closes on fixed offsets from the swing's
             // start tick, so both edges are frame-rate invariant too.
             let first = ATTACK_START + 2 * u32::from(ACTIVE_WINDOW.0);
             let last = ATTACK_START + 2 * u32::from(ACTIVE_WINDOW.1) + 1;
             for render_cost_vblanks in [1u32, 4, 12] {
-                let run = replay(render_cost_vblanks, &spec);
+                let run = replay(render_cost_vblanks, ACTIVE_WINDOW);
                 assert_eq!(run.active_ticks.first().copied(), Some(first));
                 assert_eq!(run.active_ticks.last().copied(), Some(last));
             }

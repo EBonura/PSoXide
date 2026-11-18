@@ -410,7 +410,6 @@ impl OwnedLevelRecords {
                     recovery_ticks: e.recovery_ticks,
                     attack_min_range: e.attack_min_range,
                     attack_max_range: e.attack_max_range,
-                    touch_damage: e.touch_damage,
                     soul_value: e.soul_value,
                     flags: e.flags,
                 })

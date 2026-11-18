@@ -6,10 +6,14 @@
 //! What it runs from the game, unchanged: `GameEntities` (state machine,
 //! tactical controller, `apply_intent`, `Combatant` rules: parry, crit,
 //! knockdown, poise, energy), the character motor, `CombatProjectiles`, and
-//! the disc's contact choices where a model pose would decide (the legacy
-//! arc for melee, the body capsule for bolts). What it adds: the owner's
-//! side of a duel (perception of the other fighter, contact resolution in
-//! both directions, bolt release), which on the disc is `Playtest`.
+//! the one landing (`GameEntities::receive_hit` on the victim, then
+//! `GameEntities::answer_strike` on the attacker). The host has no model
+//! pose, so where the disc poses authored capsules the harness stands in
+//! with geometry of its own: a front arc as deep as the AI's swing distance,
+//! gated by the authored contact window, for melee, and the body capsule
+//! for bolts. What it adds: the owner's side of a duel (perception of the
+//! other fighter, contact in both directions, bolt release), which on the
+//! disc is `Playtest`.
 //!
 //! Both fighters are treated the same in every step: each thinks from a
 //! snapshot of the other taken before either moved, contacts in both
@@ -22,13 +26,12 @@ use psx_engine::{
     Angle, CharacterBlockerTraceProvider, CharacterCollisionAabb, CharacterCollisionCylinder,
     CharacterMotorConfig, CharacterMotorFrame, CharacterMotorInput, CharacterMotorState, RoomPoint,
 };
-use psx_game_runtime::combat::{arc_hits_circle, ticks_to_contact, MeleeArc, WorldCombatCapsule};
+use psx_game_runtime::combat::{ticks_to_contact, WorldCombatCapsule};
 use psx_game_runtime::combat_intent::{CombatAction, CombatActions, CombatIntent, CombatMove};
 use psx_game_runtime::combatant::{Combatant, CombatantId, Defender, HitKind, Strike};
 use psx_game_runtime::entities::{
     AttackPhase, CombatTarget, DeferredGameEntityAttacks, FighterWorld, GameEntities,
-    GameEntityState, GameEntityTickInput, OpenSpace, GAME_ENTITY_ATTACK_HALF_ANGLE,
-    GAME_ENTITY_ATTACK_REACH_MARGIN,
+    GameEntityState, GameEntityTickInput, OpenSpace, GAME_ENTITY_ATTACK_REACH_MARGIN,
 };
 use psx_game_runtime::projectiles::{
     CombatProjectiles, CombatTeam, ProjectileDamageChannel, ProjectileImpactKind,
@@ -630,6 +633,28 @@ pub const fn swing_reach(a: i32, b: i32) -> i32 {
     a + b + GAME_ENTITY_ATTACK_REACH_MARGIN + 16
 }
 
+/// Front-arc half-width of the harness's stand-in swing, PSX angle units
+/// (60 degrees).
+const SWING_HALF_ANGLE: i32 = 683;
+
+/// Whether the harness's stand-in swing from `from` facing `yaw` reaches
+/// the body centred at `to`: within `reach` and the front arc, or point
+/// blank (inside the body radius plus 64), whatever the facing.
+fn swing_reaches(from: [i32; 3], yaw: u16, reach: i32, to: [i32; 3]) -> bool {
+    let dx = i64::from(to[0] - from[0]);
+    let dz = i64::from(to[2] - from[2]);
+    let d2 = dx * dx + dz * dz;
+    if d2 > i64::from(reach) * i64::from(reach) {
+        return false;
+    }
+    if d2 <= 64 * 64 {
+        return true;
+    }
+    let to_target = i32::from(psx_math::atan2_q12(dx as i32, dz as i32));
+    let diff = (to_target - i32::from(yaw)).rem_euclid(4096);
+    diff.min(4096 - diff) <= SWING_HALF_ANGLE
+}
+
 /// Whether nothing blocks a melee contact between two fighters' chests.
 fn clear_line(pillars: &[CharacterCollisionAabb], a: [i32; 3], b: [i32; 3]) -> bool {
     let lift = |p: [i32; 3]| [p[0], p[1] + 32, p[2]];
@@ -803,18 +828,14 @@ pub fn run(duel: &Duel<'_>) -> DuelResult {
                 continue;
             }
             let records = sides[i].records;
-            // The swing's contact: the legacy arc, as deep as the AI's own
-            // swing distance (see [`swing_reach`]).
-            let arc = MeleeArc {
-                room: RoomIndex::ZERO,
-                x: attack.position()[0],
-                z: attack.position()[2],
-                yaw: sides[i].entities.yaw(0) as u16,
-                reach: swing_reach(i32::from(sides[i].body().radius), victim_radius),
-                half_angle: GAME_ENTITY_ATTACK_HALF_ANGLE,
-            };
-            if !arc_hits_circle(&arc, victim_position[0], victim_position[2], 0)
-                || !clear_line(&pillars, attack.position(), victim_position)
+            // The swing's contact: the harness's front arc, as deep as the
+            // AI's own swing distance (see [`swing_reach`]).
+            if !swing_reaches(
+                attack.position(),
+                sides[i].entities.yaw(0) as u16,
+                swing_reach(i32::from(sides[i].body().radius), victim_radius),
+                victim_position,
+            ) || !clear_line(&pillars, attack.position(), victim_position)
             {
                 continue;
             }
@@ -825,12 +846,16 @@ pub fn run(duel: &Duel<'_>) -> DuelResult {
                     continue;
                 }
             }
-            let strike = sides[i].spec.strike(attack.action());
+            let Some(strike) = sides[i].spec.strike(attack.action()) else {
+                continue;
+            };
             let (damage, poise) =
                 sides[i]
                     .entities
                     .crit_scaled(records, 0, strike.damage, strike.poise);
-            if !sides[i].entities.connect_deferred_attack(attack) {
+            // The one swing latch: the stand-in swing is one strike window,
+            // the other fighter one defender.
+            if !sides[i].entities.latch_strike(0, 1, 1) {
                 continue;
             }
             // The swing that reached its target uses up the crit, parried
@@ -1096,6 +1121,7 @@ fn land(sides: &mut [Side], hit: PendingHit, logging: bool, tick: u32, log: &mut
     let victim_records = sides[j].records;
     let attacker_records = sides[i].records;
     let armoured = sides[j].entities.armoured(victim_records, 0);
+    // The victim's side, then the attacker's: the one landing.
     let outcome = match hit.kind {
         HitKind::Projectile => sides[j].entities.apply_projectile_hit(
             victim_records,
@@ -1109,8 +1135,8 @@ fn land(sides: &mut [Side], hit: PendingHit, logging: bool, tick: u32, log: &mut
             victim_records,
             0,
             Strike {
-                // Not a slot of the victim's table: the arena staggers the
-                // attacker itself on a parry.
+                // Not a slot of the victim's table: the attacker's table
+                // answers for it below.
                 attacker: CombatantId::PLAYER,
                 kind: hit.kind,
                 channel: hit.channel,
@@ -1120,14 +1146,20 @@ fn land(sides: &mut [Side], hit: PendingHit, logging: bool, tick: u32, log: &mut
             },
         ),
     };
+    sides[i].entities.answer_strike(
+        attacker_records,
+        0,
+        CombatantId::PLAYER,
+        hit.kind,
+        hit.heavy,
+        outcome,
+        hit.opening,
+    );
     if outcome.parried {
         sides[j].tally.parries += 1;
         if logging {
             log_line(log, "duel:event", &[tick, j as u32, 1]);
         }
-        let _ = sides[i]
-            .entities
-            .riposte(attacker_records, 0, CombatantId::PLAYER);
         return;
     }
     if armoured && outcome.connected && !outcome.staggered {
@@ -1136,17 +1168,6 @@ fn land(sides: &mut [Side], hit: PendingHit, logging: bool, tick: u32, log: &mut
     }
     if hit.heavy && outcome.connected && sides[i].absorbed_in == Some(sides[i].attack_start) {
         sides[i].tally.trades += 1;
-    }
-    match hit.kind {
-        HitKind::Projectile => sides[i]
-            .entities
-            .projectile_connected(0, hit.opening && outcome.staggered),
-        _ if outcome.connected => {
-            sides[i]
-                .entities
-                .gain_melee_energy(&attacker_records[0], 0, hit.heavy)
-        }
-        _ => {}
     }
 }
 

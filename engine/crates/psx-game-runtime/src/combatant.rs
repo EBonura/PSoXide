@@ -146,7 +146,7 @@ impl CombatantId {
 /// What kind of source dealt a hit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HitKind {
-    /// A melee swing, authored capsule or legacy arc.
+    /// A melee swing (its authored capsules).
     Melee,
     /// A projectile impact.
     Projectile,

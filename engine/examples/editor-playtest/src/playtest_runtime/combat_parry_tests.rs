@@ -373,7 +373,7 @@ fn a_crit_doubles_the_next_attack_and_is_used_up_by_it_on_both_sides() {
         scene.game_entities.actor_mut().crit_scaled(&stats, 10, 7),
         (20, 14)
     );
-    scene.spend_player_melee_crit(swing(1), &ctx(101));
+    scene.spend_swing_crit(RuntimeGameEntities::ACTOR_SLOT, swing(1));
     assert_eq!(scene.game_entities.actor_mut().crit, 0);
     assert_eq!(
         scene.game_entities.actor().crit_scaled(&stats, 10, 7),
@@ -407,7 +407,7 @@ fn a_crit_doubles_the_next_attack_and_is_used_up_by_it_on_both_sides() {
 #[test]
 fn a_swing_that_reaches_no_one_keeps_the_crit() {
     let mut scene = player_crit_armed();
-    scene.spend_player_melee_crit(swing(0), &ctx(101));
+    scene.spend_swing_crit(RuntimeGameEntities::ACTOR_SLOT, swing(0));
     assert_ne!(scene.game_entities.actor().crit, 0);
 }
 

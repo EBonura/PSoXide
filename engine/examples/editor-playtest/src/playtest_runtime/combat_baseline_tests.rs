@@ -37,6 +37,19 @@ const HEAVY_GAIN: u16 = CombatStats::DEFAULT.heavy_gain;
 /// Roll / backstep invulnerable frames of the test character.
 pub(super) const TEST_I_FRAMES: u8 = 12;
 
+/// What her swing's landings leave on her, as the one swing finish does:
+/// energy for every connected hit, then the hit cues.
+fn report(scene: &mut Playtest, stats: MeleeArcStats) {
+    let heavy = matches!(
+        scene.anim.state,
+        PlayerAnim::HeavyAttack | PlayerAnim::VertHeavyAttack
+    );
+    for _ in 0..stats.hits {
+        scene.gain_melee_energy(RuntimeGameEntities::ACTOR_SLOT, heavy);
+    }
+    scene.report_player_melee_stats(stats);
+}
+
 pub(super) fn scene() -> std::boxed::Box<Playtest> {
     let layout = std::alloc::Layout::new::<Playtest>();
     let raw = unsafe { std::alloc::alloc_zeroed(layout) as *mut Playtest };
@@ -829,21 +842,27 @@ fn a_light_melee_hit_gains_twelve_and_a_heavy_hit_twenty_and_the_bar_caps() {
     let mut scene = scene();
     scene.game_entities.actor_mut().flow.energy = 0;
     scene.anim.state = PlayerAnim::LightAttack;
-    scene.report_player_melee_stats(MeleeArcStats {
-        hits: 1,
-        staggers: 0,
-        deaths: 0,
-        parries: 0,
-    });
+    report(
+        &mut scene,
+        MeleeArcStats {
+            hits: 1,
+            staggers: 0,
+            deaths: 0,
+            parries: 0,
+        },
+    );
     assert_eq!(scene.game_entities.actor().flow.energy, MELEE_GAIN);
     assert_eq!(scene.game_entities.actor().flow.followup, 0);
     scene.anim.state = PlayerAnim::HeavyAttack;
-    scene.report_player_melee_stats(MeleeArcStats {
-        hits: 1,
-        staggers: 0,
-        deaths: 0,
-        parries: 0,
-    });
+    report(
+        &mut scene,
+        MeleeArcStats {
+            hits: 1,
+            staggers: 0,
+            deaths: 0,
+            parries: 0,
+        },
+    );
     assert_eq!(
         scene.game_entities.actor().flow.energy,
         MELEE_GAIN + HEAVY_GAIN
@@ -853,12 +872,15 @@ fn a_light_melee_hit_gains_twelve_and_a_heavy_hit_twenty_and_the_bar_caps() {
         1,
         "a heavy hit opens a follow-up"
     );
-    scene.report_player_melee_stats(MeleeArcStats {
-        hits: 10,
-        staggers: 0,
-        deaths: 0,
-        parries: 0,
-    });
+    report(
+        &mut scene,
+        MeleeArcStats {
+            hits: 10,
+            staggers: 0,
+            deaths: 0,
+            parries: 0,
+        },
+    );
     assert_eq!(scene.game_entities.actor().flow.energy, ENERGY_MAX);
 }
 
@@ -867,12 +889,15 @@ fn every_enemy_connected_by_one_swing_pays_energy_separately() {
     let mut scene = scene();
     scene.game_entities.actor_mut().flow.energy = 0;
     scene.anim.state = PlayerAnim::LightAttack;
-    scene.report_player_melee_stats(MeleeArcStats {
-        hits: 3,
-        staggers: 0,
-        deaths: 0,
-        parries: 0,
-    });
+    report(
+        &mut scene,
+        MeleeArcStats {
+            hits: 3,
+            staggers: 0,
+            deaths: 0,
+            parries: 0,
+        },
+    );
     assert_eq!(scene.game_entities.actor().flow.energy, 3 * MELEE_GAIN);
 }
 
@@ -880,24 +905,30 @@ fn every_enemy_connected_by_one_swing_pays_energy_separately() {
 fn a_connected_melee_hit_queues_a_weight_matched_hit_cue() {
     let mut scene = scene();
     scene.anim.state = PlayerAnim::LightAttack;
-    scene.report_player_melee_stats(MeleeArcStats {
-        hits: 1,
-        staggers: 0,
-        deaths: 0,
-        parries: 0,
-    });
+    report(
+        &mut scene,
+        MeleeArcStats {
+            hits: 1,
+            staggers: 0,
+            deaths: 0,
+            parries: 0,
+        },
+    );
     assert_eq!(
         scene.gameplay_sfx_events & LevelGameplaySfxEvent::LightHit.bit(),
         LevelGameplaySfxEvent::LightHit.bit()
     );
     scene.gameplay_sfx_events = 0;
     scene.anim.state = PlayerAnim::VertHeavyAttack;
-    scene.report_player_melee_stats(MeleeArcStats {
-        hits: 1,
-        staggers: 0,
-        deaths: 1,
-        parries: 0,
-    });
+    report(
+        &mut scene,
+        MeleeArcStats {
+            hits: 1,
+            staggers: 0,
+            deaths: 1,
+            parries: 0,
+        },
+    );
     assert_ne!(
         scene.gameplay_sfx_events & LevelGameplaySfxEvent::HeavyHit.bit(),
         0
@@ -1013,12 +1044,15 @@ fn the_energy_economy_and_health_are_the_characters_data() {
         .flow
         .can_shoot(&scene.player_stats));
     scene.anim.state = PlayerAnim::LightAttack;
-    scene.report_player_melee_stats(MeleeArcStats {
-        hits: 1,
-        staggers: 0,
-        deaths: 0,
-        parries: 0,
-    });
+    report(
+        &mut scene,
+        MeleeArcStats {
+            hits: 1,
+            staggers: 0,
+            deaths: 0,
+            parries: 0,
+        },
+    );
     assert_eq!(scene.game_entities.actor().flow.energy, 5);
 }
 
@@ -1088,7 +1122,9 @@ fn a_new_combat_life_restores_every_player_combat_resource() {
         .buffer
         .request(1, 100);
     scene.game_entities.actor_action_mut().evade_buffer = 8;
-    scene.swing_hit_mask = 5;
+    assert!(scene
+        .game_entities
+        .latch_strike(RuntimeGameEntities::ACTOR_SLOT, 0, 1));
     scene
         .combat_projectiles
         .spawn(bolt(ProjectileDamageChannel::Horizon, 20, 40))
@@ -1113,7 +1149,12 @@ fn a_new_combat_life_restores_every_player_combat_resource() {
         None
     );
     assert_eq!(scene.game_entities.actor_action().evade_buffer, 0);
-    assert_eq!(scene.swing_hit_mask, 0);
+    assert_eq!(
+        scene
+            .game_entities
+            .spent_windows(RuntimeGameEntities::ACTOR_SLOT, 0),
+        0
+    );
     assert_eq!(scene.combat_projectiles.len(), 0);
 }
 

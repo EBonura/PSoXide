@@ -373,11 +373,6 @@ struct Playtest {
     /// weapon socket-pose resolution (PLAYER_WEAPON_ATTACHMENTS is one
     /// per life; cleared at gameplay init and on respawn).
     weapon_attach_reported: bool,
-    /// Entities already hit by the CURRENT player swing (bit i =
-    /// entity i): one swing connects at most once per enemy. Cleared
-    /// when an attack action starts.
-    // psx-numeric-allow-next-line: one-hit-per-swing bitmask over 64 entity records; bit ops only, two-word on R3000
-    swing_hit_mask: u64,
     /// Last `player_contents` answer keyed by the position and height it was
     /// sampled at. The tick asks twice (locomotion modifier before the move,
     /// hazard after it); while the player stands still both answers are the

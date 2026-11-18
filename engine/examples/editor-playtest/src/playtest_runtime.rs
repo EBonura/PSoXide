@@ -1095,7 +1095,8 @@ impl Playtest {
         self.hazard_push_left = 0;
         self.death_by_combat = false;
         self.weapon_attach_reported = false;
-        self.swing_hit_mask = 0;
+        self.game_entities
+            .begin_swing(RuntimeGameEntities::ACTOR_SLOT);
         self.destructibles.reset();
         self.clear_actor_pose_snapshots();
     }
@@ -1124,7 +1125,8 @@ impl Playtest {
         self.combat_projectile_impacts.clear();
         self.deferred_enemy_attacks.clear();
         self.game_entities.actor_action_mut().clear_requests();
-        self.swing_hit_mask = 0;
+        self.game_entities
+            .begin_swing(RuntimeGameEntities::ACTOR_SLOT);
         self.camera_recenter_requested = false;
         self.player_actor_pose = None;
         self.previous_player_actor_pose = None;
@@ -1334,7 +1336,8 @@ impl Playtest {
         self.switch_player_anim(anim, now, video_hz);
         if player_anim_is_attack(anim) {
             // A fresh swing gets a fresh one-hit-per-enemy mask.
-            self.swing_hit_mask = 0;
+            self.game_entities
+                .begin_swing(RuntimeGameEntities::ACTOR_SLOT);
             self.ranged_ready.released = 0;
             self.destructibles.begin_swing();
         }
@@ -3606,7 +3609,9 @@ mod life_reset_tests {
             .buffer
             .request(1, 100);
         scene.game_entities.actor_action_mut().evade_buffer = 8;
-        scene.swing_hit_mask = 3;
+        assert!(scene
+            .game_entities
+            .latch_strike(RuntimeGameEntities::ACTOR_SLOT, 0, 1));
         scene.camera_recenter_requested = true;
         scene
             .combat_projectiles
@@ -3634,7 +3639,12 @@ mod life_reset_tests {
             None
         );
         assert_eq!(scene.game_entities.actor_action().evade_buffer, 0);
-        assert_eq!(scene.swing_hit_mask, 0);
+        assert_eq!(
+            scene
+                .game_entities
+                .spent_windows(RuntimeGameEntities::ACTOR_SLOT, 0),
+            0
+        );
         assert!(!scene.camera_recenter_requested);
         assert_eq!(
             scene.game_entities.actor().stance.active(),

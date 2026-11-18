@@ -22,8 +22,7 @@
 //! use [`Self::tick_delta_deferred`] to freeze each active
 //! swing's exact attack clip/phase, resolve authored capsules from the
 //! same pose the body and equipment consume, and then latch the hit
-//! through [`Self::connect_deferred_attack`]. The legacy immediate
-//! front arc remains for games without retained-pose combat.
+//! through [`Self::latch_strike`], the one swing latch every fighter uses.
 //! With zero cooked records every entry point returns immediately, so
 //! a record-free game pays a handful of cycles per tick (measured in
 //! the phase-3 budget's idle A/B).
@@ -44,7 +43,6 @@ pub use tactics::{
     EnemyGoal, EnemyGoalResult, EnemyTacticalSnapshot, PredictedContact, STANCE_REASON_PARRY,
 };
 
-use crate::combat::{arc_hits_circle, MeleeArc};
 use crate::combat_intent::CombatMove;
 use crate::combatant::{
     stance_scaled, ActionProtection, Combatant, CombatantId, Defender, HitIn, HitKind, PoiseRule,
@@ -177,10 +175,6 @@ const GAME_ENTITY_ATTACK_MELEE_CHASE: u8 = 1 << 6;
 #[cfg(test)]
 const GAME_ENTITY_ATTACK_NEXT_HEAVY: u8 = 1 << 7;
 
-/// One-hit-per-swing latch: set while the current Attack window already
-/// connected.
-const GAME_ENTITY_ATTACK_CONNECTED: u8 = 1;
-
 /// The current stagger is a parry's riposte: the entity plays its Parried
 /// clip over it. Cleared by every state change.
 const GAME_ENTITY_PARRIED_STAGGER: u8 = 1 << 1;
@@ -201,12 +195,6 @@ pub fn body_of(
         .get(record.character.to_usize())
         .unwrap_or(&LevelCharacterRecord::DEFAULT_BODY)
 }
-
-/// Front-arc half-width for entity attacks, PSX angle units
-/// (60 degrees). The entity faced the player when it committed to
-/// its windup; a player who rolls past the body during the swing
-/// leaves this arc and the attack whiffs -- the souls punish loop.
-pub const GAME_ENTITY_ATTACK_HALF_ANGLE: u16 = 683;
 
 /// Legacy interruption duration for records without authored stun timing.
 pub const GAME_ENTITY_STAGGER_TICKS: u16 = 32;
@@ -516,13 +504,35 @@ impl Default for GameEntityClip {
     }
 }
 
+/// Which tell of an attack is tracking its target: each turns at its own
+/// rate, PSX angle units per tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tell {
+    /// A melee swing's authored tell, before its first active frame.
+    Melee,
+    /// A shot's authored charge, until two frames before its release.
+    RangedCharge,
+    /// A shot's windup, until its final six ticks.
+    RangedWindup,
+}
+
+impl Tell {
+    /// Turn rate, PSX angle units per tick.
+    pub const fn turn_per_tick(self) -> u16 {
+        match self {
+            Self::Melee => 16,
+            Self::RangedWindup => 32,
+            Self::RangedCharge => 48,
+        }
+    }
+}
+
 /// One attack contact opportunity frozen by [`GameEntities::tick_delta_deferred`].
 ///
 /// The token captures the exact attack clip/phase and root transform before an
 /// Attack-to-Recover transition can change the live state. It is valid only
-/// until the next entity tick: both [`GameEntities::connect_deferred_attack`]
-/// and [`GameEntities::deferred_attack_legacy_arc_hits`] reject stale tokens by
-/// generation and swing sequence.
+/// until the next entity tick: [`GameEntities::deferred_attack_can_connect`]
+/// rejects stale tokens by generation and swing sequence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeferredGameEntityAttack {
     entity: u16,
@@ -648,7 +658,7 @@ impl<const MAX_ATTACKS: usize> DeferredGameEntityAttacks<MAX_ATTACKS> {
     }
 }
 
-/// Aggregate outcome of one [`GameEntities::apply_melee_arc`] sweep.
+/// Aggregate outcome of one fighter's swing over its defenders on one tick.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MeleeArcStats {
     /// Entities the sweep connected with.
@@ -733,15 +743,20 @@ pub struct GameEntities<const MAX_ENTITIES: usize> {
     move_yaw_valid: [u8; MAX_ENTITIES],
     /// Directions rejected during the current bounded local search.
     move_tried: [u8; MAX_ENTITIES],
-    /// Combat latch byte: [`GAME_ENTITY_ATTACK_CONNECTED`] while the current
-    /// Attack window already connected.
+    /// Combat flag byte ([`GAME_ENTITY_PARRIED_STAGGER`], attack mode bits).
     combat_flags: [u8; MAX_ENTITIES],
     /// Combat flash of each entity's model (presentation only).
     flash: [crate::combat_fx::CombatFlash; MAX_ENTITIES],
     /// Wrapping identity of each entity's current swing. Deferred tokens use
     /// it to reject a contact retained across a later attack.
     attack_sequence: [u16; MAX_ENTITIES],
+    /// The swing latch, per attacker slot: the strike windows of the
+    /// current swing that have connected (shared with the ranged emitter
+    /// latches of a shot), and the defenders the latest of them struck
+    /// ([`Self::latch_strike`]).
     authored_connection_mask: [u16; MAX_ENTITIES],
+    // psx-numeric-allow-next-line: one bit per defender slot; bit ops only, two-word on R3000
+    struck: [u64; MAX_ENTITIES],
     /// Packed selected swing plus next close-range alternation bit.
     attack_mode: [u8; MAX_ENTITIES],
     /// Free-movement combat choice ([`GameEntityIntent`] as raw u8).
@@ -1081,6 +1096,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         flash: [crate::combat_fx::CombatFlash::NONE; MAX_ENTITIES],
         attack_sequence: [0; MAX_ENTITIES],
         authored_connection_mask: [0; MAX_ENTITIES],
+        struck: [0; MAX_ENTITIES],
         attack_mode: [0; MAX_ENTITIES],
         intent: [0; MAX_ENTITIES],
         attack_cooldown: [0; MAX_ENTITIES],
@@ -1821,46 +1837,47 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         if self.state_ticks[index].saturating_add(6) >= self.selected_timing(index).windup {
             return;
         }
-        let dx = input.target.position[0].saturating_sub(self.px(index));
-        let dz = input.target.position[2].saturating_sub(self.pz(index));
-        if dx != 0 || dz != 0 {
-            self.set_yaw(
-                index,
-                psx_engine::Angle::from_q12(self.yaw_raw(index) as u16)
-                    .approach_q12(
-                        psx_engine::Angle::from_q12(atan2_q12(dx, dz)),
-                        32u16.saturating_mul(delta),
-                    )
-                    .as_q12() as i16,
-            );
-        }
+        self.track_tell(index, Tell::RangedWindup, input.target.position, delta);
         self.capture_ranged_aim(index, input);
     }
 
-    /// The authored melee tell may turn slowly before its first active frame.
-    /// Callers stop invoking this at the authored cutoff; contact and stagger
-    /// also close it, so a combo never pivots after connecting.
-    pub fn track_authored_melee_tell(&mut self, index: usize, player: [i32; 3], delta: u16) {
-        if index >= self.count()
-            || self.attack_phase(index) != Some(AttackPhase::Active)
-            || self.selected_attack_is_ranged(index)
-            || self.authored_connection_mask[index] != 0
-        {
+    /// Turn fighter `index` (an entity, or the actor slot's body) toward
+    /// `target` at its `tell`'s rate for `delta` ticks: the one tell
+    /// tracking every fighter's attack runs while its authored tell frames
+    /// say it tracks ([`crate::combat::melee_tell_tracks`],
+    /// [`crate::combat::ranged_charge_tracks`]) or its ranged windup is
+    /// early. A strike window that connected, or a released shot, closes it
+    /// for the rest of the swing, so a combo never pivots after connecting.
+    pub fn track_tell(&mut self, index: usize, tell: Tell, target: [i32; 3], delta: u16) {
+        if !self.holds_fighter(index) || self.authored_connection_mask[index] != 0 {
             return;
         }
-        let dx = player[0].saturating_sub(self.px(index));
-        let dz = player[2].saturating_sub(self.pz(index));
+        let dx = target[0].saturating_sub(self.px(index));
+        let dz = target[2].saturating_sub(self.pz(index));
         if dx != 0 || dz != 0 {
             self.set_yaw(
                 index,
                 psx_engine::Angle::from_q12(self.yaw_raw(index) as u16)
                     .approach_q12(
                         psx_engine::Angle::from_q12(atan2_q12(dx, dz)),
-                        16u16.saturating_mul(delta),
+                        tell.turn_per_tick().saturating_mul(delta),
                     )
                     .as_q12() as i16,
             );
         }
+    }
+
+    /// The authored melee tell of entity `index`'s attack under way: its
+    /// [`Self::track_tell`]. Callers stop invoking this at the authored
+    /// cutoff; contact and stagger also close it.
+    pub fn track_authored_melee_tell(&mut self, index: usize, target: [i32; 3], delta: u16) {
+        if index >= self.count()
+            || self.attack_phase(index) != Some(AttackPhase::Active)
+            || self.selected_attack_is_ranged(index)
+        {
+            return;
+        }
+        self.track_tell(index, Tell::Melee, target, delta);
     }
 
     /// Track the visible charge until the caller's authored release cutoff.
@@ -1869,8 +1886,8 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
     pub fn track_authored_ranged_charge(
         &mut self,
         index: usize,
-        player: [i32; 3],
-        player_height: i32,
+        target: [i32; 3],
+        target_height: i32,
         delta: u16,
     ) {
         if index >= self.count()
@@ -1880,20 +1897,8 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         {
             return;
         }
-        let dx = player[0].saturating_sub(self.px(index));
-        let dz = player[2].saturating_sub(self.pz(index));
-        if dx != 0 || dz != 0 {
-            self.set_yaw(
-                index,
-                psx_engine::Angle::from_q12(self.yaw_raw(index) as u16)
-                    .approach_q12(
-                        psx_engine::Angle::from_q12(atan2_q12(dx, dz)),
-                        48u16.saturating_mul(delta),
-                    )
-                    .as_q12() as i16,
-            );
-        }
-        self.capture_ranged_target(index, player, player_height);
+        self.track_tell(index, Tell::RangedCharge, target, delta);
+        self.capture_ranged_target(index, target, target_height);
     }
 
     /// Target captured before release. Moving after the charge cutoff can evade
@@ -2122,13 +2127,8 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
             poise,
         });
         if out.parried {
-            // An entity's attacker is staggered here; the owner staggers any
-            // other attacker (the player) from the outcome.
-            let attacker = usize::from(strike.attacker.0);
-            if attacker < self.count() && attacker != index {
-                self.riposte(records, attacker, CombatantId::entity(index));
-            }
-            // Nothing landed: not a connection, so no energy for the attacker.
+            // Nothing landed: not a connection. The attacker's side of it
+            // (the riposte) is [`Self::answer_strike`].
             return GameEntityHitOutcome {
                 parried: true,
                 ..GameEntityHitOutcome::MISS
@@ -2195,6 +2195,41 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         }
     }
 
+    /// The attacker's side of a landed strike, for an attacker in slot
+    /// `attacker` of this table (the owner answers for a fighter outside
+    /// it): a parry by `by` staggers it with the riposte; a connected swing
+    /// pays its melee energy; a bolt that was not parried reports whether it
+    /// broke an open windup (`opening`, read before the bolt landed). Every
+    /// landing calls it after [`Self::receive_hit`] on the victim's table:
+    /// the game for a hit between entities, the duel harness between its
+    /// fighters.
+    #[allow(clippy::too_many_arguments)]
+    pub fn answer_strike(
+        &mut self,
+        records: &'static [LevelGameEntityRecord],
+        attacker: usize,
+        by: CombatantId,
+        kind: HitKind,
+        heavy: bool,
+        outcome: GameEntityHitOutcome,
+        opening: bool,
+    ) {
+        let Some(record) = records.get(attacker).filter(|_| attacker < self.count()) else {
+            return;
+        };
+        if outcome.parried {
+            self.riposte(records, attacker, by);
+            return;
+        }
+        match kind {
+            HitKind::Projectile => {
+                self.projectile_connected(attacker, opening && outcome.staggered)
+            }
+            HitKind::Melee if outcome.connected => self.gain_melee_energy(record, attacker, heavy),
+            _ => {}
+        }
+    }
+
     /// Whether entity `index`'s attack armours it now, by the one armour
     /// rule ([`crate::combatant::armoured`]): the attack's authored `Armored`
     /// window on its clip clock ([`crate::fighter_action::ActionTiming`]),
@@ -2220,96 +2255,6 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
     /// recovery on its attack's clock); None outside an attack.
     fn attack_since(&self, index: usize) -> Option<u16> {
         (self.state(index) == GameEntityState::Attack).then(|| self.state_ticks[index])
-    }
-
-    /// Sweep the player's melee arc over the live entities: every
-    /// enemy in the arc's room whose hurtbox cylinder the arc reaches
-    /// (and whose bit in `already_hit` is clear) takes one
-    /// [`Self::apply_hit`], and its bit latches so one swing connects
-    /// at most once per enemy. An entity inside its i-frames
-    /// ([`Self::invulnerable`]) is passed through without latching.
-    /// `O(live entities)` with the per-axis/squared early-outs of
-    /// [`arc_hits_circle`]; the owning
-    /// game clears `already_hit` when a new swing starts. Bit `i`
-    /// tracks entity `i` (the [`psx_level::MAX_GAME_ENTITY_RECORDS`]
-    /// = 64 contract cap is exactly the u64 width).
-    pub fn apply_melee_arc(
-        &mut self,
-        records: &'static [LevelGameEntityRecord],
-        arc: &MeleeArc,
-        channel: VitalityChannelId,
-        damage: u16,
-        poise_damage: u16,
-        // psx-numeric-allow-next-line: one-hit-per-swing bitmask; bit ops only, two-word on R3000
-        already_hit: &mut u64,
-    ) -> MeleeArcStats {
-        self.apply_melee_arc_occluded(
-            records,
-            arc,
-            channel,
-            damage,
-            poise_damage,
-            false,
-            already_hit,
-            |_, _| false,
-        )
-    }
-
-    /// [`Self::apply_melee_arc`] with a caller-supplied world occlusion test.
-    /// `occluded(entity, position)` returning true blocks the connection
-    /// WITHOUT latching the swing bit, so a target revealed later in the same
-    /// active window (a door finishing its travel) can still be hit once.
-    /// `crit` marks the swing as a crit (its posture lands on a riposted
-    /// fighter, see [`Strike::crit`]).
-    pub fn apply_melee_arc_occluded(
-        &mut self,
-        records: &'static [LevelGameEntityRecord],
-        arc: &MeleeArc,
-        channel: VitalityChannelId,
-        damage: u16,
-        poise_damage: u16,
-        crit: bool,
-        // psx-numeric-allow-next-line: one-hit-per-swing bitmask; bit ops only, two-word on R3000
-        already_hit: &mut u64,
-        mut occluded: impl FnMut(usize, [i32; 3]) -> bool,
-    ) -> MeleeArcStats {
-        // psx-numeric-allow-next-line: the 64-record cap IS the mask width
-        // The records stop at 64 (`psx_level::MAX_GAME_ENTITY_RECORDS`); a 65th
-        // slot can only be the actor slot, which no swing walks.
-        const { assert!(MAX_ENTITIES <= 65, "swing mask is a u64") };
-        let mut stats = MeleeArcStats::default();
-        let count = self.count().min(records.len());
-        let mut entity = 0usize;
-        while entity < count {
-            let record = &records[entity];
-            // psx-numeric-allow-next-line: swing bitmask bit select; no 64-bit arithmetic
-            let mask = 1u64 << entity;
-            let skip = *already_hit & mask != 0
-                || record.room != arc.room
-                || self.state(entity) == GameEntityState::Dead
-                || self.passes_through(records, entity)
-                || !arc_hits_circle(
-                    arc,
-                    self.px(entity),
-                    self.pz(entity),
-                    i32::from(self.body(record).radius),
-                )
-                || occluded(entity, self.position(entity));
-            if !skip {
-                *already_hit |= mask;
-                let outcome = self.receive_hit(
-                    records,
-                    entity,
-                    player_strike(HitKind::Melee, channel, damage, poise_damage, crit),
-                );
-                stats.hits += u16::from(outcome.connected);
-                stats.staggers += u16::from(outcome.staggered);
-                stats.deaths += u16::from(outcome.died);
-                stats.parries += u16::from(outcome.parried);
-            }
-            entity += 1;
-        }
-        stats
     }
 
     /// Advance every entity one 60 Hz tick. Thinking is gated on the
@@ -2348,7 +2293,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
     /// the exact attack clip/phase and transform sampled before any
     /// Attack-to-Recover transition. The caller resolves body/equipment poses,
     /// evaluates authored combat capsules, and latches a connection with
-    /// [`Self::connect_deferred_melee_window`] (or the legacy one-hit API).
+    /// [`Self::latch_strike`].
     pub fn tick_delta_deferred<const MAX_ATTACKS: usize>(
         &mut self,
         records: &'static [LevelGameEntityRecord],
@@ -2550,7 +2495,6 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         index < self.count()
             && attack.tick_generation == self.attack_tick_generation
             && attack.swing_sequence == self.attack_sequence[index]
-            && self.combat_flags[index] & GAME_ENTITY_ATTACK_CONNECTED == 0
     }
 
     /// Per-emitter release latches for a valid ranged attack. A stagger, death,
@@ -2580,77 +2524,54 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         true
     }
 
-    /// Per-window melee contacts, sharing storage with ranged emitter latches.
-    pub fn deferred_melee_hit_mask(&self, attack: DeferredGameEntityAttack) -> Option<u16> {
-        (!attack.is_ranged() && self.deferred_attack_can_connect(attack))
-            .then(|| self.authored_connection_mask[attack.entity()])
+    /// Start a fresh swing for slot `index` (any fighter, the actor slot
+    /// included): no strike window has connected and nobody is struck.
+    pub fn begin_swing(&mut self, index: usize) {
+        if index < MAX_ENTITIES {
+            self.authored_connection_mask[index] = 0;
+            self.struck[index] = 0;
+        }
     }
 
-    /// Consume all simultaneously active hitboxes as one verified contact.
-    /// Later non-overlapping windows remain available in the same animation.
-    pub fn connect_deferred_melee_window(
-        &mut self,
-        attack: DeferredGameEntityAttack,
-        window: u16,
-    ) -> bool {
-        let Some(used) = self.deferred_melee_hit_mask(attack) else {
-            return false;
-        };
-        if window == 0 || used & window != 0 {
-            return false;
-        }
-        self.authored_connection_mask[attack.entity()] = used | window;
-        true
+    // psx-numeric-allow-next-line: defender bit; bit ops only, two-word on R3000
+    const fn defender_bit(defender: usize) -> u64 {
+        // Records stop at 64 (`psx_level::MAX_GAME_ENTITY_RECORDS`): only a
+        // full table's actor slot (64) shares a bit, with slot 0.
+        1u64 << (defender & 63)
     }
 
-    /// Test the explicitly legacy Character-radius/front-arc contact policy for
-    /// a deferred token. Games should call this only when authored attacker
-    /// hitboxes or defender hurtboxes are absent; an authored inactive frame or
-    /// authored geometric miss is authoritative and must not fall back here.
-    pub fn deferred_attack_legacy_arc_hits(
-        &self,
-        records: &[LevelGameEntityRecord],
-        attack: DeferredGameEntityAttack,
-        player: [i32; 3],
-        player_radius: i32,
-    ) -> bool {
-        let index = attack.entity();
-        if !self.deferred_attack_can_connect(attack) || records.get(index).is_none() {
-            return false;
+    /// The strike windows of `attacker`'s swing that may no longer reach
+    /// `defender`: those already spent, once the latest window struck it.
+    /// Pass it to [`crate::combat::ActiveStrike::contact`].
+    pub fn spent_windows(&self, attacker: usize, defender: usize) -> u16 {
+        match (
+            self.struck.get(attacker),
+            self.authored_connection_mask.get(attacker),
+        ) {
+            (Some(&struck), Some(&spent)) if struck & Self::defender_bit(defender) != 0 => spent,
+            _ => 0,
         }
-        let record = &records[index];
-        if attack.is_ranged() {
-            return false;
-        }
-        let arc = MeleeArc {
-            room: attack.room,
-            x: attack.position[0],
-            z: attack.position[2],
-            yaw: attack.yaw,
-            reach: i32::from(self.body(record).radius)
-                .saturating_add(player_radius.max(0))
-                .saturating_add(GAME_ENTITY_ATTACK_REACH_MARGIN),
-            half_angle: GAME_ENTITY_ATTACK_HALF_ANGLE,
-        };
-        arc_hits_circle(&arc, player[0], player[2], 0)
     }
 
-    /// Latch one verified deferred contact. Returns `false` for stale tokens or
-    /// a swing that already connected, preserving one-hit-per-swing even if a
-    /// caller accidentally evaluates the same frame twice.
-    pub fn connect_deferred_attack(&mut self, attack: DeferredGameEntityAttack) -> bool {
-        self.commit_deferred_attack(attack)
-    }
-
-    /// Consume one verified deferred attack after its committed effect is
-    /// created. Melee calls this on contact; ranged attacks call it after a
-    /// projectile successfully enters the fixed pool. Pool overflow therefore
-    /// leaves the release retryable for the rest of its authored frame window.
-    pub fn commit_deferred_attack(&mut self, attack: DeferredGameEntityAttack) -> bool {
-        if !self.deferred_attack_can_connect(attack) {
+    /// The one swing latch: `attacker`'s strike `window` reaches
+    /// `defender`. A swing strikes each defender once per strike window
+    /// (several defenders in one window: a cleave; a later window of the
+    /// same clip strikes again). False, latching nothing, when that window
+    /// already struck this defender.
+    pub fn latch_strike(&mut self, attacker: usize, defender: usize, window: u16) -> bool {
+        if attacker >= MAX_ENTITIES || window == 0 {
             return false;
         }
-        self.combat_flags[attack.entity()] |= GAME_ENTITY_ATTACK_CONNECTED;
+        let bit = Self::defender_bit(defender);
+        let spent = self.authored_connection_mask[attacker];
+        if spent & window == 0 {
+            self.struck[attacker] = bit;
+        } else if self.struck[attacker] & bit != 0 {
+            return false;
+        } else {
+            self.struck[attacker] |= bit;
+        }
+        self.authored_connection_mask[attacker] = spent | window;
         true
     }
 
@@ -2858,8 +2779,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         } else {
             stats.melee_attack_enters += 1;
         }
-        self.authored_connection_mask[index] = 0;
-        self.combat_flags[index] &= !GAME_ENTITY_ATTACK_CONNECTED;
+        self.begin_swing(index);
         self.attack_sequence[index] = self.attack_sequence[index].wrapping_add(1);
         self.move_yaw_valid[index] = 0;
         self.move_tried[index] = 0;
@@ -3798,7 +3718,6 @@ mod tests {
             recovery_ticks: 4,
             attack_min_range: 0,
             attack_max_range: 0,
-            touch_damage: 10,
             soul_value: 0,
             flags,
         }
@@ -5272,82 +5191,27 @@ mod tests {
         assert_eq!(entities.health(0), 0);
     }
 
-    /// The same overwhelming hit through the arc sweep, which is the other
-    /// public way damage reaches an actor. A width bug in the
-    /// wrapper would be invisible to the direct `apply_hit` tests above.
-    #[test]
-    fn an_overwhelming_arc_hit_kills_outright() {
-        let mut entities = GameEntities::<8>::EMPTY;
-        entities.spawn_from_records(&EVEN_ENEMY);
-        entities.set_spatial_active_mask(u64::MAX);
-        // Put the enemy on Zenith so the Horizon (One) swing is an
-        // opposite-stance hit; the test is about arc width, not the rule.
-        entities.combatants[0]
-            .stance
-            .set_active(VitalityChannelId::Two);
-        let arc = MeleeArc {
-            room: RoomIndex(0),
-            x: 1000,
-            z: 800,
-            yaw: 1024,
-            reach: 400,
-            half_angle: 1024,
-        };
-        let mut swing = 0u64;
-        let stats = entities.apply_melee_arc(
-            &EVEN_ENEMY,
-            &arc,
-            VitalityChannelId::One,
-            u16::MAX,
-            0,
-            &mut swing,
-        );
-        assert_eq!(stats.hits, 1);
-        assert_eq!(stats.deaths, 1);
-        assert_eq!(entities.health(0), 0);
-    }
-
     #[test]
     fn an_enemy_mid_swap_lets_the_players_swing_pass_through() {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&EVEN_ENEMY);
         entities.set_spatial_active_mask(u64::MAX);
-        let arc = MeleeArc {
-            room: RoomIndex(0),
-            x: 1000,
-            z: 800,
-            yaw: 1024,
-            reach: 400,
-            half_angle: 1024,
-        };
         let full = entities.health(0);
         entities.mutate_stance(0);
         // Past the parry window (its own test pins that part).
         let parry = TEST_COMBAT.parry_ticks;
         entities.advance_stance_swap(0, parry + 1);
-        let mut swing = 0u64;
         for _ in parry + 1..=u16::from(TEST_SWAP_INVULNERABLE_TICKS) {
             assert!(entities.invulnerable(&EVEN_ENEMY, 0));
             assert!(entities.passes_through(&EVEN_ENEMY, 0));
-            let stats = entities.apply_melee_arc(
-                &EVEN_ENEMY,
-                &arc,
-                VitalityChannelId::One,
-                10,
-                0,
-                &mut swing,
-            );
-            assert_eq!(stats.hits, 0, "the swing passes through");
-            assert_eq!(swing, 0, "and is not used up");
             entities.advance_stance_swap(0, 1);
         }
         assert_eq!(entities.health(0), full);
-        // The window is the record's data, then the same swing lands.
+        // The window is the record's data, then a swing lands.
         assert!(!entities.invulnerable(&EVEN_ENEMY, 0));
-        let stats =
-            entities.apply_melee_arc(&EVEN_ENEMY, &arc, VitalityChannelId::One, 10, 0, &mut swing);
-        assert_eq!(stats.hits, 1);
-        assert_eq!(swing, 1);
+        assert!(!entities.passes_through(&EVEN_ENEMY, 0));
+        let out = entities.apply_hit(&EVEN_ENEMY, 0, VitalityChannelId::One, 10, 0);
+        assert!(out.connected);
         assert!(entities.health(0) < full);
     }
 
@@ -5429,214 +5293,28 @@ mod tests {
     }
 
     #[test]
-    fn occluded_melee_arc_blocks_without_latching_the_swing_bit() {
+    fn one_swing_strikes_each_defender_once_per_window() {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&IDLE_ENEMY);
-        entities.set_spatial_active_mask(u64::MAX);
-        // The enemy is on Horizon, so the Horizon (One) swings below match
-        // its stance and land as authored; these tests are about arc
-        // mechanics, not the stance rule.
-        let arc = MeleeArc {
-            room: RoomIndex(0),
-            x: 1200,
-            z: 1000,
-            yaw: 3072,
-            reach: 640,
-            half_angle: 683,
-        };
-        // psx-numeric-allow-next-line: swing bitmask scratch in tests
-        let mut swing = 0u64;
-
-        // A wall between the actors: no hit, no damage, and crucially the
-        // swing bit stays clear so the same swing can connect later.
-        let stats = entities.apply_melee_arc_occluded(
-            &IDLE_ENEMY,
-            &arc,
-            VitalityChannelId::One,
-            10,
-            40,
-            false,
-            &mut swing,
-            |_, _| true,
-        );
-        assert_eq!(stats, MeleeArcStats::default());
-        assert_eq!(entities.health(0), 100);
-        assert_eq!(swing, 0);
-
-        // The occluder clears (door finished opening): the identical swing
-        // connects exactly once and the closure sees the live position.
-        let mut probed = None;
-        let stats = entities.apply_melee_arc_occluded(
-            &IDLE_ENEMY,
-            &arc,
-            VitalityChannelId::One,
-            10,
-            40,
-            false,
-            &mut swing,
-            |entity, position| {
-                probed = Some((entity, position));
-                false
-            },
-        );
-        assert_eq!(
-            stats,
-            MeleeArcStats {
-                hits: 1,
-                staggers: 0,
-                deaths: 0,
-                parries: 0
-            }
-        );
-        assert_eq!(entities.health(0), 90);
-        assert_eq!(probed, Some((0, entities.position(0))));
-        assert_ne!(swing, 0);
-    }
-
-    #[test]
-    fn melee_arc_hits_once_per_swing_and_skips_dead_and_other_rooms() {
-        let mut entities = GameEntities::<8>::EMPTY;
-        entities.spawn_from_records(&IDLE_ENEMY);
-        entities.set_spatial_active_mask(u64::MAX);
-        // The enemy is on Horizon, so the Horizon (One) swings below match
-        // its stance and land as authored; these tests are about arc
-        // mechanics, not the stance rule.
-        // Player at (1200, 1000) facing -X: the enemy at (1000, 1000)
-        // sits dead ahead, 200 units out.
-        let arc = MeleeArc {
-            room: RoomIndex(0),
-            x: 1200,
-            z: 1000,
-            yaw: 3072,
-            reach: 640,
-            half_angle: 683,
-        };
-        // psx-numeric-allow-next-line: swing bitmask scratch in tests
-        let mut swing = 0u64;
-        // Swing 1: connects (poise 40 <= pool 50, no stagger)...
-        let stats = entities.apply_melee_arc(
-            &IDLE_ENEMY,
-            &arc,
-            VitalityChannelId::One,
-            20,
-            40,
-            &mut swing,
-        );
-        assert_eq!(
-            stats,
-            MeleeArcStats {
-                hits: 1,
-                staggers: 0,
-                deaths: 0,
-                parries: 0
-            }
-        );
-        assert_eq!(entities.health(0), 80);
-        // ...and the same swing never double-taps.
-        let stats = entities.apply_melee_arc(
-            &IDLE_ENEMY,
-            &arc,
-            VitalityChannelId::One,
-            20,
-            40,
-            &mut swing,
-        );
-        assert_eq!(stats, MeleeArcStats::default());
-        // Swing 2: accumulated poise (40 + 40) breaks the 50 pool.
-        swing = 0;
-        let stats = entities.apply_melee_arc(
-            &IDLE_ENEMY,
-            &arc,
-            VitalityChannelId::One,
-            20,
-            40,
-            &mut swing,
-        );
-        assert_eq!(stats.staggers, 1);
-        assert_eq!(entities.state(0), GameEntityState::Staggered);
-        // Swing 3 (health 60 - 50 = 10), swing 4 kills.
-        swing = 0;
-        entities.apply_melee_arc(
-            &IDLE_ENEMY,
-            &arc,
-            VitalityChannelId::One,
-            50,
-            40,
-            &mut swing,
-        );
-        swing = 0;
-        let stats = entities.apply_melee_arc(
-            &IDLE_ENEMY,
-            &arc,
-            VitalityChannelId::One,
-            10,
-            40,
-            &mut swing,
-        );
-        assert_eq!(stats.deaths, 1);
-        assert_eq!(entities.state(0), GameEntityState::Dead);
-        // Dead entities are no longer targets.
-        swing = 0;
-        let stats = entities.apply_melee_arc(
-            &IDLE_ENEMY,
-            &arc,
-            VitalityChannelId::One,
-            10,
-            40,
-            &mut swing,
-        );
-        assert_eq!(stats, MeleeArcStats::default());
-
-        // Wrong-room arcs never connect (cooked positions are
-        // room-local; a same-coordinate player in another room is an
-        // alias, not a neighbor).
-        entities.spawn_from_records(&IDLE_ENEMY);
-        entities.set_spatial_active_mask(u64::MAX);
-        swing = 0;
-        let wrong_room = MeleeArc {
-            room: RoomIndex(2),
-            ..arc
-        };
-        let stats = entities.apply_melee_arc(
-            &IDLE_ENEMY,
-            &wrong_room,
-            VitalityChannelId::One,
-            10,
-            40,
-            &mut swing,
-        );
-        assert_eq!(stats, MeleeArcStats::default());
-        assert_eq!(entities.health(0), 100);
-
-        // Facing away whiffs once the target is outside the
-        // point-blank ring: from 600 units out (ring is 192 + 64),
-        // facing +X misses the enemy at -X, facing -X connects.
-        swing = 0;
-        let away = MeleeArc {
-            x: 1600,
-            yaw: 1024,
-            ..arc
-        };
-        let stats = entities.apply_melee_arc(
-            &IDLE_ENEMY,
-            &away,
-            VitalityChannelId::One,
-            10,
-            40,
-            &mut swing,
-        );
-        assert_eq!(stats, MeleeArcStats::default());
-        swing = 0;
-        let toward = MeleeArc { yaw: 3072, ..away };
-        let stats = entities.apply_melee_arc(
-            &IDLE_ENEMY,
-            &toward,
-            VitalityChannelId::One,
-            10,
-            40,
-            &mut swing,
-        );
-        assert_eq!(stats.hits, 1);
+        let (attacker, a, b) = (7usize, 0usize, 1usize);
+        entities.begin_swing(attacker);
+        assert_eq!(entities.spent_windows(attacker, a), 0);
+        // A cleave: one window strikes two defenders, each once.
+        assert!(entities.latch_strike(attacker, a, 0b011));
+        assert!(!entities.latch_strike(attacker, a, 0b011));
+        assert!(entities.latch_strike(attacker, b, 0b011));
+        assert_eq!(entities.spent_windows(attacker, a), 0b011);
+        // A later window of the same clip strikes again; the earlier one is
+        // spent for the defender it reached.
+        assert!(entities.latch_strike(attacker, a, 0b100));
+        assert_eq!(entities.spent_windows(attacker, a), 0b111);
+        assert_eq!(entities.spent_windows(attacker, b), 0);
+        assert!(entities.latch_strike(attacker, b, 0b100));
+        assert!(!entities.latch_strike(attacker, b, 0b100));
+        assert!(!entities.latch_strike(attacker, b, 0));
+        // A fresh swing starts clean.
+        entities.begin_swing(attacker);
+        assert!(entities.latch_strike(attacker, a, 0b011));
     }
 
     /// Deferred twin of [`advance_into_attack`]: same grammar, tokens routed
@@ -5714,7 +5392,8 @@ mod tests {
             boundary.clip().phase_ticks,
             windup + GAME_ENTITY_ATTACK_ACTIVE_TICKS
         );
-        assert!(entities.connect_deferred_attack(boundary));
+        assert!(entities.deferred_attack_can_connect(boundary));
+        assert!(entities.latch_strike(boundary.entity(), 7, 1));
 
         // The first Recover tick emits nothing.
         let stats = entities.tick_delta_deferred(
@@ -5753,25 +5432,26 @@ mod tests {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&IDLE_ENEMY);
         entities.set_spatial_active_mask(u64::MAX);
+        let player = 7usize;
         let mut stats = GameEntityTickStats::default();
         entities.enter_phase(0, AttackPhase::Active, 0);
         let token = entities.deferred_attack(&IDLE_ENEMY[0], 0);
-        assert_eq!(entities.deferred_melee_hit_mask(token), Some(0));
-        assert!(entities.connect_deferred_melee_window(token, 1));
-        assert!(!entities.connect_deferred_melee_window(token, 1));
-        assert!(entities.connect_deferred_melee_window(token, 2));
-        assert!(entities.connect_deferred_melee_window(token, 4));
-        assert_eq!(entities.deferred_melee_hit_mask(token), Some(7));
-        assert!(!entities.connect_deferred_melee_window(token, 0));
+        assert!(entities.deferred_attack_can_connect(token));
+        assert_eq!(entities.spent_windows(0, player), 0);
+        assert!(entities.latch_strike(0, player, 1));
+        assert!(!entities.latch_strike(0, player, 1));
+        assert!(entities.latch_strike(0, player, 2));
+        assert!(entities.latch_strike(0, player, 4));
+        assert_eq!(entities.spent_windows(0, player), 7);
         entities.enter_state(0, GameEntityState::Staggered, &mut stats);
-        assert!(!entities.connect_deferred_melee_window(token, 8));
+        assert!(!entities.deferred_attack_can_connect(token));
         entities.enter_phase(0, AttackPhase::Active, 0);
         let fresh = entities.deferred_attack(&IDLE_ENEMY[0], 0);
-        assert_eq!(entities.deferred_melee_hit_mask(fresh), Some(0));
-        assert!(!entities.connect_deferred_melee_window(token, 8));
-        assert!(entities.connect_deferred_melee_window(fresh, 1));
+        assert_eq!(entities.spent_windows(0, player), 0);
+        assert!(!entities.deferred_attack_can_connect(token));
+        assert!(entities.deferred_attack_can_connect(fresh));
         entities.enter_state(0, GameEntityState::Dead, &mut stats);
-        assert!(!entities.connect_deferred_melee_window(fresh, 2));
+        assert!(!entities.deferred_attack_can_connect(fresh));
     }
 
     #[test]
@@ -5811,7 +5491,6 @@ mod tests {
         advance_into_attack_deferred(&mut entities, &mut attacks);
         entities.tick_delta_deferred(&IDLE_ENEMY, near_input(), &mut OpenWorld, 1, &mut attacks);
         let token = attacks.get(0).unwrap();
-        let player = [1200, 0, 1000];
 
         // A token from another swing of this entity fails closed even when
         // its generation is current.
@@ -5820,50 +5499,14 @@ mod tests {
             ..token
         };
         assert!(!entities.deferred_attack_can_connect(stale_swing));
-        assert!(!entities.connect_deferred_attack(stale_swing));
-        assert!(!entities.deferred_attack_legacy_arc_hits(&IDLE_ENEMY, stale_swing, player, 192,));
 
         // The next entity tick retires the previous tick's tokens wholesale:
         // contact may only finalize against the poses retained for the tick
         // that emitted the token.
         entities.tick_delta_deferred(&IDLE_ENEMY, near_input(), &mut OpenWorld, 1, &mut attacks);
         assert!(!entities.deferred_attack_can_connect(token));
-        assert!(!entities.connect_deferred_attack(token));
-        assert!(!entities.deferred_attack_legacy_arc_hits(&IDLE_ENEMY, token, player, 192,));
         let fresh = attacks.get(0).unwrap();
         assert!(entities.deferred_attack_can_connect(fresh));
-    }
-
-    #[test]
-    fn deferred_connection_latches_once_and_suppresses_the_legacy_arc() {
-        let mut entities = GameEntities::<8>::EMPTY;
-        let mut attacks = DeferredGameEntityAttacks::<8>::EMPTY;
-        entities.spawn_from_records(&IDLE_ENEMY);
-        entities.set_spatial_active_mask(u64::MAX);
-        advance_into_attack_deferred(&mut entities, &mut attacks);
-        entities.tick_delta_deferred(&IDLE_ENEMY, near_input(), &mut OpenWorld, 1, &mut attacks);
-        let token = attacks.get(0).unwrap();
-        let player = [1200, 0, 1000];
-
-        // Legacy arc geometry (frozen origin/yaw/reach) agrees the player is
-        // reachable before any connection, whiffs behind the committed
-        // facing.
-        assert!(entities.deferred_attack_legacy_arc_hits(&IDLE_ENEMY, token, player, 192,));
-        assert!(!entities.deferred_attack_legacy_arc_hits(&IDLE_ENEMY, token, [800, 0, 1000], 192,));
-
-        // An authored-capsule connection latches the swing: the same token
-        // cannot finalize twice, and the legacy arc goes dead with it, so one
-        // swing can never damage through both policies.
-        assert!(entities.connect_deferred_attack(token));
-        assert!(!entities.connect_deferred_attack(token));
-        assert!(!entities.deferred_attack_legacy_arc_hits(&IDLE_ENEMY, token, player, 192,));
-
-        // The latch spans the remaining active ticks of the SAME swing.
-        entities.tick_delta_deferred(&IDLE_ENEMY, near_input(), &mut OpenWorld, 1, &mut attacks);
-        let later = attacks.get(0).unwrap();
-        assert_eq!(later.swing_sequence, token.swing_sequence);
-        assert!(!entities.deferred_attack_can_connect(later));
-        assert!(!entities.connect_deferred_attack(later));
     }
 
     // ---- slot ownership and stable spawn ids ----------------------------
