@@ -624,6 +624,18 @@ impl GridRuntime {
         Some(located.room)
     }
 
+    /// The resident room fighter `point` stands in, searched from that
+    /// fighter's own `hint` (updated; the player's search stays with the
+    /// stream). None while the fighter's room is not resident.
+    pub(super) fn fighter_room(&self, hint: &mut u16, point: [i32; 3]) -> Option<usize> {
+        let located = self
+            .resident
+            .collision()
+            .locate(usize::from(*hint), point)?;
+        *hint = located.room.min(usize::from(u16::MAX)) as u16;
+        Some(located.room)
+    }
+
     /// Refresh the activation search around `observer`. Returns whether the
     /// observer is inside the world at all.
     fn activate(&mut self, observer: RoomPoint) -> bool {

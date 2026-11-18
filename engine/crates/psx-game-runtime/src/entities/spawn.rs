@@ -24,6 +24,7 @@ impl<const N: usize> GameEntities<N> {
         self.swap_timing[index] = CombatStanceConfig::of(body);
         self.attack_timings[index] = Self::record_timings(record);
         self.flinch_ticks[index] = 0;
+        self.hazard_ready_at[index] = 0;
         self.actions[index] = crate::fighter_action::FighterAction::IDLE;
         self.motor_anims[index] = CharacterMotorAnim::Idle;
         self.bodies[index] = crate::fighter_anim::AnimTrack::new(EntityAnim::NONE);

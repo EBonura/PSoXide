@@ -23,7 +23,7 @@ use psx_engine::CharacterMotorFrame;
 use psx_game_runtime::combat::{self, ActiveStrike, WorldCombatCapsule};
 use psx_game_runtime::combatant::stance_scaled;
 
-use crate::playtest_runtime::fighter_motor_rules;
+use crate::playtest_runtime::{fighter_motor_rules, hazard_damage};
 use psx_game_runtime::destructibles::{DamageChannel, DamageOutcome};
 use psx_game_runtime::entities::{
     DeferredGameEntityAttack, GameEntityState, MeleeArcStats, PredictedContact, Tell,
@@ -195,6 +195,9 @@ pub(super) struct SceneEntityMover<'a> {
     pub(super) player: RoomPoint,
     pub(super) player_radius: i32,
     pub(super) player_height: i32,
+    /// Each entity's streamed room (a search hint into the resident rooms):
+    /// every fighter is in a room of its own, not the player's.
+    pub(super) fighter_rooms: &'a mut [u16],
 }
 
 impl SceneEntityMover<'_> {
@@ -315,7 +318,20 @@ impl psx_game_runtime::entities::FighterWorld for SceneEntityMover<'_> {
             psx_engine::FixedScratch::<CharacterCollisionAabb, MAX_STATIC_PROP_AABB_BLOCKERS>::new(
             );
         let gathered = self.blockers(entity, room, &mut cylinders, &mut aabbs);
+        // A fighter whose room is not resident holds still: it walks again
+        // when its room streams back in.
+        let position = motor.position();
+        let resident = |world_rt: &WorldRuntime, rooms: &mut [u16]| {
+            rooms.get_mut(entity).is_none_or(|hint| {
+                world_rt
+                    .fighter_room(hint, [position.x, position.y, position.z])
+                    .is_some()
+            })
+        };
         match (gathered, self.world_rt.as_deref_mut()) {
+            (Some(()), Some(world_rt)) if !resident(world_rt, self.fighter_rooms) => {
+                motor.suspended_frame(None)
+            }
             (Some(()), Some(world_rt)) => world_rt
                 .update_motor(
                     motor,
@@ -1097,7 +1113,9 @@ impl Playtest {
             kind: FlashKind::of_hit(strike.crit, outcome.staggered || heavy),
             zenith,
         });
-        if outcome.died && strike.attacker == CombatantId::PLAYER {
+        // A body other than the player's dissolves and drops its souls,
+        // whoever or whatever killed it (the game's rule after a death).
+        if outcome.died {
             self.souls.award(record.soul_value, now.as_u32());
         }
         outcome
@@ -1361,7 +1379,7 @@ impl Playtest {
         if taken.melee_damage > 0 {
             // A swing lands on its attacker's stance, the one stance rule
             // every defender takes.
-            let died = self.hazard_death_ticks_remaining == 0
+            let died = self.death_ticks_remaining == 0
                 && self.player_take_damage(
                     taken.attacker,
                     HitKind::Melee,
@@ -1383,7 +1401,7 @@ impl Playtest {
                 gameplay_now,
             );
             if died {
-                self.arm_player_death(true, HAZARD_DEATH_TICKS, ctx.sim_tick, ctx.video_hz);
+                self.arm_player_death(true, ctx.sim_tick, ctx.video_hz);
             }
         }
         for (channel, number, damage) in [
@@ -1401,14 +1419,14 @@ impl Playtest {
             if damage == 0 {
                 continue;
             }
-            let died = self.hazard_death_ticks_remaining == 0
+            let died = self.death_ticks_remaining == 0
                 && self.apply_typed_player_damage_from(taken.attacker, channel, damage);
             // A projectile carries its own channel, so a Choir Needle
             // reads teal on the way in exactly as the bolt did.
             self.damage_numbers
                 .spawn(anchor, self.room_index, damage, number, gameplay_now);
             if died {
-                self.arm_player_death(true, HAZARD_DEATH_TICKS, ctx.sim_tick, ctx.video_hz);
+                self.arm_player_death(true, ctx.sim_tick, ctx.video_hz);
             }
         }
         if taken.hits == 0 {
@@ -1463,7 +1481,7 @@ impl Playtest {
             self.room_index,
             self.game_entities.actor().stance.active() == VitalityChannelId::Two,
             staggered,
-            self.hazard_death_ticks_remaining != 0,
+            self.death_ticks_remaining != 0,
         );
         self.show_hit_on_player(&taken, impacts, staggered);
     }
@@ -2550,14 +2568,25 @@ impl Playtest {
     /// Hurt the player with what the hazard volumes dealt this tick, and arm
     /// the death sequence when it was lethal. The volume already left an
     /// invulnerable player alone, so this only ever sees real hits.
-    pub(super) fn apply_logic_hazard_damage(&mut self, ctx: &Ctx) {
-        let damage = self.logic.take_hazard_damage();
-        let push = self.logic.take_hazard_push();
+    pub(super) fn apply_logic_hazard_damage(&mut self, ctx: &Ctx, player: [i32; 3], exempt: bool) {
+        let mut spare = 0;
+        let clock = self
+            .game_entities
+            .hazard_clock_mut(RuntimeGameEntities::ACTOR_SLOT)
+            .unwrap_or(&mut spare);
+        let touch = self.logic.touch_hazards(
+            LOGIC.as_slice(),
+            player,
+            exempt,
+            ctx.sim_tick.as_u32(),
+            clock,
+        );
+        let (damage, push) = (touch.damage, touch.push);
         if damage != 0 {
             telemetry::debug_log("player hazard:logic");
             if self.apply_hazard_player_damage(damage) {
                 self.hazard_push_left = 0;
-                self.arm_player_death(false, HAZARD_DEATH_TICKS, ctx.sim_tick, ctx.video_hz);
+                self.arm_player_death(false, ctx.sim_tick, ctx.video_hz);
                 return;
             }
         }
@@ -2585,6 +2614,66 @@ impl Playtest {
         self.hazard_push_toward_max = toward_max;
     }
 
+    /// The hazards on every entity, by the rule the player's character
+    /// takes them ([`psx_game_runtime::logic::LogicRuntime::touch_hazards`]
+    /// on each fighter's own clock, and the harmful liquids), landed through
+    /// the one landing as world damage on its own stance. An invulnerable
+    /// entity is passed through. A volume's knockback moves only the
+    /// player's character for now.
+    pub(super) fn apply_entity_hazards(&mut self, ctx: &Ctx) {
+        if LOGIC.is_empty() && self.world_rt.is_none() {
+            return;
+        }
+        let now = ctx.sim_tick.as_u32();
+        let count = self.game_entities.count().min(GAME_ENTITIES.len());
+        for index in 0..count {
+            if self.game_entities.state(index) == GameEntityState::Dead {
+                continue;
+            }
+            let record = &GAME_ENTITIES[index];
+            let position = self.game_entities.position(index);
+            let exempt = self
+                .game_entities
+                .invulnerable(GAME_ENTITIES.as_slice(), index);
+            let mut damage = match self.game_entities.hazard_clock_mut(index) {
+                Some(clock) => {
+                    self.logic
+                        .touch_hazards(LOGIC.as_slice(), position, exempt, now, clock)
+                        .damage
+                }
+                None => 0,
+            };
+            if !exempt {
+                let height = i32::from(self.game_entities.body(record).height);
+                if let Some(sample) = self.world_rt.as_ref().and_then(|world_rt| {
+                    world_rt.player_contents(
+                        RoomPoint::new(position[0], position[1], position[2]),
+                        height,
+                    )
+                }) {
+                    damage = damage.saturating_add(hazard_damage(sample.contents, now));
+                }
+            }
+            if damage == 0 {
+                continue;
+            }
+            self.land_on_entity(
+                ctx,
+                index,
+                Strike {
+                    attacker: CombatantId::WORLD,
+                    kind: HitKind::Hazard,
+                    channel: self.game_entities.stance(index),
+                    damage,
+                    poise: 0,
+                    crit: false,
+                },
+                None,
+                false,
+            );
+        }
+    }
+
     /// One tick of the shove a hazard touch gave the player: a few engine
     /// units along the hazard's thin axis through the same collision the
     /// motor uses, so a wall stops it and nothing is pushed out of the world.
@@ -2596,7 +2685,7 @@ impl Playtest {
         if self.hazard_push_left == 0 {
             return;
         }
-        if self.hazard_death_ticks_remaining != 0 {
+        if self.death_ticks_remaining != 0 {
             self.hazard_push_left = 0;
             return;
         }

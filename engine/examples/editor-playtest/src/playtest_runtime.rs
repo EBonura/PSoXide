@@ -768,7 +768,7 @@ impl Playtest {
     pub(super) fn open_demo_outro_once(&mut self) {
         const OUTRO_SCENE: u8 = 1;
         if self.poi_messages.world_message_shown(OUTRO_SCENE)
-            || self.hazard_death_ticks_remaining != 0
+            || self.death_ticks_remaining != 0
             || self.message_overlay.is_some()
             || !self.acquired_module.is_none()
             || self.inventory_overlay_active
@@ -987,14 +987,9 @@ impl Playtest {
     /// water); callers floor health themselves. PLAYER_DEATHS counts
     /// here so the death event is recorded even if a run ends before
     /// the respawn completes.
-    pub(super) fn arm_player_death(
-        &mut self,
-        by_combat: bool,
-        delay_ticks: u8,
-        now: SimTick,
-        video_hz: VideoHz,
-    ) {
-        self.hazard_death_ticks_remaining = delay_ticks.max(1);
+    pub(super) fn arm_player_death(&mut self, by_combat: bool, now: SimTick, video_hz: VideoHz) {
+        let delay_ticks = self.death_ticks(video_hz);
+        self.death_ticks_remaining = delay_ticks;
         self.death_by_combat = by_combat;
         self.switch_player_anim(PlayerAnim::Death, now, video_hz);
         self.game_entities.actor_action_mut().lock_until =
@@ -1004,6 +999,28 @@ impl Playtest {
         self.soft_lock_target = None;
         self.active_interactable = None;
         telemetry::counter(telemetry::counter::PLAYER_DEATHS, 1);
+    }
+
+    /// How long the player's character dies, by the one dying rule every
+    /// fighter follows: its own Death clip, at the speed and frames it
+    /// plays (an entity's plays out the same way before its body
+    /// dissolves); [`DEATH_FALLBACK_TICKS`] for a body with no Death clip.
+    fn death_ticks(&self, video_hz: VideoHz) -> u16 {
+        self.character
+            .as_ref()
+            .filter(|character| character.action_clip(PlayerAnim::Death.action()).is_some())
+            .and_then(|character| {
+                self.player_clip_duration_vblanks(
+                    character,
+                    character.clip_for(PlayerAnim::Death),
+                    video_hz,
+                    self.player_action_speed_q8(character, PlayerAnim::Death),
+                    character.action_frame_range(PlayerAnim::Death.action()),
+                )
+            })
+            .map_or(DEATH_FALLBACK_TICKS, |ticks| {
+                ticks.clamp(1, u32::from(u16::MAX)) as u16
+            })
     }
 
     /// Clear run progress while keeping front-end settings and loaded assets.
@@ -1091,7 +1108,7 @@ impl Playtest {
         self.inventory_overlay_active = false;
         self.combat_music = CombatMusicState::default();
         self.acquired_module = BoostModuleId::NONE;
-        self.hazard_death_ticks_remaining = 0;
+        self.death_ticks_remaining = 0;
         self.hazard_push_left = 0;
         self.death_by_combat = false;
         self.weapon_attach_reported = false;
@@ -1210,7 +1227,7 @@ impl Playtest {
             .actor_motor_mut()
             .snap_to(position, motor_yaw);
         self.reset_life_combat();
-        self.hazard_death_ticks_remaining = 0;
+        self.death_ticks_remaining = 0;
         self.anim.state = PlayerAnim::Idle;
         self.anim.switched = None;
         self.game_entities.actor_action_mut().lock_until = SimTick::ZERO;
@@ -1421,7 +1438,7 @@ impl Playtest {
         crit: bool,
         ctx: &Ctx,
     ) -> bool {
-        if self.hazard_death_ticks_remaining != 0 {
+        if self.death_ticks_remaining != 0 {
             return false;
         }
         let strike = Strike {
@@ -1444,7 +1461,7 @@ impl Playtest {
     #[inline(never)]
     #[cfg_attr(target_arch = "mips", optimize(size))]
     pub(super) fn riposte_player(&mut self, by: CombatantId, ctx: &Ctx) -> bool {
-        if self.hazard_death_ticks_remaining != 0 {
+        if self.death_ticks_remaining != 0 {
             return false;
         }
         let strike = Strike::parry(by, self.game_entities.actor().stance.active());
@@ -3487,7 +3504,7 @@ mod life_reset_tests {
             .request(1, 100);
         scene.game_entities.actor_action_mut().evade_buffer = 8;
         scene.gameplay_epoch_set = true;
-        scene.hazard_death_ticks_remaining = 10;
+        scene.death_ticks_remaining = 10;
         scene.checkpoint = Some(RuntimeCheckpoint {
             room: RoomIndex::ZERO,
             position: RoomPoint::new(1, 2, 3),
@@ -3537,7 +3554,7 @@ mod life_reset_tests {
         );
         assert_eq!(scene.game_entities.actor_action().evade_buffer, 0);
         assert!(!scene.gameplay_epoch_set);
-        assert_eq!(scene.hazard_death_ticks_remaining, 0);
+        assert_eq!(scene.death_ticks_remaining, 0);
         assert_eq!(scene.game_entities.actor().health(), PLAYER_MAX_HEALTH);
         assert!(scene.power_up_inventory.is_empty());
         assert!(scene.checkpoint.is_none());

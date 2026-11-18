@@ -357,9 +357,12 @@ struct Playtest {
     /// screen; the inventory has its own socket presentation.
     inventory_overlay_active: bool,
     /// Remaining death-sequence ticks, shared by every death cause
-    /// (combat damage, liquid hazards, lethal water). Non-zero locks
-    /// player input until the shared checkpoint/spawn respawn completes.
-    hazard_death_ticks_remaining: u8,
+    /// (combat damage, liquid hazards, lethal water): her Death clip's
+    /// length. Non-zero locks player input until the respawn completes.
+    death_ticks_remaining: u16,
+    /// Each entity's streamed room, a search hint into the resident rooms
+    /// ([`SceneEntityMover::fighter_rooms`]).
+    fighter_rooms: [u16; MAX_GAME_ENTITIES],
     /// Engine units still to shove the player along a hazard's thin axis after
     /// a touch (see `LogicRuntime::take_hazard_push`), the axis (`true` Z) and
     /// the direction (`true` toward larger coordinates).

@@ -757,6 +757,9 @@ pub struct GameEntities<const MAX_ENTITIES: usize> {
     authored_connection_mask: [u16; MAX_ENTITIES],
     // psx-numeric-allow-next-line: one bit per defender slot; bit ops only, two-word on R3000
     struck: [u64; MAX_ENTITIES],
+    /// Each fighter's hazard clock: the tick a hazard may next hurt it
+    /// (`crate::logic::LogicRuntime::touch_hazards`).
+    hazard_ready_at: [u32; MAX_ENTITIES],
     /// Packed selected swing plus next close-range alternation bit.
     attack_mode: [u8; MAX_ENTITIES],
     /// Free-movement combat choice ([`GameEntityIntent`] as raw u8).
@@ -1097,6 +1100,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         attack_sequence: [0; MAX_ENTITIES],
         authored_connection_mask: [0; MAX_ENTITIES],
         struck: [0; MAX_ENTITIES],
+        hazard_ready_at: [0; MAX_ENTITIES],
         attack_mode: [0; MAX_ENTITIES],
         intent: [0; MAX_ENTITIES],
         attack_cooldown: [0; MAX_ENTITIES],
@@ -2524,6 +2528,13 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         }
         self.authored_connection_mask[attack.entity()] = mask | (1u16 << emitter);
         true
+    }
+
+    /// The hazard clock of fighter `index` (an entity or the actor slot):
+    /// the tick a hazard may next hurt it. A spawn restarts an entity's;
+    /// the owner restarts the actor's with its life.
+    pub fn hazard_clock_mut(&mut self, index: usize) -> Option<&mut u32> {
+        self.hazard_ready_at.get_mut(index)
     }
 
     /// Whether fighter `index`'s current swing has connected (a strike

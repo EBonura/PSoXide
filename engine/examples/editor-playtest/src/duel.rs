@@ -457,8 +457,7 @@ impl Playtest {
             log_values("duel:sample", &snap);
         }
         self.duel.last_snapshot = snap;
-        let player_dead =
-            self.game_entities.actor().defeated() || self.hazard_death_ticks_remaining != 0;
+        let player_dead = self.game_entities.actor().defeated() || self.death_ticks_remaining != 0;
         let enemy_dead = self.game_entities.state(i) == GameEntityState::Dead;
         if player_dead || enemy_dead {
             self.duel_end(

@@ -141,8 +141,9 @@ pub(super) const INTERACT_BUTTON: u16 = button::CROSS;
 /// attack.
 pub(super) const ACTIVE_LIGHT_ATTACK_BUTTON: u16 = button::R1;
 pub(super) const ACTIVE_HEAVY_ATTACK_BUTTON: u16 = button::R2;
-/// Delay between fatal hazard contact and checkpoint/spawn reset.
-pub(super) const HAZARD_DEATH_TICKS: u8 = 30;
+/// How long a body with no Death clip dies before the respawn (placeholder
+/// for the rule's fallback; a Character dies for its Death clip's length).
+pub(super) const DEATH_FALLBACK_TICKS: u16 = 30;
 /// Engine units a hazard shove moves the player per tick (a walking step is
 /// about three), so the way out of a thin volume takes a few ticks.
 pub(super) const HAZARD_PUSH_STEP: i32 = 10;

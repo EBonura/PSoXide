@@ -283,6 +283,7 @@ impl Playtest {
                 player,
                 player_radius,
                 player_height,
+                fighter_rooms: &mut self.fighter_rooms,
             };
             // The target reads her fighter as it stood before the tick.
             let player_fighter = *self.game_entities.actor();
@@ -417,16 +418,14 @@ impl Playtest {
         }
         // A dash's invulnerable frames pass through a hazard, and so does a
         // body already dying: neither is hit or spends the hazard's interval.
-        let hazard_exempt = self.player_invulnerable(ctx) || self.hazard_death_ticks_remaining != 0;
+        let hazard_exempt = self.player_invulnerable(ctx) || self.death_ticks_remaining != 0;
         self.logic.tick(
             LOGIC.as_slice(),
-            psx_game_runtime::logic::LogicTickInput {
-                player: player_pos,
-                player_invulnerable: hazard_exempt,
-            },
+            psx_game_runtime::logic::LogicTickInput { player: player_pos },
             now,
         );
-        self.apply_logic_hazard_damage(ctx);
+        self.apply_logic_hazard_damage(ctx, player_pos, hazard_exempt);
+        self.apply_entity_hazards(ctx);
         self.dispatch_logic_effects(ctx.controller_port());
         self.sync_sliding_doors();
         telemetry::counter(
@@ -848,8 +847,8 @@ impl Playtest {
         }
 
         let now = ctx.sim_tick;
-        let mut action_locked = self.game_entities.actor_action().lock_until > now
-            || self.hazard_death_ticks_remaining > 0;
+        let mut action_locked =
+            self.game_entities.actor_action().lock_until > now || self.death_ticks_remaining > 0;
         self.refresh_active_interactable();
         if !action_locked && !poi_interaction_consumed {
             if let Some(index) = self.active_interactable {
@@ -872,7 +871,7 @@ impl Playtest {
         let ranged = self.player_has_ranged_weapon();
         let interrupted = circle.evade
             || !self.game_entities.actor_motor().action().is_idle()
-            || self.hazard_death_ticks_remaining != 0
+            || self.death_ticks_remaining != 0
             || (action_locked
                 && !matches!(self.anim.state, PlayerAnim::RangedAttack | PlayerAnim::Land))
             || self
@@ -1106,7 +1105,7 @@ impl Playtest {
         self.player_moved_last_tick = motor_frame.moved;
         self.advance_hazard_push(blockers.as_slice(), aabb_blockers.as_slice());
 
-        let hazard_countdown_was_active = self.hazard_death_ticks_remaining > 0;
+        let hazard_countdown_was_active = self.death_ticks_remaining > 0;
         if !hazard_countdown_was_active {
             if let Some(sample) = self.player_contents_memo(config.height) {
                 let damage = hazard_damage(sample.contents, now.as_u32());
@@ -1119,7 +1118,7 @@ impl Playtest {
                         _ => "player hazard:liquid",
                     });
                     if died {
-                        self.arm_player_death(false, HAZARD_DEATH_TICKS, now, ctx.video_hz);
+                        self.arm_player_death(false, now, ctx.video_hz);
                     }
                 }
             }
@@ -1129,8 +1128,8 @@ impl Playtest {
         // damage arms it from `resolve_combat`, hazards from the site
         // above.
         if hazard_countdown_was_active {
-            self.hazard_death_ticks_remaining = self.hazard_death_ticks_remaining.saturating_sub(1);
-            if self.hazard_death_ticks_remaining == 0 {
+            self.death_ticks_remaining = self.death_ticks_remaining.saturating_sub(1);
+            if self.death_ticks_remaining == 0 {
                 self.respawn_after_death();
             }
         }
@@ -1638,7 +1637,7 @@ impl Playtest {
         now: SimTick,
         action_locked: bool,
     ) -> bool {
-        if self.hazard_death_ticks_remaining != 0 {
+        if self.death_ticks_remaining != 0 {
             self.game_entities.actor_action_mut().buffer.clear();
             self.game_entities
                 .actor_action_mut()

@@ -175,7 +175,7 @@ fn a_fresh_player_starts_with_a_full_bar_in_the_horizon_stance() {
     );
     assert_eq!(scene.player_stance_config, CombatStanceConfig::DEFAULT);
     assert_eq!(scene.game_entities.actor().flow, CombatFlow::FULL);
-    assert_eq!(scene.hazard_death_ticks_remaining, 0);
+    assert_eq!(scene.death_ticks_remaining, 0);
 }
 
 #[test]
@@ -511,7 +511,7 @@ fn a_stunned_player_accumulates_no_posture_and_cannot_be_broken_again() {
 #[test]
 fn a_dying_player_ignores_further_hits() {
     let mut scene = scene();
-    scene.hazard_death_ticks_remaining = 10;
+    scene.death_ticks_remaining = 10;
     assert!(!scene.react_player_to_hit(CombatantId::WORLD, 1000, false, false, false, &ctx(100)));
     assert_eq!(
         scene.game_entities.actor().poise,
@@ -1061,8 +1061,8 @@ fn the_energy_economy_and_health_are_the_characters_data() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn the_death_countdown_is_thirty_ticks() {
-    assert_eq!(HAZARD_DEATH_TICKS, 30);
+fn a_body_without_a_death_clip_dies_for_thirty_ticks() {
+    assert_eq!(DEATH_FALLBACK_TICKS, 30);
 }
 
 #[test]
@@ -1071,13 +1071,8 @@ fn arming_death_locks_the_death_clip_and_drops_targeting() {
     scene.lock_target = Some(1);
     scene.soft_lock_target = Some(1);
     scene.camera_recenter_requested = true;
-    scene.arm_player_death(
-        true,
-        HAZARD_DEATH_TICKS,
-        SimTick::from_u32(100),
-        VideoHz::NTSC,
-    );
-    assert_eq!(scene.hazard_death_ticks_remaining, HAZARD_DEATH_TICKS);
+    scene.arm_player_death(true, SimTick::from_u32(100), VideoHz::NTSC);
+    assert_eq!(scene.death_ticks_remaining, DEATH_FALLBACK_TICKS);
     assert!(scene.death_by_combat);
     assert_eq!(scene.anim.state, PlayerAnim::Death);
     assert_eq!(
@@ -1091,20 +1086,8 @@ fn arming_death_locks_the_death_clip_and_drops_targeting() {
 #[test]
 fn a_hazard_death_is_not_flagged_as_combat() {
     let mut scene = scene();
-    scene.arm_player_death(
-        false,
-        HAZARD_DEATH_TICKS,
-        SimTick::from_u32(5),
-        VideoHz::NTSC,
-    );
+    scene.arm_player_death(false, SimTick::from_u32(5), VideoHz::NTSC);
     assert!(!scene.death_by_combat);
-}
-
-#[test]
-fn a_zero_delay_still_arms_a_one_tick_countdown() {
-    let mut scene = scene();
-    scene.arm_player_death(true, 0, SimTick::from_u32(5), VideoHz::NTSC);
-    assert_eq!(scene.hazard_death_ticks_remaining, 1);
 }
 
 #[test]
@@ -1163,14 +1146,9 @@ fn respawn_after_a_combat_death_restores_the_life_and_clears_the_countdown() {
     let mut scene = scene();
     scene.apply_untyped_player_damage(1000);
     scene.game_entities.actor_mut().flow.energy = 7;
-    scene.arm_player_death(
-        true,
-        HAZARD_DEATH_TICKS,
-        SimTick::from_u32(100),
-        VideoHz::NTSC,
-    );
+    scene.arm_player_death(true, SimTick::from_u32(100), VideoHz::NTSC);
     scene.respawn_after_death();
-    assert_eq!(scene.hazard_death_ticks_remaining, 0);
+    assert_eq!(scene.death_ticks_remaining, 0);
     assert!(!scene.death_by_combat);
     assert_eq!(scene.anim.state, PlayerAnim::Idle);
     assert_eq!(scene.game_entities.actor_action().lock_until, SimTick::ZERO);
