@@ -13,6 +13,7 @@ use crate::util;
 const ALWAYS_SHOWN: &[&str] = &[
     "carried from an older gate",
     "journey rows",
+    "requires ",
     "hardware renderer (hw = true)",
     "open-loop steps",
 ];

@@ -109,13 +109,19 @@ pub fn run(ctx: &Ctx<'_>, all_offsets: bool) -> StageResult {
         outcome,
     };
     if ctx.game.windows.is_empty() {
+        // A disc image's speed is its members' (each judged in its own full run).
+        let check = if ctx.game.requires.is_empty() {
+            Check::skip("speed", "the game file has no [[speed]] window")
+        } else {
+            Check::pass(
+                "speed",
+                "no window of its own: every [[requires]] member's full run judged its speed",
+            )
+        };
         return result(
             Source::Run,
             Outcome {
-                checks: vec![Check::skip(
-                    "speed",
-                    "the game file has no [[speed]] window",
-                )],
+                checks: vec![check],
                 ..Outcome::default()
             },
         );
