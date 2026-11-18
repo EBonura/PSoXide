@@ -159,9 +159,17 @@ impl Wire for &'static str {
         (self.len() as u32).put(out);
         out.extend_from_slice(self.as_bytes());
     }
+    /// A copy of its own: nothing decoded borrows the chunk, so the chunk can be read into
+    /// scratch and dropped once decoded.
     fn get(r: &mut Reader) -> Option<Self> {
         let len = u32::get(r)? as usize;
-        core::str::from_utf8(r.take(len)?).ok()
+        let text = core::str::from_utf8(r.take(len)?).ok()?;
+        if text.is_empty() {
+            return Some("");
+        }
+        Some(alloc::boxed::Box::leak(alloc::boxed::Box::<str>::from(
+            text,
+        )))
     }
 }
 
@@ -769,4 +777,3 @@ mod tests {
         assert!(LevelRecords::decode(leak(huge)).is_none());
     }
 }
-

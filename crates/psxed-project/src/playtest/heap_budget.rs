@@ -29,11 +29,10 @@ const SLOT_BYTES: usize = 228;
 /// Bytes of heap every level needs beyond what [`level_bytes`] counts: the gameplay set-up's
 /// small blocks (the 2,280 B list, the camera and streamer lists), the flood planner's lists and
 /// the first frames' scratch lists. Measured from the guest's heap (every allocation logged, and
-/// the `ReuseHeap` bump pointer read from a RAM dump after a walk or a duel): rib-room-h with its
-/// duel enemies and grid-dungeon both stay within this.
-const FIXED_BYTES: usize = 5 * 1024;
-/// Bytes of heap per room beyond [`FIXED_BYTES`]: the per-room tables and lists.
-const ROOM_BYTES: usize = 64;
+/// the `ReuseHeap` bump pointer read from a RAM dump after a walk or a duel): grid-dungeon's
+/// peak is the need less 128 B, rib-room-h's (ten rooms) the need less 1.7 KB, so no per-room
+/// term is left.
+const FIXED_BYTES: usize = 5_504;
 /// Bytes each grid material takes in the uploaded-material list (`grid_materials::bind_uploaded`).
 const UPLOADED_MATERIAL_BYTES: usize = 20;
 
@@ -54,14 +53,38 @@ pub fn heap_block(bytes: usize) -> usize {
         .unwrap_or(bytes.div_ceil(8) * 8)
 }
 
-/// Heap the level's own data takes for the run: the level core and the record chunk, each read
-/// whole (as words), every record table decoded from it (`psx_level::wire::decode_slice`, guest
-/// record sizes from [`psx_level::wire::GUEST_RECORD_BYTES`]) and the uploaded-material list.
+/// Heap the level's own data takes for the run: the level core read whole (as words), every
+/// record table decoded from the record chunk (`psx_level::wire::decode_slice`, guest record
+/// sizes from [`psx_level::wire::GUEST_RECORD_BYTES`]), each non-empty string copied out of it
+/// (the chunk itself is read into the room pool and dropped), and the uploaded-material list.
 #[must_use]
 pub fn level_bytes(package: &PlaytestPackage, materials: usize) -> usize {
     let owned = super::OwnedLevelRecords::build(package);
     let records = owned.records();
-    let chunk = records.encode().len();
+    let text = |s: &str| heap_block(s.len());
+    let message = |m: &psx_level::InteractableMessageRecord| text(m.title) + text(m.body);
+    let strings: usize = records.rooms.iter().map(|r| text(r.name)).sum::<usize>()
+        + records
+            .interactable_messages
+            .iter()
+            .map(message)
+            .sum::<usize>()
+        + records
+            .interactable_message_pages
+            .iter()
+            .map(|s| text(s))
+            .sum::<usize>()
+        + records
+            .interactable_message_pages_it
+            .iter()
+            .map(|s| text(s))
+            .sum::<usize>()
+        + records
+            .interactables
+            .iter()
+            .map(|i| text(i.prompt) + text(i.checkpoint_id))
+            .sum::<usize>()
+        + records.world_message.as_ref().map_or(0, message);
     let decoded: usize = records
         .table_lens()
         .iter()
@@ -69,8 +92,8 @@ pub fn level_bytes(package: &PlaytestPackage, materials: usize) -> usize {
         .map(|(count, size)| heap_block(count * size))
         .sum();
     heap_block(package.world_geometry.core.len().div_ceil(4) * 4)
-        + heap_block(chunk.div_ceil(4) * 4)
         + decoded
+        + strings
         + heap_block(materials * UPLOADED_MATERIAL_BYTES)
 }
 
@@ -81,7 +104,7 @@ pub struct HeapBudget {
     pub renderer: usize,
     /// The resident table: slots for every room the streamer tracks.
     pub resident_table: usize,
-    /// The level's own data ([`level_bytes`]) and the rest ([`FIXED_BYTES`], [`ROOM_BYTES`]).
+    /// The level's own data ([`level_bytes`]) and the rest ([`FIXED_BYTES`]).
     pub fixed: usize,
     /// The room pool the guest reserves in its BSS (not heap, listed because it competes with it).
     pub pool: usize,
@@ -390,7 +413,7 @@ pub fn plan(package: &PlaytestPackage) -> Option<HeapBudget> {
     Some(HeapBudget {
         renderer: GridRenderer::with_maxima(&level.maxima()).working_bytes(),
         resident_table: entries * SLOT_BYTES,
-        fixed: FIXED_BYTES + ROOM_BYTES * rooms + level_bytes(package, level.materials.len()),
+        fixed: FIXED_BYTES + level_bytes(package, level.materials.len()),
         pool: world.pool.pool_pages.max(1) * 2048,
         rooms,
     })
@@ -541,7 +564,11 @@ mod tests {
             assert!(report.is_ok(), "{name}: {:?}", report.error_messages());
             let budget = plan(&package.expect("a package")).expect("a grid world");
             std::println!("{name}: need {} (peak {peak}) {budget:?}", budget.need());
-            assert!(budget.need() >= peak, "{name}: need {} under the peak {peak}", budget.need());
+            assert!(
+                budget.need() >= peak,
+                "{name}: need {} under the peak {peak}",
+                budget.need()
+            );
             assert!(
                 budget.need() <= peak + 2048,
                 "{name}: need {} more than 2 KiB over the peak {peak}",

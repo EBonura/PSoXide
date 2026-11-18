@@ -245,7 +245,23 @@ impl GridRuntime {
         }
         let [core_info, records_info, first_room] = found;
         let core = Self::read_chunk(cd, core_info)?;
-        let records = Self::read_chunk(cd, records_info)?;
+        // The records chunk is only read to be decoded (the decoded tables and strings are
+        // copies), so it goes into the room pool, which no room uses until the streamer starts,
+        // rather than onto the heap for good.
+        let words = records_info.byte_size.div_ceil(4);
+        // SAFETY: the pool is untouched until `from_core` starts the streamer, and nothing
+        // decoded from it keeps a reference into it.
+        let records: &'static [u8] = unsafe {
+            let pool = &mut *core::ptr::addr_of_mut!(ROOM_POOL);
+            let Some(scratch) = pool.get_mut(..words) else {
+                return Err(GridRuntimeInitError::Records);
+            };
+            let read = read_world_chunk_blocking(cd, WORLD_PACK_START_LBA, records_info, scratch);
+            if read.status != ROOM_CHUNK_STATUS_OK || read.bytes != records_info.byte_size {
+                return Err(GridRuntimeInitError::NoCore(read.status));
+            }
+            core::slice::from_raw_parts(scratch.as_ptr().cast::<u8>(), records_info.byte_size)
+        };
         let records =
             psx_level::wire::LevelRecords::decode(records).ok_or(GridRuntimeInitError::Records)?;
         crate::level_data::install(records);
