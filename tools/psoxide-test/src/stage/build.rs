@@ -64,7 +64,7 @@ pub fn run(ctx: &mut Ctx<'_>) -> StageResult {
         let resolved: Vec<String> = build
             .env
             .values()
-            .map(|v| super::resolve_inputs(v, &ctx.config.inputs).unwrap_or_default())
+            .map(|v| ctx.resolve(v).unwrap_or_default())
             .collect();
         let key = match key(&ctx.repo, build, &files, &resolved.join("\0")) {
             Ok(k) => k,

@@ -25,6 +25,9 @@ pub struct Baseline {
     /// Per journey: ticks on `real` (the schedule) and the open-loop ratchet.
     #[serde(default)]
     pub journeys: BTreeMap<String, JourneyBase>,
+    /// Host-check metrics, by check name (`name` or `name@model`).
+    #[serde(default)]
+    pub host: BTreeMap<String, u64>,
 }
 
 /// One link's size, from `psoxide_size::ram`.

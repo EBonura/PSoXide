@@ -222,6 +222,15 @@ pub fn run(ctx: &Ctx<'_>, bless: bool) -> StageResult {
             continue;
         }
         for m in &models {
+            if let Some(only) = spec.only_on.get(&info.id) {
+                if !only.models.iter().any(|x| x == m) {
+                    checks.push(Check::skip(
+                        format!("{}@{m}", info.id),
+                        format!("runs on {} only: {}", only.models.join(", "), only.reason),
+                    ));
+                    continue;
+                }
+            }
             jobs.push(Job {
                 info: info.clone(),
                 model: (*m).to_string(),
