@@ -107,7 +107,12 @@ pub fn run(ctx: &Ctx<'_>, bless: bool) -> StageResult {
     let before = util::git(&ctx.repo, &["status", "--porcelain"]).unwrap_or_default();
     let done = crate::sched::run_all(&groups, ctx.config.budget.jobs, |(_, jobs)| {
         jobs.iter()
-            .map(|(host, model, name)| (name.clone(), one(ctx, host, *model, name, &tree, bless)))
+            .map(|(host, model, name)| {
+                (
+                    name.clone(),
+                    one(ctx, host, *model, name, &tree, &files, bless),
+                )
+            })
             .collect::<Vec<_>>()
     });
     let mut results: Vec<HostRow> = done.into_iter().flatten().collect();
@@ -158,12 +163,45 @@ pub fn run(ctx: &Ctx<'_>, bless: bool) -> StageResult {
     }
 }
 
+/// The digest of what a `uses` marker names.
+fn uses_digest(ctx: &Ctx<'_>, marker: &str) -> Result<String, String> {
+    match marker {
+        "sdk" => {
+            // The guest sources of the hydrated SDK by content (stat-cached), not its pin: a
+            // host-tool-only SDK commit leaves them unchanged.
+            let mut key = Key::new("uses-sdk");
+            for part in ["sdk", "crates", "engine"] {
+                let dir = ctx.repo.join(".psoxide").join(part);
+                let digest = if dir.is_dir() {
+                    ctx.originals
+                        .lock()
+                        .map_err(|_| "digest cache lock".to_string())?
+                        .digest(&dir)?
+                } else {
+                    "missing".into()
+                };
+                key.part(part, &digest);
+            }
+            Ok(key.finish())
+        }
+        "gate" => Ok(crate::config::GATE_REVISION.to_string()),
+        "frontend" => {
+            let f = ctx
+                .config
+                .tool(&ctx.config.tools.frontend, "[tools] frontend")?;
+            util::sha256_file(f)
+        }
+        other => Err(format!("unknown uses marker `{other}`")),
+    }
+}
+
 fn one(
     ctx: &Ctx<'_>,
     host: &Host,
     model: Option<&str>,
     name: &str,
     tree: &str,
+    files: &[String],
     bless: bool,
 ) -> Result<(Outcome, bool), String> {
     let mut command = Vec::new();
@@ -177,7 +215,20 @@ fn one(
     key.part("command", &keyed.join("\0"));
     key.part("dir", host.dir.as_deref().unwrap_or("."));
     key.part("model", model.unwrap_or(""));
-    key.part("tree", tree);
+    if host.inputs.is_empty() {
+        key.part("tree", tree);
+    } else {
+        // Only what the check declares it reads.
+        for f in files
+            .iter()
+            .filter(|f| host.inputs.iter().any(|i| f.starts_with(i.as_str())))
+        {
+            key.file(f, &ctx.repo.join(f))?;
+        }
+        for u in &host.uses {
+            key.part(&format!("uses {u}"), &uses_digest(ctx, u)?);
+        }
+    }
     let mut env = ctx.command_env(&ctx.work.join("guest-stage"), &host.env, &host.env_remove)?;
     if let Some(m) = model {
         env.push(("PSOXIDE_HARDWARE".into(), Some(m.to_string())));
@@ -198,7 +249,15 @@ fn one(
         for arg in &mut command {
             *arg = arg.replace("{out}", &out).replace("{disc}", &cue);
         }
-        for (file, digest) in ctx.artifacts.get(build).into_iter().flatten() {
+        // The build's bytes, not its link map: a map names object paths that move with the SDK
+        // checkout while the code stays the same (the symbol list stands for it).
+        for (file, digest) in ctx
+            .artifacts
+            .get(build)
+            .into_iter()
+            .flatten()
+            .filter(|(f, _)| !f.ends_with(".map"))
+        {
             key.part(file, digest);
         }
     }

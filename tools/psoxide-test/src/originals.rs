@@ -90,12 +90,80 @@ impl Cache {
                 root.display()
             ));
         }
+        if root.join(".git").exists() {
+            return self.checkout(root);
+        }
+        self.tree(root, false)
+    }
+
+    /// Every file of a tree by content. `with_git` keeps `.git` directories: the digest this
+    /// harness wrote before checkouts were fingerprinted by commit, still accepted for an
+    /// `[originals]` pin written then.
+    fn tree(&mut self, root: &Path, with_git: bool) -> Result<String, String> {
         let mut files = Vec::new();
-        walk(root, root, &mut files)?;
+        walk(root, root, with_git, &mut files)?;
         files.sort();
         let mut key = util::Key::new("original");
         for rel in files {
             let digest = self.file(&root.join(&rel))?;
+            key.part(&rel, &digest);
+        }
+        Ok(key.finish())
+    }
+
+    /// The digest an older harness gave `root` (whole tree, `.git` included).
+    pub fn legacy_digest(&mut self, root: &Path) -> Result<String, String> {
+        if root.is_file() {
+            return self.file(root);
+        }
+        self.tree(root, true)
+    }
+}
+
+impl Cache {
+    /// A git checkout by what it holds, never by git's own files (which `git status`, `gc` and
+    /// maintenance rewrite without changing any content): the HEAD commit, plus every path that
+    /// differs from it (modified, deleted or untracked and not ignored) with its content digest.
+    fn checkout(&mut self, root: &Path) -> Result<String, String> {
+        let head = util::git(root, &["rev-parse", "HEAD"])?;
+        // `-z`: NUL-separated `XY path` entries, paths unquoted, no trimming of the status column.
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            // Do not refresh the index: reading must not write into the input.
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .args([
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--untracked-files=all",
+                "--no-renames",
+            ])
+            .output()
+            .map_err(|e| format!("cannot run git: {e}"))?;
+        if !output.status.success() {
+            return Err(format!("git status in {} failed", root.display()));
+        }
+        let listing = String::from_utf8_lossy(&output.stdout);
+        let mut changed: Vec<String> = listing
+            .split('\0')
+            .filter_map(|entry| entry.get(3..))
+            .filter(|p| !p.is_empty())
+            .map(str::to_string)
+            .collect();
+        changed.sort();
+        changed.dedup();
+        let mut key = util::Key::new("original-checkout");
+        key.part("head", &head);
+        for rel in changed {
+            let path = root.join(&rel);
+            let digest = if path.is_file() {
+                self.file(&path)?
+            } else if path.is_dir() {
+                self.digest(&path)?
+            } else {
+                "deleted".to_string()
+            };
             key.part(&rel, &digest);
         }
         Ok(key.finish())
@@ -108,12 +176,15 @@ impl Drop for Cache {
     }
 }
 
-fn walk(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<(), String> {
+fn walk(root: &Path, dir: &Path, with_git: bool, out: &mut Vec<String>) -> Result<(), String> {
     let entries = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            walk(root, &path, out)?;
+            if entry.file_name() == ".git" && !with_git {
+                continue;
+            }
+            walk(root, &path, with_git, out)?;
         } else if path.is_file() {
             let rel = path.strip_prefix(root).unwrap_or(&path);
             out.push(rel.display().to_string());
@@ -178,6 +249,55 @@ mod tests {
         assert!(!again.changed, "an unchanged stat is not hashed again");
         std::fs::write(&file, "two!").unwrap();
         assert_ne!(again.digest(&file).unwrap(), first);
+    }
+
+    #[test]
+    fn a_checkout_is_its_commit_and_its_dirty_files_never_its_git_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("sdk");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/a.rs"), "fn a() {}").unwrap();
+        std::fs::write(repo.join(".gitignore"), "target/\n").unwrap();
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "c"]);
+        let mut cache = Cache::load(&dir.path().join("cache.json"));
+        let clean = cache.digest(&repo).unwrap();
+        // git rewrites its own files (index refresh, packing): the content is the same.
+        git(&["gc", "-q"]);
+        std::fs::remove_file(repo.join(".git/index")).unwrap();
+        git(&["reset", "-q"]);
+        std::fs::create_dir_all(repo.join("target")).unwrap();
+        std::fs::write(repo.join("target/build.o"), "ignored").unwrap();
+        assert_eq!(cache.digest(&repo).unwrap(), clean);
+        // A dirty file and an untracked file change it; putting them back restores it.
+        std::fs::write(repo.join("src/a.rs"), "fn a() { }").unwrap();
+        let dirty = cache.digest(&repo).unwrap();
+        assert_ne!(dirty, clean);
+        std::fs::write(repo.join("src/new.rs"), "x").unwrap();
+        assert_ne!(cache.digest(&repo).unwrap(), dirty);
+        std::fs::remove_file(repo.join("src/new.rs")).unwrap();
+        std::fs::write(repo.join("src/a.rs"), "fn a() {}").unwrap();
+        assert_eq!(cache.digest(&repo).unwrap(), clean);
     }
 
     #[test]

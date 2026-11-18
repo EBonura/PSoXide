@@ -6,6 +6,7 @@ pub mod cross;
 pub mod host;
 pub mod install;
 pub mod journeys;
+pub mod jreceipt;
 pub mod size;
 pub mod speed;
 
@@ -166,7 +167,21 @@ impl Ctx<'_> {
             .map_err(|_| "input digest cache lock".to_string())?
             .digest(path)?;
         if let Some(want) = self.game.originals.get(name) {
-            if *want != digest {
+            // A pin written before git checkouts were fingerprinted by commit: accept the same
+            // files under the old digest and say what the pin should now read.
+            let legacy = || {
+                self.originals
+                    .lock()
+                    .ok()
+                    .and_then(|mut c| c.legacy_digest(path).ok())
+            };
+            if *want != digest && legacy().as_deref() == Some(want.as_str()) {
+                println!(
+                    "note: [originals] {name} holds the older whole-tree digest {}; the files are \
+                     the same; the current digest is {digest} (update the pin when convenient)",
+                    util::short(want)
+                );
+            } else if *want != digest {
                 return Err(format!(
                     "original game files `{name}` at {} have content {} but the game file's \
                      [originals] requires {}: point [inputs] {name} at the right files",

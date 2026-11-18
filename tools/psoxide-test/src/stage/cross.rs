@@ -71,10 +71,12 @@ pub fn run(ctx: &Ctx<'_>) -> StageResult {
                 .tool(&ctx.config.tools.rearmed_core, "[tools] rearmed_core")
                 .map(Path::to_path_buf)
                 .and_then(|core| {
+                    // The adapter by its source, not this binary: a harness rebuild for any other
+                    // reason must not replay every smoke.
                     Ok(format!(
                         "{} {}",
                         util::sha256_file(&core)?,
-                        util::sha256_file(&self_exe)?
+                        adapter_digest()
                     ))
                 }),
             Emulator::Redux => ctx
@@ -328,4 +330,13 @@ pub fn judge(name: &str, plan: &Plan, replay: Result<Replay, String>, out: &Path
         );
     }
     Check::pass(name, value).detail(out.display().to_string())
+}
+
+/// The ReARMed adapter's identity: the source of the host and of the plan it replays.
+fn adapter_digest() -> String {
+    util::sha256_bytes(
+        [include_str!("../rearmed.rs"), include_str!("../journey.rs")]
+            .concat()
+            .as_bytes(),
+    )
 }

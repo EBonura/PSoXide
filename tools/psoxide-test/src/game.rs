@@ -276,6 +276,15 @@ pub struct Host {
     /// slots while it runs (and should share an `exclusive` group with other such checks).
     #[serde(default)]
     pub emulators: Option<usize>,
+    /// Path prefixes (repo-relative) of everything the check reads. With them its receipt is keyed
+    /// on those files alone (plus `uses`), so a commit that changes nothing it reads (an SDK pin
+    /// move, a journey edit) does not run it again. Empty: the whole tree, as before.
+    #[serde(default)]
+    pub inputs: Vec<String>,
+    /// What else the check reads: `sdk` (the hydrated SDK's guest sources: .psoxide/sdk, crates,
+    /// engine), `gate` (the pinned gate revision), `frontend` (the configured frontend binary).
+    #[serde(default)]
+    pub uses: Vec<String>,
 }
 
 /// A number read from a host check's output: the first integer after `key=` or `key:`.
@@ -450,6 +459,16 @@ impl Game {
             }
             if h.command.is_empty() {
                 return Err(format!("[[host]] `{}` has no command", h.name));
+            }
+            if let Some(u) = h
+                .uses
+                .iter()
+                .find(|u| !["sdk", "gate", "frontend"].contains(&u.as_str()))
+            {
+                return Err(format!(
+                    "[[host]] `{}`: uses `{u}` is not sdk, gate or frontend",
+                    h.name
+                ));
             }
             if let Some(m) = &h.metric {
                 if !matches!(m.better.as_deref(), None | Some("lower" | "higher")) {
