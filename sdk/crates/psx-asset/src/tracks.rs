@@ -616,6 +616,67 @@ pub(crate) unsafe fn joint_pose(tracks: &Tracks, joint: usize, pos: &TrackPos) -
     }
 }
 
+/// The translation track of joint `joint` at `pos`, model units: what
+/// [`joint_pose`] returns as the translation, with no rotation decode. For a
+/// derived v7 joint this is its residual, not its translation.
+///
+/// # Safety
+/// `tracks` must come from [`validate`] and `joint < joint_count`.
+#[inline]
+pub(crate) unsafe fn joint_translation(tracks: &Tracks, joint: usize, pos: &TrackPos) -> Vec3I32 {
+    debug_assert!(joint < tracks.joint_count as usize);
+    // SAFETY: `joint < joint_count`, so the 16 byte descriptor is inside the
+    // blob `validate` measured.
+    let d = unsafe {
+        tracks
+            .blob
+            .add(DESCRIPTORS_OFFSET + joint * fmt::DESCRIPTOR_SIZE)
+    };
+    // SAFETY: the descriptor is 16 readable bytes.
+    let w0 = unsafe { read_u32(d) };
+    // SAFETY: as above.
+    let w1 = unsafe { read_u32(d.add(4)) };
+    // SAFETY: as above.
+    let w2 = unsafe { read_u32(d.add(8)) };
+    // SAFETY: as above.
+    let w3 = unsafe { read_u32(d.add(12)) };
+    let trans_rate = ((w0 >> 8) & 7) as usize;
+    let step = (w0 >> 11) & 15;
+    let axis = w0 >> 16;
+    let trans_off = (w1 >> 16) as usize;
+    let kb = ((w3 >> 16) & 0xff) as usize;
+    // SAFETY: `validate` proved offsets, key counts and strides stay inside the
+    // key area plus its slack, for every index `track_pos` can produce.
+    let area = unsafe { tracks.blob.add(tracks.key_area) };
+    let (ti, tf) = (
+        pos.idx[trans_rate] as usize,
+        i32::from(pos.frac[trans_rate]),
+    );
+    let min = [
+        (w2 as i16) as i32,
+        ((w2 >> 16) as i16) as i32,
+        (w3 as i16) as i32,
+    ];
+    let shift = u32::from(tracks.translation_shift);
+    // SAFETY: key `ti` of the translation track starts inside the validated
+    // range.
+    let ca = unsafe { decode_trans_codes(area.add(trans_off + ti * kb), axis) };
+    let mut t = [
+        min[0] + (ca[0] << step),
+        min[1] + (ca[1] << step),
+        min[2] + (ca[2] << step),
+    ];
+    if tf != 0 {
+        // SAFETY: a non zero fraction implies `ti + 1` is a key of the track.
+        let cb = unsafe { decode_trans_codes(area.add(trans_off + (ti + 1) * kb), axis) };
+        for a in 0..3 {
+            let b = min[a] + (cb[a] << step);
+            t[a] += ((b - t[a]) * tf) >> 8;
+        }
+    }
+    Vec3I32::new(t[0] << shift, t[1] << shift, t[2] << shift)
+}
+
 /// Safe single-key helpers the cooker uses to search and verify tracks with the
 /// exact decoder.
 pub mod host {

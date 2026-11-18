@@ -1421,6 +1421,33 @@ impl<'a> Animation<'a> {
         })
     }
 
+    /// The translation of joint `joint_index` at stored frame `frame_index`
+    /// ([`Self::pose`]'s translation, without a rotation decode where the
+    /// translation is absolute).
+    pub fn translation(&self, frame_index: u16, joint_index: u16) -> Option<Vec3I32> {
+        if frame_index >= self.frame_count || joint_index >= self.joint_count {
+            return None;
+        }
+        if let Some(tracks) = &self.tracks {
+            if !tracks::is_derived(tracks, joint_index as usize) {
+                let pos = tracks::track_pos(self.poses, u32::from(frame_index) << 8);
+                // SAFETY: a validated clip and checked indices.
+                return Some(unsafe {
+                    tracks::joint_translation(tracks, joint_index as usize, &pos)
+                });
+            }
+        }
+        self.pose(frame_index, joint_index)
+            .map(|pose| pose.translation)
+    }
+
+    /// [`Self::pose_looped_q12`]'s translation, without a rotation decode
+    /// where the translation is absolute.
+    pub fn translation_looped_q12(&self, frame_q12: u32, joint_index: u16) -> Option<Vec3I32> {
+        self.looped_pose_sample_q12(frame_q12)?
+            .translation(joint_index)
+    }
+
     /// Interpolated looping joint pose at a Q12 fixed-point frame phase.
     ///
     /// `frame_q12` uses sampled animation frames as the integer unit
@@ -1604,6 +1631,24 @@ impl AnimationPoseSample<'_> {
 }
 
 impl AnimationPoseSample<'_> {
+    /// The translation of `joint` at this sample: [`Self::pose`]'s
+    /// translation, decoding no rotation when the joint's translation is
+    /// absolute (in-place root correction reads only this).
+    #[inline]
+    pub fn translation(&self, joint_index: u16) -> Option<Vec3I32> {
+        if let Some(tracks) = &self.animation.tracks {
+            if joint_index < self.animation.joint_count
+                && !tracks::is_derived(tracks, joint_index as usize)
+            {
+                // SAFETY: a validated clip and a checked joint index.
+                return Some(unsafe {
+                    tracks::joint_translation(tracks, joint_index as usize, &self.track_pos)
+                });
+            }
+        }
+        self.pose(joint_index).map(|pose| pose.translation)
+    }
+
     /// `true` when the clip is v7: some joint translations follow their
     /// parents (see [`Self::parent`]).
     #[inline]

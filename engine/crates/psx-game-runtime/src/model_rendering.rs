@@ -2676,9 +2676,7 @@ pub fn model_instance_joint_world_transform(
 /// the answer (see [`PlayerActorPoseSnapshot::clip_first_root_xz`]) instead of
 /// decoding a pose sample for it again.
 fn clip_first_root_xz(animation: Animation<'static>) -> Option<[i32; 2]> {
-    animation
-        .pose(0, 0)
-        .map(|root| [root.translation.x, root.translation.z])
+    animation.translation(0, 0).map(|root| [root.x, root.z])
 }
 
 /// `first_root_xz` is [`clip_first_root_xz`] for `animation` when the caller
@@ -2702,11 +2700,15 @@ fn model_pose_anchor_translation(
             Some(resolved) => Some(resolved),
             None => clip_first_root_xz(animation),
         };
-        match (first_root_xz, animation.pose_looped_q12(phase_q12, 0)) {
+        // Only the root's translation is read: no rotation decode.
+        match (
+            first_root_xz,
+            animation.translation_looped_q12(phase_q12, 0),
+        ) {
             (Some(first_root), Some(current_root)) => [
-                first_root[0].saturating_sub(current_root.translation.x),
+                first_root[0].saturating_sub(current_root.x),
                 0,
-                first_root[1].saturating_sub(current_root.translation.z),
+                first_root[1].saturating_sub(current_root.z),
             ],
             _ => [0, 0, 0],
         }

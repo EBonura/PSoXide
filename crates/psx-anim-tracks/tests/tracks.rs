@@ -485,3 +485,34 @@ fn v7_pose_cache_matches_walking_the_chain() {
         .collect();
     assert_eq!(anim.first_cache_mismatch(&queries), None);
 }
+
+#[test]
+fn translation_only_decode_matches_the_pose() {
+    let (chain, _) = rigid_chain(14, 5, 9);
+    let mut clips = vec![
+        chain.clone(),
+        ClipInput {
+            parents: Vec::new(),
+            ..chain
+        },
+    ];
+    clips.push(synthetic(20, 4, 3));
+    for clip in &clips {
+        let (blob, _) = encode(clip, &Options::default()).unwrap();
+        let anim = Animation::from_bytes(&blob).unwrap();
+        for j in 0..anim.joint_count() {
+            for f in 0..anim.frame_count() {
+                assert_eq!(
+                    anim.translation(f, j),
+                    anim.pose(f, j).map(|p| p.translation)
+                );
+            }
+            for phase in (0..((anim.frame_count() as u32 - 1) << 12)).step_by(97) {
+                assert_eq!(
+                    anim.translation_looped_q12(phase, j),
+                    anim.pose_looped_q12(phase, j).map(|p| p.translation)
+                );
+            }
+        }
+    }
+}
