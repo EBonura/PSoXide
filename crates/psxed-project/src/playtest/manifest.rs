@@ -275,6 +275,22 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
          pub const UPLOADED_TEXTURE_EXTRA_VRAM_SLOTS: usize = {};\n",
         super::uploaded_textures::extra_vram_slots(package),
     );
+    // The sky projections the level's rooms show, so the renderer links only
+    // their kernels and caches (an unset projection draws as a panorama).
+    let sky_projections = package
+        .rooms
+        .iter()
+        .filter(|room| room.sky.flags & psx_level::sky_flags::ENABLED != 0)
+        .map(|room| match room.sky.flags & psx_level::sky_flags::PROJECTION_MASK {
+            0 => psx_level::sky_flags::PANORAMA,
+            projection => projection,
+        })
+        .fold(0u16, |all, projection| all | projection);
+    let _ = writeln!(
+        out,
+        "/// `psx_level::sky_flags` projection bits any room's enabled sky uses.\n\
+         pub const SKY_PROJECTIONS: u16 = {sky_projections};\n",
+    );
     // Force 4-byte alignment on embedded asset blobs. A zero-size
     // `[u32; 0]` marker bumps the wrapper's alignment to a word; the
     // trailing unsized `bytes` field then starts word-aligned, which

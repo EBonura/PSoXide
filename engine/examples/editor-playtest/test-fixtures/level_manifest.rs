@@ -113,6 +113,8 @@ pub const MODEL_DECODED_VERTEX_CAPACITY: usize = 1;
 pub static BOOST_MODULES_IT: &[(&str, &str)] = &[];
 pub const PERSISTENT_ASSET_PAGE_COUNT: usize = 1;
 pub const UPLOADED_TEXTURE_EXTRA_VRAM_SLOTS: usize = 0;
+/// `psx_level::sky_flags` projection bits any room's enabled sky uses.
+pub const SKY_PROJECTIONS: u16 = 14;
 pub const CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE: u16 = 0;
 pub const PLAYTEST_HAS_WORLD: bool = false;
 pub const PLAYTEST_PACKET_CAPACITY: usize = 1536;

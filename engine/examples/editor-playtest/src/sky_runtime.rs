@@ -82,6 +82,16 @@ pub(super) fn draw_scene_sky(
     }
 
     let projection = sky.flags & psx_level::sky_flags::PROJECTION_MASK;
+    // Only the projections the cooked level shows: the others' kernels and
+    // caches fold out of the image.
+    let shown = if projection == 0 {
+        psx_level::sky_flags::PANORAMA
+    } else {
+        projection
+    };
+    if crate::generated::SKY_PROJECTIONS & shown != shown {
+        return;
+    }
     if projection == 0 || projection == psx_level::sky_flags::PANORAMA {
         // The panorama relinks packets it keeps across frames, which the
         // previous frame's list may still be reading.

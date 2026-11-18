@@ -19,9 +19,14 @@
 
 use super::*;
 
-// The panorama packet cache is one slot: the level is not known when the
-// arenas are laid out, and a room that shows no panorama never touches it.
-const PANORAMA_CACHE_COUNT: usize = 1;
+// The panorama packet cache: one slot when a room of the cooked level shows
+// a panorama, none otherwise (a room that shows no panorama never touches it).
+const PANORAMA_CACHE_COUNT: usize =
+    if crate::generated::SKY_PROJECTIONS & psx_level::sky_flags::PANORAMA != 0 {
+        1
+    } else {
+        0
+    };
 
 /// Every mutable runtime arena, owned as one struct so the whole
 /// mutable-state budget reads in one place (the scene's other state
