@@ -783,6 +783,8 @@ impl Playtest {
         // Disabled actors begin Dead and must never complete the demo.
         let boss_defeated = GAME_ENTITIES.iter().enumerate().any(|(index, record)| {
             record.flags & psx_level::game_entity_flags::ENABLED != 0
+                && self.game_entities.state(index)
+                    == psx_game_runtime::entities::GameEntityState::Dead
                 && MODEL_INSTANCES
                     .get(usize::from(record.model_instance))
                     .and_then(|instance| MODELS.get(instance.model.to_usize()))
@@ -1976,6 +1978,21 @@ impl Playtest {
         &self,
         out: &mut S,
     ) -> usize {
+        self.collect_collision_blockers_near_into(out, None)
+    }
+
+    /// [`Self::collect_collision_blockers_into`], leaving out the cylinders
+    /// that cannot touch a body moving from `near` this tick (farther than
+    /// [`BLOCKER_REACH`] beyond their radius) and away fighters' bodies.
+    pub(super) fn collect_collision_blockers_near_into<
+        S: psx_engine::BoundedSink<CharacterCollisionCylinder>,
+    >(
+        &self,
+        out: &mut S,
+        near: Option<RoomPoint>,
+    ) -> usize {
+        /// More than any body moves in one tick, its own radius included.
+        const BLOCKER_REACH: i32 = 4096;
         let mut count = 0usize;
         for (index, inst) in MODEL_INSTANCES.iter().enumerate() {
             if inst.room != self.room_index {
@@ -1999,6 +2016,7 @@ impl Playtest {
                 Some(entity) => {
                     if self.game_entities.state(entity)
                         == psx_game_runtime::entities::GameEntityState::Dead
+                        || self.game_entities.away(entity)
                     {
                         continue;
                     }
@@ -2007,6 +2025,12 @@ impl Playtest {
                 }
                 None => RoomPoint::new(inst.x, inst.y, inst.z),
             };
+            if let Some(near) = near {
+                let reach = radius.saturating_add(BLOCKER_REACH);
+                if (center.x - near.x).abs() > reach || (center.z - near.z).abs() > reach {
+                    continue;
+                }
+            }
             if !out.try_push(CharacterCollisionCylinder::new(center, radius, height)) {
                 return count;
             }

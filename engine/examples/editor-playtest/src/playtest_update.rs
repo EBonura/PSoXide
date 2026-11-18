@@ -128,6 +128,21 @@ impl Playtest {
         let entity_positions = unsafe { initialized_prefix(&entity_positions, entity_count) };
         // SAFETY: both prefixes were initialized in the loop above.
         let entity_dead = unsafe { initialized_prefix(&entity_dead, entity_count) };
+        // A fighter whose room is not resident is away: no per-tick work
+        // for it anywhere until its room streams back in.
+        // psx-numeric-allow-next-line: fixed 64-record mask; bit ops only
+        let mut away = 0u64;
+        if let Some(world_rt) = self.world_rt.as_ref() {
+            for index in 0..entity_count.min(64) {
+                if world_rt
+                    .fighter_room(&mut self.fighter_rooms[index], entity_positions[index])
+                    .is_none()
+                {
+                    away |= 1u64 << index;
+                }
+            }
+        }
+        self.game_entities.set_away_mask(away);
         let eye = self.camera.position();
         let spatial_masks = self.world_rt.as_mut().map(|world_rt| {
             // The observer stays inside the player's body rather than on the
@@ -141,9 +156,13 @@ impl Playtest {
             let mut entity_activation_bounds =
                 [const { core::mem::MaybeUninit::<VisibilityBounds>::uninit() }; MAX_GAME_ENTITIES];
             for index in 0..entity_count {
-                let Some(record) = GAME_ENTITIES.get(index) else {
+                let Some(record) = GAME_ENTITIES
+                    .get(index)
+                    .filter(|_| !self.game_entities.away(index))
+                else {
                     // Preserve initialization even if a malformed runtime table
-                    // violates the cook's one-to-one entity contract.
+                    // violates the cook's one-to-one entity contract; an away
+                    // fighter is nowhere to be seen.
                     entity_activation_bounds[index].write(VisibilityBounds::EMPTY);
                     continue;
                 };
@@ -191,6 +210,10 @@ impl Playtest {
                 };
                 if instance < 64 {
                     actor_instances |= 1u64 << instance;
+                }
+                if self.game_entities.away(entity) {
+                    *bounds = VisibilityBounds::EMPTY;
+                    continue;
                 }
                 *bounds = VisibilityBounds::cylinder(
                     entity_positions[entity],
@@ -1060,7 +1083,8 @@ impl Playtest {
         telemetry::stage_begin(telemetry::stage::SIM_COLLISION);
         let mut blockers =
             psx_engine::FixedScratch::<CharacterCollisionCylinder, MAX_COLLISION_CYLINDERS>::new();
-        self.collect_collision_blockers_into(&mut blockers);
+        let near = self.game_entities.actor_motor().position();
+        self.collect_collision_blockers_near_into(&mut blockers, Some(near));
         let mut aabb_blockers =
             psx_engine::FixedScratch::<CharacterCollisionAabb, MAX_STATIC_PROP_AABB_BLOCKERS>::new(
             );

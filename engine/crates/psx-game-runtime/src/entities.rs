@@ -852,6 +852,9 @@ pub struct GameEntities<const MAX_ENTITIES: usize> {
     /// Owner-supplied per-record activation (area residency).
     // psx-numeric-allow-next-line: fixed 64-record activation mask; bit ops only, two-word on R3000
     spatial_active_mask: u64,
+    /// Records whose room is not resident ([`Self::set_away_mask`]).
+    // psx-numeric-allow-next-line: fixed 64-record mask; bit ops only, two-word on R3000
+    away_mask: u64,
 }
 
 impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
@@ -1164,6 +1167,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         clock: psx_engine::SimTick::ZERO,
         shown: [GameEntityAnimation::NONE; MAX_ENTITIES],
         spatial_active_mask: 0,
+        away_mask: 0,
     };
 
     /// Reset and spawn entity state 1:1 from the cooked records
@@ -1291,6 +1295,20 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
     // psx-numeric-allow-next-line: mirrors the fixed 64-record activation mask above; bit ops only
     pub fn set_spatial_active_mask(&mut self, mask: u64) {
         self.spatial_active_mask = mask;
+    }
+
+    /// Select the records whose room is not resident (bit `i` is record
+    /// `i`): an away fighter does no per-tick work at all (no thinking,
+    /// clocks, motor, animation or projectile reads) and resumes where it
+    /// stopped when its room streams back in. One rule for every fighter.
+    // psx-numeric-allow-next-line: mirrors the fixed 64-record activation mask above; bit ops only
+    pub fn set_away_mask(&mut self, mask: u64) {
+        self.away_mask = mask;
+    }
+
+    /// Whether record `index`'s room is not resident ([`Self::set_away_mask`]).
+    pub fn away(&self, index: usize) -> bool {
+        index < 64 && self.away_mask & (1u64 << index) != 0
     }
 
     /// Ticks entity `index` has spent in its current behavior state.
@@ -2421,6 +2439,10 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         self.speed_scale = mover.speed_scale();
         let mut index = 0usize;
         while index < count {
+            if self.away(index) {
+                index += 1;
+                continue;
+            }
             let record = &records[index];
             // An entity with a rival engages that slot as it stands before
             // this entity thinks; the rest engage the owner's target.

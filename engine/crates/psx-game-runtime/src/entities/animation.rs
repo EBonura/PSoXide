@@ -132,6 +132,9 @@ impl<const N: usize> GameEntities<N> {
         self.anim_clock = now;
         let count = self.count().min(records.len());
         for i in 0..count {
+            if self.away(i) {
+                continue;
+            }
             let gait = self.locomotion_anim(&records[i], i);
             let track = &mut self.gaits[i];
             if track.state == EntityAnim::NONE {

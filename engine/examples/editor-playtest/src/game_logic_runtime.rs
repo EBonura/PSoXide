@@ -2286,6 +2286,7 @@ impl Playtest {
         for (index, record) in GAME_ENTITIES.iter().enumerate() {
             if record.model_instance == psx_level::GAME_ENTITY_MODEL_INSTANCE_NONE
                 || out.len() >= out.capacity()
+                || self.game_entities.away(index)
             {
                 continue;
             }
@@ -2432,7 +2433,9 @@ impl Playtest {
         let now = ctx.sim_tick.as_u32();
         let count = self.game_entities.count().min(GAME_ENTITIES.len());
         for index in 0..count {
-            if self.game_entities.state(index) == GameEntityState::Dead {
+            if self.game_entities.state(index) == GameEntityState::Dead
+                || self.game_entities.away(index)
+            {
                 continue;
             }
             let record = &GAME_ENTITIES[index];

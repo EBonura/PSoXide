@@ -1887,10 +1887,10 @@ impl Scene for Playtest {
                 };
                 font.draw_text(8, 66, label, (240, 220, 150));
                 font.draw_text(8, 78, "PRESS A BUTTON TO TAKE OVER", (200, 200, 200));
-            } else if GAME_ENTITIES
-                .iter()
-                .any(|r| r.flags & psx_level::game_entity_flags::TRAINING != 0)
-            {
+            } else if GAME_ENTITIES.iter().enumerate().any(|(index, r)| {
+                r.flags & psx_level::game_entity_flags::TRAINING != 0
+                    && !self.game_entities.away(index)
+            }) {
                 font.draw_text(8, 66, "SELECT+L2: AI DUEL", (180, 190, 200));
             }
         }

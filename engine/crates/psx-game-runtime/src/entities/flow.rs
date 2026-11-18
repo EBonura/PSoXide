@@ -13,6 +13,10 @@ impl<const N: usize> GameEntities<N> {
         projectiles: &crate::projectiles::CombatProjectiles<P>,
     ) {
         for (i, r) in records.iter().enumerate().take(self.count()) {
+            if self.away(i) {
+                self.projectile_threats[i] = None;
+                continue;
+            }
             self.projectile_threats[i] = projectiles.incoming_threat(
                 self.teams[i],
                 r.room,
