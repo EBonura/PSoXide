@@ -687,6 +687,7 @@ pub fn run(duel: &Duel<'_>) -> DuelResult {
             entities.seed_training_actor(records, 0, duel.seeds[n]);
             // The game times its entities' attacks after spawning them.
             entities.time_attacks(records, |_, action, _, _, _| fighter.spec.timing(action));
+            entities.time_flinches(records, |_, _, _, _| fighter.spec.flinch_ticks);
             let position = entities.position(0);
             Side {
                 spec: fighter.spec.clone(),

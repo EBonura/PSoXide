@@ -114,6 +114,22 @@ fn training_fighter(
         .get(first..first + usize::from(body.combat_capsule_count))
         .unwrap_or(&[]);
     let mut spec = FighterSpec::new(name, record, body, capsules);
+    let model = package
+        .model_instances
+        .get(usize::from(record.model_instance))
+        .map(|instance| usize::from(instance.model));
+    let hit_react = psx_level::CharacterAnimationAction::HitReact.to_index();
+    spec.flinch_ticks = model.and_then(|model| {
+        let clip = body.action_clips[hit_react];
+        clip.is_some().then_some(())?;
+        clip_ticks(
+            package,
+            model,
+            clip.raw(),
+            body.action_speeds[hit_react],
+            body.action_frame_ranges[hit_react],
+        )
+    });
     let clocks = entity_clocks(package, &spec.record);
     attach_clocks(&mut spec, clocks, capsules);
     spec.capsules = capsules.to_vec();

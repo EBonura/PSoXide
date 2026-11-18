@@ -69,6 +69,9 @@ pub struct FighterSpec {
     /// guest's own rules (`GameEntities::time_attacks`); `None` keeps the
     /// record's ticks, as on the disc.
     pub timings: [Option<psx_game_runtime::fighter_action::ActionTiming>; 3],
+    /// Its Hit React clip's length in ticks, as the guest times a flinch
+    /// (`GameEntities::time_flinches`); `None` when it binds none.
+    pub flinch_ticks: Option<u16>,
 }
 
 impl FighterSpec {
@@ -116,6 +119,7 @@ impl FighterSpec {
             contact: Vec::new(),
             capsules: capsules.to_vec(),
             timings: [None; 3],
+            flinch_ticks: None,
         }
     }
 

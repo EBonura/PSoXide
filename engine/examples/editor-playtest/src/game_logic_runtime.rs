@@ -513,8 +513,11 @@ fn projectile_vitality_channel(
 #[derive(Clone, Copy)]
 struct PlayerHitsTaken {
     hits: u16,
-    /// Untyped melee damage from enemy swings.
+    /// Melee damage from fighters' swings, on [`Self::melee_channel`].
     melee_damage: u16,
+    /// The stance of the fighter whose swing landed last: the channel its
+    /// damage takes, as her swing's takes hers.
+    melee_channel: VitalityChannelId,
     poise: u16,
     horizon_shots: u16,
     zenith_shots: u16,
@@ -531,6 +534,7 @@ impl PlayerHitsTaken {
     const NONE: Self = Self {
         hits: 0,
         melee_damage: 0,
+        melee_channel: VitalityChannelId::One,
         poise: 0,
         horizon_shots: 0,
         zenith_shots: 0,
@@ -723,12 +727,14 @@ impl Playtest {
                 self.duel_log_event(ctx, 1, duel::DUEL_EVENT_CRIT);
             }
             let attacker = CombatantId::entity(attack.entity());
+            // The swing's side is its attacker's stance, for every defender.
+            let channel = self.game_entities.stance(attack.entity());
             if player.parries {
                 self.parry_on_player(
                     Strike {
                         attacker,
                         kind: HitKind::Melee,
-                        channel: self.game_entities.actor().stance.active(),
+                        channel,
                         damage,
                         poise: poise_damage,
                         crit: false,
@@ -745,6 +751,15 @@ impl Playtest {
                 );
                 taken.hits = taken.hits.saturating_add(1);
                 taken.melee_damage = taken.melee_damage.saturating_add(damage);
+                taken.melee_channel = channel;
+                // The tick's posture lands summed, so each swing takes the
+                // stance rule here, by its attacker's stance, as a bolt does.
+                let (_, poise_damage) = stance_scaled(
+                    &self.player_stats,
+                    self.game_entities.actor().opposes(channel),
+                    0,
+                    poise_damage,
+                );
                 taken.poise = taken.poise.saturating_add(poise_damage);
                 taken.attacker = attacker;
                 taken.crit |= crit;
@@ -1259,26 +1274,24 @@ impl Playtest {
         let gameplay_now = self.gameplay_tick(ctx.sim_tick);
         let anchor = player_hit_anchor(player.position, player.height.max(0) as u16);
         if taken.melee_damage > 0 {
-            // Legacy enemy attacks are not axis-authored yet, so Horizon is
-            // their deterministic migration channel and excess damage spills
-            // into Zenith. Shell reduction is applied before routing; only
-            // emptying BOTH pools arms the existing shared death sequence.
+            // A swing lands on its attacker's stance, the one stance rule
+            // every defender takes.
             let died = self.hazard_death_ticks_remaining == 0
                 && self.player_take_damage(
                     taken.attacker,
                     HitKind::Melee,
-                    None,
+                    Some(taken.melee_channel),
                     taken.melee_damage,
                 );
-            // Damage taken floats off the player, not off whoever threw
-            // it, and it carries the channel it drained -- Horizon here,
-            // matching the migration routing above.
+            // Damage taken floats off the player, in the swing's channel.
             self.damage_numbers.spawn(
                 anchor,
                 self.room_index,
                 taken.melee_damage,
                 if taken.crit {
                     DamageNumberChannel::Crit
+                } else if taken.melee_channel == VitalityChannelId::Two {
+                    DamageNumberChannel::Zenith
                 } else {
                     DamageNumberChannel::Horizon
                 },
@@ -1784,6 +1797,19 @@ impl Playtest {
                     window(psx_level::CombatWindowKind::Armored),
                     window(psx_level::CombatWindowKind::Invulnerable),
                 )
+            },
+        );
+        self.game_entities.time_flinches(
+            GAME_ENTITIES.as_slice(),
+            |record, clip, speed_q8, frame_range| {
+                let character = CHARACTERS.get(record.character.to_usize())?;
+                let animation = models
+                    .get(character.model.to_usize())
+                    .copied()
+                    .flatten()?
+                    .clip(clips, ModelClipIndex(clip))?;
+                let ticks = mr::clip_duration_ticks(animation, video_hz, speed_q8, frame_range);
+                Some(ticks.min(u32::from(u16::MAX)) as u16)
             },
         );
         self.entity_attacks_timed = true;

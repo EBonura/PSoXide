@@ -87,6 +87,9 @@ pub enum GameEntityState {
     /// A crit broke poise: down and helpless for the record's
     /// `combat.knockdown_ticks`, then back up.
     KnockedDown = 8,
+    /// An ordinary hit (no poise break, no armour) interrupted it: its Hit
+    /// React clip played through, as the player flinches.
+    Flinched = 9,
 }
 
 impl GameEntityState {
@@ -100,6 +103,7 @@ impl GameEntityState {
             4 => Self::Attack,
             6 => Self::Staggered,
             8 => Self::KnockedDown,
+            9 => Self::Flinched,
             _ => Self::Dead,
         }
     }
@@ -702,6 +706,9 @@ pub struct GameEntities<const MAX_ENTITIES: usize> {
     /// What held the actor at its latest think: 0 free, 1 an action, 2 an
     /// attack ([`Self::actor_intent`]).
     actor_busy: u8,
+    /// How long each entity's flinch lasts: its Character's Hit React clip,
+    /// 0 when it binds none (no flinch, as for the player).
+    flinch_ticks: [u16; MAX_ENTITIES],
     /// How each entity's light, heavy and ranged attacks run: read off its
     /// Character's clips by [`Self::time_attacks`], else its record's ticks.
     attack_timings: [[crate::fighter_action::ActionTiming; 3]; MAX_ENTITIES],
@@ -885,6 +892,38 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         }
     }
 
+    /// Time every entity's flinch from its Character's own Hit React clip
+    /// (no stand-in): `length` reads the clip at the speed and frame range
+    /// its Character plays it at, in ticks. Call after spawning.
+    pub fn time_flinches(
+        &mut self,
+        records: &[LevelGameEntityRecord],
+        mut length: impl FnMut(
+            &LevelGameEntityRecord,
+            u16,
+            u16,
+            CharacterActionFrameRange,
+        ) -> Option<u16>,
+    ) {
+        let count = self.count().min(records.len());
+        let action = CharacterAnimationAction::HitReact.to_index();
+        for (index, record) in records.iter().enumerate().take(count) {
+            let body = self.body(record);
+            let clip = body.action_clips[action];
+            self.flinch_ticks[index] = if clip.is_some() {
+                length(
+                    record,
+                    clip.raw(),
+                    body.action_speeds[action],
+                    body.action_frame_ranges[action],
+                )
+                .unwrap_or(0)
+            } else {
+                0
+            };
+        }
+    }
+
     fn selected_attack_playback(
         &self,
         record: &LevelGameEntityRecord,
@@ -1018,6 +1057,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         actions: [crate::fighter_action::FighterAction::IDLE; MAX_ENTITIES],
         actor_plan: None,
         actor_busy: 0,
+        flinch_ticks: [0; MAX_ENTITIES],
         attack_timings: [[crate::fighter_action::ActionTiming {
             windup: 0,
             active: 0,
@@ -2013,6 +2053,18 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
             GameEntityState::KnockedDown => {
                 (Action::Knockdown, one_shot(record.knockdown_clip, ticks))
             }
+            GameEntityState::Flinched => {
+                let action = Action::HitReact.to_index();
+                let body = self.body(record);
+                (
+                    Action::HitReact,
+                    GameEntityClip {
+                        speed_q8: body.action_speeds[action],
+                        frame_range: body.action_frame_ranges[action],
+                        ..one_shot(body.action_clips[action].raw(), ticks)
+                    },
+                )
+            }
             GameEntityState::Dead => (Action::Death, one_shot(record.death_clip, ticks)),
         }
     }
@@ -2098,6 +2150,27 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         }
         if matches!(state, GameEntityState::Idle | GameEntityState::Patrol) && !out.poise_broken {
             self.notice_attacker(index, strike.attacker);
+        }
+        // The one reaction rule: an ordinary melee hit flinches a fighter
+        // that binds a Hit React clip, unless armour holds it or a reaction
+        // already does (a flinch never restarts itself).
+        if !out.poise_broken
+            && !poise.armored
+            && strike.kind == HitKind::Melee
+            && self.flinch_ticks[index] != 0
+            && !matches!(
+                state,
+                GameEntityState::Staggered
+                    | GameEntityState::KnockedDown
+                    | GameEntityState::Flinched
+            )
+        {
+            self.release_attack_owner(index, delay);
+            self.enter_state(
+                index,
+                GameEntityState::Flinched,
+                &mut GameEntityTickStats::default(),
+            );
         }
         if out.poise_broken {
             self.release_attack_owner(index, delay);
@@ -2336,7 +2409,9 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
                 delta_ticks,
                 matches!(
                     state,
-                    GameEntityState::Staggered | GameEntityState::KnockedDown
+                    GameEntityState::Staggered
+                        | GameEntityState::KnockedDown
+                        | GameEntityState::Flinched
                 ),
                 swapping,
             );
@@ -2415,6 +2490,12 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
                         self.enter_state(index, GameEntityState::Aggro, &mut stats);
                         // The authored reaction is for first acquisition, not
                         // an extra pause after the player already won a stagger.
+                        self.state_ticks[index] = u16::from(record.reaction_ticks);
+                    }
+                }
+                GameEntityState::Flinched => {
+                    if self.state_ticks[index] >= self.flinch_ticks[index] {
+                        self.enter_state(index, GameEntityState::Aggro, &mut stats);
                         self.state_ticks[index] = u16::from(record.reaction_ticks);
                     }
                 }
@@ -2716,19 +2797,20 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         state: GameEntityState,
         stats: &mut GameEntityTickStats,
     ) {
-        if matches!(
+        let interrupted = matches!(
             state,
-            GameEntityState::Staggered | GameEntityState::KnockedDown | GameEntityState::Dead
-        ) {
+            GameEntityState::Staggered
+                | GameEntityState::KnockedDown
+                | GameEntityState::Flinched
+                | GameEntityState::Dead
+        );
+        if interrupted {
             self.finish_goal(index, EnemyGoalResult::Cancelled);
         }
         self.state[index] = state as u8;
         self.state_ticks[index] = 0;
         self.combat_flags[index] &= !GAME_ENTITY_PARRIED_STAGGER;
-        if matches!(
-            state,
-            GameEntityState::Staggered | GameEntityState::KnockedDown | GameEntityState::Dead
-        ) {
+        if interrupted {
             // A pose retained earlier this tick cannot deal damage after its
             // owner was interrupted, even on the final Attack -> Recover tick.
             self.attack_sequence[index] = self.attack_sequence[index].wrapping_add(1);
@@ -4693,6 +4775,40 @@ mod tests {
         assert_eq!(entities.clip_for_state(&SLOW_STUN, 0).phase_ticks, 84);
         entities.tick(&SLOW_STUN, far_input(), &mut OpenWorld);
         assert_eq!(entities.state(0), GameEntityState::Aggro);
+    }
+
+    #[test]
+    fn an_ordinary_melee_hit_flinches_a_fighter_with_a_hit_react_clip() {
+        let mut entities = GameEntities::<8>::EMPTY;
+        entities.spawn_from_records(&IDLE_ENEMY);
+        entities.set_spatial_active_mask(u64::MAX);
+        // No Hit React clip: no flinch, as for the player.
+        entities.apply_hit(&IDLE_ENEMY, 0, VitalityChannelId::One, 5, 5);
+        assert_ne!(entities.state(0), GameEntityState::Flinched);
+        // Bound: an ordinary hit interrupts its attack for the clip's length.
+        entities.flinch_ticks[0] = 10;
+        entities.enter_phase(0, AttackPhase::Windup, 0);
+        let outcome = entities.apply_hit(&IDLE_ENEMY, 0, VitalityChannelId::One, 5, 5);
+        assert!(outcome.connected && !outcome.staggered);
+        assert_eq!(entities.state(0), GameEntityState::Flinched);
+        // A second hit does not restart it.
+        entities.tick(&IDLE_ENEMY, far_input(), &mut OpenWorld);
+        entities.apply_hit(&IDLE_ENEMY, 0, VitalityChannelId::One, 5, 5);
+        assert_eq!(entities.state_age(0), 1);
+        for _ in 1..10 {
+            entities.tick(&IDLE_ENEMY, far_input(), &mut OpenWorld);
+        }
+        assert_eq!(entities.state(0), GameEntityState::Aggro);
+        // Armour holds it: a heavy in contact does not flinch.
+        entities.attack_mode[0] = GAME_ENTITY_ATTACK_HEAVY;
+        entities.enter_phase(0, AttackPhase::Active, 0);
+        entities.apply_hit(&IDLE_ENEMY, 0, VitalityChannelId::One, 5, 5);
+        assert_eq!(entities.state(0), GameEntityState::Attack);
+        // A bolt does not flinch.
+        entities.attack_mode[0] = GAME_ENTITY_ATTACK_LIGHT;
+        entities.enter_phase(0, AttackPhase::Windup, 0);
+        entities.apply_projectile_hit(&IDLE_ENEMY, 0, VitalityChannelId::One, 5, 5, false);
+        assert_eq!(entities.state(0), GameEntityState::Attack);
     }
 
     #[test]
