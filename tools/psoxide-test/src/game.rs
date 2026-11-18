@@ -155,8 +155,9 @@ fn zero_offset() -> Vec<i32> {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Journeys {
-    /// Glob of journey files, relative to the repo root.
-    pub files: String,
+    /// Glob (or list of globs) of journey files, relative to the repo root.
+    #[serde(deserialize_with = "one_or_many")]
+    pub files: Vec<String>,
     /// Journey names (file stems) the quick tier runs on `real`.
     #[serde(default)]
     pub precheck: Vec<String>,
@@ -267,6 +268,10 @@ pub struct Host {
     /// after another (they share a build tree or start an emulator).
     #[serde(default)]
     pub exclusive: Option<String>,
+    /// Emulators the command starts by itself: it holds that many machine-wide emulator
+    /// slots while it runs (and should share an `exclusive` group with other such checks).
+    #[serde(default)]
+    pub emulators: Option<usize>,
 }
 
 /// A number read from a host check's output: the first integer after `key=` or `key:`.

@@ -76,6 +76,55 @@ pub fn machine_slot<R>(
     }
 }
 
+/// Hold `n` of the `count` machine-wide slots `kind` at once while `work` runs (a job that
+/// starts emulators of its own). All or nothing: a partial set is let go before waiting again,
+/// so two jobs each wanting several slots cannot hold each other up.
+pub fn machine_slots<R>(
+    dir: Option<&Path>,
+    kind: &str,
+    count: usize,
+    n: usize,
+    work: impl FnOnce() -> R,
+) -> R {
+    let Some(dir) = dir else {
+        return work();
+    };
+    let n = n.clamp(1, count.max(1));
+    if std::fs::create_dir_all(dir).is_err() {
+        return work();
+    }
+    loop {
+        let mut held = Vec::new();
+        for i in 0..count.max(1) {
+            if held.len() == n {
+                break;
+            }
+            let path = dir.join(format!("{kind}-{i}.lock"));
+            let Ok(file) = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&path)
+            else {
+                continue;
+            };
+            // SAFETY: a valid open descriptor owned by `file`, kept in `held` while locked.
+            let locked =
+                unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
+            if locked {
+                held.push(file);
+            }
+        }
+        if held.len() == n {
+            let r = work();
+            drop(held);
+            return r;
+        }
+        drop(held);
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,5 +162,25 @@ mod tests {
         });
         assert!(peak.load(Ordering::SeqCst) <= 2);
         assert_eq!(machine_slot(None, "emu", 1, || 7), 7);
+    }
+
+    #[test]
+    fn several_slots_are_taken_all_or_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let in_use = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+        let jobs: Vec<u32> = (0..4).collect();
+        run_all(&jobs, 4, |_| {
+            machine_slots(Some(dir.path()), "emu", 3, 2, || {
+                let now = in_use.fetch_add(2, Ordering::SeqCst) + 2;
+                peak.fetch_max(now, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(30));
+                in_use.fetch_sub(2, Ordering::SeqCst);
+            })
+        });
+        assert!(
+            peak.load(Ordering::SeqCst) <= 3,
+            "never more than 3 slots in use"
+        );
     }
 }

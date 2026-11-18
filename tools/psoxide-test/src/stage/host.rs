@@ -255,7 +255,14 @@ fn execute(
         .dir
         .as_ref()
         .map_or_else(|| ctx.repo.clone(), |d| ctx.repo.join(d));
-    let done = util::run_logged(command, &dir, env, &log, None);
+    let run = || util::run_logged(command, &dir, env, &log, None);
+    let done = match host.emulators {
+        Some(n) if n > 0 => {
+            let b = &ctx.config.budget;
+            crate::sched::machine_slots(b.shared_dir.as_deref(), "emu", b.machine_emulators, n, run)
+        }
+        _ => run(),
+    };
     let mut facts = std::collections::BTreeMap::new();
     let check = match done {
         Ok(d) if d.code != 0 => {
