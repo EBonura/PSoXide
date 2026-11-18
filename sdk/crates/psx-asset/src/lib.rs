@@ -876,6 +876,11 @@ impl<'a> Animation<'a> {
                 return Err(ParseError::UnsupportedVersion(version));
             }
         };
+        // The console decodes keyed tracks only: the cook keys every clip, and
+        // the pose-table decoders (v1 to v5) stay host-side for the tools.
+        if cfg!(target_arch = "mips") && pose_record_size != TRACKS_MARK {
+            return Err(ParseError::UnsupportedVersion(version));
+        }
         let payload_len = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
         let payload_start = psxed_format::AssetHeader::SIZE;
         let actual_payload = bytes.len().saturating_sub(payload_start);
@@ -1116,6 +1121,10 @@ impl<'a> Animation<'a> {
             // SAFETY: `tracks` came from `validate` for this blob and the joint
             // index was checked above.
             return Some(unsafe { tracks::joint_pose(tracks, joint_index as usize, &pos) });
+        }
+        if cfg!(target_arch = "mips") {
+            // Keyed tracks only on the console (see `from_bytes`).
+            return None;
         }
         let base = frame_index as usize * self.joint_count as usize * self.pose_record_size;
         // SAFETY: both indices were checked above. `from_bytes` validates
@@ -1547,6 +1556,10 @@ impl AnimationPoseSample<'_> {
                 tracks::joint_pose(tracks, joint_index as usize, &self.track_pos)
             });
         }
+        if cfg!(target_arch = "mips") {
+            // Keyed tracks only on the console (see `Animation::from_bytes`).
+            return None;
+        }
         if self.alpha_q12 == 0 || self.base_frame == self.next_frame {
             // SAFETY: the joint index was checked above and the frame offset
             // was computed from a validated animation frame.
@@ -1614,6 +1627,10 @@ impl AnimationPoseSample<'_> {
     /// files return `None` and callers can fall back to [`Self::pose`].
     #[inline]
     pub fn gte_pose(&self, joint_index: u16) -> Option<GteJointPose> {
+        if cfg!(target_arch = "mips") {
+            // No pose tables on the console (see `Animation::from_bytes`).
+            return None;
+        }
         if self.alpha_q12 == 0 || self.base_frame == self.next_frame {
             return self
                 .animation

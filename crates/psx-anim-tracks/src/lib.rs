@@ -95,6 +95,9 @@ pub struct Options {
     /// bits, while rotation keys get cheaper with every unit; measured on the
     /// Graybox Reach clips 0.8 is within 1% of the best split.
     pub rotation_share: f64,
+    /// Accept poses that are not rotations (animated scale), encoding their
+    /// nearest rotations; [`Report::worst_vs_input`] gives the difference.
+    pub rigidify: bool,
     /// Version 7: worst error of every translation track (residuals and the
     /// absolute tracks alike), model units. The rotation keeps
     /// `budget_units * rotation_share`; the verified bound is their sum.
@@ -107,6 +110,7 @@ impl Default for Options {
             budget_units: 4.0,
             rotation_share: 0.8,
             residual_units: 2.5,
+            rigidify: false,
         }
     }
 }
@@ -884,7 +888,7 @@ pub fn encode(clip: &ClipInput, opts: &Options) -> Result<(Vec<u8>, Report), Rej
         let mut q: Vec<[f64; 4]> = Vec::with_capacity(frames);
         for f in 0..frames {
             let m = mat_f64(&joint.rotations[f]);
-            if !is_rigid(&m) {
+            if !is_rigid(&m) && !opts.rigidify {
                 return Err(Reject::NotRigid { joint: j, frame: f });
             }
             let mut cur = quat_from_mat(&m);

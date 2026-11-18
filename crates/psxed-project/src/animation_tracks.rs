@@ -136,13 +136,15 @@ pub(crate) fn pack_tracks(
     // Every joint is held to its budget on the points it really moves; only a
     // socket joint keeps a lever arm, for what hangs off it.
     let probes = joint_points(model, capsule_points);
-    let frames = animation.frame_count();
+    // A one-frame pose (a weapon's bind pose) is keyed as two equal frames:
+    // the guest decodes keyed tracks only.
+    let frames = animation.frame_count().max(2);
     let mut joints = Vec::with_capacity(animation.joint_count() as usize);
     for j in 0..animation.joint_count() {
         let mut rotations = Vec::with_capacity(frames as usize);
         let mut translations = Vec::with_capacity(frames as usize);
         for f in 0..frames {
-            let Some(pose) = animation.pose(f, j) else {
+            let Some(pose) = animation.pose(f.min(animation.frame_count() - 1), j) else {
                 return bytes;
             };
             rotations.push(pose.matrix);
@@ -181,63 +183,58 @@ pub(crate) fn pack_tracks(
         parents,
     };
     // The v7 residual tolerance scales with the budget (2.5 units at 4).
-    let options = Options {
-        budget_units: f64::from(budget_units),
-        residual_units: f64::from(budget_units) * 0.625,
-        ..Options::default()
-    };
-    // The choice between keyed tracks and the pose table compares the keyed clip before
-    // repeated tracks are shared: sharing only lays the same keys out once, and judging it
-    // here would move clips the shared layout does not otherwise touch onto the keyed
-    // decoder, a different pose.
-    match encode(&clip, &options) {
-        Ok((packed, report)) if report.unshared_bytes < bytes.len() => {
-            crate::playtest::emit_cook_output(format_args!(
-                "[cook] tracks {label}: {} -> {} B ({} B before repeated tracks were shared, \
-                 {} joints follow their parent), worst {:.2} units ({:.2} vs stored poses), \
-                 {} segment counts {:?}",
-                bytes.len(),
-                packed.len(),
-                report.unshared_bytes,
-                report.derived_joints,
-                report.worst_error,
-                report.worst_vs_input,
-                report.rates.len(),
-                report.rates,
-            ));
-            packed
-        }
-        Ok((packed, report)) => {
-            crate::playtest::emit_cook_output(format_args!(
-                "[cook] tracks {label}: kept pose table, keyed tracks would be {} B ({} B with \
-                 repeated tracks shared) against {} B",
-                report.unshared_bytes,
-                packed.len(),
-                bytes.len(),
-            ));
-            bytes
-        }
-        Err(reason) => {
-            let why = match reason {
-                Reject::NotRigid { joint, frame } => {
-                    format!("joint {joint} frame {frame} is not a rotation")
-                }
-                Reject::Unreachable {
-                    joint,
-                    channel,
-                    finest,
-                    limit,
-                } => format!(
-                    "joint {joint} {channel} cannot reach {limit:.2} units, finest track {finest:.2}"
-                ),
-                other => format!("{other:?}"),
-            };
-            crate::playtest::emit_cook_output(format_args!(
-                "[cook] tracks {label}: kept pose table ({why})"
-            ));
-            bytes
+    // The guest decodes keyed tracks only, so every clip is keyed: one whose
+    // keyed form is larger than its pose table still ships keyed, an animated
+    // scale is replaced by its nearest rotation (the report gives the
+    // difference against the stored poses), and a clip that misses its budget
+    // is retried at twice the budget (and twice again).
+    let mut last_reason = None;
+    for attempt in 0..4u32 {
+        let budget = f64::from(budget_units) * f64::from(1u32 << attempt);
+        let options = Options {
+            budget_units: budget,
+            residual_units: budget * 0.625,
+            rigidify: true,
+            ..Options::default()
+        };
+        match encode(&clip, &options) {
+            Ok((packed, report)) => {
+                crate::playtest::emit_cook_output(format_args!(
+                    "[cook] tracks {label}: {} -> {} B ({} B before repeated tracks were shared, \
+                     {} joints follow their parent), budget {budget}, worst {:.2} units ({:.2} vs \
+                     stored poses), {} segment counts {:?}",
+                    bytes.len(),
+                    packed.len(),
+                    report.unshared_bytes,
+                    report.derived_joints,
+                    report.worst_error,
+                    report.worst_vs_input,
+                    report.rates.len(),
+                    report.rates,
+                ));
+                return packed;
+            }
+            Err(reason) => last_reason = Some(reason),
         }
     }
+    let why = match last_reason {
+        Some(Reject::NotRigid { joint, frame }) => {
+            format!("joint {joint} frame {frame} is not a rotation")
+        }
+        Some(Reject::Unreachable {
+            joint,
+            channel,
+            finest,
+            limit,
+        }) => format!(
+            "joint {joint} {channel} cannot reach {limit:.2} units, finest track {finest:.2}"
+        ),
+        other => format!("{other:?}"),
+    };
+    crate::playtest::emit_cook_output(format_args!(
+        "[cook] tracks {label}: kept pose table ({why}); the guest cannot decode it"
+    ));
+    bytes
 }
 
 #[cfg(test)]
