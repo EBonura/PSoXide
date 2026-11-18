@@ -6,7 +6,7 @@
 //! provides the shared joint sampling path. Rendering remains a consumer of
 //! the snapshot rather than its owner.
 
-use psx_asset::{Animation, JointPose};
+use psx_asset::{Animation, AnimationPoseSample, JointPose};
 use psx_engine::MaskedPoseBlend as ModelPoseBlend;
 use psx_engine::{
     apply_model_pose_translation, compute_joint_world_basis, compute_joint_world_transform,
@@ -23,6 +23,8 @@ pub struct ActorPoseSnapshot {
     tick: SimTick,
     animation: Animation<'static>,
     phase_q12: u32,
+    /// `animation` sampled at `phase_q12` once, for every joint read.
+    sample: Option<AnimationPoseSample<'static>>,
     blend_from: Option<ModelPoseBlend<'static>>,
     origin: WorldVertex,
     rotation: Mat3I16,
@@ -33,7 +35,7 @@ pub struct ActorPoseSnapshot {
 impl ActorPoseSnapshot {
     /// Capture all inputs needed to sample one actor's stable world pose.
     #[allow(clippy::too_many_arguments)]
-    pub const fn new(
+    pub fn new(
         tick: SimTick,
         animation: Animation<'static>,
         phase_q12: u32,
@@ -47,6 +49,7 @@ impl ActorPoseSnapshot {
             tick,
             animation,
             phase_q12,
+            sample: animation.looped_pose_sample_q12(phase_q12),
             blend_from,
             origin,
             rotation,
@@ -75,8 +78,9 @@ impl ActorPoseSnapshot {
     ///
     /// Continuous combat uses this only for the portion of an active-frame
     /// window which fell between two retained simulation poses.
-    pub const fn with_phase_q12(mut self, phase_q12: u32) -> Self {
+    pub fn with_phase_q12(mut self, phase_q12: u32) -> Self {
         self.phase_q12 = phase_q12;
+        self.sample = self.animation.looped_pose_sample_q12(phase_q12);
         self
     }
 
@@ -140,7 +144,7 @@ impl ActorPoseSnapshot {
     /// Sample one joint through the exact phase, crossfade, and root
     /// correction frozen into this snapshot.
     pub fn joint_pose(&self, joint: u16) -> Option<JointPose> {
-        let primary = self.animation.pose_looped_q12(self.phase_q12, joint)?;
+        let primary = self.sample.as_ref()?.pose(joint)?;
         let blended = match self.blend_from {
             Some(blend) => blend.blend_toward(primary, joint),
             None => primary,
