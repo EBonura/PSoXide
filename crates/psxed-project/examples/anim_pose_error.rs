@@ -6,6 +6,9 @@
 //! towards its last frame, so that interval is left out when either clip is a pose
 //! table and the encodings differ.
 //!
+//! `ANIM_ERR_STEP=<q12>` sets the phase step (default 16; 4096 compares whole
+//! source frames only, the step that measures a clip against its source poses).
+//!
 //! Usage: anim_pose_error <dump-a> <dump-b>
 
 use std::path::{Path, PathBuf};
@@ -50,11 +53,14 @@ fn probes(model: &Model<'_>) -> Vec<Vec<[f64; 3]>> {
     out
 }
 
+/// `pose` applied to `p` the way the renderer applies it: pose matrices are
+/// column-major (`scaled_pose_matrix` in psx-engine render3d.rs reads
+/// `matrix[col][row]`).
 fn apply(pose: &JointPose, p: [f64; 3]) -> [f64; 3] {
     let m = pose.matrix;
     let t = [pose.translation.x, pose.translation.y, pose.translation.z];
     [0, 1, 2].map(|r| {
-        (f64::from(m[r][0]) * p[0] + f64::from(m[r][1]) * p[1] + f64::from(m[r][2]) * p[2]) / 4096.0
+        (f64::from(m[0][r]) * p[0] + f64::from(m[1][r]) * p[1] + f64::from(m[2][r]) * p[2]) / 4096.0
             + f64::from(t[r])
     })
 }
@@ -63,6 +69,10 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (a_dir, b_dir) = (PathBuf::from(&args[0]), PathBuf::from(&args[1]));
     let mut overall: f64 = 0.0;
+    let step: u64 = std::env::var("ANIM_ERR_STEP")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(16);
     for mdir in files(&a_dir).into_iter().filter(|p| p.is_dir()) {
         let model_name = mdir.file_name().unwrap();
         let mesh = std::fs::read(mdir.join("model.psxmdl")).unwrap();
@@ -96,6 +106,7 @@ fn main() {
                 (fa << 12, fb << 12)
             };
             let mut worst: f64 = 0.0;
+            let (mut sum, mut count) = (0.0f64, 0u64);
             let mut phase = 0u64;
             while phase < end_a {
                 let pb = (phase * hb / ha).min(end_b - 16) as u32;
@@ -111,9 +122,11 @@ fn main() {
                             ((x[0] - y[0]).powi(2) + (x[1] - y[1]).powi(2) + (x[2] - y[2]).powi(2))
                                 .sqrt();
                         worst = worst.max(d);
+                        sum += d;
+                        count += 1;
                     }
                 }
-                phase += 16;
+                phase += step;
             }
             if ab != bb {
                 let (da, db) = (
@@ -121,7 +134,8 @@ fn main() {
                     fb as f64 * 1000.0 / f64::from(b.sample_rate_hz()),
                 );
                 println!(
-                    "{}/{}: {} B -> {} B, {} Hz -> {} Hz, {:.0} -> {:.0} ms, worst {:.2} units",
+                    "{}/{}: {} B -> {} B, {} Hz -> {} Hz, {:.0} -> {:.0} ms, worst {:.2} units, \
+                     mean {:.2}",
                     model_name.to_string_lossy(),
                     clip.file_name().unwrap().to_string_lossy(),
                     ab.len(),
@@ -130,7 +144,8 @@ fn main() {
                     b.sample_rate_hz(),
                     da,
                     db,
-                    worst
+                    worst,
+                    sum / count.max(1) as f64
                 );
             }
             overall = overall.max(worst);

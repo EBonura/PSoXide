@@ -1,5 +1,5 @@
 //! Cook-time packing of animation clips into per-joint keyed tracks
-//! (`.psxanim` version 6).
+//! (`.psxanim` version 7, or 6 when no bone of the skeleton holds a pivot).
 //!
 //! The tracks are fitted by `psx-anim-tracks` against a worst-case vertex
 //! displacement in model units, measured with the runtime decoder, so the bound
@@ -104,11 +104,23 @@ pub(crate) fn pack_tracks(
             rotations,
             translations,
             probes: probes[j as usize].clone(),
+            reach: 0.0,
         });
     }
+    // Version 7: a child's translation follows its parent's decoded pose, so
+    // limbs stay on their parents between keys on fast moves.
+    let parents = (0..model.joint_count())
+        .map(|j| {
+            model
+                .joint(j)
+                .and_then(|joint| joint.parent())
+                .map(usize::from)
+        })
+        .collect();
     let clip = ClipInput {
         sample_rate_hz: animation.sample_rate_hz(),
         joints,
+        parents,
     };
     let options = Options {
         budget_units: f64::from(budget_units),
@@ -121,11 +133,13 @@ pub(crate) fn pack_tracks(
     match encode(&clip, &options) {
         Ok((packed, report)) if report.unshared_bytes < bytes.len() => {
             crate::playtest::emit_cook_output(format_args!(
-                "[cook] tracks {label}: {} -> {} B ({} B before repeated tracks were shared), \
-                 worst {:.2} units ({:.2} vs stored poses), {} segment counts {:?}",
+                "[cook] tracks {label}: {} -> {} B ({} B before repeated tracks were shared, \
+                 {} joints follow their parent), worst {:.2} units ({:.2} vs stored poses), \
+                 {} segment counts {:?}",
                 bytes.len(),
                 packed.len(),
                 report.unshared_bytes,
+                report.derived_joints,
                 report.worst_error,
                 report.worst_vs_input,
                 report.rates.len(),

@@ -355,8 +355,10 @@ fn clip_input(rate: u16, frames: &[Vec<Pose>], probes: &[Vec<[f64; 3]>]) -> Clip
                 rotations: frames.iter().map(|f| tr(&f[j].m)).collect(),
                 translations: frames.iter().map(|f| f[j].t).collect(),
                 probes: probes[j].clone(),
+                reach: 0.0,
             })
             .collect(),
+        parents: Vec::new(),
     }
 }
 
@@ -492,6 +494,7 @@ fn add_residuals(
         let opts = Options {
             budget_units: total,
             rotation_share: budget * 0.8 / total,
+            ..Options::default()
         };
         last = match encode(&clip_input(rate, &frames, probes), &opts) {
             Ok((blob, _)) => Encoded { blob },

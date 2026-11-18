@@ -760,6 +760,9 @@ impl App {
                     }
 
                     telemetry::stage_begin(telemetry::stage::UPDATE);
+                    // Version 7 clip poses are cached per tick by clip address;
+                    // a tick never moves clip memory under its own samples.
+                    psx_asset::clear_pose_cache();
                     scene.update(&mut ctx);
                     ctx.release_controller_port();
                     telemetry::stage_end(telemetry::stage::UPDATE);

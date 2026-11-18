@@ -11,7 +11,8 @@
 //! ```text
 //!   AssetHeader (12 bytes)
 //!     magic       = b"PSXA"
-//!     version     = VERSION_V1, VERSION, VERSION_V3, VERSION_V4, VERSION_V5, or VERSION_V6
+//!     version     = VERSION_V1, VERSION, VERSION_V3, VERSION_V4, VERSION_V5, VERSION_V6
+//!                   or VERSION_V7
 //!     flags       = reserved
 //!     payload_len = everything after this header
 //!
@@ -27,6 +28,7 @@
 //!     v4: 16 bytes, six packed Q11 elements + correction + translation
 //!     v5: frame/joint u16 indices, padded to 4 bytes, then distinct v4 records
 //!     v6: per-joint keyed tracks, see below (no pose table)
+//!     v7: v6 tracks where a child's translation follows its parent, see below
 //! ```
 //!
 //! The pose matrix maps model-space vertices into the sampled animated
@@ -66,7 +68,11 @@ pub const VERSION_V5: u16 = 5;
 /// translation keys; see [`tracks`].
 pub const VERSION_V6: u16 = 6;
 
-/// Per-joint keyed tracks (`VERSION_V6`).
+/// Per-joint keyed tracks where a joint's translation follows its parent
+/// (`VERSION_V7`); see [`tracks`].
+pub const VERSION_V7: u16 = 7;
+
+/// Per-joint keyed tracks (`VERSION_V6` and `VERSION_V7`).
 ///
 /// A v6 clip stores no pose table. Each joint owns one rotation track and one
 /// translation track; a track is `segments + 1` evenly spaced keys over the
@@ -105,7 +111,33 @@ pub const VERSION_V6: u16 = 6;
 /// The omitted component is the largest and is recovered as positive.
 /// A translation key packs `bits x`, `bits y`, `bits z` unsigned codes LSB
 /// first; axis value `= (min + (code << step_shift)) << translation_shift`.
+///
+/// Version 7 is the same layout with two additions: the descriptor's last
+/// byte names the joint's parent (`parent + 1`, 0 for a joint whose
+/// translation track is absolute, as in v6), and a pivot table of
+/// `joint_count` x `i16[3]` (model units, zero for absolute joints, padded to
+/// four bytes) sits between the descriptors and the key area. A joint with a
+/// parent stores a residual in its translation track; its translation is
+///
+/// ```text
+///   t_j = t_p + R_p p_j - R_j p_j + residual_j
+/// ```
+///
+/// where `R x` is the matrix applied the way the renderer applies it
+/// (`(m[0][r] x0 + m[1][r] x1 + m[2][r] x2) >> 12` per row `r`, arithmetic
+/// shift), `t_p` and `R_p` are the parent's decoded pose and `p_j` the pivot.
+/// Between keys a child therefore stays on its parent's arc instead of
+/// following a straight line. A clip has at most [`tracks::MAX_JOINTS_V7`]
+/// joints and no parent cycles.
 pub mod tracks {
+    /// Most joints a v7 clip may have (one bit each in the decoder's cache).
+    pub const MAX_JOINTS_V7: usize = 32;
+    /// Bytes of one pivot in the v7 pivot table.
+    pub const PIVOT_SIZE: usize = 6;
+    /// Bytes of a v7 clip's pivot table.
+    pub const fn pivot_table_size(joint_count: usize) -> usize {
+        (joint_count * PIVOT_SIZE).next_multiple_of(4)
+    }
     /// Maximum number of distinct segment counts one clip can use.
     pub const MAX_RATES: usize = 7;
     /// Rate index meaning "one constant key".
