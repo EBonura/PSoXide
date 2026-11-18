@@ -82,6 +82,26 @@ impl Playtest {
     /// a two-load check, preserving the bit-identical gates and the
     /// budget's <1k idle rule.
     #[cfg_attr(target_arch = "mips", optimize(size))]
+    /// Mark the fighters whose room is not resident as away
+    /// ([`psx_game_runtime::entities::GameEntities::set_away_mask`]).
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
+    fn refresh_away_mask(&mut self, positions: &[[i32; 3]]) {
+        // psx-numeric-allow-next-line: fixed 64-record mask; bit ops only
+        let mut away = 0u64;
+        if let Some(world_rt) = self.world_rt.as_ref() {
+            for (index, position) in positions.iter().enumerate().take(64) {
+                if world_rt
+                    .fighter_room(&mut self.fighter_rooms[index], *position)
+                    .is_none()
+                {
+                    away |= 1u64 << index;
+                }
+            }
+        }
+        self.game_entities.set_away_mask(away);
+    }
+
     pub(super) fn tick_gameplay_layer(&mut self, ctx: &mut Ctx) {
         // Deferred tokens are one-simulation-tick capabilities. Clear even on
         // zero-record and 30 Hz off-ticks so an i-frame whiff can never be
@@ -132,19 +152,7 @@ impl Playtest {
         // for it anywhere until its room streams back in. Tested at the
         // 30 Hz cadence fighters think at.
         if npc_tick_due {
-            // psx-numeric-allow-next-line: fixed 64-record mask; bit ops only
-            let mut away = 0u64;
-            if let Some(world_rt) = self.world_rt.as_ref() {
-                for index in 0..entity_count.min(64) {
-                    if world_rt
-                        .fighter_room(&mut self.fighter_rooms[index], entity_positions[index])
-                        .is_none()
-                    {
-                        away |= 1u64 << index;
-                    }
-                }
-            }
-            self.game_entities.set_away_mask(away);
+            self.refresh_away_mask(entity_positions);
         }
         let eye = self.camera.position();
         let spatial_masks = self.world_rt.as_mut().map(|world_rt| {
