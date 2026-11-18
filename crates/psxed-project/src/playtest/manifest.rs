@@ -5,8 +5,6 @@ use std::fmt::Write as _;
 use super::*;
 use crate::{UiFontChoice, UiGradientDirection, UiImageEffect, UiNodeKind, UiValueBinding};
 
-const CD_SECTOR_BYTES: usize = 2048;
-
 /// `LevelModelFrameBoundsRecord` stores its sphere as `i16` to halve the
 /// per-frame table; refuse a cook whose bounds would not survive that.
 fn validate_model_frame_bounds(package: &PlaytestPackage) -> std::io::Result<()> {
@@ -258,14 +256,9 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         .max()
         .unwrap_or(0);
     let persistent_asset_slot_count = package.assets.len().max(1);
-    let persistent_asset_page_count = package
-        .assets
-        .iter()
-        .filter(|asset| asset.streamed_class == StreamedClass::PersistentGameplay)
-        .map(|asset| asset.bytes.len().next_multiple_of(4))
-        .sum::<usize>()
-        .div_ceil(CD_SECTOR_BYTES)
-        .max(1);
+    // The uploaded textures and the persistent assets take turns in the arena,
+    // so it holds the larger of the two groups.
+    let persistent_asset_page_count = super::heap_budget::persistent_arena_pages(package);
     let _ = writeln!(
         out,
         "pub const PERSISTENT_ASSET_SLOT_COUNT: usize = {persistent_asset_slot_count};\n",
@@ -273,6 +266,13 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     let _ = writeln!(
         out,
         "pub const PERSISTENT_ASSET_PAGE_COUNT: usize = {persistent_asset_page_count};\n",
+    );
+    let _ = writeln!(
+        out,
+        "/// VRAM slots the loading screen's texture uploads may hold beyond those of the rooms\n\
+         /// in play (see `uploaded_textures::extra_vram_slots`).\n\
+         pub const UPLOADED_TEXTURE_EXTRA_VRAM_SLOTS: usize = {};\n",
+        super::uploaded_textures::extra_vram_slots(package),
     );
     // Force 4-byte alignment on embedded asset blobs. A zero-size
     // `[u32; 0]` marker bumps the wrapper's alignment to a word; the
@@ -352,6 +352,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             StreamedClass::UiImage => "asset_flags::STREAMED_UI",
             StreamedClass::Gameplay => "asset_flags::STREAMED_GAMEPLAY_TRANSIENT",
             StreamedClass::PersistentGameplay => "asset_flags::STREAMED_GAMEPLAY_PERSISTENT",
+            StreamedClass::UploadedGameplay => "asset_flags::STREAMED_GAMEPLAY_UPLOAD",
         };
         let _ = writeln!(
             out,
@@ -1549,8 +1550,9 @@ fn ui_pack_chunks(package: &PlaytestPackage) -> Vec<(u32, &[u8])> {
     let class_rank = |class: StreamedClass| match class {
         StreamedClass::None => 0,
         StreamedClass::UiImage => 1,
-        StreamedClass::PersistentGameplay => 2,
-        StreamedClass::Gameplay => 3,
+        StreamedClass::UploadedGameplay => 2,
+        StreamedClass::PersistentGameplay => 3,
+        StreamedClass::Gameplay => 4,
     };
     // The assets a gameplay entry loads for the models come last, in the order the loader asks
     // for them: each model's atlas, then its mesh (an atlas two models share is asked for

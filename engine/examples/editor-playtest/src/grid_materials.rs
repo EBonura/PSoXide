@@ -99,18 +99,51 @@ pub(super) struct Pending {
     binding: Option<GridMaterial>,
 }
 
+/// Whether level material `material`'s texture is one the loading screen
+/// uploads and then lets go of (`asset_flags::STREAMED_GAMEPLAY_UPLOAD`): its
+/// bytes are in RAM only while the loading screen uploads it.
+fn uploaded_by_the_loading_screen(material: &psx_grid::Material) -> bool {
+    find_asset_of_kind(ASSETS, AssetId(material.texture_asset), AssetKind::Texture)
+        .is_some_and(|asset| asset.flags & psx_level::asset_flags::STREAMED_GAMEPLAY_UPLOAD != 0)
+}
+
+/// Upload the texture of every level material the loading screen uploads
+/// (see [`uploaded_by_the_loading_screen`]) while its bytes are in RAM, and
+/// keep each one's binding in `uploaded` (indexed like `level.materials`) for
+/// [`bind_pending`], which binds those materials from it. The materials are
+/// resolved in level order, as [`bind_pending`] resolves them. Returns whether
+/// every one is bound; an upload still queued leaves it unbound and the next
+/// call tries again.
+pub(super) fn bind_uploaded(
+    level: &LevelView<'static>,
+    uploaded: &mut Vec<Option<GridMaterial>>,
+) -> bool {
+    uploaded.resize(level.materials.len(), None);
+    let mut all = true;
+    for (material, binding) in level.materials.iter().zip(uploaded.iter_mut()) {
+        if binding.is_some() || !uploaded_by_the_loading_screen(material) {
+            continue;
+        }
+        *binding = resolve_material(material, true);
+        all &= binding.is_some();
+    }
+    all
+}
+
 /// Bind the materials of every resident room that has none yet. Each level
 /// material the pending rooms use is resolved once, in level order (the order
 /// the textures are queued for upload and given VRAM slots in, whichever
 /// rooms ask for them), then copied into every room's own table: entry `i`
-/// of a slot's table is the binding of its `MATERIAL_USE[i]`. A room is
-/// ready, and drawn, once every entry is; an upload still queued leaves it
-/// unready and the next call tries again. Returns whether every resident
-/// room is ready.
+/// of a slot's table is the binding of its `MATERIAL_USE[i]`. A material whose
+/// texture the loading screen uploaded takes the binding [`bind_uploaded`]
+/// kept (`uploaded`), its bytes being gone. A room is ready, and drawn, once
+/// every entry is; an upload still queued leaves it unready and the next call
+/// tries again. Returns whether every resident room is ready.
 pub(super) fn bind_pending(
     level: &LevelView<'static>,
     resident: &mut ResidentRooms<'static>,
     scratch: &mut Vec<Pending>,
+    uploaded: &[Option<GridMaterial>],
     textures_ready: bool,
 ) -> bool {
     scratch.clear();
@@ -127,9 +160,12 @@ pub(super) fn bind_pending(
     if !any {
         return true;
     }
-    for (material, entry) in level.materials.iter().zip(scratch.iter_mut()) {
+    for (index, (material, entry)) in level.materials.iter().zip(scratch.iter_mut()).enumerate() {
         if entry.needed {
-            entry.binding = resolve_material(material, textures_ready);
+            entry.binding = match uploaded.get(index).copied().flatten() {
+                Some(binding) => Some(binding),
+                None => resolve_material(material, textures_ready),
+            };
         }
     }
     let mut all_ready = true;

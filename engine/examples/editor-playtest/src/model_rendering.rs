@@ -588,6 +588,30 @@ impl Playtest {
     #[cfg(feature = "cd-stream-bench")]
     #[inline(never)]
     pub(super) fn step_persistent_model_assets(&mut self) -> bool {
+        if !self.level_textures_uploaded {
+            // The level textures only its materials use come first, into the
+            // same pages: upload them all, then let the persistent assets
+            // have the pages. A level without any is through in this call.
+            let assets = persistent_assets_arena_mut();
+            assets.begin_group(
+                UI_PACK_START_LBA,
+                UI_PACK_TOC,
+                ASSETS,
+                psx_level::asset_flags::STREAMED_GAMEPLAY_UPLOAD,
+            );
+            assets.pump(cd_arena(), RUNTIME_SCHEDULE.stream_pump_sectors_per_tick);
+            if !persistent_assets_arena().ready() {
+                return false;
+            }
+            if let Some(world_rt) = self.world_rt.as_mut() {
+                if !world_rt.bind_uploaded_textures() {
+                    let _ = self.streaming_jobs.step_vram_uploads();
+                    return false;
+                }
+            }
+            self.level_textures_uploaded = true;
+            persistent_assets_arena_mut().reset_for_scene_load();
+        }
         {
             let assets = persistent_assets_arena_mut();
             assets.begin(UI_PACK_START_LBA, UI_PACK_TOC, ASSETS);
@@ -741,6 +765,7 @@ impl Playtest {
         self.model_part_count = 0;
         self.model_vertex_count = 0;
         self.runtime_models_loaded = false;
+        self.level_textures_uploaded = false;
         self.stance_cluts = StanceCluts::EMPTY;
         self.clear_actor_pose_snapshots();
     }

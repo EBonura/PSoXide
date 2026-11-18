@@ -1077,7 +1077,19 @@ impl Scene for Playtest {
                 if persistent_assets_arena().failed() {
                     return 0;
                 }
-                return persistent_assets_arena().progress_q12().saturating_mul(3) / 8;
+                // The uploaded textures and the persistent assets are read one
+                // group after the other: the bar crosses both, each in
+                // proportion to its bytes.
+                // In 64-byte units, so that a group's whole RAM times Q12 fits.
+                let (uploaded, persistent) = persistent_load_units();
+                let total = (uploaded + persistent).max(1);
+                let group = persistent_assets_arena().progress_q12().clamp(0, 4096) as u32;
+                let done = if self.level_textures_uploaded {
+                    uploaded * 4096 + group * persistent
+                } else {
+                    group * uploaded
+                };
+                return (done / total) as i32 * 3 / 8;
             }
             // Persistent assets span 0..1536; the texture/upload tail is the
             // rest, pinned to 4096 by the engine once `loading_update`
@@ -2233,4 +2245,22 @@ fn sort_probe_class(class: u32) {
     }
     #[cfg(not(feature = "sort-probe"))]
     let _ = class;
+}
+
+/// RAM the loading screen reads into the persistent asset arena, in 64-byte
+/// units: the uploaded textures' group, then the persistent assets' group.
+#[cfg(feature = "cd-stream-bench")]
+fn persistent_load_units() -> (u32, u32) {
+    use psx_level::asset_flags::{STREAMED_GAMEPLAY_PERSISTENT, STREAMED_GAMEPLAY_UPLOAD};
+    let mut uploaded = 0u32;
+    let mut persistent = 0u32;
+    for asset in ASSETS {
+        let units = asset.ram_bytes.div_ceil(64);
+        if asset.flags & STREAMED_GAMEPLAY_UPLOAD != 0 {
+            uploaded += units;
+        } else if asset.flags & STREAMED_GAMEPLAY_PERSISTENT != 0 {
+            persistent += units;
+        }
+    }
+    (uploaded, persistent)
 }

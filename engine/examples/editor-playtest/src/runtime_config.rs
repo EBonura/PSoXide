@@ -334,9 +334,12 @@ pub(super) const BOX_PROP_PROFILE_ENABLED: bool = option_env!("PSXO_PROFILE_BOX_
 /// Capacity of the residency manager's RAM table. Holds room
 /// world + model meshes + animation clips.
 pub(super) const MAX_RESIDENT_RAM_ASSETS: usize = 128;
-/// Capacity of the residency manager's VRAM table. Holds room
-/// material atlases + model atlases.
-pub(super) const MAX_RESIDENT_VRAM_ASSETS: usize = 64;
+/// Capacity of the residency manager's VRAM table: room material atlases and
+/// model atlases, plus a slot for each level material texture the loading
+/// screen uploads beyond those of the rooms in play
+/// (`UPLOADED_TEXTURE_EXTRA_VRAM_SLOTS`, 0 when every room is resident at once).
+pub(super) const MAX_RESIDENT_VRAM_ASSETS: usize =
+    64 + crate::generated::UPLOADED_TEXTURE_EXTRA_VRAM_SLOTS;
 /// CLUT-band rows the unified VRAM allocator manages: the 32 rows under the
 /// back buffer (`VRAM_LAYOUT.clut_band`), 20 sixteen-entry slots wide.
 pub(super) const VRAM_CLUT_ROWS: usize = 32;

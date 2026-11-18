@@ -49,13 +49,14 @@ use psx_residency::{CategoryConfig, Class, Wanted};
 use crate::generated::{
     GRID_ROOM_COUNT, GRID_ROOM_ENTRIES, GRID_ROOM_POOL_PAGES, WORLD_PACK_START_LBA,
 };
-use crate::grid_materials::{animate_materials, bind_pending, Pending};
+use crate::grid_materials::{animate_materials, bind_pending, bind_uploaded, Pending};
 use crate::level_data::WORLD_OBJECTS;
 use crate::world_common::{
     view_camera, world_view_rotation, CountingTraceProvider, VisibilityBounds,
 };
 use crate::world_objects_runtime::WorldObjectVisibility;
 use crate::{telemetry, PROJECTION};
+use psx_grid::render::GridMaterial;
 
 /// Rooms the residency table tracks at once: never more rooms than pages, and
 /// never more than the level has, nor more than the cook found any wanted set
@@ -173,6 +174,10 @@ pub(super) struct GridRuntime {
     materials_epoch: Option<u32>,
     /// Scratch of [`bind_pending`].
     material_scratch: Vec<Pending>,
+    /// Bindings of the level materials whose textures the loading screen
+    /// uploaded (`grid_materials::bind_uploaded`), indexed like the level's
+    /// materials; empty until it does, cleared with the VRAM they name.
+    uploaded_materials: Vec<Option<GridMaterial>>,
     projection: ViewProjection,
     /// Room the observer was last found in, the search hint.
     room_hint: usize,
@@ -333,6 +338,7 @@ impl GridRuntime {
             renderer,
             materials_epoch: None,
             material_scratch: Vec::new(),
+            uploaded_materials: Vec::new(),
             projection,
             room_hint: 0,
             draw_scratch: Vec::new(),
@@ -898,6 +904,7 @@ impl GridRuntime {
             &self.level,
             &mut self.resident,
             &mut self.material_scratch,
+            &self.uploaded_materials,
             textures_ready,
         );
         if ready {
@@ -907,10 +914,19 @@ impl GridRuntime {
     }
 
     /// Drop every room's resolved materials so the next `refresh_materials`
-    /// binds them again.
+    /// binds them again, and the bindings of the uploaded textures with the
+    /// VRAM they name: the next loading screen uploads them again.
     pub(super) fn invalidate_materials(&mut self) {
         self.materials_epoch = None;
         self.resident.invalidate_materials();
+        self.uploaded_materials.clear();
+    }
+
+    /// Upload the textures the loading screen uploads and keep their
+    /// bindings (`grid_materials::bind_uploaded`). Returns whether every one
+    /// is bound.
+    pub(super) fn bind_uploaded_textures(&mut self) -> bool {
+        bind_uploaded(&self.level, &mut self.uploaded_materials)
     }
 
     pub(super) fn materials_ready(&self) -> bool {

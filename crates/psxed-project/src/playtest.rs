@@ -78,6 +78,7 @@ pub(crate) fn mesh_sockets_for_test(world: &crate::grid::GridWorld) -> Vec<Playt
 }
 mod performance;
 mod schema;
+mod uploaded_textures;
 pub(crate) use cook_ui::*;
 mod cook_entities;
 pub(crate) use cook_entities::*;
@@ -2420,6 +2421,9 @@ fn build_package_cooked(
         player_controller,
         entities,
     };
+    // Level textures only the materials use are uploaded by the loading
+    // screen and give their RAM to the persistent assets.
+    uploaded_textures::mark(&mut package);
     // The records one level owns ride the disc, not the executable: encode
     // them now and refuse a level that holds more than the runtime's pools.
     let records = level_records::OwnedLevelRecords::build(&package);

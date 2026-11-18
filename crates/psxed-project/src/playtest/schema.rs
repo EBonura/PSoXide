@@ -357,6 +357,12 @@ pub enum StreamedClass {
     /// Model mesh, atlas, or animation loaded during the initial loading
     /// screen and kept in stable RAM for the complete gameplay session.
     PersistentGameplay,
+    /// Level texture read during the initial loading screen before the
+    /// [`StreamedClass::PersistentGameplay`] assets, into the same RAM, and
+    /// uploaded to VRAM there; the persistent assets then take that RAM. Only
+    /// a texture nothing but the level's materials uses is cooked so: the
+    /// guest never reads its bytes again once it is in VRAM.
+    UploadedGameplay,
 }
 
 impl StreamedClass {

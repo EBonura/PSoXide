@@ -236,6 +236,9 @@ pub struct PersistentAssetStreamer<const PAGES: usize, const ASSETS: usize> {
     slots: [usize; ASSETS],
     capacities: [usize; ASSETS],
     asset_count: usize,
+    /// The [`asset_flags`] bit of the group the pages hold: the persistent assets, or the
+    /// textures read before them to be uploaded ([`Self::begin_group`]). 0 before a group begins.
+    group: u16,
     started: bool,
     ready: bool,
     failed: bool,
@@ -255,6 +258,7 @@ impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStreamer<PAGES, ASS
             slots: [0; ASSETS],
             capacities: [0; ASSETS],
             asset_count: 0,
+            group: 0,
             started: false,
             ready: false,
             failed: false,
@@ -281,6 +285,7 @@ impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStreamer<PAGES, ASS
             slots: [0; ASSETS],
             capacities: [0; ASSETS],
             asset_count: 0,
+            group: 0,
             started: false,
             ready: false,
             failed: false,
@@ -307,6 +312,7 @@ impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStreamer<PAGES, ASS
         self.storage.layout_generation = self.storage.layout_generation.wrapping_add(1).max(1);
         self.job = WorldRoomSlotsReadJob::new();
         self.asset_count = 0;
+        self.group = 0;
         self.started = false;
         self.ready = false;
         self.failed = false;
@@ -314,16 +320,38 @@ impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStreamer<PAGES, ASS
         self.failed_reason = 0;
     }
 
-    /// Reserve stable sector runs and arm one grouped pack read.
+    /// Reserve stable sector runs and arm one grouped pack read of the persistent assets.
     pub fn begin(
         &mut self,
         pack_lba: u32,
         toc: &[LevelWorldPackEntryRecord],
         assets: &[LevelAssetRecord],
     ) {
+        self.begin_group(
+            pack_lba,
+            toc,
+            assets,
+            asset_flags::STREAMED_GAMEPLAY_PERSISTENT,
+        );
+    }
+
+    /// [`Self::begin`] for the assets whose flags carry `group`: the persistent assets
+    /// ([`asset_flags::STREAMED_GAMEPLAY_PERSISTENT`]), or the textures the loading screen
+    /// reads first and uploads ([`asset_flags::STREAMED_GAMEPLAY_UPLOAD`]). The two groups
+    /// take turns in the same pages: once the uploads are done, [`Self::reset_for_scene_load`]
+    /// frees the pages and the persistent group begins, so the arena is as large as the larger
+    /// group rather than both.
+    pub fn begin_group(
+        &mut self,
+        pack_lba: u32,
+        toc: &[LevelWorldPackEntryRecord],
+        assets: &[LevelAssetRecord],
+        group: u16,
+    ) {
         if self.started || self.ready {
             return;
         }
+        self.group = group;
         // `begin` is a one-shot transition from the zeroed/new idle state.
         // Replacing the complete streamer here materialised its sector-page
         // storage as a ~290 KiB stack temporary on MIPS, even on later calls
@@ -334,7 +362,7 @@ impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStreamer<PAGES, ASS
 
         let mut count = 0usize;
         for asset in assets {
-            if asset.flags & asset_flags::STREAMED_GAMEPLAY_PERSISTENT == 0 {
+            if asset.flags & group == 0 {
                 continue;
             }
             let slot = asset.id.0 as usize;
@@ -477,9 +505,11 @@ impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStreamer<PAGES, ASS
         progress_q12_from_bytes(self.job.byte_counts(), &self.capacities, self.asset_count)
     }
 
-    /// Stable bytes for one persistent asset after the full load completes.
+    /// Stable bytes for one asset of the group the arena holds, after that group's load
+    /// completes. An asset of the other group (an uploaded texture once the persistent assets
+    /// have its pages) has none.
     pub fn bytes_for(&self, asset: &LevelAssetRecord) -> Option<&[u8]> {
-        if !self.ready || asset.flags & asset_flags::STREAMED_GAMEPLAY_PERSISTENT == 0 {
+        if !self.ready || asset.flags & self.group == 0 {
             return None;
         }
         self.storage
@@ -736,6 +766,51 @@ mod tests {
         streamer.begin(99, &[], &[]);
         assert!(streamer.ready());
         assert!(!streamer.failed());
+    }
+
+    /// The uploaded textures and the persistent assets take turns in the same pages: each group
+    /// is laid out from byte zero, and only the group the arena holds answers `bytes_for`.
+    #[test]
+    fn the_upload_group_and_the_persistent_group_share_the_pages() {
+        let upload = LevelAssetRecord {
+            flags: asset_flags::STREAMED_GAMEPLAY_UPLOAD,
+            ..persistent_asset(0, SECTOR_BYTES as u32)
+        };
+        let kept = persistent_asset_of(1, SECTOR_BYTES as u32, AssetKind::ModelAnimation);
+        let assets = [upload, kept];
+        let entry = |chunk: u16, sector_offset: u32| LevelWorldPackEntryRecord {
+            room: psx_level::RoomIndex(chunk),
+            sector_offset,
+            sector_count: 1,
+            byte_size: SECTOR_BYTES as u32,
+            checksum: 0,
+        };
+        let toc = [entry(0, 0), entry(1, 1)];
+        // One page: the two groups fit only because they never hold it together.
+        let mut streamer = PersistentAssetStreamer::<1, 2>::new();
+
+        streamer.begin_group(0, &toc, &assets, asset_flags::STREAMED_GAMEPLAY_UPLOAD);
+        assert!(!streamer.failed(), "the upload group alone fits the page");
+        assert_eq!(streamer.storage.offsets[0], 0);
+        assert_eq!(
+            streamer.storage.lengths[1], 0,
+            "the persistent asset waits its turn"
+        );
+        streamer.ready = true;
+        assert!(streamer.bytes_for(&upload).is_some());
+        assert!(streamer.bytes_for(&kept).is_none());
+
+        streamer.reset_for_scene_load();
+        streamer.begin(0, &toc, &assets);
+        assert!(!streamer.failed(), "the persistent group reuses the page");
+        assert_eq!(streamer.storage.offsets[1], 0);
+        assert_eq!(streamer.storage.lengths[0], 0);
+        streamer.ready = true;
+        assert!(streamer.bytes_for(&kept).is_some());
+        assert!(
+            streamer.bytes_for(&upload).is_none(),
+            "an uploaded texture has no bytes once the persistent assets own its page"
+        );
     }
 
     #[test]

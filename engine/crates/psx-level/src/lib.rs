@@ -410,6 +410,11 @@ pub mod asset_flags {
     pub const STREAMED_GAMEPLAY_TRANSIENT: u16 = 1 << 1;
     /// Gameplay payload loaded during initial loading and retained thereafter.
     pub const STREAMED_GAMEPLAY_PERSISTENT: u16 = 1 << 2;
+    /// Gameplay texture read during initial loading, before the
+    /// [`STREAMED_GAMEPLAY_PERSISTENT`] payloads, and uploaded to VRAM; its RAM is then given
+    /// to those payloads. Only a texture the guest never reads again once it is in VRAM (a
+    /// level material's) is cooked so.
+    pub const STREAMED_GAMEPLAY_UPLOAD: u16 = 1 << 3;
 }
 
 /// One cooked cyclorama backdrop quad.

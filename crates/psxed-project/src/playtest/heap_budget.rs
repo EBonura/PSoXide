@@ -199,14 +199,7 @@ const PERSISTENT_SLOT_BYTES: usize = 56;
 /// image cache (a union), so it is the larger of the two.
 #[must_use]
 pub fn persistent_arena_bytes(package: &PlaytestPackage) -> usize {
-    let pages = package
-        .assets
-        .iter()
-        .filter(|asset| asset.streamed_class == StreamedClass::PersistentGameplay)
-        .map(|asset| asset.bytes.len().next_multiple_of(4))
-        .sum::<usize>()
-        .div_ceil(2048)
-        .max(1);
+    let pages = persistent_arena_pages(package);
     let slots = package.assets.len().max(1);
     let gameplay = pages * 2048 + slots * PERSISTENT_SLOT_BYTES;
     let ui_chunks = package
@@ -220,6 +213,27 @@ pub fn persistent_arena_bytes(package: &PlaytestPackage) -> usize {
         .unwrap_or(0)
         * ui_chunks.count();
     gameplay.max(ui)
+}
+
+/// Pages (2 KiB) of the guest's persistent asset arena for `package`
+/// (`PERSISTENT_ASSET_PAGE_COUNT`): the larger of its two groups, the textures
+/// the loading screen uploads ([`StreamedClass::UploadedGameplay`]) and the
+/// assets kept for the session ([`StreamedClass::PersistentGameplay`]), which
+/// take turns in the same pages. At least one.
+#[must_use]
+pub fn persistent_arena_pages(package: &PlaytestPackage) -> usize {
+    let group_pages = |class: StreamedClass| {
+        package
+            .assets
+            .iter()
+            .filter(|asset| asset.streamed_class == class)
+            .map(|asset| asset.bytes.len().next_multiple_of(4))
+            .sum::<usize>()
+            .div_ceil(2048)
+    };
+    group_pages(StreamedClass::PersistentGameplay)
+        .max(group_pages(StreamedClass::UploadedGameplay))
+        .max(1)
 }
 
 /// Bytes of RAM the guest's image takes without its room pool, as far as the cook can tell: what

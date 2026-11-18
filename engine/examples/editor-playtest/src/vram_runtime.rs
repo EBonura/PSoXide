@@ -53,9 +53,14 @@ fn upload_bytes_for(asset_id: AssetId) -> Option<&'static [u8]> {
         // asset arena, which shares its RAM with the front end's image cache:
         // ask the arena that owns the asset, never the other one. A queued
         // upload exists only once those assets are ready (see
-        // `grid_materials`).
+        // `grid_materials`). A texture the loading screen uploads is there
+        // only until its upload is done.
         if let Some(asset) = psx_level::find_asset_of_kind(ASSETS, asset_id, AssetKind::Texture) {
-            if asset.flags & psx_level::asset_flags::STREAMED_GAMEPLAY_PERSISTENT != 0 {
+            if asset.flags
+                & (psx_level::asset_flags::STREAMED_GAMEPLAY_PERSISTENT
+                    | psx_level::asset_flags::STREAMED_GAMEPLAY_UPLOAD)
+                != 0
+            {
                 return persistent_assets_arena().bytes_for(asset);
             }
         }
