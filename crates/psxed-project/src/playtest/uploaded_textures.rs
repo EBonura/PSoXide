@@ -107,3 +107,61 @@ fn texture_refs_outside_the_level_materials(package: &PlaytestPackage) -> BTreeS
     }
     refs
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::playtest::build_package;
+    use crate::ProjectDocument;
+
+    /// Every texture cooked as uploaded is a level material's texture that no
+    /// other record names, the arena holds the larger group, and a level that
+    /// holds all its rooms asks for no extra VRAM slots.
+    #[test]
+    fn uploaded_textures_are_level_textures_nothing_else_names() {
+        for name in ["grid-cave", "grid-dungeon"] {
+            let dir = crate::projects_dir().join(name);
+            let project =
+                ProjectDocument::load_from_path(dir.join("project.ron")).expect("tracked project");
+            let (package, report) = build_package(&project, &dir);
+            assert!(report.errors.is_empty(), "{name}: {:?}", report.errors);
+            let package = package.expect("fixture cooks");
+            let elsewhere = texture_refs_outside_the_level_materials(&package);
+            let uploaded: Vec<usize> = package
+                .assets
+                .iter()
+                .enumerate()
+                .filter(|(_, asset)| asset.streamed_class == StreamedClass::UploadedGameplay)
+                .map(|(index, _)| index)
+                .collect();
+            assert!(!uploaded.is_empty(), "{name} has level textures to upload");
+            for index in &uploaded {
+                assert!(package.world_geometry.texture_asset_indices.contains(index));
+                assert!(
+                    !elsewhere.contains(index),
+                    "{name}: texture {index} is named elsewhere"
+                );
+                assert_eq!(package.assets[*index].kind, PlaytestAssetKind::Texture);
+            }
+            let group_pages = |class: StreamedClass| {
+                package
+                    .assets
+                    .iter()
+                    .filter(|asset| asset.streamed_class == class)
+                    .map(|asset| asset.bytes.len().next_multiple_of(4))
+                    .sum::<usize>()
+                    .div_ceil(2048)
+            };
+            assert_eq!(
+                super::super::heap_budget::persistent_arena_pages(&package),
+                group_pages(StreamedClass::PersistentGameplay)
+                    .max(group_pages(StreamedClass::UploadedGameplay))
+                    .max(1)
+            );
+            let world = &package.world_geometry;
+            if world.pool.pool_pages >= world.pool.total_pages {
+                assert_eq!(extra_vram_slots(&package), 0, "{name} holds every room");
+            }
+        }
+    }
+}
