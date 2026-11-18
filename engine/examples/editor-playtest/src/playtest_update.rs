@@ -156,13 +156,9 @@ impl Playtest {
             let mut entity_activation_bounds =
                 [const { core::mem::MaybeUninit::<VisibilityBounds>::uninit() }; MAX_GAME_ENTITIES];
             for index in 0..entity_count {
-                let Some(record) = GAME_ENTITIES
-                    .get(index)
-                    .filter(|_| !self.game_entities.away(index))
-                else {
+                let Some(record) = GAME_ENTITIES.get(index) else {
                     // Preserve initialization even if a malformed runtime table
-                    // violates the cook's one-to-one entity contract; an away
-                    // fighter is nowhere to be seen.
+                    // violates the cook's one-to-one entity contract.
                     entity_activation_bounds[index].write(VisibilityBounds::EMPTY);
                     continue;
                 };
@@ -210,10 +206,6 @@ impl Playtest {
                 };
                 if instance < 64 {
                     actor_instances |= 1u64 << instance;
-                }
-                if self.game_entities.away(entity) {
-                    *bounds = VisibilityBounds::EMPTY;
-                    continue;
                 }
                 *bounds = VisibilityBounds::cylinder(
                     entity_positions[entity],
