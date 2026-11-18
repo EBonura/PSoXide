@@ -2832,6 +2832,18 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         );
     }
 
+    /// Entity `index`'s state as the duel logs number it: the
+    /// [`GameEntityState`] value, with an attack's phases as 3 (windup), 4
+    /// (contact) and 5 (recovery).
+    pub fn state_code(&self, index: usize) -> u8 {
+        match self.attack_phase(index) {
+            Some(AttackPhase::Windup) => 3,
+            Some(AttackPhase::Active) => 4,
+            Some(AttackPhase::Recover) => 5,
+            None => self.state(index) as u8,
+        }
+    }
+
     /// Where entity `index`'s committed attack stands on its action clock;
     /// None when it is not attacking.
     pub fn attack_phase(&self, index: usize) -> Option<AttackPhase> {
