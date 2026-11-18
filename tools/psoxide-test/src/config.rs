@@ -96,6 +96,16 @@ pub struct Tools {
     /// The PCSX-Redux bundle's `Contents` directory (official build).
     #[serde(default)]
     pub redux: Option<PathBuf>,
+    /// A full SDK checkout the speed stage builds `psoxide-pgo` from when the game has no
+    /// hydrated `.psoxide` (a repository that clones its SDK sparsely). The harness never writes
+    /// into it: the build goes to `<work>/sdk-tools/<revision>`.
+    #[serde(default)]
+    pub sdk: Option<PathBuf>,
+    /// A git credential helper the clean stage fetches with (for a private repository), e.g.
+    /// `!f(){ echo username=NAME; echo password=$(gh auth token --user NAME); };f`. The helper
+    /// runs at fetch time; no token is stored or printed.
+    #[serde(default)]
+    pub git_credential_helper: Option<String>,
 }
 
 /// A tool binary and the source revision it was built from.

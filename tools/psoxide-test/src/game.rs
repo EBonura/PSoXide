@@ -32,7 +32,10 @@ pub struct Game {
     pub cross: Option<Cross>,
     #[serde(default, rename = "host")]
     pub hosts: Vec<Host>,
-    pub clean: Option<Clean>,
+    /// One `[[clean]]` per program whose bytes a fresh clone must reproduce (a single `[clean]`
+    /// table is still accepted).
+    #[serde(default, rename = "clean", deserialize_with = "one_or_many")]
+    pub cleans: Vec<Clean>,
     /// One `[[install]]` per library entry the repo produces.
     #[serde(default, rename = "install")]
     pub installs: Vec<Install>,
@@ -62,8 +65,20 @@ pub struct Build {
     /// Variables removed from the commands' environment (a build that must not see them).
     #[serde(default)]
     pub env_remove: Vec<String>,
-    /// The disc's cue inside `out`.
+    /// The disc's cue inside `out`. Empty for a build that writes no disc (a cook another
+    /// build reads); such a build cannot be played, measured or installed.
+    #[serde(default)]
     pub disc: String,
+    /// Substrings of the build's logs that make it a failure although every command exited 0
+    /// (a driver that only warns when it links without its placement layout).
+    #[serde(default)]
+    pub fail_on: Vec<String>,
+    /// Least share, in percent, of a psoxide-pgo layout or sample profile that must bind onto
+    /// this build (default 100); any other value needs `bind_reason`.
+    #[serde(default)]
+    pub bind_min: Option<f64>,
+    #[serde(default)]
+    pub bind_reason: Option<String>,
     /// The link map inside `out` (size and symbols read it).
     #[serde(default)]
     pub map: Option<String>,
@@ -163,6 +178,13 @@ pub struct Journeys {
     /// SKIP with that reason on every run.
     #[serde(default)]
     pub only_on: BTreeMap<String, OnlyOn>,
+    /// Journeys that keep the CPU frame only although `hw = true`: name -> reason.
+    #[serde(default)]
+    pub hw_off: BTreeMap<String, String>,
+    /// The game's own free-running clocks (symbols), beside the SDK's: a wait or hold until one
+    /// reaches an absolute value is a fixed wait and counts in the open-loop ratchet.
+    #[serde(default)]
+    pub clocks: Vec<String>,
 }
 
 /// A journey's model subset.
@@ -219,8 +241,7 @@ pub struct Host {
     pub name: String,
     /// argv run at the repo root. With `build`, `{out}` and `{disc}` are that build's output
     /// directory and cue, and the receipt follows its artifacts: a check that drives an older
-    /// frontend or a game's own script against the built disc. Host checks run one at a time,
-    /// so one that starts an emulator stays inside the budget.
+    /// frontend or a game's own script against the built disc.
     pub command: Vec<String>,
     #[serde(default)]
     pub build: Option<String>,
@@ -242,6 +263,10 @@ pub struct Host {
     /// A number the command prints, judged like a bar and stored by `bless`.
     #[serde(default)]
     pub metric: Option<Metric>,
+    /// Host checks run in parallel inside the CPU budget; those naming the same group run one
+    /// after another (they share a build tree or start an emulator).
+    #[serde(default)]
+    pub exclusive: Option<String>,
 }
 
 /// A number read from a host check's output: the first integer after `key=` or `key:`.
@@ -275,6 +300,30 @@ pub struct Clean {
     /// Files of `out` that must be byte-identical (default: the disc's cue and bin).
     #[serde(default)]
     pub compare: Vec<String>,
+    /// Builds run first in the clone, in order (a cook the build reads).
+    #[serde(default)]
+    pub before: Vec<String>,
+    /// Fetch the whole history instead of one commit (a profile bound by git blob needs it).
+    #[serde(default)]
+    pub history: bool,
+}
+
+/// A table or an array of tables.
+fn one_or_many<'de, D, T>(de: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany<T> {
+        Many(Vec<T>),
+        One(T),
+    }
+    Ok(match OneOrMany::deserialize(de)? {
+        OneOrMany::Many(v) => v,
+        OneOrMany::One(t) => vec![t],
+    })
 }
 
 /// The library install.
@@ -282,7 +331,7 @@ pub struct Clean {
 #[serde(deny_unknown_fields)]
 pub struct Install {
     pub build: String,
-    /// The library entry (default: the game name). The disc goes in `<library>/<dir>/`.
+    /// The library entry (default: the game name). Files go flat into the library as `<name>.bin` and its sidecars.
     #[serde(default)]
     pub name: Option<String>,
 }
@@ -427,13 +476,43 @@ impl Game {
                 }
             }
         }
-        for name in self
-            .clean
-            .iter()
-            .map(|c| c.build.as_str())
-            .chain(self.installs.iter().map(|i| i.build.as_str()))
-        {
-            known(name, "[clean]/[install]")?;
+        for b in &self.builds {
+            if let Some(min) = b.bind_min {
+                if !(0.0..=100.0).contains(&min) {
+                    return Err(format!("build `{}`: bind_min is a percentage", b.name));
+                }
+                if min < 100.0 && b.bind_reason.as_deref().is_none_or(str::is_empty) {
+                    return Err(format!(
+                        "build `{}`: bind_min under 100 needs `bind_reason`",
+                        b.name
+                    ));
+                }
+            }
+        }
+        let needs_disc = |name: &str, what: &str| match self.build(name) {
+            Some(b) if b.disc.is_empty() => Err(format!(
+                "{what} names build `{name}`, which declares no disc"
+            )),
+            _ => Ok(()),
+        };
+        for w in &self.windows {
+            needs_disc(&w.build, "[[speed]]")?;
+        }
+        if let Some(boot) = self.cross.as_ref().and_then(|c| c.boot.as_ref()) {
+            needs_disc(&boot.build, "[cross] boot")?;
+        }
+        for i in &self.installs {
+            known(&i.build, "[[install]]")?;
+            needs_disc(&i.build, "[[install]]")?;
+        }
+        for c in &self.cleans {
+            known(&c.build, "[[clean]]")?;
+            for b in &c.before {
+                known(b, "[[clean]] before")?;
+            }
+            if c.compare.is_empty() {
+                needs_disc(&c.build, "[[clean]] without compare")?;
+            }
         }
         Ok(())
     }
@@ -476,6 +555,27 @@ commands = [["make", "build"]]
 disc = "Game.cue"
 map = "link.map"
 "#;
+
+    #[test]
+    fn clean_is_a_table_or_an_array_and_a_cook_has_no_disc() {
+        let one = format!("{MINIMAL}[clean]\nbuild = \"ship\"\n");
+        assert_eq!(Game::parse(&one).unwrap().cleans.len(), 1);
+        let cook =
+            "[[build]]\nname = \"cook\"\nout = \"build/cook\"\ncommands = [[\"make\", \"cook\"]]\n";
+        let two = format!(
+            "{MINIMAL}{cook}[[clean]]\nbuild = \"ship\"\nbefore = [\"cook\"]\nhistory = true\n\
+             [[clean]]\nbuild = \"cook\"\ncompare = [\"data.bin\"]\n"
+        );
+        let game = Game::parse(&two).unwrap();
+        assert_eq!(game.cleans.len(), 2);
+        assert_eq!(game.cleans[0].before, ["cook"]);
+        let bad = format!("{MINIMAL}{cook}[[install]]\nbuild = \"cook\"\n");
+        assert!(Game::parse(&bad).unwrap_err().contains("no disc"));
+        let reasonless = MINIMAL.replace("map = ", "bind_min = 99.0\nmap = ");
+        assert!(Game::parse(&reasonless)
+            .unwrap_err()
+            .contains("bind_reason"));
+    }
 
     #[test]
     fn a_minimal_file_loads() {

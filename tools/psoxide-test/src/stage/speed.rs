@@ -260,15 +260,51 @@ pub fn run(ctx: &Ctx<'_>, all_offsets: bool) -> StageResult {
     result(source, Outcome { checks, facts })
 }
 
-/// Build the game's hydrated psoxide-pgo (the SDK pin's own tool) once and return its path.
+/// Build the psoxide-pgo of the game's SDK pin once and return its path: from the game's own
+/// hydrated `.psoxide` (a real directory, never a symlink to a checkout, which a clean clone
+/// would not have), or else from the user config's `[tools] sdk` checkout, which must be at the
+/// game's pinned SDK revision. The second form builds into `<work>/sdk-tools/<revision>` and
+/// never writes into the checkout.
 fn pgo_binary(ctx: &Ctx<'_>) -> Result<PathBuf, String> {
-    let manifest = ctx.repo.join(".psoxide/tools/psoxide-pgo/Cargo.toml");
-    if !manifest.is_file() {
+    let hydrated = ctx.repo.join(".psoxide");
+    let linked = std::fs::symlink_metadata(&hydrated).is_ok_and(|m| m.file_type().is_symlink());
+    let own = hydrated.join("tools/psoxide-pgo/Cargo.toml");
+    let (manifest, target) = if own.is_file() && !linked {
+        (own, None)
+    } else if let Some(sdk) = &ctx.config.tools.sdk {
+        let manifest = sdk.join("tools/psoxide-pgo/Cargo.toml");
+        if !manifest.is_file() {
+            return Err(format!(
+                "[tools] sdk {} has no tools/psoxide-pgo: name a full SDK checkout",
+                sdk.display()
+            ));
+        }
+        let head = util::git(sdk, &["rev-parse", "HEAD"])?;
+        let pin = super::sdk_pin(&ctx.repo);
+        if pin != "unknown" && pin != head {
+            return Err(format!(
+                "[tools] sdk {} is at {} but the game pins the SDK at {}: check that revision \
+                 out there (or in a worktree the config names)",
+                sdk.display(),
+                util::short(&head),
+                util::short(&pin)
+            ));
+        }
+        let target = ctx.dir(&["sdk-tools", util::short(&head)])?;
+        (manifest, Some(target))
+    } else if linked {
         return Err(format!(
-            "{} is missing: the game's build hydrates .psoxide; build first",
-            manifest.display()
+            "{} is a symlink (machine-local; a clean clone has none): remove it and set [tools] \
+             sdk in the config to a full SDK checkout at the game's pin",
+            hydrated.display()
         ));
-    }
+    } else {
+        return Err(format!(
+            "{} is missing: the game's build hydrates .psoxide, or set [tools] sdk in the config \
+             to a full SDK checkout at the game's pin",
+            own.display()
+        ));
+    };
     let log = ctx.dir(&["speed"])?.join("psoxide-pgo-build.log");
     let argv: Vec<String> = [
         "cargo",
@@ -282,7 +318,10 @@ fn pgo_binary(ctx: &Ctx<'_>) -> Result<PathBuf, String> {
     .map(|s| (*s).to_string())
     .chain([manifest.display().to_string()])
     .collect();
-    let env = ctx.child_env(&ctx.work.join("guest-stage"));
+    let mut env = ctx.child_env(&ctx.work.join("guest-stage"));
+    if let Some(t) = &target {
+        env.push(("CARGO_TARGET_DIR".into(), Some(t.display().to_string())));
+    }
     let done = util::run_logged(&argv, &ctx.repo, &env, &log, None)?;
     if done.code != 0 {
         return Err(format!(
@@ -290,7 +329,10 @@ fn pgo_binary(ctx: &Ctx<'_>) -> Result<PathBuf, String> {
             log.display()
         ));
     }
-    let bin = ctx.repo.join(".psoxide/target/release/psoxide-pgo");
+    let bin = match &target {
+        Some(t) => t.join("release/psoxide-pgo"),
+        None => hydrated.join("target/release/psoxide-pgo"),
+    };
     if bin.is_file() {
         Ok(bin)
     } else {

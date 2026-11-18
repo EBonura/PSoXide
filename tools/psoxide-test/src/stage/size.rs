@@ -12,9 +12,7 @@ use crate::util::{self, Key};
 pub fn measure(map_text: &str) -> Result<SizeBase, String> {
     let map = psoxide_size::map::parse(map_text);
     let ram = psoxide_size::ram::read(&map);
-    let free = ram
-        .free
-        .ok_or("the map names no __heap_start / STACK_RESERVE, so free RAM is unknown")?;
+    let free = ram.free;
     Ok(SizeBase {
         text: ram.text_total,
         data: ram.data_total,
@@ -32,8 +30,41 @@ pub fn judge(now: SizeBase, base: Option<SizeBase>, growth: u32, drop: u32) -> V
         )];
     };
     let text_ok = now.text <= base.text.saturating_add(growth);
-    let free_ok = now.free.saturating_add(drop) >= base.free;
     let delta = |a: u32, b: u32| i64::from(a) - i64::from(b);
+    let free = match (now.free, base.free) {
+        (Some(n), Some(b)) => {
+            let ok = n.saturating_add(drop) >= b;
+            Check::new(
+                "free RAM",
+                if ok {
+                    crate::report::Status::Pass
+                } else {
+                    crate::report::Status::Fail
+                },
+                format!("{n} ({:+})", delta(n, b)),
+            )
+            .baseline(b.to_string())
+            .detail(if ok {
+                String::new()
+            } else {
+                format!("free RAM fell under the baseline - {drop}")
+            })
+        }
+        (Some(_), None) => Check::fail(
+            "free RAM",
+            "the map now names a heap but the baseline has no free RAM: bless again",
+        ),
+        (None, Some(b)) => Check::fail(
+            "free RAM",
+            format!("the baseline had {b} B free but this map names no heap"),
+        ),
+        (None, None) => Check::skip(
+            "free RAM",
+            "not measured: the map names no __heap_start / STACK_RESERVE (a program with its own \
+             allocator); declare the figure the program reports as a [[host]] metric (for \
+             example heap_free from a boot run, better = \"higher\", min = the floor)",
+        ),
+    };
     vec![
         Check::new(
             "text",
@@ -50,21 +81,7 @@ pub fn judge(now: SizeBase, base: Option<SizeBase>, growth: u32, drop: u32) -> V
         } else {
             format!("text grew past the baseline + {growth}")
         }),
-        Check::new(
-            "free RAM",
-            if free_ok {
-                crate::report::Status::Pass
-            } else {
-                crate::report::Status::Fail
-            },
-            format!("{} ({:+})", now.free, delta(now.free, base.free)),
-        )
-        .baseline(base.free.to_string())
-        .detail(if free_ok {
-            String::new()
-        } else {
-            format!("free RAM fell under the baseline - {drop}")
-        }),
+        free,
         Check::pass(
             "data",
             format!("{} ({:+})", now.data, delta(now.data, base.data)),
@@ -164,7 +181,10 @@ fn one(ctx: &Ctx<'_>, size: &crate::game::Size) -> Result<(Outcome, bool), Strin
             ("text".to_string(), now.text.to_string()),
             ("data".to_string(), now.data.to_string()),
             ("bss".to_string(), now.bss.to_string()),
-            ("free".to_string(), now.free.to_string()),
+            (
+                "free".to_string(),
+                now.free.map_or("not measured".into(), |f| f.to_string()),
+            ),
         ]
         .into(),
     };
@@ -322,7 +342,7 @@ mod tests {
         text: 1000,
         data: 10,
         bss: 20,
-        free: 500,
+        free: Some(500),
     };
 
     #[test]
@@ -334,10 +354,13 @@ mod tests {
 
     #[test]
     fn free_ram_may_not_fall() {
-        let now = SizeBase { free: 499, ..BASE };
+        let now = SizeBase {
+            free: Some(499),
+            ..BASE
+        };
         assert_eq!(judge(now, Some(BASE), 0, 0)[1].status, Status::Fail);
         let better = SizeBase {
-            free: 900,
+            free: Some(900),
             text: 10,
             ..BASE
         };

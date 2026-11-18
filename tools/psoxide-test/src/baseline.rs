@@ -42,7 +42,9 @@ pub struct SizeBase {
     pub text: u32,
     pub data: u32,
     pub bss: u32,
-    pub free: u32,
+    /// Free RAM; absent when the map names no heap (a program with its own allocator).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub free: Option<u32>,
 }
 
 /// One window's metrics, one entry per offset.
@@ -62,6 +64,10 @@ pub struct WindowBase {
 pub struct JourneyBase {
     pub ticks: u64,
     pub open_loop: u32,
+    /// Waits and holds until a free-running clock reaches an absolute value (a fixed wait under
+    /// another name). Absent in baselines blessed before it was counted: then not enforced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clock_waits: Option<u32>,
 }
 
 impl Baseline {
@@ -141,7 +147,7 @@ mod tests {
                 text: 1,
                 data: 2,
                 bss: 3,
-                free: 4,
+                free: Some(4),
             },
         );
         base.journeys.insert(
@@ -149,6 +155,7 @@ mod tests {
             JourneyBase {
                 ticks: 1822,
                 open_loop: 3,
+                clock_waits: Some(1),
             },
         );
         base.save(dir.path()).unwrap();

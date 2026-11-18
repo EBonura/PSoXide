@@ -182,8 +182,9 @@ pub fn run(ctx: &Ctx<'_>, bless: bool) -> StageResult {
     let mut facts = std::collections::BTreeMap::new();
     let mut runnable = Vec::new();
     let mut open_total = 0;
+    let mut clock_total = 0;
     for path in &paths {
-        let info = match journey::inspect(path) {
+        let info = match journey::inspect(path, &spec.clocks) {
             Ok(i) => i,
             Err(e) => {
                 checks.push(Check::fail(path.display().to_string(), e));
@@ -191,7 +192,12 @@ pub fn run(ctx: &Ctx<'_>, bless: bool) -> StageResult {
             }
         };
         open_total += info.open_loop;
+        clock_total += info.clock_waits;
         facts.insert(format!("open_loop/{}", info.id), info.open_loop.to_string());
+        facts.insert(
+            format!("clock_waits/{}", info.id),
+            info.clock_waits.to_string(),
+        );
         if let Err(e) = journey::check_pad(&info, &spec.forced_analog) {
             checks.push(Check::fail(format!("{} pad", info.id), e));
             continue;
@@ -218,13 +224,36 @@ pub fn run(ctx: &Ctx<'_>, bless: bool) -> StageResult {
                 ));
                 continue;
             }
+            // Baselines blessed before clock waits were counted do not enforce them; a journey
+            // new to an existing baseline must have none.
+            let clock_allowed = match base {
+                Some(b) => b.clock_waits,
+                None => ctx.baseline.as_ref().map(|_| 0),
+            };
+            if let Some(allowed) = clock_allowed {
+                if info.clock_waits > allowed {
+                    checks.push(Check::fail(
+                        format!("{} closed-loop", info.id),
+                        format!(
+                            "{} waits on a free-running clock (an absolute vblank or present \
+                             count is a fixed wait), the baseline allows {allowed}: wait on game \
+                             state instead",
+                            info.clock_waits
+                        ),
+                    ));
+                    continue;
+                }
+            }
         }
         runnable.push((info, base.map_or(0, |b| b.ticks)));
     }
     checks.push(Check::new(
         "open-loop steps (ratchet, target 0)",
         Status::Pass,
-        open_total.to_string(),
+        format!(
+            "{} ({open_total} fixed waits or holds + {clock_total} waits on a free-running clock)",
+            open_total + clock_total
+        ),
     ));
     let models: Vec<&str> = match (ctx.tier, bless) {
         (_, true) | (Tier::Quick, false) => vec!["real"],
@@ -260,11 +289,15 @@ pub fn run(ctx: &Ctx<'_>, bless: bool) -> StageResult {
             .then(a.model.cmp(&b.model))
     });
     let conformance = format!("--conformance={}", spec.conformance.join(","));
-    let render = if spec.hw { "--strict" } else { "--no-hw" };
     let receipts = ctx.work.join("gate-receipts");
     let width = ctx.config.budget.emulators;
     let outcomes = sched::run_all(&jobs, width, |job| {
         ctx.timed(&format!("journey:{}@{}", job.info.id, job.model), || {
+            let render = if spec.hw && !spec.hw_off.contains_key(&job.info.id) {
+                "--strict"
+            } else {
+                "--no-hw"
+            };
             let mut flags = vec![render.to_string(), conformance.clone()];
             if let (Some(dir), Some(name)) = (&spec.golden_dir, &job.info.name) {
                 flags.push("--golden-dir".into());
@@ -283,7 +316,8 @@ pub fn run(ctx: &Ctx<'_>, bless: bool) -> StageResult {
     sorted.sort_by(|a, b| (&a.0.info.id, &a.0.model).cmp(&(&b.0.info.id, &b.0.model)));
     let mut hw_rows = (0usize, Vec::new(), Vec::new());
     for (job, (check, line)) in sorted {
-        if let (true, Some(line)) = (spec.hw, &line) {
+        if let (true, false, Some(line)) = (spec.hw, spec.hw_off.contains_key(&job.info.id), &line)
+        {
             let row = format!("{}@{}", job.info.id, job.model);
             match line.hw {
                 Some((a, b)) if a > 0 && b > 0 => hw_rows.0 += 1,
@@ -343,6 +377,12 @@ pub fn run(ctx: &Ctx<'_>, bless: bool) -> StageResult {
             ));
         }
         checks.push(Check::pass("hardware renderer (hw = true)", value));
+        for (id, reason) in &spec.hw_off {
+            checks.push(Check::skip(
+                format!("{id} hardware renderer"),
+                format!("hw_off: {reason}"),
+            ));
+        }
     }
     let source = match hits {
         0 => Source::Run,

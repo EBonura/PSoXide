@@ -277,7 +277,7 @@ fn run(o: &Options) -> Result<ExitCode, String> {
         ),
         ("[journeys]", game.journeys.is_some()),
         ("[cross]", game.cross.is_some()),
-        ("[clean]", game.clean.is_some()),
+        ("[[clean]]", !game.cleans.is_empty()),
     ] {
         if !declared {
             missing.push(format!("{section} not declared"));
@@ -368,6 +368,9 @@ fn bless(o: &Options) -> Result<ExitCode, String> {
         } else if let Some(id) = k.strip_prefix("open_loop/") {
             let e: &mut JourneyBase = base.journeys.entry(id.to_string()).or_default();
             e.open_loop = v.parse().unwrap_or(0);
+        } else if let Some(id) = k.strip_prefix("clock_waits/") {
+            let e: &mut JourneyBase = base.journeys.entry(id.to_string()).or_default();
+            e.clock_waits = Some(v.parse().unwrap_or(0));
         }
     }
     // The ratchet only turns one way: bless never raises a journey's open-loop count, and a
@@ -379,6 +382,14 @@ fn bless(o: &Options) -> Result<ExitCode, String> {
             if now.open_loop > allowed {
                 raised.push(format!("{id} {allowed} -> {}", now.open_loop));
             }
+            // Clock waits counted for the first time are recorded as they are; after that they
+            // only go down.
+            let clock_allowed = old.journeys.get(id).and_then(|j| j.clock_waits);
+            if let (Some(allowed), Some(now)) = (clock_allowed, now.clock_waits) {
+                if now > allowed {
+                    raised.push(format!("{id} clock waits {allowed} -> {now}"));
+                }
+            }
         }
         if !raised.is_empty() {
             return Err(format!(
@@ -388,9 +399,12 @@ fn bless(o: &Options) -> Result<ExitCode, String> {
         }
     }
     let total: u32 = base.journeys.values().map(|j| j.open_loop).sum();
+    let clock: u32 = base.journeys.values().filter_map(|j| j.clock_waits).sum();
     println!(
-        "open-loop steps remaining in {}: {total} (target 0)",
-        game.name
+        "open-loop steps remaining in {}: {} ({total} fixed waits or holds + {clock} waits on a \
+         free-running clock; target 0)",
+        game.name,
+        total + clock
     );
     let host = stage::host::run(&ctx, true);
     print_stage(&host);
@@ -454,8 +468,8 @@ fn lint(o: &Options) -> Result<ExitCode, String> {
     let mut bad = 0;
     let mut total = 0;
     for path in stage::journeys::files(&o.repo, &spec.files)? {
-        let info = journey::inspect(&path)?;
-        total += info.open_loop;
+        let info = journey::inspect(&path, &spec.clocks)?;
+        total += info.open_loop + info.clock_waits;
         let pad = journey::check_pad(&info, &spec.forced_analog);
         let allowed = base
             .as_ref()
@@ -466,10 +480,11 @@ fn lint(o: &Options) -> Result<ExitCode, String> {
             bad += 1;
         }
         println!(
-            "{:<40} pad {:<10} open-loop {:>4} (baseline {allowed}){}{}",
+            "{:<40} pad {:<10} open-loop {:>4} (baseline {allowed}) clock waits {:>3}{}{}",
             info.id,
             info.pad.as_deref().unwrap_or("MISSING"),
             info.open_loop,
+            info.clock_waits,
             if ratchet { "" } else { "  OVER THE RATCHET" },
             pad.err().map_or(String::new(), |e| format!("  {e}"))
         );
@@ -491,7 +506,10 @@ fn lint(o: &Options) -> Result<ExitCode, String> {
             }
         }
     }
-    println!("open-loop steps in total: {total} (target 0); journeys refused: {bad}");
+    println!(
+        "open-loop steps in total: {total}, waits on a free-running clock included (target 0); \
+         journeys refused: {bad}"
+    );
     Ok(if bad == 0 {
         ExitCode::SUCCESS
     } else {

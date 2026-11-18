@@ -79,6 +79,9 @@ pub fn run(ctx: &Ctx<'_>, bless: bool) -> StageResult {
         }
     }
     let tree = tree.finish();
+    // Jobs in declared order, grouped: a host's `exclusive` group runs one job after another,
+    // every other job is a group of its own; groups run in parallel inside the CPU budget.
+    let mut groups: Vec<(Option<&str>, Vec<HostJob<'_>>)> = Vec::new();
     for host in &ctx.game.hosts {
         let models: Vec<Option<&str>> = if host.models.is_empty() {
             vec![None]
@@ -91,15 +94,49 @@ pub fn run(ctx: &Ctx<'_>, bless: bool) -> StageResult {
                 Some(m) => format!("{}@{m}", host.name),
                 None => host.name.clone(),
             };
-            match one(ctx, host, model, &name, &tree, bless) {
-                Ok((outcome, hit)) => {
-                    hits += usize::from(hit);
-                    facts.extend(outcome.facts);
-                    checks.extend(outcome.checks);
-                }
-                Err(e) => checks.push(Check::fail(&name, e)),
+            let group = host.exclusive.as_deref();
+            match groups
+                .iter_mut()
+                .find(|(g, _)| group.is_some() && *g == group)
+            {
+                Some((_, jobs)) => jobs.push((host, model, name)),
+                None => groups.push((group, vec![(host, model, name)])),
             }
         }
+    }
+    let before = util::git(&ctx.repo, &["status", "--porcelain"]).unwrap_or_default();
+    let done = crate::sched::run_all(&groups, ctx.config.budget.jobs, |(_, jobs)| {
+        jobs.iter()
+            .map(|(host, model, name)| (name.clone(), one(ctx, host, *model, name, &tree, bless)))
+            .collect::<Vec<_>>()
+    });
+    let mut results: Vec<HostRow> = done.into_iter().flatten().collect();
+    // Report in the order the game file declares.
+    let order: Vec<String> = groups
+        .iter()
+        .flat_map(|(_, jobs)| jobs.iter().map(|(_, _, n)| n.clone()))
+        .collect();
+    results.sort_by_key(|(n, _)| order.iter().position(|o| o == n));
+    for (name, r) in results {
+        match r {
+            Ok((outcome, hit)) => {
+                hits += usize::from(hit);
+                facts.extend(outcome.facts);
+                checks.extend(outcome.checks);
+            }
+            Err(e) => checks.push(Check::fail(&name, e)),
+        }
+    }
+    // Checks run side by side, so the tree is compared once around all of them.
+    let after = util::git(&ctx.repo, &["status", "--porcelain"]).unwrap_or_default();
+    if before != after {
+        checks.push(Check::fail(
+            "host checks left the tree as they found it",
+            format!(
+                "the tree changed (stale committed files?): {}",
+                changed(&before, &after)
+            ),
+        ));
     }
     if ctx.game.hosts.is_empty() {
         checks.push(Check::skip(
@@ -206,7 +243,6 @@ fn execute(
     env: &[(String, Option<String>)],
     key: &str,
 ) -> Outcome {
-    let before = util::git(&ctx.repo, &["status", "--porcelain"]).unwrap_or_default();
     let log = match ctx.dir(&["host"]) {
         Ok(d) => d.join(format!(
             "{}-{}.log",
@@ -220,19 +256,11 @@ fn execute(
         .as_ref()
         .map_or_else(|| ctx.repo.clone(), |d| ctx.repo.join(d));
     let done = util::run_logged(command, &dir, env, &log, None);
-    let after = util::git(&ctx.repo, &["status", "--porcelain"]).unwrap_or_default();
     let mut facts = std::collections::BTreeMap::new();
     let check = match done {
         Ok(d) if d.code != 0 => {
             Check::fail(name, format!("exit {}; log {}", d.code, log.display()))
         }
-        Ok(_) if before != after => Check::fail(
-            name,
-            format!(
-                "it changed the tree (stale committed files?): {}",
-                changed(&before, &after)
-            ),
-        ),
         Ok(d) => match &host.metric {
             Some(m) => match read_metric(&d.output, &m.key) {
                 Some(v) => {
@@ -258,6 +286,11 @@ fn execute(
         facts,
     }
 }
+
+/// One host job: the check, the model it runs on (if any) and its row name.
+type HostJob<'a> = (&'a Host, Option<&'a str>, String);
+/// A row name and what its job returned.
+type HostRow = (String, Result<(Outcome, bool), String>);
 
 fn changed(before: &str, after: &str) -> String {
     after
