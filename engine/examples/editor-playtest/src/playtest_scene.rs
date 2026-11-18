@@ -2250,6 +2250,9 @@ fn sort_probe_class(class: u32) {
 /// RAM the loading screen reads into the persistent asset arena, in 64-byte
 /// units: the uploaded textures' group, then the persistent assets' group.
 #[cfg(feature = "cd-stream-bench")]
+// Loading-only code: kept out of line and small, off the hot loops' cache lines.
+#[inline(never)]
+#[cfg_attr(target_arch = "mips", optimize(size))]
 fn persistent_load_units() -> (u32, u32) {
     use psx_level::asset_flags::{STREAMED_GAMEPLAY_PERSISTENT, STREAMED_GAMEPLAY_UPLOAD};
     let mut uploaded = 0u32;

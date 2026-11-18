@@ -114,6 +114,9 @@ fn uploaded_by_the_loading_screen(material: &psx_grid::Material) -> bool {
 /// resolved in level order, as [`bind_pending`] resolves them. Returns whether
 /// every one is bound; an upload still queued leaves it unbound and the next
 /// call tries again.
+// Loading-only code: kept out of line and small, off the hot loops' cache lines.
+#[inline(never)]
+#[cfg_attr(target_arch = "mips", optimize(size))]
 pub(super) fn bind_uploaded(
     level: &LevelView<'static>,
     uploaded: &mut Vec<Option<GridMaterial>>,

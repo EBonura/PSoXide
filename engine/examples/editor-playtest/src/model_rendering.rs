@@ -593,37 +593,8 @@ impl Playtest {
     #[cfg(feature = "cd-stream-bench")]
     #[inline(never)]
     pub(super) fn step_persistent_model_assets(&mut self) -> bool {
-        if !self.level_textures_uploaded {
-            // The level textures only its materials use come first, into the
-            // same pages: upload them all, then let the persistent assets
-            // have the pages. A level without any is through in this call.
-            let assets = persistent_assets_arena_mut();
-            assets.begin_group(
-                UI_PACK_START_LBA,
-                UI_PACK_TOC,
-                ASSETS,
-                psx_level::asset_flags::STREAMED_GAMEPLAY_UPLOAD,
-            );
-            assets.pump(cd_arena(), RUNTIME_SCHEDULE.stream_pump_sectors_per_tick);
-            if !persistent_assets_arena().ready() {
-                return false;
-            }
-            if let Some(world_rt) = self.world_rt.as_mut() {
-                // Upload them all in this tick: the bytes leave with the next
-                // group, and the loading screen has nothing else for the GPU.
-                // Bounded so a texture VRAM cannot take never holds the
-                // loading screen in one tick (it retries on the next).
-                let mut steps = 0;
-                while !world_rt.bind_uploaded_textures() {
-                    if steps == UPLOADED_TEXTURE_STEPS_PER_TICK {
-                        return false;
-                    }
-                    let _ = self.streaming_jobs.step_vram_uploads();
-                    steps += 1;
-                }
-            }
-            self.level_textures_uploaded = true;
-            persistent_assets_arena_mut().reset_for_scene_load();
+        if !self.level_textures_uploaded && !self.upload_level_textures() {
+            return false;
         }
         {
             let assets = persistent_assets_arena_mut();
@@ -635,6 +606,45 @@ impl Playtest {
             self.runtime_models_loaded = true;
         }
         self.runtime_models_loaded
+    }
+
+    /// Read the level textures only the level's materials use into the
+    /// persistent asset pages, upload them all and keep their bindings, then
+    /// free the pages for the persistent assets. A level without any is
+    /// through in one call. Returns whether it is done.
+    #[cfg(feature = "cd-stream-bench")]
+    // Loading-only code: kept out of line and small, off the hot loops' cache lines.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
+    fn upload_level_textures(&mut self) -> bool {
+        let assets = persistent_assets_arena_mut();
+        assets.begin_group(
+            UI_PACK_START_LBA,
+            UI_PACK_TOC,
+            ASSETS,
+            psx_level::asset_flags::STREAMED_GAMEPLAY_UPLOAD,
+        );
+        assets.pump(cd_arena(), RUNTIME_SCHEDULE.stream_pump_sectors_per_tick);
+        if !persistent_assets_arena().ready() {
+            return false;
+        }
+        if let Some(world_rt) = self.world_rt.as_mut() {
+            // Upload them all in this tick: the bytes leave with the next
+            // group, and the loading screen has nothing else for the GPU.
+            // Bounded so a texture VRAM cannot take never holds the
+            // loading screen in one tick (it retries on the next).
+            let mut steps = 0;
+            while !world_rt.bind_uploaded_textures() {
+                if steps == UPLOADED_TEXTURE_STEPS_PER_TICK {
+                    return false;
+                }
+                let _ = self.streaming_jobs.step_vram_uploads();
+                steps += 1;
+            }
+        }
+        self.level_textures_uploaded = true;
+        persistent_assets_arena_mut().reset_for_scene_load();
+        true
     }
 
     pub(super) fn player_clip_duration_vblanks(
