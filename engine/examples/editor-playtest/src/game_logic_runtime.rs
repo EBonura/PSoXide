@@ -26,7 +26,7 @@ use psx_game_runtime::combatant::stance_scaled;
 use crate::playtest_runtime::fighter_motor_rules;
 use psx_game_runtime::destructibles::{DamageChannel, DamageOutcome};
 use psx_game_runtime::entities::{
-    DeferredGameEntityAttack, GameEntityState, MeleeArcStats, PredictedContact,
+    DeferredGameEntityAttack, GameEntityState, MeleeArcStats, PredictedContact, Tell,
 };
 use psx_game_runtime::model_rendering as mr;
 use psx_game_runtime::projectiles::{
@@ -2220,6 +2220,22 @@ impl Playtest {
             ),
             crit: self.game_entities.actor().crit_attack,
         };
+        // Her authored melee tell tracks the fighter she is locked on, by
+        // the rule every fighter's tell follows.
+        if let Some(target) = self.lock_target_position() {
+            if !self
+                .game_entities
+                .swing_connected(RuntimeGameEntities::ACTOR_SLOT)
+                && combat::melee_tell_tracks(swing.capsules, swing.action, swing.pose.phase_q12())
+            {
+                self.game_entities.track_tell(
+                    RuntimeGameEntities::ACTOR_SLOT,
+                    Tell::Melee,
+                    [target.x, target.y, target.z],
+                    1,
+                );
+            }
+        }
         let mut taken = PlayerHitsTaken::NONE;
         let stats = self.swing_fighters(ctx, swing, None, prop_blockers.as_slice(), &mut taken);
         self.finish_swing(swing, stats);
