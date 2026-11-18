@@ -409,6 +409,15 @@ pub fn plan(repo: &Path, path: &Path, pad: &str, min_distinct: u32) -> Result<Pl
     })
 }
 
+/// A condition written as a TOML table in the journey syntax (`{ kind = "ram", sym, offset,
+/// size, signed, op, value, value_hi }`), resolved against `symbols`.
+pub fn condition(table: &toml::Table, symbols: &Symbols) -> Result<Probe, String> {
+    let c: Cond = Value::Table(table.clone())
+        .try_into()
+        .map_err(|e| format!("condition {table}: {e}"))?;
+    resolve(&c, symbols)
+}
+
 fn resolve(c: &Cond, symbols: &Symbols) -> Result<Probe, String> {
     if c.kind != "ram" {
         return Err(format!(

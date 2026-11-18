@@ -121,6 +121,9 @@ pub struct Window {
     /// The window ends when this condition first holds after `from`.
     #[serde(default)]
     pub until: Option<toml::Table>,
+    /// Conditions only: the locating replay stops at this poll; `until` must have held by then.
+    #[serde(default)]
+    pub max_polls: Option<u32>,
     /// Phase shifts of the window, in polls; must contain 0. The quick tier runs 0 only.
     #[serde(default = "zero_offset")]
     pub offsets: Vec<i32>,
@@ -360,7 +363,21 @@ impl Game {
                 (Some(_), Some(_), None, None) => {
                     return Err(format!("[[speed]] `{}`: polls must be [from, to]", w.name))
                 }
-                (_, None, Some(_), Some(_)) => {}
+                (_, None, Some(_), Some(_)) => {
+                    if w.max_polls.is_none() {
+                        return Err(format!(
+                            "[[speed]] `{}`: a window by conditions needs max_polls (where the \
+                             locating replay gives up)",
+                            w.name
+                        ));
+                    }
+                    if self.build(&w.build).is_some_and(|b| b.map.is_none()) {
+                        return Err(format!(
+                            "[[speed]] `{}`: build `{}` declares no map to resolve the conditions",
+                            w.name, w.build
+                        ));
+                    }
+                }
                 _ => {
                     return Err(format!(
                         "[[speed]] `{}`: a window is tape + polls, or from + until conditions",
@@ -488,7 +505,13 @@ map = "link.map"
         assert!(Game::parse(&format!("{MINIMAL}{w}offset = [0]\n")).is_err());
         let c = "[[speed]]\nname = \"c\"\nbuild = \"ship\"\nfrom = { kind = \"ram\", sym = \"S\", value = 3 }\nuntil = { kind = \"ram\", sym = \"S\", value = 4 }\n";
         assert!(
-            Game::parse(&format!("{MINIMAL}{c}")).is_ok(),
+            Game::parse(&format!("{MINIMAL}{c}"))
+                .unwrap_err()
+                .contains("max_polls"),
+            "a window by conditions needs a limit"
+        );
+        assert!(
+            Game::parse(&format!("{MINIMAL}{c}max_polls = 900\n")).is_ok(),
             "a window by conditions loads"
         );
         let half = "[[speed]]\nname = \"c\"\nbuild = \"ship\"\nfrom = { kind = \"ram\", sym = \"S\", value = 3 }\n";
