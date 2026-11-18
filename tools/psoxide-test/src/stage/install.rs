@@ -75,11 +75,23 @@ fn one(ctx: &Ctx<'_>, install: &crate::game::Install) -> StageResult {
                 .map(|f| (f.to_string(), v.clone()))
         })
         .collect();
-    if now.is_empty() || now != judged_files {
+    // The bytes that go into the library are the disc (bin and cue): those must be the judged
+    // ones. Other files of `out` (a link map that names a temporary build directory) may differ.
+    let installed = [b.disc.clone(), b.disc.replace(".cue", ".bin")];
+    let differs: Vec<&String> = installed
+        .iter()
+        .filter(|f| !now.contains_key(*f) || now.get(*f) != judged_files.get(*f))
+        .collect();
+    if !differs.is_empty() {
         return result(Outcome::error(
             "install",
             format!(
-                "the files in {} are not the bytes result {} judged: build and judge them again",
+                "{} in {} are not the bytes result {} judged: build and judge them again",
+                differs
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
                 b.out,
                 util::short(&hash)
             ),

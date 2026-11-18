@@ -99,6 +99,13 @@ pub struct Build {
     pub bind_min: Option<f64>,
     #[serde(default)]
     pub bind_reason: Option<String>,
+    /// `false` for a build that links without its placement layout or sample profile on purpose
+    /// (a test disc on another feature set): psoxide-pgo's refusal lines and bind lines are then
+    /// reported as a skip with `layout_reason` instead of failing the build.
+    #[serde(default)]
+    pub layout: Option<bool>,
+    #[serde(default)]
+    pub layout_reason: Option<String>,
     /// The link map inside `out` (size and symbols read it).
     #[serde(default)]
     pub map: Option<String>,
@@ -522,6 +529,14 @@ impl Game {
                 if !["digital", "dualshock"].contains(&pad.as_str()) {
                     return Err(format!("[cross] pads: `{pad}` is not digital or dualshock"));
                 }
+            }
+        }
+        for b in &self.builds {
+            if b.layout == Some(false) && b.layout_reason.as_deref().is_none_or(str::is_empty) {
+                return Err(format!(
+                    "build `{}`: layout = false needs `layout_reason`",
+                    b.name
+                ));
             }
         }
         for b in &self.builds {

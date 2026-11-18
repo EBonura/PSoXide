@@ -303,12 +303,12 @@ const PGO_REFUSALS: &[&str] = &["UNBOUND PROFILE:", "the layout profile binds"];
 
 /// The first `fail_on` substring or psoxide-pgo refusal in a build command's output.
 pub fn refused(build: &Build, output: &str) -> Option<String> {
-    for needle in build
-        .fail_on
-        .iter()
-        .map(String::as_str)
-        .chain(PGO_REFUSALS.iter().copied())
-    {
+    for needle in build.fail_on.iter().map(String::as_str).chain(
+        PGO_REFUSALS
+            .iter()
+            .copied()
+            .filter(|_| build.layout != Some(false)),
+    ) {
         if let Some(line) = output.lines().find(|l| l.contains(needle)) {
             return Some(format!("the build printed `{}`", line.trim()));
         }
@@ -319,6 +319,15 @@ pub fn refused(build: &Build, output: &str) -> Option<String> {
 /// One named check per psoxide-pgo bind line in the build's output (placement layouts and
 /// sample profiles): the bound share against `bind_min` (default 100%).
 pub fn bind_checks(build: &Build, output: &str) -> Vec<Check> {
+    if build.layout == Some(false) {
+        return vec![Check::skip(
+            format!("{} layout", build.name),
+            format!(
+                "linked without its layout on purpose: {}",
+                build.layout_reason.as_deref().unwrap_or("")
+            ),
+        )];
+    }
     let min = build.bind_min.unwrap_or(100.0);
     let mut checks = Vec::new();
     for line in output.lines() {
@@ -476,6 +485,24 @@ mod tests {
         assert!(bind_checks(&b, "no pgo here").is_empty());
         let profile = "psoxide-pgo: profile bind (names normalised): 98.6% of samples bound; x";
         assert_eq!(bind_checks(&b, profile)[0].value, "98.6%");
+    }
+
+    #[test]
+    fn a_build_without_its_layout_on_purpose_skips_the_refusal() {
+        let mut b = build(&[]);
+        let refusal = "Error: the layout profile binds 94.5% of its instructions, under 98%";
+        assert!(refused(&b, refusal).is_some());
+        b.layout = Some(false);
+        b.layout_reason = Some("gatelock test disc, another feature set".into());
+        assert!(refused(&b, refusal).is_none());
+        let checks = bind_checks(&b, LAYOUT_LINE);
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].status, crate::report::Status::Skip);
+        b.fail_on = vec!["WITHOUT".into()];
+        assert!(
+            refused(&b, "built WITHOUT x").is_some(),
+            "fail_on still holds"
+        );
     }
 
     #[test]

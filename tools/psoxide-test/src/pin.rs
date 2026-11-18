@@ -19,6 +19,9 @@ use std::path::{Path, PathBuf};
 use crate::game::Game;
 use crate::util::{self, Key};
 
+/// Bumped whenever the guest-tree definition changes, so cached trees of the old one are not reused.
+pub const DEFINITION: &str = "guest-tree-1";
+
 /// The SDK paths whose content can change a game's bytes (see the module documentation).
 pub const GUEST_PATHS: &[&str] = &[
     "sdk",
@@ -105,6 +108,8 @@ pub fn read(repo: &Path, game: Option<&Game>) -> Option<Pin> {
 /// A bare, blob-less mirror of the SDK repository under the work tree.
 pub struct Mirror {
     dir: PathBuf,
+    /// Seconds since the last successful fetch, when this run could not fetch (offline).
+    pub stale: Option<u64>,
 }
 
 impl Mirror {
@@ -129,8 +134,22 @@ impl Mirror {
                 ));
             }
         }
-        let mirror = Mirror { dir };
-        mirror.git(&["fetch", "-q", "origin", "+refs/heads/*:refs/heads/*"])?;
+        let mut mirror = Mirror { dir, stale: None };
+        let stamp = mirror.dir.join("psoxide-test-last-fetch");
+        match mirror.git(&["fetch", "-q", "origin", "+refs/heads/*:refs/heads/*"]) {
+            Ok(_) => {
+                let _ = std::fs::write(&stamp, "");
+            }
+            // Offline: the main fetched last time stands, with its age; never fetched is an error.
+            Err(e) => match util::mtime_seconds(&stamp) {
+                Some(t) => mirror.stale = Some((util::now_seconds() - t).max(0.0) as u64),
+                None => {
+                    return Err(format!(
+                        "cannot fetch SDK main and none was ever fetched: {e}"
+                    ))
+                }
+            },
+        }
         Ok(mirror)
     }
 
@@ -150,6 +169,26 @@ impl Mirror {
 
     /// The guest tree of `commit` (see the module documentation).
     pub fn guest_tree(&self, commit: &str) -> Result<String, String> {
+        // A commit's guest tree never changes: kept per definition version, so an offline run
+        // and a repeated run read it back instead of recomputing.
+        let cache = self.dir.join("psoxide-test-guest-trees.json");
+        let mut known: BTreeMap<String, String> = std::fs::read_to_string(&cache)
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default();
+        let slot = format!("{DEFINITION}:{commit}");
+        if let Some(tree) = known.get(&slot) {
+            return Ok(tree.clone());
+        }
+        let tree = self.compute_guest_tree(commit)?;
+        known.insert(slot, tree.clone());
+        if let Ok(json) = serde_json::to_string_pretty(&known) {
+            let _ = std::fs::write(&cache, json);
+        }
+        Ok(tree)
+    }
+
+    fn compute_guest_tree(&self, commit: &str) -> Result<String, String> {
         let mut args = vec!["ls-tree", "-r", "--full-tree", commit, "--"];
         args.extend(GUEST_PATHS);
         let listing = self.git(&args)?;
@@ -291,6 +330,8 @@ pub struct Verdict {
     pub main_tree: String,
     pub recorded: Option<String>,
     pub file: String,
+    /// Offline: seconds since SDK main was last fetched (the main judged is that one).
+    pub main_age: Option<u64>,
 }
 
 impl Verdict {
@@ -305,14 +346,28 @@ impl Verdict {
 
     /// One line for the result header.
     pub fn header(&self) -> String {
-        if self.pinned_tree == self.main_tree {
+        let line = if self.pinned_tree == self.main_tree {
             format!("guest tree equals main {}", util::short(&self.main))
         } else {
             format!(
                 "guest tree differs from main {}: repin",
                 util::short(&self.main)
             )
+        };
+        match self.main_age {
+            Some(age) => format!("{line} (offline: main as fetched {} ago)", age_text(age)),
+            None => line,
         }
+    }
+}
+
+/// `3 h 05 min`, `12 min`, `40 s`.
+pub fn age_text(seconds: u64) -> String {
+    match seconds {
+        s if s >= 86_400 => format!("{} d {} h", s / 86_400, s % 86_400 / 3600),
+        s if s >= 3600 => format!("{} h {:02} min", s / 3600, s % 3600 / 60),
+        s if s >= 60 => format!("{} min", s / 60),
+        s => format!("{s} s"),
     }
 }
 
@@ -332,6 +387,7 @@ pub fn judge(work_root: &Path, pin: &Pin) -> Result<Verdict, String> {
         main,
         recorded: pin.recorded.clone(),
         file: pin.file.clone(),
+        main_age: mirror.stale,
     })
 }
 

@@ -225,6 +225,9 @@ fn not_run(name: &str, needs: &str) -> StageResult {
 fn run(o: &Options) -> Result<ExitCode, String> {
     let config = Config::load()?;
     let game = Game::load(&o.repo)?;
+    if let Some(problem) = stage::speed::pgo_source_problem(&o.repo, &game, &config) {
+        return Err(problem);
+    }
     let mut ctx = context(o, &game, &config)?;
     let wanted = |s: &str| {
         let in_tier = ctx_tier_has(o.tier, s);
@@ -333,6 +336,9 @@ fn ctx_tier_has(tier: Tier, stage: &str) -> bool {
 fn bless(o: &Options) -> Result<ExitCode, String> {
     let config = Config::load()?;
     let game = Game::load(&o.repo)?;
+    if let Some(problem) = stage::speed::pgo_source_problem(&o.repo, &game, &config) {
+        return Err(problem);
+    }
     let mut ctx = context(o, &game, &config)?;
     let build = stage::build::run(&mut ctx);
     if !build.passed() {
@@ -424,6 +430,28 @@ fn bless(o: &Options) -> Result<ExitCode, String> {
         }
     }
     let speed = stage::speed::run(&ctx, true);
+    // Before reading the windows: a stage that could not measure says why (not "no flips").
+    let broken: Vec<&Check> = speed
+        .outcome
+        .checks
+        .iter()
+        .filter(|c| c.status == Status::Fail)
+        .filter(|c| {
+            !c.name.ends_with(" baseline")
+                && ![" frames presented", " cycles per frame"]
+                    .iter()
+                    .any(|m| c.name.contains(m))
+        })
+        .collect();
+    if let Some(first) = broken.first() {
+        for c in &broken {
+            println!("  FAIL {}: {} {}", c.name, c.value, c.detail);
+        }
+        return Err(format!(
+            "the speed stage failed, nothing blessed: {}: {}",
+            first.name, first.detail
+        ));
+    }
     for w in &game.windows {
         let mut table = WindowBase {
             offsets: w.offsets.clone(),
@@ -468,6 +496,12 @@ fn print_stage(s: &StageResult) {
 fn lint(o: &Options) -> Result<ExitCode, String> {
     let game = Game::load(&o.repo)?;
     let base = Baseline::load(&o.repo)?;
+    if let Some(problem) = Config::load()
+        .ok()
+        .and_then(|c| stage::speed::pgo_source_problem(&o.repo, &game, &c))
+    {
+        println!("REFUSED (run and bless stop here): {problem}");
+    }
     let Some(spec) = &game.journeys else {
         println!("{}: no [journeys]", game.name);
         return Ok(ExitCode::SUCCESS);
@@ -589,7 +623,9 @@ fn sdk_stage(repo: &Path, game: &Game, work_root: &Path) -> (StageResult, String
         },
         util::short(&verdict.main),
         util::short(&verdict.main_tree)
-    );
+    ) + &verdict.main_age.map_or(String::new(), |a| {
+        format!(" (offline: main as fetched {} ago)", pin::age_text(a))
+    });
     let mut checks = vec![if verdict.pinned_tree == verdict.main_tree {
         Check::pass(&name, value)
     } else {

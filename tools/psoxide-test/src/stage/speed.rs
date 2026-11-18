@@ -260,6 +260,31 @@ pub fn run(ctx: &Ctx<'_>, all_offsets: bool) -> StageResult {
     result(source, Outcome { checks, facts })
 }
 
+/// The same refusal `pgo_binary` gives, asked before anything runs (run, bless and lint call it
+/// first), so a symlinked `.psoxide` never costs a build, the host checks and the journeys first.
+/// `None` when the game has no speed window or psoxide-pgo has a source.
+pub fn pgo_source_problem(
+    repo: &Path,
+    game: &crate::game::Game,
+    config: &crate::config::Config,
+) -> Option<String> {
+    if game.windows.is_empty() || config.tools.sdk.is_some() {
+        return None;
+    }
+    let hydrated = repo.join(".psoxide");
+    let linked = std::fs::symlink_metadata(&hydrated).is_ok_and(|m| m.file_type().is_symlink());
+    if linked {
+        Some(format!(
+            "{} is a symlink (machine-local; a clean clone has none): the speed stage would refuse \
+             it, so nothing runs. Remove it and set [tools] sdk in the config to a full SDK \
+             checkout at the game's pin",
+            hydrated.display()
+        ))
+    } else {
+        None
+    }
+}
+
 /// Build the psoxide-pgo of the game's SDK pin once and return its path: from the game's own
 /// hydrated `.psoxide` (a real directory, never a symlink to a checkout, which a clean clone
 /// would not have), or else from the user config's `[tools] sdk` checkout, which must be at the
