@@ -30,6 +30,12 @@
 #                                  level). About 130 KB less .text on a one-enemy level for
 #                                  +0.2% route cycles, but a different frame-time distribution,
 #                                  so it is the owner's call and never the default.
+#   PSOXIDE_GUEST_LAYOUT=<file>|off the I-cache layout profile to order the link from. Default:
+#                                  generated/link-order.layout, which the cook copies from the
+#                                  project's own link-order.layout when it has one. off: plain
+#                                  link order. See "Link order" below.
+#   PSOXIDE_GUEST_LAYOUT_REQUIRED=1 fail the build when the layout no longer binds, instead of
+#                                  warning and linking in plain order.
 #
 # Every argument is forwarded verbatim to `cargo build --release`; the
 # Makefile passes the target/build-std flags and the feature selection, and
@@ -165,8 +171,38 @@ patch_and_prove() {
     fi
 }
 
+# Link order. The R3000's I-cache is 4 KB and direct mapped, so where the
+# linker happens to put a hot function decides which other hot code it evicts;
+# every few KB of code moved anywhere above it used to swing Cortex duel frame
+# counts by about 1.5%. A project that commits a layout profile
+# (link-order.layout next to its project.ron, made by the SDK's
+# `psoxide-pgo layout` from per-word counts of representative replays; see
+# tools/psoxide-pgo/README.md, "Link order for editor projects") gets its
+# functions placed by psoxide-pgo's conflict model on every build: the plain
+# link is bound to the profile by portable name and code hash, `place` writes
+# an ordering file for it, and the guest relinks with it (its build.rs passes
+# PSOXIDE_LINK_ORDER to ld.lld). Code the profile never ran links after the
+# placed functions, so growing it no longer moves the hot code.
+unset PSOXIDE_LINK_ORDER
+LAYOUT="${PSOXIDE_GUEST_LAYOUT:-$ROOT/$GUEST_DIR/generated/link-order.layout}"
+if [ "$LAYOUT" = "off" ]; then
+    LAYOUT=""
+elif [ ! -f "$LAYOUT" ]; then
+    if [ -n "${PSOXIDE_GUEST_LAYOUT:-}" ]; then
+        echo "[guest-build] PSOXIDE_GUEST_LAYOUT names no file: $LAYOUT" >&2
+        exit 1
+    fi
+    LAYOUT=""
+fi
+if [ -n "$LAYOUT" ] && [ -n "${PSOXIDE_GUEST_LINK_ELF:-}" ]; then
+    LAYOUT=""
+fi
+
 if [ "${PSOXIDE_GUEST_STAGE:-1}" = "0" ]; then
     echo "[guest-build] PSOXIDE_GUEST_STAGE=0: building in-tree (artifact is checkout-specific)"
+    if [ -n "$LAYOUT" ]; then
+        echo "[guest-build] WARNING: the link order needs the canonical stage; linking in plain order" >&2
+    fi
     # Relative to the guest crate directory, like the linker script, so a
     # checkout path with spaces cannot split the RUSTFLAGS word list.
     in_tree_map="build/examples/editor-playtest.map"
@@ -265,13 +301,23 @@ rm -f "$staged_manifest"
 
 mkdir -p "$GUEST_CARGO_HOME"
 cd "$STAGE/$GUEST_DIR"
-CARGO_HOME="$GUEST_CARGO_HOME" \
-CARGO_TARGET_DIR="$STAGE/build/examples" \
-RUSTFLAGS="$RUSTFLAGS_VALUE" \
-RUSTC_WRAPPER="${repro_rustc:-${RUSTC_WRAPPER:-}}" \
-PSOXIDE_REPRO_ROOT="$STAGE" \
-PSOXIDE_REPRO_INNER="$([ -n "$repro_rustc" ] && printf %s "${RUSTC_WRAPPER:-}")" \
-    cargo build --release "$@"
+# One link of the guest; the ordering file in $link_order when it is set.
+link_order=""
+link_guest() {
+    if [ -n "$link_order" ]; then
+        export PSOXIDE_LINK_ORDER="$link_order"
+    else
+        unset PSOXIDE_LINK_ORDER
+    fi
+    CARGO_HOME="$GUEST_CARGO_HOME" \
+    CARGO_TARGET_DIR="$STAGE/build/examples" \
+    RUSTFLAGS="$RUSTFLAGS_VALUE" \
+    RUSTC_WRAPPER="${repro_rustc:-${RUSTC_WRAPPER:-}}" \
+    PSOXIDE_REPRO_ROOT="$STAGE" \
+    PSOXIDE_REPRO_INNER="$([ -n "$repro_rustc" ] && printf %s "${RUSTC_WRAPPER:-}")" \
+        cargo build --release "$@"
+}
+link_guest "$@"
 
 staged_exe="$STAGE/$EXE_RELATIVE"
 [ -f "$staged_exe" ] || { echo "[guest-build] staged build produced no $EXE_RELATIVE" >&2; exit 1; }
@@ -283,6 +329,46 @@ if [ -n "${PSOXIDE_GUEST_LINK_ELF:-}" ]; then
     exit 0
 fi
 patch_and_prove "$staged_exe" "$GUEST_MAP" "$STAGE"
+if [ -n "$LAYOUT" ]; then
+    # Bind the profile to the patched plain link (the image its counts were
+    # collected on was patched the same way), place, relink, prove the relink
+    # followed the order, and patch and prove the ordered image.
+    (cd "$ROOT" && cargo build -q --release --locked -p psoxide-pgo --bin psoxide-pgo \
+        --target-dir "${CARGO_TARGET_DIR:-$ROOT/target}") || {
+        echo "[guest-build] could not build psoxide-pgo for the link order" >&2
+        exit 1
+    }
+    pgo="${CARGO_TARGET_DIR:-$ROOT/target}/release/psoxide-pgo"
+    rm -f "$STAGE_ROOT"/link-order-*.order "$STAGE_ROOT"/link-order-*.order.placed
+    placing="$STAGE_ROOT/link-order-new.order"
+    if "$pgo" place "$LAYOUT" "$GUEST_MAP" "$staged_exe" "$STAGE/sdk/psoxide.ld" "$placing" \
+        >"$STAGE/link-order.txt" 2>&1; then
+        sed 's/^/[guest-build] link order: /' "$STAGE/link-order.txt"
+        # The name carries the order's hash, so a new order is a new value of
+        # PSOXIDE_LINK_ORDER and cargo reruns the guest's build script.
+        link_order="$STAGE_ROOT/link-order-$(shasum -a 256 "$placing" | cut -c1-16).order"
+        mv "$placing" "$link_order"
+        mv "$placing.placed" "$link_order.placed"
+        link_guest "$@"
+        "$pgo" followed "$link_order" "$GUEST_MAP" >"$STAGE/link-order-followed.txt" 2>&1 || {
+            cat "$STAGE/link-order-followed.txt" >&2
+            exit 1
+        }
+        sed 's/^/[guest-build] link order: /' "$STAGE/link-order-followed.txt"
+        patch_and_prove "$staged_exe" "$GUEST_MAP" "$STAGE"
+        echo "[guest-build] linked in the order placed from $LAYOUT"
+    else
+        cat "$STAGE/link-order.txt" >&2
+        if [ "${PSOXIDE_GUEST_LAYOUT_REQUIRED:-0}" = "1" ]; then
+            echo "[guest-build] $LAYOUT no longer binds this build; regenerate it" >&2
+            exit 1
+        fi
+        echo "[guest-build] WARNING: $LAYOUT no longer binds this build, so it links in plain" \
+            "order and its frame counts move with every code change again; regenerate the" \
+            "project's link-order.layout (tools/psoxide-pgo/README.md, Link order for editor" \
+            "projects)" >&2
+    fi
+fi
 mkdir -p "$ROOT/$(dirname "$EXE_RELATIVE")"
 cp "$staged_exe" "$ROOT/$EXE_RELATIVE"
 echo "[guest-build] canonical stage $STAGE"

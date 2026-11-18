@@ -395,6 +395,17 @@ pub fn build_package_with_spawn(
     project_root: &Path,
     spawn: Option<SpawnOverride>,
 ) -> (Option<PlaytestPackage>, PlaytestValidationReport) {
+    let (package, report) = build_package_budgeted(project, project_root, spawn);
+    (with_link_layout(package, project_root), report)
+}
+
+/// Cook at the default resident ceiling, then again at the room the guest
+/// has when the first cook does not fit.
+fn build_package_budgeted(
+    project: &ProjectDocument,
+    project_root: &Path,
+    spawn: Option<SpawnOverride>,
+) -> (Option<PlaytestPackage>, PlaytestValidationReport) {
     let (package, report) = build_package_cooked(
         project,
         project_root,
@@ -416,6 +427,18 @@ pub fn build_package_with_spawn(
     }
     let (package, report) = build_package_cooked(project, project_root, spawn, headroom_kib);
     finish_budget(package, report)
+}
+
+/// Attach the project's link layout ([`LINK_LAYOUT_FILENAME`]) to a cooked
+/// package.
+fn with_link_layout(
+    package: Option<PlaytestPackage>,
+    project_root: &Path,
+) -> Option<PlaytestPackage> {
+    package.map(|mut package| {
+        package.link_layout = std::fs::read(project_root.join(LINK_LAYOUT_FILENAME)).ok();
+        package
+    })
 }
 
 /// Apply the guest-fit refusal to a cooked package.
@@ -2420,6 +2443,8 @@ fn build_package_cooked(
         characters,
         player_controller,
         entities,
+        // Attached by build_package_with_spawn, which knows the project root.
+        link_layout: None,
     };
     // Level textures only the materials use are uploaded by the loading
     // screen and give their RAM to the persistent assets.

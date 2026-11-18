@@ -923,11 +923,12 @@ const USAGE: &str = "usage: psoxide-pgo <elf-with-dwarf> <pc.csv>... <out.prof>
        psoxide-pgo rebind <in.prof> <target-elf-with-dwarf> <out.prof>
        psoxide-pgo layout <link.map> <image.exe> <words.csv>... <out.layout>
        psoxide-pgo place <in.layout> <link.map> <image.exe> <linker-script> <out.order>
+       psoxide-pgo followed <in.order> <relinked.map>
        psoxide-pgo ram <link.map> [--floor BYTES]";
 
-const MODES: [&str; 11] = [
-    "portable", "rebind", "layout", "place", "collect", "order", "apply", "choose", "measure",
-    "ram", "ladder",
+const MODES: [&str; 12] = [
+    "portable", "rebind", "layout", "place", "followed", "collect", "order", "apply", "choose",
+    "measure", "ram", "ladder",
 ];
 
 /// A layout profile from one link and per-word logs (`--pc-log-words
@@ -977,6 +978,52 @@ fn place_order(
         placement.after
     );
     fs::write(out, layout::order_file(&sections, &placement))?;
+    // Where the model put each placed function, for `followed` to check the relink against.
+    let mut placed = String::new();
+    for &(index, address) in &placement.placed {
+        if let Some(symbol) = &sections[index].symbol {
+            let _ = writeln!(placed, "{address:08x} {symbol}");
+        }
+    }
+    fs::write(placed_path(out), placed)?;
+    Ok(())
+}
+
+/// The sidecar `place` writes next to an ordering file: `address symbol` per
+/// placed function.
+fn placed_path(order: &Path) -> PathBuf {
+    let mut name = order.as_os_str().to_owned();
+    name.push(".placed");
+    PathBuf::from(name)
+}
+
+/// Prove a relink followed the ordering file `place` wrote (ld.lld drops a
+/// name it cannot find without a word, and a guest without the build.rs hook
+/// links as before), and report how many placed functions start where the
+/// model put them.
+fn followed(order_path: &Path, map: &Path) -> Result<()> {
+    let order = fs::read_to_string(order_path)?;
+    let placed = fs::read_to_string(placed_path(order_path))?
+        .lines()
+        .map(|line| {
+            let (address, symbol) = line
+                .split_once(' ')
+                .ok_or_else(|| format!("bad placed line {line:?}"))?;
+            Ok((symbol.to_string(), u32::from_str_radix(address, 16)?))
+        })
+        .collect::<Result<Vec<(String, u32)>>>()?;
+    let followed = layout::check_order(
+        &order,
+        &placed,
+        &layout::read_map(&fs::read_to_string(map)?),
+    )?;
+    println!(
+        "followed: all {} ordered functions in order; {} of the {} placed start where the model \
+         put them",
+        followed.listed,
+        placed.len() - followed.drifted,
+        placed.len()
+    );
     Ok(())
 }
 
@@ -1003,6 +1050,7 @@ fn main() -> ExitCode {
         [mode @ ("collect" | "order" | "apply" | "choose" | "measure" | "ladder"), ..] => {
             pipeline::main(mode, &args[1..])
         }
+        ["followed", order, map] => followed(Path::new(order), Path::new(map)),
         ["ram", map] => ram_report(Path::new(map), None),
         ["ram", map, "--floor", floor] => match floor.parse() {
             Ok(floor) => ram_report(Path::new(map), Some(floor)),

@@ -149,6 +149,7 @@ pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io
         generated_dir.join(super::heap_budget::HEAP_BUDGET_FILENAME),
         super::heap_budget::render(package),
     )?;
+    write_link_layout(package.link_layout.as_deref(), generated_dir)?;
     let xa_started = std::time::Instant::now();
     std::fs::write(
         generated_dir.join(XA_MUSIC_FILENAME),
@@ -2087,10 +2088,23 @@ pub fn write_cook_result(
     if cooked_manifest.exists() {
         std::fs::remove_file(&cooked_manifest)?;
     }
-    if let Some(package) = package {
-        write_package(package, generated_dir)?;
+    match package {
+        Some(package) => write_package(package, generated_dir)?,
+        None => write_link_layout(None, generated_dir)?,
     }
     Ok(())
+}
+
+/// Write the project's link layout into `generated_dir`, or remove the one a
+/// previous project left there: the directory is shared by every project, and
+/// another project's layout would order this one's link from foreign counts.
+fn write_link_layout(layout: Option<&[u8]>, generated_dir: &Path) -> std::io::Result<()> {
+    let path = generated_dir.join(LINK_LAYOUT_FILENAME);
+    match layout {
+        Some(bytes) => std::fs::write(path, bytes),
+        None if path.exists() => std::fs::remove_file(path),
+        None => Ok(()),
+    }
 }
 
 /// Resolve the per-asset `static` name for the include_bytes
