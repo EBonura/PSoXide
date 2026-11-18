@@ -69,6 +69,50 @@ pub fn joint_probes(model: &Model<'_>, socket_joints: &[u16]) -> Vec<Vec<[f64; 3
     out
 }
 
+/// Model-space points each joint moves, for the track encoder: its own
+/// vertices, vertices that blend towards it and the endpoints of the combat
+/// capsules on it (`capsule_points`, joint and point). No lever arm: a socket
+/// joint gets one through `JointInput::reach`, a joint with no points at all
+/// the encoder's default.
+pub fn joint_points(model: &Model<'_>, capsule_points: &[(u16, [i32; 3])]) -> Vec<Vec<[f64; 3]>> {
+    let mut out: Vec<Vec<[f64; 3]>> = vec![Vec::new(); model.joint_count() as usize];
+    for p in 0..model.part_count() {
+        let Some(part) = model.part(p) else { continue };
+        for v in part.first_vertex()..part.first_vertex() + part.vertex_count() {
+            let Some(vertex) = model.vertex(v) else {
+                continue;
+            };
+            let pos = [
+                f64::from(vertex.position.x),
+                f64::from(vertex.position.y),
+                f64::from(vertex.position.z),
+            ];
+            if let Some(list) = out.get_mut(part.joint_index() as usize) {
+                list.push(pos);
+            }
+            if vertex.is_blend() {
+                if let Some(list) = out.get_mut(vertex.joint1 as usize) {
+                    list.push(pos);
+                }
+            }
+        }
+    }
+    // A capsule endpoint counts up to the joint's farthest vertex or the
+    // socket reach, whichever is longer: past that (a blade tip thousands of
+    // units out), Q12 matrix rounding alone exceeds the budget, as for sockets.
+    let norm = |p: &[f64; 3]| (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
+    for &(joint, point) in capsule_points {
+        if let Some(list) = out.get_mut(joint as usize) {
+            let limit = list.iter().map(norm).fold(SOCKET_REACH_UNITS, f64::max);
+            let point = point.map(f64::from);
+            if norm(&point) <= limit {
+                list.push(point);
+            }
+        }
+    }
+    out
+}
+
 /// Pack `bytes` into keyed tracks when that is smaller and inside
 /// `budget_units`. Returns the input untouched otherwise. Reports the outcome.
 pub(crate) fn pack_tracks(
@@ -76,6 +120,7 @@ pub(crate) fn pack_tracks(
     model: &Model<'_>,
     socket_joints: &[u16],
     gameplay_joints: &[u16],
+    capsule_points: &[(u16, [i32; 3])],
     budget_units: u16,
     label: &str,
 ) -> Vec<u8> {
@@ -88,7 +133,9 @@ pub(crate) fn pack_tracks(
     if animation.is_keyed_tracks() || animation.joint_count() != model.joint_count() {
         return bytes;
     }
-    let probes = joint_probes(model, socket_joints);
+    // Every joint is held to its budget on the points it really moves; only a
+    // socket joint keeps a lever arm, for what hangs off it.
+    let probes = joint_points(model, capsule_points);
     let frames = animation.frame_count();
     let mut joints = Vec::with_capacity(animation.joint_count() as usize);
     for j in 0..animation.joint_count() {
@@ -105,7 +152,11 @@ pub(crate) fn pack_tracks(
             rotations,
             translations,
             probes: probes[j as usize].clone(),
-            reach: 0.0,
+            reach: if socket_joints.contains(&j) {
+                SOCKET_REACH_UNITS
+            } else {
+                0.0
+            },
         });
     }
     // Version 7: a child's translation follows its parent's decoded pose, so
@@ -129,8 +180,10 @@ pub(crate) fn pack_tracks(
         joints,
         parents,
     };
+    // The v7 residual tolerance scales with the budget (2.5 units at 4).
     let options = Options {
         budget_units: f64::from(budget_units),
+        residual_units: f64::from(budget_units) * 0.625,
         ..Options::default()
     };
     // The choice between keyed tracks and the pose table compares the keyed clip before

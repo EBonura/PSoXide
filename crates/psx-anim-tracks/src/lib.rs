@@ -953,10 +953,19 @@ pub fn encode(clip: &ClipInput, opts: &Options) -> Result<(Vec<u8>, Report), Rej
     // A derived joint's translation is compensated to the true one at every
     // source frame, so, as in v6, only its rotation error moves its points,
     // about the model origin.
-    let probe_sets: Vec<Vec<V3>> = clip
+    //
+    // A derived joint's residual instead puts its pivot where the true pose
+    // has it, so its rotation error moves its points only by their distance
+    // from the pivot (its own bone, not the whole body's height): rotation is
+    // searched on points relative to the pivot, lever arms sit at the pivot,
+    // and every derived child's pivot is a point of its parent (so the
+    // child's residual stays small).
+    let centre = |j: usize| -> V3 { hierarchy[j].map_or([0.0; 3], |(_, p)| p.map(f64::from)) };
+    let mut probe_sets: Vec<Vec<V3>> = clip
         .joints
         .iter()
-        .map(|joint| {
+        .enumerate()
+        .map(|(j, joint)| {
             let reach = if joint.probes.is_empty() && joint.reach <= 0.0 {
                 600.0
             } else {
@@ -964,15 +973,33 @@ pub fn encode(clip: &ClipInput, opts: &Options) -> Result<(Vec<u8>, Report), Rej
             };
             let mut set = joint.probes.clone();
             if reach > 0.0 {
+                let c = if v7 { centre(j) } else { [0.0; 3] };
                 for axis in 0..3 {
                     for r in [-reach, reach] {
-                        let mut p = [0.0; 3];
-                        p[axis] = r;
+                        let mut p = c;
+                        p[axis] += r;
                         set.push(p);
                     }
                 }
             }
             set
+        })
+        .collect();
+    if v7 {
+        for j in 0..joints {
+            if let Some((p, piv)) = hierarchy[j] {
+                probe_sets[p].push(piv.map(f64::from));
+            }
+        }
+    }
+    let search_probes: Vec<Vec<V3>> = probe_sets
+        .iter()
+        .enumerate()
+        .map(|(j, set)| {
+            let c = if v7 { centre(j) } else { [0.0; 3] };
+            set.iter()
+                .map(|v| [v[0] - c[0], v[1] - c[1], v[2] - c[2]])
+                .collect()
         })
         .collect();
     let applied_truth = |j: usize, f: usize| -> M3 { truths[j].r[f] };
@@ -995,7 +1022,7 @@ pub fn encode(clip: &ClipInput, opts: &Options) -> Result<(Vec<u8>, Report), Rej
     let mut rot_c = Vec::new();
     let mut tr_c = Vec::new();
     for j in 0..joints {
-        let probes = reduce_probes(&probe_sets[j], 32);
+        let probes = reduce_probes(&search_probes[j], 32);
         rot_c.push(rot_candidates(&truths[j], &probes, rot_limit, &ladder));
         let units: Vec<V3> = estimate[j]
             .iter()
@@ -1017,7 +1044,7 @@ pub fn encode(clip: &ClipInput, opts: &Options) -> Result<(Vec<u8>, Report), Rej
         for j in 0..joints {
             let (rc, rk) = &rot_c[j];
             if rk.is_none() && rc.iter().all(Option::is_none) {
-                let probes = reduce_probes(&probe_sets[j], 32);
+                let probes = reduce_probes(&search_probes[j], 32);
                 let finest = rot_finest(&truths[j], &probes);
                 return Reject::Unreachable {
                     joint: j,
@@ -1073,12 +1100,20 @@ pub fn encode(clip: &ClipInput, opts: &Options) -> Result<(Vec<u8>, Report), Rej
             };
             let mut chosen_track = None;
             if let Some((p, piv)) = derived[j] {
+                // Residual that puts the pivot where the true pose has it:
+                // t = t_true + R_true p - R_decoded p.
+                let x = piv.map(f64::from);
                 let target: Vec<V3> = (0..frames)
                     .map(|f| {
                         let a = rotate_pivot(&rot_dec[p][f], piv);
                         let b = rotate_pivot(&rot_dec[j][f], piv);
+                        let true_pivot = apply_pose(&truths[j].r[f], x);
+                        let decoded_pivot = apply_pose(&mat_f64(&rot_dec[j][f]), x);
                         [0, 1, 2].map(|r| {
-                            (truths[j].t[f][r] - f64::from(t_dec[p][f][r] + a[r] - b[r])) / scale
+                            (truths[j].t[f][r] + true_pivot[r]
+                                - decoded_pivot[r]
+                                - f64::from(t_dec[p][f][r] + a[r] - b[r]))
+                                / scale
                         })
                     })
                     .collect();

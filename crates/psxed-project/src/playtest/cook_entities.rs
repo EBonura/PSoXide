@@ -1398,12 +1398,17 @@ pub(crate) fn register_model_for_instance(
     // trails; every Character on this model's hurtboxes, hitboxes and
     // projectile emitters). Their clips keep absolute translations there, so
     // such a read is one decode; the renderer derives the rest from parents.
+    let mut capsule_points: Vec<(u16, [i32; 3])> = Vec::new();
     let gameplay_joints: Vec<u16> = {
         let mut joints: Vec<u16> = model.attachments.iter().map(|s| s.joint).collect();
         for resource in &project.resources {
             if let ResourceData::Character(character) = &resource.data {
                 if character.model == Some(model_resource_id) {
                     joints.extend(character.combat_capsules.iter().map(|c| c.joint));
+                    for c in &character.combat_capsules {
+                        capsule_points.push((c.joint, c.capsule.start));
+                        capsule_points.push((c.joint, c.capsule.end));
+                    }
                 }
             }
         }
@@ -1823,6 +1828,7 @@ pub(crate) fn register_model_for_instance(
             &parsed_model,
             &socket_joints,
             &gameplay_joints,
+            &capsule_points,
             project.animation_track_budget_units,
             &label,
         );
