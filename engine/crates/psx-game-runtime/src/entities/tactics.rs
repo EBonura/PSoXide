@@ -1373,17 +1373,29 @@ impl<const N: usize> GameEntities<N> {
         if intent.pressed(CombatAction::Swap) {
             let _ = self.swap_stance(r, i);
         }
-        if let Some(kind) = intent
+        // The press goes through the fighter's action request, the player's
+        // path: remembered while an action holds the fighter, fired once it
+        // is free. Entities author no attack windows on their requests yet.
+        let pressed = intent
             .attack()
             .and_then(|attack| Self::permitted_attack(r, attack))
-        {
+            .map_or(0, |kind| kind + 1);
+        let free = self.state(i) != GameEntityState::Attack;
+        if let Some((tag, _)) = self.actions[i].attack_request(
+            0,
+            pressed,
+            crate::combat_timing::Sample::LEGACY,
+            self.clock,
+            free,
+        ) {
+            let kind = tag - 1;
             self.attack_mode[i] = kind;
             if kind == GAME_ENTITY_ATTACK_RANGED {
                 if let Some(point) = intent.aim {
                     self.capture_ranged_point(i, point);
                 }
             }
-            self.enter_state(i, GameEntityState::Windup, stats);
+            self.begin_attack(i, stats);
         }
         let here = self.position(i);
         let face = match intent.face {

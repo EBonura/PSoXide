@@ -26,8 +26,9 @@ use psx_game_runtime::combat::{arc_hits_circle, ticks_to_contact, MeleeArc, Worl
 use psx_game_runtime::combat_intent::{CombatAction, CombatActions, CombatIntent, CombatMove};
 use psx_game_runtime::combatant::{Combatant, CombatantId, Defender, HitKind, Strike};
 use psx_game_runtime::entities::{
-    CombatTarget, DeferredGameEntityAttacks, FighterWorld, GameEntities, GameEntityState,
-    GameEntityTickInput, OpenSpace, GAME_ENTITY_ATTACK_HALF_ANGLE, GAME_ENTITY_ATTACK_REACH_MARGIN,
+    AttackPhase, CombatTarget, DeferredGameEntityAttacks, FighterWorld, GameEntities,
+    GameEntityState, GameEntityTickInput, OpenSpace, GAME_ENTITY_ATTACK_HALF_ANGLE,
+    GAME_ENTITY_ATTACK_REACH_MARGIN,
 };
 use psx_game_runtime::projectiles::{
     CombatProjectiles, CombatTeam, ProjectileDamageChannel, ProjectileImpactKind,
@@ -408,8 +409,8 @@ impl Side {
             ticks_to_contact(first, last, u32::from(phase) << 12, 1 << 12)
         });
         // The visible attack phase: 1 tell, 2 swing, 3 recovery.
-        let attack_read = match (self.entities.state(0), swing) {
-            (GameEntityState::Windup | GameEntityState::Attack, Some((phase, first, last))) => {
+        let attack_read = match (self.entities.attack_phase(0), swing) {
+            (Some(AttackPhase::Windup | AttackPhase::Active), Some((phase, first, last))) => {
                 if phase < first {
                     1
                 } else if phase <= last {
@@ -418,7 +419,7 @@ impl Side {
                     3
                 }
             }
-            (GameEntityState::Recover, _) if melee => 3,
+            (Some(AttackPhase::Recover), _) if melee => 3,
             _ => 0,
         };
         Seen {
@@ -910,7 +911,7 @@ pub fn run(duel: &Duel<'_>) -> DuelResult {
                         log_line(&mut log, "duel:event", &[tick, n as u32, 3]);
                     }
                 }
-                if state == GameEntityState::Windup {
+                if state == GameEntityState::Attack {
                     side.tally.attacks += 1;
                     side.attack_start = tick;
                 }
@@ -1155,8 +1156,8 @@ fn sample_row(sides: &[Side], tick: u32) -> [u32; 21] {
     let pa = a.entities.position(0);
     let pb = b.entities.position(0);
     let action = |s: &Side| -> u32 {
-        match s.entities.state(0) {
-            GameEntityState::Windup | GameEntityState::Attack => match s.entities.attack_kind(0) {
+        match s.entities.attack_phase(0) {
+            Some(AttackPhase::Windup | AttackPhase::Active) => match s.entities.attack_kind(0) {
                 0 => CharacterAnimationAction::LightAttack.to_index() as u32,
                 1 => CharacterAnimationAction::HeavyAttack.to_index() as u32,
                 _ => CharacterAnimationAction::RangedAttack.to_index() as u32,

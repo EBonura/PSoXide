@@ -232,7 +232,7 @@ impl<const N: usize> GameEntities<N> {
     pub fn shot_opening(&self, records: &[LevelGameEntityRecord], index: usize) -> bool {
         index < self.count()
             && index < records.len()
-            && self.state(index) == GameEntityState::Windup
+            && self.attack_phase(index) == Some(AttackPhase::Windup)
             && self.state_ticks[index] >= self.selected_timing(index).windup / 2
             && self.combatants[index].flow.can_interrupt()
     }

@@ -195,12 +195,9 @@ impl<const N: usize> GameEntities<N> {
     /// recovers on the move (the same states the old leg layer covered):
     /// fading in as it starts to move, out as it stops.
     fn moving_legs(&self, index: usize) -> Option<(GameEntityClip, u16)> {
-        let acting = (self.selected_attack_is_ranged(index)
-            || self.state(index) == GameEntityState::Windup)
-            && matches!(
-                self.state(index),
-                GameEntityState::Windup | GameEntityState::Attack | GameEntityState::Recover
-            );
+        let phase = self.attack_phase(index);
+        let acting = phase.is_some()
+            && (self.selected_attack_is_ranged(index) || phase == Some(AttackPhase::Windup));
         if !acting {
             return None;
         }

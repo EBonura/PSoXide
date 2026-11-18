@@ -74,13 +74,11 @@ pub enum GameEntityState {
     Patrol = 1,
     /// Player noticed: closing distance.
     Aggro = 2,
-    /// Attack telegraph; the record's `windup_ticks` long.
-    Windup = 3,
-    /// Attack active window (contact resolution is the combat slice).
+    /// A committed attack: the fighter's [`crate::fighter_action::FighterAction`]
+    /// holds it from the attack's start to the end of its clip. Its telegraph,
+    /// contact and recovery are reads of that one clock
+    /// ([`GameEntities::attack_phase`]), as the player's are of hers.
     Attack = 4,
-    /// Post-attack recovery; the record's `recovery_ticks` long (the
-    /// punish window).
-    Recover = 5,
     /// Poise broke (any break but a crit's): its Stun clip played through,
     /// the record's `stagger_ticks`.
     Staggered = 6,
@@ -99,14 +97,25 @@ impl GameEntityState {
             0 => Self::Idle,
             1 => Self::Patrol,
             2 => Self::Aggro,
-            3 => Self::Windup,
             4 => Self::Attack,
-            5 => Self::Recover,
             6 => Self::Staggered,
             8 => Self::KnockedDown,
             _ => Self::Dead,
         }
     }
+}
+
+/// Where a committed attack is on its clock: the read of its
+/// [`crate::fighter_action::ActionTiming`] the AI, the hit rules and the
+/// presentation take ([`GameEntities::attack_phase`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttackPhase {
+    /// The telegraph before the first contact.
+    Windup,
+    /// Contact is live.
+    Active,
+    /// After the last contact, until the action lets go.
+    Recover,
 }
 
 /// Short-lived combat movement choice layered over [`GameEntityState`].
@@ -422,11 +431,6 @@ pub struct GameEntityTickStats {
     pub circling: u16,
     /// Engaged enemies retreating from the player this tick.
     pub retreating: u16,
-    /// Entity attacks that CONNECTED with the player this tick.
-    pub player_hits: u16,
-    /// Total damage those connections apply to the player this tick
-    /// (the owning game subtracts it from its player health).
-    pub player_damage: u16,
 }
 
 /// A strike the player sends at an entity.
@@ -773,6 +777,10 @@ pub struct GameEntities<const MAX_ENTITIES: usize> {
     gaits: [crate::fighter_anim::AnimTrack<EntityAnim>; MAX_ENTITIES],
     /// The tick of the latest [`Self::update_animation`].
     anim_clock: psx_engine::SimTick,
+    /// The entities' simulation clock: every tick advances it by its delta.
+    /// An entity's attack holds its [`crate::fighter_action::FighterAction`]
+    /// on it.
+    clock: psx_engine::SimTick,
     /// What each entity shows, as the latest [`Self::update_animation`]
     /// resolved it.
     shown: [GameEntityAnimation; MAX_ENTITIES],
@@ -781,8 +789,7 @@ pub struct GameEntities<const MAX_ENTITIES: usize> {
     spatial_active_mask: u64,
 }
 
-impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES>
-{
+impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
     fn can_run(record: &LevelGameEntityRecord) -> bool {
         record.flags & game_entity_flags::CAN_RUN != 0
     }
@@ -910,8 +917,8 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES>
     ) -> Option<(CharacterAnimationAction, u16, u16)> {
         let record = records.get(index).filter(|_| index < self.count())?;
         if !matches!(
-            self.state(index),
-            GameEntityState::Windup | GameEntityState::Attack
+            self.attack_phase(index),
+            Some(AttackPhase::Windup | AttackPhase::Active)
         ) {
             return None;
         }
@@ -1053,6 +1060,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES>
         body_starts: [psx_engine::SimTick::ZERO; MAX_ENTITIES],
         gaits: [crate::fighter_anim::AnimTrack::new(EntityAnim::NONE); MAX_ENTITIES],
         anim_clock: psx_engine::SimTick::ZERO,
+        clock: psx_engine::SimTick::ZERO,
         shown: [GameEntityAnimation::NONE; MAX_ENTITIES],
         spatial_active_mask: 0,
     };
@@ -1470,7 +1478,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES>
         rival: usize,
         fighter: &'f Combatant,
     ) -> CombatTarget<'f> {
-        let state = self.state(rival);
+        let phase = self.attack_phase(rival);
         CombatTarget {
             position: self.position(rival),
             radius: i32::from(self.body(record).radius),
@@ -1482,19 +1490,19 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES>
             ),
             defender: self.defender_with(record, rival, fighter),
             stance: Some(fighter.stance.active()),
-            attack_read: match state {
-                GameEntityState::Windup => 1,
-                GameEntityState::Attack => 2,
-                GameEntityState::Recover => 3,
-                _ => 0,
+            attack_read: match phase {
+                Some(AttackPhase::Windup) => 1,
+                Some(AttackPhase::Active) => 2,
+                Some(AttackPhase::Recover) => 3,
+                None => 0,
             },
-            swing_ticks: match state {
-                GameEntityState::Windup => Some(
+            swing_ticks: match phase {
+                Some(AttackPhase::Windup) => Some(
                     self.selected_timing(rival)
                         .windup
                         .saturating_sub(self.state_ticks[rival]),
                 ),
-                GameEntityState::Attack => Some(0),
+                Some(AttackPhase::Active) => Some(0),
                 _ => None,
             },
         }
@@ -1796,7 +1804,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES>
     /// also close it, so a combo never pivots after connecting.
     pub fn track_authored_melee_tell(&mut self, index: usize, player: [i32; 3], delta: u16) {
         if index >= self.count()
-            || self.state(index) != GameEntityState::Attack
+            || self.attack_phase(index) != Some(AttackPhase::Active)
             || self.selected_attack_is_ranged(index)
             || self.authored_connection_mask[index] != 0
         {
@@ -1828,7 +1836,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES>
         delta: u16,
     ) {
         if index >= self.count()
-            || self.state(index) != GameEntityState::Attack
+            || self.attack_phase(index) != Some(AttackPhase::Active)
             || !self.selected_attack_is_ranged(index)
             || self.authored_connection_mask[index] != 0
         {
@@ -1929,7 +1937,6 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES>
         }
         let ticks = self.state_ticks[index];
         let attack_clip = self.selected_attack_clip(record, index);
-        let timing = self.selected_timing(index);
         let (attack_speed_q8, attack_frame_range) = self.selected_attack_playback(record, index);
         let looping = |clip: u16| GameEntityClip {
             clip,
@@ -1989,14 +1996,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES>
                 }
                 GameEntityIntent::Hold => (Action::Idle, looping(record.idle_clip)),
             },
-            GameEntityState::Windup => attack_one_shot(ticks),
-            GameEntityState::Attack => attack_one_shot(timing.windup.saturating_add(ticks)),
-            GameEntityState::Recover => attack_one_shot(
-                timing
-                    .windup
-                    .saturating_add(timing.active)
-                    .saturating_add(ticks),
-            ),
+            GameEntityState::Attack => attack_one_shot(ticks),
             // A parried attacker plays its Parried clip over the same
             // stagger; until one is authored that is the stagger clip.
             GameEntityState::Staggered
@@ -2140,7 +2140,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES>
             &self.body(record).combat,
             self.attack_since(index)
                 .and_then(|since| timing.armoured_at(since)),
-            self.state(index) == GameEntityState::Attack
+            self.attack_phase(index) == Some(AttackPhase::Active)
                 && self.selected_attack_kind(index) == GAME_ENTITY_ATTACK_HEAVY,
         )
     }
@@ -2148,19 +2148,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES>
     /// Ticks since entity `index`'s attack started (windup, contact and
     /// recovery on its attack's clock); None outside an attack.
     fn attack_since(&self, index: usize) -> Option<u16> {
-        let timing = self.selected_timing(index);
-        let ticks = self.state_ticks[index];
-        match self.state(index) {
-            GameEntityState::Windup => Some(ticks),
-            GameEntityState::Attack => Some(timing.windup.saturating_add(ticks)),
-            GameEntityState::Recover => Some(
-                timing
-                    .windup
-                    .saturating_add(timing.active)
-                    .saturating_add(ticks),
-            ),
-            _ => None,
-        }
+        (self.state(index) == GameEntityState::Attack).then(|| self.state_ticks[index])
     }
 
     /// Sweep the player's melee arc over the live entities: every
@@ -2290,9 +2278,6 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES>
     /// Attack-to-Recover transition. The caller resolves body/equipment poses,
     /// evaluates authored combat capsules, and latches a connection with
     /// [`Self::connect_deferred_melee_window`] (or the legacy one-hit API).
-    /// `player_hits` and `player_damage` in
-    /// the returned stats are therefore zero; the caller reports those after
-    /// pose-backed contact resolution.
     pub fn tick_delta_deferred<const MAX_ATTACKS: usize>(
         &mut self,
         records: &'static [LevelGameEntityRecord],
@@ -2314,6 +2299,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES>
         mut deferred: Option<&mut DeferredGameEntityAttacks<MAX_ATTACKS>>,
     ) -> GameEntityTickStats {
         let delta_ticks = delta_ticks.max(1);
+        self.clock = self.clock.saturating_add(u32::from(delta_ticks));
         self.attack_tick_generation = self.attack_tick_generation.wrapping_add(1);
         let mut stats = GameEntityTickStats::default();
         let count = self.count().min(records.len());
@@ -2378,40 +2364,51 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES>
                 GameEntityState::Aggro => {
                     self.tick_aggro(record, index, input, mover, delta_ticks, &mut stats)
                 }
-                GameEntityState::Windup => {
-                    self.step_firing(record, index, input, mover, delta_ticks);
-                    self.step_melee_tell(record, index, input, mover, delta_ticks);
-                    if self.selected_attack_is_ranged(index) {
-                        self.track_ranged_tell(index, input, delta_ticks);
-                    }
-                    if self.state_ticks[index] >= self.selected_timing(index).windup {
-                        self.enter_state(index, GameEntityState::Attack, &mut stats);
-                    }
-                }
                 GameEntityState::Attack => {
-                    self.step_firing(record, index, input, mover, delta_ticks);
-                    stats.attacking += 1;
-                    match deferred.as_deref_mut() {
-                        Some(attacks) => attacks.push(self.deferred_attack(record, index)),
-                        None => self.resolve_attack_contact(record, index, input, &mut stats),
-                    }
-                    if self.state_ticks[index] >= self.selected_timing(index).active {
-                        self.enter_state(index, GameEntityState::Recover, &mut stats);
-                    }
-                }
-                GameEntityState::Recover => {
-                    self.step_firing(record, index, input, mover, delta_ticks);
-                    if self.state_ticks[index] >= self.selected_timing(index).recovery {
-                        self.attack_cooldown[index] = u16::from(record.attack_cooldown_ticks);
-                        self.release_attack_owner(
-                            index,
-                            u16::from(record.group_attack_delay_ticks),
-                        );
-                        self.enter_state(index, GameEntityState::Aggro, &mut stats);
-                        // The acquisition reaction belongs to first notice;
-                        // recovery already supplied this attack's pause.
-                        self.state_ticks[index] = u16::from(record.reaction_ticks);
-                        self.choose_spacing(record, index, input);
+                    // One action clock: the phase it stood in before this
+                    // tick decides what this tick does, as the player's
+                    // swing reads her clip.
+                    let since = self.state_ticks[index];
+                    let timing = self.selected_timing(index);
+                    match Self::phase_at(timing, since.saturating_sub(delta_ticks)) {
+                        AttackPhase::Windup => {
+                            self.step_firing(record, index, input, mover, delta_ticks);
+                            self.step_melee_tell(record, index, input, mover, delta_ticks);
+                            if self.selected_attack_is_ranged(index) {
+                                self.track_ranged_tell(index, input, delta_ticks);
+                            }
+                            if since >= timing.windup {
+                                self.begin_contact(index, &mut stats);
+                            }
+                        }
+                        AttackPhase::Active => {
+                            self.step_firing(record, index, input, mover, delta_ticks);
+                            stats.attacking += 1;
+                            if let Some(attacks) = deferred.as_deref_mut() {
+                                attacks.push(self.deferred_attack(record, index));
+                            }
+                            if since >= timing.windup.saturating_add(timing.active) {
+                                self.move_yaw_valid[index] = 0;
+                                self.move_tried[index] = 0;
+                            }
+                        }
+                        AttackPhase::Recover => {
+                            self.step_firing(record, index, input, mover, delta_ticks);
+                            if !self.actions[index].locked(self.clock) {
+                                self.attack_cooldown[index] =
+                                    u16::from(record.attack_cooldown_ticks);
+                                self.release_attack_owner(
+                                    index,
+                                    u16::from(record.group_attack_delay_ticks),
+                                );
+                                self.enter_state(index, GameEntityState::Aggro, &mut stats);
+                                // The acquisition reaction belongs to first
+                                // notice; recovery already supplied this
+                                // attack's pause.
+                                self.state_ticks[index] = u16::from(record.reaction_ticks);
+                                self.choose_spacing(record, index, input);
+                            }
+                        }
                     }
                 }
                 GameEntityState::Staggered => {
@@ -2459,10 +2456,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES>
             swing_sequence: self.attack_sequence[index],
             clip: GameEntityClip {
                 clip: self.selected_attack_clip(record, index),
-                phase_ticks: self
-                    .selected_timing(index)
-                    .windup
-                    .saturating_add(self.state_ticks[index]),
+                phase_ticks: self.state_ticks[index],
                 one_shot: true,
                 speed_q8,
                 frame_range,
@@ -2614,13 +2608,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES>
             } else {
                 self.attack_owner_chase_ticks = 0;
             }
-            if !matches!(
-                state,
-                GameEntityState::Aggro
-                    | GameEntityState::Windup
-                    | GameEntityState::Attack
-                    | GameEntityState::Recover
-            ) {
+            if !matches!(state, GameEntityState::Aggro | GameEntityState::Attack) {
                 self.release_attack_owner(
                     owner,
                     u16::from(records[owner].group_attack_delay_ticks),
@@ -2766,68 +2754,89 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES>
         match state {
             GameEntityState::Patrol => stats.patrol_enters += 1,
             GameEntityState::Aggro => stats.aggro_enters += 1,
-            GameEntityState::Windup => {
-                stats.windup_enters += 1;
-                // Every attack starts here: it is the crit strike or shot
-                // when a crit is armed now.
-                self.combatants[index].start_attack();
-            }
-            GameEntityState::Attack => {
-                stats.attack_enters += 1;
-                if self.selected_attack_is_ranged(index) {
-                    stats.ranged_attack_enters += 1;
-                } else {
-                    stats.melee_attack_enters += 1;
-                }
-                // A fresh animation gets independent authored melee-window or
-                // projectile-emitter latches. Legacy arcs still connect once.
-                self.authored_connection_mask[index] = 0;
-                self.combat_flags[index] &= !GAME_ENTITY_ATTACK_CONNECTED;
-                self.attack_sequence[index] = self.attack_sequence[index].wrapping_add(1);
-            }
             _ => {}
         }
     }
 
-    /// One Attack-window contact test against the player: the same
-    /// Character-derived reach that committed the windup, gated to a
-    /// front arc around the facing the entity locked when it
-    /// committed. Connects at most once per swing, and never against
-    /// an i-framing player (see [`CombatTarget::defender`]).
-    fn resolve_attack_contact(
-        &mut self,
-        record: &LevelGameEntityRecord,
-        index: usize,
-        input: GameEntityTickInput<'_>,
-        stats: &mut GameEntityTickStats,
-    ) {
-        // Contact on a rival resolves only through the deferred tokens,
-        // on both fighters' poses (the owner's resolver).
-        if self.selected_attack_is_ranged(index)
-            || self.rivals[index] != NO_RIVAL
-            || self.combat_flags[index] & GAME_ENTITY_ATTACK_CONNECTED != 0
-            || input.target.defender.invulnerable()
-        {
-            return;
+    /// Start entity `index`'s selected attack: its action holds it for the
+    /// whole clip on the one action clock, as the player's swing holds her.
+    /// It is the crit strike or shot when a crit is armed now.
+    fn begin_attack(&mut self, index: usize, stats: &mut GameEntityTickStats) {
+        self.enter_state(index, GameEntityState::Attack, stats);
+        stats.windup_enters += 1;
+        self.combatants[index].start_attack();
+        let timing = self.selected_timing(index);
+        let total = timing
+            .windup
+            .saturating_add(timing.active)
+            .saturating_add(timing.recovery);
+        self.actions[index].hold(self.clock, u32::from(total));
+    }
+
+    /// Entity `index`'s attack reaches its first contact: a fresh swing with
+    /// its own authored melee-window or projectile-emitter latches.
+    fn begin_contact(&mut self, index: usize, stats: &mut GameEntityTickStats) {
+        stats.attack_enters += 1;
+        if self.selected_attack_is_ranged(index) {
+            stats.ranged_attack_enters += 1;
+        } else {
+            stats.melee_attack_enters += 1;
         }
-        let arc = MeleeArc {
-            room: record.room,
-            x: self.px(index),
-            z: self.pz(index),
-            yaw: self.yaw_raw(index) as u16,
-            reach: self.melee_attack_reach(record, input),
-            half_angle: GAME_ENTITY_ATTACK_HALF_ANGLE,
+        self.authored_connection_mask[index] = 0;
+        self.combat_flags[index] &= !GAME_ENTITY_ATTACK_CONNECTED;
+        self.attack_sequence[index] = self.attack_sequence[index].wrapping_add(1);
+        self.move_yaw_valid[index] = 0;
+        self.move_tried[index] = 0;
+    }
+
+    /// Where an attack with `timing` stands `since` ticks after it started.
+    fn phase_at(timing: crate::fighter_action::ActionTiming, since: u16) -> AttackPhase {
+        if since < timing.windup {
+            AttackPhase::Windup
+        } else if since - timing.windup < timing.active {
+            AttackPhase::Active
+        } else {
+            AttackPhase::Recover
+        }
+    }
+
+    /// Tests: put entity `index` into its selected attack, `ticks` into
+    /// `phase`.
+    #[cfg(test)]
+    pub(crate) fn enter_phase(&mut self, index: usize, phase: AttackPhase, ticks: u16) {
+        let mut stats = GameEntityTickStats::default();
+        self.begin_attack(index, &mut stats);
+        let timing = self.selected_timing(index);
+        self.state_ticks[index] = match phase {
+            AttackPhase::Windup => ticks,
+            AttackPhase::Active => {
+                self.begin_contact(index, &mut stats);
+                timing.windup.saturating_add(ticks)
+            }
+            AttackPhase::Recover => {
+                self.begin_contact(index, &mut stats);
+                timing
+                    .windup
+                    .saturating_add(timing.active)
+                    .saturating_add(ticks)
+            }
         };
-        // The player hurtbox center is the motor position; its radius
-        // is already inside `attack_reach` (radius + radius + margin),
-        // so the arc tests the CENTER (radius 0) to avoid counting the
-        // player capsule twice.
-        if !arc_hits_circle(&arc, input.target.position[0], input.target.position[2], 0) {
-            return;
-        }
-        self.combat_flags[index] |= GAME_ENTITY_ATTACK_CONNECTED;
-        stats.player_hits += 1;
-        stats.player_damage = stats.player_damage.saturating_add(record.touch_damage);
+        // The lock ends where the attack's own clock says it does.
+        let total = timing
+            .windup
+            .saturating_add(timing.active)
+            .saturating_add(timing.recovery);
+        self.actions[index].hold(
+            self.clock,
+            u32::from(total.saturating_sub(self.state_ticks[index])),
+        );
+    }
+
+    /// Where entity `index`'s committed attack stands on its action clock;
+    /// None when it is not attacking.
+    pub fn attack_phase(&self, index: usize) -> Option<AttackPhase> {
+        (index < self.count() && self.state(index) == GameEntityState::Attack)
+            .then(|| Self::phase_at(self.selected_timing(index), self.state_ticks[index]))
     }
 
     fn target_within(&self, index: usize, input: GameEntityTickInput<'_>, radius: i32) -> bool {
@@ -3426,7 +3435,6 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES>
             component
         }
     }
-
 }
 
 /// Clamped integer XZ radius test: early-out on either axis, then an
@@ -3454,14 +3462,13 @@ mod tests {
         let mut entities = GameEntities::<4>::EMPTY;
         entities.spawn_from_records(&RECORDS);
         entities.attack_mode[0] = GAME_ENTITY_ATTACK_HEAVY;
-        let at = |entities: &mut GameEntities<4>, state, ticks| {
-            entities.state[0] = state as u8;
-            entities.state_ticks[0] = ticks;
+        let at = |entities: &mut GameEntities<4>, phase, ticks| {
+            entities.enter_phase(0, phase, ticks);
             entities.armoured(&RECORDS, 0)
         };
         // No authored window: armoured only while its contact is live.
-        assert!(!at(&mut entities, GameEntityState::Windup, 3));
-        assert!(at(&mut entities, GameEntityState::Attack, 0));
+        assert!(!at(&mut entities, AttackPhase::Windup, 2));
+        assert!(at(&mut entities, AttackPhase::Active, 0));
         // Its window on the clip clock, ticks 6..12 from the attack's start.
         entities.attack_timings[0][usize::from(GAME_ENTITY_ATTACK_HEAVY)] =
             crate::fighter_action::ActionTiming {
@@ -3471,16 +3478,13 @@ mod tests {
                 armour: Some((6, 12)),
                 invulnerable: None,
             };
-        assert!(!at(&mut entities, GameEntityState::Windup, 5));
-        assert!(at(&mut entities, GameEntityState::Windup, 6));
-        assert!(at(&mut entities, GameEntityState::Attack, 1));
-        assert!(
-            !at(&mut entities, GameEntityState::Attack, 2),
-            "window closed"
-        );
+        assert!(!at(&mut entities, AttackPhase::Windup, 5));
+        assert!(at(&mut entities, AttackPhase::Windup, 6));
+        assert!(at(&mut entities, AttackPhase::Active, 1));
+        assert!(!at(&mut entities, AttackPhase::Active, 2), "window closed");
         // A light attack has no armour of its own.
         entities.attack_mode[0] = GAME_ENTITY_ATTACK_LIGHT;
-        assert!(!at(&mut entities, GameEntityState::Attack, 0));
+        assert!(!at(&mut entities, AttackPhase::Active, 0));
     }
 
     #[test]
@@ -3490,13 +3494,12 @@ mod tests {
         let mut entities = GameEntities::<4>::EMPTY;
         entities.spawn_from_records(&RECORDS);
         entities.attack_mode[0] = GAME_ENTITY_ATTACK_LIGHT;
-        let at = |entities: &mut GameEntities<4>, state, ticks| {
-            entities.state[0] = state as u8;
-            entities.state_ticks[0] = ticks;
+        let at = |entities: &mut GameEntities<4>, phase, ticks| {
+            entities.enter_phase(0, phase, ticks);
             entities.invulnerable(&RECORDS, 0)
         };
         // No authored window: nothing protects the attack.
-        assert!(!at(&mut entities, GameEntityState::Windup, 6));
+        assert!(!at(&mut entities, AttackPhase::Windup, 6));
         // Ticks 6..12 from the attack's start, as the player's own window.
         entities.attack_timings[0][usize::from(GAME_ENTITY_ATTACK_LIGHT)] =
             crate::fighter_action::ActionTiming {
@@ -3506,10 +3509,10 @@ mod tests {
                 armour: None,
                 invulnerable: Some((6, 12)),
             };
-        assert!(!at(&mut entities, GameEntityState::Windup, 5));
-        assert!(at(&mut entities, GameEntityState::Windup, 6));
-        assert!(at(&mut entities, GameEntityState::Attack, 1));
-        assert!(!at(&mut entities, GameEntityState::Attack, 2));
+        assert!(!at(&mut entities, AttackPhase::Windup, 5));
+        assert!(at(&mut entities, AttackPhase::Windup, 6));
+        assert!(at(&mut entities, AttackPhase::Active, 1));
+        assert!(!at(&mut entities, AttackPhase::Active, 2));
     }
 
     #[test]
@@ -3533,7 +3536,7 @@ mod tests {
         });
         let mut stats = GameEntityTickStats::default();
         for index in 0..2 {
-            entities.enter_state(index, GameEntityState::Windup, &mut stats);
+            entities.begin_attack(index, &mut stats);
         }
         assert_eq!(
             entities.committed_swing(&RECORDS, 0),
@@ -3553,7 +3556,7 @@ mod tests {
         );
         // A spawn goes back to the record's ticks until the game times it.
         entities.spawn_from_records(&RECORDS);
-        entities.enter_state(0, GameEntityState::Windup, &mut stats);
+        entities.begin_attack(0, &mut stats);
         assert_eq!(
             entities.committed_swing(&RECORDS, 0).map(|swing| swing.1),
             Some(windup)
@@ -4052,11 +4055,7 @@ mod tests {
     fn prototype_shot_interrupts_late_tell_and_cancels_retained_attack() {
         let mut e = GameEntities::<8>::EMPTY;
         e.spawn_from_records(&DUAL_ENEMY);
-        e.enter_state(
-            0,
-            GameEntityState::Windup,
-            &mut GameEntityTickStats::default(),
-        );
+        e.enter_phase(0, AttackPhase::Windup, 0);
         e.state_ticks[0] = 0;
         assert!(!e.shot_opening(&DUAL_ENEMY, 0));
         e.state_ticks[0] = u16::from(DUAL_ENEMY[0].windup_ticks) / 2;
@@ -4135,15 +4134,15 @@ mod tests {
 
     #[test]
     fn committed_attacks_do_not_swap_even_with_an_expired_cooldown() {
-        for state in [
-            GameEntityState::Windup,
-            GameEntityState::Attack,
-            GameEntityState::Recover,
+        for phase in [
+            AttackPhase::Windup,
+            AttackPhase::Active,
+            AttackPhase::Recover,
         ] {
             let mut e = GameEntities::<8>::EMPTY;
             e.spawn_from_records(&RANGED_ENEMY);
             e.select_attack(0, false);
-            e.enter_state(0, state, &mut GameEntityTickStats::default());
+            e.enter_phase(0, phase, 0);
             let input = GameEntityTickInput {
                 target: CombatTarget {
                     position: [2550, 0, 1000],
@@ -4151,7 +4150,7 @@ mod tests {
                 },
             };
             e.tick_delta(&RANGED_ENEMY, input, &mut BlockedMover, 1);
-            assert_eq!(e.stance(0), VitalityChannelId::One, "swap during {state:?}");
+            assert_eq!(e.stance(0), VitalityChannelId::One, "swap during {phase:?}");
         }
     }
 
@@ -4658,7 +4657,7 @@ mod tests {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&PACED_ATTACK);
         entities.set_spatial_active_mask(u64::MAX);
-        entities.state[0] = GameEntityState::Windup as u8;
+        entities.enter_phase(0, AttackPhase::Windup, 0);
 
         entities.attack_mode[0] = GAME_ENTITY_ATTACK_LIGHT;
         let light = entities.clip_for_state(&PACED_ATTACK, 0);
@@ -4856,11 +4855,7 @@ mod tests {
     fn a_poise_break_cancels_an_already_retained_attack_token() {
         let mut e = GameEntities::<8>::EMPTY;
         e.spawn_from_records(&IDLE_ENEMY);
-        e.enter_state(
-            0,
-            GameEntityState::Attack,
-            &mut GameEntityTickStats::default(),
-        );
+        e.enter_phase(0, AttackPhase::Active, 0);
         let attack = e.deferred_attack(&IDLE_ENEMY[0], 0);
         assert!(e.deferred_attack_can_connect(attack));
         assert!(
@@ -4887,7 +4882,7 @@ mod tests {
         };
         begin_attack_at(&mut e, true, input);
         e.tick(&ENEMY, input, &mut OpenWorld);
-        assert_eq!(e.state(0), GameEntityState::Windup);
+        assert_eq!(e.attack_phase(0), Some(AttackPhase::Windup));
         let initial_yaw = e.yaw(0);
         input.target.position = [2300, 0, 1600];
         for _ in 0..14 {
@@ -4964,11 +4959,11 @@ mod tests {
         begin_attack_at(&mut e, true, input);
         for _ in 0..40 {
             e.tick(&RANGED_ENEMY, input, &mut OpenWorld);
-            if e.state(0) == GameEntityState::Attack {
+            if e.attack_phase(0) == Some(AttackPhase::Active) {
                 break;
             }
         }
-        assert_eq!(e.state(0), GameEntityState::Attack);
+        assert_eq!(e.attack_phase(0), Some(AttackPhase::Active));
         let initial = e.yaw(0);
         e.track_authored_ranged_charge(0, [2000, 0, 1800], 1024, 2);
         assert_ne!(e.yaw(0), initial);
@@ -4994,11 +4989,7 @@ mod tests {
         assert_eq!(entities.stance(0), VitalityChannelId::One);
         assert_eq!(entities.stance_swap_progress_q12(0), 4096);
 
-        entities.enter_state(
-            0,
-            GameEntityState::Recover,
-            &mut GameEntityTickStats::default(),
-        );
+        entities.enter_phase(0, AttackPhase::Recover, 0);
         assert_eq!(
             entities.stance(0),
             VitalityChannelId::One,
@@ -5299,7 +5290,11 @@ mod tests {
 
     /// [`begin_attack`] at `input`'s target: faces it and, for a shot,
     /// takes its aim point.
-    fn begin_attack_at(entities: &mut GameEntities<8>, ranged: bool, input: GameEntityTickInput<'_>) {
+    fn begin_attack_at(
+        entities: &mut GameEntities<8>,
+        ranged: bool,
+        input: GameEntityTickInput<'_>,
+    ) {
         let target = input.target.position;
         let dx = target[0] - entities.px(0);
         let dz = target[2] - entities.pz(0);
@@ -5308,7 +5303,7 @@ mod tests {
         if ranged {
             entities.capture_ranged_aim(0, input);
         }
-        entities.enter_state(0, GameEntityState::Windup, &mut GameEntityTickStats::default());
+        entities.begin_attack(0, &mut GameEntityTickStats::default());
     }
 
     /// Drive IDLE_ENEMY into its Attack window against the near-input
@@ -5318,101 +5313,7 @@ mod tests {
         for _ in 0..3 {
             entities.tick(&IDLE_ENEMY, input, &mut OpenWorld);
         }
-        assert_eq!(entities.state(0), GameEntityState::Attack);
-    }
-
-    #[test]
-    fn attack_window_damages_the_player_once_per_swing() {
-        let mut entities = GameEntities::<8>::EMPTY;
-        entities.spawn_from_records(&IDLE_ENEMY);
-        entities.set_spatial_active_mask(u64::MAX);
-        advance_into_attack(&mut entities, near_input());
-        // First active tick connects with the record's touch damage.
-        let stats = entities.tick(&IDLE_ENEMY, near_input(), &mut OpenWorld);
-        assert_eq!(stats.player_hits, 1);
-        assert_eq!(stats.player_damage, IDLE_ENEMY[0].touch_damage);
-        // The rest of the window and the recovery stay dry: one
-        // swing, one connection. (The NEXT windup->attack loop may
-        // legitimately connect again, so only the dry span is
-        // walked.)
-        let mut later_damage = 0u16;
-        for _ in 0..8 {
-            later_damage += entities
-                .tick(&IDLE_ENEMY, near_input(), &mut OpenWorld)
-                .player_damage;
-        }
-        assert_eq!(later_damage, 0);
-        assert_eq!(entities.state(0), GameEntityState::Recover);
-    }
-
-    #[test]
-    fn i_frames_whiff_the_swing_but_the_tail_still_bites() {
-        // Fully i-framed window: no contact at all.
-        let mut entities = GameEntities::<8>::EMPTY;
-        entities.spawn_from_records(&IDLE_ENEMY);
-        entities.set_spatial_active_mask(u64::MAX);
-        advance_into_attack(&mut entities, near_input());
-        let rolling_player = Combatant::EMPTY;
-        let rolling = GameEntityTickInput {
-            target: CombatTarget {
-                defender: Defender {
-                    combatant: &rolling_player,
-                    swap_invulnerable_ticks: 0,
-                    parry_ticks: 0,
-                    action: ActionProtection {
-                        authored: None,
-                        dodge: true,
-                    },
-                },
-                stance: None,
-                ..near_input().target
-            },
-        };
-        let mut damage = 0u16;
-        for _ in 0..GAME_ENTITY_ATTACK_ACTIVE_TICKS {
-            damage += entities
-                .tick(&IDLE_ENEMY, rolling, &mut OpenWorld)
-                .player_damage;
-        }
-        assert_eq!(damage, 0);
-        assert_eq!(entities.state(0), GameEntityState::Recover);
-
-        // I-framing only the first half leaves the tail live: rolling
-        // too early still gets clipped (souls timing rules).
-        let mut entities = GameEntities::<8>::EMPTY;
-        entities.spawn_from_records(&IDLE_ENEMY);
-        entities.set_spatial_active_mask(u64::MAX);
-        advance_into_attack(&mut entities, near_input());
-        let early_roll = entities.tick(&IDLE_ENEMY, rolling, &mut OpenWorld);
-        assert_eq!(early_roll.player_hits, 0);
-        let tail = entities.tick(&IDLE_ENEMY, near_input(), &mut OpenWorld);
-        assert_eq!(tail.player_hits, 1);
-    }
-
-    #[test]
-    fn attacks_whiff_behind_the_committed_facing() {
-        let mut entities = GameEntities::<8>::EMPTY;
-        entities.spawn_from_records(&IDLE_ENEMY);
-        entities.set_spatial_active_mask(u64::MAX);
-        // Commit the windup against a player at +X (facing locks to
-        // 1024)...
-        advance_into_attack(&mut entities, near_input());
-        // ...then the player rolls PAST the body to -X: same reach,
-        // outside the front arc, outside the point-blank ring.
-        let behind = GameEntityTickInput {
-            target: CombatTarget {
-                position: [800, 0, 1000],
-                ..near_input().target
-            },
-        };
-        let mut damage = 0u16;
-        for _ in 0..GAME_ENTITY_ATTACK_ACTIVE_TICKS {
-            damage += entities
-                .tick(&IDLE_ENEMY, behind, &mut OpenWorld)
-                .player_damage;
-        }
-        assert_eq!(damage, 0);
-        assert_eq!(entities.state(0), GameEntityState::Recover);
+        assert_eq!(entities.attack_phase(0), Some(AttackPhase::Active));
     }
 
     #[test]
@@ -5654,7 +5555,7 @@ mod tests {
         for _ in 0..3 {
             entities.tick_delta_deferred(&IDLE_ENEMY, near_input(), &mut OpenWorld, 1, attacks);
         }
-        assert_eq!(entities.state(0), GameEntityState::Attack);
+        assert_eq!(entities.attack_phase(0), Some(AttackPhase::Active));
         // The Windup -> Attack transition tick runs the Windup arm; the
         // first token appears on the first ACTIVE tick, not here.
         assert!(attacks.is_empty());
@@ -5700,8 +5601,6 @@ mod tests {
                 &mut attacks,
             );
             assert_eq!(stats.attacking, 1);
-            assert_eq!(stats.player_hits, 0);
-            assert_eq!(stats.player_damage, 0);
             assert_eq!(attacks.len(), 1);
             let token = attacks.get(0).unwrap();
             assert_eq!(token.entity(), 0);
@@ -5715,7 +5614,7 @@ mod tests {
         // The final active tick froze its token BEFORE transitioning to
         // Recover, so the boundary frame still resolves against the retained
         // attack pose even though the live state moved on.
-        assert_eq!(entities.state(0), GameEntityState::Recover);
+        assert_eq!(entities.attack_phase(0), Some(AttackPhase::Recover));
         let boundary = attacks.get(0).unwrap();
         assert_eq!(
             boundary.clip().phase_ticks,
@@ -5761,7 +5660,7 @@ mod tests {
         entities.spawn_from_records(&IDLE_ENEMY);
         entities.set_spatial_active_mask(u64::MAX);
         let mut stats = GameEntityTickStats::default();
-        entities.enter_state(0, GameEntityState::Attack, &mut stats);
+        entities.enter_phase(0, AttackPhase::Active, 0);
         let token = entities.deferred_attack(&IDLE_ENEMY[0], 0);
         assert_eq!(entities.deferred_melee_hit_mask(token), Some(0));
         assert!(entities.connect_deferred_melee_window(token, 1));
@@ -5772,7 +5671,7 @@ mod tests {
         assert!(!entities.connect_deferred_melee_window(token, 0));
         entities.enter_state(0, GameEntityState::Staggered, &mut stats);
         assert!(!entities.connect_deferred_melee_window(token, 8));
-        entities.enter_state(0, GameEntityState::Attack, &mut stats);
+        entities.enter_phase(0, AttackPhase::Active, 0);
         let fresh = entities.deferred_attack(&IDLE_ENEMY[0], 0);
         assert_eq!(entities.deferred_melee_hit_mask(fresh), Some(0));
         assert!(!entities.connect_deferred_melee_window(token, 8));
@@ -5788,7 +5687,7 @@ mod tests {
         entities.set_spatial_active_mask(u64::MAX);
         entities.attack_mode[0] = GAME_ENTITY_ATTACK_RANGED;
         let mut stats = GameEntityTickStats::default();
-        entities.enter_state(0, GameEntityState::Attack, &mut stats);
+        entities.enter_phase(0, AttackPhase::Active, 0);
         let token = entities.deferred_attack(&IDLE_ENEMY[0], 0);
         assert_eq!(entities.deferred_projectile_release_mask(token), Some(0));
         assert!(entities.commit_deferred_projectile(token, 1));
@@ -5798,7 +5697,7 @@ mod tests {
         assert_eq!(entities.deferred_projectile_release_mask(token), Some(10));
         entities.enter_state(0, GameEntityState::Staggered, &mut stats);
         assert!(!entities.commit_deferred_projectile(token, 4));
-        entities.enter_state(0, GameEntityState::Attack, &mut stats);
+        entities.enter_phase(0, AttackPhase::Active, 0);
         let fresh = entities.deferred_attack(&IDLE_ENEMY[0], 0);
         assert_eq!(entities.deferred_projectile_release_mask(fresh), Some(0));
         assert!(!entities.commit_deferred_projectile(token, 4));

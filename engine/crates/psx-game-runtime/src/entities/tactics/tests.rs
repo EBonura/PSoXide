@@ -95,12 +95,7 @@ fn engaged() -> GameEntities<2> {
     e.state_ticks[0] = 42;
     e
 }
-fn tick(
-    e: &mut GameEntities<2>,
-    m: &mut Arena,
-    p: [i32; 3],
-    delta: u16,
-) -> GameEntityTickStats {
+fn tick(e: &mut GameEntities<2>, m: &mut Arena, p: [i32; 3], delta: u16) -> GameEntityTickStats {
     e.tick_delta(&ENEMY, input(p), m, delta)
 }
 
@@ -161,12 +156,11 @@ fn turn_is_bounded_and_target_behind_cannot_be_attacked() {
 fn post_attack_spacing_uses_current_distance_and_keeps_punish_window() {
     let mut e = engaged();
     let mut m = Arena::default();
-    e.state[0] = GameEntityState::Recover as u8;
-    e.state_ticks[0] = 0;
+    e.enter_phase(0, AttackPhase::Recover, 0);
     e.attack_owner_plus_one = 1;
     for _ in 0..11 {
         tick(&mut e, &mut m, [0, 0, 20], 2);
-        assert_eq!(e.state(0), GameEntityState::Recover);
+        assert_eq!(e.attack_phase(0), Some(AttackPhase::Recover));
         assert_eq!(e.tactics[0].goal, EnemyGoal::None);
     }
     tick(&mut e, &mut m, [0, 0, 20], 2);
@@ -370,7 +364,7 @@ fn locked_cannon_approach_keeps_a_firing_band_instead_of_shuffling() {
     for _ in 0..100 {
         tick(&mut e, &mut m, [0, 0, 180], 2);
         assert_ne!(e.tactics[0].goal, EnemyGoal::Retreat);
-        if e.state(0) == GameEntityState::Windup {
+        if e.attack_phase(0) == Some(AttackPhase::Windup) {
             assert_eq!(e.selected_attack_kind(0), GAME_ENTITY_ATTACK_RANGED);
             assert!(GameEntities::<2>::distance(e.position(0), [0, 0, 180]) > 60);
             fired = true;
@@ -430,7 +424,7 @@ fn hearing_acquires_a_location_without_tracking_hidden_player() {
     tick(&mut e, &mut m, [100, 0, 0], 2);
     assert_eq!(e.yaw_raw(0), 0);
     assert_eq!(e.tactics[0].last_seen, [0, 0, 30]);
-    assert_ne!(e.state(0), GameEntityState::Windup);
+    assert_ne!(e.attack_phase(0), Some(AttackPhase::Windup));
 }
 
 #[test]
@@ -640,7 +634,7 @@ fn elevated_target_does_not_bait_ground_melee() {
         // Ordinarily this exposed-channel hint would request the melee stance.
         target.target.stance = Some(VitalityChannelId::Two);
         e.tick_delta(&ENEMY, target, &mut arena, 1);
-        if e.state(0) == GameEntityState::Windup {
+        if e.attack_phase(0) == Some(AttackPhase::Windup) {
             assert_eq!(e.selected_attack_kind(0), GAME_ENTITY_ATTACK_RANGED);
             fired = true;
         }
@@ -666,11 +660,7 @@ fn energy_replan_interrupts_spacing_but_not_an_attack() {
     assert_eq!(e.stance(0), VitalityChannelId::One);
     assert_eq!(e.tactics[0].stance_reason, 5);
     assert_ne!(e.tactics[0].goal, EnemyGoal::CircleRight);
-    e.enter_state(
-        0,
-        GameEntityState::Attack,
-        &mut GameEntityTickStats::default(),
-    );
+    e.enter_phase(0, AttackPhase::Active, 0);
     e.combatants[0].stance.set_swap_cooldown(0);
     tick(&mut e, &mut Arena::default(), [0, 200, 140], 2);
     assert_eq!(e.stance(0), VitalityChannelId::One);
@@ -686,7 +676,7 @@ fn empty_enemy_does_not_claw_at_an_overhead_perch_or_invent_energy() {
         tick(&mut e, &mut Arena::default(), [0, 150, 100], 2);
     }
     assert_eq!(e.stance(0), VitalityChannelId::Two);
-    assert_ne!(e.state(0), GameEntityState::Attack);
+    assert_ne!(e.attack_phase(0), Some(AttackPhase::Active));
     assert_eq!(e.energy(0), 0);
     assert_eq!(e.attack_owner(), None);
 }
@@ -695,11 +685,7 @@ fn empty_enemy_does_not_claw_at_an_overhead_perch_or_invent_energy() {
 fn crowded_melee_tell_moves_through_collision_then_plants() {
     let mut e = engaged();
     e.select_attack(0, false);
-    e.enter_state(
-        0,
-        GameEntityState::Windup,
-        &mut GameEntityTickStats::default(),
-    );
+    e.enter_phase(0, AttackPhase::Windup, 0);
     let mut arena = Arena::default();
     e.step_melee_tell(&ENEMY[0], 0, input([0, 0, 26]), &mut arena, 2);
     assert!(e.position(0)[2] < 0);
@@ -725,7 +711,7 @@ fn heavy_contact_creates_firing_distance_before_attacking() {
     for _ in 0..300 {
         tick(&mut e, &mut arena, [0, 0, 26], 2);
         escaped |= e.tactics[0].goal == EnemyGoal::BreakAway;
-        if e.state(0) == GameEntityState::Windup {
+        if e.attack_phase(0) == Some(AttackPhase::Windup) {
             assert!(!e.target_within(0, input([0, 0, 26]), 192));
             assert!(e.selected_attack_is_ranged(0));
             attacked = true;
@@ -752,8 +738,8 @@ fn blocked_breakaway_never_fakes_arrival_or_shoots_at_contact() {
         tick(&mut e, &mut arena, [0, 0, 26], 2);
         assert_eq!(e.position(0), start);
         if matches!(
-            e.state(0),
-            GameEntityState::Windup | GameEntityState::Attack
+            e.attack_phase(0),
+            Some(AttackPhase::Windup | AttackPhase::Active)
         ) {
             assert!(!e.selected_attack_is_ranged(0));
             defended = true;
@@ -773,7 +759,7 @@ fn breakaway_defends_before_dragging_a_chaser_outside_the_home_leash() {
         tick(&mut e, &mut arena, [0, 0, edge - 26], 2);
         assert!(e.position(0)[2] < edge + 64);
         assert_ne!(e.tactics[0].goal, EnemyGoal::ReturnHome);
-        if e.state(0) == GameEntityState::Windup {
+        if e.attack_phase(0) == Some(AttackPhase::Windup) {
             assert!(!e.selected_attack_is_ranged(0));
             defended = true;
             break;
@@ -883,15 +869,14 @@ fn empty_energy_melee_enemy_sidesteps_with_lateral_clip_then_plants() {
 }
 #[test]
 fn projectile_evade_does_not_cancel_committed_actions() {
-    for state in [
-        GameEntityState::Windup,
-        GameEntityState::Attack,
-        GameEntityState::Recover,
+    for phase in [
+        AttackPhase::Windup,
+        AttackPhase::Active,
+        AttackPhase::Recover,
     ] {
         let mut e = engaged();
         let mut m = Arena::default();
-        e.state[0] = state as u8;
-        e.state_ticks[0] = 0;
+        e.enter_phase(0, phase, 0);
         e.projectile_threats[0] = Some(crate::projectiles::ProjectileThreat {
             position: [0, 32, 160],
             velocity: [0, 0, -8],
@@ -899,7 +884,7 @@ fn projectile_evade_does_not_cancel_committed_actions() {
         });
         tick(&mut e, &mut m, [0, 0, 224], 2);
         assert_ne!(e.tactics[0].goal, EnemyGoal::Evade);
-        assert_eq!(e.state(0), state);
+        assert_eq!(e.state(0), GameEntityState::Attack);
     }
 }
 
@@ -923,14 +908,12 @@ fn committed(records: &'static [LevelGameEntityRecord; 1], attack: CombatAction)
         ..CombatIntent::IDLE
     };
     e.apply_intent(&records[0], 0, intent, &mut Arena::default(), 2, &mut stats);
-    (e.state(0) == GameEntityState::Windup).then(|| e.selected_attack_kind(0))
+    (e.attack_phase(0) == Some(AttackPhase::Windup)).then(|| e.selected_attack_kind(0))
 }
 
 #[test]
 fn enemy_attacks_pass_the_same_kit_gate_as_the_player() {
-    use game_entity_flags::{
-        ENABLED, HEAVY_ATTACK, LIGHT_ATTACK, MELEE_ATTACK, RANGED_ATTACK,
-    };
+    use game_entity_flags::{ENABLED, HEAVY_ATTACK, LIGHT_ATTACK, MELEE_ATTACK, RANGED_ATTACK};
     let base = ENABLED;
     let both_strikes = enemy_with_flags(base | MELEE_ATTACK | LIGHT_ATTACK | HEAVY_ATTACK);
     assert_eq!(committed(both_strikes, CombatAction::LightAttack), Some(0));
@@ -1083,17 +1066,17 @@ fn a_parry_crit_is_spent_with_the_swapped_to_weapon() {
         .crit_window_ticks;
     assert_eq!(e.attack_owner(), None);
     e.tick_delta(&records[..], input([0, 0, 30]), &mut Arena::default(), 2);
-    assert_eq!(e.state(0), GameEntityState::Windup);
+    assert_eq!(e.attack_phase(0), Some(AttackPhase::Windup));
     assert_eq!(e.selected_attack_kind(0), GAME_ENTITY_ATTACK_LIGHT);
     assert_eq!(e.attack_owner(), Some(0));
     // The strike reaches its active frames inside the crit window: it is
     // the crit strike (double damage and poise under the placeholders).
     let mut ticks = 0;
-    while e.state(0) == GameEntityState::Windup {
+    while e.attack_phase(0) == Some(AttackPhase::Windup) {
         e.tick_delta(&records[..], input([0, 0, 30]), &mut Arena::default(), 2);
         ticks += 2;
     }
-    assert_eq!(e.state(0), GameEntityState::Attack);
+    assert_eq!(e.attack_phase(0), Some(AttackPhase::Active));
     assert!(
         ticks
             < TEST_BODIES[usize::from(BODY_TACTICAL)]
@@ -1113,7 +1096,7 @@ fn a_parry_crit_is_spent_with_the_swapped_to_weapon() {
         .combat
         .crit_window_ticks;
     g.tick_delta(&records[..], input([0, 0, 200]), &mut Arena::default(), 2);
-    assert_eq!(g.state(0), GameEntityState::Windup);
+    assert_eq!(g.attack_phase(0), Some(AttackPhase::Windup));
     assert_eq!(g.selected_attack_kind(0), GAME_ENTITY_ATTACK_RANGED);
     // No crit: the same enemy on cooldown does not attack.
     let mut h: GameEntities<2> = GameEntities::EMPTY;
@@ -1122,7 +1105,7 @@ fn a_parry_crit_is_spent_with_the_swapped_to_weapon() {
     h.state_ticks[0] = 42;
     h.attack_cooldown[0] = 600;
     h.tick_delta(&records[..], input([0, 0, 30]), &mut Arena::default(), 2);
-    assert_ne!(h.state(0), GameEntityState::Windup);
+    assert_ne!(h.attack_phase(0), Some(AttackPhase::Windup));
 }
 
 #[test]
@@ -1230,7 +1213,7 @@ fn a_possessed_entity_runs_its_owners_intent_instead_of_its_tactics() {
         ..CombatIntent::IDLE
     });
     held.tick_delta(&ENEMY, input(target), &mut strike, 2);
-    assert_eq!(held.state(0), GameEntityState::Windup);
+    assert_eq!(held.attack_phase(0), Some(AttackPhase::Windup));
 }
 
 #[test]
@@ -1339,18 +1322,18 @@ fn a_ranged_windup_backing_off_keeps_its_legs_on_the_gait() {
     let mut now = 100;
     for _ in 0..300 {
         think_and_show(&mut e, &records[..], [0, 0, 200], &mut now);
-        if e.state(0) == GameEntityState::Windup {
+        if e.attack_phase(0) == Some(AttackPhase::Windup) {
             break;
         }
     }
-    assert_eq!(e.state(0), GameEntityState::Windup);
+    assert_eq!(e.attack_phase(0), Some(AttackPhase::Windup));
     assert!(e.selected_attack_is_ranged(0));
     // The target steps inside the band: the shot is wound up backing off.
     let p = e.position(0);
     let target = [p[0], p[1], p[2] + 40];
     let mut legs_phase = None;
     let (mut whole_steps, mut still_thinks) = (0, 0);
-    while e.state(0) == GameEntityState::Windup {
+    while e.attack_phase(0) == Some(AttackPhase::Windup) {
         let before = e.position(0);
         let shown = think_and_show(&mut e, &records[..], target, &mut now);
         if e.position(0) == before {
@@ -1358,7 +1341,7 @@ fn a_ranged_windup_backing_off_keeps_its_legs_on_the_gait() {
         } else {
             whole_steps += 1;
         }
-        if e.state(0) != GameEntityState::Windup {
+        if e.attack_phase(0) != Some(AttackPhase::Windup) {
             break;
         }
         let (legs, _) = shown.legs.expect("the legs stay on the gait every think");
