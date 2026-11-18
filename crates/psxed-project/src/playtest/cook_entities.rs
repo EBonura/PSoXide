@@ -4819,6 +4819,9 @@ pub struct MeleeReachPresentation {
     pub visual_offset: [i16; 3],
     /// Model yaw on top of the body's facing, PSX angle units.
     pub visual_yaw: i16,
+    /// The Character's in-place choice for the action (the player's pose
+    /// honours it), `None` for the clip's own cooked flag (placed instances).
+    pub in_place: Option<bool>,
 }
 
 /// How far ahead of a fighter's centre the hitboxes of `action` reach and
@@ -4861,7 +4864,9 @@ pub fn cooked_melee_reach(
         + i32::from(rotation.m[2][1]) * offset[1]
         + i32::from(rotation.m[2][2]) * offset[2])
         >> 12;
-    let in_place = clip_bounds.is_some_and(|b| b.flags & model_clip_flags::IN_PLACE != 0);
+    let in_place = presentation
+        .in_place
+        .unwrap_or_else(|| clip_bounds.is_some_and(|b| b.flags & model_clip_flags::IN_PLACE != 0));
     let pose_offset = clip_bounds.map_or([0; 3], |b| b.pose_offset);
     let first_root = clip_bounds
         .filter(|b| b.flags & model_clip_flags::FIRST_ROOT != 0)
@@ -4923,4 +4928,72 @@ pub fn cooked_melee_reach(
     reach
         .filter(|r| *r > 0)
         .map(|r| r.min(i32::from(u16::MAX)) as u16)
+}
+
+/// [`cooked_melee_reach`] for the player's Character as the disc poses her
+/// (her model, her Character's presentation and in-place choices): the
+/// shorter of her Light and Heavy blades, 0 without a player or a blade. A
+/// controller that fights for her (the training duel) swings from it.
+#[must_use]
+pub fn player_melee_reach(package: &PlaytestPackage) -> u16 {
+    let Some(character) = package
+        .player_controller
+        .as_ref()
+        .and_then(|player| package.characters.get(usize::from(player.character)))
+    else {
+        return 0;
+    };
+    let Some(model) = package.models.get(usize::from(character.model)) else {
+        return 0;
+    };
+    let Some(mesh) = package
+        .assets
+        .get(model.mesh_asset_index)
+        .and_then(|asset| psx_asset::Model::from_bytes(&asset.bytes).ok())
+    else {
+        return 0;
+    };
+    let first = usize::from(character.combat_capsule_first);
+    let capsules = package
+        .combat_capsules
+        .get(first..first + usize::from(character.combat_capsule_count))
+        .unwrap_or(&[]);
+    let reach_for = |action: psx_level::CharacterAnimationAction| {
+        let index = action.to_index();
+        let clip = character.action_clips[index];
+        (clip != psx_level::CHARACTER_CLIP_NONE.raw()).then_some(())?;
+        let global = usize::from(model.clip_first) + usize::from(clip);
+        let animation = package
+            .model_clips
+            .get(global)
+            .and_then(|clip| package.assets.get(clip.animation_asset_index))
+            .and_then(|asset| psx_asset::Animation::from_bytes(&asset.bytes).ok())?;
+        let bounds = package
+            .model_clip_bounds
+            .iter()
+            .find(|b| usize::from(b.clip) == global);
+        let flags = character.action_flags[index];
+        cooked_melee_reach(
+            capsules,
+            index as u8,
+            &mesh,
+            &animation,
+            bounds,
+            MeleeReachPresentation {
+                visual_scale_q8: character.visual_scale_q8,
+                visual_offset: character.visual_offset,
+                visual_yaw: character.visual_yaw,
+                in_place: (flags & psx_level::character_action_flags::IN_PLACE_OVERRIDE != 0)
+                    .then_some(flags & psx_level::character_action_flags::IN_PLACE != 0),
+            },
+        )
+    };
+    [
+        reach_for(psx_level::CharacterAnimationAction::LightAttack),
+        reach_for(psx_level::CharacterAnimationAction::HeavyAttack),
+    ]
+    .into_iter()
+    .flatten()
+    .min()
+    .unwrap_or(0)
 }

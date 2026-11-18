@@ -84,8 +84,8 @@ mod cook_entities;
 pub(crate) use cook_entities::*;
 pub use cook_entities::{
     bake_model_clip_frame_bounds, bake_model_frame_pair_bounds, cooked_melee_reach,
-    model_bounds_joint_transform, transform_model_bounds_vertex, MeleeReachPresentation,
-    ModelBoundsJointTransform, MODEL_FRAME_BOUNDS_PAD_UNITS,
+    model_bounds_joint_transform, player_melee_reach, transform_model_bounds_vertex,
+    MeleeReachPresentation, ModelBoundsJointTransform, MODEL_FRAME_BOUNDS_PAD_UNITS,
 };
 mod cook_props_lights;
 pub(crate) use cook_props_lights::*;
@@ -1204,6 +1204,7 @@ fn build_package_cooked(
                                                 visual_scale_q8: instance.visual_scale_q8,
                                                 visual_offset: instance.visual_offset,
                                                 visual_yaw: instance.visual_yaw,
+                                                in_place: None,
                                             },
                                         )
                                     };

@@ -482,6 +482,7 @@ fn melee_reach(
                 visual_scale_q8: body.visual_scale_q8,
                 visual_offset: body.visual_offset,
                 visual_yaw: body.visual_yaw,
+                in_place: None,
             },
         )
     };

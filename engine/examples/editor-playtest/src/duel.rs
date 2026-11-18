@@ -141,6 +141,8 @@ impl Playtest {
             if let Some(pc) = PLAYER_CONTROLLER.get() {
                 persona.character = pc.character;
             }
+            // She swings from her own blade's reach, not the placement's.
+            persona.melee_reach = crate::generated::PLAYER_MELEE_REACH;
             self.duel = Duel {
                 active: true,
                 finished: false,

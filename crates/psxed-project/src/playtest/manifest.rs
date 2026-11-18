@@ -281,11 +281,20 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         .rooms
         .iter()
         .filter(|room| room.sky.flags & psx_level::sky_flags::ENABLED != 0)
-        .map(|room| match room.sky.flags & psx_level::sky_flags::PROJECTION_MASK {
-            0 => psx_level::sky_flags::PANORAMA,
-            projection => projection,
-        })
+        .map(
+            |room| match room.sky.flags & psx_level::sky_flags::PROJECTION_MASK {
+                0 => psx_level::sky_flags::PANORAMA,
+                projection => projection,
+            },
+        )
         .fold(0u16, |all, projection| all | projection);
+    let _ = writeln!(
+        out,
+        "/// The player's blade reach (`player_melee_reach`): a controller that fights for her\n\
+         /// swings from it.\n\
+         pub const PLAYER_MELEE_REACH: u16 = {};\n",
+        super::player_melee_reach(package),
+    );
     let _ = writeln!(
         out,
         "/// `psx_level::sky_flags` projection bits any room's enabled sky uses.\n\

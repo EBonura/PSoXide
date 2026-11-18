@@ -158,10 +158,10 @@ pub const GAME_ENTITY_ATTACK_REACH_MARGIN: i32 = 8;
 /// The melee distance a fighter measures from, for a blade that reaches
 /// `melee_reach` ahead of its centre (the cook's `melee_reach`, zero when it
 /// has none) against a target of body radius `target_radius`: the AI swings
-/// from the blade's reach plus half the target's radius (this value plus its
-/// step, `+ 16`), where the blade meets the target's body; one rule for every
-/// fighter. Without a cooked blade, both radii and
-/// [`GAME_ENTITY_ATTACK_REACH_MARGIN`].
+/// from the blade's reach (this value plus its step, `+ 16`), where the blade
+/// reaches the target's centre line, so the target's hurtboxes around it
+/// absorb a blade that peaks off to one side; one rule for every fighter.
+/// Without a cooked blade, both radii and [`GAME_ENTITY_ATTACK_REACH_MARGIN`].
 pub const fn melee_swing_reach(melee_reach: u16, radius: i32, target_radius: i32) -> i32 {
     let target = if target_radius > 0 { target_radius } else { 0 };
     if melee_reach == 0 {
@@ -169,9 +169,7 @@ pub const fn melee_swing_reach(melee_reach: u16, radius: i32, target_radius: i32
             .saturating_add(target)
             .saturating_add(GAME_ENTITY_ATTACK_REACH_MARGIN)
     } else {
-        (melee_reach as i32)
-            .saturating_add(target / 2)
-            .saturating_sub(16)
+        (melee_reach as i32).saturating_sub(16)
     }
 }
 
