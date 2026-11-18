@@ -139,6 +139,10 @@ pub struct Journeys {
     /// Journeys allowed the gate's forced-analog pad: name -> reason.
     #[serde(default)]
     pub forced_analog: BTreeMap<String, String>,
+    /// Also run the hardware renderer at 1x and 3x on every checkpoint (the gate's `--strict`)
+    /// on every model instead of the CPU frame alone (`--no-hw`).
+    #[serde(default)]
+    pub hw: bool,
 }
 
 /// The fleet's enforced conformance rules, defined here once. A game file may list more (or a
@@ -192,6 +196,10 @@ pub struct Host {
     pub command: Vec<String>,
     #[serde(default)]
     pub build: Option<String>,
+    /// Working directory, relative to the repo root (default: the root), for a check that
+    /// relies on its own `.cargo/config.toml`.
+    #[serde(default)]
+    pub dir: Option<String>,
 }
 
 /// The clean-clone proof.
