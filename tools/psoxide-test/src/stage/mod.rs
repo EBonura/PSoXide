@@ -83,6 +83,17 @@ impl Ctx<'_> {
         r
     }
 
+    /// Run one emulator job inside the machine-wide budget (`kind` "emu" or "redux").
+    pub fn machine<R>(&self, kind: &str, work: impl FnOnce() -> R) -> R {
+        let b = &self.config.budget;
+        let count = if kind == "redux" {
+            b.machine_redux
+        } else {
+            b.machine_emulators
+        };
+        crate::sched::machine_slot(b.shared_dir.as_deref(), kind, count, work)
+    }
+
     /// A directory under the work tree, created.
     pub fn dir(&self, parts: &[&str]) -> Result<PathBuf, String> {
         let mut path = self.work.clone();

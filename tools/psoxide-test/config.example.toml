@@ -10,6 +10,11 @@ library = "/path/to/ps1-games"
 jobs = 3        # CARGO_BUILD_JOBS for builds
 emulators = 2   # emulator processes at once (gate, psoxide-pgo replays, ReARMed)
 redux = 1       # PCSX-Redux processes at once
+# One directory every harness run on the machine shares (lock files only): emulator and Redux
+# jobs then also hold one of machine_emulators / machine_redux slots, across all runs together.
+# shared_dir = "/path/to/psoxide-test-slots"
+# machine_emulators = 4
+# machine_redux = 1
 
 [tools]
 # The PSoXide frontend that `psoxide-pgo measure` replays tapes on.
