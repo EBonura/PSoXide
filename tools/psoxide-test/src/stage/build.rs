@@ -243,6 +243,14 @@ fn one(ctx: &Ctx<'_>, build: &Build, key: &str) -> Outcome {
             return Outcome::error(&build.name, e);
         }
     }
+    if let Some(manifest) = &build.members {
+        let path = out.join(manifest);
+        if let Err(e) = super::requires::read_manifest(&path)
+            .and_then(|m| super::requires::write_member_symbols(&path, &m))
+        {
+            return Outcome::error(&build.name, e);
+        }
+    }
     let cue = build.cue(&ctx.repo);
     let bin = cue.with_extension("bin");
     let discs: &[&std::path::PathBuf] = if build.disc.is_empty() {

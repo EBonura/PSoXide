@@ -62,6 +62,30 @@ pub fn run(ctx: &Ctx<'_>) -> StageResult {
         Ok(p) => p,
         Err(e) => return result(Source::Run, Outcome::error("cross", e.to_string())),
     };
+    // A smoke whose stem is a journey template is played once per [[requires]] member.
+    let templates = ctx
+        .game
+        .journeys
+        .as_ref()
+        .map(|j| j.instances.clone())
+        .unwrap_or_default();
+    let smokes: Vec<PathBuf> = cross.smoke.iter().map(|s| ctx.repo.join(s)).collect();
+    let smokes: Vec<(String, PathBuf)> = match super::requires::expand(ctx, &smokes, &templates) {
+        Ok(list) => list
+            .into_iter()
+            .map(|(path, instance)| {
+                let label = match instance {
+                    Some(_) => path
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    None => util::relative_display(&ctx.repo, &path),
+                };
+                (label, path)
+            })
+            .collect(),
+        Err(e) => return result(Source::Run, Outcome::error("smoke instances", e)),
+    };
     let mut checks = Vec::new();
     let mut jobs = Vec::new();
     for emulator in emulators {
@@ -127,10 +151,9 @@ pub fn run(ctx: &Ctx<'_>) -> StageResult {
                 disc_digest,
             });
         }
-        for smoke in &cross.smoke {
+        for (smoke, path) in &smokes {
             for pad in &cross.pads {
-                let path = ctx.repo.join(smoke);
-                let plan = match journey::plan(&ctx.repo, &path, pad, cross.min_distinct) {
+                let plan = match journey::plan(&ctx.repo, path, pad, cross.min_distinct) {
                     Ok(p) => p,
                     Err(e) => {
                         checks.push(Check::fail(format!("{smoke} {pad}"), e));

@@ -12,6 +12,7 @@ use crate::util;
 /// carried from an older gate, the hardware-renderer coverage, the open-loop total).
 const ALWAYS_SHOWN: &[&str] = &[
     "carried from an older gate",
+    "journey rows",
     "hardware renderer (hw = true)",
     "open-loop steps",
 ];
@@ -262,7 +263,29 @@ impl RunResult {
                 }
             }
         }
-        let _ = writeln!(out, "  skips: {}", self.skips.len());
+        // Every skip is counted, by stage, so none hides in a long table.
+        let mut by_stage: Vec<String> = Vec::new();
+        for stage in &self.stages {
+            let n = stage
+                .outcome
+                .checks
+                .iter()
+                .filter(|c| c.status == Status::Skip)
+                .count();
+            if n > 0 {
+                by_stage.push(format!("{} {n}", stage.name));
+            }
+        }
+        let _ = writeln!(
+            out,
+            "  skips: {}{}",
+            self.skips.len(),
+            if by_stage.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", by_stage.join(", "))
+            }
+        );
         let _ = writeln!(
             out,
             "VERDICT {}",

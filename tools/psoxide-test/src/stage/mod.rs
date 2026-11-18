@@ -7,8 +7,10 @@ pub mod host;
 pub mod install;
 pub mod journeys;
 pub mod jreceipt;
+pub mod requires;
 pub mod size;
 pub mod speed;
+pub mod stack;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

@@ -1,46 +1,77 @@
 # psoxide-test
 
-One test harness for every game on the SDK. A game declares what to build and check in
-`psoxide-test.toml` at its repo root; the harness owns how: stage order, content receipts, the
+One test harness for every program on the SDK. A repo declares what to build and check in
+`psoxide-test.toml` at its root; the harness decides how: stage order, content receipts, the
 emulator budget, pass and fail against the committed baseline (`psoxide-test.baseline.toml`), one
 result file per run, the clean-clone proof and the install.
 
+## The one command
+
 ```
-psoxide-test run [--repo DIR] [--tier quick|full] [--stage NAME]...
-psoxide-test bless [--repo DIR]
-psoxide-test lint [--repo DIR]
-psoxide-test install [--repo DIR]
+psoxide-test run --tier full      # everything a landing needs; exit 0 only on LANDING: COMPLETE PASS
+psoxide-test run                  # the quick pre-check (build, size, one window, precheck journeys)
+psoxide-test run --stage journeys # one stage (the build always runs first, usually as a receipt)
+psoxide-test bless                # measure the reference build, write the baseline
+psoxide-test lint                 # load the file and every journey; pads and open-loop counts
+psoxide-test install              # copy bytes a complete full PASS judged into the library
+psoxide-test pin [--write]        # the SDK pin rule for this repo
 ```
 
-Stages, in this order for every game: `build` (the game's own commands, artifacts collected into
-`out`), `size` (`psoxide_size::ram` of the link map: text, data, bss, free RAM), `host` (declared
-host checks), `journeys` (the pinned `psoxide-gate`, one process per journey and hardware model,
-longest first), `speed` (`psoxide-pgo measure` over poll windows at phase offsets), `cross` (the
-smoke journey on PCSX-ReARMed and PCSX-Redux, RAM checkpoints only), `clean` (a fresh clone of the
-pushed commit rebuilds the same bytes). `install` is its own command and installs through
-`psx-library` only bytes a complete `--tier full` PASS judged.
+Machine-local paths (gate, frontend, ReARMed core, Redux, library, original game files, the
+budget) live in the user config, never in the repo: `~/.config/psoxide-test/config.toml` or
+`PSOXIDE_TEST_CONFIG`; `config.example.toml` lists every key.
 
-`--tier quick` is the pre-check (build, size, the first window at offset 0, the `precheck`
-journeys on `real`, the ReARMed smoke). Only `--tier full` can print `LANDING: COMPLETE`.
+## What a repo declares
 
-Every stage keys a receipt on the bytes it reads (artifacts, journey files, tapes, tool binaries)
-and prints `RECEIPT HIT` instead of running again. Results land in
-`<work>/<game>/results/<sha256>.json`, named by their content, with wall times beside them in
-`<sha256>.timing.json`.
+| Section | Says |
+|---|---|
+| `[[build]]` | a build: `commands` (the repo's own entry points, `{out}` is its output dir), `collect`ed files, the `disc` cue, the link `map`; `env` with `{input:NAME}` original files and `{tool:NAME}`; `inputs` path prefixes for a build keyed on its sources alone (a cook); `members` for a disc image's manifest |
+| `[[size]]` | the build whose map is judged: text, data, bss and free RAM against the baseline (tolerance 0 unless a `reason` is given) |
+| `[[speed]]` | a window on a poll-bound tape (`tape` + `polls`) or between two game-state conditions (`from` + `until`), measured at phase `offsets`; `models = ["mister"]` adds a row per model |
+| `[journeys]` | gate journeys (`files`), the quick tier's `precheck`, enforced conformance rules, `hw`, `only_on`, `instances` (templates played once per required member) |
+| `[cross]` | smoke journeys replayed on PCSX-ReARMed and PCSX-Redux, RAM checkpoints only; `boot` of a shipping disc with no input |
+| `[[host]]` | host checks: a command that exits 0, optionally a `metric`; `inputs` and `uses` key it on what it reads |
+| `[[clean]]` | a fresh clone of the pushed commit rebuilds these files byte for byte |
+| `[[install]]` | the library entry a build becomes |
+| `[[requires]]` | results this verdict stands on (a disc image's members): each a complete full PASS of the bytes the image carries |
 
-Journeys are the gate's own TOML. The harness refuses a journey without an explicit `pad`, keeps
-the number of open-loop steps (fixed `wait`, frame-counted `hold`) as a ratchet in the baseline
-(target 0; a new journey must have none), and replays the smoke subset (press until a RAM
-condition, wait until one, check RAM at a named checkpoint) on the other emulators.
+Unknown keys are errors. A tolerance or an exception needs its reason in the file (a human changes
+a bar by editing the file, never the baseline). Journeys say `pad` explicitly and wait on game
+state, not on time: open-loop steps are a ratchet in the baseline that only goes down.
 
-Machine-local paths and the budget live in the user config: see `config.example.toml`.
+## Reading the verdict
 
-Original game files (`{input:NAME}`) enter receipts, result facts (`input:NAME`) and the
-clean-clone key by content: SHA-256 over every file of the configured file or tree, cached per
-file by size, modification time and inode in `<work>/input-digests.json`. A game file may pin
-them with `[originals] NAME = "<digest>"`; other bytes then fail the build before it starts.
+```
+NitroXide at 1d85d7a618c1 (SDK aaf06b0ffa5d, guest tree equals main 297f088666fe, gate f280c6e711d9, tier full)
+  sdk       PASS        1 pass   0 fail   0 skip  run             1 s
+  build     PASS        4 pass   0 fail   0 skip  receipt         0 s
+  journeys  PASS      166 pass   0 fail   8 skip  receipt         0 s
+      pass journey rows  164 row(s): 0 gate process(es) ..., 164 harness receipt(s), 0 carried ...
+  ...
+  skips: 8 (journeys 8)
+VERDICT PASS
+LANDING: COMPLETE PASS (every required tier ran on these bytes and passed)
+```
 
-Every child the harness starts leads its own process group. A group is killed when its job
-returns, on SIGINT, SIGTERM and SIGHUP, and, if the harness itself is killed outright, by a small
-`psoxide-test reap` process that watches a pipe from it. The machine-wide budget slots are file
-locks the kernel drops with the harness.
+- One line per stage: verdict, check counts, `run` / `receipt` / `run+receipt` (where the answer
+  came from) and wall time. A red stage prints every check with the file, the condition and the
+  value it read.
+- `RECEIPT HIT` lines above the table name each stage or row answered from a receipt: same bytes,
+  same verdict, nothing started. `journey rows` says how many gate processes ran and how many rows
+  came from receipts or were carried from an older gate (carried rows are never a fresh PASS).
+- Every skip is a check with its reason, counted per stage on the `skips:` line.
+- `LANDING: COMPLETE PASS` needs `--tier full` on one set of bytes with every declared section;
+  otherwise the last line lists what is missing.
+- The result is `<work>/<game>/results/<sha256>.json`, named by its content; wall times are in
+  `<sha256>.timing.json` beside it. `install` and `[[requires]]` name results by that hash.
+
+## Receipts and the SDK pin
+
+Every stage keys a receipt on what it reads (artifacts, journey files, tapes, tool binaries,
+declared inputs), never on paths or the clock, so a pin move that leaves the bytes identical
+re-runs only the build and the clean clone. A repo may pin any SDK commit whose guest tree equals
+SDK main's: the `sdk` stage checks it first (`psoxide-test pin`).
+
+Original game files (`{input:NAME}`) enter keys by content (a git checkout by commit plus its
+dirty files). Every child the harness starts leads its own process group and is killed when its
+job returns, on a signal, or by a small reaper if the harness itself is killed.

@@ -122,6 +122,15 @@ fn one(ctx: &Ctx<'_>, install: &crate::game::Install) -> StageResult {
         "emulator_gate_revision": GATE_REVISION,
         "files": now,
     });
+    if !ctx.game.requires.is_empty() {
+        // An image names the verdict each member stands on.
+        base["requires"] = ctx
+            .game
+            .requires
+            .iter()
+            .map(|r| serde_json::json!({ "id": r.id, "result_sha256": r.result, "file": r.file }))
+            .collect();
+    }
     if !map_bytes.is_empty() {
         base["artifacts"] = serde_json::json!({
             "map": { "file": format!("{name}{suffix}"), "sha256": util::sha256_bytes(&map_bytes) }

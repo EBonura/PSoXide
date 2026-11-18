@@ -27,6 +27,11 @@ pub struct Config {
     /// Original game files by the name a game file uses for them.
     #[serde(default)]
     pub inputs: BTreeMap<String, PathBuf>,
+    /// Further directories holding result files (`<hash>.json`, directly or in
+    /// `<dir>/<game>/results/`) that `[[requires]]` may name: other work trees on this machine.
+    /// This config's own `work` is always searched.
+    #[serde(default)]
+    pub results: Vec<PathBuf>,
 }
 
 /// How much runs at once.

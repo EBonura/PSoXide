@@ -76,6 +76,8 @@ impl Record {
             skips_unknown: false,
             hw: self.hw,
             carried_from: self.carried_from.clone(),
+            harness_hit: true,
+            failures: Vec::new(),
         }
     }
 
@@ -147,10 +149,7 @@ impl Shared {
 
 /// `path` relative to the repo, so a key does not depend on where the clone lives.
 fn relative(repo: &Path, path: &Path) -> String {
-    path.strip_prefix(repo)
-        .unwrap_or(path)
-        .display()
-        .to_string()
+    util::relative_display(repo, path)
 }
 
 /// Every file under `dir` whose path relative to it passes `keep`, sorted.
@@ -186,12 +185,17 @@ pub fn content_key(
     ctx: &Ctx<'_>,
     shared: &Shared,
     journey: &Path,
+    instance: Option<&str>,
     discs: &[String],
     golden: &Path,
     flags: &[String],
 ) -> Result<String, String> {
     let mut key = Key::new("journey-content");
-    key.file("journey", journey)?;
+    // A generated instance names the repo absolutely: key it on its template and member values.
+    match instance {
+        Some(text) => key.part("journey instance", text),
+        None => key.file("journey", journey)?,
+    }
     for disc in discs {
         let cue = ctx.repo.join(disc);
         for (label, file) in [("cue", cue.clone()), ("bin", cue.with_extension("bin"))] {

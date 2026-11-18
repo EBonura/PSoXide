@@ -89,6 +89,10 @@ type Row = (i32, BTreeMap<String, String>);
 
 struct Job<'w> {
     window: &'w Window,
+    /// The row: the window's name, or `<name>@<model>` for an extra model.
+    row: String,
+    /// The hardware model (PSOXIDE_HARDWARE) of an extra row.
+    model: Option<String>,
     /// The window in polls: declared, or located from its conditions.
     polls: [u32; 2],
     offset: i32,
@@ -170,19 +174,29 @@ pub fn run(ctx: &Ctx<'_>, all_offsets: bool) -> StageResult {
         } else {
             vec![0]
         };
-        for offset in offsets {
-            jobs.push(Job {
-                window: w,
-                polls,
-                offset,
-                disc: disc.clone(),
-                disc_digest: disc_digest.clone(),
-            });
+        // Extra models are full-tier rows only; the quick tier measures the console model.
+        let rows = if all_offsets || ctx.tier == Tier::Full {
+            w.rows()
+        } else {
+            w.rows().into_iter().take(1).collect()
+        };
+        for (row, model) in rows {
+            for &offset in &offsets {
+                jobs.push(Job {
+                    window: w,
+                    row: row.clone(),
+                    model: model.map(str::to_string),
+                    polls,
+                    offset,
+                    disc: disc.clone(),
+                    disc_digest: disc_digest.clone(),
+                });
+            }
         }
     }
     let width = ctx.config.budget.emulators;
     let outcomes = sched::run_all(&jobs, width, |job| {
-        ctx.timed(&format!("speed:{}@{}", job.window.name, job.offset), || {
+        ctx.timed(&format!("speed:{}@{}", job.row, job.offset), || {
             measure_one(ctx, job, &frontend, &pgo, &tools_digest)
         })
     });
@@ -195,15 +209,15 @@ pub fn run(ctx: &Ctx<'_>, all_offsets: bool) -> StageResult {
         match metrics {
             Ok(m) => {
                 for (k, v) in &m {
-                    facts.insert(format!("{}/{}/{k}", job.window.name, job.offset), v.clone());
+                    facts.insert(format!("{}/{}/{k}", job.row, job.offset), v.clone());
                 }
                 by_window
-                    .entry(job.window.name.as_str())
+                    .entry(job.row.as_str())
                     .or_default()
                     .push((job.offset, m));
             }
             Err(e) => checks.push(Check::fail(
-                format!("{} at offset {}", job.window.name, job.offset),
+                format!("{} at offset {}", job.row, job.offset),
                 e,
             )),
         }
@@ -390,6 +404,9 @@ fn measure_one(
     key.part("disc", &job.disc_digest);
     key.part("tools", tools_digest);
     key.part("window", &format!("{from}..{to} {:?}", w.launch_args));
+    if let Some(model) = &job.model {
+        key.part("model", model);
+    }
     if let Some(tape) = &tape {
         if let Err(e) = key.file("tape", tape) {
             return (Err(e), false);
@@ -399,7 +416,7 @@ fn measure_one(
     if let Some(o) = ctx.receipts.get("speed", &key) {
         println!(
             "RECEIPT HIT speed {}@{} {}",
-            w.name,
+            job.row,
             job.offset,
             util::short(&key)
         );
@@ -408,7 +425,7 @@ fn measure_one(
     let log = match ctx.dir(&["speed"]) {
         Ok(d) => d.join(format!(
             "{}@{}-{}.log",
-            w.name,
+            job.row.replace([',', '='], "-"),
             job.offset,
             util::short(&key)
         )),
@@ -436,7 +453,10 @@ fn measure_one(
         argv.push("--launch-arg".into());
         argv.push(a.clone());
     }
-    let env = ctx.child_env(&ctx.work.join("guest-stage"));
+    let mut env = ctx.child_env(&ctx.work.join("guest-stage"));
+    if let Some(model) = &job.model {
+        env.push(("PSOXIDE_HARDWARE".into(), Some(model.clone())));
+    }
     let metrics = match ctx.machine("emu", || {
         util::run_logged(&argv, &ctx.repo, &env, &log, None)
     }) {

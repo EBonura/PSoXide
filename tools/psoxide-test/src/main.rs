@@ -46,7 +46,7 @@ usage:
 config: ~/.config/psoxide-test/config.toml or PSOXIDE_TEST_CONFIG (see config.example.toml)";
 
 const STAGES: &[&str] = &[
-    "build", "size", "host", "journeys", "speed", "cross", "clean",
+    "build", "requires", "size", "host", "journeys", "stack", "speed", "cross", "clean",
 ];
 
 fn main() -> ExitCode {
@@ -254,11 +254,16 @@ fn run(o: &Options) -> Result<ExitCode, String> {
         if !wanted(name) {
             continue;
         }
+        if optional_stage_absent(name, &game) {
+            continue;
+        }
         if !built {
             stages.push(not_run(name, "build"));
             continue;
         }
         let r = ctx.timed(name, || match *name {
+            "requires" => stage::requires::run(&ctx),
+            "stack" => stage::stack::run(&ctx, false),
             "size" => stage::size::run(&ctx),
             "host" => stage::host::run(&ctx, false),
             "journeys" => stage::journeys::run(&ctx, false),
@@ -274,6 +279,9 @@ fn run(o: &Options) -> Result<ExitCode, String> {
         missing.push("tier full".to_string());
     }
     for s in STAGES {
+        if optional_stage_absent(s, &game) {
+            continue;
+        }
         if !stages.iter().any(|r| r.name == *s) {
             missing.push(format!("stage {s}"));
         }
@@ -282,7 +290,10 @@ fn run(o: &Options) -> Result<ExitCode, String> {
         ("[[size]]", !game.sizes.is_empty()),
         (
             "[[speed]] (or a [[host]] metric)",
-            !game.windows.is_empty() || game.hosts.iter().any(|h| h.metric.is_some()),
+            // A disc image inherits its members' speed verdicts through [[requires]].
+            !game.windows.is_empty()
+                || game.hosts.iter().any(|h| h.metric.is_some())
+                || !game.requires.is_empty(),
         ),
         ("[journeys]", game.journeys.is_some()),
         ("[cross]", game.cross.is_some()),
@@ -326,10 +337,22 @@ fn run(o: &Options) -> Result<ExitCode, String> {
     })
 }
 
+/// A stage that only runs when the game file declares it (`[[requires]]`, `[[stack]]`).
+fn optional_stage_absent(stage: &str, game: &Game) -> bool {
+    match stage {
+        "requires" => game.requires.is_empty(),
+        "stack" => game.stacks.is_empty(),
+        _ => false,
+    }
+}
+
 fn ctx_tier_has(tier: Tier, stage: &str) -> bool {
     match tier {
         Tier::Full => true,
-        Tier::Quick => matches!(stage, "build" | "size" | "journeys" | "speed" | "cross"),
+        Tier::Quick => matches!(
+            stage,
+            "build" | "requires" | "size" | "journeys" | "speed" | "cross"
+        ),
     }
 }
 
@@ -429,6 +452,18 @@ fn bless(o: &Options) -> Result<ExitCode, String> {
             base.host.insert(name.to_string(), v.parse().unwrap_or(0));
         }
     }
+    if !game.stacks.is_empty() {
+        let stack = stage::stack::run(&ctx, true);
+        print_stage(&stack);
+        if !stack.passed() {
+            return Err("the stack stage failed, nothing blessed".into());
+        }
+        for (k, v) in &stack.outcome.facts {
+            if let Some(id) = k.strip_prefix("stack/") {
+                base.stack.insert(id.to_string(), v.parse().unwrap_or(0));
+            }
+        }
+    }
     let speed = stage::speed::run(&ctx, true);
     // Before reading the windows: a stage that could not measure says why (not "no flips").
     let broken: Vec<&Check> = speed
@@ -452,17 +487,22 @@ fn bless(o: &Options) -> Result<ExitCode, String> {
             first.name, first.detail
         ));
     }
-    for w in &game.windows {
+    let rows: Vec<(String, &game::Window)> = game
+        .windows
+        .iter()
+        .flat_map(|w| w.rows().into_iter().map(move |(row, _)| (row, w)))
+        .collect();
+    for (row, w) in rows {
         let mut table = WindowBase {
             offsets: w.offsets.clone(),
             ..WindowBase::default()
         };
         for off in &w.offsets {
-            let get = |m: &str| speed.outcome.facts.get(&format!("{}/{off}/{m}", w.name));
+            let get = |m: &str| speed.outcome.facts.get(&format!("{row}/{off}/{m}"));
             let num = |m: &str| -> Result<u64, String> {
                 get(m)
                     .and_then(|v| v.parse().ok())
-                    .ok_or(format!("window {} offset {off}: no {m}", w.name))
+                    .ok_or(format!("window {row} offset {off}: no {m}"))
             };
             table.flips.push(num("flips")?);
             table.work_per_frame.push(num("work_per_frame")?);
@@ -471,7 +511,7 @@ fn bless(o: &Options) -> Result<ExitCode, String> {
                 .vblanks
                 .push(get("vblanks").cloned().unwrap_or_default());
         }
-        base.speed.insert(w.name.clone(), table);
+        base.speed.insert(row, table);
     }
     base.save(&o.repo)?;
     println!(
@@ -508,8 +548,20 @@ fn lint(o: &Options) -> Result<ExitCode, String> {
     };
     let mut bad = 0;
     let mut total = 0;
+    let is_template = |p: &Path| {
+        p.file_stem()
+            .is_some_and(|s| spec.instances.iter().any(|t| t.as_str() == s))
+    };
     for path in stage::journeys::files(&o.repo, &spec.files)? {
-        let info = journey::inspect(&path, &spec.clocks)?;
+        let info = if is_template(&path) {
+            // Played once per [[requires]] member; lint reads it with a stand-in member.
+            let copy = stage::requires::lint_copy(&path)?;
+            let info = journey::inspect(&copy, &spec.clocks);
+            let _ = std::fs::remove_dir_all(copy.parent().unwrap_or(&copy));
+            info?
+        } else {
+            journey::inspect(&path, &spec.clocks)?
+        };
         total += info.open_loop + info.clock_waits;
         let pad = journey::check_pad(&info, &spec.forced_analog);
         let allowed = base
@@ -532,8 +584,16 @@ fn lint(o: &Options) -> Result<ExitCode, String> {
     }
     if let Some(cross) = &game.cross {
         for s in &cross.smoke {
+            let path = o.repo.join(s);
+            if is_template(&path) {
+                println!(
+                    "smoke {s}: a template, planned per [[requires]] member once the image's \
+                     members.sym exists (a run)"
+                );
+                continue;
+            }
             for pad in &cross.pads {
-                match journey::plan(&o.repo, &o.repo.join(s), pad, cross.min_distinct) {
+                match journey::plan(&o.repo, &path, pad, cross.min_distinct) {
                     Ok(p) => println!(
                         "smoke {s} {pad}: {} steps, {} frames budget",
                         p.steps.len(),

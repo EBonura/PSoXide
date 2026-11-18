@@ -211,6 +211,14 @@ pub fn glob(root: &Path, pattern: &str) -> Result<Vec<PathBuf>, String> {
 }
 
 /// Short form of a hex digest for tables.
+/// `path` relative to `root` when it lies inside it, else as it is.
+pub fn relative_display(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .display()
+        .to_string()
+}
+
 pub fn short(hex: &str) -> &str {
     &hex[..hex.len().min(12)]
 }

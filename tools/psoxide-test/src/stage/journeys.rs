@@ -30,6 +30,10 @@ pub struct GateLine {
     pub hw: Option<(u64, u64)>,
     /// Carried from this older gate revision (its `real` run reproduced exactly), not run now.
     pub carried_from: Option<String>,
+    /// Answered by the harness's own journey receipt: no gate process started.
+    pub harness_hit: bool,
+    /// The gate's failed-check lines: what was checked, where, and the value it read.
+    pub failures: Vec<String>,
 }
 
 /// Read the gate's summary, receipt, conformance and abort lines.
@@ -43,6 +47,9 @@ pub fn parse_gate(output: &str) -> Option<GateLine> {
             line.conformance.push(l.to_string());
         } else if let Some(rest) = l.trim_start().strip_prefix("ABORT ") {
             line.aborts.push(rest.trim().to_string());
+        } else if let Some(rest) = l.strip_prefix("  FAIL  ") {
+            // A failed check: `<journey>/<checkpoint or step>: <condition and the value read>`.
+            line.failures.push(rest.trim().to_string());
         } else if (l.starts_with("PASS ") || l.starts_with("FAIL ")) && l.contains(" checks: ") {
             found = true;
             line.passed = l.starts_with("PASS ");
@@ -183,12 +190,20 @@ pub fn run(ctx: &Ctx<'_>, bless: bool) -> StageResult {
         }
         Err(e) => return result(Source::Run, Outcome::error("journeys", e)),
     };
+    let expanded = match super::requires::expand(ctx, &paths, &spec.instances) {
+        Ok(e) => e,
+        Err(e) => return result(Source::Run, Outcome::error("journey instances", e)),
+    };
+    let instance_keys: std::collections::BTreeMap<PathBuf, String> = expanded
+        .iter()
+        .filter_map(|(p, k)| k.clone().map(|k| (p.clone(), k)))
+        .collect();
     let mut checks = Vec::new();
     let mut facts = std::collections::BTreeMap::new();
     let mut runnable = Vec::new();
     let mut open_total = 0;
     let mut clock_total = 0;
-    for path in &paths {
+    for path in expanded.iter().map(|(p, _)| p) {
         let info = match journey::inspect(path, &spec.clocks) {
             Ok(i) => i,
             Err(e) => {
@@ -266,7 +281,11 @@ pub fn run(ctx: &Ctx<'_>, bless: bool) -> StageResult {
     };
     let mut jobs = Vec::new();
     for (info, ticks) in runnable {
-        if ctx.tier == Tier::Quick && !bless && !spec.precheck.contains(&info.id) {
+        // A template named in `precheck` stands for all of its instances.
+        let prechecked = spec.precheck.iter().any(|p| {
+            *p == info.id || spec.instances.contains(p) && info.id.starts_with(&format!("{p}-"))
+        });
+        if ctx.tier == Tier::Quick && !bless && !prechecked {
             continue;
         }
         for m in &models {
@@ -327,6 +346,7 @@ pub fn run(ctx: &Ctx<'_>, bless: bool) -> StageResult {
                 ctx,
                 &shared,
                 &job.info.path,
+                instance_keys.get(&job.info.path).map(String::as_str),
                 &job.info.discs,
                 &golden,
                 &flags,
@@ -390,6 +410,7 @@ pub fn run(ctx: &Ctx<'_>, bless: bool) -> StageResult {
     outcomes.extend(sched::run_all(&second, width, play));
     let jobs: Vec<Job> = first.into_iter().chain(second).collect();
     let mut hits = 0;
+    let (mut harness_hits, mut gate_runs, mut gate_receipts) = (0usize, 0usize, 0usize);
     let mut sorted: Vec<(&Job, (Check, Option<GateLine>))> = jobs.iter().zip(outcomes).collect();
     sorted.sort_by(|a, b| (&a.0.info.id, &a.0.model).cmp(&(&b.0.info.id, &b.0.model)));
     let mut hw_rows = (0usize, Vec::new(), Vec::new());
@@ -414,6 +435,12 @@ pub fn run(ctx: &Ctx<'_>, bless: bool) -> StageResult {
         }
         if let Some(line) = &line {
             hits += usize::from(line.receipt_hit);
+            if line.harness_hit {
+                harness_hits += 1;
+            } else {
+                gate_runs += 1;
+                gate_receipts += usize::from(line.receipt_hit);
+            }
             if job.model == "real" {
                 facts.insert(format!("ticks/{}", job.info.id), line.ticks.to_string());
             }
@@ -471,6 +498,22 @@ pub fn run(ctx: &Ctx<'_>, bless: bool) -> StageResult {
             ));
         }
     }
+    // Always printed: where every row's verdict came from, so a fast run shows why it was fast.
+    let model_skips = checks
+        .iter()
+        .filter(|c| c.status == Status::Skip && c.detail.starts_with("runs on "))
+        .count();
+    checks.push(Check::pass(
+        "journey rows",
+        format!(
+            "{} row(s): {gate_runs} gate process(es) ({gate_receipts} answered by the gate's own \
+             receipt), {} harness receipt(s), {} carried from an older gate, {model_skips} not run \
+             on a model (only_on)",
+            jobs.len(),
+            harness_hits - carried.len(),
+            carried.len()
+        ),
+    ));
     if !carried.is_empty() {
         // Always printed: these rows did not run on this gate.
         checks.push(Check::pass(
@@ -484,6 +527,20 @@ pub fn run(ctx: &Ctx<'_>, bless: bool) -> StageResult {
         _ => Source::Mixed,
     };
     result(source, Outcome { checks, facts })
+}
+
+/// The first failed checks, each with its condition and the value read (the gate's own words),
+/// so the table says what broke without opening the log.
+fn failures_note(failures: &[String]) -> String {
+    const SHOWN: usize = 3;
+    if failures.is_empty() {
+        return String::new();
+    }
+    let mut note = format!(": {}", failures[..failures.len().min(SHOWN)].join("; "));
+    if failures.len() > SHOWN {
+        note.push_str(&format!(" (and {} more)", failures.len() - SHOWN));
+    }
+    note
 }
 
 fn disc_is_an_artifact(ctx: &Ctx<'_>, info: &Info) -> Result<(), String> {
@@ -589,9 +646,10 @@ fn one(
         Some(l) => Check::fail(
             &name,
             format!(
-                "{} of {} checks failed{}{}; log {}",
+                "{} of {} checks failed{}{}{}; log {}",
                 l.fail,
                 l.checks,
+                failures_note(&l.failures),
                 if l.aborts.is_empty() {
                     String::new()
                 } else {
@@ -671,6 +729,16 @@ CONFORMANCE game gpu-irq-command=5168 first at 0x8007216c [not enforced] (114 CD
 
     #[test]
     fn a_failure_and_golden_skips_are_read() {
+        let failed = "  FAIL  credits/end: ram CREDITS_STATE+0 eq 3 (read 1)\n";
+        let l = parse_gate(&format!(
+            "{failed}FAIL credits 7 checks: 6 pass, 1 fail | 9 ticks (0 s emulated) in 0.1 s | disc ab\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            l.failures,
+            ["credits/end: ram CREDITS_STATE+0 eq 3 (read 1)"]
+        );
+        assert!(failures_note(&l.failures).contains("(read 1)"));
         let out = "  ABORT  credits: step 3 timed out\nFAIL credits 7 checks: 4 pass, 3 fail, 2 golden skipped (hardware) | 536 ticks (9 s emulated) in 4.0 s | disc ab\n";
         let l = parse_gate(out).unwrap();
         assert!(!l.passed);

@@ -33,6 +33,9 @@ pub struct Baseline {
     /// tree (`<work>/<game>/maps/<sha256>.map`) so a size change can be explained by function.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub maps: BTreeMap<String, String>,
+    /// Deepest stack in bytes by journey (`[[stack]]`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub stack: BTreeMap<String, u32>,
 }
 
 /// One link's size, from `psoxide_size::ram`.

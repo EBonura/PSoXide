@@ -47,6 +47,48 @@ pub struct Game {
     /// Where the SDK pin is written when it is not in components.lock.json or sdk.lock.json.
     #[serde(default)]
     pub sdk: Option<SdkPin>,
+    /// Results this verdict depends on: one per program a disc image carries. Each must be a
+    /// complete full-tier PASS whose judged file is the member the image holds byte for byte.
+    #[serde(default, rename = "requires")]
+    pub requires: Vec<Requires>,
+    /// Deepest-stack bars: how deep the stack has been by a checkpoint of a journey.
+    #[serde(default, rename = "stack")]
+    pub stacks: Vec<Stack>,
+}
+
+/// One deepest-stack measure: RAM saved at a journey's checkpoint, read below the stack top.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct Stack {
+    /// The journey (file stem) and the checkpoint where RAM is read (late in the journey: the
+    /// figure is the deepest the stack has been by then).
+    pub journey: String,
+    pub checkpoint: String,
+    /// The initial stack pointer and the reserve below it (default: the SDK linker script's
+    /// 0x801FFF00 and 0x8000; a program that overrides STACK_RESERVE says so here).
+    #[serde(default)]
+    pub top: Option<u32>,
+    #[serde(default)]
+    pub reserve: Option<u32>,
+    /// Bytes the depth may grow over the baseline (default 0; needs `reason`).
+    #[serde(default)]
+    pub max_growth: u32,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// One result another repo's verdict stands on (a member of a disc image).
+#[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct Requires {
+    /// The member's `id` in the build's members manifest.
+    pub id: String,
+    /// The content hash (sha256, 64 hex) of the member's result file: results are named by their
+    /// content, so the hash pins the verdict and the bytes it judged.
+    pub result: String,
+    /// `<build>/<file>` as the member's result facts name the judged artifact the image must carry
+    /// (its executable), e.g. `ship/nitroxide.exe`.
+    pub file: String,
 }
 
 /// An SDK pin written in a script: the hex revision right after `after` in `file`.
@@ -109,6 +151,12 @@ pub struct Build {
     /// The link map inside `out` (size and symbols read it).
     #[serde(default)]
     pub map: Option<String>,
+    /// A manifest the build writes into `out` naming the programs it carries (a disc image):
+    /// a JSON array of `{ index, id, exe_sha256, map, words? }`, `map` relative to `out`. The
+    /// harness writes `members.sym` beside it (every member symbol as `<slug>:<name>`) and checks
+    /// each entry against `[[requires]]`.
+    #[serde(default)]
+    pub members: Option<String>,
     /// Path prefixes of the files whose bytes form the receipt key. Empty: every file git would
     /// hand a clone, minus `exclude`. A cook lists only its sources and cooker here.
     #[serde(default)]
@@ -172,6 +220,23 @@ pub struct Window {
     /// Extra frontend arguments the replay needs.
     #[serde(default)]
     pub launch_args: Vec<String>,
+    /// Hardware models measured as well, in the full tier, each its own row `<name>@<model>`
+    /// with its own baseline (e.g. `["mister"]`: the MiSTer core's slower GPU and CD timing).
+    #[serde(default)]
+    pub models: Vec<String>,
+}
+
+impl Window {
+    /// The row names this window measures: itself (the console model), then one per extra model.
+    pub fn rows(&self) -> Vec<(String, Option<&str>)> {
+        std::iter::once((self.name.clone(), None))
+            .chain(
+                self.models
+                    .iter()
+                    .map(|m| (format!("{}@{m}", self.name), Some(m.as_str()))),
+            )
+            .collect()
+    }
 }
 
 fn zero_offset() -> Vec<i32> {
@@ -213,6 +278,11 @@ pub struct Journeys {
     /// reaches an absolute value is a fixed wait and counts in the open-loop ratchet.
     #[serde(default)]
     pub clocks: Vec<String>,
+    /// Journey templates (file stems) played once per `[[requires]]` entry instead of as they
+    /// are: `{member}`, `{id}`, `{index}`, `{repo}` and `{word:N}` are substituted. A smoke of
+    /// the same stem is instanced the same way on the other emulators.
+    #[serde(default)]
+    pub instances: Vec<String>,
 }
 
 /// A journey's model subset.
@@ -449,6 +519,17 @@ impl Game {
         }
         for w in &self.windows {
             known(&w.build, "[[speed]]")?;
+            if let Some(m) = w
+                .models
+                .iter()
+                .find(|m| !crate::stage::FULL_MODELS.contains(&m.as_str()) || *m == "real")
+            {
+                return Err(format!(
+                    "[[speed]] `{}`: models lists `{m}`; name another full-tier model (real is \
+                     always measured)",
+                    w.name
+                ));
+            }
             if !w.offsets.contains(&0) {
                 return Err(format!("[[speed]] `{}`: offsets must contain 0", w.name));
             }
@@ -512,7 +593,54 @@ impl Game {
                 }
             }
         }
+        for st in &self.stacks {
+            if st.max_growth != 0 && st.reason.as_deref().is_none_or(str::is_empty) {
+                return Err(format!(
+                    "[[stack]] `{}`: max_growth other than 0 needs `reason`",
+                    st.journey
+                ));
+            }
+            if self.journeys.is_none() {
+                return Err("[[stack]] measures a journey: declare [journeys]".into());
+            }
+        }
+        let manifests = self.builds.iter().filter(|b| b.members.is_some()).count();
+        if manifests > 1 {
+            return Err("only one [[build]] may declare `members`".into());
+        }
+        if !self.requires.is_empty() && manifests == 0 {
+            return Err(
+                "[[requires]] needs a [[build]] that declares `members` (the manifest of \
+                        the programs it carries)"
+                    .into(),
+            );
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        for r in &self.requires {
+            if !ids.insert(r.id.as_str()) {
+                return Err(format!("[[requires]] `{}` is listed twice", r.id));
+            }
+            if r.result.len() != 64 || !r.result.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(format!(
+                    "[[requires]] `{}`: result must be the 64-hex sha256 of a result file",
+                    r.id
+                ));
+            }
+            if !r.file.contains('/') {
+                return Err(format!(
+                    "[[requires]] `{}`: file is `<build>/<file>` as the member's result names it",
+                    r.id
+                ));
+            }
+        }
         if let Some(j) = &self.journeys {
+            if !j.instances.is_empty() && self.requires.is_empty() {
+                return Err(
+                    "[journeys] instances are played once per [[requires]] entry: \
+                            declare [[requires]]"
+                        .into(),
+                );
+            }
             for (id, only) in &j.only_on {
                 if only.models.is_empty() || only.reason.trim().is_empty() {
                     return Err(format!(
