@@ -18,6 +18,7 @@ mod redux;
 mod report;
 mod sched;
 mod stage;
+mod tape;
 mod util;
 
 use std::collections::BTreeMap;
@@ -41,6 +42,8 @@ usage:
       measure the reference build and write psoxide-test.baseline.toml (refuses a red journey)
   psoxide-test lint [--repo DIR]
       load the game file and every journey; print the pad and open-loop findings
+  psoxide-test tape --disc CUE --press SCHEDULE --out TAPE --steps N [--pad analog|dualshock|digital]
+      record a press schedule as a poll-bound tape and keep it only if it replays identically
   psoxide-test install [--repo DIR]
       install the judged disc into the configured library (needs a complete full PASS)
 config: ~/.config/psoxide-test/config.toml or PSOXIDE_TEST_CONFIG (see config.example.toml)";
@@ -126,6 +129,7 @@ fn dispatch(args: &[String]) -> Result<ExitCode, String> {
         Some("install") => install(&options(&args[1..])?),
         Some("adapter") => adapter(&args[1..]),
         Some("pin") => pin_command(&args[1..]),
+        Some("tape") => tape::run(&args[1..]),
         Some("-h" | "--help" | "help") | None => {
             println!("{USAGE}");
             Ok(ExitCode::SUCCESS)

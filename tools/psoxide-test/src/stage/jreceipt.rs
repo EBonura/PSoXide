@@ -40,6 +40,13 @@ pub struct Record {
     /// such a record is a valid result but never the evidence for carrying another model.
     #[serde(default)]
     pub gate_receipt: bool,
+    /// The behaviour areas the run exercised and their versions (the gate's `AREAS` line;
+    /// empty from a gate that does not print it).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub areas: BTreeMap<String, String>,
+    /// What the run did (the gate's `DIGEST` line), when the gate prints it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
 }
 
 impl Record {
@@ -57,6 +64,8 @@ impl Record {
             hw: line.hw,
             carried_from: None,
             gate_receipt: line.receipt_hit,
+            areas: line.areas.clone(),
+            digest: line.digest.clone(),
         }
     }
 
@@ -78,11 +87,19 @@ impl Record {
             carried_from: self.carried_from.clone(),
             harness_hit: true,
             failures: Vec::new(),
+            areas: self.areas.clone(),
+            digest: self.digest.clone(),
         }
     }
 
-    /// The same run: what the gate measured is identical (the runner and provenance aside).
+    /// The same run: what the gate measured is identical (the runner and provenance aside); when
+    /// both gates print a run digest, the digests must agree too.
     pub fn same_run(&self, other: &Record) -> bool {
+        if let (Some(a), Some(b)) = (&self.digest, &other.digest) {
+            if a != b {
+                return false;
+            }
+        }
         (
             self.ticks,
             self.checks,
@@ -245,7 +262,7 @@ pub fn path(root: &Path, key: &str, runner: &str, model: &str) -> PathBuf {
     root.join(key).join(format!(
         "{}@{}.json",
         util::short(runner),
-        model.replace([',', '='], "-")
+        model.replace([',', '=', '/'], "-")
     ))
 }
 
@@ -267,7 +284,7 @@ pub fn store(path: &Path, record: &Record) {
 /// Whether an older gate revision left a record for `model` under `key` (then the new gate's run
 /// must be a full one, not the gate's own receipt, to serve as the evidence for carrying).
 pub fn older_exists(root: &Path, key: &str, runner: &str, model: &str) -> bool {
-    let suffix = format!("@{}.json", model.replace([',', '='], "-"));
+    let suffix = format!("@{}.json", model.replace([',', '=', '/'], "-"));
     let current = format!("{}{suffix}", util::short(runner));
     std::fs::read_dir(root.join(key)).is_ok_and(|entries| {
         entries.flatten().any(|e| {
@@ -282,7 +299,7 @@ pub fn older_exists(root: &Path, key: &str, runner: &str, model: &str) -> bool {
 pub fn carry(root: &Path, key: &str, runner: &str, model: &str) -> Option<Record> {
     let now_real = load(&path(root, key, runner, "real"))?;
     let dir = root.join(key);
-    let suffix = format!("@{}.json", model.replace([',', '='], "-"));
+    let suffix = format!("@{}.json", model.replace([',', '=', '/'], "-"));
     let mut old: Vec<PathBuf> = std::fs::read_dir(&dir)
         .ok()?
         .flatten()
@@ -315,6 +332,55 @@ pub fn carry(root: &Path, key: &str, runner: &str, model: &str) -> Option<Record
     None
 }
 
+/// The behaviour versions a gate reports (`psoxide-gate versions`: `VERSIONS cpu=1 ... rules=<hex>
+/// journey=1`), or `None` when it has none (a gate from before behaviour versions).
+pub fn parse_versions(output: &str) -> Option<BTreeMap<String, String>> {
+    let line = output.lines().find_map(|l| l.strip_prefix("VERSIONS "))?;
+    let map: BTreeMap<String, String> = line
+        .split_whitespace()
+        .filter_map(|kv| kv.split_once('='))
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    (!map.is_empty()).then_some(map)
+}
+
+/// A result for `model` to carry to `runner` by behaviour areas: an older revision's own run (not
+/// a carry, not the gate's receipt) whose every exercised area has the same version on the new
+/// gate. No `real` re-proof is needed: the run depended on nothing the new gate changed.
+pub fn carry_by_areas(
+    root: &Path,
+    key: &str,
+    runner: &str,
+    model: &str,
+    versions: &BTreeMap<String, String>,
+) -> Option<Record> {
+    let suffix = format!("@{}.json", model.replace([',', '=', '/'], "-"));
+    let mut old: Vec<PathBuf> = std::fs::read_dir(root.join(key))
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .is_some_and(|n| n.to_string_lossy().ends_with(&suffix))
+        })
+        .collect();
+    old.sort();
+    old.into_iter()
+        .filter_map(|p| load(&p))
+        .find(|r| {
+            r.runner != runner
+                && r.carried_from.is_none()
+                && !r.gate_receipt
+                && !r.areas.is_empty()
+                && r.areas.iter().all(|(a, v)| versions.get(a) == Some(v))
+        })
+        .map(|record| Record {
+            runner: runner.to_string(),
+            carried_from: Some(record.runner.clone()),
+            ..record
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,7 +398,62 @@ mod tests {
             hw: None,
             carried_from: None,
             gate_receipt: false,
+            areas: BTreeMap::new(),
+            digest: None,
         }
+    }
+
+    /// Lines the emu-gate branch prints (captured from its fleet sample, lane/gate-batch 076d97fb).
+    const CAPTURED: &str = "PASS nitroxide-first-to-one 12 checks: 12 pass, 0 fail | 640 ticks (10 s emulated) in 1.0 s | disc ab\n\
+AREAS nitroxide-first-to-one real cpu=1 gte=1 muldiv=1 cd=1 spu=1 pad=1 gpu=2 dma=1 timers=1 irq=1 card=1 hw=2 rules=98a2b1108be61124 journey=1\n\
+DIGEST nitroxide-first-to-one real 63c51fd331310056c1fcfec1b84725c5\n";
+
+    #[test]
+    fn areas_and_the_digest_are_read_from_the_gate() {
+        let line = crate::stage::journeys::parse_gate(CAPTURED).unwrap();
+        assert_eq!(line.areas.get("gpu").map(String::as_str), Some("2"));
+        assert_eq!(
+            line.areas.get("rules").map(String::as_str),
+            Some("98a2b1108be61124")
+        );
+        assert!(!line.areas.contains_key("mdec"));
+        assert_eq!(
+            line.digest.as_deref(),
+            Some("63c51fd331310056c1fcfec1b84725c5")
+        );
+        // A model with `=` in it is not an area.
+        let never = CAPTURED.replace(" real ", " mister,gpu-irq=never ");
+        let line = crate::stage::journeys::parse_gate(&never).unwrap();
+        assert!(!line.areas.keys().any(|k| k.contains("mister")));
+        let v = parse_versions("VERSIONS cpu=1 gte=1 gpu=3 rules=98a2b1108be61124 journey=1\n")
+            .unwrap();
+        assert_eq!(v.get("gpu").map(String::as_str), Some("3"));
+        assert!(parse_versions("error: unrecognized subcommand 'versions'").is_none());
+    }
+
+    #[test]
+    fn a_row_is_carried_when_every_area_it_exercised_is_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let (old, new) = ("aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb");
+        let line = crate::stage::journeys::parse_gate(CAPTURED).unwrap();
+        store(&path(root, "k", old, "real"), &Record::of(old, &line));
+        let mut versions = line.areas.clone();
+        versions.insert("mdec".into(), "7".into()); // an area the run did not exercise moved
+        let carried = carry_by_areas(root, "k", new, "real", &versions).unwrap();
+        assert_eq!(carried.carried_from.as_deref(), Some(old));
+        versions.insert("gpu".into(), "3".into()); // one it did exercise moved
+        assert!(carry_by_areas(root, "k", new, "real", &versions).is_none());
+        // A record from a gate without areas is never carried this way.
+        store(&path(root, "k2", old, "real"), &record(old, 5));
+        assert!(carry_by_areas(root, "k2", new, "real", &line.areas).is_none());
+        // Digests that differ make two runs different even with equal counts.
+        let mut a = Record::of(old, &line);
+        let mut b = a.clone();
+        b.digest = Some("00".into());
+        assert!(!a.same_run(&b));
+        a.digest = None;
+        assert!(a.same_run(&b));
     }
 
     #[test]

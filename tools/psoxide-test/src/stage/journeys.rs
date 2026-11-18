@@ -34,6 +34,10 @@ pub struct GateLine {
     pub harness_hit: bool,
     /// The gate's failed-check lines: what was checked, where, and the value it read.
     pub failures: Vec<String>,
+    /// `AREAS <journey> <model> area=version ...`: the behaviour areas the run exercised.
+    pub areas: std::collections::BTreeMap<String, String>,
+    /// `DIGEST <journey> <model> <hex>`: what the run did.
+    pub digest: Option<String>,
 }
 
 /// Read the gate's summary, receipt, conformance and abort lines.
@@ -47,6 +51,16 @@ pub fn parse_gate(output: &str) -> Option<GateLine> {
             line.conformance.push(l.to_string());
         } else if let Some(rest) = l.trim_start().strip_prefix("ABORT ") {
             line.aborts.push(rest.trim().to_string());
+        } else if let Some(rest) = l.strip_prefix("AREAS ") {
+            // `AREAS <journey> <model> cpu=1 ...`: a model may hold `=` (gpu-irq=never).
+            line.areas = rest
+                .split_whitespace()
+                .skip(2)
+                .filter_map(|kv| kv.split_once('='))
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+        } else if let Some(rest) = l.strip_prefix("DIGEST ") {
+            line.digest = rest.split_whitespace().nth(2).map(str::to_string);
         } else if let Some(rest) = l.strip_prefix("  FAIL  ") {
             // A failed check: `<journey>/<checkpoint or step>: <condition and the value read>`.
             line.failures.push(rest.trim().to_string());
@@ -91,7 +105,7 @@ fn remember_skips(ctx: &Ctx<'_>, gate: &Path, job: &Job, conformance: &str, line
         let _ = key.file("disc", &cue.with_extension("bin"));
     }
     let _ = key.file("gate", gate);
-    key.part("model", &job.model);
+    key.part("model", &job.label());
     key.part("conformance", conformance);
     let path = ctx
         .work
@@ -153,7 +167,19 @@ fn not_enforced(lines: &[String]) -> String {
 struct Job {
     info: Info,
     model: String,
+    /// An extra row with the gate's pad override (`[journeys] pads`), else the journey's own pad.
+    pad: Option<String>,
     expected_ticks: u64,
+}
+
+impl Job {
+    /// The row's model part: `real`, or `real/digital` for a pad override row.
+    fn label(&self) -> String {
+        match &self.pad {
+            Some(pad) => format!("{}/{pad}", self.model),
+            None => self.model.clone(),
+        }
+    }
 }
 
 /// The journeys stage. `bless` runs every journey on `real` and does not enforce the ratchet.
@@ -298,11 +324,16 @@ pub fn run(ctx: &Ctx<'_>, bless: bool) -> StageResult {
                     continue;
                 }
             }
-            jobs.push(Job {
-                info: info.clone(),
-                model: (*m).to_string(),
-                expected_ticks: ticks,
-            });
+            // One row with the journey's own pad, and one per extra pad the game file lists.
+            let extra = spec.pads.get(&info.id).cloned().unwrap_or_default();
+            for pad in std::iter::once(None).chain(extra.into_iter().map(Some)) {
+                jobs.push(Job {
+                    info: info.clone(),
+                    model: (*m).to_string(),
+                    pad,
+                    expected_ticks: ticks,
+                });
+            }
         }
     }
     // Longest first: the critical path is the longest journey, not the sum.
@@ -321,14 +352,20 @@ pub fn run(ctx: &Ctx<'_>, bless: bool) -> StageResult {
     };
     let root = jreceipt::root(ctx);
     let runner = crate::config::GATE_REVISION;
+    // The pinned gate's behaviour versions, once per stage (a gate without them: None).
+    let versions = gate_versions(ctx, &gate);
     let play = |job: &Job| {
-        ctx.timed(&format!("journey:{}@{}", job.info.id, job.model), || {
+        ctx.timed(&format!("journey:{}@{}", job.info.id, job.label()), || {
             let render = if spec.hw && !spec.hw_off.contains_key(&job.info.id) {
                 "--strict"
             } else {
                 "--no-hw"
             };
             let mut flags = vec![render.to_string(), conformance.clone()];
+            if let Some(pad) = &job.pad {
+                flags.push("--pad".into());
+                flags.push(pad.clone());
+            }
             let golden = match (&spec.golden_dir, &job.info.name) {
                 (Some(dir), Some(name)) => ctx.repo.join(dir.replace("{name}", name)),
                 (None, Some(name)) => job
@@ -354,24 +391,41 @@ pub fn run(ctx: &Ctx<'_>, bless: bool) -> StageResult {
                 Ok(k) => k,
                 Err(e) => {
                     return (
-                        Check::fail(format!("{}@{}", job.info.id, job.model), e),
+                        Check::fail(format!("{}@{}", job.info.id, job.label()), e),
                         None,
                     )
                 }
             };
-            let at = jreceipt::path(&root, &key, runner, &job.model);
+            let at = jreceipt::path(&root, &key, runner, &job.label());
             let found = jreceipt::load(&at).or_else(|| {
-                // A new gate: `real` always runs again; another model is carried only when
-                // `real` reproduced the older gate's run exactly (phase 1 ran every `real`).
-                let carried = (job.model != "real")
-                    .then(|| jreceipt::carry(&root, &key, runner, &job.model))
-                    .flatten()?;
+                // A new gate that reports behaviour versions: carry any row whose exercised areas
+                // it left alone. Otherwise `real` always runs again and another model is carried
+                // only when `real` reproduced the older gate's run exactly (phase 1 ran every
+                // `real`).
+                let by_areas = versions
+                    .as_ref()
+                    .and_then(|v| jreceipt::carry_by_areas(&root, &key, runner, &job.label(), v));
+                let carried = by_areas.or_else(|| {
+                    (job.model != "real")
+                        .then(|| jreceipt::carry(&root, &key, runner, &job.label()))
+                        .flatten()
+                })?;
                 jreceipt::store(&at, &carried);
                 Some(carried)
             });
             if let Some(record) = found {
-                let name = format!("{}@{}", job.info.id, job.model);
+                let name = format!("{}@{}", job.info.id, job.label());
                 let how = match &record.carried_from {
+                    Some(from) if versions.is_some() && !record.areas.is_empty() => format!(
+                        ", CARRIED from gate {} (every area it exercised is unchanged: {})",
+                        util::short(from),
+                        record
+                            .areas
+                            .iter()
+                            .map(|(a, v)| format!("{a}={v}"))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    ),
                     Some(from) => format!(
                         ", CARRIED from gate {} (real reproduced it exactly on this gate)",
                         util::short(from)
@@ -391,7 +445,7 @@ pub fn run(ctx: &Ctx<'_>, bless: bool) -> StageResult {
             // The `real` re-proof after a gate change must be a full run: the gate's own receipt
             // would answer with a short summary that cannot show the run is the same.
             let mut run_flags = flags.clone();
-            if job.model == "real" && jreceipt::older_exists(&root, &key, runner, &job.model) {
+            if job.model == "real" && jreceipt::older_exists(&root, &key, runner, &job.label()) {
                 run_flags.push("--receipts-verify".into());
             }
             let (check, line) = one(ctx, &gate, job, &run_flags, &receipts);
@@ -412,7 +466,7 @@ pub fn run(ctx: &Ctx<'_>, bless: bool) -> StageResult {
     let mut hits = 0;
     let (mut harness_hits, mut gate_runs, mut gate_receipts) = (0usize, 0usize, 0usize);
     let mut sorted: Vec<(&Job, (Check, Option<GateLine>))> = jobs.iter().zip(outcomes).collect();
-    sorted.sort_by(|a, b| (&a.0.info.id, &a.0.model).cmp(&(&b.0.info.id, &b.0.model)));
+    sorted.sort_by(|a, b| (&a.0.info.id, a.0.label()).cmp(&(&b.0.info.id, b.0.label())));
     let mut hw_rows = (0usize, Vec::new(), Vec::new());
     let mut carried = Vec::new();
     for (job, (check, line)) in sorted {
@@ -420,13 +474,13 @@ pub fn run(ctx: &Ctx<'_>, bless: bool) -> StageResult {
             carried.push(format!(
                 "{}@{} from {}",
                 job.info.id,
-                job.model,
+                job.label(),
                 util::short(from)
             ));
         }
         if let (true, false, Some(line)) = (spec.hw, spec.hw_off.contains_key(&job.info.id), &line)
         {
-            let row = format!("{}@{}", job.info.id, job.model);
+            let row = format!("{}@{}", job.info.id, job.label());
             match line.hw {
                 Some((a, b)) if a > 0 && b > 0 => hw_rows.0 += 1,
                 Some(_) => hw_rows.1.push(row),
@@ -441,19 +495,19 @@ pub fn run(ctx: &Ctx<'_>, bless: bool) -> StageResult {
                 gate_runs += 1;
                 gate_receipts += usize::from(line.receipt_hit);
             }
-            if job.model == "real" {
+            if job.model == "real" && job.pad.is_none() {
                 facts.insert(format!("ticks/{}", job.info.id), line.ticks.to_string());
             }
             if line.skips_unknown {
                 checks.push(Check::skip(
-                    format!("{}@{} skips", job.info.id, job.model),
+                    format!("{}@{} skips", job.info.id, job.label()),
                     "the gate answered from a receipt this harness never saw run, so what that \
                      run skipped is unknown here (run with fresh receipts to list it)",
                 ));
             }
             if line.golden_skipped > 0 {
                 checks.push(Check::skip(
-                    format!("{}@{} golden", job.info.id, job.model),
+                    format!("{}@{} golden", job.info.id, job.label()),
                     format!(
                         "{} golden compare(s) not run on this model (the journey's golden_on)",
                         line.golden_skipped
@@ -462,7 +516,7 @@ pub fn run(ctx: &Ctx<'_>, bless: bool) -> StageResult {
             }
             if line.skip > 0 {
                 checks.push(Check::skip(
-                    format!("{}@{} conformance", job.info.id, job.model),
+                    format!("{}@{} conformance", job.info.id, job.label()),
                     format!(
                         "{} rule(s) reported, not enforced: {}",
                         line.skip,
@@ -517,7 +571,7 @@ pub fn run(ctx: &Ctx<'_>, bless: bool) -> StageResult {
     if !carried.is_empty() {
         // Always printed: these rows did not run on this gate.
         checks.push(Check::pass(
-            "carried from an older gate (real re-proven exactly; not run now)",
+            "carried from an older gate (areas unchanged, or real re-proven exactly; not run now)",
             format!("{} row(s): {}", carried.len(), carried.join(", ")),
         ));
     }
@@ -527,6 +581,19 @@ pub fn run(ctx: &Ctx<'_>, bless: bool) -> StageResult {
         _ => Source::Mixed,
     };
     result(source, Outcome { checks, facts })
+}
+
+/// `psoxide-gate versions`, parsed; `None` when the gate has no such command.
+fn gate_versions(ctx: &Ctx<'_>, gate: &Path) -> Option<std::collections::BTreeMap<String, String>> {
+    let log = ctx
+        .dir(&["journeys", "logs"])
+        .ok()?
+        .join("gate-versions.log");
+    let argv = vec![gate.display().to_string(), "versions".to_string()];
+    let done = util::run_logged(&argv, &ctx.repo, &[], &log, Some(60)).ok()?;
+    (done.code == 0)
+        .then(|| jreceipt::parse_versions(&done.output))
+        .flatten()
 }
 
 /// The first failed checks, each with its condition and the value read (the gate's own words),
@@ -572,7 +639,7 @@ fn one(
     receipts: &Path,
 ) -> (Check, Option<GateLine>) {
     let conformance = flags.join(" ");
-    let name = format!("{}@{}", job.info.id, job.model);
+    let name = format!("{}@{}", job.info.id, job.label());
     let model_dir = job.model.replace([',', '='], "-");
     let out = ctx
         .work

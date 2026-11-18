@@ -224,9 +224,22 @@ pub struct Window {
     /// with its own baseline (e.g. `["mister"]`: the MiSTer core's slower GPU and CD timing).
     #[serde(default)]
     pub models: Vec<String>,
+    /// Keep the tape's last pad sample on every poll after the tape ends (the frontend's
+    /// `--input-tape-hold-last`), so a window may outlive its tape (a map load after it).
+    #[serde(default)]
+    pub hold_last: bool,
 }
 
 impl Window {
+    /// The frontend arguments the replay gets: the declared ones, plus hold-last.
+    pub fn frontend_args(&self) -> Vec<String> {
+        let mut args = self.launch_args.clone();
+        if self.hold_last {
+            args.push("--input-tape-hold-last".into());
+        }
+        args
+    }
+
     /// The row names this window measures: itself (the console model), then one per extra model.
     pub fn rows(&self) -> Vec<(String, Option<&str>)> {
         std::iter::once((self.name.clone(), None))
@@ -283,6 +296,10 @@ pub struct Journeys {
     /// the same stem is instanced the same way on the other emulators.
     #[serde(default)]
     pub instances: Vec<String>,
+    /// Journeys also played with other pads (the gate's `--pad`): journey -> pads, each an extra
+    /// row `<journey>@<model>/<pad>` on every model; the ratchet counts the file once.
+    #[serde(default)]
+    pub pads: BTreeMap<String, Vec<String>>,
 }
 
 /// A journey's model subset.
@@ -530,6 +547,9 @@ impl Game {
                     w.name
                 ));
             }
+            if w.hold_last && w.tape.is_none() {
+                return Err(format!("[[speed]] `{}`: hold_last needs a tape", w.name));
+            }
             if !w.offsets.contains(&0) {
                 return Err(format!("[[speed]] `{}`: offsets must contain 0", w.name));
             }
@@ -641,6 +661,25 @@ impl Game {
                         .into(),
                 );
             }
+            for (id, pads) in &j.pads {
+                for pad in pads {
+                    match pad.as_str() {
+                        "digital" | "dualshock" => {}
+                        "analog" if j.forced_analog.contains_key(id) => {}
+                        "analog" => {
+                            return Err(format!(
+                                "[journeys] pads `{id}`: analog needs the journey in forced_analog \
+                                 with its reason"
+                            ))
+                        }
+                        other => {
+                            return Err(format!(
+                            "[journeys] pads `{id}`: `{other}` is not digital, dualshock or analog"
+                        ))
+                        }
+                    }
+                }
+            }
             for (id, only) in &j.only_on {
                 if only.models.is_empty() || only.reason.trim().is_empty() {
                     return Err(format!(
@@ -746,6 +785,25 @@ commands = [["make", "build"]]
 disc = "Game.cue"
 map = "link.map"
 "#;
+
+    #[test]
+    fn extra_pads_and_hold_last_are_checked() {
+        let j = "[journeys]\nfiles = \"tests/*.toml\"\n";
+        let ok = format!("{MINIMAL}{j}pads = {{ menu = [\"digital\"] }}\n");
+        assert_eq!(
+            Game::parse(&ok).unwrap().journeys.unwrap().pads["menu"],
+            ["digital"]
+        );
+        let analog = format!("{MINIMAL}{j}pads = {{ menu = [\"analog\"] }}\n");
+        assert!(Game::parse(&analog).unwrap_err().contains("forced_analog"));
+        let w = "[[speed]]\nname = \"w\"\nbuild = \"ship\"\ntape = \"t.pxtape\"\npolls = [1, 9]\n\
+                 hold_last = true\nmodels = [\"mister\"]\n";
+        let game = Game::parse(&format!("{MINIMAL}{w}")).unwrap();
+        assert_eq!(game.windows[0].frontend_args(), ["--input-tape-hold-last"]);
+        assert_eq!(game.windows[0].rows()[1].0, "w@mister");
+        let bad = format!("{MINIMAL}{}", w.replace("mister", "pentium"));
+        assert!(Game::parse(&bad).unwrap_err().contains("pentium"));
+    }
 
     #[test]
     fn clean_is_a_table_or_an_array_and_a_cook_has_no_disc() {

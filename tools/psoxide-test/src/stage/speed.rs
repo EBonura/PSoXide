@@ -403,7 +403,7 @@ fn measure_one(
     let mut key = Key::new("speed");
     key.part("disc", &job.disc_digest);
     key.part("tools", tools_digest);
-    key.part("window", &format!("{from}..{to} {:?}", w.launch_args));
+    key.part("window", &format!("{from}..{to} {:?}", w.frontend_args()));
     if let Some(model) = &job.model {
         key.part("model", model);
     }
@@ -449,7 +449,7 @@ fn measure_one(
         "--name".into(),
         "m".into(),
     ]);
-    for a in &w.launch_args {
+    for a in &w.frontend_args() {
         argv.push("--launch-arg".into());
         argv.push(a.clone());
     }
@@ -519,7 +519,7 @@ fn locate(
             &serde_json::to_string(probe).map_err(|e| e.to_string())?,
         );
     }
-    key.part("limit", &format!("{max_polls} {:?}", w.launch_args));
+    key.part("limit", &format!("{max_polls} {:?}", w.frontend_args()));
     let key = key.finish();
     let read = |o: &Outcome| -> Option<[u32; 2]> {
         Some([
@@ -564,7 +564,7 @@ fn locate(
         argv.push("--route-watch-u32".into());
         argv.push(format!("{word:#010x}"));
     }
-    argv.extend(w.launch_args.iter().cloned());
+    argv.extend(w.frontend_args());
     let env = ctx.child_env(&ctx.work.join("guest-stage"));
     let done = ctx.machine("emu", || {
         util::run_logged(&argv, &ctx.repo, &env, &log, None)
