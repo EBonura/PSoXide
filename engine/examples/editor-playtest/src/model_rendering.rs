@@ -1119,8 +1119,7 @@ impl Playtest {
                     .is_some_and(|effect| effect.finished())
             });
             let visible = self.instance_visible_mask & (1u16 << index) != 0;
-            let away = owner.is_some_and(|(entity, _)| self.game_entities.away(entity));
-            if away || !actor_pose_needed(corpse_gone, fighting, world_resident, visible) {
+            if !actor_pose_needed(corpse_gone, fighting, world_resident, visible) {
                 self.instance_actor_poses[index] = None;
                 self.previous_instance_actor_poses[index] = None;
                 index += 1;

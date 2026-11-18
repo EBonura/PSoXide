@@ -2149,9 +2149,6 @@ impl Playtest {
         // A named eye socket follows the same sampled head as the visible mesh.
         // Models without an authored eye simply omit this presentation effect.
         for (index, record) in GAME_ENTITIES.iter().enumerate() {
-            if self.game_entities.away(index) {
-                continue;
-            }
             let Some(progress) = self.game_entities.stance_eye_pulse_q12(index) else {
                 continue;
             };

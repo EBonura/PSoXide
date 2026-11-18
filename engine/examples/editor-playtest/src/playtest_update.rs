@@ -357,9 +357,6 @@ impl Playtest {
         self.game_entities.advance_stances(1);
         if npc_tick_due {
             for index in 0..entity_count {
-                if self.game_entities.away(index) {
-                    continue;
-                }
                 let record = &GAME_ENTITIES[index];
                 self.track_enemy_tell(index, ctx, npc_delta_ticks);
                 let position = self.game_entities.position(index);

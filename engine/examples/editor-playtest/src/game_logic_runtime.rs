@@ -2286,7 +2286,6 @@ impl Playtest {
         for (index, record) in GAME_ENTITIES.iter().enumerate() {
             if record.model_instance == psx_level::GAME_ENTITY_MODEL_INSTANCE_NONE
                 || out.len() >= out.capacity()
-                || self.game_entities.away(index)
             {
                 continue;
             }
