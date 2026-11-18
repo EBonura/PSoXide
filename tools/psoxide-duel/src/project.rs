@@ -86,18 +86,22 @@ fn cooked_body(c: &psxed_project::playtest::PlaytestCharacter) -> psx_level::Lev
     }
 }
 
-/// The training enemy's record and its capsules in `package`.
+/// The `which`-th training enemy's record and its capsules in `package`.
 fn training_fighter(
     package: &PlaytestPackage,
     name: &str,
+    which: usize,
 ) -> Result<(FighterSpec, LevelGameEntityRecord), String> {
     let owned = OwnedLevelRecords::build(package);
     let records = owned.records();
     let index = records
         .game_entities
         .iter()
-        .position(|r| r.flags & game_entity_flags::TRAINING != 0)
-        .ok_or("no TRAINING enemy in the project")?;
+        .enumerate()
+        .filter(|(_, r)| r.flags & game_entity_flags::TRAINING != 0)
+        .nth(which)
+        .map(|(index, _)| index)
+        .ok_or("no such TRAINING enemy in the project")?;
     let record = records.game_entities[index];
     let body = package
         .characters
@@ -256,7 +260,7 @@ pub fn load_training(project_dir: &Path, which: usize) -> Result<ProjectFighters
         id.and_then(|id| project.resource(id))
             .map_or_else(|| "?".to_owned(), |r| r.name.clone())
     };
-    let (enemy, enemy_record) = training_fighter(&package, &character_name(enemy_char_id))?;
+    let (enemy, enemy_record) = training_fighter(&package, &character_name(enemy_char_id), which)?;
     let player_char_id = player_char_id.ok_or("player controller has no Character")?;
     let player_resource = match project.resource(player_char_id).map(|r| &r.data) {
         Some(ResourceData::Character(c)) => c,
@@ -282,8 +286,11 @@ pub fn load_training(project_dir: &Path, which: usize) -> Result<ProjectFighters
         };
     }
     let swapped_package = cook(&swapped, project_dir)?;
-    let (mut aletha, _) =
-        training_fighter(&swapped_package, &character_name(Some(player_char_id)))?;
+    let (mut aletha, _) = training_fighter(
+        &swapped_package,
+        &character_name(Some(player_char_id)),
+        which,
+    )?;
     // Exactly the stats the disc gives her.
     aletha.body.combat = player_character.combat;
     // Her attacks play her own action clips, at her speeds and frame
