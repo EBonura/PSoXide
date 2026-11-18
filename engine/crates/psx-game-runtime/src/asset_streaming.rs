@@ -365,9 +365,11 @@ impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStreamer<PAGES, ASS
             if asset.flags & group == 0 {
                 continue;
             }
-            let slot = asset.id.0 as usize;
+            // Slots are the group's own order, so the tables are as long as the larger group,
+            // not the level's whole asset list.
+            let slot = count;
             let byte_count = asset.ram_bytes as usize;
-            if count >= ASSETS || slot >= ASSETS || byte_count == 0 {
+            if count >= ASSETS || byte_count == 0 {
                 self.started = true;
                 self.fail(asset.id.0, ASSET_FAIL_BAD_RECORD);
                 return;
@@ -512,8 +514,12 @@ impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStreamer<PAGES, ASS
         if !self.ready || asset.flags & self.group == 0 {
             return None;
         }
+        // Load-time lookups only (models, materials, uploads): a scan of the group's ids.
+        let index = self.ids[..self.asset_count]
+            .iter()
+            .position(|&id| id == asset.id.0)?;
         self.storage
-            .bytes_for(asset.id.0 as usize, asset.ram_bytes as usize)
+            .bytes_for(self.slots[index], asset.ram_bytes as usize)
     }
 }
 

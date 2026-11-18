@@ -251,6 +251,23 @@ pub fn table_bytes_of(lens: &[usize], training: bool) -> usize {
     bytes
 }
 
+/// Slots in the persistent arena's tables (`PERSISTENT_ASSET_SLOT_COUNT`). The arena holds one
+/// group at a time (the uploaded textures, then the persistent assets), in the group's own order,
+/// so the tables are as long as the larger group.
+#[must_use]
+pub fn persistent_asset_slot_count(package: &PlaytestPackage) -> usize {
+    let group = |class: StreamedClass| {
+        package
+            .assets
+            .iter()
+            .filter(|asset| asset.streamed_class == class)
+            .count()
+    };
+    group(StreamedClass::PersistentGameplay)
+        .max(group(StreamedClass::UploadedGameplay))
+        .max(1)
+}
+
 /// Bytes of one persistent asset slot in the guest: its offset, length, read-job entry and the
 /// streamer's bookkeeping (52 on the 32-bit guest, rounded up).
 const PERSISTENT_SLOT_BYTES: usize = 56;
@@ -262,7 +279,7 @@ const PERSISTENT_SLOT_BYTES: usize = 56;
 #[must_use]
 pub fn persistent_arena_bytes(package: &PlaytestPackage) -> usize {
     let pages = persistent_arena_pages(package);
-    let slots = package.assets.len().max(1);
+    let slots = persistent_asset_slot_count(package);
     let gameplay = pages * 2048 + slots * PERSISTENT_SLOT_BYTES;
     let ui_chunks = package
         .assets

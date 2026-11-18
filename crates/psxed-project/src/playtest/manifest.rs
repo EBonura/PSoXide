@@ -256,7 +256,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         .map(|(_, asset)| asset.bytes.len())
         .max()
         .unwrap_or(0);
-    let persistent_asset_slot_count = package.assets.len().max(1);
+    let persistent_asset_slot_count = super::heap_budget::persistent_asset_slot_count(package);
     // The uploaded textures and the persistent assets take turns in the arena,
     // so it holds the larger of the two groups.
     let persistent_asset_page_count = super::heap_budget::persistent_arena_pages(package);
