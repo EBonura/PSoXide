@@ -89,15 +89,11 @@ fn one(ctx: &Ctx<'_>, install: &crate::game::Install) -> StageResult {
         .name
         .clone()
         .unwrap_or_else(|| ctx.game.name.clone());
-    let games_dir = library.join(&name);
+    // The one library layout (DESIGN.md, "Library layout"): flat in the library directory, as
+    // psx-library documents it: `<Name>.bin`, `<Name>.cue`, `<Name>.provenance.json` and the map
+    // as `<Name>.<pin12>.map`, listed under the provenance's `artifacts.map`.
+    let games_dir = library.clone();
     let pin = sdk_pin(&ctx.repo);
-    let base = serde_json::json!({
-        "harness": { "tool": "psoxide-test", "version": env!("CARGO_PKG_VERSION"),
-                     "result_sha256": hash },
-        "sdk_pin": pin,
-        "emulator_gate_revision": GATE_REVISION,
-        "files": now,
-    });
     let source = match psx_library::Source::from_git(&ctx.repo, &ctx.game.repository) {
         Ok(s) => s,
         Err(e) => return result(Outcome::error("install", e.to_string())),
@@ -107,6 +103,18 @@ fn one(ctx: &Ctx<'_>, install: &crate::game::Install) -> StageResult {
         .and_then(|m| std::fs::read(m).ok())
         .unwrap_or_default();
     let suffix = format!(".{}.map", util::short(&pin));
+    let mut base = serde_json::json!({
+        "harness": { "tool": "psoxide-test", "version": env!("CARGO_PKG_VERSION"),
+                     "result_sha256": hash },
+        "sdk_pin": pin,
+        "emulator_gate_revision": GATE_REVISION,
+        "files": now,
+    });
+    if !map_bytes.is_empty() {
+        base["artifacts"] = serde_json::json!({
+            "map": { "file": format!("{name}{suffix}"), "sha256": util::sha256_bytes(&map_bytes) }
+        });
+    }
     let sidecars = [psx_library::Sidecar::new(&suffix, &map_bytes)];
     let cue = b.cue(&ctx.repo);
     let request =

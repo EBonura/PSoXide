@@ -25,6 +25,9 @@ pub struct GateLine {
     pub aborts: Vec<String>,
     /// A receipt hit whose skip counts this harness never saw: the gate's hit line has none.
     pub skips_unknown: bool,
+    /// `--strict` runs: checkpoints the gate rendered on the hardware renderer at 1x and 3x
+    /// (its `*.hw1.png` / `*.hw3.png` captures); `None` when unknown (a receipt never seen run).
+    pub hw: Option<(u64, u64)>,
 }
 
 /// Read the gate's summary, receipt, conformance and abort lines.
@@ -98,7 +101,18 @@ fn remember_skips(ctx: &Ctx<'_>, gate: &Path, job: &Job, conformance: &str, line
             }
             None => line.skips_unknown = true,
         }
+        line.hw = std::fs::read_to_string(path.with_extension("hw.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok());
     } else if line.passed {
+        if let Some(hw) = line.hw {
+            if let Ok(json) = serde_json::to_string(&hw) {
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = std::fs::write(path.with_extension("hw.json"), json);
+            }
+        }
         let record = (line.skip, line.golden_skipped, line.conformance.clone());
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -267,7 +281,16 @@ pub fn run(ctx: &Ctx<'_>, bless: bool) -> StageResult {
     let mut hits = 0;
     let mut sorted: Vec<(&Job, (Check, Option<GateLine>))> = jobs.iter().zip(outcomes).collect();
     sorted.sort_by(|a, b| (&a.0.info.id, &a.0.model).cmp(&(&b.0.info.id, &b.0.model)));
+    let mut hw_rows = (0usize, Vec::new(), Vec::new());
     for (job, (check, line)) in sorted {
+        if let (true, Some(line)) = (spec.hw, &line) {
+            let row = format!("{}@{}", job.info.id, job.model);
+            match line.hw {
+                Some((a, b)) if a > 0 && b > 0 => hw_rows.0 += 1,
+                Some(_) => hw_rows.1.push(row),
+                None => hw_rows.2.push(row),
+            }
+        }
         if let Some(line) = &line {
             hits += usize::from(line.receipt_hit);
             if job.model == "real" {
@@ -301,6 +324,25 @@ pub fn run(ctx: &Ctx<'_>, bless: bool) -> StageResult {
             }
         }
         checks.push(check);
+    }
+    if spec.hw {
+        // The table lists passing rows only for small stages, so the per-row evidence (each
+        // row's value in the result file) is summed here where it is always printed.
+        let (rendered, none, unknown) = hw_rows;
+        let mut value = format!("{rendered} row(s) captured HW1 and HW3");
+        if !none.is_empty() {
+            value.push_str(&format!(
+                "; no hardware capture (no picture checkpoint) in: {}",
+                none.join(", ")
+            ));
+        }
+        if !unknown.is_empty() {
+            value.push_str(&format!(
+                "; unknown (receipt never seen run) in: {}",
+                unknown.join(", ")
+            ));
+        }
+        checks.push(Check::pass("hardware renderer (hw = true)", value));
     }
     let source = match hits {
         0 => Source::Run,
@@ -382,19 +424,31 @@ fn one(
         Ok(d) => d,
         Err(e) => return (Check::fail(name, e), None),
     };
+    let strict = flags[0] == "--strict";
     let mut parsed = parse_gate(&done.output);
     if let Some(line) = parsed.as_mut() {
+        if strict && !line.receipt_hit {
+            line.hw = Some(hw_captures(&out));
+        }
         remember_skips(ctx, gate, job, &conformance, line);
     }
+    let hw_note = |l: &GateLine| match (strict, l.hw) {
+        (false, _) => String::new(),
+        (true, Some((hw1, hw3))) => format!(", hardware renderer: {hw1} HW1 + {hw3} HW3 captures"),
+        (true, None) => {
+            ", hardware renderer: unknown (a receipt this harness never saw run)".into()
+        }
+    };
     let check = match &parsed {
         Some(l) if done.code == 0 && l.passed => Check::pass(
             &name,
             format!(
-                "{} ticks, {}/{} checks{}",
+                "{} ticks, {}/{} checks{}{}",
                 l.ticks,
                 l.pass,
                 l.checks,
-                if l.receipt_hit { ", receipt" } else { "" }
+                if l.receipt_hit { ", receipt" } else { "" },
+                hw_note(l)
             ),
         )
         .detail(log.display().to_string()),
@@ -426,6 +480,30 @@ fn one(
         ),
     };
     (check, parsed)
+}
+
+/// Count the hardware-renderer captures a `--strict` gate run wrote under `out`
+/// (`<checkpoint>.hw1.png` and `<checkpoint>.hw3.png`; diff images are not counted).
+fn hw_captures(out: &Path) -> (u64, u64) {
+    let mut counts = (0, 0);
+    let mut dirs = vec![out.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if name.ends_with(".hw1.png") {
+                counts.0 += 1;
+            } else if name.ends_with(".hw3.png") {
+                counts.1 += 1;
+            }
+        }
+    }
+    counts
 }
 
 /// Paths of the journeys a game file selects (for `lint`).
