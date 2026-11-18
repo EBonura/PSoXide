@@ -144,9 +144,6 @@ pub(super) const ACTIVE_HEAVY_ATTACK_BUTTON: u16 = button::R2;
 /// How long a body with no Death clip dies before the respawn (placeholder
 /// for the rule's fallback; a Character dies for its Death clip's length).
 pub(super) const DEATH_FALLBACK_TICKS: u16 = 30;
-/// Engine units a hazard shove moves the player per tick (a walking step is
-/// about three), so the way out of a thin volume takes a few ticks.
-pub(super) const HAZARD_PUSH_STEP: i32 = 10;
 
 #[cfg(feature = "ot-2048")]
 pub(super) const OT_DEPTH: usize = 2048;
@@ -449,9 +446,8 @@ pub(super) const MAX_LOGIC_EVENTS: usize = if LEN_LOGIC == 0 { 0 } else { 32 };
 /// The crate souls-like entity state instantiated with this example's
 /// entity cap, plus one slot past the records for the player (its
 /// `ACTOR_SLOT`).
-pub(super) type RuntimeGameEntities = psx_game_runtime::entities::GameEntities<
-    { MAX_GAME_ENTITIES + 1 },
->;
+pub(super) type RuntimeGameEntities =
+    psx_game_runtime::entities::GameEntities<{ MAX_GAME_ENTITIES + 1 }>;
 
 /// Caller-owned one-tick handoff between entity state advancement and the
 /// retained-pose combat pass. At most every live entity can attack in one

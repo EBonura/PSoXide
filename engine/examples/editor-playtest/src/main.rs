@@ -334,10 +334,6 @@ struct Playtest {
     /// Authored tuning for the stance: the swap cooldown and the HUD's
     /// swap animation length.
     player_stance_config: CombatStanceConfig,
-    /// The player character's combat numbers (health, poise, stance
-    /// multipliers, energy): the same record every enemy carries, cooked
-    /// on its `LevelCharacterRecord`.
-    player_stats: CombatStats,
     /// Compact claim/effect state for authored vitality fields.
     vitality_circles: VitalityCircleState,
     /// Four runtime-assignable unique modules, two on each end of the health
@@ -363,12 +359,6 @@ struct Playtest {
     /// Each entity's streamed room, a search hint into the resident rooms
     /// ([`SceneEntityMover::fighter_rooms`]).
     fighter_rooms: [u16; MAX_GAME_ENTITIES],
-    /// Engine units still to shove the player along a hazard's thin axis after
-    /// a touch (see `LogicRuntime::take_hazard_push`), the axis (`true` Z) and
-    /// the direction (`true` toward larger coordinates).
-    hazard_push_left: u16,
-    hazard_push_axis_z: bool,
-    hazard_push_toward_max: bool,
     /// Whether the running death sequence was armed by combat damage
     /// rather than an environmental hazard (respawn logging only).
     death_by_combat: bool,
@@ -705,16 +695,18 @@ impl Playtest {
         // Playtest lives in a zeroed MaybeUninit, and zeroed stats or stance
         // config would mean no health and no swap timing, so they are set
         // explicitly on every reset rather than relying on the zero pattern.
-        self.player_stats = CombatStats::DEFAULT;
+        self.game_entities.set_actor_stats(CombatStats::DEFAULT);
         let kits = self.player_kits();
-        self.game_entities
-            .actor_mut()
-            .reset(&self.player_stats, kits);
+        let stats = *self.game_entities.actor_stats();
+        self.game_entities.actor_mut().reset(&stats, kits);
         self.vitality_circles = VitalityCircleState::EMPTY;
         self.player_stance_config = CombatStanceConfig::DEFAULT;
         self.power_up_loadout = PowerUpLoadout::DEFAULT;
         self.power_up_inventory = BoostInventory::EMPTY;
-        self.poi_save = SaveBlock::new(self.player_stats.max_health, PERSISTENT_FLAG_COUNT);
+        self.poi_save = SaveBlock::new(
+            self.game_entities.actor_stats().max_health,
+            PERSISTENT_FLAG_COUNT,
+        );
         self.poi_save_loaded = false;
         self.poi_save_load_attempted = false;
         self.poi_save_dirty = false;

@@ -55,8 +55,8 @@ use psx_engine::{
 };
 use psx_level::combat_verbs::CombatKits;
 use psx_level::{
-    game_entity_flags, CharacterActionFrameRange, CharacterAnimationAction, LevelCharacterRecord,
-    LevelGameEntityRecord, RoomIndex, CHARACTER_ACTION_SPEED_UNSCALED_Q8,
+    game_entity_flags, CharacterActionFrameRange, CharacterAnimationAction, CombatStats,
+    LevelCharacterRecord, LevelGameEntityRecord, RoomIndex, CHARACTER_ACTION_SPEED_UNSCALED_Q8,
 };
 use psx_math::atan2_q12;
 
@@ -296,6 +296,30 @@ pub trait FighterWorld {
     fn controller_intent(&mut self, _entity: usize) -> Option<crate::combat_intent::CombatIntent> {
         None
     }
+}
+
+/// Engine units a hazard shove moves its fighter per tick.
+pub const HAZARD_PUSH_STEP: i32 = 10;
+
+/// The shove a hazard volume gave one fighter, still to run: a few engine
+/// units a tick along one axis ([`GameEntities::start_hazard_push`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HazardShove {
+    /// Engine units still to move.
+    pub left: u16,
+    /// The axis: `false` X, `true` Z.
+    pub axis_z: bool,
+    /// Toward the larger coordinate on that axis.
+    pub toward_max: bool,
+}
+
+impl HazardShove {
+    /// No shove.
+    pub const NONE: Self = Self {
+        left: 0,
+        axis_z: false,
+        toward_max: false,
+    };
 }
 
 /// Collision provider with nothing in it: no floor, no walls. A motor over
@@ -760,6 +784,11 @@ pub struct GameEntities<const MAX_ENTITIES: usize> {
     /// Each fighter's hazard clock: the tick a hazard may next hurt it
     /// (`crate::logic::LogicRuntime::touch_hazards`).
     hazard_ready_at: [u32; MAX_ENTITIES],
+    /// Each fighter's hazard shove still to run ([`Self::start_hazard_push`]).
+    hazard_push: [HazardShove; MAX_ENTITIES],
+    /// The actor slot's combat numbers (its Character's), the stats every
+    /// entity reads off its own body ([`Self::stats`]).
+    actor_stats: CombatStats,
     /// Packed selected swing plus next close-range alternation bit.
     attack_mode: [u8; MAX_ENTITIES],
     /// Free-movement combat choice ([`GameEntityIntent`] as raw u8).
@@ -1101,6 +1130,8 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         authored_connection_mask: [0; MAX_ENTITIES],
         struck: [0; MAX_ENTITIES],
         hazard_ready_at: [0; MAX_ENTITIES],
+        hazard_push: [HazardShove::NONE; MAX_ENTITIES],
+        actor_stats: CombatStats::DEFAULT,
         attack_mode: [0; MAX_ENTITIES],
         intent: [0; MAX_ENTITIES],
         attack_cooldown: [0; MAX_ENTITIES],
@@ -1142,8 +1173,10 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         );
         // The level's Characters outlive a respawn of its entities.
         let characters = self.characters;
+        let actor_stats = self.actor_stats;
         *self = Self::EMPTY;
         self.characters = characters;
+        self.actor_stats = actor_stats;
         let count = records.len().min(MAX_ENTITIES);
         if count <= Self::ACTOR_SLOT {
             self.motors[Self::ACTOR_SLOT] = actor.0;
@@ -1419,17 +1452,21 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         attack: VitalityChannelId,
         damage: u16,
     ) -> u16 {
-        match (records.get(index), self.combatants.get(index)) {
-            (Some(record), Some(combatant)) => {
+        match self
+            .combatants
+            .get(index)
+            .filter(|_| self.holds_fighter(index))
+        {
+            Some(combatant) => {
                 stance_scaled(
-                    &self.body(record).combat,
+                    self.stats(records, index),
                     combatant.opposes(attack),
                     damage,
                     0,
                 )
                 .0
             }
-            _ => damage,
+            None => damage,
         }
     }
 
@@ -1634,6 +1671,42 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         &self.combatants[Self::ACTOR_SLOT]
     }
 
+    /// The combat numbers of fighter `index`: an entity's from its body,
+    /// the actor slot's from [`Self::set_actor_stats`] (its Character's).
+    /// [`CombatStats::DEFAULT`] out of range.
+    pub fn stats(&self, records: &[LevelGameEntityRecord], index: usize) -> &CombatStats {
+        if index == Self::ACTOR_SLOT && self.count() <= index {
+            return &self.actor_stats;
+        }
+        match records.get(index) {
+            Some(record) => &self.body(record).combat,
+            None => &CombatStats::DEFAULT,
+        }
+    }
+
+    /// The actor slot's combat numbers ([`Self::stats`]).
+    #[inline(always)]
+    pub fn actor_stats(&self) -> &CombatStats {
+        &self.actor_stats
+    }
+
+    /// Set the actor slot's combat numbers: its Character's, kept across
+    /// spawns as its body is.
+    pub fn set_actor_stats(&mut self, stats: CombatStats) {
+        self.actor_stats = stats;
+    }
+
+    /// The actor slot's fighter, to change, with its combat numbers.
+    #[inline(always)]
+    pub fn actor_and_stats(&mut self) -> (&mut Combatant, &CombatStats) {
+        (&mut self.combatants[Self::ACTOR_SLOT], &self.actor_stats)
+    }
+
+    /// Mutable [`Self::actor_stats`] (test and tuning hook).
+    pub fn actor_stats_mut(&mut self) -> &mut CombatStats {
+        &mut self.actor_stats
+    }
+
     /// The actor slot's fighter, to change ([`Self::ACTOR_SLOT`]).
     #[inline(always)]
     pub fn actor_mut(&mut self) -> &mut Combatant {
@@ -1689,11 +1762,13 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         damage: u16,
         poise: u16,
     ) -> (u16, u16) {
-        match (records.get(index), self.combatants.get(index)) {
-            (Some(record), Some(combatant)) => {
-                combatant.crit_scaled(&self.body(record).combat, damage, poise)
-            }
-            _ => (damage, poise),
+        match self
+            .combatants
+            .get(index)
+            .filter(|_| self.holds_fighter(index))
+        {
+            Some(combatant) => combatant.crit_scaled(self.stats(records, index), damage, poise),
+            None => (damage, poise),
         }
     }
 
@@ -2201,9 +2276,10 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         }
     }
 
-    /// The attacker's side of a landed strike, for an attacker in slot
-    /// `attacker` of this table (the owner answers for a fighter outside
-    /// it): a parry by `by` staggers it with the riposte; a connected swing
+    /// The attacker's side of a landed strike, for the fighter in slot
+    /// `attacker` (an entity or the actor slot): a parry by `by` staggers
+    /// an entity with the riposte (the outcome returned; the owner starts
+    /// the actor's own reaction); a connected swing
     /// pays its melee energy; a bolt that was not parried reports whether it
     /// broke an open windup (`opening`, read before the bolt landed). Every
     /// landing calls it after [`Self::receive_hit`] on the victim's table:
@@ -2219,21 +2295,25 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         heavy: bool,
         outcome: GameEntityHitOutcome,
         opening: bool,
-    ) {
-        let Some(record) = records.get(attacker).filter(|_| attacker < self.count()) else {
-            return;
-        };
+    ) -> GameEntityHitOutcome {
+        if !self.holds_fighter(attacker) {
+            return GameEntityHitOutcome::MISS;
+        }
         if outcome.parried {
-            self.riposte(records, attacker, by);
-            return;
+            // The actor's riposte is its owner's reaction to start.
+            if attacker != Self::ACTOR_SLOT || self.count() > attacker {
+                return self.riposte(records, attacker, by);
+            }
+            return GameEntityHitOutcome::MISS;
         }
         match kind {
             HitKind::Projectile => {
                 self.projectile_connected(attacker, opening && outcome.staggered)
             }
-            HitKind::Melee if outcome.connected => self.gain_melee_energy(record, attacker, heavy),
+            HitKind::Melee if outcome.connected => self.gain_melee_energy(records, attacker, heavy),
             _ => {}
         }
+        GameEntityHitOutcome::MISS
     }
 
     /// Whether entity `index`'s attack armours it now, by the one armour
@@ -2535,6 +2615,87 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
     /// the owner restarts the actor's with its life.
     pub fn hazard_clock_mut(&mut self, index: usize) -> Option<&mut u32> {
         self.hazard_ready_at.get_mut(index)
+    }
+
+    /// Start fighter `index`'s shove from a hazard touch, the one rule for
+    /// every fighter: along the volume's thin axis away from its centre; a
+    /// fighter dead centre carries on the way it faces.
+    pub fn start_hazard_push(&mut self, index: usize, push: crate::logic::HazardPush) {
+        if !self.holds_fighter(index) {
+            return;
+        }
+        let mut toward_max = push.toward_max;
+        if push.tie {
+            let yaw = self.motors[index].yaw();
+            let facing = if push.axis_z {
+                yaw.cos_q12()
+            } else {
+                yaw.sin_q12()
+            };
+            if facing != 0 {
+                toward_max = facing > 0;
+            }
+        }
+        self.hazard_push[index] = HazardShove {
+            left: push.distance,
+            axis_z: push.axis_z,
+            toward_max,
+        };
+    }
+
+    /// Drop fighter `index`'s hazard shove (it died or respawned).
+    pub fn clear_hazard_push(&mut self, index: usize) {
+        if let Some(push) = self.hazard_push.get_mut(index) {
+            *push = HazardShove::NONE;
+        }
+    }
+
+    /// Fighter `index`'s hazard shove still to run.
+    pub fn hazard_push(&self, index: usize) -> HazardShove {
+        self.hazard_push
+            .get(index)
+            .copied()
+            .unwrap_or(HazardShove::NONE)
+    }
+
+    /// One tick of fighter `index`'s hazard shove: [`HAZARD_PUSH_STEP`]
+    /// units along its axis through `step` (the owner's collision-checked
+    /// body step from a start point by `(dx, dz)`, `None` when it fails).
+    /// A step that makes no progress along the axis (a wall, a slide)
+    /// ends the shove. Every fighter's body runs it after its motor.
+    pub fn advance_hazard_push(
+        &mut self,
+        index: usize,
+        step: impl FnOnce([i32; 3], i32, i32) -> Option<[i32; 3]>,
+    ) {
+        let Some(push) = self.hazard_push.get(index).copied() else {
+            return;
+        };
+        if push.left == 0 {
+            return;
+        }
+        let amount = i32::from(push.left).min(HAZARD_PUSH_STEP);
+        let signed = if push.toward_max { amount } else { -amount };
+        let (dx, dz) = if push.axis_z {
+            (0, signed)
+        } else {
+            (signed, 0)
+        };
+        let start = self.position(index);
+        let moved = step(start, dx, dz).filter(|end| {
+            if push.axis_z {
+                (end[2] - start[2]).signum() == dz.signum()
+            } else {
+                (end[0] - start[0]).signum() == dx.signum()
+            }
+        });
+        match moved {
+            Some(end) => {
+                self.motors[index].relocate(RoomPoint::new(end[0], end[1], end[2]));
+                self.hazard_push[index].left -= amount as u16;
+            }
+            None => self.hazard_push[index] = HazardShove::NONE,
+        }
     }
 
     /// Whether fighter `index`'s current swing has connected (a strike
@@ -3214,6 +3375,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         // so skip its collision work (most thinking enemies, most ticks).
         if input == NO_MOTION {
             if let Some(frame) = self.motors[index].rest(&config) {
+                self.push_after_motor(record, index, mover);
                 self.moving[index] = 0;
                 self.motor_anims[index] = frame.anim;
                 return frame;
@@ -3227,6 +3389,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
             config,
             delta.max(1),
         );
+        self.push_after_motor(record, index, mover);
         self.motor_anims[index] = frame.anim;
         self.moving[index] = if !frame.moved {
             0
@@ -3239,6 +3402,24 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
             self.heading_feedback(index, heading, frame.moved);
         }
         frame
+    }
+
+    /// Entity `index`'s hazard shove after its motor, through the owner's
+    /// knockback push ([`FighterWorld::push_body`]).
+    fn push_after_motor(
+        &mut self,
+        record: &LevelGameEntityRecord,
+        index: usize,
+        mover: &mut impl FighterWorld,
+    ) {
+        if self.hazard_push[index].left == 0 {
+            return;
+        }
+        let body = self.body(record);
+        let (radius, height) = (i32::from(body.radius), i32::from(body.height));
+        self.advance_hazard_push(index, |start, dx, dz| {
+            Some(mover.push_body(index, record.room, start, dx, dz, radius, height))
+        });
     }
 
     /// What the body's move along the compass `heading` it tried told the
@@ -4062,6 +4243,40 @@ mod tests {
         assert_eq!(e.state_ticks[0], ticks);
     }
     #[test]
+    fn hazard_shove_moves_any_fighter_until_blocked() {
+        let mut e = GameEntities::<8>::EMPTY;
+        e.spawn_from_records(&DUAL_ENEMY);
+        let actor = GameEntities::<8>::ACTOR_SLOT;
+        let push = crate::logic::HazardPush {
+            axis_z: false,
+            toward_max: true,
+            tie: false,
+            distance: 25,
+        };
+        for slot in [0, actor] {
+            e.start_hazard_push(slot, push);
+            let start = e.position(slot);
+            e.advance_hazard_push(slot, |p, dx, dz| Some([p[0] + dx, p[1], p[2] + dz]));
+            assert_eq!(e.position(slot)[0], start[0] + HAZARD_PUSH_STEP);
+            assert_eq!(e.hazard_push(slot).left, 15);
+            // A wall: no progress ends the shove where the body stands.
+            e.advance_hazard_push(slot, |p, _, _| Some(p));
+            assert_eq!(e.hazard_push(slot), HazardShove::NONE);
+            assert_eq!(e.position(slot)[0], start[0] + HAZARD_PUSH_STEP);
+        }
+        // The actor's numbers live in the table beside every entity's.
+        e.set_actor_stats(CombatStats {
+            max_health: 77,
+            ..CombatStats::DEFAULT
+        });
+        assert_eq!(e.stats(&DUAL_ENEMY, actor).max_health, 77);
+        assert_eq!(
+            e.stats(&DUAL_ENEMY, 0).max_health,
+            e.body(&DUAL_ENEMY[0]).combat.max_health
+        );
+    }
+
+    #[test]
     fn prototype_shot_interrupts_late_tell_and_cancels_retained_attack() {
         let mut e = GameEntities::<8>::EMPTY;
         e.spawn_from_records(&DUAL_ENEMY);
@@ -4082,7 +4297,7 @@ mod tests {
             e.spend_shot_energy(&DUAL_ENEMY[0], 0);
         }
         assert!(!e.can_fire_energy(&DUAL_ENEMY[0], 0));
-        e.gain_melee_energy(&DUAL_ENEMY[0], 0, true);
+        e.gain_melee_energy(&DUAL_ENEMY, 0, true);
         assert!(e.can_fire_energy(&DUAL_ENEMY[0], 0));
     }
 

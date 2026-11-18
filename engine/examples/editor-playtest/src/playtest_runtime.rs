@@ -842,7 +842,7 @@ impl Playtest {
             health: self.game_entities.actor().health,
             energy: VitalityPool::at(
                 self.game_entities.actor().flow.energy,
-                self.player_stats.energy_max,
+                self.game_entities.actor_stats().energy_max,
             ),
         }
     }
@@ -888,6 +888,8 @@ impl Playtest {
         }
     }
 
+    // Test hook: damage straight onto her fighter, no landing.
+    #[cfg(test)]
     /// Apply an untyped incoming hit as aligned with the active stance.
     pub(super) fn apply_untyped_player_damage(&mut self, damage: u16) -> bool {
         // Untyped damage has no colour to compare, so it is treated as aligned
@@ -896,12 +898,16 @@ impl Playtest {
         self.player_take_damage(CombatantId::WORLD, HitKind::Melee, None, damage)
     }
 
+    // Test hook: damage straight onto her fighter, no landing.
+    #[cfg(test)]
     /// Damage from a hazard volume, untyped like a legacy hit. A hit bigger
     /// than the health left is lethal.
     pub(super) fn apply_hazard_player_damage(&mut self, damage: u16) -> bool {
         self.player_take_damage(CombatantId::WORLD, HitKind::Hazard, None, damage)
     }
 
+    // Test hook: damage straight onto her fighter, no landing.
+    #[cfg(test)]
     /// The projectile colour sets the multiplier; the active stance receives damage.
     pub(super) fn apply_typed_player_damage(
         &mut self,
@@ -911,6 +917,8 @@ impl Playtest {
         self.apply_typed_player_damage_from(CombatantId::WORLD, channel, damage)
     }
 
+    // Test hook: damage straight onto her fighter, no landing.
+    #[cfg(test)]
     /// [`Self::apply_typed_player_damage`] from the fighter that shot it.
     pub(super) fn apply_typed_player_damage_from(
         &mut self,
@@ -929,6 +937,8 @@ impl Playtest {
         self.player_take_damage(attacker, HitKind::Projectile, Some(channel), damage)
     }
 
+    // Test hook: damage straight onto her fighter, no landing.
+    #[cfg(test)]
     /// The player's health damage, through [`Combatant::receive_hit`].
     ///
     /// Shell modifiers reduce the hit first. `channel` `None` is untyped and
@@ -962,12 +972,12 @@ impl Playtest {
     /// The player's stats and posture state around `strike`.
     ///
     /// Damage and poise follow the one stance rule over
-    /// [`Self::player_stats`], the same rule every enemy runs, off the same
+    /// her stats in the fighter table, the same rule every enemy runs, off the same
     /// one health bar. A Stun cannot be broken.
-    fn player_hit(&self, strike: Strike, armored: bool) -> HitIn {
+    pub(super) fn player_hit(&self, strike: Strike, armored: bool) -> HitIn {
         HitIn {
             strike,
-            stats: self.player_stats,
+            stats: *self.game_entities.actor_stats(),
             poise: PoiseRule {
                 armored,
                 blocked: matches!(self.anim.state, PlayerAnim::Stun | PlayerAnim::Parried),
@@ -1040,7 +1050,10 @@ impl Playtest {
         self.opening = opening_sequence::OpeningSequence::default();
         // New Game must not reload a previous run from the card, including
         // when a card was absent at boot and becomes available later.
-        self.poi_save = SaveBlock::new(self.player_stats.max_health, PERSISTENT_FLAG_COUNT);
+        self.poi_save = SaveBlock::new(
+            self.game_entities.actor_stats().max_health,
+            PERSISTENT_FLAG_COUNT,
+        );
         self.poi_save_loaded = true;
         self.poi_save_load_attempted = true;
         self.poi_save_dirty = true;
@@ -1093,9 +1106,8 @@ impl Playtest {
         // Playtest lives in a zeroed MaybeUninit, so the combatant is set
         // explicitly on every reset rather than relying on the zero pattern.
         let kits = self.player_kits();
-        self.game_entities
-            .actor_mut()
-            .reset(&self.player_stats, kits);
+        let (actor, stats) = self.game_entities.actor_and_stats();
+        actor.reset(stats, kits);
         self.camera_recenter_requested = false;
         self.ranged_ready = combat_input::RangedReady::EMPTY;
         self.aim_control = aim_control::AimControl::EMPTY;
@@ -1109,7 +1121,8 @@ impl Playtest {
         self.combat_music = CombatMusicState::default();
         self.acquired_module = BoostModuleId::NONE;
         self.death_ticks_remaining = 0;
-        self.hazard_push_left = 0;
+        self.game_entities
+            .clear_hazard_push(RuntimeGameEntities::ACTOR_SLOT);
         self.death_by_combat = false;
         self.weapon_attach_reported = false;
         self.game_entities
@@ -1133,9 +1146,8 @@ impl Playtest {
     /// In-flight shots and queued inputs belong to the old life, not the spawn.
     fn reset_life_combat(&mut self) {
         let kits = self.player_kits();
-        self.game_entities
-            .actor_mut()
-            .reset(&self.player_stats, kits);
+        let (actor, stats) = self.game_entities.actor_and_stats();
+        actor.reset(stats, kits);
         self.ranged_ready = combat_input::RangedReady::EMPTY;
         self.aim_control = aim_control::AimControl::EMPTY;
         self.combat_projectiles.clear();
@@ -1425,10 +1437,9 @@ impl Playtest {
             .is_some_and(|start| frame >= start / 2 && frame < start)
     }
 
-    /// Land the tick's summed posture damage, dealt by `attacker`, as one
-    /// poise-only hit, then start the reaction it calls for. True when it
-    /// broke posture.
-    /// `crit` when a crit was among the hits ([`Strike::crit`]).
+    /// Test hook: a poise-only hit of `damage` by `attacker` on her own
+    /// stance, then the reaction it calls for. True when it broke posture.
+    #[cfg(test)]
     pub(super) fn react_player_to_hit(
         &mut self,
         attacker: CombatantId,
@@ -1470,58 +1481,54 @@ impl Playtest {
         self.react_player(out, false, false, true, ctx)
     }
 
-    /// A fighter's `strike` reached the player inside her parry window: her
-    /// [`Combatant::receive_hit`] parries it (refund, swap cooldown, crit),
-    /// the attacking entity takes the riposte, and the tell shows: the
+    /// She parried a strike by fighter `attacker` (her
+    /// [`Combatant::receive_hit`] gave the refund, swap cooldown and crit;
+    /// `riposte` is what the parry did to an entity attacker): the tell, the
     /// refund over her in the parry colour and break sparks on the attacker.
     // Rare (a parry, crit or knockdown): kept out of line and small.
     #[inline(never)]
     #[cfg_attr(target_arch = "mips", optimize(size))]
-    pub(super) fn parry_on_player(&mut self, strike: Strike, ctx: &Ctx) {
-        let hit_in = self.player_hit(strike, false);
-        let out = self.game_entities.actor_mut().receive_hit(hit_in);
-        if !out.parried {
-            return;
-        }
+    pub(super) fn player_parried(
+        &mut self,
+        attacker: Option<usize>,
+        riposte: psx_game_runtime::entities::GameEntityHitOutcome,
+        ctx: &Ctx,
+    ) {
         telemetry::debug_log("player parry");
         self.queue_gameplay_sfx(LevelGameplaySfxEvent::Parry);
         self.duel_log_event(ctx, 0, duel::DUEL_EVENT_PARRY);
         let now = self.gameplay_tick(ctx.sim_tick);
         let player = self.game_entities.actor_motor().position();
         let height = self.character.map_or(0, |c| c.height.max(0) as u16);
-        let attacker = usize::from(strike.attacker.0);
+        let attacker = attacker.filter(|&slot| slot < self.game_entities.count());
         let zenith = self.game_entities.actor().stance.active() == VitalityChannelId::Two;
         self.player_flash
             .begin(&COMBAT_FEEDBACK, FlashKind::Parry, zenith);
         self.spawn_parry_burst(
             [player.x, player.y, player.z],
             height,
-            (attacker < self.game_entities.count()).then(|| self.game_entities.position(attacker)),
+            attacker.map(|slot| self.game_entities.position(slot)),
             self.room_index,
             zenith,
         );
         self.damage_numbers.spawn(
             player_hit_anchor([player.x, player.y, player.z], height),
             self.room_index,
-            self.player_stats.parry_refund,
+            self.game_entities.actor_stats().parry_refund,
             DamageNumberChannel::Parry,
             now,
         );
-        let Some(record) = GAME_ENTITIES.get(attacker) else {
+        let Some((attacker, record)) =
+            attacker.and_then(|slot| GAME_ENTITIES.get(slot).map(|record| (slot, record)))
+        else {
             return;
         };
-        if attacker >= self.game_entities.count() {
-            return;
-        }
-        let outcome =
-            self.game_entities
-                .riposte(GAME_ENTITIES.as_slice(), attacker, CombatantId::PLAYER);
         self.spawn_combat_hit_sparks(
             self.game_entities.position(attacker),
             self.game_entities.body(record).height,
             record.room,
             false,
-            outcome.staggered,
+            riposte.staggered,
             false,
         );
     }
@@ -1577,7 +1584,7 @@ impl Playtest {
     /// reaction otherwise. Nothing interrupts a knockdown. A stagger from a
     /// parry's riposte (`parried`) keeps the stagger's lock and plays the
     /// Parried clip over it.
-    fn react_player(
+    pub(super) fn react_player(
         &mut self,
         out: HitOut,
         armored: bool,
@@ -1678,8 +1685,9 @@ impl Playtest {
         let now = ctx.sim_tick;
         self.interrupt_player_for_reaction();
         self.switch_player_anim(PlayerAnim::Knockdown, now, ctx.video_hz);
-        self.game_entities.actor_action_mut().lock_until =
-            now.saturating_add(u32::from(self.player_stats.knockdown_ticks.max(1)));
+        self.game_entities.actor_action_mut().lock_until = now.saturating_add(u32::from(
+            self.game_entities.actor_stats().knockdown_ticks.max(1),
+        ));
         self.anim.switched = None;
         telemetry::debug_log("player poise:knockdown");
     }
@@ -1886,7 +1894,7 @@ impl Playtest {
         Defender {
             combatant: &self.game_entities.actor(),
             swap_invulnerable_ticks: config.roll_invulnerable_frames,
-            parry_ticks: self.player_stats.parry_ticks,
+            parry_ticks: self.game_entities.actor_stats().parry_ticks,
             action: self.player_action_protection(ctx, config),
         }
     }
@@ -3585,18 +3593,14 @@ mod life_reset_tests {
         assert!(scene.apply_untyped_player_damage(1000));
         assert!(scene.game_entities.actor().defeated());
         let kits = scene.player_kits();
-        scene
-            .game_entities
-            .actor_mut()
-            .reset(&scene.player_stats, kits);
+        let (actor, stats) = scene.game_entities.actor_and_stats();
+        actor.reset(stats, kits);
         assert!(scene.apply_hazard_player_damage(1000));
         assert!(scene.game_entities.actor_mut().defeated());
         // A small hit takes only what it deals.
         let kits = scene.player_kits();
-        scene
-            .game_entities
-            .actor_mut()
-            .reset(&scene.player_stats, kits);
+        let (actor, stats) = scene.game_entities.actor_and_stats();
+        actor.reset(stats, kits);
         assert!(!scene.apply_hazard_player_damage(10));
         assert!(!scene.game_entities.actor_mut().defeated());
         assert_eq!(

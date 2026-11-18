@@ -409,11 +409,8 @@ impl Playtest {
         let attached = self.hook_attached.is_some();
         let grounded = self.hook_travel.is_none() && self.game_entities.actor_motor().grounded();
         let firing = self.ranged_ready.firing(ctx.sim_tick.as_u32());
-        if self
-            .game_entities
-            .actor_mut()
-            .air_tick(attached, grounded, firing, &self.player_stats)
-        {
+        let (actor, stats) = self.game_entities.actor_and_stats();
+        if actor.air_tick(attached, grounded, firing, stats) {
             self.detach_arch(ctx.sim_tick);
             telemetry::debug_log("arch:timeout");
             return false;

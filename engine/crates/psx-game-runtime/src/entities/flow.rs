@@ -221,12 +221,19 @@ impl<const N: usize> GameEntities<N> {
             c.flow.spend_shot(&stats);
         }
     }
-    /// Credit entity `index` for a connected melee hit at its `record`'s gain.
-    pub fn gain_melee_energy(&mut self, record: &LevelGameEntityRecord, index: usize, heavy: bool) {
-        let stats = self.body(record).combat;
-        if let Some(c) = self.combatants.get_mut(index) {
-            c.flow.melee_hit(heavy, &stats);
+    /// Credit fighter `index` (an entity or the actor slot) for a connected
+    /// melee hit at its own gain ([`Self::stats`]).
+    pub fn gain_melee_energy(
+        &mut self,
+        records: &[LevelGameEntityRecord],
+        index: usize,
+        heavy: bool,
+    ) {
+        if !self.holds_fighter(index) {
+            return;
         }
+        let stats = *self.stats(records, index);
+        self.combatants[index].flow.melee_hit(heavy, &stats);
     }
     /// True when entity `index` is in the second half of a windup and may be broken by a bolt.
     pub fn shot_opening(&self, records: &[LevelGameEntityRecord], index: usize) -> bool {

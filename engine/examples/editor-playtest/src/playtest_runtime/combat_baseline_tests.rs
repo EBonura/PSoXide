@@ -45,7 +45,11 @@ fn report(scene: &mut Playtest, stats: MeleeArcStats) {
         PlayerAnim::HeavyAttack | PlayerAnim::VertHeavyAttack
     );
     for _ in 0..stats.hits {
-        scene.gain_melee_energy(RuntimeGameEntities::ACTOR_SLOT, heavy);
+        scene.game_entities.gain_melee_energy(
+            GAME_ENTITIES.as_slice(),
+            RuntimeGameEntities::ACTOR_SLOT,
+            heavy,
+        );
     }
     scene.report_player_melee_stats(stats);
 }
@@ -381,10 +385,11 @@ fn a_player_inside_the_swap_window_is_not_a_projectile_target() {
     let config = scene.player_stance_config;
     scene.game_entities.actor_mut().stance.request_swap(&config);
     // Past the parry window: the parry tests pin the early part.
+    let parry_ticks = scene.game_entities.actor_stats().parry_ticks;
     scene
         .game_entities
         .actor_mut()
-        .advance_stance(scene.player_stats.parry_ticks + 1);
+        .advance_stance(parry_ticks + 1);
     assert!(scene.player_invulnerable(&ctx(100)));
     scene
         .combat_projectiles
@@ -425,7 +430,7 @@ fn poise_accumulates_then_breaks_and_the_break_starts_the_grace_window() {
 fn a_break_without_a_stun_clip_falls_back_to_hit_react_with_an_eighteen_tick_lock() {
     let mut scene = scene();
     // Knockdown off: a break then staggers, which is what this pins.
-    scene.player_stats.knockdown_ticks = 0;
+    scene.game_entities.actor_stats_mut().knockdown_ticks = 0;
     assert!(scene.react_player_to_hit(CombatantId::WORLD, 60, false, false, false, &ctx(100)));
     assert_eq!(scene.anim.state, PlayerAnim::HitReact);
     assert_eq!(
@@ -438,7 +443,7 @@ fn a_break_without_a_stun_clip_falls_back_to_hit_react_with_an_eighteen_tick_loc
 fn a_second_break_is_refused_until_the_grace_window_has_drained() {
     let mut scene = scene();
     // Knockdown off: the knockdown's own block is pinned elsewhere.
-    scene.player_stats.knockdown_ticks = 0;
+    scene.game_entities.actor_stats_mut().knockdown_ticks = 0;
     assert!(scene.react_player_to_hit(CombatantId::WORLD, 60, false, false, false, &ctx(100)));
     scene.anim.state = PlayerAnim::Idle;
     assert!(!scene.react_player_to_hit(CombatantId::WORLD, 60, false, false, false, &ctx(101)));
@@ -944,7 +949,7 @@ fn an_arch_refills_twenty_energy_and_health_a_second_and_stops_while_firing() {
     let mut scene = scene();
     scene.apply_untyped_player_damage(100);
     scene.game_entities.actor_mut().flow.energy = 0;
-    let stats = scene.player_stats;
+    let stats = *scene.game_entities.actor_stats();
     // 20 per second at 60 ticks: one point every third tick.
     for _ in 0..60 {
         scene
@@ -1018,7 +1023,7 @@ fn the_energy_economy_and_health_are_the_characters_data() {
     // Step 4: the numbers come off the character's CombatStats, not
     // constants, so a character can carry its own.
     let mut scene = scene();
-    scene.player_stats = CombatStats {
+    *scene.game_entities.actor_stats_mut() = CombatStats {
         max_health: 100,
         energy_max: 60,
         shot_cost: 30,
@@ -1028,21 +1033,18 @@ fn the_energy_economy_and_health_are_the_characters_data() {
     scene.reset_life_combat();
     assert_eq!(health(&scene), 100);
     assert_eq!(scene.game_entities.actor().flow.energy, 60);
-    assert!(scene
-        .game_entities
-        .actor_mut()
-        .flow
-        .spend_shot(&scene.player_stats));
-    assert!(scene
-        .game_entities
-        .actor_mut()
-        .flow
-        .spend_shot(&scene.player_stats));
-    assert!(!scene
-        .game_entities
-        .actor_mut()
-        .flow
-        .can_shoot(&scene.player_stats));
+    assert!({
+        let (actor, stats) = scene.game_entities.actor_and_stats();
+        actor.flow.spend_shot(stats)
+    });
+    assert!({
+        let (actor, stats) = scene.game_entities.actor_and_stats();
+        actor.flow.spend_shot(stats)
+    });
+    assert!(!{
+        let (actor, stats) = scene.game_entities.actor_and_stats();
+        actor.flow.can_shoot(stats)
+    });
     scene.anim.state = PlayerAnim::LightAttack;
     report(
         &mut scene,

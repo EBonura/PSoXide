@@ -297,7 +297,7 @@ impl Playtest {
                         defender: Defender {
                             combatant: &player_fighter,
                             swap_invulnerable_ticks: motor_config.roll_invulnerable_frames,
-                            parry_ticks: self.player_stats.parry_ticks,
+                            parry_ticks: self.game_entities.actor_stats().parry_ticks,
                             action: player_action,
                         },
                         stance: Some(self.game_entities.actor().stance.active()),
@@ -516,7 +516,7 @@ impl Playtest {
         // PLAYER_SPAWN for placeholder manifests. The spawn room
         // may be a manual portal room rather than room zero.
         self.player_stance_config = CombatStanceConfig::DEFAULT;
-        self.player_stats = CombatStats::DEFAULT;
+        self.game_entities.set_actor_stats(CombatStats::DEFAULT);
         let (spawn, character) = match PLAYER_CONTROLLER.get() {
             Some(pc) => {
                 let record = CHARACTERS.get(pc.character.to_usize());
@@ -525,7 +525,7 @@ impl Playtest {
                 // The reset above installed the defaults; this replaces them
                 // once the cooked values are in hand.
                 if let Some(record) = record {
-                    self.player_stats = record.combat;
+                    self.game_entities.set_actor_stats(record.combat);
                     self.player_stance_config = CombatStanceConfig {
                         swap_cooldown_ticks: record.stance_swap_cooldown_ticks,
                         swap_duration_ticks: record.stance_swap_duration_ticks,
@@ -751,13 +751,14 @@ impl Playtest {
             return;
         }
         let circle_position = self.game_entities.actor_motor().position();
+        let (actor, stats) = self.game_entities.actor_and_stats();
         let circle_locks_stance = self.vitality_circles.tick(
             VITALITY_CIRCLES.as_slice(),
             self.room_index,
             circle_position.x,
             circle_position.z,
-            &mut self.game_entities.actor_mut(),
-            &self.player_stats,
+            actor,
+            stats,
         );
         // Swapping needs both a blade and a Zenith move (the same rule as
         // every enemy), and a fighter that is down cannot act.
@@ -1110,16 +1111,28 @@ impl Playtest {
             if let Some(sample) = self.player_contents_memo(config.height) {
                 let damage = hazard_damage(sample.contents, now.as_u32());
                 if damage > 0 {
-                    let died = self.apply_untyped_player_damage(damage);
                     telemetry::counter(telemetry::counter::PLAYER_LIQUID_DAMAGE_EVENTS, 1);
                     telemetry::debug_log(match sample.contents {
                         psx_grid::contents::CONTENTS_LAVA => "player hazard:lava",
                         psx_grid::contents::CONTENTS_SLIME => "player hazard:slime",
                         _ => "player hazard:liquid",
                     });
-                    if died {
-                        self.arm_player_death(false, now, ctx.video_hz);
-                    }
+                    // World damage on her stance through the one landing
+                    // (her death sequence arms there).
+                    self.land_on_fighter(
+                        ctx,
+                        RuntimeGameEntities::ACTOR_SLOT,
+                        Strike {
+                            attacker: CombatantId::WORLD,
+                            kind: HitKind::Hazard,
+                            channel: self.game_entities.actor().stance.active(),
+                            damage,
+                            poise: 0,
+                            crit: false,
+                        },
+                        None,
+                        false,
+                    );
                 }
             }
         }
@@ -1670,7 +1683,7 @@ impl Playtest {
                     .game_entities
                     .actor()
                     .flow
-                    .can_shoot(&self.player_stats)
+                    .can_shoot(self.game_entities.actor_stats())
                 && !self.ranged_ready.firing(now.as_u32())
             {
                 if self

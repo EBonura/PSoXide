@@ -506,6 +506,18 @@ struct PlayerDefence {
     pose: Option<psx_game_runtime::actor_pose::ActorPoseSnapshot>,
 }
 
+/// The table slot of the fighter `id` names: the player's character in the
+/// actor slot, an entity in its own; none for the world.
+fn fighter_slot(id: CombatantId) -> Option<usize> {
+    if id == CombatantId::WORLD {
+        None
+    } else if id == CombatantId::PLAYER {
+        Some(RuntimeGameEntities::ACTOR_SLOT)
+    } else {
+        Some(usize::from(id.0))
+    }
+}
+
 /// The vitality channel (stance) a projectile's damage channel belongs to.
 fn projectile_vitality_channel(
     channel: psx_game_runtime::projectiles::ProjectileDamageChannel,
@@ -514,42 +526,6 @@ fn projectile_vitality_channel(
         psx_game_runtime::projectiles::ProjectileDamageChannel::Horizon => VitalityChannelId::One,
         psx_game_runtime::projectiles::ProjectileDamageChannel::Zenith => VitalityChannelId::Two,
     }
-}
-
-/// What the player took this tick. Damage and posture land together after
-/// the projectile tick, as one reaction.
-#[derive(Clone, Copy)]
-struct PlayerHitsTaken {
-    hits: u16,
-    /// Melee damage from fighters' swings, on [`Self::melee_channel`].
-    melee_damage: u16,
-    /// The stance of the fighter whose swing landed last: the channel its
-    /// damage takes, as her swing's takes hers.
-    melee_channel: VitalityChannelId,
-    poise: u16,
-    horizon_shots: u16,
-    zenith_shots: u16,
-    /// A bolt landed inside the player's readable shot opening.
-    shot_opening: bool,
-    /// The fighter whose hit landed last this tick ([`CombatantId::WORLD`]
-    /// when none did).
-    attacker: CombatantId,
-    /// An enemy swing that landed this tick was a crit.
-    crit: bool,
-}
-
-impl PlayerHitsTaken {
-    const NONE: Self = Self {
-        hits: 0,
-        melee_damage: 0,
-        melee_channel: VitalityChannelId::One,
-        poise: 0,
-        horizon_shots: 0,
-        zenith_shots: 0,
-        shot_opening: false,
-        attacker: CombatantId::WORLD,
-        crit: false,
-    };
 }
 
 /// The bolt of a crit shot: the crit gold over its own colours, and a wider
@@ -586,7 +562,7 @@ impl Playtest {
     }
 
     /// The enemy attack tokens and every live projectile against this tick's
-    /// frozen player, then the hits she took.
+    /// frozen player; each hit lands as it connects.
     fn resolve_attacks_on_player(&mut self, ctx: &Ctx) {
         let player = self.player_defence(ctx);
         let mut prop_blockers =
@@ -596,14 +572,7 @@ impl Playtest {
             || self
                 .collect_static_prop_aabb_blockers_checked_into(&mut prop_blockers)
                 .is_some();
-        let mut taken = PlayerHitsTaken::NONE;
-        self.resolve_enemy_attacks(
-            ctx,
-            &player,
-            prop_blockers.as_slice(),
-            prop_blockers_valid,
-            &mut taken,
-        );
+        self.resolve_enemy_attacks(ctx, &player, prop_blockers.as_slice(), prop_blockers_valid);
         let mut impacts = ProjectileImpacts::<MAX_PROJECTILE_IMPACTS>::new();
         self.tick_combat_projectiles(
             ctx,
@@ -611,9 +580,7 @@ impl Playtest {
             prop_blockers.as_slice(),
             prop_blockers_valid,
             &mut impacts,
-            &mut taken,
         );
-        self.land_player_hits(ctx, &player, &impacts, taken);
     }
 
     fn player_defence(&self, ctx: &Ctx) -> PlayerDefence {
@@ -669,7 +636,6 @@ impl Playtest {
         player: &PlayerDefence,
         prop_blockers: &[CharacterCollisionAabb],
         prop_blockers_valid: bool,
-        taken: &mut PlayerHitsTaken,
     ) {
         let mut attack_index = 0usize;
         while attack_index < self.deferred_enemy_attacks.len() {
@@ -730,7 +696,7 @@ impl Playtest {
             if !prop_blockers_valid {
                 continue;
             }
-            let stats = self.swing_fighters(ctx, swing, Some(player), prop_blockers, taken);
+            let stats = self.swing_fighters(ctx, swing, Some(player), prop_blockers);
             self.finish_swing(swing, stats);
         }
     }
@@ -740,16 +706,14 @@ impl Playtest {
     /// this pose (swept from the tick before), each defender's authored
     /// hurtboxes, world occlusion between the two, the one swing latch
     /// (each defender once per strike window), the attacker's outgoing
-    /// damage and crit, then the landing: on an entity through
-    /// [`Self::land_on_entity`], on her into `taken` (or her parry). The
-    /// player is a defender when `player` is given (an entity's swing).
+    /// damage and crit, then the one landing ([`Self::land_on_fighter`]).
+    /// The player is a defender when `player` is given (an entity's swing).
     fn swing_fighters(
         &mut self,
         ctx: &Ctx,
         swing: Swing,
         player: Option<&PlayerDefence>,
         prop_blockers: &[CharacterCollisionAabb],
-        taken: &mut PlayerHitsTaken,
     ) -> MeleeArcStats {
         let mut stats = MeleeArcStats::default();
         let strike = ActiveStrike::sample(swing.capsules, swing.action, swing.pose, swing.previous);
@@ -839,37 +803,8 @@ impl Playtest {
                 poise,
                 crit: swing.crit,
             };
-            if slot == actor {
-                if player.is_some_and(|player| player.parries) {
-                    self.parry_on_player(
-                        Strike {
-                            crit: false,
-                            ..strike
-                        },
-                        ctx,
-                    );
-                    stats.parries = stats.parries.saturating_add(1);
-                    continue;
-                }
-                stats.hits = stats.hits.saturating_add(1);
-                taken.hits = taken.hits.saturating_add(1);
-                taken.melee_damage = taken.melee_damage.saturating_add(damage);
-                taken.melee_channel = swing.channel;
-                // The tick's posture lands summed, so each swing takes the
-                // stance rule here, by its attacker's stance, as a bolt does.
-                let (_, poise) = stance_scaled(
-                    &self.player_stats,
-                    self.game_entities.actor().opposes(swing.channel),
-                    0,
-                    poise,
-                );
-                taken.poise = taken.poise.saturating_add(poise);
-                taken.attacker = strike.attacker;
-                taken.crit |= swing.crit;
-                self.gain_melee_energy(swing.attacker, swing.heavy);
-                continue;
-            }
-            let outcome = self.land_on_entity(ctx, slot, strike, Some(swing.position), swing.heavy);
+            let outcome =
+                self.land_on_fighter(ctx, slot, strike, Some(swing.position), swing.heavy);
             stats.parries = stats.parries.saturating_add(u16::from(outcome.parried));
             stats.hits = stats.hits.saturating_add(u16::from(outcome.connected));
             stats.staggers = stats.staggers.saturating_add(u16::from(outcome.staggered));
@@ -891,20 +826,6 @@ impl Playtest {
         }
     }
 
-    /// Energy for one connected melee hit by slot `fighter`, at its own
-    /// gain (her hits on an entity are answered in [`Self::answer_strike`],
-    /// an entity's on her where her hits are summed).
-    pub(super) fn gain_melee_energy(&mut self, fighter: usize, heavy: bool) {
-        if fighter == RuntimeGameEntities::ACTOR_SLOT {
-            self.game_entities
-                .actor_mut()
-                .flow
-                .melee_hit(heavy, &self.player_stats);
-        } else if let Some(record) = GAME_ENTITIES.get(fighter) {
-            self.game_entities.gain_melee_energy(record, fighter, heavy);
-        }
-    }
-
     /// The damage and poise slot `fighter` deals with an authored strike:
     /// its outgoing boons (the player's modules), then its crit.
     fn fighter_outgoing(
@@ -914,16 +835,13 @@ impl Playtest {
         damage: u16,
         poise: u16,
     ) -> (u16, u16) {
-        if fighter == RuntimeGameEntities::ACTOR_SLOT {
-            self.game_entities.actor().crit_scaled(
-                &self.player_stats,
-                self.vitality_modifiers().outgoing_damage(channel, damage),
-                poise,
-            )
+        let damage = if fighter == RuntimeGameEntities::ACTOR_SLOT {
+            self.vitality_modifiers().outgoing_damage(channel, damage)
         } else {
-            self.game_entities
-                .crit_scaled(GAME_ENTITIES.as_slice(), fighter, damage, poise)
-        }
+            damage
+        };
+        self.game_entities
+            .crit_scaled(GAME_ENTITIES.as_slice(), fighter, damage, poise)
     }
 
     /// The side slot `fighter` fights on: the player's character on
@@ -987,60 +905,18 @@ impl Playtest {
         }
     }
 
-    /// The attacker's side of a strike landed on entity `victim`: an
-    /// entity attacker through the one rule
-    /// ([`psx_game_runtime::entities::GameEntities::answer_strike`]); the
-    /// player's character here, because her stats live with the owner (her
-    /// riposte on a parry is [`Self::entity_parried_player`]).
-    fn answer_strike(
-        &mut self,
-        ctx: &Ctx,
-        victim: usize,
-        strike: Strike,
-        heavy: bool,
-        outcome: psx_game_runtime::entities::GameEntityHitOutcome,
-        opening: bool,
-    ) {
-        if strike.attacker != CombatantId::PLAYER {
-            self.game_entities.answer_strike(
-                GAME_ENTITIES.as_slice(),
-                usize::from(strike.attacker.0),
-                CombatantId::entity(victim),
-                strike.kind,
-                heavy,
-                outcome,
-                opening,
-            );
-            return;
-        }
-        if outcome.parried {
-            return;
-        }
-        match strike.kind {
-            HitKind::Projectile => {
-                let interrupted = opening && outcome.staggered;
-                self.game_entities.actor_mut().flow.shot_hit(interrupted);
-                if interrupted {
-                    telemetry::debug_log("flow:enemy-shot-interrupt");
-                    self.duel_log_flow(ctx, 0);
-                }
-            }
-            HitKind::Melee if outcome.connected => {
-                self.gain_melee_energy(RuntimeGameEntities::ACTOR_SLOT, heavy);
-            }
-            _ => {}
-        }
-    }
-
-    /// One hit on entity `victim`, whoever dealt it (the player or another
-    /// entity, a swing or a bolt): its hit path, then what every landed hit
-    /// shows (the damage number, a swing's contact spark from `contact_from`,
-    /// the flash) and the souls of a kill by the player. A parry shows the
-    /// parrier's tell. `heavy` marks a heavy swing.
+    /// One hit on fighter `victim` (an entity or her actor slot), whoever
+    /// dealt it (a fighter's swing or bolt, or the world): the victim's hit
+    /// path, the attacker's side ([`GameEntities::answer_strike`]: riposte,
+    /// melee energy, a bolt's interrupt report), then what every landed hit
+    /// shows (the damage number, a swing's contact spark from
+    /// `contact_from`, the flash). A parry shows the parrier's tell. What
+    /// follows a death is the game's rule: souls for a body that is not
+    /// hers, her death sequence for hers. `heavy` marks a heavy swing.
     // Once per landed hit, from every attacker's path: out of line and small.
     #[inline(never)]
     #[cfg_attr(target_arch = "mips", optimize(size))]
-    pub(super) fn land_on_entity(
+    pub(super) fn land_on_fighter(
         &mut self,
         ctx: &Ctx,
         victim: usize,
@@ -1048,45 +924,67 @@ impl Playtest {
         contact_from: Option<[i32; 3]>,
         heavy: bool,
     ) -> psx_game_runtime::entities::GameEntityHitOutcome {
-        let Some(record) = GAME_ENTITIES.get(victim) else {
-            return psx_game_runtime::entities::GameEntityHitOutcome::MISS;
-        };
-        let applied = self.game_entities.scaled_stance_damage(
-            GAME_ENTITIES.as_slice(),
-            victim,
-            strike.channel,
-            strike.damage,
-        );
-        // A bolt reads the victim's open windup before it lands.
-        let opening = strike.kind == HitKind::Projectile
-            && self
-                .game_entities
-                .shot_opening(GAME_ENTITIES.as_slice(), victim);
-        let outcome = self
-            .game_entities
-            .receive_hit(GAME_ENTITIES.as_slice(), victim, strike);
-        self.answer_strike(ctx, victim, strike, heavy, outcome, opening);
-        if outcome.parried {
-            if strike.attacker == CombatantId::PLAYER {
-                self.entity_parried_player(victim, ctx);
-            } else {
-                self.duel_log_rival_event(ctx, victim, duel::DUEL_EVENT_PARRY);
-                let zenith = self.game_entities.stance(victim) == VitalityChannelId::Two;
-                self.game_entities
-                    .start_flash(victim, &COMBAT_FEEDBACK, FlashKind::Parry, zenith);
+        use psx_game_runtime::entities::GameEntityHitOutcome;
+        let actor = RuntimeGameEntities::ACTOR_SLOT;
+        let (outcome, applied, opening) = if victim == actor {
+            match self.receive_on_player(ctx, strike) {
+                Some(landed) => landed,
+                None => return GameEntityHitOutcome::MISS,
             }
+        } else {
+            if GAME_ENTITIES.get(victim).is_none() {
+                return GameEntityHitOutcome::MISS;
+            }
+            let applied = self.game_entities.scaled_stance_damage(
+                GAME_ENTITIES.as_slice(),
+                victim,
+                strike.channel,
+                strike.damage,
+            );
+            // A bolt reads the victim's open windup before it lands.
+            let opening = strike.kind == HitKind::Projectile
+                && self
+                    .game_entities
+                    .shot_opening(GAME_ENTITIES.as_slice(), victim);
+            let outcome = self
+                .game_entities
+                .receive_hit(GAME_ENTITIES.as_slice(), victim, strike);
+            (outcome, applied, opening)
+        };
+        let attacker = fighter_slot(strike.attacker);
+        let riposte = match attacker {
+            Some(attacker) => self.game_entities.answer_strike(
+                GAME_ENTITIES.as_slice(),
+                attacker,
+                self.fighter_id(victim),
+                strike.kind,
+                heavy,
+                outcome,
+                opening,
+            ),
+            None => GameEntityHitOutcome::MISS,
+        };
+        if outcome.parried {
+            self.show_parry(ctx, victim, attacker, riposte);
             return outcome;
         }
         if !outcome.connected {
             return outcome;
         }
+        if strike.kind == HitKind::Projectile && opening && outcome.staggered {
+            telemetry::debug_log("flow:shot-interrupt");
+            self.duel_log_flow(ctx, u32::from(victim == actor));
+        }
         let zenith = strike.channel == VitalityChannelId::Two;
-        let position = self.game_entities.position(victim);
-        let height = self.game_entities.body(record).height;
+        let (position, height, room) = self.fighter_body_at(victim);
         let now = self.gameplay_tick(ctx.sim_tick);
         self.damage_numbers.spawn(
-            struck_actor_anchor(position, height),
-            record.room,
+            if victim == actor {
+                player_hit_anchor(position, height)
+            } else {
+                struck_actor_anchor(position, height)
+            },
+            room,
             applied,
             if strike.crit {
                 DamageNumberChannel::Crit
@@ -1101,29 +999,167 @@ impl Playtest {
             self.spawn_combat_hit_sparks(
                 position,
                 height,
-                record.room,
+                room,
                 zenith,
                 outcome.staggered,
                 outcome.died,
             );
         }
         self.show_hit(LandedHit {
-            victim: CombatantId::entity(victim),
+            victim: self.fighter_id(victim),
             contact_from,
             kind: FlashKind::of_hit(strike.crit, outcome.staggered || heavy),
             zenith,
         });
-        // A body other than the player's dissolves and drops its souls,
-        // whoever or whatever killed it (the game's rule after a death).
         if outcome.died {
-            self.souls.award(record.soul_value, now.as_u32());
+            if victim == actor {
+                self.game_entities.clear_hazard_push(actor);
+                self.arm_player_death(strike.kind != HitKind::Hazard, ctx.sim_tick, ctx.video_hz);
+            } else if let Some(record) = GAME_ENTITIES.get(victim) {
+                // A body other than the player's dissolves and drops its
+                // souls, whoever or whatever killed it.
+                self.souls.award(record.soul_value, now.as_u32());
+            }
         }
         outcome
     }
 
+    /// Her side of a hit, the owner's half of the one landing for the
+    /// fighter it drives: her boons reduce the damage, [`Combatant::receive_hit`]
+    /// over her stats in the fighter table, then the reaction her
+    /// animation states play. Returns the outcome, the damage the stance
+    /// rule makes of it and whether a bolt found her windup open; `None`
+    /// while she is dying (nothing lands).
+    fn receive_on_player(
+        &mut self,
+        ctx: &Ctx,
+        strike: Strike,
+    ) -> Option<(psx_game_runtime::entities::GameEntityHitOutcome, u16, bool)> {
+        if self.death_ticks_remaining != 0 {
+            return None;
+        }
+        let opening = strike.kind == HitKind::Projectile
+            && self.player_shot_opening()
+            && self.game_entities.actor().flow.can_interrupt();
+        let strike = Strike {
+            damage: self.vitality_modifiers().incoming_damage(strike.damage),
+            ..strike
+        };
+        let (applied, _) = stance_scaled(
+            self.game_entities.actor_stats(),
+            self.game_entities.actor().opposes(strike.channel),
+            strike.damage,
+            0,
+        );
+        let armored = self.player_armoured(ctx);
+        let hit_in = self.player_hit(strike, armored);
+        let out = self.game_entities.actor_mut().receive_hit(hit_in);
+        if out.parried {
+            return Some((
+                psx_game_runtime::entities::GameEntityHitOutcome {
+                    parried: true,
+                    ..psx_game_runtime::entities::GameEntityHitOutcome::MISS
+                },
+                0,
+                false,
+            ));
+        }
+        telemetry::counter(telemetry::counter::PLAYER_HITS_TAKEN, 1);
+        if out.damage_applied > 0 {
+            self.queue_gameplay_sfx(LevelGameplaySfxEvent::PlayerDamage);
+        }
+        // The one reaction rule: only a swing flinches; a break staggers
+        // whatever broke it.
+        let staggered = !out.killed
+            && self.react_player(out, armored, strike.kind != HitKind::Melee, false, ctx);
+        Some((
+            psx_game_runtime::entities::GameEntityHitOutcome {
+                connected: true,
+                staggered,
+                knocked_down: out.knocked_down,
+                died: out.killed,
+                parried: false,
+            },
+            applied,
+            opening,
+        ))
+    }
+
+    /// Whether her current action armours her, by the one armour rule:
+    /// her authored Armored window, else her heavy while its contact is
+    /// live (a hitbox of the action active on her pose).
+    fn player_armoured(&self, ctx: &Ctx) -> bool {
+        let action = self.anim.state.action();
+        let capsules = self.player_defence_capsules();
+        let contact = matches!(
+            self.anim.state,
+            PlayerAnim::HeavyAttack | PlayerAnim::VertHeavyAttack
+        ) && self.player_actor_pose.is_some_and(|snapshot| {
+            let frame = (snapshot.pose().phase_q12() >> 12).min(u32::from(u16::MAX)) as u16;
+            capsules.iter().any(|capsule| {
+                capsule.flags & psx_level::combat_capsule_flags::HITBOX != 0
+                    && capsule.action == action.to_index() as u8
+                    && frame >= capsule.active_start_frame
+                    && frame <= capsule.active_end_frame
+            })
+        });
+        psx_game_runtime::combatant::armoured(
+            self.game_entities.actor_stats(),
+            self.player_combat_sample(ctx)
+                .active(psx_level::CombatWindowKind::Armored),
+            contact,
+        )
+    }
+
+    /// Feet, height and room of fighter `slot` (her actor slot or an entity).
+    fn fighter_body_at(&self, slot: usize) -> ([i32; 3], u16, RoomIndex) {
+        if slot == RuntimeGameEntities::ACTOR_SLOT {
+            let p = self.game_entities.actor_motor().position();
+            (
+                [p.x, p.y, p.z],
+                self.character.map_or(0, |c| c.height.max(0) as u16),
+                self.room_index,
+            )
+        } else {
+            let record = &GAME_ENTITIES[slot];
+            (
+                self.game_entities.position(slot),
+                self.game_entities.body(record).height,
+                record.room,
+            )
+        }
+    }
+
+    /// The tell of a parry by fighter `parrier` of a strike by `attacker`
+    /// (`riposte`: what the parry did to an entity attacker): her parry,
+    /// an entity's parry of her (whose riposte staggers her here), or one
+    /// entity's of another's.
+    // Rare (a parry): kept out of line and small.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
+    fn show_parry(
+        &mut self,
+        ctx: &Ctx,
+        parrier: usize,
+        attacker: Option<usize>,
+        riposte: psx_game_runtime::entities::GameEntityHitOutcome,
+    ) {
+        let actor = RuntimeGameEntities::ACTOR_SLOT;
+        if parrier == actor {
+            self.player_parried(attacker, riposte, ctx);
+        } else if attacker == Some(actor) {
+            self.entity_parried_player(parrier, ctx);
+        } else {
+            self.duel_log_rival_event(ctx, parrier, duel::DUEL_EVENT_PARRY);
+            let zenith = self.game_entities.stance(parrier) == VitalityChannelId::Two;
+            self.game_entities
+                .start_flash(parrier, &COMBAT_FEEDBACK, FlashKind::Parry, zenith);
+        }
+    }
+
     /// Advance every live projectile against the player's hurtboxes (unless
-    /// she is invulnerable) and every live entity's. A bolt on an entity
-    /// lands at once; a bolt on the player is summed into `taken`.
+    /// she is invulnerable) and every live entity's. Every bolt that
+    /// strikes a fighter lands at once through the one landing.
     fn tick_combat_projectiles<const I: usize>(
         &mut self,
         ctx: &Ctx,
@@ -1131,7 +1167,6 @@ impl Playtest {
         prop_blockers: &[CharacterCollisionAabb],
         prop_blockers_valid: bool,
         impacts: &mut ProjectileImpacts<I>,
-        taken: &mut PlayerHitsTaken,
     ) {
         let mut projectile_targets = psx_engine::FixedScratch::<
             ProjectileTarget,
@@ -1253,284 +1288,62 @@ impl Playtest {
             let ProjectileImpactKind::Target { target } = impact.kind else {
                 continue;
             };
-            if target == PLAYER_PROJECTILE_TARGET {
-                let attacker = if impact.owner == NO_PROJECTILE_OWNER {
-                    CombatantId::WORLD
-                } else {
-                    CombatantId::entity(usize::from(impact.owner))
-                };
-                if player.parries {
-                    // A world bolt (no owner) cannot be parried; inside the
-                    // parry window it is spent on her i-frames.
-                    if attacker != CombatantId::WORLD {
-                        self.parry_on_player(
-                            Strike {
-                                attacker,
-                                kind: HitKind::Projectile,
-                                channel: projectile_vitality_channel(impact.damage_channel),
-                                damage: impact.damage,
-                                poise: impact.poise_damage,
-                                crit: false,
-                            },
-                            ctx,
-                        );
-                    }
-                    continue;
-                }
-                taken.attacker = attacker;
-                telemetry::debug_log("enemy projectile:player-hit");
-                taken.hits = taken.hits.saturating_add(1);
-                let exposed = self.player_shot_opening();
-                taken.shot_opening |= exposed && self.game_entities.actor().flow.can_interrupt();
-                // The tick's posture lands summed and unscaled, so each bolt
-                // takes the stance rule here, by its own channel.
-                let poise = self.game_entities.actor().flow.shot_poise(
-                    impact.poise_damage,
-                    self.player_stats.poise,
-                    exposed,
-                );
-                let (_, poise) = stance_scaled(
-                    &self.player_stats,
-                    self.game_entities
-                        .actor()
-                        .opposes(projectile_vitality_channel(impact.damage_channel)),
-                    0,
-                    poise,
-                );
-                taken.poise = taken.poise.saturating_add(poise);
-                if exposed && self.game_entities.actor().flow.can_interrupt() {
-                    telemetry::debug_log("flow:player-shot-interrupt");
-                }
-                match impact.damage_channel {
-                    psx_game_runtime::projectiles::ProjectileDamageChannel::Horizon => {
-                        taken.horizon_shots = taken.horizon_shots.saturating_add(impact.damage);
-                    }
-                    psx_game_runtime::projectiles::ProjectileDamageChannel::Zenith => {
-                        taken.zenith_shots = taken.zenith_shots.saturating_add(impact.damage);
-                    }
-                }
-            } else if impact.owner != NO_PROJECTILE_OWNER {
-                self.land_rival_shot(ctx, usize::from(target), impact);
+            let victim = if target == PLAYER_PROJECTILE_TARGET {
+                RuntimeGameEntities::ACTOR_SLOT
             } else {
-                self.land_shot_on_entity(ctx, usize::from(target), impact);
-            }
-        }
-    }
-
-    /// An entity's bolt on another entity (its rival's side), through the
-    /// struck entity's hit path; a parry there staggers the shooter.
-    #[inline(never)]
-    #[cfg_attr(target_arch = "mips", optimize(size))]
-    fn land_rival_shot(
-        &mut self,
-        ctx: &Ctx,
-        index: usize,
-        impact: &psx_game_runtime::projectiles::ProjectileImpact,
-    ) {
-        let shooter = usize::from(impact.owner);
-        let crit = impact.visual.impact_rgb == CRIT_BOLT_RGB;
-        if crit {
-            self.duel_log_rival_event(ctx, shooter, duel::DUEL_EVENT_CRIT);
-        }
-        let strike = self.game_entities.projectile_strike(
-            GAME_ENTITIES.as_slice(),
-            index,
-            CombatantId::entity(shooter),
-            projectile_vitality_channel(impact.damage_channel),
-            impact.damage,
-            impact.poise_damage,
-            crit,
-        );
-        self.land_on_entity(ctx, index, strike, None, false);
-    }
-
-    /// One player bolt on entity `index`, through the entity's hit path.
-    fn land_shot_on_entity(
-        &mut self,
-        ctx: &Ctx,
-        index: usize,
-        impact: &psx_game_runtime::projectiles::ProjectileImpact,
-    ) {
-        let channel = projectile_vitality_channel(impact.damage_channel);
-        let strike = self.game_entities.projectile_strike(
-            GAME_ENTITIES.as_slice(),
-            index,
-            CombatantId::PLAYER,
-            channel,
-            impact.damage,
-            impact.poise_damage,
-            impact.visual.impact_rgb == CRIT_BOLT_RGB,
-        );
-        self.land_on_entity(ctx, index, strike, None, false);
-    }
-
-    /// Land what the player took this tick: enemy melee as one untyped hit,
-    /// then the bolts by channel, then the summed posture damage as one
-    /// reaction.
-    fn land_player_hits<const I: usize>(
-        &mut self,
-        ctx: &Ctx,
-        player: &PlayerDefence,
-        impacts: &ProjectileImpacts<I>,
-        taken: PlayerHitsTaken,
-    ) {
-        let gameplay_now = self.gameplay_tick(ctx.sim_tick);
-        let anchor = player_hit_anchor(player.position, player.height.max(0) as u16);
-        if taken.melee_damage > 0 {
-            // A swing lands on its attacker's stance, the one stance rule
-            // every defender takes.
-            let died = self.death_ticks_remaining == 0
-                && self.player_take_damage(
-                    taken.attacker,
-                    HitKind::Melee,
-                    Some(taken.melee_channel),
-                    taken.melee_damage,
-                );
-            // Damage taken floats off the player, in the swing's channel.
-            self.damage_numbers.spawn(
-                anchor,
-                self.room_index,
-                taken.melee_damage,
-                if taken.crit {
-                    DamageNumberChannel::Crit
-                } else if taken.melee_channel == VitalityChannelId::Two {
-                    DamageNumberChannel::Zenith
-                } else {
-                    DamageNumberChannel::Horizon
-                },
-                gameplay_now,
-            );
-            if died {
-                self.arm_player_death(true, ctx.sim_tick, ctx.video_hz);
-            }
-        }
-        for (channel, number, damage) in [
-            (
-                psx_game_runtime::projectiles::ProjectileDamageChannel::Horizon,
-                DamageNumberChannel::Horizon,
-                taken.horizon_shots,
-            ),
-            (
-                psx_game_runtime::projectiles::ProjectileDamageChannel::Zenith,
-                DamageNumberChannel::Zenith,
-                taken.zenith_shots,
-            ),
-        ] {
-            if damage == 0 {
+                usize::from(target)
+            };
+            // Her bolts carry no owner: an unowned bolt is hers on an
+            // entity and the world's on her.
+            let attacker = if impact.owner != NO_PROJECTILE_OWNER {
+                CombatantId::entity(usize::from(impact.owner))
+            } else if victim == RuntimeGameEntities::ACTOR_SLOT {
+                CombatantId::WORLD
+            } else {
+                CombatantId::PLAYER
+            };
+            // A world bolt cannot be parried; inside her parry window it is
+            // spent on her i-frames.
+            if attacker == CombatantId::WORLD && player.parries {
                 continue;
             }
-            let died = self.death_ticks_remaining == 0
-                && self.apply_typed_player_damage_from(taken.attacker, channel, damage);
-            // A projectile carries its own channel, so a Choir Needle
-            // reads teal on the way in exactly as the bolt did.
-            self.damage_numbers
-                .spawn(anchor, self.room_index, damage, number, gameplay_now);
-            if died {
-                self.arm_player_death(true, ctx.sim_tick, ctx.video_hz);
+            let crit = impact.visual.impact_rgb == CRIT_BOLT_RGB;
+            if crit
+                && impact.owner != NO_PROJECTILE_OWNER
+                && victim != RuntimeGameEntities::ACTOR_SLOT
+            {
+                self.duel_log_rival_event(ctx, usize::from(impact.owner), duel::DUEL_EVENT_CRIT);
             }
-        }
-        if taken.hits == 0 {
-            return;
-        }
-        telemetry::counter(telemetry::counter::PLAYER_HITS_TAKEN, u32::from(taken.hits));
-        let action = self.anim.state.action();
-        let armored = matches!(
-            self.anim.state,
-            PlayerAnim::HeavyAttack | PlayerAnim::VertHeavyAttack
-        ) && player.pose.is_some_and(|pose| {
-            let frame = (pose.phase_q12() >> 12).min(u32::from(u16::MAX)) as u16;
-            player.capsules.iter().any(|capsule| {
-                capsule.flags & psx_level::combat_capsule_flags::HITBOX != 0
-                    && capsule.action == action.to_index() as u8
-                    && frame >= capsule.active_start_frame
-                    && frame <= capsule.active_end_frame
-            })
-        });
-        // The one armour rule: her authored window, else her heavy's contact.
-        let armored = psx_game_runtime::combatant::armoured(
-            &self.player_stats,
-            self.player_combat_sample(ctx)
-                .active(psx_level::CombatWindowKind::Armored),
-            armored,
-        );
-        let shot_only = taken.melee_damage == 0;
-        let staggered = self.react_player_to_hit(
-            taken.attacker,
-            taken.poise,
-            armored,
-            shot_only,
-            Self::crit_reached_player(&taken, impacts),
-            ctx,
-        );
-        if shot_only && staggered && taken.shot_opening {
-            self.duel_log_flow(ctx, 1);
-            for impact in impacts.as_slice() {
-                if impact.kind
-                    == (ProjectileImpactKind::Target {
-                        target: PLAYER_PROJECTILE_TARGET,
-                    })
-                {
-                    self.game_entities
-                        .projectile_connected(usize::from(impact.owner), true);
+            let channel = projectile_vitality_channel(impact.damage_channel);
+            let strike = if victim == RuntimeGameEntities::ACTOR_SLOT {
+                // Her posture takes the shot rule as every fighter's does:
+                // an open windup takes more.
+                let poise = self.game_entities.actor().flow.shot_poise(
+                    impact.poise_damage,
+                    self.game_entities.actor_stats().poise,
+                    self.player_shot_opening(),
+                );
+                Strike {
+                    attacker,
+                    kind: HitKind::Projectile,
+                    channel,
+                    damage: impact.damage,
+                    poise,
+                    crit,
                 }
-            }
-        }
-        self.spawn_combat_hit_sparks(
-            player.position,
-            player.height.max(0) as u16,
-            self.room_index,
-            self.game_entities.actor().stance.active() == VitalityChannelId::Two,
-            staggered,
-            self.death_ticks_remaining != 0,
-        );
-        self.show_hit_on_player(&taken, impacts, staggered);
-    }
-
-    /// Whether a crit reached the player this tick: a crit swing among the
-    /// melee hits, or a crit bolt among the impacts on her.
-    fn crit_reached_player<const I: usize>(
-        taken: &PlayerHitsTaken,
-        impacts: &ProjectileImpacts<I>,
-    ) -> bool {
-        taken.crit
-            || impacts.as_slice().iter().any(|impact| {
-                impact.visual.impact_rgb == CRIT_BOLT_RGB
-                    && impact.kind
-                        == (ProjectileImpactKind::Target {
-                            target: PLAYER_PROJECTILE_TARGET,
-                        })
-            })
-    }
-
-    /// The flash and, for a melee swing, the contact spark of the hits the
-    /// player took this tick, in the stance colour of the fighter that dealt
-    /// the last of them. A hazard (no fighter) shows nothing here.
-    // Out of line and small: one call per tick she is hit.
-    #[inline(never)]
-    #[cfg_attr(target_arch = "mips", optimize(size))]
-    fn show_hit_on_player<const I: usize>(
-        &mut self,
-        taken: &PlayerHitsTaken,
-        impacts: &ProjectileImpacts<I>,
-        staggered: bool,
-    ) {
-        let attacker = usize::from(taken.attacker.0);
-        if attacker >= self.game_entities.count() {
-            return;
-        }
-        let melee = taken.melee_damage > 0;
-        let crit = Self::crit_reached_player(taken, impacts);
-        let from = self.game_entities.position(attacker);
-        self.show_hit(LandedHit {
-            victim: CombatantId::PLAYER,
-            contact_from: melee.then_some(from),
-            kind: FlashKind::of_hit(crit, staggered),
-            zenith: if melee {
-                self.game_entities.stance(attacker) == VitalityChannelId::Two
             } else {
-                taken.zenith_shots > taken.horizon_shots
-            },
-        });
+                self.game_entities.projectile_strike(
+                    GAME_ENTITIES.as_slice(),
+                    victim,
+                    attacker,
+                    channel,
+                    impact.damage,
+                    impact.poise_damage,
+                    crit,
+                )
+            };
+            self.land_on_fighter(ctx, victim, strike, None, false);
+        }
     }
 
     /// Duel trace: a bolt interrupted a windup. `victim` 0 is the enemy,
@@ -1711,11 +1524,11 @@ impl Playtest {
     /// Damage and poise of one of the shooter's bolts through its crit.
     fn shooter_crit_scaled(&self, shooter: Shooter, damage: u16, poise: u16) -> (u16, u16) {
         match shooter {
-            Shooter::Player => {
-                self.game_entities
-                    .actor()
-                    .crit_scaled(&self.player_stats, damage, poise)
-            }
+            Shooter::Player => self.game_entities.actor().crit_scaled(
+                self.game_entities.actor_stats(),
+                damage,
+                poise,
+            ),
             Shooter::Entity(attack) => self.game_entities.crit_scaled(
                 GAME_ENTITIES.as_slice(),
                 attack.entity(),
@@ -1731,7 +1544,7 @@ impl Playtest {
                 .game_entities
                 .actor()
                 .flow
-                .can_shoot(&self.player_stats),
+                .can_shoot(self.game_entities.actor_stats()),
             Shooter::Entity(attack) => GAME_ENTITIES
                 .get(attack.entity())
                 .is_some_and(|record| self.game_entities.can_fire_energy(record, attack.entity())),
@@ -1741,11 +1554,8 @@ impl Playtest {
     fn shooter_spend_shot(&mut self, shooter: Shooter) {
         match shooter {
             Shooter::Player => {
-                let _ = self
-                    .game_entities
-                    .actor_mut()
-                    .flow
-                    .spend_shot(&self.player_stats);
+                let (actor, stats) = self.game_entities.actor_and_stats();
+                let _ = actor.flow.spend_shot(stats);
             }
             Shooter::Entity(attack) => {
                 if let Some(record) = GAME_ENTITIES.get(attack.entity()) {
@@ -2026,7 +1836,7 @@ impl Playtest {
                     entity_pose(rival),
                     player_capsules,
                     player_pose,
-                    self.player_stats.parry_ticks,
+                    self.game_entities.actor_stats().parry_ticks,
                     video_hz,
                 ),
                 None => PredictedContact::Unread,
@@ -2254,8 +2064,7 @@ impl Playtest {
                 );
             }
         }
-        let mut taken = PlayerHitsTaken::NONE;
-        let stats = self.swing_fighters(ctx, swing, None, prop_blockers.as_slice(), &mut taken);
+        let stats = self.swing_fighters(ctx, swing, None, prop_blockers.as_slice());
         self.finish_swing(swing, stats);
     }
 
@@ -2565,61 +2374,15 @@ impl Playtest {
         }
     }
 
-    /// Hurt the player with what the hazard volumes dealt this tick, and arm
-    /// the death sequence when it was lethal. The volume already left an
-    /// invulnerable player alone, so this only ever sees real hits.
+    /// The hazard volumes on her this tick ([`Self::land_hazards`]); the
+    /// volume leaves her alone while `exempt` (i-frames, dying).
     pub(super) fn apply_logic_hazard_damage(&mut self, ctx: &Ctx, player: [i32; 3], exempt: bool) {
-        let mut spare = 0;
-        let clock = self
-            .game_entities
-            .hazard_clock_mut(RuntimeGameEntities::ACTOR_SLOT)
-            .unwrap_or(&mut spare);
-        let touch = self.logic.touch_hazards(
-            LOGIC.as_slice(),
-            player,
-            exempt,
-            ctx.sim_tick.as_u32(),
-            clock,
-        );
-        let (damage, push) = (touch.damage, touch.push);
-        if damage != 0 {
-            telemetry::debug_log("player hazard:logic");
-            if self.apply_hazard_player_damage(damage) {
-                self.hazard_push_left = 0;
-                self.arm_player_death(false, ctx.sim_tick, ctx.video_hz);
-                return;
-            }
-        }
-        let Some(push) = push else {
-            return;
-        };
-        if damage != 0 {
-            self.react_player_to_hit(CombatantId::WORLD, damage, false, false, false, ctx);
-        }
-        let mut toward_max = push.toward_max;
-        if push.tie {
-            // Dead centre: carry on the way she faces.
-            let yaw = self.game_entities.actor_motor().yaw();
-            let facing = if push.axis_z {
-                yaw.cos_q12()
-            } else {
-                yaw.sin_q12()
-            };
-            if facing != 0 {
-                toward_max = facing > 0;
-            }
-        }
-        self.hazard_push_left = push.distance;
-        self.hazard_push_axis_z = push.axis_z;
-        self.hazard_push_toward_max = toward_max;
+        self.land_hazards(ctx, RuntimeGameEntities::ACTOR_SLOT, player, exempt, 0);
     }
 
-    /// The hazards on every entity, by the rule the player's character
-    /// takes them ([`psx_game_runtime::logic::LogicRuntime::touch_hazards`]
-    /// on each fighter's own clock, and the harmful liquids), landed through
-    /// the one landing as world damage on its own stance. An invulnerable
-    /// entity is passed through. A volume's knockback moves only the
-    /// player's character for now.
+    /// The hazards on every entity, by the rule her actor slot takes them
+    /// ([`Self::land_hazards`]), plus the harmful liquid it stands in. An
+    /// invulnerable entity is passed through.
     pub(super) fn apply_entity_hazards(&mut self, ctx: &Ctx) {
         if LOGIC.is_empty() && self.world_rt.is_none() {
             return;
@@ -2635,14 +2398,7 @@ impl Playtest {
             let exempt = self
                 .game_entities
                 .invulnerable(GAME_ENTITIES.as_slice(), index);
-            let mut damage = match self.game_entities.hazard_clock_mut(index) {
-                Some(clock) => {
-                    self.logic
-                        .touch_hazards(LOGIC.as_slice(), position, exempt, now, clock)
-                        .damage
-                }
-                None => 0,
-            };
+            let mut liquid = 0;
             if !exempt {
                 let height = i32::from(self.game_entities.body(record).height);
                 if let Some(sample) = self.world_rt.as_ref().and_then(|world_rt| {
@@ -2651,89 +2407,97 @@ impl Playtest {
                         height,
                     )
                 }) {
-                    damage = damage.saturating_add(hazard_damage(sample.contents, now));
+                    liquid = hazard_damage(sample.contents, now);
                 }
             }
-            if damage == 0 {
-                continue;
-            }
-            self.land_on_entity(
-                ctx,
-                index,
-                Strike {
-                    attacker: CombatantId::WORLD,
-                    kind: HitKind::Hazard,
-                    channel: self.game_entities.stance(index),
-                    damage,
-                    poise: 0,
-                    crit: false,
-                },
-                None,
-                false,
-            );
+            self.land_hazards(ctx, index, position, exempt, liquid);
         }
     }
 
-    /// One tick of the shove a hazard touch gave the player: a few engine
-    /// units along the hazard's thin axis through the same collision the
-    /// motor uses, so a wall stops it and nothing is pushed out of the world.
+    /// One fighter's hazards this tick, the one rule every fighter takes:
+    /// the hazard volumes on its own clock
+    /// ([`psx_game_runtime::logic::LogicRuntime::touch_hazards`]) plus
+    /// `liquid` damage, landed as world damage on its own stance through the
+    /// one landing; a volume that shoves also strikes its posture for the
+    /// damage it dealt, and the shove starts unless the hit killed.
+    fn land_hazards(
+        &mut self,
+        ctx: &Ctx,
+        slot: usize,
+        position: [i32; 3],
+        exempt: bool,
+        liquid: u16,
+    ) {
+        let Some(clock) = self.game_entities.hazard_clock_mut(slot) else {
+            return;
+        };
+        let touch = self.logic.touch_hazards(
+            LOGIC.as_slice(),
+            position,
+            exempt,
+            ctx.sim_tick.as_u32(),
+            clock,
+        );
+        let damage = touch.damage.saturating_add(liquid);
+        if damage != 0 {
+            let strike = Strike {
+                attacker: CombatantId::WORLD,
+                kind: HitKind::Hazard,
+                channel: self.game_entities.stance(slot),
+                damage,
+                poise: if touch.push.is_some() {
+                    touch.damage
+                } else {
+                    0
+                },
+                crit: false,
+            };
+            if self.land_on_fighter(ctx, slot, strike, None, false).died {
+                return;
+            }
+        }
+        if let Some(push) = touch.push {
+            self.game_entities.start_hazard_push(slot, push);
+        }
+    }
+
+    /// One tick of her hazard shove, by every fighter's rule
+    /// ([`GameEntities::advance_hazard_push`]), through the same collision
+    /// the motor uses, so a wall stops it and nothing is pushed out of the
+    /// world.
     pub(super) fn advance_hazard_push(
         &mut self,
         blockers: &[CharacterCollisionCylinder],
         aabb_blockers: &[CharacterCollisionAabb],
     ) {
-        if self.hazard_push_left == 0 {
+        let actor = RuntimeGameEntities::ACTOR_SLOT;
+        if self.game_entities.hazard_push(actor).left == 0 {
             return;
         }
         if self.death_ticks_remaining != 0 {
-            self.hazard_push_left = 0;
+            self.game_entities.clear_hazard_push(actor);
             return;
         }
-        let step = i32::from(self.hazard_push_left).min(HAZARD_PUSH_STEP);
-        let signed = if self.hazard_push_toward_max {
-            step
-        } else {
-            -step
-        };
-        let (dx, dz) = if self.hazard_push_axis_z {
-            (0, signed)
-        } else {
-            (signed, 0)
-        };
         let config = self.motor_config();
-        let start = self.game_entities.actor_motor().position();
-        let Some(world_rt) = self.world_rt.as_mut() else {
-            self.hazard_push_left = 0;
-            return;
-        };
-        let moved = world_rt
-            .commit_body_step(
-                start,
-                dx,
-                dz,
-                config.radius,
-                config.height,
-                &self.destructibles,
-                blockers,
-                aabb_blockers,
-            )
-            .ok()
-            .map(|step| step.position)
-            .filter(|end| {
-                // Progress along the push axis, not a slide along a wall.
-                if self.hazard_push_axis_z {
-                    (end.z - start.z).signum() == dz.signum()
-                } else {
-                    (end.x - start.x).signum() == dx.signum()
-                }
+        let mut world_rt = self.world_rt.as_mut();
+        let destructibles = &self.destructibles;
+        self.game_entities
+            .advance_hazard_push(actor, |start, dx, dz| {
+                world_rt
+                    .as_mut()?
+                    .commit_body_step(
+                        RoomPoint::new(start[0], start[1], start[2]),
+                        dx,
+                        dz,
+                        config.radius,
+                        config.height,
+                        destructibles,
+                        blockers,
+                        aabb_blockers,
+                    )
+                    .ok()
+                    .map(|step| [step.position.x, step.position.y, step.position.z])
             });
-        match moved {
-            Some(end) => {
-                self.game_entities.actor_motor_mut().relocate(end);
-                self.hazard_push_left -= step as u16;
-            }
-            None => self.hazard_push_left = 0,
-        }
     }
 
     /// The state of the level's visual switches, bit `i` set while slot `i`
