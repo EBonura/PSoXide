@@ -1084,6 +1084,12 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                         .map(|pose| finish(pose, joint_index))
                 } else {
                     match sample.parent(joint_index) {
+                        // With no crossfade the pose translation goes on the
+                        // absolute joints only: a derived child adds its
+                        // parent's translation, so it inherits it exactly.
+                        None if active_blend.is_none() => sample
+                            .pose_after_parent(joint_index, None)
+                            .map(|pose| apply_model_pose_translation(pose, pose_translation)),
                         None => sample.pose_after_parent(joint_index, None),
                         Some(parent) if present & (1 << parent) != 0 => {
                             let staged = &joint_view_transforms[parent as usize];
@@ -1105,7 +1111,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     present |= 1 << joint;
                 }
             }
-            if parent_relative {
+            if parent_relative && active_blend.is_some() {
                 // Every clip pose is staged; now the crossfade and the pose
                 // translation, which children must not inherit.
                 for joint in 0..joint_count {
