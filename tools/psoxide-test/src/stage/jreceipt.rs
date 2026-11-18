@@ -181,8 +181,13 @@ pub fn content_key(
     key.file("journey", journey)?;
     for disc in discs {
         let cue = ctx.repo.join(disc);
-        key.file("cue", &cue)?;
-        key.file("bin", &cue.with_extension("bin"))?;
+        for (label, file) in [("cue", cue.clone()), ("bin", cue.with_extension("bin"))] {
+            // The build stage already hashed the files it wrote; hash only what it did not.
+            match built_digest(ctx, &file) {
+                Some(d) => key.part(label, &d),
+                None => key.file(label, &file)?,
+            }
+        }
     }
     for (build, digest) in &shared.symbols {
         key.part(&format!("symbols {build}"), digest);
@@ -203,6 +208,19 @@ pub fn content_key(
 /// The receipts root of a game: `<work>/<game>/journey-receipts`.
 pub fn root(ctx: &Ctx<'_>) -> PathBuf {
     ctx.work.join("journey-receipts")
+}
+
+/// The digest the build stage recorded for `file`, when a build of this run wrote it.
+fn built_digest(ctx: &Ctx<'_>, file: &Path) -> Option<String> {
+    let dir = file.parent()?;
+    let name = file.file_name()?.to_string_lossy().into_owned();
+    ctx.game
+        .builds
+        .iter()
+        .find(|b| b.out_dir(&ctx.repo) == dir)
+        .and_then(|b| ctx.artifacts.get(&b.name))
+        .and_then(|files| files.get(&name))
+        .cloned()
 }
 
 /// Where a record lives: `<root>/<key>/<runner12>@<model>.json`.
