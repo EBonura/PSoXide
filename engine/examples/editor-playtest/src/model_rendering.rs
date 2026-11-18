@@ -584,6 +584,11 @@ const SHADOW_TUNING: mr::ShadowTuning = mr::ShadowTuning {
     radius_max: SHADOW_RADIUS_MAX,
 };
 
+/// Upload-queue steps the loading screen takes in one tick to upload the level
+/// textures it lets go of: at 768 rows a step, 64 steps upload 768 64x64 textures.
+#[cfg(feature = "cd-stream-bench")]
+const UPLOADED_TEXTURE_STEPS_PER_TICK: u32 = 64;
+
 impl Playtest {
     #[cfg(feature = "cd-stream-bench")]
     #[inline(never)]
@@ -604,9 +609,17 @@ impl Playtest {
                 return false;
             }
             if let Some(world_rt) = self.world_rt.as_mut() {
-                if !world_rt.bind_uploaded_textures() {
+                // Upload them all in this tick: the bytes leave with the next
+                // group, and the loading screen has nothing else for the GPU.
+                // Bounded so a texture VRAM cannot take never holds the
+                // loading screen in one tick (it retries on the next).
+                let mut steps = 0;
+                while !world_rt.bind_uploaded_textures() {
+                    if steps == UPLOADED_TEXTURE_STEPS_PER_TICK {
+                        return false;
+                    }
                     let _ = self.streaming_jobs.step_vram_uploads();
-                    return false;
+                    steps += 1;
                 }
             }
             self.level_textures_uploaded = true;
