@@ -274,15 +274,35 @@ impl<const N: usize> GameEntities<N> {
         if index >= self.count() || index >= records.len() {
             return GameEntityHitOutcome::MISS;
         }
-        let poise = self.combatants[index].flow.shot_poise(
-            poise,
-            self.body(&records[index]).combat.poise,
-            self.shot_opening(records, index),
-        );
-        let strike = Strike {
+        let strike = self.projectile_strike(records, index, by, channel, damage, poise, crit);
+        self.receive_hit(records, index, strike)
+    }
+
+    /// The strike a bolt `by` any fighter lands on entity `index`: its
+    /// posture damage through the shot rule (`CombatFlow::shot_poise`, an
+    /// open windup takes more), the rest as the bolt carries it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn projectile_strike(
+        &self,
+        records: &[LevelGameEntityRecord],
+        index: usize,
+        by: CombatantId,
+        channel: VitalityChannelId,
+        damage: u16,
+        poise: u16,
+        crit: bool,
+    ) -> Strike {
+        let poise = match records.get(index).filter(|_| index < self.count()) {
+            Some(record) => self.combatants[index].flow.shot_poise(
+                poise,
+                self.body(record).combat.poise,
+                self.shot_opening(records, index),
+            ),
+            None => poise,
+        };
+        Strike {
             attacker: by,
             ..super::player_strike(HitKind::Projectile, channel, damage, poise, crit)
-        };
-        self.receive_hit(records, index, strike)
+        }
     }
 }

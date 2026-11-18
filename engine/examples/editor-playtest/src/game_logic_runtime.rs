@@ -904,8 +904,11 @@ impl Playtest {
             return;
         };
         let crit = self.game_entities.spend_crit(entity);
-        let outcome = self.game_entities.receive_hit(
-            GAME_ENTITIES.as_slice(),
+        if crit {
+            self.duel_log_rival_event(ctx, entity, duel::DUEL_EVENT_CRIT);
+        }
+        let outcome = self.land_on_entity(
+            ctx,
             rival,
             Strike {
                 attacker: CombatantId::entity(entity),
@@ -915,8 +918,9 @@ impl Playtest {
                 poise: poise_damage,
                 crit,
             },
+            Some(attack.position()),
+            self.game_entities.attack_kind(entity) == 1,
         );
-        self.show_rival_outcome(ctx, entity, rival, outcome, crit);
         if outcome.connected {
             self.game_entities.gain_melee_energy(
                 record,
@@ -926,38 +930,85 @@ impl Playtest {
         }
     }
 
-    /// What a hit between rivals shows: the parrier's flash or the struck
-    /// fighter's, and the duel's event lines.
+    /// One hit on entity `victim`, whoever dealt it (the player or another
+    /// entity, a swing or a bolt): its hit path, then what every landed hit
+    /// shows (the damage number, a swing's contact spark from `contact_from`,
+    /// the flash) and the souls of a kill by the player. A parry shows the
+    /// parrier's tell. `heavy` marks a heavy swing.
+    // Once per landed hit, from every attacker's path: out of line and small.
     #[inline(never)]
     #[cfg_attr(target_arch = "mips", optimize(size))]
-    fn show_rival_outcome(
+    pub(super) fn land_on_entity(
         &mut self,
         ctx: &Ctx,
-        attacker: usize,
         victim: usize,
-        outcome: psx_game_runtime::entities::GameEntityHitOutcome,
-        crit: bool,
-    ) {
-        if crit {
-            self.duel_log_rival_event(ctx, attacker, duel::DUEL_EVENT_CRIT);
-        }
+        strike: Strike,
+        contact_from: Option<[i32; 3]>,
+        heavy: bool,
+    ) -> psx_game_runtime::entities::GameEntityHitOutcome {
+        let Some(record) = GAME_ENTITIES.get(victim) else {
+            return psx_game_runtime::entities::GameEntityHitOutcome::MISS;
+        };
+        let applied = self.game_entities.scaled_stance_damage(
+            GAME_ENTITIES.as_slice(),
+            victim,
+            strike.channel,
+            strike.damage,
+        );
+        let outcome = self
+            .game_entities
+            .receive_hit(GAME_ENTITIES.as_slice(), victim, strike);
         if outcome.parried {
-            self.duel_log_rival_event(ctx, victim, duel::DUEL_EVENT_PARRY);
-            let zenith = self.game_entities.stance(victim) == VitalityChannelId::Two;
-            self.game_entities
-                .start_flash(victim, &COMBAT_FEEDBACK, FlashKind::Parry, zenith);
-            return;
+            if strike.attacker == CombatantId::PLAYER {
+                self.entity_parried_player(victim, ctx);
+            } else {
+                self.duel_log_rival_event(ctx, victim, duel::DUEL_EVENT_PARRY);
+                let zenith = self.game_entities.stance(victim) == VitalityChannelId::Two;
+                self.game_entities
+                    .start_flash(victim, &COMBAT_FEEDBACK, FlashKind::Parry, zenith);
+            }
+            return outcome;
         }
         if !outcome.connected {
-            return;
+            return outcome;
         }
-        let zenith = self.game_entities.stance(attacker) == VitalityChannelId::Two;
-        self.game_entities.start_flash(
-            victim,
-            &COMBAT_FEEDBACK,
-            FlashKind::of_hit(crit, outcome.staggered),
-            zenith,
+        let zenith = strike.channel == VitalityChannelId::Two;
+        let position = self.game_entities.position(victim);
+        let height = self.game_entities.body(record).height;
+        let now = self.gameplay_tick(ctx.sim_tick);
+        self.damage_numbers.spawn(
+            struck_actor_anchor(position, height),
+            record.room,
+            applied,
+            if strike.crit {
+                DamageNumberChannel::Crit
+            } else if zenith {
+                DamageNumberChannel::Zenith
+            } else {
+                DamageNumberChannel::Horizon
+            },
+            now,
         );
+        if contact_from.is_some() {
+            self.spawn_combat_hit_sparks(
+                position,
+                height,
+                record.room,
+                zenith,
+                outcome.staggered,
+                outcome.died,
+            );
+        }
+        self.show_hit(LandedHit {
+            victim: CombatantId::entity(victim),
+            contact_from,
+            kind: FlashKind::of_hit(strike.crit, outcome.staggered || heavy),
+            zenith,
+        });
+        if outcome.died && strike.attacker == CombatantId::PLAYER {
+            self.souls.award(record.soul_value, now.as_u32());
+        }
+        outcome
     }
 
     /// Advance every live projectile against the player's hurtboxes (unless
@@ -1168,7 +1219,10 @@ impl Playtest {
     ) {
         let shooter = usize::from(impact.owner);
         let crit = impact.visual.impact_rgb == CRIT_BOLT_RGB;
-        let outcome = self.game_entities.apply_projectile_hit_by(
+        if crit {
+            self.duel_log_rival_event(ctx, shooter, duel::DUEL_EVENT_CRIT);
+        }
+        let strike = self.game_entities.projectile_strike(
             GAME_ENTITIES.as_slice(),
             index,
             CombatantId::entity(shooter),
@@ -1177,7 +1231,7 @@ impl Playtest {
             impact.poise_damage,
             crit,
         );
-        self.show_rival_outcome(ctx, shooter, index, outcome, crit);
+        self.land_on_entity(ctx, index, strike, None, false);
     }
 
     /// One player bolt on entity `index`, through the entity's hit path.
@@ -1187,36 +1241,21 @@ impl Playtest {
         index: usize,
         impact: &psx_game_runtime::projectiles::ProjectileImpact,
     ) {
-        let Some(record) = GAME_ENTITIES.get(index) else {
-            return;
-        };
-        let channel = match impact.damage_channel {
-            psx_game_runtime::projectiles::ProjectileDamageChannel::Horizon => {
-                VitalityChannelId::One
-            }
-            psx_game_runtime::projectiles::ProjectileDamageChannel::Zenith => {
-                VitalityChannelId::Two
-            }
-        };
-        let applied = self.game_entities.scaled_stance_damage(
-            GAME_ENTITIES.as_slice(),
-            index,
-            channel,
-            impact.damage,
-        );
+        let channel = projectile_vitality_channel(impact.damage_channel);
         let opening = self
             .game_entities
             .shot_opening(GAME_ENTITIES.as_slice(), index);
-        let outcome = self.game_entities.apply_projectile_hit(
+        let strike = self.game_entities.projectile_strike(
             GAME_ENTITIES.as_slice(),
             index,
+            CombatantId::PLAYER,
             channel,
             impact.damage,
             impact.poise_damage,
             impact.visual.impact_rgb == CRIT_BOLT_RGB,
         );
+        let outcome = self.land_on_entity(ctx, index, strike, None, false);
         if outcome.parried {
-            self.entity_parried_player(index, ctx);
             return;
         }
         self.game_entities
@@ -1226,38 +1265,6 @@ impl Playtest {
         if opening && outcome.staggered {
             telemetry::debug_log("flow:enemy-shot-interrupt");
             self.duel_log_flow(ctx, 0);
-        }
-        let now = self.gameplay_tick(ctx.sim_tick);
-        if outcome.connected {
-            self.damage_numbers.spawn(
-                struck_actor_anchor(
-                    self.game_entities.position(index),
-                    self.game_entities.body(record).height,
-                ),
-                record.room,
-                applied,
-                if impact.visual.impact_rgb == CRIT_BOLT_RGB {
-                    DamageNumberChannel::Crit
-                } else if channel == VitalityChannelId::Two {
-                    DamageNumberChannel::Zenith
-                } else {
-                    DamageNumberChannel::Horizon
-                },
-                now,
-            );
-            telemetry::debug_log("player projectile:hit");
-            self.show_hit(LandedHit {
-                victim: CombatantId::entity(index),
-                contact_from: None,
-                kind: FlashKind::of_hit(
-                    impact.visual.impact_rgb == CRIT_BOLT_RGB,
-                    outcome.staggered,
-                ),
-                zenith: channel == VitalityChannelId::Two,
-            });
-        }
-        if outcome.died {
-            self.souls.award(record.soul_value, now.as_u32());
         }
     }
 
@@ -2512,7 +2519,6 @@ impl Playtest {
         environment_reach: i32,
         prop_blockers: &[CharacterCollisionAabb],
     ) -> Option<MeleeArcStats> {
-        let now = self.gameplay_tick(ctx.sim_tick);
         let crit = self.game_entities.actor().crit_attack;
         let first = character.combat_capsule_first.to_usize();
         let end = first.saturating_add(usize::from(character.combat_capsule_count));
@@ -2594,11 +2600,6 @@ impl Playtest {
             VitalityChannelId::One => DamageChannel::Horizon,
             VitalityChannelId::Two => DamageChannel::Zenith,
         };
-        let damage_number_channel = if crit {
-            DamageNumberChannel::Crit
-        } else {
-            damage_number_channel_for(channel)
-        };
         for hit in &active[..active_count] {
             // A blocking prop needs a short forward contact volume rather than
             // an inflated copy of a lateral blade capsule. Use the weapon's
@@ -2669,14 +2670,12 @@ impl Playtest {
                     continue;
                 }
                 self.swing_hit_mask |= mask;
-                let applied_damage = self.game_entities.scaled_stance_damage(
-                    GAME_ENTITIES.as_slice(),
-                    entity,
-                    vitality_channel,
-                    hit.damage,
+                let heavy = matches!(
+                    self.anim.state,
+                    PlayerAnim::HeavyAttack | PlayerAnim::VertHeavyAttack
                 );
-                let outcome = self.game_entities.receive_hit(
-                    GAME_ENTITIES.as_slice(),
+                let outcome = self.land_on_entity(
+                    ctx,
                     entity,
                     Strike {
                         attacker: CombatantId::PLAYER,
@@ -2686,52 +2685,11 @@ impl Playtest {
                         poise: hit.poise_damage,
                         crit,
                     },
+                    Some([player.x, player.y, player.z]),
+                    heavy,
                 );
                 if outcome.parried {
                     stats.parries = stats.parries.saturating_add(1);
-                    self.entity_parried_player(entity, ctx);
-                }
-                if outcome.connected {
-                    // Spawned here rather than from the returned stats
-                    // because the damage is per-capsule: only this site
-                    // knows which capsule actually connected.
-                    self.damage_numbers.spawn(
-                        struck_actor_anchor(
-                            position,
-                            self.game_entities.body(entity_record).height,
-                        ),
-                        entity_record.room,
-                        applied_damage,
-                        damage_number_channel,
-                        now,
-                    );
-                    self.spawn_combat_hit_sparks(
-                        position,
-                        self.game_entities.body(entity_record).height,
-                        entity_record.room,
-                        vitality_channel == VitalityChannelId::Two,
-                        outcome.staggered,
-                        outcome.died,
-                    );
-                    self.show_hit(LandedHit {
-                        victim: CombatantId::entity(entity),
-                        contact_from: Some([player.x, player.y, player.z]),
-                        kind: FlashKind::of_hit(
-                            crit,
-                            outcome.staggered
-                                || matches!(
-                                    self.anim.state,
-                                    PlayerAnim::HeavyAttack | PlayerAnim::VertHeavyAttack
-                                ),
-                        ),
-                        zenith: vitality_channel == VitalityChannelId::Two,
-                    });
-                }
-                if outcome.died {
-                    // The authored-capsule path knows exactly which entity
-                    // the killing blow landed on, so it credits its own
-                    // cooked award directly.
-                    self.souls.award(entity_record.soul_value, now.as_u32());
                 }
                 stats.hits = stats.hits.saturating_add(u16::from(outcome.connected));
                 stats.staggers = stats.staggers.saturating_add(u16::from(outcome.staggered));
