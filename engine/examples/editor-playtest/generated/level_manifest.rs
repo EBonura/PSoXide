@@ -92,6 +92,7 @@ pub const LEN_ENTITIES: usize = 0;
 pub const LEN_DESTRUCTIBLES: usize = 0;
 pub const LEN_WORLD_OBJECTS: usize = 0;
 pub const ANY_TRAINING_ENTITY: bool = false;
+pub const ANY_HAZARD: bool = false;
 pub const LEN_IMAGE_PROPS: usize = 0;
 pub const LEN_BOX_PROPS: usize = 0;
 pub const LEN_BOX_PROP_SURFACES: usize = 0;

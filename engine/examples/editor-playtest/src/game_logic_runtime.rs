@@ -2425,7 +2425,8 @@ impl Playtest {
     /// ([`Self::land_hazards`]), plus the harmful liquid it stands in. An
     /// invulnerable entity is passed through.
     pub(super) fn apply_entity_hazards(&mut self, ctx: &Ctx) {
-        if LOGIC.is_empty() && self.world_rt.is_none() {
+        // A level with no hazard volume and no liquid cooks the pass out.
+        if !crate::generated::ANY_HAZARD {
             return;
         }
         let now = ctx.sim_tick.as_u32();
@@ -2469,6 +2470,9 @@ impl Playtest {
         exempt: bool,
         liquid: u16,
     ) {
+        if !crate::generated::ANY_HAZARD {
+            return;
+        }
         let Some(clock) = self.game_entities.hazard_clock_mut(slot) else {
             return;
         };

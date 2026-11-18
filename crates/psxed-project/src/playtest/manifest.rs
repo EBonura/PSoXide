@@ -536,6 +536,20 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
          pub const ANY_TRAINING_ENTITY: bool = {};",
         any_flag(psx_level::game_entity_flags::TRAINING),
     );
+    // Whether anything in the level hurts by touch (a hazard volume or a harmful liquid), so a
+    // level without either leaves the per-tick hazard pass out.
+    let liquids = psx_grid::LevelView::parse(&package.world_geometry.core)
+        .is_ok_and(|level| level.header.flags & psx_grid::LEVEL_HAS_LIQUIDS != 0);
+    let _ = writeln!(
+        out,
+        "/// Whether the level has a hazard volume or a liquid (the per-tick hazard pass).\n\
+         pub const ANY_HAZARD: bool = {};",
+        liquids
+            || package
+                .logic
+                .iter()
+                .any(|logic| logic.kind == psx_level::logic_kind::HAZARD),
+    );
     out.push('\n');
 
     out.push_str(

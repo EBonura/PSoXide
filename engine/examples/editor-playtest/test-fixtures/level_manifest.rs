@@ -176,6 +176,7 @@ pub static CHARACTERS: &[LevelCharacterRecord] = &[LevelCharacterRecord {
 }];
 pub static COMBAT_CAPSULES: &[CombatCapsuleRecord] = &[];
 pub const ANY_TRAINING_ENTITY: bool = false;
+pub const ANY_HAZARD: bool = false;
 pub const PERSISTENT_FLAG_COUNT: u16 = 1;
 pub const PROJECT_SAVE_NAME: &str = "BESLES-PSOXIDE";
 pub const PROJECT_SAVE_TITLE: &str = "PSOXIDE PLAYTEST";
