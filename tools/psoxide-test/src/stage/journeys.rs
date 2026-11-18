@@ -368,7 +368,13 @@ pub fn run(ctx: &Ctx<'_>, bless: bool) -> StageResult {
                 );
                 return (check, Some(record.line()));
             }
-            let (check, line) = one(ctx, &gate, job, &flags, &receipts);
+            // The `real` re-proof after a gate change must be a full run: the gate's own receipt
+            // would answer with a short summary that cannot show the run is the same.
+            let mut run_flags = flags.clone();
+            if job.model == "real" && jreceipt::older_exists(&root, &key, runner, &job.model) {
+                run_flags.push("--receipts-verify".into());
+            }
+            let (check, line) = one(ctx, &gate, job, &run_flags, &receipts);
             if let Some(l) = line
                 .as_ref()
                 .filter(|l| l.passed && check.status == Status::Pass)

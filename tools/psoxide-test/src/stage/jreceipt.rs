@@ -36,6 +36,10 @@ pub struct Record {
     /// Set when this result was carried from an older gate revision, not run on this one.
     #[serde(default)]
     pub carried_from: Option<String>,
+    /// The gate answered from its own receipt, whose summary line has fewer counts than a run:
+    /// such a record is a valid result but never the evidence for carrying another model.
+    #[serde(default)]
+    pub gate_receipt: bool,
 }
 
 impl Record {
@@ -52,6 +56,7 @@ impl Record {
             conformance: line.conformance.clone(),
             hw: line.hw,
             carried_from: None,
+            gate_receipt: line.receipt_hit,
         }
     }
 
@@ -255,6 +260,19 @@ pub fn store(path: &Path, record: &Record) {
     }
 }
 
+/// Whether an older gate revision left a record for `model` under `key` (then the new gate's run
+/// must be a full one, not the gate's own receipt, to serve as the evidence for carrying).
+pub fn older_exists(root: &Path, key: &str, runner: &str, model: &str) -> bool {
+    let suffix = format!("@{}.json", model.replace([',', '='], "-"));
+    let current = format!("{}{suffix}", util::short(runner));
+    std::fs::read_dir(root.join(key)).is_ok_and(|entries| {
+        entries.flatten().any(|e| {
+            let n = e.file_name().to_string_lossy().into_owned();
+            n.ends_with(&suffix) && n != current
+        })
+    })
+}
+
 /// A result for `model` to carry to `runner`: an older revision's record for this model whose
 /// `real` record under that revision is the same run as `real` under `runner`.
 pub fn carry(root: &Path, key: &str, runner: &str, model: &str) -> Option<Record> {
@@ -281,7 +299,8 @@ pub fn carry(root: &Path, key: &str, runner: &str, model: &str) -> Option<Record
         let Some(then_real) = load(&path(root, key, &record.runner, "real")) else {
             continue;
         };
-        if then_real.carried_from.is_none() && then_real.same_run(&now_real) {
+        let full_runs = !then_real.gate_receipt && !now_real.gate_receipt;
+        if full_runs && then_real.carried_from.is_none() && then_real.same_run(&now_real) {
             return Some(Record {
                 runner: runner.to_string(),
                 carried_from: Some(record.runner.clone()),
@@ -308,6 +327,7 @@ mod tests {
             conformance: vec!["CONFORMANCE j gpu-irq-command=5".into()],
             hw: None,
             carried_from: None,
+            gate_receipt: false,
         }
     }
 
@@ -342,6 +362,13 @@ mod tests {
         assert_eq!(carried.ticks, 120);
         // A model never recorded is not invented.
         assert!(carry(root, "k", new, "mister,gpu-irq=never").is_none());
+        // The gate's own receipt is not evidence: its summary is shorter than a run's.
+        let mut short = record(new, 100);
+        short.gate_receipt = true;
+        store(&path(root, "k", new, "real"), &short);
+        assert!(carry(root, "k", new, "mister").is_none());
+        assert!(older_exists(root, "k", new, "mister"));
+        assert!(!older_exists(root, "k", old, "mister,gpu-irq=never"));
     }
 
     #[test]
@@ -349,6 +376,6 @@ mod tests {
         let r = record("a", 7);
         let line = r.line();
         assert!(line.passed && line.receipt_hit && !line.skips_unknown);
-        assert_eq!(Record::of("a", &line), r);
+        assert!(Record::of("a", &line).same_run(&r));
     }
 }

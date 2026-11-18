@@ -8,6 +8,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::util;
 
+/// Passing checks the table prints however large the stage: summaries a reader must see (results
+/// carried from an older gate, the hardware-renderer coverage, the open-loop total).
+const ALWAYS_SHOWN: &[&str] = &[
+    "carried from an older gate",
+    "hardware renderer (hw = true)",
+    "open-loop steps",
+];
+
 /// One check's verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
@@ -221,7 +229,8 @@ impl RunResult {
                 stage.name, verdict, pass, fail, skip, source, wall
             );
             for c in &stage.outcome.checks {
-                if c.status != Status::Pass || stage.outcome.checks.len() <= 8 {
+                let summary = ALWAYS_SHOWN.iter().any(|p| c.name.starts_with(p));
+                if c.status != Status::Pass || stage.outcome.checks.len() <= 8 || summary {
                     let status = match c.status {
                         Status::Pass => "pass",
                         Status::Fail => "FAIL",
