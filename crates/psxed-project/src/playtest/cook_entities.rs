@@ -1779,59 +1779,53 @@ pub(crate) fn register_model_for_instance(
         };
         let corrected_source = psx_asset::Animation::from_bytes(&animation_bytes)
             .expect("host-generated corrected animation must parse");
-        let preserve_samples = animation_resource
-            .and_then(|id| project.resource(id))
-            .is_some_and(|resource| {
-                matches!(&resource.data,
-                ResourceData::AnimationClip(clip) if clip.preserve_samples)
-            });
         let source_frame_count = corrected_source.frame_count();
-        let (source_frame_first, source_frame_last) = crate::animation_resample::live_frame_range(
-            &corrected_source,
-            if preserve_samples {
-                0
-            } else {
-                project.animation_trim_still_percent
-            },
-        );
-        // Resample AFTER pose correction, so the budget is measured against the
-        // poses that actually ship, and BEFORE frame bounds are baked, so the
-        // bounds describe the frames the runtime will really read.
         let label = format!("{} / {}", resource.name, clip_name);
-        // Trim BEFORE resampling so the rate is chosen against real motion
-        // rather than against a stretch of stillness that is about to go.
-        let animation_bytes = trim_still_ends(
-            animation_bytes,
-            if preserve_samples {
-                0
-            } else {
-                project.animation_trim_still_percent
-            },
-            &label,
-        );
-        let animation_bytes = resample_under_budget(
-            animation_bytes,
-            if preserve_samples {
-                0
-            } else {
-                project.animation_error_budget_degrees
-            },
-            &label,
-        );
-        // Last, after trimming and resampling have settled which frames ship, so
-        // the error bound is measured against the poses the runtime would
-        // otherwise have read, and so the baked frame bounds below describe the
+        // Keyed tracks first, on the clip as authored. The encoder picks key
+        // rates per track against the source poses and keeps the first and
+        // last frames exact, so nothing before it drops frames or changes the
+        // clip's duration: authored durations and handoff ticks ship exactly.
+        // The error bound is measured against the poses the runtime would
+        // otherwise have read, and the baked frame bounds below describe the
         // keyed clip the runtime will actually decode.
         let socket_joints: Vec<u16> = model.attachments.iter().map(|s| s.joint).collect();
-        let animation_bytes = crate::animation_tracks::pack_tracks(
-            animation_bytes,
-            &parsed_model,
-            &socket_joints,
-            &gameplay_joints,
-            &capsule_points,
-            project.animation_track_budget_units,
-            &label,
-        );
+        let pack = |bytes: Vec<u8>| {
+            crate::animation_tracks::pack_tracks(
+                bytes,
+                &parsed_model,
+                &socket_joints,
+                &gameplay_joints,
+                &capsule_points,
+                project.animation_track_budget_units,
+                &label,
+            )
+        };
+        let keyed = pack(animation_bytes.clone());
+        let is_keyed = psx_asset::Animation::from_bytes(&keyed)
+            .map(|animation| animation.is_keyed_tracks())
+            .unwrap_or(false);
+        // A clip that stays a pose table (animated scale, too few frames, or
+        // smaller as a table) still trims its still ends and resamples under
+        // the degree budget, as before.
+        let trim_percent = if is_keyed {
+            0
+        } else {
+            project.animation_trim_still_percent
+        };
+        let (source_frame_first, source_frame_last) =
+            crate::animation_resample::live_frame_range(&corrected_source, trim_percent);
+        let animation_bytes = if is_keyed {
+            keyed
+        } else {
+            // Trim BEFORE resampling so the rate is chosen against real motion
+            // rather than against a stretch of stillness that is about to go.
+            let trimmed = trim_still_ends(animation_bytes, trim_percent, &label);
+            pack(resample_under_budget(
+                trimmed,
+                project.animation_error_budget_degrees,
+                &label,
+            ))
+        };
         let corrected_anim = psx_asset::Animation::from_bytes(&animation_bytes)
             .expect("host-generated corrected animation must parse");
         let cooked_frame_count = corrected_anim.frame_count();

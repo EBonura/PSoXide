@@ -297,7 +297,6 @@ mod tests {
     #[test]
     fn correction_keys_round_trip_with_animation_clip_resources() {
         let clip = AnimationClipResource {
-            preserve_samples: false,
             psxanim_path: "assets/aletha_idle.psxanim".to_string(),
             skeleton: None,
             target_model: None,
