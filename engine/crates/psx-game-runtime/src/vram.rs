@@ -1401,7 +1401,9 @@ impl<
     }
 
     /// Upload the scene's one sky texture through its specialized inner
-    /// layout while keeping residency and lifetime under one owner.
+    /// layout while keeping residency and lifetime under one owner. Load
+    /// time: a drawn frame finds the slot first and calls this only once.
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     pub fn ensure_sky_texture_uploaded(
         &mut self,
         layout: VramLayout,

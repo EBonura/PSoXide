@@ -750,11 +750,7 @@ impl Playtest {
             let Some(atlas_slot) = with_transient_gameplay_asset_bytes(
                 texture_asset,
                 AssetKind::Texture,
-                |atlas_bytes| {
-                    let slot = ensure_model_atlas_uploaded(texture_asset, atlas_bytes)?;
-                    stance_cluts.upload_for_atlas(texture_asset, atlas_bytes, slot);
-                    Some(slot)
-                },
+                |atlas_bytes| upload_model_atlas(stance_cluts, texture_asset, atlas_bytes),
             )
             .flatten() else {
                 continue;
@@ -842,6 +838,21 @@ impl Playtest {
             }
         }
     }
+}
+
+/// A model's atlas and its stance palette copies, uploaded at load (a named
+/// function so the load-time code is built for size, as its caller is).
+#[cfg(feature = "cd-stream-bench")]
+#[inline(never)]
+#[cfg_attr(target_arch = "mips", optimize(size))]
+fn upload_model_atlas(
+    stance_cluts: &mut StanceCluts,
+    texture_asset: AssetId,
+    atlas_bytes: &[u8],
+) -> Option<VramSlot> {
+    let slot = ensure_model_atlas_uploaded(texture_asset, atlas_bytes)?;
+    stance_cluts.upload_for_atlas(texture_asset, atlas_bytes, slot);
+    Some(slot)
 }
 
 fn runtime_model_asset_bytes(asset_id: AssetId, kind: AssetKind) -> Option<&'static [u8]> {

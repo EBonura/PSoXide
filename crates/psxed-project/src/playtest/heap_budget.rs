@@ -269,8 +269,8 @@ pub fn persistent_asset_slot_count(package: &PlaytestPackage) -> usize {
 }
 
 /// Bytes of one persistent asset slot in the guest: its offset, length, read-job entry and the
-/// streamer's bookkeeping (52 on the 32-bit guest, rounded up).
-const PERSISTENT_SLOT_BYTES: usize = 56;
+/// streamer's bookkeeping (48 on the 32-bit guest, rounded up).
+const PERSISTENT_SLOT_BYTES: usize = 52;
 
 /// The guest's persistent asset arena for `package`: the page storage the PersistentGameplay assets
 /// fill, and the table of every asset, as `manifest.rs` sizes them

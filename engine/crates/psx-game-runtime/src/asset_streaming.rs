@@ -233,7 +233,6 @@ pub struct PersistentAssetStreamer<const PAGES: usize, const ASSETS: usize> {
     storage: PersistentAssetStorage<PAGES, ASSETS>,
     job: WorldRoomSlotsReadJob<ASSETS>,
     ids: [u16; ASSETS],
-    slots: [usize; ASSETS],
     capacities: [usize; ASSETS],
     asset_count: usize,
     /// The [`asset_flags`] bit of the group the pages hold: the persistent assets, or the
@@ -255,7 +254,6 @@ impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStreamer<PAGES, ASS
             storage: PersistentAssetStorage::new(),
             job: WorldRoomSlotsReadJob::zeroed(),
             ids: [0; ASSETS],
-            slots: [0; ASSETS],
             capacities: [0; ASSETS],
             asset_count: 0,
             group: 0,
@@ -282,7 +280,6 @@ impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStreamer<PAGES, ASS
             storage: PersistentAssetStorage::new(),
             job: WorldRoomSlotsReadJob::new(),
             ids: [0; ASSETS],
-            slots: [0; ASSETS],
             capacities: [0; ASSETS],
             asset_count: 0,
             group: 0,
@@ -380,7 +377,6 @@ impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStreamer<PAGES, ASS
                 return;
             }
             self.ids[count] = asset.id.0;
-            self.slots[count] = slot;
             self.capacities[count] = byte_count;
             count += 1;
         }
@@ -395,7 +391,8 @@ impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStreamer<PAGES, ASS
             pack_lba,
             toc,
             &self.ids[..count],
-            &self.slots[..count],
+            // Each asset's slot is its place in the group.
+            &core::array::from_fn::<usize, ASSETS, _>(|index| index)[..count],
             &self.capacities[..count],
         );
         self.finish_if_done();
@@ -518,8 +515,7 @@ impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStreamer<PAGES, ASS
         let index = self.ids[..self.asset_count]
             .iter()
             .position(|&id| id == asset.id.0)?;
-        self.storage
-            .bytes_for(self.slots[index], asset.ram_bytes as usize)
+        self.storage.bytes_for(index, asset.ram_bytes as usize)
     }
 }
 
