@@ -199,6 +199,12 @@ fn attach_clocks(
 /// Cook `project_dir` twice (as authored, and with Aletha in the training
 /// enemy's place) and return both fighters.
 pub fn load(project_dir: &Path) -> Result<ProjectFighters, String> {
+    load_training(project_dir, 0)
+}
+
+/// [`load`] with the `which`-th training enemy of the scene (in node order)
+/// as the enemy, and in Aletha's swapped placement.
+pub fn load_training(project_dir: &Path, which: usize) -> Result<ProjectFighters, String> {
     let project = ProjectDocument::load_from_path(project_dir.join("project.ron"))
         .map_err(|e| format!("load {}: {e:?}", project_dir.display()))?;
     let package = cook(&project, project_dir)?;
@@ -214,6 +220,7 @@ pub fn load(project_dir: &Path) -> Result<ProjectFighters, String> {
     let scene = project.active_scene();
     let mut player_node = None;
     let mut enemy_node = None;
+    let mut training_seen = 0usize;
     for node in scene.nodes() {
         if let NodeKind::CharacterController {
             character,
@@ -233,8 +240,11 @@ pub fn load(project_dir: &Path) -> Result<ProjectFighters, String> {
                             _ => None,
                         })
                 });
-                if behaviour.is_some_and(|b| b.training) && enemy_node.is_none() {
-                    enemy_node = Some((node.id, *character, behaviour));
+                if behaviour.is_some_and(|b| b.training) {
+                    if training_seen == which {
+                        enemy_node = Some((node.id, *character, behaviour));
+                    }
+                    training_seen += 1;
                 }
             }
         }

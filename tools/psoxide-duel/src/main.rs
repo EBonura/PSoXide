@@ -7,6 +7,10 @@
 //! psoxide-duel log --project projects/grid-dungeon --seed 1 [--matchup aletha-ai:enemy-ai]
 //! ```
 //!
+//! `--training N` makes the scene's Nth training enemy (node order, from 0)
+//! the enemy; `sweep --versus M` instead fights it against the Mth, each
+//! side as A once.
+//!
 //! Every command takes `--set FIGHTER.NAME=VALUE` (repeatable) to run with a
 //! number changed: FIGHTER is `aletha` or `enemy`, NAME a placeholder's report
 //! name or `stagger_ticks`; `--set downed_protected=0|1` picks the downed
@@ -37,6 +41,8 @@ struct Args {
     out: Option<PathBuf>,
     matchup: String,
     sets: Vec<String>,
+    training: usize,
+    versus: Option<usize>,
 }
 
 fn parse() -> Args {
@@ -51,6 +57,8 @@ fn parse() -> Args {
         out: None,
         matchup: "aletha-ai:enemy-ai".into(),
         sets: Vec::new(),
+        training: 0,
+        versus: None,
     };
     while let Some(flag) = args.next() {
         let mut value = || {
@@ -70,6 +78,8 @@ fn parse() -> Args {
             "--out" => parsed.out = Some(PathBuf::from(value())),
             "--matchup" => parsed.matchup = value(),
             "--set" => parsed.sets.push(value()),
+            "--training" => parsed.training = value().parse().expect("--training N"),
+            "--versus" => parsed.versus = Some(value().parse().expect("--versus N")),
             other => panic!("unknown flag {other}"),
         }
     }
@@ -217,9 +227,10 @@ fn apply_set(loaded: &mut ProjectFighters, set: &str) {
     }
 }
 
-fn load(path: &Path, sets: &[String]) -> Placed {
+fn load(path: &Path, sets: &[String], training: usize) -> Placed {
     let started = std::time::Instant::now();
-    let mut loaded = project::load(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let mut loaded = project::load_training(path, training)
+        .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     for set in sets {
         apply_set(&mut loaded, set);
     }
@@ -256,9 +267,28 @@ fn main() {
         "sweep" => {
             println!("{HEADER}");
             for path in &args.projects {
-                let placed = load(path, &args.sets);
+                let placed = load(path, &args.sets, args.training);
+                let versus = args.versus.map(|which| load(path, &args.sets, which));
                 for &layout in &args.layouts {
-                    for matchup in standard(&placed, layout) {
+                    let matchups = match &versus {
+                        // Two training enemies against each other, each side
+                        // as A once.
+                        Some(other) => {
+                            let m = |name: &str, a, b| Matchup {
+                                name: name.to_owned(),
+                                fighters: [a, b],
+                                controllers: [Controller::Ai, Controller::Ai],
+                                layout,
+                                distance: placed.loaded.start_distance,
+                            };
+                            vec![
+                                m("enemy-ai:versus-ai", &placed.enemy, &other.enemy),
+                                m("versus-ai:enemy-ai", &other.enemy, &placed.enemy),
+                            ]
+                        }
+                        None => standard(&placed, layout),
+                    };
+                    for matchup in matchups {
                         let started = std::time::Instant::now();
                         let summary = sweep::sweep(&matchup, 1..=args.seeds);
                         eprintln!(
@@ -291,7 +321,7 @@ fn main() {
         }
         "sensitivity" => sensitivity(&args),
         "log" => {
-            let placed = load(&args.projects[0], &args.sets);
+            let placed = load(&args.projects[0], &args.sets, args.training);
             let (a, b) = args.matchup.split_once(':').expect("--matchup A:B");
             let side = |s: &str| -> (&Fighter, Controller) {
                 let (who, by) = s.split_once('-').expect("fighter-controller");
@@ -324,7 +354,7 @@ fn sensitivity(args: &Args) {
     println!("| project | layout | placeholder | value (aletha / enemy) | aletha mirror A share | enemy mirror A share | aletha vs enemy: aletha share | parries aletha / enemy | crits aletha / enemy | knockdowns aletha / enemy | mean length |\n|---|---|---|---|---|---|---|---|---|---|---|");
     let mut all = Vec::new();
     for path in &args.projects {
-        let base = load(path, &args.sets);
+        let base = load(path, &args.sets, args.training);
         for &layout in &args.layouts {
             let mut configs: Vec<(String, i32)> = vec![("baseline".into(), 0)];
             for p in Placeholder::ALL {
