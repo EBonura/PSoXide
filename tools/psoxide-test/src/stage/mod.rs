@@ -222,14 +222,20 @@ impl Ctx<'_> {
             ("redux", tools.redux.clone()),
         ] {
             let token = format!("{{tool:{name}}}");
-            if out.contains(&token) {
+            let digest_token = format!("{{tool_sha256:{name}}}");
+            if out.contains(&token) || out.contains(&digest_token) {
                 let path = path.ok_or_else(|| {
                     format!("`{value}` needs {{tool:{name}}}: set it under [tools] in the config")
                 })?;
                 out = out.replace(&token, &path.display().to_string());
+                if out.contains(&digest_token) {
+                    // A bundle directory (Redux) has no single digest.
+                    let digest = util::sha256_file(&path)?;
+                    out = out.replace(&digest_token, &digest);
+                }
             }
         }
-        if let Some(at) = out.find("{tool:") {
+        if let Some(at) = out.find("{tool:").or_else(|| out.find("{tool_sha256:")) {
             return Err(format!("unknown tool placeholder in `{}`", &out[at..]));
         }
         Ok(out)

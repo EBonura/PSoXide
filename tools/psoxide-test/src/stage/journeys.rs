@@ -168,12 +168,15 @@ pub fn run(ctx: &Ctx<'_>, bless: bool) -> StageResult {
         Ok(g) => g.to_path_buf(),
         Err(e) => return result(Source::Run, Outcome::error("gate", e)),
     };
-    let paths = match util::glob(&ctx.repo, &spec.files) {
+    let paths = match files(&ctx.repo, &spec.files) {
         Ok(p) if !p.is_empty() => p,
         Ok(_) => {
             return result(
                 Source::Run,
-                Outcome::error("journeys", format!("no file matches {}", spec.files)),
+                Outcome::error(
+                    "journeys",
+                    format!("no file matches {}", spec.files.join(", ")),
+                ),
             )
         }
         Err(e) => return result(Source::Run, Outcome::error("journeys", e)),
@@ -546,9 +549,15 @@ fn hw_captures(out: &Path) -> (u64, u64) {
     counts
 }
 
-/// Paths of the journeys a game file selects (for `lint`).
-pub fn files(repo: &Path, pattern: &str) -> Result<Vec<PathBuf>, String> {
-    util::glob(repo, pattern)
+/// Paths of the journeys a game file selects: every glob's matches, sorted, each once.
+pub fn files(repo: &Path, patterns: &[String]) -> Result<Vec<PathBuf>, String> {
+    let mut all = Vec::new();
+    for p in patterns {
+        all.extend(util::glob(repo, p)?);
+    }
+    all.sort();
+    all.dedup();
+    Ok(all)
 }
 
 #[cfg(test)]
