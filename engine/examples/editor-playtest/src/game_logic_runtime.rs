@@ -2292,38 +2292,18 @@ impl Playtest {
             {
                 continue;
             }
-            let position = self.game_entities.position(index);
             // A final Attack tick may have transitioned the state to Recover
             // before presentation freezes. The deferred token retains the
             // exact attack clip/phase that contact evaluates, so body and
             // equipment visibly sample that same pose this tick.
-            let animation = self.game_entities.animation(index);
-            let clip = self
+            let attack = self
                 .deferred_enemy_attacks
                 .as_slice()
                 .iter()
                 .copied()
                 .find(|attack| attack.entity() == index)
-                .map_or(animation.clip, |attack| attack.clip());
-            out.try_push(ModelInstancePoseOverride {
-                instance: record.model_instance,
-                x: position[0],
-                y: position[1],
-                z: position[2],
-                yaw: self.game_entities.yaw(index),
-                clip: psx_level::OptionalModelClipIndex::some(psx_level::ModelClipIndex(clip.clip)),
-                phase_ticks: clip.phase_ticks,
-                one_shot: clip.one_shot,
-                speed_q8: clip.speed_q8,
-                frame_range: clip.frame_range,
-                layer: animation
-                    .fade
-                    .map(|(clip, alpha_q12)| mr::ModelInstancePoseLayer {
-                        clip,
-                        alpha_q12,
-                        joint_mask: u32::MAX,
-                    }),
-            });
+                .map(|attack| (attack.action(), attack.clip()));
+            out.try_push(self.game_entities.pose_override(record, index, attack));
         }
     }
 

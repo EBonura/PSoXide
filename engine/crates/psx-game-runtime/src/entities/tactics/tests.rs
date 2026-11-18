@@ -1332,3 +1332,35 @@ fn a_clip_change_crossfades_and_carries_the_stride() {
     assert_eq!(from.clip, records[0].walk_backward_clip);
     assert_eq!(weight, 2048);
 }
+
+#[test]
+fn the_pose_override_reads_the_shown_actions_in_place_choice_as_hers() {
+    use psx_level::character_action_flags::{IN_PLACE, IN_PLACE_OVERRIDE};
+    let records: &'static [LevelGameEntityRecord] = &ENEMY;
+    for (flags, expected) in [
+        (0, None),
+        (IN_PLACE_OVERRIDE, Some(false)),
+        (IN_PLACE_OVERRIDE | IN_PLACE, Some(true)),
+    ] {
+        let mut bodies = TEST_BODIES;
+        for body in bodies.iter_mut() {
+            body.action_flags = [flags; psx_level::CHARACTER_ANIMATION_ACTION_COUNT];
+        }
+        let mut e: GameEntities<2> = GameEntities::EMPTY;
+        e.set_characters(std::boxed::Box::leak(std::boxed::Box::new(bodies)));
+        e.spawn_from_records(records);
+        e.update_animation(records, SimTick::from_u32(2), |_, _| 40);
+        let shown = e.pose_override(&records[0], 0, None);
+        assert_eq!(shown.in_place_override, expected);
+        // A retained attack is read for its own action.
+        let attack = e.pose_override(
+            &records[0],
+            0,
+            Some((
+                CharacterAnimationAction::LightAttack,
+                GameEntityClip::default(),
+            )),
+        );
+        assert_eq!(attack.in_place_override, expected);
+    }
+}

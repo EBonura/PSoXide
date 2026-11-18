@@ -65,6 +65,8 @@ impl AnimState for EntityAnim {
 /// What an entity shows this tick ([`GameEntities::animation`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GameEntityAnimation {
+    /// The action [`Self::clip`] plays.
+    pub action: CharacterAnimationAction,
     /// The clip its state plays ([`GameEntities::clip_for_state`]).
     pub clip: GameEntityClip,
     /// The clip it is crossfading from, at that clip's tick now, and the Q12
@@ -78,6 +80,7 @@ pub struct GameEntityAnimation {
 impl GameEntityAnimation {
     /// Nothing resolved yet: the default clip, no layer.
     pub const NONE: Self = Self {
+        action: EntityAnim::NONE.action,
         clip: EntityAnim::NONE.clip,
         fade: None,
         legs: None,
@@ -177,10 +180,54 @@ impl<const N: usize> GameEntities<N> {
                 .filter(|fade| fade.from != EntityAnim::NONE)
                 .map(|fade| (fade.from.at(fade.local_tick as u16), fade.alpha_q12));
             self.shown[i] = GameEntityAnimation {
+                action,
                 clip,
                 fade,
                 legs: self.moving_legs(i),
             };
+        }
+    }
+
+    /// How entity `index` (placed by `record`) is posed this tick: at its
+    /// position and facing, playing its shown clip (or `attack`, the retained
+    /// attack's action and clip while one is under way) with its crossfade,
+    /// and its action's in-place choice read through the player's rule
+    /// ([`crate::character::in_place_override`]). The disc and the host duel
+    /// harness pose every entity through this.
+    pub fn pose_override(
+        &self,
+        record: &LevelGameEntityRecord,
+        index: usize,
+        attack: Option<(CharacterAnimationAction, GameEntityClip)>,
+    ) -> crate::model_rendering::ModelInstancePoseOverride {
+        let animation = self.animation(index);
+        let (action, clip) = attack.unwrap_or((animation.action, animation.clip));
+        let position = self.position(index);
+        let flags = self
+            .body(record)
+            .action_flags
+            .get(action.to_index())
+            .copied()
+            .unwrap_or(0);
+        crate::model_rendering::ModelInstancePoseOverride {
+            instance: record.model_instance,
+            x: position[0],
+            y: position[1],
+            z: position[2],
+            yaw: self.yaw(index),
+            clip: psx_level::OptionalModelClipIndex::some(psx_level::ModelClipIndex(clip.clip)),
+            phase_ticks: clip.phase_ticks,
+            one_shot: clip.one_shot,
+            speed_q8: clip.speed_q8,
+            frame_range: clip.frame_range,
+            layer: animation.fade.map(|(clip, alpha_q12)| {
+                crate::model_rendering::ModelInstancePoseLayer {
+                    clip,
+                    alpha_q12,
+                    joint_mask: u32::MAX,
+                }
+            }),
+            in_place_override: crate::character::in_place_override(flags),
         }
     }
 

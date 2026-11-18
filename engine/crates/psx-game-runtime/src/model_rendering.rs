@@ -61,8 +61,9 @@ pub use self::instances::draw_collision_cylinder_debug;
 pub use self::instances::{
     accumulate_model_instance_draw_stats, actor_shadow_radius, draw_actor_shadow,
     draw_ground_decal, draw_model_instance_from_pose, draw_model_instance_shadows,
-    draw_model_instances, resolve_instance_actor_pose, InstanceActorPoseSnapshot,
-    ModelInstanceDrawStats, ModelInstancePoseLayer, ModelInstancePoseOverride,
+    draw_model_instances, resolve_instance_actor_pose, with_entity_legs_layer,
+    InstanceActorPoseSnapshot, ModelInstanceDrawStats, ModelInstancePoseLayer,
+    ModelInstancePoseOverride,
 };
 
 /// The cooked model-family tables the render policy walks, bundled so
@@ -2662,6 +2663,7 @@ pub fn model_instance_joint_world_transform(
         animation,
         phase_q12,
         clip_local,
+        None,
         None,
         x,
         y,

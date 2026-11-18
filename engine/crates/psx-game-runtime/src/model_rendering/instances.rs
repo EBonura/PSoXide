@@ -66,6 +66,10 @@ pub struct ModelInstancePoseOverride {
     /// A second clip blended over the live one: the clip it crossfades
     /// from, or a layer on some joints. Only read when `clip` is some.
     pub layer: Option<ModelInstancePoseLayer>,
+    /// The live action's authored in-place override
+    /// ([`crate::character::in_place_override`]), read exactly as the
+    /// player's is. Only read when `clip` is some.
+    pub in_place_override: Option<bool>,
 }
 
 /// A clip blended over an instance's live clip
@@ -470,6 +474,9 @@ fn resolve_instance_actor_pose_record<
         .filter(|_| live_clip.is_some())
         .and_then(|live| live.layer)
         .and_then(|layer| instance_layer_blend(runtime_model, clips, layer, video_hz));
+    let in_place_override = live
+        .filter(|_| live_clip.is_some())
+        .and_then(|live| live.in_place_override);
     Some(InstanceActorPoseSnapshot {
         instance_index,
         model: runtime_model,
@@ -483,12 +490,43 @@ fn resolve_instance_actor_pose_record<
             phase,
             clip_local,
             blend_from,
+            in_place_override,
             inst_x,
             inst_y,
             inst_z,
             inst_yaw,
         ),
     })
+}
+
+/// `pose` with an entity's moving-attack gait layered on its legs
+/// ([`crate::entities::GameEntityAnimation::legs`]): the disc and the host
+/// duel harness both add it here.
+pub fn with_entity_legs_layer<const MAX_RUNTIME_MODEL_CLIPS: usize>(
+    pose: InstanceActorPoseSnapshot,
+    legs: Option<(crate::entities::GameEntityClip, u16)>,
+    clips: &[Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
+    video_hz: VideoHz,
+) -> InstanceActorPoseSnapshot {
+    let mask = pose.model().body_masks.legs;
+    let Some((gait, weight)) = legs.filter(|_| mask != 0) else {
+        return pose;
+    };
+    let Some(animation) = pose.model().clip(clips, ModelClipIndex(gait.clip)) else {
+        return pose;
+    };
+    let phase = animation_phase_at_tick_q12(
+        animation,
+        u32::from(gait.phase_ticks),
+        video_hz,
+        true,
+        gait.speed_q8,
+        gait.frame_range,
+    );
+    pose.with_pose(
+        pose.pose()
+            .with_weighted_joint_layer(animation, phase, mask, weight),
+    )
 }
 
 /// The pose a [`ModelInstancePoseLayer`] blends in, sampled on `model`'s
@@ -534,6 +572,7 @@ pub(super) fn instance_actor_pose_from_components(
     phase_q12: u32,
     clip_local: ModelClipIndex,
     blend_from: Option<ModelPoseBlend<'static>>,
+    in_place_override: Option<bool>,
     x: i32,
     y: i32,
     z: i32,
@@ -560,7 +599,7 @@ pub(super) fn instance_actor_pose_from_components(
             clip_local,
             phase_q12,
             blend_from,
-            in_place_override: None,
+            in_place_override,
             clip_first_root_xz: None,
             bind_floor: false,
         },
@@ -1022,6 +1061,7 @@ mod tests {
             speed_q8: psx_level::CHARACTER_ACTION_SPEED_UNSCALED_Q8,
             frame_range: psx_level::CharacterActionFrameRange::FULL,
             layer: None,
+            in_place_override: None,
         }
     }
 

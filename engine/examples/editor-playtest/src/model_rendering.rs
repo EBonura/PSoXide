@@ -1151,30 +1151,12 @@ impl Playtest {
             // Moving through an attack, the gait plays on the legs read off
             // the entity's own skeleton (fighter_anim::BodyJointMasks).
             if let (Some(pose), Some((entity, _))) = (self.instance_actor_poses[index], owner) {
-                let legs = pose.model().body_masks.legs;
-                if legs != 0 {
-                    if let Some((gait, weight)) = self.game_entities.animation(entity).legs {
-                        if let Some(animation) = pose
-                            .model()
-                            .clip(&self.clips, psx_level::ModelClipIndex(gait.clip))
-                        {
-                            let phase = mr::animation_phase_at_tick_q12(
-                                animation,
-                                u32::from(gait.phase_ticks),
-                                ctx.video_hz,
-                                true,
-                                gait.speed_q8,
-                                gait.frame_range,
-                            );
-                            self.instance_actor_poses[index] = Some(
-                                pose.with_pose(
-                                    pose.pose()
-                                        .with_weighted_joint_layer(animation, phase, legs, weight),
-                                ),
-                            );
-                        }
-                    }
-                }
+                self.instance_actor_poses[index] = Some(mr::with_entity_legs_layer(
+                    pose,
+                    self.game_entities.animation(entity).legs,
+                    &self.clips,
+                    ctx.video_hz,
+                ));
             }
             self.enemy_swing_sound(index, previous, self.instance_actor_poses[index]);
         }

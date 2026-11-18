@@ -12,13 +12,12 @@ use psx_engine::{SimTick, TexturedModelRenderFace, VideoHz};
 use psx_game_runtime::actor_pose::ActorPoseSnapshot;
 use psx_game_runtime::entities::{GameEntities, GameEntityClip};
 use psx_game_runtime::model_rendering::{
-    self as mr, InstanceActorPoseSnapshot, ModelInstancePoseLayer, ModelInstancePoseOverride,
-    ModelTables, RuntimeModelAsset,
+    self as mr, InstanceActorPoseSnapshot, ModelTables, RuntimeModelAsset,
 };
 use psx_level::{
-    AssetId, CombatCapsuleRecord, LevelGameEntityRecord, LevelModelClipBoundsRecord,
-    LevelModelClipRecord, LevelModelRecord, ModelClipIndex, ModelClipTableIndex,
-    ModelFrameBoundsIndex, ModelIndex, ModelSocketIndex, OptionalModelClipIndex,
+    AssetId, CharacterAnimationAction, CombatCapsuleRecord, LevelGameEntityRecord,
+    LevelModelClipBoundsRecord, LevelModelClipRecord, LevelModelRecord, ModelClipIndex,
+    ModelClipTableIndex, ModelFrameBoundsIndex, ModelIndex, ModelSocketIndex,
 };
 use psxed_project::playtest::{OwnedLevelRecords, PlaytestCombatCapsule, PlaytestPackage};
 
@@ -252,37 +251,21 @@ impl Rig {
             })
     }
 
-    /// Fighter slot 0 of `entities`, posed at `tick` as the disc poses it:
-    /// its shown clip (the retained attack's clip while one is under way),
-    /// crossfade and moving-attack leg layer.
+    /// Fighter slot 0 of `entities` (placed by `record`), posed at `tick`
+    /// through the disc's own path ([`GameEntities::pose_override`] and
+    /// [`mr::with_entity_legs_layer`]): its shown clip (the retained attack's
+    /// action and clip while one is under way), crossfade, in-place choice
+    /// and moving-attack leg layer.
     pub fn pose<const N: usize>(
         &self,
         entities: &GameEntities<N>,
-        attack_clip: Option<GameEntityClip>,
+        record: &LevelGameEntityRecord,
+        attack: Option<(CharacterAnimationAction, GameEntityClip)>,
         tick: SimTick,
     ) -> Option<InstanceActorPoseSnapshot> {
-        let position = entities.position(0);
-        let animation = entities.animation(0);
-        let clip = attack_clip.unwrap_or(animation.clip);
-        let overrides = [ModelInstancePoseOverride {
-            instance: self.instance,
-            x: position[0],
-            y: position[1],
-            z: position[2],
-            yaw: entities.yaw(0),
-            clip: OptionalModelClipIndex::some(ModelClipIndex(clip.clip)),
-            phase_ticks: clip.phase_ticks,
-            one_shot: clip.one_shot,
-            speed_q8: clip.speed_q8,
-            frame_range: clip.frame_range,
-            layer: animation
-                .fade
-                .map(|(clip, alpha_q12)| ModelInstancePoseLayer {
-                    clip,
-                    alpha_q12,
-                    joint_mask: u32::MAX,
-                }),
-        }];
+        let mut placed = *record;
+        placed.model_instance = self.instance;
+        let overrides = [entities.pose_override(&placed, 0, attack)];
         let pose = mr::resolve_instance_actor_pose(
             self.tables,
             &self.models,
@@ -292,27 +275,12 @@ impl Rig {
             tick,
             VideoHz::NTSC,
         )?;
-        let legs = pose.model().body_masks.legs;
-        let Some((gait, weight)) = animation.legs.filter(|_| legs != 0) else {
-            return Some(pose);
-        };
-        let Some(gait_clip) = pose.model().clip(&*self.clips, ModelClipIndex(gait.clip)) else {
-            return Some(pose);
-        };
-        let phase = mr::animation_phase_at_tick_q12(
-            gait_clip,
-            u32::from(gait.phase_ticks),
+        Some(mr::with_entity_legs_layer(
+            pose,
+            entities.animation(0).legs,
+            &self.clips,
             VideoHz::NTSC,
-            true,
-            gait.speed_q8,
-            gait.frame_range,
-        );
-        Some(
-            pose.with_pose(
-                pose.pose()
-                    .with_weighted_joint_layer(gait_clip, phase, legs, weight),
-            ),
-        )
+        ))
     }
 }
 

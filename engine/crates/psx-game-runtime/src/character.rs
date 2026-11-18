@@ -69,6 +69,18 @@ pub enum PlayerAnim {
     RunWinddownAlt,
 }
 
+/// The in-place override an action's flags author, if any: `Some(true)`
+/// cancels the clip's root translation, `Some(false)` keeps it, `None` leaves
+/// the clip's own calibration. Every fighter reads its actions through this
+/// one rule (the player's [`RuntimeCharacter`] and an entity's body record).
+pub const fn in_place_override(flags: u8) -> Option<bool> {
+    if flags & character_action_flags::IN_PLACE_OVERRIDE == 0 {
+        None
+    } else {
+        Some(flags & character_action_flags::IN_PLACE != 0)
+    }
+}
+
 impl PlayerAnim {
     /// The cooked animation action this state plays.
     pub const fn action(self) -> CharacterAnimationAction {
@@ -352,12 +364,7 @@ impl RuntimeCharacter {
 
     /// Authored in-place override for `action`, if one is set.
     pub fn action_in_place_override(&self, action: CharacterAnimationAction) -> Option<bool> {
-        let flags = self.action_flags(action);
-        if flags & character_action_flags::IN_PLACE_OVERRIDE == 0 {
-            None
-        } else {
-            Some(flags & character_action_flags::IN_PLACE != 0)
-        }
+        in_place_override(self.action_flags(action))
     }
 
     /// Pick the clip index for an animation state. An unbound action plays

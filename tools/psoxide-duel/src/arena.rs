@@ -804,8 +804,11 @@ pub fn run(duel: &Duel<'_>) -> DuelResult {
             let now = psx_engine::SimTick::from_u32(tick);
             side.entities
                 .update_animation(side.records, now, |_, clip| rig.clip_ticks(clip));
-            let attack = side.attacks.get(0).map(|attack| attack.clip());
-            let pose = rig.pose(&side.entities, attack, now);
+            let attack = side
+                .attacks
+                .get(0)
+                .map(|attack| (attack.action(), attack.clip()));
+            let pose = rig.pose(&side.entities, &side.records[0], attack, now);
             side.poses.advance(pose);
         }
 
