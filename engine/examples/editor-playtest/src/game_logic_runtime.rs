@@ -704,70 +704,19 @@ impl Playtest {
             if player.passes_through {
                 continue;
             }
-            let previous_attacker_pose = self
-                .previous_instance_actor_poses
-                .get(entity.model_instance as usize)
-                .copied()
-                .flatten()
-                .filter(|old| {
-                    attacker_snapshot
-                        .is_some_and(|current| old.clip_local() == current.clip_local())
-                })
-                .map(|snapshot| snapshot.pose());
-            let (contact, window_mask) = combat::resolve_authored_actor_contact_swept_pending(
+            let Some((damage, poise_damage)) = self.entity_melee_contact(
+                attack,
                 attacker_capsules,
-                attack.action(),
-                attacker_pose,
-                previous_attacker_pose,
+                attacker_snapshot,
                 player.capsules,
                 player.pose,
-                self.game_entities
-                    .deferred_melee_hit_mask(attack)
-                    .unwrap_or(u16::MAX),
-            );
-            let damage = match contact {
-                combat::AuthoredActorContact::Hit {
-                    damage,
-                    poise_damage,
-                } => Some((damage, poise_damage)),
-                combat::AuthoredActorContact::Miss => None,
-                combat::AuthoredActorContact::FallbackRequired => self
-                    .game_entities
-                    .deferred_attack_legacy_arc_hits(
-                        GAME_ENTITIES.as_slice(),
-                        attack,
-                        player.position,
-                        player.radius,
-                    )
-                    .then_some((entity.touch_damage, entity.touch_damage.max(20))),
-            };
-            let Some((damage, poise_damage)) = damage else {
+                player.position,
+                player.radius,
+                prop_blockers,
+                prop_blockers_valid,
+            ) else {
                 continue;
             };
-            // World occlusion is authoritative for BOTH the authored capsule
-            // and the legacy arc outcome: a closed door between the frozen
-            // attacker position and the player blocks the connection. The
-            // token is deliberately not consumed, mirroring an i-frame whiff.
-            if !prop_blockers_valid
-                || !self.melee_line_clear(attack.position(), player.position, prop_blockers)
-            {
-                continue;
-            }
-            let (damage, poise_damage) = self.game_entities.crit_scaled(
-                GAME_ENTITIES.as_slice(),
-                attack.entity(),
-                damage,
-                poise_damage,
-            );
-            let connected = if window_mask == 0 {
-                self.game_entities.connect_deferred_attack(attack)
-            } else {
-                self.game_entities
-                    .connect_deferred_melee_window(attack, window_mask)
-            };
-            if !connected {
-                continue;
-            }
             // The swing that reached her uses up the crit, parried or not.
             let crit = self.game_entities.spend_crit(attack.entity());
             if crit {
@@ -801,6 +750,86 @@ impl Playtest {
                 taken.crit |= crit;
             }
         }
+    }
+
+    /// One entity melee token against one defender, whoever it is (the
+    /// player or a rival): authored capsules on both poses (swept from the
+    /// attacker's previous pose of the same clip), the legacy arc only when a
+    /// side has none, world occlusion between the frozen attacker and the
+    /// defender, the attacker's crit scaling, then the token's connection.
+    /// The damage and poise that land, or None (a miss, an occluded swing or
+    /// a token already spent; an occluded swing keeps its token, as an
+    /// i-frame whiff does).
+    #[allow(clippy::too_many_arguments)]
+    fn entity_melee_contact(
+        &mut self,
+        attack: DeferredGameEntityAttack,
+        attacker_capsules: &'static [psx_level::CombatCapsuleRecord],
+        attacker_snapshot: Option<InstanceActorPoseSnapshot>,
+        defender_capsules: &'static [psx_level::CombatCapsuleRecord],
+        defender_pose: Option<psx_game_runtime::actor_pose::ActorPoseSnapshot>,
+        defender_position: [i32; 3],
+        defender_radius: i32,
+        prop_blockers: &[CharacterCollisionAabb],
+        prop_blockers_valid: bool,
+    ) -> Option<(u16, u16)> {
+        let record = GAME_ENTITIES.get(attack.entity())?;
+        let previous_attacker_pose = self
+            .previous_instance_actor_poses
+            .get(usize::from(record.model_instance))
+            .copied()
+            .flatten()
+            .filter(|old| {
+                attacker_snapshot.is_some_and(|current| old.clip_local() == current.clip_local())
+            })
+            .map(|snapshot| snapshot.pose());
+        let (contact, window_mask) = combat::resolve_authored_actor_contact_swept_pending(
+            attacker_capsules,
+            attack.action(),
+            attacker_snapshot.map(|snapshot| snapshot.pose()),
+            previous_attacker_pose,
+            defender_capsules,
+            defender_pose,
+            self.game_entities
+                .deferred_melee_hit_mask(attack)
+                .unwrap_or(u16::MAX),
+        );
+        let (damage, poise_damage) = match contact {
+            combat::AuthoredActorContact::Hit {
+                damage,
+                poise_damage,
+            } => (damage, poise_damage),
+            combat::AuthoredActorContact::Miss => return None,
+            combat::AuthoredActorContact::FallbackRequired => {
+                if !self.game_entities.deferred_attack_legacy_arc_hits(
+                    GAME_ENTITIES.as_slice(),
+                    attack,
+                    defender_position,
+                    defender_radius,
+                ) {
+                    return None;
+                }
+                (record.touch_damage, record.touch_damage.max(20))
+            }
+        };
+        if !prop_blockers_valid
+            || !self.melee_line_clear(attack.position(), defender_position, prop_blockers)
+        {
+            return None;
+        }
+        let (damage, poise_damage) = self.game_entities.crit_scaled(
+            GAME_ENTITIES.as_slice(),
+            attack.entity(),
+            damage,
+            poise_damage,
+        );
+        let connected = if window_mask == 0 {
+            self.game_entities.connect_deferred_attack(attack)
+        } else {
+            self.game_entities
+                .connect_deferred_melee_window(attack, window_mask)
+        };
+        connected.then_some((damage, poise_damage))
     }
 
     /// One entity's melee token against its rival: the same contact the
@@ -846,63 +875,19 @@ impl Playtest {
             .copied()
             .flatten()
             .map(|snapshot| snapshot.pose());
-        let previous_attacker_pose = self
-            .previous_instance_actor_poses
-            .get(usize::from(record.model_instance))
-            .copied()
-            .flatten()
-            .filter(|old| {
-                attacker_snapshot.is_some_and(|current| old.clip_local() == current.clip_local())
-            })
-            .map(|snapshot| snapshot.pose());
-        let (contact, window_mask) = combat::resolve_authored_actor_contact_swept_pending(
+        let Some((damage, poise_damage)) = self.entity_melee_contact(
+            attack,
             attacker_capsules,
-            attack.action(),
-            attacker_snapshot.map(|snapshot| snapshot.pose()),
-            previous_attacker_pose,
+            attacker_snapshot,
             rival_capsules,
             rival_pose,
-            self.game_entities
-                .deferred_melee_hit_mask(attack)
-                .unwrap_or(u16::MAX),
-        );
-        let position = self.game_entities.position(rival);
-        let damage = match contact {
-            combat::AuthoredActorContact::Hit {
-                damage,
-                poise_damage,
-            } => Some((damage, poise_damage)),
-            combat::AuthoredActorContact::Miss => None,
-            combat::AuthoredActorContact::FallbackRequired => self
-                .game_entities
-                .deferred_attack_legacy_arc_hits(
-                    GAME_ENTITIES.as_slice(),
-                    attack,
-                    position,
-                    i32::from(self.game_entities.body(rival_record).radius),
-                )
-                .then_some((record.touch_damage, record.touch_damage.max(20))),
-        };
-        let Some((damage, poise_damage)) = damage else {
+            self.game_entities.position(rival),
+            i32::from(self.game_entities.body(rival_record).radius),
+            prop_blockers,
+            prop_blockers_valid,
+        ) else {
             return;
         };
-        if !prop_blockers_valid
-            || !self.melee_line_clear(attack.position(), position, prop_blockers)
-        {
-            return;
-        }
-        let (damage, poise_damage) =
-            self.game_entities
-                .crit_scaled(GAME_ENTITIES.as_slice(), entity, damage, poise_damage);
-        let connected = if window_mask == 0 {
-            self.game_entities.connect_deferred_attack(attack)
-        } else {
-            self.game_entities
-                .connect_deferred_melee_window(attack, window_mask)
-        };
-        if !connected {
-            return;
-        }
         let crit = self.game_entities.spend_crit(entity);
         let outcome = self.game_entities.receive_hit(
             GAME_ENTITIES.as_slice(),
