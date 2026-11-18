@@ -100,6 +100,11 @@ SECTIONS {
         *(.text.*handoff*write_commands_slow*)
         *(.text.*set_draw_mode*)
         *(.text.*signal_draw_done*)
+        /* Cortex's target-lock markers feed those leaves every frame of a
+           fight; kept beside them so neither evicts the other. Guests
+           without these functions are unaffected. */
+        *(.text.*draw_lock_target_readout*)
+        *(.text.*draw_target_lock_line*)
         *(.text .text.*);
         __text_end = .;
     } > IMAGE
