@@ -88,7 +88,7 @@ impl StepRule for Arena {
         !self.hidden
     }
 }
-fn engaged() -> GameEntities<2, true> {
+fn engaged() -> GameEntities<2> {
     let mut e = GameEntities::EMPTY;
     e.spawn_from_records(&ENEMY);
     e.state[0] = GameEntityState::Aggro as u8;
@@ -96,7 +96,7 @@ fn engaged() -> GameEntities<2, true> {
     e
 }
 fn tick(
-    e: &mut GameEntities<2, true>,
+    e: &mut GameEntities<2>,
     m: &mut Arena,
     p: [i32; 3],
     delta: u16,
@@ -300,7 +300,7 @@ fn goal_seconds_match_both_npc_cadences() {
 #[test]
 fn single_enemy_encounter_replay_is_repeatable() {
     let run = || {
-        let mut e = GameEntities::<2, true>::EMPTY;
+        let mut e = GameEntities::<2>::EMPTY;
         e.spawn_from_records(&ENEMY);
         let mut m = Arena::default();
         let mut rows = std::vec::Vec::new();
@@ -372,7 +372,7 @@ fn locked_cannon_approach_keeps_a_firing_band_instead_of_shuffling() {
         assert_ne!(e.tactics[0].goal, EnemyGoal::Retreat);
         if e.state(0) == GameEntityState::Windup {
             assert_eq!(e.selected_attack_kind(0), GAME_ENTITY_ATTACK_RANGED);
-            assert!(GameEntities::<2, true>::distance(e.position(0), [0, 0, 180]) > 60);
+            assert!(GameEntities::<2>::distance(e.position(0), [0, 0, 180]) > 60);
             fired = true;
             break;
         }
@@ -418,7 +418,7 @@ fn tactical_state_has_a_fixed_small_memory_budget() {
 
 #[test]
 fn hearing_acquires_a_location_without_tracking_hidden_player() {
-    let mut e: GameEntities<2, true> = GameEntities::EMPTY;
+    let mut e: GameEntities<2> = GameEntities::EMPTY;
     e.spawn_from_records(&ENEMY);
     let mut m = Arena {
         hidden: true,
@@ -913,7 +913,7 @@ fn enemy_with_flags(flags: u16) -> &'static [LevelGameEntityRecord; 1] {
 
 /// What entity 0 commits to when its controller asks for `attack`.
 fn committed(records: &'static [LevelGameEntityRecord; 1], attack: CombatAction) -> Option<u8> {
-    let mut e: GameEntities<2, true> = GameEntities::EMPTY;
+    let mut e: GameEntities<2> = GameEntities::EMPTY;
     e.spawn_from_records(records);
     e.state[0] = GameEntityState::Aggro as u8;
     let mut stats = GameEntityTickStats::default();
@@ -959,7 +959,7 @@ fn enemy_attacks_pass_the_same_kit_gate_as_the_player() {
 #[test]
 fn an_enemy_swaps_on_purpose_to_parry_a_swing_it_sees() {
     let records = enemy_with_flags(enemy().flags);
-    let mut e: GameEntities<2, true> = GameEntities::EMPTY;
+    let mut e: GameEntities<2> = GameEntities::EMPTY;
     e.spawn_from_records(&records[..]);
     e.set_swap_cooldown_for_tests(300);
     e.state[0] = GameEntityState::Aggro as u8;
@@ -970,7 +970,7 @@ fn an_enemy_swaps_on_purpose_to_parry_a_swing_it_sees() {
     swing.target.swing_ticks = Some(0);
     // Never on purpose at zero percent.
     let never: &'static [LevelGameEntityRecord] = &records[..];
-    let mut quiet: GameEntities<2, true> = GameEntities::EMPTY;
+    let mut quiet: GameEntities<2> = GameEntities::EMPTY;
     quiet.set_characters(tactical_bodies(|c| c.parry_swap_percent = 0));
     quiet.spawn_from_records(never);
     quiet.state[0] = GameEntityState::Aggro as u8;
@@ -991,7 +991,7 @@ fn a_predicted_contact_replaces_the_swings_own_clock_for_the_parry() {
     let always: &'static [LevelGameEntityRecord] = &enemy_with_flags(enemy().flags)[..];
     let bodies = tactical_bodies(|c| c.parry_swap_percent = 100);
     let fresh = || {
-        let mut e: GameEntities<2, true> = GameEntities::EMPTY;
+        let mut e: GameEntities<2> = GameEntities::EMPTY;
         e.set_characters(bodies);
         e.spawn_from_records(always);
         e.set_swap_cooldown_for_tests(300);
@@ -1027,7 +1027,7 @@ fn a_deliberate_parry_needs_the_swing_seen_its_reaction_time_before_contact() {
         c.parry_reaction_ticks = 12;
     });
     let fresh = || {
-        let mut e: GameEntities<2, true> = GameEntities::EMPTY;
+        let mut e: GameEntities<2> = GameEntities::EMPTY;
         e.set_characters(bodies);
         e.spawn_from_records(slow);
         e.set_swap_cooldown_for_tests(300);
@@ -1057,7 +1057,7 @@ fn a_deliberate_parry_needs_the_swing_seen_its_reaction_time_before_contact() {
 
 /// Put entity 0 in `stance`, its swap long finished and its cooldown clear
 /// (as a parry leaves it).
-fn settle_in(e: &mut GameEntities<2, true>, stance: VitalityChannelId) {
+fn settle_in(e: &mut GameEntities<2>, stance: VitalityChannelId) {
     if e.stance(0) != stance {
         e.combatants[0].stance.set_swap_cooldown(0);
         e.mutate_stance(0);
@@ -1072,7 +1072,7 @@ fn a_parry_crit_is_spent_with_the_swapped_to_weapon() {
         enemy().flags | game_entity_flags::LIGHT_ATTACK | game_entity_flags::HEAVY_ATTACK,
     );
     // Blade stance, crit armed, target in reach: the crit strike.
-    let mut e: GameEntities<2, true> = GameEntities::EMPTY;
+    let mut e: GameEntities<2> = GameEntities::EMPTY;
     e.spawn_from_records(&records[..]);
     e.state[0] = GameEntityState::Aggro as u8;
     e.state_ticks[0] = 42;
@@ -1103,7 +1103,7 @@ fn a_parry_crit_is_spent_with_the_swapped_to_weapon() {
     assert!(e.crit_armed(0));
     assert_eq!(e.crit_scaled(&records[..], 0, 10, 3), (20, 6));
     // Zenith stance, crit armed, energy to spare: the crit shot, even at range.
-    let mut g: GameEntities<2, true> = GameEntities::EMPTY;
+    let mut g: GameEntities<2> = GameEntities::EMPTY;
     g.spawn_from_records(&records[..]);
     g.state[0] = GameEntityState::Aggro as u8;
     g.state_ticks[0] = 42;
@@ -1116,7 +1116,7 @@ fn a_parry_crit_is_spent_with_the_swapped_to_weapon() {
     assert_eq!(g.state(0), GameEntityState::Windup);
     assert_eq!(g.selected_attack_kind(0), GAME_ENTITY_ATTACK_RANGED);
     // No crit: the same enemy on cooldown does not attack.
-    let mut h: GameEntities<2, true> = GameEntities::EMPTY;
+    let mut h: GameEntities<2> = GameEntities::EMPTY;
     h.spawn_from_records(&records[..]);
     h.state[0] = GameEntityState::Aggro as u8;
     h.state_ticks[0] = 42;
@@ -1128,7 +1128,7 @@ fn a_parry_crit_is_spent_with_the_swapped_to_weapon() {
 #[test]
 fn a_committed_swing_reads_its_record_contact_ticks() {
     let records = enemy_with_flags(enemy().flags);
-    let mut e: GameEntities<2, true> = GameEntities::EMPTY;
+    let mut e: GameEntities<2> = GameEntities::EMPTY;
     e.spawn_from_records(&records[..]);
     e.state[0] = GameEntityState::Aggro as u8;
     assert_eq!(e.committed_swing(&records[..], 0), None);
@@ -1236,7 +1236,7 @@ fn a_possessed_entity_runs_its_owners_intent_instead_of_its_tactics() {
 #[test]
 fn the_tactical_controller_decides_for_the_actor_as_for_an_entity() {
     let mut e = engaged();
-    let actor = GameEntities::<2, true>::ACTOR_SLOT;
+    let actor = GameEntities::<2>::ACTOR_SLOT;
     // Her body far from the entity and facing it, the entity's own persona
     // at her spot.
     e.actor_motor_mut().snap_to(
@@ -1280,7 +1280,7 @@ fn sub_unit_enemy() -> &'static [LevelGameEntityRecord; 1] {
 
 /// One 30 Hz think and the presentation tick after it, at `now`.
 fn think_and_show(
-    e: &mut GameEntities<2, true>,
+    e: &mut GameEntities<2>,
     records: &'static [LevelGameEntityRecord],
     target: [i32; 3],
     now: &mut u32,
@@ -1294,7 +1294,7 @@ fn think_and_show(
 #[test]
 fn a_sub_unit_circle_keeps_one_gait_on_a_continuous_clock() {
     let records = sub_unit_enemy();
-    let mut e: GameEntities<2, true> = GameEntities::EMPTY;
+    let mut e: GameEntities<2> = GameEntities::EMPTY;
     e.spawn_from_records(&records[..]);
     e.state[0] = GameEntityState::Aggro as u8;
     e.state_ticks[0] = 42;
@@ -1330,7 +1330,7 @@ fn a_sub_unit_circle_keeps_one_gait_on_a_continuous_clock() {
 #[test]
 fn a_ranged_windup_backing_off_keeps_its_legs_on_the_gait() {
     let records = sub_unit_enemy();
-    let mut e: GameEntities<2, true> = GameEntities::EMPTY;
+    let mut e: GameEntities<2> = GameEntities::EMPTY;
     e.spawn_from_records(&records[..]);
     e.state[0] = GameEntityState::Aggro as u8;
     e.state_ticks[0] = 42;
@@ -1377,7 +1377,7 @@ fn a_ranged_windup_backing_off_keeps_its_legs_on_the_gait() {
 #[test]
 fn a_clip_change_crossfades_and_carries_the_stride() {
     let records = sub_unit_enemy();
-    let mut e: GameEntities<2, true> = GameEntities::EMPTY;
+    let mut e: GameEntities<2> = GameEntities::EMPTY;
     e.spawn_from_records(&records[..]);
     e.state[0] = GameEntityState::Aggro as u8;
     e.state_ticks[0] = 42;

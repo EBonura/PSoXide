@@ -159,6 +159,7 @@ const GAME_ENTITY_ATTACK_LIGHT: u8 = 0;
 const GAME_ENTITY_ATTACK_HEAVY: u8 = 1;
 const GAME_ENTITY_ATTACK_RANGED: u8 = 2;
 const GAME_ENTITY_ATTACK_KIND_MASK: u8 = 3;
+#[cfg(test)]
 const GAME_ENTITY_ATTACK_MELEE_CHASE: u8 = 1 << 6;
 #[cfg(test)]
 const GAME_ENTITY_ATTACK_NEXT_HEAVY: u8 = 1 << 7;
@@ -660,12 +661,9 @@ pub struct MeleeArcStats {
 /// names each by a stable spawn id. At most `MAX_ENTITIES` slots are live at
 /// once: that is the size of the active set, not a limit on how many spawns a
 /// world has.
-/// `STANCE_BOUND_ATTACKS` selects stance-locked combat at compile time.
-/// The default retains the distance-only behavior for games without stances.
-pub struct GameEntities<
-    const MAX_ENTITIES: usize,
-    const STANCE_BOUND_ATTACKS: bool = false,
-> {
+/// Every fighter's attack family follows its stance (Horizon melee, Zenith
+/// ranged).
+pub struct GameEntities<const MAX_ENTITIES: usize> {
     tactics: [tactics::TacticalState; MAX_ENTITIES],
     /// Live entity count = `min(records.len(), MAX_ENTITIES)`.
     count: u16,
@@ -783,8 +781,7 @@ pub struct GameEntities<
     spatial_active_mask: u64,
 }
 
-impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
-    GameEntities<MAX_ENTITIES, STANCE_BOUND_ATTACKS>
+impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES>
 {
     fn can_run(record: &LevelGameEntityRecord) -> bool {
         record.flags & game_entity_flags::CAN_RUN != 0
@@ -957,11 +954,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
         if !moves.can_melee() {
             return false;
         }
-        let was_melee = if STANCE_BOUND_ATTACKS {
-            self.stance(index) == VitalityChannelId::One
-        } else {
-            self.attack_mode[index] & GAME_ENTITY_ATTACK_MELEE_CHASE != 0
-        };
+        let was_melee = self.stance(index) == VitalityChannelId::One;
         // Spacing can stop at preferred + tolerance. Enter at that outer
         // edge too, or a hybrid can sit just outside melee forever.
         let melee_entry = i32::from(record.preferred_distance.max(record.attack_min_range))
@@ -971,15 +964,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
             i32::from(record.spacing_tolerance),
             was_melee,
         );
-        let melee = self.target_within(index, input, limit);
-        if !STANCE_BOUND_ATTACKS {
-            if melee {
-                self.attack_mode[index] |= GAME_ENTITY_ATTACK_MELEE_CHASE;
-            } else {
-                self.attack_mode[index] &= !GAME_ENTITY_ATTACK_MELEE_CHASE;
-            }
-        }
-        melee
+        self.target_within(index, input, limit)
     }
 
     /// Commit one action for the entire Windup/Attack/Recover grammar. Close
@@ -2667,8 +2652,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
                 && self.rivals[index] == NO_RIVAL
                 // A dry cannon must not monopolize the shared attack slot
                 // while another enemy has a legal attack available.
-                && (!STANCE_BOUND_ATTACKS
-                    || self.stance(index) == VitalityChannelId::One
+                && (self.stance(index) == VitalityChannelId::One
                     || self.can_fire_energy(record, index))
                 && self.tactical_attack_ready(index)
                 && self.attack_cooldown[index] == 0
@@ -4156,7 +4140,7 @@ mod tests {
             GameEntityState::Attack,
             GameEntityState::Recover,
         ] {
-            let mut e = GameEntities::<8, true>::EMPTY;
+            let mut e = GameEntities::<8>::EMPTY;
             e.spawn_from_records(&RANGED_ENEMY);
             e.select_attack(0, false);
             e.enter_state(0, state, &mut GameEntityTickStats::default());
@@ -5276,7 +5260,7 @@ mod tests {
     fn a_non_swapping_enemy_is_always_hittable() {
         // Melee-only: under stance-bound attacks it always wants Horizon, so
         // it never swaps and never enters the window.
-        let mut entities = GameEntities::<8, true>::EMPTY;
+        let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&IDLE_ENEMY);
         entities.set_spatial_active_mask(u64::MAX);
         for _ in 0..240 {

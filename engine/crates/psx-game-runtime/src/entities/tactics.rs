@@ -193,7 +193,7 @@ impl TacticalState {
     };
 }
 
-impl<const N: usize, const S: bool> GameEntities<N, S> {
+impl<const N: usize> GameEntities<N> {
     /// Set when the swing coming at slot `index`'s fighter first meets its
     /// body, as the owner predicts it from the posed blade, for the slot's
     /// next think ([`PredictedContact::Unread`] leaves the controller to the
@@ -872,7 +872,7 @@ impl<const N: usize, const S: bool> GameEntities<N, S> {
         };
         self.tactics[i].threat_watched = watched;
         let watched = if seen { u16::from(watched) } else { 0 };
-        if S && visible && !self.stance_swap_in_progress(i) {
+        if visible && !self.stance_swap_in_progress(i) {
             let can_swap = self.swap_permitted(r, i);
             if crate::combat_policy::parry_swap(
                 ticks_to_hit,
@@ -944,7 +944,7 @@ impl<const N: usize, const S: bool> GameEntities<N, S> {
                 }
             }
         }
-        if S && can_replan {
+        if can_replan {
             let (stance, reason) = crate::combat_policy::stance_choice(
                 melee,
                 press_after_cannon,
@@ -1004,11 +1004,7 @@ impl<const N: usize, const S: bool> GameEntities<N, S> {
                 return TacticalPlan::run(intent);
             }
         }
-        let melee = if S {
-            self.stance(i) == VitalityChannelId::One || !Self::has_ranged_attack(r)
-        } else {
-            melee
-        };
+        let melee = self.stance(i) == VitalityChannelId::One || !Self::has_ranged_attack(r);
         let reach = if melee {
             self.melee_attack_reach(r, input) + 16
         } else {

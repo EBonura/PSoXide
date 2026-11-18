@@ -450,7 +450,6 @@ pub(super) const MAX_LOGIC_EVENTS: usize = if LEN_LOGIC == 0 { 0 } else { 32 };
 /// `ACTOR_SLOT`).
 pub(super) type RuntimeGameEntities = psx_game_runtime::entities::GameEntities<
     { MAX_GAME_ENTITIES + 1 },
-    true,
 >;
 
 /// Caller-owned one-tick handoff between entity state advancement and the

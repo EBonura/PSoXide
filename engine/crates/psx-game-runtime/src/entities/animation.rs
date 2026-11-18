@@ -84,7 +84,7 @@ impl GameEntityAnimation {
     };
 }
 
-impl<const N: usize, const S: bool> GameEntities<N, S> {
+impl<const N: usize> GameEntities<N> {
     /// The locomotion entity `i` shows: what its motor's latest frame asked
     /// for (the motor reports idle for a requested move only when it was
     /// blocked, so a sub-unit step still walks), or its turn clip while it
