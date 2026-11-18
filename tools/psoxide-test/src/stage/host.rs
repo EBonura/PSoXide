@@ -13,6 +13,7 @@ pub fn run(ctx: &Ctx<'_>) -> StageResult {
     for host in &ctx.game.hosts {
         let mut key = Key::new("host");
         key.part("command", &host.command.join("\0"));
+        key.part("dir", host.dir.as_deref().unwrap_or("."));
         let mut command = host.command.clone();
         if let Some(name) = &host.build {
             let Some(b) = ctx.game.build(name) else {
@@ -47,8 +48,16 @@ pub fn run(ctx: &Ctx<'_>) -> StageResult {
                 Err(e) => return Outcome::error(&host.name, e),
             };
             let stage_root = ctx.work.join("guest-stage");
-            let done =
-                util::run_logged(&command, &ctx.repo, &ctx.child_env(&stage_root), &log, None);
+            let done = util::run_logged(
+                &command,
+                &host
+                    .dir
+                    .as_ref()
+                    .map_or_else(|| ctx.repo.clone(), |d| ctx.repo.join(d)),
+                &ctx.child_env(&stage_root),
+                &log,
+                None,
+            );
             let after = util::git(&ctx.repo, &["status", "--porcelain"]).unwrap_or_default();
             let check = match done {
                 Ok(d) if d.code != 0 => Check::fail(

@@ -164,8 +164,24 @@ fn one(ctx: &Ctx<'_>, build: &Build, key: &str) -> Outcome {
             Err(e) => return Outcome::error(&build.name, e),
         }
     }
+    let last_path = log_dir.join(format!("last-{}.json", build.name));
+    let last: BTreeMap<String, String> = std::fs::read_to_string(&last_path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default();
     for (dest, source) in &build.collect {
-        match collect(&ctx.repo, source, start) {
+        let found = collect(&ctx.repo, source, start).or_else(|stale| {
+            // A build with nothing to relink leaves the old link in place: the same bytes the
+            // last successful build of this name collected are still that link's file.
+            let path = newest(&ctx.repo, source)?;
+            let digest = util::sha256_file(&path)?;
+            if last.get(dest) == Some(&digest) {
+                Ok(path)
+            } else {
+                Err(stale)
+            }
+        });
+        match found {
             Ok(path) => {
                 if let Err(e) = std::fs::copy(&path, out.join(dest)) {
                     return Outcome::error(
@@ -194,6 +210,9 @@ fn one(ctx: &Ctx<'_>, build: &Build, key: &str) -> Outcome {
         Ok(f) => f,
         Err(e) => return Outcome::error(&build.name, e),
     };
+    if let Ok(json) = serde_json::to_string(&files) {
+        let _ = std::fs::write(&last_path, json);
+    }
     let disc = files
         .get(&build.disc.replace(".cue", ".bin"))
         .map_or("?", |d| util::short(d))
@@ -234,6 +253,25 @@ pub fn collect(repo: &Path, source: &str, since: f64) -> Result<PathBuf, String>
         )),
         None => Err(format!("nothing matches {source} after the build")),
     }
+}
+
+/// The file a `collect` source names now, whatever its age: the path itself, or the newest
+/// match of a trailing `*`.
+fn newest(repo: &Path, source: &str) -> Result<PathBuf, String> {
+    let Some(prefix) = source.strip_suffix('*') else {
+        let path = repo.join(source);
+        return if path.is_file() {
+            Ok(path)
+        } else {
+            Err(format!("{source} does not exist"))
+        };
+    };
+    util::glob(repo, &format!("{prefix}*"))?
+        .into_iter()
+        .filter_map(|p| util::mtime_seconds(&p).map(|t| (t, p)))
+        .max_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, p)| p)
+        .ok_or_else(|| format!("nothing matches {source}"))
 }
 
 #[cfg(test)]

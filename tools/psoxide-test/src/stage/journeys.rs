@@ -237,11 +237,12 @@ pub fn run(ctx: &Ctx<'_>, bless: bool) -> StageResult {
             .then(a.model.cmp(&b.model))
     });
     let conformance = format!("--conformance={}", spec.conformance.join(","));
+    let render = if spec.hw { "--strict" } else { "--no-hw" };
     let receipts = ctx.work.join("gate-receipts");
     let width = ctx.config.budget.emulators;
     let outcomes = sched::run_all(&jobs, width, |job| {
         ctx.timed(&format!("journey:{}@{}", job.info.id, job.model), || {
-            one(ctx, &gate, job, &conformance, &receipts)
+            one(ctx, &gate, job, &[render, &conformance], &receipts)
         })
     });
     let mut hits = 0;
@@ -315,9 +316,10 @@ fn one(
     ctx: &Ctx<'_>,
     gate: &Path,
     job: &Job,
-    conformance: &str,
+    flags: &[&str],
     receipts: &Path,
 ) -> (Check, Option<GateLine>) {
+    let conformance = flags.join(" ");
     let name = format!("{}@{}", job.info.id, job.model);
     let model_dir = job.model.replace([',', '='], "-");
     let out = ctx
@@ -343,14 +345,14 @@ fn one(
         gate.display().to_string(),
         "run".into(),
         job.info.path.display().to_string(),
-        "--no-hw".into(),
+        flags[0].to_string(),
         "--hardware".into(),
         job.model.clone(),
         "--receipts".into(),
         receipts.display().to_string(),
         "--out".into(),
         out.display().to_string(),
-        conformance.to_string(),
+        flags[1].to_string(),
     ]
     .into();
     let env = ctx.child_env(&ctx.work.join("guest-stage"));
@@ -360,7 +362,7 @@ fn one(
     };
     let mut parsed = parse_gate(&done.output);
     if let Some(line) = parsed.as_mut() {
-        remember_skips(ctx, gate, job, conformance, line);
+        remember_skips(ctx, gate, job, &conformance, line);
     }
     let check = match &parsed {
         Some(l) if done.code == 0 && l.passed => Check::pass(
