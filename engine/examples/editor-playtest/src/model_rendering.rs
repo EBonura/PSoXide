@@ -633,13 +633,20 @@ impl Playtest {
             // group, and the loading screen has nothing else for the GPU.
             // Bounded so a texture VRAM cannot take never holds the
             // loading screen in one tick (it retries on the next).
+            // Their slots go to the top of the slot table: they are looked up
+            // only when a room binds them, so the textures the frame looks up
+            // keep the low slots they had when rooms uploaded their own.
+            vram_arena().set_slots_from_top(true);
             let mut steps = 0;
-            while !world_rt.bind_uploaded_textures() {
-                if steps == UPLOADED_TEXTURE_STEPS_PER_TICK {
-                    return false;
-                }
+            let mut bound = world_rt.bind_uploaded_textures();
+            while !bound && steps < UPLOADED_TEXTURE_STEPS_PER_TICK {
                 let _ = self.streaming_jobs.step_vram_uploads();
                 steps += 1;
+                bound = world_rt.bind_uploaded_textures();
+            }
+            vram_arena().set_slots_from_top(false);
+            if !bound {
+                return false;
             }
         }
         self.level_textures_uploaded = true;

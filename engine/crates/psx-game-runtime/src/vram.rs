@@ -676,6 +676,9 @@ pub struct VramRuntime<
     /// can be released on gameplay entry. One entry per streamed Texture
     /// asset.
     ui_image_slots: [Option<AssetId>; MAX_UI_IMAGE_SLOTS],
+    /// New slots are taken from the top of the table down instead of from the
+    /// bottom up ([`Self::set_slots_from_top`]).
+    slots_from_top: bool,
 }
 
 impl<
@@ -733,13 +736,18 @@ impl<
             map: VramMap::new(),
             upload_queue: VramUploadQueue::new(),
             ui_image_slots: [None; MAX_UI_IMAGE_SLOTS],
+            slots_from_top: false,
         }
     }
 
     /// Find a free VRAM slot index, reusing holes left by eviction before growing
     /// into fresh entries. Returns `None` when the slot table is full.
     fn next_vram_slot(&self) -> Option<usize> {
-        let slot = (0..VRAM_ASSETS).find(|&i| self.slots[i].is_none());
+        let slot = if self.slots_from_top {
+            (0..VRAM_ASSETS).rev().find(|&i| self.slots[i].is_none())
+        } else {
+            (0..VRAM_ASSETS).find(|&i| self.slots[i].is_none())
+        };
         if slot.is_none() {
             // The residency table is the binding VRAM budget for distinct
             // resident textures; record the overflow so the otherwise-silent drop is
@@ -747,6 +755,16 @@ impl<
             telemetry::counter(telemetry::counter::VRAM_SLOT_TABLE_FULL, 1);
         }
         slot
+    }
+
+    /// Take new slots from the top of the table down (`true`) or from the bottom
+    /// up (`false`, the default). Lookups walk the table from the bottom, so
+    /// textures that are uploaded once and then only looked up when a room
+    /// binds them (a level's materials, uploaded behind the loading screen)
+    /// go to the top, and the slots the frame looks up keep the low indices
+    /// they would have had without them.
+    pub fn set_slots_from_top(&mut self, from_top: bool) {
+        self.slots_from_top = from_top;
     }
 
     /// Release slot `i`'s VRAM (texture window/page + CLUT) to the allocator, drop
@@ -2320,6 +2338,7 @@ impl<
         self.small_texture_page = None;
         self.small_model_quadrants = 0;
         self.last_evict_room = INVALID_ROOM_INDEX;
+        self.slots_from_top = false;
     }
 
     /// Upload a 4bpp or 8bpp model atlas to the dedicated model VRAM
@@ -2772,6 +2791,19 @@ mod tests {
         let vram = TestVram::new(ARENA_LAYOUT);
         assert_eq!(vram.allocator.clut_bounds(), ARENA_LAYOUT.clut_band);
         assert!(vram.allocator.clut_band_is_reserved());
+    }
+
+    /// New slots come from the bottom of the table, or from the top while the
+    /// loading screen asks for that, and the release on gameplay exit puts the
+    /// order back.
+    #[test]
+    fn slots_come_from_the_bottom_unless_asked_for_the_top() {
+        let mut vram = VramRuntime::<1, 4, 6, 32>::new(ARENA_LAYOUT);
+        assert_eq!(vram.next_vram_slot(), Some(0));
+        vram.set_slots_from_top(true);
+        assert_eq!(vram.next_vram_slot(), Some(3));
+        vram.release_gameplay_vram();
+        assert_eq!(vram.next_vram_slot(), Some(0));
     }
 
     /// A scene state can borrow space over a fixed region, and the ledger puts
