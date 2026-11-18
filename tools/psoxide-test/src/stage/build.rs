@@ -96,7 +96,28 @@ pub fn run(ctx: &mut Ctx<'_>) -> StageResult {
         let outcome = if reused {
             hits += 1;
             println!("RECEIPT HIT build {} {}", build.name, util::short(&key));
-            stored.unwrap_or_default()
+            // A receipt from before the symbol list existed: derive it from the same map.
+            if let Some(map) = build.map_path(&ctx.repo) {
+                let list = out.join(SYMBOLS_FILE);
+                if !list.is_file() {
+                    if let Err(e) = write_symbols(&map, &list) {
+                        return failed(&build.name, e);
+                    }
+                }
+            }
+            let mut outcome = stored.unwrap_or_default();
+            // Judge the logs of the build the receipt stands for with today's rules (a
+            // receipt written before a rule existed must not hide a refusal or a short bind).
+            let logs = recorded_output(ctx, build, &key);
+            if let Some(found) = refused(build, &logs) {
+                outcome.checks.push(Check::fail(&build.name, found));
+            }
+            for c in bind_checks(build, &logs) {
+                if !outcome.checks.iter().any(|o| o.name == c.name) {
+                    outcome.checks.push(c);
+                }
+            }
+            outcome
         } else {
             let outcome = ctx.timed(&format!("build:{}", build.name), || one(ctx, build, &key));
             if let Err(e) = ctx.receipts.put("build", &key, &outcome) {
@@ -156,6 +177,7 @@ fn one(ctx: &Ctx<'_>, build: &Build, key: &str) -> Outcome {
         Err(e) => return Outcome::error(&build.name, e),
     };
     let start = util::now_seconds() - 1.0;
+    let mut output = String::new();
     for (i, command) in build.commands.iter().enumerate() {
         let argv: Vec<String> = match command
             .iter()
@@ -167,7 +189,12 @@ fn one(ctx: &Ctx<'_>, build: &Build, key: &str) -> Outcome {
         };
         let log = log_dir.join(format!("{}-{}-{}.log", build.name, util::short(key), i + 1));
         match util::run_logged(&argv, &ctx.repo, &env, &log, None) {
-            Ok(done) if done.code == 0 => {}
+            Ok(done) if done.code == 0 => {
+                if let Some(found) = refused(build, &done.output) {
+                    return Outcome::error(&build.name, format!("{found}; log {}", log.display()));
+                }
+                output.push_str(&done.output);
+            }
             Ok(done) => {
                 return Outcome::error(
                     &build.name,
@@ -211,9 +238,19 @@ fn one(ctx: &Ctx<'_>, build: &Build, key: &str) -> Outcome {
             Err(e) => return Outcome::error(&build.name, e),
         }
     }
+    if let Some(map) = build.map_path(&ctx.repo) {
+        if let Err(e) = write_symbols(&map, &out.join(SYMBOLS_FILE)) {
+            return Outcome::error(&build.name, e);
+        }
+    }
     let cue = build.cue(&ctx.repo);
     let bin = cue.with_extension("bin");
-    for f in [&cue, &bin] {
+    let discs: &[&std::path::PathBuf] = if build.disc.is_empty() {
+        &[]
+    } else {
+        &[&cue, &bin]
+    };
+    for f in discs {
         if util::mtime_seconds(f).is_none_or(|t| t < start) {
             return Outcome::error(
                 &build.name,
@@ -235,12 +272,121 @@ fn one(ctx: &Ctx<'_>, build: &Build, key: &str) -> Outcome {
         .get(&build.disc.replace(".cue", ".bin"))
         .map_or("?", |d| util::short(d))
         .to_string();
+    let mut checks = vec![Check::pass(
+        format!("{} built", build.name),
+        format!("disc {disc}, {} files", files.len()),
+    )];
+    checks.extend(bind_checks(build, &output));
     Outcome {
-        checks: vec![Check::pass(
-            format!("{} built", build.name),
-            format!("disc {disc}, {} files", files.len()),
-        )],
+        checks,
         facts: files,
+    }
+}
+
+/// The command logs a build with this key wrote, concatenated (empty when they are gone).
+fn recorded_output(ctx: &Ctx<'_>, build: &Build, key: &str) -> String {
+    let dir = ctx.work.join("build");
+    let mut text = String::new();
+    for i in 1..=build.commands.len() {
+        let log = dir.join(format!("{}-{}-{i}.log", build.name, util::short(key)));
+        text.push_str(&std::fs::read_to_string(log).unwrap_or_default());
+    }
+    text
+}
+
+/// The symbol list every build with a map writes into its `out`: `address name` per symbol,
+/// with lld's `(.N)` section suffix stripped, which the gate and the harness both read.
+pub const SYMBOLS_FILE: &str = "symbols.txt";
+
+/// psoxide-pgo's own refusal lines: a driver that catches them and links anyway still fails.
+const PGO_REFUSALS: &[&str] = &["UNBOUND PROFILE:", "the layout profile binds"];
+
+/// The first `fail_on` substring or psoxide-pgo refusal in a build command's output.
+pub fn refused(build: &Build, output: &str) -> Option<String> {
+    for needle in build
+        .fail_on
+        .iter()
+        .map(String::as_str)
+        .chain(PGO_REFUSALS.iter().copied())
+    {
+        if let Some(line) = output.lines().find(|l| l.contains(needle)) {
+            return Some(format!("the build printed `{}`", line.trim()));
+        }
+    }
+    None
+}
+
+/// One named check per psoxide-pgo bind line in the build's output (placement layouts and
+/// sample profiles): the bound share against `bind_min` (default 100%).
+pub fn bind_checks(build: &Build, output: &str) -> Vec<Check> {
+    let min = build.bind_min.unwrap_or(100.0);
+    let mut checks = Vec::new();
+    for line in output.lines() {
+        let (what, rest) = if let Some(rest) = line.strip_prefix("psoxide-pgo: layout ") {
+            ("placement layout", rest)
+        } else if let Some(at) = line.find("profile bind (") {
+            ("sample profile", &line[at..])
+        } else {
+            continue;
+        };
+        let Some(percent) = first_percent(rest) else {
+            continue;
+        };
+        let name = format!("{} {what} bind", build.name);
+        let value = format!("{percent:.1}%");
+        let check = if percent + 1e-9 >= min {
+            Check::pass(name, value)
+        } else {
+            Check::new(name, crate::report::Status::Fail, value).detail(format!(
+                "under {min}%: collect the layout or profile again on this build, or set \
+                 bind_min with bind_reason; {}",
+                line.trim()
+            ))
+        };
+        checks.push(match &build.bind_reason {
+            Some(r) if min < 100.0 => check.baseline(format!("bind_min {min}%: {r}")),
+            _ => check,
+        });
+    }
+    checks
+}
+
+/// The first `NN.N%` in `text`.
+fn first_percent(text: &str) -> Option<f64> {
+    let at = text.find('%')?;
+    let head = &text[..at];
+    let start = head
+        .rfind(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .map_or(0, |i| i + 1);
+    head[start..].parse().ok()
+}
+
+/// Write `out` from the map at `map`: every symbol as `address name`, `(.N)` stripped.
+pub fn write_symbols(map: &Path, out: &Path) -> Result<(), String> {
+    let text = std::fs::read_to_string(map).map_err(|e| format!("read {}: {e}", map.display()))?;
+    let parsed = psoxide_size::map::parse(&text);
+    let mut lines = std::collections::BTreeSet::new();
+    for section in &parsed.sections {
+        for sym in &section.syms {
+            lines.insert(format!(
+                "{:08x} {}",
+                sym.vma,
+                strip_section_suffix(&sym.name)
+            ));
+        }
+    }
+    let mut body: String = lines.into_iter().map(|l| l + "\n").collect();
+    if body.is_empty() {
+        body.push_str("# no symbols in the map\n");
+    }
+    std::fs::write(out, body).map_err(|e| format!("write {}: {e}", out.display()))
+}
+
+/// `name (.0)` -> `name`: lld's suffix for a symbol in a numbered section.
+pub fn strip_section_suffix(name: &str) -> &str {
+    match name.rsplit_once(" (.") {
+        Some((head, tail)) if tail.ends_with(')') => head,
+        _ => name,
     }
 }
 
@@ -304,6 +450,48 @@ mod tests {
         .unwrap()
         .builds
         .remove(0)
+    }
+
+    const LAYOUT_LINE: &str = "psoxide-pgo: layout /x/pgo/game.layout: bound 136 of 138 \
+                               functions, 99.9% of the profile's instructions; 2 changed, 0 missing";
+
+    #[test]
+    fn a_bind_under_100_is_red_unless_declared() {
+        let b = build(&[]);
+        let c = bind_checks(&b, LAYOUT_LINE);
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].status, crate::report::Status::Fail);
+        assert_eq!(c[0].value, "99.9%");
+        let mut b = build(&[]);
+        b.bind_min = Some(99.5);
+        b.bind_reason = Some("two functions changed since the layout".into());
+        assert_eq!(
+            bind_checks(&b, LAYOUT_LINE)[0].status,
+            crate::report::Status::Pass
+        );
+        assert!(bind_checks(&b, "no pgo here").is_empty());
+        let profile = "psoxide-pgo: profile bind (names normalised): 98.6% of samples bound; x";
+        assert_eq!(bind_checks(&b, profile)[0].value, "98.6%");
+    }
+
+    #[test]
+    fn a_printed_refusal_fails_the_build() {
+        let mut b = build(&[]);
+        assert!(refused(&b, "all fine").is_none());
+        assert!(refused(&b, "UNBOUND PROFILE: only 40.0% ...").is_some());
+        b.fail_on = vec!["built WITHOUT the PGO link order".into()];
+        assert!(refused(&b, "WARNING: built WITHOUT the PGO link order")
+            .unwrap()
+            .contains("WITHOUT"));
+    }
+
+    #[test]
+    fn section_suffixes_are_stripped() {
+        assert_eq!(
+            strip_section_suffix("cs_psx::SIM_NOW (.0)"),
+            "cs_psx::SIM_NOW"
+        );
+        assert_eq!(strip_section_suffix("plain"), "plain");
     }
 
     #[test]

@@ -23,6 +23,9 @@ pub struct Info {
     pub pad: Option<String>,
     /// Steps that wait or hold for a fixed number of video frames.
     pub open_loop: u32,
+    /// Steps that wait or hold until a free-running clock reaches an absolute value: a fixed
+    /// wait under another name, counted in the ratchet beside `open_loop`.
+    pub clock_waits: u32,
     /// Disc paths the journey boots (first existing wins in the gate).
     pub discs: Vec<String>,
     /// The journey's own `name` (the gate names its golden folder after it).
@@ -30,7 +33,7 @@ pub struct Info {
 }
 
 /// Read a journey file far enough to lint it.
-pub fn inspect(path: &Path) -> Result<Info, String> {
+pub fn inspect(path: &Path, clocks: &[String]) -> Result<Info, String> {
     let text =
         std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let value: Value = toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -40,6 +43,7 @@ pub fn inspect(path: &Path) -> Result<Info, String> {
         .unwrap_or_default();
     let pad = value.get("pad").and_then(Value::as_str).map(str::to_string);
     let mut open_loop = 0;
+    let mut clock_waits = 0;
     for list in [value.get("step")].into_iter().flatten().chain(
         value
             .get("block")
@@ -49,12 +53,14 @@ pub fn inspect(path: &Path) -> Result<Info, String> {
             .filter_map(|b| b.get("step")),
     ) {
         open_loop += count_open_loop(list);
+        clock_waits += count_clock_waits(list, clocks);
     }
     Ok(Info {
         id,
         path: path.to_path_buf(),
         pad,
         open_loop,
+        clock_waits,
         discs: strings(value.get("disc")),
         name: value
             .get("name")
@@ -90,6 +96,48 @@ fn count_open_loop(steps: &Value) -> u32 {
         }
     }
     count
+}
+
+/// The SDK's free-running clocks: they advance with time, not with game state.
+pub const SDK_CLOCKS: &[&str] = &[
+    "__psx_rt_vblank_count",
+    "__psx_rt_present_kick_count",
+    "__psx_rt_present_thread_kick_count",
+];
+
+/// Steps (bodies included) whose `wait_until` or `hold_until` compares a free-running clock
+/// (`SDK_CLOCKS` plus the game's `clocks`) with an absolute value.
+fn count_clock_waits(steps: &Value, clocks: &[String]) -> u32 {
+    let Some(steps) = steps.as_array() else {
+        return 0;
+    };
+    let mut count = 0;
+    for step in steps {
+        let on_clock = ["wait_until", "hold_until"]
+            .iter()
+            .filter_map(|k| step.get(k))
+            .any(|c| names_clock(c, clocks));
+        count += u32::from(on_clock);
+        if let Some(body) = step.get("body") {
+            count += count_clock_waits(body, clocks);
+        }
+    }
+    count
+}
+
+/// Whether a condition (or any condition nested in it) reads a clock symbol.
+fn names_clock(condition: &Value, clocks: &[String]) -> bool {
+    match condition {
+        Value::Table(t) => {
+            let own = t.get("sym").and_then(Value::as_str).is_some_and(|s| {
+                let s = s.rsplit("::").next().unwrap_or(s);
+                SDK_CLOCKS.contains(&s) || clocks.iter().any(|c| c == s)
+            });
+            own || t.values().any(|v| names_clock(v, clocks))
+        }
+        Value::Array(items) => items.iter().any(|v| names_clock(v, clocks)),
+        _ => false,
+    }
 }
 
 /// A step is open-loop when it rests a fixed number of video frames (`wait`) or holds input for
@@ -507,6 +555,11 @@ impl Symbols {
     }
 
     fn insert(&mut self, name: &str, addr: u32) {
+        // lld names a symbol in a numbered section `name (.0)`: both spellings resolve.
+        let stripped = crate::stage::build::strip_section_suffix(name);
+        if stripped != name {
+            self.insert(stripped, addr);
+        }
         let entry = self.by_name.entry(name.to_string()).or_default();
         if !entry.contains(&addr) {
             entry.push(addr);
@@ -521,7 +574,32 @@ impl Symbols {
                 "symbol `{name}` has {} addresses; name it unambiguously",
                 many.len()
             )),
-            _ => Err(format!("symbol `{name}` is not in the journey's symbols")),
+            _ => self.resolve_suffix(name),
+        }
+    }
+
+    /// The gate's second rule: a unique `::name` path suffix (`STATE` finds `game::STATE`).
+    fn resolve_suffix(&self, name: &str) -> Result<u32, String> {
+        let suffix = format!("::{name}");
+        let mut hits: Vec<(&String, u32)> = self
+            .by_name
+            .iter()
+            .filter(|(k, _)| k.ends_with(&suffix))
+            .flat_map(|(k, v)| v.iter().map(move |a| (k, *a)))
+            .collect();
+        hits.sort_by_key(|(_, a)| *a);
+        hits.dedup_by_key(|(_, a)| *a);
+        match hits.as_slice() {
+            [(_, addr)] => Ok(*addr),
+            [] => Err(format!("symbol `{name}` is not in the journey's symbols")),
+            many => Err(format!(
+                "symbol `{name}` is ambiguous: {}",
+                many.iter()
+                    .take(6)
+                    .map(|(k, a)| format!("{k}@{a:#x}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
         }
     }
 }
@@ -573,7 +651,7 @@ timeout = 100
 press = ["down"]
 "#,
         );
-        let info = inspect(&p).unwrap();
+        let info = inspect(&p, &[]).unwrap();
         assert_eq!(
             info.open_loop, 3,
             "wait 90, the 4-tick hold, the frame-counted body press"
@@ -583,12 +661,45 @@ press = ["down"]
     }
 
     #[test]
+    fn a_wait_on_a_free_running_clock_is_counted() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(
+            dir.path(),
+            "j.toml",
+            "name = \"j\"\npad = \"dualshock\"\n\
+             [[step]]\nwait_until = { kind = \"ram\", sym = \"__psx_rt_vblank_count\", op = \"ge\", value = 300 }\n\
+             [[step]]\npress = [\"start\"]\nhold_until = { kind = \"ram\", sym = \"game::FRAMES\", op = \"ge\", value = 9 }\n\
+             [[step]]\nwait_until = { kind = \"ram\", sym = \"game::STATE\", value = 2 }\n",
+        );
+        assert_eq!(inspect(&p, &[]).unwrap().clock_waits, 1);
+        assert_eq!(inspect(&p, &["FRAMES".into()]).unwrap().clock_waits, 2);
+        assert_eq!(inspect(&p, &[]).unwrap().open_loop, 0);
+    }
+
+    #[test]
+    fn symbols_resolve_by_section_stripped_name_and_unique_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(
+            dir.path(),
+            "s.txt",
+            "80010000 cs_psx::SIM_NOW (.0)\n80010010 cs_psx::world::ARENA\n80010020 a::X\n80010030 b::X\n",
+        );
+        let mut s = Symbols::default();
+        s.load(&p).unwrap();
+        assert_eq!(s.resolve("cs_psx::SIM_NOW").unwrap(), 0x8001_0000);
+        assert_eq!(s.resolve("cs_psx::SIM_NOW (.0)").unwrap(), 0x8001_0000);
+        assert_eq!(s.resolve("ARENA").unwrap(), 0x8001_0010);
+        assert!(s.resolve("X").unwrap_err().contains("ambiguous"));
+    }
+
+    #[test]
     fn the_pad_must_be_named() {
         let mut info = Info {
             id: "j".into(),
             path: PathBuf::new(),
             pad: None,
             open_loop: 0,
+            clock_waits: 0,
             discs: Vec::new(),
             name: None,
         };
