@@ -678,3 +678,21 @@ fn the_world_chunks_land_in_stream_chunks_in_pack_order() {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn link_layout_follows_the_project_and_a_stale_one_is_removed() {
+    let dir = std::env::temp_dir().join(format!("psxed-link-layout-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(LINK_LAYOUT_FILENAME);
+    write_link_layout(Some(b"layout of project A"), &dir).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"layout of project A");
+    // Project B has no layout: A's must not order B's link.
+    write_link_layout(None, &dir).unwrap();
+    assert!(!path.exists());
+    write_link_layout(None, &dir).unwrap();
+    // A failed cook leaves none either.
+    write_link_layout(Some(b"layout of project A"), &dir).unwrap();
+    write_cook_result(None, &dir).unwrap();
+    assert!(!path.exists());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
