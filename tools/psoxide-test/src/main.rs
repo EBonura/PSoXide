@@ -35,7 +35,7 @@ use stage::{Ctx, Tier};
 
 const USAGE: &str = "\
 usage:
-  psoxide-test run [--repo DIR] [--tier quick|full] [--stage NAME]...
+  psoxide-test run [--repo DIR] [--tier quick|full] [--stage NAME]... [--all-models]
       the pipeline (stages: build size host journeys speed cross clean); exit 0 only when every
       check that ran passed, and for --tier full only when the landing verdict is complete
   psoxide-test bless [--repo DIR]
@@ -67,6 +67,8 @@ struct Options {
     repo: PathBuf,
     tier: Tier,
     stages: Vec<String>,
+    /// `--all-models`: play every model of every journey, none standing on `real` (audit).
+    all_models: bool,
 }
 
 fn options(args: &[String]) -> Result<Options, String> {
@@ -74,12 +76,14 @@ fn options(args: &[String]) -> Result<Options, String> {
         repo: std::env::current_dir().map_err(|e| e.to_string())?,
         tier: Tier::Quick,
         stages: Vec::new(),
+        all_models: false,
     };
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut value = || it.next().cloned().ok_or(format!("{a} needs a value"));
         match a.as_str() {
             "--repo" => o.repo = PathBuf::from(value()?),
+            "--all-models" => o.all_models = true,
             "--tier" => {
                 o.tier = match value()?.as_str() {
                     "quick" => Tier::Quick,
@@ -203,6 +207,7 @@ fn context<'a>(o: &Options, game: &'a Game, config: &'a Config) -> Result<Ctx<'a
         receipts: Store::new(work.join("receipts")),
         work,
         tier: o.tier,
+        all_models: o.all_models,
         artifacts: BTreeMap::new(),
         timing: Mutex::new(Vec::new()),
         originals: Mutex::new(originals::Cache::load(

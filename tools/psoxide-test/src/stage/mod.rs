@@ -3,6 +3,7 @@
 pub mod build;
 pub mod clean;
 pub mod cross;
+pub mod equiv;
 pub mod host;
 pub mod install;
 pub mod journeys;
@@ -64,6 +65,8 @@ pub struct Ctx<'a> {
     pub work: PathBuf,
     pub receipts: Store,
     pub tier: Tier,
+    /// `--all-models`: every model plays every journey; no row stands on `real` (audit).
+    pub all_models: bool,
     /// Per build: file name in `out` -> SHA-256, filled by the build stage.
     pub artifacts: BTreeMap<String, BTreeMap<String, String>>,
     pub timing: Mutex<Vec<Timing>>,
