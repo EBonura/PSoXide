@@ -347,9 +347,11 @@ impl psx_game_runtime::entities::FighterWorld for SceneEntityMover<'_> {
                 motor.suspended_frame(None)
             }
             (Some(()), Some(world_rt)) => {
-                let in_liquid = world_rt
-                    .player_contents(position, config.height)
-                    .is_some_and(|sample| sample.water_level > 0);
+                // A level with no hazard and no liquid cooks the sample out.
+                let in_liquid = crate::generated::ANY_HAZARD
+                    && world_rt
+                        .player_contents(position, config.height)
+                        .is_some_and(|sample| sample.water_level > 0);
                 world_rt
                 .update_motor(
                     motor,
