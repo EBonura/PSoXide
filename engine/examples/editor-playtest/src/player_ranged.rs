@@ -117,12 +117,20 @@ impl Playtest {
         .unwrap_or(self.game_entities.actor_motor().yaw())
     }
 
+    /// Whether the player's shot may release this tick: the weapon is
+    /// firing in the ranged stance. Checked inline by the caller so the
+    /// release below costs nothing on the ticks it does not run.
+    #[inline(always)]
+    pub(super) fn player_projectile_firing(&self, ctx: &Ctx) -> bool {
+        self.ranged_ready.firing(ctx.sim_tick.as_u32())
+            && self.game_entities.actor().stance.active() == VitalityChannelId::Two
+    }
+
+    /// Release the player's shot; only called while
+    /// [`Self::player_projectile_firing`] holds.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     pub(super) fn release_player_projectile(&mut self, ctx: &Ctx) {
-        if !self.ranged_ready.firing(ctx.sim_tick.as_u32())
-            || self.game_entities.actor().stance.active() != VitalityChannelId::Two
-        {
-            return;
-        }
         let (Some(c), true) = (self.character.as_ref(), self.player_actor_pose.is_some()) else {
             return;
         };

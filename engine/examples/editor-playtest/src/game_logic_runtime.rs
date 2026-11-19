@@ -574,15 +574,21 @@ impl Playtest {
         self.combat_projectile_impacts.tick();
         self.player_flash.tick();
         self.game_entities.tick_flashes();
-        self.release_player_projectile(ctx);
+        if self.player_projectile_firing(ctx) {
+            self.release_player_projectile(ctx);
+        }
         if !self.deferred_enemy_attacks.is_empty() || !self.combat_projectiles.is_empty() {
             self.resolve_attacks_on_player(ctx);
         }
-        self.resolve_player_melee(ctx);
+        if self.player_melee_active(ctx.sim_tick) {
+            self.resolve_player_melee(ctx);
+        }
     }
 
     /// The enemy attack tokens and every live projectile against this tick's
     /// frozen player; each hit lands as it connects.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     fn resolve_attacks_on_player(&mut self, ctx: &Ctx) {
         let player = self.player_defence(ctx);
         let mut prop_blockers =
@@ -593,14 +599,17 @@ impl Playtest {
                 .collect_static_prop_aabb_blockers_checked_into(&mut prop_blockers)
                 .is_some();
         self.resolve_enemy_attacks(ctx, &player, prop_blockers.as_slice(), prop_blockers_valid);
-        let mut impacts = ProjectileImpacts::<MAX_PROJECTILE_IMPACTS>::new();
-        self.tick_combat_projectiles(
-            ctx,
-            &player,
-            prop_blockers.as_slice(),
-            prop_blockers_valid,
-            &mut impacts,
-        );
+        // An empty pool advances nothing and lands nothing.
+        if !self.combat_projectiles.is_empty() {
+            let mut impacts = ProjectileImpacts::<MAX_PROJECTILE_IMPACTS>::new();
+            self.tick_combat_projectiles(
+                ctx,
+                &player,
+                prop_blockers.as_slice(),
+                prop_blockers_valid,
+                &mut impacts,
+            );
+        }
     }
 
     fn player_defence(&self, ctx: &Ctx) -> PlayerDefence {
@@ -646,6 +655,8 @@ impl Playtest {
     /// provide it. The legacy entity arc is used only when either side has
     /// no authored role at all; inactive authored frames, invalid authored
     /// joints, and authored geometric misses stay misses.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     fn resolve_enemy_attacks(
         &mut self,
         ctx: &Ctx,
@@ -1200,6 +1211,8 @@ impl Playtest {
     /// Advance every live projectile against the player's hurtboxes (unless
     /// she is invulnerable) and every live entity's. Every bolt that
     /// strikes a fighter lands at once through the one landing.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     fn tick_combat_projectiles<const I: usize>(
         &mut self,
         ctx: &Ctx,
@@ -1216,8 +1229,7 @@ impl Playtest {
         >::new();
         // No live bolt, nothing to strike: skip sampling every fighter's
         // hurtboxes (each a joint decode) on the ticks with no projectile.
-        let live = !self.combat_projectiles.is_empty();
-        if live && !player.passes_through {
+        if !player.passes_through {
             combat::projectile_hurtboxes(
                 player.capsules,
                 self.actor_pose(PoseAt::Player),
@@ -1232,11 +1244,10 @@ impl Playtest {
                 },
             );
         }
-        for (index, record) in
-            GAME_ENTITIES
-                .iter()
-                .enumerate()
-                .take(if live { self.game_entities.count() } else { 0 })
+        for (index, record) in GAME_ENTITIES
+            .iter()
+            .enumerate()
+            .take(self.game_entities.count())
         {
             // An entity in its i-frames past its parry window is not a
             // target, exactly as the player above: the bolt flies on through.
@@ -2003,19 +2014,25 @@ impl Playtest {
         }
     }
 
+    /// Whether the player's melee swing is live this tick: an attack action
+    /// other than the ranged shot, still locked. Checked inline by the
+    /// caller, so outside attack locks the swing costs two compares.
+    #[inline(always)]
+    fn player_melee_active(&self, now: SimTick) -> bool {
+        self.body.state != PlayerAnim::RangedAttack
+            && player_anim_is_attack(self.body.state)
+            && self.game_entities.actor_action().lock_until > now
+    }
+
     /// The player's character's swing this tick, while an attack action is
     /// locked: the one melee contact path ([`Self::swing_fighters`]) from
     /// the exact snapshot the visible body and equipped weapon consume;
-    /// combat never reconstructs animation phase. Outside attack locks this
-    /// is two compares.
+    /// combat never reconstructs animation phase. Only called while
+    /// [`Self::player_melee_active`] holds.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     fn resolve_player_melee(&mut self, ctx: &Ctx) {
         let now = ctx.sim_tick;
-        if self.body.state == PlayerAnim::RangedAttack
-            || !player_anim_is_attack(self.body.state)
-            || self.game_entities.actor_action().lock_until <= now
-        {
-            return;
-        }
         let (Some(character), Some(player_pose)) =
             (self.character.as_ref(), self.player_actor_pose.as_ref())
         else {
