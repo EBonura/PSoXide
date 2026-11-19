@@ -11,6 +11,8 @@ pub mod paint;
 #[cfg(target_arch = "mips")]
 pub mod runtime;
 
+use psx_io::cd::wait::{WaitTime, FIRST_SECTOR_WAIT};
+
 /// Words in a user-data CD sector.
 pub const SECTOR_WORDS: usize = 512;
 
@@ -25,7 +27,7 @@ pub trait Reader {
     /// Seek and start a stream at an absolute collection LBA.
     /// # Safety
     /// Same exclusive-device requirement as `prepare`.
-    unsafe fn start_read_seek_first(&mut self, lba: u32, spin_limit: u32) -> bool;
+    unsafe fn start_read_seek_first(&mut self, lba: u32, limit: WaitTime) -> bool;
     /// [`start_read_seek_first`](Self::start_read_seek_first), calling `idle`
     /// while it waits for the seek to finish (once per spin, so it must be
     /// cheap). The default ignores `idle`; a reader that can run it between its
@@ -35,10 +37,10 @@ pub trait Reader {
     unsafe fn start_read_seek_first_idle(
         &mut self,
         lba: u32,
-        spin_limit: u32,
+        limit: WaitTime,
         _idle: &mut dyn FnMut(),
     ) -> bool {
-        unsafe { self.start_read_seek_first(lba, spin_limit) }
+        unsafe { self.start_read_seek_first(lba, limit) }
     }
     /// Read one complete user-data sector.
     /// # Safety
@@ -191,9 +193,9 @@ pub struct LoadedExe {
 }
 const SECTOR_BYTES: u32 = (SECTOR_WORDS * 4) as u32;
 
-/// Spins granted to one SeekL completion: covers the measured worst-case
-/// mech travel (~310 ms) with margin, far short of a hang.
-const SEEK_POLL: u32 = 4_000_000;
+/// Time granted to one SeekL completion: the SDK's bound for a seek that may
+/// carry a spin-up from idle (`psx_io::cd::wait::FIRST_SECTOR_WAIT`, 10 s).
+const SEEK_WAIT: WaitTime = FIRST_SECTOR_WAIT;
 
 // PSX-EXE header word offsets (see `psoxide.ld`).
 const HDR_PC0: usize = 0x10 / 4;
@@ -313,7 +315,7 @@ unsafe fn load<R: Reader, M: Memory, O: Observer>(
         // BIOS-style bracket: explicit SeekL waited to completion before
         // ReadN, for the header and every payload chunk alike. Seek poll
         // budget covers the measured worst case (~310 ms cross-disc).
-        if !reader.start_read_seek_first_idle(exe_lba, SEEK_POLL, &mut || observer.tick()) {
+        if !reader.start_read_seek_first_idle(exe_lba, SEEK_WAIT, &mut || observer.tick()) {
             reader.stop();
             return Err((2, exe_lba));
         }
@@ -371,7 +373,7 @@ unsafe fn load<R: Reader, M: Memory, O: Observer>(
     while sector < sectors {
         let chunk_lba = exe_lba + 1 + sector;
         if !unsafe {
-            reader.start_read_seek_first_idle(chunk_lba, SEEK_POLL, &mut || observer.tick())
+            reader.start_read_seek_first_idle(chunk_lba, SEEK_WAIT, &mut || observer.tick())
         } {
             unsafe { reader.stop() };
             return Err((2, chunk_lba));

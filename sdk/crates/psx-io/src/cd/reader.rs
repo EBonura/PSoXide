@@ -45,6 +45,7 @@
 
 use super::lba_to_bcd_msf;
 use super::pause::{self, Completion, PauseAnswer, PauseDrive, PauseFailure};
+use super::wait::{Elapsed, WaitTime, ACK_WAIT, FIFO_WAIT, FIRST_SECTOR_WAIT, NEXT_SECTOR_WAIT};
 use crate::irq;
 use crate::periph::Cd;
 use psx_hw::cd::irq::{
@@ -62,12 +63,11 @@ pub const SECTOR_WORDS: usize = 2048 / 4;
 /// `SetMode` byte for double-speed 2048-byte sectors.
 const MODE_DATA_DOUBLE_SPEED: u8 = MODE_DOUBLE_SPEED;
 
-// Poll limits, tuned on silicon. `DATA_POLL` covers a worst-case seek at
-// double speed.
-const ACK_POLL: u32 = 16_384;
+// The waits are bounded by time (see `super::wait`): a command's acknowledge
+// `ACK_WAIT`, a seek's completion and a read's first sector `FIRST_SECTOR_WAIT`,
+// the sectors after it `NEXT_SECTOR_WAIT`, the data FIFO `FIFO_WAIT`. Only the
+// parameter FIFO keeps a spin count: it has room at once on every drive.
 const PARAM_POLL: u32 = 16_384;
-const DATA_POLL: u32 = 4_000_000;
-const CLEANUP_POLL: u32 = 16_384;
 
 /// Response bytes drained at most. The FIFO holds 16, but on heavy streaming
 /// the controller (or an emulator) can wedge it "not empty", and an unbounded
@@ -186,6 +186,10 @@ pub struct SectorReader {
     /// Written on every failure path so a caller with only a screen to
     /// print on (the demo-disc loader) can say what the drive did.
     diag: [u8; 4],
+    /// The running read has not delivered its first sector yet: its wait is
+    /// [`FIRST_SECTOR_WAIT`], which carries the seek and a spin-up, not
+    /// [`NEXT_SECTOR_WAIT`].
+    first_sector: bool,
 }
 
 impl SectorReader {
@@ -199,6 +203,7 @@ impl SectorReader {
             saved_mask: SavedMask(None),
             discard: [0; SECTOR_WORDS],
             diag: [0; 4],
+            first_sector: false,
         }
     }
 
@@ -233,6 +238,12 @@ impl SectorReader {
         u32::from_be_bytes(self.diag)
     }
 
+    /// Forget the last failure snapshot, so a read that fails next is not
+    /// reported with what an earlier one (retried and recovered) left.
+    pub fn clear_diagnostics(&mut self) {
+        self.diag = [0; 4];
+    }
+
     /// Pop one sector's 2048 bytes from the data FIFO into `buffer`.
     ///
     /// Arms the data request, waits (bounded) until the FIFO reports data,
@@ -242,15 +253,16 @@ impl SectorReader {
         cd.request_data();
         // The FIFO fills shortly after the request; the bound covers a slow
         // drive without letting a dead one hang the caller.
-        let mut spins = 0;
+        let mut elapsed = Elapsed::start();
         crate::diag::wait_begin(crate::diag::site::CD_FIFO, 0);
-        while !cd.is_data_fifo_ready() && spins < DATA_POLL {
-            spins += 1;
+        let mut ready = cd.is_data_fifo_ready();
+        while !ready && !elapsed.step(FIFO_WAIT) {
+            ready = cd.is_data_fifo_ready();
         }
-        if spins >= DATA_POLL {
-            crate::diag::wait_timeout(crate::diag::site::CD_FIFO, 0, DATA_POLL);
-        } else {
+        if ready {
             crate::diag::wait_end();
+        } else {
+            crate::diag::wait_timeout(crate::diag::site::CD_FIFO, 0, elapsed.spins());
         }
         crate::diag::cd_sector();
         for word in buffer.iter_mut() {
@@ -284,22 +296,22 @@ impl SectorReader {
         }
     }
 
-    fn wait_irq(&mut self, expected: u8, limit: u32) -> Wait {
+    fn wait_irq(&mut self, expected: u8, limit: WaitTime) -> Wait {
         self.wait_irq_with(expected, limit, &mut || {})
     }
 
     /// [`wait_irq`](Self::wait_irq) calling `idle` once per spin, before the
     /// controller is looked at again, so a caller can keep servicing something
     /// else (the pad) through a wait that runs longer than a frame.
-    fn wait_irq_with(&mut self, expected: u8, limit: u32, idle: &mut dyn FnMut()) -> Wait {
+    fn wait_irq_with(&mut self, expected: u8, limit: WaitTime, idle: &mut dyn FnMut()) -> Wait {
         let site = if expected == IRQ_DATA_READY {
             crate::diag::site::CD_SECTOR
         } else {
             crate::diag::site::CD_RESPONSE
         };
         crate::diag::wait_begin(site, expected as u32);
-        let mut spins = 0;
-        while spins < limit {
+        let mut elapsed = Elapsed::start();
+        loop {
             idle();
             run_idle_hook();
             let flag = self.cd.irq_flag_value();
@@ -320,9 +332,11 @@ impl SectorReader {
             if flag != 0 {
                 self.ack_unexpected(flag);
             }
-            spins += 1;
+            if elapsed.step(limit) {
+                break;
+            }
         }
-        crate::diag::wait_timeout(site, expected as u32, limit);
+        crate::diag::wait_timeout(site, expected as u32, elapsed.spins());
         Wait::Timeout
     }
 
@@ -346,7 +360,7 @@ impl SectorReader {
     /// Dispatch one command with controller IRQs masked and every FIFO in a
     /// known state, then wait for `expected` and ack it. The mask/ack ordering
     /// is load-bearing on silicon; do not reorder.
-    fn send_command(&mut self, command: u8, params: &[u8], expected: u8, limit: u32) -> bool {
+    fn send_command(&mut self, command: u8, params: &[u8], expected: u8, limit: WaitTime) -> bool {
         matches!(
             self.send_command_waiting(command, params, expected, limit),
             Some(Wait::Matched)
@@ -360,7 +374,7 @@ impl SectorReader {
         command: u8,
         params: &[u8],
         expected: u8,
-        limit: u32,
+        limit: WaitTime,
     ) -> Option<Wait> {
         let saved = self.cd.irq_enable_mask();
         self.cd.set_irq_enable_mask(0);
@@ -395,7 +409,7 @@ impl SectorReader {
     }
 
     /// GetStat: the drive's status byte, or `None` when it does not answer within
-    /// [`ACK_POLL`] spins. Same masking, draining and acknowledging as
+    /// [`ACK_WAIT`]. Same masking, draining and acknowledging as
     /// [`send_command`](Self::send_command), so a read still streaming sectors
     /// (each popped and acknowledged by the wait) cannot hold the answer back.
     fn get_status(&mut self) -> Option<u8> {
@@ -405,7 +419,7 @@ impl SectorReader {
         self.cd.drain_response_limited(DRAIN_LIMIT);
         self.cd.reset_parameter_fifo();
         self.cd.send_command_byte(CMD_GETSTAT);
-        let status = match self.wait_irq(IRQ_ACK, ACK_POLL) {
+        let status = match self.wait_irq(IRQ_ACK, ACK_WAIT) {
             Wait::Matched => {
                 let status = self.cd.read_response_byte();
                 self.cd.drain_response_limited(DRAIN_LIMIT);
@@ -479,7 +493,7 @@ impl SectorReader {
     /// Setfilter: the XA file and channel whose audio sectors the drive
     /// plays when the mode has the filter bit set.
     pub fn set_filter(&mut self, file: u8, channel: u8) -> bool {
-        self.send_command(CMD_SETFILTER, &[file, channel], IRQ_ACK, ACK_POLL)
+        self.send_command(CMD_SETFILTER, &[file, channel], IRQ_ACK, ACK_WAIT)
     }
 
     /// Unmute the drive: let CD-DA and XA-ADPCM reach the SPU. The drive
@@ -487,7 +501,7 @@ impl SectorReader {
     /// assume the last tenant left it unmuted.
     #[doc(alias = "Demute")]
     pub fn unmute(&mut self) -> bool {
-        self.send_command(CMD_DEMUTE, &[], IRQ_ACK, ACK_POLL)
+        self.send_command(CMD_DEMUTE, &[], IRQ_ACK, ACK_WAIT)
     }
 
     fn prepare_with_mode(&mut self, mode: u8) -> bool {
@@ -537,7 +551,7 @@ impl SectorReader {
         // that survives the IRQ drain above, and an emulator FIFO never holds
         // any, which is why this cannot reproduce headless.
         self.cd.clear_data_request();
-        self.send_command(CMD_SETMODE, &[mode], IRQ_ACK, ACK_POLL)
+        self.send_command(CMD_SETMODE, &[mode], IRQ_ACK, ACK_WAIT)
     }
 
     /// Setloc to a program-relative `lba`, shifted by [`crate::disc_base`]
@@ -545,7 +559,7 @@ impl SectorReader {
     fn set_location(&mut self, lba: u32) -> bool {
         crate::diag::cd_start(crate::disc_base::shift_lba(lba));
         let [minute, second, frame] = lba_to_bcd_msf(crate::disc_base::shift_lba(lba));
-        self.send_command(CMD_SETLOC, &[minute, second, frame], IRQ_ACK, ACK_POLL)
+        self.send_command(CMD_SETLOC, &[minute, second, frame], IRQ_ACK, ACK_WAIT)
     }
 
     /// Seek to `lba` (Setloc with BCD MSF) and start a ReadN stream.
@@ -561,10 +575,11 @@ impl SectorReader {
         if !self.set_location(lba) {
             return false;
         }
-        if !self.send_command(CMD_READN, &[], IRQ_ACK, ACK_POLL) {
+        if !self.send_command(CMD_READN, &[], IRQ_ACK, ACK_WAIT) {
             return false;
         }
         self.cd.set_irq_enable_mask(ALL_IRQS_ENABLED);
+        self.first_sector = true;
         true
     }
 
@@ -577,8 +592,12 @@ impl SectorReader {
     /// SetLoc+ReadN performs starts data flowing while the mech is still
     /// settling; the same console that corrupts our sustained implicit-seek
     /// streams loads 1.4 MB EXEs through the BIOS bracket without fault.
-    pub fn start_read_seek_first(&mut self, lba: u32, seek_poll: u32) -> bool {
-        self.start_read_seek_first_with(lba, seek_poll, &mut || {})
+    ///
+    /// `seek` bounds the seek's completion: [`FIRST_SECTOR_WAIT`] covers a
+    /// drive spinning up from idle. A seek that does not complete in it leaves
+    /// a timeout in [`diagnostics`](Self::diagnostics) (command SeekL).
+    pub fn start_read_seek_first(&mut self, lba: u32, seek: WaitTime) -> bool {
+        self.start_read_seek_first_with(lba, seek, &mut || {})
     }
 
     /// [`start_read_seek_first`](Self::start_read_seek_first) calling `idle`
@@ -588,7 +607,7 @@ impl SectorReader {
     pub fn start_read_seek_first_with(
         &mut self,
         lba: u32,
-        seek_poll: u32,
+        seek: WaitTime,
         idle: &mut dyn FnMut(),
     ) -> bool {
         self.enter_polling_mask();
@@ -598,25 +617,35 @@ impl SectorReader {
         // SeekL acks (INT3) then completes (INT2) once the head has
         // settled on the target; only then is ReadN issued, so the
         // drive never streams during mech settle.
-        if !self.send_command(CMD_SEEKL, &[], IRQ_ACK, ACK_POLL) {
+        if !self.send_command(CMD_SEEKL, &[], IRQ_ACK, ACK_WAIT) {
             return false;
         }
-        match self.wait_irq_with(IRQ_COMPLETE, seek_poll, idle) {
+        match self.wait_irq_with(IRQ_COMPLETE, seek, idle) {
             Wait::Matched => {}
-            Wait::CdError | Wait::Timeout => return false,
+            Wait::CdError => {
+                self.note_drive_error(CMD_SEEKL);
+                self.cd.drain_response_limited(DRAIN_LIMIT);
+                self.cd.acknowledge_all_and_reset_parameters();
+                return false;
+            }
+            Wait::Timeout => {
+                self.note_timeout(CMD_SEEKL);
+                return false;
+            }
         }
         self.cd.acknowledge_irq(IRQ_COMPLETE);
         // The BIOS re-sends SetMode inside every bracket, between the
         // seek completion and ReadN; every one of its ReadN commands in
         // the trace is prefixed SetLoc,SeekL,SetMode. Match it exactly.
         let mode = self.mode;
-        if !self.send_command(CMD_SETMODE, &[mode], IRQ_ACK, ACK_POLL) {
+        if !self.send_command(CMD_SETMODE, &[mode], IRQ_ACK, ACK_WAIT) {
             return false;
         }
-        if !self.send_command(CMD_READN, &[], IRQ_ACK, ACK_POLL) {
+        if !self.send_command(CMD_READN, &[], IRQ_ACK, ACK_WAIT) {
             return false;
         }
         self.cd.set_irq_enable_mask(ALL_IRQS_ENABLED);
+        self.first_sector = true;
         true
     }
 
@@ -624,8 +653,19 @@ impl SectorReader {
     /// pop its 2048 bytes into `buffer`. `false` on drive error or timeout
     /// (the stream is acked/cleaned up; follow with [`stop`](Self::stop)). A
     /// read must be running (a successful [`start_read`](Self::start_read)).
+    ///
+    /// The first sector of a read is waited for up to [`FIRST_SECTOR_WAIT`] (it
+    /// carries the seek and, after an idle drive, the spin-up); the ones after
+    /// it up to [`NEXT_SECTOR_WAIT`].
     pub fn read_sector(&mut self, buffer: &mut [u32; SECTOR_WORDS]) -> bool {
-        match self.wait_irq(IRQ_DATA_READY, DATA_POLL) {
+        let limit = if self.first_sector {
+            FIRST_SECTOR_WAIT
+        } else {
+            NEXT_SECTOR_WAIT
+        };
+        let waited = self.wait_irq(IRQ_DATA_READY, limit);
+        self.first_sector = false;
+        match waited {
             Wait::Matched => {}
             Wait::CdError => {
                 self.note_drive_error(DIAG_SITE_READ);
@@ -699,7 +739,7 @@ impl SectorReader {
     /// when the drive has to be quiet before anything else happens.
     #[inline(never)]
     pub fn stop(&mut self) {
-        if self.send_command(CMD_PAUSE, &[], IRQ_ACK, CLEANUP_POLL) {
+        if self.send_command(CMD_PAUSE, &[], IRQ_ACK, ACK_WAIT) {
             self.cd.drain_response_limited(DRAIN_LIMIT);
             self.cd.acknowledge_irq(IRQ_COMPLETE);
         }
@@ -739,7 +779,7 @@ impl SectorReader {
 
     /// [`stop`](Self::stop), then wait until the drive has really stopped, with
     /// the protocol the console needs ([`pause::pause_until_stopped`]): wait for
-    /// the second response up to [`pause::COMPLETE_SPINS`], settle by status
+    /// the second response up to [`pause::COMPLETE_WAIT`], settle by status
     /// when it never comes, and send the Pause again after a seek that refused
     /// it. Takes up to about 60 ms of drive time after a long read at double
     /// speed and 115 ms at single speed; in a failure it takes up to a second.
@@ -765,7 +805,7 @@ impl PauseDrive for ReaderPause<'_> {
     fn send_pause(&mut self) -> PauseAnswer {
         match self
             .0
-            .send_command_waiting(CMD_PAUSE, &[], IRQ_ACK, CLEANUP_POLL)
+            .send_command_waiting(CMD_PAUSE, &[], IRQ_ACK, ACK_WAIT)
         {
             Some(Wait::Matched) => PauseAnswer::Acknowledged,
             Some(Wait::CdError) => PauseAnswer::Refused,
@@ -773,9 +813,9 @@ impl PauseDrive for ReaderPause<'_> {
         }
     }
 
-    fn wait_completion(&mut self, spins: u32) -> Completion {
+    fn wait_completion(&mut self, limit: WaitTime) -> Completion {
         let reader = &mut *self.0;
-        match reader.wait_irq(IRQ_COMPLETE, spins) {
+        match reader.wait_irq(IRQ_COMPLETE, limit) {
             Wait::Matched => {
                 reader.cd.drain_response_limited(DRAIN_LIMIT);
                 reader.cd.acknowledge_irq(IRQ_COMPLETE);
@@ -795,9 +835,9 @@ impl PauseDrive for ReaderPause<'_> {
         self.0.get_status()
     }
 
-    fn wait_seek_end(&mut self, spins: u32) -> bool {
+    fn wait_seek_end(&mut self, limit: WaitTime) -> bool {
         let reader = &mut *self.0;
-        match reader.wait_irq(IRQ_DATA_READY, spins) {
+        match reader.wait_irq(IRQ_DATA_READY, limit) {
             Wait::Matched => {
                 // wait_irq also matches on a ready FIFO with no flag; pop either way.
                 reader.ack_unexpected(IRQ_DATA_READY);

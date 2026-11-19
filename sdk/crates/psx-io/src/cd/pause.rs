@@ -29,28 +29,25 @@
 //!
 //! [`pause_until_stopped`] is the whole protocol over the small [`PauseDrive`]
 //! trait, so the host tests can play the console's timings against it:
-//! send, wait for INT2 up to [`COMPLETE_SPINS`], fall back to polling the status
+//! send, wait for INT2 up to [`COMPLETE_WAIT`], fall back to polling the status
 //! when INT2 never shows, and on a refusal wait the seek out and send again.
 
+use super::wait::WaitTime;
 use psx_hw::cd::{STAT_PLAYING, STAT_READING, STAT_SEEKING};
 
-/// Spins of the status register to wait for the second response of a Pause.
-///
-/// A spin of the polled readers costs about 24 system clocks on the console, so
-/// this is about 24 million clocks (0.7 s): over six times the slowest completion
-/// measured (3.84 million out of a settled single-speed read), and still bounded so
-/// a dead drive cannot hang a loader. Even at an optimistic 5 clocks a spin it is
-/// 5 million. Reaching the bound is a failure path; the normal wait ends at INT2.
-pub const COMPLETE_SPINS: u32 = 1_000_000;
+/// How long to wait for the second response of a Pause: 700 ms, over six times
+/// the slowest completion measured on the console (3.84 million clocks, 113 ms, out
+/// of a settled single-speed read). Reaching it is a failure path; the normal wait
+/// ends at INT2.
+pub const COMPLETE_WAIT: WaitTime = WaitTime::from_millis(700);
 
 /// Times the status is asked, one command each (about 20,000 clocks), when the
 /// second response did not come: about 20 million clocks (0.6 s).
 pub const STATUS_POLLS: u32 = 1_000;
 
-/// Spins to wait for the first data sector of a read whose Pause was refused,
-/// i.e. for its seek to end: the slowest seek measured is 310 ms, about 440,000
-/// spins at 24 clocks each.
-pub const SEEK_SPINS: u32 = 1_000_000;
+/// How long to wait for the first data sector of a read whose Pause was refused,
+/// i.e. for its seek to end: 1 s against the slowest seek measured, 310 ms.
+pub const SEEK_WAIT: WaitTime = WaitTime::from_millis(1_000);
 
 /// Pauses sent at most, counting the first. A refusal waits the seek out and
 /// retries; three is enough for a seek that began between two tries.
@@ -110,15 +107,15 @@ impl PauseFailure {
 pub trait PauseDrive {
     /// Send Pause and wait for its first response.
     fn send_pause(&mut self) -> PauseAnswer;
-    /// Wait up to `spins` for the second response. Data sectors still arriving
+    /// Wait up to `limit` for the second response. Data sectors still arriving
     /// from the interrupted read are consumed and acknowledged meanwhile.
-    fn wait_completion(&mut self, spins: u32) -> Completion;
+    fn wait_completion(&mut self, limit: WaitTime) -> Completion;
     /// GetStat: the status byte, `None` when it did not answer. Cancels a
     /// second response still pending.
     fn status(&mut self) -> Option<u8>;
-    /// After a refusal: wait up to `spins` for the read to deliver its first
+    /// After a refusal: wait up to `limit` for the read to deliver its first
     /// sector (consuming it), which ends the seek. `false` if none came.
-    fn wait_seek_end(&mut self, spins: u32) -> bool;
+    fn wait_seek_end(&mut self, limit: WaitTime) -> bool;
 }
 
 /// Pause the drive and return only when it has stopped.
@@ -138,9 +135,9 @@ pub fn pause_until_stopped(drive: &mut impl PauseDrive) -> Result<(), PauseFailu
             PauseAnswer::Refused => {
                 refused = true;
                 // The read carries on through the seek; send again once it is over.
-                drive.wait_seek_end(SEEK_SPINS);
+                drive.wait_seek_end(SEEK_WAIT);
             }
-            PauseAnswer::Acknowledged => match drive.wait_completion(COMPLETE_SPINS) {
+            PauseAnswer::Acknowledged => match drive.wait_completion(COMPLETE_WAIT) {
                 Completion::Arrived => return Ok(()),
                 Completion::Error => refused = true,
                 Completion::TimedOut => {
@@ -212,31 +209,30 @@ fn wait_until_idle(drive: &mut impl PauseDrive) -> bool {
 mod tests {
     use super::*;
 
-    /// The console's Pause, in spins (one status read, about 24 clocks, is one
-    /// spin; one GetStat is about 800 spins). The timeline starts at the
-    /// first `send_pause`.
+    /// The console's Pause, in system clocks. The timeline starts at the first
+    /// `send_pause`.
     struct Console {
-        /// Spins from the acknowledge to INT2, `None` when INT2 never comes.
+        /// Clocks from the acknowledge to INT2, `None` when INT2 never comes.
         completes_after: Option<u32>,
-        /// Spins from the acknowledge until the status stops saying reading.
+        /// Clocks from the acknowledge until the status stops saying reading.
         status_clears_after: u32,
-        /// Spins of a seek that refuses a Pause, counted from the first send.
+        /// Clocks of a seek that refuses a Pause, counted from the first send.
         seeking_for: u32,
         seek_waits: u32,
-        /// Spins since the first send.
+        /// Clocks since the first send.
         now: u32,
         /// Pause commands sent.
         sends: u32,
         statuses: u32,
-        /// Spin at which the accepted Pause was acknowledged.
+        /// Clock at which the accepted Pause was acknowledged.
         acked_at: Option<u32>,
         /// A GetStat has cancelled the second response.
         cancelled: bool,
         silent: bool,
     }
 
-    /// One GetStat in spins: 19,500 clocks over 24 per spin.
-    const GETSTAT_SPINS: u32 = 800;
+    /// One GetStat: 19,500 clocks.
+    const GETSTAT_CLOCKS: u32 = 19_500;
 
     impl Console {
         fn new(completes_after: Option<u32>) -> Self {
@@ -262,24 +258,25 @@ mod tests {
                 return PauseAnswer::Silent;
             }
             if self.now < self.seeking_for {
-                self.now += 1_500; // the INT5 answer
+                self.now += 36_000; // the INT5 answer
                 return PauseAnswer::Refused;
             }
-            self.now += 1_400; // the acknowledge, 33,000 clocks
+            self.now += 33_000; // the acknowledge
             self.acked_at = Some(self.now);
             self.cancelled = false;
             PauseAnswer::Acknowledged
         }
 
-        fn wait_completion(&mut self, spins: u32) -> Completion {
+        fn wait_completion(&mut self, limit: WaitTime) -> Completion {
+            let clocks = limit.clocks();
             let acked = self.acked_at.expect("a wait follows an acknowledge");
             match self.completes_after {
-                Some(after) if !self.cancelled && after <= spins => {
+                Some(after) if !self.cancelled && after <= clocks => {
                     self.now = acked + after;
                     Completion::Arrived
                 }
                 _ => {
-                    self.now += spins;
+                    self.now += clocks;
                     Completion::TimedOut
                 }
             }
@@ -287,7 +284,7 @@ mod tests {
 
         fn status(&mut self) -> Option<u8> {
             self.statuses += 1;
-            self.now += GETSTAT_SPINS;
+            self.now += GETSTAT_CLOCKS;
             // A command between the two responses cancels the second.
             self.cancelled = true;
             let reading = self
@@ -296,32 +293,29 @@ mod tests {
             Some(if reading { STAT_READING | 0x02 } else { 0x02 })
         }
 
-        fn wait_seek_end(&mut self, spins: u32) -> bool {
+        fn wait_seek_end(&mut self, limit: WaitTime) -> bool {
+            let clocks = limit.clocks();
             self.seek_waits += 1;
-            // The first sector arrives when the seek ends, if within `spins`.
-            let first_sector = self.seeking_for.saturating_add(4_700);
-            if first_sector <= self.now.saturating_add(spins) {
+            // The first sector arrives when the seek ends, if within `limit`.
+            let first_sector = self.seeking_for.saturating_add(113_000);
+            if first_sector <= self.now.saturating_add(clocks) {
                 self.now = self.now.max(first_sector);
                 true
             } else {
-                self.now += spins;
+                self.now += clocks;
                 false
             }
         }
     }
 
-    /// 3.84 million clocks (the slowest, single speed, settled head) in spins.
-    const SLOWEST: u32 = 3_840_000 / 24;
+    /// 3.84 million clocks: the slowest completion, single speed, settled head.
+    const SLOWEST: u32 = 3_840_000;
 
     #[test]
     fn the_bounds_cover_the_slowest_measured_completion_with_margin() {
-        // 24 clocks a spin on the console; even at a quarter of that it holds.
-        assert!(u64::from(COMPLETE_SPINS) * 24 > 6 * 3_840_000);
-        assert!(u64::from(COMPLETE_SPINS) * 5 >= 5_000_000);
-        // The wait the three games used (16,384 spins) was a tenth of the worst case.
-        const { assert!(16_384 < SLOWEST) };
+        assert!(COMPLETE_WAIT.clocks() > 6 * SLOWEST);
         // Longer than the slowest seek measured (310 ms = 10.5 million clocks).
-        assert!(u64::from(SEEK_SPINS) * 24 > 10_500_000);
+        assert!(SEEK_WAIT.clocks() > 3 * 10_500_000);
     }
 
     #[test]
@@ -345,17 +339,18 @@ mod tests {
             2_420_000,
             3_840_000,
         ] {
-            let spins = clocks / 24;
-            assert!(spins > 16_384, "{clocks} clocks");
-            let mut console = Console::new(Some(spins));
+            // 16,384 spins at 24 clocks each, the wait as it was written down.
+            let old = WaitTime::from_clocks(16_384 * 24);
+            assert!(clocks > old.clocks(), "{clocks} clocks");
+            let mut console = Console::new(Some(clocks));
             assert_eq!(console.send_pause(), PauseAnswer::Acknowledged);
-            assert_eq!(console.wait_completion(16_384), Completion::TimedOut);
+            assert_eq!(console.wait_completion(old), Completion::TimedOut);
         }
     }
 
     #[test]
     fn an_idle_drive_stops_at_once() {
-        let mut console = Console::new(Some(340));
+        let mut console = Console::new(Some(8_160));
         assert_eq!(pause_until_stopped(&mut console), Ok(()));
     }
 
@@ -363,7 +358,7 @@ mod tests {
     fn a_lost_second_response_is_settled_by_the_status() {
         let mut console = Console::new(None);
         // Still reading when the wait for INT2 gives up, stopped a few asks later.
-        console.status_clears_after = COMPLETE_SPINS + 5 * GETSTAT_SPINS;
+        console.status_clears_after = COMPLETE_WAIT.clocks() + 5 * GETSTAT_CLOCKS;
         assert_eq!(pause_until_stopped(&mut console), Ok(()));
         assert!(
             console.statuses >= 5,
@@ -386,7 +381,7 @@ mod tests {
     #[test]
     fn a_pause_refused_during_the_seek_is_sent_again_after_it() {
         let mut console = Console::new(Some(SLOWEST));
-        console.seeking_for = 10_500_000 / 24; // 310 ms, the slowest seek
+        console.seeking_for = 10_500_000; // 310 ms, the slowest seek
         assert_eq!(pause_until_stopped(&mut console), Ok(()));
         assert_eq!(console.sends, 2, "refused once, then accepted");
         assert_eq!(
@@ -420,7 +415,7 @@ mod tests {
 
     #[test]
     fn an_idle_drive_is_left_alone_when_taking_it_over() {
-        let mut console = Console::new(Some(340));
+        let mut console = Console::new(Some(8_160));
         console.status_clears_after = 0; // idle from the start
         console.acked_at = Some(0);
         assert_eq!(settle_drive(&mut console), Ok(Settled::AlreadyIdle));
@@ -453,13 +448,13 @@ mod tests {
         fn send_pause(&mut self) -> PauseAnswer {
             unreachable!("a deaf drive is not paused")
         }
-        fn wait_completion(&mut self, _spins: u32) -> Completion {
+        fn wait_completion(&mut self, _limit: WaitTime) -> Completion {
             unreachable!()
         }
         fn status(&mut self) -> Option<u8> {
             None
         }
-        fn wait_seek_end(&mut self, _spins: u32) -> bool {
+        fn wait_seek_end(&mut self, _limit: WaitTime) -> bool {
             unreachable!()
         }
     }

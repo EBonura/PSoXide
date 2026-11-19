@@ -15,6 +15,7 @@
 pub mod audio;
 pub mod pause;
 pub mod reader;
+pub mod wait;
 pub mod xa;
 pub mod xa_clock;
 
@@ -301,7 +302,7 @@ impl Cd {
     /// `spin_limit` bounds each of the two waits. Out of a data read the second
     /// response comes 1.2 to 3.9 million system clocks after the first on the
     /// console (and about 4.2 million after CD-DA), so a limit under
-    /// [`pause::COMPLETE_SPINS`] can report failure for a Pause that is merely
+    /// [`pause::COMPLETE_WAIT`] can report failure for a Pause that is merely
     /// slow. Returns `false` for a refusal (INT5, during a seek) as well; the
     /// protocol that waits the seek out and sends again is
     /// [`pause::pause_until_stopped`].
