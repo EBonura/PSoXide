@@ -116,7 +116,7 @@ pub const fn mvmva(mx: Matrix, vx: Vector, cv: Translation) -> u32 {
 /// Function commands as the SDK issues them: `sf` set where the command
 /// takes it, `lm` clear.
 pub mod command {
-    use super::{COMMAND, SF};
+    use super::{COMMAND, LM, SF};
 
     /// Perspective transform of V0.
     pub const RTPS: u32 = COMMAND | SF | 0x01;
@@ -130,12 +130,18 @@ pub mod command {
     pub const INTPL: u32 = COMMAND | SF | 0x11;
     /// Light, color and depth cue of V0.
     pub const NCDS: u32 = COMMAND | SF | 0x13;
+    /// `NCDS` with `lm` set: negative IR1..IR3 results clamp to 0 instead of
+    /// -0x8000.
+    pub const NCDS_LM: u32 = NCDS | LM;
     /// Color and depth cue of the light result.
     pub const CDP: u32 = COMMAND | SF | 0x14;
     /// Light, color and depth cue of V0, V1 and V2.
     pub const NCDT: u32 = COMMAND | SF | 0x16;
     /// Light and color of V0.
     pub const NCCS: u32 = COMMAND | SF | 0x1b;
+    /// `NCCS` with `lm` set: negative IR1..IR3 results clamp to 0 instead of
+    /// -0x8000.
+    pub const NCCS_LM: u32 = NCCS | LM;
     /// Color of the light result.
     pub const CC: u32 = COMMAND | SF | 0x1c;
     /// Light of V0.
@@ -199,9 +205,11 @@ mod tests {
         assert_eq!(command::DPCS, 0x4a08_0010);
         assert_eq!(command::INTPL, 0x4a08_0011);
         assert_eq!(command::NCDS, 0x4a08_0013);
+        assert_eq!(command::NCDS_LM, 0x4a08_0413);
         assert_eq!(command::CDP, 0x4a08_0014);
         assert_eq!(command::NCDT, 0x4a08_0016);
         assert_eq!(command::NCCS, 0x4a08_001b);
+        assert_eq!(command::NCCS_LM, 0x4a08_041b);
         assert_eq!(command::CC, 0x4a08_001c);
         assert_eq!(command::NCS, 0x4a08_001e);
         assert_eq!(command::NCT, 0x4a08_0020);

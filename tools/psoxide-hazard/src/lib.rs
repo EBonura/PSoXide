@@ -9,8 +9,11 @@
 //!   the next instruction; it needs no build and runs over any source tree.
 //! * [`cache_gate`] (`cache-gate`) proves nothing outside the SDK's flush routines writes the
 //!   cache control register or isolates the cache.
+//! * [`inline_gate`] (`inline-gate`) proves the frame-path functions `sdk/profile.toml` lists under `[inline]`
+//!   are inlined into their callers, not linked as functions.
 //! * [`stack_guard`] (`stack-guard`) proves every scratchpad stack call tree
-//!   fits its region.
+//!   fits its region, and (in [`dispatch_guard`]) every interrupt handler fits
+//!   psx-rt's dispatcher stack.
 //! * [`heap_guard`] (`heap-guard`) proves the guest heap holds what the cooked level needs.
 //!
 //! These replace `tools/hazard_patch.py`, `hazard_scan.py` and
@@ -22,7 +25,10 @@ use std::io::Write;
 
 pub mod cache_gate;
 pub mod detect;
+pub mod dispatch_guard;
+pub mod gate;
 pub mod heap_guard;
+pub mod inline_gate;
 pub mod linkmap;
 pub mod listing;
 pub mod mfc0;
@@ -50,8 +56,8 @@ pub fn cli_args(args: &[String]) -> Option<(Vec<String>, bool, Option<String>)> 
             check_only = true;
         } else if arg == "--map" {
             map_path = Some(it.next()?.clone());
-        } else if arg == "--code" || arg == "--module" {
-            it.next()?; // its range is read by `code_ranges` or `module::modules`
+        } else if arg == "--code" || arg == "--module" || arg == "--raw" || arg == "--entry" {
+            it.next()?; // read by `code_ranges`, `module::modules` or `raw_blob`
         } else if arg.starts_with("--") {
             continue;
         } else {
@@ -59,6 +65,122 @@ pub fn cli_args(args: &[String]) -> Option<(Vec<String>, bool, Option<String>)> 
         }
     }
     Some((paths, check_only, map_path))
+}
+
+/// A headerless blob (`--raw LOAD [--entry ADDR]`): the bytes of the file are
+/// the load, at `load`, and execution starts at `entry` (default `load`).
+/// The tools read it as a PS-EXE with the header made up, so every check that
+/// works on an executable works on it. The blob has no `HAZARD_TRAMPOLINES`
+/// array of psx-rt's to patch through, so the patcher only checks it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RawBlob {
+    /// Where the first byte of the file loads.
+    pub load: i64,
+    /// Where it starts executing.
+    pub entry: i64,
+}
+
+impl RawBlob {
+    /// The file's bytes behind a made-up PS-EXE header (entry, load address,
+    /// size), zero-padded to a whole word.
+    #[must_use]
+    pub fn image(&self, file: &[u8]) -> Vec<u8> {
+        let mut data = vec![0u8; listing::HEADER as usize];
+        data[..8].copy_from_slice(b"PS-X EXE");
+        let size = u32::try_from(file.len().div_ceil(4) * 4).unwrap_or(u32::MAX);
+        for (at, value) in [(0x10, self.entry), (0x18, self.load)] {
+            data[at..at + 4].copy_from_slice(&(value as u32).to_le_bytes());
+        }
+        data[0x1c..0x20].copy_from_slice(&size.to_le_bytes());
+        data.extend_from_slice(file);
+        data.resize(listing::HEADER as usize + size as usize, 0);
+        data
+    }
+}
+
+/// The `--raw LOAD` and `--entry ADDR` of the command line (hex, `0x`
+/// optional). `Ok(None)` is an ordinary PS-EXE; `--entry` without `--raw`
+/// and a load or entry outside RAM or not word aligned are errors.
+///
+/// # Errors
+/// A bad or misplaced `--raw` or `--entry`, named in the message.
+pub fn raw_blob(args: &[String]) -> Result<Option<RawBlob>, String> {
+    let value = |flag: &str| -> Result<Option<i64>, String> {
+        let Some(at) = args.iter().position(|a| a == flag) else {
+            return Ok(None);
+        };
+        let text = args.get(at + 1).ok_or(format!("{flag} needs an address"))?;
+        match text::int_hex(text) {
+            Some(address)
+                if !text.starts_with(['-', '+'])
+                    && (0x8000_0000..0x8080_0000).contains(&address)
+                    && address % 4 == 0 =>
+            {
+                Ok(Some(address))
+            }
+            _ => Err(format!(
+                "bad {flag} {text}: want a word-aligned address in RAM, in hex"
+            )),
+        }
+    };
+    let (load, entry) = (value("--raw")?, value("--entry")?);
+    match (load, entry) {
+        (None, None) => Ok(None),
+        (None, Some(_)) => Err("--entry needs --raw".into()),
+        (Some(load), entry) => Ok(Some(RawBlob {
+            load,
+            entry: entry.unwrap_or(load),
+        })),
+    }
+}
+
+/// The bytes of the image at `path`: the file, or with a blob its made-up
+/// PS-EXE form. A blob's entry must lie inside it.
+///
+/// # Errors
+/// The file cannot be read, or a blob's entry is outside it.
+pub fn read_image(
+    path: &std::path::Path,
+    raw: Option<&RawBlob>,
+) -> Result<Vec<u8>, std::io::Error> {
+    let file = std::fs::read(path)?;
+    let Some(blob) = raw else {
+        return Ok(file);
+    };
+    let end = blob.load + file.len() as i64;
+    if !(blob.load <= blob.entry && blob.entry < end) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "--entry {:08x} is outside the blob {:08x}..{end:08x}",
+                blob.entry, blob.load
+            ),
+        ));
+    }
+    Ok(blob.image(&file))
+}
+
+/// The modules of the command line plus the boot overlay the map declares
+/// (see [`module`]). A map that cannot be read is left for [`open_map`] to
+/// report.
+///
+/// # Errors
+/// A bad `--module`, or two that overlap (see [`module::modules`]).
+pub fn image_modules(
+    args: &[String],
+    map_path: Option<&str>,
+) -> Result<Vec<module::Module>, String> {
+    let mut found = module::modules(args)?;
+    let map = map_path.and_then(|p| LinkMap::open(std::path::Path::new(p)).ok());
+    if let Some(boot) = map.as_ref().and_then(LinkMap::boot) {
+        found.push(module::Module {
+            link: (boot.start, boot.load_end),
+            at: boot.lma,
+            boot: true,
+        });
+    }
+    Ok(found)
 }
 
 /// The link map for `data`, or `None` without one. A map that cannot be
@@ -171,6 +293,13 @@ pub fn text_bounds(
         return Err(Some(1));
     }
     let mut ranges = vec![(lo, hi)];
+    for &(lo, hi) in map.boot_text() {
+        if !(0x8001_0000 <= lo && hi <= 0x8080_0000) {
+            let _ = writeln!(out, "implausible boot overlay code {lo:#x}..{hi:#x}");
+            return Err(Some(1));
+        }
+        ranges.push((lo, hi));
+    }
     ranges.extend(code_ranges(args).map_err(|error| {
         let _ = writeln!(out, "{error}");
         Some(2)

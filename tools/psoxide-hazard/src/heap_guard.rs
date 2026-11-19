@@ -171,9 +171,15 @@ mod tests {
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ");
-        assert!(script.contains("STACK_INIT = RAM_BASE + 0x001FFF00;"));
-        assert!(script.contains("STACK_RESERVE = 0x8000;"));
+        // The defaults: a link with RAM_SIZE_OVERRIDE or STACK_RESERVE_OVERRIDE ends its heap
+        // elsewhere, which HEAP_END does not follow (the editor guest sets neither).
+        assert!(script.contains("RAM_SIZE = DEFINED(RAM_SIZE_OVERRIDE) ? RAM_SIZE_OVERRIDE : 2M;"));
+        assert!(script.contains("STACK_INIT = RAM_BASE + RAM_SIZE - 0x100;"));
+        assert!(script.contains(
+            "STACK_RESERVE = DEFINED(STACK_RESERVE_OVERRIDE) ? STACK_RESERVE_OVERRIDE : 0x8000;"
+        ));
         assert!(script.contains("__heap_end = STACK_INIT - STACK_RESERVE;"));
+        assert_eq!(HEAP_END, 0x8000_0000 + 2 * 1024 * 1024 - 0x100 - 0x8000);
     }
 
     #[test]

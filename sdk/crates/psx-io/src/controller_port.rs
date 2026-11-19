@@ -14,13 +14,13 @@
 //!
 //! ```text
 //! let mut port = peripherals.controller_port;
-//! let mut pads = psx_pad::PadReader::port1();
-//! let state = pads.poll(&mut port);
+//! let mut pads = psx_pad::Controllers::new();
+//! let state = *pads.poll(&mut port, psx_io::controller_port::Port::One);
 //! let mut card = psx_mc::Card::new(psx_mc::HardwareCard::on_port(&mut port, Slot::One));
 //! ```
 
 use crate::periph::ControllerPort;
-use crate::{read_u32, read_u8, write_u16, write_u8};
+use crate::{read_u16, read_u32, read_u8, write_u16, write_u8};
 use psx_hw::sio::sio0;
 
 /// Which socket a transaction addresses.
@@ -74,6 +74,35 @@ impl Timing {
     };
 }
 
+/// The shortest time a pad is given between `/CS` asserting and the first
+/// byte, in system-clock cycles (33.8688 MHz): what the pad driver's 1,024
+/// setup spins took on a console (6.93 cycles a spin, run of 11-03, so about
+/// 7,100), rounded up. The original SCPH-1200 needs between 384 and 768 spins;
+/// the 11-03 console answered at every delay from 64 to 24,576 cycles.
+///
+/// The pad driver measures it on root counter 0 ([`Transport::clock`]) after each select, so no
+/// change to the code can shorten it. It stays at the v0.55 value: the console's three pads
+/// also completed 28 of 28 raw transactions with 2,048 (Hardware Tests v2.21, SHORT), so a
+/// shorter setup is a later optimisation and needs its own console A/B.
+///
+/// [`Transport::open`] asserts `/CS` early for an instrument that wants to start the wait before
+/// the transaction; the pad driver does not use it.
+pub const PAD_SETUP_CYCLES: u16 = 7_168;
+
+/// The shortest time `/CS` must stay high between one pad transaction and the next, in
+/// system-clock cycles (about 1.8 ms; the clock is 16 bits wide, so one wait stays under 65,536).
+/// Console data: a select made a few hundred cycles after the last deselect failed at the address
+/// byte (6 percent of first tries with the watching transport, whose gap was about 560 cycles),
+/// and one made a video frame later never did (Hardware Tests v2.22, pad lab phase 2; the
+/// v0.55 SDK, which released `/CS` after every poll). psx-spx names no minimum.
+/// [`Transport::cs_high_gap`] enforces it where a select follows a deselect at once: a retry, and
+/// the handshake after a poll.
+pub const PAD_CS_HIGH_CYCLES: u16 = 60_000;
+
+/// The two forms a device's `/ACK` takes in `STAT`: the live level, and the
+/// latched interrupt bit.
+const ACK_SIGNALS: u32 = sio0::stat::DSR_LEVEL | sio0::stat::IRQ;
+
 /// Why one byte exchange failed.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ExchangeError {
@@ -113,6 +142,76 @@ pub trait Transport {
     fn set_baud(&mut self, value: u16);
     /// Write the control register.
     fn set_control(&mut self, value: u16);
+    /// Read the control register back.
+    fn control(&mut self) -> u16;
+    /// System-clock cycles, modulo 2^16: root counter 0, which `psx-rt` sets
+    /// to count the system clock at entry and nothing in the SDK reconfigures.
+    /// A difference of two readings never exceeds the time that really passed
+    /// (a wrap only makes it smaller), so a wait on it is never too short.
+    fn clock(&mut self) -> u16;
+
+    /// Wait until [`PAD_CS_HIGH_CYCLES`] have passed on the system clock, counted from this call.
+    /// Called right after a deselect that a select follows at once (a retry, the handshake after a
+    /// poll): a poll that starts a frame after the last needs nothing. Bounded, so a stopped counter
+    /// cannot hang a poll.
+    #[inline(never)]
+    fn cs_high_gap(&mut self) {
+        let at = self.clock();
+        let mut spins = u32::from(PAD_CS_HIGH_CYCLES);
+        while self.clock().wrapping_sub(at) < PAD_CS_HIGH_CYCLES && spins != 0 {
+            spins -= 1;
+            core::hint::spin_loop();
+        }
+    }
+
+    /// Assert `/CS` on `port` for a pad transaction that [`begin_pad`]
+    /// starts later, and return the [`clock`] it was asserted at. The pad's
+    /// setup time then passes while the program does something else.
+    ///
+    /// [`begin_pad`]: Self::begin_pad
+    /// [`clock`]: Self::clock
+    #[inline(never)]
+    fn open(&mut self, port: Port) -> u16 {
+        self.select(port);
+        self.clock()
+    }
+
+    /// Start a pad transaction on `port`: [`begin`](Self::begin) with the
+    /// pad's timing, or, on a select [`open`](Self::open) left, the rest of
+    /// [`PAD_SETUP_CYCLES`] and then the same drain and `/ACK` release.
+    ///
+    /// `opened` is what `open` returned for this port. It is used only if
+    /// `CTRL` still reads back as that select, so a memory-card transfer or
+    /// anything else that released or moved the select in between costs a
+    /// fresh select and the whole setup delay, as does `None`. `false` means
+    /// the line never released; call [`finish`](Self::finish) either way.
+    fn begin_pad(&mut self, port: Port, opened: Option<u16>) -> bool {
+        match opened {
+            Some(at) if self.control() == sio0::selected_ctrl(port.is_two(), false) => {
+                // Bounded as well, so a counter someone stopped cannot hang
+                // the poll: twice the pad's setup spins of clock readings is
+                // still at least the setup time without the clock.
+                let mut spins = 2 * Timing::PAD.setup_spins;
+                while self.clock().wrapping_sub(at) < PAD_SETUP_CYCLES && spins != 0 {
+                    spins -= 1;
+                    core::hint::spin_loop();
+                }
+            }
+            _ => {
+                let armed = self.pad_ack_irq(port);
+                self.select_with(port, armed);
+                // Measured time, not a spin count: no change to the loop can shorten it.
+                let at = self.clock();
+                let mut spins = 2 * Timing::PAD.setup_spins;
+                while self.clock().wrapping_sub(at) < PAD_SETUP_CYCLES && spins != 0 {
+                    spins -= 1;
+                    core::hint::spin_loop();
+                }
+            }
+        }
+        self.drain_receive();
+        self.wait_status_clear(sio0::stat::DSR_LEVEL, Timing::PAD.ack_spins)
+    }
 
     /// Configure the port for 250 kHz, 8N1 and assert `/CS` on `port`.
     ///
@@ -121,6 +220,24 @@ pub trait Transport {
     /// so the transport watches the live `/ACK` level in `STAT` instead.
     fn select(&mut self, port: Port) {
         self.select_with(port, false);
+    }
+
+    /// Whether a pad transaction on `port` arms the `/ACK` interrupt from its
+    /// select. Ports that show the live `/ACK` level never need it. A port that
+    /// reports `/ACK` only as the latched interrupt bit, and latches it only
+    /// while the interrupt is armed (PCSX-Redux, and the BIOS and Sony's pad
+    /// library always arm it), answers no byte otherwise. A model of a port
+    /// keeps this off.
+    fn pad_ack_irq(&mut self, port: Port) -> bool {
+        let _ = port;
+        false
+    }
+
+    /// Set what [`pad_ack_irq`](Self::pad_ack_irq) returns for `port`. The pad
+    /// driver flips it after a poll that found nobody, so an empty socket is
+    /// probed both ways and a port of either kind keeps the setting that works.
+    fn set_pad_ack_irq(&mut self, port: Port, armed: bool) {
+        let _ = (port, armed);
     }
 
     /// [`select`](Self::select) with the `/ACK` interrupt armed when
@@ -133,6 +250,13 @@ pub trait Transport {
         // assert the select line.
         self.set_control(sio0::ctrl::ACK);
         self.set_control(sio0::selected_ctrl(port.is_two(), arm_ack_irq));
+    }
+
+    /// Whether the `/ACK` interrupt is armed in `CTRL`. A pad poll arms it only
+    /// when it has seen a port acknowledge a byte with the latch alone, so this
+    /// tells a caller, after the fact, that the port is of that kind.
+    fn ack_irq_armed(&mut self) -> bool {
+        self.control() & sio0::ctrl::ACK_IRQ_EN != 0
     }
 
     /// Release `/CS`, which resets the attached device's state machine.
@@ -167,6 +291,25 @@ pub trait Transport {
         }
     }
 
+    /// Mask CPU interrupts and say whether they were on, for [`restore_interrupts`] to put
+    /// back. A pad's `/ACK` is a pulse of about 90 cycles that the exchange finds by reading
+    /// `STAT`, so an interrupt handler that runs over it hides it and the packet is abandoned
+    /// part way; a configuration packet has no retry and nobody reads its answer, so the
+    /// driver masks around those. A [`ControllerPort`] masks the CPU's interrupts and an
+    /// interrupt that came meanwhile is taken after; a model has none and masks nothing.
+    ///
+    /// Calls bracket, like a critical section: restore what a call returned, innermost first.
+    ///
+    /// [`restore_interrupts`]: Self::restore_interrupts
+    fn mask_interrupts(&mut self) -> bool {
+        false
+    }
+
+    /// Put CPU interrupts back as [`mask_interrupts`](Self::mask_interrupts) found them.
+    fn restore_interrupts(&mut self, were_enabled: bool) {
+        let _ = were_enabled;
+    }
+
     /// Spin until any bit of `mask` is set in the status register, at most
     /// `spins` reads after the first. `false` on timeout.
     fn wait_status_set(&mut self, mask: u32, spins: u32) -> bool {
@@ -179,6 +322,24 @@ pub trait Transport {
             core::hint::spin_loop();
         }
         true
+    }
+
+    /// [`wait_status_set`](Self::wait_status_set), returning
+    /// the bits of `mask` that were set, so the caller can tell which one; 0 on
+    /// timeout.
+    fn wait_status_any(&mut self, mask: u32, spins: u32) -> u32 {
+        let mut remaining = spins;
+        loop {
+            let seen = self.status() & mask;
+            if seen != 0 {
+                return seen;
+            }
+            if remaining == 0 {
+                return 0;
+            }
+            remaining -= 1;
+            core::hint::spin_loop();
+        }
     }
 
     /// Spin until every bit of `mask` is clear in the status register, at most
@@ -237,26 +398,46 @@ pub trait Transport {
         }
     }
 
-    /// Clock one byte and wait for the device's `/ACK`.
+    /// Clock one byte and wait for the device's `/ACK`, in whichever form the
+    /// port reports it.
     ///
-    /// Waits for TX ready, writes `byte`, and watches the live `/ACK` level
-    /// while the reply shifts in, so a pulse that ends before the reply
-    /// arrives is not missed. Unless `is_last` (the final byte of a packet is
-    /// never acknowledged), it then waits for `/ACK` to assert if it has not
-    /// yet, and to release, before the next byte may go. RX-ready alone only
-    /// says the byte arrived, not that the device is ready for another.
+    /// Waits for TX ready, writes `byte`, and watches `STAT` while the reply
+    /// shifts in, so a pulse that ends before the reply arrives is not missed.
+    /// An acknowledgement is either the live `/ACK` level ([`DSR_LEVEL`]) or
+    /// the latched interrupt bit ([`IRQ`]): silicon and the PSoXide emulator
+    /// show the level (the latch needs the interrupt armed), while PCSX-ReARMed
+    /// latches the bit and never shows a level. Unless `is_last` (the final
+    /// byte of a packet is never acknowledged), it then waits for either to
+    /// appear if neither has yet, waits for the level to release, and, when the
+    /// latch is what answered, clears it so it cannot count for the next byte.
+    /// RX-ready alone only says the byte arrived, not that the device is ready
+    /// for another.
     ///
-    /// No control-register write happens mid-transaction.
-    fn exchange(&mut self, byte: u8, is_last: bool, timing: Timing) -> Result<u8, ExchangeError> {
+    /// A port that shows the level takes the same register accesses as before
+    /// and no control-register write happens mid-transaction. Only when the
+    /// latch is seen does the exchange write `CTRL` once, with the interrupt
+    /// armed and the latch cleared, `/CS` still asserted on `port`: ReARMed
+    /// latches the first two bytes of a pad packet unarmed and the rest only
+    /// when armed.
+    ///
+    /// [`DSR_LEVEL`]: sio0::stat::DSR_LEVEL
+    /// [`IRQ`]: sio0::stat::IRQ
+    fn exchange(
+        &mut self,
+        port: Port,
+        byte: u8,
+        is_last: bool,
+        timing: Timing,
+    ) -> Result<u8, ExchangeError> {
         if !self.wait_status_set(sio0::stat::TX_READY, timing.byte_spins) {
             return Err(ExchangeError::TxTimeout);
         }
         self.transmit(byte);
-        let mut ack_seen = false;
+        let mut ack_seen = 0;
         let mut remaining = timing.byte_spins;
         loop {
             let status = self.status();
-            ack_seen |= status & sio0::stat::DSR_LEVEL != 0;
+            ack_seen |= status & ACK_SIGNALS;
             if status & sio0::stat::RX_NOT_EMPTY != 0 {
                 break;
             }
@@ -268,11 +449,17 @@ pub trait Transport {
         }
         let reply = self.receive();
         if !is_last {
-            if !ack_seen && !self.wait_status_set(sio0::stat::DSR_LEVEL, timing.ack_spins) {
-                return Err(ExchangeError::AckTimeout { reply });
+            if ack_seen == 0 {
+                ack_seen = self.wait_status_any(ACK_SIGNALS, timing.ack_spins);
+                if ack_seen == 0 {
+                    return Err(ExchangeError::AckTimeout { reply });
+                }
             }
             if !self.wait_status_clear(sio0::stat::DSR_LEVEL, timing.ack_spins) {
                 return Err(ExchangeError::AckStuck { reply });
+            }
+            if ack_seen & sio0::stat::IRQ != 0 {
+                self.set_control(sio0::selected_ctrl(port.is_two(), true) | sio0::ctrl::ACK);
             }
         }
         Ok(reply)
@@ -306,6 +493,18 @@ pub trait Transport {
             self.set_control(sio0::selected_ctrl(port.is_two(), true) | sio0::ctrl::ACK);
         }
         Ok(reply)
+    }
+}
+
+/// Bit 0 for port 1, bit 1 for port 2: pad transactions on that port arm the `/ACK` interrupt
+/// (see [`Transport::pad_ack_irq`]).
+static mut PAD_ACK_IRQ: u8 = 0;
+
+const fn port_bit(port: Port) -> u8 {
+    if port.is_two() {
+        2
+    } else {
+        1
     }
 }
 
@@ -348,6 +547,49 @@ impl Transport for ControllerPort {
         // socket and resets the port, nothing else.
         unsafe { write_u16(sio0::CTRL, value) }
     }
+
+    #[inline(always)]
+    fn control(&mut self) -> u16 {
+        // SAFETY: CTRL is the port's aligned 16-bit control register; reading it
+        // has no side effects.
+        unsafe { read_u16(sio0::CTRL) }
+    }
+
+    #[inline(always)]
+    fn clock(&mut self) -> u16 {
+        crate::timers::counter(crate::timers::Timer::Timer0)
+    }
+
+    #[inline(always)]
+    fn pad_ack_irq(&mut self, port: Port) -> bool {
+        // SAFETY: a volatile byte load of a private static only the pad driver's thread writes.
+        unsafe { core::ptr::read_volatile(&raw const PAD_ACK_IRQ) & port_bit(port) != 0 }
+    }
+
+    #[inline(always)]
+    fn set_pad_ack_irq(&mut self, port: Port, armed: bool) {
+        // SAFETY: as above; the `&mut` token is the proof no other driver runs a transaction.
+        unsafe {
+            let bits = core::ptr::read_volatile(&raw const PAD_ACK_IRQ) & !port_bit(port);
+            core::ptr::write_volatile(
+                &raw mut PAD_ACK_IRQ,
+                bits | (u8::from(armed) * port_bit(port)),
+            );
+        }
+    }
+
+    #[inline(always)]
+    fn mask_interrupts(&mut self) -> bool {
+        // SAFETY: the pair brackets, as the trait documents; the driver restores what this
+        // returned before it returns.
+        unsafe { crate::irq::disable_cpu_interrupts() }
+    }
+
+    #[inline(always)]
+    fn restore_interrupts(&mut self, were_enabled: bool) {
+        // SAFETY: `were_enabled` is what the matching `mask_interrupts` returned.
+        unsafe { crate::irq::restore_cpu_interrupts(were_enabled) }
+    }
 }
 
 #[cfg(test)]
@@ -366,6 +608,10 @@ mod tests {
         received: Vec<u8>,
         sent: Vec<u8>,
         control: Vec<u16>,
+        /// Root counter 0, and how far it moves on each read.
+        time: u16,
+        tick: u16,
+        clocks: usize,
     }
 
     impl Script {
@@ -399,6 +645,15 @@ mod tests {
         fn set_baud(&mut self, _value: u16) {}
         fn set_control(&mut self, value: u16) {
             self.control.push(value);
+        }
+        fn control(&mut self) -> u16 {
+            self.control.last().copied().unwrap_or(0)
+        }
+        fn clock(&mut self) -> u16 {
+            self.clocks += 1;
+            let now = self.time;
+            self.time = self.time.wrapping_add(self.tick.max(1));
+            now
         }
     }
 
@@ -474,7 +729,7 @@ mod tests {
         // TX ready; RX arrives at once without an ack; ack asserts, releases.
         let mut bus = Script::with_status(&[TX, RX, DSR, 0]);
         bus.received.push(0x41);
-        assert_eq!(bus.exchange(0x42, false, TIMING), Ok(0x41));
+        assert_eq!(bus.exchange(Port::One, 0x42, false, TIMING), Ok(0x41));
         assert_eq!(bus.sent, [0x42]);
         // No control write happened inside the exchange.
         assert!(bus.control.is_empty());
@@ -486,16 +741,87 @@ mod tests {
         // RX arrives after: only the release wait remains.
         let mut bus = Script::with_status(&[TX, DSR, RX, 0]);
         bus.received.push(0x5a);
-        assert_eq!(bus.exchange(0x00, false, TIMING), Ok(0x5a));
+        assert_eq!(bus.exchange(Port::One, 0x00, false, TIMING), Ok(0x5a));
     }
 
     #[test]
     fn the_last_byte_of_a_packet_is_never_waited_on() {
         let mut bus = Script::with_status(&[TX, RX]);
         bus.received.push(0x80);
-        assert_eq!(bus.exchange(0x00, true, TIMING), Ok(0x80));
+        assert_eq!(bus.exchange(Port::One, 0x00, true, TIMING), Ok(0x80));
         // Two status reads: TX ready and RX ready, nothing after.
         assert_eq!(bus.reads, 2);
+    }
+
+    #[test]
+    fn a_latched_ack_with_no_live_level_acknowledges_the_byte_and_is_cleared() {
+        // The reply arrives, the latch shows, the level never does. One CTRL
+        // write arms the interrupt and clears the latch, /CS held on port 2.
+        const IRQ: u32 = sio0::stat::IRQ;
+        let mut bus = Script::with_status(&[TX, RX, IRQ, IRQ, 0]);
+        bus.received.push(0x41);
+        assert_eq!(bus.exchange(Port::Two, 0x42, false, TIMING), Ok(0x41));
+        assert_eq!(
+            bus.control,
+            [sio0::selected_ctrl(true, true) | sio0::ctrl::ACK]
+        );
+    }
+
+    #[test]
+    fn a_latch_seen_while_the_reply_shifts_in_is_not_waited_for_again() {
+        const IRQ: u32 = sio0::stat::IRQ;
+        let mut bus = Script::with_status(&[TX, IRQ, RX | IRQ, 0]);
+        bus.received.push(0x5a);
+        assert_eq!(bus.exchange(Port::One, 0x00, false, TIMING), Ok(0x5a));
+        assert_eq!(bus.control.len(), 1);
+    }
+
+    #[test]
+    fn a_level_and_a_latch_together_wait_for_the_level_to_release_before_clearing() {
+        const IRQ: u32 = sio0::stat::IRQ;
+        let mut bus = Script::with_status(&[TX, RX, DSR | IRQ, DSR | IRQ, IRQ, IRQ]);
+        bus.received.push(0x73);
+        assert_eq!(bus.exchange(Port::One, 0x42, false, TIMING), Ok(0x73));
+        // TX, RX, then STAT read until DSR dropped: the write came after.
+        assert_eq!(bus.reads, 5);
+        assert_eq!(
+            bus.control,
+            [sio0::selected_ctrl(false, true) | sio0::ctrl::ACK]
+        );
+    }
+
+    #[test]
+    fn a_level_only_ack_writes_nothing_mid_packet() {
+        // The wire pattern silicon was tuned with: no CTRL write.
+        let mut bus = Script::with_status(&[TX, RX, DSR, DSR, 0]);
+        bus.received.push(0x41);
+        assert_eq!(bus.exchange(Port::One, 0x42, false, TIMING), Ok(0x41));
+        assert!(bus.control.is_empty());
+    }
+
+    #[test]
+    fn the_ack_interrupt_reads_as_armed_only_after_the_latch_exchange_arms_it() {
+        const IRQ: u32 = sio0::stat::IRQ;
+        let mut level = Script::with_status(&[TX, RX, DSR, 0]);
+        level.received.push(0x41);
+        assert_eq!(level.exchange(Port::One, 0x42, false, TIMING), Ok(0x41));
+        assert!(!level.ack_irq_armed());
+
+        let mut latch = Script::with_status(&[TX, RX, IRQ, IRQ, 0]);
+        latch.received.push(0x41);
+        assert_eq!(latch.exchange(Port::One, 0x42, false, TIMING), Ok(0x41));
+        assert!(latch.ack_irq_armed());
+    }
+
+    #[test]
+    fn no_ack_signal_at_all_times_out_with_the_reply_kept() {
+        let mut bus = Script::with_status(&[TX, RX, 0]);
+        bus.received.push(0xff);
+        assert_eq!(
+            bus.exchange(Port::One, 0x01, false, TIMING),
+            Err(ExchangeError::AckTimeout { reply: 0xff })
+        );
+        assert!(bus.control.is_empty());
     }
 
     #[test]
@@ -513,7 +839,7 @@ mod tests {
         let mut live = Script::with_status(&[TX, RX, 0]);
         live.received.push(0x5a);
         assert_eq!(
-            live.exchange(0x00, false, TIMING),
+            live.exchange(Port::One, 0x00, false, TIMING),
             Err(ExchangeError::AckTimeout { reply: 0x5a })
         );
     }
@@ -538,28 +864,28 @@ mod tests {
     fn each_failure_is_reported_with_its_stage() {
         let mut bus = Script::with_status(&[0]);
         assert_eq!(
-            bus.exchange(0x01, false, TIMING),
+            bus.exchange(Port::One, 0x01, false, TIMING),
             Err(ExchangeError::TxTimeout)
         );
         assert!(bus.sent.is_empty());
 
         let mut bus = Script::with_status(&[TX, 0]);
         assert_eq!(
-            bus.exchange(0x01, false, TIMING),
+            bus.exchange(Port::One, 0x01, false, TIMING),
             Err(ExchangeError::RxTimeout)
         );
 
         let mut bus = Script::with_status(&[TX, RX, 0]);
         bus.received.push(0xff);
         assert_eq!(
-            bus.exchange(0x01, false, TIMING),
+            bus.exchange(Port::One, 0x01, false, TIMING),
             Err(ExchangeError::AckTimeout { reply: 0xff })
         );
 
         let mut bus = Script::with_status(&[TX, RX | DSR, DSR]);
         bus.received.push(0x41);
         assert_eq!(
-            bus.exchange(0x01, false, TIMING),
+            bus.exchange(Port::One, 0x01, false, TIMING),
             Err(ExchangeError::AckStuck { reply: 0x41 })
         );
     }
@@ -574,5 +900,87 @@ mod tests {
             Timing::PAD
         );
         const { assert!(Timing::CARD.ack_spins > Timing::PAD.ack_spins) };
+    }
+
+    #[test]
+    fn a_select_opened_earlier_is_kept_and_only_the_rest_of_the_setup_is_waited() {
+        let mut bus = Script {
+            tick: 1_000,
+            ..Script::default()
+        };
+        let opened = bus.open(Port::Two);
+        let writes = bus.control.len();
+        // The program worked for 5,000 cycles in between.
+        bus.time = bus.time.wrapping_add(4_000);
+        let reads = bus.clocks;
+        assert!(bus.begin_pad(Port::Two, Some(opened)));
+        assert_eq!(bus.control.len(), writes, "no second select");
+        // 5,000 had passed; 7,168 needs three more readings of 1,000.
+        assert_eq!(bus.clocks - reads, 4);
+        assert!(bus.time.wrapping_sub(opened) >= PAD_SETUP_CYCLES);
+    }
+
+    #[test]
+    fn a_long_gap_costs_no_wait_and_a_wrap_never_shortens_it() {
+        // Opened just before the counter wraps, polled after it: the modular
+        // difference is the real one.
+        let mut bus = Script {
+            time: 0xff00,
+            tick: 16,
+            ..Script::default()
+        };
+        let opened = bus.open(Port::One);
+        bus.time = opened.wrapping_add(30_000);
+        let reads = bus.clocks;
+        assert!(bus.begin_pad(Port::One, Some(opened)));
+        assert_eq!(bus.clocks - reads, 1, "one reading, no wait");
+
+        // A gap of a whole wrap plus a little reads as the little: the wait is
+        // longer than needed, never shorter.
+        let mut bus = Script {
+            tick: 64,
+            ..Script::default()
+        };
+        let opened = bus.open(Port::One);
+        bus.time = opened.wrapping_add(100);
+        assert!(bus.begin_pad(Port::One, Some(opened)));
+        assert!(bus.time.wrapping_sub(opened) >= PAD_SETUP_CYCLES);
+    }
+
+    #[test]
+    fn a_select_released_or_moved_in_between_is_selected_again_with_the_whole_wait() {
+        for (moved_to, port) in [
+            (0u16, Port::One),
+            (sio0::selected_ctrl(true, false), Port::One),
+        ] {
+            let mut bus = Script {
+                tick: 64,
+                ..Script::default()
+            };
+            let opened = bus.open(port);
+            // A card transfer ended with a deselect, or another port was taken.
+            bus.set_control(moved_to);
+            bus.time = opened.wrapping_add(50_000);
+            let start = bus.time;
+            assert!(bus.begin_pad(port, Some(opened)));
+            let fresh = *bus.control.last().unwrap();
+            assert_eq!(fresh, sio0::selected_ctrl(false, false));
+            assert!(
+                bus.time.wrapping_sub(start) >= PAD_SETUP_CYCLES,
+                "the whole setup time again"
+            );
+        }
+        // No earlier select at all: the same.
+        let mut bus = Script {
+            tick: 64,
+            ..Script::default()
+        };
+        assert!(bus.begin_pad(Port::One, None));
+        assert_eq!(
+            bus.control,
+            [sio0::ctrl::ACK, sio0::selected_ctrl(false, false)]
+        );
+        // Measured on the clock, not counted in status reads.
+        assert!(bus.time >= PAD_SETUP_CYCLES);
     }
 }

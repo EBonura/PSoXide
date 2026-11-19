@@ -10,9 +10,12 @@ use crate::detect::{
 };
 use crate::linkmap::io_message;
 use crate::listing::{load_address, pad_to_payload, word_at_offset, Listing, Padding, HEADER};
-use crate::module::{modules, Overlay};
+use crate::module::Overlay;
 use crate::text::{fields, int_hex, strip, trailing_hex};
-use crate::{cli_args, open_map, report_unlisted, text_bounds, whole_image};
+use crate::{
+    cli_args, image_modules, open_map, raw_blob, read_image, report_unlisted, text_bounds,
+    whole_image,
+};
 
 /// Usage text.
 pub const USAGE: &str = "\
@@ -51,6 +54,7 @@ Hazards in the resident image and in different modules use separate arrays.
     hazard-patch game.exe --map game.map --check
     hazard-patch game.exe --check          # report only, exit 1 on hazards
     hazard-patch game.exe --whole-image    # patch without a map (see below)
+    hazard-patch blob.bin --raw 801C8000 --map blob.map   # headerless blob: check only
 
 `--map` (ld.lld's `-Map` output for the same link) is what makes patching
 safe. It gives the bounds of `.text`, the only executable section, and
@@ -71,6 +75,15 @@ addresses, inside LINK_LO..LINK_HI. Its bytes must lie inside the load and
 may not cover resident load bytes or another module. A map from another link is
 refused. Scan an image patched with `--map` with `hazard-scan --map` too. `--text-only` is accepted
 and does nothing: `--map` always bounds to `.text`.
+
+A program linked with a boot overlay (psyq-boot.ld) needs no flag: its map
+declares the overlay (its `.boot` output section: `__boot_start`, `__boot_load_end`), whose
+`.text` input sections are patched at their run addresses and written back
+where they are stored, through the resident array; the entry the map checks
+is `__boot_entry` and the stored size runs to the end of the overlay's stored bytes. A headerless blob
+(`--raw LOAD`, optionally `--entry ADDR`) has no psx-rt, hence no array: it is
+checked, never written, exactly as with `--check`, and a hazard fails the
+build. The compiler's delay-slot flags are what keep it clean.
 
 Without a map the executable bounds are unknown, so patching refuses (exit
 2) unless `--whole-image` asks for the heuristic over every word of the load:
@@ -170,10 +183,20 @@ fn pass(
         }
         listing
     };
-    let Some((paths, check_only, map_path)) = cli_args(args) else {
+    let Some((paths, check_flag, map_path)) = cli_args(args) else {
         let _ = write!(out, "{USAGE}");
         return 2;
     };
+    let raw = match raw_blob(args) {
+        Ok(raw) => raw,
+        Err(error) => {
+            let _ = writeln!(out, "{error}");
+            return 2;
+        }
+    };
+    // A blob has no trampoline array to patch through and no header to pad:
+    // it is only ever checked.
+    let check_only = check_flag || raw.is_some();
     if paths.len() != 1 {
         let _ = write!(out, "{USAGE}");
         return 2;
@@ -189,7 +212,7 @@ fn pass(
         return 2;
     }
     let path = Path::new(&paths[0]);
-    let mut file = match std::fs::read(path) {
+    let mut file = match read_image(path, raw.as_ref()) {
         Ok(data) => data,
         Err(error) => {
             let _ = writeln!(out, "{}", io_message(&error, path));
@@ -216,7 +239,7 @@ fn pass(
     let base = load_address(&file);
     // A code module sits in the file at one address and runs at another:
     // work on the image with it at its link address, and put it back.
-    let modules = match modules(args) {
+    let modules = match image_modules(args, map_path.as_deref()) {
         Ok(modules) => modules,
         Err(error) => {
             let _ = writeln!(out, "{error}");
@@ -291,6 +314,13 @@ fn pass(
     }
     if check_only {
         let _ = writeln!(out, "{} hazards in {path_text}", hazards.len());
+        if raw.is_some() && !check_flag {
+            let _ = writeln!(
+                out,
+                "{path_text} is a raw blob: it has no HAZARD_TRAMPOLINES to patch through, so nothing \
+                 was written; rebuild it with the SDK's delay-slot flags"
+            );
+        }
         return 1;
     }
 

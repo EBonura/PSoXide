@@ -14,6 +14,12 @@ psx-hw = { workspace = true }
 # telemetry feature here (emulator-telemetry = ["psx-telemetry/emit"]); with
 # it off every emitter compiles to a no-op, so shipping builds pay nothing.
 emit = []
+# The debug-log byte port only (no stage or counter events): for a measurement build too close
+# to the RAM limit for full telemetry.
+debug-log = []
+# The result receipts a headless journey reads back from a game's RAM (`receipts!`). A development
+# tap: the gate disc builds with it, a shipping disc has none of them.
+receipts = []
 
 [lints]
 workspace = true

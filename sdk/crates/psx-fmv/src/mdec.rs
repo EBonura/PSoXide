@@ -31,10 +31,13 @@
 //! Writing the DMA-request enable right behind the reset, as this driver used
 //! to, left the table upload waiting on DMA0 forever on that console while
 //! both of the others played the movie. So [`Mdec::reset`] waits for the reset to
-//! settle before enabling requests, and [`Mdec::load_tables`] checks that the MDEC
-//! actually raised its data-in request (status bit 28) after each command,
-//! re-writing the enable if it did not, and falls back to CPU writes when
-//! DMA0 still will not take the table.
+//! settle before enabling requests. [`Mdec::load_tables`] then feeds each table
+//! as Sony's library and PSn00bSDK do: the command, a DMA0 kick that waits for
+//! the data-in request itself, and a wait on the channel. It never polls the
+//! request bit (status bit 28) from the CPU: PCSX-Redux and PCSX-ReARMed never
+//! set it, and commercial players do not read it. A kick that does not complete
+//! is started over behind a fresh reset, and the table goes over CPU writes
+//! when DMA0 still will not take it.
 
 use psx_hw::mdec::{self as hw, MDEC0, MDEC1};
 use psx_io::dma::{self, Channel};
@@ -53,8 +56,9 @@ const CHCR_IN: u32 =
     psx_hw::dma::CHCR_TO_DEVICE | psx_hw::dma::CHCR_SYNC_BLOCK | psx_hw::dma::CHCR_START;
 const CHCR_OUT: u32 = psx_hw::dma::CHCR_SYNC_BLOCK | psx_hw::dma::CHCR_START;
 
-/// Standard intra quantization matrix (row-major), DC entry 2.
-const QUANT_ROW_MAJOR: [u8; 64] = [
+/// Standard intra quantization matrix (row-major), DC entry 2. The encoder
+/// (`psx-str-cook`) quantises against the same table the driver uploads.
+pub const QUANT_ROW_MAJOR: [u8; 64] = [
     2, 16, 19, 22, 26, 27, 29, 34, //
     16, 16, 22, 24, 27, 29, 34, 37, //
     19, 22, 26, 27, 29, 34, 34, 38, //
@@ -66,7 +70,7 @@ const QUANT_ROW_MAJOR: [u8; 64] = [
 ];
 
 /// Zigzag position `i` to its row-major index.
-const ZIGZAG_TO_ROW_MAJOR: [u8; 64] = [
+pub const ZIGZAG_TO_ROW_MAJOR: [u8; 64] = [
     0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, //
     12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13, 6, 7, 14, 21, 28, //
     35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, //
@@ -113,7 +117,8 @@ pub const SETTLE_SPINS: u32 = 20_000;
 /// is not enough on its own. Each read is an MMIO access, several cycles,
 /// so this is a few hundred cycles against the tens a reset takes.
 const RESET_TAIL_READS: u32 = 64;
-/// Enable writes to try before giving up on the data-in request.
+/// DMA0 kicks to try per table, each after a fresh reset and enable, before
+/// the table goes over the CPU.
 const ENABLE_ATTEMPTS: u8 = 4;
 
 /// Raw MDEC1 status word.
@@ -163,17 +168,18 @@ unsafe fn dma_in(words: *const u32, blocks: u16) {
 /// How [`Mdec::load_tables`] got the tables in.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Tables {
-    /// Enable writes, summed over both commands, before the MDEC raised its
-    /// data-in request: 2 when every first write held. 0 means it never
-    /// asked for data, so DMA0 decodes will not run either.
+    /// DMA0 kicks, summed over both commands, up to the one that moved the
+    /// table (each after the enable was written): 2 when every first kick
+    /// completed. 0 means DMA0 never moved a table, so DMA0 decodes will not
+    /// run either.
     pub enable_writes: u8,
-    /// Tables that went in over the CPU because the MDEC never asked for
-    /// DMA0 data or DMA0 wedged part way (0, 1 or 2).
+    /// Tables that went in over the CPU because no DMA0 kick completed
+    /// (0, 1 or 2).
     pub cpu_uploads: u8,
 }
 
 impl Tables {
-    /// The MDEC asked for data on both commands, so DMA0 feeds it.
+    /// DMA0 moved both tables, so it feeds the MDEC.
     pub fn is_dma_ready(&self) -> bool {
         self.enable_writes != 0 && self.cpu_uploads == 0
     }
@@ -227,41 +233,45 @@ impl Mdec {
         settled
     }
 
-    /// Write `command`, then feed its 32 parameter words: over DMA0 when the
-    /// MDEC asks for data, else over the CPU. Returns (enable writes before the
-    /// request rose, 0 if never; went over the CPU), or `None` if the MDEC
-    /// would not take the words at all.
+    /// Write `command`, then feed its 32 parameter words over DMA0 the way
+    /// commercial players do: start the channel straight after the command
+    /// and let it wait for the MDEC's data-in request, then wait on the
+    /// channel. A kick that does not complete is aborted and the command
+    /// started over behind a fresh [`reset`](Self::reset), which writes the
+    /// enable again once the reset has settled; after [`ENABLE_ATTEMPTS`]
+    /// kicks the words go over the CPU. Returns (DMA0 kicks up to the one
+    /// that completed, 0 if none did; went over the CPU), or `None` if the
+    /// MDEC would not take the words at all.
     fn upload(&mut self, command: u32, words: &[u32; 32]) -> Option<(u8, bool)> {
+        let mut kicks = 0u8;
+        while kicks < ENABLE_ATTEMPTS {
+            if kicks != 0 {
+                // The enable was lost to a reset that had not finished, or
+                // the channel wedged part way: start the command over.
+                dma::abort(Channel::MdecIn);
+                self.reset();
+            }
+            kicks += 1;
+            if !wait_status(hw::STATUS_BUSY, 0, SETTLE_SPINS) {
+                return None;
+            }
+            // SAFETY: MDEC command write, then a one-block DMA0 kick of the
+            // borrowed table, waited out here or aborted on the next pass.
+            unsafe {
+                psx_io::write_u32(MDEC0, command);
+                dma_in(words.as_ptr(), 1);
+            }
+            if dma::wait_done(Channel::MdecIn, SETTLE_SPINS) {
+                return Some((kicks, false));
+            }
+        }
+        dma::abort(Channel::MdecIn);
+        self.reset();
         if !wait_status(hw::STATUS_BUSY, 0, SETTLE_SPINS) {
             return None;
         }
         // SAFETY: MDEC command write.
         unsafe { psx_io::write_u32(MDEC0, command) };
-        let mut writes = 0u8;
-        let mut asked = wait_status(hw::STATUS_IN_REQUEST, hw::STATUS_IN_REQUEST, SETTLE_SPINS);
-        while !asked && writes + 1 < ENABLE_ATTEMPTS {
-            // The enable can be lost to a reset that had not finished.
-            // SAFETY: MDEC control register write, no reset bit.
-            unsafe { psx_io::write_u32(MDEC1, hw::CONTROL_ENABLE_DMA) };
-            writes += 1;
-            asked = wait_status(hw::STATUS_IN_REQUEST, hw::STATUS_IN_REQUEST, SETTLE_SPINS);
-        }
-        let enable_writes = if asked { writes + 1 } else { 0 };
-        if asked {
-            // SAFETY: `words` is a borrowed table; the transfer is waited out.
-            unsafe { dma_in(words.as_ptr(), 1) };
-            if dma::wait_done(Channel::MdecIn, DMA_SPINS) {
-                return Some((enable_writes, false));
-            }
-            // Part of the table went in: start the command over.
-            dma::abort(Channel::MdecIn);
-            self.reset();
-            if !wait_status(hw::STATUS_BUSY, 0, SETTLE_SPINS) {
-                return None;
-            }
-            // SAFETY: MDEC command write.
-            unsafe { psx_io::write_u32(MDEC0, command) };
-        }
         for &word in words {
             if !wait_status(hw::STATUS_IN_FULL, 0, SETTLE_SPINS) {
                 return None;
@@ -269,7 +279,7 @@ impl Mdec {
             // SAFETY: MDEC parameter write.
             unsafe { psx_io::write_u32(MDEC0, word) };
         }
-        Some((enable_writes, true))
+        Some((0, true))
     }
 
     /// Upload the standard quantization tables and the IDCT basis. `None` if

@@ -6,6 +6,7 @@
 //! their signatures.
 
 use super::*;
+use psx_engine::OtFrameDepth;
 use psx_game_runtime::vram::VramLayout;
 
 pub(super) use psx_game_runtime::vram::{SkyTextureKind, VramSlot};

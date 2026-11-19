@@ -16,7 +16,7 @@ use crate::util::{Error, Result};
 use crate::v2::v2_verdicts;
 
 /// Oldest first: where two baselines carry the same record, the later one wins.
-pub const SILICON_REFERENCES: [(&str, &str); 2] = [
+pub const SILICON_REFERENCES: [(&str, &str); 4] = [
     (
         "docs/hardware-refs/px8-silicon-2026-09-23-v1.24-full.txt",
         "v1.24 full",
@@ -24,6 +24,14 @@ pub const SILICON_REFERENCES: [(&str, &str); 2] = [
     (
         "docs/hardware-refs/px8-silicon-2026-10-08-v1.28-cdstream.txt",
         "v1.28 CD stream",
+    ),
+    (
+        "docs/hardware-refs/px8-silicon-2026-11-14-v2.18-run1-scph1200.txt",
+        "v2.18 run 1 (SCPH-1200)",
+    ),
+    (
+        "docs/hardware-refs/px8-silicon-2026-11-14-v2.18-run2-scph110.txt",
+        "v2.18 run 2 (SCPH-110)",
     ),
 ];
 /// Records whose meaning v2.0 changed; they cannot be compared across the bump.

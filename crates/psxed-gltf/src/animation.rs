@@ -603,7 +603,7 @@ pub(crate) fn animation_translation_shift(records: &[PoseRecord]) -> u16 {
     let mut max_abs = 0i32;
     for record in records {
         for value in record.translation {
-            max_abs = max_abs.max(abs_i32_saturating(value));
+            max_abs = max_abs.max(value.saturating_abs());
         }
     }
 
@@ -630,16 +630,6 @@ pub(crate) fn round_shift_i32(value: i32, shift: u8) -> i32 {
         ((value + half) >> shift) as i32
     } else {
         -(((-value + half) >> shift) as i32)
-    }
-}
-
-pub(crate) fn abs_i32_saturating(value: i32) -> i32 {
-    if value == i32::MIN {
-        i32::MAX
-    } else if value < 0 {
-        -value
-    } else {
-        value
     }
 }
 

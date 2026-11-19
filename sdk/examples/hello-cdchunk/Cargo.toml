@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+[package]
+name    = "hello-cdchunk"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+
+[workspace]
+
+[[bin]]
+name = "hello-cdchunk"
+path = "src/main.rs"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+
+[dependencies]
+psx-cdstream = { path = "../../crates/psx-cdstream" }
+psx-io       = { path = "../../crates/psx-io" }
+psx-rt       = { path = "../../crates/psx-rt", features = ["host-tty"] }

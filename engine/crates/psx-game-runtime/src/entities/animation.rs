@@ -138,6 +138,7 @@ impl<const N: usize> GameEntities<N> {
     ) {
         let delta = now.as_u32().wrapping_sub(self.anim_clock.as_u32());
         self.anim_clock = now;
+        // psx-numeric-allow-next-line: one bit per entity slot, the mask width is the record cap (64); bit ops only
         let mut footfalls = 0u64;
         let count = self.count().min(records.len());
         for i in 0..count {
@@ -165,6 +166,7 @@ impl<const N: usize> GameEntities<N> {
                     cycle(i, &gait.clip),
                 )
             {
+                // psx-numeric-allow-next-line: one bit per entity slot, the mask width is the record cap (64); bit ops only
                 footfalls |= 1u64 << i;
             }
             let (action, clip) = self.state_anim(records, i);
@@ -246,6 +248,7 @@ impl<const N: usize> GameEntities<N> {
     /// [`Self::update_animation`] ([`fighter_anim::footfall`], the player's
     /// rule).
     pub fn footfall(&self, index: usize) -> bool {
+        // psx-numeric-allow-next-line: one bit per entity slot, the mask width is the record cap (64); bit ops only
         index < 64 && self.footfalls & (1u64 << index) != 0
     }
 

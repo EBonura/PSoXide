@@ -46,14 +46,15 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 /// The directory every path dependency of the build lives under.
-const ROOT_VAR: &str = "PSOXIDE_REPRO_ROOT";
+pub const ROOT_VAR: &str = "PSOXIDE_REPRO_ROOT";
 /// An optional second wrapper to run the compiler under, such as `sccache`.
-const INNER_VAR: &str = "PSOXIDE_REPRO_INNER";
+pub const INNER_VAR: &str = "PSOXIDE_REPRO_INNER";
 /// Path fragments after which a source path no longer depends on the machine
 /// or on the checkout: the Cargo registry and the toolchain's library source.
 const STABLE_MARKERS: [&str; 2] = ["/registry/src/", "/lib/rustlib/src/"];
 
-fn main() -> ExitCode {
+/// Run as the compiler wrapper: the standalone binary's entry, and `psoxide-pgo`'s when it wraps itself.
+pub fn main() -> ExitCode {
     match run() {
         Ok(code) => code,
         Err(message) => {

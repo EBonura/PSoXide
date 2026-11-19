@@ -26,6 +26,15 @@
 //!   silicon.) The request ends [`Outcome::Cancelled`] with the sectors that
 //!   had landed; [`Request::remaining_after`] builds the request that
 //!   continues it.
+//! - **Park.** [`Request::park`] reads the sector before `lba` and keeps one word of it, so
+//!   the next read from `lba` pays no long seek (a gate that knows where it reads next parks the
+//!   head there while the frame renders). It is an ordinary one-sector request, so a program
+//!   that never parks carries no park code.
+//! - **An exact byte bound.** [`Request::with_byte_len`] stores only the chunk's bytes: the
+//!   last sector is popped whole but written only as far as the chunk goes.
+//! - **A watchdog.** [`Config::timeout_vblanks`] ends a transfer with no progress as
+//!   [`FailureKind::Watchdog`], and [`IrqMaskPolicy::OnlyWhileBusy`] keeps the CD source
+//!   closed between requests so the polled reader and the handler never share the controller.
 //! - **A small priority queue.** [`QUEUE_DEPTH`] requests wait behind the
 //!   active one, most urgent [`Priority`] first.
 //! - **Contiguous chaining.** A queued request that starts at the sector
@@ -65,6 +74,42 @@
 //! }
 //! ```
 //!
+//! # One transfer at a time
+//!
+//! A program that reads one chunk at a time (a loader that decodes each chunk as its sectors land,
+//! a weapon stream that must not wait for the frame loop) does not need the queue, the priorities,
+//! the chaining, the resumes or the audio lease, and a program cannot drop code it does not use. So
+//! the engine is generic over what it carries ([`Engine`]'s `SLOTS`, `RESULTS` and `LEASE`
+//! parameters, resolved at compile time; no cargo feature selects it) and [`SingleEngine`] is the
+//! configuration with none of them: the transfer state machine and the interrupt handler, and the
+//! compiler removes the rest. Its console front is the [`single`] module, with the same calls as
+//! the crate root (`install`, `submit`, `state`, `cancel`, `stop_and_wait`, ...) and one
+//! difference: [`single::submit`] starts the request now or returns [`SubmitError::QueueFull`].
+//! Use [`Request::park`] to leave the head next to the next read, [`Request::with_byte_len`] for an
+//! exact last sector, [`Config::irq_mask_policy`] with [`IrqMaskPolicy::OnlyWhileBusy`] when polled
+//! reads share the controller, and [`sectors_landed`] for a progress read that is one volatile
+//! load. A program that plays music through polled commands stops the read
+//! ([`single::stop_and_wait`]), gives the controller back ([`single::uninstall`]) and installs
+//! again afterwards: with one request at a time there is no lease to arbitrate.
+//!
+//! A program that also reads no counters and holds no tickets (it starts a read, asks once a frame
+//! whether it is done, and cancels or waits for the drive before polled reads) uses [`LeanEngine`]
+//! through the [`lean`] module: the same state machine without `PSX_CD_STATS`, the handler timing
+//! and the ticket records, and with [`lean::status`] in place of `state`.
+//!
+//! A program that decodes a request while it runs (it reads how many sectors have landed to
+//! decode a chunk at a time) and otherwise wants the same one-`status()`-a-frame shape uses
+//! [`CountedEngine`] through the [`counted`] module: the lean engine plus one counter, the
+//! sectors the interrupt handler stored ([`counted::sectors_landed`], one load, add and store per
+//! sector in the handler), and [`counted::last_error`], the latest failure's code. A program that
+//! does not read the count links none of it, because it uses [`lean`].
+//!
+//! The handler (any engine) runs on psx-rt's dispatcher stack, [`HANDLER_STACK_BYTES`] bytes of
+//! which the saved context takes 112: 400 for the handler, whose deepest path in the
+//! single-transfer engine is measured by `stack-guard` in `hello-cdchunk` (see the crate's
+//! `ADOPT` notes in the repository). The count of transfers a program started
+//! ([`submissions`]) and the counters in [`PSX_CD_STATS`] are what a gate reads.
+//!
 //! # Next to the polled reader
 //!
 //! A program that loads with `SectorReader` (maps, tables, boot assets) and only
@@ -84,18 +129,17 @@
 //!
 //! The full one is the transport below, for a program that can route its reads
 //! through it: call [`ensure_installed`] with [`IrqMaskPolicy::OnlyWhileBusy`]
-//! before a read (it also puts the wrapper back after `install_vblank_counter`
-//! reset the exception vector), submit the request, and look at it once a frame.
+//! before a read, submit the request, and look at it once a frame.
 //! Between requests the CD interrupt source is closed and the polled reader works
 //! as before; before a polled command, [`stop_and_wait`] ends a request still in
-//! flight. Use one or the other in a program, not both at once: each puts a
-//! wrapper in the exception vector and both would answer a CD interrupt.
+//! flight. Use one or the other in a program, not both at once: each registers
+//! for the CD source with psx-rt's dispatcher and the second would replace the first.
 //!
 //! # How it is built
 //!
 //! [`Engine`] is the whole state machine, generic over [`CdHw`], the
-//! controller as it sees it. On the console [`install`] puts an exception
-//! wrapper in front of psx-rt's handler that calls the one global engine
+//! controller as it sees it. On the console the CD source's handler, registered
+//! with psx-rt's dispatcher (`psx_rt::dispatch`), calls the one global engine
 //! once per CD interrupt, and the free functions (`submit`, `state`, ...)
 //! reach it with the CD source closed. On the host the tests drive the same
 //! engine against a scripted drive, so every phase, cancel point, error path,
@@ -108,7 +152,6 @@
 //! `install`, so the compiler keeps the two from sharing the drive.
 //! `uninstall` hands the token back.
 #![no_std]
-#![cfg_attr(target_arch = "mips", feature(asm_experimental_arch))]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 

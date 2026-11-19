@@ -17,6 +17,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "psx-gpu"
+version = "0.1.0"
+dependencies = [
+ "bitflags",
+ "psx-hw",
+ "psx-io",
+]
+
+[[package]]
 name = "psx-hw"
 version = "0.1.0"
 dependencies = [
@@ -28,6 +37,7 @@ name = "psx-io"
 version = "0.1.0"
 dependencies = [
  "psx-hw",
+ "psx-math",
 ]
 
 [[package]]
@@ -38,6 +48,13 @@ version = "0.1.0"
 name = "psx-rt"
 version = "0.1.0"
 dependencies = [
+ "psx-gpu",
  "psx-hw",
  "psx-io",
+ "psx-math",
+ "psx-tick",
 ]
+
+[[package]]
+name = "psx-tick"
+version = "0.1.0"

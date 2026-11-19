@@ -245,7 +245,7 @@ impl Rig {
     /// `clip_duration_ticks`), for the fighter's animation tracks.
     pub fn clip_ticks(&self, clip: &GameEntityClip) -> u32 {
         self.model()
-            .and_then(|model| model.clip(&*self.clips, ModelClipIndex(clip.clip)))
+            .and_then(|model| model.clip(&self.clips, ModelClipIndex(clip.clip)))
             .map_or(0, |animation| {
                 mr::clip_duration_ticks(animation, VideoHz::NTSC, clip.speed_q8, clip.frame_range)
             })

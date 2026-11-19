@@ -334,8 +334,8 @@ fn a_plane_that_is_switched_and_solid_is_refused() {
     wall.collision = PlaneCollision::Solid;
     wall.shown_by = Some(LogicVisibility::while_on("gate"));
     world.rooms[0].planes.push(wall);
-    let error = cook(&world)
-        .err()
-        .expect("a solid switched plane does not cook");
+    let Err(error) = cook(&world) else {
+        panic!("a solid switched plane does not cook");
+    };
     assert!(error.contains("switched by logic"), "{error}");
 }

@@ -17,7 +17,7 @@ use psx_gpu::display::DoubleBuffer;
 use psx_gpu::Gpu;
 use psx_io::periph::{ControllerPort, GpuDma};
 use psx_level::{AssetId, LevelOptionDef, LevelUiValueBinding, LevelWorldLayer};
-use psx_pad::{button, poll_on, ActionInput, ActionMap, PadState, Port};
+use psx_pad::{button, ActionInput, ActionMap, Controllers, PadState, Port};
 
 use crate::frames::{SimTick, VideoHz, VisualFrame};
 use crate::ui::UiTextureSlot;
@@ -46,11 +46,12 @@ pub enum RenderSubmission {
     /// channel first (VRAM uploads do).
     QueuedDoubleBuffered,
     /// [`QueuedDoubleBuffered`](Self::QueuedDoubleBuffered), except that the
-    /// runner hands the whole frame to psx-rt's present queue instead of
-    /// kicking it itself: frame N's ordering table, its overlay and the draw
-    /// target and clear that precede it become one DMA chain, which the VBlank
-    /// handler starts (and flips N-1 onto the display) on the first edge
-    /// after N-1 has drawn. The CPU goes straight on to the next frame.
+    /// runner hands the whole frame to `psx_rt::present::Presenter::submit`
+    /// instead of kicking it itself: frame N's ordering table, its overlay and
+    /// the draw target and clear that precede it become one DMA chain, which
+    /// starts at once if N-1 is on screen and the channel is idle, or else at
+    /// the first edge that allows it; N is shown at the first edge after it
+    /// has drawn. The CPU goes straight on to the next frame.
     ///
     /// `render` ends its ordering table on [`Ctx::present_queue_hook`] right
     /// after clearing it and reserves overlay space;
@@ -62,8 +63,8 @@ pub enum RenderSubmission {
     /// through the `QueuedDoubleBuffered` path instead, so the scene must
     /// also support [`Scene::submit_render`].
     ///
-    /// Needs psx-engine's `present-queue` feature; without it the runner
-    /// presents these scenes as `QueuedDoubleBuffered`.
+    /// A scene that returns it sets [`Scene::PRESENT_QUEUE`]; without it the
+    /// runner presents the frame the `QueuedDoubleBuffered` way.
     PresentQueue,
 }
 
@@ -129,22 +130,9 @@ pub struct Ctx {
     runtime_requests: RuntimeRequests,
     gpu_dma: Option<GpuDma>,
     controller_port: Option<ControllerPort>,
-    /// The pad engine owns the port while it runs; a card borrows it here.
-    #[cfg(all(feature = "pad-irq-engine", target_arch = "mips"))]
-    pad_engine: PadEngine,
+    /// The one pad reader, for both ports.
+    pads: Controllers,
     present_queue_hook: Option<*const u32>,
-}
-
-/// The interrupt-driven pad engine, as the context uses it.
-#[cfg(all(feature = "pad-irq-engine", target_arch = "mips"))]
-#[derive(Default)]
-struct PadEngine {
-    /// The engine is installed and owns the port token.
-    running: bool,
-    /// Port 2 is being polled (the first `refresh_second_pad` switches it on).
-    second_port: bool,
-    /// The port, on loan to a card driver until the end of the tick.
-    lease: Option<psx_pad::console::Lease>,
 }
 
 impl Ctx {
@@ -168,8 +156,7 @@ impl Ctx {
             runtime_requests: RuntimeRequests::default(),
             gpu_dma: None,
             controller_port: None,
-            #[cfg(all(feature = "pad-irq-engine", target_arch = "mips"))]
-            pad_engine: PadEngine::default(),
+            pads: Controllers::new(),
             present_queue_hook: None,
         }
     }
@@ -192,65 +179,21 @@ impl Ctx {
     /// # Panics
     ///
     /// Outside the app runner, which takes the token at boot.
-    ///
-    /// With the `pad-irq-engine` feature the pad engine owns the token and
-    /// this lends it: the first call in a tick takes a lease from the engine,
-    /// which polls nothing until the runner ends the tick. Keep to one card
-    /// transaction per tick.
     #[inline]
     pub fn controller_port(&mut self) -> &mut ControllerPort {
-        #[cfg(all(feature = "pad-irq-engine", target_arch = "mips"))]
-        if self.pad_engine.running {
-            return &mut **self
-                .pad_engine
-                .lease
-                .get_or_insert_with(psx_pad::console::lease);
-        }
         self.controller_port
             .as_mut()
             .expect("the app runner holds the controller-port token")
     }
 
-    /// Start reading the pads from the interrupt-driven engine: install it
-    /// with the port token, or give the token back to the synchronous driver
-    /// if the engine cannot take the exception vector. Returns whether it is
-    /// running. The app runner calls this once, after its boot-time pad
-    /// negotiation.
-    #[cfg(all(feature = "pad-irq-engine", target_arch = "mips"))]
-    pub(crate) fn start_pad_engine(&mut self, port: ControllerPort) -> bool {
-        match psx_pad::console::install(port, psx_pad::engine::Config::PORT1_ONLY) {
-            Ok(()) => {
-                self.pad_engine.running = true;
-                true
-            }
-            Err(port) => {
-                self.set_controller_port(port);
-                false
-            }
-        }
-    }
-
-    /// Whether the pads are read from the interrupt-driven engine.
-    #[inline]
-    pub(crate) fn pad_engine_running(&self) -> bool {
-        #[cfg(all(feature = "pad-irq-engine", target_arch = "mips"))]
-        {
-            self.pad_engine.running
-        }
-        #[cfg(not(all(feature = "pad-irq-engine", target_arch = "mips")))]
-        {
-            false
-        }
-    }
-
-    /// Give the port back to the engine if a card driver borrowed it this
-    /// tick. The app runner calls this after each update and render.
-    #[inline]
-    pub(crate) fn release_controller_port(&mut self) {
-        #[cfg(all(feature = "pad-irq-engine", target_arch = "mips"))]
-        {
-            self.pad_engine.lease = None;
-        }
+    /// Poll `port` through [`Controllers`], the one pad reader: the app runner does it
+    /// for port 1 every fixed update, [`Ctx::refresh_second_pad`] for port 2.
+    pub(crate) fn poll_pad(&mut self, port: Port) -> PadState {
+        let bus = self
+            .controller_port
+            .as_mut()
+            .expect("the app runner holds the controller-port token");
+        *self.pads.poll(bus, port)
     }
 
     /// The GPU DMA token, for [`OtFrame::submit`](crate::OtFrame::submit)
@@ -354,47 +297,28 @@ impl Ctx {
     /// Port 2 is deliberately opt-in: a single-player game should not pay for
     /// a second SIO transaction every simulation tick. Multiplayer games call
     /// this only in the screens and modes that can use a second controller.
+    /// It reads through the same [`Controllers`] as port 1: an empty port is
+    /// probed once in 60 calls, and a pad that answers for the first time is
+    /// put in analog mode, which blocks for a few frames.
     #[inline]
     pub fn refresh_second_pad(&mut self) -> PadState {
         self.pad2_prev = self.pad2;
-        #[cfg(all(feature = "pad-irq-engine", target_arch = "mips"))]
-        if self.pad_engine.running {
-            // The engine polls port 2 from the next VBlank on; until its
-            // first reading lands the port reads as no pad.
-            self.poll_second_port();
-            self.pad2 = psx_pad::console::pad(Port::Two);
-            return self.pad2;
-        }
-        self.pad2 = poll_on(self.controller_port(), Port::Two);
+        self.pad2 = self.poll_pad(Port::Two);
         self.pad2
     }
 
     /// Ask the pad on `port` for analog mode and lock it there.
     ///
-    /// On the synchronous driver this is `psx_pad::enable_analog_on`, which
-    /// blocks for a few frames and returns whether the pad took it. On the
-    /// pad engine the request is queued, one command per VBlank, and this
-    /// returns `false`; read the answer from [`Ctx::pad_for`]'s
-    /// `is_analog()` a few frames later. Port 2 is polled from here on.
+    /// This is `psx_pad::enable_analog_on`, which blocks for a few frames and
+    /// returns whether the pad took it. Its three configuration packets are not
+    /// protected from interrupts, which `psx_pad::Controllers` does; polling
+    /// through the context does the handshake, and asks again of a pad that
+    /// stays digital, with no call from the program.
+    #[deprecated(
+        note = "`Ctx::poll_pad` runs the analog handshake with interrupts masked on a pad's first answer"
+    )]
     pub fn enable_analog(&mut self, port: Port) -> bool {
-        #[cfg(all(feature = "pad-irq-engine", target_arch = "mips"))]
-        if self.pad_engine.running {
-            if port == Port::Two {
-                self.poll_second_port();
-            }
-            psx_pad::console::request_analog(port);
-            return false;
-        }
         psx_pad::enable_analog_on(self.controller_port(), port)
-    }
-
-    /// Start the pad engine polling port 2, once.
-    #[cfg(all(feature = "pad-irq-engine", target_arch = "mips"))]
-    fn poll_second_port(&mut self) {
-        if !self.pad_engine.second_port {
-            self.pad_engine.second_port = true;
-            psx_pad::console::configure(psx_pad::engine::Config::DEFAULT);
-        }
     }
 
     /// Current pad sample for player index 0 or 1. Other indices are
@@ -542,6 +466,35 @@ impl SceneStateRef {
     }
 }
 
+/// The boot splash a scene asks the engine for: the one line under the Bonnie Studios mark
+/// (see `psx_splash`) and the player's brightness step.
+#[derive(Copy, Clone, Debug)]
+#[non_exhaustive]
+pub struct BootSplash {
+    /// The line, for example `"Built with PSoXide"`.
+    pub line: &'static str,
+    /// The player's brightness setting, applied over the splash like any other frame.
+    pub brightness: psx_display::Brightness,
+}
+
+impl BootSplash {
+    /// The splash with `line` at the default brightness.
+    #[must_use]
+    pub const fn new(line: &'static str) -> Self {
+        Self {
+            line,
+            brightness: psx_display::Brightness::DEFAULT,
+        }
+    }
+
+    /// This splash at the player's `brightness`.
+    #[must_use]
+    pub const fn with_brightness(mut self, brightness: psx_display::Brightness) -> Self {
+        self.brightness = brightness;
+        self
+    }
+}
+
 /// Implement this trait on your game type and hand an instance to
 /// [`App::run`][crate::app::App::run].
 ///
@@ -549,11 +502,30 @@ impl SceneStateRef {
 /// inline (no globals needed). All methods take `&mut Ctx` so the
 /// scene can read pad state and draw into the framebuffer.
 pub trait Scene {
+    /// Whether this scene ever returns [`RenderSubmission::PresentQueue`]. A scene
+    /// that does sets it to `true`; the runner then links the chain path (the
+    /// presenter's submit, the overlay recording and the test every port write
+    /// makes for them). With the default, a `PresentQueue` frame is presented the
+    /// `QueuedDoubleBuffered` way and none of that is linked: a game that only
+    /// draws through the port pays nothing for the chain path.
+    const PRESENT_QUEUE: bool = false;
+
     /// Select the rendering hand-off contract. Existing scenes use immediate
     /// submission unless they explicitly opt into queued preparation.
     #[inline]
     fn render_submission(&self) -> RenderSubmission {
         RenderSubmission::Immediate
+    }
+
+    /// Ask for the boot splash. The engine calls this first of all, before the scene is
+    /// initialised, with the controller port (a scene that keeps the player's brightness on the
+    /// memory card reads it here), and plays `psx_splash::show` when it returns `Some`: on a
+    /// fresh GPU, so nothing of it carries into the scene. The default is no splash, and a scene
+    /// that does not ask links none of the splash.
+    #[allow(unused_variables)]
+    #[inline]
+    fn boot_splash(&mut self, port: &mut ControllerPort) -> Option<BootSplash> {
+        None
     }
 
     /// Called once at boot, before any flow state is entered, for assets

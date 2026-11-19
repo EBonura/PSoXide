@@ -113,14 +113,14 @@ fn skeleton(model: &Model<'_>, names: Vec<String>) -> Skel {
         .map(|j| model.joint(j as u16).unwrap().parent().map(usize::from))
         .collect();
     let mut depth = vec![0usize; n];
-    for j in 0..n {
+    for (j, slot) in depth.iter_mut().enumerate() {
         let mut d = 0;
         let mut k = j;
         while let Some(p) = parent[k] {
             d += 1;
             k = p;
         }
-        depth[j] = d;
+        *slot = d;
     }
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by_key(|&j| depth[j]);
@@ -151,8 +151,8 @@ fn pivots(skel: &Skel, clips: &[Vec<Vec<Pose>>]) -> (Vec<[i32; 3]>, Vec<f64>) {
                 let mut row = [[0.0; 3]; 3];
                 let mut rhs = [0.0; 3];
                 for r in 0..3 {
-                    for c in 0..3 {
-                        row[r][c] = (f64::from(a.m[r][c]) - f64::from(b.m[r][c])) / 4096.0;
+                    for (c, cell) in row[r].iter_mut().enumerate() {
+                        *cell = (f64::from(a.m[r][c]) - f64::from(b.m[r][c])) / 4096.0;
                     }
                     rhs[r] = f64::from(b.t[r] - a.t[r]);
                 }
@@ -1019,7 +1019,7 @@ fn main() {
         }
         println!("  chain ends (leaf joints), worst joint-position error vs source, ship / A / B:");
         for j in 0..n {
-            if !skel.parent.iter().any(|p| *p == Some(j)) || sockets.contains(&(j as u16)) {
+            if !skel.parent.contains(&Some(j)) || sockets.contains(&(j as u16)) {
                 println!(
                     "    {j:2} {:<28} {:6.2} {:6.2} {:6.2}{}",
                     skel.names[j],

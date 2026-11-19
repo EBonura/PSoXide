@@ -52,6 +52,14 @@ const STEP: u32 = 4;
 /// profile binds 94.4% onto its monster-route feature build.
 pub const MIN_BOUND: f64 = 0.98;
 
+/// The most of a layout profile's instructions one function may run outside
+/// the laid-out text (a `.psx_cold.*` or data section) before `order` refuses
+/// the profile. Such a function is invisible to the placement, so where it
+/// lands against the hot loops is luck: Half-Life's brightness curve, in
+/// `.psx_cold`, took 1.4% of a gameplay window and shared I-cache lines with
+/// the viewmodel's triangle loop once unrelated text moved (3.5% fewer frames).
+pub const MAX_UNPLACED: f64 = 0.005;
+
 /// The largest share of a layout profile's instructions one function may
 /// have and still not bind. The total above would let a hot function slip
 /// through: one `play` loop at 1.5% of the profile is placed as cold code, in
@@ -99,6 +107,14 @@ fn input_section(body: &str) -> Option<&str> {
     let inner = body.strip_suffix(')')?;
     let at = inner.rfind(":(")?;
     Some(&inner[at + 2..]).filter(|name| name.starts_with(".text"))
+}
+
+/// Whether an input-section line names a `.psx_hot` section (placed by the program in
+/// `psoxide.ld`, ahead of the laid-out text).
+fn program_placed(body: &str) -> bool {
+    body.strip_suffix(')')
+        .and_then(|inner| inner.rfind(":(").map(|at| &inner[at + 2..]))
+        .is_some_and(|name| name.starts_with(".psx_hot"))
 }
 
 /// A plain linker name, as opposed to a demangled path from the map's
@@ -193,6 +209,89 @@ pub fn read_map(text: &str) -> Vec<Section> {
     sections
 }
 
+/// The sized symbols of an ld.lld `-Map` that lie in an input section nothing places
+/// (anything not `.text*` or `.psx_hot*`: `.psx_cold.*`, data), as (start, size, name) in
+/// address order. `.psx_hot.<NN>_<name>` is placed by the program itself, at the front of the
+/// text in name order, so where it lands is not luck.
+pub fn read_unplaced(text: &str) -> Vec<(u32, u32, String)> {
+    let mut found = Vec::new();
+    let mut placed = true;
+    for line in text.lines() {
+        if line.len() < 34 || line.as_bytes()[8] != b' ' {
+            continue;
+        }
+        let (Some(start), Some(size), Some(rest)) =
+            (hex(line.get(0..8)), hex(line.get(18..26)), line.get(33..))
+        else {
+            continue;
+        };
+        let body = rest.trim_start_matches(' ');
+        let depth = rest.len() - body.len();
+        let body = body.trim_end();
+        if depth == 0 {
+            placed = true;
+        } else if depth == 8 {
+            placed = body
+                .strip_suffix(')')
+                .and_then(|inner| inner.rfind(":("))
+                .is_none()
+                || input_section(body).is_some()
+                || program_placed(body);
+        } else if depth >= 16 && !placed && size > 0 && !body.contains(" = ") {
+            found.push((start, size, body.to_string()));
+        }
+    }
+    found.sort_by_key(|&(start, _, _)| start);
+    found
+}
+
+/// The instructions `counts` holds in each of `unplaced` (from
+/// [`read_unplaced`]), the most first; functions that never ran are left out.
+pub fn unplaced_counts(
+    unplaced: &[(u32, u32, String)],
+    counts: &HashMap<u32, u64>,
+) -> Vec<(String, u64)> {
+    let mut ran: Vec<(String, u64)> = unplaced
+        .iter()
+        .map(|(start, size, name)| {
+            let count = (0..size / 4)
+                .filter_map(|word| counts.get(&(start + 4 * word)))
+                .sum();
+            (name.clone(), count)
+        })
+        .filter(|&(_, count)| count > 0)
+        .collect();
+    ran.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    ran
+}
+
+/// Name every function that ran 0.05% or more of `instructions` outside the
+/// laid-out text (on stderr), and refuse when one ran [`MAX_UNPLACED`] or more.
+/// Such a function lands wherever its section does, so whether it shares
+/// I-cache lines with a hot loop is luck.
+pub fn check_unplaced(map: &str, counts: &HashMap<u32, u64>, instructions: u64) -> Result<()> {
+    let share = |part: u64| 100.0 * part as f64 / instructions.max(1) as f64;
+    let unplaced = unplaced_counts(&read_unplaced(map), counts);
+    for (name, count) in unplaced.iter().filter(|(_, count)| share(*count) >= 0.05) {
+        eprintln!(
+            "psoxide-pgo: {:.2}% of the instructions ran in {name}, outside the laid-out text \
+             (a .psx_cold or data section): the layout cannot place it",
+            share(*count)
+        );
+    }
+    match unplaced.first() {
+        Some((name, count)) if share(*count) >= 100.0 * MAX_UNPLACED => Err(format!(
+            "{name} ran {:.2}% of the profiled instructions outside the laid-out text, over the \
+             {:.1}% one function may: move it into .text (drop its .psx_cold link_section) or off \
+             the hot path, then collect again",
+            share(*count),
+            100.0 * MAX_UNPLACED
+        )
+        .into()),
+        _ => Ok(()),
+    }
+}
+
 /// Each section's portable name, or `None` when it has no symbol or shares
 /// its name with another section (a profile could not say which it meant).
 pub fn keys(sections: &[Section]) -> Vec<Option<String>> {
@@ -238,7 +337,7 @@ impl Image {
     }
 
     /// A section's words, or `None` when it lies outside the image.
-    fn words(&self, section: &Section) -> Option<Vec<u32>> {
+    pub(crate) fn words(&self, section: &Section) -> Option<Vec<u32>> {
         (0..section.size / 4)
             .map(|index| self.word(section.start + 4 * index))
             .collect()
@@ -397,7 +496,31 @@ pub struct Layout {
     pub features: String,
     pub variant: String,
     pub functions: Vec<Profiled>,
+    /// The order `search` found, when it ran; [`recorded_order`] links it
+    /// instead of [`place`].
+    pub placement: Option<Recorded>,
 }
+
+/// A placement `search` recorded in a layout profile: where the ordered
+/// sections start and every listed section, in order.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Recorded {
+    pub start: u32,
+    pub entries: Vec<RecordedEntry>,
+}
+
+/// One listed section of a [`Recorded`] placement.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecordedEntry {
+    pub hash: u64,
+    pub words: u32,
+    /// The address the search placed it at.
+    pub address: u32,
+    pub key: String,
+}
+
+const START_TAG: &str = "s";
+const ENTRY_TAG: &str = "o";
 
 /// What a replay's counts held beyond the functions.
 #[derive(Debug, Default)]
@@ -542,6 +665,9 @@ impl Layout {
                 let _ = writeln!(out, "c {} {} {}", call.count, sites.join(","), call.callee);
             }
         }
+        if let Some(placement) = &self.placement {
+            out.push_str(&placement.to_text());
+        }
         out
     }
 
@@ -565,6 +691,36 @@ impl Layout {
                 continue;
             }
             let (tag, rest) = line.split_once(' ').ok_or_else(bad)?;
+            if tag == START_TAG {
+                let start = u32::from_str_radix(rest, 16).map_err(|_| bad())?;
+                layout.placement.get_or_insert_with(Recorded::default).start = start;
+                continue;
+            }
+            if tag == ENTRY_TAG {
+                let mut fields = rest.splitn(4, ' ');
+                let (Some(hash), Some(words), Some(address), Some(key)) =
+                    (fields.next(), fields.next(), fields.next(), fields.next())
+                else {
+                    return Err(bad().into());
+                };
+                let entry = RecordedEntry {
+                    hash: u64::from_str_radix(hash, 16).map_err(|_| bad())?,
+                    words: words.parse().map_err(|_| bad())?,
+                    address: u32::from_str_radix(address, 16).map_err(|_| bad())?,
+                    key: key.to_string(),
+                };
+                layout
+                    .placement
+                    .get_or_insert_with(Recorded::default)
+                    .entries
+                    .push(entry);
+                continue;
+            }
+            if layout.placement.is_some() {
+                // The placement comes last: a function after it would take
+                // its `w` and `c` lines from the wrong place.
+                return Err(bad().into());
+            }
             if tag == "f" {
                 let mut fields = rest.splitn(3, ' ');
                 let (Some(hash), Some(words), Some(key)) =
@@ -824,7 +980,7 @@ pub fn bind(layout: &Layout, sections: &[Section], image: &Image) -> Bound {
 }
 
 /// `*` and `?` glob match, as the linker script's patterns use them.
-fn glob(pattern: &[u8], text: &[u8]) -> bool {
+pub(crate) fn glob(pattern: &[u8], text: &[u8]) -> bool {
     let (mut p, mut t) = (0, 0);
     let mut star: Option<(usize, usize)> = None;
     while t < text.len() {
@@ -1194,6 +1350,105 @@ pub fn place(sections: &[Section], image: &Image, bound: &Bound, fixed: &[String
     }
 }
 
+impl Recorded {
+    /// The `s` line and one `o` line per entry (hash, words, address, key).
+    pub fn to_text(&self) -> String {
+        let mut out = String::new();
+        let _ = writeln!(out, "{START_TAG} {:08x}", self.start);
+        for entry in &self.entries {
+            let _ = writeln!(
+                out,
+                "{ENTRY_TAG} {:016x} {} {:08x} {}",
+                entry.hash, entry.words, entry.address, entry.key
+            );
+        }
+        out
+    }
+}
+
+/// Where the catch-all's sections start: after the linker script's fixed
+/// rules, or at the first section when there are none.
+pub fn ordered_start(sections: &[Section], fixed: &[String]) -> u32 {
+    sections
+        .iter()
+        .filter(|section| {
+            fixed
+                .iter()
+                .any(|pattern| glob(pattern.as_bytes(), section.name.as_bytes()))
+        })
+        .map(Section::end)
+        .max()
+        .or_else(|| sections.iter().map(|section| section.start).min())
+        .unwrap_or(0)
+}
+
+/// The placement `search` recorded, bound onto a link: the listed sections in
+/// their order, each with the address the search gave it. Every entry must be
+/// in the link with the same code, and the ordered sections must start where
+/// they started for the search, or the addresses (which are the point) would
+/// not be the ones it scored; the error says to search again.
+pub fn recorded_order(
+    recorded: &Recorded,
+    sections: &[Section],
+    image: &Image,
+    fixed: &[String],
+) -> Result<Placement> {
+    let keys = keys(sections);
+    let index: HashMap<&str, usize> = keys
+        .iter()
+        .enumerate()
+        .filter_map(|(at, key)| Some((key.as_deref()?, at)))
+        .collect();
+    let mut differ = Vec::new();
+    let mut order = Vec::with_capacity(recorded.entries.len());
+    let mut placed = Vec::with_capacity(recorded.entries.len());
+    for entry in &recorded.entries {
+        let same = index.get(entry.key.as_str()).copied().filter(|&k| {
+            sections[k].size / 4 == entry.words
+                && image
+                    .words(&sections[k])
+                    .is_some_and(|words| code_hash(&words) == entry.hash)
+        });
+        match same {
+            Some(k) => {
+                order.push(k);
+                placed.push((k, entry.address));
+            }
+            None => differ.push(entry.key.as_str()),
+        }
+    }
+    if !differ.is_empty() {
+        return Err(format!(
+            "the layout's recorded placement lists {} section(s) this link does not have with \
+             the same code ({}); run `search` again on this code",
+            differ.len(),
+            differ
+                .iter()
+                .take(5)
+                .copied()
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+        .into());
+    }
+    let start = ordered_start(sections, fixed);
+    if start != recorded.start {
+        return Err(format!(
+            "the layout's recorded placement starts at {:#010x} and this link's ordered code at \
+             {start:#010x}: the code ahead of it changed size; run `search` again",
+            recorded.start
+        )
+        .into());
+    }
+    Ok(Placement {
+        order,
+        placed,
+        gap: 0,
+        before: 0.0,
+        after: 0.0,
+    })
+}
+
 /// The ordering file for a placement: one symbol per line.
 pub fn order_file(sections: &[Section], placement: &Placement) -> String {
     let mut out = String::new();
@@ -1256,6 +1511,17 @@ pub fn check_order(
 
 #[cfg(test)]
 mod tests {
+    /// The guard's window in `psoxide.ld` is a fixed placement the search must know about, or it
+    /// would reorder `wait_idle` out of it.
+    #[test]
+    fn the_sdk_script_fixes_the_direct_access_guard_window() {
+        let fixed = fixed_patterns(include_str!("../../../sdk/psoxide.ld"));
+        assert!(
+            fixed.iter().any(|p| p == ".text.__psx_rt_wait_idle"),
+            "{fixed:?}"
+        );
+    }
+
     use super::*;
 
     const OBJ: &str = "/g/deps/game-0123.game.o";
@@ -1286,6 +1552,46 @@ mod tests {
         text += &map_line(at, 0x20, 0, ".data");
         text += &map_line(at, 0x20, 8, &format!("{OBJ}:(.data.HAZARD_TRAMPOLINES)"));
         text
+    }
+
+    #[test]
+    fn functions_outside_the_laid_out_text_are_named_with_their_counts() {
+        let mut text = String::from("     VMA      LMA     Size Align Out     In      Symbol\n");
+        text += &map_line(0x8001_0000, 0x10, 0, ".text");
+        text += &map_line(0x8001_0000, 0x10, 8, &format!("{OBJ}:(.text.{TICK_A})"));
+        text += &map_line(0x8001_0000, 0x10, 16, "game::tick");
+        text += &map_line(0x8001_0000, 0x10, 8, &format!("{OBJ}:(.psx_hot.01_sky)"));
+        text += &map_line(0x8001_0000, 0x10, 16, "game::sky");
+        text += &map_line(0x8001_0010, 0x18, 0, ".psx_cold");
+        text += &map_line(
+            0x8001_0010,
+            0x18,
+            8,
+            &format!("{OBJ}:(.psx_cold.brightness)"),
+        );
+        text += &map_line(0x8001_0010, 0x08, 16, "game::cold_once");
+        text += &map_line(0x8001_0018, 0x10, 16, "game::curve");
+        text += &map_line(0x8001_0028, 0, 16, "__marker");
+        let unplaced = read_unplaced(&text);
+        assert_eq!(
+            unplaced,
+            vec![
+                (0x8001_0010, 0x08, "game::cold_once".to_string()),
+                (0x8001_0018, 0x10, "game::curve".to_string()),
+            ]
+        );
+        let mut counts = HashMap::new();
+        counts.insert(0x8001_0000, 50); // game::tick: placed, not listed
+        counts.insert(0x8001_0018, 30);
+        counts.insert(0x8001_0024, 30);
+        counts.insert(0xbfc0_0000, 7); // the BIOS: no symbol
+        assert_eq!(
+            unplaced_counts(&unplaced, &counts),
+            vec![("game::curve".to_string(), 60)]
+        );
+        // 60 of 10,000 instructions (0.6%) is over the bar; of 20,000 (0.3%) it is not.
+        assert!(check_unplaced(&text, &counts, 10_000).is_err());
+        assert!(check_unplaced(&text, &counts, 20_000).is_ok());
     }
 
     #[test]
@@ -1649,5 +1955,64 @@ mod tests {
         );
         assert!(glob(b".text.*hot_leaf*", b".text._RNv4game8hot_leaf3run"));
         assert!(!glob(b".text.*hot_leaf*", b".text._RNv4game4cold"));
+    }
+
+    #[test]
+    fn a_recorded_placement_round_trips_and_binds_only_to_the_same_code() {
+        let (sections, image, counts) = game();
+        let mut layout = collect(&sections, &image, &counts).layout;
+        let words = |k: usize| image.words(&sections[k]).unwrap();
+        // List b, then a; main and c follow in link order.
+        let entry = |k: usize, address| RecordedEntry {
+            hash: code_hash(&words(k)),
+            words: sections[k].size / 4,
+            address,
+            key: keys(&sections)[k].clone().unwrap(),
+        };
+        let at = |name: &str| {
+            keys(&sections)
+                .iter()
+                .position(|key| key.as_deref() == Some(name))
+                .unwrap()
+        };
+        let (a, b) = (at("a"), at("b"));
+        let start = ordered_start(&sections, &[]);
+        layout.placement = Some(Recorded {
+            start,
+            entries: vec![entry(b, start), entry(a, start + 0x40)],
+        });
+        let text = layout.to_text();
+        assert!(text.ends_with(&format!(
+            "s {start:08x}\no {:016x} 16 {:08x} b\no {:016x} 16 {:08x} a\n",
+            code_hash(&words(b)),
+            start,
+            code_hash(&words(a)),
+            start + 0x40
+        )));
+        let parsed = Layout::parse(&text).unwrap();
+        assert_eq!(parsed, layout);
+        let recorded = parsed.placement.unwrap();
+        let placement = recorded_order(&recorded, &sections, &image, &[]).unwrap();
+        assert_eq!(placement.order, vec![b, a]);
+        assert_eq!(order_file(&sections, &placement), "b\na\n");
+
+        // A layout without the block writes and reads exactly as before.
+        let mut plain = layout.clone();
+        plain.placement = None;
+        assert!(!plain.to_text().contains("\ns "));
+        assert_eq!(Layout::parse(&plain.to_text()).unwrap(), plain);
+
+        // Changed code, or code ahead of the ordered sections that moved, is refused.
+        let (_, mut changed, _) = game();
+        changed.body[0x50 + 0x10..0x50 + 0x14].copy_from_slice(&ADDU.to_le_bytes());
+        changed.body[0x90 + 0x10..0x90 + 0x14].copy_from_slice(&ADDU.to_le_bytes());
+        assert!(recorded_order(&recorded, &sections, &changed, &[]).is_err());
+        let moved = Recorded {
+            start: start + 4,
+            ..recorded.clone()
+        };
+        assert!(recorded_order(&moved, &sections, &image, &[]).is_err());
+        // A function line after the placement is refused, not misattributed.
+        assert!(Layout::parse(&format!("{text}f 0000000000000000 1 late\n")).is_err());
     }
 }

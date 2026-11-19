@@ -6,18 +6,26 @@
 
 pub mod affine_edges;
 pub mod chunk_stream;
+pub mod driver;
+pub mod emit;
+pub mod fx;
 pub mod ground_logic;
 pub mod hitbox_logic;
+pub mod hltext;
 pub mod hmd_gte;
 pub mod hsfx;
 pub mod ladder_logic;
+pub mod model;
 pub mod model_variant;
 pub mod ordering;
+pub mod pads;
 pub mod pickup_logic;
+pub mod present;
 pub mod pushable;
 pub mod pvs_faces;
 pub mod render;
 pub mod route_follow;
+pub mod scratchpad;
 pub mod semantic_input;
 pub mod telemetry;
 pub mod texture_animation;

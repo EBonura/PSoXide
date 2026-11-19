@@ -10,6 +10,7 @@
 //! drawing is the row-span grid renderer.
 
 use core::fmt;
+use psx_engine::OtFrameDepth;
 
 use alloc::boxed::Box;
 use alloc::vec;
@@ -709,9 +710,11 @@ impl GridRuntime {
         if !self.activate(observer) {
             return 0;
         }
+        // psx-numeric-allow-next-line: one bit per queried item; the width IS the caller's capacity; bit ops only
         let mut mask = 0u64;
         for (index, point) in points.iter().enumerate().take(64) {
             if self.point_active(*point) {
+                // psx-numeric-allow-next-line: one bit per queried item; the width IS the caller's capacity; bit ops only
                 mask |= 1u64 << index;
             }
         }
@@ -730,9 +733,12 @@ impl GridRuntime {
         if !self.activate(observer) {
             return 0;
         }
+        // psx-numeric-allow-next-line: one bit per queried item; the width IS the caller's capacity; bit ops only
         let mut mask = 0u64;
         for (index, b) in bounds.iter().enumerate().take(64) {
+            // psx-numeric-allow-next-line: one bit per queried item; the width IS the caller's capacity; bit ops only
             if skip & (1u64 << index) == 0 && self.bounds_active(b.min(), b.max()) {
+                // psx-numeric-allow-next-line: one bit per queried item; the width IS the caller's capacity; bit ops only
                 mask |= 1u64 << index;
             }
         }
@@ -761,6 +767,7 @@ impl GridRuntime {
         let from_eye = [eye.x, eye.y, eye.z];
         let phase = self.view_phase;
         self.view_phase = phase.wrapping_add(1);
+        // psx-numeric-allow-next-line: one bit per queried item; the width IS the caller's capacity; bit ops only
         let mut mask = 0u64;
         for index in indices {
             let Some(b) = bounds.get(index).filter(|_| index < 64) else {

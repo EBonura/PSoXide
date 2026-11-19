@@ -54,6 +54,7 @@
 extern crate psx_rt;
 
 use psx_asset::Texture;
+use psx_engine::OtFrameDepth;
 use psx_engine::{App, Config, Ctx, DepthBand, DepthRange, OtDepth, OtFrame, Scene, SimTick};
 use psx_font::{fonts::BASIC_8X16, format_u16, FontAtlas};
 use psx_gpu::ot::OrderingTable;
@@ -446,7 +447,7 @@ impl Corridor {
         )) else {
             return;
         };
-        ot.add_packet(OT_DEPTH - 1, bg);
+        ot.add(OT_DEPTH - 1, bg);
 
         // --- Scene setup for this frame ---
         // Static light rig -- no orbit, no directional lighting. Just

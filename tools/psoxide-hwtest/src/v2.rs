@@ -58,15 +58,6 @@ impl Builder {
 const ACK: [&str; 3] = ["ack_rise_cycles", "ack_width_cycles", "byte_done_cycles"];
 const ANSWER: [&str; 3] = ["replies_0_and_1", "replies_2_and_3", "ack_mask_and_flags"];
 const TICK_CASES: [&str; 4] = ["t2_sysclk", "t0_sysclk", "t2_sysclk_div8", "t0_dotclock"];
-const LOAD_PHASES: [&str; 7] = [
-    "no_ports_all_load",
-    "both_ports_alone",
-    "gpu",
-    "spu",
-    "cd_reader_mask",
-    "cd_pad_irqs_open",
-    "all_load_pad_irqs_open",
-];
 const DMA_MATRIX_STATES: [&str; 10] = [
     "cd_1x_2048_lw",
     "cd_1x_2048_sw",
@@ -377,8 +368,7 @@ fn build() -> BTreeMap<u32, V2Entry> {
             ],
         );
     }
-    // SIO0 measurements (src/sio_timing.rs), the pad engine (src/pad_engine.rs)
-    // and the Timer 1 rate (src/timer1_rate.rs).
+    // SIO0 measurements (src/sio_timing.rs) and the Timer 1 rate (src/timer1_rate.rs).
     for port in 0..2u32 {
         let p = port + 1;
         b.put(
@@ -397,21 +387,21 @@ fn build() -> BTreeMap<u32, V2Entry> {
             b.put(0x6C0 + 8 * port + k, format!("sio_card_ack_p{p}_b{k}"), ACK);
         }
         b.put(0x630 + port, format!("sio_pad_answer_p{p}"), ANSWER);
-        b.put(0x634 + port, format!("sio_card_answer_p{p}"), ANSWER);
         b.put(
-            0x638 + port,
-            format!("engine_hotplug_p{p}"),
+            0x6E0 + port,
+            format!("sio_latch_unarmed_p{p}"),
+            ["irq_after_byte_mask", "ack_mask", "flags"],
+        );
+        b.put(
+            0x6E2 + port,
+            format!("sio_arm_mid_packet_p{p}"),
             [
-                "transitions",
-                "initial_health_and_final_health",
-                "frames_absent",
+                "polls_clean_and_tried",
+                "first_deviation",
+                "irq_after_byte_mask",
             ],
         );
-        b.put(
-            0x63A + port,
-            format!("engine_hotplug_frames_p{p}"),
-            ["first_event_frame", "last_event_frame", "frames_watched"],
-        );
+        b.put(0x634 + port, format!("sio_card_answer_p{p}"), ANSWER);
         for load in 0..2u32 {
             let base = 0x640 + 4 * (2 * port + load);
             let tag = format!("p{p}_{}", ["idle", "loaded"][load as usize]);
@@ -505,118 +495,6 @@ fn build() -> BTreeMap<u32, V2Entry> {
         "timer1_polled_reads",
         ["reads_low", "reads_high", "steps_larger_than_one"],
     );
-    for k in 0..7u32 {
-        b.put(
-            0x660 + k,
-            format!("engine_setup_{}", 2000 + 1000 * k),
-            [
-                "clean_updates_port1",
-                "faults_port1",
-                "health_port1_and_port2",
-            ],
-        );
-    }
-    for (pacing, base) in [("ack", 0x670u32), ("timed", 0x678)] {
-        b.put(
-            base,
-            format!("engine_port_{pacing}_p1"),
-            ["updates", "faults", "health_and_last_fault"],
-        );
-        b.put(
-            base + 1,
-            format!("engine_port_{pacing}_p2"),
-            ["updates", "faults", "health_and_last_fault"],
-        );
-        b.put(
-            base + 2,
-            format!("engine_stats_{pacing}"),
-            ["events", "stalls", "spurious"],
-        );
-        b.put(
-            base + 3,
-            format!("engine_work_{pacing}"),
-            ["work_avg", "work_min", "work_idle_avg"],
-        );
-        b.put(
-            base + 4,
-            format!("engine_pad_{pacing}"),
-            ["mode_changes", "kicks", "final_mode_and_buttons_seen"],
-        );
-    }
-    b.put(
-        0x690,
-        "engine_card_pad",
-        ["pad_faults", "leased_skips", "card_checksum_errors"],
-    );
-    b.put(
-        0x691,
-        "engine_card_ops",
-        ["card_ok", "card_tried", "slot_with_card"],
-    );
-    b.put(
-        0x692,
-        "engine_card_wait",
-        [
-            "lease_wait_med_cycles",
-            "lease_wait_max_cycles",
-            "pad_updates",
-        ],
-    );
-    b.put(
-        0x694,
-        "engine_card_writes",
-        ["writes_ok", "writes_tried", "write_frame_hblanks_med"],
-    );
-    b.put(
-        0x693,
-        "engine_card_frame",
-        [
-            "card_frame_hblanks_min",
-            "card_frame_hblanks_med",
-            "card_frame_hblanks_max",
-        ],
-    );
-    for (phase, tag) in LOAD_PHASES.iter().enumerate() {
-        let base = 0x720 + 6 * phase as u32;
-        b.put(
-            base,
-            format!("engine_load_work_{tag}"),
-            ["rounds_avg", "rounds_min", "rounds_max"],
-        );
-        b.put(
-            base + 1,
-            format!("engine_load_health_{tag}"),
-            ["pad_faults", "stalls", "spurious"],
-        );
-        b.put(
-            base + 2,
-            format!("engine_load_stack_{tag}"),
-            ["handler_stack_unused_bytes", "events", "kicks"],
-        );
-        b.put(
-            base + 3,
-            format!("engine_load_irq_{tag}"),
-            [
-                "longest_load_call_cycles",
-                "load_calls_over_a_byte",
-                "entered_ie_clear_and_pending",
-            ],
-        );
-        b.put(
-            base + 4,
-            format!("engine_load_mask_{tag}"),
-            ["i_mask_after_load_start", "i_mask_at_end", "i_stat_at_end"],
-        );
-        b.put(
-            base + 5,
-            format!("engine_load_totals_{tag}"),
-            [
-                "port1_faults_since_install",
-                "stalls_since_install",
-                "port1_updates_since_install",
-            ],
-        );
-    }
     for port in 0..2u32 {
         let p = port + 1;
         let base = 0x760 + 3 * port;
@@ -708,6 +586,129 @@ fn build() -> BTreeMap<u32, V2Entry> {
                 "failures_of_any_kind",
             ],
         );
+    }
+    for (case, tag) in ["spins", "open_1_frame", "open_30_frames", "open_0", "open_card"]
+        .iter()
+        .enumerate()
+    {
+        b.put(
+            0x6F0 + case as u32,
+            format!("sio_select_early_{tag}"),
+            ["polls", "id_and_magic", "poll_cycles_median"],
+        );
+    }
+    for (case, tag) in ["unmasked", "masked", "first_poll"].iter().enumerate() {
+        b.put(
+            0x6F5 + case as u32,
+            format!("pad_handshake_irq_{tag}"),
+            ["rounds", "bytes_seen", "packets"],
+        );
+    }
+    for (case, tag) in [
+        "digital_driver_digital_pad",
+        "digital_driver_analog_pad",
+        "full_driver_digital_pad",
+    ]
+    .iter()
+    .enumerate()
+    {
+        b.put(
+            0x6FC + case as u32,
+            format!("pad_first_poll_{tag}"),
+            ["first_poll_worst", "id_and_mode", "rounds"],
+        );
+    }
+    b.put(
+        0x970,
+        "present_path_frames",
+        ["frames_flipped", "parts_kicked", "tears_recoveries_bad_markers"],
+    );
+    b.put(
+        0x971,
+        "present_path_flip_lines",
+        ["earliest_line", "latest_line", "lines_per_frame"],
+    );
+    b.put(
+        0x972,
+        "present_path_kicks",
+        ["thread_kicks", "handler_kicks", "waiting_edges"],
+    );
+    b.put(
+        0x973,
+        "present_path_timing",
+        ["late_frames", "worst_submit_to_flip", "draw_done_fallbacks"],
+    );
+    b.put(
+        0x974,
+        "present_cd_reads_quiet",
+        ["sectors", "errors_and_retries", "unused"],
+    );
+    b.put(
+        0x975,
+        "present_cd_reads_shown",
+        ["sectors", "errors_and_retries", "tears_recoveries_lost"],
+    );
+    b.put(
+        0x976,
+        "present_cache_flush",
+        ["frames_flipped", "parts_kicked", "tears_recoveries_faults"],
+    );
+    // Retired in v2.19 (the step is gone); the names stay so captures of v2.14 to v2.18 decode.
+    for (case, tag) in ["mixed_waits", "mixed_early", "single_waits", "single_early"]
+        .iter()
+        .enumerate()
+    {
+        b.put(
+            0x6F8 + case as u32,
+            format!("cd_stop_{tag}"),
+            ["sectors", "errors_and_retries", "time_16_hblanks"],
+        );
+    }
+    // v2.20: companions of the records that clamp at 0xFFFF.
+    b.put(0x653, "timer1_polled_wide", ["hblanks_low", "hblanks_high", "distinct_low"]);
+    b.put(0x654, "timer1_polled_wide_rest", ["distinct_high", "largest_step", "unused"]);
+    for k in 0..4 {
+        b.put(
+            0x874 + 2 * k,
+            format!("list_abort_wide_{k}"),
+            ["words_at_stop_low", "words_at_stop_high", "words_after_wait_low"],
+        );
+        b.put(
+            0x875 + 2 * k,
+            format!("list_abort_wide_rest_{k}"),
+            ["words_after_wait_high", "chcr_after_stop_high_half", "unused"],
+        );
+    }
+    // v2.20: the XA clock case's raw records, fields that cannot clamp.
+    for (k, mark) in ["60", "120", "180"].iter().enumerate() {
+        b.put(
+            0x330 + k as u32,
+            format!("xa_clock_raw_head_{mark}s"),
+            ["head_ms_low", "head_ms_high", "polls"],
+        );
+        b.put(
+            0x333 + k as u32,
+            format!("xa_clock_raw_clock_{mark}s"),
+            ["clock_ms_low", "clock_ms_high", "head0_ms"],
+        );
+    }
+    b.put(0x336, "xa_clock_raw_poll_cost_x10_ms", ["min", "median", "max"]);
+    b.put(0x337, "xa_clock_raw_poll_counts", ["polls", "over_100ms", "over_1s"]);
+    b.put(0x338, "xa_clock_raw_elapsed", ["elapsed_ms_low", "elapsed_ms_high", "passes_4096"]);
+    // v2.20: the NCLIP variants, twelve raw MAC0 readings in each of four variants.
+    for (variant, name) in ["built", "filled", "extra_nop", "zeroed"].iter().enumerate() {
+        for (k, what) in [
+            "pos", "neg", "ref1", "probe1", "ref2", "probe2", "ref3", "probe3", "ref4", "probe4", "ref6", "probe6",
+        ]
+        .iter()
+        .enumerate()
+        {
+            b.put(
+                0x980 + 12 * variant as u32 + k as u32,
+                format!("gte_nclip_{name}_{what}"),
+                ["mac0_low", "mac0_high", "flag_bits"],
+            );
+        }
     }
     b.put(
         0x7A0,

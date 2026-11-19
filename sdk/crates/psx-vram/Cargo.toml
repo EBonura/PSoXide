@@ -9,6 +9,7 @@ description  = "Typed VRAM layout primitives for PS1 SDK: color, rect, tpage, CL
 [dependencies]
 psx-hw = { workspace = true }
 psx-io = { path = "../psx-io" }
+psx-math = { path = "../psx-math" }
 
 [lints]
 workspace = true

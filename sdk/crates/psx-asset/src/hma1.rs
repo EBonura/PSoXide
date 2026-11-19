@@ -132,42 +132,6 @@ fn lerp4(a: [i32; 4], b: [i32; 4], f: i32) -> [i32; 4] {
     ]
 }
 
-#[inline(always)]
-fn quat_to_mat(q: [i32; 4]) -> [[i16; 3]; 3] {
-    let [mut x, mut y, mut z, mut w] = q;
-    let n = (x * x + y * y + z * z + w * w + 2048) >> 12;
-    // The renormalising series is only meaningful while the length error is at most one unit;
-    // clamping keeps a damaged key (components up to 12224) from overflowing `3 * e * e`,
-    // and leaves every in-range key as it was.
-    let e = (4096 - n).clamp(-4096, 4096);
-    let r = 4096 + (e >> 1) + ((3 * e * e) >> 15);
-    x = (x * r + 2048) >> 12;
-    y = (y * r + 2048) >> 12;
-    z = (z * r + 2048) >> 12;
-    w = (w * r + 2048) >> 12;
-    let m2 = |a: i32, b: i32| (a * b + 1024) >> 11;
-    let (xx, yy, zz) = (m2(x, x), m2(y, y), m2(z, z));
-    let (xy, xz, yz) = (m2(x, y), m2(x, z), m2(y, z));
-    let (wx, wy, wz) = (m2(w, x), m2(w, y), m2(w, z));
-    [
-        [
-            (4096 - (yy + zz)) as i16,
-            (xy - wz) as i16,
-            (xz + wy) as i16,
-        ],
-        [
-            (xy + wz) as i16,
-            (4096 - (xx + zz)) as i16,
-            (yz - wx) as i16,
-        ],
-        [
-            (xz - wy) as i16,
-            (yz + wx) as i16,
-            (4096 - (xx + yy)) as i16,
-        ],
-    ]
-}
-
 /// MVMVA(RT, V0, cv=none, sf=0): raw 32-bit MAC1..3 for one column.
 #[cfg(target_arch = "mips")]
 #[inline(always)]
@@ -626,7 +590,7 @@ impl Model {
                 } else {
                     q
                 };
-                let r = quat_to_mat(q);
+                let r = crate::quat::to_matrix(q, true);
                 let parent = u8_at(d, 4 + b) as usize;
                 // Parents precede children (checked when the HMD8 loads) and
                 // `out` holds `nb` bones (checked above).
@@ -647,7 +611,6 @@ impl Model {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use core::f64::consts::FRAC_1_SQRT_2;
 
     /// Q12 rotation matrix of a unit quaternion given as floats (the
@@ -688,7 +651,7 @@ mod tests {
         for axis in axes {
             for scale in [0.95, 1.0, 1.05] {
                 let q = axis.map(|c| (c * 4096.0 * scale) as i32);
-                let got = quat_to_mat(q);
+                let got = crate::quat::to_matrix_renormalised(q);
                 let want = reference(axis);
                 for r in 0..3 {
                     for c in 0..3 {
@@ -712,7 +675,7 @@ mod tests {
             for y in extremes {
                 for z in extremes {
                     for w in extremes {
-                        let m = quat_to_mat([x, y, z, w]);
+                        let m = crate::quat::to_matrix_renormalised([x, y, z, w]);
                         // Garbage rotation is allowed; unbounded work is not.
                         let _ = m;
                     }

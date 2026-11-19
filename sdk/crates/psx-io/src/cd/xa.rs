@@ -29,18 +29,35 @@
 //! (looping) or pauses the drive. A restart is a seek, so a loop has an
 //! audible gap whose length is the drive's seek time; authoring the loop
 //! point into a quiet passage hides it.
+//!
+//! # Stopping
+//!
+//! A Pause out of a read completes 1.2 to 3.9 million clocks after the command,
+//! several frames. [`Player::stop`] therefore does not wait: it silences the
+//! song at the drive's mixer, sends the Pause and returns, and the polls that
+//! follow see it through ([`Player::is_stopping`], [`Player::poll_stop`]). A
+//! song that ends by itself is stopped the same way. [`Player::stop_and_wait`]
+//! is the blocking form, for a boot or a load screen where a data read comes
+//! next and nothing is presenting.
 
-use super::PlayPosition;
 use crate::disc_base::shift_lba;
 use crate::periph::Cd;
 use psx_hw::cd::xa::{END_GUARD_SECTORS, SECTORS_PER_SECOND};
-use psx_hw::cd::{CMD_READS, CMD_SETFILTER, MODE_DOUBLE_SPEED, MODE_XA_ADPCM, MODE_XA_FILTER};
+use psx_hw::cd::{
+    irq, CMD_PAUSE, CMD_READS, CMD_SETFILTER, MODE_DOUBLE_SPEED, MODE_XA_ADPCM, MODE_XA_FILTER,
+};
 
 /// Per-command response spin budget: generous, the drive answers far sooner.
 pub const COMMAND_SPINS: u32 = 131_072;
 /// Spin budget for a pause to finish (the drive spends up to about a tenth
 /// of a second stopping a read).
 const PAUSE_SPINS: u32 = 2_000_000;
+/// Polls a non-blocking [`Player::stop`] waits for the drive's Pause to complete before the
+/// blocking protocol finishes it: one second at a poll a frame, over six times the slowest
+/// completion measured on the console (3.9 million clocks).
+const STOP_POLLS: u8 = 60;
+/// The drive's mixer level at reset: unity.
+const MIXER_UNITY: (u8, u8) = (0x80, 0x80);
 
 /// Speed the song file was interleaved for (`psx-audio-cook xa-encode --speed`).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -107,6 +124,25 @@ impl File {
         Song {
             file: self,
             channel,
+            span: self.span_sector_count(),
+        }
+    }
+
+    /// Channel `channel` of this file as a song that ends `span_sector_count`
+    /// sectors from the top of the file, for a file whose encoder padded it
+    /// to its longest song: the player loops or stops there, not at the end
+    /// of the file. Clamped to [`span_sector_count`](Self::span_sector_count).
+    #[must_use]
+    pub const fn song_with_span(self, channel: u8, span_sector_count: u32) -> Song {
+        let file_span = self.span_sector_count();
+        Song {
+            file: self,
+            channel,
+            span: if span_sector_count < file_span {
+                span_sector_count
+            } else {
+                file_span
+            },
         }
     }
 
@@ -121,6 +157,8 @@ impl File {
 pub struct Song {
     file: File,
     channel: u8,
+    /// Sectors from the top of the file to where this song's audio ends.
+    span: u32,
 }
 
 /// The step of starting a song that the drive refused.
@@ -213,6 +251,15 @@ trait Drive {
     /// Pause the drive and wait for it; `false` if the drive refused (it
     /// does during the seek at the start of a read).
     fn pause(&mut self) -> bool;
+    /// Silence the drive's audio mixer and send Pause without waiting for either answer.
+    /// Returns the controller's interrupt enable, to give back to [`Self::end_stop`].
+    fn begin_stop(&mut self) -> u8;
+    /// One look at the controller while a Pause is out: `true` once the drive has stopped.
+    /// A Pause the drive refused (the head is mid-seek) is sent again here.
+    fn look_pause(&mut self) -> bool;
+    /// Give the controller back after [`Self::begin_stop`]: drain what is left, restore the
+    /// interrupt enable and the mixer level `(left, right)`.
+    fn end_stop(&mut self, saved: u8, volume: (u8, u8));
     /// Absolute LBA the head is reading, if the drive answers.
     fn head_lba(&mut self) -> Option<u32>;
 }
@@ -237,18 +284,58 @@ impl Drive for Cd {
     fn pause(&mut self) -> bool {
         self.try_pause_until_complete(PAUSE_SPINS)
     }
+    #[inline(never)]
+    fn begin_stop(&mut self) -> u8 {
+        set_mixer(self, (0, 0));
+        // A Pause has no parameter, so the parameter FIFO wait cannot fail it.
+        self.dispatch_command(CMD_PAUSE, &[], 0).unwrap_or(0)
+    }
+    #[inline(never)]
+    fn look_pause(&mut self) -> bool {
+        match self.irq_flag_value() {
+            irq::COMPLETE => return true,
+            // Refused: the read carries on; send it again (the first send's enable is kept).
+            irq::ERROR => {
+                self.begin_stop();
+            }
+            // The first answer, or a sector of the read: nothing final yet. Drop it and keep
+            // the output masked, as it is.
+            0 => {}
+            _ => self.restore_irq_output(0),
+        }
+        false
+    }
+    #[inline(never)]
+    fn end_stop(&mut self, saved: u8, volume: (u8, u8)) {
+        self.restore_irq_output(saved);
+        set_mixer(self, volume);
+    }
+    #[inline(never)]
     fn head_lba(&mut self) -> Option<u32> {
-        let position = PlayPosition::parse(&self.try_play_position(COMMAND_SPINS)?)?;
-        let frames = (position.absolute_min as u32 * 60 + position.absolute_sec as u32) * 75
-            + position.absolute_frame as u32;
+        let response = self.try_play_position(COMMAND_SPINS)?;
+        // GetlocP answers eight bytes; the absolute minute, second and frame are bytes 5 to 7,
+        // in BCD (`bcd_to_bin` for the byte `v` is `v - 6 * (v >> 4)`).
+        let &[_, _, _, _, _, min, sec, frame, ..] = response.bytes() else {
+            return None;
+        };
+        let bcd = |v: u8| u32::from(v) - 6 * u32::from(v >> 4);
+        let frames = (bcd(min) * 60 + bcd(sec)) * 75 + bcd(frame);
         // The drive counts from the start of the lead-in, two seconds before LBA 0.
         frames.checked_sub(150)
     }
 }
 
+/// The drive's mixer at `(left, right)`, plain stereo: one body for every caller.
+#[inline(never)]
+fn set_mixer(cd: &mut Cd, (left, right): (u8, u8)) {
+    cd.set_audio_mixer(left, 0, right, 0);
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum State {
     Idle,
+    /// Asked to start while a stop's Pause is out: `song` and `looping` wait for it to end.
+    Queued,
     /// Started; the head has not been seen inside the file yet. The drive
     /// reports its old position until the seek lands, so an end test now
     /// would fire on the previous run's position.
@@ -258,6 +345,13 @@ enum State {
 
 struct Engine {
     state: State,
+    /// Looks left before a non-blocking stop's Pause falls back to the blocking protocol, while
+    /// that Pause is out and not seen to complete (`state` is then `Idle` or `Queued`); else 0.
+    stopping: u8,
+    /// The controller's interrupt enable, given back when the Pause ends.
+    stop_irq: u8,
+    /// The mixer level [`Player::set_volume`] chose, given back when a stop completes.
+    volume: (u8, u8),
     song: Option<Song>,
     looping: bool,
     /// A pause was refused; try again at the next poll.
@@ -266,12 +360,12 @@ struct Engine {
     suspend_pending: bool,
     /// Absolute LBA of the top of the song file.
     start_lba: u32,
+    /// Absolute LBA where the song's audio ends (the top plus its span).
+    end_lba: u32,
     /// Where the last read was aimed: the top of the file for a start or a
     /// loop, the saved position for a resume.
     target_lba: u32,
     head_lba: u32,
-    /// Where a suspended song continues, fixed when the pause is accepted.
-    resume_lba: u32,
     /// Counts reads started (start, loop, resume): a new epoch means the
     /// head readings before it say nothing about the ones after.
     epoch: u32,
@@ -284,55 +378,80 @@ impl Engine {
     const fn new() -> Self {
         Self {
             state: State::Idle,
+            stopping: 0,
+            stop_irq: 0,
+            volume: MIXER_UNITY,
             song: None,
             looping: false,
             pause_pending: false,
             suspended: false,
             suspend_pending: false,
             start_lba: 0,
+            end_lba: 0,
             target_lba: 0,
             head_lba: 0,
-            resume_lba: 0,
             epoch: 0,
             head_serial: 0,
         }
     }
 
+    #[inline(never)]
     fn start(&mut self, drive: &mut impl Drive, song: Song, looping: bool) -> Result<(), Error> {
+        self.song = Some(song);
+        self.looping = looping;
         self.suspended = false;
         self.suspend_pending = false;
-        let file = song.file;
-        let result = (|| {
-            if !drive.unmute() {
-                return Err(Error::Unmute);
-            }
-            if !drive.set_mode(file.speed.mode()) {
-                return Err(Error::SetMode);
-            }
-            if !drive.set_filter(file.number, song.channel) {
-                return Err(Error::SetFilter);
-            }
-            self.begin_read(drive, song)
-        })();
-        if result.is_ok() {
-            self.song = Some(song);
-            self.looping = looping;
-        } else {
+        if self.stopping != 0 {
+            // The drive is still pausing the last song: the new one waits its turn here.
+            self.state = State::Queued;
+            self.head_lba = self.start_lba;
+            return Ok(());
+        }
+        self.launch(drive)
+    }
+
+    /// Start `self.song`: the drive's setup, then the read. One copy, called by a start and by
+    /// the poll that sees a stop complete (a PGO build inlined it into both).
+    #[inline(never)]
+    fn launch(&mut self, drive: &mut impl Drive) -> Result<(), Error> {
+        let Some(song) = self.song else {
+            return Ok(());
+        };
+        let top = shift_lba(song.file.lba);
+        let result = Self::setup(drive, song)
+            .and_then(|()| self.begin_read_at(drive, top, top, top + song.span));
+        if result.is_err() {
             self.state = State::Idle;
             self.song = None;
         }
         result
     }
 
-    /// Seek to the top of the file and start streaming.
-    fn begin_read(&mut self, drive: &mut impl Drive, song: Song) -> Result<(), Error> {
-        let top = shift_lba(song.file.lba);
-        self.begin_read_at(drive, top, top)
+    /// Demute, then the mode and filter of the song's file: the first steps of a start and of a
+    /// resume.
+    fn setup(drive: &mut impl Drive, song: Song) -> Result<(), Error> {
+        if !drive.unmute() {
+            return Err(Error::Unmute);
+        }
+        if !drive.set_mode(song.file.speed.mode()) {
+            return Err(Error::SetMode);
+        }
+        if !drive.set_filter(song.file.number, song.channel) {
+            return Err(Error::SetFilter);
+        }
+        Ok(())
     }
 
     /// Seek to `at` (an absolute LBA inside the song file whose top is `top`)
     /// and start streaming.
-    fn begin_read_at(&mut self, drive: &mut impl Drive, top: u32, at: u32) -> Result<(), Error> {
+    #[inline(never)]
+    fn begin_read_at(
+        &mut self,
+        drive: &mut impl Drive,
+        top: u32,
+        at: u32,
+        end: u32,
+    ) -> Result<(), Error> {
         if !drive.set_target(at) {
             return Err(Error::Seek);
         }
@@ -340,6 +459,7 @@ impl Engine {
             return Err(Error::Read);
         }
         self.start_lba = top;
+        self.end_lba = end;
         self.target_lba = at;
         self.head_lba = at;
         self.pause_pending = false;
@@ -348,53 +468,92 @@ impl Engine {
         Ok(())
     }
 
-    /// Pause a running drive. The drive refuses a pause during the seek that
-    /// starts a read, so a refused pause is retried by [`Self::poll`].
+    /// Stop and wait for the drive: the non-blocking stop, then its last look, which waits for
+    /// the Pause (sending it again when the drive refuses it mid-seek). A song queued behind a
+    /// stop already out is dropped, and that stop is waited for too.
+    #[inline(never)]
     fn stop(&mut self, drive: &mut impl Drive) {
-        self.suspended = false;
-        self.suspend_pending = false;
-        if self.state != State::Idle {
-            self.pause_pending = !drive.pause();
+        self.stop_without_waiting(drive);
+        if self.stopping != 0 {
+            self.stopping = 1;
+            self.poll_stopping(drive);
         }
-        self.state = State::Idle;
-        self.song = None;
     }
 
+    /// Silence the song and send Pause without waiting for either answer;
+    /// [`Self::poll_stopping`] completes it. A stop while one is out only cancels a song `play`
+    /// queued behind it.
+    #[inline(never)]
+    fn stop_without_waiting(&mut self, drive: &mut impl Drive) {
+        if self.state == State::Idle {
+            return;
+        }
+        // While a stop is out `state` is `Idle` or `Queued`, so nothing is reading. A suspended
+        // song's drive is paused already; otherwise the head keeps streaming until the Pause
+        // lands (1.2 to 3.9 million clocks out of a read), so the song is silenced at the
+        // drive's mixer, now.
+        let reading = matches!(self.state, State::Seeking | State::Streaming) && !self.suspended;
+        self.suspended = false;
+        self.suspend_pending = false;
+        self.pause_pending = false;
+        self.state = State::Idle;
+        self.song = None;
+        if reading {
+            self.stop_irq = drive.begin_stop();
+            self.stopping = STOP_POLLS;
+        }
+    }
+
+    /// One look at a Pause that [`Self::stop_without_waiting`] sent. Once [`STOP_POLLS`] looks
+    /// have passed (or `stopping` is set to 1, as the blocking stop does) it waits for the second
+    /// answer, then lets the blocking protocol settle a Pause that never completes. Returns true
+    /// once the drive is quiet, and any song `play` queued has been started.
+    #[inline(never)]
+    fn poll_stopping(&mut self, drive: &mut impl Drive) -> bool {
+        if self.stopping == 0 {
+            return true;
+        }
+        self.stopping -= 1;
+        let late = self.stopping == 0;
+        let mut spins = if late { PAUSE_SPINS } else { 1 };
+        let mut complete = false;
+        while spins != 0 && !complete {
+            spins -= 1;
+            complete = drive.look_pause();
+        }
+        if !complete && !late {
+            return false;
+        }
+        drive.end_stop(self.stop_irq, self.volume);
+        self.stopping = 0;
+        if !complete {
+            // INT2 never came: the blocking protocol settles it.
+            self.pause_pending = !drive.pause();
+        }
+        if self.state == State::Queued {
+            // A refused start leaves the player idle, which the next poll reports.
+            let _ = self.launch(drive);
+        }
+        true
+    }
+
+    /// Suspend the song: the next poll pauses the drive, and a Pause the drive refuses (it does
+    /// during the seek that starts a read) is retried by the polls after it. The poll that gets
+    /// the Pause accepted also asks the drive where the head is, and [`Self::resume`] continues
+    /// from that position, or from the last one a poll saw, or from the seek target when no poll
+    /// ever saw the head.
     fn suspend(&mut self, drive: &mut impl Drive) -> bool {
+        if !self.poll_stopping(drive) {
+            // The drive is not quiet yet; keep polling.
+            return false;
+        }
         if self.state == State::Idle || self.suspended {
             return true;
         }
-        self.suspended = drive.pause();
-        self.suspend_pending = !self.suspended;
-        if self.suspended {
-            self.note_resume_position(drive);
-        }
+        self.suspend_pending = true;
+        self.pause_pending = true;
+        self.poll(drive);
         self.suspended
-    }
-
-    /// Fix where a resume continues, now that the pause is accepted and the
-    /// head holds still. A poll may be a long time old (a game that polls
-    /// only near the end of a song never refreshed it), so ask the drive
-    /// once more; if it does not answer, fall back to the last position the
-    /// poll saw, or to the seek target when no poll ever saw the head.
-    fn note_resume_position(&mut self, drive: &mut impl Drive) {
-        let Some(song) = self.song else {
-            return;
-        };
-        let end = self.start_lba + song.file.span_sector_count();
-        if let Some(head) = drive.head_lba() {
-            if (self.target_lba..end).contains(&head) {
-                self.state = State::Streaming;
-                self.head_lba = head;
-                self.resume_lba = head;
-                return;
-            }
-        }
-        self.resume_lba = if self.state == State::Streaming {
-            self.head_lba
-        } else {
-            self.target_lba
-        };
     }
 
     /// Continue a suspended song. Anything may have happened to the drive
@@ -405,50 +564,61 @@ impl Engine {
     fn resume(&mut self, drive: &mut impl Drive) -> Result<(), Error> {
         if self.suspended {
             if let Some(song) = self.song {
-                let file = song.file;
-                if !drive.unmute() {
-                    return Err(Error::Unmute);
-                }
-                if !drive.set_mode(file.speed.mode()) {
-                    return Err(Error::SetMode);
-                }
-                if !drive.set_filter(file.number, song.channel) {
-                    return Err(Error::SetFilter);
-                }
-                self.begin_read_at(drive, self.start_lba, self.resume_lba)?;
+                Self::setup(drive, song)?;
+                let at = if self.state == State::Streaming {
+                    self.head_lba
+                } else {
+                    self.target_lba
+                };
+                self.begin_read_at(drive, self.start_lba, at, self.end_lba)?;
             }
             self.suspended = false;
         }
         // A refused Pause left the original read active. Cancel its retry
         // without starting another read or changing the pending seek.
-        self.suspend_pending = false;
+        if self.suspend_pending {
+            self.suspend_pending = false;
+            self.pause_pending = false;
+        }
         Ok(())
     }
 
+    #[inline(never)]
     fn poll(&mut self, drive: &mut impl Drive) -> Event {
-        let Some(song) = self.song else {
-            if self.pause_pending {
-                self.pause_pending = !drive.pause();
-            }
+        if !self.poll_stopping(drive) {
             return Event::Idle;
-        };
-        if self.suspend_pending {
-            self.suspend(drive);
         }
-        if self.suspended || self.suspend_pending {
+        // A Pause that was refused is tried again: a stop's, or a suspension's, which is
+        // settled by the head reading below (the one poll that does read the head of a
+        // suspended song).
+        let mut settled = false;
+        if self.pause_pending {
+            self.pause_pending = !drive.pause();
+            if !self.pause_pending && self.suspend_pending {
+                self.suspend_pending = false;
+                self.suspended = true;
+                settled = true;
+            }
+        }
+        if self.state == State::Idle {
+            return Event::Idle;
+        }
+        if self.suspend_pending || (self.suspended && !settled) {
             return Event::Playing;
         }
-        let end = self.start_lba + song.file.span_sector_count();
+        let end = self.end_lba;
         if let Some(head) = drive.head_lba() {
-            if self.state == State::Seeking && (self.target_lba..end).contains(&head) {
+            let inside = head < end;
+            if self.state == State::Seeking && inside && head >= self.target_lba {
                 self.state = State::Streaming;
             }
             if self.state == State::Streaming {
-                self.head_lba = head;
-                self.head_serial = self.head_serial.wrapping_add(1);
-            }
-            if self.state == State::Streaming && head >= end {
-                return self.reach_end(drive, song);
+                if inside {
+                    self.head_lba = head;
+                    self.head_serial = self.head_serial.wrapping_add(1);
+                } else if !self.suspended {
+                    return self.reach_end(drive);
+                }
             }
         }
         Event::Playing
@@ -463,7 +633,12 @@ impl Engine {
             return 0;
         };
         let sectors = self.head_lba.saturating_sub(self.start_lba);
-        sectors * 1000 / song.file.speed.sectors_per_second()
+        // `sectors * 1000 / sectors_per_second` (75 or 150) as a division by a constant.
+        let thirds = match song.file.speed {
+            DriveSpeed::Single => 40,
+            DriveSpeed::Double => 20,
+        };
+        sectors * thirds / 3
     }
 
     fn head_sample(&self) -> Option<HeadSample> {
@@ -478,11 +653,17 @@ impl Engine {
         })
     }
 
-    fn reach_end(&mut self, drive: &mut impl Drive, song: Song) -> Event {
-        if self.looping && self.begin_read(drive, song).is_ok() {
+    #[inline(never)]
+    fn reach_end(&mut self, drive: &mut impl Drive) -> Event {
+        // A loop starts the same song again: from the top of its file, to the same end.
+        if self.looping
+            && self
+                .begin_read_at(drive, self.start_lba, self.start_lba, self.end_lba)
+                .is_ok()
+        {
             return Event::Looped;
         }
-        self.stop(drive);
+        self.stop_without_waiting(drive);
         Event::Finished
     }
 }
@@ -505,9 +686,9 @@ impl Player {
         }
     }
 
-    /// Stop and give the token back.
+    /// Stop, waiting for the drive, and give the token back.
     pub fn release(mut self) -> Cd {
-        self.stop();
+        self.stop_and_wait();
         self.cd
     }
 
@@ -518,9 +699,51 @@ impl Player {
         self.engine.start(&mut self.cd, song, looping)
     }
 
-    /// Pause the drive and forget the song. Waits for the drive to settle.
+    /// Stop the song without waiting for the drive: the song is silenced at the drive's mixer
+    /// at once, Pause is sent and the call returns. A Pause out of a read completes 1.2 to 3.9
+    /// million clocks later on the console, several frames in which a game must keep polling
+    /// its pad and presenting, so nothing here waits for it.
+    ///
+    /// The Pause is completed by [`poll`](Self::poll) (or [`poll_stop`](Self::poll_stop), which
+    /// does only that): call one once per frame while [`is_stopping`](Self::is_stopping) holds.
+    /// Meanwhile:
+    ///
+    /// * the player reports [`Event::Idle`] and is not playing;
+    /// * a second `stop` is a no-op (it only cancels a song `play` queued);
+    /// * [`play`](Self::play) queues its song, returns `Ok`, and the poll that sees the Pause
+    ///   complete starts it;
+    /// * [`suspend`](Self::suspend) and [`with_cd_suspended`](Self::with_cd_suspended) report
+    ///   the drive as not quiet yet;
+    /// * anything else that drives the controller (a data read through a token of your own)
+    ///   must wait for `is_stopping` to turn false, or call
+    ///   [`stop_and_wait`](Self::stop_and_wait) instead of this.
+    ///
+    /// A song that ends by itself ([`Event::Finished`]) is stopped this way too. A Pause the
+    /// drive does not complete within 60 polls is finished by the blocking protocol.
     pub fn stop(&mut self) {
+        self.engine.stop_without_waiting(&mut self.cd);
+    }
+
+    /// Pause the drive and forget the song, waiting for the drive to settle: the blocking form
+    /// of [`stop`](Self::stop), for a boot or a load screen, where a data read follows and
+    /// nothing is presenting. Also completes a [`stop`](Self::stop) still pending (dropping a
+    /// song `play` queued behind it). A Pause the drive refuses (the head is mid-seek, up to a
+    /// third of a second after a start) is sent again until it is accepted and completes.
+    pub fn stop_and_wait(&mut self) {
         self.engine.stop(&mut self.cd);
+    }
+
+    /// Whether a [`stop`](Self::stop) has been sent and the drive has not yet confirmed it.
+    #[must_use]
+    pub fn is_stopping(&self) -> bool {
+        self.engine.stopping != 0
+    }
+
+    /// Look at a pending [`stop`](Self::stop) once, without asking the drive anything else:
+    /// the per-frame call for a game that polls [`poll`](Self::poll) only near a song's end.
+    /// Returns true while the stop is still pending.
+    pub fn poll_stop(&mut self) -> bool {
+        !self.engine.poll_stopping(&mut self.cd)
     }
 
     /// Suspend the current song without releasing the CD token or forgetting
@@ -593,13 +816,16 @@ impl Player {
     }
 
     /// Call about once per frame: notices the end of the song and loops or
-    /// stops, or retries a pending suspension. A suspended song returns
+    /// stops (without waiting for the drive, see [`stop`](Self::stop)), or
+    /// retries a pending suspension, or looks at a pending stop and returns
+    /// [`Event::Idle`] until the drive confirms it. A suspended song returns
     /// `Event::Playing` without querying or advancing the head.
     pub fn poll(&mut self) -> Event {
         self.engine.poll(&mut self.cd)
     }
 
-    /// Whether a song is started and has not finished.
+    /// Whether a song is started and has not finished (a song queued behind a pending
+    /// [`stop`](Self::stop) counts as started).
     pub fn is_playing(&self) -> bool {
         self.engine.state != State::Idle
     }
@@ -634,7 +860,11 @@ impl Player {
     /// unity, `0xFF` about twice that; `(left, right)` feed the left and
     /// right outputs of a stereo song.
     pub fn set_volume(&mut self, left: u8, right: u8) {
-        self.cd.set_audio_mixer(left, 0, right, 0);
+        self.engine.volume = (left, right);
+        // While a stop is out the mixer stays silent; the stop's end gives the level back.
+        if self.engine.stopping == 0 {
+            set_mixer(&mut self.cd, (left, right));
+        }
     }
 }
 
@@ -697,6 +927,17 @@ mod tests {
         let _token: Cd = player.release();
     }
 
+    /// What a look at a pending Pause shows.
+    #[derive(Copy, Clone)]
+    enum PauseLook {
+        /// Nothing final yet.
+        Waiting,
+        /// The second answer: the drive has stopped.
+        Complete,
+        /// Refused (the head is mid-seek): the read carries on, the player sends it again.
+        Refused,
+    }
+
     /// Records commands; `heads` is what GetlocP answers, one per poll.
     #[derive(Default)]
     struct Fake {
@@ -704,6 +945,10 @@ mod tests {
         fail_at: Option<&'static str>,
         heads: Vec<Option<u32>>,
         pause_refusals: u32,
+        /// What each look at a pending Pause shows, first to last; `Complete` once spent.
+        looks: Vec<PauseLook>,
+        /// The drive never answers: once `looks` is spent, a look shows `Waiting`.
+        stuck: bool,
     }
 
     impl Fake {
@@ -743,6 +988,30 @@ mod tests {
                 return false;
             }
             true
+        }
+        fn begin_stop(&mut self) -> u8 {
+            self.log.push("begin_stop".into());
+            0x1f
+        }
+        fn look_pause(&mut self) -> bool {
+            self.log.push("look".into());
+            let look = if self.looks.is_empty() {
+                if self.stuck {
+                    PauseLook::Waiting
+                } else {
+                    PauseLook::Complete
+                }
+            } else {
+                self.looks.remove(0)
+            };
+            if let PauseLook::Refused = look {
+                self.log.push("begin_stop".into());
+            }
+            matches!(look, PauseLook::Complete)
+        }
+        fn end_stop(&mut self, saved: u8, (left, right): (u8, u8)) {
+            self.log
+                .push(format!("end_stop {saved:#04x} {left} {right}"));
         }
         fn head_lba(&mut self) -> Option<u32> {
             if self.heads.is_empty() {
@@ -986,8 +1255,13 @@ mod tests {
         drive.heads = vec![Some(1099), Some(1101)];
         assert_eq!(engine.poll(&mut drive), Event::Playing);
         assert_eq!(engine.poll(&mut drive), Event::Finished);
-        assert_eq!(drive.log, ["pause"]);
+        // The Pause is sent and not waited for.
+        assert_eq!(drive.log, ["begin_stop"]);
+        assert_ne!(engine.stopping, 0);
+        drive.log.clear();
         assert_eq!(engine.poll(&mut drive), Event::Idle);
+        assert_eq!(drive.log, ["look", "end_stop 0x1f 128 128"]);
+        assert_eq!(engine.stopping, 0);
     }
 
     #[test]
@@ -999,15 +1273,41 @@ mod tests {
         engine
             .start(&mut drive, song(DriveSpeed::Single), false)
             .unwrap();
+        drive.log.clear();
         engine.stop(&mut drive);
-        assert_eq!(drive.log.last().unwrap(), "pause");
+        assert_eq!(drive.log, ["begin_stop", "look", "end_stop 0x1f 128 128"]);
         assert_eq!(engine.poll(&mut drive), Event::Idle);
+        assert_eq!(drive.log.len(), 3);
     }
 
     #[test]
-    fn a_refused_pause_is_retried_at_the_next_polls() {
+    fn a_stop_on_an_idle_player_keeps_a_refused_pause_retry() {
         let mut drive = Fake {
+            stuck: true,
+            // The fallback's Pause and the retry the same poll makes.
             pause_refusals: 2,
+            ..Fake::default()
+        };
+        let mut engine = Engine::new();
+        engine
+            .start(&mut drive, song(DriveSpeed::Single), false)
+            .unwrap();
+        engine.stop_without_waiting(&mut drive);
+        for _ in 0..STOP_POLLS {
+            engine.poll(&mut drive);
+        }
+        assert!(engine.pause_pending, "the fallback Pause was refused");
+        engine.stop_without_waiting(&mut drive);
+        assert!(engine.pause_pending, "the retry of the refused Pause stays");
+        drive.log.clear();
+        assert_eq!(engine.poll(&mut drive), Event::Idle);
+        assert_eq!(drive.log, ["pause"]);
+    }
+
+    #[test]
+    fn the_blocking_stop_waits_out_a_refused_pause() {
+        let mut drive = Fake {
+            looks: vec![PauseLook::Refused, PauseLook::Refused, PauseLook::Waiting],
             ..Fake::default()
         };
         let mut engine = Engine::new();
@@ -1016,12 +1316,23 @@ mod tests {
             .unwrap();
         drive.log.clear();
         engine.stop(&mut drive);
+        assert_eq!(
+            drive.log,
+            [
+                "begin_stop",
+                "look",
+                "begin_stop",
+                "look",
+                "begin_stop",
+                "look",
+                "look",
+                "end_stop 0x1f 128 128"
+            ]
+        );
+        assert_eq!(engine.stopping, 0);
+        assert!(!engine.pause_pending);
         assert_eq!(engine.poll(&mut drive), Event::Idle);
-        assert_eq!(engine.poll(&mut drive), Event::Idle);
-        assert_eq!(drive.log, ["pause", "pause", "pause"]);
-        // Accepted: no further commands.
-        assert_eq!(engine.poll(&mut drive), Event::Idle);
-        assert_eq!(drive.log.len(), 3);
+        assert_eq!(drive.log.len(), 8);
     }
 
     #[test]
@@ -1054,7 +1365,200 @@ mod tests {
         drive.fail_at = Some("target");
         assert_eq!(engine.poll(&mut drive), Event::Playing);
         assert_eq!(engine.poll(&mut drive), Event::Finished);
-        assert_eq!(drive.log.last().unwrap(), "pause");
+        assert_eq!(drive.log.last().unwrap(), "begin_stop");
+    }
+
+    /// A stopping song's Pause: sent once, never waited for, completed by the polls.
+    #[test]
+    fn a_stop_silences_at_once_and_completes_over_the_polls() {
+        let mut drive = Fake {
+            looks: vec![PauseLook::Waiting, PauseLook::Waiting],
+            ..Fake::default()
+        };
+        let mut engine = Engine::new();
+        engine
+            .start(&mut drive, song(DriveSpeed::Single), false)
+            .unwrap();
+        drive.log.clear();
+        engine.stop_without_waiting(&mut drive);
+        assert_eq!(drive.log, ["begin_stop"]);
+        assert_ne!(engine.stopping, 0);
+        assert!(!engine.is_streaming());
+        // Two looks show nothing final: the player reports idle, no command is sent.
+        assert_eq!(engine.poll(&mut drive), Event::Idle);
+        assert_eq!(engine.poll(&mut drive), Event::Idle);
+        assert_eq!(drive.log, ["begin_stop", "look", "look"]);
+        assert_ne!(engine.stopping, 0);
+        // The third shows the second answer: the controller is handed back, the mixer too.
+        assert_eq!(engine.poll(&mut drive), Event::Idle);
+        assert_eq!(&drive.log[3..], ["look", "end_stop 0x1f 128 128"]);
+        assert_eq!(engine.stopping, 0);
+    }
+
+    #[test]
+    fn a_second_stop_while_one_is_pending_sends_nothing() {
+        let mut drive = Fake::default();
+        let mut engine = Engine::new();
+        engine
+            .start(&mut drive, song(DriveSpeed::Single), false)
+            .unwrap();
+        engine.stop_without_waiting(&mut drive);
+        drive.log.clear();
+        engine.stop_without_waiting(&mut drive);
+        assert!(drive.log.is_empty());
+    }
+
+    #[test]
+    fn a_song_started_while_stopping_waits_in_the_state_machine() {
+        let mut drive = Fake {
+            looks: vec![PauseLook::Waiting],
+            ..Fake::default()
+        };
+        let mut engine = Engine::new();
+        engine
+            .start(&mut drive, song(DriveSpeed::Single), false)
+            .unwrap();
+        engine.stop_without_waiting(&mut drive);
+        drive.log.clear();
+        engine
+            .start(&mut drive, song(DriveSpeed::Double), true)
+            .unwrap();
+        assert!(drive.log.is_empty(), "queued, nothing sent");
+        assert_eq!(engine.state, State::Queued);
+        assert_eq!(engine.poll(&mut drive), Event::Idle);
+        assert!(drive.log.len() == 1 && drive.log[0] == "look");
+        // The Pause completes: the song starts in the same poll.
+        assert_eq!(engine.poll(&mut drive), Event::Playing);
+        assert_eq!(
+            &drive.log[1..],
+            [
+                "look",
+                "end_stop 0x1f 128 128",
+                "unmute",
+                "mode 0xc8",
+                "filter 3 2",
+                "target 1000",
+                "read"
+            ]
+        );
+        assert!(engine.looping);
+        assert_ne!(engine.state, State::Queued);
+    }
+
+    #[test]
+    fn a_stop_cancels_a_song_queued_behind_a_stop() {
+        let mut drive = Fake {
+            looks: vec![PauseLook::Waiting],
+            ..Fake::default()
+        };
+        let mut engine = Engine::new();
+        engine
+            .start(&mut drive, song(DriveSpeed::Single), false)
+            .unwrap();
+        engine.stop_without_waiting(&mut drive);
+        engine
+            .start(&mut drive, song(DriveSpeed::Single), false)
+            .unwrap();
+        engine.stop_without_waiting(&mut drive);
+        assert_ne!(engine.state, State::Queued);
+        drive.log.clear();
+        assert_eq!(engine.poll(&mut drive), Event::Idle);
+        assert_eq!(engine.poll(&mut drive), Event::Idle);
+        assert_eq!(drive.log.last().unwrap(), "end_stop 0x1f 128 128");
+        assert_eq!(engine.state, State::Idle);
+    }
+
+    #[test]
+    fn a_refused_stopping_pause_is_sent_again() {
+        let mut drive = Fake {
+            looks: vec![PauseLook::Refused, PauseLook::Waiting, PauseLook::Complete],
+            ..Fake::default()
+        };
+        let mut engine = Engine::new();
+        engine
+            .start(&mut drive, song(DriveSpeed::Single), false)
+            .unwrap();
+        engine.stop_without_waiting(&mut drive);
+        drive.log.clear();
+        assert_eq!(engine.poll(&mut drive), Event::Idle);
+        // Sent again with the controller's enable kept, not handed back and taken again.
+        assert_eq!(drive.log, ["look", "begin_stop"]);
+        assert_eq!(engine.poll(&mut drive), Event::Idle);
+        assert_eq!(engine.poll(&mut drive), Event::Idle);
+        assert_eq!(engine.stopping, 0);
+    }
+
+    #[test]
+    fn a_pause_that_never_completes_falls_back_to_the_blocking_protocol() {
+        let mut drive = Fake {
+            stuck: true,
+            ..Fake::default()
+        };
+        let mut engine = Engine::new();
+        engine
+            .start(&mut drive, song(DriveSpeed::Single), false)
+            .unwrap();
+        engine.stop_without_waiting(&mut drive);
+        for _ in 1..STOP_POLLS {
+            assert_eq!(engine.poll(&mut drive), Event::Idle);
+            assert_ne!(engine.stopping, 0);
+        }
+        drive.log.clear();
+        assert_eq!(engine.poll(&mut drive), Event::Idle);
+        assert_eq!(engine.stopping, 0);
+        // The last wait, the controller handed back, then the blocking Pause.
+        assert!(drive.log.iter().any(|entry| entry == "pause"));
+        assert!(!engine.pause_pending);
+    }
+
+    #[test]
+    fn the_blocking_stop_finishes_a_pending_stop_and_drops_the_queued_song() {
+        let mut drive = Fake {
+            looks: vec![PauseLook::Waiting],
+            ..Fake::default()
+        };
+        let mut engine = Engine::new();
+        engine
+            .start(&mut drive, song(DriveSpeed::Single), false)
+            .unwrap();
+        engine.stop_without_waiting(&mut drive);
+        engine
+            .start(&mut drive, song(DriveSpeed::Single), false)
+            .unwrap();
+        drive.log.clear();
+        engine.stop(&mut drive);
+        assert_eq!(engine.stopping, 0);
+        assert_eq!(engine.state, State::Idle);
+        assert_eq!(drive.log, ["look", "look", "end_stop 0x1f 128 128"]);
+    }
+
+    #[test]
+    fn a_suspended_song_stops_without_a_pause() {
+        let mut drive = Fake::default();
+        let mut engine = Engine::new();
+        engine
+            .start(&mut drive, song(DriveSpeed::Single), false)
+            .unwrap();
+        assert!(engine.suspend(&mut drive));
+        drive.log.clear();
+        engine.stop_without_waiting(&mut drive);
+        assert!(drive.log.is_empty());
+        assert_eq!(engine.state, State::Idle);
+    }
+
+    #[test]
+    fn suspension_waits_for_a_pending_stop() {
+        let mut drive = Fake {
+            looks: vec![PauseLook::Waiting],
+            ..Fake::default()
+        };
+        let mut engine = Engine::new();
+        engine
+            .start(&mut drive, song(DriveSpeed::Single), false)
+            .unwrap();
+        engine.stop_without_waiting(&mut drive);
+        assert!(!engine.suspend(&mut drive));
+        assert!(engine.suspend(&mut drive));
     }
 
     /// The head the drive reports after the pause wins over a poll that is
@@ -1197,6 +1701,36 @@ mod tests {
         let seen = player.with_cd_suspended(|cd| (cd, 7)).unwrap();
         assert_eq!(seen, 7);
         assert!(!player.is_suspended());
+    }
+
+    #[test]
+    fn a_song_with_its_own_span_loops_at_its_own_end() {
+        let mut drive = Fake::default();
+        let mut engine = Engine::new();
+        // 100 sectors of file span, this song's audio ends at 40.
+        let short =
+            File::new(1000, 100 + END_GUARD_SECTORS, 3, DriveSpeed::Single).song_with_span(2, 40);
+        engine.start(&mut drive, short, true).unwrap();
+        drive.heads = vec![Some(1010), Some(1039), Some(1040)];
+        assert_eq!(engine.poll(&mut drive), Event::Playing);
+        assert_eq!(engine.poll(&mut drive), Event::Playing);
+        assert_eq!(engine.poll(&mut drive), Event::Looped);
+        // The same song through `song` runs to the file's end instead.
+        let whole = File::new(1000, 100 + END_GUARD_SECTORS, 3, DriveSpeed::Single).song(2);
+        engine.start(&mut drive, whole, true).unwrap();
+        drive.heads = vec![Some(1010), Some(1040), Some(1099), Some(1100)];
+        for _ in 0..3 {
+            assert_eq!(engine.poll(&mut drive), Event::Playing);
+        }
+        assert_eq!(engine.poll(&mut drive), Event::Looped);
+    }
+
+    #[test]
+    fn a_span_is_clamped_to_the_file() {
+        let file = File::new(0, 100 + END_GUARD_SECTORS, 1, DriveSpeed::Single);
+        assert_eq!(file.song_with_span(0, 5000), file.song(0));
+        assert_eq!(file.song_with_span(0, 100), file.song(0));
+        assert_ne!(file.song_with_span(0, 99), file.song(0));
     }
 
     #[test]

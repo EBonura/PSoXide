@@ -848,6 +848,7 @@ pub struct GameEntities<const MAX_ENTITIES: usize> {
     anim_clock: psx_engine::SimTick,
     /// Entities whose foot landed at the latest [`Self::update_animation`]
     /// (bit per slot, [`crate::fighter_anim::footfall`]).
+    // psx-numeric-allow-next-line: one bit per entity slot, the mask width is the record cap (64); bit ops only
     footfalls: u64,
     /// The entities' simulation clock: every tick advances it by its delta.
     /// An entity's attack holds its [`crate::fighter_action::FighterAction`]
@@ -1341,6 +1342,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
 
     /// Whether record `index`'s room is not resident ([`Self::set_away_mask`]).
     pub fn away(&self, index: usize) -> bool {
+        // psx-numeric-allow-next-line: one bit per entity or fighter, the mask width is the record cap (64); bit ops only
         index < 64 && self.away_mask & (1u64 << index) != 0
     }
 
@@ -2510,6 +2512,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
                 swapping,
             );
             let behavior_awake = !matches!(state, GameEntityState::Idle | GameEntityState::Patrol);
+            // psx-numeric-allow-next-line: bit select on the 64-record mask; bit ops only
             let spatially_active = index < 64 && self.spatial_active_mask & (1u64 << index) != 0;
             // PVS is a rendering broad phase, not a perception verdict.
             // Nearby actors must still test sight/hearing around corners.
@@ -2776,6 +2779,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
     const fn defender_bit(defender: usize) -> u64 {
         // Records stop at 64 (`psx_level::MAX_GAME_ENTITY_RECORDS`): only a
         // full table's actor slot (64) shares a bit, with slot 0.
+        // psx-numeric-allow-next-line: one bit per entity or fighter, the mask width is the record cap (64); bit ops only
         1u64 << (defender & 63)
     }
 

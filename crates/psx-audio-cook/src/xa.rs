@@ -28,8 +28,17 @@ pub const RAW_SECTOR_BYTES: usize = 2336;
 /// Channel number of the filler sectors that pad unused interleave slots.
 pub const FILLER_CHANNEL: u8 = 0xff;
 
-/// `(f0, f1)` per filter, in 1/64: the first four rows of the psx-spx tables.
-const FILTERS: [(i32, i32); 4] = [(0, 0), (60, 0), (115, -52), (98, -55)];
+/// `(f0, f1)` per filter, in 1/64: the first four rows of the psx-spx tables, a prefix of
+/// the SPU table.
+const FILTERS: [(i32, i32); psx_hw::adpcm::XA_FILTER_COUNT] = {
+    let mut table = [(0, 0); psx_hw::adpcm::XA_FILTER_COUNT];
+    let mut i = 0;
+    while i < table.len() {
+        table[i] = psx_hw::adpcm::FILTERS[i];
+        i += 1;
+    }
+    table
+};
 
 /// Sample rate of an XA audio sector.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

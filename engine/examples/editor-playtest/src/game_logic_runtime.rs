@@ -2258,6 +2258,7 @@ impl Playtest {
                 || out.len() >= out.capacity()
                 // An away fighter is frozen and its instance is not present:
                 // nothing poses it.
+                // psx-numeric-allow-next-line: one bit per entity or fighter, the mask width is the record cap (64); bit ops only
                 || (index < 64 && self.fighters_away_now & (1u64 << index) != 0)
             {
                 continue;

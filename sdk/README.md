@@ -14,7 +14,7 @@ the editor and emulator share one simulation.
 | Crate | Purpose |
 |-------|---------|
 | [`psx-rt`](crates/psx-rt) | Bare-metal runtime: `_start`, BIOS calls, panic, heap, VBlank IRQ counter, corrected i64 builtins, scratchpad regions and scratchpad stacks. |
-| [`psx-io`](crates/psx-io) | Volatile MMIO primitives for target code, plus the CD-ROM command surface. |
+| [`psx-io`](crates/psx-io) | Volatile MMIO primitives for target code, plus the CD-ROM command surface and the lookup of a file on the disc by name (`psx_io::iso`). |
 | [`psx-gpu`](crates/psx-gpu) | High-level GPU API: init, primitives, framebuffers, display-window shifting. |
 | [`psx-vram`](crates/psx-vram) | Typed VRAM layout primitives: color, rect, tpage, CLUT, upload helpers. |
 | [`psx-spu`](crates/psx-spu) | High-level SPU API: typed voices, volume, pitch, ADSR, ADPCM upload, key-on/off, loop chaining, noise. |
@@ -24,10 +24,11 @@ the editor and emulator share one simulation.
 | [`psx-segments`](crates/psx-segments) | Bounded segment selection and launch requests using game-owned state and controls. |
 | [`psx-display`](crates/psx-display) | Picture options: the BRIGHTNESS stepper (`DEFAULT`, `DARKER n`, `BRIGHTER n`) with its one-packet GPU overlay, and the SCREEN X/Y stepper, each with row text and a save byte. Host-tested, no heap ([adoption guide](docs/DISPLAY-OPTIONS.md)). |
 | [`psx-loading`](crates/psx-loading) | An animated LOADING indicator for blocking loads: a label with stepping dots or a dot spinner and a breathing ink, drawn as plain GP0 rectangles from any `BitmapFont` (no VRAM, no atlas, no heap). Polled from a load loop, redraws only when the picture changes. Host-tested ([adoption guide](docs/LOADING-INDICATOR.md)). |
+| [`psx-splash`](crates/psx-splash) | The boot splash every PSoXide game opens with: the Bonnie Studios mark and one line of text (`Built with PSoXide`, say) with a sweeping sheen, faded in, held and faded out over 150 frames, skipped by a fresh Cross, Circle or Start press. One call, `psx_splash::show`, with the pad read through the caller's own closure; a program that does not call it links none of it. Host-tested. |
 | [`psx-gte`](crates/psx-gte) | GTE (COP2) wrappers. MIPS emits inline-asm coprocessor ops; host routes through `psx-gte-core`. |
 | [`psx-gte-core`](crates/psx-gte-core) | Pure-Rust GTE state machine and fixed-point math. Shared by `psx-gte` and the emulator; bit-exact against a real-console conformance corpus. |
 | [`psx-math`](crates/psx-math) | Fixed-point math: Q0.12 angles + sin/cos/atan2, int32 helpers, decimal text formatting. |
-| [`psx-pad`](crates/psx-pad) | SIO0 controller polling: digital + DualShock analog, `PadTracker` edges/repeat, diagnostic pacing. Feature `irq-engine`: the interrupt-driven engine that polls both ports from VBlank and IRQ7 without waiting ([PAD-IRQ-ENGINE](docs/PAD-IRQ-ENGINE.md)). |
+| [`psx-pad`](crates/psx-pad) | SIO0 controller polling: digital + DualShock analog, `PadTracker` edges/repeat, diagnostic pacing. One synchronous driver for every game ([PAD](docs/PAD.md)). |
 | [`psx-tick`](crates/psx-tick) | Fixed-timestep game clock: per-game tick rate and catch-up policy, a render phase for interpolation, and consistency counters. Callers pass the VBlank count, so every rule is host-testable. |
 | [`psx-font`](crates/psx-font) | Bitmap-font atlas: 1bpp source → 4bpp CLUT VRAM texture, GP0 textured-rect draw path. |
 | [`psx-fx`](crates/psx-fx) | Arcade-style visual effects: particle pools, screen shake, deterministic RNG. |
@@ -40,7 +41,7 @@ the editor and emulator share one simulation.
 | [`psx-residency`](crates/psx-residency) | Residency policy for streamed data: contiguous page pools with generation handles, priority classes, pinning, distance-then-LRU eviction, retry backoff, and a fixed-slot policy. It decides what to load and what to evict and never touches the drive; reads go out through a trait. Host-tested, no heap. |
 | [`psx-residency-sim`](crates/psx-residency-sim) | Host-only route simulator for `psx-residency`: replays a route through a region graph against the real policy and a drive model built from the silicon seek and read measurements, and reports deadline slack and misses. |
 | [`psx-telemetry`](crates/psx-telemetry) | Shared guest/host telemetry id tables for the emulator profiling hooks. |
-| [`psx-fmv`](crates/psx-fmv) | FMV playback building blocks: STR sector demux, BS v2 bitstream to MDEC run-length decode, MDEC upload/decode via DMA0/DMA1 (guest only), ISO9660 root-file lookup. |
+| [`psx-fmv`](crates/psx-fmv) | FMV playback building blocks: STR sector demux, BS v2 bitstream to MDEC run-length decode, MDEC upload/decode via DMA0/DMA1 (guest only). |
 
 There is no umbrella crate: games depend on the subsystem crates they use.
 A standalone game should use the pinned bootstrap workflow described in the
@@ -61,8 +62,8 @@ Build and run them via the top-level `Makefile` (see the
 | `hello-input` | Controller polling via `psx-pad`. |
 | `sfxbench` | Cycles the `psx-sfx` bookkeeping costs: placement gains, the mixer's level update, an idle tick and a stealing `play`. |
 | `hello-seq` | Plays a song cooked by `psx-seq-cook` from the player's own cartridge through `psx-seq` and reports what the sequencer costs. |
-| `pollbench` | Cycles one synchronous controller poll costs: port 1, an empty port 2, both. |
-| `pad-engine-check` | The interrupt-driven pad engine against the synchronous driver: CPU left to the game, snapshot, lease. |
+| `pollbench` | Cycles one `Controllers` poll costs: port 1, an empty port 2, both. |
+| `hello-splash` | The boot splash at every brightness step, then with another line; the frame-identity and size harness for `psx-splash`. |
 | `hello-gte` | GTE-accelerated transforms. |
 | `hello-audio` | SPU voice playback. |
 | `hello-cdda` | CD-DA audio tracks. |
@@ -70,22 +71,28 @@ Build and run them via the top-level `Makefile` (see the
 | `hello-xa-resume` | An XA song surviving a data read: suspends it, reads sectors through the polled reader, resumes, and checks the head, the song clock, the drive command log and the audio (`make hello-xa-resume-gate`). |
 | `hello-spstack` | A call tree run on a scratchpad stack under VBlank IRQs, checked against the RAM stack; `stack-guard` (`tools/psoxide-hazard`) proves it fits. |
 | `hello-gteirq` | RTPS run under VBlank IRQs, checking that psx-rt's handler never runs a GTE command twice. The emulator models this since its commit c7e3ea8; a console run remains the reference. |
-| `hello-present` | psx-rt's queued display flip, held until the frame's closing GP0(1Fh) sets GPUSTAT bit 24 (`arm_draw_done`, `end_with_draw_done`, `signal_draw_done`). |
+| `hello-present` | Frames drawn through the GP0 port and handed to `psx_rt::present::Presenter::present_drawn`, mixed with chain frames: each flips once, only after its closing GP0(1Fh) set GPUSTAT bit 24, never sooner than the cap. |
 | `hello-diag` | The console stop-panel (`psx-rt` feature `console-diag`) shown on purpose: a stall, a fault, a panic, a failed CD read, an oversized GPU list node or a jump to nowhere (`wild`), chosen by `HELLO_DIAG_MODE`. See [CONSOLE-STOP-PANEL](docs/CONSOLE-STOP-PANEL.md). |
 | `hello-fault` | Panics on purpose (an out-of-range index) so `tools/abort_gate.sh` can prove a `panic=immediate-abort` guest records the `break` in `__psx_rt_fault_*` and that `psoxide-size faults` names `main`; the shared panic policy lives in `tools/psoxide-size`. |
-| `hello-present-queue` | psx-rt's VBlank-kicked present queue (`present-queue` feature): whole frames published as one chain each, preamble and HUD recorded with `psx_io::gpu::start_recording_raw`, kicked and flipped by the VBlank handler. |
+| `hello-present-queue` | The one present path (`psx_rt::present`, [PRESENT](docs/PRESENT.md)) at 60, 30 and 20 fps and under a varying load, frames of one chain and of two, each frame's kick and flip checked edge by edge from a VBlank hook (`make hello-present-queue-gate`). |
+| `hello-present-cd` | The one present path while the drive delivers sectors (polled reads and a `psx-cdstream` stream) and across instruction-cache flushes, against the same reads with presenting off (`make hello-present-cd-gate`). |
 | `hello-fmv` | FMV console test: streams a 2x STR with XA audio, decodes it with `psx-fmv`, and shows sector counts (LOST/BAD) over the video. |
 | `hello-memcard` | Non-destructive memory-card diagnostic: reads and hashes all 1024 frames, then (L1+R1+Cross) writes and verifies one test save. |
 | `hello-memprobe` | Checks psx-rt's `memcpy`/`memset`/`memcmp` against reference loops for every size and alignment; prints `MEMPROBE PASS` or `FAIL`. |
-| `hello-asmprobe` | Differential test and cycle benchmark for the hand-scheduled kernels (`psx-gpu` and `psx-math` `asm-kernels`): bit-identical against the portable definition on random and edge inputs, then timed; prints `ASMPROBE PASS` or `FAIL` and `BENCH` lines. |
+| `hello-asmprobe` | Differential test and cycle benchmark for the the console's tagged-stream link loop (`psx-gpu`) and the hand-scheduled `clip_lanes8_plane` kernel (`psx-math`): bit-identical against their portable definitions on random and edge inputs, then timed; prints `ASMPROBE PASS` or `FAIL` and `BENCH` lines. |
 | `hello-pack` | `psx_pack::cd` smoke test: streams raw and compressed WORLD.PAK chunks off the disc and checks them. |
 | `hello-cdstream` | `psx-cdstream` on a disc: single, chained, prioritised, aborted-and-resumed and sustained reads of a known file checked byte for byte, an audio lease taken mid-read, and the foreground cost of a long read (`make hello-cdstream-disc`, `make hello-cdstream-gate`). |
 | `hello-cddrain` | `psx_cdstream::drain` popping sectors from the CD interrupt while the polled reader runs: one read, a partial last sector, thirty back-to-back reads, a cancel and the watchdog, every byte checked (`make hello-cddrain-disc`, `make hello-cddrain-gate`). |
+| `hello-cdsingle` | `psx_cdstream::single`, the transport for one request at a time: a second request refused while one runs, the cheap progress counter under a main loop that looks every six VBlanks, a cancel, a park with the submissions counter, an exact byte bound, the CD source open only while busy with a polled read between requests, a hand-off of the controller to polled code, and an unreadable sector (`make hello-cdsingle-disc`, `make hello-cdsingle-gate`). |
+| `hello-cdchunk` | The smallest user of `psx_cdstream::single` and the size probe of a game that streams one chunk at a time: a chunk with an exact byte bound, a cancel, and a polled read, with no screen output (`make hello-cdchunk-disc`, `make hello-cdchunk-gate`). |
+| `hello-cdlean` | The smallest transport, `psx_cdstream::lean` (no counters, no tickets): a chunk with an exact byte bound looked at every six VBlanks, a refused second submit, a cancel, and a polled read, with no screen output (`make hello-cdlean-disc`, `make hello-cdlean-gate`). |
+| `hello-cdcount` | `psx_cdstream::counted`, the lean transport plus the handler's sector count: the count read while a request is in flight (every announced sector already in the destination), an exact byte bound, a park, a cancel read as `Failed` with error 0, an unreadable sector with its failure code, and a polled read, gated on real, mister and mister with `gpu-irq=never` (`make hello-cdcount-disc`, `make hello-cdcount-gate`). |
 | `hello-cdpause` | The console's two-response Pause against `SectorReader::stop_proved`: the second response 1.2 to 3.9 million clocks after the first, a Pause refused during a seek and sent again (`make hello-cdpause-disc`, `make hello-cdpause-gate`; needs an emulator with the silicon Pause model). |
 | `hello-flipcap` | The presentation cap: no display flip within two VBlanks of the last (30 fps NTSC), queued and direct, and an explicit opt-out for 60 fps; prints `FLIPCAP PASS` or `FAIL` (`make hello-flipcap-disc`, `make hello-flipcap-gate`). |
 | `hello-wide` | Every `psx_math::Wide` / `WideU` / `Mask64` operation against a reference built from 32-bit arithmetic only, on the target; prints `WIDE PASS` or `FAIL`. Its link map must pass the symbol gate (`make hello-wide-gate`). |
 | `hello-wide-div` | Every `psx_math::wide_div` operation (division of a `Wide` / `WideU`, 128-bit product, ratio compare) against a bit-by-bit 32-bit reference, on the target; prints `WIDEDIV PASS` or `FAIL` and the cycles per call of each. Its link map must pass the symbol gate (`make hello-wide-gate`). |
 | `hello-i64probe` | Runs software 64-bit multiply/divide/modulo on the target and checks the results; covers psx-rt's `__divdi3`/`__moddi3` overrides. |
+| `hello-fnv` | `psx_pack::Fnv32` (`update`, `update_bulk`, `push`, `fnv1a32`) against plain FNV-1a on the target, for every length 0..=67 at every alignment and every two- and three-way split; prints `FNV PASS` or `FNV FAIL`. |
 | `hello-icache` | Rewrites a function in cached RAM and checks that `psx_rt::cache::flush_instruction_cache` makes the CPU run the new code; prints `ICACHE PASS`, `INCONCLUSIVE` (nothing was stale) or `FAIL`. |
 | `hello-overlay` | Same-compilation Rust cold entry and resident service, caller-owned arena, scoped static-call binding and unload/re-admit generation checks. Uses its own checked packaging recipe; see [the example](examples/hello-overlay/README.md). |
 | `cdda-read-contention` | CD-ROM conformance probe: issues a data read while CD-DA is playing and records which IRQ the drive raises. |

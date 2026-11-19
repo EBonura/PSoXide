@@ -20,6 +20,10 @@ const FREE_RECORD: u16 = 0x650;
 const POLLED_RECORD: u16 = 0x651;
 /// rec timer1_polled_reads: reads_low, reads_high, steps_larger_than_one (tight read loop, 0x652)
 const POLLED_READS_RECORD: u16 = 0x652;
+/// rec timer1_polled_wide: hblanks_low, hblanks_high, distinct_low (the polled window's totals in two halves; `hblanks_in_window` of 0x651 is the only one of its three fields that can pass 0xFFFF and clamp, the largest step being a 16-bit difference; 0x653)
+const POLLED_WIDE_RECORD: u16 = 0x653;
+/// rec timer1_polled_wide_rest: distinct_high, largest_step, unused (0x654)
+const POLLED_WIDE_REST_RECORD: u16 = 0x654;
 
 /// Timer 1 mode: bit 8 selects the HBlank clock.
 const HBLANK_CLOCK: u16 = 0x0100;
@@ -92,6 +96,16 @@ pub(crate) fn run(records: &mut Records, next: &mut usize) {
         records,
         next,
         record(POLLED_READS_RECORD, reads & 0xFFFF, reads >> 16, jumps),
+    );
+    push_timing_record(
+        records,
+        next,
+        record(POLLED_WIDE_RECORD, total & 0xFFFF, total >> 16, distinct & 0xFFFF),
+    );
+    push_timing_record(
+        records,
+        next,
+        record(POLLED_WIDE_REST_RECORD, distinct >> 16, largest, 0),
     );
     timers::set_mode(Timer::Timer1, 0);
 }

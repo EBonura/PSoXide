@@ -35,10 +35,14 @@ echo "  oracle $ORACLE"
 
 # The guest. Built with the same flags the shipping guest uses, plus anything
 # the caller wants to vary.
+# -disable-mips-df-backward-search is the old cure for the delay-slot load hazard: this script links
+# without the post-link hazard patcher the policy flags (tools/sdk-examples.mk PSX_DELAY_SLOT_FLAGS)
+# need, so it keeps the flag that leaves no hazard to patch. It is a check of the toolchain, not a
+# shipping build, and its emulator step (`$ROOT/emu`) belongs to a checkout layout that no longer exists.
 GUEST_FLAGS="-Zunstable-options -Cpanic=immediate-abort -Cllvm-args=-disable-mips-df-backward-search ${GUEST_RUSTFLAGS_EXTRA:-} -Clink-arg=-T../../../sdk/psoxide.ld -Clink-arg=--oformat=binary"
 (
     cd "$ROOT/engine/examples/toolchain-probe"
-    RUSTFLAGS="$GUEST_FLAGS" CARGO_TARGET_DIR="$TARGET_DIR/guest" \
+    PSX_GATE_PROGRAM=toolchain-probe RUSTFLAGS="$GUEST_FLAGS" CARGO_TARGET_DIR="$TARGET_DIR/guest" \
         cargo build --release --target mipsel-sony-psx \
         -Zjson-target-spec -Zbuild-std=core,alloc \
         -Zbuild-std-features=compiler-builtins-mem >/dev/null 2>&1

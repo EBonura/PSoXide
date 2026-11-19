@@ -157,6 +157,18 @@ pub unsafe fn light_color_depth_single() {
     cofun!(crate::encoding::command::NCDS)
 }
 
+/// [`light_color_depth_single`] with `lm` set (`NCDS`, `sf=1, lm=1`): a
+/// negative IR1..IR3 result clamps to 0 instead of the signed limit -0x8000.
+///
+/// # Safety
+/// See [`project_single`].
+#[doc(alias = "NCDS")]
+#[doc(alias = "NormalColorDpq")]
+#[inline(always)]
+pub unsafe fn light_color_depth_single_lm() {
+    cofun!(crate::encoding::command::NCDS_LM)
+}
+
 /// Light and color one vertex normal, no depth cue (`NCCS`).
 ///
 /// # Safety
@@ -166,6 +178,18 @@ pub unsafe fn light_color_depth_single() {
 #[inline(always)]
 pub unsafe fn light_color_single() {
     cofun!(crate::encoding::command::NCCS)
+}
+
+/// [`light_color_single`] with `lm` set (`NCCS`, `sf=1, lm=1`): a negative
+/// IR1..IR3 result clamps to 0 instead of the signed limit -0x8000.
+///
+/// # Safety
+/// See [`project_single`].
+#[doc(alias = "NCCS")]
+#[doc(alias = "NormalColorCol")]
+#[inline(always)]
+pub unsafe fn light_color_single_lm() {
+    cofun!(crate::encoding::command::NCCS_LM)
 }
 
 /// Light one vertex normal, without the RGBC modulate (`NCS`).
@@ -337,4 +361,61 @@ pub unsafe fn rotate_translate_v0() {
 #[inline(always)]
 pub unsafe fn rotate_v0_far_color() {
     cofun!(crate::encoding::command::ROTATE_V0_FAR_COLOR)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::host;
+
+    /// V0 = (0x1000, 0, 0), RGBC = 0x80 grey, and light and color matrices that
+    /// give IR1 a negative result: LLM row 0 is (-0x1000, 0, 0) and LCM row 0 is
+    /// (0x1000, 0, 0), so IR1 is negative both after the light stage and after
+    /// the color stage unless `lm` clamps it. BK, FC and IR0 are 0.
+    fn load_negative_light() {
+        host::reset();
+        host::write_data(0, 0x1000);
+        host::write_data(1, 0);
+        host::write_data(6, 0x2080_8080);
+        host::write_control(8, 0xf000);
+        host::write_control(16, 0x1000);
+    }
+
+    /// IR1 after running `run` on the negative-light setup.
+    fn ir1_after(run: impl FnOnce()) -> i16 {
+        load_negative_light();
+        run();
+        host::read_data(9) as i16
+    }
+
+    #[test]
+    fn lm_changes_what_a_negative_ir_result_clamps_to() {
+        // SAFETY: the host GTE holds the registers loaded above.
+        unsafe {
+            assert!(ir1_after(|| light_color_single()) < 0);
+            assert_eq!(ir1_after(|| light_color_single_lm()), 0);
+            assert!(ir1_after(|| light_color_depth_single()) < 0);
+            assert_eq!(ir1_after(|| light_color_depth_single_lm()), 0);
+        }
+    }
+
+    #[test]
+    fn the_lm_variants_run_the_words_the_hardware_documents() {
+        // psx-spx lists NCDS as 0x0E80413 and NCCS as 0x108041B with lm set; the
+        // bits above `sf` are ignored by the GTE, so those words and the crate's
+        // `sf | lm | function` forms (0x4a08_0413, 0x4a08_041b) run the same
+        // command. Compare the whole register file after each.
+        for (ours, documented) in [
+            (crate::encoding::command::NCDS_LM, 0x4ae8_0413),
+            (crate::encoding::command::NCCS_LM, 0x4b08_041b),
+        ] {
+            load_negative_light();
+            host::execute(ours);
+            let a = host::with(|g| (0..64).map(|i| g.read_data(i % 32)).collect::<Vec<_>>());
+            load_negative_light();
+            host::execute(documented);
+            let b = host::with(|g| (0..64).map(|i| g.read_data(i % 32)).collect::<Vec<_>>());
+            assert_eq!(a, b);
+        }
+    }
 }

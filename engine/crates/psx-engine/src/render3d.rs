@@ -2447,9 +2447,11 @@ fn compute_view_origin_translation(
 }
 
 fn quantize_pose_translation_for_gte(translation: Vec3I32) -> (Vec3I16, u8) {
-    let mut max_abs = abs_i32_saturating(translation.x)
-        .max(abs_i32_saturating(translation.y))
-        .max(abs_i32_saturating(translation.z));
+    let mut max_abs = translation
+        .x
+        .saturating_abs()
+        .max(translation.y.saturating_abs())
+        .max(translation.z.saturating_abs());
     let mut shift = 0u8;
     while max_abs > i16::MAX as i32 && shift < 15 {
         max_abs = (max_abs + 1) >> 1;
@@ -2500,22 +2502,13 @@ fn exact_shift_i32(value: i32, shift: u8) -> Option<i32> {
     }
 }
 
-fn abs_i32_saturating(value: i32) -> i32 {
-    if value == i32::MIN {
-        i32::MAX
-    } else if value < 0 {
-        -value
-    } else {
-        value
-    }
-}
-
 fn round_shift_i32(value: i32, shift: u8) -> i32 {
     if shift == 0 {
         return value;
     }
     // psx-numeric-allow-next-line: depth-key widening; single 64-bit product from one mult
     let value = value as i64;
+    // psx-numeric-allow-next-line: depth-key widening bias; the 64-bit value is already allowed on the line above
     let half = 1i64 << (shift - 1);
     if value >= 0 {
         ((value + half) >> shift) as i32
@@ -3365,7 +3358,7 @@ fn project_gte_view_vertex_identity_loaded(
     };
     // Scheduled RTPS wrapper: same op, shared load-delay slots. The
     // compact macro wrapper measured substantially slower on the
-    // 161-blended-vertex player path (see docs/perf-30fps.md).
+    // 161-blended-vertex player path (30 fps perf study).
     let p = scene::project_vertex_scheduled(Vec3I16::new(x, y, z));
     if (p.sz as i32) >= projection.near_z {
         ProjectedVertex::new(p.sx, p.sy, p.sz as i32)
@@ -4024,16 +4017,6 @@ fn emit_bool_counter(counter_id: u16, value: bool) {
     }
 }
 
-fn clamp_i16(value: i32) -> i16 {
-    if value < i16::MIN as i32 {
-        i16::MIN
-    } else if value > i16::MAX as i32 {
-        i16::MAX
-    } else {
-        value as i16
-    }
-}
-
 fn clamp_i16_range(value: i16, min: i16, max: i16) -> i16 {
     if value < min {
         min
@@ -4064,7 +4047,7 @@ fn clamp_u16_i32(value: i32) -> u16 {
     }
 }
 
-use psx_math::int32::isqrt_i32;
+use psx_math::int32::{clamp_i16, isqrt_i32};
 
 #[cfg(test)]
 fn sort_for_ot_insert(commands: &mut [GouraudTriCommand]) {

@@ -21,16 +21,7 @@ use crate::{JointPose, ParseError};
 
 /// `round(sqrt(n))` for the table builder.
 const fn isqrt_round(n: u32) -> u32 {
-    let mut lo = 0u32;
-    let mut hi = 4200u32;
-    while lo < hi {
-        let mid = (lo + hi).div_ceil(2);
-        if mid * mid <= n {
-            lo = mid;
-        } else {
-            hi = mid - 1;
-        }
-    }
+    let lo = psx_math::int32::isqrt_u32(n);
     if n - lo * lo > lo {
         lo + 1
     } else {
@@ -115,11 +106,6 @@ unsafe impl Send for Tracks {}
 // SAFETY: as above, shared reads of immutable data.
 unsafe impl Sync for Tracks {}
 
-#[inline(always)]
-fn le_u16(blob: &[u8], at: usize) -> u16 {
-    u16::from_le_bytes([blob[at], blob[at + 1]])
-}
-
 /// Check a v6 (`hierarchy` false) or v7 blob completely. On success every key
 /// read the decoder can make lies inside `blob`, every v7 parent is a joint of
 /// the clip and no parent chain loops.
@@ -160,7 +146,7 @@ pub(crate) fn validate(
     }
     let mut segments = [0usize; 8];
     for (r, slot) in segments.iter_mut().enumerate().take(rate_count) {
-        let s = le_u16(blob, RATE_TABLE_OFFSET + 2 + r * 2) as usize;
+        let s = crate::le::read_u16(blob, RATE_TABLE_OFFSET + 2 + r * 2) as usize;
         if s == 0 || s > frame_count as usize - 1 {
             return Err(bad);
         }
@@ -185,9 +171,9 @@ pub(crate) fn validate(
         let d = DESCRIPTORS_OFFSET + j * fmt::DESCRIPTOR_SIZE;
         let rot_ctl = blob[d];
         let trans_ctl = blob[d + 1];
-        let axis = le_u16(blob, d + 2);
-        let rot_off = le_u16(blob, d + 4) as usize;
-        let trans_off = le_u16(blob, d + 6) as usize;
+        let axis = crate::le::read_u16(blob, d + 2);
+        let rot_off = crate::le::read_u16(blob, d + 4) as usize;
+        let trans_off = crate::le::read_u16(blob, d + 6) as usize;
         let key_bytes = blob[d + 14] as usize;
         let size = (rot_ctl >> 3) & 3;
         if rot_ctl >> 5 != 0 || size > 2 || trans_ctl >> 7 != 0 || axis >> 15 != 0 {
@@ -380,8 +366,8 @@ pub(crate) fn track_pos(blob: &[u8], pos_q8: u32) -> TrackPos {
     let rate_count = blob[RATE_TABLE_OFFSET] as usize;
     let mut r = 0;
     while r < rate_count {
-        let seg = u32::from(le_u16(blob, RATE_TABLE_OFFSET + 2 + r * 2));
-        let factor = u32::from(le_u16(blob, RATE_TABLE_OFFSET + 16 + r * 2));
+        let seg = u32::from(crate::le::read_u16(blob, RATE_TABLE_OFFSET + 2 + r * 2));
+        let factor = u32::from(crate::le::read_u16(blob, RATE_TABLE_OFFSET + 16 + r * 2));
         // pos_q8 < 2^16 and factor <= 2^15 keep the product inside u32.
         let sp = (pos_q8 * factor) >> 15;
         let i = sp >> 8;
@@ -474,43 +460,7 @@ fn rotation_matrix(a: RotKey, b: Option<RotKey>, frac: i32) -> [[i16; 3]; 3] {
         ];
         renorm = frac != 0 && frac != 256;
     }
-    quat_to_matrix(q, renorm)
-}
-
-#[inline(always)]
-fn quat_to_matrix(q: [i32; 4], renorm: bool) -> [[i16; 3]; 3] {
-    let [mut x, mut y, mut z, mut w] = q;
-    if renorm {
-        // One Newton-style step of the inverse square root around unit length.
-        let n = (x * x + y * y + z * z + w * w + 2048) >> 12;
-        let e = (4096 - n).clamp(-4096, 4096);
-        let r = 4096 + (e >> 1) + ((3 * e * e) >> 15);
-        x = (x * r + 2048) >> 12;
-        y = (y * r + 2048) >> 12;
-        z = (z * r + 2048) >> 12;
-        w = (w * r + 2048) >> 12;
-    }
-    let m2 = |a: i32, b: i32| (a * b + 1024) >> 11;
-    let (xx, yy, zz) = (m2(x, x), m2(y, y), m2(z, z));
-    let (xy, xz, yz) = (m2(x, y), m2(x, z), m2(y, z));
-    let (wx, wy, wz) = (m2(w, x), m2(w, y), m2(w, z));
-    [
-        [
-            (4096 - (yy + zz)) as i16,
-            (xy - wz) as i16,
-            (xz + wy) as i16,
-        ],
-        [
-            (xy + wz) as i16,
-            (4096 - (xx + zz)) as i16,
-            (yz - wx) as i16,
-        ],
-        [
-            (xz - wy) as i16,
-            (yz + wx) as i16,
-            (4096 - (xx + yy)) as i16,
-        ],
-    ]
+    crate::quat::to_matrix(q, renorm)
 }
 
 /// Decode a translation key into three axis codes.

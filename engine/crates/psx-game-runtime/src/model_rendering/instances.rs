@@ -127,6 +127,7 @@ pub fn draw_model_instance_shadows<const MAX_RUNTIME_MODELS: usize, const OT_DEP
     let mut drawn = 0usize;
     for (index, inst) in tables.model_instances.iter().enumerate() {
         if index >= 64
+            // psx-numeric-allow-next-line: bit select on the instance mask; the width IS the instance capacity
             || visible_instance_mask & (1u64 << index) == 0
             || inst.room != current_room
             || drawn >= knobs.max_model_instances
@@ -1138,9 +1139,8 @@ mod tests {
             rotation_q12: [0; 3],
             flags: 0,
         };
-        let socket_pose =
-            super::super::equipment::attachment_socket_pose(&snapshot.pose(), &socket)
-                .expect("socket pose");
+        let socket_pose = super::super::equipment::attachment_socket_pose(snapshot.pose(), &socket)
+            .expect("socket pose");
         assert_eq!(socket_pose.origin, WorldVertex::new(1_030, 2_014, 2_784));
         assert_eq!(
             socket_pose.rotation,
@@ -1177,7 +1177,7 @@ mod tests {
                 projectile_impact_lifetime_ticks: 0,
                 projectile_reserved: 0,
             },
-            &snapshot.pose(),
+            snapshot.pose(),
         )
         .expect("combat capsule");
         assert_eq!(combat.start, [1_010, 2_014, 2_764]);

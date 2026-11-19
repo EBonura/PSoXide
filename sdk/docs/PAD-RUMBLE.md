@@ -48,31 +48,10 @@ mode is left as it was. `poll_rumble_on` is the free-function form of a poll
 with a request. `PadReader` keeps the request and sends it on every poll, and
 `stop_motors_on` asks for none and polls once so the pad hears it.
 
-## Interrupt engine
-
-```rust
-use psx_pad::console;
-console::enable_rumble(Port::One);            // maps now, and again after every replug
-console::set_rumble(Port::One, Rumble::new(false, 120));
-console::stop_motors();                       // returns once zeros have gone out
-```
-
-The engine maps the motors in one visit to configuration mode, one packet per
-VBlank. If an analog request is pending at the same time the same visit does
-both (enter, lock analog, map, exit). A pad that is unplugged loses its mapping
-and the engine maps the next one on its own, as soon as it reports analog mode.
-A digital pad, or one that refuses, is asked once per plug-in
-(`Engine::rumble_refused`) and then only sent zeros. `stop_motors` blocks for up
-to three VBlanks until a poll with the motors off has gone out on every port, and
-`console::uninstall` does it before it hands the port back. A port a `Lease`
-holds is not polled meanwhile, so a card transaction that outlasts the pause
-leaves the motors as they were.
-
 ## Tests
 
-`transport_tests.rs` and `engine_tests.rs` run the packet sequences against the
+`transport_tests.rs` runs the packet sequences against the
 controller models: the enter, map, exit order and the mapping bytes; the motor
 bytes each pad type is sent; a pad that refuses configuration mode, drops out
 before the mapping packet, loses its reply, or ignores the exit; a replug; two
-ports at once. `pad-engine-check` maps the emulator's pad through the engine.
-The motors themselves are not observable off the console.
+ports at once. The motors themselves are not observable off the console.

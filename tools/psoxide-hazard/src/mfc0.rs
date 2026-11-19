@@ -114,8 +114,8 @@ fn ends_asm_block(line: &str, end: usize, following: &[&str]) -> bool {
     true
 }
 
-fn check_file(path: &Path, mfc: &Regex) -> Vec<String> {
-    let bytes = fs::read(path).unwrap_or_default();
+fn check_file(path: &Path, mfc: &Regex) -> Result<Vec<String>, String> {
+    let bytes = fs::read(path).map_err(|e| format!("{}: cannot read: {e}", path.display()))?;
     let text = String::from_utf8_lossy(&bytes);
     let lines = splitlines(&text);
     let mut problems = Vec::new();
@@ -172,7 +172,7 @@ fn check_file(path: &Path, mfc: &Regex) -> Vec<String> {
             ));
         }
     }
-    problems
+    Ok(problems)
 }
 
 /// Every `.rs` file under `root`, sorted part by part as Python sorts
@@ -235,7 +235,10 @@ pub fn main(paths: &[String]) -> i32 {
             // This file's own tests and docs spell the shapes it looks for.
             let own = path.ends_with("psoxide-hazard/src/mfc0.rs");
             if !target && !own {
-                problems.extend(check_file(&path, &mfc));
+                match check_file(&path, &mfc) {
+                    Ok(found) => problems.extend(found),
+                    Err(unreadable) => problems.push(unreadable),
+                }
             }
         }
     }
@@ -257,15 +260,25 @@ pub fn main(paths: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
+    /// One file per call: tests run in parallel and may feed inputs of the same length.
     fn scan(source: &str) -> Vec<String> {
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
         let dir = std::env::temp_dir().join(format!("xtask-mfc0-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
-        let file = dir.join(format!("case{}.rs", source.len()));
-        fs::write(&file, source).unwrap();
-        let found = check_file(&file, &Regex::new(MOVE).unwrap());
+        fs::create_dir_all(&dir).expect("create the scratch dir");
+        let file = dir.join(format!("case{}.rs", CALLS.fetch_add(1, Ordering::Relaxed)));
+        fs::write(&file, source).expect("write the case file");
+        let found = check_file(&file, &Regex::new(MOVE).expect("valid regex"));
         let _ = fs::remove_file(&file);
-        found
+        found.expect("the case file reads back")
+    }
+
+    #[test]
+    fn an_unreadable_file_is_an_error_not_a_clean_scan() {
+        let missing = std::env::temp_dir().join("xtask-mfc0-no-such-file.rs");
+        let regex = Regex::new(MOVE).expect("valid regex");
+        assert!(check_file(&missing, &regex).is_err());
     }
 
     #[test]

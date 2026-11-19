@@ -22,6 +22,7 @@ pub mod disc_base;
 pub mod dma;
 pub mod gpu;
 pub mod irq;
+pub mod iso;
 pub mod periph;
 pub mod timers;
 

@@ -6,7 +6,7 @@
 //!
 //! check-mfc0 [PATHS...]                 MFC0/MFC2 load-delay hazards in guest asm
 //! material-audit [--repo P] [--history] firmware artifacts and vendor EXE text
-//! fmv-test-movie --psxavenc P --out F   hello-fmv's synthetic STR movie
+//! fmv-test-movie --str-cook P --out F   hello-fmv's synthetic STR movie
 //! site <task> ...                       website data, checks and builds (`site --help`)
 //! ```
 

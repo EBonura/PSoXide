@@ -6,14 +6,14 @@
 //! Fixed-point only: the mipsel target miscompiles `i64 / runtime`, so the
 //! ratio/interpolation helpers keep every intermediate in 32 bits.
 
-use psx_engine::attributed_clip::{
-    clip_to_plane, lerp_q12_i32_wide as mix, ratio_q12_i32 as t_q12, AttributedClipPlane,
-    ClipTraversal,
-};
-use psx_engine::clip_lanes::{clip_lanes8_plane, LanePlane};
 use psx_engine::projection::{
     half_space_outcode5, triangle_outside_common_plane, ScreenClipBounds,
 };
+use psx_math::attributed_clip::{
+    clip_to_plane, lerp_q12_i32_wide as mix, ratio_q12_i32 as t_q12, AttributedClipPlane,
+    ClipTraversal,
+};
+use psx_math::clip_lanes::{clip_lanes8_plane, LanePlane};
 
 /// View-space near plane (world units). Eight keeps the projection plane inside
 /// the standing player's 32-unit hull at the normal 90-degree FOV, preventing
@@ -387,18 +387,7 @@ impl AttributedClipPlane<CVert> for NearPlane {
 /// depth in GTE SZ units.
 #[inline(always)]
 pub fn warp_probe_announce(x: i32, y: i32, z: i32) {
-    #[cfg(feature = "warp-probe")]
-    // SAFETY: emulator-only ports in Expansion Region 2 (PSoXide telemetry
-    // slice + 0x20/0x24); retail hardware ignores the writes.
-    unsafe {
-        core::ptr::write_volatile(0x1F80_2F20 as *mut u32, z.max(0) as u32);
-        core::ptr::write_volatile(
-            0x1F80_2F24 as *mut u32,
-            ((y as u32) << 16) | (x as u32 & 0xFFFF),
-        );
-    }
-    #[cfg(not(feature = "warp-probe"))]
-    let _ = (x, y, z);
+    psx_telemetry::emit::warp_probe(x, y, z);
 }
 
 /// Project a clipped view-space vertex to true screen coords (one reciprocal

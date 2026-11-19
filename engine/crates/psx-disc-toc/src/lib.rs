@@ -275,7 +275,7 @@ pub struct Header {
     pub credit: [u8; CREDIT_BYTES],
     /// Per menu track: tempo in thousandths of a BPM, and how far into the
     /// track its first beat falls, in milliseconds. Measured rather than
-    /// assumed (see `tools/beatgrid.py`): a tempo out by 1 BPM drifts several
+    /// assumed: a tempo out by 1 BPM drifts several
     /// beats over a four-minute track, which looks like a bug rather than an
     /// effect.
     pub beats: [(u32, u32); MAX_MENU_TRACKS],

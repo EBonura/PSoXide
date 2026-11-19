@@ -87,6 +87,31 @@ pub const fn dpcr_enable(channel: u32) -> u32 {
     1 << (3 + 4 * channel)
 }
 
+/// [`DICR`] bit that lets channel `channel` raise the DMA interrupt (bits
+/// 16..=22). It takes effect only with [`DICR_MASTER_ENABLE`] set too.
+#[must_use]
+#[inline(always)]
+pub const fn dicr_irq_enable(channel: u32) -> u32 {
+    1 << (16 + channel)
+}
+
+/// [`DICR`] bit 23: master enable for the per-channel interrupt enables.
+pub const DICR_MASTER_ENABLE: u32 = 1 << 23;
+
+/// [`DICR`] completion flag of channel `channel` (bits 24..=30). Set by the
+/// controller when the channel finishes and its enable bit is set; a write of 1
+/// clears it, a write of 0 leaves it alone.
+#[must_use]
+#[inline(always)]
+pub const fn dicr_irq_flag(channel: u32) -> u32 {
+    1 << (24 + channel)
+}
+
+/// The [`DICR`] bits a write can set and keep: the force bit, the channel
+/// enables and the master enable (bits 0..=23). Bits 24..=30 are the
+/// write-1-to-clear completion flags and bit 31 is the read-only master flag.
+pub const DICR_WRITABLE: u32 = 0x00ff_ffff;
+
 /// The tag word that heads every node of a linked-list walk (GPU ordering
 /// tables and packet chains): the node's payload length in words in the top
 /// byte and the next node's physical address in the low 24 bits.

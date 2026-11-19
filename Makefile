@@ -4,16 +4,18 @@ include tools/engine-examples.mk
 
 .PHONY: help check test miri fmt fmt-check lint example disc hello-tri hello-tri-disc run-tri
 help:
-	@echo "make check | test | miri | lint | hello-tri-disc"
+	@echo "make check | test | miri | lint | repro-check | hello-tri-disc"
 	@echo "make disc EXAMPLE=hello-input; make run-tri FRONTEND=/path/to/frontend"
 check:
 	cargo check --locked --workspace --all-features
 	cargo check --locked --manifest-path sdk/Cargo.toml --workspace --all-features
 	cargo check --locked --manifest-path engine/Cargo.toml --workspace --all-features
 # psxed-project's tests read the editor repository's projects/ and assets/ (they run in
-# PSoXide-editor, which hydrates this crate), so they are left out of the SDK run.
+# PSoXide-editor, which hydrates this crate), so they are left out of the SDK run. So are
+# psoxide-duel's, which cook the editor's grid-dungeon project: run them with
+# PSOXIDE_PROJECTS_DIR=<PSoXide-editor>/projects cargo test -p psoxide-duel.
 test:
-	cargo test --locked --workspace --exclude psxed-project
+	cargo test --locked --workspace --exclude psxed-project --exclude psoxide-duel
 	cargo test --locked --manifest-path sdk/Cargo.toml --workspace
 	cargo test --locked --manifest-path engine/Cargo.toml -p psx-game-runtime -p psx-render-contract -p psx-chainloader -p psx-goldsrc -p psx-bsp
 	cargo test --locked --manifest-path engine/Cargo.toml -p psx-level --features wire
@@ -42,9 +44,12 @@ fmt-check:
 	cargo fmt --manifest-path engine/Cargo.toml --all -- --check
 	for m in sdk/examples/*/Cargo.toml engine/examples/*/Cargo.toml; do cargo fmt --manifest-path "$$m" -- --check || exit 1; done
 lint:
+	$(MAKE) fmt-check
 	tools/check-register-literals.sh
 	sh tools/guest_symbol_gate_test.sh
 	sh tools/wide_gate.sh
+	sh tools/splash_gate.sh
+	sh tools/guard_stack_gate.sh
 	cargo run --locked -q -p xtask -- check-mfc0 sdk engine
 	cargo run --locked -q -p psoxide-dev -- lint-policy-guard
 	cargo run --locked -q -p psoxide-dev -- runtime-numeric-guard

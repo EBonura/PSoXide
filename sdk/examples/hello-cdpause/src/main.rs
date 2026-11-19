@@ -22,7 +22,6 @@
 
 extern crate psx_rt;
 
-use psx_fmv::iso;
 use psx_hw::cd::{STAT_PLAYING, STAT_READING, STAT_SEEKING};
 use psx_io::cd::reader::{SectorReader, DIAG_CD_ERROR, DIAG_PAUSE, SECTOR_WORDS};
 
@@ -83,25 +82,7 @@ fn read_n(reader: &mut SectorReader, lba: u32, count: u32) -> bool {
 }
 
 fn file_lba(reader: &mut SectorReader) -> Option<(u32, u32)> {
-    let read = |reader: &mut SectorReader, lba: u32| -> bool {
-        reader.start_read(lba) && {
-            let ok = reader.read_sector(sector());
-            reader.stop();
-            ok
-        }
-    };
-    if !read(reader, iso::PVD_LBA) {
-        return None;
-    }
-    let sector_bytes = |s: &[u32; SECTOR_WORDS]| -> &[u8] {
-        // SAFETY: a `[u32; N]` viewed as its own bytes; alignment only shrinks.
-        unsafe { core::slice::from_raw_parts(s.as_ptr().cast::<u8>(), 2048) }
-    };
-    let (root, _) = iso::root_directory(sector_bytes(sector()))?;
-    if !read(reader, root) {
-        return None;
-    }
-    iso::find_in_directory(sector_bytes(sector()), FILE_NAME)
+    reader.find(sector(), None, &[FILE_NAME])
 }
 
 #[no_mangle]

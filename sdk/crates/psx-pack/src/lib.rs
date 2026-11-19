@@ -33,9 +33,12 @@
 
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]
+#![cfg_attr(target_arch = "mips", feature(asm_experimental_arch))]
 #![warn(missing_docs)]
 
 pub mod cd;
+
+use psx_math::le::get_u32 as le32;
 /// Allocation-free Quake and GoldSrc visibility row codecs.
 pub mod visibility;
 
@@ -78,11 +81,6 @@ pub struct PackEntry {
     pub byte_size: u32,
     /// FNV-1a over the payload bytes (see [`fnv1a32`]).
     pub checksum: u32,
-}
-
-fn le32(bytes: &[u8], offset: usize) -> Option<u32> {
-    let b = bytes.get(offset..offset + 4)?;
-    Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
 }
 
 /// Parse and validate the fixed header from the first pack bytes
@@ -154,13 +152,469 @@ pub fn find_chunk(bytes: &[u8], header: &PackHeader, chunk_id: u32) -> Option<Pa
 }
 
 /// FNV-1a over `bytes`; the checksum `psx-iso` stores per entry.
+#[inline]
+#[must_use]
 pub fn fnv1a32(bytes: &[u8]) -> u32 {
-    let mut hash = 0x811c_9dc5u32;
-    for &byte in bytes {
-        hash ^= byte as u32;
+    let mut hash = Fnv32::new();
+    hash.update(bytes);
+    hash.finish()
+}
+
+/// [`fnv1a32`] in a `const` context (layout hashes, stable ids). The same function; a loop LLVM
+/// folds at compile time, so it is not for run-time buffers (use [`Fnv32`], the guest assembly).
+#[must_use]
+pub const fn fnv1a32_const(bytes: &[u8]) -> u32 {
+    fnv1a32_const_from(Fnv32::OFFSET_BASIS, bytes)
+}
+
+/// [`fnv1a32_const`] resumed from `hash`, the state an earlier call returned.
+#[must_use]
+pub const fn fnv1a32_const_from(mut hash: u32, bytes: &[u8]) -> u32 {
+    let mut i = 0;
+    while i < bytes.len() {
+        hash ^= bytes[i] as u32;
         hash = hash.wrapping_mul(0x0100_0193);
+        i += 1;
     }
     hash
+}
+
+/// Resumable FNV-1a over bytes: the same function as [`fnv1a32`], for data
+/// that arrives in pieces (a save record written field by field, a stream
+/// read sector by sector). Feeding the pieces in order gives exactly the
+/// one-shot hash of their concatenation.
+///
+/// The guest build runs `x * 0x0100_0193` as `x * 403` on the multiplier (6 cycles with the
+/// small constant as its first operand) plus `x << 24`, with the next byte's load, its
+/// extraction and the loop bookkeeping inside the multiplier's wait, all in assembly because
+/// LLVM turns any other form back into the 13-cycle full-width multiply (see `fold_bytes`).
+/// [`update`](Self::update) is the small form (80 bytes, about 13.3 cycles a byte, shared by
+/// `fnv1a32` and the ends of `update_bulk`); [`update_bulk`](Self::update_bulk) reads aligned
+/// words and is the one for large buffers (about 11.2 cycles a byte). [`push`](Self::push)
+/// keeps the multiply as shifts and adds, inline, for a caller that maps each byte first.
+///
+/// ```
+/// use psx_pack::{fnv1a32, Fnv32};
+/// let mut hash = Fnv32::new();
+/// hash.update(b"PSOX");
+/// hash.update(b"WPAK");
+/// assert_eq!(hash.finish(), fnv1a32(b"PSOXWPAK"));
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Fnv32(u32);
+
+impl Fnv32 {
+    /// FNV-1a 32-bit offset basis: the state of a hash that has seen no bytes.
+    pub const OFFSET_BASIS: u32 = 0x811c_9dc5;
+
+    /// A hash that has seen no bytes; `finish` returns the offset basis.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self(Self::OFFSET_BASIS)
+    }
+
+    /// A hash resumed from the `state` an earlier [`finish`](Self::finish) returned, for a
+    /// caller that keeps the running value in its own struct between pieces.
+    #[must_use]
+    pub const fn from_state(state: u32) -> Self {
+        Self(state)
+    }
+
+    /// Fold one byte into the hash (for a caller that maps each byte first,
+    /// such as an ASCII case fold).
+    #[inline(always)]
+    pub fn push(&mut self, byte: u8) {
+        self.0 = mul_prime(self.0 ^ u32::from(byte));
+    }
+
+    /// [`push`](Self::push) as a call: the same hash, one shared body. `push` inlines about nine
+    /// instructions (36 bytes) at every site, which suits a loop that maps each byte first and
+    /// costs a caller that hashes a handful of scalars at many sites (Hollow Knight's atlas
+    /// fingerprint: +524 B inlined). Such a caller uses this, or collects the values and calls
+    /// [`update`](Self::update).
+    #[inline(never)]
+    pub fn push_shared(&mut self, byte: u8) {
+        self.push(byte);
+    }
+
+    /// Fold `bytes` into the hash, one byte at a time.
+    #[inline(never)]
+    pub fn update(&mut self, bytes: &[u8]) {
+        #[cfg(target_arch = "mips")]
+        // SAFETY: reads `bytes` and reads and writes `self.0`, both through the asm below.
+        unsafe {
+            fold_bytes(&mut self.0, bytes.as_ptr(), bytes.len());
+        }
+        #[cfg(not(target_arch = "mips"))]
+        for &byte in bytes {
+            self.push(byte);
+        }
+    }
+
+    /// [`update`](Self::update) for a large buffer: the bytes up to a word boundary and the last
+    /// few go through `update`, the whole words between are fetched one load each (the R3000 has
+    /// no data cache, so four byte loads are four bus accesses). Same hash; use it where bytes
+    /// are many.
+    #[inline(never)]
+    pub fn update_bulk(&mut self, bytes: &[u8]) {
+        let head = ((bytes.as_ptr() as usize).wrapping_neg() & 3).min(bytes.len());
+        let (head, rest) = bytes.split_at(head);
+        self.update(head);
+        let words = rest.len() / 4;
+        if words != 0 {
+            let start = rest.as_ptr().cast::<u32>();
+            // SAFETY: one past the last whole word of `rest`; `start` is word-aligned (the head
+            // was consumed) and every word up to `end` is inside `rest`.
+            self.0 = unsafe { fold_words(self.0, start, start.add(words)) };
+        }
+        self.update(&rest[words * 4..]);
+    }
+
+    /// The hash of everything fed so far. The hash stays usable: more bytes
+    /// may follow.
+    #[must_use]
+    pub const fn finish(&self) -> u32 {
+        self.0
+    }
+}
+
+/// `x * 0x0100_0193` (the FNV prime, 2^24 + 403) as eight shifts and adds on
+/// the guest, where the multiply unit is the slower way.
+#[cfg(target_arch = "mips")]
+#[inline(always)]
+fn mul_prime(mut x: u32) -> u32 {
+    // SAFETY: register-only arithmetic; no memory, no stack, no flags.
+    unsafe {
+        core::arch::asm!(
+            ".set push",
+            ".set noat",
+            "sll {t0}, {x}, 1",
+            "addu {t0}, {t0}, {x}",
+            "sll {t0}, {t0}, 2",
+            "addu {t0}, {t0}, {x}",
+            "sll {t1}, {t0}, 5",
+            "subu {t0}, {t1}, {t0}",
+            "sll {t1}, {x}, 24",
+            "addu {x}, {t0}, {t1}",
+            ".set pop",
+            x = inout(reg) x,
+            t0 = out(reg) _,
+            t1 = out(reg) _,
+            options(pure, nomem, nostack),
+        );
+    }
+    x
+}
+
+/// `x * 0x0100_0193`.
+#[cfg(not(target_arch = "mips"))]
+#[inline(always)]
+fn mul_prime(x: u32) -> u32 {
+    x.wrapping_mul(0x0100_0193)
+}
+
+/// FNV-1a over the `n` bytes at `p`, from and into `*state`, one byte per round.
+///
+/// A round is `(hash ^ byte) * 0x0100_0193`, and the prime is `403 + 2^24`: the product is
+/// `x * 403` on the multiplier plus `x << 24`. The R3000A's `mult` finishes in 6 cycles when its
+/// first operand is below 0x800 (13 on a full-width one, which is what LLVM emits for the whole
+/// prime), so the constant 403 goes first, and the next byte's load runs while it works (the
+/// next byte is only fetched when there is one). The loop is assembly because LLVM rewrites any
+/// such form back into the slow multiply. The asm names no HI/LO clobber (Rust has no such
+/// register), so each loop is one block with no compiler multiply inside it, and at least two
+/// instructions separate an `mflo` from the next `mult` (the R3000 rule).
+///
+/// # Safety
+/// `p` must be readable for `n` bytes and `state` valid for reads and writes.
+#[cfg(target_arch = "mips")]
+#[inline(always)]
+unsafe fn fold_bytes(state: *mut u32, p: *const u8, n: usize) {
+    // SAFETY: reads the `n` bytes at `p` and the word at `state`, writes that word; the caller
+    // vouches for both.
+    unsafe {
+        core::arch::asm!(
+            ".set push",
+            ".set noreorder",
+            ".set noat",
+            "beqz {n}, 9f",
+            "lw {h}, 0({s})",
+            "addu {n}, {p}, {n}",
+            "addiu {c}, $zero, 403",
+            "lbu {b}, 0({p})",
+            "addiu {p}, {p}, 1",
+            "2:",
+            "xor {t}, {h}, {b}",
+            "mult {c}, {t}",
+            "beq {p}, {n}, 3f",
+            "sll {t}, {t}, 24",
+            "lbu {b}, 0({p})",
+            "mflo {h}",
+            "addiu {p}, {p}, 1",
+            "b 2b",
+            "addu {h}, {h}, {t}",
+            "3:",
+            "mflo {h}",
+            "addu {h}, {h}, {t}",
+            "sw {h}, 0({s})",
+            "9:",
+            ".set pop",
+            s = in(reg) state,
+            p = inout(reg) p => _,
+            n = inout(reg) n => _,
+            c = out(reg) _,
+            b = out(reg) _,
+            t = out(reg) _,
+            h = out(reg) _,
+            options(nostack),
+        );
+    }
+}
+
+/// FNV-1a over the whole words `p..end` (not empty, `p` aligned) from `hash`, four rounds per
+/// word as in [`fold_bytes`]: the next byte of the word is extracted while the multiplier runs,
+/// and the next word is fetched in the last round's wait (not after the last word).
+///
+/// # Safety
+/// `p..end` must be a readable, non-empty range of aligned words.
+#[cfg(target_arch = "mips")]
+#[inline(always)]
+unsafe fn fold_words(mut hash: u32, p: *const u32, end: *const u32) -> u32 {
+    // SAFETY: reads the words `p..end`, which the caller vouches for; registers and those words
+    // only.
+    unsafe {
+        core::arch::asm!(
+            ".set push",
+            ".set noreorder",
+            ".set noat",
+            "lw {w}, 0({p})",
+            "2:",
+            "addiu {p}, {p}, 4",
+            "andi {b}, {w}, 255",
+            "xor {t}, {h}, {b}",
+            "mult {c}, {t}",
+            "sll {u}, {t}, 24",
+            "srl {b}, {w}, 8",
+            "andi {b}, {b}, 255",
+            "mflo {h}",
+            "addu {h}, {h}, {u}",
+            "xor {t}, {h}, {b}",
+            "mult {c}, {t}",
+            "sll {u}, {t}, 24",
+            "srl {b}, {w}, 16",
+            "andi {b}, {b}, 255",
+            "mflo {h}",
+            "addu {h}, {h}, {u}",
+            "xor {t}, {h}, {b}",
+            "mult {c}, {t}",
+            "sll {u}, {t}, 24",
+            "srl {b}, {w}, 24",
+            "mflo {h}",
+            "addu {h}, {h}, {u}",
+            "xor {t}, {h}, {b}",
+            "mult {c}, {t}",
+            "beq {p}, {end}, 3f",
+            "sll {u}, {t}, 24",
+            "lw {w}, 0({p})",
+            "3:",
+            "mflo {h}",
+            "bne {p}, {end}, 2b",
+            "addu {h}, {h}, {u}",
+            ".set pop",
+            h = inout(reg) hash,
+            p = inout(reg) p => _,
+            end = in(reg) end,
+            c = in(reg) 403u32,
+            w = out(reg) _,
+            b = out(reg) _,
+            t = out(reg) _,
+            u = out(reg) _,
+            options(readonly, nostack),
+        );
+    }
+    hash
+}
+
+/// Host form of [`fold_words`].
+///
+/// # Safety
+/// `p..end` must be a readable, non-empty range of aligned words.
+#[cfg(not(target_arch = "mips"))]
+unsafe fn fold_words(mut hash: u32, mut p: *const u32, end: *const u32) -> u32 {
+    while p != end {
+        // SAFETY: `p` is an aligned word inside the range the caller vouches for.
+        let word = u32::from_le(unsafe { p.read() });
+        for shift in [0, 8, 16, 24] {
+            hash = mul_prime(hash ^ ((word >> shift) & 0xff));
+        }
+        // SAFETY: at most one past the end.
+        p = unsafe { p.add(1) };
+    }
+    hash
+}
+
+/// FNV-1 style hash over whole words: the round is `(hash ^ word) * 0x0100_0193`, one round a
+/// word, not four. It is a different function from [`Fnv32`] (which folds the four bytes of a
+/// word one at a time) and exists because Hollow Knight's module transport, Ocarina's collision
+/// and frame-time checks, WipEout's overlay check and `psx-residency` all hash 32-bit words that
+/// way and the value is stored or compared on both sides. Use it where the data already is words;
+/// for bytes use [`Fnv32`].
+///
+/// The guest kernel is assembly for the reason `Fnv32`'s is: the prime is `403 + 2^24`, so a round
+/// is `x * 403` on the multiplier (6 cycles with the small constant first, 13 for the whole
+/// prime LLVM emits) plus `x << 24`, and the next word is fetched in the multiplier's wait.
+///
+/// ```
+/// use psx_pack::WordFnv32;
+/// let mut hash = WordFnv32::new();
+/// hash.update(&[1, 2]);
+/// hash.update(&[3]);
+/// assert_eq!(hash.finish(), WordFnv32::of(&[1, 2, 3]));
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WordFnv32(u32);
+
+impl WordFnv32 {
+    /// The FNV offset basis: the state of a hash that has seen no words.
+    pub const OFFSET_BASIS: u32 = Fnv32::OFFSET_BASIS;
+
+    /// A hash that has seen no words.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self(Self::OFFSET_BASIS)
+    }
+
+    /// A hash resumed from the `state` an earlier [`finish`](Self::finish) returned.
+    #[must_use]
+    pub const fn from_state(state: u32) -> Self {
+        Self(state)
+    }
+
+    /// The hash of `words` from the offset basis. Always inlined with the kernel in it: a
+    /// one-shot caller with one call site (a checksum function) pays the kernel's own bytes and
+    /// no second function, as the loop it replaces did. A caller with many sites, or one that
+    /// hashes in pieces, uses [`update`](Self::update), whose kernel is shared.
+    #[inline(always)]
+    #[must_use]
+    pub fn of(words: &[u32]) -> u32 {
+        if words.is_empty() {
+            return Self::OFFSET_BASIS;
+        }
+        let start = words.as_ptr();
+        // SAFETY: a slice is a readable, aligned, non-empty range of its own length.
+        unsafe { fold_word_rounds(Self::OFFSET_BASIS, start, start.add(words.len())) }
+    }
+
+    /// Fold one word into the hash, inline (for a caller that computes each word first).
+    #[inline(always)]
+    pub fn push(&mut self, word: u32) {
+        self.0 = mul_prime(self.0 ^ word);
+    }
+
+    /// [`push`](Self::push) as a call: the same hash, one shared body, for a caller that hashes
+    /// a few scalars at many sites (Ocarina's `proxy_key`: the inlined form grew `run_game` by
+    /// 384 B); `push` is for a loop that computes each word first.
+    #[inline(never)]
+    pub fn push_shared(&mut self, word: u32) {
+        self.push(word);
+    }
+
+    /// Fold `words` into the hash.
+    #[inline(never)]
+    pub fn update(&mut self, words: &[u32]) {
+        // SAFETY: a slice is a readable, aligned range of its own length.
+        unsafe { self.update_raw(words.as_ptr(), words.len()) }
+    }
+
+    /// [`update`](Self::update) over `count` words at `ptr`, each read exactly once, in order:
+    /// for memory that is not a slice (a code overlay, a DMA target) whose words the caller
+    /// would not form a reference to.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must be word aligned and readable for `count` words.
+    #[inline(never)]
+    pub unsafe fn update_raw(&mut self, ptr: *const u32, count: usize) {
+        if count == 0 {
+            return;
+        }
+        // SAFETY: `count` is not zero, so `ptr..ptr + count` is the non-empty aligned range the
+        // caller vouches for.
+        self.0 = unsafe { fold_word_rounds(self.0, ptr, ptr.add(count)) };
+    }
+
+    /// The hash of everything fed so far. The hash stays usable.
+    #[must_use]
+    pub const fn finish(&self) -> u32 {
+        self.0
+    }
+}
+
+impl Default for WordFnv32 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// One round per word of `p..end` from `hash`: `(hash ^ word) * 0x0100_0193`, the multiply as
+/// in [`fold_bytes`], the next word fetched in the wait (not after the last).
+///
+/// # Safety
+/// `p..end` must be a readable, non-empty range of aligned words.
+#[cfg(target_arch = "mips")]
+#[inline(always)]
+unsafe fn fold_word_rounds(mut hash: u32, p: *const u32, end: *const u32) -> u32 {
+    // SAFETY: reads the words `p..end`, which the caller vouches for; registers and those words
+    // only.
+    unsafe {
+        core::arch::asm!(
+            ".set push",
+            ".set noreorder",
+            ".set noat",
+            "lw {w}, 0({p})",
+            "2:",
+            "addiu {p}, {p}, 4",
+            "xor {t}, {h}, {w}",
+            "mult {c}, {t}",
+            "beq {p}, {end}, 3f",
+            "sll {u}, {t}, 24",
+            "lw {w}, 0({p})",
+            "3:",
+            "mflo {h}",
+            "bne {p}, {end}, 2b",
+            "addu {h}, {h}, {u}",
+            ".set pop",
+            h = inout(reg) hash,
+            p = inout(reg) p => _,
+            end = in(reg) end,
+            c = in(reg) 403u32,
+            w = out(reg) _,
+            t = out(reg) _,
+            u = out(reg) _,
+            options(readonly, nostack),
+        );
+    }
+    hash
+}
+
+/// Host form of [`fold_word_rounds`].
+///
+/// # Safety
+/// `p..end` must be a readable, non-empty range of aligned words.
+#[cfg(not(target_arch = "mips"))]
+unsafe fn fold_word_rounds(mut hash: u32, mut p: *const u32, end: *const u32) -> u32 {
+    while p != end {
+        // SAFETY: `p` is an aligned word inside the range the caller vouches for.
+        hash = mul_prime(hash ^ unsafe { p.read() });
+        // SAFETY: at most one past the end.
+        p = unsafe { p.add(1) };
+    }
+    hash
+}
+
+impl Default for Fnv32 {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Undo the `HLZC` compression frame in place.
@@ -278,6 +732,264 @@ fn lz4_block_decode_in_place(buf: &mut [u8], src_start: usize, raw_len: usize) -
 
 #[cfg(test)]
 mod tests {
+
+    /// The word loop the games and `psx-residency` wrote, as the oracle.
+    fn game_word_fold(h: u32, words: &[u32]) -> u32 {
+        words
+            .iter()
+            .fold(h, |h, &w| (h ^ w).wrapping_mul(0x0100_0193))
+    }
+
+    #[test]
+    fn word_fnv_equals_the_games_word_loop_for_every_length_and_split() {
+        let words: Vec<u32> = (0..70u32)
+            .map(|i| i.wrapping_mul(0x9e37_79b9) ^ (i << 7))
+            .collect();
+        for len in 0..=words.len() {
+            let w = &words[..len];
+            let want = game_word_fold(0x811c_9dc5, w);
+            assert_eq!(WordFnv32::of(w), want, "len {len}");
+            for cut in 0..=len {
+                let mut h = WordFnv32::new();
+                h.update(&w[..cut]);
+                h.update(&w[cut..]);
+                assert_eq!(h.finish(), want, "len {len} cut {cut}");
+                let mut r = WordFnv32::from_state(WordFnv32::of(&w[..cut]));
+                // SAFETY: the slice is readable for its own length and aligned.
+                unsafe { r.update_raw(w[cut..].as_ptr(), len - cut) };
+                assert_eq!(r.finish(), want);
+            }
+            let mut pushed = WordFnv32::default();
+            for &x in w {
+                pushed.push(x);
+            }
+            assert_eq!(pushed.finish(), want);
+        }
+        assert_eq!(WordFnv32::of(&[]), WordFnv32::OFFSET_BASIS);
+    }
+
+    #[test]
+    fn push_shared_is_push() {
+        let mut a = Fnv32::new();
+        let mut b = Fnv32::new();
+        let mut c = WordFnv32::new();
+        let mut d = WordFnv32::new();
+        for i in 0..200u32 {
+            a.push(i as u8);
+            b.push_shared(i as u8);
+            c.push(i.wrapping_mul(0x9e37_79b9));
+            d.push_shared(i.wrapping_mul(0x9e37_79b9));
+        }
+        assert_eq!((a.finish(), c.finish()), (b.finish(), d.finish()));
+    }
+
+    #[test]
+    fn const_fnv_equals_the_runtime_kernels() {
+        const FIXED: u32 = fnv1a32_const(b"hello");
+        assert_eq!(FIXED, fnv1a32(b"hello"));
+        let data: Vec<u8> = (0..100u32).map(|i| (i * 29 + 5) as u8).collect();
+        for cut in 0..=data.len() {
+            assert_eq!(fnv1a32_const(&data[..cut]), fnv1a32(&data[..cut]));
+            let resumed = fnv1a32_const_from(fnv1a32_const(&data[..cut]), &data[cut..]);
+            assert_eq!(resumed, fnv1a32(&data));
+        }
+        assert_eq!(fnv1a32_const(b""), Fnv32::OFFSET_BASIS);
+    }
+
+    #[test]
+    fn fnv32_pieces_equal_one_shot_for_every_split() {
+        let data: Vec<u8> = (0..300u32).map(|i| (i * 37 + 11) as u8).collect();
+        let whole = fnv1a32(&data);
+        for cut in 0..=data.len() {
+            let mut h = Fnv32::new();
+            h.update(&data[..cut]);
+            h.update(&data[cut..]);
+            assert_eq!(h.finish(), whole, "split at {cut}");
+        }
+        let mut bytewise = Fnv32::default();
+        for b in &data {
+            bytewise.update(core::slice::from_ref(b));
+        }
+        assert_eq!(bytewise.finish(), whole);
+    }
+
+    /// The game-side loops this type replaced, kept as oracles.
+    fn game_fold(bytes: &[u8]) -> u32 {
+        bytes.iter().fold(0x811c_9dc5u32, |h, b| {
+            (h ^ u32::from(*b)).wrapping_mul(0x0100_0193)
+        })
+    }
+
+    /// Hollow Knight's room_decode and ClipCheck form: the prime as shifts and adds.
+    fn hk_shift_add(mut hash: u32, bytes: &[u8]) -> u32 {
+        for &byte in bytes {
+            let h = hash ^ u32::from(byte);
+            hash = h
+                .wrapping_add(h << 1)
+                .wrapping_add(h << 4)
+                .wrapping_add(h << 7)
+                .wrapping_add(h << 8)
+                .wrapping_add(h << 24);
+        }
+        hash
+    }
+
+    #[test]
+    fn fnv32_equals_every_game_copy_at_every_alignment_and_length() {
+        // 4 KiB of pseudo-random bytes in a word-aligned buffer.
+        let mut backing = vec![0u32; 1100];
+        let mut x = 0x1234_5678u32;
+        for w in backing.iter_mut() {
+            x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *w = x;
+        }
+        // SAFETY: a u32 buffer viewed as its bytes.
+        let all = unsafe { core::slice::from_raw_parts(backing.as_ptr().cast::<u8>(), 4400) };
+        for offset in 0..8 {
+            for len in (0..=70).chain([255, 256, 257, 1000, 4000]) {
+                let bytes = &all[offset..offset + len];
+                let want = game_fold(bytes);
+                assert_eq!(fnv1a32(bytes), want, "one-shot {offset}+{len}");
+                assert_eq!(hk_shift_add(0x811c_9dc5, bytes), want, "hk {offset}+{len}");
+                let mut bulk = Fnv32::new();
+                bulk.update_bulk(bytes);
+                assert_eq!(bulk.finish(), want, "bulk {offset}+{len}");
+                let mut pushed = Fnv32::new();
+                for &b in bytes {
+                    pushed.push(b);
+                }
+                assert_eq!(pushed.finish(), want, "push {offset}+{len}");
+                // Resumed in the middle, the way a save record is fed.
+                let cut = len / 3;
+                let mut parts = Fnv32::new();
+                parts.update_bulk(&bytes[..cut]);
+                parts.update_bulk(&bytes[cut..]);
+                assert_eq!(parts.finish(), want, "resumed {offset}+{len}");
+            }
+        }
+    }
+
+    /// Plain FNV-1a, the definition every form must equal.
+    fn reference(mut hash: u32, bytes: &[u8]) -> u32 {
+        for &byte in bytes {
+            hash = (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193);
+        }
+        hash
+    }
+
+    /// Every length 0..=67 at every alignment 0..=3 of a word-aligned buffer, fed whole, bytewise,
+    /// and cut at every two-way and three-way split, through `update` and `update_bulk`.
+    #[test]
+    fn fnv32_equals_the_definition_for_every_length_alignment_and_split() {
+        let mut backing = [0u32; 32];
+        let mut x = 0x9e37_79b9u32;
+        for w in backing.iter_mut() {
+            x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *w = x;
+        }
+        // SAFETY: a u32 array viewed as its 128 bytes.
+        let all = unsafe { core::slice::from_raw_parts(backing.as_ptr().cast::<u8>(), 128) };
+        for offset in 0..4 {
+            for len in 0..=67 {
+                let bytes = &all[offset..offset + len];
+                let want = reference(0x811c_9dc5, bytes);
+                assert_eq!(fnv1a32(bytes), want, "one-shot {offset}+{len}");
+                let mut whole = Fnv32::new();
+                whole.update_bulk(bytes);
+                assert_eq!(whole.finish(), want, "bulk {offset}+{len}");
+                let mut small = Fnv32::new();
+                small.update(bytes);
+                assert_eq!(small.finish(), want, "update {offset}+{len}");
+                for a in 0..=len {
+                    let mut two = Fnv32::new();
+                    two.update_bulk(&bytes[..a]);
+                    two.update_bulk(&bytes[a..]);
+                    assert_eq!(two.finish(), want, "bulk 2-way {offset}+{len} at {a}");
+                    let mut mixed = Fnv32::new();
+                    mixed.update(&bytes[..a]);
+                    mixed.update_bulk(&bytes[a..]);
+                    assert_eq!(
+                        mixed.finish(),
+                        want,
+                        "update then bulk {offset}+{len} at {a}"
+                    );
+                    for b in a..=len {
+                        let mut three = Fnv32::new();
+                        three.update_bulk(&bytes[..a]);
+                        three.update_bulk(&bytes[a..b]);
+                        three.update_bulk(&bytes[b..]);
+                        assert_eq!(three.finish(), want, "bulk 3-way {offset}+{len} at {a},{b}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fnv32_fixed_vectors() {
+        // Published FNV-1a 32 test vectors, fed whole and bytewise.
+        for (text, want) in [
+            (&b""[..], 0x811c_9dc5u32),
+            (b"a", 0xe40c_292c),
+            (b"b", 0xe70c_2de5),
+            (b"foobar", 0xbf9c_f968),
+            (b"hello", 0x4f9f_2cab),
+        ] {
+            assert_eq!(fnv1a32(text), want);
+            let mut bulk = Fnv32::new();
+            bulk.update_bulk(text);
+            assert_eq!(bulk.finish(), want);
+            let mut bytewise = Fnv32::new();
+            for &b in text {
+                bytewise.push(b);
+            }
+            assert_eq!(bytewise.finish(), want);
+        }
+    }
+
+    #[test]
+    fn the_prime_as_shifts_and_adds_is_the_multiply() {
+        let shifts = |x: u32| {
+            let t = x
+                .wrapping_shl(1)
+                .wrapping_add(x)
+                .wrapping_shl(2)
+                .wrapping_add(x);
+            t.wrapping_shl(5)
+                .wrapping_sub(t)
+                .wrapping_add(x.wrapping_shl(24))
+        };
+        let mut x = 1u32;
+        for _ in 0..2_000_000 {
+            x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            assert_eq!(shifts(x), x.wrapping_mul(0x0100_0193));
+        }
+        for x in [0, 1, 0xff, 0x8000_0000, 0xffff_ffff, 0x0100_0193] {
+            assert_eq!(shifts(x), x.wrapping_mul(0x0100_0193));
+        }
+    }
+
+    #[test]
+    fn fnv32_resumes_from_a_kept_state() {
+        let data: Vec<u8> = (0..200u32).map(|i| (i * 91 + 3) as u8).collect();
+        for cut in 0..=data.len() {
+            let mut first = Fnv32::new();
+            first.update_bulk(&data[..cut]);
+            let mut second = Fnv32::from_state(first.finish());
+            second.update_bulk(&data[cut..]);
+            assert_eq!(second.finish(), fnv1a32(&data));
+        }
+        assert_eq!(Fnv32::from_state(Fnv32::OFFSET_BASIS), Fnv32::new());
+    }
+
+    #[test]
+    fn fnv32_known_values() {
+        assert_eq!(Fnv32::new().finish(), 0x811c_9dc5);
+        assert_eq!(fnv1a32(b""), 0x811c_9dc5);
+        // Published FNV-1a 32 test vectors.
+        assert_eq!(fnv1a32(b"a"), 0xe40c_292c);
+        assert_eq!(fnv1a32(b"foobar"), 0xbf9c_f968);
+    }
     use super::*;
     extern crate std;
     use std::vec;

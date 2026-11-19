@@ -3748,10 +3748,12 @@ mod gates_cook_tests {
 
     #[test]
     fn a_module_reward_can_also_unlock_an_ability() {
-        let mut reward = PointOfInterestReward::default();
-        reward.abilities = PlayerAbilities {
-            sprint: false,
-            dash: true,
+        let reward = PointOfInterestReward {
+            abilities: PlayerAbilities {
+                sprint: false,
+                dash: true,
+            },
+            ..Default::default()
         };
         let (record, ok, report) = poi_with(reward);
         assert!(ok, "{:?}", report.error_messages());

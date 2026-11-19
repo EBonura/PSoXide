@@ -6,12 +6,10 @@
 //! ```text
 //!   Gpu::new + draw_area + draw_offset
 //!   DoubleBuffer::new
-//!   require_analog_on (port 1)
 //!   scene.init(&mut ctx)
 //!   loop:
 //!     ctx.pad_prev ← ctx.pad           (one-frame input history)
-//!     ctx.pad      ← PadReader::poll_on() (port 1), or with the
-//!                    `pad-irq-engine` feature the pad engine's snapshot
+//!     ctx.pad      ← Controllers::poll (port 1; analog handshake on first contact)
 //!     ask FrameScheduler for the next task:
 //!       fixed update  -> poll pad + scene.update(&mut ctx)
 //!       visual render -> clear + scene.render(&mut ctx) + present
@@ -44,12 +42,11 @@ use psx_level::{
     GameFlow, LevelGameplaySfxCueRecord, LevelOptionDef, LevelUiNodeRecord, LevelUiPaintRecord,
     LevelUiScene, LevelUiSfxCueRecord, LevelUiSfxSampleRecord,
 };
-#[cfg_attr(all(feature = "pad-irq-engine", target_arch = "mips"), allow(unused_imports))]
-use psx_pad::enable_analog_on;
-use psx_pad::{require_analog_on, PadReader, Port};
+use psx_pad::{Controllers, PadState, Port};
+use psx_rt::present::{self, Presenter};
 
 use crate::game_app::{GameApp, GAMEPLAY_ONLY};
-use crate::present_queue::{PresentQueue, ENABLED as PRESENT_QUEUE_ENABLED};
+use crate::present_queue;
 use crate::scene::{Ctx, RenderSubmission, Scene};
 use crate::scheduler::{FrameScheduler, SchedulerAction, SchedulerConfig};
 use crate::telemetry;
@@ -520,61 +517,67 @@ impl App {
         // The runner owns the GPU for the whole run; scenes borrow it
         // through `Ctx::gpu`.
         let peripherals = psx_rt::Peripherals::take().expect("peripherals are taken once");
-        let mut gpu = Gpu::new(
-            peripherals.gpu_dma,
-            DisplayConfig::new(config.video_mode, config.resolution),
-        );
+        let mut port = peripherals.controller_port;
+        // The boot splash, if the scene asks for it, plays on a GPU and buffers of its own: the
+        // loop sets them up a second time, so the scene starts from the state a program that
+        // never showed one starts from.
+        let mut splash = scene.boot_splash(&mut port);
+        let mut dma = peripherals.gpu_dma;
+        let (mut gpu, mut clock, mut fb) = loop {
+            let mut gpu = Gpu::new(dma, DisplayConfig::new(config.video_mode, config.resolution));
+            let clock = EngineClock::new();
+            let mut fb = DoubleBuffer::new(config.resolution);
+            gpu.set_draw_area(
+                (0, 0),
+                (
+                    config.screen_w.saturating_sub(1),
+                    config.screen_h.saturating_sub(1),
+                ),
+            );
+            gpu.set_draw_offset((0, 0));
+            let Some(boot) = splash.take() else {
+                break (gpu, clock, fb);
+            };
+            let mut pads = Controllers::new();
+            psx_splash::show(&mut gpu, &mut fb, boot.line, boot.brightness, || {
+                pads.poll(&mut port, Port::One).buttons
+            });
+            dma = gpu.release();
+        };
         boot_trace("psx-engine: gpu ok");
-        let mut clock = EngineClock::new();
         boot_trace("psx-engine: clock ok");
-        let mut fb = DoubleBuffer::new(config.resolution);
-        gpu.set_draw_area(
-            (0, 0),
-            (
-                config.screen_w.saturating_sub(1),
-                config.screen_h.saturating_sub(1),
-            ),
-        );
-        gpu.set_draw_offset((0, 0));
+        // Every frame goes to the screen through this one presenter: chain frames
+        // (`RenderSubmission::PresentQueue`) and frames the GPU drew through the
+        // port (the other submissions), each shown at the first edge after it is
+        // drawn and no sooner than the cap.
+        let presenter = Presenter::new(Some(config.clear_color));
         boot_visual_checkpoint_raw(&mut gpu, &mut fb, (160, 0, 0), "01 FRAMEBUFFER READY", 1);
         boot_trace("psx-engine: framebuffer ok");
 
-        // Ask a DualShock-compatible controller to enter and lock analog
-        // mode. An original digital controller answers "digital only" and
-        // the same button-input path serves it; a pad that is not plugged in
-        // yet is negotiated again when it connects (see `run_scheduled`).
-        let mut controller_port = peripherals.controller_port;
-        let _ = require_analog_on(&mut controller_port, Port::One);
-
-        // Seed pad + pad_prev from a real poll so a button already held at
-        // boot does NOT register as `just_pressed` on the first frame. This
-        // matters when booting into a UI scene with captured input (editor
-        // embedded Play): the CROSS/START that may be down as Play starts must
-        // not instantly activate a menu button and skip into gameplay. With
-        // both seeded to the current state, an input must actually transition
-        // (release then press) to count as a press.
-        let mut pad_reader = PadReader::port1();
-        let initial_pad = pad_reader.poll_on(&mut controller_port);
         let mut ctx = Ctx::new(
             SimTick::ZERO,
             VisualFrame::ZERO,
             config.video_hz(),
-            initial_pad,
-            initial_pad,
+            PadState::NONE,
+            PadState::NONE,
             fb,
         );
         ctx.set_gpu_dma(gpu.release());
-        // The interrupt-driven engine takes the port when the game asks for
-        // it (feature `pad-irq-engine`); otherwise, or if it cannot install,
-        // the synchronous driver keeps it.
-        #[cfg(all(feature = "pad-irq-engine", target_arch = "mips"))]
-        if !ctx.start_pad_engine(controller_port) {
-            boot_trace("psx-engine: pad engine refused, polling synchronously");
-        } else {
-            boot_trace("psx-engine: pad engine running");
-        }
-        #[cfg(not(all(feature = "pad-irq-engine", target_arch = "mips")))]
-        ctx.set_controller_port(controller_port);
+        // The synchronous driver keeps the port.
+        ctx.set_controller_port(port);
+        // The first poll puts a DualShock-compatible controller in analog mode
+        // and locks it there (an original digital pad answers "digital only"
+        // and the same button-input path serves it; a pad plugged in later
+        // gets the same at its first answer). It seeds pad and pad_prev, so a
+        // button already held at boot does NOT register as `just_pressed` on
+        // the first frame. This matters when booting into a UI scene with
+        // captured input (editor embedded Play): the CROSS/START that may be
+        // down as Play starts must not instantly activate a menu button and
+        // skip into gameplay. With both seeded to the current state, an input
+        // must actually transition (release then press) to count as a press.
+        let initial_pad = ctx.poll_pad(Port::One);
+        ctx.pad = initial_pad;
+        ctx.pad_prev = initial_pad;
         boot_visual_checkpoint(&mut ctx, (200, 96, 0), "02 CTX READY");
 
         // The wrapper is the Scene the scheduled loop drives: its
@@ -601,43 +604,21 @@ impl App {
         boot_trace("psx-engine: scene init");
         boot_visual_checkpoint(&mut ctx, (180, 180, 0), "03 APP INIT BEGIN");
         app.init(&mut ctx);
-        // A card read in `init` borrowed the port from the pad engine.
-        ctx.release_controller_port();
         boot_visual_checkpoint(&mut ctx, (0, 120, 0), "13 APP INIT OK");
         boot_trace("psx-engine: scene init ok");
         clock.reset_origin();
 
         let visual_interval = config.visual_pacing.interval_vblanks();
         boot_trace("psx-engine: loop");
-        Self::run_scheduled(config, &mut app, clock, ctx, pad_reader, visual_interval);
-    }
-
-    /// Port 1's latest clean state from the interrupt-driven pad engine.
-    #[inline]
-    fn engine_pad() -> psx_pad::PadState {
-        #[cfg(all(feature = "pad-irq-engine", target_arch = "mips"))]
-        {
-            psx_pad::console::pad(Port::One)
-        }
-        #[cfg(not(all(feature = "pad-irq-engine", target_arch = "mips")))]
-        {
-            psx_pad::PadState::NONE
-        }
-    }
-
-    /// Ask the engine to put a newly attached pad in analog mode.
-    #[inline]
-    fn engine_request_analog() {
-        #[cfg(all(feature = "pad-irq-engine", target_arch = "mips"))]
-        psx_pad::console::request_analog(Port::One);
+        Self::run_scheduled(config, &mut app, clock, presenter, ctx, visual_interval);
     }
 
     fn run_scheduled<S: Scene>(
         config: Config,
         scene: &mut S,
         mut clock: EngineClock,
+        mut presenter: Presenter,
         mut ctx: Ctx,
-        mut pad_reader: PadReader,
         visual_interval: u16,
     ) -> ! {
         let mut scheduler = FrameScheduler::new(config.scheduler, visual_interval);
@@ -645,49 +626,43 @@ impl App {
         let mut traced_update = false;
         let mut traced_render = false;
         let mut traced_present = false;
-        let mut pad_was_connected = ctx.pad.is_connected();
         // A built visual frame whose flip has not happened yet. The scene's
         // ordering-table DMA may still be walking; fixed updates run in the
         // gap so the GPU draw overlaps CPU work. Holds the frame's missed
         // visual intervals for the deadline counters emitted at the flip.
         let mut pending_present: Option<u16> = None;
-        // Set while a queued scene's display flip sits in the VBlank
-        // handler's GP1 slot, carrying that frame's missed visual intervals
-        // for the deadline counters. Until the edge arrives the newly selected
-        // draw buffer is still the one on screen, so the frame clear and the
-        // ordering-table kick that follow the flip are held back -- and the
-        // fixed updates that were already due get to run in the gap that used
-        // to be a spin. See `finish_deferred_flip`.
+        // Set while a queued scene's display flip waits for its edge, carrying
+        // that frame's missed visual intervals for the deadline counters. Until
+        // the edge arrives the newly selected draw buffer is still the one on
+        // screen, so the frame clear and the ordering-table kick that follow
+        // the flip are held back -- and the fixed updates that were already due
+        // get to run in the gap that used to be a spin. See
+        // `finish_deferred_flip`.
         let mut deferred_flip: Option<u16> = None;
-        // Frames handed to psx-rt's present queue (RenderSubmission::PresentQueue).
-        let mut present_queue = PresentQueue::new();
 
         loop {
-            // Resolve a queued flip as soon as the handler has taken the word,
-            // or when the scheduler has nothing but a render or a wait left to
+            // Resolve a queued flip as soon as the handler has applied it, or
+            // when the scheduler has nothing but a render or a wait left to
             // offer -- at which point blocking on the edge is all there is to
             // do. A due fixed update always goes first: covering the edge with
             // simulation the runner owed anyway is the entire point.
             if let Some(previous_misses) = deferred_flip {
-                if !clock.display_flip_pending()
+                if !present::is_flip_pending()
                     || !matches!(
                         scheduler.next_action(clock.elapsed_sim_ticks()),
                         SchedulerAction::RunFixedUpdate { .. }
                     )
                 {
                     telemetry::stage_begin(telemetry::stage::PRESENT);
-                    let landed = clock.wait_display_flip();
+                    present::wait_flip();
                     telemetry::stage_end(telemetry::stage::PRESENT);
-                    if !landed {
-                        telemetry::counter(telemetry::counter::VISUAL_DEADLINE_MISSES, 1);
-                    }
                     // Counted here, not where the word was queued: the frame
                     // reaches the screen at the edge, so `ctx.visual_frame`
                     // advances at the same point in the cadence it did when
                     // the swap was synchronous.
                     emit_visual_frame_counters(previous_misses);
                     ctx.visual_frame = ctx.visual_frame.advance();
-                    Self::finish_deferred_flip(config, scene, &mut ctx);
+                    Self::finish_deferred_flip(config, &mut presenter, scene, &mut ctx);
                     deferred_flip = None;
                 }
             }
@@ -700,7 +675,7 @@ impl App {
                         if !traced_present {
                             boot_trace("psx-engine: present begin");
                         }
-                        Self::present_pending(scene, &mut clock, &mut ctx, &mut pending_present);
+                        Self::present_pending(scene, &mut presenter, &mut ctx, &mut pending_present);
                         if !traced_present {
                             boot_visual_checkpoint_hold(&mut ctx, (0, 220, 0), "49 PRESENT OK", 60);
                             boot_trace("psx-engine: present ok");
@@ -734,26 +709,7 @@ impl App {
                         boot_trace("psx-engine: pad poll begin");
                         boot_visual_checkpoint(&mut ctx, (220, 100, 0), "22 PAD POLL BEGIN");
                     }
-                    if ctx.pad_engine_running() {
-                        // The engine has already read the pad; its snapshot
-                        // is the last clean state, as `PadReader` returns.
-                        ctx.pad = Self::engine_pad();
-                        if ctx.pad.is_connected() && !pad_was_connected {
-                            Self::engine_request_analog();
-                        }
-                    } else {
-                        ctx.pad = pad_reader.poll_on(ctx.controller_port());
-                        if ctx.pad.is_connected() && !pad_was_connected {
-                            // A newly attached DualShock starts in digital mode.
-                            // Negotiate again on the connection edge so hot-plug
-                            // behaves the same as a controller present at boot.
-                            // The shorter-spaced request: this runs in the frame
-                            // loop, where `require_analog_on` would stall.
-                            let _ = enable_analog_on(ctx.controller_port(), Port::One);
-                            ctx.pad = pad_reader.poll_on(ctx.controller_port());
-                        }
-                    }
-                    pad_was_connected = ctx.pad.is_connected();
+                    ctx.pad = ctx.poll_pad(Port::One);
                     if !traced_update {
                         boot_trace("psx-engine: pad poll ok");
                         boot_visual_checkpoint(&mut ctx, (220, 220, 0), "23 PAD POLL OK");
@@ -764,7 +720,6 @@ impl App {
                     // a tick never moves clip memory under its own samples.
                     psx_asset::clear_pose_cache();
                     scene.update(&mut ctx);
-                    ctx.release_controller_port();
                     telemetry::stage_end(telemetry::stage::UPDATE);
                     if !traced_update {
                         boot_visual_checkpoint(&mut ctx, (0, 140, 180), "29 UPDATE OK");
@@ -797,30 +752,17 @@ impl App {
                     fixed_update_clamped: _,
                 } => {
                     let mut submission = scene.render_submission();
-                    if !PRESENT_QUEUE_ENABLED && submission == RenderSubmission::PresentQueue {
+                    if !S::PRESENT_QUEUE && submission == RenderSubmission::PresentQueue {
+                        // The scene did not declare it (`Scene::PRESENT_QUEUE`), so the
+                        // chain path is not linked.
                         submission = RenderSubmission::QueuedDoubleBuffered;
                     }
                     if submission == RenderSubmission::PresentQueue {
-                        if !present_queue.active {
-                            // The queue starts on an idle GPU: present what
-                            // the other paths left in flight first. A queued
-                            // flip is resolved before any visual frame runs.
-                            debug_assert!(deferred_flip.is_none());
-                            Self::present_pending(
-                                scene,
-                                &mut clock,
-                                &mut ctx,
-                                &mut pending_present,
-                            );
-                            present_queue.start();
-                        }
-                        // The frame before the last published one used this
+                        // The frame before the last submitted one used this
                         // frame's ordering table, packets and nodes.
                         telemetry::stage_begin(telemetry::stage::OT_WAIT);
-                        present_queue.wait_arena_free();
+                        present::wait_arena_free();
                         telemetry::stage_end(telemetry::stage::OT_WAIT);
-                    } else if present_queue.active {
-                        present_queue.stop(&mut clock, &mut ctx);
                     }
                     // A queued scene keeps one completed visual in flight.
                     // A single-buffered one drains only the linked-list DMA
@@ -836,17 +778,15 @@ impl App {
                             chain::wait(ctx.gpu_dma());
                             telemetry::stage_end(telemetry::stage::OT_WAIT);
                         })
-                    } else if matches!(
-                        submission,
-                        RenderSubmission::QueuedDoubleBuffered | RenderSubmission::PresentQueue
-                    ) {
+                    } else if submission == RenderSubmission::QueuedDoubleBuffered {
                         pending_present.take()
                     } else {
-                        // Immediate scenes retain the original overload path:
-                        // present before clearing/reusing the back buffer. A
+                        // Immediate scenes, and a present-queue scene after a
+                        // frame of another kind: present what is still in
+                        // flight before clearing or reusing the back buffer. A
                         // late frame still flips on a blank edge: it stays on
                         // screen one VBlank longer instead of tearing.
-                        Self::present_pending(scene, &mut clock, &mut ctx, &mut pending_present);
+                        Self::present_pending(scene, &mut presenter, &mut ctx, &mut pending_present);
                         None
                     };
                     if !traced_render {
@@ -859,6 +799,9 @@ impl App {
                         if !traced_render {
                             boot_visual_checkpoint(&mut ctx, (80, 0, 120), "31 CLEAR BEGIN");
                         }
+                        // The frame before is on screen, so the clear and the scene's
+                        // drawing go to the other buffer.
+                        presenter.begin_frame(&ctx.fb);
                         {
                             let (gpu, fb) = ctx.gpu_and_buffers();
                             fb.clear(gpu, config.clear_color);
@@ -874,10 +817,9 @@ impl App {
                         boot_visual_checkpoint(&mut ctx, (100, 40, 180), "33 SCENE RENDER BEGIN");
                     }
                     if submission == RenderSubmission::PresentQueue {
-                        ctx.set_present_queue_hook(Some(present_queue.hook()));
+                        ctx.set_present_queue_hook(Some(present_queue::hook()));
                     }
                     scene.render(&mut ctx);
-                    ctx.release_controller_port();
                     ctx.set_present_queue_hook(None);
                     if !traced_render {
                         boot_visual_checkpoint_hold(
@@ -889,12 +831,10 @@ impl App {
                     }
                     telemetry::stage_end(telemetry::stage::RENDER);
 
+                    // A present-queue frame that could not be submitted goes
+                    // the double-buffered way below.
                     let published = submission == RenderSubmission::PresentQueue
-                        && present_queue.publish(config, scene, &mut ctx);
-                    if submission == RenderSubmission::PresentQueue && !published {
-                        // Present this frame the double-buffered way.
-                        present_queue.stop(&mut clock, &mut ctx);
-                    }
+                        && present_queue::submit(&mut presenter, scene, &mut ctx);
 
                     if submission.is_queued() && !published {
                         if let Some(previous_misses) = queued_previous {
@@ -906,35 +846,29 @@ impl App {
                             scene.render_overlay(&mut ctx);
                             telemetry::stage_end(telemetry::stage::RENDER);
 
-                            // Hand the display-start word to the VBlank
-                            // handler instead of spinning out the rest of the
-                            // display period waiting for the edge ourselves.
-                            // The handler applies it in the blanking interval
-                            // exactly as the synchronous swap did, so this is
-                            // no more prone to shearing; what changes is that
-                            // the CPU keeps the pending fixed updates it was
-                            // about to run and does them inside the wait. The
-                            // clear and the ordering-table kick come after the
-                            // edge, in `finish_deferred_flip`.
+                            // Hand the frame to the presenter instead of
+                            // spinning out the rest of the display period
+                            // waiting for the edge ourselves. The handler flips
+                            // in the blanking interval, so this is no more
+                            // prone to shearing; what changes is that the CPU
+                            // keeps the pending fixed updates it was about to
+                            // run and does them inside the wait. The clear and
+                            // the ordering-table kick come after the edge, in
+                            // `finish_deferred_flip`.
                             //
-                            // The queue closes the frame with GP0(1Fh) and
+                            // The presenter closes the frame with GP0(1Fh) and
                             // the handler flips only once the GPU reaches it,
                             // so the overlay above must be the frame's last
-                            // drawing. The previous flip has landed (it is
-                            // resolved before any visual frame runs), which
-                            // the acknowledge inside the queue requires.
+                            // drawing.
                             telemetry::stage_begin(telemetry::stage::PRESENT);
-                            {
-                                let (gpu, fb) = ctx.gpu_and_buffers();
-                                clock.queue_display_flip(gpu, fb.begin_deferred_swap());
-                            }
+                            presenter.present_drawn(&mut ctx.fb);
                             telemetry::stage_end(telemetry::stage::PRESENT);
                             deferred_flip = Some(previous_misses);
                         } else {
                             // No frame was in flight, so nothing flipped and
                             // the draw side did not move: prepare this one's
                             // buffer straight away.
-                            Self::finish_deferred_flip(config, scene, &mut ctx);
+                            Self::finish_deferred_flip(config, &mut presenter, scene, &mut ctx);
                         }
                     }
                     if !traced_render {
@@ -950,8 +884,8 @@ impl App {
                     // remaining raster time.
                     scheduler.complete_visual_frame();
                     if published {
-                        // Counted at publish: the queue shows the frame on the
-                        // first edge after the one before it has drawn.
+                        // Counted at submit: the presenter shows the frame on
+                        // the first edge allowed after it has drawn.
                         emit_visual_frame_counters(missed_visual_intervals);
                         ctx.visual_frame = ctx.visual_frame.advance();
                     } else {
@@ -962,20 +896,22 @@ impl App {
         }
     }
 
-    /// Take ownership of the buffer a queued flip just freed: point the GPU's
-    /// draw area/offset at it, clear it, and kick the ordering table that was
-    /// built for it.
+    /// Take ownership of the buffer a queued flip just freed: clear it and kick
+    /// the ordering table that was built for it. `Presenter::begin_frame`
+    /// first waits for the flip and points the draw area and offset at it.
     ///
     /// Every step here writes to the buffer the display was showing until the
-    /// flip landed, so none of it may run while
-    /// [`EngineClock::display_flip_pending`] is true -- that is the whole
-    /// reason the work is split out of the present.
-    fn finish_deferred_flip<S: Scene>(config: Config, scene: &mut S, ctx: &mut Ctx) {
-        {
-            let (gpu, fb) = ctx.gpu_and_buffers();
-            fb.apply_draw_target(gpu);
-        }
+    /// flip landed, so none of it may run while `present::is_flip_pending()`;
+    /// the guard would wait for it, and the runner resolves the flip first so
+    /// the wait is spent on fixed updates instead.
+    fn finish_deferred_flip<S: Scene>(
+        config: Config,
+        presenter: &mut Presenter,
+        scene: &mut S,
+        ctx: &mut Ctx,
+    ) {
         telemetry::stage_begin(telemetry::stage::FRAME_CLEAR);
+        presenter.begin_frame(&ctx.fb);
         {
             let (gpu, fb) = ctx.gpu_and_buffers();
             fb.clear(gpu, config.clear_color);
@@ -985,19 +921,18 @@ impl App {
     }
 
     /// Drain the in-flight ordering-table DMA, draw the scene's 2D
-    /// overlay layer over the finished frame, and flip the display.
+    /// overlay layer over the finished frame, and hand it to the presenter.
     ///
-    /// The flip always goes through psx-rt's VBlank handler, which applies
-    /// it at a blank edge once the frame's closing GP0(1Fh) has run, and
-    /// this blocks until it has landed: the next frame clears the buffer
-    /// that was on screen. That holds on the overload path too. A late
-    /// frame used to flip immediately, mid-scanout, which tears for a field
-    /// on a console (NitroXide at 60 fps: 6 double flips in 805 gameplay
-    /// VBlanks); it now shows one VBlank later instead. No-op when no built
-    /// frame is awaiting its flip.
+    /// The flip goes through psx-rt's VBlank handler, which applies it at a
+    /// blank edge once the frame's closing GP0(1Fh) has run; the next frame's
+    /// first direct access (its clear) waits in the presenter's guard until it
+    /// has landed, so it never clears the buffer on screen. A late frame used
+    /// to flip immediately, mid-scanout, which tears for a field on a console
+    /// (6 double flips in 805 gameplay VBlanks of a 60 fps game); it shows one
+    /// VBlank later instead. No-op when no built frame is awaiting its flip.
     fn present_pending<S: Scene>(
         scene: &mut S,
-        clock: &mut EngineClock,
+        presenter: &mut Presenter,
         ctx: &mut Ctx,
         pending: &mut Option<u16>,
     ) {
@@ -1019,19 +954,8 @@ impl App {
         telemetry::stage_end(telemetry::stage::RENDER);
 
         telemetry::stage_begin(telemetry::stage::PRESENT);
-        {
-            let (gpu, fb) = ctx.gpu_and_buffers();
-            clock.queue_display_flip(gpu, fb.begin_deferred_swap());
-        }
-        let landed = clock.wait_display_flip();
-        {
-            let (gpu, fb) = ctx.gpu_and_buffers();
-            fb.apply_draw_target(gpu);
-        }
+        presenter.present_drawn(&mut ctx.fb);
         telemetry::stage_end(telemetry::stage::PRESENT);
-        if !landed {
-            telemetry::counter(telemetry::counter::VISUAL_DEADLINE_MISSES, 1);
-        }
 
         emit_visual_frame_counters(missed_visual_intervals);
         ctx.visual_frame = ctx.visual_frame.advance();

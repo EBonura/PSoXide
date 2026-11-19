@@ -43,6 +43,14 @@ pub trait CdHw {
     /// pending bit. `acknowledge(0)` only clears the CPU-side bit.
     fn acknowledge(&mut self, bits: u8);
 
+    /// [`discard_response`](Self::discard_response) then [`acknowledge`](Self::acknowledge): the
+    /// end of every interrupt the state machine handles. An implementation may keep it out of
+    /// line, since the handler has half a dozen such ends.
+    fn finish_response(&mut self, bits: u8) {
+        self.discard_response();
+        self.acknowledge(bits);
+    }
+
     /// Mask the controller's interrupt output, so nothing more is raised
     /// until the next [`issue`](Self::issue).
     fn silence_output(&mut self);

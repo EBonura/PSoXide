@@ -124,7 +124,7 @@ impl Cd {
         irq_flag()
     }
 
-    /// Acknowledge the given CD-ROM IRQ bits.
+    /// Acknowledge CD-ROM IRQ `bits`: any nonzero value clears the whole code (`bits | 0x07`).
     pub fn acknowledge_irq(&mut self, bits: u8) {
         ack_irq(bits);
     }
@@ -159,10 +159,7 @@ impl Cd {
 
     /// Restore the CD-ROM IRQ enable saved by [`Self::dispatch_command`].
     pub fn restore_irq_output(&mut self, saved: u8) {
-        drain_response_fifo();
-        ack_irq(code::ACK_ALL);
-        restore_irq_enable(saved);
-        select_index(0);
+        finish_failed_polled_command(saved);
     }
 
     /// Nonblocking readiness probe for a sector reader that owns the INT1 ACK.
@@ -426,8 +423,8 @@ impl Cd {
 /// leaves register index 0 selected, so the byte steps that follow need not
 /// select it again.
 impl Cd {
-    /// Acknowledge every controller IRQ (writing `0x5F`, which also resets
-    /// the parameter FIFO) and the CD-ROM bit of `I_STAT`.
+    /// Acknowledge every controller IRQ (writing `0x1F`) and the CD-ROM bit of `I_STAT`. Each
+    /// command path empties the parameter FIFO itself (`psx_hw::cd::irq::CLEAR_PARAMETER_FIFO`).
     pub fn acknowledge_all_and_reset_parameters(&mut self) {
         ack_all_and_reset_parameters();
     }
@@ -717,6 +714,8 @@ impl PlayPosition {
     }
 }
 
+// One copy of the prologue and of the epilogue below, not one inlined at every command path.
+#[inline(never)]
 fn begin_polled_command() -> u8 {
     let irq_enable = irq_enable();
     set_irq_enable(0);
@@ -781,10 +780,7 @@ fn try_command_until_complete_inner(command: u8, params: &[u8], spin_limit: u32)
     write_byte(reg::COMMAND_RESPONSE, command);
 
     let ok = wait_ack_then_complete(spin_limit);
-    drain_response_fifo();
-    ack_irq(code::ACK_ALL);
-    restore_irq_enable(irq_enable);
-    select_index(0);
+    finish_failed_polled_command(irq_enable);
     ok
 }
 
@@ -803,6 +799,9 @@ fn wait_ack_then_complete(spin_limit: u32) -> bool {
     true
 }
 
+/// What every polled command path ends with, failed or not: drain the response, acknowledge
+/// everything, give the controller's interrupt enable back.
+#[inline(never)]
 fn finish_failed_polled_command(irq_enable: u8) {
     drain_response_fifo();
     ack_irq(code::ACK_ALL);
@@ -810,6 +809,7 @@ fn finish_failed_polled_command(irq_enable: u8) {
     select_index(0);
 }
 
+#[inline(never)]
 fn read_response_fifo() -> Response {
     select_index(0);
 
@@ -823,7 +823,8 @@ fn read_response_fifo() -> Response {
 }
 
 fn drain_response_fifo() {
-    let _ = read_response_fifo();
+    // The response FIFO holds at most 16 bytes: one shared copy of the loop, not one at each call.
+    drain_response_limited(16);
 }
 
 fn wait_param_room_bounded(mut spins: u32) -> bool {
@@ -848,12 +849,12 @@ fn drain_response_limited(limit: u32) {
     }
 }
 
-/// Acknowledge every controller IRQ and reset the parameter FIFO, then the
-/// CD-ROM bit of I_STAT.
+/// Acknowledge every controller IRQ (1Fh), then the CD-ROM bit of I_STAT. The parameter FIFO
+/// is emptied by each command path before its parameters, not here.
 #[inline(never)]
 fn ack_all_and_reset_parameters() {
     select_index(1);
-    write_byte(reg::REQUEST_IRQ, code::ACK_ALL | code::CLEAR_PARAMETER_FIFO);
+    write_byte(reg::REQUEST_IRQ, code::ACK_ALL);
     irq::acknowledge(1 << psx_hw::irq::source::CDROM);
     select_index(0);
 }
@@ -872,7 +873,7 @@ fn clear_parameter_fifo() {
 fn ack_irq(bits: u8) {
     crate::diag::cd_irq_acked(bits);
     select_index(1);
-    write_byte(reg::REQUEST_IRQ, bits & code::ACK_ALL);
+    write_byte(reg::REQUEST_IRQ, code::acknowledge_value(bits));
     irq::acknowledge(1 << psx_hw::irq::source::CDROM);
     select_index(0);
 }

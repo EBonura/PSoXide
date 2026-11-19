@@ -60,6 +60,15 @@ impl LinkMap {
         if depth > 8 {
             return None;
         }
+        // `DEFINED(NAME) ? A : B`, the form psoxide.ld gives STACK_RESERVE: A when
+        // the map carries an assignment to NAME (a script passed before the SDK's),
+        // else B. A `--defsym` is not in the map, so it reads as the default.
+        if let Some(rest) = expr.trim().strip_prefix("DEFINED(") {
+            let (name, rest) = rest.split_once(')')?;
+            let (then, otherwise) = rest.trim().strip_prefix('?')?.split_once(':')?;
+            let defined = self.exprs.iter().any(|(n, _)| n == name.trim());
+            return self.eval(if defined { then } else { otherwise }, depth + 1);
+        }
         let mut sign = 1i64;
         let mut acc = 0i64;
         for tok in expr.split_whitespace() {
@@ -85,6 +94,12 @@ impl LinkMap {
             }
         }
         Some(acc as u32)
+    }
+
+    /// `STACK_RESERVE`, the bytes the link keeps for the stack below `STACK_INIT`.
+    #[must_use]
+    pub fn stack_reserve(&self) -> Option<u32> {
+        self.eval("STACK_RESERVE", 0)
     }
 
     /// Bytes between the heap start and the stack reserve, the figure every
@@ -258,5 +273,16 @@ mod tests {
         assert_eq!(m.sections[2].name, ".data._RNvCs1_1g3FOO");
         assert_eq!(m.script_value("__image_end"), Some(0x800caa08));
         assert_eq!(m.heap_free(), Some(0));
+    }
+
+    #[test]
+    fn stack_reserve_follows_the_sdk_scripts_override_hook() {
+        let ld = "       0        0        0     1 STACK_RESERVE = DEFINED(STACK_RESERVE_OVERRIDE) ? STACK_RESERVE_OVERRIDE : 0x8000\n";
+        let ov = "       0        0        0     1 STACK_RESERVE_OVERRIDE = 0xD000\n";
+        // Nothing sets it: the SDK default.
+        assert_eq!(parse(ld).stack_reserve(), Some(0x8000));
+        // A game script before the SDK's, or after it in the map: the override.
+        assert_eq!(parse(&format!("{ov}{ld}")).stack_reserve(), Some(0xd000));
+        assert_eq!(parse(&format!("{ld}{ov}")).stack_reserve(), Some(0xd000));
     }
 }

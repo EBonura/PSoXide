@@ -453,20 +453,7 @@ impl<const N: usize> OrderingTable<N> {
         }
         debug_assert!(N > 0);
 
-        #[cfg(all(target_arch = "mips", feature = "asm-kernels"))]
-        {
-            // SAFETY: forwarded contract; the kernel walks `first..end` by each packet's own
-            // word count and writes only packet tags and in-range slot entries.
-            unsafe {
-                crate::asm_kernels::psx_gpu_link_tagged_stream(
-                    first,
-                    end,
-                    self.entries.as_mut_ptr(),
-                )
-            };
-        }
-
-        #[cfg(all(target_arch = "mips", not(feature = "asm-kernels")))]
+        #[cfg(target_arch = "mips")]
         {
             let entries = self.entries.as_mut_ptr();
             // Sixteen instructions per packet, two RAM loads. Every OT slot

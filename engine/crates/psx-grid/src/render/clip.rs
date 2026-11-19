@@ -1,10 +1,10 @@
 //! Polygon clipping against one frustum plane.
 
-use psx_engine::attributed_clip::{
+use psx_engine::AffineVertex;
+use psx_math::attributed_clip::{
     clip_to_plane_unchecked, crossing_fraction_q16_i32, lerp_q16_i32_exact, AttributedClipPlane,
     ClipTraversal,
 };
-use psx_engine::AffineVertex;
 
 use super::frustum::FrustumPlanes;
 

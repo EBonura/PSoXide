@@ -407,6 +407,9 @@ impl WideU {
     /// The largest value, `2^64 - 1`.
     // psx-numeric-allow-next-line: the largest unsigned wide value
     pub const MAX: WideU = WideU(u64::MAX);
+    /// The 64-bit FNV-1a offset basis, `0xcbf29ce484222325`: the state before the first byte.
+    // psx-numeric-allow-next-line: the FNV-1a 64-bit offset basis
+    pub const FNV1A_OFFSET: WideU = WideU(0xcbf2_9ce4_8422_2325);
 
     /// A 32-bit value widened.
     #[inline(always)]
@@ -470,6 +473,17 @@ impl WideU {
     #[inline(always)]
     pub const fn shr_by(self, n: u32) -> WideU {
         WideU(self.0.wrapping_shr(n))
+    }
+
+    /// One step of 64-bit FNV-1a: `(self ^ byte) * 0x100000001b3`, wrapping.
+    ///
+    /// Start from [`WideU::FNV1A_OFFSET`] and feed the bytes in order; the result after the
+    /// last byte is the standard FNV-1a 64 hash, equal to the host's `u64` loop. One `multu`
+    /// and a few word adds per byte, the same code as the bare `u64` expression.
+    #[inline(always)]
+    #[must_use]
+    pub const fn fnv1a_step(self, byte: u8) -> WideU {
+        WideU((self.0 ^ widen_unsigned(byte as u32)).wrapping_mul(0x0000_0100_0000_01b3))
     }
 
     /// The low 32 bits (the LO register).
@@ -649,6 +663,77 @@ impl Mask64 {
         } else {
             Mask64([(1u32 << count) - 1, 0])
         }
+    }
+
+    /// The set of bits `lo..hi` (`hi` exclusive); empty when `lo >= hi`, and `hi` past 64 is 64.
+    ///
+    /// What `((1u64 << (hi - lo)) - 1) << lo` was used for.
+    #[inline(always)]
+    #[must_use]
+    pub const fn range(lo: usize, hi: usize) -> Mask64 {
+        Mask64::first(hi).and_not(Mask64::first(lo))
+    }
+
+    /// Every bit moved up by `n` (taken modulo 64, like [`WideU::shl_by`]: a count of 64 or more
+    /// wraps, it does not give the empty set); bits shifted past bit 63 are dropped. The same instructions as `u64::wrapping_shl`.
+    #[inline(always)]
+    #[must_use]
+    pub const fn shl_by(self, n: u32) -> Mask64 {
+        let k = n & 31;
+        // lo >> (32 - k), written so that k == 0 gives zero and not an overlong shift.
+        let carry = (self.0[0] >> 1) >> (31 - k);
+        if n & 32 == 0 {
+            Mask64([self.0[0] << k, (self.0[1] << k) | carry])
+        } else {
+            Mask64([0, self.0[0] << k])
+        }
+    }
+
+    /// Every bit moved down by `n` (taken modulo 64, like [`WideU::shr_by`]: a count of 64 or more
+    /// wraps, it does not give the empty set); bits shifted below bit 0 are dropped. The same instructions as `u64::wrapping_shr`.
+    #[inline(always)]
+    #[must_use]
+    pub const fn shr_by(self, n: u32) -> Mask64 {
+        let k = n & 31;
+        // hi << (32 - k), zero for k == 0.
+        let carry = (self.0[1] << 1) << (31 - k);
+        if n & 32 == 0 {
+            Mask64([(self.0[0] >> k) | carry, self.0[1] >> k])
+        } else {
+            Mask64([self.0[1] >> k, 0])
+        }
+    }
+
+    /// The number of zero bits below the lowest set bit; 64 for the empty set, like
+    /// `u64::trailing_zeros`.
+    #[inline(always)]
+    #[must_use]
+    pub const fn trailing_zeros(self) -> u32 {
+        // The word that holds the lowest set bit; both zero gives 32 + 32.
+        let low_empty = self.0[0] == 0;
+        let word = if low_empty { self.0[1] } else { self.0[0] };
+        ((low_empty as u32) << 5) + word.trailing_zeros()
+    }
+
+    /// The number of zero bits above the highest set bit; 64 for the empty set, like
+    /// `u64::leading_zeros`.
+    #[inline(always)]
+    #[must_use]
+    pub const fn leading_zeros(self) -> u32 {
+        // The word that holds the highest set bit; both zero gives 32 + 32.
+        let (word, base) = if self.0[1] != 0 {
+            (self.0[1], 0)
+        } else {
+            (self.0[0], 32)
+        };
+        base + word.leading_zeros()
+    }
+
+    /// The number of set bits.
+    #[inline(always)]
+    #[must_use]
+    pub const fn count_ones(self) -> u32 {
+        self.0[0].count_ones() + self.0[1].count_ones()
     }
 
     /// Is no bit set?
@@ -1186,6 +1271,136 @@ mod tests {
             assert_eq!(m(a).is_empty(), a & (u64::MAX as u128) == 0);
         }
         assert!(Mask64::EMPTY.is_empty());
+    }
+
+    #[test]
+    fn mask64_shifts_match_u64_for_every_count() {
+        let m = |v: u64| Mask64::from_words(v as u32, (v >> 32) as u32);
+        let v = |m: Mask64| (m.low() as u64) | ((m.high() as u64) << 32);
+        let mut rng = Rng(0x1234_5678_9abc_def1);
+        let mut words = vec![
+            0,
+            1,
+            u64::MAX,
+            1 << 63,
+            1 << 32,
+            1 << 31,
+            0xffff_ffff,
+            0xffff_ffff_0000_0000,
+        ];
+        words.extend((0..200).map(|_| rng.next()));
+        for &w in &words {
+            for n in 0..64u32 {
+                assert_eq!(v(m(w).shl_by(n)), w << n, "{w:#x} shl {n}");
+                assert_eq!(v(m(w).shr_by(n)), w >> n, "{w:#x} shr {n}");
+            }
+            // The count is taken modulo 64, like WideU.
+            for n in 64..130u32 {
+                assert_eq!(v(m(w).shl_by(n)), w << (n % 64), "{w:#x} shl {n}");
+                assert_eq!(v(m(w).shr_by(n)), w >> (n % 64), "{w:#x} shr {n}");
+            }
+        }
+    }
+
+    #[test]
+    fn mask64_bit_queries_match_u64() {
+        let m = |v: u64| Mask64::from_words(v as u32, (v >> 32) as u32);
+        let mut rng = Rng(0x0bad_cafe_f00d_1234);
+        let mut words = vec![
+            0u64,
+            1,
+            u64::MAX,
+            1 << 63,
+            1 << 32,
+            1 << 31,
+            0xffff_ffff,
+            0xffff_ffff_0000_0000,
+        ];
+        for b in 0..64 {
+            words.push(1 << b);
+            words.push(u64::MAX << b);
+            words.push(u64::MAX >> b);
+        }
+        words.extend((0..500).map(|_| rng.next() >> (rng.next() % 64)));
+        for w in words {
+            assert_eq!(m(w).trailing_zeros(), w.trailing_zeros(), "{w:#x}");
+            assert_eq!(m(w).leading_zeros(), w.leading_zeros(), "{w:#x}");
+            assert_eq!(m(w).count_ones(), w.count_ones(), "{w:#x}");
+        }
+    }
+
+    #[test]
+    fn mask64_range_matches_u128_for_every_pair() {
+        let v = |m: Mask64| (m.low() as u128) | ((m.high() as u128) << 32);
+        for lo in 0..=80usize {
+            for hi in 0..=80usize {
+                let want: u128 = (0..64usize)
+                    .filter(|b| (lo..hi).contains(b))
+                    .map(|b| 1u128 << b)
+                    .sum();
+                assert_eq!(v(Mask64::range(lo, hi)), want, "range({lo}, {hi})");
+            }
+        }
+        // The same set as `first(count)` moved up, for a range that fits.
+        for lo in 0..64usize {
+            for count in 0..=(64 - lo) {
+                assert_eq!(
+                    Mask64::range(lo, lo + count),
+                    Mask64::first(count).shl_by(lo as u32)
+                );
+            }
+        }
+    }
+
+    /// FNV-1a 64 over `bytes`, the reference the host cookers use.
+    fn fnv1a_reference(bytes: &[u8]) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for &b in bytes {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        h
+    }
+
+    fn fnv1a_wide(bytes: &[u8]) -> u64 {
+        let mut h = WideU::FNV1A_OFFSET;
+        for &b in bytes {
+            h = h.fnv1a_step(b);
+        }
+        (u64::from(h.high()) << 32) | u64::from(h.low())
+    }
+
+    #[test]
+    fn fnv1a_step_matches_the_published_vectors() {
+        // From the FNV reference test suite (draft-eastlake-fnv).
+        assert_eq!(fnv1a_wide(b""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(fnv1a_wide(b"a"), 0xaf63_dc4c_8601_ec8c);
+        assert_eq!(fnv1a_wide(b"foobar"), 0x8594_4171_f739_67e8);
+        assert_eq!(
+            WideU::FNV1A_OFFSET,
+            WideU::from_parts(0xcbf2_9ce4, 0x8422_2325)
+        );
+    }
+
+    #[test]
+    fn fnv1a_step_matches_the_reference_on_random_data() {
+        let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+        for len in 0..300usize {
+            let data: Vec<u8> = (0..len).map(|_| (rng.next() >> 24) as u8).collect();
+            assert_eq!(fnv1a_wide(&data), fnv1a_reference(&data), "len {len}");
+        }
+        // Resuming from a stored state continues the same hash.
+        let data: Vec<u8> = (0..1000).map(|_| (rng.next() >> 24) as u8).collect();
+        let (a, b) = data.split_at(437);
+        let mid = fnv1a_wide(a);
+        let mut h = WideU::from_parts((mid >> 32) as u32, mid as u32);
+        for &x in b {
+            h = h.fnv1a_step(x);
+        }
+        assert_eq!(
+            (u64::from(h.high()) << 32) | u64::from(h.low()),
+            fnv1a_reference(&data)
+        );
     }
 
     #[test]

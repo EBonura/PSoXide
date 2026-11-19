@@ -6,50 +6,25 @@
 
 use psx_hw::gpu::{GpuStat, GP0, GP1, GPUREAD, GPUSTAT};
 
-#[cfg(any(feature = "present-queue", test))]
 mod handoff;
-#[cfg(any(feature = "present-queue", test))]
+#[cfg(not(target_arch = "mips"))]
+pub use handoff::set_direct_access_guard;
 pub use handoff::{
-    arm_direct_access_guard, is_recording, run_direct_access_guard, set_direct_access_guard,
-    start_recording_raw, ActiveRecording, CommandRecording, RecordingOverflow,
+    arm_direct_access_guard, is_recording, pause_recording, run_direct_access_guard,
+    start_recording_raw, ActiveRecording, CommandRecording, RecordingOverflow, RecordingPause,
     RECORDING_NODE_WORDS,
 };
-#[cfg(any(feature = "present-queue", test))]
-pub use handoff::{pause_recording, RecordingPause};
-
-/// Returned by [`pause_recording`]. Without the `present-queue` feature
-/// nothing can record, so it holds nothing and does nothing.
-#[cfg(not(any(feature = "present-queue", test)))]
-#[must_use = "the recording resumes as soon as this is dropped"]
-#[derive(Debug)]
-pub struct RecordingPause(());
-
-/// Pause any open command recording until the returned guard is dropped,
-/// so the command writes in between reach the port; psx-vram's uploads
-/// take one. Without the `present-queue` feature it compiles to nothing.
-#[cfg(not(any(feature = "present-queue", test)))]
-#[inline(always)]
-pub fn pause_recording() -> RecordingPause {
-    RecordingPause(())
-}
-
-/// Run the direct-access guard if a queued frame armed it. Without the
-/// `present-queue` feature nothing can arm it, so it compiles to nothing.
-#[cfg(not(any(feature = "present-queue", test)))]
-#[inline(always)]
-pub fn run_direct_access_guard() {}
 
 /// Push a drawing or VRAM command word, or one of its parameters, to the
 /// GPU's command port (`GP0`). Pairs with the word builders in
 /// `psx_hw::gpu::gp0`: `write_command(gp0::draw_mode(...))`.
 ///
-/// With the `present-queue` feature, the word goes into the open command
+/// The word goes into the open command
 /// recording instead, if there is one, and an armed direct-access guard runs
 /// before the port write.
 #[doc(alias = "GP0")]
 #[inline(always)]
 pub fn write_command(word: u32) {
-    #[cfg(any(feature = "present-queue", test))]
     if handoff::is_slow() {
         handoff::write_command_slow(word);
         return;
@@ -69,7 +44,6 @@ pub fn write_command(word: u32) {
 /// state for each of them.
 #[inline(always)]
 pub fn write_commands(words: &[u32]) {
-    #[cfg(any(feature = "present-queue", test))]
     if handoff::is_slow() {
         handoff::write_commands_slow(words);
         return;
@@ -82,10 +56,44 @@ pub fn write_commands(words: &[u32]) {
     }
 }
 
+/// [`wait_command_ready`] then [`write_commands`], as one test on the way in.
+///
+/// The common case, a ready GPU with no recording open and no guard armed,
+/// is the status read, one flag load and the plain stores. Anything else
+/// (a busy GPU, a recording, an armed guard) is one tail call into a single
+/// out-of-line body that does the ready-wait and then the guarded write, so a
+/// packet's call site carries no stack frame and no second call for the
+/// wait. Same order as the two calls: wait first, then record or guard.
+#[inline(always)]
+pub fn write_commands_when_ready(words: &[u32]) {
+    #[cfg(target_arch = "mips")]
+    if !handoff::is_slow() && status().contains(GpuStat::READY_CMD) {
+        for &word in words {
+            // SAFETY: GP0 (`psx_hw::gpu::GP0`) is the GPU's aligned 32-bit command/data port on every PS1. Any
+            // word is a legal write: the GPU parses it as a command or parameter, with no effect on
+            // CPU-visible memory.
+            unsafe { crate::write_u32(GP0, word) }
+        }
+        return;
+    }
+    write_commands_when_ready_slow(words);
+}
+
+/// The rare half of [`write_commands_when_ready`].
+#[cold]
+#[inline(never)]
+fn write_commands_when_ready_slow(words: &[u32]) {
+    wait_command_ready();
+    // The slow half handles every state: a recording, an armed guard, and neither (the
+    // guard test is then a no-op and the words go to the port), so this holds no second copy
+    // of the write loop.
+    handoff::write_commands_slow(words);
+}
+
 /// [`write_command`] straight to the port: never recorded, never behind the
 /// direct-access guard. For code that has already made the port safe, such
 /// as the present queue's stall recovery, which the guard itself runs.
-/// Without the `present-queue` feature it is the same store as [`write_command`].
+/// With no recording open and the guard disarmed it is the same store as [`write_command`].
 #[inline(always)]
 pub fn write_command_unguarded(word: u32) {
     // SAFETY: GP0 (`psx_hw::gpu::GP0`) is the GPU's aligned 32-bit command/data port on every PS1. Any
@@ -97,12 +105,11 @@ pub fn write_command_unguarded(word: u32) {
 /// Write a display-control command (reset, display mode, display area,
 /// DMA direction) to the GPU's control port (`GP1`).
 ///
-/// With the `present-queue` feature an armed direct-access guard runs first,
+/// An armed direct-access guard runs first,
 /// unless a command recording is open (display control is never recorded).
 #[doc(alias = "GP1")]
 #[inline(always)]
 pub fn write_display_control(word: u32) {
-    #[cfg(any(feature = "present-queue", test))]
     if handoff::is_slow() {
         handoff::write_display_control_slow(word);
         return;
@@ -111,6 +118,26 @@ pub fn write_display_control(word: u32) {
     // SAFETY: GP1 (`psx_hw::gpu::GP1`) is the GPU's aligned 32-bit control port on every PS1; any word is
     // a legal write and only changes GPU state.
     unsafe { crate::write_u32(GP1, word) }
+}
+
+/// [`write_display_control`] for a run of words: the same words, in order.
+///
+/// The recording and guard test of the port write happens once for the run,
+/// not once per word, so a sequence of display-control writes (a reset, a
+/// display window) carries one flag load, one branch and one cold call
+/// instead of one of each per word. After the first word the guard is spent
+/// and the rest are plain stores, which is what the per-word form does too.
+#[inline(always)]
+pub fn write_display_controls<const N: usize>(words: [u32; N]) {
+    if handoff::is_slow() {
+        handoff::display_control_guard_slow();
+    }
+    for word in words {
+        crate::diag::gp1_write();
+        // SAFETY: GP1 (`psx_hw::gpu::GP1`) is the GPU's aligned 32-bit control port on every PS1; any word is
+        // a legal write and only changes GPU state.
+        unsafe { crate::write_u32(GP1, word) }
+    }
 }
 
 /// The function a display flip waits in, installed by the runtime that owns the
@@ -192,8 +219,24 @@ pub const READY_SPINS: u32 = 500_000;
 /// words that will never arrive. On timeout, GP1(01h) resets the command
 /// buffer, which is the documented way to discard that partial command
 /// and make the GPU accept work again.
+#[inline(always)]
 fn wait_ready(flag: GpuStat) {
-    #[cfg(any(feature = "present-queue", test))]
+    // The GPU is nearly always ready: one status read and nothing else, so a
+    // packet pays nothing here for the recording that may be open. (The host
+    // has no GPU to read: its tests record, and only the slow path knows.)
+    #[cfg(target_arch = "mips")]
+    if status().contains(flag) {
+        return;
+    }
+    wait_ready_slow(flag);
+}
+
+/// [`wait_ready`] once the first read found the GPU busy: return at once while
+/// a recording is open (the words go to its buffer, and the GPU may be busy
+/// with a walk for a long time), else wait, bounded.
+#[cold]
+#[inline(never)]
+fn wait_ready_slow(flag: GpuStat) {
     if handoff::is_recording() {
         return;
     }
@@ -307,13 +350,12 @@ pub fn set_draw_done_scratch(x: u16, y: u16) {
 /// back, because the fix depends on the later requests already being queued
 /// behind the fills; a write-by-write port path waiting on GPUSTAT bit 26
 /// would hand each request to an idle GPU. With a command recording open
-/// (`present-queue`) the words are recorded instead. Otherwise an armed
+/// the words are recorded instead. Otherwise an armed
 /// direct-access guard runs first, a walk still running on the channel is
 /// waited out (aborted if it is wedged: [`psx_hw::dma`] spin budget), the
 /// list is kicked and waited out again. Every wait is bounded.
 #[inline(never)]
 pub fn signal_draw_done() {
-    #[cfg(any(feature = "present-queue", test))]
     if handoff::is_recording() {
         write_commands(&psx_hw::gpu::gp0::DRAW_DONE_SEQUENCE);
         return;
@@ -331,12 +373,12 @@ pub fn signal_draw_done_unguarded() {
     kick_draw_done_list();
 }
 
+/// One body for [`signal_draw_done`] and [`signal_draw_done_unguarded`]: inlined into both it
+/// was two 340 B copies in every program on the present path.
+#[inline(never)]
 fn kick_draw_done_list() {
     use crate::dma::{self, Channel};
-    if !dma::wait_done(Channel::Gpu, dma::DEFAULT_SPINS) {
-        dma::abort(Channel::Gpu);
-        write_display_control_unguarded(psx_hw::gpu::gp1::RESET_CMD_BUFFER);
-    }
+    settle_gpu_channel();
     // Games re-route DMA for VRAM readback and do not always restore it.
     write_display_control_unguarded(psx_hw::gpu::gp1::dma_direction(
         psx_hw::gpu::DmaDirection::CpuToGp0 as u32,
@@ -356,11 +398,19 @@ fn kick_draw_done_list() {
             },
         );
     }
+    settle_gpu_channel();
+    dma::compiler_barrier();
+}
+
+/// Wait out the GPU channel's walk, bounded; a walk that does not end is aborted and the GPU's
+/// command buffer reset. One body for the two waits of [`kick_draw_done_list`].
+#[inline(never)]
+fn settle_gpu_channel() {
+    use crate::dma::{self, Channel};
     if !dma::wait_done(Channel::Gpu, dma::DEFAULT_SPINS) {
         dma::abort(Channel::Gpu);
         write_display_control_unguarded(psx_hw::gpu::gp1::RESET_CMD_BUFFER);
     }
-    dma::compiler_barrier();
 }
 
 /// Spin until the GPU can start a DMA block transfer.
@@ -381,11 +431,9 @@ pub fn try_wait_dma_ready(spin_limit: u32) -> bool {
     try_wait_ready(GpuStat::READY_DMA_RECV, spin_limit)
 }
 fn try_wait_ready(flag: GpuStat, spin_limit: u32) -> bool {
-    #[cfg(any(feature = "present-queue", test))]
-    if handoff::is_recording() {
-        return true;
-    }
-    poll_ready(spin_limit, || status().contains(flag))
+    (cfg!(target_arch = "mips") && status().contains(flag))
+        || handoff::is_recording()
+        || poll_ready(spin_limit, || status().contains(flag))
 }
 
 fn poll_ready(spin_limit: u32, mut ready: impl FnMut() -> bool) -> bool {

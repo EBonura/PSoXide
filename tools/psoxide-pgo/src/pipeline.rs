@@ -57,12 +57,14 @@ pub const USAGE: &str = "\
                            [--launch-arg ARG]... [--pack CMD] --out PROFILE -- CARGO-ARGS...
        psoxide-pgo order   [GUEST] --frontend PATH (--tape PATH --polls A..B)... [--launch-arg ARG]...
                            [--pack CMD] [--profile PROFILE] [--variant V] --out LAYOUT -- CARGO-ARGS...
+       psoxide-pgo stamp   [GUEST] --profile PROFILE -- CARGO-ARGS...
        psoxide-pgo apply   [GUEST] [--profile PROFILE] [--layout LAYOUT] [--variant V]
                            [--ram-floor BYTES [--ram-fallback V]...] -- CARGO-ARGS...
        psoxide-pgo choose  [GUEST] --profile PROFILE [--layout LAYOUT] --gate CMD [--variant V]...
-                           [--pack CMD] [--frame-budget VBLANKS] [--rank deadline|work] -- CARGO-ARGS...
+                           [--pack CMD] [--frame-budget VBLANKS] [--rank deadline|work]
+                           [--ram-floor BYTES] -- CARGO-ARGS...
        psoxide-pgo ladder  [GUEST] --profile PROFILE [--layout LAYOUT] [--variant BASE] --ram-floor BYTES
-                           [--from N] [--to N] [--step N] [--candidates K] [--tie PERCENT] [--scan]
+                           [--from N] [--to N] [--step N] [--candidates K] [--tie PERCENT] [--scan] [--margin BYTES]
                            [--baseline FILE [--baseline-tolerance PERCENT]]
                            [--link CMD] [--pack CMD] [--bench CMD] [--out TABLE] [-- CARGO-ARGS...]
        psoxide-pgo measure --frontend PATH --image PATH [--tape PATH] --polls A..B
@@ -105,6 +107,16 @@ struct Guest {
     /// The guest's linker script, for the sections it places ahead of the
     /// catch-all `*(.text .text.*)`, which no ordering file can move.
     linker_script: PathBuf,
+    /// Set when a path dependency lies outside the workspace root: the
+    /// directory every such path is under, which the build is pinned to
+    /// (see [`Guest::pin_root`]).
+    repro_root: Option<PathBuf>,
+    /// What the architecture gate (`psx-gate`) found, set once before any build: the program
+    /// name and whether a diagnostic feature is on, for the receipt written into the image.
+    gate: Option<(String, bool)>,
+    /// What the SDK crates' build scripts need to know of the program (`PSX_GATE_FILE`,
+    /// `PSX_GATE_PROGRAM`), set on every cargo build the driver runs.
+    gate_env: Vec<(&'static str, std::ffi::OsString)>,
 }
 
 /// One link: the executable cargo reports and the link map the driver asked
@@ -247,6 +259,7 @@ fn parse(mode: &str, args: &[String]) -> Result<Options> {
                     .map_err(|_| format!("--tie wants a percentage, not {text:?}"))?;
             }
             "--scan" => options.ladder.scan = true,
+            "--margin" => options.ladder.margin = flag_number(&value()?, "--margin")?,
             "--baseline" => {
                 let path = value()?;
                 options.ladder.baseline = ladder::parse_scores(
@@ -299,7 +312,7 @@ fn parse(mode: &str, args: &[String]) -> Result<Options> {
     Ok(options)
 }
 
-/// Run `collect`, `order`, `apply`, `choose` or `measure`.
+/// Run `collect`, `order`, `apply`, `choose`, `ladder`, `stamp` or `measure`.
 pub fn main(mode: &str, args: &[String]) -> Result<()> {
     let mut options = parse(mode, args)?;
     if mode == "measure" {
@@ -320,6 +333,19 @@ pub fn main(mode: &str, args: &[String]) -> Result<()> {
             .linker_script
             .take()
             .unwrap_or_else(|| tools.join("../sdk/psoxide.ld")),
+        repro_root: None,
+        gate: None,
+        gate_env: Vec::new(),
+    };
+    let guest = Guest {
+        repro_root: guest.pin_root()?,
+        ..guest
+    };
+    let (gate, gate_env) = guest.run_gate()?;
+    let guest = Guest {
+        gate: Some(gate),
+        gate_env,
+        ..guest
     };
     for name in ["RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS"] {
         if env::var_os(name).is_some_and(|value| !value.is_empty()) {
@@ -342,6 +368,11 @@ pub fn main(mode: &str, args: &[String]) -> Result<()> {
         }
         "choose" => choose(&guest, &options),
         "ladder" => ladder_mode(&guest, &options),
+        "stamp" => {
+            let profile = options.profile.as_ref().ok_or("stamp needs --profile")?;
+            let elf = guest.build_twin()?.exe;
+            crate::stamp(profile, &elf, &guest.crate_dir)
+        }
         _ => unreachable!("main only dispatches pipeline modes"),
     }
 }
@@ -398,6 +429,11 @@ fn variant_flags(variant: &str) -> Result<Option<Vec<String>>> {
                         .parse()
                         .map_err(|_| format!("hot= wants a number, not {threshold:?}"))?;
                     flags.push(llvm(&format!("-hot-callsite-threshold={threshold}")));
+                } else if let Some(count) = part.strip_prefix("hotcount=") {
+                    let count: u32 = count
+                        .parse()
+                        .map_err(|_| format!("hotcount= wants a number, not {count:?}"))?;
+                    flags.push(llvm(&format!("-profile-summary-hot-count={count}")));
                 } else if let Some(flag) = part.strip_prefix("llvm=").filter(|f| f.starts_with('-'))
                 {
                     flags.push(llvm(flag));
@@ -478,7 +514,86 @@ fn run(command: &mut Command, what: &str) -> Result<()> {
     Ok(())
 }
 
+/// Set on the `cargo` that `psoxide-pgo` runs when it makes itself the
+/// `RUSTC_WRAPPER`: `main` then behaves as `psoxide-rustc`.
+pub const AS_RUSTC_VAR: &str = "PSOXIDE_PGO_AS_RUSTC";
+
+/// The deepest directory that holds the workspace and every local package,
+/// when some local package lies outside the workspace root; `None` when the
+/// workspace root holds them all. Reads `cargo metadata --format-version 1`.
+fn escaping_root(metadata: &serde_json::Value) -> Option<PathBuf> {
+    let workspace = Path::new(metadata["workspace_root"].as_str()?);
+    let mut root = workspace.to_path_buf();
+    let mut escapes = false;
+    for package in metadata["packages"].as_array()? {
+        if !package["source"].is_null() {
+            continue;
+        }
+        let Some(dir) = package["manifest_path"]
+            .as_str()
+            .and_then(|path| Path::new(path).parent())
+        else {
+            continue;
+        };
+        if !dir.starts_with(workspace) {
+            escapes = true;
+            while !dir.starts_with(&root) {
+                if !root.pop() {
+                    break;
+                }
+            }
+        }
+    }
+    escapes.then_some(root)
+}
+
 impl Guest {
+    /// The architecture gate over this program (sdk/profile.toml, `psx-gate`): refuse before
+    /// compiling anything. The SDK is the one this tool was built from.
+    #[allow(clippy::type_complexity)]
+    fn run_gate(&self) -> Result<((String, bool), Vec<(&'static str, std::ffi::OsString)>)> {
+        let sdk = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let outcome =
+            psoxide_hazard::gate::run(&sdk, None, &self.crate_dir, None, &self.cargo, None)?;
+        if !outcome.violations.is_empty() {
+            for line in &outcome.violations {
+                eprintln!("{line}");
+            }
+            return Err(format!(
+                "the architecture gate refused {} ({} problem(s); sdk/profile.toml, sdk/docs/GATE.md)",
+                outcome.program,
+                outcome.violations.len()
+            )
+            .into());
+        }
+        // The SDK crates' build scripts learn the program from the environment: its own file, or
+        // for a program inside the SDK repository its name in sdk/profile.toml.
+        let mut env_vars: Vec<(&'static str, std::ffi::OsString)> = Vec::new();
+        if let Some(file) = &outcome.program_file {
+            let file = file.canonicalize().unwrap_or_else(|_| file.clone());
+            env_vars.push((psx_gate::features::FILE_VAR, file.into_os_string()));
+        }
+        if outcome.sdk_local {
+            env_vars.push((
+                psx_gate::features::PROGRAM_VAR,
+                outcome.package.clone().into(),
+            ));
+        }
+        Ok(((outcome.program, outcome.diag), env_vars))
+    }
+
+    /// Write the gate receipt into a linked, patched PSX-EXE (an ELF or other file is left).
+    fn write_receipt(&self, exe: &Path) -> Result<()> {
+        let Some((program, diag)) = &self.gate else {
+            return Ok(());
+        };
+        let mut bytes = fs::read(exe)?;
+        if psx_gate::press::stamp(&mut bytes, program, *diag).is_ok() {
+            fs::write(exe, bytes)?;
+        }
+        Ok(())
+    }
+
     /// Build with `flags` appended to the guest's own rustflags and return
     /// the executable cargo reports, with the link map when the link wrote
     /// one. `order` goes to the guest's build.rs in [`LINK_ORDER_ENV`]; it
@@ -487,6 +602,23 @@ impl Guest {
         let mut flags = flags.to_vec();
         let mut command = Command::new("cargo");
         command.current_dir(&self.crate_dir).args(&self.cargo);
+        for name in [
+            psx_gate::features::FILE_VAR,
+            psx_gate::features::PROGRAM_VAR,
+        ] {
+            command.env_remove(name);
+        }
+        command.envs(self.gate_env.iter().map(|(name, value)| (*name, value)));
+        if let Some(root) = &self.repro_root {
+            let this = env::current_exe()?;
+            if let Some(inner) = env::var_os("RUSTC_WRAPPER").filter(|inner| !inner.is_empty()) {
+                command.env(crate::rustc_wrap::INNER_VAR, inner);
+            }
+            command
+                .env("RUSTC_WRAPPER", this)
+                .env(crate::rustc_wrap::ROOT_VAR, root)
+                .env(AS_RUSTC_VAR, "1");
+        }
         match order {
             Some(order) => command.env(LINK_ORDER_ENV, order),
             None => command.env_remove(LINK_ORDER_ENV),
@@ -573,6 +705,48 @@ impl Guest {
         let dir = self.target_dir()?.join(TARGET).join("psoxide-pgo-maps");
         fs::create_dir_all(&dir)?;
         Ok(dir.join(format!("{:016x}.map", fnv1a(key.as_bytes()))))
+    }
+
+    /// The directory to pin the build to, when it needs pinning.
+    ///
+    /// Cargo hashes a path dependency outside the workspace root by its
+    /// absolute path, which makes the executable depend on where the
+    /// checkout is (`psoxide-rustc`). A guest whose workspace root holds
+    /// every path dependency (the SDK imported under the game repository's
+    /// root) is already independent of the checkout and is left exactly as
+    /// it is, so adopting this changes no such game's executable. Nothing is
+    /// done when the caller already runs under `psoxide-rustc`.
+    fn pin_root(&self) -> Result<Option<PathBuf>> {
+        let wrapper = env::var_os("RUSTC_WRAPPER").unwrap_or_default();
+        let pinned_already = Path::new(&wrapper).file_name().is_some_and(|name| {
+            name == "psoxide-rustc"
+                || env::current_exe().is_ok_and(|exe| exe.file_name() == Some(name))
+        });
+        if pinned_already || env::var_os(crate::rustc_wrap::ROOT_VAR).is_some_and(|v| !v.is_empty())
+        {
+            return Ok(None);
+        }
+        let mut pass = Vec::new();
+        let mut args = self.cargo.iter();
+        while let Some(arg) = args.next() {
+            if arg == "--config" || arg == "--manifest-path" {
+                pass.push(arg.clone());
+                pass.extend(args.next().cloned());
+            } else if arg.starts_with("--config=") || arg.starts_with("--manifest-path=") {
+                pass.push(arg.clone());
+            }
+        }
+        let output = Command::new("cargo")
+            .current_dir(&self.crate_dir)
+            .args(["metadata", "--format-version", "1"])
+            .args(&pass)
+            .stderr(Stdio::inherit())
+            .output()?;
+        if !output.status.success() {
+            return Err(format!("cargo metadata failed ({})", output.status).into());
+        }
+        let metadata: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        Ok(escaping_root(&metadata))
     }
 
     /// The guest's cargo target directory: its own `--target-dir`, or what
@@ -712,9 +886,13 @@ impl Guest {
         // Nothing but psx-rt's flush routines may change the cache control register or isolate
         // the cache (sdk/docs/CACHE-CONTROL.md); not overridable.
         check(None, psoxide_hazard::cache_gate::main, true, "cache gate")?;
+        // The frame-path functions sdk/profile.toml lists under [inline] must not be functions in the
+        // image (sdk/docs/GATE.md); the SDK is the one this tool was built from.
+        check(None, psoxide_hazard::inline_gate::main, true, "inline gate")?;
         // A game that uses psx_rt::scratchpad_window gets its guard rooms and level-1 roots proved
         // from the final image; a game without stubs passes silently.
-        check(None, psoxide_hazard::window_gate::main, true, "window gate")
+        check(None, psoxide_hazard::window_gate::main, true, "window gate")?;
+        self.write_receipt(exe)
     }
 }
 
@@ -1567,7 +1745,9 @@ fn collect(guest: &Guest, options: &Options) -> Result<()> {
             out,
             format!("{FEATURES_TAG}{}\n{profile}", features_of(&guest.cargo)),
         )?;
-        Ok(())
+        // And the source the line offsets are measured against, so that a later edit of
+        // those lines carries the profile along (remap.rs).
+        crate::stamp(out, &elf, &guest.crate_dir)
     });
     // The logs are only an intermediate; the profile carries what matters.
     for log in &logs {
@@ -1604,7 +1784,15 @@ fn compile_flags(guest: &Guest, profile: Option<&Path>, variant: &str) -> Result
     }
     let elf = guest.build_twin()?.exe;
     let rebound = elf.with_extension("rebound.prof");
-    crate::rebind(profile, &elf, &rebound)?;
+    crate::rebind(
+        profile,
+        &elf,
+        &rebound,
+        &guest.crate_dir,
+        crate::bind::Gate::default(),
+        &[],
+        &crate::Trim::default(),
+    )?;
     let mut flags: Vec<String> = COLLECT_FLAGS.iter().map(ToString::to_string).collect();
     flags.push(format!("-Zprofile-sample-use={}", rebound.display()));
     flags.extend(extra);
@@ -1679,9 +1867,9 @@ fn apply_within_floor(guest: &Guest, options: &Options, variant: &str) -> Result
             .as_deref()
             .ok_or("--ram-floor needs the link map, and the link wrote none")?;
         let free = crate::ram::free_ram(&fs::read_to_string(map)?)
-            .ok_or_else(|| format!("{} has no __bss_end", map.display()))?;
+            .ok_or_else(|| format!("{} has no __heap_start", map.display()))?;
         tried.push(format!("{candidate}: {free} B"));
-        if free >= floor {
+        if crate::ram::fits(free, floor) {
             let record = format!(
                 "variant {candidate}\nfree {free}\nfloor {floor}\ntried {}\n",
                 tried.join(", ")
@@ -1746,15 +1934,28 @@ fn place(guest: &Guest, linked: &Linked, layout: &Path, compile: &str) -> Result
         &fs::read_to_string(&guest.linker_script)
             .map_err(|error| format!("{}: {error}", guest.linker_script.display()))?,
     );
-    let placement = layout::place(&sections, &image, &bound, &fixed);
-    println!(
-        "psoxide-pgo: placed {} functions ({} cold bytes moved into gaps); predicted \
-         I-cache conflict refills {:.0} -> {:.0}",
-        placement.placed.len(),
-        placement.gap,
-        placement.before,
-        placement.after
-    );
+    let placement = match &profile.placement {
+        Some(recorded) => {
+            let placement = layout::recorded_order(recorded, &sections, &image, &fixed)?;
+            println!(
+                "psoxide-pgo: the layout's recorded placement lists {} sections",
+                placement.order.len()
+            );
+            placement
+        }
+        None => {
+            let placement = layout::place(&sections, &image, &bound, &fixed);
+            println!(
+                "psoxide-pgo: placed {} functions ({} cold bytes moved into gaps); predicted \
+                 I-cache conflict refills {:.0} -> {:.0}",
+                placement.placed.len(),
+                placement.gap,
+                placement.before,
+                placement.after
+            );
+            placement
+        }
+    };
     let text = layout::order_file(&sections, &placement);
     let path = guest
         .work_dir(&linked.exe)?
@@ -1787,7 +1988,8 @@ fn order(guest: &Guest, options: &Options) -> Result<()> {
         .map
         .as_deref()
         .ok_or("order needs the link map, and the link wrote none")?;
-    let sections = layout::read_map(&fs::read_to_string(map)?);
+    let map_text = fs::read_to_string(map)?;
+    let sections = layout::read_map(&map_text);
     let image_bytes = fs::read(&linked.exe)?;
     let work = guest.work_dir(&linked.exe)?;
     let disc = work.join("order.bin");
@@ -1828,8 +2030,9 @@ fn order(guest: &Guest, options: &Options) -> Result<()> {
     let mut collected = layout::collect(&sections, &layout::Image::parse(&image_bytes)?, &counts);
     collected.layout.features = features_of(&guest.cargo);
     collected.layout.variant = compile;
-    fs::write(out, collected.layout.to_text())?;
     let share = |part: u64| 100.0 * part as f64 / collected.instructions.max(1) as f64;
+    layout::check_unplaced(&map_text, &counts, collected.instructions)?;
+    fs::write(out, collected.layout.to_text())?;
     println!(
         "psoxide-pgo: layout profile -> {}: {} functions ran; {:.2}% of instructions outside \
          them (BIOS, trampolines), {} indirect calls (jalr) not in the call graph",
@@ -1863,6 +2066,8 @@ fn gate_values(output: &str) -> Vec<(String, String)> {
 struct GateRow {
     variant: String,
     passed: bool,
+    /// Built, but leaves less RAM free than `--ram-floor`: not gated, not ranked.
+    refused: bool,
     values: Vec<(String, String)>,
 }
 
@@ -1888,7 +2093,12 @@ fn format_table(rows: &[GateRow]) -> String {
             .collect();
         let mut row = vec![
             result.variant.clone(),
-            if result.passed { "pass" } else { "FAIL" }.to_string(),
+            match (result.refused, result.passed) {
+                (true, _) => "refused",
+                (false, true) => "pass",
+                (false, false) => "FAIL",
+            }
+            .to_string(),
         ];
         row.extend(
             columns
@@ -2206,16 +2416,24 @@ fn format_ranking(ranking: &Ranking, rows: &[GateRow]) -> String {
         );
     }
     let list = |out: &mut String, ranked: &[(String, Vec<(String, String)>)]| {
+        let free_of = |variant: &str| {
+            rows.iter()
+                .find(|row| row.variant == variant)
+                .and_then(|row| number(row, "free_ram"))
+        };
         let width = ranked
             .iter()
             .map(|(variant, _)| variant.len())
             .max()
             .unwrap_or(0);
         for (place, (variant, columns)) in ranked.iter().enumerate() {
-            let columns: Vec<String> = columns
+            let mut columns: Vec<String> = columns
                 .iter()
                 .map(|(key, value)| format!("{key} {value}"))
                 .collect();
+            if let Some(free) = free_of(variant) {
+                columns.push(format!("free {free} B"));
+            }
             let _ = writeln!(
                 out,
                 "  {}. {variant:<width$}  {}",
@@ -2266,12 +2484,16 @@ fn format_ranking(ranking: &Ranking, rows: &[GateRow]) -> String {
 
 fn choose(guest: &Guest, options: &Options) -> Result<()> {
     let gate = options.gate.as_ref().ok_or("choose needs --gate CMD")?;
+    if !options.ram_fallbacks.is_empty() {
+        return Err("choose ranks the variants it is given; --ram-fallback is for apply".into());
+    }
     let variants: Vec<String> = if options.variants.is_empty() {
         let mut variants = [
             "off",
             "default",
             "hot=500",
             "hot=500+profi",
+            "hot=500+profi+hotcount=80",
             "accurate+nopgso+hot=1000",
             "accurate+nopgso+hot=1500",
         ]
@@ -2304,18 +2526,38 @@ fn choose(guest: &Guest, options: &Options) -> Result<()> {
             options.layout.as_deref(),
             variant,
         );
-        let exe = match built {
-            Ok(linked) => linked.exe,
+        let linked = match built {
+            Ok(linked) => linked,
             Err(error) => {
                 eprintln!("psoxide-pgo: variant {variant} did not build: {error}");
                 rows.push(GateRow {
                     variant: variant.clone(),
                     passed: false,
+                    refused: false,
                     values: vec![("build".to_string(), "failed".to_string())],
                 });
                 continue;
             }
         };
+        let exe = linked.exe;
+        let free = match linked.map.as_deref() {
+            Some(map) => crate::ram::free_ram(&fs::read_to_string(map)?),
+            None => None,
+        };
+        let free_column = free.map(|free| ("free_ram".to_string(), free.to_string()));
+        if let Some(floor) = options.ram_floor {
+            let free = free.ok_or("--ram-floor needs the link map, and the link wrote none")?;
+            if !crate::ram::fits(free, floor) {
+                println!("psoxide-pgo: {variant} leaves {free} B free, under the {floor} B floor: refused");
+                rows.push(GateRow {
+                    variant: variant.clone(),
+                    passed: false,
+                    refused: true,
+                    values: free_column.into_iter().collect(),
+                });
+                continue;
+            }
+        }
         let disc = guest.work_dir(&exe)?.join("choose.bin");
         let image = match &options.pack {
             Some(command) => Some(pack(command, &exe, &disc)?),
@@ -2343,13 +2585,33 @@ fn choose(guest: &Guest, options: &Options) -> Result<()> {
         rows.push(GateRow {
             variant: variant.clone(),
             passed,
-            values: gate_values(&output),
+            refused: false,
+            values: free_column
+                .into_iter()
+                .chain(gate_values(&output))
+                .collect(),
         });
     }
     let ranking = rank(&mut rows, options.frame_budget, options.objective);
     print!("\n{}", format_table(&rows));
     if let Some(ranking) = ranking {
         print!("{}", format_ranking(&ranking, &rows));
+    }
+    if let Some(floor) = options.ram_floor {
+        let refused: Vec<String> = rows
+            .iter()
+            .filter(|row| row.refused)
+            .map(|row| {
+                let free = number(row, "free_ram").unwrap_or_default();
+                format!("{} ({free} B free)", row.variant)
+            })
+            .collect();
+        if !refused.is_empty() {
+            println!(
+                "Refused, under the {floor} B RAM floor, and not ranked: {}.",
+                refused.join(", ")
+            );
+        }
     }
     println!(
         "The last variant built is {}; build the winner with `apply --variant`.",
@@ -2393,6 +2655,36 @@ fn link_report(output: &str) -> (Option<u32>, Option<String>) {
     (free, last("code "))
 }
 
+/// The free RAM of a `--link` hook's link. The map it left is measured with the shared
+/// function (`psoxide-size ram`'s); a `free N` the hook printed is only a fallback when it
+/// left no map, because a game's own copy of the report has over-reported by 256 B (it
+/// measured to the end of the RAM region, not to the stack's reach). When both exist and
+/// differ the figures are named and the map's is used.
+fn rung_free(printed: Option<u32>, map: &Path) -> Result<u32> {
+    let measured = match fs::read_to_string(map) {
+        Ok(text) => Some(crate::ram::free_ram(&text).ok_or_else(|| {
+            format!(
+                "{} has no __heap_start, so it is no psoxide.ld link",
+                map.display()
+            )
+        })?),
+        Err(_) => None,
+    };
+    match (measured, printed) {
+        (Some(measured), Some(printed)) if measured != printed => {
+            println!(
+                "psoxide-pgo: warning: the link hook printed free {printed} B but its map measures \
+                 {measured} B (`psoxide-size ram` is the measure; a hook should print what \
+                 `psoxide-pgo ram MAP` or `psoxide-size ram MAP` prints). Using {measured} B."
+            );
+            Ok(measured)
+        }
+        (Some(measured), _) => Ok(measured),
+        (None, Some(printed)) => Ok(printed),
+        (None, None) => Err("--link printed no `free N` and wrote no map".into()),
+    }
+}
+
 /// The ladder's rig: the link and the bench of one game.
 struct GameRig<'a> {
     guest: &'a Guest,
@@ -2426,13 +2718,7 @@ impl Rig for GameRig<'_> {
                 return Ok(None);
             }
             let (printed, code) = link_report(&output);
-            let free = match printed {
-                Some(free) => free,
-                None => crate::ram::free_ram(&fs::read_to_string(&map).map_err(|error| {
-                    format!("--link printed no `free N` and wrote no map: {error}")
-                })?)
-                .ok_or("the link map has no __bss_end")?,
-            };
+            let free = rung_free(printed, &map)?;
             return Ok(Some(ladder::Fit { free, code }));
         }
         let variant = self.variant(threshold);
@@ -2448,7 +2734,7 @@ impl Rig for GameRig<'_> {
                     .as_deref()
                     .ok_or("the ladder needs the link map")?;
                 let free = crate::ram::free_ram(&fs::read_to_string(map)?)
-                    .ok_or_else(|| format!("{} has no __bss_end", map.display()))?;
+                    .ok_or_else(|| format!("{} has no __heap_start", map.display()))?;
                 let code = {
                     use std::hash::{Hash, Hasher};
                     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -2572,6 +2858,46 @@ fn ladder_mode(guest: &Guest, options: &Options) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn metadata(workspace: &str, packages: &[(&str, bool)]) -> serde_json::Value {
+        let packages: Vec<_> = packages
+            .iter()
+            .map(|(manifest, registry)| {
+                serde_json::json!({
+                    "manifest_path": manifest,
+                    "source": if *registry { serde_json::json!("registry+x") } else { serde_json::Value::Null },
+                })
+            })
+            .collect();
+        serde_json::json!({ "workspace_root": workspace, "packages": packages })
+    }
+
+    #[test]
+    fn a_workspace_that_holds_its_path_dependencies_is_not_pinned() {
+        let data = metadata(
+            "/co",
+            &[
+                ("/co/game/Cargo.toml", false),
+                ("/co/.psoxide/sdk/crates/psx-rt/Cargo.toml", false),
+                ("/home/u/.cargo/registry/src/x/bitflags/Cargo.toml", true),
+            ],
+        );
+        assert_eq!(escaping_root(&data), None);
+    }
+
+    #[test]
+    fn a_path_dependency_outside_the_workspace_pins_to_their_common_root() {
+        let data = metadata(
+            "/co/game",
+            &[
+                ("/co/game/Cargo.toml", false),
+                ("/co/.psoxide/sdk/crates/psx-rt/Cargo.toml", false),
+                ("/co/.psoxide/crates/psx-hw/Cargo.toml", false),
+                ("/home/u/.cargo/registry/src/x/bitflags/Cargo.toml", true),
+            ],
+        );
+        assert_eq!(escaping_root(&data), Some(PathBuf::from("/co")));
+    }
+
     #[test]
     fn a_link_report_is_its_last_free_and_code_lines() {
         let output = "code 0x80408000..0x8040afc0\nfree 99\nfree 2416\ncode 9f3a\n";
@@ -2590,6 +2916,9 @@ mod tests {
             scanner: None,
             stack_guard: None,
             linker_script: PathBuf::new(),
+            repro_root: None,
+            gate: None,
+            gate_env: Vec::new(),
         };
         let spaced = guest(&["build", "--target-dir", target.to_str().unwrap()]);
         let joined = guest(&["build", &format!("--target-dir={}", target.display())]);
@@ -2629,6 +2958,15 @@ mod tests {
                 "-Cllvm-args=-sample-profile-inline-size".to_string(),
             ])
         );
+        assert_eq!(
+            variant_flags("hot=500+profi+hotcount=80").unwrap(),
+            Some(vec![
+                "-Cllvm-args=-hot-callsite-threshold=500".to_string(),
+                "-Cllvm-args=-sample-profile-use-profi".to_string(),
+                "-Cllvm-args=-profile-summary-hot-count=80".to_string(),
+            ])
+        );
+        assert!(variant_flags("hotcount=many").is_err());
         assert!(variant_flags("hot=lots").is_err());
         assert!(variant_flags("llvm=pgso").is_err());
         assert!(variant_flags("fast").is_err());
@@ -2775,11 +3113,13 @@ mod tests {
             GateRow {
                 variant: "off".to_string(),
                 passed: true,
+                refused: false,
                 values: vec![("cycles".to_string(), "100".to_string())],
             },
             GateRow {
                 variant: "default".to_string(),
                 passed: false,
+                refused: false,
                 values: vec![],
             },
         ];
@@ -2793,6 +3133,7 @@ mod tests {
         GateRow {
             variant: variant.to_string(),
             passed,
+            refused: false,
             values: values
                 .iter()
                 .map(|(key, value)| (key.to_string(), value.to_string()))
@@ -2849,6 +3190,47 @@ mod tests {
         let mut plain = vec![row("off", true, &[("cycles", "1")])];
         assert!(rank(&mut plain, None, Objective::Deadline).is_none());
         assert_eq!(plain[0].values.len(), 1);
+    }
+
+    #[test]
+    fn choose_lists_free_ram_and_refuses_a_variant_under_the_floor() {
+        let mut rows = vec![
+            row(
+                "off",
+                true,
+                &[("free_ram", "88460"), ("a.work_cycles", "100")],
+            ),
+            row(
+                "hot=500+profi",
+                true,
+                &[("free_ram", "120000"), ("a.work_cycles", "90")],
+            ),
+            GateRow {
+                variant: "default".to_string(),
+                passed: false,
+                refused: true,
+                values: vec![("free_ram".to_string(), "68796".to_string())],
+            },
+        ];
+        let ranking = rank(&mut rows, None, Objective::Work).unwrap();
+        // The refused row is last and unranked, whatever it would have scored.
+        let order: Vec<&str> = rows.iter().map(|row| row.variant.as_str()).collect();
+        assert_eq!(order, vec!["hot=500+profi", "off", "default"]);
+        let table = format_table(&rows);
+        assert!(
+            table.lines().any(
+                |line| line.starts_with("default") && line.contains("refused  - ")
+                    || line.starts_with("default") && line.contains("refused")
+            ),
+            "{table}"
+        );
+        assert!(table.contains("free_ram"), "{table}");
+        let text = format_ranking(&ranking, &rows);
+        assert!(
+            text.contains("1. hot=500+profi  work -10.00%  free 120000 B"),
+            "{text}"
+        );
+        assert!(!text.contains("default"), "{text}");
     }
 
     #[test]
@@ -3040,6 +3422,7 @@ mod tests {
         let row_of = |variant: &str, values: [(String, String); 4]| GateRow {
             variant: variant.to_string(),
             passed: true,
+            refused: false,
             values: values.to_vec(),
         };
         let mut rows = vec![

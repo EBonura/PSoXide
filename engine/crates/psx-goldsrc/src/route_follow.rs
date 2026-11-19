@@ -24,6 +24,8 @@
 )]
 
 use crate::semantic_input::{Sample, ACTION_DUCK, ACTION_JUMP, ACTION_USE};
+use psx_asset::le::{read_i32, read_u16, read_u32};
+use psx_math::atan2_q12_fine;
 
 pub const MAGIC: &[u8; 8] = b"HLWPTS1\0";
 pub const FLAG_USE: u16 = 1 << 0;
@@ -57,31 +59,19 @@ pub struct Route {
 #[derive(Debug)]
 pub struct Error;
 
-fn rd_u16(d: &[u8], o: usize) -> u16 {
-    u16::from_le_bytes([d[o], d[o + 1]])
-}
-
-fn rd_u32(d: &[u8], o: usize) -> u32 {
-    u32::from_le_bytes([d[o], d[o + 1], d[o + 2], d[o + 3]])
-}
-
-fn rd_i32(d: &[u8], o: usize) -> i32 {
-    rd_u32(d, o) as i32
-}
-
 impl Route {
     pub fn parse(data: &'static [u8]) -> Result<Self, Error> {
         if data.len() < 12 || &data[..8] != MAGIC {
             return Err(Error);
         }
-        let n_segments = rd_u16(data, 8) as usize;
+        let n_segments = read_u16(data, 8) as usize;
         // Validate the segment chain covers the buffer exactly.
         let mut off = 12usize;
         for _ in 0..n_segments {
             if off + SEG_HEADER > data.len() {
                 return Err(Error);
             }
-            let n_wp = rd_u32(data, off + 16) as usize;
+            let n_wp = read_u32(data, off + 16) as usize;
             off += SEG_HEADER + n_wp * WP_SIZE;
             if off > data.len() {
                 return Err(Error);
@@ -99,7 +89,7 @@ impl Route {
         for _ in 0..self.n_segments {
             let name = &self.data[off..off + 16];
             let end = name.iter().position(|&b| b == 0).unwrap_or(16);
-            let n_wp = rd_u32(self.data, off + 16) as usize;
+            let n_wp = read_u32(self.data, off + 16) as usize;
             if &name[..end] == map_name.as_bytes() {
                 return Some((off + SEG_HEADER, n_wp));
             }
@@ -112,54 +102,14 @@ impl Route {
         let o = wp_off + i * WP_SIZE;
         Waypoint {
             pos: [
-                rd_i32(self.data, o),
-                rd_i32(self.data, o + 4),
-                rd_i32(self.data, o + 8),
+                read_i32(self.data, o),
+                read_i32(self.data, o + 4),
+                read_i32(self.data, o + 8),
             ],
-            flags: rd_u16(self.data, o + 12),
-            radius: rd_u16(self.data, o + 14),
+            flags: read_u16(self.data, o + 12),
+            radius: read_u16(self.data, o + 14),
         }
     }
-}
-
-/// Integer atan2 in the runtime's yaw convention: forward = (sin yaw, ., cos
-/// yaw) in world x/z, so `atan2_q12(dx, dz)` is the yaw that faces (dx, dz).
-/// 33-entry quarter table, linear interpolation, exact to ~1 angle unit.
-const ATAN_TAB: [u16; 33] = [
-    0, 20, 41, 61, 81, 101, 121, 140, 160, 179, 197, 216, 234, 252, 269, 286, 303, 319, 335, 350,
-    365, 380, 394, 408, 422, 435, 447, 460, 472, 484, 495, 506, 512,
-];
-
-fn atan_q12(num: i32, den: i32) -> i32 {
-    // num <= den, both positive: angle 0..512
-    if den == 0 {
-        return 512;
-    }
-    let r = ((num << 12) / den).clamp(0, 4096);
-    let idx = (r >> 7) as usize;
-    let frac = r & 127;
-    let a = ATAN_TAB[idx] as i32;
-    let b = ATAN_TAB[(idx + 1).min(32)] as i32;
-    a + ((b - a) * frac >> 7)
-}
-
-pub fn atan2_q12(x: i32, z: i32) -> u16 {
-    if x == 0 && z == 0 {
-        return 0;
-    }
-    let (ax, az) = (x.abs(), z.abs());
-    let base = if az >= ax {
-        atan_q12(ax, az)
-    } else {
-        1024 - atan_q12(az, ax)
-    };
-    let a = match (x >= 0, z >= 0) {
-        (true, true) => base,
-        (true, false) => 2048 - base,
-        (false, false) => 2048 + base,
-        (false, true) => 4096 - base,
-    };
-    (a & 0xFFF) as u16
 }
 
 pub struct Follower {
@@ -234,7 +184,7 @@ impl Follower {
         let h2 = dx * dx + dz * dz;
         let r = (wp.radius as i32).max(16);
 
-        let desired = atan2_q12(dx, dz);
+        let desired = atan2_q12_fine(dx, dz);
         let err = ((desired as i32 - yaw as i32 + 2048) & 4095) - 2048;
         let turn = err.clamp(-127, 127) as i8;
         // Walk when roughly facing the goal; hold position when we are above
@@ -327,11 +277,11 @@ mod tests {
 
     #[test]
     fn atan2_matches_yaw_convention_on_axes() {
-        assert_eq!(atan2_q12(0, 100), 0); // +z = yaw 0
-        assert_eq!(atan2_q12(100, 0), 1024); // +x = yaw 1024
-        assert_eq!(atan2_q12(0, -100), 2048);
-        assert_eq!(atan2_q12(-100, 0), 3072);
-        assert_eq!(atan2_q12(100, 100), 512);
+        assert_eq!(atan2_q12_fine(0, 100), 0); // +z = yaw 0
+        assert_eq!(atan2_q12_fine(100, 0), 1024); // +x = yaw 1024
+        assert_eq!(atan2_q12_fine(0, -100), 2048);
+        assert_eq!(atan2_q12_fine(-100, 0), 3072);
+        assert_eq!(atan2_q12_fine(100, 100), 512);
     }
 
     #[test]

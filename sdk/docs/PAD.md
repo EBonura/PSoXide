@@ -1,0 +1,204 @@
+# Pad driver
+
+There is one controller driver in the SDK, the synchronous one in `psx-pad`.
+Games read their pads through `psx_pad::Controllers` (one `poll(&mut port, Port)`
+call per port per loop; the first answer of a pad gets the analog handshake, an
+empty port is probed once in 60 polls, a garbled packet returns the last clean
+state, `set_rumble` maps the motors). `psx-engine`'s `App` and
+`Ctx::refresh_second_pad` poll through it. The older entry points (`poll_on`,
+`PadReader`, `enable_analog_on`, `require_analog_on`, the rumble calls) are what
+it is built from and stay for the games that have not moved yet. An
+interrupt-driven engine existed up to SDK `0ed8d7592` and was deleted: it cost
+about 10 KB of RAM per game for under 1% of frame time, and the one game that
+used it (NitroXide) lost 0.65% on the synchronous driver and gained 12.6 KB.
+`git show 0ed8d7592:sdk/docs/PAD-IRQ-ENGINE.md` has its design.
+
+Related pages: [PAD-ANALOG](PAD-ANALOG.md), [PAD-RUMBLE](PAD-RUMBLE.md),
+[PAD-NEGCON](PAD-NEGCON.md).
+
+## What a poll does
+
+A poll selects the port, waits a setup time, then exchanges the packet one
+byte at a time, waiting for the device's `/ACK` after every byte but the last.
+The setup time exists because the official SCPH-1200 gets no answer without a
+gap between `/CS` and the first byte. The driver writes nothing to the control
+register between bytes: the first ACK-wait driver (2026-06-20) rewrote it
+between bytes and a third-party pad's bytes came back corrupted. A pad slower to
+acknowledge than the wait, such as the SCPH-110 when clocked early, slips a
+packet; a packet that fails part way reads `PadMode::Unknown`, and `Controllers`
+keeps the last clean state instead.
+
+### The select is left open
+
+The setup time is a minimum, and a game has a whole frame of other work to do in
+it. So a `Controllers` poll ends by asserting `/CS` again (`Transport::open`) on
+the port it expects to be asked for next: the port polled before this one if a
+pad is in it (a two-player loop alternates), else this one. The next poll finds
+that select still in `CTRL` and starts clocking bytes as soon as
+`PAD_SETUP_CYCLES` (7,168 system-clock cycles, what the 1,024 status reads of
+the earlier delay took on a console) have passed since it was asserted
+(`Transport::begin_pad`). The game's frame runs in that time instead of a busy
+wait.
+
+The minimum is guaranteed by construction, not by the game's frame being long:
+
+* The time is read from root counter 0 (`Transport::clock`), which `psx-rt`
+  sets to count the system clock at entry and nothing in the SDK reprograms. A
+  16-bit difference of two readings is never more than the time that passed (a
+  wrap only makes it smaller), so a poll that follows the last one at once still
+  waits the whole setup time, and a wrap can only make it wait longer than
+  needed. The wait is also bounded by 2,048 readings, which take longer than the
+  setup time on their own, so a stopped counter cannot hang a poll.
+* The select is used only if `CTRL` still reads back as the select that was
+  left. A memory-card transfer, a configuration packet, a chain-loaded
+  program's entry or anything else that touched the port in between leaves
+  something else there, and the poll selects again and waits the old 1,024
+  status reads, the sequence every poll used before.
+* Only the first try of a poll uses an open select; a retry selects again.
+  No select is left open on an empty port, so a pad plugged in always sees a
+  fresh `/CS` edge.
+
+An interrupt between the two halves does nothing to the port: no handler in the
+SDK touches SIO0. Hardware-tests step `SIO0 SELECT EARLY` (records
+`0x6F0`-`0x6F4`) is the console's verdict on all of this, and a console passed
+it (2026-11-14, SCPH-9002, two runs with two DualShocks: every poll clean, the
+select kept where the case expects it, 6,800 to 7,400 cycles a poll cheaper than
+the sequence before).
+
+An empty socket answers `0xFF` and never pulses `/ACK`; `Controllers` polls a port that has not answered every
+time for its first 128 such answers (after boot, and after a pad leaves), so that a pad slow to come up is read from
+its first answer (PCSX-ReARMed's DualShock answers like an empty socket for its first 33 video frames), and then probes it
+once in 60 polls, so it costs a game almost nothing. The 128 failed polls of an empty socket cost about 20,000
+cycles each in the emulator's model, once. A console DualShock answers from its first
+poll (hardware-tests v2.16, step `PAD DIGITAL FIRST POLL`, `0x6FC`-`0x6FE`, 2026-11-14,
+SCPH-9002, two runs with two DualShocks: first read at poll 0, ID `0x41` in digital
+mode and `0x73` in analog, both rounds read from the first poll), so the window is
+harmless there; it is for PCSX-ReARMed.
+
+## What it costs
+
+On the PSoXide emulator, one poll of an analog pad on port 1 between 100,000
+cycles of other work (port 2 empty):
+
+| Driver | Cycles per poll | Both ports, port 2 empty |
+|---|---|---|
+| `PadReader` (SDK `efdd3083c`) | 23,054 | 43,218 |
+| `Controllers` with the select left open | 16,129 | about 16,600 |
+
+Of the 16,129, 15,471 are the nine bytes on the wire (each byte's
+1,360-cycle shift, its `/ACK` delay and pulse) and about 650 are the driver. A
+60 Hz frame is 564,480 cycles.
+
+## Analog mode and hot-plug
+
+`Controllers` sends the three configuration packets one video frame apart, as
+Sony's libpad does, the first time a pad answers on a port: at boot, and when a
+pad is plugged in later (about four frames). A pad that stays digital after the
+handshake is asked again by `Controllers` itself (see below), and so is one parked in
+configuration mode (the SCPH-110 failure), which gets the exit again.
+`Ctx::enable_analog` is deprecated.
+
+### A pad left digital
+
+The handshake reads none of the answers and a packet that fails part way is not
+sent again, so a packet abandoned part way can leave a DualShock digital for the
+rest of the session. The history, from the repositories:
+
+* VoXide `c28433f` (2026-07-06): on a console the stick read nothing while the
+  buttons worked. The boot code enabled VBlank interrupts and then ran the
+  `0x43`/`0x44` exchange, which then ran with VBlank interrupts on; the fix ran
+  it first and a main-loop request every 15 frames while the pad read digital
+  covered a pad that was not ready. The driver was the synchronous one of that
+  day, with no `/ACK` wait and no interrupt engine (the engine arrived on
+  2026-10-08).
+* Quake's boot code and its `AnalogRetry` (every 15 polls, eight times, any
+  state but analog, `Unknown` included: "restricting this retry to those two
+  modes left Quake permanently digital on real hardware") come from before
+  2026-08-25, the squashed first public commit, so before the `/ACK`-paced
+  poll (`c9d5dd4f5`, 2026-09-27). It kept all of it through its repin to the
+  paced driver (`8fd7835`), so no console has run Quake without it.
+* The demo-disc launcher's request every 60 ticks (`6e60ee3`, 2026-10-03) is a
+  notice policy for a disc that requires analog (an SCPH-110 Analog button
+  toggling it), not a finding about interrupts.
+* The SCPH-110 parked in configuration mode by back-to-back packets
+  (`deddb1649`, 2026-08-16) is "not yet re-measured on silicon".
+
+None of the failures belongs to the deleted interrupt-driven engine: they
+predate it, and the mechanism applies to today's driver as it did to theirs. A
+pad's `/ACK` is a pulse of about 90 cycles that the exchange finds by reading
+`STAT`; an interrupt handler running over it hides it (`Transport::exchange_card`
+says the same of a card), the wait times out and the packet is dropped.
+A console shows it happens to the ACK-paced driver (2026-11-14, SCPH-9002, two runs
+with two DualShocks, an SCPH-1200 and an SCPH-110; both answer ID `0x73` once the
+handshake has run): hardware-tests v2.15, step `PAD CONFIG UNDER IRQ`
+(`0x6F5`-`0x6F7`), forced an interrupt over the `/ACK` of the set-analog packet. With
+nothing masked the packet was lost (three bytes written, ID `0x41` straight after, a
+second packet needed, `bytes_seen` `0x41F3`, `packets` `0x1321` and `0x1331`); with
+`Controllers` as shipped, which masks, and with the plain first-poll handshake all 15
+rounds ended analog on one packet of nine bytes with ID `0x73` straight after
+(`bytes_seen` `0x73F3`, `packets` `0xF911` and `0xF910`). The masking is needed, not
+insurance. How often a VBlank lands over the pulse in a game is still not measured.
+
+`Controllers` therefore does two things, neither of which a normal frame pays for:
+
+* Each configuration packet goes out with CPU interrupts masked
+  (`Transport::mask_interrupts`), from its first byte to its last, about
+  15,000 cycles; a pending interrupt is taken after. The select and the setup
+  wait before the bytes are outside: an interrupt there only lengthens the gap.
+* A pad that answered a packet in full (only a DualShock acknowledges all
+  nine bytes; a digital pad stops after the fourth) and still reports digital,
+  an unknown ID or configuration mode after the handshake gets the handshake
+  (or the exit) again, three times in all for the plug-in, each a few video
+  frames after the last because the handshake spaces its packets. A digital
+  pad pays nothing beyond the first handshake it has always paid. A DualShock
+  that refuses analog pays the three, about eleven video frames, once.
+
+A pad that answers an ID the driver does not know every poll keeps the last
+clean state (nothing, if it never had one): `Controllers` does not trust it as
+Quake's `UNKNOWN_MODE_TRUST_POLLS` did.
+
+### A game that never uses sticks
+
+`Controllers::digital()` makes the same `poll` with the handshake, its retries
+and the motor mapping not compiled in (a const parameter of the type,
+`Controllers<false>`); a poll is then exactly what the older `poll_on` sent:
+five bytes to a digital pad, nine to a pad that is already analog.
+
+## The stick as a d-pad, and edges
+
+Three pieces, each the size of what a game would write by hand, so a game that adopts one pays
+nothing for the others:
+
+* `PadEdges` is the edge half of a tracker: one word of state (last frame's buttons).
+  `edges.update(buttons)` returns a `PadFrame` with `held`, `previous`, `pressed`, `released`,
+  `is_held`, `just_pressed`, `just_released` and `group_pressed(mask)` (some button of the mask held
+  now and none held before, which differs from `just_pressed` when the mask has several buttons and
+  one is already down). It compiles to the loads, `and`s and stores of
+  `pressed = held & !previous; previous = held`. A caller that keeps its own previous state builds
+  a frame with `PadFrame::new(held, previous)`; `settle(buttons)` sets the previous state at a
+  resume point. It has no hold counters, no repeat and no handoff guard.
+* `PadTracker` adds those: per-button hold counters (a 16-iteration update), `repeats(mask, delay,
+  rate)`, `prime` (hide what is held across a handoff) and `settle`. Use it for a menu that
+  auto-repeats; it is not the cheap way to read edges, and it is left exactly as games link it.
+* `stick_bits::<THRESHOLD>(x, y)` folds the centred left stick into d-pad bits: an axis registers
+  strictly beyond `THRESHOLD` counts, a diagonal sets two bits, no memory. It is a pure function
+  with the threshold as a const parameter, so a game pays for its own threshold only. OR it into
+  the buttons before `update`: `edges.update(buttons | stick_bits::<48>(x, y))`. A menu that wants
+  one press per push reads `just_pressed`; one that wants a running cursor uses `PadTracker::repeats`.
+  `RadialStick::<ENTER, EXIT>` is the stateful form for hysteresis: the distance from centre
+  (`Deadzone` radii, strictly outside), one direction at a time, kept until the stick is back inside
+  `EXIT`.
+
+The host tests hold `stick_bits` to the two threshold rules games wrote by hand at every reading
+(`stick_bits::<48>` is "strictly beyond 48", `stick_bits::<47>` is "48 or more") and `RadialStick`
+to the radial 64-in, 32-out rule with a latched direction.
+
+## Memory cards
+
+A card transaction needs the whole port, and a poll needs it too. The
+`ControllerPort` token from `Peripherals::take()` has one owner at a time and
+both drivers borrow it for the length of one transaction, so a card and a poll
+never overlap. A card transaction is about as long as a frame; a pad packet
+cannot be inserted into the middle of it. A card transfer that runs while a
+pad's select is open deselects it first (`select_with` writes `CTRL`), so the
+card sees its own fresh select, and the next poll selects again.

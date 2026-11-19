@@ -12,6 +12,7 @@ description  = "Guest-side WORLD.PAK (PSOXWPAK) parsing, in-place HLZC/LZ4 chunk
 # sector reader and the drive steps it runs on live in psx-io, which builds
 # on the host too (it only touches a register when a method is called).
 psx-io = { workspace = true }
+psx-math = { workspace = true }
 
 [dev-dependencies]
 # Host tests round-trip against the REAL producers: psx-iso is the pack

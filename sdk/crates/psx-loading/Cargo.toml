@@ -9,6 +9,7 @@ description  = "A loading indicator for blocking loads: the corner widget (a sma
 
 [dependencies]
 psx-font = { workspace = true }
+psx-hw   = { workspace = true }
 psx-io   = { workspace = true }
 
 [lints]

@@ -190,6 +190,14 @@ impl RectFlat {
             wh: pack_xy(w, h),
         }
     }
+
+    /// The same rectangle drawn with the semi-transparency equation set by
+    /// the last GP0(E1h) ([`crate::Gpu::set_draw_mode`]): GP0 62h.
+    #[must_use]
+    pub const fn translucent(mut self) -> Self {
+        self.color_cmd |= SEMI_TRANSPARENT;
+        self
+    }
 }
 
 /// VRAM fill (GP0 02h). 4 words (tag + 3 data).
@@ -345,6 +353,258 @@ impl QuadGouraudBlended {
             v2: pack_vertex(verts[2].0, verts[2].1),
             color3: pack_color(r3, g3, b3),
             v3: pack_vertex(verts[3].0, verts[3].1),
+        }
+    }
+}
+
+/// Semi-transparent flat triangle with its GP0(E1) blend state embedded in
+/// the same DMA packet; see [`QuadGouraudBlended`] for why the state travels
+/// with the polygon. 6 words (tag + 5 data), GP0 22h.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(C, align(4))]
+#[non_exhaustive]
+pub struct TriFlatBlended {
+    /// OT linkage.
+    pub tag: u32,
+    /// GP0(E1) draw mode selecting the native semi-transparency equation.
+    pub draw_mode: u32,
+    /// `0x22000000 | rgb24`.
+    pub color_cmd: u32,
+    /// Vertex 0.
+    pub v0: u32,
+    /// Vertex 1.
+    pub v1: u32,
+    /// Vertex 2.
+    pub v2: u32,
+}
+
+impl TriFlatBlended {
+    /// Data-word count after the tag.
+    pub const WORDS: u8 = 5;
+
+    /// Build a blended flat triangle.
+    #[must_use]
+    pub const fn new(verts: [(i16, i16); 3], color: (u8, u8, u8), blend_mode: BlendMode) -> Self {
+        Self {
+            tag: 0,
+            draw_mode: TextureMaterial::blended(0, 0, (0, 0, 0), blend_mode).draw_mode_word(),
+            color_cmd: gp0::polygon_opcode(false, false, false, true, false)
+                | pack_color(color.0, color.1, color.2),
+            v0: pack_vertex(verts[0].0, verts[0].1),
+            v1: pack_vertex(verts[1].0, verts[1].1),
+            v2: pack_vertex(verts[2].0, verts[2].1),
+        }
+    }
+}
+
+/// Semi-transparent flat quad with its GP0(E1) blend state embedded in the
+/// same DMA packet. 7 words (tag + 6 data), GP0 2Ah.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(C, align(4))]
+#[non_exhaustive]
+pub struct QuadFlatBlended {
+    /// OT linkage.
+    pub tag: u32,
+    /// GP0(E1) draw mode selecting the native semi-transparency equation.
+    pub draw_mode: u32,
+    /// `0x2A000000 | rgb24`.
+    pub color_cmd: u32,
+    /// Vertex 0.
+    pub v0: u32,
+    /// Vertex 1.
+    pub v1: u32,
+    /// Vertex 2.
+    pub v2: u32,
+    /// Vertex 3.
+    pub v3: u32,
+}
+
+impl QuadFlatBlended {
+    /// Data-word count after the tag.
+    pub const WORDS: u8 = 6;
+
+    /// Build a blended flat quad.
+    #[must_use]
+    pub const fn new(verts: [(i16, i16); 4], color: (u8, u8, u8), blend_mode: BlendMode) -> Self {
+        Self {
+            tag: 0,
+            draw_mode: TextureMaterial::blended(0, 0, (0, 0, 0), blend_mode).draw_mode_word(),
+            color_cmd: gp0::polygon_opcode(false, true, false, true, false)
+                | pack_color(color.0, color.1, color.2),
+            v0: pack_vertex(verts[0].0, verts[0].1),
+            v1: pack_vertex(verts[1].0, verts[1].1),
+            v2: pack_vertex(verts[2].0, verts[2].1),
+            v3: pack_vertex(verts[3].0, verts[3].1),
+        }
+    }
+}
+
+/// Semi-transparent Gouraud triangle with its GP0(E1) blend state embedded in
+/// the same DMA packet. 8 words (tag + 7 data), GP0 32h.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(C, align(4))]
+#[non_exhaustive]
+pub struct TriGouraudBlended {
+    /// OT linkage.
+    pub tag: u32,
+    /// GP0(E1) draw mode selecting the native semi-transparency equation.
+    pub draw_mode: u32,
+    /// Vertex 0 colour + semi-transparent Gouraud-triangle opcode.
+    pub color0_cmd: u32,
+    /// Vertex 0 position.
+    pub v0: u32,
+    /// Vertex 1 colour.
+    pub color1: u32,
+    /// Vertex 1 position.
+    pub v1: u32,
+    /// Vertex 2 colour.
+    pub color2: u32,
+    /// Vertex 2 position.
+    pub v2: u32,
+}
+
+impl TriGouraudBlended {
+    /// Data-word count after the tag.
+    pub const WORDS: u8 = 7;
+
+    /// Build a blended Gouraud triangle.
+    #[must_use]
+    pub const fn new(
+        verts: [(i16, i16); 3],
+        colors: [(u8, u8, u8); 3],
+        blend_mode: BlendMode,
+    ) -> Self {
+        let (r0, g0, b0) = colors[0];
+        let (r1, g1, b1) = colors[1];
+        let (r2, g2, b2) = colors[2];
+        Self {
+            tag: 0,
+            draw_mode: TextureMaterial::blended(0, 0, (0, 0, 0), blend_mode).draw_mode_word(),
+            color0_cmd: gp0::polygon_opcode(true, false, false, true, false)
+                | pack_color(r0, g0, b0),
+            v0: pack_vertex(verts[0].0, verts[0].1),
+            color1: pack_color(r1, g1, b1),
+            v1: pack_vertex(verts[1].0, verts[1].1),
+            color2: pack_color(r2, g2, b2),
+            v2: pack_vertex(verts[2].0, verts[2].1),
+        }
+    }
+}
+
+/// Draw area (GP0 E3h and E4h) as an ordering-table packet: a scissor set
+/// from inside its own table, so the GPU switches between views in command
+/// order while the CPU builds the next. 3 words (tag + 2 data).
+///
+/// Build with [`DrawArea::new`] when the rectangle is known, or start from
+/// [`DrawArea::EMPTY`] in a `static` and [`set`](Self::set) it when the table
+/// is kicked and the buffer it lands in is known.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(C, align(4))]
+#[non_exhaustive]
+pub struct DrawArea {
+    /// OT linkage.
+    pub tag: u32,
+    /// GP0(E3h): top-left corner, inclusive.
+    pub top_left: u32,
+    /// GP0(E4h): bottom-right corner, inclusive.
+    pub bottom_right: u32,
+}
+
+impl DrawArea {
+    /// Data-word count after the tag.
+    pub const WORDS: u8 = 2;
+
+    /// Both corners at (0, 0): a valid packet that scissors to one pixel.
+    pub const EMPTY: Self = Self::new((0, 0), (0, 0));
+
+    /// Scissor to the inclusive rectangle `top_left`..=`bottom_right`, in
+    /// VRAM coordinates (X up to 1023, Y up to 511).
+    #[must_use]
+    pub const fn new(top_left: (u32, u32), bottom_right: (u32, u32)) -> Self {
+        Self {
+            tag: 0,
+            top_left: gp0::draw_area_top_left(top_left.0, top_left.1),
+            bottom_right: gp0::draw_area_bottom_right(bottom_right.0, bottom_right.1),
+        }
+    }
+
+    /// [`new`](Self::new) for corners already known to be inside VRAM: no masks, so runtime
+    /// corners cost what the literal words do ([`gp0::draw_area_top_left_in_range`]).
+    #[must_use]
+    pub const fn new_in_range(top_left: (u32, u32), bottom_right: (u32, u32)) -> Self {
+        Self {
+            tag: 0,
+            top_left: gp0::draw_area_top_left_in_range(top_left.0, top_left.1),
+            bottom_right: gp0::draw_area_bottom_right_in_range(bottom_right.0, bottom_right.1),
+        }
+    }
+
+    /// [`set`](Self::set) for corners already known to be inside VRAM.
+    pub const fn set_in_range(&mut self, top_left: (u32, u32), bottom_right: (u32, u32)) {
+        self.top_left = gp0::draw_area_top_left_in_range(top_left.0, top_left.1);
+        self.bottom_right = gp0::draw_area_bottom_right_in_range(bottom_right.0, bottom_right.1);
+    }
+
+    /// Re-aim the packet; the OT linkage is left as it is.
+    pub const fn set(&mut self, top_left: (u32, u32), bottom_right: (u32, u32)) {
+        self.top_left = gp0::draw_area_top_left(top_left.0, top_left.1);
+        self.bottom_right = gp0::draw_area_bottom_right(bottom_right.0, bottom_right.1);
+    }
+}
+
+/// One sixteen-entry CLUT row uploaded from inside the ordering table:
+/// GP0(A0h) with its sixteen 15-bit colours inline, then GP0(01h) so no
+/// cached copy of the old row outlives it. 12 words (tag + 11 data), which
+/// is inside the 16 words a node may hold on silicon.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(C, align(4))]
+#[non_exhaustive]
+pub struct ClutLoad16 {
+    /// OT linkage.
+    pub tag: u32,
+    /// `GP0(A0h)`: CPU to VRAM transfer.
+    pub cmd: u32,
+    /// Destination `x` and `y` in VRAM.
+    pub xy: u32,
+    /// Size: 16 wide, 1 high.
+    pub wh: u32,
+    /// The sixteen colours, two per word, entry 0 in the low half.
+    pub data: [u32; 8],
+    /// `GP0(01h)`: clear the texture cache.
+    pub flush: u32,
+}
+
+impl ClutLoad16 {
+    /// Data-word count after the tag.
+    pub const WORDS: u8 = 12;
+
+    /// A row at VRAM `(x, y)` with every colour zero.
+    #[must_use]
+    pub const fn empty(x: u16, y: u16) -> Self {
+        Self {
+            tag: 0,
+            cmd: gp0::COPY_CPU_TO_VRAM,
+            xy: pack_xy(x, y),
+            wh: pack_xy(16, 1),
+            data: [0; 8],
+            flush: gp0::CLEAR_CACHE,
+        }
+    }
+
+    /// A row at VRAM `(x, y)` holding `colors`.
+    #[must_use]
+    pub const fn new(x: u16, y: u16, colors: [u16; 16]) -> Self {
+        let mut row = Self::empty(x, y);
+        row.set_colors(colors);
+        row
+    }
+
+    /// Replace the sixteen colours.
+    pub const fn set_colors(&mut self, colors: [u16; 16]) {
+        let mut i = 0;
+        while i < 8 {
+            self.data[i] = colors[2 * i] as u32 | (colors[2 * i + 1] as u32) << 16;
+            i += 1;
         }
     }
 }
@@ -1512,6 +1772,11 @@ impl_gpu_packet!(
     FillRect,
     QuadGouraud,
     QuadGouraudBlended,
+    TriFlatBlended,
+    QuadFlatBlended,
+    TriGouraudBlended,
+    DrawArea,
+    ClutLoad16,
     LineMono,
     LineGouraud,
     TriTextured,
@@ -1535,6 +1800,11 @@ const _: () = {
         FillRect::WORDS,
         QuadGouraud::WORDS,
         QuadGouraudBlended::WORDS,
+        TriFlatBlended::WORDS,
+        QuadFlatBlended::WORDS,
+        TriGouraudBlended::WORDS,
+        DrawArea::WORDS,
+        ClutLoad16::WORDS,
         LineMono::WORDS,
         LineGouraud::WORDS,
         TriTextured::WORDS,
@@ -1557,6 +1827,128 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn words_of<T: GpuPacket>(packet: &T) -> &[u32] {
+        // SAFETY: a `GpuPacket` is `repr(C, align(4))` of plain u32 words, so every
+        // word of it is initialised and aligned.
+        unsafe {
+            core::slice::from_raw_parts(
+                (packet as *const T).cast::<u32>(),
+                core::mem::size_of::<T>() / 4,
+            )
+        }
+    }
+
+    // The word layout the games wrote by hand (VoXide ui_tri_blend, ui_tri_add_gouraud,
+    // ui_quad_blend_depth): GP0(E1) from the blended material, the polygon header, then
+    // the vertices, each as `x as u16 | y << 16`. The games' extra GP0(E2) is the
+    // no-window word, which an untextured polygon never reads.
+    fn game_rgb(r: u8, g: u8, b: u8) -> u32 {
+        r as u32 | (g as u32) << 8 | (b as u32) << 16
+    }
+
+    fn game_xy(x: i16, y: i16) -> u32 {
+        x as u16 as u32 | (y as u16 as u32) << 16
+    }
+
+    #[test]
+    fn blended_flat_and_gouraud_polygons_equal_the_games_hand_built_words() {
+        for mode in [
+            BlendMode::Average,
+            BlendMode::Add,
+            BlendMode::Subtract,
+            BlendMode::AddQuarter,
+        ] {
+            let e1 = TextureMaterial::blended(0, 0, (0, 0, 0), mode).draw_mode_word();
+            let tri = TriFlatBlended::new([(1, -2), (300, 4), (-5, 239)], (9, 8, 7), mode);
+            assert_eq!(
+                words_of(&tri),
+                [
+                    0,
+                    e1,
+                    0x2200_0000 | game_rgb(9, 8, 7),
+                    game_xy(1, -2),
+                    game_xy(300, 4),
+                    game_xy(-5, 239)
+                ]
+            );
+            let quad = QuadFlatBlended::new([(1, 2), (3, 4), (5, 6), (7, -8)], (1, 2, 3), mode);
+            assert_eq!(
+                words_of(&quad),
+                [
+                    0,
+                    e1,
+                    0x2a00_0000 | game_rgb(1, 2, 3),
+                    game_xy(1, 2),
+                    game_xy(3, 4),
+                    game_xy(5, 6),
+                    game_xy(7, -8)
+                ]
+            );
+            let c = [(1, 2, 3), (40, 50, 60), (250, 251, 252)];
+            let gtri = TriGouraudBlended::new([(0, 0), (10, 0), (0, 10)], c, mode);
+            assert_eq!(
+                words_of(&gtri),
+                [
+                    0,
+                    e1,
+                    0x3200_0000 | game_rgb(1, 2, 3),
+                    game_xy(0, 0),
+                    game_rgb(40, 50, 60),
+                    game_xy(10, 0),
+                    game_rgb(250, 251, 252),
+                    game_xy(0, 10)
+                ]
+            );
+            assert_eq!(TriFlatBlended::WORDS as usize + 1, words_of(&tri).len());
+            assert_eq!(QuadFlatBlended::WORDS as usize + 1, words_of(&quad).len());
+            assert_eq!(TriGouraudBlended::WORDS as usize + 1, words_of(&gtri).len());
+        }
+    }
+
+    #[test]
+    fn translucent_rect_is_gp0_62() {
+        let rect = RectFlat::new(4, 5, 6, 7, 0x80, 0x40, 0x20).translucent();
+        assert_eq!(rect.color_cmd, 0x6200_0000 | game_rgb(0x80, 0x40, 0x20));
+        assert_eq!(
+            RectFlat::new(4, 5, 6, 7, 0x80, 0x40, 0x20).color_cmd >> 24,
+            0x60
+        );
+    }
+
+    #[test]
+    fn draw_area_and_clut_load_equal_nitroxides_hand_built_packets() {
+        // Nitro's AreaPacket::set for a viewport at (8, 16) of size 304 x 100 in buffer row 240.
+        let (x0, y0, x1, y1) = (8u32, 240u32 + 16, 8 + 304 - 1, 240 + 16 + 100 - 1);
+        let area = DrawArea::new((x0, y0), (x1, y1));
+        assert_eq!(
+            words_of(&area),
+            [
+                0,
+                0xe300_0000 | (x0 & 0x3ff) | ((y0 & 0x1ff) << 10),
+                0xe400_0000 | (x1 & 0x3ff) | ((y1 & 0x1ff) << 10)
+            ]
+        );
+        let mut moved = DrawArea::EMPTY;
+        assert_eq!(words_of(&moved), [0, 0xe300_0000, 0xe400_0000]);
+        moved.set((x0, y0), (x1, y1));
+        assert_eq!(moved, area);
+
+        // Nitro's ClutLoad::EMPTY with sixteen colours packed two to a word.
+        let colors: [u16; 16] = core::array::from_fn(|i| 0x8000 | (i as u16 * 0x0421));
+        let row = ClutLoad16::new(320, 500, colors);
+        let mut want = [0u32; 13];
+        want[1] = 0xa000_0000;
+        want[2] = 320 | (500 << 16);
+        want[3] = (1 << 16) | 16;
+        for i in 0..8 {
+            want[4 + i] = colors[2 * i] as u32 | (colors[2 * i + 1] as u32) << 16;
+        }
+        want[12] = 0x0100_0000;
+        assert_eq!(words_of(&row), want);
+        assert_eq!(ClutLoad16::WORDS as usize + 1, want.len());
+        assert_eq!(ClutLoad16::empty(1, 2).data, [0; 8]);
+    }
 
     #[test]
     fn blended_gouraud_quad_keeps_draw_mode_and_polygon_together() {

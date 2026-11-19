@@ -3,6 +3,7 @@ use std::env;
 use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::io::Read;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 mod web_dist;
@@ -26,6 +27,8 @@ fn run() -> Result<(), String> {
     match command.as_str() {
         "lint-policy-guard" => lint_policy_guard(),
         "runtime-numeric-guard" => runtime_numeric_guard(),
+        "no64-scan" => no64_scan(&args),
+        "style-fmt" => style_fmt(&args),
         "bake-spectrum" => bake_spectrum(&args),
         "cortex-bringup-report" => cortex_bringup_report(&args),
         "cortex-stream-guard" => cortex_stream_guard(&args),
@@ -46,6 +49,8 @@ fn help() -> String {
      commands:\n\
        lint-policy-guard\n\
        runtime-numeric-guard\n\
+       no64-scan [--floats] [--exempt FILE]... DIR...\n\
+       style-fmt [--check]\n\
        bake-spectrum <input.wav> -o <output.bin> [--fps N] [--bands N] [--seconds S]\n\
        cortex-bringup-report [--out REPORT.md] [--fail-on-warn]\n\
        cortex-stream-guard [--profile profile.csv] [--cdda-log cdda.log]\n\
@@ -353,6 +358,150 @@ fn runtime_numeric_guard() -> Result<(), String> {
         files.len(),
         allowed_hits
     );
+    Ok(())
+}
+
+/// `no64-scan [--floats] [--exempt FILE]... DIR...`: the runtime numeric
+/// guard's scanner pointed at a game's own source directories. Every `.rs`
+/// file under each DIR is judged (skipping `target` directories and files
+/// named `tests.rs`), with the same `#[cfg(test)]` blanking and the same
+/// `psx-numeric-allow-*` markers as `runtime-numeric-guard`. `--exempt` skips
+/// one whole file whose purpose is wide arithmetic. Float literals are judged
+/// only with `--floats`; float and 64/128-bit integer types always are.
+/// Exit status: 0 clean, 1 violations, 2 usage or read error.
+fn no64_scan(args: &[String]) -> Result<(), String> {
+    let mut floats = false;
+    let mut exempt: Vec<PathBuf> = Vec::new();
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--floats" => floats = true,
+            "--exempt" => {
+                let file = args.next().ok_or("--exempt needs a file")?;
+                exempt.push(PathBuf::from(file));
+            }
+            _ => dirs.push(PathBuf::from(arg)),
+        }
+    }
+    if dirs.is_empty() {
+        eprintln!("usage: psoxide-dev no64-scan [--floats] [--exempt FILE]... DIR...");
+        std::process::exit(2);
+    }
+    let mut files = Vec::new();
+    for dir in &dirs {
+        if let Err(error) = collect_game_rs_files(dir, &mut files) {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+    }
+    files.retain(|f| !exempt.iter().any(|e| e == f));
+    let mut violations = Vec::new();
+    let mut allowed_hits = 0usize;
+    for path in &files {
+        let src = match fs::read_to_string(path) {
+            Ok(src) => src,
+            Err(error) => {
+                eprintln!("{}: {error}", path.display());
+                std::process::exit(2);
+            }
+        };
+        let code = blank_test_items(&blank_comments_and_literals(&src));
+        let allowed = allowed_lines(&src);
+        scan_forbidden_types(
+            path,
+            &src,
+            &code,
+            &allowed,
+            &mut allowed_hits,
+            &mut violations,
+        );
+        if floats {
+            scan_float_literals(
+                path,
+                &src,
+                &code,
+                &allowed,
+                &mut allowed_hits,
+                &mut violations,
+            );
+        }
+    }
+    if violations.is_empty() {
+        println!(
+            "no64 guard: ok ({} files, {} allowed lines)",
+            files.len(),
+            allowed_hits
+        );
+        return Ok(());
+    }
+    eprintln!("no64 guard failed: guest code names a wide integer or a float.");
+    eprintln!("Use 32-bit fixed point (psx_math::int32), or mark a reviewed exception with");
+    eprintln!("`// psx-numeric-allow-next-line: reason`.\n");
+    for violation in &violations {
+        eprintln!("{violation}");
+    }
+    eprintln!("\n{} violation(s)", violations.len());
+    std::process::exit(1);
+}
+
+fn collect_game_rs_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+    let mut entries: Vec<_> = fs::read_dir(dir)
+        .map_err(|e| format!("{}: {e}", dir.display()))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .collect();
+    entries.sort();
+    for path in entries {
+        if path.is_dir() {
+            if path.file_name().and_then(|n| n.to_str()) != Some("target") {
+                collect_game_rs_files(&path, out)?;
+            }
+        } else if path.extension().and_then(|e| e.to_str()) == Some("rs")
+            && path.file_name().and_then(|n| n.to_str()) != Some("tests.rs")
+        {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// `style-fmt [--check]`: format (or with `--check`, verify) every tracked Rust
+/// file of the git repository in the current directory, using the repository's
+/// own `rustfmt.toml` and the toolchain its `rust-toolchain.toml` pins (the
+/// style guide's options are unstable). Exit status is rustfmt's.
+fn style_fmt(args: &[String]) -> Result<(), String> {
+    let check = match args {
+        [] => false,
+        [flag] if flag == "--check" => true,
+        _ => return Err("usage: psoxide-dev style-fmt [--check]".to_string()),
+    };
+    let listing = std::process::Command::new("git")
+        .args(["ls-files", "-z", "*.rs"])
+        .output()
+        .map_err(|e| format!("git ls-files: {e}"))?;
+    if !listing.status.success() {
+        return Err("git ls-files failed (run from the repository root)".to_string());
+    }
+    let files: Vec<&[u8]> = listing
+        .stdout
+        .split(|&byte| byte == 0)
+        .filter(|name| !name.is_empty())
+        .collect();
+    // Batches keep the command line under the OS limit on a large repository.
+    for batch in files.chunks(256) {
+        let mut rustfmt = std::process::Command::new("rustfmt");
+        rustfmt.args(["--edition", "2021"]);
+        if check {
+            rustfmt.arg("--check");
+        }
+        for name in batch {
+            rustfmt.arg(std::ffi::OsStr::from_bytes(name));
+        }
+        let status = rustfmt.status().map_err(|e| format!("rustfmt: {e}"))?;
+        if !status.success() {
+            return Err("style-fmt: rustfmt reported differences or errors".to_string());
+        }
+    }
     Ok(())
 }
 
@@ -677,7 +826,18 @@ fn scan_forbidden_types(
                 .checked_sub(1)
                 .and_then(|i| code.as_bytes().get(i).copied());
             let after = code.as_bytes().get(offset + token.len()).copied();
-            if before.is_none_or(|b| !is_ident_byte(b)) && after.is_none_or(|b| !is_ident_byte(b)) {
+            // `0u64` and `1_i64`: the type is a literal suffix, so what precedes it is a
+            // run of identifier bytes that starts with a digit.
+            let suffix_of_literal = before.is_some_and(is_ident_byte) && {
+                let mut start = offset;
+                while start > 0 && is_ident_byte(code.as_bytes()[start - 1]) {
+                    start -= 1;
+                }
+                code.as_bytes()[start].is_ascii_digit()
+            };
+            if (before.is_none_or(|b| !is_ident_byte(b)) || suffix_of_literal)
+                && after.is_none_or(|b| !is_ident_byte(b))
+            {
                 let (line, col) = line_col(code, offset);
                 if allowed.contains(&line) {
                     *allowed_hits += 1;
@@ -2766,5 +2926,43 @@ dbg_macro = \"deny\"",
             lints_at_least_as_strict(&editor, &reprioritised),
             ["sets `rust_2018_idioms` with a different priority"]
         );
+    }
+}
+
+#[cfg(test)]
+mod no64_tests {
+    use super::*;
+
+    fn hits(src: &str) -> usize {
+        let code = blank_test_items(&blank_comments_and_literals(src));
+        let mut allowed_hits = 0;
+        let mut violations = Vec::new();
+        scan_forbidden_types(
+            Path::new("x.rs"),
+            src,
+            &code,
+            &allowed_lines(src),
+            &mut allowed_hits,
+            &mut violations,
+        );
+        violations.len()
+    }
+
+    #[test]
+    fn types_are_judged_and_comments_strings_and_test_items_are_not() {
+        let src = "let a: u64 = 0; // i64\nlet b = \"f32\";\n#[cfg(test)] mod t { fn f() -> f64 { 0 } }\n";
+        assert_eq!(hits(src), 1);
+    }
+
+    #[test]
+    fn literal_suffix_is_a_hit() {
+        let src = "let a = 1u64; let b = 0_i128;\n";
+        assert_eq!(hits(src), 2);
+    }
+
+    #[test]
+    fn allow_marker_silences_the_next_line() {
+        let src = "// psx-numeric-allow-next-line: reviewed\nlet a: u64 = 0;\nlet b: u64 = 0;\n";
+        assert_eq!(hits(src), 1);
     }
 }

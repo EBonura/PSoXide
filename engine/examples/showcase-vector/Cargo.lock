@@ -14,6 +14,7 @@ version = "0.1.0"
 dependencies = [
  "psx-gte",
  "psx-hw",
+ "psx-math",
  "psxed-format",
 ]
 
@@ -40,6 +41,7 @@ version = "0.1.0"
 dependencies = [
  "psx-asset",
  "psx-cdstream",
+ "psx-display",
  "psx-font",
  "psx-gpu",
  "psx-gte",
@@ -51,6 +53,7 @@ dependencies = [
  "psx-rt",
  "psx-settings",
  "psx-sfx",
+ "psx-splash",
  "psx-spu",
  "psx-telemetry",
  "psx-tick",
@@ -83,6 +86,7 @@ version = "0.1.0"
 dependencies = [
  "psx-gte-core",
  "psx-hw",
+ "psx-math",
 ]
 
 [[package]]
@@ -104,6 +108,7 @@ name = "psx-io"
 version = "0.1.0"
 dependencies = [
  "psx-hw",
+ "psx-math",
 ]
 
 [[package]]
@@ -111,11 +116,20 @@ name = "psx-level"
 version = "0.1.0"
 dependencies = [
  "psx-math",
+ "psx-pack",
 ]
 
 [[package]]
 name = "psx-math"
 version = "0.1.0"
+
+[[package]]
+name = "psx-pack"
+version = "0.1.0"
+dependencies = [
+ "psx-io",
+ "psx-math",
+]
 
 [[package]]
 name = "psx-pad"
@@ -130,8 +144,11 @@ dependencies = [
 name = "psx-rt"
 version = "0.1.0"
 dependencies = [
+ "psx-gpu",
  "psx-hw",
  "psx-io",
+ "psx-math",
+ "psx-tick",
 ]
 
 [[package]]
@@ -139,6 +156,7 @@ name = "psx-settings"
 version = "0.1.0"
 dependencies = [
  "psx-display",
+ "psx-math",
  "psx-pad",
 ]
 
@@ -149,6 +167,18 @@ dependencies = [
  "psx-asset",
  "psx-math",
  "psx-spu",
+]
+
+[[package]]
+name = "psx-splash"
+version = "0.1.0"
+dependencies = [
+ "psx-display",
+ "psx-font",
+ "psx-gpu",
+ "psx-pad",
+ "psx-rt",
+ "psx-vram",
 ]
 
 [[package]]
@@ -174,7 +204,9 @@ version = "0.1.0"
 name = "psx-vector"
 version = "0.1.0"
 dependencies = [
+ "psx-asset",
  "psx-gpu",
+ "psx-hw",
  "psx-math",
 ]
 
@@ -184,6 +216,7 @@ version = "0.1.0"
 dependencies = [
  "psx-hw",
  "psx-io",
+ "psx-math",
 ]
 
 [[package]]

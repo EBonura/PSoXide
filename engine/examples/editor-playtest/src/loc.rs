@@ -54,20 +54,37 @@ pub(crate) enum Language {
 
 /// Live language. Single-threaded guest, written only by [`set_language`] from
 /// the UI action path and read from the per-frame text resolve.
+#[cfg(not(test))]
 static mut LANGUAGE: Language = Language::English;
+
+// Test builds keep the language per thread: the harness runs each test on its
+// own thread, so tests that switch language cannot disturb one another or any
+// other test that resolves text.
+#[cfg(test)]
+std::thread_local! {
+    static LANGUAGE: core::cell::Cell<Language> = const { core::cell::Cell::new(Language::English) };
+}
 
 /// The language the next resolved label will draw in.
 #[inline]
 pub(crate) fn language() -> Language {
+    #[cfg(test)]
+    return LANGUAGE.with(core::cell::Cell::get);
     // SAFETY: the guest is single-threaded and cooperatively scheduled; no
     // reference escapes this function and `Language` is a `Copy` byte.
-    unsafe { core::ptr::read(core::ptr::addr_of!(LANGUAGE)) }
+    #[cfg(not(test))]
+    unsafe {
+        core::ptr::read(core::ptr::addr_of!(LANGUAGE))
+    }
 }
 
 /// Select a language. Takes effect on the next drawn frame -- nothing is
 /// cached across the switch, because the text resolve is already per-frame.
 pub(crate) fn set_language(next: Language) {
+    #[cfg(test)]
+    LANGUAGE.with(|cell| cell.set(next));
     // SAFETY: as `language`.
+    #[cfg(not(test))]
     unsafe {
         core::ptr::write(core::ptr::addr_of_mut!(LANGUAGE), next);
     }

@@ -49,6 +49,10 @@ pgo-collect:
 		--launch-arg --embedded-playtest \
 		--out "$(PGO_PROFILE)" -- $(GAME_CARGO)
 
+# Record the source of a committed profile that has none (once; see "Edits move the profile").
+pgo-stamp:
+	$(PGO) stamp --crate game --profile "$(PGO_PROFILE)" -- $(GAME_CARGO)
+
 # Build every variant and gate it.
 pgo-choose:
 	$(PGO) choose --crate game --profile "$(PGO_PROFILE)" \
@@ -144,11 +148,19 @@ psoxide-pgo collect [GUEST] --frontend PATH [--tape PATH [--polls A..B]]...
                     [--launch-arg ARG]... [--pack CMD] --out PROFILE -- CARGO-ARGS...
 psoxide-pgo order   [GUEST] --frontend PATH (--tape PATH --polls A..B)... [--launch-arg ARG]...
                     [--pack CMD] [--profile PROFILE] [--variant V] --out LAYOUT -- CARGO-ARGS...
+psoxide-pgo stamp   [GUEST] --profile PROFILE -- CARGO-ARGS...
+psoxide-pgo bind    PROFILE TWIN.elf [--exact] [--min-bound PERCENT] [--allow-unbound]
 psoxide-pgo apply   [GUEST] [--profile PROFILE] [--layout LAYOUT] [--variant V] -- CARGO-ARGS...
 psoxide-pgo choose  [GUEST] --profile PROFILE [--layout LAYOUT] --gate CMD [--variant V]...
-                    [--pack CMD] [--frame-budget VBLANKS] [--rank deadline|work] -- CARGO-ARGS...
+                    [--pack CMD] [--frame-budget VBLANKS] [--rank deadline|work]
+                    [--ram-floor BYTES] -- CARGO-ARGS...
 psoxide-pgo measure --frontend PATH --image PATH [--tape PATH] --polls A..B
                     [--launch-arg ARG]... [--name NAME] [--wait-range START..END]...
+psoxide-pgo search  IN.layout LINK.map IMAGE.exe LINKER-SCRIPT OUT.layout
+                    (--trace NAME MAP EXE TRACE)... [--weight NAME=W]... [--seed N]
+                    [--rounds N] [--batch N] [--threads N] [--start greedy|link|recorded]
+psoxide-pgo icache  LINK.map IMAGE.exe LINKER-SCRIPT (--trace NAME MAP EXE TRACE)...
+                    [--order FILE]... [--at MAP EXE]... [--layout FILE]... [--functions]
 GUEST: [--crate DIR] [--work DIR] [--patcher PATH] [--scanner PATH] [--stack-guard PATH]
        [--linker-script PATH]
 ```
@@ -191,7 +203,8 @@ where no ordering file can move them. Paths may contain spaces; `--pack` and `--
    (`--pc-sample-window-log`), maps ticks to polls through a `--route-log` of
    the same replay, keeps the windows wholly inside the poll range, and stops
    the replay at `TO`. Up to one window at each end is lost to the rounding.
-4. Sums the histograms, converts them, writes the portable profile to `--out`,
+4. Sums the histograms, converts them, writes the portable profile to `--out`
+   with the record of the source it describes (see "Edits move the profile"),
    and deletes the PC and route logs, the collect image and the disc.
 
 After `collect` the exe at cargo's path is the ELF twin, which does not boot;
@@ -214,6 +227,12 @@ it will join:
    `jal` or `j` word that ran and lands in another function (through a hazard
    trampoline, too) with its count. A `jalr` calls through a register, so
    indirect calls are invisible; the summary line counts how many ran.
+   Before writing (here and in `layout`), it names every function that ran 0.05% or more of the
+   instructions outside the laid-out text (a `.psx_cold.*` or data section,
+   which the layout cannot place), and refuses the profile when one ran 0.5%
+   or more: such a function lands wherever its section does, so whether it
+   shares I-cache lines with a hot loop is luck (Half-Life's brightness curve,
+   1.4% of a window, cost 3.5% of its frames that way).
 
 The code hash masks what the linker fills in (`j`/`jal` targets, `lui`
 halves and the low halves added to them), so linking in another order keeps
@@ -274,6 +293,100 @@ build +1.2%. The chain-route profile binds 94.4% of its instructions onto
 that build (13 functions changed), so `apply` refuses it; the E1M1 one binds
 fully, and only the gate can reject it (`choose` ranks it below its variant).
 
+### search
+
+`order`'s placement scores a layout with a model of who calls whom. It
+cannot see the order in which code runs, and a direct-mapped cache misses on
+exactly that: a line refills when another line of its set was fetched since
+it last ran. Two placements the model scores alike can differ by several
+percent of a frame, and a game was left drawing weight mixes and keeping the
+luckiest. `search` scores placements by the cache itself instead: it replays
+the order of every fetch through a model of the R3000's I-cache at any set
+of function addresses and moves functions until the refill stalls stop
+falling. Its result is recorded in the layout profile, and the build only
+reads it: no trace and no emulator are involved after the search.
+
+What it reads:
+
+- **Fetch traces**, one per gameplay window: the emulator's
+  `frontend launch --fetch-trace-log PATH --fetch-trace-start-route-tick N`
+  (or `psoxide-gate run --fetch-trace PATH FROM..TO` for a journey). Each
+  records every retired instruction as sequential runs. Trace the disc the
+  layout profile was collected for, or any later link of the same code (the
+  trace binds by portable name and code hash, so an ordered build serves).
+- **The layout profile** the search starts from and writes back (its
+  greedy placement, `--start greedy`, is the starting point), and **the link
+  being placed**: the map and patched image of the build's first, unordered
+  link, which is the one `place` sees.
+
+The model is the emulator's: 256 sets of 16 bytes, a valid bit per word,
+4-word fills that stream (a word every two clocks, the core running each as
+it lands, a wait when execution jumps out of a line before its fill is
+done). It leaves out write-buffer and DRAM-refresh waits ahead of a fill, so
+it predicts about 0.85 to 0.91 of the stalls the emulator measures, at a
+stable ratio. On Half-Life's 30 weight-mix draws it ranked the c4a3 and
+c0a0 benchmarks in the order their measured frame rates put them (Spearman
+0.99 and 0.96).
+
+The search keeps every traced function at a target offset in the cache and
+fills the gap in front of it with code no window ran, largest first. Each
+round it draws a batch of moves (a new offset, a few lines or words either
+way, or two functions trading offsets; functions that stall more are drawn
+more often), scores each by replaying only the cache sets the move touches,
+and keeps the best if it lowers the objective: the sum over windows of
+`weight * stalls / stalls at the start`. Candidates are drawn in order from
+the seed and ties go to the first, so the same traces, layout and seed write
+the same file on any thread count.
+
+```make
+# Once per code change that moves the hot code; commit the layout it writes.
+pgo-search:
+	$(PGO) search pgo/mygame.layout "$(FIRST_MAP)" "$(FIRST_EXE)" "$(PSOXIDE)/sdk/psoxide.ld" \
+		pgo/mygame.layout \
+		--trace c4a3 "$(TRACED_MAP)" "$(TRACED_EXE)" traces/c4a3.trace \
+		--trace c0a0 "$(TRACED_MAP)" "$(TRACED_EXE)" traces/c0a0.trace \
+		--rounds 600 --seed 1
+```
+
+`--batch` (default 24) is the number of moves scored per round and
+`--threads` how many run at once (all cores by default; the result does not
+depend on it). The search prints its objective every 50 rounds and each
+window's stalls before and after. `--start recorded` continues from the
+placement a layout already records, which is how to iterate: search, build,
+trace the new disc, search again from it. `icache` scores the link as
+linked, an ordering file (`--order`), another link of the same code
+(`--at MAP EXE`) or a layout's placement (`--layout`) against the same
+traces, and `--functions` lists the instructions each function ran in each
+window, which says when two runs did different work.
+
+What it cost on Half-Life (hl-psx, 700 to 780 million instructions per
+window, three windows): each trace 105 to 125 MB and about a minute and a
+half (an anchoring replay and the traced one); the search 600 rounds of 24 in
+17 minutes on 10 threads, `-27%` predicted stalls on c4a3; the confirming
+build and four benchmarks about 6 minutes. About half an hour end to end. The
+traces are working files: delete them once the layout is committed.
+
+What to commit: the layout file. `search` writes the profile's own lines
+unchanged, two comment lines saying how the placement was found, and the
+placement: an `s` line (where the ordered sections start) and one `o` line per
+listed section (code hash, size in words, the address the search scored,
+portable name), in link order. `place` and `apply` link that list exactly and
+print `recorded placement: N sections listed`. They refuse it, naming the
+sections, when any of them is missing or its code changed, or when the code
+ahead of the ordered sections changed size: the addresses are the point, so
+search again. A layout without these lines places exactly as before.
+
+**Limits.** The gap filler is code no traced window ran, and there may not
+be much of it. Half-Life traces 514 KB of functions against 242 KB of cold
+code, and its greedy start already spends 223 KB of that on gaps; past the
+pool's end a function lands wherever the code before it ends, and a move
+early in the list shifts everything after it, which the search then scores
+by full replays (slower). The ordering file cannot insert padding, so a game
+with little cold code gets less freedom, not a bigger image. The trace is
+also only as fixed as the workload: a journey whose legs end on video frames
+plays different gameplay on builds of different speed. Use poll-bound tapes
+and `sync = "poll"` steps for the windows you trace and gate on.
+
 ### apply
 
 Builds the ELF twin in *this* checkout, rebinds the portable profile onto its
@@ -294,6 +407,7 @@ Variants, joined with `+` to combine (`accurate+hot=1000`):
 | `noreplay` | `-Cllvm-args=-disable-sample-loader-inlining`: do not replay the profiled build's inlining; inlinee samples merge into their own functions |
 | `nopgso`   | `-Cllvm-args=-pgso=false`: do not optimise profile-cold code for size |
 | `profi`    | `-Cllvm-args=-sample-profile-use-profi`: infer block counts where samples are missing |
+| `hotcount=N` | `-Cllvm-args=-profile-summary-hot-count=N`: a fixed count above which the profile calls code hot, in place of the one derived from the profile's own samples (see "Troubleshooting") |
 | `llvm=-F`  | `-Cllvm-args=-F`, any other LLVM option (`llvm=-sample-profile-inline-size`) |
 
 A variant that fails to build shows as a failed row in `choose` instead of
@@ -335,8 +449,10 @@ compile:
 		-- $(GAME_CARGO)
 ```
 
-`apply` reads `__bss_end` from each link's map (free = 0x801F8000, the end
-of psoxide.ld's RAM region, minus `__bss_end`), ships the first variant that
+`apply` reads `__bss_end` from each link's map (free = `STACK_INIT - STACK_RESERVE`, as
+the map assigns them and the lowest address the stack may reach, minus
+`__bss_end`; 0x801F7F00 in psoxide.ld, 256 bytes under the end of its RAM
+region), ships the first variant that
 keeps the floor, prints which, and writes it to `shipped-variant.txt` in the
 work directory. When none does, the build stops. Record the shipped variant
 with the build: a later profile can land on another rung.
@@ -350,7 +466,8 @@ Builds each `--variant` in turn, packs it if `--pack` is given, and runs
 prints (no spaces in the value) becomes a column.
 
 With no `--variant`, the candidates are `off`, `default`, `hot=500`,
-`hot=500+profi`, `accurate+nopgso+hot=1000` and `accurate+nopgso+hot=1500`:
+`hot=500+profi`, `hot=500+profi+hotcount=80`, `accurate+nopgso+hot=1000` and
+`accurate+nopgso+hot=1500`:
 the winners so far were `hot=500+profi` on VoXide 895cb60 (see the table
 under `measure`), `hot=1000` on hl-psx and cs-psx, and `accurate` with
 `-pgso=false` and `hot=1500` on Cortex (see "Troubleshooting"). With
@@ -385,6 +502,18 @@ before, and `choose` prints both rankings under the table either way.
 Failed rows and rows missing a ranked column go last, unranked. A gate
 without `vblanks` is ranked by `work`, and one with neither stays in build
 order.
+
+**RAM.** Every row shows `free_ram`, the bytes between `__bss_end` and
+`STACK_INIT - STACK_RESERVE` in that variant's link map (the figure `apply
+--ram-floor` and `ram` use), and each line of the rankings ends with it. The
+ranking itself does not use it: a variant that wins by a few frames and gives
+up kilobytes still ranks first. A game that must keep RAM free says how much
+with `--ram-floor BYTES`: a variant that links under it is listed as `refused`
+with its `free_ram`, is not run through the gate, is not ranked and so never
+the winner, and a line under the rankings names it. Set the floor to the free
+RAM (`ram MAP`) of the build being replaced, linked with the cargo arguments `choose`
+uses, to ask for a variant that is no worse in RAM.
+(`--ram-fallback` belongs to `apply`; `choose` stops if given it.)
 
 NitroXide 13f7c0e shows why (its `pgo-choose`: the six variants, the train
 tape over polls 396..1200, discs with the four CD-DA songs; the frame budget
@@ -622,8 +751,110 @@ warns when the build's features differ. Keep one committed profile per
 shipped feature set (`pgo/mygame.prof`, `pgo/mygame-monsters.prof`).
 
 A profile goes stale as code changes: renamed or removed functions show up as
-`missing` in `rebind`'s count, and LLVM ignores lines that moved. Regenerate
-after large changes, and whenever the game repins onto a different SDK.
+`missing` in `rebind`'s count. Edits inside a function are carried across by
+the profile's source record (below); regenerate after large changes, and
+whenever the game repins onto a different SDK.
+
+### Names are the key, and it is not the symbol
+
+A profile's function names are looked up by exact symbol, and a Rust v0 symbol spells out
+the disambiguator of every crate on its path. Cargo derives that from `-C metadata`, a hash of
+the package id, its features, its profile and the metadata of every dependency, so a change
+to one crate's dependency edges or features re-hashes that crate and every crate above it, the
+game included. Measured on three profiles of one game committed at three SDK revisions
+(`psoxide-pgo bind PROFILE TWIN.elf --exact`, against one later build): 25.7%, 28.1% and 99.1%
+of the samples sat in functions whose spelling the build still had. Normalised (below) the same
+three bind 98.6%, 98.6% and 99.1%, and `rebind` writes the same file it wrote before.
+
+So the damage is confined to a profile that reaches LLVM spelled as the build that produced it:
+
+- `collect` writes portable names, and `apply`, `choose` and `ladder` rebind them onto the
+  local build, so a game that drives this tool needs no new collection when its SDK pin moves.
+- The plain converter (`psoxide-pgo ELF pc.csv OUT`, run by a game's own build driver) writes
+  the build's raw symbols. A game that gives that file straight to `-Zprofile-sample-use`
+  gets an empty profile after any pin that re-hashes its crates, and LLVM says nothing: the
+  measured case was 59 KB free instead of 3 KB and 12% more instructions per frame. Such a
+  driver commits `psoxide-pgo portable RAW PORTABLE` (or the raw file; both read the same),
+  and before each build links, runs
+  `psoxide-pgo rebind PORTABLE TWIN.elf OUT` in the game's directory and passes `OUT` to
+  `-Zprofile-sample-use`. `TWIN.elf` is any build of the same code with `-Cdebuginfo=1
+  -Zdebug-info-for-profiling -Cstrip=none` (the profiled build's own ELF serves: the flags
+  do not change the symbols).
+
+A driver that links by itself, and so cannot use `collect` or `stamp --crate ... -- build`
+(this tool's own twin build lacks the driver's environment), stamps and rebinds with no override:
+
+1. When it collects the profile: `psoxide-pgo stamp PROFILE --elf TWIN.elf [--crate DIR]`.
+   `TWIN.elf` is the ELF it built with `-Cdebuginfo=1 -Zdebug-info-for-profiling -Cstrip=none`
+   from the tree it collected on, and `DIR` is any directory of the git repository holding
+   that tree (default: the current directory). It records, as comments LLVM skips, the commit
+   the tree was at, the git blob id of every tracked source file that holds a function of the
+   profile, and for each such function its declaration line and last line in that build.
+2. At each build: `psoxide-pgo rebind PROFILE TWIN.elf OUT` in the game's directory, with the
+   twin of the tree being built. `rebind` hashes the recorded files. Where every one is as
+   recorded it rewrites names only. Where a file was edited since (a stale stamp) it carries
+   the profile's line keys across the edit, using the twin's DWARF for where each function
+   went, and prints how many functions moved and how many samples sat on lines that are gone.
+   It stops, naming the functions, when one holding more than 1% of the samples is not in the
+   build, or when a blob the stamp names is not in the clone. A profile with no stamp stops it
+   too, with the command to run; `PSOXIDE_PGO_ALLOW_UNSTAMPED=1` applies an unstamped profile
+   unchecked and is not for a shipping driver. Stamp again (step 1) whenever the profile is
+   collected again; a stamp that was never collected from the tree it describes records that
+   tree's lines and fixes nothing that had already drifted.
+
+The key is `rustc_demangle`'s hash-free alternate output (`{:#}`) with ` @crate` appended for
+a generic instance, as `portable_name` writes it. It was chosen over deleting the hash from
+the string, which does not give equal strings (hashes have different lengths, and v0
+back-references are byte offsets that shift with them), and over a parser of our own for the
+v0 grammar, which would need no new key for any form seen so far and would change every
+committed portable profile and `func:` record. The printer expands back-references, so one
+function has one key in any build; closures print as `{closure#N}`, shims as `{shim:..}`,
+impls by their self type, const generics by value, and the instantiating crate (which v0
+keeps once per instantiating crate, and the printer drops) is recovered from the symbol and
+appended. Legacy `_ZN...17h<hash>E` names lose their hash in the same printer. Names already
+in this form pass through unchanged, which is how an old raw profile and a new portable one
+are both read.
+
+Two different symbols can share a key: two items of one name in one scope (the `s_` after a
+path segment is an item counter the printer drops, as in `core`'s two `do_panic`), or a
+generic instance that moved to another instantiating crate. They are never merged. Writing a
+portable profile that would hold two records under one key fails and names both. Binding to
+a build in which two symbols share a key binds neither: both count as unbound, as
+`ambiguous`, and `bind` prints the keys. A generic instance that moves to a different
+instantiating crate between two SDK revisions is a different key and shows up unbound.
+
+#### The unbound gate
+
+`rebind` (so every `apply`, `choose` and `ladder`) and `bind` print how much of the profile
+has a symbol in the build, measured per function record weighted by its samples, before
+anything else, and fail below 90%:
+
+```text
+profile bind (names normalised): 98.6% of samples bound; no symbol for 1.4% of samples (538639 of 39077392) and 7 of 368 functions (0 ambiguous)
+  unbound  0.94%  psx_rt::present::wait_idle
+  ...
+psoxide-pgo: UNBOUND PROFILE: only 25.7% of the profile's samples sit in functions this build has a symbol for (under 90%), so LLVM would apply almost none of it and say nothing. Collect it again on this build, or pass --allow-unbound (PSOXIDE_PGO_ALLOW_UNBOUND=1) to continue
+```
+
+A function that is legitimately gone after a pin (renamed, deleted, or inlined everywhere) is
+normal and needs no action: the first two real profiles above had 7 of 368 functions with no
+symbol, 1.4% of their samples, and bound 98.6%, well above the line. The list tells you whether
+the unbound functions were hot; collect again only when the gate fails or a function holding a
+large share is on it.
+
+Which flows keep a raw profile away from the compiler: `collect` writes the portable profile, and
+`apply`, `choose`, `ladder` and `order` build through `rebind`, which hands LLVM a file spelled for
+the local build. `search` works on layout profiles, which bind by portable name and never reach
+LLVM. A game that drives its own build and calls the plain converter must call `rebind` itself
+(above); using `collect` plus `apply` (or `ladder` without `--link`) needs nothing more.
+
+The ten largest unbound functions are listed, under their portable keys. `--allow-unbound`
+or `PSOXIDE_PGO_ALLOW_UNBOUND=1` continues (and says so), `--min-bound PERCENT` moves the line
+(`rebind` and `bind` take both). The threshold comes from the measurements above: 98% or more
+when the names are normalised, under 30% when a re-hashed profile is given as it is. Unlike the
+line-key figure below it applies to a profile whichever tool wrote it. `bind --exact` compares
+names as spelled, which is what LLVM does with a raw file: run it on a profile and a build to
+see whether a driver that skips `rebind` is applying anything.
 
 ### Line shifts do not move the profile
 
@@ -643,6 +874,81 @@ code inlined at a call site with no line (`inlined at no line` in the
 unmapped summary). Those blocks have no weights on any build, before or after
 an edit, so adding or removing lines elsewhere changes neither the profile nor
 the code. Only an edit inside a function changes that function's own keys.
+
+### Edits move the profile
+
+The offset of a line is measured from its function's declaration, so an edit
+inside a function moves every key below it, and an edit inside a function that
+is inlined elsewhere moves the keys under every caller. LLVM cannot tell. A game
+deleted eight lines of `main` above its hot loop with the committed profile
+unchanged: every key below the deletion matched other code, free RAM fell from
+88,460 B to 43,596 B and text grew by 43 KB. A comment as long as the deleted
+code held the profile for a while; the next edit would have broken it again.
+
+`collect` therefore writes the source the profile describes, as comments LLVM
+skips, below the feature line:
+
+```text
+# psoxide-pgo source: <the commit the tree was at>
+# psoxide-pgo file: <git blob id> <path in the repository>
+# psoxide-pgo func: <declaration line> <last line> <file number> <portable name>
+```
+
+A file is the blob git holds for it (the working copy is hashed with
+`git hash-object -w`, so a tree that was never committed can still be read
+back), and a function is where its code sat in the profiled build, from the
+DWARF. Only functions in files git tracks are recorded; the SDK and the
+standard library are not the game's to diff, and their keys stay as they were.
+
+`apply` (so `choose` and `ladder`) first hashes the recorded files. When every
+one is as it was, nothing more happens: the profile and the build are the same
+as before this record existed. For any file that changed, each function in it
+is carried to the build in front of it:
+
+1. The function's old lines (`git cat-file blob`) and its new lines (the working
+   file, from the declaration line and last line the twin ELF's DWARF gives it
+   in this build, wherever the function moved to, in any file) are aligned as a
+   longest common subsequence of lines, indentation ignored.
+2. Between two aligned lines, a run that was rewritten pairs by position, so a
+   changed line keeps its samples. A line with no partner was deleted: its
+   samples are dropped, not folded into a neighbour, since the code they counted
+   no longer exists and a neighbour's count would describe other code. A function
+   that only moved down its file needs no change at all, because keys are
+   relative to the declaration.
+3. Every key of the function takes its new offset, and so does every inlined
+   call site in it (the call line moves with the caller's edit), and the body of
+   every inlined callee takes the callee's own map, under every caller.
+
+It prints how many functions moved lines and how many samples sat on lines
+that are gone. A function the profile names that this build does not have (a
+rename, a move into another crate) cannot be carried; its entries keep their old
+keys, which nothing looks up, and are listed. If such a function holds more than
+1% of the samples, the build stops, because its counts reach no code: collect
+again (`PSOXIDE_PGO_ALLOW_STALE=1` builds anyway).
+
+The build also stops, with what to run, when:
+
+- the profile has no record (a profile made before this existed, or by another
+  tool). If the profile describes the tree you are in, record it:
+  `make pgo-stamp` (`psoxide-pgo stamp --crate game --profile PROFILE -- CARGO-ARGS`).
+  That adopts the profile as it is: it fixes nothing that already drifted, and
+  `apply`'s bind report says how stale it is. Otherwise collect again.
+  `PSOXIDE_PGO_ALLOW_UNSTAMPED=1` applies it unchecked, as before.
+- the clone lacks a blob the profile names (a shallow clone): fetch the history,
+  or collect again.
+- one function is too large to align (more than 16 million line pairs).
+
+Commit the stamped profile with the source it was collected from, or any later
+commit whose files are what the profile names. A profile collected on edits that
+are never committed carries blobs that only this checkout has.
+
+Measured on one profile-guided game (`hot=500+profi`, SDK 3b7ef1256): the comment that
+padded `main` deleted, the stamped profile carried across, free RAM 88,460 B and
+text 689,164 B as before the edit (43,596 B and 732,512 B without the carry),
+the executable the same size with identical code; what differs is 37 words of
+`.rodata`, each the line number of a panic location in `main.rs` below the
+deleted lines, lower by exactly 8, and the 32-byte receipt hash over them. Both
+bench tapes measure the same work cycles.
 
 ## One guest from any directory (`psoxide-rustc`, `repro-gate`)
 
@@ -698,6 +1004,29 @@ The build sees `PSOXIDE_REPRO_CHECKOUT`, `PSOXIDE_REPRO_OUT` and
 `PSOXIDE_GUEST_STAGE_ROOT`. Run it before landing a build-script change and
 after every SDK repin.
 
+**`apply` pins by itself.** `psoxide-pgo apply|collect|order|choose` read `cargo metadata` for the guest.
+When a path dependency lies outside the workspace root they run cargo with `psoxide-pgo` itself as the
+`RUSTC_WRAPPER` (it behaves as `psoxide-rustc` when `PSOXIDE_PGO_AS_RUSTC` is set; `PSOXIDE_REPRO_ROOT`
+is the common directory of the workspace and those dependencies, a `RUSTC_WRAPPER` already set, such as
+sccache, becomes `PSOXIDE_REPRO_INNER`). A guest whose workspace root holds every path dependency (the
+`.psoxide` tree inside a repo-root workspace: voxide, hl-psx, hk-psx, quake-psx, nitroxide, cs-psx,
+wipeout-psx) is left exactly as it was, so its executable does not change. A caller that already runs
+under `psoxide-rustc` is left alone. `tools/build_guest_staged.sh` has no unpinned mode: without
+`psoxide-rustc` it stops.
+
+**Per-game check.** Every game gets a `repro-check` target that runs the gate on its own disc build.
+Not part of lint (two full builds); it is a step of the fleet repin's gate list. For a game Makefile that
+builds with `make compile` and hydrates `.psoxide` in the checkout (the clones carry it):
+
+```make
+repro-check:
+	cargo run -q --release --locked --manifest-path "$(PSOXIDE)/tools/psoxide-pgo/Cargo.toml" \
+		--bin repro-gate -- --source "$(CURDIR)" --build 'make compile' \
+		--artifact '{checkout}/game/target/mipsel-sony-psx/release/<game>.exe'
+```
+
+The SDK's own `make repro-check` runs the gate on `editor-playtest` and `hello-engine`.
+
 ## Profile quality notes
 
 - **Head samples** (a function's entry count) come from the samples at its
@@ -734,6 +1063,25 @@ after every SDK repin.
   `accurate+nopgso+hot=1500` trained on gameplay polls: +1.9% fps, 1.2% fewer
   work instructions and 15% fewer I-cache stalls. Count `jal` to memcpy in the
   disassembly of the two builds before blaming the profile.
+- **A profile collected again builds bigger than the one it replaces.** One
+  profile-guided game at SDK 3b7ef1256 (`hot=500+profi`): the profile committed for an older SDK left 88,460 B
+  free and one collected again on the tree left 68,796 B, with the same work on
+  every window (within 0.25%), so 19.7 KB bought nothing. The collections were
+  alike: same tape and polls, the sampler's 61 instructions, 1.4% more samples,
+  the twelve hottest functions within 1% to 3.5% of each other. The extra bytes
+  were about a hundred call sites in `main`, chains into code that has no sample
+  in either profile (sound and crafting calls), which LLVM's remarks show inlined
+  at its locally-hot threshold (525) in one build and kept cold (45) in the other.
+  It needs `profi` (without it both profiles make the same decisions there) and
+  the sample loader's replay of the profile's inlining (with `noreplay` both
+  profiles leave 59 KB free). Jittering `main`'s counts by 5% or scaling them
+  by 0.85 or 1.2 did not move it, and swapping `main`'s record between the two profiles made
+  both worse (62 to 66 KB), so no one record is to blame. A hot count that does
+  not depend on the profile's own distribution flattens it:
+  `hot=500+profi+hotcount=80` left the new profile 87,916 B
+  and the old one 95,724 B at the same work. Gate such a variant like any other,
+  and give `choose` the RAM the build being replaced leaves (`--ram-floor`), so a
+  collection that inlines more is refused instead of committed.
 - **`ticks` and `cycles` are the same for every variant.** The game is locked
   to the display; `vblanks` says how many frames missed, and `choose` ranks
   by those, then by the heavy frames' work, then by `work_cycles`.
@@ -751,7 +1099,9 @@ after every SDK repin.
 ```text
 psoxide-pgo <elf-with-dwarf> <pc.csv>... <out.prof>        convert (sums several logs)
 psoxide-pgo portable <in.prof> <out.prof>                  strip disambiguators
-psoxide-pgo rebind <in.prof> <target-elf-with-dwarf> <out.prof>
+psoxide-pgo rebind <in.prof> <target-elf-with-dwarf> <out.prof>  [--min-bound PERCENT] [--allow-unbound]
+psoxide-pgo hottest <in.prof> <out.prof> --coverage PERMILLE [--cold NAME]...   keep the hottest functions
+psoxide-pgo bind <profile> <target-elf-with-dwarf> [--exact] [--min-bound PERCENT] [--allow-unbound]
 psoxide-pgo layout <link.map> <image.exe> <words.csv>... <out.layout>   layout profile from per-word logs
 psoxide-pgo place <in.layout> <link.map> <image.exe> <linker-script> <out.order>
 psoxide-pgo followed <in.order> <relinked.map>             prove a relink followed the order
@@ -825,7 +1175,7 @@ bytes, and a higher threshold is not always faster. `ladder` replaces that:
 
 ```
 psoxide-pgo ladder --profile P [--layout L] --ram-floor BYTES \
-    [--from 1000] [--to 250] [--step 50] [--candidates 4] [--tie 0.3] [--scan] \
+    [--from 1000] [--to 250] [--step 50] [--candidates 4] [--tie 0.3] [--scan] [--margin 0] \
     [--link CMD] [--pack CMD] --bench CMD [--out ladder.txt] -- CARGO-ARGS...
 ```
 
@@ -841,12 +1191,25 @@ the bench hook, since a layout never survives a rung change). K = 4 is about
 four times the cost of one `apply`. `--candidates 1` takes the highest fit with
 no bench, for quick local iteration.
 
+`--margin BYTES` (default 0) asks every candidate for that much more free RAM than the floor: a
+link fits when its free RAM is at least `floor + margin`. Exactly at the requirement fits and one
+byte under does not.
+
+Free RAM is `psoxide-size ram`'s figure and nothing else: `psoxide_size::ram::free_ram` for the
+number, `psoxide_size::ram::fits` for the comparison, called by `ram`, `apply --ram-floor`,
+`choose --ram-floor` and the ladder alike. It stops at `STACK_INIT - STACK_RESERVE`. A game's
+own RAM report has over-reported by 256 B (the link's `RAM` region ends that far above the
+stack's reach), so a game must not print its own `free N`: its `--link` hook should print what
+`psoxide-pgo ram MAP` or `psoxide-size ram MAP` prints, or print nothing and leave the map. The
+ladder measures the map the hook leaves at `$PSOXIDE_PGO_MAP` and warns when the hook's printed
+`free N` disagrees; it uses the printed figure only when the hook left no map.
+
 The bench hook runs with `PSOXIDE_PGO_THRESHOLD`, `_FREE`, `_EXE` and `_IMAGE`
 (the packed disc when `--pack` is given) and prints `score NAME VALUE` lines,
 higher is better, one per window or tape. A game that links through its own
 tool passes `--link CMD` instead of cargo arguments: the command links at
-`$PSOXIDE_PGO_THRESHOLD`, prints `free N` (or leaves its map at
-`$PSOXIDE_PGO_MAP`) and exits non-zero when the link fails or the stack is
+`$PSOXIDE_PGO_THRESHOLD`, leaves its map at `$PSOXIDE_PGO_MAP` (or prints `free N` as
+`psoxide-pgo ram` does) and exits non-zero when the link fails or the stack is
 unsafe.
 
 Selection: each candidate's score on a metric is divided by the best
@@ -865,7 +1228,7 @@ sample profile still describes the code: the share of its samples whose
 missing and changed, and the functions that lost the most. It warns below 98%
 and, for a profile `collect` wrote, refuses below 90% (`PSOXIDE_PGO_ALLOW_STALE=1` builds
 anyway). The report says `STALE PROFILE` only when the build refuses; with the override it says it
-is building anyway, and for a profile made another way it says `low bind, not enforced`. A profile made another way is only reported: the comparison assumes the profile and
+is building anyway, and for a profile made another way it says `low bind, not enforced`. (The name-level gate under "The unbound gate" applies to every profile.) A profile made another way is only reported: the comparison assumes the profile and
 the twin were built with the same optimisation, and oot-psx, which collects from its
 profile-applied build and rebinds onto an unprofiled twin, reads 76.7% on a fresh profile. LLVM has no
 way to notice a stale AutoFDO profile (pseudo-probes would, but this rustc has
@@ -881,3 +1244,19 @@ eligible, the table shows each score's delta against the baseline, and the
 ladder fails, printing the table, when no candidate qualifies.
 
 The pick's scores are written to `scores.txt` in the work directory in the same format, ready to commit as the next run's baseline.
+
+### Dropping what no longer binds: `rebind --prune`
+
+`psoxide-pgo rebind IN ELF OUT --prune` (run in the guest's directory, on the unprofiled twin) writes `OUT` under portable names without the profile lines that cannot bind onto the build: lines of a function the build does not have (or inlined callees it does not have) and lines whose (offset, discriminator) it does not have. Lines that bind keep their counts exactly; a block that lost lines gets its total rewritten to the sum of what is left, and a block with nothing left goes. A profile that binds in full comes back byte for byte. Use it when a repin replaced code the profile had samples on (a new pad poll, a moved driver): the dead lines are what holds the bind share under the 90% gate, and LLVM ignores them anyway, so pruning is the honest alternative to `PSOXIDE_PGO_ALLOW_STALE`. The profile is carried across edits first, so run `stamp` on the result to record the tree it now describes.
+
+### Keeping the hottest functions: `hottest` and `rebind --coverage`
+
+`psoxide-pgo hottest IN OUT --coverage PERMILLE [--cold NAME]...` writes `IN` with only the functions that hold `PERMILLE` of its samples, in their original order, names untouched. Functions are taken by descending samples (ties in file order); a function whose name contains a `--cold` fragment is never taken and does not count towards the share (the CD driver and stream readers top the histogram while the CPU waits for the drive, and do not run in a frame). `--cold` repeats. Lines under a kept function (inlined callees included) travel with it, and the `#` record `stamp` wrote stays, so the result still rebinds. It prints how many functions it kept and the share of the counted samples they hold.
+
+Why: a build with `-profile-sample-accurate` treats every function the profile does not name as cold and optimises it for size, and a profile naming everything the replays touched makes LLVM inline hot callees into dozens of callers. Half-Life measured +47 KB of `.text` and `play()` from 56 KB to 128 KB with the whole profile, against 750 permille of the frame samples with the CD and stream functions cold (its `PGO_HOT_COVERAGE_PERMILLE` and `PGO_COLD_FUNCTIONS`). A game that drives its own `collect` calls this after `stamp` instead of keeping a private copy of the job.
+
+`rebind IN ELF OUT --coverage PERMILLE [--cold NAME]...` does the same cut on the profile before it binds (after `--rename`), so the bind share it reports is the share of the profile that is applied, and `--prune` still works on what is left. Without `--coverage`, `--cold` is an error. The output equals Half-Life's former `profile_prune::prune` on the same input (unit test `matches_half_lifes_own_prune_on_a_profile_of_its_shape` keeps a copy of that function as the oracle).
+
+### Following a moved function: `rebind --rename OLD=NEW`
+
+`psoxide-pgo rebind IN ELF OUT --rename psx_asset::read_u32=psx_asset::le::read_u32` renames every function the profile names `OLD` (portable name, as `bind` prints it, as a header or as an inlined callee) to `NEW` before it binds. Without it a function that moved between modules or crates is `missing`, its samples are dropped, and any inline decision that depended on them goes with them. The flag repeats; two profile names that rename onto one are an error.

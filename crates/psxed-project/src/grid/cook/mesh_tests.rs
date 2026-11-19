@@ -528,8 +528,8 @@ fn a_mesh_shown_by_logic_cooks_its_slot_and_must_not_collide() {
     );
     // With collision on, the instance would still block while hidden.
     world.rooms[0].meshes[0].collide = true;
-    let error = cook(&world)
-        .err()
-        .expect("a colliding switched mesh does not cook");
+    let Err(error) = cook(&world) else {
+        panic!("a colliding switched mesh does not cook");
+    };
     assert!(error.contains("switched by logic"), "{error}");
 }

@@ -178,18 +178,19 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
     // ---- allocation ------------------------------------------------------
 
     /// Step 5 of a note command: give the layer a note.
+    #[inline(never)]
     #[optimize(size)]
     pub(crate) fn layer_alloc(&mut self, p: usize, c: usize, l: usize, same: bool) {
         let o = owner(p, c, l);
-        let ly = self.players[p].channels[c].layers[l];
-        if ly.continuous && ly.bit1 {
+        let (continuous, bit1, bit3, note) = {
+            let ly = &self.players[p].channels[c].layers[l];
+            (ly.continuous, ly.bit1, ly.bit3, ly.note)
+        };
+        if continuous && bit1 {
             return;
         }
-        let reuse = ly.continuous
-            && ly.note != NONE8
-            && ly.bit3
-            && same
-            && self.notes[ly.note as usize].parent == o;
+        let reuse =
+            continuous && note != NONE8 && bit3 && same && self.notes[note as usize].parent == o;
         if !reuse {
             if !same {
                 self.note_decay(o);
@@ -209,6 +210,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
         }
     }
 
+    #[inline(never)]
     #[optimize(size)]
     fn alloc_note(&mut self, o: u16) -> Option<usize> {
         let (p, c, l) = unpack(o);
@@ -288,28 +290,41 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
     fn init_for_layer(&mut self, n: usize, o: u16) {
         let (p, c, l) = unpack(o);
         let ch = &self.players[p].channels[c];
-        let ly = ch.layers[l];
-        let env = if ly.decay_idx == 0 { ch.env } else { ly.env };
+        let (ly_tuned, ly_env, ly_decay) = {
+            let ly = &ch.layers[l];
+            (ly.tuned, ly.env, ly.decay_idx)
+        };
+        let env = if ly_decay == 0 { ch.env } else { ly_env };
         self.order += 1;
         let (font, note_priority, reverb) = (ch.font, ch.note_priority, ch.reverb);
         let nt = &mut self.notes[n];
         nt.prev_parent = NO_OWNER;
         nt.parent = o;
         nt.priority = note_priority;
-        nt.adsr = Adsr::INIT;
-        nt.adsr.player = p as u8;
-        nt.adsr.env = env;
-        nt.adsr.state = EnvState::Initial;
+        // the fields of `Adsr::INIT`, written in place: assigning the constant builds a 32-byte copy in this frame
+        let a = &mut nt.adsr;
+        a.player = p as u8;
+        a.state = EnvState::Initial;
+        a.env = env;
+        a.index = 0;
+        a.delay = 0;
+        a.target = 0;
+        a.velocity = 0;
+        a.current = 0;
+        a.sustain = 0;
+        a.fade_out = 0;
+        a.want_decay = false;
+        a.want_release = false;
         nt.phase = 0;
         nt.live = false;
-        nt.tuned = ly.tuned;
+        nt.tuned = ly_tuned;
         nt.font = font;
         nt.reverb = reverb;
         nt.needs_key_on = true;
         nt.finished = false;
         nt.vib_freq_q16 = 1 << 16;
         let cached = self.bank.and_then(|b| {
-            let info = b.sample(ly.tuned.sample)?;
+            let info = b.sample(ly_tuned.sample)?;
             Some((
                 self.spu_base + info.adpcm_off,
                 info.rate_hz,
@@ -548,6 +563,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
     // ---- players' sound --------------------------------------------------
 
     /// Fade and per-channel property update for player `p`, once per update.
+    #[inline(never)]
     #[optimize(size)]
     pub(crate) fn player_sound(&mut self, p: usize) {
         let mut disable = false;
@@ -658,44 +674,57 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
 
     /// Walk every note: transfer ownership, step envelopes, and write the
     /// voice registers.
+    #[inline(never)]
     #[optimize(size)]
     pub(crate) fn process_notes(&mut self, hw: &mut impl Hw) {
         for n in 0..N {
-            let nt = self.notes[n];
+            let (parent, phase, priority, live) = {
+                let nt = &self.notes[n];
+                (nt.parent, nt.phase, nt.priority, nt.live)
+            };
             let mut run = true;
-            if nt.parent != NO_OWNER {
-                let (p, c, l) = unpack(nt.parent);
+            if parent != NO_OWNER {
+                let (p, c, l) = unpack(parent);
                 let pl = &self.players[p];
                 let ch = &pl.channels[c];
                 let ly = &ch.layers[l];
                 let (ly_note, ly_enabled) = (ly.note, ly.enabled);
-                let layer_gone = ly_note != n as u8 && nt.phase == 0;
+                let layer_gone = ly_note != n as u8 && phase == 0;
                 if layer_gone {
                     let nt = &mut self.notes[n];
                     nt.adsr.want_release = true;
                     nt.adsr.fade_out = FAST_RELEASE_Q24;
                     nt.priority = 1;
                     nt.phase = 2;
-                } else if (!ly_enabled && nt.phase == 0 && nt.priority >= 1)
+                } else if (!ly_enabled && phase == 0 && priority >= 1)
                     || (pl.muted && ch.mute_behavior & MUTE_STOP_NOTES != 0)
                 {
-                    self.note_release(nt.parent);
+                    self.note_release(parent);
                     self.notes[n].list = NoteList::Decaying;
                     self.move_front(n);
                     self.notes[n].priority = 1;
                     self.notes[n].phase = 2;
                 }
-            } else if nt.phase == 0 && nt.priority >= 1 && !nt.live {
+            } else if phase == 0 && priority >= 1 && !live {
                 run = false;
             }
             if !run || self.notes[n].priority == 0 {
                 continue;
             }
-            let nt = self.notes[n];
-            if nt.phase >= 1 || nt.finished {
-                if nt.adsr.state == EnvState::Disabled || nt.finished {
-                    if nt.wanted != NO_OWNER {
-                        let w = nt.wanted;
+            let (parent, phase, finished, disabled, wanted) = {
+                let nt = &self.notes[n];
+                (
+                    nt.parent,
+                    nt.phase,
+                    nt.finished,
+                    nt.adsr.state == EnvState::Disabled,
+                    nt.wanted,
+                )
+            };
+            if phase >= 1 || finished {
+                if disabled || finished {
+                    if wanted != NO_OWNER {
+                        let w = wanted;
                         self.note_disable(n, hw);
                         let (wp, wc, wl) = unpack(w);
                         let _ = (wc, wl);
@@ -713,8 +742,8 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
                             continue;
                         }
                     } else {
-                        if nt.parent != NO_OWNER {
-                            let (p, c, l) = unpack(nt.parent);
+                        if parent != NO_OWNER {
+                            let (p, c, l) = unpack(parent);
                             self.players[p].channels[c].layers[l].bit1 = true;
                         }
                         self.note_disable(n, hw);
@@ -722,9 +751,9 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
                         continue;
                     }
                 }
-            } else if nt.adsr.state == EnvState::Disabled {
-                if nt.parent != NO_OWNER {
-                    let (p, c, l) = unpack(nt.parent);
+            } else if disabled {
+                if parent != NO_OWNER {
+                    let (p, c, l) = unpack(parent);
                     self.players[p].channels[c].layers[l].bit1 = true;
                 }
                 self.note_disable(n, hw);
@@ -747,11 +776,23 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
             let f = self.vibrato_scale(n);
             self.notes[n].vib_freq_q16 = f;
         }
-        let nt = self.notes[n];
-        let (mut freq, mut vel, pan) = if nt.phase >= 1 || nt.live {
+        let (phase, live, parent, tuned_sample, needs_key_on, vib_freq, porta_freq) = {
+            let nt = &self.notes[n];
+            (
+                nt.phase,
+                nt.live,
+                nt.parent,
+                nt.tuned.sample,
+                nt.needs_key_on,
+                nt.vib_freq_q16,
+                nt.porta_freq_q16,
+            )
+        };
+        let (mut freq, mut vel, pan) = if phase >= 1 || live {
+            let nt = &self.notes[n];
             (nt.saved_freq_q16, nt.saved_vel_q15 as u32, nt.saved_pan)
         } else {
-            let (p, c, l) = unpack(nt.parent);
+            let (p, c, l) = unpack(parent);
             let ch = &self.players[p].channels[c];
             let ly = &ch.layers[l];
             if self.players[p].muted && ch.mute_behavior & MUTE_SILENCE != 0 {
@@ -760,7 +801,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
                 (ly.note_freq_q16, ly.note_vel_q15 as u32, ly.note_pan)
             }
         };
-        freq = mul_q16(mul_q16(freq, nt.vib_freq_q16), nt.porta_freq_q16);
+        freq = mul_q16(mul_q16(freq, vib_freq), porta_freq);
         vel = mul_q15(vel, (env >> 9).min(32768));
         let pan = pan.min(127) as usize;
         let l15 = mul_q15(vel, PAN_Q15[pan] as u32);
@@ -772,16 +813,21 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
         let (lv, rv) = (to_spu(l15), to_spu(r15));
         let pitch = (freq >> 4).clamp(1, 0xffff) as u16;
         let voice = self.voice_of[n];
-        if nt.tuned.sample == NONE16 {
+        if tuned_sample == NONE16 {
             return;
         }
-        if nt.needs_key_on {
-            let sample = Sample::resident(
-                SpuAddr::new(nt.sample_addr),
-                nt.sample_rate as u32,
-                nt.sample_blocks as u32,
-            );
-            hw.configure(voice, &sample, nt.sample_looped, pitch);
+        if needs_key_on {
+            let (addr, rate, blocks, looped) = {
+                let nt = &self.notes[n];
+                (
+                    nt.sample_addr,
+                    nt.sample_rate,
+                    nt.sample_blocks,
+                    nt.sample_looped,
+                )
+            };
+            let sample = Sample::resident(SpuAddr::new(addr), rate as u32, blocks as u32);
+            hw.configure(voice, &sample, looped, pitch);
             hw.set_volume(voice, lv, rv);
             hw.key_on(1 << voice);
             let ntm = &mut self.notes[n];
@@ -790,10 +836,10 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
             ntm.last_l = lv;
             ntm.last_r = rv;
             ntm.last_pitch = pitch;
-            ntm.remaining_q8 = if nt.sample_looped {
+            ntm.remaining_q8 = if looped {
                 u32::MAX
             } else {
-                nt.sample_blocks as u32 * 28 * 256
+                blocks as u32 * 28 * 256
             };
             return;
         }

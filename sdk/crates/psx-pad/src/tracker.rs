@@ -17,6 +17,124 @@
 //! }
 //! ```
 
+/// Frame-to-frame edges over an active-high 16-bit button mask. The state is the
+/// previous frame's buttons, one word; [`update`](Self::update) takes this frame's
+/// and returns the [`PadFrame`] that answers what is held, just pressed and just
+/// released. It is the whole job of a menu or a game that reads edges and never
+/// auto-repeats, and it compiles to the same loads, `and`s and stores as the
+/// hand-written `pressed = held & !previous; previous = held`; [`PadTracker`] adds
+/// the per-button hold counters, repeat and the handoff guard.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct PadEdges {
+    prev: u16,
+}
+
+impl PadEdges {
+    /// Nothing held before the first frame.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { prev: 0 }
+    }
+
+    /// Feed the current frame's polled buttons; call exactly once per polled frame.
+    #[inline(always)]
+    pub fn update(&mut self, buttons: u16) -> PadFrame {
+        let frame = PadFrame {
+            held: buttons,
+            prev: self.prev,
+        };
+        self.prev = buttons;
+        frame
+    }
+
+    /// At a resume point (a menu closing, a scene starting), take `buttons` as
+    /// the previous state, so what is held then is not a fresh press on the next frame.
+    #[inline(always)]
+    pub fn settle(&mut self, buttons: u16) {
+        self.prev = buttons;
+    }
+}
+
+/// One frame of button state from [`PadEdges::update`]: what is held now and
+/// what was held the frame before.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct PadFrame {
+    held: u16,
+    prev: u16,
+}
+
+impl PadFrame {
+    /// A frame from this frame's and the previous frame's masks, for a caller
+    /// that keeps its own previous state, and for tests.
+    #[must_use]
+    #[inline(always)]
+    pub const fn new(held: u16, previous: u16) -> Self {
+        Self {
+            held,
+            prev: previous,
+        }
+    }
+
+    /// The buttons held this frame.
+    #[must_use]
+    #[inline(always)]
+    pub const fn held(self) -> u16 {
+        self.held
+    }
+
+    /// The buttons held on the frame before.
+    #[must_use]
+    #[inline(always)]
+    pub const fn previous(self) -> u16 {
+        self.prev
+    }
+
+    /// The buttons that went from released to held this frame.
+    #[must_use]
+    #[inline(always)]
+    pub const fn pressed(self) -> u16 {
+        self.held & !self.prev
+    }
+
+    /// The buttons that went from held to released this frame.
+    #[must_use]
+    #[inline(always)]
+    pub const fn released(self) -> u16 {
+        self.prev & !self.held
+    }
+
+    /// Any button in `mask` is held.
+    #[must_use]
+    #[inline(always)]
+    pub const fn is_held(self, mask: u16) -> bool {
+        self.held & mask != 0
+    }
+
+    /// Any button in `mask` went from released to held this frame.
+    #[must_use]
+    #[inline(always)]
+    pub const fn just_pressed(self, mask: u16) -> bool {
+        self.pressed() & mask != 0
+    }
+
+    /// A group edge: some button in `mask` is held now and none was held on the
+    /// frame before. With one button in `mask` it is [`just_pressed`](Self::just_pressed);
+    /// with several it differs, because a new button pressed while another of the
+    /// group is already held is not a group edge.
+    #[must_use]
+    #[inline(always)]
+    pub const fn group_pressed(self, mask: u16) -> bool {
+        self.held & mask != 0 && self.prev & mask == 0
+    }
+
+    /// Any button in `mask` went from held to released this frame.
+    #[must_use]
+    #[inline(always)]
+    pub const fn just_released(self, mask: u16) -> bool {
+        self.released() & mask != 0
+    }
+}
+
 /// Frame-to-frame tracker over an active-high 16-bit button mask
 /// (the [`PadState::buttons`](crate::PadState) representation).
 #[derive(Copy, Clone)]
@@ -96,6 +214,22 @@ impl PadTracker {
         false
     }
 
+    /// The buttons held on the frame before the last [`update`](Self::update),
+    /// as polled (suppression does not hide them here).
+    #[must_use]
+    pub const fn previous(&self) -> u16 {
+        self.prev
+    }
+
+    /// Make the previous state equal to the current one, for a resume point
+    /// (a menu closing, a scene starting): buttons held now stay held, but none
+    /// counts as just pressed, and none of them reads as just released later
+    /// than a real release. Unlike [`prime`](Self::prime) nothing is hidden
+    /// from [`is_held`](Self::is_held), and held buttons keep their repeat count.
+    pub fn settle(&mut self) {
+        self.prev = self.held;
+    }
+
     /// Suppress every button held right now until it is released and pressed
     /// again. Call at a context handoff (launcher starts a game, pause menu
     /// closes) so a button held across the transition does not fire in the
@@ -117,6 +251,59 @@ mod tests {
 
     const A: u16 = 1 << 0;
     const B: u16 = 1 << 1;
+
+    #[test]
+    fn pad_edges_match_the_tracker_on_every_frame_pair() {
+        // The edge-only type is the tracker's edge half: same answers for every
+        // pair of consecutive masks.
+        for prev in [0u16, A, B, A | B, 0x8001, 0xffff] {
+            for now in [0u16, A, B, A | B, 0x8001, 0xffff] {
+                let (mut e, mut t) = (PadEdges::new(), PadTracker::new());
+                e.update(prev);
+                t.update(prev);
+                let f = e.update(now);
+                t.update(now);
+                for mask in [A, B, A | B, 0xffff] {
+                    assert_eq!(f.just_pressed(mask), t.just_pressed(mask));
+                    assert_eq!(f.just_released(mask), t.just_released(mask));
+                    assert_eq!(f.is_held(mask), t.is_held(mask));
+                }
+                assert_eq!(f.previous(), t.previous());
+                assert_eq!(f.held(), now);
+                assert_eq!(f.pressed(), now & !prev);
+                assert_eq!(f.released(), prev & !now);
+            }
+        }
+    }
+
+    #[test]
+    fn group_edge_needs_the_whole_group_up_before() {
+        let both = A | B;
+        // Neither held before, A now: a group edge. B held before, A new: a per-button edge only.
+        assert!(PadFrame::new(A, 0).group_pressed(both));
+        let f = PadFrame::new(A | B, B);
+        assert!(f.just_pressed(both) && !f.group_pressed(both));
+        assert!(!PadFrame::new(0, 0).group_pressed(both));
+        assert!(!PadFrame::new(A, A).group_pressed(both));
+        for held in 0..4u16 {
+            for prev in 0..4u16 {
+                let f = PadFrame::new(held, prev);
+                assert_eq!(f.group_pressed(both), held & both != 0 && prev & both == 0);
+                assert_eq!(f.group_pressed(A), f.just_pressed(A));
+            }
+        }
+    }
+
+    #[test]
+    fn pad_edges_settle_ends_the_press_and_keeps_the_hold() {
+        let mut e = PadEdges::new();
+        e.update(A);
+        e.settle(A);
+        let f = e.update(A);
+        assert!(f.is_held(A) && !f.just_pressed(A));
+        // A button pressed after the settle is a fresh press.
+        assert!(e.update(A | B).just_pressed(B));
+    }
 
     #[test]
     fn edges() {
@@ -174,6 +361,51 @@ mod tests {
         assert!(t.just_pressed(A));
         assert!(t.is_held(A));
         assert!(!t.is_held(B));
+    }
+
+    #[test]
+    fn previous_is_the_last_frames_polled_mask() {
+        let mut t = PadTracker::new();
+        assert_eq!(t.previous(), 0);
+        t.update(A);
+        assert_eq!(t.previous(), 0);
+        t.update(A | B);
+        assert_eq!(t.previous(), A);
+        t.prime();
+        t.update(A | B);
+        assert_eq!(t.previous(), A | B); // not hidden by prime
+    }
+
+    #[test]
+    fn settle_keeps_held_but_ends_the_press() {
+        let mut t = PadTracker::new();
+        t.update(A);
+        assert!(t.just_pressed(A));
+        t.settle();
+        assert!(t.is_held(A));
+        assert!(!t.just_pressed(A));
+        assert_eq!(t.previous(), A);
+        // A button pressed after the settle is still a fresh press.
+        t.update(A | B);
+        assert!(t.just_pressed(B) && !t.just_pressed(A));
+        // Releasing a settled button is a normal release.
+        t.settle();
+        t.update(B);
+        assert!(t.just_released(A));
+    }
+
+    #[test]
+    fn settle_does_not_hide_buttons_like_prime() {
+        let mut t = PadTracker::new();
+        t.update(A);
+        t.settle();
+        t.update(A);
+        assert!(t.is_held(A));
+        let mut p = PadTracker::new();
+        p.update(A);
+        p.prime();
+        p.update(A);
+        assert!(!p.is_held(A));
     }
 
     #[test]

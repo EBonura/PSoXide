@@ -600,7 +600,7 @@ mod tests {
             spark.glow_scale_q8 < style.glow_scale_q8,
             "a hit is smaller"
         );
-        assert!(COMBAT_FEEDBACK.spark_radius < COMBAT_FEEDBACK.burst_radius);
+        const { assert!(COMBAT_FEEDBACK.spark_radius < COMBAT_FEEDBACK.burst_radius) };
     }
 
     #[test]

@@ -60,20 +60,14 @@ fn move_within(d: &mut [u8], src: usize, dst: usize, len: usize) -> Option<()> {
 #[inline(always)]
 unsafe fn rd_u32(d: &[u8], o: usize) -> u32 {
     // SAFETY: the caller guarantees bytes `o..o + 4` are in `d`.
-    unsafe {
-        let p = d.as_ptr().add(o);
-        u32::from_le_bytes([p.read(), p.add(1).read(), p.add(2).read(), p.add(3).read()])
-    }
+    unsafe { crate::le::read_u32_ptr(d.as_ptr(), o) }
 }
 /// # Safety
 /// `o + 2 <= d.len()`.
 #[inline(always)]
 unsafe fn rd_u16(d: &[u8], o: usize) -> u16 {
     // SAFETY: the caller guarantees bytes `o..o + 2` are in `d`.
-    unsafe {
-        let p = d.as_ptr().add(o);
-        u16::from_le_bytes([p.read(), p.add(1).read()])
-    }
+    unsafe { crate::le::read_u16_ptr(d.as_ptr(), o) }
 }
 /// # Safety
 /// `o + 2 <= d.len()`.
@@ -1306,7 +1300,7 @@ impl Model {
             // SAFETY: same contract as this function's.
             let v = unsafe { self.vertex_unchecked(index) };
             GteVertexWords {
-                xy: ((v.y as u16 as u32) << 16) | v.x as u16 as u32,
+                xy: psx_hw::gpu::pack_vertex(v.x, v.y),
                 z: v.z as i32 as u32,
             }
         }

@@ -1,29 +1,31 @@
 //! The console side: the real drive, the one global [`Engine`], and the
-//! exception wrapper that feeds it.
+//! dispatcher handler that feeds it.
 //!
 //! Everything here is for the target. (It also compiles under `cfg(doc)` so
 //! the documentation shows it; none of it may run on the host.)
 //!
 //! # Interrupt path
 //!
-//! The wrapper sits in the general exception vector in front of psx-rt's
-//! handler, or in front of another wrapper that leads there (the pad engine's),
-//! whichever was in the vector when [`install`] ran. For an interrupt with the CD source pending it saves the
-//! interrupted CPU context, switches to a private 768-byte stack, calls the
-//! engine for one sector or one response, restores the context, and jumps to
-//! psx-rt's handler either way, so the VBlank counter, the display flip and
-//! the fault handling run exactly as before. Anything else goes straight
-//! through. The wrapper never touches the interrupted stack, which is what
-//! makes it safe with a scratchpad stack; [`install`] declares it so
-//! (`psx_rt::interrupts::declare_stack_safe_handler`).
+//! The handler is registered with psx-rt's dispatcher (`psx_rt::dispatch`)
+//! for the CD source while the engine has the source open (a foreground call
+//! masks it for its own length without unregistering). For an interrupt
+//! with the CD source pending the dispatcher saves the interrupted CPU
+//! context once on its private stack and calls the engine for one sector or
+//! one response; psx-rt's own handler has already done the VBlank counter,
+//! the display flip and the fault checks, and returns through the
+//! GTE-aware path. The dispatcher never touches the interrupted stack, which
+//! is what makes it safe with a scratchpad stack.
 //!
 //! # Foreground path
 //!
-//! Every foreground call closes the CD source in `I_MASK` first, so the
-//! handler cannot run while the engine is being touched, and opens it again
-//! afterwards if the engine wants it open.
+//! Every foreground call clears the CD bit in `I_MASK` first, so the handler
+//! cannot run while the engine is being touched, and sets it again afterwards
+//! if the engine still has the source open. The registration changes only when
+//! the engine opens or closes the source, not around every call.
 
-use crate::engine::{Config, Engine, LeaseState, Owner, Phase, StreamStats};
+use crate::engine::{
+    Config, CountedEngine, Engine, LeanEngine, LeaseState, Owner, Phase, SingleEngine, StreamStats,
+};
 use crate::hw::CdHw;
 use crate::request::{Request, RequestState, SubmitError, Ticket};
 use core::cell::UnsafeCell;
@@ -39,29 +41,41 @@ const CD_BIT: u32 = 1 << source::CDROM;
 const PARAM_POLLS: u32 = 32;
 /// Status reads to wait for the data FIFO to fill after a sector interrupt.
 const FIFO_POLLS: u32 = 256;
-/// Bytes of private stack the handler runs on.
+/// Bytes of the private stack the handler runs on: the dispatcher's, shared with
+/// every other handler.
 ///
 /// The deepest call measured used 248 bytes (a Half-Life run of five weapon
-/// switches in the emulator, every sector popped by the handler, with the stack
-/// painted by [`install`]); the pad engine's comparable handler gets the same 768.
-/// RAM matters to the games that fit tight, and 2 KiB of it sat unused.
-pub const HANDLER_STACK_BYTES: usize = 768;
-/// Fill byte of the handler stack, to measure how much of it was used.
-const STACK_FILL: u8 = 0xa5;
+/// switches in the emulator, every sector popped by the handler), and the
+/// dispatcher's saved context takes 112 more. A program that sets a smaller
+/// `PSX_DISPATCH_STACK_BYTES` proves its handlers fit with `stack-guard`
+/// (`stack-guard EXE MAP`; the counted, lean and single handlers use 80 to 88
+/// bytes of frames, the full engine's recursion cannot be bounded statically).
+pub const HANDLER_STACK_BYTES: usize = psx_rt::dispatch::STACK_BYTES;
 
 // -------------------------------------------------------------------- drive
 
-/// The CD-ROM controller, through the SDK's register steps.
-pub struct Mmio {
+/// The CD-ROM controller, through the SDK's register steps. `SINGLE`, `LEAN` and `COUNT` pick
+/// which of the four transports its interrupt handler belongs to: the full [`Engine`], the
+/// [`SingleEngine`] of the [`single`] module, the [`LeanEngine`] of the [`lean`] module, or the
+/// [`CountedEngine`] of the [`counted`] module (`LEAN` and `COUNT` both on).
+pub struct Mmio<const SINGLE: bool = false, const LEAN: bool = false, const COUNT: bool = false> {
     time_handler: bool,
 }
 
-impl Mmio {
+impl<const SINGLE: bool, const LEAN: bool, const COUNT: bool> Mmio<SINGLE, LEAN, COUNT> {
     const fn new() -> Self {
         Mmio {
             time_handler: false,
         }
     }
+}
+
+/// Poll the parameter FIFO for room: [`PARAM_POLLS`] status reads at most. Out of line, with the
+/// count hidden from the optimiser, because the compiler otherwise unrolls the polls into 770
+/// bytes at every command site.
+#[inline(never)]
+fn wait_room(cd: &mut Cd) -> bool {
+    cd.wait_parameter_room(core::hint::black_box(PARAM_POLLS))
 }
 
 /// The controller token. The transport owns the controller whenever the
@@ -74,7 +88,7 @@ fn token() -> Cd {
     unsafe { Cd::steal() }
 }
 
-impl CdHw for Mmio {
+impl<const SINGLE: bool, const LEAN: bool, const COUNT: bool> CdHw for Mmio<SINGLE, LEAN, COUNT> {
     const TRACE: bool = cfg!(feature = "trace");
 
     fn issue(&mut self, command: u8, params: &[u8]) -> bool {
@@ -84,7 +98,7 @@ impl CdHw for Mmio {
         cd.discard_response();
         cd.reset_parameter_fifo();
         for &param in params {
-            if !cd.wait_parameter_room(PARAM_POLLS) {
+            if !wait_room(&mut cd) {
                 return false;
             }
             cd.send_parameter_byte(param);
@@ -112,6 +126,13 @@ impl CdHw for Mmio {
         token().acknowledge_irq(bits);
     }
 
+    #[inline(never)]
+    fn finish_response(&mut self, bits: u8) {
+        let mut cd = token();
+        cd.discard_response();
+        cd.acknowledge_irq(bits | flag::ACK_RESPONSE);
+    }
+
     fn silence_output(&mut self) {
         token().set_irq_enable_mask(0);
     }
@@ -120,6 +141,7 @@ impl CdHw for Mmio {
         token().clear_data_request();
     }
 
+    #[inline(never)]
     unsafe fn pop_sector(&mut self, destination: *mut u32, store_words: usize) -> bool {
         let mut cd = token();
         cd.request_data();
@@ -155,23 +177,30 @@ impl CdHw for Mmio {
         // Only the mask bit: a flag that arrived while the source was closed
         // must still be pending when it opens, or its sector is lost. (An
         // acknowledge of the CPU-side bit here dropped sectors in the first
-        // emulator run, because the foreground closes the source around
+        // emulator run, because the foreground masks the source around
         // every call.) Stale bits are cleared by `attach` and by the
         // preamble of every command.
         //
-        // psx-rt's handler would acknowledge a CD interrupt that reaches it
-        // pending, behind another wrapper's handler or this one's, so the
-        // source is claimed while it is open, when this wrapper is the one
-        // servicing it. Closed, nobody here services it and the claim is
-        // dropped: code that opens the source itself (a polled read, audio
-        // playback) then has its strays acknowledged by psx-rt as before,
-        // instead of an exception taken again for ever.
+        // The handler is registered with the dispatcher only while the source is
+        // open. Closed, nobody here services it: code that opens the source itself (a
+        // polled read, audio playback) has its strays acknowledged by psx-rt, instead
+        // of an exception taken again for ever. The registration comes before the
+        // mask bit and goes after it, so the source is never open without it.
         if enabled {
-            psx_rt::interrupts::claim_interrupt_sources(CD_BIT);
+            let handler = if LEAN && COUNT {
+                on_counted_interrupt
+            } else if LEAN {
+                on_lean_interrupt
+            } else if SINGLE {
+                on_single_interrupt
+            } else {
+                on_cd_interrupt
+            };
+            psx_rt::dispatch::attach(psx_rt::dispatch::Source::Cdrom, handler);
             irq::set_mask(irq::mask() | CD_BIT);
         } else {
             irq::set_mask(irq::mask() & !CD_BIT);
-            psx_rt::interrupts::release_interrupt_sources(CD_BIT);
+            psx_rt::dispatch::detach(psx_rt::dispatch::Source::Cdrom);
         }
     }
 
@@ -205,13 +234,116 @@ impl CdHw for Mmio {
 
 // ------------------------------------------------------------------- state
 
-struct Global(UnsafeCell<Engine<Mmio>>);
+struct Global<T>(UnsafeCell<T>);
 
 // SAFETY: the engine is reached from one CPU only, from the foreground with
 // the CD source closed or from the interrupt handler, never both at once.
-unsafe impl Sync for Global {}
+unsafe impl<T> Sync for Global<T> {}
 
-static ENGINE: Global = Global(UnsafeCell::new(Engine::new(Mmio::new(), Config::DEFAULT)));
+/// The full transport's engine type, and the single-transfer one's.
+type Full = Engine<Mmio>;
+type Single = SingleEngine<Mmio<true>>;
+type Lean = LeanEngine<Mmio<true, true>>;
+type Counted = CountedEngine<Mmio<true, true, true>>;
+
+static ENGINE: Global<Full> = Global(UnsafeCell::new(Engine::new(Mmio::new(), Config::DEFAULT)));
+static SINGLE: Global<Single> = Global(UnsafeCell::new(SingleEngine::single(
+    Mmio::new(),
+    Config::DEFAULT,
+)));
+
+// The lean and counted engines are zero-initialised, so each lives in `.bss` (a `.data` static
+// costs its bytes in the executable and, in a section aligned for another input, padding). The
+// configuration the zero bytes stand for is replaced by `begin`, which every install runs first.
+static LEAN: Global<Lean> = Global(UnsafeCell::new(
+    // SAFETY: `Mmio` is one `bool`, valid at zero.
+    unsafe { LeanEngine::zeroed() },
+));
+
+static COUNTED: Global<Counted> = Global(UnsafeCell::new(
+    // SAFETY: as `LEAN`.
+    unsafe { CountedEngine::zeroed() },
+));
+
+/// What the foreground and handler glue needs of an engine: where its one global lives and
+/// the few operations on it. The two engines have the same operations; a program links the
+/// glue of the one it uses.
+trait Transport: Sized + 'static {
+    /// Whether the engine counts and publishes `PSX_CD_STATS`.
+    const STATS: bool;
+    /// Whether the engine can lease the drive to audio code.
+    const LEASE: bool;
+    fn global() -> &'static Global<Self>;
+    fn interrupt(&mut self);
+    fn sync_source(&mut self);
+    fn source_open(&self) -> bool;
+    unsafe fn publish(&self, out: *mut StreamStats);
+    fn begin(&mut self, config: Config);
+    fn detach(&mut self) -> bool;
+    fn cancel_all(&mut self);
+    fn quiet(&self) -> bool;
+    fn owner(&self) -> Owner;
+}
+
+macro_rules! transport {
+    ($engine:ty, $global:ident, $stats:expr, $lease:expr) => {
+        impl Transport for $engine {
+            const STATS: bool = $stats;
+            const LEASE: bool = $lease;
+            fn global() -> &'static Global<Self> {
+                &$global
+            }
+            #[inline(always)]
+            fn interrupt(&mut self) {
+                self.on_interrupt();
+            }
+            #[inline(always)]
+            fn sync_source(&mut self) {
+                Engine::sync_source(self);
+            }
+            #[inline(always)]
+            fn source_open(&self) -> bool {
+                self.is_source_open()
+            }
+            #[inline(always)]
+            unsafe fn publish(&self, out: *mut StreamStats) {
+                // SAFETY: the caller's contract is `publish_to`'s.
+                unsafe { self.publish_to(out) }
+            }
+            #[inline(always)]
+            fn begin(&mut self, config: Config) {
+                if $stats {
+                    self.hw_mut().time_handler = config.time_handler;
+                }
+                self.configure(config);
+                self.attach();
+            }
+            #[inline(always)]
+            fn detach(&mut self) -> bool {
+                Engine::detach(self)
+            }
+            #[inline(always)]
+            fn cancel_all(&mut self) {
+                Engine::cancel_all(self);
+            }
+            #[inline(always)]
+            fn quiet(&self) -> bool {
+                self.is_idle() && self.queued_count() == 0
+            }
+            #[inline(always)]
+            fn owner(&self) -> Owner {
+                Engine::owner(self)
+            }
+        }
+    };
+}
+
+// The last two: whether the engine counts and publishes statistics, and whether it leases the
+// drive to audio code.
+transport!(Full, ENGINE, true, true);
+transport!(Single, SINGLE, true, false);
+transport!(Lean, LEAN, false, false);
+transport!(Counted, COUNTED, false, false);
 
 /// The controller token while the transport holds it.
 struct TokenSlot(UnsafeCell<Option<Cd>>);
@@ -238,27 +370,6 @@ impl TokenSlot {
 }
 
 static TOKEN: TokenSlot = TokenSlot(UnsafeCell::new(None));
-
-#[repr(C, align(16))]
-struct Stack([u8; HANDLER_STACK_BYTES]);
-
-/// The handler's private stack, painted with `0xa5` by [`install`] so a tool
-/// can see how much of it a run used ([`handler_stack_unused_bytes`] does the
-/// same from inside).
-#[no_mangle]
-static mut PSX_CD_IRQ_STACK: Stack = Stack([0; HANDLER_STACK_BYTES]);
-/// Where the wrapper saves the interrupted context.
-#[no_mangle]
-static mut PSX_CD_IRQ_CONTEXT: [u32; 34] = [0; 34];
-/// The handler the wrapper hands every exception on to: whatever the vector
-/// led to when [`install`] first ran (psx-rt's, or another wrapper such as the
-/// pad engine's), so the wrappers can be installed in either order. Zero until
-/// then.
-#[no_mangle]
-static mut PSX_CD_NEXT_HANDLER: u32 = 0;
-/// `psx_rt::interrupts::vector_epoch` when the wrapper was put in the vector.
-#[cfg(target_arch = "mips")]
-static mut PSX_CD_EPOCH: u32 = 0;
 
 /// The counters, as one block for tools that read guest memory:
 /// [`StreamStats`] with its field order. Updated after every interrupt and
@@ -289,39 +400,42 @@ pub static mut PSX_CD_TRACE: [u32; 128] = [0; 128];
 #[no_mangle]
 pub static mut PSX_CD_TRACE_N: u32 = 0;
 
-/// Copy the counters into `PSX_CD_STATS`. Out of line: every wrapper and the
+/// Copy the counters into `PSX_CD_STATS`. Out of line: every foreground entry and the
 /// handler end with this, and inlined it was a dozen loads and stores in each.
 #[inline(never)]
-fn publish(engine: &Engine<Mmio>) {
+fn publish<T: Transport>(engine: &T) {
     // SAFETY: a plain store of a `repr(C)` block that only this module
     // writes; tools read it from outside the program.
-    unsafe { core::ptr::write_volatile(&raw mut PSX_CD_STATS, engine.stats()) }
+    unsafe { engine.publish(&raw mut PSX_CD_STATS) }
 }
 
-/// Start of a foreground section: close the CD source before the engine
+/// Start of a foreground section: mask the CD source before the engine
 /// reference exists, so the handler cannot be running (or start) while this
-/// one is live. Out of line so each wrapper carries a call, not the sequence.
+/// one is live. Only the `I_MASK` bit: the engine's own view of the source, and
+/// the dispatcher registration that goes with it, stay as they are. Out of line
+/// so each caller carries a call, not the sequence.
 #[inline(never)]
-fn enter() -> &'static mut Engine<Mmio> {
+fn enter<T: Transport>() -> &'static mut T {
     let mask = irq::mask();
     irq::set_mask(mask & !CD_BIT);
-    // Closed, nothing here services the source: the claim goes until `leave`
-    // opens it again.
-    psx_rt::interrupts::release_interrupt_sources(CD_BIT);
-    // SAFETY: the source is closed, so the handler (the only other user of
-    // the engine) cannot run until `leave` reopens it, and no other
+    // SAFETY: the source is masked, so the handler (the only other user of
+    // the engine) cannot run until `leave` unmasks it, and no other
     // foreground reference exists because the CPU has one thread of control.
-    let engine = unsafe { &mut *ENGINE.0.get() };
-    engine.note_source_closed();
-    engine
+    unsafe { &mut *T::global().0.get() }
 }
 
-/// End of a foreground section: reopen the source if the engine wants it and
-/// publish the counters.
+/// End of a foreground section: open or close the source as the engine now
+/// wants it (registering or unregistering the handler with it), unmask it if
+/// it is open, and publish the counters.
 #[inline(never)]
-fn leave(engine: &mut Engine<Mmio>) {
+fn leave<T: Transport>(engine: &mut T) {
     engine.sync_source();
-    publish(engine);
+    if engine.source_open() {
+        irq::set_mask(irq::mask() | CD_BIT);
+    }
+    if T::STATS {
+        publish(engine);
+    }
 }
 
 /// Run `f` on the engine with the CD source closed, then publish the
@@ -330,172 +444,59 @@ fn leave(engine: &mut Engine<Mmio>) {
 /// The section's entry and exit are calls, which the compiler cannot move
 /// the engine accesses across (both touch `I_MASK` through volatile stores).
 #[inline(always)]
-fn with_engine<R>(f: impl FnOnce(&mut Engine<Mmio>) -> R) -> R {
-    let engine = enter();
+fn with<T: Transport, R>(f: impl FnOnce(&mut T) -> R) -> R {
+    let engine = enter::<T>();
     let result = f(engine);
     leave(engine);
     result
 }
 
-// -------------------------------------------------------------- the wrapper
-
-#[cfg(target_arch = "mips")]
-core::arch::global_asm!(
-    r#"
-    .set noreorder
-    .set noat
-    .section .text.psx_cdstream_irq
-    .globl psx_cdstream_exception_wrapper
-psx_cdstream_exception_wrapper:
-    # Not an interrupt: straight through.
-    mfc0  $26, $13
-    nop
-    andi  $26, $26, 0x007c
-    bnez  $26, 9f
-    nop
-    # An interrupt, but is the CD source one of the pending, enabled ones?
-    lui   $26, {io_hi}
-    lw    $27, {i_stat}($26)
-    lw    $26, {i_mask}($26)
-    nop
-    and   $27, $27, $26
-    andi  $27, $27, {cd_bit}
-    beqz  $27, 9f
-    nop
-    # Save the interrupted context (everything but $k0/$k1) in our own block.
-    lui   $26, %hi({context})
-    addiu $26, $26, %lo({context})
-    sw    $1, 0($26)
-    sw    $2, 4($26)
-    sw    $3, 8($26)
-    sw    $4, 12($26)
-    sw    $5, 16($26)
-    sw    $6, 20($26)
-    sw    $7, 24($26)
-    sw    $8, 28($26)
-    sw    $9, 32($26)
-    sw    $10, 36($26)
-    sw    $11, 40($26)
-    sw    $12, 44($26)
-    sw    $13, 48($26)
-    sw    $14, 52($26)
-    sw    $15, 56($26)
-    sw    $16, 60($26)
-    sw    $17, 64($26)
-    sw    $18, 68($26)
-    sw    $19, 72($26)
-    sw    $20, 76($26)
-    sw    $21, 80($26)
-    sw    $22, 84($26)
-    sw    $23, 88($26)
-    sw    $24, 92($26)
-    sw    $25, 96($26)
-    sw    $28, 100($26)
-    sw    $29, 104($26)
-    sw    $30, 108($26)
-    sw    $31, 112($26)
-    mfhi  $27
-    sw    $27, 116($26)
-    mflo  $27
-    sw    $27, 120($26)
-    # Our own stack; the interrupted one is never written.
-    lui   $29, %hi({stack}+{stack_bytes})
-    addiu $29, $29, %lo({stack}+{stack_bytes})
-    addiu $29, $29, -16
-    jal   {handler}
-    nop
-    lui   $26, %hi({context})
-    addiu $26, $26, %lo({context})
-    lw    $27, 116($26)
-    nop
-    mthi  $27
-    lw    $27, 120($26)
-    nop
-    mtlo  $27
-    lw    $1, 0($26)
-    lw    $2, 4($26)
-    lw    $3, 8($26)
-    lw    $4, 12($26)
-    lw    $5, 16($26)
-    lw    $6, 20($26)
-    lw    $7, 24($26)
-    lw    $8, 28($26)
-    lw    $9, 32($26)
-    lw    $10, 36($26)
-    lw    $11, 40($26)
-    lw    $12, 44($26)
-    lw    $13, 48($26)
-    lw    $14, 52($26)
-    lw    $15, 56($26)
-    lw    $16, 60($26)
-    lw    $17, 64($26)
-    lw    $18, 68($26)
-    lw    $19, 72($26)
-    lw    $20, 76($26)
-    lw    $21, 80($26)
-    lw    $22, 84($26)
-    lw    $23, 88($26)
-    lw    $24, 92($26)
-    lw    $25, 96($26)
-    lw    $28, 100($26)
-    lw    $29, 104($26)
-    lw    $30, 108($26)
-    lw    $31, 112($26)
-    nop
-9:
-    # The handler that was in the vector before this one: psx-rt's (VBlank,
-    # display flip, faults, strays, and the return), or another wrapper that
-    # leads there.
-    lui   $26, %hi({next})
-    lw    $26, %lo({next})($26)
-    nop
-    jr    $26
-    nop
-    .set at
-    .set reorder
-    "#,
-    io_hi = const psx_hw::memory::io::BASE >> 16,
-    i_stat = const psx_hw::irq::I_STAT & 0xFFFF,
-    i_mask = const psx_hw::irq::I_MASK & 0xFFFF,
-    cd_bit = const CD_BIT,
-    stack = sym PSX_CD_IRQ_STACK,
-    stack_bytes = const HANDLER_STACK_BYTES,
-    context = sym PSX_CD_IRQ_CONTEXT,
-    next = sym PSX_CD_NEXT_HANDLER,
-    handler = sym psx_cdstream_interrupt,
-);
-
-// The wrapper reaches both registers with one `lui` of the I/O window and a
-// signed 16-bit offset.
-#[cfg(target_arch = "mips")]
-const _: () = {
-    let window = psx_hw::memory::io::BASE >> 16;
-    assert!(psx_hw::irq::I_STAT >> 16 == window && psx_hw::irq::I_MASK >> 16 == window);
-    assert!(psx_hw::irq::I_STAT & 0xffff < 0x8000 && psx_hw::irq::I_MASK & 0xffff < 0x8000);
-};
-
-#[cfg(target_arch = "mips")]
-extern "C" {
-    fn psx_cdstream_exception_wrapper();
-    #[link_name = "__psx_rt_exception_handler"]
-    fn psx_rt_exception_handler();
+/// [`with`] on the full engine.
+#[inline(always)]
+fn with_engine<R>(f: impl FnOnce(&mut Full) -> R) -> R {
+    with::<Full, R>(f)
 }
 
-/// Called by the wrapper, on the private stack, with CPU interrupts off.
-#[no_mangle]
-extern "C" fn psx_cdstream_interrupt() {
-    // SAFETY: exception entry masks CPU interrupts, and every foreground
-    // access closes the CD source before it takes its reference, so this is
-    // the only live reference to the engine.
-    let engine = unsafe { &mut *ENGINE.0.get() };
-    engine.on_interrupt();
-    publish(engine);
+// ------------------------------------------------------------------ handler
+
+/// The dispatcher's handler for the CD source (`psx_rt::dispatch`): runs with CPU
+/// interrupts off on the dispatcher's stack. It acknowledges `I_STAT` itself, after
+/// the engine has read and cleared the controller's flags.
+fn on_cd_interrupt() {
+    handle::<Full>();
+}
+
+/// The same for the single-transfer engine.
+fn on_single_interrupt() {
+    handle::<Single>();
+}
+
+/// The same for the lean engine.
+fn on_lean_interrupt() {
+    handle::<Lean>();
+}
+
+/// The same for the lean engine with the sector counter.
+fn on_counted_interrupt() {
+    handle::<Counted>();
+}
+
+#[inline(always)]
+fn handle<T: Transport>() {
+    // SAFETY: the dispatcher runs with CPU interrupts off, and every foreground
+    // access closes the CD source before it takes its reference, so this is the
+    // only live reference to the engine.
+    let engine = unsafe { &mut *T::global().0.get() };
+    engine.interrupt();
+    if T::STATS {
+        publish(engine);
+    }
 }
 
 // ------------------------------------------------------------------- set-up
 
-/// Take over the CD-ROM controller: put the exception wrapper in front of
-/// psx-rt's handler and start serving requests.
+/// Take over the CD-ROM controller and start serving requests; the handler
+/// registers with the dispatcher whenever the CD source is open.
 ///
 /// The controller must be idle and nobody else may use it from now on: if the
 /// boot code read with `SectorReader`, call `SectorReader::release` for the
@@ -503,13 +504,26 @@ extern "C" fn psx_cdstream_interrupt() {
 /// with the polled reader again) or [`take_audio_lease`] (to play audio).
 ///
 /// If psx-rt's handler is not in the vector yet this installs it first
-/// (`install_vblank_counter`); call `install` after any code that installs it
-/// itself, since that call would overwrite the wrapper.
+/// (`install_vblank_counter`).
 ///
 /// Returns the token if the transport is already installed.
 ///
 /// With [`Config::time_handler`] the transport takes Timer 2 for itself.
+///
+/// # Errors
+///
+/// The token comes back when the transport is already installed or the CD source
+/// already has a handler.
+///
+/// # Panics
+///
+/// Never in practice: the token it takes back was stored a few lines earlier.
 pub fn install(cd: Cd, config: Config) -> Result<(), Cd> {
+    install_in::<Full>(cd, config)
+}
+
+#[inline(always)]
+fn install_in<T: Transport>(cd: Cd, config: Config) -> Result<(), Cd> {
     if TOKEN.is_held() {
         return Err(cd);
     }
@@ -519,122 +533,61 @@ pub fn install(cd: Cd, config: Config) -> Result<(), Cd> {
     if !psx_rt::interrupts::is_stack_safe_handler_installed() {
         psx_rt::interrupts::install_vblank_counter();
     }
-    if config.time_handler {
+    if T::STATS && config.time_handler {
         // System clock / 8, free running, no interrupt: wraps after about
         // 15.5 ms.
         timers::set_mode(Timer::Timer2, psx_hw::timers::mode::clock_source(2));
     }
-    paint_stack();
-    install_vector();
-    with_engine(|engine| {
-        engine.hw_mut().time_handler = config.time_handler;
-        engine.configure(config);
-        engine.attach();
-    });
+    with::<T, _>(|engine| engine.begin(config));
     Ok(())
 }
 
-fn paint_stack() {
-    // SAFETY: the handler cannot run (the source is closed) and nothing else
-    // uses this stack; plain volatile stores over a static this module owns.
-    unsafe {
-        let stack = (&raw mut PSX_CD_IRQ_STACK).cast::<u8>();
-        for i in 0..HANDLER_STACK_BYTES {
-            stack.add(i).write_volatile(STACK_FILL);
-        }
-    }
-}
-
-#[cfg(target_arch = "mips")]
-fn install_vector() {
-    const EXCEPTION_VECTOR: *mut u32 = 0x8000_0080 as *mut u32;
-    const J_OPCODE: u32 = 0x0800_0000;
-    const J_MASK: u32 = 0xfc00_0000;
-    let wrapper = psx_cdstream_exception_wrapper as *const () as usize as u32;
-    // SAFETY: the general exception vector is two words of kernel RAM. The
-    // handler it leads to now is kept in a static the wrapper reads, before the
-    // vector is rewritten; it is psx-rt's unless something chained in front of
-    // psx-rt (the pad engine's wrapper) is there, and anything that is not a
-    // `j` is replaced by psx-rt's as before. A wrapper that has been installed
-    // since psx-rt last reset the vector is not put in front again: it is already in the chain, and
-    // writing the vector would drop whatever was installed since. The wrapper
-    // switches stacks before it stores anything and hands over with `$sp` as
-    // it found it. The instruction cache is flushed so the CPU fetches the new
-    // words, and the wrapper is declared stack-safe so scratchpad stacks stay
-    // allowed.
-    unsafe {
-        // psx-rt's handler going back into the vector (anything that calls
-        // `install_vblank_counter`) drops this wrapper from the chain; the
-        // epoch says whether that has happened since.
-        let epoch = psx_rt::interrupts::vector_epoch();
-        if core::ptr::read_volatile(&raw const PSX_CD_NEXT_HANDLER) != 0
-            && core::ptr::read_volatile(&raw const PSX_CD_EPOCH) == epoch
-        {
-            return;
-        }
-        core::ptr::write_volatile(&raw mut PSX_CD_EPOCH, epoch);
-        let current = core::ptr::read_volatile(EXCEPTION_VECTOR);
-        let next = if current & J_MASK == J_OPCODE {
-            ((current & !J_MASK) << 2) | 0x8000_0000
-        } else {
-            psx_rt_exception_handler as *const () as usize as u32
-        };
-        core::ptr::write_volatile(&raw mut PSX_CD_NEXT_HANDLER, next);
-        core::ptr::write_volatile(EXCEPTION_VECTOR, J_OPCODE | ((wrapper >> 2) & 0x03ff_ffff));
-        core::ptr::write_volatile(EXCEPTION_VECTOR.add(1), 0);
-        psx_rt::cache::flush_instruction_cache();
-        psx_rt::interrupts::declare_stack_safe_handler(psx_cdstream_exception_wrapper);
-    }
-}
-
-#[cfg(not(target_arch = "mips"))]
-fn install_vector() {}
-
 /// Give the controller back to polled code. Succeeds only when the transport
 /// is idle with nothing queued; call [`cancel_all`] and poll [`is_idle`]
-/// first. The wrapper stays in the exception vector (a few instructions per
-/// exception) but the CD source is closed.
+/// first. The CD source is closed and the handler unregistered.
+#[must_use]
 pub fn uninstall() -> Option<Cd> {
-    let detached = with_engine(Engine::detach);
+    uninstall_in::<Full>()
+}
+
+#[inline(always)]
+fn uninstall_in<T: Transport>() -> Option<Cd> {
+    let detached = with::<T, _>(T::detach);
     if !detached {
         return None;
     }
     TOKEN.take()
 }
 
-/// Put the transport in the exception vector if it is not there, taking the
-/// controller token itself. For a program that reads with the polled
+/// Install the transport if it is not installed, taking the controller token itself. For a program that reads with the polled
 /// `SectorReader` and hands only some reads (a streamed asset the frame loop must
 /// not wait for) to the transport: call it before each such read and nothing else
 /// needs tracking.
 ///
-/// Idempotent. `install_vblank_counter` puts psx-rt's handler back in the vector,
-/// which drops the wrapper; this notices (by [`psx_rt::interrupts::vector_epoch`])
-/// and installs again, which a program that calls `install_vblank_counter` for
-/// every scene (Half-Life does, for every map) must do. Returns `false` when it
-/// could not: a read is in flight or queued while the vector was reset, or an
-/// audio lease holds the controller. Polled commands may run whenever no request
+/// Idempotent, and `install_vblank_counter` (which Half-Life calls for every map)
+/// does not disturb it: the registration is with the dispatcher, not the vector.
+/// Returns `false` when it could not: an audio lease holds the controller. Polled commands may run whenever no request
 /// is queued or active and [`is_idle`] reads true: with
-/// [`IrqMaskPolicy::OnlyWhileBusy`] the CD interrupt source is closed then.
+/// [`crate::IrqMaskPolicy::OnlyWhileBusy`] the CD interrupt source is closed then.
 #[must_use]
 pub fn ensure_installed(config: Config) -> bool {
+    ensure_in::<Full>(config)
+}
+
+#[inline(always)]
+fn ensure_in<T: Transport>(config: Config) -> bool {
     if TOKEN.is_held() {
-        // SAFETY: a plain read of a word only this module writes.
-        let installed = unsafe { core::ptr::read_volatile(&raw const PSX_CD_EPOCH) };
-        if installed == psx_rt::interrupts::vector_epoch() {
-            return true;
-        }
-        if uninstall().is_none() {
-            return false;
-        }
-    } else if owner() == Owner::Audio {
+        // The handler stays registered whatever calls `install_vblank_counter`.
+        return true;
+    }
+    if T::LEASE && with::<T, _>(|engine| engine.owner()) == Owner::Audio {
         return false;
     }
     // SAFETY: a token is a logic guard (see `psx_io::periph`). The caller keeps
     // polled commands away from the controller while a request is queued or
     // active, which is the only time the transport programs it.
     let cd = unsafe { Cd::steal() };
-    install(cd, config).is_ok()
+    install_in::<T>(cd, config).is_ok()
 }
 
 /// Cancel every read and wait, for at most `max_vblanks` VBlanks, until the drive
@@ -646,11 +599,16 @@ pub fn ensure_installed(config: Config) -> bool {
 /// fixed number of polls, so a stopped VBlank clock cannot hang it.
 #[must_use]
 pub fn stop_and_wait(max_vblanks: u32) -> bool {
-    cancel_all();
+    stop_in::<Full>(max_vblanks)
+}
+
+#[inline(always)]
+fn stop_in<T: Transport>(max_vblanks: u32) -> bool {
+    with::<T, _>(T::cancel_all);
     let start = psx_rt::interrupts::vblank_count();
     let mut polls = 0u32;
     loop {
-        if is_idle() && queued_count() == 0 {
+        if with::<T, _>(|engine| engine.quiet()) {
             return true;
         }
         polls += 1;
@@ -793,17 +751,313 @@ pub fn withdraw_audio_lease() -> bool {
 
 // --------------------------------------------------------------- diagnostics
 
-/// Bytes of the handler's private stack never touched since [`install`]
-/// painted it. The handler's own frames plus the saved-context area must fit
-/// in the rest; a value near 0 means it overflowed.
+/// Bytes of the dispatcher's private stack (shared with every handler) never
+/// touched since boot. A value near 0 means a handler overflowed it.
 pub fn handler_stack_unused_bytes() -> usize {
-    let mut unused = 0;
-    // SAFETY: plain volatile reads of a static this module owns.
-    unsafe {
-        let stack = (&raw const PSX_CD_IRQ_STACK).cast::<u8>();
-        while unused < HANDLER_STACK_BYTES && stack.add(unused).read_volatile() == STACK_FILL {
-            unused += 1;
-        }
+    psx_rt::dispatch::stack_unused_bytes()
+}
+
+// ------------------------------------------------------------ cheap reads
+
+/// Sectors the transport has stored at a destination since it started: one volatile load of
+/// [`PSX_CD_STATS`], no masking, no lookup. It is as fresh as the last interrupt or foreground
+/// call that published the counters.
+///
+/// This is the cheap progress read for code that looks often (a loader that decodes each chunk
+/// the moment its sectors have landed). Take `sectors_landed()` before submitting a request
+/// and the difference afterwards is the sectors that request has stored so far, as long as it
+/// is the only one running: with one request at a time (a [`single`] transport) that is always
+/// so. [`state`](fn@state) gives the definitive answer, and the only one that knows how the
+/// request ended.
+#[must_use]
+pub fn sectors_landed() -> u32 {
+    // SAFETY: a plain load of a word that the interrupt handler and foreground calls store;
+    // a stale value only means the answer is one sector old.
+    unsafe { core::ptr::read_volatile(&raw const PSX_CD_STATS.sectors) }
+}
+
+/// Requests the transport has accepted since it started, parks included, wrapping at 2^32:
+/// the number of transfers that may have moved the drive's head. A head parked next to a
+/// sector is still there while this has not changed since the park was submitted. See
+/// [`Engine::submissions`].
+#[must_use]
+pub fn submissions() -> u32 {
+    with_engine(|engine| engine.submissions())
+}
+
+// ----------------------------------------------------------- single transfer
+
+/// The transport for a program that reads one request at a time ([`SingleEngine`]): the same
+/// calls as the crate root without the queue, priorities, chaining, resumes and audio lease,
+/// and none of their code in the image. A program uses this module or the crate root, not
+/// both: each registers for the CD source with psx-rt's dispatcher and holds its own engine.
+///
+/// [`install`] and [`ensure_installed`] work as at the root. [`submit`] starts the request or
+/// returns [`SubmitError::QueueFull`] while a transfer is running or the drive is still
+/// stopping after the last; [`is_idle`] says when it can take the next. To play audio, stop
+/// the read ([`stop_and_wait`]) and give the controller back with [`uninstall`]; there is no
+/// lease to arbitrate.
+pub mod single {
+    use super::{install_in, stop_in, uninstall_in, with, Single, Transport};
+    use crate::engine::{Config, Owner, Phase, StreamStats};
+    use crate::request::{Request, RequestState, SubmitError, Ticket};
+    use psx_io::periph::Cd;
+
+    #[inline(always)]
+    fn with_engine<R>(f: impl FnOnce(&mut Single) -> R) -> R {
+        with::<Single, R>(f)
     }
-    unused
+
+    /// Take over the controller; see [`install`](fn@crate::install).
+    ///
+    /// # Errors
+    ///
+    /// The token comes back when the transport is already installed.
+    pub fn install(cd: Cd, config: Config) -> Result<(), Cd> {
+        install_in::<Single>(cd, config)
+    }
+
+    /// Give the controller back to polled code; see [`uninstall`](fn@crate::uninstall).
+    #[must_use]
+    pub fn uninstall() -> Option<Cd> {
+        uninstall_in::<Single>()
+    }
+
+    /// Install if not installed, taking the token itself; see
+    /// [`ensure_installed`](fn@crate::ensure_installed).
+    #[must_use]
+    pub fn ensure_installed(config: Config) -> bool {
+        super::ensure_in::<Single>(config)
+    }
+
+    /// Cancel the read and wait for the drive to stop; see
+    /// [`stop_and_wait`](fn@crate::stop_and_wait).
+    #[must_use]
+    pub fn stop_and_wait(max_vblanks: u32) -> bool {
+        stop_in::<Single>(max_vblanks)
+    }
+
+    /// Change the configuration; it applies from the next event.
+    pub fn configure(config: Config) {
+        with_engine(|engine| engine.configure(config));
+    }
+
+    /// Start a read now; see [`SingleEngine`](crate::SingleEngine) for when it refuses.
+    ///
+    /// # Errors
+    ///
+    /// [`SubmitError::QueueFull`] while a transfer is running or the drive is still stopping,
+    /// and before [`install`]; the other variants as for any request.
+    pub fn submit(request: Request) -> Result<Ticket, SubmitError> {
+        with_engine(|engine| engine.submit(request))
+    }
+
+    /// Cancel the read; it stops at the next sector. Returns whether `ticket` was running.
+    #[must_use]
+    pub fn cancel(ticket: Ticket) -> bool {
+        with_engine(|engine| engine.cancel(ticket))
+    }
+
+    /// Cancel the running read, if any.
+    pub fn cancel_all() {
+        with_engine(<Single as Transport>::cancel_all);
+    }
+
+    /// Where a read is. The latest finished request is remembered, no older one.
+    #[must_use]
+    pub fn state(ticket: Ticket) -> RequestState {
+        with_engine(|engine| engine.state(ticket))
+    }
+
+    /// Check for a stalled transfer; see [`Engine::service`](crate::Engine::service).
+    pub fn service() {
+        with_engine(|engine| engine.service());
+    }
+
+    /// Whether the drive is stopped and no read holds it.
+    #[must_use]
+    pub fn is_idle() -> bool {
+        with_engine(|engine| engine.is_idle())
+    }
+
+    /// Who may program the controller.
+    #[must_use]
+    pub fn owner() -> Owner {
+        with_engine(|engine| engine.owner())
+    }
+
+    /// The controller phase.
+    #[must_use]
+    pub fn phase() -> Phase {
+        with_engine(|engine| engine.phase())
+    }
+
+    /// A copy of the counters.
+    #[must_use]
+    pub fn stats() -> StreamStats {
+        with_engine(|engine| engine.stats())
+    }
+
+    /// Requests accepted so far; see [`submissions`](fn@crate::submissions).
+    #[must_use]
+    pub fn submissions() -> u32 {
+        with_engine(|engine| engine.submissions())
+    }
+
+    /// Start the longest-handler measurement over.
+    pub fn reset_max_irq_ticks() {
+        with_engine(|engine| engine.reset_max_irq_ticks());
+    }
+}
+
+// ------------------------------------------------------------ lean transfer
+
+/// The calls shared by the [`lean`] and [`counted`] modules: the same fronts on two engines
+/// that differ only in one counter.
+macro_rules! lean_front {
+    ($engine:ty) => {
+        use super::{install_in, stop_in, uninstall_in, with, Transport};
+        use psx_io::periph::Cd;
+        use $crate::engine::{Config, Status};
+        use $crate::request::{Request, SubmitError};
+
+        #[inline(always)]
+        fn with_engine<R>(f: impl FnOnce(&mut $engine) -> R) -> R {
+            with::<$engine, R>(f)
+        }
+
+        /// Take over the controller; see [`install`](fn@crate::install).
+        ///
+        /// # Errors
+        ///
+        /// The token comes back when the transport is already installed.
+        pub fn install(cd: Cd, config: Config) -> Result<(), Cd> {
+            install_in::<$engine>(cd, config)
+        }
+
+        /// Give the controller back to polled code; see [`uninstall`](fn@crate::uninstall).
+        #[must_use]
+        pub fn uninstall() -> Option<Cd> {
+            uninstall_in::<$engine>()
+        }
+
+        /// Install if not installed, taking the token itself; see
+        /// [`ensure_installed`](fn@crate::ensure_installed).
+        #[must_use]
+        pub fn ensure_installed(config: Config) -> bool {
+            super::ensure_in::<$engine>(config)
+        }
+
+        /// Cancel the read and wait for the drive to stop; see
+        /// [`stop_and_wait`](fn@crate::stop_and_wait).
+        #[must_use]
+        pub fn stop_and_wait(max_vblanks: u32) -> bool {
+            stop_in::<$engine>(max_vblanks)
+        }
+
+        /// Start a read now. `request` is read as for [`single::submit`](super::single::submit):
+        /// [`Request::with_byte_len`] bounds the last sector, [`Request::park`] is an ordinary
+        /// request, priorities and resumes have no effect.
+        ///
+        /// # Errors
+        ///
+        /// [`SubmitError::QueueFull`] while a transfer is running or the drive is still stopping,
+        /// and before [`install`]; the other variants as for any request.
+        pub fn submit(request: Request) -> Result<(), SubmitError> {
+            with_engine(|engine| engine.submit(request).map(drop))
+        }
+
+        /// Cancel the running read, if any; it stops at the next sector and the drive pauses.
+        pub fn cancel() {
+            with_engine(<$engine as Transport>::cancel_all);
+        }
+
+        /// Where the transfer is; see [`Engine::status`](crate::Engine::status). Also fails a
+        /// transfer that has made no progress for [`Config::timeout_vblanks`], so call it once per
+        /// frame while a read is in flight.
+        #[must_use]
+        pub fn status() -> Status {
+            with_engine(|engine| engine.status())
+        }
+
+        /// Whether the drive is stopped and no read holds it.
+        #[must_use]
+        pub fn is_idle() -> bool {
+            with_engine(|engine| engine.is_idle())
+        }
+    };
+}
+
+/// The smallest transport, for a program that reads one request at a time and wants neither
+/// counters nor tickets ([`LeanEngine`]): a Counter-Strike-style streamer that starts a read,
+/// asks once a frame whether it is done, and cancels or waits for the drive before polled reads.
+/// Everything [`single`] does not need is gone as well: no `PSX_CD_STATS`, no handler timing,
+/// no ticket records. A program uses this module, [`counted`], [`single`] or the crate root, not
+/// two of them: each registers for the CD source with psx-rt's dispatcher and holds its own engine.
+///
+/// [`lean::install`] and [`lean::ensure_installed`] work as at the root. [`lean::submit`] starts the request or
+/// refuses it with [`SubmitError::QueueFull`] while a transfer is running or the drive is still
+/// stopping; [`lean::status`] says how it is going, and is `Busy` until the drive has stopped, so
+/// the polled reader may follow the first `Done` or `Failed`. [`lean::stop_and_wait`] cancels and waits.
+pub mod lean {
+    lean_front!(super::Lean);
+
+    /// Requests accepted so far; see [`submissions`](fn@crate::submissions).
+    #[must_use]
+    pub fn submissions() -> u32 {
+        with_engine(|engine| engine.submissions())
+    }
+}
+
+/// [`lean`] plus the one counter a program that decodes a request while it runs asks for
+/// ([`CountedEngine`]): the sectors the interrupt handler has stored, [`counted::sectors_landed`].
+/// The handler adds one load, add and store per stored sector; nothing else is counted,
+/// published or timed, there are no tickets and no `PSX_CD_STATS`. A program that does not read
+/// the count uses [`lean`], which links none of it.
+///
+/// Everything else is the [`lean`] front with the same names and meaning: [`counted::install`],
+/// [`counted::ensure_installed`], [`counted::uninstall`], [`counted::stop_and_wait`],
+/// [`counted::submit`] (parks included), [`counted::cancel`], [`counted::status`] (once per frame,
+/// with the watchdog inside), [`counted::is_idle`], [`counted::submissions`] and
+/// [`counted::last_error`]. A program uses this module, [`lean`], [`single`] or the crate root,
+/// not two of them.
+pub mod counted {
+    use super::Counted;
+    lean_front!(Counted);
+
+    /// Requests accepted so far, parks included (a refused submit is not counted), wrapping at
+    /// 2^32; see [`submissions`](fn@crate::submissions). One volatile load, no masking: a head
+    /// parked at the last park is still there while this equals its value at the park's
+    /// submission.
+    #[must_use]
+    pub fn submissions() -> u32 {
+        // SAFETY: the global is a live static; the load is one aligned word that only
+        // `submit` stores, from the foreground.
+        unsafe { Counted::submissions_of(Counted::global().0.get()) }
+    }
+
+    /// The code of the latest failure ([`Failure::code`](crate::Failure::code)): 0 when nothing
+    /// has failed and after a request started, so a [`Status::Failed`] with 0 is a cancel
+    /// (`0x05..` is a drive error, `0xff..` the watchdog; see
+    /// [`FailureKind`](crate::FailureKind)). One volatile load, no masking: it is as fresh as
+    /// the last interrupt.
+    #[must_use]
+    pub fn last_error() -> u32 {
+        // SAFETY: the global is a live static; the load is one aligned word that the handler
+        // stores whole.
+        unsafe { Counted::error_code(Counted::global().0.get()) }
+    }
+
+    /// Sectors the handler has stored at a destination since the transport started, wrapping at
+    /// 2^32: one volatile load of one word of the engine, no masking, no lookup, no watchdog. It
+    /// is as fresh as the last interrupt. Take it before [`submit`] and subtract
+    /// (`sectors_landed().wrapping_sub(mark)`): that is how many sectors the request has stored
+    /// so far, valid with one request at a time, which this transport always is. [`status`]
+    /// says how the request ended.
+    #[must_use]
+    pub fn sectors_landed() -> u32 {
+        // SAFETY: the global is a live static; the load is one aligned word that the handler
+        // stores whole.
+        unsafe { Counted::counted_sectors(Counted::global().0.get()) }
+    }
 }

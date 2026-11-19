@@ -58,6 +58,8 @@ EXE_RELATIVE="build/examples/mipsel-sony-psx/release/editor-playtest.exe"
 # dependency outside the workspace root, rustc seeds every symbol disambiguator from it, and the stage root is a
 # parameter (PSOXIDE_GUEST_STAGE_ROOT), so two stage roots gave different guests. psoxide-rustc (SDK
 # tools/psoxide-pgo) replaces that one value with a hash of the crate name, features and stage-relative path.
+# Read before the build below sets RUSTC_WRAPPER for the command: this sh applies prefix assignments in order.
+inner_wrapper="${RUSTC_WRAPPER:-}"
 repro_rustc="${PSOXIDE_RUSTC:-}"
 if [ -z "$repro_rustc" ] && [ -f "$ROOT/tools/psoxide-pgo/src/bin/psoxide-rustc.rs" ]; then
     (cd "$ROOT" && cargo build -q --release --locked -p psoxide-pgo --bin psoxide-rustc \
@@ -67,9 +69,14 @@ if [ -z "$repro_rustc" ] && [ -f "$ROOT/tools/psoxide-pgo/src/bin/psoxide-rustc.
     }
     repro_rustc="${CARGO_TARGET_DIR:-$ROOT/target}/release/psoxide-rustc"
 fi
+# The staged guest is its own workspace (engine/examples/editor-playtest) and its path dependencies sit above
+# it, so Cargo hashes their absolute paths. Without the wrapper the executable differs by stage root and
+# checkout (110,061 bytes between two stage roots on SDK 8bbdbcc), so there is no unpinned staged build: a
+# missing wrapper stops it instead of producing an executable nobody can reproduce.
 if [ ! -x "$repro_rustc" ]; then
-    echo "[guest-build] WARNING: the pinned SDK has no psoxide-rustc: the guest depends on the stage root" >&2
-    repro_rustc=""
+    echo "[guest-build] no psoxide-rustc (PSOXIDE_RUSTC='${PSOXIDE_RUSTC:-}', source tools/psoxide-pgo/src/bin/psoxide-rustc.rs under $ROOT)." >&2
+    echo "[guest-build] refusing an unpinned build: its layout would depend on the stage root and checkout path." >&2
+    exit 1
 fi
 
 # Delay-slot filling. LLVM's MipsDelaySlotFiller can move a load into a
@@ -111,16 +118,59 @@ if [ -n "${PSOXIDE_GUEST_LINK_ELF:-}" ]; then
 fi
 
 # Everything the guest link closure reads. Directories are mirrored with
-# --delete so a removed source file cannot survive in the stage.
+# --delete so a removed source file cannot survive in the stage. A file the guest build reads
+# that is missing here fails the staged build; crates/psx-gate/tests/staged_closure.rs checks the
+# list against the files the closure sources pull in (#[path], include!, include_str!).
 CLOSURE="rust-toolchain.toml
 crates/psx-hw
 crates/psxed-format
+crates/psx-gate/src
+sdk/profile.toml
 sdk/psoxide.ld
 sdk/Cargo.toml
 sdk/crates
 engine/Cargo.toml
 engine/crates
 $GUEST_DIR"
+
+# The directory that holds the SDK's post-link tools and the gate. PSOXIDE_HAZARD_DIR names a
+# directory that already has them; otherwise they build here from tools/psoxide-hazard in the
+# locked SDK. Sets hazard_dir.
+find_hazard_tools() {
+    if [ -n "${PSOXIDE_HAZARD_DIR:-}" ]; then
+        hazard_dir="$PSOXIDE_HAZARD_DIR"
+    else
+        hazard_dir="${CARGO_TARGET_DIR:-$ROOT/target}/release"
+        (cd "$ROOT" && cargo build -q --release --locked -p psoxide-hazard \
+            --target-dir "${CARGO_TARGET_DIR:-$ROOT/target}") || {
+            echo "[guest-build] could not build the SDK's post-link checks (tools/psoxide-hazard)" >&2
+            exit 1
+        }
+    fi
+}
+
+# The architecture gate (sdk/docs/GATE.md) over this program, with the cargo arguments the
+# build will use: refuses before anything compiles, as `psoxide-pgo apply` does.
+gate_check() {
+    find_hazard_tools
+    "$hazard_dir/psx-gate" --sdk "$ROOT" --crate "$ROOT/$GUEST_DIR" -- build --release "$@" || {
+        echo "[guest-build] the architecture gate refused editor-playtest; nothing was built" >&2
+        exit 1
+    }
+}
+
+# Write the gate receipt into the finished executable ($1; the rest are the cargo arguments), the
+# same receipt `psoxide-pgo apply` writes: shipping, or diag when a diagnostic feature is on.
+gate_receipt() {
+    exe="$1"
+    shift
+    find_hazard_tools
+    "$hazard_dir/psx-gate" --sdk "$ROOT" --crate "$ROOT/$GUEST_DIR" --receipt "$exe" \
+        -- build --release "$@" || {
+        echo "[guest-build] could not write the gate receipt into $exe" >&2
+        exit 1
+    }
+}
 
 # Post-link proof shared by both build paths: reroute load-delay hazards and
 # prove the scratchpad stacks. $1 = executable, $2 = link map, $3 = directory
@@ -132,19 +182,8 @@ patch_and_prove() {
     # consumer runs inside the R3000 load delay. Rather than disabling the
     # filler (tens of kilobytes of nops), reroute those branches through the
     # guest's HAZARD_TRAMPOLINES array post-link and prove the image clean
-    # (the SDK's hazard-patch). PSOXIDE_HAZARD_DIR names a directory that
-    # already holds hazard-patch and stack-guard; otherwise they build here,
-    # from tools/psoxide-hazard in the locked SDK.
-    if [ -n "${PSOXIDE_HAZARD_DIR:-}" ]; then
-        hazard_dir="$PSOXIDE_HAZARD_DIR"
-    else
-        hazard_dir="${CARGO_TARGET_DIR:-$ROOT/target}/release"
-        (cd "$ROOT" && cargo build -q --release --locked -p psoxide-hazard \
-            --target-dir "${CARGO_TARGET_DIR:-$ROOT/target}") || {
-            echo "[guest-build] could not build the SDK's post-link checks (tools/psoxide-hazard)" >&2
-            exit 1
-        }
-    fi
+    # (the SDK's hazard-patch).
+    find_hazard_tools
     "$hazard_dir/hazard-patch" --map "$2" "$1" >"$3/hazard-patch.txt" 2>&1 || {
         cat "$3/hazard-patch.txt" >&2
         echo "[guest-build] load-delay hazards remain in $EXE_RELATIVE; refusing to stage it" >&2
@@ -170,6 +209,8 @@ patch_and_prove() {
         cat "$3/heap-guard.txt"
     fi
 }
+
+gate_check "$@"
 
 # Link order. The R3000's I-cache is 4 KB and direct mapped, so where the
 # linker happens to put a hot function decides which other hot code it evicts;
@@ -213,7 +254,7 @@ if [ "${PSOXIDE_GUEST_STAGE:-1}" = "0" ]; then
     fi
     (
         cd "$ROOT/$GUEST_DIR"
-        CARGO_TARGET_DIR="$ROOT/build/examples" RUSTFLAGS="$RUSTFLAGS_VALUE" \
+        PSX_GATE_PROGRAM=editor-playtest PSX_HAZARD_TRAMPOLINE_WORDS=256 CARGO_TARGET_DIR="$ROOT/build/examples" RUSTFLAGS="$RUSTFLAGS_VALUE" \
             cargo build --release "$@"
     )
     if [ -n "${PSOXIDE_GUEST_LINK_ELF:-}" ]; then
@@ -224,6 +265,7 @@ if [ "${PSOXIDE_GUEST_STAGE:-1}" = "0" ]; then
     fi
     cd "$ROOT"
     patch_and_prove "$ROOT/$EXE_RELATIVE" "$in_tree_map" "$ROOT/build/examples"
+    gate_receipt "$ROOT/$EXE_RELATIVE" "$@"
     echo "[guest-build] $(shasum -a 256 "$EXE_RELATIVE")"
     exit 0
 fi
@@ -311,10 +353,12 @@ link_guest() {
     fi
     CARGO_HOME="$GUEST_CARGO_HOME" \
     CARGO_TARGET_DIR="$STAGE/build/examples" \
+    PSX_GATE_PROGRAM=editor-playtest \
+    PSX_HAZARD_TRAMPOLINE_WORDS=256 \
     RUSTFLAGS="$RUSTFLAGS_VALUE" \
-    RUSTC_WRAPPER="${repro_rustc:-${RUSTC_WRAPPER:-}}" \
+    RUSTC_WRAPPER="$repro_rustc" \
     PSOXIDE_REPRO_ROOT="$STAGE" \
-    PSOXIDE_REPRO_INNER="$([ -n "$repro_rustc" ] && printf %s "${RUSTC_WRAPPER:-}")" \
+    PSOXIDE_REPRO_INNER="$inner_wrapper" \
         cargo build --release "$@"
 }
 link_guest "$@"
@@ -369,6 +413,7 @@ if [ -n "$LAYOUT" ]; then
             "projects)" >&2
     fi
 fi
+gate_receipt "$staged_exe" "$@"
 mkdir -p "$ROOT/$(dirname "$EXE_RELATIVE")"
 cp "$staged_exe" "$ROOT/$EXE_RELATIVE"
 echo "[guest-build] canonical stage $STAGE"

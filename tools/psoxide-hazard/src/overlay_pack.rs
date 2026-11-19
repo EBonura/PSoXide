@@ -977,7 +977,8 @@ fn references(
                 }
                 3
             }
-            4 => continue,
+            // R_MIPS_NONE: `arm_direct_access_guard` leaves one in the code that arms the guard.
+            0 | 4 => continue,
             10 if self_target.is_some() => {
                 let target = relocation
                     .address

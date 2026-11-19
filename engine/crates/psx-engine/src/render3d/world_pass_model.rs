@@ -1113,7 +1113,9 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             }
             if parent_relative && active_blend.is_some() {
                 // Every clip pose is staged; now the crossfade and the pose
-                // translation, which children must not inherit.
+                // translation, which children must not inherit. The index also
+                // tests the masks and names the joint, so the loop stays a range.
+                #[allow(clippy::needless_range_loop)]
                 for joint in 0..joint_count {
                     if (drawn & present) & (1 << joint) == 0 {
                         continue;
@@ -1614,7 +1616,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     // SAFETY: the blended-vertex chunk was flushed above, so
                     // no scratchpad bytes are live (see ModelFaceWalkerStack);
                     // the walker installs no exception handler, and
-                    // tools/stack_guard.py proves its call tree fits.
+                    // stack-guard proves its call tree fits.
                     unsafe {
                         ModelFaceWalkerStack::run(|| {
                             self.submit_predecoded_model_faces_packed_average_unclamped_extent_safe_batch::<true>(

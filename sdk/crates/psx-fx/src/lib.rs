@@ -36,9 +36,10 @@
 #![warn(missing_docs)]
 
 pub mod particles;
+pub mod playlist;
 pub mod rng;
 pub mod shake;
 
 pub use particles::{Particle, ParticlePool};
-pub use rng::LcgRng;
+pub use rng::{Lcg, LcgRng, NrLcg, Xorshift32};
 pub use shake::ShakeState;

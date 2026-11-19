@@ -57,15 +57,15 @@ impl From<ExeError> for BootError {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct DirEntry {
-    extent_lba: u32,
-    size: u32,
+pub(crate) struct DirEntry {
+    pub(crate) extent_lba: u32,
+    pub(crate) size: u32,
     flags: u8,
-    identifier: String,
+    pub(crate) identifier: String,
 }
 
 impl DirEntry {
-    fn is_dir(&self) -> bool {
+    pub(crate) fn is_dir(&self) -> bool {
         self.flags & 0x02 != 0
     }
 }
@@ -88,7 +88,7 @@ pub fn load_boot_exe_from_disc(disc: &Disc) -> Result<BootExe, BootError> {
     })
 }
 
-fn root_directory(disc: &Disc) -> Result<DirEntry, BootError> {
+pub(crate) fn root_directory(disc: &Disc) -> Result<DirEntry, BootError> {
     let pvd = disc
         .read_sector_user(PVD_LBA)
         .ok_or(BootError::MissingPrimaryVolumeDescriptor)?;
@@ -99,7 +99,7 @@ fn root_directory(disc: &Disc) -> Result<DirEntry, BootError> {
     parse_dir_record(&pvd[ROOT_RECORD_OFFSET..]).ok_or(BootError::BadRootDirectoryRecord)
 }
 
-fn lookup_path(disc: &Disc, root: &DirEntry, path: &str) -> Result<DirEntry, BootError> {
+pub(crate) fn lookup_path(disc: &Disc, root: &DirEntry, path: &str) -> Result<DirEntry, BootError> {
     let components = normalize_disc_path(path);
     let Some((last, parents)) = components.split_last() else {
         return Err(BootError::FileNotFound(path.to_string()));
@@ -129,7 +129,10 @@ fn find_child(
         .find(|entry| identifier_matches(&entry.identifier, component)))
 }
 
-fn read_directory(disc: &Disc, directory: &DirEntry) -> Result<Vec<DirEntry>, BootError> {
+pub(crate) fn read_directory(
+    disc: &Disc,
+    directory: &DirEntry,
+) -> Result<Vec<DirEntry>, BootError> {
     if !directory.is_dir() {
         return Err(BootError::NotDirectory(directory.identifier.clone()));
     }
@@ -177,7 +180,7 @@ fn parse_dir_record(record: &[u8]) -> Option<DirEntry> {
     })
 }
 
-fn read_extent(disc: &Disc, extent_lba: u32, size: u32) -> Result<Vec<u8>, BootError> {
+pub(crate) fn read_extent(disc: &Disc, extent_lba: u32, size: u32) -> Result<Vec<u8>, BootError> {
     let mut out = Vec::with_capacity(size as usize);
     let sectors = size.div_ceil(SECTOR_USER_DATA_BYTES as u32);
     for sector in 0..sectors {

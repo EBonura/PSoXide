@@ -864,7 +864,7 @@ fn build_native_model(
         // rotations but loses the root's motion, and the tell is the feet: the
         // hips stay at rest height, so a crouch lifts the feet off the floor
         // instead of lowering the body. Retarget the source onto this model
-        // first (tools/retarget_clip.py). A real jump lifts off too, hence a
+        // first. A real jump lifts off too, hence a
         // warning and not an error.
         if let Some(lift) = clip_floor_lift(&package.model, &bytes) {
             if lift > FLOOR_LIFT_WARN_UNITS {

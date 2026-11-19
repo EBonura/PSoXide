@@ -13,7 +13,6 @@
 
 extern crate psx_rt;
 
-use psx_fmv::iso;
 use psx_font::fonts::BASIC;
 use psx_font::FontAtlas;
 use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
@@ -39,24 +38,6 @@ const SPEED: DriveSpeed = if cfg!(feature = "double-speed") {
 };
 const SONG_NAMES: [&str; 4] = ["A MAJOR PAD", "G MAJOR HIGH", "BLIPS", "WHISTLE"];
 
-/// Read one data sector (the directory lookup before any music plays) into
-/// `sector`, as bytes.
-fn read_one<'s>(
-    reader: &mut SectorReader,
-    sector: &'s mut [u32; SECTOR_WORDS],
-    lba: u32,
-) -> Option<&'s [u8]> {
-    if !reader.start_read(lba) {
-        return None;
-    }
-    let ok = reader.read_sector(sector);
-    reader.stop();
-    // SAFETY: a `[u32; N]` viewed as its own bytes; alignment only shrinks.
-    ok.then(|| unsafe {
-        core::slice::from_raw_parts(sector.as_ptr().cast::<u8>(), SECTOR_WORDS * 4)
-    })
-}
-
 /// The song file's position on the disc, looked up by name so the program
 /// does not bake in an LBA. The reader holds the drive for the lookup and
 /// hands it back for the music player.
@@ -71,8 +52,7 @@ fn lookup(reader: &mut SectorReader, sector: &mut [u32; SECTOR_WORDS]) -> Option
     if !reader.prepare() {
         return None;
     }
-    let (root, _) = iso::root_directory(read_one(reader, sector, iso::PVD_LBA)?)?;
-    let (lba, size) = iso::find_in_directory(read_one(reader, sector, root)?, SONGS_FILE)?;
+    let (lba, size) = reader.find(sector, None, &[SONGS_FILE])?;
     Some(File::from_directory_entry(lba, size, FILE_NUMBER, SPEED))
 }
 

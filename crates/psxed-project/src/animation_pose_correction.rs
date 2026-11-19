@@ -30,9 +30,9 @@ pub fn bake_animation_pose_corrections(
                 correction,
             );
             max_translation = max_translation
-                .max(abs_i32_saturating(corrected.translation.x))
-                .max(abs_i32_saturating(corrected.translation.y))
-                .max(abs_i32_saturating(corrected.translation.z));
+                .max(corrected.translation.x.saturating_abs())
+                .max(corrected.translation.y.saturating_abs())
+                .max(corrected.translation.z.saturating_abs());
             poses.push(corrected);
         }
     }
@@ -249,14 +249,6 @@ fn quantize_translation(value: i32, shift: u8) -> i16 {
         -((-value + bias) >> shift)
     };
     rounded.clamp(i64::from(i16::MIN), i64::from(i16::MAX)) as i16
-}
-
-fn abs_i32_saturating(value: i32) -> i32 {
-    if value == i32::MIN {
-        i32::MAX
-    } else {
-        value.abs()
-    }
 }
 
 #[cfg(test)]

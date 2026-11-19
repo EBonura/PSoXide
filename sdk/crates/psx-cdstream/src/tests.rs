@@ -1413,3 +1413,532 @@ fn a_few_workloads_under_the_interpreter() {
         model_run(seed);
     }
 }
+
+#[test]
+fn a_park_reads_the_sector_before_and_keeps_one_word() {
+    let mut engine = engine();
+    let ticket = submit(&mut engine, Request::park(500));
+    run(&mut engine);
+    let done = finished(&mut engine, ticket);
+    assert_eq!(done.outcome, Outcome::Done);
+    assert_eq!(done.received, 1);
+    assert_eq!(engine.hw().popped, [499]);
+    assert!(engine.is_idle());
+    // A read after it lands whole.
+    let buf = Buf::new(2);
+    let read = submit(&mut engine, request(500, 2, &buf));
+    run(&mut engine);
+    assert_eq!(finished(&mut engine, read).outcome, Outcome::Done);
+    buf.assert_sectors(500, 2);
+}
+
+#[test]
+fn the_setloc_location_is_the_library_conversion() {
+    let mut lba = 0u32;
+    while lba < 450_000 {
+        assert_eq!(
+            super::engine::location_for_test(lba),
+            psx_io::cd::lba_to_bcd_msf(psx_io::disc_base::shift_lba(lba)),
+            "lba {lba}"
+        );
+        lba += 37;
+    }
+    for lba in [
+        0,
+        1,
+        74,
+        75,
+        4499,
+        4500,
+        449_849,
+        449_850,
+        449_851,
+        9_000_000,
+        u32::MAX - 150,
+        u32::MAX,
+    ] {
+        assert_eq!(
+            super::engine::location_for_test(lba),
+            psx_io::cd::lba_to_bcd_msf(psx_io::disc_base::shift_lba(lba)),
+            "lba {lba}"
+        );
+    }
+}
+
+// ------------------------------------------------------------ single transfer
+
+fn single() -> SingleEngine<FakeDrive> {
+    let mut engine = SingleEngine::single(FakeDrive::new(), Config::DEFAULT);
+    engine.attach();
+    engine
+}
+
+fn run_single(engine: &mut SingleEngine<FakeDrive>) {
+    let mut delivered = 0;
+    while engine.hw_mut().raise() {
+        engine.on_interrupt();
+        delivered += 1;
+        assert!(delivered < 100_000, "interrupt storm");
+    }
+}
+
+#[test]
+fn a_single_engine_reads_one_request_and_refuses_a_second_while_it_runs() {
+    let mut engine = single();
+    let buf = Buf::new(3);
+    let ticket = engine.submit(request(100, 3, &buf)).expect("accepted");
+    let other = Buf::new(1);
+    assert_eq!(
+        engine.submit(request(500, 1, &other)),
+        Err(SubmitError::QueueFull)
+    );
+    assert_eq!(engine.stats().rejected, 1);
+    run_single(&mut engine);
+    let RequestState::Finished(done) = engine.state(ticket) else {
+        panic!("not finished");
+    };
+    assert_eq!((done.outcome, done.received), (Outcome::Done, 3));
+    buf.assert_sectors(100, 3);
+    buf.assert_untouched_from(3);
+    assert_eq!(
+        engine
+            .hw()
+            .log
+            .iter()
+            .map(|s| s.command)
+            .collect::<Vec<_>>(),
+        BRACKET
+    );
+    assert!(engine.is_idle());
+}
+
+#[test]
+fn a_single_engine_takes_the_next_request_once_the_drive_has_stopped() {
+    let mut engine = single();
+    let (a, b) = (Buf::new(2), Buf::new(2));
+    let first = engine.submit(request(10, 2, &a)).expect("accepted");
+    // The request is done when its last sector lands, before the drive has paused.
+    loop {
+        assert!(engine.hw_mut().raise());
+        engine.on_interrupt();
+        if matches!(engine.state(first), RequestState::Finished(_)) {
+            break;
+        }
+    }
+    assert!(!engine.is_idle());
+    assert_eq!(
+        engine.submit(request(40, 2, &b)),
+        Err(SubmitError::QueueFull)
+    );
+    run_single(&mut engine);
+    assert!(engine.is_idle());
+    let second = engine.submit(request(40, 2, &b)).expect("accepted");
+    run_single(&mut engine);
+    b.assert_sectors(40, 2);
+    // One result is remembered: the latest.
+    assert!(matches!(engine.state(second), RequestState::Finished(_)));
+    assert_eq!(engine.state(first), RequestState::Unknown);
+    assert_eq!(engine.submissions(), 2);
+}
+
+#[test]
+fn a_single_engine_refuses_requests_before_it_is_attached() {
+    let mut engine = SingleEngine::single(FakeDrive::new(), Config::DEFAULT);
+    let buf = Buf::new(1);
+    assert_eq!(
+        engine.submit(request(1, 1, &buf)),
+        Err(SubmitError::QueueFull)
+    );
+    assert_eq!(engine.submissions(), 0);
+    engine.attach();
+    assert!(engine.submit(request(1, 1, &buf)).is_ok());
+    assert_eq!(engine.submissions(), 1);
+}
+
+#[test]
+fn a_single_engine_cancels_at_the_next_sector_and_recovers() {
+    let mut engine = single();
+    let buf = Buf::new(50);
+    let ticket = engine.submit(request(0, 50, &buf)).expect("accepted");
+    let mut landed = 0;
+    while landed < 5 {
+        assert!(engine.hw_mut().raise());
+        engine.on_interrupt();
+        if let RequestState::Active { received } = engine.state(ticket) {
+            landed = received;
+        }
+    }
+    assert!(engine.cancel(ticket));
+    run_single(&mut engine);
+    let RequestState::Finished(done) = engine.state(ticket) else {
+        panic!("not finished");
+    };
+    assert_eq!(done.outcome, Outcome::Cancelled);
+    assert!(done.received >= 5 && done.received < 50);
+    assert!(engine.is_idle());
+    let next = Buf::new(2);
+    let again = engine.submit(request(7, 2, &next)).expect("accepted");
+    run_single(&mut engine);
+    assert!(matches!(
+        engine.state(again),
+        RequestState::Finished(Completion {
+            outcome: Outcome::Done,
+            ..
+        })
+    ));
+    next.assert_sectors(7, 2);
+}
+
+#[test]
+fn a_single_engine_parks_and_bounds_the_last_sector() {
+    let mut engine = single();
+    let park = engine.submit(Request::park(100)).expect("accepted");
+    run_single(&mut engine);
+    let RequestState::Finished(done) = engine.state(park) else {
+        panic!("not finished");
+    };
+    assert_eq!((done.outcome, done.received), (Outcome::Done, 1));
+    assert_eq!(engine.hw().popped, [99]);
+    let buf = Buf::new(3);
+    let bounded = request(100, 3, &buf).with_byte_len(2 * 2048 + 100);
+    let ticket = engine.submit(bounded).expect("accepted");
+    run_single(&mut engine);
+    assert!(matches!(
+        engine.state(ticket),
+        RequestState::Finished(Completion {
+            outcome: Outcome::Done,
+            received: 3,
+            ..
+        })
+    ));
+    buf.assert_sectors(100, 2);
+    for word in 0..25 {
+        assert_eq!(buf.word(2 * 512 + word), sector_word(102, word as u32));
+    }
+    assert_eq!(buf.word(2 * 512 + 25), CANARY);
+}
+
+#[test]
+fn a_single_engine_fails_a_drive_error_and_the_next_start_recovers() {
+    let mut engine = single();
+    engine.hw_mut().error_at.push(3);
+    let buf = Buf::new(8);
+    let ticket = engine.submit(request(0, 8, &buf)).expect("accepted");
+    run_single(&mut engine);
+    let RequestState::Finished(done) = engine.state(ticket) else {
+        panic!("not finished");
+    };
+    assert!(matches!(done.outcome, Outcome::Failed(_)));
+    engine.hw_mut().error_at.clear();
+    let again = engine.submit(request(20, 2, &buf)).expect("accepted");
+    run_single(&mut engine);
+    assert!(matches!(
+        engine.state(again),
+        RequestState::Finished(Completion {
+            outcome: Outcome::Done,
+            ..
+        })
+    ));
+    assert!(
+        engine
+            .hw()
+            .log
+            .iter()
+            .filter(|s| s.command == CMD_PAUSE)
+            .count()
+            >= 2
+    );
+}
+
+// ------------------------------------------------------------ lean transfer
+
+fn lean() -> LeanEngine<FakeDrive> {
+    let mut engine = LeanEngine::lean(FakeDrive::new(), Config::DEFAULT);
+    engine.attach();
+    engine
+}
+
+fn run_lean(engine: &mut LeanEngine<FakeDrive>) {
+    let mut delivered = 0;
+    while engine.hw_mut().raise() {
+        engine.on_interrupt();
+        delivered += 1;
+        assert!(delivered < 100_000, "interrupt storm");
+    }
+}
+
+#[test]
+fn a_lean_engine_is_busy_until_the_drive_has_stopped_then_done() {
+    let mut engine = lean();
+    assert_eq!(engine.status(), Status::Idle);
+    let buf = Buf::new(3);
+    engine
+        .submit(request(100, 3, &buf).with_byte_len(2 * 2048 + 100))
+        .expect("accepted");
+    assert_eq!(engine.status(), Status::Busy);
+    // Done when the last sector has landed, but the drive is still pausing: busy.
+    loop {
+        assert!(engine.hw_mut().raise());
+        engine.on_interrupt();
+        if engine.hw().popped.len() == 3 {
+            break;
+        }
+    }
+    assert_eq!(engine.status(), Status::Busy);
+    run_lean(&mut engine);
+    assert_eq!(engine.status(), Status::Done);
+    assert!(engine.is_idle());
+    buf.assert_sectors(100, 2);
+    assert_eq!(buf.word(2 * 512 + 25), CANARY);
+    // It keeps no counters and no tickets.
+    assert_eq!(engine.stats().irq_count, 0);
+    assert_eq!(engine.stats().sectors, 0);
+    assert_eq!(engine.submissions(), 1);
+}
+
+#[test]
+fn a_lean_engine_reports_a_cancel_and_a_drive_error_as_failed_and_recovers() {
+    let mut engine = lean();
+    let buf = Buf::new(50);
+    engine.submit(request(0, 50, &buf)).expect("accepted");
+    for _ in 0..8 {
+        assert!(engine.hw_mut().raise());
+        engine.on_interrupt();
+    }
+    let other = Buf::new(1);
+    assert_eq!(
+        engine.submit(request(9, 1, &other)),
+        Err(SubmitError::QueueFull)
+    );
+    engine.cancel_all();
+    run_lean(&mut engine);
+    assert_eq!(engine.status(), Status::Failed);
+    engine.hw_mut().error_at.push(23);
+    engine.submit(request(20, 4, &buf)).expect("accepted");
+    run_lean(&mut engine);
+    assert_eq!(engine.status(), Status::Failed);
+    engine.hw_mut().error_at.clear();
+    engine.submit(request(40, 2, &buf)).expect("accepted");
+    run_lean(&mut engine);
+    assert_eq!(engine.status(), Status::Done);
+    buf.assert_sectors(40, 2);
+}
+
+#[test]
+fn a_lean_engine_fails_a_stalled_transfer_by_the_watchdog() {
+    let mut engine = lean();
+    let buf = Buf::new(4);
+    engine.submit(request(5, 4, &buf)).expect("accepted");
+    assert_eq!(engine.status(), Status::Busy);
+    engine.hw_mut().vblank += Config::DEFAULT.timeout_vblanks + 1;
+    assert_eq!(engine.status(), Status::Failed);
+    assert!(engine.is_idle());
+}
+
+// ------------------------------------------------------------ counted transfer
+
+fn counted() -> CountedEngine<FakeDrive> {
+    let mut engine = CountedEngine::counted(FakeDrive::new(), Config::DEFAULT);
+    engine.attach();
+    engine
+}
+
+fn run_counted(engine: &mut CountedEngine<FakeDrive>) {
+    let mut delivered = 0;
+    while engine.hw_mut().raise() {
+        engine.on_interrupt();
+        delivered += 1;
+        assert!(delivered < 100_000, "interrupt storm");
+    }
+}
+
+fn landed(engine: &CountedEngine<FakeDrive>) -> u32 {
+    // SAFETY: `engine` is live and nothing else touches it.
+    unsafe { CountedEngine::<FakeDrive>::counted_sectors(engine) }
+}
+
+fn error_code(engine: &CountedEngine<FakeDrive>) -> u32 {
+    // SAFETY: as `landed`.
+    unsafe { CountedEngine::<FakeDrive>::error_code(engine) }
+}
+
+#[test]
+fn a_counted_engine_counts_each_stored_sector_as_it_lands_and_nothing_else() {
+    let mut engine = counted();
+    let buf = Buf::new(5);
+    engine
+        .submit(request(100, 5, &buf).with_byte_len(4 * 2048 + 100))
+        .expect("accepted");
+    assert_eq!(landed(&engine), 0);
+    for expected in 1..=5 {
+        assert!(engine.hw_mut().raise());
+        engine.on_interrupt();
+        // Skip the command acknowledges: a sector interrupt moves the count by one.
+        while engine.hw().popped.len() < expected {
+            assert!(engine.hw_mut().raise());
+            engine.on_interrupt();
+        }
+        assert_eq!(landed(&engine), expected as u32);
+    }
+    assert_eq!(engine.status(), Status::Busy);
+    run_counted(&mut engine);
+    assert_eq!(engine.status(), Status::Done);
+    // The partly stored last sector counted once; the drive's extra sector after the last was
+    // dropped, not counted.
+    assert_eq!(landed(&engine), 5);
+    // Nothing else is kept.
+    let stats = engine.stats();
+    assert_eq!(
+        (
+            stats.irq_count,
+            stats.requests_done,
+            stats.discarded_sectors
+        ),
+        (0, 0, 0)
+    );
+    assert_eq!(engine.submissions(), 1);
+    // The count carries over to the next request.
+    engine.submit(Request::park(200)).expect("accepted");
+    run_counted(&mut engine);
+    assert_eq!(landed(&engine), 6);
+    assert_eq!(engine.submissions(), 2);
+    // SAFETY: `engine` is live and nothing else touches it.
+    let accepted = unsafe { CountedEngine::<FakeDrive>::submissions_of(&engine) };
+    assert_eq!(accepted, 2);
+    assert_eq!(engine.status(), Status::Done);
+}
+
+#[test]
+fn a_counted_engine_does_not_count_a_cancelled_requests_dropped_sector() {
+    let mut engine = counted();
+    let buf = Buf::new(50);
+    engine.submit(request(0, 50, &buf)).expect("accepted");
+    while engine.hw().popped.len() < 3 {
+        assert!(engine.hw_mut().raise());
+        engine.on_interrupt();
+    }
+    engine.cancel_all();
+    run_counted(&mut engine);
+    assert_eq!(engine.status(), Status::Failed);
+    // The sectors stored before the cancel, not the one the handler dropped after it.
+    assert_eq!(landed(&engine), 3);
+    // A cancel is a failed status with error code 0.
+    assert_eq!(error_code(&engine), 0);
+}
+
+#[test]
+fn a_counted_engine_keeps_the_latest_failure_code_until_the_next_request_starts() {
+    let mut engine = counted();
+    let buf = Buf::new(8);
+    engine.hw_mut().error_at.push(23);
+    engine.submit(request(20, 4, &buf)).expect("accepted");
+    run_counted(&mut engine);
+    assert_eq!(engine.status(), Status::Failed);
+    let code = error_code(&engine);
+    assert_eq!(code >> 24, 0x05, "a drive error: {code:#x}");
+    // Reading it again, and reading the count, change nothing.
+    assert_eq!(error_code(&engine), code);
+    engine.hw_mut().error_at.clear();
+    engine.submit(request(40, 2, &buf)).expect("accepted");
+    assert_eq!(error_code(&engine), 0);
+    run_counted(&mut engine);
+    assert_eq!(engine.status(), Status::Done);
+    assert_eq!(error_code(&engine), 0);
+}
+
+#[test]
+fn the_lean_engine_still_keeps_no_count_and_no_error_code() {
+    let mut engine = lean();
+    let buf = Buf::new(4);
+    engine.hw_mut().error_at.push(23);
+    engine.submit(request(20, 4, &buf)).expect("accepted");
+    run_lean(&mut engine);
+    assert_eq!(engine.status(), Status::Failed);
+    // SAFETY: `engine` is live and nothing else touches it.
+    unsafe {
+        assert_eq!(LeanEngine::<FakeDrive>::counted_sectors(&engine), 0);
+        assert_eq!(LeanEngine::<FakeDrive>::error_code(&engine), 0);
+    }
+}
+
+// ------------------------------------------------- zero-initialised engines
+
+/// A drive that does nothing and holds no bytes, so it is valid at all-zero bytes like the console's `Mmio`.
+struct NullDrive;
+
+impl CdHw for NullDrive {
+    fn issue(&mut self, _command: u8, _params: &[u8]) -> bool {
+        true
+    }
+    fn interrupt_code(&mut self) -> u8 {
+        0
+    }
+    fn error_response(&mut self) -> (u8, u8) {
+        (0, 0)
+    }
+    fn discard_response(&mut self) {}
+    fn acknowledge(&mut self, _bits: u8) {}
+    fn silence_output(&mut self) {}
+    fn drop_data_request(&mut self) {}
+    unsafe fn pop_sector(&mut self, _destination: *mut u32, _store_words: usize) -> bool {
+        false
+    }
+    fn set_source_enabled(&mut self, _enabled: bool) {}
+    fn vblank_count(&mut self) -> u32 {
+        0
+    }
+}
+
+#[test]
+fn a_zeroed_engine_is_the_engine_before_attach() {
+    // SAFETY: `NullDrive` has no bytes.
+    let mut counted = unsafe { CountedEngine::<NullDrive>::zeroed() };
+    // SAFETY: as above.
+    let mut lean = unsafe { LeanEngine::<NullDrive>::zeroed() };
+    assert_eq!(counted.owner(), Owner::Boot);
+    assert_eq!(lean.owner(), Owner::Boot);
+    assert_eq!(counted.phase(), Phase::Idle);
+    assert!(counted.is_idle() && lean.is_idle());
+    assert_eq!(counted.status(), Status::Idle);
+    assert_eq!(lean.status(), Status::Idle);
+    assert_eq!((counted.submissions(), lean.submissions()), (0, 0));
+    // SAFETY: the engines are live and nothing else touches them.
+    unsafe {
+        assert_eq!(CountedEngine::<NullDrive>::counted_sectors(&counted), 0);
+        assert_eq!(CountedEngine::<NullDrive>::error_code(&counted), 0);
+        assert_eq!(LeanEngine::<NullDrive>::error_code(&lean), 0);
+    }
+    // A request before the engine is attached is refused, as for any engine that is not attached.
+    let buf = Buf::new(2);
+    assert_eq!(
+        counted.submit(request(1, 2, &buf)),
+        Err(SubmitError::QueueFull)
+    );
+    // The install path configures first and attaches; the engine is then the one `counted(..)`
+    // builds.
+    counted.configure(Config::DEFAULT);
+    counted.attach();
+    assert_eq!(counted.owner(), Owner::Data);
+}
+
+#[test]
+fn an_engine_without_statistics_holds_no_statistics_block() {
+    use core::mem::size_of;
+    type Stats = Engine<NullDrive, 0, 0, false, true, false>;
+    // The lean engine drops the 48 bytes of `StreamStats`; the counted one keeps one word of it.
+    let (lean, counted, stats) = (
+        size_of::<LeanEngine<NullDrive>>(),
+        size_of::<CountedEngine<NullDrive>>(),
+        size_of::<Stats>(),
+    );
+    assert_eq!(
+        lean + size_of::<StreamStats>(),
+        stats,
+        "{lean} {counted} {stats}"
+    );
+    // One word, which padding may round up on a host with 8-byte pointers.
+    assert!(
+        (lean + 4..=lean + 8).contains(&counted),
+        "{lean} {counted} {stats}"
+    );
+}

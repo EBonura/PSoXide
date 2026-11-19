@@ -13,7 +13,7 @@
 //!
 //! - [`sincos`] -- Q0.12 angle type + 256-entry Q1.12 sine LUT +
 //!   interpolated `sin_q12` / `cos_q12` lookups, and the matching
-//!   octant-linear `atan2_q12`.
+//!   two arctangents: the coarse inlinable `atan2_q12` (47 units worst) and the accurate `atan2_q12_fine` (under one unit).
 //! - [`int32`] -- saturating 32-bit scalar helpers: `abs_i32` /
 //!   `abs_i16`, `clamp_i16`, `square_i32_saturating`, `isqrt_i32`,
 //!   `mul_q12_i32`, plus the 64-bit-free wide forms `mul_div_i32`,
@@ -22,8 +22,9 @@
 //! - [`wide`] -- [`Wide`] / [`WideU`], the one sanctioned 64-bit value
 //!   for guest code: `mult`/`multu` products, 64-bit add, subtract,
 //!   compare and shift, and explicit extraction to 32 bits. Nothing that
-//!   needs a compiler helper exists. Also [`Mask64`], a 64-flag bit set in
-//!   two words.
+//!   needs a compiler helper exists, and the 64-bit FNV-1a step
+//!   ([`WideU::fnv1a_step`]). Also [`Mask64`], a 64-flag bit set in two
+//!   words, with variable shifts and a bit range.
 //! - [`wide_div`] -- exact division of a [`Wide`] / [`WideU`] by a word or a
 //!   wide value, with [`Rounding`] and clamping chosen by the caller, a
 //!   128-bit product and ratio compare, all in 32-bit instructions.
@@ -75,17 +76,22 @@
 //!   positions, accumulated velocities, etc.
 
 #![no_std]
-#![cfg_attr(target_arch = "mips", feature(asm_experimental_arch))]
+#![cfg_attr(
+    target_arch = "mips",
+    feature(asm_experimental_arch, optimize_attribute)
+)]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
-#[cfg(all(target_arch = "mips", feature = "asm-kernels"))]
+#[cfg(target_arch = "mips")]
 mod asm_kernels;
 pub mod attributed_clip;
 pub mod clip_lanes;
 pub mod color;
+pub mod ease;
 pub mod fmt;
 pub mod int32;
+pub mod le;
 pub mod sincos;
 pub mod wide;
 pub mod wide_div;
@@ -93,6 +99,6 @@ pub mod wide_div;
 // Re-export the most common symbols at the crate root so users
 // can `use psx_math::{sin_q12, cos_q12}` without reaching through
 // the submodule -- these are the hot-loop primitives.
-pub use sincos::{atan2_q12, cos_q12, sin_q12, SIN_TABLE};
+pub use sincos::{atan2_q12, atan2_q12_fine, cos_q12, sin_q12, SIN_TABLE};
 pub use wide::{Mask64, Wide, WideU};
 pub use wide_div::Rounding;

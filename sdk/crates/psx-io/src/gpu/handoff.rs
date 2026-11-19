@@ -1,8 +1,7 @@
 //! Command recording and the direct-access guard: what lets a frame's GPU
 //! work be handed to a queue (`psx_rt::present`) instead of the ports.
 //!
-//! Built only with the `present-queue` feature. Without it the port writes
-//! in [`super`] compile to a single store, as before.
+//! Part of every build: the one present path (`psx_rt::present`) depends on both.
 //!
 //! - **Recording.** While the [`ActiveRecording`] that
 //!   [`start_recording_raw`] returns is alive, [`super::write_command`]
@@ -15,26 +14,28 @@
 //!   touches the buffer of a recording that is no longer open.
 //! - **Direct-access guard.** Once armed ([`arm_direct_access_guard`]), the
 //!   first direct command or display-control write, or GPU DMA address
-//!   store, runs the registered guard function first, which waits until no
-//!   queued walk can collide with the access.
+//!   store, runs the guard first, which waits until no queued walk can
+//!   collide with the access. On the console the guard is psx-rt's
+//!   `wait_idle`, reached by a direct call the linker script resolves (so a
+//!   stack proof sees no call through a register, and a program that never
+//!   arms the guard does not link the wait); the host runs a registered
+//!   function.
 //!
 //! Both states share one flag, so a plain port write costs one extra load
-//! and branch while the feature is on.
+//! and branch.
 
-use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
+use core::ptr::{addr_of, addr_of_mut, read_volatile};
 
 /// Payload words per recorded linked-list node. Silicon (hardware-tests
 /// v1.24) loses words from DMA nodes longer than 16 while drawing.
 pub const RECORDING_NODE_WORDS: u32 = 16;
 
 /// The one command recording. The buffer pointers are meaningful only while
-/// `open` is set; closing clears `open` and `active` before anything else,
+/// `open` is set; closing clears `open` and `ACTIVE` before anything else,
 /// so no path reaches a buffer whose recording has ended.
 struct Recording {
     /// Between a start and the close of that recording.
     open: bool,
-    /// Open and not paused: what [`is_recording`] reports.
-    active: bool,
     /// Counts starts, so a guard or pause knows whether the open recording
     /// is still the one it was made for.
     generation: u32,
@@ -53,7 +54,6 @@ struct Recording {
 #[cfg_attr(target_arch = "mips", link_section = ".data")]
 static mut RECORDING: Recording = Recording {
     open: false,
-    active: false,
     generation: 0,
     overflowed: false,
     head: core::ptr::null_mut(),
@@ -69,31 +69,34 @@ static mut RECORDING: Recording = Recording {
 static mut SLOW: bool = false;
 #[cfg_attr(target_arch = "mips", link_section = ".data")]
 static mut GUARD_ARMED: bool = false;
-#[cfg_attr(target_arch = "mips", link_section = ".data")]
+// The host runs the registered function; the console calls the guard by a linker-resolved name and
+// has no pointer.
+#[cfg(not(target_arch = "mips"))]
 static mut GUARD: Option<fn()> = None;
+
+#[cfg_attr(target_arch = "mips", link_section = ".data")]
+static mut ACTIVE: bool = false;
+#[cfg_attr(target_arch = "mips", link_section = ".data")]
+static mut PAUSED: bool = false;
+
+// The flags are read and written with plain accesses, not volatile ones: only
+// the foreground touches them (no handler does), and plain accesses let the
+// optimiser see that a program which never opens a recording nor arms the guard
+// only ever stores `false` into `SLOW`, and drop every test of it. Such a
+// program's port writes are then the plain stores they were before.
 
 #[inline(always)]
 pub(super) fn is_slow() -> bool {
-    // SAFETY: a volatile read of a `bool` static; the program is single
-    // threaded and the VBlank handler never touches it.
-    unsafe { read_volatile(addr_of!(SLOW)) }
+    // SAFETY: a plain read of a `bool` static; the program is single
+    // threaded and no interrupt handler touches it.
+    unsafe { *addr_of!(SLOW) }
 }
 
-fn refresh_slow() {
-    // SAFETY: volatile reads and a write of `bool` statics owned by this
-    // module; the program is single threaded and no interrupt handler
-    // touches them.
-    unsafe {
-        let slow =
-            read_volatile(addr_of!(RECORDING.active)) || read_volatile(addr_of!(GUARD_ARMED));
-        write_volatile(addr_of_mut!(SLOW), slow);
-    }
-}
-
-fn set_recording_active(active: bool) {
-    // SAFETY: a volatile write of a `bool` static owned by this module.
-    unsafe { write_volatile(addr_of_mut!(RECORDING.active), active) };
-    refresh_slow();
+/// Set `SLOW` from the recording and the guard. Called only where one of
+/// them changes (opening or closing a recording, arming or running the guard).
+fn set_slow(slow: bool) {
+    // SAFETY: a plain write of a `bool` static owned by this module.
+    unsafe { *addr_of_mut!(SLOW) = slow };
 }
 
 /// The slow half of [`super::write_command`]: record the word, or run the
@@ -137,6 +140,16 @@ pub(super) fn write_display_control_slow(word: u32) {
     super::write_display_control_unguarded(word);
 }
 
+/// The slow half of [`super::write_display_controls`]: the guard half of
+/// [`write_display_control_slow`], once for the whole run.
+#[cold]
+#[inline(never)]
+pub(super) fn display_control_guard_slow() {
+    if !is_recording() {
+        run_direct_access_guard();
+    }
+}
+
 /// A command stream recorded by [`start_recording_raw`]: DMA linked-list
 /// nodes that end the list until [`link_to`](Self::link_to) chains them
 /// onward.
@@ -150,12 +163,14 @@ pub struct CommandRecording {
 impl CommandRecording {
     /// First node, the address a chain links to or a DMA walk starts at.
     #[inline]
+    #[must_use]
     pub fn head(&self) -> *const u32 {
         self.head
     }
 
     /// Words used in the buffer, node headers included.
     #[inline]
+    #[must_use]
     pub fn len_words(&self) -> usize {
         self.words
     }
@@ -180,13 +195,15 @@ impl CommandRecording {
 /// The recording ran out of buffer, so it was discarded: a command cut short
 /// would make the GPU take the words after it as its parameters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RecordingOverflow;
 
 /// True while a recording is open and not paused by [`pause_recording`].
 #[inline(always)]
+#[must_use]
 pub fn is_recording() -> bool {
-    // SAFETY: a volatile read of a `bool` static owned by this module.
-    unsafe { read_volatile(addr_of!(RECORDING.active)) }
+    // SAFETY: plain reads of `bool` statics owned by this module.
+    unsafe { *addr_of!(ACTIVE) && !*addr_of!(PAUSED) }
 }
 
 /// Open the recording on `buffer` and return its generation.
@@ -211,7 +228,12 @@ unsafe fn open(buffer: *mut u32, words: usize) -> u32 {
         recording.end = buffer.add(words);
         recording.generation
     };
-    set_recording_active(true);
+    // SAFETY: plain writes of `bool` statics owned by this module.
+    unsafe {
+        *addr_of_mut!(ACTIVE) = true;
+        *addr_of_mut!(PAUSED) = false;
+    }
+    set_slow(true);
     generation
 }
 
@@ -233,7 +255,12 @@ fn close(generation: Option<u32>) -> Result<Option<CommandRecording>, RecordingO
     if !open || generation.is_some_and(|generation| !is_open(generation)) {
         return Ok(None);
     }
-    set_recording_active(false);
+    // SAFETY: plain accesses to statics owned by this module.
+    unsafe {
+        *addr_of_mut!(ACTIVE) = false;
+        *addr_of_mut!(PAUSED) = false;
+        set_slow(*addr_of!(GUARD_ARMED));
+    }
     // SAFETY: exclusive access to this module's static. The recording is
     // open (checked above), so `node` and `head` point into the buffer its
     // start's contract keeps live until it is closed, which is now; `next`
@@ -274,6 +301,11 @@ pub struct ActiveRecording {
 
 impl ActiveRecording {
     /// Stop recording. `Ok(None)` when nothing was written.
+    ///
+    /// # Errors
+    ///
+    /// [`RecordingOverflow`] when the buffer ran out: the recording was
+    /// discarded.
     pub fn end(self) -> Result<Option<CommandRecording>, RecordingOverflow> {
         let generation = self.generation;
         core::mem::forget(self);
@@ -333,7 +365,8 @@ pub fn pause_recording() -> RecordingPause {
     if !is_recording() {
         return RecordingPause { resume: None };
     }
-    set_recording_active(false);
+    // SAFETY: a plain write of a `bool` static owned by this module.
+    unsafe { *addr_of_mut!(PAUSED) = true };
     // SAFETY: a volatile read of this module's static.
     let generation = unsafe { read_volatile(addr_of!(RECORDING.generation)) };
     RecordingPause {
@@ -348,7 +381,8 @@ impl Drop for RecordingPause {
         // buffer may already be gone.
         if let Some(generation) = self.resume {
             if is_open(generation) {
-                set_recording_active(true);
+                // SAFETY: a plain write of a `bool` static owned by this module.
+                unsafe { *addr_of_mut!(PAUSED) = false };
             }
         }
     }
@@ -440,30 +474,51 @@ fn record_words(words: &[u32]) {
     }
 }
 
-/// Register the function that makes direct GPU access safe while a queued
-/// frame may be walking (`psx_rt::present` registers its `wait_idle`). It
-/// runs once, on the first direct command or display-control write or GPU
-/// DMA address store after [`arm_direct_access_guard`], and is then
-/// disarmed.
+/// Host only: register the function that makes direct GPU access safe while a queued
+/// frame may be walking (`psx_rt::present` registers its `wait_idle`). On the console
+/// there is no registration: `run_armed_guard` calls `__psx_direct_access_guard`, which
+/// the linker script binds to psx-rt's `wait_idle`, so one mechanism runs there and no
+/// call goes through a register. It runs once, on the first direct command or
+/// display-control write or GPU DMA address store after [`arm_direct_access_guard`], and
+/// is then disarmed.
+#[cfg(not(target_arch = "mips"))]
 pub fn set_direct_access_guard(guard: fn()) {
     // SAFETY: a volatile write of this module's static.
-    unsafe { write_volatile(addr_of_mut!(GUARD), Some(guard)) };
+    unsafe { core::ptr::write_volatile(addr_of_mut!(GUARD), Some(guard)) };
 }
 
 /// Arm the guard: the GPU may be busy with work the CPU handed off, so the
 /// next direct access must wait for it first.
+///
+/// On the console, arming also keeps psx-rt's `wait_idle` in the image: the linker script
+/// binds the guard's call target to it only when something references it, and this is the
+/// reference. Only code that hands a chain over (`psx_rt::present`) arms the guard; a
+/// program that never calls this links no wait at all.
+#[inline]
 pub fn arm_direct_access_guard() {
-    // SAFETY: a volatile write of a `bool` static owned by this module.
-    unsafe { write_volatile(addr_of_mut!(GUARD_ARMED), true) };
-    refresh_slow();
+    // A relocation of type R_MIPS_NONE: it emits nothing, and makes the linker's section
+    // collection treat `wait_idle` as used wherever this function is. It comes first so the
+    // flag stores below stay free for the scheduler to place, as they were without it.
+    #[cfg(target_arch = "mips")]
+    // SAFETY: the assembly emits no instruction, touches no memory and no register.
+    unsafe {
+        core::arch::asm!(
+            ".reloc ., R_MIPS_NONE, {}",
+            sym __psx_rt_wait_idle,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    // SAFETY: a plain write of a `bool` static owned by this module.
+    unsafe { *addr_of_mut!(GUARD_ARMED) = true };
+    set_slow(true);
 }
 
 /// Run and disarm the guard if it is armed. Direct-access paths outside the
 /// port writes (GPU DMA setup) call it first.
 #[inline]
 pub fn run_direct_access_guard() {
-    // SAFETY: volatile accesses to this module's statics.
-    let armed = unsafe { read_volatile(addr_of!(GUARD_ARMED)) };
+    // SAFETY: a plain read of a `bool` static owned by this module.
+    let armed = unsafe { *addr_of!(GUARD_ARMED) };
     if armed {
         run_armed_guard();
     }
@@ -474,13 +529,34 @@ pub fn run_direct_access_guard() {
 #[cold]
 #[inline(never)]
 fn run_armed_guard() {
-    // SAFETY: volatile accesses to this module's statics.
-    unsafe { write_volatile(addr_of_mut!(GUARD_ARMED), false) };
-    refresh_slow();
+    // SAFETY: plain accesses to statics owned by this module.
+    unsafe {
+        *addr_of_mut!(GUARD_ARMED) = false;
+        set_slow(*addr_of!(ACTIVE));
+    }
+    // On the console the guard is one known function, called directly, so a call tree that
+    // reaches this path has no call through a register to bound.
+    #[cfg(target_arch = "mips")]
+    // SAFETY: the linker script (sdk/psoxide.ld) defines the symbol as psx-rt's `wait_idle`
+    // whenever that function is in the image, and `arm_direct_access_guard` puts it there. This
+    // function runs only after an arm, so the symbol is never the unresolved 0 the script gives a
+    // program that has no `wait_idle` (see sdk/docs/PRESENT.md).
+    unsafe {
+        __psx_direct_access_guard()
+    }
+    #[cfg(not(target_arch = "mips"))]
     // SAFETY: as above.
     if let Some(guard) = unsafe { read_volatile(addr_of!(GUARD)) } {
         guard();
     }
+}
+
+#[cfg(target_arch = "mips")]
+extern "Rust" {
+    /// Defined by the linker script, as `__psx_rt_wait_idle` when psx-rt's `wait_idle` is linked.
+    fn __psx_direct_access_guard();
+    /// psx-rt's `wait_idle`.
+    fn __psx_rt_wait_idle();
 }
 
 #[cfg(test)]

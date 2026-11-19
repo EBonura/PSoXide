@@ -58,10 +58,8 @@
 pub mod affine_surface;
 pub mod angle;
 pub mod app;
-pub mod attributed_clip;
 pub mod cd_drive;
 pub mod character_motor;
-pub mod clip_lanes;
 pub mod collision_query;
 pub mod fixed;
 pub mod frames;
@@ -125,10 +123,11 @@ pub(crate) fn r3000_usize_gt(left: usize, right: usize) -> bool {
 
 pub use affine_surface::{
     compose_model_view_transform, materialize_baked_surface_vertices, materialize_surface_vertices,
-    submit_surface_batch, submit_surface_batch_near, submit_surface_batch_near_with_rule,
-    submit_surface_batch_screened, submit_surface_batch_screened_with_rule, AffineSurface,
-    AffineVertex, DepthBands, ErrorBounded, NearView, SplitRule, SurfaceProfile,
-    SurfaceSourceVertex, SurfaceSubmit, AFFINE_PACKETS_PER_TRIANGLE, AFFINE_SPLIT_SCRATCH_VERTICES,
+    submit_surface_batch, submit_surface_batch_near, submit_surface_batch_screened,
+    submit_world_batch, AffineSurface, AffineVertex, FirstPerson, NearView, SurfaceProfile,
+    SurfaceSourceVertex, SurfaceSubmit, WorldLattice, WorldProfile, WorldSurface,
+    AFFINE_PACKETS_PER_TRIANGLE, AFFINE_SPLIT_SCRATCH_VERTICES, WORLD_COARSE_ERROR_BUDGET_Q3,
+    WORLD_PACKET_WORDS_PER_TRIANGLE, WORLD_SCRATCH_VERTICES,
 };
 pub use angle::Angle;
 pub use app::{App, Config, VisualPacing};
@@ -160,9 +159,10 @@ pub use movement::{
 /// the app runner's through [`Ctx::gpu_dma`].
 pub use psx_io::periph::GpuDma;
 pub use render::{
-    CameraDepth, DepthBand, DepthRange, DepthSlot, GpuPacket, OtDepth, OtFrame, PacketFramePair,
-    PrimitiveArena, PrimitivePacketArena, PrimitivePacketScratch, PrimitivePacketStream,
-    PrimitivePacketWordReservation, PrimitiveSink, RoomSurfaceSink, PRIMITIVE_PACKET_SLOT_WORDS,
+    CameraDepth, DepthBand, DepthRange, DepthSlot, GpuPacket, OtDepth, OtFrame, OtFrameDepth,
+    PacketFramePair, PrimitiveArena, PrimitivePacketArena, PrimitivePacketScratch,
+    PrimitivePacketStream, PrimitivePacketWordReservation, PrimitiveSink, RoomSurfaceSink,
+    PRIMITIVE_PACKET_SLOT_WORDS,
 };
 pub use render3d::{
     apply_model_pose_translation, compute_joint_view_transform, compute_joint_world_basis,
@@ -186,7 +186,7 @@ pub use scratch::{BoundedSink, FixedScratch, SliceSink};
 // arguments (instance rotation, joint transforms) without pulling in
 // `psx-gte` directly.
 pub use psx_gte::math::{Mat3I16, Vec3I16};
-pub use scene::{Ctx, QueuedFrame, RenderSubmission, Scene, SceneStateRef};
+pub use scene::{BootSplash, Ctx, QueuedFrame, RenderSubmission, Scene, SceneStateRef};
 pub use third_person_camera::{
     accelerated_orbit_step_q12, ThirdPersonCameraConfig, ThirdPersonCameraFrame,
     ThirdPersonCameraInput, ThirdPersonCameraProfile, ThirdPersonCameraState,

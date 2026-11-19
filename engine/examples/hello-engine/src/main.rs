@@ -103,7 +103,7 @@ impl Scene for Game {
         )) else {
             return;
         };
-        ot.add_packet(3, bg);
+        ot.add(3, bg);
 
         // Foreground: a 24×24 solid quad oscillating horizontally
         // via `Angle`. `per_frames(N).mul_tick(tick)` is the
@@ -117,7 +117,7 @@ impl Scene for Game {
         let Some(quad) = quads.push(RectFlat::new(cx, cy, 24, 24, 0xE0, 0x60, 0x20)) else {
             return;
         };
-        ot.add_packet(1, quad);
+        ot.add(1, quad);
 
         ot.submit(ctx.gpu_dma());
     }

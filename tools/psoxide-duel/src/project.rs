@@ -120,7 +120,8 @@ fn training_fighter(
         .model_instances
         .get(usize::from(record.model_instance))
         .map(|instance| usize::from(instance.model));
-    spec.flinch_ticks = model.and_then(|model| reaction_ticks(package, model, &body, Reaction::Flinch));
+    spec.flinch_ticks =
+        model.and_then(|model| reaction_ticks(package, model, &body, Reaction::Flinch));
     spec.stagger_ticks =
         model.and_then(|model| reaction_ticks(package, model, &body, Reaction::Stagger));
     let clocks = entity_clocks(package, &spec.record);

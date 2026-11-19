@@ -137,17 +137,17 @@ pub(crate) struct Run {
     pub(crate) pad: PadState,
     /// Skip the steps that can hang a console (hold L2 when starting).
     pub(crate) skip_risky: bool,
-    /// Write memory-card frames back (the same bytes just read): the pad
-    /// engine's lease step rewrites about sixty frames of block 0 with the
-    /// bytes it read, and the card protocol step writes one unused frame. Only
-    /// when L1 and R1 were held at the start, as the card diagnostic asks for
-    /// its writes.
+    /// Write a memory-card frame back (the same bytes just read): the card
+    /// protocol step writes one unused frame. Only when L1 and R1 were held at
+    /// the start, as the card diagnostic asks for its writes.
     pub(crate) write_cards: bool,
     /// Show a QR checkpoint page set after each area: only when START and R2
     /// were held at the start, a chord apart from the card writes.
     pub(crate) checkpoints: bool,
     /// Run only the steps marked for the focused sweep (menu row 2).
     pub(crate) focus: bool,
+    /// Run only the steps that need an operator (menu row 8): the linear run leaves them out.
+    pub(crate) manual: bool,
     /// Areas the run entered, for the clean check of a focused run.
     visited: [bool; AREA_COUNT],
     /// An id for the checkpoint files of this run.
@@ -181,6 +181,7 @@ impl Run {
             write_cards: false,
             checkpoints: false,
             focus: false,
+            manual: false,
             visited: [false; AREA_COUNT],
             checkpoint_id: 0,
             handoffs: [Handoff {
@@ -609,6 +610,8 @@ struct Step {
     risky: bool,
     /// Order in the focused sweep run (the menu's second row), 0 for not in it.
     focus: u8,
+    /// Needs a person at the console: left out of the linear run, run by its own menu row.
+    manual: bool,
     run: fn(&mut Run),
 }
 
@@ -618,6 +621,7 @@ const fn step(area: Area, name: &'static str, run: fn(&mut Run)) -> Step {
         name,
         risky: false,
         focus: 0,
+        manual: false,
         run,
     }
 }
@@ -628,6 +632,7 @@ const fn risky(area: Area, name: &'static str, run: fn(&mut Run)) -> Step {
         name,
         risky: true,
         focus: 0,
+        manual: false,
         run,
     }
 }
@@ -639,6 +644,19 @@ const fn focused(area: Area, name: &'static str, order: u8, run: fn(&mut Run)) -
         name,
         risky: false,
         focus: order,
+        manual: false,
+        run,
+    }
+}
+
+/// A step that needs a person at the console. The linear run never runs it; its own menu row does.
+const fn manual(area: Area, name: &'static str, run: fn(&mut Run)) -> Step {
+    Step {
+        area,
+        name,
+        risky: false,
+        focus: 0,
+        manual: true,
         run,
     }
 }
@@ -671,6 +689,7 @@ macro_rules! records_step {
 records_step!(records_cpu, records::push_cpu_records);
 records_step!(records_irq, records::push_irq_dma_timer_records);
 records_step!(records_gte, records::push_gte_records);
+records_step!(records_gte_nclip, gte_nclip::run);
 records_step!(records_gpu, records::push_gpu_records);
 records_step!(records_spu, records::push_spu_records);
 records_step!(records_cd, records::push_cd_records);
@@ -690,9 +709,12 @@ records_step!(records_tick_loss, tick_loss::run);
 records_step!(records_sio_setup, sio_timing::setup_sweep);
 records_step!(records_sio_pad, sio_timing::pad_timing);
 records_step!(records_sio_card, sio_timing::card_timing);
-records_step!(records_engine_setup, pad_engine::setup_sweep);
-records_step!(records_engine_ack, pad_engine::pacing_ack);
-records_step!(records_engine_timed, pad_engine::pacing_timed);
+records_step!(records_sio_latch, sio_timing::latch_and_arm);
+records_step!(records_sio_early, sio_timing::select_early);
+records_step!(records_sio_config_irq, config_irq::run);
+records_step!(records_sio_digital_first, digital_first::run);
+records_step!(records_present_path, present_path::run);
+records_step!(records_present_cd, present_path::run_cd);
 
 fn run_tests(run: &mut Run, area: Area) {
     let total = TESTS.iter().filter(|spec| test_area(spec) == area).count();
@@ -726,40 +748,19 @@ fn step_sio_mix(run: &mut Run) {
     ui::repaint(run.font());
 }
 
-/// Card sector reads (and, with L1 and R1 held at the start, write-backs of the
-/// same bytes) through the engine's lease.
-fn step_engine_card(run: &mut Run) {
-    pad_engine::card_lease(&mut run.timing.records, &mut run.next, run.write_cards);
-}
-
-/// The engine with a GPU walk, SPU DMA and a CD read going; the load paints
-/// over the picture, so it is drawn again afterwards.
-fn step_engine_load(run: &mut Run) {
-    pad_engine::under_load(&mut run.timing.records, &mut run.next);
-    ui::repaint(run.font());
-}
-
-/// The DualShock motor packets, the poll-cost comparison and the operator's
-/// yes or no for each motor level.
+/// The DualShock motor packets and the poll-cost comparison. The operator's yes or no for each motor
+/// level is not asked here (`step_rumble_questions`).
 fn step_rumble(run: &mut Run) {
     let font = run.font.take().expect("font uploaded by reset_area");
     rumble::run(&font, &mut run.timing.records, &mut run.next);
     run.font = Some(font);
 }
 
-/// The optional hot-plug window. Says what it wants on the detail line and
-/// counts the seconds down.
-fn step_sio_hotplug(run: &mut Run) {
+/// The same step with the operator's questions: which pad, the eight motor questions, the swap. Its own
+/// menu row; the linear run does not ask anyone anything.
+fn step_rumble_questions(run: &mut Run) {
     let font = run.font.take().expect("font uploaded by reset_area");
-    pad_engine::hotplug(
-        |seconds| {
-            let mut line = ui::Line::new();
-            line.s("UNPLUG+REPLUG ONE (OPTIONAL) ").u(seconds).s("S");
-            ui::detail(&font, "PAD", line.as_str());
-        },
-        &mut run.timing.records,
-        &mut run.next,
-    );
+    rumble::run_questions(&font, &mut run.timing.records, &mut run.next);
     run.font = Some(font);
 }
 
@@ -846,6 +847,7 @@ const STEPS: &[Step] = &[
     step(Area::Gte, "GTE TIMING", records_gte),
     step(Area::Gte, "GTE COMMAND LATENCY", records_gte_latency),
     step(Area::Gte, "GTE PRECISION", precision_remaining_step),
+    step(Area::Gte, "GTE NCLIP VARIANTS", records_gte_nclip),
     // 4
     step(Area::Gpu, "GPU CASES", tests_gpu),
     step(Area::Gpu, "GPU TIMING AND MDEC", records_gpu),
@@ -859,6 +861,7 @@ const STEPS: &[Step] = &[
     step(Area::Gpu, "480I INTERLACE", step_interlace),
     step(Area::Gpu, "WORKLOAD CALIBRATION", step_calibration),
     step(Area::Gpu, "TEXTURE UV WINDOWS", step_uv_windows),
+    step(Area::Gpu, "PRESENT ONE PATH", records_present_path),
     // After the two above: a wedged list or FIFO here cannot cost them.
     step(Area::Gpu, "GPU DMA EDGE CASES", step_dma_edge),
     focused(Area::Gpu, "GPU LIST NODE SIZES", 2, step_ll_sweep),
@@ -882,21 +885,24 @@ const STEPS: &[Step] = &[
     step(Area::Cd, "STREAM COST", step_stream_cost),
     step(Area::Cd, "CD-DA HANDOFF", step_stream_handoff),
     step(Area::Cd, "CD PAUSE SECOND RESPONSE", step_cd_pause),
+    // Retired in v2.19 with its verdict: step CD STOP AT ACKNOWLEDGE, records 0x6F8 to 0x6FB (cd_stop_mixed_waits,
+    // cd_stop_mixed_early, cd_stop_single_waits, cd_stop_single_early). The ids are not reused and the decoder
+    // keeps the names so captures of v2.14 to v2.18 read.
+    step(Area::Cd, "PRESENT UNDER CD AND FLUSH", records_present_cd),
     // 7
     step(Area::Sio, "SIO CASES", tests_sio),
     step(Area::Sio, "SIO TIMING", records_sio),
     step(Area::Sio, "SIO0 SELECT DELAY", records_sio_setup),
     step(Area::Sio, "SIO0 PAD ACK TIMING", records_sio_pad),
     step(Area::Sio, "SIO0 CARD ACK TIMING", records_sio_card),
+    step(Area::Sio, "SIO0 LATCH AND ARM", records_sio_latch),
+    step(Area::Sio, "SIO0 SELECT EARLY", records_sio_early),
+    step(Area::Sio, "PAD CONFIG UNDER IRQ", records_sio_config_irq),
+    step(Area::Sio, "PAD DIGITAL FIRST POLL", records_sio_digital_first),
     step(Area::Sio, "CARD SECTOR PROTOCOL", step_card_proto),
     step(Area::Sio, "PAD AND CARD UNDER LOAD", step_sio_mix),
-    step(Area::Sio, "ENGINE SETUP SWEEP", records_engine_setup),
-    step(Area::Sio, "ENGINE ACK PACING", records_engine_ack),
-    step(Area::Sio, "ENGINE TIMED PACING", records_engine_timed),
-    step(Area::Sio, "ENGINE AND CARD LEASE", step_engine_card),
-    step(Area::Sio, "ENGINE UNDER LOAD", step_engine_load),
     step(Area::Sio, "DUALSHOCK MOTORS", step_rumble),
-    step(Area::Sio, "PAD HOT-PLUG WINDOW", step_sio_hotplug),
+    manual(Area::Sio, "DUALSHOCK MOTOR QUESTIONS", step_rumble_questions),
     // 8
     step(Area::Perf, "STACK AND LEVER CASES", tests_perf),
     step(Area::Perf, "WARM PROBES", records_perf_safe),
@@ -1106,7 +1112,14 @@ pub(crate) fn execute(
     // the marked ones, by their order number.
     let mut order = [0usize; STEPS.len()];
     let mut count = 0;
-    if run.focus {
+    if run.manual {
+        for (index, step) in STEPS.iter().enumerate() {
+            if step.manual {
+                order[count] = index;
+                count += 1;
+            }
+        }
+    } else if run.focus {
         for rank in 1..=u8::MAX {
             for (index, step) in STEPS.iter().enumerate() {
                 if step.focus == rank {
@@ -1116,10 +1129,12 @@ pub(crate) fn execute(
             }
         }
     } else {
-        for (index, slot) in order.iter_mut().enumerate() {
-            *slot = index;
+        for (index, step) in STEPS.iter().enumerate() {
+            if !step.manual {
+                order[count] = index;
+                count += 1;
+            }
         }
-        count = STEPS.len();
     }
     run.visited = [false; AREA_COUNT];
     let mut current: Option<Area> = None;

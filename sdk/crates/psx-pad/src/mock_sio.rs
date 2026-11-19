@@ -87,10 +87,32 @@ pub struct Model {
     pub ack_delay: u64,
     // psx-numeric-allow-next-line: host-only controller model, compiled under cfg(test)
     pub ack_width: u64,
+    /// The port shows no live DSR level and reports each ACK only as the
+    /// latched interrupt bit (PCSX-ReARMed).
+    pub latch_only: bool,
+    /// The port shows the live level and also latches (when armed).
+    pub latch_too: bool,
+    /// Packet bytes, counted from the first, whose ACK latches without the
+    /// interrupt being armed (ReARMed: 2, then it needs CTRL bit 12).
+    pub latch_free_bytes: usize,
+    /// An empty socket (id 0xFF) still latches the address byte, as ReARMed does:
+    /// the reply is 0xFF, nothing follows.
+    pub empty_latches: bool,
+    /// The last value written to CTRL.
+    pub ctrl: u16,
+    pub armed: bool,
+    pub latched: bool,
+    pub latch_done_for: u64,
+    pub ack_index: usize,
     pub fault: Fault,
     pub fault_byte: usize,
     /// Apply the fault to the first select only.
     pub fault_once: bool,
+    /// Apply the fault to the transaction opened by this select only, counted from 1
+    /// (0: every select): one packet hit by an interrupt that hid its `/ACK`.
+    pub fault_attempt: usize,
+    /// A DualShock that ignores the analog request (0x44) and so never leaves digital.
+    pub refuse_analog: bool,
     /// Per-select `(id, fault, byte)` overrides, indexed by attempt.
     pub sequence: Vec<(u8, Fault, usize)>,
     // Observations.
@@ -100,6 +122,21 @@ pub struct Model {
     pub mid_ctrl: usize,
     pub resets: usize,
     pub tx_errors: usize,
+    // Timing observations, in model ticks (a clock reading moves 64).
+    // psx-numeric-allow-next-line: host-only controller model, compiled under cfg(test)
+    pub min_ack_gap: u64,
+    // psx-numeric-allow-next-line: host-only controller model, compiled under cfg(test)
+    pub min_setup_gap: u64,
+    // psx-numeric-allow-next-line: host-only controller model, compiled under cfg(test)
+    pub min_last_gap: u64,
+    // psx-numeric-allow-next-line: host-only controller model, compiled under cfg(test)
+    pub cs_high: Vec<u64>,
+    // psx-numeric-allow-next-line: host-only controller model, compiled under cfg(test)
+    pub selected_at: u64,
+    // psx-numeric-allow-next-line: host-only controller model, compiled under cfg(test)
+    pub deselected_at: Option<u64>,
+    // psx-numeric-allow-next-line: host-only controller model, compiled under cfg(test)
+    pub last_ready: u64,
 }
 
 impl Model {
@@ -142,12 +179,23 @@ impl Default for Model {
             pending_small: 0,
             ignore_exits: 0,
             slow_ack: None,
+            latch_only: false,
+            latch_too: false,
+            latch_free_bytes: 0,
+            empty_latches: false,
+            ctrl: 0,
+            armed: false,
+            latched: false,
+            latch_done_for: 0,
+            ack_index: 0,
             rx_delay: 3,
             ack_delay: 12,
             ack_width: 5,
             fault: Fault::None,
             fault_byte: 3,
             fault_once: false,
+            fault_attempt: 0,
+            refuse_analog: false,
             sequence: Vec::new(),
             early: 0,
             sends: 0,
@@ -155,6 +203,13 @@ impl Default for Model {
             mid_ctrl: 0,
             resets: 0,
             tx_errors: 0,
+            min_ack_gap: u64::MAX,
+            min_setup_gap: u64::MAX,
+            min_last_gap: u64::MAX,
+            cs_high: Vec::new(),
+            selected_at: 0,
+            deselected_at: None,
+            last_ready: 0,
         }
     }
 }
@@ -174,7 +229,10 @@ pub fn reset(model: Model) {
 }
 
 fn faulted(m: &Model, kind: Fault, index: usize) -> bool {
-    m.fault == kind && m.fault_byte == index && (!m.fault_once || m.attempts == 1)
+    m.fault == kind
+        && m.fault_byte == index
+        && (!m.fault_once || m.attempts == 1)
+        && (m.fault_attempt == 0 || m.fault_attempt == m.attempts)
 }
 
 /// 16-bit register write. MODE and BAUD are accepted and ignored; on CTRL,
@@ -187,6 +245,7 @@ pub unsafe fn write_u16(addr: u32, value: u16) {
     with(|m| {
         m.now += 1;
         let selected = value & psx_hw::sio::sio0::ctrl::DTR != 0;
+        m.ctrl = value;
         if value & psx_hw::sio::sio0::ctrl::RESET != 0 {
             // The UART keeps a late reply across deselection; only RESET
             // cancels it.
@@ -198,11 +257,37 @@ pub unsafe fn write_u16(addr: u32, value: u16) {
             m.mid_ctrl += 1;
         }
         if selected && !m.selected {
+            if let Some(at) = m.deselected_at.take() {
+                let high = m.now - at;
+                m.cs_high.push(high);
+            }
+            m.selected_at = m.now;
             select(m);
+        }
+        if !selected && m.selected {
+            if m.step > 0 {
+                let gap = m.now.saturating_sub(m.last_ready);
+                m.min_last_gap = m.min_last_gap.min(gap);
+            }
+            m.deselected_at = Some(m.now);
+        }
+        m.armed = selected && value & psx_hw::sio::sio0::ctrl::ACK_IRQ_EN != 0;
+        if value & psx_hw::sio::sio0::ctrl::ACK != 0 && (m.latch_only || m.latch_too) {
+            let level_high =
+                !m.latch_only && m.ack_at != 0 && m.now >= m.ack_at && m.now < m.ack_end;
+            if !level_high {
+                m.latched = false;
+                m.latch_done_for = m.ack_at;
+                if m.latch_only {
+                    m.ack_at = 0;
+                    m.ack_end = 0;
+                }
+            }
         }
         if !selected {
             m.ack_at = 0;
             m.ack_end = 0;
+            m.latched = false;
         }
         m.selected = selected;
     });
@@ -210,6 +295,8 @@ pub unsafe fn write_u16(addr: u32, value: u16) {
 
 fn select(m: &mut Model) {
     m.attempts += 1;
+    m.latched = false;
+    m.latch_done_for = 0;
     m.step = 0;
     m.ack_at = 0;
     m.ack_end = 0;
@@ -233,7 +320,19 @@ pub unsafe fn read_u32(addr: u32) -> u32 {
         if m.pending.iter().any(|&(_, ready)| m.now >= ready) {
             stat |= 2;
         }
-        if m.ack_at != 0 && m.now >= m.ack_at && m.now < m.ack_end {
+        let latching = m.latch_only || m.latch_too;
+        if latching
+            && m.ack_at != 0
+            && m.now >= m.ack_at
+            && m.latch_done_for != m.ack_at
+            && (m.armed || m.ack_index < m.latch_free_bytes)
+        {
+            m.latched = true;
+        }
+        if m.latched {
+            stat |= psx_hw::sio::sio0::stat::IRQ;
+        }
+        if !m.latch_only && m.ack_at != 0 && m.now >= m.ack_at && m.now < m.ack_end {
             stat |= 1 << 7;
         }
         stat
@@ -264,6 +363,13 @@ pub unsafe fn write_u8(addr: u32, value: u8) {
         m.now += 1;
         assert!(m.selected, "DATA sent while deselected");
         let index = m.step;
+        if index == 0 {
+            let gap = m.now - m.selected_at;
+            m.min_setup_gap = m.min_setup_gap.min(gap);
+        } else if m.ack_end != 0 {
+            let gap = m.now.saturating_sub(m.ack_end);
+            m.min_ack_gap = m.min_ack_gap.min(gap);
+        }
         let early = index != 0 && m.now < m.ack_end;
         if early {
             m.early += 1;
@@ -292,8 +398,11 @@ pub unsafe fn write_u8(addr: u32, value: u8) {
             let late = faulted(m, Fault::LateRx, index);
             let ready = m.now + if late { 33_820 } else { m.rx_delay };
             m.pending.push((rx, ready));
+            m.last_ready = ready;
         }
-        let acked = m.id != 0xff && index < m.final_step && !faulted(m, Fault::Ack, index);
+        let acked = (m.id != 0xff || (m.empty_latches && index == 0))
+            && index < m.final_step
+            && !faulted(m, Fault::Ack, index);
         (m.ack_at, m.ack_end) = if acked {
             {
                 let delay = match m.slow_ack {
@@ -305,6 +414,7 @@ pub unsafe fn write_u8(addr: u32, value: u8) {
         } else {
             (0, 0)
         };
+        m.ack_index = index;
         if faulted(m, Fault::AckHeld, index) && index < m.final_step {
             m.ack_end = m.now + 100_000;
         }
@@ -367,7 +477,7 @@ fn apply_command(m: &mut Model, index: usize, value: u8) {
                 m.id = if m.analog_requested { 0x73 } else { 0x41 };
             }
         }
-        (0x44, 3) => m.analog_requested = value == 1,
+        (0x44, 3) => m.analog_requested = value == 1 && !m.refuse_analog,
         (0x44, 4) => m.locked = value == 3,
         _ => {}
     }
@@ -400,5 +510,16 @@ impl psx_io::controller_port::Transport for MockBus {
     fn set_control(&mut self, value: u16) {
         // SAFETY: as above.
         unsafe { write_u16(CTRL, value) }
+    }
+    fn control(&mut self) -> u16 {
+        with(|m| m.ctrl)
+    }
+    fn clock(&mut self) -> u16 {
+        // Root counter 0 moves 64 model ticks a reading, so the setup wait is
+        // about a hundred readings rather than seven thousand.
+        with(|m| {
+            m.now += 64;
+            m.now as u16
+        })
     }
 }

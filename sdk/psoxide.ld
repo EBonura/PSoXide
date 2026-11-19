@@ -13,11 +13,15 @@
  */
 
 RAM_BASE    = 0x80000000;   /* KSEG0 cached RAM */
-RAM_SIZE    = 2M;
+/* RAM_SIZE_OVERRIDE (bytes) at link time sets the RAM the program links for, as
+   STACK_RESERVE_OVERRIDE does the stack: 8M for a dev kit, 2M (the default) for a retail
+   console. Pass it the way STACK_RESERVE_OVERRIDE is passed (a `-T<file>` before this script,
+   so the link map records it and psoxide-size reads it; `--defsym` works but the map does
+   not carry it). The stack starts 100h below the top of RAM. */
+RAM_SIZE    = DEFINED(RAM_SIZE_OVERRIDE) ? RAM_SIZE_OVERRIDE : 2M;
 BIOS_SIZE   = 64K;          /* First 64 KiB is BIOS / kernel scratch */
 LOAD_ADDR   = RAM_BASE + BIOS_SIZE;
-STACK_INIT  = RAM_BASE + 0x001FFF00;
-STACK_INIT  = RAM_BASE + 0x001FFF00;
+STACK_INIT  = RAM_BASE + RAM_SIZE - 0x100;
 
 /* Build-time RAM budget for the stack. The stack runs downward from
    STACK_INIT while .text/.data/.bss grow upward from LOAD_ADDR. We carve
@@ -25,8 +29,17 @@ STACK_INIT  = RAM_BASE + 0x001FFF00;
    program that no longer leaves room for the stack overruns the region at
    LINK time (a clean rust-lld "section will not fit in region" error)
    instead of silently colliding $sp with .bss at runtime. 32 KiB is a
-   generous floor for the call stack; the heap is unused while alloc is off. */
-STACK_RESERVE = 0x8000;     /* 32 KiB reserved for the runtime stack */
+   generous floor for the call stack; the heap is unused while alloc is off.
+
+   A program whose stack goes deeper sets STACK_RESERVE_OVERRIDE (bytes) at
+   link time instead of patching this file. Either way works and the default
+   is unchanged when nothing sets it:
+     * `-Clink-arg=-T<file>` placed BEFORE this script, where <file> holds
+       `STACK_RESERVE_OVERRIDE = 0x...;`. The link map then carries the line,
+       so psoxide-size reports the heap against the reserve actually linked.
+     * `-Clink-arg=--defsym=STACK_RESERVE_OVERRIDE=0x...`, which the link
+       honours too but the map does not record. */
+STACK_RESERVE = DEFINED(STACK_RESERVE_OVERRIDE) ? STACK_RESERVE_OVERRIDE : 0x8000; /* default 32 KiB */
 
 /* Bytes in front of the image that the kernel reads and does not load. */
 EXE_HEAD_BYTES = 0x800;
@@ -50,7 +63,9 @@ SECTIONS {
         LONG(0x45584520);           /* 004h " EXE" */
         LONG(0);                    /* 008h zero */
         LONG(0);                    /* 00Ch zero */
-        LONG(_start);               /* 010h initial PC */
+        /* 010h initial PC: `__initial_pc` when a script defines it (psoxide-boot.ld: the
+           boot-overlay mover runs first), else `_start`. */
+        LONG(DEFINED(__initial_pc) ? __initial_pc : _start);
         LONG(0);                    /* 014h initial GP: the runtime does not use $gp */
         LONG(LOAD_ADDR);            /* 018h destination address */
         LONG(__image_end - __text_start); /* 01Ch bytes stored after the header */
@@ -96,9 +111,37 @@ SECTIONS {
         *(.text.*point_contents_from*)
         *(.text.*plane_contact*)
         *(.text.*model_collision_hull*)
+        /* The direct-access guard's body (psx-rt's `wait_idle`, section
+           `.text.__psx_rt_wait_idle`) goes in a window of its own, so the script can tell
+           whether it is in the image. Nothing but code that arms the guard keeps it there
+           (`psx_io::gpu::arm_direct_access_guard` carries an R_MIPS_NONE reference to it,
+           which section collection honours), and `wait_idle` callers that need it call it
+           directly. See sdk/docs/PRESENT.md. */
+        /* A program's own hot placement: functions it marks
+           `#[link_section = ".psx_hot.<NN>_<name>"]` are placed here, in name order (so the
+           numbers choose which sit side by side in the 4 KiB direct-mapped I-cache), ahead of
+           the rest of the text. Nothing in it, nothing changes. A program that needs a layout
+           the SDK's rules do not give it uses this instead of rewriting this script. */
+        *(SORT_BY_NAME(.psx_hot .psx_hot.*))
+        . = ALIGN(4);
+        __psx_guard_window_start = .;
+        *(.text.__psx_rt_wait_idle)
+        __psx_guard_window_end = .;
         *(.text .text.*);
+        /* Cold code, after everything else (`#[link_section = ".psx_cold.<name>"]`): code that
+           runs once or rarely (a loader, a settings screen) kept apart from the hot text so it
+           does not share I-cache sets or pages with it. */
+        *(.psx_cold .psx_cold.*);
         __text_end = .;
     } > IMAGE
+
+    /* The call target of psx-io's armed guard: `wait_idle`'s address when it is in the image,
+       else 0. `run_armed_guard` runs only after an arm, and an arm puts `wait_idle` in the
+       image, so a program that never arms never calls the 0. A program's call tree stays free
+       of calls through a register, which a pointer to `wait_idle` could not give it (the
+       stack proofs), and a program that never arms the guard links no wait (a pointer
+       registered at start-up would keep one linked). */
+    __psx_direct_access_guard = __psx_guard_window_end > __psx_guard_window_start ? __psx_guard_window_start : 0;
 
     /* Initialised data + read-only data. PS1 has no MMU so .rodata
        isn't actually read-only at runtime; keep it with .data so
@@ -119,7 +162,10 @@ SECTIONS {
        which `_start` clears before anything reads it. Starting .bss right
        after the data instead of after this padding gives the program the
        bytes back. */
-    __image_end = __text_start + ((__data_end - __text_start + EXE_HEAD_BYTES - 1) & ~(EXE_HEAD_BYTES - 1));
+    /* With psoxide-boot.ld the boot-only sections follow .data in the file (their load address
+       is `__boot_lma`, where .bss will be once the mover has run). */
+    __load_end = DEFINED(__boot_start) ? __boot_lma + (__boot_load_end - __boot_start) : __data_end;
+    __image_end = __text_start + ((__load_end - __text_start + EXE_HEAD_BYTES - 1) & ~(EXE_HEAD_BYTES - 1));
 
     /* Uninitialised data - zeroed by `_start`, not stored in file. */
     .bss (NOLOAD) : {
@@ -130,15 +176,15 @@ SECTIONS {
         __bss_end = .;
     } > IMAGE
 
-    /* Heap starts right after BSS and runs up to just below the stack. */
-    . = ALIGN(4);
-    __heap_start = .;
+    /* Heap starts right after BSS and runs up to just below the stack. The end of .bss, not
+       `.`: an overlay script INSERTed after .bss moves `.` past it. */
+    __heap_start = __bss_end;
     __heap_end   = STACK_INIT - STACK_RESERVE;   /* keep heap below the reserved stack */
 
     /* The header above only describes the image if these hold. */
     ASSERT(__text_start == LOAD_ADDR, "the entry section must start at LOAD_ADDR")
     ASSERT((__image_end - __text_start) % EXE_HEAD_BYTES == 0, "the stored image must be whole 800h-byte sectors")
-    ASSERT(__image_end - __data_end < EXE_HEAD_BYTES, "the stored image may reach past the data by under one sector")
+    ASSERT(__image_end - __load_end < EXE_HEAD_BYTES, "the stored image may reach past the data by under one sector")
 
     /* Discard MIPS ABI glue not needed on bare metal. */
     /DISCARD/ : {

@@ -187,7 +187,7 @@ const MODE_DATA: u8 = 0x80;
 /// when the last frame never completed.
 const FOREIGN_SECTORS: u32 = 32;
 /// GP1(08h), display mode, and its 24-bit colour bit.
-const GP1_DISPLAY_MODE: u32 = 0x0800_0000;
+const GP1_DISPLAY_MODE: u32 = gp1::display_mode(0, 0, false, false, false);
 const DISPLAY_24BIT: u32 = 1 << 4;
 
 /// The current GP1(08h) parameter, rebuilt from GPUSTAT bits 16..22.
@@ -328,26 +328,6 @@ fn mdec() -> &'static mut Mdec {
     unsafe { (*addr_of_mut!(MDEC)).as_mut().expect("mdec installed") }
 }
 
-/// Read one sector synchronously into the player's sector buffer.
-fn read_one(lba: u32) -> Option<&'static [u8]> {
-    let r = reader();
-    // SAFETY: single-threaded use of the reader and its sector buffer.
-    unsafe {
-        if !r.start_read(lba) {
-            return None;
-        }
-        let ok = r.read_sector(&mut *addr_of_mut!(SECTOR));
-        r.stop();
-        if !ok {
-            return None;
-        }
-        Some(core::slice::from_raw_parts(
-            addr_of_mut!(SECTOR) as *const u8,
-            SECTOR_WORDS * 4,
-        ))
-    }
-}
-
 /// Find a file in the disc's root directory by name: `(lba, bytes)`.
 /// Takes the drive over (data mode, double speed) and leaves it stopped.
 pub fn find_root_file(name: &str) -> Option<(u32, u32)> {
@@ -355,11 +335,13 @@ pub fn find_root_file(name: &str) -> Option<(u32, u32)> {
     // docs say; the player takes them over for as long as it runs.
     let devices = unsafe { Peripherals::steal() };
     install_devices(devices.cd, devices.mdec_dma);
-    if !reader().prepare() {
+    let r = reader();
+    if !r.prepare() {
         return None;
     }
-    let (root, _) = crate::iso::root_directory(read_one(crate::iso::PVD_LBA)?)?;
-    crate::iso::find_in_directory(read_one(root)?, name)
+    // SAFETY: single-threaded use of the reader and its sector buffer.
+    let sector = unsafe { &mut *addr_of_mut!(SECTOR) };
+    r.find(sector, None, &[name])
 }
 
 /// The drive side: sectors into frame slots.
@@ -585,7 +567,7 @@ impl Player {
         self.clock.switch(self.clock.phase);
         self.st.pump();
         if let Some(b) = self.queued {
-            if !interrupts::is_display_control_queued() {
+            if !psx_rt::present::is_flip_pending() {
                 self.front = b;
                 self.queued = None;
                 self.shown += 1;
@@ -655,15 +637,10 @@ impl Player {
                 let gp0_free = !self.cols.uploading && psx_vram::dma_copy_to_vram_done();
                 if gp0_free && (behind || edge.wrapping_sub(due) as i32 >= 0) {
                     // The VBlank handler flips only once GPUSTAT bit 24 says
-                    // the GPU got past this frame's uploads: GP0(1Fh) after
-                    // them, acknowledged afresh now that no flip is queued.
-                    let gpu = Gpu::from_dma_mut(&mut self.dma);
-                    gpu.arm_draw_done();
-                    gpu.signal_draw_done();
-                    let (x, y) = self.origins[b];
-                    interrupts::queue_display_control_at_vblank(gp1::display_start(
-                        x as u32, y as u32,
-                    ));
+                    // the GPU got past this frame's uploads: `show` sends
+                    // GP0(1Fh) after them, acknowledged afresh now that no flip
+                    // is queued.
+                    psx_rt::present::show_drawn(self.origins[b]);
                     let late = edge.wrapping_sub(due) as i32;
                     if late > 0 {
                         self.late += 1;
@@ -792,7 +769,7 @@ pub fn play(
     // Every display buffer black, the first one shown, in 24-bit mode if the
     // movie is.
     let x2 = halfwords_x2(config.depth);
-    let _ = interrupts::take_queued_display_control();
+    let _ = psx_rt::present::cancel_flip();
     clear_buffers(&mut dma, config);
     let (x0, y0) = config.buffers[0];
     psx_io::gpu::write_display_control(gp1::display_start(x0 as u32, y0 as u32));
@@ -942,7 +919,7 @@ pub fn play(
         p.clock.switch(phase);
     }
     // A flip still queued would land after we hand the display back.
-    let _ = interrupts::take_queued_display_control();
+    let _ = psx_rt::present::cancel_flip();
     mdec().abort_decode();
     psx_io::dma::abort(psx_io::dma::Channel::Gpu);
     if p.cols.uploading {

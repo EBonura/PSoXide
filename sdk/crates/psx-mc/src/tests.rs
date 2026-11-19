@@ -3,7 +3,8 @@
 //! whole directory/allocation/container logic is exercised without hardware.
 
 use crate::{
-    Block, Card, Entry, Error, RamCard, SaveIcon, DATA_BLOCKS, FRAMES_PER_BLOCK, FRAME_SIZE,
+    Block, Card, DirOptions, Entry, Error, RamCard, SaveIcon, DATA_BLOCKS, FRAMES_PER_BLOCK,
+    FRAME_SIZE,
 };
 
 const NAME: &str = "BASLUS-99999SHEET01";
@@ -466,4 +467,219 @@ fn a_card_pulled_during_a_compressed_read_reports_the_transport_error() {
     });
     let mut buf = [0u8; 512];
     assert_eq!(c.read(NAME, &mut buf), Err(Error::NoCard));
+}
+
+#[test]
+fn the_inline_directory_checksum_is_the_call_form() {
+    use crate::dir::{checksum, checksum_inline};
+    let mut frame = [0u8; crate::FRAME_SIZE];
+    for seed in 0..64u32 {
+        for (i, b) in frame.iter_mut().enumerate() {
+            *b = (i as u32).wrapping_mul(seed.wrapping_mul(31) + 7) as u8;
+        }
+        assert_eq!(checksum_inline(&frame), checksum(&frame));
+    }
+}
+
+#[test]
+fn bios_options_accept_a_directory_frame_with_a_bad_checksum() {
+    let mut c = cross_linked_card();
+    assert_eq!(c.read_dir_with(0, DirOptions::STRICT), Err(Error::Corrupt));
+    let e = c
+        .read_dir_with(0, DirOptions::STRICT.accepting_bad_checksum())
+        .unwrap();
+    assert_eq!(e[0], 0x51);
+    assert_eq!(&e[8..10], &[1, 0]);
+    // find passes the damaged entry 0 and still finds B; strict refuses the walk.
+    assert_eq!(
+        c.find_with(NAME2.as_bytes(), DirOptions::STRICT),
+        Err(Error::Corrupt)
+    );
+    assert_eq!(
+        c.find_with(
+            NAME2.as_bytes(),
+            DirOptions::STRICT.accepting_bad_checksum()
+        ),
+        Ok(Some(1))
+    );
+    assert_eq!(c.find_with(NAME.as_bytes(), DirOptions::BIOS), Ok(Some(0)));
+}
+
+#[test]
+fn find_with_wildcards_matches_like_the_bios() {
+    let mut c = fresh();
+    c.write(NAME, "A", b"a").unwrap();
+    c.write(NAME2, "B", b"b").unwrap();
+    let w = DirOptions::STRICT.with_wildcards();
+    assert_eq!(c.find_with(b"BASLUS-99999SHEET01", w), Ok(Some(0)));
+    assert_eq!(c.find_with(b"BASLUS-99999SHEET0?", w), Ok(Some(0)));
+    assert_eq!(c.find_with(b"BASLUS-99999SHEET02", w), Ok(Some(1)));
+    assert_eq!(c.find_with(b"BASLUS-99999SHEET?2", w), Ok(Some(1)));
+    assert_eq!(c.find_with(b"BASLUS*", w), Ok(Some(0)));
+    assert_eq!(c.find_with(b"*", w), Ok(Some(0)));
+    assert_eq!(c.find_with(b"BASLUS-99999SHEET0*", w), Ok(Some(0)));
+    // `?` is one character, not zero and not two; the whole name must be consumed.
+    assert_eq!(c.find_with(b"BASLUS-99999SHEET0", w), Ok(None));
+    assert_eq!(c.find_with(b"BASLUS-99999SHEET0??", w), Ok(None));
+    assert_eq!(c.find_with(b"BASLUS-99999SHEET001", w), Ok(None));
+    assert_eq!(c.find_with(b"BASLUT*", w), Ok(None));
+    // Without the option a pattern is a literal name.
+    assert_eq!(c.find_with(b"BASLUS*", DirOptions::STRICT), Ok(None));
+    assert_eq!(
+        c.find_with(b"BASLUS-99999SHEET0?", DirOptions::STRICT),
+        Ok(None)
+    );
+    assert_eq!(
+        c.find_with(NAME.as_bytes(), DirOptions::STRICT),
+        c.find(NAME.as_bytes())
+    );
+}
+
+/// A two-block file whose second link points out of range (entry 0 first, link 1; entry 1
+/// middle with link 0x0099).
+fn bad_link_card(second_state: u8, second_link: u16) -> Card<RamCard> {
+    let mut c = fresh();
+    c.write(NAME, "A", &[7u8; 9000]).unwrap();
+    assert_eq!(c.chain(0).unwrap().len, 2);
+    let mut image = *c.into_inner().image();
+    let e1 = 2 * FRAME_SIZE;
+    image[e1] = second_state;
+    image[e1 + 8..e1 + 10].copy_from_slice(&second_link.to_le_bytes());
+    image[e1 + 127] = image[e1..e1 + 127].iter().fold(0, |a, &b| a ^ b);
+    Card::new(RamCard::from_image(&image).unwrap())
+}
+
+#[test]
+fn chain_with_stops_at_a_bad_link_instead_of_failing() {
+    // Link out of range after the second block.
+    let mut c = bad_link_card(0x52, 0x0099);
+    assert_eq!(c.chain(0).err(), Some(Error::Corrupt));
+    let stop = DirOptions::STRICT.stopping_at_bad_link();
+    let ch = c.chain_with(0, stop).unwrap();
+    assert_eq!((ch.len, &ch.blocks[..2]), (2, &[1u8, 2][..]));
+    // A middle block with no link (FFFF) also ends the chain without error.
+    let mut c = bad_link_card(0x52, 0xffff);
+    let ch = c.chain_with(0, stop).unwrap();
+    assert_eq!(ch.len, 2);
+    // Strict chain_with is the old chain, error for error.
+    assert_eq!(
+        c.chain_with(0, DirOptions::STRICT).unwrap().len,
+        c.chain(0).unwrap().len
+    );
+    let mut c = bad_link_card(0x52, 0x0099);
+    assert_eq!(
+        c.chain_with(0, DirOptions::STRICT).err(),
+        Some(Error::Corrupt)
+    );
+}
+
+#[test]
+fn chain_with_stops_at_a_loop_after_fifteen_blocks() {
+    // The second block links back to the first: strict is Corrupt, the BIOS form stops at 15.
+    let mut c = bad_link_card(0x52, 0x0000);
+    assert_eq!(c.chain(0).err(), Some(Error::Corrupt));
+    let ch = c.chain_with(0, DirOptions::BIOS).unwrap();
+    assert_eq!(ch.len, DATA_BLOCKS);
+    assert_eq!(&ch.blocks[..4], &[1, 2, 1, 2]);
+}
+
+#[test]
+fn chain_with_bad_checksum_option_is_independent_of_link_option() {
+    let mut c = cross_linked_card();
+    // Entry 0 has a bad checksum and links to entry 1 (a first-block state, link none).
+    assert_eq!(
+        c.chain_with(0, DirOptions::STRICT).err(),
+        Some(Error::Corrupt)
+    );
+    let ch = c
+        .chain_with(0, DirOptions::STRICT.accepting_bad_checksum())
+        .unwrap();
+    assert_eq!((ch.len, ch.blocks[0], ch.blocks[1]), (2, 1, 2));
+    let ch = c.chain_with(0, DirOptions::BIOS).unwrap();
+    assert_eq!(ch.len, 2);
+}
+
+/// A pseudo-random directory image: damaged checksums, broken links and loops, names with and
+/// without a NUL, an optional unformatted header.
+fn random_directory_card(seed: &mut u32) -> RamCard {
+    use crate::dir::{E_CHK, E_LINK, E_NAME, E_STATE};
+    let mut next = |m: u32| {
+        *seed ^= *seed << 13;
+        *seed ^= *seed >> 17;
+        *seed ^= *seed << 5;
+        *seed % m
+    };
+    let mut image = [0u8; crate::CARD_SIZE];
+    image[0] = b'M';
+    image[1] = if next(9) == 0 { b'X' } else { b'C' };
+    const NAMES: [&[u8]; 4] = [
+        b"BASLUS-00000SAVE0",
+        b"BASLUS-00000SAVE1",
+        b"A",
+        b"01234567890123456789",
+    ];
+    for i in 0..DATA_BLOCKS {
+        let e = &mut image[(1 + i) * FRAME_SIZE..(2 + i) * FRAME_SIZE];
+        e[E_STATE] = [0x51, 0x52, 0x53, 0xa0, 0x00][next(5) as usize];
+        let link = [0xffffu16, next(15) as u16, next(30) as u16, i as u16][next(4) as usize];
+        e[E_LINK..E_LINK + 2].copy_from_slice(&link.to_le_bytes());
+        let name = NAMES[next(4) as usize];
+        e[E_NAME..E_NAME + name.len()].copy_from_slice(name);
+        if next(5) == 0 {
+            e[E_NAME + 20] = b'Z';
+        }
+        e[E_CHK] = e[..E_CHK].iter().fold(0, |a, &b| a ^ b);
+        if next(4) == 0 {
+            e[E_CHK] ^= 1 + next(255) as u8;
+        }
+    }
+    RamCard::from_image(&image).unwrap()
+}
+
+#[test]
+fn the_borrowed_directory_forms_equal_the_card_forms() {
+    use crate::dir::{chain_in, find_in, read_into, Directory};
+    const PATTERNS: [&[u8]; 9] = [
+        b"BASLUS-00000SAVE0",
+        b"BASLUS-0000?SAVE?",
+        b"BAS*",
+        b"*",
+        b"?",
+        b"A",
+        b"A?",
+        b"",
+        b"01234567890123456789",
+    ];
+    let mut seed = 0x1234_5678u32;
+    for _ in 0..2000 {
+        let mut c = Card::new(random_directory_card(&mut seed));
+        let mut dir: Directory = [[0; FRAME_SIZE]; DATA_BLOCKS];
+        let read = read_into(c.device(), DirOptions::BIOS, &mut dir);
+        if !c.is_formatted().unwrap() {
+            assert_eq!(read, Err(Error::NotFormatted));
+            continue;
+        }
+        read.unwrap();
+        for (i, entry) in dir.iter().enumerate() {
+            assert_eq!(*entry, c.read_dir_with(i, DirOptions::BIOS).unwrap());
+        }
+        for opts in [
+            DirOptions::BIOS,
+            DirOptions::STRICT.accepting_bad_checksum(),
+        ] {
+            for p in PATTERNS {
+                assert_eq!(find_in(&dir, p, opts), c.find_with(p, opts).unwrap());
+            }
+        }
+        for first in 0..DATA_BLOCKS {
+            let (a, b) = (
+                chain_in(&dir, first),
+                c.chain_with(first, DirOptions::BIOS).unwrap(),
+            );
+            assert_eq!((a.len, a.blocks), (b.len, b.blocks));
+        }
+        let strict = read_into(c.device(), DirOptions::STRICT, &mut dir);
+        let any_bad = (0..DATA_BLOCKS).any(|i| c.read_dir(i).is_err());
+        assert_eq!(strict.is_err(), any_bad);
+    }
 }

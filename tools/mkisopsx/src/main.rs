@@ -49,6 +49,8 @@ struct Args {
     system_area: Option<PathBuf>,
     files: Vec<PathBuf>,
     xa_files: Vec<PathBuf>,
+    diag: bool,
+    gate_file: Option<PathBuf>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -66,6 +68,8 @@ fn parse_args() -> Result<Args, String> {
     let mut files = Vec::new();
     let mut xa_files = Vec::new();
     let mut cdda_tracks = Vec::new();
+    let mut diag = false;
+    let mut gate_file = None;
     let mut system_area = env::var_os("PSOXIDE_SYSTEM_AREA").map(PathBuf::from);
     let mut it = env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -87,6 +91,15 @@ fn parse_args() -> Result<Args, String> {
             }
             "--iso" => {
                 cooked_iso = true;
+            }
+            "--diag" => {
+                diag = true;
+            }
+            "--gate-file" => {
+                gate_file = Some(PathBuf::from(
+                    it.next()
+                        .ok_or_else(|| "--gate-file needs a path".to_string())?,
+                ));
             }
             "--cdtest-sectors" => {
                 let raw = it
@@ -187,6 +200,36 @@ fn parse_args() -> Result<Args, String> {
         system_area,
         files,
         xa_files,
+        diag,
+        gate_file,
+    })
+}
+
+fn press_check(args: &Args, exe: &[u8]) -> Result<String, String> {
+    let profile = psx_gate::profile::Profile::read(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sdk/profile.toml"),
+    )?;
+    let own = match &args.gate_file {
+        Some(file) => {
+            let text = std::fs::read_to_string(file)
+                .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
+            Some(psx_gate::profile::Profile::parse_program_file(&text, file)?)
+        }
+        None => None,
+    };
+    let label = args
+        .exe
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("");
+    let verdict = psx_gate::press::check(exe, label, args.diag, &profile, own.as_ref())?;
+    Ok(match verdict {
+        psx_gate::press::Verdict::Receipt(program) => format!("psx-gate: receipt ok ({program})"),
+        psx_gate::press::Verdict::Diag(program) => format!("psx-gate: diag receipt ok with --diag ({program})"),
+        psx_gate::press::Verdict::Listed(program) => format!(
+            "psx-gate: {program} has no receipt (listed as no-receipt until its build moves onto `psoxide-pgo apply`)"
+        ),
+        _ => String::from("psx-gate: ok"),
     })
 }
 
@@ -200,6 +243,10 @@ fn print_usage() {
          --exe, -e       Path to the PSX-EXE (e.g. `hello-tri.exe`).\n\
          --out, -o       Destination path for the image.\n\
          --volume, -v    Volume identifier (default: PSOXIDE).\n\
+         --diag          Accept an executable built with a diagnostic feature\n\
+                         (a development disc; the lineup recipes never pass it).\n\
+         --gate-file F   The program's own psx-gate.toml (its no-receipt entry, if it\n\
+                         has one); the recipe that builds the program passes it.\n\
          --cdtest-sectors N\n\
                          Add deterministic CDTEST.BIN benchmark data\n\
                          before WORLD.PAK in the fixed boot-area padding.\n\
@@ -280,6 +327,16 @@ fn main() -> ExitCode {
     if let Err(e) = Exe::parse(&exe_bytes) {
         eprintln!("{}: not a valid PSX-EXE ({e:?})", args.exe.display());
         return ExitCode::from(1);
+    }
+
+    // The architecture gate's receipt (sdk/profile.toml, sdk/docs/GATE.md): the one place every
+    // program becomes a disc. The program is named by the executable's file stem.
+    match press_check(&args, &exe_bytes) {
+        Ok(note) => eprintln!("{note}"),
+        Err(refusal) => {
+            eprintln!("{refusal}");
+            return ExitCode::from(1);
+        }
     }
 
     let mut builder = IsoBuilder::new().volume_id(&args.volume);

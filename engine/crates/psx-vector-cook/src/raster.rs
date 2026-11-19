@@ -97,20 +97,7 @@ impl Image {
 
     /// Encode as an uncompressed PNG (stored deflate blocks), for review frames.
     pub fn to_png(&self) -> Vec<u8> {
-        fn crc32(data: &[u8]) -> u32 {
-            let mut crc = !0u32;
-            for &b in data {
-                crc ^= b as u32;
-                for _ in 0..8 {
-                    crc = if crc & 1 != 0 {
-                        (crc >> 1) ^ 0xEDB8_8320
-                    } else {
-                        crc >> 1
-                    };
-                }
-            }
-            !crc
-        }
+        use psx_hw::hash::crc32;
         fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
             out.extend_from_slice(&(data.len() as u32).to_be_bytes());
             let mut body = kind.to_vec();

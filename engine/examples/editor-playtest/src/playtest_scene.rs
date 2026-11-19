@@ -299,7 +299,7 @@ impl Playtest {
         if let Some(world_rt) = self.world_rt.as_mut() {
             world_rt.set_visual_switches(visual_switches);
             telemetry::stage_begin(telemetry::stage::ROOM);
-            sort_probe_class(SORT_CLASS_WORLD);
+            psx_telemetry::emit::sort_class(SORT_CLASS_WORLD);
             let cinematic_visibility = (self.opening.active() && !self.opening.gameplay_camera())
                 .then(|| {
                     let player = self.game_entities.actor_motor().position();
@@ -322,7 +322,7 @@ impl Playtest {
         // execute the sky first and keeps even a slot-2047 wall in front.
         if let Some(room_record) = room_record {
             telemetry::stage_begin(telemetry::stage::SKY);
-            sort_probe_class(SORT_CLASS_SKY);
+            psx_telemetry::emit::sort_class(SORT_CLASS_SKY);
             draw_scene_sky(
                 room_record.sky,
                 camera,
@@ -338,7 +338,7 @@ impl Playtest {
             #[cfg(feature = "cd-stream-bench")]
             crate::vram_runtime::emit_panel_uploads(primitive_packets, ot);
             telemetry::stage_end(telemetry::stage::SKY);
-            sort_probe_class(SORT_CLASS_WORLD);
+            psx_telemetry::emit::sort_class(SORT_CLASS_WORLD);
         }
     }
 }
@@ -438,8 +438,14 @@ impl Playtest {
 }
 
 impl Scene for Playtest {
+    const PRESENT_QUEUE: bool = true;
+
     fn render_submission(&self) -> RenderSubmission {
-        if cfg!(feature = "present-queue") && !self.present_queue_held_off {
+        // Present-queue frames: +26% fps with one enemy on screen (19.8 to
+        // 25.0). Frames that would fence early beside a queued frame, such as
+        // with two melee enemies, go double-buffered instead
+        // (choose_present_queue). Stress harness, 2026-10-03.
+        if !self.present_queue_held_off {
             RenderSubmission::PresentQueue
         } else {
             RenderSubmission::QueuedDoubleBuffered
@@ -1348,7 +1354,7 @@ impl Scene for Playtest {
                 );
                 let actor_options = current_actor_surface_options(self.room_index);
                 telemetry::stage_begin(telemetry::stage::PLAYER);
-                sort_probe_class(SORT_CLASS_PLAYER);
+                psx_telemetry::emit::sort_class(SORT_CLASS_PLAYER);
                 #[cfg(feature = "actor-shadows-projected")]
                 {
                     draw_player_projected_shadow(
@@ -1560,7 +1566,7 @@ impl Scene for Playtest {
                     telemetry::stage_end(telemetry::stage::EQUIPMENT);
                 }
             }
-            sort_probe_class(SORT_CLASS_WORLD);
+            psx_telemetry::emit::sort_class(SORT_CLASS_WORLD);
 
             let _ = self.draw_archive_beacons_world(
                 camera,
@@ -1602,7 +1608,7 @@ impl Scene for Playtest {
         telemetry::stage_begin(telemetry::stage::WORLD_FLUSH);
         world.flush();
         telemetry::stage_end(telemetry::stage::WORLD_FLUSH);
-        sort_probe_class(SORT_CLASS_SPRITE);
+        psx_telemetry::emit::sort_class(SORT_CLASS_SPRITE);
         let _ = self.draw_particle_emitters(
             camera,
             self.gameplay_tick(ctx.sim_tick),
@@ -2160,7 +2166,7 @@ impl Playtest {
         box_prop_profile_end(telemetry::stage::IMAGE_CARDS);
         telemetry::stage_end(telemetry::stage::IMAGE_PROPS);
         telemetry::stage_begin(telemetry::stage::MODEL_INSTANCES);
-        sort_probe_class(SORT_CLASS_MODEL);
+        psx_telemetry::emit::sort_class(SORT_CLASS_MODEL);
         #[cfg(feature = "actor-shadows-projected")]
         {
             draw_model_instance_projected_shadows(
@@ -2222,7 +2228,7 @@ impl Playtest {
             world,
         );
         telemetry::stage_end(telemetry::stage::MODEL_INSTANCES);
-        sort_probe_class(SORT_CLASS_WORLD);
+        psx_telemetry::emit::sort_class(SORT_CLASS_WORLD);
         stats
     }
 }
@@ -2233,21 +2239,6 @@ const SORT_CLASS_MODEL: u32 = 2;
 const SORT_CLASS_SPRITE: u32 = 4;
 const SORT_CLASS_PLAYER: u32 = 5;
 const SORT_CLASS_SKY: u32 = 7;
-
-/// Tag the projections that follow with a primitive class for PSoXide's
-/// depth-sort probe (`sort-probe` measurement builds only; nothing
-/// otherwise).
-#[inline(always)]
-fn sort_probe_class(class: u32) {
-    #[cfg(feature = "sort-probe")]
-    // SAFETY: emulator-only port in Expansion Region 2 (PSoXide telemetry
-    // slice + 0x28); retail hardware ignores the write.
-    unsafe {
-        core::ptr::write_volatile(0x1F80_2F28 as *mut u32, class);
-    }
-    #[cfg(not(feature = "sort-probe"))]
-    let _ = class;
-}
 
 /// RAM the loading screen reads into the persistent asset arena, in 64-byte
 /// units: the uploaded textures' group, then the persistent assets' group.

@@ -5,8 +5,8 @@
 //! the screen extents arrive as plain values.
 
 use psx_engine::{
-    DepthRange, LoadedWorldCameraGte, OtFrame, PrimitivePacketArena, ProjectedVertex, SimTick,
-    WorldCamera, WorldVertex,
+    DepthRange, LoadedWorldCameraGte, OtFrame, OtFrameDepth, PrimitivePacketArena, ProjectedVertex,
+    SimTick, WorldCamera, WorldVertex,
 };
 use psx_gpu::{
     material::{BlendMode, TextureMaterial},

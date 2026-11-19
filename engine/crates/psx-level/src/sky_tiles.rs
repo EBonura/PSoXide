@@ -73,9 +73,7 @@ pub const fn entry_sectors(tiles: usize) -> usize {
 /// The tile count of an entry, if `head` (at least [`HEADER_BYTES`] bytes)
 /// starts a readable one.
 pub fn header_tile_count(head: &[u8]) -> Option<usize> {
-    let word = |at: usize| -> Option<u16> {
-        Some(u16::from_le_bytes([*head.get(at)?, *head.get(at + 1)?]))
-    };
+    let word = |at: usize| psx_math::le::get_u16(head, at);
     let (version, count) = (word(0)?, usize::from(word(2)?));
     (version == VERSION && count <= TILE_COUNT).then_some(count)
 }

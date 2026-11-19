@@ -411,6 +411,7 @@ name = "mkisopsx"
 version = "0.1.0"
 dependencies = [
  "lz4_flex",
+ "psx-gate",
  "psx-iso",
 ]
 
@@ -497,8 +498,10 @@ name = "psoxide-hazard"
 version = "0.1.0"
 dependencies = [
  "psx-disasm",
+ "psx-gate",
  "psx-residency",
  "regex",
+ "serde_json",
 ]
 
 [[package]]
@@ -532,6 +535,8 @@ dependencies = [
  "gimli",
  "object",
  "psoxide-hazard",
+ "psoxide-size",
+ "psx-gate",
  "psx-hw",
  "rustc-demangle",
  "serde_json",
@@ -542,6 +547,21 @@ name = "psoxide-size"
 version = "0.1.0"
 dependencies = [
  "rustc-demangle",
+]
+
+[[package]]
+name = "psoxide-test"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "libc",
+ "psoxide-size",
+ "psx-library",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "toml",
 ]
 
 [[package]]
@@ -565,6 +585,7 @@ version = "0.1.0"
 dependencies = [
  "psx-gte",
  "psx-hw",
+ "psx-math",
  "psxed-format",
 ]
 
@@ -603,6 +624,7 @@ version = "0.1.0"
 dependencies = [
  "psx-asset",
  "psx-cdstream",
+ "psx-display",
  "psx-font",
  "psx-gpu",
  "psx-gte",
@@ -614,9 +636,24 @@ dependencies = [
  "psx-rt",
  "psx-settings",
  "psx-sfx",
+ "psx-splash",
  "psx-spu",
  "psx-telemetry",
  "psx-tick",
+ "psx-vram",
+]
+
+[[package]]
+name = "psx-fmv"
+version = "0.1.0"
+dependencies = [
+ "psx-gpu",
+ "psx-hw",
+ "psx-io",
+ "psx-math",
+ "psx-pack",
+ "psx-rt",
+ "psx-spu",
  "psx-vram",
 ]
 
@@ -645,9 +682,17 @@ dependencies = [
  "psx-io",
  "psx-level",
  "psx-math",
+ "psx-pack",
  "psx-residency",
  "psx-telemetry",
  "psx-vram",
+]
+
+[[package]]
+name = "psx-gate"
+version = "0.1.0"
+dependencies = [
+ "psx-iso",
 ]
 
 [[package]]
@@ -666,7 +711,9 @@ dependencies = [
  "psx-engine",
  "psx-gpu",
  "psx-gte",
+ "psx-hw",
  "psx-math",
+ "psx-pack",
 ]
 
 [[package]]
@@ -675,6 +722,7 @@ version = "0.1.0"
 dependencies = [
  "psx-gte-core",
  "psx-hw",
+ "psx-math",
 ]
 
 [[package]]
@@ -696,17 +744,22 @@ name = "psx-io"
 version = "0.1.0"
 dependencies = [
  "psx-hw",
+ "psx-math",
 ]
 
 [[package]]
 name = "psx-iso"
 version = "0.1.0"
+dependencies = [
+ "psx-pack",
+]
 
 [[package]]
 name = "psx-level"
 version = "0.1.0"
 dependencies = [
  "psx-math",
+ "psx-pack",
 ]
 
 [[package]]
@@ -720,6 +773,14 @@ dependencies = [
 [[package]]
 name = "psx-math"
 version = "0.1.0"
+
+[[package]]
+name = "psx-pack"
+version = "0.1.0"
+dependencies = [
+ "psx-io",
+ "psx-math",
+]
 
 [[package]]
 name = "psx-pad"
@@ -738,6 +799,7 @@ version = "0.1.0"
 name = "psx-residency"
 version = "0.1.0"
 dependencies = [
+ "psx-pack",
  "psx-rt",
 ]
 
@@ -745,14 +807,18 @@ dependencies = [
 name = "psx-rt"
 version = "0.1.0"
 dependencies = [
+ "psx-gpu",
  "psx-hw",
  "psx-io",
+ "psx-math",
+ "psx-tick",
 ]
 
 [[package]]
 name = "psx-seq"
 version = "0.1.0"
 dependencies = [
+ "psx-math",
  "psx-sfx",
  "psx-spu",
 ]
@@ -771,6 +837,7 @@ name = "psx-settings"
 version = "0.1.0"
 dependencies = [
  "psx-display",
+ "psx-math",
  "psx-pad",
 ]
 
@@ -784,11 +851,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "psx-splash"
+version = "0.1.0"
+dependencies = [
+ "psx-display",
+ "psx-font",
+ "psx-gpu",
+ "psx-pad",
+ "psx-rt",
+ "psx-vram",
+]
+
+[[package]]
 name = "psx-spu"
 version = "0.1.0"
 dependencies = [
  "psx-hw",
  "psx-io",
+]
+
+[[package]]
+name = "psx-str-cook"
+version = "0.1.0"
+dependencies = [
+ "psx-audio-cook",
+ "psx-fmv",
+ "psx-hw",
 ]
 
 [[package]]
@@ -816,6 +904,7 @@ version = "0.1.0"
 dependencies = [
  "psx-hw",
  "psx-io",
+ "psx-math",
 ]
 
 [[package]]
@@ -834,6 +923,7 @@ dependencies = [
 name = "psxed-audio"
 version = "0.1.0"
 dependencies = [
+ "psx-hw",
  "psxed-format",
  "serde",
  "serde_json",
@@ -880,6 +970,7 @@ dependencies = [
  "psx-hw",
  "psx-iso",
  "psx-level",
+ "psx-math",
  "psx-render-contract",
  "psxed-audio",
  "psxed-format",

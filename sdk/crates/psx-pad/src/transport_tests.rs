@@ -134,7 +134,9 @@ fn an_empty_socket_is_told_at_once_and_cheaply() {
     // four attempts of the long one (about 12,000 reads).
     mock::with(|m| {
         assert_eq!((m.attempts, m.sends), (1, 1));
-        assert!(m.now < 3_000, "{} register accesses", m.now);
+        // The setup time is waited on the clock, 64 model ticks a reading.
+        let limit = 3_000 + u64::from(psx_io::controller_port::PAD_SETUP_CYCLES);
+        assert!(m.now < limit, "{} model ticks", m.now);
     });
     // A reader that never saw a pad is told the same, once.
     start(Model {
@@ -635,4 +637,161 @@ fn raw_negcon_requires_exact_id_magic_and_length() {
     }
     .negcon()
     .is_none());
+}
+
+// A port may acknowledge a byte as the live DSR level, as the latched
+// interrupt bit, or as both. The same driver must read a complete packet from
+// each, with a latch left over from one byte never standing in for the next.
+
+fn latch_model(id: u8) -> Model {
+    Model {
+        id,
+        buttons: button::CROSS,
+        axes: [0x10, 0x30, 0xb0, 0xf0],
+        ..Model::default()
+    }
+}
+
+fn assert_complete(pad: PadState, id: u8) {
+    let mode = if id == 0x41 {
+        PadMode::Digital
+    } else {
+        PadMode::Analog
+    };
+    assert_eq!(pad.mode, mode);
+    assert_eq!(pad.buttons.bits(), button::CROSS);
+    if pad.is_analog() {
+        assert_eq!((pad.sticks.right_x, pad.sticks.left_y), (0x10, 0xf0));
+    }
+}
+
+#[test]
+fn latch_only_reads_a_complete_packet_in_one_transaction() {
+    // ReARMed: no live level; bytes 0 and 1 latch unarmed, the rest need CTRL bit 12.
+    for id in [0x41, 0x73] {
+        let sends = if id == 0x41 { 5 } else { 9 };
+        let pad = poll_with(Model {
+            latch_only: true,
+            latch_free_bytes: 2,
+            ..latch_model(id)
+        });
+        assert_complete(pad, id);
+        // One select, no retry; one CTRL write per acknowledged byte.
+        mock::with(|m| {
+            assert_eq!((m.attempts, m.sends, m.tx_errors), (1, sends, 0));
+            assert_eq!(m.mid_ctrl, sends - 1);
+        });
+    }
+}
+
+#[test]
+fn live_level_only_writes_no_control_register_mid_packet() {
+    for id in [0x41, 0x73] {
+        let pad = poll_with(latch_model(id));
+        assert_complete(pad, id);
+        mock::with(|m| assert_eq!((m.attempts, m.early, m.mid_ctrl), (1, 0, 0)));
+    }
+}
+
+#[test]
+fn level_and_latch_together_read_a_complete_packet() {
+    for id in [0x41, 0x73] {
+        let pad = poll_with(Model {
+            latch_too: true,
+            latch_free_bytes: 2,
+            ..latch_model(id)
+        });
+        assert_complete(pad, id);
+        mock::with(|m| assert_eq!((m.attempts, m.early, m.tx_errors), (1, 0, 0)));
+    }
+}
+
+#[test]
+fn a_latch_left_from_the_previous_byte_does_not_acknowledge_the_next() {
+    // Byte 3 is never acknowledged. Had byte 2's latch not been cleared, it
+    // would stand in for byte 3's and the packet would complete.
+    for (latch_only, latch_too) in [(true, false), (false, true)] {
+        let pad = poll_with(Model {
+            latch_only,
+            latch_too,
+            latch_free_bytes: 2,
+            fault: Fault::Ack,
+            fault_byte: 3,
+            ..latch_model(0x73)
+        });
+        assert_eq!(pad.buttons.bits(), 0);
+        assert!(!pad.mode.has_sticks());
+    }
+}
+
+#[test]
+fn no_pad_in_the_socket_costs_the_same_with_every_ack_signal() {
+    let ticks = |model: Model| {
+        let pad = poll_with(model);
+        assert_eq!(pad.mode, PadMode::Disconnected);
+        mock::with(|m| m.now)
+    };
+    let base = ticks(Model {
+        id: 0xff,
+        ..Model::default()
+    });
+    for (latch_only, latch_too) in [(true, false), (false, true)] {
+        let t = ticks(Model {
+            id: 0xff,
+            latch_only,
+            latch_too,
+            latch_free_bytes: 2,
+            ..Model::default()
+        });
+        assert_eq!(t, base);
+    }
+    std::eprintln!("no-pad poll: {base} model ticks");
+}
+
+#[test]
+fn a_latch_only_port_with_an_empty_socket_reads_disconnected_in_one_transaction() {
+    // ReARMed latches the address byte whether or not anything is plugged in.
+    let ticks = |model: Model| {
+        let pad = poll_with(model);
+        assert_eq!(pad.mode, PadMode::Disconnected);
+        mock::with(|m| (m.attempts, m.now))
+    };
+    let (_, plain) = ticks(Model {
+        id: 0xff,
+        ..Model::default()
+    });
+    let (attempts, latched) = ticks(Model {
+        id: 0xff,
+        latch_only: true,
+        latch_free_bytes: 2,
+        empty_latches: true,
+        ..Model::default()
+    });
+    assert_eq!(attempts, 1);
+    // One extra short wait for the command byte: the same budget as the
+    // address byte, so about twice the ordinary empty-socket poll at most.
+    assert!(latched <= plain * 2, "{latched} against {plain}");
+    std::eprintln!("empty socket: {plain} ticks plain, {latched} latch-only");
+}
+
+#[test]
+fn a_glitching_pad_on_a_live_level_port_is_still_retried() {
+    // The address byte is acknowledged by the live level, so a command byte
+    // answered 0xFF without an ACK is a glitch, not an empty socket.
+    let pad = poll_with(Model {
+        sequence: vec![(0x73, Fault::Ack, 1), (0x73, Fault::None, 0)],
+        ..latch_model(0x73)
+    });
+    assert_complete(pad, 0x73);
+    mock::with(|m| assert_eq!(m.attempts, 2));
+}
+
+#[test]
+fn a_retry_waits_the_cs_high_time_before_it_selects_again() {
+    poll_with(fault_model(0x73, Fault::Acquire, 0, true));
+    mock::with(|m| {
+        assert_eq!(m.attempts, 2);
+        let shortest = m.cs_high.iter().copied().min().unwrap();
+        assert!(shortest >= u64::from(psx_io::controller_port::PAD_CS_HIGH_CYCLES));
+    });
 }

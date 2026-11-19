@@ -51,6 +51,7 @@ name = "psx-io"
 version = "0.1.0"
 dependencies = [
  "psx-hw",
+ "psx-math",
 ]
 
 [[package]]
@@ -70,9 +71,16 @@ dependencies = [
 name = "psx-rt"
 version = "0.1.0"
 dependencies = [
+ "psx-gpu",
  "psx-hw",
  "psx-io",
+ "psx-math",
+ "psx-tick",
 ]
+
+[[package]]
+name = "psx-tick"
+version = "0.1.0"
 
 [[package]]
 name = "psx-vram"
@@ -80,4 +88,5 @@ version = "0.1.0"
 dependencies = [
  "psx-hw",
  "psx-io",
+ "psx-math",
 ]

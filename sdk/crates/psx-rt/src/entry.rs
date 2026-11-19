@@ -228,7 +228,7 @@ pub fn set_entry_state() {
 
         // Interrupts are closed, so nothing can start another transfer while this waits.
         for channel in CHANNELS {
-            let _ = psx_io::dma::wait_or_abort(channel, psx_io::dma::DEFAULT_SPINS);
+            settle_channel(channel);
         }
         psx_io::write_u32(dma::DPCR, dma::DPCR_ENTRY);
         psx_io::write_u32(dma::DICR, dma::DICR_ENTRY);
@@ -246,6 +246,16 @@ pub fn set_entry_state() {
         psx_io::irq::acknowledge(u32::MAX);
     }
     crate::cache::flush_instruction_cache();
+}
+
+/// One channel's [`psx_io::dma::wait_or_abort`], out of line. The wait is always inlined for its
+/// per-frame callers; inlined into [`set_entry_state`]'s loop it unrolled into a copy of the spin
+/// and abort per channel (744 B of text in every SDK example). Runs once per channel at boot, so
+/// the call costs nothing that matters.
+#[cfg(target_arch = "mips")]
+#[inline(never)]
+fn settle_channel(channel: Channel) {
+    let _ = psx_io::dma::wait_or_abort(channel, psx_io::dma::DEFAULT_SPINS);
 }
 
 /// Off the console there is no machine to set up.

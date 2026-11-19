@@ -44,6 +44,7 @@ impl PresentInstances {
         let count = MODEL_INSTANCES.len().min(MAX_MODEL_INSTANCES);
         for index in 0..count {
             let owner = game_entity_for_instance(index as u16);
+            // psx-numeric-allow-next-line: one bit per entity or fighter, the mask width is the record cap (64); bit ops only
             if owner.is_some_and(|entity| entity < 64 && away & (1u64 << entity) != 0) {
                 continue;
             }
@@ -146,6 +147,7 @@ impl Playtest {
                     };
                 }
                 if memo.away {
+                    // psx-numeric-allow-next-line: one bit per entity or fighter, the mask width is the record cap (64); bit ops only
                     away |= 1u64 << index;
                 }
             }
@@ -162,6 +164,7 @@ impl Playtest {
         self.present_instances = PresentInstances::build(away);
         for (entity, record) in GAME_ENTITIES.iter().enumerate().take(64) {
             let instance = usize::from(record.model_instance);
+            // psx-numeric-allow-next-line: one bit per entity or fighter, the mask width is the record cap (64); bit ops only
             if away & (1u64 << entity) != 0 && instance < MAX_MODEL_INSTANCES {
                 self.instance_actor_poses[instance] = None;
                 self.previous_instance_actor_poses[instance] = None;
@@ -243,6 +246,7 @@ impl Playtest {
                 // An away fighter's room is not resident, so it is in no
                 // active room: the query skips it (`away_now`) and never reads
                 // these bounds.
+                // psx-numeric-allow-next-line: one bit per entity or fighter, the mask width is the record cap (64); bit ops only
                 let away = index < 64 && away_now & (1u64 << index) != 0;
                 let Some(record) = GAME_ENTITIES.get(index).filter(|_| !away) else {
                     // Preserve initialization even if a malformed runtime table
@@ -274,6 +278,7 @@ impl Playtest {
                 instance_activation_bounds[index] = match GAME_ENTITIES.get(usize::from(owner)) {
                     Some(record) => {
                         if index < 64 {
+                            // psx-numeric-allow-next-line: one bit per model or actor; the width IS the mask capacity; bit ops only
                             actor_instances |= 1u64 << index;
                         }
                         VisibilityBounds::cylinder(
@@ -328,6 +333,7 @@ impl Playtest {
                     && player_pos[2] >= record.min[2]
                     && player_pos[2] <= record.max[2]
                 {
+                    // psx-numeric-allow-next-line: one bit per model or actor; the width IS the mask capacity; bit ops only
                     logic_mask |= 1u64 << index;
                 }
             }
@@ -344,6 +350,7 @@ impl Playtest {
             // body/equipment/shadow rendering is suppressed above.
             let mut suppressed = 0u32;
             for (index, dead) in entity_dead.iter().enumerate().take(64) {
+                // psx-numeric-allow-next-line: one bit per model or actor; the width IS the mask capacity; bit ops only
                 if !dead && entity_mask & (1u64 << index) == 0 {
                     suppressed += 1;
                 }

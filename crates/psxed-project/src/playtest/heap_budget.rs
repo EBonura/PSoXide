@@ -581,7 +581,6 @@ mod tests {
             let (package, report) = super::super::build_package(&project, &dir);
             assert!(report.is_ok(), "{name}: {:?}", report.error_messages());
             let budget = plan(&package.expect("a package")).expect("a grid world");
-            std::println!("{name}: need {} (peak {peak}) {budget:?}", budget.need());
             assert!(
                 budget.need() >= peak,
                 "{name}: need {} under the peak {peak}",

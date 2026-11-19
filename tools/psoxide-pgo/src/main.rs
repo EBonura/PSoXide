@@ -44,12 +44,21 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::{env, fs};
 
+mod bind;
+mod coverage;
 mod ladder;
 mod layout;
 mod pipeline;
 mod ram;
+mod remap;
+mod search;
 mod stale;
 mod work;
+
+// `psoxide-pgo` is also its own `RUSTC_WRAPPER` (see `pipeline::AS_RUSTC_VAR`): the same code as the
+// standalone `psoxide-rustc` binary, so `apply` pins a build without a second binary to build.
+#[path = "bin/psoxide-rustc.rs"]
+mod rustc_wrap;
 
 use gimli::{AttributeValue, DebuggingInformationEntry, EndianSlice, RunTimeEndian, UnitOffset};
 use object::{Object, ObjectSection, ObjectSymbol};
@@ -91,6 +100,8 @@ fn duplication_factor(raw: u64) -> u64 {
 struct Func {
     name: Option<String>,
     line: u64,
+    /// The declaration file as the line table spells it.
+    file: Option<String>,
 }
 
 /// An inlined call: where it sits, what it calls, and what it inlines in turn.
@@ -183,6 +194,24 @@ impl<'a> Symbols<'a> {
         Some(text.to_string_lossy().into_owned())
     }
 
+    /// A file of the unit's line table as a path (directory and name joined).
+    fn file_path(&self, unit: usize, index: u64) -> Option<String> {
+        let unit = &self.units[unit];
+        let header = unit.line_program.as_ref()?.header();
+        let entry = header.file(index)?;
+        let text = |value| {
+            self.dwarf
+                .attr_string(unit, value)
+                .ok()
+                .map(|text| text.to_string_lossy().into_owned())
+        };
+        let name = text(entry.path_name())?;
+        match entry.directory(header).and_then(text) {
+            Some(dir) if !name.starts_with('/') && !dir.is_empty() => Some(format!("{dir}/{name}")),
+            _ => Some(name),
+        }
+    }
+
     fn section_offset(&self, unit: usize, offset: UnitOffset) -> usize {
         offset
             .to_debug_info_offset(&self.units[unit].header)
@@ -196,7 +225,7 @@ impl<'a> Symbols<'a> {
         if let Some(func) = self.funcs.get(&key) {
             return Ok(func.clone());
         }
-        let (mut name, mut line) = (None, None);
+        let (mut name, mut line, mut file) = (None, None, None);
         let mut at = Some((unit, offset));
         for _ in 0..8 {
             let Some((u, o)) = at else { break };
@@ -213,6 +242,13 @@ impl<'a> Symbols<'a> {
                 line = die
                     .attr_value(gimli::DW_AT_decl_line)
                     .and_then(|v| v.udata_value());
+                file = die
+                    .attr_value(gimli::DW_AT_decl_file)
+                    .and_then(|v| match v {
+                        AttributeValue::FileIndex(index) => Some(index),
+                        other => other.udata_value(),
+                    })
+                    .and_then(|index| self.file_path(u, index));
             }
             at = None;
             for attr in [gimli::DW_AT_abstract_origin, gimli::DW_AT_specification] {
@@ -240,6 +276,7 @@ impl<'a> Symbols<'a> {
         let func = Func {
             name,
             line: line.unwrap_or(0),
+            file,
         };
         self.funcs.insert(key, func.clone());
         Ok(func)
@@ -543,7 +580,9 @@ fn read_histograms(paths: &[PathBuf]) -> Result<Vec<(u64, u64)>> {
 }
 
 fn convert(elf_path: &Path, pc_paths: &[PathBuf], out_path: &Path) -> Result<()> {
-    convert_histogram(elf_path, read_histograms(pc_paths)?, out_path, true)
+    let (profile, _) = convert_histogram(elf_path, read_histograms(pc_paths)?, true)?;
+    fs::write(out_path, profile)?;
+    Ok(())
 }
 
 /// Every instruction word of the executable sections once: the profile of
@@ -561,12 +600,13 @@ fn uniform_histogram(elf_path: &Path) -> Result<Vec<(u64, u64)>> {
     Ok(words)
 }
 
+/// The profile text for a histogram of the ELF's addresses, and where each
+/// function it touched sits in the source (see [`remap::Facts`]).
 fn convert_histogram(
     elf_path: &Path,
     histogram: Vec<(u64, u64)>,
-    out_path: &Path,
     verbose: bool,
-) -> Result<()> {
+) -> Result<(String, remap::Facts)> {
     let data = fs::read(elf_path)?;
     let object = object::File::parse(&*data)?;
     let (sections, endian) = dwarf_sections(&object)?;
@@ -596,6 +636,7 @@ fn convert_histogram(
     let mut profile: HashMap<String, Node> = HashMap::new();
     let (mut mapped, mut duplicated) = (0u64, 0u64);
     let mut unmapped = Unmapped::default();
+    let mut facts = remap::Facts::new();
     let mut elf_symbols: Vec<(u64, u64, &str)> = object
         .symbols()
         .filter(|symbol| symbol.size() > 0)
@@ -639,6 +680,7 @@ fn convert_histogram(
             let Some(callee) = hit.func.name.as_ref() else {
                 break;
             };
+            facts.reach(current, hit.call_line);
             let offset = (hit.call_line.wrapping_sub(current.line) & 0xffff) as u32;
             node = node
                 .calls
@@ -647,6 +689,7 @@ fn convert_histogram(
             current = &hit.func;
             children = &hit.children;
         }
+        facts.reach(current, line);
         let offset = (line.wrapping_sub(current.line) & 0xffff) as u32;
         // An unrolled copy runs once per `duplication` iterations of the
         // source loop, so its count stands for that many (AutoFDO scales the
@@ -668,19 +711,17 @@ fn convert_histogram(
         let _ = writeln!(out, "{name}:{}:{}", node.total(), node.head);
         node.emit(1, &mut out);
     }
-    fs::write(out_path, out)?;
-    if !verbose {
-        return Ok(());
+    if verbose {
+        println!(
+            "functions {}  mapped samples {mapped}  unmapped {}  in unrolled copies {duplicated}",
+            order.len(),
+            unmapped.total()
+        );
+        if unmapped.total() > 0 {
+            println!("unmapped: {unmapped}");
+        }
     }
-    println!(
-        "functions {}  mapped samples {mapped}  unmapped {}  in unrolled copies {duplicated}",
-        order.len(),
-        unmapped.total()
-    );
-    if unmapped.total() > 0 {
-        println!("unmapped: {unmapped}");
-    }
-    Ok(())
+    Ok((out, facts))
 }
 
 /// The crate name of the v0 crate root (`C [s<base-62>_] <len> [_] <name>`)
@@ -821,9 +862,201 @@ fn portable(in_path: &Path, out_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Facts about a build's functions under their portable names, which is what a
+/// committed profile uses.
+fn portable_facts(facts: &remap::Facts) -> remap::Facts {
+    let mut out = remap::Facts::new();
+    for (name, fact) in &facts.0 {
+        out.0
+            .entry(portable_name(name).into_owned())
+            .or_insert_with(|| fact.clone());
+    }
+    out
+}
+
+/// Whether an environment switch is on (set and not empty or `0`).
+fn switch(name: &str) -> bool {
+    env::var_os(name).is_some_and(|value| !value.is_empty() && value != "0")
+}
+
+/// Record the source `profile` describes: the repository files and function lines of the
+/// tree `elf_path` was built from, which the profile's keys are measured against. The
+/// profile's own lines are not touched. `collect` does it for the profile it writes;
+/// `stamp` does it for an older one that matches the tree it is run in.
+fn stamp(profile: &Path, elf_path: &Path, crate_dir: &Path) -> Result<()> {
+    let (_, facts) = convert_histogram(elf_path, uniform_histogram(elf_path)?, false)?;
+    let repo = remap::Repo::open(&[crate_dir])
+        .ok_or_else(|| format!("{} is not in a git repository", crate_dir.display()))?;
+    let text = fs::read_to_string(profile)?;
+    let stamped = remap::stamp_text(&text, &portable_facts(&facts), &repo, &repo.head())?;
+    fs::write(profile, stamped)?;
+    println!("psoxide-pgo: recorded the source of {}", profile.display());
+    Ok(())
+}
+
+/// `stamp PROFILE --elf TWIN.elf [--crate DIR]`: [`stamp`] for a driver that builds the twin
+/// itself. `TWIN.elf` is the ELF it built with `-Cdebuginfo=1 -Zdebug-info-for-profiling
+/// -Cstrip=none` from the tree the profile was collected on; `--crate` is any directory of the
+/// git repository that holds that tree (default: the current directory).
+fn stamp_elf(profile: &Path, elf: &Path, flags: &[String]) -> Result<()> {
+    let crate_dir = match flags {
+        [] => env::current_dir()?,
+        [flag, dir] if flag == "--crate" => PathBuf::from(dir),
+        other => return Err(format!("stamp --elf: unknown arguments {other:?}").into()),
+    };
+    stamp(profile, elf, &crate_dir)
+}
+
+/// Every linker symbol of `object` and every linkage name its DWARF records (inlined
+/// functions have no symbol of their own), keyed for [`bind`].
+fn build_symbols(object: &object::File, dwarf: &Dwarf, units: &[Unit]) -> Result<bind::Available> {
+    let mut available = bind::Available::default();
+    for symbol in object.symbols() {
+        if let Ok(name) = symbol.name() {
+            available.add(name);
+        }
+    }
+    for unit in units {
+        let mut entries = unit.entries();
+        while let Some(entry) = entries.next_dfs()? {
+            for attr in [gimli::DW_AT_linkage_name, gimli::DW_AT_MIPS_linkage_name] {
+                if let Some(value) = entry.attr_value(attr) {
+                    available.add(&dwarf.attr_string(unit, value)?.to_string_lossy());
+                }
+            }
+        }
+    }
+    Ok(available)
+}
+
+/// `rebind IN ELF OUT [--min-bound PERCENT] [--allow-unbound] [--rename OLD=NEW]...` in the guest's
+/// directory. `--rename` follows a function the profile names OLD to where the build has it as
+/// NEW (portable names, as `bind` prints them), for an item that moved between modules or crates.
+fn rebind_with_flags(input: &Path, elf: &Path, output: &Path, flags: &[String]) -> Result<()> {
+    let (renames, flags) = take_renames(flags)?;
+    let (coverage, flags) = coverage::take_flags(&flags)?;
+    let (gate, rest) = bind::Gate::from_args(&flags)?;
+    let (prune, rest): (bool, Vec<&str>) = (
+        rest.contains(&"--prune"),
+        rest.into_iter().filter(|flag| *flag != "--prune").collect(),
+    );
+    if !rest.is_empty() {
+        return Err(format!("rebind: unknown arguments {rest:?}").into());
+    }
+    rebind(
+        input,
+        elf,
+        output,
+        &env::current_dir()?,
+        gate,
+        &renames,
+        &Trim { prune, coverage },
+    )
+}
+
+/// What `rebind` removes from the profile it writes.
+#[derive(Default)]
+struct Trim {
+    /// `--prune`: the lines that cannot bind onto the build.
+    prune: bool,
+    /// `--coverage`: every function but the hottest ones.
+    coverage: Option<coverage::Selection>,
+}
+
+/// `hottest IN OUT --coverage PERMILLE [--cold NAME]...`: write `IN` with only the functions that
+/// hold `PERMILLE` of its samples (see `coverage.rs`), names untouched.
+fn hottest(input: &Path, output: &Path, flags: &[String]) -> Result<()> {
+    let (selection, rest) = coverage::take_flags(flags)?;
+    let Some(selection) = selection else {
+        return Err("hottest: --coverage PERMILLE is required".into());
+    };
+    if !rest.is_empty() {
+        return Err(format!("hottest: unknown arguments {rest:?}").into());
+    }
+    let (text, kept) = coverage::keep_hottest(&fs::read_to_string(input)?, &selection);
+    println!("{}", coverage::report(&kept));
+    fs::write(output, text)?;
+    Ok(())
+}
+
+/// `--rename` pairs: portable name the profile has, portable name the build has.
+type Renames = Vec<(String, String)>;
+
+/// The `--rename OLD=NEW` pairs of `flags`, and the flags left.
+fn take_renames(flags: &[String]) -> Result<(Renames, Vec<String>)> {
+    let (mut renames, mut rest) = (Vec::new(), Vec::new());
+    let mut flags = flags.iter();
+    while let Some(flag) = flags.next() {
+        if flag != "--rename" {
+            rest.push(flag.clone());
+            continue;
+        }
+        let pair = flags.next().and_then(|pair| pair.split_once('='));
+        match pair {
+            Some((old, new)) if !old.is_empty() && !new.is_empty() => {
+                renames.push((old.to_string(), new.to_string()));
+            }
+            _ => return Err("--rename wants OLD=NEW".into()),
+        }
+    }
+    Ok((renames, rest))
+}
+
+/// `profile` with every function named as a `renames` key (by portable name) named as its value.
+fn apply_renames(profile: &str, renames: &[(String, String)]) -> Result<String> {
+    if renames.is_empty() {
+        return Ok(profile.to_string());
+    }
+    rename_profile(profile, |name| {
+        let key = portable_name(name);
+        Ok(match renames.iter().find(|(old, _)| old == key.as_ref()) {
+            Some((_, new)) => new.clone(),
+            None => name.to_string(),
+        })
+    })
+}
+
+/// `bind PROFILE ELF [--exact] [--min-bound PERCENT] [--allow-unbound]`: print how much of
+/// `profile` finds a symbol in `elf_path` and fail below the threshold. `--exact` compares
+/// names as spelled, which is what LLVM does with a profile it is given as it is.
+fn bind_check(profile: &Path, elf_path: &Path, args: &[String]) -> Result<()> {
+    let (gate, rest) = bind::Gate::from_args(args)?;
+    let matching = match rest.as_slice() {
+        [] => bind::Matching::Normalised,
+        ["--exact"] => bind::Matching::Exact,
+        other => return Err(format!("bind: unknown arguments {other:?}").into()),
+    };
+    let data = fs::read(elf_path)?;
+    let object = object::File::parse(&*data)?;
+    let (sections, endian) = dwarf_sections(&object)?;
+    let dwarf = sections.borrow(|section| EndianSlice::new(section, endian));
+    let units = dwarf_units(&dwarf)?;
+    let available = build_symbols(&object, &dwarf, &units)?;
+    let collisions = available.collisions();
+    if !collisions.is_empty() {
+        println!(
+            "{} portable keys are shared by two symbols of the build and bind to neither, e.g. {}",
+            collisions.len(),
+            collisions[0]
+        );
+    }
+    let report = bind::measure(&fs::read_to_string(profile)?, &available, matching);
+    println!("{report}");
+    gate.check(&report)
+}
+
 /// Map a profile's names, portable or from another checkout, onto the
 /// symbols of `elf_path`, which must carry DWARF for its inlined functions.
-fn rebind(in_path: &Path, elf_path: &Path, out_path: &Path) -> Result<()> {
+/// `crate_dir` is where the guest builds, whose repository holds the profile's source.
+fn rebind(
+    in_path: &Path,
+    elf_path: &Path,
+    out_path: &Path,
+    crate_dir: &Path,
+    gate: bind::Gate,
+    renames: &[(String, String)],
+    trim: &Trim,
+) -> Result<()> {
     let data = fs::read(elf_path)?;
     let object = object::File::parse(&*data)?;
     let (sections, endian) = dwarf_sections(&object)?;
@@ -837,63 +1070,80 @@ fn rebind(in_path: &Path, elf_path: &Path, out_path: &Path) -> Result<()> {
         .into());
     }
 
-    // Portable name -> this build's symbol, or None when two symbols share
-    // one portable name and the profile cannot say which it meant.
-    let mut targets: HashMap<String, Option<String>> = HashMap::new();
-    let mut add = |symbol: String| {
-        let key = portable_name(&symbol).into_owned();
-        if key == symbol {
-            return;
+    let available = build_symbols(&object, &dwarf, &units)?;
+    // What this build's own code covers: its key set (to say how much of the profile
+    // still binds) and where each function sits in the source (to carry the profile
+    // across edits).
+    let (keys, facts) = convert_histogram(elf_path, uniform_histogram(elf_path)?, false)?;
+    let text = apply_renames(&fs::read_to_string(in_path)?, renames)?;
+    // `--coverage`: name only the hottest functions, so the bind share below is the share of the
+    // profile that is applied.
+    let text = match &trim.coverage {
+        Some(selection) => {
+            let (kept, report) = coverage::keep_hottest(&text, selection);
+            println!("{}", coverage::report(&report));
+            kept
         }
-        match targets.get(&key) {
-            None => {
-                targets.insert(key, Some(symbol));
-            }
-            Some(Some(existing)) if *existing != symbol => {
-                targets.insert(key, None);
-            }
-            Some(_) => {}
-        }
+        None => text,
     };
-    for symbol in object.symbols() {
-        if let Ok(name) = symbol.name() {
-            add(name.to_string());
-        }
-    }
-    for unit in &units {
-        let mut entries = unit.entries();
-        while let Some(entry) = entries.next_dfs()? {
-            for attr in [gimli::DW_AT_linkage_name, gimli::DW_AT_MIPS_linkage_name] {
-                if let Some(value) = entry.attr_value(attr) {
-                    add(dwarf
-                        .attr_string(unit, value)?
-                        .to_string_lossy()
-                        .into_owned());
+    // Before anything else: a profile whose functions are not in this build is not
+    // applied, and LLVM would not say so.
+    let bind = bind::measure(&text, &available, bind::Matching::Normalised);
+    println!("{bind}");
+    gate.check(&bind)?;
+    let collected_here = text.starts_with(pipeline::FEATURES_TAG);
+    let profile_dir = in_path.parent().unwrap_or(Path::new("."));
+    let carried = match remap::Repo::open(&[crate_dir, profile_dir]) {
+        Some(repo) => remap::carry(&text, &portable_facts(&facts), &repo),
+        None => Err(format!(
+            "{} is not in a git repository",
+            crate_dir.display()
+        )),
+    };
+    let text = match carried {
+        Ok((carried, report)) => {
+            if carried != text {
+                println!("{report}");
+                if let Some(refusal) = report.refusal() {
+                    if !switch("PSOXIDE_PGO_ALLOW_STALE") {
+                        return Err(
+                            format!("{refusal} (PSOXIDE_PGO_ALLOW_STALE=1 builds anyway)").into(),
+                        );
+                    }
+                    println!("psoxide-pgo: {refusal}; building anyway (PSOXIDE_PGO_ALLOW_STALE)");
                 }
             }
+            carried
         }
-    }
+        Err(error) if switch("PSOXIDE_PGO_ALLOW_UNSTAMPED") => {
+            println!("psoxide-pgo: {error}; building anyway (PSOXIDE_PGO_ALLOW_UNSTAMPED)");
+            text
+        }
+        Err(error) => {
+            return Err(format!(
+                "{}: {error} (PSOXIDE_PGO_ALLOW_UNSTAMPED=1 applies the profile as it is)",
+                in_path.display()
+            )
+            .into())
+        }
+    };
 
     let (mut kept, mut bound, mut missing, mut ambiguous) = (0, 0, 0, 0);
-    let text = fs::read_to_string(in_path)?;
     let rebound = rename_profile(&text, |name| {
-        // A Rust name either demangles or is already portable, and every
-        // Rust item path has a `::`; C names such as `main` have neither.
-        let key = portable_name(name);
-        if key == name && !name.contains("::") {
-            kept += 1;
-            return Ok(name.to_string());
-        }
-        Ok(match targets.get(key.as_ref()) {
-            Some(Some(symbol)) => {
-                bound += 1;
-                symbol.clone()
+        Ok(match available.resolve(name) {
+            bind::Lookup::Kept => {
+                kept += 1;
+                name.to_string()
             }
-            Some(None) => {
+            bind::Lookup::Bound(symbol) => {
+                bound += 1;
+                symbol
+            }
+            bind::Lookup::Ambiguous => {
                 ambiguous += 1;
                 name.to_string()
             }
-            None => {
+            bind::Lookup::Missing => {
                 missing += 1;
                 name.to_string()
             }
@@ -903,14 +1153,25 @@ fn rebind(in_path: &Path, elf_path: &Path, out_path: &Path) -> Result<()> {
     if bound == 0 && missing + ambiguous > 0 {
         return Err(format!("no profile name matched a symbol in {}", elf_path.display()).into());
     }
-    fs::write(out_path, &rebound)?;
+    // `--prune`: write the profile without the lines that cannot bind onto this build, under
+    // the portable names a committed profile uses.
+    let rebound = if trim.prune {
+        let (kept, pruned) = stale::prune(&rebound, &keys);
+        println!(
+            "pruned {} line(s) holding {} sample(s) and {} function block(s) that do not bind",
+            pruned.lines, pruned.samples, pruned.functions
+        );
+        fs::write(
+            out_path,
+            rename_profile(&kept, |name| Ok(portable_name(name).into_owned()))?,
+        )?;
+        kept
+    } else {
+        fs::write(out_path, &rebound)?;
+        rebound
+    };
     // How much of the profile still describes this code.
-    let keys_path = out_path.with_extension("keys");
-    let keys = convert_histogram(elf_path, uniform_histogram(elf_path)?, &keys_path, false)
-        .and_then(|()| Ok(fs::read_to_string(&keys_path)?));
-    let _ = fs::remove_file(&keys_path);
-    let collected_here = text.starts_with(pipeline::FEATURES_TAG);
-    let mut report = stale::compare(&rebound, &keys?).enforced_for(collected_here);
+    let mut report = stale::compare(&rebound, &keys).enforced_for(collected_here);
     for (name, _) in &mut report.worst {
         *name = portable_name(name).into_owned();
     }
@@ -920,21 +1181,26 @@ fn rebind(in_path: &Path, elf_path: &Path, out_path: &Path) -> Result<()> {
 
 const USAGE: &str = "usage: psoxide-pgo <elf-with-dwarf> <pc.csv>... <out.prof>
        psoxide-pgo portable <in.prof> <out.prof>
-       psoxide-pgo rebind <in.prof> <target-elf-with-dwarf> <out.prof>
+       psoxide-pgo rebind <in.prof> <target-elf-with-dwarf> <out.prof> [--min-bound PERCENT] [--allow-unbound] [--rename OLD=NEW]... [--prune] [--coverage PERMILLE [--cold NAME]...]
+                                                                       (run in the guest's directory)
+       psoxide-pgo hottest <in.prof> <out.prof> --coverage PERMILLE [--cold NAME]...
+       psoxide-pgo stamp <profile> --elf <twin-elf-with-dwarf> [--crate DIR]
+       psoxide-pgo bind <profile> <target-elf-with-dwarf> [--exact] [--min-bound PERCENT] [--allow-unbound]
        psoxide-pgo layout <link.map> <image.exe> <words.csv>... <out.layout>
        psoxide-pgo place <in.layout> <link.map> <image.exe> <linker-script> <out.order>
        psoxide-pgo followed <in.order> <relinked.map>
        psoxide-pgo ram <link.map> [--floor BYTES]";
 
-const MODES: [&str; 12] = [
-    "portable", "rebind", "layout", "place", "followed", "collect", "order", "apply", "choose",
-    "measure", "ram", "ladder",
+const MODES: [&str; 17] = [
+    "portable", "hottest", "rebind", "bind", "layout", "place", "followed", "collect", "order",
+    "apply", "choose", "measure", "ram", "ladder", "stamp", "search", "icache",
 ];
 
 /// A layout profile from one link and per-word logs (`--pc-log-words
 /// --pc-line-log`) of replays of its image.
 fn layout_profile(map: &Path, exe: &Path, logs: &[&str], out: &Path) -> Result<()> {
-    let sections = layout::read_map(&fs::read_to_string(map)?);
+    let map_text = fs::read_to_string(map)?;
+    let sections = layout::read_map(&map_text);
     let image = layout::Image::parse(&fs::read(exe)?)?;
     let mut counts: HashMap<u32, u64> = HashMap::new();
     for log in logs {
@@ -943,6 +1209,7 @@ fn layout_profile(map: &Path, exe: &Path, logs: &[&str], out: &Path) -> Result<(
         }
     }
     let collected = layout::collect(&sections, &image, &counts);
+    layout::check_unplaced(&map_text, &counts, collected.instructions)?;
     fs::write(out, collected.layout.to_text())?;
     println!(
         "functions {}  instructions {}  outside them {}  indirect calls {}",
@@ -969,14 +1236,27 @@ fn place_order(
     println!("{}", bound.coverage);
     bound.coverage.gate()?;
     let fixed = layout::fixed_patterns(&fs::read_to_string(script)?);
-    let placement = layout::place(&sections, &image, &bound, &fixed);
-    println!(
-        "placed {}  gap {} B  predicted refills {:.0} -> {:.0}",
-        placement.placed.len(),
-        placement.gap,
-        placement.before,
-        placement.after
-    );
+    let placement = match &profile.placement {
+        Some(recorded) => {
+            let placement = layout::recorded_order(recorded, &sections, &image, &fixed)?;
+            println!(
+                "recorded placement: {} sections listed as `search` placed them",
+                placement.order.len()
+            );
+            placement
+        }
+        None => {
+            let placement = layout::place(&sections, &image, &bound, &fixed);
+            println!(
+                "placed {}  gap {} B  predicted refills {:.0} -> {:.0}",
+                placement.placed.len(),
+                placement.gap,
+                placement.before,
+                placement.after
+            );
+            placement
+        }
+    };
     fs::write(out, layout::order_file(&sections, &placement))?;
     // Where the model put each placed function, for `followed` to check the relink against.
     let mut placed = String::new();
@@ -1031,10 +1311,11 @@ fn followed(order_path: &Path, map: &Path) -> Result<()> {
 /// PGO builds can step its inlining down (as `apply --ram-fallback` does).
 fn ram_report(map: &Path, floor: Option<u32>) -> Result<()> {
     let text = fs::read_to_string(map)?;
-    let free = ram::free_ram(&text).ok_or_else(|| format!("{} has no __bss_end", map.display()))?;
+    let free =
+        ram::free_ram(&text).ok_or_else(|| format!("{} has no __heap_start", map.display()))?;
     println!("free {free} B");
     match floor {
-        Some(floor) if free < floor => Err(format!(
+        Some(floor) if !ram::fits(free, floor) => Err(format!(
             "{} leaves {free} B of RAM free, under the {floor} B floor",
             map.display()
         )
@@ -1044,22 +1325,38 @@ fn ram_report(map: &Path, floor: Option<u32>) -> Result<()> {
 }
 
 fn main() -> ExitCode {
+    if env::var_os(pipeline::AS_RUSTC_VAR).is_some_and(|value| !value.is_empty()) {
+        return rustc_wrap::main();
+    }
     let args: Vec<String> = env::args().skip(1).collect();
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
     let result = match words.as_slice() {
-        [mode @ ("collect" | "order" | "apply" | "choose" | "measure" | "ladder"), ..] => {
+        ["stamp", profile, "--elf", elf, flags @ ..] => {
+            let flags: Vec<String> = flags.iter().map(ToString::to_string).collect();
+            stamp_elf(Path::new(profile), Path::new(elf), &flags)
+        }
+        [mode @ ("collect" | "order" | "apply" | "choose" | "measure" | "ladder" | "stamp"), ..] => {
             pipeline::main(mode, &args[1..])
         }
         ["followed", order, map] => followed(Path::new(order), Path::new(map)),
+        [mode @ ("search" | "icache"), ..] => search::main(mode, &args[1..]),
         ["ram", map] => ram_report(Path::new(map), None),
         ["ram", map, "--floor", floor] => match floor.parse() {
             Ok(floor) => ram_report(Path::new(map), Some(floor)),
             Err(_) => Err(format!("--floor wants a byte count, not {floor:?}").into()),
         },
         ["portable", input, output] => portable(Path::new(input), Path::new(output)),
-        ["rebind", input, elf, output] => {
-            rebind(Path::new(input), Path::new(elf), Path::new(output))
+        ["hottest", input, output, flags @ ..] => {
+            let flags: Vec<String> = flags.iter().map(ToString::to_string).collect();
+            hottest(Path::new(input), Path::new(output), &flags)
         }
+        ["rebind", input, elf, output, ..] => rebind_with_flags(
+            Path::new(input),
+            Path::new(elf),
+            Path::new(output),
+            &args[4..],
+        ),
+        ["bind", input, elf, ..] => bind_check(Path::new(input), Path::new(elf), &args[3..]),
         ["layout", map, exe, logs @ .., output] if !logs.is_empty() => {
             layout_profile(Path::new(map), Path::new(exe), logs, Path::new(output))
         }
@@ -1075,7 +1372,7 @@ fn main() -> ExitCode {
             convert(Path::new(elf), &pcs, Path::new(output))
         }
         _ => {
-            eprintln!("{USAGE}\n{}", pipeline::USAGE);
+            eprintln!("{USAGE}\n{}\n{}", pipeline::USAGE, search::USAGE);
             return ExitCode::from(2);
         }
     };
@@ -1147,6 +1444,35 @@ mod tests {
             portable_name("_RNCNvCsb9SZb48y33G_6hl_psx25classic_native_patch_masks0_0B3_"),
             "hl_psx::classic_native_patch_mask::{closure#2} @hl_psx"
         );
+    }
+
+    #[test]
+    fn a_rename_follows_a_function_that_moved_between_modules() {
+        let profile = "psx_asset::read_u32:10:1\n 1: 10\nhl::play:5:0\n 2: psx_asset::read_u32:4\n  1: 4\n 3: 1\n";
+        let renames = [(
+            "psx_asset::read_u32".to_string(),
+            "psx_asset::le::read_u32".to_string(),
+        )];
+        let moved = apply_renames(profile, &renames).expect("rename");
+        assert_eq!(
+            moved,
+            "psx_asset::le::read_u32:10:1\n 1: 10\nhl::play:5:0\n 2: psx_asset::le::read_u32:4\n  1: 4\n 3: 1\n"
+        );
+        assert_eq!(apply_renames(profile, &[]).expect("none"), profile);
+        let flags: Vec<String> = [
+            "--allow-unbound",
+            "--rename",
+            "a::b=c::b",
+            "--min-bound",
+            "90",
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+        let (pairs, rest) = take_renames(&flags).expect("flags");
+        assert_eq!(pairs, [("a::b".to_string(), "c::b".to_string())]);
+        assert_eq!(rest, ["--allow-unbound", "--min-bound", "90"]);
+        assert!(take_renames(&["--rename".to_string(), "nope".to_string()]).is_err());
     }
 
     #[test]
@@ -1230,6 +1556,7 @@ mod tests {
         let func = Func {
             name: Some("callee".into()),
             line: 10,
+            file: None,
         };
         let at = |call_line, ranges, children| Inlined {
             ranges,
@@ -1264,5 +1591,170 @@ mod tests {
         top.emit(1, &mut out);
         assert_eq!(top.total(), 17);
         assert_eq!(out, " 2: 10\n 5.1: callee:7\n  1: 7\n");
+    }
+
+    /// Every spelling of one function in builds whose crates hash differently must give one
+    /// key, and that key must be the one a committed profile holds. The spellings are
+    /// symbols of the SDK's own crates and of `core`, as three real builds named them (the
+    /// hashes differ in digits and in length), with the forms rustc v0 has: plain and
+    /// nested paths, inherent and trait impls (impl disambiguators, back-references),
+    /// closures, generic instances with the instantiating crate given as a back-reference
+    /// or spelled out, and const generics.
+    #[test]
+    fn one_function_has_one_key_whatever_the_crate_hashes() {
+        let forms: [(&[&str], &str); 8] = [
+            (
+                &[
+                    "_RNvNtCsakW6tY9fQm5_11psx_goldsrc12chunk_stream14report_sectors",
+                    "_RNvNtCsc8FXrSERXDU_11psx_goldsrc12chunk_stream14report_sectors",
+                    "_RNvNtCs1_11psx_goldsrc12chunk_stream14report_sectors",
+                ],
+                "psx_goldsrc::chunk_stream::report_sectors",
+            ),
+            (
+                &[
+                    "_RNvMNtCsakW6tY9fQm5_11psx_goldsrc12affine_edgesNtB2_10EdgePolicy11begin_frame",
+                    "_RNvMNtCslVZixn0QU4y_11psx_goldsrc12affine_edgesNtB2_10EdgePolicy11begin_frame",
+                ],
+                "<psx_goldsrc::affine_edges::EdgePolicy>::begin_frame",
+            ),
+            (
+                &[
+                    "_RNvXNtCsakW6tY9fQm5_11psx_goldsrc12chunk_streamNtNtNtCscgyhKdNuKvv_6psx_io2cd6reader12SectorReaderNtB2_11ChunkReader10start_read",
+                    "_RNvXNtCsc8FXrSERXDU_11psx_goldsrc12chunk_streamNtNtNtCs3_6psx_io2cd6reader12SectorReaderNtB2_11ChunkReader10start_read",
+                ],
+                "<psx_io::cd::reader::SectorReader as psx_goldsrc::chunk_stream::ChunkReader>::start_read",
+            ),
+            (
+                &[
+                    "_RNvXs0_NtCs6HN5p3ZHQ13_6psx_rt5cacheNtB5_5HwBusNtB5_3Bus11irq_restore",
+                    "_RNvXs0_NtCs4_6psx_rt5cacheNtB5_5HwBusNtB5_3Bus11irq_restore",
+                ],
+                "<psx_rt::cache::HwBus as psx_rt::cache::Bus>::irq_restore",
+            ),
+            (
+                &[
+                    "_RNCNvNtCsakW6tY9fQm5_11psx_goldsrc6render10guard_clip0B5_",
+                    "_RNCNvNtCsc8FXrSERXDU_11psx_goldsrc6render10guard_clip0B5_",
+                ],
+                "psx_goldsrc::render::guard_clip::{closure#0} @psx_goldsrc",
+            ),
+            (
+                &[
+                    "_RINvNtCsbh2AbiOuVML_7psx_gpu3gpu4drawNtNtB4_4prim8FillRectEB4_",
+                    "_RINvNtCs1_7psx_gpu3gpu4drawNtNtB4_4prim8FillRectEB4_",
+                ],
+                "psx_gpu::gpu::draw::<psx_gpu::prim::FillRect> @psx_gpu",
+            ),
+            (
+                &[
+                    "_RINvCsaFmROvEVfWL_7psx_pad10poll_stateNtNtCscgyhKdNuKvv_6psx_io6periph14ControllerPortECs2RILYqUnlV4_10psx_engine",
+                    "_RINvCs2_7psx_pad10poll_stateNtNtCs7_6psx_io6periph14ControllerPortECs7_10psx_engine",
+                ],
+                "psx_pad::poll_state::<psx_io::periph::ControllerPort> @psx_engine",
+            ),
+            (
+                &[
+                    "_RINvMs_NtCs5hzxbyFmMX7_7psx_gpu5frameINtB5_7OtFrameKj1_E3addNtNtB7_4prim8RectFlatECs2RILYqUnlV4_10psx_engine",
+                    "_RINvMs_NtCs9_7psx_gpu5frameINtB5_7OtFrameKj1_E3addNtNtB7_4prim8RectFlatECs1_10psx_engine",
+                ],
+                "<psx_gpu::frame::OtFrame<1>>::add::<psx_gpu::prim::RectFlat> @psx_engine",
+            ),
+        ];
+        for (spellings, key) in forms {
+            for spelling in spellings {
+                assert_eq!(portable_name(spelling), key, "{spelling}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_generic_instance_in_another_crate_is_another_key() {
+        let in_pad =
+            "_RINvCs2_7psx_pad10poll_stateNtNtCs7_6psx_io6periph14ControllerPortECs3_7psx_pad";
+        let in_engine =
+            "_RINvCs2_7psx_pad10poll_stateNtNtCs7_6psx_io6periph14ControllerPortECs3_10psx_engine";
+        assert_eq!(
+            portable_name(in_pad),
+            "psx_pad::poll_state::<psx_io::periph::ControllerPort> @psx_pad"
+        );
+        assert_eq!(
+            portable_name(in_engine),
+            "psx_pad::poll_state::<psx_io::periph::ControllerPort> @psx_engine"
+        );
+    }
+
+    #[test]
+    fn legacy_names_lose_their_hash_and_statics_keep_their_suffix() {
+        let legacy = "_ZN4core3fmt5Write9write_fmt17h0123456789abcdefE";
+        let other = "_ZN4core3fmt5Write9write_fmt17hfedcba9876543210E";
+        assert_eq!(portable_name(legacy), "core::fmt::Write::write_fmt");
+        assert_eq!(portable_name(legacy), portable_name(other));
+        // A linker suffix after the symbol (ThinLTO promotion) is not part of the name.
+        assert_eq!(
+            portable_name("_RNvNtCs1_6psx_rt3tty5print.llvm.12345"),
+            portable_name("_RNvNtCs2_6psx_rt3tty5print")
+        );
+    }
+
+    #[test]
+    fn same_named_items_of_one_scope_share_a_key_and_are_never_merged() {
+        // `s_` is the item's own disambiguator (two `do_panic` in one scope); the portable
+        // path drops it, so both map to one key and the tool binds neither.
+        let first = "_RNvNvNtNtCs1_4core5slice5index16slice_index_fail8do_panic";
+        let second = "_RNvNvNtNtCs1_4core5slice5index16slice_index_fails_8do_panic";
+        assert_eq!(portable_name(first), portable_name(second));
+        let mut available = bind::Available::default();
+        available.add(first);
+        available.add(second);
+        assert_eq!(
+            available.collisions(),
+            ["core::slice::index::slice_index_fail::do_panic"]
+        );
+        assert_eq!(available.resolve(first), bind::Lookup::Ambiguous);
+        // Writing a portable profile that would merge two records is an error.
+        let profile = format!("{first}:5:1\n 1: 5\n{second}:7:1\n 1: 7\n");
+        let error = rename_profile(&profile, |name| Ok(portable_name(name).into_owned()))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("both become"), "{error}");
+    }
+
+    /// The (printed name, key) pairs the emulator repository's `stall-tools` joins functions
+    /// by (`KEY_VECTORS` in its `functions.rs`, copied verbatim; that tool has no demangler and
+    /// cannot depend on this repository). Here each key must also be what this tool gives the
+    /// mangled spelling of the same name, and a name that is already a key must pass through.
+    #[test]
+    fn the_stall_tools_keys_are_the_portable_names_of_the_mangled_spellings() {
+        let mangled: [(&str, &str); 2] = [
+            ("_ZN4core3fmt5write17h0123456789abcdefE", "core::fmt::write"),
+            (
+                "_ZN53_$LT$core..fmt..Error$u20$as$u20$core..fmt..Debug$GT$3fmt17h0123456789abcdefE",
+                "<core::fmt::Error as core::fmt::Debug>::fmt",
+            ),
+        ];
+        for (symbol, key) in mangled {
+            assert_eq!(portable_name(symbol), key, "{symbol}");
+        }
+        for key in [
+            "core::fmt::write",
+            "<[u8]>::len",
+            "psx_gpu::gpu::draw::<psx_gpu::prim::FillRect>",
+            "<T>::beta::<closure#0, U>",
+        ] {
+            assert_eq!(portable_name(key), key);
+        }
+    }
+
+    #[test]
+    fn stamp_elf_takes_only_an_optional_crate_directory() {
+        let error = stamp_elf(
+            Path::new("p.prof"),
+            Path::new("t.elf"),
+            &["--profile".to_string(), "x".to_string()],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("unknown arguments"), "{error}");
     }
 }

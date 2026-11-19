@@ -83,3 +83,5 @@ Cortex are; Quake's chain route is partly GPU-bound).
   then runs the kernel; the slot-shift variant and the packed-command passes
   are untouched.
 * `psx-math`: `clip_lanes::clip_lanes8_plane` with `asm-kernels`.
+
+The feature flags this page describes were removed on 2026-11-14: `psx_math::clip_lanes::clip_lanes8_plane` runs its kernel on every console build, and the ordering-table link pass is the one inline loop in the `ot.rs` of `psx-gpu` (the kernel is in the history, with its measurements in the changelog); `hello-asmprobe` checks both against their portable definitions.

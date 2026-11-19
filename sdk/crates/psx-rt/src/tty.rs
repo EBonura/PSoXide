@@ -8,8 +8,10 @@
 //!
 //! With `host-tty` each byte is one store to the Expansion 2 debug console
 //! ([`psx_hw::memory::expansion2::DEBUG_CONSOLE`]). That is where PCSX-Redux,
-//! OpenBIOS's `putchar` and our emulator print to the host terminal, and a
-//! retail console ignores the store. It never calls into the BIOS and reads no
+//! OpenBIOS's `putchar` and our emulator print to the host terminal. A retail console does not ignore the
+//! store: it raises a data bus error (seen 2026-11-14 on an SCPH-9002 with Expansion 2 at the 128 bytes the
+//! entry state gives it, the debug console being at offset 0x80). A build that runs on a console must
+//! not enable the feature, and `console-diag` does not. It never calls into the BIOS and reads no
 //! kernel state, so a diagnostic build behaves the same under every BIOS.
 
 /// Write a string to TTY.
@@ -45,11 +47,8 @@ pub fn println(_s: &str) {}
 /// Write a single u32 as 8 hex digits, no prefix, uppercase.
 #[cfg(feature = "host-tty")]
 pub fn print_hex_u32(v: u32) {
-    const DIGITS: &[u8; 16] = b"0123456789ABCDEF";
-    for shift in (0..8).rev() {
-        let nib = ((v >> (shift * 4)) & 0xf) as usize;
-        write_byte(DIGITS[nib]);
-    }
+    let mut buf = [0u8; psx_math::fmt::U32_HEX_MAX];
+    print(psx_math::fmt::u32_hex(&mut buf, v, 8));
 }
 
 /// Write a single u32 as 8 hex digits. A no-op without the `host-tty` feature.

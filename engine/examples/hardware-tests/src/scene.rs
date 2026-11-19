@@ -24,7 +24,7 @@ enum Mode {
     Capture,
 }
 
-const MENU: [&str; 8] = [
+const MENU: [&str; 9] = [
     // Row 0 is pinned: `make hwtest-run` selects it by firing CROSS at a fixed
     // tick with the cursor still at its boot position.
     "RUN HARDWARE TEST",
@@ -34,6 +34,7 @@ const MENU: [&str; 8] = [
     "RADIUS + LIST NODE SWEEP ONLY",
     "CONTROLLER TEST (P1 + P2)",
     "MEMORY CARD (AT OWN RISK)",
+    "DUALSHOCK MOTOR QUESTIONS",
     "VIEW LAST CAPTURE",
 ];
 const MENU_TOP: i16 = 64;
@@ -101,8 +102,9 @@ impl HardwareTests {
     }
 
     /// The whole run, then the capture.
-    fn start_run(&mut self, ctx: &mut Ctx, focus: bool) {
+    fn start_run(&mut self, ctx: &mut Ctx, focus: bool, manual: bool) {
         self.run.focus = focus;
+        self.run.manual = manual;
         let skip_risky = ctx.is_held(button::L2);
         self.run.write_cards = ctx.is_held(button::L1) && ctx.is_held(button::R1);
         self.run.checkpoints = ctx.is_held(button::START) && ctx.is_held(button::R2);
@@ -185,11 +187,11 @@ impl Scene for HardwareTests {
                 }
                 if ctx.just_pressed(button::CROSS) {
                     match self.menu_cursor {
-                        0 => self.start_run(ctx, false),
+                        0 => self.start_run(ctx, false, false),
                         1 => self.start_gpu_done(ctx, 0),
                         2 => self.start_gpu_done(ctx, 1),
                         3 => self.start_gpu_done(ctx, 2),
-                        4 => self.start_run(ctx, true),
+                        4 => self.start_run(ctx, true, false),
                         5 => {
                             self.controller_test.start();
                             self.mode = Mode::ControllerTest;
@@ -199,6 +201,7 @@ impl Scene for HardwareTests {
                             self.memcard_armed = false;
                             self.mode = Mode::MemoryCard;
                         }
+                        7 => self.start_run(ctx, false, true),
                         _ => {
                             if self.have_capture {
                                 self.open_capture();

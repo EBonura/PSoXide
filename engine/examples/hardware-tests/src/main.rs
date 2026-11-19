@@ -54,6 +54,8 @@ mod cd_pause;
 mod cd_route;
 mod cdstream_cases;
 mod clut_rewrite;
+mod config_irq;
+mod digital_first;
 mod console_tests;
 mod controller_test;
 mod cpu_tests;
@@ -64,6 +66,7 @@ mod dma_matrix;
 mod field_rule;
 mod gpu_done;
 mod gpu_probes;
+mod gte_nclip;
 mod handoff_probe;
 mod kernel_timing;
 mod list_upload_probe;
@@ -72,10 +75,10 @@ mod lever_probes;
 mod list_busy_probes;
 mod mdec_check;
 mod mdec_diag;
-mod pad_engine;
 mod payload;
 mod perf_probes;
 mod photo;
+mod present_path;
 mod probe_tokens;
 mod radius;
 mod records;
@@ -228,9 +231,9 @@ unsafe extern "C" {
 //
 // History, one entry per version: docs/hardware-test-versions.md.
 const SUITE_VERSION_MAJOR: u8 = 2;
-const SUITE_VERSION_MINOR: u8 = 10;
+const SUITE_VERSION_MINOR: u8 = 20;
 /// Display form. Keep in step with the two constants above.
-const SUITE_VERSION: &str = "HWTEST v2.10";
+const SUITE_VERSION: &str = "HWTEST v2.20";
 /// `CDTEST.BIN`: the deterministic read region the CD probes use, placed so it
 /// ends at LBA 1024. The console-diag build's stop panel pushes the boot EXE
 /// past the 541 sectors the plain layout allows, so that build gives the

@@ -967,15 +967,7 @@ pub struct MoverId(pub u32);
 impl MoverId {
     /// Hash an authored name.
     pub const fn from_name(name: &str) -> Self {
-        let bytes = name.as_bytes();
-        let mut h = 0x811c_9dc5u32;
-        let mut i = 0;
-        while i < bytes.len() {
-            h ^= bytes[i] as u32;
-            h = h.wrapping_mul(0x0100_0193);
-            i += 1;
-        }
-        Self(h)
+        Self(psx_pack::fnv1a32_const(name.as_bytes()))
     }
 }
 
@@ -1182,14 +1174,7 @@ pub const SECTION_RECORD_BYTES: [usize; SECTION_COUNT] = [
 ];
 
 const fn mix(hash: u32, value: usize) -> u32 {
-    let mut h = hash;
-    let mut i = 0;
-    while i < 4 {
-        h ^= ((value >> (i * 8)) & 0xff) as u32;
-        h = h.wrapping_mul(0x0100_0193);
-        i += 1;
-    }
-    h
+    psx_pack::fnv1a32_const_from(hash, &(value as u32).to_le_bytes())
 }
 
 const fn layout_hash() -> u32 {

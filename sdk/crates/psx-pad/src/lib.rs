@@ -13,12 +13,18 @@
 //!
 //! ```text
 //! let mut port = peripherals.controller_port;
-//! let mut reader = psx_pad::PadReader::port1();
-//! let pad = reader.poll_on(&mut port);
-//! if pad.buttons.is_held(psx_pad::button::START) {
+//! let mut pads = psx_pad::Controllers::new();
+//! let one = *pads.poll(&mut port, psx_pad::Port::One);
+//! if one.buttons.is_held(psx_pad::button::START) {
 //!     // …
 //! }
 //! ```
+//!
+//! [`Controllers`] is the one way a game reads its pads: one call per port, the
+//! same analog handshake on first contact, the motors mapped by the first `set_rumble`, an empty port probed once in 60
+//! polls, the last clean state kept across a garbled packet. The older entry points
+//! below it ([`poll_on`], [`PadReader`], [`require_analog_on`], ...) are what it is built
+//! from.
 //!
 //! The protocol spec, reproduced from nocash PSX-SPX:
 //!
@@ -49,10 +55,6 @@
 //! natural in game code.
 
 #![no_std]
-#![cfg_attr(
-    all(feature = "irq-engine", target_arch = "mips"),
-    feature(asm_experimental_arch)
-)]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
@@ -62,15 +64,14 @@ use psx_io::periph::ControllerPort;
 
 pub use psx_io::controller_port::Port;
 
-#[cfg(all(feature = "irq-engine", target_arch = "mips"))]
-pub mod console;
-pub mod engine;
+mod controllers;
+pub mod stick;
 pub mod tracker;
-pub use tracker::PadTracker;
+pub use controllers::Controllers;
+pub use stick::{stick_bits, stick_bits_of, RadialStick};
+pub use tracker::{PadEdges, PadFrame, PadTracker};
 
 // Under test the driver talks to a controller model, not the registers.
-#[cfg(test)]
-mod engine_tests;
 #[cfg(test)]
 mod mock_sio;
 #[cfg(test)]
@@ -153,6 +154,11 @@ impl ButtonState {
 pub const STICK_CENTER: u8 = 0x80;
 
 /// Controller operating mode inferred from the poll ID byte.
+///
+/// The variant order is part of the code size: `Digital`, `Analog`, `Config` and `Negcon` (the
+/// modes that answered with a valid packet) are adjacent, and `Analog` and `Config` (the modes
+/// that carry sticks) lead them, so [`PadMode::has_sticks`], `has_axes` and the "answered"
+/// test are each one range compare instead of a bit test.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum PadMode {
     /// No controller answered the poll.
@@ -161,10 +167,10 @@ pub enum PadMode {
     Digital,
     /// DualShock analog shape: ID `0x73`, buttons plus stick bytes.
     Analog,
-    /// neGcon-compatible racing controller: ID `0x23`, twist and three pressures.
-    Negcon,
     /// DualShock config/escape shape: ID `0xF3`.
     Config,
+    /// neGcon-compatible racing controller: ID `0x23`, twist and three pressures.
+    Negcon,
     /// A controller answered with an ID this SDK does not classify yet.
     Unknown,
 }
@@ -425,7 +431,11 @@ impl Default for AnalogSticks {
 }
 
 /// Result of one controller poll.
+///
+/// Word-aligned so a copy is word loads and stores, not the unaligned pairs a halfword-aligned
+/// 16-byte struct costs on a MIPS-I (it is copied out of every poll and into every slot).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(align(4))]
 pub struct PadState {
     /// Active-high button state.
     pub buttons: ButtonState,
@@ -459,6 +469,21 @@ impl PadState {
     #[inline]
     pub const fn is_analog(self) -> bool {
         matches!(self.mode, PadMode::Analog)
+    }
+
+    /// The left stick as signed counts from centre for a menu fold ([`stick_bits`],
+    /// [`RadialStick`]): the reading when the pad reports sticks ([`PadMode::has_sticks`], analog
+    /// or parked in configuration mode, where they are still on the wire), `(0, 0)` otherwise.
+    /// One rule for every game; a game must not gate its sticks on `is_analog` or on a mode of
+    /// its own.
+    #[must_use]
+    #[inline]
+    pub const fn menu_stick(self) -> (i16, i16) {
+        if self.mode.has_sticks() {
+            self.sticks.left_centered()
+        } else {
+            (0, 0)
+        }
     }
 }
 
@@ -628,6 +653,7 @@ pub enum Pacing {
 /// per-byte `/ACK` observations so a diagnostic can show whether the controller
 /// acknowledges each byte, and which pacing produced a clean handshake.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(align(4))]
 pub struct RawPoll {
     /// ID low byte: 0x41 digital, 0x73 analog, 0xF3 config, 0xFF none.
     pub id_low: u8,
@@ -1025,18 +1051,37 @@ fn poll_state<T: Transport>(
             return s;
         }
         if s.mode == PadMode::Disconnected && !confirm_absent {
+            nobody_answered(bus, socket);
             return s;
         }
         all_absent &= s.mode == PadMode::Disconnected;
         last = s;
         tries += 1;
+        if tries < 4 {
+            // The retry selects at once: `/CS` must have been high long enough first.
+            bus.cs_high_gap();
+        }
     }
     // Four complete address-byte replies of FF without ACK establish an
     // absent device. Any other failed stage means an invalid transaction.
-    if !all_absent {
+    if all_absent {
+        nobody_answered(bus, socket);
+    } else {
         last.mode = PadMode::Unknown;
     }
     last
+}
+
+/// Nobody answered a poll of `socket`: the next one arms the `/ACK` interrupt if this one did
+/// not, and the other way round ([`Transport::pad_ack_irq`]). A pad on a port that shows the live
+/// `/ACK` level (the console) answers unarmed and keeps it so; one on a port that latches `/ACK`
+/// only while the interrupt is armed (PCSX-Redux) answers armed and keeps that. An empty
+/// socket is probed both ways in turn. A poll that answers keeps the setting as it is.
+#[cold]
+#[inline(never)]
+fn nobody_answered<T: Transport>(bus: &mut T, socket: Port) {
+    let armed = bus.pad_ack_irq(socket);
+    bus.set_pad_ack_irq(socket, !armed);
 }
 
 fn poll_once_raw<T: Transport>(bus: &mut T, socket: Port, pacing: Pacing) -> RawPoll {
@@ -1134,15 +1179,18 @@ fn ex<T: Transport>(
 }
 
 /// The production poll: retain the measured post-select setup delay, then
-/// wait for each non-final byte's live ACK assertion and release. RX-ready
-/// only establishes that the current byte arrived, not that the controller
-/// is ready for the next one. No IRQ enable or CTRL rewrite is needed.
+/// wait for each non-final byte's ACK, as the live level or as the latched
+/// interrupt bit (`Transport::exchange`), and for the level to release.
+/// RX-ready only establishes that the current byte arrived, not that the
+/// controller is ready for the next one. A port that shows the live level needs
+/// no IRQ enable and no CTRL rewrite; one that only latches (PCSX-ReARMed) gets
+/// one CTRL write per acknowledged byte.
 fn poll_once<T: Transport>(bus: &mut T, socket: Port, rumble: Rumble) -> RawPoll {
     // A previous aborted transaction may have left ACK asserted: `begin` waits
     // for it to release, so an old pulse never counts as the new address
     // byte's ACK.
-    let result = if bus.begin(socket, Timing::PAD) {
-        poll_selected(bus, rumble)
+    let result = if pad_begin(bus, socket) {
+        poll_selected(bus, socket, rumble)
     } else {
         None
     };
@@ -1157,27 +1205,59 @@ fn poll_once<T: Transport>(bus: &mut T, socket: Port, rumble: Rumble) -> RawPoll
     })
 }
 
+/// `bus.delay(spins)`, once for every caller in the driver rather than a copy of the loop in each.
+#[inline(always)]
+fn pad_delay<T: Transport>(bus: &mut T, spins: u32) {
+    bus.delay(spins);
+}
+
+/// [`Transport::begin_pad`], one copy for every caller in the driver.
+#[inline(never)]
+fn pad_begin<T: Transport>(bus: &mut T, socket: Port) -> bool {
+    bus.begin_pad(socket, None)
+}
+
 /// One byte of a poll. Kept out of line: nine inlined copies of the exchange and its result
 /// decoding were most of `poll_state` (2.4 KB in every game).
 #[inline(never)]
 fn pad_exchange<T: Transport>(
     bus: &mut T,
+    socket: Port,
     tx: u8,
     is_last: bool,
     timing: Timing,
 ) -> Result<u8, ExchangeError> {
-    bus.exchange(tx, is_last, timing)
+    bus.exchange(socket, tx, is_last, timing)
 }
 
 /// [`pad_exchange`] at the standard per-byte timing, `None` on any failure.
 #[inline(always)]
-fn pad_byte<T: Transport>(bus: &mut T, tx: u8, is_last: bool) -> Option<u8> {
-    pad_exchange(bus, tx, is_last, Timing::PAD).ok()
+fn pad_byte<T: Transport>(bus: &mut T, socket: Port, tx: u8, is_last: bool) -> Option<u8> {
+    pad_exchange(bus, socket, tx, is_last, Timing::PAD).ok()
+}
+
+/// The command byte got no usable answer. On a port that shows the live `/ACK`
+/// level that is a failed poll, retried by the caller, as a glitching pad needs.
+/// A port that only latches (PCSX-ReARMed) latches the address byte even with
+/// nothing in the socket, so the address byte cannot tell a pad from an empty
+/// socket there; the command byte can, since an empty socket answers `0xFF` and
+/// never acknowledges it. The exchange arms the ACK interrupt only after a byte
+/// was acknowledged by the latch alone, so the armed bit says which kind of port
+/// this is, and an empty socket on it is reported absent in this one poll.
+/// Cold: a real pad never gets here.
+#[cold]
+#[inline(never)]
+fn command_byte_failed<T: Transport>(bus: &mut T, error: ExchangeError) -> Option<RawPoll> {
+    if matches!(error, ExchangeError::AckTimeout { reply: 0xff }) && bus.ack_irq_armed() {
+        Some(RawPoll::NONE)
+    } else {
+        None
+    }
 }
 
 /// A complete selected-port poll, or no usable packet. The current ID
 /// determines the length; a mode toggle never reuses an earlier length.
-fn poll_selected<T: Transport>(bus: &mut T, rumble: Rumble) -> Option<RawPoll> {
+fn poll_selected<T: Transport>(bus: &mut T, socket: Port, rumble: Rumble) -> Option<RawPoll> {
     // The address byte is the one that tells a pad from an empty socket, so it
     // gets the BIOS's own limit for a device to answer, not the longer budget
     // for a slow byte part way through a packet.
@@ -1185,17 +1265,20 @@ fn poll_selected<T: Transport>(bus: &mut T, rumble: Rumble) -> Option<RawPoll> {
         ack_spins: ADDRESS_ACK_SPINS,
         ..Timing::PAD
     };
-    match pad_exchange(bus, 0x01, false, address) {
+    match pad_exchange(bus, socket, 0x01, false, address) {
         Ok(_) => {}
         Err(ExchangeError::AckTimeout { reply: 0xff }) => return Some(RawPoll::NONE),
         Err(_) => return None,
     }
-    let id_low = pad_byte(bus, 0x42, false)?;
+    let id_low = match pad_exchange(bus, socket, 0x42, false, Timing::PAD) {
+        Ok(reply) => reply,
+        Err(error) => return command_byte_failed(bus, error),
+    };
     let mode = mode_from_id_low(id_low);
     if matches!(mode, PadMode::Unknown | PadMode::Disconnected) {
         return None;
     }
-    let id_high = pad_byte(bus, 0x00, false)?;
+    let id_high = pad_byte(bus, socket, 0x00, false)?;
     if id_high != 0x5a {
         return None;
     }
@@ -1208,14 +1291,27 @@ fn poll_selected<T: Transport>(bus: &mut T, rumble: Rumble) -> Option<RawPoll> {
     } else {
         (0, 0)
     };
-    let buttons_low = pad_byte(bus, small, false)?;
-    let buttons_high = pad_byte(bus, large, !analog)?;
+    // Two button bytes, then four stick bytes for an analog pad; one loop, so the
+    // byte exchange and its failure exit are emitted once.
+    let count = if analog { 6 } else { 2 };
+    let mut data = [0u8; 6];
+    let mut i = 0;
+    while i < count {
+        let tx = match i {
+            0 => small,
+            1 => large,
+            _ => 0,
+        };
+        data[i] = pad_byte(bus, socket, tx, i + 1 == count)?;
+        i += 1;
+    }
+    let [buttons_low, buttons_high, right_x, right_y, left_x, left_y] = data;
     let sticks = if analog {
         AnalogSticks {
-            right_x: pad_byte(bus, 0x00, false)?,
-            right_y: pad_byte(bus, 0x00, false)?,
-            left_x: pad_byte(bus, 0x00, false)?,
-            left_y: pad_byte(bus, 0x00, true)?,
+            right_x,
+            right_y,
+            left_x,
+            left_y,
         }
     } else {
         AnalogSticks::CENTERED
@@ -1345,8 +1441,7 @@ pub const MOTOR_MAP_PACKET: [u8; 8] = [0x4d, 0x00, 0x00, 0x01, 0xff, 0xff, 0xff,
 /// `false` and is polled as before. The pad's analog or digital
 /// mode is left as it was. Call it again after a pad is plugged in.
 ///
-/// This blocks for a few frames; the interrupt engine does the same without
-/// blocking (`console::enable_rumble`).
+/// This blocks for a few frames.
 pub fn enable_rumble_on<T: Transport>(port: &mut T, socket: Port) -> bool {
     let (state, mapped) = request_rumble(port, socket, REQUIRE_ANALOG_GAP_SPINS);
     mapped && state.is_analog()

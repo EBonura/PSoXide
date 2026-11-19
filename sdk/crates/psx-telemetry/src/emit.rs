@@ -10,12 +10,18 @@
 //!
 //! Ports (decoded by `emulator-core`, addresses in `psx_hw::memory::expansion2::telemetry`):
 //! the event word (`kind << 24 | id`), the value latch (written before the
-//! event that consumes it) and the debug-log byte stream.
+//! event that consumes it), the debug-log byte stream and the depth-sort
+//! probe's class word ([`sort_class`]).
 //!
-//! [`console`] is deliberately NOT feature-gated (mips-gated only): it is the
-//! Play debug terminal used from normal builds. Use sparingly.
+//! These are measurement-build features. A store into this window can fault on
+//! a console, so nothing here may reach a disc: every writer, [`console`] included,
+//! compiles only with `emit`, and the architecture gate treats a
+//! build that enables `emit` as a diagnostic one: `sdk/profile.toml` lists it under `[diag]`, so
+//! a measurement disc is built with `mkisopsx --diag`, and a shipping build contains no store to
+//! these ports.
+//!
 
-#[cfg(target_arch = "mips")]
+#[cfg(all(target_arch = "mips", any(feature = "emit", feature = "debug-log")))]
 use psx_hw::memory::{expansion2::telemetry, to_kseg1};
 
 const EVENT_KIND_FRAME_BEGIN: u8 = 1;
@@ -26,7 +32,7 @@ const EVENT_KIND_TASK_BEGIN: u8 = 5;
 const EVENT_KIND_TASK_END: u8 = 6;
 
 /// The uncached view of one of the emulator's telemetry ports.
-#[cfg(target_arch = "mips")]
+#[cfg(all(target_arch = "mips", any(feature = "emit", feature = "debug-log")))]
 const fn uncached(physical: u32) -> *mut u32 {
     to_kseg1(physical) as *mut u32
 }
@@ -35,8 +41,14 @@ const fn uncached(physical: u32) -> *mut u32 {
 const EVENT_ADDR: *mut u32 = uncached(telemetry::EVENT);
 #[cfg(all(target_arch = "mips", feature = "emit"))]
 const VALUE_ADDR: *mut u32 = uncached(telemetry::VALUE);
-#[cfg(all(target_arch = "mips", feature = "emit"))]
+#[cfg(all(target_arch = "mips", any(feature = "emit", feature = "debug-log")))]
 const LOG_ADDR: *mut u32 = uncached(telemetry::LOG);
+#[cfg(all(target_arch = "mips", feature = "emit"))]
+const SORT_CLASS_ADDR: *mut u32 = uncached(telemetry::SORT_CLASS);
+#[cfg(all(target_arch = "mips", feature = "emit"))]
+const WARP_Z_ADDR: *mut u32 = uncached(telemetry::WARP_Z);
+#[cfg(all(target_arch = "mips", feature = "emit"))]
+const WARP_XY_ADDR: *mut u32 = uncached(telemetry::WARP_XY);
 
 /// Emulator cycle counter, wrapping at 32 bits. Returns zero on host builds
 /// and when the `emit` feature is disabled, without touching telemetry MMIO.
@@ -96,38 +108,71 @@ pub fn task_end(task_id: u16) {
 /// Write a line to the emulator debug log, telemetry builds only.
 #[inline(always)]
 pub fn debug_log(message: &str) {
-    debug_bytes(message.as_bytes());
+    debug_write(message);
     debug_byte(b'\n');
 }
 
-/// Write a line to the emulator's guest debug-log port UNCONDITIONALLY
-/// (mips-gated, not feature-gated), so it reaches PSoXide's Play debug
-/// terminal from a normal build. Use sparingly (debug tooling only).
+/// Append `message` to the emulator debug log without ending the line, so a
+/// line can be built from several pieces; the emulator commits it at the
+/// next newline. Telemetry builds only.
 #[inline(always)]
-pub fn console(message: &str) {
-    #[cfg(target_arch = "mips")]
-    {
-        const PORT: *mut u32 = uncached(telemetry::LOG);
-        for &byte in message.as_bytes() {
-            // SAFETY: PORT is the word-aligned debug-log port in the uncached
-            // Expansion 2 window, not Rust-owned memory; each write only
-            // appends one byte to the emulator's log stream.
-            unsafe { core::ptr::write_volatile(PORT, byte as u32) };
-        }
-        // SAFETY: same debug-log port as the loop above.
-        unsafe { core::ptr::write_volatile(PORT, b'\n' as u32) };
-    }
-    #[cfg(not(target_arch = "mips"))]
-    {
-        let _ = message;
-    }
+pub fn debug_write(message: &str) {
+    debug_bytes(message.as_bytes());
 }
 
+/// Tag the primitives that follow with a class word for the emulator's
+/// depth-sort probe (an emulator build without the probe ignores it).
+/// Telemetry builds only.
 #[inline(always)]
-fn debug_bytes(bytes: &[u8]) {
+pub fn sort_class(class: u32) {
+    #[cfg(all(target_arch = "mips", feature = "emit"))]
+    // SAFETY: SORT_CLASS_ADDR is a word-aligned port in the uncached Expansion 2
+    // window, not Rust-owned memory; the write only latches a class word.
+    unsafe {
+        core::ptr::write_volatile(SORT_CLASS_ADDR, class);
+    }
+    #[cfg(not(all(target_arch = "mips", feature = "emit")))]
+    let _ = class;
+}
+
+/// Announce a CPU-projected vertex to the emulator's texture-warp probe: screen position and
+/// view depth `z` in GTE SZ units. Telemetry builds only.
+#[inline(always)]
+pub fn warp_probe(x: i32, y: i32, z: i32) {
+    #[cfg(all(target_arch = "mips", feature = "emit"))]
+    // SAFETY: both are word-aligned ports in the uncached Expansion 2 window, not Rust-owned
+    // memory; the writes only latch a probe record.
+    unsafe {
+        core::ptr::write_volatile(WARP_Z_ADDR, z.max(0) as u32);
+        core::ptr::write_volatile(WARP_XY_ADDR, ((y as u32) << 16) | (x as u32 & 0xffff));
+    }
+    #[cfg(not(all(target_arch = "mips", feature = "emit")))]
+    let _ = (x, y, z);
+}
+
+/// Write a line to the emulator's guest debug-log port, so it reaches PSoXide's
+/// Play debug terminal. It is the same write as [`debug_log`] and, like every
+/// writer here, exists only in a build with the `emit` feature: a store to this
+/// port faults on a console (a data bus error, seen on an SCPH-9002), so no
+/// shipping build may contain one. It was once compiled into every mips build.
+#[inline(always)]
+pub fn console(message: &str) {
+    debug_log(message);
+}
+
+/// Append raw bytes to the emulator debug log without ending the line. Telemetry builds only.
+#[inline(always)]
+pub fn debug_bytes(bytes: &[u8]) {
     for &byte in bytes {
         debug_byte(byte);
     }
+}
+
+/// Write one line of ASCII bytes to the emulator debug log. Telemetry builds only.
+#[inline(always)]
+pub fn debug_line(bytes: &[u8]) {
+    debug_bytes(bytes);
+    debug_byte(b'\n');
 }
 
 #[cfg(any(all(target_arch = "mips", feature = "emit"), test))]
@@ -150,7 +195,7 @@ fn emit_value(value: u32) {
 #[inline(always)]
 fn emit_value(_value: u32) {}
 
-#[cfg(all(target_arch = "mips", feature = "emit"))]
+#[cfg(all(target_arch = "mips", any(feature = "emit", feature = "debug-log")))]
 #[inline(always)]
 fn debug_byte(byte: u8) {
     // SAFETY: LOG_ADDR is the word-aligned debug-log port in the uncached
@@ -160,7 +205,7 @@ fn debug_byte(byte: u8) {
     }
 }
 
-#[cfg(not(all(target_arch = "mips", feature = "emit")))]
+#[cfg(not(all(target_arch = "mips", any(feature = "emit", feature = "debug-log"))))]
 #[inline(always)]
 fn debug_byte(_byte: u8) {}
 
@@ -218,6 +263,8 @@ mod tests {
         task_begin(crate::task::FIXED_UPDATE);
         task_end(crate::task::FIXED_UPDATE);
         debug_log("x");
+        debug_write("x");
+        sort_class(3);
         console("x");
     }
 }

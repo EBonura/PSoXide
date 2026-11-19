@@ -68,6 +68,7 @@ const ACK_POLL: u32 = 16_384;
 const PARAM_POLL: u32 = 16_384;
 const DATA_POLL: u32 = 4_000_000;
 const CLEANUP_POLL: u32 = 16_384;
+
 /// Response bytes drained at most. The FIFO holds 16, but on heavy streaming
 /// the controller (or an emulator) can wedge it "not empty", and an unbounded
 /// drain would hang the loader.
@@ -428,7 +429,7 @@ impl SectorReader {
 
     /// Set `I_MASK` to VBlank-only, keeping the caller's mask for
     /// [`stop`](Self::stop), plus the sources [`irq::keep_enabled_while_polling`]
-    /// holds (the pad engine's). Idempotent within a stream.
+    /// holds. Idempotent within a stream.
     fn enter_polling_mask(&mut self) {
         self.saved_mask.keep(irq::mask());
         irq::set_mask((1 << psx_hw::irq::source::VBLANK) | irq::polling_keep());
@@ -687,18 +688,18 @@ impl SectorReader {
     /// put the interrupt mask [`prepare`](Self::prepare) replaced back.
     /// Safe to call after failures; it tolerates a drive with no active read.
     ///
-    /// **This returns after the Pause is acknowledged, not when the drive has
-    /// stopped.** On the console the second response comes 1.2 to 3.9 million
-    /// system clocks later (see [`pause`](super::pause)); waiting here would
-    /// charge every chunk of a table scan that long. That is safe for the next
-    /// command of a read sequence (any command cancels the pending second
-    /// response, and a data sector still in flight is drained by the waits),
-    /// and wrong for a caller that then asks the drive for its state: a GetStat
-    /// right after still says "reading". Use [`stop_proved`](Self::stop_proved)
+    /// **This does not wait for the drive to stop.** It sends the Pause, takes the
+    /// acknowledge and returns. The second response comes 1.2 to 3.9 million clocks after
+    /// the acknowledge on the console (see [`pause`](super::pause)), so the call does not
+    /// look for it: the next command of a read sequence goes out while the drive is still
+    /// completing the Pause, which a console has run (hardware-tests v2.14, `CD STOP AT
+    /// ACKNOWLEDGE`) [console result: to fill at the session].
+    /// It is wrong for a caller that then asks the drive for its state: a
+    /// GetStat right after still says "reading". Use [`stop_proved`](Self::stop_proved)
     /// when the drive has to be quiet before anything else happens.
+    #[inline(never)]
     pub fn stop(&mut self) {
         if self.send_command(CMD_PAUSE, &[], IRQ_ACK, CLEANUP_POLL) {
-            let _ = self.wait_irq(IRQ_COMPLETE, CLEANUP_POLL);
             self.cd.drain_response_limited(DRAIN_LIMIT);
             self.cd.acknowledge_irq(IRQ_COMPLETE);
         }
@@ -706,6 +707,34 @@ impl SectorReader {
         // Last, so a CD-ROM IRQ still latched cannot reach the CPU through
         // the restored mask.
         self.restore_irq_mask();
+    }
+
+    /// Read the one sector `lba` into `buffer`: [`start_read`](Self::start_read), one
+    /// [`read_sector`](Self::read_sector), then [`stop`](Self::stop), so the drive is left quiet
+    /// whether or not the read worked. `true` when the sector arrived. [`prepare`](Self::prepare)
+    /// must have succeeded first. This is the read closure every lookup used to write out
+    /// (`start_read && read_sector`, then `stop`), as one call; it is what
+    /// [`iso::find`](crate::iso::find) and [`iso::find_in_root`](crate::iso::find_in_root) take
+    /// as `|lba, into| reader.read_at(lba, into)`, or through [`find`](Self::find).
+    #[inline(always)]
+    pub fn read_at(&mut self, lba: u32, buffer: &mut [u32; SECTOR_WORDS]) -> bool {
+        let ok = self.start_read(lba) && self.read_sector(buffer);
+        self.stop();
+        ok
+    }
+
+    /// [`iso::find`](crate::iso::find) over this reader: the file or directory `path` names, down
+    /// from `from` (the root directory when `None`), one [`read_at`](Self::read_at) a sector.
+    /// `sector` is the caller's buffer and holds the last sector read. Always inlined for the
+    /// reason `iso::find` is.
+    #[inline(always)]
+    pub fn find(
+        &mut self,
+        sector: &mut crate::iso::Sector,
+        from: Option<crate::iso::Extent>,
+        path: &[&str],
+    ) -> Option<crate::iso::Extent> {
+        crate::iso::find(sector, |lba, into| self.read_at(lba, into), from, path)
     }
 
     /// [`stop`](Self::stop), then wait until the drive has really stopped, with
@@ -797,7 +826,7 @@ impl Default for SectorReader {
 /// The `I_MASK` to put back when a polled stream ends: the one it found, plus
 /// the sources a driver installed meanwhile asked to keep
 /// ([`irq::keep_enabled_while_polling`]). Restoring the saved word alone would
-/// drop a source (the pad engine's) that was switched on during the stream.
+/// drop a source that was switched on during the stream.
 const fn mask_after_stream(saved: u32, keep: u32) -> u32 {
     saved | keep
 }
@@ -808,7 +837,7 @@ mod tests {
 
     #[test]
     fn a_source_kept_during_the_stream_survives_its_end() {
-        // The pad engine installed mid-stream: its bits were not in the mask
+        // A driver installed mid-stream: its bits were not in the mask
         // the reader saved, and must not be dropped when it is put back.
         assert_eq!(mask_after_stream(0b0101, 0b1000_0000), 0b1000_0101);
         assert_eq!(mask_after_stream(0b0101, 0), 0b0101);

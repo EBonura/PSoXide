@@ -85,7 +85,12 @@ fn frozen_renderer_matches_the_shared_owner_for_both_games() {
             provenance[format!("{game}_sha256")].as_str().unwrap()
         );
         let scratch = Scratch::new("render-oracle-");
-        scratch.write("src/old.rs", &old);
+        // The frozen source predates the psx_engine re-export shim's removal; point its one import at the
+        // real module so the provenance hash above stays that of the original files.
+        scratch.write(
+            "src/old.rs",
+            &old.replace("psx_engine::attributed_clip", "psx_math::attributed_clip"),
+        );
         let adapter = read(&here.join(format!("support/{game}_render_adapter.rs")));
         let unit_tests = old
             .split_once("#[cfg(test)]")
@@ -125,8 +130,10 @@ fn frozen_renderer_matches_the_shared_owner_for_both_games() {
         scratch.write(
             "Cargo.toml",
             &format!(
-                "[package]\nname=\"render-oracle\"\nversion=\"0.0.0\"\nedition=\"2021\"\n[workspace]\n[dependencies]\npsx-engine={{path=\"{}\"}}\n",
-                root.join("engine/crates/psx-engine").display()
+                "[package]\nname=\"render-oracle\"\nversion=\"0.0.0\"\nedition=\"2021\"\n[workspace]\n[dependencies]\npsx-engine={{path=\"{}\"}}\npsx-telemetry={{path=\"{}\"}}\npsx-math={{path=\"{}\"}}\n",
+                root.join("engine/crates/psx-engine").display(),
+                root.join("sdk/crates/psx-telemetry").display(),
+                root.join("sdk/crates/psx-math").display()
             ),
         );
         for lane in [

@@ -1049,10 +1049,7 @@ fn release_bolts(
         return;
     };
     let frame = (pose.phase_q12() >> 12).min(u32::from(u16::MAX)) as u16;
-    loop {
-        let Some(mask) = sides[i].entities.deferred_projectile_release_mask(attack) else {
-            break;
-        };
+    while let Some(mask) = sides[i].entities.deferred_projectile_release_mask(attack) {
         let Some((emitter, release)) = authored_projectile_release_pending_at_frame(
             capsules,
             attack.action(),

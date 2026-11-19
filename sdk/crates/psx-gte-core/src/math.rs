@@ -73,6 +73,51 @@ impl Vec3I32 {
     pub const fn new(x: i32, y: i32, z: i32) -> Self {
         Self { x, y, z }
     }
+
+    /// Component-wise sum, each lane saturating at the `i32` limits.
+    #[inline]
+    #[must_use]
+    pub const fn saturating_add(self, rhs: Self) -> Self {
+        Self {
+            x: self.x.saturating_add(rhs.x),
+            y: self.y.saturating_add(rhs.y),
+            z: self.z.saturating_add(rhs.z),
+        }
+    }
+
+    /// Component-wise difference, each lane saturating at the `i32` limits.
+    #[inline]
+    #[must_use]
+    pub const fn saturating_sub(self, rhs: Self) -> Self {
+        Self {
+            x: self.x.saturating_sub(rhs.x),
+            y: self.y.saturating_sub(rhs.y),
+            z: self.z.saturating_sub(rhs.z),
+        }
+    }
+
+    /// Q12 dot product: the sum of `mul_q12_i32` of each lane pair, the sum
+    /// saturating. `self` may carry a large Q12 offset; `rhs` should be a
+    /// unit-scale vector so the products stay in range.
+    #[inline(never)]
+    #[must_use]
+    pub fn dot_q12(self, rhs: Self) -> i32 {
+        psx_math::int32::mul_q12_i32(self.x, rhs.x)
+            .saturating_add(psx_math::int32::mul_q12_i32(self.y, rhs.y))
+            .saturating_add(psx_math::int32::mul_q12_i32(self.z, rhs.z))
+    }
+
+    /// Every lane times the Q12 `factor`, through `mul_q12_i32` (so a
+    /// product past `i32` saturates).
+    #[inline(never)]
+    #[must_use]
+    pub fn scale_q12(self, factor: i32) -> Self {
+        Self {
+            x: psx_math::int32::mul_q12_i32(self.x, factor),
+            y: psx_math::int32::mul_q12_i32(self.y, factor),
+            z: psx_math::int32::mul_q12_i32(self.z, factor),
+        }
+    }
 }
 
 /// 3×3 rotation / light matrix of `i16` in 1.3.12. Laid out row-major
@@ -120,6 +165,74 @@ mod tests {
         // x in low half, y in high half -- matches MTC2 expectation.
         let v = Vec3I16::new(-1, 2, 3);
         assert_eq!(v.xy_packed(), 0x0002_ffff);
+    }
+
+    // The games' own copies (Quake movement.rs, mover.rs, push.rs, entity.rs),
+    // kept here as the oracle the shared methods must equal.
+    fn game_add(l: Vec3I32, r: Vec3I32) -> Vec3I32 {
+        Vec3I32 {
+            x: l.x.saturating_add(r.x),
+            y: l.y.saturating_add(r.y),
+            z: l.z.saturating_add(r.z),
+        }
+    }
+
+    fn game_sub(l: Vec3I32, r: Vec3I32) -> Vec3I32 {
+        Vec3I32 {
+            x: l.x.saturating_sub(r.x),
+            y: l.y.saturating_sub(r.y),
+            z: l.z.saturating_sub(r.z),
+        }
+    }
+
+    fn game_dot(l: Vec3I32, r: Vec3I32) -> i32 {
+        psx_math::int32::mul_q12_i32(l.x, r.x)
+            .saturating_add(psx_math::int32::mul_q12_i32(l.y, r.y))
+            .saturating_add(psx_math::int32::mul_q12_i32(l.z, r.z))
+    }
+
+    fn game_scale(v: Vec3I32, f: i32) -> Vec3I32 {
+        Vec3I32 {
+            x: psx_math::int32::mul_q12_i32(v.x, f),
+            y: psx_math::int32::mul_q12_i32(v.y, f),
+            z: psx_math::int32::mul_q12_i32(v.z, f),
+        }
+    }
+
+    #[test]
+    fn vec3_i32_saturating_arithmetic_equals_the_games_copies() {
+        const LANES: [i32; 9] = [
+            i32::MIN,
+            i32::MIN + 1,
+            -4096,
+            -1,
+            0,
+            1,
+            4095,
+            i32::MAX - 1,
+            i32::MAX,
+        ];
+        for &ax in &LANES {
+            for &ay in &LANES {
+                for &bz in &LANES {
+                    let a = Vec3I32::new(ax, ay, bz);
+                    let b = Vec3I32::new(bz, ax, ay);
+                    assert_eq!(a.saturating_add(b), game_add(a, b));
+                    assert_eq!(a.saturating_sub(b), game_sub(a, b));
+                    assert_eq!(a.dot_q12(b), game_dot(a, b));
+                    assert_eq!(a.scale_q12(ax), game_scale(a, ax));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn vec3_i32_saturating_ops_clamp_and_are_const() {
+        const SUM: Vec3I32 =
+            Vec3I32::new(i32::MAX, 1, i32::MIN).saturating_add(Vec3I32::new(1, 1, -1));
+        assert_eq!(SUM, Vec3I32::new(i32::MAX, 2, i32::MIN));
+        const DIFF: Vec3I32 = Vec3I32::new(i32::MIN, 5, 0).saturating_sub(Vec3I32::new(1, 2, 0));
+        assert_eq!(DIFF, Vec3I32::new(i32::MIN, 3, 0));
     }
 
     #[test]

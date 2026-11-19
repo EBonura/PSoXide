@@ -6,13 +6,12 @@
 //! Every phase presents as fast as the CPU lets it, so each would flip every
 //! VBlank without the cap:
 //!
-//! 1. Queued: tiny frames, each flip queued with
-//!    `queue_display_control_at_vblank` (the path hl-psx, cs-psx and the other
-//!    decoupled-present games use). The handler holds each flip until the cap
-//!    allows it.
+//! 1. Queued: tiny frames drawn through the port and handed over with
+//!    `Presenter::present_drawn` (the one present path). The handler holds
+//!    each flip until the cap allows it.
 //! 2. Direct: `DoubleBuffer::swap` in a loop with no VBlank wait of its own.
 //!    The swap waits for its slot.
-//! 3. Opt-out: `set_min_flip_vblanks(PresentCap::UNCAPPED.min_vblanks())` and the same queued
+//! 3. Opt-out: `present::set_cap(PresentCap::UNCAPPED)` and the same queued
 //!    loop flips on every VBlank again.
 //!
 //! The flip-interval histogram (`interrupts::flip_histogram`) is read after
@@ -29,9 +28,11 @@ extern crate psx_rt;
 use psx_font::fonts::BASIC;
 use psx_font::FontAtlas;
 use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
+use psx_gpu::prim::{RectFlat, TriFlat};
 use psx_gpu::Gpu;
+use psx_rt::present::{self, PresentCap, Presenter};
 use psx_rt::{interrupts, tty, Peripherals};
-use psx_tick::{FlipHistogram, PresentCap};
+use psx_tick::FlipHistogram;
 use psx_vram::{Clut, TextureDepth, TexturePage};
 
 const FONT_TPAGE: TexturePage = TexturePage::new(320, 0, TextureDepth::Bit4);
@@ -42,8 +43,12 @@ const RED: (u8, u8, u8) = (230, 80, 80);
 
 /// Flips each phase makes.
 const FLIPS: u32 = 90;
-/// VBlanks a queued flip is given before it counts as a timeout.
-const WAIT_LIMIT: u32 = 8;
+
+/// Frames of each mixed-shape run (the uncapped one runs twice as many).
+const MIXED_FRAMES: u32 = 600;
+
+/// Frames of the long run that must leave the presenter in signal mode.
+const LONG_FRAMES: u32 = 1500;
 
 /// What one phase measured.
 #[derive(Clone, Copy)]
@@ -74,28 +79,144 @@ fn measure(run: impl FnOnce() -> u32) -> Phase {
     }
 }
 
-/// Queue `FLIPS` flips of an empty frame, as fast as the queue releases them.
-fn queued(gpu: &mut Gpu, fb: &mut DoubleBuffer) -> u32 {
-    let mut timeouts = 0;
-    for _ in 0..FLIPS {
-        fb.apply_draw_target(gpu);
-        fb.clear(gpu, (8, 8, 24));
-        gpu.arm_draw_done();
-        gpu.signal_draw_done();
-        interrupts::queue_display_control_at_vblank(fb.begin_deferred_swap());
-        let start = interrupts::vblank_count();
-        while interrupts::is_display_control_queued() {
-            if interrupts::vblank_count().wrapping_sub(start) > WAIT_LIMIT {
-                timeouts += 1;
-                let word = interrupts::take_queued_display_control();
-                if word != 0 {
-                    psx_io::gpu::write_display_control(word);
-                }
-                break;
-            }
+/// Present `FLIPS` empty frames, as fast as the queue releases them; counts the
+/// present stalls (a flip that never landed).
+fn queued(gpu: &mut Gpu, fb: &mut DoubleBuffer, presenter: &mut Presenter) -> u32 {
+    let before = present::stats().recovery_count;
+    for n in 0..FLIPS {
+        presenter.begin_frame(fb);
+        // A different picture every frame, so a frame-hash replay can count the flips.
+        fb.clear(gpu, (8, 8, 24 + (n % 8) as u8 * 12));
+        presenter.present_drawn(fb);
+    }
+    present::wait_idle();
+    present::stats().recovery_count.wrapping_sub(before)
+}
+
+/// `frames` empty frames where the signal is taken away on every frame `lose` names: after the
+/// frame is drawn (its GP0(1Fh) has raised GPUSTAT bit 24) the program acknowledges bit 24
+/// itself, so the presenter sees a frame whose signal never arrived. Nothing waits for a
+/// flip here, so the run costs what the cap lets it.
+fn lossy(
+    gpu: &mut Gpu,
+    fb: &mut DoubleBuffer,
+    presenter: &mut Presenter,
+    frames: u32,
+    lose: impl Fn(u32) -> bool,
+) {
+    for n in 0..frames {
+        presenter.begin_frame(fb);
+        fb.clear(gpu, (24, 8 + (n % 8) as u8 * 12, 8));
+        presenter.present_drawn(fb);
+        if lose(n) {
+            gpu.wait_idle();
+            gpu.arm_draw_done();
         }
     }
-    timeouts
+    present::wait_idle();
+}
+
+/// What `mixed` measured.
+struct Mixed {
+    frames: u32,
+    vblanks: u32,
+    flips: u32,
+    fast: u32,
+    missed: u32,
+    /// Frame numbers at which the presenter's mode changed (first 8), and how many changes in all.
+    changes: [u16; 8],
+    changed: u32,
+}
+
+/// `frames` frames of mixed shapes (nothing extra, small rects, a big triangle, a rect field),
+/// so that a target which loses the signal for some shapes only loses it on some frames, run
+/// at whatever cap is set. Records the frame at which the presenter's mode moves.
+fn mixed(
+    gpu: &mut Gpu,
+    fb: &mut DoubleBuffer,
+    presenter: &mut Presenter,
+    frames: u32,
+    loss_sixteenths: u32,
+) -> Mixed {
+    interrupts::reset_flip_histogram();
+    let start = interrupts::vblank_count();
+    let missed_before = interrupts::draw_done_fallback_count();
+    let mut state = 0x2545_f491u32;
+    let mut out = Mixed {
+        frames,
+        vblanks: 0,
+        flips: 0,
+        fast: 0,
+        missed: 0,
+        changes: [0; 8],
+        changed: 0,
+    };
+    let mut mode = interrupts::flip_signal_distrusted();
+    for n in 0..frames {
+        presenter.begin_frame(fb);
+        fb.clear(gpu, (24, 8 + (n % 8) as u8 * 12, 8));
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        match state % 6 {
+            1 => gpu.draw(&RectFlat::new(8, 8, 1, 1, 200, 40, 40)),
+            2 => gpu.draw(&RectFlat::new(8, 8, 5, 1, 40, 200, 40)),
+            3 => gpu.draw(&RectFlat::new(8, 8, 16, 4, 40, 40, 200)),
+            4 => gpu.draw(&TriFlat::new([(0, 0), (300, 10), (20, 220)], 90, 90, 200)),
+            5 => {
+                for i in 0..5 {
+                    gpu.draw(&RectFlat::new(8 + 20 * i, 30, 8, 8, 200, 200, 40));
+                }
+            }
+            _ => {}
+        }
+        presenter.present_drawn(fb);
+        // A pseudo-random share of frames loses its signal: the program acknowledges bit 24 itself
+        // once the frame is drawn, as a core that drops GP0(1Fh) would have left it.
+        if (state >> 8) % 16 < loss_sixteenths {
+            gpu.wait_idle();
+            gpu.arm_draw_done();
+        }
+        let now = interrupts::flip_signal_distrusted();
+        if now != mode {
+            mode = now;
+            if let Some(slot) = out.changes.get_mut(out.changed as usize) {
+                *slot = n as u16;
+            }
+            out.changed += 1;
+        }
+    }
+    present::wait_idle();
+    let histogram = FlipHistogram::from_buckets(interrupts::flip_histogram());
+    out.vblanks = interrupts::vblank_count().wrapping_sub(start);
+    out.flips = histogram.total();
+    out.fast = histogram.below(2);
+    out.missed = interrupts::draw_done_fallback_count().wrapping_sub(missed_before);
+    out
+}
+
+/// One TTY line for a `mixed` run.
+fn print_mixed(label: &str, run: &Mixed) {
+    tty::print("FLIPCAP MIX ");
+    tty::print(label);
+    for (name, value) in [
+        ("frames", run.frames),
+        ("vblanks", run.vblanks),
+        ("flips", run.flips),
+        ("fast", run.fast),
+        ("missed", run.missed),
+        ("changes", run.changed),
+    ] {
+        tty::print(" ");
+        let (text, len) = line(name, value);
+        tty::print(as_str(&text[..len]));
+    }
+    for at in run.changes.iter().take(run.changed as usize) {
+        let (text, len) = line("at", u32::from(*at));
+        tty::print(" ");
+        tty::print(as_str(&text[..len]));
+    }
+    tty::println("");
 }
 
 /// `FLIPS` direct flips with nothing between them but a clear.
@@ -137,14 +258,85 @@ fn main() {
     );
     let mut fb = DoubleBuffer::new(Resolution::R320X240);
     fb.apply_draw_target(&mut gpu);
-    let default_cap = PresentCap::every_vblanks(interrupts::min_flip_vblanks());
+    let default_cap = present::cap();
+    let mut presenter = Presenter::new(None);
 
-    let capped_queue = measure(|| queued(&mut gpu, &mut fb));
+    let cold = mixed(&mut gpu, &mut fb, &mut presenter, 120, 0);
+    let capped_queue = measure(|| queued(&mut gpu, &mut fb, &mut presenter));
+    let missed_capped = interrupts::draw_done_fallback_count();
+    let distrust_capped = interrupts::flip_signal_distrusted();
     let capped_direct = measure(|| direct(&mut gpu, &mut fb));
-    interrupts::set_min_flip_vblanks(PresentCap::UNCAPPED.min_vblanks());
-    let uncapped = measure(|| queued(&mut gpu, &mut fb));
-    interrupts::set_min_flip_vblanks(PresentCap::HZ30.min_vblanks());
+    present::set_cap(PresentCap::UNCAPPED);
+    let uncapped = measure(|| queued(&mut gpu, &mut fb, &mut presenter));
+    present::set_cap(PresentCap::HZ30);
     gpu.wait_idle();
+    // The signal's trust, on a target where the signal arrived in the phases above (a PS1 and the
+    // models that raise it): a lone lost signal in eight must not move the presenter to the
+    // conventional test, a burst of lost signals must, and a long run with the signal must bring
+    // it back. A target that never raised it skips these (the phases above showed it).
+    let signal_works = interrupts::draw_done_fallback_count() == 0;
+    present::set_cap(PresentCap::UNCAPPED);
+    let (mut isolated, mut burst, mut recovered) = (None, None, None);
+    let mut long = None;
+    if signal_works {
+        // A long run with the signal on every frame: the mode must never move.
+        lossy(&mut gpu, &mut fb, &mut presenter, LONG_FRAMES, |_| false);
+        long = Some((
+            interrupts::draw_done_fallback_count(),
+            interrupts::flip_signal_distrusted(),
+        ));
+        let before = interrupts::draw_done_fallback_count();
+        lossy(&mut gpu, &mut fb, &mut presenter, 64, |n| n % 8 == 3);
+        isolated = Some((
+            interrupts::draw_done_fallback_count() - before,
+            interrupts::flip_signal_distrusted(),
+        ));
+        let before = interrupts::draw_done_fallback_count();
+        lossy(&mut gpu, &mut fb, &mut presenter, 6, |_| true);
+        burst = Some((
+            interrupts::draw_done_fallback_count() - before,
+            interrupts::flip_signal_distrusted(),
+        ));
+        let before = interrupts::draw_done_fallback_count();
+        lossy(&mut gpu, &mut fb, &mut presenter, 40, |_| false);
+        recovered = Some((
+            interrupts::draw_done_fallback_count() - before,
+            interrupts::flip_signal_distrusted(),
+        ));
+    }
+    // Mixed frame shapes at 30 and at 60 fps over a long run, for a target that loses the signal on
+    // some shapes only: how many flips per VBlank, and when the mode moved.
+    present::set_cap(PresentCap::HZ30);
+    let mixed_capped = mixed(&mut gpu, &mut fb, &mut presenter, MIXED_FRAMES, 0);
+    present::set_cap(PresentCap::UNCAPPED);
+    let mixed_uncapped = mixed(&mut gpu, &mut fb, &mut presenter, 2 * MIXED_FRAMES, 0);
+    print_mixed("cold capped", &cold);
+    print_mixed("capped loss0", &mixed_capped);
+    print_mixed("uncapped loss0", &mixed_uncapped);
+    // The signal coming and going: 1/8, 1/2 and 7/8 of the frames lose it, at 60 and at 30 fps.
+    for (cap, name) in [
+        (PresentCap::UNCAPPED, "uncapped"),
+        (PresentCap::HZ30, "capped"),
+    ] {
+        present::set_cap(cap);
+        for (sixteenths, label) in [(2, "loss2/16"), (8, "loss8/16"), (14, "loss14/16")] {
+            let run = mixed(&mut gpu, &mut fb, &mut presenter, MIXED_FRAMES, sixteenths);
+            let mut text = [0u8; 40];
+            let parts = [name.as_bytes(), b" ", label.as_bytes()];
+            let mut at = 0;
+            for part in parts {
+                text[at..at + part.len()].copy_from_slice(part);
+                at += part.len();
+            }
+            print_mixed(as_str(&text[..at]), &run);
+        }
+    }
+    present::set_cap(PresentCap::HZ30);
+    gpu.wait_idle();
+    present::set_cap(PresentCap::HZ30);
+    gpu.wait_idle();
+    let missed_end = interrupts::draw_done_fallback_count();
+    let distrust_end = interrupts::flip_signal_distrusted();
 
     // Two VBlanks per flip, with a little slack at both ends of the phase.
     let paced = |p: &Phase| p.vblanks >= 2 * FLIPS - 4 && p.vblanks <= 2 * FLIPS + 8;
@@ -159,7 +351,7 @@ fn main() {
             "queued: a flip came under 2 VBlanks",
         ),
         (paced(&capped_queue), "queued: not one flip per 2 VBlanks"),
-        (capped_queue.timeouts == 0, "queued: flips timed out"),
+        (capped_queue.timeouts == 0, "queued: present stalled"),
         (capped_direct.flips == FLIPS, "direct: flips counted"),
         (
             capped_direct.fast == 0,
@@ -173,6 +365,22 @@ fn main() {
         ),
         (uncapped.vblanks <= FLIPS + 8, "opt-out: slower than 60 fps"),
         (interrupts::fault_count() == 0, "exceptions other than IRQs"),
+        (
+            long.is_none_or(|(missed, distrust)| missed == 0 && !distrust),
+            "trust: the signal missed or the mode moved in a long run",
+        ),
+        (
+            isolated.is_none_or(|(missed, distrust)| missed == 8 && !distrust),
+            "trust: a lone lost signal in eight changed the mode",
+        ),
+        (
+            burst.is_none_or(|(missed, distrust)| missed == 6 && distrust),
+            "trust: a burst of lost signals did not switch the mode",
+        ),
+        (
+            recovered.is_none_or(|(missed, distrust)| missed == 0 && !distrust),
+            "trust: the signal did not win the mode back",
+        ),
     ];
     let failures = checks.iter().filter(|check| !check.0).count() as u32;
     for (_, what) in checks.iter().filter(|check| !check.0) {
@@ -187,6 +395,22 @@ fn main() {
         line("direct fast", capped_direct.fast),
         line("optout vblanks", uncapped.vblanks),
         line("optout at 1", uncapped.single),
+        // The signal: bit 24 missed on this many frames, and whether the presenter had stopped
+        // waiting for it. A PS1 reads 0 and 0 on every row.
+        line("missed capped", missed_capped),
+        line("distrust capped", u32::from(distrust_capped)),
+        line("missed end", missed_end),
+        line("distrust end", u32::from(distrust_end)),
+        // Lost-signal phases (a program-made loss): frames missed and the mode after each, or
+        // FFFFFFFF where the target never raised the signal and the phase did not run.
+        line("long missed", long.map_or(u32::MAX, |p| p.0)),
+        line("lone missed", isolated.map_or(u32::MAX, |p| p.0)),
+        line("burst missed", burst.map_or(u32::MAX, |p| p.0)),
+        line("burst distrust", burst.map_or(u32::MAX, |p| u32::from(p.1))),
+        line(
+            "regain distrust",
+            recovered.map_or(u32::MAX, |p| u32::from(p.1)),
+        ),
     ];
     let (banner, tint) = if failures == 0 {
         ("FLIPCAP PASS", GREEN)
@@ -207,9 +431,9 @@ fn main() {
         font.draw_text(8, 6, "PRESENTATION CAP: 30 FPS", WHITE);
         font.draw_text(8, 30, banner, tint);
         for (row, (text, len)) in lines.iter().enumerate() {
-            font.draw_text(8, 54 + 12 * row as i16, as_str(&text[..*len]), WHITE);
+            font.draw_text(8, 36 + 10 * row as i16, as_str(&text[..*len]), WHITE);
         }
-        let mut y = 150;
+        let mut y = 224;
         for (_, what) in checks.iter().filter(|check| !check.0) {
             font.draw_text(8, y, what, RED);
             y += 12;

@@ -22,7 +22,6 @@ extern crate psx_rt;
 
 use core::ptr::addr_of_mut;
 use psx_cdstream::drain::{self, DrainFailure, DrainState};
-use psx_fmv::iso;
 use psx_font::fonts::BASIC;
 use psx_font::FontAtlas;
 use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
@@ -380,27 +379,14 @@ fn check_watchdog(report: &mut Report, reader: &mut SectorReader) {
 
 // --------------------------------------------------------------------- main
 
-fn read_sector<'s>(
-    reader: &mut SectorReader,
-    sector: &'s mut [u32; SECTOR_WORDS],
-    lba: u32,
-) -> Option<&'s [u8]> {
-    if !reader.start_read(lba) {
-        return None;
-    }
-    let ok = reader.read_sector(sector);
-    reader.stop();
-    // SAFETY: a `[u32; N]` viewed as its own bytes; alignment only shrinks.
-    ok.then(|| unsafe { core::slice::from_raw_parts(sector.as_ptr().cast::<u8>(), 2048) })
-}
-
 fn lookup(reader: &mut SectorReader, sector: &mut [u32; SECTOR_WORDS]) -> Option<(u32, u32)> {
-    let (root, _) = iso::root_directory(read_sector(reader, sector, iso::PVD_LBA)?)?;
-    iso::find_in_directory(read_sector(reader, sector, root)?, FILE_NAME)
+    reader.find(sector, None, &[FILE_NAME])
 }
 
 #[no_mangle]
 fn main() {
+    // So step 6 can report how much of the dispatcher stack the handler used.
+    psx_rt::dispatch::paint_stack();
     let Some(peripherals) = psx_rt::Peripherals::take() else {
         return;
     };

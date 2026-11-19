@@ -40,7 +40,9 @@ target, because the guest-only code is compiled out of a host build. It needs `j
 
 Run `make fmt` before pushing and `make lint` before asking for review. Three of the rustfmt
 options are unstable, so formatting needs the pinned nightly, which `rust-toolchain.toml`
-already selects.
+already selects. A program that uses the SDK formats the same way with
+`psoxide-dev style-fmt [--check]`, run from its repository root: it passes every git-tracked `.rs`
+file to `rustfmt --edition 2021`, so the program's own `rustfmt.toml` and pinned toolchain apply.
 
 ## Project deltas (APPROVED 2026-10-22)
 

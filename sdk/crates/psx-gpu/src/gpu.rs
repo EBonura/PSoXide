@@ -5,7 +5,10 @@ use crate::display::DisplayConfig;
 use crate::material::{TextureMaterial, TextureWindow};
 use crate::prim::GpuPacket;
 use psx_hw::gpu::{gp0, gp1, DmaDirection};
-use psx_io::gpu::{wait_command_ready, write_command, write_commands, write_display_control};
+use psx_io::gpu::{
+    wait_command_ready, write_command, write_commands_when_ready, write_display_control,
+    write_display_controls,
+};
 use psx_io::periph::GpuDma;
 
 bitflags::bitflags! {
@@ -96,8 +99,11 @@ impl Gpu {
     /// Reprogram the display mode and the picture position.
     #[doc(alias = "PutDispEnv")]
     pub fn set_display(&mut self, display: DisplayConfig) {
-        write_display_control(display.mode_command());
-        write_display_window(display);
+        write_display_controls([
+            display.mode_command(),
+            display.horizontal_range_command(),
+            display.vertical_range_command(),
+        ]);
     }
 
     /// Show VRAM from `origin` (GP1(05h)): a double-buffer flip.
@@ -206,60 +212,67 @@ impl Gpu {
 
 /// [`Gpu::new`]'s port writes.
 pub(crate) fn reset(display: DisplayConfig) {
-    write_display_control(gp1::RESET);
-    write_display_control(display.mode_command());
-    write_display_window(display);
-    write_display_control(gp1::dma_direction(DmaDirection::CpuToGp0 as u32));
-    write_display_control(gp1::display_enable(true));
+    write_display_controls([
+        gp1::RESET,
+        display.mode_command(),
+        display.horizontal_range_command(),
+        display.vertical_range_command(),
+        gp1::dma_direction(DmaDirection::CpuToGp0 as u32),
+        gp1::display_enable(true),
+    ]);
 }
 
-/// GP1(06h) and GP1(07h) for `display`.
-pub(crate) fn write_display_window(display: DisplayConfig) {
-    write_display_control(display.horizontal_range_command());
-    write_display_control(display.vertical_range_command());
-}
-
+#[inline]
 pub(crate) fn set_draw_area(top_left: (u16, u16), bottom_right: (u16, u16)) {
-    wait_command_ready();
-    write_command(gp0::draw_area_top_left(
-        top_left.0 as u32,
-        top_left.1 as u32,
-    ));
-    write_command(gp0::draw_area_bottom_right(
-        bottom_right.0 as u32,
-        bottom_right.1 as u32,
-    ));
+    write_commands_when_ready(&[
+        gp0::draw_area_top_left(top_left.0 as u32, top_left.1 as u32),
+        gp0::draw_area_bottom_right(bottom_right.0 as u32, bottom_right.1 as u32),
+    ]);
 }
 
+#[inline]
 pub(crate) fn set_draw_offset(offset: (i16, i16)) {
-    wait_command_ready();
-    write_command(gp0::draw_offset(offset.0 as i32, offset.1 as i32));
+    write_commands_when_ready(&[gp0::draw_offset(offset.0 as i32, offset.1 as i32)]);
 }
 
+/// One shared body: a program with several draw-mode sites (a menu, a HUD) links the
+/// two-word packet write once instead of at every site.
+#[inline(never)]
 pub(crate) fn set_draw_mode(material: TextureMaterial) {
-    wait_command_ready();
-    write_commands(&[material.draw_mode_word(), material.texture_window_word()]);
+    write_commands_when_ready(&[material.draw_mode_word(), material.texture_window_word()]);
 }
 
 /// One ready-wait, then the packet's payload words, in order.
-#[inline(always)]
+///
+/// One copy per packet type, called from every draw site: the port write's
+/// recording and guard test (`psx_io::gpu::write_commands`) then exists once
+/// per packet type instead of once per site, and a site is a call, as it was
+/// for the ready-wait before.
+#[inline(never)]
 pub(crate) fn draw<P: GpuPacket>(packet: &P) {
     let words = core::ptr::from_ref(packet).cast::<u32>();
-    wait_command_ready();
     // SAFETY: `GpuPacket` guarantees a `repr(C)` layout of a tag word and
     // then at least `WORDS` initialised `u32`s, so words 1..=WORDS are
     // inside `packet`, which the borrow keeps alive and unchanged.
     let payload = unsafe { core::slice::from_raw_parts(words.add(1), P::WORDS as usize) };
-    write_commands(payload);
+    write_commands_when_ready(payload);
+}
+
+/// GP0(E3h), GP0(E4h) and GP0(E5h): the draw area and offset for a buffer at
+/// VRAM line `top`.
+pub(crate) const fn draw_target(top: u16, width: u16, height: u16) -> [u32; 3] {
+    [
+        gp0::draw_area_top_left(0, top as u32),
+        gp0::draw_area_bottom_right((width - 1) as u32, (top + height - 1) as u32),
+        gp0::draw_offset(0, top as i32),
+    ]
 }
 
 /// Draw area and offset for a buffer at VRAM line `top`, written without a
 /// ready-wait, as `FrameBuffer` always has: state commands between frames.
 pub(crate) fn write_draw_target(top: u16, width: u16, height: u16) {
-    write_command(gp0::draw_area_top_left(0, top as u32));
-    write_command(gp0::draw_area_bottom_right(
-        (width - 1) as u32,
-        (top + height - 1) as u32,
-    ));
-    write_command(gp0::draw_offset(0, top as i32));
+    let [top_left, bottom_right, offset] = draw_target(top, width, height);
+    write_command(top_left);
+    write_command(bottom_right);
+    write_command(offset);
 }

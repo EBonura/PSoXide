@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-//! Hand-scheduled R3000 kernels (feature `asm-kernels`).
+//! Hand-scheduled R3000 kernels, the console's implementation of the functions they name.
 //!
 //! Each kernel is differentially tested against its portable definition by the
-//! `hello-asmprobe` guest and is kept only because it measured faster on the
-//! emulator's cycle model; the portable definition stays the default.
+//! `hello-asmprobe` guest (the host runs the portable definition) and is kept only because it
+//! is smaller and faster on the emulator's cycle model.
 
 use crate::clip_lanes::{LanePlane, Lanes8};
 use core::arch::global_asm;

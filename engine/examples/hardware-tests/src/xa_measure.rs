@@ -62,9 +62,22 @@
 //!   song streamed (ms), system clocks per HBlank line over the run, in
 //!   hundredths, less 2000 (21723 means 2172.23; the line is 3413 video clocks
 //!   at 11/7 of the system clock, 2171.9, if the video clock is locked to it).
+//!
+//! The clock case is not a measurement on a console in v2.18 and before: `0x32C` reads the clamp floor `0x8000` at all
+//! three marks on every console run (the signed 16-bit field holds only 32.768 s of difference), and the loop made 185 to
+//! 268 polls where 360 are expected. v2.20 adds nine records that cannot clamp, `0x330` to `0x338`, the raw
+//! readings the deviation was made from (`xa_clock_raw_*`; the existing records are unchanged):
+//! 0x330-0x332 (`xa_clock_raw_head_60s`, `_120s`, `_180s`): the head's position in the song at the mark,
+//!   `Player::elapsed_millis` in ms, low 16 bits, high 16 bits, polls made when it was read;
+//! 0x333-0x335 (`xa_clock_raw_clock_60s`, ...): the system clock's time since the song started at the mark (ms,
+//!   read at the top of the pass that made the poll, so before the poll), low, high, and the head's position when the clock started;
+//! 0x336 (`xa_clock_raw_poll_cost_x10_ms`): what one `Player::poll` call took, tenths of a millisecond, minimum, median, maximum;
+//! 0x337 (`xa_clock_raw_poll_counts`): polls made, polls over 100 ms, polls over 1 s;
+//! 0x338 (`xa_clock_raw_elapsed`): the loop's time (ms) low and high, its passes in units of 4,096.
+//! A field a mark was not reached for reads `0xFFFF`.
 
 use crate::bounds;
-use crate::console_tests::{bit, record, spread, XA_MEASURE_COUNT, XA_MEASURE_RECORD};
+use crate::console_tests::{bit, record, spread, XA_MEASURE_COUNT, XA_MEASURE_RECORD, XA_RAW_COUNT, XA_RAW_RECORD};
 use crate::xa_loop::{find_file, Clock, FILE_NUMBER};
 use crate::{spu_dma_read, ui, TimingRecord};
 use core::ptr::addr_of_mut;
@@ -392,7 +405,7 @@ impl Progress<'_> {
 
 /// Everything the case measures.
 #[inline(never)]
-pub(crate) fn run(font: &FontAtlas) -> [TimingRecord; XA_MEASURE_COUNT] {
+pub(crate) fn run(font: &FontAtlas) -> [TimingRecord; XA_MEASURE_COUNT + XA_RAW_COUNT] {
     // SAFETY: plain SPU register reads; restored below.
     let (spucnt, cd_left, cd_right) = unsafe {
         (
@@ -647,6 +660,21 @@ pub(crate) fn run(font: &FontAtlas) -> [TimingRecord; XA_MEASURE_COUNT] {
             drift.longest_stall,
             drift.line_clocks,
         ),
+        // The raw clock case, fields that cannot clamp (v2.20): see the header.
+        record(XA_RAW_RECORD, drift.head_ms[0] & 0xFFFF, drift.head_ms[0] >> 16, drift.polls_at_mark[0]),
+        record(XA_RAW_RECORD + 1, drift.head_ms[1] & 0xFFFF, drift.head_ms[1] >> 16, drift.polls_at_mark[1]),
+        record(XA_RAW_RECORD + 2, drift.head_ms[2] & 0xFFFF, drift.head_ms[2] >> 16, drift.polls_at_mark[2]),
+        record(XA_RAW_RECORD + 3, drift.clock_ms[0] & 0xFFFF, drift.clock_ms[0] >> 16, drift.head0_ms),
+        record(XA_RAW_RECORD + 4, drift.clock_ms[1] & 0xFFFF, drift.clock_ms[1] >> 16, drift.head0_ms),
+        record(XA_RAW_RECORD + 5, drift.clock_ms[2] & 0xFFFF, drift.clock_ms[2] >> 16, drift.head0_ms),
+        record(XA_RAW_RECORD + 6, drift.poll_cost.0, drift.poll_cost.1, drift.poll_cost.2),
+        record(XA_RAW_RECORD + 7, drift.polls, drift.polls_over_100ms, drift.polls_over_1s),
+        record(
+            XA_RAW_RECORD + 8,
+            drift.elapsed_ms & 0xFFFF,
+            drift.elapsed_ms >> 16,
+            drift.passes >> 12,
+        ),
     ]
 }
 
@@ -661,7 +689,25 @@ struct Drift {
     distinct: u32,
     longest_stall: u32,
     line_clocks: u32,
+    /// The head's position in the song (ms, `Player::elapsed_millis`) at each mark, unclamped.
+    head_ms: [u32; 3],
+    /// The system clock's time since the song started (ms) at each mark, unclamped.
+    clock_ms: [u32; 3],
+    /// Polls made when each mark was read.
+    polls_at_mark: [u32; 3],
+    /// The head's position when the clock started.
+    head0_ms: u32,
+    /// What one `Player::poll` call took, tenths of a millisecond: minimum, median, maximum.
+    poll_cost: (u32, u32, u32),
+    polls_over_100ms: u32,
+    polls_over_1s: u32,
+    /// Time the loop ran (ms), and its passes.
+    elapsed_ms: u32,
+    passes: u32,
 }
+
+/// Ticks `Player::poll` took on each call of the clock case, in order.
+static mut POLL_TICKS_LOG: [u32; 512] = [0; 512];
 
 impl Drift {
     const fn new() -> Self {
@@ -675,6 +721,15 @@ impl Drift {
             distinct: 0,
             longest_stall: 0,
             line_clocks: 0,
+            head_ms: [0xFFFF; 3],
+            clock_ms: [0xFFFF; 3],
+            polls_at_mark: [0xFFFF; 3],
+            head0_ms: 0xFFFF,
+            poll_cost: (0xFFFF, 0xFFFF, 0xFFFF),
+            polls_over_100ms: 0,
+            polls_over_1s: 0,
+            elapsed_ms: 0,
+            passes: 0,
         }
     }
 }
@@ -708,6 +763,7 @@ fn drift_run(clock: &mut Watch, progress: &mut Progress<'_>, file: File) -> Drif
     let start = clock.ticks();
     let lines_start = clock.last_lines;
     let head0 = p.elapsed_millis();
+    drift.head0_ms = head0;
     let mut head = head0;
     let mut head_changed = start;
     let mut next_poll = POLL_TICKS;
@@ -717,12 +773,27 @@ fn drift_run(clock: &mut Watch, progress: &mut Progress<'_>, file: File) -> Drif
     let mut elapsed = 0;
     // Bounded by iterations; a pass is a few dozen system clocks.
     for _ in 0..bounds::scale(DRIFT_ITERATIONS) {
+        drift.passes += 1;
         elapsed = clock.ticks().wrapping_sub(start);
         let due_mark = next_mark < DRIFT_MARKS.len()
             && elapsed >= DRIFT_MARKS[next_mark] * SYS_TICKS_PER_SECOND;
         if elapsed >= next_poll || due_mark {
             next_poll = elapsed + POLL_TICKS;
+            let before = clock.ticks();
             p.poll();
+            let took = clock.ticks().wrapping_sub(before);
+            // SAFETY: single thread; the log is only touched here and below.
+            unsafe {
+                if (drift.polls as usize) < 512 {
+                    addr_of_mut!(POLL_TICKS_LOG).cast::<u32>().add(drift.polls as usize).write(took);
+                }
+            }
+            if took > SYS_TICKS_PER_SECOND / 10 {
+                drift.polls_over_100ms += 1;
+            }
+            if took > SYS_TICKS_PER_SECOND {
+                drift.polls_over_1s += 1;
+            }
             drift.polls += 1;
             let reading = p.elapsed_millis();
             if reading != head {
@@ -735,6 +806,9 @@ fn drift_run(clock: &mut Watch, progress: &mut Progress<'_>, file: File) -> Drif
             if due_mark {
                 let progress_ms = reading as i32 - head0 as i32;
                 drift.deviation[next_mark] = signed(progress_ms - sys_ms(elapsed) as i32);
+                drift.head_ms[next_mark] = reading;
+                drift.clock_ms[next_mark] = sys_ms(elapsed);
+                drift.polls_at_mark[next_mark] = drift.polls;
                 next_mark += 1;
             }
         }
@@ -751,6 +825,16 @@ fn drift_run(clock: &mut Watch, progress: &mut Progress<'_>, file: File) -> Drif
             drift.completed = next_mark == DRIFT_MARKS.len();
             break;
         }
+    }
+    drift.elapsed_ms = sys_ms(elapsed);
+    let logged = (drift.polls as usize).min(512);
+    if logged > 0 {
+        // SAFETY: single thread; read after the loop.
+        let log = unsafe { core::slice::from_raw_parts_mut(addr_of_mut!(POLL_TICKS_LOG).cast::<u32>(), logged) };
+        for ticks in log.iter_mut() {
+            *ticks = sys_ms10(*ticks);
+        }
+        drift.poll_cost = spread(log);
     }
     // System clocks per HBlank line over the run, in hundredths, less 2000.
     let lines = clock.last_lines.wrapping_sub(lines_start);

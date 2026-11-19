@@ -34,8 +34,10 @@
 //!   address alignment.
 //! - **Doesn't own (yet)**: ADPCM encoder (ship pre-baked samples
 //!   instead -- see `vendor/tone_*.adpcm`, or cook `.psau` with
-//!   `psxed audio-pack`), reverb preset tables, DMA-based sample
-//!   upload. Those land as the ladder pulls them in.
+//!   `psxed audio-pack`), reverb presets beyond [`ReverbPreset::HALL`].
+//!   Those land as the ladder pulls them in.
+//! - **Reverb**: [`ReverbPreset`], [`ReverbArea`], [`ReverbInput`],
+//!   [`Spu::start_reverb`], [`stop_reverb`] and [`set_reverb_depth`].
 //!
 //! ## Q-format conventions
 //!
@@ -56,11 +58,14 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
+#[cfg(test)]
+extern crate std;
+
 use psx_hw::spu::{
     control as spucnt_bits, mask as voice_mask, status as spustat_bits, voice, CD_VOL_LEFT,
-    CD_VOL_RIGHT, IRQ_ADDR, MAIN_VOL_LEFT, MAIN_VOL_RIGHT, REVERB_VOL_LEFT, REVERB_VOL_RIGHT,
-    REVERB_WORK_BASE, SPUCNT, SPUSTAT, TRANSFER_ADDR, TRANSFER_CTRL, TRANSFER_CTRL_NORMAL,
-    TRANSFER_DATA,
+    CD_VOL_RIGHT, IRQ_ADDR, MAIN_VOL_LEFT, MAIN_VOL_RIGHT, REVERB_COEFFICIENTS, REVERB_VOL_LEFT,
+    REVERB_VOL_RIGHT, REVERB_WORK_BASE, SPUCNT, SPUSTAT, TRANSFER_ADDR, TRANSFER_CTRL,
+    TRANSFER_CTRL_NORMAL, TRANSFER_DATA,
 };
 use psx_io::periph::SpuDma;
 
@@ -74,6 +79,7 @@ use psx_io::periph::SpuDma;
 /// higher-width accesses -- the lower half is what matters). We go
 /// through a volatile pointer so the compiler can't reorder writes
 /// across register boundaries.
+#[cfg(not(test))]
 #[inline]
 fn write_reg16(addr: u32, value: u16) {
     // SAFETY: SPU registers live in the hardware-MMIO window
@@ -87,10 +93,22 @@ fn write_reg16(addr: u32, value: u16) {
 }
 
 /// Raw MMIO read of a 16-bit SPU register.
+#[cfg(not(test))]
 #[inline]
 fn read_reg16(addr: u32) -> u16 {
     // SAFETY: same MMIO contract as `write_reg16`.
     unsafe { core::ptr::read_volatile(addr as *const u16) }
+}
+
+// Host tests run against a register file instead of the MMIO window.
+#[cfg(test)]
+fn write_reg16(addr: u32, value: u16) {
+    mock::write(addr, value);
+}
+
+#[cfg(test)]
+fn read_reg16(addr: u32) -> u16 {
+    mock::read(addr)
 }
 
 // ======================================================================
@@ -861,6 +879,229 @@ pub fn enable_cd_audio(enabled: bool) {
 }
 
 // ======================================================================
+// Reverb
+// ======================================================================
+
+/// One reverb configuration: the 32 coefficient registers and the size of the
+/// work area they address.
+///
+/// `registers` follow the hardware order, written to `REVERB_COEFFICIENTS + 2 * i` (psx-hw):
+/// dAPF1, dAPF2, vIIR, vCOMB1..4, vWALL, vAPF1, vAPF2, mLSAME, mRSAME,
+/// mLCOMB1, mRCOMB1, mLCOMB2, mRCOMB2, dLSAME, dRSAME, mLDIFF, mRDIFF,
+/// mLCOMB3, mRCOMB3, mLCOMB4, mRCOMB4, dLDIFF, dRDIFF, mLAPF1, mRAPF1,
+/// mLAPF2, mRAPF2, vLIN, vRIN. The `m*` and `d*` values are offsets into the
+/// work area in 8-byte units, so a preset is only valid with a
+/// [`ReverbArea`] of at least `work_bytes`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ReverbPreset {
+    /// The coefficient registers, in register order.
+    pub registers: [u16; 32],
+    /// Bytes of sound RAM the preset's offsets reach, from the area base.
+    pub work_bytes: u32,
+}
+
+impl ReverbPreset {
+    /// A preset from its registers and work-area size.
+    #[must_use]
+    pub const fn new(registers: [u16; 32], work_bytes: u32) -> Self {
+        Self {
+            registers,
+            work_bytes,
+        }
+    }
+
+    /// The standard Hall preset (PSX-SPX's reverb examples).
+    pub const HALL: Self = Self::new(
+        [
+            0x01a5, 0x0139, 0x6000, 0x5000, 0x4c00, 0xb800, 0xbc00, 0xc000, 0x6000, 0x5c00, 0x15ba,
+            0x11bb, 0x14c2, 0x10bd, 0x11bc, 0x0dc1, 0x11c0, 0x0dc3, 0x0dc0, 0x09c1, 0x0bc4, 0x07c1,
+            0x0a00, 0x06cd, 0x09c2, 0x05c1, 0x05c0, 0x041a, 0x0274, 0x013a, 0x8000, 0x8000,
+        ],
+        0xade0,
+    );
+}
+
+/// Where the reverb work area sits in sound RAM: from `base` up to
+/// `base + bytes`. Everything in the range belongs to the reverb engine while
+/// it runs, so nothing else may be uploaded there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReverbArea {
+    base: u32,
+    bytes: u32,
+}
+
+/// Size of sound RAM in bytes.
+const SPU_RAM_BYTES: u32 = 0x8_0000;
+
+impl ReverbArea {
+    /// An area of `bytes` starting at the byte address `base`.
+    ///
+    /// # Panics
+    /// If `base` or `bytes` is not a multiple of 8, or the area does not fit
+    /// in sound RAM.
+    #[must_use]
+    pub const fn new(base: u32, bytes: u32) -> Self {
+        assert!(
+            base.is_multiple_of(8) && bytes.is_multiple_of(8),
+            "reverb area must be 8-byte aligned"
+        );
+        assert!(
+            base <= SPU_RAM_BYTES && bytes <= SPU_RAM_BYTES - base,
+            "reverb area must fit in sound RAM"
+        );
+        Self { base, bytes }
+    }
+
+    /// The last `bytes` of sound RAM.
+    ///
+    /// # Panics
+    /// As [`ReverbArea::new`].
+    #[must_use]
+    pub const fn top_of_ram(bytes: u32) -> Self {
+        assert!(bytes <= SPU_RAM_BYTES, "reverb area must fit in sound RAM");
+        Self::new(SPU_RAM_BYTES - bytes, bytes)
+    }
+
+    /// First byte address of the area.
+    #[must_use]
+    pub const fn base(self) -> u32 {
+        self.base
+    }
+
+    /// Byte address just past the area.
+    #[must_use]
+    pub const fn end(self) -> u32 {
+        self.base + self.bytes
+    }
+}
+
+/// Which sources feed the reverb.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ReverbInput {
+    /// One bit per voice (bits 0..=23) sent through the reverb.
+    pub voices: u32,
+    /// Also send the CD audio input through the reverb.
+    pub cd_audio: bool,
+}
+
+impl ReverbInput {
+    /// The voices in `voices` (bits 0..=23) and, if `cd_audio`, the CD audio input.
+    #[must_use]
+    pub const fn new(voices: u32, cd_audio: bool) -> Self {
+        Self { voices, cd_audio }
+    }
+
+    /// Every voice, no CD audio.
+    pub const ALL_VOICES: Self = Self {
+        voices: 0x00ff_ffff,
+        cd_audio: false,
+    };
+    /// Every voice and the CD audio input.
+    pub const ALL_VOICES_AND_CD: Self = Self {
+        voices: 0x00ff_ffff,
+        cd_audio: true,
+    };
+}
+
+/// SPUCNT bits [`stop_reverb`] clears and [`Spu::start_reverb`] sets.
+const REVERB_CONTROL_BITS: u16 = spucnt_bits::REVERB_MASTER | spucnt_bits::CD_AUDIO_REVERB;
+
+/// Words sent per piece when clearing a work area: 128 bytes, two of the 16-word blocks the FIFO takes.
+/// On the emulator (three presets, two areas) this clears in 171 and 251 HBlanks; a 16-word piece takes
+/// 177 and 258, because each piece pays the channel's start and wait, and costs only 64 bytes less stack.
+const REVERB_CLEAR_WORDS: usize = 32;
+
+impl Spu {
+    /// Start the reverb: stop it, zero the work area, load the preset, route
+    /// the input, turn the master bit on, wait for the SPU to apply it, then
+    /// set the wet `depth`.
+    ///
+    /// `depth` is written as is to both reverb output volume registers: a
+    /// signed 16-bit level, `0x3FFF` the loudest in range, negative values
+    /// invert phase. Change it later with [`set_reverb_depth`].
+    ///
+    /// The work area is cleared by DMA in 128-byte pieces sent from a block of
+    /// zeros on the caller's stack (128 bytes for the length of the call, none
+    /// in the image), so this is a load-time call, not a per-frame one.
+    ///
+    /// # Panics
+    /// If `area` is smaller than `preset.work_bytes`.
+    #[doc(alias = "SpuSetReverb")]
+    pub fn start_reverb(
+        &mut self,
+        area: ReverbArea,
+        preset: &ReverbPreset,
+        input: ReverbInput,
+        depth: i16,
+    ) {
+        assert!(
+            area.bytes >= preset.work_bytes,
+            "start_reverb: area smaller than the preset's work area"
+        );
+        stop_reverb();
+        clear_reverb_area(&mut self.0, area);
+        write_reg16(REVERB_WORK_BASE, (area.base / 8) as u16);
+        // A loop, kept a loop: the opaque count stops the compiler unrolling 32 stores.
+        let mut register = REVERB_COEFFICIENTS;
+        for &value in preset.registers.iter().take(core::hint::black_box(32)) {
+            write_reg16(register, value);
+            register += 2;
+        }
+        write_reg16(voice_mask::REVERB_ENABLE_LO, input.voices as u16);
+        write_reg16(
+            voice_mask::REVERB_ENABLE_HI,
+            ((input.voices >> 16) & 0xff) as u16,
+        );
+        let bits = if input.cd_audio {
+            REVERB_CONTROL_BITS
+        } else {
+            spucnt_bits::REVERB_MASTER
+        };
+        let control = read_reg16(SPUCNT) | bits;
+        write_reg16(SPUCNT, control);
+        wait_spu_status(control);
+        set_reverb_depth(depth);
+    }
+}
+
+/// Stop the reverb: output volumes to zero, no voice routed in, SPUCNT's
+/// reverb master and CD-reverb bits cleared. The work area keeps its base, so
+/// a bank may only be uploaded over it after the next
+/// [`Spu::start_reverb`] has moved or parked it.
+pub fn stop_reverb() {
+    set_reverb_depth(0);
+    write_reg16(voice_mask::REVERB_ENABLE_LO, 0);
+    write_reg16(voice_mask::REVERB_ENABLE_HI, 0);
+    let control = read_reg16(SPUCNT);
+    write_reg16(SPUCNT, control & !REVERB_CONTROL_BITS);
+}
+
+/// Set both reverb output volumes (the wet depth).
+///
+/// `depth` is a signed 16-bit register value written as is: `0x3FFF` is the
+/// loudest in range, 0 silences the output, negative values invert phase.
+/// There is no clamping, so a caller stepping the value must keep it in range
+/// itself.
+pub fn set_reverb_depth(depth: i16) {
+    write_reg16(REVERB_VOL_LEFT, depth as u16);
+    write_reg16(REVERB_VOL_RIGHT, depth as u16);
+}
+
+// Zero `area` in one DMA session. The zeros are a block on the stack, not a
+// static: it lives only for the call, so the reverb costs a game no RAM of its own.
+fn clear_reverb_area(dma: &mut SpuDma, area: ReverbArea) {
+    let zeros = [0u32; REVERB_CLEAR_WORDS];
+    dma_write(
+        dma,
+        SpuAddr::new(area.base),
+        core::hint::black_box(&zeros),
+        area.bytes / 4,
+    );
+}
+
+// ======================================================================
 // ADPCM upload (PIO path)
 // ======================================================================
 
@@ -912,10 +1153,24 @@ fn upload_adpcm_dma(dma: &mut SpuDma, dest: SpuAddr, bytes: &[u8]) -> bool {
         return false;
     }
     let words = (bytes.len() / 4) as u32;
-    // Largest block size (in words) that divides the count; the SPU transfer
-    // FIFO is 16 words, so cap there. ADPCM is whole 16-byte (4-word) blocks,
-    // so 4 always divides.
-    let block_size = if words.is_multiple_of(16) {
+    let block_size = dma_block_size(words);
+    if words / block_size > 0xffff {
+        return false; // larger than one block-sync transfer can describe
+    }
+
+    // SAFETY: `bytes` is word-aligned and a whole number of words (checked
+    // above), so it is exactly `words` initialised `u32`s.
+    let source =
+        unsafe { core::slice::from_raw_parts(bytes.as_ptr().cast::<u32>(), words as usize) };
+    dma_write(dma, dest, source, words);
+    true
+}
+
+/// Largest block size (in words) that divides `words`; the SPU transfer FIFO
+/// is 16 words, so cap there. ADPCM is whole 16-byte (4-word) blocks, so 4
+/// always divides.
+fn dma_block_size(words: u32) -> u32 {
+    if words.is_multiple_of(16) {
         16
     } else if words.is_multiple_of(8) {
         8
@@ -925,12 +1180,46 @@ fn upload_adpcm_dma(dma: &mut SpuDma, dest: SpuAddr, bytes: &[u8]) -> bool {
         2
     } else {
         1
-    };
-    let block_count = words / block_size;
-    if block_count > 0xffff {
-        return false; // larger than one block-sync transfer can describe
     }
+}
 
+// A DMA transfer session is the three steps below: `begin_dma_write`, any
+// number of `send_dma_words` (the SPU's transfer address advances by itself
+// from one to the next), `end_dma_write`. `dma_write` is the one place that
+// runs them, for whole uploads and the reverb clear alike, so the code exists
+// once in the image.
+
+/// Write `total_words` words to sound RAM at `dest` in one session, sending
+/// `source` over and over (once, for an upload; many times, for a fill) and a
+/// shorter piece last when `source` does not divide `total_words`.
+/// `total_words` must be a multiple of 2 and `source` must not be empty.
+#[inline(never)]
+fn dma_write(dma: &mut SpuDma, dest: SpuAddr, source: &[u32], total_words: u32) {
+    let spucnt = begin_dma_write(dest);
+    enable_dma_channel();
+    // A piece is `source`, or what is left of it at the end. The block size and count
+    // are worked out when the piece's length changes, not for every piece: the division
+    // is the slowest thing in a send, and a fill sends hundreds of pieces.
+    let piece = source.len() as u32;
+    let mut left = total_words;
+    let mut words = 0;
+    let (mut block, mut count) = (0, 0);
+    while left > 0 {
+        let now = left.min(piece);
+        if now != words {
+            words = now;
+            block = dma_block_size(words);
+            count = words / block;
+        }
+        send_dma_words(dma, &source[..words as usize], block, count);
+        left -= words;
+    }
+    end_dma_write(spucnt);
+}
+
+/// Start a DMA write session at `dest`. Returns the SPUCNT value (transfer
+/// mode Stop) that [`end_dma_write`] restores.
+fn begin_dma_write(dest: SpuAddr) -> u16 {
     // Stop any in-flight transfer, and WAIT for the SPU to really be
     // stopped before touching anything else. Going through Stop is what
     // makes the wait below meaningful: SPUSTAT only tells us the mode
@@ -948,20 +1237,37 @@ fn upload_adpcm_dma(dma: &mut SpuDma, dest: SpuAddr, bytes: &[u8]) -> bool {
     // a 32-byte table arrived not at all.
     write_reg16(SPUCNT, spucnt | spucnt_bits::TRANSFER_DMA_WRITE);
     wait_spu_status(spucnt | spucnt_bits::TRANSFER_DMA_WRITE);
+    spucnt
+}
 
-    // Channel 4: main RAM -> SPU, block-sync, forward, start; block until done.
-    // SAFETY: `bytes` is word-aligned and a whole number of words (checked
-    // above), so it is exactly `words` initialised `u32`s.
-    let source =
-        unsafe { core::slice::from_raw_parts(bytes.as_ptr().cast::<u32>(), words as usize) };
-    let _ = dma.write_blocks(source, block_size as u16);
-    // The channel is done handing bytes over; the SPU is still writing
-    // them into sound RAM.
+/// The SPU's DMA channel on, once for the session, not for every piece.
+#[cfg(not(test))]
+fn enable_dma_channel() {
+    psx_io::dma::enable_channel(psx_io::dma::Channel::Spu);
+}
+
+#[cfg(test)]
+fn enable_dma_channel() {}
+
+/// Send `source` to the open session: channel 4, main RAM -> SPU, block-sync,
+/// forward, start; blocks until the channel is done. `block_size` (words) must
+/// divide `source.len()` and be at most 16.
+#[cfg(not(test))]
+fn send_dma_words(dma: &mut SpuDma, source: &[u32], block_size: u32, blocks: u32) {
+    let _ = dma.write_counted(source, block_size as u16, blocks as u16);
+}
+
+#[cfg(test)]
+fn send_dma_words(_dma: &mut SpuDma, source: &[u32], block_size: u32, _blocks: u32) {
+    mock::dma(source.len() as u32, block_size);
+}
+
+/// Finish a session: the channel is done handing bytes over but the SPU is
+/// still writing them into sound RAM, so wait for it, then return to Stop
+/// transfer mode (`spucnt` from [`begin_dma_write`]).
+fn end_dma_write(spucnt: u16) {
     wait_transfer_idle();
-
-    // Return to Stop transfer-mode.
     write_reg16(SPUCNT, spucnt);
-    true
 }
 
 /// PIO upload (manual FIFO writes) -- small or non-word-aligned uploads. Sets
@@ -1008,6 +1314,74 @@ fn upload_adpcm_pio(dest: SpuAddr, bytes: &[u8]) {
 // ======================================================================
 // Tests
 // ======================================================================
+
+/// A register file and write log standing in for the SPU on the host.
+#[cfg(test)]
+mod mock {
+    use std::cell::RefCell;
+    use std::vec::Vec;
+
+    /// What the code under test did to the SPU, in order.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Event {
+        /// A 16-bit register write.
+        Write(u32, u16),
+        /// A DMA channel 4 transfer of `(words, block size in words)`.
+        Dma(u32, u32),
+    }
+
+    struct Spu {
+        regs: [u16; 0x200],
+        log: Vec<Event>,
+    }
+
+    std::thread_local! {
+        static SPU: RefCell<Spu> = const { RefCell::new(Spu { regs: [0; 0x200], log: Vec::new() }) };
+    }
+
+    fn slot(addr: u32) -> usize {
+        ((addr - psx_hw::spu::BASE) / 2) as usize
+    }
+
+    pub fn write(addr: u32, value: u16) {
+        SPU.with_borrow_mut(|s| {
+            s.regs[slot(addr)] = value;
+            s.log.push(Event::Write(addr, value));
+        });
+    }
+
+    pub fn read(addr: u32) -> u16 {
+        SPU.with_borrow(|s| {
+            if addr == psx_hw::spu::SPUSTAT {
+                // The applied mode follows SPUCNT at once.
+                s.regs[slot(psx_hw::spu::SPUCNT)] & psx_hw::spu::status::MODE_MASK
+            } else {
+                s.regs[slot(addr)]
+            }
+        })
+    }
+
+    pub fn dma(words: u32, block_size: u32) {
+        SPU.with_borrow_mut(|s| s.log.push(Event::Dma(words, block_size)));
+    }
+
+    /// Reset the registers to `spucnt` and empty the log.
+    pub fn reset(spucnt: u16) {
+        SPU.with_borrow_mut(|s| {
+            s.regs = [0; 0x200];
+            s.log.clear();
+            s.regs[slot(psx_hw::spu::SPUCNT)] = spucnt;
+        });
+    }
+
+    pub fn take_log() -> Vec<Event> {
+        SPU.with_borrow_mut(|s| core::mem::take(&mut s.log))
+    }
+
+    pub fn reg(addr: u32) -> u16 {
+        SPU.with_borrow(|s| s.regs[slot(addr)])
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -1131,5 +1505,182 @@ mod tests {
     #[should_panic = "index must be < 24"]
     fn voice_new_rejects_out_of_range() {
         let _ = Voice::new(24);
+    }
+
+    fn test_spu() -> Spu {
+        // SAFETY: a test-local token on the host; the mock has no DMA.
+        Spu(unsafe { SpuDma::steal() })
+    }
+
+    fn writes(log: &[mock::Event]) -> std::vec::Vec<(u32, u16)> {
+        log.iter()
+            .filter_map(|e| match *e {
+                mock::Event::Write(a, v) => Some((a, v)),
+                mock::Event::Dma(..) => None,
+            })
+            .collect()
+    }
+
+    /// The sequence WipEout's hand-written Hall setup produced, plus the
+    /// stop writes both games share, then Half-Life's order of depth last.
+    #[test]
+    fn hall_with_cd_writes_the_expected_sequence() {
+        use mock::Event::{Dma, Write};
+        mock::reset(0xc000);
+        let area = ReverbArea::top_of_ram(ReverbPreset::HALL.work_bytes);
+        test_spu().start_reverb(
+            area,
+            &ReverbPreset::HALL,
+            ReverbInput::ALL_VOICES_AND_CD,
+            2000,
+        );
+        let mut want = std::vec![
+            Write(REVERB_VOL_LEFT, 0),
+            Write(REVERB_VOL_RIGHT, 0),
+            Write(voice_mask::REVERB_ENABLE_LO, 0),
+            Write(voice_mask::REVERB_ENABLE_HI, 0),
+            Write(SPUCNT, 0xc000),
+            // One DMA session: stop, normal transfer type, address once,
+            // DMA-write mode once.
+            Write(SPUCNT, 0xc000),
+            Write(TRANSFER_CTRL, 0x0004),
+            Write(TRANSFER_ADDR, 0xea44),
+            Write(SPUCNT, 0xc020),
+        ];
+        // 11,128 words: 347 pieces of 32 (block 16) and a last one of 24 (block 8).
+        want.extend((0..347).map(|_| Dma(32, 16)));
+        want.push(Dma(24, 8));
+        want.extend([Write(SPUCNT, 0xc000), Write(REVERB_WORK_BASE, 0xea44)]);
+        for (i, &v) in ReverbPreset::HALL.registers.iter().enumerate() {
+            want.push(Write(REVERB_COEFFICIENTS + 2 * i as u32, v));
+        }
+        want.extend([
+            Write(voice_mask::REVERB_ENABLE_LO, 0xffff),
+            Write(voice_mask::REVERB_ENABLE_HI, 0x00ff),
+            Write(SPUCNT, 0xc084),
+            Write(REVERB_VOL_LEFT, 2000),
+            Write(REVERB_VOL_RIGHT, 2000),
+        ]);
+        assert_eq!(mock::take_log(), want);
+    }
+
+    #[test]
+    fn a_runtime_preset_without_cd_sets_only_the_master_bit() {
+        mock::reset(0xc001);
+        let mut regs = [0u16; 32];
+        regs[10] = 0x1234;
+        let preset = ReverbPreset::new(regs, 0x4000);
+        let area = ReverbArea::new(0x7_c000, 0x4000);
+        test_spu().start_reverb(area, &preset, ReverbInput::ALL_VOICES, 11_264);
+        let log = writes(&mock::take_log());
+        assert!(log.contains(&(REVERB_WORK_BASE, 0xf800)));
+        assert!(log.contains(&(REVERB_COEFFICIENTS + 20, 0x1234)));
+        // CD audio input (bit 0) is left as it was, bit 2 stays clear.
+        assert_eq!(mock::reg(SPUCNT), 0xc081);
+        assert_eq!(mock::reg(REVERB_VOL_LEFT), 11_264);
+        assert_eq!(mock::reg(REVERB_VOL_RIGHT), 11_264);
+        // The depth is the last thing written.
+        assert_eq!(
+            log[log.len() - 2..],
+            [(REVERB_VOL_LEFT, 11_264), (REVERB_VOL_RIGHT, 11_264)]
+        );
+    }
+
+    #[test]
+    fn stop_silences_unroutes_and_clears_the_master_bits() {
+        mock::reset(0xc084);
+        mock::write(voice_mask::REVERB_ENABLE_LO, 0xffff);
+        mock::write(voice_mask::REVERB_ENABLE_HI, 0x00ff);
+        mock::write(REVERB_VOL_LEFT, 2000);
+        mock::write(REVERB_VOL_RIGHT, 2000);
+        let _ = mock::take_log();
+        stop_reverb();
+        assert_eq!(
+            mock::take_log(),
+            std::vec![
+                mock::Event::Write(REVERB_VOL_LEFT, 0),
+                mock::Event::Write(REVERB_VOL_RIGHT, 0),
+                mock::Event::Write(voice_mask::REVERB_ENABLE_LO, 0),
+                mock::Event::Write(voice_mask::REVERB_ENABLE_HI, 0),
+                mock::Event::Write(SPUCNT, 0xc000),
+            ]
+        );
+    }
+
+    #[test]
+    fn depth_is_written_as_is_to_both_registers() {
+        mock::reset(0);
+        for depth in [0i16, 2000, 0x3fff, i16::MAX, -2000, i16::MIN] {
+            set_reverb_depth(depth);
+            assert_eq!(mock::reg(REVERB_VOL_LEFT), depth as u16);
+            assert_eq!(mock::reg(REVERB_VOL_RIGHT), depth as u16);
+        }
+    }
+
+    #[test]
+    fn partial_voice_masks_split_across_the_two_enable_registers() {
+        mock::reset(0);
+        let input = ReverbInput {
+            voices: 0x0012_8001,
+            cd_audio: false,
+        };
+        let preset = ReverbPreset::new([0; 32], 0x1000);
+        test_spu().start_reverb(ReverbArea::top_of_ram(0x1000), &preset, input, 0);
+        assert_eq!(mock::reg(voice_mask::REVERB_ENABLE_LO), 0x8001);
+        assert_eq!(mock::reg(voice_mask::REVERB_ENABLE_HI), 0x0012);
+    }
+
+    #[test]
+    fn area_helpers() {
+        let a = ReverbArea::top_of_ram(0xade0);
+        assert_eq!((a.base(), a.end()), (0x7_5220, 0x8_0000));
+        assert_eq!(ReverbArea::new(0x1010 + 0x8, 0x10).end(), 0x1028);
+    }
+
+    #[test]
+    #[should_panic = "8-byte aligned"]
+    fn area_rejects_misalignment() {
+        let _ = ReverbArea::new(0x7_5224, 0x100);
+    }
+
+    #[test]
+    #[should_panic = "fit in sound RAM"]
+    fn area_rejects_overflow() {
+        let _ = ReverbArea::new(0x7_f000, 0x2000);
+    }
+
+    #[test]
+    #[should_panic = "smaller than the preset"]
+    fn start_rejects_a_too_small_area() {
+        mock::reset(0);
+        test_spu().start_reverb(
+            ReverbArea::top_of_ram(0x1000),
+            &ReverbPreset::HALL,
+            ReverbInput::ALL_VOICES,
+            0,
+        );
+    }
+
+    /// The ordinary upload and the reverb clear are the same session: one
+    /// stop, one address, one mode switch, then the transfers.
+    #[test]
+    fn an_upload_is_one_dma_session() {
+        use mock::Event::{Dma, Write};
+        mock::reset(0xc000);
+        let data = [0u32; 8];
+        // SAFETY: viewing eight words as thirty-two bytes.
+        let bytes = unsafe { core::slice::from_raw_parts(data.as_ptr().cast::<u8>(), 32) };
+        test_spu().upload_adpcm(SpuAddr::new(0x1010), bytes);
+        assert_eq!(
+            mock::take_log(),
+            std::vec![
+                Write(SPUCNT, 0xc000),
+                Write(TRANSFER_CTRL, 0x0004),
+                Write(TRANSFER_ADDR, 0x0202),
+                Write(SPUCNT, 0xc020),
+                Dma(8, 8),
+                Write(SPUCNT, 0xc000),
+            ]
+        );
     }
 }

@@ -50,9 +50,11 @@ impl Chunk {
         if sector.len() < CHUNK_HEADER_BYTES {
             return None;
         }
-        let h = |i: usize| u16::from_le_bytes([sector[i], sector[i + 1]]);
-        let w =
-            |i: usize| u32::from_le_bytes([sector[i], sector[i + 1], sector[i + 2], sector[i + 3]]);
+        // SAFETY: every field read below ends before byte 22 and the guard above ensures
+        // `CHUNK_HEADER_BYTES` (32) bytes.
+        let h = |i: usize| unsafe { psx_math::le::read_u16_unchecked(sector, i) };
+        // SAFETY: as above.
+        let w = |i: usize| unsafe { psx_math::le::read_u32_unchecked(sector, i) };
         if h(0) != 0x0160 || h(2) != 0x8001 {
             return None;
         }

@@ -11,6 +11,33 @@ use psx_hw::{cop0, dma, gpu, gte, memory};
 #[cfg(target_arch = "mips")]
 use psx_io::irq;
 
+/// What the exception handler and the dispatcher share, in one place so the handler reaches
+/// it with one `lui`. Zero `registered` (a program that registers nothing) means the handler
+/// never leaves for the dispatcher.
+#[repr(C, align(16))]
+pub(crate) struct IrqCell {
+    /// The sources the dispatcher is to serve: `I_STAT & I_MASK` as the handler read it on entry
+    /// for a source interrupt, VBlank alone (1) for the VBlank hooks. The handler writes it only
+    /// on its way to the dispatcher.
+    pub(crate) pending: u32,
+    /// The `I_STAT` bits something is registered with the dispatcher for (bit 0: VBlank hooks).
+    pub(crate) registered: u32,
+    /// Where the handler jumps for a registered bit. Set by the first registration, so the
+    /// dispatcher's code, stack and table are linked only into a program that registers.
+    pub(crate) vector: u32,
+    /// The dispatcher's address once a VBlank hook is registered, else 0. The VBlank path tests
+    /// this one word, so a program with no hook pays a load and a branch per VBlank.
+    pub(crate) vblank_vector: u32,
+}
+
+#[no_mangle]
+pub(crate) static mut __psx_rt_irq: IrqCell = IrqCell {
+    pending: 0,
+    registered: 0,
+    vector: 0,
+    vblank_vector: 0,
+};
+
 #[cfg(target_arch = "mips")]
 core::arch::global_asm!(
     r#"
@@ -41,6 +68,69 @@ core::arch::global_asm!(
     addiu $27, $27, 1
     sw    $27, %lo(__psx_rt_flip_hist)($26)
     .endm
+    # The present queue's kick (`crate::present`), one implementation run in
+    # two places: by the VBlank handler below with $26 and $27, and by
+    # `__psx_rt_present_kick` with $8 and $9, which the thread calls with CPU
+    # interrupts masked, so the two never run at once. A published part waits
+    # in __psx_rt_present_head (0 = empty) with its display word in
+    # __psx_rt_present_display (0 for a part that is not the frame's last). It
+    # is kicked once the frame before it is on screen (the flip word is 0: the
+    # buffer it draws into is no longer shown, and that frame's GP0(1Fh) has
+    # run) and DMA channel 2 is idle: acknowledge GPUSTAT bit 24 with GP1(02h)
+    # (the part's own GP0(1Fh), if it is the last, raises it again), point GP0
+    # DMA at the CPU, enable channel 2 in DPCR, start the linked-list walk,
+    # then move the display word to the flip word and empty the slot. The
+    # kick never writes GP1(05h): a flip is the handler's alone, at an edge.
+    # Falls through when the slot is empty or the part was kicked, and
+    # branches to \busy when a part waits.
+    .macro PSX_RT_PRESENT_KICK a, b, kicks, busy
+    lui   \a, %hi(__psx_rt_present_head)
+    lw    \b, %lo(__psx_rt_present_head)(\a)
+    nop
+    beqz  \b, .Lpsx_kick_end\@
+    nop
+    lui   \a, %hi(__psx_rt_pending_gp1)
+    lw    \a, %lo(__psx_rt_pending_gp1)(\a)
+    nop
+    bnez  \a, \busy
+    nop
+    lui   \a, {io_hi}
+    lw    \b, {gpu_chcr}(\a)
+    nop
+    srl   \b, \b, {chcr_start_shift}
+    andi  \b, \b, 1
+    bnez  \b, \busy
+    nop
+    lui   \b, {ack_irq_hi}
+    sw    \b, {gp1}(\a)
+    lui   \b, {dma_dir_hi}
+    ori   \b, \b, {dma_dir_lo}
+    sw    \b, {gp1}(\a)
+    lw    \b, {dpcr}(\a)
+    nop
+    ori   \b, \b, {gpu_dpcr_enable}
+    sw    \b, {dpcr}(\a)
+    lui   \b, %hi(__psx_rt_present_head)
+    lw    \b, %lo(__psx_rt_present_head)(\b)
+    nop
+    sw    \b, {gpu_madr}(\a)
+    sw    $zero, {gpu_bcr}(\a)
+    lui   \b, {chcr_hi}
+    ori   \b, \b, {chcr_lo}
+    sw    \b, {gpu_chcr}(\a)
+    lui   \a, %hi(__psx_rt_present_display)
+    lw    \b, %lo(__psx_rt_present_display)(\a)
+    lui   \a, %hi(__psx_rt_present_head)
+    sw    $zero, %lo(__psx_rt_present_head)(\a)
+    lui   \a, %hi(__psx_rt_pending_gp1)
+    sw    \b, %lo(__psx_rt_pending_gp1)(\a)
+    lui   \a, %hi(\kicks)
+    lw    \b, %lo(\kicks)(\a)
+    nop
+    addiu \b, \b, 1
+    sw    \b, %lo(\kicks)(\a)
+.Lpsx_kick_end\@:
+    .endm
     .section .text.psx_rt_exception
     .globl __psx_rt_exception_handler
 __psx_rt_exception_handler:
@@ -69,8 +159,10 @@ __psx_rt_exception_handler:
     lw    $26, {i_mask}($26)
     nop
     and   $27, $27, $26
-    andi  $27, $27, {vblank_mask}
-    beqz  $27, 9f
+    # $27 keeps the pending, enabled sources for the no-VBlank path below, so
+    # nothing reads the two registers twice.
+    andi  $26, $27, {vblank_mask}
+    beqz  $26, 9f
     nop
 
     lui   $26, %hi(__psx_rt_vblank_count)
@@ -79,125 +171,13 @@ __psx_rt_exception_handler:
     addiu $27, $27, 1
     sw    $27, %lo(__psx_rt_vblank_count)($26)
 
-    # Present queue (`crate::present`, `present-queue` feature only). One
-    # published chain waits in __psx_rt_present_head (0 = empty). Kick it on
-    # the first edge where the previous chain's closing GP0(1Fh) has run
-    # (GPUSTAT bit 24) and DMA channel 2 is idle: flip to the finished frame,
-    # acknowledge the flag with GP1(02h) (the new chain raises it again at its
-    # own end), point GP0 DMA at the CPU with GP1(04h)=2, enable channel 2 in
-    # DPCR and start the linked-list walk. Ported from quake-psx 3ca915c.
-    # With the slot empty this costs one load.
-    .if {present}
-    lui   $26, %hi(__psx_rt_present_head)
-    lw    $27, %lo(__psx_rt_present_head)($26)
-    nop
-    beqz  $27, 8f
-    nop
-    # The presentation cap: hold the chain (and its flip) while the last flip is
-    # fewer than the cap's VBlanks old.
-    lui   $26, %hi(__psx_rt_flip_hold)
-    lw    $26, %lo(__psx_rt_flip_hold)($26)
-    nop
-    bnez  $26, 8f
-    nop
-    lui   $26, {io_hi}
-    lw    $27, {gp1}($26)
-    nop
-    srl   $27, $27, {gpustat_irq1_shift}
-    andi  $27, $27, 1
-    beqz  $27, 31f
-    nop
-    lw    $27, {gpu_chcr}($26)
-    nop
-    srl   $27, $27, {chcr_start_shift}
-    andi  $27, $27, 1
-    bnez  $27, 7f
-    nop
-34:
-    lui   $27, %hi(__psx_rt_present_display)
-    lw    $27, %lo(__psx_rt_present_display)($27)
-    nop
-    beqz  $27, 6f
-    nop
-    sw    $27, {gp1}($26)
-    PSX_RT_FLIP_RECORD
-    lui   $26, {io_hi}
-6:
-    lui   $27, {ack_irq_hi}
-    sw    $27, {gp1}($26)
-    lui   $27, {dma_dir_hi}
-    ori   $27, $27, {dma_dir_lo}
-    sw    $27, {gp1}($26)
-    lw    $27, {dpcr}($26)
-    nop
-    ori   $27, $27, {gpu_dpcr_enable}
-    sw    $27, {dpcr}($26)
-    lui   $27, %hi(__psx_rt_present_head)
-    lw    $27, %lo(__psx_rt_present_head)($27)
-    nop
-    sw    $27, {gpu_madr}($26)
-    sw    $zero, {gpu_bcr}($26)
-    lui   $27, {chcr_hi}
-    ori   $27, $27, {chcr_lo}
-    sw    $27, {gpu_chcr}($26)
-    lui   $26, %hi(__psx_rt_present_head)
-    sw    $zero, %lo(__psx_rt_present_head)($26)
-    lui   $26, %hi(__psx_rt_present_kick_count)
-    lw    $27, %lo(__psx_rt_present_kick_count)($26)
-    nop
-    addiu $27, $27, 1
-    b     8f
-    sw    $27, %lo(__psx_rt_present_kick_count)($26)
-    # GPUSTAT bit 24 is down. If DMA 2 is idle and GPUSTAT bits 26 and 28 (ready
-    # for a command, ready for a DMA block) were up on the previous edge as
-    # well as this one, a whole VBlank has passed with nothing running and
-    # nothing arriving: the closing GP0(1Fh) was lost (an FPGA PSX core can
-    # miss it), so kick anyway and count it. A PS1 never gets here: bit 24 is
-    # up by the first edge after the chain's last primitive.
-31:
-    lw    $27, {gp1}($26)
-    lui   $26, 0x1400
-    and   $27, $27, $26
-    bne   $27, $26, 7f
-    nop
-    lui   $26, {io_hi}
-    lw    $27, {gpu_chcr}($26)
-    nop
-    srl   $27, $27, {chcr_start_shift}
-    andi  $27, $27, 1
-    bnez  $27, 7f
-    nop
-    lui   $26, %hi(__psx_rt_vblank_count)
-    lw    $27, %lo(__psx_rt_vblank_count)($26)
-    lui   $26, %hi(__psx_rt_present_quiet)
-    lw    $26, %lo(__psx_rt_present_quiet)($26)
-    nop
-    addiu $26, $26, 1
-    beq   $26, $27, 33f
-    nop
-    lui   $26, %hi(__psx_rt_present_quiet)
-    b     7f
-    sw    $27, %lo(__psx_rt_present_quiet)($26)
-33:
-    lui   $26, %hi(__psx_rt_draw_done_fallbacks)
-    lw    $27, %lo(__psx_rt_draw_done_fallbacks)($26)
-    nop
-    addiu $27, $27, 1
-    sw    $27, %lo(__psx_rt_draw_done_fallbacks)($26)
-    lui   $26, {io_hi}
-    b     34b
-    nop
-7:
-    lui   $26, %hi(__psx_rt_present_skip_count)
-    lw    $27, %lo(__psx_rt_present_skip_count)($26)
-    nop
-    addiu $27, $27, 1
-    sw    $27, %lo(__psx_rt_present_skip_count)($26)
-8:
-    .endif
-
-    # Apply one queued GP1 word exactly at the blank edge (deferred display
-    # flip). Zero means no request; a display-start word is never zero.
+    # The flip: apply the one queued GP1 word (the flip word,
+    # __psx_rt_pending_gp1) exactly at the blank edge. Its writers are the
+    # present queue's kick (the display word of a frame's last part) and the
+    # thread (`crate::present`: a frame drawn through the GP0 port, a movie
+    # frame, display enable), the latter only while it is 0. Zero means no
+    # request; a display-start word is never zero. Then the kick below, so a
+    # frame flipped here lets the next one start in the same pass.
     # Only apply once GPUSTAT bit 24 is set: the frame's work ends with
     # GP0(1Fh), which sets it when the GPU reaches it, i.e. when everything
     # before it has been drawn, and the game acknowledged the flag with
@@ -210,7 +190,7 @@ __psx_rt_exception_handler:
     lui   $26, %hi(__psx_rt_pending_gp1)
     lw    $27, %lo(__psx_rt_pending_gp1)($26)
     nop
-    beqz  $27, 2f
+    beqz  $27, 8f
     nop
     # A display-start word (GP1 05h) is a flip and waits out the presentation cap;
     # any other word (display enable, say) is applied as before.
@@ -221,7 +201,7 @@ __psx_rt_exception_handler:
     lui   $26, %hi(__psx_rt_flip_hold)
     lw    $26, %lo(__psx_rt_flip_hold)($26)
     nop
-    bnez  $26, 2f
+    bnez  $26, 8f
     nop
 21:
     lui   $26, {io_hi}
@@ -229,8 +209,19 @@ __psx_rt_exception_handler:
     nop
     srl   $26, $26, {gpustat_irq1_shift}
     andi  $26, $26, 1
-    beqz  $26, 41f
+    bnez  $26, 44f
     nop
+    # Bit 24 is down for a queued word: leave through the slot (a load and a jump). The slot holds
+    # `__psx_rt_flip_resume` (below: leave the word queued for the next edge) until the presenter
+    # points it at `__psx_rt_flip_confirm`. Only the presenter queues a word, so a program that
+    # never calls it never takes this branch and links none of the confirmation code.
+    lui   $26, %hi(__psx_rt_flip_miss)
+    lw    $27, %lo(__psx_rt_flip_miss)($26)
+    nop
+    jr    $27
+    nop
+    .globl __psx_rt_flip_apply
+__psx_rt_flip_apply:
 44:
     lui   $26, %hi(__psx_rt_pending_gp1)
     sw    $zero, %lo(__psx_rt_pending_gp1)($26)
@@ -238,56 +229,30 @@ __psx_rt_exception_handler:
     sw    $27, {gp1}($26)
     srl   $26, $27, 24
     addiu $26, $26, -5
-    bnez  $26, 2f
+    bnez  $26, 8f
     nop
     PSX_RT_FLIP_RECORD
 
-    b     2f
+    b     8f
     nop
-    # GPUSTAT bit 24 is down for a queued GP1 word: the same fallback as the
-    # present queue's, with its own previous-edge stamp. DMA 2 idle and GPUSTAT
-    # bits 26 and 28 up on two edges in a row means a VBlank passed with the GPU
-    # idle and nothing arriving, so the frame is drawn and its GP0(1Fh) was lost
-    # (an FPGA PSX core can miss it): apply the word and count it. Such a flip
-    # costs one VBlank more than one that sees bit 24.
-41:
-    lui   $26, {io_hi}
-    lw    $26, {gp1}($26)
-    lui   $27, 0x1400
-    and   $26, $26, $27
-    bne   $26, $27, 2f
-    nop
-    lui   $26, {io_hi}
-    lw    $27, {gpu_chcr}($26)
-    nop
-    srl   $27, $27, {chcr_start_shift}
-    andi  $27, $27, 1
-    bnez  $27, 2f
-    nop
-    lui   $26, %hi(__psx_rt_vblank_count)
-    lw    $27, %lo(__psx_rt_vblank_count)($26)
-    lui   $26, %hi(__psx_rt_flip_quiet)
-    lw    $26, %lo(__psx_rt_flip_quiet)($26)
-    nop
-    addiu $26, $26, 1
-    beq   $26, $27, 43f
-    nop
-    lui   $26, %hi(__psx_rt_flip_quiet)
-    b     2f
-    sw    $27, %lo(__psx_rt_flip_quiet)($26)
-43:
-    lui   $26, %hi(__psx_rt_draw_done_fallbacks)
-    lw    $27, %lo(__psx_rt_draw_done_fallbacks)($26)
-    nop
-    addiu $27, $27, 1
-    sw    $27, %lo(__psx_rt_draw_done_fallbacks)($26)
-    lui   $26, %hi(__psx_rt_pending_gp1)
-    lw    $27, %lo(__psx_rt_pending_gp1)($26)
-    nop
-    b     44b
-    nop
+    # The slot of the branch above. It starts as the resume point and is written by the presenter.
+    .pushsection .data.psx_rt_flip_miss,"aw",@progbits
+    .align 2
+    .globl __psx_rt_flip_miss
+__psx_rt_flip_miss:
+    .word __psx_rt_flip_resume
+    .popsection
+
+    # The kick. A part that waits (for the flip above, or for channel 2) is
+    # counted as a skipped edge, out of line (`7:` below the stray path). With
+    # the slot empty this costs one load and falls through.
+    .globl __psx_rt_flip_resume
+__psx_rt_flip_resume:
+8:
+    PSX_RT_PRESENT_KICK $26, $27, __psx_rt_present_kick_count, 7f
 
 2:
+.Lpsx_vblank_ack:
     lui   $26, {io_hi}
     addiu $27, $zero, {ack_vblank}
     sw    $27, {i_stat}($26)
@@ -316,6 +281,26 @@ __psx_rt_exception_handler:
     nop
 .Lpsx_diag_ret:
     .endif
+
+    # Registered VBlank hooks: one context save for all of them, in the
+    # dispatcher. With none this is a load and a branch: the word is the
+    # dispatcher's address once a hook is registered, else 0. The delay slot
+    # stays empty: a load into $27 there would be followed by the `mfc0 $27`
+    # at `1:`, two delayed writes to one register back to back. The
+    # dispatcher serves VBlank alone from here; a source that is pending too
+    # takes the exception again at once and goes the other way.
+    lui   $26, %hi(__psx_rt_irq)
+    lw    $27, %lo(__psx_rt_irq+12)($26)
+    nop
+    beqz  $27, 1f
+    nop
+    addiu $27, $zero, 1
+    sw    $27, %lo(__psx_rt_irq)($26)
+    lw    $27, %lo(__psx_rt_irq+12)($26)
+    lui   $26, %hi(.Lpsx_disp_vb)
+    jr    $27
+    addiu $26, $26, %lo(.Lpsx_disp_vb)
+.Lpsx_disp_vb:
 
 1:
     mfc0  $27, $13
@@ -403,6 +388,7 @@ __psx_rt_exception_handler:
     # hazard-scan warns about any it finds. `interrupt_resume_pc`
     # below is the same decision in Rust, unit-tested on host.
 2:
+.Lpsx_rt_iret:
     mfc0  $26, $14
     nop
     lw    $27, 0($26)
@@ -440,16 +426,31 @@ __psx_rt_exception_handler:
     # itself must stay in I_STAT until it does. `stray_interrupt_sources`
     # below is the same decision in Rust, unit-tested on host.
 9:
-    mfc0  $27, $13
+    mfc0  $26, $13
     nop
-    andi  $27, $27, 0x007c
-    bnez  $27, 1b
+    andi  $26, $26, 0x007c
+    bnez  $26, 1b
     nop
-    lui   $26, {io_hi}
-    lw    $27, {i_stat}($26)
-    lw    $26, {i_mask}($26)
+    # $27 is still I_STAT & I_MASK from the entry.
+    # A source registered with the dispatcher: one context save, in `dispatch`,
+    # then the common return. Anything else pending goes on being a stray (or
+    # re-enters at once).
+    # The dispatcher returns straight to the GTE-aware return (`2:`): the
+    # cause was checked above. The `lui` in the delay slot is harmless on the
+    # way to `60:`, which sets $26 first.
+    lui   $26, %hi(__psx_rt_irq)
+    lw    $26, %lo(__psx_rt_irq+4)($26)
     nop
-    and   $27, $27, $26
+    and   $26, $26, $27
+    beqz  $26, 60f
+    lui   $26, %hi(__psx_rt_irq)
+    sw    $27, %lo(__psx_rt_irq)($26)
+    lw    $26, %lo(__psx_rt_irq+8)($26)
+    lui   $27, %hi(.Lpsx_rt_iret)
+    addiu $27, $27, %lo(.Lpsx_rt_iret)
+    jr    $26
+    move  $26, $27
+60:
     # A source a wrapper in front of this handler has claimed is not a stray
     # even though it is pending here: it arrived while another wrapper's handler
     # ran, or while the claimant's own handler held interrupts off, and the
@@ -472,10 +473,40 @@ __psx_rt_exception_handler:
     addiu $27, $27, 1
     b     1b
     sw    $27, %lo(__psx_rt_stray_irq_count)($26)
+    # A published part waited at this edge: count it, then the VBlank path
+    # goes on as if it had kicked.
+7:
+    lui   $26, %hi(__psx_rt_present_skip_count)
+    lw    $27, %lo(__psx_rt_present_skip_count)($26)
+    nop
+    addiu $27, $27, 1
+    b     .Lpsx_vblank_ack
+    sw    $27, %lo(__psx_rt_present_skip_count)($26)
+
+    # The thread's kick (`crate::present`): the handler's, with $8 and $9, as a
+    # leaf routine that masks CPU interrupts around it (IEc cleared as
+    # `psx_io::irq::disable_cpu_interrupts` does, SR put back as found), so
+    # the handler's kick and this one never run at once. Clobbers $8-$10.
+    # In its own section, so a program that never publishes a part does not
+    # link it.
+    .section .text.psx_rt_present_kick,"ax",@progbits
+    .globl __psx_rt_present_kick
+__psx_rt_present_kick:
+    mfc0  $10, $12
+    nop
+    srl   $9, $10, 1
+    sll   $9, $9, 1
+    mtc0  $9, $12
+    nop
+    nop
+    PSX_RT_PRESENT_KICK $8, $9, __psx_rt_present_thread_kick_count, 1f
+1:
+    mtc0  $10, $12
+    jr    $31
+    nop
     .set reorder
     "#,
     strict = const STRICT_FAULTS as u32,
-    present = const PRESENT_QUEUE as u32,
     diag = const CONSOLE_DIAG as u32,
     fatal = sym psx_rt_fatal_fault,
     isc_hi = const crate::cache::ISOLATE_CACHE_BIT >> 16,
@@ -504,6 +535,98 @@ __psx_rt_exception_handler:
     gte_prefix_shift = const gte::PREFIX_SHIFT,
     gte_prefix = const gte::COMMAND >> gte::PREFIX_SHIFT,
 );
+// The handler's confirmation of a queued flip whose GPUSTAT bit 24 is down (the handler's slot,
+// `__psx_rt_flip_miss`, jumps here once the presenter has pointed it here). Its own object and
+// section: only `crate::present` refers to it, so a program that never presents does not link it.
+// Out of line, past all other text (`.psx_cold`, farther than a branch reaches, so jumps). Enters
+// with nothing live; leaves for `__psx_rt_flip_apply` (flip, `$27` the queued word) or
+// `__psx_rt_flip_resume` (leave it queued).
+#[cfg(target_arch = "mips")]
+core::arch::global_asm!(
+    r#"
+    .set noreorder
+    # GPUSTAT bit 24 is down for a queued GP1 word. DMA 2 idle and GPUSTAT bits
+    # 26 and 28 up, held on {confirm_reads} reads in a row (the test OpenBIOS's GPU_sync and
+    # PSn00bSDK's DrawSync use; bit 26 can pulse up between the primitives of a
+    # chain, and bit 28 idles early on silicon, so neither is enough alone), means
+    # the GPU has nothing left to draw. What that decides depends on the mode
+    # (`__psx_rt_flip_conv`, set by the thread: `crate::present`'s trust).
+    # Signal mode (the start, and always on a PS1, where the signal arrives): only
+    # a second edge in a row that sees it flips, so a frame whose drawing spans a
+    # VBlank is never flipped early and a lost GP0(1Fh) costs one VBlank more. A
+    # flip by this test is counted. Conventional mode (a target that does not
+    # raise bit 24 on most frames: an FPGA PSX core, PCSX-ReARMed): the first edge
+    # that sees it flips. The loop counter lives in `__psx_rt_flip_reads`.
+    .pushsection .psx_cold.psx_rt_flip_confirm,"ax",@progbits
+    .globl __psx_rt_flip_confirm
+__psx_rt_flip_confirm:
+    lui   $26, %hi(__psx_rt_flip_reads)
+    addiu $27, $zero, {confirm_reads}
+    sw    $27, %lo(__psx_rt_flip_reads)($26)
+45:
+    lui   $26, {io_hi}
+    lw    $27, {gp1}($26)
+    lui   $26, 0x1400
+    and   $27, $27, $26
+    bne   $27, $26, 47f
+    nop
+    lui   $26, {io_hi}
+    lw    $27, {gpu_chcr}($26)
+    nop
+    srl   $27, $27, {chcr_start_shift}
+    andi  $27, $27, 1
+    bnez  $27, 47f
+    nop
+    lui   $26, %hi(__psx_rt_flip_reads)
+    lw    $27, %lo(__psx_rt_flip_reads)($26)
+    nop
+    addiu $27, $27, -1
+    bnez  $27, 45b
+    sw    $27, %lo(__psx_rt_flip_reads)($26)
+    lui   $26, %hi(__psx_rt_flip_conv)
+    lw    $27, %lo(__psx_rt_flip_conv)($26)
+    nop
+    bnez  $27, 43f
+    nop
+    lui   $26, %hi(__psx_rt_vblank_count)
+    lw    $27, %lo(__psx_rt_vblank_count)($26)
+    lui   $26, %hi(__psx_rt_flip_quiet)
+    lw    $26, %lo(__psx_rt_flip_quiet)($26)
+    nop
+    addiu $26, $26, 1
+    beq   $26, $27, 43f
+    nop
+    lui   $26, %hi(__psx_rt_flip_quiet)
+    j     __psx_rt_flip_resume
+    sw    $27, %lo(__psx_rt_flip_quiet)($26)
+43:
+    lui   $26, %hi(__psx_rt_draw_done_fallbacks)
+    lw    $27, %lo(__psx_rt_draw_done_fallbacks)($26)
+    nop
+    addiu $27, $27, 1
+    sw    $27, %lo(__psx_rt_draw_done_fallbacks)($26)
+    lui   $26, %hi(__psx_rt_pending_gp1)
+    lw    $27, %lo(__psx_rt_pending_gp1)($26)
+    nop
+    j     __psx_rt_flip_apply
+    nop
+47:
+    j     __psx_rt_flip_resume
+    nop
+    .popsection
+    .set reorder
+    "#,
+    confirm_reads = const CONFIRM_READS,
+    io_hi = const memory::io::BASE >> 16,
+    gp1 = const gpu::GP1 & 0xFFFF,
+    gpu_chcr = const (dma::CHANNEL_BASE + dma::CHANNEL_STRIDE * dma::channel::GPU + dma::CHCR) & 0xFFFF,
+    chcr_start_shift = const dma::CHCR_START.trailing_zeros(),
+);
+
+/// Reads of GPUSTAT and channel 2's CHCR the confirmation holds the idle test over.
+#[cfg(target_arch = "mips")]
+const CONFIRM_READS: u32 = 64;
+
 // The handler reaches every register through one `lui` of the I/O window's
 // high half plus a signed 16-bit offset, and builds its GP1 and CHCR words
 // from immediates; check each the way the template spells them.
@@ -524,50 +647,54 @@ const _: () = {
 /// runs the stall watch and a fatal fault shows the stop-panel (see `diag`).
 pub const CONSOLE_DIAG: bool = cfg!(feature = "console-diag");
 
-/// Chains the present queue has kicked (0 without the `present-queue` feature).
+/// Parts the present queue has kicked, by the handler and by the thread.
 #[cfg(all(feature = "console-diag", target_arch = "mips"))]
 pub(crate) fn present_kick_count() -> u32 {
-    #[cfg(feature = "present-queue")]
-    // SAFETY: a volatile aligned read of a counter only the handler writes.
-    return unsafe { core::ptr::addr_of!(__psx_rt_present_kick_count).read_volatile() };
-    #[cfg(not(feature = "present-queue"))]
-    0
+    crate::present::stats().kick_count
 }
 
-/// Present-queue edges that found the previous chain undrawn (0 without the feature).
+/// Present-queue edges on which a published part had to wait.
 #[cfg(all(feature = "console-diag", target_arch = "mips"))]
 pub(crate) fn present_skip_count() -> u32 {
-    #[cfg(feature = "present-queue")]
-    // SAFETY: a volatile aligned read of a counter only the handler writes.
-    return unsafe { core::ptr::addr_of!(__psx_rt_present_skip_count).read_volatile() };
-    #[cfg(not(feature = "present-queue"))]
-    0
+    crate::present::stats().skip_count
 }
 
-/// True when psx-rt was built with the `present-queue` feature: the VBlank
-/// handler kicks frames published through [`crate::present`].
-pub const PRESENT_QUEUE: bool = cfg!(feature = "present-queue");
+/// Always true: every build of psx-rt has the present queue ([`crate::present`]).
+#[deprecated(note = "always true; the present queue is part of every build")]
+pub const PRESENT_QUEUE: bool = true;
 
-/// Present-queue slot: the chain head the VBlank handler kicks at the next
-/// ready edge, 0 when empty. Owned by [`crate::present`].
-#[cfg(feature = "present-queue")]
+// The words the present queue shares between the thread and the VBlank handler.
+// Each is one aligned word, so a load or store of it never tears; the thread
+// never reads one, decides and writes it back with interrupts on unless the
+// rule below makes the handler unable to change it in between. The protocol,
+// and why a VBlank between any two thread instructions is harmless, is in
+// `crate::present` ("Interrupt safety"); `present::model` is the same machine
+// in Rust, tested against every interleaving.
+
+/// The slot: the head of a published part not yet kicked, 0 when empty.
+/// The thread writes it from 0 to a head (only the thread fills it, so it
+/// stays 0 between the thread's check and its store); the kick writes it back
+/// to 0, in the handler or on the thread with interrupts masked.
 #[no_mangle]
 pub(crate) static mut __psx_rt_present_head: u32 = 0;
 
-/// GP1(05h) word the handler writes just before kicking the slot's chain;
-/// 0 = no flip.
-#[cfg(feature = "present-queue")]
+/// The display word of the part in the slot: the GP1(05h) word that shows the
+/// frame when the part is its last, 0 for a part that is not. Written by the
+/// thread only while the slot is empty (the kick reads it only after it reads a
+/// head), before the head; read by the kick, which moves it to the flip word.
 #[no_mangle]
 pub(crate) static mut __psx_rt_present_display: u32 = 0;
 
-/// Chains the handler has kicked.
-#[cfg(feature = "present-queue")]
+/// Parts the handler has kicked.
 #[no_mangle]
 pub(crate) static mut __psx_rt_present_kick_count: u32 = 0;
 
-/// Edges on which a published chain found the previous one undrawn or DMA
-/// channel 2 still busy.
-#[cfg(feature = "present-queue")]
+/// Parts the thread has kicked (always with interrupts masked).
+#[no_mangle]
+pub(crate) static mut __psx_rt_present_thread_kick_count: u32 = 0;
+
+/// Edges on which a published part waited for the flip before it or for
+/// DMA channel 2.
 #[no_mangle]
 pub(crate) static mut __psx_rt_present_skip_count: u32 = 0;
 
@@ -691,30 +818,52 @@ extern "C" fn psx_rt_fatal_fault() -> ! {
     }
 }
 
-/// One queued GP1 word the VBlank handler writes to the GPU at the first
-/// blank edge on which GPUSTAT bit 24 is set, then clears. Zero = empty.
-/// Written by [`queue_display_control_at_vblank`].
+/// The flip word: one GP1 word the VBlank handler writes to the GPU at the
+/// first blank edge on which GPUSTAT bit 24 is set (a GP1(05h) word also
+/// waits out the cap's hold), then clears. Zero = empty. Written nonzero by
+/// the present queue's kick (the display word of a frame's last part) and by
+/// the thread only while it is 0 (`crate::present`): neither the kick nor the
+/// flip writes a nonzero value over another. Cleared by the handler's flip and
+/// by `crate::present::cancel_flip`.
 #[no_mangle]
-static mut __psx_rt_pending_gp1: u32 = 0;
+pub(crate) static mut __psx_rt_pending_gp1: u32 = 0;
 
-/// VBlank counts at which the draw-done fallback last saw the GPU idle and
-/// ready with a queued flip waiting (`u32::MAX` = never): two edges in a row
-/// make the fallback fire. In `.data` like the other counters.
-#[cfg_attr(target_arch = "mips", link_section = ".data")]
+/// The VBlank count of the last edge at which the signal-mode timeout saw the GPU idle with
+/// bit 24 down (the timeout fires on the next edge). Handler scratch, in `.data`.
+#[cfg_attr(target_arch = "mips", link_section = ".data.psx_rt_flip_quiet")]
 #[no_mangle]
-static mut __psx_rt_flip_quiet: u32 = u32::MAX;
+static mut __psx_rt_flip_quiet: u32 = 0;
 
-/// The same for a published chain waiting for the present queue's kick.
-#[cfg_attr(target_arch = "mips", link_section = ".data")]
+/// The conventional-mode confirmation loop's counter (the reads left before it fires).
+/// Handler scratch, in `.data`.
+#[cfg_attr(target_arch = "mips", link_section = ".data.psx_rt_flip_reads")]
 #[no_mangle]
-static mut __psx_rt_present_quiet: u32 = u32::MAX;
+static mut __psx_rt_flip_reads: u32 = 0;
+
+/// The presenter's mode (see `crate::present`'s trust): 0 = signal mode, where the draw-done
+/// timeout needs two idle edges in a row, nonzero = conventional mode, where the first idle edge
+/// flips. Written by the thread, read by the handler. In `.data`.
+#[cfg_attr(target_arch = "mips", link_section = ".data.psx_rt_flip_conv")]
+#[no_mangle]
+pub(crate) static mut __psx_rt_flip_conv: u32 = 0;
+
+/// Whether the presenter has stopped waiting for GPUSTAT bit 24 (see `crate::present`):
+/// `true` in conventional mode. Stays `false` for the life of a program on a PS1.
+#[must_use]
+pub fn flip_signal_distrusted() -> bool {
+    // SAFETY: a volatile aligned read of a word only the thread writes.
+    unsafe { core::ptr::addr_of!(__psx_rt_flip_conv).read_volatile() != 0 }
+}
 
 /// Times the VBlank handler acted on a frame without seeing GPUSTAT bit 24:
-/// DMA 2 idle and GPUSTAT bits 26 and 28 up on two edges in a row, with a
-/// queued flip or published chain waiting. A GPU that raises bit 24 for every
+/// DMA 2 idle and GPUSTAT bits 26 and 28 up on a run of reads at one edge, with a
+/// queued flip waiting. A GPU that raises bit 24 for every
 /// closing GP0(1Fh) (a PS1) leaves it at 0; an FPGA PSX core that loses some of
 /// them counts them here.
-#[cfg_attr(target_arch = "mips", link_section = ".data")]
+#[cfg_attr(
+    target_arch = "mips",
+    link_section = ".data.psx_rt_draw_done_fallbacks"
+)]
 #[no_mangle]
 static mut __psx_rt_draw_done_fallbacks: u32 = 0;
 
@@ -745,8 +894,7 @@ static mut __psx_rt_claimed_irq: u32 = 0;
 ///
 /// psx-rt's handler acknowledges an enabled source that is pending when no
 /// VBlank is, because nothing it knows owns it. A wrapper chained in front
-/// (psx-cdstream's for the CD controller, the pad engine's for the controller
-/// port and root counter 0) does own its sources, but an interrupt can arrive
+/// (psx-cdstream's for the CD controller) does own its sources, but an interrupt can arrive
 /// while another wrapper's handler runs, or while its own runs with interrupts
 /// off, and so reach psx-rt's handler pending, where the acknowledge loses it:
 /// a CD sector, a pad byte. A claimed source is left pending, and the exception
@@ -888,6 +1036,9 @@ extern "C" {
 /// game needs must be serviced by the game's own handler ahead of this one
 /// (which then chains here), not left to this handler.
 #[cfg(target_arch = "mips")]
+// Out of line: boot and level-load code, and a game that calls it from several
+// places (VoXide: three) carried a copy at each.
+#[inline(never)]
 pub fn install_vblank_counter() {
     const EXCEPTION_VECTOR: *mut u32 = 0x8000_0080 as *mut u32;
     const J_OPCODE: u32 = 0x0800_0000;
@@ -921,8 +1072,13 @@ pub fn install_vblank_counter() {
         psx_io::gpu::set_flip_pacer(Some(pace_direct_flip));
         irq::acknowledge(1 << psx_hw::irq::source::VBLANK);
         // This handler services VBlank only. After a BIOS disc boot, do not
-        // preserve CD-ROM/DMA/etc. bits the BIOS may have left enabled.
-        irq::set_mask(1 << psx_hw::irq::source::VBLANK);
+        // preserve CD-ROM/DMA/etc. bits the BIOS may have left enabled; keep
+        // only a source that is open and has a dispatcher handler (its owner
+        // opened it, and the registration outlives this reinstall).
+        irq::set_mask(
+            1 << psx_hw::irq::source::VBLANK
+                | (irq::mask() & crate::dispatch::registered_sources()),
+        );
         enable_cpu_interrupts();
         core::ptr::write_volatile(&raw mut INSTALLED, true);
     }
@@ -934,7 +1090,7 @@ pub fn install_vblank_counter() {}
 
 /// How many times [`install_vblank_counter`] has put psx-rt's handler in the
 /// vector. That drops every wrapper chained in front of it, so a wrapper
-/// (psx-cdstream's, the pad engine's) that remembers installing itself is
+/// (psx-cdstream's) that remembers installing itself is
 /// still in the chain only while this reads what it read then.
 #[cfg(target_arch = "mips")]
 static mut VECTOR_EPOCH: u32 = 0;
@@ -1067,33 +1223,29 @@ pub fn fault_pc() -> u32 {
 }
 
 /// Set the presentation cap: the fewest VBlanks between two display flips (0 is
-/// treated as 1).
-///
-/// Every program starts at 2 ([`DEFAULT_MIN_FLIP_VBLANKS`], `psx_tick::PresentCap::HZ30`), so the picture never changes
-/// faster than 30 fps NTSC (25 PAL): a flip a frame finished early waits for its
-/// slot. A game that deliberately targets the full display rate opts out by name,
-/// once at boot:
-///
-/// ```ignore
-/// psx_rt::interrupts::set_min_flip_vblanks(psx_tick::PresentCap::UNCAPPED.min_vblanks());
-/// ```
-///
-/// The cap applies to every display flip made through psx-rt: a word queued
-/// with [`queue_display_control_at_vblank`] (the handler holds it at the edge
-/// until the cap allows it), a frame kicked by the present queue, and a
-/// `DoubleBuffer::swap` (which waits, bounded, before the flip). Other display
-/// words (video on or off) are never held. Frames slower than the cap are not
-/// delayed.
+/// treated as 1). The cap's one home is [`crate::present::set_cap`].
+#[deprecated(note = "use `psx_rt::present::set_cap`")]
 pub fn set_min_flip_vblanks(vblanks: u8) {
+    crate::present::set_cap(psx_tick::PresentCap::every_vblanks(vblanks));
+}
+
+/// The presentation cap in force, in VBlanks.
+#[deprecated(note = "use `psx_rt::present::cap`")]
+#[must_use]
+pub fn min_flip_vblanks() -> u8 {
+    crate::present::cap().min_vblanks()
+}
+
+/// Store the cap the handler arms its hold with (`crate::present::set_cap`).
+pub(crate) fn write_flip_min(vblanks: u8) {
     // SAFETY: an aligned volatile word store; the handler only reads it and the cap is a plain
     // value, so no ordering with the handler matters.
     unsafe { core::ptr::write_volatile(&raw mut __psx_rt_flip_min, u32::from(vblanks.max(1))) }
 }
 
-/// The presentation cap in force, in VBlanks (see [`set_min_flip_vblanks`]).
-#[must_use]
-pub fn min_flip_vblanks() -> u8 {
-    // SAFETY: an aligned volatile word load of a value written only by `set_present_cap`.
+/// The cap the handler arms its hold with.
+pub(crate) fn read_flip_min() -> u8 {
+    // SAFETY: an aligned volatile word load of a value only `write_flip_min` writes.
     let min = unsafe { core::ptr::read_volatile(&raw const __psx_rt_flip_min) };
     min.min(u32::from(u8::MAX)) as u8
 }
@@ -1191,98 +1343,44 @@ pub fn vblank_count() -> u32 {
     unsafe { core::ptr::read_volatile(&raw const __psx_rt_vblank_count) }
 }
 
-/// Queue one GP1 word for the VBlank handler to apply at a blank edge
-/// (deferred tear-free display flip). Overwrites any unapplied word.
-///
-/// The handler applies the word at the first VBlank edge on which GPUSTAT
-/// bit 24 (the GPU's IRQ1 flag) is set, so the frame must signal its own
-/// end:
-///
-/// 1. acknowledge the flag with GP1(02h) before kicking the frame's work
-///    (`psx_gpu::arm_draw_done`), after the previous flip has landed;
-/// 2. end that work with GP0(1Fh): as the last node of the DMA chain
-///    (`psx_gpu::OrderingTable::end_with_draw_done`, or a one-word packet
-///    in an ordered stream) or, after drawing through the ports,
-///    `psx_gpu::signal_draw_done`;
-/// 3. queue the display-start word here.
-///
-/// The flag stays set until the next acknowledge, so a word queued while
-/// the GPU is idle after such a frame (a display enable, say) applies at
-/// the next edge. A game that never sends GP0(1Fh) never flips: before this
-/// handler tested bit 24 it tested GPUSTAT bit 28, which on silicon rises
-/// about one large primitive before the drawing ends (hardware-tests v1.24
-/// cases 219-226), so a flip could expose a frame one primitive short.
-/// Keep interrupt source 1 (GPU) masked in `I_MASK`: this handler owns VBlank
-/// only, so a GPU interrupt it finds is acknowledged as a stray and counted
-/// ([`stray_interrupt_count`]), which costs a handler entry per frame.
-#[cfg(target_arch = "mips")]
+/// Queue one GP1 word for the VBlank handler to apply at a blank edge,
+/// overwriting any unapplied word. The flip word's one writer is now
+/// `psx_rt::present`: [`crate::present::Presenter::present_drawn`] for a frame
+/// drawn through the GP0 port, [`crate::present::show`] for a buffer filled
+/// another way, [`crate::present::set_display_enabled`] for display enable.
+/// Mixing this with them can overwrite a frame's display word.
+#[deprecated(
+    note = "use `psx_rt::present` (`Presenter::present_drawn`, `show`, `set_display_enabled`)"
+)]
 #[inline]
 #[doc(alias = "GP1")]
 pub fn queue_display_control_at_vblank(word: u32) {
-    // SAFETY: a volatile aligned u32 store through a raw pointer, so no reference is formed. The
-    // VBlank handler is the only other accessor, and an aligned word store cannot tear.
-    unsafe { core::ptr::write_volatile(&raw mut __psx_rt_pending_gp1, word) }
-}
-
-/// Host no-op: no IRQ exists to consume the queue off-target.
-#[cfg(not(target_arch = "mips"))]
-#[inline]
-#[doc(alias = "GP1")]
-pub fn queue_display_control_at_vblank(_word: u32) {}
-
-/// True while a word queued by [`queue_display_control_at_vblank`] has not
-/// yet been applied by the VBlank handler.
-#[cfg(target_arch = "mips")]
-#[inline]
-#[doc(alias = "GP1")]
-pub fn is_display_control_queued() -> bool {
-    // SAFETY: a volatile aligned u32 read through a raw pointer, so no reference is formed. The
-    // VBlank handler is the only other accessor, and an aligned word load cannot tear.
-    unsafe { core::ptr::read_volatile(&raw const __psx_rt_pending_gp1) != 0 }
-}
-
-/// Empty the queue and hand back the word the handler has not applied, so
-/// the caller can write it to GP1 itself. Returns 0 when nothing was queued.
-///
-/// The handler only applies its word at a blank edge on which GPUSTAT
-/// bit 24 is set (see [`queue_display_control_at_vblank`]), so a long enough frame, or
-/// one that never sends GP0(1Fh), leaves it queued indefinitely. A caller that has given up waiting must take the word
-/// rather than leave it: the next [`queue_display_control_at_vblank`] overwrites the
-/// slot, and a display start that never reaches the GPU desynchronises the
-/// display side from the draw side for the rest of the session.
-///
-/// Racing the handler is harmless. If the IRQ lands between the read and
-/// the clear, the handler applies the word and the caller writes the same
-/// value again; GP1(05h) is idempotent.
-#[cfg(target_arch = "mips")]
-#[inline]
-#[doc(alias = "GP1")]
-pub fn take_queued_display_control() -> u32 {
-    // SAFETY: volatile aligned u32 accesses through a raw pointer, so no reference is formed. A
-    // handler run between the read and the clear is harmless (see above).
+    #[cfg(target_arch = "mips")]
+    // SAFETY: a volatile aligned u32 store through a raw pointer, so no reference is formed; an
+    // aligned word store cannot tear.
     unsafe {
-        let word = core::ptr::read_volatile(&raw const __psx_rt_pending_gp1);
-        if word != 0 {
-            core::ptr::write_volatile(&raw mut __psx_rt_pending_gp1, 0);
-        }
-        word
+        core::ptr::write_volatile(&raw mut __psx_rt_pending_gp1, word)
     }
+    #[cfg(not(target_arch = "mips"))]
+    let _ = word;
 }
 
-/// Host: nothing is ever queued, so nothing can be taken.
-#[cfg(not(target_arch = "mips"))]
+/// True while a queued GP1 word has not yet been applied by the VBlank handler.
+#[deprecated(note = "use `psx_rt::present::is_flip_pending`")]
+#[inline]
+#[must_use]
+#[doc(alias = "GP1")]
+pub fn is_display_control_queued() -> bool {
+    crate::present::is_flip_pending()
+}
+
+/// Empty the queue and hand back the word the handler has not applied (0 when
+/// nothing was queued).
+#[deprecated(note = "use `psx_rt::present::cancel_flip`")]
 #[inline]
 #[doc(alias = "GP1")]
 pub fn take_queued_display_control() -> u32 {
-    0
-}
-
-/// Host no-op: nothing is ever pending off-target.
-#[cfg(not(target_arch = "mips"))]
-#[inline]
-#[doc(alias = "GP1")]
-pub fn is_display_control_queued() -> bool {
-    false
+    crate::present::cancel_flip()
 }
 
 /// Block until the next VBlank IRQ.
@@ -1344,6 +1442,13 @@ pub fn try_wait_vblank(spins: u32) -> bool {
 #[cfg(not(target_arch = "mips"))]
 #[doc(alias = "VSync")]
 pub fn wait_vblank() {}
+
+/// Host no-op: there is no VBlank off-target, so the wait is over at once.
+#[cfg(not(target_arch = "mips"))]
+#[must_use]
+pub fn try_wait_vblank(_spins: u32) -> bool {
+    true
+}
 
 /// True when the general exception vector jumps to psx-rt's handler, the
 /// one that never touches `$sp` (so interrupts are safe on any stack).

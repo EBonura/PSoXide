@@ -9,10 +9,7 @@ pub type RoomPoint = [i32; 3];
 /// Floating room-space position `[x, y, z]`.
 pub type RoomPointF = [f32; 3];
 
-/// Q12 fixed-point multiply: `(value * q12) >> 12`, saturated to `i32`.
-pub fn mul_q12(value: i32, q12: i32) -> i32 {
-    (((value as i64) * (q12 as i64)) >> 12).clamp(i32::MIN as i64, i32::MAX as i64) as i32
-}
+use psx_math::int32::mul_q12_i32;
 
 /// Rotate `v` about the X axis by a Q12 turn angle (4096 units per turn).
 pub fn rotate_x_q12(v: RoomPoint, angle_q12: u16) -> RoomPoint {
@@ -20,8 +17,8 @@ pub fn rotate_x_q12(v: RoomPoint, angle_q12: u16) -> RoomPoint {
     let (s, c) = (angle.sin().raw(), angle.cos().raw());
     [
         v[0],
-        mul_q12(v[1], c) - mul_q12(v[2], s),
-        mul_q12(v[1], s) + mul_q12(v[2], c),
+        mul_q12_i32(v[1], c) - mul_q12_i32(v[2], s),
+        mul_q12_i32(v[1], s) + mul_q12_i32(v[2], c),
     ]
 }
 
@@ -30,9 +27,9 @@ pub fn rotate_y_q12(v: RoomPoint, angle_q12: u16) -> RoomPoint {
     let angle = Angle::from_q12(angle_q12);
     let (s, c) = (angle.sin().raw(), angle.cos().raw());
     [
-        mul_q12(v[0], c) + mul_q12(v[2], s),
+        mul_q12_i32(v[0], c) + mul_q12_i32(v[2], s),
         v[1],
-        -mul_q12(v[0], s) + mul_q12(v[2], c),
+        -mul_q12_i32(v[0], s) + mul_q12_i32(v[2], c),
     ]
 }
 
@@ -41,8 +38,8 @@ pub fn rotate_z_q12(v: RoomPoint, angle_q12: u16) -> RoomPoint {
     let angle = Angle::from_q12(angle_q12);
     let (s, c) = (angle.sin().raw(), angle.cos().raw());
     [
-        mul_q12(v[0], c) - mul_q12(v[1], s),
-        mul_q12(v[0], s) + mul_q12(v[1], c),
+        mul_q12_i32(v[0], c) - mul_q12_i32(v[1], s),
+        mul_q12_i32(v[0], s) + mul_q12_i32(v[1], c),
         v[2],
     ]
 }
@@ -291,8 +288,8 @@ mod tests {
 
     #[test]
     fn q12_transforms_scale_and_identity() {
-        assert_eq!(mul_q12(4096, 4096), 4096); // 1.0 * 1.0
-        assert_eq!(mul_q12(2048, 2048), 1024); // 0.5 * 0.5 = 0.25
+        assert_eq!(mul_q12_i32(4096, 4096), 4096); // 1.0 * 1.0
+        assert_eq!(mul_q12_i32(2048, 2048), 1024); // 0.5 * 0.5 = 0.25
         let v = [123, -456, 789];
         // A zero rotation is the identity on every axis.
         assert_eq!(rotate_euler_local_q12(v, 0, 0, 0), v);

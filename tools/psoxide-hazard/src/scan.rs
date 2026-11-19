@@ -10,9 +10,11 @@ use crate::detect::{
 };
 use crate::linkmap::{io_message, LinkMap};
 use crate::listing::{load_address, Listing, HEADER};
-use crate::module::{modules, Module, Overlay};
+use crate::module::{Module, Overlay};
 use crate::text::strip;
-use crate::{cli_args, open_map, report_unlisted, text_bounds};
+use crate::{
+    cli_args, image_modules, open_map, raw_blob, read_image, report_unlisted, text_bounds, RawBlob,
+};
 
 /// Usage text.
 pub const USAGE: &str = "\
@@ -30,6 +32,7 @@ latter). This scan proves an image is clean, whatever built it.
     hazard-scan path/to/game.exe [more.exe ...]
     hazard-scan path/to/game.exe --map path/to/game.map
     hazard-scan path/to/game.exe              # no map: heuristic, see below
+    hazard-scan blob.bin --raw 801C8000 --map blob.map   # headerless blob
 
 Prints every hazard as `branch | delay-slot load | consumer` and exits 1 if
 any image has one. Loads into $zero (cache probes) are ignored, and so is
@@ -42,6 +45,15 @@ address and sit in the file at another, as `hazard-patch` describes), as
 nothing). Without a map, or with
 `--whole-image`, every word of the load that looks like code is scanned, and
 data that decodes as a branch can be reported.
+A program linked with a boot overlay (psyq-boot.ld: boot-only code stored
+after `.data`, run from the start of the heap) is described by its map
+alone: `__boot_start`, `__boot_load_end` and the stored address of the `.boot`
+section place the overlay,
+its `.text` input sections are code, and the entry is `__boot_entry`.
+A headerless blob (the demo disc's chain loader) takes `--raw LOAD` (hex load
+address of its first byte) and optionally `--entry ADDR` (default LOAD); its
+map has no `__text_start`, so its code is the span of its `.text` input
+sections. Without a map the whole blob is scanned as under `--whole-image`.
 It also warns, without failing, about a GTE command (COP2 `cofun`) in a
 branch delay slot: an interrupt taken on it runs the branch and the command
 twice. A slot load whose consumer cannot be seen from the image (`jr ra`,
@@ -97,7 +109,7 @@ pub fn scan_with_ceiling(
     table_ceiling: usize,
     out: &mut dyn Write,
 ) -> Result<Vec<String>, ScanError> {
-    scan_in(path, map_path, is_code, table_ceiling, None, &[], out)
+    scan_in(path, map_path, is_code, table_ceiling, None, &[], None, out)
 }
 
 fn scan_in(
@@ -107,9 +119,10 @@ fn scan_in(
     table_ceiling: usize,
     text: Option<&[(i64, i64)]>,
     modules: &[Module],
+    raw: Option<&RawBlob>,
     out: &mut dyn Write,
 ) -> Result<Vec<String>, ScanError> {
-    let file = std::fs::read(path).map_err(|error| {
+    let file = read_image(path, raw).map_err(|error| {
         let _ = writeln!(out, "{}", io_message(&error, path));
         ScanError::Failed(1)
     })?;
@@ -235,8 +248,10 @@ fn run(
     if paths.is_empty() || (map_path.is_some() && paths.len() != 1) {
         return usage(out);
     }
-    let modules = match modules(args) {
-        Ok(modules) => modules,
+    let (raw, modules) = match raw_blob(args)
+        .and_then(|raw| image_modules(args, map_path.as_deref()).map(|modules| (raw, modules)))
+    {
+        Ok(found) => found,
         Err(error) => {
             let _ = writeln!(out, "{error}");
             return 2;
@@ -251,6 +266,7 @@ fn run(
             TABLE_CEILING,
             text,
             &modules,
+            raw.as_ref(),
             out,
         ) {
             Ok(hazards) => hazards,

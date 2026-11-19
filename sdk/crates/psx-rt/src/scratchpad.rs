@@ -67,6 +67,15 @@
 //!   overflows) the scratchpad.
 //! * Nesting. A call made while already on a scratchpad stack runs `f` in
 //!   place, and the guard counts it as part of the outer call tree.
+//!
+//! # The two forms
+//!
+//! [`ScratchpadStack::call`] runs a known function, [`StackEntry::enter`],
+//! with one context pointer: the switch is ten instructions and the entry
+//! function is a jump straight into `enter`, so it costs nothing a
+//! hand-written switch would not. [`ScratchpadStack::run`] takes any closure
+//! on the same switch, and keeps the closure and its result in the caller's
+//! frame.
 
 use core::mem::{ManuallyDrop, MaybeUninit};
 
@@ -86,6 +95,83 @@ pub const STACK_OVERHEAD: usize = 20;
 /// The value the `scratchpad-stack-check` feature keeps in a stack region's
 /// bottom word.
 pub const CANARY: u32 = 0x5c4a_7c4d;
+
+#[repr(C, align(16))]
+struct AlignedScratchpad([u8; SIZE]);
+
+// Give LLVM an absolute object instead of manufacturing an integer-derived pointer at every call
+// site. The symbol occupies no EXE or main-RAM space.
+#[cfg(target_arch = "mips")]
+core::arch::global_asm!(
+    ".globl __psoxide_scratchpad",
+    ".set __psoxide_scratchpad, {base}",
+    base = const psx_hw::memory::scratchpad::BASE,
+);
+
+#[cfg(target_arch = "mips")]
+unsafe extern "C" {
+    static mut __psoxide_scratchpad: AlignedScratchpad;
+}
+
+// Native tests exercise the same pointer API and layouts without fabricating a PS1 address. This
+// storage never ships in a MIPS executable.
+#[cfg(not(target_arch = "mips"))]
+static mut HOST_SCRATCHPAD: AlignedScratchpad = AlignedScratchpad([0; SIZE]);
+
+/// Base address of the scratchpad as a byte pointer, 16-byte aligned (on the host, a private
+/// block of the same size and alignment).
+///
+/// # Safety
+///
+/// The caller must coordinate all live ranges in the scratchpad. There is no allocator because
+/// render phases deliberately reuse the same bytes after earlier consumers have finished; name
+/// each range as a [`Region`] and check the live sets with [`assert_disjoint`].
+#[inline(always)]
+#[must_use]
+pub unsafe fn base_ptr() -> *mut u8 {
+    #[cfg(target_arch = "mips")]
+    {
+        core::ptr::addr_of_mut!(__psoxide_scratchpad).cast::<u8>()
+    }
+
+    #[cfg(not(target_arch = "mips"))]
+    {
+        core::ptr::addr_of_mut!(HOST_SCRATCHPAD).cast::<u8>()
+    }
+}
+
+/// A typed pointer at `byte_offset` within the scratchpad.
+///
+/// # Safety
+///
+/// The caller must reserve a suitably aligned, non-overlapping range large enough for every value
+/// addressed through the returned pointer. No reference into that range may outlive the operation
+/// which owns the reservation.
+#[inline(always)]
+#[must_use]
+pub unsafe fn ptr_at<T>(byte_offset: usize) -> *mut T {
+    debug_assert!(byte_offset <= SIZE.saturating_sub(core::mem::size_of::<T>()));
+    debug_assert!(byte_offset.is_multiple_of(core::mem::align_of::<T>()));
+    // SAFETY: forwarded contract; the offset stays inside the scratchpad (checked in debug builds).
+    unsafe { base_ptr().add(byte_offset).cast::<T>() }
+}
+
+/// Zero the whole scratchpad, so the first consumer starts from deterministic contents.
+///
+/// # Safety
+///
+/// Call only while no scratchpad-backed working set is live.
+#[inline]
+pub unsafe fn clear() {
+    // SAFETY: forwarded contract; word 0 is in range and 4-aligned (the base is 16-aligned).
+    let words = unsafe { ptr_at::<u32>(0) };
+    let mut index = 0usize;
+    while index < SIZE / core::mem::size_of::<u32>() {
+        // SAFETY: `index` stays below the scratchpad's word count.
+        unsafe { words.add(index).write(0) };
+        index += 1;
+    }
+}
 
 /// A byte range `start..end` of the scratchpad.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -160,6 +246,40 @@ pub const fn assert_disjoint(regions: &[Region]) {
     }
 }
 
+/// A function that runs as the root of a scratchpad stack call, given one
+/// context pointer ([`ScratchpadStack::call`]).
+///
+/// `enter` is the first real frame on the scratchpad stack: the switch reaches
+/// it through a two-instruction jump with no frame of its own, so a known
+/// function costs no more than the switch. Implement it on a type that names
+/// the call:
+///
+/// ```
+/// use psx_rt::scratchpad::{ScratchpadStack, StackEntry};
+///
+/// struct Walk;
+/// impl StackEntry for Walk {
+///     unsafe extern "C" fn enter(context: *mut u8) {
+///         // SAFETY: the caller passes a live `u32`.
+///         unsafe { *context.cast::<u32>() += 1 };
+///     }
+/// }
+///
+/// let mut count = 0u32;
+/// // SAFETY: on the host `call` only calls `enter`.
+/// unsafe { ScratchpadStack::<128, 1024>::call::<Walk>((&raw mut count).cast()) };
+/// assert_eq!(count, 1);
+/// ```
+pub trait StackEntry {
+    /// The call. `context` is the pointer given to [`ScratchpadStack::call`].
+    ///
+    /// # Safety
+    ///
+    /// The contract of [`ScratchpadStack::call`], plus whatever `context`
+    /// must point to for this entry.
+    unsafe extern "C" fn enter(context: *mut u8);
+}
+
 /// A call stack in scratchpad bytes `START..END`.
 ///
 /// The stack grows down from `END - 16`; the bottom word at `START` is the
@@ -200,9 +320,43 @@ impl<const START: usize, const END: usize> ScratchpadStack<START, END> {
     /// the build when the linked tree needs more.
     pub const BUDGET: usize = Self::REGION.len() - STACK_OVERHEAD;
 
+    /// Run `E::enter(context)` with `$sp` in this region.
+    ///
+    /// The lean form: a 4-instruction `$sp` test, then the 10-instruction
+    /// switch, which jumps through [`stack_entry_fn`](Self::stack_entry_fn)
+    /// straight into `enter`. Already on a scratchpad stack, it calls `enter`
+    /// in place. On the host there is no scratchpad and it only calls `enter`.
+    ///
+    /// # Safety
+    ///
+    /// As [`run`](Self::run), with `enter`'s call tree in place of `f`'s,
+    /// and `context` valid for `enter`.
+    #[inline(always)]
+    pub unsafe fn call<E: StackEntry>(context: *mut u8) {
+        // Force the layout checks for every instantiation.
+        let region = Self::REGION;
+        #[cfg(feature = "scratchpad-window")]
+        let in_window = crate::scratchpad_window::is_active();
+        #[cfg(not(feature = "scratchpad-window"))]
+        let in_window = false;
+        if is_on_scratchpad_stack() || in_window {
+            // SAFETY: forwarded contract; a nested call runs on the stack it is on.
+            unsafe { E::enter(context) };
+            return;
+        }
+        #[cfg(feature = "scratchpad-stack-check")]
+        check::before(region);
+        // SAFETY: the stack top is 8-byte aligned and inside the scratchpad
+        // (REGION's checks); `stack_entry_fn::<E>` runs `E::enter(context)`.
+        // The caller upholds the rest.
+        unsafe { call_on_stack(context, Self::stack_entry_fn::<E>, BASE + region.end() - 16) };
+        #[cfg(feature = "scratchpad-stack-check")]
+        check::after(region);
+    }
+
     /// Run `f` with `$sp` in this region and return its result.
     ///
-    /// The switch is a 16-instruction trampoline after a 4-instruction `$sp`
+    /// The switch is a 10-instruction trampoline after a 4-instruction `$sp`
     /// test. Already on a scratchpad stack, it calls `f` in place. On the host there is no scratchpad and
     /// it only calls `f`.
     ///
@@ -252,15 +406,37 @@ impl<const START: usize, const END: usize> ScratchpadStack<START, END> {
         unsafe { frame.result.assume_init() }
     }
 
-    /// First function on the scratchpad stack. `stack-guard` finds
-    /// every monomorphised copy by this name and reads `START`/`END` from
-    /// the symbol, so do not rename it without updating the tool.
+    /// First function on the scratchpad stack for [`run`](Self::run).
+    /// `stack-guard` finds every monomorphised copy of it and of
+    /// [`stack_entry_fn`](Self::stack_entry_fn) by name and reads
+    /// `START`/`END` from the symbol, so do not rename them without updating
+    /// the tool.
     unsafe extern "C" fn stack_entry<R, F: FnOnce() -> R>(frame: *mut u8) {
         // SAFETY: `run` passes its own live `Frame<F, R>`.
         let frame = unsafe { &mut *frame.cast::<Frame<F, R>>() };
         // SAFETY: taken exactly once; `run` never drops `frame.f` itself.
         let f = unsafe { ManuallyDrop::take(&mut frame.f) };
         frame.result.write(f());
+    }
+
+    /// First function on the scratchpad stack for [`call`](Self::call): a
+    /// jump to `E::enter`, with no frame.
+    #[cfg(target_arch = "mips")]
+    #[unsafe(naked)]
+    unsafe extern "C" fn stack_entry_fn<E: StackEntry>(_context: *mut u8) {
+        core::arch::naked_asm!(
+            ".set noreorder",
+            "j {enter}",
+            "nop",
+            ".set reorder",
+            enter = sym E::enter,
+        )
+    }
+
+    #[cfg(not(target_arch = "mips"))]
+    unsafe extern "C" fn stack_entry_fn<E: StackEntry>(context: *mut u8) {
+        // SAFETY: forwarded from `call`.
+        unsafe { E::enter(context) }
     }
 }
 
@@ -283,13 +459,15 @@ pub fn is_on_scratchpad_stack() -> bool {
     }
 }
 
-// void __psx_rt_call_on_stack(void *frame, void (*entry)(void *), void *sp)
+// void __psx_rt_call_on_stack(void *context, void (*entry)(void *), void *sp)
 //
-// Saves the caller's $sp in $s0 (callee-saved, so the entry preserves it)
-// and in __psx_rt_scratchpad_return_sp (for the panic handler), sets $sp in
-// the call's delay slot, calls entry(frame), then restores. Its own 24-byte
-// frame stays on the caller's stack. An IRQ in the delay slot re-executes
-// the jalr and the move, which are idempotent.
+// Saves the caller's $sp and $ra in __psx_rt_scratchpad_return_sp (the RAM
+// $sp is also what the panic handler returns to), sets $sp in the call's delay
+// slot, calls entry(context), then restores both from the record and clears its
+// $sp word in the return's delay slot. No frame and no callee-saved register:
+// one switch is in progress at a time (a nested call runs in place), and the
+// entry's call tree hands $sp back unchanged. An IRQ in the jalr's delay slot
+// re-executes the jalr and the move, which are idempotent. Ten instructions.
 #[cfg(target_arch = "mips")]
 core::arch::global_asm!(
     r#"
@@ -299,22 +477,16 @@ core::arch::global_asm!(
     .globl __psx_rt_call_on_stack
     .type __psx_rt_call_on_stack,@function
 __psx_rt_call_on_stack:
-    addiu $sp, $sp, -24
-    sw    $ra, 20($sp)
-    sw    $s0, 16($sp)
-    move  $s0, $sp
     lui   $t0, %hi(__psx_rt_scratchpad_return_sp)
     sw    $sp, %lo(__psx_rt_scratchpad_return_sp)($t0)
-    move  $t9, $a1
-    jalr  $t9
+    sw    $ra, %lo(__psx_rt_scratchpad_return_sp+4)($t0)
+    jalr  $a1
     move  $sp, $a2
     lui   $t0, %hi(__psx_rt_scratchpad_return_sp)
-    sw    $zero, %lo(__psx_rt_scratchpad_return_sp)($t0)
-    move  $sp, $s0
-    lw    $ra, 20($sp)
-    lw    $s0, 16($sp)
+    lw    $ra, %lo(__psx_rt_scratchpad_return_sp+4)($t0)
+    lw    $sp, %lo(__psx_rt_scratchpad_return_sp)($t0)
     jr    $ra
-    addiu $sp, $sp, 24
+    sw    $zero, %lo(__psx_rt_scratchpad_return_sp)($t0)
     .size __psx_rt_call_on_stack, .-__psx_rt_call_on_stack
 
     # Its own section: the panic handler keeps this one in every guest, and
@@ -332,39 +504,45 @@ __psx_rt_jump_on_stack:
     "#
 );
 
-/// The RAM `$sp` below the frame of the outermost [`ScratchpadStack::run`]
-/// in progress; zero when none is.
+/// The switch's save record: the caller's RAM `$sp` (zero when no switch is
+/// in progress) and its `$ra`. 8-aligned, so `%hi` of both words is the same.
+#[cfg(target_arch = "mips")]
+#[repr(C, align(8))]
+pub(crate) struct SwitchRecord([usize; 2]);
+
+/// The record of the outermost [`ScratchpadStack::call`] in progress. Its
+/// first word is also set by a scratchpad window's level-1 switch.
 #[cfg(target_arch = "mips")]
 #[no_mangle]
-pub(crate) static mut __psx_rt_scratchpad_return_sp: usize = 0;
+pub(crate) static mut __psx_rt_scratchpad_return_sp: SwitchRecord = SwitchRecord([0; 2]);
 
 #[cfg(target_arch = "mips")]
 extern "C" {
-    fn __psx_rt_call_on_stack(frame: *mut u8, entry: unsafe extern "C" fn(*mut u8), sp: usize);
+    fn __psx_rt_call_on_stack(context: *mut u8, entry: unsafe extern "C" fn(*mut u8), sp: usize);
     fn __psx_rt_jump_on_stack(arg: *const u8, sp: usize, entry: extern "C" fn(*const u8) -> !)
         -> !;
 }
 
 #[cfg(target_arch = "mips")]
 #[inline(always)]
-unsafe fn call_on_stack(frame: *mut u8, entry: unsafe extern "C" fn(*mut u8), sp: usize) {
-    // SAFETY: the caller (`ScratchpadStack::run`) passes a live frame, the entry that matches it,
-    // and an 8-byte-aligned stack top inside the scratchpad. The trampoline saves $ra and $s0 on
-    // the RAM stack, switches $sp, calls `entry(frame)`, and restores $sp, so the O32 contract
-    // holds across it.
-    unsafe { __psx_rt_call_on_stack(frame, entry, sp) }
+unsafe fn call_on_stack(context: *mut u8, entry: unsafe extern "C" fn(*mut u8), sp: usize) {
+    // SAFETY: the caller (`ScratchpadStack::call`) passes the entry that matches `context` and an
+    // 8-byte-aligned stack top inside the scratchpad. The trampoline keeps $ra and $sp in its
+    // record, switches $sp, calls `entry(context)`, and restores both, so the O32 contract holds
+    // across it.
+    unsafe { __psx_rt_call_on_stack(context, entry, sp) }
 }
 
 #[cfg(not(target_arch = "mips"))]
 #[inline(always)]
-unsafe fn call_on_stack(frame: *mut u8, entry: unsafe extern "C" fn(*mut u8), _sp: usize) {
-    // SAFETY: the caller passes a live frame and the entry that matches it, as on the target; the
-    // host has no scratchpad, so `entry` simply runs on the current stack.
-    unsafe { entry(frame) }
+unsafe fn call_on_stack(context: *mut u8, entry: unsafe extern "C" fn(*mut u8), _sp: usize) {
+    // SAFETY: the caller passes the entry that matches `context`, as on the target; the host has
+    // no scratchpad, so `entry` simply runs on the current stack.
+    unsafe { entry(context) }
 }
 
 /// If a panic starts on a scratchpad stack, continue `report(arg)` on the
-/// RAM stack the outermost [`ScratchpadStack::run`] left, and never
+/// RAM stack the outermost [`ScratchpadStack::call`] left, and never
 /// return. Returns when the panic is already on the RAM stack.
 #[cfg(target_arch = "mips")]
 #[inline(always)]
@@ -374,7 +552,7 @@ pub(crate) fn leave_for_panic(arg: *const u8, report: extern "C" fn(*const u8) -
     }
     // SAFETY: a plain read; the value is either zero or a RAM stack
     // pointer below every live RAM frame.
-    let sp = unsafe { core::ptr::read_volatile(&raw const __psx_rt_scratchpad_return_sp) };
+    let sp = unsafe { core::ptr::read_volatile(&raw const __psx_rt_scratchpad_return_sp.0[0]) };
     if sp != 0 {
         // SAFETY: nothing on the scratchpad stack is used again.
         unsafe { __psx_rt_jump_on_stack(arg, sp, report) }
@@ -423,6 +601,20 @@ mod check {
 mod tests {
     extern crate std;
     use super::*;
+
+    #[test]
+    fn typed_regions_share_one_aligned_backing() {
+        // SAFETY: the test owns the host scratchpad block for its duration (tests of this
+        // module that touch it take no other reference into it).
+        unsafe {
+            clear();
+            ptr_at::<u32>(0).write(0x7654_3210);
+            ptr_at::<u16>(4).write(0xabcd);
+            assert_eq!(ptr_at::<u32>(0).read(), 0x7654_3210);
+            assert_eq!(ptr_at::<u16>(4).read(), 0xabcd);
+            assert_eq!(base_ptr() as usize % 16, 0);
+        }
+    }
 
     const HEADS: Region = Region::new(0, 128);
     const PLANES: Region = Region::new(128, 224);
@@ -479,5 +671,21 @@ mod tests {
         };
         assert_eq!((touched, len, words), (1, 5, [7; 9]));
         assert!(!is_on_scratchpad_stack());
+    }
+
+    struct AddTwo;
+    impl StackEntry for AddTwo {
+        unsafe extern "C" fn enter(context: *mut u8) {
+            // SAFETY: the test passes a live `u32`.
+            unsafe { *context.cast::<u32>() += 2 };
+        }
+    }
+
+    #[test]
+    fn call_runs_the_entry_with_its_context() {
+        let mut value = 40u32;
+        // SAFETY: as above, the host only calls the entry.
+        unsafe { Stack::call::<AddTwo>((&raw mut value).cast()) };
+        assert_eq!(value, 42);
     }
 }

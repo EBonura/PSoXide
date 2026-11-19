@@ -50,9 +50,10 @@ lto           = true
 
 [features]
 # Measurement builds only: tag projections with a primitive class through
-# PSoXide's emulator-only class port so `frontend launch --sort-log` splits
-# depth-sort errors by class pair. Retail hardware ignores the writes.
-sort-probe = []
+# PSoXide's emulator-only class port (`psx_telemetry::emit::sort_class`) so
+# `frontend launch --sort-log` splits depth-sort errors by class pair. It turns
+# on psx-telemetry's `emit`, so the engine's own telemetry writes run too.
+sort-probe = ["psx-telemetry/emit"]
 # Measurement builds only: `stance-hud-open` keeps the stance HUD unfolded and `stance-hud-off` draws
 # none, so its cost is the difference of two runs of one route (`EDITOR_PLAYTEST_FEATURES`).
 stance-hud-open = []
@@ -60,11 +61,6 @@ stance-hud-off = []
 default = [
     "cd-stream-bench",
     "ot-2048",
-    # VBlank-kicked presentation: +26% fps with one enemy on screen (19.8 to
-    # 25.0). Frames that would fence early beside a queued frame, such as
-    # with two melee enemies, go double-buffered instead (choose_present_queue).
-    # Stress harness, 2026-10-03.
-    "present-queue",
 ]
 # Write the save a card transaction a frame (psx-mc CardJob) instead of one blocking write at a calm
 # moment: no hitch, about 5 KB more heap.
@@ -88,13 +84,11 @@ far-cards = ["cd-stream-bench"]
 far-skin = []
 # Measurement builds: one debug line per far-card event (card_trace.rs).
 card-trace = ["cd-stream-bench", "emulator-telemetry"]
-# Pad polled by the interrupt-driven engine (see psx-engine `pad-irq`).
-pad-irq = ["psx-engine/pad-irq"]
 # Per-update `camera-pose` debug lines only; fits builds that overflow RAM with
 # the full emulator-telemetry feature (Graybox Reach).
 camera-pose-log = ["psx-engine/debug-log"]
 # One `sim-state` line per fixed tick (player, camera, entities) for the
-# cycle-independent sim-state gate (tools/grid_simgate.sh). Implies the
+# cycle-independent sim-state gate. Implies the
 # `camera-pose-log` line.
 sim-trace = ["camera-pose-log"]
 hardware-boot-visual = ["psx-engine/hardware-boot-visual"]
@@ -103,13 +97,6 @@ hardware-boot-visual = ["psx-engine/hardware-boot-visual"]
 # and draw packets, so probe builds request it explicitly via
 # EDITOR_PLAYTEST_FEATURES="... vert-debug-overlay".
 vert-debug-overlay = ["psx-engine/vert-debug"]
-# Hand every gameplay frame to psx-rt's VBlank-kicked present queue
-# (RenderSubmission::PresentQueue) instead of kicking it from the runner.
-present-queue = ["psx-engine/present-queue"]
-# Read the pads from the interrupt-driven pad engine instead of polling them
-# from the frame loop (sdk/docs/PAD-IRQ-ENGINE.md). Build with
-# EDITOR_PLAYTEST_FEATURES="<defaults> pad-irq-engine".
-pad-irq-engine = ["psx-engine/pad-irq-engine"]
 room-surface-profile = ["psx-engine/room-surface-profile"]
 # Diagnostic-only cadence for semantic A/B comparisons. Render exactly once
 # per two fixed simulation ticks even when wall-clock VBlanks have accumulated,
@@ -147,11 +134,12 @@ psx-math   = { path = "../../../sdk/crates/psx-math" }
 psx-pad    = { path = "../../../sdk/crates/psx-pad" }
 psx-residency = { path = "../../../sdk/crates/psx-residency" }
 psx-mc     = { path = "../../../sdk/crates/psx-mc" }
-# hazard-trampolines-256: with every delay-slot filler search on, PGO builds
-# can need more than the default 96 trampoline words (a profile-driven layout
-# filled the array with one jump table's entries).
+# tools/build_guest_staged.sh sets PSX_HAZARD_TRAMPOLINE_WORDS=256: with every delay-slot filler
+# search on, PGO builds can need more than the default 96 trampoline words (a profile-driven
+# layout filled the array with one jump table's entries).
 # No `alloc` feature: the heap is `reuse_heap.rs`, which reuses what is freed.
-psx-rt     = { path = "../../../sdk/crates/psx-rt", features = ["hazard-trampolines-256"] }
+psx-rt     = { path = "../../../sdk/crates/psx-rt" }
 psx-spu    = { path = "../../../sdk/crates/psx-spu" }
+psx-telemetry = { path = "../../../sdk/crates/psx-telemetry" }
 psx-vram   = { path = "../../../sdk/crates/psx-vram" }
 psxed-format = { path = "../../../crates/psxed-format" }

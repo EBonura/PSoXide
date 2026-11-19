@@ -63,7 +63,31 @@ pub mod irq {
     /// Interrupt flag write that acknowledges every pending code.
     pub const ACK_ALL: u8 = ALL;
     /// Interrupt flag write bit that also empties the parameter FIFO.
+    ///
+    /// Written on its own, never combined with an acknowledge: `0x5F` does
+    /// both on the console, but PCSX-Redux takes only `0x07` or `0x1F` as an
+    /// acknowledge, reads `0x5F` as a parameter reset alone and stalls. The
+    /// BIOS and commercial libraries write the two separately.
     pub const CLEAR_PARAMETER_FIFO: u8 = 0x40;
+    /// Interrupt flag write that acknowledges the response code (INT1..INT5).
+    ///
+    /// The code is a three-bit number, not three flags, so it is cleared as a
+    /// whole with `0x07`, as the BIOS and commercial libraries do. Writing the
+    /// code itself (`0x03` for INT3) also clears it on the console, because
+    /// each set bit clears its own flag, but PCSX-Redux accepts only `0x07` or
+    /// `0x1F` as an acknowledge and stops on anything else.
+    pub const ACK_RESPONSE: u8 = 0x07;
+
+    /// The interrupt flag write that acknowledges `bits`: any nonzero `bits`
+    /// clears the whole response code ([`ACK_RESPONSE`]); `0` clears nothing.
+    #[must_use]
+    pub const fn acknowledge_value(bits: u8) -> u8 {
+        if bits == 0 {
+            0
+        } else {
+            (bits | ACK_RESPONSE) & ACK_ALL
+        }
+    }
 }
 
 /// Bits of the volume-apply register (index 3 of [`reg::REQUEST_IRQ`], write).
@@ -251,5 +275,29 @@ mod tests {
         );
         assert_eq!(irq::ACK_ALL, 0x1f);
         assert_eq!(request::WANT_DATA, 0x80);
+    }
+
+    #[test]
+    fn every_acknowledge_clears_the_code_and_is_one_pcsx_redux_accepts() {
+        for code in [
+            irq::DATA_READY,
+            irq::COMPLETE,
+            irq::ACKNOWLEDGE,
+            irq::DATA_END,
+            irq::ERROR,
+            irq::ACK_ALL,
+        ] {
+            let value = irq::acknowledge_value(code);
+            // The console clears each flag bit written as one.
+            assert_eq!(code & !value, 0, "code {code:#04x}");
+            // PCSX-Redux acknowledges only these two values.
+            assert!(
+                value == 0x07 || value == 0x1f,
+                "code {code:#04x} writes {value:#04x}"
+            );
+            // No reset bits ride along.
+            assert_eq!(value & !irq::ACK_ALL, 0);
+        }
+        assert_eq!(irq::acknowledge_value(0), 0);
     }
 }

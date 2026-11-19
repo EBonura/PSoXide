@@ -33,9 +33,12 @@ use alloc::{format, vec};
 
 pub mod boot;
 pub mod exe;
+pub mod files;
 pub mod iso9660;
+pub mod receipt;
 pub use boot::{load_boot_exe_from_disc, BootError, BootExe};
 pub use exe::{pad_to_payload, Exe, ExeError, EXE_HEADER_BYTES};
+pub use files::{DiscFile, FileError};
 pub use iso9660::{
     default_system_cnf, protect_mode1, protect_mode2_form1, protect_mode2_form2, sector_edc,
     sector_edc_continue, write_sector_parity, IsoBuilder, IsoFile, XA_SECTOR_SIZE,
@@ -261,14 +264,13 @@ pub const fn cd_stream_bench_expected_byte(index: usize, sectors: usize) -> u8 {
 pub fn cd_stream_bench_expected_checksum(sectors: usize) -> u32 {
     let sectors = sectors.max(1);
     let len = sectors.saturating_mul(SECTOR_USER_DATA_BYTES);
-    let mut hash = 0x811c_9dc5u32;
+    let mut hash = psx_pack::Fnv32::new();
     let mut i = 0usize;
     while i < len {
-        hash ^= cd_stream_bench_expected_byte(i, sectors) as u32;
-        hash = hash.wrapping_mul(0x0100_0193);
+        hash.push(cd_stream_bench_expected_byte(i, sectors));
         i += 1;
     }
-    hash
+    hash.finish()
 }
 
 const fn sectors_for_bytes(bytes: usize) -> u32 {
@@ -435,14 +437,7 @@ pub fn build_world_pack_layout(chunks: &[(u32, &[u8])]) -> WorldPackLayout {
     }
 }
 
-fn fnv1a32(bytes: &[u8]) -> u32 {
-    let mut hash = 0x811c_9dc5u32;
-    for &byte in bytes {
-        hash ^= byte as u32;
-        hash = hash.wrapping_mul(0x0100_0193);
-    }
-    hash
-}
+use psx_pack::fnv1a32;
 
 fn write_le_u32_at(dst: &mut [u8], offset: usize, value: u32) {
     dst[offset..offset + 4].copy_from_slice(&value.to_le_bytes());

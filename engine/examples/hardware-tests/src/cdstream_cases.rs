@@ -24,7 +24,7 @@
 //!
 //! Each case leaves timing-block records (`0x2F0`, `0x300`, `0x310`) in the
 //! capture; the layouts are in each function's doc and in
-//! tools/hwtest-report.py. They install and remove the transport themselves,
+//! psoxide-hwtest (report.rs). They install and remove the transport themselves,
 //! so a case is safe to run after the others; run them after the full
 //! characterisation, which they would otherwise disturb (the transport's
 //! exception wrapper stays in the vector after it is removed).
@@ -364,7 +364,7 @@ fn expected_word(word: u32, sectors: u32) -> u32 {
 /// Do the `sectors` sectors at `buffer`, which hold file sectors
 /// `file_sector..`, carry the pattern? `stride` checks one word in that many.
 #[inline(never)]
-fn verify(buffer: *const u32, file_sector: u32, sectors: u32, stride: u32) -> bool {
+pub(crate) fn verify(buffer: *const u32, file_sector: u32, sectors: u32, stride: u32) -> bool {
     let total = FILE_SECTORS;
     let first_word = file_sector * SECTOR_WORDS as u32;
     let mut word = 0;

@@ -190,14 +190,13 @@ pub mod raw {
     /// The value arms the next transfer on `ch`: the caller takes on
     /// [`super::start`]'s contract for whatever transfer later starts with it.
     ///
-    /// With the `present-queue` feature, a store to the GPU channel first
+    /// A store to the GPU channel first
     /// runs an armed direct-access guard (`gpu::arm_direct_access_guard`),
     /// so it never re-arms the channel under a queued walk. Every GPU DMA
     /// start, [`super::start`] included, goes through here.
     #[doc(alias = "MADR")]
     #[inline(always)]
     pub unsafe fn set_address(ch: Channel, addr: u32) {
-        #[cfg(feature = "present-queue")]
         if matches!(ch, Channel::Gpu) {
             crate::gpu::run_direct_access_guard();
         }
@@ -264,7 +263,7 @@ pub fn is_busy(ch: Channel) -> bool {
 /// Enable a channel without disturbing the others.
 ///
 /// The read-modify-write of the global enable register runs with CPU
-/// interrupts masked: with the `present-queue` feature the VBlank handler
+/// interrupts masked: the VBlank handler (the present queue's kick)
 /// sets the GPU channel's bit in the same register, and a handler that ran
 /// between this read and write would have its bit overwritten.
 pub fn enable_channel(ch: Channel) {
@@ -275,6 +274,74 @@ pub fn enable_channel(ch: Channel) {
         // channel starts no transfer.
         unsafe { crate::write_u32(reg::DPCR, enabled | (1 << ch.enable_bit())) }
     });
+}
+
+/// The `DICR` word that lets `ch` raise the DMA interrupt, given the register
+/// as read: its force bit and enables stay, the master enable is set, and the
+/// completion flags are written as 0, which leaves them as they are.
+#[inline(always)]
+const fn irq_enable_word(dicr: u32, ch: Channel) -> u32 {
+    (dicr & reg::DICR_WRITABLE) | reg::DICR_MASTER_ENABLE | reg::dicr_irq_enable(ch as u32)
+}
+
+/// The `DICR` word that clears `ch`'s completion flag and no other: the
+/// writable bits as read, the flag bit of `ch` as the only 1 above bit 23.
+#[inline(always)]
+const fn irq_acknowledge_word(dicr: u32, ch: Channel) -> u32 {
+    (dicr & reg::DICR_WRITABLE) | reg::dicr_irq_flag(ch as u32)
+}
+
+/// Let `ch` raise the DMA interrupt when it finishes a transfer.
+///
+/// Sets the channel's enable bit and the master enable, keeps every other
+/// enable, and leaves every pending completion flag as it is (the register
+/// clears a flag only when a 1 is written to it, so the write carries 0 there).
+/// The caller still unmasks the DMA source in the interrupt mask
+/// ([`irq::set_mask`](crate::irq::set_mask)) and installs the handler.
+///
+/// The read-modify-write runs with CPU interrupts masked, like
+/// [`enable_channel`], because a handler acknowledging a channel does the same
+/// read-modify-write.
+#[doc(alias = "DICR")]
+pub fn enable_irq(ch: Channel) {
+    crate::irq::without_interrupts(|| {
+        // SAFETY: a side-effect-free read of the global interrupt register.
+        let dicr = unsafe { crate::read_u32(reg::DICR) };
+        // SAFETY: sets one channel's interrupt enable and keeps the rest; it
+        // starts no transfer and clears no flag.
+        unsafe { crate::write_u32(reg::DICR, irq_enable_word(dicr, ch)) }
+    });
+}
+
+/// Whether `ch` has finished a transfer with its interrupt enabled and not
+/// yet been acknowledged.
+#[doc(alias = "DICR")]
+#[must_use]
+#[inline(always)]
+pub fn is_irq_flagged(ch: Channel) -> bool {
+    // SAFETY: a side-effect-free read of the global interrupt register.
+    let dicr = unsafe { crate::read_u32(reg::DICR) };
+    dicr & reg::dicr_irq_flag(ch as u32) != 0
+}
+
+/// Clear `ch`'s completion flag and say whether it was set.
+///
+/// Writes a 1 to this channel's flag only: the other channels' pending flags
+/// are written as 0 and stay pending, and the enables and master enable are
+/// written back as read. The read-modify-write runs with CPU interrupts
+/// masked, as for [`enable_irq`]; from a handler that costs nothing, since
+/// they are already masked.
+#[doc(alias = "DICR")]
+#[must_use = "the flag says whether the channel had raised the interrupt; discard it with `let _ =`"]
+pub fn acknowledge_irq(ch: Channel) -> bool {
+    crate::irq::without_interrupts(|| {
+        // SAFETY: a side-effect-free read of the global interrupt register.
+        let dicr = unsafe { crate::read_u32(reg::DICR) };
+        // SAFETY: writes the enables back as read and a 1 on this channel's
+        // completion flag, which only clears that flag.
+        unsafe { crate::write_u32(reg::DICR, irq_acknowledge_word(dicr, ch)) };
+        dicr & reg::dicr_irq_flag(ch as u32) != 0
+    })
 }
 
 impl OrderingTableClearDma {
@@ -363,6 +430,14 @@ impl SpuDma {
             return false;
         };
         enable_channel(Channel::Spu);
+        self.write_counted(words, block_words, block_count)
+    }
+
+    /// [`write_blocks`](Self::write_blocks) with the block count worked out and the
+    /// channel enabled by the caller (`enable_channel(Channel::Spu)`): `words` is
+    /// exactly `block_count` blocks of `block_words` words, neither zero. For a caller
+    /// that sends many pieces and divides and enables once.
+    pub fn write_counted(&mut self, words: &[u32], block_words: u16, block_count: u16) -> bool {
         // SAFETY: the transfer reads `block_words * block_count` words from
         // `words`, which is exactly the slice (a whole number of non-empty
         // blocks, checked above), borrowed until this function returns. The
@@ -430,6 +505,11 @@ pub fn wait_done(ch: Channel, spins: u32) -> bool {
 /// CD channel's console wedges were (START latched, MADR frozen). Burst-mode
 /// channels without chopping need no assumption; see
 /// [`OrderingTableClearDma::clear_table`].
+///
+/// Always inlined: a sample-profiled caller (Half-Life's `psx_spu::dma_write`) otherwise keeps
+/// or drops it at the edge of the hot-call threshold, so an unrelated edit in the program moves
+/// an out-of-line copy (152 B) in and out of the image.
+#[inline(always)]
 pub fn wait_or_abort(ch: Channel, spins: u32) -> bool {
     let done = wait_done(ch, spins);
     if !done {
@@ -464,6 +544,129 @@ mod tests {
             reg::CHANNEL_BASE + 6 * reg::CHANNEL_STRIDE
         );
         assert_eq!(Channel::OrderingTableClear.enable_bit(), 27);
+    }
+
+    /// The interrupt register as the controller behaves (nocash PSX-SPX "DMA
+    /// Channels"): bits 0..=23 keep what is written, a 1 written to a flag bit
+    /// (24..=30) clears that flag and a 0 leaves it, bit 31 is the read-only
+    /// master flag (force bit, or master enable with an enabled channel's flag).
+    #[derive(Default)]
+    struct Dicr {
+        low: u32,
+        flags: u32,
+    }
+
+    impl Dicr {
+        fn read(&self) -> u32 {
+            let enables = (self.low >> 16) & 0x7f;
+            let raised =
+                self.low & reg::DICR_MASTER_ENABLE != 0 && enables & (self.flags >> 24) != 0;
+            let master = self.low & (1 << 15) != 0 || raised;
+            self.low | self.flags | (u32::from(master) << 31)
+        }
+
+        fn write(&mut self, value: u32) {
+            self.low = value & 0x00ff_ffff;
+            self.flags &= !(value & 0x7f00_0000);
+        }
+
+        /// A channel finishing: the flag sets only when its enable is set.
+        fn finish(&mut self, ch: Channel) {
+            if self.low & reg::dicr_irq_enable(ch as u32) != 0 {
+                self.flags |= reg::dicr_irq_flag(ch as u32);
+            }
+        }
+    }
+
+    #[test]
+    fn irq_bits_follow_psx_spx() {
+        assert_eq!(reg::dicr_irq_enable(Channel::MdecIn as u32), 0x0001_0000);
+        assert_eq!(reg::dicr_irq_enable(Channel::Gpu as u32), 0x0004_0000);
+        assert_eq!(
+            reg::dicr_irq_enable(Channel::OrderingTableClear as u32),
+            0x0040_0000
+        );
+        assert_eq!(reg::DICR_MASTER_ENABLE, 0x0080_0000);
+        assert_eq!(reg::dicr_irq_flag(Channel::MdecIn as u32), 0x0100_0000);
+        assert_eq!(reg::dicr_irq_flag(Channel::Gpu as u32), 0x0400_0000);
+        assert_eq!(
+            reg::dicr_irq_flag(Channel::OrderingTableClear as u32),
+            0x4000_0000
+        );
+    }
+
+    #[test]
+    fn enabling_a_channel_sets_its_bit_and_the_master_and_keeps_the_rest() {
+        let mut dicr = Dicr::default();
+        dicr.write(irq_enable_word(dicr.read(), Channel::Cd));
+        dicr.write(irq_enable_word(dicr.read(), Channel::Gpu));
+        assert_eq!(
+            dicr.read(),
+            reg::DICR_MASTER_ENABLE | reg::dicr_irq_enable(3) | reg::dicr_irq_enable(2)
+        );
+    }
+
+    #[test]
+    fn enabling_a_channel_does_not_clear_another_channels_pending_flag() {
+        let mut dicr = Dicr::default();
+        dicr.write(irq_enable_word(dicr.read(), Channel::Cd));
+        dicr.finish(Channel::Cd);
+        assert_ne!(dicr.read() & reg::dicr_irq_flag(3), 0);
+        dicr.write(irq_enable_word(dicr.read(), Channel::Gpu));
+        assert_ne!(dicr.read() & reg::dicr_irq_flag(3), 0);
+    }
+
+    #[test]
+    fn acknowledging_one_channel_leaves_the_others_flags_and_every_enable() {
+        let mut dicr = Dicr::default();
+        for ch in [Channel::Gpu, Channel::Cd, Channel::Spu] {
+            dicr.write(irq_enable_word(dicr.read(), ch));
+            dicr.finish(ch);
+        }
+        let before = dicr.read();
+        let flagged = before & reg::dicr_irq_flag(Channel::Gpu as u32) != 0;
+        dicr.write(irq_acknowledge_word(before, Channel::Gpu));
+        assert!(flagged);
+        let after = dicr.read();
+        assert_eq!(after & reg::dicr_irq_flag(2), 0);
+        assert_eq!(after & reg::dicr_irq_flag(3), reg::dicr_irq_flag(3));
+        assert_eq!(after & reg::dicr_irq_flag(4), reg::dicr_irq_flag(4));
+        // Enables and master enable are unchanged, and the master flag is still
+        // raised by the two channels left pending.
+        assert_eq!(after & 0x00ff_ffff, before & 0x00ff_ffff);
+        assert_ne!(after & (1 << 31), 0);
+        // The last two go one at a time; the master flag drops with the last.
+        dicr.write(irq_acknowledge_word(after, Channel::Cd));
+        assert_ne!(dicr.read() & (1 << 31), 0);
+        dicr.write(irq_acknowledge_word(dicr.read(), Channel::Spu));
+        assert_eq!(dicr.read() & 0xff00_0000, 0);
+    }
+
+    #[test]
+    fn the_acknowledge_word_never_writes_a_one_on_another_flag_or_the_master_flag() {
+        for ch in 0..7 {
+            let word = irq_acknowledge_word(
+                0xffff_ffff,
+                [
+                    Channel::MdecIn,
+                    Channel::MdecOut,
+                    Channel::Gpu,
+                    Channel::Cd,
+                    Channel::Spu,
+                    Channel::Expansion,
+                    Channel::OrderingTableClear,
+                ][ch],
+            );
+            assert_eq!(word & 0xff00_0000, 1 << (24 + ch));
+        }
+    }
+
+    #[test]
+    fn an_unenabled_channel_sets_no_flag() {
+        let mut dicr = Dicr::default();
+        dicr.write(irq_enable_word(dicr.read(), Channel::Cd));
+        dicr.finish(Channel::Gpu);
+        assert_eq!(dicr.read() & reg::dicr_irq_flag(2), 0);
     }
 
     #[test]

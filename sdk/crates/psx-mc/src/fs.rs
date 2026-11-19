@@ -26,22 +26,199 @@ use crate::{
     FLAG_COMPRESSED, FRAMES_PER_BLOCK, FRAME_SIZE, MAX_NAME_LEN,
 };
 
-// Directory entry field offsets.
-const E_STATE: usize = 0;
-const E_SIZE: usize = 4;
-const E_LINK: usize = 8;
-const E_NAME: usize = 10;
-const E_CHK: usize = 127;
+/// The directory-entry layout, shared with any program that reads a card's directory itself (the
+/// restored games' BIOS-style card layer): field offsets, allocation states, the free test and
+/// the XOR checksum of a 128-byte entry.
+pub mod dir {
+    use super::{Chain, DirOptions};
+    use crate::{Block, Error, Result, DATA_BLOCKS, FRAME_SIZE, MAX_NAME_LEN};
 
-// Allocation states.
-const ST_FIRST: u8 = 0x51;
-const ST_MIDDLE: u8 = 0x52;
-const ST_LAST: u8 = 0x53;
-const ST_FREE: u8 = 0xa0;
-/// A block is free if its state's high nibble is `0xA` (formatted or deleted).
-fn is_free(state: u8) -> bool {
-    state & 0xf0 == 0xa0
+    /// Offset of the allocation state byte.
+    pub const E_STATE: usize = 0;
+    /// Offset of the little-endian file size (first block only).
+    pub const E_SIZE: usize = 4;
+    /// Offset of the little-endian next-block link.
+    pub const E_LINK: usize = 8;
+    /// Offset of the NUL-terminated name.
+    pub const E_NAME: usize = 10;
+    /// Offset of the XOR checksum of bytes `0..127`.
+    pub const E_CHK: usize = 127;
+
+    /// State of a file's first block.
+    pub const ST_FIRST: u8 = 0x51;
+    /// State of a file's middle block.
+    pub const ST_MIDDLE: u8 = 0x52;
+    /// State of a file's last block.
+    pub const ST_LAST: u8 = 0x53;
+    /// State of a free (formatted) block.
+    pub const ST_FREE: u8 = 0xa0;
+    /// The link value that ends a chain.
+    pub const LINK_NONE: u16 = 0xffff;
+    /// A block is free if its state's high nibble is `0xA` (formatted or deleted).
+    #[must_use]
+    pub fn is_free(state: u8) -> bool {
+        state & 0xf0 == 0xa0
+    }
+
+    /// [`checksum`] always inlined: the same XOR, for a caller that has its own loop inline today
+    /// (the restored games' card layer): through the call form the loop is an outlined function
+    /// and a call, 148 B more in its `open`. `checksum` itself is unchanged.
+    #[inline(always)]
+    #[must_use]
+    pub fn checksum_inline(frame: &[u8; FRAME_SIZE]) -> u8 {
+        frame[..E_CHK].iter().fold(0u8, |a, &b| a ^ b)
+    }
+
+    /// XOR of a frame's first 127 bytes (the directory checksum).
+    #[must_use]
+    pub fn checksum(frame: &[u8; FRAME_SIZE]) -> u8 {
+        frame[..E_CHK].iter().fold(0u8, |a, &b| a ^ b)
+    }
+
+    /// The fifteen directory entries (frames 1 to 15 of block 0), for a program that reads them
+    /// once and walks them in place with [`find_in`] and [`chain_in`].
+    pub type Directory = [[u8; FRAME_SIZE]; DATA_BLOCKS];
+
+    /// Read the directory from `dev` into `out`: the `MC` header frame first, then the fifteen
+    /// entries in order. Unless `options` accepts a bad checksum, an entry whose XOR checksum does
+    /// not match ends the read. Only `accept_bad_checksum` is consulted.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NotFormatted`] when frame 0 does not start with `MC`, [`Error::Corrupt`] on a
+    /// checksum mismatch that is not accepted, or what the device reports.
+    pub fn read_into<B: Block>(
+        dev: &mut B,
+        options: DirOptions,
+        out: &mut Directory,
+    ) -> Result<()> {
+        let mut head = [0u8; FRAME_SIZE];
+        dev.read_frame(0, &mut head)?;
+        if head[0] != b'M' || head[1] != b'C' {
+            return Err(Error::NotFormatted);
+        }
+        for (i, e) in out.iter_mut().enumerate() {
+            dev.read_frame(1 + i as u16, e)?;
+            if !options.accept_bad_checksum && checksum_inline(e) != e[E_CHK] {
+                return Err(Error::Corrupt);
+            }
+        }
+        Ok(())
+    }
+
+    /// The index of the first file whose first-block entry matches `name`, walking `dir` in
+    /// place (nothing is copied): the walk [`Card::find_with`] does over a card, over a directory
+    /// already read. Only `wildcards` is consulted (`?` any one character, `*` the rest);
+    /// checksums are [`read_into`]'s concern.
+    #[must_use]
+    pub fn find_in(dir: &Directory, name: &[u8], options: DirOptions) -> Option<usize> {
+        (0..DATA_BLOCKS).find(|&i| {
+            dir[i][E_STATE] == ST_FIRST && entry_matches(name, &dir[i], options.wildcards)
+        })
+    }
+
+    /// A file's blocks from its first entry, following links in `dir` in place as the BIOS does:
+    /// the chain ends at the last-block state, at a link out of range or at fifteen blocks, and
+    /// the blocks so far are returned. The state of a linked block is not examined. This is
+    /// [`Card::chain_with`] with `stop_at_bad_link` over a directory already read.
+    ///
+    /// # Panics
+    ///
+    /// If `first` is not below fifteen.
+    #[must_use]
+    pub fn chain_in(dir: &Directory, first: usize) -> Chain {
+        let (mut blocks, mut len, mut i) = ([0u8; DATA_BLOCKS], 0, first);
+        while len < DATA_BLOCKS {
+            blocks[len] = i as u8 + 1;
+            len += 1;
+            let link = u16::from_le_bytes([dir[i][E_LINK], dir[i][E_LINK + 1]]) as usize;
+            if dir[i][E_STATE] == ST_LAST || link >= DATA_BLOCKS {
+                break;
+            }
+            i = link;
+        }
+        Chain { blocks, len }
+    }
+
+    /// Does `pattern` match the NUL-terminated name in `entry`: exactly, or with `wildcards`
+    /// where `?` is any one character and `*` is the rest of the name (even an empty rest)?
+    /// A name with no NUL in its twenty bytes is twenty long.
+    pub(super) fn entry_matches(pattern: &[u8], entry: &[u8; FRAME_SIZE], wildcards: bool) -> bool {
+        let name = &entry[E_NAME..E_NAME + MAX_NAME_LEN + 1];
+        let len = name.iter().position(|&b| b == 0).unwrap_or(MAX_NAME_LEN);
+        let name = &name[..len];
+        let mut i = 0;
+        for &p in pattern {
+            match p {
+                b'*' if wildcards => return true,
+                b'?' if wildcards && i < name.len() => {}
+                c if i < name.len() && name[i] == c => {}
+                _ => return false,
+            }
+            i += 1;
+        }
+        i == name.len()
+    }
 }
+
+/// How a directory walk treats a damaged or pattern-bearing card, for a program that must behave
+/// as the console BIOS does (the restored games' card layer). The default, [`STRICT`](Self::STRICT),
+/// is what [`Card::find`], [`Card::chain`] and [`Card::read_dir`] do; those functions are
+/// unchanged. Use through [`Card::read_dir_with`], [`Card::find_with`] and [`Card::chain_with`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DirOptions {
+    /// Take a directory frame whose XOR checksum does not match as it is.
+    pub accept_bad_checksum: bool,
+    /// In [`Card::find_with`], read `?` as any one character and `*` as the rest of the name.
+    pub wildcards: bool,
+    /// In [`Card::chain_with`], end the chain at a link out of range, at a repeat of the
+    /// fifteen-block limit or at the last block, instead of returning [`Error::Corrupt`]. The
+    /// state byte of a linked block is not examined (only the last-block state ends the chain),
+    /// as the BIOS follows links.
+    pub stop_at_bad_link: bool,
+}
+
+impl DirOptions {
+    /// What [`Card::find`], [`Card::chain`] and [`Card::read_dir`] do.
+    pub const STRICT: Self = Self {
+        accept_bad_checksum: false,
+        wildcards: false,
+        stop_at_bad_link: false,
+    };
+    /// All three options on: the console BIOS's directory behaviour.
+    pub const BIOS: Self = Self {
+        accept_bad_checksum: true,
+        wildcards: true,
+        stop_at_bad_link: true,
+    };
+
+    /// `self` with a bad checksum accepted.
+    #[must_use]
+    pub const fn accepting_bad_checksum(mut self) -> Self {
+        self.accept_bad_checksum = true;
+        self
+    }
+
+    /// `self` with `?` and `*` wildcards in a find.
+    #[must_use]
+    pub const fn with_wildcards(mut self) -> Self {
+        self.wildcards = true;
+        self
+    }
+
+    /// `self` with a chain that stops at a bad link.
+    #[must_use]
+    pub const fn stopping_at_bad_link(mut self) -> Self {
+        self.stop_at_bad_link = true;
+        self
+    }
+}
+
+use dir::{
+    checksum, is_free, E_CHK, E_LINK, E_NAME, E_SIZE, E_STATE, LINK_NONE, ST_FIRST, ST_FREE,
+    ST_LAST, ST_MIDDLE,
+};
 
 // Title (`SC`) header offsets within a file's first frame.
 const T_ICON_FLAG: usize = 2;
@@ -50,18 +227,12 @@ const T_TITLE: usize = 4;
 const T_TITLE_LEN: usize = 64;
 const T_CLUT: usize = 0x60;
 
-const LINK_NONE: u16 = 0xffff;
 /// Payload frames in a file's first block (title + icon consume 2 frames).
 const FIRST_BLOCK_FRAMES: usize = FRAMES_PER_BLOCK - 2;
 /// Payload bytes in a file's first block.
 const FIRST_BLOCK_CAP: usize = FIRST_BLOCK_FRAMES * FRAME_SIZE; // 7936
 /// Payload bytes in a continuation block.
 const BLOCK_CAP: usize = FRAMES_PER_BLOCK * FRAME_SIZE; // 8192
-
-/// XOR of a frame's first 127 bytes (the directory checksum).
-fn checksum(frame: &[u8; FRAME_SIZE]) -> u8 {
-    frame[..E_CHK].iter().fold(0u8, |a, &b| a ^ b)
-}
 
 /// Blocks needed to hold `total` payload bytes (including the container header).
 pub(crate) const fn blocks_for(total: usize) -> usize {
@@ -75,17 +246,22 @@ pub(crate) const fn blocks_for(total: usize) -> usize {
 fn write_u32(buf: &mut [u8], v: u32) {
     buf[0..4].copy_from_slice(&v.to_le_bytes());
 }
+#[inline(always)]
 fn read_u32(buf: &[u8]) -> u32 {
-    u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]])
+    psx_math::le::read_u32_inline(buf, 0)
 }
 
 // --------------------------------------------------------------------------
 // A file's block chain: physical block numbers (1..=15), in order.
 // --------------------------------------------------------------------------
 
-struct Chain {
-    blocks: [u8; DATA_BLOCKS],
-    len: usize,
+/// A file's block chain: physical block numbers (1..=15), in order ([`Card::chain`]).
+#[non_exhaustive]
+pub struct Chain {
+    /// The physical block numbers in order; `blocks[..len]` is valid.
+    pub blocks: [u8; DATA_BLOCKS],
+    /// How many blocks the chain holds.
+    pub len: usize,
 }
 
 /// The directory entries of the files a write replaces, one bit per entry.
@@ -222,8 +398,12 @@ impl<B: Block> Card<B> {
     /// Read directory entry `index`, refusing one whose XOR checksum does not
     /// match. Every operation walks these entries, so a flipped link or state
     /// byte must stop it before it frees or reuses another save's blocks.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Corrupt`] on a checksum mismatch, or whatever the device reports.
     #[inline(never)]
-    fn read_dir(&mut self, index: usize) -> Result<[u8; FRAME_SIZE]> {
+    pub fn read_dir(&mut self, index: usize) -> Result<[u8; FRAME_SIZE]> {
         let mut f = [0u8; FRAME_SIZE];
         self.dev.read_frame(1 + index as u16, &mut f)?;
         if checksum(&f) != f[E_CHK] {
@@ -391,7 +571,11 @@ impl<B: Block> Card<B> {
     }
 
     /// Find the first-block directory index of `name`, if present.
-    fn find(&mut self, name: &[u8]) -> Result<Option<usize>> {
+    ///
+    /// # Errors
+    ///
+    /// As [`read_dir`](Self::read_dir), for any entry it walks.
+    pub fn find(&mut self, name: &[u8]) -> Result<Option<usize>> {
         for i in 0..block_count() {
             let e = self.read_dir(i)?;
             if e[E_STATE] == ST_FIRST && entry_name_eq(&e, name) {
@@ -402,8 +586,13 @@ impl<B: Block> Card<B> {
     }
 
     /// Follow the link chain from a first-block entry.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Corrupt`] on a loop, an overrun, a link out of range or a state that is not a
+    /// file block, or as [`read_dir`](Self::read_dir).
     #[inline(never)]
-    fn chain(&mut self, first: usize) -> Result<Chain> {
+    pub fn chain(&mut self, first: usize) -> Result<Chain> {
         let mut blocks = [0u8; DATA_BLOCKS];
         let mut len = 0;
         let mut idx = first;
@@ -428,6 +617,96 @@ impl<B: Block> Card<B> {
                 }
                 _ => return Err(Error::Corrupt),
             }
+        }
+        Ok(Chain { blocks, len })
+    }
+
+    /// [`read_dir`](Self::read_dir) with `options`: with `accept_bad_checksum` a frame whose
+    /// checksum does not match is returned as it is.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Corrupt`] on a checksum mismatch unless it is accepted, or what the device reports.
+    pub fn read_dir_with(&mut self, index: usize, options: DirOptions) -> Result<[u8; FRAME_SIZE]> {
+        if options.accept_bad_checksum {
+            let mut f = [0u8; FRAME_SIZE];
+            self.dev.read_frame(1 + index as u16, &mut f)?;
+            Ok(f)
+        } else {
+            self.read_dir(index)
+        }
+    }
+
+    /// [`find`](Self::find) with `options`: `wildcards` makes `name` a pattern, and
+    /// `accept_bad_checksum` lets the walk pass a damaged entry.
+    ///
+    /// # Errors
+    ///
+    /// As [`read_dir_with`](Self::read_dir_with), for any entry it walks.
+    pub fn find_with(&mut self, name: &[u8], options: DirOptions) -> Result<Option<usize>> {
+        for i in 0..block_count() {
+            let e = self.read_dir_with(i, options)?;
+            if e[E_STATE] != ST_FIRST {
+                continue;
+            }
+            if dir::entry_matches(name, &e, options.wildcards) {
+                return Ok(Some(i));
+            }
+        }
+        Ok(None)
+    }
+
+    /// [`chain`](Self::chain) with `options`: with `stop_at_bad_link` the chain ends where the
+    /// BIOS's would (the last-block state, a link that is `FFFF` or out of range, or fifteen
+    /// blocks) and the blocks so far are returned; `accept_bad_checksum` applies to each entry.
+    ///
+    /// # Errors
+    ///
+    /// As [`chain`](Self::chain) unless `stop_at_bad_link` turns the fault into an end.
+    pub fn chain_with(&mut self, first: usize, options: DirOptions) -> Result<Chain> {
+        if !options.stop_at_bad_link {
+            if !options.accept_bad_checksum {
+                return self.chain(first);
+            }
+            return self.chain_walk(first, options, true);
+        }
+        self.chain_walk(first, options, false)
+    }
+
+    fn chain_walk(
+        &mut self,
+        first: usize,
+        options: DirOptions,
+        strict_links: bool,
+    ) -> Result<Chain> {
+        let mut blocks = [0u8; DATA_BLOCKS];
+        let mut len = 0;
+        let mut idx = first;
+        while len < DATA_BLOCKS {
+            let e = self.read_dir_with(idx, options)?;
+            blocks[len] = (idx + 1) as u8;
+            len += 1;
+            let link = u16::from_le_bytes([e[E_LINK], e[E_LINK + 1]]);
+            if strict_links {
+                match e[E_STATE] {
+                    ST_LAST => return Ok(Chain { blocks, len }),
+                    ST_FIRST | ST_MIDDLE => {
+                        if link == LINK_NONE {
+                            return Ok(Chain { blocks, len });
+                        }
+                        if link as usize >= DATA_BLOCKS {
+                            return Err(Error::Corrupt);
+                        }
+                    }
+                    _ => return Err(Error::Corrupt),
+                }
+            } else if e[E_STATE] == ST_LAST || link as usize >= DATA_BLOCKS {
+                break;
+            }
+            idx = link as usize;
+        }
+        if strict_links && len >= DATA_BLOCKS {
+            return Err(Error::Corrupt);
         }
         Ok(Chain { blocks, len })
     }

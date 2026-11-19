@@ -121,10 +121,10 @@ Module guard ranges include the complete 136-byte trampoline reserve, beginning
 at its eight-byte magic/count header. This is required for hazard-tool discovery;
 the reserved size and executable entry offsets do not change.
 
-A resident guest that exceeds psx-rt's default 96 trampoline words can enable
-`psx-rt/hazard-trampolines-192` (+384 bytes of initialized data), or the existing
-`psx-rt/hazard-trampolines-256` (+640 bytes). If both are enabled, 256 wins.
-These features change only the resident array's capacity. Each packed cold
+A resident guest that exceeds psx-rt's default 96 trampoline words sets the build variable
+`PSX_HAZARD_TRAMPOLINE_WORDS` (a whole number of words, 1 to 1024; 192 costs 384 bytes of
+initialized data more, 256 costs 640 more) in the environment of its guest build or in the `[env]`
+table of its `.cargo/config.toml`. The variable changes only the resident array's capacity. Each packed cold
 image retains its separate 136-byte reservation: an eight-byte header and
 32 instruction words.
 
@@ -139,3 +139,14 @@ late and which come from `asm!` blocks the compiler does not schedule around:
   `asm!` block that ENDS with a move (the consumer is then in the next block, HL's `enable_cop2`). A game
   runs it over its own tree: `cargo run --release -p psoxide-hazard --bin check-mfc0 -- game host`
   from the hydrated SDK. `cargo run -p xtask -- check-mfc0` is the same code (`make lint`).
+
+## The architecture gate
+
+- `psx-gate [--sdk DIR] [--crate DIR] [--metadata FILE] [--program-file FILE] [--propose] [-- CARGO-ARGS]`
+  checks one program against `sdk/profile.toml` and its own `psx-gate.toml` (features of SDK crates,
+  register literals, exception-vector writes, COP0 assembly, deprecated calls, private copies of SDK
+  crates; today's exceptions are a ratchet). The
+  program is resolved with `cargo metadata` under the program's own cargo flags. `psoxide-pgo`
+  runs the same code in-process before it compiles and writes the receipt that `mkisopsx` checks.
+  `--propose` prints the exception entries that would list the current violations (to see what a
+  change adds, never to silence the gate). See `sdk/docs/GATE.md`.

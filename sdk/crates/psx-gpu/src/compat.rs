@@ -55,12 +55,14 @@ pub fn signal_draw_done() {
 
 /// Set the drawing-area rectangle.
 #[deprecated(note = "use `Gpu::set_draw_area`")]
+#[inline]
 pub fn set_draw_area(x0: u16, y0: u16, x1: u16, y1: u16) {
     gpu::set_draw_area((x0, y0), (x1, y1));
 }
 
 /// Set the drawing offset.
 #[deprecated(note = "use `Gpu::set_draw_offset`")]
+#[inline]
 pub fn set_draw_offset(x: i16, y: i16) {
     gpu::set_draw_offset((x, y));
 }

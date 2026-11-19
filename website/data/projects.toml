@@ -93,9 +93,9 @@ tagline = "PS1 hardware and emulator checks with on-screen results and QR captur
 shot = "img/shots/hwtests.png"
 shot_alt = "PS1 Hardware Tests v1.24 menu with test, controller and QR capture options"
 itch = ""
-repo = "https://github.com/EBonura/PSoXide-editor/tree/main/engine/examples/hardware-tests"
+repo = "https://github.com/EBonura/PSoXide/tree/main/engine/examples/hardware-tests"
 disc_note = "Available from source; not included in the public Demo Disc v0.40."
-source = "PSoXide-editor/docs/hardware-test-disc.md; verified v0.40 disc inventory"
+source = "PSoXide/docs/hardware-test-disc.md; verified v0.40 disc inventory"
 
 # Games that first shipped on the PlayStation, rebuilt for the same console
 # ("Rebuilt with PSoXide"). Text only: no screenshot is published until Manny

@@ -42,7 +42,7 @@ PGO_ARGS ?=
 PGO_VARIANTS ?= --variant off --variant default --variant hot=500 --variant hot=500+profi
 GATE ?=
 
-.PHONY: example disc hello-tri hello-tri-disc run-tri examples pgo-collect pgo-choose hello-xa-disc hello-xa-gate hello-xa-resume-disc hello-xa-resume-gate hello-cdstream-disc hello-cdstream-gate hello-cddrain-disc hello-cddrain-gate hello-cdpause-disc hello-cdpause-gate hello-wide-gate
+.PHONY: example disc hello-tri hello-tri-disc run-tri examples pgo-collect pgo-choose hello-xa-disc hello-xa-gate hello-xa-stop-gate hello-xa-resume-disc hello-xa-resume-gate hello-cdstream-disc hello-cdstream-gate hello-cdsingle-disc hello-cdsingle-gate hello-cdchunk-disc hello-cdchunk-gate hello-cdlean-disc hello-cdlean-gate hello-cdcount-disc hello-cdcount-gate hello-cddrain-disc hello-cddrain-gate hello-gteirq-disc hello-gteirq-gate hello-cdpause-disc hello-cdpause-gate hello-present-queue-disc hello-present-queue-gate hello-present-cd-disc hello-present-cd-gate hello-wide-gate
 examples:
 	@set -e; for example in hello-tri hello-input hello-ot hello-gte hello-tex hello-memcard hello-spstack hello-gteirq hello-present hello-present-queue hello-asmprobe; do $(MAKE) -f tools/sdk-examples.mk disc EXAMPLE=$$example; done
 
@@ -51,7 +51,7 @@ example:
 	$(PGO) apply --crate "sdk/examples/$(EXAMPLE)" --profile "$(PGO_PROFILE)" \
 		--variant "$$(test -f "$(PGO_PROFILE)" && echo "$(PGO_VARIANT)" || echo off)" -- $(EXAMPLE_CARGO)
 disc: example
-	cargo run --locked --release -p mkisopsx -- --exe "$(BUILD)/$(TARGET)/release/$(EXAMPLE).exe" --out "$(BUILD)/$(TARGET)/release/$(EXAMPLE).bin" --volume PSOXIDESDK
+	cargo run --locked --release -p mkisopsx -- --diag --exe "$(BUILD)/$(TARGET)/release/$(EXAMPLE).exe" --out "$(BUILD)/$(TARGET)/release/$(EXAMPLE).bin" --volume PSOXIDESDK
 # make pgo-collect EXAMPLE=x TAPE=route.pxtape FRONTEND=frontend [PGO_ARGS="--polls 100..1400"]
 pgo-collect:
 	@test -n "$(FRONTEND)" -a -n "$(TAPE)" || (echo "Set FRONTEND and TAPE"; exit 1)
@@ -72,13 +72,18 @@ hello-xa-disc:
 		"$(XA_DIR)/song0_pad.wav" "$(XA_DIR)/song1_high.wav" "$(XA_DIR)/song2_blips.wav" "$(XA_DIR)/song3_whistle.wav" \
 		--manifest "$(XA_DIR)/songs.json"
 	$(MAKE) example EXAMPLE=hello-xa
-	cargo run --locked --release -p mkisopsx -- --exe "$(BUILD)/$(TARGET)/release/hello-xa.exe" \
+	cargo run --locked --release -p mkisopsx -- --diag --exe "$(BUILD)/$(TARGET)/release/hello-xa.exe" \
 		--out "$(BUILD)/$(TARGET)/release/hello-xa.bin" --volume PSOXIDESDK --xa-file "$(XA_DIR)/SONGS.XA"
 # Plays hello-xa headless and checks the audio capture: make hello-xa-gate FRONTEND=/path/to/frontend
 hello-xa-gate: hello-xa-disc
 	@test -n "$(FRONTEND)" || (echo "Set FRONTEND to the PSoXide-emulator executable"; exit 1)
 	cargo build -q --release --locked -p psx-audio-cook
 	sh tools/xa_gate.sh "$(FRONTEND)" "$(BUILD)/$(TARGET)/release/hello-xa.cue" $(or $(CARGO_TARGET_DIR),target)/release/psx-audio-cook
+# Stops hello-xa's songs while it keeps polling: make hello-xa-stop-gate FRONTEND=/path/to/frontend
+hello-xa-stop-gate: hello-xa-disc
+	@test -n "$(FRONTEND)" || (echo "Set FRONTEND to the PSoXide-emulator executable"; exit 1)
+	cargo build -q --release --locked -p psx-audio-cook
+	sh tools/xa_stop_gate.sh "$(FRONTEND)" "$(BUILD)/$(TARGET)/release/hello-xa.cue" $(or $(CARGO_TARGET_DIR),target)/release/psx-audio-cook
 # hello-xa-resume plays one song, reads data sectors while it is suspended,
 # resumes it and checks the player, the song clock, the drive command log and
 # the audio capture. The songs run 24 s so the pause and the resume both land
@@ -90,30 +95,79 @@ hello-xa-resume-disc:
 		"$(XA_RESUME_DIR)/song0_pad.wav" "$(XA_RESUME_DIR)/song1_high.wav" "$(XA_RESUME_DIR)/song2_blips.wav" "$(XA_RESUME_DIR)/song3_whistle.wav" \
 		--manifest "$(XA_RESUME_DIR)/songs.json"
 	$(MAKE) example EXAMPLE=hello-xa-resume
-	cargo run --locked --release -p mkisopsx -- --exe "$(BUILD)/$(TARGET)/release/hello-xa-resume.exe" \
+	cargo run --locked --release -p mkisopsx -- --diag --exe "$(BUILD)/$(TARGET)/release/hello-xa-resume.exe" \
 		--out "$(BUILD)/$(TARGET)/release/hello-xa-resume.bin" --volume PSOXIDESDK --xa-file "$(XA_RESUME_DIR)/SONGS.XA"
 # Runs hello-xa-resume headless and checks it: make hello-xa-resume-gate FRONTEND=/path/to/frontend
 hello-xa-resume-gate: hello-xa-resume-disc
 	@test -n "$(FRONTEND)" || (echo "Set FRONTEND to the PSoXide-emulator executable"; exit 1)
 	cargo build -q --release --locked -p psx-audio-cook
 	sh tools/xa_resume_gate.sh "$(FRONTEND)" "$(BUILD)/$(TARGET)/release/hello-xa-resume.cue" $(or $(CARGO_TARGET_DIR),target)/release/psx-audio-cook
+# hello-gteirq: a GTE command under dispatched interrupts, the dispatcher's order, and `$28` across a hook and a handler.
+hello-gteirq-disc:
+	$(MAKE) disc EXAMPLE=hello-gteirq
+# Runs hello-gteirq headless and checks its verdict: make hello-gteirq-gate FRONTEND=/path/to/frontend
+hello-gteirq-gate: hello-gteirq-disc
+	@test -n "$(FRONTEND)" || (echo "Set FRONTEND to the PSoXide-emulator executable"; exit 1)
+	sh tools/gteirq_gate.sh "$(FRONTEND)" "$(BUILD)/$(TARGET)/release/hello-gteirq.cue"
 # hello-cdstream streams CDTEST.BIN, the deterministic file mkisopsx writes with
 # --cdtest-sectors, through psx-cdstream and checks every byte. 960 sectors is
 # nearly all the boot area has room for after the executable.
 CDSTREAM_SECTORS ?= 960
 hello-cdstream-disc:
 	$(MAKE) example EXAMPLE=hello-cdstream
-	cargo run --locked --release -p mkisopsx -- --exe "$(BUILD)/$(TARGET)/release/hello-cdstream.exe" \
+	cargo run --locked --release -p mkisopsx -- --diag --exe "$(BUILD)/$(TARGET)/release/hello-cdstream.exe" \
 		--out "$(BUILD)/$(TARGET)/release/hello-cdstream.bin" --volume PSOXIDESDK --cdtest-sectors $(CDSTREAM_SECTORS)
 # Runs hello-cdstream headless and checks its verdict: make hello-cdstream-gate FRONTEND=/path/to/frontend
 hello-cdstream-gate: hello-cdstream-disc
 	@test -n "$(FRONTEND)" || (echo "Set FRONTEND to the PSoXide-emulator executable"; exit 1)
 	sh tools/cdstream_gate.sh "$(FRONTEND)" "$(BUILD)/$(TARGET)/release/hello-cdstream.cue"
+# hello-cdsingle streams CDTEST.BIN through the single-transfer transport (psx_cdstream::single):
+# one request at a time, the cheap progress counter, cancel, park, the byte bound, the source closed
+# between requests, a hand-off to polled code.
+hello-cdsingle-disc:
+	$(MAKE) example EXAMPLE=hello-cdsingle
+	cargo run --locked --release -p mkisopsx -- --diag --exe "$(BUILD)/$(TARGET)/release/hello-cdsingle.exe" \
+		--out "$(BUILD)/$(TARGET)/release/hello-cdsingle.bin" --volume PSOXIDESDK --cdtest-sectors $(CDSTREAM_SECTORS)
+# Runs hello-cdsingle headless and checks its verdict: make hello-cdsingle-gate FRONTEND=/path/to/frontend
+hello-cdsingle-gate: hello-cdsingle-disc
+	@test -n "$(FRONTEND)" || (echo "Set FRONTEND to the PSoXide-emulator executable"; exit 1)
+	sh tools/cdsingle_gate.sh "$(FRONTEND)" "$(BUILD)/$(TARGET)/release/hello-cdsingle.cue"
+# hello-cdchunk is the smallest user of psx_cdstream::single: one chunk with an exact byte bound,
+# a cancel, then a polled read (no screen output; its image is the size probe of such a game).
+hello-cdchunk-disc:
+	$(MAKE) example EXAMPLE=hello-cdchunk
+	cargo run --locked --release -p mkisopsx -- --diag --exe "$(BUILD)/$(TARGET)/release/hello-cdchunk.exe" \
+		--out "$(BUILD)/$(TARGET)/release/hello-cdchunk.bin" --volume PSOXIDESDK --cdtest-sectors $(CDSTREAM_SECTORS)
+# Runs hello-cdchunk headless and checks its verdict: make hello-cdchunk-gate FRONTEND=/path/to/frontend
+hello-cdchunk-gate: hello-cdchunk-disc
+	@test -n "$(FRONTEND)" || (echo "Set FRONTEND to the PSoXide-emulator executable"; exit 1)
+	sh tools/cdchunk_gate.sh "$(FRONTEND)" "$(BUILD)/$(TARGET)/release/hello-cdchunk.cue"
+# hello-cdlean is the smallest transport, psx_cdstream::lean: no counters, no tickets; one chunk with an
+# exact byte bound, a refused second submit, a cancel, then a polled read.
+hello-cdlean-disc:
+	$(MAKE) example EXAMPLE=hello-cdlean
+	cargo run --locked --release -p mkisopsx -- --diag --exe "$(BUILD)/$(TARGET)/release/hello-cdlean.exe" \
+		--out "$(BUILD)/$(TARGET)/release/hello-cdlean.bin" --volume PSOXIDESDK --cdtest-sectors $(CDSTREAM_SECTORS)
+# Runs hello-cdlean headless and checks its verdict: make hello-cdlean-gate FRONTEND=/path/to/frontend
+hello-cdlean-gate: hello-cdlean-disc
+	@test -n "$(FRONTEND)" || (echo "Set FRONTEND to the PSoXide-emulator executable"; exit 1)
+	sh tools/cdlean_gate.sh "$(FRONTEND)" "$(BUILD)/$(TARGET)/release/hello-cdlean.cue"
+# hello-cdcount is psx_cdstream::counted, the lean transport plus the sector count the handler keeps: the count read
+# while a request is in flight, a byte bound, a park, a cancel and an unreadable sector. The gate runs it on real,
+# mister and mister,gpu-irq=never.
+hello-cdcount-disc:
+	$(MAKE) example EXAMPLE=hello-cdcount
+	cargo run --locked --release -p mkisopsx -- --diag --exe "$(BUILD)/$(TARGET)/release/hello-cdcount.exe" \
+		--out "$(BUILD)/$(TARGET)/release/hello-cdcount.bin" --volume PSOXIDESDK --cdtest-sectors $(CDSTREAM_SECTORS)
+# Runs hello-cdcount headless and checks its verdict: make hello-cdcount-gate FRONTEND=/path/to/frontend
+hello-cdcount-gate: hello-cdcount-disc
+	@test -n "$(FRONTEND)" || (echo "Set FRONTEND to the PSoXide-emulator executable"; exit 1)
+	sh tools/cdcount_gate.sh "$(FRONTEND)" "$(BUILD)/$(TARGET)/release/hello-cdcount.cue"
 # hello-cddrain reads CDTEST.BIN with the polled reader while psx_cdstream::drain pops the sectors
 # from the CD interrupt, and checks every byte.
 hello-cddrain-disc:
 	$(MAKE) example EXAMPLE=hello-cddrain
-	cargo run --locked --release -p mkisopsx -- --exe "$(BUILD)/$(TARGET)/release/hello-cddrain.exe" \
+	cargo run --locked --release -p mkisopsx -- --diag --exe "$(BUILD)/$(TARGET)/release/hello-cddrain.exe" \
 		--out "$(BUILD)/$(TARGET)/release/hello-cddrain.bin" --volume PSOXIDESDK --cdtest-sectors $(CDSTREAM_SECTORS)
 # Runs hello-cddrain headless and checks its verdict: make hello-cddrain-gate FRONTEND=/path/to/frontend
 hello-cddrain-gate: hello-cddrain-disc
@@ -123,15 +177,32 @@ hello-cddrain-gate: hello-cddrain-disc
 # refused during a seek) against psx_io::cd::reader::SectorReader::stop_proved on the emulator's model of it.
 hello-cdpause-disc:
 	$(MAKE) example EXAMPLE=hello-cdpause
-	cargo run --locked --release -p mkisopsx -- --exe "$(BUILD)/$(TARGET)/release/hello-cdpause.exe" \
+	cargo run --locked --release -p mkisopsx -- --diag --exe "$(BUILD)/$(TARGET)/release/hello-cdpause.exe" \
 		--out "$(BUILD)/$(TARGET)/release/hello-cdpause.bin" --volume PSOXIDESDK --cdtest-sectors 960
 # hello-flipcap checks the presentation cap (no flip within 2 VBlanks of the last, an explicit opt-out for 60 fps).
 hello-flipcap-disc:
 	$(MAKE) example EXAMPLE=hello-flipcap
-	cargo run --locked --release -p mkisopsx -- --exe "$(BUILD)/$(TARGET)/release/hello-flipcap.exe" --out "$(BUILD)/$(TARGET)/release/hello-flipcap.bin" --volume PSOXIDESDK
+	cargo run --locked --release -p mkisopsx -- --diag --exe "$(BUILD)/$(TARGET)/release/hello-flipcap.exe" --out "$(BUILD)/$(TARGET)/release/hello-flipcap.bin" --volume PSOXIDESDK
 hello-flipcap-gate: hello-flipcap-disc
 	@test -n "$(FRONTEND)" || (echo "Set FRONTEND to the PSoXide-emulator executable"; exit 1)
 	sh tools/flipcap_gate.sh "$(FRONTEND)" "$(BUILD)/$(TARGET)/release/hello-flipcap.cue"
+# hello-present-queue presents 240 frames through the one present path at 60, 30 and 20 fps and under a
+# varying load, and checks each frame's kick and flip edge by edge.
+hello-present-queue-disc:
+	$(MAKE) example EXAMPLE=hello-present-queue
+	cargo run --locked --release -p mkisopsx -- --diag --exe "$(BUILD)/$(TARGET)/release/hello-present-queue.exe" --out "$(BUILD)/$(TARGET)/release/hello-present-queue.bin" --volume PSOXIDESDK
+hello-present-queue-gate: hello-present-queue-disc
+	@test -n "$(FRONTEND)" || (echo "Set FRONTEND to the PSoXide-emulator executable"; exit 1)
+	sh tools/present_gate.sh "$(FRONTEND)" "$(BUILD)/$(TARGET)/release/hello-present-queue.cue"
+# hello-present-cd presents chain and drawn frames while the drive delivers sectors (polled and
+# interrupt-driven) and across instruction-cache flushes, against the same reads with presenting off.
+hello-present-cd-disc:
+	$(MAKE) example EXAMPLE=hello-present-cd
+	cargo run --locked --release -p mkisopsx -- --diag --exe "$(BUILD)/$(TARGET)/release/hello-present-cd.exe" \
+		--out "$(BUILD)/$(TARGET)/release/hello-present-cd.bin" --volume PSOXIDESDK --cdtest-sectors 960
+hello-present-cd-gate: hello-present-cd-disc
+	@test -n "$(FRONTEND)" || (echo "Set FRONTEND to the PSoXide-emulator executable"; exit 1)
+	sh tools/present_cd_gate.sh "$(FRONTEND)" "$(BUILD)/$(TARGET)/release/hello-present-cd.cue"
 hello-cdpause-gate: hello-cdpause-disc
 	@test -n "$(FRONTEND)" || (echo "Set FRONTEND to the PSoXide-emulator executable"; exit 1)
 	sh tools/cdpause_gate.sh "$(FRONTEND)" "$(BUILD)/$(TARGET)/release/hello-cdpause.cue"

@@ -4,7 +4,7 @@
 //! Checked, allocation-free readers for the XBSP cooked map format.
 //!
 //! Shared by the guest runtime, the editor cook and quake-psx so the wire
-//! format has one Rust definition (docs/quake-bsp-migration-plan.md, P0).
+//! format has one Rust definition (the Quake BSP migration, P0).
 //! Record sizes and lump order are the cooked format's; the readers and
 //! validators are this crate's own. The PXBSP extensions (material lump,
 //! PSoXide entity records, streaming index) grow here.
@@ -19,14 +19,13 @@ pub mod pxbsp;
 pub mod pxbsp_resident;
 pub mod render;
 pub mod resident;
-/// The sky projection moved to `psx-engine` with the grid renderer; the path
-/// stays so consumers of `psx_bsp::sky` keep building.
-pub use psx_engine::sky;
-pub mod visibility;
 pub mod world_hooks;
 
 use core::fmt;
 use core::marker::PhantomData;
+use psx_math::le::{
+    read_i16 as i16_at, read_i32 as i32_at, read_u16 as u16_at, read_u32 as u32_at,
+};
 
 /// `PSX%` as emitted by the original Quake PSX map cooker.
 pub const PSB_MAGIC: u32 = 0x2558_5350;
@@ -422,20 +421,9 @@ pub struct Vec2I16 {
     pub y: i16,
 }
 
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub struct Vec3I16 {
-    pub x: i16,
-    pub y: i16,
-    pub z: i16,
-}
-
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub struct Vec3I32 {
-    pub x: i32,
-    pub y: i32,
-    pub z: i32,
-}
+/// The GTE vectors are the SDK's own: one `Vec3I16` and one `Vec3I32`, with their saturating
+/// and Q12 operations, for the renderer and every game that reads a cooked world.
+pub use psx_gte::math::{Vec3I16, Vec3I32};
 
 pub trait CookedRecord: Copy {
     const SIZE: usize;
@@ -1560,27 +1548,6 @@ impl CookedRecord for SoundEffect {
     }
 }
 
-fn u16_at(bytes: &[u8], offset: usize) -> u16 {
-    u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
-}
-
-fn i16_at(bytes: &[u8], offset: usize) -> i16 {
-    u16_at(bytes, offset) as i16
-}
-
-fn u32_at(bytes: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes([
-        bytes[offset],
-        bytes[offset + 1],
-        bytes[offset + 2],
-        bytes[offset + 3],
-    ])
-}
-
-fn i32_at(bytes: &[u8], offset: usize) -> i32 {
-    u32_at(bytes, offset) as i32
-}
-
 fn vec3_i16(bytes: &[u8], offset: usize) -> Vec3I16 {
     Vec3I16 {
         x: i16_at(bytes, offset),
@@ -1604,6 +1571,22 @@ extern crate std;
 mod tests {
     use super::*;
     use std::vec::Vec;
+
+    #[test]
+    fn the_bsp_vectors_are_the_gte_vectors_with_the_shared_operations() {
+        let a: psx_gte::math::Vec3I32 = Vec3I32 {
+            x: i32::MAX,
+            y: -5,
+            z: 7,
+        };
+        assert_eq!(
+            a.saturating_add(Vec3I32::new(1, -5, 7)),
+            Vec3I32::new(i32::MAX, -10, 14)
+        );
+        let n: psx_gte::math::Vec3I16 = Vec3I16 { x: 1, y: 2, z: 3 };
+        assert_eq!(n, Vec3I16::new(1, 2, 3));
+        assert_eq!(core::mem::size_of::<Vec3I32>(), 12);
+    }
 
     /// A record whose size is not a power of two, like the cooked planes.
     #[derive(Copy, Clone, Debug, Eq, PartialEq)]

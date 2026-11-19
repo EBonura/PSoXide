@@ -963,7 +963,7 @@ fn submit_instance_equipment_record_from_pose<
                 weapon.default_character_socket,
             )
         })?;
-    let socket_pose = attachment_socket_pose(&instance_pose.pose(), socket)?;
+    let socket_pose = attachment_socket_pose(instance_pose.pose(), socket)?;
     submit_equipped_weapon::<
         MAX_RUNTIME_MODELS,
         MAX_RUNTIME_MODEL_CLIPS,

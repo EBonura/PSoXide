@@ -348,17 +348,8 @@ fn draw_percent(font: &FontAtlas, x: i16, y: i16, value: u8) {
 }
 
 fn draw_number(font: &FontAtlas, x: i16, y: i16, value: u32, color: (u8, u8, u8)) {
-    let mut bytes = [b'0'; 10];
-    let mut value = value;
-    let mut start = bytes.len() - 1;
-    bytes[start] = b'0' + (value % 10) as u8;
-    value /= 10;
-    while value != 0 && start > 0 {
-        start -= 1;
-        bytes[start] = b'0' + (value % 10) as u8;
-        value /= 10;
-    }
-    let text = unsafe { core::str::from_utf8_unchecked(&bytes[start..]) };
+    let mut bytes = [0u8; psx_math::fmt::U32_DEC_MAX];
+    let text = psx_math::fmt::u32_dec(&mut bytes, value);
     font.draw_text(x - text.len() as i16 * 8, y, text, color);
 }
 

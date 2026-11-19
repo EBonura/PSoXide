@@ -219,7 +219,7 @@ impl StanceHud {
         let packets = unsafe { &mut (*core::ptr::addr_of_mut!(PACKETS))[table & 1] };
         packets.link(&self.state, |ptr, tag| {
             // SAFETY: the packets are a `static`, so they outlive the walk.
-            unsafe { ot.add_raw_tag_unchecked(0, ptr, tag) }
+            unsafe { ot.add_raw_tag_high_unchecked(0, ptr, tag) }
         });
     }
 }

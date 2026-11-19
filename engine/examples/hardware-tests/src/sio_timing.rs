@@ -14,13 +14,13 @@
 //! The memory card is only ever read, never written.
 //!
 //! The record layout, three fields each, is documented on the constants
-//! below and mirrored in `tools/hwtest-report.py`.
+//! below and mirrored in `psoxide-hwtest` (report.rs).
 
 use crate::console_tests::{record, spread};
 use crate::list_busy_probes::GpuLoad;
 use crate::{push_timing_record, IrqGuard, TimingRecord, TIMING_RECORD_COUNT};
 use psx_hw::sio::sio0;
-use psx_io::controller_port::{Port, Transport};
+use psx_io::controller_port::{Port, Timing, Transport};
 use psx_io::periph::ControllerPort;
 use psx_io::timers::{self, Timer};
 use psx_mc::{Block, Error as CardError, HardwareCard};
@@ -429,6 +429,111 @@ pub(crate) fn card_timing(records: &mut Records, next: &mut usize) {
     }
 }
 
+// -------------------------------------------------- latch and arming records
+
+/// rec sio_latch_unarmed: irq_after_byte_mask, ack_mask, flags (a pad poll with the ACK interrupt armed never, port 1 and 2, 0x6E0-0x6E1). Bit n of the first two is byte n: STAT bit 9 seen after the byte's `/ACK` released, and `/ACK` seen. The flags are 1 for a device that answered with `0x5A`, 2 for a digital pad (five bytes), 4 for an analog pad. Does the latch set with CTRL bit 12 clear? A mask of zero says no, which the shared pad driver relies on.
+const LATCH_UNARMED_RECORD: u16 = 0x6E0;
+/// rec sio_arm_mid_packet: polls_clean_and_tried, first_deviation, irq_after_byte_mask (four polls that write CTRL, arm plus ACK, after every acknowledged byte, each compared with an unarmed poll of the same pad; port 1 and 2, 0x6E2-0x6E3). `polls_clean_and_tried` is the clean count in the low byte and the polls tried in the high byte; a poll is clean when its ID, its `0x5A` and its `/ACK` mask match the unarmed one; `first_deviation` is the poll in the high byte and the byte index in the low byte of the first mismatch, 0xFFFF when there is none. Does one CTRL write mid-packet disturb the rest of it? The shared pad driver does this only when a port reports the latch alone, but a console answer decides whether it may ever do it on silicon.
+const ARM_MID_PACKET_RECORD: u16 = 0x6E2;
+
+/// One pad poll with the select delay of the other passes. With `arm` the
+/// interrupt is armed and the latch cleared by one `CTRL` write after every
+/// byte that pulsed `/ACK`, exactly what `Transport::exchange` does on a port
+/// that only latches. Returns the replies, the bytes that pulsed `/ACK`, and
+/// the bytes after which STAT bit 9 was set.
+fn latch_poll(port2: bool, arm: bool) -> ([u8; 9], u16, u16) {
+    let mut port = token();
+    let _irq = IrqGuard::mask();
+    let mut replies = [0xFFu8; 9];
+    let (mut acks, mut irqs) = (0u16, 0u16);
+    port.set_mode(sio0::MODE_8N1);
+    port.set_baud(sio0::BAUD_250KHZ);
+    port.set_control(sio0::ctrl::ACK);
+    restart();
+    port.set_control(sio0::selected_ctrl(port2, false));
+    while count() < SAFE_SETUP {}
+    port.drain_receive();
+    let _ = port.wait_status_clear(sio0::stat::DSR_LEVEL, 4_096);
+    for (index, tx) in PAD_POLL.iter().enumerate() {
+        let byte = exchange(&mut port, *tx);
+        replies[index] = byte.reply;
+        // Read the latch before the write that clears it.
+        if port.status() & sio0::stat::IRQ != 0 {
+            irqs |= 1 << index;
+        }
+        if byte.acked() {
+            acks |= 1 << index;
+            if arm {
+                port.set_control(sio0::selected_ctrl(port2, true) | sio0::ctrl::ACK);
+            }
+        }
+        if index == 0 && !byte.acked() {
+            break;
+        }
+    }
+    port.deselect();
+    port.reset();
+    pause(4_000);
+    (replies, acks, irqs)
+}
+
+/// The two questions the shared pad driver's latch path rests on.
+pub(crate) fn latch_and_arm(records: &mut Records, next: &mut usize) {
+    for port2 in [false, true] {
+        crate::bounds::record_start(LATCH_UNARMED_RECORD + port2 as u16);
+        let (reference, ref_acks, ref_irqs) = latch_poll(port2, false);
+        let there = reference[2] == 0x5A;
+        let kind = match reference[1] {
+            0x41 => 2,
+            0x73 | 0x53 => 4,
+            _ => 0,
+        };
+        push(
+            records,
+            next,
+            record(
+                LATCH_UNARMED_RECORD + port2 as u16,
+                ref_irqs as u32,
+                ref_acks as u32,
+                there as u32 | kind,
+            ),
+        );
+        crate::bounds::record_start(ARM_MID_PACKET_RECORD + port2 as u16);
+        let mut clean = 0u32;
+        let mut deviation = 0xFFFFu32;
+        let mut irq_union = 0u32;
+        let tries = if there { 4 } else { 0 };
+        for poll in 0..tries {
+            let (replies, acks, irqs) = latch_poll(port2, true);
+            irq_union |= irqs as u32;
+            let mut bad = None;
+            if replies[1] != reference[1] {
+                bad = Some(1);
+            } else if replies[2] != reference[2] {
+                bad = Some(2);
+            } else if acks != ref_acks {
+                bad = Some((acks ^ ref_acks).trailing_zeros());
+            }
+            match bad {
+                None => clean += 1,
+                Some(byte) if deviation == 0xFFFF => deviation = (poll << 8) | byte,
+                Some(_) => {}
+            }
+        }
+        push(
+            records,
+            next,
+            record(
+                ARM_MID_PACKET_RECORD + port2 as u16,
+                clean | (tries << 8),
+                deviation,
+                irq_union,
+            ),
+        );
+    }
+}
+
+
 // ------------------------------------------------------- pad and card mix
 
 const MIX_ROUNDS: usize = 24;
@@ -643,5 +748,134 @@ pub(crate) fn pad_and_card(records: &mut Records, next: &mut usize) {
         }
         mix(port2, false, records, next);
         mix(port2, true, records, next);
+    }
+}
+
+// ---------------------------------------------------------- select early
+
+/// rec sio_select_early: polls, id_and_magic, poll_cycles_median (port 1, eight polls a case, 0x6F0-0x6F4). `polls` packs four counts of four bits: clean polls (bits 0-3), polls tried (4-7), polls whose earlier select was still in `CTRL` when the bytes began (8-11), card frames read in the gap (12-15). A poll is clean when every byte exchanged and the third reply was `0x5A`. `id_and_magic` is the last poll's ID in the high byte and its third reply in the low one; `poll_cycles_median` is the system-clock cycles from the start of the transaction to the last byte received, the select delay included only where the case waits it.
+///
+/// Every case sends its bytes with CPU interrupts masked (`Transport::mask_interrupts`, the pair `Controllers`
+/// brackets a configuration packet with); the select and the wait before the bytes stay outside it, so VBlanks
+/// still run while a select is held. Without the mask, once the present path's VBlank handler is linked, the
+/// third poll of `0x6F2` can lose the /ACK of its fifth byte to a VBlank (the eight polls start at different
+/// phases against the VBlank): the phase of an interrupt, not the select, so the case could not answer its own
+/// question. No record field is free for a count of exchanges that saw a VBlank, so none is recorded.
+/// 0x6F0 the pad poll as the SDK did it before v2.13: select, 1,024 status reads, the bytes. 0x6F1 the select left open by the poll before and the bytes clocked one video frame later, as `psx_pad::Controllers` ships. 0x6F2 the same with half a second in between. 0x6F3 the bytes at once after the select, so the setup time is measured on root counter 0 alone. 0x6F4 a memory-card frame read on slot 1 between the open select and the bytes.
+const SELECT_EARLY_RECORD: u16 = 0x6F0;
+const EARLY_POLLS: usize = 8;
+/// About one 60 Hz video frame of system-clock cycles, in pauses of 47,000.
+const FRAME_PAUSES: u32 = 12;
+
+/// What comes between the select and the bytes.
+#[derive(Clone, Copy, PartialEq)]
+enum Lead {
+    /// The sequence before v2.13: select, then the fixed spin delay.
+    Spins,
+    /// The select opened by `Transport::open`, then `frames` video frames.
+    Open { frames: u32 },
+    /// The select opened, then a memory-card frame read on the same slot.
+    OpenThenCard,
+}
+
+/// One pad poll on port 1 led in by `lead`: (clean, select kept, card frame
+/// read, ID, third reply, cycles).
+fn early_poll(lead: Lead) -> (bool, bool, bool, u8, u8, u16) {
+    let mut port = token();
+    let mut kept = false;
+    let mut card_ok = false;
+    let ready = match lead {
+        Lead::Spins => {
+            restart();
+            port.select(Port::One);
+            port.delay(Timing::PAD.setup_spins);
+            port.drain_receive();
+            port.wait_status_clear(sio0::stat::DSR_LEVEL, Timing::PAD.ack_spins)
+        }
+        Lead::Open { frames } => {
+            let opened = port.open(Port::One);
+            for _ in 0..frames * FRAME_PAUSES {
+                pause(47_000);
+            }
+            kept = port.control() == sio0::selected_ctrl(false, false);
+            restart();
+            port.begin_pad(Port::One, Some(opened))
+        }
+        Lead::OpenThenCard => {
+            let opened = port.open(Port::One);
+            let mut buf = [0u8; 128];
+            card_ok = HardwareCard::on_port(&mut port, Port::One)
+                .read_frame(0, &mut buf)
+                .is_ok();
+            kept = port.control() == sio0::selected_ctrl(false, false);
+            restart();
+            port.begin_pad(Port::One, Some(opened))
+        }
+    };
+    let mut ok = ready;
+    let mut replies = [0xFFu8; 9];
+    let mut length = 9;
+    let mut i = 0;
+    // The exchange runs with CPU interrupts off, as `Controllers` sends a configuration packet: a VBlank
+    // over a pad's /ACK pulse hides it, which would fail a poll for a reason that is not the select. The
+    // select, the wait before the bytes and the whole of `begin_pad` stay outside, with interrupts on.
+    let were_enabled = port.mask_interrupts();
+    while ok && i < length {
+        let tx = match i {
+            0 => 0x01,
+            1 => 0x42,
+            _ => 0x00,
+        };
+        match port.exchange(Port::One, tx, i + 1 == length, Timing::PAD) {
+            Ok(reply) => replies[i] = reply,
+            Err(_) => ok = false,
+        }
+        if i == 1 && replies[1] == 0x41 {
+            length = 5;
+        }
+        i += 1;
+    }
+    let cycles = count();
+    port.restore_interrupts(were_enabled);
+    port.finish(ok);
+    (ok && replies[2] == 0x5A, kept, card_ok, replies[1], replies[2], cycles)
+}
+
+/// Five pass-or-fail cases for the pad's select left open (`psx_pad::Controllers`).
+pub(crate) fn select_early(records: &mut Records, next: &mut usize) {
+    // The pad driver times the setup on root counter 0, which psx-rt leaves
+    // counting the system clock; earlier steps of this suite reprogram it.
+    timers::set_mode(Timer::Timer0, 0);
+    let leads = [
+        Lead::Spins,
+        Lead::Open { frames: 1 },
+        Lead::Open { frames: 30 },
+        Lead::Open { frames: 0 },
+        Lead::OpenThenCard,
+    ];
+    for (case, lead) in leads.into_iter().enumerate() {
+        let id = SELECT_EARLY_RECORD + case as u16;
+        crate::bounds::record_start(id);
+        let (mut clean, mut kept, mut cards) = (0u32, 0u32, 0u32);
+        let mut answer = 0u32;
+        let mut cycles = [0u32; EARLY_POLLS];
+        let mut tried = 0usize;
+        while tried < EARLY_POLLS {
+            let (ok, held, card, id_low, magic, spent) = early_poll(lead);
+            clean += ok as u32;
+            kept += held as u32;
+            cards += card as u32;
+            answer = (u32::from(id_low) << 8) | u32::from(magic);
+            cycles[tried] = u32::from(spent);
+            tried += 1;
+            // An empty port answers FF to everything: one poll says so.
+            if id_low == 0xFF {
+                break;
+            }
+        }
+        let (_, median, _) = spread(&mut cycles[..tried]);
+        let polls = clean | (tried as u32) << 4 | kept << 8 | cards << 12;
+        push(records, next, record(id, polls, answer, median));
+        pause(4_000);
     }
 }

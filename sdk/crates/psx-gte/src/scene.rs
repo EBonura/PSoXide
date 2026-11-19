@@ -58,35 +58,6 @@ pub struct ClassicNormalizedVector {
     pub squared: i32,
 }
 
-/// floor(sqrt(n)) by bisection, for building tables at compile time.
-const fn isqrt_u32(n: u32) -> u32 {
-    let (mut lo, mut hi) = (0u32, 1u32 << 16);
-    while hi - lo > 1 {
-        let mid = (lo + hi) / 2;
-        if mid * mid <= n {
-            lo = mid;
-        } else {
-            hi = mid;
-        }
-    }
-    lo
-}
-
-/// Q12 reciprocal square roots of the sums 64..=255, scaled so the sum 64
-/// maps to 1.0: entry `m - 64` is floor(4096 * sqrt(64 / m)). That equals
-/// floor(32768 / sqrt(m)) = floor(sqrt(2^30 / m)), and since flooring the
-/// argument first doesn't change an integer square root's floor, it is
-/// computed exactly in integers.
-const RSQRT_Q12_FROM_64: [i16; 192] = {
-    let mut table = [0i16; 192];
-    let mut i = 0;
-    while i < 192 {
-        table[i] = isqrt_u32((1u32 << 30) / (64 + i as u32)) as i16;
-        i += 1;
-    }
-    table
-};
-
 /// Scale a Q12 direction to length 4096 with a 192-entry reciprocal square
 /// root table, the classic fixed-point way.
 ///
@@ -124,7 +95,7 @@ pub fn normalize_classic_q12_scheduled(input: Vec3I32) -> ClassicNormalizedVecto
     } else {
         squared >> (24 - even_zeros)
     };
-    let r = i32::from(RSQRT_Q12_FROM_64[(in_range - 64) as usize]);
+    let r = i32::from(psx_math::int32::rsqrt_q12_from_64(in_range as u32));
     let shift = (31 - even_zeros) / 2;
     let scale = |v: i16| ((i32::from(v) * r) >> shift) as i16;
     ClassicNormalizedVector {
@@ -1924,7 +1895,9 @@ mod host_smoke {
     }
 
     #[test]
-    fn generated_rsqrt_table_matches_the_previous_table() {
-        assert_eq!(RSQRT_Q12_FROM_64, PREVIOUS_TABLE);
+    fn the_rsqrt_read_from_the_isqrt_knots_matches_the_previous_table() {
+        let generated: [i16; 192] =
+            core::array::from_fn(|i| psx_math::int32::rsqrt_q12_from_64(64 + i as u32));
+        assert_eq!(generated, PREVIOUS_TABLE);
     }
 }

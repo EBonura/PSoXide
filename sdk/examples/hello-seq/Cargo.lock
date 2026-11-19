@@ -25,7 +25,17 @@ version = "0.1.0"
 dependencies = [
  "psx-gte",
  "psx-hw",
+ "psx-math",
  "psxed-format",
+]
+
+[[package]]
+name = "psx-gpu"
+version = "0.1.0"
+dependencies = [
+ "bitflags",
+ "psx-hw",
+ "psx-io",
 ]
 
 [[package]]
@@ -34,6 +44,7 @@ version = "0.1.0"
 dependencies = [
  "psx-gte-core",
  "psx-hw",
+ "psx-math",
 ]
 
 [[package]]
@@ -55,6 +66,7 @@ name = "psx-io"
 version = "0.1.0"
 dependencies = [
  "psx-hw",
+ "psx-math",
 ]
 
 [[package]]
@@ -65,14 +77,18 @@ version = "0.1.0"
 name = "psx-rt"
 version = "0.1.0"
 dependencies = [
+ "psx-gpu",
  "psx-hw",
  "psx-io",
+ "psx-math",
+ "psx-tick",
 ]
 
 [[package]]
 name = "psx-seq"
 version = "0.1.0"
 dependencies = [
+ "psx-math",
  "psx-sfx",
  "psx-spu",
 ]
@@ -93,6 +109,10 @@ dependencies = [
  "psx-hw",
  "psx-io",
 ]
+
+[[package]]
+name = "psx-tick"
+version = "0.1.0"
 
 [[package]]
 name = "psxed-format"

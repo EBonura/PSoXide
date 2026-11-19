@@ -8,7 +8,10 @@ description  = "PS1 bare-metal runtime: _start, panic, heap. Makes no BIOS call.
 
 [dependencies]
 psx-hw = { workspace = true }
+psx-math = { workspace = true }
 psx-io = { path = "../psx-io" }
+psx-gpu = { path = "../psx-gpu" }
+psx-tick = { path = "../psx-tick" }
 critical-section = { version = "1.2", optional = true, features = ["restore-state-bool"] }
 
 [features]
@@ -27,8 +30,11 @@ alloc = []
 # console (`psx_hw::memory::expansion2::DEBUG_CONSOLE`), where PCSX-Redux, OpenBIOS and our emulator print it to the
 # host terminal. Off, they compile to nothing, which is what a shipping build
 # wants: no cycles, no port traffic, and no BIOS call either way. Turned on by
-# `console-diag`, by emulator-gated test programs (the SDK examples ask for it)
+# emulator-gated test programs (the SDK examples ask for it)
 # and by any game build whose gate reads the terminal.
+# Not turned on by `console-diag`: a retail console raises a data bus error on the store (seen 2026-11-14 on an
+# SCPH-9002: the entry state gives Expansion 2 128 bytes and the debug console is at offset 0x80), so a build
+# that runs on a console must not have it. Add it only for a build the emulator runs.
 host-tty = []
 # Emit coarse boot breadcrumbs through `tty`. Implies `host-tty`: a breadcrumb nobody can see is a trap.
 boot-trace = ["host-tty"]
@@ -36,13 +42,6 @@ boot-trace = ["host-tty"]
 # ([`entry::inherited`]): the hardware tests report it to learn what each BIOS leaves. About 120
 # bytes of `.bss` and a few dozen register reads at boot; never in a shipping build.
 entry-census = []
-# Reserve 192 trampoline words instead of 96 (+384 bytes of `.data`).
-# The 256-word option takes precedence if both features are enabled.
-hazard-trampolines-192 = []
-# Reserve 256 trampoline words for the post-link load-delay hazard patcher
-# instead of 96 (+640 bytes of `.data`). Opt in only when a guest's linked
-# exe reports "trampoline array full".
-hazard-trampolines-256 = []
 # Guard every `scratchpad::ScratchpadStack::run`: a canary word at the bottom
 # of the region, checked after the call, and a trap when interrupts are on
 # with an exception handler other than psx-rt's or one the game declared
@@ -59,10 +58,6 @@ scratchpad-window = []
 # For development and test builds; one `b` in the fault path, nothing on
 # the interrupt path.
 strict-faults = []
-# `present`: the VBlank-kicked present queue, with psx-io's command
-# recording and direct-access guard. The handler's kick block costs one load
-# per VBlank and is assembled only with this feature.
-present-queue = ["psx-io/present-queue"]
 # Register psx-rt's interrupt-masking critical section as the
 # `critical-section` crate's implementation (for dependencies that use that
 # crate). A program links at most one implementation, so this is opt-in.
@@ -70,7 +65,7 @@ critical-section = ["dep:critical-section"]
 # Stop-panel for diagnostic discs: a fault, a panic or a stall puts the program counter,
 # stack, GPU/DMA/CD state and any panic message on screen. See `diag`. Never in a shipping
 # build. Also switches on psx-io's counters.
-console-diag = ["psx-io/console-diag", "host-tty"]
+console-diag = ["psx-io/console-diag"]
 
 [lints]
 workspace = true

@@ -112,7 +112,7 @@ impl Scene for ShowcaseParticles {
         )) else {
             return;
         };
-        ot.add_packet(BG_SLOT, bg);
+        ot.add(BG_SLOT, bg);
 
         let _ = render_particles(&self.particles, &mut rects, &mut ot, AUTO_SLOT);
         if let Some(marker) = rects.push(RectFlat::new(
@@ -124,7 +124,7 @@ impl Scene for ShowcaseParticles {
             240,
             160,
         )) {
-            ot.add_packet(MARKER_SLOT, marker);
+            ot.add(MARKER_SLOT, marker);
         }
 
         ot.submit(ctx.gpu_dma());
@@ -160,7 +160,7 @@ fn render_particles<'a, const N: usize, const OT_N: usize>(
         let Some(rect) = rects.push(RectFlat::new(p.x, p.y, size, size, r, g, b)) else {
             break;
         };
-        ot.add_packet(slot, rect);
+        ot.add(slot, rect);
         written += 1;
     }
     written

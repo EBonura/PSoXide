@@ -11,9 +11,7 @@ keeps any page whose CRC checks out.
 v2.0 shows one capture per run: a cover page ("FILM FROM HERE, n PAGES" and a
 run id), then the pages in turn, forever. Every page carries the run id, so a
 recording that spans several runs is sorted by run before anything is
-combined; the binary CRC then confirms the set. `tools/hwtest-report.py
---compare recording.mov` does this and the diff against the silicon baselines
-in one go.
+combined; the binary CRC then confirms the set. `psoxide-hwtest report pages.txt` (the file this tool writes) prints the decoded records.
 
 Install zxing-cpp (`pip install zxing-cpp`). OpenCV's detector is the fallback
 and is markedly weaker on a photographed CRT: on one console recording it read
