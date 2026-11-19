@@ -689,6 +689,11 @@ fn build() -> BTreeMap<u32, V2Entry> {
     b.put(0x9B6, "spu_bulk_abort", ["read_16b_at_abort", "read_16b_after_wait", "flags"]);
     b.put(0x9B7, "spu_bulk_abort_check", ["landed_16b", "bcr_blocks_at_abort", "bcr_blocks_after"]);
     b.put(0x9B8, "spu_bulk_source", ["changed", "hash_low", "window_fits"]);
+    // v2.25: manual-write (PIO) upload, old unpaced against paced (spu_bulk.rs).
+    b.put(0x9B9, "spu_bulk_pio_old", ["first_differing_low", "first_differing_high", "hblanks"]);
+    b.put(0x9BA, "spu_bulk_pio_old_check", ["differing_bytes_low", "differing_bytes_high", "unused"]);
+    b.put(0x9BB, "spu_bulk_pio_new", ["first_differing_low", "first_differing_high", "hblanks"]);
+    b.put(0x9BC, "spu_bulk_pio_new_check", ["differing_bytes_low", "differing_bytes_high", "flags"]);
     // v2.24: 480i field sequence (engine/examples/hardware-tests/src/field_rule.rs run_sequence).
     for k in 0..8u32 {
         b.put(0x9D0 + k, format!("field_seq_blank_{k}"), ["row_mask", "bit31_at_and_after", "field_number"]);

@@ -45,12 +45,29 @@
 //!   wait.
 //! * `0x9B8` the bank's source: 1 if its hash changed over the step, the hash's
 //!   low half, 1 if the bank's window fit the program image (0: nothing ran).
+//!
+//! v2.25 adds the manual-write (PIO) upload, the path `psx_spu` takes for a
+//! source that is not word-aligned (`include_bytes!` data: NitroXide's 32
+//! sample bodies, the largest 73,136 bytes). The SDK used to switch the SPU to
+//! Manual Write once and push every halfword back to back, never letting the
+//! 32-halfword FIFO drain; it now pushes at most 32 with the transfer mode at
+//! Stop, starts Manual Write, waits for the busy flag and repeats. Both run
+//! here on the same [`PIO_BYTES`] bytes of the bank, two bytes in (so the
+//! source is not word-aligned), each into zeroed SPU RAM and read back:
+//!
+//! * `0x9B9` the OLD PIO (unpaced, as before): first byte of SPU RAM that
+//!   differs `lo`, `hi` ([`PIO_BYTES`] when none does), HBlanks it took.
+//! * `0x9BA` the OLD PIO: bytes that differ `lo`, `hi`, 0.
+//! * `0x9BB` the NEW PIO (`psx_spu::upload_adpcm`): first differing byte `lo`,
+//!   `hi`, HBlanks.
+//! * `0x9BC` the NEW PIO: bytes that differ `lo`, `hi`, flags (bit 0 it
+//!   returned a timeout).
 
 use crate::console_tests::record;
 use crate::ui::{self, Line};
 use crate::{push_timing_record, TimingRecord, TIMING_RECORD_COUNT};
 use psx_font::FontAtlas;
-use psx_hw::spu::{SPUCNT, SPUSTAT, TRANSFER_ADDR, TRANSFER_CTRL};
+use psx_hw::spu::{SPUCNT, SPUSTAT, TRANSFER_ADDR, TRANSFER_CTRL, TRANSFER_DATA};
 use psx_io::dma::{self, Channel};
 use psx_io::timers::{self, Timer};
 use psx_rt::interrupts;
@@ -67,6 +84,16 @@ const LARGE_RECORD: u16 = 0x9B5;
 const ABORT_RECORD: u16 = 0x9B6;
 const ABORT_CHECK_RECORD: u16 = 0x9B7;
 const SOURCE_RECORD: u16 = 0x9B8;
+const PIO_OLD_RECORD: u16 = 0x9B9;
+const PIO_OLD_CHECK_RECORD: u16 = 0x9BA;
+const PIO_NEW_RECORD: u16 = 0x9BB;
+const PIO_NEW_CHECK_RECORD: u16 = 0x9BC;
+
+/// The manual-write uploads' length: NitroXide's largest sample body.
+const PIO_BYTES: u32 = 73_136;
+/// Where in the bank the manual-write source starts: two bytes in, so it is
+/// not word-aligned and `psx_spu` cannot send it by DMA.
+const PIO_SOURCE_OFFSET: usize = 2;
 
 /// WipEout's bank.
 const BANK_BYTES: u32 = 470_544;
@@ -182,6 +209,59 @@ fn landed(bank: &[u32]) -> (u32, u32) {
         at += words;
     }
     (first, matching)
+}
+
+/// Compare the first `source.len()` bytes of SPU RAM at [`DEST`] with
+/// `source`: the offset of the first byte that differs (`source.len()` when
+/// none does) and how many differ.
+#[optimize(size)]
+#[inline(never)]
+fn landed_bytes(source: &[u8]) -> (u32, u32) {
+    let mut back = [0u32; 256];
+    let total = source.len() as u32;
+    let mut first = total;
+    let mut differ = 0u32;
+    let mut at = 0u32;
+    while at < total {
+        let bytes = (total - at).min(1024);
+        let words = bytes.div_ceil(4);
+        let chunk = &mut back[..words as usize];
+        crate::spu_dma_read(DEST + at, chunk);
+        for i in 0..bytes {
+            let got = (chunk[(i / 4) as usize] >> ((i % 4) * 8)) as u8;
+            if got != source[(at + i) as usize] {
+                if first == total {
+                    first = at + i;
+                }
+                differ += 1;
+            }
+        }
+        at += bytes;
+    }
+    (first, differ)
+}
+
+/// The SDK's manual-write upload as it was before v2.25: the SPU switched to
+/// Manual Write once, every halfword pushed back to back with no wait for the
+/// 32-halfword FIFO to drain, one drain wait at the end.
+#[optimize(size)]
+#[inline(never)]
+fn unpaced_pio(dest: u32, bytes: &[u8]) {
+    // SAFETY: SPU register stores and status reads, the old psx-spu sequence.
+    let stopped = unsafe {
+        let stopped = psx_io::read_u16(SPUCNT) & !0x0030;
+        psx_io::write_u16(SPUCNT, stopped);
+        wait_mode(stopped);
+        psx_io::write_u16(TRANSFER_CTRL, 0x0004);
+        psx_io::write_u16(TRANSFER_ADDR, (dest / 8) as u16);
+        psx_io::write_u16(SPUCNT, stopped | 0x0010);
+        wait_mode(stopped | 0x0010);
+        for pair in bytes.chunks_exact(2) {
+            psx_io::write_u16(TRANSFER_DATA, u16::from_le_bytes([pair[0], pair[1]]));
+        }
+        stopped
+    };
+    close_dma_write(stopped);
 }
 
 /// Put the SPU in DMA-write mode at `dest` and wait for it to take the mode.
@@ -322,6 +402,23 @@ fn show(font: &FontAtlas, row: u32, name: &str, landed: u32, hblanks: u32) {
         .u(hblanks * CLOCKS_PER_LINE / 1000)
         .s("K CLK");
     let colour = if landed == BANK_BYTES { (120, 230, 120) } else { (255, 110, 90) };
+    ui::live_line(font, row, line.as_str(), colour);
+}
+
+/// A manual-write result on the live band.
+#[optimize(size)]
+#[inline(never)]
+fn show_pio(font: &FontAtlas, row: u32, name: &str, differ: u32, hblanks: u32) {
+    let mut line = Line::new();
+    line.s(name)
+        .s(": ")
+        .u(differ)
+        .s(" OF ")
+        .u(PIO_BYTES)
+        .s(" B DIFFER, ")
+        .u(hblanks * CLOCKS_PER_LINE / 1000)
+        .s("K CLK");
+    let colour = if differ == 0 { (120, 230, 120) } else { (255, 110, 90) };
     ui::live_line(font, row, line.as_str(), colour);
 }
 
@@ -473,6 +570,38 @@ pub(crate) fn run(font: &FontAtlas, records: &mut Records, next: &mut usize) {
         .u(after_wait * 16)
         .s(if after_wait == at_abort { " B: STOPS" } else { " B: RUNS ON" });
     ui::live_line(font, 4, line.as_str(), (220, 224, 230));
+
+    // (5) Manual write: the old unpaced PIO against the paced one, on the same
+    // unaligned bytes.
+    // SAFETY: viewing the bank's words as bytes.
+    let all = unsafe { core::slice::from_raw_parts(from as *const u8, BANK_BYTES as usize) };
+    let pio = &all[PIO_SOURCE_OFFSET..PIO_SOURCE_OFFSET + PIO_BYTES as usize];
+    crate::bounds::record_start(PIO_OLD_RECORD);
+    clear_bank();
+    start_hblanks();
+    unpaced_pio(DEST, pio);
+    let lines = hblanks();
+    let (first, differ) = landed_bytes(pio);
+    push_timing_record(records, next, record(PIO_OLD_RECORD, first & 0xFFFF, first >> 16, lines));
+    push_timing_record(
+        records,
+        next,
+        record(PIO_OLD_CHECK_RECORD, differ & 0xFFFF, differ >> 16, 0),
+    );
+    show_pio(font, 5, "OLD PIO", differ, lines);
+    crate::bounds::record_start(PIO_NEW_RECORD);
+    clear_bank();
+    start_hblanks();
+    let result = psx_spu::upload_adpcm(SpuAddr::new(DEST), pio);
+    let lines = hblanks();
+    let (first, differ) = landed_bytes(pio);
+    push_timing_record(records, next, record(PIO_NEW_RECORD, first & 0xFFFF, first >> 16, lines));
+    push_timing_record(
+        records,
+        next,
+        record(PIO_NEW_CHECK_RECORD, differ & 0xFFFF, differ >> 16, u32::from(result.is_err())),
+    );
+    show_pio(font, 6, "NEW PIO", differ, lines);
 
     let after = fnv_words(bank);
     push_timing_record(
