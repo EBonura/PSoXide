@@ -461,7 +461,7 @@ level_tables! {
     table logic: LevelLogicRecord = 68;
     table logic_slots: u16 = 2;
     table visual_links: u16 = 2;
-    table game_entities: LevelGameEntityRecord = 128;
+    table game_entities: LevelGameEntityRecord = 116;
     table game_entity_ids: StableId = 4;
     table entities: EntityRecord = 24;
     table destructibles: LevelDestructibleRecord = 6;
