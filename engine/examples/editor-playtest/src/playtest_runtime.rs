@@ -985,7 +985,7 @@ impl Playtest {
         let reacting = if self.game_entities.actor().knocked_down() {
             Some(Reaction::Knockdown)
         } else {
-            match self.anim.state {
+            match self.body.state {
                 PlayerAnim::Stun => Some(Reaction::Stagger),
                 PlayerAnim::Parried => Some(Reaction::Parried),
                 PlayerAnim::HitReact if self.game_entities.actor_action().lock_until > now => {
@@ -1095,9 +1095,9 @@ impl Playtest {
         self.evade_run_hold_consumed = false;
         self.evade_latched_move = (Q12::ZERO, Q12::ZERO);
         self.game_entities.actor_action_mut().evade_buffer = 0;
-        self.anim.state = PlayerAnim::Idle;
-        self.game_entities.actor_action_mut().start = SimTick::ZERO;
-        self.anim.switched = None;
+        self.body.state = PlayerAnim::Idle;
+        self.body.start = SimTick::ZERO;
+        self.body.switched = None;
         self.game_entities.actor_action_mut().lock_until = SimTick::ZERO;
         self.loco = LocoPhase::Idle;
         self.active_interactable = None;
@@ -1258,8 +1258,8 @@ impl Playtest {
             .snap_to(position, motor_yaw);
         self.reset_life_combat();
         self.death_ticks_remaining = 0;
-        self.anim.state = PlayerAnim::Idle;
-        self.anim.switched = None;
+        self.body.state = PlayerAnim::Idle;
+        self.body.switched = None;
         self.game_entities.actor_action_mut().lock_until = SimTick::ZERO;
         self.lock_target = None;
         self.soft_lock_target = None;
@@ -1307,50 +1307,20 @@ impl Playtest {
             .clear();
         self.game_entities.actor_action_mut().authored_dodge.clear();
         // Gait to gait, enter the incoming cycle at the phase the outgoing one
-        // had reached: the shared track backdates the clock by the carry.
-        let carried = self.gait_phase_carry(self.anim.state, anim, now, video_hz);
-        self.anim.switch(
-            anim,
-            &mut self.game_entities.actor_action_mut().start,
-            now,
-            carried,
-        );
-    }
-
-    /// Ticks to backdate the incoming gait clip by so it starts in phase with
-    /// the outgoing one. Zero for anything that is not gait-to-gait, and for
-    /// any clip whose duration cannot be resolved.
-    fn gait_phase_carry(
-        &self,
-        from: PlayerAnim,
-        to: PlayerAnim,
-        now: SimTick,
-        video_hz: VideoHz,
-    ) -> u32 {
-        if !from.is_gait() || !to.is_gait() || from == to {
-            return 0;
-        }
-        let Some(character) = self.character.as_ref() else {
-            return 0;
-        };
-        let cycle = |anim: PlayerAnim| {
-            self.player_clip_duration_vblanks(
-                character,
-                character.clip_for(anim),
-                video_hz,
-                self.player_action_speed_q8(character, anim),
-                character.action_frame_range(anim.action()),
-            )
-            .filter(|ticks| *ticks > 0)
-        };
-        let (Some(out_cycle), Some(in_cycle)) = (cycle(from), cycle(to)) else {
-            return 0;
-        };
-        fighter_anim::gait_phase_carry(
-            now.saturating_sub(self.game_entities.actor_action().start),
-            out_cycle,
-            in_cycle,
-        )
+        // had reached: the body backdates the clock by the carry.
+        let carried = self.body.gait_carry(anim, now, |state| {
+            self.character.as_ref().map_or(0, |character| {
+                self.player_clip_duration_vblanks(
+                    character,
+                    character.clip_for(state),
+                    video_hz,
+                    self.player_action_speed_q8(character, state),
+                    character.action_frame_range(state.action()),
+                )
+                .unwrap_or(0)
+            })
+        });
+        self.body.switch(anim, now, carried);
     }
 
     /// Resolve the active crossfade for this render tick, if any.
@@ -1360,12 +1330,8 @@ impl Playtest {
     ///
     /// Keep outgoing clips advancing except when a gait stops: continuing
     /// that stride would show extra steps after the motor is already still.
-    pub(super) fn player_anim_blend(&self, now: SimTick) -> Option<PlayerAnimBlend> {
-        self.anim.fade(now).map(|fade| PlayerAnimBlend {
-            anim: fade.from,
-            local_tick: fade.local_tick,
-            alpha_q12: fade.alpha_q12,
-        })
+    pub(super) fn player_anim_blend(&self, now: SimTick) -> Option<AnimFade<PlayerAnim>> {
+        self.body.fade(now)
     }
 
     pub(super) fn start_player_anim_action(
@@ -1394,7 +1360,7 @@ impl Playtest {
     #[cfg_attr(target_arch = "mips", optimize(size))]
     pub(super) fn player_melee_read(&self) -> u8 {
         if !matches!(
-            self.anim.state,
+            self.body.state,
             PlayerAnim::LightAttack | PlayerAnim::HeavyAttack
         ) {
             return 0;
@@ -1412,7 +1378,7 @@ impl Playtest {
             .unwrap_or(&[])
         {
             if capsule.flags & psx_level::combat_capsule_flags::HITBOX != 0
-                && capsule.action == self.anim.state.action().to_index() as u8
+                && capsule.action == self.body.state.action().to_index() as u8
             {
                 first_hit = first_hit.min(u32::from(capsule.active_start_frame));
                 end_hit = end_hit.max(u32::from(capsule.active_end_frame));
@@ -1433,7 +1399,7 @@ impl Playtest {
     /// heavy armour and ordinary movement never count as a firearm opening.
     pub(super) fn player_shot_opening(&self) -> bool {
         if !matches!(
-            self.anim.state,
+            self.body.state,
             PlayerAnim::LightAttack | PlayerAnim::HeavyAttack
         ) {
             return false;
@@ -1450,7 +1416,7 @@ impl Playtest {
             .iter()
             .filter(|c| {
                 c.flags & psx_level::combat_capsule_flags::HITBOX != 0
-                    && c.action == self.anim.state.action().to_index() as u8
+                    && c.action == self.body.state.action().to_index() as u8
             })
             .map(|c| u32::from(c.active_start_frame))
             .min()
@@ -1638,7 +1604,6 @@ impl Playtest {
             self.switch_player_anim(anim, now, ctx.video_hz);
         }
         self.game_entities.actor_action_mut().lock_until = now.saturating_add(recovery);
-        self.anim.switched = None;
         telemetry::debug_log(if reaction == Reaction::Flinch {
             "player hit:react"
         } else {
@@ -1688,7 +1653,6 @@ impl Playtest {
         self.game_entities.actor_action_mut().lock_until = now.saturating_add(u32::from(
             self.game_entities.actor_stats().knockdown_ticks.max(1),
         ));
-        self.anim.switched = None;
         telemetry::debug_log("player poise:knockdown");
     }
 
@@ -1832,7 +1796,7 @@ impl Playtest {
         if !character
             .combat_windows
             .iter()
-            .any(|w| w.action == self.anim.state.action().to_index() as u8)
+            .any(|w| w.action == self.body.state.action().to_index() as u8)
         {
             return Sample::LEGACY;
         }
@@ -1841,22 +1805,21 @@ impl Playtest {
             .get(character.model.to_usize())
             .copied()
             .flatten()
-            .and_then(|model| model.clip(&self.clips, character.clip_for(self.anim.state)))
+            .and_then(|model| model.clip(&self.clips, character.clip_for(self.body.state)))
         else {
             return Sample::LEGACY;
         };
         let phase = psx_game_runtime::model_rendering::animation_phase_at_tick_q12(
             clip,
-            ctx.sim_tick
-                .saturating_sub(self.game_entities.actor_action().start),
+            ctx.sim_tick.saturating_sub(self.body.start),
             ctx.video_hz,
             false,
-            self.player_action_speed_q8(character, self.anim.state),
-            character.action_frame_range(self.anim.state.action()),
+            self.player_action_speed_q8(character, self.body.state),
+            character.action_frame_range(self.body.state.action()),
         );
         psx_game_runtime::combat_timing::Sample::new(
             &character.combat_windows,
-            self.anim.state.action().to_index() as u8,
+            self.body.state.action().to_index() as u8,
             phase,
         )
     }
@@ -2655,7 +2618,7 @@ impl Playtest {
             self.lock_target_position()
                 .or_else(|| self.soft_lock_target_position())
         };
-        let target = self.camera_target(lock_target, self.anim.state != PlayerAnim::Idle);
+        let target = self.camera_target(lock_target, self.body.state != PlayerAnim::Idle);
         let mut prop_blockers =
             psx_engine::FixedScratch::<CharacterCollisionAabb, MAX_STATIC_PROP_AABB_BLOCKERS>::new(
             );
@@ -3280,8 +3243,8 @@ mod life_reset_tests {
     #[test]
     fn walk_windup_hands_off_without_blending_a_frozen_endpoint() {
         let mut scene = test_scene();
-        scene.anim.state = PlayerAnim::Walk;
-        scene.anim.switched = Some(AnimSwitch {
+        scene.body.state = PlayerAnim::Walk;
+        scene.body.switched = Some(AnimSwitch {
             from: PlayerAnim::WalkWindup,
             local_tick: 40,
             at: SimTick::from_u32(100),
@@ -3290,7 +3253,7 @@ mod life_reset_tests {
         assert!(scene.player_anim_blend(SimTick::from_u32(102)).is_none());
 
         // An interrupted stop still blends when movement resumes.
-        scene.anim.switched = Some(AnimSwitch {
+        scene.body.switched = Some(AnimSwitch {
             from: PlayerAnim::WalkWinddown,
             local_tick: 12,
             at: SimTick::from_u32(100),
@@ -3314,8 +3277,8 @@ mod life_reset_tests {
                 PlayerAnim::RunWinddown,
                 PlayerAnim::RunWinddownAlt,
             ] {
-                scene.anim.state = stop;
-                scene.anim.switched = Some(AnimSwitch {
+                scene.body.state = stop;
+                scene.body.switched = Some(AnimSwitch {
                     from: gait,
                     local_tick: 17,
                     at: SimTick::from_u32(100),
@@ -3330,8 +3293,8 @@ mod life_reset_tests {
                 assert!(scene.player_anim_blend(SimTick::from_u32(104)).is_none());
             }
         }
-        scene.anim.state = PlayerAnim::Run;
-        scene.anim.switched = Some(AnimSwitch {
+        scene.body.state = PlayerAnim::Run;
+        scene.body.switched = Some(AnimSwitch {
             from: PlayerAnim::Walk,
             local_tick: 17,
             at: SimTick::from_u32(100),

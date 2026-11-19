@@ -309,7 +309,7 @@ fn a_sub_unit_strafe_keeps_one_gait_on_one_clock_for_her_and_an_enemy() {
         // Her selection: the shared mapping of the motor's intent, switched
         // on the shared track (a strafe has no windup phase).
         let anim = fighter_anim::locomotion_anim(hers.anim);
-        if anim != scene.anim.state {
+        if anim != scene.body.state {
             scene.switch_player_anim(anim, now, VideoHz::NTSC);
         }
         // Theirs: the same mapping and track, at the presentation tick.
@@ -319,12 +319,12 @@ fn a_sub_unit_strafe_keeps_one_gait_on_one_clock_for_her_and_an_enemy() {
         if think == 0 {
             continue;
         }
-        assert_eq!(scene.anim.state, PlayerAnim::StrafeLeft, "think {think}");
+        assert_eq!(scene.body.state, PlayerAnim::StrafeLeft, "think {think}");
         assert_eq!(
             shown.clip.clip, records[0].strafe_left_clip,
             "think {think}"
         );
-        let her_clock = now.saturating_sub(scene.game_entities.actor_action().start);
+        let her_clock = scene.body.local_tick(now);
         if let Some((her_before, theirs_before)) = last {
             assert_eq!(her_clock, her_before + 2, "think {think}");
             assert_eq!(shown.clip.phase_ticks, theirs_before + 2, "think {think}");

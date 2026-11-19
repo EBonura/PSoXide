@@ -1376,6 +1376,7 @@ impl<const N: usize> GameEntities<N> {
             0,
             pressed,
             crate::combat_timing::Sample::LEGACY,
+            self.gaits[i].start,
             self.clock,
             free,
         ) {

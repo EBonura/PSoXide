@@ -1173,7 +1173,7 @@ impl Scene for Playtest {
         self.game_entities.actor_mut().tick(
             1,
             matches!(
-                self.anim.state,
+                self.body.state,
                 PlayerAnim::Stun
                     | PlayerAnim::Parried
                     | PlayerAnim::HitReact
@@ -1486,9 +1486,9 @@ impl Scene for Playtest {
                 } else {
                     player_lighting.map_or(EquipmentDrawStats::default(), |lighting| {
                         draw_player_equipment(
-                            self.anim.state,
+                            self.body.state,
                             crate::model_rendering::equipment_wire_q12(
-                                self.anim.state,
+                                self.body.state,
                                 player_pose.pose().phase_q12(),
                                 player_pose.pose().animation().frame_count(),
                             ),

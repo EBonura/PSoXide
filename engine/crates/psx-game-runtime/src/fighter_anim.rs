@@ -3,12 +3,11 @@
 //! one gait into the next, and the crossfade a clip change leaves behind.
 //!
 //! The player and every [`GameEntities`](crate::entities::GameEntities) slot
-//! run these same rules. A fighter keeps an [`AnimTrack`] per thing it
-//! shows: the state it plays and the crossfade from the one before. The
-//! clip's clock is a start tick the fighter owns (the player's is her
-//! [`FighterAction::start`](crate::fighter_action::FighterAction::start)):
-//! a clip's local tick is the time since that start, so a gait's phase runs
-//! on the clock whatever distance the body covered on any one tick.
+//! run these same rules. A fighter keeps a [`Body`] per thing it shows: the
+//! state it plays, the crossfade from the one before and the clip's clock, a
+//! start tick: a clip's local tick is the time since that start, so a gait's
+//! phase runs on the clock whatever distance the body covered on any one
+//! tick.
 
 use crate::character::PlayerAnim;
 use psx_engine::{CharacterMotorAnim, SimTick};
@@ -210,37 +209,84 @@ pub struct AnimFade<S> {
     pub alpha_q12: u16,
 }
 
-/// One fighter's animation: the state it plays and the switch it is fading
-/// from.
+/// How a body enters a reaction (Hit React, Stun, Parried, Knockdown).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct AnimTrack<S> {
+pub enum ReactionBlend {
+    /// Crossfade into it by the usual windows ([`blend_ticks`]).
+    Fade,
+    /// Cut to it at once: the reaction's first frame shows on the hit tick.
+    Cut,
+}
+
+/// Whether `action` is a reaction a hit plays on a body.
+pub const fn is_reaction(action: Action) -> bool {
+    matches!(
+        action,
+        Action::HitReact | Action::Stun | Action::Parried | Action::Knockdown
+    )
+}
+
+/// One fighter's animation: the state it plays, the switch it is fading
+/// from and the clip's clock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Body<S> {
     /// Current state.
     pub state: S,
     /// Last switch, while its crossfade may still show.
     pub switched: Option<AnimSwitch<S>>,
+    /// The clip's clock: the tick its local tick reads as zero.
+    pub start: SimTick,
+    /// How this body enters a reaction.
+    pub reactions: ReactionBlend,
 }
 
-impl<S: AnimState> AnimTrack<S> {
-    /// A track showing `state`, with nothing to fade from.
-    pub const fn new(state: S) -> Self {
+impl<S: AnimState> Body<S> {
+    /// A body showing `state` on a clock started at `start`, with nothing to
+    /// fade from.
+    pub const fn new(state: S, start: SimTick, reactions: ReactionBlend) -> Self {
         Self {
             state,
             switched: None,
+            start,
+            reactions,
         }
     }
 
+    /// The current clip's local tick at `now`.
+    pub fn local_tick(&self, now: SimTick) -> u32 {
+        now.saturating_sub(self.start)
+    }
+
     /// Switch to `next` at `now`, keeping the outgoing pose for the
-    /// crossfade. `start` is the clip clock: the outgoing clip's local tick
-    /// is read off it, and it restarts at `now` backdated by `carried` ticks
-    /// (see [`gait_phase_carry`]).
-    pub fn switch(&mut self, next: S, start: &mut SimTick, now: SimTick, carried: u32) {
-        self.switched = Some(AnimSwitch {
-            from: self.state,
-            local_tick: now.saturating_sub(*start),
-            at: now,
-        });
+    /// crossfade (none into a reaction when [`Self::reactions`] cuts). The
+    /// outgoing clip's local tick is read off the clock, which restarts at
+    /// `now` backdated by `carried` ticks (see [`Self::gait_carry`]).
+    pub fn switch(&mut self, next: S, now: SimTick, carried: u32) {
+        let cut = self.reactions == ReactionBlend::Cut && is_reaction(next.action());
+        self.switched = if cut {
+            None
+        } else {
+            Some(AnimSwitch {
+                from: self.state,
+                local_tick: self.local_tick(now),
+                at: now,
+            })
+        };
         self.state = next;
-        *start = SimTick::from_u32(now.as_u32().saturating_sub(carried));
+        self.start = SimTick::from_u32(now.as_u32().saturating_sub(carried));
+    }
+
+    /// Ticks to backdate `next`'s clock by when switching to it at `now`, so
+    /// gait to gait it enters the stride at the phase the outgoing one had
+    /// reached ([`gait_phase_carry`]); zero otherwise. `cycle(state)` is a
+    /// state's clip length in ticks at its playback, 0 when unknown.
+    pub fn gait_carry(&self, next: S, now: SimTick, mut cycle: impl FnMut(S) -> u32) -> u32 {
+        let from = self.state;
+        if from == next || !is_gait(from.action()) || !is_gait(next.action()) {
+            return 0;
+        }
+        let out_cycle = cycle(from);
+        gait_phase_carry(self.local_tick(now), out_cycle, cycle(next))
     }
 
     /// The crossfade showing at `now`, if any. Alpha ramps linearly over
@@ -396,15 +442,13 @@ mod tests {
 
     #[test]
     fn a_switch_restarts_the_clock_backdated_by_the_carry() {
-        let mut start = SimTick::from_u32(100);
-        let mut track = AnimTrack::new(PlayerAnim::Walk);
-        track.switch(
-            PlayerAnim::StrafeLeft,
-            &mut start,
-            SimTick::from_u32(130),
-            7,
+        let mut track = Body::new(
+            PlayerAnim::Walk,
+            SimTick::from_u32(100),
+            ReactionBlend::Fade,
         );
-        assert_eq!(start, SimTick::from_u32(123));
+        track.switch(PlayerAnim::StrafeLeft, SimTick::from_u32(130), 7);
+        assert_eq!(track.start, SimTick::from_u32(123));
         assert_eq!(track.state, PlayerAnim::StrafeLeft);
         let fade = track.fade(SimTick::from_u32(132)).unwrap();
         assert_eq!(fade.from, PlayerAnim::Walk);
@@ -413,6 +457,29 @@ mod tests {
         assert!(track
             .fade(SimTick::from_u32(130 + BLEND_GAIT_TICKS))
             .is_none());
+    }
+
+    #[test]
+    fn a_cutting_body_enters_a_reaction_without_a_fade() {
+        let now = SimTick::from_u32(40);
+        let mut cuts = Body::new(PlayerAnim::Walk, SimTick::ZERO, ReactionBlend::Cut);
+        let mut fades = Body::new(PlayerAnim::Walk, SimTick::ZERO, ReactionBlend::Fade);
+        cuts.switch(PlayerAnim::Stun, now, 0);
+        fades.switch(PlayerAnim::Stun, now, 0);
+        assert_eq!(
+            (cuts.state, cuts.start, cuts.switched),
+            (PlayerAnim::Stun, now, None)
+        );
+        assert_eq!(
+            fades.fade(now).map(|fade| fade.from),
+            Some(PlayerAnim::Walk)
+        );
+        // Anything else still crossfades on a cutting body.
+        cuts.switch(PlayerAnim::Idle, SimTick::from_u32(50), 0);
+        assert_eq!(
+            cuts.fade(SimTick::from_u32(50)).map(|fade| fade.from),
+            Some(PlayerAnim::Stun)
+        );
     }
 
     fn masks(parents: &[Option<u16>]) -> BodyJointMasks {

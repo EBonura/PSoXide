@@ -835,15 +835,14 @@ pub struct GameEntities<const MAX_ENTITIES: usize> {
     /// The animation intent of each entity's motor at its latest think:
     /// what its locomotion clip shows ([`Self::update_animation`]).
     motor_anims: [CharacterMotorAnim; MAX_ENTITIES],
-    /// Each entity's shown clip and the switch it crossfades from
-    /// ([`crate::fighter_anim::AnimTrack`]).
-    bodies: [crate::fighter_anim::AnimTrack<EntityAnim>; MAX_ENTITIES],
-    /// Clock of each shown clip: the tick its phase reads as zero.
-    body_starts: [psx_engine::SimTick; MAX_ENTITIES],
-    /// Each entity's locomotion (its gait, idle or turn), on the clock of
-    /// its [`crate::fighter_action::FighterAction::start`]: the full body in
-    /// tactical Aggro, the legs while it moves through an attack.
-    gaits: [crate::fighter_anim::AnimTrack<EntityAnim>; MAX_ENTITIES],
+    /// Each entity's shown clip, the switch it crossfades from and the
+    /// clip's clock, the tick its phase reads as zero
+    /// ([`crate::fighter_anim::Body`]).
+    bodies: [crate::fighter_anim::Body<EntityAnim>; MAX_ENTITIES],
+    /// Each entity's locomotion (its gait, idle or turn) on its own clock:
+    /// the full body in tactical Aggro, the legs while it moves through an
+    /// attack.
+    gaits: [crate::fighter_anim::Body<EntityAnim>; MAX_ENTITIES],
     /// The tick of the latest [`Self::update_animation`].
     anim_clock: psx_engine::SimTick,
     /// Entities whose foot landed at the latest [`Self::update_animation`]
@@ -1193,9 +1192,8 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         moving: [0; MAX_ENTITIES],
         teams: [crate::projectiles::CombatTeam::Enemy; MAX_ENTITIES],
         motor_anims: [CharacterMotorAnim::Idle; MAX_ENTITIES],
-        bodies: [crate::fighter_anim::AnimTrack::new(EntityAnim::NONE); MAX_ENTITIES],
-        body_starts: [psx_engine::SimTick::ZERO; MAX_ENTITIES],
-        gaits: [crate::fighter_anim::AnimTrack::new(EntityAnim::NONE); MAX_ENTITIES],
+        bodies: [EntityAnim::NO_BODY; MAX_ENTITIES],
+        gaits: [EntityAnim::NO_BODY; MAX_ENTITIES],
         anim_clock: psx_engine::SimTick::ZERO,
         footfalls: 0,
         clock: psx_engine::SimTick::ZERO,

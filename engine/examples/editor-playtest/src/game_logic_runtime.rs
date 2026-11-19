@@ -353,16 +353,16 @@ impl psx_game_runtime::entities::FighterWorld for SceneEntityMover<'_> {
                         .player_contents(position, config.height)
                         .is_some_and(|sample| sample.water_level > 0);
                 world_rt
-                .update_motor(
-                    motor,
-                    input,
-                    liquid_motor_rule(fighter_motor_rules(config, room, true), in_liquid),
-                    delta,
-                    self.destructibles,
-                    cylinders.as_slice(),
-                    aabbs.as_slice(),
-                )
-                .expect("grid entity trace failed")
+                    .update_motor(
+                        motor,
+                        input,
+                        liquid_motor_rule(fighter_motor_rules(config, room, true), in_liquid),
+                        delta,
+                        self.destructibles,
+                        cylinders.as_slice(),
+                        aabbs.as_slice(),
+                    )
+                    .expect("grid entity trace failed")
             }
             // No world cooked yet (the placeholder manifest), or a prop
             // table that does not fit: the body holds still.
@@ -1129,10 +1129,10 @@ impl Playtest {
     /// her authored Armored window, else her heavy while its contact is
     /// live (a hitbox of the action active on her pose).
     fn player_armoured(&self, ctx: &Ctx) -> bool {
-        let action = self.anim.state.action();
+        let action = self.body.state.action();
         let capsules = self.player_defence_capsules();
         let contact = matches!(
-            self.anim.state,
+            self.body.state,
             PlayerAnim::HeavyAttack | PlayerAnim::VertHeavyAttack
         ) && self.player_actor_pose.is_some_and(|snapshot| {
             let frame = (snapshot.pose().phase_q12() >> 12).min(u32::from(u16::MAX)) as u16;
@@ -1232,10 +1232,11 @@ impl Playtest {
                 },
             );
         }
-        for (index, record) in GAME_ENTITIES
-            .iter()
-            .enumerate()
-            .take(if live { self.game_entities.count() } else { 0 })
+        for (index, record) in
+            GAME_ENTITIES
+                .iter()
+                .enumerate()
+                .take(if live { self.game_entities.count() } else { 0 })
         {
             // An entity in its i-frames past its parry window is not a
             // target, exactly as the player above: the bolt flies on through.
@@ -1647,7 +1648,7 @@ impl Playtest {
     #[cfg_attr(target_arch = "mips", optimize(size))]
     pub(super) fn player_swing(&self, now: SimTick) -> Option<SwingClock> {
         if !matches!(
-            self.anim.state,
+            self.body.state,
             PlayerAnim::LightAttack
                 | PlayerAnim::HeavyAttack
                 | PlayerAnim::VertLightAttack
@@ -1656,7 +1657,7 @@ impl Playtest {
             return None;
         }
         let character = self.character.as_ref()?;
-        let action = self.anim.state.action();
+        let action = self.body.state.action();
         let first = character.combat_capsule_first.to_usize();
         let end = first.saturating_add(usize::from(character.combat_capsule_count));
         Some(SwingClock {
@@ -1665,13 +1666,13 @@ impl Playtest {
                 .get(character.model.to_usize())
                 .copied()
                 .flatten()
-                .and_then(|model| model.clip(&self.clips, character.clip_for(self.anim.state))),
-            local_tick: now.saturating_sub(self.game_entities.actor_action().start),
+                .and_then(|model| model.clip(&self.clips, character.clip_for(self.body.state))),
+            local_tick: now.saturating_sub(self.body.start),
             looping: character.action_loops(action),
             speed_q8: crate::playtest_runtime::live_action_speed_q8(
                 self.vitality_modifiers(),
                 character,
-                self.anim.state,
+                self.body.state,
             ),
             frame_range: character.action_frame_range(action),
             action,
@@ -1926,7 +1927,7 @@ impl Playtest {
     }
 
     pub(super) fn player_swing_sound(&mut self) {
-        if !player_anim_is_attack(self.anim.state) {
+        if !player_anim_is_attack(self.body.state) {
             return;
         }
         let (Some(character), Some(pose)) =
@@ -1943,11 +1944,11 @@ impl Playtest {
             .map(|old| old.pose().phase_q12());
         if combat::melee_window_started(
             COMBAT_CAPSULES.get(first..end).unwrap_or(&[]),
-            self.anim.state.action(),
+            self.body.state.action(),
             previous,
             pose.pose().phase_q12(),
         ) {
-            if let Some(event) = weapon_swing_sfx(self.anim.state.action()) {
+            if let Some(event) = weapon_swing_sfx(self.body.state.action()) {
                 self.queue_gameplay_sfx(event);
             }
             self.destructibles.begin_swing();
@@ -1958,7 +1959,11 @@ impl Playtest {
     /// The swing sound of `instance`'s melee window, read off this tick's
     /// and last tick's snapshots in place (each is a few hundred bytes).
     pub(super) fn enemy_swing_sound(&mut self, instance: usize) {
-        let Some(pose) = self.instance_actor_poses.get(instance).and_then(Option::as_ref) else {
+        let Some(pose) = self
+            .instance_actor_poses
+            .get(instance)
+            .and_then(Option::as_ref)
+        else {
             return;
         };
         let Some(attack) = self
@@ -2005,8 +2010,8 @@ impl Playtest {
     /// is two compares.
     fn resolve_player_melee(&mut self, ctx: &Ctx) {
         let now = ctx.sim_tick;
-        if self.anim.state == PlayerAnim::RangedAttack
-            || !player_anim_is_attack(self.anim.state)
+        if self.body.state == PlayerAnim::RangedAttack
+            || !player_anim_is_attack(self.body.state)
             || self.game_entities.actor_action().lock_until <= now
         {
             return;
@@ -2034,7 +2039,7 @@ impl Playtest {
         let swing = Swing {
             attacker: RuntimeGameEntities::ACTOR_SLOT,
             capsules: COMBAT_CAPSULES.get(first..end).unwrap_or(&[]),
-            action: self.anim.state.action(),
+            action: self.body.state.action(),
             pose: PoseAt::Player,
             previous: self
                 .previous_player_actor_pose
@@ -2043,9 +2048,9 @@ impl Playtest {
                 .then_some(PoseAt::PreviousPlayer),
             position: [player.x, player.y, player.z],
             room: self.room_index,
-            channel: Self::player_attack_channel(self.anim.state),
+            channel: Self::player_attack_channel(self.body.state),
             heavy: matches!(
-                self.anim.state,
+                self.body.state,
                 PlayerAnim::HeavyAttack | PlayerAnim::VertHeavyAttack
             ),
             crit: self.game_entities.actor().crit_attack,
@@ -2210,7 +2215,7 @@ impl Playtest {
         if stats.hits > 0 {
             telemetry::counter(telemetry::counter::PLAYER_MELEE_HITS, u32::from(stats.hits));
             let event = if matches!(
-                self.anim.state,
+                self.body.state,
                 PlayerAnim::HeavyAttack | PlayerAnim::VertHeavyAttack
             ) {
                 LevelGameplaySfxEvent::HeavyHit
@@ -2389,16 +2394,27 @@ impl Playtest {
     /// The harmful liquid one fighter stands in this tick, by one rule for
     /// every fighter: the damage of the contents at its body (on the
     /// liquid's own interval), none while `exempt` (i-frames, dying).
-    fn fighter_liquid_damage(&self, ctx: &Ctx, position: [i32; 3], height: i32, exempt: bool) -> u16 {
+    fn fighter_liquid_damage(
+        &self,
+        ctx: &Ctx,
+        position: [i32; 3],
+        height: i32,
+        exempt: bool,
+    ) -> u16 {
         if exempt {
             return 0;
         }
         self.world_rt
             .as_ref()
             .and_then(|world_rt| {
-                world_rt.player_contents(RoomPoint::new(position[0], position[1], position[2]), height)
+                world_rt.player_contents(
+                    RoomPoint::new(position[0], position[1], position[2]),
+                    height,
+                )
             })
-            .map_or(0, |sample| hazard_damage(sample.contents, ctx.sim_tick.as_u32()))
+            .map_or(0, |sample| {
+                hazard_damage(sample.contents, ctx.sim_tick.as_u32())
+            })
     }
 
     /// The hazards on every entity, by the rule her actor slot takes them

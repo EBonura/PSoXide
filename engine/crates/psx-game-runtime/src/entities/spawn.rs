@@ -28,8 +28,8 @@ impl<const N: usize> GameEntities<N> {
         self.hazard_ready_at[index] = 0;
         self.actions[index] = crate::fighter_action::FighterAction::IDLE;
         self.motor_anims[index] = CharacterMotorAnim::Idle;
-        self.bodies[index] = crate::fighter_anim::AnimTrack::new(EntityAnim::NONE);
-        self.gaits[index] = crate::fighter_anim::AnimTrack::new(EntityAnim::NONE);
+        self.bodies[index] = EntityAnim::NO_BODY;
+        self.gaits[index] = EntityAnim::NO_BODY;
         self.exchanges[index] = crate::ranged_tactics::RangedExchange::EMPTY;
         self.projectile_threats[index] = None;
         self.patrol_leg[index] = 0;

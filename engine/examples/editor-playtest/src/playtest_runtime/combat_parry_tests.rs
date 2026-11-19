@@ -158,7 +158,7 @@ fn the_enemy_parries_a_player_bolt_early_in_its_swap() {
         BREAK_GRACE_TICKS_FOR_TEST
     );
     assert!(matches!(
-        scene.anim.state,
+        scene.body.state,
         PlayerAnim::Stun | PlayerAnim::HitReact
     ));
     assert!(!scene.game_entities.actor().knocked_down());
@@ -184,7 +184,7 @@ fn a_parried_attacker_is_staggered_not_knocked_down_on_both_sides() {
     assert_eq!(scene.game_entities.state(0), GameEntityState::Staggered);
     assert!(riposte_on_her(&mut scene, 0, &ctx(100)));
     assert!(!scene.game_entities.actor().knocked_down());
-    assert_ne!(scene.anim.state, PlayerAnim::Knockdown);
+    assert_ne!(scene.body.state, PlayerAnim::Knockdown);
 }
 
 #[test]
@@ -234,12 +234,12 @@ fn a_parried_attacker_plays_parried_on_both_sides() {
         OptionalModelClipIndex::from_raw(7);
     scene.character = Some(aletha);
     assert!(riposte_on_her(&mut scene, 0, &ctx(100)));
-    assert_eq!(scene.anim.state, PlayerAnim::Parried);
+    assert_eq!(scene.body.state, PlayerAnim::Parried);
     assert_eq!(aletha.clip_for(PlayerAnim::Parried).to_usize(), 7);
     assert!(scene.game_entities.actor_action().lock_until > ctx(100).sim_tick);
     let mut scene = duel();
     assert!(riposte_on_her(&mut scene, 0, &ctx(100)));
-    assert_ne!(scene.anim.state, PlayerAnim::Parried);
+    assert_ne!(scene.body.state, PlayerAnim::Parried);
 }
 
 #[test]
@@ -250,10 +250,10 @@ fn a_riposte_in_break_grace_does_not_flinch_her_as_it_does_not_an_entity() {
     let mut scene = duel();
     scene.character = Some(character(true));
     assert!(riposte_on_her(&mut scene, 0, &ctx(100)));
-    scene.anim.state = PlayerAnim::Idle;
+    scene.body.state = PlayerAnim::Idle;
     scene.game_entities.actor_action_mut().lock_until = ctx(150).sim_tick;
     assert!(!riposte_on_her(&mut scene, 0, &ctx(200)));
-    assert_eq!(scene.anim.state, PlayerAnim::Idle);
+    assert_eq!(scene.body.state, PlayerAnim::Idle);
 }
 
 #[test]
@@ -506,7 +506,7 @@ fn an_ordinary_break_staggers_the_player_and_never_knocks_her_down() {
         &ctx(100)
     ));
     assert!(!scene.game_entities.actor().knocked_down());
-    assert_ne!(scene.anim.state, PlayerAnim::Knockdown);
+    assert_ne!(scene.body.state, PlayerAnim::Knockdown);
 }
 
 #[test]
@@ -523,7 +523,7 @@ fn a_crit_break_knocks_the_player_down_and_she_gets_up() {
         &ctx(100)
     ));
     assert!(scene.game_entities.actor().knocked_down());
-    assert_eq!(scene.anim.state, PlayerAnim::Knockdown);
+    assert_eq!(scene.body.state, PlayerAnim::Knockdown);
     assert_eq!(
         scene.game_entities.actor_action().lock_until,
         SimTick::from_u32(100 + u32::from(down)),
@@ -541,7 +541,7 @@ fn a_crit_break_knocks_the_player_down_and_she_gets_up() {
     ));
     assert!(!scene.player_take_damage(CombatantId::entity(0), HitKind::Melee, None, 5));
     assert_eq!(scene.game_entities.actor().health(), health - 5);
-    assert_eq!(scene.anim.state, PlayerAnim::Knockdown);
+    assert_eq!(scene.body.state, PlayerAnim::Knockdown);
     for _ in 1..down {
         scene.game_entities.actor_mut().tick(1, true, false);
     }

@@ -967,12 +967,12 @@ impl Playtest {
                 let blend = self.player_anim_blend(ctx.sim_tick);
                 let modifiers = self.vitality_modifiers();
                 let speeds = mr::PlayerActionSpeeds {
-                    action_q8: live_action_speed_q8(modifiers, character, self.anim.state),
+                    action_q8: live_action_speed_q8(modifiers, character, self.body.state),
                     blend_q8: blend.map_or(0, |blend| {
-                        live_action_speed_q8(modifiers, character, blend.anim)
+                        live_action_speed_q8(modifiers, character, blend.from)
                     }),
                 };
-                let clip_local = character.clip_for(self.anim.state);
+                let clip_local = character.clip_for(self.body.state);
                 // The clip's first-frame root is constant for the clip, and
                 // sampling it was a whole pose decode per tick. Last tick's
                 // snapshot already carries it; reuse it while the same clip of
@@ -995,9 +995,9 @@ impl Playtest {
                     player.y,
                     player.z,
                     self.game_entities.actor_motor().yaw(),
-                    self.anim.state.action(),
+                    self.body.state.action(),
                     clip_local,
-                    self.game_entities.actor_action().start,
+                    self.body.start,
                     blend,
                     speeds,
                     cached_clip_first_root_xz,
@@ -1011,7 +1011,7 @@ impl Playtest {
         // Keep Aletha's authored legs running while the cannon plays its own
         // upper-body shot. This retained pose also owns muzzle/hurtbox sampling.
         if self.ranged_ready.firing(ctx.sim_tick.as_u32())
-            && self.anim.state != PlayerAnim::RangedAttack
+            && self.body.state != PlayerAnim::RangedAttack
         {
             if let (Some(c), Some(pose)) =
                 (self.character.as_ref(), self.player_actor_pose.as_ref())

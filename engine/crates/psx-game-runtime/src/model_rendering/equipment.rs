@@ -33,7 +33,7 @@ pub(super) fn draw_player_equipment<
     anim_action: CharacterAnimationAction,
     clip_local: ModelClipIndex,
     anim_start_tick: SimTick,
-    blend: Option<PlayerAnimBlend>,
+    blend: Option<AnimFade<PlayerAnim>>,
     elapsed_tick: SimTick,
     video_hz: VideoHz,
     camera: &WorldCamera,

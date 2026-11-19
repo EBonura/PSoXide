@@ -41,7 +41,7 @@ pub(super) const TEST_I_FRAMES: u8 = 12;
 /// energy for every connected hit, then the hit cues.
 fn report(scene: &mut Playtest, stats: MeleeArcStats) {
     let heavy = matches!(
-        scene.anim.state,
+        scene.body.state,
         PlayerAnim::HeavyAttack | PlayerAnim::VertHeavyAttack
     );
     for _ in 0..stats.hits {
@@ -375,7 +375,7 @@ fn an_unreadable_bolt_poise_is_a_quarter_capped_at_ten_and_never_breaks_the_play
         scene.game_entities.actor().poise,
         psx_game_runtime::poise::Poise::EMPTY
     );
-    assert_ne!(scene.anim.state, PlayerAnim::HitReact);
+    assert_ne!(scene.body.state, PlayerAnim::HitReact);
 }
 
 #[test]
@@ -432,11 +432,12 @@ fn a_break_with_no_clip_bound_holds_her_as_long_as_an_entity() {
     // Knockdown off: a break then staggers, which is what this pins.
     scene.game_entities.actor_stats_mut().knockdown_ticks = 0;
     assert!(scene.react_player_to_hit(CombatantId::WORLD, 60, false, false, false, &ctx(100)));
-    assert_eq!(scene.anim.state, PlayerAnim::Stun);
+    assert_eq!(scene.body.state, PlayerAnim::Stun);
     assert_eq!(
         scene.game_entities.actor_action().lock_until,
         SimTick::from_u32(100 + u32::from(psx_game_runtime::entities::GAME_ENTITY_STAGGER_TICKS))
     );
+    assert_eq!(scene.body.switched, None, "her body cuts into a reaction");
 }
 
 #[test]
@@ -445,7 +446,7 @@ fn a_second_break_is_refused_until_the_grace_window_has_drained() {
     // Knockdown off: the knockdown's own block is pinned elsewhere.
     scene.game_entities.actor_stats_mut().knockdown_ticks = 0;
     assert!(scene.react_player_to_hit(CombatantId::WORLD, 60, false, false, false, &ctx(100)));
-    scene.anim.state = PlayerAnim::Idle;
+    scene.body.state = PlayerAnim::Idle;
     assert!(!scene.react_player_to_hit(CombatantId::WORLD, 60, false, false, false, &ctx(101)));
     // Grace only drains once the reaction is over.
     scene
@@ -475,9 +476,9 @@ fn armour_doubles_the_capacity_without_granting_immunity() {
 #[test]
 fn an_ordinary_hit_without_a_reaction_clip_does_not_interrupt_the_player() {
     let mut scene = scene();
-    scene.anim.state = PlayerAnim::Run;
+    scene.body.state = PlayerAnim::Run;
     assert!(!scene.react_player_to_hit(CombatantId::WORLD, 10, false, false, false, &ctx(100)));
-    assert_eq!(scene.anim.state, PlayerAnim::Run);
+    assert_eq!(scene.body.state, PlayerAnim::Run);
     assert_eq!(scene.game_entities.actor_action().lock_until, SimTick::ZERO);
     assert_ne!(
         scene.game_entities.actor().poise,
@@ -490,18 +491,18 @@ fn an_ordinary_hit_without_a_reaction_clip_does_not_interrupt_the_player() {
 fn a_shot_only_hit_never_interrupts_unless_it_breaks_posture() {
     let mut scene = scene();
     assert!(!scene.react_player_to_hit(CombatantId::WORLD, 30, false, true, false, &ctx(100)));
-    assert_eq!(scene.anim.state, PlayerAnim::Idle);
+    assert_eq!(scene.body.state, PlayerAnim::Idle);
     assert!(scene.react_player_to_hit(CombatantId::WORLD, 30, false, true, false, &ctx(101)));
     // An ordinary break is a stagger: Stun (its chain's Hit React when only
     // that is bound; the Stun over her rest pose here, where nothing is).
-    assert_eq!(scene.anim.state, PlayerAnim::Stun, "a break staggers her");
+    assert_eq!(scene.body.state, PlayerAnim::Stun, "a break staggers her");
     assert!(!scene.game_entities.actor().knocked_down());
 }
 
 #[test]
 fn a_stunned_player_accumulates_no_posture_and_cannot_be_broken_again() {
     let mut scene = scene();
-    scene.anim.state = PlayerAnim::Stun;
+    scene.body.state = PlayerAnim::Stun;
     assert!(!scene.react_player_to_hit(CombatantId::WORLD, 1000, false, false, false, &ctx(100)));
     assert_eq!(
         scene.game_entities.actor().poise,
@@ -519,7 +520,7 @@ fn a_dying_player_ignores_further_hits() {
         scene.game_entities.actor().poise,
         psx_game_runtime::poise::Poise::EMPTY
     );
-    assert_eq!(scene.anim.state, PlayerAnim::Idle);
+    assert_eq!(scene.body.state, PlayerAnim::Idle);
 }
 
 #[test]
@@ -843,7 +844,7 @@ fn a_shot_costs_twenty_and_five_shots_empty_the_bar() {
 fn a_light_melee_hit_gains_twelve_and_a_heavy_hit_twenty_and_the_bar_caps() {
     let mut scene = scene();
     scene.game_entities.actor_mut().flow.energy = 0;
-    scene.anim.state = PlayerAnim::LightAttack;
+    scene.body.state = PlayerAnim::LightAttack;
     report(
         &mut scene,
         MeleeArcStats {
@@ -855,7 +856,7 @@ fn a_light_melee_hit_gains_twelve_and_a_heavy_hit_twenty_and_the_bar_caps() {
     );
     assert_eq!(scene.game_entities.actor().flow.energy, MELEE_GAIN);
     assert_eq!(scene.game_entities.actor().flow.followup, 0);
-    scene.anim.state = PlayerAnim::HeavyAttack;
+    scene.body.state = PlayerAnim::HeavyAttack;
     report(
         &mut scene,
         MeleeArcStats {
@@ -890,7 +891,7 @@ fn a_light_melee_hit_gains_twelve_and_a_heavy_hit_twenty_and_the_bar_caps() {
 fn every_enemy_connected_by_one_swing_pays_energy_separately() {
     let mut scene = scene();
     scene.game_entities.actor_mut().flow.energy = 0;
-    scene.anim.state = PlayerAnim::LightAttack;
+    scene.body.state = PlayerAnim::LightAttack;
     report(
         &mut scene,
         MeleeArcStats {
@@ -906,7 +907,7 @@ fn every_enemy_connected_by_one_swing_pays_energy_separately() {
 #[test]
 fn a_connected_melee_hit_queues_a_weight_matched_hit_cue() {
     let mut scene = scene();
-    scene.anim.state = PlayerAnim::LightAttack;
+    scene.body.state = PlayerAnim::LightAttack;
     report(
         &mut scene,
         MeleeArcStats {
@@ -921,7 +922,7 @@ fn a_connected_melee_hit_queues_a_weight_matched_hit_cue() {
         LevelGameplaySfxEvent::LightHit.bit()
     );
     scene.gameplay_sfx_events = 0;
-    scene.anim.state = PlayerAnim::VertHeavyAttack;
+    scene.body.state = PlayerAnim::VertHeavyAttack;
     report(
         &mut scene,
         MeleeArcStats {
@@ -1042,7 +1043,7 @@ fn the_energy_economy_and_health_are_the_characters_data() {
         let (actor, stats) = scene.game_entities.actor_and_stats();
         actor.flow.can_shoot(stats)
     });
-    scene.anim.state = PlayerAnim::LightAttack;
+    scene.body.state = PlayerAnim::LightAttack;
     report(
         &mut scene,
         MeleeArcStats {
@@ -1073,7 +1074,7 @@ fn arming_death_locks_the_death_clip_and_drops_targeting() {
     scene.arm_player_death(true, SimTick::from_u32(100), VideoHz::NTSC);
     assert_eq!(scene.death_ticks_remaining, DEATH_FALLBACK_TICKS);
     assert!(scene.death_by_combat);
-    assert_eq!(scene.anim.state, PlayerAnim::Death);
+    assert_eq!(scene.body.state, PlayerAnim::Death);
     assert_eq!(
         scene.game_entities.actor_action().lock_until,
         SimTick::from_u32(130)
@@ -1149,7 +1150,7 @@ fn respawn_after_a_combat_death_restores_the_life_and_clears_the_countdown() {
     scene.respawn_after_death();
     assert_eq!(scene.death_ticks_remaining, 0);
     assert!(!scene.death_by_combat);
-    assert_eq!(scene.anim.state, PlayerAnim::Idle);
+    assert_eq!(scene.body.state, PlayerAnim::Idle);
     assert_eq!(scene.game_entities.actor_action().lock_until, SimTick::ZERO);
     assert_eq!(health(&scene), PLAYER_MAX_HEALTH);
     assert_eq!(scene.game_entities.actor().flow.energy, ENERGY_MAX);

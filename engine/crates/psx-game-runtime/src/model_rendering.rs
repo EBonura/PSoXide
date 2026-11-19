@@ -33,7 +33,8 @@ use psx_level::{
 use psx_math::int32::{clamp_i16, square_i32_saturating};
 
 use crate::actor_pose::ActorPoseSnapshot;
-use crate::character::{PlayerAnim, PlayerAnimBlend, RuntimeCharacter};
+use crate::character::{PlayerAnim, RuntimeCharacter};
+use crate::fighter_anim::AnimFade;
 use crate::room_lighting::RuntimeRoomLighting;
 use crate::vram::{vram_slot_texture_size_u8, VramSlot};
 
@@ -1237,11 +1238,11 @@ impl PlayerActionSpeeds {
     pub fn authored(
         character: &RuntimeCharacter,
         anim_action: CharacterAnimationAction,
-        blend: Option<PlayerAnimBlend>,
+        blend: Option<AnimFade<PlayerAnim>>,
     ) -> Self {
         Self {
             action_q8: character.action_speed(anim_action),
-            blend_q8: blend.map_or(0, |blend| character.action_speed(blend.anim.action())),
+            blend_q8: blend.map_or(0, |blend| character.action_speed(blend.from.action())),
         }
     }
 }
@@ -1259,7 +1260,7 @@ pub(crate) fn player_pose_blend<const MAX_RUNTIME_MODEL_CLIPS: usize>(
     character: &RuntimeCharacter,
     runtime_model: RuntimeModelAsset,
     clips: &[Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
-    blend: Option<PlayerAnimBlend>,
+    blend: Option<AnimFade<PlayerAnim>>,
     blend_speed_q8: u16,
     video_hz: VideoHz,
 ) -> Option<ModelPoseBlend<'static>> {
@@ -1267,8 +1268,8 @@ pub(crate) fn player_pose_blend<const MAX_RUNTIME_MODEL_CLIPS: usize>(
     if blend.alpha_q12 >= 1 << 12 {
         return None;
     }
-    let action = blend.anim.action();
-    let clip_local = character.clip_for(blend.anim);
+    let action = blend.from.action();
+    let clip_local = character.clip_for(blend.from);
     let anim = runtime_model.clip(clips, clip_local)?;
     let phase = animation_phase_at_tick_q12(
         anim,
@@ -1309,7 +1310,7 @@ pub fn resolve_player_actor_pose<
     anim_action: CharacterAnimationAction,
     clip_local: ModelClipIndex,
     anim_start_tick: SimTick,
-    blend: Option<PlayerAnimBlend>,
+    blend: Option<AnimFade<PlayerAnim>>,
     speeds: PlayerActionSpeeds,
     cached_clip_first_root_xz: Option<[i32; 2]>,
     elapsed_tick: SimTick,
@@ -1629,7 +1630,7 @@ pub fn draw_player<
     anim_action: CharacterAnimationAction,
     clip_local: ModelClipIndex,
     anim_start_tick: SimTick,
-    blend: Option<PlayerAnimBlend>,
+    blend: Option<AnimFade<PlayerAnim>>,
     elapsed_tick: SimTick,
     video_hz: VideoHz,
     camera: &WorldCamera,
@@ -2265,7 +2266,7 @@ pub fn draw_player_equipment<
     anim_action: CharacterAnimationAction,
     clip_local: ModelClipIndex,
     anim_start_tick: SimTick,
-    blend: Option<PlayerAnimBlend>,
+    blend: Option<AnimFade<PlayerAnim>>,
     elapsed_tick: SimTick,
     video_hz: VideoHz,
     camera: &WorldCamera,

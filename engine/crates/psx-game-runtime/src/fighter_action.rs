@@ -165,12 +165,11 @@ pub struct DodgeStep {
     pub cancelled: bool,
 }
 
-/// One fighter's current action: when its clip started, how long it holds the
-/// fighter, and the attack and dodge requests waiting to replace it.
+/// One fighter's current action: how long it holds the fighter, and the attack
+/// and dodge requests waiting to replace it (its clip's clock is the fighter's
+/// [`Body`](crate::fighter_anim::Body)).
 #[derive(Clone, Copy, Debug)]
 pub struct FighterAction {
-    /// Tick the current action's clip started: its local clock's zero.
-    pub start: SimTick,
     /// The action holds the fighter until this tick.
     pub lock_until: SimTick,
     /// Legacy attack memory, used where no authored window decides.
@@ -186,7 +185,6 @@ pub struct FighterAction {
 impl FighterAction {
     /// No action, nothing remembered.
     pub const IDLE: Self = Self {
-        start: SimTick::ZERO,
         lock_until: SimTick::ZERO,
         buffer: AttackBuffer::EMPTY,
         authored_attack: Request::EMPTY,
@@ -214,7 +212,8 @@ impl FighterAction {
     }
 
     /// The attack request that fires this tick for a press `pressed` (a
-    /// [`pressed_strike`] tag) during action `action` at clip `sample`: inside
+    /// [`pressed_strike`] tag) during action `action` at clip `sample`, its
+    /// clip started at `started` (which run of the action a request is for): inside
     /// an action that authors attack windows, the authored request (armed by
     /// its buffer window, fired in its attack window); otherwise the legacy
     /// buffer, which fires only once the fighter is `free`. `(tag, authored)`.
@@ -223,6 +222,7 @@ impl FighterAction {
         action: u8,
         pressed: u8,
         sample: Sample,
+        started: SimTick,
         now: SimTick,
         free: bool,
     ) -> Option<(u8, bool)> {
@@ -232,7 +232,7 @@ impl FighterAction {
                 .authored_attack
                 .update(
                     action,
-                    self.start.as_u32(),
+                    started.as_u32(),
                     pressed,
                     sample,
                     WindowKind::AttackBuffer,
@@ -251,7 +251,7 @@ impl FighterAction {
     }
 
     /// Whether a dodge pressed (`pressed`) during action `action` at clip
-    /// `sample` happens this tick. Inside an authored dodge window the
+    /// `sample` (started at `started`) happens this tick. Inside an authored dodge window the
     /// authored request decides (and cancels the action when it fires); a
     /// press during a locked action waits for the lock to end, a little past
     /// it at most; a press while `free` dodges at once.
@@ -260,6 +260,7 @@ impl FighterAction {
         action: u8,
         pressed: bool,
         sample: Sample,
+        started: SimTick,
         now: SimTick,
         free: bool,
         delta: u16,
@@ -272,7 +273,7 @@ impl FighterAction {
                 .authored_dodge
                 .update(
                     action,
-                    self.start.as_u32(),
+                    started.as_u32(),
                     u8::from(pressed),
                     sample,
                     WindowKind::DodgeBuffer,
@@ -360,16 +361,16 @@ mod tests {
         let mut action = FighterAction::IDLE;
         let now = SimTick::from_u32(100);
         assert_eq!(
-            action.attack_request(6, 1, Sample::LEGACY, now, false),
+            action.attack_request(6, 1, Sample::LEGACY, SimTick::ZERO, now, false),
             None
         );
         let later = SimTick::from_u32(105);
         assert_eq!(
-            action.attack_request(6, 0, Sample::LEGACY, later, true),
+            action.attack_request(6, 0, Sample::LEGACY, SimTick::ZERO, later, true),
             Some((1, false))
         );
         assert_eq!(
-            action.attack_request(6, 0, Sample::LEGACY, later, true),
+            action.attack_request(6, 0, Sample::LEGACY, SimTick::ZERO, later, true),
             None
         );
     }
@@ -395,10 +396,10 @@ mod tests {
         let inside = Sample::new(&windows, 6, 5 << 12);
         let now = SimTick::from_u32(110);
         assert_eq!(
-            action.attack_request(6, 2, inside, now, false),
+            action.attack_request(6, 2, inside, SimTick::ZERO, now, false),
             Some((2, true))
         );
-        let step = action.dodge(6, true, inside, now, false, 1);
+        let step = action.dodge(6, true, inside, SimTick::ZERO, now, false, 1);
         assert_eq!(
             step,
             DodgeStep {
@@ -413,20 +414,60 @@ mod tests {
     fn a_dodge_pressed_late_in_a_lock_fires_when_it_ends_and_an_early_one_expires() {
         let mut action = FighterAction::IDLE;
         action.lock_until = SimTick::from_u32(110);
-        let step = action.dodge(0, true, Sample::LEGACY, SimTick::from_u32(100), false, 1);
+        let step = action.dodge(
+            0,
+            true,
+            Sample::LEGACY,
+            SimTick::ZERO,
+            SimTick::from_u32(100),
+            false,
+            1,
+        );
         assert!(!step.evade);
         assert_eq!(action.evade_buffer, EVADE_BUFFER_TICKS);
-        let step = action.dodge(0, false, Sample::LEGACY, SimTick::from_u32(110), true, 1);
+        let step = action.dodge(
+            0,
+            false,
+            Sample::LEGACY,
+            SimTick::ZERO,
+            SimTick::from_u32(110),
+            true,
+            1,
+        );
         assert!(step.evade);
         action.lock_until = SimTick::from_u32(1000);
-        action.dodge(0, true, Sample::LEGACY, SimTick::from_u32(100), false, 1);
+        action.dodge(
+            0,
+            true,
+            Sample::LEGACY,
+            SimTick::ZERO,
+            SimTick::from_u32(100),
+            false,
+            1,
+        );
         assert_eq!(action.evade_buffer, EVADE_BUFFER_LOCK_CAP_TICKS);
         for tick in 101..1000 {
-            action.dodge(0, false, Sample::LEGACY, SimTick::from_u32(tick), false, 1);
+            action.dodge(
+                0,
+                false,
+                Sample::LEGACY,
+                SimTick::ZERO,
+                SimTick::from_u32(tick),
+                false,
+                1,
+            );
         }
         assert!(
             !action
-                .dodge(0, false, Sample::LEGACY, SimTick::from_u32(1000), true, 1)
+                .dodge(
+                    0,
+                    false,
+                    Sample::LEGACY,
+                    SimTick::ZERO,
+                    SimTick::from_u32(1000),
+                    true,
+                    1
+                )
                 .evade
         );
     }

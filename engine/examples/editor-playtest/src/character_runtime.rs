@@ -5,9 +5,7 @@
 
 use super::*;
 
-pub(super) use psx_game_runtime::character::{
-    player_anim_is_attack, PlayerAnim, PlayerAnimBlend, RuntimeCharacter,
-};
+pub(super) use psx_game_runtime::character::{player_anim_is_attack, PlayerAnim, RuntimeCharacter};
 
 /// Decode a cooked character record with this example's global
 /// player-speed scale.

@@ -125,7 +125,7 @@ impl Playtest {
             self.respawn_after_death();
             self.gameplay_epoch = ctx.sim_tick;
             self.gameplay_epoch_set = true;
-            self.game_entities.actor_action_mut().start = ctx.sim_tick;
+            self.body.start = ctx.sim_tick;
             self.game_entities.seed_training_actor(
                 GAME_ENTITIES.as_slice(),
                 target,
@@ -216,7 +216,7 @@ impl Playtest {
     /// (0 nothing, 1 an action, 2 an attack), then its intent.
     pub(super) fn duel_actor_busy(&self, now: SimTick) -> u8 {
         if self.game_entities.actor_action().locked(now) {
-            if player_anim_is_attack(self.anim.state) {
+            if player_anim_is_attack(self.body.state) {
                 2
             } else {
                 1
@@ -444,13 +444,13 @@ impl Playtest {
             self.game_entities.health(i) as u32,
             self.game_entities.actor().stance.active().index() as u32,
             self.game_entities.stance(i).index() as u32,
-            self.anim.state.action().to_index() as u32,
+            self.body.state.action().to_index() as u32,
             u32::from(self.game_entities.state_code(i)),
             actor.goal as u32,
             u32::from(actor.stance_reason),
             self.game_entities.actor_motor().stamina_q12() as u32,
             self.game_entities.tactical_snapshot(i).generation as u32,
-            self.game_entities.actor_action().start.as_u32(),
+            self.body.start.as_u32(),
             self.game_entities.tactical_snapshot(i).goal as u32,
             self.game_entities.tactical_snapshot(i).stance_reason as u32,
             self.game_entities.attack_kind(i) as u32,

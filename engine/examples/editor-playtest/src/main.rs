@@ -66,7 +66,7 @@ use psx_engine::{
 use psx_font::FontAtlas;
 use psx_game_runtime::combat_fx::{FlashKind, LandedHit, COMBAT_FEEDBACK};
 use psx_game_runtime::combat_intent::{CombatAction, CombatActions, CombatIntent, CombatMove};
-use psx_game_runtime::fighter_anim::{self, AnimTrack};
+use psx_game_runtime::fighter_anim::{self, AnimFade, Body, ReactionBlend};
 use psx_game_runtime::vitality::{
     BoostBars, BoostInventory, BoostModuleId, BoostSlotId, CombatStance, CombatStanceConfig,
     PowerUpLoadout, VitalityChannelId, VitalityModifiers, VitalityPole, VitalityPool,
@@ -264,13 +264,12 @@ struct Playtest {
     /// `PLAYER_CONTROLLER` was authored. Falls back to the
     /// pre-character debug controls in that case.
     character: Option<RuntimeCharacter>,
-    /// Current animation state (source of truth for which clip
-    /// `draw_player` plays each frame) and the switch it crossfades from,
-    /// on the one animation track every fighter runs
-    /// ([`psx_game_runtime::fighter_anim`]). Its clock is her
-    /// `actor_action().start`. The crossfade is cleared on init/respawn
-    /// and expires by elapsed ticks at render.
-    anim: AnimTrack<PlayerAnim>,
+    /// Her body: the animation state (source of truth for which clip
+    /// `draw_player` plays each frame), the switch it crossfades from and
+    /// the clip's clock, the one [`Body`] every fighter runs
+    /// ([`psx_game_runtime::fighter_anim`]). The crossfade is cleared on
+    /// init/respawn and expires by elapsed ticks at render.
+    body: Body<PlayerAnim>,
     /// Three-part gait (windup / cruise / winddown) phase; see
     /// `walk_transition_input` and `walk_transition_state`.
     loco: LocoPhase,
@@ -737,8 +736,10 @@ impl Playtest {
         self.inventory_overlay_active = false;
         self.acquired_module = BoostModuleId::NONE;
         // Zero bytes already decode as `Idle`; stamped for self-documentation.
-        self.anim.state = PlayerAnim::Idle;
-        self.anim.switched = None;
+        self.body.state = PlayerAnim::Idle;
+        self.body.switched = None;
+        // She cuts into a reaction (entities fade into theirs).
+        self.body.reactions = ReactionBlend::Cut;
         self.loco = LocoPhase::Idle;
         self.box_props.init();
         self.orbit_yaw = CAMERA_START_YAW;

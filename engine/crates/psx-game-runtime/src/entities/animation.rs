@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::character::PlayerAnim;
-use crate::fighter_anim::{self, AnimState, AnimTrack};
+use crate::fighter_anim::{self, AnimState, Body, ReactionBlend};
 use psx_engine::SimTick;
 
 /// One shown clip as a crossfade key: the animation action it plays and the
@@ -32,6 +32,9 @@ impl EntityAnim {
             frame_range: CharacterActionFrameRange::FULL,
         },
     };
+
+    /// A body showing nothing yet. Entities crossfade into a reaction.
+    pub const NO_BODY: Body<Self> = Body::new(Self::NONE, SimTick::ZERO, ReactionBlend::Fade);
 
     /// A looping locomotion clip.
     const fn looping(action: CharacterAnimationAction, clip: u16) -> Self {
@@ -113,7 +116,7 @@ impl<const N: usize> GameEntities<N> {
     /// its gait began, when it is the gait the clock runs for.
     pub(super) fn locomotion_clip(&self, shown: EntityAnim, i: usize) -> GameEntityClip {
         let phase = if self.gaits[i].state == shown {
-            self.anim_clock.saturating_sub(self.actions[i].start) as u16
+            self.gaits[i].local_tick(self.anim_clock) as u16
         } else {
             0
         };
@@ -145,21 +148,10 @@ impl<const N: usize> GameEntities<N> {
                 && self.gaits[i].state != EntityAnim::NONE;
             let track = &mut self.gaits[i];
             if track.state == EntityAnim::NONE {
-                *track = AnimTrack::new(gait);
-                self.actions[i].start = now;
+                *track = Body::new(gait, now, ReactionBlend::Fade);
             } else if track.state != gait {
-                let from = track.state;
-                let carried =
-                    if fighter_anim::is_gait(from.action) && fighter_anim::is_gait(gait.action) {
-                        fighter_anim::gait_phase_carry(
-                            now.saturating_sub(self.actions[i].start),
-                            cycle(i, &from.clip),
-                            cycle(i, &gait.clip),
-                        )
-                    } else {
-                        0
-                    };
-                track.switch(gait, &mut self.actions[i].start, now, carried);
+                let carried = track.gait_carry(gait, now, |state| cycle(i, &state.clip));
+                track.switch(gait, now, carried);
             }
             // A gait the motor reports is a step it took (blocked, it
             // reports idle), so a shown gait is a moving one.
@@ -167,7 +159,7 @@ impl<const N: usize> GameEntities<N> {
                 && fighter_anim::footfall(
                     fighter_anim::is_gait(gait.action),
                     was_gait,
-                    now.saturating_sub(self.actions[i].start),
+                    self.gaits[i].local_tick(now),
                     delta,
                     cycle(i, &gait.clip),
                 )
@@ -184,14 +176,14 @@ impl<const N: usize> GameEntities<N> {
             };
             let track = &mut self.bodies[i];
             if track.state == EntityAnim::NONE {
-                *track = AnimTrack::new(shown);
+                track.state = shown;
+                track.switched = None;
             } else if track.state != shown {
-                track.switch(shown, &mut self.body_starts[i], now, 0);
+                track.switch(shown, now, 0);
             }
             // The shown clip's own clock (its state's, or the locomotion
             // clock) is where its phase reads as zero.
-            self.body_starts[i] =
-                SimTick::from_u32(now.as_u32().wrapping_sub(u32::from(clip.phase_ticks)));
+            track.start = SimTick::from_u32(now.as_u32().wrapping_sub(u32::from(clip.phase_ticks)));
             let fade = self.bodies[i]
                 .fade(now)
                 .filter(|fade| fade.from != EntityAnim::NONE)

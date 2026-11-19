@@ -380,14 +380,14 @@ impl Playtest {
         // Keep the pose at frame zero through both orbit shots, without a
         // blend from the standing idle pose that was used during loading.
         if self.opening.holding_pose() {
-            self.game_entities.actor_action_mut().start = ctx.sim_tick;
+            self.body.start = ctx.sim_tick;
         }
         if self.opening.handoff() {
             self.player_dash_assembly.cancel();
-            self.anim.state = PlayerAnim::Idle;
-            self.game_entities.actor_action_mut().start = ctx.sim_tick;
+            self.body.state = PlayerAnim::Idle;
+            self.body.start = ctx.sim_tick;
             self.game_entities.actor_action_mut().lock_until = SimTick::ZERO;
-            self.anim.switched = None;
+            self.body.switched = None;
             self.camera
                 .snap_to_player(self.camera_target(None, false), self.camera_config());
         }
