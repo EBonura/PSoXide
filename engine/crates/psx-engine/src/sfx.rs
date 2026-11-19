@@ -75,6 +75,9 @@ pub fn upload_sample(
 }
 
 /// [`upload_samples_on`] on a token the caller does not hold.
+///
+/// # Errors
+/// As [`upload_samples_on`].
 #[deprecated(note = "use `upload_samples_on` with the `Spu` driver")]
 #[allow(deprecated)]
 pub fn upload_samples(

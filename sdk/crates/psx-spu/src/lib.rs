@@ -217,9 +217,10 @@ pub fn upload_adpcm(dest: SpuAddr, bytes: &[u8]) -> Result<(), TransferTimeout> 
 /// wait budget: the channel was aborted and the rest of the transfer was not
 /// sent.
 ///
-/// The budget is four times the console's transfer time, so on a working
+/// The budget is sixteen times the console's transfer time, so on a working
 /// machine this means a wedged channel, not a slow one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TransferTimeout {
     /// Bytes of the transfer sent in pieces that finished before the one that
     /// timed out: what is known to be in SPU RAM, from the destination up.
@@ -1226,7 +1227,7 @@ fn dma_block_size(words: u32) -> u32 {
 /// bank lost its tail (the countdown and most weapon-name voices) on silicon
 /// while every emulator, moving SPU words at twice the console's rate, landed
 /// it whole. A 4 KiB piece takes about 67,600 clocks on a console; its budget
-/// ([`psx_io::dma::spu_wait_spins`]) is four times that. Each extra piece costs
+/// ([`psx_io::dma::spu_wait_spins`]) is sixteen times that. Each extra piece costs
 /// one channel start, a few dozen clocks.
 pub const UPLOAD_PIECE_BYTES: u32 = 4096;
 

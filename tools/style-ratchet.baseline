@@ -74,7 +74,7 @@ engine clippy::enum_glob_use 0
 engine clippy::rc_buffer 0
 engine clippy::rc_mutex 0
 engine clippy::get_first 0
-engine clippy::must_use_candidate 1290
+engine clippy::must_use_candidate 1288
 engine clippy::unwrap_used 50
 engine clippy::exhaustive_enums 107
 engine clippy::exhaustive_structs 370

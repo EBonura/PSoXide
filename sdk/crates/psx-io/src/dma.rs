@@ -487,7 +487,14 @@ const MIN_CLOCKS_PER_SPIN: u32 = 8;
 
 /// How many times longer than the silicon transfer time an SPU wait may spin
 /// before it calls the channel wedged.
-const SPU_WAIT_MARGIN: u32 = 4;
+///
+/// Large on purpose: the error is for a stuck channel, never a slow one. Time
+/// spent in interrupt handlers (CD, VBlank) does not count against the budget,
+/// because only passes of the loop are counted; what could slow the transfer
+/// itself is another DMA channel holding the bus, and sixteen times covers any
+/// such share. A wedged 4 KiB piece gives up after about 1.5 million clocks
+/// (under three frames).
+const SPU_WAIT_MARGIN: u32 = 16;
 
 /// Spins for the setup a transfer pays whatever its length (channel start,
 /// the first block request).
@@ -497,8 +504,9 @@ const SPU_WAIT_BASE_SPINS: u32 = 2_048;
 /// the silicon transfer time at [`SPU_CLOCKS_PER_WORD`], counted in the
 /// cheapest possible spin, plus a fixed allowance.
 ///
-/// A 4 KiB piece (1,024 words) gets 35,840 spins, about 390,000 clocks of
-/// waiting against the 67,600 it takes on a console. The largest transfer one
+/// A 4 KiB piece (1,024 words) gets 137,216 spins, about 1.5 million clocks
+/// of waiting (at the SDK loop's 11 clocks a spin) against the 67,600 the
+/// piece takes on a console. The largest transfer one
 /// call can describe (65,535 blocks of 16 words) still fits in a `u32`.
 #[must_use]
 pub const fn spu_wait_spins(words: u32) -> u32 {
@@ -715,21 +723,21 @@ mod tests {
     }
 
     #[test]
-    fn the_spu_budget_scales_with_the_length_and_covers_silicon_four_times() {
-        // The cheapest spin is 8 clocks, so the budget must cover four times
-        // the silicon transfer in 8-clock spins, at any length.
+    fn the_spu_budget_scales_with_the_length_and_covers_silicon_sixteen_times() {
+        // The cheapest spin is 8 clocks, so the budget must cover sixteen
+        // times the silicon transfer in 8-clock spins, at any length.
         for words in [1u32, 16, 256, 1_024, 4_096, 117_636, 65_535 * 16] {
             let spins = spu_wait_spins(words);
             assert!(
-                u64::from(spins) * 8 >= u64::from(words) * 66 * 4,
+                u64::from(spins) * 8 >= u64::from(words) * 66 * 16,
                 "{words} words"
             );
             assert!(spu_wait_spins(words + 16) > spins);
         }
-        assert_eq!(spu_wait_spins(1_024), 35_840);
+        assert_eq!(spu_wait_spins(1_024), 137_216);
         // WipEout's whole bank in one transfer (470,544 B), which the fixed
         // 500,000-spin budget cut off on a console at about 338 KB.
-        assert!(spu_wait_spins(470_544 / 4) > 3_800_000);
+        assert!(spu_wait_spins(470_544 / 4) > 15_000_000);
     }
 
     #[test]
