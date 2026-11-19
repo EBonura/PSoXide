@@ -24,7 +24,7 @@ enum Mode {
     Capture,
 }
 
-const MENU: [&str; 9] = [
+const MENU: [&str; 10] = [
     // Row 0 is pinned: `make hwtest-run` selects it by firing CROSS at a fixed
     // tick with the cursor still at its boot position.
     "RUN HARDWARE TEST",
@@ -35,10 +35,12 @@ const MENU: [&str; 9] = [
     "CONTROLLER TEST (P1 + P2)",
     "MEMORY CARD (AT OWN RISK)",
     "DUALSHOCK MOTOR QUESTIONS",
+    // The 2026-11-19 console session's rows: SPU BULK UPLOAD, 480I DRAW RULE, CD MOTOR.
+    "SPU, 480I, CD IDLE ONLY",
     "VIEW LAST CAPTURE",
 ];
 const MENU_TOP: i16 = 64;
-const MENU_ROW_PITCH: i16 = 14;
+const MENU_ROW_PITCH: i16 = 13;
 /// Frames each capture page (and the cover) stays up before the next one.
 const PAGE_FRAMES: u32 = 150;
 /// Frames auto-advance stays off after a manual page turn.
@@ -103,8 +105,14 @@ impl HardwareTests {
 
     /// The whole run, then the capture.
     fn start_run(&mut self, ctx: &mut Ctx, focus: bool, manual: bool) {
+        self.start_run_of(ctx, focus, manual, false);
+    }
+
+    /// [`start_run`](Self::start_run), or with `session` only the session steps.
+    fn start_run_of(&mut self, ctx: &mut Ctx, focus: bool, manual: bool, session: bool) {
         self.run.focus = focus;
         self.run.manual = manual;
+        self.run.session = session;
         let skip_risky = ctx.is_held(button::L2);
         self.run.write_cards = ctx.is_held(button::L1) && ctx.is_held(button::R1);
         self.run.checkpoints = ctx.is_held(button::START) && ctx.is_held(button::R2);
@@ -202,6 +210,7 @@ impl Scene for HardwareTests {
                             self.mode = Mode::MemoryCard;
                         }
                         7 => self.start_run(ctx, false, true),
+                        8 => self.start_run_of(ctx, false, false, true),
                         _ => {
                             if self.have_capture {
                                 self.open_capture();
@@ -349,7 +358,7 @@ impl HardwareTests {
                 (176, 190, 210)
             };
             font.draw_text(22, y, label, colour);
-            if row == 7 && !self.have_capture {
+            if row == MENU.len() - 1 && !self.have_capture {
                 font.draw_text(22, y + 9, "NONE YET - RUN FIRST", (112, 136, 170));
             }
             y += MENU_ROW_PITCH;

@@ -148,6 +148,8 @@ pub(crate) struct Run {
     pub(crate) focus: bool,
     /// Run only the steps that need an operator (menu row 8): the linear run leaves them out.
     pub(crate) manual: bool,
+    /// Run only the console-session steps (the menu's `SPU, 480I, CD IDLE ONLY` row).
+    pub(crate) session: bool,
     /// Areas the run entered, for the clean check of a focused run.
     visited: [bool; AREA_COUNT],
     /// An id for the checkpoint files of this run.
@@ -182,6 +184,7 @@ impl Run {
             checkpoints: false,
             focus: false,
             manual: false,
+            session: false,
             visited: [false; AREA_COUNT],
             checkpoint_id: 0,
             handoffs: [Handoff {
@@ -602,7 +605,12 @@ fn verify_silence(run: &mut Run) {
 
 // ------------------------------------------------------------------- steps
 
+// `repr(C)`: the flags sit between the name and the function pointer. With the fields in the
+// compiler's order a step named with 8 letters put the word 8 (`jr $zero` as an instruction)
+// right before its function pointer, and the post-link hazard scan, which does not know the
+// table is data, read the pair as a jump with a load in its delay slot.
 #[derive(Copy, Clone)]
+#[repr(C)]
 struct Step {
     area: Area,
     name: &'static str,
@@ -612,6 +620,8 @@ struct Step {
     focus: u8,
     /// Needs a person at the console: left out of the linear run, run by its own menu row.
     manual: bool,
+    /// One of the steps the session row runs (they run in the linear run too).
+    session: bool,
     run: fn(&mut Run),
 }
 
@@ -622,6 +632,7 @@ const fn step(area: Area, name: &'static str, run: fn(&mut Run)) -> Step {
         risky: false,
         focus: 0,
         manual: false,
+        session: false,
         run,
     }
 }
@@ -633,6 +644,7 @@ const fn risky(area: Area, name: &'static str, run: fn(&mut Run)) -> Step {
         risky: true,
         focus: 0,
         manual: false,
+        session: false,
         run,
     }
 }
@@ -645,6 +657,7 @@ const fn focused(area: Area, name: &'static str, order: u8, run: fn(&mut Run)) -
         risky: false,
         focus: order,
         manual: false,
+        session: false,
         run,
     }
 }
@@ -657,6 +670,21 @@ const fn manual(area: Area, name: &'static str, run: fn(&mut Run)) -> Step {
         risky: false,
         focus: 0,
         manual: true,
+        session: false,
+        run,
+    }
+}
+
+/// A step of the linear run that the session row (`SPU, 480I, CD IDLE ONLY`) also runs: the
+/// rows asked of the 2026-11-19 console session, so one short run answers them.
+const fn session(area: Area, name: &'static str, run: fn(&mut Run)) -> Step {
+    Step {
+        area,
+        name,
+        risky: false,
+        focus: 0,
+        manual: false,
+        session: true,
         run,
     }
 }
@@ -692,7 +720,6 @@ records_step!(records_gte, records::push_gte_records);
 records_step!(records_gte_nclip, gte_nclip::run);
 records_step!(records_gpu, records::push_gpu_records);
 records_step!(records_spu, records::push_spu_records);
-records_step!(records_spu_bulk, spu_bulk::run);
 records_step!(records_cd, records::push_cd_records);
 records_step!(records_sio, records::push_sio_records);
 records_step!(records_gpu_batches, gpu_probes::push);
@@ -872,7 +899,7 @@ const STEPS: &[Step] = &[
     step(Area::Spu, "SPU CASES", tests_spu),
     step(Area::Spu, "SPU MAP", step_spu_map),
     step(Area::Spu, "SPU DMA TIMING", records_spu),
-    step(Area::Spu, "SPU BULK UPLOAD", records_spu_bulk),
+    session(Area::Spu, "SPU BULK UPLOAD", step_spu_bulk),
     step(Area::Spu, "UI SAMPLE END AND LOOP", step_sb1),
     step(Area::Spu, "SPU RAM AND VOICES", step_sb2),
     step(Area::Spu, "CAPTURE RINGS", step_sb4),
@@ -918,11 +945,13 @@ const STEPS: &[Step] = &[
     step(Area::Perf, "AUDIT PROBES", records_audit),
     // 9: last, hardest on the machine
     step(Area::Drive, "CD DMA VERSUS CPU", records_cd_dma),
-    step(Area::Drive, "CD MOTOR", step_stream_motor),
+    session(Area::Drive, "CD MOTOR", step_stream_motor),
+    session(Area::Drive, "CD READ AFTER IDLE", step_cd_idle),
     focused(Area::Drive, "CD RADIUS SWEEP", 1, step_radius),
     // Last of the safe steps: it changes the display mode, and a failure here
     // cannot stop anything before it (only the risky step after it).
     step(Area::Drive, "480I DRAW RULE", step_field_rule),
+    session(Area::Drive, "480I FIELD SEQUENCE", step_field_sequence),
     risky(Area::Drive, "REGISTER A/B (CAN HANG)", records_risky_ab),
 ];
 
@@ -1039,6 +1068,24 @@ fn step_radius(run: &mut Run) {
     run.font = Some(font);
 }
 
+fn step_cd_idle(run: &mut Run) {
+    let font = run.font.take().expect("font uploaded by reset_area");
+    cd_idle::run(&font, &mut run.timing.records, &mut run.next);
+    run.font = Some(font);
+}
+
+fn step_field_sequence(run: &mut Run) {
+    let font = run.font.take().expect("font uploaded by reset_area");
+    field_rule::run_sequence(&font, &mut run.timing.records, &mut run.next);
+    run.font = Some(font);
+}
+
+fn step_spu_bulk(run: &mut Run) {
+    let font = run.font.take().expect("font uploaded by reset_area");
+    spu_bulk::run(&font, &mut run.timing.records, &mut run.next);
+    run.font = Some(font);
+}
+
 fn step_ll_sweep(run: &mut Run) {
     let font = run.font.take().expect("font uploaded by reset_area");
     run.push_all(ll_sweep::run(&font).as_slice());
@@ -1114,7 +1161,14 @@ pub(crate) fn execute(
     // the marked ones, by their order number.
     let mut order = [0usize; STEPS.len()];
     let mut count = 0;
-    if run.manual {
+    if run.session {
+        for (index, step) in STEPS.iter().enumerate() {
+            if step.session {
+                order[count] = index;
+                count += 1;
+            }
+        }
+    } else if run.manual {
         for (index, step) in STEPS.iter().enumerate() {
             if step.manual {
                 order[count] = index;
