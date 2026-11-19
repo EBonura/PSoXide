@@ -12,6 +12,7 @@ use psx_level::{
     combat_capsule_flags, CharacterAnimationAction, CombatCapsuleRecord,
     MAX_CHARACTER_COMBAT_CAPSULES,
 };
+use psx_math::int32::mul_q12_i32;
 
 use crate::actor_pose::ActorPoseSnapshot;
 use crate::projectiles::{ProjectileDamageChannel, ProjectileVisualStyle};
@@ -1112,9 +1113,9 @@ fn interpolate3_q12(start: [i32; 3], end: [i32; 3], phase_q12: u16) -> [i32; 3] 
     let delta = sub3(end, start);
     let phase = i32::from(phase_q12.min(4096));
     [
-        start[0].saturating_add(mul_q12(delta[0], phase)),
-        start[1].saturating_add(mul_q12(delta[1], phase)),
-        start[2].saturating_add(mul_q12(delta[2], phase)),
+        start[0].saturating_add(mul_q12_i32(delta[0], phase)),
+        start[1].saturating_add(mul_q12_i32(delta[1], phase)),
+        start[2].saturating_add(mul_q12_i32(delta[2], phase)),
     ]
 }
 
@@ -1127,18 +1128,10 @@ fn closest_point_on_segment(point: [i32; 3], start: [i32; 3], delta: [i32; 3]) -
     let denominator = dot3_saturating(scaled_delta, scaled_delta);
     let phase = ratio_q12(numerator, denominator);
     [
-        start[0].saturating_add(mul_q12(delta[0], phase)),
-        start[1].saturating_add(mul_q12(delta[1], phase)),
-        start[2].saturating_add(mul_q12(delta[2], phase)),
+        start[0].saturating_add(mul_q12_i32(delta[0], phase)),
+        start[1].saturating_add(mul_q12_i32(delta[1], phase)),
+        start[2].saturating_add(mul_q12_i32(delta[2], phase)),
     ]
-}
-
-fn mul_q12(value: i32, phase: i32) -> i32 {
-    let whole = value / 4096;
-    let fraction = value % 4096;
-    whole
-        .saturating_mul(phase)
-        .saturating_add(fraction.saturating_mul(phase) / 4096)
 }
 
 /// Shared right shift which keeps three signed component products inside i32.
