@@ -179,6 +179,11 @@ pub trait AnimState: Copy + PartialEq {
 
     /// The animation action this state plays.
     fn action(self) -> Action;
+
+    /// Whether this state is a stepping gait ([`is_gait`]).
+    fn is_gait(self) -> bool {
+        is_gait(self.action())
+    }
 }
 
 impl AnimState for PlayerAnim {
@@ -187,6 +192,11 @@ impl AnimState for PlayerAnim {
 
     fn action(self) -> Action {
         PlayerAnim::action(self)
+    }
+
+    // Straight off the state: through the action it was a jump table.
+    fn is_gait(self) -> bool {
+        PlayerAnim::is_gait(self)
     }
 }
 
@@ -289,7 +299,7 @@ impl<S: AnimState> Body<S> {
     /// state's clip length in ticks at its playback, 0 when unknown.
     pub fn gait_carry(&self, next: S, now: SimTick, mut cycle: impl FnMut(S) -> u32) -> u32 {
         let from = self.state;
-        if from == next || !is_gait(from.action()) || !is_gait(next.action()) {
+        if from == next || !from.is_gait() || !next.is_gait() {
             return 0;
         }
         let out_cycle = cycle(from);
