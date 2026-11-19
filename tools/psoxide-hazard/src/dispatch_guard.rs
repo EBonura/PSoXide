@@ -374,9 +374,11 @@ struct Registrations {
 }
 
 /// Whether the function at `start` reads argument register `arg` before it writes it, in its
-/// first run of instructions (up to the first branch). The compiler removes an argument every
-/// caller passes the same value for and puts the value in the function, which then writes the
-/// register before it reads it, or never reads it.
+/// first run of instructions (up to the first branch, and that branch's delay slot, which runs
+/// before it). The compiler removes an argument every caller passes the same value for and puts
+/// the value in the function, which then writes the register before it reads it, or never
+/// reads it: a specialised `attach` sets up its own call to `link` with `a1` written in the
+/// call's delay slot.
 fn reads_argument(image: &GuardImage, start: i64, end: i64, arg: usize) -> bool {
     let listing = &image.listing;
     let register = ARGUMENT_REGISTERS[arg];
@@ -389,6 +391,13 @@ fn reads_argument(image: &GuardImage, start: i64, end: i64, arg: usize) -> bool 
             return false;
         }
         if is_branch(op) {
+            let slot = at + 4;
+            if slot < end {
+                let (op, args) = (listing.op(slot), listing.args(slot));
+                if !reads(op, args, register) && writes(op, args, register) {
+                    return false;
+                }
+            }
             return true;
         }
     }
