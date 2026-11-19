@@ -239,6 +239,41 @@ fn a_parried_attacker_plays_parried_on_both_sides() {
 }
 
 #[test]
+fn a_riposte_in_break_grace_does_not_flinch_her_as_it_does_not_an_entity() {
+    // Her stagger is over but its break grace still runs: a second riposte
+    // cannot break her, and, like any strike that is not a swing, does not
+    // flinch her either (it used to play her Hit React).
+    let mut scene = duel();
+    scene.character = Some(character(true));
+    assert!(riposte_on_her(&mut scene, 0, &ctx(100)));
+    scene.anim.state = PlayerAnim::Idle;
+    scene.game_entities.actor_action_mut().lock_until = ctx(150).sim_tick;
+    assert!(!riposte_on_her(&mut scene, 0, &ctx(200)));
+    assert_eq!(scene.anim.state, PlayerAnim::Idle);
+}
+
+#[test]
+fn a_crit_break_restarts_her_stagger_as_it_does_an_entitys() {
+    // With knockdown off, a crit that breaks her while she is staggered
+    // starts the stagger again, as an entity's does (it used to leave her
+    // old stagger running).
+    let mut scene = enemy_crit_armed();
+    scene.game_entities.actor_stats_mut().knockdown_ticks = 0;
+    assert!(riposte_on_her(&mut scene, 0, &ctx(100)));
+    let first = scene.game_entities.actor_action().lock_until;
+    let poise = scene.game_entities.actor_stats().poise;
+    assert!(scene.react_player_to_hit(
+        CombatantId::entity(0),
+        poise,
+        false,
+        false,
+        true,
+        &ctx(110)
+    ));
+    assert!(scene.game_entities.actor_action().lock_until > first);
+}
+
+#[test]
 fn the_world_is_never_parried_on_either_side() {
     let mut scene = duel();
     player_swaps(&mut scene);
