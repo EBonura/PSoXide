@@ -1209,7 +1209,10 @@ impl Playtest {
             ProjectileTarget,
             { (MAX_GAME_ENTITIES + 1) * combat::PROJECTILE_HURTBOXES_PER_FIGHTER },
         >::new();
-        if !player.passes_through {
+        // No live bolt, nothing to strike: skip sampling every fighter's
+        // hurtboxes (each a joint decode) on the ticks with no projectile.
+        let live = !self.combat_projectiles.is_empty();
+        if live && !player.passes_through {
             combat::projectile_hurtboxes(
                 player.capsules,
                 self.actor_pose(PoseAt::Player),
@@ -1227,7 +1230,7 @@ impl Playtest {
         for (index, record) in GAME_ENTITIES
             .iter()
             .enumerate()
-            .take(self.game_entities.count())
+            .take(if live { self.game_entities.count() } else { 0 })
         {
             // An entity in its i-frames past its parry window is not a
             // target, exactly as the player above: the bolt flies on through.
