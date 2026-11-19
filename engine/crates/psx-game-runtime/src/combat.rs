@@ -105,6 +105,20 @@ pub fn projectile_hurtboxes(
     body: Option<WorldCombatCapsule>,
     mut push: impl FnMut(WorldCombatCapsule),
 ) {
+    projectile_hurtboxes_dyn(capsules, pose, body, &mut push);
+}
+
+/// [`projectile_hurtboxes`] through one out-of-line body: every caller
+/// shares a single copy of the joint transforms instead of inlining one per
+/// closure (it runs only while a bolt is live).
+#[inline(never)]
+#[cfg_attr(target_arch = "mips", optimize(size))]
+fn projectile_hurtboxes_dyn(
+    capsules: &[CombatCapsuleRecord],
+    pose: Option<&ActorPoseSnapshot>,
+    body: Option<WorldCombatCapsule>,
+    push: &mut dyn FnMut(WorldCombatCapsule),
+) {
     let mut pushed = 0usize;
     if let Some(pose) = pose {
         for record in capsules {
