@@ -1366,6 +1366,52 @@ mod tests {
             )
         }
 
+        #[test]
+        fn bolts_test_every_authored_hurtbox_else_the_body() {
+            let hurt = |joint| {
+                capsule_record(
+                    joint,
+                    combat_capsule_flags::HURTBOX,
+                    CharacterAnimationAction::Idle,
+                )
+            };
+            let hit = capsule_record(
+                0,
+                combat_capsule_flags::HITBOX,
+                CharacterAnimationAction::LightAttack,
+            );
+            let body = body_hurt_capsule([10, 0, 20], 12, 64);
+            assert_eq!(
+                body,
+                Some(WorldCombatCapsule {
+                    start: [10, 12, 20],
+                    end: [10, 52, 20],
+                    radius: 12
+                })
+            );
+            assert_eq!(body_hurt_capsule([0; 3], 0, 64), None);
+            let pose = pose_at([0, 0, 0], 0);
+            let mut got = (0usize, None);
+            projectile_hurtboxes(&[hit, hurt(0), hurt(0)], Some(&pose), body, |c| {
+                got = (got.0 + 1, Some(c))
+            });
+            assert_eq!(
+                got.0, 2,
+                "both authored hurtboxes, not the hitbox or the body"
+            );
+            got = (0, None);
+            projectile_hurtboxes(&[hurt(0); 6], Some(&pose), body, |c| {
+                got = (got.0 + 1, Some(c))
+            });
+            assert_eq!(got.0, PROJECTILE_HURTBOXES_PER_FIGHTER);
+            got = (0, None);
+            projectile_hurtboxes(&[hit, hurt(0)], None, body, |c| got = (got.0 + 1, Some(c)));
+            assert_eq!(got, (1, body), "no pose: the body capsule");
+            got = (0, None);
+            projectile_hurtboxes(&[hit], Some(&pose), body, |c| got = (got.0 + 1, Some(c)));
+            assert_eq!(got, (1, body), "no authored hurtbox: the body capsule");
+        }
+
         const fn capsule_record(
             joint: u8,
             flags: u8,
