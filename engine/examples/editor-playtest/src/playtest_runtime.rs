@@ -3714,6 +3714,19 @@ mod life_reset_tests {
     }
 }
 
+/// Every fighter's motor standing in liquid: walk and run keep 60 percent
+/// (the playtest has no vertical swim input yet).
+pub(super) fn liquid_motor_rule(
+    mut config: CharacterMotorConfig,
+    in_liquid: bool,
+) -> CharacterMotorConfig {
+    if in_liquid {
+        config.walk_speed = config.walk_speed.saturating_mul(60) / 100;
+        config.run_speed = config.run_speed.saturating_mul(60) / 100;
+    }
+    config
+}
+
 /// This game's rules over a fighter's motor configuration, the player's and
 /// every enemy's alike: no stamina limit (Cortex has no stamina), the
 /// decelerating roll of an authored character, and the gravity of the room

@@ -20,10 +20,10 @@
 
 use super::*;
 use psx_engine::CharacterMotorFrame;
-use psx_game_runtime::combat::{self, ActiveStrike, WorldCombatCapsule};
+use psx_game_runtime::combat::{self, ActiveStrike};
 use psx_game_runtime::combatant::stance_scaled;
 
-use crate::playtest_runtime::{fighter_motor_rules, hazard_damage};
+use crate::playtest_runtime::{fighter_motor_rules, hazard_damage, liquid_motor_rule};
 use psx_game_runtime::destructibles::{DamageChannel, DamageOutcome};
 use psx_game_runtime::entities::{
     DeferredGameEntityAttack, GameEntityState, MeleeArcStats, PredictedContact, Tell,
@@ -346,17 +346,22 @@ impl psx_game_runtime::entities::FighterWorld for SceneEntityMover<'_> {
             (Some(()), Some(world_rt)) if !resident(world_rt, self.fighter_rooms) => {
                 motor.suspended_frame(None)
             }
-            (Some(()), Some(world_rt)) => world_rt
+            (Some(()), Some(world_rt)) => {
+                let in_liquid = world_rt
+                    .player_contents(position, config.height)
+                    .is_some_and(|sample| sample.water_level > 0);
+                world_rt
                 .update_motor(
                     motor,
                     input,
-                    fighter_motor_rules(config, room, true),
+                    liquid_motor_rule(fighter_motor_rules(config, room, true), in_liquid),
                     delta,
                     self.destructibles,
                     cylinders.as_slice(),
                     aabbs.as_slice(),
                 )
-                .expect("grid entity trace failed"),
+                .expect("grid entity trace failed")
+            }
             // No world cooked yet (the placeholder manifest), or a prop
             // table that does not fit: the body holds still.
             _ => motor.suspended_frame(None),
@@ -2371,7 +2376,30 @@ impl Playtest {
     /// The hazard volumes on her this tick ([`Self::land_hazards`]); the
     /// volume leaves her alone while `exempt` (i-frames, dying).
     pub(super) fn apply_logic_hazard_damage(&mut self, ctx: &Ctx, player: [i32; 3], exempt: bool) {
-        self.land_hazards(ctx, RuntimeGameEntities::ACTOR_SLOT, player, exempt, 0);
+        if !crate::generated::ANY_HAZARD {
+            return;
+        }
+        let height = self.motor_config().height;
+        let liquid = self.fighter_liquid_damage(ctx, player, height, exempt);
+        if liquid != 0 {
+            telemetry::counter(telemetry::counter::PLAYER_LIQUID_DAMAGE_EVENTS, 1);
+        }
+        self.land_hazards(ctx, RuntimeGameEntities::ACTOR_SLOT, player, exempt, liquid);
+    }
+
+    /// The harmful liquid one fighter stands in this tick, by one rule for
+    /// every fighter: the damage of the contents at its body (on the
+    /// liquid's own interval), none while `exempt` (i-frames, dying).
+    fn fighter_liquid_damage(&self, ctx: &Ctx, position: [i32; 3], height: i32, exempt: bool) -> u16 {
+        if exempt {
+            return 0;
+        }
+        self.world_rt
+            .as_ref()
+            .and_then(|world_rt| {
+                world_rt.player_contents(RoomPoint::new(position[0], position[1], position[2]), height)
+            })
+            .map_or(0, |sample| hazard_damage(sample.contents, ctx.sim_tick.as_u32()))
     }
 
     /// The hazards on every entity, by the rule her actor slot takes them
@@ -2382,7 +2410,6 @@ impl Playtest {
         if !crate::generated::ANY_HAZARD {
             return;
         }
-        let now = ctx.sim_tick.as_u32();
         let count = self.game_entities.count().min(GAME_ENTITIES.len());
         for index in 0..count {
             if self.game_entities.state(index) == GameEntityState::Dead
@@ -2395,18 +2422,8 @@ impl Playtest {
             let exempt = self
                 .game_entities
                 .invulnerable(GAME_ENTITIES.as_slice(), index);
-            let mut liquid = 0;
-            if !exempt {
-                let height = i32::from(self.game_entities.body(record).height);
-                if let Some(sample) = self.world_rt.as_ref().and_then(|world_rt| {
-                    world_rt.player_contents(
-                        RoomPoint::new(position[0], position[1], position[2]),
-                        height,
-                    )
-                }) {
-                    liquid = hazard_damage(sample.contents, now);
-                }
-            }
+            let height = i32::from(self.game_entities.body(record).height);
+            let liquid = self.fighter_liquid_damage(ctx, position, height, exempt);
             self.land_hazards(ctx, index, position, exempt, liquid);
         }
     }

@@ -1,5 +1,4 @@
 use super::*;
-use crate::playtest_runtime::hazard_damage;
 
 /// Borrow the initialized prefix of a `MaybeUninit` scratch array.
 ///
@@ -1091,13 +1090,10 @@ impl Playtest {
         if self.ranged_ready.ready(now.as_u32()) {
             config.walk_speed = (config.walk_speed * 3 / 4).max(1);
         }
-        let liquid_contents = self.player_contents_memo(config.height);
-        if liquid_contents.is_some_and(|sample| sample.water_level > 0) {
-            // Liquids retain 60 percent locomotion; the editor playtest has
-            // no vertical swim input contract yet.
-            config.walk_speed = config.walk_speed.saturating_mul(60) / 100;
-            config.run_speed = config.run_speed.saturating_mul(60) / 100;
-        }
+        let in_liquid = self
+            .player_contents_memo(config.height)
+            .is_some_and(|sample| sample.water_level > 0);
+        config = crate::playtest_runtime::liquid_motor_rule(config, in_liquid);
         if action_locked && player_anim_is_attack(self.anim.state) {
             if let Some(character) = self.character.as_ref() {
                 let character = self.player_character_for_anim(character, self.anim.state);
@@ -1177,36 +1173,6 @@ impl Playtest {
         self.advance_hazard_push(blockers.as_slice(), aabb_blockers.as_slice());
 
         let hazard_countdown_was_active = self.death_ticks_remaining > 0;
-        if !hazard_countdown_was_active {
-            if let Some(sample) = self.player_contents_memo(config.height) {
-                let damage = hazard_damage(sample.contents, now.as_u32());
-                if damage > 0 {
-                    telemetry::counter(telemetry::counter::PLAYER_LIQUID_DAMAGE_EVENTS, 1);
-                    telemetry::debug_log(match sample.contents {
-                        psx_grid::contents::CONTENTS_LAVA => "player hazard:lava",
-                        psx_grid::contents::CONTENTS_SLIME => "player hazard:slime",
-                        _ => "player hazard:liquid",
-                    });
-                    // World damage on her stance through the one landing
-                    // (her death sequence arms there).
-                    self.land_on_fighter(
-                        ctx,
-                        RuntimeGameEntities::ACTOR_SLOT,
-                        Strike {
-                            attacker: CombatantId::WORLD,
-                            kind: HitKind::Hazard,
-                            channel: self.game_entities.actor().stance.active(),
-                            damage,
-                            poise: 0,
-                            crit: false,
-                        },
-                        None,
-                        false,
-                    );
-                }
-            }
-        }
-
         // The countdown/respawn below serves EVERY death cause: combat
         // damage arms it from `resolve_combat`, hazards from the site
         // above.
