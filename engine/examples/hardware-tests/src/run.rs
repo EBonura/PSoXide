@@ -692,6 +692,7 @@ records_step!(records_gte, records::push_gte_records);
 records_step!(records_gte_nclip, gte_nclip::run);
 records_step!(records_gpu, records::push_gpu_records);
 records_step!(records_spu, records::push_spu_records);
+records_step!(records_spu_bulk, spu_bulk::run);
 records_step!(records_cd, records::push_cd_records);
 records_step!(records_sio, records::push_sio_records);
 records_step!(records_gpu_batches, gpu_probes::push);
@@ -871,6 +872,7 @@ const STEPS: &[Step] = &[
     step(Area::Spu, "SPU CASES", tests_spu),
     step(Area::Spu, "SPU MAP", step_spu_map),
     step(Area::Spu, "SPU DMA TIMING", records_spu),
+    step(Area::Spu, "SPU BULK UPLOAD", records_spu_bulk),
     step(Area::Spu, "UI SAMPLE END AND LOOP", step_sb1),
     step(Area::Spu, "SPU RAM AND VOICES", step_sb2),
     step(Area::Spu, "CAPTURE RINGS", step_sb4),
