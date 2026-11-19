@@ -10,12 +10,15 @@ check:
 	cargo check --locked --workspace --all-features
 	cargo check --locked --manifest-path sdk/Cargo.toml --workspace --all-features
 	cargo check --locked --manifest-path engine/Cargo.toml --workspace --all-features
+	cargo check --locked --manifest-path tools/psoxide-duel/Cargo.toml --workspace --all-features
 # psxed-project's tests read the editor repository's projects/ and assets/ (they run in
 # PSoXide-editor, which hydrates this crate), so they are left out of the SDK run. So are
-# psoxide-duel's, which cook the editor's grid-dungeon project: run them with
-# PSOXIDE_PROJECTS_DIR=<PSoXide-editor>/projects cargo test -p psoxide-duel.
+# psoxide-duel's (its own workspace), which cook the editor's grid-dungeon project: they are
+# only built here; run them with PSOXIDE_PROJECTS_DIR=<PSoXide-editor>/projects
+# cargo test --manifest-path tools/psoxide-duel/Cargo.toml.
 test:
-	cargo test --locked --workspace --exclude psxed-project --exclude psoxide-duel
+	cargo test --locked --workspace --exclude psxed-project
+	cargo test --locked --manifest-path tools/psoxide-duel/Cargo.toml --no-run
 	cargo test --locked --manifest-path sdk/Cargo.toml --workspace
 	cargo test --locked --manifest-path engine/Cargo.toml -p psx-game-runtime -p psx-render-contract -p psx-chainloader -p psx-goldsrc -p psx-bsp
 	cargo test --locked --manifest-path engine/Cargo.toml -p psx-level --features wire
@@ -37,11 +40,13 @@ fmt:
 	cargo fmt --all
 	cargo fmt --manifest-path sdk/Cargo.toml --all
 	cargo fmt --manifest-path engine/Cargo.toml --all
+	cargo fmt --manifest-path tools/psoxide-duel/Cargo.toml --all
 	for m in sdk/examples/*/Cargo.toml engine/examples/*/Cargo.toml; do cargo fmt --manifest-path "$$m" || exit 1; done
 fmt-check:
 	cargo fmt --all -- --check
 	cargo fmt --manifest-path sdk/Cargo.toml --all -- --check
 	cargo fmt --manifest-path engine/Cargo.toml --all -- --check
+	cargo fmt --manifest-path tools/psoxide-duel/Cargo.toml --all -- --check
 	for m in sdk/examples/*/Cargo.toml engine/examples/*/Cargo.toml; do cargo fmt --manifest-path "$$m" -- --check || exit 1; done
 lint:
 	$(MAKE) fmt-check
@@ -56,6 +61,7 @@ lint:
 	cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 	cargo clippy --locked --manifest-path sdk/Cargo.toml --workspace --all-targets --all-features -- -D warnings
 	cargo clippy --locked --manifest-path engine/Cargo.toml --workspace --all-targets --all-features -- -D warnings
+	cargo clippy --locked --manifest-path tools/psoxide-duel/Cargo.toml --workspace --all-targets --all-features -- -D warnings
 	# Again for the guest: the cfg(target_arch = "mips") MMIO, DMA and asm paths
 	# only exist there. Libraries only; the tests need std.
 	cargo clippy --locked --manifest-path sdk/Cargo.toml --workspace --target $(TARGET) \

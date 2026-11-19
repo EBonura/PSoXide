@@ -479,21 +479,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "psoxide-duel"
-version = "0.1.0"
-dependencies = [
- "psx-asset",
- "psx-engine",
- "psx-game-runtime",
- "psx-gpu",
- "psx-level",
- "psx-math",
- "psx-vram",
- "psxed-project",
- "serde_json",
-]
-
-[[package]]
 name = "psoxide-hazard"
 version = "0.1.0"
 dependencies = [
@@ -665,26 +650,6 @@ dependencies = [
  "psx-hw",
  "psx-io",
  "psx-math",
- "psx-vram",
-]
-
-[[package]]
-name = "psx-game-runtime"
-version = "0.1.0"
-dependencies = [
- "psx-asset",
- "psx-cdstream",
- "psx-engine",
- "psx-font",
- "psx-gpu",
- "psx-grid",
- "psx-hw",
- "psx-io",
- "psx-level",
- "psx-math",
- "psx-pack",
- "psx-residency",
- "psx-telemetry",
  "psx-vram",
 ]
 

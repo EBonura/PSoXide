@@ -1,3 +1,14 @@
+# Its own workspace, outside the SDK root one: the games check the SDK out
+# sparsely and do not carry this tool, so the root workspace must resolve
+# without it. The lint table and release profile are copies of the root
+# manifest's (psoxide-dev lint-policy-guard keeps the lints from drifting);
+# make check, test, lint and fmt reach it with --manifest-path.
+[workspace]
+resolver = "2"
+
+[workspace.dependencies]
+serde_json = "1.0"
+
 [package]
 name    = "psoxide-duel"
 version = "0.1.0"
@@ -28,3 +39,52 @@ path = "src/main.rs"
 
 [lints]
 workspace = true
+
+[workspace.lints.rust]
+missing_docs = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unsafe_op_in_unsafe_fn = "deny"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+too_many_arguments = "allow"
+
+# Google's Rust style guide (sdk/docs/STYLE.md). Clean today, so denied; `make lint`
+# runs clippy with -D warnings.
+wrong_self_convention = "deny"
+should_implement_trait = "deny"
+len_without_is_empty = "deny"
+borrowed_box = "deny"
+ptr_arg = "deny"
+new_without_default = "deny"
+new_ret_no_self = "deny"
+missing_safety_doc = "deny"
+undocumented_unsafe_blocks = "deny"
+unnecessary_unwrap = "deny"
+from_over_into = "deny"
+inherent_to_string = "deny"
+enum_glob_use = "deny"
+rc_buffer = "deny"
+rc_mutex = "deny"
+get_first = "deny"
+
+# Not clean yet. Allowed here so -D warnings stays green, counted by
+# tools/style-ratchet.sh against tools/style-ratchet.baseline: a count may fall,
+# never rise. `tools/style-ratchet.sh --report` shows today's numbers.
+must_use_candidate = "allow"
+unwrap_used = "allow"
+exhaustive_enums = "allow"
+exhaustive_structs = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+wildcard_imports = "allow"
+string_add = "allow"
+string_add_assign = "allow"
+fn_params_excessive_bools = "allow"
+needless_for_each = "allow"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1

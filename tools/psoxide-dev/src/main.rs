@@ -89,12 +89,17 @@ fn relative_to_root(path: &Path) -> String {
 
 fn lint_policy_guard() -> Result<(), String> {
     let root = repo_root();
-    // The three real workspace roots. engine/ carries the baseline lint table
-    // (the one the engine and editor crates were written against). The root
-    // host workspace and sdk/ may add lints or make them stricter, never relax
-    // or drop one.
+    // The real workspace roots. engine/ carries the baseline lint table (the
+    // one the engine and editor crates were written against). The root host
+    // workspace, sdk/ and tools/psoxide-duel (its own workspace so the games'
+    // sparse SDK checkouts can leave it out) may add lints or make them
+    // stricter, never relax or drop one.
     let reference_path = root.join("engine/Cargo.toml");
-    let others = [root.join("Cargo.toml"), root.join("sdk/Cargo.toml")];
+    let others = [
+        root.join("Cargo.toml"),
+        root.join("sdk/Cargo.toml"),
+        root.join("tools/psoxide-duel/Cargo.toml"),
+    ];
     let sections = ["workspace.lints.rust", "workspace.lints.clippy"];
     let mut violations = Vec::new();
     for section in sections {
@@ -131,7 +136,7 @@ fn lint_policy_guard() -> Result<(), String> {
         }
         return Err("lint policy guard failed".to_string());
     }
-    println!("lint policy guard: ok (3 manifests)");
+    println!("lint policy guard: ok ({} manifests)", others.len() + 1);
     Ok(())
 }
 

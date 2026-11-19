@@ -44,16 +44,27 @@ done
 WARN=""
 for l in $LINTS; do WARN="$WARN -W $l"; done
 
-# measure CONTEXT CARGO_ARGS...  prints "CONTEXT LINT COUNT" for every ratchet lint
-measure() {
+# codes CARGO_ARGS...  prints the code of every ratchet lint clippy reports, one per line
+codes() {
+	cargo clippy --locked "$@" --message-format=json -- $WARN 2>/dev/null |
+		jq -r 'select(.reason == "compiler-message") | .message.code.code // empty' || true
+}
+
+# count CONTEXT CODES  prints "CONTEXT LINT COUNT" for every ratchet lint
+count() {
 	ctx=$1
-	shift
-	out=$(cargo clippy --locked "$@" --message-format=json -- $WARN 2>/dev/null |
-		jq -r 'select(.reason == "compiler-message") | .message.code.code // empty' || true)
+	out=$2
 	for l in $LINTS; do
 		n=$(printf '%s\n' "$out" | grep -c -x -F "$l" || true)
 		echo "$ctx $l $n"
 	done
+}
+
+# measure CONTEXT CARGO_ARGS...  count for one cargo invocation
+measure() {
+	ctx=$1
+	shift
+	count "$ctx" "$(codes "$@")"
 }
 
 NOW=$(mktemp)
@@ -66,7 +77,10 @@ export CLIPPY_CONF_DIR="$CONF"
 	# `content` is what came in from PSoXide-editor (the psxed cookers and project model and
 	# the host tools); `engine` is the engine workspace. Each has its own baseline so the
 	# older scopes keep their meaning and the newer ones can only go down.
-	measure root --workspace $CONTENT_EXCLUDE --lib --bins --all-features
+	# tools/psoxide-duel is its own workspace (the games' sparse SDK checkouts leave it out)
+	# but was counted in `root` before it moved, so it still is.
+	count root "$(codes --workspace $CONTENT_EXCLUDE --lib --bins --all-features)
+$(codes --manifest-path tools/psoxide-duel/Cargo.toml --workspace --lib --bins --all-features)"
 	measure content $CONTENT_PACKAGES --lib --bins --all-features
 	measure engine --manifest-path engine/Cargo.toml --workspace --lib --bins --all-features
 	measure sdk --manifest-path sdk/Cargo.toml --workspace --lib --bins --all-features
