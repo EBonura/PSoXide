@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::character::PlayerAnim;
-use crate::fighter_anim::{self, AnimState, Body, ReactionBlend};
+use crate::fighter_anim::{self, AnimState, Body};
 use psx_engine::SimTick;
 
 /// One shown clip as a crossfade key: the animation action it plays and the
@@ -33,8 +33,8 @@ impl EntityAnim {
         },
     };
 
-    /// A body showing nothing yet. Entities crossfade into a reaction.
-    pub const NO_BODY: Body<Self> = Body::new(Self::NONE, SimTick::ZERO, ReactionBlend::Fade);
+    /// A body showing nothing yet.
+    pub const NO_BODY: Body<Self> = Body::new(Self::NONE, SimTick::ZERO);
 
     /// A looping locomotion clip.
     const fn looping(action: CharacterAnimationAction, clip: u16) -> Self {
@@ -59,6 +59,7 @@ impl EntityAnim {
     }
 }
 
+/// Entities crossfade into a reaction (the default [`AnimState::REACTIONS`]).
 impl AnimState for EntityAnim {
     fn action(self) -> CharacterAnimationAction {
         self.action
@@ -148,7 +149,7 @@ impl<const N: usize> GameEntities<N> {
                 && self.gaits[i].state != EntityAnim::NONE;
             let track = &mut self.gaits[i];
             if track.state == EntityAnim::NONE {
-                *track = Body::new(gait, now, ReactionBlend::Fade);
+                *track = Body::new(gait, now);
             } else if track.state != gait {
                 let carried = track.gait_carry(gait, now, |state| cycle(i, &state.clip));
                 track.switch(gait, now, carried);

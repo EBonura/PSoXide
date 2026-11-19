@@ -66,7 +66,7 @@ use psx_engine::{
 use psx_font::FontAtlas;
 use psx_game_runtime::combat_fx::{FlashKind, LandedHit, COMBAT_FEEDBACK};
 use psx_game_runtime::combat_intent::{CombatAction, CombatActions, CombatIntent, CombatMove};
-use psx_game_runtime::fighter_anim::{self, AnimFade, Body, ReactionBlend};
+use psx_game_runtime::fighter_anim::{self, AnimFade, Body};
 use psx_game_runtime::vitality::{
     BoostBars, BoostInventory, BoostModuleId, BoostSlotId, CombatStance, CombatStanceConfig,
     PowerUpLoadout, VitalityChannelId, VitalityModifiers, VitalityPole, VitalityPool,
@@ -738,8 +738,6 @@ impl Playtest {
         // Zero bytes already decode as `Idle`; stamped for self-documentation.
         self.body.state = PlayerAnim::Idle;
         self.body.switched = None;
-        // She cuts into a reaction (entities fade into theirs).
-        self.body.reactions = ReactionBlend::Cut;
         self.loco = LocoPhase::Idle;
         self.box_props.init();
         self.orbit_yaw = CAMERA_START_YAW;

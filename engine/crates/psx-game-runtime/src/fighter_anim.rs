@@ -173,11 +173,18 @@ pub fn footfall(
 /// What a fighter shows: anything that names the animation action it plays,
 /// which decides how changes to and from it crossfade.
 pub trait AnimState: Copy + PartialEq {
+    /// How a body showing these states enters a reaction. A choice per kind of
+    /// body, so it costs no byte per body and no test where it fades.
+    const REACTIONS: ReactionBlend = ReactionBlend::Fade;
+
     /// The animation action this state plays.
     fn action(self) -> Action;
 }
 
 impl AnimState for PlayerAnim {
+    /// She cuts into a reaction: its first frame shows on the hit tick.
+    const REACTIONS: ReactionBlend = ReactionBlend::Cut;
+
     fn action(self) -> Action {
         PlayerAnim::action(self)
     }
@@ -236,19 +243,16 @@ pub struct Body<S> {
     pub switched: Option<AnimSwitch<S>>,
     /// The clip's clock: the tick its local tick reads as zero.
     pub start: SimTick,
-    /// How this body enters a reaction.
-    pub reactions: ReactionBlend,
 }
 
 impl<S: AnimState> Body<S> {
     /// A body showing `state` on a clock started at `start`, with nothing to
     /// fade from.
-    pub const fn new(state: S, start: SimTick, reactions: ReactionBlend) -> Self {
+    pub const fn new(state: S, start: SimTick) -> Self {
         Self {
             state,
             switched: None,
             start,
-            reactions,
         }
     }
 
@@ -258,14 +262,14 @@ impl<S: AnimState> Body<S> {
     }
 
     /// Switch to `next` at `now`, keeping the outgoing pose for the
-    /// crossfade (none into a reaction when [`Self::reactions`] cuts). The
+    /// crossfade (none into a reaction when [`AnimState::REACTIONS`] cuts). The
     /// outgoing clip's local tick is read off the clock, which restarts at
     /// `now` backdated by `carried` ticks (see [`Self::gait_carry`]).
     // Inlined at every call, as the track it replaced was: out of line it cost
     // 364 B for the entities' two calls.
     #[inline]
     pub fn switch(&mut self, next: S, now: SimTick, carried: u32) {
-        let cut = self.reactions == ReactionBlend::Cut && is_reaction(next.action());
+        let cut = matches!(S::REACTIONS, ReactionBlend::Cut) && is_reaction(next.action());
         self.switched = if cut {
             None
         } else {
@@ -445,11 +449,7 @@ mod tests {
 
     #[test]
     fn a_switch_restarts_the_clock_backdated_by_the_carry() {
-        let mut track = Body::new(
-            PlayerAnim::Walk,
-            SimTick::from_u32(100),
-            ReactionBlend::Fade,
-        );
+        let mut track = Body::new(PlayerAnim::Walk, SimTick::from_u32(100));
         track.switch(PlayerAnim::StrafeLeft, SimTick::from_u32(130), 7);
         assert_eq!(track.start, SimTick::from_u32(123));
         assert_eq!(track.state, PlayerAnim::StrafeLeft);
@@ -462,20 +462,30 @@ mod tests {
             .is_none());
     }
 
+    /// A body kind that keeps the default: it fades into a reaction.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    struct Fading(Action);
+
+    impl AnimState for Fading {
+        fn action(self) -> Action {
+            self.0
+        }
+    }
+
     #[test]
     fn a_cutting_body_enters_a_reaction_without_a_fade() {
         let now = SimTick::from_u32(40);
-        let mut cuts = Body::new(PlayerAnim::Walk, SimTick::ZERO, ReactionBlend::Cut);
-        let mut fades = Body::new(PlayerAnim::Walk, SimTick::ZERO, ReactionBlend::Fade);
+        let mut cuts = Body::new(PlayerAnim::Walk, SimTick::ZERO);
+        let mut fades = Body::new(Fading(Action::Walk), SimTick::ZERO);
         cuts.switch(PlayerAnim::Stun, now, 0);
-        fades.switch(PlayerAnim::Stun, now, 0);
+        fades.switch(Fading(Action::Stun), now, 0);
         assert_eq!(
             (cuts.state, cuts.start, cuts.switched),
             (PlayerAnim::Stun, now, None)
         );
         assert_eq!(
             fades.fade(now).map(|fade| fade.from),
-            Some(PlayerAnim::Walk)
+            Some(Fading(Action::Walk))
         );
         // Anything else still crossfades on a cutting body.
         cuts.switch(PlayerAnim::Idle, SimTick::from_u32(50), 0);
