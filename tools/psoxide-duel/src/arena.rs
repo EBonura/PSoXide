@@ -28,7 +28,7 @@ use psx_engine::{
     CharacterMotorConfig, CharacterMotorFrame, CharacterMotorInput, CharacterMotorState, RoomPoint,
 };
 use psx_game_runtime::combat::{
-    ticks_to_contact, transform_actor_combat_capsule, ActiveStrike, WorldCombatCapsule,
+    body_hurt_capsule, projectile_hurtboxes, ticks_to_contact, ActiveStrike, WorldCombatCapsule,
 };
 use psx_game_runtime::combat_intent::{CombatAction, CombatActions, CombatIntent, CombatMove};
 use psx_game_runtime::combatant::{Combatant, CombatantId, Defender, HitKind, Strike};
@@ -445,30 +445,21 @@ impl Side {
         }
     }
 
-    /// The body capsule bolts hit (the disc's fallback hurtbox).
-    /// What a bolt strikes: the first authored hurtbox on this tick's pose
-    /// (none without a pose), else the body capsule, as on the disc.
-    fn hurtbox(&self) -> Option<WorldCombatCapsule> {
-        let authored = self.spec.rig.as_ref().and_then(|rig| {
-            rig.capsules
-                .iter()
-                .find(|c| c.flags & psx_level::combat_capsule_flags::HURTBOX != 0)
-        });
-        match authored {
-            Some(capsule) => transform_actor_combat_capsule(capsule, self.poses.current()?),
-            None => Some(self.body_capsule()),
-        }
-    }
-
-    fn body_capsule(&self) -> WorldCombatCapsule {
+    /// What a bolt strikes, the disc's one rule
+    /// (`combat::projectile_hurtboxes`): every authored hurtbox on this
+    /// tick's pose, else the body capsule.
+    fn hurtboxes(&self, push: impl FnMut(WorldCombatCapsule)) {
         let r = self.body();
-        let p = self.entities.position(0);
-        let radius = i32::from(r.radius).min(i32::from(r.height) / 2);
-        WorldCombatCapsule {
-            start: [p[0], p[1] + radius, p[2]],
-            end: [p[0], p[1] + i32::from(r.height) - radius, p[2]],
-            radius: radius.max(1) as u16,
-        }
+        projectile_hurtboxes(
+            self.spec.rig.as_ref().map_or(&[][..], |rig| rig.capsules),
+            self.poses.current(),
+            body_hurt_capsule(
+                self.entities.position(0),
+                i32::from(r.radius),
+                i32::from(r.height),
+            ),
+            push,
+        );
     }
 }
 
@@ -899,14 +890,14 @@ pub fn run(duel: &Duel<'_>) -> DuelResult {
             if sides[j].entities.state(0) != GameEntityState::Dead
                 && !sides[j].entities.passes_through(sides[j].records, 0)
             {
-                if let Some(hurtbox) = sides[j].hurtbox() {
+                sides[j].hurtboxes(|hurtbox| {
                     targets.push(ProjectileTarget {
                         target: 0,
                         team: CombatTeam::Enemy,
                         room: RoomIndex::ZERO,
                         hurtbox,
-                    });
-                }
+                    })
+                });
             }
             let mut impacts = ProjectileImpacts::<8>::new();
             let opening = sides[j].entities.shot_opening(sides[j].records, 0);

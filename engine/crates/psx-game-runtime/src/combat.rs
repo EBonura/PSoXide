@@ -65,6 +65,68 @@ pub fn transform_actor_combat_capsule(
     ))
 }
 
+/// Most authored hurtboxes a bolt tests on one fighter (the cooked fighters
+/// author two or three); later ones are ignored. Callers size their target
+/// storage from it.
+pub const PROJECTILE_HURTBOXES_PER_FIGHTER: usize = 4;
+
+/// A fighter's body cylinder as the capsule a bolt strikes when it has no
+/// authored hurtbox: from its feet to its height, as wide as its radius (at
+/// most half its height). `None` for a body with no size.
+pub fn body_hurt_capsule(
+    position: [i32; 3],
+    radius: i32,
+    height: i32,
+) -> Option<WorldCombatCapsule> {
+    if radius <= 0 || height <= 0 {
+        return None;
+    }
+    let r = radius.min(height / 2).max(1);
+    Some(WorldCombatCapsule {
+        start: [position[0], position[1].saturating_add(r), position[2]],
+        end: [
+            position[0],
+            position[1].saturating_add(height).saturating_sub(r),
+            position[2],
+        ],
+        radius: r.min(i32::from(u16::MAX)) as u16,
+    })
+}
+
+/// What a bolt strikes on one fighter, by one rule for every fighter: each
+/// authored HURTBOX capsule on its pose, in capsule order (at most
+/// [`PROJECTILE_HURTBOXES_PER_FIGHTER`]), or `body` when none is on a pose.
+///
+/// Every hurtbox counts, not only the first: a fighter whose first hurtbox
+/// is a leg would otherwise let every bolt aimed at its chest fly over it.
+pub fn projectile_hurtboxes(
+    capsules: &[CombatCapsuleRecord],
+    pose: Option<&ActorPoseSnapshot>,
+    body: Option<WorldCombatCapsule>,
+    mut push: impl FnMut(WorldCombatCapsule),
+) {
+    let mut pushed = 0usize;
+    if let Some(pose) = pose {
+        for record in capsules {
+            if pushed == PROJECTILE_HURTBOXES_PER_FIGHTER {
+                return;
+            }
+            if record.flags & combat_capsule_flags::HURTBOX == 0 {
+                continue;
+            }
+            if let Some(hurtbox) = transform_actor_combat_capsule(record, pose) {
+                push(hurtbox);
+                pushed += 1;
+            }
+        }
+    }
+    if pushed == 0 {
+        if let Some(body) = body {
+            push(body);
+        }
+    }
+}
+
 /// Sample the endpoints of an active part of a retained-pose interval. Both
 /// animation phase and actor translation are clipped, so movement during an
 /// inactive tell or recovery cannot become part of the damaging blade path.

@@ -1203,53 +1203,27 @@ impl Playtest {
         prop_blockers_valid: bool,
         impacts: &mut ProjectileImpacts<I>,
     ) {
+        // Every fighter is struck by the one rule: each authored hurtbox on
+        // its pose, else its body capsule (combat::projectile_hurtboxes).
         let mut projectile_targets = psx_engine::FixedScratch::<
             ProjectileTarget,
-            { MAX_GAME_ENTITIES + psx_level::MAX_CHARACTER_COMBAT_CAPSULES },
+            { (MAX_GAME_ENTITIES + 1) * combat::PROJECTILE_HURTBOXES_PER_FIGHTER },
         >::new();
         if !player.passes_through {
-            if let Some(pose) = self.actor_pose(PoseAt::Player) {
-                for record in player
-                    .capsules
-                    .iter()
-                    .take(psx_level::MAX_CHARACTER_COMBAT_CAPSULES)
-                {
-                    if record.flags & psx_level::combat_capsule_flags::HURTBOX == 0 {
-                        continue;
-                    }
-                    let Some(hurtbox) = combat::transform_actor_combat_capsule(record, pose) else {
-                        continue;
-                    };
+            combat::projectile_hurtboxes(
+                player.capsules,
+                self.actor_pose(PoseAt::Player),
+                combat::body_hurt_capsule(player.position, player.radius, player.height),
+                |hurtbox| {
                     let _ = projectile_targets.try_push(ProjectileTarget {
                         target: PLAYER_PROJECTILE_TARGET,
                         team: CombatTeam::Player,
                         room: self.room_index,
                         hurtbox,
                     });
-                }
-            }
-            if projectile_targets.is_empty() && player.radius > 0 && player.height > 0 {
-                let radius = player.radius.min(i32::from(u16::MAX)) as u16;
-                let segment_start_y = player.position[1].saturating_add(player.radius);
-                let segment_end_y = player.position[1]
-                    .saturating_add(player.height)
-                    .saturating_sub(player.radius)
-                    .max(segment_start_y);
-                let _ = projectile_targets.try_push(ProjectileTarget {
-                    target: PLAYER_PROJECTILE_TARGET,
-                    team: CombatTeam::Player,
-                    room: self.room_index,
-                    hurtbox: WorldCombatCapsule {
-                        start: [player.position[0], segment_start_y, player.position[2]],
-                        end: [player.position[0], segment_end_y, player.position[2]],
-                        radius,
-                    },
-                });
-            }
+                },
+            );
         }
-        // Use the primary animated hurtbox for projectile contact. A legacy
-        // actor without one retains its body capsule; authoring failures do
-        // not invent a larger target. Storage stays bounded at the actor limit.
         for (index, record) in GAME_ENTITIES
             .iter()
             .enumerate()
@@ -1264,47 +1238,31 @@ impl Playtest {
             {
                 continue;
             }
-            let p = self.game_entities.position(index);
-            let r = i32::from(self.game_entities.body(record).radius)
-                .min(i32::from(self.game_entities.body(record).height) / 2);
-            let fallback = WorldCombatCapsule {
-                start: [p[0], p[1] + r, p[2]],
-                end: [
-                    p[0],
-                    p[1] + i32::from(self.game_entities.body(record).height) - r,
-                    p[2],
-                ],
-                radius: r.max(1) as u16,
-            };
-            let capsule_body = self.game_entities.body(record);
-            let first = capsule_body.combat_capsule_first.to_usize();
-            let authored = COMBAT_CAPSULES
-                .get(first..first + usize::from(capsule_body.combat_capsule_count))
-                .unwrap_or(&[])
-                .iter()
-                .find(|c| c.flags & psx_level::combat_capsule_flags::HURTBOX != 0);
-            let hurtbox = if let Some(capsule) = authored {
-                let Some(pose) = self
-                    .instance_actor_poses
+            let body = self.game_entities.body(record);
+            let first = body.combat_capsule_first.to_usize();
+            let team = self.game_entities.team(index);
+            combat::projectile_hurtboxes(
+                COMBAT_CAPSULES
+                    .get(first..first + usize::from(body.combat_capsule_count))
+                    .unwrap_or(&[]),
+                self.instance_actor_poses
                     .get(usize::from(record.model_instance))
                     .and_then(Option::as_ref)
-                else {
-                    continue;
-                };
-                let Some(hurtbox) = combat::transform_actor_combat_capsule(capsule, pose.pose())
-                else {
-                    continue;
-                };
-                hurtbox
-            } else {
-                fallback
-            };
-            let _ = projectile_targets.try_push(ProjectileTarget {
-                target: index as u16,
-                team: self.game_entities.team(index),
-                room: record.room,
-                hurtbox,
-            });
+                    .map(|pose| pose.pose()),
+                combat::body_hurt_capsule(
+                    self.game_entities.position(index),
+                    i32::from(body.radius),
+                    i32::from(body.height),
+                ),
+                |hurtbox| {
+                    let _ = projectile_targets.try_push(ProjectileTarget {
+                        target: index as u16,
+                        team,
+                        room: record.room,
+                        hurtbox,
+                    });
+                },
+            );
         }
         {
             let mut tracer = SceneProjectileWorldTracer {
