@@ -13,6 +13,11 @@
 //! Names are compared byte for byte, up to the `;version` the disc appends. ISO 9660 writes
 //! file names in upper case, and so must the names passed in.
 //!
+//! Every lookup sees this program's own image: on a multi-program disc the reads go through
+//! [`crate::disc_base`]'s shift. [`find_in_host_root`] is the one exception, the root of the
+//! whole disc, for a demo-disc member playing an XA file another member or the launcher carries
+//! on the same disc; it hands back locations the reader and the XA player take as they are.
+//!
 //! ```
 //! use psx_io::iso::{find, Sector};
 //! let mut sector: Sector = [0; psx_io::cd::reader::SECTOR_WORDS];
@@ -227,6 +232,52 @@ pub fn find_in_root(
     true
 }
 
+/// [`find_in_root`] on the HOST disc: the root directory of the whole disc the console booted
+/// (volume descriptor at absolute sector 16), not of this program's own image.
+///
+/// It exists for one use: a demo-disc member playing an XA file that another member or the
+/// launcher carries on the same disc (the disc builder writes an outer-root record, such as
+/// `PIANO1.XA`, pointing into that other image). Every other lookup wants [`find_in_root`].
+///
+/// `read` is the same member-relative read [`find_in_root`] takes (`|lba, into|
+/// reader.read_at(lba, into)`), and every extent written to `out` is member-relative too, so it
+/// goes straight into [`File::from_directory_entry`](crate::cd::xa::File::from_directory_entry)
+/// or [`SectorReader::start_read`](crate::cd::reader::SectorReader::start_read). Both readers
+/// add [`disc_base::lba_offset`](crate::disc_base::lba_offset) with
+/// [`disc_base::shift_lba`](crate::disc_base::shift_lba) (a wrapping add), so this lookup takes
+/// it away with a wrapping subtraction: a file in front of this program's image comes back as
+/// an LBA that has wrapped below zero, and the reader's add brings it back to the right sector.
+/// A caller that steps through such a file adds to its LBA with `wrapping_add`.
+///
+/// On a disc that holds one program (the base is 0) this is exactly [`find_in_root`].
+#[inline]
+pub fn find_in_host_root(
+    sector: &mut Sector,
+    read: impl FnMut(u32, &mut Sector) -> bool,
+    names: &[&str],
+    out: &mut [Option<Extent>],
+) -> bool {
+    find_in_root_from_base(crate::disc_base::lba_offset(), sector, read, names, out)
+}
+
+/// [`find_in_host_root`] with the program's base passed in: absolute sector `n` is read as
+/// member-relative `n - base`, and absolute extents are handed back as member-relative ones.
+#[inline(always)]
+fn find_in_root_from_base(
+    base: u32,
+    sector: &mut Sector,
+    mut read: impl FnMut(u32, &mut Sector) -> bool,
+    names: &[&str],
+    out: &mut [Option<Extent>],
+) -> bool {
+    let read_absolute = |absolute: u32, into: &mut Sector| read(absolute.wrapping_sub(base), into);
+    let ok = find_in_root(sector, read_absolute, names, out);
+    for slot in out.iter_mut().flatten() {
+        slot.0 = slot.0.wrapping_sub(base);
+    }
+    ok
+}
+
 /// Whether two slices of one length hold the same bytes: a loop right here, so the function around
 /// it stays a leaf that makes no call and saves no registers (the library's compare is a call).
 #[inline(always)]
@@ -298,7 +349,12 @@ mod tests {
 
         /// The volume descriptor, naming the root directory.
         fn volume(&mut self, root: Extent) {
-            let s = &mut self.0[PVD_LBA as usize];
+            self.volume_at(PVD_LBA, root);
+        }
+
+        /// A volume descriptor at sector `lba` (a member image's own, inside a bigger disc).
+        fn volume_at(&mut self, lba: u32, root: Extent) {
+            let s = &mut self.0[lba as usize];
             s[0] = 1;
             s[1..6].copy_from_slice(b"CD001");
             s[156] = 34;
@@ -426,6 +482,189 @@ mod tests {
             ));
             assert_eq!(out[0], lookup(&im, name), "{name}");
         }
+    }
+
+    /// Where the member image starts on the host disc in [`two_programs`].
+    const MEMBER_BASE: u32 = 64;
+
+    /// A disc of two programs. The host disc's root (sector 20) holds PIANO1.XA at absolute 40
+    /// (in front of the member, as a file inside the launcher's or an earlier member's image is)
+    /// and SHARED.BIN at absolute 45. The member image starts at [`MEMBER_BASE`]; its own root
+    /// (member-relative 20) holds its own SHARED.BIN at member-relative 30 and OWN.BIN at 31.
+    fn two_programs() -> Image {
+        let mut im = Image(vec![[0; BYTES]; 128]);
+        im.volume((20, 2048));
+        let at = im.record(20, 0, b"\0", (20, 2048));
+        let at = im.record(20, at, b"\x01", (20, 2048));
+        let at = im.record(20, at, b"PIANO1.XA;1", (40, 5 * 2048));
+        im.record(20, at, b"SHARED.BIN;1", (45, 2048));
+        let root = MEMBER_BASE + 20;
+        im.volume_at(MEMBER_BASE + PVD_LBA, (20, 2048));
+        let at = im.record(root, 0, b"\0", (20, 2048));
+        let at = im.record(root, at, b"\x01", (20, 2048));
+        let at = im.record(root, at, b"SHARED.BIN;1", (30, 2048));
+        im.record(root, at, b"OWN.BIN;1", (31, 100));
+        // A tag in each file's first sector, to prove which sector a read lands on.
+        for (lba, tag) in [(40, 0xa1), (45, 0xb2), (MEMBER_BASE + 30, 0xc3)] {
+            im.0[lba as usize][0] = tag;
+        }
+        im
+    }
+
+    /// The member's read as `SectorReader::read_at` does it: the member-relative LBA plus the
+    /// base, wrapping (`disc_base::shift_lba`).
+    fn member_read<'a>(
+        im: &'a Image,
+        base: u32,
+        log: &'a mut Vec<u32>,
+    ) -> impl FnMut(u32, &mut Sector) -> bool + 'a {
+        let mut inner = im.reader(log);
+        move |lba, into| inner(lba.wrapping_add(base), into)
+    }
+
+    #[test]
+    fn host_lookup_finds_a_file_in_front_of_the_member_and_the_shift_brings_it_back() {
+        let im = two_programs();
+        let mut sector = [0; SECTOR_WORDS];
+        let mut log = Vec::new();
+        let mut out = [None];
+        assert!(find_in_root_from_base(
+            MEMBER_BASE,
+            &mut sector,
+            member_read(&im, MEMBER_BASE, &mut log),
+            &["PIANO1.XA"],
+            &mut out
+        ));
+        assert_eq!(
+            log,
+            [PVD_LBA, 20],
+            "the host's descriptor and root, read absolute"
+        );
+        let (lba, bytes) = out[0].expect("found on the host disc");
+        assert_eq!(bytes, 5 * 2048);
+        // The base is larger than the file's absolute LBA: the member-relative LBA wraps.
+        assert_eq!(lba, 40u32.wrapping_sub(MEMBER_BASE));
+        assert!(lba > 0x8000_0000, "wrapped below zero");
+        // The reader's shift (and the XA player's, the same `shift_lba`) lands on sector 40.
+        assert_eq!(lba.wrapping_add(MEMBER_BASE), 40);
+        let mut steps = Vec::new();
+        let mut read = member_read(&im, MEMBER_BASE, &mut steps);
+        assert!(read(lba, &mut sector));
+        assert_eq!(as_bytes(&sector)[0], 0xa1);
+        // Stepping through the file with wrapping_add stays on the host's sectors.
+        assert!(read(lba.wrapping_add(4), &mut sector));
+        drop(read);
+        assert_eq!(steps, [40, 44]);
+        // The XA file built from it starts its read at the absolute sector.
+        let file = crate::cd::xa::File::from_directory_entry(
+            lba,
+            bytes,
+            1,
+            crate::cd::xa::DriveSpeed::Double,
+        );
+        assert_eq!(
+            file,
+            crate::cd::xa::File::new(
+                40u32.wrapping_sub(MEMBER_BASE),
+                5,
+                1,
+                crate::cd::xa::DriveSpeed::Double
+            )
+        );
+    }
+
+    #[test]
+    fn host_lookup_with_a_base_of_zero_is_the_ordinary_lookup() {
+        let im = standard();
+        let names = ["MUSIC.XA", "SYSTEM.CNF", "MISSING.BIN", "GAME"];
+        let mut sector = [0; SECTOR_WORDS];
+        let (mut plain, mut host, mut public) = ([None; 4], [None; 4], [None; 4]);
+        let (mut log_plain, mut log_host, mut log_public) = (Vec::new(), Vec::new(), Vec::new());
+        assert!(find_in_root(
+            &mut sector,
+            im.reader(&mut log_plain),
+            &names,
+            &mut plain
+        ));
+        assert!(find_in_root_from_base(
+            0,
+            &mut sector,
+            im.reader(&mut log_host),
+            &names,
+            &mut host
+        ));
+        // A host test run is a standalone program: nothing installed a base.
+        assert_eq!(crate::disc_base::lba_offset(), 0);
+        assert!(find_in_host_root(
+            &mut sector,
+            im.reader(&mut log_public),
+            &names,
+            &mut public
+        ));
+        assert_eq!(host, plain);
+        assert_eq!(public, plain);
+        assert_eq!(log_host, log_plain);
+        assert_eq!(log_public, log_plain);
+    }
+
+    #[test]
+    fn host_lookup_of_a_missing_name_is_none_and_a_failed_read_is_false() {
+        let im = two_programs();
+        let mut sector = [0; SECTOR_WORDS];
+        let mut out = [Some((9, 9)), Some((9, 9))];
+        assert!(find_in_root_from_base(
+            MEMBER_BASE,
+            &mut sector,
+            member_read(&im, MEMBER_BASE, &mut Vec::new()),
+            &["OWN.BIN", "NOPE.XA"],
+            &mut out
+        ));
+        // OWN.BIN is only in the member's own root, so the host does not have it either.
+        assert_eq!(out, [None, None]);
+        assert!(!find_in_root_from_base(
+            MEMBER_BASE,
+            &mut sector,
+            |_, _| false,
+            &["PIANO1.XA"],
+            &mut out
+        ));
+        assert_eq!(out, [None, None]);
+    }
+
+    #[test]
+    fn a_name_in_both_roots_is_the_hosts_file_for_the_host_lookup_and_the_members_otherwise() {
+        let im = two_programs();
+        let mut sector = [0; SECTOR_WORDS];
+        let mut log = Vec::new();
+        let (mut own, mut host) = ([None], [None]);
+        assert!(find_in_root(
+            &mut sector,
+            member_read(&im, MEMBER_BASE, &mut log),
+            &["SHARED.BIN"],
+            &mut own
+        ));
+        assert_eq!(own, [Some((30, 2048))]);
+        assert!(find_in_root_from_base(
+            MEMBER_BASE,
+            &mut sector,
+            member_read(&im, MEMBER_BASE, &mut log),
+            &["SHARED.BIN"],
+            &mut host
+        ));
+        let (lba, _) = host[0].expect("on the host disc");
+        let mut read = member_read(&im, MEMBER_BASE, &mut log);
+        assert!(read(lba, &mut sector));
+        assert_eq!(
+            as_bytes(&sector)[0],
+            0xb2,
+            "the host's SHARED.BIN at absolute 45"
+        );
+        assert!(read(30, &mut sector));
+        assert_eq!(
+            as_bytes(&sector)[0],
+            0xc3,
+            "the member's own at absolute 94"
+        );
     }
 
     #[test]
