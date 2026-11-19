@@ -287,6 +287,9 @@ fn hblanks() -> u32 {
 #[inline(never)]
 fn play_tail(font: &FontAtlas, label: &str) {
     ui::live_line(font, 8, label, (255, 220, 80));
+    // The area reset (`run::silence_spu`) leaves the main volume at 0: without
+    // this the voice plays into silence (v2.24 on the console, 2026-11-19).
+    psx_spu::set_main_volume(Volume::MAX, Volume::MAX);
     let voice = Voice::V0;
     voice.configure_sample(
         SpuAddr::new(DEST + BANK_BYTES - TONE.0.len() as u32),
@@ -302,6 +305,7 @@ fn play_tail(font: &FontAtlas, label: &str) {
     }
     Voice::release(voice.mask());
     voice.set_volume(Volume::SILENCE, Volume::SILENCE);
+    psx_spu::set_main_volume(Volume::SILENCE, Volume::SILENCE);
     ui::live_line(font, 8, "", (255, 220, 80));
 }
 
