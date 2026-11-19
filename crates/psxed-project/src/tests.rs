@@ -1119,6 +1119,7 @@ fn default_project_instantiates_the_single_animated_heavy_enemy() {
     };
     // Idle, four-direction locomotion, light/heavy/ranged attacks, hit, stun and death ship (the
     // set may bind more: the live default project adds knockdown, intro, turn and dashes).
+    let bound_clips = animation_set.clips.len();
     for action in [
         CharacterAnimationAction::Idle,
         CharacterAnimationAction::Walk,
@@ -1189,8 +1190,7 @@ fn default_project_instantiates_the_single_animated_heavy_enemy() {
     crate::grid::starter::attach_starter_world(&mut project);
     // The heap guard refuses the default project (a known gap, see
     // the_cook_warns_once_per_missing_verb_of_a_kit_a_character_has); this checks what it cooks.
-    let (package, report) =
-        playtest::build_package_ignoring_ram(&project, &default_project_dir());
+    let (package, report) = playtest::build_package_ignoring_ram(&project, &default_project_dir());
     assert!(
         report.is_ok(),
         "default project with the animated Heavy Enemy must cook: {:?}",
@@ -1198,8 +1198,11 @@ fn default_project_instantiates_the_single_animated_heavy_enemy() {
     );
     let package = package.expect("default project produces a playtest package");
     assert!(
-        package.models.iter().any(|cooked| cooked.clip_count == 13),
-        "the cooked Heavy Enemy model carries all thirteen selected clips"
+        package
+            .models
+            .iter()
+            .any(|cooked| usize::from(cooked.clip_count) == bound_clips),
+        "the cooked Heavy Enemy model carries every clip its set binds ({bound_clips})"
     );
     assert!(
         package.game_entities.iter().any(|entity| {
