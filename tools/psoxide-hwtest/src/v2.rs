@@ -679,6 +679,13 @@ fn build() -> BTreeMap<u32, V2Entry> {
             ["words_after_wait_high", "chcr_after_stop_high_half", "unused"],
         );
     }
+    // v2.21: SPU bulk upload (engine/examples/hardware-tests/src/spu_bulk.rs).
+    b.put(0x9B0, "spu_bulk_rate", ["clocks_1024_halfwords", "polls", "halfwords"]);
+    b.put(0x9B1, "spu_bulk_one_dma", ["hblanks", "polls_low", "polls_high"]);
+    b.put(0x9B2, "spu_bulk_one_dma_check", ["first_bad_kb", "matching_kb", "sent_kb"]);
+    b.put(0x9B3, "spu_bulk_sdk_upload", ["hblanks", "timed_out", "landed_kb"]);
+    b.put(0x9B4, "spu_bulk_sdk_upload_check", ["first_bad_kb", "matching_kb", "sent_kb"]);
+    b.put(0x9B5, "spu_bulk_source", ["changed", "hash_low", "unused"]);
     // v2.20: the XA clock case's raw records, fields that cannot clamp.
     for (k, mark) in ["60", "120", "180"].iter().enumerate() {
         b.put(

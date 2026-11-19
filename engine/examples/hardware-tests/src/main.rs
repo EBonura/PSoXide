@@ -90,6 +90,7 @@ mod run;
 mod sample_probe;
 mod scene;
 mod sio_timing;
+mod spu_bulk;
 mod spu_probe;
 mod tick_loss;
 mod timer1_rate;
@@ -231,9 +232,9 @@ unsafe extern "C" {
 //
 // History, one entry per version: docs/hardware-test-versions.md.
 const SUITE_VERSION_MAJOR: u8 = 2;
-const SUITE_VERSION_MINOR: u8 = 20;
+const SUITE_VERSION_MINOR: u8 = 21;
 /// Display form. Keep in step with the two constants above.
-const SUITE_VERSION: &str = "HWTEST v2.20";
+const SUITE_VERSION: &str = "HWTEST v2.21";
 /// `CDTEST.BIN`: the deterministic read region the CD probes use, placed so it
 /// ends at LBA 1024. The console-diag build's stop panel pushes the boot EXE
 /// past the 541 sectors the plain layout allows, so that build gives the
