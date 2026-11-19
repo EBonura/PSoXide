@@ -4026,7 +4026,7 @@ mod tests {
     pub(super) const BODY_TACTICAL: u16 = 1;
     // Index 2 was the hybrid body of the retired distance-only controller tests.
     pub(super) const BODY_SMALL: u16 = 3;
-    pub(super) const BODY_NO_KNOCKDOWN: u16 = 4;
+    // Index 4 is the knockdown-off body; no test record links it now.
     pub(super) const BODY_SHORT_SWAP: u16 = 5;
     pub(super) const BODY_SUB_UNIT: u16 = 6;
     pub(super) const BODY_SLOW_STUN: u16 = 7;
