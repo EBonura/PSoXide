@@ -998,9 +998,6 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
     /// How `body` plays `reaction`, `phase_ticks` in, the player's rule: the
     /// action it shows ([`Reaction::shown`]) on that action's clip, authored
     /// speed and range. None when it binds nothing in the verb's chain.
-    // Read only while a fighter reacts: out of line and small.
-    #[inline(never)]
-    #[cfg_attr(target_arch = "mips", optimize(size))]
     fn reaction_clip(
         body: &LevelCharacterRecord,
         reaction: Reaction,
