@@ -680,12 +680,39 @@ fn build() -> BTreeMap<u32, V2Entry> {
         );
     }
     // v2.21: SPU bulk upload (engine/examples/hardware-tests/src/spu_bulk.rs).
-    b.put(0x9B0, "spu_bulk_rate", ["clocks_1024_halfwords", "polls", "halfwords"]);
-    b.put(0x9B1, "spu_bulk_one_dma", ["hblanks", "polls_low", "polls_high"]);
-    b.put(0x9B2, "spu_bulk_one_dma_check", ["first_bad_kb", "matching_kb", "sent_kb"]);
-    b.put(0x9B3, "spu_bulk_sdk_upload", ["hblanks", "timed_out", "landed_kb"]);
-    b.put(0x9B4, "spu_bulk_sdk_upload_check", ["first_bad_kb", "matching_kb", "sent_kb"]);
-    b.put(0x9B5, "spu_bulk_source", ["changed", "hash_low", "unused"]);
+    b.put(0x9B0, "spu_bulk_rate_512", ["clocks", "polls", "halfwords"]);
+    b.put(0x9B1, "spu_bulk_old_path", ["landed_bytes_low", "landed_bytes_high", "flags"]);
+    b.put(0x9B2, "spu_bulk_old_path_check", ["hblanks", "matching_kb", "cleared_kb"]);
+    b.put(0x9B3, "spu_bulk_new_path", ["landed_bytes_low", "landed_bytes_high", "flags"]);
+    b.put(0x9B4, "spu_bulk_new_path_check", ["hblanks", "matching_kb", "cleared_kb"]);
+    b.put(0x9B5, "spu_bulk_rate_bank", ["hblanks", "polls_low", "polls_high"]);
+    b.put(0x9B6, "spu_bulk_abort", ["read_16b_at_abort", "read_16b_after_wait", "flags"]);
+    b.put(0x9B7, "spu_bulk_abort_check", ["landed_16b", "bcr_blocks_at_abort", "bcr_blocks_after"]);
+    b.put(0x9B8, "spu_bulk_source", ["changed", "hash_low", "window_fits"]);
+    // v2.21: 480i field sequence (engine/examples/hardware-tests/src/field_rule.rs run_sequence).
+    for k in 0..8u32 {
+        b.put(0x9D0 + k, format!("field_seq_blank_{k}"), ["row_mask", "bit31_at_and_after", "field_number"]);
+        b.put(0x9D8 + k, format!("field_seq_active_{k}"), ["row_mask", "bit31_at_and_after", "field_number"]);
+    }
+    b.put(0x9E0, "field_seq_redraw_hblanks", ["min", "median", "max"]);
+    b.put(0x9E1, "field_seq_answers", ["answer_bits", "blank_odd_skipped", "active_odd_skipped"]);
+    // v2.21: CD read after idle (engine/examples/hardware-tests/src/cd_idle.rs).
+    for (case, tag) in ["pause_5s", "pause_10s", "pause_15s", "pause_30s", "stop_5s"]
+        .iter()
+        .enumerate()
+    {
+        b.put(
+            0x9C0 + 2 * case as u32,
+            format!("cd_idle_{tag}"),
+            ["hblanks_low", "hblanks_high", "outcome"],
+        );
+        b.put(
+            0x9C1 + 2 * case as u32,
+            format!("cd_idle_{tag}_spins"),
+            ["spins_low", "spins_high", "retry_hblanks"],
+        );
+    }
+    b.put(0x9CA, "cd_idle_bound", ["tenth_clocks_per_spin", "data_poll_ms", "flags"]);
     // v2.20: the XA clock case's raw records, fields that cannot clamp.
     for (k, mark) in ["60", "120", "180"].iter().enumerate() {
         b.put(

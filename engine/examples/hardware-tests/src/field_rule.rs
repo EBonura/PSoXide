@@ -454,3 +454,159 @@ pub(crate) fn run(records: &mut Records, next: &mut usize) {
     }
     restore_display();
 }
+
+/// First record of `480I FIELD SEQUENCE`.
+pub(crate) const FIELD_SEQUENCE_RECORD: u16 = 0x9D0;
+/// Consecutive fields each sequence covers.
+const SEQUENCE_FIELDS: u32 = 8;
+/// Scratch rows of the two sequences, eight 64 x 16 areas side by side.
+const BLANK_ROW: u32 = 256;
+const ACTIVE_ROW: u32 = 288;
+
+/// `480I FIELD SEQUENCE` (v2.21, records `0x9D0`-`0x9E1`): the questions a 480i
+/// game drawing one pass a field with E1 bit 10 clear needs answered, over
+/// consecutive fields so an alternation cannot hide.
+///
+/// * `0x9D0 + k` (k 0 to 7): a fill issued at once after the VBlank edge (in
+///   vertical blank) of eight consecutive fields, each into its own cleared
+///   scratch area: row mask, GPUSTAT bit 31 at issue (bit 0) and after the
+///   drain (bit 1), the field's number counted from the first (VBlanks).
+/// * `0x9D8 + k`: the same, issued about 3 ms into the active picture.
+/// * `0x9E0`: a 320 x 480 redraw of 40 textured 64 x 64 rectangles (15bpp,
+///   raw) with E1 bit 10 clear, eight times: HBlanks from the first word to the
+///   drain, min, median, max (times 63.6 for microseconds).
+/// * `0x9E1`: the answers as bits (bit 0 the blank fill's parity alternates,
+///   bit 1 it is constant, bit 2 the active fill always skips the rows whose
+///   parity is bit 31 at issue, bit 3 bit 31 alternates field to field in the
+///   active picture, bit 4 the redraw median is under 15 ms), the blank fills'
+///   skipped-parity pattern (bit k: field k skipped odd rows), the active fills'.
+///
+/// A mask of 0xAAAA is the even rows skipped, 0x5555 the odd ones, 0xFFFF none.
+pub(crate) fn run_sequence(font: &psx_font::FontAtlas, records: &mut Records, next: &mut usize) {
+    crate::bounds::record_start(FIELD_SEQUENCE_RECORD);
+    prepare_sources();
+    show_mode(0, 0);
+    v24::environment(0);
+    for row in [BLANK_ROW, ACTIVE_ROW] {
+        for k in 0..SEQUENCE_FIELDS {
+            let _ = clear_scratch((k * SCRATCH_W, row));
+        }
+    }
+    let mut blank = [(0u32, 0u32, 0u32); SEQUENCE_FIELDS as usize];
+    let mut active = [(0u32, 0u32, 0u32); SEQUENCE_FIELDS as usize];
+    let _ = v24::frame();
+    let first = psx_rt::interrupts::vblank_count();
+    for (k, slot) in blank.iter_mut().enumerate() {
+        let _ = v24::frame();
+        let s1 = v24::field();
+        v24::send(&[0x02FF_FFFF, xy(k as u32 * SCRATCH_W, BLANK_ROW), xy(SCRATCH_W, SCRATCH_H)]);
+        let _ = v24::drain();
+        *slot = (s1, v24::field(), psx_rt::interrupts::vblank_count().wrapping_sub(first));
+    }
+    let _ = v24::frame();
+    let first = psx_rt::interrupts::vblank_count();
+    for (k, slot) in active.iter_mut().enumerate() {
+        let _ = v24::frame();
+        v24::spin_cycles(SETTLE_CYCLES);
+        let s1 = v24::field();
+        v24::send(&[0x02FF_FFFF, xy(k as u32 * SCRATCH_W, ACTIVE_ROW), xy(SCRATCH_W, SCRATCH_H)]);
+        let _ = v24::drain();
+        *slot = (s1, v24::field(), psx_rt::interrupts::vblank_count().wrapping_sub(first));
+    }
+
+    // The masks now: the redraw below covers the scratch areas.
+    let mut blank_masks = [0u32; SEQUENCE_FIELDS as usize];
+    let mut active_masks = [0u32; SEQUENCE_FIELDS as usize];
+    for k in 0..SEQUENCE_FIELDS as usize {
+        blank_masks[k] = row_mask((k as u32 * SCRATCH_W, BLANK_ROW)).unwrap_or(0xFFFF);
+        active_masks[k] = row_mask((k as u32 * SCRATCH_W, ACTIVE_ROW)).unwrap_or(0xFFFF);
+    }
+
+    // The redraw: 40 textured rectangles over 320 x 480, rule on (bit 10 clear).
+    let mut times = [0u32; 8];
+    for time in times.iter_mut() {
+        let _ = v24::frame();
+        v24::environment(TEXPAGE_15BPP);
+        timers::set_mode(Timer::Timer1, 0x0100);
+        timers::set_counter(Timer::Timer1, 0);
+        for ty in 0..8u32 {
+            for tx in 0..5u32 {
+                gpu_io::wait_command_ready();
+                v24::send(&[0x6580_8080, xy(tx * 64, ty * 64), 0, xy(64, 64)]);
+            }
+        }
+        let _ = v24::drain();
+        *time = timers::counter(Timer::Timer1) as u32;
+    }
+    v24::environment(0);
+    let mut sorted = times;
+    sorted.sort_unstable();
+    let (low, median, high) = (sorted[0], sorted[4], sorted[7]);
+
+    let mut blank_odd = 0u32;
+    let mut active_odd = 0u32;
+    let mut active_follows = true;
+    let mut active_field_alternates = true;
+    for k in 0..SEQUENCE_FIELDS as usize {
+        let mask = blank_masks[k];
+        if mask == 0x5555 {
+            blank_odd |= 1 << k;
+        }
+        push_timing_record(
+            records,
+            next,
+            record(FIELD_SEQUENCE_RECORD + k as u16, mask, blank[k].0 | (blank[k].1 << 1), blank[k].2),
+        );
+    }
+    for k in 0..SEQUENCE_FIELDS as usize {
+        let mask = active_masks[k];
+        if mask == 0x5555 {
+            active_odd |= 1 << k;
+        }
+        let skipped_parity_is_field = (mask == 0x5555 && active[k].0 == 1) || (mask == 0xAAAA && active[k].0 == 0);
+        active_follows &= skipped_parity_is_field;
+        if k > 0 && active[k].0 == active[k - 1].0 {
+            active_field_alternates = false;
+        }
+        push_timing_record(
+            records,
+            next,
+            record(FIELD_SEQUENCE_RECORD + 8 + k as u16, mask, active[k].0 | (active[k].1 << 1), active[k].2),
+        );
+    }
+    // Even-skipped fills not counted as odd: a field that skipped nothing or
+    // everything breaks both patterns.
+    let blank_masks_ok = blank_masks.iter().all(|&m| m == 0x5555 || m == 0xAAAA);
+    let alternates = blank_masks_ok && (blank_odd == 0x55 || blank_odd == 0xAA);
+    let constant = blank_masks_ok && (blank_odd == 0 || blank_odd == 0xFF);
+    // 15 ms in HBlanks (63.56 us each): 236.
+    let under = median < 236;
+    let answers = u32::from(alternates)
+        | (u32::from(constant) << 1)
+        | (u32::from(active_follows) << 2)
+        | (u32::from(active_field_alternates) << 3)
+        | (u32::from(under) << 4);
+    push_timing_record(records, next, record(FIELD_SEQUENCE_RECORD + 16, low, median, high));
+    push_timing_record(records, next, record(FIELD_SEQUENCE_RECORD + 17, answers, blank_odd, active_odd));
+    restore_display();
+    // The redraw covered the run's screen.
+    crate::ui::repaint(font);
+
+    use crate::ui::{live_line, Line};
+    let mut line = Line::new();
+    line.s("BLANK FILL PARITY: ").s(if alternates {
+        "ALTERNATES"
+    } else if constant {
+        if blank_odd == 0 { "CONSTANT, EVEN SKIPPED" } else { "CONSTANT, ODD SKIPPED" }
+    } else {
+        "NEITHER"
+    });
+    live_line(font, 0, line.as_str(), (255, 220, 80));
+    let mut line = Line::new();
+    line.s("ACTIVE FILL SKIPS FIELD ON SHOW: ").s(if active_follows { "YES" } else { "NO" });
+    live_line(font, 1, line.as_str(), (255, 220, 80));
+    let mut line = Line::new();
+    line.s("320X480 TEXTURED REDRAW: ").u(median * 636 / 10_000).s(".").u(median * 636 / 1_000 % 10);
+    line.s(" MS ").s(if under { "(UNDER 15 MS)" } else { "(NOT UNDER 15 MS)" });
+    live_line(font, 2, line.as_str(), (255, 220, 80));
+}

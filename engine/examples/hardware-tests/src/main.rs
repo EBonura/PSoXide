@@ -50,6 +50,7 @@ mod boot;
 mod bounds;
 mod card_proto;
 mod cd_chain_probe;
+mod cd_idle;
 mod cd_pause;
 mod cd_route;
 mod cdstream_cases;
