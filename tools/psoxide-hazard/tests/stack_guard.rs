@@ -1487,6 +1487,38 @@ fn an_argument_the_compiler_removed_leaves_the_handler_in_the_registrar() {
 }
 
 #[test]
+fn an_argument_written_in_a_call_delay_slot_is_not_read() {
+    // The specialised `attach` of a real link: it stores the handler itself, then calls on
+    // with a1 written in the call's delay slot. The caller's a1 is stale (here 1) and must not
+    // be taken for a handler.
+    let mut d = Dispatcher::new(512);
+    let handler = d.handler(6, "t::on_cd", 200);
+    let link = d.fx.leaf(8, "t::link", 8);
+    d.fx.function(
+        3,
+        ATTACH,
+        &[
+            lui("v0", hi(handler)),
+            addiu("v0", "v0", lo(handler)),
+            sw("v0", 20, "t0"),
+            addiu("a0", "zero", 4),
+            jal(link),
+            addiu("a1", "zero", 0),
+            jr("ra"),
+            NOP,
+        ],
+    );
+    main_calling(&mut d, vec![addiu("a1", "zero", 1), jal(ATTACH_AT), NOP]);
+    let (status, out) = d.guard(&[]);
+    assert_eq!(status, 0, "{out}");
+    assert!(
+        out.contains("ok   dispatcher handler t::on_cd: 200 of 400 bytes")
+            && !out.contains("00000001"),
+        "{out}"
+    );
+}
+
+#[test]
 fn a_handler_read_from_memory_needs_the_proof_only_on_a_shrunk_stack() {
     let table = |stack| {
         let mut d = Dispatcher::new(stack);
