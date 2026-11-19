@@ -436,7 +436,7 @@ fn scrub_spu_ram(run: &mut Run) {
         let bytes = (next.min(SPU_RAM_END) - addr) as usize;
         // SAFETY: the zero buffer is a static array of at least `bytes` bytes.
         let slice = unsafe { core::slice::from_raw_parts(zeros.as_ptr() as *const u8, bytes) };
-        let _ = psx_spu::upload_adpcm(SpuAddr::new(addr), slice);
+        crate::probe_upload(SpuAddr::new(addr), slice);
         addr = next;
     }
     crate::bounds::record_start(SPU_RAM_POSTSCRUB);

@@ -37,6 +37,16 @@ use psx_rt::tty;
 use psx_spu::SpuAddr;
 use psx_vram::{Clut, TextureDepth, TexturePage};
 
+/// Upload for a probe. Every row that uploads checks what landed itself (a readback, a hash, a
+/// capture or a tone it listens for), so a `TransferTimeout`, which leaves the tail of the bytes
+/// out of SPU RAM, shows as that row failing: what the suite exists to report. The `Result` is
+/// therefore dropped here, in one place, and not at each probe. Always inlined, so the machine
+/// code is what the probes had before.
+#[inline(always)]
+pub(crate) fn probe_upload(dest: SpuAddr, bytes: &[u8]) {
+    let _ = psx_spu::upload_adpcm(dest, bytes);
+}
+
 /// Binds `$gpu` to the GPU driver for a probe that draws or programs the
 /// display from inside a test, over a token taken the way [`probe_gpu_dma`]
 /// takes it. Declared before the modules so each of them can use it.
@@ -4864,7 +4874,7 @@ fn test_spu_dma_and_fifo_agree() -> TestResult {
     use psx_hw::spu::{SPUCNT, SPUSTAT, TRANSFER_ADDR, TRANSFER_CTRL, TRANSFER_DATA};
     let src = spu_probe_pattern();
     let bytes = unsafe { core::slice::from_raw_parts(src.as_ptr() as *const u8, 64) };
-    let _ = psx_spu::upload_adpcm(SpuAddr::new(0x3800), bytes);
+    crate::probe_upload(SpuAddr::new(0x3800), bytes);
 
     // The same 64 bytes again, by hand through the FIFO, at 0x3C00.
     let halfwords = unsafe { core::slice::from_raw_parts(src.as_ptr() as *const u16, 32) };
@@ -5849,7 +5859,7 @@ fn test_spu_ram_dma_roundtrip() -> TestResult {
     }
     let dest: u32 = 0x3000; // clear of the 0x000-0xFFF capture buffers
     let bytes = unsafe { core::slice::from_raw_parts(src.as_ptr() as *const u8, 64) };
-    let _ = psx_spu::upload_adpcm(SpuAddr::new(dest), bytes);
+    crate::probe_upload(SpuAddr::new(dest), bytes);
     let mut back = [0u32; 16];
     spu_dma_read(dest, &mut back);
     expect_eq(fnv32_words(&src), fnv32_words(&back), "spu dma upload")
@@ -6034,7 +6044,7 @@ fn precision_spu(values: &mut [u32; PRECISION_VALUE_COUNT], next: &mut usize) {
     }
     let dest = 0x3800;
     let bytes = unsafe { core::slice::from_raw_parts(src.as_ptr() as *const u8, 64) };
-    let _ = psx_spu::upload_adpcm(SpuAddr::new(dest), bytes);
+    crate::probe_upload(SpuAddr::new(dest), bytes);
 
     let mut boot_single = [0u32; 16];
     let boot_single_waits = spu_dma_read_shape(dest, &mut boot_single, 16);

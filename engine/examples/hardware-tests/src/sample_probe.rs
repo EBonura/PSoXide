@@ -302,7 +302,7 @@ impl SampleProbe {
         self.beep_audit = FlagAudit::of(beep_bytes);
 
         self.beep_addr = SPU_SAMPLE_BASE;
-        let _ = spu::upload_adpcm(SpuAddr::new(self.beep_addr), beep_bytes);
+        crate::probe_upload(SpuAddr::new(self.beep_addr), beep_bytes);
 
         // Read the beep back out of SPU RAM: a mismatch here would blame
         // the upload rather than the flags, so it has to be on record.

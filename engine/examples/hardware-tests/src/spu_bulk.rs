@@ -147,8 +147,7 @@ fn clear_bank() {
     // SAFETY: viewing the static zero words as bytes.
     let bytes = unsafe { core::slice::from_raw_parts(ZEROS.as_ptr().cast::<u8>(), 1024) };
     for kb in 0..CLEAR_KB {
-        #[allow(deprecated)]
-        let _ = psx_spu::upload_adpcm(SpuAddr::new(DEST + kb * 1024), bytes);
+        crate::probe_upload(SpuAddr::new(DEST + kb * 1024), bytes);
     }
     crate::bounds::heartbeat();
 }

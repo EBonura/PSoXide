@@ -125,7 +125,7 @@ impl HandoffProbe {
     fn apply_stage(&mut self) -> bool {
         let blocking = match self.stage {
             0 => {
-                let _ = spu::upload_adpcm(SpuAddr::new(CALIBRATION_ADDR), &CALIBRATION_TONE);
+                crate::probe_upload(SpuAddr::new(CALIBRATION_ADDR), &CALIBRATION_TONE);
                 Voice::V0.set_volume(Volume::linear(1, 8), Volume::linear(1, 8));
                 Voice::V0.set_pitch(Pitch::UNITY);
                 Voice::V0.set_start_addr(SpuAddr::new(CALIBRATION_ADDR));
@@ -299,7 +299,7 @@ impl HandoffProbe {
             if pattern == Pattern::MapFixture && index == 0 {
                 self.expected_hash = fnv16_bytes(&bytes[..READBACK_BYTES]);
             }
-            let _ = spu::upload_adpcm(SpuAddr::new(next), bytes);
+            crate::probe_upload(SpuAddr::new(next), bytes);
             next += len as u32;
         }
         next
