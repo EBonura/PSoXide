@@ -2,9 +2,9 @@
 use psx_chainloader::{LoadedExe, Memory, Observer, Reader, SECTOR_WORDS};
 const SECTOR_BYTES: u32 = (SECTOR_WORDS * 4) as u32;
 
-/// Spins granted to one SeekL completion: covers the measured worst-case
-/// mech travel (~310 ms) with margin, far short of a hang.
-const SEEK_POLL: u32 = 4_000_000;
+/// The seek bound, adapted at the reader boundary: the reader's waits are a
+/// time now (`psx_io::cd::wait`), not a spin count.
+const SEEK_POLL: psx_io::cd::wait::WaitTime = psx_io::cd::wait::FIRST_SECTOR_WAIT;
 
 // PSX-EXE header word offsets (see `psoxide.ld`).
 const HDR_PC0: usize = 0x10 / 4;

@@ -4,6 +4,7 @@ mod legacy;
 use psx_chainloader::{
     check_payload, Conflict, LoadedExe, Memory, Observer, Reader, Span, RAM_END, SECTOR_WORDS,
 };
+use psx_io::cd::wait::WaitTime;
 use std::{cell::RefCell, rc::Rc};
 
 type Trace = Rc<RefCell<Vec<String>>>;
@@ -36,8 +37,8 @@ impl Reader for Cd {
         self.trace.borrow_mut().push("prepare".into());
         !matches!(self.fault, Fault::Prepare)
     }
-    unsafe fn start_read_seek_first(&mut self, lba: u32, limit: u32) -> bool {
-        assert_eq!(limit, 4_000_000);
+    unsafe fn start_read_seek_first(&mut self, lba: u32, limit: WaitTime) -> bool {
+        assert_eq!(limit, psx_io::cd::wait::FIRST_SECTOR_WAIT);
         self.trace.borrow_mut().push(format!("seek:{lba}"));
         self.starts += 1;
         self.at = lba;
@@ -293,13 +294,13 @@ impl Reader for Idling {
     unsafe fn prepare(&mut self) -> bool {
         unsafe { self.0.prepare() }
     }
-    unsafe fn start_read_seek_first(&mut self, lba: u32, limit: u32) -> bool {
+    unsafe fn start_read_seek_first(&mut self, lba: u32, limit: WaitTime) -> bool {
         unsafe { self.0.start_read_seek_first(lba, limit) }
     }
     unsafe fn start_read_seek_first_idle(
         &mut self,
         lba: u32,
-        limit: u32,
+        limit: WaitTime,
         idle: &mut dyn FnMut(),
     ) -> bool {
         for _ in 0..3 {
