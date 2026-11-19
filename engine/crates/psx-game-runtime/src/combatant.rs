@@ -377,6 +377,17 @@ impl Reaction {
             verb
         }
     }
+
+    /// [`Self::shown`] for a Character whose action clip slots are `clips`
+    /// (the player's and every entity's body hold the same table).
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
+    pub fn shown_by(
+        self,
+        clips: &[psx_level::OptionalModelClipIndex; psx_level::CHARACTER_ANIMATION_ACTION_COUNT],
+    ) -> psx_level::CharacterAnimationAction {
+        self.shown(|action| clips[action.to_index()].is_some())
+    }
 }
 
 /// The defender's side of one hit apart from its numbers: armour now, the

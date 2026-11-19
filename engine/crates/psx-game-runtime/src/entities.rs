@@ -974,14 +974,25 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         let count = self.count().min(records.len());
         for (index, record) in records.iter().enumerate().take(count) {
             let body = self.body(record);
-            let mut time = |reaction: Reaction| {
-                let (_, clip) = Self::reaction_clip(body, reaction, 0)?;
-                length(record, reaction, &clip)
-            };
-            self.flinch_ticks[index] = time(Reaction::Flinch).unwrap_or(0);
+            self.flinch_ticks[index] =
+                Self::reaction_ticks(body, record, Reaction::Flinch, &mut length).unwrap_or(0);
             self.stagger_ticks[index] =
-                time(Reaction::Stagger).unwrap_or(GAME_ENTITY_STAGGER_TICKS);
+                Self::reaction_ticks(body, record, Reaction::Stagger, &mut length)
+                    .unwrap_or(GAME_ENTITY_STAGGER_TICKS);
         }
+    }
+
+    /// [`Self::time_reactions`] for one reaction (one copy of the caller's
+    /// clip reader).
+    #[inline(never)]
+    fn reaction_ticks(
+        body: &LevelCharacterRecord,
+        record: &LevelGameEntityRecord,
+        reaction: Reaction,
+        length: &mut impl FnMut(&LevelGameEntityRecord, Reaction, &GameEntityClip) -> Option<u16>,
+    ) -> Option<u16> {
+        let (_, clip) = Self::reaction_clip(body, reaction, 0)?;
+        length(record, reaction, &clip)
     }
 
     /// How `body` plays `reaction`, `phase_ticks` in, the player's rule: the
@@ -995,7 +1006,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         reaction: Reaction,
         phase_ticks: u16,
     ) -> Option<(CharacterAnimationAction, GameEntityClip)> {
-        let action = reaction.shown(|action| body.action_clips[action.to_index()].is_some());
+        let action = reaction.shown_by(&body.action_clips);
         let index = action.to_index();
         let clip = body.action_clips[index].to_option()?;
         Some((

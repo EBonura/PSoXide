@@ -1652,8 +1652,11 @@ impl Playtest {
     #[cfg_attr(target_arch = "mips", optimize(size))]
     fn player_reaction_anim(&self, reaction: Reaction) -> PlayerAnim {
         use psx_level::CharacterAnimationAction as Action;
-        let character = self.character.as_ref();
-        match reaction.shown(|action| character.is_some_and(|c| c.supports_action(action))) {
+        let shown = match self.character.as_ref() {
+            Some(character) => reaction.shown_by(&character.action_clips),
+            None => reaction.shown(|_| false),
+        };
+        match shown {
             Action::Stun => PlayerAnim::Stun,
             Action::Parried => PlayerAnim::Parried,
             Action::Knockdown => PlayerAnim::Knockdown,
