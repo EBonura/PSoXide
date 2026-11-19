@@ -468,7 +468,7 @@ const SEQUENCE_FIELDS: u32 = 8;
 const BLANK_ROW: u32 = 256;
 const ACTIVE_ROW: u32 = 288;
 
-/// `480I FIELD SEQUENCE` (v2.21, records `0x9D0`-`0x9E1`): the questions a 480i
+/// `480I FIELD SEQUENCE` (v2.24, records `0x9D0`-`0x9E1`): the questions a 480i
 /// game drawing one pass a field with E1 bit 10 clear needs answered, over
 /// consecutive fields so an alternation cannot hide.
 ///
