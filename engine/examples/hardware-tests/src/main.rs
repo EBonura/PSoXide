@@ -17,6 +17,7 @@
 // engine and the game crates do not get this allowance.
 #![allow(deprecated)]
 #![cfg_attr(target_arch = "mips", feature(asm_experimental_arch))]
+#![feature(optimize_attribute)]
 
 extern crate psx_rt;
 

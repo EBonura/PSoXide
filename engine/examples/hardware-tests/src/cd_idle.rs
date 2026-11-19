@@ -56,6 +56,8 @@ static mut LINES: u32 = 0;
 static mut LAST: u16 = 0;
 
 /// The reader's idle hook: one spin, and Timer 1 widened to 32 bits.
+#[optimize(size)]
+#[inline(never)]
 fn count_spin() {
     let now = timers::counter(Timer::Timer1);
     // SAFETY: single thread; only this hook and `begin`/`lines` touch these.
@@ -66,6 +68,8 @@ fn count_spin() {
     }
 }
 
+#[optimize(size)]
+#[inline(never)]
 fn begin() {
     timers::set_mode(Timer::Timer1, HBLANK_CLOCK);
     timers::set_counter(Timer::Timer1, 0);
@@ -78,6 +82,8 @@ fn begin() {
 }
 
 /// HBlanks and spins since [`begin`], the time up to now included.
+#[optimize(size)]
+#[inline(never)]
 fn taken() -> (u32, u32) {
     count_spin();
     // SAFETY: as `count_spin`.
@@ -85,6 +91,8 @@ fn taken() -> (u32, u32) {
 }
 
 /// Wait `seconds` on Timer 1, servicing nothing: the drive is left alone.
+#[optimize(size)]
+#[inline(never)]
 fn idle(seconds: u32) {
     begin();
     let mut guard = 0u32;
@@ -94,6 +102,8 @@ fn idle(seconds: u32) {
 }
 
 /// One timed read: its HBlanks, spins, outcome and the retry's HBlanks.
+#[optimize(size)]
+#[inline(never)]
 fn timed_read(reader: &mut SectorReader, buffer: &mut [u32; SECTOR_WORDS]) -> (u32, u32, u32, u32) {
     begin();
     let ok = reader.read_at(READ_LBA, buffer);
@@ -108,6 +118,8 @@ fn timed_read(reader: &mut SectorReader, buffer: &mut [u32; SECTOR_WORDS]) -> (u
     (lines, spins, 1 | (u32::from(retry) << 1) | (cause << 8), retry_lines.min(0xFFFF))
 }
 
+#[optimize(size)]
+#[inline(never)]
 fn show(font: &FontAtlas, row: u32, name: &str, lines: u32, outcome: u32, bound_ms: u32) {
     let mut line = Line::new();
     line.s(name)
@@ -125,6 +137,8 @@ fn show(font: &FontAtlas, row: u32, name: &str, lines: u32, outcome: u32, bound_
     ui::live_line(font, row, line.as_str(), colour);
 }
 
+#[optimize(size)]
+#[inline(never)]
 pub(crate) fn run(font: &FontAtlas, records: &mut Records, next: &mut usize) {
     crate::bounds::record_start(FIRST_RECORD);
     // The polled reader owns the drive here: no transport is installed between the

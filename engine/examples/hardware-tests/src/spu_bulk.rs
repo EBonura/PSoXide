@@ -115,6 +115,8 @@ static ZEROS: [u32; 256] = [0; 256];
 
 /// The bank's window of the program image, ending with [`TONE`]. `None` when
 /// the tone sits too low in the image for a whole bank before it.
+#[optimize(size)]
+#[inline(never)]
 fn bank() -> Option<&'static [u32]> {
     let end = TONE.0.as_ptr() as u32 + TONE.0.len() as u32;
     let start = end.checked_sub(BANK_BYTES)?;
@@ -127,6 +129,8 @@ fn bank() -> Option<&'static [u32]> {
     Some(unsafe { core::slice::from_raw_parts(start as *const u32, BANK_WORDS as usize) })
 }
 
+#[optimize(size)]
+#[inline(never)]
 fn fnv_words(words: &[u32]) -> u32 {
     let mut hash = 0x811C_9DC5u32;
     for &word in words {
@@ -137,6 +141,8 @@ fn fnv_words(words: &[u32]) -> u32 {
 }
 
 /// Zero the bank's range of SPU RAM, a kilobyte at a time.
+#[optimize(size)]
+#[inline(never)]
 fn clear_bank() {
     // SAFETY: viewing the static zero words as bytes.
     let bytes = unsafe { core::slice::from_raw_parts(ZEROS.as_ptr().cast::<u8>(), 1024) };
@@ -149,6 +155,8 @@ fn clear_bank() {
 
 /// Compare SPU RAM with the bank: the offset of the first byte that differs
 /// (the bank's length when none does) and the whole kilobytes that match.
+#[optimize(size)]
+#[inline(never)]
 fn landed(bank: &[u32]) -> (u32, u32) {
     let mut back = [0u32; 256];
     let mut first = BANK_BYTES;
@@ -178,6 +186,8 @@ fn landed(bank: &[u32]) -> (u32, u32) {
 }
 
 /// Put the SPU in DMA-write mode at `dest` and wait for it to take the mode.
+#[optimize(size)]
+#[inline(never)]
 fn open_dma_write(dest: u32) -> u16 {
     // SAFETY: SPU register stores, the sequence psx-spu's upload makes.
     unsafe {
@@ -192,6 +202,8 @@ fn open_dma_write(dest: u32) -> u16 {
     }
 }
 
+#[optimize(size)]
+#[inline(never)]
 fn wait_mode(want: u16) {
     let mut guard = 0u32;
     // SAFETY: a status read.
@@ -201,6 +213,8 @@ fn wait_mode(want: u16) {
 }
 
 /// Let the SPU write its FIFO out, then back to Stop.
+#[optimize(size)]
+#[inline(never)]
 fn close_dma_write(stopped: u16) {
     let mut guard = 0u32;
     // SAFETY: status reads, then the mode store.
@@ -222,6 +236,8 @@ fn close_dma_write(stopped: u16) {
 ///
 /// `from` holds `blocks * block_words` readable words that nothing writes
 /// until the caller has waited the transfer out or aborted it.
+#[optimize(size)]
+#[inline(never)]
 unsafe fn kick(from: u32, block_words: u16, blocks: u16) {
     dma::enable_channel(Channel::Spu);
     // SAFETY: as this function's contract.
@@ -235,6 +251,8 @@ unsafe fn kick(from: u32, block_words: u16, blocks: u16) {
     }
 }
 
+#[optimize(size)]
+#[inline(never)]
 fn poll_until_idle(limit: u32) -> u32 {
     let mut polls = 0u32;
     while dma::is_busy(Channel::Spu) && polls < limit {
@@ -243,22 +261,30 @@ fn poll_until_idle(limit: u32) -> u32 {
     polls
 }
 
+#[optimize(size)]
+#[inline(never)]
 fn bcr_blocks() -> u32 {
     // SAFETY: a read of the SPU channel's size register.
     unsafe { psx_io::read_u32(Channel::Spu.register_base() + psx_hw::dma::BCR) >> 16 }
 }
 
+#[optimize(size)]
+#[inline(never)]
 fn start_hblanks() {
     timers::set_mode(Timer::Timer1, HBLANK_CLOCK);
     timers::set_counter(Timer::Timer1, 0);
 }
 
+#[optimize(size)]
+#[inline(never)]
 fn hblanks() -> u32 {
     timers::counter(Timer::Timer1) as u32
 }
 
 /// Key the tone where the bank's end should be, for [`TONE_FRAMES`], under a
 /// label, then silence it.
+#[optimize(size)]
+#[inline(never)]
 fn play_tail(font: &FontAtlas, label: &str) {
     ui::live_line(font, 8, label, (255, 220, 80));
     let voice = Voice::V0;
@@ -280,6 +306,8 @@ fn play_tail(font: &FontAtlas, label: &str) {
 }
 
 /// The result of a path, on the live band.
+#[optimize(size)]
+#[inline(never)]
 fn show(font: &FontAtlas, row: u32, name: &str, landed: u32, hblanks: u32) {
     let mut line = Line::new();
     line.s(name)
@@ -294,6 +322,8 @@ fn show(font: &FontAtlas, row: u32, name: &str, landed: u32, hblanks: u32) {
     ui::live_line(font, row, line.as_str(), colour);
 }
 
+#[optimize(size)]
+#[inline(never)]
 pub(crate) fn run(font: &FontAtlas, records: &mut Records, next: &mut usize) {
     crate::bounds::record_start(SOURCE_RECORD);
     let Some(bank) = bank() else {
