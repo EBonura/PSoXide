@@ -28,7 +28,8 @@ use psx_engine::{
     CharacterMotorConfig, CharacterMotorFrame, CharacterMotorInput, CharacterMotorState, RoomPoint,
 };
 use psx_game_runtime::combat::{
-    body_hurt_capsule, projectile_hurtboxes, ticks_to_contact, ActiveStrike, WorldCombatCapsule,
+    authored_projectile_release_pending_at_frame, body_hurt_capsule, projectile_hurtboxes,
+    ticks_to_contact, ActiveStrike, WorldCombatCapsule,
 };
 use psx_game_runtime::combat_intent::{CombatAction, CombatActions, CombatIntent, CombatMove};
 use psx_game_runtime::combatant::{Combatant, CombatantId, Defender, HitKind, Strike};
@@ -1016,8 +1017,8 @@ pub fn run(duel: &Duel<'_>) -> DuelResult {
 }
 
 /// Release every emitter of side `i`'s ranged token not yet fired, while it
-/// can pay: the disc's `release_projectiles` without a pose (every emitter
-/// fires on the first attack tick, from the chest).
+/// can pay: the disc's `release_projectiles` rule on this tick's pose (each
+/// emitter from its own muzzle, once the clip frame reaches its window).
 fn release_bolts(
     sides: &mut [Side],
     i: usize,
@@ -1033,54 +1034,55 @@ fn release_bolts(
     };
     let crit = sides[i].entities.attack_is_crit(0);
     let mut released_crit = false;
-    let emitters: Vec<_> = sides[i]
+    // The disc's one release rule (`release_projectiles`): each authored
+    // emitter on this tick's pose fires from its own muzzle once the clip
+    // frame reaches its window.
+    let capsules = sides[i]
         .spec
-        .emitters_of(attack.action())
-        .copied()
-        .collect();
-    for emitter in emitters {
+        .rig
+        .as_ref()
+        .map_or(&[][..], |rig| rig.capsules);
+    let Some(pose) = sides[i].poses.current().copied() else {
+        return;
+    };
+    let frame = (pose.phase_q12() >> 12).min(u32::from(u16::MAX)) as u16;
+    loop {
         let Some(mask) = sides[i].entities.deferred_projectile_release_mask(attack) else {
             break;
         };
-        if mask & (1u16 << emitter.latch) != 0 {
-            continue;
-        }
-        if attack.clip().phase_ticks < emitter.release_tick {
-            continue;
-        }
+        let Some((emitter, release)) = authored_projectile_release_pending_at_frame(
+            capsules,
+            attack.action(),
+            Some(&pose),
+            mask,
+            frame,
+        ) else {
+            break;
+        };
         if !sides[i].entities.can_fire_energy(&records[0], 0) {
             break;
         }
-        let r = sides[i].body();
-        let p = sides[i].entities.position(0);
-        let yaw = Angle::from_q12(sides[i].entities.yaw(0) as u16);
-        let reach = i32::from(r.radius);
-        let muzzle = [
-            p[0] + yaw.sin().mul_i32(reach),
-            p[1] + i32::from(r.height) * 3 / 4,
-            p[2] + yaw.cos().mul_i32(reach),
-        ];
         let (damage, poise) = if crit {
             sides[i]
                 .entities
-                .crit_scaled(records, 0, emitter.damage, emitter.poise)
+                .crit_scaled(records, 0, release.damage, release.poise_damage)
         } else {
-            (emitter.damage, emitter.poise)
+            (release.damage, release.poise_damage)
         };
         let spawn = ProjectileSpawn {
-            position: muzzle,
+            position: release.position,
             velocity: [0; 3],
-            radius: emitter.radius,
+            radius: release.radius,
             damage,
             poise_damage: poise,
-            lifetime_ticks: emitter.lifetime_ticks,
+            lifetime_ticks: release.lifetime_ticks,
             room: RoomIndex::ZERO,
             team: CombatTeam::Player,
             // The pool holds only bolts at this side, its one target is id
             // 0, and a bolt never hits its owner: any other id.
             owner: 1,
             tint_rgb: [0; 3],
-            damage_channel: ProjectileDamageChannel::from_raw(emitter.channel),
+            damage_channel: release.damage_channel,
             visual: if crit {
                 ProjectileVisualStyle {
                     impact_rgb: CRIT_BOLT_MARK,
@@ -1092,7 +1094,7 @@ fn release_bolts(
         };
         if sides[j]
             .incoming
-            .spawn_toward(spawn, target, emitter.speed)
+            .spawn_toward(spawn, target, release.speed)
             .is_err()
         {
             break;
@@ -1100,7 +1102,7 @@ fn release_bolts(
         sides[i].entities.spend_shot_energy(&records[0], 0);
         let _ = sides[i]
             .entities
-            .commit_deferred_projectile(attack, emitter.latch);
+            .commit_deferred_projectile(attack, emitter);
         sides[i].tally.shots += 1;
         released_crit |= crit;
         if logging {
