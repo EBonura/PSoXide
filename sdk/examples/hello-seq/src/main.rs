@@ -127,7 +127,13 @@ fn main() {
             return;
         }
     };
-    spu.upload_adpcm(SpuAddr::new(SPU_BASE), bank.adpcm());
+    if spu
+        .upload_adpcm(SpuAddr::new(SPU_BASE), bank.adpcm())
+        .is_err()
+    {
+        tty::print("hello-seq: bank upload timed out\n");
+        return;
+    }
     line("adpcm bytes", bank.adpcm().len() as u32);
 
     // SAFETY: single-threaded; this is the only reference to SONG_RAM.

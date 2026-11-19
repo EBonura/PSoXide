@@ -22,7 +22,7 @@
 //!
 //! ```ignore
 //! let mut bank = Bank::new(SpuAddr::new(0x1010));
-//! let blip = bank.upload_on(&mut spu, include_bytes!("blip.psau"));
+//! let blip = bank.upload_on(&mut spu, include_bytes!("blip.psau"))?;
 //! let mut player: Player<3> = Player::new([Voice::V0, Voice::V1, Voice::V2], 60);
 //!
 //! // once a frame
@@ -64,7 +64,7 @@ pub mod space;
 pub mod vloop;
 
 use psx_asset::Audio;
-use psx_spu::{Adsr, Pitch, Spu, SpuAddr, Voice, Volume};
+use psx_spu::{Adsr, Pitch, Spu, SpuAddr, TransferTimeout, Voice, Volume};
 
 /// Highest level the SPU accepts in a volume register.
 pub(crate) const SPU_LEVEL_MAX: i16 = 0x3fff;
@@ -184,36 +184,48 @@ impl Bank {
         self.next
     }
 
-    /// Upload one cooked `.psau` sample through `spu`.
+    /// Upload one cooked `.psau` sample through `spu`, then its parking block.
+    ///
+    /// # Errors
+    /// [`TransferTimeout`] when the sample's or the parking block's DMA did not
+    /// finish (a wedged channel, see [`psx_spu::Spu::upload_adpcm`]). The bank
+    /// does not advance, so the next upload goes to the same address.
     ///
     /// # Panics
     /// If `psau` is not a valid cooked sample, matching the rest of the SDK's
     /// asset handling: a bad `include_bytes!` is a build mistake, not a
     /// runtime condition worth threading a Result through a sound effect for.
-    pub fn upload_on(&mut self, spu: &mut Spu, psau: &[u8]) -> Sample {
+    pub fn upload_on(&mut self, spu: &mut Spu, psau: &[u8]) -> Result<Sample, TransferTimeout> {
         self.upload_with(psau, |dest, bytes| spu.upload_adpcm(dest, bytes))
     }
 
     /// [`upload_on`](Self::upload_on) on a token the caller does not hold.
     ///
+    /// # Errors
+    /// As [`upload_on`](Self::upload_on).
+    ///
     /// # Panics
     /// As [`upload_on`](Self::upload_on).
     #[deprecated(note = "use `Bank::upload_on` with the `Spu` driver")]
     #[allow(deprecated)]
-    pub fn upload(&mut self, psau: &[u8]) -> Sample {
+    pub fn upload(&mut self, psau: &[u8]) -> Result<Sample, TransferTimeout> {
         self.upload_with(psau, psx_spu::upload_adpcm)
     }
 
-    fn upload_with(&mut self, psau: &[u8], mut put: impl FnMut(SpuAddr, &[u8])) -> Sample {
+    fn upload_with(
+        &mut self,
+        psau: &[u8],
+        mut put: impl FnMut(SpuAddr, &[u8]) -> Result<(), TransferTimeout>,
+    ) -> Result<Sample, TransferTimeout> {
         let audio = Audio::from_bytes(psau).expect("cooked psau sample");
         let adpcm = audio.adpcm_bytes();
-        put(self.next, adpcm);
+        put(self.next, adpcm)?;
         let sample = Sample {
             addr: self.next,
             rate_hz: audio.sample_rate_hz(),
             frames: adpcm.len() as u32 / BLOCK_BYTES,
         };
-        self.next = SpuAddr::new(self.next.byte_offset() + adpcm.len() as u32);
+        let tail = SpuAddr::new(self.next.byte_offset() + adpcm.len() as u32);
         // A parking block after every sample, not just one shared block that
         // the repeat register points at.
         //
@@ -231,9 +243,9 @@ impl Bank {
         // block carries END, REPEAT and LOOP-START, so the hardware latches the
         // repeat address to the block itself as it decodes it, rather than
         // relying on a value written before key-on.
-        put(self.next, &PARKING_TAIL);
-        self.next = SpuAddr::new(self.next.byte_offset() + BLOCK_BYTES);
-        sample
+        put(tail, &PARKING_TAIL)?;
+        self.next = SpuAddr::new(tail.byte_offset() + BLOCK_BYTES);
+        Ok(sample)
     }
 }
 

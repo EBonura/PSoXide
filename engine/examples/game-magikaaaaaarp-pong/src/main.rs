@@ -375,7 +375,8 @@ impl Scene for MagikaaaaaarpPong {
         game_trace("magikarp: init");
         spu::init();
         game_trace("magikarp: spu ok");
-        sfx::upload_samples(SPU_SAMPLE_BASE, &SFX_BANK);
+        // A bank that did not land plays nothing; psx-spu reports the timeout.
+        let _ = sfx::upload_samples(SPU_SAMPLE_BASE, &SFX_BANK);
         game_trace("magikarp: sfx ok");
         if let Ok(profile) = psx_settings::load_slot_one(SETTINGS_FILE) {
             self.shell.set_profile(profile);
