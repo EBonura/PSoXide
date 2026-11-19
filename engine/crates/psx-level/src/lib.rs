@@ -1514,6 +1514,10 @@ pub struct LevelGameEntityRecord {
     pub soul_value: u16,
     /// Runtime flags from [`game_entity_flags`].
     pub flags: u16,
+    /// Zero. Keeps the record at 128 bytes: a power-of-two stride indexes a
+    /// record with one shift where 116 bytes cost a multiply at every
+    /// access (measured: about 1.4 KB of code and 0.5 % of a walk's cycles).
+    pub reserved: [u8; 12],
 }
 
 /// One animation clip bound to a [`LevelModelRecord`]. The clip

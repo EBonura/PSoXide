@@ -407,6 +407,7 @@ impl OwnedLevelRecords {
                     melee_reach: e.melee_reach,
                     soul_value: e.soul_value,
                     flags: e.flags,
+                    reserved: [0; 12],
                 })
                 .collect(),
             game_entity_ids: package

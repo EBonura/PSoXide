@@ -3964,6 +3964,7 @@ mod tests {
             melee_reach: 0,
             soul_value: 0,
             flags,
+            reserved: [0; 12],
         }
     }
 

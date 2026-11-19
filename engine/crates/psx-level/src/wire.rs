@@ -377,7 +377,7 @@ wire_struct! {
         spacing_tolerance, spacing_speed_percent, decision_interval_ticks, circle_chance,
         attack_priority, attack_cooldown_ticks, group_attack_delay_ticks, windup_ticks,
         attack_active_ticks, heavy_attack_active_ticks, ranged_attack_active_ticks, recovery_ticks,
-        attack_min_range, attack_max_range, melee_reach, soul_value, flags
+        attack_min_range, attack_max_range, melee_reach, soul_value, flags, reserved
     }
     CharacterMotion {
         walk_speed, run_speed, turn_speed_degrees_per_second, weight_q8, stamina_max_q12,
@@ -461,7 +461,7 @@ level_tables! {
     table logic: LevelLogicRecord = 68;
     table logic_slots: u16 = 2;
     table visual_links: u16 = 2;
-    table game_entities: LevelGameEntityRecord = 116;
+    table game_entities: LevelGameEntityRecord = 128;
     table game_entity_ids: StableId = 4;
     table entities: EntityRecord = 24;
     table destructibles: LevelDestructibleRecord = 6;
