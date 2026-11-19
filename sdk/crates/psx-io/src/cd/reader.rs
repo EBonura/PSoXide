@@ -11,6 +11,14 @@
 //! that leaves the drive spun up. The comments that record silicon findings
 //! travel with the code.
 //!
+//! Every wait is bounded by time, not by a spin count: root counter 2 read
+//! once a spin, never written ([`super::wait`] says what that assumes about the
+//! counter's owner, and why a game that reprograms it can only lengthen a wait
+//! and a stopped counter cannot hang one). Measured on the console
+//! (hardware tests v2.24, 2026-11-19): one spin of the data wait is about 96
+//! clocks, a read after a Pause and 5 to 30 s idle delivered its first sector in
+//! 109 to 150 ms, and after a Stop in 1.92 s; [`FIRST_SECTOR_WAIT`] is 10 s.
+//!
 //! Sectors come out of the data FIFO by CPU reads (PIO), not DMA channel 3.
 //! The CL1/CL2 silicon probes convicted the chopping-burst DMA path on real
 //! hardware: the transfer is a state-dependent lottery, and the channel can
