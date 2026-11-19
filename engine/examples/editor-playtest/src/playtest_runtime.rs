@@ -1652,11 +1652,8 @@ impl Playtest {
     #[cfg_attr(target_arch = "mips", optimize(size))]
     fn player_reaction_anim(&self, reaction: Reaction) -> PlayerAnim {
         use psx_level::CharacterAnimationAction as Action;
-        let resolved = self
-            .character
-            .as_ref()
-            .and_then(|c| psx_level::combat_verbs::resolve(c, reaction.verb()));
-        match reaction.shown(resolved) {
+        let character = self.character.as_ref();
+        match reaction.shown(|action| character.is_some_and(|c| c.supports_action(action))) {
             Action::Stun => PlayerAnim::Stun,
             Action::Parried => PlayerAnim::Parried,
             Action::Knockdown => PlayerAnim::Knockdown,

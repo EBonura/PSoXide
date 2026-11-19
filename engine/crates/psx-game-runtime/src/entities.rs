@@ -966,8 +966,6 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
     /// none), a stagger its Stun playback ([`Reaction::verb`], through the
     /// verb's chain). `length` reads a clip at the speed and frame range its
     /// Character plays it at, in ticks. Call after spawning.
-    // Once per spawn: kept small.
-    #[cfg_attr(target_arch = "mips", optimize(size))]
     pub fn time_reactions(
         &mut self,
         records: &[LevelGameEntityRecord],
@@ -997,7 +995,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         reaction: Reaction,
         phase_ticks: u16,
     ) -> Option<(CharacterAnimationAction, GameEntityClip)> {
-        let action = reaction.shown(psx_level::combat_verbs::resolve(body, reaction.verb()));
+        let action = reaction.shown(|action| body.action_clips[action.to_index()].is_some());
         let index = action.to_index();
         let clip = body.action_clips[index].to_option()?;
         Some((
@@ -2180,7 +2178,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
                 let reaction = self.reaction(index).unwrap_or(Reaction::Flinch);
                 let body = self.body(record);
                 Self::reaction_clip(body, reaction, ticks)
-                    .unwrap_or((reaction.shown(None), one_shot(record.idle_clip, ticks)))
+                    .unwrap_or((reaction.shown(|_| false), one_shot(record.idle_clip, ticks)))
             }
             GameEntityState::Dead => (Action::Death, one_shot(record.death_clip, ticks)),
         }
@@ -3964,7 +3962,7 @@ mod tests {
             melee_reach: 0,
             soul_value: 0,
             flags,
-            reserved: [0; 12],
+            reserved: psx_level::RecordPad::ZERO,
         }
     }
 

@@ -1514,10 +1514,20 @@ pub struct LevelGameEntityRecord {
     pub soul_value: u16,
     /// Runtime flags from [`game_entity_flags`].
     pub flags: u16,
-    /// Zero. Keeps the record at 128 bytes: a power-of-two stride indexes a
-    /// record with one shift where 116 bytes cost a multiply at every
-    /// access (measured: about 1.4 KB of code and 0.5 % of a walk's cycles).
-    pub reserved: [u8; 12],
+    /// Keeps the record at 128 bytes ([`RecordPad`]).
+    pub reserved: RecordPad,
+}
+
+/// Unused bytes that keep a record's size a power of two: a power-of-two
+/// stride indexes a record with one shift where 116 bytes cost a multiply
+/// at every access (measured on the game entity record: about 1.4 KB of code
+/// and 0.5 % of a walk's cycles). Never on the wire; always zero.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RecordPad([u8; 12]);
+
+impl RecordPad {
+    /// The only value.
+    pub const ZERO: Self = Self([0; 12]);
 }
 
 /// One animation clip bound to a [`LevelModelRecord`]. The clip

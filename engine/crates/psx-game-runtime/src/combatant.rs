@@ -352,18 +352,29 @@ impl Reaction {
         }
     }
 
-    /// The action a body shows for this reaction, given what its Character
-    /// resolves the verb to (`combat_verbs::resolve`: the verb, else the
-    /// first bound stand-in of its chain); with none bound, the verb (a
-    /// riposte's, the stagger's), over the rest pose.
-    pub const fn shown(
+    /// The action a body that binds the actions `bound` says shows for this
+    /// reaction: its verb, else the first bound stand-in of the verb's chain
+    /// (Stun, then Hit React, as `combat_verbs::resolve` walks it; pinned by
+    /// a test); with none bound, the verb (a riposte's, the stagger's), over
+    /// the rest pose. Spelled out rather than calling the generic resolver:
+    /// the reaction chains are this short, and the guest copy of the general
+    /// walk costs about 0.8 KB.
+    pub fn shown(
         self,
-        resolved: Option<psx_level::CharacterAnimationAction>,
+        bound: impl Fn(psx_level::CharacterAnimationAction) -> bool,
     ) -> psx_level::CharacterAnimationAction {
-        match (resolved, self) {
-            (Some(action), _) => action,
-            (None, Self::Parried) => psx_level::CharacterAnimationAction::Stun,
-            (None, other) => other.verb(),
+        use psx_level::CharacterAnimationAction as Action;
+        let verb = self.verb();
+        if bound(verb) {
+            verb
+        } else if self != Self::Flinch && bound(Action::Stun) {
+            Action::Stun
+        } else if bound(Action::HitReact) {
+            Action::HitReact
+        } else if self == Self::Parried {
+            Action::Stun
+        } else {
+            verb
         }
     }
 }
@@ -707,6 +718,39 @@ impl Combatant {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_reaction_shows_what_the_verb_chain_resolves_to() {
+        use psx_level::combat_verbs::{resolve, BoundBy};
+        use psx_level::CharacterAnimationAction as Action;
+        let actions = [
+            Action::HitReact,
+            Action::Stun,
+            Action::Parried,
+            Action::Knockdown,
+        ];
+        for set in 0u8..16 {
+            let bound = |action: Action| {
+                actions
+                    .iter()
+                    .position(|&a| a == action)
+                    .is_some_and(|i| set & (1 << i) != 0)
+            };
+            for reaction in [
+                super::Reaction::Flinch,
+                super::Reaction::Stagger,
+                super::Reaction::Parried,
+                super::Reaction::Knockdown,
+            ] {
+                let resolved = resolve(&BoundBy(bound), reaction.verb());
+                let shown = reaction.shown(bound);
+                match resolved {
+                    Some(action) => assert_eq!(shown, action, "{reaction:?} {set:04b}"),
+                    None => assert!(!bound(shown), "{reaction:?} {set:04b}"),
+                }
+            }
+        }
+    }
+
     use super::*;
     use crate::combat_flow::BREAK_GRACE_TICKS;
 

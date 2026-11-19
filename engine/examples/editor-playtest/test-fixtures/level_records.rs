@@ -101,7 +101,7 @@ pub static GAME_ENTITIES: &[LevelGameEntityRecord] = &[LevelGameEntityRecord {
     melee_reach: 0,
     soul_value: 50,
     flags: 0,
-    reserved: [0; 12],
+    reserved: psx_level::RecordPad::ZERO,
 }];
 pub static PLAYER_CONTROLLER: Option<PlayerControllerRecord> = None;
 pub static ENTITIES: &[EntityRecord] = &[];

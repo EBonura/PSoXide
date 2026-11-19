@@ -91,6 +91,13 @@ impl Wire for bool {
     }
 }
 
+impl Wire for RecordPad {
+    fn put(&self, _out: &mut Vec<u8>) {}
+    fn get(_r: &mut Reader) -> Option<Self> {
+        Some(Self::ZERO)
+    }
+}
+
 impl<T: Wire, const N: usize> Wire for [T; N] {
     fn put(&self, out: &mut Vec<u8>) {
         for item in self {
