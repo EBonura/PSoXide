@@ -1037,9 +1037,10 @@ static mut SCENE: core::mem::MaybeUninit<Playtest> = core::mem::MaybeUninit::zer
 static HEAP: psx_game_runtime::reuse_heap::ReuseHeap =
     psx_game_runtime::reuse_heap::ReuseHeap::new();
 
-/// One byte to the debug console (Expansion 2). A retail console ignores the store, so this is
-/// on in every build: it only runs when the guest has already died.
-#[cfg(target_arch = "mips")]
+/// One byte to the debug console (Expansion 2). Emulator builds only (`host-tty`): on a retail
+/// console the store raises a data bus error, which here, inside the fault halt, would overwrite
+/// the Cause/EPC/BadVAddr psx-rt recorded for the real fault.
+#[cfg(all(target_arch = "mips", feature = "host-tty"))]
 fn fatal_byte(byte: u8) {
     // SAFETY: a byte store to the debug console port, which has no other effect.
     unsafe {
@@ -1048,7 +1049,7 @@ fn fatal_byte(byte: u8) {
 }
 
 /// `label` then `value` as eight hex digits.
-#[cfg(target_arch = "mips")]
+#[cfg(all(target_arch = "mips", feature = "host-tty"))]
 fn fatal_field(label: &[u8], value: u32) {
     for &byte in label {
         fatal_byte(byte);
@@ -1064,7 +1065,7 @@ fn fatal_field(label: &[u8], value: u32) {
 /// console log names the cause. `epc` is the site (look it up in the link map); `alloc` is the
 /// size of the latest request the heap could not serve (0 if none) and `heap_free` what the heap
 /// had left.
-#[cfg(target_arch = "mips")]
+#[cfg(all(target_arch = "mips", feature = "host-tty"))]
 extern "C" fn fatal_report(cause: u32, epc: u32, badvaddr: u32) {
     for &byte in b"FATAL kind=" {
         fatal_byte(byte);
@@ -1106,7 +1107,8 @@ fn main() -> ! {
         let start = &raw const __heap_start as usize;
         HEAP.init(start, &raw const __heap_end as usize);
     }
-    #[cfg(target_arch = "mips")]
+    // Emulator builds only: the report writes the debug port, which a console must never see.
+    #[cfg(all(target_arch = "mips", feature = "host-tty"))]
     psx_rt::interrupts::set_fatal_hook(fatal_report);
     // Stamp the scene's boot state onto its link-time-zero storage BEFORE
     // any other use (see `SCENE` and `Playtest::init_zeroed`).
