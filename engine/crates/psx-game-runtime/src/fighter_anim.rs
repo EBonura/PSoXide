@@ -261,6 +261,9 @@ impl<S: AnimState> Body<S> {
     /// crossfade (none into a reaction when [`Self::reactions`] cuts). The
     /// outgoing clip's local tick is read off the clock, which restarts at
     /// `now` backdated by `carried` ticks (see [`Self::gait_carry`]).
+    // Inlined at every call, as the track it replaced was: out of line it cost
+    // 364 B for the entities' two calls.
+    #[inline]
     pub fn switch(&mut self, next: S, now: SimTick, carried: u32) {
         let cut = self.reactions == ReactionBlend::Cut && is_reaction(next.action());
         self.switched = if cut {

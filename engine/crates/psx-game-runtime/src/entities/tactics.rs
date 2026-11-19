@@ -1376,7 +1376,8 @@ impl<const N: usize> GameEntities<N> {
             0,
             pressed,
             crate::combat_timing::Sample::LEGACY,
-            self.gaits[i].start,
+            // No window, so no request is keyed to a clip's run.
+            psx_engine::SimTick::ZERO,
             self.clock,
             free,
         ) {
