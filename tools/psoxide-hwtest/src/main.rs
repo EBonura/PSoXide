@@ -16,6 +16,8 @@ commands:\n\
       docs/hardware-refs: regressions (exit 1) and mismatches\n\
   check-silence WAV [--tail-seconds S]\n\
       check that the audio the emulator dumped ends in silence\n\
+  check-audible WAV [--min-seconds S]\n\
+      check that the audio the emulator dumped holds at least S seconds of sound\n\
   emulator-baseline LOG [--git X] [--exe-sha X] [--steps N]\n\
       print an emulator baseline file made from a run log\n\
   v24-report PAYLOAD_OR_FILE ...\n\
@@ -115,6 +117,7 @@ fn run() -> i32 {
         "report" => (report_command(rest, &mut out, &mut err), 2),
         "compare" => (compare::compare_command(rest, &mut out, &mut err), 2),
         "check-silence" => (compare::check_silence_command(rest, &mut out, &mut err), 2),
+        "check-audible" => (compare::check_audible_command(rest, &mut out, &mut err), 2),
         "emulator-baseline" => (compare::emulator_baseline_command(rest, &mut out), 2),
         "v24-report" => (v24::run(rest, &mut out), 2),
         "sb4-report" => (sb4::run(rest, &mut out), 1),
@@ -139,7 +142,7 @@ fn run() -> i32 {
         Err(error) => {
             let _ = out.flush();
             let name = match command.as_str() {
-                "report" | "compare" | "check-silence" | "emulator-baseline" | "v24-report" => {
+                "report" | "compare" | "check-silence" | "check-audible" | "emulator-baseline" | "v24-report" => {
                     "hwtest-report"
                 }
                 "audio-report" => "hwtest-audio-report",

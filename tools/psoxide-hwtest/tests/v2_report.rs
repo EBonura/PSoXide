@@ -3,7 +3,7 @@
 //! hand-built input.
 
 use psoxide_hwtest::compare::{
-    check_silence, compare_to_silicon, SiliconReference, EXACT_RECORDS, REDEFINED_IN_V2,
+    check_audible, check_silence, compare_to_silicon, SiliconReference, EXACT_RECORDS, REDEFINED_IN_V2,
 };
 use psoxide_hwtest::report::{
     parse_capture_page, record_label, run_id_text, Capture, Record, PX8_BLOCK_STATUS,
@@ -324,4 +324,18 @@ fn silence_check_measures_the_tail() {
     let (mut out, mut err) = (Vec::new(), Vec::new());
     assert_eq!(check_silence(&path, 0.5, &mut out, &mut err).unwrap(), 1);
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn audible_check_counts_the_sound() {
+    let dir = std::env::temp_dir().join(format!("psoxide-hwtest-audible-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("tone.wav");
+    wav(&path, 10, 2, 4);
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    assert_eq!(check_audible(&path, 1.5, &mut out, &mut err).unwrap(), 0);
+    assert!(String::from_utf8(out).unwrap().ends_with("audible\n"));
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    assert_eq!(check_audible(&path, 3.0, &mut out, &mut err).unwrap(), 1);
+    assert!(String::from_utf8(err).unwrap().starts_with("FAIL: 2.0 s of sound"));
 }

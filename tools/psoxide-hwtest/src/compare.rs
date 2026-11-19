@@ -308,27 +308,7 @@ pub fn check_silence(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<i32> {
-    let wav = read_wav_file(path)?;
-    let channels = usize::from(wav.channels.max(1));
-    let rate = f64::from(wav.rate);
-    let frames = wav.samples.len() / channels;
-    let duration = frames as f64 / rate;
-    // Non-silent spans, in seconds, merged when closer than 0.25 s.
-    let window = (wav.rate / 20).max(1) as usize;
-    let mut loud = Vec::new();
-    for start in (0..frames).step_by(window) {
-        let end = ((start + window) * channels).min(wav.samples.len());
-        if wav.samples[start * channels..end].iter().any(|&s| s != 0) {
-            loud.push(start as f64 / rate);
-        }
-    }
-    let mut spans: Vec<[f64; 2]> = Vec::new();
-    for t in loud {
-        match spans.last_mut() {
-            Some(last) if t - last[1] <= 0.25 => last[1] = t + 0.05,
-            _ => spans.push([t, t + 0.05]),
-        }
-    }
+    let (duration, spans) = loud_spans(path)?;
     writeln!(
         out,
         "# audio: {duration:.1} s, {} non-silent span(s)",
@@ -351,6 +331,84 @@ pub fn check_silence(
         return Ok(1);
     }
     writeln!(out, "silent at the capture pages")?;
+    Ok(0)
+}
+
+/// The WAV's length and its non-silent spans, in seconds, merged when closer than 0.25 s.
+fn loud_spans(path: &Path) -> Result<(f64, Vec<[f64; 2]>)> {
+    let wav = read_wav_file(path)?;
+    let channels = usize::from(wav.channels.max(1));
+    let rate = f64::from(wav.rate);
+    let frames = wav.samples.len() / channels;
+    let duration = frames as f64 / rate;
+    let window = (wav.rate / 20).max(1) as usize;
+    let mut loud = Vec::new();
+    for start in (0..frames).step_by(window) {
+        let end = ((start + window) * channels).min(wav.samples.len());
+        if wav.samples[start * channels..end].iter().any(|&s| s != 0) {
+            loud.push(start as f64 / rate);
+        }
+    }
+    let mut spans: Vec<[f64; 2]> = Vec::new();
+    for t in loud {
+        match spans.last_mut() {
+            Some(last) if t - last[1] <= 0.25 => last[1] = t + 0.05,
+            _ => spans.push([t, t + 0.05]),
+        }
+    }
+    Ok((duration, spans))
+}
+
+/// `check-audible WAV [--min-seconds S]`.
+pub fn check_audible_command(
+    args: &[String],
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<i32> {
+    let mut min_seconds = 1.5f64;
+    let mut inputs = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--min-seconds" => {
+                i += 1;
+                let value = args.get(i).ok_or("--min-seconds needs a value")?;
+                min_seconds = value
+                    .parse()
+                    .map_err(|_| Error(format!("invalid float value: {value:?}")))?;
+            }
+            flag if flag.starts_with("--") => {
+                return Err(Error(format!("unrecognized arguments: {flag}")))
+            }
+            input => inputs.push(input.to_string()),
+        }
+        i += 1;
+    }
+    ensure!(inputs.len() == 1, "check-audible takes exactly one WAV");
+    check_audible(Path::new(&inputs[0]), min_seconds, out, err)
+}
+
+/// Fail (1) unless the emulator's audio holds at least `min_seconds` of sound in all. For a
+/// step that plays something meant to be heard: v2.24's SPU BULK UPLOAD tone played into a
+/// main volume of 0 on the console and in the emulator, and nothing noticed.
+pub fn check_audible(
+    path: &Path,
+    min_seconds: f64,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<i32> {
+    let (duration, spans) = loud_spans(path)?;
+    let heard: f64 = spans.iter().map(|[begin, end]| end - begin).sum();
+    writeln!(
+        out,
+        "# audio: {duration:.1} s, {heard:.1} s of sound in {} span(s)",
+        spans.len()
+    )?;
+    if heard < min_seconds {
+        writeln!(err, "FAIL: {heard:.1} s of sound, needs {min_seconds:.1} s")?;
+        return Ok(1);
+    }
+    writeln!(out, "audible")?;
     Ok(0)
 }
 
