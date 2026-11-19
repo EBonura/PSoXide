@@ -12,14 +12,16 @@ const PROJECTS: [&str; 6] = [
     "grid-planes",
 ];
 
-/// The pinned hashes, in `PROJECTS` order.
-const GOLDEN: [u64; 7] = [
+/// The pinned hashes, in `PROJECTS` order. grid-dungeon was re-pinned when
+/// its Room 0 floor moved from the importer's "Grid Fallback" checker to
+/// Bark, an intended data change: the hash covers each face's material as
+/// well as its texels.
+const GOLDEN: [u64; 6] = [
     0xcf48c80128acabbb,
     0xd4ae97c7eccc539f,
-    0xf2d1d43d51a5da31,
+    0xd9d49fd5e1590e8d,
     0x8ac4b01036b6e626,
     0xa604cca745d2ac2a,
-    0x92129cc4ca69d11f,
     0xdeeb9e077316127b,
 ];
 
