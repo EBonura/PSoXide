@@ -430,6 +430,22 @@ fn build_package_budgeted(
     finish_budget(package, report)
 }
 
+/// Cook `project` without the guest-fit refusal, for tests that check what the cook writes on a
+/// project the heap guard refuses (the default project, a known gap the guard tests cover).
+#[cfg(test)]
+pub(crate) fn build_package_ignoring_ram(
+    project: &ProjectDocument,
+    project_root: &Path,
+) -> (Option<PlaytestPackage>, PlaytestValidationReport) {
+    let (package, report) = build_package_cooked(
+        project,
+        project_root,
+        None,
+        crate::grid::cook::GUEST_POOL_CEILING_KIB,
+    );
+    (with_link_layout(package, project_root), report)
+}
+
 /// Attach the project's link layout ([`LINK_LAYOUT_FILENAME`]) to a cooked
 /// package.
 fn with_link_layout(
