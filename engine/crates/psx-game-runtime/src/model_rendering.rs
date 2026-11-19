@@ -1510,7 +1510,7 @@ fn dash_wire_visual(
 /// Resolve visual timing from motor travel, independent of animation clip length.
 pub fn player_dash_wire_visual(
     character: &RuntimeCharacter,
-    pose: PlayerActorPoseSnapshot,
+    pose: &PlayerActorPoseSnapshot,
 ) -> DashWireVisual {
     dash_wire_visual(
         pose.action(),
@@ -1523,7 +1523,7 @@ pub fn player_dash_wire_visual(
 /// Whether the body is currently entirely wireframe.
 pub fn player_pose_draws_wireframe(
     character: &RuntimeCharacter,
-    pose: PlayerActorPoseSnapshot,
+    pose: &PlayerActorPoseSnapshot,
 ) -> bool {
     matches!(
         player_dash_wire_visual(character, pose),
@@ -1665,7 +1665,7 @@ pub fn draw_player<
         knobs,
         scratch,
         character,
-        player_pose,
+        &player_pose,
         model_faces,
         model_parts,
         model_vertices,
@@ -1700,7 +1700,7 @@ pub fn draw_player_from_pose<
     knobs: ModelDrawKnobs,
     scratch: &mut ModelDrawScratch<MODEL_VERTEX_CAP, JOINT_CAP>,
     character: &RuntimeCharacter,
-    player_pose: PlayerActorPoseSnapshot,
+    player_pose: &PlayerActorPoseSnapshot,
     model_faces: &[TexturedModelRenderFace],
     model_parts: &[ModelPart],
     model_vertices: &[ModelVertex],
@@ -2328,7 +2328,7 @@ pub fn draw_player_equipment_from_pose<
     tables: ModelTables,
     knobs: ModelDrawKnobs,
     scratch: &mut ModelDrawScratch<MODEL_VERTEX_CAP, JOINT_CAP>,
-    player_pose: PlayerActorPoseSnapshot,
+    player_pose: &PlayerActorPoseSnapshot,
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
     model_faces: &[TexturedModelRenderFace],
     model_parts: &[ModelPart],
@@ -2383,7 +2383,7 @@ pub fn draw_player_weapon_trails_from_pose<
     character: psx_level::CharacterIndex,
     action: CharacterAnimationAction,
     wire_q12: [u16; MAX_PLAYER_EQUIPMENT],
-    player_pose: PlayerActorPoseSnapshot,
+    player_pose: &PlayerActorPoseSnapshot,
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
     model_parts: &[ModelPart],
     model_vertices: &[ModelVertex],

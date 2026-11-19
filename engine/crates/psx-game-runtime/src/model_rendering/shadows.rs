@@ -268,7 +268,7 @@ pub fn draw_actor_projected_shadow<
     tuning: ProjectedShadowTuning,
     scratch: &mut ModelDrawScratch<MODEL_VERTEX_CAP, JOINT_CAP>,
     runtime_model: RuntimeModelAsset,
-    pose: ActorPoseSnapshot,
+    pose: &ActorPoseSnapshot,
     floor_y: i32,
     base_material: TextureMaterial,
     camera: &WorldCamera,
@@ -360,7 +360,7 @@ pub fn draw_model_instance_projected_shadows<
             continue;
         }
         let runtime_model = pose.model();
-        let actor_pose = *pose.pose();
+        let actor_pose = pose.pose();
         // The pose's own origin, not the cooked `record.y`: a live entity
         // bound to this instance moves, and the cooked spawn height would
         // leave its shadow behind on the floor it started on.

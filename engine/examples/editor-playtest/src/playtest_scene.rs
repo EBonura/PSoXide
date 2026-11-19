@@ -1322,7 +1322,7 @@ impl Scene for Playtest {
             // `character` by reference: copying the whole RuntimeCharacter
             // (688 B) into the tuple cost a memcpy per frame.
             if let (Some(character), Some(player_pose)) =
-                (self.character.as_ref(), self.player_actor_pose)
+                (self.character.as_ref(), self.player_actor_pose.as_ref())
             {
                 {
                     // Diagnostic: the model's rendered forward (local +Z through the

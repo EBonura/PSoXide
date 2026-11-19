@@ -1137,8 +1137,7 @@ impl Playtest {
                 self.previous_instance_actor_poses[index] = None;
                 continue;
             }
-            let previous = self.instance_actor_poses[index];
-            self.previous_instance_actor_poses[index] = previous;
+            self.previous_instance_actor_poses[index] = self.instance_actor_poses[index];
             self.instance_actor_poses[index] = mr::resolve_instance_actor_pose(
                 model_tables(),
                 &self.models,
@@ -1160,7 +1159,7 @@ impl Playtest {
                     ctx.video_hz,
                 );
             }
-            self.enemy_swing_sound(index, previous, self.instance_actor_poses[index]);
+            self.enemy_swing_sound(index);
         }
         self.instance_actor_poses[count..].fill(None);
         self.previous_instance_actor_poses[count..].fill(None);
@@ -1182,7 +1181,7 @@ impl Playtest {
 pub(super) fn draw_player(
     current_room: RoomIndex,
     character: &RuntimeCharacter,
-    player_pose: PlayerActorPoseSnapshot,
+    player_pose: &PlayerActorPoseSnapshot,
     model_faces: &[TexturedModelRenderFace],
     model_parts: &[ModelPart],
     model_vertices: &[ModelVertex],
@@ -1345,7 +1344,7 @@ pub(super) fn draw_player_equipment(
     anim: PlayerAnim,
     wire_q12: [u16; mr::MAX_PLAYER_EQUIPMENT],
     armed_glow: Option<(u8, u8, u8)>,
-    player_pose: PlayerActorPoseSnapshot,
+    player_pose: &PlayerActorPoseSnapshot,
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
     model_faces: &[TexturedModelRenderFace],
     model_parts: &[ModelPart],
@@ -1652,7 +1651,7 @@ pub(super) fn actor_shadow_radius(base_radius: i32) -> i32 {
 /// Draw the player's own geometry flattened onto the floor plane.
 #[cfg(feature = "actor-shadows-projected")]
 pub(super) fn draw_player_projected_shadow(
-    player_pose: PlayerActorPoseSnapshot,
+    player_pose: &PlayerActorPoseSnapshot,
     floor_y: i32,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,

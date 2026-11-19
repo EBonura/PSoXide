@@ -20,11 +20,7 @@ impl MaskedPoseBlend<'_> {
         if !self.selects(joint) {
             return primary;
         }
-        psx_asset::ModelPoseBlend {
-            sample: self.sample,
-            alpha_q12: self.alpha_q12,
-        }
-        .blend_toward(primary, joint)
+        self.sample.blend_toward(primary, joint, self.alpha_q12)
     }
 }
 

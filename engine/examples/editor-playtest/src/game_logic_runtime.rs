@@ -1990,13 +1990,10 @@ impl Playtest {
         }
     }
 
-    pub(super) fn enemy_swing_sound(
-        &mut self,
-        instance: usize,
-        previous: Option<InstanceActorPoseSnapshot>,
-        current: Option<InstanceActorPoseSnapshot>,
-    ) {
-        let Some(pose) = current else {
+    /// The swing sound of `instance`'s melee window, read off this tick's
+    /// and last tick's snapshots in place (each is a few hundred bytes).
+    pub(super) fn enemy_swing_sound(&mut self, instance: usize) {
+        let Some(pose) = self.instance_actor_poses.get(instance).and_then(Option::as_ref) else {
             return;
         };
         let Some(attack) = self
@@ -2017,7 +2014,10 @@ impl Playtest {
         let capsule_body = self.game_entities.body(entity);
         let first = capsule_body.combat_capsule_first.to_usize();
         let end = first + usize::from(capsule_body.combat_capsule_count);
-        let previous = previous
+        let previous = self
+            .previous_instance_actor_poses
+            .get(instance)
+            .and_then(Option::as_ref)
             .filter(|old| old.clip_local() == pose.clip_local())
             .map(|old| old.pose().phase_q12());
         if combat::melee_window_started(

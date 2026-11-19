@@ -1744,11 +1744,24 @@ impl ModelPoseBlend<'_> {
     /// from the outgoing clip (mismatched rigs never corrupt poses).
     #[inline]
     pub fn blend_toward(&self, primary: JointPose, joint_index: u16) -> JointPose {
-        if self.alpha_q12 >= 1 << 12 {
+        self.sample
+            .blend_toward(primary, joint_index, self.alpha_q12)
+    }
+}
+
+impl AnimationPoseSample<'_> {
+    /// Blend this sample's joint pose toward `primary` by `alpha_q12`.
+    ///
+    /// The weight is a separate argument so a caller holding the sample
+    /// inside a larger blend borrows it in place: a sample is about 100
+    /// bytes, and copying one per joint costs more than the blend.
+    #[inline]
+    pub fn blend_toward(&self, primary: JointPose, joint_index: u16, alpha_q12: u16) -> JointPose {
+        if alpha_q12 >= 1 << 12 {
             return primary;
         }
-        match self.sample.pose(joint_index) {
-            Some(from) => lerp_pose_q12(from, primary, self.alpha_q12),
+        match self.pose(joint_index) {
+            Some(from) => lerp_pose_q12(from, primary, alpha_q12),
             None => primary,
         }
     }
