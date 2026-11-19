@@ -1673,19 +1673,6 @@ pub struct PlaytestGameEntity {
     pub ranged_attack_speed_q8: u16,
     /// Inclusive authored playback range for the projectile action.
     pub ranged_attack_frame_range: psx_level::CharacterActionFrameRange,
-    /// Complete Stun one-shot, including recovery (HitReact fallback).
-    pub stagger_clip: u16,
-    /// Authored stun speed; zero preserves legacy 3x playback.
-    pub stagger_speed_q8: u16,
-    /// Inclusive authored stun range.
-    pub stagger_frame_range: psx_level::CharacterActionFrameRange,
-    /// Complete stun duration at 60 Hz; zero preserves the legacy 32 ticks.
-    pub stagger_ticks: u16,
-    /// One-shot held while knocked down: the Knockdown role, else the
-    /// stagger clip.
-    pub knockdown_clip: u16,
-    /// Clip over a parry's stagger (Parried, else its chain).
-    pub parried_clip: u16,
     /// Clip while rolling (Roll, else its chain, else walk).
     pub roll_clip: u16,
     /// Death one-shot clip.

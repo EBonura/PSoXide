@@ -1442,23 +1442,6 @@ pub struct LevelGameEntityRecord {
     pub ranged_attack_speed_q8: u16,
     /// Inclusive authored playback range for the projectile action.
     pub ranged_attack_frame_range: CharacterActionFrameRange,
-    /// Complete one-shot while Staggered: impact, disabled beat, and recovery.
-    /// Cooked from the Stun action, with HitReact as the legacy fallback.
-    pub stagger_clip: u16,
-    /// Authored stun speed; zero preserves legacy 3x playback.
-    pub stagger_speed_q8: u16,
-    /// Inclusive authored stun range.
-    pub stagger_frame_range: CharacterActionFrameRange,
-    /// Complete stun duration at 60 Hz; zero preserves the legacy 32 ticks.
-    pub stagger_ticks: u16,
-    /// One-shot held while knocked down: the character's
-    /// [`CharacterAnimationAction::Knockdown`] role, falling back to
-    /// `stagger_clip` at cook time.
-    pub knockdown_clip: u16,
-    /// Model-local clip played while staggered by a parry's riposte;
-    /// resolved through the Parried verb's chain (Stun, HitReact) at cook
-    /// time, so it is the stagger clip until a Parried clip is authored.
-    pub parried_clip: u16,
     /// Clip played while rolling: the character's Roll role through its
     /// fallback chain at cook time.
     pub roll_clip: u16,

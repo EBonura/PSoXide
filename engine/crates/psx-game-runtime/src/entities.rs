@@ -77,8 +77,8 @@ pub enum GameEntityState {
     /// contact and recovery are reads of that one clock
     /// ([`GameEntities::attack_phase`]), as the player's are of hers.
     Attack = 4,
-    /// Poise broke (any break but a crit's): its Stun clip played through,
-    /// the record's `stagger_ticks`.
+    /// Poise broke (any break but a crit's): its Stun clip played through
+    /// ([`GameEntities::time_reactions`]).
     Staggered = 6,
     /// Health reached zero (or the record spawned disabled).
     Dead = 7,
@@ -208,7 +208,7 @@ pub fn body_of(
         .unwrap_or(&LevelCharacterRecord::DEFAULT_BODY)
 }
 
-/// Legacy interruption duration for records without authored stun timing.
+/// How long a reaction holds a body whose Character binds no clip for it.
 pub const GAME_ENTITY_STAGGER_TICKS: u16 = 32;
 
 /// [`GameEntities::rival`] of an entity that engages the owner's target
@@ -755,6 +755,10 @@ pub struct GameEntities<const MAX_ENTITIES: usize> {
     /// How long each entity's flinch lasts: its Character's Hit React clip,
     /// 0 when it binds none (no flinch, as for the player).
     flinch_ticks: [u16; MAX_ENTITIES],
+    /// How long each entity's stagger (and a riposte's) lasts: its
+    /// Character's Stun clip played through, as the player's does
+    /// ([`Self::time_reactions`]).
+    stagger_ticks: [u16; MAX_ENTITIES],
     /// How each entity's light, heavy and ranged attacks run: read off its
     /// Character's clips by [`Self::time_attacks`], else its record's ticks.
     attack_timings: [[crate::fighter_action::ActionTiming; 3]; MAX_ENTITIES],
@@ -957,36 +961,50 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         }
     }
 
-    /// Time every entity's flinch from its Character's own Hit React clip
-    /// (no stand-in): `length` reads the clip at the speed and frame range
-    /// its Character plays it at, in ticks. Call after spawning.
-    pub fn time_flinches(
+    /// Time every entity's reactions as the player's are timed: a flinch is
+    /// its Character's Hit React clip played through (none when it binds
+    /// none), a stagger its Stun playback ([`Reaction::verb`], through the
+    /// verb's chain). `length` reads a clip at the speed and frame range its
+    /// Character plays it at, in ticks. Call after spawning.
+    pub fn time_reactions(
         &mut self,
         records: &[LevelGameEntityRecord],
-        mut length: impl FnMut(
-            &LevelGameEntityRecord,
-            u16,
-            u16,
-            CharacterActionFrameRange,
-        ) -> Option<u16>,
+        mut length: impl FnMut(&LevelGameEntityRecord, Reaction, &GameEntityClip) -> Option<u16>,
     ) {
         let count = self.count().min(records.len());
-        let action = CharacterAnimationAction::HitReact.to_index();
         for (index, record) in records.iter().enumerate().take(count) {
             let body = self.body(record);
-            let clip = body.action_clips[action];
-            self.flinch_ticks[index] = if clip.is_some() {
-                length(
-                    record,
-                    clip.raw(),
-                    body.action_speeds[action],
-                    body.action_frame_ranges[action],
-                )
-                .unwrap_or(0)
-            } else {
-                0
+            let mut time = |reaction: Reaction| {
+                let (_, clip) = Self::reaction_clip(body, reaction, 0)?;
+                length(record, reaction, &clip)
             };
+            self.flinch_ticks[index] = time(Reaction::Flinch).unwrap_or(0);
+            self.stagger_ticks[index] =
+                time(Reaction::Stagger).unwrap_or(GAME_ENTITY_STAGGER_TICKS);
         }
+    }
+
+    /// How `body` plays `reaction`, `phase_ticks` in, the player's rule: the
+    /// action it shows ([`Reaction::shown`]) on that action's clip, authored
+    /// speed and range. None when it binds nothing in the verb's chain.
+    fn reaction_clip(
+        body: &LevelCharacterRecord,
+        reaction: Reaction,
+        phase_ticks: u16,
+    ) -> Option<(CharacterAnimationAction, GameEntityClip)> {
+        let action = reaction.shown(body);
+        let index = action.to_index();
+        let clip = body.action_clips[index].to_option()?;
+        Some((
+            action,
+            GameEntityClip {
+                clip: clip.0,
+                phase_ticks,
+                one_shot: true,
+                speed_q8: body.action_speeds[index],
+                frame_range: body.action_frame_ranges[index],
+            },
+        ))
     }
 
     fn selected_attack_playback(
@@ -1123,6 +1141,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         actor_plan: None,
         actor_busy: 0,
         flinch_ticks: [0; MAX_ENTITIES],
+        stagger_ticks: [GAME_ENTITY_STAGGER_TICKS; MAX_ENTITIES],
         attack_timings: [[crate::fighter_action::ActionTiming {
             windup: 0,
             active: 0,
@@ -2122,15 +2141,6 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
                 },
             )
         };
-        let stagger = |ticks: u16| GameEntityClip {
-            speed_q8: if record.stagger_speed_q8 == 0 {
-                768
-            } else {
-                record.stagger_speed_q8
-            },
-            frame_range: record.stagger_frame_range,
-            ..one_shot(record.stagger_clip, ticks)
-        };
         match self.state(index) {
             GameEntityState::Idle => (Action::Idle, looping(record.idle_clip)),
             GameEntityState::Patrol => (Action::Walk, looping(record.walk_clip)),
@@ -2155,35 +2165,17 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
                 GameEntityIntent::Hold => (Action::Idle, looping(record.idle_clip)),
             },
             GameEntityState::Attack => attack_one_shot(ticks),
-            // A parried attacker plays its Parried clip over the same
-            // stagger; until one is authored that is the stagger clip.
+            // A reaction plays as the player's does (a riposte's stagger is
+            // its Parried clip, else the stagger's; a knockdown is held on
+            // its last frame while down); a body that binds nothing for it
+            // holds its rest pose.
             GameEntityState::Staggered
-                if self.combat_flags[index] & GAME_ENTITY_PARRIED_STAGGER != 0
-                    && record.parried_clip != record.stagger_clip =>
-            {
-                (Action::Parried, one_shot(record.parried_clip, ticks))
-            }
-            GameEntityState::Staggered => (Action::Stun, stagger(ticks)),
-            // The knockdown clip plays once and holds its last frame while
-            // the entity is down. Until a knockdown clip is authored it is the
-            // stagger clip, at the stagger's authored playback.
-            GameEntityState::KnockedDown if record.knockdown_clip == record.stagger_clip => {
-                (Action::Knockdown, stagger(ticks))
-            }
-            GameEntityState::KnockedDown => {
-                (Action::Knockdown, one_shot(record.knockdown_clip, ticks))
-            }
-            GameEntityState::Flinched => {
-                let action = Action::HitReact.to_index();
+            | GameEntityState::KnockedDown
+            | GameEntityState::Flinched => {
+                let reaction = self.reaction(index).unwrap_or(Reaction::Flinch);
                 let body = self.body(record);
-                (
-                    Action::HitReact,
-                    GameEntityClip {
-                        speed_q8: body.action_speeds[action],
-                        frame_range: body.action_frame_ranges[action],
-                        ..one_shot(body.action_clips[action].raw(), ticks)
-                    },
-                )
+                Self::reaction_clip(body, reaction, ticks)
+                    .unwrap_or((reaction.shown(body), one_shot(record.idle_clip, ticks)))
             }
             GameEntityState::Dead => (Action::Death, one_shot(record.death_clip, ticks)),
         }
@@ -2565,13 +2557,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
                     }
                 }
                 GameEntityState::Staggered => {
-                    if self.state_ticks[index]
-                        >= if record.stagger_ticks == 0 {
-                            GAME_ENTITY_STAGGER_TICKS
-                        } else {
-                            record.stagger_ticks
-                        }
-                    {
+                    if self.state_ticks[index] >= self.stagger_ticks[index] {
                         self.enter_state(index, GameEntityState::Aggro, &mut stats);
                         // The authored reaction is for first acquisition, not
                         // an extra pause after the player already won a stagger.
@@ -3942,12 +3928,6 @@ mod tests {
             ranged_attack_clip: 12,
             ranged_attack_speed_q8: CHARACTER_ACTION_SPEED_UNSCALED_Q8,
             ranged_attack_frame_range: CharacterActionFrameRange::FULL,
-            stagger_clip: 4,
-            stagger_speed_q8: 0,
-            stagger_frame_range: CharacterActionFrameRange::FULL,
-            stagger_ticks: 0,
-            knockdown_clip: 4,
-            parried_clip: 4,
             roll_clip: 4,
             death_clip: 5,
             ranged_attack_action: CharacterAnimationAction::RangedAttack.to_index() as u8,
@@ -4031,12 +4011,31 @@ mod tests {
     pub(super) const BODY_NO_KNOCKDOWN: u16 = 4;
     pub(super) const BODY_SHORT_SWAP: u16 = 5;
     pub(super) const BODY_SUB_UNIT: u16 = 6;
+    pub(super) const BODY_SLOW_STUN: u16 = 7;
     const TACTICAL_MOTION: psx_level::CharacterMotion = psx_level::CharacterMotion {
         walk_speed: 2 * 256,
         run_speed: 6 * 256,
         ..test_motion(16, 48)
     };
-    pub(super) static TEST_BODIES: [LevelCharacterRecord; 7] = [
+    /// Knockdown off (a break staggers) and a Stun bound to clip 9, played
+    /// at full speed over frames 0 to 42.
+    const fn slow_stun_body() -> LevelCharacterRecord {
+        let mut body = test_body(
+            192,
+            1024,
+            test_motion(16, 48),
+            CombatStats {
+                knockdown_ticks: 0,
+                ..TEST_COMBAT
+            },
+        );
+        let stun = CharacterAnimationAction::Stun.to_index();
+        body.action_clips[stun] = psx_level::OptionalModelClipIndex::some(psx_level::ModelClipIndex(9));
+        body.action_speeds[stun] = 256;
+        body.action_frame_ranges[stun] = CharacterActionFrameRange { start: 0, end: 42 };
+        body
+    }
+    pub(super) static TEST_BODIES: [LevelCharacterRecord; 8] = [
         test_body(192, 1024, test_motion(16, 48), TEST_COMBAT),
         // The two old 600 pools as one bar.
         test_body(
@@ -4082,6 +4081,7 @@ mod tests {
                 ..TEST_COMBAT
             },
         ),
+        slow_stun_body(),
     ];
 
     static IDLE_ENEMY: [LevelGameEntityRecord; 1] = [test_record(
@@ -4967,20 +4967,18 @@ mod tests {
     #[test]
     fn authored_stagger_plays_at_its_speed_until_recovery_finishes() {
         static SLOW_STUN: [LevelGameEntityRecord; 1] = [LevelGameEntityRecord {
-            stagger_speed_q8: 256,
-            stagger_frame_range: CharacterActionFrameRange { start: 0, end: 42 },
-            stagger_ticks: 85,
-            // Knockdown off: a break then staggers, which is what this pins.
-            character: psx_level::CharacterIndex(BODY_NO_KNOCKDOWN),
+            character: psx_level::CharacterIndex(BODY_SLOW_STUN),
             ..test_record(1000, 1000, 0, 512, game_entity_flags::ENABLED)
         }];
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&SLOW_STUN);
         entities.set_spatial_active_mask(u64::MAX);
+        // The game reads the Stun clip's length off the clip (85 ticks here).
+        entities.time_reactions(&SLOW_STUN, |_, _, clip| (clip.clip == 9).then_some(85));
         entities.apply_hit(&SLOW_STUN, 0, VitalityChannelId::One, 10, 60);
         let clip = entities.clip_for_state(&SLOW_STUN, 0);
-        assert_eq!(clip.speed_q8, 256);
-        assert_eq!(clip.frame_range, SLOW_STUN[0].stagger_frame_range);
+        assert_eq!((clip.clip, clip.speed_q8), (9, 256));
+        assert_eq!(clip.frame_range, CharacterActionFrameRange { start: 0, end: 42 });
         for _ in 0..84 {
             entities.tick(&SLOW_STUN, far_input(), &mut OpenWorld);
             assert_eq!(entities.state(0), GameEntityState::Staggered);

@@ -12,6 +12,7 @@
 
 use std::path::Path;
 
+use psx_game_runtime::combatant::Reaction;
 use psx_level::{game_entity_flags, LevelGameEntityRecord};
 use psxed_project::playtest::{build_package, OwnedLevelRecords, PlaytestPackage};
 use psxed_project::{NodeKind, ProjectDocument, ResourceData};
@@ -119,18 +120,9 @@ fn training_fighter(
         .model_instances
         .get(usize::from(record.model_instance))
         .map(|instance| usize::from(instance.model));
-    let hit_react = psx_level::CharacterAnimationAction::HitReact.to_index();
-    spec.flinch_ticks = model.and_then(|model| {
-        let clip = body.action_clips[hit_react];
-        clip.is_some().then_some(())?;
-        clip_ticks(
-            package,
-            model,
-            clip.raw(),
-            body.action_speeds[hit_react],
-            body.action_frame_ranges[hit_react],
-        )
-    });
+    spec.flinch_ticks = model.and_then(|model| reaction_ticks(package, model, &body, Reaction::Flinch));
+    spec.stagger_ticks =
+        model.and_then(|model| reaction_ticks(package, model, &body, Reaction::Stagger));
     let clocks = entity_clocks(package, &spec.record);
     attach_clocks(&mut spec, clocks, capsules);
     spec.capsules = capsules.to_vec();
@@ -412,19 +404,14 @@ pub fn load_training(project_dir: &Path, which: usize) -> Result<ProjectFighters
         )
     };
 
-    // Her stagger is her Stun clip played through, as the disc locks her for
-    // it (`react_player`); her set does not bind Stun the way an enemy set
-    // does, so the entity cook leaves her the legacy 32 ticks.
-    let stun = psx_level::CharacterAnimationAction::Stun.to_index();
-    if let Some(ticks) = clip_ticks(
+    // Her stagger is timed on her own Character and model, as the disc times
+    // it.
+    aletha.stagger_ticks = reaction_ticks(
         &package,
         usize::from(player_character.model),
-        player_character.action_clips[stun],
-        player_character.action_speeds[stun],
-        player_character.action_frame_ranges[stun],
-    ) {
-        aletha.record.stagger_ticks = ticks;
-    }
+        &cooked_body(player_character),
+        Reaction::Stagger,
+    );
 
     let spawn = player.spawn;
     let dx = i64::from(spawn.x) - i64::from(enemy_record.x);
@@ -499,6 +486,26 @@ fn melee_reach(
 /// How long clip `clip` (model-local) of model `model` plays at `speed_q8`
 /// over `range`, in 60 Hz ticks: the guest's `clip_duration_ticks`, the
 /// length an action locks its fighter for. None when the clip is not cooked.
+/// How long `body` (on `model`) is held by `reaction`, as the guest times
+/// it (`GameEntities::time_reactions`): the reaction's playback played
+/// through. `None` when it binds nothing for it.
+fn reaction_ticks(
+    package: &PlaytestPackage,
+    model: usize,
+    body: &psx_level::LevelCharacterRecord,
+    reaction: Reaction,
+) -> Option<u16> {
+    let (action, clip) = body.verb_clip(reaction.verb())?;
+    let i = action.to_index();
+    clip_ticks(
+        package,
+        model,
+        clip,
+        body.action_speeds[i],
+        body.action_frame_ranges[i],
+    )
+}
+
 fn clip_ticks(
     package: &PlaytestPackage,
     model: usize,

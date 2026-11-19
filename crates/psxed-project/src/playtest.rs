@@ -1223,11 +1223,6 @@ fn build_package_cooked(
                                 .min()
                                 .unwrap_or(0)
                             };
-                            let stagger_ticks = cooked_game_entity_stagger_ticks(
-                                clip_timing_for(state_clips.stagger),
-                                state_clips.stagger_speed_q8,
-                                state_clips.stagger_frame_range,
-                            );
                             let entity_settings = controller.settings.unwrap_or_else(|| {
                                 crate::CharacterControllerSettings::from_character(enemy_character)
                             });
@@ -1270,7 +1265,6 @@ fn build_package_cooked(
                                         attack_active_ticks,
                                         heavy_attack_active_ticks,
                                         ranged_attack_active_ticks,
-                                        stagger_ticks,
                                         projectile_attack_range,
                                         melee_reach,
                                         &mut names,

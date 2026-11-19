@@ -1715,19 +1715,18 @@ impl Playtest {
                 )
             },
         );
-        self.game_entities.time_flinches(
-            GAME_ENTITIES.as_slice(),
-            |record, clip, speed_q8, frame_range| {
+        self.game_entities
+            .time_reactions(GAME_ENTITIES.as_slice(), |record, _, clip| {
                 let character = CHARACTERS.get(record.character.to_usize())?;
                 let animation = models
                     .get(character.model.to_usize())
                     .copied()
                     .flatten()?
-                    .clip(clips, ModelClipIndex(clip))?;
-                let ticks = mr::clip_duration_ticks(animation, video_hz, speed_q8, frame_range);
+                    .clip(clips, ModelClipIndex(clip.clip))?;
+                let ticks =
+                    mr::clip_duration_ticks(animation, video_hz, clip.speed_q8, clip.frame_range);
                 Some(ticks.min(u32::from(u16::MAX)) as u16)
-            },
-        );
+            });
         self.entity_attacks_timed = true;
     }
 

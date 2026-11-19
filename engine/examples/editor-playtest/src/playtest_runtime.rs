@@ -1601,32 +1601,28 @@ impl Playtest {
     }
 
     /// Play `reaction` (decided by the one rule,
-    /// [`Posture::reaction`]) on her body: the knockdown, the stagger (Stun;
-    /// a riposte's plays the Parried clip over its lock), or the hit
-    /// reaction (HitReact).
+    /// [`Posture::reaction`]) on her body as every body plays it: the clip of
+    /// its verb, else the first bound stand-in of the verb's chain
+    /// ([`Reaction::verb`]), locked for the clip's length (a riposte's
+    /// stagger for the stagger's); a knockdown for her `knockdown_ticks`.
     pub(super) fn play_player_reaction(&mut self, reaction: Reaction, ctx: &Ctx) {
         // Player animation starts and locks use the absolute simulation clock.
         // Enemy animation phases use gameplay_tick; using that epoch here makes
         // the reaction appear expired as soon as update_gameplay checks its lock.
         let now = ctx.sim_tick;
-        let anim = match reaction {
-            Reaction::Knockdown => {
-                self.knock_player_down(ctx);
-                return;
-            }
-            Reaction::Flinch => PlayerAnim::HitReact,
-            // Older projects can still use their hit clip when no Stun is bound.
-            Reaction::Stagger | Reaction::Parried
-                if self
-                    .character
-                    .is_none_or(|c| c.action_clip(PlayerAnim::Stun.action()).is_none()) =>
-            {
-                PlayerAnim::HitReact
-            }
-            Reaction::Stagger | Reaction::Parried => PlayerAnim::Stun,
-        };
+        if reaction == Reaction::Knockdown {
+            self.knock_player_down(ctx);
+            return;
+        }
+        // Same lock, same rules: only the clip differs.
+        let lock = self.player_reaction_anim(if reaction == Reaction::Flinch {
+            Reaction::Flinch
+        } else {
+            Reaction::Stagger
+        });
+        let anim = self.player_reaction_anim(reaction);
         self.interrupt_player_for_reaction();
-        let has_reaction = self.start_player_anim_action(anim, now, ctx.video_hz);
+        let has_reaction = self.start_player_anim_action(lock, now, ctx.video_hz);
         let recovery = if has_reaction {
             // Follow authored speed and range through the final recovery pose.
             self.game_entities
@@ -1635,29 +1631,34 @@ impl Playtest {
                 .saturating_sub(now)
                 .max(1)
         } else {
-            18
+            // A body that binds no clip for it is still held, as an entity is.
+            u32::from(psx_game_runtime::entities::GAME_ENTITY_STAGGER_TICKS)
         };
-        // Missing hit-react assets still interrupt gameplay safely.
-        if !has_reaction {
+        if !has_reaction || anim != lock {
             self.switch_player_anim(anim, now, ctx.video_hz);
         }
         self.game_entities.actor_action_mut().lock_until = now.saturating_add(recovery);
-        // Same lock, same rules: only the clip differs. Unbound, Parried's
-        // chain (Stun, then HitReact) is exactly the reaction already playing,
-        // at its own authored speed and range.
-        if reaction == Reaction::Parried
-            && self
-                .character
-                .is_some_and(|c| c.supports_action(CharacterAnimationAction::Parried))
-        {
-            self.switch_player_anim(PlayerAnim::Parried, now, ctx.video_hz);
-        }
         self.anim.switched = None;
         telemetry::debug_log(if reaction == Reaction::Flinch {
             "player hit:react"
         } else {
             "player poise:break"
         });
+    }
+
+    /// The state her body shows for `reaction` ([`Reaction::shown`]).
+    fn player_reaction_anim(&self, reaction: Reaction) -> PlayerAnim {
+        use psx_level::CharacterAnimationAction as Action;
+        let shown = match self.character.as_ref() {
+            Some(character) => reaction.shown(character),
+            None => reaction.shown(&psx_level::combat_verbs::BoundBy(|_| false)),
+        };
+        match shown {
+            Action::Stun => PlayerAnim::Stun,
+            Action::Parried => PlayerAnim::Parried,
+            Action::Knockdown => PlayerAnim::Knockdown,
+            _ => PlayerAnim::HitReact,
+        }
     }
 
     /// Drop every action, buffer and aim the player had going: a reaction
@@ -1679,7 +1680,8 @@ impl Playtest {
     fn knock_player_down(&mut self, ctx: &Ctx) {
         let now = ctx.sim_tick;
         self.interrupt_player_for_reaction();
-        self.switch_player_anim(PlayerAnim::Knockdown, now, ctx.video_hz);
+        let anim = self.player_reaction_anim(Reaction::Knockdown);
+        self.switch_player_anim(anim, now, ctx.video_hz);
         self.game_entities.actor_action_mut().lock_until = now.saturating_add(u32::from(
             self.game_entities.actor_stats().knockdown_ticks.max(1),
         ));

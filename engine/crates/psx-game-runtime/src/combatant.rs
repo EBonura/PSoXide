@@ -338,6 +338,31 @@ pub enum Reaction {
     Knockdown,
 }
 
+impl Reaction {
+    /// The verb every body plays this reaction with, through its Character's
+    /// fallback chain ([`psx_level::combat_verbs`]): a Parried with no
+    /// Parried clip plays the Stun, a Stun with none the Hit React.
+    pub const fn verb(self) -> psx_level::CharacterAnimationAction {
+        use psx_level::CharacterAnimationAction as Action;
+        match self {
+            Self::Flinch => Action::HitReact,
+            Self::Stagger => Action::Stun,
+            Self::Parried => Action::Parried,
+            Self::Knockdown => Action::Knockdown,
+        }
+    }
+
+    /// The action a body shows for this reaction: its verb, else the first
+    /// bound stand-in of the verb's chain; with none bound, the verb (a
+    /// riposte's, the stagger's), over the rest pose.
+    pub fn shown(self, body: &impl psx_level::combat_verbs::VerbBindings) -> psx_level::CharacterAnimationAction {
+        psx_level::combat_verbs::resolve(body, self.verb()).unwrap_or(match self {
+            Self::Parried => psx_level::CharacterAnimationAction::Stun,
+            other => other.verb(),
+        })
+    }
+}
+
 /// The defender's side of one hit apart from its numbers: armour now, the
 /// reaction holding it, and whether its body binds a flinch (Hit React)
 /// clip.

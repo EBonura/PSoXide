@@ -70,8 +70,12 @@ pub struct FighterSpec {
     /// record's ticks, as on the disc.
     pub timings: [Option<psx_game_runtime::fighter_action::ActionTiming>; 3],
     /// Its Hit React clip's length in ticks, as the guest times a flinch
-    /// (`GameEntities::time_flinches`); `None` when it binds none.
+    /// (`GameEntities::time_reactions`); `None` when it binds none.
     pub flinch_ticks: Option<u16>,
+    /// Its stagger's length in ticks: its Stun playback (through the verb's
+    /// chain) played through, as the guest times it; `None` when it binds
+    /// none.
+    pub stagger_ticks: Option<u16>,
     /// Its cooked model, clips and capsules, posed each tick for contact;
     /// `None` when the body could not be loaded (it then never connects
     /// and is never struck by a blade, as a body without a pose on the
@@ -125,6 +129,7 @@ impl FighterSpec {
             capsules: capsules.to_vec(),
             timings: [None; 3],
             flinch_ticks: None,
+            stagger_ticks: None,
             rig: None,
         }
     }

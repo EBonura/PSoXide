@@ -190,14 +190,17 @@ fn a_parried_attacker_is_staggered_not_knocked_down_on_both_sides() {
 #[test]
 fn a_parried_attacker_plays_parried_on_both_sides() {
     use psx_level::{CharacterAnimationAction, OptionalModelClipIndex};
-    // The enemy: its riposte stagger plays its cooked Parried clip; any other
-    // stagger still plays the stagger clip. Same state, same timing.
+    // The enemy: its riposte stagger plays its Character's Parried clip; any
+    // other stagger still plays the stagger clip. Same state, same timing.
     let records: &'static [LevelGameEntityRecord] =
-        std::boxed::Box::leak(std::boxed::Box::new([LevelGameEntityRecord {
-            parried_clip: 9,
-            ..*hybrid()
-        }]));
+        std::boxed::Box::leak(std::boxed::Box::new([*hybrid()]));
+    let mut bodies = CHARACTERS.to_vec();
+    let body = &mut bodies[records[0].character.to_usize()];
+    body.action_clips[CharacterAnimationAction::Parried.to_index()] =
+        OptionalModelClipIndex::from_raw(9);
+    let bodies: &'static [psx_level::LevelCharacterRecord] = bodies.leak();
     let mut scene = duel();
+    scene.game_entities.set_characters(bodies);
     assert!(scene.game_entities.spawn_slot(0, StableId(1), &records[0]));
     let outcome = scene.game_entities.riposte(records, 0, CombatantId::PLAYER);
     assert!(outcome.staggered);
@@ -205,6 +208,7 @@ fn a_parried_attacker_plays_parried_on_both_sides() {
     assert!(scene.game_entities.parried_stagger(0));
     assert_eq!(scene.game_entities.clip_for_state(records, 0).clip, 9);
     let mut plain = duel();
+    plain.game_entities.set_characters(bodies);
     assert!(plain.game_entities.spawn_slot(0, StableId(1), &records[0]));
     let broken = plain.game_entities.receive_hit(
         records,

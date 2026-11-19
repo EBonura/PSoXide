@@ -464,26 +464,6 @@ pub(crate) fn remap_runtime_model_clip(
         .flatten()
 }
 
-/// Keep an explicitly configured stun active through its final recovery pose.
-pub(crate) fn cooked_game_entity_stagger_ticks(
-    timing: Option<(u16, u16)>,
-    speed_q8: u16,
-    range: psx_level::CharacterActionFrameRange,
-) -> u16 {
-    let Some((hz, count)) = timing.filter(|_| speed_q8 != 0) else {
-        return 32;
-    };
-    let last = count.saturating_sub(2);
-    let start = range.start.min(last);
-    let end = range.end.min(last).max(start);
-    // Match the guest's integer phase step, including truncation at slow rates.
-    let base_step = (u64::from(hz.max(1)) << 12) / 60;
-    let step = (base_step * u64::from(speed_q8) / 256).max(1);
-    let phase = u64::from(end - start) << 12;
-    // Keep the final recovery pose visible for one tick before leaving Staggered.
-    (phase.div_ceil(step) + 1).min(u64::from(u16::MAX)) as u16
-}
-
 /// Keep an enemy in its committed Attack state until every authored combat
 /// event has been sampled and enough clip time remains for the authored
 /// recovery state to reach the final frame. Entity state clocks are 60 Hz;
@@ -2958,11 +2938,6 @@ pub(crate) struct GameEntityStateClips {
     pub ranged_attack_speed_q8: u16,
     pub ranged_attack_frame_range: psx_level::CharacterActionFrameRange,
     pub ranged_attack_action: u8,
-    pub stagger: u16,
-    pub stagger_speed_q8: u16,
-    pub stagger_frame_range: psx_level::CharacterActionFrameRange,
-    pub knockdown: u16,
-    pub parried: u16,
     /// Played while rolling: Roll, else its chain, else walk.
     pub roll: u16,
     pub death: u16,
@@ -2999,11 +2974,6 @@ impl GameEntityStateClips {
             ranged_attack_speed_q8: psx_level::CHARACTER_ACTION_SPEED_UNSCALED_Q8,
             ranged_attack_frame_range: psx_level::CharacterActionFrameRange::FULL,
             ranged_attack_action: CharacterAnimationAction::RangedAttack.to_index() as u8,
-            stagger: clip,
-            stagger_speed_q8: 0,
-            stagger_frame_range: psx_level::CharacterActionFrameRange::FULL,
-            knockdown: clip,
-            parried: clip,
             roll: clip,
             death: clip,
             // Bindings unknown without the Character's own model: nothing is
@@ -3119,7 +3089,6 @@ pub(crate) fn game_entity_state_clips(
     let attack = play(CharacterAnimationAction::LightAttack).unwrap_or(rest);
     let heavy_attack = play(CharacterAnimationAction::HeavyAttack).unwrap_or(rest);
     let ranged_attack = play(CharacterAnimationAction::RangedAttack).unwrap_or(rest);
-    let stagger = play(CharacterAnimationAction::Stun).unwrap_or(rest);
     Some(GameEntityStateClips {
         idle,
         // Intro is the first-activation role for non-player Characters; for
@@ -3152,29 +3121,10 @@ pub(crate) fn game_entity_state_clips(
         ranged_attack_speed_q8: ranged_attack.speed_q8,
         ranged_attack_frame_range: ranged_attack.frame_range,
         ranged_attack_action: ranged_action.to_index() as u8,
-        // A poise break is one complete authored Stun clip, including its
-        // recovery. Older characters without that action keep their existing
-        // HitReact behavior rather than becoming animationless.
-        stagger: stagger.clip,
-        // Existing unconfigured clips retain the legacy half-second reaction.
-        stagger_speed_q8: if stagger.authored_options {
-            stagger.speed_q8
-        } else {
-            0
-        },
-        stagger_frame_range: stagger.frame_range,
-        // Over a parry's stagger: Parried, else its chain (Stun, HitReact).
-        parried: play(CharacterAnimationAction::Parried)
-            .map(|playback| playback.clip)
-            .unwrap_or(stagger.clip),
         // While rolling: Roll, else its chain (Backstep), else the walk.
         roll: play(CharacterAnimationAction::Roll)
             .map(|playback| playback.clip)
             .unwrap_or(walk),
-        // Held while down: Knockdown, else its chain (Stun, HitReact).
-        knockdown: play(CharacterAnimationAction::Knockdown)
-            .map(|playback| playback.clip)
-            .unwrap_or(stagger.clip),
         death: optional(CharacterAnimationAction::Death)
             .map(|playback| playback.clip)
             .unwrap_or(idle),
@@ -4023,20 +3973,6 @@ mod socket_anchor_tests {
         cooked_game_entity_attack_active_ticks, remap_authored_duration, remap_authored_frame,
     };
     use crate::model_import::model_joint_bind_anchor;
-
-    #[test]
-    fn stagger_timing_covers_recovery_and_keeps_legacy_defaults() {
-        use super::cooked_game_entity_stagger_ticks as ticks;
-        use psx_level::CharacterActionFrameRange as Range;
-        assert_eq!(ticks(Some((30, 44)), 256, Range::FULL), 85);
-        assert_eq!(ticks(Some((30, 44)), 128, Range::FULL), 169);
-        assert_eq!(ticks(Some((30, 44)), 256, Range { start: 12, end: 42 }), 61);
-        // At 10 Hz the fixed-point phase step rounds down: reaching 15
-        // requires 91 ticks at 1x, plus a tick showing the final pose.
-        assert_eq!(ticks(Some((10, 17)), 256, Range::FULL), 92);
-        assert_eq!(ticks(Some((30, 44)), 0, Range::FULL), 32);
-        assert_eq!(ticks(None, 256, Range::FULL), 32);
-    }
 
     /// Every body keeps resident exactly the clips its Character binds, by one rule: an
     /// enemy's roll, dash or hit reaction is resident as the player's is, so a newly bound

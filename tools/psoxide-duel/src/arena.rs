@@ -32,7 +32,7 @@ use psx_game_runtime::combat::{
     ticks_to_contact, ActiveStrike, WorldCombatCapsule,
 };
 use psx_game_runtime::combat_intent::{CombatAction, CombatActions, CombatIntent, CombatMove};
-use psx_game_runtime::combatant::{Combatant, CombatantId, Defender, HitKind, Strike};
+use psx_game_runtime::combatant::{Combatant, CombatantId, Defender, HitKind, Reaction, Strike};
 use psx_game_runtime::entities::{
     melee_swing_reach, AttackPhase, CombatTarget, DeferredGameEntityAttacks, FighterWorld,
     GameEntities, GameEntityState, GameEntityTickInput, OpenSpace,
@@ -688,7 +688,10 @@ pub fn run(duel: &Duel<'_>) -> DuelResult {
             entities.seed_training_actor(records, 0, duel.seeds[n]);
             // The game times its entities' attacks after spawning them.
             entities.time_attacks(records, |_, action, _, _, _| fighter.spec.timing(action));
-            entities.time_flinches(records, |_, _, _, _| fighter.spec.flinch_ticks);
+            entities.time_reactions(records, |_, reaction, _| match reaction {
+                Reaction::Flinch => fighter.spec.flinch_ticks,
+                _ => fighter.spec.stagger_ticks,
+            });
             let position = entities.position(0);
             Side {
                 spec: fighter.spec.clone(),

@@ -427,15 +427,15 @@ fn poise_accumulates_then_breaks_and_the_break_starts_the_grace_window() {
 }
 
 #[test]
-fn a_break_without_a_stun_clip_falls_back_to_hit_react_with_an_eighteen_tick_lock() {
+fn a_break_with_no_clip_bound_holds_her_as_long_as_an_entity() {
     let mut scene = scene();
     // Knockdown off: a break then staggers, which is what this pins.
     scene.game_entities.actor_stats_mut().knockdown_ticks = 0;
     assert!(scene.react_player_to_hit(CombatantId::WORLD, 60, false, false, false, &ctx(100)));
-    assert_eq!(scene.anim.state, PlayerAnim::HitReact);
+    assert_eq!(scene.anim.state, PlayerAnim::Stun);
     assert_eq!(
         scene.game_entities.actor_action().lock_until,
-        SimTick::from_u32(118)
+        SimTick::from_u32(100 + u32::from(psx_game_runtime::entities::GAME_ENTITY_STAGGER_TICKS))
     );
 }
 
@@ -492,12 +492,9 @@ fn a_shot_only_hit_never_interrupts_unless_it_breaks_posture() {
     assert!(!scene.react_player_to_hit(CombatantId::WORLD, 30, false, true, false, &ctx(100)));
     assert_eq!(scene.anim.state, PlayerAnim::Idle);
     assert!(scene.react_player_to_hit(CombatantId::WORLD, 30, false, true, false, &ctx(101)));
-    // An ordinary break is a stagger: Stun, HitReact while Stun is unbound.
-    assert_eq!(
-        scene.anim.state,
-        PlayerAnim::HitReact,
-        "a break staggers her"
-    );
+    // An ordinary break is a stagger: Stun (its chain's Hit React when only
+    // that is bound; the Stun over her rest pose here, where nothing is).
+    assert_eq!(scene.anim.state, PlayerAnim::Stun, "a break staggers her");
     assert!(!scene.game_entities.actor().knocked_down());
 }
 
