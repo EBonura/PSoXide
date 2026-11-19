@@ -905,6 +905,14 @@ impl GridRuntime {
         if self.level.header.flags & LEVEL_HAS_LIQUIDS == 0 {
             return None;
         }
+        Some(self.sample_contents(position, height))
+    }
+
+    /// The three body samples of [`Self::player_contents`], out of line: every
+    /// fighter asks, and the flag test above is all a dry level runs.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
+    fn sample_contents(&self, position: RoomPoint, height: i32) -> LiquidContentsSample {
         let height = height.max(1);
         let samples = [
             position.y.saturating_add(1),
@@ -927,7 +935,7 @@ impl GridRuntime {
                 }
             }
         }
-        Some(out)
+        out
     }
 
     // ------------------------------------------------------------------
