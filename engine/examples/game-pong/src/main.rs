@@ -269,7 +269,8 @@ fn spin_from_paddle(ball_y: i16, paddle_y: i16, prev_vy: i16) -> i16 {
 impl Scene for Pong {
     fn init(&mut self, _ctx: &mut Ctx) {
         spu::init();
-        sfx::upload_samples(SPU_SAMPLE_BASE, &SFX_BANK);
+        // A bank that did not land plays nothing; psx-spu reports the timeout.
+        let _ = sfx::upload_samples(SPU_SAMPLE_BASE, &SFX_BANK);
 
         self.font = Some(FontAtlas::upload(&BASIC_8X16, FONT_TPAGE, FONT_CLUT));
 

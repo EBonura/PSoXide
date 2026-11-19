@@ -4861,7 +4861,7 @@ fn test_spu_dma_and_fifo_agree() -> TestResult {
     use psx_hw::spu::{SPUCNT, SPUSTAT, TRANSFER_ADDR, TRANSFER_CTRL, TRANSFER_DATA};
     let src = spu_probe_pattern();
     let bytes = unsafe { core::slice::from_raw_parts(src.as_ptr() as *const u8, 64) };
-    psx_spu::upload_adpcm(SpuAddr::new(0x3800), bytes);
+    let _ = psx_spu::upload_adpcm(SpuAddr::new(0x3800), bytes);
 
     // The same 64 bytes again, by hand through the FIFO, at 0x3C00.
     let halfwords = unsafe { core::slice::from_raw_parts(src.as_ptr() as *const u16, 32) };
@@ -5846,7 +5846,7 @@ fn test_spu_ram_dma_roundtrip() -> TestResult {
     }
     let dest: u32 = 0x3000; // clear of the 0x000-0xFFF capture buffers
     let bytes = unsafe { core::slice::from_raw_parts(src.as_ptr() as *const u8, 64) };
-    psx_spu::upload_adpcm(SpuAddr::new(dest), bytes);
+    let _ = psx_spu::upload_adpcm(SpuAddr::new(dest), bytes);
     let mut back = [0u32; 16];
     spu_dma_read(dest, &mut back);
     expect_eq(fnv32_words(&src), fnv32_words(&back), "spu dma upload")
@@ -6031,7 +6031,7 @@ fn precision_spu(values: &mut [u32; PRECISION_VALUE_COUNT], next: &mut usize) {
     }
     let dest = 0x3800;
     let bytes = unsafe { core::slice::from_raw_parts(src.as_ptr() as *const u8, 64) };
-    psx_spu::upload_adpcm(SpuAddr::new(dest), bytes);
+    let _ = psx_spu::upload_adpcm(SpuAddr::new(dest), bytes);
 
     let mut boot_single = [0u32; 16];
     let boot_single_waits = spu_dma_read_shape(dest, &mut boot_single, 16);

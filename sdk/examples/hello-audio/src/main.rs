@@ -167,7 +167,9 @@ fn main() {
     for ch in SFX_CHANNELS.iter() {
         let audio = Audio::from_bytes(ch.bytes).expect("psau sample");
         let addr = SpuAddr::new(next_addr);
-        spu_driver.upload_adpcm(addr, audio.adpcm_bytes());
+        if spu_driver.upload_adpcm(addr, audio.adpcm_bytes()).is_err() {
+            psx_rt::tty::println("hello-audio: sample upload timed out");
+        }
         ch.voice
             .configure_sample(addr, audio.sample_rate_hz(), ch.volume, Adsr::sample());
         next_addr += audio.adpcm_bytes().len() as u32;

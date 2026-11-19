@@ -349,7 +349,8 @@ static mut BG_QUAD: QuadGouraud = QuadGouraud {
 impl Scene for Breakout {
     fn init(&mut self, _ctx: &mut Ctx) {
         spu::init();
-        sfx::upload_samples(SPU_SAMPLE_BASE, &SFX_BANK);
+        // A bank that did not land plays nothing; psx-spu reports the timeout.
+        let _ = sfx::upload_samples(SPU_SAMPLE_BASE, &SFX_BANK);
 
         self.font = Some(FontAtlas::upload(&BASIC_8X16, FONT_TPAGE, FONT_CLUT));
 

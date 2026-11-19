@@ -353,8 +353,8 @@ fn upload_tables() {
         // Impulse: only sample 0 of each block is nonzero.
         impulse[at + 2] |= 0x7;
     }
-    spu::upload_adpcm(SpuAddr::new(SPU_SQUARE_ADDR), &square);
-    spu::upload_adpcm(SpuAddr::new(SPU_IMPULSE_ADDR), &impulse);
+    let _ = spu::upload_adpcm(SpuAddr::new(SPU_SQUARE_ADDR), &square);
+    let _ = spu::upload_adpcm(SpuAddr::new(SPU_IMPULSE_ADDR), &impulse);
 }
 
 fn segment_label(segment: u8) -> &'static str {

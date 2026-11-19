@@ -420,7 +420,10 @@ impl SpuDma {
     /// Returns `false` without starting anything when `words` is empty (a zero
     /// block count means 65,536 blocks on silicon), when `block_words` is 0 or
     /// does not divide the length, or when the block count does not fit the
-    /// 16-bit field; and `false` when the channel wedged and was aborted.
+    /// 16-bit field; and `false` when the channel outlived its wait budget
+    /// ([`spu_wait_spins`]) and was aborted, in which case only a head of
+    /// `words` reached the SPU.
+    #[must_use = "`false` means the SPU did not receive every word"]
     pub fn write_blocks(&mut self, words: &[u32], block_words: u16) -> bool {
         let block = usize::from(block_words);
         if words.is_empty() || block == 0 || !words.len().is_multiple_of(block) {
@@ -437,6 +440,13 @@ impl SpuDma {
     /// channel enabled by the caller (`enable_channel(Channel::Spu)`): `words` is
     /// exactly `block_count` blocks of `block_words` words, neither zero. For a caller
     /// that sends many pieces and divides and enables once.
+    ///
+    /// The wait's budget is [`spu_wait_spins`] of the length, not a fixed
+    /// count: the SPU takes a word about every 65 clocks, so a fixed budget
+    /// that covers a frame's GPU work covers only about 338 KB of samples, and
+    /// a longer upload used to be cut off on a console while every emulator,
+    /// moving words twice as fast, finished it.
+    #[must_use = "`false` means the SPU did not receive every word"]
     pub fn write_counted(&mut self, words: &[u32], block_words: u16, block_count: u16) -> bool {
         // SAFETY: the transfer reads `block_words * block_count` words from
         // `words`, which is exactly the slice (a whole number of non-empty
@@ -452,14 +462,49 @@ impl SpuDma {
                 },
             )
         };
-        wait_or_abort(Channel::Spu, DEFAULT_SPINS)
+        wait_or_abort(Channel::Spu, spu_wait_spins(words.len() as u32))
     }
 }
 
-/// Spin budget for one DMA completion wait. Comfortably longer than the
-/// largest legitimate transfer (a full-screen VRAM upload) and short
-/// enough that a wedged channel returns control inside a frame.
+/// Spin budget for one DMA completion wait on the fast channels (GPU,
+/// ordering-table clear, MDEC): comfortably longer than the largest legitimate
+/// transfer (a full-screen VRAM upload) and short enough that a wedged channel
+/// returns control inside a frame. The SPU channel is about fifty times slower
+/// per word and sizes its budget from the length instead: [`spu_wait_spins`].
 pub const DEFAULT_SPINS: u32 = 500_000;
+
+/// Clocks the SPU channel takes per 32-bit word on silicon: hardware-test
+/// record 0x65 (1 KiB RAM to SPU, 512 halfwords) reads 16,589 to 16,891
+/// clocks on every console capture (v1.17 to v2.18, both memory-controller
+/// settings), so 65 and a fraction; rounded up.
+pub const SPU_CLOCKS_PER_WORD: u32 = 66;
+
+/// The fewest clocks one pass of [`wait_done`]'s loop can take: a control
+/// register read (380 clocks per 64 on silicon, hardware-test record 0x1A1),
+/// the test, the count and the branch. The SDK's loop measures about 11, so
+/// this undercounts on purpose: the budget only ever comes out longer.
+const MIN_CLOCKS_PER_SPIN: u32 = 8;
+
+/// How many times longer than the silicon transfer time an SPU wait may spin
+/// before it calls the channel wedged.
+const SPU_WAIT_MARGIN: u32 = 4;
+
+/// Spins for the setup a transfer pays whatever its length (channel start,
+/// the first block request).
+const SPU_WAIT_BASE_SPINS: u32 = 2_048;
+
+/// Spin budget for an SPU DMA of `words` words: [`SPU_WAIT_MARGIN`] times
+/// the silicon transfer time at [`SPU_CLOCKS_PER_WORD`], counted in the
+/// cheapest possible spin, plus a fixed allowance.
+///
+/// A 4 KiB piece (1,024 words) gets 35,840 spins, about 390,000 clocks of
+/// waiting against the 67,600 it takes on a console. The largest transfer one
+/// call can describe (65,535 blocks of 16 words) still fits in a `u32`.
+#[must_use]
+pub const fn spu_wait_spins(words: u32) -> u32 {
+    let per_word = SPU_CLOCKS_PER_WORD * SPU_WAIT_MARGIN / MIN_CLOCKS_PER_SPIN;
+    SPU_WAIT_BASE_SPINS.saturating_add(words.saturating_mul(per_word))
+}
 
 /// Clear `ch`'s control register, dropping its START bit, so the channel can
 /// be re-armed: on silicon a CHCR write to a channel whose START is still
@@ -667,6 +712,24 @@ mod tests {
         dicr.write(irq_enable_word(dicr.read(), Channel::Cd));
         dicr.finish(Channel::Gpu);
         assert_eq!(dicr.read() & reg::dicr_irq_flag(2), 0);
+    }
+
+    #[test]
+    fn the_spu_budget_scales_with_the_length_and_covers_silicon_four_times() {
+        // The cheapest spin is 8 clocks, so the budget must cover four times
+        // the silicon transfer in 8-clock spins, at any length.
+        for words in [1u32, 16, 256, 1_024, 4_096, 117_636, 65_535 * 16] {
+            let spins = spu_wait_spins(words);
+            assert!(
+                u64::from(spins) * 8 >= u64::from(words) * 66 * 4,
+                "{words} words"
+            );
+            assert!(spu_wait_spins(words + 16) > spins);
+        }
+        assert_eq!(spu_wait_spins(1_024), 35_840);
+        // WipEout's whole bank in one transfer (470,544 B), which the fixed
+        // 500,000-spin budget cut off on a console at about 338 KB.
+        assert!(spu_wait_spins(470_544 / 4) > 3_800_000);
     }
 
     #[test]

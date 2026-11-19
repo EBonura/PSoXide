@@ -838,10 +838,17 @@ impl<'a, S: Scene> GameApp<'a, S> {
             let mut upload = |bytes: &[u8]| {
                 let audio = psx_asset::Audio::from_bytes(bytes).expect("ui psau sample");
                 let adpcm = audio.adpcm_bytes();
-                self.spu
+                // A sample that did not land stays unloaded (never played);
+                // psx-spu reports the timeout.
+                if self
+                    .spu
                     .as_mut()
                     .expect("menu audio reset the SPU before the upload")
-                    .upload_adpcm(psx_spu::SpuAddr::new(addr), adpcm);
+                    .upload_adpcm(psx_spu::SpuAddr::new(addr), adpcm)
+                    .is_err()
+                {
+                    return;
+                }
                 uploaded = Some((
                     adpcm.len() as u32,
                     psx_spu::Pitch::for_sample_rate(audio.sample_rate_hz()).as_u16(),

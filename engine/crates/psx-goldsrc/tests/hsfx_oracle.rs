@@ -126,7 +126,7 @@ fn frozen_hsfx_matches_shared_source() {
     spu = replace_body(
         &spu,
         "upload_adpcm",
-        "\ncrate::record(crate::Op::Upload(dest.byte_offset(),bytes.to_vec()));\n",
+        "\ncrate::record(crate::Op::Upload(dest.byte_offset(),bytes.to_vec()));\nOk(())\n",
     );
     // The shared source reaches the SPU through the `Spu` driver, whose reset
     // and upload bodies are these two private functions; the frozen originals
@@ -135,7 +135,7 @@ fn frozen_hsfx_matches_shared_source() {
     spu = replace_body(
         &spu,
         "upload_adpcm_with",
-        "\ncrate::record(crate::Op::Upload(dest.byte_offset(),bytes.to_vec()));\n",
+        "\ncrate::record(crate::Op::Upload(dest.byte_offset(),bytes.to_vec()));\nOk(())\n",
     );
     // A driver without the reset, for the call that used to find the SPU
     // already initialised (the dialogue loader).
