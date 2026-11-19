@@ -738,7 +738,8 @@ pub struct GameEntities<const MAX_ENTITIES: usize> {
     speed_scale: (i32, i32),
     /// Behavior state ([`GameEntityState`] as raw u8).
     state: [u8; MAX_ENTITIES],
-    /// Ticks spent in the current state.
+    /// Ticks spent in the current state. In an attack it runs on
+    /// [`Self::clock`], as the attack's lock does, thinking or away.
     state_ticks: [u16; MAX_ENTITIES],
     /// Health, poise, energy and stance of each entity: the same
     /// [`Combatant`] the player holds.
@@ -2461,6 +2462,13 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         let mut index = 0usize;
         while index < count {
             if self.away(index) {
+                // An attack is timed on the clock its lock runs on: an
+                // entity whose room unloads mid-swing stops thinking, but
+                // its swing time runs on with the lock (the player's rule,
+                // now less the clip's start).
+                if self.state(index) == GameEntityState::Attack {
+                    self.state_ticks[index] = self.state_ticks[index].saturating_add(delta_ticks);
+                }
                 index += 1;
                 continue;
             }
@@ -5578,6 +5586,20 @@ mod tests {
             entities.capture_ranged_aim(0, input);
         }
         entities.begin_attack(0, &mut GameEntityTickStats::default());
+    }
+
+    #[test]
+    fn an_away_attack_keeps_its_swing_time_running_with_its_lock() {
+        let mut e = GameEntities::<8>::EMPTY;
+        e.spawn_from_records(&DUAL_ENEMY);
+        e.enter_phase(0, AttackPhase::Windup, 0);
+        let windup = e.selected_timing(0).windup;
+        // Its room unloads mid-attack: it stops thinking, but the swing
+        // stays on the clock its lock runs on.
+        e.set_away_mask(1);
+        e.tick_delta(&DUAL_ENEMY, far_input(), &mut OpenWorld, windup);
+        assert_eq!(e.attack_since(0), Some(windup));
+        assert_eq!(e.attack_phase(0), Some(AttackPhase::Active));
     }
 
     #[test]
