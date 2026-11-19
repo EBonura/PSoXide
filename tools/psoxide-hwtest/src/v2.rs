@@ -679,7 +679,7 @@ fn build() -> BTreeMap<u32, V2Entry> {
             ["words_after_wait_high", "chcr_after_stop_high_half", "unused"],
         );
     }
-    // v2.21: SPU bulk upload (engine/examples/hardware-tests/src/spu_bulk.rs).
+    // v2.24: SPU bulk upload (engine/examples/hardware-tests/src/spu_bulk.rs).
     b.put(0x9B0, "spu_bulk_rate_512", ["clocks", "polls", "halfwords"]);
     b.put(0x9B1, "spu_bulk_old_path", ["landed_bytes_low", "landed_bytes_high", "flags"]);
     b.put(0x9B2, "spu_bulk_old_path_check", ["hblanks", "matching_kb", "cleared_kb"]);
@@ -689,14 +689,14 @@ fn build() -> BTreeMap<u32, V2Entry> {
     b.put(0x9B6, "spu_bulk_abort", ["read_16b_at_abort", "read_16b_after_wait", "flags"]);
     b.put(0x9B7, "spu_bulk_abort_check", ["landed_16b", "bcr_blocks_at_abort", "bcr_blocks_after"]);
     b.put(0x9B8, "spu_bulk_source", ["changed", "hash_low", "window_fits"]);
-    // v2.21: 480i field sequence (engine/examples/hardware-tests/src/field_rule.rs run_sequence).
+    // v2.24: 480i field sequence (engine/examples/hardware-tests/src/field_rule.rs run_sequence).
     for k in 0..8u32 {
         b.put(0x9D0 + k, format!("field_seq_blank_{k}"), ["row_mask", "bit31_at_and_after", "field_number"]);
         b.put(0x9D8 + k, format!("field_seq_active_{k}"), ["row_mask", "bit31_at_and_after", "field_number"]);
     }
     b.put(0x9E0, "field_seq_redraw_hblanks", ["min", "median", "max"]);
     b.put(0x9E1, "field_seq_answers", ["answer_bits", "blank_odd_skipped", "active_odd_skipped"]);
-    // v2.21: CD read after idle (engine/examples/hardware-tests/src/cd_idle.rs).
+    // v2.24: CD read after idle (engine/examples/hardware-tests/src/cd_idle.rs).
     for (case, tag) in ["pause_5s", "pause_10s", "pause_15s", "pause_30s", "stop_5s"]
         .iter()
         .enumerate()

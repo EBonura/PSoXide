@@ -346,6 +346,8 @@ impl HardwareTests {
             (112, 136, 170),
         );
         font.draw_text(8, 20, "MAIN MENU", (255, 232, 128));
+        // The pad discs (v2.22, v2.23) were built from branches; their menu is not in this one.
+        font.draw_text(8, 40, "PAD READOUT: V2.22 AND V2.23 DISCS", (112, 136, 170));
         let mut y = MENU_TOP;
         for (row, label) in MENU.iter().enumerate() {
             let selected = row == self.menu_cursor;
