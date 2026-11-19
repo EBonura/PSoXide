@@ -1647,13 +1647,16 @@ impl Playtest {
     }
 
     /// The state her body shows for `reaction` ([`Reaction::shown`]).
+    // Rare (a reaction): kept out of line and small.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     fn player_reaction_anim(&self, reaction: Reaction) -> PlayerAnim {
         use psx_level::CharacterAnimationAction as Action;
-        let shown = match self.character.as_ref() {
-            Some(character) => reaction.shown(character),
-            None => reaction.shown(&psx_level::combat_verbs::BoundBy(|_| false)),
-        };
-        match shown {
+        let resolved = self
+            .character
+            .as_ref()
+            .and_then(|c| psx_level::combat_verbs::resolve(c, reaction.verb()));
+        match reaction.shown(resolved) {
             Action::Stun => PlayerAnim::Stun,
             Action::Parried => PlayerAnim::Parried,
             Action::Knockdown => PlayerAnim::Knockdown,

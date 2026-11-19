@@ -966,6 +966,8 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
     /// none), a stagger its Stun playback ([`Reaction::verb`], through the
     /// verb's chain). `length` reads a clip at the speed and frame range its
     /// Character plays it at, in ticks. Call after spawning.
+    // Once per spawn: kept small.
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     pub fn time_reactions(
         &mut self,
         records: &[LevelGameEntityRecord],
@@ -987,12 +989,15 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
     /// How `body` plays `reaction`, `phase_ticks` in, the player's rule: the
     /// action it shows ([`Reaction::shown`]) on that action's clip, authored
     /// speed and range. None when it binds nothing in the verb's chain.
+    // Read only while a fighter reacts: out of line and small.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     fn reaction_clip(
         body: &LevelCharacterRecord,
         reaction: Reaction,
         phase_ticks: u16,
     ) -> Option<(CharacterAnimationAction, GameEntityClip)> {
-        let action = reaction.shown(body);
+        let action = reaction.shown(psx_level::combat_verbs::resolve(body, reaction.verb()));
         let index = action.to_index();
         let clip = body.action_clips[index].to_option()?;
         Some((
@@ -2175,7 +2180,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
                 let reaction = self.reaction(index).unwrap_or(Reaction::Flinch);
                 let body = self.body(record);
                 Self::reaction_clip(body, reaction, ticks)
-                    .unwrap_or((reaction.shown(body), one_shot(record.idle_clip, ticks)))
+                    .unwrap_or((reaction.shown(None), one_shot(record.idle_clip, ticks)))
             }
             GameEntityState::Dead => (Action::Death, one_shot(record.death_clip, ticks)),
         }
@@ -4030,7 +4035,8 @@ mod tests {
             },
         );
         let stun = CharacterAnimationAction::Stun.to_index();
-        body.action_clips[stun] = psx_level::OptionalModelClipIndex::some(psx_level::ModelClipIndex(9));
+        body.action_clips[stun] =
+            psx_level::OptionalModelClipIndex::some(psx_level::ModelClipIndex(9));
         body.action_speeds[stun] = 256;
         body.action_frame_ranges[stun] = CharacterActionFrameRange { start: 0, end: 42 };
         body
@@ -4978,7 +4984,10 @@ mod tests {
         entities.apply_hit(&SLOW_STUN, 0, VitalityChannelId::One, 10, 60);
         let clip = entities.clip_for_state(&SLOW_STUN, 0);
         assert_eq!((clip.clip, clip.speed_q8), (9, 256));
-        assert_eq!(clip.frame_range, CharacterActionFrameRange { start: 0, end: 42 });
+        assert_eq!(
+            clip.frame_range,
+            CharacterActionFrameRange { start: 0, end: 42 }
+        );
         for _ in 0..84 {
             entities.tick(&SLOW_STUN, far_input(), &mut OpenWorld);
             assert_eq!(entities.state(0), GameEntityState::Staggered);

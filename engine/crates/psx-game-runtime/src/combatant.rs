@@ -352,14 +352,19 @@ impl Reaction {
         }
     }
 
-    /// The action a body shows for this reaction: its verb, else the first
-    /// bound stand-in of the verb's chain; with none bound, the verb (a
+    /// The action a body shows for this reaction, given what its Character
+    /// resolves the verb to (`combat_verbs::resolve`: the verb, else the
+    /// first bound stand-in of its chain); with none bound, the verb (a
     /// riposte's, the stagger's), over the rest pose.
-    pub fn shown(self, body: &impl psx_level::combat_verbs::VerbBindings) -> psx_level::CharacterAnimationAction {
-        psx_level::combat_verbs::resolve(body, self.verb()).unwrap_or(match self {
-            Self::Parried => psx_level::CharacterAnimationAction::Stun,
-            other => other.verb(),
-        })
+    pub const fn shown(
+        self,
+        resolved: Option<psx_level::CharacterAnimationAction>,
+    ) -> psx_level::CharacterAnimationAction {
+        match (resolved, self) {
+            (Some(action), _) => action,
+            (None, Self::Parried) => psx_level::CharacterAnimationAction::Stun,
+            (None, other) => other.verb(),
+        }
     }
 }
 
