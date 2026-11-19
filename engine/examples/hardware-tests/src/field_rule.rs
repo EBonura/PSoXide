@@ -128,6 +128,7 @@ fn mode_register(mode: u32) -> u32 {
 }
 
 /// Put `mode` on the display, starting at row `start_y`, and let it settle.
+#[inline(never)]
 fn show_mode(mode: u32, start_y: u32) {
     gpu_io::write_display_control(0x0300_0000); // display on
     gpu_io::write_display_control(0x0800_0000 | mode_register(mode));
@@ -137,6 +138,7 @@ fn show_mode(mode: u32, start_y: u32) {
     }
 }
 
+#[inline(never)]
 fn restore_display() {
     probe_gpu!(gpu);
     gpu.set_display(DisplayConfig::new(VideoMode::Ntsc, Resolution::R320X240));
@@ -149,6 +151,7 @@ fn restore_display() {
 }
 
 /// The white blocks the textured quad samples and the copy reads.
+#[inline(never)]
 fn prepare_sources() {
     v24::upload(
         TEXTURE.0,
@@ -171,6 +174,7 @@ fn prepare_sources() {
 
 /// Mask of the scratch rows that hold a non-zero pixel. `None` when the read
 /// never answered.
+#[inline(never)]
 fn row_mask(at: (u32, u32)) -> Option<u32> {
     let mut mask = 0u32;
     let mut index = 0u32;
@@ -188,6 +192,7 @@ fn row_mask(at: (u32, u32)) -> Option<u32> {
     }
 }
 
+#[inline(never)]
 fn clear_scratch(at: (u32, u32)) -> bool {
     v24::upload(at.0, at.1, SCRATCH_W, SCRATCH_H, 0, SCRATCH_WORDS);
     v24::drain() && row_mask(at) == Some(0)
@@ -482,6 +487,8 @@ const ACTIVE_ROW: u32 = 288;
 ///   skipped-parity pattern (bit k: field k skipped odd rows), the active fills'.
 ///
 /// A mask of 0xAAAA is the even rows skipped, 0x5555 the odd ones, 0xFFFF none.
+#[optimize(size)]
+#[inline(never)]
 pub(crate) fn run_sequence(font: &psx_font::FontAtlas, records: &mut Records, next: &mut usize) {
     crate::bounds::record_start(FIELD_SEQUENCE_RECORD);
     prepare_sources();
@@ -539,8 +546,15 @@ pub(crate) fn run_sequence(font: &psx_font::FontAtlas, records: &mut Records, ne
         *time = timers::counter(Timer::Timer1) as u32;
     }
     v24::environment(0);
+    // Insertion sort: eight values, and no slice sort linked for them.
     let mut sorted = times;
-    sorted.sort_unstable();
+    for i in 1..sorted.len() {
+        let mut j = i;
+        while j > 0 && sorted[j - 1] > sorted[j] {
+            sorted.swap(j - 1, j);
+            j -= 1;
+        }
+    }
     let (low, median, high) = (sorted[0], sorted[4], sorted[7]);
 
     let mut blank_odd = 0u32;
