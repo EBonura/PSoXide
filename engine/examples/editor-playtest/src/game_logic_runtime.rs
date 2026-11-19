@@ -1067,12 +1067,12 @@ impl Playtest {
     }
 
     /// Her side of a hit, the owner's half of the one landing for the
-    /// fighter it drives: her boons reduce the damage, [`Combatant::receive_hit`]
-    /// over her stats in the fighter table, then the reaction her
-    /// animation states play. Returns the outcome, the damage the stance
+    /// fighter it drives: her boons reduce the damage, then every fighter's
+    /// landing and reaction rule (`GameEntities::receive_actor_hit` over
+    /// her posture), and her body plays the reaction it returns. Returns the outcome, the damage the stance
     /// rule makes of it and whether a bolt found her windup open; `None`
     /// while she is dying (nothing lands).
-    fn receive_on_player(
+    pub(super) fn receive_on_player(
         &mut self,
         ctx: &Ctx,
         strike: Strike,
@@ -1093,9 +1093,8 @@ impl Playtest {
             strike.damage,
             0,
         );
-        let armored = self.player_armoured(ctx);
-        let hit_in = self.player_hit(strike, armored);
-        let out = self.game_entities.actor_mut().receive_hit(hit_in);
+        let posture = self.player_posture(self.player_armoured(ctx), ctx.sim_tick);
+        let (out, reaction) = self.game_entities.receive_actor_hit(strike, posture);
         if out.parried {
             return Some((
                 psx_game_runtime::entities::GameEntityHitOutcome {
@@ -1110,14 +1109,13 @@ impl Playtest {
         if out.damage_applied > 0 {
             self.queue_gameplay_sfx(LevelGameplaySfxEvent::PlayerDamage);
         }
-        // The one reaction rule: only a swing flinches; a break staggers
-        // whatever broke it.
-        let staggered = !out.killed
-            && self.react_player(out, armored, strike.kind != HitKind::Melee, false, ctx);
+        if let Some(reaction) = reaction {
+            self.play_player_reaction(reaction, ctx);
+        }
         Some((
             psx_game_runtime::entities::GameEntityHitOutcome {
                 connected: true,
-                staggered,
+                staggered: out.poise_broken,
                 knocked_down: out.knocked_down,
                 died: out.killed,
                 parried: false,

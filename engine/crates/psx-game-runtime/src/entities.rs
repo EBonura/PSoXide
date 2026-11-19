@@ -45,8 +45,8 @@ pub use tactics::{
 
 use crate::combat_intent::CombatMove;
 use crate::combatant::{
-    stance_scaled, ActionProtection, Combatant, CombatantId, Defender, HitIn, HitKind, PoiseRule,
-    Strike,
+    stance_scaled, ActionProtection, Combatant, CombatantId, Defender, HitIn, HitKind, HitOut,
+    Posture, Reaction, Strike,
 };
 use crate::vitality::{CombatStanceConfig, VitalityChannelId};
 use psx_engine::{
@@ -2211,6 +2211,49 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         self.receive_hit(records, index, strike)
     }
 
+    /// The one landing for every fighter, entity or actor slot: `strike`
+    /// through [`Combatant::receive_hit`] over `stats` and the defender's
+    /// `posture`, and the reaction the one rule ([`Posture::reaction`])
+    /// makes of it. The body plays the reaction: an entity's state here, the
+    /// actor's by its owner.
+    fn land(
+        &mut self,
+        index: usize,
+        strike: Strike,
+        stats: CombatStats,
+        posture: Posture,
+    ) -> (HitOut, Option<Reaction>) {
+        let out = self.combatants[index].receive_hit(HitIn {
+            strike,
+            stats,
+            poise: posture.rule(),
+        });
+        (out, posture.reaction(strike.kind, &out))
+    }
+
+    /// Land `strike` on the actor slot ([`Self::ACTOR_SLOT`]) over its stats
+    /// and the `posture` its owner reads off its body: the same landing and
+    /// reaction rule as every entity. The owner plays the reaction returned.
+    pub fn receive_actor_hit(
+        &mut self,
+        strike: Strike,
+        posture: Posture,
+    ) -> (HitOut, Option<Reaction>) {
+        let stats = self.actor_stats;
+        self.land(Self::ACTOR_SLOT, strike, stats, posture)
+    }
+
+    /// The reaction entity `index` is in, read off its state.
+    fn reaction(&self, index: usize) -> Option<Reaction> {
+        match self.state(index) {
+            GameEntityState::Flinched => Some(Reaction::Flinch),
+            GameEntityState::Staggered if self.parried_stagger(index) => Some(Reaction::Parried),
+            GameEntityState::Staggered => Some(Reaction::Stagger),
+            GameEntityState::KnockedDown => Some(Reaction::Knockdown),
+            _ => None,
+        }
+    }
+
     /// Land `strike` on entity `index` through [`Combatant::receive_hit`]
     /// with the entity's record stats, then move the entity into Dead or
     /// Staggered when the hit killed or broke it. An out of range or dead
@@ -2229,18 +2272,12 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
             return GameEntityHitOutcome::MISS;
         }
         let stats = self.body(&records[index]).combat;
-        let poise = PoiseRule {
+        let posture = Posture {
             armored: self.armoured(records, index),
-            blocked: matches!(
-                state,
-                GameEntityState::Staggered | GameEntityState::KnockedDown
-            ),
+            reacting: self.reaction(index),
+            flinches: self.flinch_ticks[index] != 0,
         };
-        let out = self.combatants[index].receive_hit(HitIn {
-            strike,
-            stats,
-            poise,
-        });
+        let (out, reaction) = self.land(index, strike, stats, posture);
         if out.parried {
             // Nothing landed: not a connection. The attacker's side of it
             // (the riposte) is [`Self::answer_strike`].
@@ -2266,39 +2303,18 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         if matches!(state, GameEntityState::Idle | GameEntityState::Patrol) && !out.poise_broken {
             self.notice_attacker(index, strike.attacker);
         }
-        // The one reaction rule: an ordinary melee hit flinches a fighter
-        // that binds a Hit React clip, unless armour holds it or a reaction
-        // already does (a flinch never restarts itself).
-        if !out.poise_broken
-            && !poise.armored
-            && strike.kind == HitKind::Melee
-            && self.flinch_ticks[index] != 0
-            && !matches!(
-                state,
-                GameEntityState::Staggered
-                    | GameEntityState::KnockedDown
-                    | GameEntityState::Flinched
-            )
-        {
+        if let Some(reaction) = reaction {
             self.release_attack_owner(index, delay);
             self.enter_state(
                 index,
-                GameEntityState::Flinched,
-                &mut GameEntityTickStats::default(),
-            );
-        }
-        if out.poise_broken {
-            self.release_attack_owner(index, delay);
-            self.enter_state(
-                index,
-                if out.knocked_down {
-                    GameEntityState::KnockedDown
-                } else {
-                    GameEntityState::Staggered
+                match reaction {
+                    Reaction::Flinch => GameEntityState::Flinched,
+                    Reaction::Stagger | Reaction::Parried => GameEntityState::Staggered,
+                    Reaction::Knockdown => GameEntityState::KnockedDown,
                 },
                 &mut GameEntityTickStats::default(),
             );
-            if strike.kind == HitKind::Parry && !out.knocked_down {
+            if reaction == Reaction::Parried {
                 self.combat_flags[index] |= GAME_ENTITY_PARRIED_STAGGER;
             }
         }

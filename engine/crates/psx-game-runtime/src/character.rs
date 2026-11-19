@@ -151,27 +151,6 @@ impl PlayerAnim {
     }
 }
 
-/// Choose the player reaction without restarting an active recovery.
-/// A poise break can upgrade a normal hit, but never downgrade a stun.
-pub const fn player_damage_reaction(
-    poise_broken: bool,
-    armored: bool,
-    current: PlayerAnim,
-    action_locked: bool,
-) -> Option<PlayerAnim> {
-    if matches!(current, PlayerAnim::Death)
-        || (action_locked && matches!(current, PlayerAnim::Stun | PlayerAnim::Parried))
-    {
-        None
-    } else if poise_broken {
-        Some(PlayerAnim::Stun)
-    } else if armored || (action_locked && matches!(current, PlayerAnim::HitReact)) {
-        None
-    } else {
-        Some(PlayerAnim::HitReact)
-    }
-}
-
 /// Whether `anim` is one of the attack states.
 pub const fn player_anim_is_attack(anim: PlayerAnim) -> bool {
     matches!(
@@ -525,23 +504,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn player_reactions_distinguish_hits_breaks_and_heavy_armor() {
-        assert_eq!(
-            player_damage_reaction(false, false, PlayerAnim::Run, false),
-            Some(PlayerAnim::HitReact)
-        );
-        assert_eq!(
-            player_damage_reaction(false, false, PlayerAnim::LightAttack, true),
-            Some(PlayerAnim::HitReact)
-        );
-        assert_eq!(
-            player_damage_reaction(false, true, PlayerAnim::HeavyAttack, true),
-            None
-        );
-        assert_eq!(
-            player_damage_reaction(true, true, PlayerAnim::HeavyAttack, true),
-            Some(PlayerAnim::Stun)
-        );
+    fn stun_plays_the_stun_action() {
         assert_eq!(PlayerAnim::Stun.action(), CharacterAnimationAction::Stun);
     }
 
@@ -554,34 +517,6 @@ mod tests {
         assert!(poise.hit(75, psx_level::CombatStats::DEFAULT.poise, false));
         let mut poise = crate::poise::Poise::EMPTY;
         assert!(!poise.hit(75, psx_level::CombatStats::DEFAULT.poise, true));
-    }
-
-    #[test]
-    fn player_reactions_upgrade_but_do_not_restart_or_downgrade_recovery() {
-        assert_eq!(
-            player_damage_reaction(false, false, PlayerAnim::HitReact, true),
-            None
-        );
-        assert_eq!(
-            player_damage_reaction(true, false, PlayerAnim::HitReact, true),
-            Some(PlayerAnim::Stun)
-        );
-        assert_eq!(
-            player_damage_reaction(false, false, PlayerAnim::Stun, true),
-            None
-        );
-        assert_eq!(
-            player_damage_reaction(true, false, PlayerAnim::Stun, true),
-            None
-        );
-        assert_eq!(
-            player_damage_reaction(false, false, PlayerAnim::Stun, false),
-            Some(PlayerAnim::HitReact)
-        );
-        assert_eq!(
-            player_damage_reaction(true, false, PlayerAnim::Death, true),
-            None
-        );
     }
 
     #[test]

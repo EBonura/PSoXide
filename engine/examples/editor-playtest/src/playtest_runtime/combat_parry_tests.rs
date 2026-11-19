@@ -14,6 +14,15 @@ use psx_game_runtime::projectiles::{CombatTeam, ProjectileDamageChannel, NO_PROJ
 use psx_level::{game_entity_flags, LevelGameEntityRecord, StableId};
 
 /// The fixture enemy, which every owner path reads its stats from.
+/// Entity `by`'s parry riposte on her, through her one landing. True when
+/// it broke her posture.
+fn riposte_on_her(scene: &mut Playtest, by: usize, ctx: &Ctx) -> bool {
+    let channel = scene.game_entities.actor().stance.active();
+    scene
+        .receive_on_player(ctx, Strike::parry(CombatantId::entity(by), channel))
+        .is_some_and(|(outcome, _, _)| outcome.staggered)
+}
+
 fn enemy_record() -> &'static LevelGameEntityRecord {
     &GAME_ENTITIES[0]
 }
@@ -173,7 +182,7 @@ fn a_parried_attacker_is_staggered_not_knocked_down_on_both_sides() {
         .riposte(GAME_ENTITIES.as_slice(), 0, CombatantId::PLAYER);
     assert!(outcome.staggered && !outcome.knocked_down);
     assert_eq!(scene.game_entities.state(0), GameEntityState::Staggered);
-    assert!(scene.riposte_player(CombatantId::entity(0), &ctx(100)));
+    assert!(riposte_on_her(&mut scene, 0, &ctx(100)));
     assert!(!scene.game_entities.actor().knocked_down());
     assert_ne!(scene.anim.state, PlayerAnim::Knockdown);
 }
@@ -220,12 +229,12 @@ fn a_parried_attacker_plays_parried_on_both_sides() {
     aletha.action_clips[CharacterAnimationAction::Parried.to_index()] =
         OptionalModelClipIndex::from_raw(7);
     scene.character = Some(aletha);
-    assert!(scene.riposte_player(CombatantId::entity(0), &ctx(100)));
+    assert!(riposte_on_her(&mut scene, 0, &ctx(100)));
     assert_eq!(scene.anim.state, PlayerAnim::Parried);
     assert_eq!(aletha.clip_for(PlayerAnim::Parried).to_usize(), 7);
     assert!(scene.game_entities.actor_action().lock_until > ctx(100).sim_tick);
     let mut scene = duel();
-    assert!(scene.riposte_player(CombatantId::entity(0), &ctx(100)));
+    assert!(riposte_on_her(&mut scene, 0, &ctx(100)));
     assert_ne!(scene.anim.state, PlayerAnim::Parried);
 }
 
@@ -847,7 +856,7 @@ fn a_crit_knocks_down_the_riposted_fighter_on_both_sides() {
     // The enemy's crit on the player its parry staggered.
     for crit in [false, true] {
         let mut scene = enemy_crit_armed();
-        assert!(scene.riposte_player(CombatantId::entity(0), &ctx(100)));
+        assert!(riposte_on_her(&mut scene, 0, &ctx(100)));
         let poise = scene.game_entities.actor_stats().poise;
         let broke =
             scene.react_player_to_hit(CombatantId::entity(0), poise, false, false, crit, &ctx(101));

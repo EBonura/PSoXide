@@ -967,27 +967,39 @@ impl Playtest {
             poise: 0,
             crit: false,
         };
-        let hit_in = self.player_hit(strike, false);
-        let hit = self.game_entities.actor_mut().receive_hit(hit_in);
+        let posture = self.player_posture(false, SimTick::ZERO);
+        let (hit, _) = self.game_entities.receive_actor_hit(strike, posture);
         if hit.damage_applied > 0 {
             self.queue_gameplay_sfx(LevelGameplaySfxEvent::PlayerDamage);
         }
         hit.defeated
     }
 
-    /// The player's stats and posture state around `strike`.
-    ///
-    /// Damage and poise follow the one stance rule over
-    /// her stats in the fighter table, the same rule every enemy runs, off the same
-    /// one health bar. A Stun cannot be broken.
-    pub(super) fn player_hit(&self, strike: Strike, armored: bool) -> HitIn {
-        HitIn {
-            strike,
-            stats: *self.game_entities.actor_stats(),
-            poise: PoiseRule {
-                armored,
-                blocked: matches!(self.anim.state, PlayerAnim::Stun | PlayerAnim::Parried),
-            },
+    /// Her posture for a hit at `now`, read off her body: `armored`, the
+    /// reaction her animation is playing (a knockdown while her fighter is
+    /// down, a stagger while Stun or Parried plays, a flinch while her Hit
+    /// React still holds her) and whether she binds a Hit React clip. The
+    /// landing and the reaction rule are every fighter's
+    /// ([`psx_game_runtime::entities::GameEntities::receive_actor_hit`]).
+    pub(super) fn player_posture(&self, armored: bool, now: SimTick) -> Posture {
+        let reacting = if self.game_entities.actor().knocked_down() {
+            Some(Reaction::Knockdown)
+        } else {
+            match self.anim.state {
+                PlayerAnim::Stun => Some(Reaction::Stagger),
+                PlayerAnim::Parried => Some(Reaction::Parried),
+                PlayerAnim::HitReact if self.game_entities.actor_action().lock_until > now => {
+                    Some(Reaction::Flinch)
+                }
+                _ => None,
+            }
+        };
+        Posture {
+            armored,
+            reacting,
+            flinches: self
+                .character
+                .is_some_and(|c| c.action_clip(PlayerAnim::HitReact.action()).is_some()),
         }
     }
 
@@ -1446,7 +1458,8 @@ impl Playtest {
     }
 
     /// Test hook: a poise-only hit of `damage` by `attacker` on her own
-    /// stance, then the reaction it calls for. True when it broke posture.
+    /// stance (a swing, else a bolt when `shot_only`), then the reaction it
+    /// calls for. True when it broke posture.
     #[cfg(test)]
     pub(super) fn react_player_to_hit(
         &mut self,
@@ -1462,31 +1475,22 @@ impl Playtest {
         }
         let strike = Strike {
             attacker,
-            kind: HitKind::Melee,
+            kind: if shot_only {
+                HitKind::Projectile
+            } else {
+                HitKind::Melee
+            },
             channel: self.game_entities.actor().stance.active(),
             damage: 0,
             poise: damage,
             crit,
         };
-        let hit_in = self.player_hit(strike, armored);
-        let out = self.game_entities.actor_mut().receive_hit(hit_in);
-        self.react_player(out, armored, shot_only, false, ctx)
-    }
-
-    /// Stagger the player with the riposte of a parry by `by`: the same
-    /// [`Combatant::receive_hit`] and reaction as any hit. True when it broke
-    /// her posture.
-    // Rare (a parry, crit or knockdown): kept out of line and small.
-    #[inline(never)]
-    #[cfg_attr(target_arch = "mips", optimize(size))]
-    pub(super) fn riposte_player(&mut self, by: CombatantId, ctx: &Ctx) -> bool {
-        if self.death_ticks_remaining != 0 {
-            return false;
+        let posture = self.player_posture(armored, ctx.sim_tick);
+        let (out, reaction) = self.game_entities.receive_actor_hit(strike, posture);
+        if let Some(reaction) = reaction {
+            self.play_player_reaction(reaction, ctx);
         }
-        let strike = Strike::parry(by, self.game_entities.actor().stance.active());
-        let hit_in = self.player_hit(strike, false);
-        let out = self.game_entities.actor_mut().receive_hit(hit_in);
-        self.react_player(out, false, false, true, ctx)
+        out.poise_broken
     }
 
     /// She parried a strike by fighter `attacker` (her
@@ -1576,7 +1580,16 @@ impl Playtest {
             record.room,
             zenith,
         );
-        let staggered = self.riposte_player(CombatantId::entity(index), ctx);
+        // The riposte lands on her through her one landing.
+        let staggered = self
+            .receive_on_player(
+                ctx,
+                Strike::parry(
+                    CombatantId::entity(index),
+                    self.game_entities.actor().stance.active(),
+                ),
+            )
+            .is_some_and(|(outcome, _, _)| outcome.staggered);
         self.spawn_combat_hit_sparks(
             [player.x, player.y, player.z],
             self.character.map_or(0, |c| c.height.max(0) as u16),
@@ -1587,57 +1600,33 @@ impl Playtest {
         );
     }
 
-    /// Start the reaction a landed hit calls for: a knockdown on a break that
-    /// knocked her down, the stagger (Stun) on any other break, a hit
-    /// reaction otherwise. Nothing interrupts a knockdown. A stagger from a
-    /// parry's riposte (`parried`) keeps the stagger's lock and plays the
-    /// Parried clip over it.
-    pub(super) fn react_player(
-        &mut self,
-        out: HitOut,
-        armored: bool,
-        shot_only: bool,
-        parried: bool,
-        ctx: &Ctx,
-    ) -> bool {
-        let poise_broken = out.poise_broken;
-        if out.knocked_down {
-            self.knock_player_down(ctx);
-            return true;
-        }
-        if self.game_entities.actor().knocked_down() || (shot_only && !poise_broken) {
-            return poise_broken;
-        }
+    /// Play `reaction` (decided by the one rule,
+    /// [`Posture::reaction`]) on her body: the knockdown, the stagger (Stun;
+    /// a riposte's plays the Parried clip over its lock), or the hit
+    /// reaction (HitReact).
+    pub(super) fn play_player_reaction(&mut self, reaction: Reaction, ctx: &Ctx) {
         // Player animation starts and locks use the absolute simulation clock.
         // Enemy animation phases use gameplay_tick; using that epoch here makes
         // the reaction appear expired as soon as update_gameplay checks its lock.
         let now = ctx.sim_tick;
-        let Some(mut reaction) = psx_game_runtime::character::player_damage_reaction(
-            poise_broken,
-            armored,
-            self.anim.state,
-            self.game_entities.actor_action().lock_until > now,
-        ) else {
-            return poise_broken;
+        let anim = match reaction {
+            Reaction::Knockdown => {
+                self.knock_player_down(ctx);
+                return;
+            }
+            Reaction::Flinch => PlayerAnim::HitReact,
+            // Older projects can still use their hit clip when no Stun is bound.
+            Reaction::Stagger | Reaction::Parried
+                if self
+                    .character
+                    .is_none_or(|c| c.action_clip(PlayerAnim::Stun.action()).is_none()) =>
+            {
+                PlayerAnim::HitReact
+            }
+            Reaction::Stagger | Reaction::Parried => PlayerAnim::Stun,
         };
-        // Older projects can still use their hit clip when no Stun is bound.
-        if reaction == PlayerAnim::Stun
-            && self
-                .character
-                .is_none_or(|c| c.action_clip(reaction.action()).is_none())
-        {
-            reaction = PlayerAnim::HitReact;
-        }
-        // An unbound ordinary hit should not freeze a character on an idle pose.
-        if !poise_broken
-            && self
-                .character
-                .is_none_or(|c| c.action_clip(reaction.action()).is_none())
-        {
-            return false;
-        }
         self.interrupt_player_for_reaction();
-        let has_reaction = self.start_player_anim_action(reaction, now, ctx.video_hz);
+        let has_reaction = self.start_player_anim_action(anim, now, ctx.video_hz);
         let recovery = if has_reaction {
             // Follow authored speed and range through the final recovery pose.
             self.game_entities
@@ -1650,14 +1639,13 @@ impl Playtest {
         };
         // Missing hit-react assets still interrupt gameplay safely.
         if !has_reaction {
-            self.switch_player_anim(reaction, now, ctx.video_hz);
+            self.switch_player_anim(anim, now, ctx.video_hz);
         }
         self.game_entities.actor_action_mut().lock_until = now.saturating_add(recovery);
         // Same lock, same rules: only the clip differs. Unbound, Parried's
         // chain (Stun, then HitReact) is exactly the reaction already playing,
         // at its own authored speed and range.
-        if parried
-            && poise_broken
+        if reaction == Reaction::Parried
             && self
                 .character
                 .is_some_and(|c| c.supports_action(CharacterAnimationAction::Parried))
@@ -1665,12 +1653,11 @@ impl Playtest {
             self.switch_player_anim(PlayerAnim::Parried, now, ctx.video_hz);
         }
         self.anim.switched = None;
-        telemetry::debug_log(if poise_broken {
-            "player poise:break"
-        } else {
+        telemetry::debug_log(if reaction == Reaction::Flinch {
             "player hit:react"
+        } else {
+            "player poise:break"
         });
-        poise_broken
     }
 
     /// Drop every action, buffer and aim the player had going: a reaction

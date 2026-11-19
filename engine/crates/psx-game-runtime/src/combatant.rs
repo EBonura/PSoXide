@@ -322,6 +322,76 @@ pub struct HitOut {
     pub parried: bool,
 }
 
+/// What a fighter's body does after a landed hit. Every fighter reacts by
+/// the one rule ([`Posture::reaction`]); only how a body plays it differs
+/// (an entity's state, the player's animation).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reaction {
+    /// An ordinary swing's hit reaction (the Hit React clip).
+    Flinch,
+    /// A posture break (the stagger clip).
+    Stagger,
+    /// A posture break by a parry's riposte: the stagger, with the Parried
+    /// clip over it.
+    Parried,
+    /// A crit's posture break: down for [`CombatStats::knockdown_ticks`].
+    Knockdown,
+}
+
+/// The defender's side of one hit apart from its numbers: armour now, the
+/// reaction holding it, and whether its body binds a flinch (Hit React)
+/// clip.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Posture {
+    /// Its current action armours it.
+    pub armored: bool,
+    /// The reaction it is in, if any.
+    pub reacting: Option<Reaction>,
+    /// It binds a Hit React clip, so an ordinary swing can flinch it.
+    pub flinches: bool,
+}
+
+impl Posture {
+    /// The posture state for [`Combatant::receive_hit`]: a break reaction
+    /// (stagger, riposte stagger, knockdown) cannot be broken again.
+    pub fn rule(self) -> PoiseRule {
+        PoiseRule {
+            armored: self.armored,
+            blocked: matches!(
+                self.reacting,
+                Some(Reaction::Stagger | Reaction::Parried | Reaction::Knockdown)
+            ),
+        }
+    }
+
+    /// The one reaction rule, for every fighter: a crit's break knocks
+    /// down, any other break staggers (a riposte's with the Parried clip),
+    /// and an ordinary swing flinches a fighter that binds a Hit React clip
+    /// unless armour holds it or a reaction already does (a flinch never
+    /// restarts itself). A kill or a parry is no reaction.
+    pub fn reaction(self, kind: HitKind, out: &HitOut) -> Option<Reaction> {
+        if out.killed || out.parried {
+            None
+        } else if out.knocked_down {
+            Some(Reaction::Knockdown)
+        } else if out.poise_broken {
+            Some(if kind == HitKind::Parry {
+                Reaction::Parried
+            } else {
+                Reaction::Stagger
+            })
+        } else if kind == HitKind::Melee
+            && !self.armored
+            && self.flinches
+            && self.reacting.is_none()
+        {
+            Some(Reaction::Flinch)
+        } else {
+            None
+        }
+    }
+}
+
 /// Health, posture, energy and stance of one fighter.
 ///
 /// `Copy` and `const`-constructible so entity tables can hold an array of
@@ -1091,5 +1161,77 @@ mod tests {
         // A knockdown still blocks it: no chain of crit knockdowns.
         let again = critted.receive_hit(hit(Strike { crit: true, ..blow }));
         assert!(!again.poise_broken);
+    }
+
+    #[test]
+    fn one_reaction_rule_for_every_fighter() {
+        let open = Posture {
+            flinches: true,
+            ..Posture::default()
+        };
+        let hit = HitOut::default();
+        let broke = HitOut {
+            poise_broken: true,
+            ..HitOut::default()
+        };
+        let down = HitOut {
+            knocked_down: true,
+            ..broke
+        };
+        // An ordinary swing flinches; armour, a missing clip, a bolt or a
+        // reaction already playing holds it.
+        assert_eq!(open.reaction(HitKind::Melee, &hit), Some(Reaction::Flinch));
+        let armored = Posture {
+            armored: true,
+            ..open
+        };
+        assert_eq!(armored.reaction(HitKind::Melee, &hit), None);
+        let no_clip = Posture {
+            flinches: false,
+            ..open
+        };
+        assert_eq!(no_clip.reaction(HitKind::Melee, &hit), None);
+        for kind in [HitKind::Projectile, HitKind::Hazard, HitKind::Parry] {
+            assert_eq!(open.reaction(kind, &hit), None);
+        }
+        let flinching = Posture {
+            reacting: Some(Reaction::Flinch),
+            ..open
+        };
+        assert_eq!(flinching.reaction(HitKind::Melee, &hit), None);
+        // A break staggers through armour and over a flinch; a riposte's
+        // break plays the Parried stagger; a crit's break knocks down.
+        assert_eq!(
+            armored.reaction(HitKind::Melee, &broke),
+            Some(Reaction::Stagger)
+        );
+        assert_eq!(
+            flinching.reaction(HitKind::Melee, &broke),
+            Some(Reaction::Stagger)
+        );
+        assert_eq!(
+            open.reaction(HitKind::Parry, &broke),
+            Some(Reaction::Parried)
+        );
+        assert_eq!(
+            open.reaction(HitKind::Melee, &down),
+            Some(Reaction::Knockdown)
+        );
+        // A kill or a parry is no reaction.
+        let killed = HitOut {
+            killed: true,
+            ..HitOut::default()
+        };
+        assert_eq!(open.reaction(HitKind::Melee, &killed), None);
+        // Only a break reaction refuses another break.
+        assert!(!flinching.rule().blocked);
+        for reacting in [Reaction::Stagger, Reaction::Parried, Reaction::Knockdown] {
+            let held = Posture {
+                reacting: Some(reacting),
+                ..open
+            };
+            assert!(held.rule().blocked);
+            assert_eq!(held.reaction(HitKind::Melee, &hit), None);
+        }
     }
 }
