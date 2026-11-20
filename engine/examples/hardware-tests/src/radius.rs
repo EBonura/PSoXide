@@ -345,7 +345,26 @@ fn read_sdk(lba: u32, first: u32) -> Cell {
         }
         reader.stop();
     }
+    // SAFETY: single thread; plain static.
+    unsafe {
+        if tally.delivered >= GROUP && attempt == 2 {
+            SDK_RETRIES[0] += 1;
+        } else if attempt > 2 || tally.delivered < GROUP {
+            SDK_RETRIES[1] += 1;
+        }
+    }
     tally.cell(&mut clock)
+}
+
+/// v2.25: the SDK method's groups that needed one retry, and two or never
+/// completed, over the last sweep (`0xA4C` reports them).
+static mut SDK_RETRIES: [u32; 2] = [0; 2];
+
+/// The sweep's SDK-method retry tally, each count at most 255.
+pub(crate) fn sdk_retry_tally() -> [u32; 2] {
+    // SAFETY: single thread; plain static.
+    let tally = unsafe { SDK_RETRIES };
+    [tally[0].min(0xFF), tally[1].min(0xFF)]
 }
 
 /// The SDK reader's failure snapshot is `cause << 24 | status << 16 | command
@@ -549,6 +568,7 @@ pub(crate) fn run(font: &FontAtlas) -> RadiusRecords {
     unsafe {
         TABLE_LEN = 0;
         DEAD_SKIPPED = 0;
+        SDK_RETRIES = [0; 2];
         FILE_FOUND = false;
         *addr_of_mut!(TABLE) = [BLANK; MAX_POSITIONS];
     }
@@ -659,14 +679,14 @@ fn push_position(out: &mut RadiusRecords, index: usize, position: &Position) {
 
 /// The step's records: up to three meta, seven a position.
 pub(crate) struct RadiusRecords {
-    items: [TimingRecord; 3 + 7 * MAX_POSITIONS],
+    items: [TimingRecord; 4 + 7 * MAX_POSITIONS],
     len: usize,
 }
 
 impl RadiusRecords {
     const fn new() -> Self {
         Self {
-            items: [TimingRecord::pending(); 3 + 7 * MAX_POSITIONS],
+            items: [TimingRecord::pending(); 4 + 7 * MAX_POSITIONS],
             len: 0,
         }
     }
