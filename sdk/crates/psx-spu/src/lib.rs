@@ -357,6 +357,12 @@ impl<const N: usize> WordAligned<N> {
     pub const fn new(bytes: [u8; N]) -> Self {
         Self(bytes)
     }
+
+    /// The bytes, word-aligned. A `const fn`, so a `const` table of samples can name them.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; N] {
+        &self.0
+    }
 }
 
 impl<const N: usize> core::ops::Deref for WordAligned<N> {

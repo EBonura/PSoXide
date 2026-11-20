@@ -66,6 +66,38 @@ pub mod vloop;
 use psx_asset::Audio;
 use psx_spu::{Adsr, Pitch, Spu, SpuAddr, TransferTimeout, Voice, Volume};
 
+/// [`include_psau!`]'s storage type, re-exported so a program needs no `psx-spu` dependency of its
+/// own to expand the macro.
+#[doc(hidden)]
+pub use psx_spu::WordAligned as __WordAligned;
+
+/// Include a cooked `.psau` sample at a 4-byte-aligned address, as a `&'static [u8]`.
+///
+/// Use this instead of `include_bytes!` for every sample a program uploads. `include_bytes!` data
+/// has an alignment of 1, and an upload from an unaligned source cannot go by DMA: it takes the
+/// manual-write path, which is unproven on a console until hardware-test rows 0x9BB and 0x9BC
+/// (v2.25) run. A `.psau` header is 32 bytes and its ADPCM is whole 16-byte blocks, so the body
+/// [`Bank`] uploads from a word-aligned file is word-aligned and a whole number of words: DMA every
+/// time, whatever the linker does.
+///
+/// The path is relative to the invoking source file, as for `include_bytes!`. The macro is a
+/// constant expression, so a `const` table of samples can use it.
+///
+/// ```ignore
+/// static BLIP: &[u8] = psx_sfx::include_psau!("../assets/blip.psau");
+/// let blip = bank.upload_on(&mut spu, BLIP)?;
+/// ```
+#[macro_export]
+macro_rules! include_psau {
+    ($path:expr) => {{
+        const LEN: usize = include_bytes!($path).len();
+        static BYTES: $crate::__WordAligned<LEN> =
+            $crate::__WordAligned::new(*include_bytes!($path));
+        let bytes: &'static [u8] = BYTES.as_bytes();
+        bytes
+    }};
+}
+
 /// Highest level the SPU accepts in a volume register.
 pub(crate) const SPU_LEVEL_MAX: i16 = 0x3fff;
 
@@ -556,6 +588,34 @@ mod tests {
             PARKING_TAIL[2..].iter().all(|&b| b == 0),
             "decodes to silence"
         );
+    }
+
+    /// A cooked sample (a copy of assets/audio/freesfx/psau/footstep.psau kept in the crate,
+    /// inside the staged guest closure), included the way programs should include theirs; twice,
+    /// so two statics sit next to each other and both must come out aligned.
+    const SAMPLES: [&[u8]; 2] = [
+        include_psau!("../testdata/footstep.psau"),
+        include_psau!("../testdata/footstep.psau"),
+    ];
+
+    #[test]
+    fn an_included_sample_body_is_word_aligned_and_whole_words_so_it_goes_by_dma() {
+        for psau in SAMPLES {
+            assert!((psau.as_ptr() as usize).is_multiple_of(4), "the file");
+            let audio = Audio::from_bytes(psau).expect("cooked psau");
+            let body = audio.adpcm_bytes();
+            // The two conditions psx_spu checks before it takes DMA.
+            assert!(
+                (body.as_ptr() as usize).is_multiple_of(4),
+                "the body Bank uploads"
+            );
+            assert!(body.len().is_multiple_of(4));
+        }
+    }
+
+    #[test]
+    fn an_included_sample_holds_the_files_bytes() {
+        assert_eq!(SAMPLES[0], &include_bytes!("../testdata/footstep.psau")[..]);
     }
 
     #[test]
