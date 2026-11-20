@@ -360,6 +360,11 @@ fn loud_spans(path: &Path) -> Result<(f64, Vec<[f64; 2]>)> {
 }
 
 /// `check-audible WAV [--min-seconds S]`.
+///
+/// # Errors
+///
+/// Returns an error for an unknown flag, a missing or unparsable `--min-seconds` value, a
+/// count of WAV arguments other than one, and any error from [`check_audible`].
 pub fn check_audible_command(
     args: &[String],
     out: &mut dyn Write,
@@ -391,6 +396,11 @@ pub fn check_audible_command(
 /// Fail (1) unless the emulator's audio holds at least `min_seconds` of sound in all. For a
 /// step that plays something meant to be heard: v2.24's SPU BULK UPLOAD tone played into a
 /// main volume of 0 on the console and in the emulator, and nothing noticed.
+///
+/// # Errors
+///
+/// Returns an error when the WAV cannot be read or parsed, or when writing to `out` or `err`
+/// fails. Too little sound is not an error: it returns `Ok(1)`.
 pub fn check_audible(
     path: &Path,
     min_seconds: f64,
