@@ -78,7 +78,7 @@ engine clippy::must_use_candidate 1288
 engine clippy::unwrap_used 50
 engine clippy::exhaustive_enums 107
 engine clippy::exhaustive_structs 370
-engine clippy::missing_errors_doc 61
+engine clippy::missing_errors_doc 60
 engine clippy::missing_panics_doc 15
 engine clippy::wildcard_imports 32
 engine clippy::string_add 0
@@ -87,7 +87,7 @@ engine clippy::fn_params_excessive_bools 3
 engine clippy::needless_for_each 0
 engine clippy::disallowed_types 5
 engine clippy::disallowed_methods 0
-engine missing_docs 146
+engine missing_docs 145
 sdk clippy::wrong_self_convention 0
 sdk clippy::should_implement_trait 0
 sdk clippy::len_without_is_empty 0

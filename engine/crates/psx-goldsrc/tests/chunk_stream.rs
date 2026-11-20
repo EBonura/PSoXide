@@ -340,8 +340,5 @@ fn a_failed_session_closes_and_a_blocking_load_supersedes_an_open_one() {
     assert!(!o.stream_active());
 }
 
-#[test]
-fn the_session_timeout_covers_a_first_sector_after_idle() {
-    // The console has taken 4.4 s to a first sector after idle: 264 VBlanks.
-    assert!(STREAM_TIMEOUT_VBLANKS >= 600);
-}
+// The console has taken 4.4 s to a first sector after idle: 264 VBlanks.
+const _: () = assert!(STREAM_TIMEOUT_VBLANKS >= 600);
