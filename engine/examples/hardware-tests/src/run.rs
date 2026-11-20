@@ -961,8 +961,10 @@ const STEPS: &[Step] = &[
     session(Area::Drive, "CD MOTOR", step_stream_motor),
     session(Area::Drive, "CD READ AFTER IDLE", step_cd_idle),
     focused(Area::Drive, "CD RADIUS SWEEP", 1, step_radius),
-    // Also on menu row 2 (the radius disc's row): its outer chunks read RADIUS.DAT.
+    // Also on the RADIUS + LIST NODE SWEEP ONLY menu row: its outer chunks read RADIUS.DAT.
     focused(Area::Drive, "CD FIFO AND OUTER CHUNKS", 3, step_cd_v225),
+    // v2.25 (lane cs-cd): the drain transport's cost and start-up, implicit seek against seek-first.
+    focused(Area::Drive, "CD DRAIN AND SEEK", 4, step_cd_drain),
     // Last of the safe steps: it changes the display mode, and a failure here
     // cannot stop anything before it (only the risky step after it).
     step(Area::Drive, "480I DRAW RULE", step_field_rule),
@@ -1112,6 +1114,12 @@ fn step_spu_key_reverb_irq(run: &mut Run) {
 fn step_card_save(run: &mut Run) {
     let font = run.font.take().expect("font uploaded by reset_area");
     card_save::run(&font, &mut run.timing.records, &mut run.next);
+    run.font = Some(font);
+}
+
+fn step_cd_drain(run: &mut Run) {
+    let font = run.font.take().expect("font uploaded by reset_area");
+    cd_drain::run(&font, &mut run.timing.records, &mut run.next);
     run.font = Some(font);
 }
 

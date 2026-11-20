@@ -32,7 +32,13 @@
 //!   ended on a drive error (INT5, high byte) or a timeout (low byte), the
 //!   first INT5 error code (0 none).
 //!
-//! Decoder labels: `cd_fifo_PLACE`, `cd_fifo_PLACE_counts`,
+//! * `0xA4C` (the retries a two-attempt loader sees, lane cs-cd): outer chunks
+//!   right on the second attempt, outer chunks right only on a third attempt
+//!   or never (what `READ_ATTEMPTS = 2` loses), and from `CD RADIUS SWEEP` the
+//!   SDK reader's groups that needed one retry (bits 0-7) and two or that
+//!   never completed (bits 8-15).
+//!
+//! Decoder labels: `cd_outer_retries`, `cd_fifo_PLACE`, `cd_fifo_PLACE_counts`,
 //! `cd_outer_chunks_Ns`, `cd_outer_chunks_Ns_errors`.
 
 use crate::console_tests::{record, spread};
@@ -62,6 +68,10 @@ const IDLE_TICKS: u32 = 39_000;
 const SYSCLK_DIV8: u16 = 0x0200;
 
 static mut SECTOR: [u32; SECTOR_WORDS] = [0; SECTOR_WORDS];
+/// Outer chunks right on the second attempt, and right only on the third or
+/// never (lost to a two-attempt loader).
+static mut RETRY_TALLY: [u32; 2] = [0; 2];
+const RETRY_RECORD: u16 = 0xA4C;
 
 /// Leave the drive paused with no flag waiting.
 #[optimize(size)]
@@ -226,6 +236,8 @@ fn chunk_place(lba: u32, first: u32) -> [u32; 6] {
                         clean += 1;
                     } else {
                         retried += 1;
+                        // SAFETY: single thread; plain static.
+                        unsafe { RETRY_TALLY[(attempt - 1).min(1) as usize] += 1 };
                     }
                     break;
                 }
@@ -233,6 +245,8 @@ fn chunk_place(lba: u32, first: u32) -> [u32; 6] {
         }
         if !ok {
             never += 1;
+            // SAFETY: single thread; plain static.
+            unsafe { RETRY_TALLY[1] += 1 };
         }
         crate::bounds::heartbeat();
     }
@@ -274,6 +288,8 @@ pub(crate) fn run(font: &FontAtlas, records: &mut Records, next: &mut usize) {
         let good = lba.is_none() || values[4] == 0 && values[5] == 0;
         ui::live_line(font, place as u32, line.as_str(), if good { (120, 230, 120) } else { (255, 110, 90) });
     }
+    // SAFETY: single thread; plain static.
+    unsafe { RETRY_TALLY = [0; 2] };
     for place in 0..3usize {
         let id = CHUNK_RECORD + 2 * place as u16;
         crate::bounds::record_start(id);
@@ -301,4 +317,18 @@ pub(crate) fn run(font: &FontAtlas, records: &mut Records, next: &mut usize) {
         let good = radius.is_none() || values[0] == CHUNKS as u32;
         ui::live_line(font, 3 + place as u32, line.as_str(), if good { (120, 230, 120) } else { (255, 110, 90) });
     }
+    // SAFETY: single thread; plain static.
+    let tally = unsafe { RETRY_TALLY };
+    crate::bounds::record_start(RETRY_RECORD);
+    let sdk = crate::radius::sdk_retry_tally();
+    push_timing_record(
+        records,
+        next,
+        record(
+            RETRY_RECORD,
+            if radius.is_some() { tally[0] } else { 0xFFFF },
+            if radius.is_some() { tally[1] } else { 0xFFFF },
+            sdk[0] | sdk[1] << 8,
+        ),
+    );
 }

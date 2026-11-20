@@ -62,6 +62,7 @@ mod bounds;
 mod card_proto;
 mod card_save;
 mod cd_chain_probe;
+mod cd_drain;
 mod cd_idle;
 mod cd_pause;
 mod cd_route;

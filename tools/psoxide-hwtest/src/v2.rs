@@ -741,6 +741,20 @@ fn build() -> BTreeMap<u32, V2Entry> {
             ["wrong_sectors", "int5_high_timeouts_low", "first_error_code"],
         );
     }
+    b.put(0xA4C, "cd_outer_retries", ["right_on_second_attempt", "third_or_never", "sweep_once_low_twice_high"]);
+    // v2.25 (lane cs-cd): drain cost, drain after idle, implicit seek against seek-first (cd_drain.rs).
+    b.put(0xAA0, "cd_drain_cost", ["sectors", "sectors_per_s_x10", "wrong_state_high"]);
+    b.put(0xAA1, "cd_drain_cost_cpu", ["clk_lost_per_sector", "longest_gap_clk", "idle_longest_gap_clk"]);
+    for (k, s) in [0u32, 5, 15, 30].into_iter().enumerate() {
+        b.put(0xAA2 + k as u32, format!("cd_drain_after_idle_{s}s"), ["vblanks_to_first", "vblanks_total", "state"]);
+    }
+    for (p, place) in ["inner", "middle", "outer"].into_iter().enumerate() {
+        for (m, method) in ["implicit", "seek_first"].into_iter().enumerate() {
+            let id = 0xAA8 + 2 * (2 * p as u32 + m as u32);
+            b.put(id, format!("cd_seek_{place}_{method}"), ["delivered", "wrong", "first_wrong"]);
+            b.put(id + 1, format!("cd_seek_{place}_{method}_detail"), ["shift_plus_128", "failures", "hblanks_div16"]);
+        }
+    }
     // v2.25: Stop then read at once, Pause during SeekL (cd_idle.rs).
     for k in 0..3u32 {
         b.put(0xA50 + k, format!("cd_stop_read_at_once_{k}"), ["hblanks_low", "hblanks_high", "outcome"]);
