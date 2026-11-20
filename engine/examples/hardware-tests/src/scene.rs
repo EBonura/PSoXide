@@ -186,6 +186,7 @@ impl Scene for HardwareTests {
             }
             Mode::MemoryCard => self.update_memory_card(ctx),
             Mode::Menu => {
+                crate::pad_polls::note_menu_poll(ctx.pad);
                 let rows = MENU.len();
                 if ctx.just_pressed(button::UP) {
                     self.menu_cursor = (self.menu_cursor + rows - 1) % rows;

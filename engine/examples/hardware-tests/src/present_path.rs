@@ -172,7 +172,26 @@ fn load(f: u32) {
 
 /// The four records.
 pub(crate) fn run(records: &mut Records, next: &mut usize) {
-    crate::bounds::record_start(RECORD);
+    run_with(records, next, RECORD, false);
+}
+
+/// `PRESENT HEAVY FRAMES` (v2.25): the same four records from `0xA90`, every
+/// chain frame two parts, the first [`HEAVY_NODES`] textured 48 x 48 quads
+/// (`gpu_heavy::heavy_chain`, the list `HEAVY FRAME WALK` times) and the second
+/// the marker. 0x970-0x973 only ever had 16-word arenas; this is the presenter
+/// with frames that take longer than a VBlank to draw.
+pub(crate) fn run_heavy(records: &mut Records, next: &mut usize) {
+    run_with(records, next, HEAVY_RECORD, true);
+}
+
+/// First record of `PRESENT HEAVY FRAMES`.
+const HEAVY_RECORD: u16 = 0xA90;
+/// Quads in each heavy frame's first part.
+const HEAVY_NODES: usize = 512;
+
+fn run_with(records: &mut Records, next: &mut usize, base: u16, heavy: bool) {
+    crate::bounds::record_start(base);
+    let heavy_head = if heavy { crate::gpu_heavy::heavy_chain(HEAVY_NODES) } else { core::ptr::null() };
     // SAFETY: plain statics; the hook is idle (`RUNNING` clear).
     let hooked = unsafe {
         if !read_volatile(addr_of!(HOOKED)) {
@@ -222,6 +241,15 @@ pub(crate) fn run(records: &mut Records, next: &mut usize) {
             gpu.draw(&FillRect::new((0, y), (320, 240), (24, 8, 8)));
             gpu.draw(&FillRect::new((MARKER_X, y), (16, 16), marker_colour(frame)));
             presenter.present_drawn(&mut buffers);
+        } else if heavy {
+            let (_, marker) = build_chain(f & 1, frame, y, true);
+            // SAFETY: the heavy list is static and never changes while frames walk it; it ends
+            // without GP0(1Fh) and the marker node ends on it, as for the two-part frames below.
+            unsafe {
+                presenter.submit(&mut buffers, heavy_head, Part::More);
+                presenter.submit(&mut buffers, marker, Part::Final);
+            }
+            parts += 2;
         } else {
             let two = f % 3 == 1;
             let (first, marker) = build_chain(f & 1, frame, y, two);
@@ -326,7 +354,7 @@ pub(crate) fn run(records: &mut Records, next: &mut usize) {
     .into_iter()
     .enumerate()
     {
-        push_timing_record(records, next, record(RECORD + case as u16, a, b, c));
+        push_timing_record(records, next, record(base + case as u16, a, b, c));
     }
 }
 

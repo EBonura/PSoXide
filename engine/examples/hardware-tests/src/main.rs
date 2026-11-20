@@ -60,10 +60,12 @@ macro_rules! probe_gpu {
 mod boot;
 mod bounds;
 mod card_proto;
+mod card_save;
 mod cd_chain_probe;
 mod cd_idle;
 mod cd_pause;
 mod cd_route;
+mod cd_v225;
 mod cdstream_cases;
 mod clut_rewrite;
 mod config_irq;
@@ -77,6 +79,7 @@ mod dma_edge;
 mod dma_matrix;
 mod field_rule;
 mod gpu_done;
+mod gpu_heavy;
 mod gpu_probes;
 mod gte_nclip;
 mod handoff_probe;
@@ -87,6 +90,7 @@ mod lever_probes;
 mod list_busy_probes;
 mod mdec_check;
 mod mdec_diag;
+mod pad_polls;
 mod payload;
 mod perf_probes;
 mod photo;
@@ -104,6 +108,7 @@ mod scene;
 mod sio_timing;
 mod spu_bulk;
 mod spu_probe;
+mod spu_v225;
 mod tick_loss;
 mod timer1_rate;
 mod ui;
@@ -250,8 +255,9 @@ const SUITE_VERSION: &str = "HWTEST v2.25";
 /// `CDTEST.BIN`: the deterministic read region the CD probes use, placed so it
 /// ends at LBA 1024. The console-diag build's stop panel pushes the boot EXE
 /// past the 541 sectors the plain layout allows, so that build gives the
-/// region 60 sectors back (the Makefile passes the same count to mkisopsx).
-pub(crate) const CDTEST_SECTORS: u32 = if cfg!(feature = "console-diag") { 400 } else { 460 };
+/// region 100 sectors back (the Makefile passes the same count to mkisopsx):
+/// 400 until v2.24, 360 from v2.25, whose rows took the EXE to 623 sectors.
+pub(crate) const CDTEST_SECTORS: u32 = if cfg!(feature = "console-diag") { 360 } else { 460 };
 pub(crate) const CDTEST_LBA: u32 = 1024 - CDTEST_SECTORS;
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;

@@ -694,6 +694,82 @@ fn build() -> BTreeMap<u32, V2Entry> {
     b.put(0x9BA, "spu_bulk_pio_old_check", ["differing_bytes_low", "differing_bytes_high", "unused"]);
     b.put(0x9BB, "spu_bulk_pio_new", ["first_differing_low", "first_differing_high", "hblanks"]);
     b.put(0x9BC, "spu_bulk_pio_new_check", ["differing_bytes_low", "differing_bytes_high", "flags"]);
+    // v2.25 (audit rows): SPU FIFO overfill (spu_v225.rs).
+    for (k, n) in [32u32, 33, 48, 64].into_iter().enumerate() {
+        b.put(
+            0xA20 + k as u32,
+            format!("spu_fifo_push_{n}"),
+            ["halfwords_landed", "index_at_slot0_and_last_high", "first_wrong_slot_bit15_timeout"],
+        );
+    }
+    b.put(0xA24, "spu_fifo_two_bursts", ["halfwords_landed", "index_at_slot0_and_last_high", "first_wrong_slot_bit15_timeout"]);
+    // v2.25: key-on after key-off, reverb, IRQ latch (spu_v225.rs).
+    for (k, clocks) in [0u32, 768, 1_536, 3_072].into_iter().enumerate() {
+        b.put(
+            0xA28 + k as u32,
+            format!("spu_kon_after_koff_{clocks}clk"),
+            ["took_lost_neither_nibbles", "level_median", "level_max"],
+        );
+    }
+    b.put(0xA2C, "spu_reverb_start", ["timeout", "hblanks_low", "hblanks_high"]);
+    b.put(0xA2D, "spu_reverb_check", ["nonzero_words_in_area", "registers_differing", "reverb_bit_after_stop"]);
+    b.put(0xA2E, "spu_irq_latch", ["hblanks_to_latch", "i_stat_bit9", "stat_bit6_after_ack"]);
+    b.put(0xA2F, "spu_irq_latch_again", ["hblanks_rearmed", "hblanks_disabled", "unused"]);
+    // v2.25: memory card test save and commit timing (card_save.rs), port 1 then port 2.
+    for (port, p) in [(0u32, 1u32), (1, 2)] {
+        let base = 0xA30 + 8 * port;
+        b.put(base, format!("card_save_p{p}"), ["flags_error_high", "free_blocks", "save_block"]);
+        b.put(base + 1, format!("card_save_time_p{p}"), ["write_hblanks", "write_vblanks", "delete_hblanks"]);
+        b.put(base + 2, format!("card_save_flag_p{p}"), ["flag_before", "flag_after_write", "raw_write_status"]);
+        b.put(base + 3, format!("card_commit_p{p}"), ["hblanks_min", "hblanks_median", "hblanks_max"]);
+        b.put(base + 4, format!("card_commit_reads_p{p}"), ["reads_first_round", "flag_first_read", "missed_refused"]);
+    }
+    // v2.25: CD data FIFO and outer-radius chunk reads (cd_v225.rs).
+    for (k, place) in ["inner", "middle", "outer"].into_iter().enumerate() {
+        b.put(0xA40 + 2 * k as u32, format!("cd_fifo_{place}"), ["div8_clk_min", "div8_clk_median", "div8_clk_max"]);
+        b.put(
+            0xA41 + 2 * k as u32,
+            format!("cd_fifo_{place}_counts"),
+            ["sectors", "over15ms_over100ms_high", "int5_timeouts_high"],
+        );
+    }
+    for (k, place) in ["60s", "20s", "3s"].into_iter().enumerate() {
+        b.put(0xA46 + 2 * k as u32, format!("cd_outer_chunks_{place}"), ["clean", "after_retry", "never"]);
+        b.put(
+            0xA47 + 2 * k as u32,
+            format!("cd_outer_chunks_{place}_errors"),
+            ["wrong_sectors", "int5_high_timeouts_low", "first_error_code"],
+        );
+    }
+    // v2.25: Stop then read at once, Pause during SeekL (cd_idle.rs).
+    for k in 0..3u32 {
+        b.put(0xA50 + k, format!("cd_stop_read_at_once_{k}"), ["hblanks_low", "hblanks_high", "outcome"]);
+    }
+    b.put(0xA53, "cd_pause_in_seek", ["refused", "accepted", "seek_refused"]);
+    // v2.25: heavy textured list walk (gpu_heavy.rs).
+    for (k, n) in [256u32, 512, 1_024].into_iter().enumerate() {
+        b.put(0xA60 + 2 * k as u32, format!("gpu_heavy_walk_{n}"), ["passes_low", "passes_high", "hblanks"]);
+        b.put(
+            0xA61 + 2 * k as u32,
+            format!("gpu_heavy_walk_{n}_bounds"),
+            ["hblanks_to_idle", "past_sdk_500k", "percent_of_8_vblanks"],
+        );
+    }
+    // v2.25: 480i fill after VBlank with E1 bit 10 set (field_rule.rs).
+    for k in 0..4u32 {
+        b.put(0xA68 + k, format!("field_rule_bit10_after_vblank_{k}"), ["row_mask", "descriptor", "flags"]);
+    }
+    b.put(0xA6C, "cache_flush_dma_wedged", ["hblanks_low", "hblanks_high", "flags"]);
+    // v2.25: pad polls under a forced interrupt (pad_polls.rs).
+    for (k, name) in ["shipped", "forced_irq", "forced_irq_masked"].into_iter().enumerate() {
+        b.put(0xA80 + k as u32, format!("pad_polls_{name}"), ["answered", "retried", "silent_most_high"]);
+    }
+    b.put(0xA83, "pad_menu_from_boot", ["menu_frames", "frames_unanswered", "first_answer_mode_high"]);
+    // v2.25: the present queue with heavy frames (present_path.rs run_heavy), as 0x970-0x973.
+    b.put(0xA90, "present_heavy", ["flipped", "kicks", "health"]);
+    b.put(0xA91, "present_heavy_lines", ["first_line", "last_line", "lines_per_frame"]);
+    b.put(0xA92, "present_heavy_kicks", ["thread_kicks", "handler_kicks", "skips"]);
+    b.put(0xA93, "present_heavy_late", ["late", "worst_vblanks", "fallbacks"]);
     // v2.24: 480i field sequence (engine/examples/hardware-tests/src/field_rule.rs run_sequence).
     for k in 0..8u32 {
         b.put(0x9D0 + k, format!("field_seq_blank_{k}"), ["row_mask", "bit31_at_and_after", "field_number"]);
