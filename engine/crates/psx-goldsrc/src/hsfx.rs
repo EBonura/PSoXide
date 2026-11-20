@@ -6,7 +6,7 @@
 //! truncation retains the legacy bounds panic; valid directories with a bad
 //! payload retain the valid prefix rather than rejecting the whole bank.
 use psx_asset::Audio;
-use psx_sfx::{OneShot, Sample, PARKING_TAIL as SAMPLE_TAIL};
+use psx_sfx::{parking_tail, OneShot, Sample, PARKING_TAIL as SAMPLE_TAIL};
 use psx_spu::{Adsr, Spu, SpuAddr, Voice, Volume};
 
 const SPU_SAMPLE_BASE: u32 = 0x1010;
@@ -488,7 +488,7 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
             next_addr = (next_addr + bytes.len() as u32 + 15) & !15;
             if next_addr + SAMPLE_TAIL.len() as u32 <= 512 * 1024 {
                 if spu
-                    .upload_adpcm(SpuAddr::new(next_addr), &SAMPLE_TAIL)
+                    .upload_adpcm(SpuAddr::new(next_addr), parking_tail())
                     .is_err()
                 {
                     break;
@@ -553,7 +553,7 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
             next_addr = (next_addr + bytes.len() as u32 + 15) & !15;
             if next_addr + SAMPLE_TAIL.len() as u32 <= 512 * 1024 {
                 if spu
-                    .upload_adpcm(SpuAddr::new(next_addr), &SAMPLE_TAIL)
+                    .upload_adpcm(SpuAddr::new(next_addr), parking_tail())
                     .is_err()
                 {
                     break;

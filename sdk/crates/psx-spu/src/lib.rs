@@ -315,7 +315,7 @@ fn init_with(dma: &mut SpuDma) {
 
     // The one upload allowed onto the silence block: it writes the block. A
     // timeout here is reported by `dma_write` and not returned; see `Spu::new`.
-    let _ = upload_adpcm_unguarded(dma, SILENCE_BLOCK, &SILENCE_BLOCK_BYTES);
+    let _ = upload_adpcm_unguarded(dma, SILENCE_BLOCK, &SILENCE_BLOCK_BYTES[..]);
 }
 
 /// One ADPCM block of silence that loops on itself, for every one-shot's
@@ -331,7 +331,35 @@ pub const SILENCE_BLOCK: SpuAddr = SpuAddr::new(0x1000);
 ///
 /// A voice that lands here decodes silence and jumps straight back to the top
 /// of the same block, so it stays here until something keys it off.
-static SILENCE_BLOCK_BYTES: [u8; 16] = [0x00, 0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+///
+/// Word-aligned, so its upload goes by DMA: a byte-aligned static would take the
+/// manual-write path, which the console fails with the old write order
+/// (hardware tests 0xA7 and 0xBD).
+static SILENCE_BLOCK_BYTES: WordAligned<16> =
+    WordAligned::new([0x00, 0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+
+/// Bytes at a 4-byte-aligned address, the alignment [`Spu::upload_adpcm`] needs to send
+/// them by DMA rather than by manual write. A `static` or `const` byte array has an
+/// alignment of 1, so a short block kept in one (a parking or silence block) can land
+/// on any address; wrap it in this instead and upload `&block[..]`.
+#[repr(C, align(4))]
+pub struct WordAligned<const N: usize>([u8; N]);
+
+impl<const N: usize> WordAligned<N> {
+    /// `bytes` at a word-aligned address.
+    #[must_use]
+    pub const fn new(bytes: [u8; N]) -> Self {
+        Self(bytes)
+    }
+}
+
+impl<const N: usize> core::ops::Deref for WordAligned<N> {
+    type Target = [u8; N];
+
+    fn deref(&self) -> &[u8; N] {
+        &self.0
+    }
+}
 
 /// Spin budget for one SPU handshake. Generous next to the delay the
 /// hardware actually takes, short enough that a wedged SPU hands control
@@ -1609,6 +1637,21 @@ mod tests {
         // trusting every game to start at 0x1010.
         assert_eq!(SILENCE_BLOCK.byte_offset(), 0x1000);
         assert_eq!(SILENCE_BLOCK_BYTES.len(), 16);
+    }
+
+    #[test]
+    fn the_silence_block_goes_by_dma_never_by_manual_write() {
+        assert!((SILENCE_BLOCK_BYTES.as_ptr() as usize).is_multiple_of(4));
+        mock::reset(0xc000);
+        let mut spu = test_spu();
+        upload_adpcm_unguarded(&mut spu.0, SILENCE_BLOCK, &SILENCE_BLOCK_BYTES[..])
+            .expect("no timeout");
+        let log = mock::take_log();
+        assert!(log.contains(&mock::Event::Dma(4, 4)), "{log:?}");
+        assert!(
+            !writes(&log).iter().any(|&(addr, _)| addr == TRANSFER_DATA),
+            "no manual-write pushes: {log:?}"
+        );
     }
 
     #[test]

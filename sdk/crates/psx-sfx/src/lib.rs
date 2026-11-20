@@ -94,6 +94,18 @@ const BLOCK_BYTES: u32 = 16;
 pub const PARKING_TAIL: [u8; BLOCK_BYTES as usize] =
     [0x00, 0x07, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
+/// [`PARKING_TAIL`] at a word-aligned address: the form to upload. `&PARKING_TAIL`
+/// can land on any byte address, and an unaligned source goes by manual write
+/// instead of DMA ([`psx_spu::Spu::upload_adpcm`]).
+#[must_use]
+#[inline]
+pub fn parking_tail() -> &'static [u8; BLOCK_BYTES as usize] {
+    &PARKING_TAIL_WORDS
+}
+
+static PARKING_TAIL_WORDS: psx_spu::WordAligned<{ BLOCK_BYTES as usize }> =
+    psx_spu::WordAligned::new(PARKING_TAIL);
+
 /// Ticks of margin added past a sample's own length before its voice is
 /// silenced, so the cutoff never clips a sound that is still sounding.
 ///
@@ -243,7 +255,7 @@ impl Bank {
         // block carries END, REPEAT and LOOP-START, so the hardware latches the
         // repeat address to the block itself as it decodes it, rather than
         // relying on a value written before key-on.
-        put(tail, &PARKING_TAIL)?;
+        put(tail, parking_tail())?;
         self.next = SpuAddr::new(tail.byte_offset() + BLOCK_BYTES);
         Ok(sample)
     }
@@ -544,6 +556,14 @@ mod tests {
             PARKING_TAIL[2..].iter().all(|&b| b == 0),
             "decodes to silence"
         );
+    }
+
+    #[test]
+    fn the_uploaded_parking_block_is_word_aligned_so_it_goes_by_dma() {
+        // An unaligned source takes the manual-write path; the parking block
+        // follows every sample, so it must never be one.
+        assert_eq!(parking_tail(), &PARKING_TAIL);
+        assert!((parking_tail().as_ptr() as usize).is_multiple_of(4));
     }
 
     #[test]
