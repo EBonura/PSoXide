@@ -3,9 +3,10 @@
 //!
 //! **FIFO fill.** The SDK reader's `pop_sector` requests a sector's data after
 //! the drive's data-ready interrupt (INT1) and waits up to 100 ms for the data
-//! FIFO; when the wait runs out it pops 2,048 bytes anyway and the read counts
-//! as good. How long the FIFO really takes, and whether the wait ever runs
-//! out, was never measured. Raw commands (SetMode double speed, Setloc, ReadN)
+//! FIFO; until `lane/console-fixes` c2ad07691 an expired wait popped 2,048
+//! bytes anyway and the read counted as good, now it fails the read. How long
+//! the FIFO really takes, and whether the wait ever runs out, was never
+//! measured. Raw commands (SetMode double speed, Setloc, ReadN)
 //! read [`FIFO_SECTORS`] sectors at three places: `CDTEST.BIN` (inner), the
 //! middle of `RADIUS.DAT` and its last minute (outer; the radius disc only).
 //! For each sector Timer 2 (system clock / 8) runs from the data request to the
@@ -14,7 +15,7 @@
 //! * `0xA40 + 2 * place`: the wait in units of 8 system clocks, min, median,
 //!   max (`0xFFFF` for a place not on this disc, or a wait past 15.5 ms).
 //! * `0xA41 + 2 * place`: sectors read, waits over 15 ms (bits 0-7) and over
-//!   100 ms (bits 8-15: the SDK's bound, a silent wrong sector), drive errors
+//!   100 ms (bits 8-15: past the SDK's bound, a failed read), drive errors
 //!   (INT5, bits 0-7) and timeouts (bits 8-15).
 //!
 //! **Outer chunks.** Pack loads (`psx_pack`, goldsrc) read a chunk as prepare,
