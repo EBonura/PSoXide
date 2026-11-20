@@ -160,8 +160,14 @@ impl Spu {
     /// of words, and otherwise (`include_bytes!` data, an odd number of
     /// halfwords) through the manual-transfer FIFO, at most
     /// [`MANUAL_BURST_HALFWORDS`] at a time, each burst drained before the
-    /// next. Both paths land the same bytes and report a stuck transfer the
-    /// same way.
+    /// next. Both paths land the same bytes in the emulator and report a stuck
+    /// transfer the same way.
+    ///
+    /// Only the DMA path is proven on a console (hardware tests v2.24). The
+    /// manual-write path is the fallback and is unproven on hardware until
+    /// hardware-test rows 0x9BB and 0x9BC (v2.25) run: include sample data with
+    /// `psx_sfx::include_psau!` (or keep it in a [`WordAligned`]) so it never
+    /// takes it.
     ///
     /// `bytes` must be a multiple of 2 (one halfword per two bytes).
     /// `dest` must be 8-byte-aligned (the SPU voice-start register's
@@ -1337,9 +1343,82 @@ fn dma_write(
     }
     end_dma_write(spucnt);
     if let Err(timeout) = result {
-        report_timeout(dest, timeout);
+        note_timeout(dest, timeout);
     }
     result
+}
+
+/// The first transfer of the run that timed out, as two words: the destination's byte offset
+/// with bit 31 set, then the bytes that landed. Both zero until one times out; never cleared.
+///
+/// A plain RAM word (no debug-port store), so it is safe on a console: the console-diag overlay
+/// and a gate's RAM checks read it by its map symbol, and [`first_upload_fault`] reads it in code.
+/// It is what makes a dropped upload `Result` harmless to diagnose: the failure is on record
+/// even where the caller ignored it.
+static mut UPLOAD_FAULT: [u32; 2] = [0; 2];
+
+/// Bit 31 of [`UPLOAD_FAULT`]'s first word: a fault is recorded.
+const UPLOAD_FAULT_SET: u32 = 1 << 31;
+
+/// The first SPU transfer of this run that timed out, from [`first_upload_fault`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct UploadFault {
+    /// Where the transfer was going.
+    pub dest: SpuAddr,
+    /// Bytes known to be in SPU RAM from `dest` up, as in [`TransferTimeout::landed_bytes`].
+    pub landed_bytes: u32,
+}
+
+/// The first SPU upload or reverb clear of this run that timed out, or `None` while every
+/// transfer has finished. Recorded by the SDK whether or not the caller handled the `Result`,
+/// and kept for the run (a later timeout does not replace it).
+///
+/// The SDK's policy for a failed upload: the sample is never played (`psx_sfx::Bank` and
+/// `psx_engine::sfx::upload_sample*` hand back no playable sample for it), the failure is on
+/// record here, and a game neither retries nor handles it beyond not playing the sound.
+#[must_use]
+pub fn first_upload_fault() -> Option<UploadFault> {
+    // SAFETY: the SPU driver runs on the main thread only; a two-word read of a static no
+    // interrupt handler writes.
+    let [dest, landed] = unsafe { core::ptr::addr_of!(UPLOAD_FAULT).read_volatile() };
+    decode_upload_fault(dest, landed)
+}
+
+const fn decode_upload_fault(dest: u32, landed_bytes: u32) -> Option<UploadFault> {
+    if dest & UPLOAD_FAULT_SET == 0 {
+        return None;
+    }
+    Some(UploadFault {
+        dest: SpuAddr::new(dest & !UPLOAD_FAULT_SET),
+        landed_bytes,
+    })
+}
+
+/// The two words to store for a timeout, or `None` when one is already recorded.
+const fn latch_upload_fault(
+    recorded: u32,
+    dest: SpuAddr,
+    timeout: TransferTimeout,
+) -> Option<[u32; 2]> {
+    if recorded & UPLOAD_FAULT_SET != 0 {
+        return None;
+    }
+    Some([dest.byte_offset() | UPLOAD_FAULT_SET, timeout.landed_bytes])
+}
+
+/// Record a timed-out transfer in [`UPLOAD_FAULT`] (the first one only), then report it on the
+/// debug console where a `host-tty` build has one.
+fn note_timeout(dest: SpuAddr, timeout: TransferTimeout) {
+    // SAFETY: the SPU driver runs on the main thread only, and only this function writes the
+    // static.
+    unsafe {
+        let fault = core::ptr::addr_of_mut!(UPLOAD_FAULT);
+        if let Some(words) = latch_upload_fault((*fault)[0], dest, timeout) {
+            fault.write_volatile(words);
+        }
+    }
+    report_timeout(dest, timeout);
 }
 
 /// Say once, on the debug console, that an SPU transfer timed out. Compiled to
@@ -1453,6 +1532,11 @@ const MANUAL_BURST_SPINS: u32 = psx_io::dma::spu_wait_spins(MANUAL_BURST_HALFWOR
 /// A burst whose busy flag does not clear within [`MANUAL_BURST_SPINS`] ends the
 /// upload with [`TransferTimeout`], as the DMA path does; `landed_bytes` counts
 /// the bursts that drained before it.
+///
+/// Unproven on hardware: that the console keeps the halfwords pushed in Stop and
+/// carries the transfer address across bursts rests on PSX-SPX until
+/// hardware-test rows 0x9BB and 0x9BC (v2.25) run. The fallback only; sample data
+/// is meant to be word-aligned (`psx_sfx::include_psau!`) and go by DMA.
 #[inline(never)]
 fn upload_adpcm_pio(dest: SpuAddr, bytes: &[u8]) -> Result<(), TransferTimeout> {
     let stop = read_reg16(SPUCNT) & !spucnt_bits::TRANSFER_MODE_MASK;
@@ -1497,7 +1581,7 @@ fn upload_adpcm_pio(dest: SpuAddr, bytes: &[u8]) -> Result<(), TransferTimeout> 
         let _ = read_reg16(SPUSTAT);
     }
     if let Err(timeout) = result {
-        report_timeout(dest, timeout);
+        note_timeout(dest, timeout);
     }
     result
 }
@@ -1981,6 +2065,33 @@ mod tests {
         let log = mock::take_log();
         assert_eq!(log.iter().filter(|e| matches!(e, Dma(..))).count(), 3);
         assert_eq!(log.last(), Some(&Write(SPUCNT, 0xc000)));
+        // The run's fault word now holds a timeout (this one, or one another test in the same
+        // process recorded first): a dropped Result still leaves the failure on record.
+        assert!(first_upload_fault().is_some());
+    }
+
+    #[test]
+    fn the_fault_word_keeps_the_first_timeout_and_decodes_it() {
+        let first = TransferTimeout {
+            landed_bytes: 3 * 4096,
+        };
+        let words = latch_upload_fault(0, SpuAddr::new(0x2000), first).expect("first latches");
+        assert_eq!(
+            decode_upload_fault(words[0], words[1]),
+            Some(UploadFault {
+                dest: SpuAddr::new(0x2000),
+                landed_bytes: 3 * 4096,
+            })
+        );
+        assert_eq!(
+            latch_upload_fault(words[0], SpuAddr::new(0x9000), first),
+            None
+        );
+        assert_eq!(decode_upload_fault(0, 0), None, "nothing recorded");
+        // Address 0 with nothing landed is still a recorded fault.
+        let at_zero = latch_upload_fault(0, SpuAddr::new(0), TransferTimeout { landed_bytes: 0 });
+        let [dest, landed] = at_zero.expect("latches");
+        assert!(decode_upload_fault(dest, landed).is_some());
     }
 
     /// The halfwords of `bytes` as the SPU's data port takes them.
