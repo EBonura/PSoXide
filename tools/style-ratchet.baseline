@@ -87,7 +87,7 @@ engine clippy::fn_params_excessive_bools 3
 engine clippy::needless_for_each 0
 engine clippy::disallowed_types 5
 engine clippy::disallowed_methods 0
-engine missing_docs 146
+engine missing_docs 145
 sdk clippy::wrong_self_convention 0
 sdk clippy::should_implement_trait 0
 sdk clippy::len_without_is_empty 0
