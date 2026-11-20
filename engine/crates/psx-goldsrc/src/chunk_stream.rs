@@ -32,6 +32,7 @@ pub const STREAM_TIMEOUT_VBLANKS: u32 =
 /// Where an interrupt-serviced read stands, as [`ChunkReader::drain_poll`]
 /// reports it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DrainPoll {
     /// Sectors are still arriving.
     Running,
