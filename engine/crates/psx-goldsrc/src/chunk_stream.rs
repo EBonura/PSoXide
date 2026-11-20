@@ -1,8 +1,17 @@
-//! Cached WORLD.PAK reads and bounded incremental chunk sessions.
+//! Cached WORLD.PAK reads and interrupt-serviced chunk sessions.
 //!
 //! The cache borrows a caller-owned render arena. Its invalidation contract is
 //! explicit and statically dispatched; persistent entry metadata has const
 //! capacity and never adds a second resident pack table.
+//!
+//! Every CD command goes through the caller's polled reader. A session (a
+//! weapon model that streams in while the world renders) starts its read the
+//! same way and hands only the popping of sectors to the CD interrupt
+//! (`psx_cdstream::drain` on the console); the reader's Pause ends it.
+//!
+//! A read that fails is tried once more from a fresh seek, and the pack table
+//! is cached only when every entry it declares was read, so a read that dies
+//! part way through never leaves a short table that later lookups trust.
 use core::marker::PhantomData;
 use psx_pack::{cd::SECTOR_WORDS, SECTOR_BYTES};
 
@@ -10,6 +19,28 @@ use psx_pack::{cd::SECTOR_WORDS, SECTOR_BYTES};
 pub const PACK_LBA: u32 = psx_pack::cd::WORLD_PACK_DEFAULT_LBA;
 /// One cached entry occupies exactly three u32 words in the caller arena.
 pub const CACHE_ENTRY_BYTES: usize = 12;
+/// Reads of one table, payload or page before the load gives up: the first and
+/// one retry from a fresh prepare and seek.
+pub const READ_ATTEMPTS: u32 = 2;
+/// VBlanks a session may go without a sector before it fails and the caller
+/// falls back to a blocking load. The polled reader's first-sector bound
+/// (`psx_io::cd::wait::FIRST_SECTOR_WAIT`, 10 s) at 60 VBlanks a second: the
+/// console has taken 4.4 s to a first sector after the drive sat idle.
+pub const STREAM_TIMEOUT_VBLANKS: u32 =
+    psx_io::cd::wait::FIRST_SECTOR_WAIT.millis().div_ceil(1000) * 60;
+
+/// Where an interrupt-serviced read stands, as [`ChunkReader::drain_poll`]
+/// reports it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DrainPoll {
+    /// Sectors are still arriving.
+    Running,
+    /// Every sector landed.
+    Done,
+    /// The drive reported an error, a sector's data never came, or no sector
+    /// arrived within the timeout; nothing was started.
+    Failed,
+}
 
 /// Overlay storage policy. No storage or function pointer is kept in the reader.
 /// # Safety
@@ -46,15 +77,31 @@ pub trait ChunkReader {
     unsafe fn stop(&mut self);
     /// # Safety
     /// Caller exclusively owns the transport and serializes all CD operations.
-    unsafe fn ready(&mut self) -> Result<bool, psx_io::cd::SectorPollError>;
-    /// # Safety
-    /// Caller exclusively owns the transport and serializes all CD operations.
     unsafe fn find_entry(
         &mut self,
         pack_lba: u32,
         id: u32,
         scratch: &mut [u32; SECTOR_WORDS],
     ) -> Option<psx_pack::PackEntry>;
+    /// Hand the sectors of the read [`Self::start_read`] just started to the
+    /// CD interrupt: `sectors` land back to back at `dst`, of which only
+    /// `byte_len` bytes are written. `false` starts nothing.
+    /// # Safety
+    /// `dst` is word aligned and writable for `byte_len` bytes, rounded up to
+    /// a word, and nothing else touches it or the drive until
+    /// [`Self::drain_poll`] stops reporting `Running` or [`Self::drain_cancel`].
+    unsafe fn drain_start(
+        &mut self,
+        dst: *mut u32,
+        sectors: u32,
+        byte_len: u32,
+        timeout_vblanks: u32,
+    ) -> bool;
+    /// Where the interrupt-serviced read stands.
+    fn drain_poll(&mut self) -> DrainPoll;
+    /// Take the sectors back from the interrupt. The drive keeps reading
+    /// until [`Self::stop`].
+    fn drain_cancel(&mut self);
 }
 #[cfg(target_arch = "mips")]
 impl ChunkReader for psx_pack::cd::SectorReader {
@@ -75,10 +122,6 @@ impl ChunkReader for psx_pack::cd::SectorReader {
         Self::stop(self)
     }
     #[inline]
-    unsafe fn ready(&mut self) -> Result<bool, psx_io::cd::SectorPollError> {
-        self.cd_mut().poll_data_sector()
-    }
-    #[inline]
     unsafe fn find_entry(
         &mut self,
         pack_lba: u32,
@@ -86,6 +129,31 @@ impl ChunkReader for psx_pack::cd::SectorReader {
         scratch: &mut [u32; SECTOR_WORDS],
     ) -> Option<psx_pack::PackEntry> {
         psx_pack::cd::find_entry(self, pack_lba, id, scratch)
+    }
+    #[inline]
+    unsafe fn drain_start(
+        &mut self,
+        dst: *mut u32,
+        sectors: u32,
+        byte_len: u32,
+        timeout_vblanks: u32,
+    ) -> bool {
+        // SAFETY: the trait's contract is the drain's.
+        unsafe { psx_cdstream::drain::start(dst, sectors, byte_len, timeout_vblanks) }
+    }
+    #[inline]
+    fn drain_poll(&mut self) -> DrainPoll {
+        use psx_cdstream::drain::{poll, DrainState};
+        match poll() {
+            DrainState::Running { .. } => DrainPoll::Running,
+            DrainState::Done => DrainPoll::Done,
+            // Failed, or a drain nobody started (Idle): either way no sectors come.
+            _ => DrainPoll::Failed,
+        }
+    }
+    #[inline]
+    fn drain_cancel(&mut self) {
+        psx_cdstream::drain::cancel();
     }
 }
 
@@ -145,11 +213,16 @@ impl<A: PacketArena, const P: usize> EntryCache<A, P> {
     /// stream in a single ReadN pass (entries are laid out sequentially), parsed
     /// with the SDK's host-tested helpers; the entry that straddles two sectors is
     /// stitched through a 24-byte buffer, same as `psx_pack::cd`'s own scan.
+    ///
+    /// The table is cached only when all `chunk_count` entries were read: a read
+    /// failure, a header too short for the count, or an unparsable entry leaves
+    /// the cache unbuilt (`-1`), so the next lookup reads it again instead of
+    /// trusting a short table. Returns whether the cache state is final.
     unsafe fn build_pack_cache<R: ChunkReader>(
         &mut self,
         rd: &mut R,
         scratch: &mut [u32; SECTOR_WORDS],
-    ) {
+    ) -> bool {
         use psx_pack::{entry_location, parse_entry_at, parse_header, ENTRY_BYTES};
         // The exact-view world cache deliberately retains packet payloads in this
         // arena across visual frames. A mid-game stream (for example a cold weapon
@@ -159,16 +232,16 @@ impl<A: PacketArena, const P: usize> EntryCache<A, P> {
         A::invalidate_render_cache();
         if !rd.prepare() || !rd.start_read(PACK_LBA) || !rd.read_sector(scratch) {
             rd.stop();
-            return; // leave state -1 so a later call retries
+            return false; // leave state -1 so a later call retries
         }
         let Some(header) = parse_header(sector_bytes(scratch)) else {
             rd.stop();
-            return;
+            return false;
         };
         if header.chunk_count as usize > A::CAPACITY {
             rd.stop();
             self.len = -2;
-            return;
+            return true;
         }
         let mut n = 0usize;
         let mut cur_sector = 0u32;
@@ -209,12 +282,17 @@ impl<A: PacketArena, const P: usize> EntryCache<A, P> {
             n += 1;
         }
         rd.stop();
+        if n as u32 != header.chunk_count {
+            return false; // short: leave state -1, never cache part of a table
+        }
         self.len = n as i32;
+        true
     }
 
     /// Resolve `chunk_id` to (sector_offset, byte_size), building the table cache
-    /// on first use so later lookups touch no disc. A pack too big for the cache
-    /// falls back to the SDK's sector-by-sector table scan.
+    /// on first use so later lookups touch no disc. A pack too big for the cache,
+    /// or a table that could not be read whole in [`READ_ATTEMPTS`] tries, falls
+    /// back to the SDK's sector-by-sector table scan for this lookup.
     #[optimize(size)]
     unsafe fn lookup_entry<R: ChunkReader>(
         &mut self,
@@ -227,8 +305,10 @@ impl<A: PacketArena, const P: usize> EntryCache<A, P> {
         if let Some(hit) = self.persist_lookup(chunk_id) {
             return Some(hit);
         }
-        if self.len == -1 {
+        let mut attempt = 0;
+        while self.len == -1 && attempt < READ_ATTEMPTS {
             self.build_pack_cache(rd, scratch);
+            attempt += 1;
         }
         if self.len >= 0 {
             let n = self.len as usize;
@@ -263,22 +343,16 @@ pub enum StreamPump {
     /// is closed and the destination contents are undefined.
     Failed,
 }
+/// The open interrupt-serviced session.
 struct ChunkStream {
     active: bool,
-    just_started: bool,
     dst: *mut u32,
     dst_words: usize,
     byte_size: usize,
-    sectors_done: usize,
-    stall_ticks: u32,
 }
 const PROGRESS_SECTORS: usize = 8;
-const PUMP_MAX_SECTORS: usize = 1;
-const PUMP_WAIT_POLLS: u32 = 24_576;
-const PUMP_IDLE_POLLS: u32 = 2_048;
-const PUMP_STALL_TICKS: u32 = 64;
 
-/// One exclusive reader/cache/pump owner. The caller supplies its existing
+/// One exclusive reader/cache/session owner. The caller supplies its existing
 /// sector reader; the arena is borrowed through `A`, never allocated here.
 /// There is no automatic `Drop` abort: the owner must call `stream_abort`
 /// before relinquishing the transport or an active destination buffer.
@@ -303,12 +377,9 @@ impl<R: ChunkReader, A: PacketArena, const P: usize> CachedStreamer<R, A, P> {
             cache: EntryCache::new(),
             stream: ChunkStream {
                 active: false,
-                just_started: false,
                 dst: core::ptr::null_mut(),
                 dst_words: 0,
                 byte_size: 0,
-                sectors_done: 0,
-                stall_ticks: 0,
             },
             hook: None,
         }
@@ -327,9 +398,10 @@ impl<R: ChunkReader, A: PacketArena, const P: usize> CachedStreamer<R, A, P> {
     /// persistent mini-cache. Call while the arena-overlay table is resident
     /// (mid map load) so the fill is pure RAM scans; entries the table cannot
     /// resolve are skipped and fall back to a lazy per-switch lookup.
-    /// Call only during map loading with no incremental session active; a cache
-    /// miss may issue header reads and would interrupt that session.
+    /// Call during map loading; a cache miss may issue header reads, so an open
+    /// session is closed first.
     pub fn prime_persistent_entries(&mut self, first_id: u32, count: usize) {
+        self.stream_abort();
         unsafe {
             let rd = &mut *core::ptr::addr_of_mut!(self.reader);
             let scratch = &mut *core::ptr::addr_of_mut!(self.scratch);
@@ -353,8 +425,12 @@ impl<R: ChunkReader, A: PacketArena, const P: usize> CachedStreamer<R, A, P> {
         self.hook = hook;
     }
 
+    /// Read chunk `chunk_id`'s stored bytes into `dst` and return their length.
+    /// A read that fails part way is tried again from a fresh seek, up to
+    /// [`READ_ATTEMPTS`] in all. `None` when the chunk is unknown, too big for
+    /// `dst`, or every attempt failed.
     pub fn load_chunk(&mut self, chunk_id: u32, dst: &mut [u32]) -> Option<usize> {
-        // The drive can hold one open pump session (weapon switch). Any blocking
+        // The drive can hold one open session (weapon switch). Any blocking
         // load supersedes it: close the READN stream before issuing new commands.
         self.stream_abort();
         unsafe {
@@ -364,37 +440,56 @@ impl<R: ChunkReader, A: PacketArena, const P: usize> CachedStreamer<R, A, P> {
             if byte_size > dst.len() * 4 {
                 return None;
             }
-            // Payload: read the chunk's sectors into dst. This is the cached-entry
-            // twin of psx_pack::cd::load_chunk's payload loop (the SDK version
-            // rescans the table per call, which the cache exists to avoid).
-            if !rd.prepare() || !rd.start_read(PACK_LBA + sector_offset) {
-                rd.stop();
-                return None;
-            }
             let dst_ptr = dst.as_mut_ptr() as *mut u8;
-            // Read only as many sectors as `byte_size` needs; the table's padded
-            // sector_count could be garbage and looping on it would hang the loader.
-            let needed = byte_size.div_ceil(SECTOR_BYTES);
-            let mut s = 0usize;
-            while s < needed {
-                if !rd.read_sector(scratch) {
-                    rd.stop();
-                    return None;
+            let mut attempt = 0;
+            while attempt < READ_ATTEMPTS {
+                if read_payload(rd, scratch, sector_offset, byte_size, dst_ptr, self.hook) {
+                    return Some(byte_size);
                 }
-                let off = s * SECTOR_BYTES;
-                let copy = byte_size.saturating_sub(off).min(SECTOR_BYTES);
-                if copy > 0 {
-                    core::ptr::copy_nonoverlapping(
-                        scratch.as_ptr() as *const u8,
-                        dst_ptr.add(off),
-                        copy,
-                    );
-                }
-                s += 1;
-                report_sectors(self.hook, s, needed);
+                attempt += 1;
             }
-            rd.stop();
-            Some(byte_size)
+            None
+        }
+    }
+
+    /// Read whole sector `index` of chunk `chunk_id`'s payload into `dst`: one
+    /// page of a paged table whose entry must be exactly `expected_bytes`, a
+    /// whole number of sectors. Tried again from a fresh seek on failure, up to
+    /// [`READ_ATTEMPTS`] in all. `false` when the entry is unknown, its size is
+    /// not `expected_bytes`, the sector lies outside it, or every attempt failed.
+    pub fn load_entry_sector(
+        &mut self,
+        chunk_id: u32,
+        expected_bytes: usize,
+        index: u32,
+        dst: &mut [u32; SECTOR_WORDS],
+    ) -> bool {
+        self.stream_abort();
+        unsafe {
+            let rd = &mut *core::ptr::addr_of_mut!(self.reader);
+            let scratch = &mut *core::ptr::addr_of_mut!(self.scratch);
+            let Some((sector_offset, byte_size)) = self.cache.lookup_entry(rd, scratch, chunk_id)
+            else {
+                return false;
+            };
+            if byte_size != expected_bytes
+                || byte_size == 0
+                || !byte_size.is_multiple_of(SECTOR_BYTES)
+                || (index as usize) >= byte_size / SECTOR_BYTES
+            {
+                return false;
+            }
+            let lba = PACK_LBA + sector_offset + index;
+            let mut attempt = 0;
+            while attempt < READ_ATTEMPTS {
+                let ok = rd.prepare() && rd.start_read(lba) && rd.read_sector(dst);
+                rd.stop();
+                if ok {
+                    return true;
+                }
+                attempt += 1;
+            }
+            false
         }
     }
 
@@ -415,10 +510,13 @@ impl<R: ChunkReader, A: PacketArena, const P: usize> CachedStreamer<R, A, P> {
         }
     }
 
-    /// Open an incremental stream for `chunk_id`: resolve its pack entry (the
-    /// persistent mini-cache first, so no header re-scan), seek, start the READN
-    /// session, and leave it open for [`Self::stream_pump`] to drain across ticks. Any
-    /// stream already in flight is superseded (aborted) -- never queued.
+    /// Open an interrupt-serviced session for `chunk_id`: resolve its pack entry
+    /// (the persistent mini-cache first, so no header re-scan), start the read
+    /// with the polled reader, and hand its sectors to the CD interrupt, which
+    /// stores each one at `dst` as it arrives while the frame loop runs. Ask
+    /// [`Self::stream_pump`] once a tick. Any session already open is superseded
+    /// (aborted), never queued. `false` starts nothing: the entry is unknown, empty
+    /// or too big for `dst`, or the drive refused the read.
     ///
     /// # Safety
     /// `dst` must be four-byte aligned, writable and exclusively available for
@@ -441,146 +539,115 @@ impl<R: ChunkReader, A: PacketArena, const P: usize> CachedStreamer<R, A, P> {
         if byte_size == 0 || byte_size > dst_words * 4 {
             return false;
         }
-        if !rd.prepare() || !rd.start_read(PACK_LBA + sector_offset) {
+        let sectors = byte_size.div_ceil(SECTOR_BYTES) as u32;
+        if !rd.prepare()
+            || !rd.start_read(PACK_LBA + sector_offset)
+            || !rd.drain_start(dst, sectors, byte_size as u32, STREAM_TIMEOUT_VBLANKS)
+        {
             rd.stop();
             return false;
         }
         self.stream = ChunkStream {
             active: true,
-            just_started: true,
             dst,
             dst_words,
             byte_size,
-            sectors_done: 0,
-            stall_ticks: 0,
         };
         true
     }
 
-    /// Advance the open stream by the bounded per-tick budget. On the completion
-    /// call the session is paused and the payload decompressed in place (a raw
-    /// chunk passes through untouched). Never blocks longer than the poll budget.
+    /// Where the open session stands; never waits. On the call that sees the
+    /// last sector land the read is paused and the payload decompressed in place
+    /// (a raw chunk passes through untouched). `Failed` closes the session: the
+    /// drive reported an error, a sector's data never came, no sector arrived
+    /// for [`STREAM_TIMEOUT_VBLANKS`], or the payload did not decode.
     ///
     /// # Safety
     /// Same contract as [`Self::stream_begin`] (whose `dst` this writes through).
     pub unsafe fn stream_pump(&mut self) -> StreamPump {
-        let st = &mut *core::ptr::addr_of_mut!(self.stream);
-        if !st.active {
+        if !self.stream.active {
             return StreamPump::Idle;
         }
-        // `start_read` acknowledges ReadN, but the first DataReady can race an
-        // immediate pump in the same fixed-update tick (especially on a fast HLE
-        // frontend). Let one normal render/update interval establish the sector
-        // cadence. This costs no busy-wait and also mirrors the real drive's
-        // unavoidable seek/rotation latency.
-        if st.just_started {
-            st.just_started = false;
-            return StreamPump::InFlight;
-        }
-        let rd = &mut *core::ptr::addr_of_mut!(self.reader);
-        let scratch = &mut *core::ptr::addr_of_mut!(self.scratch);
-        let needed = st.byte_size.div_ceil(SECTOR_BYTES);
-        let mut got = 0usize;
-        let mut polls = 0u32;
-        while got < PUMP_MAX_SECTORS && st.sectors_done < needed {
-            match rd.ready() {
-                Ok(true) => {
-                    // Readiness is already latched, so the SDK's bounded wait
-                    // returns immediately and performs the silicon-proven DMA +
-                    // acknowledgement sequence. Passing `&mut scratch` through
-                    // this opaque call also makes the external DMA mutation
-                    // visible to the optimizer before the ordinary copy below.
-                    if !rd.read_sector(scratch) {
-                        rd.stop();
-                        st.active = false;
-                        return StreamPump::Failed;
-                    }
-                    let off = st.sectors_done * SECTOR_BYTES;
-                    let copy = st.byte_size.saturating_sub(off).min(SECTOR_BYTES);
-                    if copy > 0 {
-                        core::ptr::copy_nonoverlapping(
-                            scratch.as_ptr() as *const u8,
-                            (st.dst as *mut u8).add(off),
-                            copy,
-                        );
-                    }
-                    st.sectors_done += 1;
-                    got += 1;
-                }
-                Ok(false) => {
-                    polls += 1;
-                    if (got == 0 && polls >= PUMP_IDLE_POLLS) || polls >= PUMP_WAIT_POLLS {
-                        break;
-                    }
-                }
-                Err(_) => {
-                    rd.stop();
-                    st.active = false;
-                    return StreamPump::Failed;
+        match self.reader.drain_poll() {
+            DrainPoll::Running => StreamPump::InFlight,
+            DrainPoll::Done => {
+                self.stream_abort();
+                let st = &self.stream;
+                let buf = core::slice::from_raw_parts_mut(st.dst, st.dst_words);
+                match decompress_in_place(buf, st.byte_size) {
+                    0 => StreamPump::Failed,
+                    raw_len => StreamPump::Done(ChunkLoad {
+                        stored_len: st.byte_size,
+                        raw_len,
+                    }),
                 }
             }
-        }
-        if st.sectors_done >= needed {
-            rd.stop();
-            st.active = false;
-            let buf = core::slice::from_raw_parts_mut(st.dst, st.dst_words);
-            let raw_len = decompress_in_place(buf, st.byte_size);
-            return if raw_len == 0 {
+            DrainPoll::Failed => {
+                self.stream_abort();
                 StreamPump::Failed
-            } else {
-                StreamPump::Done(ChunkLoad {
-                    stored_len: st.byte_size,
-                    raw_len,
-                })
-            };
-        }
-        if got == 0 {
-            st.stall_ticks += 1;
-            if st.stall_ticks >= PUMP_STALL_TICKS {
-                rd.stop();
-                st.active = false;
-                return StreamPump::Failed;
             }
-        } else {
-            st.stall_ticks = 0;
         }
-        StreamPump::InFlight
     }
 
-    /// Whether a pump session currently owns the drive (READN open). While true,
-    /// nothing else may issue CD commands -- CDDA restarts wait for completion.
+    /// Whether a session currently owns the drive (READN open). While true,
+    /// nothing else may issue CD commands.
     pub fn stream_active(&mut self) -> bool {
         self.stream.active
     }
 
-    /// Resolve `chunk_id` to (sector offset in the pack, stored byte size) the way
-    /// [`Self::stream_begin`] does, for a caller that drives its own transport
-    /// (an interrupt-driven reader). Closes any pump session first; may read the
-    /// pack header when neither cache holds the entry.
-    ///
-    /// # Safety
-    /// Same contract as [`Self::stream_begin`].
-    pub unsafe fn resolve_entry(&mut self, chunk_id: u32) -> Option<(u32, usize)> {
-        self.stream_abort();
-        let rd = &mut *core::ptr::addr_of_mut!(self.reader);
-        let scratch = &mut *core::ptr::addr_of_mut!(self.scratch);
-        let (sector_offset, byte_size) = self.cache.lookup_entry(rd, scratch, chunk_id)?;
-        self.cache
-            .persist_store(chunk_id, sector_offset, byte_size as u32);
-        Some((sector_offset, byte_size))
-    }
-
-    /// Close an in-flight pump session (pause the drive, ack everything). Safe
-    /// to call when idle. Runs automatically ahead of every blocking load.
+    /// Close the open session: take the sectors back from the interrupt, then
+    /// pause the drive with the reader's Pause. Safe to call when idle. Runs
+    /// automatically ahead of every blocking load.
     pub fn stream_abort(&mut self) {
-        unsafe {
-            if self.stream.active {
-                self.stream.active = false;
-                let rd = &mut *core::ptr::addr_of_mut!(self.reader);
-                rd.stop();
-            }
+        if self.stream.active {
+            self.stream.active = false;
+            self.reader.drain_cancel();
+            // SAFETY: the session owned the drive and has just given it up; this
+            // owner serializes every CD operation.
+            unsafe { self.reader.stop() };
         }
     }
+}
+
+/// Read a chunk's payload, `byte_size` bytes from `sector_offset` in the pack,
+/// into `dst` through `scratch`, reporting progress to `hook`. One attempt: a
+/// prepare, a seek and ReadN, the sectors, and the reader's Pause.
+///
+/// Reads only as many sectors as `byte_size` needs; the table's padded
+/// `sector_count` could be garbage and looping on it would hang the loader.
+///
+/// # Safety
+/// `dst` is writable for `byte_size` bytes; the caller exclusively owns the
+/// transport.
+unsafe fn read_payload<R: ChunkReader>(
+    rd: &mut R,
+    scratch: &mut [u32; SECTOR_WORDS],
+    sector_offset: u32,
+    byte_size: usize,
+    dst: *mut u8,
+    hook: Option<fn(usize, usize)>,
+) -> bool {
+    if !rd.prepare() || !rd.start_read(PACK_LBA + sector_offset) {
+        rd.stop();
+        return false;
+    }
+    let needed = byte_size.div_ceil(SECTOR_BYTES);
+    let mut s = 0usize;
+    while s < needed {
+        if !rd.read_sector(scratch) {
+            rd.stop();
+            return false;
+        }
+        let off = s * SECTOR_BYTES;
+        let copy = byte_size.saturating_sub(off).min(SECTOR_BYTES);
+        if copy > 0 {
+            core::ptr::copy_nonoverlapping(scratch.as_ptr() as *const u8, dst.add(off), copy);
+        }
+        s += 1;
+        report_sectors(hook, s, needed);
+    }
+    rd.stop();
+    true
 }
 
 /// The scratch sector as bytes (little-endian DMA words are exactly the

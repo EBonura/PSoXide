@@ -8,21 +8,11 @@ the new allocation. `stop_map_loops` and `stop_all` are still compared.
 
 ## Chunk streamer
 
-`legacy-cdstream.rs` is the exact public HL 70072 source. CS 988f differs only
-in the persistent-entry capacity (32 versus 16) and its matching comment;
-`CDSTREAM-PROVENANCE.json` records both originals. The independent oracle
-compiles the frozen algorithm for both configurations with a recording sector
-transport. It compares cache/pump behavior and destination bytes, including
-header entry straddling, cache invalidation, persistent collisions, fallback,
-startup/read errors and recovery. Separate assertions require the first-pump
-yield, one-sector service, and failure on the 64th stalled pump. It does not
-simulate optical seek time, FIFO loss, DMA or hardware acknowledgement timing.
-
-Run from the editor root:
-
-```sh
-cargo test --manifest-path engine/Cargo.toml -p psx-goldsrc --test chunk_stream_oracle
-```
+Retired. The frozen HL 70072 / CS 988f chunk streamer (`legacy-cdstream.rs`) and its oracle
+were removed when the owner stopped being equivalent to it on purpose: a short pack table is
+never cached, failed reads are tried again from a fresh seek, and the polled pump with its
+64-call stall bound gave way to the interrupt-serviced session. `tests/chunk_stream.rs`
+pins the new contract against a scripted drive.
 
 ## Renderer
 
