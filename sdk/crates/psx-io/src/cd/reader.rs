@@ -53,7 +53,9 @@
 
 use super::lba_to_bcd_msf;
 use super::pause::{self, Completion, PauseAnswer, PauseDrive, PauseFailure};
-use super::wait::{Elapsed, WaitTime, ACK_WAIT, FIFO_WAIT, FIRST_SECTOR_WAIT, NEXT_SECTOR_WAIT};
+use super::wait::{
+    poll_until, Elapsed, WaitTime, ACK_WAIT, FIFO_WAIT, FIRST_SECTOR_WAIT, NEXT_SECTOR_WAIT,
+};
 use crate::irq;
 use crate::periph::Cd;
 use psx_hw::cd::irq::{
@@ -100,6 +102,10 @@ pub const DIAG_PAUSE: u8 = 0xfd;
 /// [`SectorReader::diagnostics`] command byte standing in for a `read_sector`
 /// wait (ReadN is streaming; no command byte is in flight).
 pub const DIAG_SITE_READ: u8 = 0xd0;
+/// [`SectorReader::diagnostics`] command byte for a sector whose data FIFO
+/// never filled after its request (the wait is [`FIFO_WAIT`]); with
+/// [`DIAG_TIMEOUT`] as the cause.
+pub const DIAG_SITE_FIFO: u8 = 0xd1;
 
 /// Called from every spin of every polled wait in this module, see [`set_idle_hook`].
 ///
@@ -257,21 +263,22 @@ impl SectorReader {
     /// Arms the data request, waits (bounded) until the FIFO reports data,
     /// then pops byte by byte. The words are written with volatile stores, in
     /// order, so the pops and the stores interleave as on silicon.
-    fn pop_sector(cd: &mut Cd, buffer: &mut [u32; SECTOR_WORDS]) {
+    ///
+    /// `false` when the FIFO never reported data within [`FIFO_WAIT`]: nothing
+    /// is popped, `buffer` is left as it was and the data request is dropped
+    /// (which resets the FIFO), so a late sector cannot land in the next read.
+    #[must_use]
+    fn pop_sector(cd: &mut Cd, buffer: &mut [u32; SECTOR_WORDS]) -> bool {
         cd.request_data();
         // The FIFO fills shortly after the request; the bound covers a slow
         // drive without letting a dead one hang the caller.
-        let mut elapsed = Elapsed::start();
         crate::diag::wait_begin(crate::diag::site::CD_FIFO, 0);
-        let mut ready = cd.is_data_fifo_ready();
-        while !ready && !elapsed.step(FIFO_WAIT) {
-            ready = cd.is_data_fifo_ready();
+        if let Err(spins) = poll_until(|| cd.is_data_fifo_ready(), FIFO_WAIT) {
+            crate::diag::wait_timeout(crate::diag::site::CD_FIFO, 0, spins);
+            cd.clear_data_request();
+            return false;
         }
-        if ready {
-            crate::diag::wait_end();
-        } else {
-            crate::diag::wait_timeout(crate::diag::site::CD_FIFO, 0, elapsed.spins());
-        }
+        crate::diag::wait_end();
         crate::diag::cd_sector();
         for word in buffer.iter_mut() {
             let b0 = cd.read_data_byte() as u32;
@@ -281,6 +288,7 @@ impl SectorReader {
             // SAFETY: `word` is a live, aligned `&mut u32` into `buffer`.
             unsafe { core::ptr::write_volatile(word, (b3 << 24) | (b2 << 16) | (b1 << 8) | b0) };
         }
+        true
     }
 
     /// Clear an IRQ we were not waiting for. A stale `DataReady` must have its
@@ -289,7 +297,10 @@ impl SectorReader {
     fn ack_unexpected(&mut self, flag: u8) {
         match flag {
             IRQ_DATA_READY => {
-                Self::pop_sector(&mut self.cd, &mut self.discard);
+                // The sector is thrown away either way; a FIFO that never filled
+                // has had its request dropped, so the ack below still leaves the
+                // controller clean.
+                let _ = Self::pop_sector(&mut self.cd, &mut self.discard);
                 self.cd.drain_response_limited(DRAIN_LIMIT);
                 self.cd.acknowledge_irq(IRQ_DATA_READY);
             }
@@ -690,10 +701,22 @@ impl SectorReader {
                 return false;
             }
         }
-        Self::pop_sector(&mut self.cd, buffer);
+        if !Self::pop_sector(&mut self.cd, buffer) {
+            self.fifo_timed_out();
+            return false;
+        }
         self.cd.drain_response_limited(DRAIN_LIMIT);
         self.cd.acknowledge_irq(IRQ_DATA_READY);
         true
+    }
+
+    /// A sector was announced but its data FIFO never filled: record it and
+    /// leave the controller acked, as for any other failed read.
+    fn fifo_timed_out(&mut self) {
+        self.note_timeout(DIAG_SITE_FIFO);
+        crate::diag::cd_read_failed(self.diagnostics());
+        self.cd.drain_response_limited(DRAIN_LIMIT);
+        self.cd.acknowledge_all_and_reset_parameters();
     }
 
     /// Non-blocking [`read_sector`](Self::read_sector): check the controller
@@ -701,7 +724,8 @@ impl SectorReader {
     /// pop its 2048 bytes into `buffer` and ack it.
     ///
     /// `Ok(true)` means `buffer` holds a new sector, `Ok(false)` that none
-    /// has arrived yet. `Err(())` is a drive error; the stream is acked and
+    /// has arrived yet. `Err(())` is a drive error, or a sector whose data FIFO never
+    /// filled within [`FIFO_WAIT`] (nothing popped); the stream is acked and
     /// the caller should [`stop`](Self::stop) (the diag snapshot is set as
     /// for `read_sector`).
     ///
@@ -726,7 +750,10 @@ impl SectorReader {
             }
             return Ok(false);
         }
-        Self::pop_sector(&mut self.cd, buffer);
+        if !Self::pop_sector(&mut self.cd, buffer) {
+            self.fifo_timed_out();
+            return Err(());
+        }
         self.cd.drain_response_limited(DRAIN_LIMIT);
         self.cd.acknowledge_irq(IRQ_DATA_READY);
         Ok(true)

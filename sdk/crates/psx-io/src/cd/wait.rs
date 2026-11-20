@@ -132,6 +132,31 @@ impl Elapsed {
     }
 }
 
+/// Ask `ready` once a spin until it says yes or `limit` is used up, the time
+/// read from root counter 2. `Err(spins)` when the wait ran out.
+#[inline(always)]
+pub(crate) fn poll_until(ready: impl FnMut() -> bool, limit: WaitTime) -> Result<(), u32> {
+    poll_until_with(ready, || timers::counter(Timer::Timer2), limit)
+}
+
+/// [`poll_until`] with the counter read from `now`, so a host test can drive it.
+#[inline(always)]
+pub(crate) fn poll_until_with(
+    mut ready: impl FnMut() -> bool,
+    mut now: impl FnMut() -> u16,
+    limit: WaitTime,
+) -> Result<(), u32> {
+    let mut elapsed = Elapsed::starting_at(now());
+    loop {
+        if ready() {
+            return Ok(());
+        }
+        if elapsed.step_to(now(), limit) {
+            return Err(elapsed.spins());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,5 +224,41 @@ mod tests {
         }
         assert_eq!(spins + 1, 80_000 / MIN_SPIN_CLOCKS);
         assert_eq!(elapsed.spins(), 10_000);
+    }
+
+    #[test]
+    fn a_fifo_that_never_fills_is_a_timeout_not_a_sector() {
+        // The reader pops a sector only on Ok: a FIFO that never reports data
+        // must come back as Err, after the bound, never as a ready FIFO.
+        let mut asked = 0u32;
+        let mut now = 0u16;
+        let waited = poll_until_with(
+            || {
+                asked += 1;
+                false
+            },
+            || {
+                now = now.wrapping_add(50);
+                now
+            },
+            FIFO_WAIT,
+        );
+        assert_eq!(waited, Err(FIFO_WAIT.clocks().div_ceil(50)));
+        assert_eq!(asked, FIFO_WAIT.clocks().div_ceil(50), "one look a spin");
+    }
+
+    #[test]
+    fn a_fifo_that_fills_ends_the_wait_at_once() {
+        let mut asked = 0u32;
+        let waited = poll_until_with(
+            || {
+                asked += 1;
+                asked == 3
+            },
+            || 0,
+            FIFO_WAIT,
+        );
+        assert_eq!(waited, Ok(()));
+        assert_eq!(asked, 3);
     }
 }
