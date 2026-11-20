@@ -19,6 +19,11 @@
 //! returned, to the same frame. A slot with no card answers `FF` and
 //! never pulses `/ACK`; the empty-slot record says so.
 //!
+//! From v2.25 the frame is the last frame of the test save `CARD TEST SAVE`
+//! (`card_save.rs`) wrote on that port, read and written back with no chord;
+//! frame 56 behind L1 and R1 only when that step wrote no save. Bit 1 of the
+//! write-total flags then means "no test save and no chord".
+//!
 //! Times are system-clock cycles from the byte's write; a time that did not
 //! happen is 0xFFFF.
 //!
@@ -78,12 +83,12 @@ static mut BYTES: [Byte; READ_LEN] = [Byte::none(); READ_LEN];
 static mut READS: [[Byte; READ_LEN]; READ_ROUNDS] = [[Byte::none(); READ_LEN]; READ_ROUNDS];
 static mut WRITES: [[Byte; WRITE_LEN]; WRITE_ROUNDS] = [[Byte::none(); WRITE_LEN]; WRITE_ROUNDS];
 
-fn read_command() -> [u8; READ_LEN] {
+fn read_command(frame: u16) -> [u8; READ_LEN] {
     let mut tx = [0u8; READ_LEN];
     tx[0] = 0x81;
     tx[1] = 0x52;
-    tx[4] = (WRITE_FRAME >> 8) as u8;
-    tx[5] = WRITE_FRAME as u8;
+    tx[4] = (frame >> 8) as u8;
+    tx[5] = frame as u8;
     tx
 }
 
@@ -175,7 +180,14 @@ fn slot(port2: bool, write: bool, records: &mut Records, next: &mut usize) {
     let reads = unsafe { &mut *addr_of_mut!(READS) };
     let scratch = unsafe { &mut *addr_of_mut!(BYTES) };
     let writes = unsafe { &mut *addr_of_mut!(WRITES) };
-    let tx = read_command();
+    // v2.25: the last frame of the test save `CARD TEST SAVE` wrote, when it
+    // wrote one; that frame is written with no chord. Otherwise frame 56, as
+    // before, written only with L1 and R1 held.
+    // SAFETY: single thread; plain static written by the step before.
+    let save_frame = unsafe { (*core::ptr::addr_of!(crate::card_save::SAVE_FRAME))[usize::from(port2)] };
+    let frame = save_frame.unwrap_or(WRITE_FRAME);
+    let write = write || save_frame.is_some();
+    let tx = read_command(frame);
     let mut good_reads = 0u32;
     let mut span = 0u32;
     let mut first_good: Option<usize> = None;
@@ -314,8 +326,8 @@ fn slot(port2: bool, write: bool, records: &mut Records, next: &mut usize) {
     let mut wtx = [0u8; WRITE_LEN];
     wtx[0] = 0x81;
     wtx[1] = 0x57;
-    wtx[4] = (WRITE_FRAME >> 8) as u8;
-    wtx[5] = WRITE_FRAME as u8;
+    wtx[4] = (frame >> 8) as u8;
+    wtx[5] = frame as u8;
     for i in 0..128 {
         wtx[6 + i] = source[10 + i].reply;
     }

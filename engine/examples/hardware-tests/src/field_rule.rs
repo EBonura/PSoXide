@@ -457,8 +457,21 @@ pub(crate) fn run(records: &mut Records, next: &mut usize) {
             id += 1;
         }
     }
+    // v2.25 (records 0xA68-0xA6B): the fill issued at once after the VBlank
+    // edge on four frames in a row (as 0x83F-0x842), with E1 bit 10 set. Both
+    // v2.18 console runs read mask 0xAAAA (even rows skipped) with it clear;
+    // a mask other than 0xAAAA here says setting the bit is the fix.
+    for k in 0..4u16 {
+        let mut case = plain(Cmd::Fill, true, 2);
+        case.variant = 4;
+        let r = run_case(BIT10_AFTER_VBLANK_RECORD + k, &case);
+        push(r, records, next);
+    }
     restore_display();
 }
+
+/// v2.25: the after-VBlank fill with E1 bit 10 set, four records.
+const BIT10_AFTER_VBLANK_RECORD: u16 = 0xA68;
 
 /// First record of `480I FIELD SEQUENCE`.
 pub(crate) const FIELD_SEQUENCE_RECORD: u16 = 0x9D0;

@@ -82,7 +82,7 @@ const RECORD: u16 = 0x6F5;
 const ROUNDS: u32 = 15;
 /// System-clock cycles from starting root counter 1 to its interrupt: after the shift of the byte begins
 /// and well before its `/ACK`, which rises 1,600 or more cycles after the write.
-const FIRE_CYCLES: u16 = 1_000;
+pub(crate) const FIRE_CYCLES: u16 = 1_000;
 /// System-clock cycles the handler spins: it starts about 1,100 after the write and ends about 2,700 after
 /// it, over the whole of the pulse (1,600 to 1,780 after the write).
 const ISR_CYCLES: u16 = 1_600;
@@ -98,7 +98,7 @@ fn runs() -> u32 {
 }
 
 /// The handler of root counter 1: spin [`ISR_CYCLES`] of the system clock, count the run, acknowledge.
-fn spin_over_the_ack() {
+pub(crate) fn spin_over_the_ack() {
     let start = timers::counter(Timer::Timer0);
     while timers::counter(Timer::Timer0).wrapping_sub(start) < ISR_CYCLES {}
     // SAFETY: the handler runs with interrupts off on the dispatcher's stack and is the only writer.

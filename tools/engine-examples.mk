@@ -177,7 +177,7 @@ $(HWTEST_XA_CLOCK):
 
 # The boot EXE of the BIOS-free suite (v2.9 on) is 547 sectors, past the 542 that
 # CDTEST.BIN at 460 sectors leaves, so the disc is always the console-diag build
-# (the SDK stop panel; CDTEST_SECTORS 400 in main.rs), the same layout as the
+# (the SDK stop panel; CDTEST_SECTORS 360 in main.rs since v2.25, 400 before), the same layout as the
 # radius disc and as every v2.9 burn.
 hardware-tests-disc: HWTEST_FEATURES = console-diag
 hardware-tests-disc: hardware-tests $(HWTEST_CDDA) $(HWTEST_XA) $(HWTEST_XA_CLOCK)
@@ -186,7 +186,7 @@ hardware-tests-disc: hardware-tests $(HWTEST_CDDA) $(HWTEST_XA) $(HWTEST_XA_CLOC
 		--exe ../../$(EXAMPLE_OUT)/hardware-tests.exe \
 		--out ../../$(EXAMPLE_OUT)/hardware-tests.bin \
 		--volume PSOXIDE \
-		--cdtest-sectors 400 \
+		--cdtest-sectors 360 \
 		--xa-file ../../$(HWTEST_XA) \
 		--xa-file ../../$(HWTEST_XA_CLOCK) \
 		--cdda-track ../../$(HWTEST_CDDA)
@@ -212,7 +212,7 @@ hwtest-session-audio:
 # (psoxide-hwtest radius-fill) that carries the data track out to about 78
 # minutes, as full as the demo disc, so the CD RADIUS SWEEP step has outer
 # radius to read. It is built with the SDK stop panel (console-diag), which
-# moves CDTEST.BIN to 400 sectors (see CDTEST_SECTORS in main.rs). The filler
+# moves CDTEST.BIN to 360 sectors (400 before v2.25) (see CDTEST_SECTORS in main.rs). The filler
 # goes last on the data track, after the XA files, so everything else keeps its
 # place; the CD-DA track follows it, so on this disc it sits at the outer edge.
 # 16,660 sectors of image plus the filler stay under the 359,844 blocks of an
@@ -233,7 +233,7 @@ hwtest-radius-disc: hardware-tests $(HWTEST_CDDA) $(HWTEST_XA) $(HWTEST_XA_CLOCK
 		--exe ../../$(EXAMPLE_OUT)/hardware-tests.exe \
 		--out ../../$(HWTEST_RADIUS_DIR)/hardware-tests-radius.bin \
 		--volume PSOXIDE \
-		--cdtest-sectors 400 \
+		--cdtest-sectors 360 \
 		--xa-file ../../$(HWTEST_XA) \
 		--xa-file ../../$(HWTEST_XA_CLOCK) \
 		--xa-file ../../$(HWTEST_RADIUS_FILL) \

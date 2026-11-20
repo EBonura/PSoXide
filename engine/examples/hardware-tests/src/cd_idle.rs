@@ -26,12 +26,22 @@
 //! * `0x9CA`: tenths of a clock per spin (from the longest read), the reader's
 //!   `DATA_POLL` bound in milliseconds at that cost, the Stop command's result
 //!   (1 acknowledged, 0 refused).
+//!
+//! v2.25 (records `0xA50`-`0xA53`): goldsrc's stream pump gives up after 64
+//! empty calls (about 1.07 s at 60 Hz) and the console took 1.92 s to the first
+//! sector after a Stop and 5 s (`0x9C8`). Here a read is issued at once after a
+//! Stop, three times, and a Pause is sent while a long seek runs, eight times:
+//!
+//! * `0xA50`-`0xA52`: Stop, then the read at once: HBlanks `lo`, `hi`, outcome
+//!   (as `0x9C0`).
+//! * `0xA53`: Pauses refused (INT5) during a SeekL of eight, Pauses
+//!   acknowledged, SeekL commands refused.
 
 use crate::console_tests::record;
 use crate::ui::{self, Line};
 use crate::{push_timing_record, TimingRecord, TIMING_RECORD_COUNT};
 use psx_font::FontAtlas;
-use psx_hw::cd::CMD_STOP;
+use psx_hw::cd::{CMD_PAUSE, CMD_SEEKL, CMD_STOP};
 use psx_io::cd::reader::{set_idle_hook, SectorReader, SECTOR_WORDS};
 use psx_io::timers::{self, Timer};
 
@@ -39,6 +49,12 @@ type Records = [TimingRecord; TIMING_RECORD_COUNT];
 
 const FIRST_RECORD: u16 = 0x9C0;
 const BOUND_RECORD: u16 = 0x9CA;
+const STOP_AT_ONCE_RECORD: u16 = 0xA50;
+const PAUSE_IN_SEEK_RECORD: u16 = 0xA53;
+/// Seek targets of the Pause-in-seek trials, alternating: near the start, and
+/// far out on the data track.
+const SEEK_NEAR: u32 = 300;
+const SEEK_FAR: u32 = 15_000;
 /// The reader's data wait, `psx_io::cd::reader`'s `DATA_POLL`.
 const DATA_POLL: u32 = 4_000_000;
 const HZ: u32 = 15_734;
@@ -166,6 +182,44 @@ pub(crate) fn run(font: &FontAtlas, records: &mut Records, next: &mut usize) {
     idle(5);
     results[4] = timed_read(&mut reader, &mut buffer);
 
+    // v2.25: Stop, then the read at once, three times.
+    let mut at_once = [(0u32, 0u32, 0u32, 0u32); 3];
+    for (k, slot) in at_once.iter_mut().enumerate() {
+        crate::bounds::record_start(STOP_AT_ONCE_RECORD + k as u16);
+        let _ = reader.read_at(PRIME_LBA, &mut buffer);
+        let _ = reader.cd_mut().command(CMD_STOP, &[]);
+        *slot = timed_read(&mut reader, &mut buffer);
+    }
+    // v2.25: a Pause sent while a SeekL runs.
+    crate::bounds::record_start(PAUSE_IN_SEEK_RECORD);
+    let (mut refused, mut accepted, mut seek_refused) = (0u32, 0u32, 0u32);
+    for trial in 0..8u32 {
+        let _ = reader.read_at(PRIME_LBA, &mut buffer);
+        let target = if trial % 2 == 0 { SEEK_FAR } else { SEEK_NEAR };
+        let cd = reader.cd_mut();
+        if cd.try_set_target_lba(target, 200_000).is_none() || cd.command(CMD_SEEKL, &[]).is_err() {
+            seek_refused += 1;
+        } else {
+            match cd.command(CMD_PAUSE, &[]) {
+                Ok(_) => accepted += 1,
+                Err(psx_io::cd::CdError::DriveError) => refused += 1,
+                Err(_) => {}
+            }
+        }
+        // Let the seek and any Pause finish, then leave no flag waiting.
+        idle(1);
+        let cd = reader.cd_mut();
+        let _ = cd.try_pause_until_complete(2_000_000);
+        for _ in 0..8 {
+            let flag = cd.irq_flag_value();
+            if flag == 0 {
+                break;
+            }
+            cd.discard_response();
+            cd.acknowledge_irq(flag);
+        }
+    }
+
     set_idle_hook(None);
     reader.stop();
     let _ = reader.release();
@@ -209,6 +263,23 @@ pub(crate) fn run(font: &FontAtlas, records: &mut Records, next: &mut usize) {
             u32::from(stopped) | (u32::from(!prepared) << 1),
         ),
     );
+    for (k, r) in at_once.iter().enumerate() {
+        let id = STOP_AT_ONCE_RECORD + k as u16;
+        push_timing_record(records, next, record(id, r.0 & 0xFFFF, r.0 >> 16, r.2));
+    }
+    push_timing_record(
+        records,
+        next,
+        record(PAUSE_IN_SEEK_RECORD, refused, accepted, seek_refused),
+    );
+    let worst = at_once.iter().map(|r| r.0).max().unwrap_or(0);
+    let mut line = Line::new();
+    line.s("STOP+READ AT ONCE: WORST ")
+        .u(worst * 1000 / HZ)
+        .s(" MS; PAUSE IN SEEK REFUSED ")
+        .u(refused)
+        .s(" OF 8");
+    ui::live_line(font, 6, line.as_str(), (220, 224, 230));
     let mut line = Line::new();
     line.s("ONE READER SPIN = ")
         .u(tenths / 10)
