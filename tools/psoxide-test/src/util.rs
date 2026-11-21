@@ -242,6 +242,44 @@ pub fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// `git -C repo args...` fed `input` on stdin, with `env` set, returning its raw stdout.
+pub fn git_stdin(
+    repo: &Path,
+    args: &[&str],
+    input: &[u8],
+    env: &[(&str, &str)],
+) -> Result<Vec<u8>, String> {
+    use std::io::Write as _;
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .envs(env.iter().copied())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("cannot run git: {e}"))?;
+    // Written from a thread: a large output fills the pipe before the input is all read.
+    let mut pipe = child.stdin.take().ok_or("git has no stdin")?;
+    let input = input.to_vec();
+    let writer = std::thread::spawn(move || pipe.write_all(&input));
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("git {}: {e}", args.join(" ")))?;
+    let written = writer.join().map_err(|_| "git stdin writer panicked")?;
+    if !output.status.success() {
+        return Err(format!(
+            "git {} in {}: {}",
+            args.join(" "),
+            repo.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    written.map_err(|e| format!("git {}: {e}", args.join(" ")))?;
+    Ok(output.stdout)
+}
+
 /// Every file git would hand to a fresh clone plus untracked, not-ignored files, sorted.
 pub fn tree_files(repo: &Path) -> Result<Vec<String>, String> {
     let listing = git(

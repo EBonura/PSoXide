@@ -12,15 +12,25 @@
 //!
 //! A host-tool-only commit (this harness, psoxide-dev, the docs) leaves the guest tree equal, so
 //! it never forces a repin.
+//!
+//! The rule compares one game's view of that tree (scope.rs): the same digest without the files
+//! of SDK crates the game cannot reach, so a change to a disc no game links (an SDK example)
+//! moves no game that does not build it. When the game's reach cannot be read, the whole guest
+//! tree is compared. A lock records the whole guest tree of its pin, which does not depend on
+//! the game.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::game::Game;
+use crate::scope::{self, Scope};
 use crate::util::{self, Key};
 
 /// Bumped whenever the guest-tree definition changes, so cached trees of the old one are not reused.
 pub const DEFINITION: &str = "guest-tree-1";
+
+/// The same for a game's scoped view of it (scope.rs).
+pub const SCOPED_DEFINITION: &str = "guest-tree-scoped-1";
 
 /// The SDK paths whose content can change a game's bytes (see the module documentation).
 pub const GUEST_PATHS: &[&str] = &[
@@ -169,26 +179,52 @@ impl Mirror {
 
     /// The guest tree of `commit` (see the module documentation).
     pub fn guest_tree(&self, commit: &str) -> Result<String, String> {
-        // A commit's guest tree never changes: kept per definition version, so an offline run
-        // and a repeated run read it back instead of recomputing.
+        self.cached(&format!("{DEFINITION}:{commit}"), || {
+            self.compute_guest_tree(commit, None)
+        })
+    }
+
+    /// The guest tree of `commit` as a game with `reach` sees it, and how many of the commit's
+    /// crates that game reaches (`12/120`).
+    pub fn scoped_guest_tree(
+        &self,
+        commit: &str,
+        reach: &scope::Reach,
+    ) -> Result<(String, String), String> {
+        let slot = format!("{SCOPED_DEFINITION}:{commit}:{}", reach.digest());
+        let value = self.cached(&slot, || self.compute_guest_tree(commit, Some(reach)))?;
+        let (tree, counts) = value.split_once(' ').unwrap_or((&value, "?"));
+        Ok((tree.to_string(), counts.to_string()))
+    }
+
+    /// A commit's tree never changes: kept by definition version, so an offline run and a
+    /// repeated run read it back instead of recomputing.
+    fn cached(
+        &self,
+        slot: &str,
+        compute: impl FnOnce() -> Result<String, String>,
+    ) -> Result<String, String> {
         let cache = self.dir.join("psoxide-test-guest-trees.json");
         let mut known: BTreeMap<String, String> = std::fs::read_to_string(&cache)
             .ok()
             .and_then(|t| serde_json::from_str(&t).ok())
             .unwrap_or_default();
-        let slot = format!("{DEFINITION}:{commit}");
-        if let Some(tree) = known.get(&slot) {
+        if let Some(tree) = known.get(slot) {
             return Ok(tree.clone());
         }
-        let tree = self.compute_guest_tree(commit)?;
-        known.insert(slot, tree.clone());
+        let tree = compute()?;
+        known.insert(slot.to_string(), tree.clone());
         if let Ok(json) = serde_json::to_string_pretty(&known) {
             let _ = std::fs::write(&cache, json);
         }
         Ok(tree)
     }
 
-    fn compute_guest_tree(&self, commit: &str) -> Result<String, String> {
+    fn compute_guest_tree(
+        &self,
+        commit: &str,
+        reach: Option<&scope::Reach>,
+    ) -> Result<String, String> {
         let mut args = vec!["ls-tree", "-r", "--full-tree", commit, "--"];
         args.extend(GUEST_PATHS);
         let listing = self.git(&args)?;
@@ -200,12 +236,176 @@ impl Mirror {
                 .and_then(|t| toml::from_str::<toml::Table>(&t).ok())
                 .and_then(|t| t.get("package")?.get("name")?.as_str().map(str::to_string))
         };
-        guest_tree_of(&listing, manifest.as_deref(), lock.as_deref(), member_names)
+        let Some(reach) = reach else {
+            return guest_tree_of(&listing, manifest.as_deref(), lock.as_deref(), member_names);
+        };
+        let reached = self.reached_in(commit, &listing, manifest.as_deref(), reach)?;
+        let tree = tree_of(
+            "sdk-guest-tree-scoped",
+            &listing,
+            manifest.as_deref(),
+            lock.as_deref(),
+            member_names,
+            |path| reached.keeps(path),
+        )?;
+        Ok(format!(
+            "{tree} {}/{}",
+            reached.reached.len(),
+            reached.crates.len()
+        ))
+    }
+
+    /// The crates of `commit` a game with `reach` reaches (`listing` is its `ls-tree` of the
+    /// guest paths, `manifest` its root manifest).
+    fn reached_in(
+        &self,
+        commit: &str,
+        listing: &str,
+        manifest: Option<&str>,
+        reach: &scope::Reach,
+    ) -> Result<scope::Reached, String> {
+        // Every manifest of the guest paths (and the root's), and the tool scripts the game names.
+        let mut wanted: Vec<(String, String)> = Vec::new();
+        for (oid, path) in listing_blobs(listing) {
+            if path.ends_with("/Cargo.toml") || reach.tools.contains(path) {
+                wanted.push((oid.to_string(), path.to_string()));
+            }
+        }
+        let oids: Vec<&str> = wanted.iter().map(|(oid, _)| oid.as_str()).collect();
+        let texts = self.blobs(&oids)?;
+        let mut manifests = BTreeMap::new();
+        let mut tools = BTreeMap::new();
+        for (oid, path) in &wanted {
+            let text = texts
+                .get(oid)
+                .ok_or_else(|| format!("{commit}:{path} cannot be read"))?
+                .clone();
+            if reach.tools.contains(path) {
+                tools.insert(path.clone(), text);
+            } else if let Some(dir) = path.strip_suffix("/Cargo.toml") {
+                manifests.insert(dir.to_string(), text);
+            }
+        }
+        if let Some(root) = manifest {
+            manifests.insert(String::new(), root.to_string());
+        }
+        let rust: Vec<(&str, &str)> = listing_blobs(listing)
+            .filter(|(_, path)| path.ends_with(".rs"))
+            .collect();
+        let mut sources = |dirs: &[String]| -> Result<Vec<(String, String)>, String> {
+            let wanted: Vec<(&str, &str)> = rust
+                .iter()
+                .copied()
+                .filter(|(_, path)| {
+                    dirs.iter().any(|d| {
+                        path.strip_prefix(d.as_str())
+                            .is_some_and(|r| r.starts_with('/'))
+                    })
+                })
+                .collect();
+            let oids: Vec<&str> = wanted.iter().map(|(oid, _)| *oid).collect();
+            let texts = self.blobs(&oids)?;
+            wanted
+                .iter()
+                .map(|(oid, path)| {
+                    let text = texts
+                        .get(*oid)
+                        .ok_or_else(|| format!("{commit}:{path} cannot be read"))?;
+                    Ok((path.to_string(), text.clone()))
+                })
+                .collect()
+        };
+        scope::reached_crates(&manifests, &tools, reach, &mut sources)
+    }
+
+    /// [`Mirror::reached_in`] for a commit, uncached (`psoxide-test pin --crates`).
+    pub fn reached(&self, commit: &str, reach: &scope::Reach) -> Result<scope::Reached, String> {
+        let mut args = vec!["ls-tree", "-r", "--full-tree", commit, "--"];
+        args.extend(GUEST_PATHS);
+        let listing = self.git(&args)?;
+        let manifest = self.git(&["show", &format!("{commit}:Cargo.toml")]).ok();
+        self.reached_in(commit, &listing, manifest.as_deref(), reach)
+    }
+
+    /// The texts of `oids`, fetched in one batch when the blob-less mirror lacks them.
+    fn blobs(&self, oids: &[&str]) -> Result<BTreeMap<String, String>, String> {
+        let input: String = oids.iter().map(|oid| format!("{oid}\n")).collect();
+        // What is missing, without a fetch per object.
+        let check = util::git_stdin(
+            &self.dir,
+            &["cat-file", "--batch-check"],
+            input.as_bytes(),
+            &[("GIT_NO_LAZY_FETCH", "1")],
+        )?;
+        let missing: Vec<String> = String::from_utf8_lossy(&check)
+            .lines()
+            .filter_map(|l| l.strip_suffix(" missing").map(str::to_string))
+            .collect();
+        if !missing.is_empty() {
+            // The fetch git makes for one lazy object, for all of them at once (a blob cannot be
+            // fetched as a revision on the command line). If it fails, `--batch` below still
+            // fetches each object itself, slowly.
+            let wants: String = missing.iter().map(|oid| format!("{oid}\n")).collect();
+            let _ = util::git_stdin(
+                &self.dir,
+                &[
+                    "-c",
+                    "fetch.negotiationAlgorithm=noop",
+                    "fetch",
+                    "-q",
+                    "origin",
+                    "--no-tags",
+                    "--no-write-fetch-head",
+                    "--recurse-submodules=no",
+                    "--filter=blob:none",
+                    "--stdin",
+                ],
+                wants.as_bytes(),
+                &[],
+            );
+        }
+        let out = util::git_stdin(&self.dir, &["cat-file", "--batch"], input.as_bytes(), &[])?;
+        parse_batch(&out)
     }
 }
 
+/// `(oid, path)` of every blob in an `ls-tree -r` listing.
+fn listing_blobs(listing: &str) -> impl Iterator<Item = (&str, &str)> {
+    listing.lines().filter_map(|line| {
+        let (meta, path) = line.split_once('\t')?;
+        let mut fields = meta.split(' ');
+        let (_, kind, oid) = (fields.next()?, fields.next()?, fields.next()?);
+        (kind == "blob").then_some((oid, path))
+    })
+}
+
+/// The objects of `git cat-file --batch` output, by id (text, lossily).
+fn parse_batch(out: &[u8]) -> Result<BTreeMap<String, String>, String> {
+    let mut objects = BTreeMap::new();
+    let mut at = 0;
+    while at < out.len() {
+        let end = out[at..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map(|i| at + i)
+            .ok_or("cat-file: a header without its line end")?;
+        let header = String::from_utf8_lossy(&out[at..end]).to_string();
+        let fields: Vec<&str> = header.split(' ').collect();
+        let [oid, _, size] = fields.as_slice() else {
+            return Err(format!("cat-file: {header}"));
+        };
+        let size: usize = size.parse().map_err(|_| format!("cat-file: {header}"))?;
+        let body = out
+            .get(end + 1..end + 1 + size)
+            .ok_or_else(|| format!("cat-file: {oid} is cut short"))?;
+        objects.insert(oid.to_string(), String::from_utf8_lossy(body).into_owned());
+        at = end + 1 + size + 1;
+    }
+    Ok(objects)
+}
+
 /// Whether a path is documentation.
-fn is_doc(path: &str) -> bool {
+pub fn is_doc(path: &str) -> bool {
     path.ends_with(".md") || path.split('/').any(|c| c == "docs")
 }
 
@@ -217,12 +417,31 @@ pub fn guest_tree_of(
     lock: Option<&str>,
     member_name: impl Fn(&str) -> Option<String>,
 ) -> Result<String, String> {
-    let mut key = Key::new("sdk-guest-tree");
+    tree_of(
+        "sdk-guest-tree",
+        listing,
+        manifest,
+        lock,
+        member_name,
+        |_| true,
+    )
+}
+
+/// [`guest_tree_of`] over only the listed files `keep` accepts, under the key `label`.
+fn tree_of(
+    label: &str,
+    listing: &str,
+    manifest: Option<&str>,
+    lock: Option<&str>,
+    member_name: impl Fn(&str) -> Option<String>,
+    keep: impl Fn(&str) -> bool,
+) -> Result<String, String> {
+    let mut key = Key::new(label);
     for line in listing.lines() {
         let Some((meta, path)) = line.split_once('\t') else {
             continue;
         };
-        if !is_doc(path) {
+        if !is_doc(path) && keep(path) {
             key.part(path, meta);
         }
     }
@@ -326,8 +545,14 @@ fn lock_closure(lock: &str, roots: &BTreeSet<String>) -> Result<Vec<String>, Str
 pub struct Verdict {
     pub pinned: String,
     pub main: String,
+    /// The trees compared: the game's view of each commit (or the whole tree, see `scope`).
     pub pinned_tree: String,
     pub main_tree: String,
+    /// The whole guest trees, which a lock records.
+    pub pinned_whole: String,
+    pub main_whole: String,
+    /// What was compared, in words.
+    pub scope: String,
     pub recorded: Option<String>,
     pub file: String,
     /// Offline: seconds since SDK main was last fetched (the main judged is that one).
@@ -341,7 +566,7 @@ impl Verdict {
             && self
                 .recorded
                 .as_ref()
-                .is_none_or(|r| *r == self.pinned_tree)
+                .is_none_or(|r| *r == self.pinned_whole)
     }
 
     /// One line for the result header.
@@ -353,6 +578,11 @@ impl Verdict {
                 "guest tree differs from main {}: repin",
                 util::short(&self.main)
             )
+        };
+        let line = if self.pinned_tree == self.main_tree && self.pinned_whole != self.main_whole {
+            format!("{line} for this game (main changed only SDK crates it does not reach)")
+        } else {
+            line
         };
         match self.main_age {
             Some(age) => format!("{line} (offline: main as fetched {} ago)", age_text(age)),
@@ -371,24 +601,73 @@ pub fn age_text(seconds: u64) -> String {
     }
 }
 
-/// Apply the rule: the pinned commit's guest tree against SDK main's.
-pub fn judge(work_root: &Path, pin: &Pin) -> Result<Verdict, String> {
+/// Apply the rule: the pinned commit's guest tree against SDK main's (or against `main`, a
+/// candidate revision), as a game of `scope` sees them.
+pub fn judge(
+    work_root: &Path,
+    pin: &Pin,
+    scope: &Scope,
+    main: Option<&str>,
+) -> Result<Verdict, String> {
     let mirror = Mirror::open(work_root, &pin.repository)?;
     let pinned = mirror.commit(&pin.revision)?;
-    let main = mirror.commit("refs/heads/main")?;
+    let main = mirror.commit(main.unwrap_or("refs/heads/main"))?;
+    let trees = Trees::of(&mirror, &pinned, &main, scope)?;
     Ok(Verdict {
-        pinned_tree: mirror.guest_tree(&pinned)?,
-        main_tree: if main == pinned {
-            mirror.guest_tree(&pinned)?
-        } else {
-            mirror.guest_tree(&main)?
-        },
+        pinned_tree: trees.pinned,
+        main_tree: trees.main,
+        pinned_whole: trees.pinned_whole,
+        main_whole: trees.main_whole,
+        scope: trees.scope,
         pinned,
         main,
         recorded: pin.recorded.clone(),
         file: pin.file.clone(),
         main_age: mirror.stale,
     })
+}
+
+/// The trees one verdict compares.
+#[derive(Debug)]
+struct Trees {
+    pinned: String,
+    main: String,
+    pinned_whole: String,
+    main_whole: String,
+    scope: String,
+}
+
+impl Trees {
+    fn of(mirror: &Mirror, pinned: &str, main: &str, scope: &Scope) -> Result<Trees, String> {
+        let pinned_whole = mirror.guest_tree(pinned)?;
+        let main_whole = mirror.guest_tree(main)?;
+        let whole = |why: &str| Trees {
+            pinned: pinned_whole.clone(),
+            main: main_whole.clone(),
+            pinned_whole: pinned_whole.clone(),
+            main_whole: main_whole.clone(),
+            scope: format!("the whole guest tree ({why})"),
+        };
+        Ok(match scope {
+            Scope::Game(reach) => {
+                let scoped = mirror
+                    .scoped_guest_tree(pinned, reach)
+                    .and_then(|p| Ok((p, mirror.scoped_guest_tree(main, reach)?)));
+                match scoped {
+                    Ok(((p, _), (m, counts))) => Trees {
+                        pinned: p,
+                        main: m,
+                        pinned_whole: pinned_whole.clone(),
+                        main_whole: main_whole.clone(),
+                        scope: format!("the SDK crates this game reaches ({counts} at main)"),
+                    },
+                    // Never narrower than what can be shown: the whole tree.
+                    Err(e) => whole(&e),
+                }
+            }
+            Scope::Whole(why) => whole(why),
+        })
+    }
 }
 
 /// `text` (a JSON lock) with `"guest_tree": "<tree>"` beside the first `"revision"` after
@@ -476,6 +755,184 @@ mod tests {
             }
         }
         assert!(seen.contains("tools/psoxide-pgo"));
+    }
+
+    /// A small SDK repository: the root workspace with one guest tool, the SDK workspace with
+    /// psx-rt, and the hardware-tests example. Returns the directory and a commit function.
+    fn sdk_repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let files = [
+            ("Cargo.toml", "[workspace]\nmembers = [\"tools/psoxide-link\"]\n"),
+            ("Cargo.lock", "version = 4\n[[package]]\nname = \"psoxide-link\"\nversion = \"0.1.0\"\n"),
+            ("rust-toolchain.toml", "[toolchain]\nchannel = \"nightly\"\n"),
+            ("tools/psoxide-link/Cargo.toml", "[package]\nname = \"psoxide-link\"\n"),
+            ("tools/psoxide-link/src/lib.rs", "pub fn link() {}\n"),
+            ("sdk/Cargo.toml", "[workspace]\nmembers = [\"crates/psx-rt\"]\n"),
+            ("sdk/psoxide.ld", "SECTIONS {}\n"),
+            ("sdk/crates/psx-rt/Cargo.toml", "[package]\nname = \"psx-rt\"\n"),
+            ("sdk/crates/psx-rt/src/lib.rs", "pub fn rt() {}\n"),
+            ("engine/examples/hardware-tests/Cargo.toml", "[package]\nname = \"hardware-tests\"\n[dependencies]\npsx-rt = { path = \"../../../sdk/crates/psx-rt\" }\n"),
+            ("engine/examples/hardware-tests/src/main.rs", "const SUITE_VERSION: &str = \"v2.25\";\n"),
+        ];
+        for (path, text) in files {
+            let path = dir.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        let git = |args: &[&str]| util::git(dir.path(), args).unwrap();
+        git(&["init", "-q"]);
+        git(&["add", "-A"]);
+        git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "-m",
+            "a",
+        ]);
+        dir
+    }
+
+    /// Edit `path` in `repo` and commit; the new commit.
+    fn commit_edit(repo: &Path, path: &str, text: &str) -> String {
+        std::fs::write(repo.join(path), text).unwrap();
+        util::git(
+            repo,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "-am",
+                "e",
+            ],
+        )
+        .unwrap();
+        util::git(repo, &["rev-parse", "HEAD"]).unwrap()
+    }
+
+    fn game(files: &[(&str, &str)]) -> Scope {
+        let files: Vec<(String, String)> = files
+            .iter()
+            .map(|(p, t)| (p.to_string(), t.to_string()))
+            .collect();
+        Scope::Game(scope::reach_of(&files).unwrap())
+    }
+
+    /// A game that links psx-rt: the files it builds from.
+    const LINKS_RT: &[(&str, &str)] = &[(
+        "game/Cargo.toml",
+        "[package]\nname = \"g\"\n[dependencies]\npsx-rt = { path = \"../.psoxide/sdk/crates/psx-rt\" }\n",
+    )];
+
+    #[test]
+    fn a_change_to_an_example_a_game_does_not_build_does_not_refuse_it() {
+        let repo = sdk_repo();
+        let mirror = Mirror {
+            dir: repo.path().to_path_buf(),
+            stale: None,
+        };
+        let base = util::git(repo.path(), &["rev-parse", "HEAD"]).unwrap();
+        let hwtest = commit_edit(
+            repo.path(),
+            "engine/examples/hardware-tests/src/main.rs",
+            "const SUITE_VERSION: &str = \"v2.26\";\n",
+        );
+        let trees = Trees::of(&mirror, &base, &hwtest, &game(LINKS_RT)).unwrap();
+        assert_ne!(trees.pinned_whole, trees.main_whole, "the whole tree moved");
+        assert_eq!(trees.pinned, trees.main, "{}", trees.scope);
+        assert!(
+            trees.scope.starts_with("the SDK crates this game reaches"),
+            "{}",
+            trees.scope
+        );
+        // The game that builds the hardware tests (its Makefile names them) must repin.
+        let builder = game(&[(
+            "Makefile",
+            "hwtest:\n\tcd $(PSOXIDE)/engine/examples/hardware-tests && cargo build\n",
+        )]);
+        let trees = Trees::of(&mirror, &base, &hwtest, &builder).unwrap();
+        assert_ne!(trees.pinned, trees.main);
+        // And so must one that builds every example through the SDK's makefile.
+        std::fs::write(
+            repo.path().join("tools/engine-examples.mk"),
+            "hardware-tests:\n\tcd engine/examples/hardware-tests && cargo build\n",
+        )
+        .unwrap();
+        util::git(repo.path(), &["add", "-A"]).unwrap();
+        let with_mk = commit_edit(repo.path(), "sdk/psoxide.ld", "SECTIONS {}\n/* same */\n");
+        let hwtest_again = commit_edit(
+            repo.path(),
+            "engine/examples/hardware-tests/src/main.rs",
+            "const SUITE_VERSION: &str = \"v2.27\";\n",
+        );
+        let make = game(&[("Makefile", "-include .psoxide/tools/engine-examples.mk\n")]);
+        let trees = Trees::of(&mirror, &with_mk, &hwtest_again, &make).unwrap();
+        assert_ne!(trees.pinned, trees.main);
+    }
+
+    #[test]
+    fn a_change_to_a_crate_a_game_links_still_refuses_it() {
+        let repo = sdk_repo();
+        let mirror = Mirror {
+            dir: repo.path().to_path_buf(),
+            stale: None,
+        };
+        let base = util::git(repo.path(), &["rev-parse", "HEAD"]).unwrap();
+        let rt = commit_edit(
+            repo.path(),
+            "sdk/crates/psx-rt/src/lib.rs",
+            "pub fn rt() { loop {} }\n",
+        );
+        let trees = Trees::of(&mirror, &base, &rt, &game(LINKS_RT)).unwrap();
+        assert_ne!(trees.pinned, trees.main);
+        // A file outside every crate (the linker script) counts for every game.
+        let ld = commit_edit(repo.path(), "sdk/psoxide.ld", "SECTIONS { . = 0; }\n");
+        let nothing = game(&[]);
+        let trees = Trees::of(&mirror, &rt, &ld, &nothing).unwrap();
+        assert_ne!(trees.pinned, trees.main);
+        // So does a guest tool, which every build uses.
+        let tool = commit_edit(
+            repo.path(),
+            "tools/psoxide-link/src/lib.rs",
+            "pub fn link() { }\n",
+        );
+        let trees = Trees::of(&mirror, &ld, &tool, &nothing).unwrap();
+        assert_ne!(trees.pinned, trees.main);
+    }
+
+    #[test]
+    fn an_unknown_reach_compares_the_whole_tree() {
+        let repo = sdk_repo();
+        let mirror = Mirror {
+            dir: repo.path().to_path_buf(),
+            stale: None,
+        };
+        let base = util::git(repo.path(), &["rev-parse", "HEAD"]).unwrap();
+        let hwtest = commit_edit(
+            repo.path(),
+            "engine/examples/hardware-tests/src/main.rs",
+            "const SUITE_VERSION: &str = \"v2.26\";\n",
+        );
+        let unknown = Scope::Whole("no git work tree".into());
+        let trees = Trees::of(&mirror, &base, &hwtest, &unknown).unwrap();
+        assert_ne!(trees.pinned, trees.main);
+        assert!(trees.scope.starts_with("the whole guest tree"));
+        // A reach the SDK cannot resolve (a git dependency on a package it lacks): whole too.
+        let odd = game(&[(
+            "Cargo.toml",
+            "[dependencies]\nx = { git = \"https://github.com/EBonura/PSoXide\", package = \"psx-gone\" }\n",
+        )]);
+        let trees = Trees::of(&mirror, &base, &hwtest, &odd).unwrap();
+        assert_ne!(trees.pinned, trees.main);
+        assert!(trees.scope.contains("psx-gone"), "{}", trees.scope);
+        // A game whose files cannot be listed (not a git work tree) is judged whole.
+        let not_git = tempfile::tempdir().unwrap();
+        assert!(matches!(scope::of_game(not_git.path()), Scope::Whole(_)));
     }
 
     #[test]

@@ -17,6 +17,7 @@ mod receipt;
 mod redux;
 mod report;
 mod sched;
+mod scope;
 mod stage;
 mod tape;
 mod util;
@@ -44,6 +45,9 @@ usage:
       load the game file and every journey; print the pad and open-loop findings
   psoxide-test tape --disc CUE --press SCHEDULE --out TAPE --steps N [--stop-at-poll P] [--pad analog|dualshock|digital]
       record a press schedule as a poll-bound tape and keep it only if it replays identically
+  psoxide-test pin [--repo DIR] [--write] [--pinned REV] [--main REV] [--crates]
+      the SDK pin rule for the game: its pinned commit against SDK main (or REV), over the SDK
+      crates the game reaches (--crates lists them); --write records the pin's guest tree
   psoxide-test install [--repo DIR]
       install the judged disc into the configured library (needs a complete full PASS)
 config: ~/.config/psoxide-test/config.toml or PSOXIDE_TEST_CONFIG (see config.example.toml)";
@@ -672,7 +676,7 @@ fn sdk_stage(repo: &Path, game: &Game, work_root: &Path) -> (StageResult, String
             "SDK pin unknown".into(),
         );
     };
-    let verdict = match pin::judge(work_root, &pin) {
+    let verdict = match pin::judge(work_root, &pin, &scope::of_game(repo), None) {
         Ok(v) => v,
         Err(e) => {
             return (
@@ -686,7 +690,7 @@ fn sdk_stage(repo: &Path, game: &Game, work_root: &Path) -> (StageResult, String
     };
     let name = format!("sdk pin ({})", verdict.file);
     let mut value = format!(
-        "{} guest tree {} {} main {} guest tree {}",
+        "{} guest tree {} {} main {} guest tree {} (compared: {})",
         util::short(&verdict.pinned),
         util::short(&verdict.pinned_tree),
         if verdict.pinned_tree == verdict.main_tree {
@@ -695,7 +699,8 @@ fn sdk_stage(repo: &Path, game: &Game, work_root: &Path) -> (StageResult, String
             "DIFFERS FROM"
         },
         util::short(&verdict.main),
-        util::short(&verdict.main_tree)
+        util::short(&verdict.main_tree),
+        verdict.scope
     );
     if let Some(age) = verdict.main_age {
         value.push_str(&format!(
@@ -714,7 +719,7 @@ fn sdk_stage(repo: &Path, game: &Game, work_root: &Path) -> (StageResult, String
     if let Some(recorded) = verdict
         .recorded
         .as_ref()
-        .filter(|r| **r != verdict.pinned_tree)
+        .filter(|r| **r != verdict.pinned_whole)
     {
         checks.push(Check::fail(
             "sdk guest_tree recorded",
@@ -722,7 +727,7 @@ fn sdk_stage(repo: &Path, game: &Game, work_root: &Path) -> (StageResult, String
                 "the lock records {} but {} has {}: run `psoxide-test pin --write`",
                 util::short(recorded),
                 util::short(&verdict.pinned),
-                util::short(&verdict.pinned_tree)
+                util::short(&verdict.pinned_whole)
             ),
         ));
     }
@@ -733,24 +738,63 @@ fn sdk_stage(repo: &Path, game: &Game, work_root: &Path) -> (StageResult, String
     (stage(checks), verdict.header())
 }
 
-/// `psoxide-test pin [--repo DIR] [--write]`: apply the pin rule and print it; `--write` records
-/// the pinned commit's guest tree in the lock (components.lock.json or sdk.lock.json).
+/// `psoxide-test pin [--repo DIR] [--write] [--pinned REV] [--main REV] [--crates]`: apply the pin
+/// rule and print it (`--crates`: which SDK crates of main the game reaches); `--write` records the pinned commit's guest tree in the lock (components.lock.json or
+/// sdk.lock.json). `--pinned` and `--main` judge other commits than the lock's and SDK main (would
+/// this game have to repin if main moved to REV?); they cannot be written.
 fn pin_command(args: &[String]) -> Result<ExitCode, String> {
     let write = args.iter().any(|a| a == "--write");
-    let rest: Vec<String> = args.iter().filter(|a| *a != "--write").cloned().collect();
+    let crates = args.iter().any(|a| a == "--crates");
+    let (mut pinned, mut main, mut rest) = (None, None, Vec::new());
+    let mut it = args.iter().filter(|a| *a != "--write" && *a != "--crates");
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--pinned" => pinned = Some(it.next().ok_or("--pinned needs a value")?.clone()),
+            "--main" => main = Some(it.next().ok_or("--main needs a value")?.clone()),
+            _ => rest.push(a.clone()),
+        }
+    }
+    if write && (pinned.is_some() || main.is_some()) {
+        return Err("--write records the lock's own pin: drop --pinned and --main".into());
+    }
     let o = options(&rest)?;
     let config = Config::load()?;
     let game = Game::load(&o.repo)?;
-    let pin = pin::read(&o.repo, Some(&game))
+    let mut pin = pin::read(&o.repo, Some(&game))
         .ok_or("no SDK pin in components.lock.json, sdk.lock.json or the game file's [sdk]")?;
-    let v = pin::judge(&config.work, &pin)?;
+    if let Some(rev) = pinned {
+        pin.revision = rev;
+        pin.recorded = None;
+    }
+    let game_scope = scope::of_game(&o.repo);
+    let v = pin::judge(&config.work, &pin, &game_scope, main.as_deref())?;
+    if crates {
+        match &game_scope {
+            scope::Scope::Game(reach) => {
+                let mirror = pin::Mirror::open(&config.work, &pin.repository)?;
+                let reached = mirror.reached(&v.main, reach)?;
+                for dir in &reached.crates {
+                    let mark = if reached.reached.contains(dir) {
+                        "reached"
+                    } else {
+                        "out"
+                    };
+                    println!("{mark} {dir}");
+                }
+            }
+            scope::Scope::Whole(why) => println!("every crate: {why}"),
+        }
+    }
     println!(
-        "{}: pinned {} guest tree {}\nSDK main {} guest tree {}\n{}",
+        "{}: pinned {} guest tree {} (whole {})\nSDK main {} guest tree {} (whole {})\ncompared: {}\n{}",
         v.file,
         v.pinned,
         v.pinned_tree,
+        v.pinned_whole,
         v.main,
         v.main_tree,
+        v.main_whole,
+        v.scope,
         v.header()
     );
     if write {
@@ -764,10 +808,10 @@ fn pin_command(args: &[String]) -> Result<ExitCode, String> {
         } else {
             return Err(format!(
                 "the pin is in {}: add `guest_tree = \"{}\"` under [sdk] in the game file",
-                v.file, v.pinned_tree
+                v.file, v.pinned_whole
             ));
         };
-        let new = pin::record_guest_tree(&text, section, &v.pinned_tree)
+        let new = pin::record_guest_tree(&text, section, &v.pinned_whole)
             .ok_or_else(|| format!("cannot find the SDK revision in {}", path.display()))?;
         std::fs::write(&path, new).map_err(|e| format!("write {}: {e}", path.display()))?;
         println!("recorded guest_tree in {}", v.file);
