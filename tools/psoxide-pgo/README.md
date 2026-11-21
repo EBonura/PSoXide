@@ -1220,6 +1220,51 @@ the best candidate on any single metric is flagged in the output. The whole
 table (threshold, free RAM, fit, every metric, rating, worst ratio) is written
 to `--out` and `shipped-variant.txt`; paste it in the game's commit message.
 
+## Keeping a collection only when it is faster (`psoxide-perf adopt-pgo`)
+
+A collection is a draw. Two profiles of one tree that differ by under 2% on any
+function can put a few call sites on opposite sides of the hot threshold: on
+Counter-Strike at SDK fce1f6855bc1 a fresh profile flipped the inlining of
+`Arsenal::try_fire` and `cs_weapons::spread` into its 120 KB `play` and ran
+de_airstrip 4.4% slower than the profile it replaced, same code, same rung.
+Half-Life's greedy layout collected the same day was 1.09% slower than its
+searched one. The ladder's `--baseline` does not catch this: it compares
+thresholds of the new profile with stored scores at a 1% tolerance, and is
+skipped at `--candidates 1`.
+
+So every collection flow ends with one more step, whichever tool collected:
+
+```sh
+psoxide-perf adopt-pgo --repo . \
+  --file game/pgo/cs-psx.prof --file game/pgo/hot-callsite-threshold --file game/pgo/cs-psx.layout \
+  --build 'cargo cs-build pack --half-life "$CS_GAMEDIR"' --image dist/cs-psx.cue \
+  --frontend "$FRONTEND" --launch-arg --embedded-playtest --launch-arg --no-memcard \
+  --tape tests/pgo/tapes/de_dust2.pxtape --polls 500..1950 \
+  --tape tests/pgo/tapes/cs_italy.pxtape --polls 500..1860 \
+  --tape tests/pgo/tapes/de_airstrip.pxtape --polls 500..1800 \
+  --record game/pgo/adoption.txt
+```
+
+The candidate is what the collection left in the working tree; the incumbent is
+the same files at `--rev` (default `HEAD`). Each is built with `--build` and
+measured with this tool's `measure` on every window at every `--offsets` shift
+(default -48, -24, 0, 24 polls), and the score of a window is the mean
+`work_per_frame` over the shifts: a window edge can fall on either side of a
+vblank bucket, and the shifted windows average that out where one run or a p99
+does not. The candidate stays only when no window is slower than the `--tie`
+band (default 0.25%) and the geometric mean of the windows is faster than it;
+otherwise the incumbent's files are put back (a tie keeps the incumbent). An
+incumbent that no longer builds or benches on the tree (a stale profile after
+a repin) gives way, and the record says so. The record (both sides' scores per
+window and shift, the decision, why, the commit, the file hashes and the
+frontend's hash) has no times or paths, so the same comparison writes the same
+bytes; commit it beside the ticket.
+
+It lives in `psoxide-perf` because this directory is part of the SDK's guest
+tree (`psoxide-test`'s pin rule): a change here forces every game to repin.
+The cost is two builds and `2 x windows x shifts` replays of `measure`, two at
+a time (`--jobs`).
+
 ## Stale profiles
 
 `rebind` (so every `apply`, `choose` and `ladder`) reports how much of the

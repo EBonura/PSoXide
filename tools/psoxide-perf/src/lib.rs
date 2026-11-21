@@ -3,6 +3,7 @@
 
 #[macro_use]
 pub mod util;
+pub mod adopt_pgo;
 pub mod cortex_30fps_report;
 pub mod cortex_bench_report;
 pub mod instr_census;

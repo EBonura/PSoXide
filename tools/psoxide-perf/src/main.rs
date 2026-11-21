@@ -3,12 +3,15 @@
 use std::io::Write;
 
 use psoxide_perf::{
-    cortex_30fps_report, cortex_bench_report, instr_census, mcp_client, pc_line_attribution,
-    pc_symbolize, performance_suite, text_census,
+    adopt_pgo, cortex_30fps_report, cortex_bench_report, instr_census, mcp_client,
+    pc_line_attribution, pc_symbolize, performance_suite, text_census,
 };
 
 const HELP: &str = "usage: psoxide-perf <command> [args]\n\
 commands:\n\
+  adopt-pgo --repo DIR (--file PATH)... --build CMD --image PATH --frontend PATH\n\
+         (--tape PATH --polls A..B)... --record PATH [--rev REV] [--offsets O,..] [--tie PCT]\n\
+      keep a newly collected PGO ticket only when it benches no worse than the committed one\n\
   pc-line-attribution PC_LINES LINKER_MAP [--limit N] [--compare BASE_LOG BASE_MAP]\n\
          [--icache-events CSV]\n\
       attribute exact PC-line or PC-word counts to linker-map symbols and cache sets\n\
@@ -32,6 +35,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut stdout = std::io::stdout();
     let result = match args.first().map(String::as_str) {
+        Some("adopt-pgo") => adopt_pgo::run(&args[1..], &mut stdout),
         Some("pc-line-attribution") => pc_line_attribution::run(&args[1..], &mut stdout),
         Some("pc-symbolize") => pc_symbolize::run(&args[1..], &mut stdout),
         Some("instr-census") => instr_census::run(&args[1..], &mut stdout),
