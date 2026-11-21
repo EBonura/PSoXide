@@ -27,16 +27,18 @@ use crate::scope::{self, Scope};
 use crate::util::{self, Key};
 
 /// Bumped whenever the guest-tree definition changes, so cached trees of the old one are not reused.
-pub const DEFINITION: &str = "guest-tree-1";
+pub const DEFINITION: &str = "guest-tree-2";
 
 /// The same for a game's scoped view of it (scope.rs).
-pub const SCOPED_DEFINITION: &str = "guest-tree-scoped-1";
+pub const SCOPED_DEFINITION: &str = "guest-tree-scoped-2";
 
 /// The SDK paths whose content can change a game's bytes (see the module documentation).
 pub const GUEST_PATHS: &[&str] = &[
     "sdk",
     "engine",
     "crates",
+    "assets/audio",
+    "assets/textures",
     "tools/mkisopsx",
     "tools/psoxide-link",
     "tools/psoxide-pgo",

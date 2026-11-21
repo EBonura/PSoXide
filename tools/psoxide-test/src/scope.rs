@@ -15,8 +15,13 @@
 //! - a guest tool script the game names (`tools/sdk-examples.mk`) does one of these;
 //! - a crate it reaches depends on it by path, directly or through its workspace.
 //!
+//! An asset file (`assets/audio`, `assets/textures`) counts for a game that names it (its lock
+//! hydrates the directory, or a file mentions the path) or whose reached crate reads it
+//! (`include_bytes!("../../../../assets/textures/floor.psxt")`); any other asset counts for no one.
+//!
 //! Documentation (`*.md`, `docs/`) and the pin locks (`components.lock.json`, `sdk.lock.json`:
-//! they list what is hydrated, not what is built) are not read. Whenever something cannot be
+//! they list what is hydrated, not what is built) are not read, except for the asset paths in
+//! a lock. Whenever something cannot be
 //! read with certainty (no git work tree, a manifest that does not parse, a path dependency
 //! outside the repository, a git dependency on a package the SDK does not have, a workspace
 //! dependency without its workspace), the scope is the whole guest tree, as before.
@@ -43,6 +48,9 @@ pub struct Reach {
     /// SDK manifests named on a line with no `-p` (`""` is the root's): a workspace among
     /// them is built whole.
     pub workspace_builds: BTreeSet<String>,
+    /// Asset paths (`assets/audio`, `assets/textures/floor.psxt`) the files name, the pin locks
+    /// included: the game hydrates them or builds from them.
+    pub assets: BTreeSet<String>,
 }
 
 impl Reach {
@@ -56,6 +64,7 @@ impl Reach {
             ("composed", &self.composed),
             ("tool", &self.tools),
             ("workspace", &self.workspace_builds),
+            ("asset", &self.assets),
         ];
         for (label, set) in sets {
             for item in set {
@@ -110,6 +119,10 @@ pub fn reach_of(files: &[(String, String)]) -> Result<Reach, String> {
     let mut reach = Reach::default();
     for (rel, text) in files {
         if skipped(rel) {
+            // A lock lists what the game hydrates: the asset directories it takes count.
+            if rel == "components.lock.json" {
+                text.lines().for_each(|line| scan_assets(line, &mut reach));
+            }
             continue;
         }
         scan_text(text, &mut reach);
@@ -150,6 +163,7 @@ fn scan_text(text: &str, reach: &mut Reach) {
 
 /// One line of [`scan_text`] (a path and a cargo command's arguments sit on one line).
 fn scan_line(line: &str, reach: &mut Reach) {
+    scan_assets(line, reach);
     let mut words = line
         .split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ',' | '[' | ']' | '='))
         .filter(|w| !w.is_empty());
@@ -217,6 +231,28 @@ fn scan_line(line: &str, reach: &mut Reach) {
     // Without `-p`, cargo builds what the manifest names: for a workspace, its members.
     if !packages {
         reach.workspace_builds.extend(manifests);
+    }
+}
+
+/// Add the asset paths (`assets/audio/cdda`) a line names to `reach`.
+fn scan_assets(line: &str, reach: &mut Reach) {
+    for (at, _) in line.match_indices("assets/") {
+        // `my-assets/` and `x.assets/` are other names; `../.psoxide/assets/` and `"assets/` are not.
+        if line[..at]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+        {
+            continue;
+        }
+        let run: String = line[at..]
+            .chars()
+            .take_while(|&c| is_path_char(c))
+            .collect();
+        let path = run.trim_end_matches(['/', '.']);
+        if path.len() > "assets/".len() {
+            reach.assets.insert(path.to_string());
+        }
     }
 }
 
@@ -332,11 +368,24 @@ pub struct Reached {
     pub crates: BTreeSet<String>,
     /// The ones the game reaches.
     pub reached: BTreeSet<String>,
+    /// Asset paths the game names, and those the sources of the crates it reaches read.
+    pub assets: BTreeSet<String>,
 }
 
 impl Reached {
-    /// Whether `path` counts: it is in no crate directory, or in one the game reaches.
+    /// Whether `path` counts: an asset the game names or a reached crate reads, or a file in no crate
+    /// directory, or in one the game reaches.
     pub fn keeps(&self, path: &str) -> bool {
+        // An asset counts when a reached crate reads it or the game names it (or a directory
+        // above it); every other asset is read by nothing the game builds.
+        if path.starts_with("assets/") {
+            return self.assets.iter().any(|a| {
+                path == a
+                    || path
+                        .strip_prefix(a.as_str())
+                        .is_some_and(|r| r.starts_with('/'))
+            });
+        }
         let mut inside = self
             .crates
             .iter()
@@ -432,6 +481,7 @@ pub fn reached_crates(
 
     let all: BTreeSet<String> = crates.keys().map(|d| d.to_string()).collect();
     let mut seen = BTreeSet::new();
+    let mut assets = reach.assets.clone();
     // In waves, so each wave's sources are read in one batch.
     while !stack.is_empty() {
         let wave: Vec<String> = std::mem::take(&mut stack)
@@ -456,6 +506,9 @@ pub fn reached_crates(
             let owner = owner_of(&all, &path);
             let file_dir = path.rsplit_once('/').map_or("", |(d, _)| d);
             for target in relative_reads(&text, file_dir, owner.unwrap_or(file_dir)) {
+                if target.starts_with("assets/") {
+                    assets.insert(target.clone());
+                }
                 if let Some(read) = owner_of(&all, &target) {
                     stack.push(read.to_string());
                 }
@@ -465,6 +518,7 @@ pub fn reached_crates(
     Ok(Reached {
         crates: all,
         reached: seen,
+        assets,
     })
 }
 
@@ -802,6 +856,83 @@ mod tests {
         assert!(!got.contains("engine/examples/editor-playtest"));
     }
 
+    /// The SDK of `sdk()` plus two crates that read assets and one that reads none.
+    fn asset_reader(
+        text: &'static str,
+    ) -> impl FnMut(&[String]) -> Result<Vec<(String, String)>, String> {
+        move |dirs: &[String]| {
+            Ok(dirs
+                .iter()
+                .filter(|d| *d == "engine/examples/hardware-tests")
+                .map(|_| {
+                    (
+                        "engine/examples/hardware-tests/src/main.rs".to_string(),
+                        text.to_string(),
+                    )
+                })
+                .collect())
+        }
+    }
+
+    #[test]
+    fn an_asset_a_reached_crate_includes_counts_for_the_game() {
+        let reach = Reach {
+            mentions: ["engine/examples/hardware-tests".to_string()].into(),
+            ..Reach::default()
+        };
+        let mut sources = asset_reader(
+            "static B: &[u8] = include_bytes!(\"../../../../assets/textures/floor.psxt\");",
+        );
+        let reached = reached_crates(&sdk(), &BTreeMap::new(), &reach, &mut sources).unwrap();
+        assert!(reached.keeps("assets/textures/floor.psxt"));
+        assert!(!reached.keeps("assets/textures/brick-wall.psxt"));
+        assert!(!reached.keeps("assets/audio/freesfx/psau/jump.psau"));
+        // The compose form with the crate's manifest directory reads the same file.
+        let mut sources = asset_reader(
+            "include_bytes!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../../../assets/audio/x.psau\"));",
+        );
+        let reached = reached_crates(&sdk(), &BTreeMap::new(), &reach, &mut sources).unwrap();
+        assert!(reached.keeps("assets/audio/x.psau"));
+    }
+
+    #[test]
+    fn an_asset_no_reached_crate_reads_counts_for_no_one() {
+        // The reading crate is out of reach: its asset does not count.
+        let reach = Reach {
+            mentions: ["crates/psx-cook".to_string()].into(),
+            ..Reach::default()
+        };
+        let mut sources = asset_reader(
+            "static B: &[u8] = include_bytes!(\"../../../../assets/textures/floor.psxt\");",
+        );
+        let reached = reached_crates(&sdk(), &BTreeMap::new(), &reach, &mut sources).unwrap();
+        assert!(!reached.keeps("assets/textures/floor.psxt"));
+        assert!(
+            reached.keeps("sdk/psoxide.ld"),
+            "files outside assets are unchanged"
+        );
+    }
+
+    #[test]
+    fn a_game_that_names_an_asset_directory_counts_it() {
+        let reach = reach_of(&files(&[(
+            "components.lock.json",
+            "\"paths\": [\n \"assets/audio\",\n \"assets/branding/x.png\"\n]",
+        )]))
+        .unwrap();
+        let reached = reached_crates(&sdk(), &BTreeMap::new(), &reach, &mut no_sources).unwrap();
+        assert!(reached.keeps("assets/audio/freesfx/psau/jump.psau"));
+        assert!(!reached.keeps("assets/textures/floor.psxt"));
+        // A file of the game naming a directory does too; `my-assets/` is another name.
+        let reach = reach_of(&files(&[(
+            "Makefile",
+            "T := $(SDK)/assets/textures\nX := my-assets/audio\n",
+        )]))
+        .unwrap();
+        assert!(reach.assets.contains("assets/textures"));
+        assert!(!reach.assets.contains("assets/audio"));
+    }
+
     #[test]
     fn a_file_counts_unless_every_crate_around_it_is_out_of_reach() {
         let reached = Reached {
@@ -813,6 +944,7 @@ mod tests {
             .map(str::to_string)
             .into(),
             reached: ["crates/a".to_string()].into(),
+            assets: BTreeSet::new(),
         };
         assert!(reached.keeps("sdk/psoxide.ld"));
         assert!(reached.keeps("engine/Cargo.lock"));
