@@ -9,9 +9,11 @@ use serde::{Deserialize, Serialize};
 use crate::util;
 
 /// Passing checks the table prints however large the stage: summaries a reader must see (results
-/// carried from an older gate, the hardware-renderer coverage, the open-loop total).
+/// carried from an older gate, rows standing on real, the hardware-renderer coverage, the
+/// open-loop total).
 const ALWAYS_SHOWN: &[&str] = &[
     "carried from an older gate",
+    "standing on real",
     "journey rows",
     "requires ",
     "hardware renderer (hw = true)",

@@ -9,6 +9,9 @@ description  = "High-level PS1 SPU (Sound Processing Unit) API: typed voices, vo
 [dependencies]
 psx-hw = { workspace = true }
 psx-io = { path = "../psx-io" }
+# The debug console a timeout is reported on (`psx_rt::tty`, nothing unless the program
+# turns on `host-tty`).
+psx-rt = { workspace = true }
 
 [lints]
 workspace = true

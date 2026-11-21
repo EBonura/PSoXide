@@ -9,7 +9,7 @@ use serde::Deserialize;
 /// The emulator revision whose `psoxide-gate` this harness version runs journeys with
 /// (PSoXide-emulator main, `--conformance=RULES`). A gate built from another revision is
 /// refused, so every result names the runner it was judged by.
-pub const GATE_REVISION: &str = "076d97fb1acf59a3081351f1775eda644269b457";
+pub const GATE_REVISION: &str = "97cd078f9d2a33eb6aff274541bccc118f5b12e8";
 
 /// The user config.
 #[derive(Debug, Deserialize)]
@@ -210,8 +210,8 @@ mod tests {
             bin.display()
         );
         let config: Config = toml::from_str(&text).unwrap();
-        assert!(config.gate().unwrap_err().contains("076d97fb1acf"));
-        let text = text.replace("eca75bc6", "076d97fb");
+        assert!(config.gate().unwrap_err().contains("97cd078f9d2a"));
+        let text = text.replace("eca75bc6", "97cd078f");
         let config: Config = toml::from_str(&text).unwrap();
         assert!(config.gate().is_ok());
     }

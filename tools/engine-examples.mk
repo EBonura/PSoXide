@@ -101,7 +101,7 @@ HWTEST_FEATURES ?=
 repro-rustc:
 	cargo build -q --release --manifest-path tools/psoxide-pgo/Cargo.toml --target-dir "$(REPRO_TARGET)" --bin psoxide-rustc
 hello-engine showcase-text game-pong game-magikaaaaaarp-pong game-breakout game-invaders showcase-3d showcase-model showcase-lights showcase-fog showcase-particles hardware-tests: repro-rustc
-.PHONY: hardware-tests hardware-tests-disc hwtest-radius-disc hwtest-verify-code hello-engine showcase-text game-pong game-breakout game-invaders showcase-3d showcase-model showcase-lights showcase-fog showcase-particles game-magikaaaaaarp-pong game-magikaaaaaarp-pong-disc magikaaaaaarp-pong-spectrum assets psxed engine-examples
+.PHONY: hardware-tests hardware-tests-disc hwtest-session-audio hwtest-radius-disc hwtest-verify-code hello-engine showcase-text game-pong game-breakout game-invaders showcase-3d showcase-model showcase-lights showcase-fog showcase-particles game-magikaaaaaarp-pong game-magikaaaaaarp-pong-disc magikaaaaaarp-pong-spectrum assets psxed engine-examples
 hardware-tests:
 	cd engine/examples/hardware-tests && PSX_GATE_PROGRAM=hardware-tests $(ENGINE_EXAMPLE_CARGO_ENV) cargo build --release $(EDITOR_PLAYTEST_PSX_BUILD_FLAGS) $(if $(HWTEST_FEATURES),--features "$(HWTEST_FEATURES)")
 	cargo run -q --release --locked -p psoxide-hazard --bin hazard-scan -- $(EXAMPLE_OUT)/hardware-tests.exe
@@ -177,7 +177,7 @@ $(HWTEST_XA_CLOCK):
 
 # The boot EXE of the BIOS-free suite (v2.9 on) is 547 sectors, past the 542 that
 # CDTEST.BIN at 460 sectors leaves, so the disc is always the console-diag build
-# (the SDK stop panel; CDTEST_SECTORS 400 in main.rs), the same layout as the
+# (the SDK stop panel; CDTEST_SECTORS 360 in main.rs since v2.25, 400 before), the same layout as the
 # radius disc and as every v2.9 burn.
 hardware-tests-disc: HWTEST_FEATURES = console-diag
 hardware-tests-disc: hardware-tests $(HWTEST_CDDA) $(HWTEST_XA) $(HWTEST_XA_CLOCK)
@@ -186,17 +186,33 @@ hardware-tests-disc: hardware-tests $(HWTEST_CDDA) $(HWTEST_XA) $(HWTEST_XA_CLOC
 		--exe ../../$(EXAMPLE_OUT)/hardware-tests.exe \
 		--out ../../$(EXAMPLE_OUT)/hardware-tests.bin \
 		--volume PSOXIDE \
-		--cdtest-sectors 400 \
+		--cdtest-sectors 360 \
 		--xa-file ../../$(HWTEST_XA) \
 		--xa-file ../../$(HWTEST_XA_CLOCK) \
 		--cdda-track ../../$(HWTEST_CDDA)
+
+# --- audible steps (v2.24) --------------------------------------------------
+# The session row (menu row 9) runs SPU BULK UPLOAD, which keys a tone after the old and the
+# new upload path. v2.24 shipped with both tones silent (main volume left at 0) and nothing
+# noticed, on the console or in the emulator: this runs the row on the emulator twin (host
+# TTY on, never burned) to the step's last record and fails unless its audio holds at least
+# 1.5 s of sound (the new path's tone is 2 s; on an emulator that models the old path's cut,
+# its tone is silent). FRONTEND=<psoxide-emulator binary>.
+HWTEST_SESSION_PULSES := 0x0040@40+3,0x0040@50+3,0x0040@60+3,0x0040@70+3,0x0040@80+3,0x0040@90+3,0x0040@100+3,0x0040@110+3,0x4000@130+3
+hwtest-session-audio:
+	@test -n "$(FRONTEND)" || { echo "hwtest-session-audio: set FRONTEND=<psoxide-emulator binary>"; exit 2; }
+	$(MAKE) hardware-tests-disc HWTEST_FEATURES="console-diag psx-rt/host-tty" HWTEST_ALLOW_DEBUG_PORT=1
+	$(FRONTEND) launch --path $(EXAMPLE_OUT)/hardware-tests.cue --pad-pulses '$(HWTEST_SESSION_PULSES)' \
+		--steps 30000000000 --stop-on-tty "hardware-tests: rec 09B8" \
+		--dump-audio $(EXAMPLE_OUT)/hwtest-session-audio.wav
+	$(PSOXIDE_HWTEST) check-audible $(EXAMPLE_OUT)/hwtest-session-audio.wav --min-seconds 1.5
 
 # --- radius disc (v2.8) ---------------------------------------------------
 # The plain hardware-test image padded with RADIUS.DAT, deterministic filler
 # (psoxide-hwtest radius-fill) that carries the data track out to about 78
 # minutes, as full as the demo disc, so the CD RADIUS SWEEP step has outer
 # radius to read. It is built with the SDK stop panel (console-diag), which
-# moves CDTEST.BIN to 400 sectors (see CDTEST_SECTORS in main.rs). The filler
+# moves CDTEST.BIN to 360 sectors (400 before v2.25) (see CDTEST_SECTORS in main.rs). The filler
 # goes last on the data track, after the XA files, so everything else keeps its
 # place; the CD-DA track follows it, so on this disc it sits at the outer edge.
 # 16,660 sectors of image plus the filler stay under the 359,844 blocks of an
@@ -217,7 +233,7 @@ hwtest-radius-disc: hardware-tests $(HWTEST_CDDA) $(HWTEST_XA) $(HWTEST_XA_CLOCK
 		--exe ../../$(EXAMPLE_OUT)/hardware-tests.exe \
 		--out ../../$(HWTEST_RADIUS_DIR)/hardware-tests-radius.bin \
 		--volume PSOXIDE \
-		--cdtest-sectors 400 \
+		--cdtest-sectors 360 \
 		--xa-file ../../$(HWTEST_XA) \
 		--xa-file ../../$(HWTEST_XA_CLOCK) \
 		--xa-file ../../$(HWTEST_RADIUS_FILL) \

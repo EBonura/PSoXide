@@ -18,7 +18,7 @@
 //! ```ignore
 //! spu::init();                              // turn the SPU on, sensible defaults
 //! spu::set_main_volume(Volume::MAX, Volume::MAX);
-//! spu::upload_adpcm(SpuAddr::new(0x1010), &TONE_SAMPLE);
+//! spu::upload_adpcm(SpuAddr::new(0x1010), &TONE_SAMPLE)?;
 //! let v = Voice::V0;
 //! v.set_volume(Volume::MAX, Volume::MAX);
 //! v.set_pitch(Pitch::UNITY);
@@ -124,7 +124,7 @@ fn read_reg16(addr: u32) -> u16 {
 ///
 /// ```text
 /// let mut spu = psx_spu::Spu::new(peripherals.spu_dma);
-/// spu.upload_adpcm(SpuAddr::new(0x1010), &TONE_SAMPLE);
+/// spu.upload_adpcm(SpuAddr::new(0x1010), &TONE_SAMPLE)?;
 /// ```
 #[derive(Debug)]
 #[repr(transparent)]
@@ -142,6 +142,12 @@ impl Spu {
     /// - Transfer mode: "normal" (the upload path we expose)
     ///
     /// Call once at boot before any voice operations.
+    ///
+    /// The silence block goes over DMA like any upload. It is 16 bytes, so its
+    /// wait only runs out on a wedged channel; that is reported like every
+    /// other timeout (the debug console in a `host-tty` build, the stop-panel
+    /// counters in a `console-diag` one) but not returned, since a driver that
+    /// failed to write 16 bytes is still the only way to reach the SPU.
     #[doc(alias = "SpuInit")]
     pub fn new(mut dma: SpuDma) -> Self {
         init_with(&mut dma);
@@ -151,20 +157,39 @@ impl Spu {
     /// Upload ADPCM sample bytes to SPU RAM.
     ///
     /// Goes over DMA channel 4 when `bytes` is word-aligned and a whole number
-    /// of words, which is fast and the only reliable path past the 32-halfword
-    /// transfer FIFO, and otherwise falls back to the manual-transfer (PIO)
-    /// path, one halfword per write.
+    /// of words, and otherwise (`include_bytes!` data, an odd number of
+    /// halfwords) through the manual-transfer FIFO, at most
+    /// [`MANUAL_BURST_HALFWORDS`] at a time, each burst drained before the
+    /// next. Both paths land the same bytes in the emulator and report a stuck
+    /// transfer the same way.
+    ///
+    /// Only the DMA path is proven on a console (hardware tests v2.24). The
+    /// manual-write path is the fallback and is unproven on hardware until
+    /// hardware-test rows 0x9BB and 0x9BC (v2.25) run: include sample data with
+    /// `psx_sfx::include_psau!` (or keep it in a [`WordAligned`]) so it never
+    /// takes it.
     ///
     /// `bytes` must be a multiple of 2 (one halfword per two bytes).
     /// `dest` must be 8-byte-aligned (the SPU voice-start register's
     /// resolution) and above the silence block.
     ///
+    /// The DMA path sends [`UPLOAD_PIECE_BYTES`] at a time and waits each
+    /// piece out against a budget sized from its length at the console's rate,
+    /// so an upload of any size lands whole on silicon, not only on emulators.
+    ///
+    /// # Errors
+    /// [`TransferTimeout`] when a DMA piece or a manual-write burst did not
+    /// finish inside its budget (a wedged channel or a stuck busy flag):
+    /// nothing after it was sent, and only [`TransferTimeout::landed_bytes`]
+    /// are known to be in SPU RAM. The caller decides what a missing sample
+    /// means; it is never silently partial.
+    ///
     /// # Panics
     /// If `bytes` is odd in length, or `dest` overlaps the silence block at
     /// 0x1000.
     #[doc(alias = "SpuWrite")]
-    pub fn upload_adpcm(&mut self, dest: SpuAddr, bytes: &[u8]) {
-        upload_adpcm_with(&mut self.0, dest, bytes);
+    pub fn upload_adpcm(&mut self, dest: SpuAddr, bytes: &[u8]) -> Result<(), TransferTimeout> {
+        upload_adpcm_with(&mut self.0, dest, bytes)
     }
 
     /// Give the DMA token back.
@@ -188,9 +213,46 @@ pub fn init() {
 }
 
 /// Upload ADPCM sample bytes to SPU RAM.
+///
+/// # Errors
+/// As [`Spu::upload_adpcm`].
 #[deprecated(note = "use `Spu::upload_adpcm` with the `SpuDma` token")]
-pub fn upload_adpcm(dest: SpuAddr, bytes: &[u8]) {
-    upload_adpcm_with(&mut steal_dma(), dest, bytes);
+pub fn upload_adpcm(dest: SpuAddr, bytes: &[u8]) -> Result<(), TransferTimeout> {
+    upload_adpcm_with(&mut steal_dma(), dest, bytes)
+}
+
+/// An SPU transfer (an upload by DMA or by the manual-write FIFO, or a
+/// reverb-area clear) that outlived its wait budget: the rest of the transfer
+/// was not sent.
+///
+/// The budget is sixteen times the console's transfer time, so on a working
+/// machine this means a wedged channel, not a slow one.
+///
+/// A caller cannot drop it by accident: the upload returns a `Result`, and a
+/// build that denies warnings (every SDK gate, `-D warnings`) refuses an
+/// unused one.
+///
+/// ```compile_fail
+/// #![deny(unused_must_use)]
+/// fn load(spu: &mut psx_spu::Spu, bytes: &[u8]) {
+///     spu.upload_adpcm(psx_spu::SpuAddr::new(0x1010), bytes);
+/// }
+/// ```
+///
+/// Handled, the same call builds:
+///
+/// ```no_run
+/// #![deny(unused_must_use)]
+/// fn load(spu: &mut psx_spu::Spu, bytes: &[u8]) -> Result<(), psx_spu::TransferTimeout> {
+///     spu.upload_adpcm(psx_spu::SpuAddr::new(0x1010), bytes)
+/// }
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct TransferTimeout {
+    /// Bytes of the transfer sent in pieces that finished before the one that
+    /// timed out: what is known to be in SPU RAM, from the destination up.
+    pub landed_bytes: u32,
 }
 
 // ======================================================================
@@ -257,8 +319,9 @@ fn init_with(dma: &mut SpuDma) {
     // Manual/DMA as needed when uploading.
     write_reg16(TRANSFER_CTRL, TRANSFER_CTRL_NORMAL); // normal mode
 
-    // The one upload allowed onto the silence block: it writes the block.
-    upload_adpcm_unguarded(dma, SILENCE_BLOCK, &SILENCE_BLOCK_BYTES);
+    // The one upload allowed onto the silence block: it writes the block. A
+    // timeout here is reported by `dma_write` and not returned; see `Spu::new`.
+    let _ = upload_adpcm_unguarded(dma, SILENCE_BLOCK, &SILENCE_BLOCK_BYTES[..]);
 }
 
 /// One ADPCM block of silence that loops on itself, for every one-shot's
@@ -274,7 +337,41 @@ pub const SILENCE_BLOCK: SpuAddr = SpuAddr::new(0x1000);
 ///
 /// A voice that lands here decodes silence and jumps straight back to the top
 /// of the same block, so it stays here until something keys it off.
-static SILENCE_BLOCK_BYTES: [u8; 16] = [0x00, 0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+///
+/// Word-aligned, so its upload goes by DMA: a byte-aligned static would take the
+/// manual-write path, which the console fails with the old write order
+/// (hardware tests 0xA7 and 0xBD).
+static SILENCE_BLOCK_BYTES: WordAligned<16> =
+    WordAligned::new([0x00, 0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+
+/// Bytes at a 4-byte-aligned address, the alignment [`Spu::upload_adpcm`] needs to send
+/// them by DMA rather than by manual write. A `static` or `const` byte array has an
+/// alignment of 1, so a short block kept in one (a parking or silence block) can land
+/// on any address; wrap it in this instead and upload `&block[..]`.
+#[repr(C, align(4))]
+pub struct WordAligned<const N: usize>([u8; N]);
+
+impl<const N: usize> WordAligned<N> {
+    /// `bytes` at a word-aligned address.
+    #[must_use]
+    pub const fn new(bytes: [u8; N]) -> Self {
+        Self(bytes)
+    }
+
+    /// The bytes, word-aligned. A `const fn`, so a `const` table of samples can name them.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; N] {
+        &self.0
+    }
+}
+
+impl<const N: usize> core::ops::Deref for WordAligned<N> {
+    type Target = [u8; N];
+
+    fn deref(&self) -> &[u8; N] {
+        &self.0
+    }
+}
 
 /// Spin budget for one SPU handshake. Generous next to the delay the
 /// hardware actually takes, short enough that a wedged SPU hands control
@@ -318,28 +415,36 @@ fn wait_transfer_idle() {
     // the SPU is still writing them into sound RAM when the caller puts the
     // transfer mode back to Stop underneath it.
     //
-    // So require the flag to stay clear rather than to be clear once, and
-    // then leave a settle behind it. Timing record 0x65 puts 512 halfwords at
-    // roughly 32 cycles each, so a whole 32-halfword FIFO drains in about a
-    // thousand; the margin below is several times that and costs nothing
-    // against an upload measured in kilobytes.
-    const CONSECUTIVE_CLEAR: u32 = 16;
-    let mut clear = 0u32;
-    for _ in 0..SPU_HANDSHAKE_SPINS {
-        if read_reg16(SPUSTAT) & spustat_bits::TRANSFER_BUSY == 0 {
-            clear += 1;
-            if clear >= CONSECUTIVE_CLEAR {
-                break;
-            }
-        } else {
-            clear = 0;
-        }
-    }
+    // So require the flag to stay clear rather than to be clear once
+    // ([`transfer_idle_within`]), and then leave a settle behind it. Timing
+    // record 0x65 puts 512 halfwords at roughly 32 cycles each, so a whole
+    // 32-halfword FIFO drains in about a thousand; the margin below is several
+    // times that and costs nothing against an upload measured in kilobytes.
+    let _ = transfer_idle_within(SPU_HANDSHAKE_SPINS);
     // Settle. `read_reg16` is a volatile MMIO read, so this cannot be
     // optimised away into nothing.
     for _ in 0..SPU_DRAIN_SETTLE_READS {
         let _ = read_reg16(SPUSTAT);
     }
+}
+
+/// Whether SPUSTAT's transfer-busy flag (bit 10) read clear sixteen times in a
+/// row within `spins` status reads: the drain test [`wait_transfer_idle`] and
+/// each manual-write burst use. `false` when it never did (a stuck flag).
+fn transfer_idle_within(spins: u32) -> bool {
+    const CONSECUTIVE_CLEAR: u32 = 16;
+    let mut clear = 0u32;
+    for _ in 0..spins {
+        if read_reg16(SPUSTAT) & spustat_bits::TRANSFER_BUSY == 0 {
+            clear += 1;
+            if clear >= CONSECUTIVE_CLEAR {
+                return true;
+            }
+        } else {
+            clear = 0;
+        }
+    }
+    false
 }
 
 /// Status reads spent letting the SPU finish writing sound RAM after its
@@ -1026,6 +1131,11 @@ impl Spu {
     /// zeros on the caller's stack (128 bytes for the length of the call, none
     /// in the image), so this is a load-time call, not a per-frame one.
     ///
+    /// # Errors
+    /// [`TransferTimeout`] when the work area's clear did not finish: the
+    /// reverb is left stopped (as [`stop_reverb`] leaves it), since running it
+    /// over a work area of leftover samples would be heard.
+    ///
     /// # Panics
     /// If `area` is smaller than `preset.work_bytes`.
     #[doc(alias = "SpuSetReverb")]
@@ -1035,13 +1145,13 @@ impl Spu {
         preset: &ReverbPreset,
         input: ReverbInput,
         depth: i16,
-    ) {
+    ) -> Result<(), TransferTimeout> {
         assert!(
             area.bytes >= preset.work_bytes,
             "start_reverb: area smaller than the preset's work area"
         );
         stop_reverb();
-        clear_reverb_area(&mut self.0, area);
+        clear_reverb_area(&mut self.0, area)?;
         write_reg16(REVERB_WORK_BASE, (area.base / 8) as u16);
         // A loop, kept a loop: the opaque count stops the compiler unrolling 32 stores.
         let mut register = REVERB_COEFFICIENTS;
@@ -1063,6 +1173,7 @@ impl Spu {
         write_reg16(SPUCNT, control);
         wait_spu_status(control);
         set_reverb_depth(depth);
+        Ok(())
     }
 }
 
@@ -1091,14 +1202,14 @@ pub fn set_reverb_depth(depth: i16) {
 
 // Zero `area` in one DMA session. The zeros are a block on the stack, not a
 // static: it lives only for the call, so the reverb costs a game no RAM of its own.
-fn clear_reverb_area(dma: &mut SpuDma, area: ReverbArea) {
+fn clear_reverb_area(dma: &mut SpuDma, area: ReverbArea) -> Result<(), TransferTimeout> {
     let zeros = [0u32; REVERB_CLEAR_WORDS];
     dma_write(
         dma,
         SpuAddr::new(area.base),
         core::hint::black_box(&zeros),
         area.bytes / 4,
-    );
+    )
 }
 
 // ======================================================================
@@ -1106,14 +1217,8 @@ fn clear_reverb_area(dma: &mut SpuDma, area: ReverbArea) {
 // ======================================================================
 
 // The upload behind `Spu::upload_adpcm`, guarded against the silence block.
-//
-// The PIO path follows PSX-SPX "SPU Data Transfer"; the process (PSX-SPX § "SPU Data Transfer"):
-/// 1. Write transfer-control = 0 (reset).
-/// 2. Write target address register.
-/// 3. Write transfer-control = 4 (manual).
-/// 4. Push halfword data through [`TRANSFER_DATA`].
-/// 5. Wait for the transfer to drain (SPUSTAT bit 7 = transfer busy).
-fn upload_adpcm_with(dma: &mut SpuDma, dest: SpuAddr, bytes: &[u8]) {
+// The DMA path is `dma_write`, the manual-write path `upload_adpcm_pio`.
+fn upload_adpcm_with(dma: &mut SpuDma, dest: SpuAddr, bytes: &[u8]) -> Result<(), TransferTimeout> {
     assert!(
         bytes.len().is_multiple_of(2),
         "upload_adpcm: byte slice must be a multiple of 2",
@@ -1128,42 +1233,31 @@ fn upload_adpcm_with(dma: &mut SpuDma, dest: SpuAddr, bytes: &[u8]) {
         dest.byte_offset() >= SILENCE_BLOCK.byte_offset() + SILENCE_BLOCK_BYTES.len() as u32,
         "upload_adpcm: destination overlaps the SPU silence block at 0x1000",
     );
-    upload_adpcm_unguarded(dma, dest, bytes);
+    upload_adpcm_unguarded(dma, dest, bytes)
 }
 
 // The upload without the silence-block guard, for `Spu::new` writing
 // that block. `bytes` is a whole number of halfwords.
-fn upload_adpcm_unguarded(dma: &mut SpuDma, dest: SpuAddr, bytes: &[u8]) {
+fn upload_adpcm_unguarded(
+    dma: &mut SpuDma,
+    dest: SpuAddr,
+    bytes: &[u8],
+) -> Result<(), TransferTimeout> {
     // Prefer DMA (channel 4): fast, and the only reliable path for uploads
     // larger than the 32-halfword transfer FIFO. Falls back to PIO when the
     // source is not word-aligned / a whole number of 32-bit words.
-    if !upload_adpcm_dma(dma, dest, bytes) {
-        upload_adpcm_pio(dest, bytes);
-    }
-}
-
-/// DMA upload (channel 4, RAM -> SPU RAM), block-sync. Returns `false` (so the
-/// caller falls back to PIO) when `bytes` is not 4-byte aligned or not a whole
-/// number of 32-bit words -- the DMA controller is word-addressed.
-fn upload_adpcm_dma(dma: &mut SpuDma, dest: SpuAddr, bytes: &[u8]) -> bool {
     let src = bytes.as_ptr() as u32;
     // An empty slice would program a zero block count, which silicon reads
     // as 65,536 blocks: megabytes past the slice. PIO moves nothing instead.
     if bytes.is_empty() || !src.is_multiple_of(4) || !bytes.len().is_multiple_of(4) {
-        return false;
+        return upload_adpcm_pio(dest, bytes);
     }
     let words = (bytes.len() / 4) as u32;
-    let block_size = dma_block_size(words);
-    if words / block_size > 0xffff {
-        return false; // larger than one block-sync transfer can describe
-    }
-
     // SAFETY: `bytes` is word-aligned and a whole number of words (checked
     // above), so it is exactly `words` initialised `u32`s.
     let source =
         unsafe { core::slice::from_raw_parts(bytes.as_ptr().cast::<u32>(), words as usize) };
-    dma_write(dma, dest, source, words);
-    true
+    dma_write(dma, dest, source, words)
 }
 
 /// Largest block size (in words) that divides `words`; the SPU transfer FIFO
@@ -1189,33 +1283,179 @@ fn dma_block_size(words: u32) -> u32 {
 // runs them, for whole uploads and the reverb clear alike, so the code exists
 // once in the image.
 
+/// Bytes the DMA path sends per channel start, each waited out on its own.
+///
+/// One transfer per upload used to be one wait for the whole upload, and that
+/// wait's fixed budget ran out on a console at about 338 KB: WipEout's 470 KB
+/// bank lost its tail (the countdown and most weapon-name voices) on silicon
+/// while every emulator, moving SPU words at twice the console's rate, landed
+/// it whole. A 4 KiB piece takes about 67,600 clocks on a console; its budget
+/// ([`psx_io::dma::spu_wait_spins`]) is sixteen times that. Each extra piece costs
+/// one channel start, a few dozen clocks.
+pub const UPLOAD_PIECE_BYTES: u32 = 4096;
+
+/// [`UPLOAD_PIECE_BYTES`] in words.
+const UPLOAD_PIECE_WORDS: u32 = UPLOAD_PIECE_BYTES / 4;
+
 /// Write `total_words` words to sound RAM at `dest` in one session, sending
-/// `source` over and over (once, for an upload; many times, for a fill) and a
-/// shorter piece last when `source` does not divide `total_words`.
+/// `source` over and over (once, for an upload; many times, for a fill) in
+/// pieces of at most [`UPLOAD_PIECE_WORDS`], each waited out before the next.
 /// `total_words` must be a multiple of 2 and `source` must not be empty.
+///
+/// Stops at the first piece that outlives its budget, still closes the session,
+/// reports the timeout once and returns it.
 #[inline(never)]
-fn dma_write(dma: &mut SpuDma, dest: SpuAddr, source: &[u32], total_words: u32) {
+fn dma_write(
+    dma: &mut SpuDma,
+    dest: SpuAddr,
+    source: &[u32],
+    total_words: u32,
+) -> Result<(), TransferTimeout> {
     let spucnt = begin_dma_write(dest);
     enable_dma_channel();
-    // A piece is `source`, or what is left of it at the end. The block size and count
-    // are worked out when the piece's length changes, not for every piece: the division
-    // is the slowest thing in a send, and a fill sends hundreds of pieces.
-    let piece = source.len() as u32;
-    let mut left = total_words;
+    // A piece starts at `at` in `source` and runs to the end of `source`, the
+    // piece limit or the end of the transfer, whichever is first. The block size and
+    // count are worked out when the piece's length changes, not for every piece: the
+    // division is the slowest thing in a send, and a fill sends hundreds of pieces.
+    let len = source.len() as u32;
+    let mut sent = 0u32;
+    let mut at = 0u32;
     let mut words = 0;
     let (mut block, mut count) = (0, 0);
-    while left > 0 {
-        let now = left.min(piece);
+    let mut result = Ok(());
+    while sent < total_words {
+        let now = (total_words - sent).min(UPLOAD_PIECE_WORDS).min(len - at);
         if now != words {
             words = now;
             block = dma_block_size(words);
             count = words / block;
         }
-        send_dma_words(dma, &source[..words as usize], block, count);
-        left -= words;
+        if !send_dma_words(
+            dma,
+            &source[at as usize..(at + words) as usize],
+            block,
+            count,
+        ) {
+            result = Err(TransferTimeout {
+                landed_bytes: sent * 4,
+            });
+            break;
+        }
+        sent += words;
+        at += words;
+        if at == len {
+            at = 0;
+        }
     }
     end_dma_write(spucnt);
+    if let Err(timeout) = result {
+        note_timeout(dest, timeout);
+    }
+    result
 }
+
+/// The first transfer of the run that timed out, as two words: the destination's byte offset
+/// with bit 31 set, then the bytes that landed. Both zero until one times out; never cleared.
+///
+/// A plain RAM word (no debug-port store), so it is safe on a console: the console-diag overlay
+/// and a gate's RAM checks read it by its map symbol, and [`first_upload_fault`] reads it in code.
+/// It is what makes a dropped upload `Result` harmless to diagnose: the failure is on record
+/// even where the caller ignored it.
+static mut UPLOAD_FAULT: [u32; 2] = [0; 2];
+
+/// Bit 31 of [`UPLOAD_FAULT`]'s first word: a fault is recorded.
+const UPLOAD_FAULT_SET: u32 = 1 << 31;
+
+/// The first SPU transfer of this run that timed out, from [`first_upload_fault`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct UploadFault {
+    /// Where the transfer was going.
+    pub dest: SpuAddr,
+    /// Bytes known to be in SPU RAM from `dest` up, as in [`TransferTimeout::landed_bytes`].
+    pub landed_bytes: u32,
+}
+
+/// The first SPU upload or reverb clear of this run that timed out, or `None` while every
+/// transfer has finished. Recorded by the SDK whether or not the caller handled the `Result`,
+/// and kept for the run (a later timeout does not replace it).
+///
+/// The SDK's policy for a failed upload: the sample is never played (`psx_sfx::Bank` and
+/// `psx_engine::sfx::upload_sample*` hand back no playable sample for it), the failure is on
+/// record here, and a game neither retries nor handles it beyond not playing the sound.
+#[must_use]
+pub fn first_upload_fault() -> Option<UploadFault> {
+    // SAFETY: the SPU driver runs on the main thread only; a two-word read of a static no
+    // interrupt handler writes.
+    let [dest, landed] = unsafe { core::ptr::addr_of!(UPLOAD_FAULT).read_volatile() };
+    decode_upload_fault(dest, landed)
+}
+
+const fn decode_upload_fault(dest: u32, landed_bytes: u32) -> Option<UploadFault> {
+    if dest & UPLOAD_FAULT_SET == 0 {
+        return None;
+    }
+    Some(UploadFault {
+        dest: SpuAddr::new(dest & !UPLOAD_FAULT_SET),
+        landed_bytes,
+    })
+}
+
+/// The two words to store for a timeout, or `None` when one is already recorded.
+const fn latch_upload_fault(
+    recorded: u32,
+    dest: SpuAddr,
+    timeout: TransferTimeout,
+) -> Option<[u32; 2]> {
+    if recorded & UPLOAD_FAULT_SET != 0 {
+        return None;
+    }
+    Some([dest.byte_offset() | UPLOAD_FAULT_SET, timeout.landed_bytes])
+}
+
+/// Record a timed-out transfer in [`UPLOAD_FAULT`] (the first one only), then report it on the
+/// debug console where a `host-tty` build has one.
+fn note_timeout(dest: SpuAddr, timeout: TransferTimeout) {
+    // SAFETY: the SPU driver runs on the main thread only, and only this function writes the
+    // static.
+    unsafe {
+        let fault = core::ptr::addr_of_mut!(UPLOAD_FAULT);
+        if let Some(words) = latch_upload_fault((*fault)[0], dest, timeout) {
+            fault.write_volatile(words);
+        }
+    }
+    report_timeout(dest, timeout);
+}
+
+/// Say once, on the debug console, that an SPU transfer timed out. Compiled to
+/// nothing unless the program turned on `psx-rt`'s `host-tty` (a console build
+/// never does: a store to the debug port bus-errors on silicon). A
+/// `console-diag` build has already counted it on the stop-panel through
+/// `psx_io::dma::wait_done`.
+#[cfg(target_arch = "mips")]
+fn report_timeout(dest: SpuAddr, timeout: TransferTimeout) {
+    if !psx_rt::tty::ENABLED {
+        return;
+    }
+    static mut REPORTED: bool = false;
+    // SAFETY: the SPU driver runs on the main thread only, and this flag is
+    // only ever read and written here.
+    unsafe {
+        if REPORTED {
+            return;
+        }
+        REPORTED = true;
+    }
+    psx_rt::tty::print("psx-spu: SPU transfer timed out at 0x");
+    psx_rt::tty::print_hex_u32(dest.byte_offset());
+    psx_rt::tty::print(" after 0x");
+    psx_rt::tty::print_hex_u32(timeout.landed_bytes);
+    psx_rt::tty::println(" bytes");
+}
+
+/// Off the console there is no debug port.
+#[cfg(not(target_arch = "mips"))]
+fn report_timeout(_dest: SpuAddr, _timeout: TransferTimeout) {}
 
 /// Start a DMA write session at `dest`. Returns the SPUCNT value (transfer
 /// mode Stop) that [`end_dma_write`] restores.
@@ -1251,15 +1491,16 @@ fn enable_dma_channel() {}
 
 /// Send `source` to the open session: channel 4, main RAM -> SPU, block-sync,
 /// forward, start; blocks until the channel is done. `block_size` (words) must
-/// divide `source.len()` and be at most 16.
+/// divide `source.len()` and be at most 16. `false` when the wait ran out and
+/// the channel was aborted.
 #[cfg(not(test))]
-fn send_dma_words(dma: &mut SpuDma, source: &[u32], block_size: u32, blocks: u32) {
-    let _ = dma.write_counted(source, block_size as u16, blocks as u16);
+fn send_dma_words(dma: &mut SpuDma, source: &[u32], block_size: u32, blocks: u32) -> bool {
+    dma.write_counted(source, block_size as u16, blocks as u16)
 }
 
 #[cfg(test)]
-fn send_dma_words(_dma: &mut SpuDma, source: &[u32], block_size: u32, _blocks: u32) {
-    mock::dma(source.len() as u32, block_size);
+fn send_dma_words(_dma: &mut SpuDma, source: &[u32], block_size: u32, _blocks: u32) -> bool {
+    mock::dma(source.len() as u32, block_size)
 }
 
 /// Finish a session: the channel is done handing bytes over but the SPU is
@@ -1270,31 +1511,67 @@ fn end_dma_write(spucnt: u16) {
     write_reg16(SPUCNT, spucnt);
 }
 
-/// PIO upload (manual FIFO writes) -- small or non-word-aligned uploads. Sets
-/// SPUCNT Manual-Write mode (bits 5..4 = 01) around the writes, the step the
-/// original path was missing (it only poked TRANSFER_CTRL), which silently
-/// no-op'd the upload on hardware and on FIFO-accurate emulators.
-fn upload_adpcm_pio(dest: SpuAddr, bytes: &[u8]) {
-    let spucnt = read_reg16(SPUCNT) & !spucnt_bits::TRANSFER_MODE_MASK;
-    write_reg16(SPUCNT, spucnt);
-    wait_spu_status(spucnt);
+/// Halfwords the SPU's manual-transfer FIFO holds: the most one manual-write
+/// burst pushes before it lets the SPU drain them.
+pub const MANUAL_BURST_HALFWORDS: usize = 32;
+
+/// Spin budget for one manual-write burst to drain: the DMA path's budget for
+/// the same 16 words ([`psx_io::dma::spu_wait_spins`], sixteen times the
+/// console's transfer time plus a fixed allowance), so a stuck busy flag is
+/// called a timeout well inside a frame and a slow console never is.
+const MANUAL_BURST_SPINS: u32 = psx_io::dma::spu_wait_spins(MANUAL_BURST_HALFWORDS as u32 / 2);
+
+/// PIO upload (manual FIFO writes): uploads the DMA path cannot take (a source
+/// that is not word-aligned, such as `include_bytes!` data, or a length that is
+/// not a whole number of words).
+///
+/// The manual-write protocol (PSX-SPX, SPU data transfer): with the transfer
+/// mode at Stop, set the transfer address, push at most
+/// [`MANUAL_BURST_HALFWORDS`] into the FIFO, switch the mode to Manual Write,
+/// wait for SPUSTAT's busy flag to clear, return to Stop and repeat; the SPU's
+/// transfer address carries on from one burst to the next. The first version
+/// switched to Manual Write once and pushed every halfword back to back, never
+/// letting the FIFO drain: more than 32 halfwords in an over-full FIFO, with
+/// what the console does then unmeasured (NitroXide's sample bodies, up to
+/// 73,136 bytes, all came this way).
+///
+/// A burst whose busy flag does not clear within [`MANUAL_BURST_SPINS`] ends the
+/// upload with [`TransferTimeout`], as the DMA path does; `landed_bytes` counts
+/// the bursts that drained before it.
+///
+/// Unproven on hardware: that the console keeps the halfwords pushed in Stop and
+/// carries the transfer address across bursts rests on PSX-SPX until
+/// hardware-test rows 0x9BB and 0x9BC (v2.25) run. The fallback only; sample data
+/// is meant to be word-aligned (`psx_sfx::include_psau!`) and go by DMA.
+#[inline(never)]
+fn upload_adpcm_pio(dest: SpuAddr, bytes: &[u8]) -> Result<(), TransferTimeout> {
+    let stop = read_reg16(SPUCNT) & !spucnt_bits::TRANSFER_MODE_MASK;
+    let manual = stop | spucnt_bits::TRANSFER_MANUAL_WRITE;
+    write_reg16(SPUCNT, stop);
+    wait_spu_status(stop);
     write_reg16(TRANSFER_CTRL, TRANSFER_CTRL_NORMAL);
     write_reg16(TRANSFER_ADDR, dest.register_value());
-    // Manual Write (bits 5..4 = 01), and wait for the SPU to be in it
-    // before pushing a single halfword. Same reason as the DMA path.
-    write_reg16(SPUCNT, spucnt | spucnt_bits::TRANSFER_MANUAL_WRITE);
-    wait_spu_status(spucnt | spucnt_bits::TRANSFER_MANUAL_WRITE);
 
-    let mut i = 0;
-    while i + 1 < bytes.len() {
-        let lo = bytes[i] as u16;
-        let hi = bytes[i + 1] as u16;
-        write_reg16(TRANSFER_DATA, lo | (hi << 8));
-        i += 2;
+    let mut result = Ok(());
+    let mut landed = 0u32;
+    for burst in bytes.chunks(MANUAL_BURST_HALFWORDS * 2) {
+        // A whole number of halfwords: `upload_adpcm_with` refuses an odd length.
+        for pair in burst.chunks_exact(2) {
+            write_reg16(TRANSFER_DATA, u16::from_le_bytes([pair[0], pair[1]]));
+        }
+        write_reg16(SPUCNT, manual);
+        wait_spu_status(manual);
+        let drained = transfer_idle_within(MANUAL_BURST_SPINS);
+        write_reg16(SPUCNT, stop);
+        wait_spu_status(stop);
+        if !drained {
+            result = Err(TransferTimeout {
+                landed_bytes: landed,
+            });
+            break;
+        }
+        landed += burst.len() as u32;
     }
-
-    wait_transfer_idle();
-    write_reg16(SPUCNT, spucnt);
     // Leave the transfer type NORMAL, not 0. PSX-SPX is explicit that
     // the transfer control register "should be 0004h"; parking it at 0 selects another
     // transfer type, and on silicon that poisons everything that touches
@@ -1306,9 +1583,13 @@ fn upload_adpcm_pio(dest: SpuAddr, bytes: &[u8]) {
     // run was silent too, both fine on the emulator, which ignores this
     // register entirely.
     write_reg16(TRANSFER_CTRL, TRANSFER_CTRL_NORMAL);
-    for _ in 0..200 {
-        core::hint::spin_loop();
+    for _ in 0..SPU_DRAIN_SETTLE_READS {
+        let _ = read_reg16(SPUSTAT);
     }
+    if let Err(timeout) = result {
+        note_timeout(dest, timeout);
+    }
+    result
 }
 
 // ======================================================================
@@ -1333,10 +1614,12 @@ mod mock {
     struct Spu {
         regs: [u16; 0x200],
         log: Vec<Event>,
+        fail_at: Option<usize>,
+        busy_stuck: bool,
     }
 
     std::thread_local! {
-        static SPU: RefCell<Spu> = const { RefCell::new(Spu { regs: [0; 0x200], log: Vec::new() }) };
+        static SPU: RefCell<Spu> = const { RefCell::new(Spu { regs: [0; 0x200], log: Vec::new(), fail_at: None, busy_stuck: false }) };
     }
 
     fn slot(addr: u32) -> usize {
@@ -1353,16 +1636,41 @@ mod mock {
     pub fn read(addr: u32) -> u16 {
         SPU.with_borrow(|s| {
             if addr == psx_hw::spu::SPUSTAT {
-                // The applied mode follows SPUCNT at once.
-                s.regs[slot(psx_hw::spu::SPUCNT)] & psx_hw::spu::status::MODE_MASK
+                // The applied mode follows SPUCNT at once; the transfer-busy
+                // flag is clear unless a test made it stick.
+                let busy = if s.busy_stuck {
+                    psx_hw::spu::status::TRANSFER_BUSY
+                } else {
+                    0
+                };
+                (s.regs[slot(psx_hw::spu::SPUCNT)] & psx_hw::spu::status::MODE_MASK) | busy
             } else {
                 s.regs[slot(addr)]
             }
         })
     }
 
-    pub fn dma(words: u32, block_size: u32) {
-        SPU.with_borrow_mut(|s| s.log.push(Event::Dma(words, block_size)));
+    /// Log a transfer; `false` (a timeout) once `fail_at` transfers have
+    /// already been logged since the last reset.
+    pub fn dma(words: u32, block_size: u32) -> bool {
+        SPU.with_borrow_mut(|s| {
+            let sent = s.log.iter().filter(|e| matches!(e, Event::Dma(..))).count();
+            if s.fail_at == Some(sent) {
+                return false;
+            }
+            s.log.push(Event::Dma(words, block_size));
+            true
+        })
+    }
+
+    /// Make the transfer after the first `sent` ones time out.
+    pub fn fail_at(sent: usize) {
+        SPU.with_borrow_mut(|s| s.fail_at = Some(sent));
+    }
+
+    /// Make SPUSTAT's transfer-busy flag read set from now on.
+    pub fn stick_busy() {
+        SPU.with_borrow_mut(|s| s.busy_stuck = true);
     }
 
     /// Reset the registers to `spucnt` and empty the log.
@@ -1370,6 +1678,8 @@ mod mock {
         SPU.with_borrow_mut(|s| {
             s.regs = [0; 0x200];
             s.log.clear();
+            s.fail_at = None;
+            s.busy_stuck = false;
             s.regs[slot(psx_hw::spu::SPUCNT)] = spucnt;
         });
     }
@@ -1417,6 +1727,21 @@ mod tests {
         // trusting every game to start at 0x1010.
         assert_eq!(SILENCE_BLOCK.byte_offset(), 0x1000);
         assert_eq!(SILENCE_BLOCK_BYTES.len(), 16);
+    }
+
+    #[test]
+    fn the_silence_block_goes_by_dma_never_by_manual_write() {
+        assert!((SILENCE_BLOCK_BYTES.as_ptr() as usize).is_multiple_of(4));
+        mock::reset(0xc000);
+        let mut spu = test_spu();
+        upload_adpcm_unguarded(&mut spu.0, SILENCE_BLOCK, &SILENCE_BLOCK_BYTES[..])
+            .expect("no timeout");
+        let log = mock::take_log();
+        assert!(log.contains(&mock::Event::Dma(4, 4)), "{log:?}");
+        assert!(
+            !writes(&log).iter().any(|&(addr, _)| addr == TRANSFER_DATA),
+            "no manual-write pushes: {log:?}"
+        );
     }
 
     #[test]
@@ -1528,12 +1853,14 @@ mod tests {
         use mock::Event::{Dma, Write};
         mock::reset(0xc000);
         let area = ReverbArea::top_of_ram(ReverbPreset::HALL.work_bytes);
-        test_spu().start_reverb(
-            area,
-            &ReverbPreset::HALL,
-            ReverbInput::ALL_VOICES_AND_CD,
-            2000,
-        );
+        test_spu()
+            .start_reverb(
+                area,
+                &ReverbPreset::HALL,
+                ReverbInput::ALL_VOICES_AND_CD,
+                2000,
+            )
+            .expect("the mock never times out unless told to");
         let mut want = std::vec![
             Write(REVERB_VOL_LEFT, 0),
             Write(REVERB_VOL_RIGHT, 0),
@@ -1571,7 +1898,9 @@ mod tests {
         regs[10] = 0x1234;
         let preset = ReverbPreset::new(regs, 0x4000);
         let area = ReverbArea::new(0x7_c000, 0x4000);
-        test_spu().start_reverb(area, &preset, ReverbInput::ALL_VOICES, 11_264);
+        test_spu()
+            .start_reverb(area, &preset, ReverbInput::ALL_VOICES, 11_264)
+            .expect("no timeout");
         let log = writes(&mock::take_log());
         assert!(log.contains(&(REVERB_WORK_BASE, 0xf800)));
         assert!(log.contains(&(REVERB_COEFFICIENTS + 20, 0x1234)));
@@ -1625,7 +1954,9 @@ mod tests {
             cd_audio: false,
         };
         let preset = ReverbPreset::new([0; 32], 0x1000);
-        test_spu().start_reverb(ReverbArea::top_of_ram(0x1000), &preset, input, 0);
+        test_spu()
+            .start_reverb(ReverbArea::top_of_ram(0x1000), &preset, input, 0)
+            .expect("no timeout");
         assert_eq!(mock::reg(voice_mask::REVERB_ENABLE_LO), 0x8001);
         assert_eq!(mock::reg(voice_mask::REVERB_ENABLE_HI), 0x0012);
     }
@@ -1653,12 +1984,14 @@ mod tests {
     #[should_panic = "smaller than the preset"]
     fn start_rejects_a_too_small_area() {
         mock::reset(0);
-        test_spu().start_reverb(
-            ReverbArea::top_of_ram(0x1000),
-            &ReverbPreset::HALL,
-            ReverbInput::ALL_VOICES,
-            0,
-        );
+        test_spu()
+            .start_reverb(
+                ReverbArea::top_of_ram(0x1000),
+                &ReverbPreset::HALL,
+                ReverbInput::ALL_VOICES,
+                0,
+            )
+            .expect("panics before any transfer");
     }
 
     /// The ordinary upload and the reverb clear are the same session: one
@@ -1670,7 +2003,9 @@ mod tests {
         let data = [0u32; 8];
         // SAFETY: viewing eight words as thirty-two bytes.
         let bytes = unsafe { core::slice::from_raw_parts(data.as_ptr().cast::<u8>(), 32) };
-        test_spu().upload_adpcm(SpuAddr::new(0x1010), bytes);
+        test_spu()
+            .upload_adpcm(SpuAddr::new(0x1010), bytes)
+            .expect("no timeout");
         assert_eq!(
             mock::take_log(),
             std::vec![
@@ -1682,5 +2017,241 @@ mod tests {
                 Write(SPUCNT, 0xc000),
             ]
         );
+    }
+    /// A bank goes in 4 KiB pieces, each its own transfer and wait, inside one
+    /// session; the last piece takes what is left. WipEout's 470,544-byte bank
+    /// is 114 whole pieces and one of 900 words.
+    #[test]
+    fn a_large_upload_is_sent_in_bounded_pieces_in_one_session() {
+        use mock::Event::{Dma, Write};
+        mock::reset(0xc000);
+        let data = std::vec![0u32; 117_636];
+        // SAFETY: viewing the words as bytes.
+        let bytes = unsafe { core::slice::from_raw_parts(data.as_ptr().cast::<u8>(), 470_544) };
+        test_spu()
+            .upload_adpcm(SpuAddr::new(0x1010), bytes)
+            .expect("no timeout");
+        let log = mock::take_log();
+        let pieces: std::vec::Vec<_> = log
+            .iter()
+            .filter(|e| matches!(e, Dma(..)))
+            .copied()
+            .collect();
+        assert_eq!(pieces.len(), 115);
+        assert!(pieces[..114].iter().all(|&p| p == Dma(1024, 16)));
+        assert_eq!(pieces[114], Dma(900, 4));
+        // One address write and one mode switch for the whole bank.
+        assert_eq!(
+            log.iter()
+                .filter(|e| matches!(e, Write(TRANSFER_ADDR, _)))
+                .count(),
+            1
+        );
+        assert_eq!(log.last(), Some(&Write(SPUCNT, 0xc000)));
+    }
+
+    /// A piece that outlives its wait ends the upload: nothing after it is
+    /// sent, the session still closes (transfer mode back to Stop), and the
+    /// caller gets what had landed.
+    #[test]
+    fn a_timed_out_piece_stops_the_upload_and_is_returned() {
+        use mock::Event::{Dma, Write};
+        mock::reset(0xc000);
+        mock::fail_at(3);
+        let data = std::vec![0u32; 5 * 1024];
+        // SAFETY: viewing the words as bytes.
+        let bytes = unsafe { core::slice::from_raw_parts(data.as_ptr().cast::<u8>(), 5 * 4096) };
+        let result = test_spu().upload_adpcm(SpuAddr::new(0x2000), bytes);
+        assert_eq!(
+            result,
+            Err(TransferTimeout {
+                landed_bytes: 3 * 4096
+            })
+        );
+        let log = mock::take_log();
+        assert_eq!(log.iter().filter(|e| matches!(e, Dma(..))).count(), 3);
+        assert_eq!(log.last(), Some(&Write(SPUCNT, 0xc000)));
+        // The run's fault word now holds a timeout (this one, or one another test in the same
+        // process recorded first): a dropped Result still leaves the failure on record.
+        assert!(first_upload_fault().is_some());
+    }
+
+    #[test]
+    fn the_fault_word_keeps_the_first_timeout_and_decodes_it() {
+        let first = TransferTimeout {
+            landed_bytes: 3 * 4096,
+        };
+        let words = latch_upload_fault(0, SpuAddr::new(0x2000), first).expect("first latches");
+        assert_eq!(
+            decode_upload_fault(words[0], words[1]),
+            Some(UploadFault {
+                dest: SpuAddr::new(0x2000),
+                landed_bytes: 3 * 4096,
+            })
+        );
+        assert_eq!(
+            latch_upload_fault(words[0], SpuAddr::new(0x9000), first),
+            None
+        );
+        assert_eq!(decode_upload_fault(0, 0), None, "nothing recorded");
+        // Address 0 with nothing landed is still a recorded fault.
+        let at_zero = latch_upload_fault(0, SpuAddr::new(0), TransferTimeout { landed_bytes: 0 });
+        let [dest, landed] = at_zero.expect("latches");
+        assert!(decode_upload_fault(dest, landed).is_some());
+    }
+
+    /// The halfwords of `bytes` as the SPU's data port takes them.
+    fn halfwords(bytes: &[u8]) -> std::vec::Vec<u16> {
+        bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect()
+    }
+
+    /// `halfwords` bytes starting one byte into a word-aligned buffer, so the
+    /// upload cannot take the DMA path (as `include_bytes!` data cannot).
+    fn unaligned(halfwords: usize) -> (std::vec::Vec<u32>, usize) {
+        let words = halfwords / 2 + 2;
+        let mut data = std::vec![0u32; words];
+        for (index, word) in data.iter_mut().enumerate() {
+            *word = 0x0101_0101u32.wrapping_mul(index as u32 * 4 + 1) ^ 0x5a00_a55a;
+        }
+        (data, halfwords * 2)
+    }
+
+    /// The manual-write bursts of one PIO upload, read off the register log:
+    /// the halfwords each pushed, checked to be pushed while the transfer mode
+    /// was Stop and each followed by a switch to Manual Write and back to Stop.
+    fn bursts(log: &[mock::Event], stop: u16) -> std::vec::Vec<std::vec::Vec<u16>> {
+        let manual = stop | spucnt_bits::TRANSFER_MANUAL_WRITE;
+        let mut mode = None;
+        let mut bursts = std::vec::Vec::new();
+        let mut current = std::vec::Vec::new();
+        for &(addr, value) in &writes(log) {
+            if addr == SPUCNT {
+                if value == manual {
+                    bursts.push(core::mem::take(&mut current));
+                }
+                mode = Some(value);
+            } else if addr == TRANSFER_DATA {
+                assert_eq!(mode, Some(stop), "a halfword pushed outside Stop");
+                current.push(value);
+            }
+        }
+        assert!(current.is_empty(), "halfwords pushed after the last burst");
+        bursts
+    }
+
+    /// Every PIO upload: at most 32 halfwords a burst, pushed in Stop, the
+    /// SPU let drain after each, the bytes in order, and the transfer address
+    /// written once (the SPU carries it from one burst to the next).
+    #[test]
+    fn a_pio_upload_pushes_at_most_one_fifo_a_burst() {
+        for count in [0usize, 1, 31, 32, 33, 64, 65, 1000] {
+            mock::reset(0xc000);
+            let (data, len) = unaligned(count);
+            // SAFETY: viewing the words as bytes, from the second byte on.
+            let all = unsafe { core::slice::from_raw_parts(data.as_ptr().cast::<u8>(), len + 4) };
+            let bytes = &all[1..1 + len];
+            test_spu()
+                .upload_adpcm(SpuAddr::new(0x1010), bytes)
+                .expect("no timeout");
+            let log = mock::take_log();
+            assert!(
+                !log.iter().any(|e| matches!(e, mock::Event::Dma(..))),
+                "{count}: unaligned data takes no DMA"
+            );
+            let bursts = bursts(&log, 0xc000);
+            assert_eq!(bursts.len(), count.div_ceil(32), "{count} halfwords");
+            assert!(
+                bursts.iter().all(|b| !b.is_empty() && b.len() <= 32),
+                "{count}"
+            );
+            assert_eq!(
+                bursts.concat(),
+                halfwords(bytes),
+                "{count}: the bytes in order"
+            );
+            let addresses: std::vec::Vec<_> = writes(&log)
+                .into_iter()
+                .filter(|&(addr, _)| addr == TRANSFER_ADDR)
+                .collect();
+            assert_eq!(addresses, [(TRANSFER_ADDR, 0x0202)], "{count}");
+            assert_eq!(mock::reg(SPUCNT), 0xc000, "{count}: left at Stop");
+            assert_eq!(mock::reg(TRANSFER_CTRL), TRANSFER_CTRL_NORMAL, "{count}");
+        }
+    }
+
+    /// A word-aligned source of an odd number of halfwords is not a whole
+    /// number of words, so it goes by PIO too, in the same bursts.
+    #[test]
+    fn an_aligned_upload_of_an_odd_halfword_count_goes_by_pio() {
+        mock::reset(0xc000);
+        let data = [0x1234_5678u32; 17];
+        // SAFETY: viewing the words as bytes; 66 of the 68.
+        let bytes = unsafe { core::slice::from_raw_parts(data.as_ptr().cast::<u8>(), 66) };
+        test_spu()
+            .upload_adpcm(SpuAddr::new(0x1010), bytes)
+            .expect("no timeout");
+        let bursts = bursts(&mock::take_log(), 0xc000);
+        assert_eq!(
+            bursts.iter().map(|b| b.len()).collect::<std::vec::Vec<_>>(),
+            [32, 1]
+        );
+        assert_eq!(bursts.concat(), halfwords(bytes));
+    }
+
+    /// An odd number of bytes is not a whole number of halfwords: refused.
+    #[test]
+    #[should_panic(expected = "multiple of 2")]
+    fn an_odd_byte_count_is_refused() {
+        mock::reset(0xc000);
+        let data = [0u32; 4];
+        // SAFETY: viewing the words as bytes; 15 of the 16.
+        let bytes = unsafe { core::slice::from_raw_parts(data.as_ptr().cast::<u8>(), 15) };
+        let _ = test_spu().upload_adpcm(SpuAddr::new(0x1010), bytes);
+    }
+
+    /// A busy flag that never clears ends a PIO upload after its first burst
+    /// with a timeout, the transfer mode back at Stop and nothing more pushed.
+    #[test]
+    fn a_stuck_busy_flag_times_a_pio_upload_out() {
+        mock::reset(0xc000);
+        mock::stick_busy();
+        let (data, len) = unaligned(100);
+        // SAFETY: viewing the words as bytes, from the second byte on.
+        let all = unsafe { core::slice::from_raw_parts(data.as_ptr().cast::<u8>(), len + 4) };
+        let result = test_spu().upload_adpcm(SpuAddr::new(0x1010), &all[1..1 + len]);
+        assert_eq!(result, Err(TransferTimeout { landed_bytes: 0 }));
+        let bursts = bursts(&mock::take_log(), 0xc000);
+        assert_eq!(bursts.len(), 1);
+        assert_eq!(bursts[0].len(), 32);
+        assert_eq!(mock::reg(SPUCNT), 0xc000);
+        assert_eq!(mock::reg(TRANSFER_CTRL), TRANSFER_CTRL_NORMAL);
+    }
+
+    /// The burst budget is the DMA budget for the same 16 words: thousands of
+    /// status reads for a drain of about a thousand clocks.
+    #[test]
+    fn the_burst_budget_is_the_dma_budget_for_one_fifo() {
+        assert_eq!(MANUAL_BURST_SPINS, psx_io::dma::spu_wait_spins(16));
+        const { assert!(MANUAL_BURST_SPINS >= 4_096) };
+    }
+
+    /// A reverb whose work area did not clear is left stopped, not started
+    /// over leftover samples.
+    #[test]
+    fn a_reverb_clear_that_times_out_leaves_the_reverb_off() {
+        mock::reset(0xc000);
+        mock::fail_at(0);
+        let result = test_spu().start_reverb(
+            ReverbArea::top_of_ram(ReverbPreset::HALL.work_bytes),
+            &ReverbPreset::HALL,
+            ReverbInput::ALL_VOICES,
+            2000,
+        );
+        assert_eq!(result, Err(TransferTimeout { landed_bytes: 0 }));
+        assert_eq!(mock::reg(SPUCNT) & spucnt_bits::REVERB_MASTER, 0);
+        assert_eq!(mock::reg(REVERB_VOL_LEFT), 0);
     }
 }

@@ -148,6 +148,8 @@ pub(crate) struct Run {
     pub(crate) focus: bool,
     /// Run only the steps that need an operator (menu row 8): the linear run leaves them out.
     pub(crate) manual: bool,
+    /// Run only the console-session steps (the menu's `SPU, 480I, CD IDLE ONLY` row).
+    pub(crate) session: bool,
     /// Areas the run entered, for the clean check of a focused run.
     visited: [bool; AREA_COUNT],
     /// An id for the checkpoint files of this run.
@@ -182,6 +184,7 @@ impl Run {
             checkpoints: false,
             focus: false,
             manual: false,
+            session: false,
             visited: [false; AREA_COUNT],
             checkpoint_id: 0,
             handoffs: [Handoff {
@@ -433,7 +436,7 @@ fn scrub_spu_ram(run: &mut Run) {
         let bytes = (next.min(SPU_RAM_END) - addr) as usize;
         // SAFETY: the zero buffer is a static array of at least `bytes` bytes.
         let slice = unsafe { core::slice::from_raw_parts(zeros.as_ptr() as *const u8, bytes) };
-        psx_spu::upload_adpcm(SpuAddr::new(addr), slice);
+        crate::probe_upload(SpuAddr::new(addr), slice);
         addr = next;
     }
     crate::bounds::record_start(SPU_RAM_POSTSCRUB);
@@ -602,7 +605,12 @@ fn verify_silence(run: &mut Run) {
 
 // ------------------------------------------------------------------- steps
 
+// `repr(C)`: the flags sit between the name and the function pointer. With the fields in the
+// compiler's order a step named with 8 letters put the word 8 (`jr $zero` as an instruction)
+// right before its function pointer, and the post-link hazard scan, which does not know the
+// table is data, read the pair as a jump with a load in its delay slot.
 #[derive(Copy, Clone)]
+#[repr(C)]
 struct Step {
     area: Area,
     name: &'static str,
@@ -612,6 +620,8 @@ struct Step {
     focus: u8,
     /// Needs a person at the console: left out of the linear run, run by its own menu row.
     manual: bool,
+    /// One of the steps the session row runs (they run in the linear run too).
+    session: bool,
     run: fn(&mut Run),
 }
 
@@ -622,6 +632,7 @@ const fn step(area: Area, name: &'static str, run: fn(&mut Run)) -> Step {
         risky: false,
         focus: 0,
         manual: false,
+        session: false,
         run,
     }
 }
@@ -633,6 +644,7 @@ const fn risky(area: Area, name: &'static str, run: fn(&mut Run)) -> Step {
         risky: true,
         focus: 0,
         manual: false,
+        session: false,
         run,
     }
 }
@@ -645,6 +657,7 @@ const fn focused(area: Area, name: &'static str, order: u8, run: fn(&mut Run)) -
         risky: false,
         focus: order,
         manual: false,
+        session: false,
         run,
     }
 }
@@ -657,6 +670,21 @@ const fn manual(area: Area, name: &'static str, run: fn(&mut Run)) -> Step {
         risky: false,
         focus: 0,
         manual: true,
+        session: false,
+        run,
+    }
+}
+
+/// A step of the linear run that the session row (`SPU, 480I, CD IDLE ONLY`) also runs: the
+/// rows asked of the 2026-11-19 console session, so one short run answers them.
+const fn session(area: Area, name: &'static str, run: fn(&mut Run)) -> Step {
+    Step {
+        area,
+        name,
+        risky: false,
+        focus: 0,
+        manual: false,
+        session: true,
         run,
     }
 }
@@ -715,6 +743,10 @@ records_step!(records_sio_config_irq, config_irq::run);
 records_step!(records_sio_digital_first, digital_first::run);
 records_step!(records_present_path, present_path::run);
 records_step!(records_present_cd, present_path::run_cd);
+records_step!(records_gpu_heavy_walk, gpu_heavy::run_walk);
+records_step!(records_present_heavy, present_path::run_heavy);
+records_step!(records_pad_polls, pad_polls::run);
+records_step!(records_cache_wedge, gpu_heavy::run_cache_wedge);
 
 fn run_tests(run: &mut Run, area: Area) {
     let total = TESTS.iter().filter(|spec| test_area(spec) == area).count();
@@ -865,12 +897,19 @@ const STEPS: &[Step] = &[
     // After the two above: a wedged list or FIFO here cannot cost them.
     step(Area::Gpu, "GPU DMA EDGE CASES", step_dma_edge),
     focused(Area::Gpu, "GPU LIST NODE SIZES", 2, step_ll_sweep),
+    // v2.25: heavy textured lists against the SDK's walk bound and through the presenter.
+    step(Area::Gpu, "HEAVY FRAME WALK", records_gpu_heavy_walk),
+    step(Area::Gpu, "PRESENT HEAVY FRAMES", records_present_heavy),
     // 5
     step(Area::Spu, "SPU INIT STATE", step_spu_init),
     step(Area::Spu, "SPU PRECISION", precision_spu_step),
     step(Area::Spu, "SPU CASES", tests_spu),
     step(Area::Spu, "SPU MAP", step_spu_map),
     step(Area::Spu, "SPU DMA TIMING", records_spu),
+    session(Area::Spu, "SPU BULK UPLOAD", step_spu_bulk),
+    // v2.25
+    step(Area::Spu, "SPU FIFO OVERFILL", step_spu_overfill),
+    step(Area::Spu, "SPU KEY, REVERB, IRQ", step_spu_key_reverb_irq),
     step(Area::Spu, "UI SAMPLE END AND LOOP", step_sb1),
     step(Area::Spu, "SPU RAM AND VOICES", step_sb2),
     step(Area::Spu, "CAPTURE RINGS", step_sb4),
@@ -899,6 +938,9 @@ const STEPS: &[Step] = &[
     step(Area::Sio, "SIO0 SELECT EARLY", records_sio_early),
     step(Area::Sio, "PAD CONFIG UNDER IRQ", records_sio_config_irq),
     step(Area::Sio, "PAD DIGITAL FIRST POLL", records_sio_digital_first),
+    step(Area::Sio, "PAD POLLS UNDER IRQ", records_pad_polls),
+    // v2.25: writes one test save of its own; CARD SECTOR PROTOCOL then writes its frame.
+    step(Area::Sio, "CARD TEST SAVE", step_card_save),
     step(Area::Sio, "CARD SECTOR PROTOCOL", step_card_proto),
     step(Area::Sio, "PAD AND CARD UNDER LOAD", step_sio_mix),
     step(Area::Sio, "DUALSHOCK MOTORS", step_rumble),
@@ -916,12 +958,20 @@ const STEPS: &[Step] = &[
     step(Area::Perf, "AUDIT PROBES", records_audit),
     // 9: last, hardest on the machine
     step(Area::Drive, "CD DMA VERSUS CPU", records_cd_dma),
-    step(Area::Drive, "CD MOTOR", step_stream_motor),
+    session(Area::Drive, "CD MOTOR", step_stream_motor),
+    session(Area::Drive, "CD READ AFTER IDLE", step_cd_idle),
     focused(Area::Drive, "CD RADIUS SWEEP", 1, step_radius),
+    // Also on the RADIUS + LIST NODE SWEEP ONLY menu row: its outer chunks read RADIUS.DAT.
+    focused(Area::Drive, "CD FIFO AND OUTER CHUNKS", 3, step_cd_v225),
+    // v2.25 (lane cs-cd): the drain transport's cost and start-up, implicit seek against seek-first.
+    focused(Area::Drive, "CD DRAIN AND SEEK", 4, step_cd_drain),
     // Last of the safe steps: it changes the display mode, and a failure here
     // cannot stop anything before it (only the risky step after it).
     step(Area::Drive, "480I DRAW RULE", step_field_rule),
+    session(Area::Drive, "480I FIELD SEQUENCE", step_field_sequence),
     risky(Area::Drive, "REGISTER A/B (CAN HANG)", records_risky_ab),
+    // v2.25: can kill the program; the run shows a checkpoint before the risky steps.
+    risky(Area::Drive, "CACHE FLUSH, DMA WEDGED", records_cache_wedge),
 ];
 
 fn step_mdec(run: &mut Run) {
@@ -1037,6 +1087,54 @@ fn step_radius(run: &mut Run) {
     run.font = Some(font);
 }
 
+fn step_cd_idle(run: &mut Run) {
+    let font = run.font.take().expect("font uploaded by reset_area");
+    cd_idle::run(&font, &mut run.timing.records, &mut run.next);
+    run.font = Some(font);
+}
+
+fn step_field_sequence(run: &mut Run) {
+    let font = run.font.take().expect("font uploaded by reset_area");
+    field_rule::run_sequence(&font, &mut run.timing.records, &mut run.next);
+    run.font = Some(font);
+}
+
+fn step_spu_overfill(run: &mut Run) {
+    let font = run.font.take().expect("font uploaded by reset_area");
+    spu_v225::run_overfill(&font, &mut run.timing.records, &mut run.next);
+    run.font = Some(font);
+}
+
+fn step_spu_key_reverb_irq(run: &mut Run) {
+    let font = run.font.take().expect("font uploaded by reset_area");
+    spu_v225::run_key_reverb_irq(&font, &mut run.timing.records, &mut run.next);
+    run.font = Some(font);
+}
+
+fn step_card_save(run: &mut Run) {
+    let font = run.font.take().expect("font uploaded by reset_area");
+    card_save::run(&font, &mut run.timing.records, &mut run.next);
+    run.font = Some(font);
+}
+
+fn step_cd_drain(run: &mut Run) {
+    let font = run.font.take().expect("font uploaded by reset_area");
+    cd_drain::run(&font, &mut run.timing.records, &mut run.next);
+    run.font = Some(font);
+}
+
+fn step_cd_v225(run: &mut Run) {
+    let font = run.font.take().expect("font uploaded by reset_area");
+    cd_v225::run(&font, &mut run.timing.records, &mut run.next);
+    run.font = Some(font);
+}
+
+fn step_spu_bulk(run: &mut Run) {
+    let font = run.font.take().expect("font uploaded by reset_area");
+    spu_bulk::run(&font, &mut run.timing.records, &mut run.next);
+    run.font = Some(font);
+}
+
 fn step_ll_sweep(run: &mut Run) {
     let font = run.font.take().expect("font uploaded by reset_area");
     run.push_all(ll_sweep::run(&font).as_slice());
@@ -1112,7 +1210,14 @@ pub(crate) fn execute(
     // the marked ones, by their order number.
     let mut order = [0usize; STEPS.len()];
     let mut count = 0;
-    if run.manual {
+    if run.session {
+        for (index, step) in STEPS.iter().enumerate() {
+            if step.session {
+                order[count] = index;
+                count += 1;
+            }
+        }
+    } else if run.manual {
         for (index, step) in STEPS.iter().enumerate() {
             if step.manual {
                 order[count] = index;
@@ -1138,6 +1243,7 @@ pub(crate) fn execute(
     }
     run.visited = [false; AREA_COUNT];
     let mut current: Option<Area> = None;
+    let mut risky_checkpoint_shown = false;
     for &index in &order[..count] {
         let step = &STEPS[index];
         if current != Some(step.area) {
@@ -1155,6 +1261,13 @@ pub(crate) fn execute(
             tty::print("hardware-tests: skipped risky step ");
             tty::println(step.name);
             continue;
+        }
+        // v2.25: before the first step that can hang or kill the program, every
+        // page so far, once, so a recording keeps the run whatever happens next.
+        if step.risky && !risky_checkpoint_shown {
+            risky_checkpoint_shown = true;
+            tty::println("hardware-tests: checkpoint before the risky steps");
+            show_checkpoint(run, capture);
         }
         ui::begin_step(
             run.font(),

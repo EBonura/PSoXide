@@ -22,7 +22,7 @@
 //!
 //! ```ignore
 //! let mut bank = Bank::new(SpuAddr::new(0x1010));
-//! let blip = bank.upload_on(&mut spu, include_bytes!("blip.psau"));
+//! let blip = bank.upload_on(&mut spu, include_bytes!("blip.psau"))?;
 //! let mut player: Player<3> = Player::new([Voice::V0, Voice::V1, Voice::V2], 60);
 //!
 //! // once a frame
@@ -64,7 +64,39 @@ pub mod space;
 pub mod vloop;
 
 use psx_asset::Audio;
-use psx_spu::{Adsr, Pitch, Spu, SpuAddr, Voice, Volume};
+use psx_spu::{Adsr, Pitch, Spu, SpuAddr, TransferTimeout, Voice, Volume};
+
+/// [`include_psau!`]'s storage type, re-exported so a program needs no `psx-spu` dependency of its
+/// own to expand the macro.
+#[doc(hidden)]
+pub use psx_spu::WordAligned as __WordAligned;
+
+/// Include a cooked `.psau` sample at a 4-byte-aligned address, as a `&'static [u8]`.
+///
+/// Use this instead of `include_bytes!` for every sample a program uploads. `include_bytes!` data
+/// has an alignment of 1, and an upload from an unaligned source cannot go by DMA: it takes the
+/// manual-write path, which is unproven on a console until hardware-test rows 0x9BB and 0x9BC
+/// (v2.25) run. A `.psau` header is 32 bytes and its ADPCM is whole 16-byte blocks, so the body
+/// [`Bank`] uploads from a word-aligned file is word-aligned and a whole number of words: DMA every
+/// time, whatever the linker does.
+///
+/// The path is relative to the invoking source file, as for `include_bytes!`. The macro is a
+/// constant expression, so a `const` table of samples can use it.
+///
+/// ```ignore
+/// static BLIP: &[u8] = psx_sfx::include_psau!("../assets/blip.psau");
+/// let blip = bank.upload_on(&mut spu, BLIP)?;
+/// ```
+#[macro_export]
+macro_rules! include_psau {
+    ($path:expr) => {{
+        const LEN: usize = include_bytes!($path).len();
+        static BYTES: $crate::__WordAligned<LEN> =
+            $crate::__WordAligned::new(*include_bytes!($path));
+        let bytes: &'static [u8] = BYTES.as_bytes();
+        bytes
+    }};
+}
 
 /// Highest level the SPU accepts in a volume register.
 pub(crate) const SPU_LEVEL_MAX: i16 = 0x3fff;
@@ -93,6 +125,18 @@ const BLOCK_BYTES: u32 = 16;
 /// without duplicating the hardware-specific byte sequence outside the SDK.
 pub const PARKING_TAIL: [u8; BLOCK_BYTES as usize] =
     [0x00, 0x07, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+
+/// [`PARKING_TAIL`] at a word-aligned address: the form to upload. `&PARKING_TAIL`
+/// can land on any byte address, and an unaligned source goes by manual write
+/// instead of DMA ([`psx_spu::Spu::upload_adpcm`]).
+#[must_use]
+#[inline]
+pub fn parking_tail() -> &'static [u8; BLOCK_BYTES as usize] {
+    &PARKING_TAIL_WORDS
+}
+
+static PARKING_TAIL_WORDS: psx_spu::WordAligned<{ BLOCK_BYTES as usize }> =
+    psx_spu::WordAligned::new(PARKING_TAIL);
 
 /// Ticks of margin added past a sample's own length before its voice is
 /// silenced, so the cutoff never clips a sound that is still sounding.
@@ -184,36 +228,48 @@ impl Bank {
         self.next
     }
 
-    /// Upload one cooked `.psau` sample through `spu`.
+    /// Upload one cooked `.psau` sample through `spu`, then its parking block.
+    ///
+    /// # Errors
+    /// [`TransferTimeout`] when the sample's or the parking block's DMA did not
+    /// finish (a wedged channel, see [`psx_spu::Spu::upload_adpcm`]). The bank
+    /// does not advance, so the next upload goes to the same address.
     ///
     /// # Panics
     /// If `psau` is not a valid cooked sample, matching the rest of the SDK's
     /// asset handling: a bad `include_bytes!` is a build mistake, not a
     /// runtime condition worth threading a Result through a sound effect for.
-    pub fn upload_on(&mut self, spu: &mut Spu, psau: &[u8]) -> Sample {
+    pub fn upload_on(&mut self, spu: &mut Spu, psau: &[u8]) -> Result<Sample, TransferTimeout> {
         self.upload_with(psau, |dest, bytes| spu.upload_adpcm(dest, bytes))
     }
 
     /// [`upload_on`](Self::upload_on) on a token the caller does not hold.
     ///
+    /// # Errors
+    /// As [`upload_on`](Self::upload_on).
+    ///
     /// # Panics
     /// As [`upload_on`](Self::upload_on).
     #[deprecated(note = "use `Bank::upload_on` with the `Spu` driver")]
     #[allow(deprecated)]
-    pub fn upload(&mut self, psau: &[u8]) -> Sample {
+    pub fn upload(&mut self, psau: &[u8]) -> Result<Sample, TransferTimeout> {
         self.upload_with(psau, psx_spu::upload_adpcm)
     }
 
-    fn upload_with(&mut self, psau: &[u8], mut put: impl FnMut(SpuAddr, &[u8])) -> Sample {
+    fn upload_with(
+        &mut self,
+        psau: &[u8],
+        mut put: impl FnMut(SpuAddr, &[u8]) -> Result<(), TransferTimeout>,
+    ) -> Result<Sample, TransferTimeout> {
         let audio = Audio::from_bytes(psau).expect("cooked psau sample");
         let adpcm = audio.adpcm_bytes();
-        put(self.next, adpcm);
+        put(self.next, adpcm)?;
         let sample = Sample {
             addr: self.next,
             rate_hz: audio.sample_rate_hz(),
             frames: adpcm.len() as u32 / BLOCK_BYTES,
         };
-        self.next = SpuAddr::new(self.next.byte_offset() + adpcm.len() as u32);
+        let tail = SpuAddr::new(self.next.byte_offset() + adpcm.len() as u32);
         // A parking block after every sample, not just one shared block that
         // the repeat register points at.
         //
@@ -231,9 +287,9 @@ impl Bank {
         // block carries END, REPEAT and LOOP-START, so the hardware latches the
         // repeat address to the block itself as it decodes it, rather than
         // relying on a value written before key-on.
-        put(self.next, &PARKING_TAIL);
-        self.next = SpuAddr::new(self.next.byte_offset() + BLOCK_BYTES);
-        sample
+        put(tail, parking_tail())?;
+        self.next = SpuAddr::new(tail.byte_offset() + BLOCK_BYTES);
+        Ok(sample)
     }
 }
 
@@ -532,6 +588,42 @@ mod tests {
             PARKING_TAIL[2..].iter().all(|&b| b == 0),
             "decodes to silence"
         );
+    }
+
+    /// A cooked sample (a copy of assets/audio/freesfx/psau/footstep.psau kept in the crate,
+    /// inside the staged guest closure), included the way programs should include theirs; twice,
+    /// so two statics sit next to each other and both must come out aligned.
+    const SAMPLES: [&[u8]; 2] = [
+        include_psau!("../testdata/footstep.psau"),
+        include_psau!("../testdata/footstep.psau"),
+    ];
+
+    #[test]
+    fn an_included_sample_body_is_word_aligned_and_whole_words_so_it_goes_by_dma() {
+        for psau in SAMPLES {
+            assert!((psau.as_ptr() as usize).is_multiple_of(4), "the file");
+            let audio = Audio::from_bytes(psau).expect("cooked psau");
+            let body = audio.adpcm_bytes();
+            // The two conditions psx_spu checks before it takes DMA.
+            assert!(
+                (body.as_ptr() as usize).is_multiple_of(4),
+                "the body Bank uploads"
+            );
+            assert!(body.len().is_multiple_of(4));
+        }
+    }
+
+    #[test]
+    fn an_included_sample_holds_the_files_bytes() {
+        assert_eq!(SAMPLES[0], &include_bytes!("../testdata/footstep.psau")[..]);
+    }
+
+    #[test]
+    fn the_uploaded_parking_block_is_word_aligned_so_it_goes_by_dma() {
+        // An unaligned source takes the manual-write path; the parking block
+        // follows every sample, so it must never be one.
+        assert_eq!(parking_tail(), &PARKING_TAIL);
+        assert!((parking_tail().as_ptr() as usize).is_multiple_of(4));
     }
 
     #[test]

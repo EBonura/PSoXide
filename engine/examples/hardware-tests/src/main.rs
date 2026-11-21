@@ -17,6 +17,7 @@
 // engine and the game crates do not get this allowance.
 #![allow(deprecated)]
 #![cfg_attr(target_arch = "mips", feature(asm_experimental_arch))]
+#![feature(optimize_attribute)]
 
 extern crate psx_rt;
 
@@ -36,6 +37,16 @@ use psx_rt::tty;
 use psx_spu::SpuAddr;
 use psx_vram::{Clut, TextureDepth, TexturePage};
 
+/// Upload for a probe. Every row that uploads checks what landed itself (a readback, a hash, a
+/// capture or a tone it listens for), so a `TransferTimeout`, which leaves the tail of the bytes
+/// out of SPU RAM, shows as that row failing: what the suite exists to report. The `Result` is
+/// therefore dropped here, in one place, and not at each probe. Always inlined, so the machine
+/// code is what the probes had before.
+#[inline(always)]
+pub(crate) fn probe_upload(dest: SpuAddr, bytes: &[u8]) {
+    let _ = psx_spu::upload_adpcm(dest, bytes);
+}
+
 /// Binds `$gpu` to the GPU driver for a probe that draws or programs the
 /// display from inside a test, over a token taken the way [`probe_gpu_dma`]
 /// takes it. Declared before the modules so each of them can use it.
@@ -49,9 +60,13 @@ macro_rules! probe_gpu {
 mod boot;
 mod bounds;
 mod card_proto;
+mod card_save;
 mod cd_chain_probe;
+mod cd_drain;
+mod cd_idle;
 mod cd_pause;
 mod cd_route;
+mod cd_v225;
 mod cdstream_cases;
 mod clut_rewrite;
 mod config_irq;
@@ -65,6 +80,7 @@ mod dma_edge;
 mod dma_matrix;
 mod field_rule;
 mod gpu_done;
+mod gpu_heavy;
 mod gpu_probes;
 mod gte_nclip;
 mod handoff_probe;
@@ -75,6 +91,7 @@ mod lever_probes;
 mod list_busy_probes;
 mod mdec_check;
 mod mdec_diag;
+mod pad_polls;
 mod payload;
 mod perf_probes;
 mod photo;
@@ -90,7 +107,9 @@ mod run;
 mod sample_probe;
 mod scene;
 mod sio_timing;
+mod spu_bulk;
 mod spu_probe;
+mod spu_v225;
 mod tick_loss;
 mod timer1_rate;
 mod ui;
@@ -231,14 +250,15 @@ unsafe extern "C" {
 //
 // History, one entry per version: docs/hardware-test-versions.md.
 const SUITE_VERSION_MAJOR: u8 = 2;
-const SUITE_VERSION_MINOR: u8 = 20;
+const SUITE_VERSION_MINOR: u8 = 25;
 /// Display form. Keep in step with the two constants above.
-const SUITE_VERSION: &str = "HWTEST v2.20";
+const SUITE_VERSION: &str = "HWTEST v2.25";
 /// `CDTEST.BIN`: the deterministic read region the CD probes use, placed so it
 /// ends at LBA 1024. The console-diag build's stop panel pushes the boot EXE
 /// past the 541 sectors the plain layout allows, so that build gives the
-/// region 60 sectors back (the Makefile passes the same count to mkisopsx).
-pub(crate) const CDTEST_SECTORS: u32 = if cfg!(feature = "console-diag") { 400 } else { 460 };
+/// region 100 sectors back (the Makefile passes the same count to mkisopsx):
+/// 400 until v2.24, 360 from v2.25, whose rows took the EXE to 623 sectors.
+pub(crate) const CDTEST_SECTORS: u32 = if cfg!(feature = "console-diag") { 360 } else { 460 };
 pub(crate) const CDTEST_LBA: u32 = 1024 - CDTEST_SECTORS;
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
@@ -4861,7 +4881,7 @@ fn test_spu_dma_and_fifo_agree() -> TestResult {
     use psx_hw::spu::{SPUCNT, SPUSTAT, TRANSFER_ADDR, TRANSFER_CTRL, TRANSFER_DATA};
     let src = spu_probe_pattern();
     let bytes = unsafe { core::slice::from_raw_parts(src.as_ptr() as *const u8, 64) };
-    psx_spu::upload_adpcm(SpuAddr::new(0x3800), bytes);
+    crate::probe_upload(SpuAddr::new(0x3800), bytes);
 
     // The same 64 bytes again, by hand through the FIFO, at 0x3C00.
     let halfwords = unsafe { core::slice::from_raw_parts(src.as_ptr() as *const u16, 32) };
@@ -5846,7 +5866,7 @@ fn test_spu_ram_dma_roundtrip() -> TestResult {
     }
     let dest: u32 = 0x3000; // clear of the 0x000-0xFFF capture buffers
     let bytes = unsafe { core::slice::from_raw_parts(src.as_ptr() as *const u8, 64) };
-    psx_spu::upload_adpcm(SpuAddr::new(dest), bytes);
+    crate::probe_upload(SpuAddr::new(dest), bytes);
     let mut back = [0u32; 16];
     spu_dma_read(dest, &mut back);
     expect_eq(fnv32_words(&src), fnv32_words(&back), "spu dma upload")
@@ -6031,7 +6051,7 @@ fn precision_spu(values: &mut [u32; PRECISION_VALUE_COUNT], next: &mut usize) {
     }
     let dest = 0x3800;
     let bytes = unsafe { core::slice::from_raw_parts(src.as_ptr() as *const u8, 64) };
-    psx_spu::upload_adpcm(SpuAddr::new(dest), bytes);
+    crate::probe_upload(SpuAddr::new(dest), bytes);
 
     let mut boot_single = [0u32; 16];
     let boot_single_waits = spu_dma_read_shape(dest, &mut boot_single, 16);

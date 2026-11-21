@@ -47,6 +47,9 @@ pub struct Record {
     /// What the run did (the gate's `DIGEST` line), when the gate prints it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub digest: Option<String>,
+    /// What the run met of the events the hardware models treat differently (`SIGNALS`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signals: Option<super::equiv::Signals>,
 }
 
 impl Record {
@@ -66,6 +69,7 @@ impl Record {
             gate_receipt: line.receipt_hit,
             areas: line.areas.clone(),
             digest: line.digest.clone(),
+            signals: line.signals.clone(),
         }
     }
 
@@ -89,6 +93,8 @@ impl Record {
             failures: Vec::new(),
             areas: self.areas.clone(),
             digest: self.digest.clone(),
+            signals: self.signals.clone(),
+            stands_on: None,
         }
     }
 
@@ -400,7 +406,23 @@ mod tests {
             gate_receipt: false,
             areas: BTreeMap::new(),
             digest: None,
+            signals: None,
         }
+    }
+
+    #[test]
+    fn a_signals_line_survives_the_receipt() {
+        let out = format!(
+            "{CAPTURED}SIGNALS nitroxide-first-to-one real gp0-1f=0 gp0-1f-written=0 \
+             cd-ack-broken=0 mdec-commands=0 golden-on=no\n"
+        );
+        let line = crate::stage::journeys::parse_gate(&out).unwrap();
+        let signals = line.signals.clone().expect("SIGNALS parsed");
+        assert_eq!(signals, crate::stage::equiv::Signals::default());
+        assert_eq!(Record::of("g", &line).line().signals, Some(signals));
+        // The older gate printed none: nothing can stand on its rows.
+        let old = crate::stage::journeys::parse_gate(CAPTURED).unwrap();
+        assert_eq!(old.signals, None);
     }
 
     /// Lines the emu-gate branch prints (captured from its fleet sample, lane/gate-batch 076d97fb).

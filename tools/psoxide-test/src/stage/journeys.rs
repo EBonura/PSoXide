@@ -7,11 +7,11 @@ use std::path::{Path, PathBuf};
 
 use crate::journey::{self, Info};
 use crate::report::{Check, Outcome, Source, StageResult, Status};
-use crate::stage::{jreceipt, Ctx, Tier, FULL_MODELS};
+use crate::stage::{equiv, jreceipt, Ctx, Tier, FULL_MODELS};
 use crate::{sched, util};
 
 /// What one gate run printed.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct GateLine {
     pub passed: bool,
     pub checks: u64,
@@ -38,6 +38,10 @@ pub struct GateLine {
     pub areas: std::collections::BTreeMap<String, String>,
     /// `DIGEST <journey> <model> <hex>`: what the run did.
     pub digest: Option<String>,
+    /// `SIGNALS ...`: what the run met of the events the hardware models treat differently.
+    pub signals: Option<super::equiv::Signals>,
+    /// This row was not played: it stands on the `real` row (the signals that allowed it).
+    pub stands_on: Option<String>,
 }
 
 /// Read the gate's summary, receipt, conformance and abort lines.
@@ -61,6 +65,8 @@ pub fn parse_gate(output: &str) -> Option<GateLine> {
                 .collect();
         } else if let Some(rest) = l.strip_prefix("DIGEST ") {
             line.digest = rest.split_whitespace().nth(2).map(str::to_string);
+        } else if let Some(rest) = l.strip_prefix("SIGNALS ") {
+            line.signals = super::equiv::Signals::parse(rest);
         } else if let Some(rest) = l.strip_prefix("  FAIL  ") {
             // A failed check: `<journey>/<checkpoint or step>: <condition and the value read>`.
             line.failures.push(rest.trim().to_string());
@@ -461,7 +467,41 @@ pub fn run(ctx: &Ctx<'_>, bless: bool) -> StageResult {
     // Phase 1 every `real` row, phase 2 the other models (which may carry from phase 1).
     let (first, second): (Vec<Job>, Vec<Job>) = jobs.into_iter().partition(|j| j.model == "real");
     let mut outcomes = sched::run_all(&first, width, play);
-    outcomes.extend(sched::run_all(&second, width, play));
+    // A row of another model stands on its journey's `real` row when the real run met none of
+    // the events that model treats differently (equiv.rs); `--all-models` plays them all.
+    let reals: std::collections::BTreeMap<(String, Option<String>), GateLine> = first
+        .iter()
+        .zip(&outcomes)
+        .filter_map(|(job, (check, line))| {
+            let line = line.as_ref().filter(|_| check.status == Status::Pass)?;
+            Some(((job.info.id.clone(), job.pad.clone()), line.clone()))
+        })
+        .collect();
+    let stand = |job: &Job| -> Option<(Check, Option<GateLine>)> {
+        if ctx.all_models {
+            return None;
+        }
+        let real = reals.get(&(job.info.id.clone(), job.pad.clone()))?;
+        let signals = equiv::stands_on_real(&job.model, real).ok()?;
+        let name = format!("{}@{}", job.info.id, job.label());
+        println!("STANDS ON REAL journey {name}: {signals} observed");
+        let line = GateLine {
+            stands_on: Some(signals.clone()),
+            receipt_hit: false,
+            harness_hit: false,
+            ..real.clone()
+        };
+        let check = Check::pass(
+            &name,
+            format!(
+                "{} ticks, {}/{} checks, stands on real: {signals} observed (not run)",
+                line.ticks, line.pass, line.checks
+            ),
+        );
+        Some((check, Some(line)))
+    };
+    let dependent = |job: &Job| stand(job).unwrap_or_else(|| play(job));
+    outcomes.extend(sched::run_all(&second, width, dependent));
     let jobs: Vec<Job> = first.into_iter().chain(second).collect();
     let mut hits = 0;
     let (mut harness_hits, mut gate_runs, mut gate_receipts) = (0usize, 0usize, 0usize);
@@ -469,7 +509,11 @@ pub fn run(ctx: &Ctx<'_>, bless: bool) -> StageResult {
     sorted.sort_by(|a, b| (&a.0.info.id, a.0.label()).cmp(&(&b.0.info.id, b.0.label())));
     let mut hw_rows = (0usize, Vec::new(), Vec::new());
     let mut carried = Vec::new();
+    let mut stood = Vec::new();
     for (job, (check, line)) in sorted {
+        if let Some(signals) = line.as_ref().and_then(|l| l.stands_on.as_ref()) {
+            stood.push(format!("{}@{}: {signals}", job.info.id, job.label()));
+        }
         if let Some(from) = line.as_ref().and_then(|l| l.carried_from.as_ref()) {
             carried.push(format!(
                 "{}@{} from {}",
@@ -489,7 +533,9 @@ pub fn run(ctx: &Ctx<'_>, bless: bool) -> StageResult {
         }
         if let Some(line) = &line {
             hits += usize::from(line.receipt_hit);
-            if line.harness_hit {
+            if line.stands_on.is_some() {
+                // Neither a gate process nor a receipt: listed in `stood`.
+            } else if line.harness_hit {
                 harness_hits += 1;
             } else {
                 gate_runs += 1;
@@ -561,13 +607,22 @@ pub fn run(ctx: &Ctx<'_>, bless: bool) -> StageResult {
         "journey rows",
         format!(
             "{} row(s): {gate_runs} gate process(es) ({gate_receipts} answered by the gate's own \
-             receipt), {} harness receipt(s), {} carried from an older gate, {model_skips} not run \
-             on a model (only_on)",
+             receipt), {} harness receipt(s), {} carried from an older gate, {} standing on real, \
+             {model_skips} not run on a model (only_on)",
             jobs.len(),
             harness_hits - carried.len(),
-            carried.len()
+            carried.len(),
+            stood.len()
         ),
     ));
+    if !stood.is_empty() {
+        // Always printed: these rows were not played on their own model.
+        checks.push(Check::pass(
+            "standing on real (the real run met nothing these models treat differently; \
+             --all-models plays them)",
+            format!("{} row(s): {}", stood.len(), stood.join("; ")),
+        ));
+    }
     if !carried.is_empty() {
         // Always printed: these rows did not run on this gate.
         checks.push(Check::pass(

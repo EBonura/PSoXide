@@ -365,7 +365,7 @@ impl SpuProbe {
                     let small = unsafe { &*core::ptr::addr_of!(SOURCE) };
                     let bytes =
                         unsafe { core::slice::from_raw_parts(small.as_ptr() as *const u8, 512) };
-                    spu::upload_adpcm(SpuAddr::new(ADDR_HIGH), bytes);
+                    crate::probe_upload(SpuAddr::new(ADDR_HIGH), bytes);
                 }
             }
             _ => {}
@@ -504,7 +504,9 @@ impl SpuProbe {
         let bytes = unsafe { core::slice::from_raw_parts(src.as_ptr() as *const u8, words * 4) };
         match stage {
             1 | 2 => pio_write(addr, src),
-            _ => spu::upload_adpcm(SpuAddr::new(addr), bytes),
+            _ => {
+                crate::probe_upload(SpuAddr::new(addr), bytes);
+            }
         }
         match stage {
             2 | 3 => pio_read(addr, &mut readback[..words]),
@@ -582,12 +584,12 @@ fn key_voice(index: u8, pitch: u16, addr: u32) {
 fn upload_tables() {
     let mut table = [0u8; TABLE_BYTES];
     build_square(&mut table, 1);
-    spu::upload_adpcm(SpuAddr::new(SPU_TABLE_ADDR), &table);
+    crate::probe_upload(SpuAddr::new(SPU_TABLE_ADDR), &table);
     // An octave down, for ADDRSWAP: a swap that takes effect is audible
     // as a drop, not as a subtlety.
     let mut table2 = [0u8; TABLE_BYTES];
     build_square(&mut table2, 2);
-    spu::upload_adpcm(SpuAddr::new(SPU_TABLE2_ADDR), &table2);
+    crate::probe_upload(SpuAddr::new(SPU_TABLE2_ADDR), &table2);
     // The termination pair. Both tones are identical four-block one-shots
     // whose last block raises END and nothing else -- exactly the shape every
     // cooked .psau on the disc has, and the shape that was wandering.
@@ -605,15 +607,15 @@ fn upload_tables() {
     // not a loop. build_square writes a looping shape, so undo it here.
     term[1] = 0x00;
     term[(TERM_BLOCKS - 1) * 16 + 1] = 0x01;
-    spu::upload_adpcm(SpuAddr::new(SPU_TERM_PARKED_ADDR), &term);
+    crate::probe_upload(SpuAddr::new(SPU_TERM_PARKED_ADDR), &term);
     let park = [0x00u8, 0x07, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    spu::upload_adpcm(SpuAddr::new(SPU_TERM_PARK_BLOCK), &park);
-    spu::upload_adpcm(SpuAddr::new(SPU_TERM_UNPARKED_ADDR), &term);
+    crate::probe_upload(SpuAddr::new(SPU_TERM_PARK_BLOCK), &park);
+    crate::probe_upload(SpuAddr::new(SPU_TERM_UNPARKED_ADDR), &term);
     // The neighbour: an octave down and unmissable, so a capture can hear a
     // voice that ran past its own data as well as read it in the payload.
     let mut neighbour = [0u8; TERM_BYTES];
     build_square(&mut neighbour, 2);
-    spu::upload_adpcm(SpuAddr::new(SPU_TERM_NEIGHBOUR_ADDR), &neighbour);
+    crate::probe_upload(SpuAddr::new(SPU_TERM_NEIGHBOUR_ADDR), &neighbour);
 
     // The size control: same waveform, same call, 32 bytes.
     let mut small = [0u8; SMALL_BLOCKS * 16];
@@ -636,7 +638,7 @@ fn upload_tables() {
             }
         }
     }
-    spu::upload_adpcm(SpuAddr::new(SPU_SMALL_ADDR), &small);
+    crate::probe_upload(SpuAddr::new(SPU_SMALL_ADDR), &small);
 }
 
 /// `half_period_blocks == 1` gives one square cycle per 28 samples (1575 Hz

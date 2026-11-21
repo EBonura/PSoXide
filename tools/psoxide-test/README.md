@@ -59,6 +59,12 @@ LANDING: COMPLETE PASS (every required tier ran on these bytes and passed)
 - `RECEIPT HIT` lines above the table name each stage or row answered from a receipt: same bytes,
   same verdict, nothing started. `journey rows` says how many gate processes ran and how many rows
   came from receipts or were carried from an older gate (carried rows are never a fresh PASS).
+- `STANDS ON REAL` lines and the `standing on real` check list the rows of another model that were
+  not played: the journey's `real` row passed and its gate's `SIGNALS` line shows none of the events
+  that model treats differently (no GP0(1Fh) executed or written for `mister` and `gpu-irq`, no
+  broken CD acknowledge for `cd-ack=strict`, no MDEC command for `mdec-req=hidden`), and the journey
+  names no `golden_on`. The emulator's docs/conformance.md ("Model equivalence") gives the reason;
+  `run --all-models` plays every model of every journey (the audit).
 - Every skip is a check with its reason, counted per stage on the `skips:` line.
 - `LANDING: COMPLETE PASS` needs `--tier full` on one set of bytes with every declared section;
   otherwise the last line lists what is missing.

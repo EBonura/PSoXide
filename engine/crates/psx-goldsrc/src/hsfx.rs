@@ -6,7 +6,7 @@
 //! truncation retains the legacy bounds panic; valid directories with a bad
 //! payload retain the valid prefix rather than rejecting the whole bank.
 use psx_asset::Audio;
-use psx_sfx::{OneShot, Sample, PARKING_TAIL as SAMPLE_TAIL};
+use psx_sfx::{parking_tail, OneShot, Sample, PARKING_TAIL as SAMPLE_TAIL};
 use psx_spu::{Adsr, Spu, SpuAddr, Voice, Volume};
 
 const SPU_SAMPLE_BASE: u32 = 0x1010;
@@ -475,7 +475,11 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
                 break;
             }
             let addr = SpuAddr::new(next_addr);
-            spu.upload_adpcm(addr, bytes);
+            // A sample that did not land ends the bank here: `ready` counts only
+            // what is in SPU RAM (the timeout itself is reported by psx-spu).
+            if spu.upload_adpcm(addr, bytes).is_err() {
+                break;
+            }
             self.addrs[i] = next_addr;
             self.rates[i] = audio.sample_rate_hz();
             // Park this sample before the next one starts. Sixteen-byte aligned
@@ -483,7 +487,12 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
             // SPU address granularity, not the block size.
             next_addr = (next_addr + bytes.len() as u32 + 15) & !15;
             if next_addr + SAMPLE_TAIL.len() as u32 <= 512 * 1024 {
-                spu.upload_adpcm(SpuAddr::new(next_addr), &SAMPLE_TAIL);
+                if spu
+                    .upload_adpcm(SpuAddr::new(next_addr), parking_tail())
+                    .is_err()
+                {
+                    break;
+                }
                 next_addr += SAMPLE_TAIL.len() as u32;
             }
             ready = i + 1;
@@ -524,7 +533,9 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
             if next_addr + bytes.len() as u32 > 512 * 1024 {
                 break; // out of SPU RAM: drop the rest of this map's dialogue
             }
-            spu.upload_adpcm(SpuAddr::new(next_addr), bytes);
+            if spu.upload_adpcm(SpuAddr::new(next_addr), bytes).is_err() {
+                break; // the line did not land: the map's dialogue ends before it
+            }
             self.voice_addrs[i] = next_addr;
             let rate = audio.sample_rate_hz().min(u16::MAX as u32);
             let ticks = ((audio.sample_count().saturating_mul(20) + rate.saturating_sub(1)) / rate)
@@ -541,7 +552,12 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
             // consecutively too, so a voice reading past one runs into the next.
             next_addr = (next_addr + bytes.len() as u32 + 15) & !15;
             if next_addr + SAMPLE_TAIL.len() as u32 <= 512 * 1024 {
-                spu.upload_adpcm(SpuAddr::new(next_addr), &SAMPLE_TAIL);
+                if spu
+                    .upload_adpcm(SpuAddr::new(next_addr), parking_tail())
+                    .is_err()
+                {
+                    break;
+                }
                 next_addr += SAMPLE_TAIL.len() as u32;
             }
             ready = i + 1;

@@ -16,6 +16,10 @@
 //! scratchpad, and a headerless PSX-EXE gives no way to bound `.bss`).
 //! [`psx-rt`'s `_start`](../../psx_rt/fn._start.html) takes the loader's
 //! arguments and calls [`install`] before anything else runs.
+//!
+//! A member that must reach a file outside its own image (an XA file another member carries)
+//! looks it up with [`crate::iso::find_in_host_root`], which undoes this shift with a wrapping
+//! subtraction so the shift applied by the reader lands on the host disc's sector.
 
 /// Marks `$a0` as a loader handover rather than boot-time register garbage.
 /// ASCII `PSXD`.

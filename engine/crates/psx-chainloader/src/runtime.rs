@@ -1,6 +1,7 @@
 //! Bare-metal teardown, retry diagnostics, cache flush and register handoff.
 use crate::paint;
 use crate::{Bounds, Observer, Reader, Span, SECTOR_WORDS};
+use psx_io::cd::wait::WaitTime;
 use psx_pack::cd::SectorReader;
 
 /// Collection-specific loading visuals. Shared transport owns the CD device.
@@ -28,13 +29,13 @@ impl Reader for SectorReader {
     unsafe fn prepare(&mut self) -> bool {
         SectorReader::prepare(self)
     }
-    unsafe fn start_read_seek_first(&mut self, lba: u32, limit: u32) -> bool {
+    unsafe fn start_read_seek_first(&mut self, lba: u32, limit: WaitTime) -> bool {
         SectorReader::start_read_seek_first(self, lba, limit)
     }
     unsafe fn start_read_seek_first_idle(
         &mut self,
         lba: u32,
-        limit: u32,
+        limit: WaitTime,
         idle: &mut dyn FnMut(),
     ) -> bool {
         SectorReader::start_read_seek_first_with(self, lba, limit, idle)
