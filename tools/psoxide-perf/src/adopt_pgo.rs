@@ -304,10 +304,11 @@ pub fn decide(
         ));
     }
     // The candidate first: when it loses (the case this exists for), the incumbent is the last
-    // build, so the tree's image matches the files left in it.
+    // build and nothing is rebuilt. Whatever the verdict, the last build is the winner, so the
+    // image on disk matches the files left in the tree.
     let candidate = run_side(root, files, Side::Candidate, config, rig)?;
     if !candidate.ok() {
-        put(root, files, Side::Incumbent)?;
+        rebuild(root, files, Side::Incumbent, rig)?;
         let reason = format!("the candidate {}", candidate.why_not());
         return Ok(outcome(
             Decision::KeepIncumbent,
@@ -318,7 +319,7 @@ pub fn decide(
     }
     let incumbent = run_side(root, files, Side::Incumbent, config, rig)?;
     if !incumbent.ok() {
-        put(root, files, Side::Candidate)?;
+        rebuild(root, files, Side::Candidate, rig)?;
         let reason = format!(
             "the incumbent {} on this tree, so it cannot be kept",
             incumbent.why_not()
@@ -373,15 +374,9 @@ pub fn decide(
             ),
         )
     };
-    put(
-        root,
-        files,
-        if decision == Decision::Adopt {
-            Side::Candidate
-        } else {
-            Side::Incumbent
-        },
-    )?;
+    if decision == Decision::Adopt {
+        rebuild(root, files, Side::Candidate, rig)?;
+    }
     Ok(Outcome {
         decision,
         reason,
@@ -389,6 +384,17 @@ pub fn decide(
         incumbent: Some(incumbent),
         ratios,
         geomean: Some(geomean),
+    })
+}
+
+/// Put `side` back in the tree and build it, so the image on disk is the winner's.
+fn rebuild(root: &Path, files: &[TicketFile], side: Side, rig: &mut dyn Rig) -> Result<()> {
+    put(root, files, side)?;
+    rig.build(side).map_err(|why| {
+        Error(format!(
+            "the {} was kept but did not build again: {why}",
+            side.label()
+        ))
     })
 }
 
@@ -867,15 +873,16 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<i32> {
         record_path.display(),
         work.display()
     )?;
-    if outcome.decision != Decision::Adopt && outcome.candidate.is_some() {
+    if outcome.candidate.is_some() {
+        let winner = if outcome.decision == Decision::Adopt {
+            Side::Candidate
+        } else {
+            Side::Incumbent
+        };
         writeln!(
             out,
-            "adopt-pgo: the incumbent's files are back in the tree and it was built last"
-        )?;
-    } else if outcome.decision == Decision::Adopt && outcome.incumbent.is_some() {
-        writeln!(
-            out,
-            "adopt-pgo: the candidate's files are in the tree; the image on disk is the incumbent's, build again"
+            "adopt-pgo: the {}'s files are in the tree and it was built last",
+            winner.label()
         )?;
     }
     Ok(0)
@@ -995,6 +1002,14 @@ mod tests {
         );
         // The incumbent was built last, so the image matches the files left in the tree.
         assert_eq!(rig.built, [Side::Candidate, Side::Incumbent]);
+        // A win builds the candidate again: the winner is always the last build.
+        let dir = tree(&files);
+        let mut rig = Fake::new(&[900.0], &[1_000.0]);
+        decide(dir.path(), &files, &config(1), &mut rig).unwrap();
+        assert_eq!(
+            rig.built,
+            [Side::Candidate, Side::Incumbent, Side::Candidate]
+        );
     }
 
     #[test]

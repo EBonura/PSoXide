@@ -149,6 +149,7 @@ fn a_fast_collection_is_adopted() {
     let tree = |path: &str| std::fs::read_to_string(repo.root.join(path)).unwrap();
     assert_eq!(tree("pgo/game.prof"), "fast profile\n");
     assert_eq!(tree("pgo/hot-callsite-threshold"), "500\n");
+    assert_eq!(tree("image.cue"), "fast profile\n");
 }
 
 #[test]
