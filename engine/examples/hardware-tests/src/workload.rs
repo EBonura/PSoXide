@@ -21,6 +21,18 @@
 //! 16, 32 and 64 texels. Each row is a pair of records, the clocks for the
 //! list and then a record that says what the row was.
 //!
+//! **Texture page refill** (`0xAC0`-`0xAEF`, v2.26). The emulator's charge
+//! for a texture page change grows with the pixels drawn (fitted on the
+//! `0x200`-`0x223` triangles at about one texel a pixel). Eight 32 x 32
+//! textured quads per row on the same 256 x 256 pages, at 4 and 8 bits, with
+//! UV spans of 15, 31 and 63 texels (about 0.5, 1 and 2 texels a pixel), the
+//! UVs either the same for every quad or a fresh tile per quad, each list
+//! drawn on one page and again alternating between two copies of that page.
+//! Only the page bits differ between the two, so the difference is what the
+//! page changes cost. Drawn at 320 x 240 progressive (the steps after
+//! `480I INTERLACE`, the UV windows among them, draw in 480i, which skips
+//! every other row). Each row is a pair of records, as the UV windows.
+//!
 
 // The record constants document the layout; the code builds ids from their bases.
 #![allow(dead_code)]
@@ -30,8 +42,11 @@ use crate::v24::{self, xy, Clock32};
 use crate::{push_timing_record, sample_timing, TimingRecord, TIMING_RECORD_COUNT};
 use core::hint::black_box;
 use core::ptr::{addr_of_mut, read_volatile, write_volatile};
+use psx_gpu::display::{DisplayConfig, Resolution, VideoMode};
+use psx_gpu::Gpu;
 use psx_io::dma;
 use psx_io::gpu as gpu_io;
+use psx_io::timers::{self, Timer};
 
 type Records = [TimingRecord; TIMING_RECORD_COUNT];
 
@@ -50,6 +65,11 @@ const CALIBRATION_FRAMES_ONE_RECORD: u16 = 0x8C4;
 const CALIBRATION_FRAMES_FOUR_RECORD: u16 = 0x8C5;
 /// rec uv_window: clocks_min, clocks_med, clocks_max (clocks for sixteen 32 x 32 textured triangles, five runs; the even id of each pair from 0x8E0; the odd id says which row it was)
 const UV_WINDOW_TIMING_RECORD: u16 = 0x8E0;
+/// rec tex_refill: clocks_min, clocks_med, clocks_max (clocks for eight 32 x 32 textured quads, five runs, 0xFFFF when Timer 2 went past 0xFFFF; the even id of each pair from 0xAC0; the odd id says which row it was)
+const REFILL_TIMING_RECORD: u16 = 0xAC0;
+/// rec tex_refill_row: depth_pages_uvs, uv_span_texels, quad_pixels (the odd id of each pair; depth 0 4bpp, 1 8bpp in bits 0 to 3, bit 4 set when the quads alternate between two copies of the page, the first on the copy, bit 5 set when every quad reads its own tile of texels; quad_pixels the side of each quad; 0xAC1 and every second id after)
+const REFILL_ROW_RECORD: u16 = 0xAC1;
+pub(crate) const REFILL_RECORD: u16 = 0xAC0;
 /// rec uv_window_row: depth_and_window, uv_span_texels, origin_u_and_v (the odd id of each pair; depth 0 4bpp, 1 8bpp, 2 15bpp in bits 0 to 3, the texture window in 8-texel units in bits 4 to 8, 0 for off; origin u in the low byte and v in the high byte; 0x8E1 and every second id after)
 const UV_WINDOW_ROW_RECORD: u16 = 0x8E1;
 pub(crate) const UV_WINDOW_RECORD: u16 = 0x8E0;
@@ -539,6 +559,125 @@ fn uv_windows(records: &mut Records, next: &mut usize) {
         id += 2;
     }
     v24::environment(0);
+}
+
+// ------------------------------------------------- texture page refill
+
+/// Second copies of the 4 and 8-bit UV pages, filled by a VRAM copy, so a
+/// list can change page without changing what it samples.
+const PAGE_4_B: (u32, u32) = (704, 256);
+const PAGE_8_B: (u32, u32) = (768, 256);
+const REFILL_QUADS: u32 = 8;
+const REFILL_QUAD: u32 = 32;
+const REFILL_SPANS: [u32; 3] = [16, 32, 64];
+
+/// Eight quads; `span` texels a tile, the quad reading `span - 1` across.
+fn refill_list(depth: u32, span: u32, alternate: bool, fresh: bool) -> u32 {
+    let list = addr_of_mut!(UV_LIST) as *mut u32;
+    let mut at = 0usize;
+    let clut = if depth == 0 {
+        (UV_CLUT_4.1 << 6) | (UV_CLUT_4.0 / 16)
+    } else {
+        (UV_CLUT_8.1 << 6) | (UV_CLUT_8.0 / 16)
+    };
+    let page_a = page_word(depth);
+    let page_b = if depth == 0 {
+        page_a + (PAGE_4_B.0 - PAGE_4.0) / 64
+    } else {
+        page_a + (PAGE_8_B.0 - PAGE_8.0) / 64
+    };
+    let across = 256 / span;
+    let q = REFILL_QUAD;
+    for index in 0..REFILL_QUADS {
+        let (x, y) = (UV_DRAW.0, UV_DRAW.1 + (index & 7));
+        // The first quad on the copy: the row before ends on the first page,
+        // and every run ends on it, so all eight quads of every run change.
+        let page = if alternate && index & 1 == 0 {
+            page_b
+        } else {
+            page_a
+        };
+        let (u0, v0) = if fresh {
+            ((index % across) * span, (index / across) * span)
+        } else {
+            (0, 0)
+        };
+        let (u1, v1) = (u0 + span - 1, v0 + span - 1);
+        emit_node(
+            list,
+            &mut at,
+            &[
+                0x2C80_8080,
+                xy(x, y),
+                (clut << 16) | (v0 << 8) | u0,
+                xy(x + q, y),
+                (page << 16) | (v0 << 8) | u1,
+                xy(x, y + q),
+                (v1 << 8) | u0,
+                xy(x + q, y + q),
+                (v1 << 8) | u1,
+            ],
+            false,
+        );
+    }
+    emit_node(list, &mut at, &[0x1F00_0000], true);
+    list as u32
+}
+
+/// [`crate::gpu_probes::submit_and_time`], with 0xFFFF when Timer 2 passed
+/// 0xFFFF (its wrap is otherwise silent; an 8-bit row at 2 texels a pixel
+/// is about two thirds of the range on the emulator).
+fn time_refill(head: u32) -> u16 {
+    gpu_io::wait_command_ready();
+    v24::send(&[0xE200_0000, 0xE600_0000]);
+    gpu_io::wait_command_ready();
+    timers::set_mode(Timer::Timer2, 0);
+    // Reading the mode clears its reached-0xFFFF flag (bit 12).
+    let _ = timers::mode(Timer::Timer2);
+    let clocks = crate::gpu_probes::submit_and_time(head);
+    if timers::mode(Timer::Timer2) & (1 << 12) != 0 {
+        0xFFFF
+    } else {
+        clocks
+    }
+}
+
+fn texture_refill(records: &mut Records, next: &mut usize) {
+    upload_uv_pages();
+    gpu_io::wait_command_ready();
+    v24::send(&[0x8000_0000, xy(PAGE_4.0, PAGE_4.1), xy(PAGE_4_B.0, PAGE_4_B.1), xy(64, 256)]);
+    gpu_io::wait_command_ready();
+    v24::send(&[0x8000_0000, xy(PAGE_8.0, PAGE_8.1), xy(PAGE_8_B.0, PAGE_8_B.1), xy(128, 256)]);
+    v24::environment(0);
+    let mut id = REFILL_RECORD;
+    for depth in 0..2u32 {
+        for span in REFILL_SPANS {
+            for fresh in [false, true] {
+                for alternate in [false, true] {
+                    let timing = sample_timing(id, REFILL_QUADS as u16, || {
+                        time_refill(refill_list(depth, span, alternate, fresh))
+                    });
+                    push_timing_record(records, next, timing);
+                    let flags = depth | (u32::from(alternate) << 4) | (u32::from(fresh) << 5);
+                    push_timing_record(records, next, record(id + 1, flags, span - 1, REFILL_QUAD));
+                    id += 2;
+                }
+            }
+        }
+    }
+    v24::environment(0);
+}
+
+/// At 320 x 240, progressive, as `GPU BATCHES` and as a game: from
+/// `480I INTERLACE` on the display is 480i, which skips every other row.
+/// Runs before `TEXTURE UV WINDOWS`, whose upload puts back the 15-bit page
+/// the 8-bit copy overwrites; `480I INTERLACE` sets its own display.
+pub(crate) fn run_refill(gpu: &mut Gpu, records: &mut Records, next: &mut usize) {
+    gpu.set_display_enabled(false);
+    gpu.set_display(DisplayConfig::new(VideoMode::Ntsc, Resolution::R320X240));
+    gpu.set_display_start((0, 0));
+    gpu.set_display_enabled(true);
+    texture_refill(records, next);
 }
 
 pub(crate) fn run_calibration(records: &mut Records, next: &mut usize) {

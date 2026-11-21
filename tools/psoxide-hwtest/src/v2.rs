@@ -1080,6 +1080,15 @@ fn build() -> BTreeMap<u32, V2Entry> {
             ["depth_and_window", "uv_span_texels", "origin_u_and_v"],
         );
     }
+    // v2.26: texture page refill (workload.rs texture_refill), the uv_window pair layout.
+    for k in 0..24 {
+        b.put(0xAC0 + 2 * k, format!("tex_refill_{k}"), ["clocks_min", "clocks_med", "clocks_max"]);
+        b.put(
+            0xAC1 + 2 * k,
+            format!("tex_refill_row_{k}"),
+            ["depth_pages_uvs", "uv_span_texels", "quad_pixels"],
+        );
+    }
     // The second pad's pass repeats 0x760-0x776 at +0x1E0.
     let first_pass: Vec<(u32, V2Entry)> = b
         .map
