@@ -30,10 +30,10 @@ use sha2::{Digest, Sha256};
 use crate::util::{Error, Result};
 
 /// Poll offsets each window is measured at, unless `--offsets` says otherwise.
-pub const DEFAULT_OFFSETS: [i64; 4] = [-48, -24, 0, 24];
+pub(crate) const DEFAULT_OFFSETS: [i64; 4] = [-48, -24, 0, 24];
 /// Differences inside this percentage are a tie, unless `--tie` says otherwise. Two links of the
 /// same code measured within 0.14% of each other this way on Counter-Strike.
-pub const DEFAULT_TIE_PERCENT: f64 = 0.25;
+pub(crate) const DEFAULT_TIE_PERCENT: f64 = 0.25;
 
 const HELP: &str = "usage: psoxide-perf adopt-pgo --repo DIR [--rev REV] (--file PATH)...\n\
     --build CMD --image PATH --frontend PATH (--tape PATH --polls A..B)...\n\
@@ -44,7 +44,7 @@ const HELP: &str = "usage: psoxide-perf adopt-pgo --repo DIR [--rev REV] (--file
 
 /// One gameplay window of a bench tape.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Window {
+pub(crate) struct Window {
     /// The tape's file stem; names the window in the record.
     pub name: String,
     /// The poll-bound input tape.
@@ -57,7 +57,7 @@ pub struct Window {
 
 /// Which ticket a build or bench is for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Side {
+pub(crate) enum Side {
     /// The ticket just collected, in the working tree.
     Candidate,
     /// The ticket committed at the revision.
@@ -76,7 +76,7 @@ impl Side {
 
 /// One file of the ticket, both versions. `None` means the file does not exist on that side.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TicketFile {
+pub(crate) struct TicketFile {
     /// Path relative to the repository.
     pub path: String,
     /// Contents at the revision.
@@ -96,7 +96,7 @@ impl TicketFile {
 
 /// What the comparison is run with.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Config {
+pub(crate) struct Config {
     /// The bench windows.
     pub windows: Vec<Window>,
     /// Poll offsets each window is measured at.
@@ -106,7 +106,7 @@ pub struct Config {
 }
 
 /// The build and the bench, so the decision tests without a compiler or an emulator.
-pub trait Rig {
+pub(crate) trait Rig {
     /// Build the ticket now in the tree. `Err` carries why it failed.
     fn build(&mut self, side: Side) -> std::result::Result<(), String>;
     /// Measure `work_per_frame` for each (window, offset), in order.
@@ -119,7 +119,7 @@ pub trait Rig {
 
 /// What happened to one side.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Bench {
+pub(crate) struct Bench {
     /// `Err` when the build failed, with why.
     pub built: std::result::Result<(), String>,
     /// `work_per_frame` per window, per offset, when the bench ran in full.
@@ -151,7 +151,7 @@ impl Bench {
 
 /// The verdict.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Decision {
+pub(crate) enum Decision {
     /// The candidate stays in the tree.
     Adopt,
     /// The incumbent is put back.
@@ -173,7 +173,7 @@ impl Decision {
 
 /// The comparison and its verdict.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Outcome {
+pub(crate) struct Outcome {
     /// The verdict.
     pub decision: Decision,
     /// Why, in one sentence.
@@ -189,7 +189,7 @@ pub struct Outcome {
 }
 
 /// Put one side's files in the tree under `root` (absent files are removed).
-pub fn put(root: &Path, files: &[TicketFile], side: Side) -> Result<()> {
+pub(crate) fn put(root: &Path, files: &[TicketFile], side: Side) -> Result<()> {
     for file in files {
         let path = root.join(&file.path);
         match file.contents(side) {
@@ -266,7 +266,7 @@ fn results_len_mismatch(scores: &[Vec<f64>], config: &Config) -> bool {
 }
 
 /// Bench both tickets and leave the winner in the tree under `root`.
-pub fn decide(
+pub(crate) fn decide(
     root: &Path,
     files: &[TicketFile],
     config: &Config,
@@ -411,7 +411,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 /// Where the comparison ran, for the record.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Provenance {
+pub(crate) struct Provenance {
     /// The full commit the incumbent was read from.
     pub rev: String,
     /// SHA-256 of the frontend binary that ran the benches.
@@ -420,7 +420,7 @@ pub struct Provenance {
 
 /// The record a game commits beside its ticket. It holds no time, path or host, so the same
 /// comparison writes the same bytes.
-pub fn record(
+pub(crate) fn record(
     outcome: &Outcome,
     files: &[TicketFile],
     config: &Config,
@@ -499,7 +499,7 @@ pub fn record(
 }
 
 /// The real rig: the game's build command and `psoxide-pgo measure`.
-pub struct CommandRig {
+pub(crate) struct CommandRig {
     /// Where the build command runs.
     pub root: PathBuf,
     /// Shell command that builds the ticket in the tree.
@@ -677,7 +677,7 @@ fn git(repo: &Path, args: &[&str]) -> Result<std::process::Output> {
 }
 
 /// The ticket: each file at `rev` and in the working tree.
-pub fn read_ticket(repo: &Path, rev: &str, paths: &[String]) -> Result<Vec<TicketFile>> {
+pub(crate) fn read_ticket(repo: &Path, rev: &str, paths: &[String]) -> Result<Vec<TicketFile>> {
     let mut files = Vec::new();
     for path in paths {
         let spec = format!("{rev}:./{path}");
@@ -714,7 +714,12 @@ fn parse_polls(text: &str) -> Result<(u64, u64)> {
     }
 }
 
-/// `psoxide-perf adopt-pgo ...`.
+/// `psoxide-perf adopt-pgo ...`: returns the process exit code.
+///
+/// # Errors
+///
+/// A malformed argument, a ticket file that cannot be read or written, or a build or bench
+/// command that cannot be run.
 pub fn run(args: &[String], out: &mut dyn Write) -> Result<i32> {
     let mut repo = None;
     let mut rev = "HEAD".to_string();
