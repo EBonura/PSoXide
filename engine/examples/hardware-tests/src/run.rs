@@ -890,6 +890,9 @@ const STEPS: &[Step] = &[
     step(Area::Gpu, "GPU PRECISION", precision_gpu_step),
     step(Area::Gpu, "RASTER HASHES", precision_identity_step),
     step(Area::Gpu, "DISPLAY WIDTHS", step_widths),
+    // v2.26: at 320 x 240 before the interlace step sets 480i; the UV windows
+    // upload puts back the VRAM it copies over.
+    step(Area::Gpu, "TEXTURE PAGE REFILL", step_tex_refill),
     step(Area::Gpu, "480I INTERLACE", step_interlace),
     step(Area::Gpu, "WORKLOAD CALIBRATION", step_calibration),
     step(Area::Gpu, "TEXTURE UV WINDOWS", step_uv_windows),
@@ -1004,6 +1007,12 @@ fn step_dma_edge(run: &mut Run) {
 
 fn step_calibration(run: &mut Run) {
     workload::run_calibration(&mut run.timing.records, &mut run.next);
+    ui::repaint(run.font());
+}
+
+fn step_tex_refill(run: &mut Run) {
+    probe_gpu!(gpu);
+    workload::run_refill(gpu, &mut run.timing.records, &mut run.next);
     ui::repaint(run.font());
 }
 
