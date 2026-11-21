@@ -880,15 +880,25 @@ fn switch(name: &str) -> bool {
 }
 
 /// Record the source `profile` describes: the repository files and function lines of the
-/// tree `elf_path` was built from, which the profile's keys are measured against. The
-/// profile's own lines are not touched. `collect` does it for the profile it writes;
-/// `stamp` does it for an older one that matches the tree it is run in.
+/// tree `elf_path` was built from, which the profile's keys are measured against. `collect`
+/// does it for the profile it writes. For a profile stamped from an older tree (a restamp after
+/// an edit), the keys are first carried across the edit as `rebind` carries them, so the record
+/// never names a tree the keys were not moved to; a hot function the build lacks stops it.
 fn stamp(profile: &Path, elf_path: &Path, crate_dir: &Path) -> Result<()> {
     let (_, facts) = convert_histogram(elf_path, uniform_histogram(elf_path)?, false)?;
     let repo = remap::Repo::open(&[crate_dir])
         .ok_or_else(|| format!("{} is not in a git repository", crate_dir.display()))?;
     let text = fs::read_to_string(profile)?;
-    let stamped = remap::stamp_text(&text, &portable_facts(&facts), &repo, &repo.head())?;
+    let (stamped, report) =
+        remap::restamp_text(&text, &portable_facts(&facts), &repo, &repo.head())?;
+    if report.files > 0 {
+        println!("psoxide-pgo: {report}");
+        if let Some(refusal) = report.refusal() {
+            if !switch("PSOXIDE_PGO_ALLOW_STALE") {
+                return Err(format!("{refusal} (PSOXIDE_PGO_ALLOW_STALE=1 stamps anyway)").into());
+            }
+        }
+    }
     fs::write(profile, stamped)?;
     println!("psoxide-pgo: recorded the source of {}", profile.display());
     Ok(())

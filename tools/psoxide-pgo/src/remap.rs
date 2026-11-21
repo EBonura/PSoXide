@@ -368,6 +368,24 @@ pub fn stamp_text(text: &str, facts: &Facts, tree: &dyn Tree, rev: &str) -> Resu
     Ok(out)
 }
 
+/// [`stamp_text`] for a profile that may already be stamped from an older tree: its keys are
+/// carried to `facts`' tree first (see [`carry`]), then its record is rewritten, so the record
+/// and the keys describe the same text. An unstamped profile is taken to describe the tree, as
+/// [`stamp_text`] does. The report says what carrying did (all zero when nothing moved).
+pub fn restamp_text(
+    text: &str,
+    facts: &Facts,
+    tree: &dyn Tree,
+    rev: &str,
+) -> Result<(String, Report), String> {
+    let (carried, report) = if parse_stamp(text).is_some() {
+        carry(text, facts, tree)?
+    } else {
+        (text.to_string(), Report::default())
+    };
+    Ok((stamp_text(&carried, facts, tree, rev)?, report))
+}
+
 /// The comments of a profile, and its functions in file order.
 type Parsed<'a> = (Vec<&'a str>, Vec<(String, Node)>);
 
@@ -437,6 +455,9 @@ enum LineMap {
     Same,
     /// The function does not exist in this build.
     Gone,
+    /// The function of that name in this build is not the code the profile describes (a
+    /// closure renumbered by one added above it, a body rewritten): its samples are dropped.
+    Unmatched,
     Offsets(Vec<Option<u32>>),
 }
 
@@ -448,6 +469,7 @@ impl LineMap {
                 .iter()
                 .enumerate()
                 .any(|(at, to)| *to != Some(at as u32)),
+            LineMap::Unmatched => true,
             LineMap::Same | LineMap::Gone => false,
         }
     }
@@ -455,6 +477,7 @@ impl LineMap {
     fn apply(&self, offset: u32) -> Option<u32> {
         match self {
             LineMap::Same | LineMap::Gone => Some(offset),
+            LineMap::Unmatched => None,
             LineMap::Offsets(map) => map.get(offset as usize).copied().flatten(),
         }
     }
@@ -472,6 +495,8 @@ pub struct Report {
     pub total_samples: u64,
     /// Functions of the profile that this build does not have, with their samples.
     pub gone: Vec<(String, u64)>,
+    /// Functions whose name this build has on other code, with the samples dropped.
+    pub unmatched: Vec<(String, u64)>,
 }
 
 impl Report {
@@ -522,6 +547,21 @@ impl fmt::Display for Report {
         lost.dedup_by(|a, b| a.0 == b.0);
         if let Some((name, samples)) = lost.first() {
             write!(f, " (most in {name}: {samples})")?;
+        }
+        if !self.unmatched.is_empty() {
+            let samples: u64 = self.unmatched.iter().map(|u| u.1).sum();
+            write!(
+                f,
+                "; {} function(s) name other code in this build and lost their {} samples ({:.2}%): {}",
+                self.unmatched.len(),
+                samples,
+                share(samples),
+                self.unmatched
+                    .iter()
+                    .map(|u| u.0.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )?;
         }
         if !self.gone.is_empty() {
             write!(
@@ -585,6 +625,10 @@ pub fn carry(text: &str, new: &Facts, tree: &dyn Tree) -> Result<(String, Report
     for (name, node) in funcs {
         carrier.report.total_samples += node.total();
         let node = carrier.node(&name, node, true);
+        // A function whose every line was dropped is not written: no block beats a wrong one.
+        if node.body.is_empty() && node.calls.is_empty() {
+            continue;
+        }
         let _ = writeln!(out, "{name}:{}:{}", node.total(), node.head);
         node.emit(1, &mut out);
     }
@@ -652,7 +696,11 @@ impl Carrier<'_> {
         }
         self.report.dropped_samples += dropped;
         if dropped > 0 {
-            self.report.dropped_in.push((name.to_string(), dropped));
+            if matches!(self.maps[name], LineMap::Unmatched) {
+                self.report.unmatched.push((name.to_string(), dropped));
+            } else {
+                self.report.dropped_in.push((name.to_string(), dropped));
+            }
         }
         out
     }
@@ -698,12 +746,29 @@ impl Carrier<'_> {
             return Ok(LineMap::Gone);
         }
 
-        align(&old, &new)
-            .map(|pairs| {
-                LineMap::Offsets(pairs.into_iter().map(|to| to.map(|n| n as u32)).collect())
-            })
-            .map_err(|why| format!("{name}: {why}; collect the profile again"))
+        let map =
+            align(&old, &new).map_err(|why| format!("{name}: {why}; collect the profile again"))?;
+        if !matches_with_confidence(&old, &new, &map) {
+            return Ok(LineMap::Unmatched);
+        }
+        Ok(LineMap::Offsets(
+            map.into_iter().map(|to| to.map(|n| n as u32)).collect(),
+        ))
     }
+}
+
+/// Whether the new text is the old function's code: at least half of the old lines that hold
+/// code (a letter or digit, so not a lone brace) found an equal line. A closure renumbered by
+/// one inserted above it shares its name with other code, and the braces alone would align.
+fn matches_with_confidence(old: &[String], new: &[String], map: &[Option<usize>]) -> bool {
+    let code = |line: &String| line.chars().any(char::is_alphanumeric);
+    let lines = old.iter().filter(|line| code(line)).count();
+    let equal = old
+        .iter()
+        .zip(map)
+        .filter(|(line, to)| code(line) && to.is_some_and(|j| new.get(j) == Some(*line)))
+        .count();
+    2 * equal >= lines
 }
 
 /// `into` plus `other`: the larger count of a line, the union of the call sites.
@@ -780,14 +845,19 @@ fn align(old: &[String], new: &[String]) -> Result<Vec<Option<usize>>, String> {
 }
 
 /// The line map of an alignment given as its equal-line pairs (increasing in both): paired
-/// lines map to each other, and between two pairs the rewritten run pairs by position.
+/// lines map to each other, and between two pairs a run rewritten in place (as many lines on
+/// both sides) pairs by position. A run that changed its length has no partner on either side:
+/// which old line became which new one is a guess, and a dropped count is reported where a
+/// guessed one would land on other code unseen.
 fn pairs_to_map(pairs: &[(usize, usize)], n: usize, m: usize) -> Vec<Option<usize>> {
     let mut map = vec![None; n];
     let mut edge = (0usize, 0usize);
     for &(i, j) in pairs.iter().chain(std::iter::once(&(n, m))) {
         // The lines between the previous pair and this one on each side.
-        for k in 0..(i - edge.0).min(j - edge.1) {
-            map[edge.0 + k] = Some(edge.1 + k);
+        if i - edge.0 == j - edge.1 {
+            for k in 0..i - edge.0 {
+                map[edge.0 + k] = Some(edge.1 + k);
+            }
         }
         if i < n {
             map[i] = Some(j);
@@ -1091,6 +1161,69 @@ fn step() {
         let (again, report) =
             carry(&restamped, &facts(&[(F, fact("g.rs", 5, 11))]), &later).expect("restamped");
         assert_eq!((again, report.files), (restamped, 0));
+    }
+
+    /// The Ocarina report: a restamp after an edit in a function rewrote the record and kept
+    /// the old keys, so every key below the edit landed on the line above its own. A restamp
+    /// carries the keys first.
+    #[test]
+    fn a_restamp_after_lines_inserted_above_a_hot_line_keeps_its_count_on_it() {
+        let tree = Fake::with(&[("g.rs", OLD)]);
+        let collected = stamped(&tree, &facts(&[(F, fact("g.rs", 5, 10))]));
+        // Two lines above `hot(x)` (offset 3, 90 samples) and `if x > 3` (offset 2).
+        let new_src = OLD.replace(
+            "    if x > 3 {",
+            "    let y = 1;\n    let z = 2;\n    if x > 3 {",
+        );
+        let later = tree.edit(&[("g.rs", &new_src)]);
+        let now = facts(&[(F, fact("g.rs", 5, 12))]);
+        let (restamped, report) = restamp_text(&collected, &now, &later, "later").expect("restamp");
+        assert_eq!((report.files, report.dropped_samples), (1, 0));
+        // `hot(x)` is line 10, offset 5 from the declaration at 5: its 90 samples are there.
+        assert_eq!(new_src.lines().nth(9).map(str::trim), Some("hot(x);"));
+        assert_eq!(
+            body(&restamped),
+            ["game::step:300:2", " 1: 100", " 4: 100", " 5: 90", " 7: 10"]
+        );
+        // The restamped profile describes the tree it was stamped on: binding it moves nothing.
+        let (bound, report) = carry(&restamped, &now, &later).expect("carry");
+        assert_eq!((bound, report.files), (restamped.clone(), 0));
+        // And a restamp of a current profile changes nothing.
+        let (again, _) = restamp_text(&restamped, &now, &later, "later").expect("restamp");
+        assert_eq!(again, restamped);
+    }
+
+    #[test]
+    fn a_name_on_other_code_drops_its_samples_and_says_so() {
+        let tree = Fake::with(&[("g.rs", OLD)]);
+        let collected = stamped(&tree, &facts(&[(F, fact("g.rs", 5, 10))]));
+        // Another function now has the name (a closure renumbered): its lines share only braces.
+        let other = OLD.replace(
+            "    let x = load();\n    if x > 3 {\n        hot(x);\n    }\n    done();\n",
+            "    for item in items() {\n        draw(item);\n    }\n    flush();\n    swap();\n",
+        );
+        let later = tree.edit(&[("g.rs", &other)]);
+        let (carried, report) =
+            carry(&collected, &facts(&[(F, fact("g.rs", 5, 10))]), &later).expect("carry");
+        assert!(body(&carried).is_empty(), "{carried}");
+        assert_eq!(report.unmatched, vec![(F.to_string(), 300)]);
+        assert!(report.to_string().contains("name other code"), "{report}");
+    }
+
+    #[test]
+    fn a_run_that_changed_its_length_is_not_guessed() {
+        let tree = Fake::with(&[("g.rs", OLD)]);
+        let collected = stamped(&tree, &facts(&[(F, fact("g.rs", 5, 10))]));
+        // `hot(x);` (90 samples) became two different lines: no line of the two is it.
+        let new_src = OLD.replace("        hot(x);", "        warm(x);\n        cool(x);");
+        let later = tree.edit(&[("g.rs", &new_src)]);
+        let (carried, report) =
+            carry(&collected, &facts(&[(F, fact("g.rs", 5, 11))]), &later).expect("carry");
+        assert_eq!(
+            body(&carried),
+            ["game::step:210:2", " 1: 100", " 2: 100", " 6: 10"]
+        );
+        assert_eq!(report.dropped_samples, 90);
     }
 
     #[test]
