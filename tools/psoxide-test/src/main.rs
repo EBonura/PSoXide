@@ -509,6 +509,20 @@ fn ctx_tier_has(tier: Tier, stage: &str) -> bool {
 }
 
 fn bless(o: &Options) -> Result<ExitCode, String> {
+    // A --keep-speed bless serves a light landing: the game's host checks get the landing
+    // allowance on their own layout-sensitive ceilings, as `run --profile landing` gives them.
+    let landing;
+    let o = if o.keep_speed {
+        landing = Options {
+            profile: stage::Profile::Landing,
+            repo: o.repo.clone(),
+            stages: o.stages.clone(),
+            ..*o
+        };
+        &landing
+    } else {
+        o
+    };
     let config = Config::load()?;
     let game = Game::load(&o.repo)?;
     if let Some(problem) = stage::speed::pgo_source_problem(&o.repo, &game, &config) {
