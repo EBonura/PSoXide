@@ -69,6 +69,12 @@ pub struct WindowBase {
     /// Absent in baselines blessed before it was recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<WindowIdentity>,
+    /// Set by `bless --keep-speed --trust-legacy-rows`: these rows were blessed before layout
+    /// provenance was recorded and are trusted as the LANDING reference only (never by install,
+    /// which judges the layout stamp and the library's facts on its own). Names the commit the
+    /// rows were blessed on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_trusted: Option<String>,
 }
 
 /// One layout profile a speed row's build linked when it was blessed.
@@ -144,6 +150,7 @@ impl Baseline {
 pub fn kept_speed(
     old: &Baseline,
     now: &BTreeMap<String, WindowIdentity>,
+    trust_legacy: bool,
 ) -> Result<BTreeMap<String, WindowBase>, String> {
     let missing: Vec<&str> = now
         .keys()
@@ -165,17 +172,41 @@ pub fn kept_speed(
             extra.join(", ")
         ));
     }
+    // `--trust-legacy-rows`: only a baseline none of whose rows carries a record (every row
+    // blessed before records existed) is adopted, each row taking today's identity and the mark.
+    let none_recorded = old
+        .speed
+        .values()
+        .all(|w| w.layouts.is_none() && w.identity.is_none() && w.legacy_trusted.is_none());
+    if trust_legacy {
+        if !none_recorded || old.speed.is_empty() {
+            return Err(
+                "--trust-legacy-rows adopts only a baseline whose speed rows all predate \
+                 provenance records; this one has records: drop the flag"
+                    .into(),
+            );
+        }
+        let mut rows = old.speed.clone();
+        for (row, w) in rows.iter_mut() {
+            w.identity = now.get(row).cloned();
+            w.legacy_trusted = Some(old.blessed_commit.clone());
+        }
+        return Ok(rows);
+    }
     let unrecorded: Vec<&str> = old
         .speed
         .iter()
-        .filter(|(_, w)| w.layouts.is_none() || w.identity.is_none())
+        .filter(|(_, w)| {
+            w.identity.is_none() || (w.layouts.is_none() && w.legacy_trusted.is_none())
+        })
         .map(|(row, _)| row.as_str())
         .collect();
     if !unrecorded.is_empty() {
         return Err(format!(
             "--keep-speed: the baseline records no layout provenance or window identity for \
              [{}] (blessed before they were recorded). Run one plain `psoxide-test bless` on a \
-             layout `psoxide-pgo search` wrote, commit it, then --keep-speed may keep its rows",
+             layout `psoxide-pgo search` wrote, commit it, then --keep-speed may keep its rows \
+             (or, for a landing only, adopt the rows once with --trust-legacy-rows)",
             unrecorded.join(", ")
         ));
     }
@@ -318,10 +349,41 @@ mod tests {
                     vblanks: vec![String::new(); 3],
                     layouts: layouts.clone(),
                     identity: Some(identity("t1")),
+                    legacy_trusted: None,
                 },
             );
         }
         base
+    }
+
+    /// A baseline blessed before any record existed.
+    fn legacy(rows: &[&str]) -> Baseline {
+        let mut base = blessed(rows, None);
+        for w in base.speed.values_mut() {
+            w.identity = None;
+        }
+        base
+    }
+
+    #[test]
+    fn trust_legacy_adopts_a_pre_record_baseline_once_and_then_checks_identity() {
+        let old = legacy(&["w"]);
+        let e = kept_speed(&old, &now(&["w"], "t1"), false).unwrap_err();
+        assert!(e.contains("--trust-legacy-rows"), "{e}");
+        let kept = kept_speed(&old, &now(&["w"], "t1"), true).unwrap();
+        assert_eq!(kept["w"].legacy_trusted.as_deref(), Some("abc"));
+        assert_eq!(kept["w"].identity, Some(identity("t1")));
+        assert_eq!(kept["w"].work_per_frame, old.speed["w"].work_per_frame);
+        // The next landing keeps them without the flag, and a moved window still refuses.
+        let mut next = old.clone();
+        next.speed = kept;
+        assert!(kept_speed(&next, &now(&["w"], "t1"), false).is_ok());
+        assert!(kept_speed(&next, &now(&["w"], "t2"), false).is_err());
+        // Adopting twice, or adopting a baseline that has records, is refused.
+        assert!(kept_speed(&next, &now(&["w"], "t1"), true).is_err());
+        assert!(kept_speed(&blessed(&["w"], Some(vec![])), &now(&["w"], "t1"), true).is_err());
+        // Missing or extra rows still refuse.
+        assert!(kept_speed(&old, &now(&["w", "x"], "t1"), true).is_err());
     }
 
     fn now(rows: &[&str], tape: &str) -> BTreeMap<String, WindowIdentity> {
@@ -343,7 +405,7 @@ mod tests {
         let old = Baseline::load(dir.path()).unwrap().unwrap();
         assert_eq!(old.speed["w"].layouts, None);
         assert_eq!(old.speed["w"].identity, None);
-        let e = kept_speed(&old, &now(&["w"], "t1")).unwrap_err();
+        let e = kept_speed(&old, &now(&["w"], "t1"), false).unwrap_err();
         assert!(
             e.contains("no layout provenance") && e.contains("[w]"),
             "{e}"
@@ -356,7 +418,7 @@ mod tests {
         let mut greedy = searched("pgo/t.layout");
         greedy.searched = None;
         let old = blessed(&["w"], Some(vec![searched("pgo/g.layout"), greedy]));
-        let e = kept_speed(&old, &now(&["w"], "t1")).unwrap_err();
+        let e = kept_speed(&old, &now(&["w"], "t1"), false).unwrap_err();
         assert!(e.contains("`w`: pgo/t.layout"), "{e}");
         assert!(!e.contains("pgo/g.layout"), "{e}");
     }
@@ -371,7 +433,7 @@ mod tests {
             blessed_commit: "next".into(),
             ..old.clone()
         };
-        new.speed = kept_speed(&old, &now(&["w", "w@mister"], "t1")).unwrap();
+        new.speed = kept_speed(&old, &now(&["w", "w@mister"], "t1"), false).unwrap();
         new.save(dir.path()).unwrap();
         let back = Baseline::load(dir.path()).unwrap().unwrap();
         assert_eq!(back.speed, old.speed);
@@ -387,21 +449,24 @@ mod tests {
     #[test]
     fn keep_speed_accepts_a_game_with_no_layout() {
         let old = blessed(&["w"], Some(Vec::new()));
-        assert_eq!(kept_speed(&old, &now(&["w"], "t1")).unwrap(), old.speed);
+        assert_eq!(
+            kept_speed(&old, &now(&["w"], "t1"), false).unwrap(),
+            old.speed
+        );
     }
 
     #[test]
     fn keep_speed_refuses_a_changed_window_identity() {
         let old = blessed(&["w"], Some(vec![searched("pgo/g.layout")]));
-        let e = kept_speed(&old, &now(&["w"], "t2")).unwrap_err();
+        let e = kept_speed(&old, &now(&["w"], "t2"), false).unwrap_err();
         assert!(e.contains("`w` (tape sha256"), "{e}");
         let mut moved = now(&["w"], "t1");
         moved.get_mut("w").unwrap().offsets = vec![-6, 0, 6];
-        let e = kept_speed(&old, &moved).unwrap_err();
+        let e = kept_speed(&old, &moved, false).unwrap_err();
         assert!(e.contains("offsets"), "{e}");
         let mut moved = now(&["w"], "t1");
         moved.get_mut("w").unwrap().gate_revision = "h".repeat(40);
-        assert!(kept_speed(&old, &moved)
+        assert!(kept_speed(&old, &moved, false)
             .unwrap_err()
             .contains("gate revision"));
     }
@@ -409,12 +474,12 @@ mod tests {
     #[test]
     fn keep_speed_refuses_missing_and_extra_rows() {
         let old = blessed(&["w"], Some(vec![searched("pgo/g.layout")]));
-        let e = kept_speed(&old, &now(&["w", "w@mister"], "t1")).unwrap_err();
+        let e = kept_speed(&old, &now(&["w", "w@mister"], "t1"), false).unwrap_err();
         assert!(e.contains("lacks [w@mister]"), "{e}");
-        let e = kept_speed(&old, &now(&[], "t1")).unwrap_err();
+        let e = kept_speed(&old, &now(&[], "t1"), false).unwrap_err();
         assert!(e.contains("no longer declares [w]"), "{e}");
         // No rows declared and none blessed: nothing to keep, nothing refused.
-        assert!(kept_speed(&blessed(&[], None), &now(&[], "t1"))
+        assert!(kept_speed(&blessed(&[], None), &now(&[], "t1"), false)
             .unwrap()
             .is_empty());
     }

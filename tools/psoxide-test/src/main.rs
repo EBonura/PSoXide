@@ -42,7 +42,7 @@ usage:
       and for --tier full only when the landing verdict is complete. --profile landing (full tier
       only, needs the owner's approval before lanes use it): journeys on real only, the speed
       bar's landing slack; never installable. No --profile is install: the full tier unchanged
-  psoxide-test bless [--repo DIR] [--keep-speed]
+  psoxide-test bless [--repo DIR] [--keep-speed [--trust-legacy-rows]]
       measure the reference build and write psoxide-test.baseline.toml (refuses a red journey);
       --keep-speed keeps the baseline's speed rows, refused unless a plain bless measured each on
       searched layouts (or none) and its window identity is unchanged
@@ -109,6 +109,8 @@ struct Options {
     rebase_facts: bool,
     /// `bless --keep-speed`: keep the baseline's speed rows (light landings on a greedy layout).
     keep_speed: bool,
+    /// `bless --keep-speed --trust-legacy-rows`: adopt a pre-provenance baseline's rows once.
+    trust_legacy: bool,
 }
 
 fn options(args: &[String]) -> Result<Options, String> {
@@ -119,6 +121,7 @@ fn options(args: &[String]) -> Result<Options, String> {
         all_models: false,
         keep_going: false,
         keep_speed: false,
+        trust_legacy: false,
         profile: stage::Profile::Install,
         rebase_facts: false,
     };
@@ -130,6 +133,7 @@ fn options(args: &[String]) -> Result<Options, String> {
             "--all-models" => o.all_models = true,
             "--keep-going" => o.keep_going = true,
             "--keep-speed" => o.keep_speed = true,
+            "--trust-legacy-rows" => o.trust_legacy = true,
             "--rebase-facts" => o.rebase_facts = true,
             "--profile" => {
                 o.profile = match value()?.as_str() {
@@ -623,7 +627,15 @@ fn bless(o: &Options) -> Result<ExitCode, String> {
             .as_ref()
             .ok_or("--keep-speed needs a baseline: run a plain bless on a searched layout")?;
         let now = stage::install::window_identities(&o.repo, &commit, &game, GATE_REVISION)?;
-        base.speed = baseline::kept_speed(old, &now)?;
+        base.speed = baseline::kept_speed(old, &now, o.trust_legacy)?;
+        if o.trust_legacy {
+            println!(
+                "TRUSTED LEGACY SPEED ROWS from blessed commit {} as the landing reference \
+                 (--trust-legacy-rows); installs still need a stamped search, a plain bless and \
+                 never-slower against the library",
+                util::short(&old.blessed_commit)
+            );
+        }
         base.save(&o.repo)?;
         println!(
             "blessed {} into {} KEEPING the previous speed rows ({} windows, not re-measured; \
