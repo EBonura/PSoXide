@@ -51,6 +51,12 @@ pub struct Reach {
     /// Asset paths (`assets/audio`, `assets/textures/floor.psxt`) the files name, the pin locks
     /// included: the game hydrates them or builds from them.
     pub assets: BTreeSet<String>,
+    /// The backstop: SDK packages the game's resolved dependencies link (from its Cargo.lock
+    /// files: path packages that are not the game's own, and git packages from the SDK). Each
+    /// one the SDK has must be reached, or the scan missed a way in and the tree is whole.
+    pub linked: BTreeSet<String>,
+    /// The same as SDK directories, where `cargo metadata` gave paths (a manifest with no lock).
+    pub linked_dirs: BTreeSet<String>,
 }
 
 impl Reach {
@@ -65,6 +71,8 @@ impl Reach {
             ("tool", &self.tools),
             ("workspace", &self.workspace_builds),
             ("asset", &self.assets),
+            ("linked", &self.linked),
+            ("linked-dir", &self.linked_dirs),
         ];
         for (label, set) in sets {
             for item in set {
@@ -100,10 +108,186 @@ pub fn of_game(repo: &Path) -> Scope {
             texts.push((rel, text));
         }
     }
-    match reach_of(&texts) {
-        Ok(reach) => Scope::Game(reach),
+    let mut reach = match reach_of(&texts) {
+        Ok(reach) => reach,
+        Err(e) => return Scope::Whole(e),
+    };
+    match linked(repo, &texts) {
+        Ok((names, dirs)) => {
+            reach.linked = names;
+            reach.linked_dirs = dirs;
+            Scope::Game(reach)
+        }
         Err(e) => Scope::Whole(e),
     }
+}
+
+/// What the game's resolved dependency graphs link from the SDK, for the backstop: package
+/// names from every Cargo.lock that covers one of its manifests, and SDK directories from
+/// `cargo metadata --offline` for a manifest no lock covers. A manifest neither can read
+/// is an error.
+fn linked(
+    repo: &Path,
+    files: &[(String, String)],
+) -> Result<(BTreeSet<String>, BTreeSet<String>), String> {
+    let manifests: Vec<&(String, String)> = files
+        .iter()
+        .filter(|(rel, _)| rel == "Cargo.toml" || rel.ends_with("/Cargo.toml"))
+        .filter(|(rel, _)| !skipped(rel))
+        .collect();
+    let own: BTreeSet<String> = manifests
+        .iter()
+        .filter_map(|(_, text)| {
+            let table: toml::Table = toml::from_str(text).ok()?;
+            Some(table.get("package")?.get("name")?.as_str()?.to_string())
+        })
+        .collect();
+    let mut locks: BTreeMap<String, Option<Vec<LockPackage>>> = BTreeMap::new();
+    let mut names = BTreeSet::new();
+    let mut dirs = BTreeSet::new();
+    for (rel, text) in manifests {
+        let dir = rel
+            .strip_suffix("Cargo.toml")
+            .unwrap_or_default()
+            .trim_end_matches('/');
+        let package = toml::from_str::<toml::Table>(text)
+            .ok()
+            .and_then(|t| Some(t.get("package")?.get("name")?.as_str()?.to_string()));
+        // The nearest lock above the manifest that lists it (its workspace's).
+        let mut covering = None;
+        let mut at = Some(dir);
+        while let Some(d) = at {
+            let lock = if d.is_empty() {
+                "Cargo.lock".to_string()
+            } else {
+                format!("{d}/Cargo.lock")
+            };
+            let packages = locks
+                .entry(lock.clone())
+                .or_insert_with(|| read_lock(&repo.join(&lock)))
+                .as_ref();
+            if let Some(packages) = packages {
+                let lists_it = match &package {
+                    Some(name) => packages
+                        .iter()
+                        .any(|p| p.name == *name && p.source.is_none()),
+                    // A virtual manifest's lock sits beside it.
+                    None => d == dir,
+                };
+                if lists_it {
+                    covering = Some(lock);
+                    break;
+                }
+            }
+            at = match d.rsplit_once('/') {
+                Some((parent, _)) => Some(parent),
+                None if !d.is_empty() => Some(""),
+                None => None,
+            };
+        }
+        match covering.and_then(|lock| locks.get(&lock)?.as_ref()) {
+            Some(packages) => {
+                for p in packages {
+                    match &p.source {
+                        None if !own.contains(&p.name) => {
+                            names.insert(p.name.clone());
+                        }
+                        Some(source)
+                            if source.starts_with("git+")
+                                && is_sdk_repository(
+                                    source
+                                        .trim_start_matches("git+")
+                                        .split(['?', '#'])
+                                        .next()
+                                        .unwrap_or(""),
+                                ) =>
+                        {
+                            names.insert(p.name.clone());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            None => dirs.extend(metadata_dirs(repo, rel)?),
+        }
+    }
+    Ok((names, dirs))
+}
+
+/// One `[[package]]` of a Cargo.lock.
+#[derive(Debug)]
+struct LockPackage {
+    name: String,
+    source: Option<String>,
+}
+
+/// The packages of the Cargo.lock at `path`, or `None` when there is none to read.
+fn read_lock(path: &Path) -> Option<Vec<LockPackage>> {
+    let table: toml::Table = toml::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    Some(
+        table
+            .get("package")?
+            .as_array()?
+            .iter()
+            .filter_map(|p| {
+                Some(LockPackage {
+                    name: p.get("name")?.as_str()?.to_string(),
+                    source: p
+                        .get("source")
+                        .and_then(toml::Value::as_str)
+                        .map(str::to_string),
+                })
+            })
+            .collect(),
+    )
+}
+
+/// The SDK directories (`sdk/crates/psx-rt`) of the hydrated `.psoxide/` packages in the
+/// resolved graph of the manifest `rel`, from `cargo metadata --offline`.
+fn metadata_dirs(repo: &Path, rel: &str) -> Result<BTreeSet<String>, String> {
+    let fail = |why: String| {
+        format!("{rel}: no Cargo.lock lists it and cargo metadata cannot read it: {why}")
+    };
+    let out = std::process::Command::new("cargo")
+        .current_dir(repo)
+        .args([
+            "metadata",
+            "--offline",
+            "--format-version",
+            "1",
+            "--manifest-path",
+            rel,
+        ])
+        .output()
+        .map_err(|e| fail(e.to_string()))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        return Err(fail(err.lines().last().unwrap_or("").trim().to_string()));
+    }
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.stdout).map_err(|e| fail(e.to_string()))?;
+    let root = repo.canonicalize().map_err(|e| fail(e.to_string()))?;
+    let mut dirs = BTreeSet::new();
+    for package in json["packages"].as_array().into_iter().flatten() {
+        let Some(manifest) = package["manifest_path"].as_str() else {
+            continue;
+        };
+        let manifest = Path::new(manifest);
+        let manifest = manifest
+            .canonicalize()
+            .unwrap_or_else(|_| manifest.to_path_buf());
+        if let Ok(inside) = manifest.strip_prefix(&root) {
+            let inside = inside.display().to_string();
+            if let Some(sdk) = inside.strip_prefix(".psoxide/") {
+                dirs.insert(
+                    sdk.trim_end_matches("Cargo.toml")
+                        .trim_end_matches('/')
+                        .to_string(),
+                );
+            }
+        }
+    }
+    Ok(dirs)
 }
 
 /// Files that cannot build anything: documentation, the pin locks, the hydrated SDK itself.
@@ -515,6 +699,27 @@ pub fn reached_crates(
             }
         }
     }
+    // The backstop: what the game's lock files link from the SDK, the scan must have reached.
+    for name in &reach.linked {
+        let dirs: Vec<&str> = crates
+            .iter()
+            .filter(|(_, n)| **n == name.as_str())
+            .map(|(d, _)| *d)
+            .collect();
+        if !dirs.is_empty() && !dirs.iter().any(|d| seen.contains(*d)) {
+            return Err(format!(
+                "the game links {name} ({}) but its files do not show how",
+                dirs.join(", ")
+            ));
+        }
+    }
+    for dir in &reach.linked_dirs {
+        if all.contains(dir) && !seen.contains(dir) {
+            return Err(format!(
+                "the game links {dir} but its files do not show how"
+            ));
+        }
+    }
     Ok(Reached {
         crates: all,
         reached: seen,
@@ -744,6 +949,61 @@ mod tests {
             .reached;
         assert!(got.contains("engine/crates/psx-engine"));
         assert!(!got.contains("engine/examples/hardware-tests"));
+    }
+
+    #[test]
+    fn a_linked_sdk_package_the_scan_missed_makes_the_tree_whole() {
+        // The scan saw only psx-rt; the lock links psx-iso too.
+        let mut reach = Reach {
+            mentions: ["sdk/crates/psx-rt".to_string()].into(),
+            linked: ["psx-rt".to_string(), "some-registry-crate".to_string()].into(),
+            ..Reach::default()
+        };
+        assert!(reached_crates(&sdk(), &BTreeMap::new(), &reach, &mut no_sources).is_ok());
+        reach.linked.insert("psx-cook".to_string());
+        let e = reached_crates(&sdk(), &BTreeMap::new(), &reach, &mut no_sources).unwrap_err();
+        assert!(e.contains("psx-cook"), "{e}");
+        let reach = Reach {
+            linked_dirs: ["engine/examples/editor-playtest".to_string()].into(),
+            ..Reach::default()
+        };
+        assert!(reached_crates(&sdk(), &BTreeMap::new(), &reach, &mut no_sources).is_err());
+    }
+
+    /// A git work tree holding `files`.
+    fn game_repo(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for (path, text) in files {
+            let path = dir.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        util::git(dir.path(), &["init", "-q"]).unwrap();
+        util::git(dir.path(), &["add", "-A"]).unwrap();
+        dir
+    }
+
+    #[test]
+    fn the_backstop_reads_the_games_locks() {
+        let manifest = "[package]\nname = \"g\"\n[dependencies]\n\
+                        psx-rt = { path = \"../.psoxide/sdk/crates/psx-rt\" }\n";
+        let lock = "version = 4\n[[package]]\nname = \"g\"\nversion = \"0.1.0\"\n\
+                    [[package]]\nname = \"psx-rt\"\nversion = \"0.1.0\"\n\
+                    [[package]]\nname = \"psx-iso\"\nversion = \"0.1.0\"\n\
+                    source = \"git+ssh://git@github.com/EBonura/PSoXide.git?rev=abc#abc\"\n\
+                    [[package]]\nname = \"serde\"\nversion = \"1.0.0\"\n\
+                    source = \"registry+https://github.com/rust-lang/crates.io-index\"\n";
+        let repo = game_repo(&[("game/Cargo.toml", manifest), ("game/Cargo.lock", lock)]);
+        let Scope::Game(reach) = of_game(repo.path()) else {
+            panic!("a game with a lock has a scope");
+        };
+        assert_eq!(
+            reach.linked,
+            ["psx-iso".to_string(), "psx-rt".to_string()].into()
+        );
+        // No lock and nothing cargo can resolve offline: the whole tree.
+        let repo = game_repo(&[("game/Cargo.toml", manifest)]);
+        assert!(matches!(of_game(repo.path()), Scope::Whole(_)));
     }
 
     #[test]
