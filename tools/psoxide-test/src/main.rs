@@ -559,6 +559,18 @@ fn bless(o: &Options) -> Result<ExitCode, String> {
         base.maps
             .insert(size.build.clone(), stage::size::keep_map(&ctx, &map)?);
     }
+    // The game's host checks first: they take minutes, the journeys most of a bless, and a host
+    // refusal stops the bless either way.
+    let host = stage::host::run(&ctx, true);
+    print_stage(&host);
+    if !host.passed() {
+        return Err("a host check failed: nothing blessed".into());
+    }
+    for (k, v) in &host.outcome.facts {
+        if let Some(name) = k.strip_prefix("metric/") {
+            base.host.insert(name.to_string(), v.parse().unwrap_or(0));
+        }
+    }
     let journeys = stage::journeys::run(&ctx, true);
     print_stage(&journeys);
     if !journeys.passed() {
@@ -608,16 +620,6 @@ fn bless(o: &Options) -> Result<ExitCode, String> {
         game.name,
         total + clock
     );
-    let host = stage::host::run(&ctx, true);
-    print_stage(&host);
-    if !host.passed() {
-        return Err("a host check failed: nothing blessed".into());
-    }
-    for (k, v) in &host.outcome.facts {
-        if let Some(name) = k.strip_prefix("metric/") {
-            base.host.insert(name.to_string(), v.parse().unwrap_or(0));
-        }
-    }
     if !game.stacks.is_empty() {
         let stack = stage::stack::run(&ctx, true);
         print_stage(&stack);
