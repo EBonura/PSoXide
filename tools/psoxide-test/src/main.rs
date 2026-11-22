@@ -279,11 +279,10 @@ fn run(o: &Options) -> Result<ExitCode, String> {
     // The SDK pin rule first: it is not a receipt (SDK main moves), and a run that cannot
     // show it is not a landing.
     let (sdk, sdk_guest) = ctx.timed("sdk", || sdk_stage(&o.repo, &game, config.work.as_path()));
-    // The first failed stage, once the run stops at it (`--keep-going` never stops).
+    // The first failed stage, once the run stops at it (`--keep-going` never stops). A failed SDK
+    // pin does not stop the run: it judges the pin, not these bytes, and a lane may prove its
+    // bytes on an older pin on purpose.
     let mut stopped: Option<String> = None;
-    if !sdk.passed() && !o.keep_going {
-        stopped = Some("sdk".into());
-    }
     stages.push(sdk);
     // A full tier whose clean clone cannot fetch this commit fails at its very end, after every
     // journey: ask GitHub first. Only a definite "not there" stops the run.
