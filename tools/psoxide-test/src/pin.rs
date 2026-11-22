@@ -32,6 +32,24 @@ pub const DEFINITION: &str = "guest-tree-2";
 /// The same for a game's scoped view of it (scope.rs).
 pub const SCOPED_DEFINITION: &str = "guest-tree-scoped-2";
 
+/// The source of the code that computes a tree. A cached tree is kept under a hash of it as
+/// well as the definition names above, so a change to the logic never reads a tree the old
+/// logic computed, bumped or not.
+const LOGIC: [&str; 3] = [
+    include_str!("pin.rs"),
+    include_str!("scope.rs"),
+    include_str!("util.rs"),
+];
+
+/// The hash of [`LOGIC`], short.
+fn logic_digest() -> String {
+    let mut key = Key::new("guest-tree-logic");
+    for (i, source) in LOGIC.iter().enumerate() {
+        key.part(&i.to_string(), source);
+    }
+    key.finish()[..16].to_string()
+}
+
 /// The SDK paths whose content can change a game's bytes (see the module documentation).
 pub const GUEST_PATHS: &[&str] = &[
     "sdk",
@@ -181,7 +199,7 @@ impl Mirror {
 
     /// The guest tree of `commit` (see the module documentation).
     pub fn guest_tree(&self, commit: &str) -> Result<String, String> {
-        self.cached(&format!("{DEFINITION}:{commit}"), || {
+        self.cached(&format!("{DEFINITION}:{}:{commit}", logic_digest()), || {
             self.compute_guest_tree(commit, None)
         })
     }
@@ -193,7 +211,11 @@ impl Mirror {
         commit: &str,
         reach: &scope::Reach,
     ) -> Result<(String, String), String> {
-        let slot = format!("{SCOPED_DEFINITION}:{commit}:{}", reach.digest());
+        let slot = format!(
+            "{SCOPED_DEFINITION}:{}:{commit}:{}",
+            logic_digest(),
+            reach.digest()
+        );
         let value = self.cached(&slot, || self.compute_guest_tree(commit, Some(reach)))?;
         let (tree, counts) = value.split_once(' ').unwrap_or((&value, "?"));
         Ok((tree.to_string(), counts.to_string()))
@@ -935,6 +957,16 @@ mod tests {
         // A game whose files cannot be listed (not a git work tree) is judged whole.
         let not_git = tempfile::tempdir().unwrap();
         assert!(matches!(scope::of_game(not_git.path()), Scope::Whole(_)));
+    }
+
+    #[test]
+    fn the_cache_slot_carries_the_logic() {
+        let digest = logic_digest();
+        assert_eq!(digest.len(), 16);
+        assert_eq!(digest, logic_digest());
+        // The sources hashed are this module's and the scope's own text.
+        assert!(LOGIC[0].contains("fn logic_digest()"));
+        assert!(LOGIC[1].contains("pub fn reached_crates("));
     }
 
     #[test]
