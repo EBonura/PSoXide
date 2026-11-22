@@ -7,6 +7,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::game::BASELINE_FILE;
+use crate::stage::install::WindowIdentity;
 
 /// The whole baseline.
 #[derive(Debug, Deserialize, Serialize, Default, Clone)]
@@ -59,6 +60,36 @@ pub struct WindowBase {
     pub work_per_frame: Vec<u64>,
     pub frame_work_p99: Vec<u64>,
     pub vblanks: Vec<String>,
+    /// The layout profiles the row's build linked when a plain bless measured it, read at the
+    /// blessed commit; empty when the build links no layout. Absent in baselines blessed before
+    /// it was recorded. `bless --keep-speed` carries it unchanged with the row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layouts: Option<Vec<LayoutRecord>>,
+    /// What the row measured (the install facts' identity), when a plain bless measured it.
+    /// Absent in baselines blessed before it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<WindowIdentity>,
+}
+
+/// One layout profile a speed row's build linked when it was blessed.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LayoutRecord {
+    /// Its path in the repository.
+    pub path: String,
+    /// The SHA-256 of its bytes at the blessed commit.
+    pub sha256: String,
+    /// psoxide-pgo's search stamp (`# psoxide-pgo searched: rounds N seed N`); `None`: greedy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub searched: Option<SearchStamp>,
+}
+
+/// The search stamp of a layout profile.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SearchStamp {
+    pub rounds: u64,
+    pub seed: u64,
 }
 
 /// One journey's schedule hint and open-loop count.
@@ -105,6 +136,84 @@ impl Baseline {
         );
         std::fs::write(&path, text).map_err(|e| format!("write {}: {e}", path.display()))
     }
+}
+
+/// `bless --keep-speed`: the speed rows of `old` to keep, refused unless every row was measured
+/// by a plain bless on searched layouts (or no layout) and still measures what the game file and
+/// config declare now (`now`: every declared row's current identity).
+pub fn kept_speed(
+    old: &Baseline,
+    now: &BTreeMap<String, WindowIdentity>,
+) -> Result<BTreeMap<String, WindowBase>, String> {
+    let missing: Vec<&str> = now
+        .keys()
+        .filter(|row| !old.speed.contains_key(*row))
+        .map(String::as_str)
+        .collect();
+    let extra: Vec<&str> = old
+        .speed
+        .keys()
+        .filter(|row| !now.contains_key(*row))
+        .map(String::as_str)
+        .collect();
+    if !missing.is_empty() || !extra.is_empty() {
+        return Err(format!(
+            "--keep-speed keeps every speed row or none: the game file declares rows the \
+             baseline lacks [{}] and the baseline has rows the game file no longer declares \
+             [{}]. Run a plain `psoxide-test bless` on a searched layout",
+            missing.join(", "),
+            extra.join(", ")
+        ));
+    }
+    let unrecorded: Vec<&str> = old
+        .speed
+        .iter()
+        .filter(|(_, w)| w.layouts.is_none() || w.identity.is_none())
+        .map(|(row, _)| row.as_str())
+        .collect();
+    if !unrecorded.is_empty() {
+        return Err(format!(
+            "--keep-speed: the baseline records no layout provenance or window identity for \
+             [{}] (blessed before they were recorded). Run one plain `psoxide-test bless` on a \
+             layout `psoxide-pgo search` wrote, commit it, then --keep-speed may keep its rows",
+            unrecorded.join(", ")
+        ));
+    }
+    let greedy: Vec<String> = old
+        .speed
+        .iter()
+        .flat_map(|(row, w)| {
+            w.layouts
+                .iter()
+                .flatten()
+                .filter(|l| l.searched.is_none())
+                .map(move |l| format!("`{row}`: {}", l.path))
+        })
+        .collect();
+    if !greedy.is_empty() {
+        return Err(format!(
+            "--keep-speed keeps only rows measured on a searched layout; the baseline's rows \
+             were blessed on layouts without the search stamp: {}. Run the layout search, \
+             commit the layout, and run a plain `psoxide-test bless`",
+            greedy.join(", ")
+        ));
+    }
+    let moved: Vec<String> = old
+        .speed
+        .iter()
+        .filter_map(|(row, w)| {
+            let (was, is) = (w.identity.as_ref()?, now.get(row)?);
+            (was != is).then(|| format!("`{row}` ({})", was.differences(is).join(", ")))
+        })
+        .collect();
+    if !moved.is_empty() {
+        return Err(format!(
+            "--keep-speed: the kept rows no longer measure what the game file and config \
+             declare: {}. Run a plain `psoxide-test bless` on a searched layout",
+            moved.join("; ")
+        ));
+    }
+    Ok(old.speed.clone())
 }
 
 impl WindowBase {
@@ -165,5 +274,148 @@ mod tests {
         let back = Baseline::load(dir.path()).unwrap().unwrap();
         assert_eq!(back.size, base.size);
         assert_eq!(back.journeys["journey"].ticks, 1822);
+    }
+
+    /// Row `w`'s identity: tape `t.tape` with sha256 `tape`, offsets -12, 0, 12.
+    fn identity(tape: &str) -> WindowIdentity {
+        WindowIdentity {
+            tape: Some("t.tape".into()),
+            tape_sha256: Some(tape.into()),
+            window: "polls 10..20".into(),
+            offsets: vec![-12, 0, 12],
+            launch_args: Vec::new(),
+            gate_revision: "g".repeat(40),
+        }
+    }
+
+    fn searched(path: &str) -> LayoutRecord {
+        LayoutRecord {
+            path: path.into(),
+            sha256: "s".repeat(64),
+            searched: Some(SearchStamp {
+                rounds: 600,
+                seed: 1,
+            }),
+        }
+    }
+
+    /// A baseline whose rows `rows` were blessed on `layouts` with tape `t1`.
+    fn blessed(rows: &[&str], layouts: Option<Vec<LayoutRecord>>) -> Baseline {
+        let mut base = Baseline {
+            schema: 1,
+            blessed_commit: "abc".into(),
+            sdk_pin: "def".into(),
+            ..Baseline::default()
+        };
+        for row in rows {
+            base.speed.insert(
+                row.to_string(),
+                WindowBase {
+                    offsets: vec![-12, 0, 12],
+                    flips: vec![790, 786, 778],
+                    work_per_frame: vec![100, 101, 102],
+                    frame_work_p99: vec![10, 11, 12],
+                    vblanks: vec![String::new(); 3],
+                    layouts: layouts.clone(),
+                    identity: Some(identity("t1")),
+                },
+            );
+        }
+        base
+    }
+
+    fn now(rows: &[&str], tape: &str) -> BTreeMap<String, WindowIdentity> {
+        rows.iter()
+            .map(|r| (r.to_string(), identity(tape)))
+            .collect()
+    }
+
+    #[test]
+    fn a_baseline_without_the_new_records_loads_and_keep_speed_refuses_it() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(BASELINE_FILE),
+            "schema = 1\nblessed_commit = \"abc\"\nsdk_pin = \"def\"\n\n[speed.w]\n\
+             offsets = [0]\nflips = [790]\nwork_per_frame = [100]\nframe_work_p99 = [10]\n\
+             vblanks = [\"\"]\n",
+        )
+        .unwrap();
+        let old = Baseline::load(dir.path()).unwrap().unwrap();
+        assert_eq!(old.speed["w"].layouts, None);
+        assert_eq!(old.speed["w"].identity, None);
+        let e = kept_speed(&old, &now(&["w"], "t1")).unwrap_err();
+        assert!(
+            e.contains("no layout provenance") && e.contains("[w]"),
+            "{e}"
+        );
+        assert!(e.contains("plain `psoxide-test bless`"), "{e}");
+    }
+
+    #[test]
+    fn keep_speed_refuses_rows_blessed_on_a_greedy_layout() {
+        let mut greedy = searched("pgo/t.layout");
+        greedy.searched = None;
+        let old = blessed(&["w"], Some(vec![searched("pgo/g.layout"), greedy]));
+        let e = kept_speed(&old, &now(&["w"], "t1")).unwrap_err();
+        assert!(e.contains("`w`: pgo/t.layout"), "{e}");
+        assert!(!e.contains("pgo/g.layout"), "{e}");
+    }
+
+    #[test]
+    fn keep_speed_carries_stamped_rows_through_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = blessed(&["w", "w@mister"], Some(vec![searched("pgo/g.layout")]));
+        old.save(dir.path()).unwrap();
+        let old = Baseline::load(dir.path()).unwrap().unwrap();
+        let mut new = Baseline {
+            blessed_commit: "next".into(),
+            ..old.clone()
+        };
+        new.speed = kept_speed(&old, &now(&["w", "w@mister"], "t1")).unwrap();
+        new.save(dir.path()).unwrap();
+        let back = Baseline::load(dir.path()).unwrap().unwrap();
+        assert_eq!(back.speed, old.speed);
+        assert_eq!(
+            back.speed["w"].layouts.as_ref().unwrap()[0].searched,
+            Some(SearchStamp {
+                rounds: 600,
+                seed: 1
+            })
+        );
+    }
+
+    #[test]
+    fn keep_speed_accepts_a_game_with_no_layout() {
+        let old = blessed(&["w"], Some(Vec::new()));
+        assert_eq!(kept_speed(&old, &now(&["w"], "t1")).unwrap(), old.speed);
+    }
+
+    #[test]
+    fn keep_speed_refuses_a_changed_window_identity() {
+        let old = blessed(&["w"], Some(vec![searched("pgo/g.layout")]));
+        let e = kept_speed(&old, &now(&["w"], "t2")).unwrap_err();
+        assert!(e.contains("`w` (tape sha256"), "{e}");
+        let mut moved = now(&["w"], "t1");
+        moved.get_mut("w").unwrap().offsets = vec![-6, 0, 6];
+        let e = kept_speed(&old, &moved).unwrap_err();
+        assert!(e.contains("offsets"), "{e}");
+        let mut moved = now(&["w"], "t1");
+        moved.get_mut("w").unwrap().gate_revision = "h".repeat(40);
+        assert!(kept_speed(&old, &moved)
+            .unwrap_err()
+            .contains("gate revision"));
+    }
+
+    #[test]
+    fn keep_speed_refuses_missing_and_extra_rows() {
+        let old = blessed(&["w"], Some(vec![searched("pgo/g.layout")]));
+        let e = kept_speed(&old, &now(&["w", "w@mister"], "t1")).unwrap_err();
+        assert!(e.contains("lacks [w@mister]"), "{e}");
+        let e = kept_speed(&old, &now(&[], "t1")).unwrap_err();
+        assert!(e.contains("no longer declares [w]"), "{e}");
+        // No rows declared and none blessed: nothing to keep, nothing refused.
+        assert!(kept_speed(&blessed(&[], None), &now(&[], "t1"))
+            .unwrap()
+            .is_empty());
     }
 }

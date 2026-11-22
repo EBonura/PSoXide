@@ -11,7 +11,10 @@ result file per run, the clean-clone proof and the install.
 psoxide-test run --tier full      # everything a landing needs; exit 0 only on LANDING: COMPLETE PASS
 psoxide-test run                  # the quick pre-check (build, size, one window, precheck journeys)
 psoxide-test run --stage journeys # one stage (the build always runs first, usually as a receipt)
-psoxide-test bless                # measure the reference build, write the baseline
+psoxide-test bless [--keep-speed] # measure the reference build, write the baseline (speed rows
+                                  # record their layouts' sha256 and search stamp and the window
+                                  # identity; --keep-speed keeps them, only when every row came
+                                  # from searched layouts or none and its identity is unchanged)
 psoxide-test lint                 # load the file and every journey; pads and open-loop counts
 psoxide-test install [--rebase-facts] # copy bytes a complete full PASS judged into the library
 psoxide-test install-check ...    # the install guarantee for a script's install (see Gate profiles)

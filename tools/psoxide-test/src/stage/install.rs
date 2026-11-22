@@ -96,7 +96,7 @@ pub struct WindowIdentity {
 
 impl WindowIdentity {
     /// The fields that differ from `other`, described.
-    fn differences(&self, other: &WindowIdentity) -> Vec<String> {
+    pub(crate) fn differences(&self, other: &WindowIdentity) -> Vec<String> {
         let mut out = Vec::new();
         let mut field = |name: &str, a: String, b: String| {
             if a != b {
@@ -309,13 +309,23 @@ pub struct CommittedLayout {
 /// Whether a layout profile's text carries the search stamp ([`SEARCHED_TAG`]).
 #[must_use]
 pub fn search_stamped(text: &str) -> bool {
+    search_stamp(text).is_some()
+}
+
+/// The search stamp's `(rounds, seed)`, when a layout profile's text carries it.
+#[must_use]
+pub fn search_stamp(text: &str) -> Option<(u64, u64)> {
     text.lines()
         .take_while(|line| line.starts_with('#'))
         .filter_map(|line| line.strip_prefix(SEARCHED_TAG))
-        .any(|rest| {
+        .find_map(|rest| {
             let fields: Vec<&str> = rest.split(' ').collect();
-            matches!(fields.as_slice(), ["rounds", rounds, "seed", seed]
-                if rounds.parse::<u64>().is_ok() && seed.parse::<u64>().is_ok())
+            match fields.as_slice() {
+                ["rounds", rounds, "seed", seed] => {
+                    Some((rounds.parse().ok()?, seed.parse().ok()?))
+                }
+                _ => None,
+            }
         })
 }
 
@@ -1581,6 +1591,7 @@ mod tests {
     #[test]
     fn the_search_stamp_is_read_from_the_header_only() {
         assert!(search_stamped(SEARCHED));
+        assert_eq!(search_stamp(SEARCHED), Some((600, 1)));
         assert!(!search_stamped(GREEDY));
         // The pre-stamp record of a search is not the stamp.
         assert!(!search_stamped(

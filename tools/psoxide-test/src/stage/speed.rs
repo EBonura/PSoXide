@@ -757,6 +757,7 @@ mod tests {
             work_per_frame: vec![100, 100, 100],
             frame_work_p99: vec![10, 10, 10],
             vblanks: vec![String::new(); 3],
+            ..WindowBase::default()
         }
     }
 

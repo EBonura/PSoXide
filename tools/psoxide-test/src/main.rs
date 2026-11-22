@@ -43,7 +43,9 @@ usage:
       only, needs the owner's approval before lanes use it): journeys on real only, the speed
       bar's landing slack; never installable. No --profile is install: the full tier unchanged
   psoxide-test bless [--repo DIR] [--keep-speed]
-      measure the reference build and write psoxide-test.baseline.toml (refuses a red journey)
+      measure the reference build and write psoxide-test.baseline.toml (refuses a red journey);
+      --keep-speed keeps the baseline's speed rows, refused unless a plain bless measured each on
+      searched layouts (or none) and its window identity is unchanged
   psoxide-test lint [--repo DIR]
       load the game file and every journey; print the pad and open-loop findings
   psoxide-test tape --disc CUE --press SCHEDULE --out TAPE --steps N [--stop-at-poll P] [--pad analog|dualshock|digital]
@@ -521,7 +523,7 @@ fn bless(o: &Options) -> Result<ExitCode, String> {
         blessed_commit: if dirty {
             format!("{commit}+dirty")
         } else {
-            commit
+            commit.clone()
         },
         sdk_pin: stage::sdk_pin(&o.repo, &game),
         ..Baseline::default()
@@ -614,12 +616,14 @@ fn bless(o: &Options) -> Result<ExitCode, String> {
         // Light landings (owner, 11-22): a greedy-layout build must not become the speed reference,
         // or each landing's slack would stack on the last. Keep the rows the previous bless wrote
         // (a searched layout) and measure nothing.
+        // The kept rows must come from a plain bless on searched layouts and still measure what
+        // the game file and config declare; their records travel with them unchanged.
         let old = ctx
             .baseline
             .as_ref()
-            .filter(|b| !b.speed.is_empty() || game.windows.is_empty())
-            .ok_or("--keep-speed needs a baseline that already has speed rows")?;
-        base.speed = old.speed.clone();
+            .ok_or("--keep-speed needs a baseline: run a plain bless on a searched layout")?;
+        let now = stage::install::window_identities(&o.repo, &commit, &game, GATE_REVISION)?;
+        base.speed = baseline::kept_speed(old, &now)?;
         base.save(&o.repo)?;
         println!(
             "blessed {} into {} KEEPING the previous speed rows ({} windows, not re-measured; \
@@ -660,9 +664,29 @@ fn bless(o: &Options) -> Result<ExitCode, String> {
         .iter()
         .flat_map(|w| w.rows().into_iter().map(move |(row, _)| (row, w)))
         .collect();
+    // What each row measured, recorded so `--keep-speed` can later prove the rows it keeps came
+    // from a searched layout and still measure the same thing. A record that cannot be read
+    // (a tape or layout the commit does not hold) is left out, with a warning: the row is then
+    // never kept.
+    let identities = stage::install::window_identities(&o.repo, &commit, &game, GATE_REVISION)
+        .map_err(|e| eprintln!("warning: no window identity recorded: {e}"))
+        .ok();
     for (row, w) in rows {
+        let layouts = game
+            .build(&w.build)
+            .map(|b| layout_records(&o.repo, &commit, b));
+        let layouts = match layouts {
+            Some(Ok(l)) => Some(l),
+            Some(Err(e)) => {
+                eprintln!("warning: no layout provenance recorded for `{row}`: {e}");
+                None
+            }
+            None => None,
+        };
         let mut table = WindowBase {
             offsets: w.offsets.clone(),
+            layouts,
+            identity: identities.as_ref().and_then(|i| i.get(&row).cloned()),
             ..WindowBase::default()
         };
         for off in &w.offsets {
@@ -691,6 +715,26 @@ fn bless(o: &Options) -> Result<ExitCode, String> {
         base.journeys.len()
     );
     Ok(ExitCode::SUCCESS)
+}
+
+/// The layout profiles `build` links at `commit`, recorded for the baseline: path, SHA-256 and
+/// search stamp.
+fn layout_records(
+    repo: &Path,
+    commit: &str,
+    build: &game::Build,
+) -> Result<Vec<baseline::LayoutRecord>, String> {
+    stage::install::committed_layouts(repo, commit, build)?
+        .into_iter()
+        .map(|l| {
+            Ok(baseline::LayoutRecord {
+                sha256: util::git_blob_sha256(repo, commit, &l.path)?,
+                searched: stage::install::search_stamp(&l.text)
+                    .map(|(rounds, seed)| baseline::SearchStamp { rounds, seed }),
+                path: l.path,
+            })
+        })
+        .collect()
 }
 
 fn print_stage(s: &StageResult) {
