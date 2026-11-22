@@ -41,6 +41,38 @@ Note (2026-11-14, the console session): hardware-tests v2.18 (a test disc built 
 
 Note (2026-11-14, the first console run of a disc built with `console-diag`): a test disc (hardware-tests v2.18, built from branches that had not landed) stopped on the stop panel at boot on a console (SCPH-9002): "PSXDIAG FAULT HALT ... CAUSE C000001C, EPC at the store loop of `psx_rt::tty::print`", exception code 7, a data bus error on the first byte stored to the Expansion 2 debug console (`0x1F802080`). Since 2026-11-03 (`psx-rt` 381be68a1) `tty` stores to that port directly, and since 2026-11-07 `hardware-tests-disc` is built with `console-diag`, which implied `host-tty`; no disc built after both had been run on a console. The entry state gives Expansion 2 128 bytes (`0x0007_0777`) and the port is at offset `0x80`, outside it. The emulator does not model the error, so every emulator run passed. From this commit `console-diag` does not imply `host-tty`, the stop panel draws on screen and needs no tty, and `make hardware-tests-disc` fails when the built executable can reach Expansion 2 beyond its first 128 bytes (`psoxide-hwtest scan-expansion2`). A run that needs the terminal (headless emulator runs read the `hardware-tests: rec` lines) uses a twin build with `HWTEST_FEATURES="console-diag psx-rt/host-tty"` (`make hardware-tests-disc HWTEST_FEATURES="console-diag psx-rt/host-tty" HWTEST_ALLOW_DEBUG_PORT=1`); the twin is never burned.
 
+### v2.27 (2026-11-22, schema PX8)
+
+MINOR. **Not run on a console.** It carries every v2.26 row (v2.26 ran on a console on 2026-11-22, run 8017). One step added, `TEXTURE CACHE WIPEOUT` (`src/workload.rs`, GPU area, right after `TEXTURE PAGE REFILL`, at 320 x 240 progressive), records `0xC50`-`0xC6D` (30, 15 rows), no record redefined. The linear run's twin takes 1,550 records (1,520 at v2.26), under the 1,700 slots; a radius-disc run, estimated at about 1,706 at v2.26, would be about 1,736 if every row fired: not built or checked.
+
+v2.26 showed the console charging for texels newly fetched into the texture cache, not for a page change. PSoXide-emulator 31982f1e (`PSOXIDE_TEXTURE_LAW=texels`) models that as a 2 KB direct-mapped cache (256 lines of 8 bytes, slotted by a block of 64 x 64 texels at 4 bits, 64 x 32 at 8, 32 x 32 at 15) at about 9.4 clocks a missed line, less the clocks a primitive's setup leaves its fill idle. It was fitted on 8 x 8 to 32 x 32 primitives at up to 8 texels a pixel each way. On WipEout's heavy frames the two laws differ by about half the GPU time, on primitives no row had measured. Rows 0 to 12 follow the WipEout lane's row spec (cases A to E, from packet dumps of heavy frames); rows 13 and 14 are not in it.
+
+Each row is one linked list after a GP0(01h) (every run starts with the texture cache empty), drawn spread over a 320 x 240 rectangle at x 640, y 0 without overlap, opaque, timed as `0xAC0` (Timer 2 from the DMA kick to GP0(1Fh), five runs, `0xFFFF` past `0xFFFF`). Textures: four 4-bit pages at x 512, 576, 640 and 704 (y 256) holding 32 x 32 tiles sixteen a page, eight across, as WipEout's library packs them; one 8-bit page at x 768; CLUTs at (512, 456) and (512, 458). `TEXTURE UV WINDOWS` uploads its own pages again. Even ids `tex_cache_N`: clocks min, median, max for the list. Odd ids `tex_cache_row_N`: shape (bit 0 set at 8 bits, the case in bits 1 to 3: 0 one tile, 1 tiles cycled, 2 scenery regions cycled, 3 one scenery region, 4 sky, 5 near, 6 far and near keeping, 7 far and near evicting; the primitives from bit 5); texels across and down less one (low and high bytes); width and height in pixels (low and high bytes).
+
+Emulator, the twin on PSoXide-emulator 31982f1e, median clocks for the list:
+
+| id | case | primitive | count | texels | default | texels law |
+|---|---|---|---|---|---|---|
+| `0xC50` | A one tile | 2Ch 5 x 4 | 64 | 32 x 32, the same tile | 17,210 | 17,210 |
+| `0xC52` | A 64 tiles | 2Ch 5 x 4 | 64 | 32 x 32, 64 tiles on 4 pages in order | 17,210 | 17,210 |
+| `0xC54` | A 64 tiles | 2Ch 2 x 2 | 128 | as above | 34,357 | 34,357 |
+| `0xC56` | A 64 tiles | 2Ch 8 x 6 | 64 | as above | 17,301 | 17,210 |
+| `0xC58` | A 64 tiles | 2Ch 12 x 10 | 32 | as above | 8,825 | 11,893 |
+| `0xC5A` | C 64 tiles | 2Ch 16 x 12 | 64 | as above | 17,873 | 31,094 |
+| `0xC5C` | C one tile | 2Ch 16 x 12 | 64 | the same tile | 17,210 | 17,418 |
+| `0xC5E` | B regions | 34h 6 x 6 | 96 | 17 x 33 of 48 regions of 32 x 64 on 3 pages | 25,881 | 25,881 |
+| `0xC60` | B one region | 34h 6 x 6 | 96 | 17 x 33 of one region | 25,881 | 25,881 |
+| `0xC62` | D sky | 3Ch 64 x 40, 8 bit | 8 | 48 x 32, distinct (1.3x magnified) | 31,094 | 39,843 |
+| `0xC64` | D sky | 3Ch 64 x 40, 8 bit | 8 | 26 x 16, distinct (2.5x) | 25,894 | 30,704 |
+| `0xC66` | E near | 2Ch 160 x 120 | 1 | 80 x 60 (2x magnified) | 25,907 | 24,594 |
+| `0xC68` | E near | 2Ch 160 x 120 | 1 | 240 x 180 (1.5x minified) | 38,322 | 39,024 |
+| `0xC6A` | far and near, keeping | 2Ch | 35 | eight 8 x 8 (57 x 57 texels), a 64 x 64 near quad (64 x 64), three times, then the eight | 30,180 | 23,836 |
+| `0xC6C` | far and near, evicting | 2Ch | 35 | as above, the near texels 64 to the right | 30,180 | 33,144 |
+
+Departures from the spec, all for Timer 2's range (`0xFFFF` clocks; the largest median above is 39,843): A at 5 x 4 draws 64 quads, not 256 (one cycle of the 64 tiles); B draws 96 triangles, not 256, over 48 regions (16 a page, three pages) cycled twice; D draws 8 quads, not 30; E draws one quad of 160 x 120, not eight of 200 x 150, and its minified row reads 240 x 180 texels (1.5x; 300 x 225 does not fit the 8-bit UVs). B's triangles are right triangles 6 pixels on a side (18 pixels). Each primitive's per-primitive cost is what the rows give; a frame scales by its counts.
+
+Reading. In these rows both laws make the far primitives of A and B pure setup (268 clocks a quad, 269 a triangle): the default law because a 32 x 32 tile is under its 1,024-byte footprint threshold and a page change past 24 pixels only, the texel law because a primitive's misses (at most one line a pixel) are hidden in the clocks its setup leaves idle. The laws part from 12 x 10 up (`0xC58` +35%, `0xC5A` +74%) and on the sky (+19 to 28%), and on the mixed pair, which only the texel law separates (23,836 against 33,144). On the console: if `0xC50` to `0xC56` and `0xC5E`/`0xC60` read more than 17.2k / 34.4k / 25.9k, both laws undercharge far primitives and misses are not hidden in setup; one tile against 64 tiles (`0xC50` against `0xC52`, `0xC5C` against `0xC5A`) says whether fresh tiles cost and so whether a tile-sorted order would pay; `0xC5A` against `0xC58` gives the per-line miss cost once setup is covered. The machine-code baseline: drift 0 against v2.26.
+
 ### v2.26 (2026-11-21, schema PX8)
 
 MINOR. **Not run on a console.** It carries every v2.25 row (v2.25 has not run on a console either), so one burn of v2.26 answers both. One step added, `TEXTURE PAGE REFILL` (`src/workload.rs`, GPU area, after `DISPLAY WIDTHS` and before `480I INTERLACE`), records `0xAC0`-`0xAEF`, no record redefined. The emulator charges a texture page change (`texture_timing_surcharge` in PSoXide-emulator `emu/crates/emulator-core/src/gpu.rs`) 1.0, 1.55 and 2.8 clocks a pixel past the first 24 at 4, 8 and 15 bits, fitted on the `0x200`-`0x223` triangles (8 x 8, 16 x 32 and 32 x 32) at about one texel a pixel. WipEout pays that charge on minified trees (about two texels a pixel) and on magnified 32 x 32 smoke puffs (up to 64 pixels wide). If the console's refill follows the texels read or the cache footprint rather than the pixels drawn, the charge is wrong for both.

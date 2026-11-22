@@ -33,6 +33,18 @@
 //! `480I INTERLACE`, the UV windows among them, draw in 480i, which skips
 //! every other row). Each row is a pair of records, as the UV windows.
 //!
+//! **Texture cache, WipEout** (`0xC50`-`0xC6D`, v2.27). Rows from the WipEout
+//! lane's heavy frames (its row spec of 2026-11-22), where the
+//! emulator's texel law (fitted on 32 x 32 primitives at up to 8 texels a pixel
+//! each way) and its default law disagree by about half the frame's GPU time:
+//! far 4-bit track tiles drawn 2 x 2 to 16 x 12 pixels from whole 32 x 32 tiles,
+//! one tile against 64 cycled over four pages; far scenery Gouraud triangles
+//! over 32 x 64 regions; 8-bit sky quads magnified; one big near quad
+//! magnified and minified; and, beyond the spec, bursts of far quads around a
+//! near quad that keeps or evicts their texels. Every list starts with
+//! GP0(01h), so every run starts with the texture cache empty. Drawn at
+//! 320 x 240 progressive; a pair of records a row, as the UV windows.
+//!
 
 // The record constants document the layout; the code builds ids from their bases.
 #![allow(dead_code)]
@@ -70,6 +82,11 @@ const REFILL_TIMING_RECORD: u16 = 0xAC0;
 /// rec tex_refill_row: depth_pages_uvs, uv_span_texels, quad_pixels (the odd id of each pair; depth 0 4bpp, 1 8bpp in bits 0 to 3, bit 4 set when the quads alternate between two copies of the page, the first on the copy, bit 5 set when every quad reads its own tile of texels; quad_pixels the side of each quad; 0xAC1 and every second id after)
 const REFILL_ROW_RECORD: u16 = 0xAC1;
 pub(crate) const REFILL_RECORD: u16 = 0xAC0;
+/// rec tex_cache: clocks_min, clocks_med, clocks_max (clocks for the list of a texture-cache row, five runs, 0xFFFF when Timer 2 went past 0xFFFF; the even id of each pair from 0xC50; the odd id says which row it was)
+const CACHE_TIMING_RECORD: u16 = 0xC50;
+/// rec tex_cache_row: shape, span_u_v, size_w_h (the odd id of each pair; shape: bit 0 set at 8 bits, the case in bits 1 to 3 (0 one tile, 1 tiles cycled, 2 scenery regions cycled, 3 one scenery region, 4 sky, 5 near, 6 far and near keeping, 7 far and near evicting), the primitives in the list from bit 5; span_u_v the texels across and down less one in the low and high bytes; size_w_h the primitive's width and height in pixels in the low and high bytes; 0xC51 and every second id after)
+const CACHE_ROW_RECORD: u16 = 0xC51;
+pub(crate) const CACHE_RECORD: u16 = 0xC50;
 /// rec uv_window_row: depth_and_window, uv_span_texels, origin_u_and_v (the odd id of each pair; depth 0 4bpp, 1 8bpp, 2 15bpp in bits 0 to 3, the texture window in 8-texel units in bits 4 to 8, 0 for off; origin u in the low byte and v in the high byte; 0x8E1 and every second id after)
 const UV_WINDOW_ROW_RECORD: u16 = 0x8E1;
 pub(crate) const UV_WINDOW_RECORD: u16 = 0x8E0;
@@ -673,11 +690,338 @@ fn texture_refill(records: &mut Records, next: &mut usize) {
 /// Runs before `TEXTURE UV WINDOWS`, whose upload puts back the 15-bit page
 /// the 8-bit copy overwrites; `480I INTERLACE` sets its own display.
 pub(crate) fn run_refill(gpu: &mut Gpu, records: &mut Records, next: &mut usize) {
+    display_progressive(gpu);
+    texture_refill(records, next);
+}
+
+// --------------------------------------------- texture cache, WipEout
+
+/// Where the rows draw: a 320 x 240 rectangle off screen (the calibration
+/// scene's area), the quads spread across it without overlap.
+const CACHE_DRAW: (u32, u32) = (640, 0);
+/// Four 4-bit pages of 32 x 32 tiles (x 512, 576, 640 and 704, y 256), as
+/// WipEout's library packs them, and one 8-bit page at x 768.
+const CACHE_PAGE_4_X: u32 = 512;
+const CACHE_PAGE_8_X: u32 = 768;
+const CACHE_PAGE_Y: u32 = 256;
+/// The CLUTs, in rows of the 4-bit pages no row reads (y 456 and 458), so
+/// no quad draws over them.
+const CACHE_CLUT_4: (u32, u32) = (512, 456);
+const CACHE_CLUT_8: (u32, u32) = (512, 458);
+/// The most primitives a list holds (the 2 x 2 row), up to thirteen words each.
+const CACHE_MAX_QUADS: usize = 128;
+static mut CACHE_LIST: [u32; CACHE_MAX_QUADS * 13 + 4] = [0; CACHE_MAX_QUADS * 13 + 4];
+/// Far quads a burst, and bursts, in the mixed rows.
+const MIXED_FAR: u32 = 8;
+const MIXED_CYCLES: u32 = 3;
+
+/// Which case of WipEout's heavy frames a row draws (A to E as the WipEout
+/// lane's row spec names them).
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum Case {
+    /// A, far track tiles: flat textured quads (2Ch), each reading one whole
+    /// 32 x 32 tile, every quad the same tile.
+    TileOne = 0,
+    /// A: the tiles cycled, 64 of them on four pages, in order.
+    TileCycle = 1,
+    /// B, far scenery: Gouraud textured triangles (34h) reading 17 x 33
+    /// texels of 32 x 64 regions on three pages, cycled.
+    SceneryCycle = 2,
+    /// B, every triangle the same region.
+    SceneryOne = 3,
+    /// D, sky: Gouraud textured quads (3Ch) at 8 bits, distinct regions.
+    Sky = 4,
+    /// E, near track: one big flat textured quad.
+    Near = 5,
+    /// Not in the spec: three times a burst of eight 8 x 8 far quads and a
+    /// 64 x 64 near quad on the same page that reads the burst's texels,
+    /// then the burst again.
+    MixedKeep = 6,
+    /// As `MixedKeep`, the near quad reading texels 64 to the right, which
+    /// a 2 KB direct-mapped cache keeps in the same slots.
+    MixedEvict = 7,
+}
+
+#[derive(Copy, Clone)]
+struct CacheRow {
+    case: Case,
+    /// Primitives in the list.
+    count: u32,
+    /// Screen size in pixels.
+    size: (u32, u32),
+    /// Texels read across and down, less one.
+    span: (u32, u32),
+}
+
+const fn cache_row(case: Case, count: u32, size: (u32, u32), span: (u32, u32)) -> CacheRow {
+    CacheRow {
+        case,
+        count,
+        size,
+        span,
+    }
+}
+
+/// The rows, in record order. Counts are the spec's where Timer 2's 0xFFFF
+/// allows (see the versions doc for the ones cut).
+const CACHE_ROWS: [CacheRow; 15] = [
+    // A: one tile against 64 tiles, then the sizes.
+    cache_row(Case::TileOne, 64, (5, 4), (31, 31)),
+    cache_row(Case::TileCycle, 64, (5, 4), (31, 31)),
+    cache_row(Case::TileCycle, 128, (2, 2), (31, 31)),
+    cache_row(Case::TileCycle, 64, (8, 6), (31, 31)),
+    cache_row(Case::TileCycle, 32, (12, 10), (31, 31)),
+    // C: mid tiles.
+    cache_row(Case::TileCycle, 64, (16, 12), (31, 31)),
+    cache_row(Case::TileOne, 64, (16, 12), (31, 31)),
+    // B: far scenery triangles.
+    cache_row(Case::SceneryCycle, 96, (6, 6), (16, 32)),
+    cache_row(Case::SceneryOne, 96, (6, 6), (16, 32)),
+    // D: sky, magnified 1.3 and 2.5 times.
+    cache_row(Case::Sky, 8, (64, 40), (47, 31)),
+    cache_row(Case::Sky, 8, (64, 40), (25, 15)),
+    // E: one near quad, magnified 2 times and minified 1.5 times.
+    cache_row(Case::Near, 1, (160, 120), (79, 59)),
+    cache_row(Case::Near, 1, (160, 120), (239, 179)),
+    // Eviction between far and near (not in the spec).
+    cache_row(Case::MixedKeep, (MIXED_CYCLES + 1) * MIXED_FAR + MIXED_CYCLES, (8, 8), (56, 56)),
+    cache_row(Case::MixedEvict, (MIXED_CYCLES + 1) * MIXED_FAR + MIXED_CYCLES, (8, 8), (56, 56)),
+];
+
+const fn clut_word((x, y): (u32, u32)) -> u32 {
+    (y << 6) | (x / 16)
+}
+
+/// The texture page word of the 4-bit page `index` (0 to 3).
+const fn page_4(index: u32) -> u32 {
+    ((CACHE_PAGE_4_X / 64) + index) | ((CACHE_PAGE_Y / 256) << 4)
+}
+
+const fn page_8() -> u32 {
+    (CACHE_PAGE_8_X / 64) | ((CACHE_PAGE_Y / 256) << 4) | (1 << 7)
+}
+
+/// The top-left pixel of primitive `index` of `size`, spread across the
+/// 320 x 240 rectangle a pixel apart.
+fn place(index: u32, (w, h): (u32, u32)) -> (u32, u32) {
+    let across = 320 / (w + 1);
+    (
+        CACHE_DRAW.0 + (index % across) * (w + 1),
+        CACHE_DRAW.1 + ((index / across) * (h + 1)) % 240,
+    )
+}
+
+/// A flat textured quad (2Ch), `(w, h)` pixels at `(x, y)`, reading
+/// `(u0, v0)` to `(u0 + du, v0 + dv)`.
+fn emit_flat_quad(
+    list: *mut u32,
+    at: &mut usize,
+    (x, y): (u32, u32),
+    (w, h): (u32, u32),
+    (u0, v0): (u32, u32),
+    (du, dv): (u32, u32),
+    page: u32,
+) {
+    let clut = clut_word(CACHE_CLUT_4);
+    let (u1, v1) = (u0 + du, v0 + dv);
+    emit_node(
+        list,
+        at,
+        &[
+            0x2C80_8080,
+            xy(x, y),
+            (clut << 16) | (v0 << 8) | u0,
+            xy(x + w, y),
+            (page << 16) | (v0 << 8) | u1,
+            xy(x, y + h),
+            (v1 << 8) | u0,
+            xy(x + w, y + h),
+            (v1 << 8) | u1,
+        ],
+        false,
+    );
+}
+
+/// The 32 x 32 tile `tile` (0 to 63): sixteen a page, eight across.
+fn tile_origin(tile: u32) -> (u32, (u32, u32)) {
+    let j = tile % 16;
+    (page_4(tile / 16), ((j % 8) * 32, (j / 8) * 32))
+}
+
+/// The list of a row, after a GP0(01h) so every run starts with the texture
+/// cache empty.
+fn cache_list(row: &CacheRow) -> u32 {
+    let list = addr_of_mut!(CACHE_LIST) as *mut u32;
+    let mut at = 0usize;
+    emit_node(list, &mut at, &[0x0100_0000], false);
+    let (w, h) = row.size;
+    let (du, dv) = row.span;
+    match row.case {
+        Case::TileOne | Case::TileCycle => {
+            for index in 0..row.count {
+                let tile = if row.case == Case::TileCycle { index % 64 } else { 0 };
+                let (page, uv) = tile_origin(tile);
+                emit_flat_quad(list, &mut at, place(index, row.size), row.size, uv, row.span, page);
+            }
+        }
+        Case::SceneryCycle | Case::SceneryOne => {
+            let clut = clut_word(CACHE_CLUT_4);
+            for index in 0..row.count {
+                // 32 x 64 regions, sixteen a page on three pages.
+                let region = if row.case == Case::SceneryCycle { index % 48 } else { 0 };
+                let j = region % 16;
+                let (u0, v0) = ((j % 8) * 32, (j / 8) * 64);
+                let (x, y) = place(index, row.size);
+                emit_node(
+                    list,
+                    &mut at,
+                    &[
+                        0x3480_8080,
+                        xy(x, y),
+                        (clut << 16) | (v0 << 8) | u0,
+                        0x0070_7070,
+                        xy(x + w, y),
+                        (page_4(region / 16) << 16) | (v0 << 8) | (u0 + du),
+                        0x0060_6060,
+                        xy(x, y + h),
+                        ((v0 + dv) << 8) | u0,
+                    ],
+                    false,
+                );
+            }
+        }
+        Case::Sky => {
+            let clut = clut_word(CACHE_CLUT_8);
+            for index in 0..row.count {
+                // 48 x 32 regions, five across.
+                let (u0, v0) = ((index % 5) * 48, (index / 5) * 32);
+                let (u1, v1) = (u0 + du, v0 + dv);
+                let (x, y) = place(index, row.size);
+                emit_node(
+                    list,
+                    &mut at,
+                    &[
+                        0x3C80_8080,
+                        xy(x, y),
+                        (clut << 16) | (v0 << 8) | u0,
+                        0x0078_7878,
+                        xy(x + w, y),
+                        (page_8() << 16) | (v0 << 8) | u1,
+                        0x0070_7070,
+                        xy(x, y + h),
+                        (v1 << 8) | u0,
+                        0x0068_6868,
+                        xy(x + w, y + h),
+                        (v1 << 8) | u1,
+                    ],
+                    false,
+                );
+            }
+        }
+        Case::Near => {
+            emit_flat_quad(list, &mut at, CACHE_DRAW, row.size, (0, 0), row.span, page_4(2));
+        }
+        Case::MixedKeep | Case::MixedEvict => {
+            // The near quad reads 64 x 64 texels at 4 bits, one cache block.
+            let near_u = if row.case == Case::MixedEvict { 64 } else { 0 };
+            for cycle in 0..=MIXED_CYCLES {
+                for k in 0..MIXED_FAR {
+                    // Far quad k from row k, so the burst reads 57 x 64 texels.
+                    emit_flat_quad(
+                        list,
+                        &mut at,
+                        place(k, row.size),
+                        row.size,
+                        (0, k),
+                        row.span,
+                        page_4(2),
+                    );
+                }
+                if cycle < MIXED_CYCLES {
+                    let near = (CACHE_DRAW.0 + 128, CACHE_DRAW.1 + 64);
+                    emit_flat_quad(list, &mut at, near, (64, 64), (near_u, 0), (63, 63), page_4(2));
+                }
+            }
+        }
+    }
+    emit_node(list, &mut at, &[0x1F00_0000], true);
+    list as u32
+}
+
+/// The four 4-bit pages and the 8-bit page, no zero texel, and the CLUTs.
+fn upload_cache_pages() {
+    let mut row = [0u16; 128];
+    for y in 0..256u32 {
+        for page in 0..4u32 {
+            for (x, hw) in row.iter_mut().take(64).enumerate() {
+                let n = |k: u32| ((x as u32 * 3 + y * 5 + k * 7 + page * 11) % 15 + 1) as u16;
+                *hw = n(0) | (n(1) << 4) | (n(2) << 8) | (n(3) << 12);
+            }
+            psx_vram::upload_16bpp(
+                psx_vram::VramRect::new(
+                    (CACHE_PAGE_4_X + 64 * page) as u16,
+                    (CACHE_PAGE_Y + y) as u16,
+                    64,
+                    1,
+                ),
+                &row[..64],
+            );
+        }
+        for (x, hw) in row.iter_mut().enumerate() {
+            let lo = 1 + (x as u32 * 3 + y) % 255;
+            let hi = 1 + (x as u32 * 5 + y * 2) % 255;
+            *hw = (lo | (hi << 8)) as u16;
+        }
+        psx_vram::upload_16bpp(
+            psx_vram::VramRect::new(CACHE_PAGE_8_X as u16, (CACHE_PAGE_Y + y) as u16, 128, 1),
+            &row,
+        );
+    }
+    let mut clut = [0u16; 256];
+    for (i, colour) in clut.iter_mut().enumerate() {
+        *colour = 0x0421 * (i as u16 % 31 + 1);
+    }
+    psx_vram::upload_16bpp(
+        psx_vram::VramRect::new(CACHE_CLUT_4.0 as u16, CACHE_CLUT_4.1 as u16, 16, 1),
+        &clut[..16],
+    );
+    psx_vram::upload_16bpp(
+        psx_vram::VramRect::new(CACHE_CLUT_8.0 as u16, CACHE_CLUT_8.1 as u16, 256, 1),
+        &clut,
+    );
+}
+
+fn texture_cache_rows(records: &mut Records, next: &mut usize) {
+    upload_cache_pages();
+    v24::environment(0);
+    let mut id = CACHE_RECORD;
+    for row in &CACHE_ROWS {
+        let timing = sample_timing(id, row.count as u16, || time_refill(cache_list(row)));
+        push_timing_record(records, next, timing);
+        let depth = u32::from(row.case == Case::Sky);
+        let shape = depth | ((row.case as u32) << 1) | (row.count << 5);
+        let span = row.span.0 | (row.span.1 << 8);
+        let size = row.size.0 | (row.size.1 << 8);
+        push_timing_record(records, next, record(id + 1, shape, span, size));
+        id += 2;
+    }
+    v24::environment(0);
+}
+
+/// Displays 320 x 240, progressive, as `GPU BATCHES` and as a game: from
+/// `480I INTERLACE` on the display is 480i, which skips every other row.
+fn display_progressive(gpu: &mut Gpu) {
     gpu.set_display_enabled(false);
     gpu.set_display(DisplayConfig::new(VideoMode::Ntsc, Resolution::R320X240));
     gpu.set_display_start((0, 0));
     gpu.set_display_enabled(true);
-    texture_refill(records, next);
+}
+
+/// At 320 x 240 progressive, after `TEXTURE PAGE REFILL`. Its pages overwrite
+/// the UV-window pages, which `TEXTURE UV WINDOWS` uploads again.
+pub(crate) fn run_tex_cache(gpu: &mut Gpu, records: &mut Records, next: &mut usize) {
+    display_progressive(gpu);
+    texture_cache_rows(records, next);
 }
 
 pub(crate) fn run_calibration(records: &mut Records, next: &mut usize) {

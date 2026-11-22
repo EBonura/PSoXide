@@ -893,6 +893,8 @@ const STEPS: &[Step] = &[
     // v2.26: at 320 x 240 before the interlace step sets 480i; the UV windows
     // upload puts back the VRAM it copies over.
     step(Area::Gpu, "TEXTURE PAGE REFILL", step_tex_refill),
+    // v2.27: still at 320 x 240; TEXTURE UV WINDOWS uploads its pages again.
+    step(Area::Gpu, "TEXTURE CACHE WIPEOUT", step_tex_cache),
     step(Area::Gpu, "480I INTERLACE", step_interlace),
     step(Area::Gpu, "WORKLOAD CALIBRATION", step_calibration),
     step(Area::Gpu, "TEXTURE UV WINDOWS", step_uv_windows),
@@ -1013,6 +1015,12 @@ fn step_calibration(run: &mut Run) {
 fn step_tex_refill(run: &mut Run) {
     probe_gpu!(gpu);
     workload::run_refill(gpu, &mut run.timing.records, &mut run.next);
+    ui::repaint(run.font());
+}
+
+fn step_tex_cache(run: &mut Run) {
+    probe_gpu!(gpu);
+    workload::run_tex_cache(gpu, &mut run.timing.records, &mut run.next);
     ui::repaint(run.font());
 }
 

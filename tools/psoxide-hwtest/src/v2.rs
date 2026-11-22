@@ -1089,6 +1089,11 @@ fn build() -> BTreeMap<u32, V2Entry> {
             ["depth_pages_uvs", "uv_span_texels", "quad_pixels"],
         );
     }
+    // v2.27: texture cache rows from WipEout's frames (workload.rs texture_cache_rows), the uv_window pair layout.
+    for k in 0..15 {
+        b.put(0xC50 + 2 * k, format!("tex_cache_{k}"), ["clocks_min", "clocks_med", "clocks_max"]);
+        b.put(0xC51 + 2 * k, format!("tex_cache_row_{k}"), ["shape", "span_u_v", "size_w_h"]);
+    }
     // The second pad's pass repeats 0x760-0x776 at +0x1E0.
     let first_pass: Vec<(u32, V2Entry)> = b
         .map
