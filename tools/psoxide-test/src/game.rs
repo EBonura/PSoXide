@@ -148,6 +148,12 @@ pub struct Build {
     pub layout: Option<bool>,
     #[serde(default)]
     pub layout_reason: Option<String>,
+    /// The committed psoxide-pgo layout profiles this build links with, relative to the repo
+    /// root. Installing it needs each one to carry psoxide-pgo's search stamp (`install`,
+    /// stage/install.rs). Empty: every tracked `*.layout` file that is a layout profile. Not
+    /// written into the receipt key when empty, so a game file without it keeps its keys.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layout_files: Vec<String>,
     /// The link map inside `out` (size and symbols read it).
     #[serde(default)]
     pub map: Option<String>,

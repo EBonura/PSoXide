@@ -123,6 +123,89 @@ impl SpeedFacts {
     }
 }
 
+/// The search stamp, as psoxide-pgo defines it (tools/psoxide-pgo: `layout::SEARCHED_TAG`, and
+/// its README, "The search stamp"). `psoxide-pgo search` writes it as the second line of every
+/// layout profile it places:
+///
+/// ```text
+/// # psoxide-pgo layout 1
+/// # psoxide-pgo searched: rounds <N> seed <N>
+/// ```
+///
+/// `order` and `layout` write layouts without it, so a stamped layout's placement came from the
+/// search. Read here by this exact prefix, then `rounds N seed N`, in the profile's leading
+/// comment lines.
+pub const SEARCHED_TAG: &str = "# psoxide-pgo searched: ";
+
+/// The first line of every psoxide-pgo layout profile.
+pub const LAYOUT_MAGIC: &str = "# psoxide-pgo layout 1";
+
+/// One committed layout profile of a build being installed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommittedLayout {
+    /// Its path in the repository.
+    pub path: String,
+    /// Its text at the judged commit.
+    pub text: String,
+}
+
+/// Whether a layout profile's text carries the search stamp ([`SEARCHED_TAG`]).
+#[must_use]
+pub fn search_stamped(text: &str) -> bool {
+    text.lines()
+        .take_while(|line| line.starts_with('#'))
+        .filter_map(|line| line.strip_prefix(SEARCHED_TAG))
+        .any(|rest| {
+            let fields: Vec<&str> = rest.split(' ').collect();
+            matches!(fields.as_slice(), ["rounds", rounds, "seed", seed]
+                if rounds.parse::<u64>().is_ok() && seed.parse::<u64>().is_ok())
+        })
+}
+
+/// The layout profiles `build` links with, as committed at `commit`: its `layout_files`, or
+/// when it names none every tracked `*.layout` file whose first line is [`LAYOUT_MAGIC`]. A
+/// build that links without its layout on purpose (`layout = false`) has none. A named file
+/// that the commit lacks, or that is not a layout profile, is an error.
+pub fn committed_layouts(
+    repo: &Path,
+    commit: &str,
+    build: &crate::game::Build,
+) -> Result<Vec<CommittedLayout>, String> {
+    if build.layout == Some(false) {
+        return Ok(Vec::new());
+    }
+    let declared = !build.layout_files.is_empty();
+    let paths: Vec<String> = if declared {
+        build.layout_files.clone()
+    } else {
+        util::git(repo, &["ls-tree", "-r", "--name-only", commit])?
+            .lines()
+            .filter(|path| path.ends_with(".layout"))
+            .map(str::to_string)
+            .collect()
+    };
+    let mut layouts = Vec::new();
+    for path in paths {
+        let text = util::git(repo, &["show", &format!("{commit}:{path}")]).map_err(|e| {
+            format!(
+                "build `{}` names layout file `{path}`, which commit {} does not hold: {e}",
+                build.name,
+                util::short(commit)
+            )
+        })?;
+        if text.lines().next() == Some(LAYOUT_MAGIC) {
+            layouts.push(CommittedLayout { path, text });
+        } else if declared {
+            return Err(format!(
+                "build `{}` names layout file `{path}`, which is not a psoxide-pgo layout \
+                 profile (no `{LAYOUT_MAGIC}` first line)",
+                build.name
+            ));
+        }
+    }
+    Ok(layouts)
+}
+
 /// The install guarantee. `Ok` with the result's own speed facts (to store beside the installed
 /// disc) when `r` (whose content hash is `hash`) may be installed over a build whose facts are
 /// `installed` (`None`: no facts recorded yet, the first install under this rule, accepted):
@@ -134,16 +217,14 @@ impl SpeedFacts {
 ///   mean frames presented not below the installed build's, within the strict bar's tolerance
 ///   (the installed build's own spread over its offsets, `WindowBase::tolerance`, no slack).
 ///   A row the installed build had and this result lacks is refused, not skipped.
-//
-// TODO(searched layout): the owner's install bar includes "searched layout". There is no cheap
-// honest signal for it today: no game file declares its placement layout (no build sets
-// `layout`), and the build stage only sees psoxide-pgo's bind line (a layout bound to this build),
-// not whether that layout came from the placement search. Require it here once a build declares
-// its layout file and psoxide-pgo reports the layout's search provenance.
+/// - a searched layout: every committed layout profile of the installed builds (`layouts`, from
+///   [`committed_layouts`] at the result's commit) carries psoxide-pgo's search stamp
+///   ([`SEARCHED_TAG`]); a game with no layout profile passes.
 pub fn check(
     hash: &str,
     r: &RunResult,
     installed: Option<&SpeedFacts>,
+    layouts: &[CommittedLayout],
 ) -> Result<SpeedFacts, String> {
     let at = util::short(hash);
     if r.tier != "full" || r.verdict != Status::Pass || !r.landing_missing.is_empty() {
@@ -169,6 +250,22 @@ pub fn check(
             "result {at} is a {}-profile PASS, not an install pass: run `psoxide-test run --tier \
              full` (the install profile) on these bytes",
             r.profile.name()
+        ));
+    }
+    let greedy: Vec<&str> = layouts
+        .iter()
+        .filter(|l| !search_stamped(&l.text))
+        .map(|l| l.path.as_str())
+        .collect();
+    if !greedy.is_empty() {
+        return Err(format!(
+            "result {at} links with a layout that `psoxide-pgo search` did not write (no \
+             `{SEARCHED_TAG}rounds N seed N` line at commit {}): {}. Run the layout search on \
+             this code (`psoxide-pgo search ... --start recorded` from the committed layout, or \
+             the game's search step), commit the layout it writes, then bless and run the full \
+             tier on that commit",
+            util::short(&r.commit),
+            greedy.join(", ")
         ));
     }
     let facts = SpeedFacts::of(hash, r);
@@ -273,7 +370,12 @@ fn one(ctx: &Ctx<'_>, install: &crate::game::Install) -> StageResult {
         Ok(f) => f,
         Err(e) => return result(Outcome::error("install", e)),
     };
-    let facts = match check(&hash, &judged, installed.as_ref()).and_then(|f| f.to_json()) {
+    let layouts = match committed_layouts(&ctx.repo, &judged.commit, b) {
+        Ok(l) => l,
+        Err(e) => return result(Outcome::error("install", e)),
+    };
+    let facts = match check(&hash, &judged, installed.as_ref(), &layouts).and_then(|f| f.to_json())
+    {
         Ok(f) => f,
         Err(e) => return result(Outcome::error("install", e)),
     };
@@ -372,32 +474,36 @@ fn one(ctx: &Ctx<'_>, install: &crate::game::Install) -> StageResult {
     }
 }
 
-/// `psoxide-test install-check --result RESULT.json --facts INSTALLED_FACTS.json
+/// `psoxide-test install-check --result RESULT.json --facts INSTALLED_FACTS.json --repo DIR
 /// [--write-facts OUT.json]`: [`check`] for an install made outside this stage (the campaign's
 /// install script). Exit 0 only when RESULT may be installed; a missing facts file is the first
-/// install. `--write-facts` writes RESULT's speed facts for the caller to keep beside the disc.
+/// install. `--repo` is a clone of the game holding RESULT's commit: the layouts of the game
+/// file's `[[install]]` builds are read there at that commit. `--write-facts` writes RESULT's
+/// speed facts for the caller to keep beside the disc.
 pub fn check_command(args: &[String]) -> Result<std::process::ExitCode, String> {
-    let (mut result, mut facts, mut write) = (None, None, None);
+    let (mut result, mut facts, mut repo, mut write) = (None, None, None, None);
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut value = || it.next().cloned().ok_or(format!("{a} needs a value"));
         match a.as_str() {
             "--result" => result = Some(value()?),
             "--facts" => facts = Some(value()?),
+            "--repo" => repo = Some(value()?),
             "--write-facts" => write = Some(value()?),
             other => return Err(format!("install-check: unknown argument `{other}`")),
         }
     }
-    let (Some(result), Some(facts)) = (result, facts) else {
+    let (Some(result), Some(facts), Some(repo)) = (result, facts, repo) else {
         return Err(
             "usage: psoxide-test install-check --result RESULT.json --facts \
-                    INSTALLED_FACTS.json [--write-facts OUT.json]"
+                    INSTALLED_FACTS.json --repo GAME_CLONE [--write-facts OUT.json]"
                 .into(),
         );
     };
     let (hash, r) = read_result(Path::new(&result))?;
     let installed = SpeedFacts::load(Path::new(&facts))?;
-    match check(&hash, &r, installed.as_ref()) {
+    let layouts = install_layouts(Path::new(&repo), &r.commit)?;
+    match check(&hash, &r, installed.as_ref(), &layouts) {
         Ok(new) => {
             if let Some(out) = write {
                 std::fs::write(&out, new.to_json()?).map_err(|e| format!("write {out}: {e}"))?;
@@ -418,6 +524,37 @@ pub fn check_command(args: &[String]) -> Result<std::process::ExitCode, String> 
             Ok(std::process::ExitCode::FAILURE)
         }
     }
+}
+
+/// The committed layouts of every `[[install]]` build in the game file at `commit` in `repo`.
+fn install_layouts(repo: &Path, commit: &str) -> Result<Vec<CommittedLayout>, String> {
+    let file = format!("{commit}:{}", crate::game::GAME_FILE);
+    let text = util::git(repo, &["show", &file]).map_err(|e| {
+        format!(
+            "--repo {}: no game file at {}: {e}",
+            repo.display(),
+            util::short(commit)
+        )
+    })?;
+    let game = crate::game::Game::parse(&text).map_err(|e| format!("{file}: {e}"))?;
+    if game.installs.is_empty() {
+        return Err(format!("{file} declares no [[install]]"));
+    }
+    let mut layouts = Vec::new();
+    for install in &game.installs {
+        let build = game.build(&install.build).ok_or_else(|| {
+            format!(
+                "{file}: [[install]] names unknown build `{}`",
+                install.build
+            )
+        })?;
+        for layout in committed_layouts(repo, commit, build)? {
+            if !layouts.contains(&layout) {
+                layouts.push(layout);
+            }
+        }
+    }
+    Ok(layouts)
 }
 
 /// A result file by path: its content hash and contents. A file named `<sha256>.json` must hash
@@ -501,7 +638,7 @@ mod tests {
     #[test]
     fn the_first_install_is_accepted_and_its_facts_recorded() {
         let r = passing([100, 102, 104], [790, 786, 782]);
-        let facts = check("ab", &r, None).unwrap();
+        let facts = check("ab", &r, None, &[]).unwrap();
         assert_eq!(facts.result_sha256, "ab");
         assert_eq!(
             facts.windows["w"],
@@ -523,7 +660,7 @@ mod tests {
     fn a_landing_profile_result_is_refused() {
         let mut r = passing([100, 102, 104], [790, 786, 782]);
         r.profile = Profile::Landing;
-        let e = check("ab", &r, None).unwrap_err();
+        let e = check("ab", &r, None, &[]).unwrap_err();
         assert!(
             e.contains("landing-profile PASS, not an install pass"),
             "{e}"
@@ -535,48 +672,194 @@ mod tests {
         let base = passing([100, 102, 104], [790, 786, 782]);
         let mut r = base.clone();
         r.landing_missing = vec!["tier full".into()];
-        assert!(check("ab", &r, None)
+        assert!(check("ab", &r, None, &[])
             .unwrap_err()
             .contains("complete full PASS"));
         let mut r = base.clone();
         r.verdict = Status::Fail;
-        assert!(check("ab", &r, None)
+        assert!(check("ab", &r, None, &[])
             .unwrap_err()
             .contains("complete full PASS"));
         let mut r = base;
         r.dirty = true;
-        assert!(check("ab", &r, None).unwrap_err().contains("dirty"));
+        assert!(check("ab", &r, None, &[]).unwrap_err().contains("dirty"));
     }
 
     #[test]
     fn slower_than_the_installed_build_is_refused() {
-        let installed = check("old", &passing([100, 102, 104], [790, 786, 782]), None).unwrap();
+        let installed =
+            check("old", &passing([100, 102, 104], [790, 786, 782]), None, &[]).unwrap();
         // Spread over three offsets: work (104-100)/3, flips (790-782)/3. Inside it passes.
         let same = passing([101, 103, 105], [789, 785, 781]);
-        assert!(check("new", &same, Some(&installed)).is_ok());
+        assert!(check("new", &same, Some(&installed), &[]).is_ok());
         let faster = passing([90, 91, 92], [795, 790, 788]);
-        assert!(check("new", &faster, Some(&installed)).is_ok());
+        assert!(check("new", &faster, Some(&installed), &[]).is_ok());
         let more_work = passing([103, 105, 107], [790, 786, 782]);
-        let e = check("new", &more_work, Some(&installed)).unwrap_err();
+        let e = check("new", &more_work, Some(&installed), &[]).unwrap_err();
         assert!(e.contains("window `w` work per frame is 105.0"), "{e}");
         assert!(e.contains("had 102.0"), "{e}");
         let fewer_flips = passing([100, 102, 104], [786, 782, 778]);
-        let e = check("new", &fewer_flips, Some(&installed)).unwrap_err();
+        let e = check("new", &fewer_flips, Some(&installed), &[]).unwrap_err();
         assert!(e.contains("window `w` frames presented is 782.0"), "{e}");
         assert!(e.contains("had 786.0"), "{e}");
         // A window the installed build was judged on must be measured again.
         let mut gone = passing([100, 102, 104], [790, 786, 782]);
         gone.stages.clear();
-        assert!(check("new", &gone, Some(&installed))
+        assert!(check("new", &gone, Some(&installed), &[])
             .unwrap_err()
             .contains("has no numbers for it"));
+    }
+
+    /// A git repository holding a game file (one build `b`, installed; `extra` is appended to
+    /// its `[[build]]`) and `files`, committed. Returns its path and the commit.
+    fn game_repo(dir: &Path, extra: &str, files: &[(&str, &str)]) -> (std::path::PathBuf, String) {
+        let repo = dir.join("game");
+        std::fs::create_dir_all(&repo).unwrap();
+        let game = format!(
+            "schema = 1\nname = \"g\"\nrepository = \"o/g\"\n[[build]]\nname = \"b\"\n\
+             out = \"o\"\ncommands = [[\"true\"]]\ndisc = \"g.cue\"\n{extra}\n\
+             [[install]]\nbuild = \"b\"\n"
+        );
+        std::fs::write(repo.join(crate::game::GAME_FILE), game).unwrap();
+        for (path, text) in files {
+            let path = repo.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(status.status.success(), "{status:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "c"]);
+        let commit = util::git(&repo, &["rev-parse", "HEAD"]).unwrap();
+        (repo, commit)
+    }
+
+    const GREEDY: &str = "# psoxide-pgo layout 1\n# features: (default)\n# variant: profi\n\
+                          f 0000000000000001 1 a\nw 0:5\n";
+    const SEARCHED: &str = "# psoxide-pgo layout 1\n# psoxide-pgo searched: rounds 600 seed 1\n\
+                            # features: (default)\n# variant: profi\nf 0000000000000001 1 a\n\
+                            w 0:5\n# placement: psoxide-pgo search, seed 1 rounds 600\n\
+                            s 80010000\no 0000000000000001 1 80010000 a\n";
+
+    #[test]
+    fn the_search_stamp_is_read_from_the_header_only() {
+        assert!(search_stamped(SEARCHED));
+        assert!(!search_stamped(GREEDY));
+        // The pre-stamp record of a search is not the stamp.
+        assert!(!search_stamped(
+            &SEARCHED.replace("# psoxide-pgo searched: rounds 600 seed 1\n", "")
+        ));
+        // Below the header, or malformed, it does not count.
+        assert!(!search_stamped(&format!(
+            "{GREEDY}# psoxide-pgo searched: rounds 600 seed 1\n"
+        )));
+        for bad in [
+            "rounds 600",
+            "rounds x seed 1",
+            "seed 1 rounds 600",
+            "rounds 6 seed 1 x",
+        ] {
+            assert!(
+                !search_stamped(&format!("{LAYOUT_MAGIC}\n{SEARCHED_TAG}{bad}\n")),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_install_whose_layout_was_not_searched_is_refused() {
+        let r = passing([100, 102, 104], [790, 786, 782]);
+        let layout = |path: &str, text: &str| CommittedLayout {
+            path: path.into(),
+            text: text.into(),
+        };
+        // No layout at all: nothing to search.
+        assert!(check("ab", &r, None, &[]).is_ok());
+        assert!(check("ab", &r, None, &[layout("pgo/g.layout", SEARCHED)]).is_ok());
+        let e = check(
+            "ab",
+            &r,
+            None,
+            &[
+                layout("pgo/g.layout", SEARCHED),
+                layout("pgo/t.layout", GREEDY),
+            ],
+        )
+        .unwrap_err();
+        assert!(
+            e.contains("did not write") && e.contains("pgo/t.layout"),
+            "{e}"
+        );
+        assert!(!e.contains("pgo/g.layout"), "{e}");
+        assert!(e.contains("psoxide-pgo search"), "{e}");
+    }
+
+    #[test]
+    fn the_committed_layouts_are_the_declared_ones_or_every_tracked_layout_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let (repo, commit) = game_repo(
+            dir.path(),
+            "",
+            &[
+                ("pgo/g.layout", SEARCHED),
+                ("pgo/t.layout", GREEDY),
+                ("docs/not-a-profile.layout", "some other format\n"),
+            ],
+        );
+        let game = crate::game::Game::load(&repo).unwrap();
+        let mut b = game.builds.into_iter().next().unwrap();
+        let paths = |b: &crate::game::Build| -> Vec<String> {
+            committed_layouts(&repo, &commit, b)
+                .unwrap()
+                .into_iter()
+                .map(|l| l.path)
+                .collect()
+        };
+        assert_eq!(paths(&b), ["pgo/g.layout", "pgo/t.layout"]);
+        // A working-tree edit is not the commit's layout.
+        std::fs::write(repo.join("pgo/t.layout"), SEARCHED).unwrap();
+        let t = committed_layouts(&repo, &commit, &b).unwrap();
+        assert_eq!(t[1].text.trim_end(), GREEDY.trim_end());
+        b.layout_files = vec!["pgo/g.layout".into()];
+        assert_eq!(paths(&b), ["pgo/g.layout"]);
+        b.layout_files = vec!["pgo/gone.layout".into()];
+        assert!(committed_layouts(&repo, &commit, &b)
+            .unwrap_err()
+            .contains("does not hold"));
+        b.layout_files = vec!["docs/not-a-profile.layout".into()];
+        assert!(committed_layouts(&repo, &commit, &b)
+            .unwrap_err()
+            .contains("not a psoxide-pgo layout profile"));
+        b.layout_files.clear();
+        b.layout = Some(false);
+        assert!(paths(&b).is_empty());
     }
 
     #[test]
     fn install_check_reads_the_result_and_writes_the_facts() {
         let dir = tempfile::tempdir().unwrap();
+        let (repo, commit) = game_repo(dir.path(), "", &[("pgo/g.layout", SEARCHED)]);
+        let repo = repo.display().to_string();
         let write_result = |r: &RunResult| {
-            let json = serde_json::to_string_pretty(r).unwrap();
+            let mut r = r.clone();
+            r.commit = commit.clone();
+            let json = serde_json::to_string_pretty(&r).unwrap();
             let path = dir
                 .path()
                 .join(format!("{}.json", util::sha256_bytes(json.as_bytes())));
@@ -585,29 +868,61 @@ mod tests {
         };
         let facts = dir.path().join("installed.json").display().to_string();
         let out = dir.path().join("out.json").display().to_string();
-        let args = |result: &str| -> Vec<String> {
-            ["--result", result, "--facts", &facts, "--write-facts", &out]
-                .iter()
-                .map(|s| s.to_string())
-                .collect()
+        let args = |result: &str, repo: &str| -> Vec<String> {
+            [
+                "--result",
+                result,
+                "--facts",
+                &facts,
+                "--repo",
+                repo,
+                "--write-facts",
+                &out,
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
         };
         let first = write_result(&passing([100, 102, 104], [790, 786, 782]));
         assert_eq!(
-            check_command(&args(&first)).unwrap(),
+            check_command(&args(&first, &repo)).unwrap(),
             std::process::ExitCode::SUCCESS
         );
         std::fs::rename(&out, &facts).unwrap();
         let slower = write_result(&passing([110, 112, 114], [790, 786, 782]));
         assert_eq!(
-            check_command(&args(&slower)).unwrap(),
+            check_command(&args(&slower, &repo)).unwrap(),
             std::process::ExitCode::FAILURE
         );
         let mut landing = passing([100, 102, 104], [790, 786, 782]);
         landing.profile = Profile::Landing;
         let landing = write_result(&landing);
         assert_eq!(
-            check_command(&args(&landing)).unwrap(),
+            check_command(&args(&landing, &repo)).unwrap(),
             std::process::ExitCode::FAILURE
         );
+        // Without --repo the layout cannot be checked: refused as a usage error.
+        let mut no_repo = args(&first, &repo);
+        no_repo.drain(4..6);
+        assert!(check_command(&no_repo).unwrap_err().contains("--repo"));
+        // The same result against a clone whose layout at that commit is greedy is refused.
+        let greedy_dir = tempfile::tempdir().unwrap();
+        let (greedy_repo, greedy_commit) =
+            game_repo(greedy_dir.path(), "", &[("pgo/g.layout", GREEDY)]);
+        let mut r = passing([100, 102, 104], [790, 786, 782]);
+        r.commit = greedy_commit;
+        let json = serde_json::to_string_pretty(&r).unwrap();
+        let path = greedy_dir.path().join("r.json");
+        std::fs::write(&path, json).unwrap();
+        assert_eq!(
+            check_command(&args(
+                &path.display().to_string(),
+                &greedy_repo.display().to_string()
+            ))
+            .unwrap(),
+            std::process::ExitCode::FAILURE
+        );
+        // A repo without the result's commit is an error, never a pass.
+        assert!(check_command(&args(&first, &greedy_repo.display().to_string())).is_err());
     }
 }

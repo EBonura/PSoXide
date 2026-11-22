@@ -108,10 +108,26 @@ disc as `<Name>.speed-facts.json`:
 ```
 
 No facts file means the first install under this rule: accepted, and the facts are written with
-the disc. `psoxide-test install-check --result R.json --facts INSTALLED.json [--write-facts
-OUT.json]` applies the same check (exit 0 = may install) and writes R's facts for the caller to
-store. A "searched layout" requirement is not enforced yet: no build declares its placement
-layout and nothing reports whether a layout came from the search (TODO in `stage/install.rs`).
+the disc. `psoxide-test install-check --result R.json --facts INSTALLED.json --repo GAME_CLONE
+[--write-facts OUT.json]` applies the same check (exit 0 = may install) and writes R's facts for
+the caller to store. `--repo` is a clone of the game holding R's commit: the layouts are read
+there, at that commit.
+
+The install also needs a searched layout. Every committed psoxide-pgo layout profile of the
+installed builds must carry the search stamp that `psoxide-pgo search` writes as its second
+line (format defined in tools/psoxide-pgo, README "The search stamp"):
+
+```
+# psoxide-pgo layout 1
+# psoxide-pgo searched: rounds <N> seed <N>
+```
+
+The layouts are read at the result's commit: a `[[build]]`'s `layout_files` (paths in the repo),
+or when it names none every tracked `*.layout` file whose first line is `# psoxide-pgo layout
+1`. A game with no layout profile passes; a build with `layout = false` has none. A layout from
+`order` or `layout` (greedy), or one searched before the stamp existed, is refused: run the
+game's layout search on the commit (`psoxide-pgo search ... --start recorded` continues from the
+committed placement), commit the layout, bless, and run the full tier on that commit.
 
 ## Receipts and the SDK pin
 

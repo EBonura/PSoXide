@@ -53,11 +53,13 @@ usage:
       crates the game reaches (--crates lists them); --write records the pin's guest tree
   psoxide-test install [--repo DIR]
       install the judged disc into the configured library (needs a complete clean full PASS on
-      the install profile, never slower per speed window than the build installed before it)
-  psoxide-test install-check --result RESULT.json --facts INSTALLED_FACTS.json [--write-facts OUT.json]
+      the install profile, a searched layout, never slower per speed window than the build
+      installed before it)
+  psoxide-test install-check --result RESULT.json --facts INSTALLED_FACTS.json --repo GAME_CLONE [--write-facts OUT.json]
       the same guarantee for an install made elsewhere: exit 0 only if RESULT may replace the
-      build whose speed facts are INSTALLED_FACTS (missing = first install); --write-facts
-      writes RESULT's speed facts in that format
+      build whose speed facts are INSTALLED_FACTS (missing = first install) and its committed
+      layouts (read in GAME_CLONE at RESULT's commit) were searched; --write-facts writes
+      RESULT's speed facts in that format
 config: ~/.config/psoxide-test/config.toml or PSOXIDE_TEST_CONFIG (see config.example.toml)";
 
 const STAGES: &[&str] = &[

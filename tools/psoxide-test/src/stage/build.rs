@@ -463,6 +463,14 @@ fn newest(repo: &Path, source: &str) -> Result<PathBuf, String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_build_naming_no_layout_files_keeps_its_declaration_and_key() {
+        let mut b = build(&[]);
+        assert!(!serde_json::to_string(&b).unwrap().contains("layout_files"));
+        b.layout_files = vec!["pgo/g.layout".into()];
+        assert!(serde_json::to_string(&b).unwrap().contains("layout_files"));
+    }
+
     fn build(inputs: &[&str]) -> Build {
         crate::game::Game::parse(&format!(
             "schema = 1\nname = \"g\"\nrepository = \"o/g\"\n[[build]]\nname = \"b\"\n\
