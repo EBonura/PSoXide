@@ -66,6 +66,11 @@ pub fn judge_metric(name: &str, m: &Metric, value: u64, base: Option<u64>, bless
 }
 
 /// The host stage. `bless` records metrics instead of judging them against the baseline.
+/// The variable a game's host check reads for the landing allowance, in permille.
+pub const LANDING_SLACK_ENV: &str = "PSOXIDE_LANDING_SLACK_PERMILLE";
+/// The landing allowance on a game's own host ceilings: 5%, as on the speed rows.
+pub const LANDING_HOST_SLACK_PERMILLE: u32 = 50;
+
 pub fn run(ctx: &Ctx<'_>, bless: bool) -> StageResult {
     let mut checks = Vec::new();
     let mut facts = std::collections::BTreeMap::new();
@@ -232,6 +237,16 @@ fn one(
     let mut env = ctx.command_env(&ctx.work.join("guest-stage"), &host.env, &host.env_remove)?;
     if let Some(m) = model {
         env.push(("PSOXIDE_HARDWARE".into(), Some(m.to_string())));
+    }
+    // Under the landing profile a game's own layout-sensitive host ceilings (frame pacing) get the
+    // same allowance as the speed rows, read by the game from this variable; the committed
+    // ceilings stay the install bar. It is part of the receipt key, so a landing pass never
+    // answers for an install run.
+    if ctx.profile == super::Profile::Landing {
+        env.push((
+            LANDING_SLACK_ENV.into(),
+            Some(LANDING_HOST_SLACK_PERMILLE.to_string()),
+        ));
     }
     for (k, v) in &env {
         match host.env.get(k) {
