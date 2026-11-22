@@ -91,17 +91,33 @@ pub struct Requires {
     pub file: String,
 }
 
-/// An SDK pin written in a script: the hex revision right after `after` in `file`.
+/// The game file's `[sdk]`: an SDK pin written in a script (the hex revision right after `after`
+/// in `file`; both or neither), and an optional `[sdk.defer]`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SdkPin {
-    pub file: String,
-    pub after: String,
+    #[serde(default)]
+    pub file: Option<String>,
+    #[serde(default)]
+    pub after: Option<String>,
     #[serde(default = "sdk_repository")]
     pub repository: String,
     /// The guest tree of that revision, recorded (optional; checked when present).
     #[serde(default)]
     pub guest_tree: Option<String>,
+    /// A time-boxed exception to the pin rule for landings (pin.rs `deferral`).
+    #[serde(default)]
+    pub defer: Option<SdkDefer>,
+}
+
+/// `[sdk.defer]`: the pin may stay one SDK guest move behind main for landing runs only, until
+/// `until` (RFC 3339 UTC, at most 48 h after that move's commit), for `reason`. Checked when the
+/// pin rule runs, never here, so an expired or refused one reads as a pin failure that says why.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct SdkDefer {
+    pub until: String,
+    pub reason: String,
 }
 
 fn sdk_repository() -> String {
@@ -519,6 +535,11 @@ impl Game {
         if self.builds.is_empty() {
             return Err("at least one [[build]] is needed".into());
         }
+        if let Some(sdk) = &self.sdk {
+            if sdk.file.is_some() != sdk.after.is_some() {
+                return Err("[sdk]: `file` and `after` go together (or neither)".into());
+            }
+        }
         let mut names = std::collections::BTreeSet::new();
         for b in &self.builds {
             if !names.insert(b.name.as_str()) {
@@ -811,6 +832,23 @@ commands = [["make", "build"]]
 disc = "Game.cue"
 map = "link.map"
 "#;
+
+    #[test]
+    fn an_sdk_defer_stands_alone_or_beside_a_script_pin() {
+        let defer = "[sdk.defer]\nuntil = \"2026-11-24T06:00:00Z\"\nreason = \"resident RAM\"\n";
+        let game = Game::parse(&format!("{MINIMAL}{defer}")).unwrap();
+        let sdk = game.sdk.unwrap();
+        assert_eq!(sdk.file, None);
+        assert_eq!(sdk.defer.unwrap().until, "2026-11-24T06:00:00Z");
+        let script = "[sdk]\nfile = \"b.sh\"\nafter = \"REV=\"\n";
+        assert!(Game::parse(&format!("{MINIMAL}{script}{defer}")).is_ok());
+        let half = "[sdk]\nfile = \"b.sh\"\n";
+        assert!(Game::parse(&format!("{MINIMAL}{half}"))
+            .unwrap_err()
+            .contains("go together"));
+        let typo = "[sdk.defer]\nuntil = \"2026-11-24T06:00:00Z\"\nwhy = \"x\"\n";
+        assert!(Game::parse(&format!("{MINIMAL}{typo}")).is_err());
+    }
 
     #[test]
     fn extra_pads_and_hold_last_are_checked() {

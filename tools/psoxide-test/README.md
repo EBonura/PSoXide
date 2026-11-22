@@ -178,6 +178,24 @@ declared inputs), never on paths or the clock, so a pin move that leaves the byt
 re-runs only the build and the clean clone. A repo may pin any SDK commit whose guest tree equals
 SDK main's: the `sdk` stage checks it first (`psoxide-test pin`).
 
+A game one SDK move behind may keep landing (never installing) for a short while with
+
+```toml
+[sdk.defer]
+until = "2026-11-24T06:00:00Z"   # RFC 3339 UTC
+reason = "resident RAM over budget on the new SDK"
+```
+
+The `sdk` stage then passes as DEFERRED only when every one of these holds: the run is
+`--profile landing`; `reason` is not empty; now is before `until`; the pin's guest tree (as this
+game sees it) is that of a recent commit of SDK main; and `until` is at most 48 h after the first
+commit since then that moved the game's guest tree. One landing is often several commits and git
+does not record where a landing ends, so the window starts at the first change the game lacks:
+a game can never trail a guest change by more than 48 h, however many landings follow it.
+Anything else is the plain pin failure, with the reason the deferral did not apply. A deferred
+result records `sdk_deferred` and is refused by `install` and `install-check`. `psoxide-test pin`
+prints, for a stale pin, where it left main and the latest `until` allowed.
+
 Original game files (`{input:NAME}`) enter keys by content (a git checkout by commit plus its
 dirty files). Every child the harness starts leads its own process group and is killed when its
 job returns, on a signal, or by a small reaper if the harness itself is killed.

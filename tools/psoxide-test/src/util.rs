@@ -264,6 +264,40 @@ pub fn rfc3339_utc(seconds: u64) -> String {
     )
 }
 
+/// The inverse of [`rfc3339_utc`]: seconds since the Unix epoch of `YYYY-MM-DDTHH:MM:SSZ`, or
+/// `None` for any other shape (an offset other than `Z`, fractions, a date that does not exist).
+pub fn parse_rfc3339_utc(text: &str) -> Option<u64> {
+    let b = text.as_bytes();
+    let shape_ok = b.len() == 20
+        && b.iter().enumerate().all(|(i, c)| match i {
+            4 | 7 => *c == b'-',
+            10 => *c == b'T',
+            13 | 16 => *c == b':',
+            19 => *c == b'Z',
+            _ => c.is_ascii_digit(),
+        });
+    if !shape_ok {
+        return None;
+    }
+    let num = |from: usize, to: usize| text[from..to].parse::<i64>().ok();
+    let (year, month, day) = (num(0, 4)?, num(5, 7)?, num(8, 10)?);
+    let (hour, minute, second) = (num(11, 13)?, num(14, 16)?, num(17, 19)?);
+    if !(1..=12).contains(&month) || day < 1 || hour > 23 || minute > 59 || second > 59 {
+        return None;
+    }
+    // Days since 1970-01-01 from the civil date (proleptic Gregorian).
+    let y = year - i64::from(month <= 2);
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let seconds = u64::try_from(days * 86_400 + hour * 3600 + minute * 60 + second).ok()?;
+    // A day past the month's end (02-30) maps to another date: refuse it by the round trip.
+    (rfc3339_utc(seconds) == text).then_some(seconds)
+}
+
 /// Now, as [`rfc3339_utc`].
 pub fn utc_now() -> String {
     rfc3339_utc(
@@ -355,6 +389,19 @@ mod tests {
         assert_eq!(rfc3339_utc(0), "1970-01-01T00:00:00Z");
         assert_eq!(rfc3339_utc(951_782_400), "2000-02-29T00:00:00Z");
         assert_eq!(rfc3339_utc(1_795_350_896), "2026-11-22T12:34:56Z");
+        for t in [0, 951_782_400, 1_795_350_896, 4_102_444_799] {
+            assert_eq!(parse_rfc3339_utc(&rfc3339_utc(t)), Some(t));
+        }
+        for bad in [
+            "2026-11-22T12:34:56+00:00",
+            "2026-11-22 12:34:56Z",
+            "2026-02-30T00:00:00Z",
+            "2026-11-22T24:00:00Z",
+            "2026-11-22T12:34:56.5Z",
+            "",
+        ] {
+            assert_eq!(parse_rfc3339_utc(bad), None, "{bad}");
+        }
     }
 
     #[test]

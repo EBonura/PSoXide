@@ -150,6 +150,11 @@ pub struct RunResult {
     /// The SDK pin rule's line: "guest tree equals main <sha12>" or why not.
     #[serde(default)]
     pub sdk_guest: String,
+    /// Set when the `sdk` stage passed only by the game file's `[sdk.defer]` (landing runs
+    /// only): the pin is one SDK guest move behind main. Install and disc guards refuse such a
+    /// result. Not written when absent, so other results keep their bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sdk_deferred: Option<crate::pin::Deferred>,
     pub harness: String,
     pub gate_revision: String,
     pub tier: String,
@@ -372,6 +377,7 @@ mod tests {
             dirty: false,
             sdk_pin: "s".repeat(40),
             sdk_guest: String::new(),
+            sdk_deferred: None,
             harness: "0.1.0".into(),
             gate_revision: "r".repeat(40),
             tier: "quick".into(),

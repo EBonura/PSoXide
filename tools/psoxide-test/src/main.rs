@@ -352,7 +352,10 @@ fn run(o: &Options) -> Result<ExitCode, String> {
     let mut stages = Vec::new();
     // The SDK pin rule first: it is not a receipt (SDK main moves), and a run that cannot
     // show it is not a landing.
-    let (sdk, sdk_guest) = ctx.timed("sdk", || sdk_stage(&o.repo, &game, config.work.as_path()));
+    let now = util::now_seconds().max(0.0) as u64;
+    let (sdk, sdk_guest, sdk_deferred) = ctx.timed("sdk", || {
+        sdk_stage(&o.repo, &game, config.work.as_path(), o.profile, now)
+    });
     // The first failed stage, once the run stops at it. Only a full tier stops: a quick tier is
     // already cheap, and repin flows run it expecting a size or speed red before they bless.
     // `--keep-going` never stops. A failed SDK pin does not stop the run: it judges the pin, not
@@ -462,6 +465,7 @@ fn run(o: &Options) -> Result<ExitCode, String> {
         dirty,
         sdk_pin: stage::sdk_pin(&o.repo, &game),
         sdk_guest,
+        sdk_deferred,
         harness: env!("CARGO_PKG_VERSION").into(),
         gate_revision: GATE_REVISION.into(),
         tier: o.tier.name().into(),
@@ -855,9 +859,52 @@ fn install(o: &Options) -> Result<ExitCode, String> {
 }
 
 /// The SDK pin rule (pin.rs) as a stage: the pinned commit's guest tree against SDK main's.
-/// Returns the stage and the line the result header shows.
-fn sdk_stage(repo: &Path, game: &Game, work_root: &Path) -> (StageResult, String) {
-    let stage = |checks: Vec<Check>| StageResult {
+/// Returns the stage, the line the result header shows, and the deferral when the stage passed
+/// only by the game file's `[sdk.defer]` (`now` is seconds since the epoch).
+fn sdk_stage(
+    repo: &Path,
+    game: &Game,
+    work_root: &Path,
+    profile: stage::Profile,
+    now: u64,
+) -> (StageResult, String, Option<pin::Deferred>) {
+    let Some(pin) = pin::read(repo, Some(game)) else {
+        return (
+            sdk_stage_of(vec![Check::skip(
+                "sdk pin",
+                "no pin found in components.lock.json, sdk.lock.json or the game file's [sdk]",
+            )]),
+            "SDK pin unknown".into(),
+            None,
+        );
+    };
+    let scope = scope::of_game(repo);
+    let judged = pin::Mirror::open(work_root, &pin.repository).and_then(|mirror| {
+        let verdict = pin::judge(&mirror, &pin, &scope, None)?;
+        let defer = game.sdk.as_ref().and_then(|s| s.defer.as_ref());
+        let deferral = match defer {
+            Some(d) if verdict.pinned_tree != verdict.main_tree => {
+                Some(pin::deferral(&mirror, &verdict, &scope, d, profile, now))
+            }
+            _ => None,
+        };
+        Ok((verdict, deferral))
+    });
+    match judged {
+        Ok((verdict, deferral)) => sdk_checks(&verdict, deferral),
+        Err(e) => (
+            sdk_stage_of(vec![Check::fail(
+                format!("sdk pin ({})", pin.file),
+                format!("cannot apply the pin rule: {e}"),
+            )]),
+            "guest tree not checked".into(),
+            None,
+        ),
+    }
+}
+
+fn sdk_stage_of(checks: Vec<Check>) -> StageResult {
+    StageResult {
         name: "sdk".into(),
         source: Source::Run,
         key: String::new(),
@@ -865,28 +912,15 @@ fn sdk_stage(repo: &Path, game: &Game, work_root: &Path) -> (StageResult, String
             checks,
             ..Outcome::default()
         },
-    };
-    let Some(pin) = pin::read(repo, Some(game)) else {
-        return (
-            stage(vec![Check::skip(
-                "sdk pin",
-                "no pin found in components.lock.json, sdk.lock.json or the game file's [sdk]",
-            )]),
-            "SDK pin unknown".into(),
-        );
-    };
-    let verdict = match pin::judge(work_root, &pin, &scope::of_game(repo), None) {
-        Ok(v) => v,
-        Err(e) => {
-            return (
-                stage(vec![Check::fail(
-                    format!("sdk pin ({})", pin.file),
-                    format!("cannot apply the pin rule: {e}"),
-                )]),
-                "guest tree not checked".into(),
-            )
-        }
-    };
+    }
+}
+
+/// The `sdk` stage's checks for a verdict, and `deferral`: `None` when the game file declares no
+/// `[sdk.defer]` (or the pin is current), else whether it holds ([`pin::deferral`]).
+fn sdk_checks(
+    verdict: &pin::Verdict,
+    deferral: Option<Result<pin::Deferred, String>>,
+) -> (StageResult, String, Option<pin::Deferred>) {
     let name = format!("sdk pin ({})", verdict.file);
     let mut value = format!(
         "{} guest tree {} {} main {} guest tree {} (compared: {})",
@@ -907,13 +941,43 @@ fn sdk_stage(repo: &Path, game: &Game, work_root: &Path) -> (StageResult, String
             pin::age_text(age)
         ));
     }
+    let mut header = verdict.header();
+    let mut deferred = None;
     let mut checks = vec![if verdict.pinned_tree == verdict.main_tree {
         Check::pass(&name, value)
     } else {
-        Check::new(&name, Status::Fail, value).detail(
-            "SDK main changed guest content since this pin: repin to main (a host-tool-only \
-             commit never does this)",
-        )
+        match deferral {
+            Some(Ok(d)) => {
+                header = format!(
+                    "{header}: DEFERRED until {} (behind since {} at {}): {}",
+                    d.until,
+                    util::short(&d.move_commit),
+                    d.move_time,
+                    d.reason
+                );
+                let check = Check::pass(&name, format!("DEFERRED until {}: {value}", d.until))
+                    .detail(format!(
+                        "[sdk.defer] holds for this landing run: behind since {} at {} ({} \
+                         guest-moving commits), until {}; reason: {}. Never installable",
+                        util::short(&d.move_commit),
+                        d.move_time,
+                        d.missed,
+                        d.until,
+                        d.reason
+                    ));
+                deferred = Some(d);
+                check
+            }
+            refused => {
+                let why = refused.and_then(Result::err).map_or(String::new(), |e| {
+                    format!(" The [sdk.defer] did not apply: {e}.")
+                });
+                Check::new(&name, Status::Fail, value).detail(format!(
+                    "SDK main changed guest content since this pin: repin to main (a \
+                     host-tool-only commit never does this).{why}"
+                ))
+            }
+        }
     }];
     if let Some(recorded) = verdict
         .recorded
@@ -930,11 +994,10 @@ fn sdk_stage(repo: &Path, game: &Game, work_root: &Path) -> (StageResult, String
             ),
         ));
     }
-    debug_assert_eq!(
-        verdict.holds(),
-        checks.iter().all(|c| c.status == Status::Pass)
+    debug_assert!(
+        deferred.is_some() || verdict.holds() == checks.iter().all(|c| c.status == Status::Pass)
     );
-    (stage(checks), verdict.header())
+    (sdk_stage_of(checks), header, deferred)
 }
 
 /// `psoxide-test pin [--repo DIR] [--write] [--pinned REV] [--main REV] [--crates]`: apply the pin
@@ -966,11 +1029,11 @@ fn pin_command(args: &[String]) -> Result<ExitCode, String> {
         pin.recorded = None;
     }
     let game_scope = scope::of_game(&o.repo);
-    let v = pin::judge(&config.work, &pin, &game_scope, main.as_deref())?;
+    let mirror = pin::Mirror::open(&config.work, &pin.repository)?;
+    let v = pin::judge(&mirror, &pin, &game_scope, main.as_deref())?;
     if crates {
         match &game_scope {
             scope::Scope::Game(reach) => {
-                let mirror = pin::Mirror::open(&config.work, &pin.repository)?;
                 let reached = mirror.reached(&v.main, reach)?;
                 for dir in &reached.crates {
                     let mark = if reached.reached.contains(dir) {
@@ -996,6 +1059,21 @@ fn pin_command(args: &[String]) -> Result<ExitCode, String> {
         v.scope,
         v.header()
     );
+    if v.pinned_tree != v.main_tree {
+        // What a landing-only `[sdk.defer]` would need (pin.rs `deferral`).
+        match pin::missed_move(&mirror, &v, &game_scope) {
+            Ok(m) => println!(
+                "the pin is current at {}; main moved this game's guest tree in {} commits since, \
+                 the first {} at {}; an [sdk.defer] may hold landings until {} at the latest",
+                util::short(&m.parent),
+                m.missed,
+                util::short(&m.commit),
+                util::rfc3339_utc(m.time),
+                util::rfc3339_utc(m.time + pin::DEFER_WINDOW_SECONDS)
+            ),
+            Err(e) => println!("no [sdk.defer] can hold: {e}"),
+        }
+    }
     if write {
         let path = o.repo.join(&v.file);
         let text =
@@ -1063,6 +1141,66 @@ mod tests {
         assert_eq!(report::result_schema(stage::Profile::Install), 1);
         assert_eq!(report::result_schema(stage::Profile::Landing), 2);
         assert_eq!(report::RESULT_SCHEMA_MAX, 2);
+    }
+
+    fn stale_verdict() -> pin::Verdict {
+        pin::Verdict {
+            pinned: "p".repeat(40),
+            main: "m".repeat(40),
+            pinned_tree: "a".repeat(64),
+            main_tree: "b".repeat(64),
+            pinned_whole: "a".repeat(64),
+            main_whole: "b".repeat(64),
+            scope: "the SDK crates this game reaches".into(),
+            recorded: None,
+            file: "components.lock.json".into(),
+            main_age: None,
+        }
+    }
+
+    #[test]
+    fn a_deferred_pin_passes_the_sdk_stage_and_says_so() {
+        let d = pin::Deferred {
+            until: "2026-11-24T06:00:00Z".into(),
+            reason: "resident RAM".into(),
+            move_commit: "m".repeat(40),
+            move_time: "2026-11-22T22:00:00Z".into(),
+            missed: 1,
+        };
+        let (stage, header, deferred) = sdk_checks(&stale_verdict(), Some(Ok(d.clone())));
+        assert!(stage.passed());
+        assert_eq!(deferred, Some(d));
+        assert!(
+            header.contains("DEFERRED until 2026-11-24T06:00:00Z"),
+            "{header}"
+        );
+        assert!(header.contains("resident RAM"), "{header}");
+        let check = &stage.outcome.checks[0];
+        assert!(check.value.starts_with("DEFERRED until"), "{}", check.value);
+        assert!(
+            check.detail.contains("Never installable"),
+            "{}",
+            check.detail
+        );
+    }
+
+    #[test]
+    fn a_refused_defer_is_a_pin_failure_that_says_why() {
+        let expired =
+            Err("it expired at 2026-11-24T06:00:00Z (1 h 00 min ago): repin to main".into());
+        let (stage, header, deferred) = sdk_checks(&stale_verdict(), Some(expired));
+        assert!(!stage.passed());
+        assert_eq!(deferred, None);
+        assert!(!header.contains("DEFERRED"));
+        let detail = &stage.outcome.checks[0].detail;
+        assert!(
+            detail.contains("The [sdk.defer] did not apply: it expired at 2026-11-24T06:00:00Z"),
+            "{detail}"
+        );
+        // No [sdk.defer]: the plain failure, unchanged.
+        let (stage, _, _) = sdk_checks(&stale_verdict(), None);
+        assert!(!stage.passed());
+        assert!(!stage.outcome.checks[0].detail.contains("sdk.defer"));
     }
 
     fn parse(args: &[&str]) -> Result<Options, String> {

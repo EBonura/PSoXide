@@ -121,8 +121,9 @@ pub fn read(repo: &Path, game: Option<&Game>) -> Option<Pin> {
         }
     }
     let sdk = game?.sdk.as_ref()?;
-    let body = std::fs::read_to_string(repo.join(&sdk.file)).ok()?;
-    let at = body.find(&sdk.after)? + sdk.after.len();
+    let (file, after) = (sdk.file.as_ref()?, sdk.after.as_ref()?);
+    let body = std::fs::read_to_string(repo.join(file)).ok()?;
+    let at = body.find(after.as_str())? + after.len();
     let revision: String = body[at..]
         .chars()
         .take_while(char::is_ascii_hexdigit)
@@ -131,7 +132,7 @@ pub fn read(repo: &Path, game: Option<&Game>) -> Option<Pin> {
         revision,
         repository: slug(&sdk.repository),
         recorded: sdk.guest_tree.clone(),
-        file: sdk.file.clone(),
+        file: file.clone(),
     })
 }
 
@@ -625,18 +626,18 @@ pub fn age_text(seconds: u64) -> String {
     }
 }
 
-/// Apply the rule: the pinned commit's guest tree against SDK main's (or against `main`, a
-/// candidate revision), as a game of `scope` sees them.
+/// Apply the rule in `mirror` (an open [`Mirror`] of the pin's repository): the pinned commit's
+/// guest tree against SDK main's (or against `main`, a candidate revision), as a game of `scope`
+/// sees them.
 pub fn judge(
-    work_root: &Path,
+    mirror: &Mirror,
     pin: &Pin,
     scope: &Scope,
     main: Option<&str>,
 ) -> Result<Verdict, String> {
-    let mirror = Mirror::open(work_root, &pin.repository)?;
     let pinned = mirror.commit(&pin.revision)?;
     let main = mirror.commit(main.unwrap_or("refs/heads/main"))?;
-    let trees = Trees::of(&mirror, &pinned, &main, scope)?;
+    let trees = Trees::of(mirror, &pinned, &main, scope)?;
     Ok(Verdict {
         pinned_tree: trees.pinned,
         main_tree: trees.main,
@@ -648,6 +649,171 @@ pub fn judge(
         recorded: pin.recorded.clone(),
         file: pin.file.clone(),
         main_age: mirror.stale,
+    })
+}
+
+/// How long after the first SDK guest change a game lacks a `[sdk.defer]` may end.
+pub const DEFER_WINDOW_SECONDS: u64 = 48 * 3600;
+
+/// How many first-parent commits of SDK main [`first_missed_move`] reads before giving up.
+pub const DEFER_WALK: usize = 200;
+
+/// Where a stale pin left SDK main: the oldest commit on main's first-parent line that moved the
+/// game's guest tree after the last commit whose tree the pin still equals.
+#[derive(Debug, Clone)]
+pub struct Move {
+    pub commit: String,
+    /// Its first parent: the SDK the game is current on.
+    pub parent: String,
+    /// Its commit time, seconds since the epoch.
+    pub time: u64,
+    /// How many commits from it to main moved the game's guest tree (it included).
+    pub missed: usize,
+}
+
+/// Walk `main`'s first-parent history (at most `limit` commits) back to the newest commit whose
+/// guest tree, as a game of `scope` sees it, equals `pinned`'s, and return the move right after
+/// it ([`Move`]). An error when the pin is not found within `limit` commits.
+///
+/// One SDK landing is often several commits (a lane's branch fast-forwarded onto main), and
+/// git does not record where one landing ends, so "behind" is measured from the first change
+/// the game lacks: the deferral window starts at that commit's time, which is no later than the
+/// landing that brought it.
+pub fn first_missed_move(
+    mirror: &Mirror,
+    pinned: &str,
+    main: &str,
+    scope: &Scope,
+    limit: usize,
+) -> Result<Move, String> {
+    let log = mirror.git(&[
+        "log",
+        "--first-parent",
+        &format!("--max-count={limit}"),
+        "--format=%H %ct %P",
+        main,
+    ])?;
+    let mut missed = 0;
+    for line in log.lines() {
+        let mut fields = line.split(' ');
+        let (Some(commit), Some(time)) = (fields.next(), fields.next()) else {
+            return Err(format!("git log: {line}"));
+        };
+        let Some(parent) = fields.next().filter(|p| !p.is_empty()) else {
+            return Err(format!(
+                "reached the first commit {} without finding the pin's guest tree",
+                util::short(commit)
+            ));
+        };
+        // Every input of either tree lies under these paths: a commit outside them moves none.
+        let mut args = vec!["diff-tree", "-r", "--name-only", parent, commit, "--"];
+        args.extend(GUEST_PATHS);
+        args.extend(["Cargo.toml", "Cargo.lock"]);
+        if mirror.git(&args)?.trim().is_empty() {
+            continue;
+        }
+        let step = Trees::of(mirror, parent, commit, scope)?;
+        if step.pinned == step.main {
+            continue;
+        }
+        missed += 1;
+        let before = Trees::of(mirror, pinned, parent, scope)?;
+        if before.pinned == before.main {
+            return Ok(Move {
+                commit: commit.to_string(),
+                parent: parent.to_string(),
+                time: time.parse().map_err(|_| format!("git log: {line}"))?,
+                missed,
+            });
+        }
+    }
+    Err(format!(
+        "its guest tree is not that of any of the last {limit} commits of main"
+    ))
+}
+
+/// [`first_missed_move`] for a verdict's pin and main, in words a refusal can carry.
+pub fn missed_move(mirror: &Mirror, verdict: &Verdict, scope: &Scope) -> Result<Move, String> {
+    first_missed_move(mirror, &verdict.pinned, &verdict.main, scope, DEFER_WALK)
+        .map_err(|e| format!("where the pin left main cannot be found: {e}"))
+}
+
+/// A pin rule failure a `[sdk.defer]` turns into a deferred pass (landing runs only).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Deferred {
+    /// RFC 3339 UTC, as the game file writes it.
+    pub until: String,
+    pub reason: String,
+    /// The first SDK main commit whose guest change the pin lacks, its commit time (RFC 3339),
+    /// and how many commits up to main moved the game's guest tree.
+    pub move_commit: String,
+    pub move_time: String,
+    pub missed: usize,
+}
+
+/// Whether `defer` holds for `verdict` (whose pin differs from main): `Ok` when it does, else why
+/// not, in words that finish "the [sdk.defer] did not apply: ". It holds only when every one of:
+///
+/// - its reason is not empty and `until` is an RFC 3339 UTC time;
+/// - the run is the landing profile (an install run, and so any install, needs a current pin);
+/// - `now` is before `until`;
+/// - the pin's guest tree is that of a recent commit of main ([`first_missed_move`]), and
+///   `until` is at most [`DEFER_WINDOW_SECONDS`] after the first commit since then that moved
+///   the game's guest tree. A game file cannot write a far future date, and a game can never
+///   trail a guest change of main by more than the window, however many landings follow it: a
+///   game two moves behind whose first missed move is older than the window is refused.
+///
+/// Any error reading the history is a refusal.
+pub fn deferral(
+    mirror: &Mirror,
+    verdict: &Verdict,
+    scope: &Scope,
+    defer: &crate::game::SdkDefer,
+    profile: crate::stage::Profile,
+    now: u64,
+) -> Result<Deferred, String> {
+    if defer.reason.trim().is_empty() {
+        return Err("its `reason` is empty".into());
+    }
+    let until = util::parse_rfc3339_utc(&defer.until).ok_or_else(|| {
+        format!(
+            "`until = \"{}\"` is not an RFC 3339 UTC time (YYYY-MM-DDTHH:MM:SSZ)",
+            defer.until
+        )
+    })?;
+    if profile != crate::stage::Profile::Landing {
+        return Err(format!(
+            "a deferral holds for `run --tier full --profile landing` only; this is the {} \
+             profile, which needs a current pin",
+            profile.name()
+        ));
+    }
+    if now >= until {
+        return Err(format!(
+            "it expired at {} ({} ago): repin to main",
+            defer.until,
+            age_text(now - until)
+        ));
+    }
+    let moved = missed_move(mirror, verdict, scope)?;
+    if until > moved.time + DEFER_WINDOW_SECONDS {
+        return Err(format!(
+            "`until` {} is more than {} h after {} ({}), the first guest change of main the pin \
+             lacks ({} guest-moving commits behind): the latest it may be is {}",
+            defer.until,
+            DEFER_WINDOW_SECONDS / 3600,
+            util::short(&moved.commit),
+            util::rfc3339_utc(moved.time),
+            moved.missed,
+            util::rfc3339_utc(moved.time + DEFER_WINDOW_SECONDS)
+        ));
+    }
+    Ok(Deferred {
+        until: defer.until.clone(),
+        reason: defer.reason.trim().to_string(),
+        move_commit: moved.commit,
+        move_time: util::rfc3339_utc(moved.time),
+        missed: moved.missed,
     })
 }
 
@@ -957,6 +1123,217 @@ mod tests {
         // A game whose files cannot be listed (not a git work tree) is judged whole.
         let not_git = tempfile::tempdir().unwrap();
         assert!(matches!(scope::of_game(not_git.path()), Scope::Whole(_)));
+    }
+
+    /// Write `path` in `repo` and commit everything at `time` (seconds since the epoch, committer
+    /// and author); the new commit.
+    fn commit_at(repo: &Path, path: &str, text: &str, time: u64) -> String {
+        let file = repo.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, text).unwrap();
+        util::git(repo, &["add", "-A"]).unwrap();
+        let date = format!("@{time} +0000");
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(["-c", "commit.gpgsign=false", "commit", "-q", "-m", "c"])
+            .env("GIT_COMMITTER_DATE", &date)
+            .env("GIT_AUTHOR_DATE", &date)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        util::git(repo, &["rev-parse", "HEAD"]).unwrap()
+    }
+
+    /// SDK history for the deferral: `base`, a guest move `one` `gap` hours before `main`, a
+    /// host-only commit, then a second guest move `main` at [`MOVED`].
+    struct History {
+        repo: tempfile::TempDir,
+        base: String,
+        one: String,
+        main: String,
+    }
+
+    const MOVED: u64 = 1_795_000_000;
+    const HOUR: u64 = 3600;
+
+    fn history(gap: u64) -> History {
+        let repo = sdk_repo();
+        let r = repo.path();
+        let base = util::git(r, &["rev-parse", "HEAD"]).unwrap();
+        let rt = "sdk/crates/psx-rt/src/lib.rs";
+        let one = commit_at(r, rt, "pub fn rt() { 1; }\n", MOVED - gap * HOUR);
+        let host = "tools/psoxide-test/src/main.rs";
+        commit_at(r, host, "fn main() {}\n", MOVED - HOUR);
+        let main = commit_at(r, rt, "pub fn rt() { 2; }\n", MOVED);
+        History {
+            repo,
+            base,
+            one,
+            main,
+        }
+    }
+
+    impl History {
+        fn mirror(&self) -> Mirror {
+            Mirror {
+                dir: self.repo.path().to_path_buf(),
+                stale: None,
+            }
+        }
+
+        /// The verdict of a game pinned at `pinned` that links psx-rt, against main.
+        fn verdict(&self, pinned: &str) -> Verdict {
+            let pin = Pin {
+                revision: pinned.to_string(),
+                repository: "EBonura/PSoXide".into(),
+                recorded: None,
+                file: "components.lock.json".into(),
+            };
+            judge(&self.mirror(), &pin, &game(LINKS_RT), Some(&self.main)).unwrap()
+        }
+
+        fn defer(
+            &self,
+            pinned: &str,
+            until: u64,
+            profile: crate::stage::Profile,
+            now: u64,
+        ) -> Result<Deferred, String> {
+            let defer = crate::game::SdkDefer {
+                until: util::rfc3339_utc(until),
+                reason: "resident RAM over budget on the new SDK".into(),
+            };
+            let verdict = self.verdict(pinned);
+            assert_ne!(verdict.pinned_tree, verdict.main_tree);
+            deferral(
+                &self.mirror(),
+                &verdict,
+                &game(LINKS_RT),
+                &defer,
+                profile,
+                now,
+            )
+        }
+    }
+
+    use crate::stage::Profile;
+
+    #[test]
+    fn a_defer_holds_one_move_behind_on_a_landing_run() {
+        let h = history(50);
+        let d = h
+            .defer(&h.one, MOVED + 24 * HOUR, Profile::Landing, MOVED + HOUR)
+            .unwrap();
+        // The host-only commit between the moves is not a move.
+        assert_eq!((d.move_commit.as_str(), d.missed), (h.main.as_str(), 1));
+        assert_eq!(d.move_time, util::rfc3339_utc(MOVED));
+        assert_eq!(d.until, util::rfc3339_utc(MOVED + 24 * HOUR));
+        // The last moment the window allows is allowed.
+        let edge = MOVED + DEFER_WINDOW_SECONDS;
+        assert!(h.defer(&h.one, edge, Profile::Landing, MOVED).is_ok());
+    }
+
+    #[test]
+    fn a_defer_is_refused_two_moves_behind() {
+        // The first move the pin lacks is 50 h old: no `until` both in the future and inside
+        // its window exists.
+        let h = history(50);
+        let e = h
+            .defer(&h.base, MOVED + 24 * HOUR, Profile::Landing, MOVED + HOUR)
+            .unwrap_err();
+        assert!(e.contains("more than 48 h after"), "{e}");
+        assert!(e.contains("(2 guest-moving commits behind)"), "{e}");
+        let e = h
+            .defer(&h.base, MOVED - 3 * HOUR, Profile::Landing, MOVED + HOUR)
+            .unwrap_err();
+        assert!(e.starts_with("it expired"), "{e}");
+    }
+
+    #[test]
+    fn a_landing_of_several_guest_commits_is_one_window() {
+        // A lane's branch fast-forwarded as several commits: the window starts at the first.
+        let h = history(3);
+        let d = h
+            .defer(&h.base, MOVED + 24 * HOUR, Profile::Landing, MOVED + HOUR)
+            .unwrap();
+        assert_eq!((d.move_commit.as_str(), d.missed), (h.one.as_str(), 2));
+        let e = h
+            .defer(&h.base, MOVED + 46 * HOUR, Profile::Landing, MOVED + HOUR)
+            .unwrap_err();
+        assert!(e.contains("more than 48 h after"), "{e}");
+    }
+
+    #[test]
+    fn a_pin_off_main_is_not_deferrable() {
+        let h = history(3);
+        let r = h.repo.path();
+        util::git(r, &["checkout", "-q", "-b", "side", &h.base]).unwrap();
+        let side = commit_at(
+            r,
+            "sdk/crates/psx-rt/src/lib.rs",
+            "pub fn rt() { 9; }\n",
+            MOVED,
+        );
+        let e = h
+            .defer(&side, MOVED + 24 * HOUR, Profile::Landing, MOVED + HOUR)
+            .unwrap_err();
+        assert!(
+            e.starts_with("where the pin left main cannot be found"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn a_defer_is_refused_after_until() {
+        let h = history(50);
+        let until = MOVED + 24 * HOUR;
+        let e = h.defer(&h.one, until, Profile::Landing, until).unwrap_err();
+        assert!(e.starts_with("it expired at 2026-"), "{e}");
+        assert!(e.contains("repin to main"), "{e}");
+    }
+
+    #[test]
+    fn a_defer_ending_more_than_48_hours_after_the_move_is_refused() {
+        let h = history(50);
+        let until = MOVED + DEFER_WINDOW_SECONDS + 1;
+        let e = h
+            .defer(&h.one, until, Profile::Landing, MOVED + HOUR)
+            .unwrap_err();
+        assert!(e.contains("more than 48 h after"), "{e}");
+    }
+
+    #[test]
+    fn a_defer_is_refused_on_the_install_profile() {
+        let h = history(50);
+        let e = h
+            .defer(&h.one, MOVED + 24 * HOUR, Profile::Install, MOVED + HOUR)
+            .unwrap_err();
+        assert!(e.contains("--profile landing` only"), "{e}");
+    }
+
+    #[test]
+    fn a_defer_needs_a_reason_and_a_utc_time() {
+        let h = history(50);
+        let verdict = h.verdict(&h.one);
+        let try_defer = |until: &str, reason: &str| {
+            let defer = crate::game::SdkDefer {
+                until: until.into(),
+                reason: reason.into(),
+            };
+            deferral(
+                &h.mirror(),
+                &verdict,
+                &game(LINKS_RT),
+                &defer,
+                Profile::Landing,
+                MOVED,
+            )
+            .unwrap_err()
+        };
+        assert!(try_defer("2026-11-23T00:00:00Z", "  ").contains("`reason` is empty"));
+        assert!(try_defer("2026-11-23", "ram").contains("not an RFC 3339 UTC time"));
     }
 
     #[test]

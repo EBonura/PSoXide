@@ -456,6 +456,15 @@ pub fn check(j: &Judged<'_>, installed: Installed<'_>, rebase: bool) -> Result<A
             "result {at} judged a dirty tree: commit, then run the full tier again"
         ));
     }
+    if let Some(d) = &r.sdk_deferred {
+        return Err(format!(
+            "result {at} passed the SDK pin rule only by [sdk.defer] (behind SDK main since {}, \
+             until {}): a deferred pin is never installed; repin to main and run the \
+             full tier",
+            util::short(&d.move_commit),
+            d.until
+        ));
+    }
     if !r.profile.is_install() {
         return Err(format!(
             "result {at} is a {}-profile PASS, not an install pass: run `psoxide-test run --tier \
@@ -1210,6 +1219,7 @@ mod tests {
             dirty: false,
             sdk_pin: "s".repeat(40),
             sdk_guest: String::new(),
+            sdk_deferred: None,
             harness: "0.1.0".into(),
             gate_revision: "r".repeat(40),
             tier: "full".into(),
@@ -1321,6 +1331,36 @@ mod tests {
         r.schema = RESULT_SCHEMA_MAX + 1;
         let e = judge("ab", &r, "t1", Installed::Nothing, false).unwrap_err();
         assert!(e.contains("newer than this psoxide-test reads"), "{e}");
+    }
+
+    #[test]
+    fn a_deferred_pin_result_is_refused() {
+        // A landing result that passed by [sdk.defer], and the same flag on an install result
+        // (written by hand): both refused, the second by the deferral itself.
+        let deferred = crate::pin::Deferred {
+            until: "2026-11-24T00:00:00Z".into(),
+            reason: "resident RAM".into(),
+            move_commit: "m".repeat(40),
+            move_time: "2026-11-22T00:00:00Z".into(),
+            missed: 1,
+        };
+        let mut r = passing([100, 102, 104], [790, 786, 782]);
+        r.sdk_deferred = Some(deferred);
+        let e = judge("ab", &r, "t1", Installed::Nothing, false).unwrap_err();
+        assert!(e.contains("never installed"), "{e}");
+        r.profile = Profile::Landing;
+        r.schema = crate::report::result_schema(Profile::Landing);
+        let e = judge("ab", &r, "t1", Installed::Nothing, false).unwrap_err();
+        assert!(e.contains("[sdk.defer]"), "{e}");
+        // And it travels in the result file: a result read back still carries it.
+        let json = serde_json::to_string(&r).unwrap();
+        let back: RunResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.sdk_deferred, r.sdk_deferred);
+        // An undeferred result writes no key, so its bytes are as before.
+        let plain = passing([100, 102, 104], [790, 786, 782]);
+        assert!(!serde_json::to_string(&plain)
+            .unwrap()
+            .contains("sdk_deferred"));
     }
 
     #[test]
