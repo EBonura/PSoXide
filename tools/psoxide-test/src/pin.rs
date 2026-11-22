@@ -269,7 +269,7 @@ impl Mirror {
         // Every manifest of the guest paths (and the root's), and the tool scripts the game names.
         let mut wanted: Vec<(String, String)> = Vec::new();
         for (oid, path) in listing_blobs(listing) {
-            if path.ends_with("/Cargo.toml") || reach.tools.contains(path) {
+            if path.ends_with("/Cargo.toml") || scope::is_guest_tool_file(path) {
                 wanted.push((oid.to_string(), path.to_string()));
             }
         }
@@ -282,7 +282,7 @@ impl Mirror {
                 .get(oid)
                 .ok_or_else(|| format!("{commit}:{path} cannot be read"))?
                 .clone();
-            if reach.tools.contains(path) {
+            if scope::is_guest_tool_file(path) {
                 tools.insert(path.clone(), text);
             } else if let Some(dir) = path.strip_suffix("/Cargo.toml") {
                 manifests.insert(dir.to_string(), text);

@@ -440,6 +440,11 @@ fn scan_assets(line: &str, reach: &mut Reach) {
     }
 }
 
+/// Whether `path` is one of the guest tool scripts.
+pub fn is_guest_tool_file(path: &str) -> bool {
+    guest_tool_files().any(|tool| tool == path)
+}
+
 /// The guest paths that are tool scripts rather than directories (`tools/sdk-examples.mk`).
 fn guest_tool_files() -> impl Iterator<Item = &'static str> {
     GUEST_PATHS.iter().copied().filter(|p| {
@@ -607,13 +612,22 @@ pub fn reached_crates(
         .filter_map(|(dir, m)| Some((dir.as_str(), m.package()?)))
         .collect();
 
-    // The game's reach and that of the tool scripts it names.
+    // The game's reach and that of the tool scripts it names, and of the scripts those name
+    // (engine-examples.mk runs build_guest_staged.sh), until no new one appears.
     let mut reach = reach.clone();
-    for tool in reach.tools.clone() {
-        let text = tool_texts
-            .get(&tool)
-            .ok_or_else(|| format!("the game names {tool}, which this SDK commit lacks"))?;
-        scan_text(text, &mut reach);
+    let mut read = BTreeSet::new();
+    loop {
+        let next: Vec<String> = reach.tools.difference(&read).cloned().collect();
+        if next.is_empty() {
+            break;
+        }
+        for tool in next {
+            let text = tool_texts
+                .get(&tool)
+                .ok_or_else(|| format!("the game runs {tool}, which this SDK commit lacks"))?;
+            scan_text(text, &mut reach);
+            read.insert(tool);
+        }
     }
 
     let mut stack: Vec<String> = Vec::new();
@@ -1004,6 +1018,27 @@ mod tests {
         // No lock and nothing cargo can resolve offline: the whole tree.
         let repo = game_repo(&[("game/Cargo.toml", manifest)]);
         assert!(matches!(of_game(repo.path()), Scope::Whole(_)));
+    }
+
+    #[test]
+    fn a_tool_script_named_by_a_tool_script_is_followed() {
+        let reach = Reach {
+            tools: ["tools/engine-examples.mk".to_string()].into(),
+            ..Reach::default()
+        };
+        let tools: BTreeMap<String, String> = [
+            (
+                "tools/engine-examples.mk".to_string(),
+                "playtest:\n\tsh tools/build_guest_staged.sh\n".to_string(),
+            ),
+            (
+                "tools/build_guest_staged.sh".to_string(),
+                "cp -R \"$SDK/crates/psx-hw\" \"$STAGE/crates/psx-hw\"\n".to_string(),
+            ),
+        ]
+        .into();
+        let got = reached_crates(&sdk(), &tools, &reach, &mut no_sources).unwrap();
+        assert!(got.reached.contains("crates/psx-hw"), "{:?}", got.reached);
     }
 
     #[test]
