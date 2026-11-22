@@ -4,7 +4,8 @@
 //! under `engine/examples/hardware-tests`) moves the guest tree, and every game has to repin
 //! before it can land again. A game's scope leaves out the SDK crates the game cannot reach.
 //! Files outside every crate directory (linker scripts, workspace manifests and locks, the
-//! toolchain file, the guest tool scripts) and the guest tool crates always count.
+//! toolchain file, the guest tool scripts) and the guest tool crates always count; a nested
+//! workspace lock (`engine/Cargo.lock`) counts only for the packages the game reaches (pin.rs).
 //!
 //! A game reaches a crate when:
 //! - one of its manifests has a git dependency on the SDK naming the crate's package;
@@ -764,6 +765,8 @@ pub struct Reached {
     pub crates: BTreeSet<String>,
     /// The ones the game reaches.
     pub reached: BTreeSet<String>,
+    /// The package names of the reached ones: the roots a nested Cargo.lock is read from.
+    pub packages: BTreeSet<String>,
     /// Asset paths the game names, and those the sources of the crates it reaches read.
     pub assets: BTreeSet<String>,
 }
@@ -944,9 +947,15 @@ pub fn reached_crates(
             ));
         }
     }
+    let packages = seen
+        .iter()
+        .filter_map(|dir| crates.get(dir.as_str()))
+        .map(|name| name.to_string())
+        .collect();
     Ok(Reached {
         crates: all,
         reached: seen,
+        packages,
         assets,
     })
 }
@@ -1606,6 +1615,7 @@ mod tests {
             .map(str::to_string)
             .into(),
             reached: ["crates/a".to_string()].into(),
+            packages: ["a".to_string()].into(),
             assets: BTreeSet::new(),
         };
         assert!(reached.keeps("sdk/psoxide.ld"));
