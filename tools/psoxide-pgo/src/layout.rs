@@ -455,7 +455,33 @@ fn jump_target(word: u32, pc: u32) -> u32 {
 /// share counts, which steers placement, never the code. [`code_hash_v1`]
 /// tracked the `lui` halves in program order and missed both cases, so any
 /// growth of `.text` unbound switch-heavy functions (WipEout's `play::run`).
+///
+/// `sp` is never an address register (its offsets are frame slots), except
+/// that where a `lui` writes it, `addiu sp, sp, imm` and `ori sp, sp, imm`
+/// are that address's low half and are masked: an interrupt trampoline that
+/// switches to a stack in `.bss` hashes the same wherever the stack lands.
+/// [`code_hash_v2`] kept that half.
 pub fn code_hash(words: &[u32]) -> u64 {
+    hash_masked(words, true)
+}
+
+/// [`code_hash`] before it masked the `%lo` that completes a stack address
+/// (`lui sp, %hi(stack)`, `addiu sp, sp, %lo(stack)`, as an interrupt
+/// trampoline switches stacks). Bind and `place` still accept it, so layouts
+/// and profiles recorded with it keep binding until they are searched again;
+/// it must not drift.
+pub fn code_hash_v2(words: &[u32]) -> u64 {
+    hash_masked(words, false)
+}
+
+fn hash_masked(words: &[u32], stack_address: bool) -> u64 {
+    // A `lui` writes `sp` only to build an address: then `addiu sp, sp, imm`
+    // and `ori sp, sp, imm` add its low half. Loads and stores off `sp` stay
+    // frame slots either way.
+    let sp_loaded = stack_address
+        && words
+            .iter()
+            .any(|&word| word >> 26 == 0x0f && (word >> 16) & 31 == 29);
     let mut address = 0u32;
     for &word in words {
         if word >> 26 == 0x0f {
@@ -485,6 +511,7 @@ pub fn code_hash(words: &[u32]) -> u64 {
             2 | 3 => word & 0xfc00_0000,
             0x0f => word & 0xffff_0000,
             _ if is_low_half_op(op) && address & (1 << rs) != 0 => word & 0xffff_0000,
+            0x09 | 0x0d if sp_loaded && rs == 29 && (word >> 16) & 31 == 29 => word & 0xffff_0000,
             _ => word,
         };
         bytes.extend_from_slice(&masked.to_le_bytes());
@@ -1014,7 +1041,9 @@ pub fn bind(layout: &Layout, sections: &[Section], image: &Image) -> Bound {
         };
         let same = sections[at].size / 4 == function.words
             && image.words(&sections[at]).is_some_and(|words| {
-                code_hash(&words) == function.hash || code_hash_v1(&words) == function.hash
+                code_hash(&words) == function.hash
+                    || code_hash_v2(&words) == function.hash
+                    || code_hash_v1(&words) == function.hash
             });
         if !same {
             coverage.changed += 1;
@@ -1480,9 +1509,9 @@ pub fn recorded_order(
     for entry in &recorded.entries {
         let same = index.get(entry.key.as_str()).copied().filter(|&k| {
             sections[k].size / 4 == entry.words
-                && image
-                    .words(&sections[k])
-                    .is_some_and(|words| code_hash(&words) == entry.hash)
+                && image.words(&sections[k]).is_some_and(|words| {
+                    code_hash(&words) == entry.hash || code_hash_v2(&words) == entry.hash
+                })
         });
         match same {
             Some(k) => {
@@ -1795,6 +1824,31 @@ mod tests {
             code_hash(&[lui_sp, lw_t0_sp(16)]),
             code_hash(&[lui_sp, lw_t0_sp(20)])
         );
+    }
+
+    #[test]
+    fn a_stack_address_hashes_the_same_wherever_the_stack_lands() {
+        // An interrupt trampoline: lui sp, %hi(stack); addiu sp, sp, %lo(stack);
+        // sw at, 32(sp). The stack is in .bss, so data ahead of it moves it.
+        let tramp =
+            |hi: u32, lo: u32, slot: u32| [0x3c1d_0000 | hi, 0x27bd_0000 | lo, 0xafa1_0000 | slot];
+        assert_eq!(
+            code_hash(&tramp(0x801e, 0x8ca0, 32)),
+            code_hash(&tramp(0x801e, 0x8d20, 32))
+        );
+        // The frame slot stays real.
+        assert_ne!(
+            code_hash(&tramp(0x801e, 0x8ca0, 32)),
+            code_hash(&tramp(0x801e, 0x8ca0, 36))
+        );
+        // The old hash told them apart, and is unchanged where no lui writes sp.
+        assert_ne!(
+            code_hash_v2(&tramp(0x801e, 0x8ca0, 32)),
+            code_hash_v2(&tramp(0x801e, 0x8d20, 32))
+        );
+        let frame = [0x27bd_ffe0, 0xafbf_001c]; // addiu sp, sp, -32; sw ra, 28(sp)
+        assert_eq!(code_hash(&frame), code_hash_v2(&frame));
+        assert_ne!(code_hash(&frame), code_hash(&[0x27bd_ffd8, 0xafbf_001c]));
     }
 
     #[test]
