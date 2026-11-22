@@ -101,7 +101,7 @@ pub enum Scope {
     /// Every guest path, with the reason the game's reach is not known.
     Whole(String),
     /// What the game reaches.
-    Game(Reach),
+    Game(Box<Reach>),
 }
 
 /// The scope of the game in the git work tree `repo`.
@@ -144,7 +144,7 @@ pub fn of_game(repo: &Path) -> Scope {
         Ok((names, dirs)) => {
             reach.linked = names;
             reach.linked_dirs = dirs;
-            Scope::Game(reach)
+            Scope::Game(Box::new(reach))
         }
         Err(e) => Scope::Whole(e),
     }

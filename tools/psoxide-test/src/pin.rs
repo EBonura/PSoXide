@@ -844,7 +844,7 @@ mod tests {
             .iter()
             .map(|(p, t)| (p.to_string(), t.to_string()))
             .collect();
-        Scope::Game(scope::reach_of(&files).unwrap())
+        Scope::Game(Box::new(scope::reach_of(&files).unwrap()))
     }
 
     /// A game that links psx-rt: the files it builds from.
