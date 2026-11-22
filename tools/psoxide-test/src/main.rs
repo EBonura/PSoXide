@@ -42,7 +42,7 @@ usage:
       and for --tier full only when the landing verdict is complete. --profile landing (full tier
       only, needs the owner's approval before lanes use it): journeys on real only, the speed
       bar's landing slack; never installable. No --profile is install: the full tier unchanged
-  psoxide-test bless [--repo DIR]
+  psoxide-test bless [--repo DIR] [--keep-speed]
       measure the reference build and write psoxide-test.baseline.toml (refuses a red journey)
   psoxide-test lint [--repo DIR]
       load the game file and every journey; print the pad and open-loop findings
@@ -105,6 +105,8 @@ struct Options {
     /// (another window identity, facts of another disc, or legacy facts), take this strict PASS
     /// as the new reference instead of refusing. Never waives a comparison that can be made.
     rebase_facts: bool,
+    /// `bless --keep-speed`: keep the baseline's speed rows (light landings on a greedy layout).
+    keep_speed: bool,
 }
 
 fn options(args: &[String]) -> Result<Options, String> {
@@ -114,6 +116,7 @@ fn options(args: &[String]) -> Result<Options, String> {
         stages: Vec::new(),
         all_models: false,
         keep_going: false,
+        keep_speed: false,
         profile: stage::Profile::Install,
         rebase_facts: false,
     };
@@ -124,6 +127,7 @@ fn options(args: &[String]) -> Result<Options, String> {
             "--repo" => o.repo = PathBuf::from(value()?),
             "--all-models" => o.all_models = true,
             "--keep-going" => o.keep_going = true,
+            "--keep-speed" => o.keep_speed = true,
             "--rebase-facts" => o.rebase_facts = true,
             "--profile" => {
                 o.profile = match value()?.as_str() {
@@ -605,6 +609,28 @@ fn bless(o: &Options) -> Result<ExitCode, String> {
                 base.stack.insert(id.to_string(), v.parse().unwrap_or(0));
             }
         }
+    }
+    if o.keep_speed {
+        // Light landings (owner, 11-22): a greedy-layout build must not become the speed reference,
+        // or each landing's slack would stack on the last. Keep the rows the previous bless wrote
+        // (a searched layout) and measure nothing.
+        let old = ctx
+            .baseline
+            .as_ref()
+            .filter(|b| !b.speed.is_empty() || game.windows.is_empty())
+            .ok_or("--keep-speed needs a baseline that already has speed rows")?;
+        base.speed = old.speed.clone();
+        base.save(&o.repo)?;
+        println!(
+            "blessed {} into {} KEEPING the previous speed rows ({} windows, not re-measured; \
+             --keep-speed); size {:?}, {} journeys",
+            util::short(&base.blessed_commit),
+            game::BASELINE_FILE,
+            base.speed.len(),
+            base.size,
+            base.journeys.len()
+        );
+        return Ok(ExitCode::SUCCESS);
     }
     let speed = stage::speed::run(&ctx, true);
     // Before reading the windows: a stage that could not measure says why (not "no flips").
