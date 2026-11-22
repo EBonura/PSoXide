@@ -1251,6 +1251,11 @@ fn parse(args: &[String]) -> Result<Args> {
     if parsed.traces.is_empty() {
         return Err("at least one --trace NAME MAP EXE TRACE is needed".into());
     }
+    // A search of no rounds writes the start layout back with the searched stamp, which an
+    // install then takes for a searched layout.
+    if parsed.settings.rounds == 0 {
+        return Err("--rounds 0 searches nothing; give at least one round".into());
+    }
     Ok(parsed)
 }
 
@@ -1868,5 +1873,18 @@ mod tests {
         assert_eq!(twice.matches("\ns ").count(), 1);
         let parsed = layout::Layout::parse(&twice).unwrap();
         assert_eq!(parsed.placement, Some(placement(8)));
+    }
+
+    #[test]
+    fn a_search_of_no_rounds_is_refused() {
+        let args: Vec<String> = ["--trace", "a", "a.map", "a.exe", "a.trace", "--rounds", "0"]
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        let error = parse(&args)
+            .err()
+            .expect("--rounds 0 must be refused")
+            .to_string();
+        assert!(error.contains("--rounds 0"), "{error}");
     }
 }
