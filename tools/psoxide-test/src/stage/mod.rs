@@ -101,6 +101,8 @@ pub struct Ctx<'a> {
     pub profile: Profile,
     /// `--all-models`: every model plays every journey; no row stands on `real` (audit).
     pub all_models: bool,
+    /// `install --rebase-facts` (main.rs Options).
+    pub rebase_facts: bool,
     /// Per build: file name in `out` -> SHA-256, filled by the build stage.
     pub artifacts: BTreeMap<String, BTreeMap<String, String>>,
     pub timing: Mutex<Vec<Timing>>,

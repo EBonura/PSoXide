@@ -51,15 +51,21 @@ usage:
   psoxide-test pin [--repo DIR] [--write] [--pinned REV] [--main REV] [--crates]
       the SDK pin rule for the game: its pinned commit against SDK main (or REV), over the SDK
       crates the game reaches (--crates lists them); --write records the pin's guest tree
-  psoxide-test install [--repo DIR]
+  psoxide-test install [--repo DIR] [--rebase-facts]
       install the judged disc into the configured library (needs a complete clean full PASS on
       the install profile, a searched layout, never slower per speed window than the build
-      installed before it)
-  psoxide-test install-check --result RESULT.json --facts INSTALLED_FACTS.json --repo GAME_CLONE [--write-facts OUT.json]
-      the same guarantee for an install made elsewhere: exit 0 only if RESULT may replace the
-      build whose speed facts are INSTALLED_FACTS (missing = first install) and its committed
-      layouts (read in GAME_CLONE at RESULT's commit) were searched; --write-facts writes
-      RESULT's speed facts in that format
+      installed before it, judged on the library's speed facts, which must describe the library's
+      disc; no facts is a first install only when the library holds no disc of that name).
+      --rebase-facts: when those facts cannot be compared, take this PASS as the new reference
+  psoxide-test install-check --result RESULT.json --repo GAME_CLONE --bin BIN [--map MAP]
+                             (--facts FACTS.json --library-bin LIBRARY.bin | --first-install)
+                             [--rebase-facts] [--write-facts OUT.json] [--stamp OUT.json]
+      the same guarantee for an install made elsewhere: exit 0 only if RESULT (named by its own
+      sha256) judged BIN and MAP, its committed layouts (read in GAME_CLONE at RESULT's commit)
+      were searched, and it is never slower than the installed build whose speed facts are
+      FACTS and whose disc is LIBRARY.bin. A missing FACTS is refused; --first-install says
+      there is none. --write-facts writes the new speed facts; --stamp (on success only) writes
+      the install marker a deploy script checks
 config: ~/.config/psoxide-test/config.toml or PSOXIDE_TEST_CONFIG (see config.example.toml)";
 
 const STAGES: &[&str] = &[
@@ -95,6 +101,10 @@ struct Options {
     keep_going: bool,
     /// `--profile`: the full tier's gates (stage::Profile); `Install` when not given.
     profile: stage::Profile,
+    /// `--rebase-facts` (install only): when the installed build's speed facts cannot be compared
+    /// (another window identity, facts of another disc, or legacy facts), take this strict PASS
+    /// as the new reference instead of refusing. Never waives a comparison that can be made.
+    rebase_facts: bool,
 }
 
 fn options(args: &[String]) -> Result<Options, String> {
@@ -105,6 +115,7 @@ fn options(args: &[String]) -> Result<Options, String> {
         all_models: false,
         keep_going: false,
         profile: stage::Profile::Install,
+        rebase_facts: false,
     };
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -113,6 +124,7 @@ fn options(args: &[String]) -> Result<Options, String> {
             "--repo" => o.repo = PathBuf::from(value()?),
             "--all-models" => o.all_models = true,
             "--keep-going" => o.keep_going = true,
+            "--rebase-facts" => o.rebase_facts = true,
             "--profile" => {
                 o.profile = match value()?.as_str() {
                     "install" => stage::Profile::Install,
@@ -163,10 +175,10 @@ fn dispatch(args: &[String]) -> Result<ExitCode, String> {
         Some("run") => {
             let o = options(&args[1..])?;
             check_profile(&o, true)?;
-            run(&o)
+            run(&no_rebase(o)?)
         }
-        Some("bless") => bless(&checked(&args[1..])?),
-        Some("lint") => lint(&checked(&args[1..])?),
+        Some("bless") => bless(&no_rebase(checked(&args[1..])?)?),
+        Some("lint") => lint(&no_rebase(checked(&args[1..])?)?),
         Some("install") => install(&checked(&args[1..])?),
         Some("install-check") => stage::install::check_command(&args[1..]),
         Some("adapter") => adapter(&args[1..]),
@@ -181,6 +193,15 @@ fn dispatch(args: &[String]) -> Result<ExitCode, String> {
 }
 
 /// `options` for a command other than `run`, which takes no landing profile.
+/// `--rebase-facts` is an `install` option only.
+fn no_rebase(o: Options) -> Result<Options, String> {
+    if o.rebase_facts {
+        Err("--rebase-facts is an `install` option only".into())
+    } else {
+        Ok(o)
+    }
+}
+
 fn checked(args: &[String]) -> Result<Options, String> {
     let o = options(args)?;
     check_profile(&o, false)?;
@@ -271,6 +292,7 @@ fn context<'a>(o: &Options, game: &'a Game, config: &'a Config) -> Result<Ctx<'a
         tier: o.tier,
         profile: o.profile,
         all_models: o.all_models,
+        rebase_facts: o.rebase_facts,
         artifacts: BTreeMap::new(),
         timing: Mutex::new(Vec::new()),
         originals: Mutex::new(originals::Cache::load(
@@ -426,11 +448,9 @@ fn run(o: &Options) -> Result<ExitCode, String> {
     }
     missing.dedup();
     let commit = util::git(&o.repo, &["rev-parse", "HEAD"]).unwrap_or_else(|_| "unknown".into());
-    let dirty = !util::git(&o.repo, &["status", "--porcelain", "--untracked-files=no"])
-        .unwrap_or_default()
-        .is_empty();
+    let dirty = tree_dirty(&o.repo);
     let mut result = RunResult {
-        schema: 1,
+        schema: report::result_schema(o.profile),
         game: game.name.clone(),
         commit,
         dirty,
@@ -932,9 +952,48 @@ fn pin_command(args: &[String]) -> Result<ExitCode, String> {
     })
 }
 
+/// Whether the repo's tracked files differ from HEAD. A git that cannot answer (not a repository,
+/// git missing) counts as dirty: the clean-tree refusal must never pass on an error.
+fn tree_dirty(repo: &Path) -> bool {
+    util::git(repo, &["status", "--porcelain", "--untracked-files=no"])
+        .map_or(true, |status| !status.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failing_git_reads_as_dirty() {
+        let dir = tempfile::tempdir().unwrap();
+        // Not a repository: git fails, and that is dirty, never clean.
+        assert!(tree_dirty(&dir.path().join("missing")));
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{out:?}");
+        };
+        git(&["init", "-q"]);
+        std::fs::write(dir.path().join("f"), "a").unwrap();
+        git(&["add", "f"]);
+        git(&["commit", "-q", "-m", "c"]);
+        assert!(!tree_dirty(dir.path()));
+        std::fs::write(dir.path().join("f"), "b").unwrap();
+        assert!(tree_dirty(dir.path()));
+    }
+
+    #[test]
+    fn only_landing_results_carry_schema_2() {
+        assert_eq!(report::result_schema(stage::Profile::Install), 1);
+        assert_eq!(report::result_schema(stage::Profile::Landing), 2);
+        assert_eq!(report::RESULT_SCHEMA_MAX, 2);
+    }
 
     fn parse(args: &[&str]) -> Result<Options, String> {
         let dir = std::env::temp_dir().display().to_string();

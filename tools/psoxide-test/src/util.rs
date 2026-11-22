@@ -223,6 +223,56 @@ pub fn short(hex: &str) -> &str {
     &hex[..hex.len().min(12)]
 }
 
+/// The lowercase hex SHA-256 of `path` as committed at `commit` in `repo` (the blob's raw bytes).
+pub fn git_blob_sha256(repo: &Path, commit: &str, path: &str) -> Result<String, String> {
+    let spec = format!("{commit}:{path}");
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["cat-file", "blob", &spec])
+        .output()
+        .map_err(|e| format!("cannot run git: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git cat-file blob {spec} in {}: {}",
+            repo.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(sha256_bytes(&output.stdout))
+}
+
+/// `seconds` since the Unix epoch as an RFC 3339 UTC time, `YYYY-MM-DDTHH:MM:SSZ`.
+pub fn rfc3339_utc(seconds: u64) -> String {
+    let days = i64::try_from(seconds / 86_400).unwrap_or(i64::MAX);
+    let rest = seconds % 86_400;
+    // Civil date from days since 1970-01-01 (proleptic Gregorian).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        rest / 3600,
+        rest % 3600 / 60,
+        rest % 60
+    )
+}
+
+/// Now, as [`rfc3339_utc`].
+pub fn utc_now() -> String {
+    rfc3339_utc(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs()),
+    )
+}
+
 /// Read a git value in `repo`.
 pub fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
     let output = Command::new("git")
@@ -299,6 +349,13 @@ pub fn tree_files(repo: &Path) -> Result<Vec<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn utc_times_are_rfc3339() {
+        assert_eq!(rfc3339_utc(0), "1970-01-01T00:00:00Z");
+        assert_eq!(rfc3339_utc(951_782_400), "2000-02-29T00:00:00Z");
+        assert_eq!(rfc3339_utc(1_795_350_896), "2026-11-22T12:34:56Z");
+    }
 
     #[test]
     fn key_parts_are_length_delimited() {

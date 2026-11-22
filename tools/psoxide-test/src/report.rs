@@ -123,6 +123,21 @@ impl StageResult {
     }
 }
 
+/// The newest result `schema` this harness reads. 1: an install-profile result (no `profile`
+/// key, the file it has always been). 2: a landing-profile result, numbered apart so a reader
+/// that knows only 1 can tell it is not an install result even though it ignores `profile`.
+pub const RESULT_SCHEMA_MAX: u32 = 2;
+
+/// The `schema` a result of `profile` is written with: 1 for install (byte-identical to the
+/// results written before profiles existed), 2 for landing.
+pub fn result_schema(profile: crate::stage::Profile) -> u32 {
+    if profile.is_install() {
+        1
+    } else {
+        2
+    }
+}
+
 /// The run's result file. Its name is the SHA-256 of its JSON, so the same bytes judged the same
 /// way give the same name; wall times live in a sidecar.
 #[derive(Debug, Clone, Serialize, Deserialize)]
