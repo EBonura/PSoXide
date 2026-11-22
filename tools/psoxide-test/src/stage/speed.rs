@@ -11,7 +11,7 @@ use crate::baseline::WindowBase;
 use crate::game::Window;
 use crate::report::{Check, Outcome, Source, StageResult, Status};
 use crate::sched;
-use crate::stage::{Ctx, Tier};
+use crate::stage::{Ctx, Profile, Tier};
 use crate::util::{self, Key};
 
 /// The metrics read from one replay.
@@ -35,12 +35,18 @@ pub fn parse_measure(output: &str) -> BTreeMap<String, String> {
 }
 
 /// Judge one metric over the offsets that ran. `higher_is_better` for flips.
+///
+/// The bar: the mean over the offsets of how much worse each offset is than its blessed value
+/// may not exceed the tolerance (the blessed phase spread) plus `slack_permille` thousandths of
+/// the blessed mean. `slack_permille` is 0 for the install profile (the strict bar, unchanged)
+/// and the window's `landing_work_slack_permille` under the landing profile.
 pub fn judge_metric(
     name: &str,
     now: &[(i32, u64)],
     base: &WindowBase,
     values: &[u64],
     higher_is_better: bool,
+    slack_permille: u32,
 ) -> Check {
     let tolerance = WindowBase::tolerance(values);
     let mut bad = 0.0;
@@ -66,7 +72,8 @@ pub fn judge_metric(
         return Check::fail(name, "no offset ran");
     }
     let mean_bad = bad / count;
-    let status = if mean_bad <= tolerance + 1e-9 {
+    let slack = base_sum / count * f64::from(slack_permille) / 1000.0;
+    let status = if mean_bad <= tolerance + slack + 1e-9 {
         Status::Pass
     } else {
         Status::Fail
@@ -76,12 +83,45 @@ pub fn judge_metric(
         status,
         format!("{:.1} (mean of {count:.0} offset(s))", now_sum / count),
     )
-    .baseline(format!("{:.1}, tolerance {tolerance:.2}", base_sum / count))
+    .baseline(if slack_permille == 0 {
+        format!("{:.1}, tolerance {tolerance:.2}", base_sum / count)
+    } else {
+        format!(
+            "{:.1}, tolerance {tolerance:.2} + landing slack {slack:.2} ({slack_permille}‰)",
+            base_sum / count
+        )
+    })
     .detail(if status == Status::Fail {
         format!("worse by {mean_bad:.2} on average, beyond the measured phase spread")
     } else {
         String::new()
     })
+}
+
+/// The speed slack of one window row, in thousandths of the blessed mean: 0 under the install
+/// profile (the strict bar); under the landing profile the window's `landing_work_slack_permille`
+/// (default 50 = 5%), applied to both the work per frame (may rise) and flips (may drop).
+pub fn slack_permille(profile: Profile, window: Option<&Window>) -> u32 {
+    match profile {
+        Profile::Install => 0,
+        Profile::Landing => window.map_or(
+            crate::game::DEFAULT_LANDING_SLACK_PERMILLE,
+            Window::landing_slack_permille,
+        ),
+    }
+}
+
+/// The p99 row: judged strictly under the install profile; under the landing profile reported
+/// (value and baseline kept) as a skip, so it neither passes nor fails.
+fn p99_check(profile: Profile, check: Check) -> Check {
+    match profile {
+        Profile::Install => check,
+        Profile::Landing => Check {
+            status: Status::Skip,
+            detail: "not judged under the landing profile".into(),
+            ..check
+        },
+    }
 }
 
 /// One offset of one window: the offset and the metrics read there.
@@ -228,6 +268,12 @@ pub fn run(ctx: &Ctx<'_>, all_offsets: bool) -> StageResult {
             )),
         }
     }
+    let windows_by_row: BTreeMap<String, &Window> = ctx
+        .game
+        .windows
+        .iter()
+        .flat_map(|w| w.rows().into_iter().map(move |(row, _)| (row, w)))
+        .collect();
     for (name, rows) in &by_window {
         let base = ctx.baseline.as_ref().and_then(|b| b.speed.get(*name));
         let Some(base) = base else {
@@ -242,12 +288,14 @@ pub fn run(ctx: &Ctx<'_>, all_offsets: bool) -> StageResult {
                 .filter_map(|(o, m)| m.get(key).and_then(|v| v.parse().ok()).map(|v| (*o, v)))
                 .collect()
         };
+        let slack = slack_permille(ctx.profile, windows_by_row.get(*name).copied());
         checks.push(judge_metric(
             &format!("{name} frames presented"),
             &series("flips"),
             base,
             &base.flips,
             true,
+            slack,
         ));
         checks.push(judge_metric(
             &format!("{name} cycles per frame"),
@@ -255,14 +303,17 @@ pub fn run(ctx: &Ctx<'_>, all_offsets: bool) -> StageResult {
             base,
             &base.work_per_frame,
             false,
+            slack,
         ));
-        checks.push(judge_metric(
+        let p99 = judge_metric(
             &format!("{name} cycles per frame p99"),
             &series("frame_work_p99"),
             base,
             &base.frame_work_p99,
             false,
-        ));
+            0,
+        );
+        checks.push(p99_check(ctx.profile, p99));
         let vblanks: Vec<String> = rows
             .iter()
             .map(|(o, m)| format!("{o}:{}", m.get("vblanks").map_or("?", String::as_str)))
@@ -696,11 +747,11 @@ mod tests {
     fn one_flip_down_everywhere_is_inside_a_four_flip_spread() {
         let b = base();
         let now = [(-12, 789), (0, 785), (12, 777)];
-        let c = judge_metric("f", &now, &b, &b.flips, true);
+        let c = judge_metric("f", &now, &b, &b.flips, true, 0);
         assert_eq!(c.status, Status::Pass, "{c:?}");
         let now = [(-12, 780), (0, 776), (12, 768)];
         assert_eq!(
-            judge_metric("f", &now, &b, &b.flips, true).status,
+            judge_metric("f", &now, &b, &b.flips, true, 0).status,
             Status::Fail
         );
     }
@@ -710,14 +761,53 @@ mod tests {
         let b = base();
         let worse = [(0, 101)];
         assert_eq!(
-            judge_metric("w", &worse, &b, &b.work_per_frame, false).status,
+            judge_metric("w", &worse, &b, &b.work_per_frame, false, 0).status,
             Status::Fail
         );
         let better = [(0, 99)];
         assert_eq!(
-            judge_metric("w", &better, &b, &b.work_per_frame, false).status,
+            judge_metric("w", &better, &b, &b.work_per_frame, false, 0).status,
             Status::Pass
         );
+    }
+
+    #[test]
+    fn the_install_profile_has_no_slack_and_landing_defaults_to_five_percent() {
+        // No --profile is Install: the strict bar, whatever the window declares.
+        assert_eq!(slack_permille(Profile::Install, None), 0);
+        assert_eq!(slack_permille(Profile::Landing, None), 50);
+        let b = base();
+        // Work 100 with zero spread: +5 passes under 5%, +6 fails; strict fails +1.
+        let five = [(0, 105)];
+        let six = [(0, 106)];
+        let w = |now: &[(i32, u64)], slack| {
+            judge_metric("w", now, &b, &b.work_per_frame, false, slack).status
+        };
+        assert_eq!(w(&five, 0), Status::Fail);
+        assert_eq!(w(&five, 50), Status::Pass);
+        assert_eq!(w(&six, 50), Status::Fail);
+        // Flips may drop by the same slack: mean 784.7, spread 4, 5% about 39.2.
+        let f =
+            |now: &[(i32, u64)], slack| judge_metric("f", now, &b, &b.flips, true, slack).status;
+        let dropped = [(-12, 750), (0, 746), (12, 738)];
+        assert_eq!(f(&dropped, 0), Status::Fail);
+        assert_eq!(f(&dropped, 50), Status::Pass);
+        let too_far = [(-12, 740), (0, 736), (12, 728)];
+        assert_eq!(f(&too_far, 50), Status::Fail);
+    }
+
+    #[test]
+    fn landing_reports_the_p99_without_judging_it() {
+        let b = base();
+        let worse = judge_metric("p", &[(0, 50)], &b, &b.frame_work_p99, false, 0);
+        assert_eq!(worse.status, Status::Fail);
+        assert_eq!(
+            p99_check(Profile::Install, worse.clone()).status,
+            Status::Fail
+        );
+        let landing = p99_check(Profile::Landing, worse);
+        assert_eq!(landing.status, Status::Skip);
+        assert!(!landing.value.is_empty() && !landing.baseline.is_empty());
     }
 
     #[test]

@@ -36,10 +36,12 @@ use stage::{Ctx, Tier};
 
 const USAGE: &str = "\
 usage:
-  psoxide-test run [--repo DIR] [--tier quick|full] [--stage NAME]... [--all-models] [--keep-going]
+  psoxide-test run [--repo DIR] [--tier quick|full] [--profile install|landing] [--stage NAME]... [--all-models] [--keep-going]
       the pipeline (stages, in run order: build size host stack speed journeys cross clean); stops
       a full tier at the first failed stage unless --keep-going; exit 0 only when every check that ran passed,
-      and for --tier full only when the landing verdict is complete
+      and for --tier full only when the landing verdict is complete. --profile landing (full tier
+      only, needs the owner's approval before lanes use it): journeys on real only, the speed
+      bar's landing slack; never installable. No --profile is install: the full tier unchanged
   psoxide-test bless [--repo DIR]
       measure the reference build and write psoxide-test.baseline.toml (refuses a red journey)
   psoxide-test lint [--repo DIR]
@@ -50,7 +52,12 @@ usage:
       the SDK pin rule for the game: its pinned commit against SDK main (or REV), over the SDK
       crates the game reaches (--crates lists them); --write records the pin's guest tree
   psoxide-test install [--repo DIR]
-      install the judged disc into the configured library (needs a complete full PASS)
+      install the judged disc into the configured library (needs a complete clean full PASS on
+      the install profile, never slower per speed window than the build installed before it)
+  psoxide-test install-check --result RESULT.json --facts INSTALLED_FACTS.json [--write-facts OUT.json]
+      the same guarantee for an install made elsewhere: exit 0 only if RESULT may replace the
+      build whose speed facts are INSTALLED_FACTS (missing = first install); --write-facts
+      writes RESULT's speed facts in that format
 config: ~/.config/psoxide-test/config.toml or PSOXIDE_TEST_CONFIG (see config.example.toml)";
 
 const STAGES: &[&str] = &[
@@ -84,6 +91,8 @@ struct Options {
     /// `--keep-going`: play every stage even after one has failed (the old behaviour). By default
     /// a full tier stops at its first failed stage and lists the rest as not run.
     keep_going: bool,
+    /// `--profile`: the full tier's gates (stage::Profile); `Install` when not given.
+    profile: stage::Profile,
 }
 
 fn options(args: &[String]) -> Result<Options, String> {
@@ -93,6 +102,7 @@ fn options(args: &[String]) -> Result<Options, String> {
         stages: Vec::new(),
         all_models: false,
         keep_going: false,
+        profile: stage::Profile::Install,
     };
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -101,6 +111,13 @@ fn options(args: &[String]) -> Result<Options, String> {
             "--repo" => o.repo = PathBuf::from(value()?),
             "--all-models" => o.all_models = true,
             "--keep-going" => o.keep_going = true,
+            "--profile" => {
+                o.profile = match value()?.as_str() {
+                    "install" => stage::Profile::Install,
+                    "landing" => stage::Profile::Landing,
+                    p => return Err(format!("unknown profile `{p}` (install or landing)")),
+                }
+            }
             "--tier" => {
                 o.tier = match value()?.as_str() {
                     "quick" => Tier::Quick,
@@ -143,11 +160,13 @@ fn dispatch(args: &[String]) -> Result<ExitCode, String> {
     match command {
         Some("run") => {
             let o = options(&args[1..])?;
+            check_profile(&o, true)?;
             run(&o)
         }
-        Some("bless") => bless(&options(&args[1..])?),
-        Some("lint") => lint(&options(&args[1..])?),
-        Some("install") => install(&options(&args[1..])?),
+        Some("bless") => bless(&checked(&args[1..])?),
+        Some("lint") => lint(&checked(&args[1..])?),
+        Some("install") => install(&checked(&args[1..])?),
+        Some("install-check") => stage::install::check_command(&args[1..]),
         Some("adapter") => adapter(&args[1..]),
         Some("pin") => pin_command(&args[1..]),
         Some("tape") => tape::run(&args[1..]),
@@ -157,6 +176,30 @@ fn dispatch(args: &[String]) -> Result<ExitCode, String> {
         }
         Some(other) => Err(format!("unknown command `{other}`\n{USAGE}")),
     }
+}
+
+/// `options` for a command other than `run`, which takes no landing profile.
+fn checked(args: &[String]) -> Result<Options, String> {
+    let o = options(args)?;
+    check_profile(&o, false)?;
+    Ok(o)
+}
+
+/// `--profile landing` is a full-tier `run` option only, and not an audit (`--all-models`).
+fn check_profile(o: &Options, is_run: bool) -> Result<(), String> {
+    if o.profile == stage::Profile::Install {
+        return Ok(());
+    }
+    if !is_run {
+        return Err("--profile landing is a `run --tier full` option only".into());
+    }
+    if o.tier != Tier::Full {
+        return Err("--profile landing needs --tier full".into());
+    }
+    if o.all_models {
+        return Err("--profile landing plays journeys on real only: drop --all-models".into());
+    }
+    Ok(())
 }
 
 /// The `adapter` subcommands the harness runs in their own process.
@@ -224,6 +267,7 @@ fn context<'a>(o: &Options, game: &'a Game, config: &'a Config) -> Result<Ctx<'a
         receipts: Store::new(work.join("receipts")),
         work,
         tier: o.tier,
+        profile: o.profile,
         all_models: o.all_models,
         artifacts: BTreeMap::new(),
         timing: Mutex::new(Vec::new()),
@@ -393,6 +437,7 @@ fn run(o: &Options) -> Result<ExitCode, String> {
         harness: env!("CARGO_PKG_VERSION").into(),
         gate_revision: GATE_REVISION.into(),
         tier: o.tier.name().into(),
+        profile: o.profile,
         stages,
         skips: Vec::new(),
         verdict: Status::Pass,
@@ -883,4 +928,41 @@ fn pin_command(args: &[String]) -> Result<ExitCode, String> {
     } else {
         ExitCode::FAILURE
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Options, String> {
+        let dir = std::env::temp_dir().display().to_string();
+        let mut all: Vec<String> = vec!["--repo".into(), dir];
+        all.extend(args.iter().map(|s| s.to_string()));
+        options(&all)
+    }
+
+    #[test]
+    fn no_profile_is_the_install_profile() {
+        let o = parse(&["--tier", "full"]).unwrap();
+        assert_eq!(o.profile, stage::Profile::Install);
+        assert!(check_profile(&o, true).is_ok());
+        let explicit = parse(&["--tier", "full", "--profile", "install"]).unwrap();
+        assert_eq!(explicit.profile, o.profile);
+    }
+
+    #[test]
+    fn landing_is_a_full_tier_run_option_only() {
+        let o = parse(&["--tier", "full", "--profile", "landing"]).unwrap();
+        assert_eq!(o.profile, stage::Profile::Landing);
+        assert!(check_profile(&o, true).is_ok());
+        assert!(
+            check_profile(&o, false).is_err(),
+            "bless and install refuse it"
+        );
+        let quick = parse(&["--profile", "landing"]).unwrap();
+        assert!(check_profile(&quick, true).is_err());
+        let audit = parse(&["--tier", "full", "--profile", "landing", "--all-models"]).unwrap();
+        assert!(check_profile(&audit, true).is_err());
+        assert!(parse(&["--profile", "fast"]).is_err());
+    }
 }

@@ -14,6 +14,7 @@ psoxide-test run --stage journeys # one stage (the build always runs first, usua
 psoxide-test bless                # measure the reference build, write the baseline
 psoxide-test lint                 # load the file and every journey; pads and open-loop counts
 psoxide-test install              # copy bytes a complete full PASS judged into the library
+psoxide-test install-check ...    # the install guarantee for a script's install (see Gate profiles)
 psoxide-test pin [--write]        # the SDK pin rule for this repo
 ```
 
@@ -70,6 +71,47 @@ LANDING: COMPLETE PASS (every required tier ran on these bytes and passed)
   otherwise the last line lists what is missing.
 - The result is `<work>/<game>/results/<sha256>.json`, named by its content; wall times are in
   `<sha256>.timing.json` beside it. `install` and `[[requires]]` name results by that hash.
+
+## Gate profiles and the install guarantee
+
+**Needs the owner's approval before any lane uses `--profile landing`.** Without `--profile` a full
+tier is exactly what it was before profiles existed (the result file is byte-identical: an
+install-profile result writes no `profile` key).
+
+```
+psoxide-test run --tier full                     # = --profile install: the strict full tier
+psoxide-test run --tier full --profile landing   # lighter, opt-in, never installable
+```
+
+| | `install` (default) | `landing` |
+|---|---|---|
+| journeys | every model in `FULL_MODELS` | `real` only; every other model is a skip row naming the landing profile (never a pass) |
+| speed: work per frame, frames presented | mean worse-by over the offsets <= the blessed phase spread | the same, plus `landing_work_slack_permille` thousandths of the blessed mean (per `[[speed]]` window, default 50 = 5%): work may rise and flips may drop by that much |
+| speed: p99 | judged as above | reported as a skip (value and baseline kept), not judged |
+| frames by vblank count | reported, not judged | the same |
+| result JSON | no `profile` key | `"profile": "landing"`; the verdict line reads `LANDING-PROFILE PASS ... NOT an install pass` |
+
+`--profile landing` is refused outside `run --tier full`, and with `--all-models`. A disc image run
+on the install profile refuses a `[[requires]]` member whose result is landing-profile.
+
+The install guarantee (`install`, and `install-check` for installs made by a script) refuses
+unless the result is a complete, clean, full PASS on the install profile, and refuses a result
+slower than the build installed before it: for every speed row the installed build was judged
+on, over the offsets both measured, mean work per frame not above and mean frames presented not
+below the installed build's, within its own phase spread (the strict tolerance, no slack). A row
+the installed build had and the new result lacks is refused. The facts live beside the installed
+disc as `<Name>.speed-facts.json`:
+
+```
+{"schema": 1, "result_sha256": "<hex>",
+ "windows": {"<row>": {"offsets": [-12, 0, 12], "flips": [...], "work_per_frame": [...]}}}
+```
+
+No facts file means the first install under this rule: accepted, and the facts are written with
+the disc. `psoxide-test install-check --result R.json --facts INSTALLED.json [--write-facts
+OUT.json]` applies the same check (exit 0 = may install) and writes R's facts for the caller to
+store. A "searched layout" requirement is not enforced yet: no build declares its placement
+layout and nothing reports whether a layout came from the search (TODO in `stage/install.rs`).
 
 ## Receipts and the SDK pin
 

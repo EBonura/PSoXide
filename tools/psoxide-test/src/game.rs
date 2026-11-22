@@ -228,9 +228,23 @@ pub struct Window {
     /// `--input-tape-hold-last`), so a window may outlive its tape (a map load after it).
     #[serde(default)]
     pub hold_last: bool,
+    /// The landing profile's speed slack for this window, in thousandths of the blessed mean
+    /// (default 50 = 5%): work per frame may rise and frames presented may drop by that much
+    /// beyond the measured phase spread. The install profile (the default) ignores it.
+    #[serde(default)]
+    pub landing_work_slack_permille: Option<u32>,
 }
 
+/// `landing_work_slack_permille` when a window does not set it: 5%.
+pub const DEFAULT_LANDING_SLACK_PERMILLE: u32 = 50;
+
 impl Window {
+    /// The landing profile's slack, in thousandths (default 5%).
+    pub fn landing_slack_permille(&self) -> u32 {
+        self.landing_work_slack_permille
+            .unwrap_or(DEFAULT_LANDING_SLACK_PERMILLE)
+    }
+
     /// The frontend arguments the replay gets: the declared ones, plus hold-last.
     pub fn frontend_args(&self) -> Vec<String> {
         let mut args = self.launch_args.clone();
@@ -552,6 +566,12 @@ impl Game {
             }
             if !w.offsets.contains(&0) {
                 return Err(format!("[[speed]] `{}`: offsets must contain 0", w.name));
+            }
+            if w.landing_slack_permille() > 1000 {
+                return Err(format!(
+                    "[[speed]] `{}`: landing_work_slack_permille is thousandths (at most 1000)",
+                    w.name
+                ));
             }
             match (&w.tape, w.polls, &w.from, &w.until) {
                 (Some(_), Some([a, b]), None, None) if a < b => {}

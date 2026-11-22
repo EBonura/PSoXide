@@ -170,6 +170,9 @@ struct MemberResult {
     verdict: String,
     #[serde(default)]
     landing_missing: Vec<String>,
+    /// Absent = install (results written before profiles, and every run without `--profile`).
+    #[serde(default)]
+    profile: crate::stage::Profile,
     stages: Vec<MemberStage>,
 }
 
@@ -186,7 +189,15 @@ struct MemberOutcome {
 }
 
 /// Judge one `[[requires]]` entry against the image's member. `Ok` is the passing value.
-pub fn judge(req: &Requires, member: &Member, result_path: &Path) -> Result<String, String> {
+///
+/// `profile` is the image's own run's: an install-profile image refuses a landing-profile member
+/// (that member never proved itself on every model or on the strict speed bar).
+pub fn judge(
+    req: &Requires,
+    member: &Member,
+    result_path: &Path,
+    profile: crate::stage::Profile,
+) -> Result<String, String> {
     let bytes =
         std::fs::read(result_path).map_err(|e| format!("read {}: {e}", result_path.display()))?;
     let digest = util::sha256_bytes(&bytes);
@@ -212,6 +223,15 @@ pub fn judge(req: &Requires, member: &Member, result_path: &Path) -> Result<Stri
             } else {
                 format!("missing {}", r.landing_missing.join(", "))
             }
+        ));
+    }
+    if profile.is_install() && !r.profile.is_install() {
+        return Err(format!(
+            "{} at {} is a {}-profile result: an install-profile image needs each member's \
+             install-profile full PASS",
+            r.game,
+            util::short(&r.commit),
+            r.profile.name()
         ));
     }
     let judged = r
@@ -289,7 +309,8 @@ pub fn run(ctx: &Ctx<'_>) -> StageResult {
                     ));
                     continue;
                 };
-                let verdict = find_result(ctx, &req.result).and_then(|p| judge(req, member, &p));
+                let verdict =
+                    find_result(ctx, &req.result).and_then(|p| judge(req, member, &p, ctx.profile));
                 match verdict {
                     Ok(value) => {
                         facts.insert(format!("requires/{}", req.id), req.result.clone());
@@ -499,6 +520,7 @@ mod tests {
 
     #[test]
     fn a_member_result_must_be_a_complete_full_pass_of_the_same_bytes() {
+        use crate::stage::Profile;
         let dir = tempfile::tempdir().unwrap();
         let write = |body: &str| {
             let digest = util::sha256_bytes(body.as_bytes());
@@ -517,10 +539,12 @@ mod tests {
             result: digest.clone(),
             file: "ship/wo.exe".into(),
         };
-        assert!(judge(&req, &member(), &path).unwrap().contains("member 3"));
+        assert!(judge(&req, &member(), &path, Profile::Install)
+            .unwrap()
+            .contains("member 3"));
         let mut other = member();
         other.exe_sha256 = "cd".repeat(32);
-        assert!(judge(&req, &other, &path)
+        assert!(judge(&req, &other, &path, Profile::Install)
             .unwrap_err()
             .contains("the image carries"));
         let bin_good = good
@@ -532,18 +556,28 @@ mod tests {
             file: "ship/wo.bin".into(),
             ..req.clone()
         };
-        assert!(judge(&bin_req, &member(), &bp).is_ok());
+        assert!(judge(&bin_req, &member(), &bp, Profile::Install).is_ok());
         let quick = good.replace("\"full\"", "\"quick\"");
         let (qd, qp) = write(&quick);
         let req_quick = Requires {
             result: qd,
             ..req.clone()
         };
-        assert!(judge(&req_quick, &member(), &qp)
+        assert!(judge(&req_quick, &member(), &qp, Profile::Install)
             .unwrap_err()
             .contains("complete full PASS"));
+        let landing = good.replace("\"tier\"", "\"profile\":\"landing\",\"tier\"");
+        let (ld, lp) = write(&landing);
+        let req_landing = Requires {
+            result: ld,
+            ..req.clone()
+        };
+        assert!(judge(&req_landing, &member(), &lp, Profile::Install)
+            .unwrap_err()
+            .contains("landing-profile result"));
+        assert!(judge(&req_landing, &member(), &lp, Profile::Landing).is_ok());
         std::fs::write(&path, good.replace("c0ffee", "c0ffef")).unwrap();
-        assert!(judge(&req, &member(), &path)
+        assert!(judge(&req, &member(), &path, Profile::Install)
             .unwrap_err()
             .contains("was changed"));
     }

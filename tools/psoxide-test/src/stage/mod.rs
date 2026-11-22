@@ -43,6 +43,38 @@ impl Tier {
     }
 }
 
+/// Which gates a full tier judges with (`run --tier full --profile landing|install`). The default,
+/// with no `--profile`, is `Install`: exactly the full tier as it was before profiles existed.
+///
+/// `Landing` is lighter and opt-in (it waits on the owner's approval before lanes use it):
+/// journeys run on `real` only (every other full-tier model is listed as a skip), and the speed
+/// bar allows each window's `landing_work_slack_permille` (speed.rs). A landing result is never
+/// an install result: `install` and `install-check` refuse it, and a disc image's `[[requires]]`
+/// refuses a landing member unless the image's own run is a landing run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Profile {
+    #[default]
+    Install,
+    Landing,
+}
+
+impl Profile {
+    pub fn name(self) -> &'static str {
+        match self {
+            Profile::Install => "install",
+            Profile::Landing => "landing",
+        }
+    }
+
+    /// For `skip_serializing_if`: an install-profile result writes no `profile` key, so a run
+    /// without `--profile` writes the same result file (and hash) as before profiles existed;
+    /// a result with no `profile` key is an install-profile result.
+    pub fn is_install(&self) -> bool {
+        *self == Profile::Install
+    }
+}
+
 /// The hardware models of the full tier, spelled as `--hardware` spells them: the console, the
 /// MiSTer core with its two GP0(1Fh) behaviours, and a strict row where PSoXide refuses what the
 /// stricter third-party emulators refuse (CD acknowledges other than 07h/1Fh; an MDEC whose data
@@ -65,6 +97,8 @@ pub struct Ctx<'a> {
     pub work: PathBuf,
     pub receipts: Store,
     pub tier: Tier,
+    /// `--profile`: `Install` unless the run asked for `landing`.
+    pub profile: Profile,
     /// `--all-models`: every model plays every journey; no row stands on `real` (audit).
     pub all_models: bool,
     /// Per build: file name in `out` -> SHA-256, filled by the build stage.

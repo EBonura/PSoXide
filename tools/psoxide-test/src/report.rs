@@ -138,6 +138,10 @@ pub struct RunResult {
     pub harness: String,
     pub gate_revision: String,
     pub tier: String,
+    /// The gate profile (`--profile`). Not written for `install` (the default), so a run without
+    /// `--profile` writes the same file as before profiles existed; absent reads as `install`.
+    #[serde(default, skip_serializing_if = "crate::stage::Profile::is_install")]
+    pub profile: crate::stage::Profile,
     pub stages: Vec<StageResult>,
     /// Every skipped check, `stage: check: reason`.
     pub skips: Vec<String>,
@@ -188,7 +192,7 @@ impl RunResult {
         let mut out = String::new();
         let _ = writeln!(
             out,
-            "\n{} at {}{} (SDK {}{}, gate {}, tier {})",
+            "\n{} at {}{} (SDK {}{}, gate {}, tier {}{})",
             self.game,
             util::short(&self.commit),
             if self.dirty { " +dirty" } else { "" },
@@ -199,7 +203,12 @@ impl RunResult {
                 format!(", {}", self.sdk_guest)
             },
             util::short(&self.gate_revision),
-            self.tier
+            self.tier,
+            if self.profile.is_install() {
+                String::new()
+            } else {
+                format!(", profile {}", self.profile.name())
+            }
         );
         for stage in &self.stages {
             let wall = timing
@@ -298,7 +307,16 @@ impl RunResult {
                 "FAIL"
             }
         );
-        if self.landing_missing.is_empty() && self.verdict == Status::Pass {
+        if self.landing_missing.is_empty()
+            && self.verdict == Status::Pass
+            && !self.profile.is_install()
+        {
+            let _ = writeln!(
+                out,
+                "LANDING: LANDING-PROFILE PASS (lighter gates: journeys on real only, speed slack; \
+                 NOT an install pass: `install` refuses this result)"
+            );
+        } else if self.landing_missing.is_empty() && self.verdict == Status::Pass {
             let _ = writeln!(
                 out,
                 "LANDING: COMPLETE PASS (every required tier ran on these bytes and passed)"
@@ -342,6 +360,7 @@ mod tests {
             harness: "0.1.0".into(),
             gate_revision: "r".repeat(40),
             tier: "quick".into(),
+            profile: crate::stage::Profile::Install,
             stages,
             skips: Vec::new(),
             verdict: Status::Pass,
@@ -379,6 +398,27 @@ mod tests {
         let r = result(vec![stage("size", Vec::new(), Source::NotRun)]);
         assert_eq!(r.verdict, Status::Fail);
         assert!(r.table(&[]).contains("NOT RUN"));
+    }
+
+    #[test]
+    fn an_install_result_writes_no_profile_and_a_landing_one_says_so() {
+        let mut r = result(vec![stage(
+            "size",
+            vec![Check::pass("t", "1")],
+            Source::Run,
+        )]);
+        r.tier = "full".into();
+        r.landing_missing.clear();
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(!json.contains("\"profile\""), "unchanged without --profile");
+        assert!(r.table(&[]).contains("LANDING: COMPLETE PASS"));
+        r.profile = crate::stage::Profile::Landing;
+        assert!(serde_json::to_string(&r)
+            .unwrap()
+            .contains("\"profile\":\"landing\""));
+        let table = r.table(&[]);
+        assert!(table.contains("LANDING-PROFILE PASS") && table.contains("NOT an install pass"));
+        assert!(!table.contains("COMPLETE PASS"));
     }
 
     #[test]

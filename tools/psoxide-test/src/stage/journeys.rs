@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use crate::journey::{self, Info};
 use crate::report::{Check, Outcome, Source, StageResult, Status};
-use crate::stage::{equiv, jreceipt, Ctx, Tier, FULL_MODELS};
+use crate::stage::{equiv, jreceipt, Ctx, Profile, Tier, FULL_MODELS};
 use crate::{sched, util};
 
 /// What one gate run printed.
@@ -307,10 +307,7 @@ pub fn run(ctx: &Ctx<'_>, bless: bool) -> StageResult {
             open_total + clock_total
         ),
     ));
-    let models: Vec<&str> = match (ctx.tier, bless) {
-        (_, true) | (Tier::Quick, false) => vec!["real"],
-        (Tier::Full, false) => FULL_MODELS.to_vec(),
-    };
+    let models = models(ctx.tier, bless);
     let mut jobs = Vec::new();
     for (info, ticks) in runnable {
         // A template named in `precheck` stands for all of its instances.
@@ -329,6 +326,10 @@ pub fn run(ctx: &Ctx<'_>, bless: bool) -> StageResult {
                     ));
                     continue;
                 }
+            }
+            if let Some(reason) = landing_skip(ctx.profile, m) {
+                checks.push(Check::skip(format!("{}@{m}", info.id), reason));
+                continue;
             }
             // One row with the journey's own pad, and one per extra pad the game file lists.
             let extra = spec.pads.get(&info.id).cloned().unwrap_or_default();
@@ -639,6 +640,26 @@ pub fn run(ctx: &Ctx<'_>, bless: bool) -> StageResult {
 }
 
 /// `psoxide-gate versions`, parsed; `None` when the gate has no such command.
+/// The models a journey is listed on: `real` for bless and the quick tier, every full-tier model
+/// for the full tier (whatever the profile: the landing profile lists the others as skips).
+fn models(tier: Tier, bless: bool) -> Vec<&'static str> {
+    match (tier, bless) {
+        (_, true) | (Tier::Quick, false) => vec!["real"],
+        (Tier::Full, false) => FULL_MODELS.to_vec(),
+    }
+}
+
+/// Why the landing profile does not play `model` (every model but `real`); `None` = play it.
+/// The row is a skip, never a pass: a landing result says nothing about that model.
+fn landing_skip(profile: Profile, model: &str) -> Option<String> {
+    (profile == Profile::Landing && model != "real").then(|| {
+        format!(
+            "not run on {model}: the landing profile plays journeys on real only (a landing \
+             result is not an install result)"
+        )
+    })
+}
+
 fn gate_versions(ctx: &Ctx<'_>, gate: &Path) -> Option<std::collections::BTreeMap<String, String>> {
     let log = ctx
         .dir(&["journeys", "logs"])
@@ -834,6 +855,22 @@ pub fn files(repo: &Path, patterns: &[String]) -> Result<Vec<PathBuf>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_install_profile_plays_every_full_model_and_landing_only_real() {
+        // No --profile is Install: the full tier's model list is exactly FULL_MODELS, as before.
+        assert_eq!(models(Tier::Full, false), FULL_MODELS);
+        assert_eq!(models(Tier::Quick, false), ["real"]);
+        assert_eq!(models(Tier::Full, true), ["real"]);
+        for m in FULL_MODELS {
+            assert_eq!(landing_skip(Profile::Install, m), None);
+        }
+        assert_eq!(landing_skip(Profile::Landing, "real"), None);
+        for m in &FULL_MODELS[1..] {
+            let reason = landing_skip(Profile::Landing, m).expect("skipped under landing");
+            assert!(reason.contains("landing profile"), "{reason}");
+        }
+    }
 
     #[test]
     fn a_receipt_hit_and_a_skip_are_read() {
