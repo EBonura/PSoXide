@@ -772,9 +772,14 @@ impl SectorReader {
     /// It is wrong for a caller that then asks the drive for its state: a
     /// GetStat right after still says "reading". Use [`stop_proved`](Self::stop_proved)
     /// when the drive has to be quiet before anything else happens.
+    ///
+    /// A Pause sent while the read is still seeking (a `stop` soon after
+    /// [`start_read`](Self::start_read)) is refused by the console with INT5 and
+    /// the read carries on; it is sent once more when the read's first sector
+    /// shows the seek is over ([`pause::send_until_acknowledged`]).
     #[inline(never)]
     pub fn stop(&mut self) {
-        if self.send_command(CMD_PAUSE, &[], IRQ_ACK, ACK_WAIT) {
+        if pause::send_until_acknowledged(&mut ReaderPause(self)) == PauseAnswer::Acknowledged {
             self.cd.drain_response_limited(DRAIN_LIMIT);
             self.cd.acknowledge_irq(IRQ_COMPLETE);
         }

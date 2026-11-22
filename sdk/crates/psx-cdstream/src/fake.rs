@@ -6,7 +6,8 @@
 //! popped only while its interrupt is the pending one. Faults are knobs:
 //! a drive error at a given sector, a lost Pause acknowledge, a parameter
 //! FIFO that never has room, a data FIFO that never fills, sectors still in
-//! flight when Pause lands.
+//! flight when Pause lands, a seek the test ends by hand and a Pause the
+//! drive refuses while that seek runs (the console, hardware-tests `0xA53`).
 
 use crate::hw::CdHw;
 use psx_hw::cd::{CMD_PAUSE, CMD_READN, CMD_SEEKL, CMD_SETLOC, CMD_SETMODE};
@@ -86,6 +87,14 @@ pub struct FakeDrive {
     pub data_never_ready: bool,
     /// Pause is accepted but never answers.
     pub swallow_pause: bool,
+    /// SeekL is acknowledged but its completion waits for
+    /// [`finish_seek`](Self::finish_seek).
+    pub hold_seek: bool,
+    /// A Pause sent while a held seek runs is refused with INT5 and the seek
+    /// carries on, as the console does (8 of 8, hardware-tests `0xA53`).
+    pub refuse_pause_while_seeking: bool,
+    /// A held seek is running.
+    seeking: bool,
 }
 
 impl FakeDrive {
@@ -111,7 +120,17 @@ impl FakeDrive {
             refuse_command: None,
             data_never_ready: false,
             swallow_pause: false,
+            hold_seek: false,
+            refuse_pause_while_seeking: false,
+            seeking: false,
         }
+    }
+
+    /// End the held seek: its completion becomes the next interrupt.
+    pub fn finish_seek(&mut self) {
+        assert!(self.seeking, "no held seek is running");
+        self.seeking = false;
+        self.events.push_back(Event::Complete);
     }
 
     /// Commands sent so far, as bytes only.
@@ -179,7 +198,11 @@ impl CdHw for FakeDrive {
             }
             CMD_SEEKL => {
                 self.events.push_back(Event::Acknowledge);
-                self.events.push_back(Event::Complete);
+                if self.hold_seek {
+                    self.seeking = true;
+                } else {
+                    self.events.push_back(Event::Complete);
+                }
                 self.next_lba = self.target;
             }
             CMD_SETMODE => {
@@ -189,6 +212,10 @@ impl CdHw for FakeDrive {
             CMD_READN => {
                 self.reading = true;
                 self.events.push_back(Event::Acknowledge);
+            }
+            CMD_PAUSE if self.seeking && self.refuse_pause_while_seeking => {
+                // Status: error, motor on; the error byte is not recorded.
+                self.events.push_back(Event::Error(0x03, 0x80));
             }
             CMD_PAUSE => {
                 if self.reading {
