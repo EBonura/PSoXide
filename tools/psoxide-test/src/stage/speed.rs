@@ -124,6 +124,19 @@ fn p99_check(profile: Profile, check: Check) -> Check {
     }
 }
 
+/// Why the landing profile does not measure a speed row on `model` (`None`, a plain window, is
+/// the console model `real`); `None` = measure it. Like the journeys: every model but `real` is a
+/// skip row naming the landing profile, never measured and never a pass.
+pub fn landing_skip(profile: Profile, model: Option<&str>) -> Option<String> {
+    let model = model.unwrap_or("real");
+    (profile == Profile::Landing && model != "real").then(|| {
+        format!(
+            "not measured on {model}: the landing profile measures speed on real only (a landing \
+             result is not an install result)"
+        )
+    })
+}
+
 /// One offset of one window: the offset and the metrics read there.
 type Row = (i32, BTreeMap<String, String>);
 
@@ -227,6 +240,10 @@ pub fn run(ctx: &Ctx<'_>, all_offsets: bool) -> StageResult {
             w.rows().into_iter().take(1).collect()
         };
         for (row, model) in rows {
+            if let Some(reason) = landing_skip(ctx.profile, model) {
+                unmeasurable.push(Check::skip(row, reason));
+                continue;
+            }
             for &offset in &offsets {
                 jobs.push(Job {
                     window: w,
@@ -808,6 +825,21 @@ mod tests {
         let landing = p99_check(Profile::Landing, worse);
         assert_eq!(landing.status, Status::Skip);
         assert!(!landing.value.is_empty() && !landing.baseline.is_empty());
+    }
+
+    #[test]
+    fn landing_measures_speed_on_real_only() {
+        // A plain window is the console model: measured under both profiles.
+        assert_eq!(landing_skip(Profile::Landing, None), None);
+        assert_eq!(landing_skip(Profile::Landing, Some("real")), None);
+        for m in crate::stage::FULL_MODELS.iter().filter(|m| **m != "real") {
+            assert_eq!(landing_skip(Profile::Install, Some(m)), None);
+            let reason = landing_skip(Profile::Landing, Some(m)).expect("skipped under landing");
+            assert!(
+                reason.contains("landing profile") && reason.contains(m),
+                "{reason}"
+            );
+        }
     }
 
     #[test]
