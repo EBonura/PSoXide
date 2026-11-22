@@ -366,9 +366,11 @@ pub fn signal_draw_done() {
 
 /// [`signal_draw_done`] past the direct-access guard and any recording, for
 /// code that has already made the port and the channel safe (the present
-/// queue's stall recovery, which the guard itself runs).
-#[cold]
-#[inline(never)]
+/// queue's stall recovery, which the guard itself runs, and every frame's present).
+///
+/// Inline: a call site calls the one kick body directly. The presenter sends this once a frame,
+/// so a cold wrapper in front of it cost a second call and a cache line far from the frame's code.
+#[inline(always)]
 pub fn signal_draw_done_unguarded() {
     kick_draw_done_list();
 }
@@ -403,9 +405,20 @@ fn kick_draw_done_list() {
 }
 
 /// Wait out the GPU channel's walk, bounded; a walk that does not end is aborted and the GPU's
-/// command buffer reset. One body for the two waits of [`kick_draw_done_list`].
-#[inline(never)]
+/// command buffer reset. An idle channel (the common case before the kick) is one register test
+/// here; only a busy one calls the wait.
+#[inline(always)]
 fn settle_gpu_channel() {
+    use crate::dma::{self, Channel};
+    if dma::is_busy(Channel::Gpu) {
+        settle_busy_gpu_channel();
+    }
+}
+
+/// The waiting half of [`settle_gpu_channel`]: one body for the two waits of
+/// [`kick_draw_done_list`].
+#[inline(never)]
+fn settle_busy_gpu_channel() {
     use crate::dma::{self, Channel};
     if !dma::wait_done(Channel::Gpu, dma::DEFAULT_SPINS) {
         dma::abort(Channel::Gpu);

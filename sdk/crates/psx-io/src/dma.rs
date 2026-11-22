@@ -266,7 +266,15 @@ pub fn is_busy(ch: Channel) -> bool {
 /// interrupts masked: the VBlank handler (the present queue's kick)
 /// sets the GPU channel's bit in the same register, and a handler that ran
 /// between this read and write would have its bit overwritten.
+///
+/// A channel already enabled (every frame's draw-done kick, after the first) is one read and no
+/// write: nothing clears an enable bit behind the thread's back (the handler only sets the GPU
+/// channel's), so a bit seen set stays set.
 pub fn enable_channel(ch: Channel) {
+    // SAFETY: a side-effect-free read of the global enable register.
+    if unsafe { crate::read_u32(reg::DPCR) } & (1 << ch.enable_bit()) != 0 {
+        return;
+    }
     crate::irq::without_interrupts(|| {
         // SAFETY: a side-effect-free read of the global enable register.
         let enabled = unsafe { crate::read_u32(reg::DPCR) };

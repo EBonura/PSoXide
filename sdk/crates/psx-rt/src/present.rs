@@ -830,11 +830,37 @@ const TRUST_CLEAN: u32 = 32;
 static mut TRUST_SEEN: u32 = 0;
 static mut TRUST_RUN: u32 = 0;
 
+/// The fallback count at which a frame has nothing to count (thread-only): [`TRUST_SEEN`] while
+/// the presenter is in signal mode with a run of 0, and [`TRUST_SEEN`] with its top bit flipped
+/// otherwise, a count the handler would need 2^31 timeouts to reach.
+static mut TRUST_SETTLED_AT: u32 = 0;
+
+/// The bit that makes [`TRUST_SETTLED_AT`] differ from the count when there is counting to do.
+const TRUST_UNSETTLED: u32 = 1 << 31;
+
 /// Once per frame, from the frame's present call: a frame is a miss when the handler flipped the
 /// one before by its timeout instead of by bit 24. In conventional mode a frame is clean when it
 /// flipped with bit 24. On a PS1 this never changes anything: no miss ever happens.
-#[inline(never)]
+///
+/// A frame in signal mode with no new miss and no run left to drain (every frame on a PS1) changes
+/// no word, so the call site holds one comparison of two words; only a frame with something to
+/// count calls the body.
+#[inline(always)]
 fn observe_signal() {
+    // SAFETY: volatile aligned word loads of a thread-only static and of a counter the handler
+    // writes with single stores.
+    let settled = unsafe {
+        crate::interrupts::draw_done_fallback_count() == read_volatile(addr_of!(TRUST_SETTLED_AT))
+    };
+    if !settled {
+        count_signal();
+    }
+}
+
+/// The counting half of [`observe_signal`]: a miss, a run still draining, or conventional mode.
+#[cold]
+#[inline(never)]
+fn count_signal() {
     // SAFETY: thread-only statics; the mode word is written here and only read by the handler.
     unsafe {
         let fallbacks = crate::interrupts::draw_done_fallback_count();
@@ -849,15 +875,22 @@ fn observe_signal() {
             (true, false) => run + 1,
         };
         let limit = if conv { TRUST_CLEAN } else { TRUST_MISS_LIMIT };
-        if run >= limit {
+        // Whether the next frame has counting to do: conventional mode or a run left to drain.
+        let unsettled = if run >= limit {
             write_volatile(
                 addr_of_mut!(crate::interrupts::__psx_rt_flip_conv),
                 u32::from(!conv),
             );
             write_volatile(addr_of_mut!(TRUST_RUN), 0);
+            !conv
         } else {
             write_volatile(addr_of_mut!(TRUST_RUN), run);
-        }
+            conv || run != 0
+        };
+        write_volatile(
+            addr_of_mut!(TRUST_SETTLED_AT),
+            fallbacks ^ (u32::from(unsettled) * TRUST_UNSETTLED),
+        );
     }
 }
 
@@ -903,3 +936,75 @@ fn compiler_barrier() {
 #[cfg(test)]
 #[path = "present_model.rs"]
 mod model;
+
+#[cfg(test)]
+mod trust_tests {
+    use super::*;
+
+    /// The words `observe_signal` keeps: seen, run, mode, settled-at.
+    fn trust() -> (u32, u32, u32, u32) {
+        // SAFETY: volatile reads of this module's and the handler's words; no other test writes them.
+        unsafe {
+            (
+                read_volatile(addr_of!(TRUST_SEEN)),
+                read_volatile(addr_of!(TRUST_RUN)),
+                read_volatile(addr_of!(crate::interrupts::__psx_rt_flip_conv)),
+                read_volatile(addr_of!(TRUST_SETTLED_AT)),
+            )
+        }
+    }
+
+    /// Put the words in a state: seen = the handler's count, `run`, `conv`, and the settled-at
+    /// word the counting body would leave for them.
+    fn set(run: u32, conv: u32) -> u32 {
+        let seen = crate::interrupts::draw_done_fallback_count();
+        let settled_at = if run != 0 || conv != 0 {
+            seen ^ TRUST_UNSETTLED
+        } else {
+            seen
+        };
+        // SAFETY: as in `trust`.
+        unsafe {
+            write_volatile(addr_of_mut!(TRUST_SEEN), seen);
+            write_volatile(addr_of_mut!(TRUST_RUN), run);
+            write_volatile(addr_of_mut!(crate::interrupts::__psx_rt_flip_conv), conv);
+            write_volatile(addr_of_mut!(TRUST_SETTLED_AT), settled_at);
+        }
+        seen
+    }
+
+    /// The one-comparison check skips only frames on which the counting changes nothing, and the
+    /// body leaves the settled-at word so that a run still draining, or conventional mode, keeps
+    /// being counted.
+    #[test]
+    fn only_a_settled_frame_skips_the_counting() {
+        let seen = set(0, 0);
+        count_signal();
+        assert_eq!(
+            trust(),
+            (seen, 0, 0, seen),
+            "the body changes nothing on a settled frame"
+        );
+        observe_signal();
+        assert_eq!(trust(), (seen, 0, 0, seen));
+
+        let seen = set(2, 0);
+        observe_signal();
+        assert_eq!(trust(), (seen, 1, 0, seen ^ TRUST_UNSETTLED));
+        observe_signal();
+        assert_eq!(trust(), (seen, 0, 0, seen), "a drained run is settled");
+
+        // Conventional mode counts clean frames from a run of 0, so it is never skipped.
+        let seen = set(0, 1);
+        observe_signal();
+        assert_eq!(trust(), (seen, 1, 1, seen ^ TRUST_UNSETTLED));
+        for _ in 1..TRUST_CLEAN {
+            observe_signal();
+        }
+        assert_eq!(
+            trust(),
+            (seen, 0, 0, seen),
+            "a long clean run trusts the signal again"
+        );
+    }
+}
