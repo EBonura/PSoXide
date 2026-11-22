@@ -81,6 +81,81 @@ const MAGIC: &str = "# psoxide-pgo layout 1";
 const FEATURES_TAG: &str = "# features: ";
 const VARIANT_TAG: &str = "# variant: ";
 
+/// The search stamp: the header line `search` writes right after the first line of every layout
+/// profile it places, so a reader can tell a searched layout from a greedy one.
+///
+/// ```text
+/// # psoxide-pgo layout 1
+/// # psoxide-pgo searched: rounds <N> seed <N>
+/// ```
+///
+/// It is a comment, so every reader of the profile (`place`, `layout`, `apply`, `search`)
+/// parses a stamped profile exactly as the same profile without it. `order` and `layout` write
+/// new counts with no stamp: their output is not a searched placement. The SDK's harness
+/// (psoxide-test, `install`) reads the same line, by this exact prefix, in the profile's leading
+/// comment lines, to refuse installing a game whose committed layout was never searched.
+pub const SEARCHED_TAG: &str = "# psoxide-pgo searched: ";
+
+/// What a search stamp records: the search's rounds and seed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SearchStamp {
+    /// The search's `--rounds`.
+    pub rounds: usize,
+    /// The search's `--seed`.
+    pub seed: u64,
+}
+
+impl SearchStamp {
+    /// The stamp line, without its newline.
+    #[must_use]
+    pub fn line(&self) -> String {
+        format!("{SEARCHED_TAG}rounds {} seed {}", self.rounds, self.seed)
+    }
+
+    /// The stamp of a layout profile's text: read from its leading comment lines; `None` when it
+    /// has none (a greedy layout, or one written before stamps existed).
+    #[must_use]
+    pub fn read(text: &str) -> Option<SearchStamp> {
+        let rest = text
+            .lines()
+            .take_while(|line| line.starts_with('#'))
+            .find_map(|line| line.strip_prefix(SEARCHED_TAG))?;
+        let mut fields = rest.split(' ');
+        let (Some("rounds"), Some(rounds), Some("seed"), Some(seed), None) = (
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+        ) else {
+            return None;
+        };
+        Some(SearchStamp {
+            rounds: rounds.parse().ok()?,
+            seed: seed.parse().ok()?,
+        })
+    }
+
+    /// `text` (a layout profile) with this stamp as its second line, any older stamp dropped.
+    #[must_use]
+    pub fn apply(&self, text: &str) -> String {
+        let mut out = String::new();
+        let mut lines = text.lines().filter(|line| !line.starts_with(SEARCHED_TAG));
+        if let Some(first) = lines.next() {
+            out.push_str(first);
+            out.push('\n');
+        }
+        out.push_str(&self.line());
+        out.push('\n');
+        for line in lines {
+            out.push_str(line);
+            out.push('\n');
+        }
+        out
+    }
+}
+
 /// One input section of the link's `.text`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Section {
@@ -2014,5 +2089,99 @@ mod tests {
         assert!(recorded_order(&moved, &sections, &image, &[]).is_err());
         // A function line after the placement is refused, not misattributed.
         assert!(Layout::parse(&format!("{text}f 0000000000000000 1 late\n")).is_err());
+    }
+
+    #[test]
+    fn a_search_stamp_reads_back_and_places_exactly_as_the_unstamped_layout() {
+        let (sections, image, counts) = game();
+        let mut layout = collect(&sections, &image, &counts).layout;
+        let stamp = SearchStamp {
+            rounds: 600,
+            seed: 7,
+        };
+
+        // Greedy: no recorded placement, `place` lays it out from the counts.
+        let plain = layout.to_text();
+        let stamped = stamp.apply(&plain);
+        assert_eq!(SearchStamp::read(&plain), None);
+        assert_eq!(SearchStamp::read(&stamped), Some(stamp));
+        let mut lines = stamped.lines();
+        assert_eq!(lines.next(), Some(MAGIC), "the magic line stays first");
+        assert_eq!(
+            lines.next(),
+            Some("# psoxide-pgo searched: rounds 600 seed 7")
+        );
+        assert_eq!(
+            stamped.replacen(&format!("{}\n", stamp.line()), "", 1),
+            plain,
+            "the stamp is the only added line"
+        );
+        let (a, b) = (
+            Layout::parse(&plain).unwrap(),
+            Layout::parse(&stamped).unwrap(),
+        );
+        assert_eq!(a, b);
+        let fixed = [".text._start".to_string()];
+        let greedy = |l: &Layout| place(&sections, &image, &bind(l, &sections, &image), &fixed);
+        assert_eq!(greedy(&a), greedy(&b));
+        assert_eq!(
+            order_file(&sections, &greedy(&a)),
+            order_file(&sections, &greedy(&b))
+        );
+
+        // Recorded: a placement `search` wrote binds to the same order with or without it.
+        let start = ordered_start(&sections, &[]);
+        let at = |name: &str| {
+            keys(&sections)
+                .iter()
+                .position(|key| key.as_deref() == Some(name))
+                .unwrap()
+        };
+        let entry = |k: usize, address| RecordedEntry {
+            hash: code_hash(&image.words(&sections[k]).unwrap()),
+            words: sections[k].size / 4,
+            address,
+            key: keys(&sections)[k].clone().unwrap(),
+        };
+        layout.placement = Some(Recorded {
+            start,
+            entries: vec![entry(at("b"), start), entry(at("a"), start + 0x40)],
+        });
+        let plain = layout.to_text();
+        let stamped = stamp.apply(&plain);
+        let (a, b) = (
+            Layout::parse(&plain).unwrap(),
+            Layout::parse(&stamped).unwrap(),
+        );
+        assert_eq!(a, b);
+        let recorded = |l: &Layout| {
+            recorded_order(l.placement.as_ref().unwrap(), &sections, &image, &[]).unwrap()
+        };
+        assert_eq!(recorded(&a), recorded(&b));
+
+        // A second search replaces the stamp; a stamp below the header, or malformed, is none.
+        let again = SearchStamp {
+            rounds: 2000,
+            seed: 1,
+        }
+        .apply(&stamped);
+        assert_eq!(again.matches(SEARCHED_TAG).count(), 1);
+        assert_eq!(SearchStamp::read(&again).unwrap().rounds, 2000);
+        assert_eq!(
+            SearchStamp::read(&format!("{MAGIC}\nf 0 1 a\n{}\n", stamp.line())),
+            None
+        );
+        for bad in [
+            "rounds 6",
+            "rounds x seed 1",
+            "seed 1 rounds 6",
+            "rounds 6 seed 1 more",
+        ] {
+            assert_eq!(
+                SearchStamp::read(&format!("{MAGIC}\n{SEARCHED_TAG}{bad}\n")),
+                None,
+                "{bad}"
+            );
+        }
     }
 }
