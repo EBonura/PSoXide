@@ -36,9 +36,10 @@ use stage::{Ctx, Tier};
 
 const USAGE: &str = "\
 usage:
-  psoxide-test run [--repo DIR] [--tier quick|full] [--stage NAME]... [--all-models]
-      the pipeline (stages: build size host journeys speed cross clean); exit 0 only when every
-      check that ran passed, and for --tier full only when the landing verdict is complete
+  psoxide-test run [--repo DIR] [--tier quick|full] [--stage NAME]... [--all-models] [--keep-going]
+      the pipeline (stages, in run order: build size host stack speed journeys cross clean); stops
+      at the first failed stage unless --keep-going; exit 0 only when every check that ran passed,
+      and for --tier full only when the landing verdict is complete
   psoxide-test bless [--repo DIR]
       measure the reference build and write psoxide-test.baseline.toml (refuses a red journey)
   psoxide-test lint [--repo DIR]
@@ -54,6 +55,13 @@ config: ~/.config/psoxide-test/config.toml or PSOXIDE_TEST_CONFIG (see config.ex
 
 const STAGES: &[&str] = &[
     "build", "requires", "size", "host", "journeys", "stack", "speed", "cross", "clean",
+];
+
+/// The order `run` plays the stages in: the cheap verdicts (size, host, stack, speed) before the
+/// journeys, which are most of a full tier's wall time, so a run that is going to fail on a
+/// cheap check says so in minutes. No stage reads another stage's output except through `build`.
+const RUN_ORDER: &[&str] = &[
+    "build", "requires", "size", "host", "stack", "speed", "journeys", "cross", "clean",
 ];
 
 fn main() -> ExitCode {
@@ -73,6 +81,9 @@ struct Options {
     stages: Vec<String>,
     /// `--all-models`: play every model of every journey, none standing on `real` (audit).
     all_models: bool,
+    /// `--keep-going`: play every stage even after one has failed (the old behaviour). By default
+    /// a run stops at its first failed stage and lists the rest as not run.
+    keep_going: bool,
 }
 
 fn options(args: &[String]) -> Result<Options, String> {
@@ -81,6 +92,7 @@ fn options(args: &[String]) -> Result<Options, String> {
         tier: Tier::Quick,
         stages: Vec::new(),
         all_models: false,
+        keep_going: false,
     };
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -88,6 +100,7 @@ fn options(args: &[String]) -> Result<Options, String> {
         match a.as_str() {
             "--repo" => o.repo = PathBuf::from(value()?),
             "--all-models" => o.all_models = true,
+            "--keep-going" => o.keep_going = true,
             "--tier" => {
                 o.tier = match value()?.as_str() {
                     "quick" => Tier::Quick,
@@ -235,6 +248,22 @@ fn not_run(name: &str, needs: &str) -> StageResult {
     }
 }
 
+/// A stage the run never started because an earlier stage failed.
+fn stopped_at(name: &str, failed: &str) -> StageResult {
+    StageResult {
+        name: name.into(),
+        source: Source::NotRun,
+        key: String::new(),
+        outcome: Outcome {
+            checks: vec![Check::fail(
+                name,
+                format!("not run: the run stopped at `{failed}`, which failed (--keep-going plays every stage)"),
+            )],
+            ..Outcome::default()
+        },
+    }
+}
+
 fn run(o: &Options) -> Result<ExitCode, String> {
     let config = Config::load()?;
     let game = Game::load(&o.repo)?;
@@ -250,24 +279,48 @@ fn run(o: &Options) -> Result<ExitCode, String> {
     // The SDK pin rule first: it is not a receipt (SDK main moves), and a run that cannot
     // show it is not a landing.
     let (sdk, sdk_guest) = ctx.timed("sdk", || sdk_stage(&o.repo, &game, config.work.as_path()));
+    // The first failed stage, once the run stops at it (`--keep-going` never stops).
+    let mut stopped: Option<String> = None;
+    if !sdk.passed() && !o.keep_going {
+        stopped = Some("sdk".into());
+    }
     stages.push(sdk);
+    // A full tier whose clean clone cannot fetch this commit fails at its very end, after every
+    // journey: ask GitHub first. Only a definite "not there" stops the run.
+    if stopped.is_none() && o.tier == Tier::Full && wanted("clean") && !game.cleans.is_empty() {
+        let pre = ctx.timed("pushed", || stage::clean::pushed_precheck(&ctx));
+        if !pre.passed() && !o.keep_going {
+            stopped = Some("pushed".into());
+        }
+        stages.push(pre);
+    }
     let t0 = util::now_seconds();
-    let build = stage::build::run(&mut ctx);
-    ctx.timing
-        .lock()
-        .map_err(|_| "timing lock")?
-        .push(report::Timing {
-            what: "build".into(),
-            start: t0,
-            end: util::now_seconds(),
-        });
-    let built = build.passed();
-    stages.push(build);
-    for name in &STAGES[1..] {
+    let built = if let Some(at) = &stopped {
+        stages.push(stopped_at("build", at));
+        false
+    } else {
+        let build = stage::build::run(&mut ctx);
+        ctx.timing
+            .lock()
+            .map_err(|_| "timing lock")?
+            .push(report::Timing {
+                what: "build".into(),
+                start: t0,
+                end: util::now_seconds(),
+            });
+        let built = build.passed();
+        stages.push(build);
+        built
+    };
+    for name in &RUN_ORDER[1..] {
         if !wanted(name) {
             continue;
         }
         if optional_stage_absent(name, &game) {
+            continue;
+        }
+        if let Some(at) = &stopped {
+            stages.push(stopped_at(name, at));
             continue;
         }
         if !built {
@@ -283,9 +336,18 @@ fn run(o: &Options) -> Result<ExitCode, String> {
             "speed" => stage::speed::run(&ctx, false),
             "cross" => stage::cross::run(&ctx),
             "clean" => stage::clean::run(&ctx),
-            _ => unreachable!("STAGES lists only these"),
+            _ => unreachable!("RUN_ORDER lists only these"),
         });
+        if !r.passed() && !o.keep_going {
+            stopped = Some(name.to_string());
+        }
         stages.push(r);
+    }
+    if let Some(at) = &stopped {
+        println!(
+            "STOPPED at the first failed stage ({at}); the stages after it did not run \
+             (--keep-going plays them all)"
+        );
     }
     let mut missing = Vec::new();
     if o.tier != Tier::Full {

@@ -118,6 +118,119 @@ fn one(ctx: &Ctx<'_>, clean: &Clean) -> (Source, String, Outcome) {
     (Source::Run, key, outcome)
 }
 
+/// `-c` arguments that make git fetch through the configured credential helper. A private
+/// repository fetches through it; the helper runs at fetch time, so no token is ever in an
+/// argument, the clone's config or a log.
+fn helper_args(ctx: &Ctx<'_>) -> Vec<String> {
+    match &ctx.config.tools.git_credential_helper {
+        Some(h) => vec![
+            "-c".into(),
+            "credential.helper=".into(),
+            "-c".into(),
+            format!("credential.helper={h}"),
+        ],
+        None => Vec::new(),
+    }
+}
+
+/// Whether a fetch error says the server does not have the commit (as opposed to a network or
+/// credential failure, which proves nothing either way).
+fn says_not_on_server(error: &str) -> bool {
+    let e = error.to_ascii_lowercase();
+    [
+        "not our ref",
+        "couldn't find remote ref",
+        "no such remote ref",
+        "unadvertised object",
+    ]
+    .iter()
+    .any(|m| e.contains(m))
+}
+
+/// Asked before a full tier builds anything: can a clean clone fetch HEAD from GitHub? Fetches
+/// only the commit object (`--depth 1 --filter=tree:0`, a few hundred bytes) into a scratch
+/// repository. Fails on tracked edits or when the server answers that it does not have the
+/// commit; any other fetch error (network, credentials) is a skip, so the run goes on and the
+/// clean stage gives the real verdict.
+pub fn pushed_precheck(ctx: &Ctx<'_>) -> StageResult {
+    let name = "pushed";
+    let result = |check: Check| StageResult {
+        name: name.into(),
+        source: Source::Run,
+        key: String::new(),
+        outcome: Outcome {
+            checks: vec![check],
+            ..Outcome::default()
+        },
+    };
+    let commit = match util::git(&ctx.repo, &["rev-parse", "HEAD"]) {
+        Ok(c) => c,
+        Err(e) => return result(Check::skip(name, format!("cannot read HEAD: {e}"))),
+    };
+    let dirty = util::git(
+        &ctx.repo,
+        &["status", "--porcelain", "--untracked-files=no"],
+    )
+    .unwrap_or_default();
+    if !dirty.is_empty() {
+        return result(Check::fail(
+            name,
+            "tracked files differ from HEAD: the clean stage would refuse this tree at the end \
+             of the run; commit and push first",
+        ));
+    }
+    let scratch = ctx.work.join("pushed-precheck");
+    if scratch.exists() {
+        if let Err(e) = std::fs::remove_dir_all(&scratch) {
+            return result(Check::skip(
+                name,
+                format!("remove {}: {e}", scratch.display()),
+            ));
+        }
+    }
+    if let Err(e) = std::fs::create_dir_all(&scratch) {
+        return result(Check::skip(
+            name,
+            format!("create {}: {e}", scratch.display()),
+        ));
+    }
+    let url = format!("https://github.com/{}.git", ctx.game.repository);
+    let helper = helper_args(ctx);
+    let mut fetch: Vec<&str> = helper.iter().map(String::as_str).collect();
+    fetch.extend([
+        "fetch",
+        "-q",
+        "--depth",
+        "1",
+        "--filter=tree:0",
+        "origin",
+        commit.as_str(),
+    ]);
+    let outcome = util::git(&scratch, &["init", "-q", "--bare"])
+        .and_then(|_| util::git(&scratch, &["remote", "add", "origin", &url]))
+        .and_then(|_| util::git(&scratch, &fetch));
+    let _ = std::fs::remove_dir_all(&scratch);
+    match outcome {
+        Ok(_) => result(Check::pass(
+            name,
+            format!("{} is on {}", util::short(&commit), ctx.game.repository),
+        )),
+        Err(e) if says_not_on_server(&e) => result(Check::fail(
+            name,
+            format!(
+                "{} is not on {}: the clean clone would fail at the end of the run; push the \
+                 branch first",
+                util::short(&commit),
+                ctx.game.repository
+            ),
+        )),
+        Err(e) => result(Check::skip(
+            name,
+            format!("could not ask GitHub (the clean stage will): {e}"),
+        )),
+    }
+}
+
 fn fetch_steps<'a>(url: &'a str, commit: &'a str, history: bool) -> Vec<Vec<&'a str>> {
     let mut fetch = vec!["fetch", "-q"];
     if !history {
@@ -155,17 +268,7 @@ fn prove(
     if let Err(e) = std::fs::create_dir_all(&src) {
         return Outcome::error("clean", e.to_string());
     }
-    // A private repository fetches through the configured helper; the helper runs at fetch
-    // time, so no token is ever in an argument, the clone's config or a log.
-    let helper: Vec<String> = match &ctx.config.tools.git_credential_helper {
-        Some(h) => vec![
-            "-c".into(),
-            "credential.helper=".into(),
-            "-c".into(),
-            format!("credential.helper={h}"),
-        ],
-        None => Vec::new(),
-    };
+    let helper = helper_args(ctx);
     for args in fetch_steps(&url, commit, clean.history) {
         let mut all: Vec<&str> = helper.iter().map(String::as_str).collect();
         all.extend(args);
@@ -304,5 +407,22 @@ mod tests {
         assert!(shallow[2].contains(&"--depth"));
         let full = fetch_steps("u", "c", true);
         assert!(!full[2].contains(&"--depth"));
+    }
+}
+
+#[cfg(test)]
+mod pushed_tests {
+    use super::says_not_on_server;
+
+    #[test]
+    fn only_a_missing_commit_counts_as_not_pushed() {
+        assert!(says_not_on_server(
+            "git fetch in /x: fatal: remote error: upload-pack: not our ref 1111"
+        ));
+        assert!(says_not_on_server("fatal: couldn't find remote ref deadbeef"));
+        assert!(!says_not_on_server(
+            "fatal: unable to access 'https://github.com/a/b.git/': Could not resolve host"
+        ));
+        assert!(!says_not_on_server("remote: Repository not found."));
     }
 }
