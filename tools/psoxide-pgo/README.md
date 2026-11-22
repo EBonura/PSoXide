@@ -376,6 +376,24 @@ sections, when any of them is missing or its code changed, or when the code
 ahead of the ordered sections changed size: the addresses are the point, so
 search again. A layout without these lines places exactly as before.
 
+The search stamp. `search` also writes one header line, right after the
+profile's first line, saying the layout was searched and with what:
+
+```text
+# psoxide-pgo layout 1
+# psoxide-pgo searched: rounds 600 seed 1
+```
+
+It is a comment: `place`, `apply`, `layout`, `icache` and `search` read a
+stamped profile exactly as the same profile without it (a test proves the
+placement identical). A second search replaces it. `order` and `layout`
+write fresh counts without it, so a stamp always means the placement in the
+file came from `search`. The SDK's harness reads the same line (exact
+prefix `# psoxide-pgo searched: `, then `rounds N seed N`, in the leading
+comment lines): `psoxide-test install` refuses a game whose committed layout
+has no stamp. A layout searched before stamps existed has its `# placement:
+psoxide-pgo search, ...` comment but no stamp: search it again to install.
+
 **Limits.** The gap filler is code no traced window ran, and there may not
 be much of it. Half-Life traces 514 KB of functions against 242 KB of cold
 code, and its greedy start already spends 223 KB of that on gaps; past the
