@@ -525,6 +525,11 @@ impl<R: ChunkReader, A: PacketArena, const P: usize> CachedStreamer<R, A, P> {
     /// not overlap this owner's sector scratch or the caller's cache arena.
     /// Only the owner may access the destination while the stream is active.
     /// Calls are serialized with all other CD MMIO and may not reenter.
+    // Out of line, as are stream_pump and stream_abort: inlined at each game call site they cost
+    // Half-Life about 1 KB of resident text (11-22). They run on a weapon switch or once a frame
+    // while a session is open, so one call is nothing.
+    #[inline(never)]
+    #[optimize(size)]
     pub unsafe fn stream_begin(&mut self, chunk_id: u32, dst: *mut u32, dst_words: usize) -> bool {
         self.stream_abort();
         let rd = &mut *core::ptr::addr_of_mut!(self.reader);
@@ -565,6 +570,7 @@ impl<R: ChunkReader, A: PacketArena, const P: usize> CachedStreamer<R, A, P> {
     ///
     /// # Safety
     /// Same contract as [`Self::stream_begin`] (whose `dst` this writes through).
+    #[inline(never)]
     pub unsafe fn stream_pump(&mut self) -> StreamPump {
         if !self.stream.active {
             return StreamPump::Idle;
@@ -599,6 +605,7 @@ impl<R: ChunkReader, A: PacketArena, const P: usize> CachedStreamer<R, A, P> {
     /// Close the open session: take the sectors back from the interrupt, then
     /// pause the drive with the reader's Pause. Safe to call when idle. Runs
     /// automatically ahead of every blocking load.
+    #[inline(never)]
     pub fn stream_abort(&mut self) {
         if self.stream.active {
             self.stream.active = false;
