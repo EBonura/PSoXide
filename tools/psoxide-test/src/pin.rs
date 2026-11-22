@@ -15,9 +15,11 @@
 //!
 //! The rule compares one game's view of that tree (scope.rs): the same digest without the files
 //! of SDK crates the game cannot reach, so a change to a disc no game links (an SDK example)
-//! moves no game that does not build it. When the game's reach cannot be read, the whole guest
-//! tree is compared. A lock records the whole guest tree of its pin, which does not depend on
-//! the game.
+//! moves no game that does not build it. A nested workspace lock (`engine/Cargo.lock`) counts
+//! in that view only for the packages the game reaches, with their dependency edges, so a new
+//! dependency of a crate the game never builds does not move it (a lock that does not parse
+//! counts whole). When the game's reach cannot be read, the whole guest tree is compared. A
+//! lock records the whole guest tree of its pin, which does not depend on the game.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -30,7 +32,7 @@ use crate::util::{self, Key};
 pub const DEFINITION: &str = "guest-tree-2";
 
 /// The same for a game's scoped view of it (scope.rs).
-pub const SCOPED_DEFINITION: &str = "guest-tree-scoped-2";
+pub const SCOPED_DEFINITION: &str = "guest-tree-scoped-3";
 
 /// The source of the code that computes a tree. A cached tree is kept under a hash of it as
 /// well as the definition names above, so a change to the logic never reads a tree the old
@@ -264,13 +266,21 @@ impl Mirror {
             return guest_tree_of(&listing, manifest.as_deref(), lock.as_deref(), member_names);
         };
         let reached = self.reached_in(commit, &listing, manifest.as_deref(), reach)?;
+        let nested_locks = self.nested_locks(commit, &listing, &reached)?;
         let tree = tree_of(
             "sdk-guest-tree-scoped",
             &listing,
             manifest.as_deref(),
             lock.as_deref(),
             member_names,
-            |path| reached.keeps(path),
+            |path, meta| {
+                reached.keeps(path).then(|| {
+                    nested_locks
+                        .get(path)
+                        .cloned()
+                        .unwrap_or_else(|| meta.to_string())
+                })
+            },
         )?;
         Ok(format!(
             "{tree} {}/{}",
@@ -340,6 +350,35 @@ impl Mirror {
                 .collect()
         };
         scope::reached_crates(&manifests, &tools, reach, &mut sources)
+    }
+
+    /// What each nested Cargo.lock of the guest paths that the game keeps (`engine/Cargo.lock`)
+    /// contributes to its scoped tree, by path: the lock reduced to the packages the game
+    /// reaches ([`scoped_lock`]). A lock that does not parse is left out of the map, so its
+    /// listing line (its blob id) counts, as before.
+    fn nested_locks(
+        &self,
+        commit: &str,
+        listing: &str,
+        reached: &scope::Reached,
+    ) -> Result<BTreeMap<String, String>, String> {
+        let wanted: Vec<(&str, &str)> = listing_blobs(listing)
+            .filter(|(_, path)| {
+                path.ends_with("/Cargo.lock") && !is_doc(path) && reached.keeps(path)
+            })
+            .collect();
+        let oids: Vec<&str> = wanted.iter().map(|(oid, _)| *oid).collect();
+        let texts = self.blobs(&oids)?;
+        let mut views = BTreeMap::new();
+        for (oid, path) in wanted {
+            let text = texts
+                .get(oid)
+                .ok_or_else(|| format!("{commit}:{path} cannot be read"))?;
+            if let Some(view) = scoped_lock(text, &reached.packages) {
+                views.insert(path.to_string(), view);
+            }
+        }
+        Ok(views)
     }
 
     /// [`Mirror::reached_in`] for a commit, uncached (`psoxide-test pin --crates`).
@@ -447,26 +486,30 @@ pub fn guest_tree_of(
         manifest,
         lock,
         member_name,
-        |_| true,
+        |_, meta| Some(meta.to_string()),
     )
 }
 
-/// [`guest_tree_of`] over only the listed files `keep` accepts, under the key `label`.
+/// [`guest_tree_of`] under the key `label`, where `view` gives what each listed file
+/// contributes from its path and listing line (mode, type, blob id), or `None` to leave it out.
 fn tree_of(
     label: &str,
     listing: &str,
     manifest: Option<&str>,
     lock: Option<&str>,
     member_name: impl Fn(&str) -> Option<String>,
-    keep: impl Fn(&str) -> bool,
+    view: impl Fn(&str, &str) -> Option<String>,
 ) -> Result<String, String> {
     let mut key = Key::new(label);
     for line in listing.lines() {
         let Some((meta, path)) = line.split_once('\t') else {
             continue;
         };
-        if !is_doc(path) && keep(path) {
-            key.part(path, meta);
+        if is_doc(path) {
+            continue;
+        }
+        if let Some(part) = view(path, meta) {
+            key.part(path, &part);
         }
     }
     let mut roots = BTreeSet::new();
@@ -514,6 +557,31 @@ fn tree_of(
 /// The `[[package]]` entries of a Cargo.lock reachable from `roots`, one line each, sorted.
 fn lock_closure(lock: &str, roots: &BTreeSet<String>) -> Result<Vec<String>, String> {
     let table: toml::Table = toml::from_str(lock).map_err(|e| format!("Cargo.lock: {e}"))?;
+    Ok(closure_of(&table, roots).into_keys().collect())
+}
+
+/// A nested Cargo.lock as a game that reaches the packages `roots` sees it: its header (the
+/// format version, any patch or metadata tables) and the entries [`lock_closure`] keeps, each
+/// with its dependency edges. A line the lock gains under a package the game does not reach
+/// (psx-goldsrc's new dependency on psx-cdstream, for a game without psx-goldsrc) leaves it
+/// equal; a reached entry's version, source, checksum or edges moving changes it, and so does
+/// a package the game newly reaches through a new edge. `None` when the lock does not parse.
+/// The root lock keeps [`lock_closure`]'s lines without edges: a pin lock records the whole
+/// tree, and changing that definition would invalidate every recorded tree.
+fn scoped_lock(lock: &str, roots: &BTreeSet<String>) -> Option<String> {
+    let mut table: toml::Table = toml::from_str(lock).ok()?;
+    let entries = closure_of(&table, roots);
+    table.remove("package");
+    let mut view = toml::to_string(&table).ok()?;
+    for (line, dependencies) in entries {
+        view.push_str(&format!("{line} <- {}\n", dependencies.join(", ")));
+    }
+    Some(view)
+}
+
+/// The `[[package]]` entries of a parsed Cargo.lock reachable from `roots`: the line
+/// `name version source checksum` of each, with its dependency strings, sorted.
+fn closure_of(table: &toml::Table, roots: &BTreeSet<String>) -> BTreeMap<String, Vec<String>> {
     let packages = table
         .get("package")
         .and_then(toml::Value::as_array)
@@ -545,14 +613,17 @@ fn lock_closure(lock: &str, roots: &BTreeSet<String>) -> Result<Vec<String>, Str
             .or_default()
             .push((field(p, "version"), line, deps));
     }
-    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut seen: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut stack: Vec<(String, Option<String>)> =
         roots.iter().map(|r| (r.clone(), None)).collect();
     while let Some((name, version)) = stack.pop() {
         for (v, line, deps) in by_name.get(&name).into_iter().flatten() {
-            if version.as_ref().is_some_and(|want| want != v) || !seen.insert(line.clone()) {
+            if version.as_ref().is_some_and(|want| want != v) || seen.contains_key(line) {
                 continue;
             }
+            let mut edges = deps.clone();
+            edges.sort();
+            seen.insert(line.clone(), edges);
             for d in deps {
                 // "name", "name version" or "name version (source)".
                 let mut parts = d.split(' ');
@@ -561,7 +632,7 @@ fn lock_closure(lock: &str, roots: &BTreeSet<String>) -> Result<Vec<String>, Str
             }
         }
     }
-    Ok(seen.into_iter().collect())
+    seen
 }
 
 /// The verdict of the pin rule for one run.
@@ -797,6 +868,7 @@ mod tests {
             ("sdk/crates/psx-rt/src/lib.rs", "pub fn rt() {}\n"),
             ("engine/examples/hardware-tests/Cargo.toml", "[package]\nname = \"hardware-tests\"\n[dependencies]\npsx-rt = { path = \"../../../sdk/crates/psx-rt\" }\n"),
             ("engine/examples/hardware-tests/src/main.rs", "const SUITE_VERSION: &str = \"v2.25\";\n"),
+            ("engine/Cargo.lock", ENGINE_LOCK),
         ];
         for (path, text) in files {
             let path = dir.path().join(path);
@@ -927,6 +999,100 @@ mod tests {
         );
         let trees = Trees::of(&mirror, &ld, &tool, &nothing).unwrap();
         assert_ne!(trees.pinned, trees.main);
+    }
+
+    /// The engine workspace's lock in [`sdk_repo`]: hardware-tests (which a [`LINKS_RT`] game
+    /// does not reach) takes heapless and psx-rt; psx-rt (which it reaches) takes bitflags.
+    const ENGINE_LOCK: &str = r#"version = 4
+
+[[package]]
+name = "bitflags"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aa"
+
+[[package]]
+name = "hardware-tests"
+version = "0.1.0"
+dependencies = [
+ "heapless",
+ "psx-rt",
+]
+
+[[package]]
+name = "heapless"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bb"
+
+[[package]]
+name = "psx-rt"
+version = "0.1.0"
+dependencies = [
+ "bitflags",
+]
+"#;
+
+    /// The trees of a [`LINKS_RT`] game for the fixture SDK and for it with `engine/Cargo.lock`
+    /// replaced by `lock`.
+    fn trees_with_engine_lock(lock: &str) -> Trees {
+        let repo = sdk_repo();
+        let mirror = Mirror {
+            dir: repo.path().to_path_buf(),
+            stale: None,
+        };
+        let base = util::git(repo.path(), &["rev-parse", "HEAD"]).unwrap();
+        let edited = commit_edit(repo.path(), "engine/Cargo.lock", lock);
+        let trees = Trees::of(&mirror, &base, &edited, &game(LINKS_RT)).unwrap();
+        assert!(
+            trees.scope.starts_with("the SDK crates this game reaches"),
+            "{}",
+            trees.scope
+        );
+        assert_ne!(trees.pinned_whole, trees.main_whole, "the whole tree moved");
+        trees
+    }
+
+    #[test]
+    fn a_nested_lock_line_under_an_unreached_package_leaves_the_tree_equal() {
+        // hardware-tests gains a dependency (the psx-goldsrc -> psx-cdstream line of 52a9f58ab).
+        let lock = ENGINE_LOCK
+            .replace(" \"heapless\",\n", " \"crc\",\n \"heapless\",\n")
+            .replace(
+                "[[package]]\nname = \"hardware-tests\"",
+                "[[package]]\nname = \"crc\"\nversion = \"3.0.0\"\n\
+                 source = \"registry+https://github.com/rust-lang/crates.io-index\"\n\
+                 checksum = \"cc\"\n\n[[package]]\nname = \"hardware-tests\"",
+            );
+        assert_ne!(lock, ENGINE_LOCK);
+        let trees = trees_with_engine_lock(&lock);
+        assert_eq!(trees.pinned, trees.main);
+    }
+
+    #[test]
+    fn a_nested_lock_version_bump_of_a_reached_dependency_moves_the_tree() {
+        let lock = ENGINE_LOCK
+            .replace("version = \"2.0.0\"", "version = \"2.1.0\"")
+            .replace("checksum = \"aa\"", "checksum = \"ab\"");
+        let trees = trees_with_engine_lock(&lock);
+        assert_ne!(trees.pinned, trees.main);
+    }
+
+    #[test]
+    fn a_nested_lock_edge_from_a_reached_package_to_an_unreached_one_moves_the_tree() {
+        // psx-rt now takes heapless, which only hardware-tests took before.
+        let lock = ENGINE_LOCK.replace(" \"bitflags\",\n]", " \"bitflags\",\n \"heapless\",\n]");
+        assert_ne!(lock, ENGINE_LOCK);
+        let trees = trees_with_engine_lock(&lock);
+        assert_ne!(trees.pinned, trees.main);
+    }
+
+    #[test]
+    fn a_nested_lock_that_does_not_parse_counts_whole() {
+        let lock = format!("{ENGINE_LOCK}not toml at all\n");
+        let trees = trees_with_engine_lock(&lock);
+        assert_ne!(trees.pinned, trees.main);
+        assert!(scoped_lock(&lock, &BTreeSet::new()).is_none());
     }
 
     #[test]
