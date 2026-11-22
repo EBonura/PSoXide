@@ -158,6 +158,29 @@ pub fn pause_until_stopped(drive: &mut impl PauseDrive) -> Result<(), PauseFailu
     }
 }
 
+/// Pauses [`send_until_acknowledged`] sends at most: a refusal ends with the
+/// read's seek, so one more send is enough.
+pub const ACKNOWLEDGE_ATTEMPTS: u32 = 2;
+
+/// Send Pause until the drive takes it, and do not wait for it to stop: a Pause
+/// refused because the read is still seeking is sent again once the read's first
+/// sector shows the seek has ended (up to [`SEEK_WAIT`]). Returns the last answer.
+///
+/// This is the acknowledge-only stop of
+/// [`SectorReader::stop`](super::reader::SectorReader::stop). Without the resend
+/// a refused Pause leaves the read running after the caller believes it stopped.
+pub fn send_until_acknowledged(drive: &mut impl PauseDrive) -> PauseAnswer {
+    let mut answer = drive.send_pause();
+    for _ in 1..ACKNOWLEDGE_ATTEMPTS {
+        if answer != PauseAnswer::Refused {
+            break;
+        }
+        drive.wait_seek_end(SEEK_WAIT);
+        answer = drive.send_pause();
+    }
+    answer
+}
+
 /// What [`settle_drive`] found.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -400,6 +423,37 @@ mod tests {
             Err(PauseFailure::Refused)
         );
         assert_eq!(console.sends, ATTEMPTS);
+    }
+
+    #[test]
+    fn an_acknowledge_only_stop_sends_a_refused_pause_again_after_the_seek() {
+        let mut console = Console::new(Some(SLOWEST));
+        console.seeking_for = 10_500_000; // 310 ms, the slowest seek
+        assert_eq!(
+            send_until_acknowledged(&mut console),
+            PauseAnswer::Acknowledged
+        );
+        assert_eq!(console.sends, 2, "refused once, then accepted");
+        assert_eq!(console.seek_waits, 1);
+        assert_eq!(console.statuses, 0, "no GetStat, no wait for INT2");
+    }
+
+    #[test]
+    fn an_acknowledge_only_stop_sends_once_when_the_drive_takes_it() {
+        let mut console = Console::new(Some(SLOWEST));
+        assert_eq!(
+            send_until_acknowledged(&mut console),
+            PauseAnswer::Acknowledged
+        );
+        assert_eq!((console.sends, console.seek_waits), (1, 0));
+    }
+
+    #[test]
+    fn an_acknowledge_only_stop_gives_up_on_a_refusal_that_never_ends() {
+        let mut console = Console::new(Some(SLOWEST));
+        console.seeking_for = u32::MAX / 2;
+        assert_eq!(send_until_acknowledged(&mut console), PauseAnswer::Refused);
+        assert_eq!(console.sends, ACKNOWLEDGE_ATTEMPTS);
     }
 
     #[test]

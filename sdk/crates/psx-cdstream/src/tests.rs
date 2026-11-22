@@ -759,6 +759,102 @@ fn the_watchdog_waits_for_a_stalled_transfer_not_a_flowing_one() {
     assert_eq!(finished(&mut engine, ticket).outcome, Outcome::Done);
 }
 
+/// An engine whose seek ran past a 10-VBlank watchdog on a drive that refuses
+/// a Pause while it seeks: the request failed in `Seeking`, was queued again,
+/// and its recovery Pause went out with the seek still running.
+fn refused_recovery_pause(resumes: u8, buf: &Buf) -> (Engine<FakeDrive>, Ticket) {
+    let mut engine = engine_with(Config {
+        timeout_vblanks: 10,
+        ..Config::DEFAULT
+    });
+    engine.hw_mut().hold_seek = true;
+    engine.hw_mut().refuse_pause_while_seeking = true;
+    let ticket = submit(&mut engine, request(100, 4, buf).with_resumes(resumes));
+    run(&mut engine);
+    assert_eq!(engine.phase(), Phase::Seeking);
+    engine.hw_mut().vblank = 11;
+    engine.service();
+    assert_eq!(engine.phase(), Phase::Stopping, "the recovery Pause is out");
+    run(&mut engine); // its INT5
+    (engine, ticket)
+}
+
+#[test]
+fn a_recovery_pause_refused_mid_seek_is_sent_again_when_the_seek_ends() {
+    let buf = Buf::new(4);
+    let (mut engine, ticket) = refused_recovery_pause(1, &buf);
+    // The refusal is not a failure: the drive is still seeking.
+    assert_eq!(engine.phase(), Phase::PauseRefused);
+    assert_eq!(engine.state(ticket), RequestState::Active { received: 0 });
+    engine.hw_mut().hold_seek = false;
+    engine.hw_mut().finish_seek();
+    run(&mut engine);
+    let done = finished(&mut engine, ticket);
+    assert_eq!((done.outcome, done.received), (Outcome::Done, 4));
+    buf.assert_sectors(100, 4);
+    let log = engine.hw().commands();
+    assert_eq!(
+        &log[2..6],
+        [CMD_PAUSE, CMD_PAUSE, CMD_SETLOC, CMD_SEEKL],
+        "refused, sent again after the seek, then the seek back"
+    );
+    assert_eq!(engine.stats().resumed, 1, "only the watchdog used a resume");
+}
+
+#[test]
+fn a_seek_that_never_ends_after_a_refused_pause_is_caught_by_the_watchdog() {
+    let buf = Buf::new(4);
+    let (mut engine, ticket) = refused_recovery_pause(1, &buf);
+    assert_eq!(engine.phase(), Phase::PauseRefused);
+    engine.hw_mut().vblank = 21;
+    engine.service();
+    assert_eq!(
+        engine.phase(),
+        Phase::PauseRefused,
+        "not yet past the limit"
+    );
+    engine.hw_mut().vblank = 22;
+    engine.service();
+    let done = finished(&mut engine, ticket);
+    let Outcome::Failed(failure) = done.outcome else {
+        panic!("{done:?}");
+    };
+    assert_eq!(failure.kind(), FailureKind::Watchdog);
+    assert_eq!(failure.code() & 0xff, Phase::PauseRefused as u32);
+    assert_eq!(engine.phase(), Phase::Failed);
+}
+
+#[test]
+fn a_pause_refused_after_a_failed_read_does_not_fail_the_next_request() {
+    // No resumes: before the refusal was handled, the first request failed by
+    // the watchdog (as it should), and the INT5 to the recovery Pause of the
+    // request behind it failed that one too.
+    let first_buf = Buf::new(4);
+    let mut engine = engine_with(Config {
+        timeout_vblanks: 10,
+        ..Config::DEFAULT
+    });
+    engine.hw_mut().hold_seek = true;
+    engine.hw_mut().refuse_pause_while_seeking = true;
+    let first = submit(&mut engine, request(100, 4, &first_buf));
+    let next_buf = Buf::new(2);
+    let next = submit(&mut engine, request(300, 2, &next_buf));
+    run(&mut engine);
+    engine.hw_mut().vblank = 11;
+    engine.service();
+    assert!(matches!(
+        finished(&mut engine, first).outcome,
+        Outcome::Failed(_)
+    ));
+    run(&mut engine);
+    assert_eq!(engine.phase(), Phase::PauseRefused);
+    engine.hw_mut().hold_seek = false;
+    engine.hw_mut().finish_seek();
+    run(&mut engine);
+    assert_eq!(finished(&mut engine, next).outcome, Outcome::Done);
+    next_buf.assert_sectors(300, 2);
+}
+
 #[test]
 fn a_custom_timeout_applies() {
     let config = Config {

@@ -42,6 +42,10 @@ pub enum Phase {
     /// A transfer failed; the drive's state is unknown. The next transfer
     /// starts with a recovery Pause.
     Failed = 10,
+    /// The recovery Pause was refused (INT5) because the drive is still
+    /// seeking: waiting for the seek to end (its completion or a first
+    /// sector) to send it again.
+    PauseRefused = 11,
 }
 
 impl Phase {
@@ -1133,6 +1137,14 @@ where
         if code == flag::ERROR {
             let (status, detail) = self.hw.error_response();
             self.hw.finish_response(flag::ACK_ALL);
+            if self.phase == Phase::Stopping && self.recovering {
+                // The console refuses a Pause while the drive seeks (hardware-tests
+                // `0xA53`, 8 of 8) and the seek carries on; the recovery Pause is the
+                // only one that can meet a seek (after a failure in `Seeking`). Send it
+                // again when the seek ends. No stamp: the watchdog bounds the wait.
+                self.phase = Phase::PauseRefused;
+                return;
+            }
             self.fail(Failure::drive(status, self.phase as u32, detail));
             return;
         }
@@ -1161,6 +1173,8 @@ where
             }
             (Phase::Stopping, flag::ACKNOWLEDGE) => self.change(Phase::WaitingForStop),
             (Phase::WaitingForStop, flag::COMPLETE) => self.pause_complete(),
+            // The refused seek has completed.
+            (Phase::PauseRefused, flag::COMPLETE) => self.pause(),
             (_, 0) => {}
             _ => self.fail(Failure::unexpected(self.phase as u32, code)),
         }
@@ -1207,6 +1221,10 @@ where
     /// onto the next, or pause for a cancel.
     fn after_sector(&mut self) {
         if !matches!(self.phase, Phase::Reading | Phase::StartingRead) {
+            if self.phase == Phase::PauseRefused {
+                // A read's seek ends with its first sector (dropped above).
+                self.pause();
+            }
             return;
         }
         let Some(active) = self.active else {
