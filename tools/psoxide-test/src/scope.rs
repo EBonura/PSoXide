@@ -19,12 +19,19 @@
 //! hydrates the directory, or a file mentions the path) or whose reached crate reads it
 //! (`include_bytes!("../../../../assets/textures/floor.psxt")`); any other asset counts for no one.
 //!
-//! Documentation (`*.md`, `docs/`) and the pin locks (`components.lock.json`, `sdk.lock.json`:
-//! they list what is hydrated, not what is built) are not read, except for the asset paths in
-//! a lock. Whenever something cannot be
-//! read with certainty (no git work tree, a manifest that does not parse, a path dependency
-//! outside the repository, a git dependency on a package the SDK does not have, a workspace
-//! dependency without its workspace), the scope is the whole guest tree, as before.
+//! Every file of the game is read (lossily: the paths a build names are ASCII), `docs/`
+//! included; Markdown and the pin locks (`components.lock.json`, `sdk.lock.json`: they list what
+//! is hydrated, not what is built) are not, except for the asset paths in a lock. A command is
+//! read on its own (`a && b`); a make variable set to a `.psoxide` path is read as that path; a
+//! build entered into the SDK (`cd .psoxide/engine`, `current_dir(".psoxide")`) builds that
+//! workspace, and a make run there makes the tree whole.
+//!
+//! The backstop: every SDK package the game's resolved dependency graphs link (its Cargo.lock
+//! files, or `cargo metadata --offline` for a manifest no lock covers) must be reached. Whenever
+//! that fails, or something cannot be read with certainty (no git work tree, a manifest that
+//! does not parse, a path dependency outside the repository, a git dependency on a package the
+//! SDK does not have, a workspace dependency without its workspace), the scope is the whole
+//! guest tree, as before.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -57,6 +64,8 @@ pub struct Reach {
     pub linked: BTreeSet<String>,
     /// The same as SDK directories, where `cargo metadata` gave paths (a manifest with no lock).
     pub linked_dirs: BTreeSet<String>,
+    /// A way in the scan cannot bound (a make run inside the SDK): the tree is whole, and why.
+    pub whole: Option<String>,
 }
 
 impl Reach {
@@ -79,6 +88,9 @@ impl Reach {
                 key.part(label, item);
             }
         }
+        if let Some(why) = &self.whole {
+            key.part("whole", why);
+        }
         key.finish()
     }
 }
@@ -100,18 +112,34 @@ pub fn of_game(repo: &Path) -> Scope {
     };
     let mut texts = Vec::new();
     for rel in files {
-        if skipped(&rel) {
+        if rel.split('/').any(|c| c == ".psoxide") {
             continue;
         }
-        // Binary files (and files that are gone from the work tree) name no SDK path.
-        if let Ok(text) = std::fs::read_to_string(repo.join(&rel)) {
-            texts.push((rel, text));
+        let path = repo.join(&rel);
+        // A file in the listing that is gone from the work tree builds nothing.
+        let meta = match std::fs::metadata(&path) {
+            Ok(meta) if meta.is_file() => meta,
+            Ok(_) => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Scope::Whole(format!("cannot read {rel}: {e}")),
+        };
+        if meta.len() > MAX_SCANNED {
+            return Scope::Whole(format!("{rel} is too large to read ({} B)", meta.len()));
+        }
+        // Every file is read, binaries and non-UTF-8 text included: the paths a build names
+        // are ASCII, and survive a lossy decoding.
+        match std::fs::read(&path) {
+            Ok(bytes) => texts.push((rel, String::from_utf8_lossy(&bytes).into_owned())),
+            Err(e) => return Scope::Whole(format!("cannot read {rel}: {e}")),
         }
     }
     let mut reach = match reach_of(&texts) {
         Ok(reach) => reach,
         Err(e) => return Scope::Whole(e),
     };
+    if let Some(why) = reach.whole.take() {
+        return Scope::Whole(why);
+    }
     match linked(repo, &texts) {
         Ok((names, dirs)) => {
             reach.linked = names;
@@ -290,9 +318,13 @@ fn metadata_dirs(repo: &Path, rel: &str) -> Result<BTreeSet<String>, String> {
     Ok(dirs)
 }
 
-/// Files that cannot build anything: documentation, the pin locks, the hydrated SDK itself.
+/// The largest file of a game the scan reads; a larger one makes the tree whole.
+const MAX_SCANNED: u64 = 256 << 20;
+
+/// Files that cannot build anything: Markdown, the pin locks, the hydrated SDK itself. A
+/// directory named `docs` is read like any other (a build script may live there).
 fn skipped(rel: &str) -> bool {
-    crate::pin::is_doc(rel)
+    rel.ends_with(".md")
         || rel == "components.lock.json"
         || rel == "sdk.lock.json"
         || rel.split('/').any(|c| c == ".psoxide")
@@ -301,7 +333,9 @@ fn skipped(rel: &str) -> bool {
 /// The reach of a game from its files (path relative to the repository, text).
 pub fn reach_of(files: &[(String, String)]) -> Result<Reach, String> {
     let mut reach = Reach::default();
+    let aliases = aliases(files);
     for (rel, text) in files {
+        let text = &expand(text, &aliases);
         if skipped(rel) {
             // A lock lists what the game hydrates: the asset directories it takes count.
             if rel == "components.lock.json" {
@@ -332,10 +366,95 @@ fn is_composition(c: char) -> bool {
     matches!(c, '$' | '{' | '*' | '<' | '%')
 }
 
+/// Variables the game sets to a path in its hydrated SDK (`SDK := .psoxide`,
+/// `export PSOXIDE=$(ROOT)/.psoxide/engine`): name -> the path from `.psoxide` on.
+fn aliases(files: &[(String, String)]) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for (rel, text) in files {
+        if skipped(rel) {
+            continue;
+        }
+        for line in text.lines() {
+            let Some(at) = line.find(".psoxide") else {
+                continue;
+            };
+            let Some(eq) = line[..at].rfind('=') else {
+                continue;
+            };
+            // `NAME := v`, `export NAME=v`, `let name = v`: the whole left side is one name.
+            let mut name = line[..eq]
+                .trim()
+                .trim_end_matches([':', '?', '+', '!'])
+                .trim();
+            for keyword in [
+                "export ",
+                "override ",
+                "let mut ",
+                "let ",
+                "const ",
+                "static ",
+                "set ",
+            ] {
+                name = name.strip_prefix(keyword).unwrap_or(name).trim();
+            }
+            let value: String = line[at..]
+                .chars()
+                .take_while(|&c| is_path_char(c))
+                .collect();
+            let identifier = !name.is_empty()
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                && !name.starts_with(|c: char| c.is_ascii_digit());
+            if identifier {
+                let name = name.to_string();
+                out.insert(name, value.trim_end_matches('/').to_string());
+            }
+        }
+    }
+    out
+}
+
+/// `text` with every `$(NAME)`, `${NAME}` and `$NAME` of an alias written as its path.
+fn expand(text: &str, aliases: &BTreeMap<String, String>) -> String {
+    if aliases.is_empty() || !text.contains('$') {
+        return text.to_string();
+    }
+    let mut out = text.to_string();
+    for (name, value) in aliases {
+        for form in [format!("$({name})"), format!("${{{name}}}")] {
+            out = out.replace(&form, value);
+        }
+        let bare = format!("${name}");
+        let mut from = 0;
+        while let Some(found) = out[from..].find(&bare) {
+            let at = from + found;
+            let end = at + bare.len();
+            let more = out[end..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+            if more {
+                from = end;
+            } else {
+                out.replace_range(at..end, value);
+                from = at + value.len();
+            }
+        }
+    }
+    out
+}
+
 /// Add what `text` names of the SDK to `reach`.
 fn scan_text(text: &str, reach: &mut Reach) {
     for line in text.lines() {
-        scan_line(line, reach);
+        // One command at a time: `cargo build --manifest-path A && cargo run -p b` builds A whole.
+        for command in line
+            .split("&&")
+            .flat_map(|c| c.split("||"))
+            .flat_map(|c| c.split([';', '|']))
+            .flat_map(|c| c.split("],"))
+        {
+            scan_line(command, reach);
+        }
     }
     for tool in guest_tool_files() {
         let base = tool.rsplit('/').next().unwrap_or(tool);
@@ -345,19 +464,76 @@ fn scan_text(text: &str, reach: &mut Reach) {
     }
 }
 
-/// One line of [`scan_text`] (a path and a cargo command's arguments sit on one line).
+/// Whether a word can be a package name (`psxed-project`, not `.arg(` or `)`).
+fn is_package_word(word: &str) -> bool {
+    !word.starts_with('-')
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+}
+
+/// Whether a directory a build enters (`cd`, `current_dir`, `make -C`) is the hydrated SDK's
+/// root: `.psoxide`, or a variable about it (`$(PSOXIDE)`, `${PSOXIDE_FROM}`, `{psoxide}`) that
+/// does not name a file (`$$PSOXIDE_PGO_EXE`, a file the SDK's tools are handed).
+fn is_sdk_root(path: &str) -> bool {
+    let last = path.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+    if last == ".psoxide" {
+        return true;
+    }
+    if !last.starts_with('$') && !last.starts_with('{') {
+        return false;
+    }
+    let name = last
+        .trim_matches(|c| matches!(c, '$' | '(' | ')' | '{' | '}'))
+        .to_ascii_lowercase();
+    let file = [
+        "_exe", "_elf", "_disc", "_bin", "_cue", "_iso", "_map", "_prof", "_profile", "_log",
+        "_image", "_out",
+    ]
+    .iter()
+    .any(|suffix| name.ends_with(suffix));
+    name.contains("psoxide") && !file
+}
+
+/// Whether the directory in front of a `Cargo.toml` may be the SDK's root, read wide: any
+/// last segment about psoxide (the game's `psoxide-pin` included), so a root manifest is never
+/// missed; only a build of it costs, as members it reaches.
+fn may_be_sdk_root(path: &str) -> bool {
+    let last = path.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+    is_sdk_root(path) || !last.contains('.') && last.to_ascii_lowercase().contains("psoxide")
+}
+
+/// One command of [`scan_text`] (a path and a cargo command's arguments sit on one line).
 fn scan_line(line: &str, reach: &mut Reach) {
     scan_assets(line, reach);
-    let mut words = line
-        .split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ',' | '[' | ']' | '='))
-        .filter(|w| !w.is_empty());
+    let words: Vec<&str> = line
+        .split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '`' | ',' | '[' | ']' | '='))
+        .filter(|w| !w.is_empty())
+        .collect();
     let mut packages = false;
-    while let Some(word) = words.next() {
-        if matches!(word, "-p" | "--package" | "--bin" | "--example") {
-            if let Some(name) = words.next() {
-                reach.cargo_packages.insert(name.to_string());
-                packages = true;
+    for (i, word) in words.iter().enumerate() {
+        let (flag, glued) = match *word {
+            "-p" | "--package" => ("p", None),
+            "--bin" | "--example" => ("target", None),
+            w if w.starts_with("-p") && w.len() > 2 && is_package_word(&w[2..]) => {
+                ("p", Some(&w[2..]))
             }
+            _ => continue,
+        };
+        // The name, past builder punctuation (`arg("-p"), arg("psxed-project")`).
+        let name = glued.or_else(|| {
+            words[i + 1..]
+                .iter()
+                .take(4)
+                .take_while(|w| !w.starts_with('-'))
+                .find(|w| is_package_word(w))
+                .copied()
+        });
+        if let Some(name) = name {
+            reach.cargo_packages.insert(name.to_string());
+            // `--bin` and `--example` pick a target, not a package: the manifest's own
+            // workspace is still what gets resolved.
+            packages |= flag == "p";
         }
     }
     let mut manifests = Vec::new();
@@ -398,18 +574,42 @@ fn scan_line(line: &str, reach: &mut Reach) {
         let before: String = line[..at]
             .chars()
             .rev()
-            .take_while(|&c| !c.is_whitespace() && !matches!(c, '"' | '\'' | '='))
+            .take_while(|&c| !c.is_whitespace() && !matches!(c, '"' | '\'' | '`' | '='))
             .collect::<Vec<_>>()
             .into_iter()
             .rev()
             .collect();
-        let last = before
-            .trim_end_matches('/')
-            .rsplit('/')
-            .next()
-            .unwrap_or("");
-        if before.ends_with('/') && last.to_ascii_lowercase().contains("psoxide") {
+        if before.ends_with('/') && may_be_sdk_root(&before) {
             manifests.push(String::new());
+        }
+    }
+    // A build run inside the hydrated SDK with no manifest named (`cd .psoxide/engine && cargo
+    // build`, `current_dir(".psoxide")`, `make -C $(PSOXIDE)`): the workspace of that directory.
+    let enters = words.iter().any(|w| {
+        matches!(*w, "cd" | "pushd" | "-C" | "--directory")
+            || w.contains("current_dir(")
+            || w.contains("set_current_dir(")
+    });
+    if enters {
+        for word in &words {
+            let word = word.trim_end_matches([')', ';', '/']);
+            let dir = word.trim_end_matches("/sdk").trim_end_matches("/engine");
+            if !is_sdk_root(dir) {
+                continue;
+            }
+            let rest = &word[dir.len()..];
+            if words.iter().any(|w| *w == "make" || w.ends_with("/make")) {
+                // The SDK's own Makefile builds every disc it knows.
+                reach
+                    .whole
+                    .get_or_insert_with(|| format!("a make run inside the SDK ({line})"));
+            }
+            match rest {
+                "" => manifests.push(String::new()),
+                "/sdk" => manifests.push("sdk".to_string()),
+                "/engine" => manifests.push("engine".to_string()),
+                _ => {}
+            }
         }
     }
     // Without `-p`, cargo builds what the manifest names: for a workspace, its members.
@@ -436,6 +636,11 @@ fn scan_assets(line: &str, reach: &mut Reach) {
         let path = run.trim_end_matches(['/', '.']);
         if path.len() > "assets/".len() {
             reach.assets.insert(path.to_string());
+        } else {
+            // `$(PSOXIDE)/assets/$(KIND)/x`, `concat!("assets/", kind)`: any asset directory.
+            for dir in GUEST_PATHS.iter().filter(|g| g.starts_with("assets/")) {
+                reach.assets.insert(dir.to_string());
+            }
         }
     }
 }
@@ -496,10 +701,12 @@ fn scan_game_manifest(dir: &str, text: &str, reach: &mut Reach) -> Result<(), St
 
 /// Whether a git URL is the SDK's repository (not the emulator's or the editor's).
 fn is_sdk_repository(url: &str) -> bool {
+    // `https://github.com/EBonura/PSoXide.git`, `ssh://git@github.com/EBonura/PSoXide`, and
+    // the scp form `git@github.com:EBonura/PSoXide.git`.
     let slug = url
         .trim_end_matches('/')
         .trim_end_matches(".git")
-        .rsplit('/')
+        .rsplit(['/', ':'])
         .take(2)
         .collect::<Vec<_>>();
     matches!(slug.as_slice(), [name, owner] if name.eq_ignore_ascii_case("PSoXide")
@@ -630,6 +837,9 @@ pub fn reached_crates(
         }
     }
 
+    if let Some(why) = &reach.whole {
+        return Err(why.clone());
+    }
     let mut stack: Vec<String> = Vec::new();
     for (&dir, &name) in &crates {
         let always = GUEST_PATHS
@@ -1039,6 +1249,163 @@ mod tests {
         .into();
         let got = reached_crates(&sdk(), &tools, &reach, &mut no_sources).unwrap();
         assert!(got.reached.contains("crates/psx-hw"), "{:?}", got.reached);
+    }
+
+    fn scan(list: &[(&str, &str)]) -> Reach {
+        reach_of(&files(list)).unwrap()
+    }
+
+    #[test]
+    fn review_a_whole_workspace_build_from_inside_the_sdk() {
+        let r = scan(&[("build.sh", "cd .psoxide/sdk && cargo build --release\n")]);
+        assert!(r.workspace_builds.contains("sdk"), "{r:?}");
+        let r = scan(&[("Makefile", "all:\n\tcd $(PSOXIDE)/engine; cargo build\n")]);
+        assert!(r.workspace_builds.contains("engine"), "{r:?}");
+        let r = scan(&[(
+            "x.rs",
+            "Command::new(\"cargo\").current_dir(\".psoxide\").arg(\"build\")\n",
+        )]);
+        assert!(r.workspace_builds.contains(""), "{r:?}");
+        // The SDK's own Makefile builds anything: the tree is whole.
+        let r = scan(&[("Makefile", "hw:\n\tmake -C .psoxide hardware-tests\n")]);
+        assert!(r.whole.is_some(), "{r:?}");
+        // The game's own `psoxide-pin` directory is not the SDK, nor a file handed to its tools.
+        let r = scan(&[("Makefile", "pin:\n\tcd psoxide-pin && cargo run\n")]);
+        assert!(r.workspace_builds.is_empty(), "{r:?}");
+        let r = scan(&[(
+            "Makefile",
+            "\t--pack 'make -C \"$(ROOT)\" pack EXE=\"$$PSOXIDE_PGO_EXE\"' \\\n",
+        )]);
+        assert!(r.whole.is_none() && r.workspace_builds.is_empty(), "{r:?}");
+        assert!(
+            is_sdk_root("$(PSOXIDE)")
+                && is_sdk_root("${PSOXIDE_DIR}")
+                && is_sdk_root("../.psoxide")
+        );
+    }
+
+    #[test]
+    fn review_a_make_variable_holding_the_sdk() {
+        let r = scan(&[(
+            "Makefile",
+            "SDK := .psoxide\nENGINE ?= $(ROOT)/.psoxide/engine\nb:\n\tcargo build --manifest-path $(SDK)/Cargo.toml\n\tcargo build --manifest-path ${ENGINE}/Cargo.toml\n",
+        )]);
+        assert!(r.workspace_builds.contains(""), "{r:?}");
+        assert!(r.workspace_builds.contains("engine"), "{r:?}");
+        // A TOML inline table is not a variable.
+        let r = scan(&[
+            (
+                "Cargo.toml",
+                "[dependencies]\npsx-rt = { path = \".psoxide/sdk/crates/psx-rt\" }\n",
+            ),
+            ("run.sh", "echo $path\n"),
+        ]);
+        assert!(r.workspace_builds.is_empty(), "{r:?}");
+    }
+
+    #[test]
+    fn review_a_builder_names_its_package() {
+        let r = scan(&[(
+            "main.rs",
+            "cmd.arg(\"run\").arg(\"-p\").arg(\"psxed-project\");\nc.args([\"build\", \"--package\", \"psx-vector-cook\"]);\nc.arg(\"-p\"), arg(\"psx-anim-cook\")\n",
+        )]);
+        for name in ["psxed-project", "psx-vector-cook", "psx-anim-cook"] {
+            assert!(r.cargo_packages.contains(name), "{name}: {r:?}");
+        }
+    }
+
+    #[test]
+    fn review_one_commands_package_does_not_hide_anothers_manifest() {
+        let r = scan(&[(
+            "Makefile",
+            "\tcargo build --manifest-path .psoxide/engine/Cargo.toml && cargo run -p tool\n",
+        )]);
+        assert!(r.workspace_builds.contains("engine"), "{r:?}");
+        let r = scan(&[(
+            "t.toml",
+            "commands = [[\"cargo\", \"build\", \"--manifest-path\", \".psoxide/sdk/Cargo.toml\"], [\"cargo\", \"run\", \"-p\", \"x\"]]\n",
+        )]);
+        assert!(r.workspace_builds.contains("sdk"), "{r:?}");
+        // Within one command, `-p` still picks the package.
+        let r = scan(&[(
+            "m",
+            "cargo run --manifest-path .psoxide/Cargo.toml -p psoxide-pgo\n",
+        )]);
+        assert!(r.workspace_builds.is_empty(), "{r:?}");
+    }
+
+    #[test]
+    fn review_a_target_flag_is_not_a_package() {
+        let r = scan(&[(
+            "m",
+            "cargo run --manifest-path .psoxide/engine/Cargo.toml --bin cook\ncargo run --manifest-path .psoxide/sdk/Cargo.toml --example hello\n",
+        )]);
+        assert!(r.workspace_builds.contains("engine"), "{r:?}");
+        assert!(r.workspace_builds.contains("sdk"), "{r:?}");
+    }
+
+    #[test]
+    fn review_an_scp_git_dependency_is_the_sdk() {
+        let r = scan(&[(
+            "Cargo.toml",
+            "[dependencies]\nlink = { git = \"git@github.com:EBonura/PSoXide.git\", package = \"psoxide-link\" }\n",
+        )]);
+        assert!(r.git_packages.contains("psoxide-link"), "{r:?}");
+        assert!(is_sdk_repository("ssh://git@github.com/EBonura/PSoXide"));
+        assert!(!is_sdk_repository(
+            "git@github.com:EBonura/PSoXide-emulator.git"
+        ));
+    }
+
+    #[test]
+    fn review_docs_scripts_and_non_utf8_files_are_read() {
+        let repo = game_repo(&[
+            (
+                "docs/build.sh",
+                "cd .psoxide/engine/examples/hardware-tests && cargo build\n",
+            ),
+            (
+                "game/Cargo.lock",
+                "version = 4\n[[package]]\nname = \"g\"\nversion = \"0.1.0\"\n",
+            ),
+            ("game/Cargo.toml", "[package]\nname = \"g\"\n"),
+            ("docs/notes.md", "engine/examples/editor-playtest\n"),
+        ]);
+        let mut bytes = vec![0xff, 0xfe, b'\n'];
+        bytes.extend_from_slice(
+            b"cargo build --manifest-path .psoxide/engine/examples/showcase-fog/Cargo.toml\n",
+        );
+        std::fs::write(repo.path().join("tools.bin"), bytes).unwrap();
+        util::git(repo.path(), &["add", "-A"]).unwrap();
+        let Scope::Game(r) = of_game(repo.path()) else {
+            panic!("a scope");
+        };
+        assert!(
+            r.mentions.contains("engine/examples/hardware-tests"),
+            "{r:?}"
+        );
+        assert!(
+            r.mentions
+                .contains("engine/examples/showcase-fog/Cargo.toml"),
+            "{r:?}"
+        );
+        // Markdown still builds nothing.
+        assert!(
+            !r.mentions.iter().any(|m| m.contains("editor-playtest")),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn review_an_asset_path_composed_after_assets_names_every_asset_directory() {
+        for text in [
+            "\tcp $(PSOXIDE)/assets/$(KIND)/x out/\n",
+            "include_bytes!(concat!(env!(\"SDK\"), \"/assets/\", \"audio/x.psau\"));\n",
+        ] {
+            let r = scan(&[("m", text)]);
+            assert!(r.assets.contains("assets/audio"), "{text}: {r:?}");
+            assert!(r.assets.contains("assets/textures"), "{text}: {r:?}");
+        }
     }
 
     #[test]
