@@ -38,7 +38,7 @@ const USAGE: &str = "\
 usage:
   psoxide-test run [--repo DIR] [--tier quick|full] [--stage NAME]... [--all-models] [--keep-going]
       the pipeline (stages, in run order: build size host stack speed journeys cross clean); stops
-      at the first failed stage unless --keep-going; exit 0 only when every check that ran passed,
+      a full tier at the first failed stage unless --keep-going; exit 0 only when every check that ran passed,
       and for --tier full only when the landing verdict is complete
   psoxide-test bless [--repo DIR]
       measure the reference build and write psoxide-test.baseline.toml (refuses a red journey)
@@ -82,7 +82,7 @@ struct Options {
     /// `--all-models`: play every model of every journey, none standing on `real` (audit).
     all_models: bool,
     /// `--keep-going`: play every stage even after one has failed (the old behaviour). By default
-    /// a run stops at its first failed stage and lists the rest as not run.
+    /// a full tier stops at its first failed stage and lists the rest as not run.
     keep_going: bool,
 }
 
@@ -279,9 +279,10 @@ fn run(o: &Options) -> Result<ExitCode, String> {
     // The SDK pin rule first: it is not a receipt (SDK main moves), and a run that cannot
     // show it is not a landing.
     let (sdk, sdk_guest) = ctx.timed("sdk", || sdk_stage(&o.repo, &game, config.work.as_path()));
-    // The first failed stage, once the run stops at it (`--keep-going` never stops). A failed SDK
-    // pin does not stop the run: it judges the pin, not these bytes, and a lane may prove its
-    // bytes on an older pin on purpose.
+    // The first failed stage, once the run stops at it. Only a full tier stops: a quick tier is
+    // already cheap, and repin flows run it expecting a size or speed red before they bless.
+    // `--keep-going` never stops. A failed SDK pin does not stop the run: it judges the pin, not
+    // these bytes, and a lane may prove its bytes on an older pin on purpose.
     let mut stopped: Option<String> = None;
     stages.push(sdk);
     // A full tier whose clean clone cannot fetch this commit fails at its very end, after every
@@ -337,7 +338,7 @@ fn run(o: &Options) -> Result<ExitCode, String> {
             "clean" => stage::clean::run(&ctx),
             _ => unreachable!("RUN_ORDER lists only these"),
         });
-        if !r.passed() && !o.keep_going {
+        if !r.passed() && !o.keep_going && o.tier == Tier::Full {
             stopped = Some(name.to_string());
         }
         stages.push(r);

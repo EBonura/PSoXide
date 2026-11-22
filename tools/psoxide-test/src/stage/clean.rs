@@ -179,7 +179,13 @@ pub fn pushed_precheck(ctx: &Ctx<'_>) -> StageResult {
              of the run; commit and push first",
         ));
     }
-    let scratch = ctx.work.join("pushed-precheck");
+    // One scratch per run: work dirs are shared between configs, and two runs must never wipe or
+    // fetch into each other's scratch.
+    let scratch = ctx.work.join(format!(
+        "pushed-precheck-{}-{}",
+        util::short(&commit),
+        std::process::id()
+    ));
     if scratch.exists() {
         if let Err(e) = std::fs::remove_dir_all(&scratch) {
             return result(Check::skip(
@@ -419,7 +425,9 @@ mod pushed_tests {
         assert!(says_not_on_server(
             "git fetch in /x: fatal: remote error: upload-pack: not our ref 1111"
         ));
-        assert!(says_not_on_server("fatal: couldn't find remote ref deadbeef"));
+        assert!(says_not_on_server(
+            "fatal: couldn't find remote ref deadbeef"
+        ));
         assert!(!says_not_on_server(
             "fatal: unable to access 'https://github.com/a/b.git/': Could not resolve host"
         ));
