@@ -1388,6 +1388,12 @@ fn run_search(args: &Args) -> Result<()> {
     };
     let text = std::fs::read_to_string(input)?;
     let mut profile = layout::Layout::parse(&text)?;
+    if let Some(before) = layout::SearchStamp::read(&text) {
+        println!(
+            "{input} was searched before (rounds {} seed {}); its stamp is replaced",
+            before.rounds, before.seed
+        );
+    }
     let patterns = layout::fixed_patterns(&std::fs::read_to_string(script)?);
     let link = load_link(map, exe, &patterns)?;
     let traces = load_traces(args, &link, &patterns)?;
@@ -1453,30 +1459,52 @@ fn run_search(args: &Args) -> Result<()> {
         );
     }
     profile.placement = Some(recorded(&link, &found.listed));
-    // The profile's own lines stay as they were; the placement follows them,
-    // with what made it.
-    let mut out = text
-        .lines()
-        .take_while(|line| {
-            !line.starts_with(&format!("{} ", START_TAG_TEXT)) && !line.starts_with("# placement")
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    out.push('\n');
-    let _ = writeln!(out, "# placement: psoxide-pgo search, {summary}");
     let names: Vec<String> = traces
         .windows
         .iter()
         .map(|window| format!("{} (weight {})", window.name, window.weight))
         .collect();
-    let _ = writeln!(out, "# placement windows: {}", names.join(", "));
-    out.push_str(&profile.placement.as_ref().expect("set above").to_text());
+    let stamp = layout::SearchStamp {
+        rounds: settings.rounds,
+        seed: settings.seed,
+    };
+    let out = searched_text(
+        &text,
+        stamp,
+        &summary,
+        &names.join(", "),
+        profile.placement.as_ref().expect("set above"),
+    );
     std::fs::write(output, out)?;
     println!("wrote {output}");
     Ok(())
 }
 
 const START_TAG_TEXT: &str = "s";
+
+/// The layout `search` writes: the input profile's own lines as they were (an earlier search's
+/// placement and its comment lines dropped), stamped as searched (`layout::SEARCHED_TAG`, the
+/// second line), then two comment lines saying how the placement was found and the placement.
+fn searched_text(
+    text: &str,
+    stamp: layout::SearchStamp,
+    summary: &str,
+    windows: &str,
+    placement: &layout::Recorded,
+) -> String {
+    let own = text
+        .lines()
+        .take_while(|line| {
+            !line.starts_with(&format!("{} ", START_TAG_TEXT)) && !line.starts_with("# placement")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut out = stamp.apply(&own);
+    let _ = writeln!(out, "# placement: psoxide-pgo search, {summary}");
+    let _ = writeln!(out, "# placement windows: {windows}");
+    out.push_str(&placement.to_text());
+    out
+}
 
 /// `search` and `icache`.
 pub fn main(mode: &str, args: &[String]) -> Result<()> {
@@ -1790,5 +1818,55 @@ mod tests {
             },
         );
         assert_eq!(again.listed, found.listed);
+    }
+
+    #[test]
+    fn a_searched_layout_is_stamped_and_reads_as_the_same_profile() {
+        let input = "# psoxide-pgo layout 1\n# features: (default)\n# variant: profi\n\
+                     f 0000000000000001 2 a\nw 0:5 1:7\nc 3 1 b\nf 0000000000000002 1 b\nw 0:3\n";
+        let placement = |address: u32| layout::Recorded {
+            start: 0x8001_0000,
+            entries: vec![layout::RecordedEntry {
+                hash: 2,
+                words: 1,
+                address,
+                key: "b".into(),
+            }],
+        };
+        let stamp = |seed| layout::SearchStamp { rounds: 600, seed };
+        let once = searched_text(
+            input,
+            stamp(1),
+            "seed 1 ...",
+            "c4a3 (weight 1)",
+            &placement(4),
+        );
+        assert_eq!(
+            once.lines().nth(1),
+            Some("# psoxide-pgo searched: rounds 600 seed 1")
+        );
+        assert_eq!(layout::SearchStamp::read(&once), Some(stamp(1)));
+        assert!(once.contains("\n# placement: psoxide-pgo search, seed 1 ...\n"));
+        let parsed = layout::Layout::parse(&once).unwrap();
+        let mut unstamped = layout::Layout::parse(input).unwrap();
+        assert_eq!(parsed.functions, unstamped.functions);
+        unstamped.placement = Some(placement(4));
+        assert_eq!(parsed, unstamped);
+
+        // Searching a searched layout again (`--start recorded`) keeps one stamp, the new one,
+        // and one placement.
+        let twice = searched_text(
+            &once,
+            stamp(9),
+            "seed 9 ...",
+            "c4a3 (weight 1)",
+            &placement(8),
+        );
+        assert_eq!(twice.matches(layout::SEARCHED_TAG).count(), 1);
+        assert_eq!(layout::SearchStamp::read(&twice), Some(stamp(9)));
+        assert_eq!(twice.matches("# placement: ").count(), 1);
+        assert_eq!(twice.matches("\ns ").count(), 1);
+        let parsed = layout::Layout::parse(&twice).unwrap();
+        assert_eq!(parsed.placement, Some(placement(8)));
     }
 }
