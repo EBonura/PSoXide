@@ -77,9 +77,9 @@ pub const LOAD_ADDR: u32 = 0x8001_0000;
 /// The core window: the prebuilt core's code, data and bss, at the same
 /// addresses in every program that hosts it. The core keeps no stack here:
 /// a switch runs at the top of the outgoing program's stack reserve, every
-/// other call on the caller's stack. **Provisional** at 8,192 B (the SDK
-/// lane's 11-23 decision, down from the 10,240 B cap); the final number comes
-/// after P1, and this constant is the one place that moves.
+/// other call on the caller's stack. **Provisional** at 8,192 B (down from
+/// the earlier 10,240 B cap); the final number comes after P1, and this
+/// constant is the one place that moves.
 pub const CORE_WINDOW: Span = Span {
     start: 0x801f_df00,
     end: 0x801f_ff00,
@@ -638,7 +638,8 @@ impl SceneRow {
 /// 0x18  4  member base relative to the table base (Program; 0 for an Overlay)
 /// 0x1C  1  kind: 0 Program, 1 Overlay
 /// 0x1D  1  class (Overlay: 1 RESIDENT_SET, 2 SWAP; 0 for a Program); build only
-/// 0x1E  1  owner (Overlay: its Program's image index; 0 for a Program)
+/// 0x1E  1  owner (Overlay: its Program's image index; reserved for a Program, written 0 and
+///          not read by the core)
 /// 0x1F  1  CD-DA base delta (Program; 0 for an Overlay)
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -661,7 +662,7 @@ pub struct ImageRow {
     pub kind: Kind,
     /// Overlay: how it is kept. `None` for a Program.
     pub class: Option<Class>,
-    /// Overlay: its Program's image index. 0 for a Program.
+    /// Overlay: its Program's image index. Reserved for a Program: written 0, not read by the core.
     pub owner: u8,
     /// Program: CD-DA tracks of the members ahead of its own (0 on a single-game disc).
     pub cdda_delta: u8,

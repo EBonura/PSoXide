@@ -369,6 +369,7 @@ pub fn program_image_row(
         member_base: 0,
         kind: Kind::Program,
         class: None,
+        // Reserved for a Program (only an Overlay names its owner); the core does not read it.
         owner: 0,
         cdda_delta: 0,
     };
