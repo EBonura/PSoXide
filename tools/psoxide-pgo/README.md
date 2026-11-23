@@ -118,6 +118,11 @@ Two conventions the guest must follow:
 
   The driver checks the output and says so if the guest forgot.
 
+A guest whose link writes an ELF rather than a flat binary (one with sections
+stored apart from where they run: `sdk/psoxide-core.ld`, `sdk/psoxide-boot.ld`)
+gets its EXE written by load address (`psx-exe`, tools/psoxide-hazard), and the
+ELF kept beside it as `NAME.elf`.
+
 A third applies only to a game that tries `+order`:
 
 - **The link order.** An `+order` variant relinks with an ordering file the

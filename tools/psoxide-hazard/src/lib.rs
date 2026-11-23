@@ -15,6 +15,9 @@
 //!   fits its region, and (in [`dispatch_guard`]) every interrupt handler fits
 //!   psx-rt's dispatcher stack.
 //! * [`heap_guard`] (`heap-guard`) proves the guest heap holds what the cooked level needs.
+//! * [`exe`] (`psx-exe`) writes a PS-X EXE from a link's ELF by load address, for programs
+//!   whose sections are stored in one place and run from another (psoxide-core.ld,
+//!   psoxide-boot.ld).
 //!
 //! These replace `tools/hazard_patch.py`, `hazard_scan.py` and
 //! `stack_guard.py`, with the same command lines, reports and patched bytes,
@@ -26,6 +29,7 @@ use std::io::Write;
 pub mod cache_gate;
 pub mod detect;
 pub mod dispatch_guard;
+pub mod exe;
 pub mod gate;
 pub mod heap_guard;
 pub mod inline_gate;

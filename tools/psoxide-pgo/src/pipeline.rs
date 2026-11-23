@@ -12,8 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::{env, fs};
 
-use object::read::elf::{ElfFile32, FileHeader, ProgramHeader};
-use object::{Object, ObjectSection};
+use object::Object;
 
 use crate::ladder::{self, Rig};
 use crate::{layout, Result};
@@ -675,7 +674,17 @@ impl Guest {
             .into());
         }
         if !elf && is_elf {
-            return Err(format!("{} is an ELF, not a flat PSX-EXE", exe.display()).into());
+            // A program with sections stored in one place and run from another
+            // (psoxide-core.ld, psoxide-boot.ld) links an ELF: write its EXE by load address
+            // (psx-exe), keeping the ELF beside it. A new file, so the hardlinked copy cargo
+            // keeps under deps/ stays the ELF it built.
+            let bytes = fs::read(&exe)?;
+            let image = psoxide_hazard::exe::from_elf(&bytes)
+                .map_err(|e| format!("{}: {e}", exe.display()))?;
+            fs::write(exe.with_extension("elf"), &bytes)?;
+            let staged = exe.with_extension("exe.part");
+            fs::write(&staged, image)?;
+            fs::rename(&staged, &exe)?;
         }
         let map = if map.is_file() {
             Some(map)
@@ -896,63 +905,11 @@ impl Guest {
     }
 }
 
-/// The bytes `ld.lld --oformat=binary` would have written for this ELF:
-/// every allocated section with contents, at its load address relative to
-/// the lowest one.
+/// The bytes `ld.lld --oformat=binary` would have written for this ELF, with every section at
+/// its load address (the same as `--oformat=binary` for a program whose sections all run where
+/// they are stored): `psx-exe`'s writer.
 fn flat_image(data: &[u8]) -> Result<Vec<u8>> {
-    let elf = ElfFile32::<object::Endianness>::parse(data)?;
-    let endian = elf.endian();
-    let segments: Vec<(u64, u64, u64)> = elf
-        .elf_header()
-        .program_headers(endian, data)?
-        .iter()
-        .filter(|segment| segment.p_type(endian) == object::elf::PT_LOAD)
-        .map(|segment| {
-            (
-                u64::from(segment.p_offset(endian)),
-                u64::from(segment.p_filesz(endian)),
-                u64::from(segment.p_paddr(endian)),
-            )
-        })
-        .collect();
-    let mut pieces = Vec::new();
-    for section in elf.sections() {
-        let object::SectionFlags::Elf { sh_flags, .. } = section.flags() else {
-            continue;
-        };
-        if sh_flags.0 & object::elf::SHF_ALLOC.0 == 0 {
-            continue;
-        }
-        let Some((offset, size)) = section.file_range() else {
-            continue; // NOBITS
-        };
-        if size == 0 {
-            continue;
-        }
-        let lma = segments
-            .iter()
-            .find(|&&(start, len, _)| start <= offset && offset < start + len)
-            .map_or(section.address(), |&(start, _, paddr)| {
-                paddr + offset - start
-            });
-        pieces.push((lma, section.data()?));
-    }
-    let base = pieces
-        .iter()
-        .map(|piece| piece.0)
-        .min()
-        .ok_or("the ELF has no loadable sections")?;
-    let end = pieces
-        .iter()
-        .map(|piece| piece.0 + piece.1.len() as u64)
-        .max()
-        .unwrap_or(base);
-    let mut image = vec![0u8; usize::try_from(end - base)?];
-    for (lma, bytes) in pieces {
-        let at = usize::try_from(lma - base)?;
-        image[at..at + bytes.len()].copy_from_slice(bytes);
-    }
-    Ok(image)
+    Ok(psoxide_hazard::exe::from_elf(data)?)
 }
 
 /// Run the caller's pack command for `exe` and return the image to launch.

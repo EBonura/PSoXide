@@ -534,7 +534,13 @@ pub(crate) fn resident_image(
             if section.kind != 1 || section.bytes.len() != section.size as usize {
                 return Err("resident section file backing".into());
             }
-            end = end.max(bounds.end);
+            // Stored at its load address: a section linked with AT(...) (psoxide-boot.ld's
+            // `.boot`, psoxide-core.ld's stored core image) runs elsewhere.
+            let stored = range(section.load_address, section.size)?;
+            if stored.start < base || stored.end > 0x80200000 {
+                return Err("resident PS1 load bounds".into());
+            }
+            end = end.max(stored.end);
         }
     }
     let load = end
@@ -550,7 +556,7 @@ pub(crate) fn resident_image(
             continue;
         }
         let at = section
-            .address
+            .load_address
             .checked_sub(base)
             .and_then(|n| n.checked_add(2048))
             .ok_or("resident section offset")? as usize;

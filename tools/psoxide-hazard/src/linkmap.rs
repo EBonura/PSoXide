@@ -206,6 +206,16 @@ impl LinkMap {
                 .into_iter()
                 .find(|key| name.strip_prefix(key) == Some(" = ."))
             {
+                // The core's stored image runs in its window; where its bytes end in the stored
+                // image is the row's second (load address) column.
+                let address = if key == "__psx_core_store_end" {
+                    line.split_whitespace()
+                        .nth(1)
+                        .and_then(|c| i64::from_str_radix(c, 16).ok())
+                        .unwrap_or(address)
+                } else {
+                    address
+                };
                 assigned.insert(key, address);
             } else if depth == 0 && name == ".boot" {
                 // The output section row's second column is where its bytes are stored;

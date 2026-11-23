@@ -36,6 +36,10 @@ name = "window-gate"
 path = "src/bin/window-gate.rs"
 
 [[bin]]
+name = "psx-exe"
+path = "src/bin/psx-exe.rs"
+
+[[bin]]
 name = "cache-gate"
 path = "src/bin/cache-gate.rs"
 
