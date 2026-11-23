@@ -120,6 +120,46 @@ pub mod slot {
     pub const SET_IDLE_HOOK: u32 = CORE_WINDOW.start + 11 * SLOT_BYTES;
 }
 
+/// The deepest stack each slot uses below the caller's `$sp`, in bytes: every frame of its worst
+/// call chain inside the core, measured from the core image's own code (frame sizes and calls of
+/// `psx-core/image`, prebuilt `psx-core.bin`). A program's stack proof adds the slot's figure at
+/// each call site. The idle hook (`psx_core_set_idle_hook`) and a read's per-sector hook are the
+/// program's own code: they run on top of the slot's frames, so their depth adds to the slot's.
+/// The switch runs its load on a stack of its own at `STACK_INIT` (see `SWITCH_STACK`), so
+/// [`stack::SWITCH`] is only what it uses on the caller's stack before that.
+pub mod stack {
+    /// `__psx_core_attach` (called by `__core_boot` only).
+    pub const ATTACH: u32 = 72;
+    /// `psx_core_switch`, on the caller's stack, before it moves to the switch stack.
+    pub const SWITCH: u32 = 296;
+    /// The switch's load, on the switch stack at `STACK_INIT`; under `SWITCH_STACK`.
+    pub const SWITCH_LOAD: u32 = 312;
+    /// `psx_core_read`.
+    pub const READ: u32 = 264;
+    /// `psx_core_pause`.
+    pub const PAUSE: u32 = 176;
+    /// `psx_core_client_attach`.
+    pub const CLIENT_ATTACH: u32 = 0;
+    /// `psx_core_client_detach`.
+    pub const CLIENT_DETACH: u32 = 0;
+    /// `psx_core_fatal`.
+    pub const FATAL: u32 = 64;
+    /// `psx_core_music_yield`.
+    pub const MUSIC_YIELD: u32 = 8;
+    /// `psx_core_stream_open`.
+    pub const STREAM_OPEN: u32 = 184;
+    /// `psx_core_stream_sector`.
+    pub const STREAM_SECTOR: u32 = 96;
+    /// `psx_core_cd`.
+    pub const CD: u32 = 120;
+    /// `psx_core_set_idle_hook`.
+    pub const SET_IDLE_HOOK: u32 = 0;
+    /// The deepest of the slots a program calls (the switch's load runs on its own stack).
+    pub const MAX: u32 = 296;
+
+    const _: () = assert!(SWITCH_LOAD <= super::SWITCH_STACK);
+}
+
 /// OR'd into the `lba` argument of `psx_core_read` and `psx_core_stream_open`:
 /// the LBA is absolute on the disc, not offset by the member base, for a file
 /// in the host disc's root. Bit 31 is part of ABI version 1. A
