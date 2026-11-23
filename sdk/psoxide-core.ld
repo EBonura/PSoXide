@@ -6,25 +6,28 @@
  * The core's image (psx-core's `IMAGE`, input section `.psx_core`) runs at the window
  * 0x801FDF00..0x801FFF00 and is stored right after .data, where .bss will be, so it costs the
  * program no RAM once `_start` has cleared .bss. `__core_boot` is the entry: it copies the image
- * up before `_start` runs. Link with --no-check-sections as well (the store and .bss overlap).
+ * from its load address up into the window, then goes on to `__core_next` (`__boot_entry` with
+ * psoxide-boot.ld, else `_start`).
+ *
+ * The run address and the load address differ, so the program links an ELF (no
+ * `--oformat=binary`) and its EXE is written from the load addresses (`psx-exe`, or psoxide-pgo,
+ * which does the same); see psoxide.ld.
  */
 __initial_pc = __core_boot;
-/* Where `__core_boot` goes next: the boot-overlay mover when psoxide-boot.ld is linked too (it
-   moves .boot, runs the splash and goes on to `_start`), else psx-rt's `_start`. With both, the
-   boot overlay is stored after the core's copy: BOOT_LMA = __psx_core_store_end. */
-__core_next = DEFINED(__boot_entry) ? __boot_entry : _start;
+__core_next = DEFINED(__boot_initial) ? __boot_initial : _start;
 
 /* The jump table's slot symbols come from psx-core (`link`), which takes them from psx-scene-abi. */
 
 SECTIONS {
-    /* The stored copy, right after .data. psoxide.ld lays .bss over it, so it costs the program no
-       RAM; that overlap is on purpose, so these programs link with --no-check-sections. */
-    .psx_core_store : {
+    /* Run at the window, stored right after .data. psoxide.ld lays .bss over the stored copy. */
+    .psx_core_store STACK_INIT : AT(__data_end) {
         __psx_core_store = .;
         KEEP(*(.psx_core))
         . = ALIGN(4);
         __psx_core_store_end = .;
-    } > IMAGE
+    } > RELOCATED
+    __psx_core_store_lma = LOADADDR(.psx_core_store);
+    __psx_core_store_load_end = __psx_core_store_lma + SIZEOF(.psx_core_store);
 }
 /* As psoxide-boot.ld: INSERT must directly follow SECTIONS's closing brace. */
 INSERT AFTER .data;

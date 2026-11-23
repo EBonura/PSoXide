@@ -28,7 +28,8 @@
 //! ahead of the rest, in name order, so the `NN` prefixes choose which functions sit side by
 //! side in the 4 KiB direct-mapped I-cache. A program that uses neither links byte for byte
 //! as before. The stack is `STACK_RESERVE_OVERRIDE`, the RAM size `RAM_SIZE_OVERRIDE`, the
-//! initial PC `__initial_pc` and boot-only memory `psoxide-boot.ld` (see the script).
+//! initial PC `__initial_pc` and boot-only memory `psoxide-boot.ld` (see the script; its mover,
+//! `__boot_entry`, is this crate's).
 
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]
@@ -51,6 +52,8 @@ mod builtins;
 #[cfg(target_arch = "mips")]
 mod mem;
 
+#[cfg(all(target_arch = "mips", feature = "runtime"))]
+mod boot;
 pub mod cache;
 pub mod critical_section;
 #[cfg(all(feature = "console-diag", target_arch = "mips"))]

@@ -14,13 +14,17 @@ GUEST_TARGET="${GUEST_TARGET:-$ROOT/build/examples}"
 CRATE=sdk/examples/hello-scene
 mkdir -p "$OUT"
 FLAGS='"-Zunstable-options","-Cpanic=immediate-abort","-Cllvm-args=-disable-mips-df-succbb-search=false","-Cllvm-args=-disable-mips-df-forward-search=false"'
-CORE_LINK='"-Clink-arg=-Tram.ld","-Clink-arg=-T../../psoxide-core.ld","-Clink-arg=--no-check-sections",'
+CORE_LINK='"-Clink-arg=-Tram.ld","-Clink-arg=-T../../psoxide-core.ld",'
 
+# A program on the core links an ELF (its core image runs at the window and is stored after .data,
+# see sdk/psoxide.ld), which psoxide-pgo writes out as the EXE by load address; the plain one keeps
+# --oformat=binary.
 guest() { # name features link-scripts
+    if [ -n "$3" ]; then format=""; else format=',"-Clink-arg=--oformat=binary"'; fi
     "$HOST_BIN/psoxide-pgo" apply --crate "$CRATE" --profile "$CRATE/pgo.prof" --variant off -- \
         build --release --target mipsel-sony-psx -Zbuild-std=core -Zbuild-std-features=compiler-builtins-mem \
         --target-dir "$GUEST_TARGET" $2 \
-        --config "target.mipsel-sony-psx.rustflags=[$FLAGS,$3\"-Clink-arg=-T../../psoxide.ld\",\"-Clink-arg=--oformat=binary\"]"
+        --config "target.mipsel-sony-psx.rustflags=[$FLAGS,$3\"-Clink-arg=-T../../psoxide.ld\"$format]"
     cp "$GUEST_TARGET/mipsel-sony-psx/release/hello-scene.exe" "$OUT/$1.exe"
     map=$(ls -t "$GUEST_TARGET"/mipsel-sony-psx/psoxide-pgo-maps/*.map 2>/dev/null | head -1 || true)
     [ -n "$map" ] && cp "$map" "$OUT/$1.map" || true

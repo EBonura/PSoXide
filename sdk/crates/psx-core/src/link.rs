@@ -3,8 +3,9 @@
 //!
 //! A program on the core links with `-T psoxide-core.ld` before psoxide.ld and a `-T` file that
 //! sets `RAM_SIZE_OVERRIDE = 0x1FE000`. The script stores [`IMAGE`] right after `.data` (where
-//! `.bss` will be), makes `__core_boot` the header's entry and gives the jump-table slots their
-//! addresses. `__core_boot` then runs before psx-rt's `_start`:
+//! `.bss` will be; the program's EXE is written from load addresses, see psoxide.ld), makes
+//! `__core_boot` the header's entry and gives the jump-table slots their addresses.
+//! `__core_boot` then runs before psx-rt's `_start`:
 //!
 //! 1. it keeps `$a0..$a3` and moves `$sp` to `STACK_INIT` (a BIOS hands over 0x801FFFF0, inside
 //!    the handoff block);
@@ -56,7 +57,7 @@ const _: () = assert!(
 );
 
 extern "C" {
-    static __psx_core_store: u32;
+    static __psx_core_store_lma: u32;
     fn __psx_core_attach(a0: u32, a1: u32, a2: u32, hash: u32);
     fn psx_core_switch(scene: u32, args: *const [u32; 4], table: *const u32) -> u32;
     fn psx_core_load_image(image: u32, table: *const u32) -> u32;
@@ -100,10 +101,10 @@ extern "C" fn __core_boot_rs(a0: u32, a1: u32, a2: u32, a3: u32) {
         && r32(block::ADDR + block::OFF_FLAGS) & block::FLAG_CORE_ENTRY != 0;
     let window = abi::WINDOW as *mut u32;
     if !core_entry {
-        // SAFETY: the stored image is LEN bytes at __psx_core_store (psoxide-core.ld); the window
+        // SAFETY: the stored image is LEN bytes at __psx_core_store_lma (psoxide-core.ld); the window
         // is this program's to fill, nothing runs from it yet.
         unsafe {
-            let from = core::ptr::addr_of!(__psx_core_store);
+            let from = core::ptr::addr_of!(__psx_core_store_lma);
             let mut i = 0;
             while i < LEN / 4 {
                 core::ptr::write_volatile(window.add(i), core::ptr::read_volatile(from.add(i)));

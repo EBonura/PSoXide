@@ -8,6 +8,14 @@
  * in here from link-time symbols, so no post-link tool has to touch the
  * file.
  *
+ * A program with sections stored in one place and run from another (the scene core's image,
+ * psoxide-core.ld; boot-only code, psoxide-boot.ld) links an ELF instead and writes the EXE
+ * from its load addresses with `psx-exe` (tools/psoxide-hazard; psoxide-pgo does it for the
+ * programs it builds): ld.lld's `--oformat=binary` places every section at its run address.
+ * The stored copies follow .data in the file, in this order: .data, the core's image, .boot.
+ * .bss is laid over them, so they cost no RAM once their movers have run (`__core_boot`, then
+ * `__boot_entry`, then `_start`).
+ *
  * The image loads to 80010000h: KSEG0 (cached), the first address past the
  * 64 KiB the kernel keeps for itself (psx-spx "BIOS Memory Map").
  */
@@ -55,6 +63,9 @@ EXE_HEAD_BYTES = 0x800;
 MEMORY {
     IMAGE (rwx) : ORIGIN = LOAD_ADDR - EXE_HEAD_BYTES,
                   LENGTH = EXE_HEAD_BYTES + RAM_BASE + RAM_SIZE - LOAD_ADDR - STACK_RESERVE
+    /* Run addresses of sections stored elsewhere (psoxide-core.ld, psoxide-boot.ld). They are
+       counted where they are stored, by the assertions below and in their scripts, not here. */
+    RELOCATED (rwx) : ORIGIN = RAM_BASE, LENGTH = 8M
 }
 
 ENTRY(_start)
@@ -67,9 +78,10 @@ SECTIONS {
         LONG(0x45584520);           /* 004h " EXE" */
         LONG(0);                    /* 008h zero */
         LONG(0);                    /* 00Ch zero */
-        /* 010h initial PC: `__initial_pc` when a script defines it (psoxide-boot.ld: the
-           boot-overlay mover runs first), else `_start`. */
-        LONG(DEFINED(__initial_pc) ? __initial_pc : _start);
+        /* 010h initial PC: `__initial_pc` when a script defines it (psoxide-core.ld: the core's
+           mover), else `__boot_initial` (psoxide-boot.ld: the boot-only mover), else `_start`.
+           With both, `__core_boot` runs first and goes on to `__boot_entry`. */
+        LONG(DEFINED(__initial_pc) ? __initial_pc : DEFINED(__boot_initial) ? __boot_initial : _start);
         LONG(0);                    /* 014h initial GP: the runtime does not use $gp */
         LONG(LOAD_ADDR);            /* 018h destination address */
         LONG(__image_end - __text_start); /* 01Ch bytes stored after the header */
@@ -166,16 +178,16 @@ SECTIONS {
        which `_start` clears before anything reads it. Starting .bss right
        after the data instead of after this padding gives the program the
        bytes back. */
-    /* With psoxide-boot.ld the boot-only sections follow .data in the file (their load address
-       is `__boot_lma`, where .bss will be once the mover has run). */
-    /* With psoxide-core.ld the scene core's stored image follows .data in the file, and .bss is
-       laid over it (`__core_boot` has copied it up into the window before `_start` clears .bss). */
-    __load_end = DEFINED(__boot_start) ? __boot_lma + (__boot_load_end - __boot_start)
-               : DEFINED(__psx_core_store_end) ? __psx_core_store_end : __data_end;
+    /* The end of the stored bytes: .data, then the scene core's stored image (psoxide-core.ld),
+       then the boot-only sections (psoxide-boot.ld), each where .bss will be. */
+    __load_end = DEFINED(__boot_lma_end) ? __boot_lma_end
+               : DEFINED(__psx_core_store_load_end) ? __psx_core_store_load_end : __data_end;
     __image_end = __text_start + ((__load_end - __text_start + EXE_HEAD_BYTES - 1) & ~(EXE_HEAD_BYTES - 1));
 
-    /* Uninitialised data - zeroed by `_start`, not stored in file. */
-    .bss (DEFINED(__psx_core_store) ? __psx_core_store : .) (NOLOAD) : {
+    /* Uninitialised data - zeroed by `_start`, not stored in file. It runs right after .data,
+       over the stored copies; its load address (which nothing reads) follows them, so no two
+       sections share load addresses and the link keeps its section checks. */
+    .bss __data_end (NOLOAD) : AT(__load_end) {
         __bss_start = .;
         *(.bss .bss.*);
         *(COMMON);
@@ -193,6 +205,7 @@ SECTIONS {
     ASSERT(LOAD_ADDR >= RAM_BASE + BIOS_SIZE, "LOAD_ADDR_OVERRIDE is inside the kernel's 64 KiB")
     ASSERT((__image_end - __text_start) % EXE_HEAD_BYTES == 0, "the stored image must be whole 800h-byte sectors")
     ASSERT(__image_end - __load_end < EXE_HEAD_BYTES, "the stored image may reach past the data by under one sector")
+    ASSERT(__load_end <= __heap_end, "the stored image reaches into the stack reserve")
 
     /* Discard MIPS ABI glue not needed on bare metal. */
     /DISCARD/ : {
