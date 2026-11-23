@@ -36,8 +36,8 @@ pub mod block {
     pub const BYTES: u32 = b::LENGTH as u32;
     /// "PSCB".
     pub const MAGIC: u32 = b::MAGIC;
-    /// Layout version written by this core.
-    pub const VERSION: u32 = b::VERSION as u32;
+    /// Layout version written by this core (version 1 until the core moves to the v2 table).
+    pub const VERSION: u32 = psx_scene_abi::v1::BLOCK_VERSION as u32;
     /// `version:u16 | length:u16 << 16`.
     pub const OFF_VERSION: u32 = b::OFF_VERSION as u32;
     /// Offset of the magic.
@@ -68,7 +68,8 @@ pub mod block {
 
 /// The scene table, by word of its one sector.
 pub mod table {
-    use psx_scene_abi as s;
+    // The version 1 table until the core moves to version 2 (psx_scene_abi::v1).
+    use psx_scene_abi::v1 as s;
     /// Member-relative LBA of the table.
     pub const LBA: u32 = s::TABLE_LBA;
     /// Member-relative LBA of the boot exe.
