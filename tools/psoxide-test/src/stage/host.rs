@@ -110,7 +110,7 @@ pub fn run(ctx: &Ctx<'_>, bless: bool) -> StageResult {
         }
     }
     let before = util::git(&ctx.repo, &["status", "--porcelain"]).unwrap_or_default();
-    let done = crate::sched::run_all(&groups, ctx.config.budget.jobs, |(_, jobs)| {
+    let done = crate::sched::run_all(&groups, ctx.jobs_width(), |(_, jobs)| {
         jobs.iter()
             .map(|(host, model, name)| {
                 (

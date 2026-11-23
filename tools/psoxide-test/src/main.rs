@@ -185,7 +185,10 @@ fn dispatch(args: &[String]) -> Result<ExitCode, String> {
     if command == Some("reap") {
         procs::reap();
     }
-    if matches!(command, Some("run" | "bless" | "install" | "adapter")) {
+    if matches!(
+        command,
+        Some("run" | "bless" | "install" | "adapter" | "clean-stage")
+    ) {
         // Nothing this process starts may outlive it (procs.rs).
         procs::install_signal_handlers();
         if command != Some("adapter") {
@@ -206,6 +209,7 @@ fn dispatch(args: &[String]) -> Result<ExitCode, String> {
         Some("pin") => pin_command(&args[1..]),
         Some("tape") => tape::run(&args[1..]),
         Some("tape-anchor") => tape::anchor_command(&args[1..]),
+        Some("clean-stage") => clean_stage(&args[1..]),
         Some("-h" | "--help" | "help") | None => {
             println!("{USAGE}");
             Ok(ExitCode::SUCCESS)
@@ -321,6 +325,7 @@ fn context<'a>(o: &Options, game: &'a Game, config: &'a Config) -> Result<Ctx<'a
         originals: Mutex::new(originals::Cache::load(
             &config.work.join("input-digests.json"),
         )),
+        jobs_held: std::sync::atomic::AtomicUsize::new(0),
     })
 }
 
@@ -353,6 +358,36 @@ fn stopped_at(name: &str, failed: &str) -> StageResult {
             ..Outcome::default()
         },
     }
+}
+
+/// `psoxide-test clean-stage --repo DIR --artifacts FILE --out FILE`: the full tier's clean stage
+/// in its own process, started by `run` beside the other stages (stage/clean_bg.rs). Not for
+/// direct use.
+fn clean_stage(args: &[String]) -> Result<ExitCode, String> {
+    let mut repo = None;
+    let mut artifacts = None;
+    let mut out = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let value = it.next().cloned().ok_or(format!("{a} needs a value"))?;
+        match a.as_str() {
+            "--repo" => repo = Some(value),
+            "--artifacts" => artifacts = Some(PathBuf::from(value)),
+            "--out" => out = Some(PathBuf::from(value)),
+            other => return Err(format!("clean-stage: unknown argument `{other}`")),
+        }
+    }
+    let (Some(repo), Some(artifacts), Some(out)) = (repo, artifacts, out) else {
+        return Err(
+            "usage: psoxide-test clean-stage --repo DIR --artifacts FILE --out FILE".into(),
+        );
+    };
+    let o = options(&["--repo".into(), repo, "--tier".into(), "full".into()])?;
+    let config = Config::load()?;
+    let game = Game::load(&o.repo)?;
+    let mut ctx = context(&o, &game, &config)?;
+    stage::clean_bg::child(&mut ctx, &artifacts, &out)?;
+    Ok(ExitCode::SUCCESS)
 }
 
 fn run(o: &Options) -> Result<ExitCode, String> {
@@ -403,6 +438,33 @@ fn run(o: &Options) -> Result<ExitCode, String> {
         stages.push(build);
         built
     };
+    // The clean stage needs only the judged build and the pushed commit: start it now, beside
+    // the other stages, and join it where it sits in the order (stage/clean_bg.rs).
+    let mut clean_bg = None;
+    if built
+        && stopped.is_none()
+        && o.tier == Tier::Full
+        && wanted("clean")
+        && !game.cleans.is_empty()
+    {
+        let free = stage::clean_bg::free_bytes(&ctx.work);
+        match stage::clean_bg::serial_reason(
+            config.budget.jobs,
+            free,
+            config.budget.overlap_min_free_gb,
+        ) {
+            Some(why) => println!("clean runs after the other stages: {why}"),
+            None => match stage::clean_bg::start(&ctx) {
+                Ok(bg) => {
+                    ctx.jobs_held
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    println!("clean started beside the other stages (one jobs unit)");
+                    clean_bg = Some(bg);
+                }
+                Err(e) => println!("clean runs after the other stages: {e}"),
+            },
+        }
+    }
     for name in &RUN_ORDER[1..] {
         if !wanted(name) {
             continue;
@@ -411,12 +473,30 @@ fn run(o: &Options) -> Result<ExitCode, String> {
             continue;
         }
         if let Some(at) = &stopped {
+            if *name == "clean" {
+                if let Some(bg) = clean_bg.take() {
+                    bg.cancel();
+                }
+            }
             stages.push(stopped_at(name, at));
             continue;
         }
         if !built {
             stages.push(not_run(name, "build"));
             continue;
+        }
+        if *name == "clean" {
+            if let Some(bg) = clean_bg.take() {
+                let (r, timing) = bg.join();
+                ctx.jobs_held
+                    .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                ctx.timing.lock().map_err(|_| "timing lock")?.extend(timing);
+                if !r.passed() && !o.keep_going {
+                    stopped = Some(name.to_string());
+                }
+                stages.push(r);
+                continue;
+            }
         }
         let r = ctx.timed(name, || match *name {
             "requires" => stage::requires::run(&ctx),
@@ -433,6 +513,11 @@ fn run(o: &Options) -> Result<ExitCode, String> {
             stopped = Some(name.to_string());
         }
         stages.push(r);
+    }
+    // Started but not reached (a stage list without it cannot happen: it starts only when
+    // wanted): never left running.
+    if let Some(bg) = clean_bg.take() {
+        bg.cancel();
     }
     if let Some(at) = &stopped {
         println!(

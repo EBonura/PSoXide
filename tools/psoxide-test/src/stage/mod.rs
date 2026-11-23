@@ -2,6 +2,7 @@
 
 pub mod build;
 pub mod clean;
+pub mod clean_bg;
 pub mod cross;
 pub mod equiv;
 pub mod host;
@@ -111,9 +112,20 @@ pub struct Ctx<'a> {
     pub timing: Mutex<Vec<Timing>>,
     /// Content digests of the original game files (`originals.rs`), cached by stat.
     pub originals: Mutex<crate::originals::Cache>,
+    /// `jobs` units held by work running beside the stages (the overlapped clean stage).
+    pub jobs_held: std::sync::atomic::AtomicUsize,
 }
 
 impl Ctx<'_> {
+    /// Parallel jobs a stage may run now: the `jobs` budget less the units held beside it.
+    pub fn jobs_width(&self) -> usize {
+        self.config
+            .budget
+            .jobs
+            .saturating_sub(self.jobs_held.load(std::sync::atomic::Ordering::SeqCst))
+            .max(1)
+    }
+
     /// Record the wall time of one job for the timing sidecar.
     pub fn timed<R>(&self, what: &str, work: impl FnOnce() -> R) -> R {
         let start = util::now_seconds();

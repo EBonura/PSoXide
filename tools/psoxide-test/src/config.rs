@@ -54,8 +54,16 @@ pub struct Budget {
     pub shared_dir: Option<std::path::PathBuf>,
     #[serde(default = "four")]
     pub machine_emulators: usize,
+    /// Free disk on the work tree, in GB, under which the full tier's `clean` runs after the
+    /// other stages instead of beside them (its clone is a whole tree and its build).
+    #[serde(default = "nine")]
+    pub overlap_min_free_gb: u64,
     #[serde(default = "one")]
     pub machine_redux: usize,
+}
+
+fn nine() -> u64 {
+    9
 }
 
 fn four() -> usize {
@@ -81,6 +89,7 @@ impl Default for Budget {
             shared_dir: None,
             machine_emulators: 4,
             machine_redux: 1,
+            overlap_min_free_gb: 9,
         }
     }
 }
