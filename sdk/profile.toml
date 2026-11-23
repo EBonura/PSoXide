@@ -14,6 +14,7 @@
 psx-rt   = ["runtime"]
 psx-mc   = ["hw"]
 psx-settings = ["card"]
+psx-io   = ["core-cd"]
 
 # Development taps. A build with one of these on is a diagnostic build: it runs, it cannot
 # become a disc without --diag (the receipt psoxide-pgo apply writes says so).

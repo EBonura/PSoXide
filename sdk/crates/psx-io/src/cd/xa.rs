@@ -39,13 +39,22 @@
 //! song that ends by itself is stopped the same way. [`Player::stop_and_wait`]
 //! is the blocking form, for a boot or a load screen where a data read comes
 //! next and nothing is presenting.
+//!
+//! # On the scene core
+//!
+//! With the `core-cd` feature every controller access the player makes goes
+//! through the resident scene core's register-level CD slot
+//! (`psx_scene_abi::slot::CD`, op codes in `psx_scene_abi::cd_op`) instead
+//! of psx-io's polled command layer, so a program hosted by the core does not
+//! link that layer. The state machine and the public API are the same; the
+//! program's link script must define `psx_core_cd` at the slot's address.
 
 use crate::disc_base::shift_lba;
 use crate::periph::Cd;
 use psx_hw::cd::xa::{END_GUARD_SECTORS, SECTORS_PER_SECOND};
-use psx_hw::cd::{
-    irq, CMD_PAUSE, CMD_READS, CMD_SETFILTER, MODE_DOUBLE_SPEED, MODE_XA_ADPCM, MODE_XA_FILTER,
-};
+#[cfg(not(feature = "core-cd"))]
+use psx_hw::cd::{irq, CMD_PAUSE, CMD_READS, CMD_SETFILTER};
+use psx_hw::cd::{MODE_DOUBLE_SPEED, MODE_XA_ADPCM, MODE_XA_FILTER};
 
 /// Per-command response spin budget: generous, the drive answers far sooner.
 pub const COMMAND_SPINS: u32 = 131_072;
@@ -264,6 +273,9 @@ trait Drive {
     fn head_lba(&mut self) -> Option<u32>;
 }
 
+// The drive steps on psx-io's own polled command layer. With the `core-cd` feature the
+// same steps go through the resident scene core's CD slot instead (`core_slot`).
+#[cfg(not(feature = "core-cd"))]
 impl Drive for Cd {
     fn unmute(&mut self) -> bool {
         self.try_unmute(COMMAND_SPINS).is_some()
@@ -313,23 +325,35 @@ impl Drive for Cd {
     #[inline(never)]
     fn head_lba(&mut self) -> Option<u32> {
         let response = self.try_play_position(COMMAND_SPINS)?;
-        // GetlocP answers eight bytes; the absolute minute, second and frame are bytes 5 to 7,
-        // in BCD (`bcd_to_bin` for the byte `v` is `v - 6 * (v >> 4)`).
-        let &[_, _, _, _, _, min, sec, frame, ..] = response.bytes() else {
-            return None;
-        };
-        let bcd = |v: u8| u32::from(v) - 6 * u32::from(v >> 4);
-        let frames = (bcd(min) * 60 + bcd(sec)) * 75 + bcd(frame);
-        // The drive counts from the start of the lead-in, two seconds before LBA 0.
-        frames.checked_sub(150)
+        getlocp_lba(response.bytes())
     }
 }
 
+/// The absolute LBA in a GetlocP answer, `None` for a short one or a position in the lead-in.
+#[inline(always)]
+fn getlocp_lba(response: &[u8]) -> Option<u32> {
+    // GetlocP answers eight bytes; the absolute minute, second and frame are bytes 5 to 7,
+    // in BCD (`bcd_to_bin` for the byte `v` is `v - 6 * (v >> 4)`).
+    let &[_, _, _, _, _, min, sec, frame, ..] = response else {
+        return None;
+    };
+    let bcd = |v: u8| u32::from(v) - 6 * u32::from(v >> 4);
+    let frames = (bcd(min) * 60 + bcd(sec)) * 75 + bcd(frame);
+    // The drive counts from the start of the lead-in, two seconds before LBA 0.
+    frames.checked_sub(150)
+}
+
 /// The drive's mixer at `(left, right)`, plain stereo: one body for every caller.
+#[cfg(not(feature = "core-cd"))]
 #[inline(never)]
 fn set_mixer(cd: &mut Cd, (left, right): (u8, u8)) {
     cd.set_audio_mixer(left, 0, right, 0);
 }
+
+#[cfg(feature = "core-cd")]
+mod core_slot;
+#[cfg(feature = "core-cd")]
+use core_slot::set_mixer;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum State {
