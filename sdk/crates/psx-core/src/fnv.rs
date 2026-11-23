@@ -2,7 +2,7 @@
 //! Word FNV-1a: `h = (h ^ word) * 0x0100_0193` from 0x811C_9DC5, over little-endian `u32`s.
 
 /// The offset basis.
-pub const BASIS: u32 = 0x811C_9DC5;
+pub const BASIS: u32 = 0x811c_9dc5;
 /// The prime.
 pub const PRIME: u32 = 0x0100_0193;
 
@@ -44,7 +44,9 @@ pub unsafe fn of_ram(at: *const u32, words: u32) -> u32 {
     let mut i = 0;
     while i < words {
         // SAFETY: inside the range the caller vouches for.
-        hash = step(hash, unsafe { core::ptr::read_volatile(at.add(i as usize)) });
+        hash = step(hash, unsafe {
+            core::ptr::read_volatile(at.add(i as usize))
+        });
         i += 1;
     }
     hash
@@ -62,7 +64,10 @@ mod tests {
     #[test]
     fn bytes_are_little_endian_words() {
         assert_eq!(of_bytes(&[1, 0, 0, 0, 2, 0, 0, 0]), step(step(BASIS, 1), 2));
-        assert_eq!(of_bytes(&[0x78, 0x56, 0x34, 0x12]), step(BASIS, 0x1234_5678));
+        assert_eq!(
+            of_bytes(&[0x78, 0x56, 0x34, 0x12]),
+            step(BASIS, 0x1234_5678)
+        );
         assert_eq!(of_bytes(&[5]), step(BASIS, 5));
     }
 }

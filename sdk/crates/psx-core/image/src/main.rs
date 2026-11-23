@@ -27,20 +27,20 @@ use psx_core::fnv;
 // ---------------------------------------------------------------------------------------------
 // Registers.
 
-const CD_INDEX: u32 = 0x1F80_1800;
-const CD_CMD: u32 = 0x1F80_1801;
-const CD_PARAM: u32 = 0x1F80_1802;
-const CD_REQ: u32 = 0x1F80_1803;
-const I_STAT: u32 = 0x1F80_1070;
-const I_MASK: u32 = 0x1F80_1074;
-const TIMER2: u32 = 0x1F80_1120;
-const DPCR: u32 = 0x1F80_10F0;
-const DICR: u32 = 0x1F80_10F4;
-const DMA_CHCR0: u32 = 0x1F80_1088;
-const SPU_KEY_OFF: u32 = 0x1F80_1D8C;
-const SPU_CD_VOLUME: u32 = 0x1F80_1DB0;
-const SPU_CONTROL: u32 = 0x1F80_1DAA;
-const CACHE_CONTROL: u32 = 0xFFFE_0130;
+const CD_INDEX: u32 = 0x1f80_1800;
+const CD_CMD: u32 = 0x1f80_1801;
+const CD_PARAM: u32 = 0x1f80_1802;
+const CD_REQ: u32 = 0x1f80_1803;
+const I_STAT: u32 = 0x1f80_1070;
+const I_MASK: u32 = 0x1f80_1074;
+const TIMER2: u32 = 0x1f80_1120;
+const DPCR: u32 = 0x1f80_10f0;
+const DICR: u32 = 0x1f80_10f4;
+const DMA_CHCR0: u32 = 0x1f80_1088;
+const SPU_KEY_OFF: u32 = 0x1f80_1d8c;
+const SPU_CD_VOLUME: u32 = 0x1f80_1db0;
+const SPU_CONTROL: u32 = 0x1f80_1daa;
+const CACHE_CONTROL: u32 = 0xfffe_0130;
 
 const CDROM_IRQ_BIT: u32 = 1 << 2;
 
@@ -57,7 +57,7 @@ const CMD_GETSTAT: u8 = 0x01;
 const CMD_SETLOC: u8 = 0x02;
 const CMD_READN: u8 = 0x06;
 const CMD_PAUSE: u8 = 0x09;
-const CMD_SETMODE: u8 = 0x0E;
+const CMD_SETMODE: u8 = 0x0e;
 const CMD_SEEKL: u8 = 0x15;
 
 /// Double speed, 2048-byte user data.
@@ -122,7 +122,7 @@ fn w32(addr: u32, v: u32) {
 // Statics: zeroed by `__core_boot` on a cold entry, kept across switches.
 
 /// Written by a cold attach; a core entry that does not find it has no live core.
-const ALIVE: u32 = 0xC0DE_5CE1;
+const ALIVE: u32 = 0xc0de_5ce1;
 /// [`State::keep`] when no table row is being read. A kept row is stored as its word index + 1,
 /// so the statics start all zero and sit in `.bss`, outside the hashed image.
 const NO_KEEP: u32 = 0;
@@ -207,14 +207,18 @@ struct Elapsed {
 impl Elapsed {
     #[inline(always)]
     fn start() -> Self {
-        Elapsed { last: r16(TIMER2) as u32, clocks: 0, spins: 0 }
+        Elapsed {
+            last: r16(TIMER2) as u32,
+            clocks: 0,
+            spins: 0,
+        }
     }
 
     /// One spin; `true` once `limit` clocks (or the spin backstop) have passed.
     #[inline(always)]
     fn step(&mut self, limit: u32) -> bool {
         let now = r16(TIMER2) as u32;
-        let step = (now.wrapping_sub(self.last) & 0xFFFF).min(MAX_STEP);
+        let step = (now.wrapping_sub(self.last) & 0xffff).min(MAX_STEP);
         self.last = now;
         self.clocks = self.clocks.saturating_add(step);
         self.spins += 1;
@@ -236,7 +240,7 @@ mod cmd {
     #[inline(never)]
     pub fn flag() -> u8 {
         index(1);
-        let f = r8(CD_REQ) & 0x1F;
+        let f = r8(CD_REQ) & 0x1f;
         index(0);
         f
     }
@@ -244,7 +248,7 @@ mod cmd {
     #[inline(never)]
     pub fn ack(bits: u8) {
         index(1);
-        w8(CD_REQ, (bits | 0x07) & 0x1F);
+        w8(CD_REQ, (bits | 0x07) & 0x1f);
         w32(I_STAT, !CDROM_IRQ_BIT);
         index(0);
     }
@@ -253,7 +257,7 @@ mod cmd {
     #[inline(never)]
     pub fn ack_all() {
         index(1);
-        w8(CD_REQ, 0x1F);
+        w8(CD_REQ, 0x1f);
         w32(I_STAT, !CDROM_IRQ_BIT);
         index(0);
     }
@@ -270,12 +274,12 @@ mod cmd {
 
     pub fn irq_enable() -> u8 {
         index(0);
-        r8(CD_REQ) & 0x1F
+        r8(CD_REQ) & 0x1f
     }
 
     pub fn set_irq_enable(mask: u8) {
         index(1);
-        w8(CD_PARAM, mask & 0x1F);
+        w8(CD_PARAM, mask & 0x1f);
         index(0);
     }
 
@@ -325,7 +329,7 @@ mod cmd {
     /// wait for `expected`. The mask and acknowledge order is the one proven on silicon.
     #[inline(never)]
     pub fn send(command: u8, params: &[u8], expected: u8, limit: u32) -> u32 {
-        send_with(command, params, expected, limit, core::ptr::null_mut()) & 0xFF
+        send_with(command, params, expected, limit, core::ptr::null_mut()) & 0xff
     }
 
     /// [`send`] for a raw command: waits for the acknowledge and copies its response.
@@ -398,7 +402,7 @@ mod cmd {
                 drain();
                 ack_all();
             }
-            _ => st().diag = (0xFF << 24) | ((command as u32) << 8) | flag() as u32,
+            _ => st().diag = (0xff << 24) | ((command as u32) << 8) | flag() as u32,
         }
         set_irq_enable(saved);
         r
@@ -607,7 +611,7 @@ mod drive {
         let s = st();
         enter_mask();
         w32(I_STAT, !CDROM_IRQ_BIT);
-        cmd::set_irq_enable(0x1F);
+        cmd::set_irq_enable(0x1f);
         cmd::ack_all();
         if s.prepared == 0 {
             let mut n = 0;
@@ -674,7 +678,11 @@ mod drive {
     /// SetLoc, SeekL and its completion, SetMode, ReadN: the start the BIOS uses.
     #[inline(never)]
     pub fn start(lba: u32, implicit_seek: bool) -> bool {
-        let abs = if lba & abi::READ_ABSOLUTE != 0 { lba & !abi::READ_ABSOLUTE } else { lba + st().lba_offset } + 150;
+        let abs = if lba & abi::READ_ABSOLUTE != 0 {
+            lba & !abi::READ_ABSOLUTE
+        } else {
+            lba + st().lba_offset
+        } + 150;
         let minutes = abs / (75 * 60);
         let rest = abs - minutes * (75 * 60);
         let seconds = rest / 75;
@@ -703,7 +711,7 @@ mod drive {
         if cmd::send(CMD_READN, &[], INT_ACK, ACK_WAIT) != cmd::MATCHED {
             return false;
         }
-        cmd::set_irq_enable(0x1F);
+        cmd::set_irq_enable(0x1f);
         st().first_sector = 1;
         true
     }
@@ -712,7 +720,11 @@ mod drive {
     #[inline(never)]
     pub fn sector(dst: *mut u32, hash: &mut u32) -> bool {
         let s = st();
-        let limit = if s.first_sector != 0 { FIRST_SECTOR_WAIT } else { NEXT_SECTOR_WAIT };
+        let limit = if s.first_sector != 0 {
+            FIRST_SECTOR_WAIT
+        } else {
+            NEXT_SECTOR_WAIT
+        };
         s.first_sector = 0;
         if cmd::wait(INT_DATA_READY, limit) != cmd::MATCHED || !pop(dst, hash) {
             cmd::drain();
@@ -745,7 +757,14 @@ mod read {
     /// seek-first start, each chunk retried from a fresh start up to `attempts` times. The word
     /// FNV of everything read comes back in `hash`. Ends with a proven Pause.
     #[inline(never)]
-    pub fn run(lba: u32, sectors: u32, dst: *mut u32, hook: Hook, attempts: u32, hash: &mut u32) -> u32 {
+    pub fn run(
+        lba: u32,
+        sectors: u32,
+        dst: *mut u32,
+        hook: Hook,
+        attempts: u32,
+        hash: &mut u32,
+    ) -> u32 {
         let r = drive::prepare();
         if r != code::OK {
             drive::release();
@@ -761,7 +780,11 @@ mod read {
                 let mut k = 0;
                 let mut ok = drive::start(lba + done, false);
                 while ok && k < n {
-                    let at = if dst.is_null() { dst } else { dst.wrapping_add(((done + k) * SECTOR_WORDS) as usize) };
+                    let at = if dst.is_null() {
+                        dst
+                    } else {
+                        dst.wrapping_add(((done + k) * SECTOR_WORDS) as usize)
+                    };
                     ok = drive::sector(at, &mut ch);
                     if ok {
                         if let Some(f) = hook {
@@ -817,16 +840,26 @@ mod switch {
         }
         s.keep = table::row_word(id) + 1;
         let mut h = 0;
-        let r = read::run(table::LBA, 1, core::ptr::null_mut(), None, DEFAULT_ATTEMPTS, &mut h);
+        let r = read::run(
+            table::LBA,
+            1,
+            core::ptr::null_mut(),
+            None,
+            DEFAULT_ATTEMPTS,
+            &mut h,
+        );
         s.keep = NO_KEEP;
         if r != code::OK {
             return r;
         }
         let head = s.head[table::W_HEAD_VERSION];
-        if s.head[0] != table::MAGIC[0] || s.head[1] != table::MAGIC[1] || head & 0xFFFF != table::VERSION {
+        if s.head[0] != table::MAGIC[0]
+            || s.head[1] != table::MAGIC[1]
+            || head & 0xffff != table::VERSION
+        {
             return code::TABLE_MAGIC;
         }
-        if id >= head >> 16 || s.row[table::W_ID_KIND] & 0xFFFF != id {
+        if id >= head >> 16 || s.row[table::W_ID_KIND] & 0xffff != id {
             return code::NO_ROW;
         }
         code::OK
@@ -837,7 +870,9 @@ mod switch {
     #[inline(never)]
     fn quiesce() {
         // SAFETY: SR is COP0 12; interrupts off, coprocessor 2 kept usable.
-        unsafe { core::arch::asm!(".set noat", "mtc0 {0}, $12", "nop", "nop", ".set at", in(reg) 0x4000_0000u32) };
+        unsafe {
+            core::arch::asm!(".set noat", "mtc0 {0}, $12", "nop", "nop", ".set at", in(reg) 0x4000_0000u32)
+        };
         w32(I_MASK, 0);
         w32(I_STAT, 0);
         let mut ch = 0;
@@ -855,8 +890,8 @@ mod switch {
         w32(DICR, 0);
         w32(DPCR, 0x0765_4321);
         // Key off all 24 voices: two 16-bit registers.
-        w16(SPU_KEY_OFF, 0xFFFF);
-        w16(SPU_KEY_OFF + 2, 0x00FF);
+        w16(SPU_KEY_OFF, 0xffff);
+        w16(SPU_KEY_OFF + 2, 0x00ff);
     }
 
     /// The whole switch, from the outgoing program's call.
@@ -907,7 +942,7 @@ mod switch {
             return code::CORE_HASH;
         }
         let (t_addr, t_size) = (row[table::W_T_ADDR], row[table::W_T_SIZE]);
-        let kind = (row[table::W_ID_KIND] >> 16) & 0xFF;
+        let kind = (row[table::W_ID_KIND] >> 16) & 0xff;
         if kind != table::KIND_PROGRAM
             || t_addr < 0x8001_0000
             || t_size % 2048 != 0
@@ -936,7 +971,14 @@ mod switch {
         let mut tries = 0;
         loop {
             let mut h = fnv::BASIS;
-            let r = read::run(row[table::W_LBA] + 1, t_size / 2048, t_addr as *mut u32, None, attempts, &mut h);
+            let r = read::run(
+                row[table::W_LBA] + 1,
+                t_size / 2048,
+                t_addr as *mut u32,
+                None,
+                attempts,
+                &mut h,
+            );
             if r != code::OK {
                 fatal_screen(r);
             }
@@ -952,8 +994,12 @@ mod switch {
         // The incoming program's disc bases: its member's, relative to where the table was read.
         s.lba_offset += row[table::W_LBA_OFFSET];
         s.cdda_base += row[table::W_PARTNER_CDDA] >> 16;
-        s.flags = if s.lba_offset != 0 { block::FLAG_NESTED } else { 0 };
-        let id = row[table::W_ID_KIND] & 0xFFFF;
+        s.flags = if s.lba_offset != 0 {
+            block::FLAG_NESTED
+        } else {
+            0
+        };
+        let id = row[table::W_ID_KIND] & 0xffff;
         let previous = s.current;
         s.current = id;
         s.switches += 1;
@@ -989,7 +1035,10 @@ fn write_block(current: u32, previous: u32, flags: u32) {
     let b = block::ADDR;
     w32(b + block::OFF_NOT_MAGIC, 0);
     w32(b + block::OFF_MAGIC, block::MAGIC);
-    w32(b + block::OFF_VERSION, block::VERSION | (block::BYTES << 16));
+    w32(
+        b + block::OFF_VERSION,
+        block::VERSION | (block::BYTES << 16),
+    );
     w32(b + block::OFF_CORE_HASH, s.hash);
     w32(b + block::OFF_LBA_OFFSET, s.lba_offset);
     w32(b + block::OFF_CDDA_BASE, s.cdda_base);
@@ -1005,7 +1054,8 @@ fn write_block(current: u32, previous: u32, flags: u32) {
 }
 
 fn block_valid() -> bool {
-    r32(block::ADDR + block::OFF_MAGIC) == block::MAGIC && r32(block::ADDR + block::OFF_NOT_MAGIC) == !block::MAGIC
+    r32(block::ADDR + block::OFF_MAGIC) == block::MAGIC
+        && r32(block::ADDR + block::OFF_NOT_MAGIC) == !block::MAGIC
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1113,7 +1163,11 @@ extern "C" fn __psx_core_pause_impl() -> u32 {
         drive::enter_mask();
         code::OK
     };
-    let r = if r == code::OK { drive::pause_proved() } else { r };
+    let r = if r == code::OK {
+        drive::pause_proved()
+    } else {
+        r
+    };
     drive::release();
     r
 }
@@ -1167,11 +1221,11 @@ extern "C" fn __psx_core_stream_sector_impl(dst: *mut u32) -> u32 {
 extern "C" fn __psx_core_cd_impl(op: u32, a: u32, b: u32, c: *mut u8) -> u32 {
     match op {
         0 | 1 => {
-            let params = if a == 0 || b & 0xFF == 0 {
+            let params = if a == 0 || b & 0xff == 0 {
                 &[][..]
             } else {
                 // SAFETY: the caller's `b` parameter bytes at `a`.
-                unsafe { core::slice::from_raw_parts(a as *const u8, (b & 0xFF).min(16) as usize) }
+                unsafe { core::slice::from_raw_parts(a as *const u8, (b & 0xff).min(16) as usize) }
             };
             if op == 0 {
                 cmd::send_collect((b >> 8) as u8, params, c)
@@ -1270,9 +1324,9 @@ core::arch::global_asm!(
 #[cfg(feature = "alt")]
 #[used]
 #[no_mangle]
-static __PSX_CORE_ALT: u32 = 0xA17C_0DE5;
+static __PSX_CORE_ALT: u32 = 0xa17c_0de5;
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
-    fatal_screen(0xFF)
+    fatal_screen(0xff)
 }

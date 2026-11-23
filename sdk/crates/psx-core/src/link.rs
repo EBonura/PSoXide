@@ -12,8 +12,9 @@
 //!    zeroes the rest of the window (the core's statics);
 //! 3. it hashes the window and stops on the fatal screen, stage 0x01, if the hash is not this
 //!    program's [`CORE_HASH`];
-//! 4. it calls the core's attach with `$a0..$a2` and the hash, and jumps to `_start` with
-//!    `$a0..$a2` as it found them.
+//! 4. it calls the core's attach with `$a0..$a2` and the hash, and jumps on with `$a0..$a2` as
+//!    it found them: to the boot-overlay mover `__boot_entry` when psoxide-boot.ld is linked,
+//!    else to psx-rt's `_start` (psoxide-core.ld's `__core_next`).
 //!
 //! So a program behaves the same booted from the BIOS on its own disc, chain-loaded at an LBA
 //! offset on a bigger disc, or switched to by the core.
@@ -49,13 +50,21 @@ pub const CORE_HASH: u32 = fnv::of_bytes(IMAGE_BYTES);
 pub const CORE_BYTES: u32 = LEN as u32;
 
 const _: () = assert!(LEN % 4 == 0, "the core image is whole words");
-const _: () = assert!(LEN as u32 <= abi::WINDOW_BYTES, "the core image fits the window");
+const _: () = assert!(
+    LEN as u32 <= abi::WINDOW_BYTES,
+    "the core image fits the window"
+);
 
 extern "C" {
     static __psx_core_store: u32;
     fn __psx_core_attach(a0: u32, a1: u32, a2: u32, hash: u32);
     fn psx_core_switch(scene: u32, args: *const [u32; 4]) -> u32;
-    fn psx_core_read(lba: u32, sectors: u32, dst: *mut u32, hook: Option<extern "C" fn(u32)>) -> u32;
+    fn psx_core_read(
+        lba: u32,
+        sectors: u32,
+        dst: *mut u32,
+        hook: Option<extern "C" fn(u32)>,
+    ) -> u32;
     fn psx_core_pause() -> u32;
     fn psx_core_client_attach() -> u32;
     fn psx_core_client_detach();
@@ -77,7 +86,7 @@ fn r32(addr: u32) -> u32 {
 pub fn block_valid() -> bool {
     r32(block::ADDR + block::OFF_MAGIC) == block::MAGIC
         && r32(block::ADDR + block::OFF_NOT_MAGIC) == !block::MAGIC
-        && r32(block::ADDR + block::OFF_VERSION) & 0xFFFF >= block::VERSION
+        && r32(block::ADDR + block::OFF_VERSION) & 0xffff >= block::VERSION
 }
 
 /// The Rust half of `__core_boot`. No statics: `.bss` is not cleared yet, and its first bytes
@@ -169,7 +178,7 @@ core::arch::global_asm!(
     "nop",
     "move $a0, $s0",
     "move $a1, $s1",
-    "j    _start",
+    "j    __core_next",
     "move $a2, $s2",
     ".set reorder",
     ".size __core_boot, . - __core_boot",

@@ -17,7 +17,8 @@
  */
 /* psoxide.ld reads `__initial_pc`; a program without this script never references
    `__boot_entry` (ld.lld keeps what a script expression names, taken or not). */
-__initial_pc = __boot_entry;
+/* PROVIDE: with psoxide-core.ld the entry is `__core_boot`, which runs first and then jumps here. */
+PROVIDE(__initial_pc = __boot_entry);
 SECTIONS {
     .boot BOOT_VMA : AT(BOOT_LMA) {
         __boot_start = .;

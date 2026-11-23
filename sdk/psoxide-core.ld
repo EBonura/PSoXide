@@ -9,6 +9,10 @@
  * up before `_start` runs. Link with --no-check-sections as well (the store and .bss overlap).
  */
 __initial_pc = __core_boot;
+/* Where `__core_boot` goes next: the boot-overlay mover when psoxide-boot.ld is linked too (it
+   moves .boot, runs the splash and goes on to `_start`), else psx-rt's `_start`. With both, the
+   boot overlay is stored after the core's copy: BOOT_LMA = __psx_core_store_end. */
+__core_next = DEFINED(__boot_entry) ? __boot_entry : _start;
 
 /* The jump table's slot symbols come from psx-core (`link`), which takes them from psx-scene-abi. */
 

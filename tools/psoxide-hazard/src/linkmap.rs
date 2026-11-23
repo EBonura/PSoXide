@@ -345,12 +345,13 @@ impl LinkMap {
         rodata.sort_unstable();
         // With a boot overlay the image starts at its mover, not at `_start`.
         // With the scene core (psoxide-core.ld) it starts at `__core_boot`, which copies the core's
-        // stored image (data, after .data) up into its window before `_start` runs.
+        // stored image (data, after .data) up into its window and then runs the boot overlay's
+        // mover, if there is one, or `_start`.
         let core_store_end = assigned.get("__psx_core_store_end").copied();
-        let entry_name = if boot.is_some() {
-            "__boot_entry"
-        } else if core_store_end.is_some() {
+        let entry_name = if core_store_end.is_some() {
             "__core_boot"
+        } else if boot.is_some() {
+            "__boot_entry"
         } else {
             "_start"
         };
