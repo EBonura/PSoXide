@@ -1216,7 +1216,7 @@ map = "link.map"
             format!("[[load]]\nname = \"boot\"\nbuild = \"ship\"\nmax_polls = 2000\n{until}");
         let game = Game::parse(&format!("{MINIMAL}{boot}")).unwrap();
         assert!(game.loads[0].from.is_empty(), "no from: boot from power-on");
-        assert!(Game::parse(&format!("{MINIMAL}{}", boot.replace(&until, ""))).is_err());
+        assert!(Game::parse(&format!("{MINIMAL}{}", boot.replace(until, ""))).is_err());
         assert!(Game::parse(&format!("{MINIMAL}{boot}max_growth = 4\n"))
             .unwrap_err()
             .contains("reason"));

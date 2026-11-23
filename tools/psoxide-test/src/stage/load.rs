@@ -334,7 +334,7 @@ mod tests {
     fn a_scene_load_counts_between_two_named_states() {
         let from = probe(0x8000_1000, "eq", 1);
         let until = probe(0x8000_1000, "ge", 3);
-        let m = span(ROUTE, &[from.clone()], &[until], 10).unwrap();
+        let m = span(ROUTE, std::slice::from_ref(&from), &[until], 10).unwrap();
         assert_eq!(
             m,
             LoadBase {
