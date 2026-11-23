@@ -8,7 +8,7 @@
 #   search-flow.sh --config FILE --repo DIR --work DIR --frontend PATH
 #                  [--from STEP] [--reseed] [--threads N] [--plan]
 #
-#   STEP is one of: first seed trace search ship check (default: first).
+#   STEP is one of: first seed trace search ship also check (default: first).
 #   --reseed   run the config's SEED_BUILD even when the committed layout binds to the first link.
 #   --plan     print the resolved config and the commands each step would run; run nothing.
 #
@@ -54,7 +54,7 @@ case $work in "$repo"|"$repo"/*) die "--work must be outside the repository (the
 GAME= LAYOUT= LINKER_SCRIPT= DISC_NAME=
 FIRST_BUILD= FIRST_EXE= FIRST_MAP= FIRST_DISC=
 SHIP_BUILD= SHIP_EXE= SHIP_MAP= SHIP_DISC=
-SEED_BUILD= LAUNCH_ARGS= WINDOWS= WEIGHTS=
+SEED_BUILD= ALSO_BUILDS= LAUNCH_ARGS= WINDOWS= WEIGHTS=
 ROUNDS=600 SEED=1 BATCH=24 THREADS=4 START=greedy MAX_DRIFT=0 MIN_ROUNDS=600 STEPS=40000000000
 # shellcheck disable=SC1090
 . "$config"
@@ -72,7 +72,7 @@ PGO=${FLOW_PGO:-cargo run -q --release --locked --manifest-path "$repo/.psoxide/
 WRAP=${FLOW_EMU_WRAP:-}
 export FLOW_FRONTEND=$frontend FLOW_REPO=$repo FLOW_WORK=$work
 
-steps="first seed trace search ship check"
+steps="first seed trace search ship also check"
 case " $steps " in *" $from "*) ;; *) die "--from wants one of: $steps" ;; esac
 runs() { # runs STEP: whether STEP is at or after --from
   local s; for s in $steps; do [ "$s" = "$from" ] && return 0; [ "$s" = "$1" ] && return 1; done; return 1
@@ -126,6 +126,7 @@ if [ "$plan" = 1 ]; then
   echo "first build   $FIRST_BUILD"
   echo "              exe $FIRST_EXE map $FIRST_MAP disc $FIRST_DISC"
   echo "seed build    ${SEED_BUILD:-(none: the committed layout must bind)}"
+  echo "also builds   ${ALSO_BUILDS:-(none)}"
   echo "ship build    $SHIP_BUILD"
   echo "              exe $SHIP_EXE map $SHIP_MAP disc $SHIP_DISC"
   echo "search        rounds $ROUNDS seed $SEED batch $BATCH threads $THREADS start $START (no early stop)"
@@ -233,7 +234,25 @@ if runs ship; then
 fi
 [ -f "$work/ship/link.map" ] || die "no ship link in $work/ship (run from 'ship')"
 
-# ---- 6. check: the ship map follows the searched placement ----------------------------------
+# ---- 6. also: every other build that links the same layout must still link -----------------
+# A searched layout records exact sections, and `place` refuses one whose code differs in a build
+# with other features (a gate or test disc), where a greedy layout only bound a little lower.
+if runs also; then
+  step "other builds of the layout"
+  while read -r name cmd; do
+    [ -n "$name" ] || continue
+    mkdir -p "$work/also/$name"; export FLOW_OUT=$work/also/$name
+    say "$name build: $cmd"
+    (cd "$repo" && eval "$cmd") > "$work/also/$name.log" 2>&1 || {
+      grep -i "psoxide-pgo" "$work/also/$name.log" | tail -5 >&2
+      die "$name build fails with the searched layout (log $work/also/$name.log)"; }
+    say "$name: builds"
+  done <<EOF
+$ALSO_BUILDS
+EOF
+fi
+
+# ---- 7. check: the ship map follows the searched placement ----------------------------------
 # The order the searched layout gives the first link, written independently of the game's build
 # (its build may place silently, fall back, or never check the relink), then checked against the
 # ship map. ld.lld drops a name it cannot find without a word, so this is the proof.
