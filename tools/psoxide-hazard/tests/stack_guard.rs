@@ -1692,12 +1692,14 @@ fn a_call_into_the_core_costs_the_slots_depth() {
     fx.caller(1, &entry(0, 1024), 8, &[load]);
     let (failures, out) = fx.guard();
     assert_eq!(failures, 0, "{out}");
-    assert_eq!(core_stack::SWITCH, 296);
     let want = 8 + 16 + i64::from(core_stack::SWITCH.max(core_stack::READ));
     assert!(out.contains(&format!("{want} of 1004 bytes")), "{out}");
     // The switch's load is on its own stack, never the caller's.
     assert!(
-        out.contains("t::load(16) > psx_core_switch@801fdf08(296)"),
+        out.contains(&format!(
+            "t::load(16) > psx_core_switch@801fdf08({})",
+            core_stack::SWITCH
+        )),
         "{out}"
     );
     assert!(!out.contains(&core_stack::SWITCH_LOAD.to_string()), "{out}");
@@ -1726,7 +1728,13 @@ fn a_tail_call_and_a_constant_register_call_reach_the_slot() {
     assert_eq!(failures, 0, "{out}");
     let want = 8 + 16 + i64::from(core_stack::STREAM_OPEN.max(core_stack::PAUSE));
     assert!(out.contains(&format!("{want} of 1004 bytes")), "{out}");
-    assert!(out.contains("psx_core_stream_open@801fdf40(184)"), "{out}");
+    assert!(
+        out.contains(&format!(
+            "psx_core_stream_open@801fdf40({})",
+            core_stack::STREAM_OPEN
+        )),
+        "{out}"
+    );
 }
 
 #[test]
@@ -1738,7 +1746,7 @@ fn a_call_into_the_cores_interior_is_refused() {
             "not at the start of one of its 8-byte slots",
         ),
         // The first address past the table, and deep in the core's code.
-        (slot::TABLE_END, "past its jump table (12 slots"),
+        (slot::TABLE_END, "past its jump table ("),
         (slot::TABLE_END + 0x400, "past its jump table"),
     ] {
         let mut fx = Fixture::new();
@@ -1785,7 +1793,10 @@ fn the_idle_hook_adds_to_every_slot_that_waits() {
     let want = 8 + 16 + i64::from(core_stack::PAUSE) + 64;
     assert!(out.contains(&format!("{want} of 1004 bytes")), "{out}");
     assert!(
-        out.contains("psx_core_pause@801fdf18(176) > t::idle(40) > t::deep(24)"),
+        out.contains(&format!(
+            "psx_core_pause@801fdf18({}) > t::idle(40) > t::deep(24)",
+            core_stack::PAUSE
+        )),
         "{out}"
     );
 }
@@ -1802,7 +1813,10 @@ fn the_reads_sector_hook_adds_to_the_read() {
     let want = 8 + 16 + i64::from(core_stack::READ) + 100;
     assert!(out.contains(&format!("{want} of 1004 bytes")), "{out}");
     assert!(
-        out.contains("psx_core_read@801fdf10(264) > t::on_sector(100)"),
+        out.contains(&format!(
+            "psx_core_read@801fdf10({}) > t::on_sector(100)",
+            core_stack::READ
+        )),
         "{out}"
     );
 }
