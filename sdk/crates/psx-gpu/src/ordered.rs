@@ -172,6 +172,10 @@ impl<D: CommandStreamDma> OrderedCommandStream<D> {
         }
     }
 
+    // Inline like open_node and close_node around it: out of line, a caller
+    // that inlines submit pays a call on every flush (a game drawing through
+    // many small submits).
+    #[inline]
     fn kick_pending(&mut self) {
         if self.sent > self.head {
             return;
