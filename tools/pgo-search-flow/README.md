@@ -8,13 +8,19 @@ psoxide-pgo (`.psoxide/tools/psoxide-pgo`), so the layout it writes is the forma
 
 ```text
 search-flow.sh --config GAME.conf --repo GAME_CLONE --work DIR --frontend FRONTEND
-               [--from first|seed|trace|search|ship|check] [--reseed] [--threads N] [--plan]
+               [--from first|seed|trace|search|ship|also|check] [--reseed] [--threads N] [--plan]
 ```
 
 `--plan` prints the resolved config (and flags a missing tape) and runs nothing. `--work` must be
 outside the repository. `FLOW_EMU_WRAP` prefixes every emulator run (a machine slot wrapper,
 say); `FLOW_PGO` replaces the pinned psoxide-pgo. `--from` resumes at a step, reusing what the
 earlier steps left in `--work`.
+
+Run it on a clone hydrated in place (the game's `make psoxide` or equivalent). Do not copy
+`.psoxide/target` from another checkout: the host tools built there keep that checkout as their
+SDK root, so the architecture gate in the first build refuses every SDK crate as game code.
+Give the clone's `origin` the game's own repository URL (the gate names the program
+`repo/package` from it).
 
 ## Steps
 
@@ -36,7 +42,10 @@ earlier steps left in `--work`.
    then checks the stamp names exactly these rounds and seed.
 5. **ship**: the game's shipping build (`SHIP_BUILD`, the harness's `[[build]] ship` command),
    now linking the searched layout.
-6. **check**: `psoxide-pgo place` writes the order the searched layout gives the first link,
+6. **also**: every other build that links the same layout (`ALSO_BUILDS`: a gate or test disc
+   with other features) must still link. A searched layout records exact sections, and `place`
+   refuses one whose code differs in that build, where a greedy layout only bound a little lower.
+7. **check**: `psoxide-pgo place` writes the order the searched layout gives the first link,
    independently of the game's build, and `psoxide-pgo followed` checks the ship map against it:
    every ordered function in order, and at most `MAX_DRIFT` (default 0) placed functions away
    from the address the search scored. A build that falls back to the default order when `place`
@@ -71,6 +80,7 @@ it. Build commands run in the repository with `FLOW_OUT` (where to put a disc), 
 | `FIRST_BUILD`, `FIRST_EXE`, `FIRST_MAP`, `FIRST_DISC` | the unordered link of the ship code, packed |
 | `SHIP_BUILD`, `SHIP_EXE`, `SHIP_MAP`, `SHIP_DISC` | the shipping build, as the harness runs it |
 | `SEED_BUILD` | optional: re-collects greedy counts into `LAYOUT` |
+| `ALSO_BUILDS` | optional, one per line: `name command`, every other build linking `LAYOUT` |
 | `LAUNCH_ARGS` | frontend arguments of every replay (the speed windows' `launch_args`) |
 | `WINDOWS` | one per line: `name tape from-poll to-poll weight [extra launch args]`; tape `-` for none |
 | `ROUNDS`, `SEED`, `BATCH`, `THREADS`, `START` | search settings (600, 1, 24, 4, greedy) |
