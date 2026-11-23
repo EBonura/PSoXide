@@ -25,11 +25,14 @@
 //! `psx-iso::iso9660` so it's reusable from build scripts, test
 //! harnesses, or a future GUI bundler.
 
+use psx_iso::scenes::{add_scene_disc_files, ScenePlan};
 use psx_iso::{add_playtest_files, build_world_pack, Exe, IsoBuilder};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::{env, fs};
+
+mod scenes;
 
 const CDDA_PREGAP_SECTORS: u32 = 150;
 
@@ -51,6 +54,8 @@ struct Args {
     xa_files: Vec<PathBuf>,
     diag: bool,
     gate_file: Option<PathBuf>,
+    scenes: Option<PathBuf>,
+    core_image: Option<PathBuf>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -70,6 +75,8 @@ fn parse_args() -> Result<Args, String> {
     let mut cdda_tracks = Vec::new();
     let mut diag = false;
     let mut gate_file = None;
+    let mut scenes = None;
+    let mut core_image = None;
     let mut system_area = env::var_os("PSOXIDE_SYSTEM_AREA").map(PathBuf::from);
     let mut it = env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -176,6 +183,18 @@ fn parse_args() -> Result<Args, String> {
                         .ok_or_else(|| "--xa-file takes a path".to_string())?,
                 ));
             }
+            "--scenes" => {
+                scenes = Some(PathBuf::from(
+                    it.next()
+                        .ok_or_else(|| "--scenes takes a path".to_string())?,
+                ));
+            }
+            "--core-image" => {
+                core_image = Some(PathBuf::from(
+                    it.next()
+                        .ok_or_else(|| "--core-image takes a path".to_string())?,
+                ));
+            }
             "--help" | "-h" => {
                 return Err(String::from("help"));
             }
@@ -202,6 +221,8 @@ fn parse_args() -> Result<Args, String> {
         xa_files,
         diag,
         gate_file,
+        scenes,
+        core_image,
     })
 }
 
@@ -290,6 +311,14 @@ fn print_usage() {
                          subheader, EDC (Form 2) or EDC/ECC (Form 1) is\n\
                          rebuilt at the final LBA. Raw .bin output only.\n\
                          The file's LBA and size are printed.\n\
+         --scenes PATH   Write SCENES.TBL at LBA 22 from a scene manifest\n\
+                         (tools/mkisopsx/src/scenes.rs), boot exe at LBA 23,\n\
+                         the manifest's other files as named slots right\n\
+                         after it while they fit the boot area, the rest\n\
+                         after the packs. Without it the disc is unchanged.\n\
+         --core-image PATH\n\
+                         The prebuilt psx-core.bin: its word FNV is the rows'\n\
+                         core hash, and every program must contain it.\n\
          --iso           Emit a cooked 2048-byte-per-sector .iso\n\
                          instead of the default raw 2352-byte .bin.\n"
     );
@@ -393,7 +422,55 @@ fn main() -> ExitCode {
     // padding, optional CDTEST.BIN, WORLD.PAK, UI.PAK), shared with the editor's
     // embedded Play via add_playtest_files so the on-disc order cannot drift
     // from the cooked *_PACK_START_LBA values.
-    if let Err(error) = add_playtest_files(
+    // With --scenes the same layout gains SCENES.TBL ahead of the boot exe
+    // and the manifest's slots; without it nothing about the disc changes.
+    if let Some(manifest) = &args.scenes {
+        let plan = match read_scene_plan(manifest, args.core_image.as_deref()) {
+            Ok(plan) => plan,
+            Err(e) => {
+                eprintln!("{e}");
+                return ExitCode::from(1);
+            }
+        };
+        match add_scene_disc_files(
+            &mut builder,
+            exe_bytes,
+            world_pack,
+            ui_pack,
+            args.cdtest_sectors,
+            &plan,
+        ) {
+            Ok(pressed) => {
+                println!(
+                    "{}: LBA {}, boot scene {}",
+                    psx_iso::scenes::abi::TABLE_FILE_NAME,
+                    psx_iso::scenes::abi::TABLE_LBA,
+                    pressed.boot_scene
+                );
+                for row in &pressed.rows {
+                    println!(
+                        "scene {} {:?} {}: LBA {}, {} sectors, t_addr {:#010x}, t_size {}, fnv {:#010x}, core {:#010x}",
+                        row.id,
+                        row.kind,
+                        row.name_str(),
+                        row.lba,
+                        row.sectors,
+                        row.t_addr,
+                        row.t_size,
+                        row.checksum,
+                        row.core_hash
+                    );
+                }
+            }
+            Err(error) => {
+                eprintln!("scene disc layout error: {error:?}");
+                return ExitCode::from(1);
+            }
+        }
+    } else if args.core_image.is_some() {
+        eprintln!("--core-image needs --scenes");
+        return ExitCode::from(2);
+    } else if let Err(error) = add_playtest_files(
         &mut builder,
         exe_bytes,
         world_pack,
@@ -517,6 +594,20 @@ fn main() -> ExitCode {
         args.exe.display(),
     );
     ExitCode::SUCCESS
+}
+
+fn read_scene_plan(manifest: &Path, core_image: Option<&Path>) -> Result<ScenePlan, String> {
+    let text =
+        fs::read_to_string(manifest).map_err(|e| format!("read {}: {e}", manifest.display()))?;
+    let base = manifest.parent().unwrap_or_else(|| Path::new(""));
+    let slots = scenes::parse_manifest(&text, base, &mut |path| {
+        fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))
+    })?;
+    let core_image = match core_image {
+        Some(path) => Some(fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?),
+        None => None,
+    };
+    Ok(ScenePlan { slots, core_image })
 }
 
 fn read_cdda_track_list(path: &Path) -> Result<Vec<PathBuf>, String> {

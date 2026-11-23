@@ -182,6 +182,28 @@ impl IsoBuilder {
         Some(self)
     }
 
+    /// Replace the bytes of the plain file `name` added earlier, keeping its
+    /// place. The new content must take the same number of sectors, so no
+    /// later file moves: for a table that names LBAs of files added after it
+    /// (`SCENES.TBL`), written once the layout is known. `false` when there
+    /// is no such file or the sector count would change.
+    pub fn set_file_content(&mut self, name: &str, content: Vec<u8>) -> bool {
+        let name = name.to_ascii_uppercase();
+        let sectors = |len: usize| len.div_ceil(SECTOR_SIZE).max(1);
+        for entry in &mut self.entries {
+            if let IsoEntry::File(file) = entry {
+                if file.name == name {
+                    if sectors(file.content.len()) != sectors(content.len()) {
+                        return false;
+                    }
+                    file.content = content;
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// Reserve invisible file-area sectors. These sectors are not listed in the
     /// root directory, but they do consume LBAs, allowing later files to land at
     /// fixed positions without cluttering the ISO file tree.
