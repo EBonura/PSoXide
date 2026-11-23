@@ -164,7 +164,7 @@ pub fn run(ctx: &Ctx<'_>, all_offsets: bool) -> StageResult {
         key: String::new(),
         outcome,
     };
-    if ctx.game.windows.is_empty() {
+    if ctx.game.windows.is_empty() && ctx.game.loads.is_empty() {
         // A disc image's speed is its members' (each judged in its own full run).
         let check = if ctx.game.requires.is_empty() {
             Check::skip("speed", "the game file has no [[speed]] window")
@@ -189,6 +189,22 @@ pub fn run(ctx: &Ctx<'_>, all_offsets: bool) -> StageResult {
         Ok(f) => f.to_path_buf(),
         Err(e) => return result(Source::Run, Outcome::error("frontend", e)),
     };
+    // Load rows ride the speed stage: one replay each, judged against the baseline.
+    let (load_checks, load_facts, load_hits) = super::load::run(ctx, &frontend, all_offsets);
+    if ctx.game.windows.is_empty() {
+        let source = match load_hits {
+            0 => Source::Run,
+            n if n == ctx.game.loads.len() => Source::Hit,
+            _ => Source::Mixed,
+        };
+        return result(
+            source,
+            Outcome {
+                checks: load_checks,
+                facts: load_facts,
+            },
+        );
+    }
     let pgo = match pgo_binary(ctx) {
         Ok(p) => p,
         Err(e) => return result(Source::Run, Outcome::error("psoxide-pgo", e)),
@@ -296,7 +312,9 @@ pub fn run(ctx: &Ctx<'_>, all_offsets: bool) -> StageResult {
         })
     });
     let mut checks = unmeasurable;
+    checks.extend(load_checks);
     let mut facts = located_facts;
+    facts.extend(load_facts);
     let mut hits = 0;
     let mut by_window: BTreeMap<&str, Vec<Row>> = BTreeMap::new();
     for (job, (metrics, hit)) in jobs.iter().zip(outcomes) {
@@ -588,7 +606,7 @@ fn measure_one(
 }
 
 /// Steps cap of the locating replay (the same ceiling psoxide-pgo gives its replays).
-const LOCATE_STEPS: &str = "40000000000";
+pub const LOCATE_STEPS: &str = "40000000000";
 
 /// Find the polls of a window declared by conditions: one plain replay of the window's tape
 /// (no profiling logs) with the condition words on the route log. The window starts after the
@@ -938,7 +956,10 @@ mod tests {
         let route = "route_tick,port1_polls,ram_80001000,ram_80002000\n\
                      0,0,0,7\n1,1,1,7\n2,2,1,9\n3,3,2,9\n";
         let frames = probe(0x8000_1000, 4, "ge", 1);
-        assert_eq!(find_anchor(route, std::slice::from_ref(&frames), 10).unwrap(), 1);
+        assert_eq!(
+            find_anchor(route, std::slice::from_ref(&frames), 10).unwrap(),
+            1
+        );
         // A guard term (bytes of another program at the same address hold early otherwise).
         let guard = probe(0x8000_2000, 4, "eq", 9);
         assert_eq!(find_anchor(route, &[frames, guard], 10).unwrap(), 2);

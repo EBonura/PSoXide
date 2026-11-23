@@ -57,6 +57,18 @@ pub struct SpeedFacts {
     #[serde(default)]
     pub map_sha256: Option<String>,
     pub windows: BTreeMap<String, FactsWindow>,
+    /// Load time per `[[load]]` row. Absent for a game without one, so its facts are as before.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub loads: BTreeMap<String, FactsLoad>,
+}
+
+/// One `[[load]]` row's time and what it measured.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FactsLoad {
+    pub vblanks: u64,
+    pub cycles: u64,
+    pub identity: Option<WindowIdentity>,
 }
 
 /// One speed row's per-offset numbers and what was measured.
@@ -205,6 +217,41 @@ pub fn window_identities(
     Ok(out)
 }
 
+/// The identity of every `[[load]]` row `game` declares, as committed at `commit`: what it
+/// replays (tape and its bytes there, conditions, limit, arguments) and the gate revision.
+pub fn load_identities(
+    repo: &Path,
+    commit: &str,
+    game: &Game,
+    gate_revision: &str,
+) -> Result<BTreeMap<String, WindowIdentity>, String> {
+    let mut out = BTreeMap::new();
+    for l in &game.loads {
+        let tape_sha256 = match &l.tape {
+            Some(t) => Some(util::git_blob_sha256(repo, commit, t).map_err(|e| {
+                format!(
+                    "[[load]] `{}`: tape `{t}` at commit {}: {e}",
+                    l.name,
+                    util::short(commit)
+                )
+            })?),
+            None => None,
+        };
+        out.insert(
+            l.name.clone(),
+            WindowIdentity {
+                tape: l.tape.clone(),
+                tape_sha256,
+                window: crate::stage::load::identity(l),
+                offsets: Vec::new(),
+                launch_args: l.launch_args.clone(),
+                gate_revision: gate_revision.to_string(),
+            },
+        );
+    }
+    Ok(out)
+}
+
 /// One offset's frames presented, work per frame and p99, as read so far.
 type OffsetNumbers = (Option<u64>, Option<u64>, Option<u64>);
 
@@ -263,12 +310,38 @@ impl SpeedFacts {
             w.identity = j.identities.get(&row).cloned();
             windows.insert(row, w);
         }
+        let speed_facts = || {
+            j.result
+                .stages
+                .iter()
+                .filter(|s| s.name == "speed")
+                .flat_map(|s| s.outcome.facts.iter())
+        };
+        let mut loads = BTreeMap::new();
+        for (name, identity) in j.load_identities {
+            let get = |m: &str| -> Option<u64> {
+                speed_facts()
+                    .find(|(k, _)| **k == format!("load/{name}/{m}"))
+                    .and_then(|(_, v)| v.parse().ok())
+            };
+            if let (Some(vblanks), Some(cycles)) = (get("vblanks"), get("cycles")) {
+                loads.insert(
+                    name.clone(),
+                    FactsLoad {
+                        vblanks,
+                        cycles,
+                        identity: Some(identity.clone()),
+                    },
+                );
+            }
+        }
         SpeedFacts {
             schema: FACTS_SCHEMA,
             result_sha256: j.hash.to_string(),
             bin_sha256: j.bin_sha256.to_string(),
             map_sha256: j.map_sha256.map(str::to_string),
             windows,
+            loads,
         }
     }
 
@@ -402,6 +475,8 @@ pub struct Judged<'a> {
     pub layouts: &'a [CommittedLayout],
     /// Every declared speed row's identity ([`window_identities`]).
     pub identities: &'a BTreeMap<String, WindowIdentity>,
+    /// Every declared `[[load]]` row's identity ([`load_identities`]).
+    pub load_identities: &'a BTreeMap<String, WindowIdentity>,
     /// The bin and link map being installed (already matched with the result's build stage).
     pub bin_sha256: &'a str,
     pub map_sha256: Option<&'a str>,
@@ -715,6 +790,40 @@ pub fn check_approved(
             }
         }
     }
+    // Loads: never more VBlanks than the installed build took (Manny 11-23: everything loads at
+    // the same speed or faster). A row new to this install has nothing to be slower than.
+    for (name, old_l) in &old.loads {
+        let now_id = j.load_identities.get(name);
+        if old_l.identity.is_none() || old_l.identity.as_ref() != now_id {
+            moved.push(match (&old_l.identity, now_id) {
+                (Some(a), Some(b)) => format!("load `{name}` ({})", a.differences(b).join(", ")),
+                (_, None) => format!("load `{name}` (no longer declared)"),
+                (None, Some(_)) => format!("load `{name}` (installed facts record no identity)"),
+            });
+            continue;
+        }
+        let Some(new) = facts.loads.get(name) else {
+            return Err(format!(
+                "never slower than the installed build: load `{name}` was measured for the \
+                 installed build (result {from}) but result {at} has no numbers for it"
+            ));
+        };
+        if new.vblanks > old_l.vblanks {
+            let line = format!(
+                "load `{name}` takes {} VBlanks ({} cycles) for result {at}, the installed build \
+                 (result {from}) took {} ({} cycles)",
+                new.vblanks, new.cycles, old_l.vblanks, old_l.cycles
+            );
+            if approval.is_none() {
+                return Err(format!(
+                    "never slower than the installed build: {line}. If the owner approved this \
+                     slower build, pass --accept-slower \"<their approval>\" to install it with \
+                     the approval and these numbers in the install record"
+                ));
+            }
+            slower.push(line);
+        }
+    }
     if !moved.is_empty() {
         return incomparable(
             facts,
@@ -903,11 +1012,17 @@ fn one(ctx: &Ctx<'_>, install: &crate::game::Install) -> StageResult {
             Ok(i) => i,
             Err(e) => return refuse(e),
         };
+    let load_identities =
+        match load_identities(&ctx.repo, &judged.commit, ctx.game, &judged.gate_revision) {
+            Ok(i) => i,
+            Err(e) => return refuse(e),
+        };
     let judged_side = Judged {
         hash: &hash,
         result: &judged,
         layouts: &layouts,
         identities: &identities,
+        load_identities: &load_identities,
         bin_sha256: &bin_sha256,
         map_sha256: map_sha256.as_deref(),
     };
@@ -1142,11 +1257,13 @@ pub fn check_command(args: &[String]) -> Result<std::process::ExitCode, String> 
         };
     let layouts = install_layouts(repo, &r.commit, &game)?;
     let identities = window_identities(repo, &r.commit, &game, &r.gate_revision)?;
+    let load_identities = load_identities(repo, &r.commit, &game, &r.gate_revision)?;
     let judged = Judged {
         hash: &hash,
         result: &r,
         layouts: &layouts,
         identities: &identities,
+        load_identities: &load_identities,
         bin_sha256: &bin_sha256,
         map_sha256: map_sha256.as_deref(),
     };
@@ -1407,6 +1524,7 @@ mod tests {
             result: r,
             layouts: &[],
             identities: &identities,
+            load_identities: &BTreeMap::new(),
             bin_sha256: &bin,
             map_sha256: Some("map"),
         };
@@ -1426,6 +1544,102 @@ mod tests {
             facts,
             library_bin_sha256: &facts.bin_sha256,
         }
+    }
+
+    /// `passing` with a boot load row of `vblanks`.
+    fn with_boot(vblanks: u64) -> RunResult {
+        let mut r = passing([100, 102, 104], [790, 786, 782]);
+        let speed = r.stages.iter_mut().find(|s| s.name == "speed").unwrap();
+        speed
+            .outcome
+            .facts
+            .insert("load/boot/vblanks".into(), vblanks.to_string());
+        speed
+            .outcome
+            .facts
+            .insert("load/boot/cycles".into(), (vblanks * 564_480).to_string());
+        r
+    }
+
+    fn load_ids(until: &str) -> BTreeMap<String, WindowIdentity> {
+        BTreeMap::from([(
+            "boot".to_string(),
+            WindowIdentity {
+                window: format!("from power-on until {until} max_polls 2000 tape none args []"),
+                gate_revision: "r".repeat(40),
+                ..WindowIdentity::default()
+            },
+        )])
+    }
+
+    fn judge_loads(
+        hash: &str,
+        r: &RunResult,
+        loads: &BTreeMap<String, WindowIdentity>,
+        installed: Installed<'_>,
+        approval: Option<&str>,
+    ) -> Result<Accepted, String> {
+        let identities = ids("t1");
+        let bin = format!("bin-{hash}");
+        let j = Judged {
+            hash,
+            result: r,
+            layouts: &[],
+            identities: &identities,
+            load_identities: loads,
+            bin_sha256: &bin,
+            map_sha256: Some("map"),
+        };
+        check_approved(&j, installed, false, approval)
+    }
+
+    #[test]
+    fn a_load_slower_than_the_installed_build_is_refused_and_faster_is_accepted() {
+        let ids = load_ids("GAME_FRAMES ge 1");
+        let installed = judge_loads("a1", &with_boot(362), &ids, Installed::Nothing, None)
+            .unwrap()
+            .facts;
+        assert_eq!(installed.loads["boot"].vblanks, 362);
+        // The sidecar round-trips with its load rows.
+        let back: SpeedFacts = serde_json::from_str(&installed.to_json().unwrap()).unwrap();
+        assert_eq!(back, installed);
+        // Same or faster: accepted.
+        for v in [362, 300] {
+            assert!(judge_loads("a2", &with_boot(v), &ids, over(&installed), None).is_ok());
+        }
+        // One VBlank slower: refused with both numbers, unless the owner approved it.
+        let e = judge_loads("a3", &with_boot(363), &ids, over(&installed), None).unwrap_err();
+        assert!(
+            e.contains("load `boot` takes 363 VBlanks") && e.contains("took 362"),
+            "{e}"
+        );
+        let a = judge_loads(
+            "a3",
+            &with_boot(363),
+            &ids,
+            over(&installed),
+            Some("owner 11-23: the core may cost one VBlank"),
+        )
+        .unwrap();
+        assert_eq!(a.approval.unwrap().slower.len(), 1);
+        // A row that measures something else cannot be compared: --rebase-facts.
+        let moved = load_ids("TITLE eq 1");
+        let e = judge_loads("a4", &with_boot(300), &moved, over(&installed), None).unwrap_err();
+        assert!(
+            e.contains("load `boot`") && e.contains("--rebase-facts"),
+            "{e}"
+        );
+        // A game without load rows writes facts without the field.
+        let plain = judge(
+            "p",
+            &passing([100, 102, 104], [790, 786, 782]),
+            "t1",
+            Installed::Nothing,
+            false,
+        )
+        .unwrap()
+        .facts;
+        assert!(!plain.to_json().unwrap().contains("loads"));
     }
 
     #[test]
@@ -1528,6 +1742,7 @@ mod tests {
                 result: r,
                 layouts: &[],
                 identities: &identities,
+                load_identities: &BTreeMap::new(),
                 bin_sha256: "bin-new",
                 map_sha256: Some("map"),
             };
@@ -1624,6 +1839,7 @@ mod tests {
             result: &slower,
             layouts: &[],
             identities: &identities,
+            load_identities: &BTreeMap::new(),
             bin_sha256: "bin-new",
             map_sha256: None,
         };
@@ -1841,6 +2057,7 @@ mod tests {
                 result: &r,
                 layouts,
                 identities: &identities,
+                load_identities: &BTreeMap::new(),
                 bin_sha256: "bin",
                 map_sha256: None,
             };

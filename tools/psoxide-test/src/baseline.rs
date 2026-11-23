@@ -37,6 +37,9 @@ pub struct Baseline {
     /// Deepest stack in bytes by journey (`[[stack]]`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub stack: BTreeMap<String, u32>,
+    /// Load time by `[[load]]` row.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub load: BTreeMap<String, crate::stage::load::LoadBase>,
 }
 
 /// One link's size, from `psoxide_size::ram`.

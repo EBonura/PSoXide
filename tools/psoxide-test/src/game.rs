@@ -28,6 +28,9 @@ pub struct Game {
     pub sizes: Vec<Size>,
     #[serde(default, rename = "speed")]
     pub windows: Vec<Window>,
+    /// Load-time bars: boot to the game's first state, and scene loads, in VBlanks.
+    #[serde(default, rename = "load")]
+    pub loads: Vec<Load>,
     pub journeys: Option<Journeys>,
     pub cross: Option<Cross>,
     #[serde(default, rename = "host")]
@@ -295,6 +298,35 @@ pub struct Window {
     /// beyond the measured phase spread. The install profile (the default) ignores it.
     #[serde(default)]
     pub landing_work_slack_permille: Option<u32>,
+}
+
+/// One load-time row: the VBlanks from one game state to another on the PSoXide frontend.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct Load {
+    pub name: String,
+    pub build: String,
+    /// Where the load starts: RAM conditions that hold together (journey syntax, on the build's
+    /// map and its `images` symbols). Empty: power-on, so the row is the boot time.
+    #[serde(default, deserialize_with = "one_or_many")]
+    pub from: Vec<toml::Table>,
+    /// Where it ends: the game's own first frame or title for a boot, the next scene's first
+    /// state for a scene load.
+    #[serde(deserialize_with = "one_or_many")]
+    pub until: Vec<toml::Table>,
+    /// The replay stops at this port-1 poll; `until` must have held by then.
+    pub max_polls: u32,
+    /// Poll-bound tape that drives the game to the load (none: no input).
+    #[serde(default)]
+    pub tape: Option<String>,
+    /// Extra frontend arguments (the pad).
+    #[serde(default)]
+    pub launch_args: Vec<String>,
+    /// VBlanks the load may grow over the baseline (default 0; needs `reason`).
+    #[serde(default)]
+    pub max_growth: u64,
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 /// `landing_work_slack_permille` when a window does not set it: 5%.
@@ -746,6 +778,40 @@ impl Game {
                 }
             }
         }
+        let mut load_names = std::collections::BTreeSet::new();
+        for l in &self.loads {
+            known(&l.build, "[[load]]")?;
+            if !load_names.insert(l.name.as_str()) || l.name.contains('/') {
+                return Err(format!(
+                    "[[load]] `{}`: names are unique and have no `/`",
+                    l.name
+                ));
+            }
+            if l.until.is_empty() {
+                return Err(format!(
+                    "[[load]] `{}`: until names the state the load ends at",
+                    l.name
+                ));
+            }
+            if self.build(&l.build).is_some_and(|b| b.map.is_none()) {
+                return Err(format!(
+                    "[[load]] `{}`: build `{}` declares no map to resolve its conditions",
+                    l.name, l.build
+                ));
+            }
+            if l.max_growth != 0 && l.reason.as_deref().is_none_or(str::is_empty) {
+                return Err(format!(
+                    "[[load]] `{}`: max_growth other than 0 needs `reason`",
+                    l.name
+                ));
+            }
+            if l.launch_args.iter().any(|a| a == "--press") {
+                return Err(format!(
+                    "[[load]] `{}`: a load replays a tape or no input, not a --press schedule",
+                    l.name
+                ));
+            }
+        }
         for h in &self.hosts {
             if let Some(b) = &h.build {
                 known(b, "[[host]]")?;
@@ -927,6 +993,9 @@ impl Game {
         };
         for w in &self.windows {
             needs_disc(&w.build, "[[speed]]")?;
+        }
+        for l in &self.loads {
+            needs_disc(&l.build, "[[load]]")?;
         }
         if let Some(boot) = self.cross.as_ref().and_then(|c| c.boot.as_ref()) {
             needs_disc(&boot.build, "[cross] boot")?;
@@ -1138,6 +1207,24 @@ map = "link.map"
         assert!(!serde_json::to_string(&plain.builds[0])
             .unwrap()
             .contains("images"));
+    }
+
+    #[test]
+    fn a_load_row_names_its_end_state_and_a_growth_needs_a_reason() {
+        let until = "until = { kind = \"ram\", sym = \"GAME_FRAMES\", op = \"ge\", value = 1 }\n";
+        let boot =
+            format!("[[load]]\nname = \"boot\"\nbuild = \"ship\"\nmax_polls = 2000\n{until}");
+        let game = Game::parse(&format!("{MINIMAL}{boot}")).unwrap();
+        assert!(game.loads[0].from.is_empty(), "no from: boot from power-on");
+        assert!(Game::parse(&format!("{MINIMAL}{}", boot.replace(&until, ""))).is_err());
+        assert!(Game::parse(&format!("{MINIMAL}{boot}max_growth = 4\n"))
+            .unwrap_err()
+            .contains("reason"));
+        assert!(Game::parse(&format!("{MINIMAL}{boot}{boot}"))
+            .unwrap_err()
+            .contains("unique"));
+        // A game without [[load]] has none.
+        assert!(Game::parse(MINIMAL).unwrap().loads.is_empty());
     }
 
     #[test]

@@ -656,6 +656,8 @@ fn bless(o: &Options) -> Result<ExitCode, String> {
             .ok_or("--keep-speed needs a baseline: run a plain bless on a searched layout")?;
         let now = stage::install::window_identities(&o.repo, &commit, &game, GATE_REVISION)?;
         base.speed = baseline::kept_speed(old, &now, o.trust_legacy)?;
+        // Load rows are speed rows too: kept, not re-measured.
+        base.load = old.load.clone();
         if o.trust_legacy {
             println!(
                 "TRUSTED LEGACY SPEED ROWS from blessed commit {} as the landing reference \
@@ -744,6 +746,23 @@ fn bless(o: &Options) -> Result<ExitCode, String> {
                 .push(get("vblanks").cloned().unwrap_or_default());
         }
         base.speed.insert(row, table);
+    }
+    for l in &game.loads {
+        let num = |m: &str| -> Result<u64, String> {
+            speed
+                .outcome
+                .facts
+                .get(&format!("load/{}/{m}", l.name))
+                .and_then(|v| v.parse().ok())
+                .ok_or(format!("load {}: no {m}", l.name))
+        };
+        base.load.insert(
+            l.name.clone(),
+            stage::load::LoadBase {
+                vblanks: num("vblanks")?,
+                cycles: num("cycles")?,
+            },
+        );
     }
     base.save(&o.repo)?;
     println!(

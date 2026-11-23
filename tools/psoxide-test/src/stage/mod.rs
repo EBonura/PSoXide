@@ -8,6 +8,7 @@ pub mod host;
 pub mod install;
 pub mod journeys;
 pub mod jreceipt;
+pub mod load;
 pub mod requires;
 pub mod size;
 pub mod speed;
