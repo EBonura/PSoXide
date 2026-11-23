@@ -175,6 +175,12 @@ mod tests {
         // elsewhere, which HEAP_END does not follow (the editor guest sets neither).
         assert!(script.contains("RAM_SIZE = DEFINED(RAM_SIZE_OVERRIDE) ? RAM_SIZE_OVERRIDE : 2M;"));
         assert!(script.contains("STACK_INIT = RAM_BASE + RAM_SIZE - 0x100;"));
+        // IMAGE_BASE is the default load address; LOAD_ADDR_OVERRIDE moves a boot program only.
+        assert!(script.contains(
+            "LOAD_ADDR = DEFINED(LOAD_ADDR_OVERRIDE) ? LOAD_ADDR_OVERRIDE : RAM_BASE + BIOS_SIZE;"
+        ));
+        assert!(script.contains("BIOS_SIZE = 64K;"));
+        assert_eq!(IMAGE_BASE, 0x8000_0000 + 64 * 1024);
         assert!(script.contains(
             "STACK_RESERVE = DEFINED(STACK_RESERVE_OVERRIDE) ? STACK_RESERVE_OVERRIDE : 0x8000;"
         ));

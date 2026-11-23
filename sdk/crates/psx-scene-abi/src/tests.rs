@@ -1,6 +1,7 @@
 extern crate std;
 
 use super::*;
+use std::string::String;
 use std::vec;
 use std::vec::Vec;
 
@@ -50,6 +51,33 @@ fn memory_map_is_the_day_0_page() {
     assert!(!CORE_WINDOW.holds(0x801f_d6fc, 0x801f_d800));
     assert!(!CORE_WINDOW.holds(0x801f_fe00, 0x801f_ff04));
     assert!(!CORE_WINDOW.holds(0x801f_e000, 0x801f_e000));
+}
+
+/// The linker script's own words, whitespace folded.
+fn psoxide_ld() -> String {
+    include_str!("../../../psoxide.ld")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[test]
+fn the_constants_match_psoxide_ld() {
+    let script = psoxide_ld();
+    // RAM_SIZE_OVERRIDE lands STACK_INIT on the window only through this formula.
+    assert!(script.contains("RAM_SIZE = DEFINED(RAM_SIZE_OVERRIDE) ? RAM_SIZE_OVERRIDE : 2M;"));
+    assert!(script.contains("STACK_INIT = RAM_BASE + RAM_SIZE - 0x100;"));
+    assert!(script.contains("RAM_BASE = 0x80000000;"));
+    // Every scene loads at the default LOAD_ADDR; the override is for boot programs.
+    assert!(script.contains(
+        "LOAD_ADDR = DEFINED(LOAD_ADDR_OVERRIDE) ? LOAD_ADDR_OVERRIDE : RAM_BASE + BIOS_SIZE;"
+    ));
+    assert!(script.contains("BIOS_SIZE = 64K;"));
+    assert_eq!(LOAD_ADDR, RAM_BASE + 64 * 1024);
+    // The image region ends at the stack reserve below STACK_INIT, so nothing a hosting program
+    // links (text, data, bss) can reach the window.
+    assert!(script
+        .contains("LENGTH = EXE_HEAD_BYTES + RAM_BASE + RAM_SIZE - LOAD_ADDR - STACK_RESERVE"));
 }
 
 #[test]

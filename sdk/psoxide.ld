@@ -20,7 +20,11 @@ RAM_BASE    = 0x80000000;   /* KSEG0 cached RAM */
    not carry it). The stack starts 100h below the top of RAM. */
 RAM_SIZE    = DEFINED(RAM_SIZE_OVERRIDE) ? RAM_SIZE_OVERRIDE : 2M;
 BIOS_SIZE   = 64K;          /* First 64 KiB is BIOS / kernel scratch */
-LOAD_ADDR   = RAM_BASE + BIOS_SIZE;
+/* LOAD_ADDR_OVERRIDE (an address) at link time moves where the image loads, the same way:
+   a `-T<file>` before this script holding `LOAD_ADDR_OVERRIDE = 0x...;`. For a program that
+   must sit above another one's image (a boot program, a chain loader); every game and every
+   scene keeps the default. It must be at or above RAM_BASE + BIOS_SIZE (asserted below). */
+LOAD_ADDR   = DEFINED(LOAD_ADDR_OVERRIDE) ? LOAD_ADDR_OVERRIDE : RAM_BASE + BIOS_SIZE;
 STACK_INIT  = RAM_BASE + RAM_SIZE - 0x100;
 
 /* Build-time RAM budget for the stack. The stack runs downward from
@@ -50,7 +54,7 @@ EXE_HEAD_BYTES = 0x800;
    top is still the start of the stack reserve. */
 MEMORY {
     IMAGE (rwx) : ORIGIN = LOAD_ADDR - EXE_HEAD_BYTES,
-                  LENGTH = EXE_HEAD_BYTES + RAM_SIZE - BIOS_SIZE - STACK_RESERVE
+                  LENGTH = EXE_HEAD_BYTES + RAM_BASE + RAM_SIZE - LOAD_ADDR - STACK_RESERVE
 }
 
 ENTRY(_start)
@@ -183,6 +187,7 @@ SECTIONS {
 
     /* The header above only describes the image if these hold. */
     ASSERT(__text_start == LOAD_ADDR, "the entry section must start at LOAD_ADDR")
+    ASSERT(LOAD_ADDR >= RAM_BASE + BIOS_SIZE, "LOAD_ADDR_OVERRIDE is inside the kernel's 64 KiB")
     ASSERT((__image_end - __text_start) % EXE_HEAD_BYTES == 0, "the stored image must be whole 800h-byte sectors")
     ASSERT(__image_end - __load_end < EXE_HEAD_BYTES, "the stored image may reach past the data by under one sector")
 
