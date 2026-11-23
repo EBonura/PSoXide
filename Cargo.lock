@@ -485,6 +485,7 @@ dependencies = [
  "psx-disasm",
  "psx-gate",
  "psx-residency",
+ "psx-scene-abi",
  "regex",
  "serde_json",
 ]

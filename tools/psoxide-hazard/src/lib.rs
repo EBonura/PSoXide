@@ -230,9 +230,7 @@ pub fn code_ranges(args: &[String]) -> Result<Vec<(i64, i64)>, String> {
             Some((hex(lo)?, hex(hi)?))
         });
         match range {
-            Some((lo, hi))
-                if (0x8001_0000 <= lo && lo < hi && hi <= 0x801F_8000)
-                    || modules.iter().any(|m| m.links(lo, hi)) =>
+            Some((lo, hi)) if plausible_code(lo, hi) || modules.iter().any(|m| m.links(lo, hi)) =>
             {
                 ranges.push((lo, hi));
             }
@@ -244,6 +242,16 @@ pub fn code_ranges(args: &[String]) -> Result<Vec<(i64, i64)>, String> {
         }
     }
     Ok(ranges)
+}
+
+/// RAM a program's code may occupy: `0x80010000..0x801F8000`, or wholly
+/// inside the scene core's window (`psx_scene_abi::CORE_WINDOW`), where the
+/// prebuilt core's code links. Nothing between the two, and no range that
+/// straddles into the window or the handoff block above it.
+pub fn plausible_code(lo: i64, hi: i64) -> bool {
+    let window = psx_scene_abi::CORE_WINDOW;
+    (0x8001_0000 <= lo && lo < hi && hi <= 0x801f_8000)
+        || (i64::from(window.start) <= lo && lo < hi && hi <= i64::from(window.end))
 }
 
 /// The executable ranges the tools work within. With `--map` they are the
@@ -288,7 +296,7 @@ pub fn text_bounds(
         Some(1)
     })?;
     let (lo, hi) = map.text;
-    if !(0x8001_0000 <= lo && lo < hi && hi <= 0x801f_8000) {
+    if !plausible_code(lo, hi) {
         let _ = writeln!(out, "implausible .text bounds {lo:#x}..{hi:#x}");
         return Err(Some(1));
     }
