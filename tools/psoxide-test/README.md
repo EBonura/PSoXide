@@ -171,6 +171,15 @@ or when it names none every tracked `*.layout` file whose first line is `# psoxi
 game's layout search on the commit (`psoxide-pgo search ... --start recorded` continues from the
 committed placement), commit the layout, bless, and run the full tier on that commit.
 
+The stamp says where the search placed the code; the build stage proves the ship link put it
+there. A `[[build]]` may name `order`, the ordering file its link followed, inside `out`, with
+the `<order>.placed` sidecar `psoxide-pgo place` writes collected beside it. On every run the
+build stage runs `psoxide-pgo followed <order> <map>` (the psoxide-pgo of the game's pin) and
+fails unless every ordered function is in order; the check reports how many placed functions
+start where the model put them. The install build (`[[install]] build`) of a game whose
+committed layouts include a searched one must name `order`: a driver that links by itself and
+falls back to plain order would otherwise ship a stamp the disc does not follow.
+
 ## Receipts and the SDK pin
 
 Every stage keys a receipt on what it reads (artifacts, journey files, tapes, tool binaries,

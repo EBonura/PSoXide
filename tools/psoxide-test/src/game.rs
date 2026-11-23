@@ -157,6 +157,13 @@ pub struct Build {
     /// The link map inside `out` (size and symbols read it).
     #[serde(default)]
     pub map: Option<String>,
+    /// The ordering file the link followed, inside `out`, with the `.placed` sidecar
+    /// `psoxide-pgo place` writes beside it. The build stage runs `psoxide-pgo followed` on it
+    /// against `map`; the install build needs it when it links with a searched layout (a
+    /// driver that links by itself and falls back to plain order would ship a stamp the disc
+    /// lacks). Not written into the receipt key when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<String>,
     /// A manifest the build writes into `out` naming the programs it carries (a disc image):
     /// a JSON array of `{ index, id, exe_sha256, map, words? }`, `map` relative to `out`. The
     /// harness writes `members.sym` beside it (every member symbol as `<slug>:<name>`) and checks

@@ -135,6 +135,15 @@ pub fn run(ctx: &mut Ctx<'_>) -> StageResult {
         if !ok {
             break;
         }
+        // Judged on every run, receipt or not: a build cached before the guard existed still
+        // has to show its link followed the layout it claims.
+        if let Some(check) = order_check(ctx, build) {
+            let failed = check.status != crate::report::Status::Pass;
+            checks.push(check);
+            if failed {
+                break;
+            }
+        }
     }
     let source = match hits {
         0 => Source::Run,
@@ -288,6 +297,78 @@ fn one(ctx: &Ctx<'_>, build: &Build, key: &str) -> Outcome {
     Outcome {
         checks,
         facts: files,
+    }
+}
+
+/// The order guard for one build: `None` when it has nothing to prove (no `order`, and not the
+/// install build of a searched layout); else whether its link map followed its ordering file.
+fn order_check(ctx: &Ctx<'_>, build: &Build) -> Option<Check> {
+    let name = format!("{} layout followed", build.name);
+    let installed = ctx.game.installs.iter().any(|i| i.build == build.name);
+    let searched = || -> Result<Vec<String>, String> {
+        let head = util::git(&ctx.repo, &["rev-parse", "HEAD"])?;
+        Ok(super::install::committed_layouts(&ctx.repo, &head, build)?
+            .into_iter()
+            .filter(|l| super::install::search_stamped(&l.text))
+            .map(|l| l.path)
+            .collect())
+    };
+    let order = match (&build.order, installed && !build.disc.is_empty()) {
+        (Some(order), _) => order,
+        (None, false) => return None,
+        (None, true) => match searched() {
+            Ok(stamped) if stamped.is_empty() => return None,
+            Ok(stamped) => {
+                return Some(Check::fail(
+                    &name,
+                    format!(
+                        "build `{}` is installed with the searched layout {} but declares no                          `order`: collect the ordering file its link followed (and its .placed                          sidecar) into out and name it, so the harness can prove the ship link                          followed the layout",
+                        build.name,
+                        stamped.join(", ")
+                    ),
+                ))
+            }
+            Err(e) => return Some(Check::fail(&name, e)),
+        },
+    };
+    Some(match followed(ctx, build, order) {
+        Ok(line) => Check::pass(&name, line),
+        Err(e) => Check::fail(&name, e),
+    })
+}
+
+/// `psoxide-pgo followed <out>/<order> <map>`, with the psoxide-pgo of the game's pin: its
+/// report line, or why the link did not follow.
+fn followed(ctx: &Ctx<'_>, build: &Build, order: &str) -> Result<String, String> {
+    let out = build.out_dir(&ctx.repo);
+    let order = out.join(order);
+    let map = build
+        .map_path(&ctx.repo)
+        .ok_or_else(|| format!("build `{}` names an `order` but no `map`", build.name))?;
+    for f in [&order, &map] {
+        if !f.is_file() {
+            return Err(format!("{} is missing after the build", f.display()));
+        }
+    }
+    let pgo = super::speed::pgo_binary(ctx)?;
+    let log = ctx
+        .dir(&["build"])?
+        .join(format!("{}-followed.log", build.name));
+    let argv = vec![
+        pgo.display().to_string(),
+        "followed".into(),
+        order.display().to_string(),
+        map.display().to_string(),
+    ];
+    let done = util::run_logged(&argv, &ctx.repo, &[], &log, None)?;
+    let last = done.output.lines().last().unwrap_or("").trim().to_string();
+    if done.code == 0 {
+        Ok(last)
+    } else {
+        Err(format!(
+            "the ship link did not follow its ordering file: {last}; log {}",
+            log.display()
+        ))
     }
 }
 

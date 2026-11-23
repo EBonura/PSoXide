@@ -378,7 +378,7 @@ pub fn pgo_source_problem(
 /// would not have), or else from the user config's `[tools] sdk` checkout, which must be at the
 /// game's pinned SDK revision. The second form builds into `<work>/sdk-tools/<revision>` and
 /// never writes into the checkout.
-fn pgo_binary(ctx: &Ctx<'_>) -> Result<PathBuf, String> {
+pub fn pgo_binary(ctx: &Ctx<'_>) -> Result<PathBuf, String> {
     let hydrated = ctx.repo.join(".psoxide");
     let linked = std::fs::symlink_metadata(&hydrated).is_ok_and(|m| m.file_type().is_symlink());
     let own = hydrated.join("tools/psoxide-pgo/Cargo.toml");
