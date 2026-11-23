@@ -146,8 +146,11 @@ struct Job<'w> {
     row: String,
     /// The hardware model (PSOXIDE_HARDWARE) of an extra row.
     model: Option<String>,
-    /// The window in polls: declared, or located from its conditions.
+    /// The window in polls from power-on: declared, or located from its conditions, plus the
+    /// anchor's poll for an anchored window.
     polls: [u32; 2],
+    /// An anchored window's tape, fed from the anchor (written in the work tree).
+    tape: Option<PathBuf>,
     offset: i32,
     disc: PathBuf,
     disc_digest: String,
@@ -214,12 +217,40 @@ pub fn run(ctx: &Ctx<'_>, all_offsets: bool) -> StageResult {
             .and_then(|a| a.get(&build.disc.replace(".cue", ".bin")))
             .cloned()
             .unwrap_or_default();
+        // An anchored window: where its anchor holds on this disc, and its tape fed from there.
+        let (anchor, tape) = if w.anchor.is_empty() {
+            (0, w.tape.as_ref().map(|t| ctx.repo.join(t)))
+        } else {
+            match anchor_poll(ctx, w, build, &disc, &disc_digest, &frontend)
+                .and_then(|p| Ok((p, anchored_tape(ctx, w, p)?)))
+            {
+                Ok((p, t)) => {
+                    located_facts.insert(format!("{}/anchor", w.name), p.to_string());
+                    (p, Some(t))
+                }
+                Err(e) => {
+                    unmeasurable.push(Check::fail(format!("{} anchor", w.name), e));
+                    continue;
+                }
+            }
+        };
         let polls = match w.polls {
-            Some(p) => p,
-            None => match locate(ctx, w, build, &disc, &disc_digest, &frontend) {
+            Some([a, b]) => [a + anchor, b + anchor],
+            None => match locate(
+                ctx,
+                w,
+                build,
+                &disc,
+                &disc_digest,
+                &frontend,
+                tape.as_deref(),
+                anchor,
+            ) {
                 Ok(p) => {
-                    located_facts
-                        .insert(format!("{}/polls", w.name), format!("{}..{}", p[0], p[1]));
+                    located_facts.insert(
+                        format!("{}/polls", w.name),
+                        format!("{}..{}", p[0] - anchor, p[1] - anchor),
+                    );
                     p
                 }
                 Err(e) => {
@@ -250,6 +281,7 @@ pub fn run(ctx: &Ctx<'_>, all_offsets: bool) -> StageResult {
                     row: row.clone(),
                     model: model.map(str::to_string),
                     polls,
+                    tape: tape.clone(),
                     offset,
                     disc: disc.clone(),
                     disc_digest: disc_digest.clone(),
@@ -473,7 +505,7 @@ fn measure_one(
             false,
         );
     }
-    let tape = w.tape.as_ref().map(|t| ctx.repo.join(t));
+    let tape = job.tape.clone();
     let mut key = Key::new("speed");
     key.part("disc", &job.disc_digest);
     key.part("tools", tools_digest);
@@ -562,6 +594,7 @@ const LOCATE_STEPS: &str = "40000000000";
 /// (no profiling logs) with the condition words on the route log. The window starts after the
 /// poll in whose route tick `from` first holds and ends at the poll in whose tick `until` first
 /// holds after that. Receipt-keyed per window, so every offset shares one locating replay.
+#[allow(clippy::too_many_arguments)]
 fn locate(
     ctx: &Ctx<'_>,
     w: &Window,
@@ -569,6 +602,8 @@ fn locate(
     disc: &Path,
     disc_digest: &str,
     frontend: &Path,
+    tape: Option<&Path>,
+    anchor: u32,
 ) -> Result<[u32; 2], String> {
     let (Some(from), Some(until), Some(max_polls)) = (&w.from, &w.until, w.max_polls) else {
         return Err("a window by conditions needs from, until and max_polls".into());
@@ -577,7 +612,8 @@ fn locate(
         .ok_or_else(|| format!("build `{}` declares no map", build.name))??;
     let from = crate::journey::condition(from, &symbols)?;
     let until = crate::journey::condition(until, &symbols)?;
-    let tape = w.tape.as_ref().map(|t| ctx.repo.join(t));
+    // Counted from the anchor for an anchored window (0 otherwise).
+    let max_polls = max_polls.saturating_add(anchor);
     let mut key = Key::new("speed-locate");
     key.part("disc", disc_digest);
     key.file("frontend", frontend)?;
@@ -650,6 +686,12 @@ fn locate(
     let text =
         std::fs::read_to_string(&route).map_err(|e| format!("read {}: {e}", route.display()))?;
     let found = find_window(&text, &from, &until, max_polls)?;
+    if found[0] < anchor {
+        return Err(format!(
+            "`{}` held at poll {}, before the window's anchor at poll {anchor}",
+            from.text, found[0]
+        ));
+    }
     let outcome = Outcome {
         checks: vec![Check::pass("located", "")],
         facts: BTreeMap::from([
@@ -663,6 +705,168 @@ fn locate(
         w.name, found[0], found[1], from.text, until.text
     );
     Ok(found)
+}
+
+/// The poll an anchored window's anchor first holds at on this disc: one input-free replay
+/// (the window's launch arguments, no tape) with the anchor words on the route log, stopped at
+/// `anchor_max_polls`. Receipt-keyed per window, so every offset and row shares it.
+fn anchor_poll(
+    ctx: &Ctx<'_>,
+    w: &Window,
+    build: &crate::game::Build,
+    disc: &Path,
+    disc_digest: &str,
+    frontend: &Path,
+) -> Result<u32, String> {
+    let max_polls = w
+        .anchor_max_polls
+        .ok_or("an anchored window needs anchor_max_polls")?;
+    let symbols = super::build::symbols(&ctx.repo, build)
+        .ok_or_else(|| format!("build `{}` declares no map", build.name))??;
+    let probes = w
+        .anchor
+        .iter()
+        .map(|c| crate::journey::condition(c, &symbols))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut key = Key::new("speed-anchor");
+    key.part("disc", disc_digest);
+    key.file("frontend", frontend)?;
+    key.part(
+        "probes",
+        &serde_json::to_string(&probes).map_err(|e| e.to_string())?,
+    );
+    key.part("limit", &format!("{max_polls} {:?}", w.launch_args));
+    let key = key.finish();
+    if let Some(found) = ctx
+        .receipts
+        .get("speed-anchor", &key)
+        .and_then(|o| o.facts.get("anchor")?.parse().ok())
+    {
+        println!("RECEIPT HIT speed-anchor {} {}", w.name, util::short(&key));
+        return Ok(found);
+    }
+    let dir = ctx.dir(&["speed", "anchor"])?;
+    let stem = format!("{}-{}", w.name, util::short(&key));
+    let route = dir.join(format!("{stem}.route.csv"));
+    let log = dir.join(format!("{stem}.log"));
+    let mut argv: Vec<String> = vec![
+        frontend.display().to_string(),
+        "launch".into(),
+        "--path".into(),
+        disc.display().to_string(),
+        "--stop-at-poll".into(),
+        max_polls.to_string(),
+        "--steps".into(),
+        LOCATE_STEPS.into(),
+        "--route-log".into(),
+        route.display().to_string(),
+    ];
+    let mut words: Vec<u32> = probes.iter().map(|p| p.addr & !3).collect();
+    words.sort_unstable();
+    words.dedup();
+    for word in &words {
+        argv.push("--route-watch-u32".into());
+        argv.push(format!("{word:#010x}"));
+    }
+    // Pad and machine flags only: no tape before the anchor, so no hold-last either.
+    argv.extend(w.launch_args.iter().cloned());
+    let env = ctx.child_env(&ctx.work.join("guest-stage"));
+    let done = ctx.machine("emu", || {
+        util::run_logged(&argv, &ctx.repo, &env, &log, None)
+    })?;
+    if done.code != 0 {
+        return Err(format!(
+            "the anchor replay exited {}; log {}",
+            done.code,
+            log.display()
+        ));
+    }
+    let text =
+        std::fs::read_to_string(&route).map_err(|e| format!("read {}: {e}", route.display()))?;
+    let found = find_anchor(&text, &probes, max_polls)?;
+    let outcome = Outcome {
+        checks: vec![Check::pass("anchored", "")],
+        facts: BTreeMap::from([("anchor".to_string(), found.to_string())]),
+    };
+    let _ = ctx.receipts.put("speed-anchor", &key, &outcome);
+    println!(
+        "speed window {} anchored at poll {found} ({})",
+        w.name,
+        probes
+            .iter()
+            .map(|p| p.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" and ")
+    );
+    Ok(found)
+}
+
+/// The window's committed tape fed from poll `anchor`: written into the work tree under its
+/// content, so the measuring replay keys on it while the window's identity keys on the
+/// committed tape alone.
+fn anchored_tape(ctx: &Ctx<'_>, w: &Window, anchor: u32) -> Result<PathBuf, String> {
+    let rel = w.tape.as_ref().ok_or("an anchored window needs a tape")?;
+    let path = ctx.repo.join(rel);
+    let bytes = std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let fed = crate::tape::PollTape::parse(&bytes)
+        .map_err(|e| format!("{rel}: {e}"))?
+        .after(anchor)?
+        .bytes();
+    let out = ctx.dir(&["speed", "anchor"])?.join(format!(
+        "{}-{}.pxtape",
+        w.name,
+        util::short(&util::sha256_bytes(&fed))
+    ));
+    std::fs::write(&out, &fed).map_err(|e| format!("write {}: {e}", out.display()))?;
+    Ok(out)
+}
+
+/// The `port1_polls` of the first route-log row where every probe holds.
+fn find_anchor(
+    route: &str,
+    probes: &[crate::journey::Probe],
+    max_polls: u32,
+) -> Result<u32, String> {
+    let mut lines = route.lines();
+    let header: Vec<&str> = lines.next().unwrap_or("").split(',').collect();
+    let column = |name: &str| {
+        header
+            .iter()
+            .position(|h| *h == name)
+            .ok_or_else(|| format!("the route log has no {name} column"))
+    };
+    let polls_at = column("port1_polls")?;
+    let words = probes
+        .iter()
+        .map(|p| {
+            Ok((
+                column(&format!("ram_{:08x}", p.addr & !3))?,
+                (p.addr & 3) * 8,
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    for line in lines {
+        let fields: Vec<&str> = line.split(',').collect();
+        let number = |at: usize| -> Option<u64> { fields.get(at)?.parse().ok() };
+        let Some(polls) = number(polls_at) else {
+            continue;
+        };
+        let holds = probes
+            .iter()
+            .zip(&words)
+            .all(|(p, (at, shift))| number(*at).is_some_and(|v| p.holds((v as u32) >> shift)));
+        if holds {
+            return u32::try_from(polls).map_err(|_| "poll count out of range".to_string());
+        }
+    }
+    Err(format!(
+        "the anchor ({}) never held before poll {max_polls}",
+        probes
+            .iter()
+            .map(|p| p.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" and ")
+    ))
 }
 
 /// Read a route log with `ram_XXXXXXXX` columns and return `[from poll, until poll]`.
@@ -727,6 +931,21 @@ mod tests {
             value,
             value_hi: 0,
         }
+    }
+
+    #[test]
+    fn an_anchor_is_the_first_poll_where_every_condition_holds() {
+        let route = "route_tick,port1_polls,ram_80001000,ram_80002000\n\
+                     0,0,0,7\n1,1,1,7\n2,2,1,9\n3,3,2,9\n";
+        let frames = probe(0x8000_1000, 4, "ge", 1);
+        assert_eq!(find_anchor(route, std::slice::from_ref(&frames), 10).unwrap(), 1);
+        // A guard term (bytes of another program at the same address hold early otherwise).
+        let guard = probe(0x8000_2000, 4, "eq", 9);
+        assert_eq!(find_anchor(route, &[frames, guard], 10).unwrap(), 2);
+        let never = probe(0x8000_1000, 4, "eq", 5);
+        assert!(find_anchor(route, &[never], 10)
+            .unwrap_err()
+            .contains("never held before poll 10"));
     }
 
     #[test]

@@ -174,6 +174,22 @@ pub fn window_identities(
                 w.max_polls.unwrap_or(0)
             ),
         };
+        // An anchored window is named by its anchor, never by the poll the anchor was found at
+        // on one disc: a boot change in front of the game leaves the identity as it was.
+        let window = if w.anchor.is_empty() {
+            window
+        } else {
+            let anchor: Vec<String> = w
+                .anchor
+                .iter()
+                .map(|t| serde_json::to_string(t).unwrap_or_default())
+                .collect();
+            format!(
+                "anchored at {} within {} polls; {window} from the anchor",
+                anchor.join(" and "),
+                w.anchor_max_polls.unwrap_or(0)
+            )
+        };
         let identity = WindowIdentity {
             tape: w.tape.clone(),
             tape_sha256,
@@ -1922,6 +1938,39 @@ mod tests {
                 util::short(&util::sha256_bytes(b"tape two"))
             )]
         );
+    }
+
+    #[test]
+    fn an_anchored_window_is_named_by_its_anchor_not_the_poll_it_was_found_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let anchored = format!(
+            "{MAPPED_WINDOW}anchor = {{ kind = \"ram\", sym = \"GAME_FRAMES\", op = \"ge\", value = 1 }}\n\
+             anchor_max_polls = 2000\n"
+        );
+        let (repo, one) = game_repo(dir.path(), &anchored, &[("t.tape", "tape one")]);
+        let game = game_at(&repo, &one).unwrap();
+        let id = &window_identities(&repo, &one, &game, "gate").unwrap()["w"];
+        assert!(
+            id.window.starts_with("anchored at {")
+                && id.window.contains("GAME_FRAMES")
+                && id
+                    .window
+                    .ends_with("within 2000 polls; polls 10..20 from the anchor"),
+            "{}",
+            id.window
+        );
+        // The tape is still keyed by its committed bytes.
+        assert_eq!(id.tape_sha256, Some(util::sha256_bytes(b"tape one")));
+        // Declaring an anchor is itself an identity change against the power-on window.
+        let (plain_repo, plain) = game_repo(
+            &dir.path().join("plain"),
+            MAPPED_WINDOW,
+            &[("t.tape", "tape one")],
+        );
+        let plain_game = game_at(&plain_repo, &plain).unwrap();
+        let before = &window_identities(&plain_repo, &plain, &plain_game, "gate").unwrap()["w"];
+        assert_eq!(before.window, "polls 10..20");
+        assert_eq!(before.differences(id).len(), 1);
     }
 
     #[test]

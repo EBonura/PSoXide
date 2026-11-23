@@ -264,6 +264,18 @@ pub struct Window {
     /// Conditions only: the locating replay stops at this poll; `until` must have held by then.
     #[serde(default)]
     pub max_polls: Option<u32>,
+    /// Anchor the window on game state instead of power-on: RAM conditions (journey syntax,
+    /// on the build's map and `images` symbols) that hold together once the game itself runs.
+    /// The harness finds the poll they first hold at in an input-free replay, feeds the tape
+    /// from there (the tape's polls, `polls`, `from`/`until` and `max_polls` all count from that
+    /// poll), and the window's identity names the anchor, never the poll it was found at. So a
+    /// splash or boot core in front of the game moves the anchor, not the tape or the window.
+    /// Without it the window counts from power-on, as before.
+    #[serde(default, deserialize_with = "one_or_many")]
+    pub anchor: Vec<toml::Table>,
+    /// With `anchor`: the input-free replay looking for it stops at this poll.
+    #[serde(default)]
+    pub anchor_max_polls: Option<u32>,
     /// Phase shifts of the window, in polls; must contain 0. The quick tier runs 0 only.
     #[serde(default = "zero_offset")]
     pub offsets: Vec<i32>,
@@ -667,6 +679,44 @@ impl Game {
                     "[[speed]] `{}`: landing_work_slack_permille is thousandths (at most 1000)",
                     w.name
                 ));
+            }
+            match (w.anchor.is_empty(), w.anchor_max_polls) {
+                (true, None) => {}
+                (false, Some(_)) => {
+                    if w.tape.is_none() {
+                        return Err(format!(
+                            "[[speed]] `{}`: an anchored window replays a tape fed from its \
+                             anchor: declare tape",
+                            w.name
+                        ));
+                    }
+                    if w.launch_args.iter().any(|a| a == "--press") {
+                        return Err(format!(
+                            "[[speed]] `{}`: a --press schedule counts frames from power-on, \
+                             which an anchor does not move: transcribe it into the tape",
+                            w.name
+                        ));
+                    }
+                    if self.build(&w.build).is_some_and(|b| b.map.is_none()) {
+                        return Err(format!(
+                            "[[speed]] `{}`: build `{}` declares no map to resolve the anchor",
+                            w.name, w.build
+                        ));
+                    }
+                }
+                (false, None) => {
+                    return Err(format!(
+                        "[[speed]] `{}`: anchor needs anchor_max_polls (where the replay looking \
+                         for it gives up)",
+                        w.name
+                    ))
+                }
+                (true, Some(_)) => {
+                    return Err(format!(
+                        "[[speed]] `{}`: anchor_max_polls without anchor",
+                        w.name
+                    ))
+                }
             }
             match (&w.tape, w.polls, &w.from, &w.until) {
                 (Some(_), Some([a, b]), None, None) if a < b => {}
@@ -1129,5 +1179,26 @@ map = "link.map"
         );
         let half = "[[speed]]\nname = \"c\"\nbuild = \"ship\"\nfrom = { kind = \"ram\", sym = \"S\", value = 3 }\n";
         assert!(Game::parse(&format!("{MINIMAL}{half}")).is_err());
+    }
+
+    #[test]
+    fn an_anchored_window_needs_a_tape_a_limit_and_no_press_schedule() {
+        let w = "[[speed]]\nname = \"t\"\nbuild = \"ship\"\ntape = \"t.pxtape\"\npolls = [1, 9]\n";
+        let anchor = "anchor = { kind = \"ram\", sym = \"GAME_FRAMES\", op = \"ge\", value = 1 }\n";
+        assert!(Game::parse(&format!("{MINIMAL}{w}")).unwrap().windows[0]
+            .anchor
+            .is_empty());
+        assert!(Game::parse(&format!("{MINIMAL}{w}{anchor}"))
+            .unwrap_err()
+            .contains("anchor_max_polls"));
+        let ok = Game::parse(&format!("{MINIMAL}{w}{anchor}anchor_max_polls = 2000\n")).unwrap();
+        assert_eq!(ok.windows[0].anchor.len(), 1);
+        let press = format!(
+            "{MINIMAL}{w}{anchor}anchor_max_polls = 2000\nlaunch_args = [\"--press\", \"1400:cross:20\"]\n"
+        );
+        assert!(Game::parse(&press).unwrap_err().contains("--press"));
+        assert!(Game::parse(&format!("{MINIMAL}{w}anchor_max_polls = 9\n"))
+            .unwrap_err()
+            .contains("without anchor"));
     }
 }

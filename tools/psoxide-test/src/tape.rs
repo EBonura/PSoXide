@@ -11,6 +11,161 @@ use std::path::{Path, PathBuf};
 use crate::config::Config;
 use crate::util;
 
+/// The frontend's poll-bound tape format, `PXITAPE2`: magic, sample count (u32), the completed
+/// port-1 poll at which sample 0 is fed (u32), then 6 bytes a sample (buttons u16, right x/y,
+/// left x/y). Replay feeds nothing before `start_poll`, so the game reads an idle pad there.
+pub const POLL_MAGIC: &[u8; 8] = b"PXITAPE2";
+const POLL_HEADER: usize = 16;
+const SAMPLE: usize = 6;
+
+/// A poll-bound tape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PollTape {
+    pub start_poll: u32,
+    pub samples: Vec<[u8; SAMPLE]>,
+}
+
+/// An idle pad: no button pressed, both sticks centred.
+pub const IDLE: [u8; SAMPLE] = [0, 0, 0x80, 0x80, 0x80, 0x80];
+
+impl PollTape {
+    /// Read `PXITAPE2` bytes. A video-frame tape (`PXITAPE1`) or a CSV is refused: only a
+    /// poll-bound tape keeps its route when the frame rate moves.
+    pub fn parse(bytes: &[u8]) -> Result<PollTape, String> {
+        if bytes.len() < POLL_HEADER || &bytes[..8] != POLL_MAGIC {
+            return Err(
+                "not a poll-bound tape (PXITAPE2): transcribe it with `psoxide-test \
+                        tape`"
+                    .into(),
+            );
+        }
+        let word = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+        let count = word(8) as usize;
+        let start_poll = word(12);
+        let body = &bytes[POLL_HEADER..];
+        if body.len() != count * SAMPLE {
+            return Err(format!(
+                "tape length mismatch: {count} samples need {} bytes after the header, got {}",
+                count * SAMPLE,
+                body.len()
+            ));
+        }
+        let samples = body
+            .chunks_exact(SAMPLE)
+            .map(|c| c.try_into().unwrap())
+            .collect();
+        Ok(PollTape {
+            start_poll,
+            samples,
+        })
+    }
+
+    /// The `PXITAPE2` bytes.
+    pub fn bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(POLL_HEADER + self.samples.len() * SAMPLE);
+        out.extend_from_slice(POLL_MAGIC);
+        out.extend_from_slice(&(self.samples.len() as u32).to_le_bytes());
+        out.extend_from_slice(&self.start_poll.to_le_bytes());
+        for s in &self.samples {
+            out.extend_from_slice(s);
+        }
+        out
+    }
+
+    /// This tape fed from `anchor` polls later: what an anchored tape (whose polls count from
+    /// the poll its anchor held at) is on a disc where the anchor held at poll `anchor`.
+    pub fn after(&self, anchor: u32) -> Result<PollTape, String> {
+        Ok(PollTape {
+            start_poll: self
+                .start_poll
+                .checked_add(anchor)
+                .ok_or("tape start poll overflows")?,
+            samples: self.samples.clone(),
+        })
+    }
+
+    /// Re-anchor a tape recorded from power-on at the poll its anchor held at: polls count from
+    /// `anchor` instead of from power-on. Every sample before it must be an idle pad (the
+    /// anchored replay feeds nothing there), so a tape that presses before its anchor is refused
+    /// with the first such poll: pick an anchor that holds before the first press.
+    pub fn anchored_at(&self, anchor: u32) -> Result<PollTape, String> {
+        if self.start_poll >= anchor {
+            return Ok(PollTape {
+                start_poll: self.start_poll - anchor,
+                samples: self.samples.clone(),
+            });
+        }
+        let drop = (anchor - self.start_poll) as usize;
+        if let Some((i, s)) = self
+            .samples
+            .iter()
+            .take(drop)
+            .enumerate()
+            .find(|(_, s)| **s != IDLE)
+        {
+            return Err(format!(
+                "the tape is not idle before poll {anchor}: poll {} feeds {:02x?} (an anchored \
+                 replay feeds an idle pad until the anchor holds); anchor on a state the game \
+                 reaches before its first press",
+                self.start_poll as usize + i,
+                s
+            ));
+        }
+        Ok(PollTape {
+            start_poll: 0,
+            samples: self.samples.iter().skip(drop).copied().collect(),
+        })
+    }
+}
+
+/// `psoxide-test tape-anchor --tape IN --at-poll P --out OUT`: re-anchor a power-on tape at the
+/// poll a `[[speed]]` window's `anchor` holds at on the current disc (the speed stage reports it).
+pub fn anchor_command(args: &[String]) -> Result<std::process::ExitCode, String> {
+    let mut tape = None;
+    let mut at = None;
+    let mut out = None;
+    let mut it = args.iter();
+    while let Some(flag) = it.next() {
+        let value = it
+            .next()
+            .cloned()
+            .ok_or_else(|| format!("{flag} needs a value\nusage: {ANCHOR_USAGE}"))?;
+        match flag.as_str() {
+            "--tape" => tape = Some(PathBuf::from(value)),
+            "--out" => out = Some(PathBuf::from(value)),
+            "--at-poll" => {
+                at = Some(
+                    value
+                        .parse::<u32>()
+                        .map_err(|_| format!("--at-poll `{value}` is not a number"))?,
+                )
+            }
+            other => return Err(format!("unknown option `{other}`\nusage: {ANCHOR_USAGE}")),
+        }
+    }
+    let missing = |what: &str| format!("{what} is required\nusage: {ANCHOR_USAGE}");
+    let (tape, at, out) = (
+        tape.ok_or_else(|| missing("--tape"))?,
+        at.ok_or_else(|| missing("--at-poll"))?,
+        out.ok_or_else(|| missing("--out"))?,
+    );
+    let bytes = std::fs::read(&tape).map_err(|e| format!("read {}: {e}", tape.display()))?;
+    let anchored = PollTape::parse(&bytes)
+        .map_err(|e| format!("{}: {e}", tape.display()))?
+        .anchored_at(at)?;
+    std::fs::write(&out, anchored.bytes()).map_err(|e| format!("write {}: {e}", out.display()))?;
+    println!(
+        "wrote {} ({} samples from the anchor, sample 0 at anchor + {}): declare the window's \
+         polls from the anchor too",
+        out.display(),
+        anchored.samples.len(),
+        anchored.start_poll
+    );
+    Ok(std::process::ExitCode::SUCCESS)
+}
+
+pub const ANCHOR_USAGE: &str = "psoxide-test tape-anchor --tape IN --at-poll P --out OUT";
+
 /// What `psoxide-test tape` was asked for.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Request {
@@ -204,6 +359,52 @@ mod tests {
         assert!(parse(&args("--disc d.cue --out t --steps 9"))
             .unwrap_err()
             .contains("--press"));
+    }
+
+    fn tape(start: u32, samples: &[[u8; 6]]) -> PollTape {
+        PollTape {
+            start_poll: start,
+            samples: samples.to_vec(),
+        }
+    }
+    const CROSS: [u8; 6] = [0, 0x40, 0x80, 0x80, 0x80, 0x80];
+
+    #[test]
+    fn a_poll_tape_round_trips_and_other_formats_are_refused() {
+        let t = tape(7, &[IDLE, CROSS]);
+        let bytes = t.bytes();
+        assert_eq!(&bytes[..8], b"PXITAPE2");
+        assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 2);
+        assert_eq!(u32::from_le_bytes(bytes[12..16].try_into().unwrap()), 7);
+        assert_eq!(PollTape::parse(&bytes).unwrap(), t);
+        let mut video = bytes.clone();
+        video[7] = b'1';
+        assert!(PollTape::parse(&video).unwrap_err().contains("PXITAPE2"));
+        assert!(PollTape::parse(&bytes[..bytes.len() - 1])
+            .unwrap_err()
+            .contains("mismatch"));
+    }
+
+    #[test]
+    fn re_anchoring_drops_the_idle_polls_before_the_anchor_and_refuses_a_press() {
+        // Recorded from power-on: idle through the boot, the first press at poll 3.
+        let power_on = tape(0, &[IDLE, IDLE, IDLE, CROSS, IDLE]);
+        let anchored = power_on.anchored_at(2).unwrap();
+        assert_eq!(anchored, tape(0, &[IDLE, CROSS, IDLE]));
+        // Fed after an anchor found at poll 2 it is the power-on tape again from that poll on
+        // (the frontend feeds an idle pad before start_poll).
+        assert_eq!(anchored.after(2).unwrap(), tape(2, &[IDLE, CROSS, IDLE]));
+        // A boot core in front that adds 151 polls moves the anchor, not the tape.
+        assert_eq!(anchored.after(153).unwrap().start_poll, 153);
+        assert_eq!(anchored.after(153).unwrap().samples, anchored.samples);
+        // An anchor after the first press would drop it: refused, naming the poll.
+        let err = power_on.anchored_at(4).unwrap_err();
+        assert!(err.contains("poll 3"), "{err}");
+        // A tape that starts later than the anchor keeps its samples.
+        assert_eq!(
+            tape(10, &[CROSS]).anchored_at(4).unwrap(),
+            tape(6, &[CROSS])
+        );
     }
 
     #[test]
