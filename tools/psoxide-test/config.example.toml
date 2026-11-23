@@ -15,6 +15,9 @@ redux = 1       # PCSX-Redux processes at once
 # shared_dir = "/path/to/psoxide-test-slots"
 # machine_emulators = 4
 # machine_redux = 1
+# The full tier runs clean beside the other stages unless jobs is 1 or the work tree has less free
+# disk than this, in GB; then it runs last, as before.
+# overlap_min_free_gb = 9
 
 [tools]
 # The PSoXide frontend that `psoxide-pgo measure` replays tapes on.
