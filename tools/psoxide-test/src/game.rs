@@ -235,7 +235,7 @@ pub struct Size {
     pub image: Option<String>,
     /// An absolute ceiling on `.text + .data + .bss` of the measured link, judged on every run
     /// with or without a baseline (a resident image with a fixed window, such as the scene
-    /// core's 10,240 B).
+    /// core's 8,192 B window, 0x801FDF00..0x801FFF00).
     #[serde(default)]
     pub max_bytes: Option<u32>,
     /// Bytes `.text` may grow over the baseline (default 0).
@@ -1134,7 +1134,7 @@ map = "link.map"
             Game::parse(&ok).unwrap().stacks[0].build.as_deref(),
             Some("ship")
         );
-        let both = format!("{ok}top = 0x801FD700\n");
+        let both = format!("{ok}top = 0x801FDF00\n");
         assert!(Game::parse(&both).unwrap_err().contains("name one of them"));
         let unknown = format!("{MINIMAL}{j}{st}build = \"gate\"\n");
         assert!(Game::parse(&unknown).unwrap_err().contains("`gate`"));
@@ -1184,7 +1184,7 @@ map = "link.map"
     #[test]
     fn images_are_named_and_a_size_bar_can_judge_one() {
         let images = "images = [{ name = \"core\", map = \"core.map\", exe = \"core.exe\" }]\n";
-        let text = format!("{MINIMAL}{images}[[size]]\nbuild = \"ship\"\n[[size]]\nbuild = \"ship\"\nimage = \"core\"\nmax_bytes = 10240\n");
+        let text = format!("{MINIMAL}{images}[[size]]\nbuild = \"ship\"\n[[size]]\nbuild = \"ship\"\nimage = \"core\"\nmax_bytes = 8192\n");
         let game = Game::parse(&text).unwrap();
         assert_eq!(game.builds[0].images[0].exe.as_deref(), Some("core.exe"));
         assert_eq!(game.sizes[0].key(), "ship");

@@ -288,13 +288,13 @@ mod tests {
         let hosted = dir.path().join("hosted.map");
         std::fs::write(
             &hosted,
-            format!("{lines}       0        0        0     1 RAM_SIZE_OVERRIDE = 0x1FD800\n"),
+            format!("{lines}       0        0        0     1 RAM_SIZE_OVERRIDE = 0x1FE000\n"),
         )
         .unwrap();
         let top = top_from_map(&hosted).unwrap();
-        assert_eq!(top, 0x801f_d700);
+        assert_eq!(top, 0x801f_df00);
         // Measured from the hosted top, a frame 0x200 B under it is 0x200 deep; measured from the
-        // stock constant, the same RAM would read 0x2800 B (the core window) deeper than it is.
+        // stock constant, the same RAM would read 0x2000 B (the core window) deeper than it is.
         let mut ram = vec![0u8; 2 * 1024 * 1024];
         ram[(top - RAM_BASE) as usize - 0x200] = 1;
         assert_eq!(depth(&ram, top, SDK_STACK_RESERVE).unwrap(), 0x200);

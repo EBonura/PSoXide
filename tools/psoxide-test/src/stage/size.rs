@@ -392,21 +392,21 @@ mod tests {
 
     #[test]
     fn a_ceiling_is_judged_on_text_data_and_bss_together() {
-        // The scene core's window (CORE-ABI): 10,240 B.
+        // The scene core's window (CORE-ABI): 8,192 B, 0x801FDF00..0x801FFF00.
         let core = SizeBase {
             text: 7000,
             data: 200,
             bss: 900,
             free: None,
         };
-        let c = ceiling(core, 10_240);
+        let c = ceiling(core, 8192);
         assert_eq!(c.status, Status::Pass);
-        assert!(c.value.contains("8100 B of 10240") && c.value.contains("2140 B spare"));
-        let over = SizeBase { text: 9500, ..core };
-        let c = ceiling(over, 10_240);
+        assert!(c.value.contains("8100 B of 8192") && c.value.contains("92 B spare"));
+        let over = SizeBase { text: 7100, ..core };
+        let c = ceiling(over, 8192);
         assert_eq!(c.status, Status::Fail);
-        assert!(c.detail.contains("360 B over"), "{}", c.detail);
-        assert_eq!(ceiling(over, 10_600).status, Status::Pass);
+        assert!(c.detail.contains("8 B over"), "{}", c.detail);
+        assert_eq!(ceiling(over, 8200).status, Status::Pass);
     }
 
     #[test]

@@ -341,12 +341,12 @@ mod tests {
         assert_eq!(stock.stack_init(), Ok(0x801f_ff00));
         assert_eq!(stock.ram_top(), Ok(0x8020_0000));
         // A program hosted under the scene core's window (CORE-ABI: RAM_SIZE_OVERRIDE =
-        // 0x1FD800 in a -T file before psoxide.ld), in either order in the map.
-        let ov = "       0        0        0     1 RAM_SIZE_OVERRIDE = 0x1FD800\n";
+        // 0x1FE000 in a -T file before psoxide.ld), in either order in the map.
+        let ov = "       0        0        0     1 RAM_SIZE_OVERRIDE = 0x1FE000\n";
         for text in [format!("{ov}{RAM_LINES}"), format!("{RAM_LINES}{ov}")] {
             let hosted = parse(&text);
-            assert_eq!(hosted.stack_init(), Ok(0x801f_d700));
-            assert_eq!(hosted.ram_top(), Ok(0x801f_d800));
+            assert_eq!(hosted.stack_init(), Ok(0x801f_df00));
+            assert_eq!(hosted.ram_top(), Ok(0x801f_e000));
         }
     }
 
