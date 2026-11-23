@@ -166,6 +166,9 @@ struct State {
     img: u32,
     /// One bit per image of the table that is in RAM now.
     mask: u32,
+    /// A cold boot has not yet added the overlays the boot program's exe carries to `mask`
+    /// (the first table the program passes has them).
+    carry_pending: u32,
 }
 
 static mut ST: State = State {
@@ -193,6 +196,7 @@ static mut ST: State = State {
     head: [0; 4],
     img: 0,
     mask: 0,
+    carry_pending: 0,
 };
 
 #[inline(always)]
@@ -821,6 +825,14 @@ mod switch {
         if scenes > table::MAX_ROWS {
             return code::NO_ROW;
         }
+        if s.carry_pending != 0 {
+            // The boot program (image 0) is running since the BIOS: the overlays its exe carries
+            // are in RAM too.
+            s.carry_pending = 0;
+            let at = table::HEADER_WORDS + table::ROW_WORDS * scenes + table::I_EVICTS as u32;
+            // SAFETY: image row 0's word 5, inside the copy (every table has image 0).
+            s.mask |= unsafe { core::ptr::read_volatile(table.add(at as usize)) };
+        }
         let image = if by_image != 0 {
             want
         } else {
@@ -1117,7 +1129,8 @@ mod switch {
         } else {
             0
         };
-        s.mask = 1 << s.img;
+        // The program and the overlays its own exe carries (its row's word 5).
+        s.mask = (1 << s.img) | s.image[table::I_EVICTS];
         enter(block::FLAG_CORE_ENTRY)
     }
 }
@@ -1228,8 +1241,9 @@ extern "C" fn __psx_core_attach_impl(a0: u32, a1: u32, a2: u32, hash: u32) {
     }
     s.alive = ALIVE;
     s.hash = hash;
-    // The boot program is image 0 of its table; nothing else is in RAM yet.
+    // The boot program is image 0 of its table; what its exe carries is added at the first table.
     s.mask = 1;
+    s.carry_pending = 1;
     if a0 == abi::PSXD {
         s.lba_offset = a1;
         s.cdda_base = a2;
