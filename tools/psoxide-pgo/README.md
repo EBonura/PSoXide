@@ -1067,6 +1067,14 @@ The SDK's own `make repro-check` runs the gate on `editor-playtest` and `hello-e
     trampolines (2.8% on the bench, 0.2% on VoXide). The sample loader only
     annotates functions it compiles from IR; adding records for the assembly
     built a byte-identical exe.
+- **The scene core's window** (`psx_scene_abi::CORE_WINDOW`) holds the
+  prebuilt core, which a hosting program calls with `jal` (its CD reader loop
+  among others). The program's build does not compile that code, so samples
+  there are counted apart (`scene core: N samples (P%) in its window` from
+  `collect`, `in the scene core's window` from `order` and `search`): they
+  write no profile record, the core's sections are never laid out or ordered,
+  and they count toward no unbound or unplaced gate. Anything outside both the
+  program's text and the window is reported as before.
 
 ## Troubleshooting
 

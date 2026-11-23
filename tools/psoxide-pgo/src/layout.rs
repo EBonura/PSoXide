@@ -67,6 +67,15 @@ pub const MAX_UNPLACED: f64 = 0.005;
 /// every function this hot that fails to bind is an error by itself.
 pub const MAX_UNBOUND_HOT: f64 = 0.01;
 
+/// Whether `pc` lies in the scene core's window (`psx_scene_abi::CORE_WINDOW`). The core is
+/// prebuilt and links at the same addresses in every program that hosts it, so its code is not
+/// the program's to profile or lay out: samples there are counted apart (neither the program's
+/// nor unbound), and its sections are left out of every layout.
+pub fn in_core_window(pc: u32) -> bool {
+    let window = psx_scene_abi::CORE_WINDOW;
+    window.start <= pc && pc < window.end
+}
+
 /// Input-section name prefixes in front of a function's symbol.
 const PREFIXES: [&str; 5] = [
     ".text.hot.",
@@ -227,6 +236,9 @@ fn ordering_symbol(section: &str, symbols: &[String]) -> Option<String> {
 /// VMA). Only the first input section to claim a range is kept, so a word
 /// still names one function; the map lists the resident tenant first.
 ///
+/// Sections in the scene core's window ([`in_core_window`]) are left out:
+/// the core's code is prebuilt and not this program's to place.
+///
 /// ELF32 map columns: VMA, LMA, size, alignment, then the output section at
 /// column 33, an input section eight columns in and its symbols sixteen in.
 pub fn read_map(text: &str) -> Vec<Section> {
@@ -271,6 +283,7 @@ pub fn read_map(text: &str) -> Vec<Section> {
             section
         })
         .collect();
+    sections.retain(|section| !in_core_window(section.start));
     // Stable: at one address the map's first (resident) tenant stays first.
     sections.sort_by_key(|section| section.start);
     let mut end = 0u32;
@@ -287,7 +300,8 @@ pub fn read_map(text: &str) -> Vec<Section> {
 /// The sized symbols of an ld.lld `-Map` that lie in an input section nothing places
 /// (anything not `.text*` or `.psx_hot*`: `.psx_cold.*`, data), as (start, size, name) in
 /// address order. `.psx_hot.<NN>_<name>` is placed by the program itself, at the front of the
-/// text in name order, so where it lands is not luck.
+/// text in name order, so where it lands is not luck. Symbols in the scene core's window
+/// ([`in_core_window`]) are not the program's and are left out.
 pub fn read_unplaced(text: &str) -> Vec<(u32, u32, String)> {
     let mut found = Vec::new();
     let mut placed = true;
@@ -312,7 +326,12 @@ pub fn read_unplaced(text: &str) -> Vec<(u32, u32, String)> {
                 .is_none()
                 || input_section(body).is_some()
                 || program_placed(body);
-        } else if depth >= 16 && !placed && size > 0 && !body.contains(" = ") {
+        } else if depth >= 16
+            && !placed
+            && size > 0
+            && !body.contains(" = ")
+            && !in_core_window(start)
+        {
             found.push((start, size, body.to_string()));
         }
     }
@@ -632,6 +651,9 @@ pub struct Collected {
     /// Instructions outside every named function (the BIOS, psx-rt's
     /// trampolines, a function two sections share a name with).
     pub outside: u64,
+    /// Instructions in the scene core's window ([`in_core_window`]): prebuilt
+    /// code, counted apart from `outside` and from every function.
+    pub core: u64,
     /// `jalr` words executed: calls the graph cannot see.
     pub indirect: u64,
 }
@@ -672,6 +694,10 @@ pub fn collect(sections: &[Section], image: &Image, counts: &HashMap<u32, u64>) 
     let mut calls: BTreeMap<(usize, usize), Call> = BTreeMap::new();
     for &(pc, count) in &executed {
         collected.instructions += count;
+        if in_core_window(pc) {
+            collected.core += count;
+            continue;
+        }
         let from = find(sections, pc).filter(|&index| keys[index].is_some());
         if from.is_none() {
             collected.outside += count;
@@ -2237,5 +2263,130 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    use psx_scene_abi::CORE_WINDOW;
+
+    /// The `game()` fixture's layout profile and ordering file, as the tool
+    /// wrote them before the scene core's window was told apart.
+    const GAME_LAYOUT: &str = "# psoxide-pgo layout 1\n# features: \n# variant: \n\
+# Per-word counts over the gameplay polls (w index:count) and the direct\n\
+# calls from executed jal and j words (c count sites callee). Indirect calls\n\
+# (jalr) are not seen. A function binds by portable name and code hash.\n\
+f 560c97a273600c22 16 a\nw 0:100 1:100 2:100 3:100\n\
+f 560c97a273600c22 16 b\nw 0:100 1:100 2:100 3:100\n\
+f 07e58d069c82a228 16 main\n\
+w 0:1 1:1 2:100 3:100 4:100 5:100 6:100 7:100 8:1 9:1 10:1 11:1 12:1 13:1 14:1 15:1\n\
+c 100 2 a\nc 100 4 b\n";
+    const GAME_ORDER: &str = "main\na\nb\nc\n";
+
+    #[test]
+    fn the_core_window_is_the_abi_constant_half_open() {
+        assert!(in_core_window(CORE_WINDOW.start));
+        assert!(in_core_window(CORE_WINDOW.end - 4));
+        assert!(!in_core_window(CORE_WINDOW.start - 4));
+        assert!(!in_core_window(CORE_WINDOW.end));
+    }
+
+    #[test]
+    fn a_sample_in_the_core_window_counts_as_core_and_not_outside() {
+        let (sections, image, mut counts) = game();
+        let plain = collect(&sections, &image, &counts);
+        counts.insert(CORE_WINDOW.start, 40);
+        counts.insert(CORE_WINDOW.end - 4, 2);
+        let collected = collect(&sections, &image, &counts);
+        assert_eq!(collected.core, 42);
+        assert_eq!(collected.outside, plain.outside);
+        assert_eq!(collected.instructions, plain.instructions + 42);
+        assert_eq!(collected.layout, plain.layout);
+    }
+
+    #[test]
+    fn a_sample_just_outside_the_window_and_the_text_is_still_outside() {
+        let (sections, image, mut counts) = game();
+        let plain = collect(&sections, &image, &counts);
+        // The last word below the window, and the handoff block's first.
+        counts.insert(CORE_WINDOW.start - 4, 5);
+        counts.insert(CORE_WINDOW.end, 3);
+        let collected = collect(&sections, &image, &counts);
+        assert_eq!(collected.core, 0);
+        assert_eq!(collected.outside, plain.outside + 8);
+    }
+
+    /// `game()`'s map with the core linked in its window: `core_read` as
+    /// `.text` (an orderable section) and `core_idle` in a section nothing
+    /// places, the way the core's own link names them.
+    fn map_with_core() -> String {
+        let mut text = map(&[
+            (".text.main", "main", 0x40),
+            (".text.a", "a", 0x40),
+            (".text.b", "b", 0x40),
+            (".text.c", "c", 0x100),
+        ]);
+        let core = CORE_WINDOW.start;
+        text += &map_line(core, 0x40, 0, ".core");
+        text += &map_line(core, 0x20, 8, "core.o:(.text.core_read)");
+        text += &map_line(core, 0x20, 16, "core_read");
+        text += &map_line(core + 0x20, 0x20, 8, "core.o:(.core_text)");
+        text += &map_line(core + 0x20, 0x20, 16, "core_idle");
+        text
+    }
+
+    #[test]
+    fn the_core_is_left_out_of_the_layout_and_passes_the_unplaced_gate() {
+        let text = map_with_core();
+        let (plain, image, mut counts) = game();
+        // The core's sections are neither laid out nor unplaced.
+        assert_eq!(read_map(&text), plain);
+        assert!(read_unplaced(&text)
+            .iter()
+            .all(|&(start, _, _)| !in_core_window(start)));
+        // A fifth of the instructions in the core, every one of them out of
+        // the program's text: no gate trips.
+        let core = CORE_WINDOW.start;
+        for word in 0..16 {
+            counts.insert(core + 4 * word, 100);
+        }
+        let collected = collect(&read_map(&text), &image, &counts);
+        assert_eq!(collected.core, 1_600);
+        assert!(collected.core * 5 > collected.instructions);
+        assert!(check_unplaced(&text, &counts, collected.instructions).is_ok());
+        let bound = bind(&collected.layout, &read_map(&text), &image);
+        assert!(bound.coverage.gate().is_ok());
+        // The same counts outside both the text and the window are still
+        // refused when a section nothing places holds them.
+        let mut cold = String::from("     VMA      LMA     Size Align Out     In      Symbol\n");
+        cold += &map_line(core - 0x40, 0x40, 0, ".psx_cold");
+        cold += &map_line(core - 0x40, 0x40, 8, &format!("{OBJ}:(.psx_cold.wait)"));
+        cold += &map_line(core - 0x40, 0x40, 16, "game::wait");
+        let mut below = HashMap::new();
+        for word in 0..16 {
+            below.insert(core - 0x40 + 4 * word, 100);
+        }
+        assert!(check_unplaced(&cold, &below, 8_000).is_err());
+    }
+
+    #[test]
+    fn with_nothing_in_the_window_the_layout_and_order_are_unchanged() {
+        let (sections, image, counts) = game();
+        let collected = collect(&sections, &image, &counts);
+        assert_eq!(collected.core, 0);
+        assert_eq!(collected.outside, 7);
+        assert_eq!(collected.layout.to_text(), GAME_LAYOUT);
+        let bound = bind(&collected.layout, &sections, &image);
+        let fixed = fixed_patterns("KEEP(*(.text._start));\n*(.text .text.*);\n");
+        let placement = place(&sections, &image, &bound, &fixed);
+        assert_eq!(order_file(&sections, &placement), GAME_ORDER);
+        assert_eq!(
+            placement.placed,
+            [(1, 0x8001_0010), (2, 0x8001_0050), (3, 0x8001_0090)]
+        );
+        // A map that also links a core changes neither.
+        let with_core = read_map(&map_with_core());
+        let collected = collect(&with_core, &image, &counts);
+        assert_eq!(collected.layout.to_text(), GAME_LAYOUT);
+        let bound = bind(&collected.layout, &with_core, &image);
+        let placement = place(&with_core, &image, &bound, &fixed);
+        assert_eq!(order_file(&with_core, &placement), GAME_ORDER);
     }
 }

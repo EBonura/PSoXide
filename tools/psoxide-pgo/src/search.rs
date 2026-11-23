@@ -287,10 +287,30 @@ pub struct Window {
     /// Instructions in functions of the traced build that did not bind to
     /// the link (code changed); simulated at the traced address.
     pub unbound: u64,
+    /// Instructions in the scene core's window ([`layout::in_core_window`]):
+    /// prebuilt code at fixed addresses, simulated there and never unbound.
+    pub core: u64,
     pub uncached: u64,
     pub ticks: u64,
     /// Instructions per section of the link.
     pub executed: HashMap<u32, u64>,
+}
+
+impl Window {
+    /// Refuse a window with more than 1% of its instructions in functions
+    /// that did not bind to the link. The scene core's window is not counted:
+    /// its code is not the link's.
+    pub fn check_bound(&self) -> Result<()> {
+        if self.unbound * 100 > self.instructions {
+            return Err(format!(
+                "{}: {} of {} instructions ran in functions that are not in this link with \
+                 the same code; trace the build being placed",
+                self.name, self.unbound, self.instructions
+            )
+            .into());
+        }
+        Ok(())
+    }
 }
 
 /// Fetch traces bound to one link and reduced to segments.
@@ -422,6 +442,7 @@ impl Traces {
             ids: Vec::new(),
             instructions: 0,
             unbound: 0,
+            core: 0,
             uncached: 0,
             ticks: 0,
             executed: HashMap::new(),
@@ -481,6 +502,9 @@ impl Traces {
                 };
                 let in_chunk = ((1u32 << CHUNK_SHIFT) - (offset & ((1 << CHUNK_SHIFT) - 1))) / 4;
                 let n = left.min(room).min(in_chunk);
+                if unit == FIXED && layout::in_core_window(address) {
+                    window.core += u64::from(n);
+                }
                 let from = ((offset & ((1 << CHUNK_SHIFT) - 1)) / 4) as u16;
                 reducer.touch(
                     Chunk {
@@ -1280,9 +1304,14 @@ fn load_traces(args: &Args, link: &Link, patterns: &[String]) -> Result<Traces> 
         let weight = args.weights.get(&spec.name).copied().unwrap_or(1.0);
         traces.read(&spec.name, weight, &bytes, traced, link)?;
         let window = traces.windows.last().expect("read adds a window");
+        let core = if window.core > 0 {
+            format!(", {} in the scene core's window", window.core)
+        } else {
+            String::new()
+        };
         println!(
-            "trace {}: {} instructions ({} uncached, {} in code that did not bind), {} route \
-             ticks; {} segment ids so far, {} distinct",
+            "trace {}: {} instructions ({} uncached, {} in code that did not bind{core}), {} \
+             route ticks; {} segment ids so far, {} distinct",
             window.name,
             window.instructions,
             window.uncached,
@@ -1291,14 +1320,7 @@ fn load_traces(args: &Args, link: &Link, patterns: &[String]) -> Result<Traces> 
             traces.length(),
             traces.segments()
         );
-        if window.unbound * 100 > window.instructions {
-            return Err(format!(
-                "{}: {} of {} instructions ran in functions that are not in this link with \
-                 the same code; trace the build being placed",
-                window.name, window.unbound, window.instructions
-            )
-            .into());
-        }
+        window.check_bound()?;
     }
     Ok(traces)
 }
@@ -1886,5 +1908,50 @@ mod tests {
             .expect("--rounds 0 must be refused")
             .to_string();
         assert!(error.contains("--rounds 0"), "{error}");
+    }
+
+    #[test]
+    fn fetches_in_the_core_window_are_core_and_pass_the_bound_check() {
+        use psx_scene_abi::CORE_WINDOW;
+        let link = link(&[64]);
+        let program = Event::Run {
+            pc: 0x8001_0000,
+            words: 16,
+        };
+        let core = Event::Run {
+            pc: CORE_WINDOW.start,
+            words: 8,
+        };
+        let traces = traces_for(&link, &[program, core, program, core]);
+        let window = &traces.windows[0];
+        assert_eq!(
+            (window.instructions, window.core, window.unbound),
+            (48, 16, 0)
+        );
+        assert!(window.check_bound().is_ok());
+        // Just past the window (the handoff block) is not the core's.
+        let after = Event::Run {
+            pc: CORE_WINDOW.end,
+            words: 8,
+        };
+        let traces = traces_for(&link, &[program, after]);
+        assert_eq!(traces.windows[0].core, 0);
+    }
+
+    #[test]
+    fn the_bound_check_still_refuses_unbound_code() {
+        let window = |unbound| Window {
+            name: "t".into(),
+            weight: 1.0,
+            ids: Vec::new(),
+            instructions: 1_000,
+            unbound,
+            core: 900,
+            uncached: 0,
+            ticks: 0,
+            executed: HashMap::new(),
+        };
+        assert!(window(10).check_bound().is_ok());
+        assert!(window(11).check_bound().is_err());
     }
 }

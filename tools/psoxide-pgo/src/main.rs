@@ -646,7 +646,13 @@ fn convert_histogram(
     if histogram.is_empty() {
         return Err("the PC sample logs hold no samples".into());
     }
+    let mut core = 0u64;
     for (pc, count) in histogram {
+        // The prebuilt scene core: not this program's code, and no record LLVM could apply.
+        if u32::try_from(pc).is_ok_and(layout::in_core_window) {
+            core += count;
+            continue;
+        }
         let top = match flat_lo.partition_point(|&lo| lo <= pc).checked_sub(1) {
             Some(index) if pc < flat[index].1 => Some(&tops[flat[index].2]),
             _ => None,
@@ -719,6 +725,14 @@ fn convert_histogram(
         );
         if unmapped.total() > 0 {
             println!("unmapped: {unmapped}");
+        }
+        if core > 0 {
+            let all = mapped + unmapped.total() + core;
+            println!(
+                "scene core: {core} samples ({:.1}%) in its window, prebuilt code left out of \
+                 the profile",
+                100.0 * core as f64 / all as f64
+            );
         }
     }
     Ok((out, facts))
@@ -1228,6 +1242,9 @@ fn layout_profile(map: &Path, exe: &Path, logs: &[&str], out: &Path) -> Result<(
         collected.outside,
         collected.indirect
     );
+    if collected.core > 0 {
+        println!("in the scene core's window {}", collected.core);
+    }
     Ok(())
 }
 

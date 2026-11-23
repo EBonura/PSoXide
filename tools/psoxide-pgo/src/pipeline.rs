@@ -2041,6 +2041,13 @@ fn order(guest: &Guest, options: &Options) -> Result<()> {
         share(collected.outside),
         collected.indirect
     );
+    if collected.core > 0 {
+        println!(
+            "psoxide-pgo: {:.2}% of instructions ran in the scene core's window (prebuilt, not \
+             laid out)",
+            share(collected.core)
+        );
+    }
     Ok(())
 }
 

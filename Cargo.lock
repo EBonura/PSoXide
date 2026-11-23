@@ -524,6 +524,7 @@ dependencies = [
  "psoxide-size",
  "psx-gate",
  "psx-hw",
+ "psx-scene-abi",
  "rustc-demangle",
  "serde_json",
 ]
