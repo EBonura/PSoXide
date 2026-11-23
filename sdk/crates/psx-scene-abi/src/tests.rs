@@ -186,6 +186,22 @@ fn the_slot_names_are_the_ones_psx_core_defines() {
 }
 
 #[test]
+fn the_cd_slot_op_codes_are_the_abi() {
+    let ops = [
+        cd_op::COMMAND,
+        cd_op::COMMAND_NO_WAIT,
+        cd_op::IRQ_FLAG,
+        cd_op::IRQ_ACK,
+        cd_op::MIXER,
+        cd_op::IRQ_ENABLE,
+        cd_op::RESPONSE,
+    ];
+    assert_eq!(ops, [0, 1, 2, 3, 4, 5, 6]);
+    let outcomes = [cd_op::ACKNOWLEDGED, cd_op::DRIVE_ERROR, cd_op::TIMEOUT];
+    assert_eq!(outcomes, [0, 1, 2]);
+}
+
+#[test]
 fn handoff_block_magic_and_offsets() {
     assert_eq!(block::MAGIC.to_le_bytes(), *b"PSCB");
     assert_eq!(block::MAGIC_INV, 0xbdbc_acaf);

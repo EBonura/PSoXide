@@ -270,6 +270,49 @@ pub mod stack {
     }
 }
 
+/// The op codes of the register-level CD slot, [`slot::CD`]:
+/// `psx_core_cd(op, a, b, c) -> u32`, for a game's own drive driver (an XA
+/// player). Every op leaves controller register index 0 selected.
+pub mod cd_op {
+    /// Send a command and wait for its acknowledge (INT3). `a` points at the
+    /// parameter bytes, `b` = count | command << 8; the controller's IRQ
+    /// enables are masked for the command and put back after it. The response
+    /// ([`RESPONSE_BYTES`] at most) is copied to `c` when `c` is not null.
+    /// Returns the outcome ([`ACKNOWLEDGED`], [`DRIVE_ERROR`], [`TIMEOUT`]) |
+    /// response length << 8.
+    pub const COMMAND: u32 = 0;
+    /// Send a command and return at once: the parameter FIFO emptied, the
+    /// parameters and the command byte written, the IRQ enables untouched.
+    /// The caller collects the answers with [`IRQ_FLAG`], [`IRQ_ACK`] and
+    /// [`RESPONSE`]. Returns [`ACKNOWLEDGED`], or [`TIMEOUT`] when the
+    /// parameter FIFO never made room.
+    pub const COMMAND_NO_WAIT: u32 = 1;
+    /// The controller's IRQ flag (0 none, 1..5 INT1..INT5).
+    pub const IRQ_FLAG: u32 = 2;
+    /// Acknowledge flag bits `a` and the CD-ROM bit of `I_STAT`.
+    pub const IRQ_ACK: u32 = 3;
+    /// The CD audio mixer, `a` = L->L | L->R << 8 | R->R << 16 | R->L << 24,
+    /// then applied.
+    pub const MIXER: u32 = 4;
+    /// Set the controller's IRQ enables to `a`; returns the old ones.
+    pub const IRQ_ENABLE: u32 = 5;
+    /// Pop the response FIFO ([`RESPONSE_BYTES`] at most) into `c`, or
+    /// discard it when `c` is null; returns the bytes popped.
+    pub const RESPONSE: u32 = 6;
+
+    /// [`COMMAND`] outcome: the drive acknowledged.
+    pub const ACKNOWLEDGED: u32 = 0;
+    /// [`COMMAND`] outcome: the drive answered INT5; the core acknowledged it.
+    pub const DRIVE_ERROR: u32 = 1;
+    /// [`COMMAND`] outcome: no acknowledge within the core's acknowledge bound.
+    pub const TIMEOUT: u32 = 2;
+
+    /// Parameter bytes [`COMMAND`] sends at most.
+    pub const MAX_PARAMS: u32 = 16;
+    /// Response bytes [`COMMAND`] and [`RESPONSE`] copy at most.
+    pub const RESPONSE_BYTES: usize = 16;
+}
+
 /// OR'd into the `lba` argument of `psx_core_read` and `psx_core_stream_open`:
 /// the LBA is absolute on the disc, not offset by the member base, for a file
 /// in the host disc's root. The same bit marks an image row's LBA. A

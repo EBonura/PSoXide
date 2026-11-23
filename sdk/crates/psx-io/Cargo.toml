@@ -9,6 +9,7 @@ description  = "Volatile MMIO primitives for PSoXide target code."
 [dependencies]
 psx-hw = { workspace = true }
 psx-math = { workspace = true }
+psx-scene-abi = { path = "../psx-scene-abi", optional = true }
 
 [lints]
 workspace = true
@@ -18,3 +19,8 @@ default = []
 # Counters and wait-site records a stop-panel can print (see `diag`). Off in every
 # shipping build; every hook compiles to nothing without it.
 console-diag = []
+# The XA player (`cd::xa::Player`) drives the resident scene core's register-level CD slot
+# instead of psx-io's polled command layer, for a program the core hosts: that layer is then
+# not linked by the player. The program's link script must define `psx_core_cd` at
+# `psx_scene_abi::slot::CD`.
+core-cd = ["dep:psx-scene-abi"]
