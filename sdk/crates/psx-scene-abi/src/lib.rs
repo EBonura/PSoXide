@@ -10,9 +10,8 @@
 //! - the handoff block's field offsets ([`block`]);
 //! - the `SCENES.TBL` wire format ([`Header`], [`Row`], [`encode_table`]).
 //!
-//! It is the layout of the day-0 page, `CORE-ABI.md` (scene-core lane,
-//! 2026-11-23), sections 0 to 3. Items that page marks provisional are marked
-//! **provisional** here too and can still move after the P0 and P1 builds;
+//! It is version 1 of the scene core's ABI (2026-11-23). Items marked
+//! **provisional** can still move after the core's first builds and proofs;
 //! the window bounds are one constant so a real core build can move them by
 //! one edit.
 //!
@@ -123,8 +122,7 @@ pub mod slot {
 
 /// OR'd into the `lba` argument of `psx_core_read` and `psx_core_stream_open`:
 /// the LBA is absolute on the disc, not offset by the member base, for a file
-/// in the host disc's root. **Provisional**: the SDK lane decided the flag on
-/// 11-23; its bit is this crate's choice until CORE-ABI.md states one. A
+/// in the host disc's root. Bit 31 is part of ABI version 1. A
 /// member-relative LBA never reaches bit 31 (a CD holds under 2^19 sectors).
 pub const LBA_ABSOLUTE: u32 = 1 << 31;
 
@@ -364,10 +362,9 @@ impl Header {
 /// 0x30 16  name, ASCII, NUL-padded
 /// ```
 ///
-/// The member fields come from the SDK lane's 11-23 decision that the
-/// collection's member table becomes `SCENES.TBL` (DEMOTOC.BIN's role at LBA
-/// 22). Their offsets are this crate's choice until CORE-ABI.md states them:
-/// `cdda_base` takes the one reserved slot and `lba_offset` the first four
+/// The member fields exist because a collection's member table is
+/// `SCENES.TBL` itself (DEMOTOC.BIN's role at LBA 22). Their offsets are ABI
+/// version 1: `cdda_base` takes the one reserved slot and `lba_offset` the first four
 /// bytes of the old 20-byte name, so the row stays 64 B. A single-game disc
 /// writes zero for both.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -13,7 +13,7 @@
 //! from the manifest's directory. Options: `return=<id>`, `attempts=<n>`
 //! (0 means 3), `block=<n>` (minimum handoff block version), `credit=<id>`,
 //! `show-credit`, `core-hash=<hex>` (this row's core hash instead of the
-//! `--core-image` one). The row format is provisional with CORE-ABI.md.
+//! `--core-image` one). The row format is `psx-scene-abi`'s, ABI version 1.
 
 use psx_iso::scenes::abi::{Kind, ROW_FLAG_PARTNER_CREDIT};
 use psx_iso::scenes::SceneSlot;
