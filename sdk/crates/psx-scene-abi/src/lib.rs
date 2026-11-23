@@ -118,6 +118,10 @@ pub mod slot {
     pub const CD: u32 = CORE_WINDOW.start + 10 * SLOT_BYTES;
     /// `psx_core_set_idle_hook(hook)`, called from every spin of every core wait.
     pub const SET_IDLE_HOOK: u32 = CORE_WINDOW.start + 11 * SLOT_BYTES;
+    /// Slots in the table.
+    pub const COUNT: usize = 12;
+    /// One past the table's last slot: the core's own code starts here.
+    pub const TABLE_END: u32 = CORE_WINDOW.start + COUNT as u32 * SLOT_BYTES;
 }
 
 /// The deepest stack each slot uses below the caller's `$sp`, in bytes: every frame of its worst
@@ -158,6 +162,87 @@ pub mod stack {
     pub const MAX: u32 = 296;
 
     const _: () = assert!(SWITCH_LOAD <= super::SWITCH_STACK);
+
+    /// What one jump-table slot costs the stack of the program that calls it.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Slot {
+        /// The slot's address, a [`super::slot`] constant.
+        pub addr: u32,
+        /// The symbol psoxide-core.ld gives the slot.
+        pub name: &'static str,
+        /// Bytes it uses below the caller's `$sp`, its hooks apart.
+        pub depth: u32,
+        /// It can call the program's idle hook (it waits on the drive).
+        pub idle_hook: bool,
+        /// It calls the per-sector hook passed to it (`psx_core_read`'s fourth argument).
+        pub sector_hook: bool,
+    }
+
+    const fn row(addr: u32, name: &'static str, depth: u32, idle_hook: bool) -> Slot {
+        Slot {
+            addr,
+            name,
+            depth,
+            idle_hook,
+            sector_hook: false,
+        }
+    }
+
+    /// Every slot, in table order. A slot that runs a hook runs it on top of its own frames, so a
+    /// stack proof adds the hook's depth to the slot's. [`SWITCH_LOAD`] is not here: it runs on the
+    /// switch stack, never the caller's.
+    pub const SLOTS: [Slot; super::slot::COUNT] = {
+        use super::slot as s;
+        [
+            row(s::ATTACH, "__psx_core_attach", ATTACH, false),
+            row(s::SWITCH, "psx_core_switch", SWITCH, true),
+            Slot {
+                sector_hook: true,
+                ..row(s::READ, "psx_core_read", READ, true)
+            },
+            row(s::PAUSE, "psx_core_pause", PAUSE, true),
+            row(
+                s::CLIENT_ATTACH,
+                "psx_core_client_attach",
+                CLIENT_ATTACH,
+                false,
+            ),
+            row(
+                s::CLIENT_DETACH,
+                "psx_core_client_detach",
+                CLIENT_DETACH,
+                false,
+            ),
+            row(s::FATAL, "psx_core_fatal", FATAL, false),
+            row(s::MUSIC_YIELD, "psx_core_music_yield", MUSIC_YIELD, false),
+            row(s::STREAM_OPEN, "psx_core_stream_open", STREAM_OPEN, true),
+            row(
+                s::STREAM_SECTOR,
+                "psx_core_stream_sector",
+                STREAM_SECTOR,
+                true,
+            ),
+            row(s::CD, "psx_core_cd", CD, true),
+            row(
+                s::SET_IDLE_HOOK,
+                "psx_core_set_idle_hook",
+                SET_IDLE_HOOK,
+                false,
+            ),
+        ]
+    };
+
+    /// The slot that starts at `addr`, `None` for any other address (inside the window or not).
+    pub const fn slot_at(addr: u32) -> Option<Slot> {
+        let mut i = 0;
+        while i < SLOTS.len() {
+            if SLOTS[i].addr == addr {
+                return Some(SLOTS[i]);
+            }
+            i += 1;
+        }
+        None
+    }
 }
 
 /// OR'd into the `lba` argument of `psx_core_read` and `psx_core_stream_open`:

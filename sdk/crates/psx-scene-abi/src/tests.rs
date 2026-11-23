@@ -122,6 +122,88 @@ fn jump_table_slots_are_the_day_0_addresses() {
         0x801f_df58,
     ];
     assert_eq!(slots, want);
+    assert_eq!(slots.len(), slot::COUNT);
+    assert_eq!(slot::TABLE_END, slot::SET_IDLE_HOOK + slot::SLOT_BYTES);
+}
+
+#[test]
+fn every_slot_has_a_depth() {
+    // The table is the slots in order, one per 8 bytes from the window's start, to its end.
+    for (i, row) in stack::SLOTS.iter().enumerate() {
+        assert_eq!(
+            row.addr,
+            CORE_WINDOW.start + i as u32 * slot::SLOT_BYTES,
+            "{}",
+            row.name
+        );
+        assert_eq!(stack::slot_at(row.addr), Some(*row));
+    }
+    assert_eq!(
+        stack::SLOTS.last().unwrap().addr + slot::SLOT_BYTES,
+        slot::TABLE_END
+    );
+    let depths = [
+        (slot::ATTACH, stack::ATTACH),
+        (slot::SWITCH, stack::SWITCH),
+        (slot::READ, stack::READ),
+        (slot::PAUSE, stack::PAUSE),
+        (slot::CLIENT_ATTACH, stack::CLIENT_ATTACH),
+        (slot::CLIENT_DETACH, stack::CLIENT_DETACH),
+        (slot::FATAL, stack::FATAL),
+        (slot::MUSIC_YIELD, stack::MUSIC_YIELD),
+        (slot::STREAM_OPEN, stack::STREAM_OPEN),
+        (slot::STREAM_SECTOR, stack::STREAM_SECTOR),
+        (slot::CD, stack::CD),
+        (slot::SET_IDLE_HOOK, stack::SET_IDLE_HOOK),
+    ];
+    assert_eq!(depths.len(), slot::COUNT);
+    for (addr, depth) in depths {
+        assert_eq!(
+            stack::slot_at(addr).map(|s| s.depth),
+            Some(depth),
+            "{addr:08x}"
+        );
+    }
+    // The switch charges its caller only what it uses before it moves to its own stack.
+    assert_eq!(stack::slot_at(slot::SWITCH).unwrap().depth, stack::SWITCH);
+    assert!(stack::SLOTS.iter().all(|s| s.depth != stack::SWITCH_LOAD));
+    // Only the read takes a per-sector hook; a slot with no frame cannot call a hook.
+    for row in stack::SLOTS {
+        assert_eq!(row.sector_hook, row.addr == slot::READ, "{}", row.name);
+        assert!(
+            row.depth > 0 || !(row.idle_hook || row.sector_hook),
+            "{}",
+            row.name
+        );
+    }
+    // Between slots and past the table there is no slot.
+    for addr in [
+        slot::ATTACH + 4,
+        slot::READ + 1,
+        slot::TABLE_END,
+        CORE_WINDOW.end - 8,
+        0,
+    ] {
+        assert_eq!(stack::slot_at(addr), None, "{addr:08x}");
+    }
+}
+
+#[test]
+fn max_is_the_deepest_caller_stack_slot() {
+    let deepest = stack::SLOTS.iter().map(|s| s.depth).max().unwrap();
+    assert_eq!(stack::MAX, deepest);
+}
+
+#[test]
+fn the_slot_names_are_psoxide_core_ld_s() {
+    let script = include_str!("../../../psoxide-core.ld")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for row in stack::SLOTS {
+        let line = std::format!("{} = 0x{:08X};", row.name, row.addr);
+        assert!(script.contains(&line), "{line}");
+    }
 }
 
 #[test]
