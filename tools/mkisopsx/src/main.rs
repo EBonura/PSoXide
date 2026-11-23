@@ -311,14 +311,25 @@ fn print_usage() {
                          subheader, EDC (Form 2) or EDC/ECC (Form 1) is\n\
                          rebuilt at the final LBA. Raw .bin output only.\n\
                          The file's LBA and size are printed.\n\
-         --scenes PATH   Write SCENES.TBL at LBA 22 from a scene manifest\n\
-                         (tools/mkisopsx/src/scenes.rs), boot exe at LBA 23,\n\
-                         the manifest's other files as named slots right\n\
-                         after it while they fit the boot area, the rest\n\
-                         after the packs. Without it the disc is unchanged.\n\
+         --scenes PATH   Write SCENES.TBL (version 2) at LBA 22 from a scene\n\
+                         manifest, boot exe (image 0) at LBA 23, the other\n\
+                         images (program exes, overlay blobs) right after it\n\
+                         while they fit the boot area, the rest after the\n\
+                         packs. Manifest lines:\n\
+                           program NAME file|- [core-hash=H] [reserve=LO-HI]\n\
+                                   [reaches=SCENE,...]\n\
+                           overlay NAME file owner=PROG load=ADDR\n\
+                                   [class=resident|swap]\n\
+                           scene NAME IMAGE start|entry=ADDR [credit=N]\n\
+                                 [show-credit] [block=N]\n\
+                         Image 0 is `program PSX.EXE -` (the --exe); each\n\
+                         program has one `start` scene. Prints every row and\n\
+                         each program's compact table copy size. See\n\
+                         tools/mkisopsx/src/scenes.rs. Without it the disc\n\
+                         is unchanged.\n\
          --core-image PATH\n\
-                         The prebuilt psx-core.bin: its word FNV is the rows'\n\
-                         core hash; every program must end with it.\n\
+                         The prebuilt psx-core.bin: its word FNV is the\n\
+                         programs' core hash; every program must end with it.\n\
          --iso           Emit a cooked 2048-byte-per-sector .iso\n\
                          instead of the default raw 2352-byte .bin.\n"
     );
@@ -447,18 +458,41 @@ fn main() -> ExitCode {
                     psx_iso::scenes::abi::TABLE_LBA,
                     pressed.boot_scene
                 );
-                for row in &pressed.rows {
+                for (index, image) in pressed.images.iter().enumerate() {
                     println!(
-                        "scene {} {:?} {}: LBA {}, {} sectors, t_addr {:#010x}, t_size {}, fnv {:#010x}, core {:#010x}",
-                        row.id,
-                        row.kind,
-                        row.name_str(),
-                        row.lba,
-                        row.sectors,
-                        row.t_addr,
-                        row.t_size,
-                        row.checksum,
-                        row.core_hash
+                        "image {index} {:?} {}: LBA {}, size {}, load {:#010x}, fnv {:#010x}, core {:#010x}, evicts {:#010x}, owner {}",
+                        image.kind,
+                        image.class.map_or("-", |c| match c {
+                            psx_iso::scenes::abi::Class::ResidentSet => "resident",
+                            psx_iso::scenes::abi::Class::Swap => "swap",
+                        }),
+                        image.lba,
+                        image.size,
+                        image.load_addr,
+                        image.checksum,
+                        image.core_hash,
+                        image.evicts,
+                        image.owner
+                    );
+                }
+                for scene in &pressed.scenes {
+                    println!(
+                        "scene {} {}: image {}, entry {:#010x}, flags {:#04x}, credit {}",
+                        scene.id,
+                        scene.name_str(),
+                        scene.image,
+                        scene.entry,
+                        scene.flags,
+                        scene.partner_credit
+                    );
+                }
+                for copy in &pressed.compact {
+                    println!(
+                        "image {} compact table: {} bytes ({} scenes, images {:#010x})",
+                        copy.image,
+                        copy.bytes.len(),
+                        copy.scenes.len(),
+                        copy.images
                     );
                 }
             }
@@ -600,14 +634,14 @@ fn read_scene_plan(manifest: &Path, core_image: Option<&Path>) -> Result<ScenePl
     let text =
         fs::read_to_string(manifest).map_err(|e| format!("read {}: {e}", manifest.display()))?;
     let base = manifest.parent().unwrap_or_else(|| Path::new(""));
-    let slots = scenes::parse_manifest(&text, base, &mut |path| {
+    let mut plan = scenes::parse_manifest(&text, base, &mut |path| {
         fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))
     })?;
-    let core_image = match core_image {
+    plan.core_image = match core_image {
         Some(path) => Some(fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?),
         None => None,
     };
-    Ok(ScenePlan { slots, core_image })
+    Ok(plan)
 }
 
 fn read_cdda_track_list(path: &Path) -> Result<Vec<PathBuf>, String> {
