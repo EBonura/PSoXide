@@ -15,7 +15,9 @@
 //!
 //! The rule compares one game's view of that tree (scope.rs): the same digest without the files
 //! of SDK crates the game cannot reach, so a change to a disc no game links (an SDK example)
-//! moves no game that does not build it. A nested workspace lock (`engine/Cargo.lock`) counts
+//! moves no game that does not build it. A guest tool crate (`tools/psoxide-pgo`) is one of
+//! those crates: it counts for a game that reaches it, and the root `Cargo.lock` counts in that
+//! view only from the guest workspace members the game reaches. A nested workspace lock (`engine/Cargo.lock`) counts
 //! in that view only for the packages the game reaches, with their dependency edges, so a new
 //! dependency of a crate the game never builds does not move it (a lock that does not parse
 //! counts whole). When the game's reach cannot be read, the whole guest tree is compared. A
@@ -273,6 +275,7 @@ impl Mirror {
             manifest.as_deref(),
             lock.as_deref(),
             member_names,
+            Some(&reached.packages),
             |path, meta| {
                 reached.keeps(path).then(|| {
                     nested_locks
@@ -486,18 +489,23 @@ pub fn guest_tree_of(
         manifest,
         lock,
         member_name,
+        None,
         |_, meta| Some(meta.to_string()),
     )
 }
 
 /// [`guest_tree_of`] under the key `label`, where `view` gives what each listed file
 /// contributes from its path and listing line (mode, type, blob id), or `None` to leave it out.
+/// `reached`, for a game's view, names the packages the game reaches: the root lock then counts
+/// only from the guest workspace members among them (a new dependency of a guest tool the game
+/// never runs does not move it).
 fn tree_of(
     label: &str,
     listing: &str,
     manifest: Option<&str>,
     lock: Option<&str>,
     member_name: impl Fn(&str) -> Option<String>,
+    reached: Option<&BTreeSet<String>>,
     view: impl Fn(&str, &str) -> Option<String>,
 ) -> Result<String, String> {
     let mut key = Key::new(label);
@@ -534,7 +542,9 @@ fn tree_of(
                     .any(|g| m == *g || m.starts_with(&format!("{g}/")));
                 if guest {
                     if let Some(name) = member_name(&m) {
-                        roots.insert(name);
+                        if reached.is_none_or(|r| r.contains(&name)) {
+                            roots.insert(name);
+                        }
                     }
                 }
             }
@@ -991,13 +1001,27 @@ mod tests {
         let nothing = game(&[]);
         let trees = Trees::of(&mirror, &rt, &ld, &nothing).unwrap();
         assert_ne!(trees.pinned, trees.main);
-        // So does a guest tool, which every build uses.
+        // A guest tool counts for a game that runs it, and for no other.
         let tool = commit_edit(
             repo.path(),
             "tools/psoxide-link/src/lib.rs",
             "pub fn link() { }\n",
         );
         let trees = Trees::of(&mirror, &ld, &tool, &nothing).unwrap();
+        assert_eq!(trees.pinned, trees.main, "{}", trees.scope);
+        assert_ne!(trees.pinned_whole, trees.main_whole);
+        let links = game(&[("Makefile", "link:\n\tpsoxide-link game.elf\n")]);
+        let trees = Trees::of(&mirror, &ld, &tool, &links).unwrap();
+        assert_ne!(trees.pinned, trees.main);
+        // Its root lock entry too: a new dependency of the tool moves only the game that runs it.
+        let lock = commit_edit(
+            repo.path(),
+            "Cargo.lock",
+            "version = 4\n[[package]]\nname = \"psoxide-link\"\nversion = \"0.2.0\"\n",
+        );
+        let trees = Trees::of(&mirror, &tool, &lock, &nothing).unwrap();
+        assert_eq!(trees.pinned, trees.main, "{}", trees.scope);
+        let trees = Trees::of(&mirror, &tool, &lock, &links).unwrap();
         assert_ne!(trees.pinned, trees.main);
     }
 

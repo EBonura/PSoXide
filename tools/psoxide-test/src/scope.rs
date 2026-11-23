@@ -4,7 +4,8 @@
 //! under `engine/examples/hardware-tests`) moves the guest tree, and every game has to repin
 //! before it can land again. A game's scope leaves out the SDK crates the game cannot reach.
 //! Files outside every crate directory (linker scripts, workspace manifests and locks, the
-//! toolchain file, the guest tool scripts) and the guest tool crates always count; a nested
+//! toolchain file, the guest tool scripts) always count; a guest tool crate (`tools/psoxide-pgo`,
+//! `tools/mkisopsx`) counts like any other crate, for a game that reaches it; a nested
 //! workspace lock (`engine/Cargo.lock`) counts only for the packages the game reaches (pin.rs).
 //!
 //! A game reaches a crate when:
@@ -14,6 +15,9 @@
 //!   in it, or a directory above it (`sdk/examples`), or composes the name at run time
 //!   (`sdk/examples/$(EXAMPLE)`), or passes its package to cargo (`-p NAME`);
 //! - a guest tool script the game names (`tools/sdk-examples.mk`) does one of these;
+//! - for a guest tool crate, one of its files or a tool script it names names the tool's
+//!   package as a word, in any case and with `_` for `-` (`psoxide-pgo place`,
+//!   `$(PSOXIDE_PGO_EXE)`): a build handed a tool binary still runs that tool;
 //! - a crate it reaches depends on it by path, directly or through its workspace.
 //!
 //! An asset file (`assets/audio`, `assets/textures`) counts for a game that names it (its lock
@@ -53,6 +57,8 @@ pub struct Reach {
     pub composed: BTreeSet<String>,
     /// Guest tool scripts (files of [`GUEST_PATHS`]) the files name.
     pub tools: BTreeSet<String>,
+    /// Guest tool crates (`tools/psoxide-pgo`) whose package the files name as a word.
+    pub tool_crates: BTreeSet<String>,
     /// SDK manifests named on a line with no `-p` (`""` is the root's): a workspace among
     /// them is built whole.
     pub workspace_builds: BTreeSet<String>,
@@ -79,6 +85,7 @@ impl Reach {
             ("mention", &self.mentions),
             ("composed", &self.composed),
             ("tool", &self.tools),
+            ("tool-crate", &self.tool_crates),
             ("workspace", &self.workspace_builds),
             ("asset", &self.assets),
             ("linked", &self.linked),
@@ -463,6 +470,16 @@ fn scan_text(text: &str, reach: &mut Reach) {
             reach.tools.insert(tool.to_string());
         }
     }
+    // A tool crate by its name, read wide (`PSOXIDE_PGO`, `psoxide-pgo-build.log`): a name the
+    // scan misses would leave a tool the game runs out of its tree, one it counts too many
+    // only costs a repin.
+    let folded = text.to_ascii_lowercase().replace('_', "-");
+    for dir in guest_tool_crates() {
+        let base = dir.rsplit('/').next().unwrap_or(dir);
+        if folded.contains(base) {
+            reach.tool_crates.insert(dir.to_string());
+        }
+    }
 }
 
 /// Whether a word can be a package name (`psxed-project`, not `.arg(` or `)`).
@@ -649,6 +666,14 @@ fn scan_assets(line: &str, reach: &mut Reach) {
 /// Whether `path` is one of the guest tool scripts.
 pub fn is_guest_tool_file(path: &str) -> bool {
     guest_tool_files().any(|tool| tool == path)
+}
+
+/// The guest paths that are tool crates (`tools/psoxide-pgo`), not tool scripts.
+fn guest_tool_crates() -> impl Iterator<Item = &'static str> {
+    GUEST_PATHS
+        .iter()
+        .copied()
+        .filter(|p| p.starts_with("tools/") && !is_guest_tool_file(p))
 }
 
 /// The guest paths that are tool scripts rather than directories (`tools/sdk-examples.mk`).
@@ -845,13 +870,11 @@ pub fn reached_crates(
     }
     let mut stack: Vec<String> = Vec::new();
     for (&dir, &name) in &crates {
-        let always = GUEST_PATHS
-            .iter()
-            .any(|g| g.starts_with("tools/") && names(g, dir));
         let named = reach.mentions.iter().any(|m| names(m, dir))
             || reach.composed.iter().any(|p| names(p, dir))
+            || reach.tool_crates.iter().any(|t| names(t, dir))
             || reach.cargo_packages.contains(name);
-        if always || named {
+        if named {
             stack.push(dir.to_string());
         }
     }
@@ -1260,6 +1283,36 @@ mod tests {
         assert!(got.reached.contains("crates/psx-hw"), "{:?}", got.reached);
     }
 
+    #[test]
+    fn a_guest_tool_crate_counts_for_a_game_that_names_it() {
+        let reach = scan(&[(
+            "Makefile",
+            "link:\n\t$(PSOXIDE_PGO_EXE) place --order x.order\n\tmkisopsx game.cue\n",
+        )]);
+        let want: BTreeSet<String> = ["tools/psoxide-pgo", "tools/mkisopsx"]
+            .map(str::to_string)
+            .into();
+        assert_eq!(reach.tool_crates, want);
+        let none = scan(&[("psyq/build.sh", "ccpsx -O2 main.c -o main.cpe\n")]);
+        assert!(none.tool_crates.is_empty(), "{:?}", none.tool_crates);
+        // A tool script the game names that runs a tool brings it.
+        let reach = Reach {
+            tools: ["tools/build_guest_staged.sh".to_string()].into(),
+            ..Reach::default()
+        };
+        let tools = [(
+            "tools/build_guest_staged.sh".to_string(),
+            "cargo build -q --release --locked -p psoxide-link\n".to_string(),
+        )]
+        .into();
+        let got = reached_crates(&sdk(), &tools, &reach, &mut no_sources).unwrap();
+        assert!(
+            got.reached.contains("tools/psoxide-link"),
+            "{:?}",
+            got.reached
+        );
+    }
+
     fn scan(list: &[(&str, &str)]) -> Reach {
         reach_of(&files(list)).unwrap()
     }
@@ -1500,15 +1553,23 @@ mod tests {
         let got = reached_crates(&sdk(), &BTreeMap::new(), &reach, &mut no_sources)
             .unwrap()
             .reached;
-        let want: BTreeSet<String> = [
-            "sdk/crates/psx-rt",
-            "crates/psx-hw",
-            "tools/psoxide-link",
-            "crates/psx-iso",
-        ]
-        .map(str::to_string)
-        .into();
-        assert_eq!(got, want);
+        let want: BTreeSet<String> = ["sdk/crates/psx-rt", "crates/psx-hw"]
+            .map(str::to_string)
+            .into();
+        assert_eq!(
+            got, want,
+            "a guest tool the game does not run is out of reach"
+        );
+        // A game that runs the tool reaches it and what it depends on.
+        let reach = Reach {
+            tool_crates: ["tools/psoxide-link".to_string()].into(),
+            ..reach
+        };
+        let got = reached_crates(&sdk(), &BTreeMap::new(), &reach, &mut no_sources)
+            .unwrap()
+            .reached;
+        assert!(got.contains("tools/psoxide-link"), "{got:?}");
+        assert!(got.contains("crates/psx-iso"), "{got:?}");
         // A tool script the game names brings what it names.
         let reach = Reach {
             tools: ["tools/engine-examples.mk".to_string()].into(),
