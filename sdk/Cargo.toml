@@ -31,13 +31,14 @@ members = [
     "crates/psx-residency",
     "crates/psx-residency-sim",
     "crates/psx-scene-abi",
+    "crates/psx-core",
 ]
 
 # The examples are built against the MIPS target via a separate
 # nightly toolchain -- keep them out of the main workspace so
 # `cargo check` in the default (host) target doesn't try to compile
 # bare-metal binaries on the wrong target.
-exclude = ["examples"]
+exclude = ["examples", "crates/psx-core/image"]
 
 [workspace.package]
 edition    = "2021"

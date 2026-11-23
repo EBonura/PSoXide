@@ -53,6 +53,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "psx-core"
+version = "0.1.0"
+dependencies = [
+ "psx-scene-abi",
+]
+
+[[package]]
 name = "psx-display"
 version = "0.1.0"
 dependencies = [

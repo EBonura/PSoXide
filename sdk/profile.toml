@@ -14,6 +14,8 @@
 psx-rt   = ["runtime"]
 psx-mc   = ["hw"]
 psx-settings = ["card"]
+# The program side of the scene core (sdk/crates/psx-core): every program on the core enables it.
+psx-core = ["link"]
 
 # Development taps. A build with one of these on is a diagnostic build: it runs, it cannot
 # become a disc without --diag (the receipt psoxide-pgo apply writes says so).
