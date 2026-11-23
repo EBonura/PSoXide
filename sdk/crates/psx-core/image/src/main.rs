@@ -40,7 +40,6 @@ const DMA_CHCR0: u32 = 0x1f80_1088;
 const SPU_KEY_OFF: u32 = 0x1f80_1d8c;
 const SPU_CD_VOLUME: u32 = 0x1f80_1db0;
 const SPU_CONTROL: u32 = 0x1f80_1daa;
-const CACHE_CONTROL: u32 = 0xfffe_0130;
 
 const CDROM_IRQ_BIT: u32 = 1 << 2;
 
@@ -1198,7 +1197,6 @@ fn flush_icache() {
             out("$8") _, out("$9") _, out("$10") _, out("$11") _, out("$12") _, out("$13") _, out("$14") _,
         )
     }
-    let _ = CACHE_CONTROL;
 }
 
 // ---------------------------------------------------------------------------------------------
