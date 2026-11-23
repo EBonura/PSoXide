@@ -218,6 +218,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "psx-scene-abi"
+version = "0.1.0"
+dependencies = [
+ "psx-pack",
+]
+
+[[package]]
 name = "psx-segments"
 version = "0.1.0"
 

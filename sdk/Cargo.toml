@@ -30,6 +30,7 @@ members = [
     "crates/psx-cdstream",
     "crates/psx-residency",
     "crates/psx-residency-sim",
+    "crates/psx-scene-abi",
 ]
 
 # The examples are built against the MIPS target via a separate
