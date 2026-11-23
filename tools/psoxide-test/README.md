@@ -164,6 +164,9 @@ line (format defined in tools/psoxide-pgo, README "The search stamp"):
 # psoxide-pgo searched: rounds <N> seed <N>
 ```
 
+with at least 600 rounds (`MIN_SEARCH_ROUNDS`, the psoxide-pgo README's recipe): a search
+stopped after a round or two carries the same stamp and places like no search.
+
 The layouts are read at the result's commit: a `[[build]]`'s `layout_files` (paths in the repo),
 or when it names none every tracked `*.layout` file whose first line is `# psoxide-pgo layout
 1`. A game with no layout profile passes; a build with `layout = false` has none. A layout from

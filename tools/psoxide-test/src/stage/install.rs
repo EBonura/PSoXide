@@ -294,6 +294,11 @@ impl SpeedFacts {
 /// comment lines.
 pub const SEARCHED_TAG: &str = "# psoxide-pgo searched: ";
 
+/// Fewest search rounds an installed layout may carry in its stamp: the psoxide-pgo README's
+/// recipe and the floor tools/pgo-search-flow refuses under. A search stopped after a round or
+/// two measures like no search (one landed with `rounds 1`, 11-22) but carries the same stamp.
+pub const MIN_SEARCH_ROUNDS: u64 = 600;
+
 /// The first line of every psoxide-pgo layout profile.
 pub const LAYOUT_MAGIC: &str = "# psoxide-pgo layout 1";
 
@@ -416,7 +421,8 @@ pub struct Accepted {
 /// - it is a complete full PASS (tier full, verdict PASS, nothing missing), of a clean tree,
 ///   on the install profile (a landing-profile result is refused);
 /// - a searched layout: every committed layout profile of the installed builds carries
-///   psoxide-pgo's search stamp ([`SEARCHED_TAG`]); a game with no layout profile passes;
+///   psoxide-pgo's search stamp ([`SEARCHED_TAG`]) with at least [`MIN_SEARCH_ROUNDS`] rounds;
+///   a game with no layout profile passes;
 /// - never slower than the installed build: only [`Installed::Nothing`] is a first install.
 ///   The installed facts must describe the library's bin (`bin_sha256`). For every row they
 ///   hold whose [`WindowIdentity`] equals this result's, over the offsets both measured, the
@@ -478,6 +484,25 @@ pub fn check(j: &Judged<'_>, installed: Installed<'_>, rebase: bool) -> Result<A
              tier on that commit",
             util::short(&r.commit),
             greedy.join(", ")
+        ));
+    }
+    let short: Vec<String> = j
+        .layouts
+        .iter()
+        .filter_map(|l| {
+            let (rounds, seed) = search_stamp(&l.text)?;
+            (rounds < MIN_SEARCH_ROUNDS)
+                .then(|| format!("{} (rounds {rounds} seed {seed})", l.path))
+        })
+        .collect();
+    if !short.is_empty() {
+        return Err(format!(
+            "result {at} links with a layout searched for fewer than {MIN_SEARCH_ROUNDS} rounds \
+             at commit {}: {}. A short search places like no search; run it for at least \
+             {MIN_SEARCH_ROUNDS} rounds with no early stop (tools/pgo-search-flow), commit the \
+             layout, then bless and run the full tier on that commit",
+            util::short(&r.commit),
+            short.join(", ")
         ));
     }
     let facts = SpeedFacts::of(j);
@@ -1647,6 +1672,14 @@ mod tests {
         );
         assert!(!e.contains("pgo/g.layout"), "{e}");
         assert!(e.contains("psoxide-pgo search"), "{e}");
+        // A stamp from a search stopped early is refused, naming its rounds.
+        let one = SEARCHED.replacen("rounds 600 seed 1", "rounds 1 seed 1", 1);
+        assert_ne!(one, SEARCHED);
+        let e = with(&[layout("pgo/g.layout", &one)]).unwrap_err();
+        assert!(
+            e.contains("fewer than 600") && e.contains("rounds 1 seed 1"),
+            "{e}"
+        );
     }
 
     #[test]
