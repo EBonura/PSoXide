@@ -19,6 +19,7 @@
 #![no_std]
 #![no_main]
 #![feature(asm_experimental_arch)]
+#![feature(optimize_attribute)]
 
 use psx_core::abi::{self, block, code, table};
 use psx_core::fnv;
@@ -147,6 +148,8 @@ struct State {
     diag: u32,
     /// The running read has not delivered a sector yet.
     first_sector: u32,
+    /// A stream sector: popped with no checksum (the stream client checks its own data).
+    no_hash: u32,
     /// `I_MASK` is saved in `saved_mask` (a read or a stream is open).
     mask_saved: u32,
     /// Table read: word index + 1 of the row kept from the sector, or [`NO_KEEP`].
@@ -176,6 +179,7 @@ static mut ST: State = State {
     last_status: 0,
     diag: 0,
     first_sector: 0,
+    no_hash: 0,
     mask_saved: 0,
     keep: NO_KEEP,
     idle: None,
@@ -411,6 +415,7 @@ mod drive {
     /// word into `hash`, and keep table header words 0..4 in the state. `false` when the FIFO
     /// never filled (the request is dropped, so a late sector cannot land in the next read).
     #[inline(never)]
+    #[optimize(speed)]
     pub fn pop(dst: *mut u32, hash: &mut u32) -> bool {
         w8(CD_REQ, 0x80);
         let mut e = Elapsed::start();
@@ -422,6 +427,21 @@ mod drive {
         }
         let mut h = *hash;
         let keep = st().keep;
+        if keep == NO_KEEP && !dst.is_null() && st().no_hash != 0 {
+            // A stream client's sector: the plain PIO pop, as psx-io's reader does it.
+            let mut at = dst;
+            let end = dst.wrapping_add(SECTOR_WORDS as usize);
+            while at != end {
+                let b0 = r8(CD_PARAM) as u32;
+                let b1 = r8(CD_PARAM) as u32;
+                let b2 = r8(CD_PARAM) as u32;
+                let b3 = r8(CD_PARAM) as u32;
+                // SAFETY: the caller's destination covers a whole sector.
+                unsafe { core::ptr::write_volatile(at, (b3 << 24) | (b2 << 16) | (b1 << 8) | b0) };
+                at = at.wrapping_add(1);
+            }
+            return true;
+        }
         if keep == NO_KEEP && !dst.is_null() {
             // The payload path, hot in every load and every streamed sector: no per-word tests.
             let mut at = dst;
@@ -434,7 +454,30 @@ mod drive {
                 let word = (b3 << 24) | (b2 << 16) | (b1 << 8) | b0;
                 // SAFETY: the caller's destination covers a whole sector.
                 unsafe { core::ptr::write_volatile(at, word) };
-                h = fnv::step(h, word);
+                // The FNV prime as shifts and adds (0x0100_0193 = 2^24 + 2^8 + 2^7 + 2^4 + 2^1 + 1):
+                // no `mult`, so no wait on `mflo` while the next bytes could be popped.
+                let x = h ^ word;
+                let s: u32;
+                // SAFETY: register arithmetic only.
+                unsafe {
+                    core::arch::asm!(
+                        ".set noat",
+                        "sll {t}, {x}, 1",
+                        "addu {s}, {x}, {t}",
+                        "sll {t}, {x}, 4",
+                        "addu {s}, {s}, {t}",
+                        "sll {t}, {x}, 7",
+                        "addu {s}, {s}, {t}",
+                        "sll {t}, {x}, 8",
+                        "addu {s}, {s}, {t}",
+                        "sll {t}, {x}, 24",
+                        "addu {s}, {s}, {t}",
+                        ".set at",
+                        x = in(reg) x, s = out(reg) s, t = out(reg) _,
+                        options(pure, nomem, nostack)
+                    )
+                };
+                h = s;
                 at = at.wrapping_add(1);
             }
             *hash = h;
@@ -1099,7 +1142,11 @@ extern "C" fn __psx_core_stream_open_impl(lba: u32, flags: u32) -> u32 {
 #[no_mangle]
 extern "C" fn __psx_core_stream_sector_impl(dst: *mut u32) -> u32 {
     let mut h = 0;
-    if drive::sector(dst, &mut h) {
+    let s = st();
+    s.no_hash = 1;
+    let ok = drive::sector(dst, &mut h);
+    s.no_hash = 0;
+    if ok {
         code::OK
     } else {
         code::READ

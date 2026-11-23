@@ -123,6 +123,36 @@ extern "C" fn __core_boot_rs(a0: u32, a1: u32, a2: u32, a3: u32) {
 
 const CORE_HASH_WORDS: u32 = (LEN / 4) as u32;
 
+// The jump table's slots as absolute symbols, from psx-scene-abi: the `extern "C"` declarations
+// above resolve to them, so every call is a direct `jal` and the addresses exist in one place.
+#[cfg(target_arch = "mips")]
+core::arch::global_asm!(
+    ".globl __psx_core_attach", ".set __psx_core_attach, {attach}",
+    ".globl psx_core_switch", ".set psx_core_switch, {switch}",
+    ".globl psx_core_read", ".set psx_core_read, {read}",
+    ".globl psx_core_pause", ".set psx_core_pause, {pause}",
+    ".globl psx_core_client_attach", ".set psx_core_client_attach, {client_attach}",
+    ".globl psx_core_client_detach", ".set psx_core_client_detach, {client_detach}",
+    ".globl psx_core_fatal", ".set psx_core_fatal, {fatal}",
+    ".globl psx_core_music_yield", ".set psx_core_music_yield, {music_yield}",
+    ".globl psx_core_stream_open", ".set psx_core_stream_open, {stream_open}",
+    ".globl psx_core_stream_sector", ".set psx_core_stream_sector, {stream_sector}",
+    ".globl psx_core_cd", ".set psx_core_cd, {cd}",
+    ".globl psx_core_set_idle_hook", ".set psx_core_set_idle_hook, {set_idle_hook}",
+    attach = const abi::slot::ATTACH,
+    switch = const abi::slot::SWITCH,
+    read = const abi::slot::READ,
+    pause = const abi::slot::PAUSE,
+    client_attach = const abi::slot::CLIENT_ATTACH,
+    client_detach = const abi::slot::CLIENT_DETACH,
+    fatal = const abi::slot::FATAL,
+    music_yield = const abi::slot::MUSIC_YIELD,
+    stream_open = const abi::slot::STREAM_OPEN,
+    stream_sector = const abi::slot::STREAM_SECTOR,
+    cd = const abi::slot::CD,
+    set_idle_hook = const abi::slot::SET_IDLE_HOOK,
+);
+
 #[cfg(target_arch = "mips")]
 core::arch::global_asm!(
     ".section .text.__core_boot,\"ax\",@progbits",

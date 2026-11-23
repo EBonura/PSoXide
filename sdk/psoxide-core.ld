@@ -10,19 +10,7 @@
  */
 __initial_pc = __core_boot;
 
-/* The core's jump table: one slot per call, fixed by the ABI. */
-__psx_core_attach       = 0x801FDF00;
-psx_core_switch         = 0x801FDF08;
-psx_core_read           = 0x801FDF10;
-psx_core_pause          = 0x801FDF18;
-psx_core_client_attach  = 0x801FDF20;
-psx_core_client_detach  = 0x801FDF28;
-psx_core_fatal          = 0x801FDF30;
-psx_core_music_yield    = 0x801FDF38;
-psx_core_stream_open    = 0x801FDF40;
-psx_core_stream_sector  = 0x801FDF48;
-psx_core_cd             = 0x801FDF50;
-psx_core_set_idle_hook  = 0x801FDF58;
+/* The jump table's slot symbols come from psx-core (`link`), which takes them from psx-scene-abi. */
 
 SECTIONS {
     /* The stored copy, right after .data. psoxide.ld lays .bss over it, so it costs the program no

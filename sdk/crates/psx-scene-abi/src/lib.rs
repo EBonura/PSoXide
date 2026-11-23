@@ -153,7 +153,7 @@ pub mod stack {
     /// `psx_core_stream_open`.
     pub const STREAM_OPEN: u32 = 184;
     /// `psx_core_stream_sector`.
-    pub const STREAM_SECTOR: u32 = 96;
+    pub const STREAM_SECTOR: u32 = 104;
     /// `psx_core_cd`.
     pub const CD: u32 = 120;
     /// `psx_core_set_idle_hook`.
