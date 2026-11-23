@@ -558,17 +558,15 @@ fn bless(o: &Options) -> Result<ExitCode, String> {
         ..Baseline::default()
     };
     for size in &game.sizes {
-        let map = game
-            .build(&size.build)
-            .and_then(|b| b.map_path(&o.repo))
+        let map = size
+            .map_path(&game, &o.repo)
             .ok_or("[size] build has no map")?;
         let text =
             std::fs::read_to_string(&map).map_err(|e| format!("read {}: {e}", map.display()))?;
-        base.size
-            .insert(size.build.clone(), stage::size::measure(&text)?);
+        base.size.insert(size.key(), stage::size::measure(&text)?);
         // Kept under its digest so a later size change can be explained by function.
         base.maps
-            .insert(size.build.clone(), stage::size::keep_map(&ctx, &map)?);
+            .insert(size.key(), stage::size::keep_map(&ctx, &map)?);
     }
     // The game's host checks first: they take minutes, the journeys most of a bless, and a host
     // refusal stops the bless either way.

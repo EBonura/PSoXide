@@ -148,6 +148,11 @@ impl Shared {
             if let Some(path) = source.filter(|p| p.is_file()) {
                 symbols.insert(b.name.clone(), util::sha256_file(&path)?);
             }
+            // Only a build with `images` has this list, so every other key is unchanged.
+            let images = b.out_dir(&ctx.repo).join(super::build::IMAGE_SYMBOLS);
+            if !b.images.is_empty() && images.is_file() {
+                symbols.insert(format!("{}:images", b.name), util::sha256_file(&images)?);
+            }
         }
         let mut dirs: Vec<PathBuf> = journeys
             .iter()

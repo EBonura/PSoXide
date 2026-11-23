@@ -146,6 +146,10 @@ fn measure(ctx: &Ctx<'_>, s: &Stack) -> Result<(u32, bool), String> {
         if list.is_file() {
             key.file(&format!("symbols {}", b.name), &list)?;
         }
+        let images = b.out_dir(&ctx.repo).join(super::build::IMAGE_SYMBOLS);
+        if !b.images.is_empty() && images.is_file() {
+            key.file(&format!("images {}", b.name), &images)?;
+        }
     }
     key.part("gate", crate::config::GATE_REVISION);
     key.part(

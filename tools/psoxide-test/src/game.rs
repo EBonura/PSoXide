@@ -169,6 +169,14 @@ pub struct Build {
     /// lacks). Not written into the receipt key when unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order: Option<String>,
+    /// Other programs this build links beside its own `map` (the scene core's prebuilt image,
+    /// a boot scene), each with its own link map inside `out`. The harness writes
+    /// `images.sym` beside them: every image symbol as `<image>:<name>`, a symbol list the gate
+    /// and the adapters read, so two links that share SDK names never make a name ambiguous.
+    /// The build's own `map` keeps its unprefixed names. `[[size]] image` judges one of them.
+    /// Not written into the receipt key when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<Image>,
     /// A manifest the build writes into `out` naming the programs it carries (a disc image):
     /// a JSON array of `{ index, id, exe_sha256, map, words? }`, `map` relative to `out`. The
     /// harness writes `members.sym` beside it (every member symbol as `<slug>:<name>`) and checks
@@ -185,6 +193,21 @@ pub struct Build {
     pub exclude: Vec<String>,
 }
 
+/// One more program of a build, with its own link.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct Image {
+    /// The symbol prefix (`core` gives `core:__psx_rt_vblank_count`): lowercase letters,
+    /// digits and `-`.
+    pub name: String,
+    /// Its link map, inside `out`.
+    pub map: String,
+    /// Its executable inside `out`, when the build collects it (the install names it among the
+    /// disc's programs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exe: Option<String>,
+}
+
 fn default_exclude() -> Vec<String> {
     ["tests/", GAME_FILE, BASELINE_FILE]
         .iter()
@@ -197,6 +220,15 @@ fn default_exclude() -> Vec<String> {
 #[serde(deny_unknown_fields)]
 pub struct Size {
     pub build: String,
+    /// One of the build's `images` instead of its own `map`: its own bar, its own baseline
+    /// entry `<build>:<image>`.
+    #[serde(default)]
+    pub image: Option<String>,
+    /// An absolute ceiling on `.text + .data + .bss` of the measured link, judged on every run
+    /// with or without a baseline (a resident image with a fixed window, such as the scene
+    /// core's 10,240 B).
+    #[serde(default)]
+    pub max_bytes: Option<u32>,
     /// Bytes `.text` may grow over the baseline (default 0).
     #[serde(default)]
     pub text_max_growth: u32,
@@ -566,10 +598,44 @@ impl Game {
                 ))
             }
         };
+        for b in &self.builds {
+            let mut seen = std::collections::BTreeSet::new();
+            for image in &b.images {
+                let valid = !image.name.is_empty()
+                    && image
+                        .name
+                        .bytes()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-');
+                if !valid || !seen.insert(image.name.as_str()) {
+                    return Err(format!(
+                        "build `{}`: image `{}` needs a unique name of lowercase letters, digits \
+                         and `-` (its symbol prefix)",
+                        b.name, image.name
+                    ));
+                }
+                if b.map.is_none() {
+                    return Err(format!(
+                        "build `{}`: images sit beside the build's own `map`: declare it",
+                        b.name
+                    ));
+                }
+            }
+        }
         for size in &self.sizes {
             known(&size.build, "[[size]]")?;
             if self.build(&size.build).is_some_and(|b| b.map.is_none()) {
                 return Err(format!("[size]: build `{}` declares no map", size.build));
+            }
+            if let Some(image) = &size.image {
+                if self
+                    .build(&size.build)
+                    .is_some_and(|b| !b.images.iter().any(|i| &i.name == image))
+                {
+                    return Err(format!(
+                        "[[size]]: build `{}` declares no image `{image}`",
+                        size.build
+                    ));
+                }
             }
             if (size.text_max_growth != 0 || size.free_min_drop != 0)
                 && size.reason.as_deref().is_none_or(str::is_empty)
@@ -852,6 +918,30 @@ impl Build {
     pub fn map_path(&self, repo: &Path) -> Option<PathBuf> {
         self.map.as_ref().map(|m| self.out_dir(repo).join(m))
     }
+
+    /// The image of this name.
+    pub fn image(&self, name: &str) -> Option<&Image> {
+        self.images.iter().find(|i| i.name == name)
+    }
+}
+
+impl Size {
+    /// The baseline and fact name of this bar: the build, or `<build>:<image>`.
+    pub fn key(&self) -> String {
+        match &self.image {
+            Some(image) => format!("{}:{image}", self.build),
+            None => self.build.clone(),
+        }
+    }
+
+    /// The link map this bar measures.
+    pub fn map_path(&self, game: &Game, repo: &Path) -> Option<PathBuf> {
+        let build = game.build(&self.build)?;
+        match &self.image {
+            Some(name) => Some(build.out_dir(repo).join(&build.image(name)?.map)),
+            None => build.map_path(repo),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -964,6 +1054,40 @@ map = "link.map"
         assert!(Game::parse(&format!("{mapless}{c}{until}after = 600\n"))
             .unwrap_err()
             .contains("no map"));
+    }
+
+    #[test]
+    fn images_are_named_and_a_size_bar_can_judge_one() {
+        let images = "images = [{ name = \"core\", map = \"core.map\", exe = \"core.exe\" }]\n";
+        let text = format!("{MINIMAL}{images}[[size]]\nbuild = \"ship\"\n[[size]]\nbuild = \"ship\"\nimage = \"core\"\nmax_bytes = 10240\n");
+        let game = Game::parse(&text).unwrap();
+        assert_eq!(game.builds[0].images[0].exe.as_deref(), Some("core.exe"));
+        assert_eq!(game.sizes[0].key(), "ship");
+        assert_eq!(game.sizes[1].key(), "ship:core");
+        let repo = Path::new("/r");
+        assert_eq!(
+            game.sizes[1].map_path(&game, repo),
+            Some(PathBuf::from("/r/build/ship/core.map"))
+        );
+        assert_eq!(
+            game.sizes[0].map_path(&game, repo),
+            Some(PathBuf::from("/r/build/ship/link.map"))
+        );
+        let unknown = text.replace("image = \"core\"", "image = \"boot\"");
+        assert!(Game::parse(&unknown)
+            .unwrap_err()
+            .contains("no image `boot`"));
+        let bad = format!("{MINIMAL}images = [{{ name = \"Core\", map = \"c.map\" }}]\n");
+        assert!(Game::parse(&bad).unwrap_err().contains("lowercase"));
+        let twice = format!(
+            "{MINIMAL}images = [{{ name = \"core\", map = \"a.map\" }}, {{ name = \"core\", map = \"b.map\" }}]\n"
+        );
+        assert!(Game::parse(&twice).unwrap_err().contains("unique"));
+        // A build without images serializes as before (its receipt key is unchanged).
+        let plain = Game::parse(MINIMAL).unwrap();
+        assert!(!serde_json::to_string(&plain.builds[0])
+            .unwrap()
+            .contains("images"));
     }
 
     #[test]

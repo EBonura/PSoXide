@@ -105,6 +105,11 @@ pub fn run(ctx: &mut Ctx<'_>) -> StageResult {
                     }
                 }
             }
+            if !build.images.is_empty() && !out.join(IMAGE_SYMBOLS).is_file() {
+                if let Err(e) = write_image_symbols(build, &out) {
+                    return failed(&build.name, e);
+                }
+            }
             let mut outcome = stored.unwrap_or_default();
             // Judge the logs of the build the receipt stands for with today's rules (a
             // receipt written before a rule existed must not hide a refusal or a short bind).
@@ -252,6 +257,9 @@ fn one(ctx: &Ctx<'_>, build: &Build, key: &str) -> Outcome {
             return Outcome::error(&build.name, e);
         }
     }
+    if let Err(e) = write_image_symbols(build, &out) {
+        return Outcome::error(&build.name, e);
+    }
     if let Some(manifest) = &build.members {
         let path = out.join(manifest);
         if let Err(e) = super::requires::read_manifest(&path)
@@ -386,6 +394,8 @@ fn recorded_output(ctx: &Ctx<'_>, build: &Build, key: &str) -> String {
 /// The symbol list every build with a map writes into its `out`: `address name` per symbol,
 /// with lld's `(.N)` section suffix stripped, which the gate and the harness both read.
 pub const SYMBOLS_FILE: &str = "symbols.txt";
+/// The prefixed symbol list of a build's `images`, beside its own symbol list.
+pub const IMAGE_SYMBOLS: &str = "images.sym";
 
 /// psoxide-pgo's own refusal lines: a driver that catches them and links anyway still fails.
 const PGO_REFUSALS: &[&str] = &["UNBOUND PROFILE:", "the layout profile binds"];
@@ -484,12 +494,54 @@ pub fn write_symbols(map: &Path, out: &Path) -> Result<(), String> {
     std::fs::write(out, body).map_err(|e| format!("write {}: {e}", out.display()))
 }
 
-/// The symbols a condition on this build's programs resolves against: its link map. `None`
-/// when the build declares no map.
+/// Write `images.sym` into `out` for a build with `images`: each image's map symbols as
+/// `<image>:<name>`, `(.N)` stripped. A build without images writes nothing.
+pub fn write_image_symbols(build: &Build, out: &Path) -> Result<(), String> {
+    if build.images.is_empty() {
+        return Ok(());
+    }
+    let mut lines = std::collections::BTreeSet::new();
+    for image in &build.images {
+        let path = out.join(&image.map);
+        let text = std::fs::read_to_string(&path).map_err(|e| {
+            format!(
+                "image `{}`: read its map {}: {e} (collect it into out)",
+                image.name,
+                path.display()
+            )
+        })?;
+        for section in &psoxide_size::map::parse(&text).sections {
+            for sym in &section.syms {
+                let name = strip_section_suffix(&sym.name);
+                if !name.contains(char::is_whitespace) {
+                    lines.insert(format!("{:08x} {}:{name}", sym.vma, image.name));
+                }
+            }
+        }
+    }
+    let mut body = String::new();
+    for line in lines {
+        body.push_str(&line);
+        body.push('\n');
+    }
+    let path = out.join(IMAGE_SYMBOLS);
+    std::fs::write(&path, body).map_err(|e| format!("write {}: {e}", path.display()))
+}
+
+/// The symbols a condition on this build's programs resolves against: its link map, unprefixed,
+/// and its `images` as `<image>:<name>`. `None` when the build declares no map.
 pub fn symbols(repo: &Path, build: &Build) -> Option<Result<crate::journey::Symbols, String>> {
     let map = build.map_path(repo)?;
     let mut symbols = crate::journey::Symbols::default();
-    Some(symbols.load(&map).map(|()| symbols))
+    let images = build.out_dir(repo).join(IMAGE_SYMBOLS);
+    let loaded = symbols.load(&map).and_then(|()| {
+        if build.images.is_empty() {
+            Ok(())
+        } else {
+            symbols.load(&images)
+        }
+    });
+    Some(loaded.map(|()| symbols))
 }
 
 /// `name (.0)` -> `name`: lld's suffix for a symbol in a numbered section.
@@ -551,6 +603,58 @@ fn newest(repo: &Path, source: &str) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A link map with one symbol at `addr`, the way lld prints it.
+    fn map_with(name: &str, addr: u32) -> String {
+        format!(
+            "     VMA      LMA     Size Align Out     In      Symbol\n\
+             {addr:08x} {addr:08x}       10     4 .bss\n\
+             {addr:08x} {addr:08x}        4     4         a.o:(.bss.x)\n\
+             {addr:08x} {addr:08x}        4     1                 {name}\n"
+        )
+    }
+
+    #[test]
+    fn a_core_and_a_game_map_load_together_without_making_sdk_names_ambiguous() {
+        let dir = tempfile::tempdir().unwrap();
+        let game = crate::game::Game::parse(
+            "schema = 1\nname = \"G\"\nrepository = \"o/g\"\n[[build]]\nname = \"ship\"\n\
+             out = \"out\"\ncommands = [[\"make\"]]\ndisc = \"g.cue\"\nmap = \"game.map\"\n\
+             images = [{ name = \"core\", map = \"core.map\" }]\n",
+        )
+        .unwrap();
+        let build = &game.builds[0];
+        let out = build.out_dir(dir.path());
+        std::fs::create_dir_all(&out).unwrap();
+        // Both links carry psx-rt, so both define the SDK's VBlank counter.
+        std::fs::write(
+            out.join("game.map"),
+            map_with("__psx_rt_vblank_count", 0x8012_0000),
+        )
+        .unwrap();
+        std::fs::write(
+            out.join("core.map"),
+            map_with("__psx_rt_vblank_count", 0x801f_e000),
+        )
+        .unwrap();
+        // Loaded raw, the two maps make the name ambiguous (the rule is never a pick).
+        let mut raw = crate::journey::Symbols::default();
+        raw.load(&out.join("game.map")).unwrap();
+        raw.load(&out.join("core.map")).unwrap();
+        assert!(raw.resolve("__psx_rt_vblank_count").is_err());
+        // Through the build: the game's names stay unprefixed, the core's are `core:`.
+        write_image_symbols(build, &out).unwrap();
+        let listed = std::fs::read_to_string(out.join(IMAGE_SYMBOLS)).unwrap();
+        assert_eq!(listed, "801fe000 core:__psx_rt_vblank_count\n");
+        let s = symbols(dir.path(), build).unwrap().unwrap();
+        assert_eq!(s.resolve("__psx_rt_vblank_count"), Ok(0x8012_0000));
+        assert_eq!(s.resolve("core:__psx_rt_vblank_count"), Ok(0x801f_e000));
+        // A missing image map says to collect it.
+        std::fs::remove_file(out.join("core.map")).unwrap();
+        assert!(write_image_symbols(build, &out)
+            .unwrap_err()
+            .contains("collect it"));
+    }
 
     #[test]
     fn a_build_naming_no_layout_files_keeps_its_declaration_and_key() {

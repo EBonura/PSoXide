@@ -93,6 +93,24 @@ pub fn judge(now: SizeBase, base: Option<SizeBase>, growth: u32, drop: u32) -> V
     ]
 }
 
+/// The absolute ceiling of a `[[size]]` with `max_bytes`: `.text + .data + .bss` of the link.
+pub fn ceiling(now: SizeBase, max: u32) -> Check {
+    let span = u64::from(now.text) + u64::from(now.data) + u64::from(now.bss);
+    let value = format!(
+        "{span} B of {max} (text {} + data {} + bss {})",
+        now.text, now.data, now.bss
+    );
+    if span <= u64::from(max) {
+        Check::pass(
+            "span",
+            format!("{value}, {} B spare", u64::from(max) - span),
+        )
+    } else {
+        Check::new("span", crate::report::Status::Fail, value)
+            .detail(format!("{} B over the ceiling", span - u64::from(max)))
+    }
+}
+
 /// The size stage: one link per `[[size]]` entry, checks named after its build when there are
 /// several.
 pub fn run(ctx: &Ctx<'_>) -> StageResult {
@@ -101,7 +119,7 @@ pub fn run(ctx: &Ctx<'_>) -> StageResult {
     let mut hits = 0;
     for size in &ctx.game.sizes {
         let prefix = if ctx.game.sizes.len() > 1 {
-            format!("{} ", size.build)
+            format!("{} ", size.key())
         } else {
             String::new()
         };
@@ -113,7 +131,7 @@ pub fn run(ctx: &Ctx<'_>) -> StageResult {
                     checks.push(c);
                 }
                 for (k, v) in outcome.facts {
-                    facts.insert(format!("{}/{k}", size.build), v);
+                    facts.insert(format!("{}/{k}", size.key()), v);
                 }
             }
             Err(e) => checks.push(Check::fail(format!("{prefix}size"), e)),
@@ -135,22 +153,18 @@ pub fn run(ctx: &Ctx<'_>) -> StageResult {
 }
 
 fn one(ctx: &Ctx<'_>, size: &crate::game::Size) -> Result<(Outcome, bool), String> {
-    let map = ctx
-        .game
-        .build(&size.build)
-        .and_then(|b| b.map_path(&ctx.repo))
-        .ok_or("no map")?;
+    let map = size.map_path(ctx.game, &ctx.repo).ok_or("no map")?;
     let mut key = Key::new("size");
     key.file("map", &map)?;
     let base = ctx
         .baseline
         .as_ref()
-        .and_then(|b| b.size.get(&size.build).copied());
+        .and_then(|b| b.size.get(&size.key()).copied());
     key.part("baseline", &format!("{base:?}"));
     let base_map = ctx
         .baseline
         .as_ref()
-        .and_then(|b| b.maps.get(&size.build).cloned());
+        .and_then(|b| b.maps.get(&size.key()).cloned());
     key.part("baseline map", base_map.as_deref().unwrap_or(""));
     if let Some(digest) = &base_map {
         key.part(
@@ -162,14 +176,21 @@ fn one(ctx: &Ctx<'_>, size: &crate::game::Size) -> Result<(Outcome, bool), Strin
         "tolerance",
         &format!("{} {}", size.text_max_growth, size.free_min_drop),
     );
+    // Only a bar with a ceiling has it, so every other bar keeps its key.
+    if let Some(max) = size.max_bytes {
+        key.part("max bytes", &max.to_string());
+    }
     let key = key.finish();
     if let Some(outcome) = ctx.receipts.get("size", &key) {
-        println!("RECEIPT HIT size {} {}", size.build, util::short(&key));
+        println!("RECEIPT HIT size {} {}", size.key(), util::short(&key));
         return Ok((outcome, true));
     }
     let text = std::fs::read_to_string(&map).map_err(|e| format!("read {}: {e}", map.display()))?;
     let now = measure(&text)?;
     let mut checks = judge(now, base, size.text_max_growth, size.free_min_drop);
+    if let Some(max) = size.max_bytes {
+        checks.push(ceiling(now, max));
+    }
     if let (Some(base), Some(digest)) = (base, &base_map) {
         if base.text != now.text {
             checks.push(explain(&stored_map(ctx, digest), digest, &text));
@@ -367,6 +388,25 @@ mod tests {
         assert!(judge(better, Some(BASE), 0, 0)
             .iter()
             .all(|c| c.status == Status::Pass));
+    }
+
+    #[test]
+    fn a_ceiling_is_judged_on_text_data_and_bss_together() {
+        // The scene core's window (CORE-ABI): 10,240 B.
+        let core = SizeBase {
+            text: 7000,
+            data: 200,
+            bss: 900,
+            free: None,
+        };
+        let c = ceiling(core, 10_240);
+        assert_eq!(c.status, Status::Pass);
+        assert!(c.value.contains("8100 B of 10240") && c.value.contains("2140 B spare"));
+        let over = SizeBase { text: 9500, ..core };
+        let c = ceiling(over, 10_240);
+        assert_eq!(c.status, Status::Fail);
+        assert!(c.detail.contains("360 B over"), "{}", c.detail);
+        assert_eq!(ceiling(over, 10_600).status, Status::Pass);
     }
 
     #[test]
