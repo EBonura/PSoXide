@@ -790,7 +790,7 @@ pub fn check_approved(
             }
         }
     }
-    // Loads: never more VBlanks than the installed build took (Manny 11-23: everything loads at
+    // Loads: never more VBlanks than the installed build took (the owner, 11-23: everything loads at
     // the same speed or faster). A row new to this install has nothing to be slower than.
     for (name, old_l) in &old.loads {
         let now_id = j.load_identities.get(name);
