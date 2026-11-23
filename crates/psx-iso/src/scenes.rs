@@ -34,19 +34,30 @@
 pub use psx_scene_abi as abi;
 
 use alloc::string::String;
-use alloc::vec;
 use alloc::vec::Vec;
+use alloc::{format, vec};
 
 use psx_scene_abi::{
     block, encode_table, rows_capacity, word_fnv, Kind, Row, TableError, BOOT_EXE_LBA, CORE_WINDOW,
-    LOAD_ADDR, NO_SCENE, PAYLOAD_END, SECTOR_BYTES, TABLE_FILE_NAME, TABLE_LBA,
+    LOAD_ADDR, NO_SCENE, PAYLOAD_END, SECTOR_BYTES, STACK_INIT, TABLE_FILE_NAME, TABLE_LBA,
 };
 
 use crate::{
-    cd_stream_bench_payload, default_system_cnf, pad_to_payload, Exe, IsoBuilder,
-    PlaytestLayoutError, CD_STREAM_BENCH_FILE_NAME, PLAYTEST_FIRST_FILE_LBA, UI_PACK_FILE_NAME,
+    cd_stream_bench_payload, pad_to_payload, Exe, IsoBuilder, PlaytestLayoutError,
+    CD_STREAM_BENCH_FILE_NAME, PLAYTEST_FIRST_FILE_LBA, UI_PACK_FILE_NAME,
     WORLD_PACK_DEFAULT_START_LBA, WORLD_PACK_FILE_NAME,
 };
+
+/// `SYSTEM.CNF` for a scene disc: the default one with `STACK` at the core window's base.
+///
+/// psx-rt's `_start` never sets `$sp`; the BIOS does, from this `STACK` line, not from the exe
+/// header. The default `801FFFF0` would start the boot program's stack inside the core window,
+/// so a scene disc starts it at [`STACK_INIT`], where every hosting program's link puts it.
+#[must_use]
+pub fn scene_system_cnf() -> Vec<u8> {
+    format!("BOOT = cdrom:\\PSX.EXE;1\r\nTCB = 4\r\nEVENT = 10\r\nSTACK = {STACK_INIT:08X}\r\n")
+        .into_bytes()
+}
 
 /// Name the boot exe must have: `SYSTEM.CNF` boots it.
 pub const BOOT_EXE_NAME: &str = "PSX.EXE";
@@ -357,7 +368,7 @@ pub fn add_scene_disc_files(
     }
 
     debug_assert_eq!(PLAYTEST_FIRST_FILE_LBA + 1, TABLE_LBA);
-    builder.add_file("SYSTEM.CNF", default_system_cnf());
+    builder.add_file("SYSTEM.CNF", scene_system_cnf());
     builder.add_file(TABLE_FILE_NAME, vec![0u8; SECTOR_BYTES]);
     builder.add_file(BOOT_EXE_NAME, files[boot].clone());
     // Slots in table order: contiguous with the boot exe while they fit, the

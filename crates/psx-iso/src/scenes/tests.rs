@@ -72,6 +72,18 @@ fn the_table_sits_at_22_the_boot_exe_at_23_and_scenes_follow_it() {
     let booted = load_boot_exe_from_disc(&disc).expect("boots");
     assert_eq!(booted.exe.payload, boot_payload);
     assert_eq!(disc.find_file("SYSTEM.CNF").unwrap().lba, 21);
+    // The BIOS takes the stack from SYSTEM.CNF: it starts at the core window's base.
+    let cnf = disc.read_file("SYSTEM.CNF").unwrap();
+    assert_eq!(cnf, scene_system_cnf());
+    let cnf = String::from_utf8(cnf).unwrap();
+    assert!(cnf.contains(&format!("STACK = {:08X}\r\n", psx_scene_abi::STACK_INIT)));
+    assert!(!cnf.contains("801FFFF0"));
+    assert_eq!(
+        cnf.replace(&format!("{:08X}", psx_scene_abi::STACK_INIT), "801FFFF0")
+            .into_bytes(),
+        crate::default_system_cnf(),
+        "only the STACK value differs from the default"
+    );
     assert_eq!(disc.find_file(TABLE_FILE_NAME).unwrap().lba, TABLE_LBA);
     assert_eq!(disc.find_file(BOOT_EXE_NAME).unwrap().lba, BOOT_EXE_LBA);
     // The first scene is contiguous with the boot exe: 23 + 1 header + 3.
