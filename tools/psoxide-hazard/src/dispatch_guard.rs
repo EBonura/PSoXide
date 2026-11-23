@@ -335,10 +335,59 @@ fn through_trampoline(image: &GuardImage, dest: i64) -> i64 {
     dest
 }
 
-/// Every `jal`, and every `j` out of its own function, by callee: the sites that call it.
+/// The constant the register a `jalr` at `at` jumps through holds, when every path into it sets
+/// the same one (`lui`/`addiu`/`ori`/`move`, as an argument is followed).
+pub(crate) fn jalr_target(image: &GuardImage, at: i64) -> Option<i64> {
+    let (start, end, _) = image.map.function(at)?;
+    jalr_target_in(image, start, &branch_sources(image, start, end)?, at)
+}
+
+/// [`jalr_target`] for a `jalr` in the function at `start` whose branches are `sources`.
+fn jalr_target_in(
+    image: &GuardImage,
+    start: i64,
+    sources: &HashMap<i64, Vec<i64>>,
+    at: i64,
+) -> Option<i64> {
+    let args = image.listing.args(at);
+    let register = fields(args).last().copied()?.to_string();
+    let mut search = Search {
+        image,
+        start,
+        sources,
+        looked_at: 0,
+        visited: HashSet::new(),
+    };
+    match search.before(at, &register, &[]) {
+        Value::Constant(target) => Some(target),
+        _ => None,
+    }
+}
+
+/// Every `jal`, every `j` out of its own function, and every `jalr` into the scene core's window
+/// whose register it can resolve, by callee: the sites that call it.
 fn call_sites(image: &GuardImage) -> HashMap<i64, Vec<i64>> {
+    let window = psx_scene_abi::CORE_WINDOW;
     let mut sites: HashMap<i64, Vec<i64>> = HashMap::new();
+    let mut sources: HashMap<i64, Option<HashMap<i64, Vec<i64>>>> = HashMap::new();
     for (at, entry) in image.listing.iter() {
+        if entry.op == "jalr" {
+            let Some((start, end, _)) = image.map.function(at) else {
+                continue;
+            };
+            let own = sources
+                .entry(start)
+                .or_insert_with(|| branch_sources(image, start, end));
+            let dest = own
+                .as_ref()
+                .and_then(|own| jalr_target_in(image, start, own, at));
+            if let Some(dest) = dest {
+                if i64::from(window.start) <= dest && dest < i64::from(window.end) {
+                    sites.entry(dest).or_default().push(at);
+                }
+            }
+            continue;
+        }
         if entry.op != "jal" && entry.op != "j" {
             continue;
         }
@@ -359,18 +408,18 @@ fn call_sites(image: &GuardImage) -> HashMap<i64, Vec<i64>> {
 
 /// A handler the program registers.
 #[derive(Debug)]
-struct Registered {
-    address: i64,
+pub(crate) struct Registered {
+    pub(crate) address: i64,
     /// Functions that register it.
-    from: Vec<String>,
+    pub(crate) from: Vec<String>,
 }
 
 /// What the scan found.
 #[derive(Debug, Default)]
-struct Registrations {
-    handlers: Vec<Registered>,
+pub(crate) struct Registrations {
+    pub(crate) handlers: Vec<Registered>,
     /// Registrations whose handler it could not resolve: where, and why.
-    unresolved: Vec<String>,
+    pub(crate) unresolved: Vec<String>,
 }
 
 /// Whether the function at `start` reads argument register `arg` before it writes it, in its
@@ -460,17 +509,32 @@ fn specialised_handlers(
 }
 
 fn registrations(image: &GuardImage) -> Registrations {
-    let mut registrars: Vec<(i64, usize, usize)> = Vec::new();
+    let mut registrars: Vec<(i64, usize)> = Vec::new();
     for (address, names) in image.map.sorted_names() {
         for (_, name) in names {
             if let Some(&(_, arg)) = REGISTRARS
                 .iter()
                 .find(|(symbol, _)| is_function(name, symbol))
             {
-                registrars.push((address, arg, 0));
+                registrars.push((address, arg));
             }
         }
     }
+    registrations_through(image, &registrars, false)
+}
+
+/// The constant functions passed as argument `arg` to each registrar `(address, arg)`, through up
+/// to [`MAX_WRAPPERS`] levels of wrapper, and the sites it could not resolve. With `slots`, the
+/// registrars are scene core jump-table slots: code outside the program, so not searched for a
+/// stored handler or for whether they read the argument, and a constant 0 (`None`) registers
+/// nothing.
+pub(crate) fn registrations_through(
+    image: &GuardImage,
+    registrars: &[(i64, usize)],
+    slots: bool,
+) -> Registrations {
+    let mut registrars: Vec<(i64, usize, usize)> =
+        registrars.iter().map(|&(at, arg)| (at, arg, 0)).collect();
     let callers = call_sites(image);
     let mut source_cache: HashMap<i64, Option<HashMap<i64, Vec<i64>>>> = HashMap::new();
     let mut found = Registrations::default();
@@ -490,25 +554,27 @@ fn registrations(image: &GuardImage) -> Registrations {
         if !seen.insert((registrar, arg)) {
             continue;
         }
-        let Some((_, end, registrar_name)) = image.map.function(registrar) else {
-            continue;
-        };
-        let own = source_cache
-            .entry(registrar)
-            .or_insert_with(|| branch_sources(image, registrar, end));
-        if depth == 0 {
-            if let Some(sources) = own {
-                for address in specialised_handlers(image, (registrar, end), sources) {
-                    add(
-                        &mut found,
-                        address,
-                        format!("{} (the handler is in its code)", short(&registrar_name)),
-                    );
+        if !(slots && depth == 0) {
+            let Some((_, end, registrar_name)) = image.map.function(registrar) else {
+                continue;
+            };
+            let own = source_cache
+                .entry(registrar)
+                .or_insert_with(|| branch_sources(image, registrar, end));
+            if depth == 0 {
+                if let Some(sources) = own {
+                    for address in specialised_handlers(image, (registrar, end), sources) {
+                        add(
+                            &mut found,
+                            address,
+                            format!("{} (the handler is in its code)", short(&registrar_name)),
+                        );
+                    }
                 }
             }
-        }
-        if !reads_argument(image, registrar, end, arg) {
-            continue;
+            if !reads_argument(image, registrar, end, arg) {
+                continue;
+            }
         }
         for &site in callers.get(&registrar).map_or(&[][..], Vec::as_slice) {
             let Some((start, end, caller)) = image.map.function(site) else {
@@ -525,6 +591,7 @@ fn registrations(image: &GuardImage) -> Registrations {
                 ),
             };
             match value {
+                Value::Constant(0) if slots => {}
                 Value::Constant(address) => add(&mut found, address, place),
                 Value::Incoming(n) if depth < MAX_WRAPPERS => {
                     registrars.push((start, n, depth + 1));

@@ -1658,3 +1658,213 @@ fn both_entry_forms_are_roots() {
         assert!(out.contains("40 of 492 bytes"), "{out}");
     }
 }
+
+// Calls into the scene core's window: each jump-table slot costs its measured depth
+// (psx_scene_abi::stack), plus the deepest of the program's hooks it can run.
+
+use psx_scene_abi::{slot, stack as core_stack};
+
+/// `jal SLOT` with `a3` (the read's hook) set to `hook` in the delay slot, 0 for none.
+fn read_call(hook: u32) -> Vec<u32> {
+    if hook == 0 {
+        vec![jal(slot::READ), or("a3", "zero", "zero")]
+    } else {
+        vec![
+            lui("a3", hi(hook)),
+            jal(slot::READ),
+            addiu("a3", "a3", lo(hook)),
+        ]
+    }
+}
+
+#[test]
+fn a_call_into_the_core_costs_the_slots_depth() {
+    let mut fx = Fixture::new();
+    // A read with no hook and a switch from one function: the deeper of the two counts.
+    let body = [
+        prologue(16),
+        read_call(0),
+        vec![jal(slot::SWITCH), NOP],
+        epilogue(16),
+    ]
+    .concat();
+    let load = fx.function(2, "t::load", &body);
+    fx.caller(1, &entry(0, 1024), 8, &[load]);
+    let (failures, out) = fx.guard();
+    assert_eq!(failures, 0, "{out}");
+    assert_eq!(core_stack::SWITCH, 296);
+    let want = 8 + 16 + i64::from(core_stack::SWITCH.max(core_stack::READ));
+    assert!(out.contains(&format!("{want} of 1004 bytes")), "{out}");
+    // The switch's load is on its own stack, never the caller's.
+    assert!(
+        out.contains("t::load(16) > psx_core_switch@801fdf08(296)"),
+        "{out}"
+    );
+    assert!(!out.contains(&core_stack::SWITCH_LOAD.to_string()), "{out}");
+}
+
+#[test]
+fn a_tail_call_and_a_constant_register_call_reach_the_slot() {
+    let mut fx = Fixture::new();
+    let tail = fx.function(3, "t::pause", &[j(slot::PAUSE), NOP]);
+    let body = [
+        prologue(16),
+        vec![
+            lui("t9", hi(slot::STREAM_OPEN)),
+            addiu("t9", "t9", lo(slot::STREAM_OPEN)),
+            jalr("t9"),
+            NOP,
+            jal(tail),
+            NOP,
+        ],
+        epilogue(16),
+    ]
+    .concat();
+    let open = fx.function(2, "t::open", &body);
+    fx.caller(1, &entry(0, 1024), 8, &[open]);
+    let (failures, out) = fx.guard();
+    assert_eq!(failures, 0, "{out}");
+    let want = 8 + 16 + i64::from(core_stack::STREAM_OPEN.max(core_stack::PAUSE));
+    assert!(out.contains(&format!("{want} of 1004 bytes")), "{out}");
+    assert!(out.contains("psx_core_stream_open@801fdf40(184)"), "{out}");
+}
+
+#[test]
+fn a_call_into_the_cores_interior_is_refused() {
+    for (dest, why) in [
+        // Between two slots.
+        (
+            slot::READ + 4,
+            "not at the start of one of its 8-byte slots",
+        ),
+        // The first address past the table, and deep in the core's code.
+        (slot::TABLE_END, "past its jump table (12 slots"),
+        (slot::TABLE_END + 0x400, "past its jump table"),
+    ] {
+        let mut fx = Fixture::new();
+        let body = [prologue(16), vec![jal(dest), NOP], epilogue(16)].concat();
+        let f = fx.function(2, "t::inside", &body);
+        fx.caller(1, &entry(0, 1024), 8, &[f]);
+        let (failures, out) = fx.guard();
+        assert_eq!(failures, 1, "{dest:08x}: {out}");
+        assert!(
+            out.contains(&format!("t::inside calls {dest:08x}")),
+            "{out}"
+        );
+        assert!(out.contains(why), "{dest:08x}: {out}");
+    }
+}
+
+#[test]
+fn the_idle_hook_adds_to_every_slot_that_waits() {
+    let mut fx = Fixture::new();
+    let deep = fx.leaf(5, "t::deep", 24);
+    let idle = fx.caller(4, "t::idle", 40, &[deep]);
+    // Registered outside the tree, as a program's main does.
+    fx.function(
+        3,
+        "t::main",
+        &[
+            lui("a0", hi(idle)),
+            jal(slot::SET_IDLE_HOOK),
+            addiu("a0", "a0", lo(idle)),
+            jr("ra"),
+            NOP,
+        ],
+    );
+    let body = [
+        prologue(16),
+        vec![jal(slot::PAUSE), NOP, jal(slot::MUSIC_YIELD), NOP],
+        epilogue(16),
+    ]
+    .concat();
+    let f = fx.function(2, "t::f", &body);
+    fx.caller(1, &entry(0, 1024), 8, &[f]);
+    let (failures, out) = fx.guard();
+    assert_eq!(failures, 0, "{out}");
+    let want = 8 + 16 + i64::from(core_stack::PAUSE) + 64;
+    assert!(out.contains(&format!("{want} of 1004 bytes")), "{out}");
+    assert!(
+        out.contains("psx_core_pause@801fdf18(176) > t::idle(40) > t::deep(24)"),
+        "{out}"
+    );
+}
+
+#[test]
+fn the_reads_sector_hook_adds_to_the_read() {
+    let mut fx = Fixture::new();
+    let hook = fx.leaf(3, "t::on_sector", 100);
+    let body = [prologue(16), read_call(hook), epilogue(16)].concat();
+    let f = fx.function(2, "t::load", &body);
+    fx.caller(1, &entry(0, 1024), 8, &[f]);
+    let (failures, out) = fx.guard();
+    assert_eq!(failures, 0, "{out}");
+    let want = 8 + 16 + i64::from(core_stack::READ) + 100;
+    assert!(out.contains(&format!("{want} of 1004 bytes")), "{out}");
+    assert!(
+        out.contains("psx_core_read@801fdf10(264) > t::on_sector(100)"),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_hook_it_cannot_resolve_is_refused_unless_named() {
+    let mut fx = Fixture::new();
+    fx.leaf(3, "t::on_sector", 100);
+    // The hook comes from memory.
+    let body = [
+        prologue(16),
+        vec![lw("a3", 0, "a0"), jal(slot::READ), NOP],
+        epilogue(16),
+    ]
+    .concat();
+    let f = fx.function(2, "t::load", &body);
+    fx.caller(1, &entry(0, 1024), 8, &[f]);
+    let (failures, out) = fx.guard();
+    assert_eq!(failures, 1, "{out}");
+    assert!(
+        out.contains("psx_core_read runs the program's per-sector hook"),
+        "{out}"
+    );
+    assert!(out.contains("--core-hook REGEX"), "{out}");
+    let (exe, map) = fx.write();
+    let (exe, map) = (exe.to_str().unwrap(), map.to_str().unwrap());
+    let (status, out) = call(
+        stack_guard::main,
+        &[exe, map, "--core-hook", "^t::on_sector$"],
+    );
+    assert_eq!(status, 0, "{out}");
+    let want = 8 + 16 + i64::from(core_stack::READ) + 100;
+    assert!(out.contains(&format!("{want} of 1004 bytes")), "{out}");
+    let (status, out) = call(
+        stack_guard::main,
+        &[exe, map, "--core-hook", "^t::nothing$"],
+    );
+    assert_eq!(status, 1, "{out}");
+    assert!(out.contains("no function matches the --core-hook"), "{out}");
+}
+
+#[test]
+fn a_hook_that_waits_on_the_core_is_refused() {
+    let mut fx = Fixture::new();
+    let hook = fx.function(
+        3,
+        "t::on_sector",
+        &[
+            addiu("sp", "sp", -8),
+            jal(slot::PAUSE),
+            NOP,
+            jr("ra"),
+            addiu("sp", "sp", 8),
+        ],
+    );
+    let body = [prologue(16), read_call(hook), epilogue(16)].concat();
+    let f = fx.function(2, "t::load", &body);
+    fx.caller(1, &entry(0, 1024), 8, &[f]);
+    let (failures, out) = fx.guard();
+    assert_eq!(failures, 1, "{out}");
+    assert!(
+        out.contains("the scene core hook t::on_sector calls psx_core_pause"),
+        "{out}"
+    );
+}
