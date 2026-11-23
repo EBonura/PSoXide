@@ -33,7 +33,7 @@ use alloc::vec::Vec;
 
 use psx_scene_abi::{
     block, encode_table, rows_capacity, word_fnv, Kind, Row, TableError, BOOT_EXE_LBA, CORE_WINDOW,
-    LOAD_ADDR, NO_SCENE, SECTOR_BYTES, TABLE_FILE_NAME, TABLE_LBA,
+    LOAD_ADDR, NO_SCENE, PAYLOAD_END, SECTOR_BYTES, TABLE_FILE_NAME, TABLE_LBA,
 };
 
 use crate::{
@@ -127,7 +127,8 @@ pub enum SceneDiscError {
     NotAnExe(String),
     /// A program's `t_size` is not whole sectors.
     TSize(String),
-    /// A program would load outside `0x80010000..` the core window.
+    /// A program would load outside `0x80010000..PAYLOAD_END` (the switch
+    /// stack and the core window above it).
     Bounds {
         /// The row's name.
         name: String,
@@ -333,7 +334,7 @@ pub fn add_scene_disc_files(
                 && exe
                     .load_addr
                     .checked_add(t_size)
-                    .is_some_and(|end| end <= CORE_WINDOW.start);
+                    .is_some_and(|end| end <= PAYLOAD_END);
             if !in_bounds {
                 return Err(SceneDiscError::Bounds {
                     name: slot.name.clone(),

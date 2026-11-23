@@ -138,6 +138,7 @@ name = "psx-iso"
 version = "0.1.0"
 dependencies = [
  "psx-pack",
+ "psx-scene-abi",
 ]
 
 [[package]]

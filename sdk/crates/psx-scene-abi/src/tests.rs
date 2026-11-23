@@ -45,6 +45,7 @@ fn memory_map_is_the_day_0_page() {
     // psoxide.ld: STACK_INIT = RAM_BASE + RAM_SIZE - 0x100.
     assert_eq!(RAM_SIZE_OVERRIDE, 0x1f_d800);
     assert_eq!(RAM_BASE + RAM_SIZE_OVERRIDE - 0x100, STACK_INIT);
+    assert_eq!(PAYLOAD_END, 0x801f_d300);
     assert!(CORE_WINDOW.holds(0x801f_d700, 0x801f_ff00));
     assert!(!CORE_WINDOW.holds(0x801f_d6fc, 0x801f_d800));
     assert!(!CORE_WINDOW.holds(0x801f_fe00, 0x801f_ff04));
@@ -62,7 +63,10 @@ fn jump_table_slots_are_the_day_0_addresses() {
         slot::CLIENT_DETACH,
         slot::FATAL,
         slot::MUSIC_YIELD,
-        slot::CD_PRIMITIVE,
+        slot::STREAM_OPEN,
+        slot::STREAM_SECTOR,
+        slot::CD,
+        slot::SET_IDLE_HOOK,
     ];
     let want = [
         0x801f_d700,
@@ -74,6 +78,9 @@ fn jump_table_slots_are_the_day_0_addresses() {
         0x801f_d730,
         0x801f_d738,
         0x801f_d740,
+        0x801f_d748,
+        0x801f_d750,
+        0x801f_d758,
     ];
     assert_eq!(slots, want);
 }

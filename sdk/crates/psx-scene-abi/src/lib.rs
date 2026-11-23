@@ -55,10 +55,12 @@ pub const RAM_BASE: u32 = 0x8000_0000;
 /// Where every scene's image loads (psoxide.ld's `LOAD_ADDR`, psyq.ld's).
 pub const LOAD_ADDR: u32 = 0x8001_0000;
 
-/// The core window: the prebuilt core's code, data, bss and its own stack,
-/// at the same addresses in every program that hosts it. Cap 10,240 B,
-/// target 8,192 B; P0 reports where the build lands, and this constant is
-/// the one place that moves if it does.
+/// The core window: the prebuilt core's code, data and bss, at the same
+/// addresses in every program that hosts it. The core keeps no stack here:
+/// a switch runs at the top of the outgoing program's stack reserve, every
+/// other call on the caller's stack. Cap 10,240 B, target 8,192 B; P0
+/// reports where the build lands, and this constant is the one place that
+/// moves if it does.
 pub const CORE_WINDOW: Span = Span {
     start: 0x801f_d700,
     end: 0x801f_ff00,
@@ -78,6 +80,13 @@ pub const STACK_INIT: u32 = CORE_WINDOW.start;
 /// (`-T` file before the script). psoxide.ld puts `STACK_INIT` 0x100 below
 /// `RAM_BASE + RAM_SIZE`, so this lands it on [`STACK_INIT`].
 pub const RAM_SIZE_OVERRIDE: u32 = STACK_INIT + 0x100 - RAM_BASE;
+
+/// Stack a switch runs on, below [`STACK_INIT`]: no payload may load into it.
+pub const SWITCH_STACK: u32 = 0x400;
+
+/// The highest address a Program row's payload may end at: the core refuses
+/// a row whose `t_addr + t_size` is above it (stage 0x24).
+pub const PAYLOAD_END: u32 = STACK_INIT - SWITCH_STACK;
 
 /// The core's jump table: one `j` per 8-byte slot at the start of the window.
 /// The addresses are the ABI, fixed across core builds.
@@ -102,9 +111,14 @@ pub mod slot {
     pub const FATAL: u32 = CORE_WINDOW.start + 6 * SLOT_BYTES;
     /// `psx_core_music_yield()`.
     pub const MUSIC_YIELD: u32 = CORE_WINDOW.start + 7 * SLOT_BYTES;
-    /// Reserved for the CD command primitive stream clients build on
-    /// (**provisional**: P2 decides its shape).
-    pub const CD_PRIMITIVE: u32 = CORE_WINDOW.start + 8 * SLOT_BYTES;
+    /// `psx_core_stream_open(lba, flags) -> u32`, a stream client's start.
+    pub const STREAM_OPEN: u32 = CORE_WINDOW.start + 8 * SLOT_BYTES;
+    /// `psx_core_stream_sector(dst) -> u32`, the next sector of an open stream.
+    pub const STREAM_SECTOR: u32 = CORE_WINDOW.start + 9 * SLOT_BYTES;
+    /// `psx_core_cd(op, a, b, c) -> u32`, register-level CD for a game's own driver.
+    pub const CD: u32 = CORE_WINDOW.start + 10 * SLOT_BYTES;
+    /// `psx_core_set_idle_hook(hook)`, called from every spin of every core wait.
+    pub const SET_IDLE_HOOK: u32 = CORE_WINDOW.start + 11 * SLOT_BYTES;
 }
 
 /// The handoff block's fields, as byte offsets from [`HANDOFF_BLOCK`]`.start`.

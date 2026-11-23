@@ -190,8 +190,8 @@ fn rows_carry_the_core_hash_and_a_program_must_contain_the_core() {
 #[test]
 fn programs_must_load_between_the_kernel_and_the_core_window() {
     let small = exe(0x8001_0000, 0x8001_0000, 0, &payload(1, 0));
-    // Ends exactly at the window: accepted.
-    let top = CORE_WINDOW.start - 2 * SECTOR_BYTES as u32;
+    // Ends exactly at the switch stack (1 KB below the window): accepted.
+    let top = psx_scene_abi::PAYLOAD_END - 2 * SECTOR_BYTES as u32;
     let fits = SceneSlot::new(
         "TOP.EXE",
         Kind::Program,
@@ -202,8 +202,9 @@ fn programs_must_load_between_the_kernel_and_the_core_window() {
         core_image: None,
     };
     press(small.clone(), &plan, false).unwrap();
-    // One sector into the window, or below the kernel's 64 KiB: refused.
-    for t_addr in [top + SECTOR_BYTES as u32, 0x8000_f800] {
+    // Into the switch stack, ending at the window, or below the kernel's
+    // 64 KiB: refused.
+    for t_addr in [top + 4, CORE_WINDOW.start - 4096, 0x8000_f800] {
         let mut plan = plan.clone();
         plan.slots[1].file = Some(exe(t_addr, t_addr, 0, &payload(2, 0)));
         assert_eq!(
