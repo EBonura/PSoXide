@@ -318,7 +318,7 @@ fn print_usage() {
                          after the packs. Without it the disc is unchanged.\n\
          --core-image PATH\n\
                          The prebuilt psx-core.bin: its word FNV is the rows'\n\
-                         core hash, and every program must contain it.\n\
+                         core hash; every program must end with it.\n\
          --iso           Emit a cooked 2048-byte-per-sector .iso\n\
                          instead of the default raw 2352-byte .bin.\n"
     );

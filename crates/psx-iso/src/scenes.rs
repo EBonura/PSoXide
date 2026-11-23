@@ -22,8 +22,14 @@
 //!
 //! The core image needs no slot: CORE-ABI.md 4.1 stores it inside every
 //! program that hosts it, right after `.data`, so it is read with the boot
-//! exe. A [`ScenePlan::core_image`] is the hash source the rows carry, and
-//! each program row is checked to contain those exact bytes.
+//! exe. A [`ScenePlan::core_image`] is the hash source the rows carry; each
+//! program must end with those exact bytes, and its row's `t_size` stops
+//! before them so a switch never reads the unused copy.
+//!
+//! A collection disc (the demo disc, Arcade) nests each member image whole;
+//! its own `SCENES.TBL` at LBA 22 replaces DEMOTOC.BIN and lists the members'
+//! programs with their `lba_offset` and `cdda_base`. mkdisc builds those rows
+//! with [`scene_row`] and writes them with `psx_scene_abi::encode_table`.
 
 pub use psx_scene_abi as abi;
 
@@ -139,7 +145,8 @@ pub enum SceneDiscError {
     },
     /// The core image is empty, not whole words, or larger than the window.
     CoreImage(usize),
-    /// A program row does not contain the core image's bytes.
+    /// A program row does not end with the core image's bytes (only sector
+    /// padding may follow its stored copy).
     CoreMissing(String),
     /// The table writer refused.
     Table(TableError),
@@ -167,12 +174,102 @@ fn is_exe_kind(kind: Kind) -> bool {
     !matches!(kind, Kind::Data | Kind::Module)
 }
 
-/// True when `payload` holds `image` at a word-aligned offset.
-fn contains_words(payload: &[u8], image: &[u8]) -> bool {
-    payload.len() >= image.len()
-        && (0..=payload.len() - image.len())
-            .step_by(4)
-            .any(|at| payload[at..at + image.len()] == *image)
+/// Where a program's payload stops for the core: the start of its stored copy
+/// of `core` (CORE-ABI.md 4.1 stores it right after `.data`), rounded up to a
+/// whole sector. A switch reads only this much, never the unused copy; the
+/// running core is already in the window. `None` when the copy is missing or
+/// anything but sector padding follows it.
+pub fn payload_before_core(payload: &[u8], core: &[u8]) -> Option<usize> {
+    if core.is_empty() || payload.len() < core.len() {
+        return None;
+    }
+    let at = (0..(payload.len() - core.len()) / 4 + 1)
+        .rev()
+        .map(|word| word * 4)
+        .find(|&at| payload[at..at + core.len()] == *core)?;
+    payload[at + core.len()..]
+        .iter()
+        .all(|&b| b == 0)
+        .then(|| at.next_multiple_of(SECTOR_BYTES))
+}
+
+/// One row for `slot`, whose file as pressed is `bytes` at member-relative
+/// `lba`, `sectors` long. `core` is the plan's core image: its word FNV is the
+/// row's core hash (unless the slot names its own), and a program's `t_size`
+/// ends before its stored copy of it ([`payload_before_core`]). The member
+/// fields (`lba_offset`, `cdda_base`) are zero; the demo disc's mkdisc sets
+/// them for each member's rows before [`psx_scene_abi::encode_table`].
+pub fn scene_row(
+    id: u16,
+    slot: &SceneSlot,
+    bytes: &[u8],
+    lba: u32,
+    sectors: u32,
+    core: Option<&[u8]>,
+) -> Result<Row, SceneDiscError> {
+    let mut row = Row {
+        id,
+        kind: slot.kind,
+        flags: slot.flags,
+        lba,
+        sectors,
+        t_addr: 0,
+        t_size: 0,
+        pc: 0,
+        checksum: 0,
+        core_hash: 0,
+        sp: 0,
+        return_scene: slot.return_scene,
+        read_attempts: slot.read_attempts,
+        min_block_version: slot.min_block_version,
+        partner_credit: slot.partner_credit,
+        cdda_base: 0,
+        lba_offset: 0,
+        name: Row::name_bytes(&slot.name),
+    };
+    if !is_exe_kind(slot.kind) {
+        // Data: the whole sectors as pressed, zero-filled past the file.
+        let mut padded = bytes.to_vec();
+        padded.resize(sectors as usize * SECTOR_BYTES, 0);
+        row.t_size = padded.len() as u32;
+        row.checksum = word_fnv(&padded);
+        row.core_hash = slot.core_hash.unwrap_or(0);
+        return Ok(row);
+    }
+    let exe = Exe::parse(bytes).map_err(|_| SceneDiscError::NotAnExe(slot.name.clone()))?;
+    if !exe.payload.len().is_multiple_of(SECTOR_BYTES) {
+        return Err(SceneDiscError::TSize(slot.name.clone()));
+    }
+    let (stored, core_hash) = match (slot.core_hash, core) {
+        (Some(hash), _) => (exe.payload.len(), hash),
+        (None, Some(core)) => (
+            payload_before_core(&exe.payload, core)
+                .ok_or_else(|| SceneDiscError::CoreMissing(slot.name.clone()))?,
+            word_fnv(core),
+        ),
+        (None, None) => (exe.payload.len(), 0),
+    };
+    let payload = &exe.payload[..stored];
+    let t_size = stored as u32;
+    let in_bounds = exe.load_addr >= LOAD_ADDR
+        && exe
+            .load_addr
+            .checked_add(t_size)
+            .is_some_and(|end| end <= PAYLOAD_END);
+    if !in_bounds {
+        return Err(SceneDiscError::Bounds {
+            name: slot.name.clone(),
+            t_addr: exe.load_addr,
+            t_size,
+        });
+    }
+    row.t_addr = exe.load_addr;
+    row.t_size = t_size;
+    row.pc = exe.initial_pc;
+    row.sp = exe.initial_sp().unwrap_or(0);
+    row.checksum = word_fnv(payload);
+    row.core_hash = core_hash;
+    Ok(row)
 }
 
 /// The playtest layout of [`crate::add_playtest_files`] with `SCENES.TBL` at
@@ -215,18 +312,14 @@ pub fn add_scene_disc_files(
         }
         seen.push(name);
     }
-    let core_hash = match &plan.core_image {
-        Some(image) => {
-            if image.is_empty()
-                || !image.len().is_multiple_of(4)
-                || image.len() > CORE_WINDOW.len() as usize
-            {
-                return Err(SceneDiscError::CoreImage(image.len()));
-            }
-            Some(word_fnv(image))
+    if let Some(image) = &plan.core_image {
+        if image.is_empty()
+            || !image.len().is_multiple_of(4)
+            || image.len() > CORE_WINDOW.len() as usize
+        {
+            return Err(SceneDiscError::CoreImage(image.len()));
         }
-        None => None,
-    };
+    }
 
     // Every file as it will be pressed (executables padded to their t_size).
     let _ = pad_to_payload(&mut exe_bytes);
@@ -305,65 +398,15 @@ pub fn add_scene_disc_files(
             .find(|(name, _, _)| *name == slot.name)
             .cloned()
             .expect("every slot was added");
-        let mut row = Row {
-            id: index as u16,
-            kind: slot.kind,
-            flags: slot.flags,
+        let core = plan.core_image.as_deref();
+        rows.push(scene_row(
+            index as u16,
+            slot,
+            &files[index],
             lba,
             sectors,
-            t_addr: 0,
-            t_size: 0,
-            pc: 0,
-            checksum: 0,
-            core_hash: 0,
-            sp: 0,
-            return_scene: slot.return_scene,
-            read_attempts: slot.read_attempts,
-            min_block_version: slot.min_block_version,
-            partner_credit: slot.partner_credit,
-            name: Row::name_bytes(&slot.name),
-        };
-        let bytes = &files[index];
-        if is_exe_kind(slot.kind) {
-            let exe = Exe::parse(bytes).map_err(|_| SceneDiscError::NotAnExe(slot.name.clone()))?;
-            let t_size = exe.payload.len() as u32;
-            if !t_size.is_multiple_of(SECTOR_BYTES as u32) {
-                return Err(SceneDiscError::TSize(slot.name.clone()));
-            }
-            let in_bounds = exe.load_addr >= LOAD_ADDR
-                && exe
-                    .load_addr
-                    .checked_add(t_size)
-                    .is_some_and(|end| end <= PAYLOAD_END);
-            if !in_bounds {
-                return Err(SceneDiscError::Bounds {
-                    name: slot.name.clone(),
-                    t_addr: exe.load_addr,
-                    t_size,
-                });
-            }
-            if slot.core_hash.is_none() {
-                if let Some(image) = &plan.core_image {
-                    if !contains_words(&exe.payload, image) {
-                        return Err(SceneDiscError::CoreMissing(slot.name.clone()));
-                    }
-                }
-            }
-            row.t_addr = exe.load_addr;
-            row.t_size = t_size;
-            row.pc = exe.initial_pc;
-            row.sp = exe.initial_sp().unwrap_or(0);
-            row.checksum = word_fnv(&exe.payload);
-            row.core_hash = slot.core_hash.or(core_hash).unwrap_or(0);
-        } else {
-            // Data: the whole sectors as pressed, zero-filled past the file.
-            let mut padded = bytes.clone();
-            padded.resize(sectors as usize * SECTOR_BYTES, 0);
-            row.t_size = padded.len() as u32;
-            row.checksum = word_fnv(&padded);
-            row.core_hash = slot.core_hash.unwrap_or(0);
-        }
-        rows.push(row);
+            core,
+        )?);
     }
 
     let mut table = vec![0u8; SECTOR_BYTES];

@@ -144,47 +144,115 @@ fn a_scene_too_big_for_the_boot_area_and_every_one_after_it_go_after_the_packs()
     assert_eq!(data.checksum, psx_pack::WordFnv32::of(&words(&padded)));
 }
 
+/// A program image the way psoxide-core.ld stores it: `data` bytes of text
+/// and data, then the core copy, then zeros to whole sectors.
+fn with_core(data: usize, core: &[u8]) -> Vec<u8> {
+    let mut image: Vec<u8> = (0..data).map(|i| (i as u8) ^ 0x5a | 1).collect();
+    image.extend_from_slice(core);
+    image.resize(image.len().next_multiple_of(SECTOR_BYTES), 0);
+    image
+}
+
+fn core_image() -> Vec<u8> {
+    (0..256u32)
+        .flat_map(|w| w.wrapping_mul(0x0101_0101).wrapping_add(1).to_le_bytes())
+        .collect()
+}
+
 #[test]
-fn rows_carry_the_core_hash_and_a_program_must_contain_the_core() {
-    let core: Vec<u8> = (0..256u32)
-        .flat_map(|w| (w * 0x0101_0101).to_le_bytes())
-        .collect();
+fn rows_carry_the_core_hash_and_stop_before_the_stored_core() {
+    let core = core_image();
     let hash = psx_pack::WordFnv32::of(&words(&core));
-    let mut with_core = payload(2, 9);
-    with_core[0x400..0x400 + core.len()].copy_from_slice(&core);
+    // 5,000 bytes of program: the core copy starts in sector 2, so the
+    // payload the core switches in is three sectors, not the four stored.
+    let image = with_core(5_000, &core);
+    assert_eq!(image.len(), 3 * SECTOR_BYTES);
+    let image = {
+        let mut longer = image.clone();
+        longer.resize(4 * SECTOR_BYTES, 0);
+        longer
+    };
+    assert_eq!(payload_before_core(&image, &core), Some(3 * SECTOR_BYTES));
     let game = SceneSlot::new(
         "GAME.EXE",
         Kind::Program,
-        Some(exe(0x8001_0000, 0x8001_0000, 0, &with_core)),
+        Some(exe(0x8001_0000, 0x8001_0000, 0, &image)),
     );
     let plan = ScenePlan {
-        slots: vec![boot(), game.clone()],
+        slots: vec![boot(), game],
         core_image: Some(core.clone()),
     };
-    let (_, pressed) = press(exe(0x8001_0000, 0x8001_0000, 0, &with_core), &plan, false).unwrap();
+    let boot_exe = exe(0x8001_0000, 0x8001_0000, 0, &with_core(100, &core));
+    let (_, pressed) = press(boot_exe.clone(), &plan, false).unwrap();
     assert_eq!(pressed.rows[0].core_hash, hash);
-    assert_eq!(pressed.rows[1].core_hash, hash);
-
-    // A program that does not carry the core is refused...
-    let mut plan = plan;
-    plan.slots[1].file = Some(exe(0x8001_0000, 0x8001_0000, 0, &payload(2, 9)));
-    let boot_exe = exe(0x8001_0000, 0x8001_0000, 0, &with_core);
+    assert_eq!(pressed.rows[0].t_size, SECTOR_BYTES as u32);
+    let row = pressed.rows[1];
+    assert_eq!(row.core_hash, hash);
+    assert_eq!(row.t_size, 3 * SECTOR_BYTES as u32);
+    assert_eq!(row.sectors, 5, "the file on the disc is still whole");
     assert_eq!(
-        press(boot_exe.clone(), &plan, false).err().unwrap(),
-        SceneDiscError::CoreMissing("GAME.EXE".into())
+        row.checksum,
+        psx_pack::WordFnv32::of(&words(&image[..3 * SECTOR_BYTES]))
     );
-    // ...unless the row names its own hash (a program of another pin).
+    // A core copy that starts on a sector boundary is left out whole.
+    let exact = with_core(SECTOR_BYTES, &core);
+    assert_eq!(payload_before_core(&exact, &core), Some(SECTOR_BYTES));
+
+    // A program that does not carry the core, or carries it with something
+    // after it, is refused...
+    let mut plan = plan;
+    for file in [payload(2, 9), {
+        let mut tail = with_core(100, &core);
+        tail[2000] = 1;
+        tail
+    }] {
+        plan.slots[1].file = Some(exe(0x8001_0000, 0x8001_0000, 0, &file));
+        assert_eq!(
+            press(boot_exe.clone(), &plan, false).err().unwrap(),
+            SceneDiscError::CoreMissing("GAME.EXE".into())
+        );
+    }
+    // ...unless the row names its own hash (a program of another pin), which
+    // keeps its whole payload.
     plan.slots[1].core_hash = Some(0x1234_5678);
     let (_, pressed) = press(boot_exe, &plan, false).unwrap();
     assert_eq!(pressed.rows[1].core_hash, 0x1234_5678);
+    assert_eq!(pressed.rows[1].t_size, SECTOR_BYTES as u32);
 
     plan.core_image = Some(vec![1, 2, 3]);
     assert_eq!(
-        press(exe(0x8001_0000, 0x8001_0000, 0, &with_core), &plan, false)
-            .err()
-            .unwrap(),
+        press(
+            exe(0x8001_0000, 0x8001_0000, 0, &payload(1, 0)),
+            &plan,
+            false
+        )
+        .err()
+        .unwrap(),
         SceneDiscError::CoreImage(3)
     );
+}
+
+#[test]
+fn a_collection_row_carries_its_member_base() {
+    // mkdisc's use: a member's program row, then the member's place on the
+    // collection disc.
+    let slot = SceneSlot::new(
+        "PSX.EXE",
+        Kind::Program,
+        Some(exe(0x8001_0000, 0x8001_0000, 0x801f_df00, &payload(2, 4))),
+    );
+    let file = slot.file.clone().unwrap();
+    let mut row = scene_row(3, &slot, &file, 23, 3, None).unwrap();
+    assert_eq!((row.lba_offset, row.cdda_base), (0, 0));
+    row.lba_offset = 40_000;
+    row.cdda_base = 7;
+    let rows: Vec<Row> = (0..4).map(|id| Row { id, ..row }).collect();
+    let mut table = vec![0u8; SECTOR_BYTES];
+    psx_scene_abi::encode_table(&rows, 0, &mut table).unwrap();
+    let header = decode_header_checked(&table).unwrap();
+    let back = table_row(&table, &header, 3).unwrap();
+    assert_eq!((back.lba, back.lba_offset, back.cdda_base), (23, 40_000, 7));
+    assert_eq!(back, rows[3]);
 }
 
 #[test]
@@ -260,8 +328,8 @@ fn a_bad_plan_is_refused() {
         SceneDiscError::DuplicateName("WORLD.PAK".into())
     );
     assert_eq!(
-        refuse(vec![boot(), data("A_NAME_LONGER_THAN_20.DAT")]),
-        SceneDiscError::BadName("A_NAME_LONGER_THAN_20.DAT".into())
+        refuse(vec![boot(), data("A_NAME_OVER_16.DAT")]),
+        SceneDiscError::BadName("A_NAME_OVER_16.DAT".into())
     );
     assert_eq!(
         refuse(vec![

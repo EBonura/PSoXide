@@ -25,30 +25,32 @@ fn sample_row(id: u16) -> Row {
         pc: 0x8001_2345,
         checksum: 0xa1a2_a3a4,
         core_hash: 0xb1b2_b3b4,
-        sp: 0x801f_d700,
+        sp: 0x801f_df00,
         return_scene: 0xc1c2,
         read_attempts: 0xd1,
         min_block_version: 0xd2,
         partner_credit: 0xe1e2,
+        cdda_base: 0xf1f2,
+        lba_offset: 0x0a0b_0c0d,
         name: Row::name_bytes("GAME.EXE"),
     }
 }
 
 #[test]
 fn memory_map_is_the_day_0_page() {
-    assert_eq!(CORE_WINDOW.start, 0x801f_d700);
+    assert_eq!(CORE_WINDOW.start, 0x801f_df00);
     assert_eq!(CORE_WINDOW.end, 0x801f_ff00);
-    assert_eq!(CORE_WINDOW.len(), 10_240);
+    assert_eq!(CORE_WINDOW.len(), 8_192);
     assert_eq!(CORE_WINDOW.end, HANDOFF_BLOCK.start);
     assert_eq!(HANDOFF_BLOCK.len(), 256);
     assert_eq!(HANDOFF_BLOCK.end, 0x8020_0000);
-    assert_eq!(STACK_INIT, 0x801f_d700);
+    assert_eq!(STACK_INIT, 0x801f_df00);
     // psoxide.ld: STACK_INIT = RAM_BASE + RAM_SIZE - 0x100.
-    assert_eq!(RAM_SIZE_OVERRIDE, 0x1f_d800);
+    assert_eq!(RAM_SIZE_OVERRIDE, 0x1f_e000);
     assert_eq!(RAM_BASE + RAM_SIZE_OVERRIDE - 0x100, STACK_INIT);
-    assert_eq!(PAYLOAD_END, 0x801f_d300);
-    assert!(CORE_WINDOW.holds(0x801f_d700, 0x801f_ff00));
-    assert!(!CORE_WINDOW.holds(0x801f_d6fc, 0x801f_d800));
+    assert_eq!(PAYLOAD_END, 0x801f_db00);
+    assert!(CORE_WINDOW.holds(0x801f_df00, 0x801f_ff00));
+    assert!(!CORE_WINDOW.holds(0x801f_defc, 0x801f_e000));
     assert!(!CORE_WINDOW.holds(0x801f_fe00, 0x801f_ff04));
     assert!(!CORE_WINDOW.holds(0x801f_e000, 0x801f_e000));
 }
@@ -81,6 +83,15 @@ fn the_constants_match_psoxide_ld() {
 }
 
 #[test]
+fn the_absolute_flag_is_clear_of_every_cd_lba() {
+    // 80 minutes of 75 sectors a second is the most a CD holds.
+    let last_lba: u32 = 80 * 60 * 75;
+    assert_eq!(last_lba & LBA_ABSOLUTE, 0);
+    assert_eq!((last_lba | LBA_ABSOLUTE) & !LBA_ABSOLUTE, last_lba);
+    assert_eq!(LBA_ABSOLUTE & STREAM_IMPLICIT_SEEK, 0);
+}
+
+#[test]
 fn jump_table_slots_are_the_day_0_addresses() {
     let slots = [
         slot::ATTACH,
@@ -97,18 +108,18 @@ fn jump_table_slots_are_the_day_0_addresses() {
         slot::SET_IDLE_HOOK,
     ];
     let want = [
-        0x801f_d700,
-        0x801f_d708,
-        0x801f_d710,
-        0x801f_d718,
-        0x801f_d720,
-        0x801f_d728,
-        0x801f_d730,
-        0x801f_d738,
-        0x801f_d740,
-        0x801f_d748,
-        0x801f_d750,
-        0x801f_d758,
+        0x801f_df00,
+        0x801f_df08,
+        0x801f_df10,
+        0x801f_df18,
+        0x801f_df20,
+        0x801f_df28,
+        0x801f_df30,
+        0x801f_df38,
+        0x801f_df40,
+        0x801f_df48,
+        0x801f_df50,
+        0x801f_df58,
     ];
     assert_eq!(slots, want);
 }
@@ -174,14 +185,15 @@ fn row_round_trips_at_the_day_0_offsets() {
     assert_eq!(le32(&bytes, 0x14), 0x8001_2345);
     assert_eq!(le32(&bytes, 0x18), 0xa1a2_a3a4);
     assert_eq!(le32(&bytes, 0x1c), 0xb1b2_b3b4);
-    assert_eq!(le32(&bytes, 0x20), 0x801f_d700);
+    assert_eq!(le32(&bytes, 0x20), 0x801f_df00);
     assert_eq!(le16(&bytes, 0x24), 0xc1c2);
     assert_eq!(bytes[0x26], 0xd1);
     assert_eq!(bytes[0x27], 0xd2);
     assert_eq!(le16(&bytes, 0x28), 0xe1e2);
-    assert_eq!(le16(&bytes, 0x2a), 0);
-    assert_eq!(&bytes[0x2c..0x34], b"GAME.EXE");
-    assert!(bytes[0x34..0x40].iter().all(|&b| b == 0));
+    assert_eq!(le16(&bytes, 0x2a), 0xf1f2);
+    assert_eq!(le32(&bytes, 0x2c), 0x0a0b_0c0d);
+    assert_eq!(&bytes[0x30..0x38], b"GAME.EXE");
+    assert!(bytes[0x38..0x40].iter().all(|&b| b == 0));
     assert_eq!(Row::decode(&bytes), Some(row));
     assert_eq!(row.name_str(), "GAME.EXE");
     for (kind, byte) in [

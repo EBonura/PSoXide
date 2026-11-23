@@ -58,11 +58,11 @@ pub const LOAD_ADDR: u32 = 0x8001_0000;
 /// The core window: the prebuilt core's code, data and bss, at the same
 /// addresses in every program that hosts it. The core keeps no stack here:
 /// a switch runs at the top of the outgoing program's stack reserve, every
-/// other call on the caller's stack. Cap 10,240 B, target 8,192 B; P0
-/// reports where the build lands, and this constant is the one place that
-/// moves if it does.
+/// other call on the caller's stack. **Provisional** at 8,192 B (the SDK
+/// lane's 11-23 decision, down from the 10,240 B cap); the final number comes
+/// after P1, and this constant is the one place that moves.
 pub const CORE_WINDOW: Span = Span {
-    start: 0x801f_d700,
+    start: 0x801f_df00,
     end: 0x801f_ff00,
 };
 
@@ -120,6 +120,16 @@ pub mod slot {
     /// `psx_core_set_idle_hook(hook)`, called from every spin of every core wait.
     pub const SET_IDLE_HOOK: u32 = CORE_WINDOW.start + 11 * SLOT_BYTES;
 }
+
+/// OR'd into the `lba` argument of `psx_core_read` and `psx_core_stream_open`:
+/// the LBA is absolute on the disc, not offset by the member base, for a file
+/// in the host disc's root. **Provisional**: the SDK lane decided the flag on
+/// 11-23; its bit is this crate's choice until CORE-ABI.md states one. A
+/// member-relative LBA never reaches bit 31 (a CD holds under 2^19 sectors).
+pub const LBA_ABSOLUTE: u32 = 1 << 31;
+
+/// `psx_core_stream_open` flag bit 0: skip the SeekL and go straight to ReadN.
+pub const STREAM_IMPLICIT_SEEK: u32 = 1 << 0;
 
 /// The handoff block's fields, as byte offsets from [`HANDOFF_BLOCK`]`.start`.
 pub mod block {
@@ -203,8 +213,8 @@ pub const ROW_BYTES: usize = 64;
 /// of more than one sector moves the boot exe past [`BOOT_EXE_LBA`].
 pub const MAX_TABLE_SECTORS: u16 = 4;
 
-/// Bytes reserved for a row's name.
-pub const NAME_BYTES: usize = 20;
+/// Bytes reserved for a row's name: an ISO 9660 8.3 name is at most 12.
+pub const NAME_BYTES: usize = 16;
 
 /// The `return_scene` of a row that has none.
 pub const NO_SCENE: u16 = 0xffff;
@@ -349,9 +359,17 @@ impl Header {
 /// 0x26  1  read attempts, 0 means 3
 /// 0x27  1  minimum handoff block version
 /// 0x28  2  partner credit id, 0 none (provisional)
-/// 0x2A  2  reserved, 0
-/// 0x2C 20  name, ASCII, NUL-padded
+/// 0x2A  2  CD-DA track base of the member (provisional)
+/// 0x2C  4  lba_offset: sectors from disc LBA 0 to the member image (provisional)
+/// 0x30 16  name, ASCII, NUL-padded
 /// ```
+///
+/// The member fields come from the SDK lane's 11-23 decision that the
+/// collection's member table becomes `SCENES.TBL` (DEMOTOC.BIN's role at LBA
+/// 22). Their offsets are this crate's choice until CORE-ABI.md states them:
+/// `cdda_base` takes the one reserved slot and `lba_offset` the first four
+/// bytes of the old 20-byte name, so the row stays 64 B. A single-game disc
+/// writes zero for both.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Row {
     /// Scene id; [`encode_table`] checks it equals the row's index.
@@ -384,6 +402,12 @@ pub struct Row {
     pub min_block_version: u8,
     /// Partner credit id, 0 none (**provisional**).
     pub partner_credit: u16,
+    /// CD-DA tracks of the members ahead of this row's, 0 on a single-game
+    /// disc (**provisional**).
+    pub cdda_base: u16,
+    /// Sectors from disc LBA 0 to this row's member image; `lba` is relative
+    /// to it. 0 on a single-game disc (**provisional**).
+    pub lba_offset: u32,
     /// ASCII name, NUL-padded.
     pub name: [u8; NAME_BYTES],
 }
@@ -421,13 +445,15 @@ impl Row {
         out[0x26] = self.read_attempts;
         out[0x27] = self.min_block_version;
         put16(out, 0x28, self.partner_credit);
-        out[0x2c..0x2c + NAME_BYTES].copy_from_slice(&self.name);
+        put16(out, 0x2a, self.cdda_base);
+        put32(out, 0x2c, self.lba_offset);
+        out[0x30..0x30 + NAME_BYTES].copy_from_slice(&self.name);
     }
 
     /// Read a row; `None` for a kind this layout does not know.
     pub fn decode(bytes: &[u8; ROW_BYTES]) -> Option<Self> {
         let mut name = [0u8; NAME_BYTES];
-        name.copy_from_slice(&bytes[0x2c..0x2c + NAME_BYTES]);
+        name.copy_from_slice(&bytes[0x30..0x30 + NAME_BYTES]);
         Some(Row {
             id: get16(bytes, 0x00),
             kind: Kind::from_u8(bytes[0x02])?,
@@ -444,6 +470,8 @@ impl Row {
             read_attempts: bytes[0x26],
             min_block_version: bytes[0x27],
             partner_credit: get16(bytes, 0x28),
+            cdda_base: get16(bytes, 0x2a),
+            lba_offset: get32(bytes, 0x2c),
             name,
         })
     }
