@@ -42,19 +42,22 @@
 //!
 //! # On the scene core
 //!
-//! With the `core-cd` feature every controller access the player makes goes
-//! through the resident scene core's register-level CD slot
-//! (`psx_scene_abi::slot::CD`, op codes in `psx_scene_abi::cd_op`) instead
-//! of psx-io's polled command layer, so a program hosted by the core does not
-//! link that layer. The state machine and the public API are the same; the
-//! program's link script must define `psx_core_cd` at the slot's address.
+//! With the `core-cd` feature every drive command the player waits on (Demute,
+//! Setmode, Setfilter, Setloc, ReadS, GetlocP and a blocking Pause) goes
+//! through the resident scene core's CD slot (`psx_scene_abi::slot::CD`, op
+//! `psx_scene_abi::cd_op::COMMAND`) instead of psx-io's polled command layer,
+//! so a program hosted by the core does not link that layer. The register
+//! steps that wait on nothing (the non-blocking Pause, the IRQ flag looks,
+//! the acknowledges, the IRQ enables, the mixer) stay psx-io's own. The state
+//! machine and the public API are the same; the program's link script must
+//! define `psx_core_cd` at the slot's address.
 
 use crate::disc_base::shift_lba;
 use crate::periph::Cd;
 use psx_hw::cd::xa::{END_GUARD_SECTORS, SECTORS_PER_SECOND};
-#[cfg(not(feature = "core-cd"))]
-use psx_hw::cd::{irq, CMD_PAUSE, CMD_READS, CMD_SETFILTER};
-use psx_hw::cd::{MODE_DOUBLE_SPEED, MODE_XA_ADPCM, MODE_XA_FILTER};
+use psx_hw::cd::{
+    irq, CMD_PAUSE, CMD_READS, CMD_SETFILTER, MODE_DOUBLE_SPEED, MODE_XA_ADPCM, MODE_XA_FILTER,
+};
 
 /// Per-command response spin budget: generous, the drive answers far sooner.
 pub const COMMAND_SPINS: u32 = 131_072;
@@ -273,28 +276,58 @@ trait Drive {
     fn head_lba(&mut self) -> Option<u32>;
 }
 
-// The drive steps on psx-io's own polled command layer. With the `core-cd` feature the
-// same steps go through the resident scene core's CD slot instead (`core_slot`).
-#[cfg(not(feature = "core-cd"))]
+// The drive steps. The commands that wait for an answer are psx-io's polled command layer, or,
+// with the `core-cd` feature, the resident scene core's command slot (`core_slot`); the register
+// steps that wait on nothing are psx-io's in both.
 impl Drive for Cd {
+    #[cfg(not(feature = "core-cd"))]
     fn unmute(&mut self) -> bool {
         self.try_unmute(COMMAND_SPINS).is_some()
     }
+    #[cfg(not(feature = "core-cd"))]
     fn set_mode(&mut self, mode: u8) -> bool {
         self.try_set_mode(mode, COMMAND_SPINS).is_some()
     }
+    #[cfg(not(feature = "core-cd"))]
     fn set_filter(&mut self, file: u8, channel: u8) -> bool {
         self.try_command(CMD_SETFILTER, &[file, channel], COMMAND_SPINS)
             .is_some()
     }
+    #[cfg(not(feature = "core-cd"))]
     fn set_target(&mut self, lba: u32) -> bool {
         self.try_set_target_lba(lba, COMMAND_SPINS).is_some()
     }
+    #[cfg(not(feature = "core-cd"))]
     fn start_streaming(&mut self) -> bool {
         self.try_command(CMD_READS, &[], COMMAND_SPINS).is_some()
     }
+    #[cfg(not(feature = "core-cd"))]
     fn pause(&mut self) -> bool {
         self.try_pause_until_complete(PAUSE_SPINS)
+    }
+    #[cfg(feature = "core-cd")]
+    fn unmute(&mut self) -> bool {
+        core_slot::command(psx_hw::cd::CMD_DEMUTE, &[])
+    }
+    #[cfg(feature = "core-cd")]
+    fn set_mode(&mut self, mode: u8) -> bool {
+        core_slot::command(psx_hw::cd::CMD_SETMODE, &[mode])
+    }
+    #[cfg(feature = "core-cd")]
+    fn set_filter(&mut self, file: u8, channel: u8) -> bool {
+        core_slot::command(CMD_SETFILTER, &[file, channel])
+    }
+    #[cfg(feature = "core-cd")]
+    fn set_target(&mut self, lba: u32) -> bool {
+        core_slot::command(psx_hw::cd::CMD_SETLOC, &super::lba_to_bcd_msf(lba))
+    }
+    #[cfg(feature = "core-cd")]
+    fn start_streaming(&mut self) -> bool {
+        core_slot::command(CMD_READS, &[])
+    }
+    #[cfg(feature = "core-cd")]
+    fn pause(&mut self) -> bool {
+        core_slot::pause_until_complete(PAUSE_SPINS)
     }
     #[inline(never)]
     fn begin_stop(&mut self) -> u8 {
@@ -322,10 +355,16 @@ impl Drive for Cd {
         self.restore_irq_output(saved);
         set_mixer(self, volume);
     }
+    #[cfg(not(feature = "core-cd"))]
     #[inline(never)]
     fn head_lba(&mut self) -> Option<u32> {
         let response = self.try_play_position(COMMAND_SPINS)?;
         getlocp_lba(response.bytes())
+    }
+    #[cfg(feature = "core-cd")]
+    #[inline(never)]
+    fn head_lba(&mut self) -> Option<u32> {
+        core_slot::head_lba()
     }
 }
 
@@ -344,7 +383,6 @@ fn getlocp_lba(response: &[u8]) -> Option<u32> {
 }
 
 /// The drive's mixer at `(left, right)`, plain stereo: one body for every caller.
-#[cfg(not(feature = "core-cd"))]
 #[inline(never)]
 fn set_mixer(cd: &mut Cd, (left, right): (u8, u8)) {
     cd.set_audio_mixer(left, 0, right, 0);
@@ -352,8 +390,6 @@ fn set_mixer(cd: &mut Cd, (left, right): (u8, u8)) {
 
 #[cfg(feature = "core-cd")]
 mod core_slot;
-#[cfg(feature = "core-cd")]
-use core_slot::set_mixer;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum State {
