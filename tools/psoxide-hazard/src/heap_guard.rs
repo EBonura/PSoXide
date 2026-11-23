@@ -230,11 +230,16 @@ mod tests {
             u64::from(psx_scene_abi::STACK_INIT) - 0x8000,
             "a program hosting the scene core ends its heap a stack reserve below the window"
         );
-        assert_eq!(heap_range(&scene).map(|range| range.1), Some(heap_end(&scene)));
-        let small_stack = format!(
-            "       0        0        0     1 STACK_RESERVE_OVERRIDE = 16K\n{scene}"
+        assert_eq!(
+            heap_range(&scene).map(|range| range.1),
+            Some(heap_end(&scene))
         );
-        assert_eq!(heap_end(&small_stack), u64::from(psx_scene_abi::STACK_INIT) - 16 * 1024);
+        let small_stack =
+            format!("       0        0        0     1 STACK_RESERVE_OVERRIDE = 16K\n{scene}");
+        assert_eq!(
+            heap_end(&small_stack),
+            u64::from(psx_scene_abi::STACK_INIT) - 16 * 1024
+        );
         // The script's own `STACK_RESERVE = DEFINED(...)` line is not an assignment of the override.
         let script_line =
             "       0        0        0     1 STACK_RESERVE = DEFINED(STACK_RESERVE_OVERRIDE) ? STACK_RESERVE_OVERRIDE : 0x8000\n";
