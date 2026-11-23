@@ -4,7 +4,7 @@
 //! file's hash and the digest of every installed file; the link map goes beside the disc named
 //! after the SDK pin.
 //!
-//! The install guarantee lives in [`check`], which both this stage and `psoxide-test
+//! The install guarantee lives in [`check_approved`], which both this stage and `psoxide-test
 //! install-check` (the campaign's install script) call: the result must be a complete, clean,
 //! full PASS on the install profile, and no speed window may be slower than the build installed
 //! before it, whose speed facts sit beside it as `<Name>.speed-facts.json` ([`SpeedFacts`]).
@@ -378,7 +378,7 @@ pub fn committed_layouts(
     Ok(layouts)
 }
 
-/// The judged side of [`check`]: the result, its content hash, and what is about to be installed.
+/// The judged side of [`check_approved`]: the result, its content hash, and what is about to be installed.
 pub struct Judged<'a> {
     pub hash: &'a str,
     pub result: &'a RunResult,
@@ -412,6 +412,42 @@ pub struct Accepted {
     pub note: String,
     /// `--rebase-facts` took this result as the new reference without comparing it.
     pub rebased: bool,
+    /// `--accept-slower` let a slower build in: the owner's words and what was slower. Written
+    /// into the install record (provenance, stamp) whenever it is set.
+    pub approval: Option<Approval>,
+}
+
+/// The owner's approval of an install that is slower than the installed build
+/// (`--accept-slower TEXT`), as the install record keeps it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Approval {
+    /// The owner's approval, verbatim (who approved, and what).
+    pub text: String,
+    /// Each never-slower comparison the install failed, with the measured values; or, on a
+    /// rebased install, why none could be measured.
+    pub slower: Vec<String>,
+}
+
+/// The least an `--accept-slower` text must say: a few words, not a flag value typed by habit.
+pub const APPROVAL_MIN_CHARS: usize = 12;
+
+/// The `--accept-slower` text, checked: refused when it is too short to name who approved what.
+pub fn approval_text(text: &str) -> Result<String, String> {
+    let text = text.trim();
+    if text.chars().count() < APPROVAL_MIN_CHARS {
+        return Err(format!(
+            "--accept-slower needs the owner's approval in words (who approved this slower \
+             install, and why), at least {APPROVAL_MIN_CHARS} characters; got `{text}`"
+        ));
+    }
+    Ok(text.to_string())
+}
+
+/// [`check_approved`] without an owner approval (the tests' form).
+#[cfg(test)]
+pub fn check(j: &Judged<'_>, installed: Installed<'_>, rebase: bool) -> Result<Accepted, String> {
+    check_approved(j, installed, rebase, None)
 }
 
 /// The install guarantee. `Ok` with the result's own speed facts (to store beside the installed
@@ -434,7 +470,18 @@ pub struct Accepted {
 /// a row whose identity changed) are refused, unless `rebase`: then the result, which passed
 /// everything above, becomes the new reference and the note says so loudly. `rebase` never
 /// waives a comparison that can be made.
-pub fn check(j: &Judged<'_>, installed: Installed<'_>, rebase: bool) -> Result<Accepted, String> {
+///
+/// `approval` is the owner's approval of a slower install (`--accept-slower TEXT`, already
+/// checked by [`approval_text`]). It waives only never-slower comparisons that were
+/// made and failed, each recorded with its numbers in [`Accepted::approval`]; every other
+/// refusal stands. With `rebase` on facts that cannot be compared it is recorded as given, with
+/// why nothing was measured. An approval nothing needed is not recorded.
+pub fn check_approved(
+    j: &Judged<'_>,
+    installed: Installed<'_>,
+    rebase: bool,
+    approval: Option<&str>,
+) -> Result<Accepted, String> {
     let r = j.result;
     let at = util::short(j.hash);
     if r.schema > RESULT_SCHEMA_MAX {
@@ -513,9 +560,14 @@ pub fn check(j: &Judged<'_>, installed: Installed<'_>, rebase: bool) -> Result<A
                 note: format!(
                     "REBASED SPEED REFERENCE: {why}. --rebase-facts takes result {at}, a strict \
                      install-profile PASS, as the new reference: never-slower was NOT judged \
-                     for this install"
+                     for this install{}",
+                    approval.map_or(String::new(), |t| format!("; OWNER APPROVAL recorded: {t}"))
                 ),
                 rebased: true,
+                approval: approval.map(|t| Approval {
+                    text: t.to_string(),
+                    slower: vec![format!("not measured by the harness: {why}")],
+                }),
             })
         } else {
             Err(format!(
@@ -533,6 +585,7 @@ pub fn check(j: &Judged<'_>, installed: Installed<'_>, rebase: bool) -> Result<A
                        this name"
                     .into(),
                 rebased: false,
+                approval: None,
             })
         }
         Installed::DiscWithoutFacts => {
@@ -569,6 +622,7 @@ pub fn check(j: &Judged<'_>, installed: Installed<'_>, rebase: bool) -> Result<A
         );
     }
     let mut moved = Vec::new();
+    let mut slower = Vec::new();
     for (row, old_w) in &old.windows {
         let now_id = j.identities.get(row);
         if old_w.identity.is_none() || old_w.identity.as_ref() != now_id {
@@ -629,11 +683,19 @@ pub fn check(j: &Judged<'_>, installed: Installed<'_>, rebase: bool) -> Result<A
         for (metric, now, values, higher) in metrics {
             let c = crate::stage::speed::judge_metric(metric, &now, &base, values, higher, 0);
             if c.status != Status::Pass {
-                return Err(format!(
-                    "never slower than the installed build: window `{row}` {metric} is {} for \
-                     result {at}, the installed build (result {from}) had {}",
+                let line = format!(
+                    "window `{row}` {metric} is {} for result {at}, the installed build (result \
+                     {from}) had {}",
                     c.value, c.baseline
-                ));
+                );
+                if approval.is_none() {
+                    return Err(format!(
+                        "never slower than the installed build: {line}. If the owner approved \
+                         this slower build, pass --accept-slower \"<their approval>\" to install \
+                         it with the approval and these numbers in the install record"
+                    ));
+                }
+                slower.push(line);
             }
         }
     }
@@ -647,17 +709,38 @@ pub fn check(j: &Judged<'_>, installed: Installed<'_>, rebase: bool) -> Result<A
             ),
         );
     }
+    if let (Some(text), false) = (approval, slower.is_empty()) {
+        return Ok(Accepted {
+            facts,
+            note: format!(
+                "OWNER-APPROVED SLOWER INSTALL: slower than the installed build (result {from}): \
+                 {}; approval: {text}",
+                slower.join("; ")
+            ),
+            rebased: false,
+            approval: Some(Approval {
+                text: text.to_string(),
+                slower,
+            }),
+        });
+    }
     Ok(Accepted {
         facts,
         note: format!(
-            "not slower than the installed build (result {from}){}",
+            "not slower than the installed build (result {from}){}{}",
             if rebase {
                 "; --rebase-facts was not needed and changed nothing"
+            } else {
+                ""
+            },
+            if approval.is_some() {
+                "; --accept-slower was not needed and is not recorded"
             } else {
                 ""
             }
         ),
         rebased: false,
+        approval: None,
     })
 }
 
@@ -812,11 +895,16 @@ fn one(ctx: &Ctx<'_>, install: &crate::game::Install) -> StageResult {
         bin_sha256: &bin_sha256,
         map_sha256: map_sha256.as_deref(),
     };
-    let accepted = match check(&judged_side, installed, ctx.rebase_facts) {
+    let accepted = match check_approved(
+        &judged_side,
+        installed,
+        ctx.rebase_facts,
+        ctx.accept_slower.as_deref(),
+    ) {
         Ok(a) => a,
         Err(e) => return refuse(e),
     };
-    if accepted.rebased {
+    if accepted.rebased || accepted.approval.is_some() {
         eprintln!("\n*** {} ***\n", accepted.note);
     }
     let facts = match accepted.facts.to_json() {
@@ -848,6 +936,9 @@ fn one(ctx: &Ctx<'_>, install: &crate::game::Install) -> StageResult {
             .iter()
             .map(|r| serde_json::json!({ "id": r.id, "result_sha256": r.result, "file": r.file }))
             .collect();
+    }
+    if let Some(approval) = &accepted.approval {
+        base["owner_approval"] = serde_json::json!(approval);
     }
     if let Some(map_sha) = &map_sha256 {
         base["artifacts"] = serde_json::json!({
@@ -897,9 +988,13 @@ pub struct Stamp {
     pub checked_at: String,
     /// The new speed facts, to store beside the disc as `<Name>.speed-facts.json`.
     pub facts: SpeedFacts,
+    /// `--accept-slower`: the owner's approval and what was slower. Absent otherwise, so a stamp
+    /// without one is written as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_approval: Option<Approval>,
 }
 
-/// `psoxide-test install-check` (main.rs, usage): [`check`] for an install made outside this stage
+/// `psoxide-test install-check` (main.rs, usage): [`check_approved`] for an install made outside this stage
 /// (the campaign's install script).
 ///
 /// - `--result` is a result file named by its own sha256; `--repo` a clone of the game holding
@@ -915,11 +1010,20 @@ pub struct Stamp {
 pub fn check_command(args: &[String]) -> Result<std::process::ExitCode, String> {
     let mut o: BTreeMap<&str, String> = BTreeMap::new();
     let (mut first_install, mut rebase) = (false, false);
+    let mut approval = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--first-install" => first_install = true,
             "--rebase-facts" => rebase = true,
+            "--accept-slower" => {
+                let v = it
+                    .next()
+                    .ok_or("--accept-slower needs the owner's approval text")?;
+                if approval.replace(approval_text(v)?).is_some() {
+                    return Err("install-check: --accept-slower given twice".into());
+                }
+            }
             flag @ ("--result" | "--facts" | "--repo" | "--write-facts" | "--bin" | "--map"
             | "--library-bin" | "--stamp") => {
                 let v = it.next().cloned().ok_or(format!("{flag} needs a value"))?;
@@ -932,7 +1036,8 @@ pub fn check_command(args: &[String]) -> Result<std::process::ExitCode, String> 
     }
     let usage = "usage: psoxide-test install-check --result RESULT.json --repo GAME_CLONE --bin \
                  BIN [--map MAP] (--facts FACTS.json --library-bin LIBRARY.bin | \
-                 --first-install) [--rebase-facts] [--write-facts OUT.json] [--stamp OUT.json]";
+                 --first-install) [--rebase-facts] [--accept-slower TEXT] [--write-facts OUT.json] \
+                 [--stamp OUT.json]";
     let (Some(result), Some(repo), Some(bin)) =
         (o.get("--result"), o.get("--repo"), o.get("--bin"))
     else {
@@ -947,6 +1052,12 @@ pub fn check_command(args: &[String]) -> Result<std::process::ExitCode, String> 
     }
     if first_install && rebase {
         return Err("install-check: --first-install and --rebase-facts exclude each other".into());
+    }
+    if first_install && approval.is_some() {
+        return Err(
+            "install-check: --first-install has nothing to be slower than; drop --accept-slower"
+                .into(),
+        );
     }
     let repo = Path::new(repo);
     let (hash, r) = read_result(Path::new(result))?;
@@ -1023,7 +1134,7 @@ pub fn check_command(args: &[String]) -> Result<std::process::ExitCode, String> 
         bin_sha256: &bin_sha256,
         map_sha256: map_sha256.as_deref(),
     };
-    let accepted = match check(&judged, installed, rebase) {
+    let accepted = match check_approved(&judged, installed, rebase, approval.as_deref()) {
         Ok(a) => a,
         Err(e) => return refused(e),
     };
@@ -1039,13 +1150,14 @@ pub fn check_command(args: &[String]) -> Result<std::process::ExitCode, String> 
             profile: r.profile.name().into(),
             checked_at: util::utc_now(),
             facts: accepted.facts.clone(),
+            owner_approval: accepted.approval.clone(),
         };
         let json = serde_json::to_string_pretty(&stamp).map_err(|e| e.to_string())?;
         let tmp = format!("{out}.tmp");
         std::fs::write(&tmp, json).map_err(|e| format!("write {tmp}: {e}"))?;
         std::fs::rename(&tmp, out).map_err(|e| format!("rename {tmp} to {out}: {e}"))?;
     }
-    if accepted.rebased {
+    if accepted.rebased || accepted.approval.is_some() {
         println!("\n*** {} ***\n", accepted.note);
     }
     println!(
@@ -1385,6 +1497,66 @@ mod tests {
         // --rebase-facts never waives a comparison that can be made.
         let slower = passing([110, 112, 114], [790, 786, 782]);
         assert!(judge("new", &slower, "t1", over(&installed), true).is_err());
+        assert!(judge("new", &slower, "t1", over(&installed), false)
+            .unwrap_err()
+            .contains("--accept-slower"));
+    }
+
+    #[test]
+    fn an_owner_approved_slower_install_is_recorded_with_its_numbers() {
+        let installed = first("old", &passing([100, 102, 104], [790, 786, 782]));
+        let identities = ids("t1");
+        let approved = |r: &RunResult, rebase: bool, text: Option<&str>| {
+            let j = Judged {
+                hash: "new",
+                result: r,
+                layouts: &[],
+                identities: &identities,
+                bin_sha256: "bin-new",
+                map_sha256: Some("map"),
+            };
+            check_approved(&j, over(&installed), rebase, text)
+        };
+        let text = "owner 11-23: the slower build may go in";
+        let slower = passing([110, 112, 114], [790, 786, 782]);
+        let a = approved(&slower, false, Some(text)).unwrap();
+        let approval = a.approval.expect("recorded");
+        assert_eq!(approval.text, text);
+        assert_eq!(
+            approval.slower.len(),
+            2,
+            "mean and p99: {:?}",
+            approval.slower
+        );
+        assert!(
+            approval.slower[0].contains("work per frame is 112.0"),
+            "{:?}",
+            approval.slower
+        );
+        assert!(
+            approval.slower[0].contains("had 102.0"),
+            "{:?}",
+            approval.slower
+        );
+        assert!(
+            a.note.starts_with("OWNER-APPROVED SLOWER INSTALL"),
+            "{}",
+            a.note
+        );
+        assert!(a.note.contains(text), "{}", a.note);
+        assert!(!a.rebased);
+        // Not slower: nothing to approve, nothing recorded.
+        let same = passing([101, 103, 105], [789, 785, 781]);
+        let a = approved(&same, false, Some(text)).unwrap();
+        assert!(a.approval.is_none());
+        assert!(a.note.contains("not needed"), "{}", a.note);
+        // The approval waives only the speed comparison: a short layout search still refuses.
+        let mut dirty = slower.clone();
+        dirty.dirty = true;
+        assert!(approved(&dirty, false, Some(text)).is_err());
+        // A bare flag value is not an approval.
+        assert!(approval_text("yes").is_err());
+        assert_eq!(approval_text(&format!("  {text} ")).unwrap(), text);
     }
 
     #[test]

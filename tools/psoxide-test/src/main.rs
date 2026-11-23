@@ -53,15 +53,17 @@ usage:
   psoxide-test pin [--repo DIR] [--write] [--pinned REV] [--main REV] [--crates]
       the SDK pin rule for the game: its pinned commit against SDK main (or REV), over the SDK
       crates the game reaches (--crates lists them); --write records the pin's guest tree
-  psoxide-test install [--repo DIR] [--rebase-facts]
+  psoxide-test install [--repo DIR] [--rebase-facts] [--accept-slower TEXT]
       install the judged disc into the configured library (needs a complete clean full PASS on
       the install profile, a searched layout, never slower per speed window than the build
       installed before it, judged on the library's speed facts, which must describe the library's
       disc; no facts is a first install only when the library holds no disc of that name).
       --rebase-facts: when those facts cannot be compared, take this PASS as the new reference
+      --accept-slower TEXT: the owner approved a build slower than the installed one; installs
+      it with TEXT and each failed never-slower comparison, with its numbers, in the record
   psoxide-test install-check --result RESULT.json --repo GAME_CLONE --bin BIN [--map MAP]
                              (--facts FACTS.json --library-bin LIBRARY.bin | --first-install)
-                             [--rebase-facts] [--write-facts OUT.json] [--stamp OUT.json]
+                             [--rebase-facts] [--accept-slower TEXT] [--write-facts OUT.json] [--stamp OUT.json]
       the same guarantee for an install made elsewhere: exit 0 only if RESULT (named by its own
       sha256) judged BIN and MAP, its committed layouts (read in GAME_CLONE at RESULT's commit)
       were searched, and it is never slower than the installed build whose speed facts are
@@ -107,6 +109,9 @@ struct Options {
     /// (another window identity, facts of another disc, or legacy facts), take this strict PASS
     /// as the new reference instead of refusing. Never waives a comparison that can be made.
     rebase_facts: bool,
+    /// `--accept-slower TEXT` (install only): the owner's approval of a build slower than the
+    /// installed one, recorded with the measured slowdown in the install record.
+    accept_slower: Option<String>,
     /// `bless --keep-speed`: keep the baseline's speed rows (light landings on a greedy layout).
     keep_speed: bool,
     /// `bless --keep-speed --trust-legacy-rows`: adopt a pre-provenance baseline's rows once.
@@ -124,6 +129,7 @@ fn options(args: &[String]) -> Result<Options, String> {
         trust_legacy: false,
         profile: stage::Profile::Install,
         rebase_facts: false,
+        accept_slower: None,
     };
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -135,6 +141,9 @@ fn options(args: &[String]) -> Result<Options, String> {
             "--keep-speed" => o.keep_speed = true,
             "--trust-legacy-rows" => o.trust_legacy = true,
             "--rebase-facts" => o.rebase_facts = true,
+            "--accept-slower" => {
+                o.accept_slower = Some(stage::install::approval_text(&value()?)?);
+            }
             "--profile" => {
                 o.profile = match value()?.as_str() {
                     "install" => stage::Profile::Install,
@@ -205,8 +214,8 @@ fn dispatch(args: &[String]) -> Result<ExitCode, String> {
 /// `options` for a command other than `run`, which takes no landing profile.
 /// `--rebase-facts` is an `install` option only.
 fn no_rebase(o: Options) -> Result<Options, String> {
-    if o.rebase_facts {
-        Err("--rebase-facts is an `install` option only".into())
+    if o.rebase_facts || o.accept_slower.is_some() {
+        Err("--rebase-facts and --accept-slower are `install` options only".into())
     } else {
         Ok(o)
     }
@@ -303,6 +312,7 @@ fn context<'a>(o: &Options, game: &'a Game, config: &'a Config) -> Result<Ctx<'a
         profile: o.profile,
         all_models: o.all_models,
         rebase_facts: o.rebase_facts,
+        accept_slower: o.accept_slower.clone(),
         artifacts: BTreeMap::new(),
         timing: Mutex::new(Vec::new()),
         originals: Mutex::new(originals::Cache::load(
@@ -517,6 +527,7 @@ fn bless(o: &Options) -> Result<ExitCode, String> {
             profile: stage::Profile::Landing,
             repo: o.repo.clone(),
             stages: o.stages.clone(),
+            accept_slower: None,
             ..*o
         };
         &landing

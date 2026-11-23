@@ -155,6 +155,14 @@ psoxide-test install-check --result RESULT.json --repo GAME_CLONE --bin BIN [--m
 
 Exit 0 only on PASS.
 
+A build slower than the installed one goes in only with the owner's approval in words:
+`install --accept-slower "<who approved, and what>"` (and the same flag on `install-check`).
+It waives only the never-slower comparisons that were made and failed; each one, with its
+numbers, goes into the install record with the text (`owner_approval` in the provenance and the
+stamp) and is printed loudly. Every other refusal stands, and an approval nothing needed is not
+recorded. With `--rebase-facts` on facts that cannot be compared, the text is recorded with why
+nothing was measured.
+
 The install also needs a searched layout. Every committed psoxide-pgo layout profile of the
 installed builds must carry the search stamp that `psoxide-pgo search` writes as its second
 line (format defined in tools/psoxide-pgo, README "The search stamp"):

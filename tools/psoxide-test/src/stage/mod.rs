@@ -103,6 +103,8 @@ pub struct Ctx<'a> {
     pub all_models: bool,
     /// `install --rebase-facts` (main.rs Options).
     pub rebase_facts: bool,
+    /// `install --accept-slower TEXT` (main.rs Options), checked by `install::approval_text`.
+    pub accept_slower: Option<String>,
     /// Per build: file name in `out` -> SHA-256, filled by the build stage.
     pub artifacts: BTreeMap<String, BTreeMap<String, String>>,
     pub timing: Mutex<Vec<Timing>>,
