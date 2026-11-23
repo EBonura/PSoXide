@@ -82,6 +82,14 @@ const LOGO_CLUT: Clut = Clut::new(768, 258);
 const LOGO_GLINT_CLUT: Clut = Clut::new(768, 259);
 const FONT_TPAGE: TexturePage = TexturePage::new(320, 0, TextureDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
+/// The font as statics of this crate: a `const` the generic upload takes by reference is emitted as
+/// anonymous data in the caller's crate, which no linker script can place by name (a boot overlay
+/// that holds the splash cannot take it, and under fat LTO it stays resident).
+static FONT_BITMAP: [u8; 1024] = psx_font::fonts::basic::BASIC_BITMAP;
+static FONT: psx_font::BitmapFont = psx_font::BitmapFont {
+    bitmap: &FONT_BITMAP,
+    ..BASIC
+};
 
 /// Frames in all, and fading out at the end.
 const TOTAL: i32 = 150;
@@ -246,7 +254,7 @@ fn play(
         VramRect::new(MARK_GLINT_CLUT.x(), MARK_GLINT_CLUT.y(), 16, 1),
         &stp[..16],
     );
-    let font = FontAtlas::upload(&BASIC, FONT_TPAGE, FONT_CLUT);
+    let font = FontAtlas::upload(&FONT, FONT_TPAGE, FONT_CLUT);
     let mut mark = Picture {
         x: 112,
         y: SOLO_MARK_Y,
