@@ -202,7 +202,7 @@ impl LinkMap {
             };
             let depth = rest.len() - rest.trim_start_matches(' ').len();
             let name = strip(rest);
-            if let Some(key) = ["__boot_start", "__boot_load_end"]
+            if let Some(key) = ["__boot_start", "__boot_load_end", "__psx_core_store_end"]
                 .into_iter()
                 .find(|key| name.strip_prefix(key) == Some(" = ."))
             {
@@ -344,8 +344,13 @@ impl LinkMap {
         starts.sort_unstable();
         rodata.sort_unstable();
         // With a boot overlay the image starts at its mover, not at `_start`.
+        // With the scene core (psoxide-core.ld) it starts at `__core_boot`, which copies the core's
+        // stored image (data, after .data) up into its window before `_start` runs.
+        let core_store_end = assigned.get("__psx_core_store_end").copied();
         let entry_name = if boot.is_some() {
             "__boot_entry"
+        } else if core_store_end.is_some() {
+            "__core_boot"
         } else {
             "_start"
         };
@@ -363,6 +368,7 @@ impl LinkMap {
             text: (lo, hi),
             data_end: boot
                 .map(|b| b.lma + (b.load_end - b.start))
+                .or(core_store_end)
                 .or_else(|| text_marks.get("__data_end").copied())
                 .or_else(|| text_marks.get("__bss_start").copied()),
             raw,

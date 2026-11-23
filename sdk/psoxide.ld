@@ -168,11 +168,14 @@ SECTIONS {
        bytes back. */
     /* With psoxide-boot.ld the boot-only sections follow .data in the file (their load address
        is `__boot_lma`, where .bss will be once the mover has run). */
-    __load_end = DEFINED(__boot_start) ? __boot_lma + (__boot_load_end - __boot_start) : __data_end;
+    /* With psoxide-core.ld the scene core's stored image follows .data in the file, and .bss is
+       laid over it (`__core_boot` has copied it up into the window before `_start` clears .bss). */
+    __load_end = DEFINED(__psx_core_store_end) ? __psx_core_store_end
+               : DEFINED(__boot_start) ? __boot_lma + (__boot_load_end - __boot_start) : __data_end;
     __image_end = __text_start + ((__load_end - __text_start + EXE_HEAD_BYTES - 1) & ~(EXE_HEAD_BYTES - 1));
 
     /* Uninitialised data - zeroed by `_start`, not stored in file. */
-    .bss (NOLOAD) : {
+    .bss (DEFINED(__psx_core_store) ? __psx_core_store : .) (NOLOAD) : {
         __bss_start = .;
         *(.bss .bss.*);
         *(COMMON);
