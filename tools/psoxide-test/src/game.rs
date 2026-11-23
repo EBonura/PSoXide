@@ -64,6 +64,11 @@ pub struct Stack {
     /// figure is the deepest the stack has been by then).
     pub journey: String,
     pub checkpoint: String,
+    /// The build whose link map gives the stack top (`STACK_INIT`, which a program hosted
+    /// under the scene core links lower with `RAM_SIZE_OVERRIDE`). Unset: `top`, else the SDK
+    /// linker script's stock 0x801FFF00. Not both.
+    #[serde(default)]
+    pub build: Option<String>,
     /// The initial stack pointer and the reserve below it (default: the SDK linker script's
     /// 0x801FFF00 and 0x8000; a program that overrides STACK_RESERVE says so here).
     #[serde(default)]
@@ -656,6 +661,22 @@ impl Game {
             if self.journeys.is_none() {
                 return Err("[[stack]] measures a journey: declare [journeys]".into());
             }
+            if let Some(b) = &st.build {
+                known(b, "[[stack]]")?;
+                if st.top.is_some() {
+                    return Err(format!(
+                        "[[stack]] `{}`: build reads the stack top from that link; top is for a \
+                         program without one: name one of them",
+                        st.journey
+                    ));
+                }
+                if self.build(b).is_some_and(|b| b.map.is_none()) {
+                    return Err(format!(
+                        "[[stack]] `{}`: build `{b}` declares no map to read STACK_INIT from",
+                        st.journey
+                    ));
+                }
+            }
         }
         let manifests = self.builds.iter().filter(|b| b.members.is_some()).count();
         if manifests > 1 {
@@ -857,6 +878,27 @@ map = "link.map"
         assert!(Game::parse(&reasonless)
             .unwrap_err()
             .contains("bind_reason"));
+    }
+
+    #[test]
+    fn a_stack_bar_reads_its_top_from_a_build_with_a_map() {
+        let j = "[journeys]\nfiles = \"tests/*.toml\"\n";
+        let st = "[[stack]]\njourney = \"play\"\ncheckpoint = \"deep\"\n";
+        let ok = format!("{MINIMAL}{j}{st}build = \"ship\"\n");
+        assert_eq!(
+            Game::parse(&ok).unwrap().stacks[0].build.as_deref(),
+            Some("ship")
+        );
+        let both = format!("{ok}top = 0x801FD700\n");
+        assert!(Game::parse(&both).unwrap_err().contains("name one of them"));
+        let unknown = format!("{MINIMAL}{j}{st}build = \"gate\"\n");
+        assert!(Game::parse(&unknown).unwrap_err().contains("`gate`"));
+        let mapless = MINIMAL.replace("map = \"link.map\"\n", "");
+        let mapless = format!("{mapless}{j}{st}build = \"ship\"\n");
+        assert!(Game::parse(&mapless).unwrap_err().contains("no map"));
+        // Unchanged for a game that names neither.
+        let plain = format!("{MINIMAL}{j}{st}");
+        assert!(Game::parse(&plain).unwrap().stacks[0].build.is_none());
     }
 
     #[test]

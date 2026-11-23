@@ -133,7 +133,7 @@ fn measure(ctx: &Ctx<'_>, s: &Stack) -> Result<(u32, bool), String> {
         .as_ref()
         .ok_or("[[stack]] needs [journeys]")?;
     let conformance = format!("--conformance={}", spec.conformance.join(","));
-    let top = s.top.unwrap_or(SDK_STACK_TOP);
+    let top = stack_top(ctx, s)?;
     let reserve = s.reserve.unwrap_or(SDK_STACK_RESERVE);
     let mut key = Key::new("stack");
     key.file("journey", &path)?;
@@ -211,6 +211,29 @@ fn measure(ctx: &Ctx<'_>, s: &Stack) -> Result<(u32, bool), String> {
     Ok((d, false))
 }
 
+/// The stack top a `[[stack]]` measures down from: the `STACK_INIT` its build's link map
+/// gives, else `top`, else the stock SDK value (a game that declares neither keeps its key).
+fn stack_top(ctx: &Ctx<'_>, s: &Stack) -> Result<u32, String> {
+    let Some(name) = &s.build else {
+        return Ok(s.top.unwrap_or(SDK_STACK_TOP));
+    };
+    let map = ctx
+        .game
+        .build(name)
+        .and_then(|b| b.map_path(&ctx.repo))
+        .ok_or_else(|| format!("[[stack]] build `{name}` declares no map"))?;
+    top_from_map(&map)
+}
+
+/// `STACK_INIT` of the link whose map is at `path`.
+pub fn top_from_map(path: &Path) -> Result<u32, String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    psoxide_size::map::parse(&text)
+        .stack_init()
+        .map_err(|e| format!("{}: {e}", path.display()))
+}
+
 /// The one `ram.bin` the traced run saved.
 fn find_ram(dir: &Path) -> Option<PathBuf> {
     let mut stack = vec![dir.to_path_buf()];
@@ -244,5 +267,37 @@ mod tests {
         ram[off - SDK_STACK_RESERVE as usize - 8] = 9;
         assert_eq!(depth(&ram, top, SDK_STACK_RESERVE).unwrap(), 0x400);
         assert!(depth(&ram, 0x7000_0000, 16).is_err());
+    }
+
+    #[test]
+    fn the_top_comes_from_the_builds_map_so_a_hosted_link_is_measured_from_its_own_top() {
+        let dir = tempfile::tempdir().unwrap();
+        let lines = concat!(
+            "     VMA      LMA     Size Align Out     In      Symbol\n",
+            "       0        0        0     1 RAM_BASE = 0x80000000\n",
+            "       0        0        0     1 RAM_SIZE = DEFINED(RAM_SIZE_OVERRIDE) ? RAM_SIZE_OVERRIDE : 2M\n",
+            "       0        0        0     1 STACK_INIT = RAM_BASE + RAM_SIZE - 0x100\n",
+        );
+        let stock = dir.path().join("stock.map");
+        std::fs::write(&stock, lines).unwrap();
+        assert_eq!(top_from_map(&stock), Ok(SDK_STACK_TOP));
+        let hosted = dir.path().join("hosted.map");
+        std::fs::write(
+            &hosted,
+            format!("{lines}       0        0        0     1 RAM_SIZE_OVERRIDE = 0x1FD800\n"),
+        )
+        .unwrap();
+        let top = top_from_map(&hosted).unwrap();
+        assert_eq!(top, 0x801f_d700);
+        // Measured from the hosted top, a frame 0x200 B under it is 0x200 deep; measured from the
+        // stock constant, the same RAM would read 0x2800 B (the core window) deeper than it is.
+        let mut ram = vec![0u8; 2 * 1024 * 1024];
+        ram[(top - RAM_BASE) as usize - 0x200] = 1;
+        assert_eq!(depth(&ram, top, SDK_STACK_RESERVE).unwrap(), 0x200);
+        assert_eq!(
+            depth(&ram, SDK_STACK_TOP, SDK_STACK_RESERVE).unwrap(),
+            SDK_STACK_TOP - top + 0x200
+        );
+        assert!(top_from_map(&dir.path().join("missing.map")).is_err());
     }
 }

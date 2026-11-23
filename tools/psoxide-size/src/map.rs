@@ -102,6 +102,43 @@ impl LinkMap {
         self.eval("STACK_RESERVE", 0)
     }
 
+    /// `STACK_INIT`, the initial stack pointer this link wrote into the PS-X header
+    /// (`RAM_BASE + RAM_SIZE - 0x100` in psoxide.ld): 0x801FFF00 for a stock link,
+    /// lower for one that sets `RAM_SIZE_OVERRIDE` (a program hosted under the scene
+    /// core's window). Read from the map's own assignments, so it is the number the
+    /// link used, not a constant.
+    ///
+    /// An override passed with `--defsym` is not in the map and reads as the default,
+    /// exactly as [`LinkMap::stack_reserve`] does: psoxide.ld asks for overrides in a
+    /// `-T` file for that reason, and the scene core's link rule does the same. (The
+    /// map's address column on an assignment line is the location counter, not the
+    /// value, so the map holds no second copy to check against.) A map whose
+    /// `STACK_INIT` cannot be evaluated (no psoxide.ld link, or a script whose
+    /// `RAM_SIZE` only a `--defsym` gives) is an error, never the stock value.
+    pub fn stack_init(&self) -> Result<u32, String> {
+        self.eval("STACK_INIT", 0).ok_or_else(|| {
+            "the map gives no STACK_INIT this tool can evaluate (not a psoxide.ld link, or its \
+             RAM size comes from --defsym, which the map does not record)"
+                .to_string()
+        })
+    }
+
+    /// The top of the RAM the program links for, `RAM_BASE + RAM_SIZE` (0x80200000 for a
+    /// stock link): [`LinkMap::stack_init`] plus the 0x100 psoxide.ld leaves above it.
+    pub fn ram_top(&self) -> Result<u32, String> {
+        let init = self.stack_init()?;
+        let top = self.eval("RAM_BASE + RAM_SIZE", 0).ok_or(
+            "the map gives no RAM_BASE + RAM_SIZE this tool can evaluate (not a psoxide.ld link)",
+        )?;
+        if top.wrapping_sub(init) != STACK_INIT_GAP {
+            return Err(format!(
+                "STACK_INIT {init:#010x} is not {STACK_INIT_GAP:#x} below RAM_BASE + RAM_SIZE \
+                 {top:#010x}: not the psoxide.ld layout this tool reads"
+            ));
+        }
+        Ok(top)
+    }
+
     /// Bytes between the heap start and the stack reserve, the figure every
     /// builder reports as `heap_free`.
     pub fn heap_free(&self) -> Option<u32> {
@@ -116,6 +153,9 @@ impl LinkMap {
 fn hex(field: &str) -> Option<u32> {
     u32::from_str_radix(field.trim(), 16).ok()
 }
+
+/// psoxide.ld's gap between `STACK_INIT` and the top of RAM.
+pub const STACK_INIT_GAP: u32 = 0x100;
 
 /// Parse a map. Lines that are not part of the image (debug sections, the
 /// header row, script assignments with no address) are skipped.
@@ -284,5 +324,45 @@ mod tests {
         // A game script before the SDK's, or after it in the map: the override.
         assert_eq!(parse(&format!("{ov}{ld}")).stack_reserve(), Some(0xd000));
         assert_eq!(parse(&format!("{ld}{ov}")).stack_reserve(), Some(0xd000));
+    }
+
+    /// The four psoxide.ld lines that set the RAM top, as lld prints them.
+    const RAM_LINES: &str = "\
+     VMA      LMA     Size Align Out     In      Symbol
+       0        0        0     1 RAM_BASE = 0x80000000
+       0        0        0     1 RAM_SIZE = DEFINED(RAM_SIZE_OVERRIDE) ? RAM_SIZE_OVERRIDE : 2M
+       0        0        0     1 STACK_INIT = RAM_BASE + RAM_SIZE - 0x100
+";
+
+    #[test]
+    fn the_stack_top_is_read_from_the_link_not_a_constant() {
+        // A stock link: the SDK's 2 MB.
+        let stock = parse(RAM_LINES);
+        assert_eq!(stock.stack_init(), Ok(0x801f_ff00));
+        assert_eq!(stock.ram_top(), Ok(0x8020_0000));
+        // A program hosted under the scene core's window (CORE-ABI: RAM_SIZE_OVERRIDE =
+        // 0x1FD800 in a -T file before psoxide.ld), in either order in the map.
+        let ov = "       0        0        0     1 RAM_SIZE_OVERRIDE = 0x1FD800\n";
+        for text in [format!("{ov}{RAM_LINES}"), format!("{RAM_LINES}{ov}")] {
+            let hosted = parse(&text);
+            assert_eq!(hosted.stack_init(), Ok(0x801f_d700));
+            assert_eq!(hosted.ram_top(), Ok(0x801f_d800));
+        }
+    }
+
+    #[test]
+    fn a_stack_top_the_map_cannot_give_is_an_error_not_the_stock_value() {
+        // No psoxide.ld assignments at all.
+        assert!(parse(SAMPLE).stack_init().is_err());
+        // A Psy-Q style script whose RAM size only a --defsym gives: never 0x801FFF00.
+        let psyq = "\
+     VMA      LMA     Size Align Out     In      Symbol
+       0        0        0     1 RAM_BASE = 0x80000000
+       0        0        0     1 RAM_SIZE = DEFINED(RAM_SIZE) ? RAM_SIZE : 0x200000
+       0        0        0     1 STACK_INIT = RAM_BASE + RAM_SIZE - 0x100
+";
+        let err = parse(psyq).stack_init().unwrap_err();
+        assert!(err.contains("--defsym"), "{err}");
+        assert!(parse(psyq).ram_top().is_err());
     }
 }
