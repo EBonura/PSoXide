@@ -135,17 +135,16 @@ pub fn run(ctx: &Ctx<'_>) -> StageResult {
                 .and_then(|a| a.get(&b.disc.replace(".cue", ".bin")))
                 .cloned()
                 .unwrap_or_default();
+            let plan = match boot_plan(ctx, boot, b, cross.min_distinct) {
+                Ok(p) => p,
+                Err(e) => {
+                    checks.push(Check::fail(format!("boot-{}", b.name), e));
+                    continue;
+                }
+            };
             jobs.push(Job {
                 emulator: *emulator,
-                plan: Plan {
-                    name: format!("boot-{}", b.name),
-                    disc: b.cue(&ctx.repo),
-                    pad: "digital".into(),
-                    steps: Vec::new(),
-                    max_frames: boot.frames,
-                    min_distinct: cross.min_distinct,
-                    idle_frames: boot.frames,
-                },
+                plan,
                 smoke: format!("boot-{}", b.name),
                 tool_digest: tool_digest.clone(),
                 disc_digest,
@@ -222,6 +221,60 @@ pub fn run(ctx: &Ctx<'_>) -> StageResult {
     )
 }
 
+/// The checkpoint a boot run with `until` passes when the game has started.
+pub const BOOTED: &str = "booted";
+
+/// The input-free boot run. Without `until`: `frames` frames, pictures counted over all of them
+/// (as before). With it: wait up to `frames` for the game's own state, check it at the `booted`
+/// checkpoint, then `after` more frames, pictures counted over those only.
+fn boot_plan(
+    ctx: &Ctx<'_>,
+    boot: &crate::game::Boot,
+    b: &crate::game::Build,
+    min_distinct: u32,
+) -> Result<Plan, String> {
+    let mut plan = Plan {
+        name: format!("boot-{}", b.name),
+        disc: b.cue(&ctx.repo),
+        pad: "digital".into(),
+        steps: Vec::new(),
+        max_frames: boot.frames,
+        min_distinct,
+        idle_frames: boot.frames,
+        distinct_after: None,
+    };
+    if boot.until.is_empty() {
+        return Ok(plan);
+    }
+    let symbols = super::build::symbols(&ctx.repo, b)
+        .ok_or_else(|| format!("build `{}` declares no map to resolve `until`", b.name))??;
+    let probes = boot
+        .until
+        .iter()
+        .map(|c| journey::condition(c, &symbols))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("[cross] boot until: {e}"))?;
+    plan.steps = vec![
+        journey::PlanStep {
+            label: "boot until the game's own state".into(),
+            action: journey::Action::Wait,
+            probes: probes.clone(),
+            timeout: boot.frames,
+        },
+        journey::PlanStep {
+            label: BOOTED.into(),
+            action: journey::Action::Check {
+                name: BOOTED.into(),
+            },
+            probes,
+            timeout: 0,
+        },
+    ];
+    plan.idle_frames = boot.after.unwrap_or(0);
+    plan.distinct_after = Some(BOOTED.into());
+    Ok(plan)
+}
+
 fn one(ctx: &Ctx<'_>, job: &Job, self_exe: &Path) -> (Check, bool) {
     let stem = Path::new(&job.smoke)
         .file_stem()
@@ -237,6 +290,13 @@ fn one(ctx: &Ctx<'_>, job: &Job, self_exe: &Path) -> (Check, bool) {
     );
     key.part("pad", &job.plan.pad);
     key.part("min_distinct", &job.plan.min_distinct.to_string());
+    // Only a boot run with `until` has these, so every other run keeps its key.
+    if let Some(after) = &job.plan.distinct_after {
+        key.part(
+            "distinct after",
+            &format!("{after} {} {}", job.plan.max_frames, job.plan.idle_frames),
+        );
+    }
     let key = key.finish();
     if let Some(o) = ctx.receipts.get("cross", &key) {
         println!("RECEIPT HIT cross {name} {}", util::short(&key));
@@ -341,17 +401,44 @@ pub fn judge(name: &str, plan: &Plan, replay: Result<Replay, String>, out: &Path
             ),
         );
     }
-    if r.distinct < plan.min_distinct {
+    let (distinct, after) = match &plan.distinct_after {
+        None => (r.distinct, String::new()),
+        Some(checkpoint) => {
+            let at = r
+                .reached
+                .iter()
+                .position(|(n, _)| n == checkpoint)
+                .and_then(|i| r.distinct_at.get(i).copied());
+            let Some(at) = at else {
+                return Check::fail(
+                    name,
+                    format!(
+                        "the adapter did not report the pictures at `{checkpoint}`; evidence {}",
+                        out.display()
+                    ),
+                );
+            };
+            (
+                r.distinct.saturating_sub(at),
+                format!(" after `{checkpoint}`"),
+            )
+        }
+    };
+    if distinct < plan.min_distinct {
         return Check::fail(
             name,
             format!(
-                "only {} distinct pictures (fewer than {}): a hang or a frozen picture; evidence {}",
-                r.distinct,
+                "only {distinct} distinct pictures{after} (fewer than {}): a hang or a frozen \
+                 picture; evidence {}",
                 plan.min_distinct,
                 out.display()
             ),
         );
     }
+    let value = match &plan.distinct_after {
+        Some(checkpoint) => format!("{value}; {distinct} distinct after `{checkpoint}`"),
+        None => value,
+    };
     Check::pass(name, value).detail(out.display().to_string())
 }
 
@@ -362,4 +449,98 @@ fn adapter_digest() -> String {
             .concat()
             .as_bytes(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::journey::{Action, PlanStep, Probe};
+
+    fn boot(after: Option<&str>) -> Plan {
+        let probe = Probe {
+            text: "GAME_FRAMES ge 1".into(),
+            addr: 0x8001_0000,
+            size: 4,
+            signed: false,
+            op: "ge".into(),
+            value: 1,
+            value_hi: 0,
+        };
+        Plan {
+            name: "boot-ship".into(),
+            disc: "/d.cue".into(),
+            pad: "digital".into(),
+            steps: if after.is_some() {
+                vec![
+                    PlanStep {
+                        label: "boot".into(),
+                        action: Action::Wait,
+                        probes: vec![probe.clone()],
+                        timeout: 3000,
+                    },
+                    PlanStep {
+                        label: BOOTED.into(),
+                        action: Action::Check {
+                            name: BOOTED.into(),
+                        },
+                        probes: vec![probe],
+                        timeout: 0,
+                    },
+                ]
+            } else {
+                Vec::new()
+            },
+            max_frames: 3000,
+            min_distinct: 60,
+            idle_frames: 600,
+            distinct_after: after.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn a_splash_alone_no_longer_passes_a_boot_run_with_until() {
+        let out = Path::new("/o");
+        // 150 animated splash pictures, then the game never changes its picture again.
+        let splash_only = Replay {
+            reached: vec![(BOOTED.into(), 400)],
+            failure: None,
+            frames: 1000,
+            distinct: 152,
+            distinct_at: vec![150],
+        };
+        // Today's rule counts the whole run: the splash passes it.
+        let whole_run = Replay {
+            reached: Vec::new(),
+            distinct_at: Vec::new(),
+            ..splash_only.clone()
+        };
+        let old = judge("boot", &boot(None), Ok(whole_run), out);
+        assert_eq!(old.status, crate::report::Status::Pass);
+        // With until, only the pictures after the game's own state count.
+        let c = judge("boot", &boot(Some(BOOTED)), Ok(splash_only.clone()), out);
+        assert_eq!(c.status, crate::report::Status::Fail, "{c:?}");
+        assert!(
+            c.detail.contains("2 distinct pictures after `booted`"),
+            "{}",
+            c.detail
+        );
+        // A game that keeps drawing passes, and the value names the booted frame.
+        let playing = Replay {
+            distinct: 150 + 200,
+            ..splash_only.clone()
+        };
+        let c = judge("boot", &boot(Some(BOOTED)), Ok(playing), out);
+        assert_eq!(c.status, crate::report::Status::Pass, "{c:?}");
+        assert!(c.value.contains("booted@400") && c.value.contains("200 distinct after"));
+        // The game never reaching its state is a failure of the wait, whatever was drawn.
+        let never = Replay {
+            reached: Vec::new(),
+            failure: Some("boot: GAME_FRAMES ge 1 (read 0) still false after 3000 frames".into()),
+            frames: 3000,
+            distinct: 150,
+            distinct_at: Vec::new(),
+        };
+        let c = judge("boot", &boot(Some(BOOTED)), Ok(never), out);
+        assert_eq!(c.status, crate::report::Status::Fail);
+    }
 }

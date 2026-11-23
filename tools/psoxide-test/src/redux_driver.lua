@@ -103,7 +103,7 @@ local function advance()
       shot(step.name)
       local ok, bad = all(step)
       if not ok then return finish(string.format('checkpoint %s at frame %d: %s does not hold', step.name, frame, bad)) end
-      say('REACHED', step.name, frame)
+      say('REACHED', step.name, frame, distinct)
       index = index + 1
     else
       local ok, bad = all(step)

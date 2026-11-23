@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use crate::journey::{Action, Plan};
 
 /// What an adapter run produced (ReARMed and Redux write the same shape).
-#[derive(Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Replay {
     /// Checkpoints reached, with the video frame they were checked on.
     pub reached: Vec<(String, u64)>,
@@ -25,6 +25,9 @@ pub struct Replay {
     pub frames: u64,
     /// Distinct pictures presented (frames whose picture hash differs from the previous one).
     pub distinct: u32,
+    /// Distinct pictures presented by the time each checkpoint of `reached` was checked.
+    #[serde(default)]
+    pub distinct_at: Vec<u32>,
 }
 
 const RETRO_DEVICE_JOYPAD: c_uint = 1;
@@ -460,6 +463,9 @@ pub fn replay(plan: &Plan, core_path: &Path, out: &Path) -> Result<Replay, Strin
                 save_png(out, name);
                 if failing.is_empty() {
                     result.reached.push((name.clone(), result.frames));
+                    result
+                        .distinct_at
+                        .push(with_host(|h| h.distinct).unwrap_or(0));
                 } else {
                     result.failure = Some(format!(
                         "checkpoint {name} at frame {}: {} does not hold",

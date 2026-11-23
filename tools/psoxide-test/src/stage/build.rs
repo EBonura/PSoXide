@@ -484,6 +484,14 @@ pub fn write_symbols(map: &Path, out: &Path) -> Result<(), String> {
     std::fs::write(out, body).map_err(|e| format!("write {}: {e}", out.display()))
 }
 
+/// The symbols a condition on this build's programs resolves against: its link map. `None`
+/// when the build declares no map.
+pub fn symbols(repo: &Path, build: &Build) -> Option<Result<crate::journey::Symbols, String>> {
+    let map = build.map_path(repo)?;
+    let mut symbols = crate::journey::Symbols::default();
+    Some(symbols.load(&map).map(|()| symbols))
+}
+
 /// `name (.0)` -> `name`: lld's suffix for a symbol in a numbered section.
 pub fn strip_section_suffix(name: &str) -> &str {
     match name.rsplit_once(" (.") {

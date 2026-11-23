@@ -573,11 +573,8 @@ fn locate(
     let (Some(from), Some(until), Some(max_polls)) = (&w.from, &w.until, w.max_polls) else {
         return Err("a window by conditions needs from, until and max_polls".into());
     };
-    let map = build
-        .map_path(&ctx.repo)
-        .ok_or_else(|| format!("build `{}` declares no map", build.name))?;
-    let mut symbols = crate::journey::Symbols::default();
-    symbols.load(&map)?;
+    let symbols = super::build::symbols(&ctx.repo, build)
+        .ok_or_else(|| format!("build `{}` declares no map", build.name))??;
     let from = crate::journey::condition(from, &symbols)?;
     let until = crate::journey::condition(until, &symbols)?;
     let tape = w.tape.as_ref().map(|t| ctx.repo.join(t));

@@ -342,6 +342,10 @@ pub struct Plan {
     /// Frames to keep running with no input after the last step (a boot run has no steps).
     #[serde(default)]
     pub idle_frames: u64,
+    /// Count `min_distinct` only over the frames after this checkpoint (a boot run's proof that
+    /// the game started), not over the whole run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distinct_after: Option<String>,
 }
 
 const BUTTONS: &[&str] = &[
@@ -464,6 +468,7 @@ pub fn plan(repo: &Path, path: &Path, pad: &str, min_distinct: u32) -> Result<Pl
         max_frames: smoke.max_ticks.unwrap_or(budget).min(budget.max(1)),
         min_distinct,
         idle_frames: 0,
+        distinct_after: None,
     })
 }
 

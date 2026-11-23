@@ -115,6 +115,11 @@ pub fn parse(output: &str) -> Replay {
             ["REACHED", name, frame] => r
                 .reached
                 .push(((*name).to_string(), frame.parse().unwrap_or(0))),
+            ["REACHED", name, frame, distinct] => {
+                r.reached
+                    .push(((*name).to_string(), frame.parse().unwrap_or(0)));
+                r.distinct_at.push(distinct.parse().unwrap_or(0));
+            }
             ["DONE", frames, distinct] => {
                 done = true;
                 r.frames = frames.trim().parse().unwrap_or(0);
@@ -241,6 +246,7 @@ mod tests {
             max_frames: 100,
             min_distinct: 60,
             idle_frames: 0,
+            distinct_after: None,
             steps: vec![PlanStep {
                 label: "it's".into(),
                 action: Action::Hold {
@@ -287,5 +293,9 @@ mod tests {
         let r = parse("CD-Rom: w3:1(03) not available yet\nPTEST\tDONE\t900\t5\n");
         assert!(r.failure.unwrap().contains("paused"));
         assert!(parse("").failure.is_some());
+        // The driver reports the distinct pictures at each checkpoint.
+        let r = parse("PTEST REACHED booted 412 37\nPTEST DONE 1012 140\n");
+        assert_eq!(r.reached, [("booted".to_string(), 412)]);
+        assert_eq!(r.distinct_at, [37]);
     }
 }

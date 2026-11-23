@@ -375,7 +375,18 @@ pub struct Cross {
 #[serde(deny_unknown_fields)]
 pub struct Boot {
     pub build: String,
+    /// Frames the run has (with `until`: frames the condition has to hold by).
     pub frames: u64,
+    /// The game-state proof that the game itself started: RAM conditions (the journey syntax,
+    /// resolved against the build's map and its `images` symbols) that hold together once the
+    /// game reached its own first frame or title. Without it the run only counts pictures,
+    /// which a splash or boot core in front of the game passes alone.
+    #[serde(default, deserialize_with = "one_or_many")]
+    pub until: Vec<toml::Table>,
+    /// With `until`: frames the run goes on after the conditions held; `min_distinct` is
+    /// counted over those frames only, so pictures drawn before the game do not count.
+    #[serde(default)]
+    pub after: Option<u64>,
 }
 
 fn default_pads() -> Vec<String> {
@@ -745,6 +756,25 @@ impl Game {
         if let Some(cross) = &self.cross {
             if let Some(boot) = &cross.boot {
                 known(&boot.build, "[cross] boot")?;
+                match (boot.until.is_empty(), boot.after) {
+                    (true, None) => {}
+                    (false, Some(_)) => {
+                        if self.build(&boot.build).is_some_and(|b| b.map.is_none()) {
+                            return Err(format!(
+                                "[cross] boot: build `{}` declares no map to resolve `until`",
+                                boot.build
+                            ));
+                        }
+                    }
+                    (false, None) => {
+                        return Err("[cross] boot: until needs `after` (the frames the game is \
+                                    watched once it started)"
+                            .into())
+                    }
+                    (true, Some(_)) => {
+                        return Err("[cross] boot: after counts from `until`: declare it".into())
+                    }
+                }
             }
             for pad in &cross.pads {
                 if !["digital", "dualshock"].contains(&pad.as_str()) {
@@ -899,6 +929,41 @@ map = "link.map"
         // Unchanged for a game that names neither.
         let plain = format!("{MINIMAL}{j}{st}");
         assert!(Game::parse(&plain).unwrap().stacks[0].build.is_none());
+    }
+
+    #[test]
+    fn a_boot_run_with_until_needs_after_and_a_map() {
+        let c = "[cross]\nsmoke = []\n[cross.boot]\nbuild = \"ship\"\nframes = 3000\n";
+        // Today's form is unchanged.
+        let plain = Game::parse(&format!("{MINIMAL}{c}")).unwrap();
+        assert!(plain.cross.unwrap().boot.unwrap().until.is_empty());
+        let until = "until = { kind = \"ram\", sym = \"GAME_FRAMES\", op = \"ge\", value = 1 }\n";
+        assert!(Game::parse(&format!("{MINIMAL}{c}{until}"))
+            .unwrap_err()
+            .contains("after"));
+        let ok = Game::parse(&format!("{MINIMAL}{c}{until}after = 600\n")).unwrap();
+        let boot = ok.cross.unwrap().boot.unwrap();
+        assert_eq!((boot.until.len(), boot.after), (1, Some(600)));
+        // Several conditions (a guard against bytes of another program at the same address).
+        let two = "until = [{ kind = \"ram\", sym = \"A\", value = 1 }, { kind = \"ram\", sym = \"B\", value = 2 }]\nafter = 60\n";
+        assert_eq!(
+            Game::parse(&format!("{MINIMAL}{c}{two}"))
+                .unwrap()
+                .cross
+                .unwrap()
+                .boot
+                .unwrap()
+                .until
+                .len(),
+            2
+        );
+        assert!(Game::parse(&format!("{MINIMAL}{c}after = 60\n"))
+            .unwrap_err()
+            .contains("until"));
+        let mapless = MINIMAL.replace("map = \"link.map\"\n", "");
+        assert!(Game::parse(&format!("{mapless}{c}{until}after = 600\n"))
+            .unwrap_err()
+            .contains("no map"));
     }
 
     #[test]

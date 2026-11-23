@@ -33,7 +33,7 @@ budget) live in the user config, never in the repo: `~/.config/psoxide-test/conf
 | `[[size]]` | the build whose map is judged: text, data, bss and free RAM against the baseline (tolerance 0 unless a `reason` is given) |
 | `[[speed]]` | a window on a poll-bound tape (`tape` + `polls`) or between two game-state conditions (`from` + `until`), measured at phase `offsets`; `models = ["mister"]` adds a row per model |
 | `[journeys]` | gate journeys (`files`), the quick tier's `precheck`, enforced conformance rules, `hw`, `only_on`, `instances` (templates played once per required member) |
-| `[cross]` | smoke journeys replayed on PCSX-ReARMed and PCSX-Redux, RAM checkpoints only; `boot` of a shipping disc with no input |
+| `[cross]` | smoke journeys replayed on PCSX-ReARMed and PCSX-Redux, RAM checkpoints only; `boot` of a shipping disc with no input. `boot.until` (RAM conditions on the build's map) with `boot.after` proves the game itself started: the run waits up to `frames` for them, reports the frame they held at, and counts `min_distinct` over the `after` frames only, so a splash or boot core in front cannot pass it alone |
 | `[[host]]` | host checks: a command that exits 0, optionally a `metric`; `inputs` and `uses` key it on what it reads |
 | `[[clean]]` | a fresh clone of the pushed commit rebuilds these files byte for byte |
 | `[[install]]` | the library entry a build becomes |
