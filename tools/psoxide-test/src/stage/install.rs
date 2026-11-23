@@ -869,6 +869,53 @@ pub fn check_approved(
     })
 }
 
+/// The provenance of a build's programs beyond its disc and map: `artifacts.exe` (the
+/// executable the map is of, `exe`) and `artifacts.images` (each image's map, kept beside the
+/// disc as `<Name>.<pin12>.<image>.map`, and its executable). Every file must be one of the
+/// judged `files` (`now`). Returns the image map sidecars to write: (suffix, file in `out`).
+pub fn program_artifacts(
+    b: &crate::game::Build,
+    now: &BTreeMap<String, String>,
+    name: &str,
+    pin: &str,
+    base: &mut serde_json::Value,
+) -> Result<Vec<(String, String)>, String> {
+    let judged = |file: &str| -> Result<String, String> {
+        now.get(file).cloned().ok_or_else(|| {
+            format!(
+                "build `{}` names `{file}`, which is not among its judged files in {}",
+                b.name, b.out
+            )
+        })
+    };
+    let mut sidecars = Vec::new();
+    if b.exe.is_none() && b.images.is_empty() {
+        return Ok(sidecars);
+    }
+    if !base["artifacts"].is_object() {
+        base["artifacts"] = serde_json::json!({});
+    }
+    if let Some(exe) = &b.exe {
+        base["artifacts"]["exe"] = serde_json::json!({ "file": exe, "sha256": judged(exe)? });
+    }
+    if !b.images.is_empty() {
+        let mut images = serde_json::Map::new();
+        for image in &b.images {
+            let suffix = format!(".{}.{}.map", util::short(pin), image.name);
+            let mut entry = serde_json::json!({
+                "map": { "file": format!("{name}{suffix}"), "sha256": judged(&image.map)? }
+            });
+            if let Some(exe) = &image.exe {
+                entry["exe"] = serde_json::json!({ "file": exe, "sha256": judged(exe)? });
+            }
+            images.insert(image.name.clone(), entry);
+            sidecars.push((suffix, image.map.clone()));
+        }
+        base["artifacts"]["images"] = serde_json::Value::Object(images);
+    }
+    Ok(sidecars)
+}
+
 /// The install stage: reads the latest result in the work tree and refuses unless it is a
 /// complete PASS for exactly these bytes.
 pub fn run(ctx: &Ctx<'_>) -> StageResult {
@@ -1076,11 +1123,28 @@ fn one(ctx: &Ctx<'_>, install: &crate::game::Install) -> StageResult {
             "map": { "file": format!("{name}{suffix}"), "sha256": map_sha }
         });
     }
+    // A disc with more than one program: which executable the map is of, and every other
+    // image's map (kept beside the disc) and executable. Absent for a build without them.
+    let image_maps = match program_artifacts(b, &now, &name, &pin, &mut base) {
+        Ok(m) => m,
+        Err(e) => return refuse(e),
+    };
     // The speed facts go in with the disc (written before the cue), so the next install is
     // judged against exactly this build.
     let mut sidecars = vec![psx_library::Sidecar::new(FACTS_SUFFIX, facts.as_bytes())];
     if !map_bytes.is_empty() {
         sidecars.push(psx_library::Sidecar::new(&suffix, &map_bytes));
+    }
+    let out_dir = b.out_dir(&ctx.repo);
+    let mut image_bytes = Vec::new();
+    for (sidecar, file) in &image_maps {
+        match std::fs::read(out_dir.join(file)) {
+            Ok(bytes) => image_bytes.push((sidecar.clone(), bytes)),
+            Err(e) => return refuse(format!("read {file}: {e}")),
+        }
+    }
+    for (sidecar, bytes) in &image_bytes {
+        sidecars.push(psx_library::Sidecar::new(sidecar, bytes));
     }
     let cue = b.cue(&ctx.repo);
     let request = psx_library::Request::new(&cue, &games_dir, &name, source)
@@ -1640,6 +1704,61 @@ mod tests {
         .unwrap()
         .facts;
         assert!(!plain.to_json().unwrap().contains("loads"));
+    }
+
+    #[test]
+    fn a_two_program_disc_names_the_games_executable_and_keeps_every_image_map() {
+        let game = crate::game::Game::parse(
+            "schema = 1\nname = \"G\"\nrepository = \"o/g\"\n[[build]]\nname = \"ship\"\n\
+             out = \"out\"\ncommands = [[\"make\"]]\ndisc = \"g.cue\"\nmap = \"game.map\"\n\
+             exe = \"game.exe\"\nimages = [{ name = \"boot\", map = \"boot.map\", exe = \"boot.exe\" }]\n",
+        )
+        .unwrap();
+        let b = &game.builds[0];
+        let now: BTreeMap<String, String> =
+            ["g.bin", "game.map", "game.exe", "boot.map", "boot.exe"]
+                .iter()
+                .map(|f| (f.to_string(), format!("sha-{f}")))
+                .collect();
+        let pin = "abcdef0123456789";
+        let mut base =
+            serde_json::json!({ "artifacts": { "map": { "file": "G.abcdef012345.map" } } });
+        let sidecars = program_artifacts(b, &now, "G", pin, &mut base).unwrap();
+        assert_eq!(base["artifacts"]["map"]["file"], "G.abcdef012345.map");
+        assert_eq!(base["artifacts"]["exe"]["sha256"], "sha-game.exe");
+        assert_eq!(
+            base["artifacts"]["images"]["boot"]["exe"]["sha256"],
+            "sha-boot.exe"
+        );
+        assert_eq!(
+            base["artifacts"]["images"]["boot"]["map"]["file"],
+            "G.abcdef012345.boot.map"
+        );
+        assert_eq!(
+            sidecars,
+            [(".abcdef012345.boot.map".to_string(), "boot.map".to_string())]
+        );
+        // A named file the result did not judge is refused.
+        let mut partial = now.clone();
+        partial.remove("boot.exe");
+        assert!(
+            program_artifacts(b, &partial, "G", pin, &mut serde_json::json!({}))
+                .unwrap_err()
+                .contains("boot.exe")
+        );
+        // A one-program build adds nothing.
+        let plain = crate::game::Game::parse(
+            "schema = 1\nname = \"G\"\nrepository = \"o/g\"\n[[build]]\nname = \"ship\"\n\
+             out = \"out\"\ncommands = [[\"make\"]]\ndisc = \"g.cue\"\nmap = \"game.map\"\n",
+        )
+        .unwrap();
+        let mut untouched = serde_json::json!({ "files": {} });
+        assert!(
+            program_artifacts(&plain.builds[0], &now, "G", pin, &mut untouched)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(untouched, serde_json::json!({ "files": {} }));
     }
 
     #[test]

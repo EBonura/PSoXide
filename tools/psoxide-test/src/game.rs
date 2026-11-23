@@ -165,6 +165,12 @@ pub struct Build {
     /// The link map inside `out` (size and symbols read it).
     #[serde(default)]
     pub map: Option<String>,
+    /// The executable inside `out` whose link `map` is, for a disc that carries more than one
+    /// (a boot scene and the game). The install names it in the provenance (`artifacts.exe`), so
+    /// the demo disc's member tools take this program's words and map, not the disc's boot
+    /// executable's. Not written into the receipt key when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exe: Option<String>,
     /// The ordering file the link followed, inside `out`, with the `.placed` sidecar
     /// `psoxide-pgo place` writes beside it. The build stage runs `psoxide-pgo followed` on it
     /// against `map`; the install build needs it when it links with a searched layout (a
