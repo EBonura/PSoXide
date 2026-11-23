@@ -15,5 +15,13 @@ psx-pad     = { workspace = true }
 psx-rt      = { workspace = true }
 psx-vram    = { workspace = true }
 
+[features]
+# For a program that links the splash into a boot-only overlay module: `play` and the mark's
+# decoder take their callbacks by type, not as trait objects, so no vtable for a closure of the
+# splash lands in the program's resident read-only data pointing into the module's code. Costs
+# code size (a generic copy is built in the caller's crate); off by default, and a program
+# without it links the splash exactly as before.
+overlay = []
+
 [lints]
 workspace = true

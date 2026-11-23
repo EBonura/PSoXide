@@ -34,9 +34,14 @@ pub(crate) static PALETTE: [u16; 16] = [
 /// copy is built in the caller's crate under the caller's optimisation settings, and it was
 /// inlined into `show` there (2,656 bytes more in one game than in the others). The band callback
 /// is a trait object; it is called eight times.
+///
+/// With the `overlay` feature the callback is taken by type instead (no vtable in read-only data).
 #[inline(never)]
 #[cfg_attr(target_arch = "mips", optimize(size))]
-pub(crate) fn expand(band: &mut dyn FnMut(&[u16; 512])) {
+pub(crate) fn expand<#[cfg(feature = "overlay")] F: FnMut(&[u16; 512])>(
+    #[cfg(not(feature = "overlay"))] band: &mut dyn FnMut(&[u16; 512]),
+    #[cfg(feature = "overlay")] band: &mut F,
+) {
     let mut ring = [0u16; 512];
     let mut next = 0usize;
     let mut at = 0usize;

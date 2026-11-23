@@ -21,7 +21,12 @@
 //! * **Brightness.** The player's BRIGHTNESS step is applied over every frame, faded with
 //!   the picture so the fade ends black.
 //! * **Pay for use.** The mark (2,746 bytes, LZ coded), its decoder and the text
-//!   code are linked only into a program that calls [`show`]. No heap, no cargo feature.
+//!   code are linked only into a program that calls [`show`]. No heap.
+//! * **Overlay.** A program that keeps the splash in a boot-only overlay module enables the
+//!   `overlay` feature: the pad closure and the mark decoder's callback are then taken by type,
+//!   not as trait objects, so no vtable in the program's resident read-only data points into the
+//!   module's code. It costs a generic copy of the splash in the caller's crate; without the
+//!   feature the splash links exactly as before.
 //!
 //! # What it needs
 //!
@@ -223,16 +228,18 @@ fn glint_palette(palette: &[u16], out: &mut [u16]) {
 }
 
 /// Not generic (the pad closure is a trait object) and never inlined, so the splash is compiled
-/// once, here, for size.
+/// once, here, for size. With the `overlay` feature it takes the closure by type instead, so no
+/// vtable for it is emitted into the caller's read-only data (see the crate's `overlay` feature).
 #[inline(never)]
 #[cfg_attr(target_arch = "mips", optimize(size))]
-fn play(
+fn play<#[cfg(feature = "overlay")] B: FnMut() -> ButtonState>(
     gpu: &mut Gpu,
     buffers: &mut DoubleBuffer,
     line: &str,
     partner: Option<&Partner<'_>>,
     brightness: Brightness,
-    buttons: &mut dyn FnMut() -> ButtonState,
+    #[cfg(not(feature = "overlay"))] buttons: &mut dyn FnMut() -> ButtonState,
+    #[cfg(feature = "overlay")] buttons: &mut B,
 ) {
     debug_assert_eq!(
         buffers.size(),
