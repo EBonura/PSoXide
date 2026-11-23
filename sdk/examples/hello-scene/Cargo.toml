@@ -6,7 +6,7 @@ edition = "2021"
 license = "GPL-2.0-or-later"
 
 [workspace]
-exclude = ["corehash"]
+exclude = ["corehash", "overlay"]
 
 [[bin]]
 name = "hello-scene"

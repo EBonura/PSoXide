@@ -83,6 +83,7 @@ fn jump_table_slots_are_the_day_0_addresses() {
         slot::STREAM_SECTOR,
         slot::CD,
         slot::SET_IDLE_HOOK,
+        slot::LOAD_IMAGE,
     ];
     let want = [
         0x801f_df00,
@@ -97,10 +98,11 @@ fn jump_table_slots_are_the_day_0_addresses() {
         0x801f_df48,
         0x801f_df50,
         0x801f_df58,
+        0x801f_df60,
     ];
     assert_eq!(slots, want);
     assert_eq!(slots.len(), slot::COUNT);
-    assert_eq!(slot::TABLE_END, slot::SET_IDLE_HOOK + slot::SLOT_BYTES);
+    assert_eq!(slot::TABLE_END, slot::LOAD_IMAGE + slot::SLOT_BYTES);
 }
 
 #[test]
@@ -132,6 +134,7 @@ fn every_slot_has_a_depth() {
         (slot::STREAM_SECTOR, stack::STREAM_SECTOR),
         (slot::CD, stack::CD),
         (slot::SET_IDLE_HOOK, stack::SET_IDLE_HOOK),
+        (slot::LOAD_IMAGE, stack::LOAD_IMAGE),
     ];
     assert_eq!(depths.len(), slot::COUNT);
     for (addr, depth) in depths {

@@ -22,7 +22,7 @@ guest() { # name features link-scripts
         --target-dir "$GUEST_TARGET" $2 \
         --config "target.mipsel-sony-psx.rustflags=[$FLAGS,$3\"-Clink-arg=-T../../psoxide.ld\",\"-Clink-arg=--oformat=binary\"]"
     cp "$GUEST_TARGET/mipsel-sony-psx/release/hello-scene.exe" "$OUT/$1.exe"
-    map=$(ls -t "$GUEST_TARGET"/mipsel-sony-psx/release/*.map 2>/dev/null | head -1 || true)
+    map=$(ls -t "$GUEST_TARGET"/mipsel-sony-psx/psoxide-pgo-maps/*.map 2>/dev/null | head -1 || true)
     [ -n "$map" ] && cp "$map" "$OUT/$1.map" || true
 }
 
@@ -33,24 +33,44 @@ cp sdk/crates/psx-core/prebuilt/psx-core.bin "$OUT/psx-core.bin"
 guest scene-a "" "$CORE_LINK"
 guest scene-b "--features role-b" "$CORE_LINK"
 PSX_CORE_IMAGE_OVERRIDE="$OUT/psx-core-alt.bin" guest scene-b-alt "--features role-b" "$CORE_LINK"
-guest plain-a "--no-default-features" ""
+overlay() { # name features
+    (cd "$CRATE/overlay" && cargo build -q --release --target mipsel-sony-psx -Zbuild-std=core \
+        -Zbuild-std-features=compiler-builtins-mem --target-dir "$GUEST_TARGET/overlay" $2 \
+        --config "target.mipsel-sony-psx.rustflags=[$FLAGS,\"-Clink-arg=-Toverlay.ld\",\"-Clink-arg=--oformat=binary\"]")
+    cp "$GUEST_TARGET/overlay/mipsel-sony-psx/release/hello-scene-overlay.exe" "$OUT/$1.bin"
+    "$HOST_BIN/hazard-scan" --raw 0x80100000 "$OUT/$1.bin"
+}
+overlay o1 ""
+overlay o2 "--features second"
 
 (cd "$CRATE/corehash" && cargo build -q --release --target-dir "$GUEST_TARGET/host")
-H=$("$GUEST_TARGET/host/release/corehash" "$OUT/psx-core.bin")
-HALT=$("$GUEST_TARGET/host/release/corehash" "$OUT/psx-core-alt.bin")
-echo "core hash $H, second image $HALT"
+HASH="$GUEST_TARGET/host/release/corehash"
+H=$("$HASH" "$OUT/psx-core.bin")
+HALT=$("$HASH" "$OUT/psx-core-alt.bin")
+MENU=$(awk '$NF == "hello_scene_menu" { print "0x" $1; exit }' "$OUT/scene-a.map")
+echo "core hash $H, second image $HALT, menu at $MENU"
 MKISO="$HOST_BIN/mkisopsx"
-disc() { # name scene1-file scene1-options
-    printf 'program PSX.EXE -\nprogram SCENE1.EXE %s %s\n' "$2" "$3" >"$OUT/$1.scenes"
+walk() { # name B-exe B-options
+    cat >"$OUT/$1.scenes" <<MANIFEST
+# images (the index is the loaded-mask bit)
+program PSX.EXE  -          reserve=0x80100000-0x80110000
+overlay O1.BIN   o1.bin     owner=PSX.EXE load=0x80100000 class=swap
+overlay O2.BIN   o2.bin     owner=PSX.EXE load=0x80100000 class=swap
+program B.EXE    $2  $3
+# scenes
+scene   START    PSX.EXE    start
+scene   MENU     PSX.EXE    entry=$MENU
+scene   O1       O1.BIN     entry=0x80100000
+scene   O2       O2.BIN     entry=0x80100000
+scene   BSTART   B.EXE      start
+MANIFEST
     "$MKISO" --diag --exe "$OUT/scene-a.exe" --scenes "$OUT/$1.scenes" --core-image "$OUT/psx-core.bin" \
         --volume PSXSCENE --out "$OUT/$1.bin"
 }
-# 1. the match: scene 0 switches to scene 1, both on the one core.
-disc match scene-b.exe ""
-# 2. scene 1 carries the second core and its row says so: the core refuses the switch (0x23).
-disc mism-row scene-b-alt.exe "core-hash=$HALT"
-# 3. the row lies (says the running core): the core loads it, its __core_boot refuses (0x01).
-disc mism-win scene-b-alt.exe "core-hash=$H"
-# The old way, for the boot-time baseline: the same program without the core, a plain disc.
-"$MKISO" --diag --exe "$OUT/plain-a.exe" --volume PSXPLAIN --out "$OUT/plain.bin"
+# The walk: every scene and image, B on the one core.
+walk walk scene-b.exe ""
+# B carries the second core and its row says so: the core refuses the program switch (0x23).
+walk walk-mism-row scene-b-alt.exe "core-hash=$HALT"
+# The row lies (says the running core): the core loads B, B's __core_boot refuses (0x01).
+walk walk-mism-win scene-b-alt.exe "core-hash=$H"
 ls -la "$OUT"

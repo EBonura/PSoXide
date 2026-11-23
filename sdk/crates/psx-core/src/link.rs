@@ -58,7 +58,8 @@ const _: () = assert!(
 extern "C" {
     static __psx_core_store: u32;
     fn __psx_core_attach(a0: u32, a1: u32, a2: u32, hash: u32);
-    fn psx_core_switch(scene: u32, args: *const [u32; 4]) -> u32;
+    fn psx_core_switch(scene: u32, args: *const [u32; 4], table: *const u32) -> u32;
+    fn psx_core_load_image(image: u32, table: *const u32) -> u32;
     fn psx_core_read(
         lba: u32,
         sectors: u32,
@@ -148,6 +149,7 @@ core::arch::global_asm!(
     ".globl psx_core_stream_sector", ".set psx_core_stream_sector, {stream_sector}",
     ".globl psx_core_cd", ".set psx_core_cd, {cd}",
     ".globl psx_core_set_idle_hook", ".set psx_core_set_idle_hook, {set_idle_hook}",
+    ".globl psx_core_load_image", ".set psx_core_load_image, {load_image}",
     attach = const abi::slot::ATTACH,
     switch = const abi::slot::SWITCH,
     read = const abi::slot::READ,
@@ -160,6 +162,7 @@ core::arch::global_asm!(
     stream_sector = const abi::slot::STREAM_SECTOR,
     cd = const abi::slot::CD,
     set_idle_hook = const abi::slot::SET_IDLE_HOOK,
+    load_image = const abi::slot::LOAD_IMAGE,
 );
 
 #[cfg(target_arch = "mips")]
@@ -187,10 +190,45 @@ core::arch::global_asm!(
 );
 
 /// Switch to `scene`. Returns only when the core refused before anything changed (a
-/// [`abi::code`]); on success the next program runs.
-pub fn switch(scene: u32, args: &[u32; 4]) -> u32 {
+/// [`abi::code`]); on success the scene runs. `table` is the program's RAM copy of its scene
+/// table ([`read_table`]).
+pub fn switch(scene: u32, args: &[u32; 4], table: &[u32]) -> u32 {
     // SAFETY: the core is in the window (checked at boot); the call follows the ABI.
-    unsafe { psx_core_switch(scene, args) }
+    unsafe { psx_core_switch(scene, args, table.as_ptr()) }
+}
+
+/// Load overlay `image` into its range unless it is in RAM, and return: the caller then calls
+/// into it. Refused (a code) when its program is not the one running, or when its range would
+/// overwrite the calling code. `table` as for [`switch`].
+pub fn load_image(image: u32, table: &[u32]) -> u32 {
+    // SAFETY: the core is in the window (checked at boot); the call follows the ABI.
+    unsafe { psx_core_load_image(image, table.as_ptr()) }
+}
+
+/// Read this disc's SCENES.TBL once (at boot) into `table`, the program's own RAM copy that
+/// [`switch`] and [`load_image`] take: the header and every row, `16 + 8 * (scenes + images)` words
+/// (a 2 KB sector passes through the stack while it is read). Returns the words kept, or the code
+/// of a failed read, a table of another version (0x21) or a `table` too small for it (0x24).
+pub fn read_table(table: &mut [u32]) -> Result<usize, u32> {
+    let mut sector = [0u32; 512];
+    // SAFETY: one sector's worth of words.
+    let r = unsafe { read(abi::table::LBA, 1, sector.as_mut_ptr(), None) };
+    if r != abi::code::OK {
+        return Err(r);
+    }
+    if sector[0] != abi::table::MAGIC[0]
+        || sector[1] != abi::table::MAGIC[1]
+        || sector[2] & 0xffff != abi::table::VERSION
+    {
+        return Err(abi::code::TABLE_MAGIC);
+    }
+    let rows = (sector[2] >> 16) + (sector[3] & 0xffff);
+    let words = (16 + 8 * rows.min(abi::table::MAX_ROWS)) as usize;
+    if table.len() < words {
+        return Err(abi::code::BOUNDS);
+    }
+    table[..words].copy_from_slice(&sector[..words]);
+    Ok(words)
 }
 
 /// Blocking read of `sectors` from member-relative `lba` into `dst`, ending with a proven Pause.

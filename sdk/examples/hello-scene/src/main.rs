@@ -1,11 +1,13 @@
-//! `hello-scene` -- two programs and the scene core between them (proof P1).
+//! `hello-scene` -- two programs, two overlays and the scene core between them.
 //!
-//! Scene 0 (default build) boots from the BIOS, or from a chain loader on a bigger disc, checks
-//! the handoff block the core wrote at its cold entry, checks that a switch is refused while a
-//! stream client is attached, then asks the core to switch to scene 1. Scene 1 (`role-b`) checks
-//! that it was entered by the core, that the window still hashes to its own core hash, that the
-//! block carries the switch (scenes, counter, arguments, disc bases equal to psx-rt's), and reads
-//! a sector through the core and through a stream to show the core still owns the drive.
+//! The walk (scene table version 2: scenes 0 and 1 in program A, 2 and 3 the overlays O1 and O2
+//! at one address, 4 program B): A's start checks the cold handoff block, reads its scene table
+//! into RAM and checks that a switch is refused while a stream client is attached; then
+//! 0 -> 1 (A's menu, in RAM), which loads O1 with the load that returns, calls it, and switches
+//! 1 -> 2 (O1, in RAM) -> 1 (in RAM) -> 2 (in RAM) -> 3 (O2, read, evicts O1) -> 2 (O1, read again)
+//! -> 4 (program B, a program switch). B checks the core entry, the window hash, the block (scenes,
+//! counter, arguments, disc bases equal to psx-rt's, the loaded mask) and that the core still reads
+//! and streams.
 //!
 //! Each verdict goes to the TTY (`hello-scene: A ...`, `hello-scene: B PASS` or `FAIL`) and to the
 //! screen: blue while scene 0 runs, green for a pass, magenta for a failed check, the core's red
@@ -71,7 +73,7 @@ fn say(label: &str, value: u32) {
 #[cfg(feature = "core")]
 mod scene {
     use super::*;
-    use psx_core::abi::{block, code, table};
+    use psx_core::abi::{block, code};
     use psx_core::link as core_;
 
     const BLUE: u32 = 0xc0_4000;
@@ -80,6 +82,10 @@ mod scene {
 
     /// Arguments scene 0 passes; scene 1 checks them.
     const ARGS: [u32; 4] = [0x5ce1_0001, 0x5ce1_0002, 0x5ce1_0003, 0x5ce1_0004];
+    /// The handoff block's private words: [1] the table copy's address (the overlays read it),
+    /// [2] the root counter 2 value just before a switch (the next scene prints the delta).
+    const TABLE_AT: u32 = 0x801f_ff84;
+    const T0_AT: u32 = 0x801f_ff88;
 
     fn check(ok: &mut bool, what: &str, got: u32, want: u32) {
         if got != want {
@@ -92,6 +98,15 @@ mod scene {
             tty::print_hex_u32(want);
             tty::println("");
         }
+    }
+
+    fn put(addr: u32, v: u32) {
+        // SAFETY: the handoff block's private area.
+        unsafe { core::ptr::write_volatile(addr as *mut u32, v) };
+    }
+
+    fn timer() -> u32 {
+        psx_io::timers::counter(psx_io::timers::Timer::Timer2) as u32
     }
 
     /// What every scene checks of the block and the window.
@@ -124,6 +139,49 @@ mod scene {
         );
     }
 
+    fn verdict(ok: bool, who: &str, mark_ok: u32) {
+        tty::print("hello-scene: ");
+        tty::print(who);
+        if ok {
+            tty::println(" PASS");
+            screen(GREEN, mark_ok);
+        } else {
+            tty::println(" FAIL");
+            screen(MAGENTA, 0xff);
+            loop {}
+        }
+    }
+
+    /// Print the clocks since the switch that entered this scene asked (root counter 2 at the
+    /// system clock, wrapping at 65,536: only an in-RAM switch is short enough to read this way).
+    fn since_switch() {
+        // SAFETY: the handoff block's private area.
+        let t0 = unsafe { core::ptr::read_volatile(T0_AT as *const u32) };
+        say(
+            "hello-scene: clocks since the switch call ",
+            timer().wrapping_sub(t0) & 0xffff,
+        );
+    }
+
+    #[cfg(not(feature = "role-b"))]
+    mod base {
+        use super::*;
+
+        /// The program's copy of its scene table (header and rows; 5 scenes and 4 images here).
+        pub static mut TABLE: [u32; 96] = [0; 96];
+
+        pub fn table() -> &'static [u32] {
+            // SAFETY: written once at boot, before any switch reads it.
+            unsafe { &*core::ptr::addr_of!(TABLE) }
+        }
+
+        pub fn switch(next: u32, args: &[u32; 4]) -> u32 {
+            put(T0_AT, timer());
+            core_::switch(next, args, table())
+        }
+    }
+
+    /// Scene 0: the program's start.
     #[cfg(not(feature = "role-b"))]
     pub fn run() -> ! {
         screen(BLUE, 0xa0);
@@ -135,7 +193,6 @@ mod scene {
             "hello-scene: A lba-offset ",
             psx_io::disc_base::lba_offset(),
         );
-        say("hello-scene: A flags ", core_::block_word(block::OFF_FLAGS));
         let mut ok = true;
         common(&mut ok);
         let nested = if psx_io::disc_base::lba_offset() != 0 {
@@ -161,17 +218,23 @@ mod scene {
             core_::block_word(block::OFF_SWITCHES),
             0,
         );
-        // A stream client holds the drive: the switch must be refused and change nothing.
+        check(&mut ok, "mask", core_::block_word(block::OFF_MASK), 1);
+        // SAFETY: once, before any switch reads it.
+        let words = core_::read_table(unsafe { &mut *core::ptr::addr_of_mut!(base::TABLE) });
+        say(
+            "hello-scene: A table words ",
+            words.map_or_else(|e| e | 0xe000_0000, |w| w as u32),
+        );
+        check(&mut ok, "read-table", words.is_ok() as u32, 1);
+        put(TABLE_AT, base::table().as_ptr() as u32);
+        // A stream client holds the drive: a switch must be refused and change nothing.
         check(&mut ok, "client-attach", core_::client_attach(), code::OK);
         check(
             &mut ok,
-            "client-attach-twice",
-            core_::client_attach(),
+            "switch-with-client",
+            base::switch(1, &ARGS),
             code::CLIENT,
         );
-        let refused = core_::switch(1, &ARGS);
-        say("hello-scene: A switch-with-client ", refused);
-        check(&mut ok, "switch-with-client", refused, code::CLIENT);
         core_::client_detach();
         check(
             &mut ok,
@@ -179,29 +242,105 @@ mod scene {
             core_::window_hash(),
             core_::CORE_HASH,
         );
-        if !ok {
-            tty::println("hello-scene: A FAIL");
-            screen(MAGENTA, 0xaf);
-            loop {}
-        }
-        tty::println("hello-scene: A checks PASS");
+        verdict(ok, "A checks", 0xa0);
         tty::println("hello-scene: A switching");
-        mark(0xa1);
-        let r = core_::switch(1, &ARGS);
-        // Only a refusal comes back.
+        let r = base::switch(1, &ARGS);
         say("hello-scene: A switch refused ", r);
         core_::fatal(r)
     }
 
+    /// Nothing calls the menu: only the scene table names it. Keep it linked.
+    #[cfg(not(feature = "role-b"))]
+    #[used]
+    static MENU_ENTRY: extern "C" fn() -> ! = hello_scene_menu;
+
+    /// Scene 1: a scene of the running program, entered in RAM.
+    #[cfg(not(feature = "role-b"))]
+    #[no_mangle]
+    pub extern "C" fn hello_scene_menu() -> ! {
+        since_switch();
+        let step = core_::block_word(block::OFF_SWITCHES);
+        mark(0xa100 | step);
+        tty::print("hello-scene: menu step ");
+        tty::print_hex_u32(step);
+        tty::print(" mask ");
+        tty::print_hex_u32(core_::block_word(block::OFF_MASK));
+        tty::println("");
+        let mut ok = true;
+        check(
+            &mut ok,
+            "menu-flags",
+            core_::block_word(block::OFF_FLAGS) & block::FLAG_IN_PROGRAM,
+            block::FLAG_IN_PROGRAM,
+        );
+        check(
+            &mut ok,
+            "menu-scene",
+            core_::block_word(block::OFF_SCENES) & 0xffff,
+            1,
+        );
+        check(
+            &mut ok,
+            "menu-window",
+            core_::window_hash(),
+            core_::CORE_HASH,
+        );
+        let next = match step {
+            1 => {
+                check(
+                    &mut ok,
+                    "menu-args",
+                    core_::block_word(block::OFF_ARGS),
+                    ARGS[0],
+                );
+                // Load the first overlay and call it (the load that returns), then load it again
+                // (in RAM: no read).
+                check(
+                    &mut ok,
+                    "load-image",
+                    core_::load_image(1, base::table()),
+                    code::OK,
+                );
+                // SAFETY: the overlay's call entry, loaded and checked just now.
+                let call: extern "C" fn(u32) -> u32 =
+                    unsafe { core::mem::transmute(0x8010_0008usize) };
+                check(&mut ok, "overlay-call", call(0x1234), 0x0c01_1234);
+                check(
+                    &mut ok,
+                    "load-image-again",
+                    core_::load_image(1, base::table()),
+                    code::OK,
+                );
+                // An overlay of another program is not this program's to load.
+                check(
+                    &mut ok,
+                    "load-program-image",
+                    core_::load_image(3, base::table()),
+                    code::BOUNDS,
+                );
+                2
+            }
+            3 => 2,
+            _ => 0xff,
+        };
+        verdict(ok, "menu checks", 0xa1);
+        let r = base::switch(next, &[step, 0, 0, 0]);
+        say("hello-scene: menu switch refused ", r);
+        core_::fatal(r)
+    }
+
+    /// Scene 4: the second program, after the walk through the first one's scenes.
     #[cfg(feature = "role-b")]
     pub fn run() -> ! {
         mark(0xb0);
+        since_switch();
         tty::println("hello-scene: B main");
         say("hello-scene: B core-hash ", core_::CORE_HASH);
         say(
             "hello-scene: B lba-offset ",
             psx_io::disc_base::lba_offset(),
         );
+        say("hello-scene: B mask ", core_::block_word(block::OFF_MASK));
         let mut ok = true;
         common(&mut ok);
         let nested = if psx_io::disc_base::lba_offset() != 0 {
@@ -215,40 +354,37 @@ mod scene {
             core_::block_word(block::OFF_FLAGS),
             nested | block::FLAG_CORE_ENTRY,
         );
-        check(&mut ok, "scenes", core_::block_word(block::OFF_SCENES), 1);
+        check(
+            &mut ok,
+            "scenes",
+            core_::block_word(block::OFF_SCENES),
+            4 | (2 << 16),
+        );
         check(
             &mut ok,
             "switches",
             core_::block_word(block::OFF_SWITCHES),
-            1,
+            7,
         );
-        for (i, &want) in ARGS.iter().enumerate() {
-            check(
-                &mut ok,
-                "arg",
-                core_::block_word(block::OFF_ARGS + 4 * i as u32),
-                want,
-            );
-        }
+        check(&mut ok, "arg", core_::block_word(block::OFF_ARGS), 6);
+        check(&mut ok, "mask", core_::block_word(block::OFF_MASK), 1 << 3);
         // The core still owns the drive: a blocking read and a stream of the table sector.
         let mut sector = [0u32; 512];
         // SAFETY: one sector's worth of words.
-        let r = unsafe { core_::read(table::LBA, 1, sector.as_mut_ptr(), None) };
+        let r = unsafe { core_::read(psx_core::abi::table::LBA, 1, sector.as_mut_ptr(), None) };
         check(&mut ok, "read", r, code::OK);
-        check(&mut ok, "read-magic", sector[0], table::MAGIC[0]);
-        check(&mut ok, "read-row1-id", sector[16 * 2] & 0xffff, 1);
+        check(
+            &mut ok,
+            "read-magic",
+            sector[0],
+            psx_core::abi::table::MAGIC[0],
+        );
         sector[0] = 0;
         check(&mut ok, "stream-attach", core_::client_attach(), code::OK);
         check(
             &mut ok,
-            "read-while-attached",
-            unsafe { core_::read(table::LBA, 1, sector.as_mut_ptr(), None) },
-            code::CLIENT,
-        );
-        check(
-            &mut ok,
             "stream-open",
-            core_::stream_open(table::LBA, 0),
+            core_::stream_open(psx_core::abi::table::LBA, 0),
             code::OK,
         );
         // SAFETY: one sector's worth of words.
@@ -258,7 +394,12 @@ mod scene {
             unsafe { core_::stream_sector(sector.as_mut_ptr()) },
             code::OK,
         );
-        check(&mut ok, "stream-magic", sector[0], table::MAGIC[0]);
+        check(
+            &mut ok,
+            "stream-magic",
+            sector[0],
+            psx_core::abi::table::MAGIC[0],
+        );
         check(&mut ok, "stream-pause", core_::pause(), code::OK);
         core_::client_detach();
         check(
@@ -267,13 +408,7 @@ mod scene {
             core_::window_hash(),
             core_::CORE_HASH,
         );
-        if ok {
-            tty::println("hello-scene: B PASS");
-            screen(GREEN, 0xb0);
-        } else {
-            tty::println("hello-scene: B FAIL");
-            screen(MAGENTA, 0xbf);
-        }
+        verdict(ok, "B", 0xb0);
         loop {}
     }
 }

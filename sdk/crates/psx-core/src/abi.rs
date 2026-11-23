@@ -37,7 +37,7 @@ pub mod block {
     /// "PSCB".
     pub const MAGIC: u32 = b::MAGIC;
     /// Layout version written by this core (version 1 until the core moves to the v2 table).
-    pub const VERSION: u32 = psx_scene_abi::v1::BLOCK_VERSION as u32;
+    pub const VERSION: u32 = b::VERSION as u32;
     /// `version:u16 | length:u16 << 16`.
     pub const OFF_VERSION: u32 = b::OFF_VERSION as u32;
     /// Offset of the magic.
@@ -56,6 +56,10 @@ pub mod block {
     pub const OFF_SWITCHES: u32 = b::OFF_SWITCH_COUNT as u32;
     /// The four argument words.
     pub const OFF_ARGS: u32 = b::OFF_ARGS as u32;
+    /// The loaded-image mask (version 2), core-written.
+    pub const OFF_MASK: u32 = b::OFF_LOADED_MASK as u32;
+    /// Flag: entered in-program by a switch (no `_start` ran).
+    pub const FLAG_IN_PROGRAM: u32 = b::FLAG_IN_PROGRAM;
     /// `!MAGIC`, written last.
     pub const OFF_NOT_MAGIC: u32 = b::OFF_MAGIC_INV as u32;
     /// Flag: entered by a core switch.
@@ -66,57 +70,53 @@ pub mod block {
     pub const NO_SCENE: u32 = psx_scene_abi::NO_SCENE as u32;
 }
 
-/// The scene table, by word of its one sector.
+/// The scene table (psx-scene-abi's version 2) as the core reads it: by word of the program's RAM
+/// copy, a 64-byte header, the scene rows, then the image rows at their image index, 32 bytes each.
 pub mod table {
-    // The version 1 table until the core moves to version 2 (psx_scene_abi::v1).
-    use psx_scene_abi::v1 as s;
+    use psx_scene_abi as s;
     /// Member-relative LBA of the table.
     pub const LBA: u32 = s::TABLE_LBA;
     /// Member-relative LBA of the boot exe.
     pub const BOOT_EXE_LBA: u32 = s::BOOT_EXE_LBA;
-    /// "PSXSCN01" as two little-endian words.
+    /// The magic as two little-endian words.
     pub const MAGIC: [u32; 2] = [
         u32::from_le_bytes([s::MAGIC[0], s::MAGIC[1], s::MAGIC[2], s::MAGIC[3]]),
         u32::from_le_bytes([s::MAGIC[4], s::MAGIC[5], s::MAGIC[6], s::MAGIC[7]]),
     ];
     /// Table version.
     pub const VERSION: u32 = s::VERSION as u32;
-    /// Row kind: a whole program.
+    /// Image kind: a whole program (PS-X EXE with psx-rt and the core's entry).
     pub const KIND_PROGRAM: u32 = s::Kind::Program as u32;
-    /// Word of the header holding `row_count << 16 | version`.
-    pub const W_HEAD_VERSION: usize = 2;
-    /// Rows the one sector holds.
-    pub const MAX_ROWS: u32 = s::rows_capacity(1) as u32;
-    /// Row words: `id:u16 | kind:u8 << 16 | flags:u8 << 24`.
-    pub const W_ID_KIND: usize = 0;
-    /// Exe header sector LBA, relative to the base the table was read at.
-    pub const W_LBA: usize = 1;
-    /// Sectors of the file.
-    pub const W_SECTORS: usize = 2;
+    /// Image kind: an overlay linked against its owner program, entered in-program.
+    pub const KIND_OVERLAY: u32 = s::Kind::Overlay as u32;
+    /// Scene row word 0 flag: the scene starts its program (a program switch).
+    pub const SCENE_START: u32 = (s::SCENE_FLAG_START as u32) << 24;
+    /// Scene row word: the entry PC.
+    pub const S_ENTRY: usize = 1;
+    /// Image row words: LBA (relative to the table's base; a program's is its header sector).
+    pub const I_LBA: usize = 0;
+    /// Bytes to load.
+    pub const I_SIZE: usize = 1;
     /// Load address.
-    pub const W_T_ADDR: usize = 3;
-    /// Bytes to load from `lba + 1`: whole sectors, stopping before the stored core image.
-    pub const W_T_SIZE: usize = 4;
-    /// Entry PC.
-    pub const W_PC: usize = 5;
+    pub const I_ADDR: usize = 2;
     /// Word FNV of the loaded bytes.
-    pub const W_FNV: usize = 6;
-    /// Core hash.
-    pub const W_CORE_HASH: usize = 7;
-    /// Initial SP.
-    pub const W_SP: usize = 8;
-    /// `return:u16 | attempts:u8 << 16 | min_block_version:u8 << 24`.
-    pub const W_POLICY: usize = 9;
-    /// `partner:u16 | cdda_base:u16 << 16` (the CD-DA base is added to the current one).
-    pub const W_PARTNER_CDDA: usize = 10;
-    /// The program's member base, relative to the base the table was read at (0: same image).
-    pub const W_LBA_OFFSET: usize = 11;
-
-    /// Word index of row `id` within the table's one sector.
-    #[must_use]
-    pub const fn row_word(id: u32) -> u32 {
-        (s::HEADER_BYTES as u32 + id * s::ROW_BYTES as u32) / 4
-    }
+    pub const I_FNV: usize = 3;
+    /// Core hash (a program).
+    pub const I_CORE_HASH: usize = 4;
+    /// The images an overlay overwrites.
+    pub const I_EVICTS: usize = 5;
+    /// A program's member base, relative to the table's base.
+    pub const I_BASE: usize = 6;
+    /// `kind | class << 8 | owner << 16 | cdda_base << 24`.
+    pub const I_KIND: usize = 7;
+    /// Rows the one sector holds, scenes and images together.
+    pub const MAX_ROWS: u32 = s::MAX_ROWS as u32;
+    /// Images at most (bits of the loaded mask).
+    pub const MAX_IMAGES: u32 = s::MAX_IMAGES as u32;
+    /// Words of the header and of a row.
+    pub const HEADER_WORDS: u32 = (s::HEADER_BYTES / 4) as u32;
+    /// Words of a row.
+    pub const ROW_WORDS: u32 = (s::ROW_BYTES / 4) as u32;
 }
 
 /// `$a0` of a program entered with disc bases (psx-io's `disc_base::HANDOFF_MAGIC`).
@@ -156,14 +156,16 @@ pub mod code {
     pub const READ: u32 = 0x13;
     /// The payload checksum was wrong after its attempts.
     pub const PAYLOAD_FNV: u32 = 0x14;
-    /// The scene table's magic or version is not this core's.
-    pub const TABLE_MAGIC: u32 = 0x21;
+    /// No table, or its magic or version is not this core's.
+    pub const TABLE_MAGIC: u32 = psx_scene_abi::status::TABLE;
     /// No such scene.
     pub const NO_ROW: u32 = 0x22;
     /// The row's core hash is not the running core's.
     pub const CORE_HASH: u32 = 0x23;
     /// The row's load bounds are outside the program area, or its kind is not built yet.
     pub const BOUNDS: u32 = 0x24;
+    /// An in-program scene or an overlay whose program is not the one running.
+    pub const NOT_LOADED: u32 = psx_scene_abi::status::NOT_LOADED;
     /// A stream client is attached.
     pub const CLIENT: u32 = 0x31;
 }

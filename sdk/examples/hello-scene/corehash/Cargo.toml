@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
-# Prints the core hash of a core image (word FNV), for the hello-scene test discs' manifests.
+# Prints the core hash of a core image (word FNV), for hello-scene's disc manifests.
 [package]
 name    = "corehash"
 version = "0.1.0"

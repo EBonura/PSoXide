@@ -138,8 +138,10 @@ pub mod slot {
     pub const CD: u32 = CORE_WINDOW.start + 10 * SLOT_BYTES;
     /// `psx_core_set_idle_hook(hook)`, called from every spin of every core wait.
     pub const SET_IDLE_HOOK: u32 = CORE_WINDOW.start + 11 * SLOT_BYTES;
+    /// `psx_core_load_image(image, table) -> u32`: load an overlay and return to the caller.
+    pub const LOAD_IMAGE: u32 = CORE_WINDOW.start + 12 * SLOT_BYTES;
     /// Slots in the table.
-    pub const COUNT: usize = 12;
+    pub const COUNT: usize = 13;
     /// One past the table's last slot: the core's own code starts here.
     pub const TABLE_END: u32 = CORE_WINDOW.start + COUNT as u32 * SLOT_BYTES;
 }
@@ -155,13 +157,13 @@ pub mod stack {
     /// `__psx_core_attach` (called by `__core_boot` only).
     pub const ATTACH: u32 = 72;
     /// `psx_core_switch`, on the caller's stack, before it moves to the switch stack.
-    pub const SWITCH: u32 = 296;
+    pub const SWITCH: u32 = 368;
     /// The switch's load, on the switch stack at `STACK_INIT`; under `SWITCH_STACK`.
-    pub const SWITCH_LOAD: u32 = 312;
+    pub const SWITCH_LOAD: u32 = 352;
     /// `psx_core_read`.
-    pub const READ: u32 = 264;
+    pub const READ: u32 = 312;
     /// `psx_core_pause`.
-    pub const PAUSE: u32 = 176;
+    pub const PAUSE: u32 = 224;
     /// `psx_core_client_attach`.
     pub const CLIENT_ATTACH: u32 = 0;
     /// `psx_core_client_detach`.
@@ -171,15 +173,17 @@ pub mod stack {
     /// `psx_core_music_yield`.
     pub const MUSIC_YIELD: u32 = 8;
     /// `psx_core_stream_open`.
-    pub const STREAM_OPEN: u32 = 184;
+    pub const STREAM_OPEN: u32 = 232;
     /// `psx_core_stream_sector`.
-    pub const STREAM_SECTOR: u32 = 104;
+    pub const STREAM_SECTOR: u32 = 152;
     /// `psx_core_cd`.
-    pub const CD: u32 = 120;
+    pub const CD: u32 = 168;
     /// `psx_core_set_idle_hook`.
     pub const SET_IDLE_HOOK: u32 = 0;
+    /// `psx_core_load_image`: the rows, the load and its checks.
+    pub const LOAD_IMAGE: u32 = 368;
     /// The deepest of the slots a program calls (the switch's load runs on its own stack).
-    pub const MAX: u32 = 296;
+    pub const MAX: u32 = 368;
 
     const _: () = assert!(SWITCH_LOAD <= super::SWITCH_STACK);
 
@@ -249,6 +253,7 @@ pub mod stack {
                 SET_IDLE_HOOK,
                 false,
             ),
+            row(s::LOAD_IMAGE, "psx_core_load_image", LOAD_IMAGE, true),
         ]
     };
 
