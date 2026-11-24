@@ -22,6 +22,10 @@ pub(crate) const FNV1A: u64 = 0xa349_5cc8_751c_b163;
 
 /// The PICO-8 palette the mark was quantised against (RGB555). Entry 0 is opaque near-black, not
 /// 0x0000: the backdrop is black, and 0x0000 is transparent.
+#[cfg_attr(
+    target_arch = "mips",
+    link_section = ".rodata.boot_inner.psx_splash.PALETTE"
+)]
 pub(crate) static PALETTE: [u16; 16] = [
     0x0421, 0x28a3, 0x288f, 0x2a00, 0x1955, 0x254b, 0x6318, 0x77df, 0x241f, 0x029f, 0x13bf, 0x1b80,
     0x7ea5, 0x4dd0, 0x55df, 0x573f,
@@ -36,6 +40,10 @@ pub(crate) static PALETTE: [u16; 16] = [
 /// is a trait object; it is called eight times.
 #[inline(never)]
 #[cfg_attr(target_arch = "mips", optimize(size))]
+#[cfg_attr(
+    target_arch = "mips",
+    link_section = ".text.boot_inner.psx_splash.expand"
+)]
 pub(crate) fn expand(band: &mut dyn FnMut(&[u16; 512])) {
     let mut ring = [0u16; 512];
     let mut next = 0usize;
@@ -70,6 +78,10 @@ pub(crate) fn expand(band: &mut dyn FnMut(&[u16; 512])) {
 }
 
 /// The coded mark.
+#[cfg_attr(
+    target_arch = "mips",
+    link_section = ".rodata.boot_inner.psx_splash.CODED"
+)]
 pub(crate) static CODED: [u8; 2746] = [
     0xfd, 0x00, 0x00, 0x01, 0xc6, 0x65, 0x66, 0x66, 0x66, 0xdd, 0x5d, 0x55, 0x55, 0x11, 0x11, 0x11,
     0x11, 0xb7, 0x51, 0x55, 0x55, 0x55, 0x55, 0xdd, 0x07, 0x00, 0x55, 0x55, 0x11, 0x01, 0x73, 0x20,

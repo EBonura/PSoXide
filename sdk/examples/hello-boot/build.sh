@@ -1,5 +1,6 @@
 #!/bin/sh
-# Build hello-boot (a program on the scene core with boot-only memory) and its two discs.
+# Build hello-boot (a program on the scene core with boot-only memory) and its two discs, and check
+# that psoxide-boot.ld refuses a resident reference into `.boot_inner`.
 #
 #   sh sdk/examples/hello-boot/build.sh OUT_DIR      (from the repository root)
 #
@@ -24,6 +25,17 @@ guest() { # extra cargo arguments
         build --release --target mipsel-sony-psx -Zbuild-std=core -Zbuild-std-features=compiler-builtins-mem \
         --target-dir "$GUEST_TARGET" "$@" --config "target.mipsel-sony-psx.rustflags=[$FLAGS,$LINK]"
 }
+
+# Resident code calling into `.boot_inner`: the link must fail, on that reference.
+if guest --features cross-ref >"$OUT/cross-ref.log" 2>&1; then
+    echo "hello-boot: FAIL: the cross-ref build linked" >&2
+    exit 1
+fi
+grep -q "prohibited cross reference from '.text' to '.text.boot_inner" "$OUT/cross-ref.log" || {
+    echo "hello-boot: FAIL: the cross-ref build failed for another reason ($OUT/cross-ref.log)" >&2
+    exit 1
+}
+echo "hello-boot: the cross-ref build is refused, as it must be"
 
 guest
 cp "$GUEST_TARGET/mipsel-sony-psx/release/hello-boot.exe" "$OUT/hello-boot.exe"

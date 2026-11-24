@@ -16,6 +16,12 @@ panic = "abort"
 codegen-units = 1
 lto = true
 
+[features]
+# Resident code calls a function placed in `.boot_inner` (boot-only code only boot code calls):
+# the link must fail (psoxide-boot.ld's cross-reference check). For the build script's
+# negative test only.
+cross-ref = []
+
 [dependencies]
 psx-core    = { path = "../../crates/psx-core", features = ["link"] }
 psx-display = { path = "../../crates/psx-display" }
