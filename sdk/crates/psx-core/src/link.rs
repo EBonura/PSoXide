@@ -78,7 +78,9 @@ extern "C" {
     fn psx_core_music_yield();
     fn psx_core_stream_open(lba: u32, flags: u32) -> u32;
     fn psx_core_stream_sector(dst: *mut u32) -> u32;
-    fn psx_core_cd(op: u32, a: u32, b: u32, c: *mut u8) -> u32;
+    // `a` is an address: `usize`, as psx-io's `core-cd` declares the same symbol (one 32-bit
+    // register on the console, where the core's own definition takes it as `u32`).
+    fn psx_core_cd(op: u32, a: usize, b: u32, c: *mut u8) -> u32;
     fn psx_core_set_idle_hook(hook: Option<extern "C" fn()>);
 }
 
@@ -330,7 +332,7 @@ pub unsafe fn stream_sector(dst: *mut u32) -> u32 {
 /// `a` and `c` must be what `op` reads and writes (see the core image's `__psx_core_cd_impl`).
 pub unsafe fn cd(op: u32, a: u32, b: u32, c: *mut u8) -> u32 {
     // SAFETY: as the caller vouches.
-    unsafe { psx_core_cd(op, a, b, c) }
+    unsafe { psx_core_cd(op, a as usize, b, c) }
 }
 
 /// Install (or with `None` remove) the hook every core wait calls.

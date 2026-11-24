@@ -124,23 +124,9 @@ pub mod table {
 /// `$a0` of a program entered with disc bases (psx-io's `disc_base::HANDOFF_MAGIC`).
 pub const PSXD: u32 = 0x5053_5844;
 
-/// Op codes of the register-level CD slot.
-pub mod cd_op {
-    /// Send a command and wait for its acknowledge.
-    pub const COMMAND: u32 = 0;
-    /// Send a command and return at once.
-    pub const COMMAND_NO_WAIT: u32 = 1;
-    /// Read the controller's IRQ flag.
-    pub const IRQ_FLAG: u32 = 2;
-    /// Acknowledge flag bits.
-    pub const IRQ_ACK: u32 = 3;
-    /// Set the CD audio mixer and apply it.
-    pub const MIXER: u32 = 4;
-    /// Set the controller's IRQ enables; returns the old ones.
-    pub const IRQ_ENABLE: u32 = 5;
-    /// Pop the response FIFO.
-    pub const RESPONSE: u32 = 6;
-}
+/// Op codes, outcomes and limits of the register-level CD slot: psx-scene-abi's, the one
+/// definition psx-io's `core-cd` uses too.
+pub use s::cd_op;
 
 /// Stage codes: what a refusal returns and what the fatal screen shows.
 pub mod code {
