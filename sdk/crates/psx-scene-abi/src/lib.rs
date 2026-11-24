@@ -161,16 +161,18 @@ pub mod slot {
 /// The switch runs its load on a stack of its own at `STACK_INIT` (see `SWITCH_STACK`), so
 /// [`stack::SWITCH`] is only what it uses on the caller's stack before that.
 pub mod stack {
+    //! Measured on the core image of CORE_HASH 2dd28a19 (depth.sh over its disassembly and map,
+    //! 11-24): each slot's deepest frame chain below the caller's `$sp`, its hooks apart.
     /// `__psx_core_attach` (called by `__core_boot` only).
     pub const ATTACH: u32 = 72;
     /// `psx_core_switch`, on the caller's stack, before it moves to the switch stack.
-    pub const SWITCH: u32 = 368;
+    pub const SWITCH: u32 = 352;
     /// The switch's load, on the switch stack at `STACK_INIT`; under `SWITCH_STACK`.
-    pub const SWITCH_LOAD: u32 = 352;
+    pub const SWITCH_LOAD: u32 = 336;
     /// `psx_core_read`.
-    pub const READ: u32 = 320;
+    pub const READ: u32 = 304;
     /// `psx_core_pause`.
-    pub const PAUSE: u32 = 216;
+    pub const PAUSE: u32 = 224;
     /// `psx_core_client_attach`.
     pub const CLIENT_ATTACH: u32 = 0;
     /// `psx_core_client_detach`.
@@ -180,17 +182,17 @@ pub mod stack {
     /// `psx_core_music_yield`.
     pub const MUSIC_YIELD: u32 = 8;
     /// `psx_core_stream_open`.
-    pub const STREAM_OPEN: u32 = 240;
+    pub const STREAM_OPEN: u32 = 224;
     /// `psx_core_stream_sector`.
     pub const STREAM_SECTOR: u32 = 136;
     /// `psx_core_cd`.
-    pub const CD: u32 = 224;
+    pub const CD: u32 = 232;
     /// `psx_core_set_idle_hook`.
     pub const SET_IDLE_HOOK: u32 = 0;
     /// `psx_core_load_image`: the rows, the load and its checks.
-    pub const LOAD_IMAGE: u32 = 368;
+    pub const LOAD_IMAGE: u32 = 352;
     /// The deepest of the slots a program calls (the switch's load runs on its own stack).
-    pub const MAX: u32 = 368;
+    pub const MAX: u32 = 352;
 
     const _: () = assert!(SWITCH_LOAD <= super::SWITCH_STACK);
 
