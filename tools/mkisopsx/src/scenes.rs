@@ -23,7 +23,9 @@
 //! switch can start), `reserve=<lo>-<hi>` (the RAM its overlays load into,
 //! below PAYLOAD_END), `reaches=<scene>,...` (the scenes it can switch to, for
 //! its compact table copy; default every scene). Overlay options, all needed
-//! but `class`'s default `swap`: `owner=<program>`, `load=<addr>`,
+//! but `class`'s default `swap`: `owner=<program>`, `load=<addr>` (for an
+//! overlay linked with its program by psoxide-overlay.ld, the option
+//! `psx-exe --overlay` prints),
 //! `class=resident|swap|volatile` (`volatile`: a swap overlay over memory its
 //! owner also uses, which the core reads again at every load).
 //!

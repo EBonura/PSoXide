@@ -9,18 +9,30 @@
 //! `.ps_exe_head` section's, which is the start of the file. As with `--oformat=binary` the file
 //! ends with the last stored byte; `hazard-patch` pads it to the header's whole sectors.
 //!
+//! A program on the scene core with fixed-address overlays (psoxide-overlay.ld) has `.overlay.N`
+//! sections: they are never in the EXE. `--overlay` writes one as its own image file, its bytes as
+//! they run from its address, and prints the `load=` option of its scene manifest line.
+//!
 //! ```text
 //! psx-exe path/to/game.elf path/to/game.exe
+//! psx-exe --overlay .overlay.1 path/to/game.elf path/to/menu.ovl     (prints load=0x...)
 //! ```
 
 use crate::overlay_elf::Elf;
 
 /// Usage text.
 pub const USAGE: &str = "\
-Write a PS-X EXE from a psoxide.ld link's ELF, every section at its load address.
+Write a PS-X EXE from a psoxide.ld link's ELF, every section at its load address, or one of its
+fixed-address overlays (psoxide-overlay.ld) as its own image file.
 
     psx-exe path/to/game.elf path/to/game.exe
+    psx-exe --overlay .overlay.N path/to/game.elf path/to/overlay.ovl
+
+With --overlay it prints the overlay's scene manifest option, `load=0x........`.
 ";
+
+/// Names of psoxide-overlay.ld's output sections: never stored in the EXE.
+pub const OVERLAY_PREFIX: &str = ".overlay.";
 
 /// The header section psoxide.ld writes first.
 const HEADER: &str = ".ps_exe_head";
@@ -33,9 +45,11 @@ const NOBITS: u32 = 8;
 
 /// The EXE's bytes for an ELF linked with psoxide.ld.
 ///
-/// Refuses an ELF without the header section, a section stored below the header, two sections
-/// stored over the same bytes, and a header whose destination or stored size does not describe
-/// the bytes written (the size reaches the file's end rounded up to whole 800h-byte sectors).
+/// Every allocated section with contents is stored, but the fixed-address overlays
+/// ([`OVERLAY_PREFIX`], see [`overlay_from_elf`]). Refuses an ELF without the header section, a
+/// section stored below the header, two sections stored over the same bytes, and a header whose
+/// destination or stored size does not describe the bytes written (the size reaches the file's
+/// end rounded up to whole 800h-byte sectors).
 pub fn from_elf(bytes: &[u8]) -> Result<Vec<u8>, String> {
     let elf = Elf::parse(bytes)?;
     let (_, head) = elf.section(HEADER)?;
@@ -44,6 +58,7 @@ pub fn from_elf(bytes: &[u8]) -> Result<Vec<u8>, String> {
         .sections()
         .map(|(_, s)| s)
         .filter(|s| s.flags & ALLOC != 0 && s.kind != NOBITS && !s.bytes.is_empty())
+        .filter(|s| !s.name.starts_with(OVERLAY_PREFIX))
         .map(|s| (s.load_address, s.bytes, s.name))
         .collect();
     stored.sort_by_key(|&(at, ..)| at);
@@ -70,6 +85,30 @@ pub fn from_elf(bytes: &[u8]) -> Result<Vec<u8>, String> {
     }
     check_header(&image, base)?;
     Ok(image)
+}
+
+/// A fixed-address overlay of an ELF linked with psoxide-overlay.ld: its run address and its
+/// bytes as they run there (the image file the core loads to that address).
+///
+/// Refuses a name without the [`OVERLAY_PREFIX`], a section that is missing, empty, not
+/// allocated or without contents, and one whose address is not word aligned (the core's
+/// checksum runs over words; the disc writer pads the file to whole sectors).
+pub fn overlay_from_elf(bytes: &[u8], name: &str) -> Result<(u32, Vec<u8>), String> {
+    if !name.starts_with(OVERLAY_PREFIX) {
+        return Err(format!("{name} is not an overlay section ({OVERLAY_PREFIX}N)"));
+    }
+    let elf = Elf::parse(bytes)?;
+    let (_, section) = elf.section(name)?;
+    if section.flags & ALLOC == 0 || section.kind == NOBITS || section.bytes.is_empty() {
+        return Err(format!("{name} holds no code or data"));
+    }
+    if section.address % 4 != 0 {
+        return Err(format!(
+            "{name} runs at {:08x}, not word aligned",
+            section.address
+        ));
+    }
+    Ok((section.address, section.bytes.to_vec()))
 }
 
 fn word(image: &[u8], at: usize) -> u32 {
@@ -103,8 +142,32 @@ fn check_header(image: &[u8], base: u32) -> Result<(), String> {
     Ok(())
 }
 
-/// `psx-exe ELF EXE`.
-pub fn main(args: &[String], _out: &mut dyn std::io::Write) -> i32 {
+/// `psx-exe ELF EXE`, or `psx-exe --overlay SECTION ELF FILE`.
+pub fn main(args: &[String], out: &mut dyn std::io::Write) -> i32 {
+    if let [flag, section, elf, file] = args {
+        if flag == "--overlay" {
+            let result = std::fs::read(elf)
+                .map_err(|e| format!("{elf}: {e}"))
+                .and_then(|bytes| {
+                    overlay_from_elf(&bytes, section).map_err(|e| format!("{elf}: {e}"))
+                })
+                .and_then(|(address, image)| {
+                    std::fs::write(file, image)
+                        .map(|()| address)
+                        .map_err(|e| format!("{file}: {e}"))
+                });
+            return match result {
+                Ok(address) => {
+                    let _ = writeln!(out, "load={address:#010x}");
+                    0
+                }
+                Err(message) => {
+                    eprintln!("psx-exe: {message}");
+                    1
+                }
+            };
+        }
+    }
     let [elf, exe] = args else {
         eprint!("{USAGE}");
         return 2;
@@ -280,6 +343,62 @@ mod tests {
             0x800,
             "one sector covers the stored bytes"
         );
+    }
+
+    /// psoxide-overlay.ld's overlays run above .bss and are stored nowhere in the EXE; each one is
+    /// written on its own, at its run address.
+    #[test]
+    fn an_overlay_is_left_out_of_the_exe_and_written_on_its_own() {
+        const OVERLAY: u32 = 0x8010_0000;
+        let mut parts = boot_program(0x800);
+        parts.push(progbits(
+            ".overlay.1",
+            OVERLAY,
+            OVERLAY & 0x1fff_ffff,
+            fill(0x4444_4444, 5),
+        ));
+        parts.push(progbits(
+            ".overlay.2",
+            OVERLAY,
+            (OVERLAY & 0x1fff_ffff) + 20,
+            fill(0x5555_5555, 2),
+        ));
+        let bytes = elf(&parts);
+        let without = {
+            let mut plain = boot_program(0x800);
+            plain.truncate(5);
+            from_elf(&elf(&plain)).unwrap()
+        };
+        assert_eq!(from_elf(&bytes).unwrap(), without, "the EXE holds no overlay byte");
+        assert_eq!(
+            overlay_from_elf(&bytes, ".overlay.1").unwrap(),
+            (OVERLAY, fill(0x4444_4444, 5))
+        );
+        assert_eq!(
+            overlay_from_elf(&bytes, ".overlay.2").unwrap(),
+            (OVERLAY, fill(0x5555_5555, 2))
+        );
+        assert!(overlay_from_elf(&bytes, ".overlay.3")
+            .unwrap_err()
+            .contains(".overlay.3"));
+        assert!(overlay_from_elf(&bytes, ".boot")
+            .unwrap_err()
+            .contains("not an overlay"));
+        // The CLI prints the manifest option.
+        let dir = std::env::temp_dir().join(format!("psx-exe-overlay-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (elf_path, file) = (dir.join("game.elf"), dir.join("menu.ovl"));
+        std::fs::write(&elf_path, &bytes).unwrap();
+        let args: Vec<String> = ["--overlay", ".overlay.1"]
+            .iter()
+            .map(|s| s.to_string())
+            .chain([elf_path, file.clone()].iter().map(|p| p.display().to_string()))
+            .collect();
+        let mut printed = Vec::new();
+        assert_eq!(main(&args, &mut printed), 0);
+        assert_eq!(String::from_utf8(printed).unwrap(), "load=0x80100000\n");
+        assert_eq!(std::fs::read(&file).unwrap(), fill(0x4444_4444, 5));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
