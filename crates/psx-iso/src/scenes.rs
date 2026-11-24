@@ -36,7 +36,9 @@
 //! - an Overlay loads inside its owner's reserved RAM (below `PAYLOAD_END`);
 //!   co-resident images never overlap (an Overlay and its owner, two
 //!   RESIDENT_SET Overlays of one owner); an Overlay's evicts mask is exactly
-//!   the other images whose load ranges intersect its own;
+//!   the other images whose load ranges intersect its own, plus its own bit for
+//!   a VOLATILE Overlay (one over memory its owner also uses: never kept, so
+//!   read again at every load);
 //! - `I <= 32` and `S + I <= 62`.
 //!
 //! A scene that runs inside its Program's exe has no image row: its scene row
@@ -613,13 +615,20 @@ pub fn add_scene_disc_files(
             }
         }
     }
-    // An Overlay's evicts mask: exactly the other images whose load ranges intersect its own.
+    // An Overlay's evicts mask: exactly the other images whose load ranges intersect its own, and
+    // a VOLATILE one's own bit (the core applies the mask after setting the bit, so it is never
+    // kept and every load reads the overlay again).
     let spans: Vec<Span> = rows.iter().map(ImageRow::span).collect();
     for (i, row) in rows.iter_mut().enumerate() {
         if row.kind == Kind::Overlay {
+            let own = if row.class == Some(Class::Volatile) {
+                1 << i
+            } else {
+                0
+            };
             row.evicts = (0..spans.len())
                 .filter(|&j| j != i && overlaps(spans[i], spans[j]))
-                .fold(0, |mask, j| mask | 1 << j);
+                .fold(own, |mask, j| mask | 1 << j);
         }
     }
 

@@ -393,15 +393,26 @@ fn image_row_round_trips_at_the_v2_offsets() {
         assert_eq!(Kind::from_u8(byte), Some(kind));
         assert_eq!(kind as u8, byte);
     }
-    for (class, byte) in [(Class::ResidentSet, 1), (Class::Swap, 2)] {
+    for (class, byte) in [
+        (Class::ResidentSet, 1),
+        (Class::Swap, 2),
+        (Class::Volatile, 3),
+    ] {
         assert_eq!(Class::from_u8(byte), Some(class));
         assert_eq!(class as u8, byte);
     }
     assert_eq!(Class::from_u8(0), None);
+    // A VOLATILE row round-trips.
+    let mut volatile = sample_image(Kind::Overlay);
+    volatile.class = Some(Class::Volatile);
+    let mut bytes = [0u8; ROW_BYTES];
+    volatile.encode(&mut bytes);
+    assert_eq!(bytes[0x1d], 3);
+    assert_eq!(ImageRow::decode(&bytes), Some(volatile));
     // An unknown kind, an Overlay without a class, a Program with one: refused.
     let mut bytes = [0u8; ROW_BYTES];
     sample_image(Kind::Overlay).encode(&mut bytes);
-    for (at, byte) in [(0x1c, 2), (0x1d, 0), (0x1d, 3)] {
+    for (at, byte) in [(0x1c, 2), (0x1d, 0), (0x1d, 4)] {
         let mut bad = bytes;
         bad[at] = byte;
         assert_eq!(ImageRow::decode(&bad), None, "{at:#x}={byte}");

@@ -103,8 +103,9 @@ pub mod table {
     pub const I_FNV: usize = 3;
     /// Core hash (a program).
     pub const I_CORE_HASH: usize = 4;
-    /// An overlay: the images it overwrites. A program: the overlays its own exe carries, loaded
-    /// whenever it is entered.
+    /// An overlay: the images it overwrites, applied after its own bit is set (a VOLATILE
+    /// overlay lists itself, so it is never kept loaded). A program: the overlays its own exe
+    /// carries, loaded whenever it is entered.
     pub const I_EVICTS: usize = 5;
     /// A program's member base, relative to the table's base.
     pub const I_BASE: usize = 6;

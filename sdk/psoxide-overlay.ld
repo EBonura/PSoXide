@@ -1,0 +1,57 @@
+/*
+ * Fixed-address overlays of a program on the scene core, for psoxide.ld, opt-in: link with
+ * `-T <ram>.ld -T psoxide-core.ld [-T psoxide-boot.ld] -T psoxide-overlay.ld -T psoxide.ld`, where
+ * <ram>.ld (or another `-T` file before this one) holds `OVERLAY_VMA = 0x...;` as well as
+ * `RAM_SIZE_OVERRIDE`. Link an ELF, as for psoxide-core.ld.
+ *
+ * Code and read-only data a program needs only some of the time (a pre-play title menu) run at
+ * OVERLAY_VMA, memory the program also uses for something else (its world, once play starts).
+ * They are linked with the program, so they call its code and read its statics and the program
+ * calls into them, but they are not in its EXE: `psx-exe` (and psoxide-pgo, which writes EXEs the
+ * same way) leaves every `.overlay.N` section out of it, and
+ *
+ *     psx-exe --overlay .overlay.N game.elf menu.ovl
+ *
+ * writes overlay N as its own image file and prints its manifest options (`load=0x...`). The
+ * scene disc's manifest then names it (mkisopsx --scenes):
+ *
+ *     overlay MENU.OVL menu.ovl owner=<the program> load=<as printed> class=volatile
+ *
+ * and mkisopsx writes its Overlay row (owner, load address, size, word FNV). The program calls
+ * `psx_core::link::load_image` for it before every call into it. `class=volatile` because the
+ * program writes over that memory: the core then reads the overlay again at every load, so a
+ * program that has used the memory for something else never jumps into stale bytes.
+ *
+ * Up to four overlays share OVERLAY_VMA, each loaded over the others: overlay N (1 to 4) is the
+ * program's `.text.overlay.N.*` code and `.rodata.overlay.N.*` read-only data. Name each function
+ * and table with `#[link_section = ".text.overlay.N.<name>"]` (or `.rodata.`) and keep the entry
+ * points `#[inline(never)]`, so their code stays in the overlay. What the compiler places on its
+ * own (string literals, constants it folds out, generic code it shares) stays resident, as do the
+ * overlay's writable statics: an overlay keeps no state of its own across a reload. One overlay
+ * never refers to another (NOCROSSREFS: the link fails if it does).
+ *
+ * The overlay's code is not in the EXE, so psoxide-pgo's hazard patcher never sees it: build the
+ * program with the SDK's MIPS flags (the delay-slot searches on) and run `hazard-scan --raw
+ * <OVERLAY_VMA> <file>` and `check-mfc0 --raw <OVERLAY_VMA> <file>` on each overlay file, as
+ * sdk/examples/hello-core-overlay/build.sh does.
+ */
+SECTIONS {
+    /* Every overlay runs at OVERLAY_VMA. The load addresses only keep the sections' file bytes
+       apart in the ELF (OVERLAY places them one after another): the physical alias of the run
+       address, where nothing else is stored. Nothing loads from them. */
+    OVERLAY OVERLAY_VMA : NOCROSSREFS AT(OVERLAY_VMA & 0x1FFFFFFF) {
+        .overlay.1 { *(.text.overlay.1.* .rodata.overlay.1.*) }
+        .overlay.2 { *(.text.overlay.2.* .rodata.overlay.2.*) }
+        .overlay.3 { *(.text.overlay.3.* .rodata.overlay.3.*) }
+        .overlay.4 { *(.text.overlay.4.* .rodata.overlay.4.*) }
+    } > RELOCATED
+    /* OVERLAY leaves `.` at OVERLAY_VMA plus the largest overlay. */
+    __overlay_end = .;
+}
+/* As psoxide-boot.ld: INSERT must directly follow SECTIONS's closing brace. */
+INSERT AFTER .bss;
+
+ASSERT(OVERLAY_VMA % 4 == 0, "OVERLAY_VMA must be word aligned")
+ASSERT(OVERLAY_VMA >= __data_end, "an overlay runs above the program's .text and .data (OVERLAY_VMA)")
+/* The core loads whole sectors: the file is padded to one, and the padding lands in RAM too. */
+ASSERT(OVERLAY_VMA + ((__overlay_end - OVERLAY_VMA + 0x7FF) & ~0x7FF) <= __heap_end, "an overlay, padded to whole sectors, must end below the stack reserve")

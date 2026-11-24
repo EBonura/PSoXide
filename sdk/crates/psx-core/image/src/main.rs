@@ -7,8 +7,9 @@
 //! - `drive`: the polled reader and its rules: never assume an idle drive (settle on first use),
 //!   seek-first starts, PIO sector pops (no CD DMA), Pause and never Stop, a Pause resent when
 //!   refused mid-seek, the CD input muted before a read after music, and the drive proven stopped
-//!   before every command the core sends: a read or `psx_core_pause` ends on an acknowledged
-//!   Pause and the next use proves it (`drive::settle`), so the wait overlaps the program's work;
+//!   before every command the core sends but the probe that proves it (a GetStat, or a read's
+//!   own SetMode): a read or `psx_core_pause` ends on an acknowledged Pause and the next use
+//!   proves it (`drive::settle`, `drive::prepare`), so the wait overlaps the program's work;
 //! - `read`: the read loop with retries from a fresh start and contiguous chunks;
 //! - `switch`: the table row, bounds, quiesce, load with the checksum folded in, I-cache flush,
 //!   handoff block and jump;
@@ -587,18 +588,40 @@ mod drive {
         r
     }
 
+    /// What proves the drive stopped when its proof is not already in ([`settle`]).
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub enum Probe {
+        /// A GetStat, before any other command.
+        Status,
+        /// The read's own SetMode (it moves nothing; a read sends it anyway), with the controller
+        /// taken for polled reads first: one command round trip less per read.
+        ReadMode,
+    }
+
     /// Prove the drive stopped before the core's own next command. On the first use, whatever
     /// the drive is doing (it is never assumed idle); after [`stop`], that Pause: by its
-    /// second response if it has latched (no command), else a status and a proven Pause while
-    /// the drive is still active. Never a blocking wait for that latched response: our own
-    /// acknowledges, or a program's register-level driver, may have taken it.
+    /// second response if it has latched (no command), else the status in the probe's
+    /// acknowledge and a proven Pause while the drive is still active. Never a blocking wait for
+    /// that latched response: our own acknowledges, or a program's register-level driver, may
+    /// have taken it. With [`Probe::ReadMode`] the controller is taken for polled reads first
+    /// ([`prepare`]: `I_MASK` saved and VBlank-only, controller IRQs on) and the SetMode goes out
+    /// in every case; its failure is the read's.
     #[inline(never)]
-    pub fn settle() -> u32 {
+    pub fn settle(probe: Probe) -> u32 {
         let s = st();
-        if s.prepared == PROVEN {
+        let read = probe == Probe::ReadMode;
+        if read {
+            enter_mask();
+        }
+        if s.prepared == PROVEN && !read {
+            // Nothing to prove and nothing to send: the flags stay as they are (a program's own
+            // driver may wait on one).
             return code::OK;
         }
-        if s.prepared != OWED || cmd::flag() != INT_COMPLETE {
+        // Before anything is acknowledged: an owed Pause's latched second response is its proof.
+        let proven =
+            s.prepared == PROVEN || (s.prepared == OWED && cmd::flag() == INT_COMPLETE);
+        if !proven {
             let mut n = 0;
             while n < 16 {
                 let f = cmd::flag();
@@ -608,46 +631,48 @@ mod drive {
                 ack_unexpected(f);
                 n += 1;
             }
-            cmd::ack_all();
-            match status() {
-                // No answer: the next command fails on its own bound and says so.
-                None => {}
-                Some(stat) if stat & STAT_ACTIVE == 0 => {}
-                Some(_) => {
-                    let r = pause_proved();
-                    if r != code::OK {
-                        cmd::ack_all();
-                        return r;
-                    }
+        }
+        // The latched second response's status byte too: nothing is left pending. A read takes
+        // the controller's IRQs (`I_MASK` keeps the CD source out, so none is taken) and drops
+        // whatever the previous tenant left in the data FIFO.
+        cmd::drain();
+        if read {
+            cmd::set_irq_enable(0x1f);
+        }
+        cmd::ack_all();
+        if read {
+            cmd::clear_data_request();
+        }
+        if read || !proven {
+            let (command, params): (u8, &[u8]) = if read {
+                (CMD_SETMODE, &[MODE_DATA])
+            } else {
+                (CMD_GETSTAT, &[])
+            };
+            if cmd::send(command, params, INT_ACK, ACK_WAIT) != cmd::MATCHED {
+                // A read cannot start; a status probe leaves it to the next command, which fails
+                // on its own bound and says so.
+                if read {
+                    return code::NO_ANSWER;
+                }
+            } else if !proven && s.last_status as u8 & STAT_ACTIVE != 0 {
+                let r = pause_proved();
+                if r != code::OK {
+                    cmd::ack_all();
+                    return r;
                 }
             }
         }
-        // The latched second response's status byte too: nothing is left pending.
-        cmd::drain();
-        cmd::ack_all();
         s.prepared = PROVEN;
         code::OK
     }
 
     /// Take the controller for polled reads: the CD source out of `I_MASK` until [`release`],
-    /// the drive proven stopped ([`settle`]), controller IRQs on.
-    #[inline(never)]
+    /// the drive proven stopped (its read's SetMode the probe), controller IRQs on, the data
+    /// mode set.
+    #[inline(always)]
     pub fn prepare() -> u32 {
-        enter_mask();
-        // Before anything is acknowledged: an owed Pause's latched second response is its proof.
-        let r = settle();
-        if r != code::OK {
-            return r;
-        }
-        w32(I_STAT, !CDROM_IRQ_BIT);
-        cmd::set_irq_enable(0x1f);
-        cmd::ack_all();
-        // Drop whatever the previous tenant left in the data FIFO.
-        cmd::clear_data_request();
-        if cmd::send(CMD_SETMODE, &[MODE_DATA], INT_ACK, ACK_WAIT) != cmd::MATCHED {
-            return code::NO_ANSWER;
-        }
-        code::OK
+        settle(Probe::ReadMode)
     }
 
     /// Save `I_MASK` (once per read) and keep only VBlank while the drive is polled, as psx-io's
@@ -945,7 +970,9 @@ mod switch {
     }
 
     /// Read the image in the state's rows into its range unless its bit says it is there, check
-    /// it, flush the I-cache and update the mask.
+    /// it, flush the I-cache and update the mask. The evicts word is applied after the image's
+    /// own bit: a VOLATILE overlay (its owner also uses its range) lists itself, so its bit is
+    /// never kept and every load reads it.
     #[inline(never)]
     fn load_overlay() -> u32 {
         let s = st();
@@ -959,7 +986,7 @@ mod switch {
         }
         dma_settle();
         flush_icache();
-        s.mask = (s.mask & !s.image[table::I_EVICTS]) | bit;
+        s.mask = (s.mask | bit) & !s.image[table::I_EVICTS];
         code::OK
     }
 
@@ -1149,7 +1176,7 @@ mod switch {
         let mut r = load_into(1);
         if r == code::OK {
             // A program is entered with the drive proven stopped (CORE-ABI 3.3).
-            r = drive::settle();
+            r = drive::settle(drive::Probe::Status);
         }
         if r != code::OK {
             fatal_screen(r);
@@ -1316,7 +1343,7 @@ extern "C" fn __psx_core_pause_impl() -> u32 {
     drive::enter_mask();
     // The previous Pause (or whatever the drive does) is proven before this one is sent; this one
     // is only acknowledged, its proof owed to the next use of the drive.
-    let mut r = drive::settle();
+    let mut r = drive::settle(drive::Probe::Status);
     if r == code::OK && drive::stop() != cmd::MATCHED {
         r = code::NO_ANSWER;
     }
@@ -1368,7 +1395,7 @@ extern "C" fn __psx_core_cd_impl(op: u32, a: u32, b: u32, c: *mut u8) -> u32 {
     }
     // The drive is proven stopped before any command the core sends, this one included (with
     // the caller's `I_MASK`, as the command itself: no CD-ROM IRQ handler is installed).
-    let _ = drive::settle();
+    let _ = drive::settle(drive::Probe::Status);
     let params = if a == 0 || b & 0xff == 0 {
         &[][..]
     } else {
