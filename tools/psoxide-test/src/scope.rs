@@ -676,6 +676,11 @@ fn guest_tool_crates() -> impl Iterator<Item = &'static str> {
         .filter(|p| p.starts_with("tools/") && !is_guest_tool_file(p))
 }
 
+/// Whether `path` is the SDK's examples directory or a path in it (`sdk/examples/hello-tri`).
+fn is_sdk_example(path: &str) -> bool {
+    path == "sdk/examples" || path.starts_with("sdk/examples/")
+}
+
 /// The guest paths that are tool scripts rather than directories (`tools/sdk-examples.mk`).
 fn guest_tool_files() -> impl Iterator<Item = &'static str> {
     GUEST_PATHS.iter().copied().filter(|p| {
@@ -860,7 +865,19 @@ pub fn reached_crates(
             let text = tool_texts
                 .get(&tool)
                 .ok_or_else(|| format!("the game runs {tool}, which this SDK commit lacks"))?;
+            let (mentions, composed) = (reach.mentions.clone(), reach.composed.clone());
             scan_text(text, &mut reach);
+            // An SDK example is never part of a game: what a tool script names under
+            // `sdk/examples` (sdk-examples.mk builds `sdk/examples/$(EXAMPLE)`) is not reached
+            // through it. Every game that names sdk-examples.mk reads its delay-slot flags (the
+            // script's own bytes stay in the scope); a game reaches an example only by naming that
+            // example itself.
+            reach
+                .mentions
+                .retain(|m| mentions.contains(m) || !is_sdk_example(m));
+            reach
+                .composed
+                .retain(|m| composed.contains(m) || !is_sdk_example(m));
             read.insert(tool);
         }
     }
@@ -1586,6 +1603,45 @@ mod tests {
         assert!(got.contains("engine/examples/hardware-tests"));
         assert!(got.contains("sdk/crates/psx-rt"), "its dependencies too");
         assert!(!got.contains("engine/examples/editor-playtest"));
+    }
+
+    /// Every game that names tools/sdk-examples.mk reads its delay-slot flags (Half-Life, Quake,
+    /// WipEout, the launcher): the script builds `sdk/examples/$(EXAMPLE)`, but no game links an
+    /// SDK example, so a new example (hello-anchor) must not make those games repin. A game that
+    /// names one example itself still reaches it.
+    #[test]
+    fn an_sdk_example_is_not_reached_through_the_examples_script() {
+        let mut sdk = sdk();
+        sdk.insert(
+            "sdk/examples/hello-anchor".to_string(),
+            "[package]\nname = \"hello-anchor\"\n[dependencies]\npsx-rt = { path = \"../../crates/psx-rt\" }\n"
+                .to_string(),
+        );
+        let tools = [(
+            "tools/sdk-examples.mk".to_string(),
+            "PSX_DELAY_SLOT_FLAGS := -Cllvm-args=x\n\tpgo apply --crate \"sdk/examples/$(EXAMPLE)\"\n"
+                .to_string(),
+        )]
+        .into();
+        let reach = Reach {
+            tools: ["tools/sdk-examples.mk".to_string()].into(),
+            mentions: ["sdk/crates/psx-rt".to_string()].into(),
+            ..Reach::default()
+        };
+        let got = reached_crates(&sdk, &tools, &reach, &mut no_sources)
+            .unwrap()
+            .reached;
+        assert!(!got.contains("sdk/examples/hello-anchor"), "{got:?}");
+        assert!(got.contains("sdk/crates/psx-rt"));
+        // Named by the game itself, an example is reached.
+        let reach = Reach {
+            mentions: ["sdk/examples/hello-anchor".to_string()].into(),
+            ..reach
+        };
+        let got = reached_crates(&sdk, &tools, &reach, &mut no_sources)
+            .unwrap()
+            .reached;
+        assert!(got.contains("sdk/examples/hello-anchor"), "{got:?}");
     }
 
     /// The SDK of `sdk()` plus two crates that read assets and one that reads none.

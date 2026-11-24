@@ -13,6 +13,11 @@
 //! A host-tool-only commit (this harness, psoxide-dev, the docs) leaves the guest tree equal, so
 //! it never forces a repin.
 //!
+//! No game links an SDK example (`sdk/examples`): a game's view never reaches one through a tool
+//! script (every game names tools/sdk-examples.mk only for its delay-slot flags; the script's own
+//! bytes still count), and a game whose reach cannot be bounded compares the whole tree without
+//! them. The whole tree a lock records still includes them, so no recorded tree changes.
+//!
 //! The rule compares one game's view of that tree (scope.rs): the same digest without the files
 //! of SDK crates the game cannot reach, so a change to a disc no game links (an SDK example)
 //! moves no game that does not build it. A guest tool crate (`tools/psoxide-pgo`) is one of
@@ -206,6 +211,37 @@ impl Mirror {
         self.cached(&format!("{DEFINITION}:{}:{commit}", logic_digest()), || {
             self.compute_guest_tree(commit, None)
         })
+    }
+
+    /// The guest tree of `commit` without the SDK's examples (`sdk/examples`): what a game whose
+    /// reach cannot be bounded compares. No game links an SDK example, so adding or changing one
+    /// must not make every such game repin. The whole tree a lock records is [`Self::guest_tree`].
+    pub fn guest_tree_without_examples(&self, commit: &str) -> Result<String, String> {
+        self.cached(
+            &format!("{DEFINITION}:no-examples:{}:{commit}", logic_digest()),
+            || {
+                let mut args = vec!["ls-tree", "-r", "--full-tree", commit, "--"];
+                args.extend(GUEST_PATHS);
+                let listing = self.git(&args)?;
+                let manifest = self.git(&["show", &format!("{commit}:Cargo.toml")]).ok();
+                let lock = self.git(&["show", &format!("{commit}:Cargo.lock")]).ok();
+                let member_names = |member: &str| {
+                    self.git(&["show", &format!("{commit}:{member}/Cargo.toml")])
+                        .ok()
+                        .and_then(|t| toml::from_str::<toml::Table>(&t).ok())
+                        .and_then(|t| t.get("package")?.get("name")?.as_str().map(str::to_string))
+                };
+                tree_of(
+                    "sdk-guest-tree-no-examples",
+                    &listing,
+                    manifest.as_deref(),
+                    lock.as_deref(),
+                    member_names,
+                    None,
+                    |path, meta| (!path.starts_with("sdk/examples/")).then(|| meta.to_string()),
+                )
+            },
+        )
     }
 
     /// The guest tree of `commit` as a game with `reach` sees it, and how many of the commit's
@@ -746,12 +782,17 @@ impl Trees {
     fn of(mirror: &Mirror, pinned: &str, main: &str, scope: &Scope) -> Result<Trees, String> {
         let pinned_whole = mirror.guest_tree(pinned)?;
         let main_whole = mirror.guest_tree(main)?;
+        // Unbounded reach: the whole tree but the SDK's examples, which no game links.
+        let (pinned_open, main_open) = (
+            mirror.guest_tree_without_examples(pinned)?,
+            mirror.guest_tree_without_examples(main)?,
+        );
         let whole = |why: &str| Trees {
-            pinned: pinned_whole.clone(),
-            main: main_whole.clone(),
+            pinned: pinned_open.clone(),
+            main: main_open.clone(),
             pinned_whole: pinned_whole.clone(),
             main_whole: main_whole.clone(),
-            scope: format!("the whole guest tree ({why})"),
+            scope: format!("the whole guest tree but sdk/examples ({why})"),
         };
         Ok(match scope {
             Scope::Game(reach) => {
