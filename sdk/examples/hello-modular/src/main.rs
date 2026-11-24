@@ -14,7 +14,10 @@
 //! | 6 | HOSTED.OVL  | Q's overlay 1, over Q's host buffer |
 //!
 //! Scenes: 0 PSTART (P starts; needs SVC and CARRIED), 1 PPLAY (in P; needs TAILED and CARRIED),
-//! 2 PVOL (in P; needs VOL), 3 QSTART (Q starts; needs HOSTED). A disc with a scene named
+//! 2 PVOL (in P; needs VOL), 3 QSTART (Q starts; needs HOSTED). SVC, VOL and TAILED run at one address
+//! (OVERLAY_VMA), so each scene's needs evict the others': allowed (an in-program switch loads what the
+//! entered scene needs; the evicted image is loaded again on its scene's next entry), and P keeps its
+//! idle hook and VBlank handler in its resident text, never in an overlay. A disc with a scene named
 //! `SOAK<n>` runs the soak instead: P and Q switch to each other n times, each entry loading an
 //! overlay, with the pad polled from the core's idle hook and the VBlank counter running.
 //!

@@ -998,6 +998,9 @@ mod switch {
     /// Each is refused (nothing of it read) when it has no row, is not an Overlay of the program
     /// that runs, or its range is bad or holds `caller`. The disc builder guarantees a scene's
     /// needed images are its program's Overlays and overlap neither each other nor its own image.
+    /// A needed image may evict one another scene of the program needs (its evicts word): that is
+    /// allowed, and the program keeps no handler or hook in an image a later load can overlap
+    /// (CORE-ABI "landing fixes", S7).
     #[inline(never)]
     pub fn walk(mut needs: u32, table: *const u32, caller: u32) -> u32 {
         let mut i = 0;

@@ -1074,3 +1074,23 @@ fn a_called_program_is_refused_as_a_disc_program() {
         SceneDiscError::CalledProgram(String::from(BOOT_EXE_NAME))
     );
 }
+
+/// Decided at the landing review (S7): one scene's needed image may evict an image another scene
+/// of the same program needs (overlays sharing an address); the evicts word says so and the core
+/// loads the evicted one again on its scene's next entry. Only overlaps within one scene's needs
+/// are refused (a_scene_needs_overlays_of_its_own_program_that_do_not_overlap).
+#[test]
+fn a_scene_may_evict_an_image_another_scene_of_its_program_needs() {
+    let mut plan = overlay_plan();
+    let mut a = SceneSpec::at("NEEDSET", BOOT_EXE_NAME, BASE + 4);
+    a.needs = vec![String::from("SET.OVL")];
+    let mut b = SceneSpec::at("NEEDSWAP", BOOT_EXE_NAME, BASE + 8);
+    b.needs = vec![String::from("SWAPA.OVL")];
+    plan.scenes.extend([a, b]);
+    let (_, pressed) = press(exe(BASE, BASE, 0, &payload(8, 1)), &plan, false).unwrap();
+    let n = pressed.scenes.len();
+    assert_eq!(pressed.scenes[n - 2].needs, 1 << 1);
+    assert_eq!(pressed.scenes[n - 1].needs, 1 << 3);
+    // SWAPA (image 3) lies over SET (image 1): loading it for NEEDSWAP evicts NEEDSET's image.
+    assert_eq!(pressed.images[3].evicts & 1 << 1, 1 << 1);
+}

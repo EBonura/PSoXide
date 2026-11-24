@@ -59,8 +59,14 @@ it: a `#[used]` static holding the entry functions (hello-modular's `ENTRIES`).
 
 ## Rules
 
-- A switch inside a program only adds images; an image leaves RAM only when a later load's range
-  covers it (its evicts word) or at a program switch.
+- A switch inside a program loads what the entered scene needs and discards nothing by itself; an
+  image leaves RAM only when a load's range covers it (its evicts word) or at a program switch. So a
+  scene's needed image may evict one another scene needs (overlays sharing an address: hello-modular's
+  PPLAY loads TAILED over PSTART's SVC); that scene's next entry loads it again. The writer refuses
+  only needed images that overlap each other or the scene's own overlay.
+- The core runs VBlank and the idle hook while it loads. Never leave an interrupt handler, the idle
+  hook or any callback you registered pointing into an image that a later scene's needed images (or a
+  `load_image`) can overlap: keep such code resident, or in an image nothing else overlaps.
 - The idle hook runs while these loads wait on the drive (so a program keeps its pad and music
   going), never while `psx_core_cd` sends a short command.
 - Every program on a disc is on one core (CORE_HASH); every disc is pressed with the SDK that built
