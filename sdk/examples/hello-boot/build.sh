@@ -1,6 +1,7 @@
 #!/bin/sh
 # Build hello-boot (a program on the scene core with boot-only memory) and its two discs, and check
-# that psoxide-boot.ld refuses a resident reference into `.boot_inner`.
+# that psoxide-boot.ld refuses a resident reference into `.boot_inner` and boot-only code in a
+# section without the `.text.` prefix.
 #
 #   sh sdk/examples/hello-boot/build.sh OUT_DIR      (from the repository root)
 #
@@ -36,6 +37,16 @@ grep -q "prohibited cross reference from '.text' to '.text.boot_inner" "$OUT/cro
     exit 1
 }
 echo "hello-boot: the cross-ref build is refused, as it must be"
+# Boot-only code without the `.text.` prefix: refused too.
+if guest --features unprefixed >"$OUT/unprefixed.log" 2>&1; then
+    echo "hello-boot: FAIL: the unprefixed build linked" >&2
+    exit 1
+fi
+grep -q "a boot-only section without a .text./.rodata./.data. prefix" "$OUT/unprefixed.log" || {
+    echo "hello-boot: FAIL: the unprefixed build failed for another reason ($OUT/unprefixed.log)" >&2
+    exit 1
+}
+echo "hello-boot: the unprefixed build is refused, as it must be"
 
 guest
 cp "$GUEST_TARGET/mipsel-sony-psx/release/hello-boot.exe" "$OUT/hello-boot.exe"
