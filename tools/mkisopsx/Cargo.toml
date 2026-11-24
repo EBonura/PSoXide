@@ -13,3 +13,7 @@ lz4_flex = { version = "0.11", default-features = false }
 [[bin]]
 name = "mkisopsx"
 path = "src/main.rs"
+
+[[bin]]
+name = "psx-nest"
+path = "src/bin/psx-nest.rs"

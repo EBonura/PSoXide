@@ -35,6 +35,7 @@ pub mod boot;
 pub mod exe;
 pub mod files;
 pub mod iso9660;
+pub mod nest;
 pub mod receipt;
 pub mod scenes;
 pub use boot::{load_boot_exe_from_disc, BootError, BootExe};
