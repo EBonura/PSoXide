@@ -30,19 +30,21 @@ use psx_core::fnv;
 // ---------------------------------------------------------------------------------------------
 // Registers.
 
-const CD_INDEX: u32 = 0x1f80_1800;
-const CD_CMD: u32 = 0x1f80_1801;
-const CD_PARAM: u32 = 0x1f80_1802;
-const CD_REQ: u32 = 0x1f80_1803;
-const I_STAT: u32 = 0x1f80_1070;
-const I_MASK: u32 = 0x1f80_1074;
-const TIMER2: u32 = 0x1f80_1120;
-const DPCR: u32 = 0x1f80_10f0;
-const DICR: u32 = 0x1f80_10f4;
-const DMA_CHCR0: u32 = 0x1f80_1088;
-const SPU_KEY_OFF: u32 = 0x1f80_1d8c;
-const SPU_CD_VOLUME: u32 = 0x1f80_1db0;
-const SPU_CONTROL: u32 = 0x1f80_1daa;
+const CD_INDEX: u32 = psx_hw::cd::reg::INDEX;
+const CD_CMD: u32 = psx_hw::cd::reg::COMMAND_RESPONSE;
+const CD_PARAM: u32 = psx_hw::cd::reg::PARAMETER;
+const CD_REQ: u32 = psx_hw::cd::reg::REQUEST_IRQ;
+const I_STAT: u32 = psx_hw::irq::I_STAT;
+const I_MASK: u32 = psx_hw::irq::I_MASK;
+/// Timer 2's counter.
+const TIMER2: u32 = psx_hw::timers::block(2) + psx_hw::timers::COUNTER;
+const DPCR: u32 = psx_hw::dma::DPCR;
+const DICR: u32 = psx_hw::dma::DICR;
+/// Channel 0's CHCR; the other channels follow every `CHANNEL_STRIDE` bytes.
+const DMA_CHCR0: u32 = psx_hw::dma::CHANNEL_BASE + psx_hw::dma::CHCR;
+const SPU_KEY_OFF: u32 = psx_hw::spu::mask::KEY_OFF_LO;
+const SPU_CD_VOLUME: u32 = psx_hw::spu::CD_VOL_LEFT;
+const SPU_CONTROL: u32 = psx_hw::spu::SPUCNT;
 
 const CDROM_IRQ_BIT: u32 = 1 << 2;
 

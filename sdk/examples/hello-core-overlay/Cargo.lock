@@ -20,6 +20,7 @@ dependencies = [
 name = "psx-core"
 version = "0.1.0"
 dependencies = [
+ "psx-hw",
  "psx-scene-abi",
 ]
 

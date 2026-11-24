@@ -23,6 +23,7 @@ debug = false
 
 [dependencies]
 psx-core = { path = ".." }
+psx-hw = { path = "../../../../crates/psx-hw" }
 
 [features]
 # A second image with different bytes, for the hash-mismatch tests only.

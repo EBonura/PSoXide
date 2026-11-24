@@ -20,6 +20,9 @@ panic = "abort"
 codegen-units = 1
 lto = true
 
+[dependencies]
+psx-hw = { path = "../../../../crates/psx-hw" }
+
 [features]
 # The second overlay (same load address, so each evicts the other).
 second = []

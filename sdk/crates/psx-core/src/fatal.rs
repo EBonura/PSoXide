@@ -4,8 +4,8 @@
 //! so the bars sit on 32-pixel steps). No font, no VRAM upload, nothing
 //! that depends on the program that ran before.
 
-const GP0: u32 = 0x1f80_1810;
-const GP1: u32 = 0x1f80_1814;
+const GP0: u32 = psx_hw::gpu::GP0;
+const GP1: u32 = psx_hw::gpu::GP1;
 /// GPUSTAT bit 26: ready to receive a command word.
 const READY_FOR_COMMAND: u32 = 1 << 26;
 

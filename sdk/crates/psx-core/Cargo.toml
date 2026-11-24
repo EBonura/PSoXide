@@ -8,6 +8,7 @@ repository.workspace = true
 description  = "The scene core: the resident CD owner and program switch every program on a disc shares."
 
 [dependencies]
+psx-hw = { workspace = true }
 psx-scene-abi = { path = "../psx-scene-abi" }
 
 [features]

@@ -12,7 +12,7 @@ const BLOCK: u32 = 0x801f_ff00;
 const MARK: u32 = BLOCK + 0x80;
 /// Where the base program leaves its scene-table copy's address.
 const TABLE_AT: u32 = BLOCK + 0x84;
-const TTY: u32 = 0x1f80_2080;
+const TTY: u32 = psx_hw::memory::expansion2::DEBUG_CONSOLE;
 #[cfg(not(feature = "second"))]
 const ID: u32 = 1;
 #[cfg(feature = "second")]
