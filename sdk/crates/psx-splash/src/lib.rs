@@ -59,7 +59,10 @@
 //! ```
 
 #![no_std]
-#![cfg_attr(target_arch = "mips", feature(optimize_attribute))]
+#![cfg_attr(
+    target_arch = "mips",
+    feature(optimize_attribute, asm_experimental_arch)
+)]
 #![warn(missing_docs)]
 
 mod logo;
@@ -73,6 +76,21 @@ use psx_gpu::prim::{QuadTexturedGouraud, QuadTexturedMaterial};
 use psx_gpu::Gpu;
 use psx_pad::{button, ButtonState};
 use psx_vram::{Clut, TextureDepth, TexturePage, VramRect};
+
+/// The stack the splash's own code needs, in bytes below the `$sp` of [`show`]'s caller, rounded
+/// up: measured 18,272 B on hello-boot (11-24; `show` 16, `play` 17,120, of which the font atlas's
+/// 16 KiB packing buffer is most, its deepest callee 1,136), without the caller's pad closure,
+/// which `play` calls through a register. Published to the link as `__psx_splash_stack_bytes`:
+/// psoxide-boot.ld refuses a boot-time stack (`BOOT_STACK_OVERRIDE`) smaller than this. Measure it
+/// again (frames and direct calls from the linked ELF) when the splash's code changes.
+pub const STACK_BYTES: u32 = 0x5000;
+
+#[cfg(target_arch = "mips")]
+core::arch::global_asm!(
+    ".globl __psx_splash_stack_bytes",
+    ".set __psx_splash_stack_bytes, {bytes}",
+    bytes = const STACK_BYTES,
+);
 
 const MARK_TPAGE: TexturePage = TexturePage::new(896, 0, TextureDepth::Bit4);
 const MARK_CLUT: Clut = Clut::new(768, 256);

@@ -1,7 +1,8 @@
 #!/bin/sh
 # Build hello-boot (a program on the scene core with boot-only memory) and its two discs, and check
 # that psoxide-boot.ld refuses a resident reference into `.boot_inner` and boot-only code in a
-# section without the `.text.` prefix.
+# section without the `.text.` prefix, and that a boot-time stack (BOOT_STACK_OVERRIDE) below the
+# boot crates' own need is refused. reserve.bin runs .boot partly inside the stack reserve.
 #
 #   sh sdk/examples/hello-boot/build.sh OUT_DIR      (from the repository root)
 #
@@ -19,12 +20,13 @@ mkdir -p "$OUT"
 FLAGS='"-Zunstable-options","-Cpanic=immediate-abort","-Cllvm-args=-disable-mips-df-succbb-search=false","-Cllvm-args=-disable-mips-df-forward-search=false"'
 # The order CORE-ABI gives: the RAM size, the core, the boot-only memory, then psoxide.ld.
 LINK='"-Clink-arg=-Tram.ld","-Clink-arg=-T../../psoxide-core.ld","-Clink-arg=-T../../psoxide-boot.ld","-Clink-arg=-T../../psoxide.ld"'
+EXTRA=""  # a further -T file before the scripts, for the boot-stack builds below
 guest() { # extra cargo arguments
     # Cargo does not see the linker scripts change: relink every time.
     touch "$CRATE/src/main.rs"
     "$HOST_BIN/psoxide-pgo" apply --crate "$CRATE" --profile "$CRATE/pgo.prof" --variant off -- \
         build --release --target mipsel-sony-psx -Zbuild-std=core -Zbuild-std-features=compiler-builtins-mem \
-        --target-dir "$GUEST_TARGET" "$@" --config "target.mipsel-sony-psx.rustflags=[$FLAGS,$LINK]"
+        --target-dir "$GUEST_TARGET" "$@" --config "target.mipsel-sony-psx.rustflags=[$FLAGS$EXTRA,$LINK]"
 }
 
 # Resident code calling into `.boot_inner`: the link must fail, on that reference.
@@ -61,3 +63,24 @@ MANIFEST
 # The program's row must cover .boot: its stored core image comes after it (psoxide.ld).
 "$MKISO" --diag --exe "$OUT/hello-boot.exe" --scenes "$OUT/boot.scenes" \
     --core-image sdk/crates/psx-core/prebuilt/psx-core.bin --volume HELLOBOOT --out "$OUT/scenes.bin"
+
+# Boot code inside the stack reserve, as a program with no heap to spare runs it: the boot-time
+# stack stated (BOOT_STACK_OVERRIDE) below the boot crates' own need is refused...
+EXTRA=',"-Clink-arg=-Tboot-stack-small.ld"'
+if guest >"$OUT/boot-stack-small.log" 2>&1; then
+    echo "hello-boot: FAIL: the boot-stack-small build linked" >&2
+    exit 1
+fi
+grep -q "BOOT_STACK_OVERRIDE is less than the boot crates' own stack" "$OUT/boot-stack-small.log" || {
+    echo "hello-boot: FAIL: the boot-stack-small build failed for another reason ($OUT/boot-stack-small.log)" >&2
+    exit 1
+}
+echo "hello-boot: the boot-stack-small build is refused, as it must be"
+# ...and one that states enough stack for the boot crates, runs .boot partly inside the reserve and
+# passes (reserve.bin: the splash's stack stays clear of the code it runs).
+EXTRA=',"-Clink-arg=-Tboot-stack-reserve.ld"'
+guest
+cp "$GUEST_TARGET/mipsel-sony-psx/release/hello-boot.exe" "$OUT/reserve.exe"
+map=$(ls -t "$GUEST_TARGET"/mipsel-sony-psx/psoxide-pgo-maps/*.map | head -1)
+cp "$map" "$OUT/reserve.map"
+"$MKISO" --diag --exe "$OUT/reserve.exe" --volume HELLOBOOT --out "$OUT/reserve.bin"
