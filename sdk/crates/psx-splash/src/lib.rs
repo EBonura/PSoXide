@@ -72,7 +72,7 @@ use psx_gpu::material::{BlendMode, TextureMaterial};
 use psx_gpu::prim::{QuadTexturedGouraud, QuadTexturedMaterial};
 use psx_gpu::Gpu;
 use psx_pad::{button, ButtonState};
-use psx_vram::{upload_16bpp, Clut, TextureDepth, TexturePage, VramRect};
+use psx_vram::{Clut, TextureDepth, TexturePage, VramRect};
 
 const MARK_TPAGE: TexturePage = TexturePage::new(896, 0, TextureDepth::Bit4);
 const MARK_CLUT: Clut = Clut::new(768, 256);
@@ -85,8 +85,9 @@ const FONT_CLUT: Clut = Clut::new(320, 256);
 /// The font as statics of this crate: a `const` the generic upload takes by reference is emitted as
 /// anonymous data in the caller's crate, which no linker script can place by name (a boot overlay
 /// that holds the splash cannot take it, and under fat LTO it stays resident).
-// In .boot, where resident code may refer to it (psoxide-boot.ld): with one caller, LTO folds the
-// font's address into psx-font's resident `FontAtlas::upload`, which then runs only for the splash.
+// In .boot, where resident code may refer to it (psoxide-boot.ld). The splash uploads it with its
+// own boot-only copy of the atlas upload (`FontAtlas::upload_inline`), so no resident code holds
+// its address any more; .boot stays the safe place for a boot crate's statics all the same.
 #[cfg_attr(
     target_arch = "mips",
     link_section = ".rodata.boot_only.psx_splash.FONT_BITMAP"
@@ -281,7 +282,7 @@ fn play(
         VramRect::new(MARK_GLINT_CLUT.x(), MARK_GLINT_CLUT.y(), 16, 1),
         &stp[..16],
     );
-    let font = FontAtlas::upload(&FONT, FONT_TPAGE, FONT_CLUT);
+    let font = FontAtlas::upload_inline(&FONT, FONT_TPAGE, FONT_CLUT, upload_16bpp);
     let mut mark = Picture {
         x: 112,
         y: SOLO_MARK_Y,
@@ -484,6 +485,20 @@ fn draw_glint(gpu: &mut Gpu, p: &Picture, at: i32) {
             p.glint,
         ));
     }
+}
+
+/// psx-vram's 16bpp uploader, compiled here into the splash's own boot-only code, as the font
+/// atlas upload is (inlined into [`play`]): the splash calls neither `psx_vram::upload_16bpp` nor
+/// `psx_font::FontAtlas::upload`, so a program whose only uploads are the splash's keeps none of
+/// that code resident (764 B in Ocarina), and a program that uploads too keeps its own resident
+/// copy, which never runs boot-only code. Not inlined: five calls share it.
+#[inline(never)]
+#[cfg_attr(
+    target_arch = "mips",
+    link_section = ".text.boot_inner.psx_splash.upload_16bpp"
+)]
+fn upload_16bpp(rect: VramRect, pixels: &[u16]) {
+    psx_vram::upload_16bpp_inline(rect, pixels);
 }
 
 /// Expand the mark into VRAM sixteen rows at a time (1,024 bytes of stack, once), and put its

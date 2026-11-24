@@ -769,44 +769,13 @@ pub fn upload_fonts<R: VramRegionSource>(
     })
 }
 
-impl FontAtlas {
-    /// Maximum texels a 4bpp tpage covers horizontally. 64 pixels
-    /// is the PSX-SPX value (tpage is 256×256 in texel units, but
-    /// in 4bpp mode the effective horizontal texel range per page
-    /// maps onto 64 VRAM halfwords = 64 × 4 = 256 texels).
-    const MAX_ATLAS_W_TEXELS: u16 = 256;
-    /// Stack buffer for the packed 4bpp atlas. 8192 halfwords =
-    /// 16 KiB leaves real call-frame headroom inside the SDK's 32 KiB
-    /// minimum stack reserve while covering the common cases:
-    /// - 128 glyphs at 8×8   (2048 hw)
-    /// - 128 glyphs at 8×16  (4096 hw)
-    /// - 64 glyphs  at 16×16 (4096 hw)
-    /// - 128 glyphs at 12×16 (5040 hw)
-    /// - 128 glyphs at 16×16 (8192 hw)
-    /// - 64 glyphs  at 32×16 (8192 hw) -- the largest supported
-    ///
-    /// A full 32 KiB local is not safe: the linker guarantees 32 KiB for the
-    /// *whole* call stack, so the uploader's caller/interrupt frames would
-    /// cross into static RAM. Larger imports should use [`upload_fonts`] and
-    /// provide scratch storage with an explicitly audited lifetime.
-    const MAX_PACK_HALFWORDS: usize = 8192;
-
-    /// Upload `font` as a 4bpp CLUT texture at `tpage`, with a
-    /// 2-entry CLUT (transparent, white) at `clut`.
-    ///
-    /// The caller picks the tpage / clut locations -- typically
-    /// `TexturePage::new(768, 0, TextureDepth::Bit4)` for the standard
-    /// off-display region, and a `Clut::new(768, 480)` for the
-    /// CLUT row. Both must live inside VRAM and not overlap the
-    /// active framebuffer.
-    ///
-    /// Atlas layout picks `glyphs_per_row` so the texture's pixel
-    /// width stays within `MAX_ATLAS_W_TEXELS`. For 8-wide fonts
-    /// that's 32 glyphs per row; 16-wide fonts get 16 per row.
-    ///
-    /// Out of line, so every caller shares one copy.
-    #[inline(never)]
-    pub fn upload(font: &'static BitmapFont, tpage: TexturePage, clut: Clut) -> Self {
+/// The code of [`FontAtlas::upload`] and [`FontAtlas::upload_inline`], one text for both, so the
+/// two cannot drift. In `upload` it is expanded with psx-vram's `upload_16bpp` and `upload_clut`,
+/// exactly the code `upload` always had (byte-identical programs); in `upload_inline` with the
+/// caller's uploader. Expanded inside `impl FontAtlas` (`Self`).
+macro_rules! upload_atlas {
+    ($font:ident, $tpage:ident, $clut:ident, $upload_16bpp:ident, $upload_clut:ident) => {{
+        let (font, tpage, clut) = ($font, $tpage, $clut);
         assert!(
             matches!(tpage.depth(), TextureDepth::Bit4),
             "FontAtlas::upload requires a 4bpp tpage",
@@ -876,13 +845,13 @@ impl FontAtlas {
         // VRAM rect semantics expose the *halfword* footprint when
         // depth is 4bpp -- so width is `atlas_w / 4`, not `atlas_w`.
         let vram_rect = VramRect::new(tpage.x(), tpage.y(), halfwords_per_row, atlas_h);
-        upload_16bpp(vram_rect, &packed[..total_halfwords]);
+        $upload_16bpp(vram_rect, &packed[..total_halfwords]);
 
         // Upload 2-entry CLUT: idx 0 = transparent, idx 1 = white.
         // The white texel will be tinted per-draw_call via the
         // sprite's per-vertex colour (GP0 0x64 tint byte).
         let clut_entries = [Color555::TRANSPARENT, Color555::rgb5(31, 31, 31)];
-        upload_clut(clut, &clut_entries);
+        $upload_clut(clut, &clut_entries);
 
         Self {
             font,
@@ -891,6 +860,72 @@ impl FontAtlas {
             glyphs_per_row,
             uv_origin: (0, 0),
         }
+    }};
+}
+
+impl FontAtlas {
+    /// Maximum texels a 4bpp tpage covers horizontally. 64 pixels
+    /// is the PSX-SPX value (tpage is 256×256 in texel units, but
+    /// in 4bpp mode the effective horizontal texel range per page
+    /// maps onto 64 VRAM halfwords = 64 × 4 = 256 texels).
+    const MAX_ATLAS_W_TEXELS: u16 = 256;
+    /// Stack buffer for the packed 4bpp atlas. 8192 halfwords =
+    /// 16 KiB leaves real call-frame headroom inside the SDK's 32 KiB
+    /// minimum stack reserve while covering the common cases:
+    /// - 128 glyphs at 8×8   (2048 hw)
+    /// - 128 glyphs at 8×16  (4096 hw)
+    /// - 64 glyphs  at 16×16 (4096 hw)
+    /// - 128 glyphs at 12×16 (5040 hw)
+    /// - 128 glyphs at 16×16 (8192 hw)
+    /// - 64 glyphs  at 32×16 (8192 hw) -- the largest supported
+    ///
+    /// A full 32 KiB local is not safe: the linker guarantees 32 KiB for the
+    /// *whole* call stack, so the uploader's caller/interrupt frames would
+    /// cross into static RAM. Larger imports should use [`upload_fonts`] and
+    /// provide scratch storage with an explicitly audited lifetime.
+    const MAX_PACK_HALFWORDS: usize = 8192;
+
+    /// Upload `font` as a 4bpp CLUT texture at `tpage`, with a
+    /// 2-entry CLUT (transparent, white) at `clut`.
+    ///
+    /// The caller picks the tpage / clut locations -- typically
+    /// `TexturePage::new(768, 0, TextureDepth::Bit4)` for the standard
+    /// off-display region, and a `Clut::new(768, 480)` for the
+    /// CLUT row. Both must live inside VRAM and not overlap the
+    /// active framebuffer.
+    ///
+    /// Atlas layout picks `glyphs_per_row` so the texture's pixel
+    /// width stays within `MAX_ATLAS_W_TEXELS`. For 8-wide fonts
+    /// that's 32 glyphs per row; 16-wide fonts get 16 per row.
+    ///
+    /// Out of line, so every caller shares one copy.
+    #[inline(never)]
+    pub fn upload(font: &'static BitmapFont, tpage: TexturePage, clut: Clut) -> Self {
+        upload_atlas!(font, tpage, clut, upload_16bpp, upload_clut)
+    }
+
+    /// [`Self::upload`]'s code, always inlined, with its two uploads made through `upload_16bpp`:
+    /// for a caller that needs a copy of its own in a section of its own. psx-splash compiles one
+    /// into its boot-only code (psoxide-boot.ld's `.boot_inner`) with its own boot-only uploader,
+    /// so a program whose only font is the splash's keeps no font upload code resident once boot
+    /// memory is reused. Everything else calls [`Self::upload`] and shares one copy.
+    ///
+    /// # Panics
+    ///
+    /// As [`Self::upload`].
+    #[doc(hidden)]
+    #[inline(always)]
+    pub fn upload_inline(
+        font: &'static BitmapFont,
+        tpage: TexturePage,
+        clut: Clut,
+        upload_16bpp: fn(VramRect, &[u16]),
+    ) -> Self {
+        let upload_clut = |clut: Clut, entries: &[Color555; 2]| {
+            let words = [entries[0].as_u16(), entries[1].as_u16()];
+            upload_16bpp(VramRect::new(clut.x(), clut.y(), 2, 1), &words);
+        };
+        upload_atlas!(font, tpage, clut, upload_16bpp, upload_clut)
     }
 
     /// Pixel width of `text` when rendered with this atlas.

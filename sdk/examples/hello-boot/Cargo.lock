@@ -15,10 +15,12 @@ dependencies = [
  "psx-core",
  "psx-display",
  "psx-fmv",
+ "psx-font",
  "psx-gpu",
  "psx-pad",
  "psx-rt",
  "psx-splash",
+ "psx-vram",
 ]
 
 [[package]]
