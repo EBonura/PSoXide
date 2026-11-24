@@ -86,7 +86,8 @@ same check (it cannot see a path the run did not take).
 ## How it is built
 
 The dispatcher is one short assembly routine (`__psx_rt_dispatch_tramp`). It saves `$1`-`$15`,
-`$24`, `$25`, `$28`, `$31`, HI, LO and the three callee-saved registers it uses, on its own stack;
+`$24`, `$25`, `$28`, `$31`, HI, LO and the three callee-saved registers it uses, on its own stack
+(`$sp` moves to it in one instruction, so a profiler sampling `$sp` never sees a half-built address);
 reads the pending word the exception handler stored and the registered mask; calls the VBlank
 hooks (a zero-ended array) if bit 0 is due, then one handler per due source in `I_STAT` bit order
 (a table indexed by bit); restores and returns to the handler's continuation (the VBlank path's
