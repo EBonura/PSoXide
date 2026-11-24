@@ -147,7 +147,7 @@ pub const STARTED: u32 = 0x5f6e_7572;
 /// the scene core, the stored `.boot` and core image bytes), so no `.bss` symbol may be read as
 /// the program's state. In `.data` (a non-zero initial value), so the EXE carries
 /// [`NOT_STARTED`].
-#[cfg(all(target_arch = "mips", feature = "runtime"))]
+#[cfg(all(target_arch = "mips", any(feature = "runtime", feature = "start-marker")))]
 #[no_mangle]
 #[used]
 #[allow(
@@ -155,6 +155,18 @@ pub const STARTED: u32 = 0x5f6e_7572;
     reason = "a link symbol harnesses find by this name"
 )]
 pub static mut __psx_rt_started: u32 = NOT_STARTED;
+
+/// Set [`__psx_rt_started`] to [`STARTED`]: for a program that starts through its own entry (feature
+/// `start-marker` without `runtime`, such as a psyq layer), right after it has cleared `.bss` and
+/// before anything else runs. psx-rt's own `_start` does the same.
+///
+/// # Safety
+/// Call it once, from the entry code, after `.bss` is clear.
+#[cfg(all(target_arch = "mips", feature = "start-marker", not(feature = "runtime")))]
+pub unsafe fn mark_started() {
+    // SAFETY: a volatile aligned store to the marker static; the entry code is the only writer.
+    unsafe { (&raw mut __psx_rt_started).write_volatile(STARTED) };
+}
 
 // Symbols emitted by `psoxide.ld`.
 extern "C" {

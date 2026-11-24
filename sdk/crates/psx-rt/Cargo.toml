@@ -23,6 +23,9 @@ default = ["runtime"]
 # it off with `default-features = false`. Features are additive: a program that also links a
 # crate asking for the runtime gets it.
 runtime = []
+# Only the start marker `__psx_rt_started` and `mark_started`, for a program that brings its own entry
+# point (a psyq layer): harnesses then read none of its RAM before its own `.bss` clear has run.
+start-marker = []
 # Expose a bump allocator as the global allocator. Kept optional so a
 # minimal no-heap homebrew can opt out.
 alloc = []

@@ -462,7 +462,7 @@ pub fn plan(repo: &Path, path: &Path, pad: &str, min_distinct: u32) -> Result<Pl
     // No condition counts before the program has started: until psx-rt's `_start` has cleared
     // `.bss`, a `.bss` symbol holds leftover bytes (on the scene core, the stored `.boot` and core
     // image), and a `ge 1` on one could hold before the program ran a line.
-    if let Some(p) = started_probe(&symbols) {
+    if let Some(p) = started_probe(&symbols)? {
         for step in &mut steps {
             step.probes.push(p.clone());
         }
@@ -545,10 +545,27 @@ pub const PSX_RT_STARTED: u32 = 0x5f6e_7572;
 /// The condition every RAM check of a run carries when the program's map has psx-rt's start marker:
 /// `__psx_rt_started` reads [`PSX_RT_STARTED`]. Before `_start` it reads what the EXE stores
 /// (`"pre_"`), so no sample taken before the program started can satisfy a check.
-#[must_use]
-pub fn started_probe(symbols: &Symbols) -> Option<Probe> {
-    let addr = symbols.resolve("__psx_rt_started").ok()?;
-    Some(Probe {
+///
+/// `Ok(None)` when no map loaded has the marker (a program without psx-rt's `_start`). Two
+/// addresses for it is an error naming the maps: a run checks one program, so it lists that
+/// program's map only.
+///
+/// # Errors
+/// The marker has more than one address in the maps loaded.
+pub fn started_probe(symbols: &Symbols) -> Result<Option<Probe>, String> {
+    let addr = match symbols.by_name.get("__psx_rt_started").map(Vec::as_slice) {
+        None | Some([]) => return Ok(None),
+        Some([addr]) => *addr,
+        Some(many) => {
+            return Err(format!(
+                "`__psx_rt_started` has {} addresses in the maps loaded ({}): the start rule \
+                 needs one program's marker; list only the map of the program this run checks",
+                many.len(),
+                symbols.maps.join(", ")
+            ))
+        }
+    };
+    Ok(Some(Probe {
         text: "__psx_rt_started eq run_ (the program has started)".into(),
         addr,
         size: 4,
@@ -556,12 +573,28 @@ pub fn started_probe(symbols: &Symbols) -> Option<Probe> {
         op: "eq".into(),
         value: i64::from(PSX_RT_STARTED),
         value_hi: 0,
-    })
+    }))
+}
+
+/// `probes` with [`started_probe`] added when the maps have the marker. Every condition set a run
+/// checks against program RAM goes through this (journey steps, `[[speed]]` windows and anchors,
+/// `[[load]]` `from` and `until`, `[cross]` boot `until`), so none can hold on a sample taken
+/// before the program started.
+///
+/// # Errors
+/// As [`started_probe`].
+pub fn with_started(mut probes: Vec<Probe>, symbols: &Symbols) -> Result<Vec<Probe>, String> {
+    if let Some(p) = started_probe(symbols)? {
+        probes.push(p);
+    }
+    Ok(probes)
 }
 
 #[derive(Default, Debug)]
 pub struct Symbols {
     by_name: BTreeMap<String, Vec<u32>>,
+    /// The files loaded, in order (named in errors).
+    maps: Vec<String>,
 }
 
 impl Symbols {
@@ -573,6 +606,7 @@ impl Symbols {
                 path.display()
             )
         })?;
+        self.maps.push(path.display().to_string());
         if text.starts_with("             VMA") || text.contains("     VMA      LMA") {
             let map = psoxide_size::map::parse(&text);
             for section in &map.sections {
@@ -720,7 +754,7 @@ press = ["down"]
             &symbols,
         )
         .unwrap();
-        let started = started_probe(&symbols).unwrap();
+        let started = started_probe(&symbols).unwrap().unwrap();
         let stored_bytes = 0x6e33_3333;
         assert!(counter.holds(stored_bytes), "the bare check is fooled");
         assert!(
@@ -742,6 +776,27 @@ press = ["down"]
         let plan = plan(dir.path(), &j, "dualshock", 1).unwrap();
         assert_eq!(plan.steps[0].probes.len(), 2);
         assert_eq!(plan.steps[0].probes[1], started);
+    }
+
+    /// Two program maps (Half-Life's game and intro) give the marker two addresses: an error that
+    /// names both maps, not a run that silently drops the rule.
+    #[test]
+    fn an_ambiguous_start_marker_is_an_error_naming_the_maps() {
+        let dir = tempfile::tempdir().unwrap();
+        let game = write(dir.path(), "game.txt", "80014000 __psx_rt_started\n");
+        let intro = write(dir.path(), "intro.txt", "80018000 __psx_rt_started\n");
+        let mut symbols = Symbols::default();
+        symbols.load(&game).unwrap();
+        assert!(started_probe(&symbols).unwrap().is_some());
+        symbols.load(&intro).unwrap();
+        let error = started_probe(&symbols).unwrap_err();
+        assert!(
+            error.contains("game.txt") && error.contains("intro.txt"),
+            "{error}"
+        );
+        assert!(with_started(Vec::new(), &symbols).is_err());
+        // No marker (a program without psx-rt's start): no rule, no error.
+        assert!(started_probe(&Symbols::default()).unwrap().is_none());
     }
 
     #[test]

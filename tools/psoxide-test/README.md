@@ -51,10 +51,23 @@ program: on a program of the scene core, the bytes of its stored `.boot` and cor
 EXE puts where `.bss` will be. A check such as `wait_until = { sym = "HITS", op = "ge", value = 1 }`
 read in those first instructions can hold before the program has run a line. psx-rt therefore keeps
 `__psx_rt_started` in `.data`: `"pre_"` (0x5F657270) as the EXE stores it, `"run_"` (0x5F6E7572) once
-`.bss` is clear. Every resolved step of a journey (`journey::plan`) carries the condition
-`__psx_rt_started eq run_` beside its own when the build's map has the symbol, so no sample taken
-before the start can satisfy it. A tool that reads a route log or RAM itself (a tape anchor, a
-counter) applies the same rule: a row before the marker reads `run_` is not the program's state.
+`.bss` is clear. Every condition set psoxide-test resolves carries `__psx_rt_started eq run_` beside
+its own when the build's map has the symbol (`journey::with_started`): every journey step
+(`journey::plan`, the `[cross]` smokes), `[[speed]]` window ends and anchors, `[[load]]` `from` (a
+non-empty one; an empty `from` is power-on) and `until`, and `[cross]` boot `until`. So no sample taken
+before the start can satisfy one. A run whose maps give the marker two addresses (two program maps
+listed for one run) is refused with the maps named: list the map of the program the run checks.
+
+Not covered here: `[journeys]` handed to the PSoXide emulator's `psoxide-gate` (its own runner; the
+change it needs is an emulator-repo item), and any tool of a game that reads a route log or RAM itself
+(a tape anchor, a replay cue): each applies the same rule, a row before the marker reads `run_` is not
+the program's state. Until psoxide-gate has it, a journey adds the condition by hand: first step
+`wait_until = { kind = "ram", sym = "__psx_rt_started", op = "eq", value = 0x5F6E7572 }`.
+
+A program that starts through another runtime (the psyq layer of 360X and QD Up) has the rule only if
+it defines the same marker: a `u32` named `__psx_rt_started`, `#[no_mangle]`, in `.data` (never
+`.bss`), stored as 0x5F657270 and written 0x5F6E7572 right after its own `.bss` clear, before anything
+else runs. Without it psoxide-test cannot tell its tick-0 rows from its own state.
 
 ## Reading the verdict
 

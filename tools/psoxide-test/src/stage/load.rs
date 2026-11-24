@@ -117,8 +117,15 @@ fn measure(ctx: &Ctx<'_>, l: &Load, frontend: &Path) -> Result<(LoadBase, bool),
             .map(|t| crate::journey::condition(t, &symbols))
             .collect()
     };
+    // Neither end counts before the program has started (an empty `from` is power-on, and
+    // stays so).
     let from = resolve(&l.from)?;
-    let until = resolve(&l.until)?;
+    let from = if from.is_empty() {
+        from
+    } else {
+        crate::journey::with_started(from, &symbols)?
+    };
+    let until = crate::journey::with_started(resolve(&l.until)?, &symbols)?;
     let disc = build.cue(&ctx.repo);
     let disc_digest = ctx
         .artifacts
