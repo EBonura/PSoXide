@@ -230,7 +230,11 @@ fn a_tail_is_the_world_packs_first_sectors_loaded_and_checked_with_the_overlay()
     let world = disc.find_file(WORLD_PACK_FILE_NAME).unwrap();
     let row = pressed.images[4];
     assert_eq!(row.lba, world.lba - 4);
-    assert_eq!(row.size, 5 * SECTOR_BYTES as u32, "the overlay's own sectors and the tail");
+    assert_eq!(
+        row.size,
+        5 * SECTOR_BYTES as u32,
+        "the overlay's own sectors and the tail"
+    );
     // The checksum is the core's over everything it reads: the overlay, then the pack's header.
     let mut read = Vec::new();
     for lba in row.lba..row.lba + 5 {
@@ -347,7 +351,11 @@ fn an_overlay_may_load_from_its_owners_stored_core_on() {
         press(exe(BASE, BASE, 0, &with_core(3_000, &core)), &plan, false)
     };
     let (_, pressed) = at(BASE + 3_000).unwrap();
-    assert_eq!(pressed.images[0].size, 2 * SECTOR_BYTES as u32, "the switch still loads both");
+    assert_eq!(
+        pressed.images[0].size,
+        2 * SECTOR_BYTES as u32,
+        "the switch still loads both"
+    );
     assert_eq!(pressed.images[1].evicts, 1 << 1, "the owner stays loaded");
     assert_eq!(
         at(BASE + 2_996).err().unwrap(),
@@ -813,4 +821,131 @@ fn the_table_costs_the_boot_exe_one_sector_of_room() {
     // The same exe still fits the plain layout, which starts it at 22.
     let mut builder = IsoBuilder::new();
     crate::add_playtest_files(&mut builder, too_big, None, None, Some(100)).unwrap();
+}
+
+/// A program whose exe holds its front end at the overlays' address: the front end carried (row
+/// word 5), a swap overlay over it that evicts the front end and never its owner.
+#[test]
+fn a_program_carries_the_overlays_its_exe_holds() {
+    // The front end as built: not whole sectors; its link pads it to the sector in the exe.
+    let mut front = payload(1, 9);
+    front.extend_from_slice(&[0x5a; 500]);
+    let mission = payload(2, 7);
+    // The exe: 4 sectors of code at BASE, the front end right after (zeros to its sector edge),
+    // then a sector of other data.
+    let mut body = payload(4, 1);
+    body.extend_from_slice(&front);
+    body.resize(6 * SECTOR_BYTES, 0);
+    body.extend_from_slice(&payload(1, 4));
+    let at = BASE + 4 * SECTOR_BYTES as u32;
+    let mut plan = boot_plan();
+    plan.images[0].reserve = Some(Span {
+        start: at,
+        end: at + 3 * SECTOR_BYTES as u32,
+    });
+    plan.images[0].carries = vec!["FRONT.OVL".into()];
+    plan.images.extend([
+        ImageSpec::overlay("FRONT.OVL", front.clone(), BOOT_EXE_NAME, at, Class::Swap),
+        ImageSpec::overlay("MISSION.OVL", mission, BOOT_EXE_NAME, at, Class::Swap),
+    ]);
+    let boot = exe(BASE, BASE, 0, &body);
+    let (_, pressed) = press(boot.clone(), &plan, false).unwrap();
+    let rows = &pressed.images;
+    assert_eq!(rows[0].evicts, 1 << 1, "the program carries FRONT");
+    assert_eq!(rows[1].evicts, 1 << 2);
+    assert_eq!(
+        rows[2].evicts,
+        1 << 1,
+        "MISSION evicts FRONT, never its owner"
+    );
+
+    // Without `carries` the owner's payload over its overlays is an overlap, as before.
+    let mut plain = plan.clone();
+    plain.images[0].carries.clear();
+    assert!(matches!(
+        press(boot.clone(), &plain, false),
+        Err(SceneDiscError::Overlap { .. })
+    ));
+    // MISSION reaching past FRONT into the program's other data is an overlap too: carrying
+    // FRONT exempts only FRONT's range.
+    let mut wide = plan.clone();
+    wide.images[2].file = Some(payload(4, 7));
+    wide.images[0].reserve = Some(Span {
+        start: at,
+        end: at + 4 * SECTOR_BYTES as u32,
+    });
+    assert!(matches!(
+        press(boot.clone(), &wide, false),
+        Err(SceneDiscError::Overlap { .. })
+    ));
+    let refused = |plan: &ScenePlan| press(boot.clone(), plan, false).err().unwrap();
+    let carried = |overlay: &str| SceneDiscError::Carried {
+        program: BOOT_EXE_NAME.into(),
+        overlay: overlay.into(),
+    };
+    // Bytes the exe does not hold, data in what would be the front end's padding (a reload from
+    // the disc would write zeros over it), a volatile overlay.
+    let mut wrong = plan.clone();
+    wrong.images[0].carries = vec!["MISSION.OVL".into()];
+    assert_eq!(refused(&wrong), carried("MISSION.OVL"));
+    let mut packed = body.clone();
+    packed[4 * SECTOR_BYTES + front.len()] = 1;
+    assert_eq!(
+        press(exe(BASE, BASE, 0, &packed), &plan, false)
+            .err()
+            .unwrap(),
+        carried("FRONT.OVL")
+    );
+    let mut volatile = plan.clone();
+    volatile.images[1].class = Some(Class::Volatile);
+    assert_eq!(refused(&volatile), carried("FRONT.OVL"));
+}
+
+#[test]
+fn an_image_placed_before_a_further_file_ends_where_it_starts_and_may_carry_its_head() {
+    let mut plan = overlay_plan();
+    plan.images[4].placement = Placement::Before("GAME.DAT".into()); // SWAPB.OVL, 4 sectors
+    plan.images[4].tail = 1;
+    let game = payload(3, 11);
+    let extra = vec![
+        (String::from("OTHER.DAT"), payload(1, 2)),
+        (String::from("GAME.DAT"), game.clone()),
+    ];
+    let mut builder = IsoBuilder::new();
+    let pressed =
+        add_scene_disc_files_with(&mut builder, small_exe(), None, None, None, &plan, &extra)
+            .unwrap();
+    let disc = Disc::from_bin(builder.build_bin());
+    let file = disc.find_file("GAME.DAT").unwrap();
+    let row = pressed.images[4];
+    assert_eq!(row.lba, file.lba - 4, "right before the file");
+    assert_eq!(disc.find_file("OTHER.DAT").unwrap().lba + 1, row.lba);
+    assert_eq!(row.size, 5 * SECTOR_BYTES as u32);
+    let mut read = payload(4, 5);
+    read.extend_from_slice(&game[..SECTOR_BYTES]);
+    assert_eq!(row.checksum, psx_pack::WordFnv32::of(&words(&read)));
+    // A file that is not there, and a name taken twice, are refused.
+    let mut builder = IsoBuilder::new();
+    assert_eq!(
+        add_scene_disc_files_with(
+            &mut builder,
+            small_exe(),
+            None,
+            None,
+            None,
+            &plan,
+            &extra[..1]
+        )
+        .err()
+        .unwrap(),
+        SceneDiscError::Unknown("GAME.DAT".into())
+    );
+    let mut builder = IsoBuilder::new();
+    let twice = vec![(String::from("SWAPB.OVL"), payload(1, 2))];
+    assert_eq!(
+        add_scene_disc_files_with(&mut builder, small_exe(), None, None, None, &plan, &twice)
+            .err()
+            .unwrap(),
+        SceneDiscError::DuplicateName("SWAPB.OVL".into())
+    );
 }

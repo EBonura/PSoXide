@@ -41,8 +41,12 @@
 //!   the other images whose ranges intersect its own, plus its own bit for
 //!   a VOLATILE Overlay (one over memory its owner also uses: never kept, so
 //!   read again at every load);
-//! - an image with a tail is the Overlay whose file ends where `WORLD.PAK`
-//!   starts, with nothing between them; its row's size and checksum cover the
+//! - a Program's carried Overlays (`carries`, its row's word 5) are its own,
+//!   not VOLATILE, and its payload holds each byte for byte with its sector
+//!   padding; its Overlays may lie over those ranges of it and no other;
+//! - an image placed before a further file (`add_scene_disc_files_with`) goes
+//!   right before it; an image with a tail is the Overlay whose file ends where
+//!   the next file (`WORLD.PAK` or that one) starts, with nothing between them; its row's size and checksum cover the
 //!   tail, so the reserve and overlap rules above count it too;
 //! - `I <= 32` and `S + I <= 62`.
 //!
@@ -102,6 +106,11 @@ pub struct ImageSpec {
     /// Program: names of the scenes it can switch to, for its compact table copy (the scenes
     /// entering it and its Overlays' are always in). `None` reaches every scene.
     pub reaches: Option<Vec<String>>,
+    /// Program: its own Overlays its exe already holds at their load addresses, byte for byte
+    /// (a front end linked into the program). Their bits go into its row's word 5, so the core
+    /// counts them as loaded whenever the program is entered; their range may then lie inside
+    /// the program's payload. None may be VOLATILE ([`SceneDiscError::Carried`] otherwise).
+    pub carries: Vec<String>,
     /// Overlay: the owning Program's image name.
     pub owner: Option<String>,
     /// Overlay: its load address.
@@ -110,17 +119,18 @@ pub struct ImageSpec {
     pub class: Option<Class>,
     /// Where its file goes on the disc.
     pub placement: Placement,
-    /// Overlay: sectors of `WORLD.PAK`'s start its row also loads, in the same read, right after
+    /// Overlay: the first sectors of the file it is placed before (`WORLD.PAK`, or a further file)
+    /// that its row also loads, in the same read, right after
     /// its own sector-padded bytes (a title menu and the pack header its owner reads next). Its
     /// size and checksum cover them, so the core checks them with the overlay and its owner takes
     /// them from RAM (`psx_core::link::image_tail`) instead of reading them after a stop. Only the
-    /// [`Placement::BeforeWorld`] image that ends at the pack, on a disc with `WORLD.PAK` and no
-    /// `CDTEST.BIN`; the owner's reserve holds them ([`SceneDiscError::Tail`] otherwise).
+    /// image that ends where that file starts, with nothing between (no `CDTEST.BIN` before
+    /// `WORLD.PAK`); the owner's reserve holds them ([`SceneDiscError::Tail`] otherwise).
     pub tail: u32,
 }
 
 /// Where an image's file goes on a scene disc.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Placement {
     /// In image order: contiguous with the boot exe while it fits the boot area, else after the
     /// packs.
@@ -131,6 +141,11 @@ pub enum Placement {
     /// short hop, not two long seeks (Half-Life's title menu overlay, read before the menu art).
     /// Images placed so keep their image order among themselves; the boot area must hold them.
     BeforeWorld,
+    /// Right before the further root file of this name (`add_scene_disc_files_with`, mkisopsx's
+    /// `--file`): for an image whose owner reads that file next (360X's front end before its
+    /// game data). Images placed before one file keep their image order; the last one ends where
+    /// the file starts.
+    Before(String),
 }
 
 impl ImageSpec {
@@ -143,6 +158,7 @@ impl ImageSpec {
             core_hash: None,
             reserve: None,
             reaches: None,
+            carries: Vec::new(),
             owner: None,
             load_addr: 0,
             class: None,
@@ -300,8 +316,9 @@ pub enum SceneDiscError {
     /// An image placed before `WORLD.PAK` ([`Placement::BeforeWorld`]) does not fit what the
     /// boot area has left after the boot exe.
     BeforeWorld(String),
-    /// An image has a tail ([`ImageSpec::tail`]) but is not the Overlay whose file ends where
-    /// `WORLD.PAK` starts, or the disc has no `WORLD.PAK` that long, or `CDTEST.BIN` lies between.
+    /// An image has a tail ([`ImageSpec::tail`]) but is not the Overlay whose file ends where the
+    /// next file (`WORLD.PAK` or a [`Placement::Before`] file) starts, that file is shorter than
+    /// the tail, or `CDTEST.BIN` lies between the image and `WORLD.PAK`.
     Tail(String),
     /// An Overlay loads outside its owner's reserved RAM.
     OutsideReserve {
@@ -329,6 +346,14 @@ pub enum SceneDiscError {
     /// A scene's entry is missing, given for a START scene, outside its image's load range, or
     /// START is set on an Overlay scene.
     Entry(String),
+    /// A Program's `carries` names an image that is not one of its own Overlays, a VOLATILE one,
+    /// or one whose bytes its payload does not hold at the overlay's load address.
+    Carried {
+        /// The Program.
+        program: String,
+        /// The Overlay it says it carries.
+        overlay: String,
+    },
     /// The table writer refused.
     Table(TableError),
 }
@@ -453,11 +478,34 @@ fn check_name(name: &str, seen: &mut Vec<String>) -> Result<(), SceneDiscError> 
 /// build rules; the table is written into its sector last.
 pub fn add_scene_disc_files(
     builder: &mut IsoBuilder,
+    exe_bytes: Vec<u8>,
+    world_pack: Option<Vec<u8>>,
+    ui_pack: Option<Vec<u8>>,
+    cdtest_sectors: Option<usize>,
+    plan: &ScenePlan,
+) -> Result<SceneDisc, SceneDiscError> {
+    add_scene_disc_files_with(
+        builder,
+        exe_bytes,
+        world_pack,
+        ui_pack,
+        cdtest_sectors,
+        plan,
+        &[],
+    )
+}
+
+/// [`add_scene_disc_files`] with further root files (`name`, bytes) after everything else, in
+/// order (mkisopsx's `--file`): an image placed [`Placement::Before`] one of them goes right
+/// before it.
+pub fn add_scene_disc_files_with(
+    builder: &mut IsoBuilder,
     mut exe_bytes: Vec<u8>,
     world_pack: Option<Vec<u8>>,
     ui_pack: Option<Vec<u8>>,
     cdtest_sectors: Option<usize>,
     plan: &ScenePlan,
+    extra_files: &[(String, Vec<u8>)],
 ) -> Result<SceneDisc, SceneDiscError> {
     let (images, scenes) = (&plan.images, &plan.scenes);
     let rows_ok = (1..=MAX_IMAGES).contains(&images.len())
@@ -479,6 +527,9 @@ pub fn add_scene_disc_files(
     let mut seen: Vec<String> = RESERVED_NAMES.iter().map(|&n| n.into()).collect();
     for image in images {
         check_name(&image.name, &mut seen)?;
+    }
+    for (name, _) in extra_files {
+        check_name(name, &mut seen)?;
     }
     let mut seen = Vec::new();
     for scene in scenes {
@@ -558,27 +609,48 @@ pub fn add_scene_disc_files(
         }
         room -= sectors;
     }
-    // A tail is WORLD.PAK's first sectors, read on from the image that ends where the pack
-    // starts: only that image may have one, and only with nothing between it and the pack.
-    let mut world_head = Vec::new();
+    // Images placed right before a further file, in image order: each file's list.
+    let before_file = |name: &str| -> Vec<usize> {
+        (1..images.len())
+            .filter(|&index| matches!(&images[index].placement, Placement::Before(n) if n == name))
+            .collect()
+    };
+    for image in images {
+        if let Placement::Before(name) = &image.placement {
+            if !extra_files.iter().any(|(n, _)| n == name) {
+                return Err(SceneDiscError::Unknown(name.clone()));
+            }
+        }
+    }
+    // A tail is the first sectors of the file an image is placed right before, read on from
+    // that image: only the image that ends where the file starts may have one, with nothing
+    // between them (no CDTEST.BIN before WORLD.PAK).
+    let mut tails: Vec<Vec<u8>> = vec![Vec::new(); images.len()];
     for (index, image) in images.iter().enumerate() {
         if image.tail == 0 {
             continue;
         }
         let bytes = image.tail as usize * SECTOR_BYTES;
-        let adjacent = image.kind == Kind::Overlay
-            && before_world.last() == Some(&index)
-            && cdtest_sectors.is_none();
-        match &world_pack {
-            Some(world) if adjacent && world.len() >= bytes => {
-                world_head = world[..bytes].to_vec();
+        let next: Option<&[u8]> = match &image.placement {
+            Placement::BeforeWorld if before_world.last() == Some(&index) => {
+                world_pack.as_deref().filter(|_| cdtest_sectors.is_none())
+            }
+            Placement::Before(name) if before_file(name).last() == Some(&index) => extra_files
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, file)| file.as_slice()),
+            _ => None,
+        };
+        match next {
+            Some(file) if image.kind == Kind::Overlay && file.len() >= bytes => {
+                tails[index] = file[..bytes].to_vec();
             }
             _ => return Err(SceneDiscError::Tail(image.name.clone())),
         }
     }
     let mut later = Vec::new();
     for index in 1..images.len() {
-        if images[index].placement == Placement::BeforeWorld {
+        if images[index].placement != Placement::InOrder {
             continue;
         }
         let sectors = sectors_of(files[index].len());
@@ -604,6 +676,12 @@ pub fn add_scene_disc_files(
     }
     for index in later {
         builder.add_file(&images[index].name, files[index].clone());
+    }
+    for (name, bytes) in extra_files {
+        for index in before_file(name) {
+            builder.add_file(&images[index].name, files[index].clone());
+        }
+        builder.add_file(name, bytes.clone());
     }
     let extents = builder.file_extents();
     let lba_of = |name: &str| {
@@ -669,9 +747,7 @@ pub fn add_scene_disc_files(
             })?;
         // The tail, if any, is loaded and checked with the overlay's own bytes.
         let mut loaded = files[index].clone();
-        if image.tail != 0 {
-            loaded.extend_from_slice(&world_head);
-        }
+        loaded.extend_from_slice(&tails[index]);
         let size = loaded.len() as u32;
         let span = Span {
             start: image.load_addr,
@@ -713,12 +789,73 @@ pub fn add_scene_disc_files(
         })
         .collect();
 
+    // Carried overlays: a Program's row word 5 lists its own Overlays its exe already holds at
+    // their load addresses, byte for byte, sector padding included: a reload from the disc writes
+    // the padding too, so the payload may hold nothing else there.
+    let mut carried_spans: Vec<Vec<Span>> = vec![Vec::new(); images.len()];
+    let mut word5 = vec![0u32; images.len()];
+    for (index, image) in images.iter().enumerate() {
+        for name in &image.carries {
+            let bad = || SceneDiscError::Carried {
+                program: image.name.clone(),
+                overlay: name.clone(),
+            };
+            let o = index_of(name)? as usize;
+            let (program, overlay) = (&rows[index], &rows[o]);
+            if image.kind != Kind::Program
+                || overlay.kind != Kind::Overlay
+                || overlay.owner as usize != index
+                || overlay.class == Some(Class::Volatile)
+                || images[o].tail != 0
+            {
+                return Err(bad());
+            }
+            let own = &files[o];
+            let exe = Exe::parse(&files[index]).map_err(|_| bad())?;
+            let at = overlay.load_addr.wrapping_sub(program.load_addr) as usize;
+            let holds = overlay.load_addr >= program.load_addr
+                && at + own.len() <= program.size as usize
+                && exe.payload[at..at + own.len()] == *own;
+            if !holds {
+                return Err(bad());
+            }
+            word5[index] |= 1 << o;
+            carried_spans[index].push(Span {
+                start: overlay.load_addr,
+                end: overlay.load_addr + own.len() as u32,
+            });
+        }
+    }
+    for (row, word) in rows.iter_mut().zip(word5) {
+        row.evicts |= word;
+    }
+    // Where an Overlay may lie over its owner: only over the overlays the owner carries.
+    let over_carried = |program: usize, overlay: Span| {
+        let span = spans[program];
+        let mut from = overlay.start.max(span.start);
+        let to = overlay.end.min(span.end);
+        while from < to {
+            match carried_spans[program]
+                .iter()
+                .find(|c| c.start <= from && from < c.end)
+            {
+                Some(c) => from = c.end,
+                None => return false,
+            }
+        }
+        true
+    };
+
     // Co-resident images never overlap: an Overlay and its owner, two RESIDENT_SETs of one owner.
     for (i, a) in rows.iter().enumerate() {
         for (j, b) in rows.iter().enumerate().skip(i + 1) {
             let co_resident = match (a.kind, b.kind) {
-                (Kind::Program, Kind::Overlay) => b.owner as usize == i,
-                (Kind::Overlay, Kind::Program) => a.owner as usize == j,
+                (Kind::Program, Kind::Overlay) => {
+                    b.owner as usize == i && !over_carried(i, spans[j])
+                }
+                (Kind::Overlay, Kind::Program) => {
+                    a.owner as usize == j && !over_carried(j, spans[i])
+                }
                 (Kind::Overlay, Kind::Overlay) => {
                     a.owner == b.owner
                         && a.class == Some(Class::ResidentSet)
@@ -744,8 +881,10 @@ pub fn add_scene_disc_files(
             } else {
                 0
             };
+            // Never its owner: it may lie over the owner only where the owner carries overlays.
+            let owner = row.owner as usize;
             row.evicts = (0..spans.len())
-                .filter(|&j| j != i && overlaps(spans[i], spans[j]))
+                .filter(|&j| j != i && j != owner && overlaps(spans[i], spans[j]))
                 .fold(own, |mask, j| mask | 1 << j);
         }
     }

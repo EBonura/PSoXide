@@ -25,7 +25,7 @@
 //! `psx-iso::iso9660` so it's reusable from build scripts, test
 //! harnesses, or a future GUI bundler.
 
-use psx_iso::scenes::{add_scene_disc_files, ScenePlan};
+use psx_iso::scenes::{add_scene_disc_files_with, ScenePlan};
 use psx_iso::{add_playtest_files, build_world_pack, Exe, IsoBuilder};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -317,9 +317,10 @@ fn print_usage() {
                          while they fit the boot area, the rest after the\n\
                          packs. Manifest lines:\n\
                            program NAME file|- [core-hash=H] [reserve=LO-HI]\n\
-                                   [reaches=SCENE,...]\n\
+                                   [reaches=SCENE,...] [carries=OVL,...]\n\
                            overlay NAME file owner=PROG load=ADDR\n\
-                                   [class=resident|swap]\n\
+                                   [class=resident|swap|volatile]\n\
+                                   [place=before-world|before:FILE] [tail=N]\n\
                            scene NAME IMAGE start|entry=ADDR [credit=N]\n\
                                  [show-credit] [block=N]\n\
                          Image 0 is `program PSX.EXE -` (the --exe); each\n\
@@ -435,6 +436,24 @@ fn main() -> ExitCode {
     // from the cooked *_PACK_START_LBA values.
     // With --scenes the same layout gains SCENES.TBL ahead of the boot exe
     // and the manifest's slots; without it nothing about the disc changes.
+    // --file inputs, read first: a scene disc may place an image right before one of them.
+    let mut extra_files: Vec<(String, Vec<u8>)> = Vec::with_capacity(args.files.len());
+    for path in &args.files {
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_ascii_uppercase(),
+            None => {
+                eprintln!("--file {}: no usable file name", path.display());
+                return ExitCode::from(2);
+            }
+        };
+        match fs::read(path) {
+            Ok(bytes) => extra_files.push((name, bytes)),
+            Err(e) => {
+                eprintln!("read {}: {e}", path.display());
+                return ExitCode::from(1);
+            }
+        }
+    }
     if let Some(manifest) = &args.scenes {
         let plan = match read_scene_plan(manifest, args.core_image.as_deref()) {
             Ok(plan) => plan,
@@ -443,13 +462,14 @@ fn main() -> ExitCode {
                 return ExitCode::from(1);
             }
         };
-        match add_scene_disc_files(
+        match add_scene_disc_files_with(
             &mut builder,
             exe_bytes,
             world_pack,
             ui_pack,
             args.cdtest_sectors,
             &plan,
+            &extra_files,
         ) {
             Ok(pressed) => {
                 println!(
@@ -516,22 +536,10 @@ fn main() -> ExitCode {
         return ExitCode::from(1);
     }
 
-    for path in &args.files {
-        let name = match path.file_name().and_then(|n| n.to_str()) {
-            Some(n) => n.to_ascii_uppercase(),
-            None => {
-                eprintln!("--file {}: no usable file name", path.display());
-                return ExitCode::from(2);
-            }
-        };
-        match fs::read(path) {
-            Ok(bytes) => {
-                builder.add_file(&name, bytes);
-            }
-            Err(e) => {
-                eprintln!("read {}: {e}", path.display());
-                return ExitCode::from(1);
-            }
+    // A scene disc placed them already.
+    if args.scenes.is_none() {
+        for (name, bytes) in extra_files {
+            builder.add_file(&name, bytes);
         }
     }
 
