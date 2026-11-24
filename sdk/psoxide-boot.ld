@@ -5,9 +5,9 @@
  * which does the same); see psoxide.ld.
  *
  * Code and data a program needs only once, at boot, before its heap fills (the boot splash, the
- * film player, anything it puts in a `.boot_only` section) run from memory the program reuses
- * afterwards: by default the start of the heap (BOOT_VMA = __bss_end, rounded up to 16), so the
- * program's first heap blocks lie over them. In the EXE file they follow .data (the scene core's
+ * film player, anything it puts in a `.text.boot_only.*` section) run from memory the program
+ * reuses afterwards: by default the start of the heap (BOOT_VMA = __bss_end, rounded up to 16),
+ * so the program's first heap blocks lie over them. In the EXE file they follow .data (the core's
  * stored image follows them), where .bss will be. psx-rt's `__boot_entry` moves them up before
  * `_start` clears .bss, zeroes `.boot_bss` and flushes the I-cache over them. The program must be
  * done with them before anything writes over their run range (its first heap allocation, with
@@ -22,7 +22,7 @@
  * above it), and a BOOT_RUN_END past __heap_end.
  *
  * Programs add their own sections with a further script that names the same output section,
- * or place them in `.boot_only`.
+ * or place them in `.text.boot_only.*` (data: `.rodata.boot_only.*`, `.data.boot_only.*`).
  */
 /* psoxide.ld (its header's PC, or `__core_next` for psoxide-core.ld) reads `__boot_initial`; a
    program without this script never references `__boot_entry` (ld.lld keeps what a script
@@ -33,7 +33,7 @@ BOOT_RUN_END = DEFINED(BOOT_RUN_END_OVERRIDE) ? BOOT_RUN_END_OVERRIDE : __heap_e
 BOOT_LMA = DEFINED(BOOT_LMA_OVERRIDE) ? BOOT_LMA_OVERRIDE : __data_end;
 SECTIONS {
     /* What resident code may refer to while it boots (before its heap reaches this memory):
-       - entry points: the program's own `.boot_only` sections and the boot crates' public calls
+       - entry points: the program's own `.text.boot_only.*` code and the boot crates' public calls
          (psx-splash's `show` and `show_with_partner`, psx-fmv's `player::play`,
          `find_root_file`, `memory_words`), each placed by its own crate;
        - the boot crates' statics (psx-splash's font and mark, psx-fmv's tables and its reader,
@@ -45,7 +45,7 @@ SECTIONS {
        as what they are and a program without this script keeps them in .text and .data. */
     .boot BOOT_VMA : AT(BOOT_LMA) {
         __boot_start = .;
-        *(.boot_only .boot_only.* .text.boot_only.* .rodata.boot_only.* .data.boot_only.*)
+        *(.text.boot_only.* .rodata.boot_only.* .data.boot_only.*)
         . = ALIGN(4);
     } > RELOCATED
     /* Boot-only code only boot code calls: psx-splash's and psx-fmv's own functions, placed by
@@ -54,7 +54,7 @@ SECTIONS {
        NOCROSSREFS_TO below fails the link if it does. Right after .boot in RAM and in the file
        (named: the region's own count is past the core's window when the program has one). */
     .boot_inner ADDR(.boot) + SIZEOF(.boot) : AT(LOADADDR(.boot) + SIZEOF(.boot)) {
-        *(.boot_inner .boot_inner.* .text.boot_inner.* .rodata.boot_inner.*)
+        *(.text.boot_inner.* .rodata.boot_inner.*)
         . = ALIGN(4);
         __boot_load_end = .;
     } > RELOCATED
@@ -66,6 +66,11 @@ SECTIONS {
         . = ALIGN(4);
         __boot_end = .;
     } > RELOCATED
+    /* Boot-only sections without a `.text.`, `.rodata.`, `.data.` or `.bss.` prefix: the hazard
+       tools would not know code from data in them (code there is never patched), and ld.lld
+       would place a misspelt one as an orphan without a word. Nothing may land here (asserted
+       below): name boot-only code `.text.boot_only.*` or `.text.boot_inner.*`. */
+    .boot_unprefixed : { *(.boot_only .boot_only.* .boot_inner .boot_inner.*) } > RELOCATED
     __boot_lma = LOADADDR(.boot);
     __boot_lma_end = __boot_lma + SIZEOF(.boot) + SIZEOF(.boot_inner);
 }
@@ -85,3 +90,4 @@ ASSERT(__boot_start % 4 == 0 && __boot_lma % 4 == 0, ".boot's run and load addre
 /* Resident code and data never refer to boot-only code that is not an entry point: once the heap
    has the memory, it is gone. ld.lld fails the link on any such reference. */
 NOCROSSREFS_TO(.boot_inner .text .data)
+ASSERT(SIZEOF(.boot_unprefixed) == 0, "a boot-only section without a .text./.rodata./.data. prefix (`.boot_only.x`): name code `.text.boot_only.x` so the hazard tools patch it")

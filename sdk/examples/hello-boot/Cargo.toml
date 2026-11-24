@@ -21,6 +21,9 @@ lto = true
 # the link must fail (psoxide-boot.ld's cross-reference check). For the build script's
 # negative test only.
 cross-ref = []
+# Boot-only code in a section without the `.text.` prefix: the link must fail (psoxide-boot.ld). For
+# the build script's negative test only.
+unprefixed = []
 
 [dependencies]
 psx-core    = { path = "../../crates/psx-core", features = ["link"] }

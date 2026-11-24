@@ -74,6 +74,15 @@ fn inner(x: u32) -> u32 {
     core::hint::black_box(x) ^ 0x5a5a
 }
 
+/// Boot-only code in a section the hazard tools would not read as code: with feature
+/// `unprefixed`, the link must refuse it.
+#[cfg(feature = "unprefixed")]
+#[inline(never)]
+#[link_section = ".boot_only.hello_boot.unprefixed"]
+fn unprefixed(x: u32) -> u32 {
+    core::hint::black_box(x) ^ 0xa5a5
+}
+
 #[no_mangle]
 fn main() {
     tty::println("hello-boot: main");
@@ -108,6 +117,8 @@ fn main() {
     film();
     #[cfg(feature = "cross-ref")]
     tty::print_hex_u32(inner(core::hint::black_box(1)));
+    #[cfg(feature = "unprefixed")]
+    tty::print_hex_u32(unprefixed(core::hint::black_box(1)));
     // What the heap does to `.boot` from here on: every word of it overwritten, with a word that
     // is no instruction (a reserved-instruction fault if anything still runs from there).
     let (start, end) = unsafe {
