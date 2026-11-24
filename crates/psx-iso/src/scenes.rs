@@ -837,6 +837,24 @@ pub fn add_scene_disc_files_with(
             Kind::Overlay => row.span(),
         })
         .collect();
+    // A program whose overlays run over a host buffer (psoxide-overlay.ld) has the host at
+    // `__data_end`, over its boot-only store and its stored core, both consumed before `_start`
+    // (the core's boot copies its image to the window, the mover copies `.boot` to its run
+    // range). What it still uses once it runs then ends where its first such overlay starts;
+    // the link refuses an overlay below `__data_end`, which the exe alone does not show.
+    let mut spans = spans;
+    for row in &rows {
+        if row.kind != Kind::Overlay {
+            continue;
+        }
+        let owner = row.owner as usize;
+        let start = row.load_addr;
+        if let Some(span) = spans.get_mut(owner) {
+            if rows[owner].kind == Kind::Program && span.start < start && start < span.end {
+                span.end = start;
+            }
+        }
+    }
 
     // Carried overlays: a Program's row word 5 lists its own Overlays its exe already holds at
     // their load addresses, byte for byte, sector padding included: a reload from the disc writes

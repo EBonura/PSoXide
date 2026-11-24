@@ -24,3 +24,7 @@ psx-rt   = { path = "../../crates/psx-rt", features = ["host-tty"] }
 # The overlay runs over a static host buffer (`.bss.overlay_host`) instead of at OVERLAY_VMA:
 # link with ram-host.ld.
 host = []
+# With `host`: boot-only memory as well (psoxide-boot.ld), the shape of a program with the core,
+# a `.boot` section and a host (Counter-Strike). The host must start at `.data`'s end, over the
+# boot-only store and the stored core, and the link must converge without BOOT_VMA_OVERRIDE.
+boot = ["host"]

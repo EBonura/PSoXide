@@ -66,11 +66,14 @@
  * patching the EXE and all its overlays in one pass (not built).
  */
 SECTIONS {
-    /* Where the overlays run: OVERLAY_VMA, or the host buffer, which starts where the stored bytes
-       a program still needs end (.data, or a boot-only store after it: psoxide.ld's
-       `__psx_core_store_at`), over its stored core; .bss then follows the overlays. */
+    /* Where the overlays run: OVERLAY_VMA, or the host buffer, which starts right after .data, as
+       .bss does in a program without a host: over the boot-only store and the stored core, both
+       consumed before `_start` (the core's boot copies its image to the window, the boot mover
+       copies `.boot` to its run range), so their memory is the host's; .bss then follows the
+       overlays. Nothing here depends on the boot store's end, so a program with the core,
+       boot-only memory and a host links without a cycle (BOOT_VMA follows .bss). */
     __overlay_vma = DEFINED(OVERLAY_VMA) ? OVERLAY_VMA
-                  : ALIGN(__psx_core_store_at, MAX(4, ALIGNOF(.overlay.host)));
+                  : ALIGN(__data_end, MAX(4, ALIGNOF(.overlay.host)));
     /* Every overlay runs there, and so does the host buffer, a member so that ld.lld allows the
        overlap. The load addresses only keep the sections' file bytes apart in the ELF (OVERLAY
        places them one after another): the physical alias of the run address, where nothing else

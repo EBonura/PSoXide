@@ -12,7 +12,8 @@
 # before WORLD.PAK, header read after the overlay) and tail.bin (the same with tail=1: the
 # header comes with the overlay). OUT_DIR/host gets the same files for the host build (feature
 # `host`: the overlay runs over a static buffer in `.bss.overlay_host`) and host.bin (volatile,
-# before WORLD.PAK, tail=1). Every disc but swap ends with `hello-core-overlay: PASS`.
+# before WORLD.PAK, tail=1); OUT_DIR/hostboot the host build with boot-only memory too (feature
+# `boot`, psoxide-boot.ld) and hostboot.bin. Every disc but swap ends with `hello-core-overlay: PASS`.
 set -eu
 OUT="${1:?usage: build.sh OUT_DIR}"
 ROOT="$(pwd)"
@@ -34,7 +35,9 @@ build() { # out_dir ram_script [cargo args]
     shift 2
     mkdir -p "$dir"
     # The RAM size (and OVERLAY_VMA), the core, the overlays, then psoxide.ld.
-    link="\"-Clink-arg=-T$ram\",\"-Clink-arg=-T../../psoxide-core.ld\",\"-Clink-arg=-T../../psoxide-overlay.ld\",\"-Clink-arg=-T../../psoxide.ld\""
+    boot=""
+    [ -n "${BOOTLD:-}" ] && boot="\"-Clink-arg=-T../../psoxide-boot.ld\","
+    link="\"-Clink-arg=-T$ram\",\"-Clink-arg=-T../../psoxide-core.ld\",$boot\"-Clink-arg=-T../../psoxide-overlay.ld\",\"-Clink-arg=-T../../psoxide.ld\""
     # Cargo does not see the linker scripts change: relink every time.
     touch "$CRATE/src/main.rs"
     "$HOST_BIN/psoxide-pgo" apply --crate "$CRATE" --profile "$CRATE/pgo.prof" --variant off -- \
@@ -79,6 +82,11 @@ disc "$OUT" tail volatile "place=before-world tail=1"
 # The overlay over a static: no OVERLAY_VMA in ram-host.ld.
 build "$OUT/host" ram-host.ld --features host
 disc "$OUT/host" host volatile "place=before-world tail=1"
+
+# The core, boot-only memory and a host in one program (Counter-Strike's shape): links with no
+# BOOT_VMA_OVERRIDE, the host starts at .data's end over the boot-only store.
+BOOTLD=1 build "$OUT/hostboot" ram-host.ld --features boot
+disc "$OUT/hostboot" hostboot volatile "place=before-world tail=1"
 
 # What must not link: OVERLAY_VMA inside .bss (only the host may be overlaid), and a host with
 # OVERLAY_VMA as well. Each ram file sits in the crate (the link scripts are found from there).

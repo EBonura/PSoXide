@@ -35,6 +35,8 @@ extern "C" {
     static __overlay_vma: u32;
     static __overlay_end: u32;
     static __overlay_1_bytes: u32;
+    #[cfg(feature = "boot")]
+    static __boot_lma: u32;
 }
 
 /// The overlay's image index in the scene table (image 0 is this program).
@@ -195,6 +197,62 @@ fn check_host() {
 #[cfg(not(feature = "host"))]
 fn check_host() {}
 
+/// Boot-only data for the `boot` build: 4 KiB stored after `.data`, copied to its run range by
+/// the boot mover, and then under the host buffer.
+#[cfg(feature = "boot")]
+#[link_section = ".rodata.boot_only.hello_core_overlay.BOOT_WORDS"]
+static BOOT_WORDS: [u32; 1024] = {
+    let mut w = [0u32; 1024];
+    let mut i = 0;
+    while i < 1024 {
+        w[i] = 0x9e37_79b9u32.wrapping_mul(i as u32 + 1);
+        i += 1;
+    }
+    w
+};
+
+/// The `boot` build's boot-only code: sums its boot-only data where the mover put it.
+#[cfg(feature = "boot")]
+#[inline(never)]
+#[link_section = ".text.boot_only.hello_core_overlay.boot_sum"]
+fn boot_sum() -> u32 {
+    let mut sum = 0u32;
+    let mut i = 0;
+    while i < 1024 {
+        // SAFETY: a word of the boot-only static, at its run address.
+        sum = sum
+            .wrapping_add(unsafe { core::ptr::read_volatile(core::ptr::addr_of!(BOOT_WORDS[i])) });
+        i += 1;
+    }
+    sum
+}
+
+/// The `boot` build: the boot-only code ran from its run range, and the host starts at or below
+/// the boot-only store (its memory reused, not left under the host).
+#[cfg(feature = "boot")]
+fn check_boot() {
+    let mut want = 0u32;
+    let mut i = 0u32;
+    while i < 1024 {
+        want = want.wrapping_add(0x9e37_79b9u32.wrapping_mul(i + 1));
+        i += 1;
+    }
+    let got = boot_sum();
+    if got != want {
+        fail("boot sum", got);
+    }
+    // Link-time symbols: only their addresses are taken.
+    let vma = core::ptr::addr_of!(__overlay_vma) as u32;
+    let store = core::ptr::addr_of!(__boot_lma) as u32;
+    if vma > store {
+        fail("host above the boot store", vma);
+    }
+    tty::println("hello-core-overlay: boot ran, host over the boot store");
+}
+
+#[cfg(not(feature = "boot"))]
+fn check_boot() {}
+
 #[no_mangle]
 fn main() {
     tty::println("hello-core-overlay: main");
@@ -202,6 +260,7 @@ fn main() {
         fail("window", link::window_hash());
     }
     check_host();
+    check_boot();
     // SAFETY: the one reference to the table, taken once.
     let table = unsafe { &mut *core::ptr::addr_of_mut!(TABLE) };
     let first = load_and_call(table, "first");
