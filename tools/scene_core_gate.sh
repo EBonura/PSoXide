@@ -5,7 +5,8 @@
 #   PSOXIDE_EMULATOR=/path/to/psoxide-emulator sh tools/scene_core_gate.sh fast|full OUT_DIR
 #
 # fast (every commit): host tests, the core image check, every build and its link refusals, every
-# disc on two configurations (real hardware with the retail entry state; MiSTer with OpenBIOS's).
+# disc on three configurations (real hardware with the retail entry state; MiSTer with OpenBIOS's;
+# real hardware with a hostile entry state, which caught an entry-state bug the others did not).
 # full (before landing): the same on four hardware profiles by four entry states, a long soak, and
 # PCSX-Redux with OpenBIOS when PCSX_REDUX names its app's Contents directory.
 #
@@ -96,7 +97,7 @@ done
 "$NEST" "$L" 8 "$D/f-prog.bin" "$D/f-prog-nested.bin" >/dev/null
 # PCSX-Redux runs about ten times slower: its soak is 40 entries (the same discs, a shorter SOAK row).
 sed "s/^scene   SOAK[0-9]*/scene   SOAK40/" "$OUT/mod/soak.scenes" >"$OUT/mod/soak40.scenes"
-"$HOST_BIN/mkisopsx" --exe "$OUT/mod/p.exe" --scenes "$OUT/mod/soak40.scenes" \
+"$HOST_BIN/mkisopsx" --diag --exe "$OUT/mod/p.exe" --scenes "$OUT/mod/soak40.scenes" \
     --core-image sdk/crates/psx-core/prebuilt/psx-core.bin --volume HELLOMOD \
     --world-pack-extra-dir "$OUT/mod/world" --out "$D/soak40.bin" >/dev/null
 "$NEST" "$L" 8 "$D/soak40.bin" "$D/n-soak40.bin" >/dev/null
