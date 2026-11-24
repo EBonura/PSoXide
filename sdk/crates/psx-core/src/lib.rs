@@ -18,6 +18,7 @@
 //! - with feature `link`, the program side: the embedded image, `__core_boot` and the calls.
 #![no_std]
 #![cfg_attr(target_arch = "mips", feature(asm_experimental_arch))]
+#![cfg_attr(feature = "link", feature(optimize_attribute))]
 
 pub mod abi;
 pub mod fatal;

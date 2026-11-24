@@ -97,6 +97,11 @@ pub fn block_valid() -> bool {
 
 /// The Rust half of `__core_boot`. No statics: `.bss` is not cleared yet, and its first bytes
 /// are where the image is stored.
+///
+/// Built for size whatever the program's opt-level: at speed LLVM unrolled the zeroing of the
+/// window's tail completely (one store per word left after the image, 852 B in all against 300 B),
+/// and it runs once per program start.
+#[optimize(size)]
 #[no_mangle]
 #[cfg_attr(target_arch = "mips", link_section = ".text.__core_boot_rs")]
 extern "C" fn __core_boot_rs(a0: u32, a1: u32, a2: u32, a3: u32) {
