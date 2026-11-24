@@ -136,6 +136,26 @@ static mut HAZARD_TRAMPOLINES: [u32; 2 + HAZARD_TRAMPOLINE_WORDS] = {
 #[cfg(feature = "runtime")]
 include!(concat!(env!("OUT_DIR"), "/hazard_trampoline_words.rs"));
 
+/// `__psx_rt_started`'s value before `_start` has cleared `.bss` (`"pre_"`): what the EXE stores,
+/// so RAM holds it from the moment the program is loaded, by a BIOS or by the scene core.
+pub const NOT_STARTED: u32 = 0x5f65_7270;
+/// `__psx_rt_started`'s value once `_start` has cleared `.bss` (`"run_"`).
+pub const STARTED: u32 = 0x5f6e_7572;
+
+/// Whether the program has started, for tools that read RAM from outside (a test harness): until
+/// it is [`STARTED`], `.bss` still holds whatever was there before the program (on a program of
+/// the scene core, the stored `.boot` and core image bytes), so no `.bss` symbol may be read as
+/// the program's state. In `.data` (a non-zero initial value), so the EXE carries
+/// [`NOT_STARTED`].
+#[cfg(all(target_arch = "mips", feature = "runtime"))]
+#[no_mangle]
+#[used]
+#[allow(
+    non_upper_case_globals,
+    reason = "a link symbol harnesses find by this name"
+)]
+pub static mut __psx_rt_started: u32 = NOT_STARTED;
+
 // Symbols emitted by `psoxide.ld`.
 extern "C" {
     static mut __zero_start: u8;
@@ -188,6 +208,9 @@ pub unsafe extern "C" fn _start(a0: u32, a1: u32, a2: u32) -> ! {
         // static's initial value (an overlay is in RAM only after its first load).
         unsafe { core::ptr::write_bytes(bss_start, 0, bss_len) };
     }
+    // From here a harness may read the program's statics (`__psx_rt_started`).
+    // SAFETY: a word of this image's .data, written once before any Rust code reads it.
+    unsafe { (&raw mut __psx_rt_started).write_volatile(STARTED) };
     #[cfg(feature = "boot-trace")]
     tty::println("psx-rt: bss ok");
 

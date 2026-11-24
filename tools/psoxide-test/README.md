@@ -44,6 +44,18 @@ Unknown keys are errors. A tolerance or an exception needs its reason in the fil
 a bar by editing the file, never the baseline). Journeys say `pad` explicitly and wait on game
 state, not on time: open-loop steps are a ratchet in the baseline that only goes down.
 
+## RAM checks count only once the program has started
+
+Until psx-rt's `_start` has cleared `.bss`, a `.bss` symbol holds whatever RAM held before the
+program: on a program of the scene core, the bytes of its stored `.boot` and core image, which the
+EXE puts where `.bss` will be. A check such as `wait_until = { sym = "HITS", op = "ge", value = 1 }`
+read in those first instructions can hold before the program has run a line. psx-rt therefore keeps
+`__psx_rt_started` in `.data`: `"pre_"` (0x5F657270) as the EXE stores it, `"run_"` (0x5F6E7572) once
+`.bss` is clear. Every resolved step of a journey (`journey::plan`) carries the condition
+`__psx_rt_started eq run_` beside its own when the build's map has the symbol, so no sample taken
+before the start can satisfy it. A tool that reads a route log or RAM itself (a tape anchor, a
+counter) applies the same rule: a row before the marker reads `run_` is not the program's state.
+
 ## Reading the verdict
 
 ```

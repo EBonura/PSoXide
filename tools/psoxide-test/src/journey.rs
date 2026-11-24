@@ -459,6 +459,14 @@ pub fn plan(repo: &Path, path: &Path, pad: &str, min_distinct: u32) -> Result<Pl
             timeout,
         });
     }
+    // No condition counts before the program has started: until psx-rt's `_start` has cleared
+    // `.bss`, a `.bss` symbol holds leftover bytes (on the scene core, the stored `.boot` and core
+    // image), and a `ge 1` on one could hold before the program ran a line.
+    if let Some(p) = started_probe(&symbols) {
+        for step in &mut steps {
+            step.probes.push(p.clone());
+        }
+    }
     let budget: u64 = steps.iter().map(|s| s.timeout).sum();
     Ok(Plan {
         name: smoke.name,
@@ -531,6 +539,26 @@ fn resolve(c: &Cond, symbols: &Symbols) -> Result<Probe, String> {
 }
 
 /// Symbol addresses by name, from lld maps and `address name` lists.
+/// psx-rt's `__psx_rt_started` once `_start` has cleared `.bss` (psx-rt `STARTED`, `"run_"`).
+pub const PSX_RT_STARTED: u32 = 0x5f6e_7572;
+
+/// The condition every RAM check of a run carries when the program's map has psx-rt's start marker:
+/// `__psx_rt_started` reads [`PSX_RT_STARTED`]. Before `_start` it reads what the EXE stores
+/// (`"pre_"`), so no sample taken before the program started can satisfy a check.
+#[must_use]
+pub fn started_probe(symbols: &Symbols) -> Option<Probe> {
+    let addr = symbols.resolve("__psx_rt_started").ok()?;
+    Some(Probe {
+        text: "__psx_rt_started eq run_ (the program has started)".into(),
+        addr,
+        size: 4,
+        signed: false,
+        op: "eq".into(),
+        value: i64::from(PSX_RT_STARTED),
+        value_hi: 0,
+    })
+}
+
 #[derive(Default, Debug)]
 pub struct Symbols {
     by_name: BTreeMap<String, Vec<u32>>,
@@ -673,6 +701,47 @@ press = ["down"]
         );
         assert_eq!(info.pad.as_deref(), Some("dualshock"));
         assert_eq!(info.discs, ["build/x.cue"]);
+    }
+
+    #[test]
+    fn no_check_holds_before_the_program_has_started() {
+        // A `.bss` counter under a scene-core program's stored `.boot` reads leftover bytes until
+        // `_start` clears it: `ge 1` holds on them (the Ocarina, Hollow Knight shape).
+        let dir = tempfile::tempdir().unwrap();
+        let syms = write(
+            dir.path(),
+            "syms.txt",
+            "80020000 COUNTER\n80014000 __psx_rt_started\n",
+        );
+        let mut symbols = Symbols::default();
+        symbols.load(&syms).unwrap();
+        let counter = condition(
+            &toml::from_str("kind = \"ram\"\nsym = \"COUNTER\"\nop = \"ge\"\nvalue = 1").unwrap(),
+            &symbols,
+        )
+        .unwrap();
+        let started = started_probe(&symbols).unwrap();
+        let stored_bytes = 0x6e33_3333;
+        assert!(counter.holds(stored_bytes), "the bare check is fooled");
+        assert!(
+            !started.holds(0x5f65_7270),
+            "the EXE's stored marker: not started"
+        );
+        assert!(started.holds(PSX_RT_STARTED));
+        // A plan made from a journey carries the marker on every step.
+        let j = write(
+            dir.path(),
+            "j.toml",
+            &format!(
+                "name = \"j\"\npad = \"dualshock\"\ndisc = \"x.cue\"\nsymbols = \"{}\"\n\
+                 [[step]]\nwait_until = {{ kind = \"ram\", sym = \"COUNTER\", op = \"ge\", value = 1 }}\n\
+                 timeout = 10\n",
+                syms.display()
+            ),
+        );
+        let plan = plan(dir.path(), &j, "dualshock", 1).unwrap();
+        assert_eq!(plan.steps[0].probes.len(), 2);
+        assert_eq!(plan.steps[0].probes[1], started);
     }
 
     #[test]

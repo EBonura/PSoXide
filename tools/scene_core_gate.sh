@@ -94,6 +94,12 @@ EOF
     "$FAULT" "$from" "$D/f-$name.bin" "$lba" $what >/dev/null
 done
 "$NEST" "$L" 8 "$D/f-prog.bin" "$D/f-prog-nested.bin" >/dev/null
+# PCSX-Redux runs about ten times slower: its soak is 40 entries (the same discs, a shorter SOAK row).
+sed "s/^scene   SOAK[0-9]*/scene   SOAK40/" "$OUT/mod/soak.scenes" >"$OUT/mod/soak40.scenes"
+"$HOST_BIN/mkisopsx" --exe "$OUT/mod/p.exe" --scenes "$OUT/mod/soak40.scenes" \
+    --core-image sdk/crates/psx-core/prebuilt/psx-core.bin --volume HELLOMOD \
+    --world-pack-extra-dir "$OUT/mod/world" --out "$D/soak40.bin" >/dev/null
+"$NEST" "$L" 8 "$D/soak40.bin" "$D/n-soak40.bin" >/dev/null
 mark "discs made"
 
 # The runs.
@@ -154,7 +160,7 @@ if [ "$TIER" = full ] && [ -n "${PCSX_REDUX:-}" ]; then
         "L = PCSX.Events.createEventListener('GPU::Vsync', function()" \
         "  n = n + 1; if n >= 7200 then print('SCEND'); PCSX.quit(0) end end)" >"$R/quit.lua"
     for c in "walk|$S/walk.cue|hello-scene: B PASS" "n-member|$D/n-member.cue|hello-modular: PASS" \
-        "n-soak|$D/n-soak.cue|hello-modular: SOAK PASS" "n-film|$D/n-film.cue|hello-boot: PASS" \
+        "n-soak40|$D/n-soak40.cue|hello-modular: SOAK PASS" "n-film|$D/n-film.cue|hello-boot: PASS" \
         "ovl-tail|$O/tail.cue|hello-core-overlay: PASS" "ovl-host|$O/host/host.cue|hello-core-overlay: PASS" \
         "n-volatile-nobit|$D/n-volatile-nobit.cue|hello-core-overlay: FAIL load 00000025"; do
         IFS='|' read -r name disc want <<EOF
