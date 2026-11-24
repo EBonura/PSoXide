@@ -41,7 +41,8 @@
 //! bytes, checked with it: the owner takes that file's first sectors (the pack
 //! header) from RAM with
 //! `psx_core::link::image_tail` instead of reading it after the core's stop;
-//! the reserve must hold them). An overlay's owner needs `reserve=` on its
+//! the reserve must hold them), and `host` for an overlay that runs over its owner's
+//! host buffer (`.bss.overlay_host`, from `.data`'s end). An overlay's owner needs `reserve=` on its
 //! `program` line (mkisopsx refuses with `NoReserve` otherwise).
 //!
 //! A scene line is `scene NAME IMAGE (start | entry=<addr>) [options]`:
@@ -167,7 +168,12 @@ fn overlay<'a>(
     let (mut owner, mut load, mut class) = (None, None, Class::Swap);
     let mut placement = Placement::InOrder;
     let mut tail = 0;
+    let mut hosted = false;
     for option in options {
+        if option == "host" {
+            hosted = true;
+            continue;
+        }
         match option.split_once('=') {
             Some(("owner", v)) => owner = Some(v),
             Some(("load", v)) => load = Some(number::<u32>("load", v)?),
@@ -187,6 +193,7 @@ fn overlay<'a>(
     let mut image = ImageSpec::overlay(name, file, owner, load, class);
     image.placement = placement;
     image.tail = tail;
+    image.hosted = hosted;
     Ok(image)
 }
 

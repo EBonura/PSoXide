@@ -81,12 +81,12 @@ disc "$OUT" tail volatile "place=before-world tail=1"
 
 # The overlay over a static: no OVERLAY_VMA in ram-host.ld.
 build "$OUT/host" ram-host.ld --features host
-disc "$OUT/host" host volatile "place=before-world tail=1"
+disc "$OUT/host" host volatile "place=before-world tail=1 host"
 
 # The core, boot-only memory and a host in one program (Counter-Strike's shape): links with no
 # BOOT_VMA_OVERRIDE, the host starts at .data's end over the boot-only store.
 BOOTLD=1 build "$OUT/hostboot" ram-host.ld --features boot
-disc "$OUT/hostboot" hostboot volatile "place=before-world tail=1"
+disc "$OUT/hostboot" hostboot volatile "place=before-world tail=1 host"
 
 # What must not link: OVERLAY_VMA inside .bss (only the host may be overlaid), and a host with
 # OVERLAY_VMA as well. Each ram file sits in the crate (the link scripts are found from there).

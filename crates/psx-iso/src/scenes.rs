@@ -131,6 +131,11 @@ pub struct ImageSpec {
     /// image that ends where that file starts, with nothing between (no `CDTEST.BIN` before
     /// `WORLD.PAK`); the owner's reserve holds them ([`SceneDiscError::Tail`] otherwise).
     pub tail: u32,
+    /// Overlay: it runs over its owner's host buffer (psoxide-overlay.ld's `.bss.overlay_host`,
+    /// which starts at `.data`'s end, over the owner's boot-only store and stored core). The
+    /// owner's live span then ends at this overlay's load address instead of at its stored core.
+    /// Only a hosted overlay may lie in the owner's stored bytes.
+    pub hosted: bool,
 }
 
 /// Where an image's file goes on a scene disc.
@@ -173,6 +178,7 @@ impl ImageSpec {
             class: None,
             placement: Placement::InOrder,
             tail: 0,
+            hosted: false,
         }
     }
 
@@ -837,14 +843,15 @@ pub fn add_scene_disc_files_with(
             Kind::Overlay => row.span(),
         })
         .collect();
-    // A program whose overlays run over a host buffer (psoxide-overlay.ld) has the host at
-    // `__data_end`, over its boot-only store and its stored core, both consumed before `_start`
-    // (the core's boot copies its image to the window, the mover copies `.boot` to its run
-    // range). What it still uses once it runs then ends where its first such overlay starts;
-    // the link refuses an overlay below `__data_end`, which the exe alone does not show.
+    // A program whose overlays run over a host buffer (psoxide-overlay.ld; the manifest says
+    // `host`) has the host at `__data_end`, over its boot-only store and its stored core, both
+    // consumed before `_start` (the core's boot copies its image to the window, the mover copies
+    // `.boot` to its run range). What it still uses once it runs then ends where its first hosted
+    // overlay starts; the link refuses a host below `__data_end`, which the exe alone does not
+    // show. Every other overlay is still checked against the whole span up to the stored core.
     let mut spans = spans;
-    for row in &rows {
-        if row.kind != Kind::Overlay {
+    for (row, image) in rows.iter().zip(images) {
+        if row.kind != Kind::Overlay || !image.hosted {
             continue;
         }
         let owner = row.owner as usize;
