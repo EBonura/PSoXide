@@ -27,6 +27,7 @@
 use std::io::Write;
 
 pub mod cache_gate;
+pub mod core_stack;
 pub mod detect;
 pub mod dispatch_guard;
 pub mod exe;

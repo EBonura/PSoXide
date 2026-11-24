@@ -19,3 +19,7 @@ path = "src/main.rs"
 [[bin]]
 name = "psx-nest"
 path = "src/bin/psx-nest.rs"
+
+[[bin]]
+name = "psx-fault"
+path = "src/bin/psx-fault.rs"

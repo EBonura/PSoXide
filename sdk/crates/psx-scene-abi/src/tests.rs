@@ -246,6 +246,7 @@ fn sample_scene(id: u16) -> SceneRow {
         entry: 0x8001_2345,
         partner_credit: 0xe1e2,
         min_block_version: 0xd2,
+        needs: 0x0000_0006,
         name: SceneRow::name_bytes("A_SIXTEEN_BYTE_N"),
     }
 }
@@ -346,7 +347,7 @@ fn scene_row_round_trips_at_the_v2_offsets() {
     assert_eq!(le16(&bytes, 0x08), 0xe1e2);
     assert_eq!(bytes[0x0a], 0xd2);
     assert_eq!(bytes[0x0b], 0);
-    assert_eq!(le32(&bytes, 0x0c), 0);
+    assert_eq!(le32(&bytes, 0x0c), 6);
     assert_eq!(&bytes[0x10..0x20], b"A_SIXTEEN_BYTE_N");
     assert_eq!(SceneRow::decode(&bytes), row);
     assert_eq!(row.name_str(), "A_SIXTEEN_BYTE_N");

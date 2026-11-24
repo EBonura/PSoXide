@@ -169,7 +169,7 @@ mod scene {
         use super::*;
 
         /// The program's copy of its scene table (header and rows; 5 scenes and 4 images here).
-        pub static mut TABLE: [u32; 96] = [0; 96];
+        pub static mut TABLE: [u32; 512] = [0; 512];
 
         pub fn table() -> &'static mut [u32] {
             // SAFETY: single-threaded; the core reads it only during the calls it is passed to.
@@ -315,11 +315,13 @@ mod scene {
                     core_::load_image(1, base::table()),
                     code::OK,
                 );
-                // An overlay of another program is not this program's to load.
+                // Another program is not an overlay to load: B, the image scene 4 (BSTART) starts
+                // (row 3 on the walk discs, row 8 on the launcher).
+                let b = base::table()[16 + 8 * 4] >> 16 & 0xff;
                 check(
                     &mut ok,
                     "load-program-image",
-                    core_::load_image(3, base::table()),
+                    core_::load_image(b, base::table()),
                     code::BOUNDS,
                 );
                 2

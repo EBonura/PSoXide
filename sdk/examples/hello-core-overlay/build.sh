@@ -37,7 +37,7 @@ build() { # out_dir ram_script [cargo args]
     # The RAM size (and OVERLAY_VMA), the core, the overlays, then psoxide.ld.
     boot=""
     [ -n "${BOOTLD:-}" ] && boot="\"-Clink-arg=-T../../psoxide-boot.ld\","
-    link="\"-Clink-arg=-T$ram\",\"-Clink-arg=-T../../psoxide-core.ld\",$boot\"-Clink-arg=-T../../psoxide-overlay.ld\",\"-Clink-arg=-T../../psoxide.ld\""
+    link="\"-Clink-arg=-T$ram\",\"-Clink-arg=-T../../psoxide-core.ld\",$boot\"-Clink-arg=-T../../psoxide-overlay.ld\",\"-Clink-arg=-T../../psoxide.ld\",\"-Clink-arg=--orphan-handling=error\""
     # Cargo does not see the linker scripts change: relink every time.
     touch "$CRATE/src/main.rs"
     "$HOST_BIN/psoxide-pgo" apply --crate "$CRATE" --profile "$CRATE/pgo.prof" --variant off -- \

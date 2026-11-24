@@ -446,6 +446,7 @@ fn a_collection_program_row_carries_its_member_base() {
         entry: pc,
         partner_credit: 0,
         min_block_version: 2,
+        needs: 0,
         name: SceneRow::name_bytes("MEMBER"),
     };
     let mut table = vec![0u8; SECTOR_BYTES];
@@ -948,4 +949,91 @@ fn an_image_placed_before_a_further_file_ends_where_it_starts_and_may_carry_its_
             .unwrap(),
         SceneDiscError::DuplicateName("SWAPB.OVL".into())
     );
+}
+
+#[test]
+fn a_scene_needs_overlays_of_its_own_program_that_do_not_overlap() {
+    let boot = exe(BASE, BASE, 0, &payload(8, 1));
+    // SET 0x80100000..+2 sectors, SET2 0x80101000..+1, SWAPA 0x80100800..+1, SWAPB 0x80110000..+4.
+    let with = |scene: SceneSpec| {
+        let mut plan = overlay_plan();
+        plan.scenes.push(scene);
+        plan
+    };
+    let needing = |name: &str, image: &str, needs: &[&str]| {
+        let mut scene = if image == BOOT_EXE_NAME {
+            SceneSpec::at(name, image, BASE + 4)
+        } else {
+            SceneSpec::at(name, image, 0x8011_0000)
+        };
+        scene.needs = needs.iter().map(|n| String::from(*n)).collect();
+        scene
+    };
+    // An in-program scene that needs two overlays which do not meet.
+    let (_, pressed) = press(
+        boot.clone(),
+        &with(needing("PLAY", BOOT_EXE_NAME, &["SET2.OVL", "SWAPB.OVL"])),
+        false,
+    )
+    .unwrap();
+    let play = pressed.scenes[2];
+    assert_eq!(play.needs, 1 << 2 | 1 << 4);
+    assert_eq!(
+        pressed.scenes[0].needs, 0,
+        "a scene without needs= needs nothing"
+    );
+    // The rows round-trip through the table the core reads.
+    let header = decode_header_checked(&pressed.table).unwrap();
+    assert_eq!(
+        table_scene(&pressed.table, &header, 2).unwrap().needs,
+        play.needs
+    );
+    // An overlay scene may need an overlay away from its own range.
+    let (_, pressed) = press(
+        boot.clone(),
+        &with(needing("SWAPPED", "SWAPB.OVL", &["SET2.OVL"])),
+        false,
+    )
+    .unwrap();
+    assert_eq!(pressed.scenes[2].needs, 1 << 2);
+    let refused = |scene: SceneSpec, image: &str| {
+        let err = press(boot.clone(), &with(scene), false).err().unwrap();
+        assert_eq!(
+            err,
+            SceneDiscError::Needs {
+                scene: err_scene(&err),
+                image: String::from(image)
+            }
+        );
+    };
+    // Two needed images that overlap (SET and SWAPA meet at 0x80100800).
+    refused(
+        needing("PAIR", BOOT_EXE_NAME, &["SET.OVL", "SWAPA.OVL"]),
+        "SWAPA.OVL",
+    );
+    // A needed image over the scene's own overlay.
+    let mut own = needing("OWN", "SWAPA.OVL", &["SET.OVL"]);
+    own.entry = Some(0x8010_0800);
+    refused(own, "SET.OVL");
+    // A Program is not a required image.
+    refused(
+        needing("PROG", BOOT_EXE_NAME, &[BOOT_EXE_NAME]),
+        BOOT_EXE_NAME,
+    );
+    // An unknown name.
+    let err = press(
+        boot,
+        &with(needing("X", BOOT_EXE_NAME, &["NONE.OVL"])),
+        false,
+    )
+    .err()
+    .unwrap();
+    assert_eq!(err, SceneDiscError::Unknown(String::from("NONE.OVL")));
+}
+
+fn err_scene(err: &SceneDiscError) -> String {
+    match err {
+        SceneDiscError::Needs { scene, .. } => scene.clone(),
+        other => panic!("not a Needs refusal: {other:?}"),
+    }
 }

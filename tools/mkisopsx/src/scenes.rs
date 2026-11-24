@@ -13,6 +13,7 @@
 //! scene   MENU      PSX.EXE    entry=0x80012345
 //! scene   TOWN      TOWN.OVL   entry=0x80100000 credit=2 show-credit
 //! scene   GAME      GAME.EXE   start
+//! scene   SHOP      PSX.EXE    entry=0x80012400 needs=TOWN.OVL
 //! ```
 //!
 //! An image line is `program|overlay NAME file [options]`; NAME is its root
@@ -49,7 +50,10 @@
 //! `start` for the one scene that starts each Program (its entry is the exe's
 //! PC), `entry=` for a function inside a running Program or an Overlay.
 //! Options: `credit=<id>`, `show-credit`, `block=<n>` (minimum handoff block
-//! version). Image lines and scene lines may interleave; each kind keeps its
+//! version), `needs=<overlay>,...` (the images the scene needs in RAM on entry:
+//! overlays of its own program that do not overlap each other or the scene's own
+//! overlay; the core loads each one not loaded before an in-program scene runs, and
+//! a program's start scene when the program asks, `psx_core::link::require`). Image lines and scene lines may interleave; each kind keeps its
 //! own order. Numbers are decimal or `0x` hex.
 
 use psx_iso::scenes::abi::{Class, Span, SCENE_FLAG_PARTNER_CREDIT};
@@ -211,6 +215,9 @@ fn scene<'a>(
             Some(("entry", v)) => entry = Some(number::<u32>("entry", v)?),
             Some(("credit", v)) => scene.partner_credit = number("credit", v)?,
             Some(("block", v)) => scene.min_block_version = number("block", v)?,
+            Some(("needs", v)) if !v.is_empty() => {
+                scene.needs = v.split(',').map(str::to_ascii_uppercase).collect();
+            }
             _ => return Err(format!("unknown scene option {option}")),
         }
     }
@@ -239,7 +246,7 @@ mod tests {
             program game.exe sub/game.exe reaches=BOOT,GAME core-hash=0xdeadbeef\n\
             overlay TOWN.OVL /abs/town.bin owner=PSX.EXE load=0x80100000 class=resident # trailing\n\
             scene TOWN TOWN.OVL entry=0x80100010 credit=0x10 show-credit block=2\n\
-            scene GAME GAME.EXE start\n";
+            scene GAME GAME.EXE start needs=town.ovl,Map.ovl\n";
         let mut asked = Vec::new();
         let plan = parse_manifest(text, Path::new("/base"), &mut |path| {
             asked.push(path.to_path_buf());
@@ -285,6 +292,8 @@ mod tests {
             (scene.partner_credit, scene.flags, scene.min_block_version),
             (16, SCENE_FLAG_PARTNER_CREDIT, 2)
         );
+        assert_eq!(plan.scenes[2].needs, ["TOWN.OVL", "MAP.OVL"]);
+        assert!(plan.scenes[1].needs.is_empty());
         assert!(plan.core_image.is_none());
     }
 

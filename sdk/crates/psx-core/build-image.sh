@@ -45,6 +45,8 @@ echo "psx-core image: $SIZE bytes -> $OUT"
 if [ -n "${HAZARD_BIN:-}" ]; then
     "$HAZARD_BIN/hazard-scan" --raw 0x801FDF00 "$OUT"
     "$HAZARD_BIN/check-mfc0" --raw 0x801FDF00 "$OUT"
+    # Every slot's stack depth, derived from this image, must be the one psx-scene-abi publishes.
+    "$HAZARD_BIN/core-stack" "$OUT" "$MAP"
 fi
 if [ "$MODE" = check ]; then
     if cmp -s "$OUT" "$HERE/prebuilt/psx-core.bin"; then

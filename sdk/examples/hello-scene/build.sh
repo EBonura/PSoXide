@@ -24,7 +24,7 @@ guest() { # name features link-scripts
     "$HOST_BIN/psoxide-pgo" apply --crate "$CRATE" --profile "$CRATE/pgo.prof" --variant off -- \
         build --release --target mipsel-sony-psx -Zbuild-std=core -Zbuild-std-features=compiler-builtins-mem \
         --target-dir "$GUEST_TARGET" $2 \
-        --config "target.mipsel-sony-psx.rustflags=[$FLAGS,$3\"-Clink-arg=-T../../psoxide.ld\"$format]"
+        --config "target.mipsel-sony-psx.rustflags=[$FLAGS,$3\"-Clink-arg=-T../../psoxide.ld\",\"-Clink-arg=--orphan-handling=error\"$format]"
     cp "$GUEST_TARGET/mipsel-sony-psx/release/hello-scene.exe" "$OUT/$1.exe"
     map=$(ls -t "$GUEST_TARGET"/mipsel-sony-psx/psoxide-pgo-maps/*.map 2>/dev/null | head -1 || true)
     [ -n "$map" ] && cp "$map" "$OUT/$1.map" || true
@@ -77,4 +77,26 @@ walk walk scene-b.exe ""
 walk walk-mism-row scene-b-alt.exe "core-hash=$HALT"
 # The row lies (says the running core): the core loads B, B's __core_boot refuses (0x01).
 walk walk-mism-win scene-b-alt.exe "core-hash=$H"
+# The launcher: the walk with B at image row 8 (five spare one-sector overlays of A, never loaded,
+# before it), so psx-nest can put a member disc of up to 8 images there (the nesting rule: the
+# outer row's position is at least the member's image count).
+head -c 2048 /dev/zero >"$OUT/spare.bin"
+cat >"$OUT/launcher.scenes" <<MANIFEST
+program PSX.EXE  -          reserve=0x80100000-0x80110000
+overlay O1.BIN   o1.bin     owner=PSX.EXE load=0x80100000 class=swap
+overlay O2.BIN   o2.bin     owner=PSX.EXE load=0x80100000 class=swap
+overlay S1.BIN   spare.bin  owner=PSX.EXE load=0x80108000 class=swap
+overlay S2.BIN   spare.bin  owner=PSX.EXE load=0x80108000 class=swap
+overlay S3.BIN   spare.bin  owner=PSX.EXE load=0x80108000 class=swap
+overlay S4.BIN   spare.bin  owner=PSX.EXE load=0x80108000 class=swap
+overlay S5.BIN   spare.bin  owner=PSX.EXE load=0x80108000 class=swap
+program B.EXE    scene-b.exe
+scene   START    PSX.EXE    start
+scene   MENU     PSX.EXE    entry=$MENU
+scene   O1       O1.BIN     entry=0x80100000
+scene   O2       O2.BIN     entry=0x80100000
+scene   BSTART   B.EXE      start
+MANIFEST
+"$MKISO" --diag --exe "$OUT/scene-a.exe" --scenes "$OUT/launcher.scenes" --core-image "$OUT/psx-core.bin" \
+    --volume PSXSCENE --out "$OUT/launcher.bin"
 ls -la "$OUT"

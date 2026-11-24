@@ -216,6 +216,10 @@ pub struct SceneSpec {
     pub partner_credit: u16,
     /// Minimum handoff block version the scene needs.
     pub min_block_version: u8,
+    /// Images the scene needs in RAM on entry, by name: Overlays of the scene's own Program. The
+    /// core loads each one whose loaded bit is clear before the scene runs (an in-program scene),
+    /// or when the Program asks on its start (`psx_core::link::require`).
+    pub needs: Vec<String>,
 }
 
 impl SceneSpec {
@@ -230,6 +234,7 @@ impl SceneSpec {
             flags: 0,
             partner_credit: 0,
             min_block_version: block::VERSION as u8,
+            needs: Vec::new(),
         }
     }
 
@@ -391,6 +396,15 @@ pub enum SceneDiscError {
         program: String,
         /// The Overlay it says it carries.
         overlay: String,
+    },
+    /// A scene's `needs` names an image that is not an Overlay of the scene's own Program, two
+    /// of its needed images overlap, or one overlaps the scene's own Overlay (the core loads the
+    /// scene's image first, then each needed one, so none may evict another).
+    Needs {
+        /// The scene.
+        scene: String,
+        /// The needed image at fault.
+        image: String,
     },
     /// The table writer refused.
     Table(TableError),
@@ -978,6 +992,33 @@ pub fn add_scene_disc_files_with(
             (_, false, Some(entry)) if row.span().holds(entry, entry.saturating_add(1)) => entry,
             _ => return Err(bad()),
         };
+        // Required images: Overlays of the scene's own Program, loaded after the scene's own image,
+        // so none may lie over that image or over another needed one.
+        let program = if row.kind == Kind::Program {
+            image
+        } else {
+            row.owner
+        };
+        let mut needs = 0u32;
+        let mut needed: Vec<Span> = Vec::new();
+        for name in &scene.needs {
+            let bad = || SceneDiscError::Needs {
+                scene: scene.name.clone(),
+                image: name.clone(),
+            };
+            let n = index_of(name)?;
+            let need = &rows[n as usize];
+            let span = spans[n as usize];
+            let clash = needed.iter().any(|&s| overlaps(s, span))
+                || (row.kind == Kind::Overlay
+                    && n != image
+                    && overlaps(spans[image as usize], span));
+            if need.kind != Kind::Overlay || need.owner != program || clash {
+                return Err(bad());
+            }
+            needed.push(span);
+            needs |= 1 << n;
+        }
         let start_flag = if scene.start { SCENE_FLAG_START } else { 0 };
         scene_rows.push(SceneRow {
             id: id as u16,
@@ -986,6 +1027,7 @@ pub fn add_scene_disc_files_with(
             entry,
             partner_credit: scene.partner_credit,
             min_block_version: scene.min_block_version,
+            needs,
             name: SceneRow::name_bytes(&scene.name),
         });
     }

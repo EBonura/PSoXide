@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+[package]
+name    = "hello-modular"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+
+[workspace]
+
+[[bin]]
+name = "hello-modular"
+path = "src/main.rs"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+
+[dependencies]
+psx-core = { path = "../../crates/psx-core", features = ["link"] }
+psx-hw   = { path = "../../../crates/psx-hw" }
+psx-io   = { path = "../../crates/psx-io" }
+psx-pad  = { path = "../../crates/psx-pad" }
+psx-rt   = { path = "../../crates/psx-rt", features = ["host-tty"] }
+
+[features]
+# Program Q, the member's second program: its overlay runs over a static host buffer
+# (`.bss.overlay_host`); link with ram-host.ld. Without it: program P, the member's boot program,
+# whose overlays run at OVERLAY_VMA (ram.ld).
+role-q = []

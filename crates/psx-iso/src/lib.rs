@@ -33,6 +33,7 @@ use alloc::{format, vec};
 
 pub mod boot;
 pub mod exe;
+pub mod fault;
 pub mod files;
 pub mod iso9660;
 pub mod nest;

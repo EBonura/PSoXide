@@ -62,7 +62,18 @@ fn film() {
     let outcome = psx_fmv::player::play(&movie, &config, memory, &mut || false);
     tty::print("hello-boot: film frames ");
     tty::print_hex_u32(outcome.shown);
+    tty::print(" stop ");
+    tty::print_hex_u32(outcome.stop as u32);
+    tty::print(" dropped ");
+    tty::print_hex_u32(outcome.dropped);
+    tty::print(" last ");
+    tty::print_hex_u32(outcome.last_frame);
     tty::println("");
+    // A film on the disc plays to its end: every frame shown.
+    if outcome.shown != movie.frames {
+        tty::println("hello-boot: FAIL film");
+        loop {}
+    }
 }
 
 /// Boot-only code no resident code may call: with feature `cross-ref`, `main` does, and the link

@@ -642,7 +642,7 @@ impl Header {
 /// 0x08  2  partner credit id, 0 none
 /// 0x0A  1  minimum handoff block version
 /// 0x0B  1  reserved, 0
-/// 0x0C  4  reserved, 0
+/// 0x0C  4  required images: one bit per image row the scene needs in RAM on entry
 /// 0x10 16  name, ASCII, NUL-padded
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -663,6 +663,9 @@ pub struct SceneRow {
     pub partner_credit: u16,
     /// Minimum handoff block version the scene needs.
     pub min_block_version: u8,
+    /// The images the scene needs in RAM on entry, one bit per image row (its index): the core
+    /// loads each one whose loaded bit is clear before the scene runs. 0: no requirement.
+    pub needs: u32,
     /// ASCII name, NUL-padded.
     pub name: [u8; NAME_BYTES],
 }
@@ -699,6 +702,7 @@ impl SceneRow {
         put32(out, 0x04, self.entry);
         put16(out, 0x08, self.partner_credit);
         out[0x0a] = self.min_block_version;
+        put32(out, 0x0c, self.needs);
         out[0x10..0x10 + NAME_BYTES].copy_from_slice(&self.name);
     }
 
@@ -714,6 +718,7 @@ impl SceneRow {
             entry: get32(bytes, 0x04),
             partner_credit: get16(bytes, 0x08),
             min_block_version: bytes[0x0a],
+            needs: get32(bytes, 0x0c),
             name,
         }
     }

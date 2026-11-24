@@ -27,7 +27,7 @@ guest() { # extra cargo arguments
     touch "$CRATE/src/main.rs"
     "$HOST_BIN/psoxide-pgo" apply --crate "$CRATE" --profile "$CRATE/pgo.prof" --variant off -- \
         build --release --target mipsel-sony-psx -Zbuild-std=core -Zbuild-std-features=compiler-builtins-mem \
-        --target-dir "$GUEST_TARGET" "$@" --config "target.mipsel-sony-psx.rustflags=[$FLAGS$EXTRA,$LINK]"
+        --target-dir "$GUEST_TARGET" "$@" --config "target.mipsel-sony-psx.rustflags=[$FLAGS$EXTRA,$LINK,\"-Clink-arg=--orphan-handling=error\"]"
 }
 
 # Resident code calling into `.boot_inner`: the link must fail, on that reference.
@@ -77,6 +77,23 @@ MANIFEST
 # The program's row must cover .boot: its stored core image comes after it (psoxide.ld).
 "$MKISO" --diag --exe "$OUT/hello-boot.exe" --scenes "$OUT/boot.scenes" \
     --core-image sdk/crates/psx-core/prebuilt/psx-core.bin --volume HELLOBOOT --out "$OUT/scenes.bin"
+# The film player for real: the same scene disc with a FILM.STR of 30 frames (a flat picture made
+# here, cooked by psx-str-cook). The TTY says `hello-boot: film frames 0000001E` before PASS, booted
+# alone or entered by a launcher's switch (the scene-core gate nests it).
+{
+    printf 'YUV4MPEG2 W320 H240 F15:1 Ip A1:1 C420jpeg\n'
+    i=0
+    while [ $i -lt 30 ]; do
+        printf 'FRAME\n'
+        head -c 76800 /dev/zero | LC_ALL=C tr '\0' '\120'
+        head -c 38400 /dev/zero | LC_ALL=C tr '\0' '\200'
+        i=$((i + 1))
+    done
+} >"$OUT/film.y4m"
+"$HOST_BIN/psx-str-cook" encode --video "$OUT/film.y4m" --out "$OUT/FILM.STR" --size 320x240
+"$MKISO" --diag --exe "$OUT/hello-boot.exe" --scenes "$OUT/boot.scenes" --xa-file "$OUT/FILM.STR" \
+    --core-image sdk/crates/psx-core/prebuilt/psx-core.bin --volume HELLOBOOT --out "$OUT/film.bin"
+rm -f "$OUT/film.y4m"
 
 # Boot code inside the stack reserve, as a program with no heap to spare runs it: the boot-time
 # stack stated (BOOT_STACK_OVERRIDE) below the boot crates' own need is refused...

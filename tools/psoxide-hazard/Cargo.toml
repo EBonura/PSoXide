@@ -48,6 +48,10 @@ name = "inline-gate"
 path = "src/bin/inline-gate.rs"
 
 [[bin]]
+name = "core-stack"
+path = "src/bin/core-stack.rs"
+
+[[bin]]
 name = "check-mfc0"
 path = "src/bin/check-mfc0.rs"
 

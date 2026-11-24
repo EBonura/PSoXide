@@ -38,3 +38,7 @@ INSERT AFTER .data;
 ASSERT(STACK_INIT == 0x801FDF00, "a program on the core links with RAM_SIZE_OVERRIDE = 0x1FE000")
 ASSERT(__psx_core_store_end - __psx_core_store <= 0x2000, "the core image must fit the window")
 ASSERT(__psx_core_store_end > __psx_core_store, "psx-core's IMAGE is missing: depend on psx-core with feature link")
+/* The entry code is placed by the program's main script (psoxide.ld: `.text_entry.*`, last in
+   .text). A forked script that leaves that line out links it as an orphan section outside .text:
+   refused here, whatever the orphan-handling option. */
+ASSERT(__core_boot >= __text_start && __core_boot < __text_end, "__core_boot is outside .text: the program's link script must place .text_entry.* in .text (see psoxide.ld)")
