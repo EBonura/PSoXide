@@ -80,6 +80,12 @@ pub fn run(ctx: &mut Ctx<'_>) -> StageResult {
             }
             Err(e) => return failed(&build.name, e),
         }
+        // The SDK the build links is an input too: the pin, and a tree given from outside the
+        // repository (`PSOXIDE_FROM`, a lane swapping the SDK without a commit) by its commit and
+        // its uncommitted changes, so a swapped SDK never reuses the old build.
+        let mut keyed = keyed;
+        keyed.push(format!("sdk {}", sdk_pin(&ctx.repo, ctx.game)));
+        keyed.push(sdk_from_identity());
         let key = match key(&ctx.repo, build, &files, &keyed.join("\0")) {
             Ok(k) => k,
             Err(e) => return failed(&build.name, e),
@@ -600,9 +606,71 @@ fn newest(repo: &Path, source: &str) -> Result<PathBuf, String> {
         .ok_or_else(|| format!("nothing matches {source}"))
 }
 
+/// `PSOXIDE_FROM` (a game build's SDK tree given from outside the repository) as a key part: the
+/// path, its git commit and a digest of its uncommitted changes. Empty when it is not set.
+fn sdk_from_identity() -> String {
+    let Some(dir) = std::env::var_os("PSOXIDE_FROM") else {
+        return String::new();
+    };
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(args)
+            .output()
+            .map(|o| o.stdout)
+            .unwrap_or_default()
+    };
+    let head = git(&["rev-parse", "HEAD"]);
+    let mut changes = git(&["status", "--porcelain", "--untracked-files=no"]);
+    changes.extend(git(&["diff", "HEAD"]));
+    format!(
+        "sdk-from {} {} {}",
+        std::path::Path::new(&dir).display(),
+        String::from_utf8_lossy(&head).trim(),
+        util::sha256_bytes(&changes)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A lane that swaps the SDK under `PSOXIDE_FROM` without a commit gets a new build key.
+    #[test]
+    fn an_sdk_given_from_outside_is_keyed_by_its_commit_and_its_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        git(&["init", "-q"]);
+        std::fs::write(dir.path().join("f"), "a").unwrap();
+        git(&["add", "f"]);
+        git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "-m",
+            "a",
+        ]);
+        // No other test reads or writes PSOXIDE_FROM.
+        std::env::set_var("PSOXIDE_FROM", dir.path());
+        let clean = sdk_from_identity();
+        std::fs::write(dir.path().join("f"), "b").unwrap();
+        let changed = sdk_from_identity();
+        std::env::remove_var("PSOXIDE_FROM");
+        assert!(clean.starts_with("sdk-from "), "{clean}");
+        assert_ne!(clean, changed);
+        assert_eq!(sdk_from_identity(), "");
+    }
 
     /// A link map with one symbol at `addr`, the way lld prints it.
     fn map_with(name: &str, addr: u32) -> String {
