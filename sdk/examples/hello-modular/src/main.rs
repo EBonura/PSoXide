@@ -309,9 +309,14 @@ fn start(who: &str) {
     }
 }
 
-/// The program asks the core for what its start scene needs. This core has no such call yet, so
-/// this asks nothing and the checks below find the images missing.
-fn require() {}
+/// The program asks the core for what its start scene needs (`psx_core::link::require`); a
+/// refusal or a failed load ends the walk.
+fn require() {
+    let r = link::require(table());
+    if r != 0 {
+        fail("require", r);
+    }
+}
 
 // ---------------------------------------------------------------------------------------------
 // The carried image: 2 KiB of P's .data, the same bytes as CARRIED.OVL.

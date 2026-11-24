@@ -26,6 +26,18 @@ extern "C" {
     fn psx_core_cd(op: u32, a: usize, b: u32, c: *mut u8) -> u32;
 }
 
+extern "C" {
+    /// The core's release slot (`psx_scene_abi::slot::RELEASE`): the program drove the drive with
+    /// a raw command, so the core proves it stopped before its own next command.
+    fn psx_core_release();
+}
+
+/// Tell the core the player sent a raw command (its no-wait Pause).
+pub(super) fn release() {
+    // SAFETY: the slot is the core's ABI entry; it takes and returns nothing.
+    unsafe { psx_core_release() }
+}
+
 /// Send `command` with `params` and wait for its acknowledge, the response
 /// into `response` (null discards it). The response length, or `None` for a
 /// drive error or a timeout.
@@ -136,6 +148,10 @@ mod tests {
             outcome
         })
     }
+
+    /// The host stand-in for the core's release slot.
+    #[no_mangle]
+    extern "C" fn psx_core_release() {}
 
     fn take_calls() -> Vec<Call> {
         CORE.with(|core| core::mem::take(&mut core.borrow_mut().calls))

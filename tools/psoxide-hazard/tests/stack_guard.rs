@@ -1782,7 +1782,7 @@ fn the_idle_hook_adds_to_every_slot_that_waits() {
     );
     let body = [
         prologue(16),
-        vec![jal(slot::PAUSE), NOP, jal(slot::MUSIC_YIELD), NOP],
+        vec![jal(slot::PAUSE), NOP, jal(slot::RELEASE), NOP],
         epilogue(16),
     ]
     .concat();

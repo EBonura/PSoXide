@@ -48,7 +48,10 @@ fn main() -> ExitCode {
         let got = slot_target(&image, base, slot.addr)
             .and_then(name_at)
             .and_then(|n| found.get(&n).copied());
-        check(slot.name, got, slot.depth, Some(slot.idle_hook));
+        // A slot published as calling the idle hook must reach it. `psx_core_cd` reaches the core's
+        // waits too but parks the hook for its whole call, so only its depth is checked.
+        let hook = (slot.addr != psx_scene_abi::slot::CD).then_some(slot.idle_hook);
+        check(slot.name, got, slot.depth, hook);
     }
     let land = found
         .iter()

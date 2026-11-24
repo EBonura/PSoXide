@@ -6,7 +6,7 @@
 //! - `cmd`: the CD command layer (send and wait, response FIFO, bounded drain, acknowledge);
 //! - `drive`: the polled reader and its rules: never assume an idle drive (settle on first use),
 //!   seek-first starts, PIO sector pops (no CD DMA), Pause and never Stop, a Pause resent when
-//!   refused mid-seek, the CD input muted before a read after music, and the drive proven stopped
+//!   refused mid-seek, and the drive proven stopped
 //!   before every command the core sends but the probe that proves it (a GetStat, or a read's
 //!   own SetMode): a read or `psx_core_pause` ends on an acknowledged Pause and the next use
 //!   proves it (`drive::settle`, `drive::prepare`), so the wait overlaps the program's work;
@@ -43,8 +43,6 @@ const DICR: u32 = psx_hw::dma::DICR;
 /// Channel 0's CHCR; the other channels follow every `CHANNEL_STRIDE` bytes.
 const DMA_CHCR0: u32 = psx_hw::dma::CHANNEL_BASE + psx_hw::dma::CHCR;
 const SPU_KEY_OFF: u32 = psx_hw::spu::mask::KEY_OFF_LO;
-const SPU_CD_VOLUME: u32 = psx_hw::spu::CD_VOL_LEFT;
-const SPU_CONTROL: u32 = psx_hw::spu::SPUCNT;
 
 const CDROM_IRQ_BIT: u32 = 1 << 2;
 
@@ -164,11 +162,10 @@ struct State {
     mask_saved: u32,
     /// The program's idle hook, called from every spin of every wait.
     idle: Option<extern "C" fn()>,
-    /// Stage of the last fatal screen.
-    fatal: u32,
-    /// The scene row's first two words (id, image and flags; entry PC) and the image row of the
-    /// switch or load in flight: copied, the caller's table may be overwritten by the load.
-    scene: [u32; 2],
+    /// The scene row's first four words (id, image and flags; entry PC; credit and block version;
+    /// the images it needs) and the image row of the switch or load in flight: copied, the
+    /// caller's table may be overwritten by the load.
+    scene: [u32; 4],
     image: [u32; 8],
     /// The image index of the rows in flight.
     img: u32,
@@ -196,8 +193,7 @@ static mut ST: State = State {
     first_sector: 0,
     mask_saved: 0,
     idle: None,
-    fatal: 0,
-    scene: [0; 2],
+    scene: [0; 4],
     image: [0; 8],
     img: 0,
     mask: 0,
@@ -235,7 +231,8 @@ impl Elapsed {
         let now = r16(TIMER2) as u32;
         let step = (now.wrapping_sub(self.last) & 0xffff).min(MAX_STEP);
         self.last = now;
-        self.clocks = self.clocks.saturating_add(step);
+        // No overflow: a bound is at most 10 s of clocks, far under 2^32, and the wait ends there.
+        self.clocks += step;
         self.spins += 1;
         self.clocks >= limit || self.spins >= limit / MIN_SPIN_CLOCKS
     }
@@ -621,8 +618,7 @@ mod drive {
             return code::OK;
         }
         // Before anything is acknowledged: an owed Pause's latched second response is its proof.
-        let proven =
-            s.prepared == PROVEN || (s.prepared == OWED && cmd::flag() == INT_COMPLETE);
+        let proven = s.prepared == PROVEN || (s.prepared == OWED && cmd::flag() == INT_COMPLETE);
         if !proven {
             let mut n = 0;
             while n < 16 {
@@ -651,13 +647,22 @@ mod drive {
             } else {
                 (CMD_GETSTAT, &[])
             };
-            if cmd::send(command, params, INT_ACK, ACK_WAIT) != cmd::MATCHED {
+            let mut r = cmd::send(command, params, INT_ACK, ACK_WAIT);
+            if r != cmd::MATCHED {
+                // Refused (a drive mid-seek answers INT5) or unanswered: wait the seek out and ask
+                // once more, as `pause_proved` does for its Pause.
+                wait_seek_end();
+                r = cmd::send(command, params, INT_ACK, ACK_WAIT);
+            }
+            if r != cmd::MATCHED {
                 // A read cannot start; a status probe leaves it to the next command, which fails
                 // on its own bound and says so.
                 if read {
                     return code::NO_ANSWER;
                 }
-            } else if !proven && s.last_status as u8 & STAT_ACTIVE != 0 {
+            } else if s.last_status as u8 & STAT_ACTIVE != 0 {
+                // Active, whatever the state said: a program's own commands (a player's ReadS,
+                // its no-wait Pause) may have moved the drive since the core last proved it.
                 let r = pause_proved();
                 if r != code::OK {
                     cmd::ack_all();
@@ -756,9 +761,10 @@ mod drive {
         true
     }
 
-    /// Wait for the next sector and pop it (`hash` as for [`pop`]).
+    /// Wait for the next sector and pop it (`hash` as for [`pop`]): `code::OK`, or `code::READ`
+    /// when it never came whole.
     #[inline(never)]
-    pub fn sector(dst: *mut u32, hash: *mut u32) -> bool {
+    pub fn sector(dst: *mut u32, hash: *mut u32) -> u32 {
         let s = st();
         let limit = if s.first_sector != 0 {
             FIRST_SECTOR_WAIT
@@ -769,19 +775,11 @@ mod drive {
         if cmd::wait(INT_DATA_READY, limit) != cmd::MATCHED || !pop(dst, hash) {
             cmd::drain();
             cmd::ack_all();
-            return false;
+            return code::READ;
         }
         cmd::drain();
         cmd::ack(INT_DATA_READY);
-        true
-    }
-
-    /// Mute the SPU's CD input before a data read that follows music.
-    #[inline(never)]
-    pub fn music_yield() {
-        w16(SPU_CD_VOLUME, 0);
-        w16(SPU_CD_VOLUME + 2, 0);
-        w16(SPU_CONTROL, r16(SPU_CONTROL) & !1);
+        code::OK
     }
 }
 
@@ -819,7 +817,7 @@ mod read {
                     } else {
                         dst.wrapping_add(((done + k) * SECTOR_WORDS) as usize)
                     };
-                    ok = drive::sector(at, &mut ch);
+                    ok = drive::sector(at, &mut ch) == code::OK;
                     if ok {
                         if let Some(f) = hook {
                             f(done + k);
@@ -862,7 +860,7 @@ mod switch {
     /// The rows of scene `want` (or of image `want` with `by_image`) from the caller's RAM copy of
     /// the table. On success `img` holds the image index.
     #[inline(never)]
-    fn rows(want: u32, by_image: u32, table: *const u32) -> u32 {
+    pub fn rows(want: u32, by_image: u32, table: *const u32) -> u32 {
         let s = st();
         // Neither a switch nor a load while a stream client holds the drive.
         if s.client != 0 {
@@ -906,11 +904,11 @@ mod switch {
                     return code::NO_ROW;
                 }
                 let at = table::HEADER_WORDS + table::ROW_WORDS * i;
-                // Row `i` of `scenes`, inside the copy. Only its first two words are used: id,
-                // image and flags, then the entry PC.
+                // Row `i` of `scenes`, inside the copy. Its first four words are used: id, image
+                // and flags; the entry PC; credit and block version; the images it needs.
                 if word(at) & 0xffff == want {
                     // SAFETY: as above.
-                    unsafe { copy_words(s.scene.as_mut_ptr(), table.add(at as usize), 2) };
+                    unsafe { copy_words(s.scene.as_mut_ptr(), table.add(at as usize), 4) };
                     break;
                 }
                 i += 1;
@@ -974,7 +972,8 @@ mod switch {
     /// Read the image in the state's rows into its range unless its bit says it is there, check
     /// it, flush the I-cache and update the mask. The evicts word is applied after the image's
     /// own bit: a VOLATILE overlay (its owner also uses its range) lists itself, so its bit is
-    /// never kept and every load reads it.
+    /// never kept and every load reads it. What the load overwrites is marked gone before the
+    /// first byte is read, so a load that fails leaves nothing marked loaded over its range.
     #[inline(never)]
     fn load_overlay() -> u32 {
         let s = st();
@@ -982,13 +981,43 @@ mod switch {
         if s.mask & bit != 0 {
             return code::OK;
         }
+        let evicts = s.image[table::I_EVICTS];
+        s.mask &= !evicts;
         let r = load_into(0);
         if r != code::OK {
             return r;
         }
         dma_settle();
         flush_icache();
-        s.mask = (s.mask | bit) & !s.image[table::I_EVICTS];
+        s.mask = (s.mask | bit) & !evicts;
+        code::OK
+    }
+
+    /// Load every overlay whose bit is set in `needs` and clear in the loaded mask, in image order,
+    /// `caller` the code that asked (0 for a switch, which never returns): the one load path of
+    /// `psx_core_load_image` (one bit), `psx_core::link::require` and a scene's needed images.
+    /// Each is refused (nothing of it read) when it has no row, is not an Overlay of the program
+    /// that runs, or its range is bad or holds `caller`. The disc builder guarantees a scene's
+    /// needed images are its program's Overlays and overlap neither each other nor its own image.
+    #[inline(never)]
+    pub fn walk(mut needs: u32, table: *const u32, caller: u32) -> u32 {
+        let mut i = 0;
+        while needs != 0 {
+            if needs & 1 != 0 {
+                let mut r = rows(i, 1, table);
+                if r == code::OK {
+                    r = overlay_ok(caller);
+                }
+                if r == code::OK {
+                    r = load_overlay();
+                }
+                if r != code::OK {
+                    return r;
+                }
+            }
+            needs >>= 1;
+            i += 1;
+        }
         code::OK
     }
 
@@ -1019,19 +1048,6 @@ mod switch {
                 return code::PAYLOAD_FNV;
             }
         }
-    }
-
-    /// `psx_core_load_image`: load an overlay and return to the caller.
-    #[inline(never)]
-    pub fn load_image(image: u32, table: *const u32, caller: u32) -> u32 {
-        let mut r = rows(image, 1, table);
-        if r == code::OK {
-            r = overlay_ok(caller);
-        }
-        if r == code::OK {
-            r = load_overlay();
-        }
-        r
     }
 
     /// Let the DMA channels finish, aborting one that will not within the command wait.
@@ -1134,8 +1150,13 @@ mod switch {
             }
         }
         // An in-program entry: an overlay (read first unless it is in RAM) or a scene of the
-        // program that is running. A failed load has overwritten RAM: no way back.
-        let r = load_overlay();
+        // program that is running, then every image the scene needs. Only adds: nothing is
+        // discarded but what a load's evicts word names. A failed load has overwritten RAM: no
+        // way back.
+        let mut r = load_overlay();
+        if r == code::OK {
+            r = walk(s.scene[table::S_NEEDS], table, 0);
+        }
         if r != code::OK {
             fatal_screen(r);
         }
@@ -1187,13 +1208,14 @@ mod switch {
         // The incoming program's disc bases: its member's, relative to where the table was read.
         s.lba_offset += s.image[table::I_BASE];
         s.cdda_base += s.image[table::I_KIND] >> 24;
-        s.flags = if s.lba_offset != 0 {
-            block::FLAG_NESTED
-        } else {
-            0
-        };
+        s.flags = u32::from(s.lba_offset != 0) * block::FLAG_NESTED;
         // The program and the overlays its own exe carries (its row's word 5).
         s.mask = (1 << s.img) | s.image[table::I_EVICTS];
+        // Across tables (a launcher's member) the scene ids are the outer table's: the block says
+        // so with the current scene NO_SCENE, and the member takes its own table's boot scene.
+        if s.image[table::I_BASE] != 0 {
+            s.scene[0] |= 0xffff;
+        }
         enter(block::FLAG_CORE_ENTRY)
     }
 }
@@ -1223,11 +1245,6 @@ fn write_block(current: u32, previous: u32, flags: u32) {
     };
     w32(b + block::OFF_MASK, s.mask);
     w32(b + block::OFF_NOT_MAGIC, !block::MAGIC);
-}
-
-fn block_valid() -> bool {
-    r32(block::ADDR + block::OFF_MAGIC) == block::MAGIC
-        && r32(block::ADDR + block::OFF_NOT_MAGIC) == !block::MAGIC
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1282,7 +1299,6 @@ fn flush_icache() {
 fn fatal_screen(stage: u32) -> ! {
     // SAFETY: interrupts off before the screen is touched.
     unsafe { core::arch::asm!("mtc0 $zero, $12", "nop", "nop") };
-    st().fatal = stage;
     psx_core::fatal::paint(stage);
     loop {
         core::hint::spin_loop();
@@ -1296,10 +1312,8 @@ fn fatal_screen(stage: u32) -> ! {
 extern "C" fn __psx_core_attach_impl(a0: u32, a1: u32, a2: u32, hash: u32) {
     let s = st();
     if s.hash != 0 {
-        // A core entry: the switch wrote the block; it must still be there.
-        if !block_valid() {
-            fatal_screen(code::BAD_BLOCK);
-        }
+        // A core entry: `__core_boot` routes one here only when the block the switch wrote is
+        // valid (otherwise it is a cold entry and the statics are zeroed).
         return;
     }
     s.hash = hash;
@@ -1309,7 +1323,7 @@ extern "C" fn __psx_core_attach_impl(a0: u32, a1: u32, a2: u32, hash: u32) {
     if a0 == abi::PSXD {
         s.lba_offset = a1;
         s.cdda_base = a2;
-        s.flags = if a1 != 0 { block::FLAG_NESTED } else { 0 };
+        s.flags = u32::from(a1 != 0) * block::FLAG_NESTED;
     }
     write_block(0, block::NO_SCENE, s.flags);
 }
@@ -1328,7 +1342,10 @@ extern "C" fn __psx_core_load_image_impl(image: u32, table: *const u32) -> u32 {
     unsafe {
         core::arch::asm!("move {0}, $ra", out(reg) caller, options(nomem, nostack, preserves_flags))
     };
-    switch::load_image(image, table, caller)
+    if image >= table::MAX_IMAGES {
+        return code::NO_ROW;
+    }
+    switch::walk(1 << image, table, caller)
 }
 
 #[no_mangle]
@@ -1377,11 +1394,7 @@ extern "C" fn __psx_core_stream_open_impl(lba: u32, flags: u32) -> u32 {
 #[no_mangle]
 extern "C" fn __psx_core_stream_sector_impl(dst: *mut u32) -> u32 {
     // No checksum: the stream client checks its own data, the shape of psx-io's reader.
-    if drive::sector(dst, core::ptr::null_mut()) {
-        code::OK
-    } else {
-        code::READ
-    }
+    drive::sector(dst, core::ptr::null_mut())
 }
 
 /// The CD command slot for a game's own driver (HL's XA player): op 0 only, a command and the
@@ -1395,6 +1408,11 @@ extern "C" fn __psx_core_cd_impl(op: u32, a: u32, b: u32, c: *mut u8) -> u32 {
     if op != 0 {
         return u32::MAX;
     }
+    // A short command a program sends from play: its waits never call the idle hook, so the
+    // program's own loop alone decides what runs between its frames (and the slot's stack depth
+    // is its own, with no hook on top).
+    let s = st();
+    let hook = s.idle.take();
     // The drive is proven stopped before any command the core sends, this one included (with
     // the caller's `I_MASK`, as the command itself: no CD-ROM IRQ handler is installed).
     let _ = drive::settle(drive::Probe::Status);
@@ -1404,7 +1422,9 @@ extern "C" fn __psx_core_cd_impl(op: u32, a: u32, b: u32, c: *mut u8) -> u32 {
         // SAFETY: the caller's `b` parameter bytes at `a`.
         unsafe { core::slice::from_raw_parts(a as *const u8, (b & 0xff).min(16) as usize) }
     };
-    cmd::send_collect((b >> 8) as u8, params, c)
+    let r = cmd::send_collect((b >> 8) as u8, params, c);
+    s.idle = hook;
+    r
 }
 
 #[no_mangle]
@@ -1417,16 +1437,16 @@ extern "C" fn __psx_core_client_attach_impl() -> u32 {
     let s = st();
     let held = s.client;
     s.client = 1;
-    if held != 0 {
-        code::CLIENT
-    } else {
-        code::OK
-    }
+    // `client` is 0 or 1: CLIENT when it was held, OK when it was free.
+    code::CLIENT & held.wrapping_neg()
 }
 
 #[no_mangle]
 extern "C" fn __psx_core_client_detach_impl() {
-    st().client = 0;
+    let s = st();
+    s.client = 0;
+    // The client drove the drive by itself: proven again before the core's next command.
+    s.prepared = UNKNOWN;
 }
 
 #[no_mangle]
@@ -1434,9 +1454,10 @@ extern "C" fn __psx_core_fatal_impl(stage: u32) -> ! {
     fatal_screen(stage)
 }
 
+/// The program drove the drive itself: nothing is known of it until it is proven again.
 #[no_mangle]
-extern "C" fn __psx_core_music_yield_impl() {
-    drive::music_yield()
+extern "C" fn __psx_core_release_impl() {
+    st().prepared = UNKNOWN;
 }
 
 core::arch::global_asm!(
@@ -1458,7 +1479,7 @@ core::arch::global_asm!(
     "nop",
     "j __psx_core_fatal_impl",
     "nop",
-    "j __psx_core_music_yield_impl",
+    "j __psx_core_release_impl",
     "nop",
     "j __psx_core_stream_open_impl",
     "nop",
@@ -1470,6 +1491,8 @@ core::arch::global_asm!(
     "nop",
     "j __psx_core_load_image_impl",
     "nop",
+    // The slot count (psx-scene-abi `slot::TABLE_WORD`).
+    ".word 13",
     ".set reorder",
 );
 

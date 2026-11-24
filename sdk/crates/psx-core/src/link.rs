@@ -79,7 +79,7 @@ extern "C" {
     fn psx_core_client_attach() -> u32;
     fn psx_core_client_detach();
     fn psx_core_fatal(stage: u32) -> !;
-    fn psx_core_music_yield();
+    fn psx_core_release();
     fn psx_core_stream_open(lba: u32, flags: u32) -> u32;
     fn psx_core_stream_sector(dst: *mut u32) -> u32;
     // `a` is an address: `usize`, as psx-io's `core-cd` declares the same symbol (one 32-bit
@@ -160,7 +160,7 @@ core::arch::global_asm!(
     ".globl psx_core_client_attach", ".set psx_core_client_attach, {client_attach}",
     ".globl psx_core_client_detach", ".set psx_core_client_detach, {client_detach}",
     ".globl psx_core_fatal", ".set psx_core_fatal, {fatal}",
-    ".globl psx_core_music_yield", ".set psx_core_music_yield, {music_yield}",
+    ".globl psx_core_release", ".set psx_core_release, {release}",
     ".globl psx_core_stream_open", ".set psx_core_stream_open, {stream_open}",
     ".globl psx_core_stream_sector", ".set psx_core_stream_sector, {stream_sector}",
     ".globl psx_core_cd", ".set psx_core_cd, {cd}",
@@ -173,7 +173,7 @@ core::arch::global_asm!(
     client_attach = const abi::slot::CLIENT_ATTACH,
     client_detach = const abi::slot::CLIENT_DETACH,
     fatal = const abi::slot::FATAL,
-    music_yield = const abi::slot::MUSIC_YIELD,
+    release = const abi::slot::RELEASE,
     stream_open = const abi::slot::STREAM_OPEN,
     stream_sector = const abi::slot::STREAM_SECTOR,
     cd = const abi::slot::CD,
@@ -337,10 +337,54 @@ pub fn fatal(stage: u32) -> ! {
     unsafe { psx_core_fatal(stage) }
 }
 
-/// Mute the SPU's CD input before a data read after music.
-pub fn music_yield() {
+/// The program drove the drive with its own raw commands (psx-io's `core-cd` register ops, a
+/// player's no-wait Pause): the core no longer knows what the drive does, and proves it stopped
+/// before its next command. psx-io's `core-cd` calls it after every command it sends itself.
+pub fn release() {
     // SAFETY: ABI call.
-    unsafe { psx_core_music_yield() }
+    unsafe { psx_core_release() }
+}
+
+/// Load the images the program's entry scene needs (its `needs=` line), each one whose loaded bit
+/// is clear, with the core's load (`load_image`), and return. The entry scene is the table's boot
+/// scene after a BIOS boot or a switch from another table (a launcher's member: the block's
+/// current scene is `NO_SCENE`), else the scene the switch entered. Call it once at
+/// the start, before the first call into one of those images; `table` as for [`switch`]. Returns
+/// 0, or the code of a refusal (nothing loaded) or of a failed load (a needed image's range may
+/// have been written: the program stops on the fatal screen).
+///
+/// In-program scenes need no call: the core loads their needed images when the switch enters
+/// them.
+#[allow(
+    clippy::must_use_candidate,
+    reason = "a program may treat any failure as fatal through the code it gets back"
+)]
+pub fn require(table: &mut [u32]) -> u32 {
+    let r = table_ready(table);
+    if r != abi::code::OK {
+        return r;
+    }
+    let current = block_word(block::OFF_SCENES) & 0xffff;
+    let core_entry = block_word(block::OFF_FLAGS) & block::FLAG_CORE_ENTRY != 0;
+    let scene = if core_entry && current != block::NO_SCENE {
+        current
+    } else {
+        abi::table::boot_scene(table)
+    };
+    let Some(needs) = abi::table::scene_needs(table, scene) else {
+        return abi::code::NO_ROW;
+    };
+    let mut image = 0;
+    while image < abi::table::MAX_IMAGES {
+        if needs & (1 << image) != 0 {
+            let r = load_image(image, table);
+            if r != abi::code::OK {
+                return r;
+            }
+        }
+        image += 1;
+    }
+    abi::code::OK
 }
 
 /// Open a stream at member-relative `lba`.

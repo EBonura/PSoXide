@@ -78,7 +78,7 @@ fn jump_table_slots_are_the_day_0_addresses() {
         slot::CLIENT_ATTACH,
         slot::CLIENT_DETACH,
         slot::FATAL,
-        slot::MUSIC_YIELD,
+        slot::RELEASE,
         slot::STREAM_OPEN,
         slot::STREAM_SECTOR,
         slot::CD,
@@ -102,7 +102,8 @@ fn jump_table_slots_are_the_day_0_addresses() {
     ];
     assert_eq!(slots, want);
     assert_eq!(slots.len(), slot::COUNT);
-    assert_eq!(slot::TABLE_END, slot::LOAD_IMAGE + slot::SLOT_BYTES);
+    assert_eq!(slot::TABLE_WORD, slot::LOAD_IMAGE + slot::SLOT_BYTES);
+    assert_eq!(slot::TABLE_END, slot::TABLE_WORD + 4);
 }
 
 #[test]
@@ -119,7 +120,7 @@ fn every_slot_has_a_depth() {
     }
     assert_eq!(
         stack::SLOTS.last().unwrap().addr + slot::SLOT_BYTES,
-        slot::TABLE_END
+        slot::TABLE_WORD
     );
     let depths = [
         (slot::ATTACH, stack::ATTACH),
@@ -129,7 +130,7 @@ fn every_slot_has_a_depth() {
         (slot::CLIENT_ATTACH, stack::CLIENT_ATTACH),
         (slot::CLIENT_DETACH, stack::CLIENT_DETACH),
         (slot::FATAL, stack::FATAL),
-        (slot::MUSIC_YIELD, stack::MUSIC_YIELD),
+        (slot::RELEASE, stack::RELEASE),
         (slot::STREAM_OPEN, stack::STREAM_OPEN),
         (slot::STREAM_SECTOR, stack::STREAM_SECTOR),
         (slot::CD, stack::CD),
@@ -271,7 +272,7 @@ fn sample_image(kind: Kind) -> ImageRow {
 }
 
 #[test]
-fn header_round_trips_at_the_v2_offsets() {
+fn header_round_trips_at_the_v3_offsets() {
     let header = Header {
         image_count: 0x0003,
         scene_count: 0x0005,
@@ -281,8 +282,8 @@ fn header_round_trips_at_the_v2_offsets() {
     };
     let mut bytes = [0xeeu8; HEADER_BYTES];
     header.encode(&mut bytes);
-    assert_eq!(&bytes[0x00..0x08], b"PSXSCN02");
-    assert_eq!(le16(&bytes, 0x08), 2);
+    assert_eq!(&bytes[0x00..0x08], b"PSXSCN03");
+    assert_eq!(le16(&bytes, 0x08), 3);
     assert_eq!(le16(&bytes, 0x0a), 3);
     assert_eq!(le16(&bytes, 0x0c), 5);
     assert_eq!(le16(&bytes, 0x0e), 32);
@@ -297,6 +298,9 @@ fn header_round_trips_at_the_v2_offsets() {
     v1[..8].copy_from_slice(b"PSXSCN01");
     assert_eq!(Header::decode(&v1), Err(TableError::Version1));
     assert_eq!(TableError::Version1.status(), Some(0x21));
+    let mut v2 = v1;
+    v2[..8].copy_from_slice(b"PSXSCN02");
+    assert_eq!(Header::decode(&v2), Err(TableError::Version(2)));
     let mut other = bytes;
     other[0] = b'X';
     assert_eq!(Header::decode(&other), Err(TableError::Magic));
@@ -336,7 +340,7 @@ fn header_round_trips_at_the_v2_offsets() {
 }
 
 #[test]
-fn scene_row_round_trips_at_the_v2_offsets() {
+fn scene_row_round_trips_at_the_v3_offsets() {
     let row = sample_scene(7);
     let mut bytes = [0xeeu8; ROW_BYTES];
     row.encode(&mut bytes);

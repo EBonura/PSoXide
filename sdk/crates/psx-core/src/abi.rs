@@ -93,6 +93,8 @@ pub mod table {
     pub const SCENE_START: u32 = (s::SCENE_FLAG_START as u32) << 24;
     /// Scene row word: the entry PC.
     pub const S_ENTRY: usize = 1;
+    /// Scene row word: the images the scene needs in RAM on entry, one bit per image row.
+    pub const S_NEEDS: usize = 3;
     /// Image row words: LBA (relative to the table's base; a program's is its header sector).
     pub const I_LBA: usize = 0;
     /// Bytes to load.
@@ -141,6 +143,27 @@ pub mod table {
         }
     }
 
+    /// The table's boot scene id (header word 4), the scene its image 0 starts as.
+    #[must_use]
+    pub fn boot_scene(table: &[u32]) -> u32 {
+        table.get(4).map_or(0, |w| w & 0xffff)
+    }
+
+    /// The images scene `id` needs (its row's word 3), found by its id field as the core finds it
+    /// (a compact copy keeps only the scenes a program reaches); `None` when the copy holds no
+    /// such scene or is not a table.
+    #[must_use]
+    pub fn scene_needs(table: &[u32], id: u32) -> Option<u32> {
+        if table.get(..2)? != MAGIC {
+            return None;
+        }
+        let scenes = *table.get(3)? & 0xffff;
+        (0..scenes.min(MAX_ROWS)).find_map(|i| {
+            let row = table.get((HEADER_WORDS + ROW_WORDS * i) as usize..)?;
+            (row.first()? & 0xffff == id).then(|| row.get(S_NEEDS).copied())?
+        })
+    }
+
     /// Bytes of a sector.
     const SECTOR_BYTES: u32 = s::SECTOR_BYTES as u32;
 
@@ -159,6 +182,19 @@ pub mod table {
             t[row + I_ADDR] = 0x8010_0000;
             t[row + I_KIND] = kind;
             t
+        }
+
+        #[test]
+        fn a_scene_is_found_by_its_id_with_what_it_needs() {
+            let mut t = table(2048, KIND_OVERLAY);
+            t[4] = 7; // boot scene 7
+            let row = HEADER_WORDS as usize; // the copy's one scene row
+            t[row] = 7 | 1 << 16;
+            t[row + S_NEEDS] = 0b110;
+            assert_eq!(boot_scene(&t), 7);
+            assert_eq!(scene_needs(&t, 7), Some(0b110));
+            assert_eq!(scene_needs(&t, 0), None, "no such scene");
+            assert_eq!(scene_needs(&[0; 4], 7), None, "table not read");
         }
 
         #[test]

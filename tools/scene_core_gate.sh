@@ -106,7 +106,7 @@ if [ "$TIER" = full ]; then
         real,cd-ack=strict,mdec-req=hidden|default real,cd-ack=strict,mdec-req=hidden|openbios
         real,cd-ack=strict,mdec-req=hidden|hostile:1 real,cd-ack=strict,mdec-req=hidden|hostile:7"
 else
-    CONFIGS="real|default mister|openbios"
+    CONFIGS="real|default mister|openbios real|hostile:7"
 fi
 job() { # name disc steps expect [pads]
     for c in $CONFIGS; do
@@ -140,7 +140,7 @@ job f-prog "$D/f-prog-nested.cue" 1500000000 'fatal:14'
 job f-short "$D/f-short.cue" 2500000000 'fatal:13'
 job f-tailed "$D/f-tailed.cue" 1200000000 'fatal:14'
 job f-svc "$D/f-svc.cue" 1200000000 'tty:hello-modular: FAIL require 00000014'
-job f-needs "$D/f-needs.cue" 1200000000 'tty:hello-modular: FAIL switch refused 00000022'
+job f-needs "$D/f-needs.cue" 1200000000 'fatal:22'
 job f-hash "$D/f-hash.cue" 1200000000 'tty:hello-modular: FAIL switch refused 00000023'
 for f in "$D"/*.bin; do cue "$f"; done
 seq 1 "$(wc -l <"$OUT/jobs")" | xargs -P "$JOBS" -n 1 sh tools/scene_core_run.sh "$OUT"

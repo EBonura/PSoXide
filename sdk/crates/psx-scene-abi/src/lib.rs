@@ -11,12 +11,12 @@
 //! - the `SCENES.TBL` wire format ([`Header`], [`SceneRow`], [`ImageRow`],
 //!   [`encode_table`]).
 //!
-//! The table is version 2 (`PSXSCN02`): scene rows say where a scene enters,
-//! image rows say what is loaded where, so a Program can host scenes of its
-//! own and Overlays without a program switch. A version 1 table is refused
-//! ([`status::TABLE`]); [`v1`] keeps what the prebuilt core still reads.
+//! The table is version 3 (`PSXSCN03`): scene rows say where a scene enters and which images it
+//! needs in RAM (the core loads them on entry), image rows say what is loaded where, so a Program
+//! can host scenes of its own and Overlays without a program switch. Version 1 and 2 tables are
+//! refused ([`status::TABLE`]); [`v1`] keeps the old names for the tools that report them.
 //!
-//! Version 2 layout, one sector at LBA 22, all little-endian:
+//! Version 3 layout, one sector at LBA 22, all little-endian:
 //!
 //! ```text
 //! 0x00            header, 64 B (Header)
@@ -135,22 +135,28 @@ pub mod slot {
     pub const CLIENT_DETACH: u32 = CORE_WINDOW.start + 5 * SLOT_BYTES;
     /// `psx_core_fatal(stage) -> !`.
     pub const FATAL: u32 = CORE_WINDOW.start + 6 * SLOT_BYTES;
-    /// `psx_core_music_yield()`.
-    pub const MUSIC_YIELD: u32 = CORE_WINDOW.start + 7 * SLOT_BYTES;
+    /// `psx_core_release()`: the program drove the drive itself (its own raw commands); the core
+    /// proves the drive stopped again before its next command. Was the music yield until table
+    /// version 3.
+    pub const RELEASE: u32 = CORE_WINDOW.start + 7 * SLOT_BYTES;
     /// `psx_core_stream_open(lba, flags) -> u32`, a stream client's start.
     pub const STREAM_OPEN: u32 = CORE_WINDOW.start + 8 * SLOT_BYTES;
     /// `psx_core_stream_sector(dst) -> u32`, the next sector of an open stream.
     pub const STREAM_SECTOR: u32 = CORE_WINDOW.start + 9 * SLOT_BYTES;
     /// `psx_core_cd(op, a, b, c) -> u32`, register-level CD for a game's own driver.
     pub const CD: u32 = CORE_WINDOW.start + 10 * SLOT_BYTES;
-    /// `psx_core_set_idle_hook(hook)`, called from every spin of every core wait.
+    /// `psx_core_set_idle_hook(hook)`, called from every spin of the waits of the slots that load
+    /// or stream (never from `psx_core_cd`).
     pub const SET_IDLE_HOOK: u32 = CORE_WINDOW.start + 11 * SLOT_BYTES;
     /// `psx_core_load_image(image, table) -> u32`: load an overlay and return to the caller.
     pub const LOAD_IMAGE: u32 = CORE_WINDOW.start + 12 * SLOT_BYTES;
     /// Slots in the table.
     pub const COUNT: usize = 13;
-    /// One past the table's last slot: the core's own code starts here.
-    pub const TABLE_END: u32 = CORE_WINDOW.start + COUNT as u32 * SLOT_BYTES;
+    /// The word right after the last slot: the number of slots this core has ([`COUNT`]), so a
+    /// later core can add slots without renumbering and a program can see which it has.
+    pub const TABLE_WORD: u32 = CORE_WINDOW.start + COUNT as u32 * SLOT_BYTES;
+    /// One past the table and its word: the core's own code starts here.
+    pub const TABLE_END: u32 = TABLE_WORD + 4;
 }
 
 /// The deepest stack each slot uses below the caller's `$sp`, in bytes: every frame of its worst
@@ -164,35 +170,35 @@ pub mod slot {
 /// The figures were measured on the core image of CORE_HASH 2dd28a19 (11-24).
 pub mod stack {
     /// `__psx_core_attach` (called by `__core_boot` only).
-    pub const ATTACH: u32 = 72;
+    pub const ATTACH: u32 = 24;
     /// `psx_core_switch`, on the caller's stack, before it moves to the switch stack.
-    pub const SWITCH: u32 = 352;
+    pub const SWITCH: u32 = 392;
     /// The switch's load, on the switch stack at `STACK_INIT`; under `SWITCH_STACK`.
-    pub const SWITCH_LOAD: u32 = 336;
+    pub const SWITCH_LOAD: u32 = 344;
     /// `psx_core_read`.
-    pub const READ: u32 = 304;
+    pub const READ: u32 = 312;
     /// `psx_core_pause`.
-    pub const PAUSE: u32 = 224;
+    pub const PAUSE: u32 = 232;
     /// `psx_core_client_attach`.
     pub const CLIENT_ATTACH: u32 = 0;
     /// `psx_core_client_detach`.
     pub const CLIENT_DETACH: u32 = 0;
     /// `psx_core_fatal`.
     pub const FATAL: u32 = 64;
-    /// `psx_core_music_yield`.
-    pub const MUSIC_YIELD: u32 = 8;
+    /// `psx_core_release`.
+    pub const RELEASE: u32 = 0;
     /// `psx_core_stream_open`.
-    pub const STREAM_OPEN: u32 = 224;
+    pub const STREAM_OPEN: u32 = 232;
     /// `psx_core_stream_sector`.
     pub const STREAM_SECTOR: u32 = 136;
     /// `psx_core_cd`.
-    pub const CD: u32 = 232;
+    pub const CD: u32 = 248;
     /// `psx_core_set_idle_hook`.
     pub const SET_IDLE_HOOK: u32 = 0;
     /// `psx_core_load_image`: the rows, the load and its checks.
-    pub const LOAD_IMAGE: u32 = 352;
+    pub const LOAD_IMAGE: u32 = 384;
     /// The deepest of the slots a program calls (the switch's load runs on its own stack).
-    pub const MAX: u32 = 352;
+    pub const MAX: u32 = 392;
 
     const _: () = assert!(SWITCH_LOAD <= super::SWITCH_STACK);
 
@@ -251,7 +257,7 @@ pub mod stack {
                 false,
             ),
             row(s::FATAL, "psx_core_fatal", FATAL, false),
-            row(s::MUSIC_YIELD, "psx_core_music_yield", MUSIC_YIELD, false),
+            row(s::RELEASE, "psx_core_release", RELEASE, false),
             row(s::STREAM_OPEN, "psx_core_stream_open", STREAM_OPEN, true),
             row(
                 s::STREAM_SECTOR,
@@ -259,7 +265,7 @@ pub mod stack {
                 STREAM_SECTOR,
                 true,
             ),
-            row(s::CD, "psx_core_cd", CD, true),
+            row(s::CD, "psx_core_cd", CD, false),
             row(
                 s::SET_IDLE_HOOK,
                 "psx_core_set_idle_hook",
@@ -409,14 +415,17 @@ pub const BOOT_EXE_LBA: u32 = TABLE_LBA + 1;
 /// File name the disc tools give the table in the ISO 9660 root.
 pub const TABLE_FILE_NAME: &str = "SCENES.TBL";
 
-/// Identifies a version 2 scene table.
-pub const MAGIC: [u8; 8] = *b"PSXSCN02";
+/// Identifies a version 3 scene table.
+pub const MAGIC: [u8; 8] = *b"PSXSCN03";
 
-/// The version 1 magic. A version 2 core refuses such a table with [`status::TABLE`].
+/// The version 2 magic (no required-images word): refused, [`TableError::Version`] 2.
+pub const MAGIC_V2: [u8; 8] = *b"PSXSCN02";
+
+/// The version 1 magic. A version 3 core refuses such a table with [`status::TABLE`].
 pub const MAGIC_V1: [u8; 8] = *b"PSXSCN01";
 
 /// Table version this layout describes. A new field in a reserved slot keeps it.
-pub const VERSION: u16 = 2;
+pub const VERSION: u16 = 3;
 
 /// Bytes in the header, at offset 0.
 pub const HEADER_BYTES: usize = 64;
@@ -498,6 +507,10 @@ impl Kind {
     }
 }
 
+/// Image kind byte 2, reserved for modules shared by the programs of a disc (not built): every
+/// core so far refuses a row of this kind (0x24) and the table writer never writes one.
+pub const KIND_RESERVED_SHARED: u8 = 2;
+
 /// How an Overlay is kept. Read by the build only; the core ignores it (a VOLATILE overlay reaches
 /// the core through its evicts word, which holds its own bit). A Program row carries 0.
 ///
@@ -539,8 +552,8 @@ impl Class {
 /// The table header, 64 bytes at offset 0.
 ///
 /// ```text
-/// 0x00  8  magic "PSXSCN02"
-/// 0x08  2  table version, 2
+/// 0x00  8  magic "PSXSCN03"
+/// 0x08  2  table version, 3
 /// 0x0A  2  image count I, 1..=32
 /// 0x0C  2  scene count S, S + I <= 62
 /// 0x0E  2  row bytes, 32
@@ -602,6 +615,9 @@ impl Header {
     pub fn decode(bytes: &[u8; HEADER_BYTES]) -> Result<Self, TableError> {
         if bytes[0x00..0x08] == MAGIC_V1 {
             return Err(TableError::Version1);
+        }
+        if bytes[0x00..0x08] == MAGIC_V2 {
+            return Err(TableError::Version(2));
         }
         if bytes[0x00..0x08] != MAGIC {
             return Err(TableError::Magic);

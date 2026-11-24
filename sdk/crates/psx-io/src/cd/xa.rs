@@ -333,7 +333,11 @@ impl Drive for Cd {
     fn begin_stop(&mut self) -> u8 {
         set_mixer(self, (0, 0));
         // A Pause has no parameter, so the parameter FIFO wait cannot fail it.
-        self.dispatch_command(CMD_PAUSE, &[], 0).unwrap_or(0)
+        let saved = self.dispatch_command(CMD_PAUSE, &[], 0).unwrap_or(0);
+        // Sent without the core: it proves the drive stopped again before its own next command.
+        #[cfg(feature = "core-cd")]
+        core_slot::release();
+        saved
     }
     #[inline(never)]
     fn look_pause(&mut self) -> bool {
