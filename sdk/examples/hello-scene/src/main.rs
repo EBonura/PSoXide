@@ -1,8 +1,9 @@
 //! `hello-scene` -- two programs, two overlays and the scene core between them.
 //!
 //! The walk (scene table version 2: scenes 0 and 1 in program A, 2 and 3 the overlays O1 and O2
-//! at one address, 4 program B): A's start checks the cold handoff block, reads its scene table
-//! into RAM and checks that a switch is refused while a stream client is attached; then
+//! at one address, 4 program B): A's start checks the cold handoff block, that its scene table
+//! is not read at boot (the first switch reads it) and that a switch is refused while a stream
+//! client is attached; then
 //! 0 -> 1 (A's menu, in RAM), which loads O1 with the load that returns, calls it, and switches
 //! 1 -> 2 (O1, in RAM) -> 1 (in RAM) -> 2 (in RAM) -> 3 (O2, read, evicts O1) -> 2 (O1, read again)
 //! -> 4 (program B, a program switch). B checks the core entry, the window hash, the block (scenes,
@@ -170,9 +171,9 @@ mod scene {
         /// The program's copy of its scene table (header and rows; 5 scenes and 4 images here).
         pub static mut TABLE: [u32; 96] = [0; 96];
 
-        pub fn table() -> &'static [u32] {
-            // SAFETY: written once at boot, before any switch reads it.
-            unsafe { &*core::ptr::addr_of!(TABLE) }
+        pub fn table() -> &'static mut [u32] {
+            // SAFETY: single-threaded; the core reads it only during the calls it is passed to.
+            unsafe { &mut *core::ptr::addr_of_mut!(TABLE) }
         }
 
         pub fn switch(next: u32, args: &[u32; 4]) -> u32 {
@@ -219,13 +220,9 @@ mod scene {
             0,
         );
         check(&mut ok, "mask", core_::block_word(block::OFF_MASK), 1);
-        // SAFETY: once, before any switch reads it.
-        let words = core_::read_table(unsafe { &mut *core::ptr::addr_of_mut!(base::TABLE) });
-        say(
-            "hello-scene: A table words ",
-            words.map_or_else(|e| e | 0xe000_0000, |w| w as u32),
-        );
-        check(&mut ok, "read-table", words.is_ok() as u32, 1);
+        // The table is not read at boot: the first switch or load reads it (a program that never
+        // switches pays nothing).
+        check(&mut ok, "table-unread", base::table()[0], 0);
         put(TABLE_AT, base::table().as_ptr() as u32);
         // A stream client holds the drive: a switch must be refused and change nothing.
         check(&mut ok, "client-attach", core_::client_attach(), code::OK);
@@ -292,6 +289,13 @@ mod scene {
                     "menu-args",
                     core_::block_word(block::OFF_ARGS),
                     ARGS[0],
+                );
+                // The first switch read the table into RAM.
+                check(
+                    &mut ok,
+                    "table-read",
+                    base::table()[0],
+                    psx_core::abi::table::MAGIC[0],
                 );
                 // Load the first overlay and call it (the load that returns), then load it again
                 // (in RAM: no read).

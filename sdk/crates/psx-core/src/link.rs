@@ -196,8 +196,13 @@ core::arch::global_asm!(
 
 /// Switch to `scene`. Returns only when the core refused before anything changed (a
 /// [`abi::code`]); on success the scene runs. `table` is the program's RAM copy of its scene
-/// table ([`read_table`]).
-pub fn switch(scene: u32, args: &[u32; 4], table: &[u32]) -> u32 {
+/// table, read from the disc by the first [`switch`] or [`load_image`] that needs it: zeroed
+/// memory is fine, and a program that never switches never reads it, so its boot costs no seek.
+pub fn switch(scene: u32, args: &[u32; 4], table: &mut [u32]) -> u32 {
+    let r = table_ready(table);
+    if r != abi::code::OK {
+        return r;
+    }
     // SAFETY: the core is in the window (checked at boot); the call follows the ABI.
     unsafe { psx_core_switch(scene, args, table.as_ptr()) }
 }
@@ -205,15 +210,34 @@ pub fn switch(scene: u32, args: &[u32; 4], table: &[u32]) -> u32 {
 /// Load overlay `image` into its range unless it is in RAM, and return: the caller then calls
 /// into it. Refused (a code) when its program is not the one running, or when its range would
 /// overwrite the calling code. `table` as for [`switch`].
-pub fn load_image(image: u32, table: &[u32]) -> u32 {
+pub fn load_image(image: u32, table: &mut [u32]) -> u32 {
+    let r = table_ready(table);
+    if r != abi::code::OK {
+        return r;
+    }
     // SAFETY: the core is in the window (checked at boot); the call follows the ABI.
     unsafe { psx_core_load_image(image, table.as_ptr()) }
 }
 
-/// Read this disc's SCENES.TBL once (at boot) into `table`, the program's own RAM copy that
-/// [`switch`] and [`load_image`] take: the header and every row, `16 + 8 * (scenes + images)` words
-/// (a 2 KB sector passes through the stack while it is read). Returns the words kept, or the code
-/// of a failed read, a table of another version (0x21) or a `table` too small for it (0x24).
+/// `table` holds the disc's scene table: read now unless it already does (its first word is the
+/// magic only once [`read_table`] has filled it).
+fn table_ready(table: &mut [u32]) -> u32 {
+    if table.first() == Some(&abi::table::MAGIC[0]) {
+        return abi::code::OK;
+    }
+    match read_table(table) {
+        Ok(_) => abi::code::OK,
+        Err(r) => r,
+    }
+}
+
+/// Read this disc's SCENES.TBL into `table`, the program's own RAM copy that [`switch`] and
+/// [`load_image`] take: the header and every row, `16 + 8 * (scenes + images)` words. They read it
+/// on their first use; a program calls this itself only to pay for the read earlier. A 2 KB
+/// sector passes through the stack while it is read, so it is never inlined into its caller.
+/// Returns the words kept, or the code of a failed read, a table of another version (0x21) or a
+/// `table` too small for it (0x24).
+#[inline(never)]
 pub fn read_table(table: &mut [u32]) -> Result<usize, u32> {
     let mut sector = [0u32; 512];
     // SAFETY: one sector's worth of words.
