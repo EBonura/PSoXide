@@ -22,6 +22,7 @@
 #   while the core waits and the VBlank counter on), alone and nested; its entry-state line, which
 #   must be the same in every run (a BIOS boot and a core switch leave the same machine);
 # - hello-boot: the film player playing a real FILM.STR, alone and nested (no splash on the switch);
+# - pgo-search: a layout search on hello-core-overlay through its ship relink (tools/pgo_search_gate.sh);
 # - faults, every one the emulators can produce: the launcher's table broken (fatal 0x21), a program
 #   image's byte (fatal 0x14, the switch's load), a needed overlay's byte on an in-program switch
 #   (fatal 0x14) and on a program's start (refused 0x14), a disc cut short inside a program (fatal
@@ -69,6 +70,13 @@ SOAK=$SOAK sh sdk/examples/hello-modular/build.sh "$OUT/mod" >"$OUT/build-mod.lo
 sh sdk/examples/hello-boot/build.sh "$OUT/boot" >"$OUT/build-boot.log" 2>&1 || failed boot
 grep -h -E "refused, as it must be|links the same EXE" "$OUT"/build-*.log | sort | uniq -c
 mark "builds done"
+
+# A layout search on a program of the core, through its ship relink (psoxide.ld keeps the core's
+# entry code last; a search that moved it broke every searched game's relink, 11-24).
+v=PASS
+sh tools/pgo_search_gate.sh "$OUT/ovl" "$OUT/pgo-search" >"$OUT/pgo-search.log" 2>&1 || v=FAIL
+printf 'pgo-search\t%s\t%s\n' $v "$(tail -1 "$OUT/pgo-search.log")" >>"$OUT/results.tsv"
+mark "pgo search: $v"
 
 # Derived discs.
 NEST="$HOST_BIN/psx-nest"

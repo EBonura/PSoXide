@@ -1131,9 +1131,12 @@ pub(crate) fn glob(pattern: &[u8], text: &[u8]) -> bool {
     pattern[p..].iter().all(|&b| b == b'*')
 }
 
-/// The `.text` input-section patterns a linker script places ahead of its
-/// catch-all (`KEEP(*(.text._start))`, `*(.text.*hot_leaf*)`): an ordering
-/// file cannot move what they match.
+/// The `.text` input-section patterns a linker script places by name, ahead of
+/// its catch-all (`KEEP(*(.text._start))`, `*(.text.*hot_leaf*)`) or after it
+/// (`*(.text_entry .text_entry.*)`, once-only entry code kept last): an
+/// ordering file cannot move what they match, so neither the search nor the
+/// placement lists it. A line may name several patterns; only the catch-all's
+/// own `.text` and `.text.*` are not fixed.
 pub fn fixed_patterns(script: &str) -> Vec<String> {
     let mut text = String::with_capacity(script.len());
     let mut rest = script;
@@ -1144,20 +1147,29 @@ pub fn fixed_patterns(script: &str) -> Vec<String> {
             .map_or("", |close| &rest[open + close + 2..]);
     }
     text.push_str(rest);
-    text.lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            let line = line.strip_prefix("KEEP(").unwrap_or(line);
-            let inner = line.strip_prefix("*(")?;
-            let (pattern, tail) = inner.split_at(inner.find(')')?);
-            let tail = tail[1..].trim();
-            let single = pattern.starts_with(".text") && !pattern.contains(char::is_whitespace);
-            (single
-                && matches!(tail, "" | ";" | ")" | ");")
-                && !matches!(pattern, ".text" | ".text.*"))
-            .then(|| pattern.to_string())
-        })
-        .collect()
+    let mut fixed = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        let line = line.strip_prefix("KEEP(").unwrap_or(line);
+        let Some(inner) = line.strip_prefix("*(") else {
+            continue;
+        };
+        let Some(close) = inner.find(')') else {
+            continue;
+        };
+        if !matches!(inner[close + 1..].trim(), "" | ";" | ")" | ");") {
+            continue;
+        }
+        fixed.extend(
+            inner[..close]
+                .split_whitespace()
+                .filter(|pattern| {
+                    pattern.starts_with(".text") && !matches!(*pattern, ".text" | ".text.*")
+                })
+                .map(str::to_string),
+        );
+    }
+    fixed
 }
 
 /// A conflict term: `x` (with the loop around its call sites, if any)
@@ -1364,14 +1376,7 @@ pub fn place(sections: &[Section], image: &Image, bound: &Bound, fixed: &[String
         })
         .collect();
     let free = |k: usize| sections[k].symbol.is_some() && !is_fixed[k];
-    let mut at = sections
-        .iter()
-        .zip(&is_fixed)
-        .filter(|(_, &fixed)| fixed)
-        .map(|(section, _)| section.end())
-        .max()
-        .or_else(|| sections.iter().map(|section| section.start).min())
-        .unwrap_or(0);
+    let mut at = ordered_start(sections, fixed);
     let mut weight = vec![0.0; sections.len()];
     for term in &model.terms {
         weight[term.x] += term.n;
@@ -1499,13 +1504,23 @@ impl Recorded {
 /// Where the catch-all's sections start: after the linker script's fixed
 /// rules, or at the first section when there are none.
 pub fn ordered_start(sections: &[Section], fixed: &[String]) -> u32 {
+    let is_fixed = |section: &&Section| {
+        fixed
+            .iter()
+            .any(|pattern| glob(pattern.as_bytes(), section.name.as_bytes()))
+    };
+    // Fixed sections after the catch-all (`.text_entry.*`, kept last) lie above the
+    // ordered code and do not move where it starts.
+    let first_free = sections
+        .iter()
+        .filter(|section| !is_fixed(section))
+        .map(|section| section.start)
+        .min()
+        .unwrap_or(u32::MAX);
     sections
         .iter()
-        .filter(|section| {
-            fixed
-                .iter()
-                .any(|pattern| glob(pattern.as_bytes(), section.name.as_bytes()))
-        })
+        .filter(is_fixed)
+        .filter(|section| section.start < first_free)
         .map(Section::end)
         .max()
         .or_else(|| sections.iter().map(|section| section.start).min())
@@ -2070,6 +2085,77 @@ mod tests {
             .map(|line| format!("{line}\n"))
             .collect();
         assert!(check_order(&reversed, &symbols, &sections).is_err());
+    }
+
+    /// A program on the scene core: psoxide.ld keeps its once-only entry code (`__core_boot`, the
+    /// boot mover) last, after the catch-all, in one two-pattern line. That code is cold, so a
+    /// placement that did not know it is fixed offered it as a gap filler and the ship relink,
+    /// which keeps it last whatever the order file says, broke the order (NitroXide, 11-24).
+    #[test]
+    fn a_core_programs_entry_code_is_never_placed_and_the_relink_follows_the_order() {
+        let fixed = fixed_patterns(include_str!("../../../sdk/psoxide.ld"));
+        for pattern in [".text._start", ".text_entry", ".text_entry.*"] {
+            assert!(fixed.iter().any(|p| p == pattern), "{pattern}: {fixed:?}");
+        }
+        assert!(
+            !fixed.iter().any(|p| p == ".text" || p == ".text.*"),
+            "{fixed:?}"
+        );
+        assert_eq!(
+            fixed_patterns("*(.text .text.*);\n  *(.text_entry .text_entry.*);\n"),
+            vec![".text_entry", ".text_entry.*"]
+        );
+
+        let (_, image, counts) = game();
+        let text = map(&[
+            (".text.main", "main", 0x40),
+            (".text.a", "a", 0x40),
+            (".text.b", "b", 0x40),
+            (".text.c", "c", 0x100),
+            (".text_entry.__core_boot", "__core_boot", 0x20),
+            (".text_entry.__core_boot_rs", "__core_boot_rs", 0x140),
+            (".text_entry.__boot_entry_rs", "__boot_entry_rs", 0x80),
+        ]);
+        let sections = read_map(&text);
+        let is_entry = |k: usize| sections[k].name.starts_with(".text_entry");
+        // The ordered code starts after `_start`, not after the entry code at the end.
+        assert_eq!(ordered_start(&sections, &fixed), 0x8001_0010);
+
+        let layout = collect(&sections, &image, &counts).layout;
+        let bound = bind(&layout, &sections, &image);
+        let placement = place(&sections, &image, &bound, &fixed);
+        assert!(
+            !placement.order.iter().any(|&k| is_entry(k)),
+            "{placement:?}"
+        );
+        let order = order_file(&sections, &placement);
+        assert!(
+            !order.contains("__core_boot") && !order.contains("__boot_entry"),
+            "{order}"
+        );
+
+        // The ship relink as ld.lld makes it: the listed sections from the ordered start in the
+        // file's order, then the rest of the catch-all, then the entry code, still last.
+        let mut relinked = sections.clone();
+        let mut at = ordered_start(&sections, &fixed);
+        for &k in &placement.order {
+            relinked[k].start = at;
+            at += sections[k].size;
+        }
+        for (k, section) in relinked.iter_mut().enumerate() {
+            if is_entry(k) {
+                section.start = at;
+                at += section.size;
+            }
+        }
+        let symbols: Vec<(String, u32)> = placement
+            .placed
+            .iter()
+            .map(|&(k, at)| (sections[k].symbol.clone().unwrap(), at))
+            .collect();
+        let followed = check_order(&order, &symbols, &relinked).unwrap();
+        assert_eq!(followed.drifted, 0);
+        assert_eq!(at, sections.iter().map(Section::end).max().unwrap());
     }
 
     #[test]
