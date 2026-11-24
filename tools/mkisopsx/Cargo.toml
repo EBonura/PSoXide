@@ -3,6 +3,8 @@ name    = "mkisopsx"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-2.0-or-later"
+# `cargo run -p mkisopsx` (the Makefile, game builds) runs the disc writer, not psx-nest.
+default-run = "mkisopsx"
 
 
 [dependencies]
