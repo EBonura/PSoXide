@@ -61,9 +61,9 @@ use alloc::{format, vec};
 
 use psx_scene_abi::{
     block, encode_compact, encode_table, word_fnv, Class, ImageRow, Kind, SceneRow, Span,
-    TableError, BOOT_EXE_LBA, CORE_WINDOW, LOAD_ADDR, MAX_IMAGES, MAX_ROWS, NAME_BYTES,
-    PAYLOAD_END, REQUIRE_MARKER, SCENE_FLAG_START, SECTOR_BYTES, STACK_INIT, TABLE_FILE_NAME,
-    TABLE_LBA,
+    TableError, BOOT_EXE_LBA, CALLED_PROGRAM_MARKER, CORE_WINDOW, LOAD_ADDR, MAX_IMAGES, MAX_ROWS,
+    NAME_BYTES, PAYLOAD_END, REQUIRE_MARKER, SCENE_FLAG_START, SECTOR_BYTES, STACK_INIT,
+    TABLE_FILE_NAME, TABLE_LBA,
 };
 
 use crate::{
@@ -409,6 +409,9 @@ pub enum SceneDiscError {
     },
     /// A start scene needs images but its Program never asks for them: its EXE does not link
     /// `psx_core::link::require` (no `psx_scene_abi::REQUIRE_MARKER` in its bytes).
+    /// A Program was built as a called program (psx-rt `called-program`): it returns to a caller
+    /// and must never be started by the BIOS or the scene core.
+    CalledProgram(String),
     NoRequire {
         /// The start scene.
         scene: String,
@@ -790,6 +793,13 @@ pub fn add_scene_disc_files_with(
                     end: reserve.end,
                 });
             }
+        }
+        // A program another program calls and that returns to it is never one a disc starts.
+        if files[index]
+            .windows(CALLED_PROGRAM_MARKER.len())
+            .any(|w| w == CALLED_PROGRAM_MARKER)
+        {
+            return Err(SceneDiscError::CalledProgram(image.name.clone()));
         }
         let lba = lba_of(&image.name);
         let (row, pc) = program_image_row(&image.name, &files[index], lba, image.core_hash, core)?;

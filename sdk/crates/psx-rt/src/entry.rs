@@ -253,8 +253,13 @@ pub fn set_entry_state() {
         psx_io::write_u16(psx_hw::sio::sio0::CTRL, 0);
 
         spu_entry_state();
-        gpu_entry_state();
-        cd_mixer_entry_state();
+        // A called program (feature `called-program`) shares its caller's VRAM, display and CD
+        // mixer and returns to it: those stay as the caller left them.
+        #[cfg(not(feature = "called-program"))]
+        {
+            gpu_entry_state();
+            cd_mixer_entry_state();
+        }
 
         // Last: the timers and SIO0 above may have latched a bit.
         psx_io::irq::acknowledge(u32::MAX);
@@ -545,6 +550,14 @@ unsafe fn set_control(value: u16) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_called_program_marker_is_the_one_the_disc_tools_refuse() {
+        assert_eq!(
+            crate::CALLED_PROGRAM_MARKER,
+            psx_scene_abi::CALLED_PROGRAM_MARKER
+        );
+    }
 
     #[test]
     fn the_handoff_block_words_are_the_scene_abis() {

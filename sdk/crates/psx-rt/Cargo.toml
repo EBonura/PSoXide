@@ -26,6 +26,11 @@ runtime = []
 # Only the start marker `__psx_rt_started` and `mark_started`, for a program that brings its own entry
 # point (a psyq layer): harnesses then read none of its RAM before its own `.bss` clear has run.
 start-marker = []
+# The program is called by another program and returns to it (Hollow Knight's intro blob): `_start`
+# is a function that returns after `main`, and the entry state leaves the caller's VRAM, display
+# and CD mixer alone. Never for a program a BIOS or the scene core starts: the disc tools refuse
+# one (psx_rt::CALLED_PROGRAM_MARKER).
+called-program = []
 # Expose a bump allocator as the global allocator. Kept optional so a
 # minimal no-heap homebrew can opt out.
 alloc = []

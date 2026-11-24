@@ -1061,3 +1061,16 @@ fn a_start_scene_that_needs_images_needs_a_program_that_asks_for_them() {
     plan.scenes[start].needs.clear();
     assert!(press(exe(BASE, BASE, 0, &payload(8, 1)), &plan, false).is_ok());
 }
+
+/// A program built with psx-rt's `called-program` (it returns to a caller) never goes on a disc.
+#[test]
+fn a_called_program_is_refused_as_a_disc_program() {
+    let mut called = payload(8, 1);
+    called[0x200..0x218].copy_from_slice(&psx_scene_abi::CALLED_PROGRAM_MARKER);
+    assert_eq!(
+        press(exe(BASE, BASE, 0, &called), &overlay_plan(), false)
+            .err()
+            .unwrap(),
+        SceneDiscError::CalledProgram(String::from(BOOT_EXE_NAME))
+    );
+}

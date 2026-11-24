@@ -347,6 +347,11 @@ pub const STREAM_IMPLICIT_SEEK: u32 = 1 << 0;
 /// not hold them: such a program never asks for those images and runs without them.
 pub const REQUIRE_MARKER: [u8; 16] = *b"psx-core:require";
 
+/// Bytes a program built with psx-rt's `called-program` feature carries (`psx_rt::CALLED_PROGRAM_MARKER`):
+/// it is called by another program and returns to it, so it must never be a disc's program. The
+/// table writer refuses a Program that holds them.
+pub const CALLED_PROGRAM_MARKER: [u8; 24] = *b"psx-rt:called-program\0\0\0";
+
 /// The handoff block's fields, as byte offsets from [`HANDOFF_BLOCK`]`.start`.
 pub mod block {
     /// `"PSCB"` read as a little-endian word.

@@ -147,7 +147,10 @@ pub const STARTED: u32 = 0x5f6e_7572;
 /// the scene core, the stored `.boot` and core image bytes), so no `.bss` symbol may be read as
 /// the program's state. In `.data` (a non-zero initial value), so the EXE carries
 /// [`NOT_STARTED`].
-#[cfg(all(target_arch = "mips", any(feature = "runtime", feature = "start-marker")))]
+#[cfg(all(
+    target_arch = "mips",
+    any(feature = "runtime", feature = "start-marker")
+))]
 #[no_mangle]
 #[used]
 #[allow(
@@ -162,7 +165,11 @@ pub static mut __psx_rt_started: u32 = NOT_STARTED;
 ///
 /// # Safety
 /// Call it once, from the entry code, after `.bss` is clear.
-#[cfg(all(target_arch = "mips", feature = "start-marker", not(feature = "runtime")))]
+#[cfg(all(
+    target_arch = "mips",
+    feature = "start-marker",
+    not(feature = "runtime")
+))]
 pub unsafe fn mark_started() {
     // SAFETY: a volatile aligned store to the marker static; the entry code is the only writer.
     unsafe { (&raw mut __psx_rt_started).write_volatile(STARTED) };
@@ -202,10 +209,53 @@ static PSX_EXE_REGION: [u8; 55] = *b"PSoXide SDK homebrew executable            
 /// have set up a valid stack pointer before branching here -- the
 /// PSX-EXE header's `initial_sp_base` + `initial_sp_offset` fields
 /// guarantee this.
-#[cfg(all(target_arch = "mips", feature = "runtime"))]
+#[cfg(all(
+    target_arch = "mips",
+    feature = "runtime",
+    not(feature = "called-program")
+))]
 #[no_mangle]
 #[link_section = ".text._start"]
 pub unsafe extern "C" fn _start(a0: u32, a1: u32, a2: u32) -> ! {
+    // SAFETY: as this function's.
+    unsafe { start(a0, a1, a2) };
+    #[cfg(feature = "boot-trace")]
+    tty::println("psx-rt: main returned");
+    halt();
+}
+
+/// The entry of a program another program calls and that returns to it (feature `called-program`,
+/// Hollow Knight's intro blob): `.bss` cleared, the entry state without the parts its caller keeps
+/// (VRAM, the display, the CD mixer: see [`entry::set_entry_state`]), `main`, then back to the
+/// caller, on the caller's stack. The caller saves and restores the registers it needs around the call
+/// (the CPU, interrupt, DMA, timer, SIO and SPU resets still run).
+///
+/// # Safety
+/// Called as a function, once per call, by a program that has loaded this one at its link address
+/// and flushed the instruction cache; `` is the caller's, with room for this program's stack.
+#[cfg(all(target_arch = "mips", feature = "runtime", feature = "called-program"))]
+#[no_mangle]
+#[link_section = ".text._start"]
+pub unsafe extern "C" fn _start(a0: u32, a1: u32, a2: u32) {
+    // The marker the disc tools refuse in a disc's own program: read, so it links.
+    // SAFETY: a volatile read of the first byte of a static array.
+    let _ = unsafe { core::ptr::read_volatile(CALLED_PROGRAM.as_ptr()) };
+    // SAFETY: as this function's.
+    unsafe { start(a0, a1, a2) };
+}
+
+/// Bytes a called program carries (`.rodata`): mkisopsx refuses a disc program that holds them, so
+/// `called-program` cannot end up on a program a BIOS or the scene core starts.
+#[cfg(all(target_arch = "mips", feature = "runtime", feature = "called-program"))]
+static CALLED_PROGRAM: [u8; 24] = CALLED_PROGRAM_MARKER;
+
+/// The bytes of [`CALLED_PROGRAM`], for the tools that look for them.
+pub const CALLED_PROGRAM_MARKER: [u8; 24] = *b"psx-rt:called-program\0\0\0";
+
+/// `_start`'s body, up to and including `main`.
+#[cfg(all(target_arch = "mips", feature = "runtime"))]
+#[inline(always)]
+unsafe fn start(a0: u32, a1: u32, a2: u32) {
     #[cfg(feature = "boot-trace")]
     tty::println("psx-rt: start");
 
@@ -257,9 +307,6 @@ pub unsafe extern "C" fn _start(a0: u32, a1: u32, a2: u32) -> ! {
     // declaration to it. The signature is not checked across that boundary; a `main` with a
     // different signature would be undefined behaviour.
     unsafe { main() };
-    #[cfg(feature = "boot-trace")]
-    tty::println("psx-rt: main returned");
-    halt();
 }
 
 /// Current MIPS stack pointer (`$sp`). No memory or stack side effects.

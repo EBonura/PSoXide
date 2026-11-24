@@ -25,7 +25,7 @@ tty:*)
     for stop in 'hello-scene: B PASS' 'hello-scene: B FAIL' 'hello-scene: O switch refused' \
         'hello-core-overlay: PASS' 'hello-core-overlay: STALE' 'hello-core-overlay: FAIL' \
         'hello-modular: PASS' 'hello-modular: FAIL' 'hello-modular: SOAK' 'hello-boot: PASS' \
-        'hello-boot: FAIL'; do
+        'hello-boot: FAIL' 'hello-called: PASS' 'hello-called: FAIL'; do
         set -- "$@" --stop-on-tty "$stop"
     done
     ;;

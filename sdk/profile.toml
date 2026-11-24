@@ -11,7 +11,7 @@
 
 # Features any guest build may enable.
 [shipping]
-psx-rt   = ["runtime", "start-marker"]
+psx-rt   = ["runtime", "start-marker", "called-program"]
 psx-mc   = ["hw"]
 psx-settings = ["card"]
 # The program side of the scene core (sdk/crates/psx-core): every program on the core enables it.

@@ -23,6 +23,8 @@
 #   must be the same in every run (a BIOS boot and a core switch leave the same machine);
 # - hello-boot: the film player playing a real FILM.STR, alone and nested (no splash on the switch);
 # - pgo-search: a layout search on hello-core-overlay through its ship relink (tools/pgo_search_gate.sh);
+# - hello-called: a program that calls another (psx-rt `called-program`) twice and keeps its VRAM
+#   and display (Hollow Knight's intro blob);
 # - faults, every one the emulators can produce: the launcher's table broken (fatal 0x21), a program
 #   image's byte (fatal 0x14, the switch's load), a needed overlay's byte on an in-program switch
 #   (fatal 0x14) and on a program's start (refused 0x14), a disc cut short inside a program (fatal
@@ -68,6 +70,7 @@ sh sdk/examples/hello-scene/build.sh "$OUT/scene" >"$OUT/build-scene.log" 2>&1 |
 sh sdk/examples/hello-core-overlay/build.sh "$OUT/ovl" >"$OUT/build-ovl.log" 2>&1 || failed ovl
 SOAK=$SOAK sh sdk/examples/hello-modular/build.sh "$OUT/mod" >"$OUT/build-mod.log" 2>&1 || failed mod
 sh sdk/examples/hello-boot/build.sh "$OUT/boot" >"$OUT/build-boot.log" 2>&1 || failed boot
+sh sdk/examples/hello-called/build.sh "$OUT/called" >"$OUT/build-called.log" 2>&1 || failed called
 grep -h -E "refused, as it must be|links the same EXE" "$OUT"/build-*.log | sort | uniq -c
 # Every core program's ELF: __core_boot copies the window from __psx_core_store_lma, which must be
 # where the core is stored (__psx_core_store_at). An empty boot region linked it 0 in Quake's
@@ -187,6 +190,7 @@ job f-short "$D/f-short.cue" 2500000000 'fatal:13'
 job f-tailed "$D/f-tailed.cue" 1200000000 'fatal:14'
 job f-svc "$D/f-svc.cue" 1200000000 'tty:hello-modular: FAIL require 00000014'
 job f-needs "$D/f-needs.cue" 1200000000 'fatal:22'
+job called "$OUT/called/caller.exe" 600000000 'tty:hello-called: PASS'
 job f-hash "$D/f-hash.cue" 1200000000 'tty:hello-modular: FAIL switch refused 00000023'
 for f in "$D"/*.bin; do cue "$f"; done
 seq 1 "$(wc -l <"$OUT/jobs")" | xargs -P "$JOBS" -n 1 sh tools/scene_core_run.sh "$OUT"
