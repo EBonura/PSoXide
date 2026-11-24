@@ -221,6 +221,57 @@ fn an_image_placed_before_the_world_pack_ends_right_where_it_starts() {
     );
 }
 
+#[test]
+fn a_tail_is_the_world_packs_first_sectors_loaded_and_checked_with_the_overlay() {
+    let mut plan = overlay_plan();
+    plan.images[4].placement = Placement::BeforeWorld; // SWAPB.OVL, 4 sectors at 0x80110000
+    plan.images[4].tail = 1;
+    let (disc, pressed) = press(small_exe(), &plan, true).unwrap();
+    let world = disc.find_file(WORLD_PACK_FILE_NAME).unwrap();
+    let row = pressed.images[4];
+    assert_eq!(row.lba, world.lba - 4);
+    assert_eq!(row.size, 5 * SECTOR_BYTES as u32, "the overlay's own sectors and the tail");
+    // The checksum is the core's over everything it reads: the overlay, then the pack's header.
+    let mut read = Vec::new();
+    for lba in row.lba..row.lba + 5 {
+        read.extend_from_slice(&disc.read_sector_user(lba).unwrap()[..SECTOR_BYTES]);
+    }
+    assert_eq!(&read[4 * SECTOR_BYTES..4 * SECTOR_BYTES + 8], b"PSOXWPAK");
+    assert_eq!(row.checksum, psx_pack::WordFnv32::of(&words(&read)));
+    // Without the tail the row is the overlay alone.
+    plan.images[4].tail = 0;
+    let (_, plain) = press(small_exe(), &plan, true).unwrap();
+    assert_eq!(plain.images[4].size, 4 * SECTOR_BYTES as u32);
+
+    // The tail counts for the reserve: a reserve ending at the overlay's own end refuses it.
+    let mut plan = overlay_plan();
+    plan.images[0].reserve = Some(Span {
+        start: 0x8010_0000,
+        end: 0x8011_2000,
+    });
+    plan.images[4].placement = Placement::BeforeWorld;
+    assert!(press(small_exe(), &plan, true).is_ok());
+    plan.images[4].tail = 1;
+    assert!(matches!(
+        press(small_exe(), &plan, true).err().unwrap(),
+        SceneDiscError::OutsideReserve { .. }
+    ));
+    // Only the image ending at the pack, only with a pack.
+    let tail = |at: usize, place: &[usize], world: bool| {
+        let mut plan = overlay_plan();
+        for &i in place {
+            plan.images[i].placement = Placement::BeforeWorld;
+        }
+        plan.images[at].tail = 1;
+        press(small_exe(), &plan, world).err()
+    };
+    let refused = |name: &str| Some(SceneDiscError::Tail(name.into()));
+    assert_eq!(tail(4, &[], true), refused("SWAPB.OVL"));
+    assert_eq!(tail(1, &[1, 4], true), refused("SET.OVL"));
+    assert_eq!(tail(4, &[4], false), refused("SWAPB.OVL"));
+    assert_eq!(tail(4, &[1, 4], true), None);
+}
+
 /// A program image the way psoxide-core.ld stores it: `data` bytes of text
 /// and data, then the core copy, then zeros to whole sectors.
 fn with_core(data: usize, core: &[u8]) -> Vec<u8> {

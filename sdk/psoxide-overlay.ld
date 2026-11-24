@@ -22,7 +22,11 @@
  * (OVERLAY_VMA to the largest one's sector-padded end), or mkisopsx refuses with `NoReserve`. An
  * overlay its owner reads right before WORLD.PAK's header (a title menu before its art) takes
  * `place=before-world`: its file then ends where the pack starts, so the two reads cost one seek
- * and a short hop instead of two long seeks. The program calls
+ * and a short hop instead of two long seeks. With it, `tail=1` makes that one read: the row also
+ * loads the pack's header sector right after the overlay's padded end (checked with the overlay;
+ * the reserve must hold it), and the program takes the header from there
+ * (`psx_core::link::image_tail(image, __overlay_N_bytes, table)`) instead of reading it after the
+ * core's stop. The program calls
  * `psx_core::link::load_image` for it before every call into it. `class=volatile` because the
  * program writes over that memory: the core then reads the overlay again at every load, so a
  * program that has used the memory for something else never jumps into stale bytes.
@@ -65,6 +69,11 @@ SECTIONS {
     } > RELOCATED
     /* OVERLAY leaves `.` at OVERLAY_VMA plus the largest overlay. */
     __overlay_end = .;
+    /* Each overlay file's size, for psx_core::link::image_tail. */
+    __overlay_1_bytes = SIZEOF(.overlay.1);
+    __overlay_2_bytes = SIZEOF(.overlay.2);
+    __overlay_3_bytes = SIZEOF(.overlay.3);
+    __overlay_4_bytes = SIZEOF(.overlay.4);
 }
 /* As psoxide-boot.ld: INSERT must directly follow SECTIONS's closing brace. */
 INSERT AFTER .bss;

@@ -1,6 +1,6 @@
 #!/bin/sh
 # Build hello-core-overlay (a program on the scene core with one fixed-address overlay,
-# psoxide-overlay.ld), its overlay image and two scene discs.
+# psoxide-overlay.ld), its overlay image and four scene discs.
 #
 #   sh sdk/examples/hello-core-overlay/build.sh OUT_DIR      (from the repository root)
 #
@@ -8,7 +8,9 @@
 # (HOST_BIN, default target/release) and a guest target dir (GUEST_TARGET, default build/examples).
 # OUT_DIR gets hello-core-overlay.exe, its ELF and map, menu.ovl, volatile.bin (the overlay is
 # class=volatile: the TTY ends with `hello-core-overlay: PASS`) and swap.bin (class=swap, the old
-# behaviour: the TTY ends with `hello-core-overlay: STALE`).
+# behaviour: the TTY ends with `hello-core-overlay: STALE`), before.bin (volatile, placed right
+# before WORLD.PAK, header read after the overlay) and tail.bin (the same with tail=1: the
+# header comes with the overlay). Every disc but swap ends with `hello-core-overlay: PASS`.
 set -eu
 OUT="${1:?usage: build.sh OUT_DIR}"
 ROOT="$(pwd)"
@@ -39,14 +41,24 @@ ADDR=${LOAD#load=}
 "$HOST_BIN/check-mfc0" --raw "$ADDR" "$OUT/menu.ovl"
 
 MKISO="$HOST_BIN/mkisopsx"
-disc() { # name class
+# WORLD.PAK: one small chunk (the header sector names it) and one of 4 MiB, so the pack reaches
+# past LBA 3024 (the far read).
+mkdir -p "$OUT/world"
+printf "menu art" >"$OUT/world/chunk_1.bin"
+head -c 4194304 /dev/zero >"$OUT/world/chunk_2.bin"
+disc() { # name class [placement options]
     cat >"$OUT/$1.scenes" <<MANIFEST
 program PSX.EXE  -         reserve=0x80100000-0x80140000
-overlay MENU.OVL menu.ovl  owner=PSX.EXE $LOAD class=$2
+overlay MENU.OVL menu.ovl  owner=PSX.EXE $LOAD class=$2 ${3:-}
 scene   START    PSX.EXE   start
 MANIFEST
     "$MKISO" --diag --exe "$OUT/hello-core-overlay.exe" --scenes "$OUT/$1.scenes" \
-        --core-image sdk/crates/psx-core/prebuilt/psx-core.bin --volume HELLOOVL --out "$OUT/$1.bin"
+        --core-image sdk/crates/psx-core/prebuilt/psx-core.bin --volume HELLOOVL \
+        --world-pack-extra-dir "$OUT/world" --out "$OUT/$1.bin"
 }
 disc volatile volatile
 disc swap swap
+# The overlay right before the pack: the header is read after it (Half-Life on 16dda36a7)
+disc before volatile place=before-world
+# ... and carried as its tail, in the same read.
+disc tail volatile "place=before-world tail=1"

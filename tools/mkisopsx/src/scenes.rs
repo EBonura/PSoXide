@@ -30,7 +30,11 @@
 //! owner also uses, which the core reads again at every load), and optionally
 //! `place=before-world` (its file ends where `WORLD.PAK` starts, LBA 1024, for an
 //! overlay its owner reads right before the pack: one seek and a short hop
-//! instead of two long seeks). An overlay's owner needs `reserve=` on its
+//! instead of two long seeks), with it `tail=<n>` (the row also loads the
+//! pack's first n sectors in the same read, right after the overlay's padded
+//! bytes, checked with it: the owner takes the pack header from RAM with
+//! `psx_core::link::image_tail` instead of reading it after the core's stop;
+//! the reserve must hold them). An overlay's owner needs `reserve=` on its
 //! `program` line (mkisopsx refuses with `NoReserve` otherwise).
 //!
 //! A scene line is `scene NAME IMAGE (start | entry=<addr>) [options]`:
@@ -148,6 +152,7 @@ fn overlay<'a>(
 ) -> Result<ImageSpec, String> {
     let (mut owner, mut load, mut class) = (None, None, Class::Swap);
     let mut placement = Placement::InOrder;
+    let mut tail = 0;
     for option in options {
         match option.split_once('=') {
             Some(("owner", v)) => owner = Some(v),
@@ -156,6 +161,7 @@ fn overlay<'a>(
             Some(("class", "swap")) => class = Class::Swap,
             Some(("class", "volatile")) => class = Class::Volatile,
             Some(("place", "before-world")) => placement = Placement::BeforeWorld,
+            Some(("tail", v)) => tail = number::<u32>("tail", v)?,
             _ => return Err(format!("unknown overlay option {option}")),
         }
     }
@@ -163,6 +169,7 @@ fn overlay<'a>(
     let load = load.ok_or("an overlay needs load=<address>")?;
     let mut image = ImageSpec::overlay(name, file, owner, load, class);
     image.placement = placement;
+    image.tail = tail;
     Ok(image)
 }
 
@@ -268,6 +275,10 @@ mod tests {
         let text = text.replace("class=volatile", "class=volatile place=before-world");
         let plan = parse_manifest(&text, Path::new("."), &mut |_| Ok(vec![0; 4])).unwrap();
         assert_eq!(plan.images[1].placement, Placement::BeforeWorld);
+        assert_eq!(plan.images[1].tail, 0);
+        let text = text.replace("before-world", "before-world tail=1");
+        let plan = parse_manifest(&text, Path::new("."), &mut |_| Ok(vec![0; 4])).unwrap();
+        assert_eq!(plan.images[1].tail, 1);
     }
 
     #[test]
@@ -287,6 +298,7 @@ mod tests {
             ("overlay A.OVL a.bin owner=PSX.EXE", "needs load"),
             ("overlay A.OVL a.bin owner=X load=0 class=big", "class=big"),
             ("overlay A.OVL a.bin owner=X load=0 place=end", "place=end"),
+            ("overlay A.OVL a.bin owner=X load=0 tail=x", "tail=x"),
             ("scene A PSX.EXE", "exactly one of start and entry"),
             (
                 "scene A PSX.EXE start entry=0",

@@ -39,6 +39,9 @@
 //!   the other images whose load ranges intersect its own, plus its own bit for
 //!   a VOLATILE Overlay (one over memory its owner also uses: never kept, so
 //!   read again at every load);
+//! - an image with a tail is the Overlay whose file ends where `WORLD.PAK`
+//!   starts, with nothing between them; its row's size and checksum cover the
+//!   tail, so the reserve and overlap rules above count it too;
 //! - `I <= 32` and `S + I <= 62`.
 //!
 //! A scene that runs inside its Program's exe has no image row: its scene row
@@ -105,6 +108,13 @@ pub struct ImageSpec {
     pub class: Option<Class>,
     /// Where its file goes on the disc.
     pub placement: Placement,
+    /// Overlay: sectors of `WORLD.PAK`'s start its row also loads, in the same read, right after
+    /// its own sector-padded bytes (a title menu and the pack header its owner reads next). Its
+    /// size and checksum cover them, so the core checks them with the overlay and its owner takes
+    /// them from RAM (`psx_core::link::image_tail`) instead of reading them after a stop. Only the
+    /// [`Placement::BeforeWorld`] image that ends at the pack, on a disc with `WORLD.PAK` and no
+    /// `CDTEST.BIN`; the owner's reserve holds them ([`SceneDiscError::Tail`] otherwise).
+    pub tail: u32,
 }
 
 /// Where an image's file goes on a scene disc.
@@ -135,6 +145,7 @@ impl ImageSpec {
             load_addr: 0,
             class: None,
             placement: Placement::InOrder,
+            tail: 0,
         }
     }
 
@@ -287,6 +298,9 @@ pub enum SceneDiscError {
     /// An image placed before `WORLD.PAK` ([`Placement::BeforeWorld`]) does not fit what the
     /// boot area has left after the boot exe.
     BeforeWorld(String),
+    /// An image has a tail ([`ImageSpec::tail`]) but is not the Overlay whose file ends where
+    /// `WORLD.PAK` starts, or the disc has no `WORLD.PAK` that long, or `CDTEST.BIN` lies between.
+    Tail(String),
     /// An Overlay loads outside its owner's reserved RAM.
     OutsideReserve {
         /// The Overlay.
@@ -534,6 +548,24 @@ pub fn add_scene_disc_files(
         }
         room -= sectors;
     }
+    // A tail is WORLD.PAK's first sectors, read on from the image that ends where the pack
+    // starts: only that image may have one, and only with nothing between it and the pack.
+    let mut world_head = Vec::new();
+    for (index, image) in images.iter().enumerate() {
+        if image.tail == 0 {
+            continue;
+        }
+        let bytes = image.tail as usize * SECTOR_BYTES;
+        let adjacent = image.kind == Kind::Overlay
+            && before_world.last() == Some(&index)
+            && cdtest_sectors.is_none();
+        match &world_pack {
+            Some(world) if adjacent && world.len() >= bytes => {
+                world_head = world[..bytes].to_vec();
+            }
+            _ => return Err(SceneDiscError::Tail(image.name.clone())),
+        }
+    }
     let mut later = Vec::new();
     for index in 1..images.len() {
         if images[index].placement == Placement::BeforeWorld {
@@ -615,7 +647,12 @@ pub fn add_scene_disc_files(
                 overlay: image.name.clone(),
                 owner: owner_spec.name.clone(),
             })?;
-        let size = files[index].len() as u32;
+        // The tail, if any, is loaded and checked with the overlay's own bytes.
+        let mut loaded = files[index].clone();
+        if image.tail != 0 {
+            loaded.extend_from_slice(&world_head);
+        }
+        let size = loaded.len() as u32;
         let span = Span {
             start: image.load_addr,
             end: image.load_addr.saturating_add(size),
@@ -631,7 +668,7 @@ pub fn add_scene_disc_files(
             lba: lba_of(&image.name),
             size,
             load_addr: image.load_addr,
-            checksum: word_fnv(&files[index]),
+            checksum: word_fnv(&loaded),
             core_hash: 0,
             evicts: 0,
             member_base: 0,
