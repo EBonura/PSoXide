@@ -5,8 +5,10 @@
 //! program on the core. Sections, in the order a size report lists them:
 //! - `cmd`: the CD command layer (send and wait, response FIFO, bounded drain, acknowledge);
 //! - `drive`: the polled reader and its rules: never assume an idle drive (settle on first use),
-//!   seek-first starts, PIO sector pops (no CD DMA), Pause and never Stop, a Pause proven stopped
-//!   and resent when refused mid-seek, the CD input muted before a read after music;
+//!   seek-first starts, PIO sector pops (no CD DMA), Pause and never Stop, a Pause resent when
+//!   refused mid-seek, the CD input muted before a read after music, and the drive proven stopped
+//!   before every command the core sends: a read or `psx_core_pause` ends on an acknowledged
+//!   Pause and the next use proves it (`drive::settle`), so the wait overlaps the program's work;
 //! - `read`: the read loop with retries from a fresh start and contiguous chunks;
 //! - `switch`: the table row, bounds, quiesce, load with the checksum folded in, I-cache flush,
 //!   handoff block and jump;
@@ -120,13 +122,18 @@ fn w32(addr: u32, v: u32) {
 // ---------------------------------------------------------------------------------------------
 // Statics: zeroed by `__core_boot` on a cold entry, kept across switches.
 
-/// Written by a cold attach; a core entry that does not find it has no live core.
-const ALIVE: u32 = 0xc0de_5ce1;
+/// `State::prepared`: nothing known of the drive yet (zeroed statics).
+const UNKNOWN: u32 = 0;
+/// `State::prepared`: the drive is proven stopped, or doing what the core last started.
+const PROVEN: u32 = 1;
+/// `State::prepared`: a Pause was acknowledged and its proof is owed to the next use.
+const OWED: u32 = 2;
 
 #[repr(C)]
 struct State {
-    alive: u32,
     // These ten words are the handoff block's 0x08..0x30, in its order: `write_block` copies them.
+    /// The running core's hash, written by a cold attach (never 0: psx-core asserts it), so a
+    /// core entry that finds 0 has no live core.
     hash: u32,
     lba_offset: u32,
     cdda_base: u32,
@@ -141,7 +148,8 @@ struct State {
     flags: u32,
     /// A stream client holds the drive.
     client: u32,
-    /// The drive was settled once (a drive is never assumed idle).
+    /// What the core knows of the drive: [`UNKNOWN`], [`PROVEN`] stopped or idle, or a Pause
+    /// acknowledged whose proof is [`OWED`] to the next use (`drive::settle`).
     prepared: u32,
     /// `I_MASK` as the caller had it while a polled read runs.
     saved_mask: u32,
@@ -149,19 +157,16 @@ struct State {
     last_status: u32,
     /// The running read has not delivered a sector yet.
     first_sector: u32,
-    /// A stream sector: popped with no checksum (the stream client checks its own data).
-    no_hash: u32,
     /// `I_MASK` is saved in `saved_mask` (a read or a stream is open).
     mask_saved: u32,
     /// The program's idle hook, called from every spin of every wait.
     idle: Option<extern "C" fn()>,
     /// Stage of the last fatal screen.
     fatal: u32,
-    /// The scene row and the image row of the switch or load in flight, and the table header's
-    /// first words.
-    scene: [u32; 8],
+    /// The scene row's first two words (id, image and flags; entry PC) and the image row of the
+    /// switch or load in flight: copied, the caller's table may be overwritten by the load.
+    scene: [u32; 2],
     image: [u32; 8],
-    head: [u32; 4],
     /// The image index of the rows in flight.
     img: u32,
     /// One bit per image of the table that is in RAM now.
@@ -172,7 +177,6 @@ struct State {
 }
 
 static mut ST: State = State {
-    alive: 0,
     hash: 0,
     lba_offset: 0,
     cdda_base: 0,
@@ -183,17 +187,15 @@ static mut ST: State = State {
     current: 0,
     flags: 0,
     client: 0,
-    prepared: 0,
+    prepared: UNKNOWN,
     saved_mask: 0,
     last_status: 0,
     first_sector: 0,
-    no_hash: 0,
     mask_saved: 0,
     idle: None,
     fatal: 0,
-    scene: [0; 8],
+    scene: [0; 2],
     image: [0; 8],
-    head: [0; 4],
     img: 0,
     mask: 0,
     carry_pending: 0,
@@ -423,11 +425,11 @@ mod drive {
     use super::*;
 
     /// Pop one sector by PIO into `dst` (or into a register when `dst` is null), folding every
-    /// word into `hash` unless it is a stream sector. `false` when the FIFO
+    /// word into `*hash` unless `hash` is null (a stream sector). `false` when the FIFO
     /// never filled (the request is dropped, so a late sector cannot land in the next read).
     #[inline(never)]
     #[optimize(speed)]
-    pub fn pop(dst: *mut u32, hash: &mut u32) -> bool {
+    pub fn pop(dst: *mut u32, hash: *mut u32) -> bool {
         w8(CD_REQ, 0x80);
         let mut e = Elapsed::start();
         while !cmd::data_ready() {
@@ -445,8 +447,9 @@ mod drive {
             }
             return true;
         }
-        let plain = st().no_hash != 0;
-        let mut h = *hash;
+        let plain = hash.is_null();
+        // SAFETY: a non-null `hash` is the caller's running checksum.
+        let mut h = if plain { 0 } else { unsafe { *hash } };
         let mut at = dst;
         let end = dst.wrapping_add(SECTOR_WORDS as usize);
         while at != end {
@@ -487,7 +490,10 @@ mod drive {
             };
             h = s;
         }
-        *hash = h;
+        if !plain {
+            // SAFETY: as above.
+            unsafe { *hash = h };
+        }
         true
     }
 
@@ -496,8 +502,7 @@ mod drive {
     #[inline(never)]
     pub fn ack_unexpected(f: u8) {
         if f == INT_DATA_READY {
-            let mut h = 0;
-            let _ = pop(core::ptr::null_mut(), &mut h);
+            let _ = pop(core::ptr::null_mut(), core::ptr::null_mut());
         }
         cmd::drain();
         if f <= 4 {
@@ -566,32 +571,34 @@ mod drive {
         code::PAUSE
     }
 
-    /// The acknowledge-only stop between chunks: Pause until the drive takes it (once more
-    /// after a refusal mid-seek), without waiting for it to stop.
+    /// The acknowledge-only stop, between chunks, at the end of a read and at `psx_core_pause`:
+    /// Pause until the drive takes it (once more after a refusal mid-seek), without waiting for
+    /// it to stop. Its proof is owed to the next use of the drive ([`settle`]), so the drive
+    /// finishes stopping while the program works on what it read. `MATCHED` once acknowledged.
     #[inline(never)]
-    pub fn stop() {
+    pub fn stop() -> u32 {
         let mut r = cmd::send(CMD_PAUSE, &[], INT_ACK, ACK_WAIT);
         if r == cmd::CD_ERROR {
             wait_seek_end();
             r = cmd::send(CMD_PAUSE, &[], INT_ACK, ACK_WAIT);
         }
-        if r == cmd::MATCHED {
-            cmd::drain();
-            cmd::ack(INT_COMPLETE);
-        }
         cmd::ack_all();
+        st().prepared = OWED;
+        r
     }
 
-    /// Take the controller for polled reads: the CD source out of `I_MASK` until [`release`],
-    /// controller IRQs on, and on the first use a settle of whatever the drive is doing.
+    /// Prove the drive stopped before the core's own next command. On the first use, whatever
+    /// the drive is doing (it is never assumed idle); after [`stop`], that Pause: by its
+    /// second response if it has latched (no command), else a status and a proven Pause while
+    /// the drive is still active. Never a blocking wait for that latched response: our own
+    /// acknowledges, or a program's register-level driver, may have taken it.
     #[inline(never)]
-    pub fn prepare() -> u32 {
+    pub fn settle() -> u32 {
         let s = st();
-        enter_mask();
-        w32(I_STAT, !CDROM_IRQ_BIT);
-        cmd::set_irq_enable(0x1f);
-        cmd::ack_all();
-        if s.prepared == 0 {
+        if s.prepared == PROVEN {
+            return code::OK;
+        }
+        if s.prepared != OWED || cmd::flag() != INT_COMPLETE {
             let mut n = 0;
             while n < 16 {
                 let f = cmd::flag();
@@ -603,7 +610,7 @@ mod drive {
             }
             cmd::ack_all();
             match status() {
-                // No answer: SetMode below fails on its own bound and says so.
+                // No answer: the next command fails on its own bound and says so.
                 None => {}
                 Some(stat) if stat & STAT_ACTIVE == 0 => {}
                 Some(_) => {
@@ -614,9 +621,27 @@ mod drive {
                     }
                 }
             }
-            cmd::ack_all();
-            s.prepared = 1;
         }
+        // The latched second response's status byte too: nothing is left pending.
+        cmd::drain();
+        cmd::ack_all();
+        s.prepared = PROVEN;
+        code::OK
+    }
+
+    /// Take the controller for polled reads: the CD source out of `I_MASK` until [`release`],
+    /// the drive proven stopped ([`settle`]), controller IRQs on.
+    #[inline(never)]
+    pub fn prepare() -> u32 {
+        enter_mask();
+        // Before anything is acknowledged: an owed Pause's latched second response is its proof.
+        let r = settle();
+        if r != code::OK {
+            return r;
+        }
+        w32(I_STAT, !CDROM_IRQ_BIT);
+        cmd::set_irq_enable(0x1f);
+        cmd::ack_all();
         // Drop whatever the previous tenant left in the data FIFO.
         cmd::clear_data_request();
         if cmd::send(CMD_SETMODE, &[MODE_DATA], INT_ACK, ACK_WAIT) != cmd::MATCHED {
@@ -647,24 +672,34 @@ mod drive {
         }
     }
 
+    /// How many `unit`s `rest` holds (fewer than 100 on any disc), taken out of `rest`, in BCD.
+    /// Counted by subtraction: under 100 rounds, once per read start, and no divide code.
     #[inline(never)]
-    fn bcd(v: u32) -> u8 {
-        let tens = v / 10;
-        ((tens << 4) | (v - tens * 10)) as u8
+    fn take_bcd(rest: &mut u32, unit: u32) -> u8 {
+        let mut n = 0;
+        while *rest >= unit {
+            *rest -= unit;
+            n += 1;
+            if n & 0xf == 10 {
+                n += 6;
+            }
+        }
+        n as u8
     }
 
     /// SetLoc, SeekL and its completion, SetMode, ReadN: the start the BIOS uses.
     #[inline(never)]
     pub fn start(lba: u32, implicit_seek: bool) -> bool {
-        let abs = if lba & abi::READ_ABSOLUTE != 0 {
+        let mut abs = if lba & abi::READ_ABSOLUTE != 0 {
             lba & !abi::READ_ABSOLUTE
         } else {
             lba + st().lba_offset
         } + 150;
-        let minutes = abs / (75 * 60);
-        let rest = abs - minutes * (75 * 60);
-        let seconds = rest / 75;
-        let msf = [bcd(minutes), bcd(seconds), bcd(rest - seconds * 75)];
+        let msf = [
+            take_bcd(&mut abs, 75 * 60),
+            take_bcd(&mut abs, 75),
+            take_bcd(&mut abs, 1),
+        ];
         if cmd::send(CMD_SETLOC, &msf, INT_ACK, ACK_WAIT) != cmd::MATCHED {
             return false;
         }
@@ -694,9 +729,9 @@ mod drive {
         true
     }
 
-    /// Wait for the next sector and pop it.
+    /// Wait for the next sector and pop it (`hash` as for [`pop`]).
     #[inline(never)]
-    pub fn sector(dst: *mut u32, hash: &mut u32) -> bool {
+    pub fn sector(dst: *mut u32, hash: *mut u32) -> bool {
         let s = st();
         let limit = if s.first_sector != 0 {
             FIRST_SECTOR_WAIT
@@ -732,24 +767,18 @@ mod read {
     pub type Hook = Option<extern "C" fn(u32)>;
 
     /// Read `sectors` from member-relative `lba` into `dst` (null: discard), `CHUNK_SECTORS` per
-    /// seek-first start, each chunk retried from a fresh start up to `attempts` times. The word
-    /// FNV of everything read comes back in `hash`. Ends with a proven Pause.
+    /// seek-first start, each chunk retried from a fresh start up to `DEFAULT_ATTEMPTS` times. The
+    /// word FNV of everything read comes back in `hash`. Ends with an acknowledged Pause whose
+    /// proof is owed to the next use of the drive (`drive::stop`).
     #[inline(never)]
-    pub fn run(
-        lba: u32,
-        sectors: u32,
-        dst: *mut u32,
-        hook: Hook,
-        attempts: u32,
-        hash: &mut u32,
-    ) -> u32 {
+    pub fn run(lba: u32, sectors: u32, dst: *mut u32, hook: Hook, hash: &mut u32) -> u32 {
         let r = drive::prepare();
         if r != code::OK {
             drive::release();
             return r;
         }
         let mut done = 0;
-        let mut h = *hash;
+        let mut h = fnv::BASIS;
         while done < sectors {
             let n = CHUNK_SECTORS.min(sectors - done);
             let mut attempt = 0;
@@ -778,20 +807,22 @@ mod read {
                 attempt += 1;
                 // A fresh start for the retry: stop and prove it, then try the chunk again.
                 let _ = drive::pause_proved();
-                if attempt >= attempts {
+                if attempt >= DEFAULT_ATTEMPTS {
                     drive::release();
                     return code::READ;
                 }
             }
             done += n;
             if done < sectors {
-                drive::stop();
+                let _ = drive::stop();
             }
         }
-        let r = drive::pause_proved();
+        // The data is in: the Pause's proof waits for the next use of the drive. A Pause that
+        // was not acknowledged is found there too (the drive is then still active).
+        let _ = drive::stop();
         drive::release();
         *hash = h;
-        r
+        code::OK
     }
 }
 
@@ -806,6 +837,10 @@ mod switch {
     #[inline(never)]
     fn rows(want: u32, by_image: u32, table: *const u32) -> u32 {
         let s = st();
+        // Neither a switch nor a load while a stream client holds the drive.
+        if s.client != 0 {
+            return code::CLIENT;
+        }
         // The table is the caller's: read once at boot into its own RAM (psx-core's
         // `read_table`), so a switch never seeks for it.
         if table.is_null() {
@@ -813,15 +848,15 @@ mod switch {
         }
         // SAFETY (every read below): the caller's copy of the table, word-aligned, holding the
         // header and every row it counts; row indices are checked against the header first.
-        unsafe { copy_words(s.head.as_mut_ptr(), table, 4) };
-        let head = s.head[2];
-        if s.head[0] != table::MAGIC[0]
-            || s.head[1] != table::MAGIC[1]
+        let word = |i: u32| unsafe { core::ptr::read_volatile(table.add(i as usize)) };
+        let head = word(2);
+        if word(0) != table::MAGIC[0]
+            || word(1) != table::MAGIC[1]
             || head & 0xffff != table::VERSION
         {
             return code::TABLE_MAGIC;
         }
-        let scenes = s.head[3] & 0xffff;
+        let scenes = word(3) & 0xffff;
         if scenes > table::MAX_ROWS {
             return code::NO_ROW;
         }
@@ -829,9 +864,9 @@ mod switch {
             // The boot program (image 0) is running since the BIOS: the overlays its exe carries
             // are in RAM too.
             s.carry_pending = 0;
-            let at = table::HEADER_WORDS + table::ROW_WORDS * scenes + table::I_EVICTS as u32;
-            // SAFETY: image row 0's word 5, inside the copy (every table has image 0).
-            s.mask |= unsafe { core::ptr::read_volatile(table.add(at as usize)) };
+            // Image row 0's word 5, inside the copy (every table has image 0).
+            s.mask |=
+                word(table::HEADER_WORDS + table::ROW_WORDS * scenes + table::I_EVICTS as u32);
         }
         let image = if by_image != 0 {
             want
@@ -844,9 +879,11 @@ mod switch {
                     return code::NO_ROW;
                 }
                 let at = table::HEADER_WORDS + table::ROW_WORDS * i;
-                // SAFETY: row `i` of `scenes`, inside the copy.
-                if unsafe { core::ptr::read_volatile(table.add(at as usize)) } & 0xffff == want {
-                    unsafe { copy_words(s.scene.as_mut_ptr(), table.add(at as usize), 8) };
+                // Row `i` of `scenes`, inside the copy. Only its first two words are used: id,
+                // image and flags, then the entry PC.
+                if word(at) & 0xffff == want {
+                    // SAFETY: as above.
+                    unsafe { copy_words(s.scene.as_mut_ptr(), table.add(at as usize), 2) };
                     break;
                 }
                 i += 1;
@@ -934,13 +971,12 @@ mod switch {
         let im = st().image;
         let mut tries = 0;
         loop {
-            let mut h = fnv::BASIS;
+            let mut h = 0;
             let r = read::run(
                 im[table::I_LBA] + skip,
                 im[table::I_SIZE] / 2048,
                 im[table::I_ADDR] as *mut u32,
                 None,
-                DEFAULT_ATTEMPTS,
                 &mut h,
             );
             if r != code::OK {
@@ -959,9 +995,6 @@ mod switch {
     /// `psx_core_load_image`: load an overlay and return to the caller.
     #[inline(never)]
     pub fn load_image(image: u32, table: *const u32, caller: u32) -> u32 {
-        if st().client != 0 {
-            return code::CLIENT;
-        }
         let mut r = rows(image, 1, table);
         if r == code::OK {
             r = overlay_ok(caller);
@@ -1012,9 +1045,6 @@ mod switch {
     #[inline(never)]
     fn accept(id: u32, args: *const [u32; 4], table: *const u32) -> u32 {
         let s = st();
-        if s.client != 0 {
-            return code::CLIENT;
-        }
         let r = rows(id, 0, table);
         if r != code::OK {
             return r;
@@ -1116,7 +1146,11 @@ mod switch {
     #[inline(never)]
     extern "C" fn land() -> ! {
         let s = st();
-        let r = load_into(1);
+        let mut r = load_into(1);
+        if r == code::OK {
+            // A program is entered with the drive proven stopped (CORE-ABI 3.3).
+            r = drive::settle();
+        }
         if r != code::OK {
             fatal_screen(r);
         }
@@ -1232,14 +1266,13 @@ fn fatal_screen(stage: u32) -> ! {
 #[no_mangle]
 extern "C" fn __psx_core_attach_impl(a0: u32, a1: u32, a2: u32, hash: u32) {
     let s = st();
-    if s.alive == ALIVE {
+    if s.hash != 0 {
         // A core entry: the switch wrote the block; it must still be there.
         if !block_valid() {
             fatal_screen(code::BAD_BLOCK);
         }
         return;
     }
-    s.alive = ALIVE;
     s.hash = hash;
     // The boot program is image 0 of its table; what its exe carries is added at the first table.
     s.mask = 1;
@@ -1274,23 +1307,19 @@ extern "C" fn __psx_core_read_impl(lba: u32, sectors: u32, dst: *mut u32, hook: 
     if st().client != 0 {
         return code::CLIENT;
     }
-    let mut h = fnv::BASIS;
-    read::run(lba, sectors, dst, hook, DEFAULT_ATTEMPTS, &mut h)
+    let mut h = 0;
+    read::run(lba, sectors, dst, hook, &mut h)
 }
 
 #[no_mangle]
 extern "C" fn __psx_core_pause_impl() -> u32 {
-    let r = if st().prepared == 0 {
-        drive::prepare()
-    } else {
-        drive::enter_mask();
-        code::OK
-    };
-    let r = if r == code::OK {
-        drive::pause_proved()
-    } else {
-        r
-    };
+    drive::enter_mask();
+    // The previous Pause (or whatever the drive does) is proven before this one is sent; this one
+    // is only acknowledged, its proof owed to the next use of the drive.
+    let mut r = drive::settle();
+    if r == code::OK && drive::stop() != cmd::MATCHED {
+        r = code::NO_ANSWER;
+    }
     drive::release();
     r
 }
@@ -1318,12 +1347,8 @@ extern "C" fn __psx_core_stream_open_impl(lba: u32, flags: u32) -> u32 {
 
 #[no_mangle]
 extern "C" fn __psx_core_stream_sector_impl(dst: *mut u32) -> u32 {
-    let mut h = 0;
-    let s = st();
-    s.no_hash = 1;
-    let ok = drive::sector(dst, &mut h);
-    s.no_hash = 0;
-    if ok {
+    // No checksum: the stream client checks its own data, the shape of psx-io's reader.
+    if drive::sector(dst, core::ptr::null_mut()) {
         code::OK
     } else {
         code::READ
@@ -1341,6 +1366,9 @@ extern "C" fn __psx_core_cd_impl(op: u32, a: u32, b: u32, c: *mut u8) -> u32 {
     if op != 0 {
         return u32::MAX;
     }
+    // The drive is proven stopped before any command the core sends, this one included (with
+    // the caller's `I_MASK`, as the command itself: no CD-ROM IRQ handler is installed).
+    let _ = drive::settle();
     let params = if a == 0 || b & 0xff == 0 {
         &[][..]
     } else {
@@ -1358,11 +1386,13 @@ extern "C" fn __psx_core_set_idle_hook_impl(hook: Option<extern "C" fn()>) {
 #[no_mangle]
 extern "C" fn __psx_core_client_attach_impl() -> u32 {
     let s = st();
-    if s.client != 0 {
-        return code::CLIENT;
-    }
+    let held = s.client;
     s.client = 1;
-    code::OK
+    if held != 0 {
+        code::CLIENT
+    } else {
+        code::OK
+    }
 }
 
 #[no_mangle]

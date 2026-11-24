@@ -401,7 +401,23 @@ mod scene {
             psx_core::abi::table::MAGIC[0],
         );
         check(&mut ok, "stream-pause", core_::pause(), code::OK);
+        // A second Pause right away: the first one's stop is proven before it is sent.
+        check(&mut ok, "pause-again", core_::pause(), code::OK);
         core_::client_detach();
+        // A raw command after a Pause the core only saw acknowledged: the core proves the drive
+        // stopped before it sends the command, so the status it returns shows nothing active.
+        let mut resp = [0u8; 16];
+        // SAFETY: GetStat takes no parameters and answers with at most 16 bytes.
+        let r = unsafe {
+            core_::cd(
+                psx_core::abi::cd_op::COMMAND,
+                0,
+                0x01 << 8,
+                resp.as_mut_ptr(),
+            )
+        };
+        check(&mut ok, "raw-getstat", r & 0xff, 0);
+        check(&mut ok, "raw-getstat-idle", u32::from(resp[0] & 0xe0), 0);
         check(
             &mut ok,
             "window-at-end",

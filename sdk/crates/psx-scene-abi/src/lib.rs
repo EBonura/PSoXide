@@ -161,9 +161,9 @@ pub mod stack {
     /// The switch's load, on the switch stack at `STACK_INIT`; under `SWITCH_STACK`.
     pub const SWITCH_LOAD: u32 = 352;
     /// `psx_core_read`.
-    pub const READ: u32 = 312;
+    pub const READ: u32 = 320;
     /// `psx_core_pause`.
-    pub const PAUSE: u32 = 224;
+    pub const PAUSE: u32 = 216;
     /// `psx_core_client_attach`.
     pub const CLIENT_ATTACH: u32 = 0;
     /// `psx_core_client_detach`.
@@ -173,11 +173,11 @@ pub mod stack {
     /// `psx_core_music_yield`.
     pub const MUSIC_YIELD: u32 = 8;
     /// `psx_core_stream_open`.
-    pub const STREAM_OPEN: u32 = 232;
+    pub const STREAM_OPEN: u32 = 240;
     /// `psx_core_stream_sector`.
-    pub const STREAM_SECTOR: u32 = 152;
+    pub const STREAM_SECTOR: u32 = 136;
     /// `psx_core_cd`.
-    pub const CD: u32 = 168;
+    pub const CD: u32 = 224;
     /// `psx_core_set_idle_hook`.
     pub const SET_IDLE_HOOK: u32 = 0;
     /// `psx_core_load_image`: the rows, the load and its checks.

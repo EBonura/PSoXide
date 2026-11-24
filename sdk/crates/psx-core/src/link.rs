@@ -52,6 +52,10 @@ pub const CORE_BYTES: u32 = LEN as u32;
 
 const _: () = assert!(LEN % 4 == 0, "the core image is whole words");
 const _: () = assert!(
+    CORE_HASH != 0,
+    "the core takes a zero hash for no live core"
+);
+const _: () = assert!(
     LEN as u32 <= abi::WINDOW_BYTES,
     "the core image fits the window"
 );
@@ -232,7 +236,9 @@ pub fn read_table(table: &mut [u32]) -> Result<usize, u32> {
     Ok(words)
 }
 
-/// Blocking read of `sectors` from member-relative `lba` into `dst`, ending with a proven Pause.
+/// Blocking read of `sectors` from member-relative `lba` into `dst`. It ends with a Pause the drive
+/// has acknowledged; the core proves the stop before its next command (the next read, stream,
+/// switch, load, Pause or `cd` command), so the wait overlaps the program's own work.
 ///
 /// # Safety
 /// `dst` must hold `sectors * 2048` writable, word-aligned bytes.
@@ -241,7 +247,10 @@ pub unsafe fn read(lba: u32, sectors: u32, dst: *mut u32, hook: Option<extern "C
     unsafe { psx_core_read(lba, sectors, dst, hook) }
 }
 
-/// A proven Pause.
+/// Pause the drive: whatever it did before is proven stopped first, this Pause is acknowledged and
+/// its own proof is owed to the core's next command, as for [`read`]. A program that drives the
+/// controller itself afterwards (`psx-io`'s `core-cd` register ops) sends its first command through
+/// [`cd`] op 0, which proves the stop, not as a no-wait op 1.
 pub fn pause() -> u32 {
     // SAFETY: ABI call.
     unsafe { psx_core_pause() }
