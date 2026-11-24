@@ -37,6 +37,42 @@ fn string(bytes: &[u8], at: u32) -> Result<&str, String> {
     std::str::from_utf8(&bytes[..end]).map_err(|_| "ELF string encoding".into())
 }
 
+/// One `PT_LOAD` program header: its file bytes and where they load.
+struct Segment {
+    offset: u32,
+    file_size: u32,
+    paddr: u32,
+}
+
+/// The `PT_LOAD` program headers, none for an ELF without a program header table (a relocatable
+/// object).
+fn load_segments(bytes: &[u8]) -> Result<Vec<Segment>, String> {
+    let start = u32_at(bytes, 28)? as usize;
+    let stride = u16_at(bytes, 42)? as usize;
+    let count = u16_at(bytes, 44)? as usize;
+    if start == 0 || count == 0 {
+        return Ok(Vec::new());
+    }
+    if stride < 32 {
+        return Err("ELF program header table".into());
+    }
+    let mut segments = Vec::new();
+    for i in 0..count {
+        let at = start
+            .checked_add(i.checked_mul(stride).ok_or("ELF program header count")?)
+            .ok_or("ELF program header overflow")?;
+        if u32_at(bytes, at)? != 1 {
+            continue; // not PT_LOAD
+        }
+        segments.push(Segment {
+            offset: u32_at(bytes, at + 4)?,
+            file_size: u32_at(bytes, at + 16)?,
+            paddr: u32_at(bytes, at + 12)?,
+        });
+    }
+    Ok(segments)
+}
+
 /// One bounded linked section.
 #[derive(Clone, Debug)]
 pub struct Section<'a> {
@@ -46,8 +82,13 @@ pub struct Section<'a> {
     pub kind: u32,
     /// ELF allocation/write/execute section flags.
     pub flags: u32,
-    /// Linked virtual address.
+    /// Linked virtual address (where the section runs).
     pub address: u32,
+    /// Load address: where the section is stored in the image, from the program header that
+    /// holds it (its `p_paddr`); the run address for a section no program header holds, and for
+    /// NOBITS. It differs from `address` for a section linked with `AT(...)` (psoxide-core.ld's
+    /// stored core image, psoxide-boot.ld's `.boot`).
+    pub load_address: u32,
     /// Declared byte size, including NOBITS resident storage.
     pub size: u32,
     /// Associated table index.
@@ -122,10 +163,21 @@ impl<'a> Elf<'a> {
             u32_at(bytes, names_at + 20)?,
             bytes.len(),
         )?];
+        let segments = load_segments(bytes)?;
         let mut sections = Vec::with_capacity(count);
         for i in 0..count {
             let at = start + i * stride;
             let kind = u32_at(bytes, at + 4)?;
+            let address = u32_at(bytes, at + 12)?;
+            let offset = u32_at(bytes, at + 16)?;
+            let load_address = if kind == 8 {
+                address
+            } else {
+                segments
+                    .iter()
+                    .find(|s| s.offset <= offset && offset - s.offset < s.file_size)
+                    .map_or(address, |s| s.paddr + (offset - s.offset))
+            };
             let section_bytes = if kind == 8 {
                 &[]
             } else {
@@ -139,7 +191,8 @@ impl<'a> Elf<'a> {
                 name: string(names, u32_at(bytes, at)?)?,
                 kind,
                 flags: u32_at(bytes, at + 8)?,
-                address: u32_at(bytes, at + 12)?,
+                address,
+                load_address,
                 size: u32_at(bytes, at + 20)?,
                 link: u32_at(bytes, at + 24)?,
                 info: u32_at(bytes, at + 28)?,

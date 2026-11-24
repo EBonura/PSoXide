@@ -9,3 +9,4 @@ description = "BIN/CUE and ISO9660 parsing for PS1 disc images. Shared by emulat
 
 [dependencies]
 psx-pack = { path = "../../sdk/crates/psx-pack" }
+psx-scene-abi = { path = "../../sdk/crates/psx-scene-abi" }

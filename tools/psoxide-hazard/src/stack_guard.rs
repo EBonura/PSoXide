@@ -5,6 +5,10 @@ use std::collections::HashMap;
 use std::fmt;
 use std::io::Write;
 use std::path::Path;
+use std::rc::Rc;
+
+use psx_scene_abi::stack::Slot;
+use psx_scene_abi::{slot, CORE_WINDOW};
 
 use regex::Regex;
 
@@ -66,6 +70,19 @@ the unresolved registrations as covered by that list.
 
     stack-guard game.exe game.map                       (the whole proof)
     stack-guard game.exe game.map --handler 'game::on_timer'
+
+A call (`jal`, `j`, or `jalr` through a register holding a constant) into the scene
+core's window (psx-scene-abi's CORE_WINDOW) must land on one of its jump-table slots
+and costs that slot's measured depth (psx_scene_abi::stack::SLOTS); anywhere else in
+the window is refused. The switch's load runs on its own stack and is not charged.
+A slot that waits on the drive also runs the program's idle hook (the function passed
+to psx_core_set_idle_hook) and the read runs its per-sector hook (psx_core_read's
+fourth argument), so the deepest such hook is added to the slot. Hooks are found at
+every call to those two slots, followed back as handlers are. A hook that is not a
+constant function fails the call; `--core-hook REGEX` (repeatable) names the hook
+functions instead. A hook may not call a slot that runs hooks.
+
+    stack-guard game.exe game.map --core-hook 'game::cd::on_sector'
 ";
 
 const STACK_OVERHEAD: i64 = 20;
@@ -207,6 +224,33 @@ fn writes_sp(op: &str, args: &str) -> bool {
     strip(args.split(',').next().unwrap_or("")) == "sp" && !is(op, READS_ALL)
 }
 
+/// A `(bytes, chain)` depth, or why there is none.
+type Depth = Result<(i64, Vec<String>), GuardError>;
+
+/// The deepest of the program's hooks of one kind that the scene core runs, `(0, [])` when it
+/// registers none, or why it cannot be bounded.
+type HookDepth = Result<(i64, Vec<String>), String>;
+
+/// The program's scene core hooks, found once per walk.
+struct CoreHooks {
+    /// The idle hook (`psx_core_set_idle_hook`'s argument), run by every slot that waits.
+    idle: HookDepth,
+    /// The per-sector hook (`psx_core_read`'s fourth argument), run by the read.
+    sector: HookDepth,
+}
+
+/// What a call into the scene core's window may run of the program's own code.
+enum CoreCalls<'a> {
+    /// A program tree: hooks are found on the first call and walked; `named` are functions
+    /// accepted as hooks for the registrations the scan cannot resolve (`--core-hook`).
+    Program {
+        named: &'a [Regex],
+        hooks: Option<Rc<CoreHooks>>,
+    },
+    /// A hook's own tree, which may not call a slot that runs hooks.
+    Hook(String),
+}
+
 struct Walker<'a> {
     image: &'a GuardImage,
     detector: Detector<'a>,
@@ -216,17 +260,110 @@ struct Walker<'a> {
     /// Call targets that cost a fixed number of bytes and are not followed (a scratchpad window's guard stubs:
     /// the callee behind a guard runs on its own, checked, budget).
     leaves: &'a HashMap<i64, i64>,
+    core: CoreCalls<'a>,
 }
 
 impl<'a> Walker<'a> {
     fn new(image: &'a GuardImage, forbidden: &'a [String], leaves: &'a HashMap<i64, i64>) -> Self {
+        Self::with_core_hooks(image, forbidden, leaves, &[])
+    }
+
+    fn with_core_hooks(
+        image: &'a GuardImage,
+        forbidden: &'a [String],
+        leaves: &'a HashMap<i64, i64>,
+        named: &'a [Regex],
+    ) -> Self {
         Self {
             image,
             detector: Detector::new(image.image(), Some(&image.map)),
             memo: HashMap::new(),
             forbidden,
             leaves,
+            core: CoreCalls::Program { named, hooks: None },
         }
+    }
+
+    /// The jump-table slot a call to `addr` inside the core's window lands on; any other address
+    /// in the window is the core's interior, whose stack use is not known.
+    fn core_slot(&self, addr: i64, path: &[i64]) -> Result<Slot, GuardError> {
+        let caller = path
+            .last()
+            .and_then(|&at| self.image.map.function(at))
+            .map_or_else(|| "the entry".to_string(), |(_, _, name)| short(&name));
+        let (lo, hi) = (i64::from(CORE_WINDOW.start), i64::from(CORE_WINDOW.end));
+        if let Some(found) = u32::try_from(addr)
+            .ok()
+            .and_then(psx_scene_abi::stack::slot_at)
+        {
+            return Ok(found);
+        }
+        if addr >= i64::from(slot::TABLE_END) {
+            return Err(GuardError(format!(
+                "{caller} calls {addr:08x}, in the scene core's window ({lo:08x}..{hi:08x}) past its jump table \
+                 ({} slots, {lo:08x}..{:08x}); only a slot's stack use is known",
+                slot::COUNT,
+                slot::TABLE_END
+            )));
+        }
+        Err(GuardError(format!(
+            "{caller} calls {addr:08x}, inside the scene core's jump table but not at the start of one of its \
+             {}-byte slots; only a slot's stack use is known",
+            slot::SLOT_BYTES
+        )))
+    }
+
+    /// What a call to the core `slot` costs the caller's stack: the slot's own depth, plus the
+    /// deepest hook of the program that it can run.
+    fn core_call(&mut self, found: Slot) -> Depth {
+        let own = i64::from(found.depth);
+        let label = format!("{}@{:08x}({own})", found.name, found.addr);
+        let runs_hooks = found.idle_hook || found.sector_hook;
+        let hooks = match &mut self.core {
+            CoreCalls::Hook(hook) if runs_hooks => {
+                return Err(GuardError(format!(
+                    "the scene core hook {hook} calls {}, which runs the program's hooks itself; a hook may not \
+                     wait on the core",
+                    found.name
+                )));
+            }
+            CoreCalls::Hook(_) => None,
+            CoreCalls::Program { .. } if !runs_hooks => None,
+            CoreCalls::Program { named, hooks } => {
+                let named = *named;
+                if hooks.is_none() {
+                    *hooks = Some(Rc::new(core_hooks(self.image, self.forbidden, named)));
+                }
+                hooks.clone()
+            }
+        };
+        let mut deepest = (0, Vec::new());
+        if let Some(hooks) = hooks {
+            // The read calls its sector hook between sectors, not inside a wait, and a hook may
+            // not wait on the core itself, so the two never stack: the deeper one counts.
+            let kinds = [
+                (found.idle_hook, &hooks.idle, "idle"),
+                (found.sector_hook, &hooks.sector, "per-sector"),
+            ];
+            for (runs, depth, kind) in kinds {
+                if !runs {
+                    continue;
+                }
+                match depth {
+                    Ok(depth) if depth.0 > deepest.0 => deepest = depth.clone(),
+                    Ok(_) => {}
+                    Err(why) => {
+                        return Err(GuardError(format!(
+                            "{} runs the program's {kind} hook, which cannot be bounded: {why}",
+                            found.name
+                        )))
+                    }
+                }
+            }
+        }
+        let mut chain = vec![label];
+        chain.extend(deepest.1);
+        Ok((own + deepest.0, chain))
     }
 
     /// Call targets outside `[start, end)` for one instruction.
@@ -259,6 +396,14 @@ impl<'a> Walker<'a> {
             return Ok(vec![dest]);
         }
         if op == "jalr" {
+            // A call through a register into the scene core's window is a slot call when the
+            // register holds a constant (the core's slots are outside the program, so a call
+            // into them may be emitted either way).
+            if let Some(dest) = crate::dispatch_guard::jalr_target(self.image, addr) {
+                if i64::from(CORE_WINDOW.start) <= dest && dest < i64::from(CORE_WINDOW.end) {
+                    return Ok(vec![dest]);
+                }
+            }
             return Err(GuardError(format!(
                 "{name} calls through a register at {addr:08x}; the callee cannot be bounded"
             )));
@@ -326,6 +471,10 @@ impl<'a> Walker<'a> {
     fn depth(&mut self, addr: i64, path: &mut Vec<i64>) -> Result<(i64, Vec<String>), GuardError> {
         if let Some(&cost) = self.leaves.get(&addr) {
             return Ok((cost, vec![format!("guard@{addr:08x}({cost})")]));
+        }
+        if i64::from(CORE_WINDOW.start) <= addr && addr < i64::from(CORE_WINDOW.end) {
+            let found = self.core_slot(addr, path)?;
+            return self.core_call(found);
         }
         let Some((start, end, name)) = self.image.map.function(addr) else {
             return Err(GuardError(format!("call to {addr:08x}, outside .text")));
@@ -406,6 +555,85 @@ impl<'a> Walker<'a> {
         self.memo.insert(start, result.clone());
         Ok(result)
     }
+}
+
+/// Every function whose symbol matches one of `named`.
+fn matching_functions(image: &GuardImage, named: &[Regex]) -> Vec<i64> {
+    image
+        .map
+        .sorted_names()
+        .into_iter()
+        .filter(|(_, names)| {
+            names
+                .iter()
+                .any(|(_, name)| named.iter().any(|r| r.is_match(name)))
+        })
+        .map(|(address, _)| address)
+        .collect()
+}
+
+fn core_hooks(image: &GuardImage, forbidden: &[String], named: &[Regex]) -> CoreHooks {
+    CoreHooks {
+        idle: hook_depth(image, forbidden, named, slot::SET_IDLE_HOOK, 0),
+        sector: hook_depth(image, forbidden, named, slot::READ, 3),
+    }
+}
+
+/// The deepest function the program passes as argument `arg` of the core slot at `at`, walked
+/// as a tree of its own. A registration it cannot resolve needs `--core-hook`.
+fn hook_depth(
+    image: &GuardImage,
+    forbidden: &[String],
+    named: &[Regex],
+    at: u32,
+    arg: usize,
+) -> HookDepth {
+    let slot_name = psx_scene_abi::stack::slot_at(at).map_or("?", |s| s.name);
+    let found = crate::dispatch_guard::registrations_through(image, &[(i64::from(at), arg)], true);
+    let mut hooks: Vec<(i64, String)> = found
+        .handlers
+        .iter()
+        .map(|h| (h.address, h.from.join(", ")))
+        .collect();
+    if !found.unresolved.is_empty() {
+        let extra = matching_functions(image, named);
+        if extra.is_empty() {
+            let named = if named.is_empty() {
+                String::new()
+            } else {
+                " (no function matches the --core-hook patterns given)".to_string()
+            };
+            return Err(format!(
+                "the hook passed to {slot_name} at {} is not resolved{named}; pass a constant function there, or \
+                 name the program's hooks with --core-hook REGEX",
+                found.unresolved.join("; ")
+            ));
+        }
+        hooks.extend(
+            extra
+                .into_iter()
+                .map(|a| (a, "named by --core-hook".to_string())),
+        );
+    }
+    let no_leaves = HashMap::new();
+    let mut deepest = (0, Vec::new());
+    for (address, from) in hooks {
+        let name = image
+            .map
+            .function(address)
+            .filter(|&(start, _, _)| start == address)
+            .map(|(_, _, name)| short(&name))
+            .ok_or_else(|| {
+                format!("{address:08x} (passed to {slot_name} in {from}) is not the start of a function")
+            })?;
+        let mut walker = Walker::new(image, forbidden, &no_leaves);
+        walker.core = CoreCalls::Hook(name);
+        let depth = walker.depth(address, &mut Vec::new()).map_err(|e| e.0)?;
+        if depth.0 > deepest.0 {
+            deepest = depth;
+        }
+    }
+    Ok(deepest)
 }
 
 /// A symbol name shortened for a report line: no `::h<hash>` suffix, at
@@ -516,6 +744,7 @@ pub fn check_forbidding_modules(
         forbidden,
         modules,
         &[],
+        &[],
         &mut dispatcher,
         out,
     );
@@ -534,6 +763,7 @@ pub fn check_everything(
     forbidden: &[String],
     modules: &[Module],
     handlers: &[String],
+    core_hooks: &[String],
     dispatcher: &mut usize,
     out: &mut dyn Write,
 ) -> usize {
@@ -619,8 +849,18 @@ pub fn check_everything(
             exe.display()
         );
     }
+    let mut named_hooks = Vec::new();
+    for hook in core_hooks {
+        match Regex::new(hook) {
+            Ok(regex) => named_hooks.push(regex),
+            Err(error) => {
+                let _ = writeln!(out, "stack guard: bad --core-hook pattern: {error}");
+                return 1;
+            }
+        }
+    }
     let no_leaves = HashMap::new();
-    let mut walker = Walker::new(&image, forbidden, &no_leaves);
+    let mut walker = Walker::with_core_hooks(&image, forbidden, &no_leaves, &named_hooks);
     let mut failures = 0;
     for (address, name, limit, region) in entries {
         let place = region.map_or(String::new(), |(lo, hi)| format!("region {lo}..{hi}, "));
@@ -671,6 +911,7 @@ pub fn main(args: &[String], out: &mut dyn Write) -> i32 {
     let (mut paths, mut pattern, mut budget) = (Vec::new(), None, None);
     let mut forbidden = Vec::new();
     let mut handlers = Vec::new();
+    let mut core_hooks = Vec::new();
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -698,6 +939,13 @@ pub fn main(args: &[String], out: &mut dyn Write) -> i32 {
                 Some(value) => handlers.push(value.clone()),
                 None => {
                     let _ = writeln!(out, "stack guard: --handler needs a symbol pattern");
+                    return 1;
+                }
+            },
+            "--core-hook" => match it.next() {
+                Some(value) => core_hooks.push(value.clone()),
+                None => {
+                    let _ = writeln!(out, "stack guard: --core-hook needs a symbol pattern");
                     return 1;
                 }
             },
@@ -739,6 +987,7 @@ pub fn main(args: &[String], out: &mut dyn Write) -> i32 {
         &forbidden,
         &modules,
         &handlers,
+        &core_hooks,
         &mut dispatcher,
         out,
     );

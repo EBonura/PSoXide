@@ -8,6 +8,14 @@
  * in here from link-time symbols, so no post-link tool has to touch the
  * file.
  *
+ * A program with sections stored in one place and run from another (the scene core's image,
+ * psoxide-core.ld; boot-only code, psoxide-boot.ld) links an ELF instead and writes the EXE
+ * from its load addresses with `psx-exe` (tools/psoxide-hazard; psoxide-pgo does it for the
+ * programs it builds): ld.lld's `--oformat=binary` places every section at its run address.
+ * The stored copies follow .data in the file, in this order: .data, .boot, the core's image.
+ * .bss is laid over them, so they cost no RAM once their movers have run (`__core_boot`, then
+ * `__boot_entry`, then `_start`).
+ *
  * The image loads to 80010000h: KSEG0 (cached), the first address past the
  * 64 KiB the kernel keeps for itself (psx-spx "BIOS Memory Map").
  */
@@ -20,7 +28,11 @@ RAM_BASE    = 0x80000000;   /* KSEG0 cached RAM */
    not carry it). The stack starts 100h below the top of RAM. */
 RAM_SIZE    = DEFINED(RAM_SIZE_OVERRIDE) ? RAM_SIZE_OVERRIDE : 2M;
 BIOS_SIZE   = 64K;          /* First 64 KiB is BIOS / kernel scratch */
-LOAD_ADDR   = RAM_BASE + BIOS_SIZE;
+/* LOAD_ADDR_OVERRIDE (an address) at link time moves where the image loads, the same way:
+   a `-T<file>` before this script holding `LOAD_ADDR_OVERRIDE = 0x...;`. For a program that
+   must sit above another one's image (a boot program, a chain loader); every game and every
+   scene keeps the default. It must be at or above RAM_BASE + BIOS_SIZE (asserted below). */
+LOAD_ADDR   = DEFINED(LOAD_ADDR_OVERRIDE) ? LOAD_ADDR_OVERRIDE : RAM_BASE + BIOS_SIZE;
 STACK_INIT  = RAM_BASE + RAM_SIZE - 0x100;
 
 /* Build-time RAM budget for the stack. The stack runs downward from
@@ -50,10 +62,18 @@ EXE_HEAD_BYTES = 0x800;
    top is still the start of the stack reserve. */
 MEMORY {
     IMAGE (rwx) : ORIGIN = LOAD_ADDR - EXE_HEAD_BYTES,
-                  LENGTH = EXE_HEAD_BYTES + RAM_SIZE - BIOS_SIZE - STACK_RESERVE
+                  LENGTH = EXE_HEAD_BYTES + RAM_BASE + RAM_SIZE - LOAD_ADDR - STACK_RESERVE
+    /* Run addresses of sections stored elsewhere (psoxide-core.ld, psoxide-boot.ld). They are
+       counted where they are stored, by the assertions below and in their scripts, not here. */
+    RELOCATED (rwx) : ORIGIN = RAM_BASE, LENGTH = 8M
 }
 
 ENTRY(_start)
+
+/* Where psoxide-core.ld's `__core_boot` goes on to: the boot-only mover when psoxide-boot.ld is
+   linked, else `_start`. Here, after both scripts, so the order they are given in cannot drop
+   the mover (DEFINED() only sees symbols of the scripts before it). */
+__core_next = DEFINED(__boot_initial) ? __boot_initial : _start;
 
 SECTIONS {
     /* PS-X EXE header, field by field as psx-spx lists it. Offsets are
@@ -63,9 +83,10 @@ SECTIONS {
         LONG(0x45584520);           /* 004h " EXE" */
         LONG(0);                    /* 008h zero */
         LONG(0);                    /* 00Ch zero */
-        /* 010h initial PC: `__initial_pc` when a script defines it (psoxide-boot.ld: the
-           boot-overlay mover runs first), else `_start`. */
-        LONG(DEFINED(__initial_pc) ? __initial_pc : _start);
+        /* 010h initial PC: `__initial_pc` when a script defines it (psoxide-core.ld: the core's
+           mover), else `__boot_initial` (psoxide-boot.ld: the boot-only mover), else `_start`.
+           With both, `__core_boot` runs first and goes on to `__boot_entry`. */
+        LONG(DEFINED(__initial_pc) ? __initial_pc : DEFINED(__boot_initial) ? __boot_initial : _start);
         LONG(0);                    /* 014h initial GP: the runtime does not use $gp */
         LONG(LOAD_ADDR);            /* 018h destination address */
         LONG(__image_end - __text_start); /* 01Ch bytes stored after the header */
@@ -162,35 +183,71 @@ SECTIONS {
        which `_start` clears before anything reads it. Starting .bss right
        after the data instead of after this padding gives the program the
        bytes back. */
-    /* With psoxide-boot.ld the boot-only sections follow .data in the file (their load address
-       is `__boot_lma`, where .bss will be once the mover has run). */
-    __load_end = DEFINED(__boot_start) ? __boot_lma + (__boot_load_end - __boot_start) : __data_end;
+    /* The stored bytes, each where .bss will be: .data, then the boot-only sections
+       (psoxide-boot.ld), then the scene core's stored image (psoxide-core.ld), last so that a
+       core switch, which loads a program up to its stored core and no further, loads .boot too.
+       Decided here, after both scripts: DEFINED() only sees symbols of the scripts before it. */
+    __psx_core_store_at = DEFINED(__boot_lma_end) ? __boot_lma_end : __data_end;
+    __load_end = DEFINED(__psx_core_store_load_end) ? __psx_core_store_load_end
+               : DEFINED(__boot_lma_end) ? __boot_lma_end : __data_end;
     __image_end = __text_start + ((__load_end - __text_start + EXE_HEAD_BYTES - 1) & ~(EXE_HEAD_BYTES - 1));
 
-    /* Uninitialised data - zeroed by `_start`, not stored in file. */
-    .bss (NOLOAD) : {
+    /* Uninitialised data - zeroed by `_start`, not stored in file. It runs right after .data,
+       over the stored copies; its load address (which nothing reads) follows them, so no two
+       sections share load addresses and the link keeps its section checks. A program whose
+       overlays run over a host buffer (psoxide-overlay.ld, `.bss.overlay_host`) has the host
+       and its overlays there instead, and .bss after them. */
+    .bss (DEFINED(__overlay_host_bytes) && __overlay_host_bytes ? __overlay_end : __data_end) (NOLOAD) : AT(__load_end) {
         __bss_start = .;
         *(.bss .bss.*);
         *(COMMON);
         . = ALIGN(4);
         __bss_end = .;
+        /* Heap starts right after BSS and runs up to just below the stack. Set here, inside .bss,
+           so the link map prints its own address on its line: set after .bss, the map printed
+           the location counter there, which a script INSERTed after .bss (psoxide-boot.ld,
+           psoxide-overlay.ld) moves past .bss, and the tools that read free RAM from the map
+           (psoxide-size, `psoxide-pgo ram`, heap-guard) read that instead. */
+        __heap_start = .;
     } > IMAGE
 
-    /* Heap starts right after BSS and runs up to just below the stack. The end of .bss, not
-       `.`: an overlay script INSERTed after .bss moves `.` past it. */
-    __heap_start = __bss_end;
+    /* What `_start` zeroes: .bss, and in front of it the host buffer and its overlays' range (no
+       overlay is in RAM before its first load). */
+    __zero_start = DEFINED(__overlay_host_bytes) && __overlay_host_bytes ? __overlay_vma : __bss_start;
+
+    /* The heap runs up to just below the stack reserve. */
     __heap_end   = STACK_INIT - STACK_RESERVE;   /* keep heap below the reserved stack */
 
     /* The header above only describes the image if these hold. */
     ASSERT(__text_start == LOAD_ADDR, "the entry section must start at LOAD_ADDR")
+    ASSERT(LOAD_ADDR >= RAM_BASE + BIOS_SIZE, "LOAD_ADDR_OVERRIDE is inside the kernel's 64 KiB")
     ASSERT((__image_end - __text_start) % EXE_HEAD_BYTES == 0, "the stored image must be whole 800h-byte sectors")
     ASSERT(__image_end - __load_end < EXE_HEAD_BYTES, "the stored image may reach past the data by under one sector")
+    ASSERT(__load_end <= __heap_end, "the stored image reaches into the stack reserve")
 
-    /* Discard MIPS ABI glue not needed on bare metal. */
+    /* The scene core's stored image (psx-core with feature `link`, input section `.psx_core`)
+       belongs to psoxide-core.ld's `.psx_core_store`, which takes it first when that script is
+       linked. Linked without it, the image would be placed as an orphan without a word and the
+       program would run with no core in its window; it lands here instead, and the assertion
+       below fails the link. */
+    .psx_core_unplaced : { KEEP(*(.psx_core)) } > RELOCATED
+    ASSERT(SIZEOF(.psx_core_unplaced) == 0, "psx-core's image (feature link) is linked without psoxide-core.ld: link -T <ram>.ld -T psoxide-core.ld [-T psoxide-boot.ld] -T psoxide.ld")
+
+    /* The symbol tables the link writes (non-allocated: in the ELF beside an EXE, for the
+       tools), placed by name so the link can refuse every unplaced section
+       (`--orphan-handling=error`). */
+    .symtab 0 : { *(.symtab) }
+    .strtab 0 : { *(.strtab) }
+    .shstrtab 0 : { *(.shstrtab) }
+
+    /* Discard MIPS ABI glue not needed on bare metal, and the MIPS debug records (procedure
+       descriptors and the ABI marker) nothing reads. */
     /DISCARD/ : {
         *(.region); /* Discard legacy vendor markers from older object files. */
         *(.MIPS.abiflags)
         *(.reginfo)
+        *(.pdr)
+        *(.mdebug.*)
         *(.eh_frame_hdr)
         *(.eh_frame)
         *(.comment)

@@ -26,6 +26,15 @@
 //!
 //! The encoder is the SDK's own `psx-str-cook` (`crates/psx-str-cook`), run as a host build tool:
 //! `psx-str-cook encode --video in.y4m --audio in.wav --out out.str --size 320x240 --speed 2`.
+//!
+//! # Boot-only memory
+//!
+//! On the guest every function and static here names its own section, so a boot program that
+//! links `psoxide-boot.ld` runs the player from memory its heap takes afterwards: the entry points
+//! (`player::play`, `find_root_file`, `memory_words`; never inlined) and the statics in `.boot`,
+//! which resident code may refer to, the rest in `.boot_inner`, which it may not. A program without
+//! that script keeps all of it in `.text` and `.data`. Generic code of other crates the player
+//! instantiates is not placed: resident code may share it.
 
 #![no_std]
 

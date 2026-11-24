@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Prints the core hash of a core image (word FNV), for hello-scene's disc manifests.
+[package]
+name    = "corehash"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+
+[workspace]
+
+[dependencies]
+psx-scene-abi = { path = "../../../crates/psx-scene-abi" }

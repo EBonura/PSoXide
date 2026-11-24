@@ -313,16 +313,20 @@ impl Overlay {
     }
 
     /// The file with the checks' result in it: `image`'s bytes up to the
-    /// file's `length`, each module back where it sits.
-    pub fn collapse(&self, image: &[u8], length: usize, base: i64) -> Vec<u8> {
+    /// length of `original` (the file [`Overlay::expand`] was given), each
+    /// module back where it sits.
+    pub fn collapse(&self, image: &[u8], original: &[u8], base: i64) -> Vec<u8> {
+        let length = original.len();
         let mut file = image[..length].to_vec();
-        // A boot overlay's link range overlaps the file's tail (its stored
-        // bytes and the zero padding after them); the tail is not the
-        // overlay's, so clear it before the overlays go back where they sit.
+        // A boot overlay's link range overlaps the file's tail: its stored
+        // bytes, what is stored after them (the scene core's image) and the
+        // zero padding. None of that is the overlay's at its link address
+        // and no check writes there, so it goes back as the file had it
+        // before the overlays go back where they sit.
         for module in self.modules.iter().filter(|m| m.boot) {
             let to = Self::offset(module.link.0, base).min(length);
             let end = Self::offset(module.link.1, base).min(length);
-            file[to..end].fill(0);
+            file[to..end].copy_from_slice(&original[to..end]);
         }
         for module in &self.modules {
             let from = Self::offset(module.at, base);
@@ -413,16 +417,45 @@ mod tests {
         assert!(image[HEADER as usize + 0x20..HEADER as usize + 0x30]
             .iter()
             .all(|&b| b == 0));
-        assert_eq!(overlay.collapse(&image, file.len(), base), file);
+        assert_eq!(overlay.collapse(&image, &file, base), file);
         // A change at the link address lands where the bytes sit.
         let mut changed = image.clone();
         changed[link + 4] = 0xee;
-        let back = overlay.collapse(&changed, file.len(), base);
+        let back = overlay.collapse(&changed, &file, base);
         assert_eq!(back[HEADER as usize + 0x24], 0xee);
         assert_eq!(back.len(), file.len());
         assert_eq!(overlay.domain(0x8041_0004), Some(0));
         assert_eq!(overlay.domain(base), None);
         assert!(overlay.holds_span(0x8041_0004, 0x8041_0010, Some(0)));
         assert!(!overlay.holds_span(0x8041_0004, 0x8041_0014, Some(0)));
+    }
+
+    #[test]
+    fn a_boot_overlay_over_the_stored_core_gives_the_core_back() {
+        let base = 0x8001_0000;
+        // 0x20 bytes of code, the boot overlay's 0x10 stored bytes, then 0x10 bytes stored after
+        // them (the scene core's image) that its link range runs over.
+        let mut file = vec![0u8; HEADER as usize + 0x40];
+        file[..8].copy_from_slice(b"PS-X EXE");
+        file[0x18..0x1c].copy_from_slice(&(base as u32).to_le_bytes());
+        file[0x1c..0x20].copy_from_slice(&0x40u32.to_le_bytes());
+        for (i, b) in file[HEADER as usize..].iter_mut().enumerate() {
+            *b = i as u8 + 1;
+        }
+        let module = Module {
+            link: (base + 0x28, base + 0x38),
+            at: base + 0x20,
+            boot: true,
+        };
+        let overlay = Overlay::new(
+            vec![module],
+            &file,
+            base,
+            &[(base, base + 0x20)],
+            &mut Vec::new(),
+        )
+        .unwrap();
+        let image = overlay.expand(&file, base);
+        assert_eq!(overlay.collapse(&image, &file, base), file);
     }
 }

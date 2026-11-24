@@ -25,11 +25,20 @@ PSX_PANIC_FLAGS :=
 else
 PSX_PANIC_FLAGS := $(PSX_PANIC_ABORT_FLAGS),
 endif
+# BOOT=1 links the example with boot-only memory (sdk/psoxide-boot.ld: the splash and the film
+# player run from the start of the heap and are stored after .data). That link writes an ELF,
+# and the PGO driver writes the EXE from its load addresses (psx-exe); every other link writes
+# the EXE itself.
+ifneq ($(filter-out 0,$(BOOT)),)
+PSX_LINK_FLAGS := "-Clink-arg=-T../../psoxide-boot.ld","-Clink-arg=-T../../psoxide.ld"
+else
+PSX_LINK_FLAGS := "-Clink-arg=-T../../psoxide.ld","-Clink-arg=--oformat=binary"
+endif
 # The example's cargo invocation. Flags go in through --config rather than
 # RUSTFLAGS so the PGO driver can append its own (RUSTFLAGS would replace them).
 EXAMPLE_CARGO = build --release --target $(TARGET) -Zbuild-std=core -Zbuild-std-features=compiler-builtins-mem \
 	--target-dir "$(BUILD)" \
-	--config 'target.$(TARGET).rustflags=[$(PSX_PANIC_FLAGS)$(PSX_DELAY_SLOT_FLAGS),"-Clink-arg=-T../../psoxide.ld","-Clink-arg=--oformat=binary"]'
+	--config 'target.$(TARGET).rustflags=[$(PSX_PANIC_FLAGS)$(PSX_DELAY_SLOT_FLAGS),$(PSX_LINK_FLAGS)]'
 # Profile-guided builds (tools/psoxide-pgo/README.md). `example` applies
 # PGO_PROFILE when it exists, as variant PGO_VARIANT, and builds plainly
 # otherwise; either way the driver runs the patcher, scanner and stack guard.

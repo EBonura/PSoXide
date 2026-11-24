@@ -53,6 +53,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "psx-core"
+version = "0.1.0"
+dependencies = [
+ "psx-scene-abi",
+]
+
+[[package]]
 name = "psx-display"
 version = "0.1.0"
 dependencies = [
@@ -131,6 +138,7 @@ version = "0.1.0"
 dependencies = [
  "psx-hw",
  "psx-math",
+ "psx-scene-abi",
 ]
 
 [[package]]
@@ -138,6 +146,7 @@ name = "psx-iso"
 version = "0.1.0"
 dependencies = [
  "psx-pack",
+ "psx-scene-abi",
 ]
 
 [[package]]
@@ -215,6 +224,13 @@ dependencies = [
  "psx-io",
  "psx-math",
  "psx-tick",
+]
+
+[[package]]
+name = "psx-scene-abi"
+version = "0.1.0"
+dependencies = [
+ "psx-pack",
 ]
 
 [[package]]

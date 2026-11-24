@@ -13,6 +13,7 @@ regex = "1"
 serde_json = { workspace = true }
 psx-gate = { path = "../../crates/psx-gate" }
 psx-residency = { path = "../../sdk/crates/psx-residency" }
+psx-scene-abi = { path = "../../sdk/crates/psx-scene-abi" }
 
 [[bin]]
 name = "hazard-patch"
@@ -33,6 +34,10 @@ path = "src/bin/heap-guard.rs"
 [[bin]]
 name = "window-gate"
 path = "src/bin/window-gate.rs"
+
+[[bin]]
+name = "psx-exe"
+path = "src/bin/psx-exe.rs"
 
 [[bin]]
 name = "cache-gate"

@@ -62,11 +62,10 @@ pub struct LinkMap {
     /// `(__text_start, __text_end)`; a blob's first and last `.text` input
     /// section edge.
     pub text: (i64, i64),
-    /// Where the stored image ends and `.bss` begins: the end of the boot
-    /// overlay's stored bytes (psyq.ld's `__load_end`, which ld.lld's map
-    /// evaluates before the overlay exists), `__data_end`, or `__bss_start`
-    /// for a map without them. The header's payload size is this rounded up to whole
-    /// sectors.
+    /// Where the stored image ends and `.bss` begins: the end of the boot overlay's or the core
+    /// image's stored bytes, whichever is later (psyq.ld's `__load_end`, which ld.lld's map
+    /// evaluates before the overlay exists), `__data_end`, or `__bss_start` for a map without them.
+    /// The header's payload size is this rounded up to whole sectors.
     data_end: Option<i64>,
     raw: bool,
     boot: Option<Boot>,
@@ -202,10 +201,20 @@ impl LinkMap {
             };
             let depth = rest.len() - rest.trim_start_matches(' ').len();
             let name = strip(rest);
-            if let Some(key) = ["__boot_start", "__boot_load_end"]
+            if let Some(key) = ["__boot_start", "__boot_load_end", "__psx_core_store_end"]
                 .into_iter()
                 .find(|key| name.strip_prefix(key) == Some(" = ."))
             {
+                // The core's stored image runs in its window; where its bytes end in the stored
+                // image is the row's second (load address) column.
+                let address = if key == "__psx_core_store_end" {
+                    line.split_whitespace()
+                        .nth(1)
+                        .and_then(|c| i64::from_str_radix(c, 16).ok())
+                        .unwrap_or(address)
+                } else {
+                    address
+                };
                 assigned.insert(key, address);
             } else if depth == 0 && name == ".boot" {
                 // The output section row's second column is where its bytes are stored;
@@ -344,7 +353,13 @@ impl LinkMap {
         starts.sort_unstable();
         rodata.sort_unstable();
         // With a boot overlay the image starts at its mover, not at `_start`.
-        let entry_name = if boot.is_some() {
+        // With the scene core (psoxide-core.ld) it starts at `__core_boot`, which copies the core's
+        // stored image (data, after .data) up into its window and then runs the boot overlay's
+        // mover, if there is one, or `_start`.
+        let core_store_end = assigned.get("__psx_core_store_end").copied();
+        let entry_name = if core_store_end.is_some() {
+            "__core_boot"
+        } else if boot.is_some() {
             "__boot_entry"
         } else {
             "_start"
@@ -361,8 +376,11 @@ impl LinkMap {
         Ok(Self {
             path: path.to_string(),
             text: (lo, hi),
+            // The stored bytes end with whichever of the boot overlay and the core's image is
+            // stored last (the core's, when a program has both: psoxide.ld stores it after .boot).
             data_end: boot
                 .map(|b| b.lma + (b.load_end - b.start))
+                .max(core_store_end)
                 .or_else(|| text_marks.get("__data_end").copied())
                 .or_else(|| text_marks.get("__bss_start").copied()),
             raw,

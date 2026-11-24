@@ -59,7 +59,10 @@
 //! ```
 
 #![no_std]
-#![cfg_attr(target_arch = "mips", feature(optimize_attribute))]
+#![cfg_attr(
+    target_arch = "mips",
+    feature(optimize_attribute, asm_experimental_arch)
+)]
 #![warn(missing_docs)]
 
 mod logo;
@@ -72,7 +75,22 @@ use psx_gpu::material::{BlendMode, TextureMaterial};
 use psx_gpu::prim::{QuadTexturedGouraud, QuadTexturedMaterial};
 use psx_gpu::Gpu;
 use psx_pad::{button, ButtonState};
-use psx_vram::{upload_16bpp, Clut, TextureDepth, TexturePage, VramRect};
+use psx_vram::{Clut, TextureDepth, TexturePage, VramRect};
+
+/// The stack the splash's own code needs, in bytes below the `$sp` of [`show`]'s caller, rounded
+/// up: measured 18,272 B on hello-boot (11-24; `show` 16, `play` 17,120, of which the font atlas's
+/// 16 KiB packing buffer is most, its deepest callee 1,136), without the caller's pad closure,
+/// which `play` calls through a register. Published to the link as `__psx_splash_stack_bytes`:
+/// psoxide-boot.ld refuses a boot-time stack (`BOOT_STACK_OVERRIDE`) smaller than this. Measure it
+/// again (frames and direct calls from the linked ELF) when the splash's code changes.
+pub const STACK_BYTES: u32 = 0x5000;
+
+#[cfg(target_arch = "mips")]
+core::arch::global_asm!(
+    ".globl __psx_splash_stack_bytes",
+    ".set __psx_splash_stack_bytes, {bytes}",
+    bytes = const STACK_BYTES,
+);
 
 const MARK_TPAGE: TexturePage = TexturePage::new(896, 0, TextureDepth::Bit4);
 const MARK_CLUT: Clut = Clut::new(768, 256);
@@ -82,6 +100,25 @@ const LOGO_CLUT: Clut = Clut::new(768, 258);
 const LOGO_GLINT_CLUT: Clut = Clut::new(768, 259);
 const FONT_TPAGE: TexturePage = TexturePage::new(320, 0, TextureDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
+/// The font as statics of this crate: a `const` the generic upload takes by reference is emitted as
+/// anonymous data in the caller's crate, which no linker script can place by name (a boot overlay
+/// that holds the splash cannot take it, and under fat LTO it stays resident).
+// In .boot, where resident code may refer to it (psoxide-boot.ld). The splash uploads it with its
+// own boot-only copy of the atlas upload (`FontAtlas::upload_inline`), so no resident code holds
+// its address any more; .boot stays the safe place for a boot crate's statics all the same.
+#[cfg_attr(
+    target_arch = "mips",
+    link_section = ".rodata.boot_only.psx_splash.FONT_BITMAP"
+)]
+static FONT_BITMAP: [u8; 1024] = psx_font::fonts::basic::BASIC_BITMAP;
+#[cfg_attr(
+    target_arch = "mips",
+    link_section = ".rodata.boot_only.psx_splash.FONT"
+)]
+static FONT: psx_font::BitmapFont = psx_font::BitmapFont {
+    bitmap: &FONT_BITMAP,
+    ..BASIC
+};
 
 /// Frames in all, and fading out at the end.
 const TOTAL: i32 = 150;
@@ -164,6 +201,7 @@ impl<'a> Partner<'a> {
 /// `buffers` must be a 320x240 pair.
 #[inline(never)]
 #[cfg_attr(target_arch = "mips", optimize(size))]
+#[cfg_attr(target_arch = "mips", link_section = ".text.boot_only.psx_splash.show")]
 pub fn show(
     gpu: &mut Gpu,
     buffers: &mut DoubleBuffer,
@@ -177,6 +215,10 @@ pub fn show(
 /// [`show`] with a partner's logo beside the mark and its line under `line`.
 #[inline(never)]
 #[cfg_attr(target_arch = "mips", optimize(size))]
+#[cfg_attr(
+    target_arch = "mips",
+    link_section = ".text.boot_only.psx_splash.show_with_partner"
+)]
 pub fn show_with_partner(
     gpu: &mut Gpu,
     buffers: &mut DoubleBuffer,
@@ -206,6 +248,10 @@ struct Picture {
 
 /// The ease-out offset of an element that enters at `at`, `distance` at the start and 0 at the
 /// end, and its fade level (0 to 0x80).
+#[cfg_attr(
+    target_arch = "mips",
+    link_section = ".text.boot_inner.psx_splash.enter"
+)]
 fn enter(frame: i32, at: i32, distance: i32) -> (i16, i32) {
     let t = (frame - at).clamp(0, ENTER);
     let rest = ENTER - t;
@@ -216,6 +262,10 @@ fn enter(frame: i32, at: i32, distance: i32) -> (i16, i32) {
 }
 
 /// `palette` with the semi-transparency bit on every colour but the transparent one.
+#[cfg_attr(
+    target_arch = "mips",
+    link_section = ".text.boot_inner.psx_splash.glint_palette"
+)]
 fn glint_palette(palette: &[u16], out: &mut [u16]) {
     for (to, from) in out.iter_mut().zip(palette) {
         *to = if *from == 0 { 0 } else { *from | 0x8000 };
@@ -226,6 +276,10 @@ fn glint_palette(palette: &[u16], out: &mut [u16]) {
 /// once, here, for size.
 #[inline(never)]
 #[cfg_attr(target_arch = "mips", optimize(size))]
+#[cfg_attr(
+    target_arch = "mips",
+    link_section = ".text.boot_inner.psx_splash.play"
+)]
 fn play(
     gpu: &mut Gpu,
     buffers: &mut DoubleBuffer,
@@ -246,7 +300,7 @@ fn play(
         VramRect::new(MARK_GLINT_CLUT.x(), MARK_GLINT_CLUT.y(), 16, 1),
         &stp[..16],
     );
-    let font = FontAtlas::upload(&BASIC, FONT_TPAGE, FONT_CLUT);
+    let font = FontAtlas::upload_inline(&FONT, FONT_TPAGE, FONT_CLUT, upload_16bpp);
     let mut mark = Picture {
         x: 112,
         y: SOLO_MARK_Y,
@@ -401,6 +455,10 @@ fn play(
 }
 
 /// A picture, `(dx, dy)` off its place, at fade `level` (0 to 0x80).
+#[cfg_attr(
+    target_arch = "mips",
+    link_section = ".text.boot_inner.psx_splash.draw_picture"
+)]
 fn draw_picture(gpu: &mut Gpu, p: &Picture, dx: i16, dy: i16, level: i32) {
     if level <= 0 {
         return;
@@ -418,6 +476,10 @@ fn draw_picture(gpu: &mut Gpu, p: &Picture, dx: i16, dy: i16, level: i32) {
 /// corners are lit by their distance from a diagonal line through x `at` (at the picture's top,
 /// leaning right as it goes down), so a soft bright band crosses it.
 #[cfg_attr(target_arch = "mips", optimize(size))]
+#[cfg_attr(
+    target_arch = "mips",
+    link_section = ".text.boot_inner.psx_splash.draw_glint"
+)]
 fn draw_glint(gpu: &mut Gpu, p: &Picture, at: i32) {
     let light = |x: i16, y: i16| {
         let d = (i32::from(x) - (at + i32::from(y - p.y) / 2)).abs();
@@ -443,9 +505,27 @@ fn draw_glint(gpu: &mut Gpu, p: &Picture, at: i32) {
     }
 }
 
+/// psx-vram's 16bpp uploader, compiled here into the splash's own boot-only code, as the font
+/// atlas upload is (inlined into [`play`]): the splash calls neither `psx_vram::upload_16bpp` nor
+/// `psx_font::FontAtlas::upload`, so a program whose only uploads are the splash's keeps none of
+/// that code resident (764 B in Ocarina), and a program that uploads too keeps its own resident
+/// copy, which never runs boot-only code. Not inlined: five calls share it.
+#[inline(never)]
+#[cfg_attr(
+    target_arch = "mips",
+    link_section = ".text.boot_inner.psx_splash.upload_16bpp"
+)]
+fn upload_16bpp(rect: VramRect, pixels: &[u16]) {
+    psx_vram::upload_16bpp_inline(rect, pixels);
+}
+
 /// Expand the mark into VRAM sixteen rows at a time (1,024 bytes of stack, once), and put its
 /// palette beside it. Entry 0 of the palette is opaque near-black: the backdrop is black and
 /// 0x0000 is transparent.
+#[cfg_attr(
+    target_arch = "mips",
+    link_section = ".text.boot_inner.psx_splash.upload_mark"
+)]
 fn upload_mark() {
     let mut y = MARK_TPAGE.y();
     logo::expand(&mut |band| {
@@ -458,20 +538,29 @@ fn upload_mark() {
     );
 }
 
+/// A letter's colour at fade `level` (0 to 0x80), brightened toward white by `near`, how close the
+/// sheen's head is (0 to `SHEEN`). A function, not a closure: a closure cannot be placed in boot-only
+/// memory by name and would stay resident.
+#[cfg_attr(target_arch = "mips", link_section = ".text.boot_inner.psx_splash.mix")]
+fn mix(colour: (u8, u8, u8), near: i32, level: i32) -> (u8, u8, u8) {
+    let channel = |value: u8| {
+        let base = i32::from(value) * level / 0x80;
+        (base + (level - base) * near / SHEEN) as u8
+    };
+    (channel(colour.0), channel(colour.1), channel(colour.2))
+}
+
 /// The line: a black outline, then each letter as a gradient whose brightness rises toward
 /// the sheen's head, all scaled by the fade `level` (0 to 0x80).
 #[cfg_attr(target_arch = "mips", optimize(size))]
+#[cfg_attr(
+    target_arch = "mips",
+    link_section = ".text.boot_inner.psx_splash.draw_line"
+)]
 fn draw_line(font: &FontAtlas, mut x: i16, y: i16, line: &str, head: i32, level: i32) {
     if level <= 0 {
         return;
     }
-    let mix = |colour: (u8, u8, u8), near: i32| -> (u8, u8, u8) {
-        let channel = |value: u8| {
-            let base = i32::from(value) * level / 0x80;
-            (base + (level - base) * near / SHEEN) as u8
-        };
-        (channel(colour.0), channel(colour.1), channel(colour.2))
-    };
     for (index, ch) in line.char_indices() {
         // The one character as a `&str`, copied out so nothing re-slices `line`.
         let mut one = [0u8; 4];
@@ -484,8 +573,8 @@ fn draw_line(font: &FontAtlas, mut x: i16, y: i16, line: &str, head: i32, level:
             x,
             y,
             glyph,
-            mix((0x68, 0x80, 0x80), near),
-            mix((0x38, 0x58, 0x80), near),
+            mix((0x68, 0x80, 0x80), near, level),
+            mix((0x38, 0x58, 0x80), near, level),
         );
         // `BASIC` is fixed width and has no advance table, so every glyph advances the same.
         x += i16::from(font.font().advance_x);

@@ -485,6 +485,7 @@ dependencies = [
  "psx-disasm",
  "psx-gate",
  "psx-residency",
+ "psx-scene-abi",
  "regex",
  "serde_json",
 ]
@@ -523,6 +524,7 @@ dependencies = [
  "psoxide-size",
  "psx-gate",
  "psx-hw",
+ "psx-scene-abi",
  "rustc-demangle",
  "serde_json",
 ]
@@ -717,6 +719,7 @@ name = "psx-iso"
 version = "0.1.0"
 dependencies = [
  "psx-pack",
+ "psx-scene-abi",
 ]
 
 [[package]]
@@ -778,6 +781,10 @@ dependencies = [
  "psx-math",
  "psx-tick",
 ]
+
+[[package]]
+name = "psx-scene-abi"
+version = "0.1.0"
 
 [[package]]
 name = "psx-seq"

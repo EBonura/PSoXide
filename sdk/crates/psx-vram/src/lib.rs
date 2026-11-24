@@ -1263,6 +1263,16 @@ impl<const ROOM_PAGES: usize, const CLUT_ROWS: usize> VramRegionSource
 // upload is a load-time call.
 #[inline(never)]
 pub fn upload_16bpp(rect: VramRect, pixels: &[u16]) {
+    upload_16bpp_inline(rect, pixels);
+}
+
+/// [`upload_16bpp`]'s body, always inlined: for a caller that needs a copy of its own in its own
+/// section. psx-splash compiles one into a boot-only function (psoxide-boot.ld's `.boot_inner`), so
+/// a program whose only uploader is the splash keeps no upload code resident once boot memory is
+/// reused. Everything else calls [`upload_16bpp`] and shares one copy.
+#[doc(hidden)]
+#[inline(always)]
+pub fn upload_16bpp_inline(rect: VramRect, pixels: &[u16]) {
     let expected = rect.pixel_count();
     // Literal messages: formatting the counts links core::fmt (about 4 KB)
     // into any program where this function is not inlined.

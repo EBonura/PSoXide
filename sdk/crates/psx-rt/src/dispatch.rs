@@ -362,12 +362,18 @@ core::arch::global_asm!(
     # 24 $18, 28 $28, 32.. $1..$15, 92 $24, 96 $25, 100 $31, 104 hi, 108 lo.
     # $28 (the global pointer) is saved because the compiler uses it as a general register: a handler may
     # leave it changed (nothing in its prologue saves it) and the interrupted code may hold a live value in it.
+    # $sp changes in one instruction, from the interrupted stack to the frame: the frame's
+    # address is built in $1 (saved first, through $27) so no observer that samples $sp (a
+    # stack profiler, a debugger) ever sees half of it. Nothing can land between the
+    # instructions anyway: an exception entry clears IEc and nothing here can fault.
     .globl __psx_rt_dispatch_tramp
 __psx_rt_dispatch_tramp:
+    move  $27, $1
+    lui   $1, %hi({stack}+{frame_at})
+    addiu $1, $1, %lo({stack}+{frame_at})
+    sw    $27, 32($1)
     move  $27, $29
-    lui   $29, %hi({stack}+{frame_at})
-    addiu $29, $29, %lo({stack}+{frame_at})
-    sw    $1, 32($29)
+    move  $29, $1
     sw    $2, 36($29)
     sw    $3, 40($29)
     sw    $4, 44($29)
@@ -428,11 +434,9 @@ __psx_rt_dispatch_tramp:
     addiu $18, $18, 4
 5:
     lw    $1, 104($29)
-    nop
+    lw    $2, 108($29)
     mthi  $1
-    lw    $1, 108($29)
-    nop
-    mtlo  $1
+    mtlo  $2
     lw    $1, 32($29)
     lw    $2, 36($29)
     lw    $3, 40($29)

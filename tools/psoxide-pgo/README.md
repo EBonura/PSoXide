@@ -118,6 +118,11 @@ Two conventions the guest must follow:
 
   The driver checks the output and says so if the guest forgot.
 
+A guest whose link writes an ELF rather than a flat binary (one with sections
+stored apart from where they run: `sdk/psoxide-core.ld`, `sdk/psoxide-boot.ld`)
+gets its EXE written by load address (`psx-exe`, tools/psoxide-hazard), and the
+ELF kept beside it as `NAME.elf`.
+
 A third applies only to a game that tries `+order`:
 
 - **The link order.** An `+order` variant relinks with an ordering file the
@@ -1067,6 +1072,14 @@ The SDK's own `make repro-check` runs the gate on `editor-playtest` and `hello-e
     trampolines (2.8% on the bench, 0.2% on VoXide). The sample loader only
     annotates functions it compiles from IR; adding records for the assembly
     built a byte-identical exe.
+- **The scene core's window** (`psx_scene_abi::CORE_WINDOW`) holds the
+  prebuilt core, which a hosting program calls with `jal` (its CD reader loop
+  among others). The program's build does not compile that code, so samples
+  there are counted apart (`scene core: N samples (P%) in its window` from
+  `collect`, `in the scene core's window` from `order` and `search`): they
+  write no profile record, the core's sections are never laid out or ordered,
+  and they count toward no unbound or unplaced gate. Anything outside both the
+  program's text and the window is reported as before.
 
 ## Troubleshooting
 

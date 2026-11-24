@@ -191,6 +191,10 @@ const GP1_DISPLAY_MODE: u32 = gp1::display_mode(0, 0, false, false, false);
 const DISPLAY_24BIT: u32 = 1 << 4;
 
 /// The current GP1(08h) parameter, rebuilt from GPUSTAT bits 16..22.
+#[cfg_attr(
+    target_arch = "mips",
+    link_section = ".text.boot_inner.psx_fmv.display_mode"
+)]
 fn display_mode() -> u32 {
     let stat = psx_io::gpu::status().bits();
     ((stat >> 17) & 3)
@@ -207,17 +211,29 @@ fn display_mode() -> u32 {
 /// end until that frame's flip, which a 24-bit movie cannot afford.
 const BUFFERS: usize = 3;
 
+#[cfg_attr(
+    target_arch = "mips",
+    link_section = ".text.boot_inner.psx_fmv.slot_words"
+)]
 fn slot_words(m: &Movie) -> usize {
     m.max_chunks as usize * CHUNK_WORDS
 }
 
 /// Run-length buffer words: the measured maximum, rounded up to whole DMA
 /// blocks.
+#[cfg_attr(
+    target_arch = "mips",
+    link_section = ".text.boot_inner.psx_fmv.rle_words"
+)]
 fn rle_words(m: &Movie) -> usize {
     m.rle_words.div_ceil(mdec::DMA_BLOCK_WORDS) * mdec::DMA_BLOCK_WORDS
 }
 
 /// VRAM halfwords one decoded pixel takes.
+#[cfg_attr(
+    target_arch = "mips",
+    link_section = ".text.boot_inner.psx_fmv.halfwords_x2"
+)]
 fn halfwords_x2(depth: Depth) -> u16 {
     match depth {
         Depth::Rgb15 => 2,
@@ -226,16 +242,30 @@ fn halfwords_x2(depth: Depth) -> u16 {
 }
 
 /// One column, 16 pixels wide: 16 * height pixels of 2 or 3 bytes.
+#[cfg_attr(
+    target_arch = "mips",
+    link_section = ".text.boot_inner.psx_fmv.column_words"
+)]
 fn column_words(m: &Movie, depth: Depth) -> usize {
     4 * halfwords_x2(depth) as usize * m.height as usize
 }
 
 /// One decoded frame: every column, in the order the MDEC returns them.
+#[cfg_attr(
+    target_arch = "mips",
+    link_section = ".text.boot_inner.psx_fmv.frame_words"
+)]
 fn frame_words(m: &Movie, depth: Depth) -> usize {
     (m.width as usize / 16) * column_words(m, depth)
 }
 
 /// Words of memory [`play`] needs for `movie` at `depth`.
+// An entry point resident code calls: never inlined into it (its body calls boot-only code).
+#[inline(never)]
+#[cfg_attr(
+    target_arch = "mips",
+    link_section = ".text.boot_only.psx_fmv.memory_words"
+)]
 pub fn memory_words(movie: &Movie, depth: Depth) -> usize {
     SLOTS * slot_words(movie) + 2 * rle_words(movie) + 2 * frame_words(movie, depth)
 }
@@ -252,6 +282,7 @@ struct Clock {
 }
 
 impl Clock {
+    #[cfg_attr(target_arch = "mips", link_section = ".text.boot_inner.psx_fmv.switch")]
     fn switch(&mut self, next: usize) {
         let now = psx_io::timers::counter(psx_io::timers::Timer::Timer2);
         self.acc[self.phase] += now.wrapping_sub(self.last) as u32;
@@ -274,6 +305,7 @@ struct Buffers {
 }
 
 impl Buffers {
+    #[cfg_attr(target_arch = "mips", link_section = ".text.boot_inner.psx_fmv.slot")]
     fn slot(&self, i: usize) -> &'static mut [u8] {
         // SAFETY: slot `i` lies inside the caller's buffer (memory_words),
         // and the stream fills only the slot the decoder is not reading.
@@ -284,31 +316,42 @@ impl Buffers {
             )
         }
     }
+    #[cfg_attr(target_arch = "mips", link_section = ".text.boot_inner.psx_fmv.rle")]
     fn rle(&self, i: usize) -> &'static mut [u32] {
         // SAFETY: as above; the bitstream decoder writes one buffer while
         // DMA0 reads the other.
         unsafe { core::slice::from_raw_parts_mut(self.rle.add(i * self.rle_words), self.rle_words) }
     }
+    #[cfg_attr(target_arch = "mips", link_section = ".text.boot_inner.psx_fmv.rle16")]
     fn rle16(&self, i: usize) -> &'static mut [u16] {
         let words = self.rle(i);
         // SAFETY: the same buffer as halfwords.
         unsafe { core::slice::from_raw_parts_mut(words.as_mut_ptr() as *mut u16, words.len() * 2) }
     }
+    #[cfg_attr(target_arch = "mips", link_section = ".text.boot_inner.psx_fmv.frame")]
     fn frame(&self, i: usize) -> *mut u32 {
         // SAFETY: frame buffer `i` lies inside the caller's buffer.
         unsafe { self.frames.add(i * self.frame_words) }
     }
+    #[cfg_attr(target_arch = "mips", link_section = ".text.boot_inner.psx_fmv.column")]
     fn column(&self, frame: usize, c: u16) -> *mut u32 {
         // SAFETY: column `c` of frame buffer `frame` lies inside it.
         unsafe { self.frame(frame).add(c as usize * self.column_words) }
     }
 }
 
+#[cfg_attr(target_arch = "mips", link_section = ".data.boot_only.psx_fmv.READER")]
 static mut READER: Option<SectorReader> = None;
+#[cfg_attr(target_arch = "mips", link_section = ".bss.boot_only.psx_fmv.MDEC")]
 static mut MDEC: Option<Mdec> = None;
+#[cfg_attr(target_arch = "mips", link_section = ".bss.boot_only.psx_fmv.SECTOR")]
 static mut SECTOR: [u32; SECTOR_WORDS] = [0; SECTOR_WORDS];
 
 /// Own the drive and the MDEC from here on, replacing any earlier owner.
+#[cfg_attr(
+    target_arch = "mips",
+    link_section = ".text.boot_inner.psx_fmv.install_devices"
+)]
 fn install_devices(cd: Cd, mdec: MdecDma) {
     // SAFETY: single-threaded; nothing holds a reference from before.
     unsafe {
@@ -317,12 +360,14 @@ fn install_devices(cd: Cd, mdec: MdecDma) {
     }
 }
 
+#[cfg_attr(target_arch = "mips", link_section = ".text.boot_inner.psx_fmv.reader")]
 fn reader() -> &'static mut SectorReader {
     // SAFETY: single-threaded; only the player uses its reader, and no
     // caller keeps the reference across a call that takes another.
     unsafe { (*addr_of_mut!(READER)).as_mut().expect("reader installed") }
 }
 
+#[cfg_attr(target_arch = "mips", link_section = ".text.boot_inner.psx_fmv.mdec")]
 fn mdec() -> &'static mut Mdec {
     // SAFETY: as `reader`.
     unsafe { (*addr_of_mut!(MDEC)).as_mut().expect("mdec installed") }
@@ -330,6 +375,12 @@ fn mdec() -> &'static mut Mdec {
 
 /// Find a file in the disc's root directory by name: `(lba, bytes)`.
 /// Takes the drive over (data mode, double speed) and leaves it stopped.
+// An entry point resident code calls: never inlined into it (its body calls boot-only code).
+#[inline(never)]
+#[cfg_attr(
+    target_arch = "mips",
+    link_section = ".text.boot_only.psx_fmv.find_root_file"
+)]
 pub fn find_root_file(name: &str) -> Option<(u32, u32)> {
     // SAFETY: the caller is not using the drive or the MDEC, as the module
     // docs say; the player takes them over for as long as it runs.
@@ -365,6 +416,7 @@ struct Stream {
 }
 
 impl Stream {
+    #[cfg_attr(target_arch = "mips", link_section = ".text.boot_inner.psx_fmv.pump")]
     fn pump(&mut self) {
         while !self.done {
             // SAFETY: single-threaded use of the player's reader and sector.
@@ -434,6 +486,7 @@ struct Columns {
 }
 
 impl Columns {
+    #[cfg_attr(target_arch = "mips", link_section = ".text.boot_inner.psx_fmv.start")]
     fn start(x: u16, step: u16, y: u16, count: u16, frame: usize) -> Self {
         Columns {
             x,
@@ -448,6 +501,10 @@ impl Columns {
     }
 
     /// Move the copies along; `true` once every column is in VRAM.
+    #[cfg_attr(
+        target_arch = "mips",
+        link_section = ".text.boot_inner.psx_fmv.service"
+    )]
     fn service(&mut self, dma: &mut GpuDma, buf: &Buffers, height: u16) -> bool {
         if self.uploading && psx_vram::dma_copy_to_vram_done() {
             self.uploading = false;
@@ -518,6 +575,10 @@ struct Player {
 }
 
 impl Player {
+    #[cfg_attr(
+        target_arch = "mips",
+        link_section = ".text.boot_inner.psx_fmv.idle_phase"
+    )]
     fn idle_phase(&self) -> usize {
         if self.decoding.is_some() {
             PHASE_MDEC
@@ -528,6 +589,10 @@ impl Player {
 
     /// A display buffer that is neither shown, nor waiting for or queued to
     /// its flip, nor being decoded or copied into.
+    #[cfg_attr(
+        target_arch = "mips",
+        link_section = ".text.boot_inner.psx_fmv.free_buffer"
+    )]
     fn free_buffer(&self) -> Option<usize> {
         (0..BUFFERS).find(|&b| {
             b != self.front
@@ -541,6 +606,10 @@ impl Player {
 
     /// A RAM frame buffer the MDEC may write: not the one it is writing, and
     /// not one still waiting for or in the middle of its copy.
+    #[cfg_attr(
+        target_arch = "mips",
+        link_section = ".text.boot_inner.psx_fmv.free_frame"
+    )]
     fn free_frame(&self) -> Option<usize> {
         (0..2).find(|&f| {
             (self.decoding.is_none() || self.mdec_frame != f)
@@ -550,6 +619,10 @@ impl Player {
     }
 
     /// Nothing decoded, decoding or waiting to be shown.
+    #[cfg_attr(
+        target_arch = "mips",
+        link_section = ".text.boot_inner.psx_fmv.drained"
+    )]
     fn drained(&self) -> bool {
         self.decoding.is_none()
             && self.to_upload.is_none()
@@ -561,6 +634,7 @@ impl Player {
 
     /// Drain the drive, move the MDEC's transfers along, and queue or
     /// retire flips.
+    #[cfg_attr(target_arch = "mips", link_section = ".text.boot_inner.psx_fmv.tick")]
     fn tick(&mut self) {
         // Sample the clock at least once per pump: root counter 2 wraps
         // after 65,536 * 8 cycles, less than one bitstream decode.
@@ -653,6 +727,10 @@ impl Player {
         }
     }
 
+    #[cfg_attr(
+        target_arch = "mips",
+        link_section = ".text.boot_inner.psx_fmv.decode_failed"
+    )]
     fn decode_failed(&mut self) {
         self.errors += 1;
         self.in_a_row += 1;
@@ -663,12 +741,20 @@ impl Player {
     }
 }
 
+#[cfg_attr(
+    target_arch = "mips",
+    link_section = ".text.boot_inner.psx_fmv.setup_mdec"
+)]
 fn setup_mdec() -> bool {
     mdec().reset() && mdec().load_tables().is_some_and(|t| t.enable_writes != 0)
 }
 
 /// Every display buffer black. A 24-bit line is 1.5 times as wide in VRAM
 /// halfwords.
+#[cfg_attr(
+    target_arch = "mips",
+    link_section = ".text.boot_inner.psx_fmv.clear_buffers"
+)]
 fn clear_buffers(dma: &mut GpuDma, config: &Config) {
     let gpu = Gpu::from_dma_mut(dma);
     // A frame the caller kicked before the movie may still be walking.
@@ -686,6 +772,10 @@ fn clear_buffers(dma: &mut GpuDma, config: &Config) {
 
 /// Hand the display back in the caller's `mode`, over black when the movie
 /// ran at 24 bits: that picture read as 15-bit pixels would be noise.
+#[cfg_attr(
+    target_arch = "mips",
+    link_section = ".text.boot_inner.psx_fmv.leave_display"
+)]
 fn leave_display(dma: &mut GpuDma, config: &Config, mode: u32) {
     if config.depth == Depth::Rgb24 {
         clear_buffers(dma, config);
@@ -693,6 +783,10 @@ fn leave_display(dma: &mut GpuDma, config: &Config, mode: u32) {
     }
 }
 
+#[cfg_attr(
+    target_arch = "mips",
+    link_section = ".text.boot_inner.psx_fmv.setup_failed"
+)]
 fn setup_failed() -> Outcome {
     Outcome {
         stop: Stop::Setup,
@@ -707,6 +801,9 @@ fn setup_failed() -> Outcome {
 /// buffers); at 24 bits every buffer is cleared to black and the caller's
 /// display mode is restored. The drive is stopped
 /// and the CD audio volume left at 0.
+// An entry point resident code calls: never inlined into it (its body calls boot-only code).
+#[inline(never)]
+#[cfg_attr(target_arch = "mips", link_section = ".text.boot_only.psx_fmv.play")]
 pub fn play(
     movie: &Movie,
     config: &Config,

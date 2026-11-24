@@ -16,6 +16,7 @@ rustc-demangle = "0.1"
 psoxide-hazard = { path = "../psoxide-hazard" }
 psoxide-size = { path = "../psoxide-size" }
 psx-gate = { path = "../../crates/psx-gate" }
+psx-scene-abi = { path = "../../sdk/crates/psx-scene-abi" }
 serde_json = { workspace = true }
 
 [[bin]]

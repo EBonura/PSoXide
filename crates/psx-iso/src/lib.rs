@@ -36,6 +36,7 @@ pub mod exe;
 pub mod files;
 pub mod iso9660;
 pub mod receipt;
+pub mod scenes;
 pub use boot::{load_boot_exe_from_disc, BootError, BootExe};
 pub use exe::{pad_to_payload, Exe, ExeError, EXE_HEADER_BYTES};
 pub use files::{DiscFile, FileError};

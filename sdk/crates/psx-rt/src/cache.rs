@@ -794,7 +794,8 @@ mod tests {
     }
 
     /// The cache control register and SR.IsC are named in this file only (psx-hw keeps the
-    /// register's address for the emulator). A new use anywhere else in the SDK fails here, and
+    /// register's address for the emulator; the scene core's image, which cannot link psx-rt,
+    /// keeps its own flush). A new use anywhere else in the SDK fails here, and
     /// in the image at link time (`cache-gate`).
     #[test]
     fn nothing_else_in_the_sdk_names_the_cache_control_register_or_isc() {
@@ -808,7 +809,10 @@ mod tests {
                     visit(&path, hits);
                 } else if path.extension().is_some_and(|e| e == "rs") {
                     let text = std::fs::read_to_string(&path).unwrap();
-                    let is_this_file = path.ends_with("psx-rt/src/cache.rs");
+                    // The scene core's image is built alone and cannot link psx-rt: its one
+                    // flush (after a load, DMA settled, interrupts off) is the only other copy.
+                    let is_this_file = path.ends_with("psx-rt/src/cache.rs")
+                        || path.ends_with("psx-core/image/src/main.rs");
                     for needle in ["cache_control", "FFFE0130", "FFFE_0130", "IsC"] {
                         if text.contains(needle) && !is_this_file {
                             hits.push(std::format!("{}: {needle}", path.display()));

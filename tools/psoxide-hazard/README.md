@@ -84,6 +84,11 @@ overlay-compose game.elf raw-generation \
   --call shop_wrapper:shop_entry
 ```
 
+A program that links boot-only memory (`sdk/psoxide-boot.ld`) passes
+`--resident .boot` as well: `runtime.exe` stores every resident section at its load
+address (its ELF program header), so `.boot` lands after `.data` and the header's
+size covers it, as `psx-exe` writes it.
+
 The new generation directory contains `runtime.exe`, one `NAME.pak` per image,
 `guard.exe`, `guard-args` with every module/code range, and `manifest.txt` with
 all call sites and final checksums. Its union of cold sections is excluded from
@@ -127,6 +132,16 @@ initialized data more, 256 costs 640 more) in the environment of its guest build
 table of its `.cargo/config.toml`. The variable changes only the resident array's capacity. Each packed cold
 image retains its separate 136-byte reservation: an eight-byte header and
 32 instruction words.
+
+## Writing the EXE from an ELF
+
+`psx-exe game.elf game.exe` writes the PS-X EXE a psoxide.ld link describes, every
+section at its load address. ld.lld's `--oformat=binary` places sections at their
+run addresses, so a program with sections stored in one place and run from another
+(the scene core's image, `sdk/psoxide-core.ld`; boot-only code, `sdk/psoxide-boot.ld`)
+links an ELF and is written out here. For any other program the bytes equal
+`--oformat=binary`'s. `psoxide-pgo` does the same when a link it runs gives an ELF,
+and keeps the ELF beside the EXE as `NAME.elf`.
 
 ## Load-delay checks that see game code
 

@@ -23,14 +23,43 @@ fn hex(field: &str) -> Option<u64> {
     u64::from_str_radix(field, 16).ok()
 }
 
-/// `(heap_start, heap_end)`: the start from the link map, the end [`HEAP_END`].
+/// A `NAME = value` assignment the link map records from a `-T` file passed before psoxide.ld
+/// (how `RAM_SIZE_OVERRIDE` and `STACK_RESERVE_OVERRIDE` are given). Hex, decimal, or a
+/// decimal with a `K` or `M` suffix, as the script itself writes sizes.
+fn assignment(map: &str, name: &str) -> Option<u64> {
+    map.lines().find_map(|line| {
+        let rest = line.split_once(&format!(" {name} = "))?.1.trim();
+        if let Some(digits) = rest.strip_prefix("0x").or_else(|| rest.strip_prefix("0X")) {
+            return u64::from_str_radix(digits, 16).ok();
+        }
+        let (digits, scale) = match rest.as_bytes().last()? {
+            b'K' => (&rest[..rest.len() - 1], 1024),
+            b'M' => (&rest[..rest.len() - 1], 1024 * 1024),
+            _ => (rest, 1),
+        };
+        digits.parse::<u64>().ok().map(|value| value * scale)
+    })
+}
+
+/// `__heap_end` of the link `map`: `STACK_INIT - STACK_RESERVE` with the link's own
+/// `RAM_SIZE_OVERRIDE` and `STACK_RESERVE_OVERRIDE` when the map records them, so a program
+/// linked under the scene core's window (`psx_scene_abi::RAM_SIZE_OVERRIDE`) is judged against
+/// its own top of RAM. Without either, [`HEAP_END`].
+#[must_use]
+pub fn heap_end(map: &str) -> u64 {
+    let ram_size = assignment(map, "RAM_SIZE_OVERRIDE").unwrap_or(2 * 1024 * 1024);
+    let stack_reserve = assignment(map, "STACK_RESERVE_OVERRIDE").unwrap_or(0x8000);
+    (0x8000_0000 + ram_size - 0x100).saturating_sub(stack_reserve)
+}
+
+/// `(heap_start, heap_end)`: the start from the link map, the end [`heap_end`].
 #[must_use]
 pub fn heap_range(map: &str) -> Option<(u64, u64)> {
     let start = map.lines().find_map(|line| {
         let address = hex(line.split_whitespace().next()?)?;
         line.contains(" __heap_start ").then_some(address)
     })?;
-    Some((start, HEAP_END))
+    Some((start, heap_end(map)))
 }
 
 /// Size of the largest input section whose symbol ends in `suffix`.
@@ -73,7 +102,8 @@ pub fn check(map: &str, budget: &str) -> Result<String, String> {
     verdict(budget, start, Some(map), "")
 }
 
-/// The guard's verdict for a heap that starts at `heap_start` (the end is [`HEAP_END`]): the one
+/// The guard's verdict for a heap that starts at `heap_start` (the end is `map`'s [`heap_end`], or
+/// [`HEAP_END`] without a map): the one
 /// computation the link-time guard and the cook's own check share, so a level the cook passes is
 /// a level the guard passes whenever `heap_start` is the link's. `map` adds what uses the RAM to
 /// the refusal when the link is at hand; `source` is appended to the refusal's first words (the
@@ -91,7 +121,7 @@ pub fn verdict(
     if need == 0 {
         return Ok("heap guard: no cooked grid level, nothing to check".into());
     }
-    let (start, end) = (heap_start, HEAP_END);
+    let (start, end) = (heap_start, map.map_or(HEAP_END, heap_end));
     let heap = end.saturating_sub(start);
     let required = need + MARGIN_BYTES;
     let level = budget
@@ -175,11 +205,45 @@ mod tests {
         // elsewhere, which HEAP_END does not follow (the editor guest sets neither).
         assert!(script.contains("RAM_SIZE = DEFINED(RAM_SIZE_OVERRIDE) ? RAM_SIZE_OVERRIDE : 2M;"));
         assert!(script.contains("STACK_INIT = RAM_BASE + RAM_SIZE - 0x100;"));
+        // IMAGE_BASE is the default load address; LOAD_ADDR_OVERRIDE moves a boot program only.
+        assert!(script.contains(
+            "LOAD_ADDR = DEFINED(LOAD_ADDR_OVERRIDE) ? LOAD_ADDR_OVERRIDE : RAM_BASE + BIOS_SIZE;"
+        ));
+        assert!(script.contains("BIOS_SIZE = 64K;"));
+        assert_eq!(IMAGE_BASE, 0x8000_0000 + 64 * 1024);
         assert!(script.contains(
             "STACK_RESERVE = DEFINED(STACK_RESERVE_OVERRIDE) ? STACK_RESERVE_OVERRIDE : 0x8000;"
         ));
         assert!(script.contains("__heap_end = STACK_INIT - STACK_RESERVE;"));
         assert_eq!(HEAP_END, 0x8000_0000 + 2 * 1024 * 1024 - 0x100 - 0x8000);
+    }
+
+    #[test]
+    fn the_heap_end_follows_the_links_own_top_of_ram() {
+        assert_eq!(heap_end(MAP), HEAP_END);
+        let scene = format!(
+            "       0        0        0     1 RAM_SIZE_OVERRIDE = 0x{:X}\n{MAP}",
+            psx_scene_abi::RAM_SIZE_OVERRIDE
+        );
+        assert_eq!(
+            heap_end(&scene),
+            u64::from(psx_scene_abi::STACK_INIT) - 0x8000,
+            "a program hosting the scene core ends its heap a stack reserve below the window"
+        );
+        assert_eq!(
+            heap_range(&scene).map(|range| range.1),
+            Some(heap_end(&scene))
+        );
+        let small_stack =
+            format!("       0        0        0     1 STACK_RESERVE_OVERRIDE = 16K\n{scene}");
+        assert_eq!(
+            heap_end(&small_stack),
+            u64::from(psx_scene_abi::STACK_INIT) - 16 * 1024
+        );
+        // The script's own `STACK_RESERVE = DEFINED(...)` line is not an assignment of the override.
+        let script_line =
+            "       0        0        0     1 STACK_RESERVE = DEFINED(STACK_RESERVE_OVERRIDE) ? STACK_RESERVE_OVERRIDE : 0x8000\n";
+        assert_eq!(heap_end(&format!("{script_line}{MAP}")), HEAP_END);
     }
 
     #[test]

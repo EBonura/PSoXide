@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+[package]
+name    = "hello-scene"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+
+[workspace]
+exclude = ["corehash", "overlay"]
+
+[[bin]]
+name = "hello-scene"
+path = "src/main.rs"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+
+[features]
+default = ["core"]
+# The program on the scene core. Without it: the same program the old way (boot-time baseline).
+core = ["dep:psx-core"]
+# Scene 1 (what scene 0 switches to); scene 0 without it.
+role-b = []
+
+[dependencies]
+psx-core = { path = "../../crates/psx-core", features = ["link"], optional = true }
+psx-io   = { path = "../../crates/psx-io" }
+psx-rt   = { path = "../../crates/psx-rt", features = ["host-tty"] }

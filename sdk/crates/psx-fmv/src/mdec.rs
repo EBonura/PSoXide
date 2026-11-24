@@ -78,6 +78,10 @@ pub const ZIGZAG_TO_ROW_MAJOR: [u8; 64] = [
 ];
 
 /// Luma then chroma table, zigzag order, as the 32 words command 2 takes.
+#[cfg_attr(
+    target_arch = "mips",
+    link_section = ".rodata.boot_only.psx_fmv.QUANT_WORDS"
+)]
 pub static QUANT_WORDS: [u32; 32] = build_quant();
 
 const fn build_quant() -> [u32; 32] {
@@ -105,6 +109,10 @@ const fn build_quant() -> [u32; 32] {
 
 /// The IDCT matrix for MDEC command 3, generated from the DCT basis in
 /// [`crate::idct`].
+#[cfg_attr(
+    target_arch = "mips",
+    link_section = ".rodata.boot_only.psx_fmv.SCALE_WORDS"
+)]
 pub static SCALE_WORDS: [u32; 32] = crate::idct::MATRIX_WORDS;
 
 // Register constants moved to psx-hw; these forward until games repin.
@@ -123,12 +131,17 @@ const ENABLE_ATTEMPTS: u8 = 4;
 
 /// Raw MDEC1 status word.
 #[inline(always)]
+#[cfg_attr(target_arch = "mips", link_section = ".text.boot_inner.psx_fmv.status")]
 pub fn status() -> u32 {
     // SAFETY: MDEC status register read.
     unsafe { psx_io::read_u32(MDEC1) }
 }
 
 /// Wait until `status() & mask == want`. `false` on timeout.
+#[cfg_attr(
+    target_arch = "mips",
+    link_section = ".text.boot_inner.psx_fmv.wait_status"
+)]
 fn wait_status(mask: u32, want: u32, spins: u32) -> bool {
     let mut n = 0;
     while status() & mask != want {
@@ -147,6 +160,7 @@ fn wait_status(mask: u32, want: u32, spins: u32) -> bool {
 /// `blocks` must not be 0 (the controller reads 0 as 65,536 blocks), and
 /// `blocks * 32` words at `words` must stay alive and unmodified until DMA0
 /// completes.
+#[cfg_attr(target_arch = "mips", link_section = ".text.boot_inner.psx_fmv.dma_in")]
 unsafe fn dma_in(words: *const u32, blocks: u16) {
     debug_assert!(blocks != 0, "a zero block count is 65,536 blocks");
     dma::abort(Channel::MdecIn);
@@ -180,6 +194,10 @@ pub struct Tables {
 
 impl Tables {
     /// DMA0 moved both tables, so it feeds the MDEC.
+    #[cfg_attr(
+        target_arch = "mips",
+        link_section = ".text.boot_inner.psx_fmv.is_dma_ready"
+    )]
     pub fn is_dma_ready(&self) -> bool {
         self.enable_writes != 0 && self.cpu_uploads == 0
     }
@@ -208,6 +226,10 @@ impl Mdec {
 
     /// Give the DMA token back.
     #[inline(always)]
+    #[cfg_attr(
+        target_arch = "mips",
+        link_section = ".text.boot_inner.psx_fmv.release"
+    )]
     pub fn release(self) -> MdecDma {
         self.0
     }
@@ -215,6 +237,7 @@ impl Mdec {
     /// Reset the MDEC, wait for the reset to finish, then enable its DMA
     /// requests on both channels. `false` if the MDEC stayed busy after the
     /// reset (the enable is still written).
+    #[cfg_attr(target_arch = "mips", link_section = ".text.boot_inner.psx_fmv.reset")]
     pub fn reset(&mut self) -> bool {
         dma::abort(Channel::MdecIn);
         dma::abort(Channel::MdecOut);
@@ -242,6 +265,7 @@ impl Mdec {
     /// kicks the words go over the CPU. Returns (DMA0 kicks up to the one
     /// that completed, 0 if none did; went over the CPU), or `None` if the
     /// MDEC would not take the words at all.
+    #[cfg_attr(target_arch = "mips", link_section = ".text.boot_inner.psx_fmv.upload")]
     fn upload(&mut self, command: u32, words: &[u32; 32]) -> Option<(u8, bool)> {
         let mut kicks = 0u8;
         while kicks < ENABLE_ATTEMPTS {
@@ -284,6 +308,10 @@ impl Mdec {
 
     /// Upload the standard quantization tables and the IDCT basis. `None` if
     /// the MDEC would take them neither over DMA0 nor over the CPU.
+    #[cfg_attr(
+        target_arch = "mips",
+        link_section = ".text.boot_inner.psx_fmv.load_tables"
+    )]
     pub fn load_tables(&mut self) -> Option<Tables> {
         let (quant_writes, quant_cpu) = self.upload(hw::COMMAND_SET_QUANT, &QUANT_WORDS)?;
         let (scale_writes, scale_cpu) = self.upload(hw::COMMAND_SET_SCALE, &SCALE_WORDS)?;
@@ -304,6 +332,10 @@ impl Mdec {
     /// [`reset`](Self::reset). No DMA involved: the control path for a console
     /// whose DMA0 will not feed the MDEC. `false` if the input FIFO never made
     /// room.
+    #[cfg_attr(
+        target_arch = "mips",
+        link_section = ".text.boot_inner.psx_fmv.load_tables_cpu"
+    )]
     pub fn load_tables_cpu(&mut self) -> bool {
         for (command, words) in [
             (hw::COMMAND_SET_QUANT, &QUANT_WORDS),
@@ -325,6 +357,10 @@ impl Mdec {
 
     /// Write one word to MDEC0: a command, or a parameter the CPU feeds itself.
     #[inline(always)]
+    #[cfg_attr(
+        target_arch = "mips",
+        link_section = ".text.boot_inner.psx_fmv.write_command"
+    )]
     pub fn write_command(&mut self, word: u32) {
         // SAFETY: MDEC command/parameter write.
         unsafe { psx_io::write_u32(MDEC0, word) }
@@ -333,6 +369,10 @@ impl Mdec {
     /// Read one word of decoded output from MDEC0 (the CPU path; DMA1 is the
     /// usual one). Garbage when the output FIFO is empty.
     #[inline(always)]
+    #[cfg_attr(
+        target_arch = "mips",
+        link_section = ".text.boot_inner.psx_fmv.read_data"
+    )]
     pub fn read_data(&mut self) -> u32 {
         // SAFETY: MDEC data read.
         unsafe { psx_io::read_u32(MDEC0) }
@@ -355,6 +395,10 @@ impl Mdec {
     /// On `Ok`, DMA0 keeps reading `rle` after this returns. The caller must
     /// keep `rle` alive and unmodified until [`decode_finish`](Self::decode_finish)
     /// returns, and must call it before the storage is reused or freed.
+    #[cfg_attr(
+        target_arch = "mips",
+        link_section = ".text.boot_inner.psx_fmv.decode_start"
+    )]
     pub unsafe fn decode_start(
         &mut self,
         rle: &[u32],
@@ -388,6 +432,7 @@ impl Mdec {
     /// # Errors
     /// [`RleLengthError`] when `rle` is empty, not a whole number of 32-word
     /// blocks or longer than [`crate::rle::MAX_WORDS`]; `columns` does not run.
+    #[cfg_attr(target_arch = "mips", link_section = ".text.boot_inner.psx_fmv.decode")]
     pub fn decode<R>(
         &mut self,
         rle: &[u32],
@@ -400,6 +445,7 @@ impl Mdec {
             done: bool,
         }
         impl Drop for Finish<'_> {
+            #[cfg_attr(target_arch = "mips", link_section = ".text.boot_inner.psx_fmv.drop")]
             fn drop(&mut self) {
                 if !self.done {
                     self.mdec.decode_finish();
@@ -436,6 +482,10 @@ impl Mdec {
     /// `dst` must point at `words` writable words that stay alive and
     /// untouched until [`column_done`](Self::column_done) returns `true` or
     /// DMA1 is aborted ([`abort_decode`](Self::abort_decode)).
+    #[cfg_attr(
+        target_arch = "mips",
+        link_section = ".text.boot_inner.psx_fmv.read_column_start"
+    )]
     pub unsafe fn read_column_start(&mut self, dst: *mut u32, words: usize) -> bool {
         let Ok(blocks) = u16::try_from(words / DMA_BLOCK_WORDS) else {
             return false;
@@ -464,6 +514,10 @@ impl Mdec {
     /// True once the column [`read_column_start`](Self::read_column_start)
     /// asked for has arrived.
     #[inline]
+    #[cfg_attr(
+        target_arch = "mips",
+        link_section = ".text.boot_inner.psx_fmv.column_done"
+    )]
     pub fn column_done(&self) -> bool {
         !dma::is_busy(Channel::MdecOut)
     }
@@ -471,6 +525,10 @@ impl Mdec {
     /// Stop both MDEC DMA channels, e.g. when a decode has taken too long. A
     /// column or run-length buffer a transfer was using is free again once
     /// this returns.
+    #[cfg_attr(
+        target_arch = "mips",
+        link_section = ".text.boot_inner.psx_fmv.abort_decode"
+    )]
     pub fn abort_decode(&mut self) {
         dma::abort(Channel::MdecOut);
         dma::abort(Channel::MdecIn);
@@ -479,6 +537,10 @@ impl Mdec {
     /// Pull the next `dst.len()` words (a multiple of 32) of decoded pixels
     /// over DMA1 and wait for them. For 15bpp one 16-pixel-wide column of
     /// height `h` is `8 * h` words. `false` if DMA1 wedged.
+    #[cfg_attr(
+        target_arch = "mips",
+        link_section = ".text.boot_inner.psx_fmv.read_column"
+    )]
     pub fn read_column(&mut self, dst: &mut [u32]) -> bool {
         // SAFETY: `dst` is borrowed exclusively until this function returns;
         // the wait below, or the abort on a wedge, ends the transfer before
@@ -492,12 +554,20 @@ impl Mdec {
     /// Confirm DMA0 finished feeding the frame. `false` (after aborting the
     /// channel) if it is still busy, e.g. the frame held more data than was
     /// read back.
+    #[cfg_attr(
+        target_arch = "mips",
+        link_section = ".text.boot_inner.psx_fmv.decode_finish"
+    )]
     pub fn decode_finish(&mut self) -> bool {
         dma::wait_or_abort(Channel::MdecIn, DMA_SPINS)
     }
 }
 
 /// A driver for a deprecated forwarder that never took the token.
+#[cfg_attr(
+    target_arch = "mips",
+    link_section = ".text.boot_inner.psx_fmv.steal_mdec"
+)]
 fn steal_mdec() -> Mdec {
     // SAFETY: a token is a logic guard, not a memory-safety one (see
     // `psx_io::periph`), and the old free functions never took one.
@@ -506,12 +576,17 @@ fn steal_mdec() -> Mdec {
 
 /// Reset the MDEC and enable its DMA requests.
 #[deprecated(note = "use `Mdec::reset` with the `MdecDma` token")]
+#[cfg_attr(target_arch = "mips", link_section = ".text.boot_inner.psx_fmv.reset")]
 pub fn reset() -> bool {
     steal_mdec().reset()
 }
 
 /// Upload the standard quantization tables and the IDCT basis.
 #[deprecated(note = "use `Mdec::load_tables` with the `MdecDma` token")]
+#[cfg_attr(
+    target_arch = "mips",
+    link_section = ".text.boot_inner.psx_fmv.load_tables"
+)]
 pub fn load_tables() -> Option<Tables> {
     steal_mdec().load_tables()
 }

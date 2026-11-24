@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# hello-scene's overlays: raw images linked at 0x80100000 against hello-scene's scene 0 program.
+[package]
+name    = "hello-scene-overlay"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+
+[workspace]
+
+[[bin]]
+name = "hello-scene-overlay"
+path = "src/main.rs"
+test = false
+bench = false
+
+[profile.release]
+opt-level = "s"
+panic = "abort"
+codegen-units = 1
+lto = true
+
+[features]
+# The second overlay (same load address, so each evicts the other).
+second = []

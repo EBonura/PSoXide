@@ -1,0 +1,16 @@
+[package]
+name         = "psx-scene-abi"
+version      = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description  = "The scene core's fixed layout: the core window and handoff block addresses, the core's jump-table slots, and the SCENES.TBL wire format. No dependencies, no_std, shared by the disc tools, the harness and the guest core."
+
+[dependencies]
+
+[dev-dependencies]
+# The table checksum must be the SDK's word FNV, bit for bit.
+psx-pack = { path = "../psx-pack" }
+
+[lints]
+workspace = true
