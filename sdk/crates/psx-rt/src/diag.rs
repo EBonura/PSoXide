@@ -162,8 +162,8 @@ global_asm!(
     b     9f
     nop
 8:
-    lui   $29, %hi(__psx_diag_stack + 1008)
-    addiu $29, $29, %lo(__psx_diag_stack + 1008)
+    lui   $3, %hi(__psx_diag_stack + 1008)
+    addiu $29, $3, %lo(__psx_diag_stack + 1008)
 9:
     move  $4, $27
     mfc0  $5, $14

@@ -191,10 +191,12 @@ core::arch::global_asm!(
     "move $s0, $a0",
     "move $s1, $a1",
     "move $s2, $a2",
-    "lui  $sp, {sp_hi}",
-    "ori  $sp, $sp, {sp_lo}",
+    // $sp is written once, by the delay slot: built in $t0 first, so a stack profiler never sees
+    // the half-built value (0x801F0000) as a stack 57 KB deep.
+    "lui  $t0, {sp_hi}",
+    "ori  $t0, $t0, {sp_lo}",
     "jal  __core_boot_rs",
-    "nop",
+    "move $sp, $t0",
     "move $a0, $s0",
     "move $a1, $s1",
     "j    __core_next",

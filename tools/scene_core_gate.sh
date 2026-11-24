@@ -194,6 +194,23 @@ EOF
     mark "PCSX-Redux runs done"
 fi
 
+# The boot stubs (__core_boot, __boot_entry) never leave $sp outside the program's stack: the
+# lowest $sp of a whole boot-to-PASS run, BIOS included, stays at or above the stack reserve's floor
+# (STACK_INIT on the core, 0x801FDF00, less the default 32 KB STACK_RESERVE: hello-boot sets none). A stub that built $sp in two steps
+# showed a stack 57 KB or 2 MB deep (11-24).
+for d in plain scenes; do
+    log=$OUT/runs/stack-$d.csv
+    "$PSOXIDE_EMULATOR" --config-dir "$OUT/runs/cfg-stack-$d" launch --path "$OUT/boot/$d.cue" \
+        --hardware real --entry-state default --steps 3500000000 --stop-on-tty 'hello-boot: PASS' \
+        --stop-on-tty 'hello-boot: FAIL' --stack-profile-log "$log" >"$OUT/runs/stack-$d.txt" 2>&1 || true
+    floor=801f5f00
+    low=$(awk -F, 'NR == 2 { sub(/^0x/, "", $5); print $5 }' "$log" 2>/dev/null)
+    v=FAIL
+    [ -n "$low" ] && [ -n "$floor" ] && [ "$((0x$low))" -ge "$((0x$floor))" ] && v=PASS
+    printf 'boot-sp-%s\t%s\tlowest $sp 0x%s, floor 0x%s\n' "$d" $v "${low:-none}" "${floor:-none}" \
+        >>"$OUT/results.tsv"
+done
+
 # Whole-matrix checks: one entry state everywhere; pad presses during the soak; the film played.
 states=$(cat "$OUT"/runs/*.txt | grep -a '^hello-modular: entry-state' | sort -u | wc -l | tr -d ' ')
 n=$(cat "$OUT"/runs/*.txt | grep -a -c '^hello-modular: entry-state' || true)
