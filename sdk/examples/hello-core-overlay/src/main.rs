@@ -17,6 +17,11 @@
 //! it on the disc, the menu art. On the discs where the overlay carries the header as its tail
 //! (`place=before-world tail=1`) the header comes from RAM; on the others it is read after the
 //! core's stop. The CD command log of each disc shows what that costs.
+//!
+//! The `host` build (feature `host`, linked with ram-host.ld) puts the overlay over a static,
+//! `WORLD`, in `.bss.overlay_host`: psoxide-overlay.ld makes it the host buffer, so the overlay
+//! runs at its start without an OVERLAY_VMA and the link keeps every other overlap an error. The
+//! program checks that `_start` zeroed it, then runs the same steps over it.
 #![no_std]
 #![no_main]
 
@@ -27,7 +32,7 @@ use psx_core::{abi, link};
 use psx_rt::tty;
 
 extern "C" {
-    static OVERLAY_VMA: u32;
+    static __overlay_vma: u32;
     static __overlay_end: u32;
     static __overlay_1_bytes: u32;
 }
@@ -80,7 +85,7 @@ fn load_and_call(table: &mut [u32], round: &str) -> u32 {
     tty::print(round);
     tty::println(" load ok");
     // Link-time symbol: only its address is taken.
-    let start = core::ptr::addr_of!(OVERLAY_VMA) as *const u32;
+    let start = core::ptr::addr_of!(__overlay_vma) as *const u32;
     // SAFETY: the overlay's first word, in this program's RAM.
     if unsafe { core::ptr::read_volatile(start) } == 0xffff_ffff {
         tty::println("hello-core-overlay: STALE");
@@ -156,12 +161,47 @@ fn header_after_overlay(table: &mut [u32]) {
     tty::println("hello-core-overlay: art read");
 }
 
+/// The world's memory in the `host` build: a static in `.bss.overlay_host`, psoxide-overlay.ld's
+/// host buffer. The overlay runs at its start (no OVERLAY_VMA), and `_start` zeroes it with .bss.
+#[cfg(feature = "host")]
+#[link_section = ".bss.overlay_host"]
+static mut WORLD: [u32; 4096] = [0; 4096];
+
+/// The `host` build: the overlay runs over `WORLD`, which starts zeroed although the EXE stores
+/// the core's image right where it lies.
+#[cfg(feature = "host")]
+fn check_host() {
+    // Two symbols, one address: hidden from the compiler, which takes distinct statics to differ.
+    let world = black_box(core::ptr::addr_of!(WORLD) as *const u32);
+    // Link-time symbol: only its address is taken.
+    let vma = core::ptr::addr_of!(__overlay_vma) as u32;
+    if world as u32 != vma {
+        fail("host address", world as u32);
+    }
+    let mut at = 0;
+    while at < 4096 {
+        // SAFETY: a word of the buffer, read as memory holds it (the compiler would take the
+        // static's initial zeros).
+        if unsafe { core::ptr::read_volatile(world.add(at)) } != 0 {
+            fail("host not zeroed at word", at as u32);
+        }
+        at += 1;
+    }
+    tty::print("hello-core-overlay: host buffer zeroed at ");
+    tty::print_hex_u32(vma);
+    tty::println("");
+}
+
+#[cfg(not(feature = "host"))]
+fn check_host() {}
+
 #[no_mangle]
 fn main() {
     tty::println("hello-core-overlay: main");
     if link::window_hash() != link::CORE_HASH {
         fail("window", link::window_hash());
     }
+    check_host();
     // SAFETY: the one reference to the table, taken once.
     let table = unsafe { &mut *core::ptr::addr_of_mut!(TABLE) };
     let first = load_and_call(table, "first");
@@ -171,7 +211,7 @@ fn main() {
     // What a game's world does to the memory once play starts: every word of the overlay's range
     // written over, with a word that is no instruction.
     // Link-time symbols: only their addresses are taken.
-    let start = core::ptr::addr_of!(OVERLAY_VMA) as *mut u32;
+    let start = core::ptr::addr_of!(__overlay_vma) as *mut u32;
     let end = core::ptr::addr_of!(__overlay_end) as *mut u32;
     let mut at = start;
     while at < end {

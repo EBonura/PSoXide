@@ -35,8 +35,10 @@
 //!   its stored core copy ([`payload_before_core`]);
 //! - an Overlay loads inside its owner's reserved RAM (below `PAYLOAD_END`);
 //!   co-resident images never overlap (an Overlay and its owner, two
-//!   RESIDENT_SET Overlays of one owner); an Overlay's evicts mask is exactly
-//!   the other images whose load ranges intersect its own, plus its own bit for
+//!   RESIDENT_SET Overlays of one owner; a Program counts up to its stored
+//!   core, not to the sector edge its row loads: what lies past it is dead
+//!   once it runs); an Overlay's evicts mask is exactly
+//!   the other images whose ranges intersect its own, plus its own bit for
 //!   a VOLATILE Overlay (one over memory its owner also uses: never kept, so
 //!   read again at every load);
 //! - an image with a tail is the Overlay whose file ends where `WORLD.PAK`
@@ -359,6 +361,14 @@ fn overlaps(a: Span, b: Span) -> bool {
 /// running core is already in the window. `None` when the copy is missing or
 /// anything but sector padding follows it.
 pub fn payload_before_core(payload: &[u8], core: &[u8]) -> Option<usize> {
+    core_store_offset(payload, core).map(|at| at.next_multiple_of(SECTOR_BYTES))
+}
+
+/// Where a program's stored copy of `core` starts in its payload, unrounded: the end of the bytes
+/// it may still use once it runs (`.text`, `.data`, a boot-only store). What follows up to the
+/// sector edge is loaded by a switch but dead once the program runs (its `.bss`, or an overlay
+/// host buffer, psoxide-overlay.ld). `None` as for [`payload_before_core`].
+fn core_store_offset(payload: &[u8], core: &[u8]) -> Option<usize> {
     if core.is_empty() || payload.len() < core.len() {
         return None;
     }
@@ -369,7 +379,7 @@ pub fn payload_before_core(payload: &[u8], core: &[u8]) -> Option<usize> {
     payload[at + core.len()..]
         .iter()
         .all(|&b| b == 0)
-        .then(|| at.next_multiple_of(SECTOR_BYTES))
+        .then_some(at)
 }
 
 /// The image row of a Program whose exe as pressed is `bytes`, its header sector at
@@ -608,6 +618,7 @@ pub fn add_scene_disc_files(
     let core = plan.core_image.as_deref();
     let mut rows: Vec<Option<ImageRow>> = vec![None; images.len()];
     let mut pcs = vec![0u32; images.len()];
+    let mut live_ends = vec![0u32; images.len()];
     for (index, image) in images.iter().enumerate() {
         if image.kind != Kind::Program {
             continue;
@@ -626,6 +637,15 @@ pub fn add_scene_disc_files(
         }
         let lba = lba_of(&image.name);
         let (row, pc) = program_image_row(&image.name, &files[index], lba, image.core_hash, core)?;
+        // What the program still uses once it runs ends at its stored core, not at the sector
+        // edge: its own overlays may load over the rest (psoxide-overlay.ld's host buffer).
+        live_ends[index] = match (image.core_hash, core) {
+            (None, Some(core)) => Exe::parse(&files[index])
+                .ok()
+                .and_then(|exe| core_store_offset(&exe.payload, core))
+                .map_or(row.span().end, |at| row.load_addr + at as u32),
+            _ => row.span().end,
+        };
         rows[index] = Some(row);
         pcs[index] = pc;
     }
@@ -680,6 +700,18 @@ pub fn add_scene_disc_files(
     }
     let mut rows: Vec<ImageRow> = rows.into_iter().map(|r| r.expect("every image")).collect();
     debug_assert_eq!(rows[0].lba, BOOT_EXE_LBA);
+    // The RAM each image holds while its owner runs: a Program's ends at its stored core.
+    let spans: Vec<Span> = rows
+        .iter()
+        .zip(&live_ends)
+        .map(|(row, &end)| match row.kind {
+            Kind::Program => Span {
+                start: row.load_addr,
+                end,
+            },
+            Kind::Overlay => row.span(),
+        })
+        .collect();
 
     // Co-resident images never overlap: an Overlay and its owner, two RESIDENT_SETs of one owner.
     for (i, a) in rows.iter().enumerate() {
@@ -694,7 +726,7 @@ pub fn add_scene_disc_files(
                 }
                 (Kind::Program, Kind::Program) => false,
             };
-            if co_resident && overlaps(a.span(), b.span()) {
+            if co_resident && overlaps(spans[i], spans[j]) {
                 return Err(SceneDiscError::Overlap {
                     a: images[i].name.clone(),
                     b: images[j].name.clone(),
@@ -702,10 +734,9 @@ pub fn add_scene_disc_files(
             }
         }
     }
-    // An Overlay's evicts mask: exactly the other images whose load ranges intersect its own, and
+    // An Overlay's evicts mask: exactly the other images whose ranges intersect its own, and
     // a VOLATILE one's own bit (the core applies the mask after setting the bit, so it is never
     // kept and every load reads the overlay again).
-    let spans: Vec<Span> = rows.iter().map(ImageRow::span).collect();
     for (i, row) in rows.iter_mut().enumerate() {
         if row.kind == Kind::Overlay {
             let own = if row.class == Some(Class::Volatile) {

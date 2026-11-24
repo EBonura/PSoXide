@@ -194,8 +194,10 @@ SECTIONS {
 
     /* Uninitialised data - zeroed by `_start`, not stored in file. It runs right after .data,
        over the stored copies; its load address (which nothing reads) follows them, so no two
-       sections share load addresses and the link keeps its section checks. */
-    .bss __data_end (NOLOAD) : AT(__load_end) {
+       sections share load addresses and the link keeps its section checks. A program whose
+       overlays run over a host buffer (psoxide-overlay.ld, `.bss.overlay_host`) has the host
+       and its overlays there instead, and .bss after them. */
+    .bss (DEFINED(__overlay_host_bytes) && __overlay_host_bytes ? __overlay_end : __data_end) (NOLOAD) : AT(__load_end) {
         __bss_start = .;
         *(.bss .bss.*);
         *(COMMON);
@@ -208,6 +210,10 @@ SECTIONS {
            (psoxide-size, `psoxide-pgo ram`, heap-guard) read that instead. */
         __heap_start = .;
     } > IMAGE
+
+    /* What `_start` zeroes: .bss, and in front of it the host buffer and its overlays' range (no
+       overlay is in RAM before its first load). */
+    __zero_start = DEFINED(__overlay_host_bytes) && __overlay_host_bytes ? __overlay_vma : __bss_start;
 
     /* The heap runs up to just below the stack reserve. */
     __heap_end   = STACK_INIT - STACK_RESERVE;   /* keep heap below the reserved stack */

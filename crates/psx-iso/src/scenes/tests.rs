@@ -288,7 +288,6 @@ fn core_image() -> Vec<u8> {
 }
 
 #[test]
-#[test]
 fn a_boot_program_off_the_core_says_so_with_core_hash_0() {
     // A disc whose boot program does not link the core (an intro that chain-loads the game, say)
     // while its other programs do: the boot exe carries no stored core.
@@ -326,6 +325,40 @@ fn a_boot_program_off_the_core_says_so_with_core_hash_0() {
     assert_eq!(pressed.images[0].core_hash, 0);
 }
 
+#[test]
+fn an_overlay_may_load_from_its_owners_stored_core_on() {
+    // psoxide-overlay.ld's host buffer starts where the owner's stored core does (right after its
+    // .data): inside the last sector a switch loads, which is dead once the program runs.
+    let core = core_image();
+    let at = |load_addr: u32| {
+        let mut plan = boot_plan();
+        plan.core_image = Some(core.clone());
+        plan.images[0].reserve = Some(Span {
+            start: BASE,
+            end: BASE + 0x10000,
+        });
+        plan.images.push(ImageSpec::overlay(
+            "MENU.OVL",
+            payload(1, 3),
+            BOOT_EXE_NAME,
+            load_addr,
+            Class::Volatile,
+        ));
+        press(exe(BASE, BASE, 0, &with_core(3_000, &core)), &plan, false)
+    };
+    let (_, pressed) = at(BASE + 3_000).unwrap();
+    assert_eq!(pressed.images[0].size, 2 * SECTOR_BYTES as u32, "the switch still loads both");
+    assert_eq!(pressed.images[1].evicts, 1 << 1, "the owner stays loaded");
+    assert_eq!(
+        at(BASE + 2_996).err().unwrap(),
+        SceneDiscError::Overlap {
+            a: BOOT_EXE_NAME.into(),
+            b: "MENU.OVL".into()
+        }
+    );
+}
+
+#[test]
 fn programs_carry_the_core_hash_and_stop_before_the_stored_core() {
     let core = core_image();
     let hash = psx_pack::WordFnv32::of(&words(&core));
