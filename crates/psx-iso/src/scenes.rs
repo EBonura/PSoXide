@@ -62,7 +62,8 @@ use alloc::{format, vec};
 use psx_scene_abi::{
     block, encode_compact, encode_table, word_fnv, Class, ImageRow, Kind, SceneRow, Span,
     TableError, BOOT_EXE_LBA, CORE_WINDOW, LOAD_ADDR, MAX_IMAGES, MAX_ROWS, NAME_BYTES,
-    PAYLOAD_END, SCENE_FLAG_START, SECTOR_BYTES, STACK_INIT, TABLE_FILE_NAME, TABLE_LBA,
+    PAYLOAD_END, REQUIRE_MARKER, SCENE_FLAG_START, SECTOR_BYTES, STACK_INIT, TABLE_FILE_NAME,
+    TABLE_LBA,
 };
 
 use crate::{
@@ -405,6 +406,14 @@ pub enum SceneDiscError {
         scene: String,
         /// The needed image at fault.
         image: String,
+    },
+    /// A start scene needs images but its Program never asks for them: its EXE does not link
+    /// `psx_core::link::require` (no `psx_scene_abi::REQUIRE_MARKER` in its bytes).
+    NoRequire {
+        /// The start scene.
+        scene: String,
+        /// Its Program.
+        program: String,
     },
     /// The table writer refused.
     Table(TableError),
@@ -1018,6 +1027,19 @@ pub fn add_scene_disc_files_with(
             }
             needed.push(span);
             needs |= 1 << n;
+        }
+        // A program asks for its start scene's images itself (`psx_core::link::require`, which keeps
+        // REQUIRE_MARKER in its .rodata): one that never links the call runs without them.
+        if scene.start
+            && needs != 0
+            && !files[image as usize]
+                .windows(REQUIRE_MARKER.len())
+                .any(|w| w == REQUIRE_MARKER)
+        {
+            return Err(SceneDiscError::NoRequire {
+                scene: scene.name.clone(),
+                program: images[image as usize].name.clone(),
+            });
         }
         let start_flag = if scene.start { SCENE_FLAG_START } else { 0 };
         scene_rows.push(SceneRow {

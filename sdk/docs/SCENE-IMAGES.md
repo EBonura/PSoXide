@@ -45,7 +45,7 @@ holds, `place=`, `tail=`, `host`) are mkisopsx's (tools/mkisopsx/src/scenes.rs).
 ```rust
 static mut TABLE: [u32; 512] = [0; 512];
 // ... at the start of main, before the first call into a needed image:
-if psx_core::link::require(table) != 0 { /* fatal */ }
+psx_core::link::require_or_fatal(table); // or `require`, which returns the code
 ```
 
 `require` finds the program's entry scene (its table's boot scene after a BIOS boot or a launcher's

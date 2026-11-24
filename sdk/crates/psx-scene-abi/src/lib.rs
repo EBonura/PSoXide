@@ -342,6 +342,11 @@ pub const LBA_ABSOLUTE: u32 = 1 << 31;
 /// `psx_core_stream_open` flag bit 0: skip the SeekL and go straight to ReadN.
 pub const STREAM_IMPLICIT_SEEK: u32 = 1 << 0;
 
+/// Bytes `psx_core::link::require` keeps in a program's `.rodata` (it reads them, so they link only
+/// with it). The table writer refuses a program whose start scene needs images when its EXE does
+/// not hold them: such a program never asks for those images and runs without them.
+pub const REQUIRE_MARKER: [u8; 16] = *b"psx-core:require";
+
 /// The handoff block's fields, as byte offsets from [`HANDOFF_BLOCK`]`.start`.
 pub mod block {
     /// `"PSCB"` read as a little-endian word.

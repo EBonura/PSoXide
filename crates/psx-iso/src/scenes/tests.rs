@@ -1037,3 +1037,27 @@ fn err_scene(err: &SceneDiscError) -> String {
         other => panic!("not a Needs refusal: {other:?}"),
     }
 }
+
+/// A start scene's needed images are loaded only when its Program asks (`psx_core::link::require`).
+/// A Program whose EXE does not hold require's marker never asks: refused.
+#[test]
+fn a_start_scene_that_needs_images_needs_a_program_that_asks_for_them() {
+    let mut plan = overlay_plan();
+    let start = plan.scenes.iter().position(|s| s.start).unwrap();
+    plan.scenes[start].needs = vec![String::from("SET2.OVL")];
+    let boot = exe(BASE, BASE, 0, &payload(8, 1));
+    assert_eq!(
+        press(boot, &plan, false).err().unwrap(),
+        SceneDiscError::NoRequire {
+            scene: plan.scenes[start].name.clone(),
+            program: String::from(BOOT_EXE_NAME),
+        }
+    );
+    let mut asking = payload(8, 1);
+    asking[0x100..0x110].copy_from_slice(&REQUIRE_MARKER);
+    let (_, pressed) = press(exe(BASE, BASE, 0, &asking), &plan, false).unwrap();
+    assert_eq!(pressed.scenes[start].needs, 1 << 2);
+    // A start scene that needs nothing needs no call.
+    plan.scenes[start].needs.clear();
+    assert!(press(exe(BASE, BASE, 0, &payload(8, 1)), &plan, false).is_ok());
+}

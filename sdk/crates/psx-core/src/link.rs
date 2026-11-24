@@ -356,12 +356,14 @@ pub fn release() {
 /// have been written: the program stops on the fatal screen).
 ///
 /// In-program scenes need no call: the core loads their needed images when the switch enters
-/// them.
-#[allow(
-    clippy::must_use_candidate,
-    reason = "a program may treat any failure as fatal through the code it gets back"
-)]
+/// them. A program whose start scene needs images and never links this function is refused by the
+/// table writer (`psx_scene_abi::REQUIRE_MARKER`). [`require_or_fatal`] stops on the fatal screen
+/// instead of returning a code.
+#[must_use = "a needed image that failed to load is not in RAM: stop (require_or_fatal) or handle the code"]
 pub fn require(table: &mut [u32]) -> u32 {
+    // The marker the table writer looks for: read, so it links exactly when this function does.
+    // SAFETY: a volatile read of the first byte of a static array.
+    let _ = unsafe { core::ptr::read_volatile(REQUIRE_MARKER.as_ptr()) };
     let r = table_ready(table);
     if r != abi::code::OK {
         return r;
@@ -388,6 +390,18 @@ pub fn require(table: &mut [u32]) -> u32 {
     }
     abi::code::OK
 }
+
+/// [`require`], and the core's fatal screen with its code when a needed image did not load: what a
+/// program that cannot run without its start scene's images calls.
+pub fn require_or_fatal(table: &mut [u32]) {
+    let r = require(table);
+    if r != abi::code::OK {
+        fatal(r);
+    }
+}
+
+/// `psx_scene_abi::REQUIRE_MARKER`, in `.rodata` while [`require`] is linked.
+static REQUIRE_MARKER: [u8; 16] = psx_scene_abi::REQUIRE_MARKER;
 
 /// Open a stream at member-relative `lba`.
 #[allow(
