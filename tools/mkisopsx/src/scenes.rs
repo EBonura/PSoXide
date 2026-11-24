@@ -22,7 +22,11 @@
 //! `--core-image` one; `core-hash=0` for a program not on the core, which no
 //! switch can start), `reserve=<lo>-<hi>` (the RAM its overlays load into,
 //! below PAYLOAD_END), `reaches=<scene>,...` (the scenes it can switch to, for
-//! its compact table copy; default every scene). Overlay options, all needed
+//! its compact table copy; default every scene), `carries=<overlay>,...` (its
+//! own non-volatile overlays its exe already holds at their load addresses,
+//! byte for byte with their sector padding: the row's word 5, counted as
+//! loaded on entry; its overlays may then lie over those ranges of its
+//! payload and nowhere else). Overlay options, all needed
 //! but `class`'s default `swap`: `owner=<program>`, `load=<addr>` (for an
 //! overlay linked with its program by psoxide-overlay.ld, the option
 //! `psx-exe --overlay` prints),
@@ -30,9 +34,12 @@
 //! owner also uses, which the core reads again at every load), and optionally
 //! `place=before-world` (its file ends where `WORLD.PAK` starts, LBA 1024, for an
 //! overlay its owner reads right before the pack: one seek and a short hop
-//! instead of two long seeks), with it `tail=<n>` (the row also loads the
-//! pack's first n sectors in the same read, right after the overlay's padded
-//! bytes, checked with it: the owner takes the pack header from RAM with
+//! instead of two long seeks) or `place=before:<file>` (right before a
+//! `--file` of that name, for an overlay its owner reads before that file),
+//! with either `tail=<n>` (the row also loads the
+//! next file's first n sectors in the same read, right after the overlay's padded
+//! bytes, checked with it: the owner takes that file's first sectors (the pack
+//! header) from RAM with
 //! `psx_core::link::image_tail` instead of reading it after the core's stop;
 //! the reserve must hold them). An overlay's owner needs `reserve=` on its
 //! `program` line (mkisopsx refuses with `NoReserve` otherwise).
@@ -139,6 +146,13 @@ fn program<'a>(
                         .collect(),
                 );
             }
+            Some(("carries", v)) => {
+                image.carries = v
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_ascii_uppercase)
+                    .collect();
+            }
             _ => return Err(format!("unknown program option {option}")),
         }
     }
@@ -161,6 +175,9 @@ fn overlay<'a>(
             Some(("class", "swap")) => class = Class::Swap,
             Some(("class", "volatile")) => class = Class::Volatile,
             Some(("place", "before-world")) => placement = Placement::BeforeWorld,
+            Some(("place", v)) if v.starts_with("before:") && v.len() > 7 => {
+                placement = Placement::Before(v[7..].to_ascii_uppercase());
+            }
             Some(("tail", v)) => tail = number::<u32>("tail", v)?,
             _ => return Err(format!("unknown overlay option {option}")),
         }
@@ -279,6 +296,15 @@ mod tests {
         let text = text.replace("before-world", "before-world tail=1");
         let plan = parse_manifest(&text, Path::new("."), &mut |_| Ok(vec![0; 4])).unwrap();
         assert_eq!(plan.images[1].tail, 1);
+        let text = text.replace("before-world", "before:game.dat");
+        let plan = parse_manifest(&text, Path::new("."), &mut |_| Ok(vec![0; 4])).unwrap();
+        assert_eq!(
+            plan.images[1].placement,
+            Placement::Before("GAME.DAT".into())
+        );
+        let text = text.replace("reserve=", "carries=menu.ovl reserve=");
+        let plan = parse_manifest(&text, Path::new("."), &mut |_| Ok(vec![0; 4])).unwrap();
+        assert_eq!(plan.images[0].carries, vec![String::from("MENU.OVL")]);
     }
 
     #[test]
@@ -299,6 +325,10 @@ mod tests {
             ("overlay A.OVL a.bin owner=X load=0 class=big", "class=big"),
             ("overlay A.OVL a.bin owner=X load=0 place=end", "place=end"),
             ("overlay A.OVL a.bin owner=X load=0 tail=x", "tail=x"),
+            (
+                "overlay A.OVL a.bin owner=X load=0 place=before:",
+                "place=before:",
+            ),
             ("scene A PSX.EXE", "exactly one of start and entry"),
             (
                 "scene A PSX.EXE start entry=0",
