@@ -28,7 +28,7 @@ extern "C" {
 /// stored copy this reads.
 #[cfg(target_arch = "mips")]
 #[no_mangle]
-#[link_section = ".text.__boot_entry_rs"]
+#[link_section = ".text_entry.__boot_entry_rs"]
 extern "C" fn __boot_entry_rs() {
     let run = &raw const __boot_start as *mut u8;
     let load_end = &raw const __boot_load_end as *mut u8;
@@ -56,7 +56,7 @@ extern "C" fn __boot_entry_rs() {
 
 #[cfg(target_arch = "mips")]
 core::arch::global_asm!(
-    ".section .text.__boot_entry,\"ax\",@progbits",
+    ".section .text_entry.__boot_entry,\"ax\",@progbits",
     ".globl __boot_entry",
     ".type __boot_entry,@function",
     ".set noreorder",

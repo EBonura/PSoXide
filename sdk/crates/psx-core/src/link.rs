@@ -105,7 +105,7 @@ pub fn block_valid() -> bool {
 /// and it runs once per program start.
 #[optimize(size)]
 #[no_mangle]
-#[cfg_attr(target_arch = "mips", link_section = ".text.__core_boot_rs")]
+#[cfg_attr(target_arch = "mips", link_section = ".text_entry.__core_boot_rs")]
 extern "C" fn __core_boot_rs(a0: u32, a1: u32, a2: u32, a3: u32) {
     let core_entry = a3 == block::ADDR
         && block_valid()
@@ -179,7 +179,7 @@ core::arch::global_asm!(
 
 #[cfg(target_arch = "mips")]
 core::arch::global_asm!(
-    ".section .text.__core_boot,\"ax\",@progbits",
+    ".section .text_entry.__core_boot,\"ax\",@progbits",
     ".globl __core_boot",
     ".type __core_boot,@function",
     ".set noreorder",

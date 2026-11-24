@@ -153,6 +153,13 @@ SECTIONS {
            runs once or rarely (a loader, a settings screen) kept apart from the hot text so it
            does not share I-cache sets or pages with it. */
         *(.psx_cold .psx_cold.*);
+        /* Once-only entry code, last of all (`.text_entry.*`: psx-core's `__core_boot` and
+           `__core_boot_rs`, psx-rt's boot mover `__boot_entry` and `__boot_entry_rs`). The
+           header's entry may point anywhere, and here they cannot move the rest: a program on
+           the core, or with boot-only memory, keeps every other function at the address it has
+           without them, so its I-cache sets do not change. The name is not `.text.*`, so the
+           general rule above does not take them first. */
+        *(.text_entry .text_entry.*);
         __text_end = .;
     } > IMAGE
 
