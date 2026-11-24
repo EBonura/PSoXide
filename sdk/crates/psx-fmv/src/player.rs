@@ -777,6 +777,9 @@ fn clear_buffers(dma: &mut GpuDma, config: &Config) {
     link_section = ".text.boot_inner.psx_fmv.leave_display"
 )]
 fn leave_display(dma: &mut GpuDma, config: &Config, mode: u32) {
+    // Timer 2 back to the system clock (the entry state's mode 0): the player counts it at
+    // clock / 8, and the scene core's time bounds assume the system clock.
+    psx_io::timers::set_mode(psx_io::timers::Timer::Timer2, 0);
     if config.depth == Depth::Rgb24 {
         clear_buffers(dma, config);
         psx_io::gpu::write_display_control(GP1_DISPLAY_MODE | mode);
