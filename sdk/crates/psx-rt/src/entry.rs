@@ -37,6 +37,13 @@
 //!   unmuted with transfer mode stopped. A program that plays XA or CD-DA turns the input on
 //!   and sets its volume (`psx_spu::enable_cd_audio` and `set_cd_volume`) without having to
 //!   know what the BIOS left in the control register.
+//! * GPU: GP1(00h) (texture page, texture window and mask bits zero: mask set off, mask check
+//!   off), GP1(01h) (command buffer empty), every halfword of VRAM black (0x0000, mask bit
+//!   clear) by four GP0(02h) fills, then the splash's environment: drawing area 0..319 x
+//!   0..239, drawing offset 0, NTSC 320x240 15-bit display shown from (0, 0), display on (a
+//!   black screen). A program booted alone and one entered by a scene-core switch start from
+//!   the same GPU and the same VRAM, whatever the BIOS or the previous program left (a launcher's
+//!   mask check would otherwise refuse every upload of the new program, the 360X film's case).
 //! * The instruction cache is flushed and the cache control register set to its running value
 //!   ([`crate::cache::flush_instruction_cache`]), so the scratchpad and the caches are
 //!   configured by the program and not by the BIOS.
@@ -241,6 +248,7 @@ pub fn set_entry_state() {
         psx_io::write_u16(psx_hw::sio::sio0::CTRL, 0);
 
         spu_entry_state();
+        gpu_entry_state();
 
         // Last: the timers and SIO0 above may have latched a bit.
         psx_io::irq::acknowledge(u32::MAX);
@@ -347,6 +355,57 @@ unsafe fn write_status(value: u32) {
     // SAFETY: the caller passes a value that leaves interrupts disabled; the nops let the write
     // settle before the next instruction.
     unsafe { core::arch::asm!("mtc0 $8, $12", "nop", "nop", in("$8") value, options(nostack)) };
+}
+
+/// The GPU part of [`set_entry_state`]: reset, command buffer reset, VRAM black. Out of line, run
+/// once.
+#[cfg(target_arch = "mips")]
+///
+/// # Safety
+///
+/// As [`set_entry_state`]'s block: nothing else drives the GPU yet.
+#[inline(never)]
+unsafe fn gpu_entry_state() {
+    use psx_hw::gpu::{gp0, gp1, GP0, GP1};
+    // SAFETY: GP1 and GP0 are the GPU's own ports; the caller owns the GPU (see above).
+    unsafe {
+        psx_io::write_u32(GP1, gp1::RESET);
+        psx_io::write_u32(GP1, gp1::RESET_CMD_BUFFER);
+    }
+    // Four 512x256 fills: a fill's width and height fields cannot say 1024 or 512.
+    let mut i = 0u32;
+    while i < 4 {
+        psx_io::gpu::wait_command_ready();
+        // SAFETY: as above; a fill is three words (colour, top-left y:x, height:width).
+        unsafe {
+            psx_io::write_u32(GP0, gp0::fill_rect(0, 0, 0));
+            psx_io::write_u32(GP0, ((i >> 1) << 24) | ((i & 1) << 9));
+            psx_io::write_u32(GP0, (256 << 16) | 512);
+        }
+        i += 1;
+    }
+    psx_io::gpu::wait_command_ready();
+    // The splash's environment, black: drawing into 0..320 x 0..240 at offset 0, NTSC 320x240
+    // 15 bits a pixel shown from (0, 0), display on. GP1(00h) left the texture page, texture
+    // window and mask bits zero (mask set off, mask check off).
+    for word in [
+        gp0::draw_area_top_left(0, 0),
+        gp0::draw_area_bottom_right(319, 239),
+        gp0::draw_offset(0, 0),
+    ] {
+        // SAFETY: as above, one-word GP0 settings.
+        unsafe { psx_io::write_u32(GP0, word) };
+    }
+    for word in [
+        gp1::display_mode(1, 0, false, false, false),
+        gp1::h_display_range(0x260, 0x260 + 320 * 8),
+        gp1::v_display_range(0x10, 0x10 + 240),
+        gp1::display_start(0, 0),
+        gp1::display_enable(true),
+    ] {
+        // SAFETY: as above.
+        unsafe { psx_io::write_u32(GP1, word) };
+    }
 }
 
 /// The SPU part of [`set_entry_state`]: the register writes of `psx_spu::Spu::new` that put the
