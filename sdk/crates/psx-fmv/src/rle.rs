@@ -31,6 +31,7 @@ pub enum RleLengthError {
 }
 
 impl core::fmt::Display for RleLengthError {
+    #[cfg_attr(target_arch = "mips", link_section = ".text.boot_inner.psx_fmv.fmt")]
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(match self {
             Self::Empty => "no run-length words",
@@ -74,6 +75,10 @@ impl<const WORDS: usize> RleBuffer<WORDS> {
     }
 
     /// The buffer as `2 * WORDS` halfwords, for [`crate::bitstream::decode_frame`].
+    #[cfg_attr(
+        target_arch = "mips",
+        link_section = ".text.boot_inner.psx_fmv.as_halfwords_mut"
+    )]
     pub fn as_halfwords_mut(&mut self) -> &mut [u16] {
         // SAFETY: `[u32; WORDS]` is `4 * WORDS` initialised bytes aligned
         // for `u16`, every bit pattern is a valid `u16`, and the exclusive
@@ -88,6 +93,10 @@ impl<const WORDS: usize> RleBuffer<WORDS> {
 }
 
 impl<const WORDS: usize> Default for RleBuffer<WORDS> {
+    #[cfg_attr(
+        target_arch = "mips",
+        link_section = ".text.boot_inner.psx_fmv.default"
+    )]
     fn default() -> Self {
         Self::new()
     }

@@ -7,6 +7,11 @@
 //! memory `.boot` ran from, and draws the brightness overlay the splash drew too, a generic GPU
 //! call both share. If any of the code resident drawing needs had been placed in `.boot`, it is
 //! gone now and the program faults. Verdict on the TTY: `hello-boot: PASS`.
+//!
+//! It also links the film player (psx-fmv, all of it boot-only) the way a boot program plays its
+//! intro, and nothing else reads the disc through psx-io's `SectorReader`: LTO then folds the
+//! player's reader into psx-io's resident reader methods, the shape Half-Life's intro links in. The
+//! player looks for `FILM.STR`; these discs have none, so it reports that and goes on.
 #![no_std]
 #![no_main]
 
@@ -21,6 +26,43 @@ use psx_rt::tty;
 extern "C" {
     static __boot_start: u32;
     static __boot_end: u32;
+    static __heap_end: u32;
+}
+
+/// The film player, as a boot program calls it before its game: find the movie, play it.
+fn film() {
+    let Some((lba, bytes)) = psx_fmv::player::find_root_file("FILM.STR") else {
+        tty::println("hello-boot: no film");
+        return;
+    };
+    let movie = psx_fmv::player::Movie {
+        lba,
+        frames: bytes / (2048 * 10),
+        width: 320,
+        height: 240,
+        max_chunks: 10,
+        rle_words: 0x8000,
+        xa: None,
+    };
+    let config = psx_fmv::player::Config {
+        depth: psx_fmv::player::Depth::Rgb15,
+        buffers: psx_fmv::player::DEFAULT_BUFFERS,
+        screen_width: 320,
+        screen_height: 240,
+        latency_vblanks: 2,
+        stall_vblanks: 120,
+    };
+    // The heap above .boot (which the player runs from), which nothing uses yet: its buffers.
+    // SAFETY: link-time symbols bounding memory this program does not use otherwise.
+    let memory = unsafe {
+        let start = core::ptr::addr_of!(__boot_end) as *mut u32;
+        let end = core::ptr::addr_of!(__heap_end) as usize;
+        core::slice::from_raw_parts_mut(start, (end - start as usize) / 4)
+    };
+    let outcome = psx_fmv::player::play(&movie, &config, memory, &mut || false);
+    tty::print("hello-boot: film frames ");
+    tty::print_hex_u32(outcome.shown);
+    tty::println("");
 }
 
 /// Boot-only code no resident code may call: with feature `cross-ref`, `main` does, and the link
@@ -63,6 +105,7 @@ fn main() {
         || pads.poll(&mut port, Port::One).buttons,
     );
     tty::println("hello-boot: splash done");
+    film();
     #[cfg(feature = "cross-ref")]
     tty::print_hex_u32(inner(core::hint::black_box(1)));
     // What the heap does to `.boot` from here on: every word of it overwritten, with a word that

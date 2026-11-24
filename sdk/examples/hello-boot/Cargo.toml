@@ -25,6 +25,7 @@ cross-ref = []
 [dependencies]
 psx-core    = { path = "../../crates/psx-core", features = ["link"] }
 psx-display = { path = "../../crates/psx-display" }
+psx-fmv     = { path = "../../crates/psx-fmv" }
 psx-gpu     = { path = "../../crates/psx-gpu" }
 psx-pad     = { path = "../../crates/psx-pad" }
 psx-rt      = { path = "../../crates/psx-rt", features = ["host-tty"] }

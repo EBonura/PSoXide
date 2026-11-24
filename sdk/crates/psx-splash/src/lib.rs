@@ -85,9 +85,8 @@ const FONT_CLUT: Clut = Clut::new(320, 256);
 /// The font as statics of this crate: a `const` the generic upload takes by reference is emitted as
 /// anonymous data in the caller's crate, which no linker script can place by name (a boot overlay
 /// that holds the splash cannot take it, and under fat LTO it stays resident).
-// Boot-only data resident code may reach while the splash runs: with one caller, LTO folds the
-// font's address into psx-font's resident `FontAtlas::upload`, and only the splash calls it with
-// this font (psoxide-boot.ld refuses any resident reference into `.boot_inner`).
+// In .boot, where resident code may refer to it (psoxide-boot.ld): with one caller, LTO folds the
+// font's address into psx-font's resident `FontAtlas::upload`, which then runs only for the splash.
 #[cfg_attr(
     target_arch = "mips",
     link_section = ".rodata.boot_only.psx_splash.FONT_BITMAP"

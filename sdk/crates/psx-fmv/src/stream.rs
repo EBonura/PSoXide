@@ -46,6 +46,7 @@ pub struct Chunk {
 
 impl Chunk {
     /// Parse a sector's user data; `None` if it is not an STR video chunk.
+    #[cfg_attr(target_arch = "mips", link_section = ".text.boot_inner.psx_fmv.parse")]
     pub fn parse(sector: &[u8]) -> Option<Chunk> {
         if sector.len() < CHUNK_HEADER_BYTES {
             return None;
@@ -115,6 +116,7 @@ impl FrameAssembler {
     /// and must hold `count * 2016` bytes. Returns the finished frame when
     /// this chunk completes it; the caller then hands `buf` to the decoder
     /// and passes a different buffer from now on.
+    #[cfg_attr(target_arch = "mips", link_section = ".text.boot_inner.psx_fmv.add")]
     pub fn add(&mut self, sector: &[u8], buf: &mut [u8]) -> Option<Frame> {
         let chunk = Chunk::parse(sector)?;
         if chunk.frame != self.frame || chunk.count != self.count {

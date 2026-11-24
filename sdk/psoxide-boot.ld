@@ -32,33 +32,37 @@ BOOT_VMA = DEFINED(BOOT_VMA_OVERRIDE) ? BOOT_VMA_OVERRIDE : ALIGN(__bss_end, 16)
 BOOT_RUN_END = DEFINED(BOOT_RUN_END_OVERRIDE) ? BOOT_RUN_END_OVERRIDE : __heap_end;
 BOOT_LMA = DEFINED(BOOT_LMA_OVERRIDE) ? BOOT_LMA_OVERRIDE : __data_end;
 SECTIONS {
-    /* Boot-only code resident code may call while it boots (before its heap reaches this
-       memory): the program's own `.boot_only` sections and the boot crates' entry points, each
-       placed by its own crate (psx-splash's `show`, `show_with_partner`). Code takes `.text.`
-       names, data `.rodata.` ones, so the hazard tools read them as what they are and a program
-       without this script keeps them in .text and .data. */
+    /* What resident code may refer to while it boots (before its heap reaches this memory):
+       - entry points: the program's own `.boot_only` sections and the boot crates' public calls
+         (psx-splash's `show` and `show_with_partner`, psx-fmv's `player::play`,
+         `find_root_file`, `memory_words`), each placed by its own crate;
+       - the boot crates' statics (psx-splash's font and mark, psx-fmv's tables and its reader,
+         decoder and sector buffer). With one caller, LTO folds a static's address into the
+         shared resident code that caller uses (psx-font's `FontAtlas::upload`, psx-io's
+         `SectorReader` methods). Folding happens only when every call passes that static, and
+         only the boot crate can name it, so that resident code runs only from boot code.
+       Code takes `.text.` names and data `.rodata.`/`.data.` ones, so the hazard tools read them
+       as what they are and a program without this script keeps them in .text and .data. */
     .boot BOOT_VMA : AT(BOOT_LMA) {
         __boot_start = .;
-        *(.boot_only .boot_only.* .text.boot_only.* .rodata.boot_only.*)
+        *(.boot_only .boot_only.* .text.boot_only.* .rodata.boot_only.* .data.boot_only.*)
         . = ALIGN(4);
     } > RELOCATED
-    /* Boot-only code and data only boot code reaches: psx-splash's own functions and statics
-       (placed by name in the crate: never a generic instance of another crate's code, which
-       resident code may share), and the film player, still taken by crate name. Resident code
-       must never reach into it: NOCROSSREFS_TO below fails the link if it does (a generic the
-       player shares with resident code, say). Right after .boot in RAM and in the file (named: the
-       region's own count is past the core's window when the program has one). */
+    /* Boot-only code only boot code calls: psx-splash's and psx-fmv's own functions, placed by
+       name in each crate, never a generic instance of another crate's code (resident code may
+       share that one, so it stays resident). Resident code must never call into it:
+       NOCROSSREFS_TO below fails the link if it does. Right after .boot in RAM and in the file
+       (named: the region's own count is past the core's window when the program has one). */
     .boot_inner ADDR(.boot) + SIZEOF(.boot) : AT(LOADADDR(.boot) + SIZEOF(.boot)) {
         *(.boot_inner .boot_inner.* .text.boot_inner.* .rodata.boot_inner.*)
-        *(.text.*psx_fmv* .rodata.*psx_fmv* .data.*psx_fmv*)
         . = ALIGN(4);
         __boot_load_end = .;
     } > RELOCATED
-    /* Right after .boot (named: the region's own count is past the core's window when the
-       program has one). Its load address (which nothing reads) follows .bss's, which follows the
-       stored bytes (psoxide.ld), so no two sections share load addresses. */
+    /* The boot crates' zeroed statics, right after .boot_inner (named, as above). Its load
+       address (which nothing reads) follows .bss's, which follows the stored bytes (psoxide.ld),
+       so no two sections share load addresses. */
     .boot_bss __boot_load_end (NOLOAD) : AT(__load_end + SIZEOF(.bss)) {
-        *(.bss.*psx_fmv*)
+        *(.bss.boot_only.*)
         . = ALIGN(4);
         __boot_end = .;
     } > RELOCATED
@@ -78,7 +82,6 @@ ASSERT(__boot_lma >= __data_end, ".boot must be stored after .data")
 ASSERT(!DEFINED(__psx_core_store_lma) || __boot_lma == __data_end, "on the scene core, .boot is stored right after .data (no BOOT_LMA_OVERRIDE)")
 ASSERT(__boot_start % 4 == 0 && __boot_lma % 4 == 0, ".boot's run and load addresses must be word aligned")
 
-/* Resident code and data never reference boot-only code or data that is not an entry point: once
-   the heap has the memory, it is gone. ld.lld fails the link on any such reference. */
+/* Resident code and data never refer to boot-only code that is not an entry point: once the heap
+   has the memory, it is gone. ld.lld fails the link on any such reference. */
 NOCROSSREFS_TO(.boot_inner .text .data)
-NOCROSSREFS_TO(.boot_bss .text .data)

@@ -64,6 +64,7 @@ pub struct Header {
 impl Header {
     /// Parse the 8-byte header.
     #[inline]
+    #[cfg_attr(target_arch = "mips", link_section = ".text.boot_inner.psx_fmv.parse")]
     pub fn parse(frame: &[u8]) -> Result<Self, DecodeError> {
         if frame.len() < HEADER_BYTES {
             return Err(DecodeError::Truncated);
@@ -209,10 +210,12 @@ pub const AC_CODES: [(u8, u16, u8, u8); 111] = [
 /// First-level table, indexed by the next 8 bits. Covers every code of up
 /// to 8 bits, the escape prefix, end of block, and routes codes with 6 or
 /// more leading zeros to [`LONG`].
+#[cfg_attr(target_arch = "mips", link_section = ".rodata.boot_only.psx_fmv.SHORT")]
 static SHORT: [u32; 256] = build_short();
 /// Second level for codes with `lz` = 6..=11 leading zeros, indexed by
 /// `(lz - 6) * 16` plus the 4 bits after the first one bit (lz 6 codes
 /// have 3 such bits and fill two slots each).
+#[cfg_attr(target_arch = "mips", link_section = ".rodata.boot_only.psx_fmv.LONG")]
 static LONG: [u32; 96] = build_long();
 
 const fn build_short() -> [u32; 256] {
@@ -283,6 +286,7 @@ const fn build_long() -> [u32; 96] {
 /// [`SHORT`]'s slower kinds (end of block, escape, long codes, invalid);
 /// clear, bits 0..16 are the MDEC halfword for a positive level and bits
 /// 16..21 the code length plus its sign bit.
+#[cfg_attr(target_arch = "mips", link_section = ".rodata.boot_only.psx_fmv.FAST")]
 static FAST: [u32; 256] = build_fast();
 
 const fn build_fast() -> [u32; 256] {
@@ -319,6 +323,7 @@ struct Bits<const ALIGNED: bool> {
 }
 
 impl<const ALIGNED: bool> Bits<ALIGNED> {
+    #[cfg_attr(target_arch = "mips", link_section = ".text.boot_inner.psx_fmv.new")]
     fn new(data: &[u8]) -> Self {
         let p = data.as_ptr();
         let mut b = Bits {
@@ -334,6 +339,7 @@ impl<const ALIGNED: bool> Bits<ALIGNED> {
     /// Top up to at least 17 valid bits. Reads past the end yield zeros;
     /// the caller's overrun check reports it.
     #[inline(always)]
+    #[cfg_attr(target_arch = "mips", link_section = ".text.boot_inner.psx_fmv.refill")]
     fn refill(&mut self) {
         while self.avail <= 16 {
             let hw = if self.p < self.end {
@@ -356,6 +362,7 @@ impl<const ALIGNED: bool> Bits<ALIGNED> {
     }
 
     #[inline(always)]
+    #[cfg_attr(target_arch = "mips", link_section = ".text.boot_inner.psx_fmv.skip")]
     fn skip(&mut self, n: u32) {
         self.buf <<= n;
         self.avail -= n;
@@ -364,6 +371,7 @@ impl<const ALIGNED: bool> Bits<ALIGNED> {
 
     /// Read `n` (1..=16) bits.
     #[inline(always)]
+    #[cfg_attr(target_arch = "mips", link_section = ".text.boot_inner.psx_fmv.read")]
     fn read(&mut self, n: u32) -> u32 {
         let v = self.buf >> (32 - n);
         self.skip(n);
@@ -384,6 +392,10 @@ impl<const ALIGNED: bool> Bits<ALIGNED> {
 /// `pump` runs after every `pump_every` macroblocks (one column when set to
 /// `height / 16`). A streaming player drains CD sectors there so the drive
 /// never runs ahead of the decoder.
+#[cfg_attr(
+    target_arch = "mips",
+    link_section = ".text.boot_inner.psx_fmv.decode_frame"
+)]
 pub fn decode_frame(
     frame: &[u8],
     out: &mut [u16],
@@ -435,6 +447,10 @@ pub fn decode_frame(
 /// of the decode loop.
 #[cold]
 #[inline(never)]
+#[cfg_attr(
+    target_arch = "mips",
+    link_section = ".text.boot_inner.psx_fmv.cold_pump"
+)]
 fn cold_pump(pump: &mut impl FnMut()) {
     pump();
 }
@@ -447,6 +463,10 @@ fn cold_pump(pump: &mut impl FnMut()) {
 /// common code costs one table load with its sign folded into the same
 /// shift, and the output has one bound check per halfword.
 #[inline(never)]
+#[cfg_attr(
+    target_arch = "mips",
+    link_section = ".text.boot_inner.psx_fmv.decode_body"
+)]
 fn decode_body<const ALIGNED: bool>(
     body: &[u8],
     qscale: u16,
@@ -530,6 +550,10 @@ fn decode_body<const ALIGNED: bool>(
 /// codes of 10 bits and more, and invalid ones. Inlined: an out-of-line call
 /// would take the bit reader's address and pin it to the stack.
 #[inline(always)]
+#[cfg_attr(
+    target_arch = "mips",
+    link_section = ".text.boot_inner.psx_fmv.slow_code"
+)]
 fn slow_code<const ALIGNED: bool>(bits: &mut Bits<ALIGNED>) -> Result<Option<u32>, DecodeError> {
     match SHORT[(bits.buf >> 24) as usize] >> 24 {
         KIND_EOB => {
