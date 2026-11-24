@@ -203,6 +203,44 @@ fn core_image() -> Vec<u8> {
 }
 
 #[test]
+#[test]
+fn a_boot_program_off_the_core_says_so_with_core_hash_0() {
+    // A disc whose boot program does not link the core (an intro that chain-loads the game, say)
+    // while its other programs do: the boot exe carries no stored core.
+    let core = core_image();
+    let mut plan = boot_plan();
+    plan.images.push(ImageSpec::program(
+        "GAME.EXE",
+        Some(exe(BASE, BASE, 0, &with_core(5_000, &core))),
+    ));
+    plan.scenes.push(SceneSpec::start("GAME", "GAME.EXE"));
+    plan.core_image = Some(core.clone());
+    let boot_exe = exe(BASE, BASE, 0, &payload(2, 7));
+    // Unsaid, it is the usual mistake (a program that forgot to link the core): refused.
+    assert_eq!(
+        press(boot_exe.clone(), &plan, false).err().unwrap(),
+        SceneDiscError::CoreMissing(BOOT_EXE_NAME.into())
+    );
+    // Said with core-hash=0: its row covers its whole payload and carries hash 0, which no
+    // running core has (psx-core asserts its hash is never 0), so no core switch can start it.
+    plan.images[0].core_hash = Some(0);
+    let (_, pressed) = press(boot_exe, &plan, false).unwrap();
+    assert_eq!(pressed.images[0].core_hash, 0);
+    assert_eq!(pressed.images[0].size, 2 * SECTOR_BYTES as u32);
+    assert_eq!(
+        pressed.images[1].core_hash,
+        psx_pack::WordFnv32::of(&words(&core))
+    );
+
+    // A disc with no core at all needs no option: every row carries hash 0.
+    plan.images[0].core_hash = None;
+    plan.images.truncate(1);
+    plan.scenes.truncate(1);
+    plan.core_image = None;
+    let (_, pressed) = press(exe(BASE, BASE, 0, &payload(2, 7)), &plan, false).unwrap();
+    assert_eq!(pressed.images[0].core_hash, 0);
+}
+
 fn programs_carry_the_core_hash_and_stop_before_the_stored_core() {
     let core = core_image();
     let hash = psx_pack::WordFnv32::of(&words(&core));

@@ -85,7 +85,10 @@ pub struct ImageSpec {
     /// boot exe passed to [`add_scene_disc_files`] itself (image 0 only).
     pub file: Option<Vec<u8>>,
     /// Program: the core hash its row carries instead of the plan's core image's (a program of
-    /// another core pin); it then keeps its whole payload.
+    /// another core pin); it then keeps its whole payload. 0 says the program is not on the core
+    /// at all (a boot program that chain-loads the game, say): no running core has hash 0, so no
+    /// core switch can start it. A program without a stored core and without this is refused
+    /// ([`SceneDiscError::CoreMissing`]): a program that forgot to link the core.
     pub core_hash: Option<u32>,
     /// Program: the RAM its Overlays may load into. Needed when it owns an Overlay.
     pub reserve: Option<Span>,

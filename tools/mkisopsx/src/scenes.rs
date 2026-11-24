@@ -18,7 +18,8 @@
 //! file name. Image 0 must be `program PSX.EXE -`, `-` standing for `--exe`
 //! (the boot exe at LBA 23). A relative file is read from the manifest's
 //! directory. Program options: `core-hash=<hex>` (instead of the
-//! `--core-image` one), `reserve=<lo>-<hi>` (the RAM its overlays load into,
+//! `--core-image` one; `core-hash=0` for a program not on the core, which no
+//! switch can start), `reserve=<lo>-<hi>` (the RAM its overlays load into,
 //! below PAYLOAD_END), `reaches=<scene>,...` (the scenes it can switch to, for
 //! its compact table copy; default every scene). Overlay options, all needed
 //! but `class`'s default `swap`: `owner=<program>`, `load=<addr>`,
