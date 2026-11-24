@@ -14,7 +14,10 @@
  * `--oformat=binary`) and its EXE is written from the load addresses (`psx-exe`, or psoxide-pgo,
  * which does the same); see psoxide.ld.
  */
-__initial_pc = __core_boot;
+/* rustc links a dependency only when some code names it: a program whose own code never names
+   psx_core has no `__core_boot`. Said by name here, not as lld's "symbol not found". */
+ASSERT(DEFINED(__core_boot), "__core_boot is missing: no code names the psx_core crate, so rustc left it out of the link; add `use psx_core as _;` to the program's main.rs (or call psx_core::link)")
+__initial_pc = DEFINED(__core_boot) ? __core_boot : 0;
 /* `__core_next` is psoxide.ld's: here, before psoxide-boot.ld, DEFINED(__boot_initial) would be
    false and the chain would skip the boot mover. */
 
@@ -37,8 +40,8 @@ INSERT AFTER .data;
 
 ASSERT(STACK_INIT == 0x801FDF00, "a program on the core links with RAM_SIZE_OVERRIDE = 0x1FE000")
 ASSERT(__psx_core_store_end - __psx_core_store <= 0x2000, "the core image must fit the window")
-ASSERT(__psx_core_store_end > __psx_core_store, "psx-core's IMAGE is missing: depend on psx-core with feature link")
+ASSERT(__psx_core_store_end > __psx_core_store, "psx-core's IMAGE is missing: depend on psx-core with feature link, and name the crate in code (`use psx_core as _;`)")
 /* The entry code is placed by the program's main script (psoxide.ld: `.text_entry.*`, last in
    .text). A forked script that leaves that line out links it as an orphan section outside .text:
    refused here, whatever the orphan-handling option. */
-ASSERT(__core_boot >= __text_start && __core_boot < __text_end, "__core_boot is outside .text: the program's link script must place .text_entry.* in .text (see psoxide.ld)")
+ASSERT(!DEFINED(__core_boot) || (__core_boot >= __text_start && __core_boot < __text_end), "__core_boot is outside .text: the program's link script must place .text_entry.* in .text (see psoxide.ld)")

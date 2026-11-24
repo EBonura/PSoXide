@@ -69,6 +69,19 @@ sh sdk/examples/hello-core-overlay/build.sh "$OUT/ovl" >"$OUT/build-ovl.log" 2>&
 SOAK=$SOAK sh sdk/examples/hello-modular/build.sh "$OUT/mod" >"$OUT/build-mod.log" 2>&1 || failed mod
 sh sdk/examples/hello-boot/build.sh "$OUT/boot" >"$OUT/build-boot.log" 2>&1 || failed boot
 grep -h -E "refused, as it must be|links the same EXE" "$OUT"/build-*.log | sort | uniq -c
+# A program whose code never names psx_core (hello-tri) linked with the core script: refused with
+# the line to add, not lld's bare "symbol not found: __core_boot".
+v=FAIL
+touch sdk/examples/hello-tri/src/main.rs
+if "$HOST_BIN/psoxide-pgo" apply --crate sdk/examples/hello-tri --variant off -- build --release \
+    --target mipsel-sony-psx -Zbuild-std=core -Zbuild-std-features=compiler-builtins-mem \
+    --target-dir "$GUEST_TARGET" --config 'target.mipsel-sony-psx.rustflags=["-Zunstable-options","-Cpanic=immediate-abort","-Clink-arg=-T../hello-modular/ram.ld","-Clink-arg=-T../../psoxide-core.ld","-Clink-arg=-T../../psoxide.ld"]' \
+    >"$OUT/build-unnamed-core.log" 2>&1; then
+    echo "scene-core-gate: a program that never names psx_core linked on the core" >&2
+elif grep -q 'add `use psx_core as _;`' "$OUT/build-unnamed-core.log"; then
+    v=PASS
+fi
+printf 'unnamed-core-refused\t%s\t%s\n' $v "$(grep -m1 '__core_boot is missing' "$OUT/build-unnamed-core.log" | cut -c1-120)" >>"$OUT/results.tsv"
 mark "builds done"
 
 # A layout search on a program of the core, through its ship relink (psoxide.ld keeps the core's
