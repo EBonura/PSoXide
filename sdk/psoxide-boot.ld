@@ -9,9 +9,9 @@
  * reuses afterwards: by default the start of the heap (BOOT_VMA = __bss_end, rounded up to 16),
  * so the program's first heap blocks lie over them. In the EXE file they follow .data (the core's
  * stored image follows them), where .bss will be. psx-rt's `__boot_entry` moves them up before
- * `_start` clears .bss, zeroes `.boot_bss` and flushes the I-cache over them. The program must be
- * done with them before anything writes over their run range (its first heap allocation, with
- * the default).
+ * `_start` clears .bss and zeroes `.boot_bss` (`_start` flushes the whole I-cache before `main`).
+ * The program must be done with them before anything writes over their run range (its first heap
+ * allocation, with the default).
  *
  * A program that reuses other memory names it with a `-T` file before this script:
  *   BOOT_VMA_OVERRIDE      where .boot runs (default: __bss_end rounded up to 16);
@@ -103,6 +103,7 @@ ASSERT(BOOT_RUN_END <= STACK_INIT - BOOT_STACK, ".boot must run below the stack 
 ASSERT(BOOT_STACK >= BOOT_STACK_FLOOR, "BOOT_STACK_OVERRIDE is less than the boot crates' own stack (__psx_splash_stack_bytes): the stack would reach .boot")
 ASSERT(BOOT_STACK <= STACK_INIT - __bss_end, "BOOT_STACK_OVERRIDE reaches below .bss")
 ASSERT(__boot_lma >= __data_end, ".boot must be stored after .data")
+ASSERT(__boot_start >= __boot_lma, ".boot must run at or above where it is stored (psx-rt's mover copies from the top down)")
 /* On the core, .boot is stored right after .data and the core's image right after it: a core
    switch loads the program up to its stored core, so it loads .boot too. */
 ASSERT(!DEFINED(__psx_core_store_lma) || __boot_lma == __data_end, "on the scene core, .boot is stored right after .data (no BOOT_LMA_OVERRIDE)")
