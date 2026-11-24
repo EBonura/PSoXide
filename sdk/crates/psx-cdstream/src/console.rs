@@ -537,10 +537,16 @@ fn install_in<T: Transport>(cd: Cd, config: Config) -> Result<(), Cd> {
         // System clock / 8, free running, no interrupt: wraps after about
         // 15.5 ms.
         timers::set_mode(Timer::Timer2, psx_hw::timers::mode::clock_source(2));
+        // SAFETY: main-loop only (install and uninstall), never touched from an interrupt.
+        unsafe { core::ptr::addr_of_mut!(TIMER2_TAKEN).write_volatile(true) };
     }
     with::<T, _>(|engine| engine.begin(config));
     Ok(())
 }
+
+/// Timer 2 was set to the system clock / 8 by [`install`] (`Config::time_handler`), and goes back
+/// to the system clock at [`uninstall`].
+static mut TIMER2_TAKEN: bool = false;
 
 /// Give the controller back to polled code. Succeeds only when the transport
 /// is idle with nothing queued; call [`cancel_all`] and poll [`is_idle`]
@@ -555,6 +561,15 @@ fn uninstall_in<T: Transport>() -> Option<Cd> {
     let detached = with::<T, _>(T::detach);
     if !detached {
         return None;
+    }
+    // Timer 2 back at the system clock, as psx-rt's entry state leaves it: the scene core's time
+    // bounds count it (at clock / 8 each would last eight times as long).
+    // SAFETY: as in `install_in`.
+    unsafe {
+        if core::ptr::addr_of!(TIMER2_TAKEN).read_volatile() {
+            core::ptr::addr_of_mut!(TIMER2_TAKEN).write_volatile(false);
+            timers::set_mode(Timer::Timer2, 0);
+        }
     }
     TOKEN.take()
 }

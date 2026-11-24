@@ -305,8 +305,8 @@ fn header_round_trips_at_the_v3_offsets() {
     other[0] = b'X';
     assert_eq!(Header::decode(&other), Err(TableError::Magic));
     let mut version = bytes;
-    version[0x08] = 3;
-    assert_eq!(Header::decode(&version), Err(TableError::Version(3)));
+    version[0x08] = 4;
+    assert_eq!(Header::decode(&version), Err(TableError::Version(4)));
     let mut compact = bytes;
     compact[0x18] = 1;
     assert_eq!(
