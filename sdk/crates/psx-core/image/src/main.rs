@@ -655,12 +655,11 @@ mod drive {
                 r = cmd::send(command, params, INT_ACK, ACK_WAIT);
             }
             if r != cmd::MATCHED {
-                // A read cannot start; a status probe leaves it to the next command, which fails
-                // on its own bound and says so.
-                if read {
-                    return code::NO_ANSWER;
-                }
-            } else if s.last_status as u8 & STAT_ACTIVE != 0 {
+                // A read cannot start. A status probe proves nothing: the state stays as it was
+                // (never PROVEN), so the core's next command probes again.
+                return if read { code::NO_ANSWER } else { code::OK };
+            }
+            if s.last_status as u8 & STAT_ACTIVE != 0 {
                 // Active, whatever the state said: a program's own commands (a player's ReadS,
                 // its no-wait Pause) may have moved the drive since the core last proved it.
                 let r = pause_proved();
