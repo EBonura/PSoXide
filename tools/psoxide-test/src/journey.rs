@@ -452,20 +452,23 @@ pub fn plan(repo: &Path, path: &Path, pad: &str, min_distinct: u32) -> Result<Pl
                 .collect::<Result<Vec<_>, _>>()?;
             (Action::Check { name }, probes, 0)
         };
+        // No condition counts before its program has started: until psx-rt's `_start` has cleared
+        // `.bss`, a `.bss` symbol holds leftover bytes (on the scene core, the stored `.boot` and
+        // core image), and a `ge 1` on one could hold before the program ran a line.
+        let syms: Vec<&str> = step
+            .hold_until
+            .iter()
+            .chain(&step.wait_until)
+            .chain(&step.asserts)
+            .map(|c| c.sym.as_str())
+            .collect();
+        let probes = with_started(probes, &syms, &symbols).map_err(at)?;
         steps.push(PlanStep {
             label,
             action,
             probes,
             timeout,
         });
-    }
-    // No condition counts before the program has started: until psx-rt's `_start` has cleared
-    // `.bss`, a `.bss` symbol holds leftover bytes (on the scene core, the stored `.boot` and core
-    // image), and a `ge 1` on one could hold before the program ran a line.
-    if let Some(p) = started_probe(&symbols)? {
-        for step in &mut steps {
-            step.probes.push(p.clone());
-        }
     }
     let budget: u64 = steps.iter().map(|s| s.timeout).sum();
     Ok(Plan {
@@ -541,32 +544,42 @@ fn resolve(c: &Cond, symbols: &Symbols) -> Result<Probe, String> {
 /// psx-rt's `__psx_rt_started` once `_start` has cleared `.bss` (psx-rt `STARTED`, `"run_"`).
 pub const PSX_RT_STARTED: u32 = 0x5f6e_7572;
 
-/// The condition every RAM check of a run carries when the program's map has psx-rt's start marker:
-/// `__psx_rt_started` reads [`PSX_RT_STARTED`]. Before `_start` it reads what the EXE stores
-/// (`"pre_"`), so no sample taken before the program started can satisfy a check.
+/// The start condition for a check of symbol `sym`: `__psx_rt_started` reads [`PSX_RT_STARTED`],
+/// at the marker of the map `sym` comes from. Before `_start` the marker reads what the EXE stores
+/// (`"pre_"`), so no sample taken before that program started can satisfy the check.
 ///
-/// `Ok(None)` when no map loaded has the marker (a program without psx-rt's `_start`). Two
-/// addresses for it is an error naming the maps: a run checks one program, so it lists that
-/// program's map only.
+/// Per map, because a run may load several programs one after another (a launcher, then the game
+/// that replaces it; a member disc's two programs), each with its own map and marker: a check of
+/// the launcher's state waits for the launcher's start, a check of the game's for the game's.
+/// `Ok(None)` when the symbol's map has no marker (a program without psx-rt's `_start`, or an
+/// `addr` list).
 ///
 /// # Errors
-/// The marker has more than one address in the maps loaded.
-pub fn started_probe(symbols: &Symbols) -> Result<Option<Probe>, String> {
-    let addr = match symbols.by_name.get("__psx_rt_started").map(Vec::as_slice) {
-        None | Some([]) => return Ok(None),
-        Some([addr]) => *addr,
-        Some(many) => {
+/// `sym` does not resolve (it is ambiguous or missing: [`Symbols::resolve`]), or the maps it comes
+/// from disagree on their marker (the error names them).
+pub fn started_probe(sym: &str, symbols: &Symbols) -> Result<Option<Probe>, String> {
+    let addr = symbols.resolve(sym)?;
+    let maps = symbols.maps_of(sym, addr);
+    let mut markers: Vec<u32> = maps.iter().filter_map(|&m| symbols.markers[m]).collect();
+    markers.sort_unstable();
+    markers.dedup();
+    let marker = match markers.as_slice() {
+        [] => return Ok(None),
+        [one] => *one,
+        _ => {
             return Err(format!(
-                "`__psx_rt_started` has {} addresses in the maps loaded ({}): the start rule \
-                 needs one program's marker; list only the map of the program this run checks",
-                many.len(),
-                symbols.maps.join(", ")
+                "`{sym}` comes from maps with different `__psx_rt_started` markers ({}): the \
+                 start rule cannot tell which program it belongs to",
+                maps.iter()
+                    .map(|&m| symbols.maps[m].as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ))
         }
     };
     Ok(Some(Probe {
         text: "__psx_rt_started eq run_ (the program has started)".into(),
-        addr,
+        addr: marker,
         size: 4,
         signed: false,
         op: "eq".into(),
@@ -575,18 +588,32 @@ pub fn started_probe(symbols: &Symbols) -> Result<Option<Probe>, String> {
     }))
 }
 
-/// `probes` with [`started_probe`] added when the maps have the marker. Every condition set a run
-/// checks against program RAM goes through this (journey steps, `[[speed]]` windows and anchors,
-/// `[[load]]` `from` and `until`, `[cross]` boot `until`), so none can hold on a sample taken
-/// before the program started.
+/// `probes` (the checks of symbols `syms`, in any order) with the start condition of each symbol's
+/// map added, once per marker. Every condition set a run checks against program RAM goes through
+/// this (journey steps, `[[speed]]` windows and anchors, `[[load]]` `from` and `until`, `[cross]`
+/// boot `until`), so none can hold on a sample taken before its program started.
 ///
 /// # Errors
 /// As [`started_probe`].
-pub fn with_started(mut probes: Vec<Probe>, symbols: &Symbols) -> Result<Vec<Probe>, String> {
-    if let Some(p) = started_probe(symbols)? {
-        probes.push(p);
+pub fn with_started<S: AsRef<str>>(
+    mut probes: Vec<Probe>,
+    syms: &[S],
+    symbols: &Symbols,
+) -> Result<Vec<Probe>, String> {
+    for sym in syms {
+        if let Some(p) = started_probe(sym.as_ref(), symbols)? {
+            if !probes.contains(&p) {
+                probes.push(p);
+            }
+        }
     }
     Ok(probes)
+}
+
+/// The `sym` of a condition table (`{ kind = "ram", sym = ... }`), for [`with_started`].
+#[must_use]
+pub fn condition_sym(table: &toml::Table) -> Option<String> {
+    table.get("sym")?.as_str().map(str::to_string)
 }
 
 /// Symbol addresses by name, from lld maps and `address name` lists.
@@ -595,6 +622,10 @@ pub struct Symbols {
     by_name: BTreeMap<String, Vec<u32>>,
     /// The files loaded, in order (named in errors).
     maps: Vec<String>,
+    /// Each name's addresses with the file (index into `maps`) each came from.
+    sources: BTreeMap<String, Vec<(u32, usize)>>,
+    /// Each file's `__psx_rt_started`, if it has one.
+    markers: Vec<Option<u32>>,
 }
 
 impl Symbols {
@@ -607,6 +638,7 @@ impl Symbols {
             )
         })?;
         self.maps.push(path.display().to_string());
+        self.markers.push(None);
         if text.starts_with("             VMA") || text.contains("     VMA      LMA") {
             let map = psoxide_size::map::parse(&text);
             for section in &map.sections {
@@ -637,10 +669,37 @@ impl Symbols {
         if stripped != name {
             self.insert(stripped, addr);
         }
+        let map = self.maps.len().saturating_sub(1);
+        let from = self.sources.entry(name.to_string()).or_default();
+        if !from.contains(&(addr, map)) {
+            from.push((addr, map));
+        }
+        if name == "__psx_rt_started" {
+            if let Some(marker) = self.markers.last_mut() {
+                *marker = Some(addr);
+            }
+        }
         let entry = self.by_name.entry(name.to_string()).or_default();
         if !entry.contains(&addr) {
             entry.push(addr);
         }
+    }
+
+    /// The files `name` at `addr` came from: under its own name, or (as [`Self::resolve`]
+    /// finds it) under a `::name` path suffix.
+    fn maps_of(&self, name: &str, addr: u32) -> Vec<usize> {
+        let suffix = format!("::{name}");
+        let mut maps: Vec<usize> = self
+            .sources
+            .iter()
+            .filter(|(k, _)| *k == name || k.ends_with(&suffix))
+            .flat_map(|(_, v)| v.iter())
+            .filter(|(a, _)| *a == addr)
+            .map(|(_, m)| *m)
+            .collect();
+        maps.sort_unstable();
+        maps.dedup();
+        maps
     }
 
     /// The address of `name`; two different addresses for one name is an error, never a pick.
@@ -754,7 +813,7 @@ press = ["down"]
             &symbols,
         )
         .unwrap();
-        let started = started_probe(&symbols).unwrap().unwrap();
+        let started = started_probe("COUNTER", &symbols).unwrap().unwrap();
         let stored_bytes = 0x6e33_3333;
         assert!(counter.holds(stored_bytes), "the bare check is fooled");
         assert!(
@@ -778,25 +837,55 @@ press = ["down"]
         assert_eq!(plan.steps[0].probes[1], started);
     }
 
-    /// Two program maps (Half-Life's game and intro) give the marker two addresses: an error that
-    /// names both maps, not a run that silently drops the rule.
+    /// A run that loads two programs one after another (a launcher and the game that replaces it,
+    /// Half-Life's intro and game, a member disc's two programs) lists both maps: each check waits
+    /// for the start of the program its own symbol belongs to. Only a check whose own symbol is
+    /// ambiguous (in both maps at different addresses) is refused, with the maps named.
     #[test]
-    fn an_ambiguous_start_marker_is_an_error_naming_the_maps() {
+    fn each_check_waits_for_the_start_of_its_own_program() {
         let dir = tempfile::tempdir().unwrap();
-        let game = write(dir.path(), "game.txt", "80014000 __psx_rt_started\n");
-        let intro = write(dir.path(), "intro.txt", "80018000 __psx_rt_started\n");
-        let mut symbols = Symbols::default();
-        symbols.load(&game).unwrap();
-        assert!(started_probe(&symbols).unwrap().is_some());
-        symbols.load(&intro).unwrap();
-        let error = started_probe(&symbols).unwrap_err();
-        assert!(
-            error.contains("game.txt") && error.contains("intro.txt"),
-            "{error}"
+        let launcher = write(
+            dir.path(),
+            "launcher.txt",
+            "80014000 __psx_rt_started\n80020000 launcher::MENU\n80030000 psx_rt::FLIPS\n",
         );
-        assert!(with_started(Vec::new(), &symbols).is_err());
-        // No marker (a program without psx-rt's start): no rule, no error.
-        assert!(started_probe(&Symbols::default()).unwrap().is_none());
+        let game = write(
+            dir.path(),
+            "game.txt",
+            "80018000 __psx_rt_started\n80024000 game::LEVEL\n80034000 psx_rt::FLIPS\n",
+        );
+        let plain = write(dir.path(), "plain.txt", "80028000 NO_RUNTIME\n");
+        let mut symbols = Symbols::default();
+        for map in [&launcher, &game, &plain] {
+            symbols.load(map).unwrap();
+        }
+        let marker = |sym: &str| started_probe(sym, &symbols).unwrap().map(|p| p.addr);
+        assert_eq!(marker("MENU"), Some(0x8001_4000));
+        assert_eq!(marker("LEVEL"), Some(0x8001_8000));
+        assert_eq!(marker("NO_RUNTIME"), None, "no marker in its map: no rule");
+        let error = started_probe("FLIPS", &symbols).unwrap_err();
+        assert!(error.contains("ambiguous"), "{error}");
+        // One step checking both programs waits for both starts.
+        let probes = with_started(Vec::new(), &["MENU", "LEVEL", "LEVEL"], &symbols).unwrap();
+        let addrs: Vec<u32> = probes.iter().map(|p| p.addr).collect();
+        assert_eq!(addrs, [0x8001_4000, 0x8001_8000]);
+        assert!(with_started(Vec::new(), &["FLIPS"], &symbols).is_err());
+        // A smoke over both maps plans; each step carries its own program's marker.
+        let syms = format!("[\"{}\", \"{}\"]", launcher.display(), game.display());
+        let j = write(
+            dir.path(),
+            "two.toml",
+            &format!(
+                "name = \"two\"\npad = \"dualshock\"\ndisc = \"x.cue\"\nsymbols = {syms}\n\
+                 [[step]]\nwait_until = {{ kind = \"ram\", sym = \"MENU\", op = \"ge\", value = 1 }}\n\
+                 timeout = 10\n\
+                 [[step]]\nwait_until = {{ kind = \"ram\", sym = \"LEVEL\", op = \"ge\", value = 1 }}\n\
+                 timeout = 10\n"
+            ),
+        );
+        let plan = plan(dir.path(), &j, "dualshock", 1).unwrap();
+        assert_eq!(plan.steps[0].probes[1].addr, 0x8001_4000);
+        assert_eq!(plan.steps[1].probes[1].addr, 0x8001_8000);
     }
 
     #[test]

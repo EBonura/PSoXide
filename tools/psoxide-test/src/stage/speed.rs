@@ -628,10 +628,15 @@ fn locate(
     };
     let symbols = super::build::symbols(&ctx.repo, build)
         .ok_or_else(|| format!("build `{}` declares no map", build.name))??;
+    // Neither end of the window counts before its program has started (each end its own map's
+    // marker: a window may open on one program and close on the next).
+    let started_of = |t: &toml::Table| match crate::journey::condition_sym(t) {
+        Some(sym) => crate::journey::started_probe(&sym, &symbols),
+        None => Ok(None),
+    };
+    let started = [started_of(from)?, started_of(until)?];
     let from = crate::journey::condition(from, &symbols)?;
     let until = crate::journey::condition(until, &symbols)?;
-    // Neither end of the window counts before the program has started.
-    let started = crate::journey::started_probe(&symbols)?;
     // Counted from the anchor for an anchored window (0 otherwise).
     let max_polls = max_polls.saturating_add(anchor);
     let mut key = Key::new("speed-locate");
@@ -640,9 +645,14 @@ fn locate(
     if let Some(tape) = &tape {
         key.file("tape", tape)?;
     }
-    for probe in [Some(&from), Some(&until), started.as_ref()]
-        .into_iter()
-        .flatten()
+    for probe in [
+        Some(&from),
+        Some(&until),
+        started[0].as_ref(),
+        started[1].as_ref(),
+    ]
+    .into_iter()
+    .flatten()
     {
         key.part(
             "probe",
@@ -688,11 +698,16 @@ fn locate(
         "--route-log".into(),
         route.display().to_string(),
     ]);
-    let mut words: Vec<u32> = [Some(&from), Some(&until), started.as_ref()]
-        .into_iter()
-        .flatten()
-        .map(|p| p.addr & !3)
-        .collect();
+    let mut words: Vec<u32> = [
+        Some(&from),
+        Some(&until),
+        started[0].as_ref(),
+        started[1].as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|p| p.addr & !3)
+    .collect();
     words.sort_unstable();
     words.dedup();
     for word in &words {
@@ -713,7 +728,12 @@ fn locate(
     }
     let text =
         std::fs::read_to_string(&route).map_err(|e| format!("read {}: {e}", route.display()))?;
-    let found = find_window(&text, &from, &until, started.as_ref(), max_polls)?;
+    let found = find_window(
+        &text,
+        (&from, started[0].as_ref()),
+        (&until, started[1].as_ref()),
+        max_polls,
+    )?;
     if found[0] < anchor {
         return Err(format!(
             "`{}` held at poll {}, before the window's anchor at poll {anchor}",
@@ -757,7 +777,12 @@ fn anchor_poll(
         .map(|c| crate::journey::condition(c, &symbols))
         .collect::<Result<Vec<_>, _>>()?;
     // The anchor never holds before the program has started.
-    let probes = crate::journey::with_started(probes, &symbols)?;
+    let syms: Vec<String> = w
+        .anchor
+        .iter()
+        .filter_map(crate::journey::condition_sym)
+        .collect();
+    let probes = crate::journey::with_started(probes, &syms, &symbols)?;
     let mut key = Key::new("speed-anchor");
     key.part("disc", disc_digest);
     key.file("frontend", frontend)?;
@@ -902,9 +927,8 @@ fn find_anchor(
 /// Read a route log with `ram_XXXXXXXX` columns and return `[from poll, until poll]`.
 fn find_window(
     route: &str,
-    from: &crate::journey::Probe,
-    until: &crate::journey::Probe,
-    started: Option<&crate::journey::Probe>,
+    (from, from_started): (&crate::journey::Probe, Option<&crate::journey::Probe>),
+    (until, until_started): (&crate::journey::Probe, Option<&crate::journey::Probe>),
     max_polls: u32,
 ) -> Result<[u32; 2], String> {
     let mut lines = route.lines();
@@ -922,9 +946,11 @@ fn find_window(
     };
     let (from_at, from_shift) = word(from)?;
     let (until_at, until_shift) = word(until)?;
-    let started = started
-        .map(|p| Ok::<_, String>((p, word(p)?)))
-        .transpose()?;
+    let gate = |p: Option<&crate::journey::Probe>| {
+        p.map(|p| Ok::<_, String>((p.clone(), word(p)?)))
+            .transpose()
+    };
+    let (from_started, until_started) = (gate(from_started)?, gate(until_started)?);
     let mut start: Option<u32> = None;
     for line in lines {
         let fields: Vec<&str> = line.split(',').collect();
@@ -934,15 +960,17 @@ fn find_window(
             continue;
         };
         let polls = u32::try_from(polls).map_err(|_| "poll count out of range")?;
-        // A row before the program started (psx-rt's `__psx_rt_started`) counts for neither end.
-        if let Some((p, (at, shift))) = &started {
-            if !number(*at).is_some_and(|v| p.holds((v as u32) >> shift)) {
-                continue;
-            }
-        }
+        // A row before an end's program started (its map's `__psx_rt_started`) does not count
+        // for that end.
+        let started = |s: &Option<(crate::journey::Probe, (usize, u32))>| {
+            s.as_ref().is_none_or(|(p, (at, shift))| {
+                number(*at).is_some_and(|v| p.holds((v as u32) >> shift))
+            })
+        };
+        let (from_ok, until_ok) = (started(&from_started), started(&until_started));
         match start {
-            None if from.holds((f as u32) >> from_shift) => start = Some(polls),
-            Some(s) if polls > s && until.holds((u as u32) >> until_shift) => {
+            None if from_ok && from.holds((f as u32) >> from_shift) => start = Some(polls),
+            Some(s) if polls > s && until_ok && until.holds((u as u32) >> until_shift) => {
                 return Ok([s, polls]);
             }
             _ => {}
@@ -997,14 +1025,20 @@ mod tests {
                      0,0,0\n1,1,0\n2,2,5\n3,2,6\n4,3,9\n5,4,12\n";
         let from = probe(0x8000_1000, 4, "ge", 5);
         let until = probe(0x8000_1000, 4, "ge", 9);
-        assert_eq!(find_window(route, &from, &until, None, 10).unwrap(), [2, 3]);
+        assert_eq!(
+            find_window(route, (&from, None), (&until, None), 10).unwrap(),
+            [2, 3]
+        );
         // A byte inside the word: bits 8..15.
         let route = "route_tick,port1_polls,ram_80001000\n0,0,0\n1,1,256\n2,2,512\n";
         let from = probe(0x8000_1001, 1, "eq", 1);
         let until = probe(0x8000_1001, 1, "eq", 2);
-        assert_eq!(find_window(route, &from, &until, None, 10).unwrap(), [1, 2]);
+        assert_eq!(
+            find_window(route, (&from, None), (&until, None), 10).unwrap(),
+            [1, 2]
+        );
         let never = probe(0x8000_1001, 1, "eq", 7);
-        assert!(find_window(route, &from, &never, None, 10)
+        assert!(find_window(route, (&from, None), (&never, None), 10)
             .unwrap_err()
             .contains("never held after"));
     }
@@ -1018,7 +1052,10 @@ mod tests {
         let from = probe(0x8000_1000, 4, "ge", 5);
         let until = probe(0x8000_1000, 4, "ge", 9);
         // Without the rule the stored bytes at tick 0 open the window.
-        assert_eq!(find_window(route, &from, &until, None, 10).unwrap(), [0, 3]);
+        assert_eq!(
+            find_window(route, (&from, None), (&until, None), 10).unwrap(),
+            [0, 3]
+        );
         let started = probe(
             0x8000_2000,
             4,
@@ -1026,7 +1063,7 @@ mod tests {
             i64::from(crate::journey::PSX_RT_STARTED),
         );
         assert_eq!(
-            find_window(route, &from, &until, Some(&started), 10).unwrap(),
+            find_window(route, (&from, Some(&started)), (&until, Some(&started)), 10).unwrap(),
             [2, 3]
         );
     }

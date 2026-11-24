@@ -90,6 +90,32 @@ for elf in "$OUT"/ovl/*.elf "$OUT"/ovl/*/*.elf "$OUT"/mod/*.elf; do
 done
 [ "$seen" -gt 0 ] || v=FAIL
 printf 'core-store-lma\t%s\t%s core ELFs\n' $v "$seen" >>"$OUT/results.tsv"
+# The harness start rule over a program switch: a smoke that lists both of hello-modular's maps
+# (P, then Q, which P switches to) plans each check with the `__psx_rt_started` of its own
+# program's map; a check of a symbol in both maps at different addresses is refused by name.
+cargo build --locked --release --manifest-path tools/psoxide-test/Cargo.toml \
+    --target-dir "$HOST_TARGET" 2>&1 | tail -1
+smoke() { # name sym...
+    n=$1
+    shift
+    {
+        printf 'name = "%s"\npad = "dualshock"\ndisc = "member.cue"\nsymbols = ["p.map", "q.map"]\n' "$n"
+        for s in "$@"; do
+            printf '[[step]]\nwait_until = { kind = "ram", sym = "%s", op = "ne", value = 0 }\ntimeout = 10\n' "$s"
+        done
+    } >"$OUT/mod/$n.toml"
+    "$HOST_BIN/psoxide-test" adapter plan "$OUT/mod" "$n.toml" dualshock
+}
+marker() { awk '$NF == "__psx_rt_started" { print $1; exit }' "$OUT/mod/$1.map"; }
+plan=$(smoke two-programs hello_modular::p::SVC_SIGNATURE hello_modular::q::HOSTED_SIGNATURE 2>&1 |
+    tr -d ' \n')
+p=$((0x$(marker p)))
+q=$((0x$(marker q)))
+v=FAIL
+case $plan in *"\"addr\":$p"*"\"addr\":$q"*) [ "$p" != "$q" ] && v=PASS ;; esac
+amb=$(smoke both-maps hello_modular::PADS 2>&1 || true)
+case $amb in *ambiguous*) ;; *) v=FAIL ;; esac
+printf 'start-rule-two-programs\t%s\tP marker %x, Q marker %x\n' $v "$p" "$q" >>"$OUT/results.tsv"
 # A program whose code never names psx_core (hello-tri) linked with the core script: refused with
 # the line to add, not lld's bare "symbol not found: __core_boot".
 v=FAIL

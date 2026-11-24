@@ -255,8 +255,13 @@ fn boot_plan(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("[cross] boot until: {e}"))?;
     // The game's state never counts before the program has started.
-    let probes =
-        journey::with_started(probes, &symbols).map_err(|e| format!("[cross] boot until: {e}"))?;
+    let syms: Vec<String> = boot
+        .until
+        .iter()
+        .filter_map(journey::condition_sym)
+        .collect();
+    let probes = journey::with_started(probes, &syms, &symbols)
+        .map_err(|e| format!("[cross] boot until: {e}"))?;
     plan.steps = vec![
         journey::PlanStep {
             label: "boot until the game's own state".into(),

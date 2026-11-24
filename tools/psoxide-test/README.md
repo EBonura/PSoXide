@@ -55,8 +55,11 @@ read in those first instructions can hold before the program has run a line. psx
 its own when the build's map has the symbol (`journey::with_started`): every journey step
 (`journey::plan`, the `[cross]` smokes), `[[speed]]` window ends and anchors, `[[load]]` `from` (a
 non-empty one; an empty `from` is power-on) and `until`, and `[cross]` boot `until`. So no sample taken
-before the start can satisfy one. A run whose maps give the marker two addresses (two program maps
-listed for one run) is refused with the maps named: list the map of the program the run checks.
+before the start can satisfy one. The marker is per map: a run that lists several programs' maps (a
+launcher and the game that replaces it, an intro and its game, a member disc's two programs) checks each
+condition against the marker of the map its own symbol comes from, so a check of the game waits for the
+game's start. Only a condition whose own symbol is ambiguous (in two maps at different addresses) is
+refused, as any ambiguous symbol is.
 
 Not covered here: `[journeys]` handed to the PSoXide emulator's `psoxide-gate` (its own runner; the
 change it needs is an emulator-repo item), and any tool of a game that reads a route log or RAM itself

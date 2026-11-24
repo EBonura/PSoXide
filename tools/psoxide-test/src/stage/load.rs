@@ -120,12 +120,15 @@ fn measure(ctx: &Ctx<'_>, l: &Load, frontend: &Path) -> Result<(LoadBase, bool),
     // Neither end counts before the program has started (an empty `from` is power-on, and
     // stays so).
     let from = resolve(&l.from)?;
+    let syms = |c: &[toml::Table]| -> Vec<String> {
+        c.iter().filter_map(crate::journey::condition_sym).collect()
+    };
     let from = if from.is_empty() {
         from
     } else {
-        crate::journey::with_started(from, &symbols)?
+        crate::journey::with_started(from, &syms(&l.from), &symbols)?
     };
-    let until = crate::journey::with_started(resolve(&l.until)?, &symbols)?;
+    let until = crate::journey::with_started(resolve(&l.until)?, &syms(&l.until), &symbols)?;
     let disc = build.cue(&ctx.repo);
     let disc_digest = ctx
         .artifacts
