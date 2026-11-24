@@ -88,6 +88,10 @@ pub fn from_elf(bytes: &[u8]) -> Result<Vec<u8>, String> {
         image[from..from + data.len()].copy_from_slice(data);
     }
     check_header(&image, base)?;
+    // The file is as long as its header says: a loader or disc tool that checks sizes (mkdisc)
+    // refuses a short one, and a build that skips hazard-patch's padding (Celeste's Makefile)
+    // wrote one 624 B short.
+    crate::listing::pad_to_payload(&mut image).map_err(|e| format!("{e:?}"))?;
     Ok(image)
 }
 
@@ -339,14 +343,19 @@ mod tests {
     fn boot_is_written_after_data_at_its_load_address() {
         let image = from_elf(&elf(&boot_program(0x800))).unwrap();
         let at = |address: u32| (address - HEAD) as usize;
+        // .boot's last byte, then zeros to the size the header declares.
         assert_eq!(
             image.len(),
-            at(DATA_END) + 12,
-            "the file ends with .boot's last byte"
+            0x800 + 0x800,
+            "the file is as long as its header says"
         );
+        assert!(image[at(DATA_END) + 12..].iter().all(|&b| b == 0));
         assert_eq!(&image[at(TEXT)..at(TEXT) + 16], &fill(0x1111_1111, 4)[..]);
         assert_eq!(&image[at(DATA)..at(DATA_END)], &fill(0x2222_2222, 6)[..]);
-        assert_eq!(&image[at(DATA_END)..], &fill(0x3333_3333, 3)[..]);
+        assert_eq!(
+            &image[at(DATA_END)..at(DATA_END) + 12],
+            &fill(0x3333_3333, 3)[..]
+        );
         assert_eq!(word(&image, 0x18), TEXT);
         assert_eq!(
             word(&image, 0x1c),
@@ -424,7 +433,12 @@ mod tests {
         let mut parts = boot_program(0x800);
         parts.pop();
         let image = from_elf(&elf(&parts)).unwrap();
-        assert_eq!(image.len(), (DATA_END - HEAD) as usize);
+        // The run layout, then zeros to the header's size (Celeste's EXE was 624 B short of it
+        // when its build wrote the file with psx-exe and skipped hazard-patch's padding).
+        let stored = (DATA_END - HEAD) as usize;
+        assert_eq!(image.len(), 0x800 + 0x800);
+        assert!(stored < image.len());
+        assert!(image[stored..].iter().all(|&b| b == 0));
     }
 
     #[test]
