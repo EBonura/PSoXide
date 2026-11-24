@@ -69,6 +69,24 @@ sh sdk/examples/hello-core-overlay/build.sh "$OUT/ovl" >"$OUT/build-ovl.log" 2>&
 SOAK=$SOAK sh sdk/examples/hello-modular/build.sh "$OUT/mod" >"$OUT/build-mod.log" 2>&1 || failed mod
 sh sdk/examples/hello-boot/build.sh "$OUT/boot" >"$OUT/build-boot.log" 2>&1 || failed boot
 grep -h -E "refused, as it must be|links the same EXE" "$OUT"/build-*.log | sort | uniq -c
+# Every core program's ELF: __core_boot copies the window from __psx_core_store_lma, which must be
+# where the core is stored (__psx_core_store_at). An empty boot region linked it 0 in Quake's
+# journey build (11-24: fatal 0x01 at boot); the empty-.boot builds here are hostboot-empty and own.
+NM=$(find "$(rustc --print sysroot)/lib/rustlib" -name llvm-nm -type f | head -1)
+v=PASS
+seen=0
+for elf in "$OUT"/ovl/*.elf "$OUT"/ovl/*/*.elf "$OUT"/mod/*.elf; do
+    [ -f "$elf" ] || continue
+    at=$("$NM" "$elf" | awk '$3 == "__psx_core_store_at" { print $1 }')
+    lma=$("$NM" "$elf" | awk '$3 == "__psx_core_store_lma" { print $1 }')
+    seen=$((seen + 1))
+    if [ -z "$at" ] || [ "$at" != "$lma" ]; then
+        v=FAIL
+        echo "scene-core-gate: $elf: __psx_core_store_lma ${lma:-missing}, stored at ${at:-missing}" >&2
+    fi
+done
+[ "$seen" -gt 0 ] || v=FAIL
+printf 'core-store-lma\t%s\t%s core ELFs\n' $v "$seen" >>"$OUT/results.tsv"
 # A program whose code never names psx_core (hello-tri) linked with the core script: refused with
 # the line to add, not lld's bare "symbol not found: __core_boot".
 v=FAIL

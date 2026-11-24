@@ -32,7 +32,11 @@ SECTIONS {
         . = ALIGN(4);
         __psx_core_store_end = .;
     } > RELOCATED
-    __psx_core_store_lma = LOADADDR(.psx_core_store);
+    /* The section's AT() address itself, not LOADADDR(): with INSERT, lld can evaluate this line
+       before the section has a load address, and a core program whose boot region is empty
+       (Quake's journey build) linked __psx_core_store_lma = 0, so __core_boot copied the window
+       from address 0 and stopped on fatal 0x01. */
+    __psx_core_store_lma = __psx_core_store_at;
     __psx_core_store_load_end = __psx_core_store_lma + SIZEOF(.psx_core_store);
 }
 /* As psoxide-boot.ld: INSERT must directly follow SECTIONS's closing brace. */
