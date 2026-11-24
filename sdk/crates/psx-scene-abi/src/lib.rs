@@ -160,9 +160,9 @@ pub mod slot {
 /// program's own code: they run on top of the slot's frames, so their depth adds to the slot's.
 /// The switch runs its load on a stack of its own at `STACK_INIT` (see `SWITCH_STACK`), so
 /// [`stack::SWITCH`] is only what it uses on the caller's stack before that.
+///
+/// The figures were measured on the core image of CORE_HASH 2dd28a19 (11-24).
 pub mod stack {
-    //! Measured on the core image of CORE_HASH 2dd28a19 (depth.sh over its disassembly and map,
-    //! 11-24): each slot's deepest frame chain below the caller's `$sp`, its hooks apart.
     /// `__psx_core_attach` (called by `__core_boot` only).
     pub const ATTACH: u32 = 72;
     /// `psx_core_switch`, on the caller's stack, before it moves to the switch stack.
