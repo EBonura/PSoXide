@@ -50,7 +50,7 @@ pub const CORE_HASH: u32 = fnv::of_bytes(IMAGE_BYTES);
 /// Bytes of the image.
 pub const CORE_BYTES: u32 = LEN as u32;
 
-const _: () = assert!(LEN % 4 == 0, "the core image is whole words");
+const _: () = assert!(LEN.is_multiple_of(4), "the core image is whole words");
 const _: () = assert!(
     CORE_HASH != 0,
     "the core takes a zero hash for no live core"
