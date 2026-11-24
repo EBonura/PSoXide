@@ -538,7 +538,6 @@ fn resolve(c: &Cond, symbols: &Symbols) -> Result<Probe, String> {
     })
 }
 
-/// Symbol addresses by name, from lld maps and `address name` lists.
 /// psx-rt's `__psx_rt_started` once `_start` has cleared `.bss` (psx-rt `STARTED`, `"run_"`).
 pub const PSX_RT_STARTED: u32 = 0x5f6e_7572;
 
@@ -590,6 +589,7 @@ pub fn with_started(mut probes: Vec<Probe>, symbols: &Symbols) -> Result<Vec<Pro
     Ok(probes)
 }
 
+/// Symbol addresses by name, from lld maps and `address name` lists.
 #[derive(Default, Debug)]
 pub struct Symbols {
     by_name: BTreeMap<String, Vec<u32>>,
