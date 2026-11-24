@@ -215,11 +215,21 @@ SECTIONS {
     ASSERT(__image_end - __load_end < EXE_HEAD_BYTES, "the stored image may reach past the data by under one sector")
     ASSERT(__load_end <= __heap_end, "the stored image reaches into the stack reserve")
 
-    /* Discard MIPS ABI glue not needed on bare metal. */
+    /* The symbol tables the link writes (non-allocated: in the ELF beside an EXE, for the
+       tools), placed by name so the link can refuse every unplaced section
+       (`--orphan-handling=error`). */
+    .symtab 0 : { *(.symtab) }
+    .strtab 0 : { *(.strtab) }
+    .shstrtab 0 : { *(.shstrtab) }
+
+    /* Discard MIPS ABI glue not needed on bare metal, and the MIPS debug records (procedure
+       descriptors and the ABI marker) nothing reads. */
     /DISCARD/ : {
         *(.region); /* Discard legacy vendor markers from older object files. */
         *(.MIPS.abiflags)
         *(.reginfo)
+        *(.pdr)
+        *(.mdebug.*)
         *(.eh_frame_hdr)
         *(.eh_frame)
         *(.comment)
