@@ -386,6 +386,24 @@ fn package_sources(package: &Value) -> Vec<PathBuf> {
     files
 }
 
+/// The SDK checkout the program links, from where its `psx-rt` lives: the nearest directory above
+/// it that holds `sdk/profile.toml`. A tool's own SDK (the one it was built from) can be another
+/// checkout: a copied or APFS-cloned game repository carries its hydrated `.psoxide` SDK with the
+/// tools built in the original, whose compile-time root then names the original's files, and
+/// every SDK crate of the clone read as game code.
+fn linked_sdk(metadata: &Value) -> Option<PathBuf> {
+    let runtime = metadata["packages"]
+        .as_array()?
+        .iter()
+        .find(|p| p["name"] == "psx-rt" && p["source"].is_null())?;
+    let manifest = Path::new(runtime["manifest_path"].as_str()?);
+    manifest
+        .ancestors()
+        .skip(1)
+        .find(|dir| dir.join("sdk").join("profile.toml").is_file())
+        .map(Path::to_path_buf)
+}
+
 fn is_sdk_name(name: &str) -> bool {
     name.starts_with("psx-") || name.starts_with("psxed") || name.starts_with("psoxide")
 }
@@ -457,6 +475,7 @@ pub fn check(
     // one repository (a `shared/` directory) has one name in all of them.
     let repo_dir = git_toplevel(workspace_dir).unwrap_or_else(|| workspace_dir.to_path_buf());
     let workspace_root = repo_dir.as_path();
+    let sdk_root = linked_sdk(metadata).unwrap_or_else(|| sdk_root.to_path_buf());
     let sdk_root = sdk_root
         .canonicalize()
         .unwrap_or_else(|_| sdk_root.to_path_buf());
@@ -863,13 +882,16 @@ pub fn run_with(
     program_file: Option<&Path>,
     gpu_words: bool,
 ) -> Result<Outcome, String> {
-    let mut profile = Profile::read(&sdk.join("sdk").join("profile.toml"))?;
-    profile.gpu_words = gpu_words;
     let value: Value = match metadata {
         Some(file) => serde_json::from_slice(&fs::read(file).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?,
         None => cargo_metadata(crate_dir, cargo_args)?,
     };
+    // The SDK the program links, which may not be the one this tool was built from.
+    let linked = linked_sdk(&value);
+    let sdk = linked.as_deref().unwrap_or(sdk);
+    let mut profile = Profile::read(&sdk.join("sdk").join("profile.toml"))?;
+    profile.gpu_words = gpu_words;
     let mut named = package.map(str::to_string);
     if named.is_none() {
         named = cargo_package(cargo_args);
@@ -1107,6 +1129,44 @@ mod tests {
             .iter()
             .filter(|l| register_hit(l))
             .count()
+    }
+
+    /// A cloned game repository: its tools were built in another checkout, so the SDK root they
+    /// are given names that checkout, not the SDK the clone links. The SDK crates are still SDK
+    /// crates (psx-rt's register literal is not the program's), found by where psx-rt lives.
+    #[test]
+    fn the_sdk_is_the_one_the_program_links_not_the_tools_checkout() {
+        let f = fixture("clone", NOTHING, &["runtime"], &[]);
+        fs::write(f.dir.join("sdk-root/sdk/profile.toml"), "").unwrap();
+        let elsewhere = f.dir.join("original-clone");
+        fs::create_dir_all(&elsewhere).unwrap();
+        let own = Profile::parse_program_file(NOTHING, Path::new("psx-gate.toml")).unwrap();
+        let outcome = check(
+            &f.metadata,
+            None,
+            None,
+            &elsewhere,
+            &profile(NOTHING),
+            Some(&own),
+        )
+        .unwrap();
+        assert!(outcome.violations.is_empty(), "{:?}", outcome.violations);
+        assert_eq!(
+            linked_sdk(&f.metadata).map(|p| p.canonicalize().unwrap()),
+            Some(f.dir.join("sdk-root").canonicalize().unwrap())
+        );
+        // Without a profile above psx-rt nothing is found and the given root stands.
+        fs::remove_file(f.dir.join("sdk-root/sdk/profile.toml")).unwrap();
+        let outcome = check(
+            &f.metadata,
+            None,
+            None,
+            &elsewhere,
+            &profile(NOTHING),
+            Some(&own),
+        )
+        .unwrap();
+        assert!(!outcome.violations.is_empty());
     }
 
     #[test]
