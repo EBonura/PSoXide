@@ -119,6 +119,60 @@ pub mod table {
     pub const HEADER_WORDS: u32 = (s::HEADER_BYTES / 4) as u32;
     /// Words of a row.
     pub const ROW_WORDS: u32 = (s::ROW_BYTES / 4) as u32;
+
+    /// Where overlay `image`'s tail lands (a manifest `tail=n`: the sectors its row loads after
+    /// its own bytes), as `(address, bytes)` from the program's copy of the table. `own_bytes` is
+    /// the overlay file's size (`__overlay_N_bytes`); its sector-padded end is where the tail
+    /// starts. `None` when the copy holds no such image or its row loads nothing past the overlay.
+    #[must_use]
+    pub fn tail(table: &[u32], image: u32, own_bytes: u32) -> Option<(u32, u32)> {
+        let head = *table.get(2)?;
+        if table.first() != Some(&MAGIC[0]) || image >= head >> 16 {
+            return None;
+        }
+        let at = HEADER_WORDS + ROW_WORDS * ((*table.get(3)? & 0xffff) + image);
+        let row = table.get(at as usize..(at + ROW_WORDS) as usize)?;
+        let own = own_bytes.checked_next_multiple_of(SECTOR_BYTES)?;
+        match row[I_SIZE].checked_sub(own) {
+            Some(bytes) if bytes != 0 && row[I_KIND] & 0xff == KIND_OVERLAY => {
+                Some((row[I_ADDR].wrapping_add(own), bytes))
+            }
+            _ => None,
+        }
+    }
+
+    /// Bytes of a sector.
+    const SECTOR_BYTES: u32 = s::SECTOR_BYTES as u32;
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn table(size: u32, kind: u32) -> [u32; 40] {
+            let mut t = [0u32; 40];
+            t[0] = MAGIC[0];
+            t[1] = MAGIC[1];
+            t[2] = VERSION | 2 << 16; // two images
+            t[3] = 1; // one scene
+            let row = (HEADER_WORDS + ROW_WORDS * 2) as usize; // image 1
+            t[row + I_SIZE] = size;
+            t[row + I_ADDR] = 0x8010_0000;
+            t[row + I_KIND] = kind;
+            t
+        }
+
+        #[test]
+        fn a_tail_starts_at_the_overlays_padded_end() {
+            let t = table(4 * 2048, KIND_OVERLAY);
+            assert_eq!(tail(&t, 1, 5000), Some((0x8010_1800, 2048)));
+            assert_eq!(tail(&t, 1, 6144), Some((0x8010_1800, 2048)));
+            assert_eq!(tail(&t, 1, 6145), None, "no sector past the overlay");
+            assert_eq!(tail(&t, 2, 5000), None, "no such image");
+            assert_eq!(tail(&table(4 * 2048, KIND_PROGRAM), 1, 5000), None);
+            assert_eq!(tail(&[0; 4], 1, 0), None, "table not read");
+            assert_eq!(tail(&t[..20], 1, 5000), None, "copy too short");
+        }
+    }
 }
 
 /// `$a0` of a program entered with disc bases (psx-io's `disc_base::HANDOFF_MAGIC`).

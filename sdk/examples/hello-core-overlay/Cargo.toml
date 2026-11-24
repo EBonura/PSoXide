@@ -19,3 +19,8 @@ lto = true
 [dependencies]
 psx-core = { path = "../../crates/psx-core", features = ["link"] }
 psx-rt   = { path = "../../crates/psx-rt", features = ["host-tty"] }
+
+[features]
+# The overlay runs over a static host buffer (`.bss.overlay_host`) instead of at OVERLAY_VMA:
+# link with ram-host.ld.
+host = []

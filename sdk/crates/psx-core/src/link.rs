@@ -226,6 +226,22 @@ pub fn load_image(image: u32, table: &mut [u32]) -> u32 {
     unsafe { psx_core_load_image(image, table.as_ptr()) }
 }
 
+/// The tail of overlay `image` as the last [`load_image`] left it: the sectors that follow the
+/// overlay on the disc (a manifest `tail=n`, `WORLD.PAK`'s first n sectors), read in the same read
+/// right after the overlay's sector-padded bytes and checked with them. A program takes the pack
+/// header from here instead of reading it after the core's stop, which would cost the drive a
+/// restart for sectors it read past anyway. `own_bytes` is the overlay file's size
+/// (psoxide-overlay.ld's `__overlay_N_bytes`). `None` when the disc gave the overlay no tail.
+///
+/// The words stay valid until the program writes over the overlay's range (they are part of it).
+#[must_use]
+pub fn image_tail(image: u32, own_bytes: u32, table: &[u32]) -> Option<&'static [u32]> {
+    let (addr, bytes) = abi::table::tail(table, image, own_bytes)?;
+    // SAFETY: the row's load range, inside the owner's reserve (mkisopsx checks it) and filled by
+    // the core's load; word-aligned (an overlay loads at a word-aligned address in whole sectors).
+    Some(unsafe { core::slice::from_raw_parts(addr as *const u32, (bytes / 4) as usize) })
+}
+
 /// `table` holds the disc's scene table: read now unless it already does (its first word is the
 /// magic only once [`read_table`] has filled it).
 fn table_ready(table: &mut [u32]) -> u32 {

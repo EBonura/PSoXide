@@ -221,6 +221,57 @@ fn an_image_placed_before_the_world_pack_ends_right_where_it_starts() {
     );
 }
 
+#[test]
+fn a_tail_is_the_world_packs_first_sectors_loaded_and_checked_with_the_overlay() {
+    let mut plan = overlay_plan();
+    plan.images[4].placement = Placement::BeforeWorld; // SWAPB.OVL, 4 sectors at 0x80110000
+    plan.images[4].tail = 1;
+    let (disc, pressed) = press(small_exe(), &plan, true).unwrap();
+    let world = disc.find_file(WORLD_PACK_FILE_NAME).unwrap();
+    let row = pressed.images[4];
+    assert_eq!(row.lba, world.lba - 4);
+    assert_eq!(row.size, 5 * SECTOR_BYTES as u32, "the overlay's own sectors and the tail");
+    // The checksum is the core's over everything it reads: the overlay, then the pack's header.
+    let mut read = Vec::new();
+    for lba in row.lba..row.lba + 5 {
+        read.extend_from_slice(&disc.read_sector_user(lba).unwrap()[..SECTOR_BYTES]);
+    }
+    assert_eq!(&read[4 * SECTOR_BYTES..4 * SECTOR_BYTES + 8], b"PSOXWPAK");
+    assert_eq!(row.checksum, psx_pack::WordFnv32::of(&words(&read)));
+    // Without the tail the row is the overlay alone.
+    plan.images[4].tail = 0;
+    let (_, plain) = press(small_exe(), &plan, true).unwrap();
+    assert_eq!(plain.images[4].size, 4 * SECTOR_BYTES as u32);
+
+    // The tail counts for the reserve: a reserve ending at the overlay's own end refuses it.
+    let mut plan = overlay_plan();
+    plan.images[0].reserve = Some(Span {
+        start: 0x8010_0000,
+        end: 0x8011_2000,
+    });
+    plan.images[4].placement = Placement::BeforeWorld;
+    assert!(press(small_exe(), &plan, true).is_ok());
+    plan.images[4].tail = 1;
+    assert!(matches!(
+        press(small_exe(), &plan, true).err().unwrap(),
+        SceneDiscError::OutsideReserve { .. }
+    ));
+    // Only the image ending at the pack, only with a pack.
+    let tail = |at: usize, place: &[usize], world: bool| {
+        let mut plan = overlay_plan();
+        for &i in place {
+            plan.images[i].placement = Placement::BeforeWorld;
+        }
+        plan.images[at].tail = 1;
+        press(small_exe(), &plan, world).err()
+    };
+    let refused = |name: &str| Some(SceneDiscError::Tail(name.into()));
+    assert_eq!(tail(4, &[], true), refused("SWAPB.OVL"));
+    assert_eq!(tail(1, &[1, 4], true), refused("SET.OVL"));
+    assert_eq!(tail(4, &[4], false), refused("SWAPB.OVL"));
+    assert_eq!(tail(4, &[1, 4], true), None);
+}
+
 /// A program image the way psoxide-core.ld stores it: `data` bytes of text
 /// and data, then the core copy, then zeros to whole sectors.
 fn with_core(data: usize, core: &[u8]) -> Vec<u8> {
@@ -236,7 +287,6 @@ fn core_image() -> Vec<u8> {
         .collect()
 }
 
-#[test]
 #[test]
 fn a_boot_program_off_the_core_says_so_with_core_hash_0() {
     // A disc whose boot program does not link the core (an intro that chain-loads the game, say)
@@ -275,6 +325,40 @@ fn a_boot_program_off_the_core_says_so_with_core_hash_0() {
     assert_eq!(pressed.images[0].core_hash, 0);
 }
 
+#[test]
+fn an_overlay_may_load_from_its_owners_stored_core_on() {
+    // psoxide-overlay.ld's host buffer starts where the owner's stored core does (right after its
+    // .data): inside the last sector a switch loads, which is dead once the program runs.
+    let core = core_image();
+    let at = |load_addr: u32| {
+        let mut plan = boot_plan();
+        plan.core_image = Some(core.clone());
+        plan.images[0].reserve = Some(Span {
+            start: BASE,
+            end: BASE + 0x10000,
+        });
+        plan.images.push(ImageSpec::overlay(
+            "MENU.OVL",
+            payload(1, 3),
+            BOOT_EXE_NAME,
+            load_addr,
+            Class::Volatile,
+        ));
+        press(exe(BASE, BASE, 0, &with_core(3_000, &core)), &plan, false)
+    };
+    let (_, pressed) = at(BASE + 3_000).unwrap();
+    assert_eq!(pressed.images[0].size, 2 * SECTOR_BYTES as u32, "the switch still loads both");
+    assert_eq!(pressed.images[1].evicts, 1 << 1, "the owner stays loaded");
+    assert_eq!(
+        at(BASE + 2_996).err().unwrap(),
+        SceneDiscError::Overlap {
+            a: BOOT_EXE_NAME.into(),
+            b: "MENU.OVL".into()
+        }
+    );
+}
+
+#[test]
 fn programs_carry_the_core_hash_and_stop_before_the_stored_core() {
     let core = core_image();
     let hash = psx_pack::WordFnv32::of(&words(&core));

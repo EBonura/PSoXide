@@ -12,8 +12,9 @@
 //! 1. The loader (our emulator or the real BIOS) copies the EXE
 //!    payload to `LOAD_ADDR` and jumps to [`_start`].
 //! 2. [`_start`] zeroes the `.bss` section using the linker-defined
-//!    `__bss_start` / `__bss_end` symbols. `.bss` starts where `.data`
-//!    ends, so the zero bytes that round the stored image up to whole
+//!    `__zero_start` / `__bss_end` symbols (`__zero_start` is `__bss_start`, or
+//!    the start of an overlay host buffer in front of `.bss`, psoxide-overlay.ld).
+//!    `.bss` starts where `.data` ends, so the zero bytes that round the stored image up to whole
 //!    sectors (`hazard-patch` appends them) land over its first bytes and
 //!    are cleared with it; nothing may read `.bss` before this.
 //! 3. With the `alloc` feature, the bump allocator is seeded from
@@ -137,7 +138,7 @@ include!(concat!(env!("OUT_DIR"), "/hazard_trampoline_words.rs"));
 
 // Symbols emitted by `psoxide.ld`.
 extern "C" {
-    static mut __bss_start: u8;
+    static mut __zero_start: u8;
     static mut __bss_end: u8;
     #[cfg(feature = "alloc")]
     static __heap_start: u8;
@@ -176,14 +177,15 @@ pub unsafe extern "C" fn _start(a0: u32, a1: u32, a2: u32) -> ! {
     #[cfg(feature = "boot-trace")]
     tty::println("psx-rt: start");
 
-    // Zero BSS.
-    let bss_start = &raw mut __bss_start;
+    // Zero BSS (and a host buffer in front of it, psoxide-overlay.ld).
+    let bss_start = &raw mut __zero_start;
     let bss_end = &raw const __bss_end;
     let bss_len = bss_end as usize - bss_start as usize;
     if bss_len > 0 {
-        // SAFETY: [__bss_start, __bss_end) is this image's .bss as psoxide.ld lays it out: writable
-        // RAM the program owns. No Rust code has run yet, so nothing reads or references it, and
-        // zero is each .bss static's initial value.
+        // SAFETY: [__zero_start, __bss_end) is this image's .bss as psoxide.ld lays it out (from
+        // a host buffer's start when its overlays run there): writable RAM the program owns. No
+        // Rust code has run yet, so nothing reads or references it, and zero is each .bss
+        // static's initial value (an overlay is in RAM only after its first load).
         unsafe { core::ptr::write_bytes(bss_start, 0, bss_len) };
     }
     #[cfg(feature = "boot-trace")]
