@@ -103,6 +103,22 @@ pub struct ImageSpec {
     pub load_addr: u32,
     /// Overlay: how it is kept.
     pub class: Option<Class>,
+    /// Where its file goes on the disc.
+    pub placement: Placement,
+}
+
+/// Where an image's file goes on a scene disc.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Placement {
+    /// In image order: contiguous with the boot exe while it fits the boot area, else after the
+    /// packs.
+    #[default]
+    InOrder,
+    /// At the end of the boot area, right before `WORLD.PAK` (LBA 1024): for an image whose
+    /// owner reads the pack's header right after it, so the two reads cost one seek and a
+    /// short hop, not two long seeks (Half-Life's title menu overlay, read before the menu art).
+    /// Images placed so keep their image order among themselves; the boot area must hold them.
+    BeforeWorld,
 }
 
 impl ImageSpec {
@@ -118,6 +134,7 @@ impl ImageSpec {
             owner: None,
             load_addr: 0,
             class: None,
+            placement: Placement::InOrder,
         }
     }
 
@@ -256,9 +273,20 @@ pub enum SceneDiscError {
     /// A Program does not end with the core image's bytes (only sector padding may follow its
     /// stored copy).
     CoreMissing(String),
-    /// An Overlay's owner is not a Program, it has no class, its owner has no reserve, or a
-    /// Program carries Overlay fields.
+    /// An Overlay's owner is not a Program, it has no class, or a Program carries Overlay fields.
     Overlay(String),
+    /// An Overlay's owner has no reserve: add `reserve=<lo>-<hi>` to the owner's `program` line
+    /// (the RAM its overlays load into; for an overlay linked by psoxide-overlay.ld, a range
+    /// holding OVERLAY_VMA and the overlay's size).
+    NoReserve {
+        /// The Overlay.
+        overlay: String,
+        /// Its owner, which needs `reserve=`.
+        owner: String,
+    },
+    /// An image placed before `WORLD.PAK` ([`Placement::BeforeWorld`]) does not fit what the
+    /// boot area has left after the boot exe.
+    BeforeWorld(String),
     /// An Overlay loads outside its owner's reserved RAM.
     OutsideReserve {
         /// The Overlay.
@@ -495,8 +523,22 @@ pub fn add_scene_disc_files(
     // Images in table order: contiguous with the boot exe while they fit, the
     // rest after the packs, so a boot that loads them in order reads on.
     let mut room = cdtest_start - next_after_exe;
+    // Images placed right before the packs take the end of the boot area first.
+    let before_world: Vec<usize> = (1..images.len())
+        .filter(|&index| images[index].placement == Placement::BeforeWorld)
+        .collect();
+    for &index in &before_world {
+        let sectors = sectors_of(files[index].len());
+        if sectors > room {
+            return Err(SceneDiscError::BeforeWorld(images[index].name.clone()));
+        }
+        room -= sectors;
+    }
     let mut later = Vec::new();
     for index in 1..images.len() {
+        if images[index].placement == Placement::BeforeWorld {
+            continue;
+        }
         let sectors = sectors_of(files[index].len());
         if later.is_empty() && sectors <= room {
             builder.add_file(&images[index].name, files[index].clone());
@@ -506,6 +548,9 @@ pub fn add_scene_disc_files(
         }
     }
     builder.add_padding_sectors(room);
+    for &index in &before_world {
+        builder.add_file(&images[index].name, files[index].clone());
+    }
     if let Some(sectors) = cdtest_sectors {
         builder.add_file(CD_STREAM_BENCH_FILE_NAME, cd_stream_bench_payload(sectors));
     }
@@ -564,7 +609,12 @@ pub fn add_scene_disc_files(
         if owner_spec.kind != Kind::Program || image.core_hash.is_some() {
             return Err(bad());
         }
-        let reserve = owner_spec.reserve.ok_or_else(bad)?;
+        let reserve = owner_spec
+            .reserve
+            .ok_or_else(|| SceneDiscError::NoReserve {
+                overlay: image.name.clone(),
+                owner: owner_spec.name.clone(),
+            })?;
         let size = files[index].len() as u32;
         let span = Span {
             start: image.load_addr,

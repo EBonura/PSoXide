@@ -201,11 +201,15 @@ SECTIONS {
         *(COMMON);
         . = ALIGN(4);
         __bss_end = .;
+        /* Heap starts right after BSS and runs up to just below the stack. Set here, inside .bss,
+           so the link map prints its own address on its line: set after .bss, the map printed
+           the location counter there, which a script INSERTed after .bss (psoxide-boot.ld,
+           psoxide-overlay.ld) moves past .bss, and the tools that read free RAM from the map
+           (psoxide-size, `psoxide-pgo ram`, heap-guard) read that instead. */
+        __heap_start = .;
     } > IMAGE
 
-    /* Heap starts right after BSS and runs up to just below the stack. The end of .bss, not
-       `.`: an overlay script INSERTed after .bss moves `.` past it. */
-    __heap_start = __bss_end;
+    /* The heap runs up to just below the stack reserve. */
     __heap_end   = STACK_INIT - STACK_RESERVE;   /* keep heap below the reserved stack */
 
     /* The header above only describes the image if these hold. */
