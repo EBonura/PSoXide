@@ -17,7 +17,12 @@
  *
  *     overlay MENU.OVL menu.ovl owner=<the program> load=<as printed> class=volatile
  *
- * and mkisopsx writes its Overlay row (owner, load address, size, word FNV). The program calls
+ * and mkisopsx writes its Overlay row (owner, load address, size, word FNV). The owner's own
+ * `program` line needs `reserve=<lo>-<hi>`, a RAM range holding every overlay it owns
+ * (OVERLAY_VMA to the largest one's sector-padded end), or mkisopsx refuses with `NoReserve`. An
+ * overlay its owner reads right before WORLD.PAK's header (a title menu before its art) takes
+ * `place=before-world`: its file then ends where the pack starts, so the two reads cost one seek
+ * and a short hop instead of two long seeks. The program calls
  * `psx_core::link::load_image` for it before every call into it. `class=volatile` because the
  * program writes over that memory: the core then reads the overlay again at every load, so a
  * program that has used the memory for something else never jumps into stale bytes.
@@ -28,12 +33,25 @@
  * points `#[inline(never)]`, so their code stays in the overlay. What the compiler places on its
  * own (string literals, constants it folds out, generic code it shares) stays resident, as do the
  * overlay's writable statics: an overlay keeps no state of its own across a reload. One overlay
- * never refers to another (NOCROSSREFS: the link fails if it does).
+ * never refers to another (NOCROSSREFS: the link fails if it does). Jump tables are among what
+ * stays resident: LLVM puts a function's switch tables in a `.rodata` section of its own name,
+ * not in the function's `link_section`, so an overlay function's tables sit in resident `.data`
+ * (a few words each; they point into the overlay and are read only while it is loaded).
  *
- * The overlay's code is not in the EXE, so psoxide-pgo's hazard patcher never sees it: build the
- * program with the SDK's MIPS flags (the delay-slot searches on) and run `hazard-scan --raw
- * <OVERLAY_VMA> <file>` and `check-mfc0 --raw <OVERLAY_VMA> <file>` on each overlay file, as
- * sdk/examples/hello-core-overlay/build.sh does.
+ * OVERLAY_VMA may not lie over the program's own `.bss`: ld.lld refuses any two sections whose
+ * run ranges overlap unless both are members of one OVERLAY, so an overlay over a static buffer
+ * fails with "section .bss virtual address range overlaps with .overlay.N". Use memory outside
+ * .text, .data and .bss (the heap or a pool the program manages by address). A buffer that is a
+ * static cannot host an overlay yet (open item; see the scene-core plan).
+ *
+ * The overlay's code is not in the EXE, so psoxide-pgo's hazard patcher never sees it, and the
+ * SDK's delay-slot flags can leave a load-delay hazard in it as anywhere else (Half-Life's menu
+ * had two). Detection is the rule: run `hazard-scan --raw <OVERLAY_VMA> <file>` and `check-mfc0
+ * --raw <OVERLAY_VMA> <file>` on each overlay file, as sdk/examples/hello-core-overlay/build.sh
+ * does, and fail the build on a finding; fix it in the source (the usual cause is a small helper
+ * inlined into a branch: keep it `#[inline(never)]`). The patcher does not fix overlays: its
+ * trampolines go in the EXE's resident `HAZARD_TRAMPOLINES`, so patching an overlay would mean
+ * patching the EXE and all its overlays in one pass (not built).
  */
 SECTIONS {
     /* Every overlay runs at OVERLAY_VMA. The load addresses only keep the sections' file bytes
