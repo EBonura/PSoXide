@@ -10,6 +10,10 @@ use std::collections::HashMap;
 
 /// A function of the image: start address, size in bytes, name.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(
+    clippy::exhaustive_structs,
+    reason = "plain data read from a link map, built by literal in tests"
+)]
 pub struct Function {
     /// First instruction's address.
     pub addr: u32,
