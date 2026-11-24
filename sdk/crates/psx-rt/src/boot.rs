@@ -6,12 +6,12 @@
 //! core's `__core_boot` goes on to it. It runs before `_start`:
 //!
 //! 1. it keeps `$a0..$a2` and moves `$sp` to `STACK_INIT` (a BIOS hands over its own stack);
-//! 2. it copies `.boot` from its load address to its run address (the two ranges may overlap:
-//!    the copy is a `memmove`), zeroes `.boot_bss` after it, and invalidates the I-cache lines
-//!    over the run range once the DMA channels are idle (a chain loader, the core or a previous
-//!    program may have run code at those addresses);
+//! 2. it copies `.boot` from its load address up to its run address (at or above it; the two
+//!    ranges may overlap, so the copy runs from the top down) and zeroes `.boot_bss` after it;
 //! 3. it jumps to `_start` with `$a0..$a2` as it found them, and `_start` clears `.bss`, which
-//!    holds the stored copy.
+//!    holds the stored copy, and flushes the whole instruction cache before `main` (a chain
+//!    loader, the core or a previous program may have run code at the run addresses), so the
+//!    mover flushes nothing itself.
 //!
 //! A program that does not link psoxide-boot.ld never references `__boot_entry`, and the link
 //! drops it.
@@ -39,22 +39,19 @@ extern "C" fn __boot_entry_rs() {
     // SAFETY: psoxide-boot.ld lays these out, word aligned (asserted there): `words` words stored
     // at `__boot_lma` (inside the image the loader wrote) and the same number at `__boot_start`,
     // inside memory its assertions prove is the program's and holds nothing live yet;
-    // `.boot_bss` follows the run copy. No code runs from either range yet. The ranges may
-    // overlap, so the copy runs away from the overlap, a word at a time: `ptr::copy` would not
-    // do, because LLVM takes two distinct symbols for two objects and makes it a `memcpy`.
+    // `.boot_bss` follows the run copy. No code runs from either range yet. The run copy is at or
+    // above the stored one (asserted there too) and the two may overlap, so the copy runs from
+    // the top down, a word at a time: `ptr::copy` would not do, because LLVM takes two distinct
+    // symbols for two objects and makes it a `memcpy`.
     unsafe {
-        if (to as usize) < (from as usize) {
-            for i in 0..words {
-                core::ptr::write_volatile(to.add(i), core::ptr::read_volatile(from.add(i)));
-            }
-        } else {
-            for i in (0..words).rev() {
-                core::ptr::write_volatile(to.add(i), core::ptr::read_volatile(from.add(i)));
-            }
+        for i in (0..words).rev() {
+            core::ptr::write_volatile(to.add(i), core::ptr::read_volatile(from.add(i)));
         }
         core::ptr::write_bytes(load_end, 0, end as usize - load_end as usize);
     }
-    crate::cache::flush_instruction_cache_range(run as u32, load_end as u32);
+    // No I-cache flush here: `_start` runs next, and its `entry::set_entry_state` flushes the
+    // whole instruction cache (once the DMA channels are idle) before `main`, the only way into
+    // boot code.
 }
 
 #[cfg(target_arch = "mips")]

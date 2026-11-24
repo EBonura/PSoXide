@@ -9,27 +9,45 @@
  * reuses afterwards: by default the start of the heap (BOOT_VMA = __bss_end, rounded up to 16),
  * so the program's first heap blocks lie over them. In the EXE file they follow .data (the core's
  * stored image follows them), where .bss will be. psx-rt's `__boot_entry` moves them up before
- * `_start` clears .bss, zeroes `.boot_bss` and flushes the I-cache over them. The program must be
- * done with them before anything writes over their run range (its first heap allocation, with
- * the default).
+ * `_start` clears .bss and zeroes `.boot_bss` (`_start` flushes the whole I-cache before `main`).
+ * The program must be done with them before anything writes over their run range (its first heap
+ * allocation, with the default).
  *
  * A program that reuses other memory names it with a `-T` file before this script:
  *   BOOT_VMA_OVERRIDE      where .boot runs (default: __bss_end rounded up to 16);
- *   BOOT_RUN_END_OVERRIDE  the end of the memory it reuses (default: __heap_end);
+ *   BOOT_RUN_END_OVERRIDE  the end of the memory it reuses (default: __heap_end, or
+ *                          STACK_INIT - BOOT_STACK_OVERRIDE when that is set);
+ *   BOOT_STACK_OVERRIDE    the stack its boot code needs, in bytes below STACK_INIT (default:
+ *                          the whole STACK_RESERVE): while boot code is live the stack never
+ *                          goes deeper, so boot code may run in the rest of the reserve;
  *   BOOT_LMA_OVERRIDE      where it is stored (default: right after .data; not on the core).
  * The assertions below refuse a run range outside __bss_end..BOOT_RUN_END (so over .text, .data
- * or the .bss `_start` clears, or over the stack reserve, the core's window or the handoff block
- * above it), and a BOOT_RUN_END past __heap_end.
+ * or the .bss `_start` clears), a BOOT_RUN_END closer than BOOT_STACK to STACK_INIT (so into the
+ * stack the program says boot needs, the core's window or the handoff block above it), and a
+ * BOOT_STACK smaller than the boot crates' own deepest stack (psx-splash's
+ * `__psx_splash_stack_bytes`, below `show`'s caller). A program with no heap to spare (Ocarina)
+ * sets only `BOOT_STACK_OVERRIDE` and runs .boot from the end of .bss into the reserve; one that
+ * runs it from its own pool (Hollow Knight) sets BOOT_VMA_OVERRIDE and BOOT_RUN_END_OVERRIDE up to
+ * the reserve's floor. BOOT_STACK is the program's statement of its deepest stack while boot code
+ * runs: its own frames down to the boot call, the deepest boot code, and any callback boot code
+ * makes into the program (the splash's pad closure). The link checks the boot crates' part; the
+ * program's own stack proof covers the rest.
  *
- * Programs add their own sections with a further script that names the same output section,
- * or place them in `.text.boot_only.*` (data: `.rodata.boot_only.*`, `.data.boot_only.*`).
+ * Programs place their own boot-only code and data by section name: `.text.boot_only.*` (entry
+ * points resident code calls; data `.rodata.boot_only.*`, `.data.boot_only.*`) and
+ * `.text.boot_inner.*` (code only boot code calls). A further script naming `.boot` or
+ * `.boot_inner` again does not add to these: ld.lld makes a second output section of that name.
  */
 /* psoxide.ld (its header's PC, or `__core_next` for psoxide-core.ld) reads `__boot_initial`; a
    program without this script never references `__boot_entry` (ld.lld keeps what a script
    expression names, taken or not). */
 __boot_initial = __boot_entry;
 BOOT_VMA = DEFINED(BOOT_VMA_OVERRIDE) ? BOOT_VMA_OVERRIDE : ALIGN(__bss_end, 16);
-BOOT_RUN_END = DEFINED(BOOT_RUN_END_OVERRIDE) ? BOOT_RUN_END_OVERRIDE : __heap_end;
+BOOT_STACK = DEFINED(BOOT_STACK_OVERRIDE) ? BOOT_STACK_OVERRIDE : STACK_RESERVE;
+BOOT_RUN_END = DEFINED(BOOT_RUN_END_OVERRIDE) ? BOOT_RUN_END_OVERRIDE
+             : DEFINED(BOOT_STACK_OVERRIDE) ? STACK_INIT - BOOT_STACK_OVERRIDE : __heap_end;
+/* The boot crates' own deepest stack (0 without them): see the assertion below. */
+BOOT_STACK_FLOOR = DEFINED(__psx_splash_stack_bytes) ? __psx_splash_stack_bytes : 0;
 BOOT_LMA = DEFINED(BOOT_LMA_OVERRIDE) ? BOOT_LMA_OVERRIDE : __data_end;
 SECTIONS {
     /* What resident code may refer to while it boots (before its heap reaches this memory):
@@ -38,9 +56,10 @@ SECTIONS {
          `find_root_file`, `memory_words`), each placed by its own crate;
        - the boot crates' statics (psx-splash's font and mark, psx-fmv's tables and its reader,
          decoder and sector buffer). With one caller, LTO folds a static's address into the
-         shared resident code that caller uses (psx-font's `FontAtlas::upload`, psx-io's
-         `SectorReader` methods). Folding happens only when every call passes that static, and
-         only the boot crate can name it, so that resident code runs only from boot code.
+         shared resident code that caller uses (psx-io's `SectorReader` methods; psx-splash
+         uploads through boot-only copies of its own, so no font upload does that any more).
+         Folding happens only when every call passes that static, and only the boot crate can
+         name it, so that resident code runs only from boot code.
        Code takes `.text.` names and data `.rodata.`/`.data.` ones, so the hazard tools read them
        as what they are and a program without this script keeps them in .text and .data. */
     .boot BOOT_VMA : AT(BOOT_LMA) {
@@ -80,8 +99,11 @@ INSERT AFTER .bss;
 
 ASSERT(__boot_start >= __bss_end, ".boot must run above .bss (_start clears .bss after the move)")
 ASSERT(__boot_end <= BOOT_RUN_END, ".boot does not fit the memory it reuses (BOOT_RUN_END)")
-ASSERT(BOOT_RUN_END <= __heap_end, ".boot must run below the stack reserve, the core's window and the handoff block")
+ASSERT(BOOT_RUN_END <= STACK_INIT - BOOT_STACK, ".boot must run below the stack its boot code needs (BOOT_STACK_OVERRIDE, default the whole stack reserve), the core's window and the handoff block")
+ASSERT(BOOT_STACK >= BOOT_STACK_FLOOR, "BOOT_STACK_OVERRIDE is less than the boot crates' own stack (__psx_splash_stack_bytes): the stack would reach .boot")
+ASSERT(BOOT_STACK <= STACK_INIT - __bss_end, "BOOT_STACK_OVERRIDE reaches below .bss")
 ASSERT(__boot_lma >= __data_end, ".boot must be stored after .data")
+ASSERT(__boot_start >= __boot_lma, ".boot must run at or above where it is stored (psx-rt's mover copies from the top down)")
 /* On the core, .boot is stored right after .data and the core's image right after it: a core
    switch loads the program up to its stored core, so it loads .boot too. */
 ASSERT(!DEFINED(__psx_core_store_lma) || __boot_lma == __data_end, "on the scene core, .boot is stored right after .data (no BOOT_LMA_OVERRIDE)")

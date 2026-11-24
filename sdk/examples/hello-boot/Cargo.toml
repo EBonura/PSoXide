@@ -24,12 +24,17 @@ cross-ref = []
 # Boot-only code in a section without the `.text.` prefix: the link must fail (psoxide-boot.ld). For
 # the build script's negative test only.
 unprefixed = []
+# Resident code uploads a font after boot memory is overwritten: its own resident copy of the
+# upload, never the splash's boot-only one (psx-splash compiles its own). Run it: `hello-boot: PASS`.
+resident-font = ["dep:psx-font", "dep:psx-vram"]
 
 [dependencies]
 psx-core    = { path = "../../crates/psx-core", features = ["link"] }
 psx-display = { path = "../../crates/psx-display" }
 psx-fmv     = { path = "../../crates/psx-fmv" }
+psx-font    = { path = "../../crates/psx-font", optional = true }
 psx-gpu     = { path = "../../crates/psx-gpu" }
 psx-pad     = { path = "../../crates/psx-pad" }
 psx-rt      = { path = "../../crates/psx-rt", features = ["host-tty"] }
 psx-splash  = { path = "../../crates/psx-splash" }
+psx-vram    = { path = "../../crates/psx-vram", optional = true }

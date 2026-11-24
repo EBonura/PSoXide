@@ -140,6 +140,20 @@ fn main() {
     tty::print(" ");
     tty::print_hex_u32(end as u32);
     tty::println("");
+    // With feature `resident-font`: the program's own font upload, after the splash's boot-only
+    // copy of it is gone. It runs resident code only.
+    #[cfg(feature = "resident-font")]
+    {
+        use psx_vram::{Clut, TextureDepth, TexturePage};
+        let font = psx_font::FontAtlas::upload(
+            &psx_font::fonts::BASIC,
+            TexturePage::new(320, 0, TextureDepth::Bit4),
+            Clut::new(320, 256),
+        );
+        tty::print("hello-boot: resident font, width ");
+        tty::print_hex_u32(u32::from(font.text_width("PASS")));
+        tty::println("");
+    }
     if let Some(overlay) = brightness.faded_overlay(Resolution::R320X240, 255) {
         gpu.draw(&overlay);
     }
