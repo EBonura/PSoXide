@@ -95,7 +95,9 @@ pub fn from_elf(bytes: &[u8]) -> Result<Vec<u8>, String> {
 /// checksum runs over words; the disc writer pads the file to whole sectors).
 pub fn overlay_from_elf(bytes: &[u8], name: &str) -> Result<(u32, Vec<u8>), String> {
     if !name.starts_with(OVERLAY_PREFIX) {
-        return Err(format!("{name} is not an overlay section ({OVERLAY_PREFIX}N)"));
+        return Err(format!(
+            "{name} is not an overlay section ({OVERLAY_PREFIX}N)"
+        ));
     }
     let elf = Elf::parse(bytes)?;
     let (_, section) = elf.section(name)?;
@@ -369,7 +371,11 @@ mod tests {
             plain.truncate(5);
             from_elf(&elf(&plain)).unwrap()
         };
-        assert_eq!(from_elf(&bytes).unwrap(), without, "the EXE holds no overlay byte");
+        assert_eq!(
+            from_elf(&bytes).unwrap(),
+            without,
+            "the EXE holds no overlay byte"
+        );
         assert_eq!(
             overlay_from_elf(&bytes, ".overlay.1").unwrap(),
             (OVERLAY, fill(0x4444_4444, 5))
@@ -392,7 +398,11 @@ mod tests {
         let args: Vec<String> = ["--overlay", ".overlay.1"]
             .iter()
             .map(|s| s.to_string())
-            .chain([elf_path, file.clone()].iter().map(|p| p.display().to_string()))
+            .chain(
+                [elf_path, file.clone()]
+                    .iter()
+                    .map(|p| p.display().to_string()),
+            )
             .collect();
         let mut printed = Vec::new();
         assert_eq!(main(&args, &mut printed), 0);
