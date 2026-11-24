@@ -87,6 +87,10 @@ disc "$OUT/host" host volatile "place=before-world tail=1 host"
 # BOOT_VMA_OVERRIDE, the host starts at .data's end over the boot-only store.
 BOOTLD=1 build "$OUT/hostboot" ram-host.ld --features boot
 disc "$OUT/hostboot" hostboot volatile "place=before-world tail=1 host"
+# ... and the same scripts with nothing boot-only in the program: an empty .boot links and makes a
+# valid EXE (the stored size once came out as 0x7fff2000).
+BOOTLD=1 build "$OUT/hostboot-empty" ram-host.ld --features host
+disc "$OUT/hostboot-empty" hostboot-empty volatile "place=before-world tail=1 host"
 
 # What must not link: OVERLAY_VMA inside .bss (only the host may be overlaid), and a host with
 # OVERLAY_VMA as well. Each ram file sits in the crate (the link scripts are found from there).
