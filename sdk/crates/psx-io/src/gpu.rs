@@ -112,12 +112,14 @@ pub fn write_command_unguarded(word: u32) {
 pub fn write_display_control(word: u32) {
     if handoff::is_slow() {
         handoff::write_display_control_slow(word);
+        note_display_word(word);
         return;
     }
     crate::diag::gp1_write();
     // SAFETY: GP1 (`psx_hw::gpu::GP1`) is the GPU's aligned 32-bit control port on every PS1; any word is
     // a legal write and only changes GPU state.
-    unsafe { crate::write_u32(GP1, word) }
+    unsafe { crate::write_u32(GP1, word) };
+    note_display_word(word);
 }
 
 /// [`write_display_control`] for a run of words: the same words, in order.
@@ -136,18 +138,113 @@ pub fn write_display_controls<const N: usize>(words: [u32; N]) {
         crate::diag::gp1_write();
         // SAFETY: GP1 (`psx_hw::gpu::GP1`) is the GPU's aligned 32-bit control port on every PS1; any word is
         // a legal write and only changes GPU state.
-        unsafe { crate::write_u32(GP1, word) }
+        unsafe { crate::write_u32(GP1, word) };
+        note_display_word(word);
     }
 }
 
 /// The loading frame: the VRAM rectangle (x, y, width, height) a launcher shows while the scene
 /// core loads the next program (a 320x240 15-bit display from (0, 0)). `psx_rt`'s entry state
-/// clears all of VRAM but this, so the frame stays on screen through the new program's start;
-/// [`clear_loading_frame`] clears it at the program's first display set-up (psx-gpu's
-/// `Gpu::new`; a layer with its own GPU reset calls it too). A program booted alone shows what the
-/// BIOS left there until then. Either way the program finds all of VRAM black once its display is
-/// set up.
+/// clears all of VRAM but this (on a BIOS boot, this too), shows it in that display, and marks it
+/// live: it stays on screen through the program's load until the program first shows a frame of
+/// its own (its first display-start write, [`write_display_control`] or a queued flip). Then, if
+/// that frame is elsewhere in VRAM, the rectangle is filled black (no longer shown, so nothing
+/// flashes, and no cover is left for a later draw to show); if it is inside the rectangle the
+/// program drew over it, and the mark just drops. A program that leaves parts of a first buffer at
+/// (0, 0) undrawn shows the cover there.
 pub const LOADING_FRAME: (u16, u16, u16, u16) = (0, 0, 320, 240);
+
+/// No loading frame on screen.
+const FRAME_GONE: u8 = 0;
+/// The entry state's frame is shown and no frame of the program's has been.
+const FRAME_LIVE: u8 = 1;
+/// A queued flip will show the program's first frame elsewhere: clear the rectangle once it has.
+const FRAME_PENDING: u8 = 2;
+
+/// Where the loading frame stands ([`FRAME_GONE`], [`FRAME_LIVE`], [`FRAME_PENDING`]).
+static mut LOADING_FRAME_STATE: u8 = FRAME_GONE;
+
+/// Mark the loading frame live: the entry state has just shown it. Called by `psx_rt`'s entry state
+/// (and by a layer with its own entry, after it has shown the frame the same way).
+pub fn set_loading_frame_live() {
+    // SAFETY: a volatile store to a private static, foreground only.
+    unsafe { core::ptr::write_volatile(&raw mut LOADING_FRAME_STATE, FRAME_LIVE) }
+}
+
+/// Whether the loading frame is still on screen (no frame of the program's shown yet).
+#[must_use]
+pub fn loading_frame_live() -> bool {
+    // SAFETY: a volatile read of a private static.
+    unsafe { core::ptr::read_volatile(&raw const LOADING_FRAME_STATE) == FRAME_LIVE }
+}
+
+/// Whether `word` (a GP1(05h) display-start word) shows VRAM inside [`LOADING_FRAME`].
+const fn starts_in_loading_frame(word: u32) -> bool {
+    let (x, y, w, h) = LOADING_FRAME;
+    let (sx, sy) = (word & 0x3ff, (word >> 10) & 0x1ff);
+    sx >= x as u32 && sx < (x + w) as u32 && sy >= y as u32 && sy < (y + h) as u32
+}
+
+/// A GP1 word just written straight to the port: if it is the program's first display start, the
+/// loading frame is done with (cleared when the new start is elsewhere). One load and a branch per
+/// display-start write; nothing for other words when the word is a constant.
+#[inline(always)]
+fn note_display_word(word: u32) {
+    if word >> 24 == 0x05 {
+        // SAFETY: a volatile read of a private static.
+        if unsafe { core::ptr::read_volatile(&raw const LOADING_FRAME_STATE) } == FRAME_LIVE {
+            loading_frame_shown_over(word, false);
+        }
+    }
+}
+
+/// A GP1(05h) word handed to the VBlank handler to apply at an edge (psx-rt's present queue): the
+/// same rule as a direct write, except that the rectangle is cleared only once the flip has landed
+/// ([`settle_loading_frame`], called by the queue after its own flip wait).
+#[inline]
+pub fn note_queued_display_start(word: u32) {
+    // SAFETY: a volatile read of a private static.
+    if unsafe { core::ptr::read_volatile(&raw const LOADING_FRAME_STATE) } == FRAME_LIVE {
+        loading_frame_shown_over(word, true);
+    }
+}
+
+/// Whether a queued flip away from the loading frame owes it a clear ([`settle_loading_frame`]).
+#[inline(always)]
+#[must_use]
+pub fn loading_frame_pending() -> bool {
+    // SAFETY: a volatile read of a private static.
+    unsafe { core::ptr::read_volatile(&raw const LOADING_FRAME_STATE) == FRAME_PENDING }
+}
+
+/// Clear the loading frame if a queued flip away from it is owed a clear: call once that flip has
+/// landed and the GPU is idle (the present queue's wait before its next part does both).
+#[inline]
+pub fn settle_loading_frame() {
+    // SAFETY: a volatile read of a private static.
+    if unsafe { core::ptr::read_volatile(&raw const LOADING_FRAME_STATE) } == FRAME_PENDING {
+        // SAFETY: a volatile store to a private static.
+        unsafe { core::ptr::write_volatile(&raw mut LOADING_FRAME_STATE, FRAME_GONE) };
+        clear_loading_frame();
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn loading_frame_shown_over(word: u32, queued: bool) {
+    let next = if starts_in_loading_frame(word) {
+        FRAME_GONE
+    } else if queued {
+        FRAME_PENDING
+    } else {
+        // The display already shows the new start: the rectangle is not on screen.
+        wait_dma_ready();
+        clear_loading_frame();
+        FRAME_GONE
+    };
+    // SAFETY: a volatile store to a private static.
+    unsafe { core::ptr::write_volatile(&raw mut LOADING_FRAME_STATE, next) };
+}
 
 /// Fill [`LOADING_FRAME`] black (GP0(02h)), waiting for the GPU to take the command first.
 pub fn clear_loading_frame() {
@@ -159,6 +256,33 @@ pub fn clear_loading_frame() {
         (u32::from(h) << 16) | u32::from(w),
     ] {
         // SAFETY: GP0 is the GPU's aligned 32-bit command port; a fill is these three words.
+        unsafe { crate::write_u32(GP0, word) }
+    }
+}
+
+/// GP1(00h)'s reset without its display part: the command buffer reset (GP1(01h)), the IRQ
+/// acknowledged (GP1(02h)), DMA direction off (GP1(04h)) and the drawing settings GP0(E1h..E6h)
+/// at zero, as GP1(00h) leaves them. The display (enable, start, mode and ranges) is left as it
+/// is: GP1(00h) would turn it off and move it to (0, 0), blanking the loading frame the entry
+/// state put up. A driver's set-up (psx-gpu's `Gpu::new`, a psyq layer's `ResetGraph`) calls this,
+/// then programs its own display mode and ranges and turns the display on.
+pub fn reset_keeping_display() {
+    // SAFETY: GP1 is the GPU's aligned 32-bit control port; any word only changes GPU state.
+    unsafe {
+        crate::write_u32(GP1, 0x0100_0000);
+        crate::write_u32(GP1, 0x0200_0000);
+        crate::write_u32(GP1, 0x0400_0000);
+    }
+    wait_command_ready();
+    for word in [
+        0xe100_0000u32,
+        0xe200_0000,
+        0xe300_0000,
+        0xe400_0000,
+        0xe500_0000,
+        0xe600_0000,
+    ] {
+        // SAFETY: GP0 is the GPU's aligned 32-bit command port; each is a one-word setting.
         unsafe { crate::write_u32(GP0, word) }
     }
 }

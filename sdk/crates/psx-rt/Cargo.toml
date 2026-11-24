@@ -72,3 +72,6 @@ console-diag = ["psx-io/console-diag"]
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+psx-scene-abi = { path = "../psx-scene-abi" }

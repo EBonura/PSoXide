@@ -396,11 +396,18 @@ unsafe fn gpu_entry_state() {
     // hostile entry states showed it).
     // SAFETY: as above, a one-word GP0 setting.
     unsafe { psx_io::write_u32(GP0, 0xe100_0400) };
+    // A launcher's switch keeps its loading frame; any other entry (a BIOS boot) has the BIOS's
+    // picture there, which the display below would show: black too.
+    let keep_frame = core_entry();
     for (x, y, w, h) in [
         (320u32, 0u32, 704u32, 240u32),
         (0, 240, 512, 272),
         (512, 240, 512, 272),
+        (0, 0, 320, 240),
     ] {
+        if keep_frame && x == 0 && y == 0 {
+            continue;
+        }
         psx_io::gpu::wait_command_ready();
         // SAFETY: as above; a fill is three words (colour, top-left y:x, height:width).
         unsafe {
@@ -412,6 +419,49 @@ unsafe fn gpu_entry_state() {
     psx_io::gpu::wait_command_ready();
     // SAFETY: as above: texture page 0, dithering and drawing to the display area off again.
     unsafe { psx_io::write_u32(GP0, 0xe100_0000) };
+    // One display on every path (a BIOS leaves 640x480 interlaced, a hostile one 24-bit or off, a
+    // launcher its own): the loading frame's, 320x240 15-bit progressive from (0, 0), on. It shows
+    // the launcher's cover through the program's load, or black after a BIOS boot, until the
+    // program shows a frame of its own (psx_io::gpu::LOADING_FRAME).
+    let [mode, horizontal, vertical] = psx_gpu::display::ENTRY_DISPLAY.display_commands();
+    for word in [
+        gp1::display_start(0, 0),
+        horizontal,
+        vertical,
+        mode,
+        gp1::display_enable(true),
+    ] {
+        // SAFETY: as above, GP1 words (straight to the port: the start (0, 0) is the entry
+        // state's, not a frame of the program's).
+        unsafe { psx_io::write_u32(GP1, word) };
+    }
+    psx_io::gpu::set_loading_frame_live();
+}
+
+/// Whether the program was entered by a scene-core switch (the handoff block valid, its core-entry
+/// flag set), as `psx_splash` reads it. The block's layout is `psx_scene_abi`'s (handoff block at
+/// 0x801FFF00: magic at 0x00, flags at 0x18, the inverted magic at 0xFC); a test holds the two
+/// together. psx-rt does not depend on psx-scene-abi so that no game's lock has to learn the edge.
+#[cfg(target_arch = "mips")]
+fn core_entry() -> bool {
+    let at = |offset: u32| {
+        // SAFETY: the handoff block is mapped RAM at the top of main RAM; an aligned volatile read.
+        unsafe { core::ptr::read_volatile((block::ADDR + offset) as *const u32) }
+    };
+    at(block::OFF_MAGIC) == block::MAGIC
+        && at(block::OFF_MAGIC_INV) == !block::MAGIC
+        && at(block::OFF_FLAGS) & block::FLAG_CORE_ENTRY != 0
+}
+
+/// The scene core's handoff block, as far as the entry state reads it (`psx_scene_abi::block`).
+#[cfg_attr(not(target_arch = "mips"), allow(dead_code))]
+mod block {
+    pub const ADDR: u32 = 0x801f_ff00;
+    pub const OFF_MAGIC: u32 = 0x00;
+    pub const OFF_FLAGS: u32 = 0x18;
+    pub const OFF_MAGIC_INV: u32 = 0xfc;
+    pub const MAGIC: u32 = 0x4243_5350;
+    pub const FLAG_CORE_ENTRY: u32 = 1 << 0;
 }
 
 /// The CD drive's audio mixer at unity (left to left and right to right full, no cross-feed,
@@ -495,6 +545,30 @@ unsafe fn set_control(value: u16) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_handoff_block_words_are_the_scene_abis() {
+        use psx_scene_abi::block as abi;
+        assert_eq!(block::ADDR, psx_scene_abi::HANDOFF_BLOCK.start);
+        assert_eq!(block::OFF_MAGIC as usize, abi::OFF_MAGIC);
+        assert_eq!(block::OFF_FLAGS as usize, abi::OFF_FLAGS);
+        assert_eq!(block::OFF_MAGIC_INV as usize, abi::OFF_MAGIC_INV);
+        assert_eq!(block::MAGIC, abi::MAGIC);
+        assert_eq!(!block::MAGIC, abi::MAGIC_INV);
+        assert_eq!(block::FLAG_CORE_ENTRY, abi::FLAG_CORE_ENTRY);
+    }
+
+    #[test]
+    fn the_entry_display_shows_exactly_the_loading_frame() {
+        let (x, y, w, h) = psx_io::gpu::LOADING_FRAME;
+        let display = psx_gpu::display::ENTRY_DISPLAY;
+        assert_eq!((x, y), (0, 0));
+        assert_eq!(
+            (display.resolution.width(), display.resolution.height()),
+            (w, h)
+        );
+        assert!(!display.resolution.is_interlaced());
+    }
 
     #[test]
     fn the_entry_status_word_enables_only_the_gte() {

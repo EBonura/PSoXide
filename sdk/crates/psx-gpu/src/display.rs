@@ -135,6 +135,18 @@ impl DisplayConfig {
         }
     }
 
+    /// GP1(08h), GP1(06h) and GP1(07h) for this display, in that order: the mode and the window
+    /// [`Gpu::new`](crate::Gpu::new) programs, for code that sets a display without the driver
+    /// (psx-rt's entry state).
+    #[must_use]
+    pub const fn display_commands(self) -> [u32; 3] {
+        [
+            self.mode_command(),
+            self.horizontal_range_command(),
+            self.vertical_range_command(),
+        ]
+    }
+
     /// The same display with the picture shifted by `offset`.
     pub const fn with_offset(self, offset: (i16, i16)) -> Self {
         Self { offset, ..self }
@@ -175,6 +187,10 @@ impl DisplayConfig {
         gp1::v_display_range(start, start + self.resolution.field_lines())
     }
 }
+
+/// The display every program starts in (psx-rt's entry state): 320x240 NTSC 15-bit progressive,
+/// the standard window, shown from (0, 0). It shows exactly `psx_io::gpu::LOADING_FRAME`.
+pub const ENTRY_DISPLAY: DisplayConfig = DisplayConfig::new(VideoMode::Ntsc, Resolution::R320X240);
 
 /// VRAM lines the GPU has; two buffers must fit in them.
 const VRAM_LINES: u16 = 512;

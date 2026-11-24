@@ -224,6 +224,7 @@ dependencies = [
  "psx-hw",
  "psx-io",
  "psx-math",
+ "psx-scene-abi",
  "psx-tick",
 ]
 

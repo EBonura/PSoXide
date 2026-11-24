@@ -873,6 +873,8 @@ pub fn play(
     clear_buffers(&mut dma, config);
     let (x0, y0) = config.buffers[0];
     psx_io::gpu::write_display_control(gp1::display_start(x0 as u32, y0 as u32));
+    // The player owns the display while it plays: on, whatever the program or a launcher left.
+    psx_io::gpu::write_display_control(gp1::display_enable(true));
     let mode = display_mode();
     if config.depth == Depth::Rgb24 {
         psx_io::gpu::write_display_control(GP1_DISPLAY_MODE | mode | DISPLAY_24BIT);

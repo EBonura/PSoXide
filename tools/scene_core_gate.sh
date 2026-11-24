@@ -225,6 +225,45 @@ EOF
     mark "PCSX-Redux runs done"
 fi
 
+# The loading frame, frame by frame (one screenshot per VBlank): program P sets its display up
+# (psx-gpu's Gpu::new), "loads" for 20 VBlanks, then shows its first frame (0x204080 at (0, 256)).
+# Launched (n-member): the launcher's last screen stays up until P's frame, never a black frame
+# between. Booted alone (member): black from the entry state until P's frame, nothing else.
+frames() { # disc: the colour at (8, 120) of each distinct frame in turn, as `r g b`
+    rm -rf "$OUT/runs/shots"
+    mkdir -p "$OUT/runs/shots/cfg"
+    "$PSOXIDE_EMULATOR" --config-dir "$OUT/runs/shots/cfg" launch --path "$1" --hardware real \
+        --entry-state default --steps 2500000000 --stop-on-tty 'hello-modular: PASS' \
+        --stop-on-tty 'hello-modular: FAIL' --route-screenshot-dir "$OUT/runs/shots/s" \
+        --route-screenshot-interval 1 >"$OUT/runs/shots/log" 2>&1 || true
+    for f in $(cd "$OUT/runs/shots/s" && ls | sort); do
+        f="$OUT/runs/shots/s/$f"
+        h=$(head -c 20 "$f" | awk 'NR <= 3 { n += length($0) + 1 } END { print n + 0 }')
+        w=$(head -2 "$f" | tail -1 | cut -d' ' -f1)
+        dd if="$f" bs=1 skip=$((h + (120 * w + 8) * 3)) count=3 2>/dev/null | od -An -tu1 |
+            awk 'NF >= 3 { print $1, $2, $3 }'
+    done | uniq
+    rm -rf "$OUT/runs/shots"
+}
+for c in "n-member|$D/n-member.cue|cover" "member|$M/member.cue|black"; do
+    IFS='|' read -r name disc want <<EOF
+$c
+EOF
+    seq=$(frames "$disc" | awk '$1 == 33 && $2 == 66 && $3 == 132 { print "P"; exit } { print }')
+    printf '%s\n' "$seq" >"$OUT/runs/loading-frame-$name.seq"
+    before=$(printf '%s\n' "$seq" | grep -v '^P$' || true)
+    v=FAIL
+    case $want in
+    cover) # never black once something is shown, and P's frame comes
+        printf '%s\n' "$seq" | grep -q '^P$' &&
+            ! printf '%s\n' "$before" | awk 'seen && $0 == "0 0 0" { bad = 1 } $0 != "0 0 0" { seen = 1 } END { exit !bad }' &&
+            v=PASS ;;
+    black) # only black before P's frame
+        printf '%s\n' "$seq" | grep -q '^P$' && [ "$before" = "0 0 0" ] && v=PASS ;;
+    esac
+    printf 'loading-frame-%s\t%s\t%s\n' "$name" $v "$(printf '%s' "$seq" | tr '\n' '/')" >>"$OUT/results.tsv"
+done
+
 # The boot stubs (__core_boot, __boot_entry) never leave $sp outside the program's stack: the
 # lowest $sp of a whole boot-to-PASS run, BIOS included, stays at or above the stack reserve's floor
 # (STACK_INIT on the core, 0x801FDF00, less the default 32 KB STACK_RESERVE: hello-boot sets none). A stub that built $sp in two steps

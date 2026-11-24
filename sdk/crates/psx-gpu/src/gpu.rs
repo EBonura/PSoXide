@@ -212,17 +212,19 @@ impl Gpu {
 
 /// [`Gpu::new`]'s port writes.
 pub(crate) fn reset(display: DisplayConfig) {
+    // GP1(00h) without the display-off: the loading frame psx-rt's entry state put up stays on
+    // screen until the program shows its first frame (psx_io::gpu::LOADING_FRAME), which clears
+    // it. The display start goes to (0, 0) as GP1(00h) put it: where the entry state already shows
+    // the frame, and not a frame of the program's (unguarded, so it is not taken for one).
+    psx_io::gpu::reset_keeping_display();
+    psx_io::gpu::write_display_control_unguarded(gp1::display_start(0, 0));
     write_display_controls([
-        gp1::RESET,
         display.mode_command(),
         display.horizontal_range_command(),
         display.vertical_range_command(),
         gp1::dma_direction(DmaDirection::CpuToGp0 as u32),
         gp1::display_enable(true),
     ]);
-    // The program's first display set-up: the launcher's loading frame goes (psx-rt's entry
-    // state left only that rectangle of VRAM uncleared).
-    psx_io::gpu::clear_loading_frame();
 }
 
 #[inline]

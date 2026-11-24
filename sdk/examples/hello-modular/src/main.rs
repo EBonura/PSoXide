@@ -186,6 +186,71 @@ mod entry {
         (nonzero, hash)
     }
 
+    /// VBlanks P spends "loading" before its first frame.
+    #[cfg(not(feature = "role-q"))]
+    const LOAD_VBLANKS: u32 = 20;
+
+    /// The loading frame (psx-rt's entry state, psx_io::gpu::LOADING_FRAME), as a program that
+    /// sets its display up first and loads for a while before its first frame sees it: on screen
+    /// and unchanged through `Gpu::new` and the load (the launcher's cover on a core entry, black
+    /// after a BIOS boot), then gone from VRAM once the program shows its first frame elsewhere.
+    /// Prints `hello-modular: loading-frame ...`; any break is the walk's FAIL.
+    #[cfg(not(feature = "role-q"))]
+    pub fn loading_frame() {
+        use psx_gpu::display::{DisplayConfig, Resolution, VideoMode};
+        let core_entry = link::block_word(abi::block::OFF_FLAGS) & abi::block::FLAG_CORE_ENTRY != 0;
+        let (lit, cover) = vram(0, 0, 320, 240);
+        // A launcher's cover (the gate's launcher leaves its last screen) or the BIOS boot's black.
+        if core_entry == (lit == 0) {
+            fail("loading-frame at main", lit);
+        }
+        let Some(peripherals) = psx_rt::Peripherals::take() else {
+            fail("peripherals", 0);
+        };
+        let mut gpu = psx_gpu::Gpu::new(
+            peripherals.gpu_dma,
+            DisplayConfig::new(VideoMode::Ntsc, Resolution::R320X240),
+        );
+        let start = psx_rt::interrupts::vblank_count();
+        let mut seen = 0;
+        let mut last = start;
+        while seen < LOAD_VBLANKS {
+            let now = psx_rt::interrupts::vblank_count();
+            if now == last {
+                continue;
+            }
+            last = now;
+            seen += 1;
+            if r32(gpu::GPUSTAT) & (1 << 23) != 0 {
+                fail("loading-frame display off at vblank", seen);
+            }
+            if vram(0, 0, 320, 240).1 != cover {
+                fail("loading-frame changed at vblank", seen);
+            }
+        }
+        // The first frame, drawn at (0, 256) and shown.
+        gpu.draw(&psx_gpu::prim::FillRect::new(
+            (0, 256),
+            (320, 240),
+            (0x20, 0x40, 0x80),
+        ));
+        gpu.wait_idle();
+        gpu.set_display_start((0, 256));
+        gpu.wait_idle();
+        let (left, _) = vram(0, 0, 320, 240);
+        if left != 0 {
+            fail("loading-frame left in VRAM after the first frame", left);
+        }
+        if psx_io::gpu::loading_frame_live() {
+            fail("loading-frame still live after the first frame", 1);
+        }
+        tty::print("hello-modular: loading-frame kept ");
+        tty::print_hex_u32(seen);
+        tty::print(if core_entry { " (cover)" } else { " (black)" });
+        tty::println(", cleared after the first frame");
+        let _ = gpu.release();
+    }
+
     fn field(name: &str, value: u32) {
         tty::print(" ");
         tty::print(name);
@@ -204,6 +269,8 @@ mod entry {
         tty::print("hello-modular: entry-state");
         // GPUSTAT bits 0..15: the draw mode (E1h) and the mask bits (E6h).
         field("draw", stat & 0xffff);
+        // GPUSTAT bits 16..23: the display (mode, depth, interlace, enable), one on every path.
+        field("display", stat >> 16 & 0xff);
         field("texwin", info(2));
         field("area0", info(3));
         field("area1", info(4));
@@ -230,7 +297,6 @@ mod entry {
         tty::println("");
         tty::print("hello-modular: entry-info ");
         tty::print(who);
-        field("display", stat >> 16 & 0xff);
         field("frame", frame);
         field("flags", link::block_word(abi::block::OFF_FLAGS));
         field("switches", link::block_word(abi::block::OFF_SWITCHES));
@@ -424,6 +490,7 @@ mod p {
         if let Some(n) = soak_length() {
             soak(n, a);
         }
+        entry::loading_frame();
         let mut missing = a[arg::MISSING];
         // The canary: CARRIED is carried (in RAM since P's start), so its walk reads nothing.
         // SAFETY: a word of P's own .data.

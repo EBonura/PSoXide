@@ -13,6 +13,7 @@ name = "hello-modular"
 version = "0.1.0"
 dependencies = [
  "psx-core",
+ "psx-gpu",
  "psx-hw",
  "psx-io",
  "psx-pad",

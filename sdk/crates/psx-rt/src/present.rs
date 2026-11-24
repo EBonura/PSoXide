@@ -237,6 +237,9 @@ impl Port for Hardware {
 
     #[inline(always)]
     fn set_display(&mut self, word: u32) {
+        if word >> 24 == 0x05 {
+            psx_io::gpu::note_queued_display_start(word);
+        }
         // SAFETY: a volatile aligned word store, made only while the slot is empty.
         unsafe { write_volatile(addr_of_mut!(__psx_rt_present_display), word) }
     }
@@ -255,6 +258,9 @@ impl Port for Hardware {
 
     #[inline(always)]
     fn set_flip(&mut self, word: u32) {
+        if word >> 24 == 0x05 {
+            psx_io::gpu::note_queued_display_start(word);
+        }
         #[cfg(target_arch = "mips")]
         // SAFETY: a volatile aligned word store, made only with the slot empty and the word 0.
         unsafe {
@@ -433,6 +439,7 @@ pub fn show_drawn(origin: (u16, u16)) {
     arm_confirmation();
     psx_io::gpu::run_direct_access_guard();
     let port = &mut Hardware;
+    settle_loading_frame_drawn(port);
     wait_flip_on(port);
     present_drawn_on(
         port,
@@ -537,6 +544,7 @@ impl Presenter {
     /// returns before the frame after next is built, or [`wait_idle`].
     pub unsafe fn submit(&mut self, buffers: &mut DoubleBuffer, head: *const u32, part: Part) {
         let port = &mut Hardware;
+        settle_loading_frame(port);
         let vblanks = wait_slot_empty_on(port);
         add(addr_of_mut!(SLOT_WAIT_VBLANKS), vblanks);
         let mut first = head as u32;
@@ -602,6 +610,7 @@ impl Presenter {
     pub fn begin_frame(&mut self, buffers: &DoubleBuffer) {
         psx_io::gpu::run_direct_access_guard();
         let port = &mut Hardware;
+        settle_loading_frame_drawn(port);
         // The guard above emptied the slot if a part was ever submitted (submit arms it).
         if port.flip() != 0 || port.is_channel_busy() {
             wait_drawn_idle_on(port);
@@ -623,6 +632,7 @@ impl Presenter {
         // `begin_frame` saw to it; a frame that skipped it waits here.
         psx_io::gpu::run_direct_access_guard();
         let port = &mut Hardware;
+        settle_loading_frame_drawn(port);
         // The guard above emptied the slot if a part was ever submitted (submit arms it).
         if port.flip() != 0 {
             wait_drawn_idle_on(port);
@@ -653,6 +663,7 @@ impl Presenter {
 pub unsafe fn publish_raw(head: *const u32, display: u32) {
     arm_confirmation();
     let port = &mut Hardware;
+    settle_loading_frame(port);
     compiler_barrier();
     // The old contract carries the previous frame's flip with the next frame;
     // queue it as this part's flip, after the slot wait, as the old handler did
@@ -696,11 +707,45 @@ fn present_drawn_on<P: Port>(port: &mut P, display: u32) {
 }
 
 fn show_on<P: Port>(port: &mut P, display: u32) {
+    settle_loading_frame(port);
     wait_slot_empty_on(port);
     wait_flip_on(port);
     port.acknowledge_draw_done();
     port.signal_draw_done();
     port.set_flip(display);
+}
+
+/// The loading frame (psx_io::gpu::LOADING_FRAME) after the program's first flip away from it:
+/// once that flip has landed and nothing walks, fill it black, before the next part can draw. Once
+/// per program; one load and a branch on every later call.
+#[inline(always)]
+fn settle_loading_frame<P: Port>(port: &mut P) {
+    if psx_io::gpu::loading_frame_pending() {
+        settle_loading_frame_cold(port);
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn settle_loading_frame_cold<P: Port>(port: &mut P) {
+    wait_slot_empty_on(port);
+    wait_drawn_idle_on(port);
+    psx_io::gpu::settle_loading_frame();
+}
+
+/// [`settle_loading_frame`] for a program that presents drawn frames only (no slot loop linked).
+#[inline(always)]
+fn settle_loading_frame_drawn<P: Port>(port: &mut P) {
+    if psx_io::gpu::loading_frame_pending() {
+        settle_loading_frame_drawn_cold(port);
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn settle_loading_frame_drawn_cold<P: Port>(port: &mut P) {
+    wait_drawn_idle_on(port);
+    psx_io::gpu::settle_loading_frame();
 }
 
 /// The VBlanks between `start` and now.
