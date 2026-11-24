@@ -2,7 +2,8 @@
 # Build hello-boot (a program on the scene core with boot-only memory) and its two discs, and check
 # that psoxide-boot.ld refuses a resident reference into `.boot_inner` and boot-only code in a
 # section without the `.text.` prefix, and that a boot-time stack (BOOT_STACK_OVERRIDE) below the
-# boot crates' own need is refused. reserve.bin runs .boot partly inside the stack reserve.
+# boot crates' own need and a link without psoxide-core.ld are refused. reserve.bin runs .boot partly
+# inside the stack reserve.
 #
 #   sh sdk/examples/hello-boot/build.sh OUT_DIR      (from the repository root)
 #
@@ -49,6 +50,19 @@ grep -q "a boot-only section without a .text./.rodata./.data. prefix" "$OUT/unpr
     exit 1
 }
 echo "hello-boot: the unprefixed build is refused, as it must be"
+# psx-core's image linked without psoxide-core.ld: refused too (it would be placed as an orphan).
+LINK_ALL="$LINK"
+LINK='"-Clink-arg=-Tram.ld","-Clink-arg=-T../../psoxide-boot.ld","-Clink-arg=-T../../psoxide.ld"'
+if guest >"$OUT/no-core-script.log" 2>&1; then
+    echo "hello-boot: FAIL: the build without psoxide-core.ld linked" >&2
+    exit 1
+fi
+grep -q "linked without psoxide-core.ld" "$OUT/no-core-script.log" || {
+    echo "hello-boot: FAIL: the build without psoxide-core.ld failed for another reason ($OUT/no-core-script.log)" >&2
+    exit 1
+}
+echo "hello-boot: the build without psoxide-core.ld is refused, as it must be"
+LINK="$LINK_ALL"
 
 guest
 cp "$GUEST_TARGET/mipsel-sony-psx/release/hello-boot.exe" "$OUT/hello-boot.exe"

@@ -215,6 +215,14 @@ SECTIONS {
     ASSERT(__image_end - __load_end < EXE_HEAD_BYTES, "the stored image may reach past the data by under one sector")
     ASSERT(__load_end <= __heap_end, "the stored image reaches into the stack reserve")
 
+    /* The scene core's stored image (psx-core with feature `link`, input section `.psx_core`)
+       belongs to psoxide-core.ld's `.psx_core_store`, which takes it first when that script is
+       linked. Linked without it, the image would be placed as an orphan without a word and the
+       program would run with no core in its window; it lands here instead, and the assertion
+       below fails the link. */
+    .psx_core_unplaced : { KEEP(*(.psx_core)) } > RELOCATED
+    ASSERT(SIZEOF(.psx_core_unplaced) == 0, "psx-core's image (feature link) is linked without psoxide-core.ld: link -T <ram>.ld -T psoxide-core.ld [-T psoxide-boot.ld] -T psoxide.ld")
+
     /* The symbol tables the link writes (non-allocated: in the ELF beside an EXE, for the
        tools), placed by name so the link can refuse every unplaced section
        (`--orphan-handling=error`). */
