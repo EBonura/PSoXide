@@ -72,7 +72,7 @@ SECTIONS {
        share that one, so it stays resident). Resident code must never call into it:
        NOCROSSREFS_TO below fails the link if it does. Right after .boot in RAM and in the file
        (named: the region's own count is past the core's window when the program has one). */
-    .boot_inner ADDR(.boot) + SIZEOF(.boot) : AT(BOOT_LMA + SIZEOF(.boot)) {
+    .boot_inner ADDR(.boot) + SIZEOF(.boot) : AT(LOADADDR(.boot) + SIZEOF(.boot)) {
         *(.text.boot_inner.* .rodata.boot_inner.*)
         . = ALIGN(4);
         __boot_load_end = .;
@@ -90,10 +90,10 @@ SECTIONS {
        would place a misspelt one as an orphan without a word. Nothing may land here (asserted
        below): name boot-only code `.text.boot_only.*` or `.text.boot_inner.*`. */
     .boot_unprefixed : { *(.boot_only .boot_only.* .boot_inner .boot_inner.*) } > RELOCATED
-    /* BOOT_LMA, not LOADADDR(.boot): an empty .boot (LTO dropped the splash, or a build that
-       never calls it) has no load address of its own, and the stored size came out as
-       0x7fff2000. */
-    __boot_lma = BOOT_LMA;
+    /* An empty .boot (LTO dropped the splash, or a build that never calls it) has no load address
+       of its own (its LOADADDR made the stored size 0x7fff2000): then the boot store is empty and
+       starts at BOOT_LMA. */
+    __boot_lma = SIZEOF(.boot) + SIZEOF(.boot_inner) > 0 ? LOADADDR(.boot) : BOOT_LMA;
     __boot_lma_end = __boot_lma + SIZEOF(.boot) + SIZEOF(.boot_inner);
 }
 /* ld.lld takes a script with no INSERT for the main one; this is the addition. INSERT must
