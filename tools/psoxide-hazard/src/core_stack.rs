@@ -77,12 +77,14 @@ pub fn depths(image: &[u8], base: u32, functions: &[Function]) -> HashMap<String
             let op = w >> 26;
             let target = (pc & 0xf000_0000) | ((w & 0x03ff_ffff) << 2);
             match op {
-                // addiu $sp, $sp, imm
-                0x09 if (w >> 21) & 31 == 29 && (w >> 16) & 31 == 29 && w & 0x8000 != 0 => {
-                    if !framed {
-                        shapes[i].frame = 0x1_0000 - (w & 0xffff);
-                        framed = true;
-                    }
+                // The first addiu $sp, $sp, -n.
+                0x09 if !framed
+                    && (w >> 21) & 31 == 29
+                    && (w >> 16) & 31 == 29
+                    && w & 0x8000 != 0 =>
+                {
+                    shapes[i].frame = 0x1_0000 - (w & 0xffff);
+                    framed = true;
                 }
                 0x03 => {
                     if let Some(j) = of(target) {

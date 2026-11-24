@@ -390,7 +390,12 @@ unsafe fn gpu_entry_state() {
         unsafe { psx_io::write_u32(GP0, word) };
     }
     // All of VRAM black but the loading frame (psx_io::gpu::LOADING_FRAME, 0..320 x 0..240):
-    // right of it, then below it in two halves (a fill cannot say 1024 wide).
+    // right of it, then below it in two halves (a fill cannot say 1024 wide). With drawing to the
+    // display area allowed while they run: an interlaced display (a BIOS may leave 480i up) with
+    // it off makes a fill skip the displayed field's lines, half of VRAM (the scene-core gate's
+    // hostile entry states showed it).
+    // SAFETY: as above, a one-word GP0 setting.
+    unsafe { psx_io::write_u32(GP0, 0xe100_0400) };
     for (x, y, w, h) in [
         (320u32, 0u32, 704u32, 240u32),
         (0, 240, 512, 272),
@@ -405,6 +410,8 @@ unsafe fn gpu_entry_state() {
         }
     }
     psx_io::gpu::wait_command_ready();
+    // SAFETY: as above: texture page 0, dithering and drawing to the display area off again.
+    unsafe { psx_io::write_u32(GP0, 0xe100_0000) };
 }
 
 /// The CD drive's audio mixer at unity (left to left and right to right full, no cross-feed,
