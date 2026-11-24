@@ -407,11 +407,11 @@ pub enum SceneDiscError {
         /// The needed image at fault.
         image: String,
     },
-    /// A start scene needs images but its Program never asks for them: its EXE does not link
-    /// `psx_core::link::require` (no `psx_scene_abi::REQUIRE_MARKER` in its bytes).
     /// A Program was built as a called program (psx-rt `called-program`): it returns to a caller
     /// and must never be started by the BIOS or the scene core.
     CalledProgram(String),
+    /// A start scene needs images but its Program never asks for them: its EXE does not link
+    /// `psx_core::link::require` (no `psx_scene_abi::REQUIRE_MARKER` in its bytes).
     NoRequire {
         /// The start scene.
         scene: String,

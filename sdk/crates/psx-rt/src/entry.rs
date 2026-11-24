@@ -375,6 +375,10 @@ unsafe fn write_status(value: u32) {
 /// # Safety
 ///
 /// As [`set_entry_state`]'s block: nothing else drives the GPU yet.
+#[cfg_attr(
+    feature = "called-program",
+    allow(dead_code, reason = "a called program keeps its caller's GPU")
+)]
 #[inline(never)]
 unsafe fn gpu_entry_state() {
     use psx_hw::gpu::{gp0, gp1, GP0, GP1};
@@ -448,6 +452,10 @@ unsafe fn gpu_entry_state() {
 /// 0x801FFF00: magic at 0x00, flags at 0x18, the inverted magic at 0xFC); a test holds the two
 /// together. psx-rt does not depend on psx-scene-abi so that no game's lock has to learn the edge.
 #[cfg(target_arch = "mips")]
+#[cfg_attr(
+    feature = "called-program",
+    allow(dead_code, reason = "a called program keeps its caller's GPU")
+)]
 fn core_entry() -> bool {
     let at = |offset: u32| {
         // SAFETY: the handoff block is mapped RAM at the top of main RAM; an aligned volatile read.
@@ -459,7 +467,13 @@ fn core_entry() -> bool {
 }
 
 /// The scene core's handoff block, as far as the entry state reads it (`psx_scene_abi::block`).
-#[cfg_attr(not(target_arch = "mips"), allow(dead_code))]
+#[cfg_attr(
+    any(not(target_arch = "mips"), feature = "called-program"),
+    allow(
+        dead_code,
+        reason = "read by the GPU entry state, which a called program skips"
+    )
+)]
 mod block {
     pub const ADDR: u32 = 0x801f_ff00;
     pub const OFF_MAGIC: u32 = 0x00;
@@ -476,6 +490,10 @@ mod block {
 ///
 /// As [`set_entry_state`]'s block: nothing else drives the CD controller's registers now.
 #[cfg(target_arch = "mips")]
+#[cfg_attr(
+    feature = "called-program",
+    allow(dead_code, reason = "a called program keeps its caller's mixer")
+)]
 unsafe fn cd_mixer_entry_state() {
     use psx_hw::cd::reg;
     // SAFETY: the CD controller's byte registers; index selects which function each one has.
