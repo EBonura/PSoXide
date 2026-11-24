@@ -202,6 +202,20 @@ pub fn window_identities(
                 w.anchor_max_polls.unwrap_or(0)
             )
         };
+        // An anchor reached by presses names the tape of those presses too (absent: as before).
+        let window = match &w.anchor_tape {
+            None => window,
+            Some(t) => {
+                let sha = util::git_blob_sha256(repo, commit, t).map_err(|e| {
+                    format!(
+                        "[[speed]] `{}`: anchor_tape `{t}` at commit {}: {e}",
+                        w.name,
+                        util::short(commit)
+                    )
+                })?;
+                format!("{window}; reached by anchor_tape {t} {sha}")
+            }
+        };
         let identity = WindowIdentity {
             tape: w.tape.clone(),
             tape_sha256,

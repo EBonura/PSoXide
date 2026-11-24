@@ -782,10 +782,30 @@ fn anchor_poll(
         .iter()
         .filter_map(crate::journey::condition_sym)
         .collect();
+    // An anchor reached by presses: the replay looking for it feeds them from power-on.
+    let before = match &w.anchor_tape {
+        Some(rel) => {
+            let path = ctx.repo.join(rel);
+            let bytes =
+                std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+            let tape = crate::tape::PollTape::parse(&bytes).map_err(|e| format!("{rel}: {e}"))?;
+            if tape.samples.last().is_some_and(|s| *s != crate::tape::IDLE) {
+                return Err(format!(
+                    "{rel}: the anchor tape must end idle (its last sample is held while the \
+                     anchor is looked for)"
+                ));
+            }
+            Some((path, tape))
+        }
+        None => None,
+    };
     let probes = crate::journey::with_started(probes, &syms, &symbols)?;
     let mut key = Key::new("speed-anchor");
     key.part("disc", disc_digest);
     key.file("frontend", frontend)?;
+    if let Some((path, _)) = &before {
+        key.file("anchor-tape", path)?;
+    }
     key.part(
         "probes",
         &serde_json::to_string(&probes).map_err(|e| e.to_string())?,
@@ -823,7 +843,15 @@ fn anchor_poll(
         argv.push("--route-watch-u32".into());
         argv.push(format!("{word:#010x}"));
     }
-    // Pad and machine flags only: no tape before the anchor, so no hold-last either.
+    // Pad and machine flags, and the presses that reach the anchor if it has them (held idle
+    // after their end); otherwise no tape before the anchor, so no hold-last either.
+    if let Some((path, _)) = &before {
+        argv.extend([
+            "--input-tape".into(),
+            path.display().to_string(),
+            "--input-tape-hold-last".into(),
+        ]);
+    }
     argv.extend(w.launch_args.iter().cloned());
     let env = ctx.child_env(&ctx.work.join("guest-stage"));
     let done = ctx.machine("emu", || {
@@ -839,6 +867,17 @@ fn anchor_poll(
     let text =
         std::fs::read_to_string(&route).map_err(|e| format!("read {}: {e}", route.display()))?;
     let found = find_anchor(&text, &probes, max_polls)?;
+    // Polls throughout (the tape is poll-indexed): the anchor must first hold after the last press
+    // meant to cause it, or the presses after it would be counted from a state they did not reach.
+    if let Some(last) = before.as_ref().and_then(|(_, t)| t.last_press()) {
+        if found <= last {
+            return Err(format!(
+                "the anchor held at poll {found}, at or before the anchor tape's last press at \
+                 poll {last}: it holds before the presses meant to cause it (anchor on a state \
+                 they reach)"
+            ));
+        }
+    }
     let outcome = Outcome {
         checks: vec![Check::pass("anchored", "")],
         facts: BTreeMap::from([("anchor".to_string(), found.to_string())]),
@@ -863,10 +902,20 @@ fn anchored_tape(ctx: &Ctx<'_>, w: &Window, anchor: u32) -> Result<PathBuf, Stri
     let rel = w.tape.as_ref().ok_or("an anchored window needs a tape")?;
     let path = ctx.repo.join(rel);
     let bytes = std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    let fed = crate::tape::PollTape::parse(&bytes)
-        .map_err(|e| format!("{rel}: {e}"))?
-        .after(anchor)?
-        .bytes();
+    let after = crate::tape::PollTape::parse(&bytes).map_err(|e| format!("{rel}: {e}"))?;
+    // Anchored after presses: those presses from power-on, then the tape from the anchor.
+    let fed = match &w.anchor_tape {
+        Some(before_rel) => {
+            let path = ctx.repo.join(before_rel);
+            let bytes =
+                std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+            let before =
+                crate::tape::PollTape::parse(&bytes).map_err(|e| format!("{before_rel}: {e}"))?;
+            crate::tape::PollTape::joined(&before, &after, anchor)?
+        }
+        None => after.after(anchor)?,
+    }
+    .bytes();
     let out = ctx.dir(&["speed", "anchor"])?.join(format!(
         "{}-{}.pxtape",
         w.name,

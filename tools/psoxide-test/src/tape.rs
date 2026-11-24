@@ -107,7 +107,8 @@ impl PollTape {
             return Err(format!(
                 "the tape is not idle before poll {anchor}: poll {} feeds {:02x?} (an anchored \
                  replay feeds an idle pad until the anchor holds); anchor on a state the game \
-                 reaches before its first press",
+                 reaches before its first press, or keep the presses with --before-out (an \
+                 anchor after presses)",
                 self.start_poll as usize + i,
                 s
             ));
@@ -119,12 +120,99 @@ impl PollTape {
     }
 }
 
+impl PollTape {
+    /// The poll of the last sample that is not an idle pad, if any.
+    #[must_use]
+    pub fn last_press(&self) -> Option<u32> {
+        self.samples
+            .iter()
+            .rposition(|s| *s != IDLE)
+            .map(|i| self.start_poll + i as u32)
+    }
+
+    /// Split a tape recorded from power-on at the poll `anchor` held at in that recording: the
+    /// part before it (fed from power-on while the anchor is looked for: the presses that reach
+    /// the anchored state, ending idle) and the part from it (polls counted from the anchor). The
+    /// anchor must come after the last press of the first part: a press on the anchor's poll or
+    /// later belongs to the second.
+    ///
+    /// # Errors
+    /// Nothing is pressed before `anchor` (use [`Self::anchored_at`]), or the tape ends before it.
+    pub fn split_at_anchor(&self, anchor: u32) -> Result<(PollTape, PollTape), String> {
+        let end = self.start_poll as usize + self.samples.len();
+        if anchor as usize >= end || anchor < self.start_poll {
+            return Err(format!(
+                "poll {anchor} is outside the tape (polls {} to {})",
+                self.start_poll,
+                end.saturating_sub(1)
+            ));
+        }
+        let cut = (anchor - self.start_poll) as usize;
+        let mut before = PollTape {
+            start_poll: self.start_poll,
+            samples: self.samples[..cut].to_vec(),
+        };
+        if before.last_press().is_none() {
+            return Err(format!(
+                "nothing is pressed before poll {anchor}: anchor the tape with --at-poll alone"
+            ));
+        }
+        // It ends idle: the replay looking for the anchor holds its last sample.
+        before.samples.push(IDLE);
+        let after = PollTape {
+            start_poll: 0,
+            samples: self.samples[cut..].to_vec(),
+        };
+        Ok((before, after))
+    }
+
+    /// The tape a window anchored after presses replays: `before` (fed from power-on, the
+    /// presses that reach the anchored state) up to `anchor`, the poll its anchor first held at on
+    /// this disc, idle after it, then `after` (polls counted from the anchor) from there.
+    ///
+    /// # Errors
+    /// `before` presses on or after `anchor` (the anchor held before the presses meant to cause
+    /// it), or the polls overflow.
+    pub fn joined(before: &PollTape, after: &PollTape, anchor: u32) -> Result<PollTape, String> {
+        if let Some(last) = before.last_press() {
+            if last >= anchor {
+                return Err(format!(
+                    "the anchor held at poll {anchor}, but the anchor tape still presses at poll \
+                     {last}: it held before the presses meant to cause it"
+                ));
+            }
+        }
+        if before.start_poll > anchor {
+            return Err(format!(
+                "the anchor tape starts at poll {}, after the anchor at poll {anchor}",
+                before.start_poll
+            ));
+        }
+        let first = anchor
+            .checked_add(after.start_poll)
+            .ok_or("tape start poll overflows")?;
+        let mut samples: Vec<[u8; SAMPLE]> = before
+            .samples
+            .iter()
+            .take((anchor - before.start_poll) as usize)
+            .copied()
+            .collect();
+        samples.resize((first - before.start_poll) as usize, IDLE);
+        samples.extend_from_slice(&after.samples);
+        Ok(PollTape {
+            start_poll: before.start_poll,
+            samples,
+        })
+    }
+}
+
 /// `psoxide-test tape-anchor --tape IN --at-poll P --out OUT`: re-anchor a power-on tape at the
 /// poll a `[[speed]]` window's `anchor` holds at on the current disc (the speed stage reports it).
 pub fn anchor_command(args: &[String]) -> Result<std::process::ExitCode, String> {
     let mut tape = None;
     let mut at = None;
     let mut out = None;
+    let mut before_out: Option<PathBuf> = None;
     let mut it = args.iter();
     while let Some(flag) = it.next() {
         let value = it
@@ -134,6 +222,7 @@ pub fn anchor_command(args: &[String]) -> Result<std::process::ExitCode, String>
         match flag.as_str() {
             "--tape" => tape = Some(PathBuf::from(value)),
             "--out" => out = Some(PathBuf::from(value)),
+            "--before-out" => before_out = Some(PathBuf::from(value)),
             "--at-poll" => {
                 at = Some(
                     value
@@ -151,9 +240,24 @@ pub fn anchor_command(args: &[String]) -> Result<std::process::ExitCode, String>
         out.ok_or_else(|| missing("--out"))?,
     );
     let bytes = std::fs::read(&tape).map_err(|e| format!("read {}: {e}", tape.display()))?;
-    let anchored = PollTape::parse(&bytes)
-        .map_err(|e| format!("{}: {e}", tape.display()))?
-        .anchored_at(at)?;
+    let recorded = PollTape::parse(&bytes).map_err(|e| format!("{}: {e}", tape.display()))?;
+    if let Some(before_out) = before_out {
+        // An anchor after presses: the presses that reach it go into their own tape.
+        let (before, after) = recorded.split_at_anchor(at)?;
+        std::fs::write(&before_out, before.bytes())
+            .map_err(|e| format!("write {}: {e}", before_out.display()))?;
+        std::fs::write(&out, after.bytes()).map_err(|e| format!("write {}: {e}", out.display()))?;
+        println!(
+            "wrote {} (the presses before the anchor, from power-on, last at poll {}) and {} ({} \
+             samples from the anchor): declare them as the window's anchor_tape and tape",
+            before_out.display(),
+            before.last_press().unwrap_or(0),
+            out.display(),
+            after.samples.len()
+        );
+        return Ok(std::process::ExitCode::SUCCESS);
+    }
+    let anchored = recorded.anchored_at(at)?;
     std::fs::write(&out, anchored.bytes()).map_err(|e| format!("write {}: {e}", out.display()))?;
     println!(
         "wrote {} ({} samples from the anchor, sample 0 at anchor + {}): declare the window's \
@@ -165,7 +269,57 @@ pub fn anchor_command(args: &[String]) -> Result<std::process::ExitCode, String>
     Ok(std::process::ExitCode::SUCCESS)
 }
 
-pub const ANCHOR_USAGE: &str = "psoxide-test tape-anchor --tape IN --at-poll P --out OUT";
+pub const ANCHOR_USAGE: &str =
+    "psoxide-test tape-anchor --tape IN --at-poll P --out OUT [--before-out BEFORE]";
+
+pub const JOIN_USAGE: &str =
+    "psoxide-test tape-join --before BEFORE --tape AFTER --at-poll A --out JOINED";
+
+/// `psoxide-test tape-join`: the tape a window anchored after presses replays on a disc where its
+/// anchor first held at port-1 poll `A` ([`PollTape::joined`]), as the speed stage builds it.
+pub fn join_command(args: &[String]) -> Result<std::process::ExitCode, String> {
+    let mut paths: [Option<PathBuf>; 3] = [None, None, None];
+    let mut at = None;
+    let mut it = args.iter();
+    while let Some(flag) = it.next() {
+        let value = it
+            .next()
+            .cloned()
+            .ok_or_else(|| format!("{flag} needs a value\nusage: {JOIN_USAGE}"))?;
+        match flag.as_str() {
+            "--before" => paths[0] = Some(PathBuf::from(value)),
+            "--tape" => paths[1] = Some(PathBuf::from(value)),
+            "--out" => paths[2] = Some(PathBuf::from(value)),
+            "--at-poll" => {
+                at = Some(
+                    value
+                        .parse::<u32>()
+                        .map_err(|_| format!("--at-poll `{value}` is not a number"))?,
+                )
+            }
+            other => return Err(format!("unknown option `{other}`\nusage: {JOIN_USAGE}")),
+        }
+    }
+    let [Some(before), Some(after), Some(out)] = paths else {
+        return Err(format!(
+            "--before, --tape and --out are required\nusage: {JOIN_USAGE}"
+        ));
+    };
+    let at = at.ok_or_else(|| format!("--at-poll is required\nusage: {JOIN_USAGE}"))?;
+    let read = |p: &Path| -> Result<PollTape, String> {
+        let bytes = std::fs::read(p).map_err(|e| format!("read {}: {e}", p.display()))?;
+        PollTape::parse(&bytes).map_err(|e| format!("{}: {e}", p.display()))
+    };
+    let joined = PollTape::joined(&read(&before)?, &read(&after)?, at)?;
+    std::fs::write(&out, joined.bytes()).map_err(|e| format!("write {}: {e}", out.display()))?;
+    println!(
+        "wrote {} ({} samples from poll {})",
+        out.display(),
+        joined.samples.len(),
+        joined.start_poll
+    );
+    Ok(std::process::ExitCode::SUCCESS)
+}
 
 /// What `psoxide-test tape` was asked for.
 #[derive(Debug, PartialEq, Eq)]
@@ -406,6 +560,48 @@ mod tests {
             tape(10, &[CROSS]).anchored_at(4).unwrap(),
             tape(6, &[CROSS])
         );
+    }
+
+    /// QD Up's shot: Start and menu presses reach the table, the anchor holds when the table loop
+    /// starts, the aim and the shot follow. On a disc whose table loads two polls later the
+    /// presses after the anchor move with it; the presses before it stay where they were.
+    #[test]
+    fn an_anchor_after_presses_moves_what_follows_it_and_keeps_what_reaches_it() {
+        const START: [u8; SAMPLE] = [0x08, 0, 0x80, 0x80, 0x80, 0x80];
+        // Recorded from power-on: Start at poll 1, the table loads, the anchor held at poll 4,
+        // cross (the shot) at poll 5.
+        let recorded = tape(0, &[IDLE, START, IDLE, IDLE, IDLE, CROSS, IDLE]);
+        assert_eq!(recorded.last_press(), Some(5));
+        let (before, after) = recorded.split_at_anchor(4).unwrap();
+        assert_eq!(before, tape(0, &[IDLE, START, IDLE, IDLE, IDLE]));
+        assert_eq!(before.last_press(), Some(1));
+        assert_eq!(after, tape(0, &[IDLE, CROSS, IDLE]));
+        // The same disc: the join is the recording.
+        assert_eq!(PollTape::joined(&before, &after, 4).unwrap(), recorded);
+        // A slower load: the anchor at poll 6, the shot two polls later, Start where it was.
+        let slower = PollTape::joined(&before, &after, 6).unwrap();
+        assert_eq!(
+            slower,
+            tape(0, &[IDLE, START, IDLE, IDLE, IDLE, IDLE, IDLE, CROSS, IDLE])
+        );
+        // A faster one: the shot one poll earlier.
+        assert_eq!(
+            PollTape::joined(&before, &after, 3).unwrap(),
+            tape(0, &[IDLE, START, IDLE, IDLE, CROSS, IDLE])
+        );
+        // An anchor that held on or before the last press meant to cause it: refused.
+        let err = PollTape::joined(&before, &after, 1).unwrap_err();
+        assert!(
+            err.contains("before the presses meant to cause it"),
+            "{err}"
+        );
+        // Nothing pressed before the anchor: the plain re-anchor is the tool.
+        let err = tape(0, &[IDLE, IDLE, CROSS])
+            .split_at_anchor(2)
+            .unwrap_err();
+        assert!(err.contains("--at-poll alone"), "{err}");
+        // Outside the tape.
+        assert!(recorded.split_at_anchor(9).is_err());
     }
 
     #[test]

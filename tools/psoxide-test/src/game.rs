@@ -285,6 +285,15 @@ pub struct Window {
     /// With `anchor`: the input-free replay looking for it stops at this poll.
     #[serde(default)]
     pub anchor_max_polls: Option<u32>,
+    /// With `anchor`: a poll-bound tape fed from power-on while the anchor is looked for, the
+    /// presses that reach the anchored state (a title's Start and menu presses before the level the
+    /// window measures). The anchor must first hold after its last press (an anchor that holds
+    /// before the presses meant to cause it is refused). On every disc the replay feeds this tape
+    /// from power-on, finds the poll the anchor first holds at, and feeds `tape` (polls counted
+    /// from that poll) from there, so a load that moves the anchor moves everything after it with
+    /// it. `psoxide-test tape-anchor --before-out` splits a recorded tape into the two.
+    #[serde(default)]
+    pub anchor_tape: Option<String>,
     /// Phase shifts of the window, in polls; must contain 0. The quick tier runs 0 only.
     #[serde(default = "zero_offset")]
     pub offsets: Vec<i32>,
@@ -719,6 +728,12 @@ impl Game {
                 ));
             }
             match (w.anchor.is_empty(), w.anchor_max_polls) {
+                (true, None) if w.anchor_tape.is_some() => {
+                    return Err(format!(
+                        "[[speed]] `{}`: anchor_tape without anchor",
+                        w.name
+                    ))
+                }
                 (true, None) => {}
                 (false, Some(_)) => {
                     if w.tape.is_none() {
@@ -731,7 +746,8 @@ impl Game {
                     if w.launch_args.iter().any(|a| a == "--press") {
                         return Err(format!(
                             "[[speed]] `{}`: a --press schedule counts frames from power-on, \
-                             which an anchor does not move: transcribe it into the tape",
+                             which an anchor does not move: transcribe it into the tape (presses \
+                             after the anchor) and anchor_tape (presses that reach it)",
                             w.name
                         ));
                     }
@@ -1293,5 +1309,19 @@ map = "link.map"
         assert!(Game::parse(&format!("{MINIMAL}{w}anchor_max_polls = 9\n"))
             .unwrap_err()
             .contains("without anchor"));
+        // An anchor reached by presses (QD Up's Start and menu before the table): anchor_tape.
+        let reached = Game::parse(&format!(
+            "{MINIMAL}{w}{anchor}anchor_max_polls = 2000\nanchor_tape = \"menu.pxtape\"\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            reached.windows[0].anchor_tape.as_deref(),
+            Some("menu.pxtape")
+        );
+        assert!(
+            Game::parse(&format!("{MINIMAL}{w}anchor_tape = \"menu.pxtape\"\n"))
+                .unwrap_err()
+                .contains("anchor_tape without anchor")
+        );
     }
 }

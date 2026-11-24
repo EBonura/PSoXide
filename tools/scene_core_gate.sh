@@ -116,6 +116,11 @@ case $plan in *"\"addr\":$p"*"\"addr\":$q"*) [ "$p" != "$q" ] && v=PASS ;; esac
 amb=$(smoke both-maps hello_modular::PADS 2>&1 || true)
 case $amb in *ambiguous*) ;; *) v=FAIL ;; esac
 printf 'start-rule-two-programs\t%s\tP marker %x, Q marker %x\n' $v "$p" "$q" >>"$OUT/results.tsv"
+# A speed window anchored after presses (hello-anchor, two load lengths): the press after the anchor
+# lands on the same frame on both builds; the open-loop tape does not.
+v=PASS
+sh tools/anchor_tape_gate.sh "$OUT/anchor" >"$OUT/anchor.log" 2>&1 || v=FAIL
+printf 'anchor-after-presses\t%s\t%s\n' $v "$(grep -m1 'anchor at poll' "$OUT/anchor.log")" >>"$OUT/results.tsv"
 # A program whose code never names psx_core (hello-tri) linked with the core script: refused with
 # the line to add, not lld's bare "symbol not found: __core_boot".
 v=FAIL

@@ -50,8 +50,12 @@ usage:
       load the game file and every journey; print the pad and open-loop findings
   psoxide-test tape --disc CUE --press SCHEDULE --out TAPE --steps N [--stop-at-poll P] [--pad analog|dualshock|digital]
       record a press schedule as a poll-bound tape and keep it only if it replays identically
-  psoxide-test tape-anchor --tape IN --at-poll P --out OUT
-      re-anchor a power-on tape at the poll a [[speed]] anchor holds at (refused if it presses before it)
+  psoxide-test tape-anchor --tape IN --at-poll P --out OUT [--before-out BEFORE]
+      re-anchor a power-on tape at the poll a [[speed]] anchor holds at (refused if it presses before it);
+      with --before-out, an anchor after presses: BEFORE gets the presses that reach it (the window's
+      anchor_tape, from power-on), OUT the rest counted from the anchor (its tape). P is a port-1 poll
+  psoxide-test tape-join --before BEFORE --tape OUT --at-poll A --out JOINED
+      the tape such a window replays on a disc where its anchor first holds at poll A
   psoxide-test pin [--repo DIR] [--write] [--pinned REV] [--main REV] [--crates]
       the SDK pin rule for the game: its pinned commit against SDK main (or REV), over the SDK
       crates the game reaches (--crates lists them); --write records the pin's guest tree
@@ -209,6 +213,7 @@ fn dispatch(args: &[String]) -> Result<ExitCode, String> {
         Some("pin") => pin_command(&args[1..]),
         Some("tape") => tape::run(&args[1..]),
         Some("tape-anchor") => tape::anchor_command(&args[1..]),
+        Some("tape-join") => tape::join_command(&args[1..]),
         Some("clean-stage") => clean_stage(&args[1..]),
         Some("-h" | "--help" | "help") | None => {
             println!("{USAGE}");

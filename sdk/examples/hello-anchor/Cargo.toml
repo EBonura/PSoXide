@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+[package]
+name    = "hello-anchor"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+
+[workspace]
+
+[[bin]]
+name = "hello-anchor"
+path = "src/main.rs"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+
+[dependencies]
+psx-pad = { path = "../../crates/psx-pad" }
+psx-rt  = { path = "../../crates/psx-rt", features = ["host-tty"] }
+
+[features]
+# The load after Start takes 50 VBlanks instead of 20: the same game, a slower disc.
+long-load = []
