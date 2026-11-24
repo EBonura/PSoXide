@@ -87,6 +87,10 @@ pub const BOOT_EXE_NAME: &str = "PSX.EXE";
 
 /// One image of the plan, in image order (the index is its loaded-mask bit).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(
+    clippy::exhaustive_structs,
+    reason = "plain data the disc builders fill in by literal"
+)]
 pub struct ImageSpec {
     /// Root-directory file name (upper-cased); scenes and overlays name the image by it.
     pub name: String,
@@ -131,6 +135,10 @@ pub struct ImageSpec {
 
 /// Where an image's file goes on a scene disc.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[allow(
+    clippy::exhaustive_enums,
+    reason = "the disc builders match every variant to report it"
+)]
 pub enum Placement {
     /// In image order: contiguous with the boot exe while it fits the boot area, else after the
     /// packs.
@@ -150,6 +158,7 @@ pub enum Placement {
 
 impl ImageSpec {
     /// A Program image; `file` `None` stands for the boot exe.
+    #[must_use]
     pub fn program(name: &str, file: Option<Vec<u8>>) -> Self {
         Self {
             name: name.to_ascii_uppercase(),
@@ -168,6 +177,7 @@ impl ImageSpec {
     }
 
     /// An Overlay image owned by the Program named `owner`.
+    #[must_use]
     pub fn overlay(name: &str, file: Vec<u8>, owner: &str, load_addr: u32, class: Class) -> Self {
         Self {
             kind: Kind::Overlay,
@@ -181,6 +191,10 @@ impl ImageSpec {
 
 /// One scene of the plan, in scene order (the index is its id).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(
+    clippy::exhaustive_structs,
+    reason = "plain data the disc builders fill in by literal"
+)]
 pub struct SceneSpec {
     /// Row name, ASCII, up to 16 bytes; [`ImageSpec::reaches`] names scenes by it.
     pub name: String,
@@ -200,6 +214,7 @@ pub struct SceneSpec {
 
 impl SceneSpec {
     /// The scene that starts the Program `image`.
+    #[must_use]
     pub fn start(name: &str, image: &str) -> Self {
         Self {
             name: name.into(),
@@ -213,6 +228,7 @@ impl SceneSpec {
     }
 
     /// A scene entered at `entry` inside `image` (a running Program, or an Overlay).
+    #[must_use]
     pub fn at(name: &str, image: &str, entry: u32) -> Self {
         Self {
             start: false,
@@ -224,6 +240,10 @@ impl SceneSpec {
 
 /// Every image and scene of a disc.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[allow(
+    clippy::exhaustive_structs,
+    reason = "plain data the disc builders fill in by literal"
+)]
 pub struct ScenePlan {
     /// The images, boot exe first.
     pub images: Vec<ImageSpec>,
@@ -236,6 +256,10 @@ pub struct ScenePlan {
 
 /// One Program's compact RAM copy of the table.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(
+    clippy::exhaustive_structs,
+    reason = "plain data the disc builders fill in by literal"
+)]
 pub struct CompactCopy {
     /// The Program's image index.
     pub image: u8,
@@ -249,6 +273,10 @@ pub struct CompactCopy {
 
 /// What [`add_scene_disc_files`] wrote: the rows as pressed and the table.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(
+    clippy::exhaustive_structs,
+    reason = "plain data the disc builders fill in by literal"
+)]
 pub struct SceneDisc {
     /// Scene rows, in id order.
     pub scenes: Vec<SceneRow>,
@@ -264,6 +292,10 @@ pub struct SceneDisc {
 
 /// Why a scene disc could not be laid out. Names are image or scene names.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(
+    clippy::exhaustive_enums,
+    reason = "the disc builders match every variant to report it"
+)]
 pub enum SceneDiscError {
     /// The boot area did not fit (the boot exe starts at LBA 23 here).
     Layout(PlaytestLayoutError),
@@ -385,6 +417,7 @@ fn overlaps(a: Span, b: Span) -> bool {
 /// whole sector. A switch reads only this much, never the unused copy; the
 /// running core is already in the window. `None` when the copy is missing or
 /// anything but sector padding follows it.
+#[must_use]
 pub fn payload_before_core(payload: &[u8], core: &[u8]) -> Option<usize> {
     core_store_offset(payload, core).map(|at| at.next_multiple_of(SECTOR_BYTES))
 }
@@ -412,6 +445,10 @@ fn core_store_offset(payload: &[u8], core: &[u8]) -> Option<usize> {
 /// is the row's core hash (unless `core_hash` names one), and the load size ends before the
 /// exe's stored copy of it. `member_base` and `cdda_delta` are zero; the demo disc's mkdisc sets
 /// them for each member's Programs before `psx_scene_abi::encode_table`.
+///
+/// # Errors
+///
+/// A [`SceneDiscError`] naming the image, scene or placement the disc cannot hold.
 pub fn program_image_row(
     name: &str,
     bytes: &[u8],
@@ -476,6 +513,10 @@ fn check_name(name: &str, seen: &mut Vec<String>) -> Result<(), SceneDiscError> 
 ///
 /// Rows are filled from the files as pressed and checked against the module's
 /// build rules; the table is written into its sector last.
+///
+/// # Errors
+///
+/// A [`SceneDiscError`] naming the image, scene or placement the disc cannot hold.
 pub fn add_scene_disc_files(
     builder: &mut IsoBuilder,
     exe_bytes: Vec<u8>,
@@ -498,6 +539,14 @@ pub fn add_scene_disc_files(
 /// [`add_scene_disc_files`] with further root files (`name`, bytes) after everything else, in
 /// order (mkisopsx's `--file`): an image placed [`Placement::Before`] one of them goes right
 /// before it.
+///
+/// # Errors
+///
+/// A [`SceneDiscError`] naming the image, scene or placement the disc cannot hold.
+///
+/// # Panics
+///
+/// Never: the plan's image count is checked before its boot image is read.
 pub fn add_scene_disc_files_with(
     builder: &mut IsoBuilder,
     mut exe_bytes: Vec<u8>,

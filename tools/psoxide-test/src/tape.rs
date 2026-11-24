@@ -39,7 +39,8 @@ impl PollTape {
                     .into(),
             );
         }
-        let word = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+        let word =
+            |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().expect("a 4-byte slice"));
         let count = word(8) as usize;
         let start_poll = word(12);
         let body = &bytes[POLL_HEADER..];
@@ -52,7 +53,7 @@ impl PollTape {
         }
         let samples = body
             .chunks_exact(SAMPLE)
-            .map(|c| c.try_into().unwrap())
+            .map(|c| c.try_into().expect("a 4-byte chunk"))
             .collect();
         Ok(PollTape {
             start_poll,

@@ -52,6 +52,7 @@ use linkmap::LinkMap;
 /// The patcher's and scanner's command line: `(paths, --check given,
 /// --map path)`, or `None` when `--map` has no value. Other `--` flags are
 /// ignored.
+#[must_use]
 pub fn cli_args(args: &[String]) -> Option<(Vec<String>, bool, Option<String>)> {
     let (mut paths, mut check_only, mut map_path) = (Vec::new(), false, None);
     let mut it = args.iter();
@@ -211,6 +212,7 @@ pub fn open_map(
 
 /// True when `--whole-image` is given: the caller accepts the heuristic
 /// data guard over every word of the load (see [`detect::looks_like_code`]).
+#[must_use]
 pub fn whole_image(args: &[String]) -> bool {
     args.iter().any(|arg| arg == "--whole-image")
 }
@@ -252,6 +254,7 @@ pub fn code_ranges(args: &[String]) -> Result<Vec<(i64, i64)>, String> {
 /// inside the scene core's window (`psx_scene_abi::CORE_WINDOW`), where the
 /// prebuilt core's code links. Nothing between the two, and no range that
 /// straddles into the window or the handoff block above it.
+#[must_use]
 pub fn plausible_code(lo: i64, hi: i64) -> bool {
     let window = psx_scene_abi::CORE_WINDOW;
     (0x8001_0000 <= lo && lo < hi && hi <= 0x801f_8000)

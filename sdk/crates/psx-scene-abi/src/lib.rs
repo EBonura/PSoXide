@@ -44,6 +44,10 @@
 
 /// A half-open address range, `start..end`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(
+    clippy::exhaustive_structs,
+    reason = "plain data of the frozen table and core layout, built by literal in the disc tools"
+)]
 pub struct Span {
     /// First address in the range.
     pub start: u32,
@@ -53,16 +57,19 @@ pub struct Span {
 
 impl Span {
     /// Bytes in the range.
+    #[must_use]
     pub const fn len(&self) -> u32 {
         self.end - self.start
     }
 
     /// True for an empty range.
+    #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.end <= self.start
     }
 
     /// True when `lo..hi` (half-open, non-empty) lies wholly inside.
+    #[must_use]
     pub const fn holds(&self, lo: u32, hi: u32) -> bool {
         self.start <= lo && lo < hi && hi <= self.end
     }
@@ -189,6 +196,10 @@ pub mod stack {
 
     /// What one jump-table slot costs the stack of the program that calls it.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    #[allow(
+        clippy::exhaustive_structs,
+        reason = "plain data of the frozen table and core layout, built by literal in the disc tools"
+    )]
     pub struct Slot {
         /// The slot's address, a [`super::slot`] constant.
         pub addr: u32,
@@ -258,6 +269,7 @@ pub mod stack {
     };
 
     /// The slot that starts at `addr`, `None` for any other address (inside the window or not).
+    #[must_use]
     pub const fn slot_at(addr: u32) -> Option<Slot> {
         let mut i = 0;
         while i < SLOTS.len() {
@@ -447,11 +459,13 @@ pub const SCENE_FLAG_PARTNER_CREDIT: u8 = 1 << 0;
 pub const SCENE_FLAG_START: u8 = 1 << 1;
 
 /// Byte offset of scene row `id`.
+#[must_use]
 pub const fn scene_row_offset(id: u16) -> usize {
     HEADER_BYTES + id as usize * ROW_BYTES
 }
 
 /// Byte offset of image row `index` in a table of `scene_count` scenes: images follow scenes.
+#[must_use]
 pub const fn image_row_offset(scene_count: u16, index: u8) -> usize {
     HEADER_BYTES + (scene_count as usize + index as usize) * ROW_BYTES
 }
@@ -459,6 +473,10 @@ pub const fn image_row_offset(scene_count: u16, index: u8) -> usize {
 /// What an image is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
+#[allow(
+    clippy::exhaustive_enums,
+    reason = "a wire format: a new variant is a new table version, read by every tool and the core"
+)]
 pub enum Kind {
     /// A whole PS-X EXE: its row points at the header sector and loads from the next one.
     Program = 0,
@@ -468,6 +486,7 @@ pub enum Kind {
 
 impl Kind {
     /// The kind for a wire byte, `None` for one this layout does not know.
+    #[must_use]
     pub const fn from_u8(byte: u8) -> Option<Self> {
         match byte {
             0 => Some(Kind::Program),
@@ -484,6 +503,10 @@ impl Kind {
 /// own: its scene row names the Program's image, so it has no class byte either.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
+#[allow(
+    clippy::exhaustive_enums,
+    reason = "a wire format: a new variant is a new table version, read by every tool and the core"
+)]
 pub enum Class {
     /// Loaded with its siblings and kept: one blob, one read, never overlapping a co-resident image.
     ResidentSet = 1,
@@ -500,6 +523,7 @@ pub enum Class {
 
 impl Class {
     /// The class for a wire byte, `None` for 0 or one this layout does not know.
+    #[must_use]
     pub const fn from_u8(byte: u8) -> Option<Self> {
         match byte {
             1 => Some(Class::ResidentSet),
@@ -525,6 +549,10 @@ impl Class {
 /// 0x1A 38  reserved, 0
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(
+    clippy::exhaustive_structs,
+    reason = "plain data of the frozen table and core layout, built by literal in the disc tools"
+)]
 pub struct Header {
     /// Image rows, after the scene rows.
     pub image_count: u16,
@@ -565,6 +593,10 @@ impl Header {
 
     /// Read a header and check what it alone can show: magic, version, row size, sector count,
     /// the counts' limits and the boot scene. [`TableError::status`] gives the core's code.
+    ///
+    /// # Errors
+    ///
+    /// The [`TableError`] naming what in the input breaks the table format.
     pub fn decode(bytes: &[u8; HEADER_BYTES]) -> Result<Self, TableError> {
         if bytes[0x00..0x08] == MAGIC_V1 {
             return Err(TableError::Version1);
@@ -612,6 +644,10 @@ impl Header {
 /// 0x10 16  name, ASCII, NUL-padded
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(
+    clippy::exhaustive_structs,
+    reason = "plain data of the frozen table and core layout, built by literal in the disc tools"
+)]
 pub struct SceneRow {
     /// Scene id; [`encode_table`] checks it equals the row's index.
     pub id: u16,
@@ -631,17 +667,20 @@ pub struct SceneRow {
 
 impl SceneRow {
     /// True when the scene starts its Program ([`SCENE_FLAG_START`]).
+    #[must_use]
     pub const fn starts_program(&self) -> bool {
         self.flags & SCENE_FLAG_START != 0
     }
 
     /// The name as text, up to its first NUL.
+    #[must_use]
     pub fn name_str(&self) -> &str {
         let end = self.name.iter().position(|&b| b == 0).unwrap_or(NAME_BYTES);
         core::str::from_utf8(&self.name[..end]).unwrap_or("")
     }
 
     /// `name` as a row name: truncated to [`NAME_BYTES`], NUL-padded.
+    #[must_use]
     pub fn name_bytes(name: &str) -> [u8; NAME_BYTES] {
         let mut out = [0u8; NAME_BYTES];
         let n = name.len().min(NAME_BYTES);
@@ -662,6 +701,7 @@ impl SceneRow {
     }
 
     /// Read a row. Reserved bytes are not checked: a later layout may use them.
+    #[must_use]
     pub fn decode(bytes: &[u8; ROW_BYTES]) -> Self {
         let mut name = [0u8; NAME_BYTES];
         name.copy_from_slice(&bytes[0x10..0x10 + NAME_BYTES]);
@@ -696,6 +736,10 @@ impl SceneRow {
 /// 0x1F  1  CD-DA base delta (Program; 0 for an Overlay)
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(
+    clippy::exhaustive_structs,
+    reason = "plain data of the frozen table and core layout, built by literal in the disc tools"
+)]
 pub struct ImageRow {
     /// LBA relative to the table base, [`LBA_ABSOLUTE`] for one in the host disc's root.
     pub lba: u32,
@@ -724,6 +768,7 @@ pub struct ImageRow {
 
 impl ImageRow {
     /// The image's RAM range `load_addr..load_addr + size`.
+    #[must_use]
     pub const fn span(&self) -> Span {
         Span {
             start: self.load_addr,
@@ -749,6 +794,7 @@ impl ImageRow {
 
     /// Read a row; `None` for an unknown kind, an Overlay without a known class or a Program
     /// with one.
+    #[must_use]
     pub fn decode(bytes: &[u8; ROW_BYTES]) -> Option<Self> {
         let kind = Kind::from_u8(bytes[0x1c])?;
         let class = match (kind, bytes[0x1d]) {
@@ -774,6 +820,10 @@ impl ImageRow {
 
 /// Why a table could not be written or read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(
+    clippy::exhaustive_enums,
+    reason = "a wire format: a new variant is a new table version, read by every tool and the core"
+)]
 pub enum TableError {
     /// The magic is `PSXSCN01`: a version 1 table.
     Version1,
@@ -817,6 +867,7 @@ pub enum TableError {
 impl TableError {
     /// The status the core returns for a table refused this way, `None` for an error only the
     /// build can make.
+    #[must_use]
     pub const fn status(&self) -> Option<u32> {
         match self {
             TableError::Version1
@@ -845,6 +896,7 @@ const fn check_counts(scenes: usize, images: usize) -> Result<(), TableError> {
 
 /// Word FNV over `bytes` read as little-endian words; a trailing partial
 /// word is not hashed (every input here is whole words).
+#[must_use]
 pub fn word_fnv(bytes: &[u8]) -> u32 {
     let mut hash: u32 = 0x811c_9dc5;
     for word in bytes.chunks_exact(4) {
@@ -858,6 +910,10 @@ pub fn word_fnv(bytes: &[u8]) -> u32 {
 /// length, one sector. Scene rows first, then image rows; the header's checksum is the word FNV
 /// of the rows as written. Only the table's own consistency is checked here (counts, ids, image
 /// indices, the boot scene); what the rows mean is the build's to check.
+///
+/// # Errors
+///
+/// The [`TableError`] naming what in the input breaks the table format.
 pub fn encode_table(
     scenes: &[SceneRow],
     images: &[ImageRow],
@@ -911,6 +967,14 @@ pub fn encode_table(
 /// Read and check a whole table or a compact copy: the header, then the rows' checksum, and for
 /// a compact copy that its scene ids ascend and name images it holds. `table` may be just the
 /// copy's bytes ([`compact_bytes`]).
+///
+/// # Errors
+///
+/// The [`TableError`] naming what in the input breaks the table format.
+///
+/// # Panics
+///
+/// Never: the header is converted from a slice already checked to be 64 bytes long.
 pub fn decode_header_checked(table: &[u8]) -> Result<Header, TableError> {
     let head: &[u8; HEADER_BYTES] = table
         .get(..HEADER_BYTES)
@@ -954,6 +1018,7 @@ fn image_row_absent(table: &[u8], header: &Header, index: u8) -> bool {
 
 /// Scene `id` of a table: row `id` of the disc's table, or the row whose id field is `id` in a
 /// compact copy. `None` for a scene the table does not hold.
+#[must_use]
 pub fn table_scene(table: &[u8], header: &Header, id: u16) -> Option<SceneRow> {
     if !header.compact {
         if id >= header.scene_count {
@@ -973,6 +1038,7 @@ pub fn table_scene(table: &[u8], header: &Header, id: u16) -> Option<SceneRow> {
 
 /// Image row `index` (its mask bit) of a table, `None` past the image count, for a row a compact
 /// copy leaves out (all zero) or for a row that does not decode.
+#[must_use]
 pub fn table_image(table: &[u8], header: &Header, index: u8) -> Option<ImageRow> {
     if u16::from(index) >= header.image_count {
         return None;
@@ -987,6 +1053,7 @@ pub fn table_image(table: &[u8], header: &Header, index: u8) -> Option<ImageRow>
 
 /// Bytes of a compact copy holding `scenes` scene rows and the images below the highest bit of
 /// `images`: `64 + 32 * (scenes + highest bit + 1)`.
+#[must_use]
 pub const fn compact_bytes(scenes: usize, images: u32) -> usize {
     let image_rows = (32 - images.leading_zeros()) as usize;
     HEADER_BYTES + (scenes + image_rows) * ROW_BYTES
@@ -997,6 +1064,10 @@ pub const fn compact_bytes(scenes: usize, images: u32) -> usize {
 /// [`compact_bytes`]. Image rows keep their index (the mask bit), so rows below the highest
 /// reached one that are not reached are written as zeros; the scenes keep their ids. Every
 /// reached scene's image must be reached too.
+///
+/// # Errors
+///
+/// The [`TableError`] naming what in the input breaks the table format.
 pub fn encode_compact(
     table: &[u8],
     scenes: &[u16],
@@ -1077,6 +1148,7 @@ pub mod v1 {
     pub const BLOCK_VERSION: u16 = 1;
 
     /// Version 1 rows a table of `sectors` sectors has room for.
+    #[must_use]
     pub const fn rows_capacity(sectors: u16) -> usize {
         (sectors as usize * super::SECTOR_BYTES - HEADER_BYTES) / ROW_BYTES
     }

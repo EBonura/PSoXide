@@ -50,6 +50,10 @@ const NOBITS: u32 = 8;
 /// section stored below the header, two sections stored over the same bytes, and a header whose
 /// destination or stored size does not describe the bytes written (the size reaches the file's
 /// end rounded up to whole 800h-byte sectors).
+///
+/// # Errors
+///
+/// Why the ELF cannot be written as a PS-X EXE (not a MIPS ELF, or segments the EXE cannot hold).
 pub fn from_elf(bytes: &[u8]) -> Result<Vec<u8>, String> {
     let elf = Elf::parse(bytes)?;
     let (_, head) = elf.section(HEADER)?;
@@ -93,6 +97,10 @@ pub fn from_elf(bytes: &[u8]) -> Result<Vec<u8>, String> {
 /// Refuses a name without the [`OVERLAY_PREFIX`], a section that is missing, empty, not
 /// allocated or without contents, and one whose address is not word aligned (the core's
 /// checksum runs over words; the disc writer pads the file to whole sectors).
+///
+/// # Errors
+///
+/// Why the ELF holds no overlay of that name, or one the overlay file cannot carry.
 pub fn overlay_from_elf(bytes: &[u8], name: &str) -> Result<(u32, Vec<u8>), String> {
     if !name.starts_with(OVERLAY_PREFIX) {
         return Err(format!(
@@ -114,7 +122,7 @@ pub fn overlay_from_elf(bytes: &[u8], name: &str) -> Result<(u32, Vec<u8>), Stri
 }
 
 fn word(image: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes(image[at..at + 4].try_into().unwrap())
+    u32::from_le_bytes(image[at..at + 4].try_into().expect("a 4-byte slice"))
 }
 
 /// The header describes the image: magic, destination right after it, stored size reaching the

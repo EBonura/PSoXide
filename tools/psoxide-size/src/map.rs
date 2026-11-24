@@ -115,6 +115,10 @@ impl LinkMap {
     /// value, so the map holds no second copy to check against.) A map whose
     /// `STACK_INIT` cannot be evaluated (no psoxide.ld link, or a script whose
     /// `RAM_SIZE` only a `--defsym` gives) is an error, never the stock value.
+    ///
+    /// # Errors
+    ///
+    /// When the map gives no value for `STACK_INIT`.
     pub fn stack_init(&self) -> Result<u32, String> {
         self.eval("STACK_INIT", 0).ok_or_else(|| {
             "the map gives no STACK_INIT this tool can evaluate (not a psoxide.ld link, or its \
@@ -125,6 +129,11 @@ impl LinkMap {
 
     /// The top of the RAM the program links for, `RAM_BASE + RAM_SIZE` (0x80200000 for a
     /// stock link): [`LinkMap::stack_init`] plus the 0x100 psoxide.ld leaves above it.
+    ///
+    /// # Errors
+    ///
+    /// When `STACK_INIT` or `RAM_BASE + RAM_SIZE` cannot be evaluated from the map, or they are
+    /// not the 0x100 apart psoxide.ld leaves.
     pub fn ram_top(&self) -> Result<u32, String> {
         let init = self.stack_init()?;
         let top = self.eval("RAM_BASE + RAM_SIZE", 0).ok_or(
@@ -247,11 +256,22 @@ pub struct Image {
 }
 
 impl Image {
+    /// The EXE's stored bytes and load address.
+    ///
+    /// # Errors
+    ///
+    /// When the file is shorter than the 2 KiB header or does not start with `PS-X EXE`.
+    ///
+    /// # Panics
+    ///
+    /// Never: each header word is read from a 4-byte slice of a file already checked to be
+    /// longer than the header.
     pub fn parse(file: &[u8]) -> Result<Image, String> {
         if file.len() < 0x800 || &file[0..8] != b"PS-X EXE" {
             return Err("not a PS-X EXE".into());
         }
-        let word = |at: usize| u32::from_le_bytes(file[at..at + 4].try_into().unwrap());
+        let word =
+            |at: usize| u32::from_le_bytes(file[at..at + 4].try_into().expect("a 4-byte slice"));
         let load = word(0x18);
         let size = word(0x1c) as usize;
         let end = (0x800 + size).min(file.len());
@@ -275,9 +295,14 @@ impl Image {
         self.bytes.get(start..start + size as usize)
     }
 
+    /// The little-endian word at `vma` when it is inside the file image.
+    ///
+    /// # Panics
+    ///
+    /// Never: the word is read from a 4-byte slice `at` returned.
     pub fn word(&self, vma: u32) -> Option<u32> {
         let b = self.at(vma, 4)?;
-        Some(u32::from_le_bytes(b.try_into().unwrap()))
+        Some(u32::from_le_bytes(b.try_into().expect("a 4-byte slice")))
     }
 }
 

@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use std::fmt;
 use std::io::Write;
 use std::path::Path;
-use std::rc::Rc;
 
 use psx_scene_abi::stack::Slot;
 use psx_scene_abi::{slot, CORE_WINDOW};
@@ -232,6 +231,7 @@ type Depth = Result<(i64, Vec<String>), GuardError>;
 type HookDepth = Result<(i64, Vec<String>), String>;
 
 /// The program's scene core hooks, found once per walk.
+#[derive(Clone)]
 struct CoreHooks {
     /// The idle hook (`psx_core_set_idle_hook`'s argument), run by every slot that waits.
     idle: HookDepth,
@@ -245,7 +245,7 @@ enum CoreCalls<'a> {
     /// accepted as hooks for the registrations the scan cannot resolve (`--core-hook`).
     Program {
         named: &'a [Regex],
-        hooks: Option<Rc<CoreHooks>>,
+        hooks: Option<CoreHooks>,
     },
     /// A hook's own tree, which may not call a slot that runs hooks.
     Hook(String),
@@ -332,7 +332,7 @@ impl<'a> Walker<'a> {
             CoreCalls::Program { named, hooks } => {
                 let named = *named;
                 if hooks.is_none() {
-                    *hooks = Some(Rc::new(core_hooks(self.image, self.forbidden, named)));
+                    *hooks = Some(core_hooks(self.image, self.forbidden, named));
                 }
                 hooks.clone()
             }

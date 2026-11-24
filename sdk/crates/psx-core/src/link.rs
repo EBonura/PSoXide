@@ -25,6 +25,10 @@ use crate::{fatal, fnv};
 
 /// The core image, word aligned.
 #[repr(C, align(4))]
+#[allow(
+    clippy::exhaustive_structs,
+    reason = "the image's bytes and nothing else, built by include_bytes"
+)]
 pub struct Image<const N: usize>(pub [u8; N]);
 
 const IMAGE_BYTES: &[u8] = include_bytes!(env!("PSX_CORE_IMAGE"));
@@ -260,6 +264,10 @@ fn table_ready(table: &mut [u32]) -> u32 {
 /// sector passes through the stack while it is read, so it is never inlined into its caller.
 /// Returns the words kept, or the code of a failed read, a table of another version (0x21) or a
 /// `table` too small for it (0x24).
+///
+/// # Errors
+///
+/// The core's code: a failed read, a table of another version (0x21), a `table` too small (0x24).
 #[inline(never)]
 pub fn read_table(table: &mut [u32]) -> Result<usize, u32> {
     let mut sector = [0u32; 512];
@@ -298,12 +306,20 @@ pub unsafe fn read(lba: u32, sectors: u32, dst: *mut u32, hook: Option<extern "C
 /// its own proof is owed to the core's next command, as for [`read`]. A program that drives the
 /// controller itself afterwards (`psx-io`'s `core-cd` register ops) sends its first command through
 /// [`cd`] op 0, which proves the stop, not as a no-wait op 1.
+#[allow(
+    clippy::must_use_candidate,
+    reason = "games on the core already call it for its effect; must_use would warn in each of them"
+)]
 pub fn pause() -> u32 {
     // SAFETY: ABI call.
     unsafe { psx_core_pause() }
 }
 
 /// A stream client takes the drive.
+#[allow(
+    clippy::must_use_candidate,
+    reason = "games on the core already call it for its effect; must_use would warn in each of them"
+)]
 pub fn client_attach() -> u32 {
     // SAFETY: ABI call.
     unsafe { psx_core_client_attach() }
@@ -328,6 +344,10 @@ pub fn music_yield() {
 }
 
 /// Open a stream at member-relative `lba`.
+#[allow(
+    clippy::must_use_candidate,
+    reason = "games on the core already call it for its effect; must_use would warn in each of them"
+)]
 pub fn stream_open(lba: u32, flags: u32) -> u32 {
     // SAFETY: ABI call.
     unsafe { psx_core_stream_open(lba, flags) }
