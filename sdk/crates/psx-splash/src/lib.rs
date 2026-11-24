@@ -34,7 +34,7 @@
 //! [`show`] leaves the display on the buffer it last drew, 2/128 of full brightness, which
 //! is black to the eye, and does not clear it.
 //!
-//! # VRAM it uses and leaves behind
+//! # VRAM it uses, keeps and discards
 //!
 //! | what | where |
 //! |---|---|
@@ -44,8 +44,17 @@
 //! | the logo's palette and its glint copy | x 768..1024, y 258 and 259 |
 //! | the 8x8 `BASIC` font | texture page x 320 (an atlas of 256 by 32 texels), palette at x 320, y 256 |
 //!
-//! Nothing is put back afterwards; a game uploads its own textures over these columns, as
-//! the hand-written splashes it replaces did.
+//! When the splash ends it discards what nothing after it uses: each of these rectangles is
+//! written black (0x0000, transparent as a texel) from the splash's boot-only code, so no later
+//! draw can show the splash's art. The font is the one resource a program may go on using: a
+//! program that calls [`show_keeping_font`] (or [`show_with_partner_keeping_font`]) gets the
+//! atlas's handle back and draws with that copy, with no second upload and no resident upload
+//! code; its rectangle and palette stay. Which one happens is decided at link time by the call
+//! the program makes, so there is no flag to set. Clears are GPU fills, so the mark's, the
+//! logo's and the font's rectangles are rounded out to 16 halfwords, inside the columns above;
+//! palette rows are cleared exactly. Nothing is put back: VRAM a program wrote before the splash
+//! and inside these rectangles is cleared too. On a disc of several programs only the first one
+//! plays the splash; a later program finds these rectangles clean and uploads its own font.
 //!
 //! ```ignore
 //! let mut pads = psx_pad::Controllers::new();
@@ -72,7 +81,7 @@ use psx_font::fonts::BASIC;
 use psx_font::FontAtlas;
 use psx_gpu::display::{DoubleBuffer, Resolution};
 use psx_gpu::material::{BlendMode, TextureMaterial};
-use psx_gpu::prim::{QuadTexturedGouraud, QuadTexturedMaterial};
+use psx_gpu::prim::{FillRect, QuadTexturedGouraud, QuadTexturedMaterial};
 use psx_gpu::Gpu;
 use psx_pad::{button, ButtonState};
 use psx_vram::{Clut, TextureDepth, TexturePage, VramRect};
@@ -209,7 +218,34 @@ pub fn show(
     brightness: Brightness,
     buttons: impl FnMut() -> ButtonState,
 ) {
+    if entered_by_core_switch() {
+        return;
+    }
     play(gpu, buffers, line, None, brightness, &mut { buttons });
+    discard_font(gpu);
+}
+
+/// [`show`], keeping the splash's font in VRAM for the program: returns the handle of that atlas
+/// (the 8x8 `BASIC` font, texture page x 320, palette at x 320, y 256), to draw with instead of
+/// uploading the font again. Everything else the splash uploaded is discarded as by [`show`].
+#[inline(never)]
+#[cfg_attr(target_arch = "mips", optimize(size))]
+#[cfg_attr(
+    target_arch = "mips",
+    link_section = ".text.boot_only.psx_splash.show_keeping_font"
+)]
+pub fn show_keeping_font(
+    gpu: &mut Gpu,
+    buffers: &mut DoubleBuffer,
+    line: &str,
+    brightness: Brightness,
+    buttons: impl FnMut() -> ButtonState,
+) -> FontAtlas {
+    if entered_by_core_switch() {
+        return upload_font_only();
+    }
+    play(gpu, buffers, line, None, brightness, &mut { buttons });
+    KEPT_FONT
 }
 
 /// [`show`] with a partner's logo beside the mark and its line under `line`.
@@ -227,10 +263,82 @@ pub fn show_with_partner(
     brightness: Brightness,
     buttons: impl FnMut() -> ButtonState,
 ) {
+    if entered_by_core_switch() {
+        return;
+    }
     play(gpu, buffers, line, Some(partner), brightness, &mut {
         buttons
     });
+    discard_font(gpu);
 }
+
+/// [`show_with_partner`], keeping the splash's font as [`show_keeping_font`] does.
+#[inline(never)]
+#[cfg_attr(target_arch = "mips", optimize(size))]
+#[cfg_attr(
+    target_arch = "mips",
+    link_section = ".text.boot_only.psx_splash.show_with_partner_keeping_font"
+)]
+pub fn show_with_partner_keeping_font(
+    gpu: &mut Gpu,
+    buffers: &mut DoubleBuffer,
+    line: &str,
+    partner: &Partner<'_>,
+    brightness: Brightness,
+    buttons: impl FnMut() -> ButtonState,
+) -> FontAtlas {
+    if entered_by_core_switch() {
+        return upload_font_only();
+    }
+    play(gpu, buffers, line, Some(partner), brightness, &mut {
+        buttons
+    });
+    KEPT_FONT
+}
+
+/// Whether this program was entered by a scene-core switch (the handoff block is valid and says
+/// so): then it is not the disc's first program, and the splash has played already. A program
+/// that is not on the core reads its own stack there, which never holds the block's two magic
+/// words, so it plays the splash.
+#[cfg_attr(
+    target_arch = "mips",
+    link_section = ".text.boot_inner.psx_splash.entered_by_core_switch"
+)]
+fn entered_by_core_switch() -> bool {
+    #[cfg(target_arch = "mips")]
+    {
+        use psx_scene_abi::block;
+        let at = |offset: usize| {
+            // SAFETY: the handoff block's span is mapped RAM; a volatile read of an aligned word.
+            unsafe {
+                core::ptr::read_volatile(
+                    (psx_scene_abi::HANDOFF_BLOCK.start as usize + offset) as *const u32,
+                )
+            }
+        };
+        at(block::OFF_MAGIC) == block::MAGIC
+            && at(block::OFF_MAGIC_INV) == block::MAGIC_INV
+            && at(block::OFF_FLAGS) & block::FLAG_CORE_ENTRY != 0
+    }
+    #[cfg(not(target_arch = "mips"))]
+    {
+        false
+    }
+}
+
+/// The font alone, for a program entered by a core switch that keeps it: the atlas it would have
+/// had after the splash, with no splash.
+#[cfg_attr(
+    target_arch = "mips",
+    link_section = ".text.boot_inner.psx_splash.upload_font_only"
+)]
+fn upload_font_only() -> FontAtlas {
+    FontAtlas::upload_inline(&FONT, FONT_TPAGE, FONT_CLUT, upload_16bpp)
+}
+
+/// The handle [`show_keeping_font`] returns: the resident `BASIC` font (the program draws with
+/// its metrics) at the place the splash uploaded it.
+const KEPT_FONT: FontAtlas = FontAtlas::uploaded(&BASIC, FONT_TPAGE, FONT_CLUT);
 
 /// A picture on screen: where it is drawn, its texels' size, and its two materials (opaque, and
 /// the additive one the glint is drawn with).
@@ -452,6 +560,62 @@ fn play(
         frame += 1;
     }
     psx_rt::present::set_cap(cap);
+    discard_art(gpu, partner);
+}
+
+/// Black over the mark, its palettes and a partner's logo and palettes: nothing after the splash
+/// draws them. GP0(02h) fills for the texture pages (16-halfword steps), exact uploads for the
+/// palette rows.
+#[cfg_attr(
+    target_arch = "mips",
+    link_section = ".text.boot_inner.psx_splash.discard_art"
+)]
+fn discard_art(gpu: &mut Gpu, partner: Option<&Partner<'_>>) {
+    fill_black(gpu, MARK_TPAGE.x(), MARK_TPAGE.y(), 32, 128);
+    let zeros = [0u16; 256];
+    upload_16bpp(
+        VramRect::new(MARK_CLUT.x(), MARK_CLUT.y(), 32, 1),
+        &zeros[..32],
+    );
+    if let Some(p) = partner {
+        fill_black(gpu, LOGO_TPAGE.x(), LOGO_TPAGE.y(), p.width / 2, p.height);
+        upload_16bpp(VramRect::new(LOGO_CLUT.x(), LOGO_CLUT.y(), 256, 1), &zeros);
+        upload_16bpp(
+            VramRect::new(LOGO_GLINT_CLUT.x(), LOGO_GLINT_CLUT.y(), 256, 1),
+            &zeros,
+        );
+    }
+}
+
+/// Black over the font's atlas and its palette, for a program that did not keep it.
+#[inline(never)]
+#[cfg_attr(
+    target_arch = "mips",
+    link_section = ".text.boot_inner.psx_splash.discard_font"
+)]
+fn discard_font(gpu: &mut Gpu) {
+    let (w, h) = font_rect();
+    fill_black(gpu, FONT_TPAGE.x(), FONT_TPAGE.y(), w, h);
+    upload_16bpp(VramRect::new(FONT_CLUT.x(), FONT_CLUT.y(), 2, 1), &[0, 0]);
+}
+
+/// The font atlas's size in VRAM halfwords, as `FontAtlas::upload` lays it out.
+const fn font_rect() -> (u16, u16) {
+    let cell_w = (BASIC.glyph_w as u16).div_ceil(4) * 4;
+    let per_row = 256 / cell_w;
+    let rows = BASIC.glyph_count.div_ceil(per_row);
+    ((per_row * cell_w).div_ceil(4), rows * BASIC.glyph_h as u16)
+}
+
+/// A GP0(02h) fill of black (the GPU rounds `w` up to 16 halfwords; it ignores the drawing area
+/// and the mask bit), waited for so the caller's next upload cannot overtake it.
+#[cfg_attr(
+    target_arch = "mips",
+    link_section = ".text.boot_inner.psx_splash.fill_black"
+)]
+fn fill_black(gpu: &mut Gpu, x: u16, y: u16, w: u16, h: u16) {
+    gpu.draw(&FillRect::new((x, y), (w, h), (0, 0, 0)));
+    gpu.wait_idle();
 }
 
 /// A picture, `(dx, dy)` off its place, at fade `level` (0 to 0x80).
@@ -622,5 +786,26 @@ mod enter_tests {
         assert_eq!(enter(ENTER, 0, SLIDE), (0, 0x80));
         assert_eq!(enter(-5, 0, SLIDE), (SLIDE as i16, 0));
         assert_eq!(enter(500, 0, SLIDE), (0, 0x80));
+    }
+}
+
+#[cfg(test)]
+mod resource_tests {
+    extern crate std;
+    use super::*;
+    use std::format;
+
+    fn no_upload(_: VramRect, _: &[u16]) {}
+
+    #[test]
+    fn the_kept_font_is_the_atlas_the_splash_uploads() {
+        let uploaded = FontAtlas::upload_inline(&BASIC, FONT_TPAGE, FONT_CLUT, no_upload);
+        assert_eq!(format!("{KEPT_FONT:?}"), format!("{uploaded:?}"));
+    }
+
+    #[test]
+    fn the_discarded_font_rectangle_is_the_documented_one() {
+        // 256 by 32 texels at 4 bits a texel.
+        assert_eq!(font_rect(), (64, 32));
     }
 }

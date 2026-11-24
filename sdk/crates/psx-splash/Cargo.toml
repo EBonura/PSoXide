@@ -13,6 +13,7 @@ psx-font    = { workspace = true }
 psx-gpu     = { workspace = true }
 psx-pad     = { workspace = true }
 psx-rt      = { workspace = true }
+psx-scene-abi = { path = "../psx-scene-abi" }
 psx-vram    = { workspace = true }
 
 [lints]

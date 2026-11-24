@@ -98,3 +98,12 @@ cp "$GUEST_TARGET/mipsel-sony-psx/release/hello-boot.exe" "$OUT/reserve.exe"
 map=$(ls -t "$GUEST_TARGET"/mipsel-sony-psx/psoxide-pgo-maps/*.map | head -1)
 cp "$map" "$OUT/reserve.map"
 "$MKISO" --diag --exe "$OUT/reserve.exe" --volume HELLOBOOT --out "$OUT/reserve.bin"
+
+# The program that keeps the splash's font (kept.bin): the atlas and its palette stay in VRAM and
+# the program draws with them; the plain build's VRAM has both rectangles black after the splash.
+EXTRA=""
+guest --features kept-font
+cp "$GUEST_TARGET/mipsel-sony-psx/release/hello-boot.exe" "$OUT/kept.exe"
+map=$(ls -t "$GUEST_TARGET"/mipsel-sony-psx/psoxide-pgo-maps/*.map | head -1)
+cp "$map" "$OUT/kept.map"
+"$MKISO" --diag --exe "$OUT/kept.exe" --volume HELLOBOOT --out "$OUT/kept.bin"

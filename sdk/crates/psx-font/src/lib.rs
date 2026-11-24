@@ -928,6 +928,31 @@ impl FontAtlas {
         upload_atlas!(font, tpage, clut, upload_16bpp, upload_clut)
     }
 
+    /// The handle of an atlas of `font` that is already in VRAM at `tpage` and `clut`, laid out
+    /// as [`Self::upload`] lays it out (cells padded to 4 texels, as many to a row as fit in 256
+    /// texels). Uploads nothing and links no upload code: psx-splash hands its font to a program
+    /// this way (`psx_splash::show_keeping_font`), so the program draws with the splash's copy.
+    #[must_use]
+    pub const fn uploaded(font: &'static BitmapFont, tpage: TexturePage, clut: Clut) -> Self {
+        let cell_w = (font.glyph_w as u16).div_ceil(4) * 4;
+        let mut max_cols = Self::MAX_ATLAS_W_TEXELS / cell_w;
+        if max_cols == 0 {
+            max_cols = 1;
+        }
+        let glyphs_per_row = if font.glyph_count < max_cols {
+            font.glyph_count
+        } else {
+            max_cols
+        };
+        Self {
+            font,
+            tpage,
+            clut_word: clut.uv_word(),
+            glyphs_per_row,
+            uv_origin: (0, 0),
+        }
+    }
+
     /// Pixel width of `text` when rendered with this atlas.
     pub fn text_width(&self, text: &str) -> u16 {
         self.font.text_width(text)

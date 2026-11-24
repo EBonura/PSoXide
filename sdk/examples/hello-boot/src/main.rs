@@ -106,7 +106,16 @@ fn main() {
     let mut pads = Controllers::new();
     // A brightness other than the default: the splash draws the overlay too.
     let brightness = Brightness::new(-2);
+    #[cfg(not(feature = "kept-font"))]
     psx_splash::show(
+        &mut gpu,
+        &mut buffers,
+        "Built with PSoXide",
+        brightness,
+        || pads.poll(&mut port, Port::One).buttons,
+    );
+    #[cfg(feature = "kept-font")]
+    let font = psx_splash::show_keeping_font(
         &mut gpu,
         &mut buffers,
         "Built with PSoXide",
@@ -151,6 +160,14 @@ fn main() {
             Clut::new(320, 256),
         );
         tty::print("hello-boot: resident font, width ");
+        tty::print_hex_u32(u32::from(font.text_width("PASS")));
+        tty::println("");
+    }
+    // With feature `kept-font`: text drawn with the splash's atlas, which stayed in VRAM.
+    #[cfg(feature = "kept-font")]
+    {
+        font.draw_text(8, 8, "PASS", (128, 128, 128));
+        tty::print("hello-boot: kept font, width ");
         tty::print_hex_u32(u32::from(font.text_width("PASS")));
         tty::println("");
     }

@@ -211,6 +211,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "psx-scene-abi"
+version = "0.1.0"
+
+[[package]]
 name = "psx-settings"
 version = "0.1.0"
 dependencies = [
@@ -237,6 +241,7 @@ dependencies = [
  "psx-gpu",
  "psx-pad",
  "psx-rt",
+ "psx-scene-abi",
  "psx-vram",
 ]
 

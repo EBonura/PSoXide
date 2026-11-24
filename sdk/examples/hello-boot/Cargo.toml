@@ -27,6 +27,9 @@ unprefixed = []
 # Resident code uploads a font after boot memory is overwritten: its own resident copy of the
 # upload, never the splash's boot-only one (psx-splash compiles its own). Run it: `hello-boot: PASS`.
 resident-font = ["dep:psx-font", "dep:psx-vram"]
+# The program keeps the splash's font (psx_splash::show_keeping_font) and draws with that atlas
+# after boot memory is overwritten: no upload of its own (kept.bin).
+kept-font = ["dep:psx-font"]
 
 [dependencies]
 psx-core    = { path = "../../crates/psx-core", features = ["link"] }
