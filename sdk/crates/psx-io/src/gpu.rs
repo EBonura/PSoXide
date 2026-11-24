@@ -140,6 +140,29 @@ pub fn write_display_controls<const N: usize>(words: [u32; N]) {
     }
 }
 
+/// The loading frame: the VRAM rectangle (x, y, width, height) a launcher shows while the scene
+/// core loads the next program (a 320x240 15-bit display from (0, 0)). `psx_rt`'s entry state
+/// clears all of VRAM but this, so the frame stays on screen through the new program's start;
+/// [`clear_loading_frame`] clears it at the program's first display set-up (psx-gpu's
+/// `Gpu::new`; a layer with its own GPU reset calls it too). A program booted alone shows what the
+/// BIOS left there until then. Either way the program finds all of VRAM black once its display is
+/// set up.
+pub const LOADING_FRAME: (u16, u16, u16, u16) = (0, 0, 320, 240);
+
+/// Fill [`LOADING_FRAME`] black (GP0(02h)), waiting for the GPU to take the command first.
+pub fn clear_loading_frame() {
+    let (x, y, w, h) = LOADING_FRAME;
+    wait_command_ready();
+    for word in [
+        0x0200_0000,
+        (u32::from(y) << 16) | u32::from(x),
+        (u32::from(h) << 16) | u32::from(w),
+    ] {
+        // SAFETY: GP0 is the GPU's aligned 32-bit command port; a fill is these three words.
+        unsafe { crate::write_u32(GP0, word) }
+    }
+}
+
 /// The function a display flip waits in, installed by the runtime that owns the
 /// VBlank clock (`psx_rt::interrupts::install_vblank_counter`).
 static mut FLIP_PACER: Option<fn()> = None;

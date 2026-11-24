@@ -37,13 +37,18 @@
 //!   unmuted with transfer mode stopped. A program that plays XA or CD-DA turns the input on
 //!   and sets its volume (`psx_spu::enable_cd_audio` and `set_cd_volume`) without having to
 //!   know what the BIOS left in the control register.
-//! * GPU: GP1(00h) (texture page, texture window and mask bits zero: mask set off, mask check
-//!   off), GP1(01h) (command buffer empty), every halfword of VRAM black (0x0000, mask bit
-//!   clear) by four GP0(02h) fills, then the splash's environment: drawing area 0..319 x
-//!   0..239, drawing offset 0, NTSC 320x240 15-bit display shown from (0, 0), display on (a
-//!   black screen). A program booted alone and one entered by a scene-core switch start from
-//!   the same GPU and the same VRAM, whatever the BIOS or the previous program left (a launcher's
-//!   mask check would otherwise refuse every upload of the new program, the 360X film's case).
+//! * GPU: command buffer reset (GP1(01h)); texture page 0 with dithering off, texture window
+//!   off, drawing area 0..319 x 0..239 at offset 0, mask set and mask check off (GP0(E1h..E6h));
+//!   all of VRAM black (0x0000) except the loading frame (`psx_io::gpu::LOADING_FRAME`, 0..320 x
+//!   0..240). The display itself is not touched, so a launcher's loading frame stays on screen
+//!   until the program's first display set-up, which clears that rectangle too (psx-gpu's
+//!   `Gpu::new`). A program booted alone and one entered by a scene-core switch find the same GPU
+//!   settings and, once their display is set up, the same all-black VRAM (a launcher's mask check
+//!   would otherwise refuse every upload of the new program, the 360X film's case).
+//! * The CD drive's audio mixer at unity, no cross-feed, ADPCM unmuted (register writes; the
+//!   drive is not commanded). SPU sample memory is not cleared (512 KiB would take longer than a
+//!   program switch): its contents are undefined on entry, so a program uploads every sample it
+//!   plays and clears the reverb work area before it turns reverb on.
 //! * The instruction cache is flushed and the cache control register set to its running value
 //!   ([`crate::cache::flush_instruction_cache`]), so the scratchpad and the caches are
 //!   configured by the program and not by the BIOS.
@@ -249,6 +254,7 @@ pub fn set_entry_state() {
 
         spu_entry_state();
         gpu_entry_state();
+        cd_mixer_entry_state();
 
         // Last: the timers and SIO0 above may have latched a bit.
         psx_io::irq::acknowledge(u32::MAX);
@@ -367,44 +373,59 @@ unsafe fn write_status(value: u32) {
 #[inline(never)]
 unsafe fn gpu_entry_state() {
     use psx_hw::gpu::{gp0, gp1, GP0, GP1};
+    // Not GP1(00h): that turns the display off, and a launcher's loading frame must stay up until
+    // the program's own display set-up. The drawing settings instead, one by one.
     // SAFETY: GP1 and GP0 are the GPU's own ports; the caller owns the GPU (see above).
-    unsafe {
-        psx_io::write_u32(GP1, gp1::RESET);
-        psx_io::write_u32(GP1, gp1::RESET_CMD_BUFFER);
-    }
-    // Four 512x256 fills: a fill's width and height fields cannot say 1024 or 512.
-    let mut i = 0u32;
-    while i < 4 {
-        psx_io::gpu::wait_command_ready();
-        // SAFETY: as above; a fill is three words (colour, top-left y:x, height:width).
-        unsafe {
-            psx_io::write_u32(GP0, gp0::fill_rect(0, 0, 0));
-            psx_io::write_u32(GP0, ((i >> 1) << 24) | ((i & 1) << 9));
-            psx_io::write_u32(GP0, (256 << 16) | 512);
-        }
-        i += 1;
-    }
+    unsafe { psx_io::write_u32(GP1, gp1::RESET_CMD_BUFFER) };
     psx_io::gpu::wait_command_ready();
-    // The splash's environment, black: drawing into 0..320 x 0..240 at offset 0, NTSC 320x240
-    // 15 bits a pixel shown from (0, 0), display on. GP1(00h) left the texture page, texture
-    // window and mask bits zero (mask set off, mask check off).
     for word in [
+        0xe100_0000, // texture page 0, dithering and drawing to the display area off
+        0xe200_0000, // texture window off
         gp0::draw_area_top_left(0, 0),
         gp0::draw_area_bottom_right(319, 239),
         gp0::draw_offset(0, 0),
+        0xe600_0000, // mask bit set off, mask check off
     ] {
         // SAFETY: as above, one-word GP0 settings.
         unsafe { psx_io::write_u32(GP0, word) };
     }
-    for word in [
-        gp1::display_mode(1, 0, false, false, false),
-        gp1::h_display_range(0x260, 0x260 + 320 * 8),
-        gp1::v_display_range(0x10, 0x10 + 240),
-        gp1::display_start(0, 0),
-        gp1::display_enable(true),
+    // All of VRAM black but the loading frame (psx_io::gpu::LOADING_FRAME, 0..320 x 0..240):
+    // right of it, then below it in two halves (a fill cannot say 1024 wide).
+    for (x, y, w, h) in [
+        (320u32, 0u32, 704u32, 240u32),
+        (0, 240, 512, 272),
+        (512, 240, 512, 272),
     ] {
-        // SAFETY: as above.
-        unsafe { psx_io::write_u32(GP1, word) };
+        psx_io::gpu::wait_command_ready();
+        // SAFETY: as above; a fill is three words (colour, top-left y:x, height:width).
+        unsafe {
+            psx_io::write_u32(GP0, gp0::fill_rect(0, 0, 0));
+            psx_io::write_u32(GP0, (y << 16) | x);
+            psx_io::write_u32(GP0, (h << 16) | w);
+        }
+    }
+    psx_io::gpu::wait_command_ready();
+}
+
+/// The CD drive's audio mixer at unity (left to left and right to right full, no cross-feed,
+/// ADPCM unmuted), whatever a BIOS or a launcher's music left: register writes only, no command.
+///
+/// # Safety
+///
+/// As [`set_entry_state`]'s block: nothing else drives the CD controller's registers now.
+#[cfg(target_arch = "mips")]
+unsafe fn cd_mixer_entry_state() {
+    use psx_hw::cd::reg;
+    // SAFETY: the CD controller's byte registers; index selects which function each one has.
+    unsafe {
+        psx_io::write_u8(reg::INDEX, 2);
+        psx_io::write_u8(reg::PARAMETER, 0x80);
+        psx_io::write_u8(reg::REQUEST_IRQ, 0);
+        psx_io::write_u8(reg::INDEX, 3);
+        psx_io::write_u8(reg::COMMAND_RESPONSE, 0x80);
+        psx_io::write_u8(reg::PARAMETER, 0);
+        psx_io::write_u8(reg::REQUEST_IRQ, 0x20);
+        psx_io::write_u8(reg::INDEX, 0);
     }
 }
 

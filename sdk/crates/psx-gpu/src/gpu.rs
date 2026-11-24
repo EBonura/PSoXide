@@ -220,6 +220,9 @@ pub(crate) fn reset(display: DisplayConfig) {
         gp1::dma_direction(DmaDirection::CpuToGp0 as u32),
         gp1::display_enable(true),
     ]);
+    // The program's first display set-up: the launcher's loading frame goes (psx-rt's entry
+    // state left only that rectangle of VRAM uncleared).
+    psx_io::gpu::clear_loading_frame();
 }
 
 #[inline]
