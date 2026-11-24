@@ -407,6 +407,15 @@ fn an_overlay_evicts_exactly_the_images_its_range_intersects() {
     let level = pressed.scenes[1];
     assert_eq!((level.image, level.entry, level.flags), (3, 0x8010_0800, 0));
 
+    // A VOLATILE overlay is pressed as a Swap is (it may lie over a RESIDENT_SET of its owner),
+    // and its evicts word holds its own bit too: the core never keeps it loaded.
+    let mut plan = overlay_plan();
+    plan.images[3].class = Some(Class::Volatile);
+    let (_, volatile) = press(boot.clone(), &plan, false).unwrap();
+    assert_eq!(volatile.images[3].class, Some(Class::Volatile));
+    assert_eq!(volatile.images[3].evicts, 1 << 1 | 1 << 3);
+    assert_eq!(volatile.images[1].evicts, 1 << 3);
+
     // Two RESIDENT_SETs of one owner are co-resident: overlapping, refused, naming both.
     let mut plan = overlay_plan();
     plan.images[2].load_addr = 0x8010_0800;

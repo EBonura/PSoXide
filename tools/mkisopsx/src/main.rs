@@ -465,6 +465,7 @@ fn main() -> ExitCode {
                         image.class.map_or("-", |c| match c {
                             psx_iso::scenes::abi::Class::ResidentSet => "resident",
                             psx_iso::scenes::abi::Class::Swap => "swap",
+                            psx_iso::scenes::abi::Class::Volatile => "volatile",
                         }),
                         image.lba,
                         image.size,

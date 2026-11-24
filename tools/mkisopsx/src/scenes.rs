@@ -7,6 +7,7 @@
 //! program GAME.EXE  game.exe   reaches=BOOT,GAME
 //! overlay TOWN.OVL  town.bin   owner=PSX.EXE load=0x80100000 class=resident
 //! overlay BOSS.OVL  boss.bin   owner=PSX.EXE load=0x80140000 class=swap
+//! overlay MENU.OVL  menu.ovl   owner=PSX.EXE load=0x80140000 class=volatile
 //! # scenes, in id order
 //! scene   BOOT      PSX.EXE    start
 //! scene   MENU      PSX.EXE    entry=0x80012345
@@ -23,7 +24,8 @@
 //! below PAYLOAD_END), `reaches=<scene>,...` (the scenes it can switch to, for
 //! its compact table copy; default every scene). Overlay options, all needed
 //! but `class`'s default `swap`: `owner=<program>`, `load=<addr>`,
-//! `class=resident|swap`.
+//! `class=resident|swap|volatile` (`volatile`: a swap overlay over memory its
+//! owner also uses, which the core reads again at every load).
 //!
 //! A scene line is `scene NAME IMAGE (start | entry=<addr>) [options]`:
 //! `start` for the one scene that starts each Program (its entry is the exe's
@@ -145,6 +147,7 @@ fn overlay<'a>(
             Some(("load", v)) => load = Some(number::<u32>("load", v)?),
             Some(("class", "resident")) => class = Class::ResidentSet,
             Some(("class", "swap")) => class = Class::Swap,
+            Some(("class", "volatile")) => class = Class::Volatile,
             _ => return Err(format!("unknown overlay option {option}")),
         }
     }
@@ -242,6 +245,15 @@ mod tests {
             (16, SCENE_FLAG_PARTNER_CREDIT, 2)
         );
         assert!(plan.core_image.is_none());
+    }
+
+    #[test]
+    fn an_overlay_over_memory_its_owner_reuses_is_volatile() {
+        let text = "program PSX.EXE - reserve=0x80100000-0x80180000\n\
+            overlay MENU.OVL menu.ovl owner=PSX.EXE load=0x80100000 class=volatile\n\
+            scene BOOT PSX.EXE start\n";
+        let plan = parse_manifest(text, Path::new("."), &mut |_| Ok(vec![0; 4])).unwrap();
+        assert_eq!(plan.images[1].class, Some(Class::Volatile));
     }
 
     #[test]

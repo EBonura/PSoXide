@@ -945,7 +945,9 @@ mod switch {
     }
 
     /// Read the image in the state's rows into its range unless its bit says it is there, check
-    /// it, flush the I-cache and update the mask.
+    /// it, flush the I-cache and update the mask. The evicts word is applied after the image's
+    /// own bit: a VOLATILE overlay (its owner also uses its range) lists itself, so its bit is
+    /// never kept and every load reads it.
     #[inline(never)]
     fn load_overlay() -> u32 {
         let s = st();
@@ -959,7 +961,7 @@ mod switch {
         }
         dma_settle();
         flush_icache();
-        s.mask = (s.mask & !s.image[table::I_EVICTS]) | bit;
+        s.mask = (s.mask | bit) & !s.image[table::I_EVICTS];
         code::OK
     }
 

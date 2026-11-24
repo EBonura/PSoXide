@@ -434,7 +434,8 @@ impl Kind {
     }
 }
 
-/// How an Overlay is kept. Read by the build only; the core ignores it. A Program row carries 0.
+/// How an Overlay is kept. Read by the build only; the core ignores it (a VOLATILE overlay reaches
+/// the core through its evicts word, which holds its own bit). A Program row carries 0.
 ///
 /// A scene that runs inside its Program's exe (once called BOOT_RESIDENT) has no image row of its
 /// own: its scene row names the Program's image, so it has no class byte either.
@@ -445,6 +446,13 @@ pub enum Class {
     ResidentSet = 1,
     /// Loaded over whatever its range intersects (its evicts mask).
     Swap = 2,
+    /// A Swap overlay whose range its owner also uses at run time (a title menu in the memory the
+    /// game's world takes once play starts). Its evicts word lists itself too, and the core
+    /// applies an overlay's evicts word after setting its bit, so the bit is never kept: every
+    /// load and every switch to one of its scenes reads it again. A program that wrote over it
+    /// cannot jump into stale bytes, and has nothing to declare when it does. It never shows in
+    /// the loaded mask, and no Program row may carry it (word 5).
+    Volatile = 3,
 }
 
 impl Class {
@@ -453,6 +461,7 @@ impl Class {
         match byte {
             1 => Some(Class::ResidentSet),
             2 => Some(Class::Swap),
+            3 => Some(Class::Volatile),
             _ => None,
         }
     }
@@ -634,10 +643,11 @@ impl SceneRow {
 /// 0x08  4  load address
 /// 0x0C  4  word FNV of the loaded bytes
 /// 0x10  4  core hash (Program; 0 for an Overlay)
-/// 0x14  4  evicts mask (Overlay: the images its range intersects); 0 for a Program
+/// 0x14  4  evicts mask (Overlay: the images its range intersects, and itself when VOLATILE);
+///          0 for a Program
 /// 0x18  4  member base relative to the table base (Program; 0 for an Overlay)
 /// 0x1C  1  kind: 0 Program, 1 Overlay
-/// 0x1D  1  class (Overlay: 1 RESIDENT_SET, 2 SWAP; 0 for a Program); build only
+/// 0x1D  1  class (Overlay: 1 RESIDENT_SET, 2 SWAP, 3 VOLATILE; 0 for a Program); build only
 /// 0x1E  1  owner (Overlay: its Program's image index; reserved for a Program, written 0 and
 ///          not read by the core)
 /// 0x1F  1  CD-DA base delta (Program; 0 for an Overlay)
@@ -654,7 +664,8 @@ pub struct ImageRow {
     pub checksum: u32,
     /// Core hash a Program carries; 0 for an Overlay.
     pub core_hash: u32,
-    /// Overlay: the images whose load ranges intersect its own. 0 for a Program.
+    /// Overlay: the images whose load ranges intersect its own, and its own bit when it is
+    /// [`Class::Volatile`]. 0 for a Program.
     pub evicts: u32,
     /// Program: sectors from the table base to its member image (0 on a single-game disc).
     pub member_base: u32,
