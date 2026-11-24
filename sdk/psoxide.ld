@@ -12,7 +12,7 @@
  * psoxide-core.ld; boot-only code, psoxide-boot.ld) links an ELF instead and writes the EXE
  * from its load addresses with `psx-exe` (tools/psoxide-hazard; psoxide-pgo does it for the
  * programs it builds): ld.lld's `--oformat=binary` places every section at its run address.
- * The stored copies follow .data in the file, in this order: .data, the core's image, .boot.
+ * The stored copies follow .data in the file, in this order: .data, .boot, the core's image.
  * .bss is laid over them, so they cost no RAM once their movers have run (`__core_boot`, then
  * `__boot_entry`, then `_start`).
  *
@@ -69,6 +69,11 @@ MEMORY {
 }
 
 ENTRY(_start)
+
+/* Where psoxide-core.ld's `__core_boot` goes on to: the boot-only mover when psoxide-boot.ld is
+   linked, else `_start`. Here, after both scripts, so the order they are given in cannot drop
+   the mover (DEFINED() only sees symbols of the scripts before it). */
+__core_next = DEFINED(__boot_initial) ? __boot_initial : _start;
 
 SECTIONS {
     /* PS-X EXE header, field by field as psx-spx lists it. Offsets are
@@ -178,10 +183,13 @@ SECTIONS {
        which `_start` clears before anything reads it. Starting .bss right
        after the data instead of after this padding gives the program the
        bytes back. */
-    /* The end of the stored bytes: .data, then the scene core's stored image (psoxide-core.ld),
-       then the boot-only sections (psoxide-boot.ld), each where .bss will be. */
-    __load_end = DEFINED(__boot_lma_end) ? __boot_lma_end
-               : DEFINED(__psx_core_store_load_end) ? __psx_core_store_load_end : __data_end;
+    /* The stored bytes, each where .bss will be: .data, then the boot-only sections
+       (psoxide-boot.ld), then the scene core's stored image (psoxide-core.ld), last so that a
+       core switch, which loads a program up to its stored core and no further, loads .boot too.
+       Decided here, after both scripts: DEFINED() only sees symbols of the scripts before it. */
+    __psx_core_store_at = DEFINED(__boot_lma_end) ? __boot_lma_end : __data_end;
+    __load_end = DEFINED(__psx_core_store_load_end) ? __psx_core_store_load_end
+               : DEFINED(__boot_lma_end) ? __boot_lma_end : __data_end;
     __image_end = __text_start + ((__load_end - __text_start + EXE_HEAD_BYTES - 1) & ~(EXE_HEAD_BYTES - 1));
 
     /* Uninitialised data - zeroed by `_start`, not stored in file. It runs right after .data,

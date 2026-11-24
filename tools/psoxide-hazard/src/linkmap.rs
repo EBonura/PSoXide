@@ -62,11 +62,10 @@ pub struct LinkMap {
     /// `(__text_start, __text_end)`; a blob's first and last `.text` input
     /// section edge.
     pub text: (i64, i64),
-    /// Where the stored image ends and `.bss` begins: the end of the boot
-    /// overlay's stored bytes (psyq.ld's `__load_end`, which ld.lld's map
-    /// evaluates before the overlay exists), `__data_end`, or `__bss_start`
-    /// for a map without them. The header's payload size is this rounded up to whole
-    /// sectors.
+    /// Where the stored image ends and `.bss` begins: the end of the boot overlay's or the core
+    /// image's stored bytes, whichever is later (psyq.ld's `__load_end`, which ld.lld's map
+    /// evaluates before the overlay exists), `__data_end`, or `__bss_start` for a map without them.
+    /// The header's payload size is this rounded up to whole sectors.
     data_end: Option<i64>,
     raw: bool,
     boot: Option<Boot>,
@@ -377,9 +376,11 @@ impl LinkMap {
         Ok(Self {
             path: path.to_string(),
             text: (lo, hi),
+            // The stored bytes end with whichever of the boot overlay and the core's image is
+            // stored last (the core's, when a program has both: psoxide.ld stores it after .boot).
             data_end: boot
                 .map(|b| b.lma + (b.load_end - b.start))
-                .or(core_store_end)
+                .max(core_store_end)
                 .or_else(|| text_marks.get("__data_end").copied())
                 .or_else(|| text_marks.get("__bss_start").copied()),
             raw,

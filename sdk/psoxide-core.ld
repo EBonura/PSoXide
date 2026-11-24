@@ -4,23 +4,26 @@
  * with feature `link`. See sdk/crates/psx-core and the scene core ABI.
  *
  * The core's image (psx-core's `IMAGE`, input section `.psx_core`) runs at the window
- * 0x801FDF00..0x801FFF00 and is stored right after .data, where .bss will be, so it costs the
- * program no RAM once `_start` has cleared .bss. `__core_boot` is the entry: it copies the image
- * from its load address up into the window, then goes on to `__core_next` (`__boot_entry` with
- * psoxide-boot.ld, else `_start`).
+ * 0x801FDF00..0x801FFF00 and is stored after .data and .boot, last, where .bss will be, so it
+ * costs the program no RAM once `_start` has cleared .bss, and a core switch (which loads a
+ * program up to its stored core) loads .boot too. `__core_boot` is the entry: it copies the image
+ * from its load address up into the window, then goes on to `__core_next` (psoxide.ld:
+ * `__boot_entry` with psoxide-boot.ld, else `_start`, whatever the order of the scripts).
  *
  * The run address and the load address differ, so the program links an ELF (no
  * `--oformat=binary`) and its EXE is written from the load addresses (`psx-exe`, or psoxide-pgo,
  * which does the same); see psoxide.ld.
  */
 __initial_pc = __core_boot;
-__core_next = DEFINED(__boot_initial) ? __boot_initial : _start;
+/* `__core_next` is psoxide.ld's: here, before psoxide-boot.ld, DEFINED(__boot_initial) would be
+   false and the chain would skip the boot mover. */
 
 /* The jump table's slot symbols come from psx-core (`link`), which takes them from psx-scene-abi. */
 
 SECTIONS {
-    /* Run at the window, stored right after .data. psoxide.ld lays .bss over the stored copy. */
-    .psx_core_store STACK_INIT : AT(__data_end) {
+    /* Run at the window, stored after .data and .boot (psoxide.ld's `__psx_core_store_at`).
+       psoxide.ld lays .bss over the stored copy. */
+    .psx_core_store STACK_INIT : AT(__psx_core_store_at) {
         __psx_core_store = .;
         KEEP(*(.psx_core))
         . = ALIGN(4);

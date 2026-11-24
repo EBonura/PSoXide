@@ -250,7 +250,6 @@ fn pass(
         Ok(overlay) => overlay,
         Err(status) => return status,
     };
-    let file_len = file.len();
     let mut data = overlay.expand(&file, base);
     // The map names module link addresses, not their compact placement in
     // the file. Check its jump tables against the expanded image.
@@ -598,7 +597,7 @@ fn pass(
         );
         return 1;
     }
-    if let Err(error) = write_whole(path, &overlay.collapse(&data, file_len, base)) {
+    if let Err(error) = write_whole(path, &overlay.collapse(&data, &file, base)) {
         let _ = writeln!(out, "{}", io_message(&error, path));
         return 1;
     }
