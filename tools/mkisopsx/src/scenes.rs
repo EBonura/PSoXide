@@ -27,7 +27,11 @@
 //! overlay linked with its program by psoxide-overlay.ld, the option
 //! `psx-exe --overlay` prints),
 //! `class=resident|swap|volatile` (`volatile`: a swap overlay over memory its
-//! owner also uses, which the core reads again at every load).
+//! owner also uses, which the core reads again at every load), and optionally
+//! `place=before-world` (its file ends where `WORLD.PAK` starts, LBA 1024, for an
+//! overlay its owner reads right before the pack: one seek and a short hop
+//! instead of two long seeks). An overlay's owner needs `reserve=` on its
+//! `program` line (mkisopsx refuses with `NoReserve` otherwise).
 //!
 //! A scene line is `scene NAME IMAGE (start | entry=<addr>) [options]`:
 //! `start` for the one scene that starts each Program (its entry is the exe's
@@ -37,7 +41,7 @@
 //! own order. Numbers are decimal or `0x` hex.
 
 use psx_iso::scenes::abi::{Class, Span, SCENE_FLAG_PARTNER_CREDIT};
-use psx_iso::scenes::{ImageSpec, ScenePlan, SceneSpec};
+use psx_iso::scenes::{ImageSpec, Placement, ScenePlan, SceneSpec};
 use std::path::Path;
 
 fn number<T: TryFrom<u64>>(key: &str, value: &str) -> Result<T, String> {
@@ -143,6 +147,7 @@ fn overlay<'a>(
     options: impl Iterator<Item = &'a str>,
 ) -> Result<ImageSpec, String> {
     let (mut owner, mut load, mut class) = (None, None, Class::Swap);
+    let mut placement = Placement::InOrder;
     for option in options {
         match option.split_once('=') {
             Some(("owner", v)) => owner = Some(v),
@@ -150,12 +155,15 @@ fn overlay<'a>(
             Some(("class", "resident")) => class = Class::ResidentSet,
             Some(("class", "swap")) => class = Class::Swap,
             Some(("class", "volatile")) => class = Class::Volatile,
+            Some(("place", "before-world")) => placement = Placement::BeforeWorld,
             _ => return Err(format!("unknown overlay option {option}")),
         }
     }
     let owner = owner.ok_or("an overlay needs owner=<program>")?;
     let load = load.ok_or("an overlay needs load=<address>")?;
-    Ok(ImageSpec::overlay(name, file, owner, load, class))
+    let mut image = ImageSpec::overlay(name, file, owner, load, class);
+    image.placement = placement;
+    Ok(image)
 }
 
 fn scene<'a>(
@@ -256,6 +264,10 @@ mod tests {
             scene BOOT PSX.EXE start\n";
         let plan = parse_manifest(text, Path::new("."), &mut |_| Ok(vec![0; 4])).unwrap();
         assert_eq!(plan.images[1].class, Some(Class::Volatile));
+        assert_eq!(plan.images[1].placement, Placement::InOrder);
+        let text = text.replace("class=volatile", "class=volatile place=before-world");
+        let plan = parse_manifest(&text, Path::new("."), &mut |_| Ok(vec![0; 4])).unwrap();
+        assert_eq!(plan.images[1].placement, Placement::BeforeWorld);
     }
 
     #[test]
@@ -274,6 +286,7 @@ mod tests {
             ("overlay A.OVL a.bin load=0", "needs owner"),
             ("overlay A.OVL a.bin owner=PSX.EXE", "needs load"),
             ("overlay A.OVL a.bin owner=X load=0 class=big", "class=big"),
+            ("overlay A.OVL a.bin owner=X load=0 place=end", "place=end"),
             ("scene A PSX.EXE", "exactly one of start and entry"),
             (
                 "scene A PSX.EXE start entry=0",

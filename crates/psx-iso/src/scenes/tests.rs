@@ -187,6 +187,40 @@ fn an_image_too_big_for_the_boot_area_and_every_one_after_it_go_after_the_packs(
     );
 }
 
+#[test]
+fn an_image_placed_before_the_world_pack_ends_right_where_it_starts() {
+    let mut plan = overlay_plan();
+    plan.images[1].placement = Placement::BeforeWorld; // SET.OVL, 2 sectors
+    plan.images[4].placement = Placement::BeforeWorld; // SWAPB.OVL, 4 sectors
+    let (disc, pressed) = press(small_exe(), &plan, true).unwrap();
+    let world = disc.find_file(WORLD_PACK_FILE_NAME).unwrap();
+    assert_eq!(world.lba, WORLD_PACK_DEFAULT_START_LBA);
+    // In image order among themselves, the last one ending at the pack.
+    assert_eq!(pressed.images[4].lba, world.lba - 4);
+    assert_eq!(pressed.images[1].lba, world.lba - 6);
+    // The others stay contiguous with the boot exe.
+    let exe = disc.find_file(BOOT_EXE_NAME).unwrap();
+    assert_eq!(
+        pressed.images[2].lba,
+        exe.lba + sectors_of(exe.size as usize)
+    );
+    assert_eq!(pressed.images[3].lba, pressed.images[2].lba + 1);
+    // What the boot area cannot hold is refused, not moved.
+    let mut plan = overlay_plan();
+    plan.images[4] = ImageSpec::overlay(
+        "SWAPB.OVL",
+        payload(1100, 5),
+        BOOT_EXE_NAME,
+        0x8011_0000,
+        Class::Swap,
+    );
+    plan.images[4].placement = Placement::BeforeWorld;
+    assert_eq!(
+        press(small_exe(), &plan, true).err().unwrap(),
+        SceneDiscError::BeforeWorld("SWAPB.OVL".into())
+    );
+}
+
 /// A program image the way psoxide-core.ld stores it: `data` bytes of text
 /// and data, then the core copy, then zeros to whole sectors.
 fn with_core(data: usize, core: &[u8]) -> Vec<u8> {
@@ -465,7 +499,10 @@ fn an_overlay_evicts_exactly_the_images_its_range_intersects() {
     plan.images[0].reserve = None;
     assert_eq!(
         press(boot.clone(), &plan, false).err().unwrap(),
-        SceneDiscError::Overlay("SET.OVL".into())
+        SceneDiscError::NoReserve {
+            overlay: "SET.OVL".into(),
+            owner: BOOT_EXE_NAME.into(),
+        }
     );
     let mut plan = overlay_plan();
     plan.images[4].owner = Some("SET.OVL".into());
