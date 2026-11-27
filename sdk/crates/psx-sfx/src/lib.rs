@@ -228,6 +228,18 @@ impl Bank {
         self.next
     }
 
+    /// A bank stacked on `below`: it starts where `below` would put its next
+    /// sample. The two-level SPU RAM stack is two banks: the permanent one
+    /// (menu, player, weapon sounds) uploaded once at boot, and a per-level
+    /// one made with `Bank::on_top_of(&permanent)` at every level change, so
+    /// the level's sounds always reuse the same SPU RAM above the permanent
+    /// set and never fragment it. Samples of the old level bank are dead once
+    /// the new one uploads over them: silence their voices first.
+    #[must_use]
+    pub const fn on_top_of(below: &Bank) -> Self {
+        Self { next: below.next }
+    }
+
     /// Upload one cooked `.psau` sample through `spu`, then its parking block.
     ///
     /// # Errors
@@ -564,6 +576,31 @@ impl<const N: usize> Player<N> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_level_bank_reuses_the_same_spu_ram_above_the_permanent_one() {
+        let psau = include_bytes!("../../../../assets/audio/freesfx/psau/footstep.psau");
+        let mut put = |_: SpuAddr, _: &[u8]| Ok(());
+        let mut permanent = Bank::new(SpuAddr::new(0x1010));
+        permanent.upload_with(psau, &mut put).expect("upload");
+        let floor = permanent.next_addr();
+        for _level in 0..3 {
+            let mut level = Bank::on_top_of(&permanent);
+            let first = level.upload_with(psau, &mut put).expect("upload");
+            assert_eq!(
+                first.addr(),
+                floor,
+                "every level starts at the same address"
+            );
+            level.upload_with(psau, &mut put).expect("upload");
+            assert!(level.next_addr().byte_offset() > floor.byte_offset());
+        }
+        assert_eq!(
+            permanent.next_addr(),
+            floor,
+            "the permanent bank is untouched"
+        );
+    }
 
     fn sample(rate_hz: u32, frames: u32) -> Sample {
         Sample {
