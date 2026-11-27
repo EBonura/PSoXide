@@ -73,7 +73,11 @@ impl Transport for SectorReader {
     }
     #[inline(always)]
     fn start_read(&mut self, lba: u32) -> bool {
-        SectorReader::start_read(self, lba)
+        // The BIOS bracket (Setloc, SeekL waited to completion, SetMode, ReadN) the
+        // resident core and the chain loader use, instead of the implicit seek of a
+        // bare Setloc + ReadN that reader.rs warns corrupts sustained console
+        // streams. The seek is bounded like a first sector (10 s, a drive spinning up).
+        SectorReader::start_read_seek_first(self, lba, psx_io::cd::wait::FIRST_SECTOR_WAIT)
     }
     #[inline(always)]
     fn read_sector(&mut self, buffer: &mut [u32; SECTOR_WORDS]) -> bool {
