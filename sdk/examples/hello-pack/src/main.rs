@@ -29,7 +29,8 @@ use psx_font::FontAtlas;
 use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
 use psx_gpu::Gpu;
 use psx_pack::cd::{
-    find_entry, load_chunk, load_chunk_decompressed, SectorReader, SECTOR_WORDS,
+    find_entry, find_indexed, load_chunk, load_chunk_decompressed, load_indexed,
+    load_indexed_decompressed, read_index, IndexEntry, SectorReader, SECTOR_WORDS,
     WORLD_PACK_DEFAULT_LBA,
 };
 use psx_pack::fnv1a32;
@@ -72,10 +73,12 @@ static mut READER: Option<SectorReader> = None;
 static mut SCRATCH: [u32; SECTOR_WORDS] = [0; SECTOR_WORDS];
 const DST_WORDS: usize = 3072; // 12 KiB
 static mut DST: [u32; DST_WORDS] = [0; DST_WORDS];
+/// The whole fixture table as a resident index: 86 entries x 12 bytes.
+static mut INDEX: [IndexEntry; 86] = [IndexEntry::EMPTY; 86];
 
 /// Up to this many result lines are recorded, then rendered every frame.
 struct Report {
-    lines: [Line; 12],
+    lines: [Line; 16],
     len: usize,
     all_ok: bool,
     failed: &'static str,
@@ -90,7 +93,7 @@ struct Line {
 impl Report {
     fn new() -> Self {
         Report {
-            lines: [Line { text: "", ok: true }; 12],
+            lines: [Line { text: "", ok: true }; 16],
             len: 0,
             all_ok: true,
             failed: "",
@@ -200,6 +203,35 @@ fn run(rd: &mut SectorReader) -> Report {
     if !rep.check(
         "DATA 85",
         bytes_match(&dst_bytes(dst)[..COMP_LEN], comp_byte),
+    ) {
+        return rep;
+    }
+
+    // The same two chunks through a resident index: the table read once, in
+    // one read start, then each load seeks straight to its payload.
+    // SAFETY: main runs once; the static is only touched here.
+    let index = unsafe { &mut *addr_of_mut!(INDEX) };
+    let kept = read_index(rd, WORLD_PACK_DEFAULT_LBA, scratch, index, |_| true);
+    if !rep.check("INDEX 86", kept == Some(index.len())) {
+        return rep;
+    }
+    let Some(i84) = find_indexed(index, RAW_ID) else {
+        rep.check("INDEXED 84", false);
+        return rep;
+    };
+    dst.fill(0);
+    let loaded = load_indexed(rd, WORLD_PACK_DEFAULT_LBA, &i84, scratch, dst);
+    if !rep.check(
+        "LOAD-I 84",
+        loaded == Some(RAW_LEN) && bytes_match(&dst_bytes(dst)[..RAW_LEN], raw_byte),
+    ) {
+        return rep;
+    }
+    let raw = find_indexed(index, COMP_ID)
+        .and_then(|e| load_indexed_decompressed(rd, WORLD_PACK_DEFAULT_LBA, &e, scratch, dst));
+    if !rep.check(
+        "LOAD-I 85",
+        raw == Some(COMP_LEN) && bytes_match(&dst_bytes(dst)[..COMP_LEN], comp_byte),
     ) {
         return rep;
     }

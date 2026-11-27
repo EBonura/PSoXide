@@ -295,6 +295,169 @@ pub(crate) fn stream_payload<T: Transport>(
     Some(byte_size)
 }
 
+/// One chunk's place in the pack, as a resident index keeps it: the three
+/// fields a load needs, 12 bytes against the table's 24 (the sector count is
+/// derived from `byte_size`, the checksum is left on the disc).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IndexEntry {
+    /// The chunk's id.
+    pub chunk_id: u32,
+    /// Payload start, in sectors from the beginning of the pack.
+    pub sector_offset: u32,
+    /// Exact payload length in bytes.
+    pub byte_size: u32,
+}
+
+/// RAM one [`IndexEntry`] costs.
+pub const INDEX_ENTRY_BYTES: usize = 12;
+const _: () = assert!(core::mem::size_of::<IndexEntry>() == INDEX_ENTRY_BYTES);
+
+impl IndexEntry {
+    /// A slot holding no chunk, for initialising index storage.
+    pub const EMPTY: Self = Self {
+        chunk_id: u32::MAX,
+        sector_offset: 0,
+        byte_size: 0,
+    };
+}
+
+/// The entry for `chunk_id` in an index [`read_index`] filled, by a linear
+/// scan (a level's slice is small; keep it sorted and binary-search it in the
+/// caller if it is not).
+#[must_use]
+pub fn find_indexed(index: &[IndexEntry], chunk_id: u32) -> Option<IndexEntry> {
+    index.iter().copied().find(|e| e.chunk_id == chunk_id)
+}
+
+/// Read the pack table at `pack_lba` once and keep the entries `keep` accepts,
+/// in table order, in `out`; returns how many were kept.
+///
+/// One read start for the whole table (header sectors in one ReadN, ended by
+/// the reader's Pause), so every later [`load_indexed`] costs only its
+/// payload's seek instead of [`load_chunk`]'s table scan of one seek per
+/// table sector. `keep` = `|_| true` holds the whole table (12 bytes an
+/// entry); a level's id list holds just its slice.
+///
+/// `None` on a read failure, a bad header, a table shorter than its count, or
+/// more accepted entries than `out` holds: an index is never partial.
+#[cfg(target_arch = "mips")]
+pub fn read_index(
+    rd: &mut SectorReader,
+    pack_lba: u32,
+    scratch: &mut [u32; SECTOR_WORDS],
+    out: &mut [IndexEntry],
+    keep: impl FnMut(u32) -> bool,
+) -> Option<usize> {
+    read_index_from(rd, pack_lba, scratch, out, keep)
+}
+
+/// [`read_index`] over any [`Transport`].
+pub(crate) fn read_index_from<T: Transport>(
+    rd: &mut T,
+    pack_lba: u32,
+    scratch: &mut [u32; SECTOR_WORDS],
+    out: &mut [IndexEntry],
+    mut keep: impl FnMut(u32) -> bool,
+) -> Option<usize> {
+    if !rd.prepare() || !rd.start_read(pack_lba) || !rd.read_sector(scratch) {
+        rd.stop();
+        return None;
+    }
+    let kept = scan_table_stream(rd, scratch, out, &mut keep);
+    rd.stop();
+    kept
+}
+
+/// The table walk of [`read_index_from`] with sector 0 in `scratch` and the
+/// read running: later sectors are taken in order from the same read.
+fn scan_table_stream<T: Transport>(
+    rd: &mut T,
+    scratch: &mut [u32; SECTOR_WORDS],
+    out: &mut [IndexEntry],
+    keep: &mut impl FnMut(u32) -> bool,
+) -> Option<usize> {
+    let header = parse_header(scratch_bytes(scratch))?;
+    let mut kept = 0usize;
+    let mut current = 0u32;
+    let mut index = 0u32;
+    while index < header.chunk_count {
+        let (sector, within) = entry_location(index);
+        if sector >= header.header_sectors {
+            return None;
+        }
+        while current < sector {
+            if !rd.read_sector(scratch) {
+                return None;
+            }
+            current += 1;
+        }
+        let entry = if within + ENTRY_BYTES <= SECTOR_BYTES {
+            parse_entry_at(scratch_bytes(scratch), within)?
+        } else {
+            if sector + 1 >= header.header_sectors {
+                return None;
+            }
+            let first = SECTOR_BYTES - within;
+            let mut stitched = [0u8; ENTRY_BYTES];
+            stitched[..first].copy_from_slice(&scratch_bytes(scratch)[within..]);
+            if !rd.read_sector(scratch) {
+                return None;
+            }
+            current += 1;
+            stitched[first..].copy_from_slice(&scratch_bytes(scratch)[..ENTRY_BYTES - first]);
+            parse_entry_at(&stitched, 0)?
+        };
+        if keep(entry.chunk_id) {
+            *out.get_mut(kept)? = IndexEntry {
+                chunk_id: entry.chunk_id,
+                sector_offset: entry.sector_offset,
+                byte_size: entry.byte_size,
+            };
+            kept += 1;
+        }
+        index += 1;
+    }
+    Some(kept)
+}
+
+/// Stream the chunk `entry` names (from [`read_index`]) into `dst`: one seek to
+/// its payload and its sectors, no table read. Same result and `I_MASK`
+/// behaviour as [`load_chunk`].
+#[cfg(target_arch = "mips")]
+pub fn load_indexed(
+    rd: &mut SectorReader,
+    pack_lba: u32,
+    entry: &IndexEntry,
+    scratch: &mut [u32; SECTOR_WORDS],
+    dst: &mut [u32],
+) -> Option<usize> {
+    stream_payload(
+        rd,
+        pack_lba,
+        entry.sector_offset,
+        entry.byte_size,
+        scratch,
+        dst,
+    )
+}
+
+/// [`load_indexed`], then [`crate::decompress_hlzc_in_place`]; as
+/// [`load_chunk_decompressed`].
+#[cfg(target_arch = "mips")]
+pub fn load_indexed_decompressed(
+    rd: &mut SectorReader,
+    pack_lba: u32,
+    entry: &IndexEntry,
+    scratch: &mut [u32; SECTOR_WORDS],
+    dst: &mut [u32],
+) -> Option<usize> {
+    let loaded = load_indexed(rd, pack_lba, entry, scratch, dst)?;
+    // SAFETY: [u32] viewed as its own bytes for the in-place decoder.
+    let bytes =
+        unsafe { core::slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut u8, dst.len() * 4) };
+    crate::decompress_hlzc_in_place(bytes, loaded)
+}
+
 /// [`load_chunk`], then [`crate::decompress_hlzc_in_place`] on the result.
 ///
 /// Returns the chunk's RAW byte length: the decompressed size for an `HLZC`
@@ -464,6 +627,182 @@ mod tests {
         assert_eq!(
             WORLD_PACK_DEFAULT_LBA,
             psx_iso::WORLD_PACK_DEFAULT_START_LBA
+        );
+    }
+
+    #[test]
+    fn an_index_is_the_whole_table_read_in_one_start() {
+        // 714 entries: the Half-Life disc's table (9 header sectors).
+        let (image, _) = pack(714, |i| 100 + (i as usize * 131) % 9000);
+        let header = crate::parse_header(&image).expect("header");
+        let mut drive = ImageDrive::new(image.clone(), LBA);
+        let mut scratch = [0u32; SECTOR_WORDS];
+        let mut index = vec![IndexEntry::EMPTY; 714];
+        let kept = read_index_from(&mut drive, LBA, &mut scratch, &mut index, |_| true);
+        assert_eq!(kept, Some(714));
+        assert_eq!(drive.seeks(), 1);
+        assert_eq!(drive.sectors(), header.header_sectors);
+        for id in 0..714u32 {
+            let e = crate::find_chunk(&image, &header, id).expect("on disc");
+            let i = find_indexed(&index, id).expect("indexed");
+            assert_eq!(
+                (i.sector_offset, i.byte_size),
+                (e.sector_offset, e.byte_size)
+            );
+        }
+        assert_eq!(find_indexed(&index, 714), None);
+    }
+
+    #[test]
+    fn a_level_slice_keeps_only_its_ids_and_refuses_to_overflow() {
+        let (image, bodies) = pack(300, |i| 500 + i as usize);
+        let mut drive = ImageDrive::new(image, LBA);
+        let mut scratch = [0u32; SECTOR_WORDS];
+        let level = |id: u32| id % 25 == 3;
+        let mut slice = [IndexEntry::EMPTY; 12];
+        assert_eq!(
+            read_index_from(&mut drive, LBA, &mut scratch, &mut slice, level),
+            Some(12)
+        );
+        let mut dst = vec![0u32; 256];
+        drive.reset_counts();
+        for e in &slice {
+            let len = stream_payload(
+                &mut drive,
+                LBA,
+                e.sector_offset,
+                e.byte_size,
+                &mut scratch,
+                &mut dst,
+            );
+            let len = len.expect("loads");
+            assert_eq!(
+                &words_as_bytes(&dst)[..len],
+                bodies[e.chunk_id as usize].as_slice()
+            );
+        }
+        assert_eq!(drive.seeks(), 12, "one seek a chunk, no table reads");
+        let mut short = [IndexEntry::EMPTY; 11];
+        assert_eq!(
+            read_index_from(&mut drive, LBA, &mut scratch, &mut short, level),
+            None
+        );
+    }
+
+    #[test]
+    fn a_failed_table_sector_leaves_no_index() {
+        let (image, _) = pack(200, |_| 10);
+        let mut drive = ImageDrive::new(image, LBA);
+        drive.fail_lba = Some(LBA + 2);
+        let mut scratch = [0u32; SECTOR_WORDS];
+        let mut index = vec![IndexEntry::EMPTY; 200];
+        assert_eq!(
+            read_index_from(&mut drive, LBA, &mut scratch, &mut index, |_| true),
+            None
+        );
+    }
+
+    /// Drive time of the reads `drive` recorded, from the residency
+    /// simulator's silicon seek and read table (double speed, nominal seeks;
+    /// a read starting where the last ended is charged no seek, which is
+    /// kind to the table scan, since our reader Pauses between them).
+    fn drive_micros(drive: &ImageDrive) -> u64 {
+        let mut model = psx_residency_sim::DriveModel::double_speed();
+        drive
+            .runs
+            .iter()
+            .map(|&(lba, n)| model.read(lba, n).0)
+            .sum()
+    }
+
+    /// Seeks and drive time to load `ids` one after another, by table scan
+    /// (`load_chunk`) and from an index read once, on `image`.
+    fn compare(image: &[u8], ids: &[u32]) -> [(u32, u32, u64); 2] {
+        let mut scratch = [0u32; SECTOR_WORDS];
+        let header = crate::parse_header(image).expect("header");
+        let mut dst = vec![0u32; header.total_sectors as usize * SECTOR_WORDS];
+        let mut scan = ImageDrive::new(image.to_vec(), LBA);
+        for &id in ids {
+            let e = scan_entry(&mut scan, LBA, id, &mut scratch).expect("entry");
+            stream_payload(
+                &mut scan,
+                LBA,
+                e.sector_offset,
+                e.byte_size,
+                &mut scratch,
+                &mut dst,
+            )
+            .expect("load");
+        }
+        let mut indexed = ImageDrive::new(image.to_vec(), LBA);
+        let mut index = vec![IndexEntry::EMPTY; header.chunk_count as usize];
+        read_index_from(&mut indexed, LBA, &mut scratch, &mut index, |_| true).expect("index");
+        for &id in ids {
+            let e = find_indexed(&index, id).expect("entry");
+            stream_payload(
+                &mut indexed,
+                LBA,
+                e.sector_offset,
+                e.byte_size,
+                &mut scratch,
+                &mut dst,
+            )
+            .expect("load");
+        }
+        [
+            (scan.seeks(), scan.sectors(), drive_micros(&scan)),
+            (indexed.seeks(), indexed.sectors(), drive_micros(&indexed)),
+        ]
+    }
+
+    #[test]
+    fn measure_index_against_table_scan_on_synthetic_hl_geometry() {
+        // 714 entries as on the HL disc; 40 loads spread over the table.
+        let (image, _) = pack(714, |i| 2000 + (i as usize * 7919) % 30000);
+        let ids: Vec<u32> = (0..40).map(|k| k * 17 + 3).collect();
+        let [scan, indexed] = compare(&image, &ids);
+        std::println!("A3 synthetic 714 entries, 40 loads: scan {scan:?} indexed {indexed:?}");
+        assert!(indexed.0 < scan.0);
+        assert!(indexed.2 < scan.2);
+    }
+
+    /// Reads the WORLD.PAK of a real disc image (raw 2352-byte sectors) named by
+    /// `PSX_PACK_MEASURE_DISC` and compares the two load paths for every chunk in
+    /// table order. Lane measurement only: `cargo test -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn measure_index_against_table_scan_on_a_disc() {
+        let path = std::env::var("PSX_PACK_MEASURE_DISC").expect("PSX_PACK_MEASURE_DISC");
+        let raw = std::fs::read(&path).expect("disc");
+        let user = |lba: usize| &raw[lba * 2352 + 24..lba * 2352 + 24 + SECTOR_BYTES];
+        let head = crate::parse_header(user(LBA as usize)).expect("pack header");
+        let mut image = Vec::new();
+        for s in 0..head.total_sectors as usize {
+            image.extend_from_slice(user(LBA as usize + s));
+        }
+        let ids: Vec<u32> = (0..head.chunk_count)
+            .map(|i| {
+                let (s, w) = entry_location(i);
+                let at = s as usize * SECTOR_BYTES + w;
+                crate::parse_entry_at(&image[at..], 0)
+                    .expect("entry")
+                    .chunk_id
+            })
+            .collect();
+        let [scan, indexed] = compare(&image, &ids);
+        std::println!(
+            "{path}: {} entries, {} header sectors; every chunk once in table order: \
+             scan seeks {} sectors {} drive {} ms; indexed seeks {} sectors {} drive {} ms; \
+             index RAM {} B",
+            head.chunk_count,
+            head.header_sectors,
+            scan.0,
+            scan.1,
+            scan.2 / 1000,
+            indexed.0,
+            indexed.1,
+            indexed.2 / 1000,
+            head.chunk_count as usize * INDEX_ENTRY_BYTES
         );
     }
 }
