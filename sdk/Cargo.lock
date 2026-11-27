@@ -188,6 +188,7 @@ dependencies = [
  "psx-io",
  "psx-iso",
  "psx-math",
+ "psx-residency-sim",
 ]
 
 [[package]]

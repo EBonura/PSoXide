@@ -20,6 +20,10 @@ psx-math = { workspace = true }
 # --world-pack-compress-rooms (same version pin as tools/mkisopsx).
 psx-iso  = { path = "../../../crates/psx-iso" }
 lz4_flex = { version = "0.11", default-features = false }
+# The drive model (silicon seek and read table) that prices the loader's reads in
+# the measurement tests. It depends on this crate; a dev-dependency cycle only
+# builds a second copy for the tests.
+psx-residency-sim = { path = "../psx-residency-sim" }
 
 [lints]
 workspace = true

@@ -92,10 +92,14 @@ fn scratch_bytes(scratch: &[u32; SECTOR_WORDS]) -> &[u8] {
     unsafe { core::slice::from_raw_parts(scratch.as_ptr() as *const u8, SECTOR_BYTES) }
 }
 
+/// No sector: what a bounce buffer holds before its first read and after
+/// anything else wrote it.
+const NO_SECTOR: u32 = u32::MAX;
+
 /// Read pack header sector `sector` (relative to `pack_lba`) into `scratch`,
-/// unless `*loaded` says it is already there. Each miss is a full
-/// prepare/seek/read/stop cycle, which is why sequential entry scans track
-/// `loaded` (ports hl-psx's `load_pack_header_sector`).
+/// unless `*loaded` (an absolute LBA) says it is already there. Each miss is a
+/// full prepare/seek/read/stop cycle, which is why scans track `loaded`
+/// (ports hl-psx's `load_pack_header_sector`).
 fn load_header_sector<T: Transport>(
     rd: &mut T,
     pack_lba: u32,
@@ -103,17 +107,20 @@ fn load_header_sector<T: Transport>(
     loaded: &mut u32,
     sector: u32,
 ) -> bool {
-    if *loaded == sector {
+    let lba = pack_lba + sector;
+    if *loaded == lba {
         return true;
     }
-    if !rd.prepare() || !rd.start_read(pack_lba + sector) {
+    // Whatever the read leaves in `scratch`, it is not the old sector.
+    *loaded = NO_SECTOR;
+    if !rd.prepare() || !rd.start_read(lba) {
         rd.stop();
         return false;
     }
     let ok = rd.read_sector(scratch);
     rd.stop();
     if ok {
-        *loaded = sector;
+        *loaded = lba;
     }
     ok
 }
@@ -155,6 +162,70 @@ fn read_entry<T: Transport>(
     }
 }
 
+/// The two header fields a scan needs, remembered for one pack.
+#[derive(Clone, Copy)]
+struct TableShape {
+    pack_lba: u32,
+    chunk_count: u32,
+    header_sectors: u32,
+}
+
+const NO_TABLE: TableShape = TableShape {
+    pack_lba: NO_SECTOR,
+    chunk_count: 0,
+    header_sectors: 0,
+};
+
+/// A one-sector bounce buffer that remembers which sector it holds, so the
+/// `_bounced` loads skip reading a sector that is already in it, and the
+/// pack's header numbers, so a lookup whose entry is not in the first table
+/// sector does not read that sector again just for them.
+///
+/// 2,060 bytes: the sector plus 12. It assumes the disc does not change under
+/// it. Anything else written into the buffer must go through
+/// [`sector_mut`](Self::sector_mut), which forgets what it held.
+pub struct Bounce {
+    sector: [u32; SECTOR_WORDS],
+    holds: u32,
+    table: TableShape,
+}
+
+impl Bounce {
+    /// An empty buffer that holds no sector. `const` so it can be a `static`.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            sector: [0; SECTOR_WORDS],
+            holds: NO_SECTOR,
+            table: NO_TABLE,
+        }
+    }
+
+    /// The absolute LBA of the sector in the buffer, if any.
+    #[must_use]
+    pub fn holds(&self) -> Option<u32> {
+        (self.holds != NO_SECTOR).then_some(self.holds)
+    }
+
+    /// Forget the sector and the pack header numbers (after a disc change).
+    pub fn forget(&mut self) {
+        self.holds = NO_SECTOR;
+        self.table = NO_TABLE;
+    }
+
+    /// The buffer for another use; it no longer counts as holding a sector.
+    pub fn sector_mut(&mut self) -> &mut [u32; SECTOR_WORDS] {
+        self.holds = NO_SECTOR;
+        &mut self.sector
+    }
+}
+
+impl Default for Bounce {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Scan the pack table at `pack_lba` for `chunk_id` and return its entry
 /// (including `byte_size` and the FNV `checksum` the writer stored).
 ///
@@ -171,6 +242,26 @@ pub fn find_entry(
     scan_entry(rd, pack_lba, chunk_id, scratch)
 }
 
+/// [`find_entry`] through a [`Bounce`]: a table sector it already holds is
+/// not read again, and neither is the first table sector when only the
+/// header numbers were needed from it.
+#[cfg(target_arch = "mips")]
+pub fn find_entry_bounced(
+    rd: &mut SectorReader,
+    pack_lba: u32,
+    chunk_id: u32,
+    bounce: &mut Bounce,
+) -> Option<PackEntry> {
+    scan_with(
+        rd,
+        pack_lba,
+        chunk_id,
+        &mut bounce.sector,
+        &mut bounce.holds,
+        &mut bounce.table,
+    )
+}
+
 /// [`find_entry`] over any [`Transport`].
 pub(crate) fn scan_entry<T: Transport>(
     rd: &mut T,
@@ -178,7 +269,10 @@ pub(crate) fn scan_entry<T: Transport>(
     chunk_id: u32,
     scratch: &mut [u32; SECTOR_WORDS],
 ) -> Option<PackEntry> {
-    let mut loaded = u32::MAX;
+    // The plain scan keeps its own body: routed through `scan_with` it would
+    // carry the held-sector pass (about 540 B of .text) into every program
+    // that never uses a `Bounce`.
+    let mut loaded = NO_SECTOR;
     if !load_header_sector(rd, pack_lba, scratch, &mut loaded, 0) {
         return None;
     }
@@ -193,6 +287,68 @@ pub(crate) fn scan_entry<T: Transport>(
             header.header_sectors,
             index,
         )?;
+        if entry.chunk_id == chunk_id {
+            return Some(entry);
+        }
+        index += 1;
+    }
+    None
+}
+
+/// The first table entry that starts in header sector `sector`.
+fn first_entry_in(sector: u32) -> u32 {
+    let start = (sector as usize * SECTOR_BYTES).saturating_sub(crate::HEADER_BYTES);
+    start.div_ceil(ENTRY_BYTES) as u32
+}
+
+/// The table scan with what `scratch` holds (`loaded`) and the pack's header
+/// numbers (`table`) carried in and out.
+fn scan_with<T: Transport>(
+    rd: &mut T,
+    pack_lba: u32,
+    chunk_id: u32,
+    scratch: &mut [u32; SECTOR_WORDS],
+    loaded: &mut u32,
+    table: &mut TableShape,
+) -> Option<PackEntry> {
+    if table.pack_lba != pack_lba {
+        if !load_header_sector(rd, pack_lba, scratch, loaded, 0) {
+            return None;
+        }
+        let header = parse_header(scratch_bytes(scratch))?;
+        *table = TableShape {
+            pack_lba,
+            chunk_count: header.chunk_count,
+            header_sectors: header.header_sectors,
+        };
+    }
+    // A table sector already in `scratch` is searched first, at no read; the
+    // full pass after it skips the entries that lie wholly inside it.
+    let held = loaded
+        .checked_sub(pack_lba)
+        .filter(|&s| *loaded != NO_SECTOR && s < table.header_sectors);
+    if let Some(sector) = held {
+        let mut index = first_entry_in(sector);
+        while index < table.chunk_count {
+            let (s, within) = entry_location(index);
+            if s != sector || within + ENTRY_BYTES > SECTOR_BYTES {
+                break;
+            }
+            let entry = parse_entry_at(scratch_bytes(scratch), within)?;
+            if entry.chunk_id == chunk_id {
+                return Some(entry);
+            }
+            index += 1;
+        }
+    }
+    let mut index = 0u32;
+    while index < table.chunk_count {
+        let (s, within) = entry_location(index);
+        if Some(s) == held && within + ENTRY_BYTES <= SECTOR_BYTES {
+            index += 1;
+            continue;
+        }
+        let entry = read_entry(rd, pack_lba, scratch, loaded, table.header_sectors, index)?;
         if entry.chunk_id == chunk_id {
             return Some(entry);
         }
@@ -280,6 +436,56 @@ pub(crate) fn stream_payload<T: Transport>(
     }
     rd.stop();
     Some(byte_size)
+}
+
+/// [`load_chunk`] through a [`Bounce`]: the table scan skips sectors the
+/// bounce already holds ([`find_entry_bounced`]). The payload streams
+/// through the bounce as through any scratch sector, so afterwards it holds
+/// the payload's last sector, not the table's.
+#[cfg(target_arch = "mips")]
+pub fn load_chunk_bounced(
+    rd: &mut SectorReader,
+    pack_lba: u32,
+    chunk_id: u32,
+    bounce: &mut Bounce,
+    dst: &mut [u32],
+) -> Option<usize> {
+    load_bounced(rd, pack_lba, chunk_id, bounce, dst)
+}
+
+/// [`load_chunk_bounced`] over any [`Transport`].
+pub(crate) fn load_bounced<T: Transport>(
+    rd: &mut T,
+    pack_lba: u32,
+    chunk_id: u32,
+    bounce: &mut Bounce,
+    dst: &mut [u32],
+) -> Option<usize> {
+    let entry = scan_with(
+        rd,
+        pack_lba,
+        chunk_id,
+        &mut bounce.sector,
+        &mut bounce.holds,
+        &mut bounce.table,
+    )?;
+    let sectors = (entry.byte_size as usize).div_ceil(SECTOR_BYTES) as u32;
+    let fits = entry.byte_size as usize <= dst.len() * 4;
+    if fits && sectors > 0 {
+        bounce.holds = NO_SECTOR;
+    }
+    let loaded = stream_payload(
+        rd,
+        pack_lba,
+        entry.sector_offset,
+        entry.byte_size,
+        &mut bounce.sector,
+        dst,
+    );
+    if loaded.is_some() && sectors > 0 {
+        bounce.holds = pack_lba + entry.sector_offset + sectors - 1;
+    }
+    loaded
 }
 
 /// [`load_chunk`], then [`crate::decompress_hlzc_in_place`] on the result.
@@ -382,6 +588,145 @@ mod tests {
         assert_eq!(
             WORLD_PACK_DEFAULT_LBA,
             psx_iso::WORLD_PACK_DEFAULT_START_LBA
+        );
+    }
+    #[test]
+    // 900 table scans over a 300-entry pack: a sweep, native only (sdk/docs/MIRI.md).
+    #[cfg_attr(miri, ignore)]
+    fn a_bounce_finds_every_entry_the_scan_finds_in_any_order() {
+        // 300 entries over 4 table sectors, straddles included.
+        let (image, bodies) = pack(300, |i| [2048usize, 3000, 100][i as usize % 3]);
+        let mut drive = ImageDrive::new(image, LBA);
+        let mut scratch = [0u32; SECTOR_WORDS];
+        let mut bounce = Bounce::new();
+        let mut dst = vec![0u32; 1024];
+        for k in 0..900u32 {
+            let id = (k * 7919) % 301; // 300 is absent
+            let want = scan_entry(&mut drive, LBA, id, &mut scratch);
+            let got = scan_with(
+                &mut drive,
+                LBA,
+                id,
+                &mut bounce.sector,
+                &mut bounce.holds,
+                &mut bounce.table,
+            );
+            assert_eq!(got, want, "id {id}");
+            if k % 5 == 0 && id < 300 {
+                let len = load_bounced(&mut drive, LBA, id, &mut bounce, &mut dst).expect("load");
+                assert_eq!(&words_as_bytes(&dst)[..len], bodies[id as usize].as_slice());
+            }
+        }
+    }
+
+    #[test]
+    fn a_lookup_then_a_load_of_the_same_chunk_reads_the_table_once() {
+        // Quake's and hello-pack's pattern: find_entry, then load_chunk.
+        let (image, _) = pack(200, |_| 4096);
+        for id in [0u32, 100, 199] {
+            let mut plain = ImageDrive::new(image.clone(), LBA);
+            let mut scratch = [0u32; SECTOR_WORDS];
+            let mut dst = vec![0u32; 1024];
+            scan_entry(&mut plain, LBA, id, &mut scratch).expect("entry");
+            let e = scan_entry(&mut plain, LBA, id, &mut scratch).expect("entry");
+            stream_payload(
+                &mut plain,
+                LBA,
+                e.sector_offset,
+                e.byte_size,
+                &mut scratch,
+                &mut dst,
+            )
+            .expect("load");
+            let mut drive = ImageDrive::new(image.clone(), LBA);
+            let mut bounce = Bounce::new();
+            scan_with(
+                &mut drive,
+                LBA,
+                id,
+                &mut bounce.sector,
+                &mut bounce.holds,
+                &mut bounce.table,
+            )
+            .expect("entry");
+            let first = drive.seeks();
+            load_bounced(&mut drive, LBA, id, &mut bounce, &mut dst).expect("load");
+            std::println!(
+                "A5 find+load id {id}: plain seeks {} bounced seeks {}",
+                plain.seeks(),
+                drive.seeks()
+            );
+            assert_eq!(drive.seeks(), first + 1, "the load re-read no table sector");
+        }
+    }
+
+    /// Drive time of the reads `drive` recorded, from the residency
+    /// simulator's silicon seek and read table (double speed, nominal seeks;
+    /// a read starting where the last ended is charged no seek).
+    fn drive_micros(drive: &ImageDrive) -> u64 {
+        let mut model = psx_residency_sim::DriveModel::double_speed();
+        drive
+            .runs
+            .iter()
+            .map(|&(lba, n)| model.read(lba, n).0)
+            .sum()
+    }
+
+    /// The WORLD.PAK of the raw disc image `PSX_PACK_MEASURE_DISC`, and the ids
+    /// in `PSX_PACK_MEASURE_IDS` (comma separated).
+    fn disc_pack() -> (Vec<u8>, Vec<u32>) {
+        let path = std::env::var("PSX_PACK_MEASURE_DISC").expect("PSX_PACK_MEASURE_DISC");
+        let ids = std::env::var("PSX_PACK_MEASURE_IDS")
+            .expect("PSX_PACK_MEASURE_IDS")
+            .split(',')
+            .map(|s| s.trim().parse().expect("id"))
+            .collect();
+        let raw = std::fs::read(&path).expect("disc");
+        let user = |lba: usize| &raw[lba * 2352 + 24..lba * 2352 + 24 + SECTOR_BYTES];
+        let head = crate::parse_header(user(LBA as usize)).expect("pack header");
+        let mut image = Vec::new();
+        for s in 0..head.total_sectors as usize {
+            image.extend_from_slice(user(LBA as usize + s));
+        }
+        (image, ids)
+    }
+
+    /// `load_chunk` against `load_chunk_bounced` for a real disc's id list.
+    /// Lane measurement: `cargo test -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn measure_bounce_against_scan_on_a_disc() {
+        let (image, ids) = disc_pack();
+        let header = crate::parse_header(&image).expect("header");
+        let mut dst = vec![0u32; header.total_sectors as usize * SECTOR_WORDS];
+        let mut scratch = [0u32; SECTOR_WORDS];
+        let mut scan = ImageDrive::new(image.clone(), LBA);
+        for &id in &ids {
+            let e = scan_entry(&mut scan, LBA, id, &mut scratch).expect("entry");
+            stream_payload(
+                &mut scan,
+                LBA,
+                e.sector_offset,
+                e.byte_size,
+                &mut scratch,
+                &mut dst,
+            )
+            .expect("load");
+        }
+        let mut bounced = ImageDrive::new(image, LBA);
+        let mut bounce = Bounce::new();
+        for &id in &ids {
+            load_bounced(&mut bounced, LBA, id, &mut bounce, &mut dst).expect("load");
+        }
+        std::println!(
+            "{} chunks: scan starts {} sectors {} drive {} ms; bounced starts {} sectors {} drive {} ms",
+            ids.len(),
+            scan.seeks(),
+            scan.sectors(),
+            drive_micros(&scan) / 1000,
+            bounced.seeks(),
+            bounced.sectors(),
+            drive_micros(&bounced) / 1000
         );
     }
 }
