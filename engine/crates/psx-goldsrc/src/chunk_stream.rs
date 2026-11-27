@@ -611,7 +611,8 @@ impl<R: ChunkReader, A: PacketArena, const P: usize> CachedStreamer<R, A, P> {
 }
 
 /// Read a chunk's payload, `byte_size` bytes from `sector_offset` in the pack,
-/// into `dst` through `scratch`, reporting progress to `hook`. One attempt: a
+/// into `dst` (whole sectors straight in, a partial last sector through
+/// `scratch`), reporting progress to `hook`. One attempt: a
 /// prepare, a seek and ReadN, the sectors, and the reader's Pause.
 ///
 /// Reads only as many sectors as `byte_size` needs; the table's padded
@@ -635,14 +636,25 @@ unsafe fn read_payload<R: ChunkReader>(
     let needed = byte_size.div_ceil(SECTOR_BYTES);
     let mut s = 0usize;
     while s < needed {
-        if !rd.read_sector(scratch) {
-            rd.stop();
-            return false;
-        }
         let off = s * SECTOR_BYTES;
-        let copy = byte_size.saturating_sub(off).min(SECTOR_BYTES);
-        if copy > 0 {
-            core::ptr::copy_nonoverlapping(scratch.as_ptr() as *const u8, dst.add(off), copy);
+        let left = byte_size - off;
+        if left >= SECTOR_BYTES {
+            // A whole sector pops straight into its place: no bounce, no copy.
+            // SAFETY: `off + SECTOR_BYTES <= byte_size`, and `dst` is writable
+            // for `byte_size` bytes and word aligned (it is a `[u32]`), so
+            // this sector-sized window is in bounds and aligned; nothing else
+            // aliases it while the read runs.
+            let slot = &mut *(dst.add(off) as *mut [u32; SECTOR_WORDS]);
+            if !rd.read_sector(slot) {
+                rd.stop();
+                return false;
+            }
+        } else {
+            if !rd.read_sector(scratch) {
+                rd.stop();
+                return false;
+            }
+            core::ptr::copy_nonoverlapping(scratch.as_ptr() as *const u8, dst.add(off), left);
         }
         s += 1;
         report_sectors(hook, s, needed);
