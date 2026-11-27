@@ -9,6 +9,7 @@
 //! * `BOUNCED`: `load_chunk_bounced`, the same through a bounce that
 //!   remembers its sector;
 //! * `INDEX`: `read_index` once, then `load_indexed` per chunk;
+//! * `RUN`: `load_run`, the list sorted by disc position, neighbours sharing a read;
 //! * `DECODE`: the in-place HLZC decode of every compressed chunk on the
 //!   list, timed on its own, to set against the read time;
 //! * `COPY`: CPU clocks of one 2 KB sector copy, what popping whole sectors
@@ -26,8 +27,8 @@ extern crate psx_rt;
 use core::ptr::addr_of_mut;
 use psx_io::timers::{self, Timer};
 use psx_pack::cd::{
-    find_entry, find_indexed, load_chunk, load_chunk_bounced, load_indexed, read_index, Bounce,
-    IndexEntry, SectorReader, SECTOR_WORDS, WORLD_PACK_DEFAULT_LBA,
+    find_entry, find_indexed, load_chunk, load_chunk_bounced, load_indexed, load_run, read_index,
+    Bounce, IndexEntry, RunItem, SectorReader, SECTOR_WORDS, WORLD_PACK_DEFAULT_LBA,
 };
 use psx_pack::{decompress_hlzc_in_place, fnv1a32, HLZC_MAGIC};
 use psx_rt::interrupts::{install_vblank_counter, vblank_count};
@@ -42,11 +43,14 @@ const LEVEL: [u32; 17] = [
 /// The biggest raw chunk on the list is 442,276 B; room for it plus the
 /// in-place margin.
 const DST_WORDS: usize = 120 * 1024;
+/// The run path loads the whole list at once, each chunk in its own place: the
+/// list stores 1,230,006 B. The other paths use its first `DST_WORDS`.
+const ARENA_WORDS: usize = 312 * 1024;
 /// Every entry of the pack (714 on the HL disc).
 const INDEX_CAP: usize = 768;
 
 static mut SCRATCH: [u32; SECTOR_WORDS] = [0; SECTOR_WORDS];
-static mut DST: [u32; DST_WORDS] = [0; DST_WORDS];
+static mut ARENA: [u32; ARENA_WORDS] = [0; ARENA_WORDS];
 static mut INDEX: [IndexEntry; INDEX_CAP] = [IndexEntry::EMPTY; INDEX_CAP];
 static mut BOUNCE: Bounce = Bounce::new();
 static mut SUMS: [u32; LEVEL.len()] = [0; LEVEL.len()];
@@ -89,15 +93,16 @@ fn main() {
     install_vblank_counter();
     let rd = &mut SectorReader::with_cd(peripherals.cd);
     // SAFETY: main runs once; these statics are only touched here.
-    let (scratch, dst, index, bounce, sums) = unsafe {
+    let (scratch, arena, index, bounce, sums) = unsafe {
         (
             &mut *addr_of_mut!(SCRATCH),
-            &mut *addr_of_mut!(DST),
+            &mut *addr_of_mut!(ARENA),
             &mut *addr_of_mut!(INDEX),
             &mut *addr_of_mut!(BOUNCE),
             &mut *addr_of_mut!(SUMS),
         )
     };
+    let (dst, _) = arena.split_at_mut(DST_WORDS);
     if !rd.prepare() {
         fail("PREPARE");
     }
@@ -208,6 +213,40 @@ fn main() {
     tty::print("pack-bench: COPY clocks 0x");
     tty::print_hex_u32(best);
     tty::println("");
+
+    // RUN: the same list as runs (neighbours on the disc share one read),
+    // each chunk into its own part of the arena.
+    {
+        let mut rest: &mut [u32] = &mut arena[..];
+        let mut items: [Option<RunItem<'_>>; LEVEL.len()] = [const { None }; LEVEL.len()];
+        for (slot, &id) in items.iter_mut().zip(LEVEL.iter()) {
+            let Some(entry) = find_indexed(index, id) else {
+                fail("RUN FIND")
+            };
+            let words = (entry.byte_size as usize).div_ceil(4);
+            if words > rest.len() {
+                fail("RUN ARENA");
+            }
+            let (dst, tail) = core::mem::take(&mut rest).split_at_mut(words);
+            rest = tail;
+            *slot = Some(RunItem { entry, dst });
+        }
+        let mut items = items.map(|item| item.expect("filled"));
+        let t = vblank_count();
+        let Some(starts) = load_run(rd, pack, &mut items, scratch) else {
+            fail("RUN LOAD")
+        };
+        report("RUN", vblank_count().wrapping_sub(t));
+        tty::print("pack-bench: RUN starts 0x");
+        tty::print_hex_u32(starts);
+        tty::println("");
+        for item in items.iter() {
+            let Some(i) = LEVEL.iter().position(|&id| id == item.entry.chunk_id) else {
+                fail("RUN ID")
+            };
+            check(i, item.dst, item.entry.byte_size as usize, "RUN FNV");
+        }
+    }
 
     rd.stop();
     tty::println("pack-bench: DONE");
