@@ -26,9 +26,11 @@
 //! keep it in the game, keyed to its own pack, where the entry count and the
 //! RAM budget are known.
 
-use crate::SECTOR_BYTES;
-#[cfg(target_arch = "mips")]
-use crate::{entry_location, parse_entry_at, parse_header, PackEntry, ENTRY_BYTES};
+// The loader bodies are generic over `Transport` so host tests can count their seeks; on a
+// host build outside the tests nothing calls them.
+#![cfg_attr(not(any(target_arch = "mips", test)), allow(dead_code))]
+
+use crate::{entry_location, parse_entry_at, parse_header, PackEntry, ENTRY_BYTES, SECTOR_BYTES};
 
 /// Moved to `psx_io::cd::reader`. Kept at this path for one stage so
 /// `psx_pack::cd::SectorReader` still resolves; a re-export cannot carry a
@@ -49,9 +51,42 @@ const _: () = assert!(SECTOR_WORDS == psx_io::cd::reader::SECTOR_WORDS);
 /// this crate asserts the two constants stay equal.
 pub const WORLD_PACK_DEFAULT_LBA: u32 = 1024;
 
+/// The four drive steps the pack loader runs, so the loader's sector and seek
+/// pattern is one generic body: [`SectorReader`] on the console, a counting
+/// disc image in the host tests. Each `start_read` is one Setloc + ReadN (one
+/// seek); the body never chains reads without the `stop` in between.
+pub(crate) trait Transport {
+    /// [`SectorReader::prepare`].
+    fn prepare(&mut self) -> bool;
+    /// [`SectorReader::start_read`].
+    fn start_read(&mut self, lba: u32) -> bool;
+    /// [`SectorReader::read_sector`].
+    fn read_sector(&mut self, buffer: &mut [u32; SECTOR_WORDS]) -> bool;
+    /// [`SectorReader::stop`].
+    fn stop(&mut self);
+}
+
+impl Transport for SectorReader {
+    #[inline(always)]
+    fn prepare(&mut self) -> bool {
+        SectorReader::prepare(self)
+    }
+    #[inline(always)]
+    fn start_read(&mut self, lba: u32) -> bool {
+        SectorReader::start_read(self, lba)
+    }
+    #[inline(always)]
+    fn read_sector(&mut self, buffer: &mut [u32; SECTOR_WORDS]) -> bool {
+        SectorReader::read_sector(self, buffer)
+    }
+    #[inline(always)]
+    fn stop(&mut self) {
+        SectorReader::stop(self)
+    }
+}
+
 /// The sector currently in `scratch`, as bytes (little-endian DMA words are
 /// exactly the on-disc byte order).
-#[cfg(target_arch = "mips")]
 fn scratch_bytes(scratch: &[u32; SECTOR_WORDS]) -> &[u8] {
     // SAFETY: [u32; N] reinterpreted as its own bytes; alignment shrinks.
     unsafe { core::slice::from_raw_parts(scratch.as_ptr() as *const u8, SECTOR_BYTES) }
@@ -61,9 +96,8 @@ fn scratch_bytes(scratch: &[u32; SECTOR_WORDS]) -> &[u8] {
 /// unless `*loaded` says it is already there. Each miss is a full
 /// prepare/seek/read/stop cycle, which is why sequential entry scans track
 /// `loaded` (ports hl-psx's `load_pack_header_sector`).
-#[cfg(target_arch = "mips")]
-fn load_header_sector(
-    rd: &mut SectorReader,
+fn load_header_sector<T: Transport>(
+    rd: &mut T,
     pack_lba: u32,
     scratch: &mut [u32; SECTOR_WORDS],
     loaded: &mut u32,
@@ -88,9 +122,8 @@ fn load_header_sector(
 /// two header sectors (ports hl-psx's `read_pack_entry`; the sector math and
 /// byte parsing are the crate's host-tested [`entry_location`] /
 /// [`parse_entry_at`]).
-#[cfg(target_arch = "mips")]
-fn read_entry(
-    rd: &mut SectorReader,
+fn read_entry<T: Transport>(
+    rd: &mut T,
     pack_lba: u32,
     scratch: &mut [u32; SECTOR_WORDS],
     loaded: &mut u32,
@@ -131,6 +164,16 @@ fn read_entry(
 #[cfg(target_arch = "mips")]
 pub fn find_entry(
     rd: &mut SectorReader,
+    pack_lba: u32,
+    chunk_id: u32,
+    scratch: &mut [u32; SECTOR_WORDS],
+) -> Option<PackEntry> {
+    scan_entry(rd, pack_lba, chunk_id, scratch)
+}
+
+/// [`find_entry`] over any [`Transport`].
+pub(crate) fn scan_entry<T: Transport>(
+    rd: &mut T,
     pack_lba: u32,
     chunk_id: u32,
     scratch: &mut [u32; SECTOR_WORDS],
@@ -181,12 +224,33 @@ pub fn load_chunk(
     scratch: &mut [u32; SECTOR_WORDS],
     dst: &mut [u32],
 ) -> Option<usize> {
-    let entry = find_entry(rd, pack_lba, chunk_id, scratch)?;
-    let byte_size = entry.byte_size as usize;
+    let entry = scan_entry(rd, pack_lba, chunk_id, scratch)?;
+    stream_payload(
+        rd,
+        pack_lba,
+        entry.sector_offset,
+        entry.byte_size,
+        scratch,
+        dst,
+    )
+}
+
+/// Read `byte_size` bytes of payload starting `sector_offset` sectors into the
+/// pack at `pack_lba`, into `dst`: one seek, then the sectors. `None` when it
+/// does not fit `dst` or a read fails.
+pub(crate) fn stream_payload<T: Transport>(
+    rd: &mut T,
+    pack_lba: u32,
+    sector_offset: u32,
+    byte_size: u32,
+    scratch: &mut [u32; SECTOR_WORDS],
+    dst: &mut [u32],
+) -> Option<usize> {
+    let byte_size = byte_size as usize;
     if byte_size > dst.len() * 4 {
         return None;
     }
-    if !rd.prepare() || !rd.start_read(pack_lba + entry.sector_offset) {
+    if !rd.prepare() || !rd.start_read(pack_lba + sector_offset) {
         rd.stop();
         return None;
     }
@@ -241,8 +305,64 @@ pub fn load_chunk_decompressed(
 }
 
 #[cfg(test)]
+mod test_drive;
+
+#[cfg(test)]
 mod tests {
+    use super::test_drive::ImageDrive;
     use super::*;
+    extern crate std;
+    use std::vec;
+    use std::vec::Vec;
+
+    const LBA: u32 = WORLD_PACK_DEFAULT_LBA;
+
+    /// `count` chunks with ids 0.., chunk `i` holding `size(i)` bytes of
+    /// a pattern unique to it, packed by the real writer.
+    fn pack(count: u32, size: fn(u32) -> usize) -> (Vec<u8>, Vec<Vec<u8>>) {
+        let bodies: Vec<Vec<u8>> = (0..count)
+            .map(|i| {
+                (0..size(i))
+                    .map(|k| (k as u32 ^ i.wrapping_mul(97)) as u8)
+                    .collect()
+            })
+            .collect();
+        let refs: Vec<(u32, &[u8])> = bodies
+            .iter()
+            .enumerate()
+            .map(|(i, b)| (i as u32, b.as_slice()))
+            .collect();
+        (psx_iso::build_world_pack(&refs), bodies)
+    }
+
+    fn words_as_bytes(words: &[u32]) -> Vec<u8> {
+        words.iter().flat_map(|w| w.to_le_bytes()).collect()
+    }
+
+    #[test]
+    fn a_load_pays_one_seek_per_table_sector_it_scans_plus_the_payload() {
+        // 200 entries: 28 + 200 * 24 = 4828 bytes, three table sectors.
+        let (image, bodies) = pack(200, |i| 1000 + i as usize * 37);
+        let mut drive = ImageDrive::new(image, LBA);
+        let mut scratch = [0u32; SECTOR_WORDS];
+        let mut dst = vec![0u32; 4096];
+        for (id, table_seeks) in [(0u32, 1u32), (100, 2), (199, 3)] {
+            drive.reset_counts();
+            let got = scan_entry(&mut drive, LBA, id, &mut scratch).and_then(|e| {
+                stream_payload(
+                    &mut drive,
+                    LBA,
+                    e.sector_offset,
+                    e.byte_size,
+                    &mut scratch,
+                    &mut dst,
+                )
+            });
+            let len = got.expect("loaded");
+            assert_eq!(&words_as_bytes(&dst)[..len], bodies[id as usize].as_slice());
+            assert_eq!(drive.seeks(), table_seeks + 1, "id {id}");
+        }
+    }
 
     #[test]
     fn the_default_pack_lba_seeks_where_the_disc_math_says() {
