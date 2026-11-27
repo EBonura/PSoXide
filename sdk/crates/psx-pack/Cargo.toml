@@ -7,6 +7,11 @@ license.workspace = true
 repository.workspace = true
 description  = "Guest-side WORLD.PAK (PSOXWPAK) parsing, in-place HLZC/LZ4 chunk decompression, and the CD-ROM sector-read state machine that streams chunks off the disc. The reader half of psx-iso's pack writer."
 
+[features]
+# Debug builds only: after `lock::seal()` any pack load is a fatal error naming
+# its chunk id. Off, `lock` compiles to nothing.
+residency-lock = []
+
 [dependencies]
 # The root module is pure logic and builds for guest and host alike. The
 # sector reader and the drive steps it runs on live in psx-io, which builds

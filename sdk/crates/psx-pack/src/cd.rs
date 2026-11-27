@@ -269,6 +269,7 @@ pub(crate) fn scan_entry<T: Transport>(
     chunk_id: u32,
     scratch: &mut [u32; SECTOR_WORDS],
 ) -> Option<PackEntry> {
+    crate::lock::check(chunk_id);
     // The plain scan keeps its own body: routed through `scan_with` it would
     // carry the held-sector pass (about 540 B of .text) into every program
     // that never uses a `Bounce`.
@@ -311,6 +312,7 @@ fn scan_with<T: Transport>(
     loaded: &mut u32,
     table: &mut TableShape,
 ) -> Option<PackEntry> {
+    crate::lock::check(chunk_id);
     if table.pack_lba != pack_lba {
         if !load_header_sector(rd, pack_lba, scratch, loaded, 0) {
             return None;
@@ -423,7 +425,7 @@ pub(crate) fn load_bounced<T: Transport>(
         &mut bounce.holds,
         &mut bounce.table,
     )?;
-    let tail = entry.byte_size as usize % SECTOR_BYTES != 0;
+    let tail = !(entry.byte_size as usize).is_multiple_of(SECTOR_BYTES);
     let bounced_lba =
         pack_lba + entry.sector_offset + (entry.byte_size as usize / SECTOR_BYTES) as u32;
     let fits = entry.byte_size as usize <= dst.len() * 4;
@@ -567,6 +569,7 @@ pub(crate) fn read_index_from<T: Transport>(
     out: &mut [IndexEntry],
     mut keep: impl FnMut(u32) -> bool,
 ) -> Option<usize> {
+    crate::lock::check(crate::lock::TABLE_KEY);
     if !rd.prepare() || !rd.start_read(pack_lba) || !rd.read_sector(scratch) {
         rd.stop();
         return None;
@@ -639,6 +642,7 @@ pub fn load_indexed(
     scratch: &mut [u32; SECTOR_WORDS],
     dst: &mut [u32],
 ) -> Option<usize> {
+    crate::lock::check(entry.chunk_id);
     stream_payload(
         rd,
         pack_lba,
@@ -689,7 +693,7 @@ pub fn load_chunk_decompressed(
 }
 
 #[cfg(test)]
-mod test_drive;
+pub(crate) mod test_drive;
 
 #[cfg(test)]
 mod tests {

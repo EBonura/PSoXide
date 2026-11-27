@@ -431,6 +431,7 @@ impl<R: ChunkReader, A: PacketArena, const P: usize> CachedStreamer<R, A, P> {
     /// [`READ_ATTEMPTS`] in all. `None` when the chunk is unknown, too big for
     /// `dst`, or every attempt failed.
     pub fn load_chunk(&mut self, chunk_id: u32, dst: &mut [u32]) -> Option<usize> {
+        psx_pack::lock::check(chunk_id);
         // The drive can hold one open session (weapon switch). Any blocking
         // load supersedes it: close the READN stream before issuing new commands.
         self.stream_abort();
@@ -465,6 +466,7 @@ impl<R: ChunkReader, A: PacketArena, const P: usize> CachedStreamer<R, A, P> {
         index: u32,
         dst: &mut [u32; SECTOR_WORDS],
     ) -> bool {
+        psx_pack::lock::check(chunk_id);
         self.stream_abort();
         unsafe {
             let rd = &mut *core::ptr::addr_of_mut!(self.reader);
@@ -526,6 +528,7 @@ impl<R: ChunkReader, A: PacketArena, const P: usize> CachedStreamer<R, A, P> {
     /// Only the owner may access the destination while the stream is active.
     /// Calls are serialized with all other CD MMIO and may not reenter.
     pub unsafe fn stream_begin(&mut self, chunk_id: u32, dst: *mut u32, dst_words: usize) -> bool {
+        psx_pack::lock::check(chunk_id);
         self.stream_abort();
         let rd = &mut *core::ptr::addr_of_mut!(self.reader);
         let scratch = &mut *core::ptr::addr_of_mut!(self.scratch);

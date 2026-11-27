@@ -37,6 +37,7 @@
 #![warn(missing_docs)]
 
 pub mod cd;
+pub mod lock;
 
 use psx_math::le::get_u32 as le32;
 /// Allocation-free Quake and GoldSrc visibility row codecs.
