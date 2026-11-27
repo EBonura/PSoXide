@@ -205,7 +205,8 @@ pub(crate) fn scan_entry<T: Transport>(
 ///
 /// Scans the table for the entry (sector-by-sector through `scratch`,
 /// straddle-safe), verifies the payload fits `dst`, then seeks to the payload
-/// and copies it in whole sectors via `scratch`. Returns the chunk's exact
+/// and pops whole sectors straight into `dst`; only a partial last sector goes
+/// through `scratch`. Returns the chunk's exact
 /// byte size, or `None` (no disc / not found / too big / read error). The
 /// payload lands at `dst[0]` still compressed if the writer compressed it;
 /// see [`load_chunk_decompressed`].
@@ -254,25 +255,37 @@ pub(crate) fn stream_payload<T: Transport>(
         rd.stop();
         return None;
     }
-    let dst_ptr = dst.as_mut_ptr() as *mut u8;
     let needed = byte_size.div_ceil(SECTOR_BYTES);
     let mut s = 0usize;
     while s < needed {
-        if !rd.read_sector(scratch) {
-            rd.stop();
-            return None;
-        }
         let off = s * SECTOR_BYTES;
-        let copy = byte_size.saturating_sub(off).min(SECTOR_BYTES);
-        if copy > 0 {
-            // SAFETY: `off + copy <= byte_size <= dst.len() * 4` (checked
-            // above), so the write stays inside `dst`; `scratch` is a whole
-            // sector and `copy <= SECTOR_BYTES`; the two are distinct borrows.
+        let left = byte_size - off;
+        // A whole sector of payload is popped straight into its place in
+        // `dst`; only a partial tail goes through `scratch`, so no full
+        // sector is copied twice. Same single read, no second seek.
+        let whole = if left >= SECTOR_BYTES {
+            dst[s * SECTOR_WORDS..].first_chunk_mut::<SECTOR_WORDS>()
+        } else {
+            None
+        };
+        if let Some(slot) = whole {
+            if !rd.read_sector(slot) {
+                rd.stop();
+                return None;
+            }
+        } else {
+            if !rd.read_sector(scratch) {
+                rd.stop();
+                return None;
+            }
+            // SAFETY: `off + left == byte_size <= dst.len() * 4` (checked
+            // above), so the write stays inside `dst`; `left < SECTOR_BYTES`
+            // fits `scratch`; the two are distinct borrows.
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     scratch.as_ptr() as *const u8,
-                    dst_ptr.add(off),
-                    copy,
+                    (dst.as_mut_ptr() as *mut u8).add(off),
+                    left,
                 );
             }
         }
@@ -361,6 +374,75 @@ mod tests {
             let len = got.expect("loaded");
             assert_eq!(&words_as_bytes(&dst)[..len], bodies[id as usize].as_slice());
             assert_eq!(drive.seeks(), table_seeks + 1, "id {id}");
+        }
+    }
+
+    #[test]
+    fn whole_sectors_land_in_place_and_only_a_partial_tail_bounces() {
+        // Sizes: exact sectors, one byte over, one byte under, under a sector.
+        let sizes = [4096usize, 4097, 6143, 100, 2048];
+        let (image, bodies) = pack(sizes.len() as u32, |i| {
+            [4096usize, 4097, 6143, 100, 2048][i as usize]
+        });
+        let mut drive = ImageDrive::new(image, LBA);
+        let mut scratch = [0u32; SECTOR_WORDS];
+        for (id, &size) in sizes.iter().enumerate() {
+            let e = scan_entry(&mut drive, LBA, id as u32, &mut scratch).expect("entry");
+            // dst exactly the payload, rounded up to a word: the tail must
+            // not be written past `byte_size` even when it would fit.
+            let mut dst = vec![0xdead_beefu32; size.div_ceil(4) + 1];
+            drive.reset_counts();
+            drive.watch(&dst);
+            let len = stream_payload(
+                &mut drive,
+                LBA,
+                e.sector_offset,
+                e.byte_size,
+                &mut scratch,
+                &mut dst,
+            );
+            assert_eq!(len, Some(size));
+            let bytes = words_as_bytes(&dst);
+            assert_eq!(&bytes[..size], bodies[id].as_slice(), "size {size}");
+            assert_eq!(
+                *dst.last().expect("guard"),
+                0xdead_beef,
+                "wrote past the payload"
+            );
+            assert_eq!(
+                drive.seeks(),
+                1,
+                "one read start, no second seek for the tail"
+            );
+            assert_eq!(drive.direct, (size / SECTOR_BYTES) as u32, "size {size}");
+            assert_eq!(
+                drive.bounced,
+                u32::from(size % SECTOR_BYTES != 0),
+                "size {size}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_sector_fails_the_load_whether_it_lands_in_place_or_bounces() {
+        let (image, _) = pack(1, |_| 5000);
+        for bad in 0..3u32 {
+            let mut drive = ImageDrive::new(image.clone(), LBA);
+            let mut scratch = [0u32; SECTOR_WORDS];
+            let e = scan_entry(&mut drive, LBA, 0, &mut scratch).expect("entry");
+            drive.fail_lba = Some(LBA + e.sector_offset + bad);
+            let mut dst = vec![0u32; 2048];
+            assert_eq!(
+                stream_payload(
+                    &mut drive,
+                    LBA,
+                    e.sector_offset,
+                    e.byte_size,
+                    &mut scratch,
+                    &mut dst
+                ),
+                None
+            );
         }
     }
 
