@@ -414,20 +414,35 @@ pub(crate) fn stream_payload<T: Transport>(
         rd.stop();
         return None;
     }
+    let ok = pop_payload(rd, byte_size, scratch, dst);
+    rd.stop();
+    ok.then_some(byte_size)
+}
+
+/// Pop the next `byte_size.div_ceil(2048)` sectors of the running read
+/// through `scratch` into `dst` (`byte_size <= dst.len() * 4`, checked by the
+/// caller). `false` when a sector read fails; the read is left for the
+/// caller to stop.
+#[inline(always)]
+fn pop_payload<T: Transport>(
+    rd: &mut T,
+    byte_size: usize,
+    scratch: &mut [u32; SECTOR_WORDS],
+    dst: &mut [u32],
+) -> bool {
     let dst_ptr = dst.as_mut_ptr() as *mut u8;
     let needed = byte_size.div_ceil(SECTOR_BYTES);
     let mut s = 0usize;
     while s < needed {
         if !rd.read_sector(scratch) {
-            rd.stop();
-            return None;
+            return false;
         }
         let off = s * SECTOR_BYTES;
         let copy = byte_size.saturating_sub(off).min(SECTOR_BYTES);
         if copy > 0 {
-            // SAFETY: `off + copy <= byte_size <= dst.len() * 4` (checked
-            // above), so the write stays inside `dst`; `scratch` is a whole
-            // sector and `copy <= SECTOR_BYTES`; the two are distinct borrows.
+            // SAFETY: `off + copy <= byte_size <= dst.len() * 4` (the
+            // caller's check), so the write stays inside `dst`; `scratch` is
+            // a whole sector and `copy <= SECTOR_BYTES`; distinct borrows.
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     scratch.as_ptr() as *const u8,
@@ -438,8 +453,117 @@ pub(crate) fn stream_payload<T: Transport>(
         }
         s += 1;
     }
-    rd.stop();
-    Some(byte_size)
+    true
+}
+
+/// A gap of up to this many sectors between two chunks of a run is read and
+/// thrown away instead of ending the read: it costs less than the Pause,
+/// seek and first-sector wait of a new read. The game runtime's UI.PAK
+/// planner (`SEEK_BREAK_EVEN_SECTORS`) uses the same number.
+pub const RUN_GAP_SECTORS: u32 = 8;
+
+/// A run (one read start, then the Pause) grows to at most this many sectors;
+/// the next chunk starts a new read. The resident core pauses between its
+/// 256-sector chunks for the same reason, and a run keeps to it. A single
+/// chunk longer than this is read in one read, as `load_chunk` reads it.
+pub const RUN_MAX_SECTORS: u32 = 256;
+
+/// One chunk of a [`load_run`]: its table entry and where its payload goes.
+#[non_exhaustive]
+pub struct RunItem<'a> {
+    /// The chunk's entry, from [`find_entry`] or the caller's own table copy
+    /// (only `sector_offset` and `byte_size` are used).
+    pub entry: PackEntry,
+    /// Its destination; holds at least `entry.byte_size` bytes.
+    pub dst: &'a mut [u32],
+}
+
+impl<'a> RunItem<'a> {
+    /// Chunk `entry`, to land in `dst`.
+    #[must_use]
+    pub fn new(entry: PackEntry, dst: &'a mut [u32]) -> Self {
+        Self { entry, dst }
+    }
+}
+
+/// Load several chunks with as few read starts as the disc layout allows:
+/// `items` is sorted by disc position, chunks no more than
+/// [`RUN_GAP_SECTORS`] apart share one read (the gap is read and thrown
+/// away) up to [`RUN_MAX_SECTORS`], and each read ends with the reader's
+/// Pause, as every load does. Returns the number of read starts, or `None`
+/// when a chunk does not fit its `dst` (nothing read) or a read failed
+/// (destinations of that read and after undefined).
+///
+/// It never issues a read while another runs: each run is one read start
+/// over sectors that lie back to back on the disc, then the Pause, exactly
+/// like one `load_chunk` of a chunk that long.
+#[cfg(target_arch = "mips")]
+pub fn load_run(
+    rd: &mut SectorReader,
+    pack_lba: u32,
+    items: &mut [RunItem<'_>],
+    scratch: &mut [u32; SECTOR_WORDS],
+) -> Option<u32> {
+    load_run_with(rd, pack_lba, items, scratch)
+}
+
+/// [`load_run`] over any [`Transport`].
+pub(crate) fn load_run_with<T: Transport>(
+    rd: &mut T,
+    pack_lba: u32,
+    items: &mut [RunItem<'_>],
+    scratch: &mut [u32; SECTOR_WORDS],
+) -> Option<u32> {
+    let sectors = |e: &PackEntry| (e.byte_size as usize).div_ceil(SECTOR_BYTES) as u32;
+    for item in items.iter() {
+        if item.entry.byte_size as usize > item.dst.len() * 4 {
+            return None;
+        }
+    }
+    items.sort_unstable_by_key(|item| item.entry.sector_offset);
+    let mut starts = 0u32;
+    let mut i = 0usize;
+    while i < items.len() {
+        // The run: items[i..j], sectors first..end.
+        let first = items[i].entry.sector_offset;
+        let mut end = first + sectors(&items[i].entry);
+        let mut j = i + 1;
+        while j < items.len() {
+            let at = items[j].entry.sector_offset;
+            let next_end = at + sectors(&items[j].entry);
+            if at < end || at - end > RUN_GAP_SECTORS || next_end - first > RUN_MAX_SECTORS {
+                break;
+            }
+            end = next_end;
+            j += 1;
+        }
+        if !rd.prepare() || !rd.start_read(pack_lba + first) {
+            rd.stop();
+            return None;
+        }
+        starts += 1;
+        let mut head = first;
+        let mut k = i;
+        while k < j {
+            let item = &mut items[k];
+            while head < item.entry.sector_offset {
+                if !rd.read_sector(scratch) {
+                    rd.stop();
+                    return None;
+                }
+                head += 1;
+            }
+            if !pop_payload(rd, item.entry.byte_size as usize, scratch, item.dst) {
+                rd.stop();
+                return None;
+            }
+            head += sectors(&item.entry);
+            k += 1;
+        }
+        rd.stop();
+        i = j;
+    }
+    Some(starts)
 }
 
 /// [`load_chunk`] through a [`Bounce`]: the table scan skips sectors the
@@ -731,6 +855,130 @@ mod tests {
             bounced.seeks(),
             bounced.sectors(),
             drive_micros(&bounced) / 1000
+        );
+    }
+
+    /// Load `ids` from `image` one chunk at a time and as runs, the entries
+    /// found first (not counted); returns (read starts, sectors, drive micros)
+    /// for each way, after checking the run put every chunk's bytes in place.
+    fn compare_run(image: &[u8], ids: &[u32]) -> [(u32, u32, u64); 2] {
+        let mut scratch = [0u32; SECTOR_WORDS];
+        let mut probe = ImageDrive::new(image.to_vec(), LBA);
+        let entries: Vec<PackEntry> = ids
+            .iter()
+            .map(|&id| scan_entry(&mut probe, LBA, id, &mut scratch).expect("entry"))
+            .collect();
+        let mut single = ImageDrive::new(image.to_vec(), LBA);
+        let mut want: Vec<Vec<u32>> = Vec::new();
+        for e in &entries {
+            let mut dst = vec![0u32; (e.byte_size as usize).div_ceil(4)];
+            stream_payload(
+                &mut single,
+                LBA,
+                e.sector_offset,
+                e.byte_size,
+                &mut scratch,
+                &mut dst,
+            )
+            .expect("load");
+            want.push(dst);
+        }
+        let mut dsts: Vec<Vec<u32>> = entries
+            .iter()
+            .map(|e| vec![0u32; (e.byte_size as usize).div_ceil(4)])
+            .collect();
+        let mut run = ImageDrive::new(image.to_vec(), LBA);
+        {
+            let mut items: Vec<RunItem<'_>> = entries
+                .iter()
+                .zip(dsts.iter_mut())
+                .map(|(&entry, dst)| RunItem {
+                    entry,
+                    dst: dst.as_mut_slice(),
+                })
+                .collect();
+            let starts = load_run_with(&mut run, LBA, &mut items, &mut scratch).expect("run");
+            assert_eq!(starts, run.seeks());
+        }
+        assert_eq!(dsts, want, "every chunk landed whole in its own buffer");
+        [
+            (single.seeks(), single.sectors(), drive_micros(&single)),
+            (run.seeks(), run.sectors(), drive_micros(&run)),
+        ]
+    }
+
+    #[test]
+    // Packs of 40 and 100 chunks loaded both ways: a sweep, native only (sdk/docs/MIRI.md).
+    #[cfg_attr(miri, ignore)]
+    fn a_run_reads_neighbours_in_one_start_and_keeps_to_the_cap() {
+        // 40 chunks of 3 sectors, back to back in the pack.
+        let (image, _) = pack(40, |_| 3 * SECTOR_BYTES - 100);
+        // Every other chunk: gaps of 3 sectors, read through.
+        let ids: Vec<u32> = (0..40).step_by(2).collect();
+        let [single, run] = compare_run(&image, &ids);
+        assert_eq!(single.0, 20);
+        assert_eq!(
+            run.0, 1,
+            "20 chunks x 3 + 19 gaps x 3 = 117 sectors, one read"
+        );
+        let all: Vec<u32> = (0..40).collect();
+        assert_eq!(compare_run(&image, &all)[1].0, 1);
+        // 100 chunks x 3 sectors = 300: capped at 256, so two reads.
+        let (big, _) = pack(100, |_| 3 * SECTOR_BYTES);
+        let all: Vec<u32> = (0..100).rev().collect();
+        assert_eq!(
+            compare_run(&big, &all)[1].0,
+            2,
+            "85 chunks (255 sectors) then 15"
+        );
+        // Far apart: no sharing.
+        let (sparse, _) = pack(40, |i| if i % 2 == 0 { 2000 } else { 20 * SECTOR_BYTES });
+        let ids: Vec<u32> = (0..40).step_by(2).collect();
+        assert_eq!(compare_run(&sparse, &ids)[1].0, 20);
+    }
+
+    #[test]
+    fn a_run_refuses_a_destination_too_small_before_reading() {
+        let (image, _) = pack(3, |_| 5000);
+        let mut drive = ImageDrive::new(image, LBA);
+        let mut scratch = [0u32; SECTOR_WORDS];
+        let e0 = scan_entry(&mut drive, LBA, 0, &mut scratch).expect("entry");
+        let e1 = scan_entry(&mut drive, LBA, 1, &mut scratch).expect("entry");
+        let reads = drive.seeks();
+        let (mut a, mut b) = (vec![0u32; 1250], vec![0u32; 1000]);
+        let mut items = [
+            RunItem {
+                entry: e0,
+                dst: &mut a,
+            },
+            RunItem {
+                entry: e1,
+                dst: &mut b,
+            },
+        ];
+        assert_eq!(
+            load_run_with(&mut drive, LBA, &mut items, &mut scratch),
+            None
+        );
+        assert_eq!(drive.seeks(), reads, "nothing read");
+    }
+
+    /// The run loader against per-chunk loads for a real disc's id list.
+    /// Lane measurement: `cargo test -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn measure_run_against_per_chunk_on_a_disc() {
+        let (image, ids) = disc_pack();
+        let [single, run] = compare_run(&image, &ids);
+        std::println!(
+            "{} chunks: per chunk starts {} sectors {} drive {} ms; run starts {} sectors {} drive {} ms",
+            ids.len(),
+            single.0,
+            single.1,
+            single.2 / 1000,
+            run.0,
+            run.1,
+            run.2 / 1000
         );
     }
 }
