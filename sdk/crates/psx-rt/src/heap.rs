@@ -30,6 +30,14 @@ pub struct Bump {
     end: *mut u8,
 }
 
+/// Both ends of a [`Bump`] at one moment, from [`Bump::mark`] or [`mark`]: what
+/// [`Bump::rewind_far`] goes back to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Mark {
+    next: usize,
+    end: usize,
+}
+
 // SAFETY: a `Bump` is two addresses and owns no memory; moving it to another thread is what
 // moving the two integers it used to hold was.
 unsafe impl Send for Bump {}
@@ -95,6 +103,49 @@ impl Bump {
     #[must_use]
     pub fn remaining(&self) -> usize {
         (self.end as usize).saturating_sub(self.next as usize)
+    }
+
+    /// A block of `size` bytes aligned to `align` (a power of two) from the FAR end of the free
+    /// range, or null when it does not fit. Not cleared.
+    ///
+    /// For load-time temporaries (a decompression window, a parse table): they come off the top
+    /// of the heap while permanent blocks keep coming off the bottom with [`alloc`](Self::alloc),
+    /// so freeing the temporaries in one [`rewind_far`](Self::rewind_far) leaves no hole between
+    /// permanent blocks.
+    #[inline(always)]
+    pub fn alloc_far(&mut self, size: usize, align: usize) -> *mut u8 {
+        let Some(start) = (self.end as usize)
+            .checked_sub(size)
+            .map(|top| top & !(align - 1))
+        else {
+            return core::ptr::null_mut();
+        };
+        if start < self.next as usize {
+            return core::ptr::null_mut();
+        }
+        self.end = start as *mut u8;
+        start as *mut u8
+    }
+
+    /// Where both ends are now, to rewind to later.
+    #[must_use]
+    pub fn mark(&self) -> Mark {
+        Mark {
+            next: self.next as usize,
+            end: self.end as usize,
+        }
+    }
+
+    /// Free every far-end block taken since `mark`, in one step; near-end blocks taken since
+    /// stay. Does nothing if the far end is already at or above the mark.
+    ///
+    /// # Safety
+    /// No far-end block taken after `mark` is used again, and `mark` came from this allocator.
+    #[inline(always)]
+    pub unsafe fn rewind_far(&mut self, mark: Mark) {
+        if mark.end > self.end as usize {
+            self.end = mark.end as *mut u8;
+        }
     }
 }
 
@@ -181,6 +232,32 @@ pub unsafe fn resize_tip(ptr: *mut u8, old_size: usize, new_size: usize) -> bool
 pub fn remaining() -> usize {
     // SAFETY: single-threaded foreground access per the `Sync` impl.
     unsafe { state().remaining() }
+}
+
+/// A block from the far end of the program's heap; see [`Bump::alloc_far`]. Not cleared.
+#[must_use]
+#[inline]
+pub fn alloc_far_raw(size: usize, align: usize) -> *mut u8 {
+    // SAFETY: single-threaded foreground access per the `Sync` impl.
+    unsafe { state().alloc_far(size, align) }
+}
+
+/// Both ends of the program's heap now; see [`Bump::mark`].
+#[must_use]
+#[inline]
+pub fn mark() -> Mark {
+    // SAFETY: single-threaded foreground access per the `Sync` impl.
+    unsafe { state().mark() }
+}
+
+/// Free the program heap's far-end blocks taken since `mark`; see [`Bump::rewind_far`].
+///
+/// # Safety
+/// As [`Bump::rewind_far`].
+#[inline]
+pub unsafe fn rewind_far(mark: Mark) {
+    // SAFETY: single-threaded access per the `Sync` impl; the rest is the caller's per `# Safety`.
+    unsafe { state().rewind_far(mark) }
 }
 
 /// Diag builds: when the program's heap has fewer than `floor` bytes left, call `report` with
@@ -324,6 +401,34 @@ mod tests {
         unsafe { assert!(b.resize_tip(p, 100, 10)) };
         assert_eq!(b.remaining(), 256 - 10);
         assert_eq!(b.alloc(1, 1) as usize, start + 10);
+    }
+
+    #[test]
+    fn far_blocks_come_off_the_top_and_free_in_one_rewind() {
+        let mut arena = Arena([0; 256]);
+        let (start, end) = arena.range();
+        let mut b = Bump::new(start, end);
+        let level = b.alloc(16, 4);
+        let mark = b.mark();
+        let window = b.alloc_far(100, 8);
+        assert_eq!(window as usize, (end - 100) & !7);
+        let table = b.alloc_far(30, 4);
+        assert!((table as usize) + 30 <= window as usize);
+        // A permanent block taken while the temporaries live stays put.
+        let keep = b.alloc(40, 4);
+        assert_eq!(keep as usize, start + 16);
+        assert!(
+            b.alloc_far(256, 1).is_null(),
+            "the far end never passes the tip"
+        );
+        // SAFETY: neither far block is used again.
+        unsafe { b.rewind_far(mark) };
+        assert_eq!(b.remaining(), 256 - 16 - 40);
+        assert_eq!(level as usize, start);
+        // An old mark above nothing taken since rewinds nothing.
+        // SAFETY: as above.
+        unsafe { b.rewind_far(mark) };
+        assert_eq!(b.remaining(), 256 - 56);
     }
 
     /// The global heap's raw entry (one test: the state is a static).
