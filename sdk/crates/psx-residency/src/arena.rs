@@ -193,6 +193,38 @@ const EMPTY: Installed = Installed {
     ready: false,
 };
 
+/// A package being installed from its words as they arrive ([`Registry::begin_stream`]). It
+/// holds a placement, not an admission: finish it ([`Registry::finish_stream`]) or abandon it
+/// ([`Registry::abandon_stream`]), else the placement stays taken until the registry is
+/// invalidated.
+pub struct Streaming {
+    handle: Handle,
+    descriptor: Descriptor,
+    /// Arena word index of the image's first word.
+    start: usize,
+    /// Its address.
+    address: u32,
+    /// Image words.
+    image: usize,
+    /// Package words (header, image and fixups).
+    words: usize,
+    /// Package words arrived so far.
+    seen: usize,
+    code_end: u32,
+    /// Word FNV of the words arrived so far.
+    hash: u32,
+}
+impl Streaming {
+    /// Package words arrived so far, the five header words included.
+    pub const fn seen(&self) -> usize {
+        self.seen
+    }
+    /// The package's complete word count.
+    pub const fn words(&self) -> usize {
+        self.words
+    }
+}
+
 /// Small persistent allocation/publication registry. Keep it across title,
 /// gameplay and title re-admission so old handles cannot become current again.
 pub struct Registry<const SLOTS: usize> {
@@ -302,6 +334,183 @@ impl<const SLOTS: usize> Registry<SLOTS> {
         };
         self.address = Some(arena.address);
         Ok(handle)
+    }
+    /// Begin installing a package whose words arrive in order (a CD read sector by sector), so
+    /// the image is read straight into its place in the arena: no staging copy of the package.
+    /// `header` is the package's first five words, `words` its complete word count (header,
+    /// image and fixups). The image is placed as [`Registry::install`] places it; nothing is
+    /// admissible until [`Registry::finish_stream`] checks the whole package.
+    ///
+    /// Then, in package order: [`Registry::stream_image`] is where the image words that have not
+    /// arrived yet go (a reader may write them there itself and report them with
+    /// [`Registry::stream_landed`]), and [`Registry::stream_feed`] takes words that arrived
+    /// elsewhere (image words are stored in place, fixup words relocate the image in place).
+    /// After an error, or to give up, [`Registry::abandon_stream`] frees the placement.
+    pub fn begin_stream(
+        &mut self,
+        arena: &CallerArena<'_>,
+        header: &[u32],
+        words: usize,
+        descriptor: Descriptor,
+    ) -> Result<Streaming, Error> {
+        self.check_arena(arena)?;
+        let header = header
+            .get(..5)
+            .ok_or(Error::Format(overlay::Error::Bounds))?;
+        if header[0] != overlay::MAGIC {
+            return Err(Error::Format(overlay::Error::Bounds));
+        }
+        let image = header[2] as usize;
+        let end = 5usize
+            .checked_add(image)
+            .and_then(|end| end.checked_add(header[3] as usize));
+        if end != Some(words) || header[4] & 3 != 0 || header[4] as usize > image * 4 {
+            return Err(Error::Format(overlay::Error::Bounds));
+        }
+        if header[1] != descriptor.id {
+            return Err(Error::Integrity);
+        }
+        if image == 0 {
+            return Err(Error::Space);
+        }
+        let bytes = u32::try_from(image * 4).map_err(|_| Error::Space)?;
+        let handle = self.place(arena, bytes, header[4] != 0)?;
+        let run = self.pool.try_run(handle).ok_or(Error::Stale)?;
+        let mut hash = psx_pack::WordFnv32::new();
+        hash.update(header);
+        Ok(Streaming {
+            handle,
+            descriptor,
+            start: run.first_page as usize / 4,
+            address: arena.address + run.first_page,
+            image,
+            words,
+            seen: 5,
+            code_end: header[4],
+            hash: hash.finish(),
+        })
+    }
+    /// The image words of `stream` that have not arrived yet, in their final place: a reader may
+    /// write the next words of the package here itself, then report them with
+    /// [`Registry::stream_landed`]. Empty once the image is complete.
+    pub fn stream_image<'b>(
+        &self,
+        arena: &'b mut CallerArena<'_>,
+        stream: &Streaming,
+    ) -> Result<&'b mut [u32], Error> {
+        self.check_stream(arena, stream)?;
+        let done = (stream.seen - 5).min(stream.image);
+        Ok(&mut arena.words[stream.start + done..stream.start + stream.image])
+    }
+    /// The reader wrote the next `count` image words of `stream` into
+    /// [`Registry::stream_image`] itself.
+    pub fn stream_landed(
+        &self,
+        arena: &CallerArena<'_>,
+        stream: &mut Streaming,
+        count: usize,
+    ) -> Result<(), Error> {
+        self.check_stream(arena, stream)?;
+        let done = stream.seen - 5;
+        if done
+            .checked_add(count)
+            .map_or(true, |end| end > stream.image)
+        {
+            return Err(Error::Format(overlay::Error::Bounds));
+        }
+        let at = stream.start + done;
+        let mut hash = psx_pack::WordFnv32::from_state(stream.hash);
+        hash.update(&arena.words[at..at + count]);
+        stream.hash = hash.finish();
+        stream.seen += count;
+        Ok(())
+    }
+    /// The next `words` of `stream`'s package, read somewhere else: image words are stored in
+    /// place, fixup words relocate the image in place (every image word precedes them, so the
+    /// checksum covers each word as it was read).
+    pub fn stream_feed(
+        &self,
+        arena: &mut CallerArena<'_>,
+        stream: &mut Streaming,
+        words: &[u32],
+    ) -> Result<(), Error> {
+        self.check_stream(arena, stream)?;
+        if stream
+            .seen
+            .checked_add(words.len())
+            .map_or(true, |end| end > stream.words)
+        {
+            return Err(Error::Format(overlay::Error::Bounds));
+        }
+        let mut hash = psx_pack::WordFnv32::from_state(stream.hash);
+        hash.update(words);
+        stream.hash = hash.finish();
+        let image_end = 5 + stream.image;
+        let split = image_end.saturating_sub(stream.seen).min(words.len());
+        let (image_words, fixups) = words.split_at(split);
+        let at = stream.start + stream.seen - 5;
+        arena.words[at..at + image_words.len()].copy_from_slice(image_words);
+        let image = &mut arena.words[stream.start..stream.start + stream.image];
+        for &fixup in fixups {
+            let offset = fixup & 0x0fff_ffff;
+            let kind = fixup >> 28;
+            if offset & 3 != 0 || offset as usize >= stream.image * 4 {
+                return Err(Error::Format(overlay::Error::Bounds));
+            }
+            if !(1..=4).contains(&kind) {
+                return Err(Error::Format(overlay::Error::Kind));
+            }
+            let index = offset as usize / 4;
+            image[index] = overlay::relocate(
+                image[index],
+                kind,
+                stream.descriptor.linked,
+                stream.address,
+                offset,
+            )?;
+        }
+        stream.seen += words.len();
+        Ok(())
+    }
+    /// Publish `stream` once every word of its package has arrived and the package checksum is
+    /// the descriptor's: the I-cache is synchronized before the handle becomes admissible. On
+    /// any failure the placement is freed and nothing is published.
+    pub fn finish_stream(
+        &mut self,
+        arena: &CallerArena<'_>,
+        stream: Streaming,
+    ) -> Result<Handle, Error> {
+        if let Err(error) = self.check_stream(arena, &stream) {
+            self.abandon_stream(stream);
+            return Err(error);
+        }
+        if stream.seen != stream.words || stream.hash != stream.descriptor.checksum {
+            self.abandon_stream(stream);
+            return Err(Error::Integrity);
+        }
+        flush();
+        self.installed[stream.handle.slot() as usize] = Installed {
+            id: stream.descriptor.id,
+            code_end: stream.code_end,
+            ready: true,
+        };
+        self.address = Some(arena.address);
+        Ok(stream.handle)
+    }
+    /// Give up `stream`: its placement is freed, nothing was published.
+    pub fn abandon_stream(&mut self, stream: Streaming) {
+        self.pool.free(stream.handle);
+    }
+    fn check_stream(&self, arena: &CallerArena<'_>, stream: &Streaming) -> Result<(), Error> {
+        self.check_arena(arena)?;
+        let run = self.pool.try_run(stream.handle).ok_or(Error::Stale)?;
+        if run.first_page as usize / 4 != stream.start
+            || arena.address + run.first_page != stream.address
+            || self.installed[stream.handle.slot() as usize].ready
+        {
+            return Err(Error::Stale);
+        }
+        Ok(())
     }
     /// Borrow the arena and registry until every CPU call/data view completes.
     /// All dependencies are checked before any admission is returned.
@@ -757,6 +966,199 @@ mod tests {
             unsafe { admission.invoke(&mut imports, trap, || ()) },
             Err(Error::Integrity)
         );
+    }
+
+    /// A package with code, data and every fixup kind: a J to its own word 3, a LUI/ADDIU pair
+    /// and a data word pointing into the image.
+    fn relocated_package(id: u32, image_words: usize) -> std::vec::Vec<u32> {
+        let mut image: std::vec::Vec<u32> = (0..image_words as u32)
+            .map(|i| i.wrapping_mul(0x9e37_79b9))
+            .collect();
+        image[0] = 0x0c00_0000 | ((0x8040_8000u32 + 12) >> 2 & 0x03ff_ffff);
+        image[1] = 0x3c01_8041;
+        image[2] = 0x2421_8010;
+        image[image_words - 1] = 0x8040_8000 + 8;
+        let fixups = [
+            0x1000_0000,
+            0x2000_0004,
+            0x3000_0008,
+            0x4000_0000 | ((image_words as u32 - 1) * 4),
+        ];
+        let mut words = std::vec![
+            overlay::MAGIC,
+            id,
+            image_words as u32,
+            fixups.len() as u32,
+            16
+        ];
+        words.extend_from_slice(&image);
+        words.extend_from_slice(&fixups);
+        words
+    }
+    fn linked(words: &[u32]) -> Descriptor {
+        Descriptor {
+            id: words[1],
+            linked: 0x8040_8000,
+            checksum: checksum(words),
+        }
+    }
+    /// Feed `words` as a sector reader would: `sector`-word pieces, the ones wholly inside the
+    /// image (past the first) read straight into place.
+    fn stream_in(
+        registry: &mut Registry<4>,
+        arena: &mut CallerArena<'_>,
+        words: &[u32],
+        descriptor: Descriptor,
+        sector: usize,
+    ) -> Result<Handle, Error> {
+        let mut stream = registry.begin_stream(arena, &words[..5], words.len(), descriptor)?;
+        let first = sector.min(words.len());
+        let mut result = registry.stream_feed(arena, &mut stream, &words[5..first]);
+        let mut at = first;
+        while result.is_ok() && at < words.len() {
+            let piece = sector.min(words.len() - at);
+            let direct = registry
+                .stream_image(arena, &stream)
+                .map(|image| image.len() >= sector);
+            result = match direct {
+                Ok(true) if piece == sector => {
+                    registry.stream_image(arena, &stream).unwrap()[..sector]
+                        .copy_from_slice(&words[at..at + sector]);
+                    registry.stream_landed(arena, &mut stream, sector)
+                }
+                Ok(_) => registry.stream_feed(arena, &mut stream, &words[at..at + piece]),
+                Err(error) => Err(error),
+            };
+            at += piece;
+        }
+        match result {
+            Ok(()) => registry.finish_stream(arena, stream),
+            Err(error) => {
+                registry.abandon_stream(stream);
+                Err(error)
+            }
+        }
+    }
+    #[test]
+    fn a_streamed_install_equals_the_staged_install_word_for_word() {
+        for image_words in [1usize, 4, 7, 40, 61] {
+            let words = relocated_package(9, image_words.max(4));
+            for sector in [5usize, 6, 8, 13, 64] {
+                let mut staged_backing = [0u32; 160];
+                let mut streamed_backing = [0u32; 160];
+                let mut staged_registry = Registry::<4>::new(0, 640);
+                let mut streamed_registry = Registry::<4>::new(0, 640);
+                // A first image so the package lands past the start of the arena.
+                let filler = package(3);
+                let (staged, streamed) = {
+                    let mut a = CallerArena::new(&mut staged_backing, 0x801d_8000).unwrap();
+                    let mut b = CallerArena::new(&mut streamed_backing, 0x801d_8000).unwrap();
+                    staged_registry
+                        .install(&mut a, &filler, descriptor(&filler))
+                        .unwrap();
+                    stream_in(
+                        &mut streamed_registry,
+                        &mut b,
+                        &filler,
+                        descriptor(&filler),
+                        sector,
+                    )
+                    .unwrap();
+                    (
+                        staged_registry
+                            .install(&mut a, &words, linked(&words))
+                            .unwrap(),
+                        stream_in(
+                            &mut streamed_registry,
+                            &mut b,
+                            &words,
+                            linked(&words),
+                            sector,
+                        )
+                        .unwrap(),
+                    )
+                };
+                assert_eq!(
+                    staged_backing, streamed_backing,
+                    "image {image_words} sector {sector}"
+                );
+                assert_eq!(staged, streamed);
+                let mut b = CallerArena::new(&mut streamed_backing, 0x801d_8000).unwrap();
+                let dependencies = [streamed];
+                let admission = streamed_registry.admit(&mut b, &dependencies).unwrap();
+                assert_eq!(admission.id(streamed).unwrap(), 9);
+            }
+        }
+    }
+    #[test]
+    fn a_streamed_package_that_fails_its_checks_publishes_nothing_and_frees_its_place() {
+        let words = relocated_package(9, 40);
+        let mut backing = [0u32; 64];
+        let mut arena = CallerArena::new(&mut backing, 0x801d_8000).unwrap();
+        let mut registry = Registry::<4>::new(0, 256);
+        // A word changed in flight: the checksum.
+        let mut corrupt = words.clone();
+        corrupt[20] ^= 1;
+        assert_eq!(
+            stream_in(&mut registry, &mut arena, &corrupt, linked(&words), 8),
+            Err(Error::Integrity)
+        );
+        assert_eq!(registry.pool.used_pages(), 0);
+        // A fixup outside the image and one of an unknown kind.
+        for bad in [0x1000_0000 | (40 * 4), 0x5000_0000] {
+            let mut corrupt = words.clone();
+            let last = corrupt.len() - 1;
+            corrupt[last] = bad;
+            assert!(matches!(
+                stream_in(&mut registry, &mut arena, &corrupt, linked(&corrupt), 8),
+                Err(Error::Format(_))
+            ));
+            assert_eq!(registry.pool.used_pages(), 0);
+        }
+        // Another module's package, a short count and a stream left unfinished.
+        assert_eq!(
+            registry
+                .begin_stream(
+                    &arena,
+                    &words[..5],
+                    words.len(),
+                    Descriptor {
+                        id: 8,
+                        ..linked(&words)
+                    }
+                )
+                .err(),
+            Some(Error::Integrity)
+        );
+        assert!(matches!(
+            registry.begin_stream(&arena, &words[..5], words.len() - 1, linked(&words)),
+            Err(Error::Format(_))
+        ));
+        let mut stream = registry
+            .begin_stream(&arena, &words[..5], words.len(), linked(&words))
+            .unwrap();
+        registry
+            .stream_feed(&mut arena, &mut stream, &words[5..30])
+            .unwrap();
+        assert_eq!(
+            registry.finish_stream(&arena, stream),
+            Err(Error::Integrity)
+        );
+        assert_eq!(registry.pool.used_pages(), 0);
+        // Words past the package's end.
+        let mut stream = registry
+            .begin_stream(&arena, &words[..5], words.len(), linked(&words))
+            .unwrap();
+        let mut long = words[5..].to_vec();
+        long.push(0);
+        assert!(registry
+            .stream_feed(&mut arena, &mut stream, &long)
+            .is_err());
+        registry.abandon_stream(stream);
+        assert_eq!(registry.pool.used_pages(), 0);
+        assert!(registry.installed.iter().all(|slot| !slot.ready));
+        // And the clean package still installs in the freed place.
+        assert!(stream_in(&mut registry, &mut arena, &words, linked(&words), 8).is_ok());
     }
 
     const TRAP: u32 = 0x80010080;
