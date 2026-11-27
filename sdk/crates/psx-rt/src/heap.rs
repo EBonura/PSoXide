@@ -147,6 +147,23 @@ impl Bump {
             self.end = mark.end as *mut u8;
         }
     }
+
+    /// Free everything taken from either end since `mark`: the level scope. A game marks when a
+    /// level starts loading and rewinds when it leaves, and the next level gets the same RAM.
+    /// Does nothing to an end that is already behind the mark.
+    ///
+    /// # Safety
+    /// No block taken after `mark` (from either end) is used again, and `mark` came from this
+    /// allocator.
+    #[inline(always)]
+    pub unsafe fn rewind(&mut self, mark: Mark) {
+        if mark.next < self.next as usize {
+            self.next = mark.next as *mut u8;
+        }
+        if mark.end > self.end as usize {
+            self.end = mark.end as *mut u8;
+        }
+    }
 }
 
 /// The program's heap: the `GlobalAlloc` under the `alloc` feature, the state behind
@@ -258,6 +275,16 @@ pub fn mark() -> Mark {
 pub unsafe fn rewind_far(mark: Mark) {
     // SAFETY: single-threaded access per the `Sync` impl; the rest is the caller's per `# Safety`.
     unsafe { state().rewind_far(mark) }
+}
+
+/// Free everything taken from the program's heap since `mark`; see [`Bump::rewind`].
+///
+/// # Safety
+/// As [`Bump::rewind`]: with the `alloc` feature this includes every `Vec` or `Box` made since.
+#[inline]
+pub unsafe fn rewind(mark: Mark) {
+    // SAFETY: single-threaded access per the `Sync` impl; the rest is the caller's per `# Safety`.
+    unsafe { state().rewind(mark) }
 }
 
 /// Diag builds: when the program's heap has fewer than `floor` bytes left, call `report` with
@@ -429,6 +456,27 @@ mod tests {
         // SAFETY: as above.
         unsafe { b.rewind_far(mark) };
         assert_eq!(b.remaining(), 256 - 56);
+    }
+
+    #[test]
+    fn a_level_rewind_gives_back_both_ends() {
+        let mut arena = Arena([0; 256]);
+        let (start, end) = arena.range();
+        let mut b = Bump::new(start, end);
+        let boot = b.alloc(32, 4);
+        let level = b.mark();
+        b.alloc(64, 4);
+        b.alloc_far(64, 4);
+        assert_eq!(b.remaining(), 256 - 32 - 128);
+        // SAFETY: nothing taken after the mark is used again.
+        unsafe { b.rewind(level) };
+        assert_eq!(b.remaining(), 256 - 32);
+        assert_eq!(
+            b.alloc(8, 4) as usize,
+            start + 32,
+            "the next level reuses the same RAM"
+        );
+        assert_eq!(boot as usize, start);
     }
 
     /// The global heap's raw entry (one test: the state is a static).
