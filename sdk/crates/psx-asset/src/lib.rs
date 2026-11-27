@@ -1809,6 +1809,104 @@ pub struct Audio<'a> {
     loop_start_block: u32,
 }
 
+/// Where a `.psau`'s ADPCM lies and what its header says, checked from the blob's first bytes
+/// when the rest is still on disc ([`Audio::layout`]). The checks are [`Audio::from_bytes`]'
+/// own, kept twice on purpose: one shared body cost every program that parses a sample 16 B of
+/// `.text` (hello-audio, measured).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct AudioLayout {
+    /// Byte offset of the ADPCM blocks in the blob.
+    pub adpcm_start: usize,
+    /// One past the last ADPCM byte (the blob's length).
+    pub adpcm_end: usize,
+    flags: u16,
+    /// Playback sample rate in Hz.
+    pub sample_rate_hz: u32,
+    sample_count: u32,
+    /// Number of 16-byte SPU ADPCM blocks.
+    pub adpcm_block_count: u32,
+    loop_start_block: u32,
+}
+
+impl AudioLayout {
+    /// Check the header in `bytes` (at least the first 32 bytes of a blob `total_len` long).
+    #[inline(always)]
+    fn parse(bytes: &[u8], total_len: usize) -> Result<Self, ParseError> {
+        use psxed_format::audio::{self, AudioHeader};
+
+        if total_len < psxed_format::AssetHeader::SIZE {
+            return Err(ParseError::Truncated);
+        }
+        let magic = [bytes[0], bytes[1], bytes[2], bytes[3]];
+        if magic != audio::MAGIC {
+            return Err(ParseError::WrongMagic);
+        }
+        let version = read_u16(bytes, 4);
+        if version != audio::VERSION {
+            return Err(ParseError::UnsupportedVersion(version));
+        }
+        let flags = read_u16(bytes, 6);
+        let payload_len = read_u32(bytes, 8);
+        let payload_start = psxed_format::AssetHeader::SIZE;
+        let actual_payload = total_len.saturating_sub(payload_start);
+        if payload_len as usize != actual_payload {
+            return Err(ParseError::InvalidPayloadLen {
+                declared: payload_len,
+                actual: actual_payload,
+            });
+        }
+        if actual_payload < AudioHeader::SIZE {
+            return Err(ParseError::Truncated);
+        }
+
+        let ah = &bytes[payload_start..payload_start + AudioHeader::SIZE];
+        let codec = ah[0];
+        let channel_count = ah[1];
+        let sample_rate_hz = read_u32(ah, 4);
+        let sample_count = read_u32(ah, 8);
+        let adpcm_block_count = read_u32(ah, 12);
+        let loop_start_block = read_u32(ah, 16);
+        let decoded_capacity = adpcm_block_count
+            .checked_mul(28)
+            .ok_or(ParseError::TableOverflow)?;
+        let min_samples_for_blocks = adpcm_block_count.saturating_sub(1) * 28 + 1;
+        if codec != audio::CODEC_SPU_ADPCM
+            || channel_count != 1
+            || flags & audio::flags::MONO == 0
+            || flags & audio::flags::ONE_SHOT == 0
+            || sample_rate_hz == 0
+            || sample_count == 0
+            || adpcm_block_count == 0
+            || sample_count > decoded_capacity
+            || sample_count < min_samples_for_blocks
+            || loop_start_block != AudioHeader::NO_LOOP
+        {
+            return Err(ParseError::InvalidAudioLayout);
+        }
+
+        let adpcm_bytes = (adpcm_block_count as usize)
+            .checked_mul(16)
+            .ok_or(ParseError::TableOverflow)?;
+        let adpcm_start = payload_start + AudioHeader::SIZE;
+        let adpcm_end = adpcm_start
+            .checked_add(adpcm_bytes)
+            .ok_or(ParseError::TableOverflow)?;
+        if adpcm_end != total_len {
+            return Err(ParseError::InvalidAudioLayout);
+        }
+
+        Ok(Self {
+            adpcm_start,
+            adpcm_end,
+            flags,
+            sample_rate_hz,
+            sample_count,
+            adpcm_block_count,
+            loop_start_block,
+        })
+    }
+}
+
 impl<'a> Audio<'a> {
     /// Parse a cooked `.psau` blob.
     // Load-time parser: one copy, never inlined into its callers (smaller, the compiler would
@@ -1886,6 +1984,21 @@ impl<'a> Audio<'a> {
             adpcm_block_count,
             loop_start_block,
         })
+    }
+
+    /// The layout of a `.psau` blob `total_len` bytes long from its first bytes (32 are
+    /// enough), for a sample streamed off the disc straight into SPU RAM without the whole
+    /// blob in main RAM.
+    ///
+    /// # Errors
+    /// The [`ParseError`] [`Audio::from_bytes`] would give for the blob: a bad magic,
+    /// version or layout, or a header that does not describe `total_len` bytes.
+    pub fn layout(prefix: &[u8], total_len: usize) -> Result<AudioLayout, ParseError> {
+        // Here, not in `parse`: `from_bytes` has the whole blob and must not pay for it.
+        if prefix.len() < psxed_format::AssetHeader::SIZE + psxed_format::audio::AudioHeader::SIZE {
+            return Err(ParseError::Truncated);
+        }
+        AudioLayout::parse(prefix, total_len)
     }
 
     /// Playback sample rate in Hz.
